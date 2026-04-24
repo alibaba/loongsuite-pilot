@@ -1,6 +1,4 @@
 import { Orchestrator } from './core/orchestrator.js';
-// HTTP Push server removed - was placeholder for future HTTP Push collection method
-// import { HttpPushServer } from './server/http-server.js';
 import { loadConfig } from './core/config-loader.js';
 import { createLogger } from './utils/logger.js';
 
@@ -16,12 +14,8 @@ async function main(): Promise<void> {
 
   const orchestrator = new Orchestrator(config);
 
-  // HTTP Push server temporarily disabled (no collectors using HTTP push method)
-  // const httpServer = new HttpPushServer(config.port);
-
   const shutdown = async () => {
     logger.info('shutdown signal received');
-    // await httpServer.stop();
     await orchestrator.stop();
     process.exit(0);
   };
@@ -30,12 +24,10 @@ async function main(): Promise<void> {
 
   await orchestrator.start();
 
-  // await httpServer.start();
-
-  logger.info('AI Agent Collector is running', {
+  logger.info('AI Agent Input is running', {
     dataDir: config.dataDir,
     port: config.port,
-    reporters: Object.entries(config.reporters)
+    flushers: Object.entries(config.flushers)
       .filter(([, v]) => v?.enabled)
       .map(([k]) => k),
   });
@@ -48,23 +40,22 @@ main().catch((err) => {
 
 // Re-export for programmatic use
 export { Orchestrator } from './core/orchestrator.js';
-export { CollectorManager } from './core/collector-manager.js';
+export { InputManager } from './core/input-manager.js';
 export { AgentControlManager } from './core/agent-control-manager.js';
 export { AgentDiscoveryService } from './core/agent-discovery-service.js';
 // HTTP Push server temporarily disabled
 // export { HttpPushServer } from './server/http-server.js';
 export { loadConfig } from './core/config-loader.js';
-export { BaseCollector } from './collectors/base/base-collector.js';
-export { BaseIdeCollector } from './collectors/base/base-ide-collector.js';
-export { BaseSqliteCollector } from './collectors/base/base-sqlite-collector.js';
-export { BaseHookCollector } from './collectors/base/base-hook-collector.js';
-export { BaseCliForwarder } from './collectors/base/base-cli-forwarder.js';
-export { BaseSessionCollector } from './collectors/base/base-session-collector.js';
-export { BaseHttpPushCollector } from './collectors/base/base-http-push-collector.js';
-export { BaseReporter } from './reporters/base-reporter.js';
-export { SlsReporter } from './reporters/sls-reporter.js';
-export { JsonlReporter } from './reporters/jsonl-reporter.js';
-export { HttpReporter } from './reporters/http-reporter.js';
-export { MultiReporter } from './reporters/multi-reporter.js';
+export { BaseInput } from './inputs/base/base-input.js';
+export { BaseIdeInput } from './inputs/base/base-ide-input.js';
+export { BaseSqliteInput } from './inputs/base/base-sqlite-input.js';
+export { BaseHookInput } from './inputs/base/base-hook-input.js';
+export { BaseCliForwarder } from './inputs/base/base-cli-forwarder.js';
+export { BaseSessionInput } from './inputs/base/base-session-input.js';
+export { BaseFlusher } from './flushers/base-flusher.js';
+export { SlsFlusher } from './flushers/sls-flusher.js';
+export { JsonlFlusher } from './flushers/jsonl-flusher.js';
+export { HttpFlusher } from './flushers/http-flusher.js';
+export { MultiFlusher } from './flushers/multi-flusher.js';
 export { HookManager } from './hooks/hook-manager.js';
 export * from './types/index.js';

@@ -1,10 +1,10 @@
-import { CollectorState } from '../types/index.js';
+import { InputState } from '../types/index.js';
 import { readJsonFile, writeJsonFile } from '../utils/fs-utils.js';
 
 /** Serializable representation of the in-memory map. */
-type StateFileShape = Record<string, CollectorState>;
+type StateFileShape = Record<string, InputState>;
 
-function cloneState(s: CollectorState): CollectorState {
+function cloneState(s: InputState): InputState {
   return {
     ...s,
     extra:
@@ -15,7 +15,7 @@ function cloneState(s: CollectorState): CollectorState {
 }
 
 export class StateStore {
-  private readonly states: Map<string, CollectorState> = new Map();
+  private readonly states: Map<string, InputState> = new Map();
   private readonly filePath: string;
   private dirty = false;
 
@@ -32,7 +32,7 @@ export class StateStore {
     }
     for (const [id, st] of Object.entries(data)) {
       if (st && typeof st === 'object') {
-        this.states.set(id, cloneState(st as CollectorState));
+        this.states.set(id, cloneState(st as InputState));
       }
     }
     this.dirty = false;
@@ -50,35 +50,35 @@ export class StateStore {
     this.dirty = false;
   }
 
-  get(collectorId: string): CollectorState {
-    return this.states.get(collectorId) ?? {};
+  get(inputId: string): InputState {
+    return this.states.get(inputId) ?? {};
   }
 
-  set(collectorId: string, state: CollectorState): void {
-    this.states.set(collectorId, cloneState(state));
+  set(inputId: string, state: InputState): void {
+    this.states.set(inputId, cloneState(state));
     this.dirty = true;
   }
 
-  update(collectorId: string, partial: Partial<CollectorState>): void {
-    const current = { ...this.get(collectorId) };
-    this.states.set(collectorId, cloneState({ ...current, ...partial }));
+  update(inputId: string, partial: Partial<InputState>): void {
+    const current = { ...this.get(inputId) };
+    this.states.set(inputId, cloneState({ ...current, ...partial }));
     this.dirty = true;
   }
 
-  getOffset(collectorId: string): number {
-    return this.get(collectorId).lastOffset ?? 0;
+  getOffset(inputId: string): number {
+    return this.get(inputId).lastOffset ?? 0;
   }
 
-  setOffset(collectorId: string, offset: number): void {
-    this.update(collectorId, { lastOffset: offset });
+  setOffset(inputId: string, offset: number): void {
+    this.update(inputId, { lastOffset: offset });
   }
 
-  getRowId(collectorId: string): number {
-    return this.get(collectorId).lastRowId ?? 0;
+  getRowId(inputId: string): number {
+    return this.get(inputId).lastRowId ?? 0;
   }
 
-  setRowId(collectorId: string, rowId: number): void {
-    this.update(collectorId, { lastRowId: rowId });
+  setRowId(inputId: string, rowId: number): void {
+    this.update(inputId, { lastRowId: rowId });
   }
 }
 

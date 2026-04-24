@@ -1,8 +1,8 @@
 import { CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
-import { BaseCollector, type CollectorOptions } from './base-collector.js';
+import { BaseInput, type InputOptions } from './base-input.js';
 
-export interface SqliteCollectorOptions extends CollectorOptions {
+export interface SqliteInputOptions extends InputOptions {
   /** Path to the SQLite database file. */
   dbPath: string;
 }
@@ -18,19 +18,19 @@ export interface SqliteRow {
 }
 
 /**
- * Base collector for SQLite database incremental polling.
+ * Base input for SQLite database incremental polling.
  * Tracks last rowid as a cursor; subclass implements query and transformation.
  *
  * Subclass must implement:
  *   - readNewRows(): query the SQLite DB for rows after the cursor
  *   - transformRow(): convert a DB row into an AgentActivityEntry
  */
-export abstract class BaseSqliteCollector extends BaseCollector {
+export abstract class BaseSqliteInput extends BaseInput {
   readonly collectionMethod = CollectionMethod.SqlitePolling;
 
   protected readonly dbPath: string;
 
-  constructor(opts: SqliteCollectorOptions) {
+  constructor(opts: SqliteInputOptions) {
     super(opts);
     this.dbPath = opts.dbPath;
   }

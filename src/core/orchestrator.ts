@@ -2,24 +2,24 @@ import { EventEmitter } from 'node:events';
 import type { AnalyticsConfig, AgentDetectionEntry } from '../types/index.js';
 import { AgentControlManager } from './agent-control-manager.js';
 import { AgentDiscoveryService } from './agent-discovery-service.js';
-import { CollectorManager } from './collector-manager.js';
-import { StateStore } from '../persistence/state-store.js';
+import { InputManager } from './input-manager.js';
+import { StateStore } from '../checkpoints/state-store.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveHome, ensureDir } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 
-// Reporters
-import { BaseReporter } from '../reporters/base-reporter.js';
-import { SlsReporter } from '../reporters/sls-reporter.js';
-import { JsonlReporter } from '../reporters/jsonl-reporter.js';
-import { HttpReporter } from '../reporters/http-reporter.js';
-import { MultiReporter } from '../reporters/multi-reporter.js';
+// Flushers
+import { BaseFlusher } from '../flushers/base-flusher.js';
+import { SlsFlusher } from '../flushers/sls-flusher.js';
+import { JsonlFlusher } from '../flushers/jsonl-flusher.js';
+import { HttpFlusher } from '../flushers/http-flusher.js';
+import { MultiFlusher } from '../flushers/multi-flusher.js';
 
-// Concrete collectors
-import { QoderCollector } from '../collectors/qoder/qoder-collector.js';
-import { QoderWorkCollector } from '../collectors/qoder-work/qoder-work-collector.js';
-import { QoderCliCollector } from '../collectors/qoder-cli/qoder-cli-collector.js';
-import { OpenclawCollector } from '../collectors/openclaw/openclaw-collector.js';
+// Concrete inputs
+import { QoderInput } from '../inputs/qoder/qoder-input.js';
+import { QoderWorkInput } from '../inputs/qoder-work/qoder-work-input.js';
+import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
+import { OpenclawInput } from '../inputs/openclaw/openclaw-input.js';
 
 const logger = createLogger('Orchestrator');
 
@@ -30,8 +30,8 @@ const DEFAULT_DATA_DIR = '~/.r2c';
  *
  * Startup sequence:
  *   1. Load configuration & state
- *   2. Build reporters (SLS + JSONL + HTTP)
- *   3. Register all collectors
+ *   2. Build flushers (SLS + JSONL + HTTP)
+ *   3. Register all inputs
  *   4. Start AgentDiscoveryService (fs.watch + polling)
  *   5. Emit 'started'
  */
@@ -40,9 +40,9 @@ export class Orchestrator extends EventEmitter {
   private readonly dataDir: string;
   private agentControlManager!: AgentControlManager;
   private agentDiscoveryService!: AgentDiscoveryService;
-  private collectorManager!: CollectorManager;
+  private inputManager!: InputManager;
   private stateStore!: StateStore;
-  private reporter!: BaseReporter;
+  private flusher!: BaseFlusher;
   private isRunning = false;
 
   constructor(config: AnalyticsConfig) {
@@ -65,7 +65,7 @@ export class Orchestrator extends EventEmitter {
     await ensureDir(path.join(this.dataDir, 'logs'));
 
     // 2. Load state & agent-control config
-    this.stateStore = new StateStore(path.join(this.dataDir, 'logs', 'collector-state.json'));
+    this.stateStore = new StateStore(path.join(this.dataDir, 'logs', 'input-state.json'));
     await this.stateStore.load();
 
     this.agentControlManager = new AgentControlManager(
@@ -73,15 +73,15 @@ export class Orchestrator extends EventEmitter {
     );
     await this.agentControlManager.load();
 
-    // 3. Build reporters
-    this.reporter = this.buildReporter();
+    // 3. Build flushers
+    this.flusher = this.buildFlusher();
 
-    // 4. Build CollectorManager
-    this.collectorManager = new CollectorManager();
-    this.collectorManager.setReporter(this.reporter);
+    // 4. Build InputManager
+    this.inputManager = new InputManager();
+    this.inputManager.setFlusher(this.flusher);
 
-    // 5. Register collectors & build detection entries
-    const detectionEntries = await this.registerAllCollectors();
+    // 5. Register inputs & build detection entries
+    const detectionEntries = await this.registerAllInputs();
 
     // 6. Start AgentDiscoveryService
     this.agentDiscoveryService = new AgentDiscoveryService(detectionEntries);
@@ -96,7 +96,7 @@ export class Orchestrator extends EventEmitter {
     this.isRunning = true;
     this.emit('started');
     logger.info('orchestrator started', {
-      collectors: detectionEntries.length,
+      inputs: detectionEntries.length,
     });
   }
 
@@ -105,8 +105,8 @@ export class Orchestrator extends EventEmitter {
     logger.info('stopping orchestrator');
 
     await this.agentDiscoveryService?.stop();
-    await this.collectorManager?.stopAll();
-    await this.reporter?.shutdown();
+    await this.inputManager?.stopAll();
+    await this.flusher?.shutdown();
     await this.stateStore?.save();
 
     this.isRunning = false;
@@ -114,8 +114,8 @@ export class Orchestrator extends EventEmitter {
     logger.info('orchestrator stopped');
   }
 
-  getCollectorManager(): CollectorManager {
-    return this.collectorManager;
+  getInputManager(): InputManager {
+    return this.inputManager;
   }
 
   getAgentControlManager(): AgentControlManager {
@@ -130,63 +130,63 @@ export class Orchestrator extends EventEmitter {
    * Set the user identity (typically resolved asynchronously).
    */
   setUserId(userId: string): void {
-    this.collectorManager?.setUserId(userId);
+    this.inputManager?.setUserId(userId);
   }
 
-  private buildReporter(): BaseReporter {
-    const reporters: BaseReporter[] = [];
-    const cfg = this.config.reporters;
+  private buildFlusher(): BaseFlusher {
+    const flushers: BaseFlusher[] = [];
+    const cfg = this.config.flushers;
 
     if (cfg.sls?.enabled) {
-      const r = new SlsReporter(cfg.sls, this.dataDir);
+      const r = new SlsFlusher(cfg.sls, this.dataDir);
       void (r as any).start?.();
-      reporters.push(r);
+      flushers.push(r);
     }
 
     if (cfg.jsonl?.enabled) {
-      const r = new JsonlReporter(cfg.jsonl);
+      const r = new JsonlFlusher(cfg.jsonl);
       void (r as any).start?.();
-      reporters.push(r);
+      flushers.push(r);
     }
 
     if (cfg.http?.enabled) {
-      const r = new HttpReporter(cfg.http);
+      const r = new HttpFlusher(cfg.http);
       void (r as any).start?.();
-      reporters.push(r);
+      flushers.push(r);
     }
 
-    if (reporters.length === 0) {
-      logger.warn('no reporters enabled, using JSONL fallback');
-      const fallback = new JsonlReporter({
+    if (flushers.length === 0) {
+      logger.warn('no flushers enabled, using JSONL fallback');
+      const fallback = new JsonlFlusher({
         enabled: true,
         outputDir: path.join(this.dataDir, 'logs', 'output'),
         rotateDaily: true,
         maxFileSizeMb: 100,
       });
       void (fallback as any).start?.();
-      reporters.push(fallback);
+      flushers.push(fallback);
     }
 
-    return reporters.length === 1 ? reporters[0] : new MultiReporter(reporters);
+    return flushers.length === 1 ? flushers[0] : new MultiFlusher(flushers);
   }
 
   /**
-   * Register all built-in collectors. Returns detection entries for the
+   * Register all built-in inputs. Returns detection entries for the
    * AgentDiscoveryService.
    *
-   * To add a new agent: create a collector class, add registration here.
+   * To add a new agent: create a input class, add registration here.
    */
-  private async registerAllCollectors(): Promise<AgentDetectionEntry[]> {
+  private async registerAllInputs(): Promise<AgentDetectionEntry[]> {
     const entries: AgentDetectionEntry[] = [];
     const listenerCfg = this.config.listeners;
 
     // --- Qoder (IDE snapshot polling) ---
-    const qoderCollector = new QoderCollector({ stateStore: this.stateStore });
-    this.collectorManager.registerCollector(qoderCollector);
+    const qoderInput = new QoderInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(qoderInput);
     entries.push(
-      this.collectorManager.buildDetectionEntry(qoderCollector, {
-        watchPaths: QoderCollector.getWatchPaths(),
-        isAvailable: QoderCollector.checkAvailability,
+      this.inputManager.buildDetectionEntry(qoderInput, {
+        watchPaths: QoderInput.getWatchPaths(),
+        isAvailable: QoderInput.checkAvailability,
         enabled: () => this.agentControlManager.resolveEnabled(
           'qoder',
           listenerCfg.qoder?.enabled ?? true,
@@ -196,12 +196,12 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Qoder Work (SQLite polling) ---
-    const qoderWorkCollector = new QoderWorkCollector({ stateStore: this.stateStore });
-    this.collectorManager.registerCollector(qoderWorkCollector);
+    const qoderWorkInput = new QoderWorkInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(qoderWorkInput);
     entries.push(
-      this.collectorManager.buildDetectionEntry(qoderWorkCollector, {
-        watchPaths: QoderWorkCollector.getWatchPaths(),
-        isAvailable: QoderWorkCollector.checkAvailability,
+      this.inputManager.buildDetectionEntry(qoderWorkInput, {
+        watchPaths: QoderWorkInput.getWatchPaths(),
+        isAvailable: QoderWorkInput.checkAvailability,
         enabled: () => this.agentControlManager.resolveEnabled(
           'qoder-work',
           listenerCfg['qoder-work']?.enabled ?? true,
@@ -211,12 +211,12 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Qoder CLI (Hook JSONL) ---
-    const qoderCliCollector = new QoderCliCollector({ stateStore: this.stateStore });
-    this.collectorManager.registerCollector(qoderCliCollector);
+    const qoderCliInput = new QoderCliInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(qoderCliInput);
     entries.push(
-      this.collectorManager.buildDetectionEntry(qoderCliCollector, {
-        watchPaths: QoderCliCollector.getWatchPaths(),
-        isAvailable: QoderCliCollector.checkAvailability,
+      this.inputManager.buildDetectionEntry(qoderCliInput, {
+        watchPaths: QoderCliInput.getWatchPaths(),
+        isAvailable: QoderCliInput.checkAvailability,
         enabled: () => this.agentControlManager.resolveEnabled(
           'qoder-cli-hook',
           listenerCfg['qoder-cli-hook']?.enabled ?? true,
@@ -226,12 +226,12 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Openclaw (Session file polling — NEW agent) ---
-    const openclawCollector = new OpenclawCollector({ stateStore: this.stateStore });
-    this.collectorManager.registerCollector(openclawCollector);
+    const openclawInput = new OpenclawInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(openclawInput);
     entries.push(
-      this.collectorManager.buildDetectionEntry(openclawCollector, {
-        watchPaths: OpenclawCollector.getWatchPaths(),
-        isAvailable: OpenclawCollector.checkAvailability,
+      this.inputManager.buildDetectionEntry(openclawInput, {
+        watchPaths: OpenclawInput.getWatchPaths(),
+        isAvailable: OpenclawInput.checkAvailability,
         enabled: () => this.agentControlManager.resolveEnabled(
           'openclaw',
           listenerCfg.openclaw?.enabled ?? true,

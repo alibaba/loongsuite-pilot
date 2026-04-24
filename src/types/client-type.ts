@@ -55,6 +55,4 @@ export enum CollectionMethod {
   SessionFilePolling = 'session-file-polling',
   /** Access tool's Language Server via HTTP API */
   LsHttpApi = 'ls-http-api',
-  /** Local HTTP server receives tool-pushed telemetry */
-  HttpPush = 'http-push',
 }

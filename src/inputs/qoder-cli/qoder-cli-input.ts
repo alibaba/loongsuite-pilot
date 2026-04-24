@@ -1,11 +1,11 @@
 import { ClientType, ActionType } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
-import { BaseHookCollector, type HookCollectorOptions } from '../base/base-hook-collector.js';
+import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 
 /**
- * Qoder CLI — Hook JSONL log collector.
+ * Qoder CLI — Hook JSONL log input.
  *
  * Hook scripts intercept PreToolUse / PostToolUse / failure events
  * and write JSONL to ~/.r2c/logs/qoder-cli/history/.
@@ -13,11 +13,11 @@ import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
  * Special: uses r2c_pre_file_exists / r2c_pre_file_content to distinguish
  * true create vs overwrite.
  */
-export class QoderCliCollector extends BaseHookCollector {
+export class QoderCliInput extends BaseHookInput {
   readonly id = 'qoder-cli-hook';
   readonly agentType = ClientType.QoderCliHook;
 
-  constructor(opts?: Partial<HookCollectorOptions> & { stateStore: HookCollectorOptions['stateStore'] }) {
+  constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
       stateStore: opts!.stateStore,
       logDir: opts?.logDir ?? resolveHome('~/.r2c/logs/qoder-cli/history'),

@@ -3,9 +3,9 @@ import * as path from 'node:path';
 import { ClientType, ActionType } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import {
-  BaseSessionCollector,
-  type SessionCollectorOptions,
-} from '../base/base-session-collector.js';
+  BaseSessionInput,
+  type SessionInputOptions,
+} from '../base/base-session-input.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 
@@ -22,11 +22,11 @@ const QODERWORK_PROJECTS_DIR = '~/Library/Application Support/QoderWork/cli/proj
  *
  * Incrementally reads JSONL transcript lines, extracting all tool calls as events.
  */
-export class QoderWorkCollector extends BaseSessionCollector {
+export class QoderWorkInput extends BaseSessionInput {
   readonly id = 'qoder-work';
   readonly agentType = ClientType.QoderWork;
 
-  constructor(opts?: Partial<SessionCollectorOptions> & { stateStore: SessionCollectorOptions['stateStore'] }) {
+  constructor(opts?: Partial<SessionInputOptions> & { stateStore: SessionInputOptions['stateStore'] }) {
     super({
       stateStore: opts!.stateStore,
       sessionDir: resolveHome(QODERWORK_PROJECTS_DIR),

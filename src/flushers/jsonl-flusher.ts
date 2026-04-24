@@ -1,17 +1,17 @@
 import * as path from 'node:path';
-import { BaseReporter } from './base-reporter.js';
+import { BaseFlusher } from './base-flusher.js';
 import { serialiseLogEntry } from '../normalization/entry-builder.js';
-import type { AgentActivityEntry, JsonlReporterConfig } from '../types/index.js';
+import type { AgentActivityEntry, JsonlFlusherConfig } from '../types/index.js';
 import { appendLine, ensureDir, getTodayDateString } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
-const logger = createLogger('JsonlReporter');
+const logger = createLogger('JsonlFlusher');
 
-export class JsonlReporter extends BaseReporter {
+export class JsonlFlusher extends BaseFlusher {
   readonly name = 'jsonl';
-  private readonly config: JsonlReporterConfig;
+  private readonly config: JsonlFlusherConfig;
 
-  constructor(config: JsonlReporterConfig) {
+  constructor(config: JsonlFlusherConfig) {
     super();
     this.config = config;
   }

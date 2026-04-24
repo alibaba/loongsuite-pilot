@@ -3,9 +3,9 @@ import * as path from 'node:path';
 import { ClientType, ActionType } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import {
-  BaseSessionCollector,
-  type SessionCollectorOptions,
-} from '../base/base-session-collector.js';
+  BaseSessionInput,
+  type SessionInputOptions,
+} from '../base/base-session-input.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 
@@ -17,13 +17,13 @@ const DEFAULT_SESSION_DIR = '~/.openclaw/sessions';
  * Demonstrates how to add a brand-new agent to the system.
  * Reads JSONL session files from ~/.openclaw/sessions/ (session-*.jsonl)
  */
-export class OpenclawCollector extends BaseSessionCollector {
+export class OpenclawInput extends BaseSessionInput {
   readonly id = 'openclaw';
   readonly agentType = ClientType.Openclaw;
 
   private sessionContext: Map<string, SessionMeta> = new Map();
 
-  constructor(opts?: Partial<SessionCollectorOptions> & { stateStore: SessionCollectorOptions['stateStore'] }) {
+  constructor(opts?: Partial<SessionInputOptions> & { stateStore: SessionInputOptions['stateStore'] }) {
     super({
       stateStore: opts!.stateStore,
       sessionDir: opts?.sessionDir ?? resolveHome(DEFAULT_SESSION_DIR),

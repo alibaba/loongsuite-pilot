@@ -1,10 +1,10 @@
 import type { AgentActivityEntry } from '../types/index.js';
 
 /**
- * Abstract base for all data output reporters.
+ * Abstract base for all data output flushers.
  * Extend this to add new output destinations (SLS, JSONL, HTTP, etc.).
  */
-export abstract class BaseReporter {
+export abstract class BaseFlusher {
   abstract readonly name: string;
 
   abstract send(entry: AgentActivityEntry): Promise<void>;

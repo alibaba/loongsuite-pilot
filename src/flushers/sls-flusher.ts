@@ -1,10 +1,10 @@
 import ALY from '@alicloud/log';
-import { BaseReporter } from './base-reporter.js';
+import { BaseFlusher } from './base-flusher.js';
 import {
   serialiseLogEntry,
   redactCodeGenerationFields,
 } from '../normalization/entry-builder.js';
-import type { AgentActivityEntry, SlsReporterConfig, SlsEndpoint } from '../types/index.js';
+import type { AgentActivityEntry, SlsFlusherConfig, SlsEndpoint } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { appendLine, ensureDir } from '../utils/fs-utils.js';
 import * as path from 'node:path';
@@ -17,17 +17,17 @@ interface QueuedLog {
   endpoint: SlsEndpoint;
 }
 
-const logger = createLogger('SlsReporter');
+const logger = createLogger('SlsFlusher');
 
-export class SlsReporter extends BaseReporter {
+export class SlsFlusher extends BaseFlusher {
   readonly name = 'sls';
-  private readonly config: SlsReporterConfig;
+  private readonly config: SlsFlusherConfig;
   private readonly queue: Map<string, QueuedLog[]> = new Map();
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private readonly failedLogDir: string;
   private readonly client: any;
 
-  constructor(config: SlsReporterConfig, dataDir: string) {
+  constructor(config: SlsFlusherConfig, dataDir: string) {
     super();
     this.config = config;
     this.failedLogDir = path.join(dataDir, 'sls-failed-logs');
@@ -77,7 +77,7 @@ export class SlsReporter extends BaseReporter {
           timestamp: now,
           content: l.content,
         })),
-        source: 'ai-agent-collector',
+        source: 'ai-agent-input',
         topic: endpoint.kind,
       };
 
@@ -121,7 +121,7 @@ export class SlsReporter extends BaseReporter {
       try {
         await this.client.postLogStoreLogs(endpoint.project, endpoint.logstore, {
           logs: [{ timestamp: Math.floor(Date.now() / 1000), content }],
-          source: 'ai-agent-collector',
+          source: 'ai-agent-input',
           topic,
         });
       } catch {

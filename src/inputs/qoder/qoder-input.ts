@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ClientType, ActionType } from '../../types/index.js';
 import type { AgentActivityEntry, CodeGenerationEvent } from '../../types/index.js';
-import { BaseIdeCollector, type IdeCollectorOptions } from '../base/base-ide-collector.js';
+import { BaseIdeInput, type IdeInputOptions } from '../base/base-ide-input.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome, fileExists } from '../../utils/fs-utils.js';
 
@@ -26,12 +26,12 @@ function resolveQoderRoot(): string {
  *   2. SharedClientCache/cache/db/local.db — SQLite chat_record + chat_session
  *   3. SharedClientCache/cache/ai_tracker/*.jsonl — agent activity tracking
  */
-export class QoderCollector extends BaseIdeCollector {
+export class QoderInput extends BaseIdeInput {
   readonly id = 'qoder';
   readonly agentType = ClientType.Qoder;
   private lastChatRowId = 0;
 
-  constructor(opts?: Partial<IdeCollectorOptions> & { stateStore: IdeCollectorOptions['stateStore'] }) {
+  constructor(opts?: Partial<IdeInputOptions> & { stateStore: IdeInputOptions['stateStore'] }) {
     const dataRoot = opts?.dataRoot ?? resolveQoderRoot();
     super({
       stateStore: opts!.stateStore,

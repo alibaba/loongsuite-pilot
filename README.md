@@ -1,4 +1,4 @@
-# 多 AI Agent 轻量数据采集器
+# 多 AI Agent 轻量数据输入源
 
 面向多种 AI Agent 的使用数据采集平台，支持自动发现、多种采集方式、多目标数据输出，架构高度可扩展。
 
@@ -17,83 +17,188 @@ node -v   # >= v16.0.0
 npm -v    # >= 8.0.0
 ```
 
-## 快速开始
+## 本地开发与测试
+
+### 开发环境准备
 
 ```bash
-# 1. 安装依赖
+# 1. 克隆仓库
+git clone <repository-url>
+cd agent-data-collection
+
+# 2. 安装依赖（包含 postinstall 钩子脚本安装）
 npm install
 
-# 2. 编译 TypeScript
-npm run build
-
-# 3. 运行
-npm start
+# 3. 类型检查（推荐在编码过程中使用）
+npm run typecheck
 ```
 
-## 编译
+### 编译与运行
 
 ```bash
 # 完整编译（输出到 dist/）
 npm run build
 
-# 仅类型检查（不生成文件）
-npm run typecheck
+# 启动服务（开发环境）
+npm start
+# 等价于: node dist/index.js
 ```
 
-编译产物输出到 `dist/` 目录，包含 `.js`、`.d.ts`、`.js.map` 三类文件，保持与 `src/` 相同的目录结构。
+### 开发最佳实践
 
-## 打包部署
+1. **增量编译**：修改代码后重新运行 `npm run build`，或启用 TypeScript watch 模式：
+   ```bash
+   npx tsc --watch
+   ```
 
-### 方式一：直接部署编译产物
+2. **直接运行测试**：编译后直接运行测试：
+   ```bash
+   node dist/index.js
+   ```
+
+3. **验证钩子安装**：检查 `~/.r2c/hooks/` 目录确认 hook 脚本已正确安装：
+   ```bash
+   ls -la ~/.r2c/hooks/
+   ```
+
+4. **查看日志输出**：检查数据采集日志：
+   ```bash
+   tail -f ~/.r2c/logs/output/*.jsonl
+   ```
+
+## 打包发布
+
+### 构建发布包（最佳实践）
 
 ```bash
+# 1. 清理并重新编译
 npm run build
 
-# 将以下内容部署到目标机器
-# ├── dist/           # 编译后的 JS
-# ├── node_modules/   # 依赖（或目标机器上重新 npm install --production）
+# 2. 打包为 npm tarball（自动包含 files 中声明的内容）
+npm pack
+# 生成: ai-agent-collector-1.0.0.tgz
+```
+
+**打包内容说明**（由 `package.json` 的 `files` 字段控制）：
+```
+ai-agent-collector-1.0.0.tgz
+├── dist/              # 编译后的 JavaScript 代码
+├── assets/            # Hook 脚本等资源文件
+├── scripts/           # postinstall 安装脚本
+└── package.json       # 包元信息
+```
+
+### 发布到 npm 仓库（可选）
+
+```bash
+# 1. 更新版本号
+npm version patch  # 或 minor, major
+
+# 2. 发布到 npm registry
+npm publish
+
+# 3. 验证发布
+cd /tmp && npm install ai-agent-collector
+```
+
+## 线上部署（主机场景）
+
+### 方式一：npm 包安装（推荐）
+
+```bash
+# 安装已发布的 npm 包
+npm install -g ai-agent-collector
+
+# 或直接安装本地打包的 tarball
+npm install -g ai-agent-collector-1.0.0.tgz
+
+# 验证安装（自动执行 postinstall，安装 hook 脚本）
+ai-agent-collector --version
+
+# 配置环境变量（按需）
+export AAC_ENABLED=true
+export SLS_ACCESS_KEY_ID="your-key"
+export SLS_ACCESS_KEY_SECRET="your-secret"
+
+# 启动服务（后台运行）
+nohup ai-agent-collector > /var/log/ai-agent-collector.log 2>&1 &
+```
+
+### 方式二：编译产物部署
+
+```bash
+# 在构建机器上编译
+git clone <repository-url>
+cd agent-data-collection
+npm ci --production
+npm run build
+
+# 将以下目录同步到目标主机：
+# ├── dist/           # 编译产物
+# ├── node_modules/   # 生产依赖（或到目标机器执行 npm install --production）
+# ├── assets/         # Hook 脚本
+# ├── scripts/        # postinstall 脚本
 # └── package.json
 
-# 在目标机器上运行
-node dist/index.js
+# 在目标主机上
+cd /opt/ai-agent-collector
+npm install --production  # 安装依赖并执行 postinstall（如果同步了完整目录）
+
+# 配置并启动
+cat > /opt/ai-agent-collector/.env << EOF
+AAC_ENABLED=true
+SLS_ACCESS_KEY_ID=your-key
+SLS_ACCESS_KEY_SECRET=your-secret
+EOF
+
+node dist/index.js &
 ```
 
-### 方式二：npm pack 打包
+### 生产环境守护（systemd）
 
-```bash
-npm run build
-npm pack
-# 生成 ai-agent-collector-1.0.0.tgz
-# 目标机器上: npm install -g ai-agent-collector-1.0.0.tgz
-# 运行: ai-agent-collector
-```
-
-### 方式三：Docker 部署
-
-```dockerfile
-FROM node:18-alpine
-WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci --production
-COPY dist/ ./dist/
-CMD ["node", "dist/index.js"]
-```
-
-### 方式四：systemd 守护进程
+创建服务文件 `/etc/systemd/system/ai-agent-collector.service`：
 
 ```ini
 [Unit]
-Description=Agent Data Collection
+Description=AI Agent Collector
 After=network.target
 
 [Service]
 Type=simple
+User=collector
+WorkingDirectory=/opt/ai-agent-collector
 ExecStart=/usr/bin/node /opt/ai-agent-collector/dist/index.js
 Restart=always
+RestartSec=10
 Environment=AAC_ENABLED=true
+# 或通过 EnvironmentFile 加载配置:
+# EnvironmentFile=/opt/ai-agent-collector/.env
+
+# 日志输出（可通过 journalctl 查看）
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
+```
+
+启动并管理服务：
+
+```bash
+# 重载 systemd 配置
+sudo systemctl daemon-reload
+
+# 启动服务
+sudo systemctl start ai-agent-collector
+
+# 设置开机自启
+sudo systemctl enable ai-agent-collector
+
+# 查看状态
+sudo systemctl status ai-agent-collector
+
+# 查看日志
+sudo journalctl -u ai-agent-collector -f
 ```
 
 ## 配置
@@ -200,7 +305,7 @@ WantedBy=multi-user.target
 | `HTTP_REPORT_URL` | HTTP 上报地址（设置后启用） | 空 |
 | `HTTP_REPORT_HEADERS` | 自定义请求头 (JSON string) | 空 |
 
-#### 采集器轮询间隔
+#### 输入源轮询间隔
 
 | 环境变量 | 说明 | 默认值 |
 |---------|------|--------|
@@ -219,34 +324,33 @@ src/
 │   ├── logger.ts                        #   结构化日志
 │   ├── git-resolver.ts                  #   Git 仓库信息解析
 │   └── fs-utils.ts                      #   文件系统操作
-├── persistence/                         # ★ 持久化层（状态管理）
+├── checkpoint/                         # ★ 持久化层（状态管理）
 │   ├── snapshot-store.ts                #   快照去重 (pending/processed 状态机)
-│   └── state-store.ts                   #   采集器偏移量/游标状态
+│   └── state-store.ts                   #   输入源偏移量/游标状态
 ├── normalization/                       # 归一化层
 │   ├── entry-builder.ts                 #   构建统一 AgentActivityEntry + 序列化 + 脱敏
 │   └── payload-normalizer.ts            #   HTTP/Hook 原始载荷标准化
-├── reporters/                           # 数据输出层 (3 种输出目标)
-│   ├── base-reporter.ts                 #   抽象 Reporter 接口
-│   ├── sls-reporter.ts                  #   SLS 上报 (批量/健康检查/重试)
-│   ├── jsonl-reporter.ts                #   本地 JSONL 文件 (按日轮转)
-│   ├── http-reporter.ts                 #   HTTP POST 到外部服务
-│   └── multi-reporter.ts               #   多目标扇出
-├── collectors/                          # 采集器层
+├── flushers/                           # 数据输出层 (3 种输出通道)
+│   ├── base-flusher.ts                 #   抽象 Flusher 接口
+│   ├── sls-flusher.ts                  #   SLS 上报 (批量/健康检查/重试)
+│   ├── jsonl-flusher.ts                #   本地 JSONL 文件 (按日轮转)
+│   ├── http-flusher.ts                 #   HTTP POST 到外部服务
+│   └── multi-flusher.ts               #   多目标扇出
+├── inputs/                          # 输入源层
 │   ├── base/                            #   ★ 6 种采集方式基类
-│   │   ├── base-collector.ts            #     根抽象类 (生命周期/定时/事件)
-│   │   ├── base-ide-collector.ts        #     IDE 历史快照轮询
-│   │   ├── base-sqlite-collector.ts     #     SQLite 增量轮询
-│   │   ├── base-hook-collector.ts       #     Hook JSONL 日志
+│   │   ├── base-input.ts            #     根抽象类 (生命周期/定时/事件)
+│   │   ├── base-ide-input.ts        #     IDE 历史快照轮询
+│   │   ├── base-sqlite-input.ts     #     SQLite 增量轮询
+│   │   ├── base-hook-input.ts       #     Hook JSONL 日志
 │   │   ├── base-cli-forwarder.ts        #     CLI 遥测日志转发
-│   │   ├── base-session-collector.ts    #     会话文件轮询
-│   │   └── base-http-push-collector.ts  #     HTTP 推送接收
+│   │   └── base-session-input.ts    #     会话文件轮询
 │   ├── qoder/                           #   Qoder IDE (快照轮询)
 │   ├── qoder-work/                      #   Qoder Work (SQLite 轮询)
 │   ├── qoder-cli/                       #   Qoder CLI (Hook JSONL)
 │   └── openclaw/                        #   Openclaw — 新 Agent 示例 (会话文件轮询)
 ├── core/                                # 核心编排层
 │   ├── orchestrator.ts                  #   中枢编排器 (串联所有子系统)
-│   ├── collector-manager.ts             #   采集器生命周期 + Git 富化 + 分发
+│   ├── input-manager.ts             #   输入源生命周期 + Git 富化 + 分发
 │   ├── agent-discovery-service.ts       #   Agent 发现 (fs.watch + 轮询 + 状态机)
 │   ├── agent-control-manager.ts         #   Agent 控制 (三层准入策略 on/off/auto)
 │   └── config-loader.ts                 #   配置加载 (环境变量 + 配置文件 + 默认值)
@@ -256,21 +360,21 @@ src/
     └── hook-manager.ts                  #   Hook 脚本注入/卸载管理
 ```
 
-## 持久化层（Persistence）
+## 持久化层（Checkpoint）
 
 持久化层负责在进程重启之间保存采集状态，避免数据重复采集或丢失。包含两个核心组件：
 
-### StateStore - 采集器状态存储
+### StateStore - 输入源状态存储
 
-**作用**：保存每个采集器的进度状态，支持增量采集。
+**作用**：保存每个输入源的进度状态，支持增量采集。
 
-**存储位置**：`~/.r2c/logs/collector-state.json`
+**存储位置**：`~/.r2c/logs/input-state.json`
 
 **状态字段**：
 ```typescript
-interface CollectorState {
-  lastOffset?: number;      // 文件读取偏移量（Hook/Session 采集器使用）
-  lastRowId?: number;       // SQLite 行 ID（SQLite 采集器使用）
+interface InputState {
+  lastOffset?: number;      // 文件读取偏移量（Hook/Session 输入源使用）
+  lastRowId?: number;       // SQLite 行 ID（SQLite 输入源使用）
   lastTimestamp?: number;   // 最后处理的时间戳
   highWatermark?: number;   // 高水位线（已处理的最大时间戳）
   extra?: Record<string, unknown>;  // 自定义扩展字段（如文件 inode）
@@ -278,9 +382,9 @@ interface CollectorState {
 ```
 
 **使用场景**：
-- **Hook JSONL 采集器**：记录文件读取字节偏移，避免重复读取
-- **SQLite 采集器**：记录最后查询的 rowid，实现增量查询
-- **Session 采集器**：记录文件偏移量和 inode（检测文件替换）
+- **Hook JSONL 输入源**：记录文件读取字节偏移，避免重复读取
+- **SQLite 输入源**：记录最后查询的 rowid，实现增量查询
+- **Session 输入源**：记录文件偏移量和 inode（检测文件替换）
 - **CLI Forwarder**：记录遥测日志文件的读取位置
 
 **API 示例**：
@@ -294,7 +398,7 @@ const rowId = stateStore.getRowId('qoder-work');
 stateStore.setRowId('qoder-work', 12345);
 
 // 通用状态更新
-stateStore.update('my-collector', { 
+stateStore.update('my-input', { 
   lastTimestamp: Date.now(),
   extra: { customField: 'value' }
 });
@@ -302,12 +406,12 @@ stateStore.update('my-collector', {
 
 **工作流程**：
 1. **启动时**：从 JSON 文件加载状态到内存（Map）
-2. **运行时**：采集器更新状态，标记 dirty
+2. **运行时**：输入源更新状态，标记 dirty
 3. **停止时**：仅在 dirty 时写入文件（优化 I/O）
 
 ### SnapshotStore - 快照去重存储
 
-**作用**：防止 IDE 历史快照采集器重复处理相同的文件修改事件。
+**作用**：防止 IDE 历史快照输入源重复处理相同的文件修改事件。
 
 **存储位置**：`~/.r2c/logs/snapshot-store.json`
 
@@ -347,7 +451,7 @@ Qoder IDE（基于 VSCode 架构）会自动保存用户的文件编辑历史，
 
 **为什么需要去重？**
 
-采集器定期轮询（例如每 60 秒），但历史快照文件会持久保留在磁盘上：
+输入源定期轮询（例如每 60 秒），但历史快照文件会持久保留在磁盘上：
 
 ```
 时间线：
@@ -417,7 +521,7 @@ const sinceTs = snapshotStore.getSuggestedSinceTimestamp();
 | 特性 | StateStore | SnapshotStore |
 |------|-----------|---------------|
 | **用途** | 采集进度跟踪 | 事件去重 |
-| **粒度** | 每个采集器一条记录 | 每个事件一条记录 |
+| **粒度** | 每个输入源一条记录 | 每个事件一条记录 |
 | **数据量** | 小（几个 KB） | 较大（随事件增长） |
 | **清理策略** | 不清理 | 自动清理过期条目（7天） |
 | **使用场景** | Hook/SQLite/Session 采集 | IDE 快照采集 |
@@ -425,7 +529,7 @@ const sinceTs = snapshotStore.getSuggestedSinceTimestamp();
 
 ### 持久化文件示例
 
-**collector-state.json**：
+**input-state.json**：
 ```json
 {
   "qoder-cli-hook": {
@@ -463,22 +567,21 @@ const sinceTs = snapshotStore.getSuggestedSinceTimestamp();
 
 | 采集方式 | 基类 | 原理 | 示例 Agent |
 |---------|------|------|-----------|
-| IDE 历史快照轮询 | `BaseIdeCollector` | 定时读取 IDE 本地 DiskKV/历史文件 | Qoder |
-| SQLite 增量轮询 | `BaseSqliteCollector` | 增量查询本地 SQLite (rowid 游标) | Qoder Work |
-| Hook JSONL 日志 | `BaseHookCollector` | 注入 Hook 脚本拦截事件，读 JSONL | Qoder CLI |
+| IDE 历史快照轮询 | `BaseIdeInput` | 定时读取 IDE 本地 DiskKV/历史文件 | Qoder |
+| SQLite 增量轮询 | `BaseSqliteInput` | 增量查询本地 SQLite (rowid 游标) | Qoder Work |
+| Hook JSONL 日志 | `BaseHookInput` | 注入 Hook 脚本拦截事件，读 JSONL | Qoder CLI |
 | CLI 遥测日志转发 | `BaseCliForwarder` | 配置 Agent 遥测输出到文件，轮询转发 | (Gemini 模式) |
-| 会话文件轮询 | `BaseSessionCollector` | 读取 JSONL/JSON 会话记录文件 | Openclaw |
-| HTTP 推送接收 | `BaseHttpPushCollector` | 本地 HTTP 服务接收 Agent 主动推送 | (外部 Agent) |
+| 会话文件轮询 | `BaseSessionInput` | 读取 JSONL/JSON 会话记录文件 | Openclaw |
 
 ## 数据输出
 
-系统通过 `MultiReporter` 同时输出到多个目标：
+系统通过 `MultiFlusher` 同时输出到多个目标：
 
-| 输出目标 | 类 | 说明 |
+| 输出通道 | 类 | 说明 |
 |---------|---|------|
-| SLS | `SlsReporter` | 阿里云日志服务，批量(20条/2秒)，健康检查，失败重试 |
-| JSONL | `JsonlReporter` | 本地文件，按 `{clientType}-{YYYY-MM-DD}.jsonl` 轮转 |
-| HTTP | `HttpReporter` | POST 到指定服务，批量发送，自动重试 |
+| SLS | `SlsFlusher` | 阿里云日志服务，批量(20条/2秒)，健康检查，失败重试 |
+| JSONL | `JsonlFlusher` | 本地文件，按 `{clientType}-{YYYY-MM-DD}.jsonl` 轮转 |
+| HTTP | `HttpFlusher` | POST 到指定服务，批量发送，自动重试 |
 
 ## 扩展指南
 
@@ -496,9 +599,9 @@ const sinceTs = snapshotStore.getSuggestedSinceTimestamp();
 
 ```
 src/
-├── collectors/
+├── inputs/
 │   └── my-new-agent/
-│       └── my-new-agent-collector.ts      # ① 实现 Collector（数据采集）
+│       └── my-new-agent-input.ts      # ① 实现 Input（数据采集）
 ├── normalization/
 │   └── my-new-agent-normalizer.ts         # ② 自定义归一化器（数据格式转换）
 └── types/
@@ -507,8 +610,8 @@ src/
 
 **步骤说明：**
 
-1. **创建 Collector**（必须）
-   - 选择合适的基类继承（或直接从 `BaseCollector` 继承）
+1. **创建 Input**（必须）
+   - 选择合适的基类继承（或直接从 `BaseInput` 继承）
    - 实现数据采集逻辑，返回原始数据
    
 2. **创建归一化器**（数据格式不一致时必须）
@@ -540,9 +643,9 @@ src/
    }
    ```
 
-3. **在 Collector 中使用归一化器**
+3. **在 Input 中使用归一化器**
    ```typescript
-   // src/collectors/my-new-agent/my-new-agent-collector.ts
+   // src/inputs/my-new-agent/my-new-agent-input.ts
    import { normalizeMyNewAgentPayload } from '../../normalization/my-new-agent-normalizer.js';
    
    // 在数据处理时调用
@@ -551,7 +654,7 @@ src/
 
 4. **类型定义**（可选）
    - 如果数据结构复杂，建议在 `types/` 下单独定义
-   - 简单结构可以直接写在 collector 或 normalizer 中
+   - 简单结构可以直接写在 input 或 normalizer 中
 
 #### 第 1 步：声明 ClientType
 
@@ -564,23 +667,23 @@ export enum ClientType {
 }
 ```
 
-#### 第 2 步：实现 Collector
+#### 第 2 步：实现 Input
 
 选择合适的基类，实现少量抽象方法。例如，若新 Agent 产生 JSONL 会话文件：
 
 ```typescript
-// src/collectors/my-new-agent/my-new-agent-collector.ts
+// src/inputs/my-new-agent/my-new-agent-input.ts
 import { ClientType } from '../../types/index.js';
-import { BaseSessionCollector, type SessionCollectorOptions } from '../base/base-session-collector.js';
+import { BaseSessionInput, type SessionInputOptions } from '../base/base-session-input.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 
-export class MyNewAgentCollector extends BaseSessionCollector {
+export class MyNewAgentInput extends BaseSessionInput {
   readonly id = 'my-new-agent';
   readonly clientType = ClientType.MyNewAgent;
 
-  constructor(opts: { stateStore: SessionCollectorOptions['stateStore'] }) {
+  constructor(opts: { stateStore: SessionInputOptions['stateStore'] }) {
     super({
       stateStore: opts.stateStore,
       sessionDir: resolveHome('~/.my-new-agent/sessions'),
@@ -614,27 +717,26 @@ export class MyNewAgentCollector extends BaseSessionCollector {
 
 | 基类 | 需要实现的方法 |
 |------|--------------|
-| `BaseIdeCollector` | `scanHistoryEntries()`, `buildEntry()` |
-| `BaseSqliteCollector` | `readNewRows()`, `transformRow()` |
-| `BaseHookCollector` | `transformRecord()` |
+| `BaseIdeInput` | `scanHistoryEntries()`, `buildEntry()` |
+| `BaseSqliteInput` | `readNewRows()`, `transformRow()` |
+| `BaseHookInput` | `transformRecord()` |
 | `BaseCliForwarder` | `isRelevantEvent()`, `transformPayload()` |
-| `BaseSessionCollector` | `discoverSessionFiles()`, `processSessionLine()` |
-| `BaseHttpPushCollector` | (可选) `transformPushPayload()` |
+| `BaseSessionInput` | `discoverSessionFiles()`, `processSessionLine()` |
 
 #### 第 3 步：注册到 Orchestrator
 
-在 `src/core/orchestrator.ts` 的 `registerAllCollectors()` 方法中添加：
+在 `src/core/orchestrator.ts` 的 `registerAllInputs()` 方法中添加：
 
 ```typescript
-import { MyNewAgentCollector } from '../collectors/my-new-agent/my-new-agent-collector.js';
+import { MyNewAgentInput } from '../inputs/my-new-agent/my-new-agent-input.js';
 
-// 在 registerAllCollectors() 中:
-const myCollector = new MyNewAgentCollector({ stateStore: this.stateStore });
-this.collectorManager.registerCollector(myCollector);
+// 在 registerAllInputs() 中:
+const myInput = new MyNewAgentInput({ stateStore: this.stateStore });
+this.inputManager.registerInput(myInput);
 entries.push(
-  this.collectorManager.buildDetectionEntry(myCollector, {
-    watchPaths: MyNewAgentCollector.getWatchPaths(),
-    isAvailable: MyNewAgentCollector.checkAvailability,
+  this.inputManager.buildDetectionEntry(myInput, {
+    watchPaths: MyNewAgentInput.getWatchPaths(),
+    isAvailable: MyNewAgentInput.checkAvailability,
     enabled: () => this.agentControlManager.resolveEnabled('my-new-agent', true),
   }),
 );
@@ -642,9 +744,9 @@ entries.push(
 
 完成后重新编译即可。系统会自动发现 Agent 安装、管理生命周期、输出到所有已配置的目标。
 
-### 新增输出目标
+### 新增输出通道
 
-继承 `BaseReporter` 并实现 `send` / `sendBatch` / `flush` / `shutdown`，然后在 `orchestrator.ts` 的 `buildReporter()` 中添加到 reporters 数组。
+继承 `BaseFlusher` 并实现 `send` / `sendBatch` / `flush` / `shutdown`，然后在 `orchestrator.ts` 的 `buildFlusher()` 中添加到 flushers 数组。
 
 ### 调整准入策略
 

@@ -17,16 +17,16 @@ export interface AnalyticsConfig {
   autoStart: boolean;
   dataDir: string;
   listeners: Record<string, ListenerConfig>;
-  reporters: ReporterConfig;
+  flushers: FlusherConfig;
 }
 
-export interface ReporterConfig {
-  sls?: SlsReporterConfig;
-  jsonl?: JsonlReporterConfig;
-  http?: HttpReporterConfig;
+export interface FlusherConfig {
+  sls?: SlsFlusherConfig;
+  jsonl?: JsonlFlusherConfig;
+  http?: HttpFlusherConfig;
 }
 
-export interface SlsReporterConfig {
+export interface SlsFlusherConfig {
   enabled: boolean;
   accessKeyId: string;
   accessKeySecret: string;
@@ -45,14 +45,14 @@ export interface SlsEndpoint {
   redact?: boolean;
 }
 
-export interface JsonlReporterConfig {
+export interface JsonlFlusherConfig {
   enabled: boolean;
   outputDir: string;
   rotateDaily: boolean;
   maxFileSizeMb: number;
 }
 
-export interface HttpReporterConfig {
+export interface HttpFlusherConfig {
   enabled: boolean;
   url: string;
   headers?: Record<string, string>;
@@ -84,9 +84,9 @@ export interface AgentControlConfig {
 }
 
 /**
- * Collector state persisted between runs.
+ * Input state persisted between runs.
  */
-export interface CollectorState {
+export interface InputState {
   lastOffset?: number;
   lastRowId?: number;
   lastTimestamp?: number;

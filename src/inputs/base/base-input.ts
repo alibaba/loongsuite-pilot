@@ -1,20 +1,20 @@
 import { EventEmitter } from 'node:events';
-import type { AgentActivityEntry, CollectorState } from '../../types/index.js';
+import type { AgentActivityEntry, InputState } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { type BoundLogger, createLogger } from '../../utils/logger.js';
-import type { StateStore } from '../../persistence/state-store.js';
+import type { StateStore } from '../../checkpoints/state-store.js';
 
-export interface CollectorOptions {
+export interface InputOptions {
   stateStore: StateStore;
   pollIntervalMs?: number;
 }
 
 /**
- * Abstract base for every collector.
- * Subclass one of the specialised bases (IdeCollector, SqliteCollector, etc.)
+ * Abstract base for every input.
+ * Subclass one of the specialised bases (IdeInput, SqliteInput, etc.)
  * rather than this directly, unless you need a fully custom lifecycle.
  */
-export abstract class BaseCollector extends EventEmitter {
+export abstract class BaseInput extends EventEmitter {
   abstract readonly id: string;
   abstract readonly agentType: ClientType;
   abstract readonly collectionMethod: CollectionMethod;
@@ -25,7 +25,7 @@ export abstract class BaseCollector extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   private _running = false;
 
-  constructor(opts: CollectorOptions) {
+  constructor(opts: InputOptions) {
     super();
     this.stateStore = opts.stateStore;
     this.pollIntervalMs = opts.pollIntervalMs ?? 60_000;
@@ -79,11 +79,11 @@ export abstract class BaseCollector extends EventEmitter {
     }
   }
 
-  protected getState(): CollectorState {
+  protected getState(): InputState {
     return this.stateStore.get(this.id);
   }
 
-  protected setState(state: Partial<CollectorState>): void {
+  protected setState(state: Partial<InputState>): void {
     this.stateStore.update(this.id, state);
   }
 }

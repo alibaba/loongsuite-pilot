@@ -19,8 +19,8 @@ export interface GitContext {
 }
 
 /**
- * Unified agent activity log entry — the normalized format shared by all collectors.
- * Every collector must produce events conforming to this shape.
+ * Unified agent activity log entry — the normalized format shared by all inputs.
+ * Every input must produce events conforming to this shape.
  */
 export interface AgentActivityEntry {
   sessionId: string;
@@ -37,7 +37,7 @@ export interface AgentActivityEntry {
 }
 
 /**
- * Raw code generation event emitted by IDE-level collectors before normalization.
+ * Raw code generation event emitted by IDE-level inputs before normalization.
  */
 export interface CodeGenerationEvent {
   agentType: ClientType;

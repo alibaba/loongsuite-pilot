@@ -1,4 +1,4 @@
-import type { AnalyticsConfig, ReporterConfig, SlsEndpoint } from '../types/index.js';
+import type { AnalyticsConfig, FlusherConfig, SlsEndpoint } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -98,7 +98,7 @@ export async function loadConfig(): Promise<AnalyticsConfig & { port: number }> 
     port: envInt('AAC_PORT', file?.port ?? 43124),
 
     listeners: buildListenersConfig(file),
-    reporters: buildReportersConfig(file, dataDir),
+    flushers: buildFlushersConfig(file, dataDir),
   };
 }
 
@@ -131,10 +131,10 @@ function buildListenersConfig(
   return result;
 }
 
-function buildReportersConfig(
+function buildFlushersConfig(
   file: ConfigFile | null,
   dataDir: string,
-): ReporterConfig {
+): FlusherConfig {
   return {
     sls: buildSlsConfig(file),
     jsonl: buildJsonlConfig(file, dataDir),

@@ -2,10 +2,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
-import { BaseCollector, type CollectorOptions } from './base-collector.js';
+import { BaseInput, type InputOptions } from './base-input.js';
 import { ensureDir, appendLine, getTodayDateString } from '../../utils/fs-utils.js';
 
-export interface CliForwarderOptions extends CollectorOptions {
+export interface CliForwarderOptions extends InputOptions {
   /** Path to the raw telemetry log file written by the CLI tool. */
   rawTelemetryPath: string;
   /** Directory where forwarded history JSONL files are written. */
@@ -17,7 +17,7 @@ export interface CliForwarderOptions extends CollectorOptions {
 }
 
 /**
- * Base collector for CLI telemetry log forwarding.
+ * Base input for CLI telemetry log forwarding.
  *
  * Flow: CLI tool writes raw telemetry → forwarder polls the raw file →
  * filters relevant events → writes to daily JSONL → transforms to AgentActivityEntry.
@@ -26,7 +26,7 @@ export interface CliForwarderOptions extends CollectorOptions {
  *   - isRelevantEvent(): filter for tool_call events
  *   - transformPayload(): convert a telemetry event into AgentActivityEntry
  */
-export abstract class BaseCliForwarder extends BaseCollector {
+export abstract class BaseCliForwarder extends BaseInput {
   readonly collectionMethod = CollectionMethod.CliTelemetryForwarding;
 
   protected readonly rawTelemetryPath: string;

@@ -1,9 +1,9 @@
 import { CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, CodeGenerationEvent } from '../../types/index.js';
-import { SnapshotStore } from '../../persistence/snapshot-store.js';
-import { BaseCollector, type CollectorOptions } from './base-collector.js';
+import { SnapshotStore } from '../../checkpoints/snapshot-store.js';
+import { BaseInput, type InputOptions } from './base-input.js';
 
-export interface IdeCollectorOptions extends CollectorOptions {
+export interface IdeInputOptions extends InputOptions {
   /** Path to the IDE data root (e.g. ~/Library/Application Support/Qoder). */
   dataRoot: string;
   /** Path to the snapshot store JSON file. */
@@ -12,20 +12,20 @@ export interface IdeCollectorOptions extends CollectorOptions {
 }
 
 /**
- * Base collector for IDE history-snapshot polling.
+ * Base input for IDE history-snapshot polling.
  * Periodically scans IDE local DiskKV / history files, uses SnapshotStore for dedup.
  *
  * Subclass must implement:
  *   - scanHistoryEntries(): discover raw code generation events from IDE storage
  *   - buildEntry(): convert a raw event into an AgentActivityEntry
  */
-export abstract class BaseIdeCollector extends BaseCollector {
+export abstract class BaseIdeInput extends BaseInput {
   readonly collectionMethod = CollectionMethod.IdeSnapshotPolling;
 
   protected readonly dataRoot: string;
   protected readonly snapshotStore: SnapshotStore;
 
-  constructor(opts: IdeCollectorOptions) {
+  constructor(opts: IdeInputOptions) {
     super(opts);
     this.dataRoot = opts.dataRoot;
     this.snapshotStore = new SnapshotStore(

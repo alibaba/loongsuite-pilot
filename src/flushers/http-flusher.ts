@@ -1,18 +1,18 @@
 import axios from 'axios';
-import { BaseReporter } from './base-reporter.js';
+import { BaseFlusher } from './base-flusher.js';
 import { serialiseLogEntry } from '../normalization/entry-builder.js';
-import type { AgentActivityEntry, HttpReporterConfig } from '../types/index.js';
+import type { AgentActivityEntry, HttpFlusherConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 
-const logger = createLogger('HttpReporter');
+const logger = createLogger('HttpFlusher');
 
-export class HttpReporter extends BaseReporter {
+export class HttpFlusher extends BaseFlusher {
   readonly name = 'http';
-  private readonly config: HttpReporterConfig;
+  private readonly config: HttpFlusherConfig;
   private buffer: Record<string, string>[] = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(config: HttpReporterConfig) {
+  constructor(config: HttpFlusherConfig) {
     super();
     this.config = config;
   }

@@ -2,10 +2,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
-import { BaseCollector, type CollectorOptions } from './base-collector.js';
+import { BaseInput, type InputOptions } from './base-input.js';
 import { getTodayDateString, ensureDir } from '../../utils/fs-utils.js';
 
-export interface HookCollectorOptions extends CollectorOptions {
+export interface HookInputOptions extends InputOptions {
   /** Directory containing the JSONL hook log files. */
   logDir: string;
   /** Prefix for JSONL files (e.g. "claude", "cursor"). */
@@ -13,20 +13,20 @@ export interface HookCollectorOptions extends CollectorOptions {
 }
 
 /**
- * Base collector for Hook JSONL log files.
- * Hook scripts write JSONL lines into daily-rotated files; this collector
+ * Base input for Hook JSONL log files.
+ * Hook scripts write JSONL lines into daily-rotated files; this input
  * incrementally reads new bytes using a persisted byte offset.
  *
  * Subclass must implement:
  *   - transformRecord(): convert a parsed JSON record into an AgentActivityEntry
  */
-export abstract class BaseHookCollector extends BaseCollector {
+export abstract class BaseHookInput extends BaseInput {
   readonly collectionMethod = CollectionMethod.HookJsonl;
 
   protected readonly logDir: string;
   protected readonly logPrefix: string;
 
-  constructor(opts: HookCollectorOptions) {
+  constructor(opts: HookInputOptions) {
     super(opts);
     this.logDir = opts.logDir;
     this.logPrefix = opts.logPrefix;

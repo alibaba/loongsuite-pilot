@@ -1,9 +1,9 @@
 import * as fs from 'node:fs/promises';
 import { CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
-import { BaseCollector, type CollectorOptions } from './base-collector.js';
+import { BaseInput, type InputOptions } from './base-input.js';
 
-export interface SessionCollectorOptions extends CollectorOptions {
+export interface SessionInputOptions extends InputOptions {
   /** Glob-like base directory to scan for session files. */
   sessionDir: string;
   /** File name pattern (e.g. "rollout-*.jsonl"). */
@@ -11,20 +11,20 @@ export interface SessionCollectorOptions extends CollectorOptions {
 }
 
 /**
- * Base collector for session file polling (e.g. Codex CLI, OpenCode).
+ * Base input for session file polling (e.g. Codex CLI, OpenCode).
  * Reads JSONL session files with offset tracking per file (inode-aware rotation).
  *
  * Subclass must implement:
  *   - discoverSessionFiles(): list session files to process
  *   - processSessionLine(): handle a single JSONL line from a session file
  */
-export abstract class BaseSessionCollector extends BaseCollector {
+export abstract class BaseSessionInput extends BaseInput {
   readonly collectionMethod = CollectionMethod.SessionFilePolling;
 
   protected readonly sessionDir: string;
   protected readonly filePattern: string;
 
-  constructor(opts: SessionCollectorOptions) {
+  constructor(opts: SessionInputOptions) {
     super(opts);
     this.sessionDir = opts.sessionDir;
     this.filePattern = opts.filePattern;
