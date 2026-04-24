@@ -1,0 +1,60 @@
+/**
+ * All supported AI coding tool types.
+ * Extend this enum when adding a new agent.
+ */
+export enum ClientType {
+  // IDE tools
+  Cursor = 'cursor',
+  Qoder = 'qoder',
+  QoderIdea = 'qoder-idea',
+  QoderWork = 'qoder-work',
+  Kiro = 'kiro',
+  KiroCli = 'kiro-cli',
+  Antigravity = 'antigravity',
+  Lingma = 'lingma',
+  LingmaVscode = 'lingma-vscode',
+
+  // CLI tools
+  GeminiCli = 'gemini-cli',
+  YkCli = 'ykcli',
+  QwenCodeCli = 'qwen-code-cli',
+  KimiCodeCli = 'kimi-code-cli',
+  CodexSession = 'codex-session',
+
+  // Hook-based tools
+  ClaudeCliHook = 'claude-cli-hook',
+  IflowCliHook = 'iflow-cli-hook',
+  CursorHook = 'cursor-hook',
+  QoderCliHook = 'qoder-cli-hook',
+  ClineHook = 'cline-hook',
+  GithubCopilotHook = 'github-copilot-hook',
+  AoneCopilotHook = 'aone-copilot-hook',
+  OpencodePlugin = 'opencode-plugin',
+
+  // New agents — add here
+  Openclaw = 'openclaw',
+}
+
+export enum ToolType {
+  IDE = 'ide',
+  CLI = 'cli',
+  Hook = 'hook',
+  Plugin = 'plugin',
+}
+
+export enum CollectionMethod {
+  /** Periodically read IDE local DiskKV / history files */
+  IdeSnapshotPolling = 'ide-snapshot-polling',
+  /** Incrementally query a local SQLite database */
+  SqlitePolling = 'sqlite-polling',
+  /** Intercept tool events via injected hook scripts, read JSONL logs */
+  HookJsonl = 'hook-jsonl',
+  /** Configure tool telemetry output to a file, poll and forward */
+  CliTelemetryForwarding = 'cli-telemetry-forwarding',
+  /** Read session record files (JSONL/JSON) */
+  SessionFilePolling = 'session-file-polling',
+  /** Access tool's Language Server via HTTP API */
+  LsHttpApi = 'ls-http-api',
+  /** Local HTTP server receives tool-pushed telemetry */
+  HttpPush = 'http-push',
+}

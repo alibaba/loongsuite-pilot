@@ -1,0 +1,97 @@
+export * from './client-type.js';
+export * from './events.js';
+
+/**
+ * Configuration for a single tool listener.
+ */
+export interface ListenerConfig {
+  enabled: boolean;
+  pollInterval: number;
+}
+
+/**
+ * Global analytics configuration.
+ */
+export interface AnalyticsConfig {
+  enabled: boolean;
+  autoStart: boolean;
+  dataDir: string;
+  listeners: Record<string, ListenerConfig>;
+  reporters: ReporterConfig;
+}
+
+export interface ReporterConfig {
+  sls?: SlsReporterConfig;
+  jsonl?: JsonlReporterConfig;
+  http?: HttpReporterConfig;
+}
+
+export interface SlsReporterConfig {
+  enabled: boolean;
+  accessKeyId: string;
+  accessKeySecret: string;
+  /** 完整 SLS endpoint URL，如 https://cn-hangzhou.log.aliyuncs.com */
+  endpoint: string;
+  endpoints: SlsEndpoint[];
+  batchMaxSize: number;
+  flushIntervalMs: number;
+}
+
+export interface SlsEndpoint {
+  name: string;
+  project: string;
+  logstore: string;
+  kind: 'agentActivity' | 'agentTelemetry' | 'mcp' | 'trace';
+  redact?: boolean;
+}
+
+export interface JsonlReporterConfig {
+  enabled: boolean;
+  outputDir: string;
+  rotateDaily: boolean;
+  maxFileSizeMb: number;
+}
+
+export interface HttpReporterConfig {
+  enabled: boolean;
+  url: string;
+  headers?: Record<string, string>;
+  batchMaxSize: number;
+  flushIntervalMs: number;
+  requestTimeoutMs: number;
+}
+
+/**
+ * Agent detection entry — describes how to discover and manage a single agent.
+ */
+export interface AgentDetectionEntry {
+  id: string;
+  type: string;
+  isAvailable: () => Promise<boolean>;
+  watchPaths: string[];
+  enabled: () => boolean;
+  start: () => Promise<void>;
+  stop: () => Promise<void>;
+  pollIntervalMs: number;
+  runOnActive?: boolean;
+}
+
+export type AgentControlMode = 'on' | 'off' | 'auto';
+
+export interface AgentControlConfig {
+  version: number;
+  tools: Record<string, AgentControlMode>;
+}
+
+/**
+ * Collector state persisted between runs.
+ */
+export interface CollectorState {
+  lastOffset?: number;
+  lastRowId?: number;
+  lastTimestamp?: number;
+  highWatermark?: number;
+  extra?: Record<string, unknown>;
+}
+
+export type EntryState = 'idle' | 'starting' | 'running' | 'stopping';
