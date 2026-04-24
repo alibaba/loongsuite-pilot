@@ -8,24 +8,24 @@ set -euo pipefail
 # It intercepts tool execution events and writes them to JSONL log files.
 #
 # Installation:
-#   The HookManager class automatically installs this script to ~/.r2c/hooks/
+#   The HookManager class automatically installs this script to ~/.ai-agent-collector/hooks/
 #   and injects the hook command into ~/.qoder/settings.json
 #
 # Output:
-#   ~/.r2c/logs/qoder-cli/history/qoder-cli-{YYYY-MM-DD}.jsonl
+#   ~/.ai-agent-collector/logs/qoder-cli/history/qoder-cli-{YYYY-MM-DD}.jsonl
 # ============================================================================
 
 # Resolve cache directory
 resolve_cache_dir() {
-  if [[ -n "${R2C_CACHE_DIR:-}" ]]; then
-    printf '%s' "$R2C_CACHE_DIR"
+  if [[ -n "${AAC_CACHE_DIR:-}" ]]; then
+    printf '%s' "$AAC_CACHE_DIR"
     return
   fi
 
   local home="${HOME:-}"
-  local target=".r2c"
+  local target=".ai-agent-collector"
   if [[ -n "$home" ]]; then
-    target="$home/.r2c"
+    target="$home/.ai-agent-collector"
   fi
 
   if mkdir -p "$target" 2>/dev/null; then
@@ -33,7 +33,7 @@ resolve_cache_dir() {
     return
   fi
 
-  local fallback="${PWD:-.}/.r2c"
+  local fallback="${PWD:-.}/.ai-agent-collector"
   mkdir -p "$fallback"
   printf '%s' "$fallback"
 }
@@ -230,12 +230,12 @@ if event_name in ('PostToolUse', 'PostToolUseFailure') and tool_name in TRACKED_
             with open(pre_state_path, 'r', encoding='utf-8') as f:
                 pre_state = json.load(f)
             if isinstance(pre_state, dict):
-                payload['r2c_pre_file_exists'] = pre_state.get('exists') is True
-                payload['r2c_pre_file_content'] = pre_state.get('content', '')
-                payload['r2c_pre_file_sha1'] = pre_state.get('sha1', '')
-                payload['r2c_pre_file_line_count'] = pre_state.get('line_count')
-                payload['r2c_pre_file_captured_at'] = pre_state.get('captured_at')
-                payload['r2c_pre_file_path'] = pre_state.get('file_path', file_path)
+                payload['aac_pre_file_exists'] = pre_state.get('exists') is True
+                payload['aac_pre_file_content'] = pre_state.get('content', '')
+                payload['aac_pre_file_sha1'] = pre_state.get('sha1', '')
+                payload['aac_pre_file_line_count'] = pre_state.get('line_count')
+                payload['aac_pre_file_captured_at'] = pre_state.get('captured_at')
+                payload['aac_pre_file_path'] = pre_state.get('file_path', file_path)
             # Clean up pre-state file
             try:
                 os.remove(pre_state_path)
@@ -247,8 +247,8 @@ if event_name in ('PostToolUse', 'PostToolUseFailure') and tool_name in TRACKED_
 # Enrich payload
 payload['capturedAt'] = payload.get('capturedAt') or log_time
 payload['logTime'] = payload.get('logTime') or log_time
-payload['r2c_client_type'] = 'Qoder'
-payload['r2c_tool_name_normalized'] = tool_name
+payload['aac_client_type'] = 'Qoder'
+payload['aac_tool_name_normalized'] = tool_name
 
 # Build record
 record = {

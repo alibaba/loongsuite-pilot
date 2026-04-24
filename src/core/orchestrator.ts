@@ -23,7 +23,7 @@ import { OpenclawInput } from '../inputs/openclaw/openclaw-input.js';
 
 const logger = createLogger('Orchestrator');
 
-const DEFAULT_DATA_DIR = '~/.r2c';
+const DEFAULT_DATA_DIR = '~/.ai-agent-collector';
 
 /**
  * Central orchestrator — the entry point that wires all sub-systems together.

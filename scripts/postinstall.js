@@ -3,7 +3,7 @@
  * Post-install script for ai-agent-collector
  * 
  * This script runs automatically after `npm install` and:
- * 1. Copies hook scripts from assets/hooks/ to ~/.r2c/hooks/
+ * 1. Copies hook scripts from assets/hooks/ to ~/.ai-agent-collector/hooks/
  * 2. Makes them executable
  * 
  * This mirrors the approach used by @ali/ai-agent-collector
@@ -19,8 +19,8 @@ const __dirname = path.dirname(__filename);
 // Resolve paths
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const HOOKS_SOURCE_DIR = path.join(PROJECT_ROOT, 'assets', 'hooks');
-const R2C_DIR = process.env.R2C_DIR || path.join(process.env.HOME || '', '.r2c');
-const HOOKS_TARGET_DIR = path.join(R2C_DIR, 'hooks');
+const AI_AGENT_COLLECTOR_DIR = process.env.AAC_DATA_DIR || path.join(process.env.HOME || '', '.ai-agent-collector');
+const HOOKS_TARGET_DIR = path.join(AI_AGENT_COLLECTOR_DIR, 'hooks');
 
 /**
  * Ensure directory exists

@@ -4,7 +4,7 @@ import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('ConfigLoader');
 
-const DEFAULT_CONFIG_PATH = '~/.r2c/config.json';
+const DEFAULT_CONFIG_PATH = '~/.ai-agent-collector/config.json';
 
 /**
  * On-disk config file shape.
@@ -74,7 +74,7 @@ function envInt(key: string, fallback: number): number {
 /**
  * Load configuration with three priority layers:
  *   1. Environment variables (highest)
- *   2. Config file (~/.r2c/config.json or AGENT_DATA_COLLECTION_CONFIG)
+ *   2. Config file (~/.ai-agent-collector/config.json or AGENT_DATA_COLLECTION_CONFIG)
  *   3. Built-in defaults (lowest)
  *
  * Env vars override config file values. Config file overrides defaults.
@@ -89,7 +89,7 @@ export async function loadConfig(): Promise<AnalyticsConfig & { port: number }> 
     logger.debug('no config file found, using env + defaults', { path: configPath });
   }
 
-  const dataDir = env('AAC_DATA_DIR') ?? file?.dataDir ?? '~/.r2c';
+  const dataDir = env('AAC_DATA_DIR') ?? file?.dataDir ?? '~/.ai-agent-collector';
 
   return {
     enabled: envBool('AAC_ENABLED', file?.enabled ?? true),

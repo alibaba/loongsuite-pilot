@@ -56,14 +56,14 @@ npm start
    node dist/index.js
    ```
 
-3. **验证钩子安装**：检查 `~/.r2c/hooks/` 目录确认 hook 脚本已正确安装：
+3. **验证钩子安装**：检查 `~/.ai-agent-collector/hooks/` 目录确认 hook 脚本已正确安装：
    ```bash
-   ls -la ~/.r2c/hooks/
+   ls -la ~/.ai-agent-collector/hooks/
    ```
 
 4. **查看日志输出**：检查数据采集日志：
    ```bash
-   tail -f ~/.r2c/logs/output/*.jsonl
+   tail -f ~/.ai-agent-collector/logs/output/*.jsonl
    ```
 
 ## 打包发布
@@ -207,12 +207,12 @@ sudo journalctl -u ai-agent-collector -f
 
 ### 配置文件
 
-默认路径 `~/.r2c/config.json`，可通过 `AGENT_DATA_COLLECTION_CONFIG` 环境变量指定其他路径。
+默认路径 `~/.ai-agent-collector/config.json`，可通过 `AGENT_DATA_COLLECTION_CONFIG` 环境变量指定其他路径。
 
 ```json
 {
   "enabled": true,
-  "dataDir": "~/.r2c",
+  "dataDir": "~/.ai-agent-collector",
   "port": 43124,
 
   "sls": {
@@ -241,7 +241,7 @@ sudo journalctl -u ai-agent-collector -f
 
   "jsonl": {
     "enabled": true,
-    "outputDir": "~/.r2c/logs/output",
+    "outputDir": "~/.ai-agent-collector/logs/output",
     "rotateDaily": true,
     "maxFileSizeMb": 100
   },
@@ -274,9 +274,9 @@ sudo journalctl -u ai-agent-collector -f
 
 | 环境变量 | 说明 | 默认值 |
 |---------|------|--------|
-| `AGENT_DATA_COLLECTION_CONFIG` | 配置文件路径 | `~/.r2c/config.json` |
+| `AGENT_DATA_COLLECTION_CONFIG` | 配置文件路径 | `~/.ai-agent-collector/config.json` |
 | `AAC_ENABLED` | 总开关 | `true` |
-| `AAC_DATA_DIR` | 数据根目录 | `~/.r2c` |
+| `AAC_DATA_DIR` | 数据根目录 | `~/.ai-agent-collector` |
 | `AAC_DISCOVERY_INTERVAL_MS` | Agent 发现轮询间隔 | `300000` (5min) |
 | `AAC_FORCE_POLLING` | 强制轮询（禁用 fs.watch） | `false` |
 | `LOG_LEVEL` | 日志级别 (debug/info/warn/error) | `info` |
@@ -301,7 +301,7 @@ sudo journalctl -u ai-agent-collector -f
 | 环境变量 | 说明 | 默认值 |
 |---------|------|--------|
 | `JSONL_ENABLED` | 是否启用 JSONL 输出 | `true` |
-| `JSONL_OUTPUT_DIR` | JSONL 文件输出目录 | `~/.r2c/logs/output` |
+| `JSONL_OUTPUT_DIR` | JSONL 文件输出目录 | `~/.ai-agent-collector/logs/output` |
 | `HTTP_REPORT_URL` | HTTP 上报地址（设置后启用） | 空 |
 | `HTTP_REPORT_HEADERS` | 自定义请求头 (JSON string) | 空 |
 
@@ -368,7 +368,7 @@ src/
 
 **作用**：保存每个输入源的进度状态，支持增量采集。
 
-**存储位置**：`~/.r2c/logs/input-state.json`
+**存储位置**：`~/.ai-agent-collector/logs/input-state.json`
 
 **状态字段**：
 ```typescript
@@ -413,7 +413,7 @@ stateStore.update('my-input', {
 
 **作用**：防止 IDE 历史快照输入源重复处理相同的文件修改事件。
 
-**存储位置**：`~/.r2c/logs/snapshot-store.json`
+**存储位置**：`~/.ai-agent-collector/logs/snapshot-store.json`
 
 **核心机制**：基于 `pending/processed` 状态机的去重逻辑。
 
@@ -750,7 +750,7 @@ entries.push(
 
 ### 调整准入策略
 
-编辑 `~/.r2c/agent-control.json` 文件：
+编辑 `~/.ai-agent-collector/agent-control.json` 文件：
 
 ```json
 {

@@ -38,8 +38,8 @@ export class HookManager {
   private readonly logBaseDir: string;
 
   constructor(hookScriptDir?: string, logBaseDir?: string) {
-    this.hookScriptDir = hookScriptDir ?? resolveHome('~/.r2c/hooks');
-    this.logBaseDir = logBaseDir ?? resolveHome('~/.r2c/logs');
+    this.hookScriptDir = hookScriptDir ?? resolveHome('~/.ai-agent-collector/hooks');
+    this.logBaseDir = logBaseDir ?? resolveHome('~/.ai-agent-collector/logs');
   }
 
   /**
@@ -154,8 +154,8 @@ export class HookManager {
   /**
    * Build a standard hook definition for Qoder CLI.
    */
-  static buildQoderCliHook(r2cDir?: string): HookDefinition {
-    const baseDir = r2cDir ?? resolveHome('~/.r2c');
+  static buildQoderCliHook(aiAgentCollectorDir?: string): HookDefinition {
+    const baseDir = aiAgentCollectorDir ?? resolveHome('~/.ai-agent-collector');
     return {
       agentId: 'qoder-cli',
       settingsPath: resolveHome('~/.qoder/settings.json'),
@@ -172,9 +172,9 @@ export class HookManager {
   static buildGenericHook(opts: {
     agentId: string;
     settingsDir: string;
-    r2cDir?: string;
+    aiAgentCollectorDir?: string;
   }): HookDefinition {
-    const baseDir = opts.r2cDir ?? resolveHome('~/.r2c');
+    const baseDir = opts.aiAgentCollectorDir ?? resolveHome('~/.ai-agent-collector');
     return {
       agentId: opts.agentId,
       settingsPath: path.join(opts.settingsDir, 'settings.json'),

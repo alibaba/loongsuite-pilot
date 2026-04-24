@@ -8,9 +8,9 @@ import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
  * Qoder CLI — Hook JSONL log input.
  *
  * Hook scripts intercept PreToolUse / PostToolUse / failure events
- * and write JSONL to ~/.r2c/logs/qoder-cli/history/.
+ * and write JSONL to ~/.ai-agent-collector/logs/qoder-cli/history/.
  *
- * Special: uses r2c_pre_file_exists / r2c_pre_file_content to distinguish
+ * Special: uses aac_pre_file_exists / aac_pre_file_content to distinguish
  * true create vs overwrite.
  */
 export class QoderCliInput extends BaseHookInput {
@@ -20,7 +20,7 @@ export class QoderCliInput extends BaseHookInput {
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
       stateStore: opts!.stateStore,
-      logDir: opts?.logDir ?? resolveHome('~/.r2c/logs/qoder-cli/history'),
+      logDir: opts?.logDir ?? resolveHome('~/.ai-agent-collector/logs/qoder-cli/history'),
       logPrefix: opts?.logPrefix ?? 'qoder-cli',
       pollIntervalMs: opts?.pollIntervalMs ?? 60_000,
     });
@@ -47,7 +47,7 @@ export class QoderCliInput extends BaseHookInput {
       ?? '';
     if (!filePath) return null;
 
-    const preFileExists = record.r2c_pre_file_exists as boolean | undefined;
+    const preFileExists = record.aac_pre_file_exists as boolean | undefined;
     let actionType = ActionType.Edit;
     if (toolName === 'create_file' || toolName === 'write_to_file') {
       actionType = preFileExists === false ? ActionType.Create : ActionType.Edit;
