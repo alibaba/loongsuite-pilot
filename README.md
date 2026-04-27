@@ -769,6 +769,211 @@ entries.push(
 - `"off"` - 强制禁用
 - `"auto"` - 自动检测（默认）
 
+## 使用 Spec Kit 添加新 Agent（推荐流程）
+
+本项目使用 [Spec Kit](https://github.com/nicholasgriffintn/speckit) 进行文档驱动开发。添加新 Agent 时，推荐按照以下标准化流程，从规格定义到实现逐步推进。
+
+### 1. 安装 Spec Kit
+
+Spec Kit 通过 Cursor IDE 的 Skills 机制集成，本仓库已包含所有必要的 skill 文件（`.cursor/skills/speckit-*/`）和配置（`.specify/`），无需额外安装。
+
+如果是全新项目，可通过 npx 初始化：
+
+```bash
+npx speckit init --ai cursor-agent --script sh
+```
+
+初始化后生成的目录结构：
+
+```
+.specify/
+├── memory/constitution.md    # 项目宪法（质量标准）
+├── templates/                # spec/plan/tasks 模板
+├── extensions.yml            # Git 等扩展钩子
+└── workflows/                # 工作流注册
+.cursor/
+├── rules/specify-rules.mdc   # Cursor Agent 上下文规则
+└── skills/speckit-*/SKILL.md  # 各 speckit 命令的 skill 定义
+```
+
+### 2. 创建 Agent Spec（规格说明）
+
+在 Cursor 中使用 `/speckit-specify` 命令创建新 Agent 的规格文档。
+
+**操作步骤**：
+
+1. 在 `specs/` 下创建新目录，编号规则为 `1xx-agent-{name}`（101 起步，已有 101-104）：
+
+```
+specs/
+├── 001-platform-base/        # 平台基础设施（已有）
+├── 101-agent-qoder/          # Qoder IDE（已有）
+├── 102-agent-qoder-work/     # Qoder Work（已有）
+├── 103-agent-qoder-cli/      # Qoder CLI（已有）
+├── 104-agent-openclaw/       # Openclaw（已有）
+└── 105-agent-my-new/         # ← 新 Agent
+    └── spec.md
+```
+
+2. 在 Cursor 中输入命令：
+
+```
+/speckit-specify 新 Agent 名称及描述
+```
+
+**Spec 编写要点**：
+
+spec.md 应包含以下章节，可参考 `specs/101-agent-qoder/spec.md` 的格式：
+
+```markdown
+# 功能规格说明：My New Agent
+
+**功能分支**: `105-agent-my-new`
+**创建日期**: 2026-xx-xx
+**状态**: Draft
+**依赖**: `001-platform-base`（输入源框架、持久化层、归一化层）
+
+## 概述
+
+描述 Agent 的类型、数据源、采集方式。以表格形式列出：
+
+| 数据源 | 采集基类 | 数据格式 | 游标类型 |
+|--------|---------|---------|---------|
+| 会话文件 | BaseSessionInput | JSONL | StateStore (byte offset) |
+
+## 用户场景与测试
+
+### 用户故事 1 — 采集 xxx 数据（优先级：P1）
+
+作为平台运维人员，我需要系统从 xxx 中采集 yyy 数据。
+
+**验收标准**:
+1. 系统定期扫描指定目录下的文件
+2. 仅处理符合条件的事件记录
+3. 正确分类 actionType（Create / Edit / ...）
+4. 偏移量持久化，重启后增量读取
+5. 异常记录跳过不中断采集
+
+## 功能需求
+
+- FR-001: 系统必须支持从 xxx 路径读取数据
+- FR-002: ...
+
+## 关键实体
+
+描述数据流中的核心对象和字段映射关系。
+
+## 成功标准
+
+- 单元测试覆盖率 ≥ 80%
+- 重启后无重复采集
+- 异常文件不中断全局采集
+
+## 范围外
+
+明确列出不在本次迭代范围内的功能。
+
+## 假设与依赖
+
+- 依赖 `001-platform-base` 提供的基类和基础设施
+- 目标 Agent 已安装在用户机器上
+```
+
+### 3. 规格评审与澄清
+
+Spec 编写完成后，使用以下命令进行质量检查：
+
+```
+/speckit-checklist    # 生成规格质量检查清单
+/speckit-clarify      # 识别规格中的模糊点，提出澄清问题
+/speckit-analyze      # 跨文档一致性分析
+```
+
+确保所有检查项通过后再进入下一步。
+
+### 4. 生成实现计划
+
+```
+/speckit-plan
+```
+
+该命令会读取 spec.md，结合项目宪法（constitution.md），生成：
+
+- `plan.md` — 技术上下文、宪法合规检查、项目结构
+- `research.md` — 技术决策和约束研究
+- `data-model.md` — 数据模型定义
+- `contracts/` — API 和行为契约
+- `quickstart.md` — 快速上手指南
+
+### 5. 生成任务清单
+
+```
+/speckit-tasks
+```
+
+基于 plan.md 和 spec.md 自动生成 `tasks.md`，包含：
+
+- 分阶段的实现任务（Setup → Tests → Core → Integration → Polish）
+- 每个任务的文件路径、依赖关系、并行标记 `[P]`
+- TDD 顺序：先写测试，再写实现
+
+### 6. 执行实现
+
+```
+/speckit-implement
+```
+
+按 tasks.md 中的任务清单逐项执行：
+
+1. 在 `src/types/client-type.ts` 添加新的 `ClientType` 枚举值
+2. 在 `src/inputs/{agent-name}/` 创建 Input 类（继承合适的基类）
+3. 在 `src/core/orchestrator.ts` 的 `registerAllInputs()` 中注册
+4. 编写单元测试和集成测试
+5. 验证覆盖率达标
+
+### 7. 完整命令速查
+
+| 阶段 | 命令 | 产出 |
+|------|------|------|
+| 宪法 | `/speckit-constitution` | `constitution.md` |
+| 规格 | `/speckit-specify` | `spec.md` |
+| 检查 | `/speckit-checklist` | `checklists/*.md` |
+| 澄清 | `/speckit-clarify` | spec.md 更新 |
+| 分析 | `/speckit-analyze` | 一致性报告 |
+| 计划 | `/speckit-plan` | `plan.md` + 设计文档 |
+| 任务 | `/speckit-tasks` | `tasks.md` |
+| 实现 | `/speckit-implement` | 源码 + 测试 |
+| 提交 | `/speckit-git-commit` | Git commit |
+
+### 8. 示例：从零添加一个 Session 文件类型的 Agent
+
+```bash
+# 1. 创建 spec 目录
+mkdir -p specs/105-agent-example
+
+# 2. 在 Cursor 中执行
+/speckit-specify Example Agent — 从 ~/.example-agent/sessions/ 目录采集 JSONL 会话文件，
+  提取 tool_call 类型事件，根据 tool_name 分类 actionType
+
+# 3. 检查规格质量
+/speckit-checklist
+
+# 4. 生成计划和任务
+/speckit-plan
+/speckit-tasks
+
+# 5. 执行实现（自动创建文件、编写测试）
+/speckit-implement
+```
+
+实现完成后，你的新 Agent 将自动获得：
+
+- 自动发现（`AgentDiscoveryService` 监控安装状态）
+- 增量采集（`StateStore` 持久化偏移量）
+- 多目标输出（SLS / JSONL / HTTP 同时输出）
+- 准入控制（`AgentControlManager` 的 on/off/auto 三级模式）
+- 优雅关闭（`Orchestrator` 统一管理生命周期）
+
 ## License
 
 Private / Internal Use

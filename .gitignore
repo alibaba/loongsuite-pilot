@@ -23,4 +23,7 @@ Thumbs.db
 # Build artifacts
 *.tsbuildinfo
 
+# Test coverage
+coverage/
+
 package
