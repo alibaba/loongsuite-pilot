@@ -149,6 +149,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners.qoder).toBeDefined();
       expect(config.listeners.qoder.enabled).toBe(true);
       expect(config.listeners['qoder-work'].enabled).toBe(true);
+      expect(config.listeners['cursor-hook'].enabled).toBe(true);
     });
 
     it('merges file-level listener overrides', async () => {

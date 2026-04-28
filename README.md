@@ -259,6 +259,7 @@ sudo journalctl -u ai-agent-collector -f
     "qoder":          { "enabled": true, "pollInterval": 60000 },
     "qoder-work":     { "enabled": true, "pollInterval": 60000 },
     "qoder-cli-hook": { "enabled": true, "pollInterval": 60000 },
+    "cursor-hook":    { "enabled": true, "pollInterval": 60000 },
     "openclaw":       { "enabled": true, "pollInterval": 30000 }
   }
 }
@@ -347,6 +348,7 @@ src/
 │   ├── qoder/                           #   Qoder IDE (快照轮询)
 │   ├── qoder-work/                      #   Qoder Work (SQLite 轮询)
 │   ├── qoder-cli/                       #   Qoder CLI (Hook JSONL)
+│   ├── cursor-hook/                     #   Cursor Hook (Hook JSONL)
 │   └── openclaw/                        #   Openclaw — 新 Agent 示例 (会话文件轮询)
 ├── core/                                # 核心编排层
 │   ├── orchestrator.ts                  #   中枢编排器 (串联所有子系统)
@@ -535,6 +537,9 @@ const sinceTs = snapshotStore.getSuggestedSinceTimestamp();
   "qoder-cli-hook": {
     "lastOffset": 15234
   },
+  "cursor-hook": {
+    "lastOffset": 9342
+  },
   "qoder-work": {
     "lastRowId": 8921
   },
@@ -569,7 +574,7 @@ const sinceTs = snapshotStore.getSuggestedSinceTimestamp();
 |---------|------|------|-----------|
 | IDE 历史快照轮询 | `BaseIdeInput` | 定时读取 IDE 本地 DiskKV/历史文件 | Qoder |
 | SQLite 增量轮询 | `BaseSqliteInput` | 增量查询本地 SQLite (rowid 游标) | Qoder Work |
-| Hook JSONL 日志 | `BaseHookInput` | 注入 Hook 脚本拦截事件，读 JSONL | Qoder CLI |
+| Hook JSONL 日志 | `BaseHookInput` | 注入 Hook 脚本拦截事件，读 JSONL | Qoder CLI / Cursor Hook |
 | CLI 遥测日志转发 | `BaseCliForwarder` | 配置 Agent 遥测输出到文件，轮询转发 | (Gemini 模式) |
 | 会话文件轮询 | `BaseSessionInput` | 读取 JSONL/JSON 会话记录文件 | Openclaw |
 
@@ -759,6 +764,7 @@ entries.push(
     "qoder": "auto",
     "qoder-work": "on",
     "qoder-cli-hook": "off",
+    "cursor-hook": "auto",
     "openclaw": "auto"
   }
 }

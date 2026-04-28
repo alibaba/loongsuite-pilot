@@ -4,7 +4,7 @@
  * 
  * This script runs automatically after `npm install` and:
  * 1. Copies hook scripts from assets/hooks/ to ~/.ai-agent-collector/hooks/
- * 2. Makes them executable
+ * 2. Sets permissions with least-privilege defaults
  * 
  * This mirrors the approach used by @ali/ai-agent-collector
  */
@@ -34,9 +34,15 @@ function ensureDir(dirPath) {
 /**
  * Copy file and make it executable
  */
+function getFileMode(filePath) {
+  // Shell/PowerShell scripts need execute bit; processors do not.
+  if (filePath.endsWith('.sh') || filePath.endsWith('.ps1')) return 0o755;
+  return 0o644;
+}
+
 function installHookFile(sourcePath, targetPath) {
   const content = fs.readFileSync(sourcePath);
-  fs.writeFileSync(targetPath, content, { mode: 0o755 });
+  fs.writeFileSync(targetPath, content, { mode: getFileMode(sourcePath) });
 }
 
 /**
@@ -54,8 +60,10 @@ function main() {
   // Create target directory
   ensureDir(HOOKS_TARGET_DIR);
 
-  // Copy all hook scripts
-  const hookFiles = fs.readdirSync(HOOKS_SOURCE_DIR).filter(f => f.endsWith('.sh') || f.endsWith('.ps1'));
+  // Copy all hook scripts / processors
+  const hookFiles = fs.readdirSync(HOOKS_SOURCE_DIR).filter(
+    f => f.endsWith('.sh') || f.endsWith('.ps1') || f.endsWith('.mjs'),
+  );
   
   if (hookFiles.length === 0) {
     console.log('[ai-agent-collector] No hook scripts to install.');

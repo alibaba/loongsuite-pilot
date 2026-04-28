@@ -6,7 +6,7 @@ import { InputManager } from './input-manager.js';
 import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { createLogger } from '../utils/logger.js';
-import { resolveHome, ensureDir } from '../utils/fs-utils.js';
+import { resolveHome, ensureDir, directoryExists } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 
 // Flushers
@@ -21,6 +21,7 @@ import { QoderInput } from '../inputs/qoder/qoder-input.js';
 import { QoderWorkInput } from '../inputs/qoder-work/qoder-work-input.js';
 import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
 import { OpenclawInput } from '../inputs/openclaw/openclaw-input.js';
+import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 
 const logger = createLogger('Orchestrator');
 
@@ -253,6 +254,25 @@ export class Orchestrator extends EventEmitter {
           listenerCfg['qoder-cli-hook']?.enabled ?? true,
         ),
         pollIntervalMs: listenerCfg['qoder-cli-hook']?.pollInterval,
+      }),
+    );
+
+    // --- Cursor Hook (Hook JSONL) ---
+    const cursorHookLogDir = path.join(this.dataDir, 'logs', 'cursor-hook', 'history');
+    const cursorHookInput = new CursorHookInput({
+      stateStore: this.stateStore,
+      logDir: cursorHookLogDir,
+    });
+    this.inputManager.registerInput(cursorHookInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(cursorHookInput, {
+        watchPaths: [cursorHookLogDir],
+        isAvailable: async () => directoryExists(cursorHookLogDir),
+        enabled: () => this.agentControlManager.resolveEnabled(
+          'cursor-hook',
+          listenerCfg['cursor-hook']?.enabled ?? true,
+        ),
+        pollIntervalMs: listenerCfg['cursor-hook']?.pollInterval,
       }),
     );
 
