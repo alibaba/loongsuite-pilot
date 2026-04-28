@@ -7,12 +7,11 @@
 
 ## 概述
 
-Qoder IDE 是一款基于 VS Code 架构的 AI 编程助手。本 Agent 从三个独立数据源采集使用数据：
+Qoder IDE 是一款基于 VS Code 架构的 AI 编程助手。本 Agent 从两个独立数据源采集使用数据：
 
 | 数据源 | 采集基类 | 数据格式 | 游标类型 |
 |--------|---------|---------|---------|
 | `User/History/` — 文件编辑历史 | BaseIdeInput | VS Code entries.json | SnapshotStore (key 去重) |
-| `SharedClientCache/cache/db/local.db` — 对话记录 | BaseIdeInput (内嵌 SQLite) | SQLite chat_record + chat_session | StateStore (rowid) |
 | `SharedClientCache/cache/ai_tracker/*.jsonl` — AI 追踪 | BaseIdeInput (内嵌 JSONL) | JSONL 文件 | StateStore (byte offset) |
 
 **数据目录**:
@@ -41,24 +40,7 @@ Qoder IDE 是一款基于 VS Code 架构的 AI 编程助手。本 Agent 从三�
 
 ---
 
-### 用户故事 2 — 采集 Qoder IDE 对话记录（优先级：P1）
-
-作为平台运维人员，我需要系统从 Qoder IDE 的 SQLite 数据库中采集 AI 对话记录（chat_record + chat_session），包括用户问题、AI 回答和会话上下文。
-
-**优先级理由**: 对话记录是理解用户如何与 AI 交互的关键数据。
-
-**独立测试**: 可通过构造一个包含 `chat_record` 和 `chat_session` 表的测试 SQLite 数据库，验证系统正确读取并归一化。
-
-**验收场景**:
-
-1. **Given** `SharedClientCache/cache/db/local.db` 存在，**When** 系统查询 `chat_record` 表（`WHERE rowid > lastRowId`），**Then** 获取增量对话记录并关联 `chat_session` 的 `session_title` 和 `project_name`
-2. **Given** 上次采集到 rowid=100，**When** 系统查询，**Then** 仅返回 `rowid > 100` 的记录，limit 500
-3. **Given** 对话记录包含 `question` 和 `answer`，**When** 系统归一化，**Then** `answer` 截取前 2000 字符作为 `content`，`question` 截取前 2000 字符存入 `extra`
-4. **Given** 数据库文件不存在或无法打开，**When** 系统尝试扫描，**Then** 记录警告并跳过，不影响其他数据源
-
----
-
-### 用户故事 3 — 采集 Qoder IDE AI 追踪日志（优先级：P2）
+### 用户故事 2 — 采集 Qoder IDE AI 追踪日志（优先级：P2）
 
 作为平台运维人员，我需要系统从 Qoder IDE 的 `ai_tracker` JSONL 文件中采集详细的 AI 代码修改追踪数据。
 
@@ -75,7 +57,7 @@ Qoder IDE 是一款基于 VS Code 架构的 AI 编程助手。本 Agent 从三�
 
 ---
 
-### 用户故事 4 — Qoder IDE 可用性检测与 Agent 发现（优先级：P2）
+### 用户故事 3 — Qoder IDE 可用性检测与 Agent 发现（优先级：P2）
 
 作为核心编排层，我需要能够检测 Qoder IDE 是否已安装，并获取需要监听的文件系统路径。
 
@@ -90,7 +72,6 @@ Qoder IDE 是一款基于 VS Code 架构的 AI 编程助手。本 Agent 从三�
 
 - `entries.json` 格式损坏（非法 JSON）时，跳过该目录继续处理
 - `entries.json` 缺少 `resource` 或 `entries` 字段时，跳过
-- SQLite 数据库被其他进程锁定时，记录警告并在下一周期重试
 - `ai_tracker` 中包含空行或畸形 JSON 时，跳过该行继续
 - `ai_tracker` 中包含非 `.jsonl` 文件时，忽略
 
@@ -101,19 +82,17 @@ Qoder IDE 是一款基于 VS Code 架构的 AI 编程助手。本 Agent 从三�
 ### 功能需求
 
 - **FR-001**: `QoderInput` 必须继承 `BaseIdeInput`，实现 `scanHistoryEntries()` 和 `buildEntry()` 方法
-- **FR-002**: `scanHistoryEntries()` 必须串行扫描三个数据源（fileHistory → chatRecords → aiTracker）
+- **FR-002**: `scanHistoryEntries()` 必须串行扫描两个数据源（fileHistory → aiTracker）
 - **FR-003**: 文件编辑历史扫描必须过滤非 AI 来源的记录，过滤关键词包括 `qoder`、`ai`、`agent`、`copilot`、`assistant`、`completion`
-- **FR-004**: 对话记录采集必须通过 SQLite 的 `rowid > lastRowId` 实现增量，每次最多 500 条
-- **FR-005**: AI 追踪日志采集必须通过 StateStore 的 byte offset 实现增量读取
-- **FR-006**: 所有数据源的归一化必须调用 `buildAgentActivityEntry()`，`agentType` 统一为 `ClientType.Qoder`
+- **FR-004**: AI 追踪日志采集必须通过 StateStore 的 byte offset 实现增量读取
+- **FR-005**: 所有数据源的归一化必须调用 `buildAgentActivityEntry()`，`agentType` 统一为 `ClientType.Qoder`
 - **FR-007**: 必须提供 `checkAvailability()` 静态方法检测 Agent 安装状态
 - **FR-008**: 必须提供 `getWatchPaths()` 静态方法返回需要监听的文件路径
 
 ### 关键实体
 
-- **QoderInput**: 继承 `BaseIdeInput` 的具体输入源，ID 为 `'qoder'`，管理三个独立数据源的扫描逻辑
+- **QoderInput**: 继承 `BaseIdeInput` 的具体输入源，ID 为 `'qoder'`，管理两个独立数据源的扫描逻辑
 - **fileHistory 扫描**: 遍历 `User/History/*/entries.json`，过滤 AI 来源
-- **chatRecords 扫描**: 查询 SQLite `chat_record JOIN chat_session`，基于 rowid 增量
 - **aiTracker 扫描**: 遍历 `ai_tracker/*.jsonl`，基于 byte offset 增量
 
 ---
@@ -121,15 +100,13 @@ Qoder IDE 是一款基于 VS Code 架构的 AI 编程助手。本 Agent 从三�
 ## 成功标准 *(必填)*
 
 - **SC-001**: Qoder IDE 数据目录存在时，系统能在 60 秒内完成首次数据采集
-- **SC-002**: 三个数据源的增量采集准确率均为 100%
-- **SC-003**: 对话记录的 `answer` 和 `question` 截取不超过 2000 字符
-- **SC-004**: 面对缺失的数据目录或损坏的数据文件，100% 不崩溃
+- **SC-002**: 两个数据源的增量采集准确率均为 100%
+- **SC-003**: 面对缺失的数据目录或损坏的数据文件，100% 不崩溃
 
 ---
 
 ## 假设
 
 - Qoder IDE 基于 VS Code 架构，`User/History/` 目录结构稳定
-- SQLite 数据库的 `chat_record` 和 `chat_session` 表 schema 在同一大版本内不变
 - `ai_tracker` JSONL 格式在同一大版本内保持稳定
 - Qoder IDE 的数据目录位于用户目录下的标准位置

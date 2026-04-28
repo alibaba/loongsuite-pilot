@@ -27,22 +27,6 @@ describe('serialiseLogEntry', () => {
     expect(out.filePath).toBe('/src/app.ts');
   });
 
-  it('flattens Git context into top-level fields', () => {
-    const out = serialiseLogEntry(makeEntry({
-      git: { repoId: 'org/repo', branchName: 'feat', commitHash: 'abc' },
-    }));
-    expect(out.repoId).toBe('org/repo');
-    expect(out.branchName).toBe('feat');
-    expect(out.commitHash).toBe('abc');
-  });
-
-  it('omits git fields when git is undefined', () => {
-    const out = serialiseLogEntry(makeEntry({ git: undefined }));
-    expect(out).not.toHaveProperty('repoId');
-    expect(out).not.toHaveProperty('branchName');
-    expect(out).not.toHaveProperty('commitHash');
-  });
-
   it('merges extra fields into top level', () => {
     const out = serialiseLogEntry(makeEntry({
       extra: { customKey: 'customVal' },

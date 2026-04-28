@@ -12,11 +12,6 @@ vi.mock('../../../src/utils/logger.js', () => ({
   }),
 }));
 
-vi.mock('../../../src/utils/git-resolver.js', () => ({
-  findGitRoot: vi.fn().mockResolvedValue(null),
-  collectRepoInfo: vi.fn(),
-}));
-
 class StubInput extends EventEmitter {
   readonly id: string;
   readonly agentType = ClientType.Qoder;

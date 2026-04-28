@@ -66,7 +66,8 @@ AGENT_DATA_COLLECTION_CONFIG=./config.json npm start
   },
   "listeners": {
     "qoder": { "enabled": true, "pollInterval": 60000 },
-    "openclaw": { "enabled": true, "pollInterval": 30000 }
+    "qoder-work": { "enabled": true, "pollInterval": 60000 },
+    "qoder-cli-hook": { "enabled": true, "pollInterval": 60000 }
   }
 }
 ```
@@ -103,7 +104,7 @@ cat ~/.ai-agent-collector/logs/input-state.json | python3 -m json.tool
 
 ## 新增 Agent
 
-参考 `src/inputs/openclaw/openclaw-input.ts` 实现：
+参考 `src/inputs/qoder-work/qoder-work-input.ts` 实现：
 
 1. 在 `src/types/client-type.ts` 添加 `ClientType` 枚举值
 2. 创建 `src/inputs/{agent}/{agent}-input.ts`，继承合适的基类

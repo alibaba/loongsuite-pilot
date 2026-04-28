@@ -259,8 +259,7 @@ sudo journalctl -u ai-agent-collector -f
     "qoder":          { "enabled": true, "pollInterval": 60000 },
     "qoder-work":     { "enabled": true, "pollInterval": 60000 },
     "qoder-cli-hook": { "enabled": true, "pollInterval": 60000 },
-    "cursor-hook":    { "enabled": true, "pollInterval": 60000 },
-    "openclaw":       { "enabled": true, "pollInterval": 30000 }
+    "cursor-hook":    { "enabled": true, "pollInterval": 60000 }
   }
 }
 ```
@@ -346,10 +345,9 @@ src/
 │   │   ├── base-cli-forwarder.ts        #     CLI 遥测日志转发
 │   │   └── base-session-input.ts    #     会话文件轮询
 │   ├── qoder/                           #   Qoder IDE (快照轮询)
-│   ├── qoder-work/                      #   Qoder Work (SQLite 轮询)
+│   ├── qoder-work/                      #   Qoder Work (Hook JSONL)
 │   ├── qoder-cli/                       #   Qoder CLI (Hook JSONL)
-│   ├── cursor-hook/                     #   Cursor Hook (Hook JSONL)
-│   └── openclaw/                        #   Openclaw — 新 Agent 示例 (会话文件轮询)
+│   └── cursor-hook/                     #   Cursor Hook (Hook JSONL)
 ├── core/                                # 核心编排层
 │   ├── orchestrator.ts                  #   中枢编排器 (串联所有子系统)
 │   ├── input-manager.ts             #   输入源生命周期 + Git 富化 + 分发
@@ -542,12 +540,6 @@ const sinceTs = snapshotStore.getSuggestedSinceTimestamp();
   },
   "qoder-work": {
     "lastRowId": 8921
-  },
-  "openclaw": {
-    "lastOffset": 4521,
-    "extra": {
-      "inode": 12345678
-    }
   }
 }
 ```
@@ -576,7 +568,7 @@ const sinceTs = snapshotStore.getSuggestedSinceTimestamp();
 | SQLite 增量轮询 | `BaseSqliteInput` | 增量查询本地 SQLite (rowid 游标) | Qoder Work |
 | Hook JSONL 日志 | `BaseHookInput` | 注入 Hook 脚本拦截事件，读 JSONL | Qoder CLI / Cursor Hook |
 | CLI 遥测日志转发 | `BaseCliForwarder` | 配置 Agent 遥测输出到文件，轮询转发 | (Gemini 模式) |
-| 会话文件轮询 | `BaseSessionInput` | 读取 JSONL/JSON 会话记录文件 | Openclaw |
+| 会话文件轮询 | `BaseSessionInput` | 读取 JSONL/JSON 会话记录文件 | — |
 
 ## 数据输出
 
@@ -592,7 +584,7 @@ const sinceTs = snapshotStore.getSuggestedSinceTimestamp();
 
 ### 新增一个 Agent
 
-以 Openclaw 为例，添加一个新的 AI Agent 采集只需 **3 步**：
+添加一个新的 AI Agent 采集只需 **3 步**：
 
 #### 场景 A：数据格式一致（使用现有基类）
 
@@ -764,8 +756,7 @@ entries.push(
     "qoder": "auto",
     "qoder-work": "on",
     "qoder-cli-hook": "off",
-    "cursor-hook": "auto",
-    "openclaw": "auto"
+    "cursor-hook": "auto"
   }
 }
 ```
@@ -816,8 +807,7 @@ specs/
 ├── 101-agent-qoder/          # Qoder IDE（已有）
 ├── 102-agent-qoder-work/     # Qoder Work（已有）
 ├── 103-agent-qoder-cli/      # Qoder CLI（已有）
-├── 104-agent-openclaw/       # Openclaw（已有）
-└── 105-agent-my-new/         # ← 新 Agent
+└── 1xx-agent-my-new/         # ← 新 Agent
     └── spec.md
 ```
 

@@ -95,7 +95,7 @@ All inputs emit ──▶ AgentActivityEntry[] ──▶ serialiseLogEntry() ─
 | extra | Record<string, unknown> | ❌ | 自定义扩展 (如 inode) |
 
 **状态键约定**:
-- 基本键: `{inputId}` (如 `'qoder'`, `'openclaw'`)
+- 基本键: `{inputId}` (如 `'qoder'`, `'qoder-work-hook'`)
 - 组合键: `{inputId}:{subResource}` (如 `'qoder-tracker:filename.jsonl'`)
 
 ### SnapshotEntry（快照条目）
@@ -183,7 +183,6 @@ idle ──▶ starting ──▶ running ──▶ stopping ──▶ idle
 | Qoder | Qoder IDE |
 | QoderWork | Qoder Work |
 | QoderCliHook | Qoder CLI (Hook) |
-| Openclaw | Openclaw |
 
 ### ActionType（枚举）
 

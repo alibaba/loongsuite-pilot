@@ -6,13 +6,6 @@ const actionTypeValues = Object.values(ActionType) as [string, ...string[]];
 
 const uuidV4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export const GitContextSchema = z.object({
-  repoId: z.string(),
-  branchName: z.string(),
-  commitHash: z.string(),
-  repoRoot: z.string().optional(),
-});
-
 export const AgentActivityEntrySchema = z.object({
   sessionId: z.string().min(0),
   timestamp: z.number().int().positive(),
@@ -23,7 +16,6 @@ export const AgentActivityEntrySchema = z.object({
   filePath: z.string(),
   content: z.string().optional(),
   inlineDiffMessage: z.string().optional(),
-  git: GitContextSchema.optional(),
   extra: z.record(z.unknown()).optional(),
 });
 

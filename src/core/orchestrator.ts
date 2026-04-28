@@ -20,7 +20,6 @@ import { MultiFlusher } from '../flushers/multi-flusher.js';
 import { QoderInput } from '../inputs/qoder/qoder-input.js';
 import { QoderWorkInput } from '../inputs/qoder-work/qoder-work-input.js';
 import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
-import { OpenclawInput } from '../inputs/openclaw/openclaw-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 
 const logger = createLogger('Orchestrator');
@@ -200,6 +199,21 @@ export class Orchestrator extends EventEmitter {
         }
       }
     }
+
+    const qoderWorkAvailable = await QoderWorkInput.checkAvailability();
+    if (qoderWorkAvailable) {
+      const defs = HookManager.buildQoderWorkHooks(this.dataDir);
+      for (const def of defs) {
+        const installed = await hookManager.isHookInstalled(def);
+        if (!installed) {
+          const ok = await hookManager.installHook(def);
+          if (ok) {
+            const event = def.hookJsonPath[def.hookJsonPath.length - 1];
+            logger.info('qoder-work hook registered', { event });
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -227,7 +241,7 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Qoder Work (SQLite polling) ---
+    // --- Qoder Work (Hook JSONL) ---
     const qoderWorkInput = new QoderWorkInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(qoderWorkInput);
     entries.push(
@@ -275,22 +289,6 @@ export class Orchestrator extends EventEmitter {
         pollIntervalMs: listenerCfg['cursor-hook']?.pollInterval,
       }),
     );
-
-    // --- Openclaw (Session file polling — NEW agent) ---
-    const openclawInput = new OpenclawInput({ stateStore: this.stateStore });
-    this.inputManager.registerInput(openclawInput);
-    entries.push(
-      this.inputManager.buildDetectionEntry(openclawInput, {
-        watchPaths: OpenclawInput.getWatchPaths(),
-        isAvailable: OpenclawInput.checkAvailability,
-        enabled: () => this.agentControlManager.resolveEnabled(
-          'openclaw',
-          listenerCfg.openclaw?.enabled ?? true,
-        ),
-        pollIntervalMs: listenerCfg.openclaw?.pollInterval,
-      }),
-    );
-
     return entries;
   }
 }

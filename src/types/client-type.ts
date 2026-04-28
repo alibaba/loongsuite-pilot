@@ -31,8 +31,6 @@ export enum ClientType {
   AoneCopilotHook = 'aone-copilot-hook',
   OpencodePlugin = 'opencode-plugin',
 
-  // New agents — add here
-  Openclaw = 'openclaw',
 }
 
 export enum ToolType {

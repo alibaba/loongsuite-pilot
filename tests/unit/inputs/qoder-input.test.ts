@@ -91,7 +91,7 @@ describe('QoderInput', () => {
     });
   });
 
-  describe('ai_tracker scanning (source 3)', () => {
+  describe('ai_tracker scanning (source 2)', () => {
     it('should read ai_tracker JSONL files', async () => {
       const trackerDir = path.join(tmpDir, 'SharedClientCache', 'cache', 'ai_tracker');
       await fs.mkdir(trackerDir, { recursive: true });
@@ -159,29 +159,6 @@ describe('QoderInput', () => {
       await input.start();
       // Should just silently skip
       await input.stop();
-    });
-  });
-
-  describe('chat record scanning (source 2)', () => {
-    it('should handle missing database gracefully', async () => {
-      const allEntries: AgentActivityEntry[] = [];
-      input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
-
-      await input.start();
-      await input.stop();
-    });
-
-    it('should handle corrupt database gracefully', async () => {
-      const dbDir = path.join(tmpDir, 'SharedClientCache', 'cache', 'db');
-      await fs.mkdir(dbDir, { recursive: true });
-      await fs.writeFile(path.join(dbDir, 'local.db'), 'not a sqlite file');
-
-      const allEntries: AgentActivityEntry[] = [];
-      input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
-
-      await input.start();
-      await input.stop();
-      // Should not crash, just skip
     });
   });
 

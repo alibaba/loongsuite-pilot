@@ -21,16 +21,11 @@ describe('AgentActivityEntry contract', () => {
     const entry = buildAgentActivityEntry({
       sessionId: 'sess-2',
       userId: 'user-2',
-      agentType: ClientType.Openclaw,
+      agentType: ClientType.QoderWork,
       actionType: ActionType.Create,
       filePath: '/tmp/new-file.ts',
       content: 'const x = 1;',
       inlineDiffMessage: '+const x = 1;',
-      git: {
-        repoId: 'https://github.com/test/repo',
-        branchName: 'main',
-        commitHash: 'abc123',
-      },
       extra: { toolName: 'write_file', model: 'claude-3' },
     });
 

@@ -110,7 +110,6 @@ function buildListenersConfig(
     'qoder-work':    { enabled: true, pollInterval: 60_000 },
     'qoder-cli-hook':{ enabled: true, pollInterval: 60_000 },
     'cursor-hook':   { enabled: true, pollInterval: 60_000 },
-    openclaw:        { enabled: true, pollInterval: 30_000 },
   };
 
   const result = { ...defaults };

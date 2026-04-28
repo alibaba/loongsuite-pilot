@@ -1,0 +1,7 @@
+---
+description: Run tsc after every code change to compile and update dist/
+globs: "**/*.ts"
+alwaysApply: false
+---
+
+After modifying any TypeScript source or test file, always run `npx tsc` (without --noEmit) to compile the project and update dist/. Fix any compilation errors before proceeding.

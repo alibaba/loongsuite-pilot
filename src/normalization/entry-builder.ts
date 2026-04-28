@@ -2,7 +2,6 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   type AgentActivityEntry,
   type CodeGenerationEvent,
-  type GitContext,
   type SerializedLogEntry,
   ClientType,
   ActionType,
@@ -16,7 +15,6 @@ export function buildAgentActivityEntry(opts: {
   filePath: string;
   content?: string;
   inlineDiffMessage?: string;
-  git?: GitContext;
   extra?: Record<string, unknown>;
   timestamp?: number;
 }): AgentActivityEntry {
@@ -30,7 +28,6 @@ export function buildAgentActivityEntry(opts: {
     filePath: opts.filePath,
     content: opts.content,
     inlineDiffMessage: opts.inlineDiffMessage,
-    git: opts.git,
     extra: opts.extra,
   };
 }
@@ -39,7 +36,6 @@ export function buildFromCodeGenerationEvent(
   event: CodeGenerationEvent,
   userId: string,
   sessionId: string,
-  git?: GitContext,
 ): AgentActivityEntry {
   return buildAgentActivityEntry({
     sessionId,
@@ -49,7 +45,6 @@ export function buildFromCodeGenerationEvent(
     filePath: event.filePath,
     content: event.content,
     inlineDiffMessage: event.diff,
-    git,
     timestamp: event.sourceTimestamp,
     extra: event.rawData,
   });
@@ -73,12 +68,6 @@ export function serialiseLogEntry(entry: AgentActivityEntry): SerializedLogEntry
 
   if (entry.content !== undefined) out.content = entry.content;
   if (entry.inlineDiffMessage !== undefined) out.inlineDiffMessage = entry.inlineDiffMessage;
-
-  if (entry.git) {
-    out.repoId = entry.git.repoId;
-    out.branchName = entry.git.branchName;
-    out.commitHash = entry.git.commitHash;
-  }
 
   if (entry.extra) {
     for (const [key, value] of Object.entries(entry.extra)) {

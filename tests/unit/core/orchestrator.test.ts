@@ -110,24 +110,11 @@ vi.mock('../../../src/inputs/cursor-hook/cursor-hook-input.js', () => ({
   })),
 }));
 
-vi.mock('../../../src/inputs/openclaw/openclaw-input.js', () => ({
-  OpenclawInput: vi.fn().mockImplementation(() => ({
-    id: 'openclaw',
-    agentType: 'openclaw',
-    collectionMethod: 'session-file-polling',
-    on: vi.fn(),
-    start: vi.fn().mockResolvedValue(undefined),
-    stop: vi.fn().mockResolvedValue(undefined),
-    running: false,
-  })),
-}));
-
 // Static methods need to be mocked on the mock class itself
 import { QoderInput } from '../../../src/inputs/qoder/qoder-input.js';
 import { QoderWorkInput } from '../../../src/inputs/qoder-work/qoder-work-input.js';
 import { QoderCliInput } from '../../../src/inputs/qoder-cli/qoder-cli-input.js';
 import { CursorHookInput } from '../../../src/inputs/cursor-hook/cursor-hook-input.js';
-import { OpenclawInput } from '../../../src/inputs/openclaw/openclaw-input.js';
 
 (QoderInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/qoder']);
 (QoderInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
@@ -137,8 +124,7 @@ import { OpenclawInput } from '../../../src/inputs/openclaw/openclaw-input.js';
 (QoderCliInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
 (CursorHookInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/cursor-hook']);
 (CursorHookInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
-(OpenclawInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/openclaw']);
-(OpenclawInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
+
 
 import { Orchestrator } from '../../../src/core/orchestrator.js';
 
@@ -152,7 +138,6 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       'qoder-work': { enabled: true, pollInterval: 60000 },
       'qoder-cli-hook': { enabled: true, pollInterval: 60000 },
       'cursor-hook': { enabled: true, pollInterval: 60000 },
-      openclaw: { enabled: true, pollInterval: 30000 },
     },
     flushers: {
       jsonl: {

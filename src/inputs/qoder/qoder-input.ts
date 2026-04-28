@@ -1,11 +1,10 @@
-import Database from 'better-sqlite3';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ClientType, ActionType } from '../../types/index.js';
 import type { AgentActivityEntry, CodeGenerationEvent } from '../../types/index.js';
 import { BaseIdeInput, type IdeInputOptions } from '../base/base-ide-input.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
-import { resolveHome, fileExists } from '../../utils/fs-utils.js';
+import { resolveHome } from '../../utils/fs-utils.js';
 
 const DEFAULT_QODER_ROOT_MAC = '~/Library/Application Support/Qoder';
 const DEFAULT_QODER_ROOT_LINUX = '~/.config/Qoder';
@@ -20,16 +19,14 @@ function resolveQoderRoot(): string {
 }
 
 /**
- * Qoder IDE — collects from three data sources:
+ * Qoder IDE — collects from two data sources:
  *
  *   1. User/History — VSCode-style file edit history snapshots
- *   2. SharedClientCache/cache/db/local.db — SQLite chat_record + chat_session
- *   3. SharedClientCache/cache/ai_tracker/*.jsonl — agent activity tracking
+ *   2. SharedClientCache/cache/ai_tracker/*.jsonl — agent activity tracking
  */
 export class QoderInput extends BaseIdeInput {
   readonly id = 'qoder';
   readonly agentType = ClientType.Qoder;
-  private lastChatRowId = 0;
 
   constructor(opts?: Partial<IdeInputOptions> & { stateStore: IdeInputOptions['stateStore'] }) {
     const dataRoot = opts?.dataRoot ?? resolveQoderRoot();
@@ -42,12 +39,6 @@ export class QoderInput extends BaseIdeInput {
         ?? (Number(process.env.QODER_ANALYTICS_POLL_INTERVAL) || 60_000),
       snapshotRetentionMs: opts?.snapshotRetentionMs,
     });
-  }
-
-  protected override async onStart(): Promise<void> {
-    await super.onStart();
-    const saved = this.stateStore.get('qoder-chat-rowid');
-    this.lastChatRowId = saved.lastRowId ?? 0;
   }
 
   static getWatchPaths(): string[] {
@@ -71,10 +62,7 @@ export class QoderInput extends BaseIdeInput {
     // Source 1: VSCode-style file edit history
     await this.scanFileHistory(events, sinceTs);
 
-    // Source 2: SQLite chat_record + chat_session
-    await this.scanChatRecords(events);
-
-    // Source 3: ai_tracker JSONL (agent activity)
+    // Source 2: ai_tracker JSONL (agent activity)
     await this.scanAiTracker(events, sinceTs);
 
     return events;
@@ -122,74 +110,6 @@ export class QoderInput extends BaseIdeInput {
           });
         }
       } catch { /* skip */ }
-    }
-  }
-
-  private async scanChatRecords(events: CodeGenerationEvent[]): Promise<void> {
-    const dbPath = path.join(this.dataRoot, 'SharedClientCache', 'cache', 'db', 'local.db');
-    if (!(await fileExists(dbPath))) return;
-
-    let db: Database.Database | null = null;
-    try {
-      db = new Database(dbPath, { readonly: true, fileMustExist: true });
-
-      const rows = db.prepare(`
-        SELECT
-          r.rowid,
-          r.request_id,
-          r.session_id,
-          r.chat_task,
-          r.question,
-          r.answer,
-          r.gmt_create,
-          r.mode,
-          r.session_type,
-          r.summary,
-          r.intention_type,
-          s.session_title,
-          s.project_name
-        FROM chat_record r
-        LEFT JOIN chat_session s ON r.session_id = s.session_id
-        WHERE r.rowid > ?
-        ORDER BY r.rowid ASC
-        LIMIT 500
-      `).all(this.lastChatRowId) as Array<Record<string, unknown>>;
-
-      for (const row of rows) {
-        const rowid = row.rowid as number;
-        if (rowid > this.lastChatRowId) this.lastChatRowId = rowid;
-
-        const ts = row.gmt_create as number ?? Date.now();
-        const question = (row.question as string) ?? '';
-        const answer = (row.answer as string) ?? '';
-
-        events.push({
-          agentType: ClientType.Qoder,
-          filePath: (row.project_name as string) ?? '',
-          actionType: ActionType.Other,
-          sourceTimestamp: ts,
-          content: answer.slice(0, 2000),
-          rawData: {
-            toolName: 'qoder-chat',
-            requestId: row.request_id,
-            sessionId: row.session_id,
-            sessionTitle: row.session_title,
-            chatTask: row.chat_task,
-            mode: row.mode,
-            sessionType: row.session_type,
-            question: question.slice(0, 2000),
-            summary: row.summary,
-            intentionType: row.intention_type,
-            projectName: row.project_name,
-          },
-        });
-      }
-
-      this.stateStore.update('qoder-chat-rowid', { lastRowId: this.lastChatRowId });
-    } catch (err) {
-      this.logger.warn('failed to scan chat_record', { error: String(err) });
-    } finally {
-      db?.close();
     }
   }
 

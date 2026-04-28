@@ -3,7 +3,6 @@ import type { AgentActivityEntry, AgentDetectionEntry } from '../types/index.js'
 import type { BaseInput } from '../inputs/base/base-input.js';
 import type { BaseFlusher } from '../flushers/base-flusher.js';
 import { createLogger } from '../utils/logger.js';
-import { collectRepoInfo, findGitRoot } from '../utils/git-resolver.js';
 
 const logger = createLogger('InputManager');
 
@@ -13,7 +12,7 @@ const logger = createLogger('InputManager');
  * Responsibilities:
  *   1. Register / start / stop inputs
  *   2. Listen for 'entries' events from each input
- *   3. Enrich entries with git context and userId
+ *   3. Enrich entries with userId
  *   4. Forward to flusher(s) for output
  */
 export class InputManager extends EventEmitter {
@@ -101,19 +100,6 @@ export class InputManager extends EventEmitter {
     if (entries.length === 0) return;
 
     for (const entry of entries) {
-      // Enrich with git context if missing
-      if (!entry.git && entry.filePath) {
-        try {
-          const gitRoot = await findGitRoot(entry.filePath);
-          if (gitRoot) {
-            entry.git = await collectRepoInfo(gitRoot);
-          }
-        } catch {
-          // git enrichment is best-effort
-        }
-      }
-
-      // Enrich with userId
       if (!entry.userId && this.userId) {
         entry.userId = this.userId;
       }

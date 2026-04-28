@@ -11,13 +11,6 @@ export enum ActionType {
   Other = 'other',
 }
 
-export interface GitContext {
-  repoId: string;
-  branchName: string;
-  commitHash: string;
-  repoRoot?: string;
-}
-
 /**
  * Unified agent activity log entry — the normalized format shared by all inputs.
  * Every input must produce events conforming to this shape.
@@ -32,7 +25,6 @@ export interface AgentActivityEntry {
   filePath: string;
   content?: string;
   inlineDiffMessage?: string;
-  git?: GitContext;
   extra?: Record<string, unknown>;
 }
 

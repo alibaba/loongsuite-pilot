@@ -10,7 +10,7 @@
 | SQLite 增量轮询 | BaseSqliteInput | SQLite 数据库 | StateStore (rowid) | (可用, 未绑定 Agent) |
 | Hook JSONL 日志 | BaseHookInput | 每日轮转 JSONL 文件 | StateStore (byte offset) | Qoder CLI |
 | CLI 遥测转发 | BaseCliForwarder | 原始遥测文件 → 每日 JSONL | StateStore (byte offset) | (可用, 未绑定 Agent) |
-| 会话文件轮询 | BaseSessionInput | JSONL 会话文件 | StateStore (byte offset + inode) | Qoder Work, Openclaw |
+| 会话文件轮询 | BaseSessionInput | JSONL 会话文件 | StateStore (byte offset + inode) | — |
 
 ## 数据流 (统一路径)
 

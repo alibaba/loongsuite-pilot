@@ -1,282 +1,103 @@
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import { ClientType, ActionType } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
-import {
-  BaseSessionInput,
-  type SessionInputOptions,
-} from '../base/base-session-input.js';
+import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 
-const QODER_PROJECTS_DIR = '~/.qoder/projects';
-const QODER_EXPERTS_DIR = '~/.qoder/cache/experts';
-const QODERWORK_PROJECTS_DIR = '~/Library/Application Support/QoderWork/cli/projects';
-
 /**
- * Qoder Work — session transcript JSONL polling.
+ * Qoder Work — Hook JSONL log input.
  *
- * Data sources:
- *   ~/Library/Application Support/QoderWork/cli/projects/{slug}/{session}.jsonl (QoderWork app)
- *   ~/.qoder/projects/{slug}/transcript/{session}.jsonl  (Qoder CLI transcripts)
+ * Hook scripts intercept PreToolUse / PostToolUse / failure events
+ * and write JSONL to ~/.ai-agent-collector/logs/qoder-work/history/.
  *
- * Incrementally reads JSONL transcript lines, extracting all tool calls as events.
+ * Reuses the same hook script as Qoder CLI (aac-qoder-hook.sh)
+ * with "qoder-work" as the agent ID parameter.
+ * Hook config lives at ~/.qoderwork/settings.json.
  */
-export class QoderWorkInput extends BaseSessionInput {
-  readonly id = 'qoder-work';
+export class QoderWorkInput extends BaseHookInput {
+  readonly id = 'qoder-work-hook';
   readonly agentType = ClientType.QoderWork;
 
-  constructor(opts?: Partial<SessionInputOptions> & { stateStore: SessionInputOptions['stateStore'] }) {
+  constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
       stateStore: opts!.stateStore,
-      sessionDir: resolveHome(QODERWORK_PROJECTS_DIR),
-      filePattern: '*.jsonl',
+      logDir: opts?.logDir ?? resolveHome('~/.ai-agent-collector/logs/qoder-work/history'),
+      logPrefix: opts?.logPrefix ?? 'qoder-work',
       pollIntervalMs: opts?.pollIntervalMs ?? 60_000,
     });
   }
 
   static async checkAvailability(): Promise<boolean> {
-    return (
-      (await directoryExists(resolveHome(QODERWORK_PROJECTS_DIR))) ||
-      (await directoryExists(resolveHome(QODER_PROJECTS_DIR))) ||
-      (await directoryExists(resolveHome(QODER_EXPERTS_DIR)))
-    );
+    return directoryExists(resolveHome('~/.qoderwork'));
   }
 
   static getWatchPaths(): string[] {
-    return [
-      resolveHome(QODERWORK_PROJECTS_DIR),
-      resolveHome(QODER_PROJECTS_DIR),
-      resolveHome(QODER_EXPERTS_DIR),
-    ];
+    return [resolveHome('~/.qoderwork')];
   }
 
-  protected async discoverSessionFiles(): Promise<string[]> {
-    const files: string[] = [];
-
-    // QoderWork app: ~/Library/Application Support/QoderWork/cli/projects/{slug}/{session}.jsonl
-    await this.scanQoderWorkProjects(files);
-
-    // Qoder CLI: ~/.qoder/projects/{slug}/transcript/{session}.jsonl
-    await this.scanQoderCliProjects(files);
-
-    return files;
-  }
-
-  private async scanQoderWorkProjects(files: string[]): Promise<void> {
-    const baseDir = resolveHome(QODERWORK_PROJECTS_DIR);
-    try {
-      const slugs = await fs.readdir(baseDir);
-      for (const slug of slugs) {
-        const slugDir = path.join(baseDir, slug);
-        try {
-          const entries = await fs.readdir(slugDir);
-          for (const entry of entries) {
-            if (entry.endsWith('.jsonl')) {
-              files.push(path.join(slugDir, entry));
-            }
-          }
-        } catch { /* skip */ }
-      }
-    } catch { /* dir may not exist */ }
-  }
-
-  private async scanQoderCliProjects(files: string[]): Promise<void> {
-    const baseDir = resolveHome(QODER_PROJECTS_DIR);
-    try {
-      const slugs = await fs.readdir(baseDir);
-      for (const slug of slugs) {
-        const transcriptDir = path.join(baseDir, slug, 'transcript');
-        try {
-          const entries = await fs.readdir(transcriptDir);
-          for (const entry of entries) {
-            if (entry.endsWith('.jsonl')) {
-              files.push(path.join(transcriptDir, entry));
-            }
-          }
-        } catch { /* transcript dir may not exist */ }
-      }
-    } catch { /* dir may not exist */ }
-  }
-
-  protected async processSessionLine(
+  protected async transformRecord(
     record: Record<string, unknown>,
-    filePath: string,
   ): Promise<AgentActivityEntry | null> {
-    const type = record.type as string | undefined;
-    if (!type) return null;
+    const inner = (typeof record.data === 'object' && record.data !== null
+      ? record.data
+      : record) as Record<string, unknown>;
 
-    const sessionId = (record.sessionId as string) ?? '';
-    const timestamp = record.timestamp as string | undefined;
-    const cwd = record.cwd as string | undefined;
-    const ts = timestamp ? new Date(timestamp).getTime() : undefined;
+    const eventType = (inner.hook_event_name as string)
+      ?? (record.hookEvent as string)
+      ?? (inner.event_type as string)
+      ?? '';
+    if (!eventType.includes('PostToolUse')) return null;
 
-    const message = record.message as Record<string, unknown> | undefined;
-    const data = record.data as Record<string, unknown> | undefined;
+    const toolInput = (inner.tool_input ?? inner.toolInput) as Record<string, unknown> | undefined;
+    const toolName = (inner.tool_name as string)
+      ?? (inner.toolName as string)
+      ?? 'unknown';
+    const normalized = (inner.aac_tool_name_normalized as string) ?? '';
+    const filePath = (toolInput?.file_path as string)
+      ?? (toolInput?.path as string)
+      ?? (toolInput?.filepath as string)
+      ?? '';
 
-    if (type === 'assistant' || type === 'user') {
-      if (!message) return null;
-      const content = message.content;
-
-      if (typeof content === 'string') {
-        return buildAgentActivityEntry({
-          sessionId,
-          userId: '',
-          agentType: ClientType.QoderWork,
-          actionType: ActionType.Other,
-          filePath: cwd ?? '',
-          content: content.slice(0, 2000),
-          timestamp: ts,
-          extra: { sourceFile: filePath, messageType: type },
-        });
+    let actionType = ActionType.Edit;
+    if (filePath) {
+      const preFileExists = inner.aac_pre_file_exists as boolean | undefined;
+      if (normalized === 'Create' || toolName === 'create_file') {
+        actionType = preFileExists === false ? ActionType.Create : ActionType.Edit;
+      } else if (normalized === 'Write' || toolName === 'write_to_file') {
+        actionType = preFileExists === false ? ActionType.Create : ActionType.Edit;
       }
-
-      if (Array.isArray(content)) {
-        for (const block of content) {
-          if (typeof block !== 'object' || !block) continue;
-          const b = block as Record<string, unknown>;
-
-          if (b.type === 'tool_use') {
-            const toolName = (b.name as string) ?? 'unknown';
-            const input = (b.input as Record<string, unknown>) ?? {};
-            const { actionType, targetFilePath, codeContent } =
-              this.classifyToolCall(toolName, input, cwd);
-
-            return buildAgentActivityEntry({
-              sessionId,
-              userId: '',
-              agentType: ClientType.QoderWork,
-              actionType,
-              filePath: targetFilePath ?? cwd ?? '',
-              content: codeContent,
-              timestamp: ts,
-              extra: { sourceFile: filePath, toolUseId: b.id as string },
-            });
-          }
-
-          if (b.type === 'tool_result') {
-            return buildAgentActivityEntry({
-              sessionId,
-              userId: '',
-              agentType: ClientType.QoderWork,
-              actionType: ActionType.Other,
-              filePath: cwd ?? '',
-              content: typeof b.content === 'string'
-                ? b.content.slice(0, 2000)
-                : JSON.stringify(b.content).slice(0, 2000),
-              timestamp: ts,
-              extra: { sourceFile: filePath, toolUseId: b.tool_use_id as string },
-            });
-          }
-
-          if (b.type === 'text') {
-            return buildAgentActivityEntry({
-              sessionId,
-              userId: '',
-              agentType: ClientType.QoderWork,
-              actionType: ActionType.Other,
-              filePath: cwd ?? '',
-              content: ((b.text as string) ?? '').slice(0, 2000),
-              timestamp: ts,
-              extra: { sourceFile: filePath, messageType: type },
-            });
-          }
-        }
-      }
-
-      return null;
+    } else {
+      const lowerTool = toolName.toLowerCase();
+      if (lowerTool.includes('search')) actionType = ActionType.Search;
+      else if (lowerTool.includes('browse') || lowerTool.includes('fetch')) actionType = ActionType.Browse;
+      else if (lowerTool.includes('bash') || lowerTool.includes('shell') || lowerTool.includes('terminal')) actionType = ActionType.Execute;
+      else if (lowerTool.includes('read')) actionType = ActionType.Read;
+      else actionType = ActionType.Other;
     }
 
-    if (type === 'session_meta') {
-      return buildAgentActivityEntry({
-        sessionId,
-        userId: '',
-        agentType: ClientType.QoderWork,
-        actionType: ActionType.Other,
-        filePath: cwd ?? '',
-        content: data ? JSON.stringify(data).slice(0, 2000) : undefined,
-        timestamp: ts,
-        extra: { sourceFile: filePath, messageType: type },
-      });
-    }
+    const content = (toolInput?.content as string)
+      ?? (toolInput?.new_string as string)
+      ?? '';
+    const diff = (toolInput?.diff as string)
+      ?? (inner.tool_response as string)
+      ?? undefined;
 
-    if (type === 'progress') {
-      return buildAgentActivityEntry({
-        sessionId,
-        userId: '',
-        agentType: ClientType.QoderWork,
-        actionType: ActionType.Other,
-        filePath: cwd ?? '',
-        content: data ? JSON.stringify(data).slice(0, 2000) : undefined,
-        timestamp: ts,
-        extra: { sourceFile: filePath, messageType: type },
-      });
-    }
-
-    return null;
-  }
-
-  private classifyToolCall(
-    toolName: string,
-    input: Record<string, unknown>,
-    cwd?: string,
-  ): { actionType: ActionType; targetFilePath?: string; codeContent?: string } {
-    switch (toolName) {
-      case 'create_file':
-      case 'Write':
-        return {
-          actionType: ActionType.Create,
-          targetFilePath: (input.file_path ?? input.path) as string,
-          codeContent: input.content as string,
-        };
-      case 'search_replace':
-      case 'Edit':
-        return {
-          actionType: ActionType.Edit,
-          targetFilePath: (input.file_path ?? input.path) as string,
-          codeContent: (input.new_string ?? input.new_str) as string,
-        };
-      case 'delete_file':
-        return {
-          actionType: ActionType.Delete,
-          targetFilePath: (input.file_path ?? input.path) as string,
-        };
-      case 'run_in_terminal':
-      case 'Bash':
-        return {
-          actionType: ActionType.Execute,
-          targetFilePath: cwd,
-          codeContent: input.command as string,
-        };
-      case 'read_file':
-      case 'Read':
-        return {
-          actionType: ActionType.Read,
-          targetFilePath: (input.file_path ?? input.path) as string,
-        };
-      case 'search_file':
-      case 'Glob':
-      case 'grep_code':
-      case 'Grep':
-      case 'search_codebase':
-        return {
-          actionType: ActionType.Search,
-          targetFilePath: (input.path ?? input.directory) as string,
-          codeContent: (input.pattern ?? input.query ?? input.regex) as string,
-        };
-      case 'fetch_content':
-      case 'WebFetch':
-      case 'search_web':
-      case 'WebSearch':
-        return {
-          actionType: ActionType.Browse,
-          codeContent: (input.url ?? input.query ?? input.search_term) as string,
-        };
-      default:
-        return {
-          actionType: ActionType.Other,
-          codeContent: JSON.stringify(input).slice(0, 500),
-        };
-    }
+    return buildAgentActivityEntry({
+      sessionId: (inner.session_id as string) ?? '',
+      userId: (inner.user_id as string) ?? '',
+      agentType: ClientType.QoderWork,
+      actionType,
+      filePath: filePath || `[${toolName}]`,
+      content,
+      inlineDiffMessage: diff,
+      timestamp: (inner.timestamp as number) ?? Date.now(),
+      extra: {
+        eventType,
+        toolName,
+        normalizedToolName: normalized,
+        conversationId: inner.conversation_id,
+        callId: inner.call_id,
+      },
+    });
   }
 }

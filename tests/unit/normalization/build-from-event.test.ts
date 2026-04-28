@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { buildFromCodeGenerationEvent } from '../../../src/normalization/entry-builder.js';
 import { ClientType, ActionType } from '../../../src/types/index.js';
-import type { CodeGenerationEvent, GitContext } from '../../../src/types/index.js';
+import type { CodeGenerationEvent } from '../../../src/types/index.js';
 
 vi.mock('uuid', () => ({ v4: vi.fn().mockReturnValue('mock-uuid') }));
 
@@ -93,19 +93,6 @@ describe('buildFromCodeGenerationEvent', () => {
     };
     const entry = buildFromCodeGenerationEvent(event, 'u1', 's1');
     expect(entry.timestamp).toBe(1234567890);
-  });
-
-  it('passes through git context', () => {
-    const git: GitContext = { repoId: 'r', branchName: 'b', commitHash: 'c' };
-    const event: CodeGenerationEvent = {
-      agentType: ClientType.Qoder,
-      filePath: '/a.ts',
-      actionType: ActionType.Edit,
-      sourceTimestamp: 1700000000000,
-      rawData: {},
-    };
-    const entry = buildFromCodeGenerationEvent(event, 'u1', 's1', git);
-    expect(entry.git).toEqual(git);
   });
 
   it('sets userId and sessionId from arguments', () => {

@@ -166,7 +166,7 @@ export class HookManager {
    */
   static buildQoderCliHooks(aiAgentCollectorDir?: string): HookDefinition[] {
     const baseDir = aiAgentCollectorDir ?? resolveHome('~/.ai-agent-collector');
-    const command = `${baseDir}/hooks/aac-qoder-hook.sh`;
+    const command = `${baseDir}/hooks/aac-qoder-hook.sh qoder-cli`;
     const settingsPath = resolveHome('~/.qoder/settings.json');
 
     return [
@@ -180,6 +180,35 @@ export class HookManager {
       },
       {
         agentId: 'qoder-cli',
+        settingsPath,
+        hookJsonPath: ['hooks', 'PostToolUse'],
+        hookCommand: command,
+        matcher: '*',
+        useNestedFormat: true,
+      },
+    ];
+  }
+
+  /**
+   * Build hook definitions for QoderWork (both PreToolUse and PostToolUse).
+   * Reuses the same hook script as Qoder CLI, passing "qoder-work" as agent ID.
+   */
+  static buildQoderWorkHooks(aiAgentCollectorDir?: string): HookDefinition[] {
+    const baseDir = aiAgentCollectorDir ?? resolveHome('~/.ai-agent-collector');
+    const command = `${baseDir}/hooks/aac-qoder-hook.sh qoder-work`;
+    const settingsPath = resolveHome('~/.qoderwork/settings.json');
+
+    return [
+      {
+        agentId: 'qoder-work',
+        settingsPath,
+        hookJsonPath: ['hooks', 'PreToolUse'],
+        hookCommand: command,
+        matcher: '*',
+        useNestedFormat: true,
+      },
+      {
+        agentId: 'qoder-work',
         settingsPath,
         hookJsonPath: ['hooks', 'PostToolUse'],
         hookCommand: command,

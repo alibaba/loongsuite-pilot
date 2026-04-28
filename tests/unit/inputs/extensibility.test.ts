@@ -11,7 +11,7 @@ import { AgentActivityEntrySchema } from '../../contract/agent-activity-schema.j
 
 class MockSessionInput extends BaseSessionInput {
   readonly id = 'mock-session-agent';
-  readonly agentType = ClientType.Openclaw;
+  readonly agentType = ClientType.Qoder;
 
   private readonly mockDir: string;
 
@@ -83,7 +83,7 @@ describe('US2: Extensibility - MockSessionInput', () => {
     await input.stop();
 
     expect(allEntries).toHaveLength(1);
-    expect(allEntries[0]!.agentType).toBe(ClientType.Openclaw);
+    expect(allEntries[0]!.agentType).toBe(ClientType.Qoder);
     expect(allEntries[0]!.filePath).toBe('/proj/ext.ts');
   });
 

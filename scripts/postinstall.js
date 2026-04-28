@@ -60,10 +60,8 @@ function main() {
   // Create target directory
   ensureDir(HOOKS_TARGET_DIR);
 
-  // Copy all hook scripts / processors
-  const hookFiles = fs.readdirSync(HOOKS_SOURCE_DIR).filter(
-    f => f.endsWith('.sh') || f.endsWith('.ps1') || f.endsWith('.mjs'),
-  );
+  // Copy all hook scripts
+  const hookFiles = fs.readdirSync(HOOKS_SOURCE_DIR).filter(f => f.endsWith('.sh') || f.endsWith('.ps1') || f.endsWith('.py')) || f.endsWith('.mjs');
   
   if (hookFiles.length === 0) {
     console.log('[ai-agent-collector] No hook scripts to install.');

@@ -85,16 +85,6 @@ describe('buildAgentActivityEntry', () => {
     expect(entry.content).toBe('hello world');
   });
 
-  it('carries optional git context', () => {
-    const git = { repoId: 'org/repo', branchName: 'main', commitHash: 'abc123' };
-    const entry = buildAgentActivityEntry({
-      sessionId: 's', userId: 'u',
-      agentType: ClientType.Qoder, actionType: ActionType.Edit,
-      filePath: '/a.ts', git,
-    });
-    expect(entry.git).toEqual(git);
-  });
-
   it('carries optional extra record', () => {
     const extra = { foo: 'bar', num: 42 };
     const entry = buildAgentActivityEntry({
@@ -113,7 +103,6 @@ describe('buildAgentActivityEntry', () => {
     });
     expect(entry.content).toBeUndefined();
     expect(entry.inlineDiffMessage).toBeUndefined();
-    expect(entry.git).toBeUndefined();
     expect(entry.extra).toBeUndefined();
   });
 });
