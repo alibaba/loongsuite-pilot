@@ -82,7 +82,10 @@ if [[ "$FIRST_CHAR" != "{" ]] || [[ "$LAST_CHAR" != "}" ]]; then
 fi
 
 # Use Python for JSON processing (more robust)
-python3 - "$HISTORY_DIR" "$PRE_STATE_DIR" "$DEDUP_DIR" <<'PYTHON_SCRIPT'
+# Write Python script to a temp file, then pipe payload via stdin.
+AAC_PY_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/aac-hook.XXXXXX.py")
+trap 'rm -f "$AAC_PY_SCRIPT"' EXIT
+cat > "$AAC_PY_SCRIPT" <<'PYTHON_SCRIPT'
 import sys
 import os
 import json
@@ -149,7 +152,7 @@ def get_file_sha1(file_path):
 TRACKED_FILE_TOOLS = {'Create', 'Write', 'Edit', 'Delete', 'Read'}
 SHELL_TOOLS = {'Bash', 'Shell', 'Terminal', 'Run'}
 
-raw = sys.stdin.read() if not sys.stdin.isatty() else ''
+raw = sys.stdin.read()
 if not raw.strip():
     sys.exit(0)
 
@@ -266,5 +269,7 @@ with open(log_file, 'a', encoding='utf-8') as f:
     f.write(json.dumps(record, ensure_ascii=False) + '\n')
 
 PYTHON_SCRIPT
+
+printf '%s' "$TRIMMED" | python3 "$AAC_PY_SCRIPT" "$HISTORY_DIR" "$PRE_STATE_DIR" "$DEDUP_DIR"
 
 exit 0

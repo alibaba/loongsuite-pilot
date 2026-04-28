@@ -37,19 +37,32 @@ export class QoderCliInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    const eventType = record.event_type as string | undefined;
-    if (!eventType || !eventType.includes('PostToolUse')) return null;
+    const inner = (typeof record.data === 'object' && record.data !== null
+      ? record.data
+      : record) as Record<string, unknown>;
 
-    const toolInput = record.tool_input as Record<string, unknown> | undefined;
-    const toolName = (record.tool_name as string) ?? 'unknown';
+    const eventType = (inner.hook_event_name as string)
+      ?? (record.hookEvent as string)
+      ?? (inner.event_type as string)
+      ?? '';
+    if (!eventType.includes('PostToolUse')) return null;
+
+    const toolInput = (inner.tool_input ?? inner.toolInput) as Record<string, unknown> | undefined;
+    const toolName = (inner.tool_name as string)
+      ?? (inner.toolName as string)
+      ?? 'unknown';
     const filePath = (toolInput?.file_path as string)
       ?? (toolInput?.path as string)
+      ?? (toolInput?.filepath as string)
       ?? '';
     if (!filePath) return null;
 
-    const preFileExists = record.aac_pre_file_exists as boolean | undefined;
+    const preFileExists = inner.aac_pre_file_exists as boolean | undefined;
     let actionType = ActionType.Edit;
-    if (toolName === 'create_file' || toolName === 'write_to_file') {
+    const normalized = (inner.aac_tool_name_normalized as string) ?? '';
+    if (normalized === 'Create' || toolName === 'create_file') {
+      actionType = preFileExists === false ? ActionType.Create : ActionType.Edit;
+    } else if (normalized === 'Write' || toolName === 'write_to_file') {
       actionType = preFileExists === false ? ActionType.Create : ActionType.Edit;
     }
 
@@ -57,22 +70,22 @@ export class QoderCliInput extends BaseHookInput {
       ?? (toolInput?.new_string as string)
       ?? '';
     const diff = (toolInput?.diff as string)
-      ?? (record.tool_response as string)
+      ?? (inner.tool_response as string)
       ?? undefined;
 
     return buildAgentActivityEntry({
-      sessionId: (record.session_id as string) ?? '',
-      userId: (record.user_id as string) ?? '',
+      sessionId: (inner.session_id as string) ?? '',
+      userId: (inner.user_id as string) ?? '',
       agentType: ClientType.QoderCliHook,
       actionType,
       filePath,
       content,
       inlineDiffMessage: diff,
-      timestamp: (record.timestamp as number) ?? Date.now(),
+      timestamp: (inner.timestamp as number) ?? Date.now(),
       extra: {
         eventType,
-        conversationId: record.conversation_id,
-        callId: record.call_id,
+        conversationId: inner.conversation_id,
+        callId: inner.call_id,
       },
     });
   }

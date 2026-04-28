@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import {
   readJsonFile,
@@ -22,6 +23,13 @@ export interface HookDefinition {
   hookCommand: string;
   /** Matcher pattern for the hook. */
   matcher?: string;
+  /**
+   * If true, use Qoder's nested format:
+   *   { matcher: "...", hooks: [{ command, type }] }
+   * Otherwise use flat format:
+   *   { command, type, matcher }
+   */
+  useNestedFormat?: boolean;
 }
 
 /**
@@ -64,21 +72,25 @@ export class HookManager {
         target[lastKey] = [];
       }
 
-      const hookEntry = {
-        type: 'command',
-        command: def.hookCommand,
-        ...(def.matcher ? { matcher: def.matcher } : {}),
-      };
+      const arr = target[lastKey] as any[];
 
-      const existing = (target[lastKey] as any[]).find(
-        (h: any) => h.command === def.hookCommand,
-      );
-      if (existing) {
+      if (this.isCommandPresent(arr, def.hookCommand)) {
         logger.debug('hook already installed', { agentId: def.agentId });
         return true;
       }
 
-      (target[lastKey] as any[]).push(hookEntry);
+      const hookEntry = def.useNestedFormat
+        ? {
+            matcher: def.matcher ?? '*',
+            hooks: [{ command: def.hookCommand, type: 'command' }],
+          }
+        : {
+            type: 'command',
+            command: def.hookCommand,
+            ...(def.matcher ? { matcher: def.matcher } : {}),
+          };
+
+      arr.push(hookEntry);
       await writeJsonFile(def.settingsPath, settings);
 
       // Ensure log directory for this agent
@@ -114,7 +126,7 @@ export class HookManager {
       if (!Array.isArray(target[lastKey])) return true;
 
       target[lastKey] = (target[lastKey] as any[]).filter(
-        (h: any) => h.command !== def.hookCommand,
+        (h: any) => !this.entryMatchesCommand(h, def.hookCommand),
       );
 
       await writeJsonFile(def.settingsPath, settings);
@@ -143,26 +155,45 @@ export class HookManager {
       const lastKey = def.hookJsonPath[def.hookJsonPath.length - 1];
       if (!Array.isArray(target[lastKey])) return false;
 
-      return (target[lastKey] as any[]).some(
-        (h: any) => h.command === def.hookCommand,
-      );
+      return this.isCommandPresent(target[lastKey] as any[], def.hookCommand);
     } catch {
       return false;
     }
   }
 
   /**
-   * Build a standard hook definition for Qoder CLI.
+   * Build hook definitions for Qoder CLI (both PreToolUse and PostToolUse).
+   */
+  static buildQoderCliHooks(aiAgentCollectorDir?: string): HookDefinition[] {
+    const baseDir = aiAgentCollectorDir ?? resolveHome('~/.ai-agent-collector');
+    const command = `${baseDir}/hooks/aac-qoder-hook.sh`;
+    const settingsPath = resolveHome('~/.qoder/settings.json');
+
+    return [
+      {
+        agentId: 'qoder-cli',
+        settingsPath,
+        hookJsonPath: ['hooks', 'PreToolUse'],
+        hookCommand: command,
+        matcher: '*',
+        useNestedFormat: true,
+      },
+      {
+        agentId: 'qoder-cli',
+        settingsPath,
+        hookJsonPath: ['hooks', 'PostToolUse'],
+        hookCommand: command,
+        matcher: '*',
+        useNestedFormat: true,
+      },
+    ];
+  }
+
+  /**
+   * @deprecated Use buildQoderCliHooks() instead.
    */
   static buildQoderCliHook(aiAgentCollectorDir?: string): HookDefinition {
-    const baseDir = aiAgentCollectorDir ?? resolveHome('~/.ai-agent-collector');
-    return {
-      agentId: 'qoder-cli',
-      settingsPath: resolveHome('~/.qoder/settings.json'),
-      hookJsonPath: ['hooks', 'PostToolUse'],
-      hookCommand: `${baseDir}/hooks/qoder-cli-hook.sh`,
-      matcher: '.*',
-    };
+    return HookManager.buildQoderCliHooks(aiAgentCollectorDir)[1];
   }
 
   /**
@@ -180,7 +211,23 @@ export class HookManager {
       settingsPath: path.join(opts.settingsDir, 'settings.json'),
       hookJsonPath: ['hooks', 'PostToolUse'],
       hookCommand: `${baseDir}/hooks/${opts.agentId}-hook.sh`,
-      matcher: '.*',
+      matcher: '*',
     };
+  }
+
+  /**
+   * Check if a command string exists in a hook array entry,
+   * supporting both flat ({ command }) and nested ({ hooks: [{ command }] }) formats.
+   */
+  private entryMatchesCommand(entry: any, command: string): boolean {
+    if (entry.command === command) return true;
+    if (Array.isArray(entry.hooks)) {
+      return entry.hooks.some((h: any) => h.command === command);
+    }
+    return false;
+  }
+
+  private isCommandPresent(arr: any[], command: string): boolean {
+    return arr.some((entry: any) => this.entryMatchesCommand(entry, command));
   }
 }

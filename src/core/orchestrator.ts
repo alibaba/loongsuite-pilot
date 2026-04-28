@@ -4,6 +4,7 @@ import { AgentControlManager } from './agent-control-manager.js';
 import { AgentDiscoveryService } from './agent-discovery-service.js';
 import { InputManager } from './input-manager.js';
 import { StateStore } from '../checkpoints/state-store.js';
+import { HookManager } from '../hooks/hook-manager.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveHome, ensureDir } from '../utils/fs-utils.js';
 import * as path from 'node:path';
@@ -31,9 +32,10 @@ const DEFAULT_DATA_DIR = '~/.ai-agent-collector';
  * Startup sequence:
  *   1. Load configuration & state
  *   2. Build flushers (SLS + JSONL + HTTP)
- *   3. Register all inputs
- *   4. Start AgentDiscoveryService (fs.watch + polling)
- *   5. Emit 'started'
+ *   3. Install hooks into agent config files
+ *   4. Register all inputs
+ *   5. Start AgentDiscoveryService (fs.watch + polling)
+ *   6. Emit 'started'
  */
 export class Orchestrator extends EventEmitter {
   private readonly config: AnalyticsConfig;
@@ -80,10 +82,13 @@ export class Orchestrator extends EventEmitter {
     this.inputManager = new InputManager();
     this.inputManager.setFlusher(this.flusher);
 
-    // 5. Register inputs & build detection entries
+    // 5. Install hooks into agent config files (best-effort, non-blocking)
+    await this.installHooks();
+
+    // 6. Register inputs & build detection entries
     const detectionEntries = await this.registerAllInputs();
 
-    // 6. Start AgentDiscoveryService
+    // 7. Start AgentDiscoveryService
     this.agentDiscoveryService = new AgentDiscoveryService(detectionEntries);
     this.agentDiscoveryService.on('agent:started', (id: string) => {
       logger.info('agent detected and started', { id });
@@ -168,6 +173,32 @@ export class Orchestrator extends EventEmitter {
     }
 
     return flushers.length === 1 ? flushers[0] : new MultiFlusher(flushers);
+  }
+
+  /**
+   * Install hook scripts into agent configuration files.
+   * Only installs if the target agent is present on disk.
+   */
+  private async installHooks(): Promise<void> {
+    const hookManager = new HookManager(
+      path.join(this.dataDir, 'hooks'),
+      path.join(this.dataDir, 'logs'),
+    );
+
+    const qoderCliAvailable = await QoderCliInput.checkAvailability();
+    if (qoderCliAvailable) {
+      const defs = HookManager.buildQoderCliHooks(this.dataDir);
+      for (const def of defs) {
+        const installed = await hookManager.isHookInstalled(def);
+        if (!installed) {
+          const ok = await hookManager.installHook(def);
+          if (ok) {
+            const event = def.hookJsonPath[def.hookJsonPath.length - 1];
+            logger.info('qoder-cli hook registered', { event });
+          }
+        }
+      }
+    }
   }
 
   /**
