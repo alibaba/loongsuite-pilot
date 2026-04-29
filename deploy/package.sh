@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# package-tarball.sh — Build the project and create a distributable tarball
+#
+# Usage:
+#   bash scripts/package-tarball.sh                 # default output: ./ai-agent-collector.tar.gz
+#   bash scripts/package-tarball.sh -o /tmp/out.tar.gz  # custom output path
+#   bash scripts/package-tarball.sh --skip-build    # skip tsc, use existing dist/
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PACKAGE_NAME="ai-agent-collector"
+OUTPUT_PATH=""
+SKIP_BUILD=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o|--output)
+            OUTPUT_PATH="$2"; shift 2 ;;
+        --skip-build)
+            SKIP_BUILD=1; shift ;;
+        *)
+            echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+if [ -z "$OUTPUT_PATH" ]; then
+    OUTPUT_PATH="$PROJECT_ROOT/$PACKAGE_NAME.tar.gz"
+fi
+
+cd "$PROJECT_ROOT"
+
+# ── Build ──
+if [ "$SKIP_BUILD" -eq 0 ]; then
+    echo "==> Building TypeScript..."
+    rm -rf dist
+    npx tsc
+    echo "    ✅ Build complete"
+else
+    echo "==> Skipping build (--skip-build)"
+    if [ ! -d dist ]; then
+        echo "❌ dist/ not found. Run 'npm run build' first or remove --skip-build."
+        exit 1
+    fi
+fi
+
+# ── Stage files into a temp directory ──
+STAGE_DIR="$(mktemp -d)"
+trap 'rm -rf "$STAGE_DIR"' EXIT
+
+PKG_DIR="$STAGE_DIR/$PACKAGE_NAME"
+mkdir -p "$PKG_DIR"
+
+echo "==> Generating VERSION file..."
+PKG_VERSION=$(node -e "process.stdout.write(require('./package.json').version)")
+GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+cat > VERSION << VEOF
+version=${PKG_VERSION}
+git_commit=${GIT_COMMIT}
+git_branch=${GIT_BRANCH}
+build_time=${BUILD_TIME}
+VEOF
+echo "    ✅ VERSION: v${PKG_VERSION} (${GIT_COMMIT}, ${BUILD_TIME})"
+
+echo "==> Staging files..."
+
+# Core distributable dirs
+cp -r dist     "$PKG_DIR/dist"
+cp -r assets   "$PKG_DIR/assets"
+cp -r scripts  "$PKG_DIR/scripts"
+
+# Package metadata & version
+cp package.json      "$PKG_DIR/"
+cp package-lock.json "$PKG_DIR/" 2>/dev/null || true
+cp README.md         "$PKG_DIR/" 2>/dev/null || true
+cp VERSION           "$PKG_DIR/"
+
+# Ensure scripts are executable
+chmod +x "$PKG_DIR/scripts/"*.sh 2>/dev/null || true
+chmod +x "$PKG_DIR/assets/hooks/"*.sh 2>/dev/null || true
+
+# deploy/ is not staged, so nothing to remove
+
+echo "    ✅ Staged into $PKG_DIR"
+
+# ── Create tarball ──
+echo "==> Creating tarball..."
+tar -czf "$OUTPUT_PATH" -C "$STAGE_DIR" "$PACKAGE_NAME"
+
+TARBALL_SIZE=$(du -h "$OUTPUT_PATH" | cut -f1)
+echo "    ✅ Tarball created: $OUTPUT_PATH ($TARBALL_SIZE)"
+
+# ── Summary ──
+echo ""
+echo "==> Contents:"
+tar -tzf "$OUTPUT_PATH" | head -20
+echo "    ... (truncated)"
+echo ""
+echo "Done. Upload with:  bash deploy/upload.sh"

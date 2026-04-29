@@ -13,7 +13,6 @@ const DEFAULT_CONFIG_PATH = '~/.ai-agent-collector/config.json';
 interface ConfigFile {
   enabled?: boolean;
   dataDir?: string;
-  port?: number;
 
   sls?: {
     enabled?: boolean;
@@ -80,7 +79,7 @@ function envInt(key: string, fallback: number): number {
  *
  * Env vars override config file values. Config file overrides defaults.
  */
-export async function loadConfig(): Promise<AnalyticsConfig & { port: number }> {
+export async function loadConfig(): Promise<AnalyticsConfig> {
   const configPath = resolveHome(env('AGENT_DATA_COLLECTION_CONFIG') ?? DEFAULT_CONFIG_PATH);
   const file = await readJsonFile<ConfigFile>(configPath);
 
@@ -96,7 +95,6 @@ export async function loadConfig(): Promise<AnalyticsConfig & { port: number }> 
     enabled: envBool('AAC_ENABLED', file?.enabled ?? true),
     autoStart: true,
     dataDir,
-    port: envInt('AAC_PORT', file?.port ?? 43124),
 
     listeners: buildListenersConfig(file),
     flushers: buildFlushersConfig(file, dataDir),

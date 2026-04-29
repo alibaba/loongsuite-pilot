@@ -66,97 +66,143 @@ npm start
    tail -f ~/.ai-agent-collector/logs/output/*.jsonl
    ```
 
-## 打包发布
+## 打包与部署
 
-### 构建发布包（最佳实践）
+项目提供 `deploy/` 目录下的三个脚本完成打包、上传、远程安装/升级/卸载的全流程。这些脚本不会被打包进发布产物中。
+
+```
+deploy/
+├── package.sh        # 编译 + 打包 tar.gz
+├── upload.sh         # 上传 tar.gz + aac-installer.sh 到 OSS
+└── aac-installer.sh  # 统一安装/升级/卸载脚本（用户侧执行）
+```
+
+### 第一步：打包
 
 ```bash
-# 1. 清理并重新编译
-npm run build
+# 编译 TypeScript 并打包（输出 ai-agent-collector.tar.gz）
+bash deploy/package.sh
 
-# 2. 打包为 npm tarball（自动包含 files 中声明的内容）
-npm pack
-# 生成: ai-agent-collector-1.0.0.tgz
+# 自定义输出路径
+bash deploy/package.sh -o /tmp/ai-agent-collector.tar.gz
+
+# 跳过编译，使用已有 dist/
+bash deploy/package.sh --skip-build
 ```
 
-**打包内容说明**（由 `package.json` 的 `files` 字段控制）：
+打包产物结构：
 ```
-ai-agent-collector-1.0.0.tgz
-├── dist/              # 编译后的 JavaScript 代码
-├── assets/            # Hook 脚本等资源文件
-├── scripts/           # postinstall 安装脚本
-└── package.json       # 包元信息
+ai-agent-collector.tar.gz
+├── dist/              # 编译后的 JavaScript
+├── assets/            # Hook 脚本
+├── scripts/           # postinstall 脚本
+├── package.json       # 包元信息
+├── package-lock.json  # 依赖锁定
+├── VERSION            # 版本信息（version / git_commit / git_branch / build_time）
+└── README.md
 ```
 
-### 发布到 npm 仓库（可选）
+### 第二步：上传到 OSS
+
+需要先安装并配置 [ossutil](https://help.aliyun.com/document_detail/120075.html)：
 
 ```bash
-# 1. 更新版本号
-npm version patch  # 或 minor, major
+# 安装 ossutil
+brew install ossutil   # 或 pip install ossutil2
 
-# 2. 发布到 npm registry
-npm publish
+# 配置凭证
+ossutil config -e oss-cn-hangzhou.aliyuncs.com -i <AK_ID> -k <AK_SECRET>
 
-# 3. 验证发布
-cd /tmp && npm install ai-agent-collector
+# 上传（默认上传到 arms-apm-cn-hangzhou-pre bucket）
+bash deploy/upload.sh
+
+# 自定义 bucket / 前缀 / 区域
+bash deploy/upload.sh --bucket my-bucket --prefix my/path --region cn-beijing
 ```
 
-## 线上部署（主机场景）
+上传后会打印一键安装命令。
 
-### 方式一：npm 包安装（推荐）
+### 第三步：远程安装/升级/卸载（用户侧）
+
+`aac-installer.sh` 支持三个子命令：`install`（默认）、`upgrade`、`uninstall`。
+
+#### 安装
 
 ```bash
-# 安装已发布的 npm 包
-npm install -g ai-agent-collector
+# 最简安装（不传子命令默认为 install）
+curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/<PREFIX>/aac-installer.sh | bash
 
-# 或直接安装本地打包的 tarball
-npm install -g ai-agent-collector-1.0.0.tgz
-
-# 验证安装（自动执行 postinstall，安装 hook 脚本）
-ai-agent-collector --version
-
-# 配置环境变量（按需）
-export AAC_ENABLED=true
-export SLS_ACCESS_KEY_ID="your-key"
-export SLS_ACCESS_KEY_SECRET="your-secret"
-
-# 启动服务（后台运行）
-nohup ai-agent-collector > /var/log/ai-agent-collector.log 2>&1 &
+# 带 SLS 后端配置
+curl -fsSL <URL>/aac-installer.sh | bash -s -- install \
+  --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
+  --sls-project "my-project" \
+  --sls-logstore "my-logstore" \
+  --sls-ak-id "your-ak-id" \
+  --sls-ak-secret "your-ak-secret"
 ```
 
-### 方式二：编译产物部署
+安装流程：
+1. 检查 Node.js >= 18、npm、curl/wget
+2. 下载并解压 tarball 到 `~/.cache/ai-agent-collector/package`
+3. `npm install --production` 安装依赖
+4. 执行 `postinstall.js` 部署 hook 脚本到 `~/.ai-agent-collector/hooks/`
+5. 将安装参数写入 `~/.ai-agent-collector/config.json`（非环境变量）
+6. 安装 `aac` 服务管理命令（root 用户链接到 `/usr/local/bin`，普通用户安装到 `~/.local/bin`）
+7. 自动启动服务
+
+#### 升级
 
 ```bash
-# 在构建机器上编译
-git clone <repository-url>
-cd agent-data-collection
-npm ci --production
-npm run build
-
-# 将以下目录同步到目标主机：
-# ├── dist/           # 编译产物
-# ├── node_modules/   # 生产依赖（或到目标机器执行 npm install --production）
-# ├── assets/         # Hook 脚本
-# ├── scripts/        # postinstall 脚本
-# └── package.json
-
-# 在目标主机上
-cd /opt/ai-agent-collector
-npm install --production  # 安装依赖并执行 postinstall（如果同步了完整目录）
-
-# 配置并启动
-cat > /opt/ai-agent-collector/.env << EOF
-AAC_ENABLED=true
-SLS_ACCESS_KEY_ID=your-key
-SLS_ACCESS_KEY_SECRET=your-secret
-EOF
-
-node dist/index.js &
+curl -fsSL <URL>/aac-installer.sh | bash -s -- upgrade
 ```
 
-### 生产环境守护（systemd）
+升级流程（无缝，自动回滚）：
+1. 比较新旧 VERSION，相同版本跳过
+2. 停止当前服务
+3. 备份旧版本到 `~/.cache/ai-agent-collector/package.bak`
+4. 部署新版本、安装依赖、更新 hook 脚本
+5. 启动新版本并验证进程存活
+6. 成功则删除备份；**失败则自动恢复旧版本并重启**
 
-创建服务文件 `/etc/systemd/system/ai-agent-collector.service`：
+升级不会修改 `config.json` 和数据目录，配置完全保留。
+
+#### 卸载
+
+```bash
+# 卸载（保留配置和日志数据）
+curl -fsSL <URL>/aac-installer.sh | bash -s -- uninstall
+
+# 彻底卸载（删除所有数据）
+curl -fsSL <URL>/aac-installer.sh | bash -s -- uninstall --purge
+```
+
+### 服务管理
+
+安装完成后使用 `aac` 命令管理服务：
+
+```bash
+aac start      # 启动（后台运行）
+aac stop       # 停止
+aac restart    # 重启
+aac status     # 查看运行状态和版本
+aac log        # 实时查看日志（tail -f）
+aac config     # 查看当前配置文件
+aac version    # 查看版本信息
+```
+
+修改配置后执行 `aac restart` 即可生效：
+
+```bash
+# 编辑配置
+vi ~/.ai-agent-collector/config.json
+
+# 重启生效
+aac restart
+```
+
+### 生产环境守护（systemd，可选）
+
+如需系统级守护，创建 `/etc/systemd/system/ai-agent-collector.service`：
 
 ```ini
 [Unit]
@@ -166,15 +212,11 @@ After=network.target
 [Service]
 Type=simple
 User=collector
-WorkingDirectory=/opt/ai-agent-collector
-ExecStart=/usr/bin/node /opt/ai-agent-collector/dist/index.js
+WorkingDirectory=/home/collector/.cache/ai-agent-collector/package
+ExecStart=/usr/bin/node dist/index.js
+Environment=AGENT_DATA_COLLECTION_CONFIG=/home/collector/.ai-agent-collector/config.json
 Restart=always
 RestartSec=10
-Environment=AAC_ENABLED=true
-# 或通过 EnvironmentFile 加载配置:
-# EnvironmentFile=/opt/ai-agent-collector/.env
-
-# 日志输出（可通过 journalctl 查看）
 StandardOutput=journal
 StandardError=journal
 
@@ -182,22 +224,9 @@ StandardError=journal
 WantedBy=multi-user.target
 ```
 
-启动并管理服务：
-
 ```bash
-# 重载 systemd 配置
 sudo systemctl daemon-reload
-
-# 启动服务
-sudo systemctl start ai-agent-collector
-
-# 设置开机自启
-sudo systemctl enable ai-agent-collector
-
-# 查看状态
-sudo systemctl status ai-agent-collector
-
-# 查看日志
+sudo systemctl enable --now ai-agent-collector
 sudo journalctl -u ai-agent-collector -f
 ```
 
@@ -213,7 +242,6 @@ sudo journalctl -u ai-agent-collector -f
 {
   "enabled": true,
   "dataDir": "~/.ai-agent-collector",
-  "port": 43124,
 
   "sls": {
     "enabled": true,
@@ -280,7 +308,6 @@ sudo journalctl -u ai-agent-collector -f
 | `AAC_DISCOVERY_INTERVAL_MS` | Agent 发现轮询间隔 | `300000` (5min) |
 | `AAC_FORCE_POLLING` | 强制轮询（禁用 fs.watch） | `false` |
 | `LOG_LEVEL` | 日志级别 (debug/info/warn/error) | `info` |
-| `AAC_PORT` | HTTP 服务端口（预留） | `43124` |
 
 #### SLS（阿里云日志服务）
 

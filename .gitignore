@@ -1,6 +1,7 @@
 node_modules/
 dist/
 *.tgz
+*.tar.gz
 
 # OS
 .DS_Store
@@ -22,6 +23,7 @@ Thumbs.db
 
 # Build artifacts
 *.tsbuildinfo
+VERSION
 
 # Test coverage
 coverage/

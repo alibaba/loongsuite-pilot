@@ -26,7 +26,6 @@ async function main(): Promise<void> {
 
   logger.info('AI Agent Input is running', {
     dataDir: config.dataDir,
-    port: config.port,
     flushers: Object.entries(config.flushers)
       .filter(([, v]) => v?.enabled)
       .map(([k]) => k),

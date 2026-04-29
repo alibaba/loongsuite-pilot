@@ -29,24 +29,19 @@ describe('ConfigLoader', () => {
     it('env vars override config file values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         dataDir: '/from/file',
-        port: 5000,
       });
       vi.stubEnv('AAC_DATA_DIR', '/from/env');
-      vi.stubEnv('AAC_PORT', '9999');
 
       const config = await loadConfig();
       expect(config.dataDir).toBe('/from/env');
-      expect(config.port).toBe(9999);
     });
 
     it('config file values override defaults', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
-        port: 7777,
         enabled: false,
       });
 
       const config = await loadConfig();
-      expect(config.port).toBe(7777);
       expect(config.enabled).toBe(false);
     });
 
@@ -54,7 +49,6 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
 
       const config = await loadConfig();
-      expect(config.port).toBe(43124);
       expect(config.enabled).toBe(true);
       expect(config.autoStart).toBe(true);
     });
@@ -66,7 +60,6 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.enabled).toBe(true);
-      expect(config.port).toBe(43124);
       expect(config.flushers.jsonl?.enabled).toBe(true);
     });
   });
