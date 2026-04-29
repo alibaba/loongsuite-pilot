@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# package-tarball.sh — Build the project and create a distributable tarball
+# package.sh — Build the project and create a distributable .tar.gz package
 #
 # Usage:
-#   bash scripts/package-tarball.sh                 # default output: ./ai-agent-collector.tar.gz
-#   bash scripts/package-tarball.sh -o /tmp/out.tar.gz  # custom output path
-#   bash scripts/package-tarball.sh --skip-build    # skip tsc, use existing dist/
+#   bash deploy/package.sh                       # default output: ./ai-agent-collector.tar.gz
+#   bash deploy/package.sh -o /tmp/out.tar.gz    # custom output path
+#   bash deploy/package.sh --skip-build          # skip tsc, use existing dist/
 
 set -euo pipefail
 
@@ -83,16 +83,14 @@ cp VERSION           "$PKG_DIR/"
 chmod +x "$PKG_DIR/scripts/"*.sh 2>/dev/null || true
 chmod +x "$PKG_DIR/assets/hooks/"*.sh 2>/dev/null || true
 
-# deploy/ is not staged, so nothing to remove
-
 echo "    ✅ Staged into $PKG_DIR"
 
-# ── Create tarball ──
-echo "==> Creating tarball..."
+# ── Create package ──
+echo "==> Creating package..."
 tar -czf "$OUTPUT_PATH" -C "$STAGE_DIR" "$PACKAGE_NAME"
 
-TARBALL_SIZE=$(du -h "$OUTPUT_PATH" | cut -f1)
-echo "    ✅ Tarball created: $OUTPUT_PATH ($TARBALL_SIZE)"
+PKG_SIZE=$(du -h "$OUTPUT_PATH" | cut -f1)
+echo "    ✅ Package created: $OUTPUT_PATH ($PKG_SIZE)"
 
 # ── Summary ──
 echo ""
