@@ -143,7 +143,7 @@ curl -fsSL <URL>/aac-installer.sh | bash -s -- install \
 
 安装流程：
 1. 检查 Node.js >= 18、npm、curl/wget
-2. 下载并解压 tarball 到 `~/.cache/ai-agent-collector/package`
+2. 下载并解压安装包到 `~/.cache/ai-agent-collector/package`
 3. `npm install --production` 安装依赖
 4. 执行 `postinstall.js` 部署 hook 脚本到 `~/.ai-agent-collector/hooks/`
 5. 将安装参数写入 `~/.ai-agent-collector/config.json`（非环境变量）

@@ -12,7 +12,7 @@
 #
 # Upgrade (preserve config, auto-rollback on failure):
 #   curl -fsSL <URL>/aac-installer.sh | bash -s -- upgrade
-#   curl -fsSL <URL>/aac-installer.sh | bash -s -- upgrade --tarball-url <url>
+#   curl -fsSL <URL>/aac-installer.sh | bash -s -- upgrade --package-url <url>
 #
 # Uninstall:
 #   curl -fsSL <URL>/aac-installer.sh | bash -s -- uninstall
@@ -23,7 +23,7 @@ set -euo pipefail
 # ============================================================
 # Constants
 # ============================================================
-DEFAULT_TARBALL_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongcollector/ai-agent-collector/ai-agent-collector.tar.gz"
+DEFAULT_PACKAGE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongcollector/ai-agent-collector/ai-agent-collector.tar.gz"
 PACKAGE_NAME="ai-agent-collector"
 PERMANENT_DIR="$HOME/.cache/ai-agent-collector/package"
 BACKUP_DIR="$HOME/.cache/ai-agent-collector/package.bak"
@@ -33,7 +33,7 @@ DEFAULT_DATA_DIR="$HOME/.ai-agent-collector"
 # Parse sub-command
 # ============================================================
 COMMAND=""
-TARBALL_URL="${AAC_TARBALL_URL:-$DEFAULT_TARBALL_URL}"
+PACKAGE_URL="${AAC_PACKAGE_URL:-$DEFAULT_PACKAGE_URL}"
 SLS_ENDPOINT=""
 SLS_PROJECT=""
 SLS_LOGSTORE=""
@@ -69,8 +69,8 @@ while [[ $# -gt 0 ]]; do
         --sls-ak-id=*)        SLS_AK_ID="${1#*=}"; shift ;;
         --sls-ak-secret)      SLS_AK_SECRET="$2"; shift 2 ;;
         --sls-ak-secret=*)    SLS_AK_SECRET="${1#*=}"; shift ;;
-        --tarball-url)        TARBALL_URL="$2"; shift 2 ;;
-        --tarball-url=*)      TARBALL_URL="${1#--tarball-url=}"; shift ;;
+        --package-url)        PACKAGE_URL="$2"; shift 2 ;;
+        --package-url=*)      PACKAGE_URL="${1#--package-url=}"; shift ;;
         --data-dir)           DATA_DIR="$2"; shift 2 ;;
         --data-dir=*)         DATA_DIR="${1#*=}"; shift ;;
         --log-level)          LOG_LEVEL="$2"; shift 2 ;;
@@ -135,19 +135,19 @@ check_deps() {
 }
 
 # ============================================================
-# Common: download and extract tarball -> sets INSTALL_SRC
+# Common: download and extract package -> sets INSTALL_SRC
 # ============================================================
 download_and_extract() {
     TMP_DIR="$(mktemp -d)"
     # TMP_DIR cleanup is handled by the caller's trap
 
-    msg "📦 下载安装包: $TARBALL_URL" \
-        "📦 Downloading: $TARBALL_URL"
+    msg "📦 下载安装包: $PACKAGE_URL" \
+        "📦 Downloading: $PACKAGE_URL"
 
     if command -v curl &>/dev/null; then
-        curl -fsSL "$TARBALL_URL" -o "$TMP_DIR/package.tar.gz"
+        curl -fsSL "$PACKAGE_URL" -o "$TMP_DIR/package.tar.gz"
     else
-        wget -q "$TARBALL_URL" -O "$TMP_DIR/package.tar.gz"
+        wget -q "$PACKAGE_URL" -O "$TMP_DIR/package.tar.gz"
     fi
     msg "    ✅ 下载完成" "    ✅ Downloaded"
     echo ""
@@ -166,8 +166,8 @@ download_and_extract() {
     else
         INSTALL_SRC=$(find "$TMP_DIR" -name "package.json" -maxdepth 2 -exec dirname {} \; | head -1 || true)
         if [ -z "$INSTALL_SRC" ]; then
-            msg "❌ 解压后未找到 package.json，tarball 结构异常" \
-                "❌ package.json not found in tarball — unexpected structure"
+            msg "❌ 解压后未找到 package.json，安装包结构异常" \
+                "❌ package.json not found — unexpected package structure"
             exit 1
         fi
     fi

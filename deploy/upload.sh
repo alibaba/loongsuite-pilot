@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# upload.sh — Upload tarball + aac-installer.sh to Alibaba Cloud OSS
+# upload.sh — Upload package + aac-installer.sh to Alibaba Cloud OSS
 #
 # Prerequisites:
 #   - ossutil installed (https://help.aliyun.com/document_detail/120075.html)
@@ -8,11 +8,11 @@
 #     ossutil config -e oss-cn-hangzhou.aliyuncs.com -i <AK_ID> -k <AK_SECRET>
 #
 # Usage:
-#   bash deploy/upload.sh                          # use defaults
-#   bash deploy/upload.sh --bucket my-bucket       # custom bucket
-#   bash deploy/upload.sh --prefix custom/path     # custom OSS prefix
-#   bash deploy/upload.sh --tarball /tmp/out.tar.gz  # custom tarball path
-#   bash deploy/upload.sh --region cn-hangzhou     # custom region
+#   bash deploy/upload.sh                              # use defaults
+#   bash deploy/upload.sh --bucket my-bucket           # custom bucket
+#   bash deploy/upload.sh --prefix custom/path         # custom OSS prefix
+#   bash deploy/upload.sh --package /tmp/out.tar.gz    # custom package path
+#   bash deploy/upload.sh --region cn-hangzhou         # custom region
 #
 # Environment variables (override CLI args):
 #   OSS_BUCKET    — target bucket name
@@ -28,7 +28,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUCKET="${OSS_BUCKET:-arms-apm-cn-hangzhou-pre}"
 PREFIX="${OSS_PREFIX:-agenttrack}"
 REGION="${OSS_REGION:-cn-hangzhou}"
-TARBALL_PATH="$PROJECT_ROOT/ai-agent-collector.tar.gz"
+PKG_PATH="$PROJECT_ROOT/ai-agent-collector.tar.gz"
 INSTALLER_SCRIPT="$PROJECT_ROOT/deploy/aac-installer.sh"
 
 while [[ $# -gt 0 ]]; do
@@ -45,10 +45,10 @@ while [[ $# -gt 0 ]]; do
             REGION="$2"; shift 2 ;;
         --region=*)
             REGION="${1#*=}"; shift ;;
-        --tarball)
-            TARBALL_PATH="$2"; shift 2 ;;
-        --tarball=*)
-            TARBALL_PATH="${1#*=}"; shift ;;
+        --package)
+            PKG_PATH="$2"; shift 2 ;;
+        --package=*)
+            PKG_PATH="${1#*=}"; shift ;;
         *)
             echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -62,8 +62,8 @@ if ! command -v ossutil &>/dev/null; then
     exit 1
 fi
 
-if [ ! -f "$TARBALL_PATH" ]; then
-    echo "❌ Tarball not found: $TARBALL_PATH"
+if [ ! -f "$PKG_PATH" ]; then
+    echo "❌ Package not found: $PKG_PATH"
     echo "   Run 'bash deploy/package.sh' first."
     exit 1
 fi
@@ -82,11 +82,11 @@ echo "    Prefix:  $PREFIX"
 echo "    Region:  $REGION"
 echo ""
 
-# ── Upload tarball ──
-TARBALL_NAME="$(basename "$TARBALL_PATH")"
-echo "==> Uploading tarball: $TARBALL_NAME"
-ossutil cp "$TARBALL_PATH" "${OSS_BASE}/${TARBALL_NAME}" --force
-echo "    ✅ Uploaded: ${PUBLIC_BASE}/${TARBALL_NAME}"
+# ── Upload package ──
+PKG_NAME="$(basename "$PKG_PATH")"
+echo "==> Uploading package: $PKG_NAME"
+ossutil cp "$PKG_PATH" "${OSS_BASE}/${PKG_NAME}" --force
+echo "    ✅ Uploaded: ${PUBLIC_BASE}/${PKG_NAME}"
 echo ""
 
 # ── Upload installer script ──
@@ -98,25 +98,25 @@ echo ""
 
 # ── Set ACL to public-read ──
 echo "==> Setting public-read ACL..."
-ossutil set-acl "${OSS_BASE}/${TARBALL_NAME}" public-read 2>/dev/null || \
-    echo "    ⚠️  Could not set ACL for tarball (may need bucket-level policy)"
+ossutil set-acl "${OSS_BASE}/${PKG_NAME}" public-read 2>/dev/null || \
+    echo "    ⚠️  Could not set ACL for package (may need bucket-level policy)"
 ossutil set-acl "${OSS_BASE}/${INSTALLER_NAME}" public-read 2>/dev/null || \
     echo "    ⚠️  Could not set ACL for installer (may need bucket-level policy)"
 echo ""
 
 # ── Summary ──
-TARBALL_SIZE=$(du -h "$TARBALL_PATH" | cut -f1)
+PKG_SIZE=$(du -h "$PKG_PATH" | cut -f1)
 
 echo "============================================================"
 echo "✅ Upload complete!"
 echo ""
-echo "📦 Tarball  ($TARBALL_SIZE):"
-echo "   ${PUBLIC_BASE}/${TARBALL_NAME}"
+echo "📦 Package ($PKG_SIZE):"
+echo "   ${PUBLIC_BASE}/${PKG_NAME}"
 echo ""
 echo "📜 Installer:"
 echo "   ${PUBLIC_BASE}/${INSTALLER_NAME}"
 echo ""
-echo "One-line install:"
+echo "Install:"
 echo "   curl -fsSL ${PUBLIC_BASE}/${INSTALLER_NAME} | bash"
 echo ""
 echo "Install with SLS backend:"
