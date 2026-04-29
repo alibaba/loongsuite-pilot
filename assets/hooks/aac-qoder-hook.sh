@@ -26,28 +26,10 @@ set -euo pipefail
 
 AGENT_ID="${1:-qoder-cli}"
 
-resolve_cache_dir() {
-  if [[ -n "${AAC_CACHE_DIR:-}" ]]; then
-    printf '%s' "$AAC_CACHE_DIR"
-    return
-  fi
-
-  local target="${HOME:-$PWD}/.ai-agent-collector"
-  if mkdir -p "$target" 2>/dev/null; then
-    printf '%s' "$target"
-    return
-  fi
-
-  local fallback="${PWD:-.}/.ai-agent-collector"
-  mkdir -p "$fallback"
-  printf '%s' "$fallback"
-}
-
-CACHE_DIR="$(resolve_cache_dir)"
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY_HANDLER="$HOOKS_DIR/aac-qoder-hook.py"
 
 # Fail silently if the Python handler is missing
 [[ -f "$PY_HANDLER" ]] || exit 0
 
-exec python3 "$PY_HANDLER" "$CACHE_DIR" "$AGENT_ID"
+exec python3 "$PY_HANDLER" --agent-id "$AGENT_ID"

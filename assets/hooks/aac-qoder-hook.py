@@ -1,419 +1,325 @@
 #!/usr/bin/env python3
 """
-Qoder CLI Hook Handler.
+Qoder stop hook transcript forwarder.
 
-Intercepts PreToolUse / PostToolUse / PostToolUseFailure events from Qoder CLI,
-captures pre-tool file state, enriches post-tool events with diff context,
-and writes structured records to JSONL log files.
+Calculates incremental line range from transcript, appends new rows to local
+history JSONL logs for ai-agent-collector, and updates the line record to
+prevent duplicate processing.
 
-Optionally uploads to Alibaba Cloud SLS when configured.
+Usage (CLI mode):
+    qoder_hook.py --agent-id <id> --transcript <path> --session-id <id>
 
-Called by aac-qoder-hook.sh with cache_dir as argv[1] and
-optional agent_id as argv[2] (defaults to "qoder-cli").
-Reads hook payload JSON from stdin.
+Usage (stdin mode — called directly by Qoder Stop hook):
+    Reads JSON from stdin with transcript_path and session_id fields.
+    Checks stop_hooks_active to avoid infinite recursion.
 """
 
 import sys
 import os
-import json
-import hashlib
-import datetime
-import uuid
-import socket
-import fcntl
 import time
-from typing import Optional, List, Tuple, Any
+import json
+import argparse
+import fcntl
+from typing import Optional, List, Tuple
 
-# ---------------------------------------------------------------------------
-# SLS Configuration (placeholders — filled by install.sh)
-# ---------------------------------------------------------------------------
-SLS_ENDPOINT = ''
-SLS_ACCESS_KEY_ID = ''
-SLS_ACCESS_KEY = ''
-SLS_PROJECT = ''
-SLS_LOGSTORE = ''
-ENABLE_SLS_UPLOAD = False
-ENABLE_LOGGING = False
+ENABLE_LOGGING = True
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-MAX_FIELD_LEN = 4096
+# Paths
+HOOKS_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE = os.path.join(HOOKS_DIR, 'qoder_hook.log')
+LINE_RECORD_FILE = os.path.join(HOOKS_DIR, '.line_records.json')
+AAC_LOGS_BASE_DIR = os.path.expanduser('~/.ai-agent-collector/logs')
 
-TRACKED_FILE_TOOLS = {'Create', 'Write', 'Edit', 'Delete', 'Read'}
-SHELL_TOOLS = {'Bash', 'Shell', 'Terminal', 'Run'}
-
-TOOL_NAME_MAP = {
-    'write': 'Edit',
-    'edit': 'Edit',
-    'str_replace': 'Edit',
-    'str_replace_editor': 'Edit',
-    'write_to_file': 'Write',
-    'create_file': 'Create',
-    'create': 'Create',
-    'delete': 'Delete',
-    'read': 'Read',
-    'read_file': 'Read',
-}
-
-# ---------------------------------------------------------------------------
-# Runtime state (resolved once in init_paths)
-# ---------------------------------------------------------------------------
-_agent_id = 'qoder-cli'
-_history_dir = ''
-_pre_state_dir = ''
-_dedup_dir = ''
-_log_file = ''
-_sls_client = None
-
-
-def init_paths(cache_dir: str, agent_id: str = 'qoder-cli'):
-    """Create and cache all working directories."""
-    global _agent_id, _history_dir, _pre_state_dir, _dedup_dir, _log_file
-    _agent_id = agent_id
-    base = os.path.join(cache_dir, 'logs', agent_id)
-    _history_dir = os.path.join(base, 'history')
-    _pre_state_dir = os.path.join(base, 'state', 'pre')
-    _dedup_dir = os.path.join(base, 'state', 'dedup')
-    _log_file = os.path.join(base, 'hook.log')
-    os.makedirs(_history_dir, exist_ok=True)
-    os.makedirs(_pre_state_dir, exist_ok=True)
-    os.makedirs(_dedup_dir, exist_ok=True)
-
-
-# ---------------------------------------------------------------------------
-# Debug logging (with file locking, per qoder_hook.py pattern)
-# ---------------------------------------------------------------------------
-def log_debug(message: str):
-    """Append a timestamped debug line with exclusive file lock."""
-    if not ENABLE_LOGGING:
-        return
+def get_transcript_line_count(transcript_path: str) -> int:
+    """Get current line count of transcript file."""
+    if not os.path.exists(transcript_path):
+        return 0
     try:
-        ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
-        with open(_log_file, 'a', encoding='utf-8') as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                f.write(f"[{ts}] {message}\n")
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------------------
-# Data serialization (per qoder_hook.py pattern)
-# ---------------------------------------------------------------------------
-def _trunc(v: str, limit: int = MAX_FIELD_LEN) -> str:
-    return v if len(v) <= limit else v[:limit] + '...[truncated]'
-
-
-def _serialize_value(v: Any) -> str:
-    if v is None:
-        return ''
-    if isinstance(v, bool):
-        return str(v).lower()
-    if isinstance(v, (dict, list)):
-        return _trunc(json.dumps(v, ensure_ascii=False))
-    return _trunc(str(v))
-
-
-def prepare_log_contents(
-    data: dict, log_source: str = '',
-) -> List[Tuple[str, str]]:
-    """Flatten *data* into SLS-compatible key-value pairs."""
-    contents: List[Tuple[str, str]] = []
-    if log_source:
-        contents.append(('log_source', log_source))
-
-    session_id = data.get('session_id') or data.get('sessionId') or ''
-    has_session_id = 'session_id' in data
-
-    for k, v in data.items():
-        if v is None:
-            continue
-        contents.append((k, _serialize_value(v)))
-
-    if session_id and not has_session_id:
-        contents.append(('session_id', str(session_id)))
-
-    return contents
-
-
-# ---------------------------------------------------------------------------
-# SLS upload (optional, per qoder_hook.py pattern)
-# ---------------------------------------------------------------------------
-def _get_sls_client():
-    global _sls_client
-    if _sls_client is not None:
-        return _sls_client
-    try:
-        from aliyun.log import LogClient
-        _sls_client = LogClient(SLS_ENDPOINT, SLS_ACCESS_KEY_ID, SLS_ACCESS_KEY)
-        return _sls_client
-    except ImportError:
-        log_debug('aliyun-log-python-sdk not installed, SLS disabled')
-        return None
-
-
-def send_to_sls(record: dict) -> bool:
-    """Upload a single record to SLS. No-op when SLS is not configured."""
-    if not ENABLE_SLS_UPLOAD or not SLS_ENDPOINT:
-        return False
-    client = _get_sls_client()
-    if client is None:
-        return False
-    try:
-        from aliyun.log import LogItem, PutLogsRequest
-        contents = prepare_log_contents(record, log_source='hook')
-        item = LogItem()
-        item.set_time(int(time.time()))
-        item.set_contents(contents)
-        req = PutLogsRequest(SLS_PROJECT, SLS_LOGSTORE, '', '', [item])
-        req.set_log_tags([('__hostname__', socket.gethostname())])
-        client.put_logs(req)
-        log_debug('SLS upload OK')
-        return True
-    except Exception as e:
-        log_debug(f'SLS upload failed: {e}')
-        return False
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def sha1_text(text: str) -> str:
-    return hashlib.sha1(text.encode('utf-8')).hexdigest()
-
-
-def normalize_tool_name(raw: str) -> str:
-    if not raw or not isinstance(raw, str):
-        return ''
-    s = raw.strip().lower().replace('-', '_')
-    if not s:
-        return ''
-    return TOOL_NAME_MAP.get(s, s.title())
-
-
-def resolve_tool_input(payload: dict) -> dict:
-    ti = payload.get('tool_input') or payload.get('toolInput') or {}
-    if isinstance(ti, str):
-        try:
-            ti = json.loads(ti)
-        except Exception:
-            ti = {}
-    return ti if isinstance(ti, dict) else {}
-
-
-def resolve_file_path(tool_input: dict) -> str:
-    for key in ('file_path', 'path', 'filepath', 'target_path'):
-        val = tool_input.get(key)
-        if isinstance(val, str) and val.strip():
-            return val.strip()
-    return ''
-
-
-def read_file_content(file_path: str) -> str:
-    try:
-        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-            return f.read()
-    except Exception:
-        return ''
-
-
-def get_file_sha1(file_path: str) -> str:
-    try:
-        with open(file_path, 'rb') as f:
-            return hashlib.sha1(f.read()).hexdigest()
-    except Exception:
-        return ''
-
-
-def count_lines(file_path: str) -> int:
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(transcript_path, 'r', encoding='utf-8') as f:
             return sum(1 for _ in f)
-    except Exception:
+    except IOError as e:
+        log_debug(f"Failed to count lines: {e}")
         return 0
 
 
-# ---------------------------------------------------------------------------
-# Dedup
-# ---------------------------------------------------------------------------
-def is_duplicate(
-    event_name: str, tool_name: str, file_path: str, log_time: str,
-) -> bool:
-    key = f'{event_name}|{tool_name}|{file_path}|{log_time}'
-    mark = os.path.join(_dedup_dir, f'{sha1_text(key)}.mark')
-    if os.path.exists(mark):
-        return True
-    try:
-        with open(mark, 'w', encoding='utf-8') as f:
-            f.write(log_time)
-    except Exception:
-        pass
-    return False
+def get_line_range(transcript_path: str, session_id: str) -> Optional[Tuple[int, int]]:
+    """
+    Calculate the incremental line range to upload.
+    Returns (start_line, end_line) or None if no new lines.
+    """
+    records = load_line_records()
+    record = records.get(transcript_path, {})
+    last_count = record.get("last_line_count", 0)
+    recorded_session = record.get("session_id", "")
+
+    current_count = get_transcript_line_count(transcript_path)
+
+    # If session changed, reset to 0 (send all lines in file)
+    if recorded_session and recorded_session != session_id:
+        log_debug(f"Session changed: {recorded_session} -> {session_id}, reset to 0")
+        last_count = 0
+
+    if current_count == 0:
+        log_debug("Transcript is empty")
+        return None
+
+    if current_count == last_count:
+        log_debug(f"No new lines (count: {current_count})")
+        return None
+
+    if current_count < last_count:
+        log_debug(f"File truncated ({last_count} -> {current_count}), sending all")
+        last_count = 0
+
+    log_debug(f"Range: {last_count} -> {current_count}")
+    return (last_count, current_count)
 
 
-# ---------------------------------------------------------------------------
-# PreToolUse — capture file state before tool execution
-# ---------------------------------------------------------------------------
-def handle_pre_tool_use(tool_name: str, file_path: str, log_time: str):
-    if tool_name not in TRACKED_FILE_TOOLS or not file_path:
+def log_debug(message: str):
+    """Write debug log to local file with locking."""
+    if not ENABLE_LOGGING:
         return
+    try:
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.write(f"[{timestamp}] {message}\n")
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except Exception as e:
+        print(f"[data_upload log error] {e}", file=sys.stderr)
 
-    pre_state: dict = {
-        'captured_at': log_time,
-        'file_path': file_path,
-        'exists': os.path.exists(file_path),
+
+def load_line_records() -> dict:
+    """Load line number records from file."""
+    if not os.path.exists(LINE_RECORD_FILE):
+        return {}
+    try:
+        with open(LINE_RECORD_FILE, 'r', encoding='utf-8') as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+            try:
+                return json.load(f)
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except (json.JSONDecodeError, IOError) as e:
+        log_debug(f"Failed to load line records: {e}")
+        return {}
+
+
+def save_line_records(records: dict) -> bool:
+    """Save line number records to file with locking."""
+    try:
+        os.makedirs(os.path.dirname(LINE_RECORD_FILE), exist_ok=True)
+        with open(LINE_RECORD_FILE, 'w', encoding='utf-8') as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                json.dump(records, f, indent=2)
+                return True
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except IOError as e:
+        log_debug(f"Failed to save line records: {e}")
+        return False
+
+
+def update_line_record(transcript_path: str, session_id: str, end_line: int) -> bool:
+    """Update line count record after successful upload."""
+    records = load_line_records()
+    records[transcript_path] = {
+        "session_id": session_id,
+        "last_line_count": end_line,
+        "updated_at": time.strftime('%Y-%m-%d %H:%M:%S')
     }
-    if pre_state['exists']:
-        pre_state['content'] = read_file_content(file_path)
-        pre_state['sha1'] = get_file_sha1(file_path)
-        pre_state['line_count'] = count_lines(file_path)
+    success = save_line_records(records)
+    if success:
+        log_debug(f"Updated record: {transcript_path} -> {end_line} lines")
+    else:
+        log_debug("Warning: Failed to save line records")
+    return success
 
-    state_path = os.path.join(_pre_state_dir, f'{sha1_text(file_path)}.json')
+
+def read_transcript_lines(transcript_path: str, start_line: int, end_line: int) -> List[str]:
+    """Read lines from transcript file [start_line, end_line)."""
+    lines = []
+    if not os.path.exists(transcript_path):
+        return lines
     try:
-        with open(state_path, 'w', encoding='utf-8') as f:
-            json.dump(pre_state, f, ensure_ascii=False)
-        log_debug(f'Pre-state saved: {file_path}')
-    except Exception as e:
-        log_debug(f'Pre-state write failed: {e}')
+        with open(transcript_path, 'r', encoding='utf-8') as f:
+            for i, line in enumerate(f):
+                if i >= start_line and i < end_line:
+                    lines.append(line.strip())
+                if i >= end_line:
+                    break
+    except IOError as e:
+        log_debug(f"Failed to read transcript {transcript_path}: {e}")
+    return lines
 
 
-# ---------------------------------------------------------------------------
-# PostToolUse — enrich payload with pre-state context
-# ---------------------------------------------------------------------------
-def enrich_post_tool_use(payload: dict, tool_name: str, file_path: str):
-    if tool_name not in TRACKED_FILE_TOOLS or not file_path:
-        return
-
-    state_path = os.path.join(_pre_state_dir, f'{sha1_text(file_path)}.json')
-    if not os.path.exists(state_path):
-        return
+def parse_transcript_line(line: str) -> Optional[str]:
+    """Validate transcript row and return canonical JSONL line."""
     try:
-        with open(state_path, 'r', encoding='utf-8') as f:
-            pre = json.load(f)
-        if isinstance(pre, dict):
-            payload['aac_pre_file_exists'] = pre.get('exists') is True
-            payload['aac_pre_file_content'] = pre.get('content', '')
-            payload['aac_pre_file_sha1'] = pre.get('sha1', '')
-            payload['aac_pre_file_line_count'] = pre.get('line_count')
-            payload['aac_pre_file_captured_at'] = pre.get('captured_at')
-            payload['aac_pre_file_path'] = pre.get('file_path', file_path)
-        try:
-            os.remove(state_path)
-        except Exception:
-            pass
-        log_debug(f'Post enriched: {file_path}')
-    except Exception as e:
-        log_debug(f'Pre-state read failed: {e}')
+        payload = json.loads(line)
+        return json.dumps(payload, ensure_ascii=False)
+    except json.JSONDecodeError:
+        log_debug("Skipped invalid JSON transcript line")
+        return None
 
 
-# ---------------------------------------------------------------------------
-# Write JSONL record (with exclusive file lock)
-# ---------------------------------------------------------------------------
-def write_jsonl(record: dict, utc_day: str):
-    log_file = os.path.join(_history_dir, f'{_agent_id}-{utc_day}.jsonl')
-    line = json.dumps(record, ensure_ascii=False) + '\n'
+def get_history_log_file(agent_id: str) -> str:
+    """Resolve daily history JSONL file path for agent_id."""
+    local_day = time.strftime('%Y-%m-%d', time.localtime())
+    history_dir = os.path.join(AAC_LOGS_BASE_DIR, agent_id, "history")
+    return os.path.join(history_dir, f"{agent_id}-{local_day}.jsonl")
+
+
+def append_rows_to_history(agent_id: str, rows: List[str]) -> bool:
+    """Append JSONL rows into agent history file with file locking."""
+    if not rows:
+        return True
+
+    log_file = get_history_log_file(agent_id)
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
     try:
         with open(log_file, 'a', encoding='utf-8') as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             try:
-                f.write(line)
+                for row in rows:
+                    f.write(row + "\n")
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        log_debug(f'JSONL written: {log_file}')
+        log_debug(f"Appended {len(rows)} rows to {log_file}")
+        return True
     except Exception as e:
-        log_debug(f'JSONL write failed: {e}')
+        log_debug(f"ERROR appending rows to history: {e}")
+        return False
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-def main():
-    if len(sys.argv) < 2:
-        sys.exit(0)
+def upload_lines(
+    transcript_path: str,
+    start_line: int,
+    end_line: int,
+    session_id: str,
+    agent_id: str,
+) -> bool:
+    """Read and append transcript lines in range [start_line, end_line)."""
+    if start_line >= end_line:
+        log_debug(f"No lines to append: start_line={start_line}, end_line={end_line}")
+        return True
 
-    agent_id = sys.argv[2] if len(sys.argv) >= 3 else 'qoder-cli'
-    init_paths(sys.argv[1], agent_id)
+    expected_count = end_line - start_line
 
-    raw = sys.stdin.read().strip()
-    if not raw:
-        sys.exit(0)
+    # Read lines
+    lines = read_transcript_lines(transcript_path, start_line, end_line)
+    actual_count = len(lines)
 
-    # Strip markdown code fences if the caller wrapped the JSON
-    if raw.startswith('```'):
-        lines = raw.split('\n')
-        raw = '\n'.join(lines[1:-1]).strip()
+    log_debug(f"Read {actual_count} lines from {transcript_path} (range: {start_line}-{end_line}, expected: {expected_count})")
+
+    # Warn if actual count doesn't match expected (file may have been modified)
+    if actual_count < expected_count:
+        log_debug(f"Warning: Expected {expected_count} lines but only read {actual_count}")
+    elif actual_count > expected_count:
+        log_debug(f"Warning: Read more lines ({actual_count}) than expected ({expected_count})")
+
+    if not lines:
+        return True
+
+    # Validate and canonicalize JSONL rows.
+    rows_to_append = []
+    for line in lines:
+        row = parse_transcript_line(line)
+        if row:
+            rows_to_append.append(row)
+
+    success = append_rows_to_history(agent_id, rows_to_append)
+
+    if success:
+        log_debug(f"Successfully appended {len(rows_to_append)} rows from {transcript_path}")
+        print(f"Appended {len(rows_to_append)} rows to local history ({agent_id})")
+        # Update line record so subsequent stop hooks see the new count
+        update_line_record(transcript_path, session_id, end_line)
+    else:
+        log_debug(f"Failed to append rows from {transcript_path}")
+        print("Failed to append rows to local history", file=sys.stderr)
+
+    return success
+
+
+def _read_stdin_params() -> Tuple[str, str]:
+    """Read transcript_path and session_id from stdin JSON (stop hook mode)."""
+    try:
+        stdin_data = sys.stdin.read().strip()
+    except Exception:
+        return "", ""
+
+    if not stdin_data:
+        return "", ""
 
     try:
-        payload = json.loads(raw)
+        payload = json.loads(stdin_data)
     except json.JSONDecodeError:
-        log_debug('Invalid JSON payload')
+        log_debug("Failed to parse stdin JSON")
+        return "", ""
+
+    # Avoid infinite loop: if this stop was triggered by hooks, bail out
+    if payload.get("stop_hooks_active", False):
+        log_debug("stop_hooks_active=true, exiting to avoid recursion")
         sys.exit(0)
 
-    if not isinstance(payload, dict):
-        sys.exit(0)
+    transcript = payload.get("transcript_path", "")
+    session_id = payload.get("session_id") or payload.get("sessionId", "")
+    return transcript, session_id
 
-    # --- gate: only process known hook events ---
-    event_name = (
-        payload.get('hook_event_name')
-        or payload.get('hookEvent')
-        or ''
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Append transcript lines to ai-agent-collector history logs",
     )
-    if event_name not in ('PreToolUse', 'PostToolUse', 'PostToolUseFailure'):
+    parser.add_argument(
+        "--agent-id",
+        required=True,
+        help="Agent ID in history path (e.g. qoder(for both qoder ide and cli), qoder-work)",
+    )
+    parser.add_argument("--transcript", default="",
+                        help="Path to transcript file")
+    parser.add_argument("--session-id", default="",
+                        help="Session ID")
+    args = parser.parse_args()
+
+    # log args
+    log_debug(f"argv: {sys.argv}")
+
+    agent_id = (args.agent_id or "").strip()
+    if not agent_id:
+        print("--agent-id is required", file=sys.stderr)
+        sys.exit(1)
+
+    transcript_path = args.transcript
+    session_id = args.session_id
+
+    # If not provided via CLI, read from stdin (stop hook mode)
+    if not transcript_path or not session_id:
+        stdin_transcript, stdin_session = _read_stdin_params()
+        transcript_path = transcript_path or stdin_transcript
+        session_id = session_id or stdin_session
+
+    if not transcript_path or not session_id:
+        log_debug("No transcript path or session ID provided")
         sys.exit(0)
 
-    tool_name_raw = payload.get('tool_name') or payload.get('toolName') or ''
-    tool_name = normalize_tool_name(tool_name_raw)
-    if not tool_name:
-        sys.exit(0)
-    # qoder-cli: only track file/shell tools; other agents: record everything
-    if agent_id == 'qoder-cli':
-        if tool_name not in TRACKED_FILE_TOOLS and tool_name not in SHELL_TOOLS:
-            sys.exit(0)
+    if not os.path.exists(transcript_path):
+        log_debug(f"Transcript file not found: {transcript_path}")
+        sys.exit(1)
 
-    tool_input = resolve_tool_input(payload)
-    file_path = resolve_file_path(tool_input)
-
-    now = datetime.datetime.utcnow()
-    log_time = now.strftime('%Y-%m-%dT%H:%M:%SZ')
-    utc_day = now.strftime('%Y-%m-%d')
-
-    # --- dedup ---
-    if is_duplicate(event_name, tool_name, file_path, log_time):
-        log_debug(f'Skipped duplicate: {event_name}|{tool_name}')
+    line_range = get_line_range(transcript_path, session_id)
+    if not line_range:
+        log_debug("No new lines to append")
         sys.exit(0)
 
-    # --- PreToolUse: snapshot file state ---
-    if event_name == 'PreToolUse':
-        handle_pre_tool_use(tool_name, file_path, log_time)
-
-    # --- PostToolUse: enrich with pre-state ---
-    if event_name in ('PostToolUse', 'PostToolUseFailure'):
-        enrich_post_tool_use(payload, tool_name, file_path)
-
-    # --- stamp common fields ---
-    payload['capturedAt'] = payload.get('capturedAt') or log_time
-    payload['logTime'] = payload.get('logTime') or log_time
-    payload['aac_client_type'] = _agent_id
-    payload['aac_tool_name_normalized'] = tool_name
-
-    record = {
-        'uuid': str(uuid.uuid4()),
-        'logTime': log_time,
-        'reported': False,
-        'clientType': _agent_id,
-        'hookEvent': event_name,
-        'hostname': socket.gethostname(),
-        'data': payload,
-    }
-
-    write_jsonl(record, utc_day)
-    send_to_sls(record)
-
-    log_debug(f'Done: {event_name} {tool_name} {file_path}')
+    start_line, end_line = line_range
+    success = upload_lines(transcript_path, start_line, end_line, session_id, agent_id)
+    sys.exit(0 if success else 1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
