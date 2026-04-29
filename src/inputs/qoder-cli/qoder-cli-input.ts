@@ -5,13 +5,10 @@ import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 
 /**
- * Qoder CLI — Hook JSONL log input.
+ * Qoder CLI — transcript JSONL input.
  *
- * Hook scripts intercept PreToolUse / PostToolUse / failure events
- * and write JSONL to ~/.ai-agent-collector/logs/qoder-cli/history/.
- *
- * Special: uses aac_pre_file_exists / aac_pre_file_content to distinguish
- * true create vs overwrite.
+ * Reads rows from ~/.ai-agent-collector/logs/qoder-cli/history/ and keeps
+ * assistant/user messages that have message.content[0].type.
  */
 export class QoderCliInput extends BaseHookInput {
   readonly id = 'qoder-cli-hook';
@@ -37,56 +34,103 @@ export class QoderCliInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    const inner = (typeof record.data === 'object' && record.data !== null
-      ? record.data
-      : record) as Record<string, unknown>;
+    const rowType = record.type as string | undefined;
+    if (rowType !== 'assistant' && rowType !== 'user') return null;
 
-    const eventType = (inner.hook_event_name as string)
-      ?? (record.hookEvent as string)
-      ?? (inner.event_type as string)
-      ?? '';
-    if (!eventType.includes('PostToolUse')) return null;
+    const message = (typeof record.message === 'object' && record.message !== null
+      ? record.message
+      : {}) as Record<string, unknown>;
+    const messageContent = message.content;
 
-    const toolInput = (inner.tool_input ?? inner.toolInput) as Record<string, unknown> | undefined;
-    const toolName = (inner.tool_name as string)
-      ?? (inner.toolName as string)
-      ?? 'unknown';
-    const filePath = (toolInput?.file_path as string)
-      ?? (toolInput?.path as string)
-      ?? (toolInput?.filepath as string)
-      ?? '';
-    if (!filePath) return null;
+    let ctype: unknown;
+    let cname: unknown;
+    let cinput: unknown;
+    let ctext: unknown;
+    let ccontent: unknown;
+    let cthinking: unknown;
+    let cid: unknown;
+    let ctoolUseId: unknown;
 
-    const preFileExists = inner.aac_pre_file_exists as boolean | undefined;
-    let actionType = ActionType.Edit;
-    const normalized = (inner.aac_tool_name_normalized as string) ?? '';
-    if (normalized === 'Create' || toolName === 'create_file') {
-      actionType = preFileExists === false ? ActionType.Create : ActionType.Edit;
-    } else if (normalized === 'Write' || toolName === 'write_to_file') {
-      actionType = preFileExists === false ? ActionType.Create : ActionType.Edit;
+    if (typeof messageContent === 'string') {
+      // Compatibility path for transcript rows where content is plain text.
+      ctype = 'text';
+      ctext = messageContent;
+    } else {
+      const contentList = Array.isArray(messageContent) ? messageContent : [];
+      const content0 = (contentList[0] && typeof contentList[0] === 'object' && contentList[0] !== null
+        ? contentList[0]
+        : null) as Record<string, unknown> | null;
+
+      // Keep parity with SQL filter for array payloads: content[0].type must be non-null.
+      ctype = content0?.type;
+      if (ctype === null || ctype === undefined) return null;
+
+      cname = content0?.name;
+      cinput = content0?.input;
+      ctext = content0?.text;
+      ccontent = content0?.content;
+      cthinking = content0?.thinking;
+      cid = content0?.id;
+      ctoolUseId = content0?.tool_use_id;
     }
 
-    const content = (toolInput?.content as string)
-      ?? (toolInput?.new_string as string)
-      ?? '';
-    const diff = (toolInput?.diff as string)
-      ?? (inner.tool_response as string)
-      ?? undefined;
+    const timestamp = parseTimestamp(record.timestamp) ?? Date.now();
+    const content = typeof ctext === 'string'
+      ? ctext
+      : typeof cthinking === 'string'
+        ? cthinking
+        : typeof ccontent === 'string'
+          ? ccontent
+          : '';
 
-    return buildAgentActivityEntry({
-      sessionId: (inner.session_id as string) ?? '',
-      userId: (inner.user_id as string) ?? '',
+    const entry = buildAgentActivityEntry({
+      sessionId: (record.session_id as string)
+        ?? (record.sessionId as string)
+        ?? (record.sessionid as string)
+        ?? '',
+      userId: (record.user_id as string)
+        ?? (record.userId as string)
+        ?? '',
       agentType: ClientType.QoderCliHook,
-      actionType,
-      filePath,
+      actionType: rowType === 'assistant' ? ActionType.Edit : ActionType.Other,
+      filePath: (record.filePath as string) ?? '',
       content,
-      inlineDiffMessage: diff,
-      timestamp: (inner.timestamp as number) ?? Date.now(),
+      timestamp,
       extra: {
-        eventType,
-        conversationId: inner.conversation_id,
-        callId: inner.call_id,
+        type: rowType,
+        _ctype: ctype,
+        _cname: cname,
+        _cinput: cinput,
+        _ctext: ctext,
+        _ccontent: ccontent,
+        _cthinking: cthinking,
+        _cid: cid,
+        _ctool_use_id: ctoolUseId,
+        entrypoint: record.entrypoint,
+        cwd: record.cwd,
+        userType: record.userType,
+        parentUuid: record.parentUuid,
+        role: message.role,
+        model: message.model,
+        stop_reason: message.stop_reason,
       },
     });
+
+    const sourceUuid = record.uuid;
+    if (typeof sourceUuid === 'string' && sourceUuid.trim().length > 0) {
+      entry.uuid = sourceUuid;
+    }
+    return entry;
   }
+}
+
+function parseTimestamp(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string') return undefined;
+
+  const num = Number(value);
+  if (Number.isFinite(num)) return num;
+
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? undefined : parsed;
 }
