@@ -1,4 +1,4 @@
-import type { AnalyticsConfig, FlusherConfig, SlsEndpoint } from '../types/index.js';
+import type { AnalyticsConfig, FlusherConfig, SlsEndpoint, SlsMode } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -17,6 +17,7 @@ interface ConfigFile {
 
   sls?: {
     enabled?: boolean;
+    mode?: SlsMode;
     accessKeyId?: string;
     accessKeySecret?: string;
     /** 完整 SLS endpoint URL，如 https://cn-hangzhou.log.aliyuncs.com */
@@ -143,6 +144,9 @@ function buildFlushersConfig(
 }
 
 function buildSlsConfig(file: ConfigFile | null) {
+  const modeRaw = env('SLS_MODE') ?? file?.sls?.mode;
+  const mode: SlsMode = modeRaw === 'ak' ? 'ak' : 'webtracking';
+
   const ak = env('SLS_ACCESS_KEY_ID') ?? file?.sls?.accessKeyId ?? '';
   const sk = env('SLS_ACCESS_KEY_SECRET') ?? file?.sls?.accessKeySecret ?? '';
   const endpoint = env('SLS_ENDPOINT') ?? file?.sls?.endpoint ?? '';
@@ -192,12 +196,19 @@ function buildSlsConfig(file: ConfigFile | null) {
     }
   }
 
-  const enabled = env('SLS_ACCESS_KEY_ID') !== undefined
-    ? !!(ak && sk && endpoint)
-    : file?.sls?.enabled ?? !!(ak && sk && endpoint);
+  const hasEndpoints = endpoints.length > 0;
+  let enabled: boolean;
+  if (file?.sls?.enabled !== undefined) {
+    enabled = file.sls.enabled;
+  } else if (mode === 'webtracking') {
+    enabled = !!(endpoint && hasEndpoints);
+  } else {
+    enabled = !!(ak && sk && endpoint && hasEndpoints);
+  }
 
   return {
     enabled,
+    mode,
     accessKeyId: ak,
     accessKeySecret: sk,
     endpoint,

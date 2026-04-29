@@ -13,7 +13,7 @@
 **Primary Dependencies**: `better-sqlite3`（SQLite 读取）、`@alicloud/log`（SLS 输出）、`axios`（HTTP 输出）、`uuid`（UUID 生成）、`zod`（schema 校验）
 **Storage**: JSON 文件持久化（StateStore/SnapshotStore）、SQLite 只读（Qoder chat_record）
 **Testing**: Vitest 1.6.0 + @vitest/coverage-v8（已配置，80% 阈值）
-**Target Platform**: Node.js 16+，macOS / Linux
+**Target Platform**: Node.js 18+，macOS / Linux
 **Project Type**: 后台守护进程（daemon）
 **Performance Goals**: 稳态 RSS < 150MB，轮询间隔 30-60s，优雅关闭 < 15s
 **Constraints**: 增量读取（禁止全文件重读），批量刷写（禁止单条刷写），事件循环不阻塞 > 50ms

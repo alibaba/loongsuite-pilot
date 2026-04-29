@@ -26,8 +26,12 @@ export interface FlusherConfig {
   http?: HttpFlusherConfig;
 }
 
+export type SlsMode = 'ak' | 'webtracking';
+
 export interface SlsFlusherConfig {
   enabled: boolean;
+  /** 上报模式：'ak' 使用 AK/SK 签名的 postLogStoreLogs，'webtracking' 使用匿名 PutWebtracking */
+  mode: SlsMode;
   accessKeyId: string;
   accessKeySecret: string;
   /** 完整 SLS endpoint URL，如 https://cn-hangzhou.log.aliyuncs.com */

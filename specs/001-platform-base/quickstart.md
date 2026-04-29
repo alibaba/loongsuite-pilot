@@ -5,8 +5,8 @@
 ## 环境准备
 
 ```bash
-# Node.js 22+（推荐使用 nvm）
-nvm use 22
+# Node.js 18+（推荐使用 nvm）
+nvm use 18
 
 # 安装依赖
 npm install --legacy-peer-deps

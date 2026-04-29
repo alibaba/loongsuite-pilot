@@ -6,14 +6,14 @@
 
 | 依赖 | 版本要求 | 说明 |
 |------|---------|------|
-| Node.js | >= 16.x | 运行时，推荐 18 LTS 或更高 |
+| Node.js | >= 18.x | 运行时，推荐 18 LTS 或更高 |
 | npm | >= 8.x | 包管理器 |
 | TypeScript | >= 5.3 | 开发依赖，已在 devDependencies 中声明 |
 | better-sqlite3 | 9.x | 原生模块，需要编译工具链 (macOS: Xcode CLT, Linux: build-essential) |
 
 ```bash
 # 验证环境
-node -v   # >= v16.0.0
+node -v   # >= v18.0.0
 npm -v    # >= 8.0.0
 ```
 
