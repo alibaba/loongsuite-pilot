@@ -148,7 +148,8 @@ curl -fsSL <URL>/aac-installer.sh | bash -s -- install \
 4. 执行 `postinstall.js` 部署 hook 脚本到 `~/.ai-agent-collector/hooks/`
 5. 将安装参数写入 `~/.ai-agent-collector/config.json`（非环境变量）
 6. 安装 `aac` 服务管理命令（root 用户链接到 `/usr/local/bin`，普通用户安装到 `~/.local/bin`）
-7. 自动启动服务
+7. 配置开机自启动（macOS: launchd / Linux: systemd user unit）
+8. 自动启动服务
 
 #### 升级
 
@@ -181,13 +182,17 @@ curl -fsSL <URL>/aac-installer.sh | bash -s -- uninstall --purge
 安装完成后使用 `aac` 命令管理服务：
 
 ```bash
-aac start      # 启动（后台运行）
-aac stop       # 停止
-aac restart    # 重启
-aac status     # 查看运行状态和版本
-aac log        # 实时查看日志（tail -f）
-aac config     # 查看当前配置文件
-aac version    # 查看版本信息
+aac start             # 启动（后台运行）
+aac stop              # 停止
+aac restart           # 重启
+aac status            # 查看运行状态、版本和自启动状态
+aac run               # 前台运行（供 launchd/systemd 调用）
+aac autostart enable  # 开启开机自启动
+aac autostart disable # 关闭开机自启动
+aac autostart status  # 查看自启动状态
+aac log               # 实时查看日志（tail -f）
+aac config            # 查看当前配置文件
+aac version           # 查看版本信息
 ```
 
 修改配置后执行 `aac restart` 即可生效：
@@ -200,9 +205,37 @@ vi ~/.ai-agent-collector/config.json
 aac restart
 ```
 
-### 生产环境守护（systemd，可选）
+### 开机自启动
 
-如需系统级守护，创建 `/etc/systemd/system/ai-agent-collector.service`：
+安装时默认自动配置开机自启动，支持 macOS 和 Linux：
+
+| 平台 | 机制 | 配置文件位置 |
+|------|------|------------|
+| macOS | launchd (LaunchAgents) | `~/Library/LaunchAgents/com.ai-agent-collector.plist` |
+| Linux | systemd user unit | `~/.config/systemd/user/ai-agent-collector.service` |
+
+均为**用户级**注册，无需 root/sudo 权限。
+
+```bash
+# 查看自启动状态
+aac autostart status
+
+# 手动开启/关闭
+aac autostart enable
+aac autostart disable
+```
+
+**工作原理**：
+
+- `aac autostart enable` 会写入对应平台的服务配置，使用 `aac run` 作为入口。`aac run` 在前台运行服务并动态解析 node 路径（兼容 nvm/volta/fnm 等版本管理器）。
+- **macOS**：通过 `KeepAlive.SuccessfulExit=false` 实现崩溃自动重启，`RunAtLoad=true` 实现登录自启动。`aac stop` 正常退出（exit 0）不会触发重启。
+- **Linux**：通过 `Restart=on-failure` 实现崩溃自动重启。如需在无登录会话时运行，需要 `loginctl enable-linger`（安装时会自动尝试）。
+
+**注意**：当自启动已开启时，`aac start/stop` 会自动委托给 launchd/systemd 管理，无需额外操作。
+
+#### 高级：系统级 systemd 守护（可选）
+
+如需系统级守护（root 运行），创建 `/etc/systemd/system/ai-agent-collector.service`：
 
 ```ini
 [Unit]
