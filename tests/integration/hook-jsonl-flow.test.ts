@@ -188,6 +188,8 @@ describe('Cursor hook script integration flow', () => {
       session_id: 'sess-1',
       generation_id: 'turn-1',
       model: 'gpt-test',
+      input_tokens: 12,
+      output_tokens: 7,
       tool_name: 'Shell',
       tool_input: { command: 'pwd' },
       tool_output: '{"ok":true}',
@@ -204,9 +206,17 @@ describe('Cursor hook script integration flow', () => {
     const record = JSON.parse(lines[0]!);
     expect(record.clientType).toBe('CursorHook');
     expect(record.hookEvent).toBe('postToolUse');
-    expect(record.data['gen_ai.session_id']).toBe('sess-1');
-    expect(record.data['gen_ai.request_model']).toBe('gpt-test');
-    expect(record.data['gen_ai.tool_name']).toBe('Shell');
+    expect(record.data['event.name']).toBe('tool.result');
+    expect(record.data['session.id']).toBe('sess-1');
+    expect(record.data['turn.id']).toBe('turn-1');
+    expect(record.data['request.model']).toBe('gpt-test');
+    expect(record.data['response.model']).toBe('gpt-test');
+    expect(record.data['usage.input_tokens']).toBe(12);
+    expect(record.data['usage.output_tokens']).toBe(7);
+    expect(record.data['usage.total_tokens']).toBe(19);
+    expect(record.data['tool.name']).toBe('Shell');
+    expect(record.data['tool.arguments']).toEqual({ command: 'pwd' });
+    expect(record.data['tool.result']).toEqual({ ok: true });
     expect(record.data.session_id).toBeUndefined();
   });
 
@@ -221,6 +231,11 @@ describe('Cursor hook script integration flow', () => {
     const logFile = path.join(tmpDir, 'logs', 'cursor-hook', 'history', `cursor-${getTodayDateString()}.jsonl`);
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
     expect(lines).toHaveLength(2);
+    const records = lines.map(line => JSON.parse(line));
+    expect(records[0].data['event.name']).toBe('llm.response');
+    expect(records[0].data['output.messages']).toEqual([{ type: 'text', content: 'a1' }]);
+    expect(records[1].data['event.name']).toBe('llm.response');
+    expect(records[1].data['output.messages']).toEqual([{ type: 'reasoning', content: 't1' }]);
   });
 
   it('should infer mapping role and parse tool fields', async () => {
@@ -238,10 +253,36 @@ describe('Cursor hook script integration flow', () => {
     const logFile = path.join(tmpDir, 'logs', 'cursor-hook', 'history', `cursor-${getTodayDateString()}.jsonl`);
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
     const record = JSON.parse(lines.at(-1)!);
-    expect(record.data['gen_ai.role']).toBe('user');
-    expect(record.data['gen_ai.tool_arguments']).toEqual({ query: 'abc' });
-    expect(record.data['gen_ai.tool_results']).toEqual({ items: [1] });
-    expect(record.data['gen_ai.session_id']).toBe('conv-1');
+    expect(record.data['event.name']).toBe('tool.call');
+    expect(record.data['message.role']).toBe('user');
+    expect(record.data['tool.arguments']).toEqual({ query: 'abc' });
+    expect(record.data['tool.result']).toEqual({ items: [1] });
+    expect(record.data['session.id']).toBe('conv-1');
+  });
+
+  it('should map user input text into input message fields', async () => {
+    const result = runCursorHook(JSON.stringify({
+      hook_event_name: 'beforeSubmitPrompt',
+      session_id: 'sess-prompt',
+      generation_id: 'turn-prompt',
+      model: 'gpt-input',
+      text: 'Please edit the file',
+      input_messages_delta: [{ role: 'user', content: 'Please edit the file' }],
+      input_messages: [{ role: 'system', content: 'You are helpful' }],
+    }), { AAC_DATA_DIR: tmpDir });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+
+    const logFile = path.join(tmpDir, 'logs', 'cursor-hook', 'history', `cursor-${getTodayDateString()}.jsonl`);
+    const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
+    const record = JSON.parse(lines.at(-1)!);
+    expect(record.data['event.name']).toBe('llm.request');
+    expect(record.data['message.role']).toBe('user');
+    expect(record.data['request.model']).toBe('gpt-input');
+    expect(record.data['input.messages_delta']).toEqual([{ role: 'user', content: 'Please edit the file' }]);
+    expect(record.data['input.messages']).toEqual([{ role: 'system', content: 'You are helpful' }]);
+    expect(record.data['input.messages_hash']).toMatch(/^[a-f0-9]{64}$/);
+    expect(record.data.text).toBeUndefined();
   });
 
   it('should keep fail-open behavior for invalid json payload', async () => {
@@ -251,6 +292,15 @@ describe('Cursor hook script integration flow', () => {
 
     const logFile = path.join(tmpDir, 'logs', 'cursor-hook', 'history', `cursor-${getTodayDateString()}.jsonl`);
     await expect(fs.access(logFile)).rejects.toBeTruthy();
+
+    const errorFile = path.join(tmpDir, 'logs', 'cursor-hook', 'errors', `cursor-error-${getTodayDateString()}.jsonl`);
+    const errorLines = (await fs.readFile(errorFile, 'utf-8')).trim().split('\n');
+    expect(errorLines).toHaveLength(1);
+    const errorRecord = JSON.parse(errorLines[0]!);
+    expect(errorRecord.stage).toBe('parse');
+    expect(errorRecord['error.type']).toBe('invalid_json');
+    expect(errorRecord.input_bytes).toBeGreaterThan(0);
+    expect(errorRecord.input_sha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it('should keep fail-open behavior when log path is not writable', async () => {

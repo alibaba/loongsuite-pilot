@@ -33,7 +33,7 @@ describe('CursorHookInput', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it('parses hook record and maps gen_ai session id', async () => {
+  it('parses hook record and maps final-schema session id', async () => {
     const today = getTodayDateString();
     const logFile = path.join(tmpDir, `cursor-${today}.jsonl`);
     const record = {
@@ -43,7 +43,7 @@ describe('CursorHookInput', () => {
       clientType: 'CursorHook',
       hookEvent: 'postToolUse',
       data: {
-        'gen_ai.session_id': 'sess-1',
+        'session.id': 'sess-1',
         text: 'hello',
         cwd: '/workspace',
       },
@@ -63,7 +63,7 @@ describe('CursorHookInput', () => {
     expect(entries[0]!.content).toBe('hello');
   });
 
-  it('supports session id compatibility fallback', async () => {
+  it('uses final-schema session id only', async () => {
     const today = getTodayDateString();
     const logFile = path.join(tmpDir, `cursor-${today}.jsonl`);
     const record = {
@@ -73,7 +73,7 @@ describe('CursorHookInput', () => {
       clientType: 'CursorHook',
       hookEvent: 'afterAgentResponse',
       data: {
-        'gen_ai.session_id': 'sess-from-gen-id',
+        'session.id': 'sess-from-schema',
       },
     };
     await fs.writeFile(logFile, `${JSON.stringify(record)}\n`);
@@ -84,7 +84,7 @@ describe('CursorHookInput', () => {
     await input.stop();
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]!.sessionId).toBe('sess-from-gen-id');
+    expect(entries[0]!.sessionId).toBe('sess-from-schema');
   });
 
   it('maps file events to read/edit actions', async () => {
@@ -97,7 +97,7 @@ describe('CursorHookInput', () => {
         reported: false,
         clientType: 'CursorHook',
         hookEvent: 'beforeReadFile',
-        data: { file_path: '/a.ts', 'gen_ai.session_id': 's-read' },
+        data: { file_path: '/a.ts', 'session.id': 's-read' },
       },
       {
         uuid: 'r-4',
@@ -105,7 +105,7 @@ describe('CursorHookInput', () => {
         reported: false,
         clientType: 'CursorHook',
         hookEvent: 'afterFileEdit',
-        data: { file_path: '/b.ts', 'gen_ai.session_id': 's-edit' },
+        data: { file_path: '/b.ts', 'session.id': 's-edit' },
       },
     ];
     await fs.writeFile(logFile, `${records.map(r => JSON.stringify(r)).join('\n')}\n`);

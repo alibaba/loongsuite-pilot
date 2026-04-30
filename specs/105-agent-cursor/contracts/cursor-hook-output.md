@@ -21,10 +21,11 @@
   "hookEvent": "postToolUse",
   "data": {
     "cursor_version": "1.0.0",
-    "timestamp_ns": "1745735530000000000",
-    "gen_ai.session_id": "sess-1",
-    "gen_ai.request_model": "gpt-test",
-    "gen_ai.tool_name": "Shell"
+    "time_unix_nano": "1745735530000000000",
+    "event.name": "tool.result",
+    "session.id": "sess-1",
+    "request.model": "gpt-test",
+    "tool.name": "Shell"
   }
 }
 ```

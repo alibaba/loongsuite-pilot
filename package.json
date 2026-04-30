@@ -11,6 +11,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
+    "perf:cursor-hook": "node tests/performance/cursor-hook-processor.perf.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
