@@ -222,6 +222,8 @@ function mapStandardFields(payload, now) {
     'tool.result.status': payload.tool_result_status,
     'tool.result.duration_ms': payload.tool_result_duration_ms,
     'is_error': payload.is_error,
+    'agent.type': 'cursor',
+    'event.id': crypto.randomUUID(),
   });
 }
 
