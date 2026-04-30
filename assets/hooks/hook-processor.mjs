@@ -19,7 +19,7 @@
  *     - transcript_path: path to the transcript JSONL file
  *     - session_id (or conversation_id): session identifier
  *
- * Called by cursor-hook.sh and aac-qoder-hook.sh.
+ * Called by cursor-aac-hook.sh and qoder-aac-hook.sh.
  * Fail-open: errors are logged locally and never block the caller.
  */
 

@@ -5,7 +5,7 @@ set -euo pipefail
 # Qoder Hook Script — delegates to shared hook-processor.mjs
 # ============================================================================
 # Usage:
-#   aac-qoder-hook.sh [agent-id]
+#   qoder-aac-hook.sh [agent-id]
 #
 #   agent-id  Optional. Defaults to "qoder-cli".
 #             Controls the log subdirectory and history file prefix.

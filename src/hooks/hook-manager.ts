@@ -166,7 +166,7 @@ export class HookManager {
    */
   static buildQoderCliHooks(aiAgentCollectorDir?: string): HookDefinition[] {
     const baseDir = aiAgentCollectorDir ?? resolveHome('~/.ai-agent-collector');
-    const command = `${baseDir}/hooks/aac-qoder-hook.sh qoder-cli`;
+    const command = `${baseDir}/hooks/qoder-aac-hook.sh qoder-cli`;
     const settingsPath = resolveHome('~/.qoder/settings.json');
 
     return [
@@ -187,7 +187,7 @@ export class HookManager {
    */
   static buildQoderWorkHooks(aiAgentCollectorDir?: string): HookDefinition[] {
     const baseDir = aiAgentCollectorDir ?? resolveHome('~/.ai-agent-collector');
-    const command = `${baseDir}/hooks/aac-qoder-hook.sh qoder-work`;
+    const command = `${baseDir}/hooks/qoder-aac-hook.sh qoder-work`;
     const settingsPath = resolveHome('~/.qoderwork/settings.json');
 
     return [

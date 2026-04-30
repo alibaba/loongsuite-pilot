@@ -10,7 +10,7 @@ import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
  * Reads rows from ~/.ai-agent-collector/logs/qoder-work/history/ and keeps
  * assistant/user messages that have message.content[0].type.
  *
- * Reuses the same hook script as Qoder CLI (aac-qoder-hook.sh)
+ * Reuses the same hook script as Qoder CLI (qoder-aac-hook.sh)
  * with "qoder-work" as the agent ID parameter.
  * Hook config lives at ~/.qoderwork/settings.json.
  */

@@ -16,7 +16,7 @@ function getTodayDateString(): string {
 }
 
 function runCursorHook(input: string, env: Record<string, string>) {
-  return spawnSync('bash', [path.resolve(process.cwd(), 'assets/hooks/cursor-hook.sh')], {
+  return spawnSync('bash', [path.resolve(process.cwd(), 'assets/hooks/cursor-aac-hook.sh')], {
     input,
     env: { ...process.env, ...env },
     encoding: 'utf-8',
