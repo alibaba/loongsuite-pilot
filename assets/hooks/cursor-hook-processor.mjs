@@ -110,7 +110,7 @@ function mapStandardFields(payload, now) {
     timestamp_ns: nowTimestampNs(now),
     trace_id: payload.trace_id,
     span_id: payload.span_id,
-    'gen_id.session_id': payload.session_id ?? payload.conversation_id,
+    'gen_ai.session_id': payload.session_id ?? payload.conversation_id,
     'gen_ai.turn_id': payload.generation_id,
     'gen_ai.step_id': payload.step_id,
     'gen_ai.response_id': payload.response_id,

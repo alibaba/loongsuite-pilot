@@ -189,7 +189,6 @@ export class HookManager {
       'subagentStop',
       'afterAgentResponse',
       'afterAgentThought',
-      'beforeTabFileRead',
     ];
 
     return events.map(event => ({
