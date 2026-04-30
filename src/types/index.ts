@@ -92,6 +92,7 @@ export interface AgentControlConfig {
  */
 export interface InputState {
   lastOffset?: number;
+  lastFile?: string;
   lastRowId?: number;
   lastTimestamp?: number;
   highWatermark?: number;

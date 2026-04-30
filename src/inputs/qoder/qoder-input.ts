@@ -36,7 +36,7 @@ export class QoderInput extends BaseIdeInput {
       snapshotStorePath: opts?.snapshotStorePath
         ?? resolveHome('~/.ai-agent-collector/logs/qoder/qoder-snapshot-store.json'),
       pollIntervalMs: opts?.pollIntervalMs
-        ?? (Number(process.env.QODER_ANALYTICS_POLL_INTERVAL) || 60_000),
+        ?? (Number(process.env.QODER_ANALYTICS_POLL_INTERVAL) || 30_000),
       snapshotRetentionMs: opts?.snapshotRetentionMs,
     });
   }

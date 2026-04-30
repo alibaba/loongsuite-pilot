@@ -19,7 +19,7 @@ export class QoderCliInput extends BaseHookInput {
       stateStore: opts!.stateStore,
       logDir: opts?.logDir ?? resolveHome('~/.ai-agent-collector/logs/qoder-cli/history'),
       logPrefix: opts?.logPrefix ?? 'qoder-cli',
-      pollIntervalMs: opts?.pollIntervalMs ?? 60_000,
+      pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
     });
   }
 

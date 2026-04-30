@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Cursor hook entrypoint — delegates to shared hook-processor.mjs.
+# Cursor hook entrypoint — delegates to cursor-hook-processor.mjs.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROCESSOR="$SCRIPT_DIR/hook-processor.mjs"
+PROCESSOR="$SCRIPT_DIR/cursor-hook-processor.mjs"
 EMPTY_RESULT='{}'
 
 PAYLOAD="$(cat || true)"
@@ -43,7 +43,7 @@ if [[ -z "$NODE_BIN" ]]; then
   exit 0
 fi
 
-if ! printf '%s' "$PAYLOAD" | "$NODE_BIN" "$PROCESSOR" --agent-id cursor-hook --log-prefix cursor; then
+if ! printf '%s' "$PAYLOAD" | "$NODE_BIN" "$PROCESSOR"; then
   echo "[ai-agent-collector] hook processor failed" >&2
   printf '%s\n' "$EMPTY_RESULT"
 fi

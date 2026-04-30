@@ -3,129 +3,78 @@ import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
-
-/**
- * Cursor Hook — transcript JSONL input.
- *
- * Reads rows from ~/.ai-agent-collector/logs/cursor-hook/history/ written by
- * hook-processor.mjs, which incrementally forwards Cursor's transcript lines.
- *
- * Each row is a transcript line with { role, message: { content: [...] } }.
- */
+function toActionType(hookEvent: string): ActionType {
+  const event = hookEvent.toLowerCase();
+  if (event.includes('readfile')) return ActionType.Read;
+  if (event.includes('fileedit')) return ActionType.Edit;
+  if (
+    event.includes('toolexecution')
+    || event.includes('tooluse')
+    || event.includes('shellexecution')
+    || event.includes('mcpexecution')
+  ) {
+    return ActionType.Execute;
+  }
+  return ActionType.Other;
+}
+function getStringRecordValue(record: Record<string, unknown>, key: string): string | undefined {
+  const val = record[key];
+  return typeof val === 'string' && val.length > 0 ? val : undefined;
+}
+function getStringDataValue(data: Record<string, unknown>, key: string): string | undefined {
+  const val = data[key];
+  return typeof val === 'string' && val.length > 0 ? val : undefined;
+}
 export class CursorHookInput extends BaseHookInput {
   readonly id = 'cursor-hook';
   readonly agentType = ClientType.CursorHook;
-
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
       stateStore: opts!.stateStore,
       logDir: opts?.logDir ?? resolveHome('~/.ai-agent-collector/logs/cursor-hook/history'),
       logPrefix: opts?.logPrefix ?? 'cursor',
-      pollIntervalMs: opts?.pollIntervalMs ?? 60_000,
+      pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
     });
   }
-
   static async checkAvailability(): Promise<boolean> {
     return directoryExists(resolveHome('~/.ai-agent-collector/logs/cursor-hook/history'));
   }
-
   static getWatchPaths(): string[] {
     return [resolveHome('~/.ai-agent-collector/logs/cursor-hook/history')];
   }
-
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    const rowRole = (record.role as string | undefined)
-      ?? (record.type as string | undefined);
-    if (rowRole !== 'assistant' && rowRole !== 'user') return null;
-
-    const message = (typeof record.message === 'object' && record.message !== null
-      ? record.message
-      : {}) as Record<string, unknown>;
-    const messageContent = message.content;
-
-    let ctype: unknown;
-    let cname: unknown;
-    let cinput: unknown;
-    let ctext: unknown;
-    let ccontent: unknown;
-    let cthinking: unknown;
-    let cid: unknown;
-    let ctoolUseId: unknown;
-
-    if (typeof messageContent === 'string') {
-      ctype = 'text';
-      ctext = messageContent;
-    } else {
-      const contentList = Array.isArray(messageContent) ? messageContent : [];
-      const content0 = (contentList[0] && typeof contentList[0] === 'object' && contentList[0] !== null
-        ? contentList[0]
-        : null) as Record<string, unknown> | null;
-
-      ctype = content0?.type;
-      if (ctype === null || ctype === undefined) return null;
-
-      cname = content0?.name;
-      cinput = content0?.input;
-      ctext = content0?.text;
-      ccontent = content0?.content;
-      cthinking = content0?.thinking;
-      cid = content0?.id;
-      ctoolUseId = content0?.tool_use_id;
-    }
-
-    const timestamp = parseTimestamp(record.timestamp) ?? Date.now();
-    const content = typeof ctext === 'string'
-      ? ctext
-      : typeof cthinking === 'string'
-        ? cthinking
-        : typeof ccontent === 'string'
-          ? ccontent
-          : '';
-
-    const entry = buildAgentActivityEntry({
-      sessionId: (record.session_id as string)
-        ?? (record.sessionId as string)
-        ?? '',
-      userId: (record.user_id as string)
-        ?? (record.userId as string)
-        ?? '',
+    const hookEvent = getStringRecordValue(record, 'hookEvent') ?? 'unknown';
+    const data = (record.data && typeof record.data === 'object' && !Array.isArray(record.data))
+      ? (record.data as Record<string, unknown>)
+      : {};
+    const sessionId = getStringDataValue(data, 'gen_ai.session_id')
+      ?? getStringDataValue(data, 'gen_ai.session_id')
+      ?? getStringRecordValue(record, 'session_id')
+      ?? '';
+    const filePath = getStringDataValue(data, 'file_path')
+      ?? getStringDataValue(data, 'path')
+      ?? getStringDataValue(data, 'filePath')
+      ?? '';
+    const textContent = getStringDataValue(data, 'text');
+    const timestamp = Date.parse(getStringRecordValue(record, 'logTime') ?? '');
+    const extra: Record<string, unknown> = {
+      hookEvent,
+      reported: record.reported,
+      cursorRecordUuid: record.uuid,
+      cursorClientType: record.clientType,
+      ...data,
+    };
+    return buildAgentActivityEntry({
+      sessionId,
+      userId: '',
       agentType: ClientType.CursorHook,
-      actionType: rowRole === 'assistant' ? ActionType.Edit : ActionType.Other,
-      filePath: (record.filePath as string) ?? '',
-      content,
-      timestamp,
-      extra: {
-        role: rowRole,
-        _ctype: ctype,
-        _cname: cname,
-        _cinput: cinput,
-        _ctext: ctext,
-        _ccontent: ccontent,
-        _cthinking: cthinking,
-        _cid: cid,
-        _ctool_use_id: ctoolUseId,
-        model: message.model,
-        stop_reason: message.stop_reason,
-      },
+      actionType: toActionType(hookEvent),
+      filePath: filePath || getStringDataValue(data, 'cwd') || '',
+      content: textContent,
+      timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
+      extra,
     });
-
-    const sourceUuid = record.uuid;
-    if (typeof sourceUuid === 'string' && sourceUuid.trim().length > 0) {
-      entry.uuid = sourceUuid;
-    }
-    return entry;
   }
-}
-
-function parseTimestamp(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value !== 'string') return undefined;
-
-  const num = Number(value);
-  if (Number.isFinite(num)) return num;
-
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? undefined : parsed;
 }

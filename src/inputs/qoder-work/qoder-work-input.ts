@@ -23,7 +23,7 @@ export class QoderWorkInput extends BaseHookInput {
       stateStore: opts!.stateStore,
       logDir: opts?.logDir ?? resolveHome('~/.ai-agent-collector/logs/qoder-work/history'),
       logPrefix: opts?.logPrefix ?? 'qoder-work',
-      pollIntervalMs: opts?.pollIntervalMs ?? 60_000,
+      pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
     });
   }
 

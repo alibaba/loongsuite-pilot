@@ -694,6 +694,62 @@ cmd_upgrade() {
 }
 
 # ============================================================
+# Remove hook entries injected into tool config files
+# ============================================================
+remove_hook_configs() {
+    local HOOK_MARKER=".ai-agent-collector"
+    local configs=(
+        "$HOME/.cursor/hooks.json"
+        "$HOME/.qoder/settings.json"
+        "$HOME/.qoderwork/settings.json"
+    )
+
+    for cfg in "${configs[@]}"; do
+        [ -f "$cfg" ] || continue
+        local short="${cfg/#$HOME/\~}"
+
+        local ok=0
+        if command -v node &>/dev/null; then
+            node -e "
+const fs = require('fs');
+const cfg = process.argv[1];
+const marker = process.argv[2];
+try {
+  const data = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
+  const hooks = data.hooks;
+  if (!hooks || typeof hooks !== 'object') process.exit(0);
+  let changed = false;
+  for (const [event, entries] of Object.entries(hooks)) {
+    if (!Array.isArray(entries)) continue;
+    const filtered = entries.filter(e => {
+      const cmd = e.command || '';
+      const nested = Array.isArray(e.hooks) ? e.hooks : [];
+      const hasMarker = cmd.includes(marker) || nested.some(h => (h.command || '').includes(marker));
+      if (hasMarker) changed = true;
+      return !hasMarker;
+    });
+    if (filtered.length === 0) { delete hooks[event]; changed = true; }
+    else hooks[event] = filtered;
+  }
+  if (changed) {
+    fs.writeFileSync(cfg, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+    process.stdout.write('cleaned');
+  } else {
+    process.stdout.write('skip');
+  }
+} catch(e) { process.stderr.write(e.message); process.exit(1); }
+" "$cfg" "$HOOK_MARKER" && ok=1
+        fi
+
+        if [ "$ok" -eq 1 ]; then
+            msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short"
+        else
+            msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)"
+        fi
+    done
+}
+
+# ============================================================
 # CMD: uninstall
 # ============================================================
 cmd_uninstall() {
@@ -732,6 +788,11 @@ cmd_uninstall() {
     rm -f "$HOME/.local/bin/aac"
     rm -f /usr/local/bin/aac 2>/dev/null || true
     msg "    ✅ aac 命令已删除" "    ✅ aac command removed"
+    echo ""
+
+    # Remove hook entries from tool configs
+    msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
+    remove_hook_configs
     echo ""
 
     # Data directory

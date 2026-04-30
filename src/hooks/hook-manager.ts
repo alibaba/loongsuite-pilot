@@ -162,6 +162,45 @@ export class HookManager {
   }
 
   /**
+   * Build hook definitions for Cursor.
+   * Registers cursor-aac-hook.sh into ~/.cursor/hooks.json for key events.
+   */
+  static buildCursorHooks(aiAgentCollectorDir?: string): HookDefinition[] {
+    const baseDir = aiAgentCollectorDir ?? resolveHome('~/.ai-agent-collector');
+    const command = `${baseDir}/hooks/cursor-aac-hook.sh`;
+    const settingsPath = resolveHome('~/.cursor/hooks.json');
+
+    const events = [
+      'stop',
+      'preToolUse',
+      'postToolUse',
+      'postToolUseFailure',
+      'afterFileEdit',
+      'beforeShellExecution',
+      'afterShellExecution',
+      'beforeMCPExecution',
+      'afterMCPExecution',
+      'beforeReadFile',
+      'beforeSubmitPrompt',
+      'preCompact',
+      'sessionStart',
+      'sessionEnd',
+      'subagentStart',
+      'subagentStop',
+      'afterAgentResponse',
+      'afterAgentThought',
+      'beforeTabFileRead',
+    ];
+
+    return events.map(event => ({
+      agentId: 'cursor-hook',
+      settingsPath,
+      hookJsonPath: ['hooks', event],
+      hookCommand: command,
+    }));
+  }
+
+  /**
    * Build hook definitions for Qoder CLI (Stop only).
    */
   static buildQoderCliHooks(aiAgentCollectorDir?: string): HookDefinition[] {

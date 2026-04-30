@@ -28,7 +28,7 @@ export abstract class BaseInput extends EventEmitter {
   constructor(opts: InputOptions) {
     super();
     this.stateStore = opts.stateStore;
-    this.pollIntervalMs = opts.pollIntervalMs ?? 60_000;
+    this.pollIntervalMs = opts.pollIntervalMs ?? 30_000;
     this.logger = createLogger(this.constructor.name);
   }
 

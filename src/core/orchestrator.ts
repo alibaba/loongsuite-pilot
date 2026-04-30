@@ -6,7 +6,7 @@ import { InputManager } from './input-manager.js';
 import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { createLogger } from '../utils/logger.js';
-import { resolveHome, ensureDir, directoryExists } from '../utils/fs-utils.js';
+import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 
 // Flushers
@@ -185,6 +185,32 @@ export class Orchestrator extends EventEmitter {
       path.join(this.dataDir, 'logs'),
     );
 
+    // --- Cursor hooks ---
+    const cursorDir = resolveHome('~/.cursor');
+    if (await directoryExists(cursorDir)) {
+      const cursorHooksPath = resolveHome('~/.cursor/hooks.json');
+      const existing = await readJsonFile<Record<string, unknown>>(cursorHooksPath);
+      if (!existing) {
+        await writeJsonFile(cursorHooksPath, { version: 1, hooks: {} });
+      } else if (existing.version === undefined) {
+        existing.version = 1;
+        await writeJsonFile(cursorHooksPath, existing);
+      }
+
+      const defs = HookManager.buildCursorHooks(this.dataDir);
+      for (const def of defs) {
+        const installed = await hookManager.isHookInstalled(def);
+        if (!installed) {
+          const ok = await hookManager.installHook(def);
+          if (ok) {
+            const event = def.hookJsonPath[def.hookJsonPath.length - 1];
+            logger.info('cursor hook registered', { event });
+          }
+        }
+      }
+    }
+
+    // --- Qoder CLI hooks ---
     const qoderCliAvailable = await QoderCliInput.checkAvailability();
     if (qoderCliAvailable) {
       const defs = HookManager.buildQoderCliHooks(this.dataDir);

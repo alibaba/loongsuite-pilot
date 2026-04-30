@@ -38,7 +38,8 @@ export abstract class BaseHookInput extends BaseInput {
 
   protected async collect(): Promise<AgentActivityEntry[]> {
     const today = getTodayDateString();
-    const logFile = path.join(this.logDir, `${this.logPrefix}-${today}.jsonl`);
+    const logFileName = `${this.logPrefix}-${today}.jsonl`;
+    const logFile = path.join(this.logDir, logFileName);
 
     let stat;
     try {
@@ -47,7 +48,8 @@ export abstract class BaseHookInput extends BaseInput {
       return [];
     }
 
-    const offset = this.stateStore.getOffset(this.id);
+    const state = this.getState();
+    const offset = state.lastFile === logFileName ? (state.lastOffset ?? 0) : 0;
     if (stat.size <= offset) return [];
 
     const handle = await fs.open(logFile, 'r');
@@ -55,7 +57,7 @@ export abstract class BaseHookInput extends BaseInput {
       const buf = Buffer.alloc(stat.size - offset);
       await handle.read(buf, 0, buf.length, offset);
       const text = buf.toString('utf-8');
-      this.stateStore.setOffset(this.id, stat.size);
+      this.setState({ lastFile: logFileName, lastOffset: stat.size });
 
       const entries: AgentActivityEntry[] = [];
       const lines = text.split('\n').filter(l => l.trim().length > 0);

@@ -105,10 +105,10 @@ function buildListenersConfig(
   file: ConfigFile | null,
 ): Record<string, { enabled: boolean; pollInterval: number }> {
   const defaults: Record<string, { enabled: boolean; pollInterval: number }> = {
-    qoder:           { enabled: true, pollInterval: 60_000 },
-    'qoder-work':    { enabled: true, pollInterval: 60_000 },
-    'qoder-cli-hook':{ enabled: true, pollInterval: 60_000 },
-    'cursor-hook':   { enabled: true, pollInterval: 60_000 },
+    qoder:           { enabled: true, pollInterval: 30_000 },
+    'qoder-work':    { enabled: true, pollInterval: 30_000 },
+    'qoder-cli-hook':{ enabled: true, pollInterval: 30_000 },
+    'cursor-hook':   { enabled: true, pollInterval: 30_000 },
   };
 
   const result = { ...defaults };
@@ -118,7 +118,7 @@ function buildListenersConfig(
     for (const [key, val] of Object.entries(file.listeners)) {
       result[key] = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
-        pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? 60_000,
+        pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? 30_000,
       };
     }
   }
