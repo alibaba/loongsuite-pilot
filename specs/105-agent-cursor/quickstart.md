@@ -60,7 +60,8 @@ printf '%s' 'not-json' | bash "./assets/hooks/cursor-hook.sh"
 ## 5) 关键核验点
 
 - `hookEvent` 是否正确归一化  
-- `gen_ai.session_id` 是否由 `session_id`/`conversation_id` 映射而来  
+- `session.id` 是否由 `session_id`/`conversation_id` 映射而来  
+- `request.model`、`usage.*`、`input.messages_delta`、`output.messages` 是否符合统一 schema  
 - 被消费源字段是否从 `data` 中移除  
 - 未映射字段是否被保留  
 

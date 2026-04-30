@@ -45,34 +45,40 @@
 
 | Standard field | Cursor source field(s) | Mapping rule |
 | --- | --- | --- |
-| `timestamp_ns` | none | Generated from local time |
+| `time_unix_nano` | none | Generated from local time |
+| `event.name` | `hook_event_name`, `hookEventName`, message/tool fields | Derived as `llm.request`, `llm.response`, `tool.call`, `tool.result`, or `event` |
 | `trace_id` | `trace_id` | Pass-through when present |
 | `span_id` | `span_id` | Pass-through when present |
-| `gen_ai.session_id` | `session_id`, `conversation_id` | `session_id ?? conversation_id` |
-| `gen_ai.turn_id` | `generation_id` | Pass-through when present |
-| `gen_ai.step_id` | `step_id` | Pass-through when present |
-| `gen_ai.response_id` | `response_id` | Pass-through when present |
-| `gen_ai.agent_id` | `subagent_id`, `agent_id` | `subagent_id ?? agent_id` |
-| `gen_ai.agent_name` | `subagent_name`, `agent_name`, `subagent_id` | `subagent_name ?? agent_name ?? subagent_id` |
-| `gen_ai.provider_name` | `provider_name` | Pass-through when present |
-| `gen_ai.request_model` | `model` | Pass-through when present |
-| `gen_ai.response_model` | `response_model`, `model` | `response_model ?? model` |
-| `gen_ai.error_type` | `failure_type`, `error_type` | `failure_type ?? error_type` |
-| `gen_ai.error_message` | `error_message` | Pass-through when present |
-| `gen_ai.response_finish_reasons` | `response_finish_reasons` | Pass-through when present |
-| `gen_ai.input_tokens` | `input_tokens` | Pass-through when present |
-| `gen_ai.output_tokens` | `output_tokens` | Pass-through when present |
-| `gen_ai.cache_write_tokens` | `cache_write_tokens` | Pass-through when present |
-| `gen_ai.cache_read_tokens` | `cache_read_tokens` | Pass-through when present |
-| `gen_ai.role` | `hook_event_name` | Inferred by event name (`before*readfile`/`beforeSubmitPrompt`/`preToolUse`/`beforeShellExecution`/`beforeMCPExecution` -> `user`, `postToolUse*`/`afterShellExecution`/`afterMCPExecution` -> `tool`, `subagent*`/`afterAgentThought`/`afterAgentResponse` -> `assistant`) |
-| `gen_ai.input_messages_hash` | `input_messages_hash`, `input_messages` | Prefer `input_messages_hash`, fallback SHA-256 of `input_messages` |
-| `gen_ai.input_messages_delta` | `input_messages_delta` | Parse JSON string or object |
-| `gen_ai.input_messages` | `input_messages` | Parse JSON string or object |
-| `gen_ai.output_messages` | `output_messages`, `text`, `hook_event_name` | Prefer `output_messages`; fallback from `text` to message array |
-| `gen_ai.tool_name` | `tool_name` | Pass-through when present |
-| `gen_ai.tool_arguments` | `tool_input` | Parse JSON string or object |
-| `gen_ai.tool_results` | `tool_output`, `result_json`, `tool_results` | `tool_output ?? result_json ?? tool_results`, then parse |
-| `gen_ai.tool_call_id` | `tool_use_id` | Pass-through when present |
+| `parent_span_id` | `parent_span_id` | Pass-through when present |
+| `session.id` | `session_id`, `conversation_id` | `session_id ?? conversation_id` |
+| `turn.id` | `generation_id` | Pass-through when present |
+| `step.id` | `step_id` | Pass-through when present |
+| `response.id` | `response_id` | Pass-through when present |
+| `agent.id` | `subagent_id`, `agent_id` | `subagent_id ?? agent_id` |
+| `agent.name` | `subagent_name`, `agent_name`, `subagent_id` | `subagent_name ?? agent_name ?? subagent_id` |
+| `provider.name` | `provider_name` | Pass-through when present |
+| `request.model` | `model` | Pass-through when present |
+| `response.model` | `response_model`, `model` | `response_model ?? model` |
+| `error.type` | `failure_type`, `error_type` | `failure_type ?? error_type` |
+| `error.message` | `error_message` | Pass-through when present |
+| `response.finish_reasons` | `response_finish_reasons` | Pass-through when present |
+| `usage.input_tokens` | `input_tokens` | Pass-through when present |
+| `usage.output_tokens` | `output_tokens` | Pass-through when present |
+| `usage.cache_write_tokens` | `cache_write_tokens` | Pass-through when present |
+| `usage.cache_read_tokens` | `cache_read_tokens` | Pass-through when present |
+| `usage.total_tokens` | `total_tokens`, `input_tokens`, `output_tokens` | Prefer `total_tokens`, fallback to `input_tokens + output_tokens` |
+| `cost.input` / `cost.output` / `cost.cache_read` / `cost.cache_write` / `cost.total` | `cost_input`, `cost_output`, `cost_cache_read`, `cost_cache_write`, `cost_total` | Pass-through when present |
+| `message.role` | `hook_event_name` | Inferred by event name (`before*readfile`/`beforeSubmitPrompt`/`preToolUse`/`beforeShellExecution`/`beforeMCPExecution` -> `user`, `postToolUse*`/`afterShellExecution`/`afterMCPExecution` -> `tool`, `subagent*`/`afterAgentThought`/`afterAgentResponse` -> `assistant`) |
+| `input.messages_hash` | `input_messages_hash`, `input_messages` | Prefer `input_messages_hash`, fallback SHA-256 of `input_messages` |
+| `input.messages_delta` | `input_messages_delta`, `text` | Parse JSON string or object; fallback from `text` for `llm.request` |
+| `input.messages` | `input_messages` | Parse JSON string or object |
+| `output.messages` | `output_messages`, `text`, `hook_event_name` | Prefer `output_messages`; fallback from `text` for `llm.response` |
+| `tool.name` | `tool_name` | Pass-through when present |
+| `tool.arguments` | `tool_input` | Parse JSON string or object |
+| `tool.result` | `tool_output`, `result_json`, `tool_results` | `tool_output ?? result_json ?? tool_results`, then parse |
+| `tool.call.id` | `tool_use_id` | Pass-through when present |
+| `tool.result.pid` / `tool.result.exit_code` / `tool.result.status` / `tool.result.duration_ms` | `tool_result_pid`, `tool_result_exit_code`, `tool_result_status`, `tool_result_duration_ms` | Pass-through when present |
+| `is_error` | `is_error` | Pass-through when present |
 
 ## Source Field Pruning
 
@@ -80,14 +86,16 @@ Mapped source fields are removed from output `data` after mapping:
 
 - `hook_event_name`, `hookEventName`
 - `conversation_id`, `generation_id`, `session_id`
-- `trace_id`, `span_id`, `step_id`, `response_id`
+- `trace_id`, `span_id`, `parent_span_id`, `step_id`, `response_id`
 - `subagent_id`, `agent_id`, `subagent_name`, `agent_name`
 - `provider_name`, `model`, `response_model`
 - `failure_type`, `error_type`, `error_message`
 - `response_finish_reasons`
-- `input_tokens`, `output_tokens`, `cache_write_tokens`, `cache_read_tokens`
+- `input_tokens`, `output_tokens`, `cache_write_tokens`, `cache_read_tokens`, `total_tokens`
+- `cost_input`, `cost_output`, `cost_cache_read`, `cost_cache_write`, `cost_total`
 - `input_messages_hash`, `input_messages_delta`, `input_messages`, `output_messages`, `text`
 - `tool_name`, `tool_input`, `tool_output`, `result_json`, `tool_results`, `tool_use_id`
+- `tool_result_pid`, `tool_result_exit_code`, `tool_result_status`, `tool_result_duration_ms`, `is_error`
 
 ## Merge and Conflict Policy
 

@@ -40,9 +40,9 @@
 
 **Acceptance Scenarios**:
 
-1. **Given** payload 含 `session_id` 或 `conversation_id`，**When** 执行映射，**Then** 输出 `gen_ai.session_id` 并删除被映射源字段
-2. **Given** payload 含 `tool_input` 与 `tool_output`/`result_json`，**When** 执行映射，**Then** 输出 `gen_ai.tool_arguments` 与 `gen_ai.tool_results`
-3. **Given** payload 无 `output_messages` 但含 `text`，**When** 执行映射，**Then** 输出兼容的 `gen_ai.output_messages` 数组
+1. **Given** payload 含 `session_id` 或 `conversation_id`，**When** 执行映射，**Then** 输出 `session.id` 并删除被映射源字段
+2. **Given** payload 含 `tool_input` 与 `tool_output`/`result_json`，**When** 执行映射，**Then** 输出 `tool.arguments` 与 `tool.result`
+3. **Given** LLM 请求/响应 payload 含 `text`，**When** 执行映射，**Then** 按事件语义输出 `input.messages_delta` 或 `output.messages` 数组
 
 ---
 

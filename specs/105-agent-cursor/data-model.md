@@ -50,15 +50,18 @@ SLS / output JSONL (via existing flushers)
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `timestamp_ns` | string | 本地时间生成，纳秒字符串 |
-| `gen_ai.session_id` | string | `session_id ?? conversation_id` |
-| `gen_ai.turn_id` | string | 来自 `generation_id` |
-| `gen_ai.request_model` | string | 来自 `model` |
-| `gen_ai.response_model` | string | `response_model ?? model` |
-| `gen_ai.role` | string | 由事件名推断（`user/tool/assistant`） |
-| `gen_ai.tool_arguments` | object | 解析后的 `tool_input` |
-| `gen_ai.tool_results` | object/string | 解析后的工具结果 |
-| `gen_ai.output_messages` | array | 优先 `output_messages`，fallback `text` |
+| `time_unix_nano` | string | 本地时间生成，纳秒字符串 |
+| `event.name` | string | 由 hook 事件推导为 `llm.request`、`llm.response`、`tool.call`、`tool.result` 或 `event` |
+| `session.id` | string | `session_id ?? conversation_id` |
+| `turn.id` | string | 来自 `generation_id` |
+| `request.model` | string | 来自 `model` |
+| `response.model` | string | `response_model ?? model` |
+| `message.role` | string | 由事件名推断（`user/tool/assistant`） |
+| `usage.*` | number | token 与 cost 统计字段 |
+| `input.messages_delta` / `input.messages` | array | LLM 请求消息增量与完整上下文 |
+| `output.messages` | array | 模型输出消息，fallback 自 LLM 响应事件的 `text` |
+| `tool.arguments` | object | 解析后的 `tool_input` |
+| `tool.result` | object/string | 解析后的工具结果 |
 | `...` | varies | 其他映射字段见 `research.md` 映射表 |
 
 ## Entity: CursorHookOutputRecord

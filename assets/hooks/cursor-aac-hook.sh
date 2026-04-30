@@ -7,14 +7,32 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROCESSOR="$SCRIPT_DIR/cursor-hook-processor.mjs"
 EMPTY_RESULT='{}'
 
-PAYLOAD="$(cat || true)"
-if [[ -z "${PAYLOAD//[[:space:]]/}" ]]; then
+log_error() {
+  local stage="$1"
+  local message="$2"
+  local data_dir="${AAC_DATA_DIR:-${AI_AGENT_COLLECTOR_DATA_DIR:-$HOME/.ai-agent-collector}}"
+  local day
+  day="$(date -u +%Y-%m-%d 2>/dev/null || true)"
+  [[ -n "$day" ]] || day="unknown"
+  local dir="$data_dir/logs/cursor-hook/errors"
+  local file="$dir/cursor-error-$day.jsonl"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  printf '{"time":"%s","clientType":"CursorHook","stage":"%s","error.type":"shell_%s","error.message":%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" \
+    "$stage" \
+    "$stage" \
+    "$(printf '%s' "$message" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '""')" \
+    >> "$file" 2>/dev/null || true
+}
+
+if [[ -t 0 ]]; then
   printf '%s\n' "$EMPTY_RESULT"
   exit 0
 fi
 
 if [[ ! -f "$PROCESSOR" ]]; then
   echo "[ai-agent-collector] hook processor not found: $PROCESSOR" >&2
+  log_error "missing_processor" "hook processor not found: $PROCESSOR"
   printf '%s\n' "$EMPTY_RESULT"
   exit 0
 fi
@@ -39,12 +57,14 @@ fi
 
 if [[ -z "$NODE_BIN" ]]; then
   echo "[ai-agent-collector] node runtime not found" >&2
+  log_error "missing_node" "node runtime not found"
   printf '%s\n' "$EMPTY_RESULT"
   exit 0
 fi
 
-if ! printf '%s' "$PAYLOAD" | "$NODE_BIN" "$PROCESSOR"; then
+if ! "$NODE_BIN" "$PROCESSOR"; then
   echo "[ai-agent-collector] hook processor failed" >&2
+  log_error "processor_failed" "hook processor exited with non-zero status"
   printf '%s\n' "$EMPTY_RESULT"
 fi
 

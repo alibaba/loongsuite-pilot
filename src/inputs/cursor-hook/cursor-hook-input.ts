@@ -49,10 +49,7 @@ export class CursorHookInput extends BaseHookInput {
     const data = (record.data && typeof record.data === 'object' && !Array.isArray(record.data))
       ? (record.data as Record<string, unknown>)
       : {};
-    const sessionId = getStringDataValue(data, 'gen_ai.session_id')
-      ?? getStringDataValue(data, 'gen_ai.session_id')
-      ?? getStringRecordValue(record, 'session_id')
-      ?? '';
+    const sessionId = getStringDataValue(data, 'session.id') ?? '';
     const filePath = getStringDataValue(data, 'file_path')
       ?? getStringDataValue(data, 'path')
       ?? getStringDataValue(data, 'filePath')
