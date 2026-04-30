@@ -367,7 +367,7 @@ describe('Cursor hook script integration flow', () => {
     await input.stop();
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]!.agentType).toBe(ClientType.CursorHook);
+    expect(entries[0]!.agentType).toBe(ClientType.Cursor);
     expect(entries[0]!.actionType).toBe(ActionType.Read);
     expect(entries[0]!.sessionId).toBe('sess-integ-cursor');
     expect(entries[0]!.filePath).toBe('/project/a.ts');

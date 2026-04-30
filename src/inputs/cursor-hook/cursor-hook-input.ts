@@ -27,7 +27,7 @@ function getStringDataValue(data: Record<string, unknown>, key: string): string 
 }
 export class CursorHookInput extends BaseHookInput {
   readonly id = 'cursor-hook';
-  readonly agentType = ClientType.CursorHook;
+  readonly agentType = ClientType.Cursor;
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
       stateStore: opts!.stateStore,
@@ -66,7 +66,7 @@ export class CursorHookInput extends BaseHookInput {
     return buildAgentActivityEntry({
       sessionId,
       userId: '',
-      agentType: ClientType.CursorHook,
+      agentType: this.agentType,
       actionType: toActionType(hookEvent),
       filePath: filePath || getStringDataValue(data, 'cwd') || '',
       content: textContent,

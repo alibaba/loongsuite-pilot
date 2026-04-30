@@ -16,6 +16,7 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
   readJsonFile: vi.fn().mockResolvedValue(null),
   writeJsonFile: vi.fn().mockResolvedValue(undefined),
   appendLine: vi.fn().mockResolvedValue(undefined),
+  directoryExists: vi.fn().mockResolvedValue(false),
   getTodayDateString: () => '2026-04-27',
 }));
 
@@ -101,7 +102,7 @@ vi.mock('../../../src/inputs/qoder-cli/qoder-cli-input.js', () => ({
 vi.mock('../../../src/inputs/cursor-hook/cursor-hook-input.js', () => ({
   CursorHookInput: vi.fn().mockImplementation(() => ({
     id: 'cursor-hook',
-    agentType: 'cursor-hook',
+    agentType: 'cursor',
     collectionMethod: 'hook-jsonl',
     on: vi.fn(),
     start: vi.fn().mockResolvedValue(undefined),

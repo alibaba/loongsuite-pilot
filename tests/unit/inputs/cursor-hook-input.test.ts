@@ -56,7 +56,7 @@ describe('CursorHookInput', () => {
     await input.stop();
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]!.agentType).toBe(ClientType.CursorHook);
+    expect(entries[0]!.agentType).toBe(ClientType.Cursor);
     expect(entries[0]!.sessionId).toBe('sess-1');
     expect(entries[0]!.actionType).toBe(ActionType.Execute);
     expect(entries[0]!.filePath).toBe('/workspace');
