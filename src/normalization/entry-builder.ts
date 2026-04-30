@@ -62,6 +62,7 @@ export function serialiseLogEntry(entry: AgentActivityEntry): SerializedLogEntry
   out.timestamp = String(normalizeTimestampToMillis(entry.timestamp));
   out.uuid = entry.uuid;
   out.userId = entry.userId;
+  if (entry.identity) out.identity = entry.identity;
   out.agentType = entry.agentType;
   out.actionType = entry.actionType;
   out.filePath = entry.filePath;

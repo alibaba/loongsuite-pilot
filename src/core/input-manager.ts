@@ -19,6 +19,7 @@ export class InputManager extends EventEmitter {
   private readonly inputs: Map<string, BaseInput> = new Map();
   private flusher: BaseFlusher | null = null;
   private userId: string = '';
+  private identity: string = '';
 
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;
@@ -26,6 +27,10 @@ export class InputManager extends EventEmitter {
 
   setUserId(userId: string): void {
     this.userId = userId;
+  }
+
+  setIdentity(identity: string): void {
+    this.identity = identity;
   }
 
   registerInput(input: BaseInput): void {
@@ -102,6 +107,9 @@ export class InputManager extends EventEmitter {
     for (const entry of entries) {
       if (!entry.userId && this.userId) {
         entry.userId = this.userId;
+      }
+      if (!entry.identity && this.identity) {
+        entry.identity = this.identity;
       }
     }
 

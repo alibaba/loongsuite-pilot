@@ -1,3 +1,4 @@
+import * as os from 'node:os';
 import type { AnalyticsConfig, FlusherConfig, SlsEndpoint, SlsMode } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
@@ -13,6 +14,7 @@ const DEFAULT_CONFIG_PATH = '~/.ai-agent-collector/config.json';
 interface ConfigFile {
   enabled?: boolean;
   dataDir?: string;
+  identity?: string;
 
   sls?: {
     enabled?: boolean;
@@ -21,13 +23,8 @@ interface ConfigFile {
     accessKeySecret?: string;
     /** 完整 SLS endpoint URL，如 https://cn-hangzhou.log.aliyuncs.com */
     endpoint?: string;
-    endpoints?: Array<{
-      name?: string;
-      project: string;
-      logstore: string;
-      kind?: string;
-      redact?: boolean;
-    }>;
+    project?: string;
+    logstore?: string;
     batchMaxSize?: number;
     flushIntervalMs?: number;
   };
@@ -91,10 +88,13 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
 
   const dataDir = env('AAC_DATA_DIR') ?? file?.dataDir ?? '~/.ai-agent-collector';
 
+  const identity = env('AAC_IDENTITY') ?? file?.identity ?? os.hostname();
+
   return {
     enabled: envBool('AAC_ENABLED', file?.enabled ?? true),
     autoStart: true,
     dataDir,
+    identity,
 
     listeners: buildListenersConfig(file),
     flushers: buildFlushersConfig(file, dataDir),
@@ -147,51 +147,22 @@ function buildSlsConfig(file: ConfigFile | null) {
 
   const ak = env('SLS_ACCESS_KEY_ID') ?? file?.sls?.accessKeyId ?? '';
   const sk = env('SLS_ACCESS_KEY_SECRET') ?? file?.sls?.accessKeySecret ?? '';
-  const endpoint = env('SLS_ENDPOINT') ?? file?.sls?.endpoint ?? '';
+  const rawEndpoint = env('SLS_ENDPOINT') ?? file?.sls?.endpoint ?? '';
+  const endpoint = rawEndpoint && !/^https?:\/\//.test(rawEndpoint)
+    ? `https://${rawEndpoint}`
+    : rawEndpoint;
+
+  const project = env('SLS_PROJECT') ?? file?.sls?.project ?? '';
+  const logstore = env('SLS_LOGSTORE') ?? file?.sls?.logstore ?? '';
 
   const endpoints: SlsEndpoint[] = [];
-
-  // From config file
-  if (file?.sls?.endpoints) {
-    for (const ep of file.sls.endpoints) {
-      endpoints.push({
-        name: ep.name ?? `${ep.project}/${ep.logstore}`,
-        project: ep.project,
-        logstore: ep.logstore,
-        kind: (ep.kind as SlsEndpoint['kind']) ?? 'agentActivity',
-        redact: ep.redact,
-      });
-    }
-  }
-
-  // From env vars (appended, may overlap with file — that's fine)
-  const envProject = env('SLS_PROJECT');
-  const envLogstore = env('SLS_LOGSTORE');
-  if (envProject && envLogstore) {
-    const exists = endpoints.some(e => e.project === envProject && e.logstore === envLogstore);
-    if (!exists) {
-      endpoints.push({
-        name: 'agent-activity',
-        project: envProject,
-        logstore: envLogstore,
-        kind: 'agentActivity',
-      });
-    }
-  }
-
-  const envTelemetryProject = env('SLS_AGENT_TELEMETRY_PROJECT');
-  const envTelemetryLogstore = env('SLS_AGENT_TELEMETRY_LOGSTORE');
-  if (envTelemetryProject && envTelemetryLogstore) {
-    const exists = endpoints.some(e => e.project === envTelemetryProject && e.logstore === envTelemetryLogstore);
-    if (!exists) {
-      endpoints.push({
-        name: 'agent-telemetry',
-        project: envTelemetryProject,
-        logstore: envTelemetryLogstore,
-        kind: 'agentTelemetry',
-        redact: true,
-      });
-    }
+  if (project && logstore) {
+    endpoints.push({
+      name: 'agent-activity',
+      project,
+      logstore,
+      kind: 'agentActivity',
+    });
   }
 
   const hasEndpoints = endpoints.length > 0;

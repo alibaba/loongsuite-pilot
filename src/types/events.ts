@@ -20,6 +20,7 @@ export interface AgentActivityEntry {
   timestamp: number;
   uuid: string;
   userId: string;
+  identity?: string;
   agentType: ClientType;
   actionType: ActionType;
   filePath: string;
