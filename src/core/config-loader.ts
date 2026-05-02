@@ -14,7 +14,7 @@ const DEFAULT_CONFIG_PATH = '~/.ai-agent-collector/config.json';
 interface ConfigFile {
   enabled?: boolean;
   dataDir?: string;
-  identity?: string;
+  'user.id'?: string;
 
   sls?: {
     enabled?: boolean;
@@ -88,13 +88,13 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
 
   const dataDir = env('AAC_DATA_DIR') ?? file?.dataDir ?? '~/.ai-agent-collector';
 
-  const identity = env('AAC_IDENTITY') ?? file?.identity ?? os.hostname();
+  const userId = env('AAC_USER_ID') ?? file?.['user.id'] ?? os.hostname();
 
   return {
     enabled: envBool('AAC_ENABLED', file?.enabled ?? true),
     autoStart: true,
     dataDir,
-    identity,
+    userId,
 
     listeners: buildListenersConfig(file),
     flushers: buildFlushersConfig(file, dataDir),

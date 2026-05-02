@@ -110,7 +110,7 @@ describe('QoderInput', () => {
 
       await input.start();
       expect(allEntries.length).toBeGreaterThanOrEqual(1);
-      const trackerEntries = allEntries.filter(e => e.extra?.toolName === 'qoder-ai-tracker');
+      const trackerEntries = allEntries.filter(e => e.attributes?.toolName === 'qoder-ai-tracker');
       expect(trackerEntries).toHaveLength(1);
       expect(trackerEntries[0]!.filePath).toBe('/proj/tracked.ts');
       await input.stop();
@@ -146,7 +146,7 @@ describe('QoderInput', () => {
 
       await input2.start();
       await input2.stop();
-      const trackerEntries = moreEntries.filter(e => e.extra?.toolName === 'qoder-ai-tracker');
+      const trackerEntries = moreEntries.filter(e => e.attributes?.toolName === 'qoder-ai-tracker');
       expect(trackerEntries).toHaveLength(1);
       expect(trackerEntries[0]!.filePath).toBe('/second.ts');
     });
@@ -290,7 +290,7 @@ describe('QoderInput', () => {
       await input.start();
       await input.stop();
 
-      const trackerEntries = allEntries.filter(e => e.extra?.toolName === 'qoder-ai-tracker');
+      const trackerEntries = allEntries.filter(e => e.attributes?.toolName === 'qoder-ai-tracker');
       expect(trackerEntries.length).toBeGreaterThanOrEqual(1);
     });
 
@@ -307,7 +307,7 @@ describe('QoderInput', () => {
       await input.start();
       await input.stop();
 
-      const trackerEntries = allEntries.filter(e => e.extra?.toolName === 'qoder-ai-tracker');
+      const trackerEntries = allEntries.filter(e => e.attributes?.toolName === 'qoder-ai-tracker');
       expect(trackerEntries.length).toBeGreaterThanOrEqual(1);
     });
 
@@ -325,7 +325,7 @@ describe('QoderInput', () => {
       await input.start();
       await input.stop();
 
-      const trackerEntries = allEntries.filter(e => e.extra?.toolName === 'qoder-ai-tracker');
+      const trackerEntries = allEntries.filter(e => e.attributes?.toolName === 'qoder-ai-tracker');
       expect(trackerEntries.length).toBeGreaterThanOrEqual(1);
     });
   });

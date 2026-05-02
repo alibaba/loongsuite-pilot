@@ -16,7 +16,7 @@ export interface AnalyticsConfig {
   enabled: boolean;
   autoStart: boolean;
   dataDir: string;
-  identity: string;
+  userId: string;
   listeners: Record<string, ListenerConfig>;
   flushers: FlusherConfig;
 }

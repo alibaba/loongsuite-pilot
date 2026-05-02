@@ -5,19 +5,51 @@ import * as os from 'node:os';
 import { ClientType, ActionType } from '../../src/types/index.js';
 import type { AgentActivityEntry, CodeGenerationEvent } from '../../src/types/index.js';
 
-export function buildTestEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEntry {
+type TestEntryOverrides = Partial<AgentActivityEntry> & {
+  sessionId?: string;
+  timestamp?: number;
+  uuid?: string;
+  userId?: string;
+  agentType?: ClientType;
+  actionType?: ActionType;
+  filePath?: string;
+  content?: string;
+  inlineDiffMessage?: string;
+  extra?: Record<string, unknown>;
+};
+
+export function buildTestEntry(overrides: TestEntryOverrides = {}): AgentActivityEntry {
+  const eventId = overrides['event.id'] ?? overrides.uuid ?? uuidv4();
+  const timestamp = overrides.timestamp ?? Date.now();
   return {
     sessionId: overrides.sessionId ?? 'test-session-1',
-    timestamp: overrides.timestamp ?? Date.now(),
-    uuid: overrides.uuid ?? uuidv4(),
+    timestamp,
+    uuid: eventId,
     userId: overrides.userId ?? 'test-user',
     agentType: overrides.agentType ?? ClientType.Qoder,
     actionType: overrides.actionType ?? ActionType.Edit,
     filePath: overrides.filePath ?? '/tmp/test/file.ts',
     content: overrides.content,
     inlineDiffMessage: overrides.inlineDiffMessage,
-    git: overrides.git,
-    extra: overrides.extra,
+    extra: {
+      ...(overrides.extra ?? {}),
+      ...(overrides.attributes ?? {}),
+    },
+    time_unix_nano: overrides.time_unix_nano ?? `${timestamp}000000`,
+    observed_time_unix_nano: overrides.observed_time_unix_nano ?? `${timestamp}000000`,
+    'event.id': eventId,
+    'event.name': overrides['event.name'] ?? 'event',
+    'user.id': overrides['user.id'] ?? overrides.userId ?? 'test-user',
+    'session.id': overrides['session.id'] ?? overrides.sessionId ?? 'test-session-1',
+    'agent.type': overrides['agent.type'] ?? overrides.agentType ?? ClientType.Qoder,
+    attributes: {
+      filePath: overrides.filePath ?? '/tmp/test/file.ts',
+      actionType: overrides.actionType ?? ActionType.Edit,
+      ...(overrides.content !== undefined ? { content: overrides.content } : {}),
+      ...(overrides.inlineDiffMessage !== undefined ? { inlineDiffMessage: overrides.inlineDiffMessage } : {}),
+      ...(overrides.extra ?? {}),
+      ...(overrides.attributes ?? {}),
+    },
   };
 }
 

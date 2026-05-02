@@ -52,6 +52,25 @@ describe('ConfigLoader', () => {
       expect(config.enabled).toBe(true);
       expect(config.autoStart).toBe(true);
     });
+
+    it('loads configured user.id from env over config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        'user.id': 'from-file',
+      });
+      vi.stubEnv('AAC_USER_ID', 'from-env');
+
+      const config = await loadConfig();
+      expect(config.userId).toBe('from-env');
+    });
+
+    it('loads configured user.id from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        'user.id': 'from-file',
+      });
+
+      const config = await loadConfig();
+      expect(config.userId).toBe('from-file');
+    });
   });
 
   describe('missing config file fallback (T026)', () => {
@@ -87,7 +106,7 @@ describe('ConfigLoader', () => {
       expect(config.flushers.sls?.endpoints).toHaveLength(1);
     });
 
-    it('appends env SLS endpoint when different from file', async () => {
+    it('uses env SLS endpoint over file endpoint list', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
           accessKeyId: 'ak',
@@ -105,7 +124,11 @@ describe('ConfigLoader', () => {
       vi.stubEnv('SLS_LOGSTORE', 'log2');
 
       const config = await loadConfig();
-      expect(config.flushers.sls?.endpoints).toHaveLength(2);
+      expect(config.flushers.sls?.endpoints).toHaveLength(1);
+      expect(config.flushers.sls?.endpoints[0]).toMatchObject({
+        project: 'proj2',
+        logstore: 'log2',
+      });
     });
 
     it('resolves HTTP enabled from env', async () => {

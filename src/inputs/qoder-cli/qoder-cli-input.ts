@@ -34,6 +34,9 @@ export class QoderCliInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
+    const hookEntry = buildPostToolUseEntry(record, ClientType.QoderCliHook);
+    if (hookEntry) return hookEntry;
+
     const rowType = record.type as string | undefined;
     if (rowType !== 'assistant' && rowType !== 'user') return null;
 
@@ -118,7 +121,7 @@ export class QoderCliInput extends BaseHookInput {
 
     const sourceUuid = record.uuid;
     if (typeof sourceUuid === 'string' && sourceUuid.trim().length > 0) {
-      entry.uuid = sourceUuid;
+      entry['event.id'] = sourceUuid;
     }
     return entry;
   }
@@ -133,4 +136,40 @@ function parseTimestamp(value: unknown): number | undefined {
 
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+function buildPostToolUseEntry(
+  record: Record<string, unknown>,
+  agentType: ClientType,
+): AgentActivityEntry | null {
+  const data = (record.data && typeof record.data === 'object' && !Array.isArray(record.data))
+    ? record.data as Record<string, unknown>
+    : record;
+  const eventType = (data.event_type ?? data.hook_event_name ?? record.hookEvent) as string | undefined;
+  if (eventType !== 'PostToolUse') return null;
+
+  const toolInput = (data.tool_input && typeof data.tool_input === 'object' && !Array.isArray(data.tool_input))
+    ? data.tool_input as Record<string, unknown>
+    : {};
+  const filePath = typeof toolInput.file_path === 'string'
+    ? toolInput.file_path
+    : typeof data.file_path === 'string'
+      ? data.file_path
+      : '';
+  if (!filePath) return null;
+
+  return buildAgentActivityEntry({
+    sessionId: (data.session_id as string) ?? '',
+    userId: (data.user_id as string) ?? '',
+    agentType,
+    actionType: data.aac_pre_file_exists === false ? ActionType.Create : ActionType.Edit,
+    filePath,
+    content: typeof toolInput.content === 'string'
+      ? toolInput.content
+      : typeof toolInput.new_string === 'string'
+        ? toolInput.new_string
+        : undefined,
+    timestamp: parseTimestamp(data.timestamp) ?? Date.now(),
+    extra: data,
+  });
 }

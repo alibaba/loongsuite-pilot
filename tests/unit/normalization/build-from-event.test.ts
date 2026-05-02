@@ -17,7 +17,7 @@ describe('buildFromCodeGenerationEvent', () => {
       rawData: {},
     };
     const entry = buildFromCodeGenerationEvent(event, 'u1', 's1');
-    expect(entry.agentType).toBe(ClientType.Cursor);
+    expect(entry['agent.type']).toBe(ClientType.Cursor);
   });
 
   it('maps actionType from event', () => {
@@ -29,7 +29,7 @@ describe('buildFromCodeGenerationEvent', () => {
       rawData: {},
     };
     const entry = buildFromCodeGenerationEvent(event, 'u1', 's1');
-    expect(entry.actionType).toBe(ActionType.Delete);
+    expect(entry.attributes?.actionType).toBe(ActionType.Delete);
   });
 
   it('maps filePath from event', () => {
@@ -41,7 +41,7 @@ describe('buildFromCodeGenerationEvent', () => {
       rawData: {},
     };
     const entry = buildFromCodeGenerationEvent(event, 'u1', 's1');
-    expect(entry.filePath).toBe('/src/foo.ts');
+    expect(entry.attributes?.filePath).toBe('/src/foo.ts');
   });
 
   it('maps content from event', () => {
@@ -54,7 +54,7 @@ describe('buildFromCodeGenerationEvent', () => {
       rawData: {},
     };
     const entry = buildFromCodeGenerationEvent(event, 'u1', 's1');
-    expect(entry.content).toBe('the content');
+    expect(entry.attributes?.content).toBe('the content');
   });
 
   it('maps diff to inlineDiffMessage', () => {
@@ -67,7 +67,7 @@ describe('buildFromCodeGenerationEvent', () => {
       rawData: {},
     };
     const entry = buildFromCodeGenerationEvent(event, 'u1', 's1');
-    expect(entry.inlineDiffMessage).toBe('--- a\n+++ b');
+    expect(entry.attributes?.inlineDiffMessage).toBe('--- a\n+++ b');
   });
 
   it('maps rawData to extra', () => {
@@ -80,7 +80,7 @@ describe('buildFromCodeGenerationEvent', () => {
       rawData,
     };
     const entry = buildFromCodeGenerationEvent(event, 'u1', 's1');
-    expect(entry.extra).toEqual(rawData);
+    expect(entry.attributes).toMatchObject(rawData);
   });
 
   it('uses sourceTimestamp as entry timestamp', () => {
@@ -92,7 +92,7 @@ describe('buildFromCodeGenerationEvent', () => {
       rawData: {},
     };
     const entry = buildFromCodeGenerationEvent(event, 'u1', 's1');
-    expect(entry.timestamp).toBe(1234567890);
+    expect(entry.time_unix_nano).toBe('1234567890000000000');
   });
 
   it('sets userId and sessionId from arguments', () => {
@@ -104,7 +104,7 @@ describe('buildFromCodeGenerationEvent', () => {
       rawData: {},
     };
     const entry = buildFromCodeGenerationEvent(event, 'user-X', 'session-Y');
-    expect(entry.userId).toBe('user-X');
-    expect(entry.sessionId).toBe('session-Y');
+    expect(entry['user.id']).toBe('user-X');
+    expect(entry['session.id']).toBe('session-Y');
   });
 });

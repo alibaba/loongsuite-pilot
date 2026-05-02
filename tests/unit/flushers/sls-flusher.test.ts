@@ -35,6 +35,7 @@ function makeConfig(overrides: Partial<SlsFlusherConfig> = {}): SlsFlusherConfig
     accessKeyId: 'ak',
     accessKeySecret: 'sk',
     endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+    mode: 'ak',
     endpoints: [
       {
         name: 'activity',
@@ -115,6 +116,7 @@ describe('SlsFlusher', () => {
       expect(content).not.toHaveProperty('filePath');
       expect(content).not.toHaveProperty('content');
       expect(content).not.toHaveProperty('inlineDiffMessage');
+      expect(content.attributes).not.toContain('secret content');
     });
 
     it('keeps fields when redact=false', async () => {
@@ -127,7 +129,7 @@ describe('SlsFlusher', () => {
 
       const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
       const content = logGroup.logs[0].content;
-      expect(content.filePath).toBe('/visible/file.ts');
+      expect(content.attributes).toContain('/visible/file.ts');
     });
   });
 
@@ -151,7 +153,7 @@ describe('SlsFlusher', () => {
 
   describe('failure persistence (T015)', () => {
     it('persists failed log group to sls-failed-logs/{kind}.jsonl', async () => {
-      mockPostLogStoreLogs.mockRejectedValueOnce(new Error('network error'));
+      mockPostLogStoreLogs.mockRejectedValueOnce(new Error('invalid request'));
 
       await flusher.send(buildTestEntry());
       await flusher.flush();
@@ -161,7 +163,7 @@ describe('SlsFlusher', () => {
       expect(filePath).toContain('sls-failed-logs');
       expect(filePath).toContain('agentActivity.jsonl');
       const parsed = JSON.parse(line);
-      expect(parsed.error).toContain('network error');
+      expect(parsed.error).toContain('invalid request');
       expect(parsed.project).toBe('proj-a');
     });
   });

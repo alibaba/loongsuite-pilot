@@ -1,22 +1,25 @@
 import { z } from 'zod';
-import { ClientType, ActionType } from '../../src/types/index.js';
+import { ClientType } from '../../src/types/index.js';
 
 const clientTypeValues = Object.values(ClientType) as [string, ...string[]];
-const actionTypeValues = Object.values(ActionType) as [string, ...string[]];
-
-const uuidV4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const eventNameValues = [
+  'llm.request',
+  'llm.response',
+  'tool.call',
+  'tool.result',
+  'skill.use',
+  'event',
+] as const;
 
 export const AgentActivityEntrySchema = z.object({
-  sessionId: z.string().min(0),
-  timestamp: z.number().int().positive(),
-  uuid: z.string().regex(uuidV4Regex, 'must be a valid UUIDv4'),
-  userId: z.string(),
-  agentType: z.enum(clientTypeValues),
-  actionType: z.enum(actionTypeValues),
-  filePath: z.string(),
-  content: z.string().optional(),
-  inlineDiffMessage: z.string().optional(),
-  extra: z.record(z.unknown()).optional(),
-});
+  time_unix_nano: z.string().regex(/^\d+$/),
+  observed_time_unix_nano: z.string().regex(/^\d+$/).optional(),
+  'event.id': z.string().min(1),
+  'event.name': z.enum(eventNameValues),
+  'user.id': z.string(),
+  'session.id': z.string(),
+  'agent.type': z.enum(clientTypeValues).or(z.string().min(1)),
+  attributes: z.record(z.unknown()).optional(),
+}).passthrough();
 
 export type ValidatedAgentActivityEntry = z.infer<typeof AgentActivityEntrySchema>;

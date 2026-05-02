@@ -182,7 +182,7 @@ describe('Cursor hook script integration flow', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it('should write normalized record for valid payload', async () => {
+  it('should write raw-ish record with collector fields for valid payload', async () => {
     const result = runCursorHook(JSON.stringify({
       hook_event_name: 'postToolUse',
       session_id: 'sess-1',
@@ -204,20 +204,15 @@ describe('Cursor hook script integration flow', () => {
     expect(lines).toHaveLength(1);
 
     const record = JSON.parse(lines[0]!);
-    expect(record.clientType).toBe('CursorHook');
-    expect(record.hookEvent).toBe('postToolUse');
-    expect(record.data['event.name']).toBe('tool.result');
-    expect(record.data['session.id']).toBe('sess-1');
-    expect(record.data['turn.id']).toBe('turn-1');
-    expect(record.data['request.model']).toBe('gpt-test');
-    expect(record.data['response.model']).toBe('gpt-test');
-    expect(record.data['usage.input_tokens']).toBe(12);
-    expect(record.data['usage.output_tokens']).toBe(7);
-    expect(record.data['usage.total_tokens']).toBe(19);
-    expect(record.data['tool.name']).toBe('Shell');
-    expect(record.data['tool.arguments']).toEqual({ command: 'pwd' });
-    expect(record.data['tool.result']).toEqual({ ok: true });
-    expect(record.data.session_id).toBeUndefined();
+    expect(record['event.id']).toBeDefined();
+    expect(record['agent.type']).toBe('cursor');
+    expect(record.observed_time_unix_nano).toMatch(/^\d+$/);
+    expect(record.hook_event_name).toBe('postToolUse');
+    expect(record.session_id).toBe('sess-1');
+    expect(record.generation_id).toBe('turn-1');
+    expect(record.tool_name).toBe('Shell');
+    expect(record.tool_input).toEqual({ command: 'pwd' });
+    expect(record.tool_output).toBe('{"ok":true}');
   });
 
   it('should append records for multiple invocations on same day', async () => {
@@ -232,10 +227,10 @@ describe('Cursor hook script integration flow', () => {
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
     expect(lines).toHaveLength(2);
     const records = lines.map(line => JSON.parse(line));
-    expect(records[0].data['event.name']).toBe('llm.response');
-    expect(records[0].data['output.messages']).toEqual([{ type: 'text', content: 'a1' }]);
-    expect(records[1].data['event.name']).toBe('llm.response');
-    expect(records[1].data['output.messages']).toEqual([{ type: 'reasoning', content: 't1' }]);
+    expect(records[0].text).toBe('a1');
+    expect(records[0].hook_event_name).toBe('afterAgentResponse');
+    expect(records[1].text).toBe('t1');
+    expect(records[1].hook_event_name).toBe('afterAgentThought');
   });
 
   it('should infer mapping role and parse tool fields', async () => {
@@ -253,11 +248,10 @@ describe('Cursor hook script integration flow', () => {
     const logFile = path.join(tmpDir, 'logs', 'cursor-hook', 'history', `cursor-${getTodayDateString()}.jsonl`);
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
     const record = JSON.parse(lines.at(-1)!);
-    expect(record.data['event.name']).toBe('tool.call');
-    expect(record.data['message.role']).toBe('user');
-    expect(record.data['tool.arguments']).toEqual({ query: 'abc' });
-    expect(record.data['tool.result']).toEqual({ items: [1] });
-    expect(record.data['session.id']).toBe('conv-1');
+    expect(record.hook_event_name).toBe('beforeMCPExecution');
+    expect(record.tool_input).toBe('{"query":"abc"}');
+    expect(record.result_json).toBe('{"items":[1]}');
+    expect(record.conversation_id).toBe('conv-1');
   });
 
   it('should map user input text into input message fields', async () => {
@@ -276,13 +270,11 @@ describe('Cursor hook script integration flow', () => {
     const logFile = path.join(tmpDir, 'logs', 'cursor-hook', 'history', `cursor-${getTodayDateString()}.jsonl`);
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
     const record = JSON.parse(lines.at(-1)!);
-    expect(record.data['event.name']).toBe('llm.request');
-    expect(record.data['message.role']).toBe('user');
-    expect(record.data['request.model']).toBe('gpt-input');
-    expect(record.data['input.messages_delta']).toEqual([{ role: 'user', content: 'Please edit the file' }]);
-    expect(record.data['input.messages']).toEqual([{ role: 'system', content: 'You are helpful' }]);
-    expect(record.data['input.messages_hash']).toMatch(/^[a-f0-9]{64}$/);
-    expect(record.data.text).toBeUndefined();
+    expect(record.hook_event_name).toBe('beforeSubmitPrompt');
+    expect(record.model).toBe('gpt-input');
+    expect(record.input_messages_delta).toEqual([{ role: 'user', content: 'Please edit the file' }]);
+    expect(record.input_messages).toEqual([{ role: 'system', content: 'You are helpful' }]);
+    expect(record.text).toBe('Please edit the file');
   });
 
   it('should keep fail-open behavior for invalid json payload', async () => {
@@ -336,7 +328,7 @@ describe('Cursor hook script integration flow', () => {
 
     const logFile = path.join(tmpDir, 'logs', 'cursor-hook', 'history', `cursor-${getTodayDateString()}.jsonl`);
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
-    const emitted = lines.map(line => JSON.parse(line).hookEvent);
+    const emitted = lines.map(line => JSON.parse(line).hook_event_name);
     for (const eventName of events) {
       expect(emitted).toContain(eventName);
     }
@@ -367,9 +359,9 @@ describe('Cursor hook script integration flow', () => {
     await input.stop();
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]!.agentType).toBe(ClientType.Cursor);
-    expect(entries[0]!.actionType).toBe(ActionType.Read);
-    expect(entries[0]!.sessionId).toBe('sess-integ-cursor');
-    expect(entries[0]!.filePath).toBe('/project/a.ts');
+    expect(entries[0]!['agent.type']).toBe(ClientType.Cursor);
+    expect(entries[0]!['event.name']).toBe('event');
+    expect(entries[0]!['session.id']).toBe('sess-integ-cursor');
+    expect(entries[0]!.attributes?.hook_event_name).toBe('beforeReadFile');
   });
 });

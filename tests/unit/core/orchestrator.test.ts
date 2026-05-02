@@ -134,6 +134,7 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
     enabled: true,
     autoStart: true,
     dataDir: '/tmp/test-data',
+    userId: 'test-user',
     listeners: {
       qoder: { enabled: true, pollInterval: 60000 },
       'qoder-work': { enabled: true, pollInterval: 60000 },

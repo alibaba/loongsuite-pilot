@@ -41,7 +41,7 @@ SLS_AK_ID=""
 SLS_AK_SECRET=""
 DATA_DIR="$DEFAULT_DATA_DIR"
 LOG_LEVEL=""
-IDENTITY=""
+USER_ID=""
 PURGE=0
 
 # First arg is sub-command (or option -> default to install)
@@ -76,8 +76,8 @@ while [[ $# -gt 0 ]]; do
         --data-dir=*)         DATA_DIR="${1#*=}"; shift ;;
         --log-level)          LOG_LEVEL="$2"; shift 2 ;;
         --log-level=*)        LOG_LEVEL="${1#*=}"; shift ;;
-        --identity)           IDENTITY="$2"; shift 2 ;;
-        --identity=*)         IDENTITY="${1#*=}"; shift ;;
+        --user.id)            USER_ID="$2"; shift 2 ;;
+        --user.id=*)          USER_ID="${1#*=}"; shift ;;
         --lang)               export AAC_LANG="$2"; shift 2 ;;
         --lang=*)             export AAC_LANG="${1#--lang=}"; shift ;;
         --purge)              PURGE=1; shift ;;
@@ -234,7 +234,7 @@ const slsLogstore = '${SLS_LOGSTORE}';
 const slsAkId     = '${SLS_AK_ID}';
 const slsAkSecret = '${SLS_AK_SECRET}';
 const logLevel    = '${LOG_LEVEL}';
-const identity    = '${IDENTITY}';
+const userId      = '${USER_ID}';
 
 if (slsEndpoint) {
   config.sls = config.sls || {};
@@ -255,8 +255,9 @@ if (logLevel) {
   config.logLevel = logLevel;
 }
 
-if (identity) {
-  config.identity = identity;
+if (userId) {
+  config['user.id'] = userId;
+  delete config.identity;
 }
 
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');

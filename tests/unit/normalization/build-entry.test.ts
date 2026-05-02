@@ -35,9 +35,9 @@ describe('buildAgentActivityEntry', () => {
       agentType: ClientType.Qoder, actionType: ActionType.Edit,
       filePath: '/b.ts',
     });
-    expect(a.uuid).toBe('uuid-aaa');
-    expect(b.uuid).toBe('uuid-bbb');
-    expect(a.uuid).not.toBe(b.uuid);
+    expect(a['event.id']).toBe('uuid-aaa');
+    expect(b['event.id']).toBe('uuid-bbb');
+    expect(a['event.id']).not.toBe(b['event.id']);
   });
 
   it('auto-fills timestamp with Date.now when not provided', () => {
@@ -46,7 +46,7 @@ describe('buildAgentActivityEntry', () => {
       agentType: ClientType.Qoder, actionType: ActionType.Edit,
       filePath: '/a.ts',
     });
-    expect(entry.timestamp).toBe(1700000000000);
+    expect(entry.time_unix_nano).toBe('1700000000000000000');
   });
 
   it('uses explicit timestamp when provided', () => {
@@ -56,7 +56,7 @@ describe('buildAgentActivityEntry', () => {
       filePath: '/a.ts',
       timestamp: 9999,
     });
-    expect(entry.timestamp).toBe(9999);
+    expect(entry.time_unix_nano).toBe('9999000000000');
   });
 
   it('includes all required fields', () => {
@@ -66,14 +66,15 @@ describe('buildAgentActivityEntry', () => {
       filePath: '/src/main.ts',
     });
     expect(entry).toMatchObject({
-      sessionId: 'sess-abc',
-      userId: 'user-42',
-      agentType: ClientType.Cursor,
+      'session.id': 'sess-abc',
+      'user.id': 'user-42',
+      'agent.type': ClientType.Cursor,
+    });
+    expect(entry['event.id']).toBe('mock-uuid');
+    expect(entry.attributes).toMatchObject({
       actionType: ActionType.Create,
       filePath: '/src/main.ts',
     });
-    expect(entry.uuid).toBe('mock-uuid');
-    expect(entry.timestamp).toBe(1700000000000);
   });
 
   it('carries optional content field', () => {
@@ -82,7 +83,7 @@ describe('buildAgentActivityEntry', () => {
       agentType: ClientType.Qoder, actionType: ActionType.Edit,
       filePath: '/a.ts', content: 'hello world',
     });
-    expect(entry.content).toBe('hello world');
+    expect(entry.attributes?.content).toBe('hello world');
   });
 
   it('carries optional extra record', () => {
@@ -92,7 +93,7 @@ describe('buildAgentActivityEntry', () => {
       agentType: ClientType.Qoder, actionType: ActionType.Edit,
       filePath: '/a.ts', extra,
     });
-    expect(entry.extra).toEqual(extra);
+    expect(entry.attributes).toMatchObject(extra);
   });
 
   it('leaves optional fields undefined when not provided', () => {
@@ -101,8 +102,7 @@ describe('buildAgentActivityEntry', () => {
       agentType: ClientType.Qoder, actionType: ActionType.Edit,
       filePath: '/a.ts',
     });
-    expect(entry.content).toBeUndefined();
-    expect(entry.inlineDiffMessage).toBeUndefined();
-    expect(entry.extra).toBeUndefined();
+    expect(entry.attributes?.content).toBeUndefined();
+    expect(entry.attributes?.inlineDiffMessage).toBeUndefined();
   });
 });

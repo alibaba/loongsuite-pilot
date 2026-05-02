@@ -42,12 +42,12 @@ describe('AgentActivityEntry contract', () => {
       filePath: '',
     });
 
-    expect(entry.uuid).toMatch(
+    expect(entry['event.id']).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     );
   });
 
-  it('should default timestamp to a positive integer', () => {
+  it('should default timestamp to unix nanoseconds', () => {
     const entry = buildAgentActivityEntry({
       sessionId: 'sess-4',
       userId: 'user-4',
@@ -56,64 +56,41 @@ describe('AgentActivityEntry contract', () => {
       filePath: '/test.ts',
     });
 
-    expect(entry.timestamp).toBeGreaterThan(0);
-    expect(Number.isInteger(entry.timestamp)).toBe(true);
+    expect(Number(entry.time_unix_nano)).toBeGreaterThan(0);
+    expect(entry.time_unix_nano).toMatch(/^\d+$/);
   });
 
-  it('should reject an entry with invalid agentType', () => {
+  it('should reject an entry without event_t required fields', () => {
     const bad = {
       sessionId: 'sess',
-      timestamp: Date.now(),
-      uuid: '00000000-0000-4000-a000-000000000000',
-      userId: 'u',
-      agentType: 'invalid-agent' as ClientType,
-      actionType: ActionType.Edit,
-      filePath: '/test.ts',
     };
 
     const result = AgentActivityEntrySchema.safeParse(bad);
     expect(result.success).toBe(false);
   });
 
-  it('should reject an entry with invalid actionType', () => {
+  it('should reject an entry with invalid event name', () => {
     const bad = {
-      sessionId: 'sess',
-      timestamp: Date.now(),
-      uuid: '00000000-0000-4000-a000-000000000000',
-      userId: 'u',
-      agentType: ClientType.Qoder,
-      actionType: 'invalid-action' as ActionType,
-      filePath: '/test.ts',
+      time_unix_nano: '1700000000000000000',
+      'event.id': 'event-1',
+      'event.name': 'invalid-action',
+      'user.id': 'u',
+      'session.id': 'sess',
+      'agent.type': ClientType.Qoder,
     };
 
     const result = AgentActivityEntrySchema.safeParse(bad);
     expect(result.success).toBe(false);
   });
 
-  it('should reject a non-UUIDv4 uuid', () => {
+  it('should reject a non-numeric time_unix_nano', () => {
     const bad = {
-      sessionId: 'sess',
-      timestamp: Date.now(),
-      uuid: 'not-a-uuid',
-      userId: 'u',
-      agentType: ClientType.Qoder,
-      actionType: ActionType.Edit,
-      filePath: '/test.ts',
-    };
-
-    const result = AgentActivityEntrySchema.safeParse(bad);
-    expect(result.success).toBe(false);
-  });
-
-  it('should reject a negative timestamp', () => {
-    const bad = {
-      sessionId: 'sess',
-      timestamp: -100,
-      uuid: '00000000-0000-4000-a000-000000000000',
-      userId: 'u',
-      agentType: ClientType.Qoder,
-      actionType: ActionType.Edit,
-      filePath: '/test.ts',
+      time_unix_nano: 'not-a-time',
+      'event.id': 'event-1',
+      'event.name': 'event',
+      'user.id': 'u',
+      'session.id': 'sess',
+      'agent.type': ClientType.Qoder,
     };
 
     const result = AgentActivityEntrySchema.safeParse(bad);

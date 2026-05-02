@@ -12,14 +12,14 @@ const logger = createLogger('InputManager');
  * Responsibilities:
  *   1. Register / start / stop inputs
  *   2. Listen for 'entries' events from each input
- *   3. Enrich entries with userId
+ *   3. Enrich entries with user.id
  *   4. Forward to flusher(s) for output
  */
 export class InputManager extends EventEmitter {
   private readonly inputs: Map<string, BaseInput> = new Map();
   private flusher: BaseFlusher | null = null;
   private userId: string = '';
-  private identity: string = '';
+  private configuredUserId: string = '';
 
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;
@@ -29,8 +29,8 @@ export class InputManager extends EventEmitter {
     this.userId = userId;
   }
 
-  setIdentity(identity: string): void {
-    this.identity = identity;
+  setConfiguredUserId(userId: string): void {
+    this.configuredUserId = userId;
   }
 
   registerInput(input: BaseInput): void {
@@ -105,11 +105,10 @@ export class InputManager extends EventEmitter {
     if (entries.length === 0) return;
 
     for (const entry of entries) {
-      if (!entry.userId && this.userId) {
-        entry.userId = this.userId;
-      }
-      if (!entry.identity && this.identity) {
-        entry.identity = this.identity;
+      if (this.configuredUserId) {
+        entry['user.id'] = this.configuredUserId;
+      } else if (!entry['user.id'] && this.userId) {
+        entry['user.id'] = this.userId;
       }
     }
 

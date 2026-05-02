@@ -81,7 +81,7 @@ export class Orchestrator extends EventEmitter {
     // 4. Build InputManager
     this.inputManager = new InputManager();
     this.inputManager.setFlusher(this.flusher);
-    this.inputManager.setIdentity(this.config.identity);
+    this.inputManager.setConfiguredUserId(this.config.userId);
 
     // 5. Install hooks into agent config files (best-effort, non-blocking)
     await this.installHooks();
@@ -133,7 +133,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   /**
-   * Set the user identity (typically resolved asynchronously).
+   * Set a fallback user id (typically resolved asynchronously).
    */
   setUserId(userId: string): void {
     this.inputManager?.setUserId(userId);

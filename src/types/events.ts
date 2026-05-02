@@ -11,22 +11,82 @@ export enum ActionType {
   Other = 'other',
 }
 
+export type AgentEventName =
+  | 'llm.request'
+  | 'llm.response'
+  | 'tool.call'
+  | 'tool.result'
+  | 'skill.use'
+  | 'event';
+
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
 /**
- * Unified agent activity log entry — the normalized format shared by all inputs.
- * Every input must produce events conforming to this shape.
+ * Unified AI agent event — the normalized event_t-compatible format shared by inputs.
+ *
+ * The dotted keys intentionally mirror the SLS wide-table schema so serialization can
+ * preserve column names without another projection layer.
  */
 export interface AgentActivityEntry {
-  sessionId: string;
-  timestamp: number;
-  uuid: string;
-  userId: string;
-  identity?: string;
-  agentType: ClientType;
-  actionType: ActionType;
-  filePath: string;
-  content?: string;
-  inlineDiffMessage?: string;
-  extra?: Record<string, unknown>;
+  [key: string]: JsonValue | undefined;
+
+  time_unix_nano: string;
+  observed_time_unix_nano?: string;
+  'event.id': string;
+  'user.id': string;
+  'event.name': AgentEventName;
+  trace_id?: string;
+  span_id?: string;
+  parent_span_id?: string;
+  'host.name'?: string;
+  'host.ip'?: string;
+  'service.name'?: string;
+  'session.id': string;
+  'turn.id'?: string;
+  'step.id'?: string;
+  'response.id'?: string;
+  'agent.type': string;
+  'agent.id'?: string;
+  'agent.name'?: string;
+  'message.role'?: 'system' | 'user' | 'assistant' | 'tool' | string;
+  'client.channel'?: string;
+  'provider.name'?: string;
+  'request.id'?: string;
+  'request.model'?: string;
+  'response.model'?: string;
+  'response.finish_reasons'?: string;
+  'usage.input_tokens'?: number;
+  'usage.output_tokens'?: number;
+  'usage.cache_read_tokens'?: number;
+  'usage.cache_write_tokens'?: number;
+  'usage.total_tokens'?: number;
+  'cost.input'?: number;
+  'cost.output'?: number;
+  'cost.cache_read'?: number;
+  'cost.cache_write'?: number;
+  'cost.total'?: number;
+  'input.messages_hash'?: string;
+  'input.messages_delta'?: JsonValue;
+  'input.messages'?: JsonValue;
+  'output.messages'?: JsonValue;
+  'tool.name'?: string;
+  'tool.call.id'?: string;
+  'tool.exec.id'?: string;
+  'tool.arguments'?: JsonValue;
+  'tool.result.payload'?: JsonValue;
+  'tool.result.status'?: string;
+  'tool.result.duration_ms'?: number;
+  'skill.name'?: string;
+  'error.type'?: string;
+  'error.message'?: string;
+  is_error?: boolean;
+  attributes?: { [key: string]: JsonValue };
 }
 
 /**

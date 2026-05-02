@@ -21,14 +21,10 @@ export class JsonlFlusher extends BaseFlusher {
   }
 
   async send(entry: AgentActivityEntry): Promise<void> {
-    const filePath = this.resolveFilePath(entry.agentType);
+    const agentType = entry['agent.type'] ?? 'unknown';
+    const filePath = this.resolveFilePath(agentType);
     const serialized = serialiseLogEntry(entry);
-    const line = JSON.stringify({
-      uuid: entry.uuid,
-      logTime: new Date(entry.timestamp).toISOString(),
-      agentType: entry.agentType,
-      data: serialized,
-    });
+    const line = JSON.stringify(serialized);
     await appendLine(filePath, line);
   }
 

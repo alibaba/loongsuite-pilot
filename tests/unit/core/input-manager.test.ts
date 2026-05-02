@@ -75,7 +75,7 @@ describe('InputManager', () => {
 
       expect(flusher.batchCalls.length).toBeGreaterThanOrEqual(1);
       const dispatched = flusher.batchCalls[0][0];
-      expect(dispatched.userId).toBe('injected-user');
+      expect(dispatched['user.id']).toBe('injected-user');
     });
 
     it('does not overwrite existing userId', async () => {
@@ -88,7 +88,35 @@ describe('InputManager', () => {
       await new Promise(r => setTimeout(r, 50));
 
       const dispatched = flusher.batchCalls[0][0];
-      expect(dispatched.userId).toBe('already-set');
+      expect(dispatched['user.id']).toBe('already-set');
+    });
+
+    it('uses configured user.id before userId fallback', async () => {
+      const input = new StubInput('input-1');
+      manager.registerInput(input as any);
+      manager.setUserId('fallback-user');
+      manager.setConfiguredUserId('installer-user');
+
+      const entry = buildTestEntry({ userId: '' });
+      input.emit('entries', [entry]);
+      await new Promise(r => setTimeout(r, 50));
+
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched['user.id']).toBe('installer-user');
+      expect(dispatched.attributes?.identity).toBeUndefined();
+    });
+
+    it('configured user.id overwrites an existing user.id', async () => {
+      const input = new StubInput('input-1');
+      manager.registerInput(input as any);
+      manager.setConfiguredUserId('installer-user');
+
+      const entry = buildTestEntry({ userId: 'raw-user' });
+      input.emit('entries', [entry]);
+      await new Promise(r => setTimeout(r, 50));
+
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched['user.id']).toBe('installer-user');
     });
   });
 

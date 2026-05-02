@@ -45,11 +45,11 @@ describe('JsonlFlusher', () => {
       const [filePath, line] = mockAppendLine.mock.calls[0];
       expect(filePath).toContain('qoder');
       const parsed = JSON.parse(line);
-      expect(parsed.uuid).toBe('e1');
-      expect(parsed.agentType).toBe('qoder');
-      expect(parsed.logTime).toBeDefined();
-      expect(parsed.data).toBeDefined();
-      expect(parsed.data.sessionId).toBeDefined();
+      expect(parsed['event.id']).toBe('e1');
+      expect(parsed['agent.type']).toBe('qoder');
+      expect(parsed.logTime).toBeUndefined();
+      expect(parsed.data).toBeUndefined();
+      expect(parsed['session.id']).toBeDefined();
     });
   });
 
