@@ -51,6 +51,8 @@ export { BaseSqliteInput } from './inputs/base/base-sqlite-input.js';
 export { BaseHookInput } from './inputs/base/base-hook-input.js';
 export { BaseCliForwarder } from './inputs/base/base-cli-forwarder.js';
 export { BaseSessionInput } from './inputs/base/base-session-input.js';
+export { QoderSqliteInput } from './inputs/qoder-sqlite/qoder-sqlite-input.js';
+export { QoderCliSessionInput } from './inputs/qoder-cli-session/qoder-cli-session-input.js';
 export { BaseFlusher } from './flushers/base-flusher.js';
 export { SlsFlusher } from './flushers/sls-flusher.js';
 export { JsonlFlusher } from './flushers/jsonl-flusher.js';

@@ -66,6 +66,8 @@ describe('CursorHookInput', () => {
     expect(entries[0]!['tool.name']).toBe('Shell');
     expect(entries[0]!['tool.call.id']).toBe('tool-1');
     expect(entries[0]!['tool.arguments']).toEqual({ command: 'echo hello', cwd: '/workspace' });
+    expect(entries[0]!['request.model']).toBe('gpt-5.5');
+    expect(entries[0]!['response.model']).toBe('gpt-5.5');
   });
 
   it('maps raw postToolUse hook record to tool.result event_t fields', async () => {
@@ -92,6 +94,8 @@ describe('CursorHookInput', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]!['event.name']).toBe('tool.result');
     expect(entries[0]!['session.id']).toBe('sess-from-raw');
+    expect(entries[0]!['request.model']).toBe('unknown');
+    expect(entries[0]!['response.model']).toBe('unknown');
     expect(entries[0]!['tool.result.payload']).toEqual({ output: 'ok', exitCode: 0 });
     expect(entries[0]!['tool.result.status']).toBe('success');
     expect(entries[0]!['tool.result.duration_ms']).toBe(12.5);
@@ -214,6 +218,8 @@ describe('CursorHookInput', () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]!['event.name']).toBe('event');
+    expect(entries[0]!['request.model']).toBe('unknown');
+    expect(entries[0]!['response.model']).toBe('unknown');
     expect(entries[0]!['error.message']).toBeUndefined();
   });
 

@@ -61,13 +61,11 @@ vi.mock('axios', () => ({
   default: { post: vi.fn().mockResolvedValue({ status: 200 }) },
 }));
 
-const mockQoderGetWatchPaths = vi.fn().mockReturnValue(['/tmp/qoder']);
-const mockQoderCheckAvailability = vi.fn().mockResolvedValue(true);
-vi.mock('../../../src/inputs/qoder/qoder-input.js', () => ({
-  QoderInput: vi.fn().mockImplementation(() => ({
-    id: 'qoder',
+vi.mock('../../../src/inputs/qoder-sqlite/qoder-sqlite-input.js', () => ({
+  QoderSqliteInput: vi.fn().mockImplementation(() => ({
+    id: 'qoder-sqlite',
     agentType: 'qoder',
-    collectionMethod: 'ide-snapshot-polling',
+    collectionMethod: 'sqlite-polling',
     on: vi.fn(),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
@@ -90,8 +88,20 @@ vi.mock('../../../src/inputs/qoder-work/qoder-work-input.js', () => ({
 vi.mock('../../../src/inputs/qoder-cli/qoder-cli-input.js', () => ({
   QoderCliInput: vi.fn().mockImplementation(() => ({
     id: 'qoder-cli-hook',
-    agentType: 'qoder-cli-hook',
+    agentType: 'qoder-cli',
     collectionMethod: 'hook-jsonl',
+    on: vi.fn(),
+    start: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
+    running: false,
+  })),
+}));
+
+vi.mock('../../../src/inputs/qoder-cli-session/qoder-cli-session-input.js', () => ({
+  QoderCliSessionInput: vi.fn().mockImplementation(() => ({
+    id: 'qoder-cli-session',
+    agentType: 'qoder-cli',
+    collectionMethod: 'session-file-polling',
     on: vi.fn(),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
@@ -112,17 +122,20 @@ vi.mock('../../../src/inputs/cursor-hook/cursor-hook-input.js', () => ({
 }));
 
 // Static methods need to be mocked on the mock class itself
-import { QoderInput } from '../../../src/inputs/qoder/qoder-input.js';
+import { QoderSqliteInput } from '../../../src/inputs/qoder-sqlite/qoder-sqlite-input.js';
 import { QoderWorkInput } from '../../../src/inputs/qoder-work/qoder-work-input.js';
 import { QoderCliInput } from '../../../src/inputs/qoder-cli/qoder-cli-input.js';
+import { QoderCliSessionInput } from '../../../src/inputs/qoder-cli-session/qoder-cli-session-input.js';
 import { CursorHookInput } from '../../../src/inputs/cursor-hook/cursor-hook-input.js';
 
-(QoderInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/qoder']);
-(QoderInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
+(QoderSqliteInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/qoder-db']);
+(QoderSqliteInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
 (QoderWorkInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/qoder-work']);
 (QoderWorkInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
 (QoderCliInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/qoder-cli']);
 (QoderCliInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
+(QoderCliSessionInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/qoder-cli-session']);
+(QoderCliSessionInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
 (CursorHookInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/cursor-hook']);
 (CursorHookInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
 
@@ -137,8 +150,10 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
     userId: 'test-user',
     listeners: {
       qoder: { enabled: true, pollInterval: 60000 },
+      'qoder-sqlite': { enabled: true, pollInterval: 60000 },
       'qoder-work': { enabled: true, pollInterval: 60000 },
       'qoder-cli-hook': { enabled: true, pollInterval: 60000 },
+      'qoder-cli-session': { enabled: true, pollInterval: 60000 },
       'cursor-hook': { enabled: true, pollInterval: 60000 },
     },
     flushers: {

@@ -164,7 +164,9 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.listeners.qoder).toBeDefined();
       expect(config.listeners.qoder.enabled).toBe(true);
+      expect(config.listeners['qoder-sqlite'].enabled).toBe(true);
       expect(config.listeners['qoder-work'].enabled).toBe(true);
+      expect(config.listeners['qoder-cli-session'].enabled).toBe(true);
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
     });
 
@@ -178,6 +180,16 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.listeners.qoder.enabled).toBe(false);
       expect(config.listeners.qoder.pollInterval).toBe(120000);
+    });
+
+    it('applies Qoder poll interval env override to SQLite listener', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('QODER_ANALYTICS_POLL_INTERVAL', '45000');
+
+      const config = await loadConfig();
+      expect(config.listeners.qoder.pollInterval).toBe(45000);
+      expect(config.listeners['qoder-sqlite'].pollInterval).toBe(45000);
+      expect(config.listeners['qoder-cli-session'].pollInterval).toBe(45000);
     });
   });
 });

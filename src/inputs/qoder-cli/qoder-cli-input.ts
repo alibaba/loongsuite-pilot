@@ -1,18 +1,24 @@
-import { ClientType, ActionType } from '../../types/index.js';
-import type { AgentActivityEntry } from '../../types/index.js';
+import { ClientType } from '../../types/index.js';
+import type { AgentActivityEntry, AgentEventName, JsonValue } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 
+const SOURCE = 'qoder-transcript-hook';
+const IGNORED_ROW_TYPES = new Set(['ai-title', 'last-prompt', 'session_meta', 'progress']);
+const UNKNOWN_MODEL = 'unknown';
+type QoderVariant = 'qoder-cli' | 'qoder';
+
 /**
- * Qoder CLI — transcript JSONL input.
+ * Qoder transcript hook input.
  *
- * Reads rows from ~/.ai-agent-collector/logs/qoder-cli/history/ and keeps
- * assistant/user messages that have message.content[0].type.
+ * Reads rows from the compatibility history channel
+ * ~/.ai-agent-collector/logs/qoder-cli/history/ and maps both Qoder CLI and
+ * Qoder IDE transcript row shapes to standard AgentActivityEntry fields.
  */
 export class QoderCliInput extends BaseHookInput {
   readonly id = 'qoder-cli-hook';
-  readonly agentType = ClientType.QoderCliHook;
+  readonly agentType = ClientType.QoderCli;
 
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
@@ -34,96 +40,69 @@ export class QoderCliInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    const hookEntry = buildPostToolUseEntry(record, ClientType.QoderCliHook);
+    const hookEntry = buildPostToolUseEntry(record);
     if (hookEntry) return hookEntry;
 
     const rowType = record.type as string | undefined;
+    if (!rowType || IGNORED_ROW_TYPES.has(rowType)) return null;
     if (rowType !== 'assistant' && rowType !== 'user') return null;
 
-    const message = (typeof record.message === 'object' && record.message !== null
-      ? record.message
-      : {}) as Record<string, unknown>;
-    const messageContent = message.content;
+    const message = asRecord(record.message);
+    const contentBlock = selectDominantContentBlock(message.content);
+    if (!contentBlock) return null;
 
-    let ctype: unknown;
-    let cname: unknown;
-    let cinput: unknown;
-    let ctext: unknown;
-    let ccontent: unknown;
-    let cthinking: unknown;
-    let cid: unknown;
-    let ctoolUseId: unknown;
-
-    if (typeof messageContent === 'string') {
-      // Compatibility path for transcript rows where content is plain text.
-      ctype = 'text';
-      ctext = messageContent;
-    } else {
-      const contentList = Array.isArray(messageContent) ? messageContent : [];
-      const content0 = (contentList[0] && typeof contentList[0] === 'object' && contentList[0] !== null
-        ? contentList[0]
-        : null) as Record<string, unknown> | null;
-
-      // Keep parity with SQL filter for array payloads: content[0].type must be non-null.
-      ctype = content0?.type;
-      if (ctype === null || ctype === undefined) return null;
-
-      cname = content0?.name;
-      cinput = content0?.input;
-      ctext = content0?.text;
-      ccontent = content0?.content;
-      cthinking = content0?.thinking;
-      cid = content0?.id;
-      ctoolUseId = content0?.tool_use_id;
-    }
-
+    const variant = inferVariant(record);
+    const eventName = inferEventName(rowType, contentBlock);
     const timestamp = parseTimestamp(record.timestamp) ?? Date.now();
-    const content = typeof ctext === 'string'
-      ? ctext
-      : typeof cthinking === 'string'
-        ? cthinking
-        : typeof ccontent === 'string'
-          ? ccontent
-          : '';
+    const sessionId = getStringValue(record, 'sessionId')
+      ?? getStringValue(record, 'session_id')
+      ?? getStringValue(record, 'sessionid')
+      ?? getStringValue(record, 'conversation_id')
+      ?? '';
+    const turnId = variant === 'qoder-cli' ? undefined : getStringValue(record, 'turn_id');
+    const model = getStringValue(message, 'model') ?? UNKNOWN_MODEL;
+    const toolResultPayload = buildToolResultPayload(record, contentBlock);
+    const messageId = getStringValue(message, 'id');
 
-    const entry = buildAgentActivityEntry({
-      sessionId: (record.session_id as string)
-        ?? (record.sessionId as string)
-        ?? (record.sessionid as string)
-        ?? '',
-      userId: (record.user_id as string)
-        ?? (record.userId as string)
-        ?? '',
-      agentType: ClientType.QoderCliHook,
-      actionType: rowType === 'assistant' ? ActionType.Edit : ActionType.Other,
-      filePath: (record.filePath as string) ?? '',
-      content,
+    return buildAgentActivityEntry({
       timestamp,
-      extra: {
-        type: rowType,
-        _ctype: ctype,
-        _cname: cname,
-        _cinput: cinput,
-        _ctext: ctext,
-        _ccontent: ccontent,
-        _cthinking: cthinking,
-        _cid: cid,
-        _ctool_use_id: ctoolUseId,
-        entrypoint: record.entrypoint,
-        cwd: record.cwd,
-        userType: record.userType,
-        parentUuid: record.parentUuid,
-        role: message.role,
-        model: message.model,
-        stop_reason: message.stop_reason,
-      },
+      'event.id': getStringValue(record, 'uuid') ?? undefined,
+      'event.name': eventName,
+      'session.id': sessionId,
+      'turn.id': turnId,
+      'agent.type': variant === 'qoder-cli' ? ClientType.QoderCli : ClientType.Qoder,
+      'message.role': eventName === 'tool.result'
+        ? 'tool'
+        : getStringValue(message, 'role') ?? rowType,
+      'request.model': model,
+      'response.model': model,
+      'response.id': eventName === 'llm.response' ? messageId : undefined,
+      'response.finish_reasons': getStringValue(message, 'stop_reason'),
+      'input.messages_delta': eventName === 'llm.request'
+        ? buildInputMessagesDelta(contentBlock)
+        : undefined,
+      'output.messages': eventName === 'llm.response'
+        ? buildOutputMessages(contentBlock)
+        : undefined,
+      'tool.name': eventName === 'tool.call' ? getStringValue(contentBlock, 'name') : undefined,
+      'tool.call.id': eventName === 'tool.call' || eventName === 'tool.result'
+        ? getStringValue(contentBlock, 'id') ?? getStringValue(contentBlock, 'tool_use_id')
+        : undefined,
+      'tool.exec.id': eventName === 'tool.call' || eventName === 'tool.result'
+        ? getStringValue(contentBlock, 'id') ?? getStringValue(contentBlock, 'tool_use_id')
+        : undefined,
+      'tool.arguments': eventName === 'tool.call'
+        ? toJsonValue(contentBlock.input)
+        : undefined,
+      'tool.result.payload': eventName === 'tool.result'
+        ? toolResultPayload
+        : undefined,
+      'tool.result.status': eventName === 'tool.result'
+        ? inferToolResultStatus(contentBlock)
+        : undefined,
+      is_error: eventName === 'tool.result' ? getBooleanValue(contentBlock, 'is_error') : undefined,
+      attributes: buildAttributes(record, message, contentBlock, variant),
     });
-
-    const sourceUuid = record.uuid;
-    if (typeof sourceUuid === 'string' && sourceUuid.trim().length > 0) {
-      entry['event.id'] = sourceUuid;
-    }
-    return entry;
   }
 }
 
@@ -138,10 +117,7 @@ function parseTimestamp(value: unknown): number | undefined {
   return Number.isNaN(parsed) ? undefined : parsed;
 }
 
-function buildPostToolUseEntry(
-  record: Record<string, unknown>,
-  agentType: ClientType,
-): AgentActivityEntry | null {
+function buildPostToolUseEntry(record: Record<string, unknown>): AgentActivityEntry | null {
   const data = (record.data && typeof record.data === 'object' && !Array.isArray(record.data))
     ? record.data as Record<string, unknown>
     : record;
@@ -151,25 +127,167 @@ function buildPostToolUseEntry(
   const toolInput = (data.tool_input && typeof data.tool_input === 'object' && !Array.isArray(data.tool_input))
     ? data.tool_input as Record<string, unknown>
     : {};
-  const filePath = typeof toolInput.file_path === 'string'
-    ? toolInput.file_path
-    : typeof data.file_path === 'string'
-      ? data.file_path
-      : '';
-  if (!filePath) return null;
-
   return buildAgentActivityEntry({
-    sessionId: (data.session_id as string) ?? '',
-    userId: (data.user_id as string) ?? '',
-    agentType,
-    actionType: data.aac_pre_file_exists === false ? ActionType.Create : ActionType.Edit,
-    filePath,
-    content: typeof toolInput.content === 'string'
-      ? toolInput.content
-      : typeof toolInput.new_string === 'string'
-        ? toolInput.new_string
-        : undefined,
     timestamp: parseTimestamp(data.timestamp) ?? Date.now(),
-    extra: data,
+    'event.name': 'tool.result',
+    'session.id': getStringValue(data, 'session_id') ?? '',
+    'user.id': getStringValue(data, 'user_id') ?? '',
+    'agent.type': ClientType.QoderCli,
+    'request.model': UNKNOWN_MODEL,
+    'response.model': UNKNOWN_MODEL,
+    'tool.name': getStringValue(data, 'tool_name'),
+    'tool.call.id': getStringValue(data, 'tool_use_id'),
+    'tool.exec.id': getStringValue(data, 'tool_use_id'),
+    'tool.arguments': toJsonValue(toolInput),
+    'tool.result.payload': toJsonValue({
+      file_path: getStringValue(toolInput, 'file_path') ?? getStringValue(data, 'file_path'),
+      content: toolInput.content ?? toolInput.new_string,
+    }),
+    'tool.result.status': 'success',
+    attributes: toJsonObject({
+      source: SOURCE,
+      qoder_variant: 'qoder-cli',
+      raw_type: eventType,
+      cwd: data.cwd,
+      aac_pre_file_exists: data.aac_pre_file_exists,
+      file_path: getStringValue(toolInput, 'file_path') ?? getStringValue(data, 'file_path'),
+    }),
   });
+}
+
+function inferVariant(record: Record<string, unknown>): QoderVariant {
+  if (
+    getStringValue(record, 'entrypoint') === 'cli' ||
+    record.promptId !== undefined ||
+    record.permissionMode !== undefined ||
+    record.userType !== undefined
+  ) {
+    return 'qoder-cli';
+  }
+  return 'qoder';
+}
+
+function inferEventName(rowType: string, content: Record<string, unknown>): AgentEventName {
+  const contentType = getStringValue(content, 'type');
+  if (contentType === 'tool_result') return 'tool.result';
+  if (contentType === 'tool_use') return 'tool.call';
+  if (rowType === 'assistant') return 'llm.response';
+  return 'llm.request';
+}
+
+function selectDominantContentBlock(rawContent: unknown): Record<string, unknown> | null {
+  if (typeof rawContent === 'string') return { type: 'text', text: rawContent };
+  const blocks = Array.isArray(rawContent)
+    ? rawContent
+        .filter((block): block is Record<string, unknown> => (
+          !!block && typeof block === 'object' && !Array.isArray(block)
+        ))
+    : [];
+  return blocks.find(block => block.type === 'tool_result')
+    ?? blocks.find(block => block.type === 'tool_use')
+    ?? blocks.find(block => block.type === 'text')
+    ?? blocks.find(block => block.type === 'thinking')
+    ?? null;
+}
+
+function buildInputMessagesDelta(content: Record<string, unknown>): JsonValue | undefined {
+  const text = getStringValue(content, 'text') ?? getStringValue(content, 'content');
+  if (!text) return undefined;
+  return [{ role: 'user', content: text }];
+}
+
+function buildOutputMessages(content: Record<string, unknown>): JsonValue | undefined {
+  const contentType = getStringValue(content, 'type');
+  const text = getStringValue(content, 'text')
+    ?? getStringValue(content, 'thinking')
+    ?? getStringValue(content, 'content');
+  if (!text) return undefined;
+  return [{
+    type: contentType === 'thinking' ? 'reasoning' : 'text',
+    content: text,
+  }];
+}
+
+function buildToolResultPayload(
+  record: Record<string, unknown>,
+  content: Record<string, unknown>,
+): JsonValue | undefined {
+  const raw = record.toolUseResult ?? content.content;
+  return toJsonValue(raw);
+}
+
+function inferToolResultStatus(content: Record<string, unknown>): string | undefined {
+  const isError = getBooleanValue(content, 'is_error');
+  if (isError === true) return 'failure';
+  if (isError === false) return 'success';
+  return undefined;
+}
+
+function buildAttributes(
+  record: Record<string, unknown>,
+  message: Record<string, unknown>,
+  content: Record<string, unknown>,
+  variant: QoderVariant,
+): { [key: string]: JsonValue } {
+  return toJsonObject({
+    source: SOURCE,
+    qoder_variant: variant,
+    raw_type: record.type,
+    content_type: content.type,
+    cwd: record.cwd,
+    entrypoint: record.entrypoint,
+    permissionMode: record.permissionMode,
+    userType: record.userType,
+    parentUuid: record.parentUuid,
+    promptId: record.promptId,
+    sourceToolAssistantUUID: record.sourceToolAssistantUUID,
+    isSidechain: record.isSidechain,
+    version: record.version,
+    message_id: message.id,
+    message_type: message.type,
+  });
+}
+
+function getStringValue(data: Record<string, unknown>, key: string): string | undefined {
+  const val = data[key];
+  return typeof val === 'string' && val.length > 0 ? val : undefined;
+}
+
+function getBooleanValue(data: Record<string, unknown>, key: string): boolean | undefined {
+  const val = data[key];
+  return typeof val === 'boolean' ? val : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function toJsonObject(value: Record<string, unknown>): { [key: string]: JsonValue } {
+  const out: { [key: string]: JsonValue } = {};
+  for (const [key, raw] of Object.entries(value)) {
+    const json = toJsonValue(raw);
+    if (json !== undefined) out[key] = json;
+  }
+  return out;
+}
+
+function toJsonValue(value: unknown): JsonValue | undefined {
+  if (value === undefined) return undefined;
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map(item => toJsonValue(item))
+      .filter((item): item is JsonValue => item !== undefined);
+  }
+  if (typeof value === 'object') return toJsonObject(value as Record<string, unknown>);
+  return String(value);
 }

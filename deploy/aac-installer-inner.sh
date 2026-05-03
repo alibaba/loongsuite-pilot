@@ -969,7 +969,8 @@ cmd_upgrade() {
     if aac start; then
         # Wait a moment and verify the process is alive
         sleep 2
-        if aac status 2>/dev/null | grep -q "is running"; then
+        status_output="$(aac status 2>/dev/null || true)"
+        if [[ "$status_output" == *"is running"* ]]; then
             msg "    ✅ 新版本启动成功" "    ✅ New version started successfully"
             echo ""
 

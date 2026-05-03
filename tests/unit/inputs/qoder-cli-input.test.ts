@@ -1,10 +1,11 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { ClientType, ActionType } from '../../../src/types/index.js';
-import type { AgentActivityEntry } from '../../../src/types/index.js';
+import { ClientType } from '../../../src/types/index.js';
+import type { AgentActivityEntry, SerializedLogEntry } from '../../../src/types/index.js';
 import { QoderCliInput } from '../../../src/inputs/qoder-cli/qoder-cli-input.js';
+import { JsonlFlusher } from '../../../src/flushers/jsonl-flusher.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
 
 function getTodayDateString(): string {
@@ -15,132 +16,403 @@ function getTodayDateString(): string {
 describe('QoderCliInput', () => {
   let tmpDir: string;
   let stateStore: MockStateStore;
-  let input: QoderCliInput;
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qcli-test-'));
     stateStore = new MockStateStore();
-    input = new QoderCliInput({
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('keeps compatibility identity and history path defaults', () => {
+    const input = makeInput();
+
+    expect(input.id).toBe('qoder-cli-hook');
+    expect(input.agentType).toBe(ClientType.QoderCli);
+  });
+
+  it('maps CLI user rows to qoder-cli llm.request entries', async () => {
+    const entries = await collectRows([await fixtureRow('raw-qoder-cli.jsonl', 1)]);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      'event.name': 'llm.request',
+      'agent.type': ClientType.QoderCli,
+      'event.id': 'user:c657a8f6-b0d0-472a-acd2-a368e9d94a71########1',
+      'session.id': 'c657a8f6-b0d0-472a-acd2-a368e9d94a71',
+      'message.role': 'user',
+      'request.model': 'unknown',
+      'response.model': 'unknown',
+    });
+    expect(entries[0]?.['turn.id']).toBeUndefined();
+    expect(entries[0]?.['request.id']).toBeUndefined();
+    expect(entries[0]?.['input.messages_delta']).toEqual([
+      { role: 'user', content: 'hi, good night' },
+    ]);
+    expect(entries[0]?.attributes).toMatchObject({
+      source: 'qoder-transcript-hook',
+      qoder_variant: 'qoder-cli',
+      raw_type: 'user',
+      entrypoint: 'cli',
+      cwd: '/Users/lukechen/.qoder/projects/-Users-lukechen-ai-agent-audit/transcript',
+    });
+  });
+
+  it('maps IDE user rows to qoder llm.request entries', async () => {
+    const entries = await collectRows([await fixtureRow('raw-qoder-ide.jsonl', 3)]);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      'event.name': 'llm.request',
+      'agent.type': ClientType.Qoder,
+      'event.id': '4279a1bc-a6e2-4cae-a086-359d2051dd6d',
+      'session.id': 'a7eaeff7-f187-463f-bc66-304a7d76fa6e',
+      'message.role': 'user',
+      'request.model': 'unknown',
+      'response.model': 'unknown',
+    });
+    expect(entries[0]?.['request.id']).toBeUndefined();
+    expect(entries[0]?.['input.messages_delta']).toEqual([
+      { role: 'user', content: 'woooo!' },
+    ]);
+    expect(entries[0]?.attributes).toMatchObject({
+      source: 'qoder-transcript-hook',
+      qoder_variant: 'qoder',
+      raw_type: 'user',
+      cwd: '/Users/lukechen/ai-agent-audit',
+    });
+  });
+
+  it('maps assistant text and thinking rows to llm.response output messages', async () => {
+    const entries = await collectRows([
+      await fixtureRow('raw-qoder-cli.jsonl', 2),
+      await fixtureRow('raw-qoder-cli.jsonl', 3),
+    ]);
+
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({
+      'event.name': 'llm.response',
+      'agent.type': ClientType.QoderCli,
+      'message.role': 'assistant',
+      'request.model': 'auto',
+      'response.model': 'auto',
+      'response.id': '2026050202152442e8836f99bb4830',
+    });
+    expect(entries[0]?.['output.messages']).toEqual([
+      { type: 'reasoning', content: 'The user is just greeting me casually.' },
+    ]);
+    expect(entries[1]).toMatchObject({
+      'event.name': 'llm.response',
+      'response.id': '2026050202152442e8836f99bb4830',
+      'response.finish_reasons': 'end_turn',
+    });
+    expect(entries[1]?.['output.messages']).toEqual([
+      { type: 'text', content: 'Good night! How can I help you?' },
+    ]);
+  });
+
+  it('maps assistant tool_use rows to tool.call entries for both schemas', async () => {
+    const entries = await collectRows([
+      await fixtureRow('raw-qoder-cli.jsonl', 11),
+      await fixtureRow('raw-qoder-ide.jsonl', 26),
+    ]);
+
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({
+      'event.name': 'tool.call',
+      'agent.type': ClientType.QoderCli,
+      'tool.call.id': 'chatcmpl-tool-aea4a8099dc32836',
+      'tool.name': 'Bash',
+    });
+    expect(entries[0]?.['tool.arguments']).toEqual({
+      command: 'ls',
+      description: 'List files in current directory',
+    });
+    expect(entries[1]).toMatchObject({
+      'event.name': 'tool.call',
+      'agent.type': ClientType.Qoder,
+      'tool.call.id': 'call_1c6e9e8b14254b9a9e3d64dc',
+      'tool.name': 'list_dir',
+      'request.model': 'unknown',
+      'response.model': 'unknown',
+    });
+    expect(entries[1]?.['tool.arguments']).toEqual({ path: '/Users/lukechen/ai-agent-audit' });
+  });
+
+  it('maps user tool_result rows to tool.result entries for both schemas', async () => {
+    const entries = await collectRows([
+      await fixtureRow('raw-qoder-cli.jsonl', 13),
+      await fixtureRow('raw-qoder-ide.jsonl', 27),
+    ]);
+
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({
+      'event.name': 'tool.result',
+      'agent.type': ClientType.QoderCli,
+      'message.role': 'tool',
+      'tool.call.id': 'chatcmpl-tool-aea4a8099dc32836',
+      'tool.result.status': 'success',
+      is_error: false,
+      'request.model': 'unknown',
+      'response.model': 'unknown',
+    });
+    expect(entries[0]?.['tool.result.payload']).toMatchObject({
+      stdout: expect.stringContaining('248bc65e'),
+      stderr: '',
+    });
+    expect(entries[1]).toMatchObject({
+      'event.name': 'tool.result',
+      'agent.type': ClientType.Qoder,
+      'message.role': 'tool',
+      'tool.call.id': 'call_1c6e9e8b14254b9a9e3d64dc',
+      'tool.result.status': 'success',
+      is_error: false,
+    });
+    expect(entries[1]?.['tool.result.payload']).toContain('Contents of directory');
+  });
+
+  it('ignores metadata and progress rows', async () => {
+    const entries = await collectRows([
+      await fixtureRow('raw-qoder-cli.jsonl', 4),
+      await fixtureRow('raw-qoder-cli.jsonl', 5),
+      await fixtureRow('raw-qoder-ide.jsonl', 2),
+      await fixtureRow('raw-qoder-ide.jsonl', 6),
+    ]);
+
+    expect(entries).toHaveLength(0);
+  });
+
+  it('maps legacy PostToolUse records to standard tool.result entries', async () => {
+    const entries = await collectRows([{
+      event_type: 'PostToolUse',
+      tool_name: 'write_to_file',
+      tool_input: { file_path: '/src/app.ts', content: 'hello' },
+      session_id: 'sess-1',
+      user_id: 'u1',
+      timestamp: Date.now(),
+    }]);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      'event.name': 'tool.result',
+      'agent.type': ClientType.QoderCli,
+      'session.id': 'sess-1',
+      'user.id': 'u1',
+      'request.model': 'unknown',
+      'response.model': 'unknown',
+      'tool.name': 'write_to_file',
+      'tool.result.status': 'success',
+    });
+    expect(entries[0]?.['tool.arguments']).toEqual({
+      file_path: '/src/app.ts',
+      content: 'hello',
+    });
+    expect(entries[0]?.attributes).toMatchObject({
+      source: 'qoder-transcript-hook',
+      qoder_variant: 'qoder-cli',
+      raw_type: 'PostToolUse',
+      file_path: '/src/app.ts',
+    });
+  });
+
+  it('serializes inferred qoder and qoder-cli entries to separate JSONL files', async () => {
+    const entries = await collectRows([
+      await fixtureRow('raw-qoder-cli.jsonl', 1),
+      await fixtureRow('raw-qoder-ide.jsonl', 3),
+    ]);
+    const outputDir = path.join(tmpDir, 'output');
+    const flusher = new JsonlFlusher({
+      enabled: true,
+      outputDir,
+      rotateDaily: true,
+      maxFileSizeMb: 100,
+    });
+    await flusher.start();
+    await flusher.sendBatch(entries);
+
+    const today = getTodayDateString();
+    const qoderCliLine = await readSingleJsonl(path.join(outputDir, `qoder-cli-${today}.jsonl`));
+    const qoderLine = await readSingleJsonl(path.join(outputDir, `qoder-${today}.jsonl`));
+
+    expect(qoderCliLine['agent.type']).toBe('qoder-cli');
+    expect(qoderLine['agent.type']).toBe('qoder');
+  });
+
+  async function collectRows(records: Record<string, unknown>[]): Promise<AgentActivityEntry[]> {
+    const today = getTodayDateString();
+    const logFile = path.join(tmpDir, `qoder-cli-${today}.jsonl`);
+    await fs.writeFile(logFile, records.map(r => JSON.stringify(r)).join('\n') + '\n');
+
+    const input = makeInput();
+    const allEntries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
+    await input.start();
+    await input.stop();
+    return allEntries;
+  }
+
+  function makeInput(): QoderCliInput {
+    return new QoderCliInput({
       stateStore: stateStore as any,
       logDir: tmpDir,
       logPrefix: 'qoder-cli',
       pollIntervalMs: 60_000,
     });
-  });
-
-  afterEach(async () => {
-    if (input.running) await input.stop();
-    await fs.rm(tmpDir, { recursive: true, force: true });
-  });
-
-  describe('PostToolUse event filtering', () => {
-    it('should process PostToolUse events', async () => {
-      const today = getTodayDateString();
-      const logFile = path.join(tmpDir, `qoder-cli-${today}.jsonl`);
-      const record = {
-        event_type: 'PostToolUse',
-        tool_name: 'write_to_file',
-        tool_input: { file_path: '/src/app.ts', content: 'hello' },
-        session_id: 'sess-1',
-        user_id: 'u1',
-        timestamp: Date.now(),
-      };
-      await fs.writeFile(logFile, JSON.stringify(record) + '\n');
-
-      const allEntries: AgentActivityEntry[] = [];
-      input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
-
-      await input.start();
-      expect(allEntries).toHaveLength(1);
-      expect(allEntries[0]!.agentType).toBe(ClientType.QoderCliHook);
-      expect(allEntries[0]!.filePath).toBe('/src/app.ts');
-      await input.stop();
-    });
-
-    it('should skip non-PostToolUse events', async () => {
-      const today = getTodayDateString();
-      const logFile = path.join(tmpDir, `qoder-cli-${today}.jsonl`);
-      const records = [
-        { event_type: 'PreToolUse', tool_name: 'read_file', tool_input: { file_path: '/a.ts' } },
-        { event_type: 'failure', error: 'timeout' },
-        { event_type: null },
-      ];
-      await fs.writeFile(logFile, records.map(r => JSON.stringify(r)).join('\n') + '\n');
-
-      const entries: AgentActivityEntry[][] = [];
-      input.on('entries', (e: AgentActivityEntry[]) => entries.push(e));
-
-      await input.start();
-      expect(entries).toHaveLength(0);
-      await input.stop();
-    });
-  });
-
-  describe('file create/edit action classification', () => {
-    it('should classify as Create when file did not exist (aac_pre_file_exists = false)', async () => {
-      const today = getTodayDateString();
-      const logFile = path.join(tmpDir, `qoder-cli-${today}.jsonl`);
-      const record = {
-        event_type: 'PostToolUse',
-        tool_name: 'create_file',
-        tool_input: { file_path: '/new-file.ts', content: 'new' },
-        aac_pre_file_exists: false,
-        session_id: 'sess-1',
-        timestamp: Date.now(),
-      };
-      await fs.writeFile(logFile, JSON.stringify(record) + '\n');
-
-      const allEntries: AgentActivityEntry[] = [];
-      input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
-
-      await input.start();
-      expect(allEntries).toHaveLength(1);
-      expect(allEntries[0]!.actionType).toBe(ActionType.Create);
-      await input.stop();
-    });
-
-    it('should classify as Edit when file already existed (aac_pre_file_exists = true)', async () => {
-      const today = getTodayDateString();
-      const logFile = path.join(tmpDir, `qoder-cli-${today}.jsonl`);
-      const record = {
-        event_type: 'PostToolUse',
-        tool_name: 'write_to_file',
-        tool_input: { file_path: '/existing.ts', content: 'updated' },
-        aac_pre_file_exists: true,
-        session_id: 'sess-1',
-        timestamp: Date.now(),
-      };
-      await fs.writeFile(logFile, JSON.stringify(record) + '\n');
-
-      const allEntries: AgentActivityEntry[] = [];
-      input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
-
-      await input.start();
-      expect(allEntries).toHaveLength(1);
-      expect(allEntries[0]!.actionType).toBe(ActionType.Edit);
-      await input.stop();
-    });
-  });
-
-  describe('events without file_path', () => {
-    it('should skip events that have no file_path', async () => {
-      const today = getTodayDateString();
-      const logFile = path.join(tmpDir, `qoder-cli-${today}.jsonl`);
-      const record = {
-        event_type: 'PostToolUse',
-        tool_name: 'bash',
-        tool_input: { command: 'ls' },
-        session_id: 'sess-1',
-        timestamp: Date.now(),
-      };
-      await fs.writeFile(logFile, JSON.stringify(record) + '\n');
-
-      const entries: AgentActivityEntry[][] = [];
-      input.on('entries', (e: AgentActivityEntry[]) => entries.push(e));
-
-      await input.start();
-      expect(entries).toHaveLength(0);
-      await input.stop();
-    });
-  });
+  }
 });
+
+async function fixtureRow(fileName: string, lineNumber: number): Promise<Record<string, unknown>> {
+  const fixture = fileName === 'raw-qoder-cli.jsonl'
+    ? CLI_FIXTURE[lineNumber]
+    : IDE_FIXTURE[lineNumber];
+  if (!fixture) throw new Error(`Missing fixture line ${fileName}:${lineNumber}`);
+  return structuredClone(fixture);
+}
+
+async function readSingleJsonl(filePath: string): Promise<SerializedLogEntry> {
+  const raw = await fs.readFile(filePath, 'utf-8');
+  const lines = raw.split('\n').filter(line => line.trim().length > 0);
+  expect(lines).toHaveLength(1);
+  return JSON.parse(lines[0]) as SerializedLogEntry;
+}
+
+const CLI_FIXTURE: Record<number, Record<string, unknown>> = {
+  1: {
+    type: 'user',
+    uuid: 'user:c657a8f6-b0d0-472a-acd2-a368e9d94a71########1',
+    timestamp: '2026-05-01T18:15:22.122Z',
+    message: { role: 'user', content: 'hi, good night' },
+    permissionMode: 'default',
+    promptId: 'b62b1882-8f5a-43d6-8f6e-3868eca4cdbc',
+    parentUuid: null,
+    cwd: '/Users/lukechen/.qoder/projects/-Users-lukechen-ai-agent-audit/transcript',
+    sessionId: 'c657a8f6-b0d0-472a-acd2-a368e9d94a71',
+    userType: 'external',
+    entrypoint: 'cli',
+    version: '0.2.0',
+  },
+  2: {
+    type: 'assistant',
+    uuid: '7f613963-6e1f-4105-ba47-e1ae3993762d',
+    timestamp: '2026-05-01T18:15:28.060Z',
+    message: {
+      id: '2026050202152442e8836f99bb4830',
+      role: 'assistant',
+      model: 'auto',
+      content: [{ type: 'thinking', thinking: 'The user is just greeting me casually.' }],
+    },
+    sessionId: 'c657a8f6-b0d0-472a-acd2-a368e9d94a71',
+    entrypoint: 'cli',
+  },
+  3: {
+    type: 'assistant',
+    uuid: '9facec46-c14a-461a-b316-7c3a3d75ed97',
+    timestamp: '2026-05-01T18:15:28.166Z',
+    message: {
+      id: '2026050202152442e8836f99bb4830',
+      role: 'assistant',
+      model: 'auto',
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'Good night! How can I help you?' }],
+    },
+    sessionId: 'c657a8f6-b0d0-472a-acd2-a368e9d94a71',
+    entrypoint: 'cli',
+  },
+  4: { type: 'last-prompt', sessionId: 'c657a8f6-b0d0-472a-acd2-a368e9d94a71', lastPrompt: 'hi' },
+  5: { type: 'ai-title', sessionId: 'c657a8f6-b0d0-472a-acd2-a368e9d94a71', aiTitle: 'Good night' },
+  11: {
+    type: 'assistant',
+    uuid: '1f2d4cf5-3c8d-4a4d-88c8-41bb18ba2fa2',
+    timestamp: '2026-05-01T18:27:49.786Z',
+    message: {
+      id: '202605020227467800a89c4058491d',
+      role: 'assistant',
+      model: 'auto',
+      content: [{
+        type: 'tool_use',
+        id: 'chatcmpl-tool-aea4a8099dc32836',
+        name: 'Bash',
+        input: { command: 'ls', description: 'List files in current directory' },
+      }],
+    },
+    sessionId: 'c657a8f6-b0d0-472a-acd2-a368e9d94a71',
+    entrypoint: 'cli',
+  },
+  13: {
+    type: 'user',
+    uuid: 'e8e21a34-5946-4d30-a71d-14e7558a99a2',
+    timestamp: '2026-05-01T18:30:06.344Z',
+    message: {
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_use_id: 'chatcmpl-tool-aea4a8099dc32836',
+        content: '248bc65e result',
+        is_error: false,
+      }],
+    },
+    toolUseResult: { stdout: '248bc65e result', stderr: '' },
+    sessionId: 'c657a8f6-b0d0-472a-acd2-a368e9d94a71',
+    entrypoint: 'cli',
+  },
+};
+
+const IDE_FIXTURE: Record<number, Record<string, unknown>> = {
+  2: {
+    type: 'session_meta',
+    sessionId: 'a7eaeff7-f187-463f-bc66-304a7d76fa6e',
+    uuid: 'b0172f61-4324-4caa-b9f5-64873f116b86',
+    timestamp: '2026-05-01T18:09:26.898075Z',
+    cwd: '/Users/lukechen/ai-agent-audit',
+  },
+  3: {
+    type: 'user',
+    sessionId: 'a7eaeff7-f187-463f-bc66-304a7d76fa6e',
+    uuid: '4279a1bc-a6e2-4cae-a086-359d2051dd6d',
+    timestamp: '2026-05-01T18:09:26.898536Z',
+    cwd: '/Users/lukechen/ai-agent-audit',
+    message: { role: 'user', content: 'woooo!' },
+  },
+  6: {
+    type: 'progress',
+    sessionId: 'a7eaeff7-f187-463f-bc66-304a7d76fa6e',
+    uuid: 'c2a3b9fa-eb6f-4002-8b5e-f718f905de4d',
+    timestamp: '2026-05-01T18:09:36.092556Z',
+    cwd: '/Users/lukechen/ai-agent-audit',
+  },
+  26: {
+    type: 'assistant',
+    sessionId: 'a7eaeff7-f187-463f-bc66-304a7d76fa6e',
+    uuid: '1be12cd5-8468-41b5-82cb-fbce2ee454a3',
+    timestamp: '2026-05-01T18:24:26.751673Z',
+    cwd: '/Users/lukechen/ai-agent-audit',
+    message: {
+      role: 'assistant',
+      content: [{
+        id: 'call_1c6e9e8b14254b9a9e3d64dc',
+        input: { path: '/Users/lukechen/ai-agent-audit' },
+        name: 'list_dir',
+        type: 'tool_use',
+      }],
+    },
+  },
+  27: {
+    type: 'user',
+    sessionId: 'a7eaeff7-f187-463f-bc66-304a7d76fa6e',
+    uuid: '8a17efb0-62d7-4e7b-b423-8cfea2c4e5ec',
+    timestamp: '2026-05-01T18:24:26.751961Z',
+    cwd: '/Users/lukechen/ai-agent-audit',
+    message: {
+      role: 'user',
+      content: [{
+        content: 'Contents of directory /Users/lukechen/ai-agent-audit:',
+        is_error: false,
+        tool_use_id: 'call_1c6e9e8b14254b9a9e3d64dc',
+        type: 'tool_result',
+      }],
+    },
+    toolUseResult: 'Contents of directory /Users/lukechen/ai-agent-audit:',
+  },
+};

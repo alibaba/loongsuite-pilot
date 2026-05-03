@@ -20,6 +20,7 @@ export enum ClientType {
   QwenCodeCli = 'qwen-code-cli',
   KimiCodeCli = 'kimi-code-cli',
   CodexSession = 'codex-session',
+  QoderCli = 'qoder-cli',
 
   // Hook-based tools
   ClaudeCliHook = 'claude-cli-hook',

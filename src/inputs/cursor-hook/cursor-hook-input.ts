@@ -4,6 +4,8 @@ import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 
+const UNKNOWN_MODEL = 'unknown';
+
 function getStringValue(data: Record<string, unknown>, key: string): string | undefined {
   const val = data[key];
   return typeof val === 'string' && val.length > 0 ? val : undefined;
@@ -41,6 +43,7 @@ export class CursorHookInput extends BaseHookInput {
     const toolOutput = buildToolResultPayload(payload);
     const toolArguments = buildToolArguments(payload);
     const attributes = buildAttributes(record, payload, hookEvent);
+    const model = getStringValue(payload, 'model') ?? UNKNOWN_MODEL;
 
     return buildAgentActivityEntry({
       time_unix_nano: getStringValue(payload, 'time_unix_nano')
@@ -60,8 +63,8 @@ export class CursorHookInput extends BaseHookInput {
         ?? '',
       'turn.id': getStringValue(payload, 'generation_id') ?? getStringValue(payload, 'turn.id'),
       'agent.type': ClientType.Cursor,
-      'request.model': getStringValue(payload, 'model'),
-      'response.model': eventName === 'llm.response' ? getStringValue(payload, 'model') : undefined,
+      'request.model': model,
+      'response.model': model,
       'response.finish_reasons': getStringValue(payload, 'response_finish_reasons'),
       'message.role': inferRole(hookEvent, eventName),
       'usage.input_tokens': getNumberValue(payload, 'input_tokens'),

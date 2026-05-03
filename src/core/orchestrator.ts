@@ -17,9 +17,10 @@ import { HttpFlusher } from '../flushers/http-flusher.js';
 import { MultiFlusher } from '../flushers/multi-flusher.js';
 
 // Concrete inputs
-import { QoderInput } from '../inputs/qoder/qoder-input.js';
+import { QoderSqliteInput } from '../inputs/qoder-sqlite/qoder-sqlite-input.js';
 import { QoderWorkInput } from '../inputs/qoder-work/qoder-work-input.js';
 import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
+import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-session-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 
 const logger = createLogger('Orchestrator');
@@ -253,18 +254,18 @@ export class Orchestrator extends EventEmitter {
     const entries: AgentDetectionEntry[] = [];
     const listenerCfg = this.config.listeners;
 
-    // --- Qoder (IDE snapshot polling) ---
-    const qoderInput = new QoderInput({ stateStore: this.stateStore });
-    this.inputManager.registerInput(qoderInput);
+    // --- Qoder (SQLite token usage polling) ---
+    const qoderSqliteInput = new QoderSqliteInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(qoderSqliteInput);
     entries.push(
-      this.inputManager.buildDetectionEntry(qoderInput, {
-        watchPaths: QoderInput.getWatchPaths(),
-        isAvailable: QoderInput.checkAvailability,
+      this.inputManager.buildDetectionEntry(qoderSqliteInput, {
+        watchPaths: QoderSqliteInput.getWatchPaths(),
+        isAvailable: QoderSqliteInput.checkAvailability,
         enabled: () => this.agentControlManager.resolveEnabled(
-          'qoder',
-          listenerCfg.qoder?.enabled ?? true,
+          'qoder-sqlite',
+          listenerCfg['qoder-sqlite']?.enabled ?? true,
         ),
-        pollIntervalMs: listenerCfg.qoder?.pollInterval,
+        pollIntervalMs: listenerCfg['qoder-sqlite']?.pollInterval,
       }),
     );
 
@@ -295,6 +296,21 @@ export class Orchestrator extends EventEmitter {
           listenerCfg['qoder-cli-hook']?.enabled ?? true,
         ),
         pollIntervalMs: listenerCfg['qoder-cli-hook']?.pollInterval,
+      }),
+    );
+
+    // --- Qoder CLI (Native session segments) ---
+    const qoderCliSessionInput = new QoderCliSessionInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(qoderCliSessionInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderCliSessionInput, {
+        watchPaths: QoderCliSessionInput.getWatchPaths(),
+        isAvailable: QoderCliSessionInput.checkAvailability,
+        enabled: () => this.agentControlManager.resolveEnabled(
+          'qoder-cli-session',
+          listenerCfg['qoder-cli-session']?.enabled ?? true,
+        ),
+        pollIntervalMs: listenerCfg['qoder-cli-session']?.pollInterval,
       }),
     );
 

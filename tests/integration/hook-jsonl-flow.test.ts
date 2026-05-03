@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { ClientType, ActionType } from '../../src/types/index.js';
+import { ClientType } from '../../src/types/index.js';
 import type { AgentActivityEntry } from '../../src/types/index.js';
 import { QoderCliInput } from '../../src/inputs/qoder-cli/qoder-cli-input.js';
 import { CursorHookInput } from '../../src/inputs/cursor-hook/cursor-hook-input.js';
@@ -17,6 +17,14 @@ function getTodayDateString(): string {
 
 function runCursorHook(input: string, env: Record<string, string>) {
   return spawnSync('bash', [path.resolve(process.cwd(), 'assets/hooks/cursor-aac-hook.sh')], {
+    input,
+    env: { ...process.env, ...env },
+    encoding: 'utf-8',
+  });
+}
+
+function runQoderHook(scriptPath: string, input: string, env: Record<string, string>) {
+  return spawnSync('bash', [scriptPath], {
     input,
     env: { ...process.env, ...env },
     encoding: 'utf-8',
@@ -81,8 +89,28 @@ describe('Hook JSONL integration flow', () => {
 
     // Verify entries are normalized correctly
     expect(allEntries).toHaveLength(2);
-    expect(allEntries[0]!.actionType).toBe(ActionType.Create);
-    expect(allEntries[1]!.actionType).toBe(ActionType.Edit);
+    expect(allEntries[0]).toMatchObject({
+      'event.name': 'tool.result',
+      'agent.type': ClientType.QoderCli,
+      'session.id': 'integ-sess-1',
+      'tool.name': 'create_file',
+      'tool.result.status': 'success',
+    });
+    expect(allEntries[0]?.attributes).toMatchObject({
+      aac_pre_file_exists: false,
+      file_path: '/proj/new.ts',
+    });
+    expect(allEntries[1]).toMatchObject({
+      'event.name': 'tool.result',
+      'agent.type': ClientType.QoderCli,
+      'session.id': 'integ-sess-1',
+      'tool.name': 'write_to_file',
+      'tool.result.status': 'success',
+    });
+    expect(allEntries[1]?.attributes).toMatchObject({
+      aac_pre_file_exists: true,
+      file_path: '/proj/existing.ts',
+    });
 
     // Verify all entries pass schema validation
     for (const entry of allEntries) {
@@ -167,7 +195,76 @@ describe('Hook JSONL integration flow', () => {
     await input2.stop();
 
     expect(newEntries).toHaveLength(1);
-    expect(newEntries[0]!.filePath).toBe('/batch2.ts');
+    expect(newEntries[0]).toMatchObject({
+      'event.name': 'tool.result',
+      'agent.type': ClientType.QoderCli,
+      'tool.name': 'write_to_file',
+    });
+    expect(newEntries[0]?.attributes).toMatchObject({
+      file_path: '/batch2.ts',
+    });
+  });
+
+  it('should consume transcript rows forwarded by qoder-aac-hook without agent argument', async () => {
+    const hookDir = path.join(tmpDir, 'hooks');
+    const dataDir = path.join(tmpDir, 'data');
+    await fs.mkdir(hookDir, { recursive: true });
+    const hookScript = path.join(hookDir, 'qoder-aac-hook.sh');
+    await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/qoder-aac-hook.sh'), hookScript);
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/hook-processor.mjs'),
+      path.join(hookDir, 'hook-processor.mjs'),
+    );
+    await fs.chmod(hookScript, 0o755);
+
+    const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        type: 'user',
+        uuid: 'user-1',
+        timestamp: '2026-05-01T18:15:22.122Z',
+        message: { role: 'user', content: 'hello from qoder hook' },
+        promptId: 'turn-1',
+        sessionId: 'sess-hook',
+        entrypoint: 'cli',
+        cwd: '/tmp/project',
+      }),
+    ].join('\n') + '\n');
+
+    const result = runQoderHook(hookScript, JSON.stringify({
+      hook_event_name: 'Stop',
+      transcript_path: transcriptPath,
+      session_id: 'sess-hook',
+    }), {
+      AAC_DATA_DIR: dataDir,
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+
+    const logDir = path.join(dataDir, 'logs', 'qoder-cli', 'history');
+    const input = new QoderCliInput({
+      stateStore: stateStore as any,
+      logDir,
+      logPrefix: 'qoder-cli',
+      pollIntervalMs: 60_000,
+    });
+
+    const allEntries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
+    await input.start();
+    await input.stop();
+
+    expect(allEntries).toHaveLength(1);
+    expect(allEntries[0]).toMatchObject({
+      'event.name': 'llm.request',
+      'agent.type': ClientType.QoderCli,
+      'session.id': 'sess-hook',
+      'message.role': 'user',
+    });
+    expect(allEntries[0]?.['turn.id']).toBeUndefined();
+    expect(allEntries[0]?.['input.messages_delta']).toEqual([
+      { role: 'user', content: 'hello from qoder hook' },
+    ]);
   });
 });
 

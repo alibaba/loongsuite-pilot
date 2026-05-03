@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { ActionType } from '../../src/types/index.js';
 import type { AgentActivityEntry } from '../../src/types/index.js';
 import { QoderCliInput } from '../../src/inputs/qoder-cli/qoder-cli-input.js';
 import { StateStore } from '../../src/checkpoints/state-store.js';
@@ -87,7 +86,8 @@ describe('US3: End-to-end restart recovery (BaseHookInput)', () => {
 
     // Should only collect the new M=2 records
     expect(entries2).toHaveLength(2);
-    expect(entries2[0]!.filePath).toBe('/batch2/file0.ts');
-    expect(entries2[1]!.filePath).toBe('/batch2/file1.ts');
+    expect(entries2[0]?.['event.name']).toBe('tool.result');
+    expect(entries2[0]?.attributes?.file_path).toBe('/batch2/file0.ts');
+    expect(entries2[1]?.attributes?.file_path).toBe('/batch2/file1.ts');
   });
 });
