@@ -1030,6 +1030,57 @@ mkdir -p specs/105-agent-example
 - 准入控制（`AgentControlManager` 的 on/off/auto 三级模式）
 - 优雅关闭（`Orchestrator` 统一管理生命周期）
 
+## 集成 OTel Agent 插件（Trace → Event 采集）
+
+### 背景
+
+许多 AI Agent 可观测插件（如 opentelemetry-instrumentation-claude）仅支持 OTel Trace 采集。ai-agent-collector 提供互补的事件级采集通道，通过让插件增加本地 JSONL 日志输出，ai-agent-collector 增加对应的 Input 消费，实现完整的数据采集闭环。
+
+数据流：
+
+```
+OTel Plugin (hooks) → JSONL files (event_t schema) → ai-agent-collector BaseHookInput → flushers (SLS/JSONL/HTTP)
+```
+
+### 第 1 步：插件侧 — 添加 JSONL 日志输出
+
+插件在每轮对话结束时将事件写入本地 JSONL 文件，每行一个 JSON 对象，字段遵循 [AI Agent EventSchema（event_t）语义规范](https://code.alibaba-inc.com/yt348264/ai-agent-audit/blob/main/docs/guide/architecture.md)。
+
+核心要求：
+
+- **event.name 枚举**：`llm.request`、`llm.response`、`tool.call`、`tool.result`
+- **必填字段**：`time_unix_nano`、`event.id`、`event.name`、`session.id`、`user.id`、`agent.type`
+- **文件命名格式**：必须匹配 `{prefix}-{YYYY-MM-DD}.jsonl`（如 `claude-code-2026-05-02.jsonl`），与 BaseHookInput 的发现逻辑对齐
+- **配置项**：通过配置文件支持 `log_enabled`、`log_dir`、`log_filename_format`，允许 ai-agent-collector 安装器统一协调路径
+
+### 第 2 步：ai-agent-collector 侧 — 实现 Input
+
+继承 `BaseHookInput`，实现以下内容：
+
+| 方法 | 职责 |
+|---|---|
+| `transformRecord()` | 将 event_t 字段映射为 `AgentActivityEntry`（event.name → ActionType，提取 content/filePath） |
+| `checkAvailability()` | 检测日志目录是否存在 |
+| `getWatchPaths()` | 返回监控路径 |
+
+在 `orchestrator.ts` 的 `registerAllInputs()` 中注册，并实现日志目录发现逻辑（如从插件配置文件读取 `log_dir`）。
+
+参考实现：`src/inputs/claude-code-log/claude-code-log-input.ts`
+
+### 第 3 步：安装集成
+
+在 `aac-installer.sh` 中添加插件安装/卸载逻辑：
+
+- 安装时自动拉取 OTel 插件并写入配置文件（`log_enabled=true`、`log_dir` 指向 ai-agent-collector 的数据目录）
+- 卸载时清理插件文件和 hook 配置
+- 关键：确保插件写入路径与 ai-agent-collector 读取路径一致，通过共享配置文件协商
+
+### 第 4 步：验证
+
+1. 运行 Agent CLI 产生事件，检查 JSONL 文件内容是否符合 event_t 规范
+2. 启动 ai-agent-collector，确认 Input 注册成功且增量采集正常
+3. 检查输出目标（JSONL flusher / SLS）中数据完整性
+
 ## License
 
 Private / Internal Use

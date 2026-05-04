@@ -22,6 +22,11 @@ import { QoderWorkInput } from '../inputs/qoder-work/qoder-work-input.js';
 import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
 import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-session-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
+import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
+import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
+
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 
 const logger = createLogger('Orchestrator');
 
@@ -332,6 +337,77 @@ export class Orchestrator extends EventEmitter {
         pollIntervalMs: listenerCfg['cursor-hook']?.pollInterval,
       }),
     );
+
+    // --- Claude Code Log (OTel plugin JSONL) ---
+    const claudeCodeLogDir = this.resolveClaudeCodeLogDir();
+    const claudeCodeLogInput = new ClaudeCodeLogInput({
+      stateStore: this.stateStore,
+      logDir: claudeCodeLogDir,
+    });
+    this.inputManager.registerInput(claudeCodeLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(claudeCodeLogInput, {
+        watchPaths: [claudeCodeLogDir],
+        isAvailable: async () => directoryExists(claudeCodeLogDir),
+        enabled: () => this.agentControlManager.resolveEnabled(
+          'claude-code-log',
+          listenerCfg['claude-code-log']?.enabled ?? true,
+        ),
+        pollIntervalMs: listenerCfg['claude-code-log']?.pollInterval,
+      }),
+    );
+
+    // --- Codex Log (OTel plugin JSONL) ---
+    const codexLogDir = this.resolveCodexLogDir();
+    const codexLogInput = new CodexLogInput({
+      stateStore: this.stateStore,
+      logDir: codexLogDir,
+    });
+    this.inputManager.registerInput(codexLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(codexLogInput, {
+        watchPaths: [codexLogDir],
+        isAvailable: async () => directoryExists(codexLogDir),
+        enabled: () => this.agentControlManager.resolveEnabled(
+          'codex-log',
+          listenerCfg['codex-log']?.enabled ?? true,
+        ),
+        pollIntervalMs: listenerCfg['codex-log']?.pollInterval,
+      }),
+    );
+
     return entries;
+  }
+
+  private resolveCodexLogDir(): string {
+    try {
+      const configPath = path.join(os.homedir(), '.codex', 'otel-config.json');
+      const raw = fs.readFileSync(configPath, 'utf-8');
+      const cfg = JSON.parse(raw);
+      if (cfg.log_dir && typeof cfg.log_dir === 'string') {
+        return cfg.log_dir.replace(/^~/, os.homedir());
+      }
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        logger.warn('failed to read codex otel-config.json', { error: String(err) });
+      }
+    }
+    return path.join(this.dataDir, 'logs', 'codex');
+  }
+
+  private resolveClaudeCodeLogDir(): string {
+    try {
+      const configPath = path.join(os.homedir(), '.claude', 'otel-config.json');
+      const raw = fs.readFileSync(configPath, 'utf-8');
+      const cfg = JSON.parse(raw);
+      if (cfg.log_dir && typeof cfg.log_dir === 'string') {
+        return cfg.log_dir.replace(/^~/, os.homedir());
+      }
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        logger.warn('failed to read otel-config.json', { error: String(err) });
+      }
+    }
+    return path.join(this.dataDir, 'logs', 'claude-code');
   }
 }

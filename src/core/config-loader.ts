@@ -111,6 +111,8 @@ function buildListenersConfig(
     'qoder-cli-hook':{ enabled: true, pollInterval: 30_000 },
     'qoder-cli-session':{ enabled: true, pollInterval: 30_000 },
     'cursor-hook':   { enabled: true, pollInterval: 30_000 },
+    'claude-code-log': { enabled: true, pollInterval: 30_000 },
+    'codex-log':       { enabled: true, pollInterval: 30_000 },
   };
 
   const result = { ...defaults };
