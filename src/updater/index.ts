@@ -1,0 +1,56 @@
+import { Updater } from './updater.js';
+import { buildAutoUpdateConfig } from '../core/config-loader.js';
+import { createLogger } from '../utils/logger.js';
+import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
+
+const logger = createLogger('UpdaterMain');
+
+const DEFAULT_CONFIG_PATH = '~/.ai-agent-collector/config.json';
+
+async function main(): Promise<void> {
+  logger.info('updater process starting');
+
+  const configPath = resolveHome(
+    process.env.AGENT_DATA_COLLECTION_CONFIG ?? DEFAULT_CONFIG_PATH,
+  );
+
+  interface ConfigFile {
+    autoUpdate?: {
+      enabled?: boolean;
+      checkIntervalMs?: number;
+      manifestUrl?: string;
+      packageUrl?: string;
+    };
+  }
+
+  const file = await readJsonFile<ConfigFile>(configPath);
+  const config = buildAutoUpdateConfig(file);
+
+  if (!config.enabled) {
+    logger.info('auto-update disabled via config, exiting');
+    process.exit(0);
+  }
+
+  const updater = new Updater(config);
+
+  const shutdown = () => {
+    logger.info('received shutdown signal');
+    updater.stop();
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+
+  updater.start();
+
+  logger.info('updater process running', {
+    checkIntervalMs: config.checkIntervalMs,
+    manifestUrl: config.manifestUrl,
+  });
+}
+
+main().catch((err) => {
+  logger.error('updater fatal error', { error: String(err) });
+  process.exit(1);
+});

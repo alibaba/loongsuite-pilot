@@ -143,7 +143,7 @@ curl -fsSL <URL>/aac-installer.sh | bash -s -- install \
 
 安装流程：
 1. 检查 Node.js >= 18、npm、curl/wget
-2. 下载并解压安装包到 `~/.cache/ai-agent-collector/package`
+2. 下载并解压安装包到 `~/.ai-agent-collector/package`
 3. `npm install --production` 安装依赖
 4. 执行 `postinstall.js` 部署 hook 脚本到 `~/.ai-agent-collector/hooks/`
 5. 将安装参数写入 `~/.ai-agent-collector/config.json`（非环境变量）
@@ -160,7 +160,7 @@ curl -fsSL <URL>/aac-installer.sh | bash -s -- upgrade
 升级流程（无缝，自动回滚）：
 1. 比较新旧 VERSION，相同版本跳过
 2. 停止当前服务
-3. 备份旧版本到 `~/.cache/ai-agent-collector/package.bak`
+3. 备份旧版本到 `~/.ai-agent-collector/package.bak`
 4. 部署新版本、安装依赖、更新 hook 脚本
 5. 启动新版本并验证进程存活
 6. 成功则删除备份；**失败则自动恢复旧版本并重启**
@@ -186,8 +186,10 @@ aac start             # 启动（后台运行）
 aac stop              # 停止
 aac restart           # 重启
 aac status            # 查看运行状态、版本和自启动状态
-aac run               # 前台运行（供 launchd/systemd 调用）
-aac autostart enable  # 开启开机自启动
+aac run               # 前台运行采集器（供 launchd/systemd 调用）
+aac run-updater       # 前台运行更新器（供 launchd/systemd 调用）
+aac rollback          # 回滚到上一个版本
+aac autostart enable  # 开启开机自启动（包含采集器和更新器）
 aac autostart disable # 关闭开机自启动
 aac autostart status  # 查看自启动状态
 aac log               # 实时查看日志（tail -f）
@@ -227,7 +229,7 @@ aac autostart disable
 
 **工作原理**：
 
-- `aac autostart enable` 会写入对应平台的服务配置，使用 `aac run` 作为入口。`aac run` 在前台运行服务并动态解析 node 路径（兼容 nvm/volta/fnm 等版本管理器）。
+- `aac autostart enable` 会同时注册两个服务：采集器（`aac run`）和自动更新器（`aac run-updater`）。`aac run` 读取 `current` 指针文件动态解析版本目录和 node 路径（兼容 nvm/volta/fnm 等版本管理器）。
 - **macOS**：通过 `KeepAlive.SuccessfulExit=false` 实现崩溃自动重启，`RunAtLoad=true` 实现登录自启动。`aac stop` 正常退出（exit 0）不会触发重启。
 - **Linux**：通过 `Restart=on-failure` 实现崩溃自动重启。如需在无登录会话时运行，需要 `loginctl enable-linger`（安装时会自动尝试）。
 
@@ -245,7 +247,7 @@ After=network.target
 [Service]
 Type=simple
 User=collector
-WorkingDirectory=/home/collector/.cache/ai-agent-collector/package
+WorkingDirectory=/home/collector/.ai-agent-collector/package
 ExecStart=/usr/bin/node dist/index.js
 Environment=AGENT_DATA_COLLECTION_CONFIG=/home/collector/.ai-agent-collector/config.json
 Restart=always
@@ -261,6 +263,64 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload
 sudo systemctl enable --now ai-agent-collector
 sudo journalctl -u ai-agent-collector -f
+```
+
+### 自动更新
+
+安装后默认开启自动更新。独立的 updater 进程每 4 小时检查一次远端版本，如有新版本会自动下载、部署并重启采集器，无需人工干预。
+
+**架构**：
+
+- **多版本目录**：所有版本安装在 `~/.ai-agent-collector/versions/<ver>_<commit>/`，通过 `current` 指针文件指向当前版本。
+- **独立进程**：updater 作为独立的 Node.js 进程运行（`aac run-updater`），由 launchd/systemd 单独管理，与采集器主进程完全隔离。
+- **固定引导脚本**：`aac run` 读取 `current` 文件动态加载版本，更新只改 JSON 指针文件，不改服务注册。
+
+**工作流程**：
+1. updater 进程定期从 OSS 拉取 `latest.json` 版本清单
+2. 与本地 `VERSION` 文件对比 `version` + `git_commit`
+3. 如有新版本，下载安装包并解压到 `versions/<new_ver>/`
+4. 运行 `npm install` 和 `postinstall.js`
+5. 原子更新 `current` 指针文件，保存旧版本到 `previous`
+6. 调用 `aac restart` 重启采集器（下次启动自动加载新版本）
+7. 自动清理旧版本（仅保留 current + previous）
+
+**手动回滚**：
+
+```bash
+aac rollback    # 切换到上一个版本并重启
+```
+
+**配置**（`config.json` 或环境变量）：
+
+```json
+{
+  "autoUpdate": {
+    "enabled": true,
+    "checkIntervalMs": 14400000,
+    "manifestUrl": "https://bucket.oss.../latest.json",
+    "packageUrl": "https://bucket.oss.../ai-agent-collector.tar.gz"
+  }
+}
+```
+
+| 环境变量 | 说明 | 默认值 |
+|---------|------|--------|
+| `AAC_AUTO_UPDATE_ENABLED` | 是否启用自动更新 | `true` |
+| `AAC_AUTO_UPDATE_INTERVAL_MS` | 检查间隔（毫秒） | `14400000` (4h) |
+| `AAC_MANIFEST_URL` | 版本清单 URL | 从 `packageUrl` 推导 |
+| `AAC_PACKAGE_URL` | 安装包 URL | 内置默认 OSS 地址 |
+
+关闭自动更新：
+
+```bash
+# 方式一：环境变量
+export AAC_AUTO_UPDATE_ENABLED=false
+
+# 方式二：配置文件
+vi ~/.ai-agent-collector/config.json
+# 添加 "autoUpdate": { "enabled": false }
+
+aac restart
 ```
 
 ## 配置

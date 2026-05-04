@@ -12,6 +12,13 @@ export interface ListenerConfig {
 /**
  * Global analytics configuration.
  */
+export interface AutoUpdateConfig {
+  enabled: boolean;
+  checkIntervalMs: number;
+  manifestUrl?: string;
+  packageUrl?: string;
+}
+
 export interface AnalyticsConfig {
   enabled: boolean;
   autoStart: boolean;
@@ -19,6 +26,7 @@ export interface AnalyticsConfig {
   userId: string;
   listeners: Record<string, ListenerConfig>;
   flushers: FlusherConfig;
+  autoUpdate?: AutoUpdateConfig;
 }
 
 export interface FlusherConfig {

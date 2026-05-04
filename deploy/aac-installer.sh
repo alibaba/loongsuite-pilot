@@ -10,6 +10,9 @@
 #     --sls-ak-id "your-ak-id" \
 #     --sls-ak-secret "your-ak-secret"
 #
+# Install from test channel:
+#   curl -fsSL <URL>/aac-installer.sh | bash -s -- install --channel test
+#
 # Upgrade (preserve config, auto-rollback on failure):
 #   curl -fsSL <URL>/aac-installer.sh | bash -s -- upgrade
 #   curl -fsSL <URL>/aac-installer.sh | bash -s -- upgrade --package-url <url>
@@ -23,21 +26,25 @@ set -euo pipefail
 # ============================================================
 # Constants
 # ============================================================
-DEFAULT_PACKAGE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongcollector/ai-agent-collector/ai-agent-collector.tar.gz"
 PACKAGE_NAME="ai-agent-collector"
-PERMANENT_DIR="$HOME/.cache/ai-agent-collector/package"
-BACKUP_DIR="$HOME/.cache/ai-agent-collector/package.bak"
+PERMANENT_DIR="$HOME/.ai-agent-collector/package"
 DEFAULT_DATA_DIR="$HOME/.ai-agent-collector"
 OTEL_PLUGIN_INSTALL_URL="https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/opentelemetry-instrumentation-claude/remote-install.sh"
 OTEL_CLAUDE_DIR="$HOME/.cache/opentelemetry.instrumentation.claude"
 OTEL_CODEX_PLUGIN_INSTALL_URL="https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/opentelemetry-instrumentation-codex/remote-install.sh"
 OTEL_CODEX_DIR="$HOME/.cache/opentelemetry.instrumentation.codex"
 
+# Channel presets: release (production) vs test (pre-release)
+_RELEASE_BASE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongcollector/ai-agent-collector"
+_TEST_BASE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongcollector-dev/ai-agent-collector"
+
 # ============================================================
 # Parse sub-command
 # ============================================================
 COMMAND=""
-PACKAGE_URL="${AAC_PACKAGE_URL:-$DEFAULT_PACKAGE_URL}"
+CHANNEL="${AAC_CHANNEL:-release}"
+PACKAGE_URL="${AAC_PACKAGE_URL:-}"
+INSTALL_VERSION=""
 SLS_ENDPOINT=""
 SLS_PROJECT=""
 SLS_LOGSTORE=""
@@ -84,12 +91,40 @@ while [[ $# -gt 0 ]]; do
         --user.id=*)          USER_ID="${1#*=}"; shift ;;
         --lang)               export AAC_LANG="$2"; shift 2 ;;
         --lang=*)             export AAC_LANG="${1#--lang=}"; shift ;;
+        --version)            INSTALL_VERSION="$2"; shift 2 ;;
+        --version=*)          INSTALL_VERSION="${1#*=}"; shift ;;
+        --channel)            CHANNEL="$2"; shift 2 ;;
+        --channel=*)          CHANNEL="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
         *)
             echo "Unknown option: $1" >&2
             exit 1 ;;
     esac
 done
+
+# Resolve PACKAGE_URL from channel + version if not explicitly set
+if [ -z "$PACKAGE_URL" ]; then
+    _channel_base=""
+    case "$CHANNEL" in
+        release|prod)
+            _channel_base="$_RELEASE_BASE_URL" ;;
+        test|pre)
+            _channel_base="$_TEST_BASE_URL" ;;
+        *)
+            echo "❌ Unknown channel: $CHANNEL (use 'release' or 'test')" >&2
+            exit 1 ;;
+    esac
+    if [ -n "$INSTALL_VERSION" ]; then
+        PACKAGE_URL="${_channel_base}/${INSTALL_VERSION}/${PACKAGE_NAME}.tar.gz"
+    else
+        PACKAGE_URL="${_channel_base}/latest/${PACKAGE_NAME}.tar.gz"
+    fi
+    # Auto-update always checks latest, not a pinned version
+    UPDATE_PACKAGE_URL="${_channel_base}/latest/${PACKAGE_NAME}.tar.gz"
+else
+    # Explicit --package-url: use as-is for both download and auto-update
+    UPDATE_PACKAGE_URL="$PACKAGE_URL"
+fi
 
 # ============================================================
 # Language detection
@@ -183,22 +218,67 @@ download_and_extract() {
 }
 
 # ============================================================
-# Common: deploy package files to PERMANENT_DIR
+# Common: deploy bootstrap scripts from the current version
+# ============================================================
+deploy_bootstrap_scripts() {
+    local src_dir="$PERMANENT_DIR/scripts"
+    local boot_dir="$HOME/.ai-agent-collector/bin"
+    mkdir -p "$boot_dir"
+    cp -f "$src_dir/collector-daemon.js" "$boot_dir/"
+    cp -f "$src_dir/updater-daemon.js"   "$boot_dir/"
+}
+
+# ============================================================
+# Common: deploy package to versions/ directory
 # ============================================================
 deploy_package() {
     local src="$1"
+    local cache_dir="$HOME/.ai-agent-collector"
+    local versions_dir="$cache_dir/versions"
+    local current_file="$cache_dir/current"
+    local previous_file="$cache_dir/previous"
 
-    msg "==> 部署到 $PERMANENT_DIR ..." \
-        "==> Deploying to $PERMANENT_DIR ..."
-    mkdir -p "$(dirname "$PERMANENT_DIR")"
-    rm -rf "$PERMANENT_DIR"
-    cp -r "$src" "$PERMANENT_DIR"
+    local ver="" commit=""
+    if [ -f "$src/VERSION" ]; then
+        ver=$(grep '^version=' "$src/VERSION" | cut -d= -f2)
+        commit=$(grep '^git_commit=' "$src/VERSION" | cut -d= -f2)
+    fi
+
+    if [ -n "$ver" ] && [ -n "$commit" ]; then
+        local dir_name="${ver}_${commit}"
+        local target="$versions_dir/$dir_name"
+
+        if [ -f "$current_file" ]; then
+            local old_dir
+            old_dir=$(cat "$current_file" 2>/dev/null | tr -d '[:space:]')
+            if [ -n "$old_dir" ] && [ "$old_dir" != "$dir_name" ]; then
+                echo "$old_dir" > "$previous_file"
+            fi
+        fi
+
+        msg "==> 部署到 $target ..." "==> Deploying to $target ..."
+        mkdir -p "$versions_dir"
+        rm -rf "$target"
+        cp -r "$src" "$target"
+
+        echo "$dir_name" > "$current_file.tmp"
+        mv -f "$current_file.tmp" "$current_file"
+
+        PERMANENT_DIR="$target"
+    else
+        msg "==> 部署到 $PERMANENT_DIR ..." \
+            "==> Deploying to $PERMANENT_DIR ..."
+        mkdir -p "$(dirname "$PERMANENT_DIR")"
+        rm -rf "$PERMANENT_DIR"
+        cp -r "$src" "$PERMANENT_DIR"
+    fi
     msg "    ✅ 部署完成" "    ✅ Deployed"
     echo ""
 
+    deploy_bootstrap_scripts
+
     msg "==> 安装依赖..." "==> Installing dependencies..."
-    cd "$PERMANENT_DIR"
-    npm install --production --no-optional 2>&1 | tail -1
+    (cd "$PERMANENT_DIR" && npm install --production --no-optional 2>&1 | tail -1)
     msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     echo ""
 
@@ -207,6 +287,44 @@ deploy_package() {
         node scripts/postinstall.js
     fi
     msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
+    echo ""
+}
+
+# ============================================================
+# Migrate legacy single-directory layout to versions/ layout
+# ============================================================
+migrate_legacy_layout() {
+    local cache_dir="$HOME/.ai-agent-collector"
+    local current_file="$cache_dir/current"
+    local legacy_dir="$cache_dir/package"
+    local versions_dir="$cache_dir/versions"
+
+    if [ -f "$current_file" ]; then
+        return 0
+    fi
+    if [ ! -d "$legacy_dir" ] || [ ! -f "$legacy_dir/dist/index.js" ]; then
+        return 0
+    fi
+
+    msg "==> 迁移旧版本目录结构..." "==> Migrating legacy directory layout..."
+
+    local ver="" commit=""
+    if [ -f "$legacy_dir/VERSION" ]; then
+        ver=$(grep '^version=' "$legacy_dir/VERSION" | cut -d= -f2)
+        commit=$(grep '^git_commit=' "$legacy_dir/VERSION" | cut -d= -f2)
+    fi
+    ver="${ver:-0.0.0}"
+    commit="${commit:-legacy}"
+
+    local dir_name="${ver}_${commit}"
+    local target="$versions_dir/$dir_name"
+
+    mkdir -p "$versions_dir"
+    cp -r "$legacy_dir" "$target"
+    echo "$dir_name" > "$current_file"
+
+    PERMANENT_DIR="$target"
+    msg "    ✅ 已迁移到 $target" "    ✅ Migrated to $target"
     echo ""
 }
 
@@ -264,6 +382,12 @@ if (userId) {
   delete config.identity;
 }
 
+const updateUrl = '${UPDATE_PACKAGE_URL}';
+if (updateUrl) {
+  config.autoUpdate = config.autoUpdate || {};
+  config.autoUpdate.packageUrl = updateUrl;
+}
+
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
 "
     msg "    ✅ 配置已写入" "    ✅ Config written"
@@ -279,434 +403,7 @@ install_aac_command() {
     mkdir -p "$global_bin_dir"
 
     local aac_cmd="$global_bin_dir/aac"
-
-    cat > "$aac_cmd" << 'SERVICEEOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-DATA_DIR="${AAC_DATA_DIR:-$HOME/.ai-agent-collector}"
-PACKAGE_DIR="$HOME/.cache/ai-agent-collector/package"
-ENTRY_POINT="$PACKAGE_DIR/dist/index.js"
-PID_FILE="$DATA_DIR/aac.pid"
-LOG_DIR="$DATA_DIR/logs"
-LOG_FILE="$LOG_DIR/aac-service.log"
-CONFIG_FILE="$DATA_DIR/config.json"
-
-SERVICE_LABEL="com.ai-agent-collector"
-LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
-SYSTEMD_UNIT="ai-agent-collector.service"
-SYSTEMD_UNIT_DIR="$HOME/.config/systemd/user"
-SYSTEMD_UNIT_PATH="$SYSTEMD_UNIT_DIR/$SYSTEMD_UNIT"
-AAC_BIN="$HOME/.local/bin/aac"
-
-ensure_dirs() {
-    mkdir -p "$LOG_DIR"
-}
-
-is_running() {
-    if [ -f "$PID_FILE" ]; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        if kill -0 "$pid" 2>/dev/null; then
-            return 0
-        fi
-        rm -f "$PID_FILE"
-    fi
-    return 1
-}
-
-resolve_node() {
-    if command -v node >/dev/null 2>&1; then
-        command -v node
-        return 0
-    fi
-    for candidate in \
-        "$HOME/.nvm/versions/node"/*/bin/node \
-        /usr/local/bin/node \
-        /opt/homebrew/bin/node \
-        "$HOME/.local/bin/node" \
-        "$HOME/.volta/bin/node" \
-        "$HOME/.fnm/aliases/default/bin/node"; do
-        if [ -x "$candidate" ]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-    return 1
-}
-
-detect_init_system() {
-    case "$(uname -s)" in
-        Darwin) echo "launchd" ;;
-        Linux)
-            if command -v systemctl &>/dev/null && systemctl --user status &>/dev/null 2>&1; then
-                echo "systemd"
-            else
-                echo "none"
-            fi
-            ;;
-        *) echo "none" ;;
-    esac
-}
-
-is_managed_by_launchd() {
-    [ -f "$LAUNCHD_PLIST" ] && launchctl list 2>/dev/null | grep -q "$SERVICE_LABEL"
-}
-
-is_managed_by_systemd() {
-    [ -f "$SYSTEMD_UNIT_PATH" ] && systemctl --user is-enabled "$SYSTEMD_UNIT" &>/dev/null
-}
-
-# Run the service in the foreground (used by launchd / systemd)
-cmd_run() {
-    ensure_dirs
-    local node_bin
-    node_bin=$(resolve_node) || {
-        echo "❌ node runtime not found" >&2
-        exit 1
-    }
-    if [ ! -f "$ENTRY_POINT" ]; then
-        echo "❌ Entry point not found: $ENTRY_POINT" >&2
-        exit 1
-    fi
-    echo "$$" > "$PID_FILE"
-    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-    exec "$node_bin" "$ENTRY_POINT"
-}
-
-cmd_start() {
-    if is_running; then
-        echo "ai-agent-collector is already running (PID $(cat "$PID_FILE"))"
-        return 0
-    fi
-
-    if is_managed_by_launchd; then
-        launchctl start "$SERVICE_LABEL" 2>/dev/null || true
-        sleep 1
-        if is_running; then
-            echo "✅ ai-agent-collector started (PID $(cat "$PID_FILE"), managed by launchd)"
-        else
-            echo "✅ ai-agent-collector start requested (launchd)"
-        fi
-        echo "   Log: $LOG_FILE"
-        return 0
-    fi
-
-    if is_managed_by_systemd; then
-        systemctl --user start "$SYSTEMD_UNIT"
-        echo "✅ ai-agent-collector started (managed by systemd)"
-        echo "   Log: journalctl --user -u $SYSTEMD_UNIT"
-        return 0
-    fi
-
-    ensure_dirs
-    if [ ! -f "$ENTRY_POINT" ]; then
-        echo "❌ Entry point not found: $ENTRY_POINT"
-        exit 1
-    fi
-
-    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-    nohup node "$ENTRY_POINT" >> "$LOG_FILE" 2>&1 &
-    local pid=$!
-    echo "$pid" > "$PID_FILE"
-    echo "✅ ai-agent-collector started (PID $pid)"
-    echo "   Log: $LOG_FILE"
-    echo "   Config: $CONFIG_FILE"
-}
-
-cmd_stop() {
-    if is_managed_by_launchd; then
-        launchctl stop "$SERVICE_LABEL" 2>/dev/null || true
-        rm -f "$PID_FILE"
-        echo "✅ ai-agent-collector stopped (launchd)"
-        return 0
-    fi
-
-    if is_managed_by_systemd; then
-        systemctl --user stop "$SYSTEMD_UNIT" 2>/dev/null || true
-        rm -f "$PID_FILE"
-        echo "✅ ai-agent-collector stopped (systemd)"
-        return 0
-    fi
-
-    if ! is_running; then
-        echo "ai-agent-collector is not running"
-        return 0
-    fi
-    local pid
-    pid=$(cat "$PID_FILE")
-    kill "$pid" 2>/dev/null || true
-
-    local count=0
-    while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
-        sleep 1
-        count=$((count + 1))
-    done
-
-    if kill -0 "$pid" 2>/dev/null; then
-        kill -9 "$pid" 2>/dev/null || true
-    fi
-
-    rm -f "$PID_FILE"
-    echo "✅ ai-agent-collector stopped"
-}
-
-cmd_restart() {
-    cmd_stop
-    sleep 1
-    cmd_start
-}
-
-cmd_status() {
-    local ver_info=""
-    local version_file="$PACKAGE_DIR/VERSION"
-    if [ -f "$version_file" ]; then
-        local v; v=$(grep '^version=' "$version_file" | cut -d= -f2)
-        local c; c=$(grep '^git_commit=' "$version_file" | cut -d= -f2)
-        ver_info=" v${v} (${c})"
-    fi
-
-    if is_running; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        echo "✅ ai-agent-collector${ver_info} is running (PID $pid)"
-        echo "   Config: $CONFIG_FILE"
-        echo "   Log:    $LOG_FILE"
-        echo "   Data:   $DATA_DIR"
-    else
-        echo "⚪ ai-agent-collector${ver_info} is not running"
-    fi
-    echo ""
-    autostart_status
-}
-
-cmd_version() {
-    local version_file="$PACKAGE_DIR/VERSION"
-    if [ -f "$version_file" ]; then
-        cat "$version_file"
-    else
-        echo "Version info not available"
-    fi
-}
-
-cmd_log() {
-    if [ -f "$LOG_FILE" ]; then
-        tail -f "$LOG_FILE"
-    else
-        echo "No log file found: $LOG_FILE"
-    fi
-}
-
-cmd_config() {
-    if [ -f "$CONFIG_FILE" ]; then
-        echo "Config file: $CONFIG_FILE"
-        echo "---"
-        cat "$CONFIG_FILE"
-    else
-        echo "No config file found: $CONFIG_FILE"
-    fi
-}
-
-# ---- Autostart management ----
-
-_write_launchd_plist() {
-    mkdir -p "$(dirname "$LAUNCHD_PLIST")"
-    ensure_dirs
-    cat > "$LAUNCHD_PLIST" << PLISTEOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>${SERVICE_LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${AAC_BIN}</string>
-        <string>run</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>${LOG_FILE}</string>
-    <key>StandardErrorPath</key>
-    <string>${LOG_FILE}</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>AGENT_DATA_COLLECTION_CONFIG</key>
-        <string>${CONFIG_FILE}</string>
-    </dict>
-    <key>ProcessType</key>
-    <string>Background</string>
-</dict>
-</plist>
-PLISTEOF
-}
-
-_write_systemd_unit() {
-    mkdir -p "$SYSTEMD_UNIT_DIR"
-    ensure_dirs
-    cat > "$SYSTEMD_UNIT_PATH" << UNITEOF
-[Unit]
-Description=AI Agent Collector
-After=default.target
-
-[Service]
-Type=simple
-ExecStart=${AAC_BIN} run
-Restart=on-failure
-RestartSec=10
-Environment=AGENT_DATA_COLLECTION_CONFIG=${CONFIG_FILE}
-
-[Install]
-WantedBy=default.target
-UNITEOF
-}
-
-autostart_install() {
-    local init_system
-    init_system=$(detect_init_system)
-
-    case "$init_system" in
-        launchd)
-            launchctl unload -w "$LAUNCHD_PLIST" 2>/dev/null || true
-            _write_launchd_plist
-            launchctl load -w "$LAUNCHD_PLIST"
-            echo "✅ Autostart enabled (launchd)"
-            echo "   Plist: $LAUNCHD_PLIST"
-            ;;
-        systemd)
-            _write_systemd_unit
-            systemctl --user daemon-reload
-            systemctl --user enable --now "$SYSTEMD_UNIT"
-            echo "✅ Autostart enabled and service started (systemd user unit)"
-            echo "   Unit: $SYSTEMD_UNIT_PATH"
-            if command -v loginctl &>/dev/null; then
-                if loginctl enable-linger "$(whoami)" 2>/dev/null; then
-                    echo "   Linger enabled (service starts at boot without login)"
-                else
-                    echo "   ⚠️  Could not enable linger (service only runs while logged in)"
-                fi
-            fi
-            ;;
-        *)
-            echo "⚠️  No supported init system detected (need launchd or systemd)"
-            echo "   Service will run via nohup but won't auto-start on boot"
-            return 1
-            ;;
-    esac
-}
-
-autostart_remove() {
-    local init_system
-    init_system=$(detect_init_system)
-
-    case "$init_system" in
-        launchd)
-            launchctl unload -w "$LAUNCHD_PLIST" 2>/dev/null || true
-            rm -f "$LAUNCHD_PLIST"
-            echo "✅ Autostart disabled (launchd plist removed)"
-            ;;
-        systemd)
-            systemctl --user disable --now "$SYSTEMD_UNIT" 2>/dev/null || true
-            rm -f "$SYSTEMD_UNIT_PATH"
-            systemctl --user daemon-reload 2>/dev/null || true
-            echo "✅ Autostart disabled (systemd unit removed)"
-            ;;
-        *)
-            echo "No autostart configuration found"
-            ;;
-    esac
-}
-
-autostart_status() {
-    local init_system
-    init_system=$(detect_init_system)
-
-    case "$init_system" in
-        launchd)
-            if [ -f "$LAUNCHD_PLIST" ]; then
-                if launchctl list 2>/dev/null | grep -q "$SERVICE_LABEL"; then
-                    echo "✅ Autostart: enabled (launchd, loaded)"
-                else
-                    echo "⚠️  Autostart: plist exists but not loaded"
-                    echo "   Run: aac autostart enable"
-                fi
-                echo "   Plist: $LAUNCHD_PLIST"
-            else
-                echo "⚪ Autostart: not configured"
-            fi
-            ;;
-        systemd)
-            if [ -f "$SYSTEMD_UNIT_PATH" ]; then
-                if systemctl --user is-enabled "$SYSTEMD_UNIT" &>/dev/null; then
-                    echo "✅ Autostart: enabled (systemd)"
-                else
-                    echo "⚠️  Autostart: unit exists but not enabled"
-                    echo "   Run: aac autostart enable"
-                fi
-                echo "   Unit: $SYSTEMD_UNIT_PATH"
-            else
-                echo "⚪ Autostart: not configured"
-            fi
-            ;;
-        *)
-            echo "⚪ Autostart: not available (no supported init system)"
-            ;;
-    esac
-}
-
-cmd_autostart() {
-    case "${1:-status}" in
-        enable)  autostart_install ;;
-        disable) autostart_remove ;;
-        status)  autostart_status ;;
-        *)
-            echo "Usage: aac autostart {enable|disable|status}"
-            exit 1 ;;
-    esac
-}
-
-cmd_help() {
-    cat << 'HELP'
-Usage: aac <command>
-
-Commands:
-  start      Start the collector service
-  stop       Stop the collector service
-  restart    Restart the collector service
-  status     Show service and autostart status
-  run        Run the service in foreground (used by launchd/systemd)
-  autostart  Manage boot autostart (enable|disable|status)
-  log        Tail the service log (Ctrl+C to stop)
-  config     Show the current config file
-  version    Show version information
-  help       Show this help message
-HELP
-}
-
-case "${1:-help}" in
-    start)   cmd_start ;;
-    stop)    cmd_stop ;;
-    restart) cmd_restart ;;
-    run)     cmd_run ;;
-    status)  cmd_status ;;
-    autostart) shift; cmd_autostart "$@" ;;
-    log)     cmd_log ;;
-    config)  cmd_config ;;
-    version|--version|-v) cmd_version ;;
-    help|--help|-h) cmd_help ;;
-    *)
-        echo "Unknown command: $1"
-        cmd_help
-        exit 1 ;;
-esac
-SERVICEEOF
-
+    cp -f "$PERMANENT_DIR/scripts/aac.sh" "$aac_cmd"
     chmod +x "$aac_cmd"
     msg "    ✅ 已安装: $aac_cmd" "    ✅ Installed: $aac_cmd"
 
@@ -753,6 +450,19 @@ PATHBLOCK
 # Common: read VERSION file fields
 # ============================================================
 get_installed_version() {
+    local cache_dir="$HOME/.ai-agent-collector"
+    local current_file="$cache_dir/current"
+    local versions_dir="$cache_dir/versions"
+
+    if [ -f "$current_file" ]; then
+        local dir
+        dir=$(cat "$current_file" 2>/dev/null | tr -d '[:space:]')
+        if [ -n "$dir" ] && [ -f "$versions_dir/$dir/VERSION" ]; then
+            grep '^version=' "$versions_dir/$dir/VERSION" | cut -d= -f2
+            return 0
+        fi
+    fi
+
     local vf="$PERMANENT_DIR/VERSION"
     if [ -f "$vf" ]; then
         grep '^version=' "$vf" | cut -d= -f2
@@ -1002,16 +712,9 @@ print_summary() {
         msg "💡 Codex OTel 插件已安装" \
             "💡 Codex OTel plugin installed"
     fi
-    echo ""
-    msg "服务管理命令:" "Service management:"
-    echo "   aac start             # 启动服务 / Start"
-    echo "   aac stop              # 停止服务 / Stop"
-    echo "   aac restart           # 重启服务 / Restart"
-    echo "   aac status            # 查看状态 / Status"
-    echo "   aac autostart enable  # 开启开机自启 / Enable boot autostart"
-    echo "   aac autostart disable # 关闭开机自启 / Disable boot autostart"
-    echo "   aac log               # 查看日志 / Tail log"
-    echo "   aac config            # 查看配置 / Show config"
+    msg "命令:" "Commands:"
+    echo "   aac          # 查看状态 / Status"
+    echo "   aac info     # 版本与配置 / Version & config"
     echo "============================================================"
 }
 
@@ -1025,14 +728,15 @@ cmd_install() {
 
     check_deps
 
+    # Migrate legacy layout if needed
+    migrate_legacy_layout
+
     # Check if already installed
-    if [ -d "$PERMANENT_DIR" ] && [ -f "$PERMANENT_DIR/dist/index.js" ]; then
-        local cur_ver; cur_ver=$(get_installed_version)
-        if [ -n "$cur_ver" ]; then
-            msg "⚠️  检测到已安装版本 v${cur_ver}，将执行重新安装" \
-                "⚠️  Existing installation v${cur_ver} detected, re-installing"
-            echo ""
-        fi
+    local cur_ver; cur_ver=$(get_installed_version)
+    if [ -n "$cur_ver" ]; then
+        msg "⚠️  检测到已安装版本 v${cur_ver}，将执行重新安装" \
+            "⚠️  Existing installation v${cur_ver} detected, re-installing"
+        echo ""
     fi
 
     # Stop running service before re-install
@@ -1067,27 +771,18 @@ cmd_install() {
     install_aac_command
     install_otel_plugin
 
-    msg "==> 配置开机自启动并启动服务..." \
-        "==> Configuring autostart and starting service..."
-    if aac autostart enable; then
-        # launchd (RunAtLoad) / systemd (enable --now) already started the service
+    msg "==> 启动服务..." "==> Starting service..."
+    if aac start; then
         sleep 2
         if aac status 2>/dev/null | grep -q "is running"; then
-            msg "    ✅ 服务已通过系统服务管理启动" \
-                "    ✅ Service started via system service manager"
+            msg "    ✅ 服务已启动" "    ✅ Service started"
         else
-            msg "    ⚠️  自启动已配置，但服务可能尚未就绪，请检查: aac status" \
-                "    ⚠️  Autostart configured, but service may not be ready. Check: aac status"
+            msg "    ⚠️  服务可能尚未就绪，请检查: aac status" \
+                "    ⚠️  Service may not be ready. Check: aac status"
         fi
     else
-        msg "    ⚠️  自启动配置失败，将使用 nohup 方式启动..." \
-            "    ⚠️  Autostart setup failed, falling back to nohup..."
-        if aac start; then
-            :
-        else
-            msg "    ⚠️  服务启动失败，请手动运行: aac start" \
-                "    ⚠️  Service failed to start, run manually: aac start"
-        fi
+        msg "    ⚠️  服务启动失败，请手动运行: aac start" \
+            "    ⚠️  Service failed to start, run manually: aac start"
     fi
     echo ""
 
@@ -1102,14 +797,17 @@ cmd_upgrade() {
         "🔄 Upgrading $PACKAGE_NAME ..."
     echo ""
 
+    # Migrate legacy layout if needed
+    migrate_legacy_layout
+
     # Must have an existing installation
-    if [ ! -d "$PERMANENT_DIR" ] || [ ! -f "$PERMANENT_DIR/dist/index.js" ]; then
+    local old_ver; old_ver=$(get_installed_version)
+    if [ -z "$old_ver" ]; then
         msg "❌ 未检测到已安装的 ai-agent-collector，请先执行 install" \
             "❌ No existing installation found. Please run install first."
         exit 1
     fi
 
-    local old_ver; old_ver=$(get_installed_version)
     msg "   当前版本: ${old_ver:-unknown}" "   Current version: ${old_ver:-unknown}"
     echo ""
 
@@ -1118,7 +816,6 @@ cmd_upgrade() {
     trap 'rm -rf "${TMP_DIR:-}"' EXIT
     download_and_extract
 
-    # Compare versions (version + git_commit together determine identity)
     local new_ver; new_ver=$(get_version_from_dir "$INSTALL_SRC")
     local new_commit; new_commit=$(get_commit_from_dir "$INSTALL_SRC")
     local old_commit; old_commit=$(get_commit_from_dir "$PERMANENT_DIR")
@@ -1142,56 +839,74 @@ cmd_upgrade() {
     fi
     echo ""
 
-    # Backup the old package
-    msg "==> 备份旧版本..." "==> Backing up old version..."
-    rm -rf "$BACKUP_DIR"
-    cp -r "$PERMANENT_DIR" "$BACKUP_DIR"
-    msg "    ✅ 已备份到 $BACKUP_DIR" "    ✅ Backed up to $BACKUP_DIR"
-    echo ""
-
-    # Deploy the new package
+    # Deploy new version to versions/<ver>_<commit>/
+    # Old version stays untouched; deploy_package writes current/previous pointers
     deploy_package "$INSTALL_SRC"
     install_aac_command
 
     # Start the new version
     msg "==> 启动新版本..." "==> Starting new version..."
     if aac start; then
-        # Wait a moment and verify the process is alive
         sleep 2
         if aac status 2>/dev/null | grep -q "is running"; then
             msg "    ✅ 新版本启动成功" "    ✅ New version started successfully"
             echo ""
 
-            # Cleanup backup
-            rm -rf "$BACKUP_DIR"
+            # GC: remove old versions beyond current + previous
+            gc_old_versions
 
             print_summary "upgrade"
             return 0
         fi
     fi
 
-    # --- Rollback ---
+    # --- Rollback via version pointer ---
     echo ""
     msg "⚠️  新版本启动失败，正在回滚..." \
         "⚠️  New version failed to start, rolling back..."
 
-    # Stop whatever might have partially started
     aac stop 2>/dev/null || true
 
-    # Restore old package
-    rm -rf "$PERMANENT_DIR"
-    mv "$BACKUP_DIR" "$PERMANENT_DIR"
-    msg "    ✅ 已恢复旧版本" "    ✅ Old version restored"
-
-    # Restart old version
-    aac start 2>/dev/null || true
-    msg "    ✅ 旧版本已重新启动" "    ✅ Old version restarted"
-    echo ""
+    if command -v aac &>/dev/null; then
+        aac rollback 2>/dev/null || true
+    else
+        "$HOME/.local/bin/aac" rollback 2>/dev/null || true
+    fi
 
     msg "❌ 升级失败，已回滚到 v${old_ver:-unknown}" \
         "❌ Upgrade failed, rolled back to v${old_ver:-unknown}"
     msg "   请检查日志: aac log" "   Check logs: aac log"
     exit 1
+}
+
+# ============================================================
+# GC: remove old version directories beyond current + previous
+# ============================================================
+gc_old_versions() {
+    local cache_dir="$HOME/.ai-agent-collector"
+    local versions_dir="$cache_dir/versions"
+    local current_file="$cache_dir/current"
+    local previous_file="$cache_dir/previous"
+
+    [ -d "$versions_dir" ] || return 0
+
+    local keep_current="" keep_previous=""
+    if [ -f "$current_file" ]; then
+        keep_current=$(cat "$current_file" 2>/dev/null | tr -d '[:space:]')
+    fi
+    if [ -f "$previous_file" ]; then
+        keep_previous=$(cat "$previous_file" 2>/dev/null | tr -d '[:space:]')
+    fi
+
+    for d in "$versions_dir"/*/; do
+        [ -d "$d" ] || continue
+        local name
+        name=$(basename "$d")
+        if [ "$name" = "$keep_current" ] || [ "$name" = "$keep_previous" ]; then
+            continue
+        fi
+        rm -rf "$d"
+    done
 }
 
 # ============================================================
@@ -1258,37 +973,13 @@ cmd_uninstall() {
         "🗑️  Uninstalling $PACKAGE_NAME ..."
     echo ""
 
-    # Disable autostart before stopping
-    msg "==> 禁用开机自启动..." "==> Disabling autostart..."
-    if command -v aac &>/dev/null; then
-        aac autostart disable 2>/dev/null || true
-    elif [ -f "$HOME/.local/bin/aac" ]; then
-        "$HOME/.local/bin/aac" autostart disable 2>/dev/null || true
-    else
-        # Manual cleanup if aac is not available
-        local _plist="$HOME/Library/LaunchAgents/com.ai-agent-collector.plist"
-        local _unit="$HOME/.config/systemd/user/ai-agent-collector.service"
-        if [ -f "$_plist" ]; then
-            launchctl unload -w "$_plist" 2>/dev/null || true
-            rm -f "$_plist"
-        fi
-        if [ -f "$_unit" ]; then
-            systemctl --user disable --now ai-agent-collector.service 2>/dev/null || true
-            rm -f "$_unit"
-            systemctl --user daemon-reload 2>/dev/null || true
-        fi
-    fi
-    msg "    ✅ 自启动已禁用" "    ✅ Autostart disabled"
-    echo ""
-
-    # Stop the service
+    # Stop service (also removes autostart)
     msg "==> 停止服务..." "==> Stopping service..."
     if command -v aac &>/dev/null; then
         aac stop 2>/dev/null || true
     elif [ -f "$HOME/.local/bin/aac" ]; then
         "$HOME/.local/bin/aac" stop 2>/dev/null || true
     else
-        # Try to kill by PID file directly
         local pid_file="$DATA_DIR/aac.pid"
         if [ -f "$pid_file" ]; then
             local pid; pid=$(cat "$pid_file")
@@ -1297,15 +988,33 @@ cmd_uninstall() {
             kill -9 "$pid" 2>/dev/null || true
             rm -f "$pid_file"
         fi
+        # Manual autostart cleanup when aac is unavailable
+        local _plist="$HOME/Library/LaunchAgents/com.ai-agent-collector.plist"
+        local _uplist="$HOME/Library/LaunchAgents/com.ai-agent-collector.updater.plist"
+        local _unit="$HOME/.config/systemd/user/ai-agent-collector.service"
+        local _uunit="$HOME/.config/systemd/user/ai-agent-collector-updater.service"
+        for f in "$_uplist" "$_plist"; do
+            if [ -f "$f" ]; then
+                launchctl unload -w "$f" 2>/dev/null || true
+                rm -f "$f"
+            fi
+        done
+        for f in "$_uunit" "$_unit"; do
+            if [ -f "$f" ]; then
+                systemctl --user disable --now "$(basename "$f")" 2>/dev/null || true
+                rm -f "$f"
+            fi
+        done
+        systemctl --user daemon-reload 2>/dev/null || true
     fi
     msg "    ✅ 服务已停止" "    ✅ Service stopped"
     echo ""
 
     # Remove package directory
     msg "==> 删除安装目录..." "==> Removing installation..."
-    rm -rf "$HOME/.cache/ai-agent-collector"
-    msg "    ✅ 已删除 $HOME/.cache/ai-agent-collector" \
-        "    ✅ Removed $HOME/.cache/ai-agent-collector"
+    rm -rf "$HOME/.ai-agent-collector"
+    msg "    ✅ 已删除 $HOME/.ai-agent-collector" \
+        "    ✅ Removed $HOME/.ai-agent-collector"
 
     # Remove aac command
     msg "==> 删除 aac 命令..." "==> Removing aac command..."

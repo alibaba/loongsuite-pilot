@@ -1,5 +1,5 @@
 import * as os from 'node:os';
-import type { AnalyticsConfig, FlusherConfig, SlsEndpoint, SlsMode } from '../types/index.js';
+import type { AnalyticsConfig, AutoUpdateConfig, FlusherConfig, SlsEndpoint, SlsMode } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -225,5 +225,44 @@ function buildHttpConfig(file: ConfigFile | null) {
     batchMaxSize: file?.http?.batchMaxSize ?? 20,
     flushIntervalMs: file?.http?.flushIntervalMs ?? 5_000,
     requestTimeoutMs: file?.http?.requestTimeoutMs ?? 10_000,
+  };
+}
+
+const RELEASE_PACKAGE_URL =
+  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongcollector/ai-agent-collector/latest/ai-agent-collector.tar.gz';
+const TEST_PACKAGE_URL =
+  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongcollector-dev/ai-agent-collector/latest/ai-agent-collector.tar.gz';
+const DEFAULT_CHECK_INTERVAL_MS = 60_000; // 1 minute
+
+function resolveDefaultPackageUrl(): string {
+  const channel = env('AAC_CHANNEL') ?? 'release';
+  return (channel === 'test' || channel === 'pre') ? TEST_PACKAGE_URL : RELEASE_PACKAGE_URL;
+}
+
+/**
+ * Build AutoUpdateConfig from env vars + config file.
+ * Exported for use by the standalone updater process.
+ */
+export function buildAutoUpdateConfig(
+  file: { autoUpdate?: { enabled?: boolean; checkIntervalMs?: number; manifestUrl?: string; packageUrl?: string } } | null,
+): AutoUpdateConfig {
+  const packageUrl = env('AAC_PACKAGE_URL') ?? file?.autoUpdate?.packageUrl ?? resolveDefaultPackageUrl();
+
+  let manifestUrl = env('AAC_MANIFEST_URL') ?? file?.autoUpdate?.manifestUrl;
+  if (!manifestUrl && packageUrl) {
+    const lastSlash = packageUrl.lastIndexOf('/');
+    manifestUrl = lastSlash >= 0
+      ? packageUrl.substring(0, lastSlash + 1) + 'latest.json'
+      : undefined;
+  }
+
+  return {
+    enabled: envBool('AAC_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
+    checkIntervalMs: envInt(
+      'AAC_AUTO_UPDATE_INTERVAL_MS',
+      file?.autoUpdate?.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS,
+    ),
+    manifestUrl,
+    packageUrl,
   };
 }
