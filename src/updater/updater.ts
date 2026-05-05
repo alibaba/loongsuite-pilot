@@ -158,6 +158,7 @@ export class Updater {
 
       await this.downloadAndDeploy(packageUrl, manifest);
       await this.restartCollector();
+      await this.restartMonitorIfRunning();
       await this.gcOldVersions();
       this.consecutiveFailures = 0;
     } catch (err) {
@@ -373,6 +374,36 @@ export class Updater {
       logger.info('collector restarted');
     } catch (err) {
       logger.warn('collector restart failed', { error: String(err) });
+    }
+  }
+
+  private async restartMonitorIfRunning(): Promise<void> {
+    const monitorPidFile = path.join(this.paths.cacheDir, 'loongpilot-monitor.pid');
+    const dashboardPidFile = path.join(this.paths.cacheDir, 'loongpilot-dashboard.pid');
+    const monitorRunning = await this.isPidFileRunning(monitorPidFile);
+    const dashboardRunning = await this.isPidFileRunning(dashboardPidFile);
+
+    if (!monitorRunning && !dashboardRunning) return;
+
+    logger.info('restarting monitor after update');
+    try {
+      await execFileAsync(this.paths.loongpilotBin, ['monitor-stop'], { timeout: 30_000 });
+      await execFileAsync(this.paths.loongpilotBin, ['monitor-start'], { timeout: 30_000 });
+      logger.info('monitor restarted');
+    } catch (err) {
+      logger.warn('monitor restart failed', { error: String(err) });
+    }
+  }
+
+  private async isPidFileRunning(pidFile: string): Promise<boolean> {
+    try {
+      const raw = await fs.readFile(pidFile, 'utf-8');
+      const pid = Number(raw.trim());
+      if (!Number.isInteger(pid) || pid <= 0) return false;
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
     }
   }
 
