@@ -19,7 +19,7 @@ const __dirname = path.dirname(__filename);
 // Resolve paths
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const HOOKS_SOURCE_DIR = path.join(PROJECT_ROOT, 'assets', 'hooks');
-const LOONGSUITE_PILOT_DIR = process.env.LOONGPILOT_DATA_DIR || path.join(process.env.HOME || '', '.loongsuite-pilot');
+const LOONGSUITE_PILOT_DIR = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(process.env.HOME || '', '.loongsuite-pilot');
 const HOOKS_TARGET_DIR = path.join(LOONGSUITE_PILOT_DIR, 'hooks');
 
 /**

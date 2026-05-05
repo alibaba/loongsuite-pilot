@@ -151,7 +151,7 @@ describe('agent overview aggregation', () => {
 });
 
 async function fixtureDir() {
-  const dataDir = await mkdtemp(path.join(tmpdir(), 'loongpilot-overview-'));
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'loongsuite-pilot-overview-'));
   await mkdir(path.join(dataDir, 'logs', 'output'), { recursive: true });
   await mkdir(path.join(dataDir, 'sls-failed-logs'), { recursive: true });
   await writeFile(path.join(dataDir, 'config.json'), JSON.stringify({
@@ -163,12 +163,12 @@ async function fixtureDir() {
       logstore: 'logstore',
     },
   }));
-  await writeFile(path.join(dataDir, 'loongpilot.pid'), String(process.pid));
+  await writeFile(path.join(dataDir, 'loongsuite-pilot.pid'), String(process.pid));
   return dataDir;
 }
 
 async function writeRuntimeFiles(dataDir, options) {
-  await writeFile(path.join(dataDir, 'logs', 'loongpilot-service.log'), options.serviceLog || '');
+  await writeFile(path.join(dataDir, 'logs', 'loongsuite-pilot-service.log'), options.serviceLog || '');
   for (const [name, lines] of Object.entries(options.outputLines || {})) {
     await writeFile(path.join(dataDir, 'logs', 'output', name), lines.join('\n'));
   }

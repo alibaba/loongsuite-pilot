@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATA_DIR="${LOONGPILOT_DATA_DIR:-$HOME/.loongsuite-pilot}"
+DATA_DIR="${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}"
 CACHE_DIR="$HOME/.loongsuite-pilot"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSIONS_DIR="$CACHE_DIR/versions"
@@ -9,15 +9,15 @@ CURRENT_FILE="$CACHE_DIR/current"
 PREVIOUS_FILE="$CACHE_DIR/previous"
 BOOTSTRAP_DIR="$CACHE_DIR/bin"
 PACKAGE_DIR="$CACHE_DIR/package"
-PID_FILE="$DATA_DIR/loongpilot.pid"
+PID_FILE="$DATA_DIR/loongsuite-pilot.pid"
 LOG_DIR="$DATA_DIR/logs"
-LOG_FILE="$LOG_DIR/loongpilot-service.log"
-UPDATER_LOG_FILE="$LOG_DIR/loongpilot-updater.log"
-MONITOR_LOG_FILE="$LOG_DIR/loongpilot-monitor-process.log"
-DASHBOARD_LOG_FILE="$LOG_DIR/loongpilot-dashboard.log"
+LOG_FILE="$LOG_DIR/loongsuite-pilot-service.log"
+UPDATER_LOG_FILE="$LOG_DIR/loongsuite-pilot-updater.log"
+MONITOR_LOG_FILE="$LOG_DIR/loongsuite-pilot-monitor-process.log"
+DASHBOARD_LOG_FILE="$LOG_DIR/loongsuite-pilot-dashboard.log"
 CONFIG_FILE="$DATA_DIR/config.json"
-MONITOR_PID_FILE="$DATA_DIR/loongpilot-monitor.pid"
-DASHBOARD_PID_FILE="$DATA_DIR/loongpilot-dashboard.pid"
+MONITOR_PID_FILE="$DATA_DIR/loongsuite-pilot-monitor.pid"
+DASHBOARD_PID_FILE="$DATA_DIR/loongsuite-pilot-dashboard.pid"
 MONITOR_DATA_DIR="$LOG_DIR/process-monitor"
 
 SERVICE_LABEL="com.loongsuite-pilot"
@@ -29,7 +29,7 @@ UPDATER_UNIT="loongsuite-pilot-updater.service"
 SYSTEMD_UNIT_DIR="$HOME/.config/systemd/user"
 SYSTEMD_UNIT_PATH="$SYSTEMD_UNIT_DIR/$SYSTEMD_UNIT"
 UPDATER_UNIT_PATH="$SYSTEMD_UNIT_DIR/$UPDATER_UNIT"
-LOONGPILOT_BIN="$HOME/.local/bin/loongpilot"
+LOONGSUITE_PILOT_BIN="$HOME/.local/bin/loongsuite-pilot"
 
 ensure_dirs() {
     mkdir -p "$LOG_DIR"
@@ -283,37 +283,37 @@ cmd_stop() {
 
 cmd_process_monitor_start() {
     if is_pid_file_running "$MONITOR_PID_FILE"; then
-        echo "✅ loongpilot process monitor is already running (PID $(cat "$MONITOR_PID_FILE"))"
+        echo "✅ loongsuite-pilot process monitor is already running (PID $(cat "$MONITOR_PID_FILE"))"
         return 0
     fi
 
     ensure_dirs
     local script
-    script=$(resolve_script "monitor-loongpilot.sh") || {
+    script=$(resolve_script "monitor-loongsuite-pilot.sh") || {
         echo "❌ monitor script missing"
         exit 1
     }
 
     nohup bash "$script" >> "$MONITOR_LOG_FILE" 2>&1 &
     echo "$!" > "$MONITOR_PID_FILE"
-    echo "✅ loongpilot process monitor started (PID $!)"
+    echo "✅ loongsuite-pilot process monitor started (PID $!)"
 }
 
 cmd_process_monitor_stop() {
     stop_pid_file "$MONITOR_PID_FILE"
-    pkill -f "monitor-loongpilot\.sh" 2>/dev/null || true
-    echo "✅ loongpilot process monitor stopped"
+    pkill -f "monitor-loongsuite-pilot\.sh" 2>/dev/null || true
+    echo "✅ loongsuite-pilot process monitor stopped"
 }
 
 cmd_dashboard_start() {
     if is_pid_file_running "$DASHBOARD_PID_FILE"; then
-        echo "✅ loongpilot dashboard is already running (PID $(cat "$DASHBOARD_PID_FILE"))"
+        echo "✅ loongsuite-pilot dashboard is already running (PID $(cat "$DASHBOARD_PID_FILE"))"
         return 0
     fi
 
     ensure_dirs
     local script node_bin
-    script=$(resolve_script "serve-loongpilot-monitor.mjs") || {
+    script=$(resolve_script "serve-loongsuite-pilot-monitor.mjs") || {
         echo "❌ dashboard script missing"
         exit 1
     }
@@ -324,27 +324,27 @@ cmd_dashboard_start() {
 
     nohup "$node_bin" "$script" >> "$DASHBOARD_LOG_FILE" 2>&1 &
     echo "$!" > "$DASHBOARD_PID_FILE"
-    echo "✅ loongpilot dashboard started (PID $!)"
-    echo "   open http://127.0.0.1:${LOONGPILOT_MONITOR_PORT:-8765}/"
+    echo "✅ loongsuite-pilot dashboard started (PID $!)"
+    echo "   open http://127.0.0.1:${LOONGSUITE_PILOT_MONITOR_PORT:-8765}/"
 }
 
 cmd_dashboard_stop() {
     stop_pid_file "$DASHBOARD_PID_FILE"
-    pkill -f "serve-loongpilot-monitor\.mjs" 2>/dev/null || true
-    echo "✅ loongpilot dashboard stopped"
+    pkill -f "serve-loongsuite-pilot-monitor\.mjs" 2>/dev/null || true
+    echo "✅ loongsuite-pilot dashboard stopped"
 }
 
 cmd_monitor_start() {
     cmd_process_monitor_start
     cmd_dashboard_start
-    echo "✅ loongpilot monitor is running"
-    echo "   dashboard: http://127.0.0.1:${LOONGPILOT_MONITOR_PORT:-8765}/"
+    echo "✅ loongsuite-pilot monitor is running"
+    echo "   dashboard: http://127.0.0.1:${LOONGSUITE_PILOT_MONITOR_PORT:-8765}/"
 }
 
 cmd_monitor_stop() {
     cmd_dashboard_stop
     cmd_process_monitor_stop
-    echo "✅ loongpilot monitor stopped"
+    echo "✅ loongsuite-pilot monitor stopped"
 }
 
 # Restart only the collector (used by updater after deploying a new version)
@@ -494,7 +494,7 @@ _write_launchd_plist() {
     <string>${SERVICE_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${LOONGPILOT_BIN}</string>
+        <string>${LOONGSUITE_PILOT_BIN}</string>
         <string>run</string>
     </array>
     <key>RunAtLoad</key>
@@ -530,7 +530,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=${LOONGPILOT_BIN} run
+ExecStart=${LOONGSUITE_PILOT_BIN} run
 Restart=on-failure
 RestartSec=10
 Environment=AGENT_DATA_COLLECTION_CONFIG=${CONFIG_FILE}
@@ -552,7 +552,7 @@ _write_launchd_updater_plist() {
     <string>${UPDATER_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${LOONGPILOT_BIN}</string>
+        <string>${LOONGSUITE_PILOT_BIN}</string>
         <string>run-updater</string>
     </array>
     <key>RunAtLoad</key>
@@ -588,7 +588,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=${LOONGPILOT_BIN} run-updater
+ExecStart=${LOONGSUITE_PILOT_BIN} run-updater
 Restart=on-failure
 RestartSec=60
 Environment=AGENT_DATA_COLLECTION_CONFIG=${CONFIG_FILE}
@@ -674,7 +674,7 @@ autostart_status() {
 }
 
 cmd_help() {
-    echo "Usage: loongpilot <command>"
+    echo "Usage: loongsuite-pilot <command>"
     echo ""
     echo "Commands:"
     echo "  start       Start the collector service"

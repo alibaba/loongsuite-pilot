@@ -420,11 +420,11 @@ describe('Updater', () => {
       const updater = new Updater(makeConfig(), tmpDir);
       await updater.check();
 
-      const loongpilotCalls = mockExecFile.mock.calls.filter(
-        ([cmd]: [string]) => String(cmd).includes('loongpilot'),
+      const loongsuitePilotCalls = mockExecFile.mock.calls.filter(
+        ([cmd]: [string]) => String(cmd).includes('loongsuite-pilot'),
       );
-      expect(loongpilotCalls.map(([, args]) => args)).toContainEqual(['restart-collector']);
-      expect(loongpilotCalls.map(([, args]) => args)).not.toContainEqual(['monitor-start']);
+      expect(loongsuitePilotCalls.map(([, args]) => args)).toContainEqual(['restart-collector']);
+      expect(loongsuitePilotCalls.map(([, args]) => args)).not.toContainEqual(['monitor-start']);
     });
 
     it('restarts monitor after update when monitor was already running', async () => {
@@ -435,20 +435,20 @@ describe('Updater', () => {
         throw new Error('not running');
       }) as typeof process.kill);
       mockFsReadFile.mockImplementation((filePath: string) => {
-        if (filePath.endsWith('/loongpilot-monitor.pid')) return Promise.resolve('12345\n');
-        if (filePath.endsWith('/loongpilot-dashboard.pid')) return Promise.reject(new Error('ENOENT'));
+        if (filePath.endsWith('/loongsuite-pilot-monitor.pid')) return Promise.resolve('12345\n');
+        if (filePath.endsWith('/loongsuite-pilot-dashboard.pid')) return Promise.reject(new Error('ENOENT'));
         return Promise.reject(new Error('ENOENT'));
       });
 
       const updater = new Updater(makeConfig(), tmpDir);
       await updater.check();
 
-      const loongpilotCalls = mockExecFile.mock.calls
-        .filter(([cmd]: [string]) => String(cmd).includes('loongpilot'))
+      const loongsuitePilotCalls = mockExecFile.mock.calls
+        .filter(([cmd]: [string]) => String(cmd).includes('loongsuite-pilot'))
         .map(([, args]) => args);
-      expect(loongpilotCalls).toContainEqual(['restart-collector']);
-      expect(loongpilotCalls).toContainEqual(['monitor-stop']);
-      expect(loongpilotCalls).toContainEqual(['monitor-start']);
+      expect(loongsuitePilotCalls).toContainEqual(['restart-collector']);
+      expect(loongsuitePilotCalls).toContainEqual(['monitor-stop']);
+      expect(loongsuitePilotCalls).toContainEqual(['monitor-start']);
 
       killSpy.mockRestore();
       process.kill = realKill;

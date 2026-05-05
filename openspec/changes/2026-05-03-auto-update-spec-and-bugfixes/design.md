@@ -4,7 +4,7 @@ The auto-update subsystem enables deployed loongsuite-pilot instances to self-up
 
 - A standalone **Updater process** (`src/updater/`) that polls a remote manifest, downloads new versions, and restarts the Collector.
 - **Bootstrap scripts** (`scripts/collector-daemon.js`, `scripts/updater-daemon.js`) that resolve the current version via pointer files.
-- **CLI integration** (`scripts/loongpilot.sh`) with launchd/systemd service management.
+- **CLI integration** (`scripts/loongsuite-pilot.sh`) with launchd/systemd service management.
 - **Build & deploy tooling** (`deploy/package.sh`, `deploy/upload.sh`) that publishes versioned packages to Alibaba Cloud OSS.
 
 ### Architecture: Dual-Process Model
@@ -12,10 +12,10 @@ The auto-update subsystem enables deployed loongsuite-pilot instances to self-up
 ```
 launchd / systemd
     │
-    ├── com.loongsuite-pilot          → loongpilot run          → collector-daemon.js
+    ├── com.loongsuite-pilot          → loongsuite-pilot run          → collector-daemon.js
     │                                                           └── versions/<current>/dist/index.js
     │
-    └── com.loongsuite-pilot.updater  → loongpilot run-updater  → updater-daemon.js
+    └── com.loongsuite-pilot.updater  → loongsuite-pilot run-updater  → updater-daemon.js
                                                                 └── versions/<current>/dist/updater/index.js
 ```
 
@@ -42,7 +42,7 @@ The Updater runs independently so it can restart the Collector without terminati
     ├── latest.json          → { version, git_commit, package_url, released_at }
     ├── latest/*.tar.gz
     ├── <version>/*.tar.gz
-    └── loongpilot-installer.sh
+    └── loongsuite-pilot-installer.sh
 ```
 
 Dual channel: `release` (production) and `test` (pre-release).
@@ -141,7 +141,7 @@ Rationale: Integration tests can pass a disposable `tmpdir` as `baseDir` and exe
 ### Key Mocking Strategy
 
 - **Unit tests**: All I/O is mocked (`node:fs/promises`, `node:child_process`, `global.fetch`). `computeSha256` is mocked via `vi.mock` to isolate SHA verification logic from actual file I/O.
-- **Integration tests**: Real filesystem in a `tmpdir`. Only `child_process` is partially mocked — `tar` routes to real execution (to create real tarballs), while `npm` and `loongpilot` are mocked to avoid external dependencies. `fetch` is mocked to serve in-memory tarball bytes.
+- **Integration tests**: Real filesystem in a `tmpdir`. Only `child_process` is partially mocked — `tar` routes to real execution (to create real tarballs), while `npm` and `loongsuite-pilot` are mocked to avoid external dependencies. `fetch` is mocked to serve in-memory tarball bytes.
 
 ## Open Questions
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# loongpilot-installer.sh — Unified installer for loongsuite-pilot
+# loongsuite-pilot-installer.sh — Unified installer for loongsuite-pilot
 #
 # Install (first time):
-#   curl -fsSL <URL>/loongpilot-installer.sh | bash
-#   curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- install \
+#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash
+#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install \
 #     --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
 #     --sls-project "my-project" \
 #     --sls-logstore "my-logstore" \
@@ -11,15 +11,15 @@
 #     --sls-ak-secret "your-ak-secret"
 #
 # Install from test channel:
-#   curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- install --channel test
+#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install --channel test
 #
 # Upgrade (preserve config, auto-rollback on failure):
-#   curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- upgrade
-#   curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- upgrade --package-url <url>
+#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- upgrade
+#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- upgrade --package-url <url>
 #
 # Uninstall:
-#   curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- uninstall
-#   curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- uninstall --purge
+#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- uninstall
+#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- uninstall --purge
 
 set -euo pipefail
 
@@ -42,12 +42,13 @@ _TEST_BASE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai
 # Parse sub-command
 # ============================================================
 COMMAND=""
-CHANNEL="${LOONGPILOT_CHANNEL:-release}"
-PACKAGE_URL="${LOONGPILOT_PACKAGE_URL:-}"
+DEFAULT_CHANNEL="${LOONGSUITE_PILOT_DEFAULT_CHANNEL:-release}"
+CHANNEL="${LOONGSUITE_PILOT_CHANNEL:-$DEFAULT_CHANNEL}"
+PACKAGE_URL="${LOONGSUITE_PILOT_PACKAGE_URL:-}"
 INSTALL_VERSION=""
-SLS_ENDPOINT=""
-SLS_PROJECT=""
-SLS_LOGSTORE=""
+SLS_ENDPOINT="https://cn-heyuan.log.aliyuncs.com"
+SLS_PROJECT="ai-coding-devops"
+SLS_LOGSTORE="ai-coding-test"
 SLS_AK_ID=""
 SLS_AK_SECRET=""
 DATA_DIR="$DEFAULT_DATA_DIR"
@@ -89,8 +90,8 @@ while [[ $# -gt 0 ]]; do
         --log-level=*)        LOG_LEVEL="${1#*=}"; shift ;;
         --user.id)            USER_ID="$2"; shift 2 ;;
         --user.id=*)          USER_ID="${1#*=}"; shift ;;
-        --lang)               export LOONGPILOT_LANG="$2"; shift 2 ;;
-        --lang=*)             export LOONGPILOT_LANG="${1#--lang=}"; shift ;;
+        --lang)               export LOONGSUITE_PILOT_LANG="$2"; shift 2 ;;
+        --lang=*)             export LOONGSUITE_PILOT_LANG="${1#--lang=}"; shift ;;
         --version)            INSTALL_VERSION="$2"; shift 2 ;;
         --version=*)          INSTALL_VERSION="${1#*=}"; shift ;;
         --channel)            CHANNEL="$2"; shift 2 ;;
@@ -130,7 +131,7 @@ fi
 # Language detection
 # ============================================================
 detect_lang() {
-    if [ -n "${LOONGPILOT_LANG:-}" ]; then echo "$LOONGPILOT_LANG"; return; fi
+    if [ -n "${LOONGSUITE_PILOT_LANG:-}" ]; then echo "$LOONGSUITE_PILOT_LANG"; return; fi
     for v in "${LANGUAGE:-}" "${LC_ALL:-}" "${LC_MESSAGES:-}" "${LANG:-}"; do
         if echo "$v" | grep -qi "zh"; then echo "zh"; return; fi
     done
@@ -395,22 +396,22 @@ fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
 }
 
 # ============================================================
-# Common: install/update the loongpilot service management script
+# Common: install/update the loongsuite-pilot service management script
 # ============================================================
-install_loongpilot_command() {
+install_loongsuite_pilot_command() {
     msg "==> 安装服务管理脚本..." "==> Installing service management script..."
     local global_bin_dir="$HOME/.local/bin"
     mkdir -p "$global_bin_dir"
 
-    local loongpilot_cmd="$global_bin_dir/loongpilot"
-    cp -f "$PERMANENT_DIR/scripts/loongpilot.sh" "$loongpilot_cmd"
-    chmod +x "$loongpilot_cmd"
-    msg "    ✅ 已安装: $loongpilot_cmd" "    ✅ Installed: $loongpilot_cmd"
+    local loongsuite_pilot_cmd="$global_bin_dir/loongsuite-pilot"
+    cp -f "$PERMANENT_DIR/scripts/loongsuite-pilot.sh" "$loongsuite_pilot_cmd"
+    chmod +x "$loongsuite_pilot_cmd"
+    msg "    ✅ 已安装: $loongsuite_pilot_cmd" "    ✅ Installed: $loongsuite_pilot_cmd"
 
     # If /usr/local/bin is writable (root), create a symlink for immediate PATH access
     if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
-        ln -sf "$loongpilot_cmd" /usr/local/bin/loongpilot
-        msg "    ✅ 已链接到 /usr/local/bin/loongpilot" "    ✅ Linked to /usr/local/bin/loongpilot"
+        ln -sf "$loongsuite_pilot_cmd" /usr/local/bin/loongsuite-pilot
+        msg "    ✅ 已链接到 /usr/local/bin/loongsuite-pilot" "    ✅ Linked to /usr/local/bin/loongsuite-pilot"
     else
         ensure_path_block() {
             local file="$1"
@@ -442,7 +443,7 @@ PATHBLOCK
     fi
     echo ""
 
-    # Ensure loongpilot is on PATH for the rest of this script
+    # Ensure loongsuite-pilot is on PATH for the rest of this script
     export PATH="$global_bin_dir:$PATH"
 }
 
@@ -506,7 +507,7 @@ show_version_info() {
 # Common: print summary
 # ============================================================
 # ============================================================
-# Install OTel Claude plugin (log-only mode for loongpilot integration)
+# Install OTel Claude plugin (log-only mode for loongsuite-pilot integration)
 # ============================================================
 install_otel_plugin() {
     local OTEL_LOG_DIR="$DATA_DIR/logs/claude-code"
@@ -521,8 +522,8 @@ install_otel_plugin() {
         if curl -fsSL "$OTEL_PLUGIN_INSTALL_URL" | bash; then
             msg "    ✅ OTel 插件安装完成" "    ✅ OTel plugin installed"
         else
-            msg "    ⚠️  OTel 插件安装失败（不影响 loongpilot 其他功能）" \
-                "    ⚠️  OTel plugin installation failed (non-blocking for loongpilot)"
+            msg "    ⚠️  OTel 插件安装失败（不影响 loongsuite-pilot 其他功能）" \
+                "    ⚠️  OTel plugin installation failed (non-blocking for loongsuite-pilot)"
             return 0
         fi
     fi
@@ -565,8 +566,8 @@ fs.writeFileSync(cfgPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
             if curl -fsSL "$OTEL_CODEX_PLUGIN_INSTALL_URL" | bash; then
                 msg "    ✅ Codex OTel 插件安装完成" "    ✅ Codex OTel plugin installed"
             else
-                msg "    ⚠️  Codex OTel 插件安装失败（不影响 loongpilot 其他功能）" \
-                    "    ⚠️  Codex OTel plugin installation failed (non-blocking for loongpilot)"
+                msg "    ⚠️  Codex OTel 插件安装失败（不影响 loongsuite-pilot 其他功能）" \
+                    "    ⚠️  Codex OTel plugin installation failed (non-blocking for loongsuite-pilot)"
             fi
         fi
 
@@ -713,8 +714,8 @@ print_summary() {
             "💡 Codex OTel plugin installed"
     fi
     msg "命令:" "Commands:"
-    echo "   loongpilot          # 查看状态 / Status"
-    echo "   loongpilot info     # 版本与配置 / Version & config"
+    echo "   loongsuite-pilot          # 查看状态 / Status"
+    echo "   loongsuite-pilot info     # 版本与配置 / Version & config"
     echo "============================================================"
 }
 
@@ -740,7 +741,7 @@ cmd_install() {
     fi
 
     # Stop running service before re-install
-    local pid_file="$DATA_DIR/loongpilot.pid"
+    local pid_file="$DATA_DIR/loongsuite-pilot.pid"
     if [ -f "$pid_file" ]; then
         local old_pid
         old_pid=$(cat "$pid_file")
@@ -768,21 +769,21 @@ cmd_install() {
     download_and_extract
     deploy_package "$INSTALL_SRC"
     write_config
-    install_loongpilot_command
+    install_loongsuite_pilot_command
     install_otel_plugin
 
     msg "==> 启动服务..." "==> Starting service..."
-    if loongpilot start; then
+    if loongsuite-pilot start; then
         sleep 2
-        if loongpilot status 2>/dev/null | grep -q "is running"; then
+        if loongsuite-pilot status 2>/dev/null | grep -q "is running"; then
             msg "    ✅ 服务已启动" "    ✅ Service started"
         else
-            msg "    ⚠️  服务可能尚未就绪，请检查: loongpilot status" \
-                "    ⚠️  Service may not be ready. Check: loongpilot status"
+            msg "    ⚠️  服务可能尚未就绪，请检查: loongsuite-pilot status" \
+                "    ⚠️  Service may not be ready. Check: loongsuite-pilot status"
         fi
     else
-        msg "    ⚠️  服务启动失败，请手动运行: loongpilot start" \
-            "    ⚠️  Service failed to start, run manually: loongpilot start"
+        msg "    ⚠️  服务启动失败，请手动运行: loongsuite-pilot start" \
+            "    ⚠️  Service failed to start, run manually: loongsuite-pilot start"
     fi
     echo ""
 
@@ -832,23 +833,23 @@ cmd_upgrade() {
 
     # Stop the running service
     msg "==> 停止服务..." "==> Stopping service..."
-    if command -v loongpilot &>/dev/null; then
-        loongpilot stop 2>/dev/null || true
-    elif [ -f "$HOME/.local/bin/loongpilot" ]; then
-        "$HOME/.local/bin/loongpilot" stop 2>/dev/null || true
+    if command -v loongsuite-pilot &>/dev/null; then
+        loongsuite-pilot stop 2>/dev/null || true
+    elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
+        "$HOME/.local/bin/loongsuite-pilot" stop 2>/dev/null || true
     fi
     echo ""
 
     # Deploy new version to versions/<ver>_<commit>/
     # Old version stays untouched; deploy_package writes current/previous pointers
     deploy_package "$INSTALL_SRC"
-    install_loongpilot_command
+    install_loongsuite_pilot_command
 
     # Start the new version
     msg "==> 启动新版本..." "==> Starting new version..."
-    if loongpilot start; then
+    if loongsuite-pilot start; then
         sleep 2
-        if loongpilot status 2>/dev/null | grep -q "is running"; then
+        if loongsuite-pilot status 2>/dev/null | grep -q "is running"; then
             msg "    ✅ 新版本启动成功" "    ✅ New version started successfully"
             echo ""
 
@@ -865,17 +866,17 @@ cmd_upgrade() {
     msg "⚠️  新版本启动失败，正在回滚..." \
         "⚠️  New version failed to start, rolling back..."
 
-    loongpilot stop 2>/dev/null || true
+    loongsuite-pilot stop 2>/dev/null || true
 
-    if command -v loongpilot &>/dev/null; then
-        loongpilot rollback 2>/dev/null || true
+    if command -v loongsuite-pilot &>/dev/null; then
+        loongsuite-pilot rollback 2>/dev/null || true
     else
-        "$HOME/.local/bin/loongpilot" rollback 2>/dev/null || true
+        "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || true
     fi
 
     msg "❌ 升级失败，已回滚到 v${old_ver:-unknown}" \
         "❌ Upgrade failed, rolled back to v${old_ver:-unknown}"
-    msg "   请检查日志: loongpilot log" "   Check logs: loongpilot log"
+    msg "   请检查日志: loongsuite-pilot log" "   Check logs: loongsuite-pilot log"
     exit 1
 }
 
@@ -975,12 +976,12 @@ cmd_uninstall() {
 
     # Stop service (also removes autostart)
     msg "==> 停止服务..." "==> Stopping service..."
-    if command -v loongpilot &>/dev/null; then
-        loongpilot stop 2>/dev/null || true
-    elif [ -f "$HOME/.local/bin/loongpilot" ]; then
-        "$HOME/.local/bin/loongpilot" stop 2>/dev/null || true
+    if command -v loongsuite-pilot &>/dev/null; then
+        loongsuite-pilot stop 2>/dev/null || true
+    elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
+        "$HOME/.local/bin/loongsuite-pilot" stop 2>/dev/null || true
     else
-        local pid_file="$DATA_DIR/loongpilot.pid"
+        local pid_file="$DATA_DIR/loongsuite-pilot.pid"
         if [ -f "$pid_file" ]; then
             local pid; pid=$(cat "$pid_file")
             kill "$pid" 2>/dev/null || true
@@ -988,7 +989,7 @@ cmd_uninstall() {
             kill -9 "$pid" 2>/dev/null || true
             rm -f "$pid_file"
         fi
-        # Manual autostart cleanup when loongpilot is unavailable
+        # Manual autostart cleanup when loongsuite-pilot is unavailable
         local _plist="$HOME/Library/LaunchAgents/com.loongsuite-pilot.plist"
         local _uplist="$HOME/Library/LaunchAgents/com.loongsuite-pilot.updater.plist"
         local _unit="$HOME/.config/systemd/user/loongsuite-pilot.service"
@@ -1016,11 +1017,11 @@ cmd_uninstall() {
     msg "    ✅ 已删除 $HOME/.loongsuite-pilot" \
         "    ✅ Removed $HOME/.loongsuite-pilot"
 
-    # Remove loongpilot command
-    msg "==> 删除 loongpilot 命令..." "==> Removing loongpilot command..."
-    rm -f "$HOME/.local/bin/loongpilot"
-    rm -f /usr/local/bin/loongpilot 2>/dev/null || true
-    msg "    ✅ loongpilot 命令已删除" "    ✅ loongpilot command removed"
+    # Remove loongsuite-pilot command
+    msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
+    rm -f "$HOME/.local/bin/loongsuite-pilot"
+    rm -f /usr/local/bin/loongsuite-pilot 2>/dev/null || true
+    msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
     echo ""
 
     # Remove hook entries from tool configs

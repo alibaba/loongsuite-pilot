@@ -9,12 +9,12 @@ import { getMetricsCsv, getMetricsStatus, parseWindowMinutes } from './lib/proce
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
-const dashboardPath = path.join(repoRoot, 'assets', 'monitor', 'loongpilot-monitor.html');
+const dashboardPath = path.join(repoRoot, 'assets', 'monitor', 'loongsuite-pilot-monitor.html');
 
-const port = Number(process.env.LOONGPILOT_MONITOR_PORT || 8765);
-const host = process.env.LOONGPILOT_MONITOR_HOST || '127.0.0.1';
-const dataDir = process.env.LOONGPILOT_DATA_DIR || path.join(homedir(), '.loongsuite-pilot');
-const monitorDir = process.env.LOONGPILOT_MONITOR_DIR || path.join(dataDir, 'logs', 'process-monitor');
+const port = Number(process.env.LOONGSUITE_PILOT_MONITOR_PORT || 8765);
+const host = process.env.LOONGSUITE_PILOT_MONITOR_HOST || '127.0.0.1';
+const dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(homedir(), '.loongsuite-pilot');
+const monitorDir = process.env.LOONGSUITE_PILOT_MONITOR_DIR || path.join(dataDir, 'logs', 'process-monitor');
 const overview = createOverviewAggregator({ dataDir });
 
 function sendJson(response, statusCode, body) {
@@ -44,7 +44,7 @@ const server = createServer(async (request, response) => {
 
     if (url.pathname === '/api/metrics') {
       const minutes = parseWindowMinutes(
-        url.searchParams.get('minutes') ?? process.env.LOONGPILOT_MONITOR_WINDOW_MINUTES,
+        url.searchParams.get('minutes') ?? process.env.LOONGSUITE_PILOT_MONITOR_WINDOW_MINUTES,
       );
       response.writeHead(200, {
         'content-type': 'text/csv; charset=utf-8',
@@ -56,7 +56,7 @@ const server = createServer(async (request, response) => {
 
     if (url.pathname === '/api/status') {
       const minutes = parseWindowMinutes(
-        url.searchParams.get('minutes') ?? process.env.LOONGPILOT_MONITOR_WINDOW_MINUTES,
+        url.searchParams.get('minutes') ?? process.env.LOONGSUITE_PILOT_MONITOR_WINDOW_MINUTES,
       );
       sendJson(response, 200, await getMetricsStatus({ monitorDir, minutes }));
       return;
@@ -90,6 +90,6 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`Loongpilot monitor dashboard: http://${host}:${port}/`);
+  console.log(`LoongSuite Pilot monitor dashboard: http://${host}:${port}/`);
   console.log(`Reading monitor CSVs from: ${monitorDir}`);
 });

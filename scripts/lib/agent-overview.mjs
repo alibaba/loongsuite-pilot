@@ -181,7 +181,7 @@ async function buildOverview(opts) {
   const config = await readConfig(opts.dataDir);
   const version = await readVersion(opts.dataDir);
   const service = await buildServiceSummary(opts.dataDir, version, opts.now);
-  const serviceLog = await parseServiceLog(path.join(opts.dataDir, 'logs', 'loongpilot-service.log'), {
+  const serviceLog = await parseServiceLog(path.join(opts.dataDir, 'logs', 'loongsuite-pilot-service.log'), {
     maxBytes: opts.serviceLogTailBytes,
     timelineLimit: opts.timelineLimit,
   });
@@ -274,11 +274,11 @@ async function readVersion(dataDir) {
 }
 
 async function buildServiceSummary(dataDir, version, now) {
-  const pidFile = path.join(dataDir, 'loongpilot.pid');
+  const pidFile = path.join(dataDir, 'loongsuite-pilot.pid');
   const pidRaw = (await safeReadFile(pidFile, 'utf8'))?.trim();
   const pid = pidRaw && /^\d+$/.test(pidRaw) ? Number(pidRaw) : null;
   const running = pid !== null && processIsRunning(pid);
-  const serviceLogPath = path.join(dataDir, 'logs', 'loongpilot-service.log');
+  const serviceLogPath = path.join(dataDir, 'logs', 'loongsuite-pilot-service.log');
   const serviceStat = await safeStat(serviceLogPath);
 
   return {
@@ -362,7 +362,7 @@ async function parseServiceLog(filePath, options) {
         timestamp,
         type: 'service.started',
         severity: 'info',
-        summary: 'Loongpilot started',
+        summary: 'LoongSuite Pilot started',
         details: { flushers: meta.flushers },
       }));
       if (Array.isArray(meta.flushers)) {
@@ -790,7 +790,7 @@ function activityEvent(event) {
 }
 
 function agentLabel(agentId) {
-  return AGENT_BY_ID.get(agentId)?.label || agentId || 'Loongpilot';
+  return AGENT_BY_ID.get(agentId)?.label || agentId || 'LoongSuite Pilot';
 }
 
 function recordTime(record) {

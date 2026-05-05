@@ -29,7 +29,7 @@ describe('AgentDiscoveryService', () => {
 
   it('detects Claude Code availability transitions at runtime', async () => {
     vi.useFakeTimers();
-    vi.stubEnv('LOONGPILOT_DISCOVERY_INTERVAL_MS', '1000');
+    vi.stubEnv('LOONGSUITE_PILOT_DISCOVERY_INTERVAL_MS', '1000');
 
     let available = false;
     const start = vi.fn().mockResolvedValue(undefined);
@@ -104,8 +104,8 @@ describe('AgentDiscoveryService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
-    vi.stubEnv('LOONGPILOT_FORCE_POLLING', 'true');
-    vi.stubEnv('LOONGPILOT_DISCOVERY_INTERVAL_MS', '10000');
+    vi.stubEnv('LOONGSUITE_PILOT_FORCE_POLLING', 'true');
+    vi.stubEnv('LOONGSUITE_PILOT_DISCOVERY_INTERVAL_MS', '10000');
   });
 
   afterEach(() => {
@@ -198,8 +198,8 @@ describe('AgentDiscoveryService', () => {
   describe('fs.watch fallback to polling (T036)', () => {
     it('falls back to setInterval when fs.watch throws', async () => {
       vi.unstubAllEnvs();
-      vi.stubEnv('LOONGPILOT_FORCE_POLLING', 'false');
-      vi.stubEnv('LOONGPILOT_DISCOVERY_INTERVAL_MS', '10000');
+      vi.stubEnv('LOONGSUITE_PILOT_FORCE_POLLING', 'false');
+      vi.stubEnv('LOONGSUITE_PILOT_DISCOVERY_INTERVAL_MS', '10000');
 
       mockFsWatch.mockImplementation(() => {
         throw new Error('watch not supported');

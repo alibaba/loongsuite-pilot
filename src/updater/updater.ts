@@ -51,7 +51,7 @@ export interface UpdaterPaths {
   currentFile: string;
   previousFile: string;
   bootstrapDir: string;
-  loongpilotBin: string;
+  loongsuitePilotBin: string;
 }
 
 function defaultPaths(): UpdaterPaths {
@@ -62,7 +62,7 @@ function defaultPaths(): UpdaterPaths {
     currentFile: path.join(cacheDir, 'current'),
     previousFile: path.join(cacheDir, 'previous'),
     bootstrapDir: path.join(cacheDir, 'bin'),
-    loongpilotBin: path.join(process.env.HOME ?? '', '.local', 'bin', 'loongpilot'),
+    loongsuitePilotBin: path.join(process.env.HOME ?? '', '.local', 'bin', 'loongsuite-pilot'),
   };
 }
 
@@ -73,7 +73,7 @@ export function buildPaths(baseDir: string): UpdaterPaths {
     currentFile: path.join(baseDir, 'current'),
     previousFile: path.join(baseDir, 'previous'),
     bootstrapDir: path.join(baseDir, 'bin'),
-    loongpilotBin: path.join(process.env.HOME ?? '', '.local', 'bin', 'loongpilot'),
+    loongsuitePilotBin: path.join(process.env.HOME ?? '', '.local', 'bin', 'loongsuite-pilot'),
   };
 }
 
@@ -370,7 +370,7 @@ export class Updater {
   private async restartCollector(): Promise<void> {
     logger.info('restarting collector service');
     try {
-      await execFileAsync(this.paths.loongpilotBin, ['restart-collector'], { timeout: 30_000 });
+      await execFileAsync(this.paths.loongsuitePilotBin, ['restart-collector'], { timeout: 30_000 });
       logger.info('collector restarted');
     } catch (err) {
       logger.warn('collector restart failed', { error: String(err) });
@@ -378,8 +378,8 @@ export class Updater {
   }
 
   private async restartMonitorIfRunning(): Promise<void> {
-    const monitorPidFile = path.join(this.paths.cacheDir, 'loongpilot-monitor.pid');
-    const dashboardPidFile = path.join(this.paths.cacheDir, 'loongpilot-dashboard.pid');
+    const monitorPidFile = path.join(this.paths.cacheDir, 'loongsuite-pilot-monitor.pid');
+    const dashboardPidFile = path.join(this.paths.cacheDir, 'loongsuite-pilot-dashboard.pid');
     const monitorRunning = await this.isPidFileRunning(monitorPidFile);
     const dashboardRunning = await this.isPidFileRunning(dashboardPidFile);
 
@@ -387,8 +387,8 @@ export class Updater {
 
     logger.info('restarting monitor after update');
     try {
-      await execFileAsync(this.paths.loongpilotBin, ['monitor-stop'], { timeout: 30_000 });
-      await execFileAsync(this.paths.loongpilotBin, ['monitor-start'], { timeout: 30_000 });
+      await execFileAsync(this.paths.loongsuitePilotBin, ['monitor-stop'], { timeout: 30_000 });
+      await execFileAsync(this.paths.loongsuitePilotBin, ['monitor-start'], { timeout: 30_000 });
       logger.info('monitor restarted');
     } catch (err) {
       logger.warn('monitor restart failed', { error: String(err) });

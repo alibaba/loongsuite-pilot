@@ -32,8 +32,8 @@ npm run typecheck
 ## 3) 本地冒烟验证
 
 ```bash
-export LOONGPILOT_DATA_DIR="/tmp/loongpilot-cursor-hook-test"
-rm -rf "$LOONGPILOT_DATA_DIR"
+export LOONGSUITE_PILOT_DATA_DIR="/tmp/loongsuite-pilot-cursor-hook-test"
+rm -rf "$LOONGSUITE_PILOT_DATA_DIR"
 
 printf '%s' '{"hook_event_name":"postToolUse","session_id":"sess-1","generation_id":"turn-1","model":"gpt-test","tool_name":"Shell","tool_input":{"command":"pwd"},"tool_output":"{\"ok\":true}","cursor_version":"1.0.0"}' \
   | bash "./assets/hooks/cursor-hook.sh"
@@ -42,7 +42,7 @@ printf '%s' '{"hook_event_name":"postToolUse","session_id":"sess-1","generation_
 预期：
 
 - stdout 返回 `{}`  
-- 生成文件：`/tmp/loongpilot-cursor-hook-test/logs/cursor-hook/history/cursor-YYYY-MM-DD.jsonl`  
+- 生成文件：`/tmp/loongsuite-pilot-cursor-hook-test/logs/cursor-hook/history/cursor-YYYY-MM-DD.jsonl`  
 - 文件中新增 1 行 JSON 记录，包含 `clientType=CursorHook`
 
 ## 4) 异常路径验证（Fail-Open）

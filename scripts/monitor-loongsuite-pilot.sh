@@ -2,21 +2,21 @@
 set -euo pipefail
 
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-5}"
-DATA_DIR="${LOONGPILOT_DATA_DIR:-$HOME/.loongsuite-pilot}"
-PID_FILE="${LOONGPILOT_PID_FILE:-$DATA_DIR/loongpilot.pid}"
-OUT_DIR="${LOONGPILOT_MONITOR_DIR:-$DATA_DIR/logs/process-monitor}"
-PROCESS_PATTERN="${LOONGPILOT_PROCESS_PATTERN:-collector-daemon.js|loongsuite-pilot.*run|loongpilot run}"
-RETENTION_HOURS="${LOONGPILOT_MONITOR_RETENTION_HOURS:-6}"
-CLEANUP_INTERVAL_SECONDS="${LOONGPILOT_MONITOR_CLEANUP_INTERVAL_SECONDS:-300}"
+DATA_DIR="${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}"
+PID_FILE="${LOONGSUITE_PILOT_PID_FILE:-$DATA_DIR/loongsuite-pilot.pid}"
+OUT_DIR="${LOONGSUITE_PILOT_MONITOR_DIR:-$DATA_DIR/logs/process-monitor}"
+PROCESS_PATTERN="${LOONGSUITE_PILOT_PROCESS_PATTERN:-collector-daemon.js|loongsuite-pilot.*run|loongsuite-pilot run}"
+RETENTION_HOURS="${LOONGSUITE_PILOT_MONITOR_RETENTION_HOURS:-6}"
+CLEANUP_INTERVAL_SECONDS="${LOONGSUITE_PILOT_MONITOR_CLEANUP_INTERVAL_SECONDS:-300}"
 CSV_HEADER="timestamp,pid,ppid,command,cpu_percent,mem_percent,rss_kb,vsz_kb,elapsed,threads,open_files,inet_connections,tcp_established,tcp_listen,udp_connections"
 
 usage() {
     echo "Usage: $0 [--interval seconds] [--out-dir path] [--pid pid] [--pattern regex]"
     echo ""
     echo "Environment overrides:"
-    echo "  INTERVAL_SECONDS, LOONGPILOT_DATA_DIR, LOONGPILOT_PID_FILE,"
-    echo "  LOONGPILOT_MONITOR_DIR, LOONGPILOT_PROCESS_PATTERN,"
-    echo "  LOONGPILOT_MONITOR_RETENTION_HOURS, LOONGPILOT_MONITOR_CLEANUP_INTERVAL_SECONDS"
+    echo "  INTERVAL_SECONDS, LOONGSUITE_PILOT_DATA_DIR, LOONGSUITE_PILOT_PID_FILE,"
+    echo "  LOONGSUITE_PILOT_MONITOR_DIR, LOONGSUITE_PILOT_PROCESS_PATTERN,"
+    echo "  LOONGSUITE_PILOT_MONITOR_RETENTION_HOURS, LOONGSUITE_PILOT_MONITOR_CLEANUP_INTERVAL_SECONDS"
 }
 
 TARGET_PID=""
@@ -53,11 +53,11 @@ done
 
 mkdir -p "$OUT_DIR"
 
-STATUS_LOG="$OUT_DIR/loongpilot-monitor.log"
+STATUS_LOG="$OUT_DIR/loongsuite-pilot-monitor.log"
 LAST_CLEANUP_EPOCH=0
 
 csv_file_for_now() {
-    echo "$OUT_DIR/loongpilot-process-$(date +%Y-%m-%d-%H).csv"
+    echo "$OUT_DIR/loongsuite-pilot-process-$(date +%Y-%m-%d-%H).csv"
 }
 
 ensure_csv_header() {
@@ -84,7 +84,7 @@ cleanup_old_csvs() {
     fi
 
     local retention_minutes=$((RETENTION_HOURS * 60))
-    find "$OUT_DIR" -type f -name 'loongpilot-process-*.csv' -mmin +"$retention_minutes" -print -exec rm -f {} \; 2>/dev/null | while IFS= read -r removed; do
+    find "$OUT_DIR" -type f -name 'loongsuite-pilot-process-*.csv' -mmin +"$retention_minutes" -print -exec rm -f {} \; 2>/dev/null | while IFS= read -r removed; do
         log_status "removed old process metrics csv: $removed"
     done
 }
@@ -131,8 +131,8 @@ discover_pids() {
 
     ps -axo pid=,command= | awk -v pattern="$PROCESS_PATTERN" '
         $0 ~ pattern &&
-        $0 !~ /monitor-loongpilot\.sh/ &&
-        $0 !~ /cursor-loongpilot-hook\.sh/ &&
+        $0 !~ /monitor-loongsuite-pilot\.sh/ &&
+        $0 !~ /cursor-loongsuite-pilot-hook\.sh/ &&
         $0 !~ /awk -v pattern/ {
             print $1
         }
@@ -191,7 +191,7 @@ sample_pid() {
 }
 
 log_status "started interval=${INTERVAL_SECONDS}s out_dir=$OUT_DIR pid_file=$PID_FILE pattern=$PROCESS_PATTERN retention_hours=$RETENTION_HOURS"
-echo "Writing hourly samples to: $OUT_DIR/loongpilot-process-YYYY-MM-DD-HH.csv"
+echo "Writing hourly samples to: $OUT_DIR/loongsuite-pilot-process-YYYY-MM-DD-HH.csv"
 echo "Writing monitor status to: $STATUS_LOG"
 
 while true; do

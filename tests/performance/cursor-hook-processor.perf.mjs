@@ -24,7 +24,7 @@ const fixturePath = path.join(
   'raw-cursor-hooks-2026-04-30.jsonl',
 );
 const processorPath = path.join(repoRoot, 'assets', 'hooks', 'cursor-hook-processor.mjs');
-const shellPath = path.join(repoRoot, 'assets', 'hooks', 'cursor-loongpilot-hook.sh');
+const shellPath = path.join(repoRoot, 'assets', 'hooks', 'cursor-loongsuite-pilot-hook.sh');
 
 function percentile(values, p) {
   if (values.length === 0) return 0;
@@ -88,7 +88,7 @@ function runCommand(command, args, payload, tmpDir) {
     input: payload,
     env: {
       ...process.env,
-      LOONGPILOT_DATA_DIR: tmpDir,
+      LOONGSUITE_PILOT_DATA_DIR: tmpDir,
     },
     encoding: 'utf-8',
     maxBuffer: 1024 * 1024 * 64,

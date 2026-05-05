@@ -10,7 +10,7 @@ EMPTY_RESULT='{}'
 log_error() {
   local stage="$1"
   local message="$2"
-  local data_dir="${LOONGPILOT_DATA_DIR:-${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}}"
+  local data_dir="${LOONGSUITE_PILOT_DATA_DIR:-${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}}"
   local day
   day="$(date -u +%Y-%m-%d 2>/dev/null || true)"
   [[ -n "$day" ]] || day="unknown"

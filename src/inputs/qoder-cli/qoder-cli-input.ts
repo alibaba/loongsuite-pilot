@@ -149,7 +149,7 @@ function buildPostToolUseEntry(record: Record<string, unknown>): AgentActivityEn
       qoder_variant: 'qoder-cli',
       raw_type: eventType,
       cwd: data.cwd,
-      loongpilot_pre_file_exists: data.loongpilot_pre_file_exists,
+      loongsuite_pilot_pre_file_exists: data.loongsuite_pilot_pre_file_exists,
       file_path: getStringValue(toolInput, 'file_path') ?? getStringValue(data, 'file_path'),
     }),
   });

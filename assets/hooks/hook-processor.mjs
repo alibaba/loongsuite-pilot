@@ -19,7 +19,7 @@
  *     - transcript_path: path to the transcript JSONL file
  *     - session_id (or conversation_id): session identifier
  *
- * Called by cursor-loongpilot-hook.sh and qoder-loongpilot-hook.sh.
+ * Called by cursor-loongsuite-pilot-hook.sh and qoder-loongsuite-pilot-hook.sh.
  * Fail-open: errors are logged locally and never block the caller.
  */
 
@@ -29,8 +29,8 @@ import os from 'node:os';
 
 const ENABLE_LOGGING = true;
 const HOOKS_DIR = path.dirname(new URL(import.meta.url).pathname);
-const LOONGPILOT_LOGS_BASE_DIR = (() => {
-  const configured = process.env.LOONGPILOT_DATA_DIR || process.env.LOONGSUITE_PILOT_DATA_DIR;
+const LOONGSUITE_PILOT_LOGS_BASE_DIR = (() => {
+  const configured = process.env.LOONGSUITE_PILOT_DATA_DIR || process.env.LOONGSUITE_PILOT_DATA_DIR;
   return path.join(configured || path.join(os.homedir(), '.loongsuite-pilot'), 'logs');
 })();
 
@@ -181,7 +181,7 @@ function parseTranscriptLine(line) {
 
 function getHistoryLogFile(agentId, logPrefix) {
   const day = new Date().toISOString().slice(0, 10);
-  const historyDir = path.join(LOONGPILOT_LOGS_BASE_DIR, agentId, 'history');
+  const historyDir = path.join(LOONGSUITE_PILOT_LOGS_BASE_DIR, agentId, 'history');
   return path.join(historyDir, `${logPrefix}-${day}.jsonl`);
 }
 

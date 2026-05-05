@@ -24,7 +24,7 @@ Qoder CLI 通过 Hook 机制（PreToolUse / PostToolUse / Stop 事件）将遥�
 ```
 Qoder CLI 会话
   │
-  ├── PreToolUse Hook ──→ 注入 loongpilot_pre_file_exists 等字段
+  ├── PreToolUse Hook ──→ 注入 loongsuite_pilot_pre_file_exists 等字段
   │                        写入 JSONL 日志
   │
   ├── PostToolUse Hook ──→ 记录工具执行结果
@@ -54,8 +54,8 @@ Qoder CLI 会话
 
 1. **Given** 日志文件中有一条 `event_type` 包含 `PostToolUse` 的记录，**When** 系统解析，**Then** 提取工具输入中的 `file_path` 并归一化为活动记录
 2. **Given** 日志文件中有一条 `event_type` 不包含 `PostToolUse` 的记录（如 `PreToolUse`），**When** 系统过滤，**Then** 该记录被跳过
-3. **Given** 工具名为 `create_file` 或 `write_to_file` 且 `loongpilot_pre_file_exists` 为 `false`，**When** 系统分类，**Then** `actionType` 为 `Create`
-4. **Given** 工具名为 `create_file` 或 `write_to_file` 且 `loongpilot_pre_file_exists` 为 `true`，**When** 系统分类，**Then** `actionType` 为 `Edit`（覆盖已存在的文件）
+3. **Given** 工具名为 `create_file` 或 `write_to_file` 且 `loongsuite_pilot_pre_file_exists` 为 `false`，**When** 系统分类，**Then** `actionType` 为 `Create`
+4. **Given** 工具名为 `create_file` 或 `write_to_file` 且 `loongsuite_pilot_pre_file_exists` 为 `true`，**When** 系统分类，**Then** `actionType` 为 `Edit`（覆盖已存在的文件）
 5. **Given** 工具输入中没有 `file_path` 也没有 `path`，**When** 系统检查，**Then** 该记录被跳过
 
 ---
@@ -136,7 +136,7 @@ Qoder CLI 会话
 
 - **FR-001**: `QoderCliInput` 必须继承 `BaseHookInput`，实现 `transformRecord()` 方法
 - **FR-002**: `transformRecord()` 必须仅处理 `event_type` 包含 `PostToolUse` 的记录
-- **FR-003**: 必须利用 `loongpilot_pre_file_exists` 字段区分 `Create`（新建）和 `Edit`（覆盖）操作
+- **FR-003**: 必须利用 `loongsuite_pilot_pre_file_exists` 字段区分 `Create`（新建）和 `Edit`（覆盖）操作
 - **FR-004**: 工具输入中无 `file_path`、`path`、`filepath` 的记录必须被跳过
 - **FR-005**: 归一化必须调用 `buildAgentActivityEntry()`，`agentType` 为 `ClientType.QoderCliHook`
 
@@ -172,7 +172,7 @@ Qoder CLI 会话
 ## 成功标准 *(必填)*
 
 - **SC-001**: PostToolUse 事件的过滤准确率 100%
-- **SC-002**: Create vs Edit 的分类基于 `loongpilot_pre_file_exists` 的准确率 100%
+- **SC-002**: Create vs Edit 的分类基于 `loongsuite_pilot_pre_file_exists` 的准确率 100%
 - **SC-003**: 面对缺失字段或非标准事件，100% 不崩溃
 - **SC-004**: Stop Hook 增量行号追踪准确率 100%（无重复上传、无遗漏）
 - **SC-005**: 会话切换和文件截断场景下自动重置，数据完整性 100%
@@ -183,7 +183,7 @@ Qoder CLI 会话
 ## 假设
 
 - Hook 脚本由平台自身安装和维护，JSONL 格式可控
-- `loongpilot_pre_file_exists` 字段由 PreToolUse Hook 注入，在 PostToolUse 事件中始终可用
+- `loongsuite_pilot_pre_file_exists` 字段由 PreToolUse Hook 注入，在 PostToolUse 事件中始终可用
 - 日志目录由 `BaseHookInput.onStart()` 自动创建
 - Stop Hook 运行环境已安装 `aliyun-log-python-sdk`
 - SLS 配置（endpoint、access_key_id、access_key、project、logstore）由安装脚本写入 Stop Hook 脚本

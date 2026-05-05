@@ -76,12 +76,12 @@ The system SHALL retain the previous version and support instant rollback.
 
 #### Scenario: Pointer swap on rollback
 - **GIVEN** current points to v2 and previous points to v1
-- **WHEN** `loongpilot rollback` is executed
+- **WHEN** `loongsuite-pilot rollback` is executed
 - **THEN** current becomes v1, previous becomes v2, and Collector restarts
 
 #### Scenario: No previous version
 - **GIVEN** no previous pointer file exists
-- **WHEN** `loongpilot rollback` is executed
+- **WHEN** `loongsuite-pilot rollback` is executed
 - **THEN** the command fails with an error message
 
 #### Scenario: GC preserves current and previous only
@@ -106,7 +106,7 @@ The system SHALL run the Updater and Collector as independent processes.
 
 #### Scenario: Updater restarts only Collector
 - **WHEN** a new version is deployed
-- **THEN** the Updater calls `loongpilot restart-collector` which restarts only the Collector, not the Updater itself
+- **THEN** the Updater calls `loongsuite-pilot restart-collector` which restarts only the Collector, not the Updater itself
 
 #### Scenario: Collector crash does not affect Updater
 - **WHEN** the Collector process crashes
@@ -116,11 +116,11 @@ The system SHALL run the Updater and Collector as independent processes.
 The system SHALL integrate with OS service managers for persistent background operation.
 
 #### Scenario: macOS launchd
-- **WHEN** `loongpilot start` is executed on macOS
+- **WHEN** `loongsuite-pilot start` is executed on macOS
 - **THEN** two launchd plists are written and loaded (Collector + Updater), with KeepAlive for crash recovery
 
 #### Scenario: Linux systemd
-- **WHEN** `loongpilot start` is executed on Linux with systemd --user
+- **WHEN** `loongsuite-pilot start` is executed on Linux with systemd --user
 - **THEN** two systemd user units are written and enabled (Collector + Updater), with Restart=on-failure
 
 #### Scenario: Fallback to nohup

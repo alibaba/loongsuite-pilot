@@ -10,7 +10,7 @@ import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
  * Reads rows from ~/.loongsuite-pilot/logs/qoder-work/history/ and keeps
  * assistant/user messages that have message.content[0].type.
  *
- * Reuses the same hook script as Qoder CLI (qoder-loongpilot-hook.sh)
+ * Reuses the same hook script as Qoder CLI (qoder-loongsuite-pilot-hook.sh)
  * with "qoder-work" as the agent ID parameter.
  * Hook config lives at ~/.qoderwork/settings.json.
  */
@@ -164,7 +164,7 @@ function buildPostToolUseEntry(
     sessionId: (data.session_id as string) ?? '',
     userId: (data.user_id as string) ?? '',
     agentType,
-    actionType: data.loongpilot_pre_file_exists === false ? ActionType.Create : ActionType.Edit,
+    actionType: data.loongsuite_pilot_pre_file_exists === false ? ActionType.Create : ActionType.Edit,
     filePath,
     content: typeof toolInput.content === 'string'
       ? toolInput.content

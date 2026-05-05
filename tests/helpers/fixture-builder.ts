@@ -117,7 +117,7 @@ export async function appendJsonlLines(
 /**
  * Create a unique temporary directory for test isolation.
  */
-export async function createTempDir(prefix = 'loongpilot-test-'): Promise<string> {
+export async function createTempDir(prefix = 'loongsuite-pilot-test-'): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 

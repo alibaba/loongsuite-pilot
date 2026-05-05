@@ -163,11 +163,11 @@ export class HookManager {
 
   /**
    * Build hook definitions for Cursor.
-   * Registers cursor-loongpilot-hook.sh into ~/.cursor/hooks.json for key events.
+   * Registers cursor-loongsuite-pilot-hook.sh into ~/.cursor/hooks.json for key events.
    */
   static buildCursorHooks(loongsuitePilotDir?: string): HookDefinition[] {
     const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
-    const command = `${baseDir}/hooks/cursor-loongpilot-hook.sh`;
+    const command = `${baseDir}/hooks/cursor-loongsuite-pilot-hook.sh`;
     const settingsPath = resolveHome('~/.cursor/hooks.json');
 
     const events = [
@@ -198,7 +198,7 @@ export class HookManager {
    */
   static buildQoderCliHooks(loongsuitePilotDir?: string): HookDefinition[] {
     const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
-    const command = `${baseDir}/hooks/qoder-loongpilot-hook.sh qoder-cli`;
+    const command = `${baseDir}/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli`;
     const settingsPath = resolveHome('~/.qoder/settings.json');
 
     return [
@@ -219,7 +219,7 @@ export class HookManager {
    */
   static buildQoderWorkHooks(loongsuitePilotDir?: string): HookDefinition[] {
     const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
-    const command = `${baseDir}/hooks/qoder-loongpilot-hook.sh qoder-work`;
+    const command = `${baseDir}/hooks/qoder-loongsuite-pilot-hook.sh qoder-work`;
     const settingsPath = resolveHome('~/.qoderwork/settings.json');
 
     return [

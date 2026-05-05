@@ -17,11 +17,11 @@ describe('process metrics window aggregation', () => {
 
   it('returns only rows inside the requested recent window', async () => {
     const monitorDir = await fixtureDir();
-    await writeFile(path.join(monitorDir, 'loongpilot-process-2026-05-05-14.csv'), [
+    await writeFile(path.join(monitorDir, 'loongsuite-pilot-process-2026-05-05-14.csv'), [
       METRICS_HEADER,
       row('2026-05-05 14:45:00', 1),
     ].join('\n'));
-    await writeFile(path.join(monitorDir, 'loongpilot-process-2026-05-05-15.csv'), [
+    await writeFile(path.join(monitorDir, 'loongsuite-pilot-process-2026-05-05-15.csv'), [
       METRICS_HEADER,
       row('2026-05-05 15:20:00', 2),
       row('2026-05-05 15:55:00', 3),
@@ -38,14 +38,14 @@ describe('process metrics window aggregation', () => {
       row('2026-05-05 15:55:00', 3),
     ]);
     expect(summary.files.map((file) => file.name)).toEqual([
-      'loongpilot-process-2026-05-05-14.csv',
-      'loongpilot-process-2026-05-05-15.csv',
+      'loongsuite-pilot-process-2026-05-05-14.csv',
+      'loongsuite-pilot-process-2026-05-05-15.csv',
     ]);
   });
 
   it('keeps the CSV API backward compatible', async () => {
     const monitorDir = await fixtureDir();
-    await writeFile(path.join(monitorDir, 'loongpilot-process-2026-05-05-15.csv'), [
+    await writeFile(path.join(monitorDir, 'loongsuite-pilot-process-2026-05-05-15.csv'), [
       METRICS_HEADER,
       row('2026-05-05 15:55:00', 3),
     ].join('\n'));
@@ -69,7 +69,7 @@ describe('process metrics window aggregation', () => {
 });
 
 async function fixtureDir() {
-  return mkdtemp(path.join(tmpdir(), 'loongpilot-process-metrics-'));
+  return mkdtemp(path.join(tmpdir(), 'loongsuite-pilot-process-metrics-'));
 }
 
 function row(timestamp, cpu) {

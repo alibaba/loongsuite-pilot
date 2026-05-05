@@ -30,7 +30,7 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce({
         dataDir: '/from/file',
       });
-      vi.stubEnv('LOONGPILOT_DATA_DIR', '/from/env');
+      vi.stubEnv('LOONGSUITE_PILOT_DATA_DIR', '/from/env');
 
       const config = await loadConfig();
       expect(config.dataDir).toBe('/from/env');
@@ -57,7 +57,7 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce({
         'user.id': 'from-file',
       });
-      vi.stubEnv('LOONGPILOT_USER_ID', 'from-env');
+      vi.stubEnv('LOONGSUITE_PILOT_USER_ID', 'from-env');
 
       const config = await loadConfig();
       expect(config.userId).toBe('from-env');
