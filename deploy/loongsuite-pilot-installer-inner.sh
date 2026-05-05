@@ -721,6 +721,34 @@ try {
         msg "    ✅ Codex 插件 hooks 已清理" \
             "    ✅ Codex plugin hooks cleaned"
     else
+        # Clean hooks.json (new format)
+        local codex_hooks_json="$HOME/.codex/hooks.json"
+        if [ -f "$codex_hooks_json" ] && grep -q "otel-codex-hook" "$codex_hooks_json" 2>/dev/null && command -v node &>/dev/null; then
+            node -e "
+const fs = require('fs');
+const f = process.argv[1];
+try {
+  const d = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  if (d && d.hooks) {
+    for (const ev of Object.keys(d.hooks)) {
+      d.hooks[ev] = d.hooks[ev].filter(g => {
+        if (!g.hooks) return true;
+        g.hooks = g.hooks.filter(h => !(h.command && h.command.includes('otel-codex-hook')));
+        return g.hooks.length > 0;
+      });
+      if (d.hooks[ev].length === 0) delete d.hooks[ev];
+    }
+    if (Object.keys(d.hooks).length === 0) {
+      fs.unlinkSync(f);
+    } else {
+      fs.writeFileSync(f, JSON.stringify(d, null, 2) + '\n');
+    }
+  }
+} catch {}
+" "$codex_hooks_json" 2>/dev/null || true
+        fi
+
+        # Clean config.toml (legacy format)
         local codex_config="$HOME/.codex/config.toml"
         if [ -f "$codex_config" ] && grep -q "otel-codex-hook" "$codex_config" 2>/dev/null; then
             local marker="# OpenTelemetry instrumentation hooks"
