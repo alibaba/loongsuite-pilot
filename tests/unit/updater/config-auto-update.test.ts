@@ -50,46 +50,46 @@ describe('buildAutoUpdateConfig', () => {
     expect(config.packageUrl).toBe('https://example.com/pkg.tar.gz');
   });
 
-  it('env AAC_AUTO_UPDATE_ENABLED=false disables', () => {
-    vi.stubEnv('AAC_AUTO_UPDATE_ENABLED', 'false');
+  it('env LOONGPILOT_AUTO_UPDATE_ENABLED=false disables', () => {
+    vi.stubEnv('LOONGPILOT_AUTO_UPDATE_ENABLED', 'false');
     const config = buildAutoUpdateConfig(null);
     expect(config.enabled).toBe(false);
   });
 
-  it('env AAC_AUTO_UPDATE_INTERVAL_MS overrides interval', () => {
-    vi.stubEnv('AAC_AUTO_UPDATE_INTERVAL_MS', '300000');
+  it('env LOONGPILOT_AUTO_UPDATE_INTERVAL_MS overrides interval', () => {
+    vi.stubEnv('LOONGPILOT_AUTO_UPDATE_INTERVAL_MS', '300000');
     const config = buildAutoUpdateConfig(null);
     expect(config.checkIntervalMs).toBe(300_000);
   });
 
-  it('env AAC_PACKAGE_URL overrides package URL', () => {
-    vi.stubEnv('AAC_PACKAGE_URL', 'https://custom.com/pkg.tar.gz');
+  it('env LOONGPILOT_PACKAGE_URL overrides package URL', () => {
+    vi.stubEnv('LOONGPILOT_PACKAGE_URL', 'https://custom.com/pkg.tar.gz');
     const config = buildAutoUpdateConfig(null);
     expect(config.packageUrl).toBe('https://custom.com/pkg.tar.gz');
     expect(config.manifestUrl).toBe('https://custom.com/latest.json');
   });
 
-  it('env AAC_MANIFEST_URL overrides manifest URL', () => {
-    vi.stubEnv('AAC_MANIFEST_URL', 'https://custom.com/versions.json');
+  it('env LOONGPILOT_MANIFEST_URL overrides manifest URL', () => {
+    vi.stubEnv('LOONGPILOT_MANIFEST_URL', 'https://custom.com/versions.json');
     const config = buildAutoUpdateConfig(null);
     expect(config.manifestUrl).toBe('https://custom.com/versions.json');
   });
 
   it('channel=test uses test package URL', () => {
-    vi.stubEnv('AAC_CHANNEL', 'test');
+    vi.stubEnv('LOONGPILOT_CHANNEL', 'test');
     const config = buildAutoUpdateConfig(null);
     expect(config.packageUrl).toContain('loongcollector-dev');
   });
 
   it('channel=release uses release package URL', () => {
-    vi.stubEnv('AAC_CHANNEL', 'release');
+    vi.stubEnv('LOONGPILOT_CHANNEL', 'release');
     const config = buildAutoUpdateConfig(null);
-    expect(config.packageUrl).toContain('loongcollector/ai-agent-collector');
+    expect(config.packageUrl).toContain('loongsuite/loongsuite-pilot');
     expect(config.packageUrl).not.toContain('loongcollector-dev');
   });
 
   it('env overrides file values', () => {
-    vi.stubEnv('AAC_AUTO_UPDATE_INTERVAL_MS', '999');
+    vi.stubEnv('LOONGPILOT_AUTO_UPDATE_INTERVAL_MS', '999');
     const config = buildAutoUpdateConfig({
       autoUpdate: { checkIntervalMs: 5000 },
     });

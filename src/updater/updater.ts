@@ -51,18 +51,18 @@ export interface UpdaterPaths {
   currentFile: string;
   previousFile: string;
   bootstrapDir: string;
-  aacBin: string;
+  loongpilotBin: string;
 }
 
 function defaultPaths(): UpdaterPaths {
-  const cacheDir = path.join(process.env.HOME ?? '', '.ai-agent-collector');
+  const cacheDir = path.join(process.env.HOME ?? '', '.loongsuite-pilot');
   return {
     cacheDir,
     versionsDir: path.join(cacheDir, 'versions'),
     currentFile: path.join(cacheDir, 'current'),
     previousFile: path.join(cacheDir, 'previous'),
     bootstrapDir: path.join(cacheDir, 'bin'),
-    aacBin: path.join(process.env.HOME ?? '', '.local', 'bin', 'aac'),
+    loongpilotBin: path.join(process.env.HOME ?? '', '.local', 'bin', 'loongpilot'),
   };
 }
 
@@ -73,7 +73,7 @@ export function buildPaths(baseDir: string): UpdaterPaths {
     currentFile: path.join(baseDir, 'current'),
     previousFile: path.join(baseDir, 'previous'),
     bootstrapDir: path.join(baseDir, 'bin'),
-    aacBin: path.join(process.env.HOME ?? '', '.local', 'bin', 'aac'),
+    loongpilotBin: path.join(process.env.HOME ?? '', '.local', 'bin', 'loongpilot'),
   };
 }
 
@@ -369,7 +369,7 @@ export class Updater {
   private async restartCollector(): Promise<void> {
     logger.info('restarting collector service');
     try {
-      await execFileAsync(this.paths.aacBin, ['restart-collector'], { timeout: 30_000 });
+      await execFileAsync(this.paths.loongpilotBin, ['restart-collector'], { timeout: 30_000 });
       logger.info('collector restarted');
     } catch (err) {
       logger.warn('collector restart failed', { error: String(err) });

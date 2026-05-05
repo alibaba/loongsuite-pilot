@@ -56,14 +56,14 @@ npm start
    node dist/index.js
    ```
 
-3. **验证钩子安装**：检查 `~/.ai-agent-collector/hooks/` 目录确认 hook 脚本已正确安装：
+3. **验证钩子安装**：检查 `~/.loongsuite-pilot/hooks/` 目录确认 hook 脚本已正确安装：
    ```bash
-   ls -la ~/.ai-agent-collector/hooks/
+   ls -la ~/.loongsuite-pilot/hooks/
    ```
 
 4. **查看日志输出**：检查数据采集日志：
    ```bash
-   tail -f ~/.ai-agent-collector/logs/output/*.jsonl
+   tail -f ~/.loongsuite-pilot/logs/output/*.jsonl
    ```
 
 ## 打包与部署
@@ -73,18 +73,18 @@ npm start
 ```
 deploy/
 ├── package.sh        # 编译 + 打包 tar.gz
-├── upload.sh         # 上传 tar.gz + aac-installer.sh 到 OSS
-└── aac-installer.sh  # 统一安装/升级/卸载脚本（用户侧执行）
+├── upload.sh         # 上传 tar.gz + loongpilot-installer.sh 到 OSS
+└── loongpilot-installer.sh  # 统一安装/升级/卸载脚本（用户侧执行）
 ```
 
 ### 第一步：打包
 
 ```bash
-# 编译 TypeScript 并打包（输出 ai-agent-collector.tar.gz）
+# 编译 TypeScript 并打包（输出 loongsuite-pilot.tar.gz）
 bash deploy/package.sh
 
 # 自定义输出路径
-bash deploy/package.sh -o /tmp/ai-agent-collector.tar.gz
+bash deploy/package.sh -o /tmp/loongsuite-pilot.tar.gz
 
 # 跳过编译，使用已有 dist/
 bash deploy/package.sh --skip-build
@@ -92,7 +92,7 @@ bash deploy/package.sh --skip-build
 
 打包产物结构：
 ```
-ai-agent-collector.tar.gz
+loongsuite-pilot.tar.gz
 ├── dist/              # 编译后的 JavaScript
 ├── assets/            # Hook 脚本
 ├── scripts/           # postinstall 脚本
@@ -124,16 +124,16 @@ bash deploy/upload.sh --bucket my-bucket --prefix my/path --region cn-beijing
 
 ### 第三步：远程安装/升级/卸载（用户侧）
 
-`aac-installer.sh` 支持三个子命令：`install`（默认）、`upgrade`、`uninstall`。
+`loongpilot-installer.sh` 支持三个子命令：`install`（默认）、`upgrade`、`uninstall`。
 
 #### 安装
 
 ```bash
 # 最简安装（不传子命令默认为 install）
-curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/<PREFIX>/aac-installer.sh | bash
+curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/<PREFIX>/loongpilot-installer.sh | bash
 
 # 带 SLS 后端配置
-curl -fsSL <URL>/aac-installer.sh | bash -s -- install \
+curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- install \
   --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
   --sls-project "my-project" \
   --sls-logstore "my-logstore" \
@@ -143,24 +143,24 @@ curl -fsSL <URL>/aac-installer.sh | bash -s -- install \
 
 安装流程：
 1. 检查 Node.js >= 18、npm、curl/wget
-2. 下载并解压安装包到 `~/.ai-agent-collector/package`
+2. 下载并解压安装包到 `~/.loongsuite-pilot/package`
 3. `npm install --production` 安装依赖
-4. 执行 `postinstall.js` 部署 hook 脚本到 `~/.ai-agent-collector/hooks/`
-5. 将安装参数写入 `~/.ai-agent-collector/config.json`（非环境变量）
-6. 安装 `aac` 服务管理命令（root 用户链接到 `/usr/local/bin`，普通用户安装到 `~/.local/bin`）
+4. 执行 `postinstall.js` 部署 hook 脚本到 `~/.loongsuite-pilot/hooks/`
+5. 将安装参数写入 `~/.loongsuite-pilot/config.json`（非环境变量）
+6. 安装 `loongpilot` 服务管理命令（root 用户链接到 `/usr/local/bin`，普通用户安装到 `~/.local/bin`）
 7. 配置开机自启动（macOS: launchd / Linux: systemd user unit）
 8. 自动启动服务
 
 #### 升级
 
 ```bash
-curl -fsSL <URL>/aac-installer.sh | bash -s -- upgrade
+curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- upgrade
 ```
 
 升级流程（无缝，自动回滚）：
 1. 比较新旧 VERSION，相同版本跳过
 2. 停止当前服务
-3. 备份旧版本到 `~/.ai-agent-collector/package.bak`
+3. 备份旧版本到 `~/.loongsuite-pilot/package.bak`
 4. 部署新版本、安装依赖、更新 hook 脚本
 5. 启动新版本并验证进程存活
 6. 成功则删除备份；**失败则自动恢复旧版本并重启**
@@ -171,40 +171,40 @@ curl -fsSL <URL>/aac-installer.sh | bash -s -- upgrade
 
 ```bash
 # 卸载（保留配置和日志数据）
-curl -fsSL <URL>/aac-installer.sh | bash -s -- uninstall
+curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- uninstall
 
 # 彻底卸载（删除所有数据）
-curl -fsSL <URL>/aac-installer.sh | bash -s -- uninstall --purge
+curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- uninstall --purge
 ```
 
 ### 服务管理
 
-安装完成后使用 `aac` 命令管理服务：
+安装完成后使用 `loongpilot` 命令管理服务：
 
 ```bash
-aac start             # 启动（后台运行）
-aac stop              # 停止
-aac restart           # 重启
-aac status            # 查看运行状态、版本和自启动状态
-aac run               # 前台运行采集器（供 launchd/systemd 调用）
-aac run-updater       # 前台运行更新器（供 launchd/systemd 调用）
-aac rollback          # 回滚到上一个版本
-aac autostart enable  # 开启开机自启动（包含采集器和更新器）
-aac autostart disable # 关闭开机自启动
-aac autostart status  # 查看自启动状态
-aac log               # 实时查看日志（tail -f）
-aac config            # 查看当前配置文件
-aac version           # 查看版本信息
+loongpilot start             # 启动（后台运行）
+loongpilot stop              # 停止
+loongpilot restart           # 重启
+loongpilot status            # 查看运行状态、版本和自启动状态
+loongpilot run               # 前台运行采集器（供 launchd/systemd 调用）
+loongpilot run-updater       # 前台运行更新器（供 launchd/systemd 调用）
+loongpilot rollback          # 回滚到上一个版本
+loongpilot autostart enable  # 开启开机自启动（包含采集器和更新器）
+loongpilot autostart disable # 关闭开机自启动
+loongpilot autostart status  # 查看自启动状态
+loongpilot log               # 实时查看日志（tail -f）
+loongpilot config            # 查看当前配置文件
+loongpilot version           # 查看版本信息
 ```
 
-修改配置后执行 `aac restart` 即可生效：
+修改配置后执行 `loongpilot restart` 即可生效：
 
 ```bash
 # 编辑配置
-vi ~/.ai-agent-collector/config.json
+vi ~/.loongsuite-pilot/config.json
 
 # 重启生效
-aac restart
+loongpilot restart
 ```
 
 ### 开机自启动
@@ -213,43 +213,43 @@ aac restart
 
 | 平台 | 机制 | 配置文件位置 |
 |------|------|------------|
-| macOS | launchd (LaunchAgents) | `~/Library/LaunchAgents/com.ai-agent-collector.plist` |
-| Linux | systemd user unit | `~/.config/systemd/user/ai-agent-collector.service` |
+| macOS | launchd (LaunchAgents) | `~/Library/LaunchAgents/com.loongsuite-pilot.plist` |
+| Linux | systemd user unit | `~/.config/systemd/user/loongsuite-pilot.service` |
 
 均为**用户级**注册，无需 root/sudo 权限。
 
 ```bash
 # 查看自启动状态
-aac autostart status
+loongpilot autostart status
 
 # 手动开启/关闭
-aac autostart enable
-aac autostart disable
+loongpilot autostart enable
+loongpilot autostart disable
 ```
 
 **工作原理**：
 
-- `aac autostart enable` 会同时注册两个服务：采集器（`aac run`）和自动更新器（`aac run-updater`）。`aac run` 读取 `current` 指针文件动态解析版本目录和 node 路径（兼容 nvm/volta/fnm 等版本管理器）。
-- **macOS**：通过 `KeepAlive.SuccessfulExit=false` 实现崩溃自动重启，`RunAtLoad=true` 实现登录自启动。`aac stop` 正常退出（exit 0）不会触发重启。
+- `loongpilot autostart enable` 会同时注册两个服务：采集器（`loongpilot run`）和自动更新器（`loongpilot run-updater`）。`loongpilot run` 读取 `current` 指针文件动态解析版本目录和 node 路径（兼容 nvm/volta/fnm 等版本管理器）。
+- **macOS**：通过 `KeepAlive.SuccessfulExit=false` 实现崩溃自动重启，`RunAtLoad=true` 实现登录自启动。`loongpilot stop` 正常退出（exit 0）不会触发重启。
 - **Linux**：通过 `Restart=on-failure` 实现崩溃自动重启。如需在无登录会话时运行，需要 `loginctl enable-linger`（安装时会自动尝试）。
 
-**注意**：当自启动已开启时，`aac start/stop` 会自动委托给 launchd/systemd 管理，无需额外操作。
+**注意**：当自启动已开启时，`loongpilot start/stop` 会自动委托给 launchd/systemd 管理，无需额外操作。
 
 #### 高级：系统级 systemd 守护（可选）
 
-如需系统级守护（root 运行），创建 `/etc/systemd/system/ai-agent-collector.service`：
+如需系统级守护（root 运行），创建 `/etc/systemd/system/loongsuite-pilot.service`：
 
 ```ini
 [Unit]
-Description=AI Agent Collector
+Description=LoongSuite Pilot
 After=network.target
 
 [Service]
 Type=simple
 User=collector
-WorkingDirectory=/home/collector/.ai-agent-collector/package
+WorkingDirectory=/home/collector/.loongsuite-pilot/package
 ExecStart=/usr/bin/node dist/index.js
-Environment=AGENT_DATA_COLLECTION_CONFIG=/home/collector/.ai-agent-collector/config.json
+Environment=AGENT_DATA_COLLECTION_CONFIG=/home/collector/.loongsuite-pilot/config.json
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -261,8 +261,8 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now ai-agent-collector
-sudo journalctl -u ai-agent-collector -f
+sudo systemctl enable --now loongsuite-pilot
+sudo journalctl -u loongsuite-pilot -f
 ```
 
 ### 自动更新
@@ -271,9 +271,9 @@ sudo journalctl -u ai-agent-collector -f
 
 **架构**：
 
-- **多版本目录**：所有版本安装在 `~/.ai-agent-collector/versions/<ver>_<commit>/`，通过 `current` 指针文件指向当前版本。
-- **独立进程**：updater 作为独立的 Node.js 进程运行（`aac run-updater`），由 launchd/systemd 单独管理，与采集器主进程完全隔离。
-- **固定引导脚本**：`aac run` 读取 `current` 文件动态加载版本，更新只改 JSON 指针文件，不改服务注册。
+- **多版本目录**：所有版本安装在 `~/.loongsuite-pilot/versions/<ver>_<commit>/`，通过 `current` 指针文件指向当前版本。
+- **独立进程**：updater 作为独立的 Node.js 进程运行（`loongpilot run-updater`），由 launchd/systemd 单独管理，与采集器主进程完全隔离。
+- **固定引导脚本**：`loongpilot run` 读取 `current` 文件动态加载版本，更新只改 JSON 指针文件，不改服务注册。
 
 **工作流程**：
 1. updater 进程定期从 OSS 拉取 `latest.json` 版本清单
@@ -281,13 +281,13 @@ sudo journalctl -u ai-agent-collector -f
 3. 如有新版本，下载安装包并解压到 `versions/<new_ver>/`
 4. 运行 `npm install` 和 `postinstall.js`
 5. 原子更新 `current` 指针文件，保存旧版本到 `previous`
-6. 调用 `aac restart` 重启采集器（下次启动自动加载新版本）
+6. 调用 `loongpilot restart` 重启采集器（下次启动自动加载新版本）
 7. 自动清理旧版本（仅保留 current + previous）
 
 **手动回滚**：
 
 ```bash
-aac rollback    # 切换到上一个版本并重启
+loongpilot rollback    # 切换到上一个版本并重启
 ```
 
 **配置**（`config.json` 或环境变量）：
@@ -298,29 +298,29 @@ aac rollback    # 切换到上一个版本并重启
     "enabled": true,
     "checkIntervalMs": 14400000,
     "manifestUrl": "https://bucket.oss.../latest.json",
-    "packageUrl": "https://bucket.oss.../ai-agent-collector.tar.gz"
+    "packageUrl": "https://bucket.oss.../loongsuite-pilot.tar.gz"
   }
 }
 ```
 
 | 环境变量 | 说明 | 默认值 |
 |---------|------|--------|
-| `AAC_AUTO_UPDATE_ENABLED` | 是否启用自动更新 | `true` |
-| `AAC_AUTO_UPDATE_INTERVAL_MS` | 检查间隔（毫秒） | `14400000` (4h) |
-| `AAC_MANIFEST_URL` | 版本清单 URL | 从 `packageUrl` 推导 |
-| `AAC_PACKAGE_URL` | 安装包 URL | 内置默认 OSS 地址 |
+| `LOONGPILOT_AUTO_UPDATE_ENABLED` | 是否启用自动更新 | `true` |
+| `LOONGPILOT_AUTO_UPDATE_INTERVAL_MS` | 检查间隔（毫秒） | `14400000` (4h) |
+| `LOONGPILOT_MANIFEST_URL` | 版本清单 URL | 从 `packageUrl` 推导 |
+| `LOONGPILOT_PACKAGE_URL` | 安装包 URL | 内置默认 OSS 地址 |
 
 关闭自动更新：
 
 ```bash
 # 方式一：环境变量
-export AAC_AUTO_UPDATE_ENABLED=false
+export LOONGPILOT_AUTO_UPDATE_ENABLED=false
 
 # 方式二：配置文件
-vi ~/.ai-agent-collector/config.json
+vi ~/.loongsuite-pilot/config.json
 # 添加 "autoUpdate": { "enabled": false }
 
-aac restart
+loongpilot restart
 ```
 
 ## 配置
@@ -329,12 +329,12 @@ aac restart
 
 ### 配置文件
 
-默认路径 `~/.ai-agent-collector/config.json`，可通过 `AGENT_DATA_COLLECTION_CONFIG` 环境变量指定其他路径。
+默认路径 `~/.loongsuite-pilot/config.json`，可通过 `AGENT_DATA_COLLECTION_CONFIG` 环境变量指定其他路径。
 
 ```json
 {
   "enabled": true,
-  "dataDir": "~/.ai-agent-collector",
+  "dataDir": "~/.loongsuite-pilot",
 
   "sls": {
     "enabled": true,
@@ -362,7 +362,7 @@ aac restart
 
   "jsonl": {
     "enabled": true,
-    "outputDir": "~/.ai-agent-collector/logs/output",
+    "outputDir": "~/.loongsuite-pilot/logs/output",
     "rotateDaily": true,
     "maxFileSizeMb": 100
   },
@@ -395,11 +395,11 @@ aac restart
 
 | 环境变量 | 说明 | 默认值 |
 |---------|------|--------|
-| `AGENT_DATA_COLLECTION_CONFIG` | 配置文件路径 | `~/.ai-agent-collector/config.json` |
-| `AAC_ENABLED` | 总开关 | `true` |
-| `AAC_DATA_DIR` | 数据根目录 | `~/.ai-agent-collector` |
-| `AAC_DISCOVERY_INTERVAL_MS` | Agent 发现轮询间隔 | `300000` (5min) |
-| `AAC_FORCE_POLLING` | 强制轮询（禁用 fs.watch） | `false` |
+| `AGENT_DATA_COLLECTION_CONFIG` | 配置文件路径 | `~/.loongsuite-pilot/config.json` |
+| `LOONGPILOT_ENABLED` | 总开关 | `true` |
+| `LOONGPILOT_DATA_DIR` | 数据根目录 | `~/.loongsuite-pilot` |
+| `LOONGPILOT_DISCOVERY_INTERVAL_MS` | Agent 发现轮询间隔 | `300000` (5min) |
+| `LOONGPILOT_FORCE_POLLING` | 强制轮询（禁用 fs.watch） | `false` |
 | `LOG_LEVEL` | 日志级别 (debug/info/warn/error) | `info` |
 
 #### SLS（阿里云日志服务）
@@ -421,7 +421,7 @@ aac restart
 | 环境变量 | 说明 | 默认值 |
 |---------|------|--------|
 | `JSONL_ENABLED` | 是否启用 JSONL 输出 | `true` |
-| `JSONL_OUTPUT_DIR` | JSONL 文件输出目录 | `~/.ai-agent-collector/logs/output` |
+| `JSONL_OUTPUT_DIR` | JSONL 文件输出目录 | `~/.loongsuite-pilot/logs/output` |
 | `HTTP_REPORT_URL` | HTTP 上报地址（设置后启用） | 空 |
 | `HTTP_REPORT_HEADERS` | 自定义请求头 (JSON string) | 空 |
 
@@ -488,7 +488,7 @@ src/
 
 **作用**：保存每个输入源的进度状态，支持增量采集。
 
-**存储位置**：`~/.ai-agent-collector/logs/input-state.json`
+**存储位置**：`~/.loongsuite-pilot/logs/input-state.json`
 
 **状态字段**：
 ```typescript
@@ -533,7 +533,7 @@ stateStore.update('my-input', {
 
 **作用**：防止 IDE 历史快照输入源重复处理相同的文件修改事件。
 
-**存储位置**：`~/.ai-agent-collector/logs/snapshot-store.json`
+**存储位置**：`~/.loongsuite-pilot/logs/snapshot-store.json`
 
 **核心机制**：基于 `pending/processed` 状态机的去重逻辑。
 
@@ -867,7 +867,7 @@ entries.push(
 
 ### 调整准入策略
 
-编辑 `~/.ai-agent-collector/agent-control.json` 文件：
+编辑 `~/.loongsuite-pilot/agent-control.json` 文件：
 
 ```json
 {
@@ -1094,12 +1094,12 @@ mkdir -p specs/105-agent-example
 
 ### 背景
 
-许多 AI Agent 可观测插件（如 opentelemetry-instrumentation-claude）仅支持 OTel Trace 采集。ai-agent-collector 提供互补的事件级采集通道，通过让插件增加本地 JSONL 日志输出，ai-agent-collector 增加对应的 Input 消费，实现完整的数据采集闭环。
+许多 AI Agent 可观测插件（如 opentelemetry-instrumentation-claude）仅支持 OTel Trace 采集。loongsuite-pilot 提供互补的事件级采集通道，通过让插件增加本地 JSONL 日志输出，loongsuite-pilot 增加对应的 Input 消费，实现完整的数据采集闭环。
 
 数据流：
 
 ```
-OTel Plugin (hooks) → JSONL files (event_t schema) → ai-agent-collector BaseHookInput → flushers (SLS/JSONL/HTTP)
+OTel Plugin (hooks) → JSONL files (event_t schema) → loongsuite-pilot BaseHookInput → flushers (SLS/JSONL/HTTP)
 ```
 
 ### 第 1 步：插件侧 — 添加 JSONL 日志输出
@@ -1111,9 +1111,9 @@ OTel Plugin (hooks) → JSONL files (event_t schema) → ai-agent-collector Base
 - **event.name 枚举**：`llm.request`、`llm.response`、`tool.call`、`tool.result`
 - **必填字段**：`time_unix_nano`、`event.id`、`event.name`、`session.id`、`user.id`、`agent.type`
 - **文件命名格式**：必须匹配 `{prefix}-{YYYY-MM-DD}.jsonl`（如 `claude-code-2026-05-02.jsonl`），与 BaseHookInput 的发现逻辑对齐
-- **配置项**：通过配置文件支持 `log_enabled`、`log_dir`、`log_filename_format`，允许 ai-agent-collector 安装器统一协调路径
+- **配置项**：通过配置文件支持 `log_enabled`、`log_dir`、`log_filename_format`，允许 loongsuite-pilot 安装器统一协调路径
 
-### 第 2 步：ai-agent-collector 侧 — 实现 Input
+### 第 2 步：loongsuite-pilot 侧 — 实现 Input
 
 继承 `BaseHookInput`，实现以下内容：
 
@@ -1129,16 +1129,16 @@ OTel Plugin (hooks) → JSONL files (event_t schema) → ai-agent-collector Base
 
 ### 第 3 步：安装集成
 
-在 `aac-installer.sh` 中添加插件安装/卸载逻辑：
+在 `loongpilot-installer.sh` 中添加插件安装/卸载逻辑：
 
-- 安装时自动拉取 OTel 插件并写入配置文件（`log_enabled=true`、`log_dir` 指向 ai-agent-collector 的数据目录）
+- 安装时自动拉取 OTel 插件并写入配置文件（`log_enabled=true`、`log_dir` 指向 loongsuite-pilot 的数据目录）
 - 卸载时清理插件文件和 hook 配置
-- 关键：确保插件写入路径与 ai-agent-collector 读取路径一致，通过共享配置文件协商
+- 关键：确保插件写入路径与 loongsuite-pilot 读取路径一致，通过共享配置文件协商
 
 ### 第 4 步：验证
 
 1. 运行 Agent CLI 产生事件，检查 JSONL 文件内容是否符合 event_t 规范
-2. 启动 ai-agent-collector，确认 Input 注册成功且增量采集正常
+2. 启动 loongsuite-pilot，确认 Input 注册成功且增量采集正常
 3. 检查输出目标（JSONL flusher / SLS）中数据完整性
 
 ## License

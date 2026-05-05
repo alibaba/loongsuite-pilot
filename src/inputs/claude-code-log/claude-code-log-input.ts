@@ -51,18 +51,18 @@ export class ClaudeCodeLogInput extends BaseHookInput {
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
       stateStore: opts!.stateStore,
-      logDir: opts?.logDir ?? resolveHome('~/.ai-agent-collector/logs/claude-code'),
+      logDir: opts?.logDir ?? resolveHome('~/.loongsuite-pilot/logs/claude-code'),
       logPrefix: opts?.logPrefix ?? 'claude-code',
       pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
     });
   }
 
   static async checkAvailability(): Promise<boolean> {
-    return directoryExists(resolveHome('~/.ai-agent-collector/logs/claude-code'));
+    return directoryExists(resolveHome('~/.loongsuite-pilot/logs/claude-code'));
   }
 
   static getWatchPaths(): string[] {
-    return [resolveHome('~/.ai-agent-collector/logs/claude-code')];
+    return [resolveHome('~/.loongsuite-pilot/logs/claude-code')];
   }
 
   protected async transformRecord(

@@ -46,8 +46,8 @@ export class HookManager {
   private readonly logBaseDir: string;
 
   constructor(hookScriptDir?: string, logBaseDir?: string) {
-    this.hookScriptDir = hookScriptDir ?? resolveHome('~/.ai-agent-collector/hooks');
-    this.logBaseDir = logBaseDir ?? resolveHome('~/.ai-agent-collector/logs');
+    this.hookScriptDir = hookScriptDir ?? resolveHome('~/.loongsuite-pilot/hooks');
+    this.logBaseDir = logBaseDir ?? resolveHome('~/.loongsuite-pilot/logs');
   }
 
   /**
@@ -163,11 +163,11 @@ export class HookManager {
 
   /**
    * Build hook definitions for Cursor.
-   * Registers cursor-aac-hook.sh into ~/.cursor/hooks.json for key events.
+   * Registers cursor-loongpilot-hook.sh into ~/.cursor/hooks.json for key events.
    */
-  static buildCursorHooks(aiAgentCollectorDir?: string): HookDefinition[] {
-    const baseDir = aiAgentCollectorDir ?? resolveHome('~/.ai-agent-collector');
-    const command = `${baseDir}/hooks/cursor-aac-hook.sh`;
+  static buildCursorHooks(loongsuitePilotDir?: string): HookDefinition[] {
+    const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
+    const command = `${baseDir}/hooks/cursor-loongpilot-hook.sh`;
     const settingsPath = resolveHome('~/.cursor/hooks.json');
 
     const events = [
@@ -196,9 +196,9 @@ export class HookManager {
   /**
    * Build hook definitions for Qoder CLI (Stop only).
    */
-  static buildQoderCliHooks(aiAgentCollectorDir?: string): HookDefinition[] {
-    const baseDir = aiAgentCollectorDir ?? resolveHome('~/.ai-agent-collector');
-    const command = `${baseDir}/hooks/qoder-aac-hook.sh qoder-cli`;
+  static buildQoderCliHooks(loongsuitePilotDir?: string): HookDefinition[] {
+    const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
+    const command = `${baseDir}/hooks/qoder-loongpilot-hook.sh qoder-cli`;
     const settingsPath = resolveHome('~/.qoder/settings.json');
 
     return [
@@ -217,9 +217,9 @@ export class HookManager {
    * Build hook definitions for QoderWork (Stop only).
    * Reuses the same hook script as Qoder CLI, passing "qoder-work" as agent ID.
    */
-  static buildQoderWorkHooks(aiAgentCollectorDir?: string): HookDefinition[] {
-    const baseDir = aiAgentCollectorDir ?? resolveHome('~/.ai-agent-collector');
-    const command = `${baseDir}/hooks/qoder-aac-hook.sh qoder-work`;
+  static buildQoderWorkHooks(loongsuitePilotDir?: string): HookDefinition[] {
+    const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
+    const command = `${baseDir}/hooks/qoder-loongpilot-hook.sh qoder-work`;
     const settingsPath = resolveHome('~/.qoderwork/settings.json');
 
     return [
@@ -237,8 +237,8 @@ export class HookManager {
   /**
    * @deprecated Use buildQoderCliHooks() instead.
    */
-  static buildQoderCliHook(aiAgentCollectorDir?: string): HookDefinition {
-    return HookManager.buildQoderCliHooks(aiAgentCollectorDir)[1];
+  static buildQoderCliHook(loongsuitePilotDir?: string): HookDefinition {
+    return HookManager.buildQoderCliHooks(loongsuitePilotDir)[1];
   }
 
   /**
@@ -248,9 +248,9 @@ export class HookManager {
   static buildGenericHook(opts: {
     agentId: string;
     settingsDir: string;
-    aiAgentCollectorDir?: string;
+    loongsuitePilotDir?: string;
   }): HookDefinition {
-    const baseDir = opts.aiAgentCollectorDir ?? resolveHome('~/.ai-agent-collector');
+    const baseDir = opts.loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
     return {
       agentId: opts.agentId,
       settingsPath: path.join(opts.settingsDir, 'settings.json'),

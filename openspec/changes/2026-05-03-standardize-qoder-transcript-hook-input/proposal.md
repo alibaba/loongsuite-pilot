@@ -12,7 +12,7 @@ Qoder and Qoder CLI both invoke hooks from the shared `.qoder/settings.json`, so
   - CLI-like transcript rows emit `agent.type = qoder-cli`.
   - IDE-like transcript rows emit `agent.type = qoder`.
 - Preserve the current hook installation and history-log compatibility path in this change:
-  - Keep the existing `qoder-aac-hook.sh` behavior and `logs/qoder-cli/history/qoder-cli-*.jsonl` channel unless a later migration explicitly renames it.
+  - Keep the existing `qoder-loongpilot-hook.sh` behavior and `logs/qoder-cli/history/qoder-cli-*.jsonl` channel unless a later migration explicitly renames it.
   - Keep the existing listener/input id stable for compatibility.
 - Map user prompts, assistant text/thinking, tool calls, and tool results into normalized `event.name` values and standard fields.
 - Ignore low-value metadata rows such as title, last-prompt, session metadata, and hook progress unless a later requirement asks to emit them.

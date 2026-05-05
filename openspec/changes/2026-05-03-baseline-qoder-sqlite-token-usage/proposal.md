@@ -1,6 +1,6 @@
 ## Why
 
-`QoderSqliteInput` currently starts from rowid `0` when its local state is missing. If AAC is uninstalled by deleting `~/.ai-agent-collector` and then reinstalled, the collector can replay all historical Qoder SQLite token usage rows and re-upload old sessions to local JSONL/SLS.
+`QoderSqliteInput` currently starts from rowid `0` when its local state is missing. If LoongPilot is uninstalled by deleting `~/.loongsuite-pilot` and then reinstalled, the collector can replay all historical Qoder SQLite token usage rows and re-upload old sessions to local JSONL/SLS.
 
 ## What Changes
 
@@ -13,7 +13,7 @@
 ## Capabilities
 
 ### New Capabilities
-- `qoder-sqlite-startup-baseline`: Prevent historical Qoder SQLite token usage replay after AAC state loss or reinstall by baselining the rowid cursor on first start.
+- `qoder-sqlite-startup-baseline`: Prevent historical Qoder SQLite token usage replay after LoongPilot state loss or reinstall by baselining the rowid cursor on first start.
 
 ### Modified Capabilities
 

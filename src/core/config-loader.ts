@@ -5,7 +5,7 @@ import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('ConfigLoader');
 
-const DEFAULT_CONFIG_PATH = '~/.ai-agent-collector/config.json';
+const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
 
 /**
  * On-disk config file shape.
@@ -71,7 +71,7 @@ function envInt(key: string, fallback: number): number {
 /**
  * Load configuration with three priority layers:
  *   1. Environment variables (highest)
- *   2. Config file (~/.ai-agent-collector/config.json or AGENT_DATA_COLLECTION_CONFIG)
+ *   2. Config file (~/.loongsuite-pilot/config.json or AGENT_DATA_COLLECTION_CONFIG)
  *   3. Built-in defaults (lowest)
  *
  * Env vars override config file values. Config file overrides defaults.
@@ -86,12 +86,12 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     logger.debug('no config file found, using env + defaults', { path: configPath });
   }
 
-  const dataDir = env('AAC_DATA_DIR') ?? file?.dataDir ?? '~/.ai-agent-collector';
+  const dataDir = env('LOONGPILOT_DATA_DIR') ?? file?.dataDir ?? '~/.loongsuite-pilot';
 
-  const userId = env('AAC_USER_ID') ?? file?.['user.id'] ?? os.hostname();
+  const userId = env('LOONGPILOT_USER_ID') ?? file?.['user.id'] ?? os.hostname();
 
   return {
-    enabled: envBool('AAC_ENABLED', file?.enabled ?? true),
+    enabled: envBool('LOONGPILOT_ENABLED', file?.enabled ?? true),
     autoStart: true,
     dataDir,
     userId,
@@ -229,13 +229,13 @@ function buildHttpConfig(file: ConfigFile | null) {
 }
 
 const RELEASE_PACKAGE_URL =
-  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongcollector/ai-agent-collector/latest/ai-agent-collector.tar.gz';
+  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite/loongsuite-pilot/latest/loongsuite-pilot.tar.gz';
 const TEST_PACKAGE_URL =
-  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongcollector-dev/ai-agent-collector/latest/ai-agent-collector.tar.gz';
+  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-dev/loongsuite-pilot/latest/loongsuite-pilot.tar.gz';
 const DEFAULT_CHECK_INTERVAL_MS = 60_000; // 1 minute
 
 function resolveDefaultPackageUrl(): string {
-  const channel = env('AAC_CHANNEL') ?? 'release';
+  const channel = env('LOONGPILOT_CHANNEL') ?? 'release';
   return (channel === 'test' || channel === 'pre') ? TEST_PACKAGE_URL : RELEASE_PACKAGE_URL;
 }
 
@@ -246,9 +246,9 @@ function resolveDefaultPackageUrl(): string {
 export function buildAutoUpdateConfig(
   file: { autoUpdate?: { enabled?: boolean; checkIntervalMs?: number; manifestUrl?: string; packageUrl?: string } } | null,
 ): AutoUpdateConfig {
-  const packageUrl = env('AAC_PACKAGE_URL') ?? file?.autoUpdate?.packageUrl ?? resolveDefaultPackageUrl();
+  const packageUrl = env('LOONGPILOT_PACKAGE_URL') ?? file?.autoUpdate?.packageUrl ?? resolveDefaultPackageUrl();
 
-  let manifestUrl = env('AAC_MANIFEST_URL') ?? file?.autoUpdate?.manifestUrl;
+  let manifestUrl = env('LOONGPILOT_MANIFEST_URL') ?? file?.autoUpdate?.manifestUrl;
   if (!manifestUrl && packageUrl) {
     const lastSlash = packageUrl.lastIndexOf('/');
     manifestUrl = lastSlash >= 0
@@ -257,9 +257,9 @@ export function buildAutoUpdateConfig(
   }
 
   return {
-    enabled: envBool('AAC_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
+    enabled: envBool('LOONGPILOT_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
     checkIntervalMs: envInt(
-      'AAC_AUTO_UPDATE_INTERVAL_MS',
+      'LOONGPILOT_AUTO_UPDATE_INTERVAL_MS',
       file?.autoUpdate?.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS,
     ),
     manifestUrl,

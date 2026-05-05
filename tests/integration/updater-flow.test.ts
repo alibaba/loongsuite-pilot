@@ -10,7 +10,7 @@ vi.mock('../../src/utils/logger.js', () => ({
   }),
 }));
 
-// Mock child_process: route tar to real exec, npm/aac to mock
+// Mock child_process: route tar to real exec, npm/loongpilot to mock
 const mockExecFile = vi.fn();
 vi.mock('node:child_process', () => ({
   execFile: (...args: any[]) => mockExecFile(...args),
@@ -89,7 +89,7 @@ describe('Updater integration (real filesystem)', () => {
     const exec = realUtil.promisify(realCp.execFile);
 
     const stageDir = path.join(testDir, 'stage');
-    const pkgDir = path.join(stageDir, 'ai-agent-collector');
+    const pkgDir = path.join(stageDir, 'loongsuite-pilot');
     await fs.mkdir(path.join(pkgDir, 'dist'), { recursive: true });
     await fs.mkdir(path.join(pkgDir, 'scripts'), { recursive: true });
     await fs.writeFile(
@@ -97,11 +97,11 @@ describe('Updater integration (real filesystem)', () => {
       `version=${version}\ngit_commit=${commit}\n`,
     );
     await fs.writeFile(path.join(pkgDir, 'dist', 'index.js'), '// new version\n');
-    await fs.writeFile(path.join(pkgDir, 'package.json'), '{"name":"ai-agent-collector"}\n');
+    await fs.writeFile(path.join(pkgDir, 'package.json'), '{"name":"loongsuite-pilot"}\n');
     await fs.writeFile(path.join(pkgDir, 'scripts', 'collector-daemon.js'), '// boot\n');
 
     const tarballPath = path.join(testDir, 'package.tar.gz');
-    await exec('tar', ['-czf', tarballPath, '-C', stageDir, 'ai-agent-collector']);
+    await exec('tar', ['-czf', tarballPath, '-C', stageDir, 'loongsuite-pilot']);
 
     const tarballBytes = await fs.readFile(tarballPath);
     const hash = crypto.createHash('sha256').update(tarballBytes).digest('hex');

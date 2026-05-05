@@ -6,7 +6,7 @@ import { createLogger } from '../utils/logger.js';
 const logger = createLogger('AgentDiscoveryService');
 
 const DEFAULT_POLL_MS = 300_000; // 5 minutes
-const FORCE_POLLING = process.env.AAC_FORCE_POLLING === 'true';
+const FORCE_POLLING = process.env.LOONGPILOT_FORCE_POLLING === 'true';
 
 interface EntryRuntime {
   entry: AgentDetectionEntry;
@@ -43,7 +43,7 @@ export class AgentDiscoveryService extends EventEmitter {
     }
     await this.refresh('startup');
 
-    const intervalMs = Number(process.env.AAC_DISCOVERY_INTERVAL_MS) || DEFAULT_POLL_MS;
+    const intervalMs = Number(process.env.LOONGPILOT_DISCOVERY_INTERVAL_MS) || DEFAULT_POLL_MS;
     this.globalPollTimer = setInterval(() => void this.refresh('poll'), intervalMs);
   }
 

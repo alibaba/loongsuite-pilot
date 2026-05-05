@@ -31,9 +31,9 @@ npm start
 ```
 
 系统将自动：
-1. 创建数据目录 `~/.ai-agent-collector/`
+1. 创建数据目录 `~/.loongsuite-pilot/`
 2. 加载状态文件（首次运行时初始化为空）
-3. 使用 JSONL 兜底输出到 `~/.ai-agent-collector/logs/output/`
+3. 使用 JSONL 兜底输出到 `~/.loongsuite-pilot/logs/output/`
 4. 启动 Agent 发现服务，检测已安装的 AI Agent
 
 ### 配置文件启动
@@ -47,7 +47,7 @@ AGENT_DATA_COLLECTION_CONFIG=./config.json npm start
 
 ```json
 {
-  "dataDir": "~/.ai-agent-collector",
+  "dataDir": "~/.loongsuite-pilot",
   "sls": {
     "enabled": true,
     "accessKeyId": "YOUR_AK",
@@ -86,20 +86,20 @@ HTTP_REPORT_URL=https://my-server.com/api/collect npm start
 JSONL_ENABLED=false npm start
 
 # 强制轮询模式（禁用 fs.watch）
-AAC_FORCE_POLLING=true npm start
+LOONGPILOT_FORCE_POLLING=true npm start
 ```
 
 ## 验证采集
 
 ```bash
 # 查看输出文件
-ls ~/.ai-agent-collector/logs/output/
+ls ~/.loongsuite-pilot/logs/output/
 
 # 查看 Qoder IDE 数据
-cat ~/.ai-agent-collector/logs/output/Qoder-$(date +%Y-%m-%d).jsonl | head -5
+cat ~/.loongsuite-pilot/logs/output/Qoder-$(date +%Y-%m-%d).jsonl | head -5
 
 # 查看采集状态
-cat ~/.ai-agent-collector/logs/input-state.json | python3 -m json.tool
+cat ~/.loongsuite-pilot/logs/input-state.json | python3 -m json.tool
 ```
 
 ## 新增 Agent

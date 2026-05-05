@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# upload.sh — Upload package + aac-installer.sh to Alibaba Cloud OSS
+# upload.sh — Upload package + loongpilot-installer.sh to Alibaba Cloud OSS
 #
 # Prerequisites:
 #   - ossutil installed (https://help.aliyun.com/document_detail/120075.html)
@@ -17,7 +17,7 @@
 #   bash deploy/upload.sh --region cn-hangzhou         # custom region
 #
 # Environment variables (override CLI args):
-#   AAC_CHANNEL   — release or test (default: test)
+#   LOONGPILOT_CHANNEL   — release or test (default: test)
 #   OSS_BUCKET    — target bucket name (overrides channel)
 #   OSS_PREFIX    — key prefix in bucket (overrides channel)
 #   OSS_REGION    — region for the public URL (overrides channel)
@@ -31,22 +31,22 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # release: production bucket, end-user facing
 # test:    pre-release bucket, internal testing
 _RELEASE_BUCKET="aliyun-observability-release-cn-shanghai"
-_RELEASE_PREFIX="loongcollector/ai-agent-collector"
+_RELEASE_PREFIX="loongsuite/loongsuite-pilot"
 _RELEASE_REGION="cn-shanghai"
 
 
 _TEST_BUCKET="aliyun-observability-release-cn-shanghai"
-_TEST_PREFIX="loongcollector-dev/ai-agent-collector"
+_TEST_PREFIX="loongsuite-dev/loongsuite-pilot"
 _TEST_REGION="cn-shanghai"
 
 # ── Defaults (test channel is the safe default for dev) ──
-CHANNEL="${AAC_CHANNEL:-test}"
+CHANNEL="${LOONGPILOT_CHANNEL:-test}"
 BUCKET="${OSS_BUCKET:-}"
 PREFIX="${OSS_PREFIX:-}"
 REGION="${OSS_REGION:-}"
-PKG_PATH="$PROJECT_ROOT/ai-agent-collector.tar.gz"
-INSTALLER_SCRIPT="$PROJECT_ROOT/deploy/aac-installer.sh"
-INSTALLER_INNER_SCRIPT="$PROJECT_ROOT/deploy/aac-installer-inner.sh"
+PKG_PATH="$PROJECT_ROOT/loongsuite-pilot.tar.gz"
+INSTALLER_SCRIPT="$PROJECT_ROOT/deploy/loongpilot-installer.sh"
+INSTALLER_INNER_SCRIPT="$PROJECT_ROOT/deploy/loongpilot-installer-inner.sh"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -121,7 +121,7 @@ OSS_BASE="oss://${BUCKET}/${PREFIX}"
 PUBLIC_BASE="https://${BUCKET}.oss-${REGION}.aliyuncs.com/${PREFIX}"
 
 # ── Extract version from package ──
-PACKAGE_NAME="ai-agent-collector"
+PACKAGE_NAME="loongsuite-pilot"
 PKG_NAME="$(basename "$PKG_PATH")"
 VERSION_INFO=$(tar -xzf "$PKG_PATH" -O "${PACKAGE_NAME}/VERSION" 2>/dev/null || true)
 PKG_VER=$(echo "$VERSION_INFO" | grep '^version=' | cut -d= -f2)
@@ -187,8 +187,8 @@ rm -f "$MANIFEST_TMP"
 echo ""
 
 # ── Upload installer scripts (version-independent, stays at prefix root) ──
-INSTALLER_NAME="aac-installer.sh"
-INSTALLER_INNER_NAME="aac-installer-inner.sh"
+INSTALLER_NAME="loongpilot-installer.sh"
+INSTALLER_INNER_NAME="loongpilot-installer-inner.sh"
 echo "==> Uploading installers: $INSTALLER_NAME, $INSTALLER_INNER_NAME"
 upload_file "$INSTALLER_SCRIPT"       "${OSS_BASE}/${INSTALLER_NAME}"       "installer"
 echo "    ✅ ${PUBLIC_BASE}/${INSTALLER_NAME}"

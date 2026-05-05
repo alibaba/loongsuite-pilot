@@ -34,7 +34,7 @@ export class QoderInput extends BaseIdeInput {
       stateStore: opts!.stateStore,
       dataRoot,
       snapshotStorePath: opts?.snapshotStorePath
-        ?? resolveHome('~/.ai-agent-collector/logs/qoder/qoder-snapshot-store.json'),
+        ?? resolveHome('~/.loongsuite-pilot/logs/qoder/qoder-snapshot-store.json'),
       pollIntervalMs: opts?.pollIntervalMs
         ?? (Number(process.env.QODER_ANALYTICS_POLL_INTERVAL) || 30_000),
       snapshotRetentionMs: opts?.snapshotRetentionMs,

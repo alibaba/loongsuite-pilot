@@ -270,7 +270,7 @@ describe('Updater', () => {
 
       // findExtractedPackage needs readdir + stat + access
       mockFsReaddir.mockImplementation((dir: string) => {
-        if (dir.includes('download-tmp')) return Promise.resolve(['ai-agent-collector']);
+        if (dir.includes('download-tmp')) return Promise.resolve(['loongsuite-pilot']);
         return Promise.resolve([]);
       });
       mockFsStat.mockResolvedValue({ isDirectory: () => true });

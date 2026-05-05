@@ -7,10 +7,10 @@ import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 /**
  * Qoder Work — transcript JSONL input.
  *
- * Reads rows from ~/.ai-agent-collector/logs/qoder-work/history/ and keeps
+ * Reads rows from ~/.loongsuite-pilot/logs/qoder-work/history/ and keeps
  * assistant/user messages that have message.content[0].type.
  *
- * Reuses the same hook script as Qoder CLI (qoder-aac-hook.sh)
+ * Reuses the same hook script as Qoder CLI (qoder-loongpilot-hook.sh)
  * with "qoder-work" as the agent ID parameter.
  * Hook config lives at ~/.qoderwork/settings.json.
  */
@@ -21,7 +21,7 @@ export class QoderWorkInput extends BaseHookInput {
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
       stateStore: opts!.stateStore,
-      logDir: opts?.logDir ?? resolveHome('~/.ai-agent-collector/logs/qoder-work/history'),
+      logDir: opts?.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder-work/history'),
       logPrefix: opts?.logPrefix ?? 'qoder-work',
       pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
     });
@@ -164,7 +164,7 @@ function buildPostToolUseEntry(
     sessionId: (data.session_id as string) ?? '',
     userId: (data.user_id as string) ?? '',
     agentType,
-    actionType: data.aac_pre_file_exists === false ? ActionType.Create : ActionType.Edit,
+    actionType: data.loongpilot_pre_file_exists === false ? ActionType.Create : ActionType.Edit,
     filePath,
     content: typeof toolInput.content === 'string'
       ? toolInput.content

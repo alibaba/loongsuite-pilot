@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const CACHE_DIR = path.join(process.env.HOME || '', '.ai-agent-collector');
+const CACHE_DIR = path.join(process.env.HOME || '', '.loongsuite-pilot');
 const CURRENT_FILE = path.join(CACHE_DIR, 'current');
 const PREVIOUS_FILE = path.join(CACHE_DIR, 'previous');
 const VERSIONS_DIR = path.join(CACHE_DIR, 'versions');
@@ -19,10 +19,10 @@ function loadVersion(pointerFile) {
 
 const entry = loadVersion(CURRENT_FILE) || loadVersion(PREVIOUS_FILE);
 if (!entry) {
-  console.error('[aac] No valid collector version found');
+  console.error('[loongpilot] No valid collector version found');
   process.exit(1);
 }
 import(entry).catch(err => {
-  console.error('[aac] Failed to load collector:', err.message);
+  console.error('[loongpilot] Failed to load collector:', err.message);
   process.exit(1);
 });

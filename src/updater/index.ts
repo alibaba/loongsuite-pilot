@@ -5,7 +5,7 @@ import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 
 const logger = createLogger('UpdaterMain');
 
-const DEFAULT_CONFIG_PATH = '~/.ai-agent-collector/config.json';
+const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
 
 async function main(): Promise<void> {
   logger.info('updater process starting');

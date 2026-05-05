@@ -2,7 +2,7 @@ import type { AgentControlConfig, AgentControlMode } from '../types/index.js';
 import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
-const DEFAULT_AGENT_CONTROL_PATH = '~/.ai-agent-collector/agent-control.json';
+const DEFAULT_AGENT_CONTROL_PATH = '~/.loongsuite-pilot/agent-control.json';
 const logger = createLogger('AgentControlManager');
 
 /**

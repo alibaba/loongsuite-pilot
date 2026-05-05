@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Shared hook transcript forwarder for ai-agent-collector.
+ * Shared hook transcript forwarder for loongsuite-pilot.
  *
  * Incrementally reads new lines from a transcript file and appends them
  * to daily-rotated JSONL history logs. Tracks line offsets per transcript
@@ -10,7 +10,7 @@
  *   hook-processor.mjs --agent-id <id> [--log-prefix <prefix>]
  *
  *   --agent-id    Required. Determines the history directory:
- *                   ~/.ai-agent-collector/logs/{agent-id}/history/
+ *                   ~/.loongsuite-pilot/logs/{agent-id}/history/
  *   --log-prefix  Optional. JSONL file name prefix (defaults to agent-id).
  *                   e.g. --log-prefix cursor → cursor-2026-04-29.jsonl
  *
@@ -19,7 +19,7 @@
  *     - transcript_path: path to the transcript JSONL file
  *     - session_id (or conversation_id): session identifier
  *
- * Called by cursor-aac-hook.sh and qoder-aac-hook.sh.
+ * Called by cursor-loongpilot-hook.sh and qoder-loongpilot-hook.sh.
  * Fail-open: errors are logged locally and never block the caller.
  */
 
@@ -29,9 +29,9 @@ import os from 'node:os';
 
 const ENABLE_LOGGING = true;
 const HOOKS_DIR = path.dirname(new URL(import.meta.url).pathname);
-const AAC_LOGS_BASE_DIR = (() => {
-  const configured = process.env.AAC_DATA_DIR || process.env.AI_AGENT_COLLECTOR_DATA_DIR;
-  return path.join(configured || path.join(os.homedir(), '.ai-agent-collector'), 'logs');
+const LOONGPILOT_LOGS_BASE_DIR = (() => {
+  const configured = process.env.LOONGPILOT_DATA_DIR || process.env.LOONGSUITE_PILOT_DATA_DIR;
+  return path.join(configured || path.join(os.homedir(), '.loongsuite-pilot'), 'logs');
 })();
 
 // --- CLI argument parsing ---------------------------------------------------
@@ -181,7 +181,7 @@ function parseTranscriptLine(line) {
 
 function getHistoryLogFile(agentId, logPrefix) {
   const day = new Date().toISOString().slice(0, 10);
-  const historyDir = path.join(AAC_LOGS_BASE_DIR, agentId, 'history');
+  const historyDir = path.join(LOONGPILOT_LOGS_BASE_DIR, agentId, 'history');
   return path.join(historyDir, `${logPrefix}-${day}.jsonl`);
 }
 

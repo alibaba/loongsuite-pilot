@@ -11,7 +11,7 @@
 
 **Language/Version**: Node.js 18+（运行 hook 脚本与 processor），TypeScript 5.3+（主项目 strict 模式）  
 **Primary Dependencies**: Node.js 标准库（`fs/promises`、`path`、`os`、`crypto`），项目测试框架 Vitest  
-**Storage**: 本地文件（`~/.ai-agent-collector/logs/cursor-hook/history/cursor-YYYY-MM-DD.jsonl`）  
+**Storage**: 本地文件（`~/.loongsuite-pilot/logs/cursor-hook/history/cursor-YYYY-MM-DD.jsonl`）  
 **Testing**: Shell 冒烟验证 + Vitest（后续任务阶段补充自动化测试）  
 **Target Platform**: macOS / Linux 本地开发环境  
 **Project Type**: 后台数据采集系统中的 hook 采集子能力  

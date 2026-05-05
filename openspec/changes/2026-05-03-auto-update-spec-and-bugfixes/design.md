@@ -1,10 +1,10 @@
 ## Context
 
-The auto-update subsystem enables deployed ai-agent-collector instances to self-update without operator intervention. It consists of:
+The auto-update subsystem enables deployed loongsuite-pilot instances to self-update without operator intervention. It consists of:
 
 - A standalone **Updater process** (`src/updater/`) that polls a remote manifest, downloads new versions, and restarts the Collector.
 - **Bootstrap scripts** (`scripts/collector-daemon.js`, `scripts/updater-daemon.js`) that resolve the current version via pointer files.
-- **CLI integration** (`scripts/aac.sh`) with launchd/systemd service management.
+- **CLI integration** (`scripts/loongpilot.sh`) with launchd/systemd service management.
 - **Build & deploy tooling** (`deploy/package.sh`, `deploy/upload.sh`) that publishes versioned packages to Alibaba Cloud OSS.
 
 ### Architecture: Dual-Process Model
@@ -12,10 +12,10 @@ The auto-update subsystem enables deployed ai-agent-collector instances to self-
 ```
 launchd / systemd
     │
-    ├── com.ai-agent-collector          → aac run          → collector-daemon.js
+    ├── com.loongsuite-pilot          → loongpilot run          → collector-daemon.js
     │                                                           └── versions/<current>/dist/index.js
     │
-    └── com.ai-agent-collector.updater  → aac run-updater  → updater-daemon.js
+    └── com.loongsuite-pilot.updater  → loongpilot run-updater  → updater-daemon.js
                                                                 └── versions/<current>/dist/updater/index.js
 ```
 
@@ -24,7 +24,7 @@ The Updater runs independently so it can restart the Collector without terminati
 ### Version Directory Layout
 
 ```
-~/.ai-agent-collector/
+~/.loongsuite-pilot/
     ├── current          → "<version>_<commit>"   (atomic pointer)
     ├── previous         → "<version>_<commit>"   (rollback pointer)
     ├── versions/
@@ -42,7 +42,7 @@ The Updater runs independently so it can restart the Collector without terminati
     ├── latest.json          → { version, git_commit, package_url, released_at }
     ├── latest/*.tar.gz
     ├── <version>/*.tar.gz
-    └── aac-installer.sh
+    └── loongpilot-installer.sh
 ```
 
 Dual channel: `release` (production) and `test` (pre-release).
@@ -125,7 +125,7 @@ Modified the `Updater` class constructor to accept an optional `baseDir` paramet
 new Updater(config: AutoUpdateConfig, baseDir?: string)
 ```
 
-When `baseDir` is provided, all internal paths (`cacheDir`, `versionsDir`, `current`, `previous`, `bin`) are derived from it. When omitted, the original hardcoded `~/.ai-agent-collector` paths are used (backward compatible).
+When `baseDir` is provided, all internal paths (`cacheDir`, `versionsDir`, `current`, `previous`, `bin`) are derived from it. When omitted, the original hardcoded `~/.loongsuite-pilot` paths are used (backward compatible).
 
 Rationale: Integration tests can pass a disposable `tmpdir` as `baseDir` and exercise the full download→deploy→pointer-update cycle on a real filesystem without polluting the user's home directory.
 
@@ -141,7 +141,7 @@ Rationale: Integration tests can pass a disposable `tmpdir` as `baseDir` and exe
 ### Key Mocking Strategy
 
 - **Unit tests**: All I/O is mocked (`node:fs/promises`, `node:child_process`, `global.fetch`). `computeSha256` is mocked via `vi.mock` to isolate SHA verification logic from actual file I/O.
-- **Integration tests**: Real filesystem in a `tmpdir`. Only `child_process` is partially mocked — `tar` routes to real execution (to create real tarballs), while `npm` and `aac` are mocked to avoid external dependencies. `fetch` is mocked to serve in-memory tarball bytes.
+- **Integration tests**: Real filesystem in a `tmpdir`. Only `child_process` is partially mocked — `tar` routes to real execution (to create real tarballs), while `npm` and `loongpilot` are mocked to avoid external dependencies. `fetch` is mocked to serve in-memory tarball bytes.
 
 ## Open Questions
 

@@ -8,7 +8,7 @@ async function main(): Promise<void> {
   const config = await loadConfig();
 
   if (!config.enabled) {
-    logger.info('analytics disabled via config or AAC_ENABLED=false');
+    logger.info('analytics disabled via config or LOONGPILOT_ENABLED=false');
     return;
   }
 

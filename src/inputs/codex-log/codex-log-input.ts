@@ -51,18 +51,18 @@ export class CodexLogInput extends BaseHookInput {
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
       stateStore: opts!.stateStore,
-      logDir: opts?.logDir ?? resolveHome('~/.ai-agent-collector/logs/codex'),
+      logDir: opts?.logDir ?? resolveHome('~/.loongsuite-pilot/logs/codex'),
       logPrefix: opts?.logPrefix ?? 'codex',
       pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
     });
   }
 
   static async checkAvailability(): Promise<boolean> {
-    return directoryExists(resolveHome('~/.ai-agent-collector/logs/codex'));
+    return directoryExists(resolveHome('~/.loongsuite-pilot/logs/codex'));
   }
 
   static getWatchPaths(): string[] {
-    return [resolveHome('~/.ai-agent-collector/logs/codex')];
+    return [resolveHome('~/.loongsuite-pilot/logs/codex')];
   }
 
   protected async transformRecord(

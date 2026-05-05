@@ -1,13 +1,13 @@
 ## Context
 
-`QoderSqliteInput` extends `BaseSqliteInput`, which reads rows using the persisted `lastRowId` cursor. When `lastRowId` is absent, the base class defaults to `0`, so a fresh AAC install or deleted `~/.ai-agent-collector/logs/input-state.json` causes `qoder-sqlite` to query every historical eligible `chat_message` row.
+`QoderSqliteInput` extends `BaseSqliteInput`, which reads rows using the persisted `lastRowId` cursor. When `lastRowId` is absent, the base class defaults to `0`, so a fresh LoongPilot install or deleted `~/.loongsuite-pilot/logs/input-state.json` causes `qoder-sqlite` to query every historical eligible `chat_message` row.
 
 For Qoder SQLite token usage, historical backfill is not desired. The input should behave like a live collector: establish a high-water mark on first start and only emit token usage rows created after the collector is running.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Prevent historical Qoder SQLite token usage replay when AAC state is missing.
+- Prevent historical Qoder SQLite token usage replay when LoongPilot state is missing.
 - Preserve normal incremental behavior when `qoder-sqlite` state already exists.
 - Continue emitting new eligible rows inserted after startup.
 - Keep the baseline scoped to `QoderSqliteInput`; do not change all SQLite inputs globally.
@@ -47,7 +47,7 @@ If no eligible rows exist, baseline to `0` or leave state effectively unchanged.
 
 ## Risks / Trade-offs
 
-- Deleting AAC state intentionally discards the ability to recover missed rows -> This matches the requested no-history behavior.
+- Deleting LoongPilot state intentionally discards the ability to recover missed rows -> This matches the requested no-history behavior.
 - Rows inserted between baseline query and first poll should still be collected if their rowid is greater than the baseline -> The next collection cycle queries `rowid > baseline`.
 - Using eligible max rowid means invalid historical rows may not be represented in state -> They are out of scope for token usage collection.
 

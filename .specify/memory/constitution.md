@@ -16,7 +16,7 @@ Templates requiring updates:
 Follow-up TODOs: None
 -->
 
-# AI Agent Collector 项目宪法
+# LoongSuite Pilot 项目宪法
 
 ## 核心原则
 

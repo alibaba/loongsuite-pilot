@@ -30,7 +30,7 @@ import * as os from 'node:os';
 
 const logger = createLogger('Orchestrator');
 
-const DEFAULT_DATA_DIR = '~/.ai-agent-collector';
+const DEFAULT_DATA_DIR = '~/.loongsuite-pilot';
 
 /**
  * Central orchestrator — the entry point that wires all sub-systems together.

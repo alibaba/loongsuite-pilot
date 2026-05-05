@@ -28,14 +28,14 @@ stop():
 ## ConfigLoader 优先级
 
 ```text
-环境变量 > 配置文件 (~/.ai-agent-collector/config.json) > 内置默认值
+环境变量 > 配置文件 (~/.loongsuite-pilot/config.json) > 内置默认值
 ```
 
 | 环境变量 | 对应配置 | 默认值 |
 |---------|---------|--------|
-| `AAC_ENABLED` | enabled | true |
-| `AAC_DATA_DIR` | dataDir | ~/.ai-agent-collector |
-| `AAC_PORT` | port | 43124 |
+| `LOONGPILOT_ENABLED` | enabled | true |
+| `LOONGPILOT_DATA_DIR` | dataDir | ~/.loongsuite-pilot |
+| `LOONGPILOT_PORT` | port | 43124 |
 | `SLS_ACCESS_KEY_ID` | sls.accessKeyId | '' |
 | `SLS_ACCESS_KEY_SECRET` | sls.accessKeySecret | '' |
 | `SLS_ENDPOINT` | sls.endpoint | '' |
@@ -44,7 +44,7 @@ stop():
 | `JSONL_OUTPUT_DIR` | jsonl.outputDir | {dataDir}/logs/output |
 | `HTTP_REPORT_URL` | http.url | '' |
 | `HTTP_REPORT_HEADERS` | http.headers | — |
-| `AGENT_DATA_COLLECTION_CONFIG` | 配置文件路径 | ~/.ai-agent-collector/config.json |
+| `AGENT_DATA_COLLECTION_CONFIG` | 配置文件路径 | ~/.loongsuite-pilot/config.json |
 
 ## AgentControlManager 三级模式
 
@@ -81,7 +81,7 @@ resolveEnabled(agentId: string, defaultWhenAuto: boolean): boolean
 1. 优先 `fs.watch(watchPaths)` → 文件变化触发 `processEntry`
 2. `fs.watch` 失败（路径不存在或 error）→ 自动降级 `setInterval` 轮询
 3. 全局轮询定时器兜底（默认 5 分钟）
-4. `AAC_FORCE_POLLING=true` 强制轮询模式
+4. `LOONGPILOT_FORCE_POLLING=true` 强制轮询模式
 
 ## InputManager 事件分发
 

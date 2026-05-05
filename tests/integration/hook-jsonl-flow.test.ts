@@ -16,7 +16,7 @@ function getTodayDateString(): string {
 }
 
 function runCursorHook(input: string, env: Record<string, string>) {
-  return spawnSync('bash', [path.resolve(process.cwd(), 'assets/hooks/cursor-aac-hook.sh')], {
+  return spawnSync('bash', [path.resolve(process.cwd(), 'assets/hooks/cursor-loongpilot-hook.sh')], {
     input,
     env: { ...process.env, ...env },
     encoding: 'utf-8',
@@ -57,7 +57,7 @@ describe('Hook JSONL integration flow', () => {
         event_type: 'PostToolUse',
         tool_name: 'create_file',
         tool_input: { file_path: '/proj/new.ts', content: 'export const x = 1;' },
-        aac_pre_file_exists: false,
+        loongpilot_pre_file_exists: false,
         session_id: 'integ-sess-1',
         user_id: 'integ-user',
         timestamp: Date.now(),
@@ -66,7 +66,7 @@ describe('Hook JSONL integration flow', () => {
         event_type: 'PostToolUse',
         tool_name: 'write_to_file',
         tool_input: { file_path: '/proj/existing.ts', content: 'updated' },
-        aac_pre_file_exists: true,
+        loongpilot_pre_file_exists: true,
         session_id: 'integ-sess-1',
         user_id: 'integ-user',
         timestamp: Date.now(),
@@ -97,7 +97,7 @@ describe('Hook JSONL integration flow', () => {
       'tool.result.status': 'success',
     });
     expect(allEntries[0]?.attributes).toMatchObject({
-      aac_pre_file_exists: false,
+      loongpilot_pre_file_exists: false,
       file_path: '/proj/new.ts',
     });
     expect(allEntries[1]).toMatchObject({
@@ -108,7 +108,7 @@ describe('Hook JSONL integration flow', () => {
       'tool.result.status': 'success',
     });
     expect(allEntries[1]?.attributes).toMatchObject({
-      aac_pre_file_exists: true,
+      loongpilot_pre_file_exists: true,
       file_path: '/proj/existing.ts',
     });
 
@@ -205,12 +205,12 @@ describe('Hook JSONL integration flow', () => {
     });
   });
 
-  it('should consume transcript rows forwarded by qoder-aac-hook without agent argument', async () => {
+  it('should consume transcript rows forwarded by qoder-loongpilot-hook without agent argument', async () => {
     const hookDir = path.join(tmpDir, 'hooks');
     const dataDir = path.join(tmpDir, 'data');
     await fs.mkdir(hookDir, { recursive: true });
-    const hookScript = path.join(hookDir, 'qoder-aac-hook.sh');
-    await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/qoder-aac-hook.sh'), hookScript);
+    const hookScript = path.join(hookDir, 'qoder-loongpilot-hook.sh');
+    await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/qoder-loongpilot-hook.sh'), hookScript);
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/hook-processor.mjs'),
       path.join(hookDir, 'hook-processor.mjs'),
@@ -236,7 +236,7 @@ describe('Hook JSONL integration flow', () => {
       transcript_path: transcriptPath,
       session_id: 'sess-hook',
     }), {
-      AAC_DATA_DIR: dataDir,
+      LOONGPILOT_DATA_DIR: dataDir,
     });
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
@@ -291,7 +291,7 @@ describe('Cursor hook script integration flow', () => {
       tool_input: { command: 'pwd' },
       tool_output: '{"ok":true}',
       cursor_version: '1.0.0',
-    }), { AAC_DATA_DIR: tmpDir });
+    }), { LOONGPILOT_DATA_DIR: tmpDir });
 
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
@@ -313,7 +313,7 @@ describe('Cursor hook script integration flow', () => {
   });
 
   it('should append records for multiple invocations on same day', async () => {
-    const env = { AAC_DATA_DIR: tmpDir };
+    const env = { LOONGPILOT_DATA_DIR: tmpDir };
 
     const first = runCursorHook(JSON.stringify({ hook_event_name: 'afterAgentResponse', text: 'a1' }), env);
     const second = runCursorHook(JSON.stringify({ hook_event_name: 'afterAgentThought', text: 't1' }), env);
@@ -338,7 +338,7 @@ describe('Cursor hook script integration flow', () => {
       tool_input: '{"query":"abc"}',
       result_json: '{"items":[1]}',
       conversation_id: 'conv-1',
-    }), { AAC_DATA_DIR: tmpDir });
+    }), { LOONGPILOT_DATA_DIR: tmpDir });
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
 
@@ -360,7 +360,7 @@ describe('Cursor hook script integration flow', () => {
       text: 'Please edit the file',
       input_messages_delta: [{ role: 'user', content: 'Please edit the file' }],
       input_messages: [{ role: 'system', content: 'You are helpful' }],
-    }), { AAC_DATA_DIR: tmpDir });
+    }), { LOONGPILOT_DATA_DIR: tmpDir });
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
 
@@ -375,7 +375,7 @@ describe('Cursor hook script integration flow', () => {
   });
 
   it('should keep fail-open behavior for invalid json payload', async () => {
-    const result = runCursorHook('not-json', { AAC_DATA_DIR: tmpDir });
+    const result = runCursorHook('not-json', { LOONGPILOT_DATA_DIR: tmpDir });
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
 
@@ -397,7 +397,7 @@ describe('Cursor hook script integration flow', () => {
     await fs.writeFile(badDataDir, 'x');
 
     const result = runCursorHook(JSON.stringify({ hook_event_name: 'postToolUse', text: 'hello' }), {
-      AAC_DATA_DIR: badDataDir,
+      LOONGPILOT_DATA_DIR: badDataDir,
     });
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
@@ -417,7 +417,7 @@ describe('Cursor hook script integration flow', () => {
 
     for (const eventName of events) {
       const result = runCursorHook(JSON.stringify({ hook_event_name: eventName, text: `evt:${eventName}` }), {
-        AAC_DATA_DIR: tmpDir,
+        LOONGPILOT_DATA_DIR: tmpDir,
       });
       expect(result.status).toBe(0);
       expect(result.stdout.trim()).toBe('{}');
@@ -437,7 +437,7 @@ describe('Cursor hook script integration flow', () => {
       session_id: 'sess-integ-cursor',
       file_path: '/project/a.ts',
       text: 'preview',
-    }), { AAC_DATA_DIR: tmpDir });
+    }), { LOONGPILOT_DATA_DIR: tmpDir });
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
 

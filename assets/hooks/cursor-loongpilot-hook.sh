@@ -10,7 +10,7 @@ EMPTY_RESULT='{}'
 log_error() {
   local stage="$1"
   local message="$2"
-  local data_dir="${AAC_DATA_DIR:-${AI_AGENT_COLLECTOR_DATA_DIR:-$HOME/.ai-agent-collector}}"
+  local data_dir="${LOONGPILOT_DATA_DIR:-${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}}"
   local day
   day="$(date -u +%Y-%m-%d 2>/dev/null || true)"
   [[ -n "$day" ]] || day="unknown"
@@ -31,7 +31,7 @@ if [[ -t 0 ]]; then
 fi
 
 if [[ ! -f "$PROCESSOR" ]]; then
-  echo "[ai-agent-collector] hook processor not found: $PROCESSOR" >&2
+  echo "[loongsuite-pilot] hook processor not found: $PROCESSOR" >&2
   log_error "missing_processor" "hook processor not found: $PROCESSOR"
   printf '%s\n' "$EMPTY_RESULT"
   exit 0
@@ -56,14 +56,14 @@ else
 fi
 
 if [[ -z "$NODE_BIN" ]]; then
-  echo "[ai-agent-collector] node runtime not found" >&2
+  echo "[loongsuite-pilot] node runtime not found" >&2
   log_error "missing_node" "node runtime not found"
   printf '%s\n' "$EMPTY_RESULT"
   exit 0
 fi
 
 if ! "$NODE_BIN" "$PROCESSOR"; then
-  echo "[ai-agent-collector] hook processor failed" >&2
+  echo "[loongsuite-pilot] hook processor failed" >&2
   log_error "processor_failed" "hook processor exited with non-zero status"
   printf '%s\n' "$EMPTY_RESULT"
 fi

@@ -1,12 +1,12 @@
 {
-  "name": "ai-agent-collector",
-  "version": "1.0.3",
+  "name": "loongsuite-pilot",
+  "version": "1.0.0",
   "type": "module",
   "description": "Multi-agent AI coding data collection platform",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "ai-agent-collector": "dist/index.js"
+    "loongsuite-pilot": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",

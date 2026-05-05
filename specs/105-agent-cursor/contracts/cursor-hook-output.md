@@ -6,7 +6,7 @@
 
 ## Output File Contract
 
-- Directory: `~/.ai-agent-collector/logs/cursor-hook/history/`
+- Directory: `~/.loongsuite-pilot/logs/cursor-hook/history/`
 - Filename: `cursor-YYYY-MM-DD.jsonl`
 - Write mode: append-only (one JSON object per line)
 

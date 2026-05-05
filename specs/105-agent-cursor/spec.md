@@ -106,7 +106,7 @@
 ### Functional Requirements
 
 - **FR-001**: 系统必须提供一个可复用的 Cursor hook 入口脚本，支持被多个事件共享调用
-- **FR-002**: 系统必须在处理成功时将记录按 JSONL 逐行追加到 `~/.ai-agent-collector/logs/cursor-hook/history/cursor-YYYY-MM-DD.jsonl`
+- **FR-002**: 系统必须在处理成功时将记录按 JSONL 逐行追加到 `~/.loongsuite-pilot/logs/cursor-hook/history/cursor-YYYY-MM-DD.jsonl`
 - **FR-003**: 系统必须输出统一记录结构：`uuid`、`logTime`、`reported`、`clientType`、`hookEvent`、`data`
 - **FR-004**: 系统必须将标准字段映射写入 `data`，至少包含会话标识、模型标识、角色、工具调用、错误信息等核心字段
 - **FR-005**: 系统必须保留未被映射消费的原始字段，并移除已消费的源字段
@@ -140,6 +140,6 @@
 
 - Cursor 各 hook 事件会通过 stdin 传入单条 JSON payload
 - `node` 运行时在 hook 执行环境可用
-- 日志目录默认位于 `~/.ai-agent-collector/logs/cursor-hook/history/`，且可按需由环境变量覆盖数据根目录
+- 日志目录默认位于 `~/.loongsuite-pilot/logs/cursor-hook/history/`，且可按需由环境变量覆盖数据根目录
 - 本阶段已扩展包含 `src/` 输入源注册与编排接入，复用既有 SLS/JSONL 输出能力
 - 合规与敏感信息治理由下游消费或后续阶段处理，本阶段不在采集侧默认脱敏

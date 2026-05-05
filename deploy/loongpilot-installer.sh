@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# aac-installer.sh — Unified installer for ai-agent-collector
+# loongpilot-installer.sh — Unified installer for loongsuite-pilot
 #
 # Install (first time):
-#   curl -fsSL <URL>/aac-installer.sh | bash
-#   curl -fsSL <URL>/aac-installer.sh | bash -s -- install \
+#   curl -fsSL <URL>/loongpilot-installer.sh | bash
+#   curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- install \
 #     --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
 #     --sls-project "my-project" \
 #     --sls-logstore "my-logstore" \
@@ -11,43 +11,43 @@
 #     --sls-ak-secret "your-ak-secret"
 #
 # Install from test channel:
-#   curl -fsSL <URL>/aac-installer.sh | bash -s -- install --channel test
+#   curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- install --channel test
 #
 # Upgrade (preserve config, auto-rollback on failure):
-#   curl -fsSL <URL>/aac-installer.sh | bash -s -- upgrade
-#   curl -fsSL <URL>/aac-installer.sh | bash -s -- upgrade --package-url <url>
+#   curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- upgrade
+#   curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- upgrade --package-url <url>
 #
 # Uninstall:
-#   curl -fsSL <URL>/aac-installer.sh | bash -s -- uninstall
-#   curl -fsSL <URL>/aac-installer.sh | bash -s -- uninstall --purge
+#   curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- uninstall
+#   curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- uninstall --purge
 
 set -euo pipefail
 
 # ============================================================
 # Constants
 # ============================================================
-PACKAGE_NAME="ai-agent-collector"
-PERMANENT_DIR="$HOME/.ai-agent-collector/package"
-DEFAULT_DATA_DIR="$HOME/.ai-agent-collector"
+PACKAGE_NAME="loongsuite-pilot"
+PERMANENT_DIR="$HOME/.loongsuite-pilot/package"
+DEFAULT_DATA_DIR="$HOME/.loongsuite-pilot"
 OTEL_PLUGIN_INSTALL_URL="https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/opentelemetry-instrumentation-claude/remote-install.sh"
 OTEL_CLAUDE_DIR="$HOME/.cache/opentelemetry.instrumentation.claude"
 OTEL_CODEX_PLUGIN_INSTALL_URL="https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/opentelemetry-instrumentation-codex/remote-install.sh"
 OTEL_CODEX_DIR="$HOME/.cache/opentelemetry.instrumentation.codex"
 
 # Channel presets: release (production) vs test (pre-release)
-_RELEASE_BASE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongcollector/ai-agent-collector"
-_TEST_BASE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongcollector-dev/ai-agent-collector"
+_RELEASE_BASE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite/loongsuite-pilot"
+_TEST_BASE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-dev/loongsuite-pilot"
 
 # ============================================================
 # Parse sub-command
 # ============================================================
 COMMAND=""
-CHANNEL="${AAC_CHANNEL:-release}"
-PACKAGE_URL="${AAC_PACKAGE_URL:-}"
+CHANNEL="${LOONGPILOT_CHANNEL:-release}"
+PACKAGE_URL="${LOONGPILOT_PACKAGE_URL:-}"
 INSTALL_VERSION=""
-SLS_ENDPOINT="https://cn-heyuan.log.aliyuncs.com"
-SLS_PROJECT="ai-coding-devops"
-SLS_LOGSTORE="ai-coding-test"
+SLS_ENDPOINT=""
+SLS_PROJECT=""
+SLS_LOGSTORE=""
 SLS_AK_ID=""
 SLS_AK_SECRET=""
 DATA_DIR="$DEFAULT_DATA_DIR"
@@ -89,8 +89,8 @@ while [[ $# -gt 0 ]]; do
         --log-level=*)        LOG_LEVEL="${1#*=}"; shift ;;
         --user.id)            USER_ID="$2"; shift 2 ;;
         --user.id=*)          USER_ID="${1#*=}"; shift ;;
-        --lang)               export AAC_LANG="$2"; shift 2 ;;
-        --lang=*)             export AAC_LANG="${1#--lang=}"; shift ;;
+        --lang)               export LOONGPILOT_LANG="$2"; shift 2 ;;
+        --lang=*)             export LOONGPILOT_LANG="${1#--lang=}"; shift ;;
         --version)            INSTALL_VERSION="$2"; shift 2 ;;
         --version=*)          INSTALL_VERSION="${1#*=}"; shift ;;
         --channel)            CHANNEL="$2"; shift 2 ;;
@@ -130,7 +130,7 @@ fi
 # Language detection
 # ============================================================
 detect_lang() {
-    if [ -n "${AAC_LANG:-}" ]; then echo "$AAC_LANG"; return; fi
+    if [ -n "${LOONGPILOT_LANG:-}" ]; then echo "$LOONGPILOT_LANG"; return; fi
     for v in "${LANGUAGE:-}" "${LC_ALL:-}" "${LC_MESSAGES:-}" "${LANG:-}"; do
         if echo "$v" | grep -qi "zh"; then echo "zh"; return; fi
     done
@@ -222,7 +222,7 @@ download_and_extract() {
 # ============================================================
 deploy_bootstrap_scripts() {
     local src_dir="$PERMANENT_DIR/scripts"
-    local boot_dir="$HOME/.ai-agent-collector/bin"
+    local boot_dir="$HOME/.loongsuite-pilot/bin"
     mkdir -p "$boot_dir"
     cp -f "$src_dir/collector-daemon.js" "$boot_dir/"
     cp -f "$src_dir/updater-daemon.js"   "$boot_dir/"
@@ -233,7 +233,7 @@ deploy_bootstrap_scripts() {
 # ============================================================
 deploy_package() {
     local src="$1"
-    local cache_dir="$HOME/.ai-agent-collector"
+    local cache_dir="$HOME/.loongsuite-pilot"
     local versions_dir="$cache_dir/versions"
     local current_file="$cache_dir/current"
     local previous_file="$cache_dir/previous"
@@ -294,7 +294,7 @@ deploy_package() {
 # Migrate legacy single-directory layout to versions/ layout
 # ============================================================
 migrate_legacy_layout() {
-    local cache_dir="$HOME/.ai-agent-collector"
+    local cache_dir="$HOME/.loongsuite-pilot"
     local current_file="$cache_dir/current"
     local legacy_dir="$cache_dir/package"
     local versions_dir="$cache_dir/versions"
@@ -395,22 +395,22 @@ fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
 }
 
 # ============================================================
-# Common: install/update the aac service management script
+# Common: install/update the loongpilot service management script
 # ============================================================
-install_aac_command() {
+install_loongpilot_command() {
     msg "==> 安装服务管理脚本..." "==> Installing service management script..."
     local global_bin_dir="$HOME/.local/bin"
     mkdir -p "$global_bin_dir"
 
-    local aac_cmd="$global_bin_dir/aac"
-    cp -f "$PERMANENT_DIR/scripts/aac.sh" "$aac_cmd"
-    chmod +x "$aac_cmd"
-    msg "    ✅ 已安装: $aac_cmd" "    ✅ Installed: $aac_cmd"
+    local loongpilot_cmd="$global_bin_dir/loongpilot"
+    cp -f "$PERMANENT_DIR/scripts/loongpilot.sh" "$loongpilot_cmd"
+    chmod +x "$loongpilot_cmd"
+    msg "    ✅ 已安装: $loongpilot_cmd" "    ✅ Installed: $loongpilot_cmd"
 
     # If /usr/local/bin is writable (root), create a symlink for immediate PATH access
     if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
-        ln -sf "$aac_cmd" /usr/local/bin/aac
-        msg "    ✅ 已链接到 /usr/local/bin/aac" "    ✅ Linked to /usr/local/bin/aac"
+        ln -sf "$loongpilot_cmd" /usr/local/bin/loongpilot
+        msg "    ✅ 已链接到 /usr/local/bin/loongpilot" "    ✅ Linked to /usr/local/bin/loongpilot"
     else
         ensure_path_block() {
             local file="$1"
@@ -420,7 +420,7 @@ install_aac_command() {
             if grep -q '\.local/bin' "$file" 2>/dev/null; then return 0; fi
             cat >> "$file" << 'PATHBLOCK'
 
-# ai-agent-collector: add ~/.local/bin to PATH
+# loongsuite-pilot: add ~/.local/bin to PATH
 export PATH="$HOME/.local/bin:$PATH"
 PATHBLOCK
             msg "    已将 ~/.local/bin 添加到 PATH ($file)" \
@@ -442,7 +442,7 @@ PATHBLOCK
     fi
     echo ""
 
-    # Ensure aac is on PATH for the rest of this script
+    # Ensure loongpilot is on PATH for the rest of this script
     export PATH="$global_bin_dir:$PATH"
 }
 
@@ -450,7 +450,7 @@ PATHBLOCK
 # Common: read VERSION file fields
 # ============================================================
 get_installed_version() {
-    local cache_dir="$HOME/.ai-agent-collector"
+    local cache_dir="$HOME/.loongsuite-pilot"
     local current_file="$cache_dir/current"
     local versions_dir="$cache_dir/versions"
 
@@ -506,7 +506,7 @@ show_version_info() {
 # Common: print summary
 # ============================================================
 # ============================================================
-# Install OTel Claude plugin (log-only mode for aac integration)
+# Install OTel Claude plugin (log-only mode for loongpilot integration)
 # ============================================================
 install_otel_plugin() {
     local OTEL_LOG_DIR="$DATA_DIR/logs/claude-code"
@@ -521,8 +521,8 @@ install_otel_plugin() {
         if curl -fsSL "$OTEL_PLUGIN_INSTALL_URL" | bash; then
             msg "    ✅ OTel 插件安装完成" "    ✅ OTel plugin installed"
         else
-            msg "    ⚠️  OTel 插件安装失败（不影响 aac 其他功能）" \
-                "    ⚠️  OTel plugin installation failed (non-blocking for aac)"
+            msg "    ⚠️  OTel 插件安装失败（不影响 loongpilot 其他功能）" \
+                "    ⚠️  OTel plugin installation failed (non-blocking for loongpilot)"
             return 0
         fi
     fi
@@ -565,8 +565,8 @@ fs.writeFileSync(cfgPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
             if curl -fsSL "$OTEL_CODEX_PLUGIN_INSTALL_URL" | bash; then
                 msg "    ✅ Codex OTel 插件安装完成" "    ✅ Codex OTel plugin installed"
             else
-                msg "    ⚠️  Codex OTel 插件安装失败（不影响 aac 其他功能）" \
-                    "    ⚠️  Codex OTel plugin installation failed (non-blocking for aac)"
+                msg "    ⚠️  Codex OTel 插件安装失败（不影响 loongpilot 其他功能）" \
+                    "    ⚠️  Codex OTel plugin installation failed (non-blocking for loongpilot)"
             fi
         fi
 
@@ -713,8 +713,8 @@ print_summary() {
             "💡 Codex OTel plugin installed"
     fi
     msg "命令:" "Commands:"
-    echo "   aac          # 查看状态 / Status"
-    echo "   aac info     # 版本与配置 / Version & config"
+    echo "   loongpilot          # 查看状态 / Status"
+    echo "   loongpilot info     # 版本与配置 / Version & config"
     echo "============================================================"
 }
 
@@ -740,7 +740,7 @@ cmd_install() {
     fi
 
     # Stop running service before re-install
-    local pid_file="$DATA_DIR/aac.pid"
+    local pid_file="$DATA_DIR/loongpilot.pid"
     if [ -f "$pid_file" ]; then
         local old_pid
         old_pid=$(cat "$pid_file")
@@ -768,21 +768,21 @@ cmd_install() {
     download_and_extract
     deploy_package "$INSTALL_SRC"
     write_config
-    install_aac_command
+    install_loongpilot_command
     install_otel_plugin
 
     msg "==> 启动服务..." "==> Starting service..."
-    if aac start; then
+    if loongpilot start; then
         sleep 2
-        if aac status 2>/dev/null | grep -q "is running"; then
+        if loongpilot status 2>/dev/null | grep -q "is running"; then
             msg "    ✅ 服务已启动" "    ✅ Service started"
         else
-            msg "    ⚠️  服务可能尚未就绪，请检查: aac status" \
-                "    ⚠️  Service may not be ready. Check: aac status"
+            msg "    ⚠️  服务可能尚未就绪，请检查: loongpilot status" \
+                "    ⚠️  Service may not be ready. Check: loongpilot status"
         fi
     else
-        msg "    ⚠️  服务启动失败，请手动运行: aac start" \
-            "    ⚠️  Service failed to start, run manually: aac start"
+        msg "    ⚠️  服务启动失败，请手动运行: loongpilot start" \
+            "    ⚠️  Service failed to start, run manually: loongpilot start"
     fi
     echo ""
 
@@ -803,7 +803,7 @@ cmd_upgrade() {
     # Must have an existing installation
     local old_ver; old_ver=$(get_installed_version)
     if [ -z "$old_ver" ]; then
-        msg "❌ 未检测到已安装的 ai-agent-collector，请先执行 install" \
+        msg "❌ 未检测到已安装的 loongsuite-pilot，请先执行 install" \
             "❌ No existing installation found. Please run install first."
         exit 1
     fi
@@ -832,23 +832,23 @@ cmd_upgrade() {
 
     # Stop the running service
     msg "==> 停止服务..." "==> Stopping service..."
-    if command -v aac &>/dev/null; then
-        aac stop 2>/dev/null || true
-    elif [ -f "$HOME/.local/bin/aac" ]; then
-        "$HOME/.local/bin/aac" stop 2>/dev/null || true
+    if command -v loongpilot &>/dev/null; then
+        loongpilot stop 2>/dev/null || true
+    elif [ -f "$HOME/.local/bin/loongpilot" ]; then
+        "$HOME/.local/bin/loongpilot" stop 2>/dev/null || true
     fi
     echo ""
 
     # Deploy new version to versions/<ver>_<commit>/
     # Old version stays untouched; deploy_package writes current/previous pointers
     deploy_package "$INSTALL_SRC"
-    install_aac_command
+    install_loongpilot_command
 
     # Start the new version
     msg "==> 启动新版本..." "==> Starting new version..."
-    if aac start; then
+    if loongpilot start; then
         sleep 2
-        if aac status 2>/dev/null | grep -q "is running"; then
+        if loongpilot status 2>/dev/null | grep -q "is running"; then
             msg "    ✅ 新版本启动成功" "    ✅ New version started successfully"
             echo ""
 
@@ -865,17 +865,17 @@ cmd_upgrade() {
     msg "⚠️  新版本启动失败，正在回滚..." \
         "⚠️  New version failed to start, rolling back..."
 
-    aac stop 2>/dev/null || true
+    loongpilot stop 2>/dev/null || true
 
-    if command -v aac &>/dev/null; then
-        aac rollback 2>/dev/null || true
+    if command -v loongpilot &>/dev/null; then
+        loongpilot rollback 2>/dev/null || true
     else
-        "$HOME/.local/bin/aac" rollback 2>/dev/null || true
+        "$HOME/.local/bin/loongpilot" rollback 2>/dev/null || true
     fi
 
     msg "❌ 升级失败，已回滚到 v${old_ver:-unknown}" \
         "❌ Upgrade failed, rolled back to v${old_ver:-unknown}"
-    msg "   请检查日志: aac log" "   Check logs: aac log"
+    msg "   请检查日志: loongpilot log" "   Check logs: loongpilot log"
     exit 1
 }
 
@@ -883,7 +883,7 @@ cmd_upgrade() {
 # GC: remove old version directories beyond current + previous
 # ============================================================
 gc_old_versions() {
-    local cache_dir="$HOME/.ai-agent-collector"
+    local cache_dir="$HOME/.loongsuite-pilot"
     local versions_dir="$cache_dir/versions"
     local current_file="$cache_dir/current"
     local previous_file="$cache_dir/previous"
@@ -913,7 +913,7 @@ gc_old_versions() {
 # Remove hook entries injected into tool config files
 # ============================================================
 remove_hook_configs() {
-    local HOOK_MARKER=".ai-agent-collector"
+    local HOOK_MARKER=".loongsuite-pilot"
     local configs=(
         "$HOME/.cursor/hooks.json"
         "$HOME/.qoder/settings.json"
@@ -975,12 +975,12 @@ cmd_uninstall() {
 
     # Stop service (also removes autostart)
     msg "==> 停止服务..." "==> Stopping service..."
-    if command -v aac &>/dev/null; then
-        aac stop 2>/dev/null || true
-    elif [ -f "$HOME/.local/bin/aac" ]; then
-        "$HOME/.local/bin/aac" stop 2>/dev/null || true
+    if command -v loongpilot &>/dev/null; then
+        loongpilot stop 2>/dev/null || true
+    elif [ -f "$HOME/.local/bin/loongpilot" ]; then
+        "$HOME/.local/bin/loongpilot" stop 2>/dev/null || true
     else
-        local pid_file="$DATA_DIR/aac.pid"
+        local pid_file="$DATA_DIR/loongpilot.pid"
         if [ -f "$pid_file" ]; then
             local pid; pid=$(cat "$pid_file")
             kill "$pid" 2>/dev/null || true
@@ -988,11 +988,11 @@ cmd_uninstall() {
             kill -9 "$pid" 2>/dev/null || true
             rm -f "$pid_file"
         fi
-        # Manual autostart cleanup when aac is unavailable
-        local _plist="$HOME/Library/LaunchAgents/com.ai-agent-collector.plist"
-        local _uplist="$HOME/Library/LaunchAgents/com.ai-agent-collector.updater.plist"
-        local _unit="$HOME/.config/systemd/user/ai-agent-collector.service"
-        local _uunit="$HOME/.config/systemd/user/ai-agent-collector-updater.service"
+        # Manual autostart cleanup when loongpilot is unavailable
+        local _plist="$HOME/Library/LaunchAgents/com.loongsuite-pilot.plist"
+        local _uplist="$HOME/Library/LaunchAgents/com.loongsuite-pilot.updater.plist"
+        local _unit="$HOME/.config/systemd/user/loongsuite-pilot.service"
+        local _uunit="$HOME/.config/systemd/user/loongsuite-pilot-updater.service"
         for f in "$_uplist" "$_plist"; do
             if [ -f "$f" ]; then
                 launchctl unload -w "$f" 2>/dev/null || true
@@ -1012,15 +1012,15 @@ cmd_uninstall() {
 
     # Remove package directory
     msg "==> 删除安装目录..." "==> Removing installation..."
-    rm -rf "$HOME/.ai-agent-collector"
-    msg "    ✅ 已删除 $HOME/.ai-agent-collector" \
-        "    ✅ Removed $HOME/.ai-agent-collector"
+    rm -rf "$HOME/.loongsuite-pilot"
+    msg "    ✅ 已删除 $HOME/.loongsuite-pilot" \
+        "    ✅ Removed $HOME/.loongsuite-pilot"
 
-    # Remove aac command
-    msg "==> 删除 aac 命令..." "==> Removing aac command..."
-    rm -f "$HOME/.local/bin/aac"
-    rm -f /usr/local/bin/aac 2>/dev/null || true
-    msg "    ✅ aac 命令已删除" "    ✅ aac command removed"
+    # Remove loongpilot command
+    msg "==> 删除 loongpilot 命令..." "==> Removing loongpilot command..."
+    rm -f "$HOME/.local/bin/loongpilot"
+    rm -f /usr/local/bin/loongpilot 2>/dev/null || true
+    msg "    ✅ loongpilot 命令已删除" "    ✅ loongpilot command removed"
     echo ""
 
     # Remove hook entries from tool configs

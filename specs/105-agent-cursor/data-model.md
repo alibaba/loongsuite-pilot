@@ -108,5 +108,5 @@ valid payload
 在扩展范围内，`src/inputs/cursor-hook/cursor-hook-input.ts` 会读取 `CursorHookOutputRecord`，转换为统一 `AgentActivityEntry` 后进入既有 `InputManager -> Flusher` 通路。
 
 - 输入源 ID: `cursor-hook`
-- 默认监听目录: `~/.ai-agent-collector/logs/cursor-hook/history/`
+- 默认监听目录: `~/.loongsuite-pilot/logs/cursor-hook/history/`
 - 默认输出目标: 复用已启用 flusher（如 SLS、JSONL）

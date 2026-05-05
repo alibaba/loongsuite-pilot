@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * Post-install script for ai-agent-collector
+ * Post-install script for loongsuite-pilot
  * 
  * This script runs automatically after `npm install` and:
- * 1. Copies hook scripts from assets/hooks/ to ~/.ai-agent-collector/hooks/
+ * 1. Copies hook scripts from assets/hooks/ to ~/.loongsuite-pilot/hooks/
  * 2. Sets permissions with least-privilege defaults
  * 
- * This mirrors the approach used by @ali/ai-agent-collector
+ * This mirrors the approach used by @ali/loongsuite-pilot
  */
 
 import * as fs from 'node:fs';
@@ -19,8 +19,8 @@ const __dirname = path.dirname(__filename);
 // Resolve paths
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const HOOKS_SOURCE_DIR = path.join(PROJECT_ROOT, 'assets', 'hooks');
-const AI_AGENT_COLLECTOR_DIR = process.env.AAC_DATA_DIR || path.join(process.env.HOME || '', '.ai-agent-collector');
-const HOOKS_TARGET_DIR = path.join(AI_AGENT_COLLECTOR_DIR, 'hooks');
+const LOONGSUITE_PILOT_DIR = process.env.LOONGPILOT_DATA_DIR || path.join(process.env.HOME || '', '.loongsuite-pilot');
+const HOOKS_TARGET_DIR = path.join(LOONGSUITE_PILOT_DIR, 'hooks');
 
 /**
  * Ensure directory exists
@@ -49,11 +49,11 @@ function installHookFile(sourcePath, targetPath) {
  * Main installation logic
  */
 function main() {
-  console.log('[ai-agent-collector] Installing hook scripts...');
+  console.log('[loongsuite-pilot] Installing hook scripts...');
 
   // Check if source directory exists
   if (!fs.existsSync(HOOKS_SOURCE_DIR)) {
-    console.log('[ai-agent-collector] No hook scripts found, skipping.');
+    console.log('[loongsuite-pilot] No hook scripts found, skipping.');
     return;
   }
 
@@ -66,7 +66,7 @@ function main() {
   );
   
   if (hookFiles.length === 0) {
-    console.log('[ai-agent-collector] No hook scripts to install.');
+    console.log('[loongsuite-pilot] No hook scripts to install.');
     return;
   }
 
@@ -84,14 +84,14 @@ function main() {
     }
   }
 
-  console.log(`[ai-agent-collector] Installed ${installedCount} hook script(s) to ${HOOKS_TARGET_DIR}`);
+  console.log(`[loongsuite-pilot] Installed ${installedCount} hook script(s) to ${HOOKS_TARGET_DIR}`);
 }
 
 // Run installation
 try {
   main();
 } catch (error) {
-  console.error('[ai-agent-collector] Post-install failed:', error.message);
+  console.error('[loongsuite-pilot] Post-install failed:', error.message);
   // Don't fail the npm install, just warn
   process.exit(0);
 }

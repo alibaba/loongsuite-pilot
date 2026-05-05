@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATA_DIR="${AAC_DATA_DIR:-$HOME/.ai-agent-collector}"
-CACHE_DIR="$HOME/.ai-agent-collector"
+DATA_DIR="${LOONGPILOT_DATA_DIR:-$HOME/.loongsuite-pilot}"
+CACHE_DIR="$HOME/.loongsuite-pilot"
 VERSIONS_DIR="$CACHE_DIR/versions"
 CURRENT_FILE="$CACHE_DIR/current"
 PREVIOUS_FILE="$CACHE_DIR/previous"
 BOOTSTRAP_DIR="$CACHE_DIR/bin"
 PACKAGE_DIR="$CACHE_DIR/package"
-PID_FILE="$DATA_DIR/aac.pid"
+PID_FILE="$DATA_DIR/loongpilot.pid"
 LOG_DIR="$DATA_DIR/logs"
-LOG_FILE="$LOG_DIR/aac-service.log"
-UPDATER_LOG_FILE="$LOG_DIR/aac-updater.log"
+LOG_FILE="$LOG_DIR/loongpilot-service.log"
+UPDATER_LOG_FILE="$LOG_DIR/loongpilot-updater.log"
 CONFIG_FILE="$DATA_DIR/config.json"
 
-SERVICE_LABEL="com.ai-agent-collector"
-UPDATER_LABEL="com.ai-agent-collector.updater"
+SERVICE_LABEL="com.loongsuite-pilot"
+UPDATER_LABEL="com.loongsuite-pilot.updater"
 LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
 UPDATER_PLIST="$HOME/Library/LaunchAgents/${UPDATER_LABEL}.plist"
-SYSTEMD_UNIT="ai-agent-collector.service"
-UPDATER_UNIT="ai-agent-collector-updater.service"
+SYSTEMD_UNIT="loongsuite-pilot.service"
+UPDATER_UNIT="loongsuite-pilot-updater.service"
 SYSTEMD_UNIT_DIR="$HOME/.config/systemd/user"
 SYSTEMD_UNIT_PATH="$SYSTEMD_UNIT_DIR/$SYSTEMD_UNIT"
 UPDATER_UNIT_PATH="$SYSTEMD_UNIT_DIR/$UPDATER_UNIT"
-AAC_BIN="$HOME/.local/bin/aac"
+LOONGPILOT_BIN="$HOME/.local/bin/loongpilot"
 
 ensure_dirs() {
     mkdir -p "$LOG_DIR"
@@ -168,7 +168,7 @@ cmd_run_updater() {
 
 cmd_start() {
     if is_running; then
-        echo "✅ ai-agent-collector is already running (PID $(cat "$PID_FILE"))"
+        echo "✅ loongsuite-pilot is already running (PID $(cat "$PID_FILE"))"
         return 0
     fi
 
@@ -179,7 +179,7 @@ cmd_start() {
     if autostart_install 2>/dev/null; then
         sleep 2
         if is_managed_by_launchd || is_managed_by_systemd; then
-            echo "✅ ai-agent-collector started ($(detect_init_system))"
+            echo "✅ loongsuite-pilot started ($(detect_init_system))"
             return 0
         fi
     fi
@@ -195,7 +195,7 @@ cmd_start() {
     nohup node "$entry" >> "$LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$PID_FILE"
-    echo "✅ ai-agent-collector started (PID $pid)"
+    echo "✅ loongsuite-pilot started (PID $pid)"
 }
 
 cmd_stop() {
@@ -223,11 +223,11 @@ cmd_stop() {
     fi
 
     # Kill any remaining orphan processes
-    pkill -f "ai-agent-collector/bin/collector-daemon" 2>/dev/null || true
-    pkill -f "ai-agent-collector/bin/updater-daemon" 2>/dev/null || true
+    pkill -f "loongsuite-pilot/bin/collector-daemon" 2>/dev/null || true
+    pkill -f "loongsuite-pilot/bin/updater-daemon" 2>/dev/null || true
 
     rm -f "$PID_FILE"
-    echo "✅ ai-agent-collector stopped"
+    echo "✅ loongsuite-pilot stopped"
 }
 
 # Restart only the collector (used by updater after deploying a new version)
@@ -235,7 +235,7 @@ cmd_restart_collector() {
     # Stop collector only (leave updater running)
     launchctl stop "$SERVICE_LABEL" 2>/dev/null || true
     systemctl --user stop "$SYSTEMD_UNIT" 2>/dev/null || true
-    pkill -f "ai-agent-collector/bin/collector-daemon" 2>/dev/null || true
+    pkill -f "loongsuite-pilot/bin/collector-daemon" 2>/dev/null || true
 
     if is_running; then
         local pid
@@ -296,9 +296,9 @@ cmd_status() {
     if is_running; then
         local pid
         pid=$(cat "$PID_FILE")
-        echo "✅ ai-agent-collector${ver_info} is running (PID $pid)"
+        echo "✅ loongsuite-pilot${ver_info} is running (PID $pid)"
     else
-        echo "⚪ ai-agent-collector${ver_info} is not running"
+        echo "⚪ loongsuite-pilot${ver_info} is not running"
     fi
     autostart_status
 }
@@ -366,7 +366,7 @@ _write_launchd_plist() {
     <string>${SERVICE_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${AAC_BIN}</string>
+        <string>${LOONGPILOT_BIN}</string>
         <string>run</string>
     </array>
     <key>RunAtLoad</key>
@@ -397,12 +397,12 @@ _write_systemd_unit() {
     ensure_dirs
     cat > "$SYSTEMD_UNIT_PATH" << UNITEOF
 [Unit]
-Description=AI Agent Collector
+Description=LoongSuite Pilot
 After=default.target
 
 [Service]
 Type=simple
-ExecStart=${AAC_BIN} run
+ExecStart=${LOONGPILOT_BIN} run
 Restart=on-failure
 RestartSec=10
 Environment=AGENT_DATA_COLLECTION_CONFIG=${CONFIG_FILE}
@@ -424,7 +424,7 @@ _write_launchd_updater_plist() {
     <string>${UPDATER_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${AAC_BIN}</string>
+        <string>${LOONGPILOT_BIN}</string>
         <string>run-updater</string>
     </array>
     <key>RunAtLoad</key>
@@ -455,12 +455,12 @@ _write_systemd_updater_unit() {
     ensure_dirs
     cat > "$UPDATER_UNIT_PATH" << UNITEOF
 [Unit]
-Description=AI Agent Collector Auto-Updater
+Description=LoongSuite Pilot Auto-Updater
 After=default.target
 
 [Service]
 Type=simple
-ExecStart=${AAC_BIN} run-updater
+ExecStart=${LOONGPILOT_BIN} run-updater
 Restart=on-failure
 RestartSec=60
 Environment=AGENT_DATA_COLLECTION_CONFIG=${CONFIG_FILE}
@@ -546,7 +546,7 @@ autostart_status() {
 }
 
 cmd_help() {
-    echo "Usage: aac <command>"
+    echo "Usage: loongpilot <command>"
     echo ""
     echo "Commands:"
     echo "  start       Start the collector service"

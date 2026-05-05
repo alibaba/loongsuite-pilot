@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * Lightweight Cursor hook processor for ai-agent-collector.
+ * Lightweight Cursor hook processor for loongsuite-pilot.
  *
  * Reads Cursor hook JSON from stdin, supplements collector-owned fields, and
  * appends the raw-ish hook record to:
- *   ~/.ai-agent-collector/logs/cursor-hook/history/cursor-YYYY-MM-DD.jsonl
+ *   ~/.loongsuite-pilot/logs/cursor-hook/history/cursor-YYYY-MM-DD.jsonl
  *
  * Semantic event_t mapping belongs in CursorHookInput, not in this processor.
  */
@@ -15,9 +15,9 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 
 function resolveDataDir() {
-  const configured = process.env.AAC_DATA_DIR || process.env.AI_AGENT_COLLECTOR_DATA_DIR;
+  const configured = process.env.LOONGPILOT_DATA_DIR || process.env.LOONGSUITE_PILOT_DATA_DIR;
   if (configured) return configured;
-  return path.join(os.homedir(), '.ai-agent-collector');
+  return path.join(os.homedir(), '.loongsuite-pilot');
 }
 
 function toIsoUtc(date) {
@@ -66,7 +66,7 @@ async function appendErrorJsonl(dataDir, now, fields) {
   }) || { time: toIsoUtc(now), clientType: 'CursorHook', stage: 'unknown' };
   const candidates = [
     path.join(dataDir, 'logs', 'cursor-hook', 'errors', `cursor-error-${day}.jsonl`),
-    path.join(os.tmpdir(), 'ai-agent-collector', 'cursor-hook', 'errors', `cursor-error-${day}.jsonl`),
+    path.join(os.tmpdir(), 'loongsuite-pilot', 'cursor-hook', 'errors', `cursor-error-${day}.jsonl`),
   ];
   for (const filePath of candidates) {
     try {

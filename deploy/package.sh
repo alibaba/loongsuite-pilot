@@ -2,7 +2,7 @@
 # package.sh — Build the project and create a distributable .tar.gz package
 #
 # Usage:
-#   bash deploy/package.sh                       # default output: ./ai-agent-collector.tar.gz
+#   bash deploy/package.sh                       # default output: ./loongsuite-pilot.tar.gz
 #   bash deploy/package.sh -o /tmp/out.tar.gz    # custom output path
 #   bash deploy/package.sh --skip-build          # skip tsc, use existing dist/
 
@@ -10,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PACKAGE_NAME="ai-agent-collector"
+PACKAGE_NAME="loongsuite-pilot"
 OUTPUT_PATH=""
 SKIP_BUILD=0
 

@@ -1,8 +1,8 @@
 ## Context
 
-Qoder IDE and Qoder CLI share `.qoder/settings.json` hook configuration. The installed Stop hook currently invokes `qoder-aac-hook.sh qoder-cli`, but that argument only controls the collector's local history directory and file prefix; it cannot reliably identify whether the raw transcript row came from Qoder IDE or Qoder CLI.
+Qoder IDE and Qoder CLI share `.qoder/settings.json` hook configuration. The installed Stop hook currently invokes `qoder-loongpilot-hook.sh qoder-cli`, but that argument only controls the collector's local history directory and file prefix; it cannot reliably identify whether the raw transcript row came from Qoder IDE or Qoder CLI.
 
-The current `hook-processor.mjs` reads incremental transcript lines and copies them into `~/.ai-agent-collector/logs/qoder-cli/history/qoder-cli-YYYY-MM-DD.jsonl`. The current `QoderCliInput` then consumes those rows, but it treats the stream as CLI-only and uses legacy `buildAgentActivityEntry` options. Observed transcript fixtures show at least two schemas:
+The current `hook-processor.mjs` reads incremental transcript lines and copies them into `~/.loongsuite-pilot/logs/qoder-cli/history/qoder-cli-YYYY-MM-DD.jsonl`. The current `QoderCliInput` then consumes those rows, but it treats the stream as CLI-only and uses legacy `buildAgentActivityEntry` options. Observed transcript fixtures show at least two schemas:
 
 - CLI-style rows: include `entrypoint: "cli"`, `promptId`, `parentUuid`, `permissionMode`, `userType`, and Claude-like content blocks.
 - IDE-style rows: include `session_meta` / `progress` rows and message content blocks without `entrypoint`.

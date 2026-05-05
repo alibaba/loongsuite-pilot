@@ -5,7 +5,7 @@
 
 ## Summary
 
-平台基础设施覆盖 AI Agent Collector 的全部基础层：输入源采集框架（5 种基类）、持久化层（StateStore + SnapshotStore）、归一化层（entry-builder + 序列化 + 脱敏）、数据输出（JSONL/SLS/HTTP + MultiFlusher）、核心编排（Orchestrator + Discovery + Config + InputManager）。所有模块已有完整的生产代码实现，输入源框架和持久化层已有充分的单元测试和集成测试覆盖（174 个测试，覆盖率 85%+），下一步需要补充归一化层、数据输出和核心编排层的测试，以达到宪法要求的 80% 全局覆盖率。
+平台基础设施覆盖 LoongSuite Pilot 的全部基础层：输入源采集框架（5 种基类）、持久化层（StateStore + SnapshotStore）、归一化层（entry-builder + 序列化 + 脱敏）、数据输出（JSONL/SLS/HTTP + MultiFlusher）、核心编排（Orchestrator + Discovery + Config + InputManager）。所有模块已有完整的生产代码实现，输入源框架和持久化层已有充分的单元测试和集成测试覆盖（174 个测试，覆盖率 85%+），下一步需要补充归一化层、数据输出和核心编排层的测试，以达到宪法要求的 80% 全局覆盖率。
 
 ## Technical Context
 

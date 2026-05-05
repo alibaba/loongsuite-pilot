@@ -13,7 +13,7 @@ type QoderVariant = 'qoder-cli' | 'qoder';
  * Qoder transcript hook input.
  *
  * Reads rows from the compatibility history channel
- * ~/.ai-agent-collector/logs/qoder-cli/history/ and maps both Qoder CLI and
+ * ~/.loongsuite-pilot/logs/qoder-cli/history/ and maps both Qoder CLI and
  * Qoder IDE transcript row shapes to standard AgentActivityEntry fields.
  */
 export class QoderCliInput extends BaseHookInput {
@@ -23,7 +23,7 @@ export class QoderCliInput extends BaseHookInput {
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
       stateStore: opts!.stateStore,
-      logDir: opts?.logDir ?? resolveHome('~/.ai-agent-collector/logs/qoder-cli/history'),
+      logDir: opts?.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder-cli/history'),
       logPrefix: opts?.logPrefix ?? 'qoder-cli',
       pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
     });
@@ -149,7 +149,7 @@ function buildPostToolUseEntry(record: Record<string, unknown>): AgentActivityEn
       qoder_variant: 'qoder-cli',
       raw_type: eventType,
       cwd: data.cwd,
-      aac_pre_file_exists: data.aac_pre_file_exists,
+      loongpilot_pre_file_exists: data.loongpilot_pre_file_exists,
       file_path: getStringValue(toolInput, 'file_path') ?? getStringValue(data, 'file_path'),
     }),
   });

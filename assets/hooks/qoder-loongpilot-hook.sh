@@ -5,7 +5,7 @@ set -euo pipefail
 # Qoder Hook Script — delegates to shared hook-processor.mjs
 # ============================================================================
 # Usage:
-#   qoder-aac-hook.sh [agent-id]
+#   qoder-loongpilot-hook.sh [agent-id]
 #
 #   agent-id  Optional. Defaults to "qoder-cli".
 #             Controls the log subdirectory and history file prefix.
@@ -13,7 +13,7 @@ set -euo pipefail
 #
 # Installation:
 #   HookManager copies this script + hook-processor.mjs to
-#   ~/.ai-agent-collector/hooks/ and injects the command into
+#   ~/.loongsuite-pilot/hooks/ and injects the command into
 #   the tool's settings.json (e.g. ~/.qoder/settings.json,
 #   ~/.qoderwork/settings.json)
 # ============================================================================
@@ -48,7 +48,7 @@ else
 fi
 
 if [[ -z "$NODE_BIN" ]]; then
-  echo "[ai-agent-collector] node runtime not found" >&2
+  echo "[loongsuite-pilot] node runtime not found" >&2
   exit 0
 fi
 

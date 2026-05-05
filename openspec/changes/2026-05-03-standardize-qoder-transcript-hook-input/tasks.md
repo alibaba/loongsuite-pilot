@@ -23,7 +23,7 @@
 
 ## 4. Hook Processor Compatibility
 
-- [x] 4.1 Confirm `qoder-aac-hook.sh` remains fail-open and can still be invoked without relying on the argument as product identity.
+- [x] 4.1 Confirm `qoder-loongpilot-hook.sh` remains fail-open and can still be invoked without relying on the argument as product identity.
 - [x] 4.2 Keep `hook-processor.mjs` as a transcript forwarder and avoid semantic `AgentActivityEntry` mapping in the processor.
 - [x] 4.3 Add or update integration coverage proving processor-forwarded history rows are consumable after mapper changes.
 

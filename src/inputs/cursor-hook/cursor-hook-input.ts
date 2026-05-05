@@ -23,16 +23,16 @@ export class CursorHookInput extends BaseHookInput {
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
       stateStore: opts!.stateStore,
-      logDir: opts?.logDir ?? resolveHome('~/.ai-agent-collector/logs/cursor-hook/history'),
+      logDir: opts?.logDir ?? resolveHome('~/.loongsuite-pilot/logs/cursor-hook/history'),
       logPrefix: opts?.logPrefix ?? 'cursor',
       pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
     });
   }
   static async checkAvailability(): Promise<boolean> {
-    return directoryExists(resolveHome('~/.ai-agent-collector/logs/cursor-hook/history'));
+    return directoryExists(resolveHome('~/.loongsuite-pilot/logs/cursor-hook/history'));
   }
   static getWatchPaths(): string[] {
-    return [resolveHome('~/.ai-agent-collector/logs/cursor-hook/history')];
+    return [resolveHome('~/.loongsuite-pilot/logs/cursor-hook/history')];
   }
   protected async transformRecord(
     record: Record<string, unknown>,

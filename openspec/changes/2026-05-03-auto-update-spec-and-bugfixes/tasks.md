@@ -41,7 +41,7 @@
   - File: `src/updater/updater.ts`
   - Added `UpdaterPaths` interface and `buildPaths(baseDir)` factory
   - Constructor signature: `new Updater(config, baseDir?)`
-  - All internal paths (`cacheDir`, `versionsDir`, `currentFile`, `previousFile`, `bootstrapDir`) derived from `baseDir` when provided; defaults to `~/.ai-agent-collector` when omitted
+  - All internal paths (`cacheDir`, `versionsDir`, `currentFile`, `previousFile`, `bootstrapDir`) derived from `baseDir` when provided; defaults to `~/.loongsuite-pilot` when omitted
 
 - [x] Task 9: Write pure function tests
   - File: `tests/unit/updater/compare-versions.test.ts` (17 cases)
