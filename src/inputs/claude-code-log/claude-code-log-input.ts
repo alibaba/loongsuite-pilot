@@ -81,7 +81,6 @@ export class ClaudeCodeLogInput extends BaseHookInput {
       'turn.id': getStringValue(record, 'turn.id'),
       'step.id': getStringValue(record, 'step.id'),
       'agent.type': ClientType.ClaudeCliHook,
-      'agent.name': getStringValue(record, 'agent.name'),
       'message.role': getStringValue(record, 'message.role'),
       'provider.name': getStringValue(record, 'provider.name'),
       'request.model': getStringValue(record, 'request.model'),
