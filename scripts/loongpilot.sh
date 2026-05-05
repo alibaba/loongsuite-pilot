@@ -3,6 +3,7 @@ set -euo pipefail
 
 DATA_DIR="${LOONGPILOT_DATA_DIR:-$HOME/.loongsuite-pilot}"
 CACHE_DIR="$HOME/.loongsuite-pilot"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSIONS_DIR="$CACHE_DIR/versions"
 CURRENT_FILE="$CACHE_DIR/current"
 PREVIOUS_FILE="$CACHE_DIR/previous"
@@ -12,7 +13,12 @@ PID_FILE="$DATA_DIR/loongpilot.pid"
 LOG_DIR="$DATA_DIR/logs"
 LOG_FILE="$LOG_DIR/loongpilot-service.log"
 UPDATER_LOG_FILE="$LOG_DIR/loongpilot-updater.log"
+MONITOR_LOG_FILE="$LOG_DIR/loongpilot-monitor-process.log"
+DASHBOARD_LOG_FILE="$LOG_DIR/loongpilot-dashboard.log"
 CONFIG_FILE="$DATA_DIR/config.json"
+MONITOR_PID_FILE="$DATA_DIR/loongpilot-monitor.pid"
+DASHBOARD_PID_FILE="$DATA_DIR/loongpilot-dashboard.pid"
+MONITOR_DATA_DIR="$LOG_DIR/process-monitor"
 
 SERVICE_LABEL="com.loongsuite-pilot"
 UPDATER_LABEL="com.loongsuite-pilot.updater"
@@ -51,6 +57,37 @@ is_running() {
         rm -f "$PID_FILE"
     fi
     return 1
+}
+
+is_pid_file_running() {
+    local pid_file="$1"
+    if [ -f "$pid_file" ]; then
+        local pid
+        pid=$(cat "$pid_file" 2>/dev/null || true)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        rm -f "$pid_file"
+    fi
+    return 1
+}
+
+stop_pid_file() {
+    local pid_file="$1"
+    if is_pid_file_running "$pid_file"; then
+        local pid
+        pid=$(cat "$pid_file")
+        kill "$pid" 2>/dev/null || true
+        local count=0
+        while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
+            sleep 1
+            count=$((count + 1))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    fi
+    rm -f "$pid_file"
 }
 
 resolve_node() {
@@ -120,6 +157,19 @@ resolve_previous_version() {
             return 0
         fi
     fi
+    return 1
+}
+
+resolve_script() {
+    local script_name="$1"
+    local version_dir
+    version_dir=$(resolve_current_version 2>/dev/null) || true
+    for base in "$version_dir" "$PACKAGE_DIR" "$(dirname "$SCRIPT_DIR")"; do
+        if [ -n "$base" ] && [ -f "$base/scripts/$script_name" ]; then
+            echo "$base/scripts/$script_name"
+            return 0
+        fi
+    done
     return 1
 }
 
@@ -199,6 +249,7 @@ cmd_start() {
 }
 
 cmd_stop() {
+    cmd_monitor_stop >/dev/null 2>&1 || true
     autostart_remove 2>/dev/null || true
 
     # Stop launchd/systemd managed services
@@ -228,6 +279,72 @@ cmd_stop() {
 
     rm -f "$PID_FILE"
     echo "✅ loongsuite-pilot stopped"
+}
+
+cmd_process_monitor_start() {
+    if is_pid_file_running "$MONITOR_PID_FILE"; then
+        echo "✅ loongpilot process monitor is already running (PID $(cat "$MONITOR_PID_FILE"))"
+        return 0
+    fi
+
+    ensure_dirs
+    local script
+    script=$(resolve_script "monitor-loongpilot.sh") || {
+        echo "❌ monitor script missing"
+        exit 1
+    }
+
+    nohup bash "$script" >> "$MONITOR_LOG_FILE" 2>&1 &
+    echo "$!" > "$MONITOR_PID_FILE"
+    echo "✅ loongpilot process monitor started (PID $!)"
+}
+
+cmd_process_monitor_stop() {
+    stop_pid_file "$MONITOR_PID_FILE"
+    pkill -f "monitor-loongpilot\.sh" 2>/dev/null || true
+    echo "✅ loongpilot process monitor stopped"
+}
+
+cmd_dashboard_start() {
+    if is_pid_file_running "$DASHBOARD_PID_FILE"; then
+        echo "✅ loongpilot dashboard is already running (PID $(cat "$DASHBOARD_PID_FILE"))"
+        return 0
+    fi
+
+    ensure_dirs
+    local script node_bin
+    script=$(resolve_script "serve-loongpilot-monitor.mjs") || {
+        echo "❌ dashboard script missing"
+        exit 1
+    }
+    node_bin=$(resolve_node) || {
+        echo "❌ node runtime not found" >&2
+        exit 1
+    }
+
+    nohup "$node_bin" "$script" >> "$DASHBOARD_LOG_FILE" 2>&1 &
+    echo "$!" > "$DASHBOARD_PID_FILE"
+    echo "✅ loongpilot dashboard started (PID $!)"
+    echo "   open http://127.0.0.1:${LOONGPILOT_MONITOR_PORT:-8765}/"
+}
+
+cmd_dashboard_stop() {
+    stop_pid_file "$DASHBOARD_PID_FILE"
+    pkill -f "serve-loongpilot-monitor\.mjs" 2>/dev/null || true
+    echo "✅ loongpilot dashboard stopped"
+}
+
+cmd_monitor_start() {
+    cmd_process_monitor_start
+    cmd_dashboard_start
+    echo "✅ loongpilot monitor is running"
+    echo "   dashboard: http://127.0.0.1:${LOONGPILOT_MONITOR_PORT:-8765}/"
+}
+
+cmd_monitor_stop() {
+    cmd_dashboard_stop
+    cmd_process_monitor_stop
+    echo "✅ loongpilot monitor stopped"
 }
 
 # Restart only the collector (used by updater after deploying a new version)
@@ -299,6 +416,17 @@ cmd_status() {
         echo "✅ loongsuite-pilot${ver_info} is running (PID $pid)"
     else
         echo "⚪ loongsuite-pilot${ver_info} is not running"
+    fi
+    local sampler_pid=""
+    local dashboard_pid=""
+    if is_pid_file_running "$MONITOR_PID_FILE"; then sampler_pid=$(cat "$MONITOR_PID_FILE"); fi
+    if is_pid_file_running "$DASHBOARD_PID_FILE"; then dashboard_pid=$(cat "$DASHBOARD_PID_FILE"); fi
+    if [ -n "$sampler_pid" ] && [ -n "$dashboard_pid" ]; then
+        echo "   monitor: running (sampler PID $sampler_pid, dashboard PID $dashboard_pid)"
+    elif [ -n "$sampler_pid" ] || [ -n "$dashboard_pid" ]; then
+        echo "   monitor: partially running (sampler PID ${sampler_pid:-stopped}, dashboard PID ${dashboard_pid:-stopped})"
+    else
+        echo "   monitor: stopped"
     fi
     autostart_status
 }
@@ -554,6 +682,8 @@ cmd_help() {
     echo "  restart     Restart the collector service"
     echo "  status      Show service status (default)"
     echo "  info        Show version and config info"
+    echo "  monitor-start     Start process resource monitor"
+    echo "  monitor-stop      Stop process resource monitor"
     echo "  rollback    Roll back to the previous version"
     echo "  help        Show this help message"
 }
@@ -566,6 +696,8 @@ case "${1:-status}" in
     restart)     cmd_restart ;;
     status)      cmd_status ;;
     info)        cmd_info ;;
+    monitor-start)       cmd_monitor_start ;;
+    monitor-stop)        cmd_monitor_stop ;;
     rollback)            cmd_rollback ;;
     restart-collector)   cmd_restart_collector ;;
     run)                 cmd_run ;;

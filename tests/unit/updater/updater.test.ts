@@ -414,6 +414,45 @@ describe('Updater', () => {
       );
       expect(rmCalls.length).toBeGreaterThanOrEqual(1);
     });
+
+    it('does not start monitor when monitor was not already running', async () => {
+      setupForDownload();
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      const loongpilotCalls = mockExecFile.mock.calls.filter(
+        ([cmd]: [string]) => String(cmd).includes('loongpilot'),
+      );
+      expect(loongpilotCalls.map(([, args]) => args)).toContainEqual(['restart-collector']);
+      expect(loongpilotCalls.map(([, args]) => args)).not.toContainEqual(['monitor-start']);
+    });
+
+    it('restarts monitor after update when monitor was already running', async () => {
+      setupForDownload();
+      const realKill = process.kill;
+      const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
+        if (pid === 12345 && signal === 0) return true;
+        throw new Error('not running');
+      }) as typeof process.kill);
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (filePath.endsWith('/loongpilot-monitor.pid')) return Promise.resolve('12345\n');
+        if (filePath.endsWith('/loongpilot-dashboard.pid')) return Promise.reject(new Error('ENOENT'));
+        return Promise.reject(new Error('ENOENT'));
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      const loongpilotCalls = mockExecFile.mock.calls
+        .filter(([cmd]: [string]) => String(cmd).includes('loongpilot'))
+        .map(([, args]) => args);
+      expect(loongpilotCalls).toContainEqual(['restart-collector']);
+      expect(loongpilotCalls).toContainEqual(['monitor-stop']);
+      expect(loongpilotCalls).toContainEqual(['monitor-start']);
+
+      killSpy.mockRestore();
+      process.kill = realKill;
+    });
   });
 
   // ─── check(): reentry protection ─────────────────────

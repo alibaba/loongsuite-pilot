@@ -1,6 +1,6 @@
 {
   "name": "loongsuite-pilot",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "type": "module",
   "description": "Multi-agent AI coding data collection platform",
   "main": "dist/index.js",
@@ -11,6 +11,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
+    "monitor:dashboard": "node scripts/serve-loongpilot-monitor.mjs",
     "perf:cursor-hook": "node tests/performance/cursor-hook-processor.perf.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

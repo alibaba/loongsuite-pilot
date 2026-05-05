@@ -1,3 +1,74 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AgentDiscoveryService } from '../../../src/core/agent-discovery-service.js';
+import type { AgentDetectionEntry } from '../../../src/types/index.js';
+
+vi.mock('node:fs', async () => {
+  const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+  return {
+    ...actual,
+    watch: vi.fn(() => {
+      throw new Error('watch path unavailable in test');
+    }),
+  };
+});
+
+vi.mock('../../../src/utils/logger.js', () => ({
+  createLogger: () => ({
+    info: vi.fn(),
+    debug: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
+describe('AgentDiscoveryService', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
+  it('detects Claude Code availability transitions at runtime', async () => {
+    vi.useFakeTimers();
+    vi.stubEnv('LOONGPILOT_DISCOVERY_INTERVAL_MS', '1000');
+
+    let available = false;
+    const start = vi.fn().mockResolvedValue(undefined);
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const events: string[] = [];
+    const entry: AgentDetectionEntry = {
+      id: 'claude-code-log',
+      type: 'hook-jsonl',
+      watchPaths: ['/tmp/not-installed-claude-code'],
+      enabled: () => true,
+      isAvailable: async () => available,
+      start,
+      stop,
+      pollIntervalMs: 1000,
+    };
+
+    const discovery = new AgentDiscoveryService([entry]);
+    discovery.on('agent:started', id => events.push(`started:${id}`));
+    discovery.on('agent:stopped', id => events.push(`stopped:${id}`));
+
+    await discovery.start();
+    expect(discovery.getStates()['claude-code-log']).toBe('idle');
+    expect(start).not.toHaveBeenCalled();
+
+    available = true;
+    await discovery.refresh('test-installed');
+    expect(discovery.getStates()['claude-code-log']).toBe('running');
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(events).toContain('started:claude-code-log');
+
+    available = false;
+    await discovery.refresh('test-removed');
+    expect(discovery.getStates()['claude-code-log']).toBe('idle');
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(events).toContain('stopped:claude-code-log');
+
+    await discovery.stop();
+  });
+});
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AgentDetectionEntry } from '../../../src/types/index.js';
 
