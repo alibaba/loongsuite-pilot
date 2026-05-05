@@ -510,24 +510,91 @@ show_version_info() {
 # Install OTel Claude plugin (log-only mode for loongsuite-pilot integration)
 # ============================================================
 install_otel_plugin() {
-    local OTEL_LOG_DIR="$DATA_DIR/logs/claude-code"
+    # Prevent NODE_OPTIONS --require intercept.js from breaking npm/node commands
+    # (inherited from Claude Code parent process via the alias)
+    unset NODE_OPTIONS 2>/dev/null || true
 
-    msg "==> 安装 Claude Code OTel 插件 (log-only 模式)..." \
-        "==> Installing Claude Code OTel plugin (log-only mode)..."
+    # Helper: install a single plugin from bundled tarball (or remote fallback)
+    _install_plugin() {
+        local plugin_label="$1"
+        local tarball_name="$2"
+        local dest_dir="$3"
+        local hook_cmd="$4"
+        local marker_file="$5"
+        local remote_url="$6"
+        local hook_install_args="$7"
 
-    if [ -f "$OTEL_CLAUDE_DIR/package/src/cli.js" ]; then
-        msg "    ✅ OTel 插件已存在，跳过下载安装" \
-            "    ✅ OTel plugin already installed, skipping download"
-    else
-        if curl -fsSL "$OTEL_PLUGIN_INSTALL_URL" | bash; then
-            msg "    ✅ OTel 插件安装完成" "    ✅ OTel plugin installed"
-        else
-            msg "    ⚠️  OTel 插件安装失败（不影响 loongsuite-pilot 其他功能）" \
-                "    ⚠️  OTel plugin installation failed (non-blocking for loongsuite-pilot)"
+        if [ -f "$marker_file" ]; then
+            msg "  · $plugin_label 已存在，跳过" \
+                "  · $plugin_label already installed, skipping"
             return 0
         fi
+
+        local tarball_path="$PERMANENT_DIR/plugins/$tarball_name"
+
+        if [ -f "$tarball_path" ]; then
+            mkdir -p "$dest_dir"
+            if tar --warning=no-unknown-keyword -xzf "$tarball_path" -C "$dest_dir" 2>/dev/null; then :
+            else tar -xzf "$tarball_path" -C "$dest_dir"; fi
+
+            cd "$dest_dir"
+            if ! npm install --silent 2>/tmp/otel-plugin-npm-err.log; then
+                msg "  ⚠️  npm install 失败（不影响其他功能）" \
+                    "  ⚠️  npm install failed (non-blocking)"
+                return 0
+            fi
+
+            if npm install -g . --silent 2>/dev/null; then :
+            elif npm link --silent 2>/dev/null; then :
+            else
+                local local_bin="$HOME/.local/bin"
+                mkdir -p "$local_bin"
+                cat > "$local_bin/$hook_cmd" << WRAPPER
+#!/usr/bin/env bash
+exec node "$dest_dir/bin/$hook_cmd" "\$@"
+WRAPPER
+                chmod +x "$local_bin/$hook_cmd"
+            fi
+
+            if [ -n "$hook_install_args" ]; then
+                "$hook_cmd" install $hook_install_args 2>/dev/null || true
+            else
+                "$hook_cmd" install 2>/dev/null || true
+            fi
+
+        elif [ -n "$remote_url" ]; then
+            msg "  · 本地 tarball 不存在，尝试远程安装..." \
+                "  · Local tarball not found, trying remote install..."
+            if curl -fsSL "$remote_url" | bash 2>/dev/null; then :
+            else
+                msg "  ⚠️  安装失败（不影响其他功能）" \
+                    "  ⚠️  Installation failed (non-blocking)"
+            fi
+        else
+            msg "  ⚠️  tarball 不可用，跳过" \
+                "  ⚠️  Tarball not available, skipping"
+        fi
+    }
+
+    # ─── Claude Code plugin ───
+    msg "==> 安装 Claude Code 插件..." \
+        "==> Installing Claude Code plugin..."
+
+    _install_plugin "Claude Code 插件" "otel-claude-hook.tar.gz" \
+        "$OTEL_CLAUDE_DIR/package" "otel-claude-hook" \
+        "$OTEL_CLAUDE_DIR/package/src/cli.js" \
+        "$OTEL_PLUGIN_INSTALL_URL" "--user"
+
+    # Claude extra: copy intercept.js + setup alias
+    if [ -f "$OTEL_CLAUDE_DIR/package/src/intercept.js" ]; then
+        cp "$OTEL_CLAUDE_DIR/package/src/intercept.js" "$OTEL_CLAUDE_DIR/intercept.js"
+    fi
+    if [ -f "$OTEL_CLAUDE_DIR/package/scripts/setup-alias.sh" ]; then
+        bash "$OTEL_CLAUDE_DIR/package/scripts/setup-alias.sh" >/dev/null 2>&1 || true
+        msg "  · claude 别名已配置" "  · claude alias configured"
     fi
 
+    local OTEL_LOG_DIR="$DATA_DIR/logs/claude-code"
     local otel_config="$HOME/.claude/otel-config.json"
     mkdir -p "$(dirname "$otel_config")"
 
@@ -546,30 +613,22 @@ if (existing.log_filename_format === undefined) existing.log_filename_format = '
 fs.writeFileSync(cfgPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
 " "$otel_config" "$OTEL_LOG_DIR"
 
-    msg "    ✅ otel-config.json 已写入 (log_enabled=true, log_filename_format=hook)" \
-        "    ✅ otel-config.json written (log_enabled=true, log_filename_format=hook)"
-
+    msg "  · otel-config.json 已写入" "  · otel-config.json written"
     mkdir -p "$OTEL_LOG_DIR"
+    msg "  ✅ Claude Code 插件安装完成" "  ✅ Claude Code plugin installed"
     echo ""
 
-    # --- Codex OTel plugin (CLI or Desktop — both create ~/.codex) ---
+    # ─── Codex plugin (conditional) ───
     if [ -d "$HOME/.codex" ]; then
         local CODEX_LOG_DIR="$DATA_DIR/logs/codex"
 
-        msg "==> 安装 Codex OTel 插件 (log-only 模式)..." \
-            "==> Installing Codex OTel plugin (log-only mode)..."
+        msg "==> 安装 Codex 插件..." \
+            "==> Installing Codex plugin..."
 
-        if [ -f "$OTEL_CODEX_DIR/package/dist/index.js" ]; then
-            msg "    ✅ Codex OTel 插件已存在，跳过下载安装" \
-                "    ✅ Codex OTel plugin already installed, skipping download"
-        else
-            if curl -fsSL "$OTEL_CODEX_PLUGIN_INSTALL_URL" | bash; then
-                msg "    ✅ Codex OTel 插件安装完成" "    ✅ Codex OTel plugin installed"
-            else
-                msg "    ⚠️  Codex OTel 插件安装失败（不影响 loongsuite-pilot 其他功能）" \
-                    "    ⚠️  Codex OTel plugin installation failed (non-blocking for loongsuite-pilot)"
-            fi
-        fi
+        _install_plugin "Codex 插件" "otel-codex-hook.tar.gz" \
+            "$OTEL_CODEX_DIR/package" "otel-codex-hook" \
+            "$OTEL_CODEX_DIR/package/dist/index.js" \
+            "$OTEL_CODEX_PLUGIN_INSTALL_URL" ""
 
         local codex_otel_config="$HOME/.codex/otel-config.json"
         mkdir -p "$(dirname "$codex_otel_config")"
@@ -589,14 +648,13 @@ if (existing.log_filename_format === undefined) existing.log_filename_format = '
 fs.writeFileSync(cfgPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
 " "$codex_otel_config" "$CODEX_LOG_DIR"
 
-        msg "    ✅ ~/.codex/otel-config.json 已写入 (log_enabled=true, log_filename_format=hook)" \
-            "    ✅ ~/.codex/otel-config.json written (log_enabled=true, log_filename_format=hook)"
-
+        msg "  · otel-config.json 已写入" "  · otel-config.json written"
         mkdir -p "$CODEX_LOG_DIR"
+        msg "  ✅ Codex 插件安装完成" "  ✅ Codex plugin installed"
         echo ""
     else
-        msg "    ℹ️  未检测到 Codex（~/.codex 目录不存在），跳过插件安装" \
-            "    ℹ️  Codex not detected (~/.codex not found), skipping plugin installation"
+        msg "  · 未检测到 Codex，跳过" \
+            "  · Codex not detected, skipping"
         echo ""
     fi
 }
@@ -605,10 +663,14 @@ fs.writeFileSync(cfgPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
 # Remove OTel Claude plugin
 # ============================================================
 remove_otel_plugin() {
+    # Prevent NODE_OPTIONS --require intercept.js from breaking node commands
+    # after the Claude plugin directory (and intercept.js) is deleted
+    unset NODE_OPTIONS 2>/dev/null || true
+
     if [ -f "$OTEL_CLAUDE_DIR/package/scripts/uninstall.sh" ]; then
         bash "$OTEL_CLAUDE_DIR/package/scripts/uninstall.sh" 2>/dev/null || true
-        msg "    ✅ OTel 插件 hooks 和 alias 已清理" \
-            "    ✅ OTel plugin hooks and alias cleaned"
+        msg "    ✅ Claude Code 插件 hooks 和 alias 已清理" \
+            "    ✅ Claude Code plugin hooks and alias cleaned"
     else
         for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.bash_profile"; do
             [ -f "$rc" ] || continue
@@ -639,19 +701,54 @@ try {
     fi
 
     if [ -d "$OTEL_CLAUDE_DIR" ]; then
-        find "$OTEL_CLAUDE_DIR" -maxdepth 1 \
-          ! -name sessions \
-          ! -name "$(basename "$OTEL_CLAUDE_DIR")" \
-          -exec rm -rf {} + 2>/dev/null || true
-        msg "    ✅ 插件文件已删除（sessions/ 已保留）" \
-            "    ✅ Plugin files removed (sessions/ preserved)"
+        if [ "$PURGE" -eq 1 ]; then
+            rm -rf "$OTEL_CLAUDE_DIR"
+            msg "    ✅ 插件目录已完全删除 (--purge): $OTEL_CLAUDE_DIR" \
+                "    ✅ Plugin directory fully removed (--purge): $OTEL_CLAUDE_DIR"
+        else
+            find "$OTEL_CLAUDE_DIR" -maxdepth 1 \
+              ! -name sessions \
+              ! -name "$(basename "$OTEL_CLAUDE_DIR")" \
+              -exec rm -rf {} + 2>/dev/null || true
+            msg "    ✅ 插件文件已删除（sessions/ 已保留）" \
+                "    ✅ Plugin files removed (sessions/ preserved)"
+        fi
     fi
 
     # --- Codex OTel plugin cleanup ---
     if [ -f "$OTEL_CODEX_DIR/package/scripts/uninstall.sh" ]; then
         bash "$OTEL_CODEX_DIR/package/scripts/uninstall.sh" 2>/dev/null || true
-        msg "    ✅ Codex OTel 插件 hooks 已清理" \
-            "    ✅ Codex OTel plugin hooks cleaned"
+        msg "    ✅ Codex 插件 hooks 已清理" \
+            "    ✅ Codex plugin hooks cleaned"
+    else
+        local codex_config="$HOME/.codex/config.toml"
+        if [ -f "$codex_config" ] && grep -q "otel-codex-hook" "$codex_config" 2>/dev/null; then
+            local marker="# OpenTelemetry instrumentation hooks"
+            local end_str='command = "otel-codex-hook stop"'
+            if grep -q "$marker" "$codex_config" 2>/dev/null && grep -qF "$end_str" "$codex_config" 2>/dev/null; then
+                local tmp; tmp=$(mktemp)
+                awk -v m="$marker" -v e="$end_str" '
+                    BEGIN { skip=0 }
+                    skip==0 && index($0, m) { skip=1; next }
+                    skip==1 { if (index($0, e)) { skip=2 }; next }
+                    skip==2 && /^[[:space:]]*$/ { next }
+                    { skip=0; print }
+                ' "$codex_config" > "$tmp"
+                mv "$tmp" "$codex_config"
+            else
+                local tmp; tmp=$(mktemp)
+                grep -v "otel-codex-hook" "$codex_config" > "$tmp" || true
+                mv "$tmp" "$codex_config"
+            fi
+            # Clean up codex_hooks = true
+            if grep -q "codex_hooks" "$codex_config" 2>/dev/null; then
+                local tmp; tmp=$(mktemp)
+                grep -v '^\s*codex_hooks\s*=' "$codex_config" > "$tmp" || true
+                mv "$tmp" "$codex_config"
+            fi
+            msg "    ✅ Codex hooks 已从 config.toml 清理 (via sed)" \
+                "    ✅ Codex hooks cleaned from config.toml (via sed)"
+        fi
     fi
 
     local codex_otel_config="$HOME/.codex/otel-config.json"
@@ -669,12 +766,18 @@ try {
     fi
 
     if [ -d "$OTEL_CODEX_DIR" ]; then
-        find "$OTEL_CODEX_DIR" -maxdepth 1 \
-          ! -name sessions \
-          ! -name "$(basename "$OTEL_CODEX_DIR")" \
-          -exec rm -rf {} + 2>/dev/null || true
-        msg "    ✅ Codex 插件文件已删除（sessions/ 已保留）" \
-            "    ✅ Codex plugin files removed (sessions/ preserved)"
+        if [ "$PURGE" -eq 1 ]; then
+            rm -rf "$OTEL_CODEX_DIR"
+            msg "    ✅ Codex 插件目录已完全删除 (--purge): $OTEL_CODEX_DIR" \
+                "    ✅ Codex plugin directory fully removed (--purge): $OTEL_CODEX_DIR"
+        else
+            find "$OTEL_CODEX_DIR" -maxdepth 1 \
+              ! -name sessions \
+              ! -name "$(basename "$OTEL_CODEX_DIR")" \
+              -exec rm -rf {} + 2>/dev/null || true
+            msg "    ✅ Codex 插件文件已删除（sessions/ 已保留）" \
+                "    ✅ Codex plugin files removed (sessions/ preserved)"
+        fi
     fi
 }
 
@@ -704,14 +807,16 @@ print_summary() {
 
     if [ -f "$OTEL_CLAUDE_DIR/package/src/cli.js" ]; then
         echo ""
-        msg "💡 Claude Code OTel 插件已安装，请执行以下命令使 alias 生效：" \
-            "💡 Claude Code OTel plugin installed. Reload your shell for the alias:"
+        msg "💡 Claude Code 插件已安装，请执行以下命令使 alias 生效：" \
+            "💡 Claude Code plugin installed. Reload your shell for the alias:"
         echo "   source ~/.bashrc   # or source ~/.zshrc"
     fi
 
     if [ -f "$OTEL_CODEX_DIR/package/dist/index.js" ]; then
-        msg "💡 Codex OTel 插件已安装" \
-            "💡 Codex OTel plugin installed"
+        msg "💡 Codex 插件已安装" \
+            "💡 Codex plugin installed"
+        msg "   如果正在使用 Codex 桌面版，请重启 App 以使 hooks 生效。" \
+            "   If using Codex Desktop, restart the app for hooks to take effect."
     fi
     msg "命令:" "Commands:"
     echo "   loongsuite-pilot          # 查看状态 / Status"
@@ -1030,7 +1135,7 @@ cmd_uninstall() {
     echo ""
 
     # Remove OTel Claude plugin
-    msg "==> 清理 OTel Claude 插件..." "==> Cleaning up OTel Claude plugin..."
+    msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
     remove_otel_plugin
     echo ""
 

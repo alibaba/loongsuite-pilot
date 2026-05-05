@@ -73,6 +73,12 @@ cp -r dist     "$PKG_DIR/dist"
 cp -r assets   "$PKG_DIR/assets"
 cp -r scripts  "$PKG_DIR/scripts"
 
+# Plugin tarballs (pre-built, bundled)
+if [ -d plugins ] && ls plugins/*.tar.gz &>/dev/null; then
+    cp -r plugins  "$PKG_DIR/plugins"
+    echo "    ✅ Plugins bundled: $(ls plugins/*.tar.gz | xargs -I{} basename {} | tr '\n' ' ')"
+fi
+
 # Package metadata & version
 cp package.json      "$PKG_DIR/"
 cp package-lock.json "$PKG_DIR/" 2>/dev/null || true
