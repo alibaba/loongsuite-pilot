@@ -23,11 +23,11 @@ export enum ClientType {
   QoderCli = 'qoder-cli',
 
   // Hook-based tools
-  ClaudeCliHook = 'claude-cli-hook',
+  ClaudeCliHook = 'claude-code',
   IflowCliHook = 'iflow-cli-hook',
   CursorHook = 'cursor-hook',
   QoderCliHook = 'qoder-cli-hook',
-  CodexCliHook = 'codex-cli-hook',
+  CodexCliHook = 'codex',
   ClineHook = 'cline-hook',
   GithubCopilotHook = 'github-copilot-hook',
   AoneCopilotHook = 'aone-copilot-hook',
