@@ -5,7 +5,7 @@ This lightweight local dashboard shows LoongSuite Pilot collection and reporting
 ## Start
 
 ```bash
-loongsuite-pilot monitor-start
+loongsuite-pilot monitor start
 ```
 
 Open:
@@ -30,13 +30,13 @@ The monitor is optional. It includes both the process sampler and the local dash
 Use this command when you want the optional UI:
 
 ```bash
-loongsuite-pilot monitor-start
+loongsuite-pilot monitor start
 ```
 
 Stop it without stopping LoongSuite Pilot collection/reporting:
 
 ```bash
-loongsuite-pilot monitor-stop
+loongsuite-pilot monitor stop
 ```
 
 `loongsuite-pilot stop` stops the optional monitor if it is running. Generated Process Resources CSV files are kept according to the monitor retention policy.

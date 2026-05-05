@@ -47,6 +47,25 @@ sync_bootstrap_scripts() {
     cp -f "$src_dir/updater-daemon.js"   "$BOOTSTRAP_DIR/" 2>/dev/null || true
 }
 
+sync_installed_scripts_from_version() {
+    local version_dir="$1"
+    local src_dir="$version_dir/scripts"
+    if [ ! -f "$src_dir/collector-daemon.js" ] || [ ! -f "$src_dir/updater-daemon.js" ] || [ ! -f "$src_dir/loongsuite-pilot.sh" ]; then
+        return 1
+    fi
+
+    mkdir -p "$BOOTSTRAP_DIR"
+    cp -f "$src_dir/collector-daemon.js" "$BOOTSTRAP_DIR/collector-daemon.js.tmp"
+    mv -f "$BOOTSTRAP_DIR/collector-daemon.js.tmp" "$BOOTSTRAP_DIR/collector-daemon.js"
+    cp -f "$src_dir/updater-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js.tmp"
+    mv -f "$BOOTSTRAP_DIR/updater-daemon.js.tmp" "$BOOTSTRAP_DIR/updater-daemon.js"
+
+    mkdir -p "$(dirname "$LOONGSUITE_PILOT_BIN")"
+    cp -f "$src_dir/loongsuite-pilot.sh" "$LOONGSUITE_PILOT_BIN.tmp"
+    chmod 755 "$LOONGSUITE_PILOT_BIN.tmp"
+    mv -f "$LOONGSUITE_PILOT_BIN.tmp" "$LOONGSUITE_PILOT_BIN"
+}
+
 is_running() {
     if [ -f "$PID_FILE" ]; then
         local pid
@@ -475,6 +494,18 @@ cmd_rollback() {
         mv -f "$PREVIOUS_FILE.tmp" "$PREVIOUS_FILE"
     fi
 
+    if ! sync_installed_scripts_from_version "$VERSIONS_DIR/$prev_dir"; then
+        if [ -n "$curr_dir" ]; then
+            echo "$curr_dir" > "$CURRENT_FILE.tmp"
+            mv -f "$CURRENT_FILE.tmp" "$CURRENT_FILE"
+            echo "$prev_dir" > "$PREVIOUS_FILE.tmp"
+            mv -f "$PREVIOUS_FILE.tmp" "$PREVIOUS_FILE"
+            sync_installed_scripts_from_version "$VERSIONS_DIR/$curr_dir" 2>/dev/null || true
+        fi
+        echo "❌ Failed to sync scripts for rollback target: $prev_dir"
+        exit 1
+    fi
+
     echo "✅ Rolled back to version: $prev_dir"
     echo "   Restarting service..."
     cmd_restart
@@ -677,15 +708,26 @@ cmd_help() {
     echo "Usage: loongsuite-pilot <command>"
     echo ""
     echo "Commands:"
-    echo "  start       Start the collector service"
-    echo "  stop        Stop the collector service"
-    echo "  restart     Restart the collector service"
-    echo "  status      Show service status (default)"
-    echo "  info        Show version and config info"
-    echo "  monitor-start     Start process resource monitor"
-    echo "  monitor-stop      Stop process resource monitor"
-    echo "  rollback    Roll back to the previous version"
-    echo "  help        Show this help message"
+    echo "  start           Start the collector service"
+    echo "  stop            Stop the collector service"
+    echo "  restart         Restart the collector service"
+    echo "  status          Show service status (default)"
+    echo "  info            Show version and config info"
+    echo "  monitor start   Start process resource monitor"
+    echo "  monitor stop    Stop process resource monitor"
+    echo "  rollback        Roll back to the previous version"
+    echo "  help            Show this help message"
+}
+
+cmd_monitor() {
+    case "${1:-}" in
+        start) cmd_monitor_start ;;
+        stop)  cmd_monitor_stop ;;
+        *)
+            echo "Unknown monitor command: ${1:-}"
+            echo "Usage: loongsuite-pilot monitor <start|stop>"
+            exit 1 ;;
+    esac
 }
 
 # ---- Dispatch ----
@@ -696,8 +738,7 @@ case "${1:-status}" in
     restart)     cmd_restart ;;
     status)      cmd_status ;;
     info)        cmd_info ;;
-    monitor-start)       cmd_monitor_start ;;
-    monitor-stop)        cmd_monitor_stop ;;
+    monitor)             cmd_monitor "${2:-}" ;;
     rollback)            cmd_rollback ;;
     restart-collector)   cmd_restart_collector ;;
     run)                 cmd_run ;;

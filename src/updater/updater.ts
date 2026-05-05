@@ -315,18 +315,27 @@ export class Updater {
         }
       }
 
-      // Update current/previous pointers atomically
       const { currentFile, previousFile } = this.paths;
       const oldCurrent = await this.readPointerFile(currentFile);
-      if (oldCurrent && oldCurrent !== dirName) {
-        await fs.writeFile(previousFile, oldCurrent + '\n');
+      const oldPrevious = await this.readPointerFile(previousFile);
+
+      try {
+        if (oldCurrent && oldCurrent !== dirName) {
+          await this.writePointerFile(previousFile, oldCurrent);
+        }
+
+        await this.writePointerFile(currentFile, dirName);
+        await this.syncInstalledScripts(targetDir);
+      } catch (err) {
+        logger.warn('failed to finalize update, restoring previous installation', { error: String(err) });
+        await this.restorePointers(oldCurrent, oldPrevious);
+        if (oldCurrent) {
+          await this.syncInstalledScriptsForPointer(oldCurrent).catch((restoreErr) => {
+            logger.warn('failed to restore installed scripts', { error: String(restoreErr) });
+          });
+        }
+        throw err;
       }
-
-      const tmpCurrent = currentFile + '.tmp';
-      await fs.writeFile(tmpCurrent, dirName + '\n');
-      await fs.rename(tmpCurrent, currentFile);
-
-      await this.syncBootstrapScripts(targetDir);
 
       logger.info('update deployed', { version: manifest.version, dir: dirName });
     } finally {
@@ -350,20 +359,58 @@ export class Updater {
     return hasRoot ? dir : null;
   }
 
-  private async syncBootstrapScripts(versionDir: string): Promise<void> {
-    const { bootstrapDir } = this.paths;
-    try {
-      await fs.mkdir(bootstrapDir, { recursive: true });
-      const srcDir = path.join(versionDir, 'scripts');
-      for (const name of ['collector-daemon.js', 'updater-daemon.js']) {
-        const src = path.join(srcDir, name);
-        const dst = path.join(bootstrapDir, name);
-        const exists = await fs.access(src).then(() => true).catch(() => false);
-        if (exists) await fs.copyFile(src, dst);
-      }
-      logger.info('bootstrap scripts synced');
-    } catch (err) {
-      logger.warn('failed to sync bootstrap scripts', { error: String(err) });
+  private async syncInstalledScripts(versionDir: string): Promise<void> {
+    const { bootstrapDir, loongsuitePilotBin } = this.paths;
+    const srcDir = path.join(versionDir, 'scripts');
+
+    await fs.mkdir(bootstrapDir, { recursive: true });
+    for (const name of ['collector-daemon.js', 'updater-daemon.js']) {
+      const src = path.join(srcDir, name);
+      const dst = path.join(bootstrapDir, name);
+      await this.copyFileAtomic(src, dst);
+    }
+
+    const cliScript = path.join(srcDir, 'loongsuite-pilot.sh');
+    await fs.mkdir(path.dirname(loongsuitePilotBin), { recursive: true });
+    await this.copyFileAtomic(cliScript, loongsuitePilotBin, 0o755);
+
+    logger.info('installed scripts synced');
+  }
+
+  private async syncInstalledScriptsForPointer(versionName: string): Promise<void> {
+    const dir = path.join(this.paths.versionsDir, versionName);
+    const exists = await fs.access(dir).then(() => true).catch(() => false);
+    if (!exists) return;
+    await this.syncInstalledScripts(dir);
+  }
+
+  private async copyFileAtomic(src: string, dst: string, mode?: number): Promise<void> {
+    const tmp = dst + '.tmp';
+    await fs.copyFile(src, tmp);
+    if (mode !== undefined) {
+      await fs.chmod(tmp, mode);
+    }
+    await fs.rename(tmp, dst);
+  }
+
+  private async writePointerFile(filePath: string, value: string): Promise<void> {
+    const tmp = filePath + '.tmp';
+    await fs.writeFile(tmp, value + '\n');
+    await fs.rename(tmp, filePath);
+  }
+
+  private async restorePointers(currentValue: string | null, previousValue: string | null): Promise<void> {
+    const { currentFile, previousFile } = this.paths;
+    if (currentValue) {
+      await this.writePointerFile(currentFile, currentValue);
+    } else {
+      await fs.rm(currentFile, { force: true });
+    }
+
+    if (previousValue) {
+      await this.writePointerFile(previousFile, previousValue);
+    } else {
+      await fs.rm(previousFile, { force: true });
     }
   }
 
@@ -387,8 +434,8 @@ export class Updater {
 
     logger.info('restarting monitor after update');
     try {
-      await execFileAsync(this.paths.loongsuitePilotBin, ['monitor-stop'], { timeout: 30_000 });
-      await execFileAsync(this.paths.loongsuitePilotBin, ['monitor-start'], { timeout: 30_000 });
+      await execFileAsync(this.paths.loongsuitePilotBin, ['monitor', 'stop'], { timeout: 30_000 });
+      await execFileAsync(this.paths.loongsuitePilotBin, ['monitor', 'start'], { timeout: 30_000 });
       logger.info('monitor restarted');
     } catch (err) {
       logger.warn('monitor restart failed', { error: String(err) });

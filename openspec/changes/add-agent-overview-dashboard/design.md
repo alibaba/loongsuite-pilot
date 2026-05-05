@@ -114,7 +114,7 @@ The dashboard API should filter rows by timestamp server-side and return CSV wit
 
 Alternative considered: keep daily CSVs and trim them in place. Rejected because in-place CSV rewriting is more fragile and more expensive than append-only hourly files plus deletion of old files.
 
-Monitor is an optional user-started feature. `loongsuite-pilot start` starts only the core collector. `loongsuite-pilot monitor-start` starts both the process sampler and local dashboard server, prints the dashboard URL, and `loongsuite-pilot monitor-stop` stops both without stopping core collection/reporting.
+Monitor is an optional user-started feature. `loongsuite-pilot start` starts only the core collector. `loongsuite-pilot monitor start` starts both the process sampler and local dashboard server, prints the dashboard URL, and `loongsuite-pilot monitor stop` stops both without stopping core collection/reporting.
 
 Auto-update should preserve the user's monitor choice. If monitor is stopped when an update is applied, the updater must not start it. If monitor is already running, the updater should restart it after the collector restarts so the sampler and dashboard use the newly deployed version.
 

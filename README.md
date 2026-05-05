@@ -280,15 +280,18 @@ sudo journalctl -u loongsuite-pilot -f
 2. 与本地 `VERSION` 文件对比 `version` + `git_commit`
 3. 如有新版本，下载安装包并解压到 `versions/<new_ver>/`
 4. 运行 `npm install` 和 `postinstall.js`
-5. 原子更新 `current` 指针文件，保存旧版本到 `previous`
-6. 调用 `loongsuite-pilot restart` 重启采集器（下次启动自动加载新版本）
-7. 自动清理旧版本（仅保留 current + previous）
+5. 同步引导脚本和 `~/.local/bin/loongsuite-pilot` 命令入口
+6. 原子更新 `current` 指针文件，保存旧版本到 `previous`
+7. 调用 `loongsuite-pilot restart` 重启采集器（下次启动自动加载新版本）
+8. 自动清理旧版本（仅保留 current + previous）
 
 **手动回滚**：
 
 ```bash
 loongsuite-pilot rollback    # 切换到上一个版本并重启
 ```
+
+回滚会同步上一版本的引导脚本和 `~/.local/bin/loongsuite-pilot` 命令入口，确保命令脚本与回滚后的版本保持一致。
 
 **配置**（`config.json` 或环境变量）：
 

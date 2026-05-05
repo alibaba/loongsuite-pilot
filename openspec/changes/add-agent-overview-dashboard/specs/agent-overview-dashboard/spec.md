@@ -149,7 +149,7 @@ The system SHALL keep process-resource metrics bounded on disk and bounded in da
 - **THEN** LoongSuite Pilot collection and reporting SHALL continue without process metrics sampling or dashboard serving
 
 #### Scenario: Monitor is explicitly started
-- **WHEN** the user runs `loongsuite-pilot monitor-start`
+- **WHEN** the user runs `loongsuite-pilot monitor start`
 - **THEN** the system SHALL start both the process sampler and the local dashboard server and print the dashboard URL
 
 #### Scenario: Core service starts
