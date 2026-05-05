@@ -552,8 +552,8 @@ fs.writeFileSync(cfgPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
     mkdir -p "$OTEL_LOG_DIR"
     echo ""
 
-    # --- Codex OTel plugin ---
-    if command -v codex &>/dev/null; then
+    # --- Codex OTel plugin (CLI or Desktop — both create ~/.codex) ---
+    if [ -d "$HOME/.codex" ]; then
         local CODEX_LOG_DIR="$DATA_DIR/logs/codex"
 
         msg "==> 安装 Codex OTel 插件 (log-only 模式)..." \
@@ -595,8 +595,8 @@ fs.writeFileSync(cfgPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
         mkdir -p "$CODEX_LOG_DIR"
         echo ""
     else
-        msg "    ℹ️  未检测到 codex CLI，跳过 Codex OTel 插件安装" \
-            "    ℹ️  codex CLI not found, skipping Codex OTel plugin installation"
+        msg "    ℹ️  未检测到 Codex（~/.codex 目录不存在），跳过插件安装" \
+            "    ℹ️  Codex not detected (~/.codex not found), skipping plugin installation"
         echo ""
     fi
 }
