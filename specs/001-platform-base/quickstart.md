@@ -86,7 +86,7 @@ HTTP_REPORT_URL=https://my-server.com/api/collect npm start
 JSONL_ENABLED=false npm start
 
 # 强制轮询模式（禁用 fs.watch）
-LOONGPILOT_FORCE_POLLING=true npm start
+LOONGSUITE_PILOT_FORCE_POLLING=true npm start
 ```
 
 ## 验证采集

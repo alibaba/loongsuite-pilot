@@ -29,6 +29,7 @@ const mockFsReaddir = vi.fn<[string], Promise<string[]>>();
 const mockFsStat = vi.fn();
 const mockFsCp = vi.fn<[string, string, any], Promise<void>>();
 const mockFsCopyFile = vi.fn<[string, string], Promise<void>>();
+const mockFsChmod = vi.fn<[string, number], Promise<void>>();
 
 vi.mock('node:fs/promises', () => ({
   readFile: (...args: [string, string]) => mockFsReadFile(...args),
@@ -41,6 +42,7 @@ vi.mock('node:fs/promises', () => ({
   stat: (...args: any[]) => mockFsStat(...args),
   cp: (...args: [string, string, any]) => mockFsCp(...args),
   copyFile: (...args: [string, string]) => mockFsCopyFile(...args),
+  chmod: (...args: [string, number]) => mockFsChmod(...args),
 }));
 
 // --- Mock node:fs (createWriteStream) ---
@@ -131,6 +133,7 @@ describe('Updater', () => {
     mockFsRename.mockResolvedValue(undefined);
     mockFsCp.mockResolvedValue(undefined);
     mockFsCopyFile.mockResolvedValue(undefined);
+    mockFsChmod.mockResolvedValue(undefined);
     mockFsReaddir.mockResolvedValue([]);
     // Default: no current pointer file → first deployment
     mockFsReadFile.mockRejectedValue(new Error('ENOENT'));
@@ -300,6 +303,82 @@ describe('Updater', () => {
       );
     });
 
+    it('syncs installed scripts after switching the current pointer', async () => {
+      setupForDownload();
+      mockFsAccess.mockImplementation((p: string) => {
+        if (p.includes('package.json')) return Promise.resolve();
+        if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('postinstall.js')) return Promise.reject(new Error('ENOENT'));
+        if (p.includes('collector-daemon.js')) return Promise.resolve();
+        if (p.includes('updater-daemon.js')) return Promise.resolve();
+        if (p.includes('loongsuite-pilot.sh')) return Promise.resolve();
+        return Promise.reject(new Error('ENOENT'));
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(mockFsCopyFile).toHaveBeenCalledWith(
+        expect.stringContaining('/scripts/collector-daemon.js'),
+        expect.stringContaining('/bin/collector-daemon.js.tmp'),
+      );
+      expect(mockFsCopyFile).toHaveBeenCalledWith(
+        expect.stringContaining('/scripts/updater-daemon.js'),
+        expect.stringContaining('/bin/updater-daemon.js.tmp'),
+      );
+      expect(mockFsCopyFile).toHaveBeenCalledWith(
+        expect.stringContaining('/scripts/loongsuite-pilot.sh'),
+        expect.stringMatching(/\.local\/bin\/loongsuite-pilot\.tmp$/),
+      );
+      expect(mockFsChmod).toHaveBeenCalledWith(
+        expect.stringMatching(/\.local\/bin\/loongsuite-pilot\.tmp$/),
+        0o755,
+      );
+      const currentRenameCall = mockFsRename.mock.calls.findIndex(([, dst]) => dst.endsWith('/current'));
+      expect(mockFsRename.mock.invocationCallOrder[currentRenameCall]).toBeLessThan(
+        mockFsCopyFile.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('restores pointers and installed scripts when script sync fails', async () => {
+      setupForDownload();
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (filePath.endsWith('/current')) return Promise.resolve('1.0.1_aaa\n');
+        if (filePath.endsWith('/previous')) return Promise.resolve('1.0.0_zzz\n');
+        if (filePath.endsWith('/VERSION')) return Promise.resolve('version=1.0.1\ngit_commit=aaa\n');
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsAccess.mockImplementation((p: string) => {
+        if (p.includes('versions/1.0.1_aaa')) return Promise.resolve();
+        if (p.includes('package.json')) return Promise.resolve();
+        if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('postinstall.js')) return Promise.reject(new Error('ENOENT'));
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsCopyFile.mockImplementation((src: string, dst: string) => {
+        if (src.includes('/versions/1.0.2_bbb/') && dst.endsWith('loongsuite-pilot.tmp')) {
+          return Promise.reject(new Error('copy failed'));
+        }
+        return Promise.resolve();
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(mockFsWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('/current.tmp'),
+        '1.0.1_aaa\n',
+      );
+      expect(mockFsWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('/previous.tmp'),
+        '1.0.0_zzz\n',
+      );
+      expect(mockFsCopyFile).toHaveBeenCalledWith(
+        expect.stringContaining('/versions/1.0.1_aaa/scripts/loongsuite-pilot.sh'),
+        expect.stringMatching(/\.local\/bin\/loongsuite-pilot\.tmp$/),
+      );
+    });
+
     it('updates previous pointer when upgrading', async () => {
       // Simulate existing version
       mockFsReadFile.mockImplementation((filePath: string) => {
@@ -327,7 +406,7 @@ describe('Updater', () => {
 
       // previous should be written with old version
       expect(mockFsWriteFile).toHaveBeenCalledWith(
-        expect.stringContaining('/previous'),
+        expect.stringContaining('/previous.tmp'),
         '1.0.1_aaa\n',
       );
     });
@@ -420,11 +499,11 @@ describe('Updater', () => {
       const updater = new Updater(makeConfig(), tmpDir);
       await updater.check();
 
-      const loongpilotCalls = mockExecFile.mock.calls.filter(
-        ([cmd]: [string]) => String(cmd).includes('loongpilot'),
+      const loongsuitePilotCalls = mockExecFile.mock.calls.filter(
+        ([cmd]: [string]) => String(cmd).includes('loongsuite-pilot'),
       );
-      expect(loongpilotCalls.map(([, args]) => args)).toContainEqual(['restart-collector']);
-      expect(loongpilotCalls.map(([, args]) => args)).not.toContainEqual(['monitor-start']);
+      expect(loongsuitePilotCalls.map(([, args]) => args)).toContainEqual(['restart-collector']);
+      expect(loongsuitePilotCalls.map(([, args]) => args)).not.toContainEqual(['monitor', 'start']);
     });
 
     it('restarts monitor after update when monitor was already running', async () => {
@@ -435,20 +514,20 @@ describe('Updater', () => {
         throw new Error('not running');
       }) as typeof process.kill);
       mockFsReadFile.mockImplementation((filePath: string) => {
-        if (filePath.endsWith('/loongpilot-monitor.pid')) return Promise.resolve('12345\n');
-        if (filePath.endsWith('/loongpilot-dashboard.pid')) return Promise.reject(new Error('ENOENT'));
+        if (filePath.endsWith('/loongsuite-pilot-monitor.pid')) return Promise.resolve('12345\n');
+        if (filePath.endsWith('/loongsuite-pilot-dashboard.pid')) return Promise.reject(new Error('ENOENT'));
         return Promise.reject(new Error('ENOENT'));
       });
 
       const updater = new Updater(makeConfig(), tmpDir);
       await updater.check();
 
-      const loongpilotCalls = mockExecFile.mock.calls
-        .filter(([cmd]: [string]) => String(cmd).includes('loongpilot'))
+      const loongsuitePilotCalls = mockExecFile.mock.calls
+        .filter(([cmd]: [string]) => String(cmd).includes('loongsuite-pilot'))
         .map(([, args]) => args);
-      expect(loongpilotCalls).toContainEqual(['restart-collector']);
-      expect(loongpilotCalls).toContainEqual(['monitor-stop']);
-      expect(loongpilotCalls).toContainEqual(['monitor-start']);
+      expect(loongsuitePilotCalls).toContainEqual(['restart-collector']);
+      expect(loongsuitePilotCalls).toContainEqual(['monitor', 'stop']);
+      expect(loongsuitePilotCalls).toContainEqual(['monitor', 'start']);
 
       killSpy.mockRestore();
       process.kill = realKill;

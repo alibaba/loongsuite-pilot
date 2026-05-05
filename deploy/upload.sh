@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# upload.sh — Upload package + loongpilot-installer.sh to Alibaba Cloud OSS
+# upload.sh — Upload package + loongsuite-pilot-installer.sh to Alibaba Cloud OSS
 #
 # Prerequisites:
 #   - ossutil installed (https://help.aliyun.com/document_detail/120075.html)
@@ -17,7 +17,7 @@
 #   bash deploy/upload.sh --region cn-hangzhou         # custom region
 #
 # Environment variables (override CLI args):
-#   LOONGPILOT_CHANNEL   — release or test (default: test)
+#   LOONGSUITE_PILOT_CHANNEL   — release or test (default: test)
 #   OSS_BUCKET    — target bucket name (overrides channel)
 #   OSS_PREFIX    — key prefix in bucket (overrides channel)
 #   OSS_REGION    — region for the public URL (overrides channel)
@@ -40,13 +40,13 @@ _TEST_PREFIX="loongsuite-dev/loongsuite-pilot"
 _TEST_REGION="cn-shanghai"
 
 # ── Defaults (test channel is the safe default for dev) ──
-CHANNEL="${LOONGPILOT_CHANNEL:-test}"
+CHANNEL="${LOONGSUITE_PILOT_CHANNEL:-test}"
 BUCKET="${OSS_BUCKET:-}"
 PREFIX="${OSS_PREFIX:-}"
 REGION="${OSS_REGION:-}"
 PKG_PATH="$PROJECT_ROOT/loongsuite-pilot.tar.gz"
-INSTALLER_SCRIPT="$PROJECT_ROOT/deploy/loongpilot-installer.sh"
-INSTALLER_INNER_SCRIPT="$PROJECT_ROOT/deploy/loongpilot-installer-inner.sh"
+INSTALLER_SCRIPT="$PROJECT_ROOT/deploy/loongsuite-pilot-installer.sh"
+INSTALLER_INNER_SCRIPT="$PROJECT_ROOT/deploy/loongsuite-pilot-installer-inner.sh"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -78,11 +78,13 @@ done
 # Apply channel presets for any value not explicitly overridden
 case "$CHANNEL" in
     release|prod)
+        CHANNEL_CANONICAL="release"
         BUCKET="${BUCKET:-$_RELEASE_BUCKET}"
         PREFIX="${PREFIX:-$_RELEASE_PREFIX}"
         REGION="${REGION:-$_RELEASE_REGION}"
         ;;
     test|pre)
+        CHANNEL_CANONICAL="test"
         BUCKET="${BUCKET:-$_TEST_BUCKET}"
         PREFIX="${PREFIX:-$_TEST_PREFIX}"
         REGION="${REGION:-$_TEST_REGION}"
@@ -149,6 +151,15 @@ upload_file() {
         echo "    ⚠️  Could not set ACL for $label (may need bucket-level policy)"
 }
 
+prepare_channel_installer() {
+    local src="$1"
+    local out
+    out="$(mktemp)"
+    sed "s/LOONGSUITE_PILOT_DEFAULT_CHANNEL:-release/LOONGSUITE_PILOT_DEFAULT_CHANNEL:-${CHANNEL_CANONICAL}/" "$src" > "$out"
+    chmod +x "$out"
+    echo "$out"
+}
+
 # ── Generate manifest JSON ──
 RELEASED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 PKG_SHA256="$(shasum -a 256 "$PKG_PATH" | cut -d' ' -f1)"
@@ -187,12 +198,15 @@ rm -f "$MANIFEST_TMP"
 echo ""
 
 # ── Upload installer scripts (version-independent, stays at prefix root) ──
-INSTALLER_NAME="loongpilot-installer.sh"
-INSTALLER_INNER_NAME="loongpilot-installer-inner.sh"
+INSTALLER_NAME="loongsuite-pilot-installer.sh"
+INSTALLER_INNER_NAME="loongsuite-pilot-installer-inner.sh"
 echo "==> Uploading installers: $INSTALLER_NAME, $INSTALLER_INNER_NAME"
-upload_file "$INSTALLER_SCRIPT"       "${OSS_BASE}/${INSTALLER_NAME}"       "installer"
+INSTALLER_UPLOAD="$(prepare_channel_installer "$INSTALLER_SCRIPT")"
+INSTALLER_INNER_UPLOAD="$(prepare_channel_installer "$INSTALLER_INNER_SCRIPT")"
+trap 'rm -f "$MANIFEST_TMP" "$INSTALLER_UPLOAD" "$INSTALLER_INNER_UPLOAD"' EXIT
+upload_file "$INSTALLER_UPLOAD"       "${OSS_BASE}/${INSTALLER_NAME}"       "installer"
 echo "    ✅ ${PUBLIC_BASE}/${INSTALLER_NAME}"
-upload_file "$INSTALLER_INNER_SCRIPT" "${OSS_BASE}/${INSTALLER_INNER_NAME}" "installer-inner"
+upload_file "$INSTALLER_INNER_UPLOAD" "${OSS_BASE}/${INSTALLER_INNER_NAME}" "installer-inner"
 echo "    ✅ ${PUBLIC_BASE}/${INSTALLER_INNER_NAME}"
 echo ""
 

@@ -15,7 +15,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 
 function resolveDataDir() {
-  const configured = process.env.LOONGPILOT_DATA_DIR || process.env.LOONGSUITE_PILOT_DATA_DIR;
+  const configured = process.env.LOONGSUITE_PILOT_DATA_DIR || process.env.LOONGSUITE_PILOT_DATA_DIR;
   if (configured) return configured;
   return path.join(os.homedir(), '.loongsuite-pilot');
 }

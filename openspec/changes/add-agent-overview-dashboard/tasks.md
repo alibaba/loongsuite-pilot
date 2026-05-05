@@ -74,10 +74,10 @@
 
 ## 9. Optional Monitor Lifecycle
 
-- [x] 9.1 Keep `loongpilot start` scoped to the core collector and avoid auto-starting monitor.
+- [x] 9.1 Keep `loongsuite-pilot start` scoped to the core collector and avoid auto-starting monitor.
 - [x] 9.2 Treat the process sampler and dashboard server as one optional `monitor` feature.
-- [x] 9.3 Add `loongpilot monitor-start` to start both sampler and dashboard and print the dashboard URL.
-- [x] 9.4 Add `loongpilot monitor-stop` to stop both sampler and dashboard without stopping core collection/reporting.
-- [x] 9.5 Ensure `loongpilot stop` stops optional monitor processes if they are running.
+- [x] 9.3 Add `loongsuite-pilot monitor start` to start both sampler and dashboard and print the dashboard URL.
+- [x] 9.4 Add `loongsuite-pilot monitor stop` to stop both sampler and dashboard without stopping core collection/reporting.
+- [x] 9.5 Ensure `loongsuite-pilot stop` stops optional monitor processes if they are running.
 - [x] 9.6 Restart monitor after auto-update only when monitor was already running.
 - [x] 9.7 Keep monitor stopped after auto-update when the user had not started monitor.

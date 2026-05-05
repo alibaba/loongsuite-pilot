@@ -1,8 +1,8 @@
 ## Context
 
-Loongpilot is a local background collector used by company developers. It already records operational signals across several files under `~/.loongsuite-pilot`: service logs, input offsets, hook history, normalized JSONL output, and SLS failed-upload records. These signals are useful but are currently exposed in implementation terms such as `qoder-cli-hook`, `qoder-sqlite`, offsets, row IDs, and JSONL paths.
+LoongSuite Pilot is a local background collector used by company developers. It already records operational signals across several files under `~/.loongsuite-pilot`: service logs, input offsets, hook history, normalized JSONL output, and SLS failed-upload records. These signals are useful but are currently exposed in implementation terms such as `qoder-cli-hook`, `qoder-sqlite`, offsets, row IDs, and JSONL paths.
 
-The dashboard should assume the user does not know Loongpilot internals. The main mental model must be "Loongpilot is collecting Cursor/Qoder/Qoder CLI/Qoder Work/Claude Code/Codex activity and reporting it", not "InputManager dispatched entries from hook-jsonl input X". Implementation details can exist in an advanced diagnostic view.
+The dashboard should assume the user does not know LoongSuite Pilot internals. The main mental model must be "LoongSuite Pilot is collecting Cursor/Qoder/Qoder CLI/Qoder Work/Claude Code/Codex activity and reporting it", not "InputManager dispatched entries from hook-jsonl input X". Implementation details can exist in an advanced diagnostic view.
 
 Performance is a first-order requirement. The dashboard must not slow down collection or reporting, and its own local API must avoid repeated full-history scans.
 
@@ -11,7 +11,7 @@ Performance is a first-order requirement. The dashboard must not slow down colle
 **Goals:**
 
 - Present health by top-level agent/tool: Cursor, Qoder, Qoder CLI, Qoder Work, Claude Code, Codex, and future agents.
-- Show whether Loongpilot is running, whether each agent is detected/collecting, today and recent event counts, last activity time, enabled reporting channels, and failures.
+- Show whether LoongSuite Pilot is running, whether each agent is detected/collecting, today and recent event counts, last activity time, enabled reporting channels, and failures.
 - Provide a recent activity timeline in user-facing language.
 - Keep internal collection methods visible only as secondary detail, grouped under their parent agent.
 - Use a lightweight local dashboard with no heavy frontend framework requirement for the initial version.
@@ -51,11 +51,11 @@ Alternative considered: expose one card per input. Rejected because users care w
 The first implementation should add a local read-only API that derives summaries from:
 
 - `config.json` for data directory, user ID, and enabled flusher configuration.
-- `logs/loongpilot-service.log` for startup, agent lifecycle, dispatch events, and errors.
+- `logs/loongsuite-pilot-service.log` for startup, agent lifecycle, dispatch events, and errors.
 - `logs/output/*.jsonl` for normalized local event counts by agent and event type.
 - `sls-failed-logs/*.jsonl` for failed upload counts and recent failure details.
 - hook history directories for raw input presence and last modified times.
-- `loongpilot.pid` and process checks for service running state.
+- `loongsuite-pilot.pid` and process checks for service running state.
 
 Alternative considered: add runtime metrics directly to `InputManager` and every flusher before building the dashboard. Rejected for MVP because it touches hot-path code and is not necessary for a useful overview. It remains a follow-up for exact upload-success counters.
 
@@ -90,7 +90,7 @@ Alternative considered: infer SLS success from dispatch counts minus failed logs
 
 The API should normalize runtime facts into friendly activity items:
 
-- `service.started`: "Loongpilot started"
+- `service.started`: "LoongSuite Pilot started"
 - `agent.started`: "Started collecting Cursor"
 - `agent.stopped`: "Stopped collecting Qoder"
 - `collection.batch`: "Cursor collected 11 events"
@@ -114,7 +114,7 @@ The dashboard API should filter rows by timestamp server-side and return CSV wit
 
 Alternative considered: keep daily CSVs and trim them in place. Rejected because in-place CSV rewriting is more fragile and more expensive than append-only hourly files plus deletion of old files.
 
-Monitor is an optional user-started feature. `loongpilot start` starts only the core collector. `loongpilot monitor-start` starts both the process sampler and local dashboard server, prints the dashboard URL, and `loongpilot monitor-stop` stops both without stopping core collection/reporting.
+Monitor is an optional user-started feature. `loongsuite-pilot start` starts only the core collector. `loongsuite-pilot monitor start` starts both the process sampler and local dashboard server, prints the dashboard URL, and `loongsuite-pilot monitor stop` stops both without stopping core collection/reporting.
 
 Auto-update should preserve the user's monitor choice. If monitor is stopped when an update is applied, the updater must not start it. If monitor is already running, the updater should restart it after the collector restarts so the sampler and dashboard use the newly deployed version.
 
@@ -143,13 +143,13 @@ Process-resource charts should support hover inspection for the nearest displaye
 1. Add the local summary API and dashboard as an optional command, without changing collector startup behavior.
 2. Validate summaries against existing `~/.loongsuite-pilot` runtime data.
 3. Add tests for aggregation, log parsing, failure counting, and performance guardrails.
-4. Later, decide whether to integrate the dashboard command into the installed `loongpilot` CLI.
+4. Later, decide whether to integrate the dashboard command into the installed `loongsuite-pilot` CLI.
 
 Rollback is simple for the MVP: stop the optional dashboard server. Existing collection and reporting remain unchanged.
 
 ## Open Questions
 
-- Should the dashboard be opened by `loongpilot dashboard`, `loongpilot status --web`, or a separate script initially?
+- Should the dashboard be opened by `loongsuite-pilot dashboard`, `loongsuite-pilot status --web`, or a separate script initially?
 - What threshold should mark an agent as "stale" when no recent activity exists?
 - Should the overview include token usage by default, or only in agent details?
 - When exact SLS success metrics are added, should they be persisted in a daily rollup file or emitted as runtime events?

@@ -73,8 +73,8 @@ npm start
 ```
 deploy/
 ├── package.sh        # 编译 + 打包 tar.gz
-├── upload.sh         # 上传 tar.gz + loongpilot-installer.sh 到 OSS
-└── loongpilot-installer.sh  # 统一安装/升级/卸载脚本（用户侧执行）
+├── upload.sh         # 上传 tar.gz + loongsuite-pilot-installer.sh 到 OSS
+└── loongsuite-pilot-installer.sh  # 统一安装/升级/卸载脚本（用户侧执行）
 ```
 
 ### 第一步：打包
@@ -124,16 +124,16 @@ bash deploy/upload.sh --bucket my-bucket --prefix my/path --region cn-beijing
 
 ### 第三步：远程安装/升级/卸载（用户侧）
 
-`loongpilot-installer.sh` 支持三个子命令：`install`（默认）、`upgrade`、`uninstall`。
+`loongsuite-pilot-installer.sh` 支持三个子命令：`install`（默认）、`upgrade`、`uninstall`。
 
 #### 安装
 
 ```bash
 # 最简安装（不传子命令默认为 install）
-curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/<PREFIX>/loongpilot-installer.sh | bash
+curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/<PREFIX>/loongsuite-pilot-installer.sh | bash
 
 # 带 SLS 后端配置
-curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- install \
+curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install \
   --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
   --sls-project "my-project" \
   --sls-logstore "my-logstore" \
@@ -147,14 +147,14 @@ curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- install \
 3. `npm install --production` 安装依赖
 4. 执行 `postinstall.js` 部署 hook 脚本到 `~/.loongsuite-pilot/hooks/`
 5. 将安装参数写入 `~/.loongsuite-pilot/config.json`（非环境变量）
-6. 安装 `loongpilot` 服务管理命令（root 用户链接到 `/usr/local/bin`，普通用户安装到 `~/.local/bin`）
+6. 安装 `loongsuite-pilot` 服务管理命令（root 用户链接到 `/usr/local/bin`，普通用户安装到 `~/.local/bin`）
 7. 配置开机自启动（macOS: launchd / Linux: systemd user unit）
 8. 自动启动服务
 
 #### 升级
 
 ```bash
-curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- upgrade
+curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- upgrade
 ```
 
 升级流程（无缝，自动回滚）：
@@ -171,40 +171,40 @@ curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- upgrade
 
 ```bash
 # 卸载（保留配置和日志数据）
-curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- uninstall
+curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- uninstall
 
 # 彻底卸载（删除所有数据）
-curl -fsSL <URL>/loongpilot-installer.sh | bash -s -- uninstall --purge
+curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- uninstall --purge
 ```
 
 ### 服务管理
 
-安装完成后使用 `loongpilot` 命令管理服务：
+安装完成后使用 `loongsuite-pilot` 命令管理服务：
 
 ```bash
-loongpilot start             # 启动（后台运行）
-loongpilot stop              # 停止
-loongpilot restart           # 重启
-loongpilot status            # 查看运行状态、版本和自启动状态
-loongpilot run               # 前台运行采集器（供 launchd/systemd 调用）
-loongpilot run-updater       # 前台运行更新器（供 launchd/systemd 调用）
-loongpilot rollback          # 回滚到上一个版本
-loongpilot autostart enable  # 开启开机自启动（包含采集器和更新器）
-loongpilot autostart disable # 关闭开机自启动
-loongpilot autostart status  # 查看自启动状态
-loongpilot log               # 实时查看日志（tail -f）
-loongpilot config            # 查看当前配置文件
-loongpilot version           # 查看版本信息
+loongsuite-pilot start             # 启动（后台运行）
+loongsuite-pilot stop              # 停止
+loongsuite-pilot restart           # 重启
+loongsuite-pilot status            # 查看运行状态、版本和自启动状态
+loongsuite-pilot run               # 前台运行采集器（供 launchd/systemd 调用）
+loongsuite-pilot run-updater       # 前台运行更新器（供 launchd/systemd 调用）
+loongsuite-pilot rollback          # 回滚到上一个版本
+loongsuite-pilot autostart enable  # 开启开机自启动（包含采集器和更新器）
+loongsuite-pilot autostart disable # 关闭开机自启动
+loongsuite-pilot autostart status  # 查看自启动状态
+loongsuite-pilot log               # 实时查看日志（tail -f）
+loongsuite-pilot config            # 查看当前配置文件
+loongsuite-pilot version           # 查看版本信息
 ```
 
-修改配置后执行 `loongpilot restart` 即可生效：
+修改配置后执行 `loongsuite-pilot restart` 即可生效：
 
 ```bash
 # 编辑配置
 vi ~/.loongsuite-pilot/config.json
 
 # 重启生效
-loongpilot restart
+loongsuite-pilot restart
 ```
 
 ### 开机自启动
@@ -220,20 +220,20 @@ loongpilot restart
 
 ```bash
 # 查看自启动状态
-loongpilot autostart status
+loongsuite-pilot autostart status
 
 # 手动开启/关闭
-loongpilot autostart enable
-loongpilot autostart disable
+loongsuite-pilot autostart enable
+loongsuite-pilot autostart disable
 ```
 
 **工作原理**：
 
-- `loongpilot autostart enable` 会同时注册两个服务：采集器（`loongpilot run`）和自动更新器（`loongpilot run-updater`）。`loongpilot run` 读取 `current` 指针文件动态解析版本目录和 node 路径（兼容 nvm/volta/fnm 等版本管理器）。
-- **macOS**：通过 `KeepAlive.SuccessfulExit=false` 实现崩溃自动重启，`RunAtLoad=true` 实现登录自启动。`loongpilot stop` 正常退出（exit 0）不会触发重启。
+- `loongsuite-pilot autostart enable` 会同时注册两个服务：采集器（`loongsuite-pilot run`）和自动更新器（`loongsuite-pilot run-updater`）。`loongsuite-pilot run` 读取 `current` 指针文件动态解析版本目录和 node 路径（兼容 nvm/volta/fnm 等版本管理器）。
+- **macOS**：通过 `KeepAlive.SuccessfulExit=false` 实现崩溃自动重启，`RunAtLoad=true` 实现登录自启动。`loongsuite-pilot stop` 正常退出（exit 0）不会触发重启。
 - **Linux**：通过 `Restart=on-failure` 实现崩溃自动重启。如需在无登录会话时运行，需要 `loginctl enable-linger`（安装时会自动尝试）。
 
-**注意**：当自启动已开启时，`loongpilot start/stop` 会自动委托给 launchd/systemd 管理，无需额外操作。
+**注意**：当自启动已开启时，`loongsuite-pilot start/stop` 会自动委托给 launchd/systemd 管理，无需额外操作。
 
 #### 高级：系统级 systemd 守护（可选）
 
@@ -272,23 +272,26 @@ sudo journalctl -u loongsuite-pilot -f
 **架构**：
 
 - **多版本目录**：所有版本安装在 `~/.loongsuite-pilot/versions/<ver>_<commit>/`，通过 `current` 指针文件指向当前版本。
-- **独立进程**：updater 作为独立的 Node.js 进程运行（`loongpilot run-updater`），由 launchd/systemd 单独管理，与采集器主进程完全隔离。
-- **固定引导脚本**：`loongpilot run` 读取 `current` 文件动态加载版本，更新只改 JSON 指针文件，不改服务注册。
+- **独立进程**：updater 作为独立的 Node.js 进程运行（`loongsuite-pilot run-updater`），由 launchd/systemd 单独管理，与采集器主进程完全隔离。
+- **固定引导脚本**：`loongsuite-pilot run` 读取 `current` 文件动态加载版本，更新只改 JSON 指针文件，不改服务注册。
 
 **工作流程**：
 1. updater 进程定期从 OSS 拉取 `latest.json` 版本清单
 2. 与本地 `VERSION` 文件对比 `version` + `git_commit`
 3. 如有新版本，下载安装包并解压到 `versions/<new_ver>/`
 4. 运行 `npm install` 和 `postinstall.js`
-5. 原子更新 `current` 指针文件，保存旧版本到 `previous`
-6. 调用 `loongpilot restart` 重启采集器（下次启动自动加载新版本）
-7. 自动清理旧版本（仅保留 current + previous）
+5. 同步引导脚本和 `~/.local/bin/loongsuite-pilot` 命令入口
+6. 原子更新 `current` 指针文件，保存旧版本到 `previous`
+7. 调用 `loongsuite-pilot restart` 重启采集器（下次启动自动加载新版本）
+8. 自动清理旧版本（仅保留 current + previous）
 
 **手动回滚**：
 
 ```bash
-loongpilot rollback    # 切换到上一个版本并重启
+loongsuite-pilot rollback    # 切换到上一个版本并重启
 ```
+
+回滚会同步上一版本的引导脚本和 `~/.local/bin/loongsuite-pilot` 命令入口，确保命令脚本与回滚后的版本保持一致。
 
 **配置**（`config.json` 或环境变量）：
 
@@ -305,22 +308,22 @@ loongpilot rollback    # 切换到上一个版本并重启
 
 | 环境变量 | 说明 | 默认值 |
 |---------|------|--------|
-| `LOONGPILOT_AUTO_UPDATE_ENABLED` | 是否启用自动更新 | `true` |
-| `LOONGPILOT_AUTO_UPDATE_INTERVAL_MS` | 检查间隔（毫秒） | `14400000` (4h) |
-| `LOONGPILOT_MANIFEST_URL` | 版本清单 URL | 从 `packageUrl` 推导 |
-| `LOONGPILOT_PACKAGE_URL` | 安装包 URL | 内置默认 OSS 地址 |
+| `LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED` | 是否启用自动更新 | `true` |
+| `LOONGSUITE_PILOT_AUTO_UPDATE_INTERVAL_MS` | 检查间隔（毫秒） | `14400000` (4h) |
+| `LOONGSUITE_PILOT_MANIFEST_URL` | 版本清单 URL | 从 `packageUrl` 推导 |
+| `LOONGSUITE_PILOT_PACKAGE_URL` | 安装包 URL | 内置默认 OSS 地址 |
 
 关闭自动更新：
 
 ```bash
 # 方式一：环境变量
-export LOONGPILOT_AUTO_UPDATE_ENABLED=false
+export LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED=false
 
 # 方式二：配置文件
 vi ~/.loongsuite-pilot/config.json
 # 添加 "autoUpdate": { "enabled": false }
 
-loongpilot restart
+loongsuite-pilot restart
 ```
 
 ## 配置
@@ -396,10 +399,10 @@ loongpilot restart
 | 环境变量 | 说明 | 默认值 |
 |---------|------|--------|
 | `AGENT_DATA_COLLECTION_CONFIG` | 配置文件路径 | `~/.loongsuite-pilot/config.json` |
-| `LOONGPILOT_ENABLED` | 总开关 | `true` |
-| `LOONGPILOT_DATA_DIR` | 数据根目录 | `~/.loongsuite-pilot` |
-| `LOONGPILOT_DISCOVERY_INTERVAL_MS` | Agent 发现轮询间隔 | `300000` (5min) |
-| `LOONGPILOT_FORCE_POLLING` | 强制轮询（禁用 fs.watch） | `false` |
+| `LOONGSUITE_PILOT_ENABLED` | 总开关 | `true` |
+| `LOONGSUITE_PILOT_DATA_DIR` | 数据根目录 | `~/.loongsuite-pilot` |
+| `LOONGSUITE_PILOT_DISCOVERY_INTERVAL_MS` | Agent 发现轮询间隔 | `300000` (5min) |
+| `LOONGSUITE_PILOT_FORCE_POLLING` | 强制轮询（禁用 fs.watch） | `false` |
 | `LOG_LEVEL` | 日志级别 (debug/info/warn/error) | `info` |
 
 #### SLS（阿里云日志服务）
@@ -1129,7 +1132,7 @@ OTel Plugin (hooks) → JSONL files (event_t schema) → loongsuite-pilot BaseHo
 
 ### 第 3 步：安装集成
 
-在 `loongpilot-installer.sh` 中添加插件安装/卸载逻辑：
+在 `loongsuite-pilot-installer.sh` 中添加插件安装/卸载逻辑：
 
 - 安装时自动拉取 OTel 插件并写入配置文件（`log_enabled=true`、`log_dir` 指向 loongsuite-pilot 的数据目录）
 - 卸载时清理插件文件和 hook 配置

@@ -33,9 +33,9 @@ stop():
 
 | 环境变量 | 对应配置 | 默认值 |
 |---------|---------|--------|
-| `LOONGPILOT_ENABLED` | enabled | true |
-| `LOONGPILOT_DATA_DIR` | dataDir | ~/.loongsuite-pilot |
-| `LOONGPILOT_PORT` | port | 43124 |
+| `LOONGSUITE_PILOT_ENABLED` | enabled | true |
+| `LOONGSUITE_PILOT_DATA_DIR` | dataDir | ~/.loongsuite-pilot |
+| `LOONGSUITE_PILOT_PORT` | port | 43124 |
 | `SLS_ACCESS_KEY_ID` | sls.accessKeyId | '' |
 | `SLS_ACCESS_KEY_SECRET` | sls.accessKeySecret | '' |
 | `SLS_ENDPOINT` | sls.endpoint | '' |
@@ -81,7 +81,7 @@ resolveEnabled(agentId: string, defaultWhenAuto: boolean): boolean
 1. 优先 `fs.watch(watchPaths)` → 文件变化触发 `processEntry`
 2. `fs.watch` 失败（路径不存在或 error）→ 自动降级 `setInterval` 轮询
 3. 全局轮询定时器兜底（默认 5 分钟）
-4. `LOONGPILOT_FORCE_POLLING=true` 强制轮询模式
+4. `LOONGSUITE_PILOT_FORCE_POLLING=true` 强制轮询模式
 
 ## InputManager 事件分发
 

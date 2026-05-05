@@ -10,7 +10,7 @@ vi.mock('../../src/utils/logger.js', () => ({
   }),
 }));
 
-// Mock child_process: route tar to real exec, npm/loongpilot to mock
+// Mock child_process: route tar to real exec, npm/loongsuite-pilot to mock
 const mockExecFile = vi.fn();
 vi.mock('node:child_process', () => ({
   execFile: (...args: any[]) => mockExecFile(...args),

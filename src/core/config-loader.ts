@@ -86,12 +86,12 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     logger.debug('no config file found, using env + defaults', { path: configPath });
   }
 
-  const dataDir = env('LOONGPILOT_DATA_DIR') ?? file?.dataDir ?? '~/.loongsuite-pilot';
+  const dataDir = env('LOONGSUITE_PILOT_DATA_DIR') ?? file?.dataDir ?? '~/.loongsuite-pilot';
 
-  const userId = env('LOONGPILOT_USER_ID') ?? file?.['user.id'] ?? os.hostname();
+  const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.['user.id'] ?? os.hostname();
 
   return {
-    enabled: envBool('LOONGPILOT_ENABLED', file?.enabled ?? true),
+    enabled: envBool('LOONGSUITE_PILOT_ENABLED', file?.enabled ?? true),
     autoStart: true,
     dataDir,
     userId,
@@ -235,7 +235,7 @@ const TEST_PACKAGE_URL =
 const DEFAULT_CHECK_INTERVAL_MS = 60_000; // 1 minute
 
 function resolveDefaultPackageUrl(): string {
-  const channel = env('LOONGPILOT_CHANNEL') ?? 'release';
+  const channel = env('LOONGSUITE_PILOT_CHANNEL') ?? 'release';
   return (channel === 'test' || channel === 'pre') ? TEST_PACKAGE_URL : RELEASE_PACKAGE_URL;
 }
 
@@ -246,9 +246,9 @@ function resolveDefaultPackageUrl(): string {
 export function buildAutoUpdateConfig(
   file: { autoUpdate?: { enabled?: boolean; checkIntervalMs?: number; manifestUrl?: string; packageUrl?: string } } | null,
 ): AutoUpdateConfig {
-  const packageUrl = env('LOONGPILOT_PACKAGE_URL') ?? file?.autoUpdate?.packageUrl ?? resolveDefaultPackageUrl();
+  const packageUrl = env('LOONGSUITE_PILOT_PACKAGE_URL') ?? file?.autoUpdate?.packageUrl ?? resolveDefaultPackageUrl();
 
-  let manifestUrl = env('LOONGPILOT_MANIFEST_URL') ?? file?.autoUpdate?.manifestUrl;
+  let manifestUrl = env('LOONGSUITE_PILOT_MANIFEST_URL') ?? file?.autoUpdate?.manifestUrl;
   if (!manifestUrl && packageUrl) {
     const lastSlash = packageUrl.lastIndexOf('/');
     manifestUrl = lastSlash >= 0
@@ -257,9 +257,9 @@ export function buildAutoUpdateConfig(
   }
 
   return {
-    enabled: envBool('LOONGPILOT_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
+    enabled: envBool('LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
     checkIntervalMs: envInt(
-      'LOONGPILOT_AUTO_UPDATE_INTERVAL_MS',
+      'LOONGSUITE_PILOT_AUTO_UPDATE_INTERVAL_MS',
       file?.autoUpdate?.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS,
     ),
     manifestUrl,

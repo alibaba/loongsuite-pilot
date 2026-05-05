@@ -28,14 +28,14 @@ The system SHALL present collection health grouped by user-facing top-level agen
 - **THEN** internal names such as `qoder-cli-hook`, `qoder-sqlite`, and `cursor-hook` SHALL NOT appear as top-level cards or primary labels
 
 ### Requirement: Service health summary
-The system SHALL show whether Loongpilot is running and provide high-level service metadata useful to a developer user.
+The system SHALL show whether LoongSuite Pilot is running and provide high-level service metadata useful to a developer user.
 
 #### Scenario: Service is running
-- **WHEN** the Loongpilot PID file points to a live process
+- **WHEN** the LoongSuite Pilot PID file points to a live process
 - **THEN** the dashboard SHALL show the service as running with available metadata such as version, data directory, enabled reporting channels, and last observed activity
 
 #### Scenario: Service is not running
-- **WHEN** the Loongpilot PID file is missing, stale, or points to a non-running process
+- **WHEN** the LoongSuite Pilot PID file is missing, stale, or points to a non-running process
 - **THEN** the dashboard SHALL show the service as not running and avoid presenting stale collection status as currently active
 
 ### Requirement: Agent collection status
@@ -88,7 +88,7 @@ The system SHALL provide a recent activity timeline that uses user-facing langua
 - **THEN** the dashboard SHALL map it to the parent agent and show an activity such as "Cursor collected 11 events"
 
 #### Scenario: Service lifecycle event is observed
-- **WHEN** service logs show Loongpilot startup, shutdown, agent start, or agent stop
+- **WHEN** service logs show LoongSuite Pilot startup, shutdown, agent start, or agent stop
 - **THEN** the dashboard SHALL include a corresponding timeline item with timestamp and severity
 
 #### Scenario: Diagnostic details are available
@@ -145,15 +145,15 @@ The system SHALL keep process-resource metrics bounded on disk and bounded in da
 - **THEN** the API SHALL return only the default recent window of samples and SHALL keep the CSV column format compatible with existing chart parsing
 
 #### Scenario: Optional monitor is stopped
-- **WHEN** the user stops monitor independently of Loongpilot
-- **THEN** Loongpilot collection and reporting SHALL continue without process metrics sampling or dashboard serving
+- **WHEN** the user stops monitor independently of LoongSuite Pilot
+- **THEN** LoongSuite Pilot collection and reporting SHALL continue without process metrics sampling or dashboard serving
 
 #### Scenario: Monitor is explicitly started
-- **WHEN** the user runs `loongpilot monitor-start`
+- **WHEN** the user runs `loongsuite-pilot monitor start`
 - **THEN** the system SHALL start both the process sampler and the local dashboard server and print the dashboard URL
 
 #### Scenario: Core service starts
-- **WHEN** the user runs `loongpilot start`
+- **WHEN** the user runs `loongsuite-pilot start`
 - **THEN** the system SHALL NOT start monitor unless the user explicitly requests monitor
 
 #### Scenario: Auto-update runs while monitor is stopped

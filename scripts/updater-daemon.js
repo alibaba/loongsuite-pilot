@@ -18,10 +18,10 @@ function loadVersion(pointerFile) {
 
 const entry = loadVersion(CURRENT_FILE);
 if (!entry) {
-  console.error('[loongpilot] No valid updater version found');
+  console.error('[loongsuite-pilot] No valid updater version found');
   process.exit(1);
 }
 import(entry).catch(err => {
-  console.error('[loongpilot] Failed to load updater:', err.message);
+  console.error('[loongsuite-pilot] Failed to load updater:', err.message);
   process.exit(1);
 });

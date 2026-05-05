@@ -66,7 +66,7 @@ describe('QoderWorkInput', () => {
           hook_event_name: 'PostToolUse',
           tool_name: 'create_file',
           tool_input: { file_path: '/new.ts', content: 'export const x = 1;' },
-          loongpilot_pre_file_exists: false,
+          loongsuite_pilot_pre_file_exists: false,
           session_id: 'sess-2',
           timestamp: Date.now(),
         },
@@ -102,14 +102,14 @@ describe('QoderWorkInput', () => {
   });
 
   describe('Create vs Edit classification', () => {
-    it('should classify as Create when loongpilot_pre_file_exists = false', async () => {
+    it('should classify as Create when loongsuite_pilot_pre_file_exists = false', async () => {
       const today = getTodayDateString();
       const logFile = path.join(tmpDir, `qoder-work-${today}.jsonl`);
       const record = {
         event_type: 'PostToolUse',
         tool_name: 'create_file',
         tool_input: { file_path: '/new-file.ts', content: 'new' },
-        loongpilot_pre_file_exists: false,
+        loongsuite_pilot_pre_file_exists: false,
         session_id: 'sess-1',
         timestamp: Date.now(),
       };
@@ -124,14 +124,14 @@ describe('QoderWorkInput', () => {
       await input.stop();
     });
 
-    it('should classify as Edit when loongpilot_pre_file_exists = true', async () => {
+    it('should classify as Edit when loongsuite_pilot_pre_file_exists = true', async () => {
       const today = getTodayDateString();
       const logFile = path.join(tmpDir, `qoder-work-${today}.jsonl`);
       const record = {
         event_type: 'PostToolUse',
         tool_name: 'write_to_file',
         tool_input: { file_path: '/existing.ts', content: 'updated' },
-        loongpilot_pre_file_exists: true,
+        loongsuite_pilot_pre_file_exists: true,
         session_id: 'sess-1',
         timestamp: Date.now(),
       };
@@ -177,7 +177,7 @@ describe('QoderWorkInput', () => {
         event_type: 'PostToolUse',
         tool_name: 'create_file',
         tool_input: { file_path: '/f.ts', content: 'const x = 42;' },
-        loongpilot_pre_file_exists: false,
+        loongsuite_pilot_pre_file_exists: false,
         session_id: 'sess-1',
         timestamp: Date.now(),
       };
