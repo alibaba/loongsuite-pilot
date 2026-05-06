@@ -25,6 +25,7 @@ import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
 import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
 
+import { LogRetentionService } from './log-retention-service.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 
@@ -51,6 +52,7 @@ export class Orchestrator extends EventEmitter {
   private inputManager!: InputManager;
   private stateStore!: StateStore;
   private flusher!: BaseFlusher;
+  private logRetentionService!: LogRetentionService;
   private isRunning = false;
 
   constructor(config: AnalyticsConfig) {
@@ -105,6 +107,10 @@ export class Orchestrator extends EventEmitter {
     });
     await this.agentDiscoveryService.start();
 
+    // 8. Start log retention service
+    this.logRetentionService = new LogRetentionService(this.dataDir, this.config.retention);
+    this.logRetentionService.start();
+
     this.isRunning = true;
     this.emit('started');
     logger.info('orchestrator started', {
@@ -116,6 +122,7 @@ export class Orchestrator extends EventEmitter {
     if (!this.isRunning) return;
     logger.info('stopping orchestrator');
 
+    this.logRetentionService?.stop();
     await this.agentDiscoveryService?.stop();
     await this.inputManager?.stopAll();
     await this.flusher?.shutdown();

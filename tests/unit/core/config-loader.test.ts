@@ -192,4 +192,72 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qoder-cli-session'].pollInterval).toBe(45000);
     });
   });
+
+  describe('retention config', () => {
+    it('provides defaults when no config or env vars', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+
+      const config = await loadConfig();
+      expect(config.retention.enabled).toBe(true);
+      expect(config.retention.intervalMs).toBe(21_600_000);
+      expect(config.retention.hookHistoryDays).toBe(7);
+      expect(config.retention.hookErrorDays).toBe(7);
+      expect(config.retention.hookDebugDays).toBe(7);
+      expect(config.retention.outputDays).toBe(7);
+      expect(config.retention.slsFailedDays).toBe(7);
+    });
+
+    it('uses config file values over defaults', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        retention: {
+          hookHistoryDays: 60,
+          hookDebugDays: 14,
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.retention.hookHistoryDays).toBe(60);
+      expect(config.retention.hookDebugDays).toBe(14);
+      expect(config.retention.hookErrorDays).toBe(7);
+    });
+
+    it('LOONGSUITE_PILOT_LOG_RETENTION_DAYS overrides all defaults', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_LOG_RETENTION_DAYS', '10');
+
+      const config = await loadConfig();
+      expect(config.retention.hookHistoryDays).toBe(10);
+      expect(config.retention.hookErrorDays).toBe(10);
+      expect(config.retention.hookDebugDays).toBe(10);
+      expect(config.retention.outputDays).toBe(10);
+      expect(config.retention.slsFailedDays).toBe(10);
+    });
+
+    it('config file values take precedence over unified env var', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        retention: { hookHistoryDays: 90 },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_LOG_RETENTION_DAYS', '10');
+
+      const config = await loadConfig();
+      expect(config.retention.hookHistoryDays).toBe(90);
+      expect(config.retention.hookErrorDays).toBe(10);
+    });
+
+    it('LOONGSUITE_PILOT_LOG_RETENTION_ENABLED disables retention', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_LOG_RETENTION_ENABLED', 'false');
+
+      const config = await loadConfig();
+      expect(config.retention.enabled).toBe(false);
+    });
+
+    it('LOONGSUITE_PILOT_LOG_RETENTION_INTERVAL_MS overrides interval', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_LOG_RETENTION_INTERVAL_MS', '3600000');
+
+      const config = await loadConfig();
+      expect(config.retention.intervalMs).toBe(3_600_000);
+    });
+  });
 });

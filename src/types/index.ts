@@ -26,6 +26,7 @@ export interface AnalyticsConfig {
   userId: string;
   listeners: Record<string, ListenerConfig>;
   flushers: FlusherConfig;
+  retention: LogRetentionConfig;
   autoUpdate?: AutoUpdateConfig;
 }
 
@@ -87,6 +88,16 @@ export interface AgentDetectionEntry {
   stop: () => Promise<void>;
   pollIntervalMs: number;
   runOnActive?: boolean;
+}
+
+export interface LogRetentionConfig {
+  enabled: boolean;
+  intervalMs: number;
+  hookHistoryDays: number;
+  hookErrorDays: number;
+  hookDebugDays: number;
+  outputDays: number;
+  slsFailedDays: number;
 }
 
 export type AgentControlMode = 'on' | 'off' | 'auto';

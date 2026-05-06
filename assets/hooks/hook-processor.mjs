@@ -53,17 +53,23 @@ function parseArgs() {
 
 // --- Logging ----------------------------------------------------------------
 
-let _logFile = '';
-function getLogFile(agentId) {
-  if (!_logFile) _logFile = path.join(HOOKS_DIR, `${agentId}_hook.log`);
-  return _logFile;
+function getDebugLogFile(agentId) {
+  const day = new Date().toISOString().slice(0, 10);
+  return path.join(LOONGSUITE_PILOT_LOGS_BASE_DIR, agentId, 'debug', `${agentId}-debug-${day}.log`);
+}
+
+function getErrorLogFile(agentId) {
+  const day = new Date().toISOString().slice(0, 10);
+  return path.join(LOONGSUITE_PILOT_LOGS_BASE_DIR, agentId, 'errors', `${agentId}-error-${day}.log`);
 }
 
 function logDebug(agentId, message) {
   if (!ENABLE_LOGGING) return;
   try {
+    const file = getDebugLogFile(agentId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
     const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
-    fs.appendFileSync(getLogFile(agentId), `[${ts}] ${message}\n`, 'utf-8');
+    fs.appendFileSync(file, `[${ts}] ${message}\n`, 'utf-8');
   } catch { /* best-effort */ }
 }
 
@@ -286,7 +292,10 @@ async function main() {
 main().catch((e) => {
   // Fail-open: never block the caller.
   try {
+    const agentId = parseArgs().agentId || 'unknown';
+    const file = getErrorLogFile(agentId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
     const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
-    fs.appendFileSync(path.join(HOOKS_DIR, 'hook_processor_error.log'), `[${ts}] ${e.message}\n`, 'utf-8');
+    fs.appendFileSync(file, `[${ts}] ${e.message}\n`, 'utf-8');
   } catch { /* ignore */ }
 });

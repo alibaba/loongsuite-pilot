@@ -1,5 +1,5 @@
 import * as os from 'node:os';
-import type { AnalyticsConfig, AutoUpdateConfig, FlusherConfig, SlsEndpoint, SlsMode } from '../types/index.js';
+import type { AnalyticsConfig, AutoUpdateConfig, FlusherConfig, LogRetentionConfig, SlsEndpoint, SlsMode } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -49,6 +49,16 @@ interface ConfigFile {
     enabled?: boolean;
     pollInterval?: number;
   }>;
+
+  retention?: {
+    enabled?: boolean;
+    intervalMs?: number;
+    hookHistoryDays?: number;
+    hookErrorDays?: number;
+    hookDebugDays?: number;
+    outputDays?: number;
+    slsFailedDays?: number;
+  };
 }
 
 function env(key: string): string | undefined {
@@ -98,6 +108,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
 
     listeners: buildListenersConfig(file),
     flushers: buildFlushersConfig(file, dataDir),
+    retention: buildRetentionConfig(file),
   };
 }
 
@@ -134,6 +145,29 @@ function buildListenersConfig(
   if (envPoll > 0) result['qoder-cli-session'].pollInterval = envPoll;
 
   return result;
+}
+
+function buildRetentionConfig(file: ConfigFile | null): LogRetentionConfig {
+  const unifiedDays = envInt('LOONGSUITE_PILOT_LOG_RETENTION_DAYS', 0);
+
+  const resolve = (fileVal: number | undefined, fallback: number): number => {
+    if (fileVal !== undefined) return fileVal;
+    if (unifiedDays > 0) return unifiedDays;
+    return fallback;
+  };
+
+  return {
+    enabled: envBool('LOONGSUITE_PILOT_LOG_RETENTION_ENABLED', file?.retention?.enabled ?? true),
+    intervalMs: envInt(
+      'LOONGSUITE_PILOT_LOG_RETENTION_INTERVAL_MS',
+      file?.retention?.intervalMs ?? 21_600_000, // 6 hours
+    ),
+    hookHistoryDays: resolve(file?.retention?.hookHistoryDays, 7),
+    hookErrorDays: resolve(file?.retention?.hookErrorDays, 7),
+    hookDebugDays: resolve(file?.retention?.hookDebugDays, 7),
+    outputDays: resolve(file?.retention?.outputDays, 7),
+    slsFailedDays: resolve(file?.retention?.slsFailedDays, 7),
+  };
 }
 
 function buildFlushersConfig(
