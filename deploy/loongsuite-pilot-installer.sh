@@ -166,6 +166,17 @@ check_deps() {
         exit 1
     fi
 
+    if [ "$(uname)" = "Darwin" ]; then
+        local sys_arch; sys_arch=$(uname -m)
+        local node_arch; node_arch=$(node -e "process.stdout.write(process.arch)")
+        if [ "$sys_arch" = "arm64" ] && [ "$node_arch" = "x64" ]; then
+            msg "⚠️  架构不匹配: 系统为 arm64 (Apple Silicon)，但 Node.js 为 x64 (Intel)" \
+                "⚠️  Architecture mismatch: system is arm64 but Node.js is x64 (Intel)"
+            msg "   原生模块可能无法正常加载，建议安装 arm64 版本的 Node.js" \
+                "   Native modules may fail to load. Please install arm64 Node.js"
+        fi
+    fi
+
     if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
         msg "❌ 需要 curl 或 wget，请先安装" \
             "❌ curl or wget is required — please install one first"

@@ -109,19 +109,47 @@ stop_pid_file() {
     rm -f "$pid_file"
 }
 
+_node_is_suitable() {
+    local bin="$1"
+    [ -x "$bin" ] || return 1
+    local ver
+    ver="$("$bin" --version 2>/dev/null)" || return 1
+    local major="${ver#v}"
+    major="${major%%.*}"
+    [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 18 )) || return 1
+    if [ "$(uname)" = "Darwin" ]; then
+        local sys_arch; sys_arch=$(uname -m)
+        local node_arch; node_arch=$("$bin" -p process.arch 2>/dev/null) || return 1
+        case "${sys_arch}:${node_arch}" in
+            arm64:arm64|x86_64:x64) ;;
+            *) return 1 ;;
+        esac
+    fi
+    return 0
+}
+
 resolve_node() {
     if command -v node >/dev/null 2>&1; then
-        command -v node
-        return 0
+        local sys_node; sys_node=$(command -v node)
+        if _node_is_suitable "$sys_node"; then
+            echo "$sys_node"
+            return 0
+        fi
     fi
-    for candidate in \
-        "$HOME/.nvm/versions/node"/*/bin/node \
-        /usr/local/bin/node \
-        /opt/homebrew/bin/node \
-        "$HOME/.local/bin/node" \
-        "$HOME/.volta/bin/node" \
-        "$HOME/.fnm/aliases/default/bin/node"; do
-        if [ -x "$candidate" ]; then
+    local _candidates=(
+        /opt/homebrew/bin/node
+        /usr/local/bin/node
+        "$HOME/.volta/bin/node"
+        "$HOME/.fnm/aliases/default/bin/node"
+        "$HOME/.local/bin/node"
+    )
+    local _nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
+    local i
+    for (( i=${#_nvm_candidates[@]}-1; i>=0; i-- )); do
+        _candidates+=("${_nvm_candidates[i]}")
+    done
+    for candidate in "${_candidates[@]}"; do
+        if _node_is_suitable "$candidate"; then
             echo "$candidate"
             return 0
         fi
