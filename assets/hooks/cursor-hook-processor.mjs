@@ -4,7 +4,7 @@
  *
  * Reads Cursor hook JSON from stdin, supplements collector-owned fields, and
  * appends the raw-ish hook record to:
- *   ~/.loongsuite-pilot/logs/cursor-hook/history/cursor-YYYY-MM-DD.jsonl
+ *   ~/.loongsuite-pilot/logs/cursor/history/cursor-YYYY-MM-DD.jsonl
  *
  * Semantic event_t mapping belongs in CursorHookInput, not in this processor.
  */
@@ -65,8 +65,8 @@ async function appendErrorJsonl(dataDir, now, fields) {
     ...fields,
   }) || { time: toIsoUtc(now), clientType: 'CursorHook', stage: 'unknown' };
   const candidates = [
-    path.join(dataDir, 'logs', 'cursor-hook', 'errors', `cursor-error-${day}.jsonl`),
-    path.join(os.tmpdir(), 'loongsuite-pilot', 'cursor-hook', 'errors', `cursor-error-${day}.jsonl`),
+    path.join(dataDir, 'logs', 'cursor', 'errors', `cursor-error-${day}.jsonl`),
+    path.join(os.tmpdir(), 'loongsuite-pilot', 'cursor', 'errors', `cursor-error-${day}.jsonl`),
   ];
   for (const filePath of candidates) {
     try {
@@ -147,7 +147,7 @@ async function main() {
   }
 
   const day = toIsoUtc(now).slice(0, 10);
-  const logFile = path.join(dataDir, 'logs', 'cursor-hook', 'history', `cursor-${day}.jsonl`);
+  const logFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
   try {
     await appendJsonl(logFile, buildRecord(payload, now));
   } catch (err) {

@@ -14,7 +14,7 @@ log_error() {
   local day
   day="$(date -u +%Y-%m-%d 2>/dev/null || true)"
   [[ -n "$day" ]] || day="unknown"
-  local dir="$data_dir/logs/cursor-hook/errors"
+  local dir="$data_dir/logs/cursor/errors"
   local file="$dir/cursor-error-$day.jsonl"
   mkdir -p "$dir" 2>/dev/null || return 0
   printf '{"time":"%s","clientType":"CursorHook","stage":"%s","error.type":"shell_%s","error.message":%s}\n' \

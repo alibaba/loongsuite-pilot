@@ -320,7 +320,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Cursor Hook (Hook JSONL) ---
-    const cursorHookLogDir = path.join(this.dataDir, 'logs', 'cursor-hook', 'history');
+    const cursorHookLogDir = path.join(this.dataDir, 'logs', 'cursor', 'history');
     const cursorHookInput = new CursorHookInput({
       stateStore: this.stateStore,
       logDir: cursorHookLogDir,
