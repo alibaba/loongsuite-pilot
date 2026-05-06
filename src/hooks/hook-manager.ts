@@ -23,6 +23,8 @@ export interface HookDefinition {
   hookCommand: string;
   /** Matcher pattern for the hook. */
   matcher?: string;
+  /** Optional explicit history log directory for agents whose control id differs from storage path. */
+  historyDir?: string;
   /**
    * If true, use Qoder's nested format:
    *   { matcher: "...", hooks: [{ command, type }] }
@@ -94,7 +96,7 @@ export class HookManager {
       await writeJsonFile(def.settingsPath, settings);
 
       // Ensure log directory for this agent
-      await ensureDir(path.join(this.logBaseDir, def.agentId, 'history'));
+      await ensureDir(def.historyDir ?? path.join(this.logBaseDir, def.agentId, 'history'));
 
       logger.info('hook installed', { agentId: def.agentId });
       return true;
@@ -190,6 +192,7 @@ export class HookManager {
       settingsPath,
       hookJsonPath: ['hooks', event],
       hookCommand: command,
+      historyDir: path.join(baseDir, 'logs', 'cursor', 'history'),
     }));
   }
 

@@ -296,7 +296,7 @@ describe('Cursor hook script integration flow', () => {
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
 
-    const logFile = path.join(tmpDir, 'logs', 'cursor-hook', 'history', `cursor-${getTodayDateString()}.jsonl`);
+    const logFile = path.join(tmpDir, 'logs', 'cursor', 'history', `cursor-${getTodayDateString()}.jsonl`);
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
     expect(lines).toHaveLength(1);
 
@@ -320,7 +320,7 @@ describe('Cursor hook script integration flow', () => {
     expect(first.status).toBe(0);
     expect(second.status).toBe(0);
 
-    const logFile = path.join(tmpDir, 'logs', 'cursor-hook', 'history', `cursor-${getTodayDateString()}.jsonl`);
+    const logFile = path.join(tmpDir, 'logs', 'cursor', 'history', `cursor-${getTodayDateString()}.jsonl`);
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
     expect(lines).toHaveLength(2);
     const records = lines.map(line => JSON.parse(line));
@@ -342,7 +342,7 @@ describe('Cursor hook script integration flow', () => {
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
 
-    const logFile = path.join(tmpDir, 'logs', 'cursor-hook', 'history', `cursor-${getTodayDateString()}.jsonl`);
+    const logFile = path.join(tmpDir, 'logs', 'cursor', 'history', `cursor-${getTodayDateString()}.jsonl`);
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
     const record = JSON.parse(lines.at(-1)!);
     expect(record.hook_event_name).toBe('beforeMCPExecution');
@@ -364,7 +364,7 @@ describe('Cursor hook script integration flow', () => {
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
 
-    const logFile = path.join(tmpDir, 'logs', 'cursor-hook', 'history', `cursor-${getTodayDateString()}.jsonl`);
+    const logFile = path.join(tmpDir, 'logs', 'cursor', 'history', `cursor-${getTodayDateString()}.jsonl`);
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
     const record = JSON.parse(lines.at(-1)!);
     expect(record.hook_event_name).toBe('beforeSubmitPrompt');
@@ -379,10 +379,10 @@ describe('Cursor hook script integration flow', () => {
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
 
-    const logFile = path.join(tmpDir, 'logs', 'cursor-hook', 'history', `cursor-${getTodayDateString()}.jsonl`);
+    const logFile = path.join(tmpDir, 'logs', 'cursor', 'history', `cursor-${getTodayDateString()}.jsonl`);
     await expect(fs.access(logFile)).rejects.toBeTruthy();
 
-    const errorFile = path.join(tmpDir, 'logs', 'cursor-hook', 'errors', `cursor-error-${getTodayDateString()}.jsonl`);
+    const errorFile = path.join(tmpDir, 'logs', 'cursor', 'errors', `cursor-error-${getTodayDateString()}.jsonl`);
     const errorLines = (await fs.readFile(errorFile, 'utf-8')).trim().split('\n');
     expect(errorLines).toHaveLength(1);
     const errorRecord = JSON.parse(errorLines[0]!);
@@ -423,7 +423,7 @@ describe('Cursor hook script integration flow', () => {
       expect(result.stdout.trim()).toBe('{}');
     }
 
-    const logFile = path.join(tmpDir, 'logs', 'cursor-hook', 'history', `cursor-${getTodayDateString()}.jsonl`);
+    const logFile = path.join(tmpDir, 'logs', 'cursor', 'history', `cursor-${getTodayDateString()}.jsonl`);
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
     const emitted = lines.map(line => JSON.parse(line).hook_event_name);
     for (const eventName of events) {
@@ -446,7 +446,7 @@ describe('Cursor hook script integration flow', () => {
 
     const input = new CursorHookInput({
       stateStore: stateStore as any,
-      logDir: path.join(tmpDir, 'logs', 'cursor-hook', 'history'),
+      logDir: path.join(tmpDir, 'logs', 'cursor', 'history'),
       logPrefix: 'cursor',
       pollIntervalMs: 60_000,
     });
