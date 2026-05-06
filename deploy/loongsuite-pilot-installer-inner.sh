@@ -908,7 +908,9 @@ cmd_install() {
     msg "==> 启动服务..." "==> Starting service..."
     if loongsuite-pilot start; then
         sleep 2
-        if loongsuite-pilot status 2>/dev/null | grep -q "is running"; then
+        local status_output
+        status_output=$(loongsuite-pilot status 2>/dev/null || true)
+        if printf '%s\n' "$status_output" | grep -q "is running"; then
             msg "    ✅ 服务已启动" "    ✅ Service started"
         else
             msg "    ⚠️  服务可能尚未就绪，请检查: loongsuite-pilot status" \
