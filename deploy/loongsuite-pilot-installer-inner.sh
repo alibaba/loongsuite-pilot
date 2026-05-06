@@ -557,9 +557,9 @@ WRAPPER
             fi
 
             if [ -n "$hook_install_args" ]; then
-                "$hook_cmd" install $hook_install_args 2>/dev/null || true
+                node "$dest_dir/bin/$hook_cmd" install $hook_install_args 2>/dev/null || true
             else
-                "$hook_cmd" install 2>/dev/null || true
+                node "$dest_dir/bin/$hook_cmd" install 2>/dev/null || true
             fi
 
         elif [ -n "$remote_url" ]; then
@@ -684,6 +684,33 @@ remove_otel_plugin() {
             fi
         done
         msg "    ✅ claude alias 已清理" "    ✅ claude alias cleaned"
+
+        # Clean settings.json hooks (fallback when uninstall.sh is unavailable)
+        local claude_settings="$HOME/.claude/settings.json"
+        if [ -f "$claude_settings" ] && grep -qE "otel-claude-hook|hook-entry\.sh" "$claude_settings" 2>/dev/null && command -v node &>/dev/null; then
+            node -e "
+const fs = require('fs');
+const f = process.argv[1];
+const isOurs = c => c.includes('otel-claude-hook') || c.includes('hook-entry.sh');
+try {
+  const d = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  if (d && d.hooks) {
+    for (const ev of Object.keys(d.hooks)) {
+      if (!Array.isArray(d.hooks[ev])) continue;
+      d.hooks[ev] = d.hooks[ev].map(m => {
+        if (!Array.isArray(m.hooks)) return m;
+        m.hooks = m.hooks.filter(h => !(h.command && isOurs(h.command)));
+        return m.hooks.length > 0 ? m : null;
+      }).filter(Boolean);
+      if (d.hooks[ev].length === 0) delete d.hooks[ev];
+    }
+    if (Object.keys(d.hooks).length === 0) delete d.hooks;
+    fs.writeFileSync(f, JSON.stringify(d, null, 2) + '\n');
+  }
+} catch {}
+" "$claude_settings" 2>/dev/null || true
+            msg "    ✅ settings.json hooks 已清理" "    ✅ settings.json hooks cleaned"
+        fi
     fi
 
     local otel_config="$HOME/.claude/otel-config.json"
@@ -723,17 +750,18 @@ try {
     else
         # Clean hooks.json (new format)
         local codex_hooks_json="$HOME/.codex/hooks.json"
-        if [ -f "$codex_hooks_json" ] && grep -q "otel-codex-hook" "$codex_hooks_json" 2>/dev/null && command -v node &>/dev/null; then
+        if [ -f "$codex_hooks_json" ] && grep -qE "otel-codex-hook|hook-entry\.sh" "$codex_hooks_json" 2>/dev/null && command -v node &>/dev/null; then
             node -e "
 const fs = require('fs');
 const f = process.argv[1];
+const isOurs = c => c.includes('otel-codex-hook') || c.includes('hook-entry.sh');
 try {
   const d = JSON.parse(fs.readFileSync(f, 'utf-8'));
   if (d && d.hooks) {
     for (const ev of Object.keys(d.hooks)) {
       d.hooks[ev] = d.hooks[ev].filter(g => {
         if (!g.hooks) return true;
-        g.hooks = g.hooks.filter(h => !(h.command && h.command.includes('otel-codex-hook')));
+        g.hooks = g.hooks.filter(h => !(h.command && isOurs(h.command)));
         return g.hooks.length > 0;
       });
       if (d.hooks[ev].length === 0) delete d.hooks[ev];
