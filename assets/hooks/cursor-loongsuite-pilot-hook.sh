@@ -37,18 +37,34 @@ if [[ ! -f "$PROCESSOR" ]]; then
   exit 0
 fi
 
+MIN_NODE_MAJOR=18
+
+node_version_ok() {
+  local ver
+  ver="$("$1" --version 2>/dev/null)" || return 1
+  local major="${ver#v}"
+  major="${major%%.*}"
+  [[ "$major" =~ ^[0-9]+$ ]] && (( major >= MIN_NODE_MAJOR ))
+}
+
 NODE_BIN=""
-if command -v node >/dev/null 2>&1; then
+if command -v node >/dev/null 2>&1 && node_version_ok "node"; then
   NODE_BIN="node"
 else
-  for candidate in \
-    "$HOME/.nvm/versions/node"/*/bin/node \
-    /usr/local/bin/node \
-    /opt/homebrew/bin/node \
-    "$HOME/.local/bin/node" \
-    "$HOME/.volta/bin/node" \
-    "$HOME/.fnm/aliases/default/bin/node"; do
-    if [[ -x "$candidate" ]]; then
+  nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
+  candidates=()
+  for (( i=${#nvm_candidates[@]}-1; i>=0; i-- )); do
+    candidates+=("${nvm_candidates[i]}")
+  done
+  candidates+=(
+    /usr/local/bin/node
+    /opt/homebrew/bin/node
+    "$HOME/.local/bin/node"
+    "$HOME/.volta/bin/node"
+    "$HOME/.fnm/aliases/default/bin/node"
+  )
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "$candidate" ]] && node_version_ok "$candidate"; then
       NODE_BIN="$candidate"
       break
     fi
@@ -56,8 +72,8 @@ else
 fi
 
 if [[ -z "$NODE_BIN" ]]; then
-  echo "[loongsuite-pilot] node runtime not found" >&2
-  log_error "missing_node" "node runtime not found"
+  echo "[loongsuite-pilot] node >= $MIN_NODE_MAJOR not found" >&2
+  log_error "missing_node" "node >= $MIN_NODE_MAJOR not found"
   printf '%s\n' "$EMPTY_RESULT"
   exit 0
 fi
