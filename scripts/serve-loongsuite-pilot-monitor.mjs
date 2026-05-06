@@ -16,6 +16,8 @@ const host = process.env.LOONGSUITE_PILOT_MONITOR_HOST || '127.0.0.1';
 const dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(homedir(), '.loongsuite-pilot');
 const monitorDir = process.env.LOONGSUITE_PILOT_MONITOR_DIR || path.join(dataDir, 'logs', 'process-monitor');
 const overview = createOverviewAggregator({ dataDir });
+/** ISO timestamp when this dashboard Node process started (same run as `monitor start` dashboard). */
+const monitorDashboardStartedAt = new Date().toISOString();
 
 function sendJson(response, statusCode, body) {
   response.writeHead(statusCode, {
@@ -63,9 +65,10 @@ const server = createServer(async (request, response) => {
     }
 
     if (url.pathname === '/api/overview') {
-      sendJson(response, 200, await overview.getOverview({
+      const body = await overview.getOverview({
         force: url.searchParams.get('force') === 'true',
-      }));
+      });
+      sendJson(response, 200, { ...body, monitorDashboardStartedAt });
       return;
     }
 

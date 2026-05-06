@@ -488,6 +488,14 @@
       return date.toLocaleTimeString();
     }
 
+    function formatDateTime(value) {
+      if (!value) return '--';
+      const normalized = typeof value === 'string' ? value.replace(' ', 'T') : value;
+      const date = new Date(normalized);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'medium' });
+    }
+
     function setNotice(message) {
       $('notice').textContent = message || '';
       $('notice').classList.toggle('show', Boolean(message));
@@ -699,7 +707,7 @@
         if (metricsStatusResponse.ok) state.metricsStatus = await metricsStatusResponse.json();
         renderOverview(state.overview);
         renderCharts();
-        setStatus(true, `最新刷新 ${formatTime(state.overview.generatedAt)} · 每 ${REFRESH_MS / 1000} 秒自动刷新`);
+        setStatus(true, `启动时间 ${formatDateTime(state.overview.monitorDashboardStartedAt)} · 最新刷新 ${formatTime(state.overview.generatedAt)} · 每 ${REFRESH_MS / 1000} 秒自动刷新`);
         setNotice('');
       } catch (error) {
         setStatus(false, '读取失败');
