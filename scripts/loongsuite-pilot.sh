@@ -10,6 +10,7 @@ PREVIOUS_FILE="$CACHE_DIR/previous"
 BOOTSTRAP_DIR="$CACHE_DIR/bin"
 PACKAGE_DIR="$CACHE_DIR/package"
 PID_FILE="$DATA_DIR/loongsuite-pilot.pid"
+UPDATER_PID_FILE="$DATA_DIR/loongsuite-pilot-updater.pid"
 LOG_DIR="$DATA_DIR/logs"
 LOG_FILE="$LOG_DIR/loongsuite-pilot-service.log"
 UPDATER_LOG_FILE="$LOG_DIR/loongsuite-pilot-updater.log"
@@ -286,6 +287,16 @@ cmd_start() {
     local pid=$!
     echo "$pid" > "$PID_FILE"
     echo "✅ loongsuite-pilot started (PID $pid)"
+
+    # Also start the updater daemon if available
+    local updater_entry="$BOOTSTRAP_DIR/updater-daemon.js"
+    if [ -f "$updater_entry" ]; then
+        if ! is_pid_file_running "$UPDATER_PID_FILE"; then
+            nohup node "$updater_entry" >> "$UPDATER_LOG_FILE" 2>&1 &
+            echo "$!" > "$UPDATER_PID_FILE"
+            echo "✅ loongsuite-pilot updater started (PID $!)"
+        fi
+    fi
 }
 
 cmd_stop() {
@@ -312,6 +323,9 @@ cmd_stop() {
             kill -9 "$pid" 2>/dev/null || true
         fi
     fi
+
+    # Stop updater PID-file tracked process
+    stop_pid_file "$UPDATER_PID_FILE"
 
     # Kill any remaining orphan processes
     pkill -f "loongsuite-pilot/bin/collector-daemon" 2>/dev/null || true
@@ -456,6 +470,11 @@ cmd_status() {
         echo "✅ loongsuite-pilot${ver_info} is running (PID $pid)"
     else
         echo "⚪ loongsuite-pilot${ver_info} is not running"
+    fi
+    if is_pid_file_running "$UPDATER_PID_FILE"; then
+        echo "   updater: running (PID $(cat "$UPDATER_PID_FILE"))"
+    else
+        echo "   updater: stopped"
     fi
     local sampler_pid=""
     local dashboard_pid=""
