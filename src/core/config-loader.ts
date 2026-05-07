@@ -1,5 +1,13 @@
 import * as os from 'node:os';
-import type { AnalyticsConfig, AutoUpdateConfig, FlusherConfig, LogRetentionConfig, SlsEndpoint, SlsMode } from '../types/index.js';
+import type {
+  AnalyticsConfig,
+  AutoUpdateConfig,
+  ContentDataConfig,
+  FlusherConfig,
+  LogRetentionConfig,
+  SlsEndpoint,
+  SlsMode,
+} from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -59,6 +67,10 @@ interface ConfigFile {
     outputDays?: number;
     slsFailedDays?: number;
   };
+
+  contentData?: Record<string, {
+    uploadEnabled?: boolean | string;
+  }>;
 }
 
 function env(key: string): string | undefined {
@@ -109,7 +121,31 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     listeners: buildListenersConfig(file),
     flushers: buildFlushersConfig(file, dataDir),
     retention: buildRetentionConfig(file),
+    contentData: buildContentDataConfig(file),
   };
+}
+
+function parseOptionalBool(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true') return true;
+  if (normalized === 'false') return false;
+  return undefined;
+}
+
+function buildContentDataConfig(file: ConfigFile | null): ContentDataConfig {
+  const result: ContentDataConfig = {};
+  if (!file?.contentData || typeof file.contentData !== 'object') return result;
+
+  for (const [agentType, policy] of Object.entries(file.contentData)) {
+    if (!agentType || !policy || typeof policy !== 'object') continue;
+    result[agentType] = {
+      uploadEnabled: parseOptionalBool(policy.uploadEnabled) ?? true,
+    };
+  }
+
+  return result;
 }
 
 function buildListenersConfig(

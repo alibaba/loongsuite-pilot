@@ -179,6 +179,7 @@ describe('QoderInput', () => {
 
       expect(allEntries.length).toBeGreaterThanOrEqual(1);
       expect(allEntries[0]!.agentType).toBe(ClientType.Qoder);
+      expect(allEntries[0]!['agent.type']).toBe(ClientType.Qoder);
       expect(allEntries[0]!.actionType).toBe(ActionType.Edit);
     });
   });

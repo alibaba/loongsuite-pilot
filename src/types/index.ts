@@ -27,8 +27,15 @@ export interface AnalyticsConfig {
   listeners: Record<string, ListenerConfig>;
   flushers: FlusherConfig;
   retention: LogRetentionConfig;
+  contentData: ContentDataConfig;
   autoUpdate?: AutoUpdateConfig;
 }
+
+export interface ContentDataAgentPolicy {
+  uploadEnabled: boolean;
+}
+
+export type ContentDataConfig = Record<string, ContentDataAgentPolicy>;
 
 export interface FlusherConfig {
   sls?: SlsFlusherConfig;

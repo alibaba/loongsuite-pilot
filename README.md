@@ -384,11 +384,30 @@ loongsuite-pilot restart
     "qoder-work":     { "enabled": true, "pollInterval": 60000 },
     "qoder-cli-hook": { "enabled": true, "pollInterval": 60000 },
     "cursor-hook":    { "enabled": true, "pollInterval": 60000 }
+  },
+
+  "contentData": {
+    "cursor": {
+      "uploadEnabled": "true"
+    },
+    "qoder-cli": {
+      "uploadEnabled": "true"
+    }
   }
 }
 ```
 
 > AK/SK 等敏感信息建议通过环境变量传入，配置文件中只放非敏感项。
+
+#### 敏感内容上报控制
+
+`contentData` 按 `agent.type` 配置内容字段是否上报到输出通道（SLS / JSONL / HTTP）。当前阶段只实现 `uploadEnabled`：
+
+- 默认值为 `true`：上报敏感内容字段。
+- 设置为 `"false"` 或 `false`：删除敏感内容字段，但保留模型、token、cost、session、event 等非敏感元数据。
+- `maskEnabled`、`excludedWorkspace` 等字段当前会被忽略，预留给后续能力。
+
+敏感内容字段包括 `input.messages`、`input.messages_delta`、`output.messages`、`tool.arguments`、`tool.result.payload`，以及 legacy 采集链路里的 `content` / `inlineDiffMessage`。
 
 ### 环境变量
 
