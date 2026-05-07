@@ -5,6 +5,7 @@ import { buildTestEntry } from '../../helpers/fixture-builder.js';
 import { EventEmitter } from 'node:events';
 import { ClientType, CollectionMethod } from '../../../src/types/index.js';
 import type { AgentActivityEntry, InputState } from '../../../src/types/index.js';
+import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -117,6 +118,103 @@ describe('InputManager', () => {
 
       const dispatched = flusher.batchCalls[0][0];
       expect(dispatched['user.id']).toBe('installer-user');
+    });
+  });
+
+  describe('content data policy', () => {
+    it('deletes sensitive fields before dispatch when upload is disabled', async () => {
+      const input = new StubInput('cursor-hook');
+      manager.registerInput(input as any);
+      manager.setContentDataConfig({
+        [ClientType.Cursor]: { uploadEnabled: false },
+      });
+
+      const entry = buildTestEntry({
+        'agent.type': ClientType.Cursor,
+        content: 'legacy secret',
+        inlineDiffMessage: 'legacy diff',
+      });
+      entry['input.messages'] = [{ role: 'user', content: 'secret prompt' }];
+      entry['tool.result.payload'] = { output: 'secret output' };
+      input.emit('entries', [entry]);
+      await new Promise(r => setTimeout(r, 50));
+
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched).not.toHaveProperty('input.messages');
+      expect(dispatched).not.toHaveProperty('tool.result.payload');
+      expect(dispatched).not.toHaveProperty('content');
+      expect(dispatched).not.toHaveProperty('inlineDiffMessage');
+      expect(dispatched.attributes).not.toHaveProperty('content');
+      expect(dispatched.attributes).not.toHaveProperty('inlineDiffMessage');
+      expect(dispatched['agent.type']).toBe(ClientType.Cursor);
+      expect(dispatched['event.name']).toBe('event');
+    });
+
+    it('preserves sensitive fields when upload is enabled by default', async () => {
+      const input = new StubInput('cursor-hook');
+      manager.registerInput(input as any);
+
+      const entry = buildTestEntry({
+        'agent.type': ClientType.Cursor,
+      });
+      entry['input.messages'] = [{ role: 'user', content: 'visible prompt' }];
+      input.emit('entries', [entry]);
+      await new Promise(r => setTimeout(r, 50));
+
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched['input.messages']).toEqual([{ role: 'user', content: 'visible prompt' }]);
+    });
+
+    it('applies policy by agent.type rather than input id', async () => {
+      const hookInput = new StubInput('cursor-hook');
+      const sqliteInput = new StubInput('cursor-sqlite');
+      manager.registerInput(hookInput as any);
+      manager.registerInput(sqliteInput as any);
+      manager.setContentDataConfig({
+        [ClientType.Cursor]: { uploadEnabled: false },
+      });
+
+      const hookEntry = buildTestEntry({
+        'agent.type': ClientType.Cursor,
+      });
+      hookEntry['input.messages'] = [{ role: 'user', content: 'hook secret' }];
+      const sqliteEntry = buildTestEntry({
+        'agent.type': ClientType.Cursor,
+      });
+      sqliteEntry['input.messages'] = [{ role: 'user', content: 'sqlite secret' }];
+      hookInput.emit('entries', [hookEntry]);
+      sqliteInput.emit('entries', [sqliteEntry]);
+      await new Promise(r => setTimeout(r, 50));
+
+      expect(flusher.batchCalls).toHaveLength(2);
+      expect(flusher.batchCalls[0][0]).not.toHaveProperty('input.messages');
+      expect(flusher.batchCalls[1][0]).not.toHaveProperty('input.messages');
+    });
+
+    it('dispatches the same policy-applied entries to all child flushers', async () => {
+      const jsonl = new MockFlusher('jsonl');
+      const sls = new MockFlusher('sls');
+      const http = new MockFlusher('http');
+      const multi = new MultiFlusher([jsonl, sls, http]);
+      manager.setFlusher(multi);
+      manager.setContentDataConfig({
+        [ClientType.Cursor]: { uploadEnabled: false },
+      });
+      const input = new StubInput('cursor-hook');
+      manager.registerInput(input as any);
+
+      const entry = buildTestEntry({
+        'agent.type': ClientType.Cursor,
+      });
+      entry['output.messages'] = [{ type: 'text', content: 'secret response' }];
+      input.emit('entries', [entry]);
+      await new Promise(r => setTimeout(r, 50));
+
+      for (const child of [jsonl, sls, http]) {
+        expect(child.batchCalls).toHaveLength(1);
+        expect(child.batchCalls[0][0]).not.toHaveProperty('output.messages');
+        expect(child.batchCalls[0][0]['agent.type']).toBe(ClientType.Cursor);
+      }
     });
   });
 

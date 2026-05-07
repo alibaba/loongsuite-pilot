@@ -164,6 +164,16 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
         maxFileSizeMb: 100,
       },
     },
+    retention: {
+      enabled: true,
+      intervalMs: 21_600_000,
+      hookHistoryDays: 7,
+      hookErrorDays: 7,
+      hookDebugDays: 7,
+      outputDays: 7,
+      slsFailedDays: 7,
+    },
+    contentData: {},
     ...overrides,
   };
 }

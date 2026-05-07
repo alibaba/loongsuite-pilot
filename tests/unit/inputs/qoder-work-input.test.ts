@@ -53,6 +53,7 @@ describe('QoderWorkInput', () => {
       await input.start();
       expect(allEntries).toHaveLength(1);
       expect(allEntries[0]!.agentType).toBe(ClientType.QoderWork);
+      expect(allEntries[0]!['agent.type']).toBe(ClientType.QoderWork);
       expect(allEntries[0]!.filePath).toBe('/src/app.ts');
       await input.stop();
     });

@@ -1,8 +1,9 @@
 import { EventEmitter } from 'node:events';
-import type { AgentActivityEntry, AgentDetectionEntry } from '../types/index.js';
+import type { AgentActivityEntry, AgentDetectionEntry, ContentDataConfig } from '../types/index.js';
 import type { BaseInput } from '../inputs/base/base-input.js';
 import type { BaseFlusher } from '../flushers/base-flusher.js';
 import { createLogger } from '../utils/logger.js';
+import { applyContentDataPolicy } from '../normalization/content-data-policy.js';
 
 const logger = createLogger('InputManager');
 
@@ -20,6 +21,7 @@ export class InputManager extends EventEmitter {
   private flusher: BaseFlusher | null = null;
   private userId: string = '';
   private configuredUserId: string = '';
+  private contentDataConfig: ContentDataConfig = {};
 
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;
@@ -31,6 +33,10 @@ export class InputManager extends EventEmitter {
 
   setConfiguredUserId(userId: string): void {
     this.configuredUserId = userId;
+  }
+
+  setContentDataConfig(config: ContentDataConfig): void {
+    this.contentDataConfig = config;
   }
 
   registerInput(input: BaseInput): void {
@@ -112,8 +118,12 @@ export class InputManager extends EventEmitter {
       }
     }
 
-    logger.info('dispatching entries', { inputId, count: entries.length });
-    await this.dispatchEntries(entries);
+    const policyAppliedEntries = entries.map(entry =>
+      applyContentDataPolicy(entry, this.contentDataConfig),
+    );
+
+    logger.info('dispatching entries', { inputId, count: policyAppliedEntries.length });
+    await this.dispatchEntries(policyAppliedEntries);
   }
 
   private async dispatchEntries(entries: AgentActivityEntry[]): Promise<void> {

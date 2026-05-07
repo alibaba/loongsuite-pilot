@@ -260,4 +260,67 @@ describe('ConfigLoader', () => {
       expect(config.retention.intervalMs).toBe(3_600_000);
     });
   });
+
+  describe('contentData config', () => {
+    it('defaults to no per-agent policies when config is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+
+      const config = await loadConfig();
+      expect(config.contentData).toEqual({});
+    });
+
+    it('loads per-agent uploadEnabled overrides', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        contentData: {
+          cursor: { uploadEnabled: false },
+          'qoder-cli': { uploadEnabled: true },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.contentData.cursor.uploadEnabled).toBe(false);
+      expect(config.contentData['qoder-cli'].uploadEnabled).toBe(true);
+    });
+
+    it('parses string boolean uploadEnabled values', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        contentData: {
+          cursor: { uploadEnabled: 'false' },
+          'qoder-cli': { uploadEnabled: 'true' },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.contentData.cursor.uploadEnabled).toBe(false);
+      expect(config.contentData['qoder-cli'].uploadEnabled).toBe(true);
+    });
+
+    it('falls back to upload enabled for invalid or omitted values', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        contentData: {
+          cursor: { uploadEnabled: 'sometimes' },
+          'qoder-cli': {},
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.contentData.cursor.uploadEnabled).toBe(true);
+      expect(config.contentData['qoder-cli'].uploadEnabled).toBe(true);
+    });
+
+    it('ignores unsupported contentData fields for this stage', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        contentData: {
+          cursor: {
+            uploadEnabled: 'true',
+            maskEnabled: 'true',
+            excludedWorkspace: ['/workspace'],
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.contentData.cursor).toEqual({ uploadEnabled: true });
+    });
+  });
 });
