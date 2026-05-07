@@ -31,32 +31,34 @@ PROCESSOR="$HOOKS_DIR/hook-processor.mjs"
 
 MIN_NODE_MAJOR=18
 
-node_version_ok() {
+node_is_suitable() {
+  local bin="$1"
+  [[ -x "$bin" ]] || return 1
   local ver
-  ver="$("$1" --version 2>/dev/null)" || return 1
+  ver="$("$bin" --version 2>/dev/null)" || return 1
   local major="${ver#v}"
   major="${major%%.*}"
-  [[ "$major" =~ ^[0-9]+$ ]] && (( major >= MIN_NODE_MAJOR ))
+  [[ "$major" =~ ^[0-9]+$ ]] && (( major >= MIN_NODE_MAJOR )) || return 1
+  return 0
 }
 
 NODE_BIN=""
-if command -v node >/dev/null 2>&1 && node_version_ok "node"; then
-  NODE_BIN="node"
+if command -v node >/dev/null 2>&1 && node_is_suitable "$(command -v node)"; then
+  NODE_BIN="$(command -v node)"
 else
+  candidates=(
+    /opt/homebrew/bin/node
+    /usr/local/bin/node
+    "$HOME/.volta/bin/node"
+    "$HOME/.fnm/aliases/default/bin/node"
+    "$HOME/.local/bin/node"
+  )
   nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
-  candidates=()
   for (( i=${#nvm_candidates[@]}-1; i>=0; i-- )); do
     candidates+=("${nvm_candidates[i]}")
   done
-  candidates+=(
-    /usr/local/bin/node
-    /opt/homebrew/bin/node
-    "$HOME/.local/bin/node"
-    "$HOME/.volta/bin/node"
-    "$HOME/.fnm/aliases/default/bin/node"
-  )
   for candidate in "${candidates[@]}"; do
-    if [[ -x "$candidate" ]] && node_version_ok "$candidate"; then
+    if node_is_suitable "$candidate"; then
       NODE_BIN="$candidate"
       break
     fi

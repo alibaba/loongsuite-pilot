@@ -47,14 +47,6 @@ node_is_suitable() {
   local major="${ver#v}"
   major="${major%%.*}"
   [[ "$major" =~ ^[0-9]+$ ]] && (( major >= MIN_NODE_MAJOR )) || return 1
-  if [[ "$(uname)" == "Darwin" ]]; then
-    local sys_arch; sys_arch=$(uname -m)
-    local node_arch; node_arch=$("$bin" -p process.arch 2>/dev/null) || return 1
-    case "${sys_arch}:${node_arch}" in
-      arm64:arm64|x86_64:x64) ;;
-      *) return 1 ;;
-    esac
-  fi
   return 0
 }
 
@@ -62,17 +54,18 @@ NODE_BIN=""
 if command -v node >/dev/null 2>&1 && node_is_suitable "$(command -v node)"; then
   NODE_BIN="$(command -v node)"
 else
-  candidates=(
+  nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
+  candidates=()
+  for (( i=${#nvm_candidates[@]}-1; i>=0; i-- )); do
+    candidates+=("${nvm_candidates[i]}")
+  done
+  candidates+=(
     /opt/homebrew/bin/node
     /usr/local/bin/node
     "$HOME/.volta/bin/node"
     "$HOME/.fnm/aliases/default/bin/node"
     "$HOME/.local/bin/node"
   )
-  nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
-  for (( i=${#nvm_candidates[@]}-1; i>=0; i-- )); do
-    candidates+=("${nvm_candidates[i]}")
-  done
   for candidate in "${candidates[@]}"; do
     if node_is_suitable "$candidate"; then
       NODE_BIN="$candidate"
