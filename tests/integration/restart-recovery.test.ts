@@ -87,7 +87,7 @@ describe('US3: End-to-end restart recovery (BaseHookInput)', () => {
     // Should only collect the new M=2 records
     expect(entries2).toHaveLength(2);
     expect(entries2[0]?.['event.name']).toBe('tool.result');
-    expect(entries2[0]?.attributes?.file_path).toBe('/batch2/file0.ts');
-    expect(entries2[1]?.attributes?.file_path).toBe('/batch2/file1.ts');
+    expect(entries2[0]?.['agent.file_path']).toBe('/batch2/file0.ts');
+    expect(entries2[1]?.['agent.file_path']).toBe('/batch2/file1.ts');
   });
 });

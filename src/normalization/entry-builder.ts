@@ -24,8 +24,42 @@ export interface LegacyAgentActivityOptions {
 export type StandardAgentActivityOptions = Partial<AgentActivityEntry> & {
   'event.name'?: AgentEventName;
   'session.id'?: string;
-  'user.id'?: string;
+  'turn.id'?: string;
+  'step.id'?: string;
+  'response.id'?: string;
   'agent.type'?: string;
+  'agent.id'?: string;
+  'agent.name'?: string;
+  'message.role'?: string;
+  'provider.name'?: string;
+  'request.id'?: string;
+  'request.model'?: string;
+  'response.model'?: string;
+  'response.finish_reasons'?: string | string[];
+  'usage.input_tokens'?: number;
+  'usage.output_tokens'?: number;
+  'usage.cache_read_tokens'?: number;
+  'usage.cache_write_tokens'?: number;
+  'usage.total_tokens'?: number;
+  'cost.input'?: number;
+  'cost.output'?: number;
+  'cost.cache_read'?: number;
+  'cost.cache_write'?: number;
+  'cost.total'?: number;
+  'input.messages_hash'?: string;
+  'input.messages_delta'?: JsonValue;
+  'input.messages'?: JsonValue;
+  'output.messages'?: JsonValue;
+  'tool.name'?: string;
+  'tool.call.id'?: string;
+  'tool.exec.id'?: string;
+  'tool.arguments'?: JsonValue;
+  'tool.result.payload'?: JsonValue;
+  'tool.result.status'?: string;
+  'tool.result.duration_ms'?: number;
+  'skill.name'?: string;
+  attributes?: { [key: string]: JsonValue };
+  'user.id'?: string;
   timestamp?: number;
 };
 
@@ -35,16 +69,74 @@ export function buildAgentActivityEntry(
   if (isLegacyOptions(opts)) return buildFromLegacyOptions(opts);
 
   const now = opts.timestamp ?? Date.now();
-  return {
+  const entry: AgentActivityEntry = {
     ...opts,
     time_unix_nano: opts.time_unix_nano ?? timestampToUnixNanos(now),
     observed_time_unix_nano: opts.observed_time_unix_nano ?? timestampToUnixNanos(Date.now()),
     'event.id': opts['event.id'] ?? uuidv4(),
-    'event.name': opts['event.name'] ?? 'event',
+    'event.name': normalizeEventName(opts['event.name']),
     'user.id': opts['user.id'] ?? '',
-    'session.id': opts['session.id'] ?? '',
-    'agent.type': opts['agent.type'] ?? 'unknown',
+    'gen_ai.session.id': stringAlias(opts, 'gen_ai.session.id', 'session.id') ?? '',
+    'gen_ai.turn.id': stringAlias(opts, 'gen_ai.turn.id', 'turn.id'),
+    'gen_ai.step.id': stringAlias(opts, 'gen_ai.step.id', 'step.id'),
+    'gen_ai.response.id': stringAlias(opts, 'gen_ai.response.id', 'response.id'),
+    'gen_ai.agent.type': stringAlias(opts, 'gen_ai.agent.type', 'agent.type') ?? 'unknown',
+    'gen_ai.agent.id': stringAlias(opts, 'gen_ai.agent.id', 'agent.id'),
+    'gen_ai.agent.name': stringAlias(opts, 'gen_ai.agent.name', 'agent.name'),
+    'gen_ai.message.role': stringAlias(opts, 'gen_ai.message.role', 'message.role'),
+    'gen_ai.provider.name': inferProviderName(opts),
+    'gen_ai.request.id': stringAlias(opts, 'gen_ai.request.id', 'request.id'),
+    'gen_ai.request.model': stringAlias(opts, 'gen_ai.request.model', 'request.model'),
+    'gen_ai.response.model': stringAlias(opts, 'gen_ai.response.model', 'response.model'),
+    'gen_ai.response.finish_reasons': normalizeFinishReasons(
+      opts['gen_ai.response.finish_reasons'] ?? opts['response.finish_reasons'],
+    ),
+    'gen_ai.usage.input_tokens': numberAlias(opts, 'gen_ai.usage.input_tokens', 'usage.input_tokens'),
+    'gen_ai.usage.output_tokens': numberAlias(opts, 'gen_ai.usage.output_tokens', 'usage.output_tokens'),
+    'gen_ai.usage.cache_read.input_tokens': numberAlias(
+      opts,
+      'gen_ai.usage.cache_read.input_tokens',
+      'usage.cache_read_tokens',
+    ),
+    'gen_ai.usage.cache_creation.input_tokens': numberAlias(
+      opts,
+      'gen_ai.usage.cache_creation.input_tokens',
+      'usage.cache_write_tokens',
+    ),
+    'gen_ai.usage.total_tokens': numberAlias(opts, 'gen_ai.usage.total_tokens', 'usage.total_tokens'),
+    'gen_ai.usage.input_cost': numberAlias(opts, 'gen_ai.usage.input_cost', 'cost.input'),
+    'gen_ai.usage.output_cost': numberAlias(opts, 'gen_ai.usage.output_cost', 'cost.output'),
+    'gen_ai.usage.cache_read.input_cost': numberAlias(
+      opts,
+      'gen_ai.usage.cache_read.input_cost',
+      'cost.cache_read',
+    ),
+    'gen_ai.usage.cache_creation.input_cost': numberAlias(
+      opts,
+      'gen_ai.usage.cache_creation.input_cost',
+      'cost.cache_write',
+    ),
+    'gen_ai.usage.total_cost': numberAlias(opts, 'gen_ai.usage.total_cost', 'cost.total'),
+    'gen_ai.input.messages_hash': stringAlias(opts, 'gen_ai.input.messages_hash', 'input.messages_hash'),
+    'gen_ai.input.messages_delta': jsonAlias(opts, 'gen_ai.input.messages_delta', 'input.messages_delta'),
+    'gen_ai.input.messages': jsonAlias(opts, 'gen_ai.input.messages', 'input.messages'),
+    'gen_ai.output.messages': jsonAlias(opts, 'gen_ai.output.messages', 'output.messages'),
+    'gen_ai.tool.name': stringAlias(opts, 'gen_ai.tool.name', 'tool.name'),
+    'gen_ai.tool.call.id': stringAlias(opts, 'gen_ai.tool.call.id', 'tool.call.id'),
+    'gen_ai.tool.call.exec.id': stringAlias(opts, 'gen_ai.tool.call.exec.id', 'tool.exec.id'),
+    'gen_ai.tool.call.arguments': jsonAlias(opts, 'gen_ai.tool.call.arguments', 'tool.arguments'),
+    'gen_ai.tool.call.result': jsonAlias(opts, 'gen_ai.tool.call.result', 'tool.result.payload'),
+    'gen_ai.tool.call.duration_ms': numberAlias(
+      opts,
+      'gen_ai.tool.call.duration_ms',
+      'tool.result.duration_ms',
+    ),
+    'gen_ai.skill.name': stringAlias(opts, 'gen_ai.skill.name', 'skill.name'),
   };
+  applyLegacyToolStatus(entry, opts);
+  flattenAttributes(entry, opts.attributes);
+  removeLegacyAliases(entry);
+  return entry;
 }
 
 export function buildFromCodeGenerationEvent(
@@ -66,16 +158,59 @@ export function buildFromCodeGenerationEvent(
 }
 
 const REDACTED_FIELDS = new Set([
+  'gen_ai.input.messages_delta',
+  'gen_ai.input.messages',
+  'gen_ai.output.messages',
+  'gen_ai.tool.call.arguments',
+  'gen_ai.tool.call.result',
   'input.messages_delta',
   'input.messages',
   'output.messages',
   'tool.arguments',
   'tool.result.payload',
+  'agent.content',
+  'agent.inline_diff_message',
   'filePath', 'content', 'inlineDiffMessage',
   'recorduuid', 'distinctid',
 ]);
 
 const LEGACY_ALIAS_FIELDS = new Set([
+  'session.id',
+  'turn.id',
+  'step.id',
+  'response.id',
+  'agent.type',
+  'agent.id',
+  'agent.name',
+  'message.role',
+  'client.channel',
+  'provider.name',
+  'request.id',
+  'request.model',
+  'response.model',
+  'response.finish_reasons',
+  'usage.input_tokens',
+  'usage.output_tokens',
+  'usage.cache_read_tokens',
+  'usage.cache_write_tokens',
+  'usage.total_tokens',
+  'cost.input',
+  'cost.output',
+  'cost.cache_read',
+  'cost.cache_write',
+  'cost.total',
+  'input.messages_hash',
+  'input.messages_delta',
+  'input.messages',
+  'output.messages',
+  'tool.name',
+  'tool.exec.id',
+  'tool.arguments',
+  'tool.result.payload',
+  'tool.result.status',
+  'tool.result.duration_ms',
+  'skill.name',
+  'attributes',
   'sessionId',
   'timestamp',
   'uuid',
@@ -153,36 +288,24 @@ export function unixNanosToMillis(value: string | number | undefined): number {
 }
 
 function buildFromLegacyOptions(opts: LegacyAgentActivityOptions): AgentActivityEntry {
-  const attributes = toJsonObject({
-    filePath: opts.filePath,
-    actionType: opts.actionType,
-    inlineDiffMessage: opts.inlineDiffMessage,
-    ...(opts.extra ?? {}),
+  const extra = toJsonObject({
+    'agent.file_path': opts.filePath,
+    'agent.action_type': opts.actionType,
+    'agent.inline_diff_message': opts.inlineDiffMessage,
   });
-  if (opts.content !== undefined) attributes.content = opts.content;
+  for (const [key, value] of Object.entries(toJsonObject(opts.extra ?? {}))) {
+    extra[key.startsWith('agent.') ? key : `agent.${key}`] = value;
+  }
+  if (opts.content !== undefined) extra['agent.content'] = opts.content;
 
-  const entry = buildAgentActivityEntry({
+  return buildAgentActivityEntry({
     timestamp: opts.timestamp,
     'session.id': opts.sessionId,
     'user.id': opts.userId,
     'agent.type': opts.agentType,
-    'event.name': 'event',
-    attributes,
+    'event.name': 'other',
+    ...extra,
   });
-
-  return {
-    ...entry,
-    sessionId: opts.sessionId,
-    timestamp: opts.timestamp ?? unixNanosToMillis(entry.time_unix_nano),
-    uuid: entry['event.id'],
-    userId: opts.userId,
-    agentType: opts.agentType,
-    actionType: opts.actionType,
-    filePath: opts.filePath,
-    content: opts.content,
-    inlineDiffMessage: opts.inlineDiffMessage,
-    extra: attributes,
-  };
 }
 
 function isLegacyOptions(
@@ -202,6 +325,118 @@ function serializeValue(value: JsonValue): string {
   return String(value);
 }
 
+export function normalizeEventName(value: unknown): AgentEventName {
+  switch (value) {
+    case 'llm.request':
+    case 'llm_call_input':
+      return 'llm.request';
+    case 'llm.response':
+    case 'llm_call_output':
+    case 'llm_call_thinking':
+      return 'llm.response';
+    case 'tool.call':
+    case 'tool_call_input':
+      return 'tool.call';
+    case 'tool.result':
+    case 'tool_call_output':
+      return 'tool.result';
+    case 'skill.use':
+    case 'skill_use':
+      return 'skill.use';
+    case 'tool.approve':
+      return 'tool.approve';
+    case 'event':
+    case 'other':
+    default:
+      return 'other';
+  }
+}
+
+export function normalizeFinishReasons(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) {
+    const values = value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+    return values.length > 0 ? values : undefined;
+  }
+  return typeof value === 'string' && value.length > 0 ? [value] : undefined;
+}
+
+export function inferProviderName(input: Record<string, unknown>): string {
+  const explicit = stringAlias(input, 'gen_ai.provider.name', 'provider.name');
+  if (explicit) return explicit;
+
+  const model = (
+    stringAlias(input, 'gen_ai.request.model', 'request.model') ??
+    stringAlias(input, 'gen_ai.response.model', 'response.model') ??
+    ''
+  ).toLowerCase();
+  if (/claude|anthropic/.test(model)) return 'anthropic';
+  if (/gpt|openai|codex/.test(model)) return 'openai';
+  if (/qwen|tongyi/.test(model)) return 'qwen';
+  if (/deepseek/.test(model)) return 'deepseek';
+  if (/gemini/.test(model)) return 'gcp.gemini';
+  if (/grok|xai|x_ai/.test(model)) return 'x_ai';
+
+  const agentType = (
+    stringAlias(input, 'gen_ai.agent.type', 'agent.type') ??
+    ''
+  ).toLowerCase();
+  if (agentType.includes('codex')) return 'openai';
+  if (agentType.includes('claude')) return 'anthropic';
+  if (agentType.includes('qoder') || agentType.includes('qwen')) return 'qwen';
+  if (agentType.includes('gemini')) return 'gcp.gemini';
+  return 'unknown';
+}
+
+function stringAlias(input: Record<string, unknown>, canonical: string, legacy: string): string | undefined {
+  const value = input[canonical] ?? input[legacy];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function numberAlias(input: Record<string, unknown>, canonical: string, legacy: string): number | undefined {
+  const value = input[canonical] ?? input[legacy];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function jsonAlias(input: Record<string, unknown>, canonical: string, legacy: string): JsonValue | undefined {
+  return toJsonValue(input[canonical] ?? input[legacy]);
+}
+
+function removeLegacyAliases(entry: AgentActivityEntry): void {
+  for (const key of LEGACY_ALIAS_FIELDS) {
+    delete entry[key];
+  }
+}
+
+function applyLegacyToolStatus(
+  entry: AgentActivityEntry,
+  opts: StandardAgentActivityOptions,
+): void {
+  const status = typeof opts['tool.result.status'] === 'string'
+    ? opts['tool.result.status'].toLowerCase()
+    : undefined;
+  if (!status) return;
+
+  if (status === 'failure' || status === 'failed' || status === 'error') {
+    entry.is_error = true;
+    entry['error.type'] = entry['error.type'] ?? '_OTHER';
+    return;
+  }
+  if (status === 'success') {
+    entry.is_error = entry.is_error ?? false;
+  }
+}
+
+function flattenAttributes(
+  entry: AgentActivityEntry,
+  attributes: { [key: string]: JsonValue } | undefined,
+): void {
+  if (!attributes || typeof attributes !== 'object' || Array.isArray(attributes)) return;
+  for (const [key, value] of Object.entries(attributes)) {
+    const targetKey = key.startsWith('agent.') ? key : `agent.${key}`;
+    if (entry[targetKey] === undefined) entry[targetKey] = value;
+  }
+}
+
 function toJsonObject(value: Record<string, unknown>): { [key: string]: JsonValue } {
   const out: { [key: string]: JsonValue } = {};
   for (const [key, raw] of Object.entries(value)) {
@@ -211,7 +446,7 @@ function toJsonObject(value: Record<string, unknown>): { [key: string]: JsonValu
   return out;
 }
 
-function toJsonValue(value: unknown): JsonValue | undefined {
+export function toJsonValue(value: unknown): JsonValue | undefined {
   if (value === undefined) return undefined;
   if (
     value === null ||

@@ -116,7 +116,7 @@ describe('SlsFlusher', () => {
       expect(content).not.toHaveProperty('filePath');
       expect(content).not.toHaveProperty('content');
       expect(content).not.toHaveProperty('inlineDiffMessage');
-      expect(content.attributes).not.toContain('secret content');
+      expect(content).not.toHaveProperty('agent.content');
     });
 
     it('keeps fields when redact=false', async () => {
@@ -129,7 +129,7 @@ describe('SlsFlusher', () => {
 
       const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
       const content = logGroup.logs[0].content;
-      expect(content.attributes).toContain('/visible/file.ts');
+      expect(content['agent.file_path']).toBe('/visible/file.ts');
     });
   });
 

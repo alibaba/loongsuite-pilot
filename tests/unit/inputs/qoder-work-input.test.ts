@@ -52,9 +52,8 @@ describe('QoderWorkInput', () => {
 
       await input.start();
       expect(allEntries).toHaveLength(1);
-      expect(allEntries[0]!.agentType).toBe(ClientType.QoderWork);
-      expect(allEntries[0]!['agent.type']).toBe(ClientType.QoderWork);
-      expect(allEntries[0]!.filePath).toBe('/src/app.ts');
+      expect(allEntries[0]!['gen_ai.agent.type']).toBe(ClientType.QoderWork);
+      expect(allEntries[0]!['agent.file_path']).toBe('/src/app.ts');
       await input.stop();
     });
 
@@ -79,7 +78,7 @@ describe('QoderWorkInput', () => {
 
       await input.start();
       expect(allEntries).toHaveLength(1);
-      expect(allEntries[0]!.actionType).toBe(ActionType.Create);
+      expect(allEntries[0]!['agent.action_type']).toBe(ActionType.Create);
       await input.stop();
     });
 
@@ -121,7 +120,7 @@ describe('QoderWorkInput', () => {
 
       await input.start();
       expect(allEntries).toHaveLength(1);
-      expect(allEntries[0]!.actionType).toBe(ActionType.Create);
+      expect(allEntries[0]!['agent.action_type']).toBe(ActionType.Create);
       await input.stop();
     });
 
@@ -143,7 +142,7 @@ describe('QoderWorkInput', () => {
 
       await input.start();
       expect(allEntries).toHaveLength(1);
-      expect(allEntries[0]!.actionType).toBe(ActionType.Edit);
+      expect(allEntries[0]!['agent.action_type']).toBe(ActionType.Edit);
       await input.stop();
     });
   });
@@ -188,7 +187,7 @@ describe('QoderWorkInput', () => {
       input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
 
       await input.start();
-      expect(allEntries[0]!.content).toBe('const x = 42;');
+      expect(allEntries[0]!['agent.content']).toBe('const x = 42;');
       await input.stop();
     });
 
@@ -208,7 +207,7 @@ describe('QoderWorkInput', () => {
       input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
 
       await input.start();
-      expect(allEntries[0]!.content).toBe('replaced text');
+      expect(allEntries[0]!['agent.content']).toBe('replaced text');
       await input.stop();
     });
   });

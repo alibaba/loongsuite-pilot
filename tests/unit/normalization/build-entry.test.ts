@@ -66,15 +66,14 @@ describe('buildAgentActivityEntry', () => {
       filePath: '/src/main.ts',
     });
     expect(entry).toMatchObject({
-      'session.id': 'sess-abc',
+      'gen_ai.session.id': 'sess-abc',
       'user.id': 'user-42',
-      'agent.type': ClientType.Cursor,
+      'gen_ai.agent.type': ClientType.Cursor,
+      'gen_ai.provider.name': 'unknown',
     });
     expect(entry['event.id']).toBe('mock-uuid');
-    expect(entry.attributes).toMatchObject({
-      actionType: ActionType.Create,
-      filePath: '/src/main.ts',
-    });
+    expect(entry['agent.action_type']).toBe(ActionType.Create);
+    expect(entry['agent.file_path']).toBe('/src/main.ts');
   });
 
   it('carries optional content field', () => {
@@ -83,7 +82,7 @@ describe('buildAgentActivityEntry', () => {
       agentType: ClientType.Qoder, actionType: ActionType.Edit,
       filePath: '/a.ts', content: 'hello world',
     });
-    expect(entry.attributes?.content).toBe('hello world');
+    expect(entry['agent.content']).toBe('hello world');
   });
 
   it('carries optional extra record', () => {
@@ -93,7 +92,7 @@ describe('buildAgentActivityEntry', () => {
       agentType: ClientType.Qoder, actionType: ActionType.Edit,
       filePath: '/a.ts', extra,
     });
-    expect(entry.attributes).toMatchObject(extra);
+    expect(entry).toMatchObject({ 'agent.foo': 'bar', 'agent.num': 42 });
   });
 
   it('leaves optional fields undefined when not provided', () => {
@@ -102,7 +101,7 @@ describe('buildAgentActivityEntry', () => {
       agentType: ClientType.Qoder, actionType: ActionType.Edit,
       filePath: '/a.ts',
     });
-    expect(entry.attributes?.content).toBeUndefined();
-    expect(entry.attributes?.inlineDiffMessage).toBeUndefined();
+    expect(entry['agent.content']).toBeUndefined();
+    expect(entry['agent.inline_diff_message']).toBeUndefined();
   });
 });

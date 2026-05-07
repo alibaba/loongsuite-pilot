@@ -22,34 +22,21 @@ export function buildTestEntry(overrides: TestEntryOverrides = {}): AgentActivit
   const eventId = overrides['event.id'] ?? overrides.uuid ?? uuidv4();
   const timestamp = overrides.timestamp ?? Date.now();
   return {
-    sessionId: overrides.sessionId ?? 'test-session-1',
-    timestamp,
-    uuid: eventId,
-    userId: overrides.userId ?? 'test-user',
-    agentType: overrides.agentType ?? ClientType.Qoder,
-    actionType: overrides.actionType ?? ActionType.Edit,
-    filePath: overrides.filePath ?? '/tmp/test/file.ts',
-    content: overrides.content,
-    inlineDiffMessage: overrides.inlineDiffMessage,
-    extra: {
-      ...(overrides.extra ?? {}),
-      ...(overrides.attributes ?? {}),
-    },
     time_unix_nano: overrides.time_unix_nano ?? `${timestamp}000000`,
     observed_time_unix_nano: overrides.observed_time_unix_nano ?? `${timestamp}000000`,
     'event.id': eventId,
-    'event.name': overrides['event.name'] ?? 'event',
+    'event.name': overrides['event.name'] ?? 'other',
     'user.id': overrides['user.id'] ?? overrides.userId ?? 'test-user',
-    'session.id': overrides['session.id'] ?? overrides.sessionId ?? 'test-session-1',
-    'agent.type': overrides['agent.type'] ?? overrides.agentType ?? ClientType.Qoder,
-    attributes: {
-      filePath: overrides.filePath ?? '/tmp/test/file.ts',
-      actionType: overrides.actionType ?? ActionType.Edit,
+    'gen_ai.session.id': overrides['gen_ai.session.id'] ?? overrides.sessionId ?? 'test-session-1',
+    'gen_ai.agent.type': overrides['gen_ai.agent.type'] ?? overrides.agentType ?? ClientType.Qoder,
+    'gen_ai.provider.name': overrides['gen_ai.provider.name'] ?? 'unknown',
+    'agent.file_path': overrides.filePath ?? '/tmp/test/file.ts',
+    'agent.action_type': overrides.actionType ?? ActionType.Edit,
       ...(overrides.content !== undefined ? { content: overrides.content } : {}),
       ...(overrides.inlineDiffMessage !== undefined ? { inlineDiffMessage: overrides.inlineDiffMessage } : {}),
       ...(overrides.extra ?? {}),
       ...(overrides.attributes ?? {}),
-    },
+    ...overrides,
   };
 }
 

@@ -75,8 +75,9 @@ describe('AgentActivityEntry contract', () => {
       'event.id': 'event-1',
       'event.name': 'invalid-action',
       'user.id': 'u',
-      'session.id': 'sess',
-      'agent.type': ClientType.Qoder,
+      'gen_ai.session.id': 'sess',
+      'gen_ai.agent.type': ClientType.Qoder,
+      'gen_ai.provider.name': 'qwen',
     };
 
     const result = AgentActivityEntrySchema.safeParse(bad);
@@ -87,10 +88,11 @@ describe('AgentActivityEntry contract', () => {
     const bad = {
       time_unix_nano: 'not-a-time',
       'event.id': 'event-1',
-      'event.name': 'event',
+      'event.name': 'other',
       'user.id': 'u',
-      'session.id': 'sess',
-      'agent.type': ClientType.Qoder,
+      'gen_ai.session.id': 'sess',
+      'gen_ai.agent.type': ClientType.Qoder,
+      'gen_ai.provider.name': 'qwen',
     };
 
     const result = AgentActivityEntrySchema.safeParse(bad);

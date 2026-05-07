@@ -97,10 +97,10 @@ describe('QoderCliSessionInput', () => {
     const entries = await input.collectOnce();
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.['response.id']).toBeUndefined();
-    expect(entries[0]?.['request.id']).toBeUndefined();
-    expect(entries[0]?.attributes?.request_id).toBe('new-request');
-    expect(entries[0]?.['usage.input_tokens']).toBe(20);
+    expect(entries[0]?.['gen_ai.response.id']).toBeUndefined();
+    expect(entries[0]?.['gen_ai.request.id']).toBeUndefined();
+    expect(entries[0]?.['agent.request_id']).toBe('new-request');
+    expect(entries[0]?.['gen_ai.usage.input_tokens']).toBe(20);
   });
 
   it('reads runtime-created segment files from the beginning', async () => {
@@ -114,10 +114,10 @@ describe('QoderCliSessionInput', () => {
     const entries = await input.collectOnce();
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.['response.id']).toBeUndefined();
-    expect(entries[0]?.['request.id']).toBeUndefined();
-    expect(entries[0]?.attributes?.request_id).toBe('runtime-request');
-    expect(entries[0]?.['usage.input_tokens']).toBe(33);
+    expect(entries[0]?.['gen_ai.response.id']).toBeUndefined();
+    expect(entries[0]?.['gen_ai.request.id']).toBeUndefined();
+    expect(entries[0]?.['agent.request_id']).toBe('runtime-request');
+    expect(entries[0]?.['gen_ai.usage.input_tokens']).toBe(33);
   });
 
   it('ignores unsupported Qoder event types', async () => {
@@ -158,36 +158,36 @@ describe('QoderCliSessionInput', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
       'event.name': 'llm.response',
-      'agent.type': ClientType.QoderCli,
-      'session.id': 'session-123',
-      'request.model': 'auto',
-      'response.model': 'auto',
-      'usage.input_tokens': 22030,
-      'usage.output_tokens': 163,
-      'usage.cache_read_tokens': 21814,
-      'usage.cache_write_tokens': 4,
-      'usage.total_tokens': 22193,
+      'gen_ai.agent.type': ClientType.QoderCli,
+      'gen_ai.session.id': 'session-123',
+      'gen_ai.request.model': 'auto',
+      'gen_ai.response.model': 'auto',
+      'gen_ai.usage.input_tokens': 22030,
+      'gen_ai.usage.output_tokens': 163,
+      'gen_ai.usage.cache_read.input_tokens': 21814,
+      'gen_ai.usage.cache_creation.input_tokens': 4,
+      'gen_ai.usage.total_tokens': 22193,
       time_unix_nano: '1777659871533000000',
     });
-    expect(entries[0]?.attributes).toMatchObject({
-      source: 'qoder-cli-session-segment',
-      'qoder.type': 'model.response.completed',
-      segment_file: file,
-      segment_name: 'a.jsonl',
-      cwd_key: 'cwd-key',
-      seq: 9,
-      level: 'info',
-      request_index: 1,
-      request_id: 'request-123',
-      turn_id: 'turn-123',
-      loop_id: 'turn-123:1',
-      stop_reason: 'end_turn',
-      content_block_count: 2,
+    expect(entries[0]).toMatchObject({
+      'agent.source': 'qoder-cli-session-segment',
+      'agent.qoder.type': 'model.response.completed',
+      'agent.segment_file': file,
+      'agent.segment_name': 'a.jsonl',
+      'agent.cwd_key': 'cwd-key',
+      'agent.seq': 9,
+      'agent.level': 'info',
+      'agent.request_index': 1,
+      'agent.request_id': 'request-123',
+      'agent.turn_id': 'turn-123',
+      'agent.loop_id': 'turn-123:1',
+      'agent.stop_reason': 'end_turn',
+      'agent.content_block_count': 2,
     });
-    expect(entries[0]?.['response.id']).toBeUndefined();
-    expect(entries[0]?.['request.id']).toBeUndefined();
-    expect(entries[0]?.['turn.id']).toBeUndefined();
-    expect(entries[0]?.['step.id']).toBeUndefined();
+    expect(entries[0]?.['gen_ai.response.id']).toBeUndefined();
+    expect(entries[0]?.['gen_ai.request.id']).toBeUndefined();
+    expect(entries[0]?.['gen_ai.turn.id']).toBeUndefined();
+    expect(entries[0]?.['gen_ai.step.id']).toBeUndefined();
   });
 
   it('generates deterministic event ids for the same source row', async () => {
@@ -211,8 +211,8 @@ describe('QoderCliSessionInput', () => {
 
     const entry = await input.mapOnce(row, file);
 
-    expect(entry?.['request.model']).toBe('unknown');
-    expect(entry?.['response.model']).toBe('unknown');
+    expect(entry?.['gen_ai.request.model']).toBe('unknown');
+    expect(entry?.['gen_ai.response.model']).toBe('unknown');
   });
 
   function makeInput(): TestQoderCliSessionInput {

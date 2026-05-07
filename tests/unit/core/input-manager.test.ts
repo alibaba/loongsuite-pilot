@@ -130,7 +130,7 @@ describe('InputManager', () => {
       });
 
       const entry = buildTestEntry({
-        'agent.type': ClientType.Cursor,
+        agentType: ClientType.Cursor,
         content: 'legacy secret',
         inlineDiffMessage: 'legacy diff',
       });
@@ -144,10 +144,10 @@ describe('InputManager', () => {
       expect(dispatched).not.toHaveProperty('tool.result.payload');
       expect(dispatched).not.toHaveProperty('content');
       expect(dispatched).not.toHaveProperty('inlineDiffMessage');
-      expect(dispatched.attributes).not.toHaveProperty('content');
-      expect(dispatched.attributes).not.toHaveProperty('inlineDiffMessage');
-      expect(dispatched['agent.type']).toBe(ClientType.Cursor);
-      expect(dispatched['event.name']).toBe('event');
+      expect(dispatched).not.toHaveProperty('agent.content');
+      expect(dispatched).not.toHaveProperty('agent.inline_diff_message');
+      expect(dispatched['gen_ai.agent.type']).toBe(ClientType.Cursor);
+      expect(dispatched['event.name']).toBe('other');
     });
 
     it('preserves sensitive fields when upload is enabled by default', async () => {
@@ -155,7 +155,7 @@ describe('InputManager', () => {
       manager.registerInput(input as any);
 
       const entry = buildTestEntry({
-        'agent.type': ClientType.Cursor,
+        agentType: ClientType.Cursor,
       });
       entry['input.messages'] = [{ role: 'user', content: 'visible prompt' }];
       input.emit('entries', [entry]);
@@ -175,11 +175,11 @@ describe('InputManager', () => {
       });
 
       const hookEntry = buildTestEntry({
-        'agent.type': ClientType.Cursor,
+        agentType: ClientType.Cursor,
       });
       hookEntry['input.messages'] = [{ role: 'user', content: 'hook secret' }];
       const sqliteEntry = buildTestEntry({
-        'agent.type': ClientType.Cursor,
+        agentType: ClientType.Cursor,
       });
       sqliteEntry['input.messages'] = [{ role: 'user', content: 'sqlite secret' }];
       hookInput.emit('entries', [hookEntry]);
@@ -204,7 +204,7 @@ describe('InputManager', () => {
       manager.registerInput(input as any);
 
       const entry = buildTestEntry({
-        'agent.type': ClientType.Cursor,
+        agentType: ClientType.Cursor,
       });
       entry['output.messages'] = [{ type: 'text', content: 'secret response' }];
       input.emit('entries', [entry]);
@@ -213,7 +213,7 @@ describe('InputManager', () => {
       for (const child of [jsonl, sls, http]) {
         expect(child.batchCalls).toHaveLength(1);
         expect(child.batchCalls[0][0]).not.toHaveProperty('output.messages');
-        expect(child.batchCalls[0][0]['agent.type']).toBe(ClientType.Cursor);
+        expect(child.batchCalls[0][0]['gen_ai.agent.type']).toBe(ClientType.Cursor);
       }
     });
   });

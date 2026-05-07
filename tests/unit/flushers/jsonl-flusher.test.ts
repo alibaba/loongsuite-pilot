@@ -46,10 +46,10 @@ describe('JsonlFlusher', () => {
       expect(filePath).toContain('qoder');
       const parsed = JSON.parse(line);
       expect(parsed['event.id']).toBe('e1');
-      expect(parsed['agent.type']).toBe('qoder');
+      expect(parsed['gen_ai.agent.type']).toBe('qoder');
       expect(parsed.logTime).toBeUndefined();
       expect(parsed.data).toBeUndefined();
-      expect(parsed['session.id']).toBeDefined();
+      expect(parsed['gen_ai.session.id']).toBeDefined();
     });
   });
 
