@@ -383,17 +383,18 @@ cmd_stop() {
     local target_user
     target_user=$(whoami)
 
-    # Stop launchd managed services
-    launchctl stop "$SERVICE_LABEL" 2>/dev/null || true
-    launchctl stop "$UPDATER_LABEL" 2>/dev/null || true
-
-    # Stop system-level systemd services
-    sudo systemctl stop "loongsuite-pilot-${target_user}.service" &>/dev/null || true
-    sudo systemctl stop "loongsuite-pilot-updater-${target_user}.service" &>/dev/null || true
-
-    # Stop init.d services
-    [ -f "/etc/init.d/loongsuite-pilot-${target_user}" ] && sudo "/etc/init.d/loongsuite-pilot-${target_user}" stop &>/dev/null || true
-    [ -f "/etc/init.d/loongsuite-pilot-updater-${target_user}" ] && sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" stop &>/dev/null || true
+    case "$(uname -s)" in
+        Darwin)
+            launchctl stop "$SERVICE_LABEL" 2>/dev/null || true
+            launchctl stop "$UPDATER_LABEL" 2>/dev/null || true
+            ;;
+        Linux)
+            sudo systemctl stop "loongsuite-pilot-${target_user}.service" &>/dev/null || true
+            sudo systemctl stop "loongsuite-pilot-updater-${target_user}.service" &>/dev/null || true
+            [ -f "/etc/init.d/loongsuite-pilot-${target_user}" ] && sudo "/etc/init.d/loongsuite-pilot-${target_user}" stop &>/dev/null || true
+            [ -f "/etc/init.d/loongsuite-pilot-updater-${target_user}" ] && sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" stop &>/dev/null || true
+            ;;
+    esac
 
     # Stop PID-file tracked process
     if is_running; then
@@ -495,9 +496,15 @@ cmd_restart_collector() {
     local initd_script="/etc/init.d/loongsuite-pilot-${target_user}"
 
     # Stop collector only (leave updater running)
-    launchctl stop "$SERVICE_LABEL" 2>/dev/null || true
-    sudo systemctl stop "$sys_unit" &>/dev/null || true
-    [ -f "$initd_script" ] && sudo "$initd_script" stop &>/dev/null || true
+    case "$(uname -s)" in
+        Darwin)
+            launchctl stop "$SERVICE_LABEL" 2>/dev/null || true
+            ;;
+        Linux)
+            sudo systemctl stop "$sys_unit" &>/dev/null || true
+            [ -f "$initd_script" ] && sudo "$initd_script" stop &>/dev/null || true
+            ;;
+    esac
     pkill -f "loongsuite-pilot/bin/collector-daemon" 2>/dev/null || true
 
     if is_running; then
@@ -520,16 +527,28 @@ cmd_restart_collector() {
     ensure_dirs
     sync_bootstrap_scripts
 
-    if launchctl list "$SERVICE_LABEL" &>/dev/null; then
-        launchctl start "$SERVICE_LABEL" 2>/dev/null || true
-        echo "✅ collector restarted (launchd)"
-    elif [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && sudo systemctl is-enabled "$sys_unit" &>/dev/null; then
-        sudo systemctl start "$sys_unit" &>/dev/null
-        echo "✅ collector restarted (systemd)"
-    elif [ -f "$initd_script" ]; then
-        sudo "$initd_script" start &>/dev/null
-        echo "✅ collector restarted (init.d)"
-    else
+    local _restarted=false
+    case "$(uname -s)" in
+        Darwin)
+            if launchctl list "$SERVICE_LABEL" &>/dev/null; then
+                launchctl start "$SERVICE_LABEL" 2>/dev/null || true
+                echo "✅ collector restarted (launchd)"
+                _restarted=true
+            fi
+            ;;
+        Linux)
+            if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && sudo systemctl is-enabled "$sys_unit" &>/dev/null; then
+                sudo systemctl start "$sys_unit" &>/dev/null
+                echo "✅ collector restarted (systemd)"
+                _restarted=true
+            elif [ -f "$initd_script" ]; then
+                sudo "$initd_script" start &>/dev/null
+                echo "✅ collector restarted (init.d)"
+                _restarted=true
+            fi
+            ;;
+    esac
+    if [ "$_restarted" = false ]; then
         local entry="$BOOTSTRAP_DIR/collector-daemon.js"
         if [ ! -f "$entry" ]; then
             echo "❌ Bootstrap script missing"

@@ -1215,40 +1215,43 @@ cmd_uninstall() {
             rm -f "$pid_file"
         fi
         # Manual autostart cleanup when loongsuite-pilot is unavailable
-        local _plist="$HOME/Library/LaunchAgents/com.loongsuite-pilot.plist"
-        local _uplist="$HOME/Library/LaunchAgents/com.loongsuite-pilot.updater.plist"
-        for f in "$_uplist" "$_plist"; do
-            if [ -f "$f" ]; then
-                launchctl unload -w "$f" 2>/dev/null || true
-                rm -f "$f"
-            fi
-        done
+        case "$(uname -s)" in
+            Darwin)
+                local _plist="$HOME/Library/LaunchAgents/com.loongsuite-pilot.plist"
+                local _uplist="$HOME/Library/LaunchAgents/com.loongsuite-pilot.updater.plist"
+                for f in "$_uplist" "$_plist"; do
+                    if [ -f "$f" ]; then
+                        launchctl unload -w "$f" 2>/dev/null || true
+                        rm -f "$f"
+                    fi
+                done
+                ;;
+            Linux)
+                local _run_user
+                _run_user="$(whoami)"
+                local _sys_unit="/etc/systemd/system/loongsuite-pilot-${_run_user}.service"
+                local _sys_uunit="/etc/systemd/system/loongsuite-pilot-updater-${_run_user}.service"
+                for f in "$_sys_uunit" "$_sys_unit"; do
+                    if [ -f "$f" ]; then
+                        sudo systemctl disable --now "$(basename "$f")" &>/dev/null || true
+                        sudo rm -f "$f"
+                    fi
+                done
+                sudo systemctl daemon-reload &>/dev/null || true
 
-        # Clean up system-level systemd units
-        local _run_user
-        _run_user="$(whoami)"
-        local _sys_unit="/etc/systemd/system/loongsuite-pilot-${_run_user}.service"
-        local _sys_uunit="/etc/systemd/system/loongsuite-pilot-updater-${_run_user}.service"
-        for f in "$_sys_uunit" "$_sys_unit"; do
-            if [ -f "$f" ]; then
-                sudo systemctl disable --now "$(basename "$f")" &>/dev/null || true
-                sudo rm -f "$f"
-            fi
-        done
-        sudo systemctl daemon-reload &>/dev/null || true
-
-        # Clean up init.d scripts
-        local _initd="/etc/init.d/loongsuite-pilot-${_run_user}"
-        local _initd_u="/etc/init.d/loongsuite-pilot-updater-${_run_user}"
-        for f in "$_initd_u" "$_initd"; do
-            if [ -f "$f" ]; then
-                sudo "$f" stop &>/dev/null || true
-                local _name; _name=$(basename "$f")
-                if command -v chkconfig &>/dev/null; then sudo chkconfig --del "$_name" &>/dev/null || true
-                elif command -v update-rc.d &>/dev/null; then sudo update-rc.d "$_name" remove &>/dev/null || true; fi
-                sudo rm -f "$f"
-            fi
-        done
+                local _initd="/etc/init.d/loongsuite-pilot-${_run_user}"
+                local _initd_u="/etc/init.d/loongsuite-pilot-updater-${_run_user}"
+                for f in "$_initd_u" "$_initd"; do
+                    if [ -f "$f" ]; then
+                        sudo "$f" stop &>/dev/null || true
+                        local _name; _name=$(basename "$f")
+                        if command -v chkconfig &>/dev/null; then sudo chkconfig --del "$_name" &>/dev/null || true
+                        elif command -v update-rc.d &>/dev/null; then sudo update-rc.d "$_name" remove &>/dev/null || true; fi
+                        sudo rm -f "$f"
+                    fi
+                done
+                ;;
+        esac
     fi
     msg "    ✅ 服务已停止" "    ✅ Service stopped"
     echo ""
