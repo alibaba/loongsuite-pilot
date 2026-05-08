@@ -55,7 +55,6 @@ export interface AgentActivityEntry {
   'gen_ai.agent.type': string;
   'gen_ai.agent.id'?: string;
   'gen_ai.agent.name'?: string;
-  'gen_ai.message.role'?: 'system' | 'user' | 'assistant' | 'tool' | string;
   'gen_ai.provider.name': string;
   'gen_ai.request.id'?: string;
   'gen_ai.request.model'?: string;
@@ -84,7 +83,6 @@ export interface AgentActivityEntry {
   'gen_ai.skill.name'?: string;
   'error.type'?: string;
   'error.message'?: string;
-  is_error?: boolean;
 }
 
 /**

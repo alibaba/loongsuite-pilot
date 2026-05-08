@@ -42,7 +42,6 @@ describe('QoderCliInput', () => {
       'gen_ai.agent.type': ClientType.QoderCli,
       'event.id': 'user:c657a8f6-b0d0-472a-acd2-a368e9d94a71########1',
       'gen_ai.session.id': 'c657a8f6-b0d0-472a-acd2-a368e9d94a71',
-      'gen_ai.message.role': 'user',
       'gen_ai.request.model': 'unknown',
       'gen_ai.response.model': 'unknown',
     });
@@ -67,7 +66,6 @@ describe('QoderCliInput', () => {
       'gen_ai.agent.type': ClientType.Qoder,
       'event.id': '4279a1bc-a6e2-4cae-a086-359d2051dd6d',
       'gen_ai.session.id': 'a7eaeff7-f187-463f-bc66-304a7d76fa6e',
-      'gen_ai.message.role': 'user',
       'gen_ai.request.model': 'unknown',
       'gen_ai.response.model': 'unknown',
     });
@@ -91,7 +89,6 @@ describe('QoderCliInput', () => {
     expect(entries[0]).toMatchObject({
       'event.name': 'llm.response',
       'gen_ai.agent.type': ClientType.QoderCli,
-      'gen_ai.message.role': 'assistant',
       'gen_ai.request.model': 'auto',
       'gen_ai.response.model': 'auto',
       'gen_ai.response.id': '2026050202152442e8836f99bb4830',
@@ -147,9 +144,7 @@ describe('QoderCliInput', () => {
     expect(entries[0]).toMatchObject({
       'event.name': 'tool.result',
       'gen_ai.agent.type': ClientType.QoderCli,
-      'gen_ai.message.role': 'tool',
       'gen_ai.tool.call.id': 'chatcmpl-tool-aea4a8099dc32836',
-      is_error: false,
       'gen_ai.request.model': 'unknown',
       'gen_ai.response.model': 'unknown',
     });
@@ -160,9 +155,7 @@ describe('QoderCliInput', () => {
     expect(entries[1]).toMatchObject({
       'event.name': 'tool.result',
       'gen_ai.agent.type': ClientType.Qoder,
-      'gen_ai.message.role': 'tool',
       'gen_ai.tool.call.id': 'call_1c6e9e8b14254b9a9e3d64dc',
-      is_error: false,
     });
     expect(entries[1]?.['gen_ai.tool.call.result']).toContain('Contents of directory');
   });

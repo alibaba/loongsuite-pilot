@@ -1,6 +1,6 @@
 ## 1. Contract And Helpers
 
-- [x] 1.1 Update `AgentActivityEntry` in `src/types/events.ts` to use section-3 canonical fields and types, including `gen_ai.turn.id`, `gen_ai.step.id`, `gen_ai.agent.*`, `gen_ai.message.role`, `gen_ai.usage.*_cost`, `gen_ai.tool.call.exec.id`, `gen_ai.tool.call.duration_ms`, and `gen_ai.response.finish_reasons` as `string[]`.
+- [x] 1.1 Update `AgentActivityEntry` in `src/types/events.ts` to use section-3 canonical fields and types, including `gen_ai.turn.id`, `gen_ai.step.id`, `gen_ai.agent.*`, `gen_ai.usage.*_cost`, `gen_ai.tool.call.exec.id`, `gen_ai.tool.call.duration_ms`, and `gen_ai.response.finish_reasons` as `string[]`; omit `gen_ai.message.role` and `is_error` from canonical output.
 - [x] 1.2 Update `AgentEventName` to the current enum: `llm.request`, `llm.response`, `tool.call`, `tool.result`, `skill.use`, `tool.approve`, and `other`.
 - [x] 1.3 Add shared normalization helpers for reading canonical-or-legacy aliases, normalizing event names, normalizing finish reasons, and converting unknown values to `JsonValue`.
 - [x] 1.4 Implement `inferProviderName()` with explicit-provider precedence, model-name rules, source/agent fallback rules, and a stable unknown fallback.

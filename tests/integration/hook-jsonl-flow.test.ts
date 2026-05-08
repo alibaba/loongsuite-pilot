@@ -251,7 +251,6 @@ describe('Hook JSONL integration flow', () => {
       'event.name': 'llm.request',
       'gen_ai.agent.type': ClientType.QoderCli,
       'gen_ai.session.id': 'sess-hook',
-      'gen_ai.message.role': 'user',
     });
     expect(allEntries[0]?.['gen_ai.turn.id']).toBeUndefined();
     expect(allEntries[0]?.['gen_ai.input.messages_delta']).toEqual([

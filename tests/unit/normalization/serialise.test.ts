@@ -37,10 +37,8 @@ describe('serialiseLogEntry', () => {
   it('converts scalar values to strings', () => {
     const out = serialiseLogEntry(makeEntry({
       'gen_ai.usage.input_tokens': 42,
-      is_error: true,
     }));
     expect(out['gen_ai.usage.input_tokens']).toBe('42');
-    expect(out.is_error).toBe('true');
   });
 
   it('JSON.stringifies JSON object values', () => {
@@ -94,12 +92,16 @@ describe('serialiseLogEntry', () => {
       'agent.type': ClientType.Cursor,
       'usage.input_tokens': 42,
       'tool.arguments': { legacy: true },
+      'gen_ai.message.role': 'user',
+      is_error: true,
       attributes: { legacy: true },
     }));
     expect(out).not.toHaveProperty('session.id');
     expect(out).not.toHaveProperty('agent.type');
     expect(out).not.toHaveProperty('usage.input_tokens');
     expect(out).not.toHaveProperty('tool.arguments');
+    expect(out).not.toHaveProperty('gen_ai.message.role');
+    expect(out).not.toHaveProperty('is_error');
     expect(out).not.toHaveProperty('attributes');
   });
 });

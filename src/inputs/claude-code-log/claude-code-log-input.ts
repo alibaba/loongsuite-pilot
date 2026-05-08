@@ -79,7 +79,6 @@ export class ClaudeCodeLogInput extends BaseHookInput {
       'gen_ai.turn.id': getStringValue(record, 'gen_ai.turn.id') ?? getStringValue(record, 'turn.id'),
       'gen_ai.step.id': getStringValue(record, 'gen_ai.step.id') ?? getStringValue(record, 'step.id'),
       'gen_ai.agent.type': ClientType.ClaudeCliHook,
-      'gen_ai.message.role': getStringValue(record, 'gen_ai.message.role') ?? getStringValue(record, 'message.role'),
       'gen_ai.provider.name': getStringValue(record, 'gen_ai.provider.name') ?? getStringValue(record, 'provider.name'),
       'gen_ai.request.model': getStringValue(record, 'gen_ai.request.model') ?? getStringValue(record, 'request.model'),
       'gen_ai.response.model': getStringValue(record, 'gen_ai.response.model') ?? getStringValue(record, 'response.model'),
@@ -100,7 +99,6 @@ export class ClaudeCodeLogInput extends BaseHookInput {
       'gen_ai.tool.call.duration_ms': getNumberValue(record, 'gen_ai.tool.call.duration_ms') ?? getNumberValue(record, 'tool.result.duration_ms'),
       'error.type': getStringValue(record, 'error.type'),
       'error.message': getStringValue(record, 'error.message'),
-      is_error: record['is_error'] === true ? true : undefined,
     });
   }
 }

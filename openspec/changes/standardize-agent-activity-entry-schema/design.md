@@ -4,11 +4,11 @@ The collector currently normalizes all input records into `AgentActivityEntry` b
 
 - identity and hierarchy fields such as `session.id` and `response.id`;
 - model/provider fields such as `provider.name`, `request.model`, and `response.model`;
-- agent/message fields such as `agent.type`, `agent.id`, and `message.role`;
+- agent fields such as `agent.type`, `agent.id`, and `agent.name`;
 - usage and cost fields such as `usage.input_tokens`, `usage.cache_write_tokens`, and `cost.total`;
 - sensitive JSON fields such as `input.messages`, `output.messages`, `tool.arguments`, and `tool.result.payload`.
 
-The current endpoint-side Agent schema in `端侧 Agent 支持情况 (1).md`, especially section 3, makes `gen_ai.*` names canonical for session, turn, step, agent, message, provider, request, response, usage, cost, tool, and skill fields. It keeps OTel-style top-level fields such as `time_unix_nano`, `observed_time_unix_nano`, `trace_id`, `span_id`, `event.*`, `host.*`, `error.*`, `user.id`, `service.name`, and `is_error`.
+The current endpoint-side Agent schema in `端侧 Agent 支持情况 (1).md`, especially section 3, makes `gen_ai.*` names canonical for session, turn, step, agent, provider, request, response, usage, cost, tool, and skill fields. It keeps OTel-style top-level fields such as `time_unix_nano`, `observed_time_unix_nano`, `trace_id`, `span_id`, `event.*`, `host.*`, `error.*`, `user.id`, and `service.name`.
 
 The main constraint is local compatibility. Existing hook processors and already-written JSONL files may still contain old shortened keys, and the collector must keep reading them without data loss.
 
@@ -46,7 +46,6 @@ Important renames:
 - `agent.type` -> `gen_ai.agent.type`
 - `agent.id` -> `gen_ai.agent.id`
 - `agent.name` -> `gen_ai.agent.name`
-- `message.role` -> `gen_ai.message.role`
 - `provider.name` -> `gen_ai.provider.name`
 - `request.id` -> `gen_ai.request.id`
 - `request.model` -> `gen_ai.request.model`
@@ -81,7 +80,7 @@ Input transforms should use helper functions that read canonical keys first and 
 
 - session: `gen_ai.session.id`, then `session.id`, then raw `session_id`/`conversation_id`;
 - turn/step: `gen_ai.turn.id`/`gen_ai.step.id`, then `turn.id`/`step.id`, then raw `turn_id`/`gen_ai.turn_id` and `gen_ai.step_id`;
-- agent/message: `gen_ai.agent.type`/`gen_ai.message.role`, then `agent.type`/`message.role`;
+- agent: `gen_ai.agent.type`, then `agent.type`;
 - model: `gen_ai.request.model`, then `request.model`, then raw `model`;
 - request id: `gen_ai.request.id`, then `request.id`;
 - tool result: `gen_ai.tool.call.result`, then `tool.result.payload`, then `tool.result`/raw output fields.
@@ -115,7 +114,7 @@ Alternative considered: fail validation when provider is absent. Rejected becaus
 
 `event.name` should use the current enum from the endpoint-side schema: `llm.request`, `llm.response`, `tool.call`, `tool.result`, `skill.use`, `tool.approve`, and `other`. Existing inputs that currently emit `event` for miscellaneous records should emit `other` in new output. Legacy raw values such as old `event_type`, `llm_call_input`, `tool_call_output`, and previous `event` should be accepted and mapped before dispatch.
 
-Tool execution outcome is no longer a canonical `tool.result.status` field in section 3. Successful results are represented by `gen_ai.tool.call.result`; failures are represented by `error.type`, `error.message`, and `is_error`. If a raw status is still useful, keep it as extension data rather than a stable output column.
+Tool execution outcome is no longer a canonical `tool.result.status` field in section 3. Successful results are represented by `gen_ai.tool.call.result`; failures are represented by `error.type` and `error.message`. If a raw status is still useful, keep it as extension data rather than a stable output column.
 
 Alternative considered: keep `tool.result.status` for backwards-compatible querying. Rejected because section 3 does not define it as a canonical field.
 
@@ -140,7 +139,7 @@ Alternative considered: only update the policy after all inputs are converted. R
 - Legacy aliases could linger in code -> Add tests asserting serialized output does not include old shortened fields for canonical entries.
 - Existing local historical JSONL remains old-shaped -> Keep input transforms compatible with old keys; do not attempt in-place file migration.
 - `gen_ai.response.finish_reasons` changes from a string to `string[]` -> Normalize single raw strings into one-element arrays.
-- Existing dashboards may query `agent.type`, `message.role`, `cost.*`, or `tool.result.*` -> Mark this change as breaking and update local tests/fixtures to catch stale consumers.
+- Existing dashboards may query `agent.type`, `cost.*`, or `tool.result.*` -> Mark this change as breaking and update local tests/fixtures to catch stale consumers.
 
 ## Migration Plan
 

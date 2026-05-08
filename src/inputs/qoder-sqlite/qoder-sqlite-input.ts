@@ -126,7 +126,6 @@ export class QoderSqliteInput extends BaseSqliteInput {
       'gen_ai.agent.type': ClientType.Qoder,
       'gen_ai.request.model': UNKNOWN_MODEL,
       'gen_ai.response.model': UNKNOWN_MODEL,
-      'gen_ai.message.role': qoderRow.role ?? undefined,
       'gen_ai.usage.input_tokens': inputTokens,
       'gen_ai.usage.output_tokens': outputTokens,
       'gen_ai.usage.cache_read.input_tokens': cacheReadTokens,

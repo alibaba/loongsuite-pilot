@@ -83,7 +83,6 @@ export function buildAgentActivityEntry(
     'gen_ai.agent.type': stringAlias(opts, 'gen_ai.agent.type', 'agent.type') ?? 'unknown',
     'gen_ai.agent.id': stringAlias(opts, 'gen_ai.agent.id', 'agent.id'),
     'gen_ai.agent.name': stringAlias(opts, 'gen_ai.agent.name', 'agent.name'),
-    'gen_ai.message.role': stringAlias(opts, 'gen_ai.message.role', 'message.role'),
     'gen_ai.provider.name': inferProviderName(opts),
     'gen_ai.request.id': stringAlias(opts, 'gen_ai.request.id', 'request.id'),
     'gen_ai.request.model': stringAlias(opts, 'gen_ai.request.model', 'request.model'),
@@ -182,6 +181,7 @@ const LEGACY_ALIAS_FIELDS = new Set([
   'agent.type',
   'agent.id',
   'agent.name',
+  'gen_ai.message.role',
   'message.role',
   'client.channel',
   'provider.name',
@@ -210,6 +210,7 @@ const LEGACY_ALIAS_FIELDS = new Set([
   'tool.result.status',
   'tool.result.duration_ms',
   'skill.name',
+  'is_error',
   'attributes',
   'sessionId',
   'timestamp',
@@ -417,12 +418,7 @@ function applyLegacyToolStatus(
   if (!status) return;
 
   if (status === 'failure' || status === 'failed' || status === 'error') {
-    entry.is_error = true;
     entry['error.type'] = entry['error.type'] ?? '_OTHER';
-    return;
-  }
-  if (status === 'success') {
-    entry.is_error = entry.is_error ?? false;
   }
 }
 

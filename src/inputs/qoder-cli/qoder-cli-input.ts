@@ -71,9 +71,6 @@ export class QoderCliInput extends BaseHookInput {
       'gen_ai.session.id': sessionId,
       'gen_ai.turn.id': turnId,
       'gen_ai.agent.type': variant === 'qoder-cli' ? ClientType.QoderCli : ClientType.Qoder,
-      'gen_ai.message.role': eventName === 'tool.result'
-        ? 'tool'
-        : getStringValue(message, 'role') ?? rowType,
       'gen_ai.request.model': model,
       'gen_ai.response.model': model,
       'gen_ai.response.id': eventName === 'llm.response' ? messageId : undefined,
@@ -100,7 +97,6 @@ export class QoderCliInput extends BaseHookInput {
       'tool.result.status': eventName === 'tool.result'
         ? inferToolResultStatus(contentBlock)
         : undefined,
-      is_error: eventName === 'tool.result' ? getBooleanValue(contentBlock, 'is_error') : undefined,
       attributes: buildAttributes(record, message, contentBlock, variant),
     });
   }

@@ -69,7 +69,6 @@ export class CursorHookInput extends BaseHookInput {
       'gen_ai.request.model': model,
       'gen_ai.response.model': model,
       'gen_ai.response.finish_reasons': normalizeFinishReasons(getStringValue(payload, 'response_finish_reasons')),
-      'gen_ai.message.role': inferRole(hookEvent, eventName),
       'gen_ai.usage.input_tokens': getNumberValue(payload, 'input_tokens'),
       'gen_ai.usage.output_tokens': getNumberValue(payload, 'output_tokens'),
       'gen_ai.usage.cache_read.input_tokens': getNumberValue(payload, 'cache_read_tokens'),
@@ -96,7 +95,6 @@ export class CursorHookInput extends BaseHookInput {
       'gen_ai.output.messages': eventName === 'llm.response' ? buildOutputMessages(payload, hookEvent) : undefined,
       'error.type': inferErrorType(payload, hookEvent),
       'error.message': inferErrorMessage(payload, hookEvent, toolOutput),
-      is_error: inferIsError(toolOutput, hookEvent),
       attributes,
     });
   }
@@ -138,14 +136,6 @@ function inferEventName(hookEvent: string, payload: Record<string, unknown>): Ag
     return 'tool.result';
   }
   return 'other';
-}
-
-function inferRole(hookEvent: string, eventName: AgentEventName): string | undefined {
-  if (eventName === 'llm.response') return 'assistant';
-  if (eventName === 'tool.result') return 'tool';
-  if (eventName === 'tool.call') return 'assistant';
-  if (hookEvent.toLowerCase().includes('submitprompt')) return 'user';
-  return undefined;
 }
 
 function buildToolArguments(payload: Record<string, unknown>): JsonValue | undefined {

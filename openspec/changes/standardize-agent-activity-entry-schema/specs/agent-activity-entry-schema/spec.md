@@ -14,10 +14,10 @@ The system SHALL represent newly normalized agent activity events using the fiel
 - **WHEN** an event includes session, turn, step, response, or tool-call hierarchy identifiers
 - **THEN** the entry SHALL use `gen_ai.session.id`, `gen_ai.turn.id`, `gen_ai.step.id`, `gen_ai.response.id`, and `gen_ai.tool.call.id`
 
-#### Scenario: Agent and message fields use GenAI namespace
+#### Scenario: Agent fields use GenAI namespace
 
-- **WHEN** an event includes agent identity or message role metadata
-- **THEN** the entry SHALL use `gen_ai.agent.type`, `gen_ai.agent.id`, `gen_ai.agent.name`, and `gen_ai.message.role`
+- **WHEN** an event includes agent identity metadata
+- **THEN** the entry SHALL use `gen_ai.agent.type`, `gen_ai.agent.id`, and `gen_ai.agent.name`
 
 #### Scenario: Model and response fields use GenAI namespace
 
@@ -61,7 +61,7 @@ The system SHALL serialize only section-3 canonical fields for newly reported en
 #### Scenario: Legacy aliases are omitted from new output
 
 - **WHEN** an entry has both canonical fields and legacy aliases during migration
-- **THEN** serialization SHALL omit legacy aliases such as `session.id`, `turn.id`, `step.id`, `agent.type`, `message.role`, `provider.name`, `request.id`, `request.model`, `response.model`, `usage.input_tokens`, `cost.total`, `input.messages`, `output.messages`, `tool.exec.id`, `tool.result.duration_ms`, `tool.arguments`, and `tool.result.payload`
+- **THEN** serialization SHALL omit legacy aliases such as `session.id`, `turn.id`, `step.id`, `agent.type`, `message.role`, `provider.name`, `request.id`, `request.model`, `response.model`, `usage.input_tokens`, `cost.total`, `input.messages`, `output.messages`, `tool.exec.id`, `tool.result.duration_ms`, `tool.arguments`, `tool.result.payload`, `gen_ai.message.role`, and `is_error`
 
 ### Requirement: Legacy Input Compatibility
 
@@ -70,7 +70,7 @@ The system SHALL continue reading existing local logs and hook records that use 
 #### Scenario: Legacy session, turn, step, agent, and model fields are accepted
 
 - **WHEN** an input reads a record containing `session.id`, `turn.id`, `step.id`, `agent.type`, `message.role`, `request.model`, or `response.model`
-- **THEN** the normalized entry SHALL populate `gen_ai.session.id`, `gen_ai.turn.id`, `gen_ai.step.id`, `gen_ai.agent.type`, `gen_ai.message.role`, `gen_ai.request.model`, and `gen_ai.response.model`
+- **THEN** the normalized entry SHALL populate `gen_ai.session.id`, `gen_ai.turn.id`, `gen_ai.step.id`, `gen_ai.agent.type`, `gen_ai.request.model`, and `gen_ai.response.model`, and SHALL omit `message.role`/`gen_ai.message.role` from canonical output
 
 #### Scenario: Legacy usage fields are accepted
 
@@ -138,7 +138,7 @@ The system SHALL normalize event-name and finish-reason values to the current sc
 #### Scenario: Tool failure uses error fields
 
 - **WHEN** a raw tool result status indicates failure
-- **THEN** the normalized entry SHALL use `error.type`, `error.message`, and `is_error` rather than emitting `tool.result.status` as a canonical output field
+- **THEN** the normalized entry SHALL use `error.type` and `error.message` rather than emitting `tool.result.status` or `is_error` as canonical output fields
 
 #### Scenario: Finish reasons are arrays
 

@@ -121,7 +121,6 @@ describe('CursorHookInput', () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]!['event.name']).toBe('llm.response');
-    expect(entries[0]!['gen_ai.message.role']).toBe('assistant');
     expect(entries[0]!['gen_ai.output.messages']).toEqual([{ type: 'reasoning', content: 'thinking...' }]);
   });
 
@@ -155,7 +154,6 @@ describe('CursorHookInput', () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]!['event.name']).toBe('llm.request');
-    expect(entries[0]!['gen_ai.message.role']).toBe('user');
     expect(entries[0]!['user.id']).toBe('');
     expect(entries[0]!['gen_ai.input.messages_delta']).toEqual([{ role: 'user', content: 'please inspect this' }]);
     expect(entries[0]!['gen_ai.usage.input_tokens']).toBe(10);
@@ -191,7 +189,6 @@ describe('CursorHookInput', () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]!['event.name']).toBe('tool.result');
-    expect(entries[0]!.is_error).toBe(true);
     expect(entries[0]!['error.type']).toBe('tool_use_failure');
     expect(entries[0]!['error.message']).toBe('tool failed');
   });

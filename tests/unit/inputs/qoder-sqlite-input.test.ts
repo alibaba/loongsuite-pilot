@@ -68,7 +68,6 @@ describe('QoderSqliteInput', () => {
       'gen_ai.session.id': 'session-1',
       'gen_ai.request.model': 'unknown',
       'gen_ai.response.model': 'unknown',
-      'gen_ai.message.role': 'assistant',
       'gen_ai.usage.input_tokens': 22030,
       'gen_ai.usage.output_tokens': 163,
       'gen_ai.usage.cache_read.input_tokens': 21814,
