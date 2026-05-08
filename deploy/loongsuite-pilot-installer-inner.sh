@@ -642,15 +642,12 @@ WRAPPER
     _install_plugin "Claude Code 插件" "otel-claude-hook.tar.gz" \
         "$OTEL_CLAUDE_DIR/package" "otel-claude-hook" \
         "$OTEL_CLAUDE_DIR/package/src/cli.js" \
-        "$OTEL_PLUGIN_INSTALL_URL" "--user"
+        "$OTEL_PLUGIN_INSTALL_URL" "--user --no-alias"
 
-    # Claude extra: copy intercept.js + setup alias
-    if [ -f "$OTEL_CLAUDE_DIR/package/src/intercept.js" ]; then
-        cp "$OTEL_CLAUDE_DIR/package/src/intercept.js" "$OTEL_CLAUDE_DIR/intercept.js"
-    fi
+    # Claude extra: clean up legacy alias (keep intercept.js to avoid MODULE_NOT_FOUND in stale shells)
     if [ -f "$OTEL_CLAUDE_DIR/package/scripts/setup-alias.sh" ]; then
-        bash "$OTEL_CLAUDE_DIR/package/scripts/setup-alias.sh" >/dev/null 2>&1 || true
-        msg "  · claude 别名已配置" "  · claude alias configured"
+        bash "$OTEL_CLAUDE_DIR/package/scripts/setup-alias.sh" --minimal >/dev/null 2>&1 || true
+        msg "  · 旧版别名已清理" "  · Legacy alias cleaned up"
     fi
 
     local OTEL_LOG_DIR="$DATA_DIR/logs/claude-code"
@@ -922,9 +919,8 @@ print_summary() {
 
     if [ -f "$OTEL_CLAUDE_DIR/package/src/cli.js" ]; then
         echo ""
-        msg "💡 Claude Code 插件已安装，请执行以下命令使 alias 生效：" \
-            "💡 Claude Code plugin installed. Reload your shell for the alias:"
-        echo "   source ~/.bashrc   # or source ~/.zshrc"
+        msg "💡 Claude Code 插件已安装" \
+            "💡 Claude Code plugin installed"
     fi
 
     if [ -f "$OTEL_CODEX_DIR/package/dist/index.js" ]; then
