@@ -6,6 +6,11 @@ import type {
 } from '../types/index.js';
 
 const CONTENT_FIELDS = new Set([
+  'gen_ai.input.messages',
+  'gen_ai.input.messages_delta',
+  'gen_ai.output.messages',
+  'gen_ai.tool.call.arguments',
+  'gen_ai.tool.call.result',
   'input.messages',
   'input.messages_delta',
   'output.messages',
@@ -13,11 +18,15 @@ const CONTENT_FIELDS = new Set([
   'tool.result.payload',
   'content',
   'inlineDiffMessage',
+  'agent.content',
+  'agent.inline_diff_message',
 ]);
 
 const CONTENT_ATTRIBUTE_FIELDS = new Set([
   'content',
   'inlineDiffMessage',
+  'agent.content',
+  'agent.inline_diff_message',
 ]);
 
 const DEFAULT_POLICY: ContentDataAgentPolicy = {
@@ -51,7 +60,7 @@ function resolvePolicy(
   entry: AgentActivityEntry,
   config: ContentDataConfig,
 ): ContentDataAgentPolicy {
-  const agentType = entry['agent.type'];
+  const agentType = entry['gen_ai.agent.type'] ?? entry['agent.type'];
   if (!agentType) return DEFAULT_POLICY;
   return config[agentType] ?? DEFAULT_POLICY;
 }

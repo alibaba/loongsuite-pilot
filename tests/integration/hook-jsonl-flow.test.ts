@@ -91,26 +91,20 @@ describe('Hook JSONL integration flow', () => {
     expect(allEntries).toHaveLength(2);
     expect(allEntries[0]).toMatchObject({
       'event.name': 'tool.result',
-      'agent.type': ClientType.QoderCli,
-      'session.id': 'integ-sess-1',
-      'tool.name': 'create_file',
-      'tool.result.status': 'success',
+      'gen_ai.agent.type': ClientType.QoderCli,
+      'gen_ai.session.id': 'integ-sess-1',
+      'gen_ai.tool.name': 'create_file',
     });
-    expect(allEntries[0]?.attributes).toMatchObject({
-      loongsuite_pilot_pre_file_exists: false,
-      file_path: '/proj/new.ts',
-    });
+    expect(allEntries[0]?.['agent.loongsuite_pilot_pre_file_exists']).toBe(false);
+    expect(allEntries[0]?.['agent.file_path']).toBe('/proj/new.ts');
     expect(allEntries[1]).toMatchObject({
       'event.name': 'tool.result',
-      'agent.type': ClientType.QoderCli,
-      'session.id': 'integ-sess-1',
-      'tool.name': 'write_to_file',
-      'tool.result.status': 'success',
+      'gen_ai.agent.type': ClientType.QoderCli,
+      'gen_ai.session.id': 'integ-sess-1',
+      'gen_ai.tool.name': 'write_to_file',
     });
-    expect(allEntries[1]?.attributes).toMatchObject({
-      loongsuite_pilot_pre_file_exists: true,
-      file_path: '/proj/existing.ts',
-    });
+    expect(allEntries[1]?.['agent.loongsuite_pilot_pre_file_exists']).toBe(true);
+    expect(allEntries[1]?.['agent.file_path']).toBe('/proj/existing.ts');
 
     // Verify all entries pass schema validation
     for (const entry of allEntries) {
@@ -197,12 +191,10 @@ describe('Hook JSONL integration flow', () => {
     expect(newEntries).toHaveLength(1);
     expect(newEntries[0]).toMatchObject({
       'event.name': 'tool.result',
-      'agent.type': ClientType.QoderCli,
-      'tool.name': 'write_to_file',
+      'gen_ai.agent.type': ClientType.QoderCli,
+      'gen_ai.tool.name': 'write_to_file',
     });
-    expect(newEntries[0]?.attributes).toMatchObject({
-      file_path: '/batch2.ts',
-    });
+    expect(newEntries[0]?.['agent.file_path']).toBe('/batch2.ts');
   });
 
   it('should consume transcript rows forwarded by qoder-loongsuite-pilot-hook without agent argument', async () => {
@@ -257,12 +249,11 @@ describe('Hook JSONL integration flow', () => {
     expect(allEntries).toHaveLength(1);
     expect(allEntries[0]).toMatchObject({
       'event.name': 'llm.request',
-      'agent.type': ClientType.QoderCli,
-      'session.id': 'sess-hook',
-      'message.role': 'user',
+      'gen_ai.agent.type': ClientType.QoderCli,
+      'gen_ai.session.id': 'sess-hook',
     });
-    expect(allEntries[0]?.['turn.id']).toBeUndefined();
-    expect(allEntries[0]?.['input.messages_delta']).toEqual([
+    expect(allEntries[0]?.['gen_ai.turn.id']).toBeUndefined();
+    expect(allEntries[0]?.['gen_ai.input.messages_delta']).toEqual([
       { role: 'user', content: 'hello from qoder hook' },
     ]);
   });
@@ -456,9 +447,9 @@ describe('Cursor hook script integration flow', () => {
     await input.stop();
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]!['agent.type']).toBe(ClientType.Cursor);
-    expect(entries[0]!['event.name']).toBe('event');
-    expect(entries[0]!['session.id']).toBe('sess-integ-cursor');
-    expect(entries[0]!.attributes?.hook_event_name).toBe('beforeReadFile');
+    expect(entries[0]!['gen_ai.agent.type']).toBe(ClientType.Cursor);
+    expect(entries[0]!['event.name']).toBe('other');
+    expect(entries[0]!['gen_ai.session.id']).toBe('sess-integ-cursor');
+    expect(entries[0]!['agent.hook_event_name']).toBe('beforeReadFile');
   });
 });

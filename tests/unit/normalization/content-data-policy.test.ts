@@ -9,22 +9,21 @@ function makeEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEn
     'event.id': 'event-1',
     'event.name': 'tool.result',
     'user.id': 'user-1',
-    'session.id': 'session-1',
-    'agent.type': ClientType.Cursor,
-    'request.model': 'gpt-5.5',
-    'usage.input_tokens': 12,
-    'input.messages': [{ role: 'user', content: 'secret prompt' }],
-    'input.messages_delta': [{ role: 'user', content: 'secret delta' }],
-    'output.messages': [{ type: 'text', content: 'secret response' }],
-    'tool.arguments': { command: 'cat secret.txt' },
-    'tool.result.payload': { output: 'secret output' },
+    'gen_ai.session.id': 'session-1',
+    'gen_ai.agent.type': ClientType.Cursor,
+    'gen_ai.provider.name': 'openai',
+    'gen_ai.request.model': 'gpt-5.5',
+    'gen_ai.usage.input_tokens': 12,
+    'gen_ai.input.messages': [{ role: 'user', content: 'secret prompt' }],
+    'gen_ai.input.messages_delta': [{ role: 'user', content: 'secret delta' }],
+    'gen_ai.output.messages': [{ type: 'text', content: 'secret response' }],
+    'gen_ai.tool.call.arguments': { command: 'cat secret.txt' },
+    'gen_ai.tool.call.result': { output: 'secret output' },
     content: 'legacy secret',
     inlineDiffMessage: 'legacy diff',
-    attributes: {
-      content: 'attribute secret',
-      inlineDiffMessage: 'attribute diff',
-      filePath: '/workspace/app.ts',
-    },
+    'agent.content': 'agent secret',
+    'agent.inline_diff_message': 'agent diff',
+    'agent.file_path': '/workspace/app.ts',
     ...overrides,
   };
 }
@@ -37,10 +36,10 @@ describe('applyContentDataPolicy', () => {
     });
 
     expect(result).not.toBe(entry);
-    expect(result['input.messages']).toEqual(entry['input.messages']);
-    expect(result['tool.result.payload']).toEqual(entry['tool.result.payload']);
+    expect(result['gen_ai.input.messages']).toEqual(entry['gen_ai.input.messages']);
+    expect(result['gen_ai.tool.call.result']).toEqual(entry['gen_ai.tool.call.result']);
     expect(result.content).toBe('legacy secret');
-    expect(result.attributes?.content).toBe('attribute secret');
+    expect(result['agent.content']).toBe('agent secret');
   });
 
   it('deletes content fields when upload is disabled', () => {
@@ -48,15 +47,15 @@ describe('applyContentDataPolicy', () => {
       [ClientType.Cursor]: { uploadEnabled: false },
     });
 
-    expect(result).not.toHaveProperty('input.messages');
-    expect(result).not.toHaveProperty('input.messages_delta');
-    expect(result).not.toHaveProperty('output.messages');
-    expect(result).not.toHaveProperty('tool.arguments');
-    expect(result).not.toHaveProperty('tool.result.payload');
+    expect(result).not.toHaveProperty('gen_ai.input.messages');
+    expect(result).not.toHaveProperty('gen_ai.input.messages_delta');
+    expect(result).not.toHaveProperty('gen_ai.output.messages');
+    expect(result).not.toHaveProperty('gen_ai.tool.call.arguments');
+    expect(result).not.toHaveProperty('gen_ai.tool.call.result');
     expect(result).not.toHaveProperty('content');
     expect(result).not.toHaveProperty('inlineDiffMessage');
-    expect(result.attributes).not.toHaveProperty('content');
-    expect(result.attributes).not.toHaveProperty('inlineDiffMessage');
+    expect(result).not.toHaveProperty('agent.content');
+    expect(result).not.toHaveProperty('agent.inline_diff_message');
   });
 
   it('retains non-content metadata when upload is disabled', () => {
@@ -65,11 +64,11 @@ describe('applyContentDataPolicy', () => {
     });
 
     expect(result['event.name']).toBe('tool.result');
-    expect(result['agent.type']).toBe(ClientType.Cursor);
-    expect(result['session.id']).toBe('session-1');
-    expect(result['request.model']).toBe('gpt-5.5');
-    expect(result['usage.input_tokens']).toBe(12);
-    expect(result.attributes?.filePath).toBe('/workspace/app.ts');
+    expect(result['gen_ai.agent.type']).toBe(ClientType.Cursor);
+    expect(result['gen_ai.session.id']).toBe('session-1');
+    expect(result['gen_ai.request.model']).toBe('gpt-5.5');
+    expect(result['gen_ai.usage.input_tokens']).toBe(12);
+    expect(result['agent.file_path']).toBe('/workspace/app.ts');
   });
 
   it('does not mutate the input entry', () => {
@@ -78,16 +77,16 @@ describe('applyContentDataPolicy', () => {
       [ClientType.Cursor]: { uploadEnabled: false },
     });
 
-    expect(entry['input.messages']).toBeDefined();
-    expect(entry['tool.result.payload']).toBeDefined();
-    expect(entry.attributes?.content).toBe('attribute secret');
+    expect(entry['gen_ai.input.messages']).toBeDefined();
+    expect(entry['gen_ai.tool.call.result']).toBeDefined();
+    expect(entry['agent.content']).toBe('agent secret');
   });
 
   it('uses fail-open defaults for missing agent policy', () => {
     const result = applyContentDataPolicy(makeEntry(), {});
 
-    expect(result['input.messages']).toBeDefined();
-    expect(result['tool.result.payload']).toBeDefined();
+    expect(result['gen_ai.input.messages']).toBeDefined();
+    expect(result['gen_ai.tool.call.result']).toBeDefined();
   });
 
   it('ignores unsupported mask and workspace fields for this stage', () => {
@@ -101,7 +100,19 @@ describe('applyContentDataPolicy', () => {
 
     const result = applyContentDataPolicy(makeEntry(), config);
 
-    expect(result['input.messages']).toEqual([{ role: 'user', content: 'secret prompt' }]);
-    expect(result['tool.result.payload']).toEqual({ output: 'secret output' });
+    expect(result['gen_ai.input.messages']).toEqual([{ role: 'user', content: 'secret prompt' }]);
+    expect(result['gen_ai.tool.call.result']).toEqual({ output: 'secret output' });
+  });
+
+  it('uses legacy agent.type as policy lookup fallback', () => {
+    const result = applyContentDataPolicy(makeEntry({
+      'gen_ai.agent.type': undefined,
+      'agent.type': ClientType.Cursor,
+      'input.messages': [{ role: 'user', content: 'legacy secret' }],
+    }), {
+      [ClientType.Cursor]: { uploadEnabled: false },
+    });
+
+    expect(result).not.toHaveProperty('input.messages');
   });
 });

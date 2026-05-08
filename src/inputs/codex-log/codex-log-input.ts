@@ -1,12 +1,8 @@
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry, AgentEventName, JsonValue } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
-import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
+import { buildAgentActivityEntry, normalizeEventName } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
-
-const VALID_EVENT_NAMES = new Set<string>([
-  'llm.request', 'llm.response', 'tool.call', 'tool.result',
-]);
 
 function getStringValue(data: Record<string, unknown>, key: string): string | undefined {
   const val = data[key];
@@ -68,41 +64,41 @@ export class CodexLogInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    const eventName = getStringValue(record, 'event.name');
-    if (!eventName || !VALID_EVENT_NAMES.has(eventName)) return null;
+    const rawEventName = getStringValue(record, 'event.name');
+    if (!rawEventName) return null;
+    const eventName = normalizeEventName(rawEventName);
 
     return buildAgentActivityEntry({
+      ...record,
       time_unix_nano: getStringValue(record, 'time_unix_nano'),
       observed_time_unix_nano: getStringValue(record, 'observed_time_unix_nano'),
       'event.id': getStringValue(record, 'event.id'),
       'event.name': eventName as AgentEventName,
       'user.id': getStringValue(record, 'user.id') ?? '',
-      'session.id': getStringValue(record, 'session.id') ?? '',
-      'turn.id': getStringValue(record, 'turn.id'),
-      'step.id': getStringValue(record, 'step.id'),
-      'agent.type': ClientType.CodexCliHook,
-      'message.role': getStringValue(record, 'message.role'),
-      'provider.name': getStringValue(record, 'provider.name'),
-      'request.model': getStringValue(record, 'request.model'),
-      'response.model': getStringValue(record, 'response.model'),
+      'gen_ai.session.id': getStringValue(record, 'gen_ai.session.id') ?? getStringValue(record, 'session.id') ?? '',
+      'gen_ai.turn.id': getStringValue(record, 'gen_ai.turn.id') ?? getStringValue(record, 'turn.id'),
+      'gen_ai.step.id': getStringValue(record, 'gen_ai.step.id') ?? getStringValue(record, 'step.id'),
+      'gen_ai.agent.type': ClientType.CodexCliHook,
+      'gen_ai.provider.name': getStringValue(record, 'gen_ai.provider.name') ?? getStringValue(record, 'provider.name'),
+      'gen_ai.request.model': getStringValue(record, 'gen_ai.request.model') ?? getStringValue(record, 'request.model'),
+      'gen_ai.response.model': getStringValue(record, 'gen_ai.response.model') ?? getStringValue(record, 'response.model'),
       'response.finish_reasons': getStringValue(record, 'response.finish_reasons'),
-      'usage.input_tokens': getNumberValue(record, 'usage.input_tokens'),
-      'usage.output_tokens': getNumberValue(record, 'usage.output_tokens'),
-      'usage.cache_read_tokens': getNumberValue(record, 'usage.cache_read_tokens'),
-      'usage.total_tokens': getNumberValue(record, 'usage.total_tokens'),
-      'input.messages_hash': getStringValue(record, 'input.messages_hash'),
-      'input.messages_delta': toJsonValue(record['input.messages_delta']),
-      'input.messages': toJsonValue(record['input.messages']),
-      'output.messages': toJsonValue(record['output.messages']),
-      'tool.name': getStringValue(record, 'tool.name'),
-      'tool.call.id': getStringValue(record, 'tool.call.id'),
-      'tool.arguments': toJsonValue(record['tool.arguments']),
-      'tool.result.payload': toJsonValue(record['tool.result']),
+      'gen_ai.usage.input_tokens': getNumberValue(record, 'gen_ai.usage.input_tokens') ?? getNumberValue(record, 'usage.input_tokens'),
+      'gen_ai.usage.output_tokens': getNumberValue(record, 'gen_ai.usage.output_tokens') ?? getNumberValue(record, 'usage.output_tokens'),
+      'gen_ai.usage.cache_read.input_tokens': getNumberValue(record, 'gen_ai.usage.cache_read.input_tokens') ?? getNumberValue(record, 'usage.cache_read_tokens'),
+      'gen_ai.usage.total_tokens': getNumberValue(record, 'gen_ai.usage.total_tokens') ?? getNumberValue(record, 'usage.total_tokens'),
+      'gen_ai.input.messages_hash': getStringValue(record, 'gen_ai.input.messages_hash') ?? getStringValue(record, 'input.messages_hash'),
+      'gen_ai.input.messages_delta': toJsonValue(record['gen_ai.input.messages_delta'] ?? record['input.messages_delta']),
+      'gen_ai.input.messages': toJsonValue(record['gen_ai.input.messages'] ?? record['input.messages']),
+      'gen_ai.output.messages': toJsonValue(record['gen_ai.output.messages'] ?? record['output.messages']),
+      'gen_ai.tool.name': getStringValue(record, 'gen_ai.tool.name') ?? getStringValue(record, 'tool.name'),
+      'gen_ai.tool.call.id': getStringValue(record, 'gen_ai.tool.call.id') ?? getStringValue(record, 'tool.call.id'),
+      'gen_ai.tool.call.arguments': toJsonValue(record['gen_ai.tool.call.arguments'] ?? record['tool.arguments']),
+      'gen_ai.tool.call.result': toJsonValue(record['gen_ai.tool.call.result'] ?? record['tool.result']),
       'tool.result.status': getStringValue(record, 'tool.result.status'),
-      'tool.result.duration_ms': getNumberValue(record, 'tool.result.duration_ms'),
+      'gen_ai.tool.call.duration_ms': getNumberValue(record, 'gen_ai.tool.call.duration_ms') ?? getNumberValue(record, 'tool.result.duration_ms'),
       'error.type': getStringValue(record, 'error.type'),
       'error.message': getStringValue(record, 'error.message'),
-      is_error: record['is_error'] === true ? true : undefined,
     });
   }
 }

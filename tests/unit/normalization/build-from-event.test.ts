@@ -17,7 +17,7 @@ describe('buildFromCodeGenerationEvent', () => {
       rawData: {},
     };
     const entry = buildFromCodeGenerationEvent(event, 'u1', 's1');
-    expect(entry['agent.type']).toBe(ClientType.Cursor);
+    expect(entry['gen_ai.agent.type']).toBe(ClientType.Cursor);
   });
 
   it('maps actionType from event', () => {
@@ -29,7 +29,7 @@ describe('buildFromCodeGenerationEvent', () => {
       rawData: {},
     };
     const entry = buildFromCodeGenerationEvent(event, 'u1', 's1');
-    expect(entry.attributes?.actionType).toBe(ActionType.Delete);
+    expect(entry['agent.action_type']).toBe(ActionType.Delete);
   });
 
   it('maps filePath from event', () => {
@@ -41,7 +41,7 @@ describe('buildFromCodeGenerationEvent', () => {
       rawData: {},
     };
     const entry = buildFromCodeGenerationEvent(event, 'u1', 's1');
-    expect(entry.attributes?.filePath).toBe('/src/foo.ts');
+    expect(entry['agent.file_path']).toBe('/src/foo.ts');
   });
 
   it('maps content from event', () => {
@@ -54,7 +54,7 @@ describe('buildFromCodeGenerationEvent', () => {
       rawData: {},
     };
     const entry = buildFromCodeGenerationEvent(event, 'u1', 's1');
-    expect(entry.attributes?.content).toBe('the content');
+    expect(entry['agent.content']).toBe('the content');
   });
 
   it('maps diff to inlineDiffMessage', () => {
@@ -67,7 +67,7 @@ describe('buildFromCodeGenerationEvent', () => {
       rawData: {},
     };
     const entry = buildFromCodeGenerationEvent(event, 'u1', 's1');
-    expect(entry.attributes?.inlineDiffMessage).toBe('--- a\n+++ b');
+    expect(entry['agent.inline_diff_message']).toBe('--- a\n+++ b');
   });
 
   it('maps rawData to extra', () => {
@@ -80,7 +80,7 @@ describe('buildFromCodeGenerationEvent', () => {
       rawData,
     };
     const entry = buildFromCodeGenerationEvent(event, 'u1', 's1');
-    expect(entry.attributes).toMatchObject(rawData);
+    expect(entry).toMatchObject({ 'agent.key1': 'val1', 'agent.key2': 123 });
   });
 
   it('uses sourceTimestamp as entry timestamp', () => {
@@ -105,6 +105,6 @@ describe('buildFromCodeGenerationEvent', () => {
     };
     const entry = buildFromCodeGenerationEvent(event, 'user-X', 'session-Y');
     expect(entry['user.id']).toBe('user-X');
-    expect(entry['session.id']).toBe('session-Y');
+    expect(entry['gen_ai.session.id']).toBe('session-Y');
   });
 });

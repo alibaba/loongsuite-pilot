@@ -68,39 +68,35 @@ export class QoderCliInput extends BaseHookInput {
       timestamp,
       'event.id': getStringValue(record, 'uuid') ?? undefined,
       'event.name': eventName,
-      'session.id': sessionId,
-      'turn.id': turnId,
-      'agent.type': variant === 'qoder-cli' ? ClientType.QoderCli : ClientType.Qoder,
-      'message.role': eventName === 'tool.result'
-        ? 'tool'
-        : getStringValue(message, 'role') ?? rowType,
-      'request.model': model,
-      'response.model': model,
-      'response.id': eventName === 'llm.response' ? messageId : undefined,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.agent.type': variant === 'qoder-cli' ? ClientType.QoderCli : ClientType.Qoder,
+      'gen_ai.request.model': model,
+      'gen_ai.response.model': model,
+      'gen_ai.response.id': eventName === 'llm.response' ? messageId : undefined,
       'response.finish_reasons': getStringValue(message, 'stop_reason'),
-      'input.messages_delta': eventName === 'llm.request'
+      'gen_ai.input.messages_delta': eventName === 'llm.request'
         ? buildInputMessagesDelta(contentBlock)
         : undefined,
-      'output.messages': eventName === 'llm.response'
+      'gen_ai.output.messages': eventName === 'llm.response'
         ? buildOutputMessages(contentBlock)
         : undefined,
-      'tool.name': eventName === 'tool.call' ? getStringValue(contentBlock, 'name') : undefined,
-      'tool.call.id': eventName === 'tool.call' || eventName === 'tool.result'
+      'gen_ai.tool.name': eventName === 'tool.call' ? getStringValue(contentBlock, 'name') : undefined,
+      'gen_ai.tool.call.id': eventName === 'tool.call' || eventName === 'tool.result'
         ? getStringValue(contentBlock, 'id') ?? getStringValue(contentBlock, 'tool_use_id')
         : undefined,
-      'tool.exec.id': eventName === 'tool.call' || eventName === 'tool.result'
+      'gen_ai.tool.call.exec.id': eventName === 'tool.call' || eventName === 'tool.result'
         ? getStringValue(contentBlock, 'id') ?? getStringValue(contentBlock, 'tool_use_id')
         : undefined,
-      'tool.arguments': eventName === 'tool.call'
+      'gen_ai.tool.call.arguments': eventName === 'tool.call'
         ? toJsonValue(contentBlock.input)
         : undefined,
-      'tool.result.payload': eventName === 'tool.result'
+      'gen_ai.tool.call.result': eventName === 'tool.result'
         ? toolResultPayload
         : undefined,
       'tool.result.status': eventName === 'tool.result'
         ? inferToolResultStatus(contentBlock)
         : undefined,
-      is_error: eventName === 'tool.result' ? getBooleanValue(contentBlock, 'is_error') : undefined,
       attributes: buildAttributes(record, message, contentBlock, variant),
     });
   }
@@ -130,16 +126,16 @@ function buildPostToolUseEntry(record: Record<string, unknown>): AgentActivityEn
   return buildAgentActivityEntry({
     timestamp: parseTimestamp(data.timestamp) ?? Date.now(),
     'event.name': 'tool.result',
-    'session.id': getStringValue(data, 'session_id') ?? '',
+    'gen_ai.session.id': getStringValue(data, 'session_id') ?? '',
     'user.id': getStringValue(data, 'user_id') ?? '',
-    'agent.type': ClientType.QoderCli,
-    'request.model': UNKNOWN_MODEL,
-    'response.model': UNKNOWN_MODEL,
-    'tool.name': getStringValue(data, 'tool_name'),
-    'tool.call.id': getStringValue(data, 'tool_use_id'),
-    'tool.exec.id': getStringValue(data, 'tool_use_id'),
-    'tool.arguments': toJsonValue(toolInput),
-    'tool.result.payload': toJsonValue({
+    'gen_ai.agent.type': ClientType.QoderCli,
+    'gen_ai.request.model': UNKNOWN_MODEL,
+    'gen_ai.response.model': UNKNOWN_MODEL,
+    'gen_ai.tool.name': getStringValue(data, 'tool_name'),
+    'gen_ai.tool.call.id': getStringValue(data, 'tool_use_id'),
+    'gen_ai.tool.call.exec.id': getStringValue(data, 'tool_use_id'),
+    'gen_ai.tool.call.arguments': toJsonValue(toolInput),
+    'gen_ai.tool.call.result': toJsonValue({
       file_path: getStringValue(toolInput, 'file_path') ?? getStringValue(data, 'file_path'),
       content: toolInput.content ?? toolInput.new_string,
     }),

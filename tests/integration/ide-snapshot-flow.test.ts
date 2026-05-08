@@ -56,7 +56,7 @@ describe('IDE snapshot integration flow', () => {
 
     // All entries should be valid
     for (const entry of allEntries) {
-      expect(entry['agent.type']).toBe(ClientType.Qoder);
+      expect(entry['gen_ai.agent.type']).toBe(ClientType.Qoder);
       const result = AgentActivityEntrySchema.safeParse(entry);
       expect(result.success).toBe(true);
     }
@@ -108,7 +108,7 @@ describe('IDE snapshot integration flow', () => {
     await input.start();
     await input.stop();
 
-    const trackerEntries = allEntries.filter(e => e.attributes?.toolName === 'qoder-ai-tracker');
+    const trackerEntries = allEntries.filter(e => e['agent.toolName'] === 'qoder-ai-tracker');
     expect(trackerEntries.length).toBeGreaterThanOrEqual(1);
 
     // Verify offset tracking

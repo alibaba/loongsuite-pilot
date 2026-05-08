@@ -39,25 +39,22 @@ describe('QoderCliInput', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
       'event.name': 'llm.request',
-      'agent.type': ClientType.QoderCli,
+      'gen_ai.agent.type': ClientType.QoderCli,
       'event.id': 'user:c657a8f6-b0d0-472a-acd2-a368e9d94a71########1',
-      'session.id': 'c657a8f6-b0d0-472a-acd2-a368e9d94a71',
-      'message.role': 'user',
-      'request.model': 'unknown',
-      'response.model': 'unknown',
+      'gen_ai.session.id': 'c657a8f6-b0d0-472a-acd2-a368e9d94a71',
+      'gen_ai.request.model': 'unknown',
+      'gen_ai.response.model': 'unknown',
     });
-    expect(entries[0]?.['turn.id']).toBeUndefined();
-    expect(entries[0]?.['request.id']).toBeUndefined();
-    expect(entries[0]?.['input.messages_delta']).toEqual([
+    expect(entries[0]?.['gen_ai.turn.id']).toBeUndefined();
+    expect(entries[0]?.['gen_ai.request.id']).toBeUndefined();
+    expect(entries[0]?.['gen_ai.input.messages_delta']).toEqual([
       { role: 'user', content: 'hi, good night' },
     ]);
-    expect(entries[0]?.attributes).toMatchObject({
-      source: 'qoder-transcript-hook',
-      qoder_variant: 'qoder-cli',
-      raw_type: 'user',
-      entrypoint: 'cli',
-      cwd: '/Users/lukechen/.qoder/projects/-Users-lukechen-ai-agent-audit/transcript',
-    });
+    expect(entries[0]?.['agent.source']).toBe('qoder-transcript-hook');
+    expect(entries[0]?.['agent.qoder_variant']).toBe('qoder-cli');
+    expect(entries[0]?.['agent.raw_type']).toBe('user');
+    expect(entries[0]?.['agent.entrypoint']).toBe('cli');
+    expect(entries[0]?.['agent.cwd']).toBe('/Users/lukechen/.qoder/projects/-Users-lukechen-ai-agent-audit/transcript');
   });
 
   it('maps IDE user rows to qoder llm.request entries', async () => {
@@ -66,23 +63,20 @@ describe('QoderCliInput', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
       'event.name': 'llm.request',
-      'agent.type': ClientType.Qoder,
+      'gen_ai.agent.type': ClientType.Qoder,
       'event.id': '4279a1bc-a6e2-4cae-a086-359d2051dd6d',
-      'session.id': 'a7eaeff7-f187-463f-bc66-304a7d76fa6e',
-      'message.role': 'user',
-      'request.model': 'unknown',
-      'response.model': 'unknown',
+      'gen_ai.session.id': 'a7eaeff7-f187-463f-bc66-304a7d76fa6e',
+      'gen_ai.request.model': 'unknown',
+      'gen_ai.response.model': 'unknown',
     });
-    expect(entries[0]?.['request.id']).toBeUndefined();
-    expect(entries[0]?.['input.messages_delta']).toEqual([
+    expect(entries[0]?.['gen_ai.request.id']).toBeUndefined();
+    expect(entries[0]?.['gen_ai.input.messages_delta']).toEqual([
       { role: 'user', content: 'woooo!' },
     ]);
-    expect(entries[0]?.attributes).toMatchObject({
-      source: 'qoder-transcript-hook',
-      qoder_variant: 'qoder',
-      raw_type: 'user',
-      cwd: '/Users/lukechen/ai-agent-audit',
-    });
+    expect(entries[0]?.['agent.source']).toBe('qoder-transcript-hook');
+    expect(entries[0]?.['agent.qoder_variant']).toBe('qoder');
+    expect(entries[0]?.['agent.raw_type']).toBe('user');
+    expect(entries[0]?.['agent.cwd']).toBe('/Users/lukechen/ai-agent-audit');
   });
 
   it('maps assistant text and thinking rows to llm.response output messages', async () => {
@@ -94,21 +88,20 @@ describe('QoderCliInput', () => {
     expect(entries).toHaveLength(2);
     expect(entries[0]).toMatchObject({
       'event.name': 'llm.response',
-      'agent.type': ClientType.QoderCli,
-      'message.role': 'assistant',
-      'request.model': 'auto',
-      'response.model': 'auto',
-      'response.id': '2026050202152442e8836f99bb4830',
+      'gen_ai.agent.type': ClientType.QoderCli,
+      'gen_ai.request.model': 'auto',
+      'gen_ai.response.model': 'auto',
+      'gen_ai.response.id': '2026050202152442e8836f99bb4830',
     });
-    expect(entries[0]?.['output.messages']).toEqual([
+    expect(entries[0]?.['gen_ai.output.messages']).toEqual([
       { type: 'reasoning', content: 'The user is just greeting me casually.' },
     ]);
     expect(entries[1]).toMatchObject({
       'event.name': 'llm.response',
-      'response.id': '2026050202152442e8836f99bb4830',
-      'response.finish_reasons': 'end_turn',
+      'gen_ai.response.id': '2026050202152442e8836f99bb4830',
+      'gen_ai.response.finish_reasons': ['end_turn'],
     });
-    expect(entries[1]?.['output.messages']).toEqual([
+    expect(entries[1]?.['gen_ai.output.messages']).toEqual([
       { type: 'text', content: 'Good night! How can I help you?' },
     ]);
   });
@@ -122,23 +115,23 @@ describe('QoderCliInput', () => {
     expect(entries).toHaveLength(2);
     expect(entries[0]).toMatchObject({
       'event.name': 'tool.call',
-      'agent.type': ClientType.QoderCli,
-      'tool.call.id': 'chatcmpl-tool-aea4a8099dc32836',
-      'tool.name': 'Bash',
+      'gen_ai.agent.type': ClientType.QoderCli,
+      'gen_ai.tool.call.id': 'chatcmpl-tool-aea4a8099dc32836',
+      'gen_ai.tool.name': 'Bash',
     });
-    expect(entries[0]?.['tool.arguments']).toEqual({
+    expect(entries[0]?.['gen_ai.tool.call.arguments']).toEqual({
       command: 'ls',
       description: 'List files in current directory',
     });
     expect(entries[1]).toMatchObject({
       'event.name': 'tool.call',
-      'agent.type': ClientType.Qoder,
-      'tool.call.id': 'call_1c6e9e8b14254b9a9e3d64dc',
-      'tool.name': 'list_dir',
-      'request.model': 'unknown',
-      'response.model': 'unknown',
+      'gen_ai.agent.type': ClientType.Qoder,
+      'gen_ai.tool.call.id': 'call_1c6e9e8b14254b9a9e3d64dc',
+      'gen_ai.tool.name': 'list_dir',
+      'gen_ai.request.model': 'unknown',
+      'gen_ai.response.model': 'unknown',
     });
-    expect(entries[1]?.['tool.arguments']).toEqual({ path: '/Users/lukechen/ai-agent-audit' });
+    expect(entries[1]?.['gen_ai.tool.call.arguments']).toEqual({ path: '/Users/lukechen/ai-agent-audit' });
   });
 
   it('maps user tool_result rows to tool.result entries for both schemas', async () => {
@@ -150,27 +143,21 @@ describe('QoderCliInput', () => {
     expect(entries).toHaveLength(2);
     expect(entries[0]).toMatchObject({
       'event.name': 'tool.result',
-      'agent.type': ClientType.QoderCli,
-      'message.role': 'tool',
-      'tool.call.id': 'chatcmpl-tool-aea4a8099dc32836',
-      'tool.result.status': 'success',
-      is_error: false,
-      'request.model': 'unknown',
-      'response.model': 'unknown',
+      'gen_ai.agent.type': ClientType.QoderCli,
+      'gen_ai.tool.call.id': 'chatcmpl-tool-aea4a8099dc32836',
+      'gen_ai.request.model': 'unknown',
+      'gen_ai.response.model': 'unknown',
     });
-    expect(entries[0]?.['tool.result.payload']).toMatchObject({
+    expect(entries[0]?.['gen_ai.tool.call.result']).toMatchObject({
       stdout: expect.stringContaining('248bc65e'),
       stderr: '',
     });
     expect(entries[1]).toMatchObject({
       'event.name': 'tool.result',
-      'agent.type': ClientType.Qoder,
-      'message.role': 'tool',
-      'tool.call.id': 'call_1c6e9e8b14254b9a9e3d64dc',
-      'tool.result.status': 'success',
-      is_error: false,
+      'gen_ai.agent.type': ClientType.Qoder,
+      'gen_ai.tool.call.id': 'call_1c6e9e8b14254b9a9e3d64dc',
     });
-    expect(entries[1]?.['tool.result.payload']).toContain('Contents of directory');
+    expect(entries[1]?.['gen_ai.tool.call.result']).toContain('Contents of directory');
   });
 
   it('ignores metadata and progress rows', async () => {
@@ -197,24 +184,21 @@ describe('QoderCliInput', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
       'event.name': 'tool.result',
-      'agent.type': ClientType.QoderCli,
-      'session.id': 'sess-1',
+      'gen_ai.agent.type': ClientType.QoderCli,
+      'gen_ai.session.id': 'sess-1',
       'user.id': 'u1',
-      'request.model': 'unknown',
-      'response.model': 'unknown',
-      'tool.name': 'write_to_file',
-      'tool.result.status': 'success',
+      'gen_ai.request.model': 'unknown',
+      'gen_ai.response.model': 'unknown',
+      'gen_ai.tool.name': 'write_to_file',
     });
-    expect(entries[0]?.['tool.arguments']).toEqual({
+    expect(entries[0]?.['gen_ai.tool.call.arguments']).toEqual({
       file_path: '/src/app.ts',
       content: 'hello',
     });
-    expect(entries[0]?.attributes).toMatchObject({
-      source: 'qoder-transcript-hook',
-      qoder_variant: 'qoder-cli',
-      raw_type: 'PostToolUse',
-      file_path: '/src/app.ts',
-    });
+    expect(entries[0]?.['agent.source']).toBe('qoder-transcript-hook');
+    expect(entries[0]?.['agent.qoder_variant']).toBe('qoder-cli');
+    expect(entries[0]?.['agent.raw_type']).toBe('PostToolUse');
+    expect(entries[0]?.['agent.file_path']).toBe('/src/app.ts');
   });
 
   it('serializes inferred qoder and qoder-cli entries to separate JSONL files', async () => {
@@ -236,8 +220,8 @@ describe('QoderCliInput', () => {
     const qoderCliLine = await readSingleJsonl(path.join(outputDir, `qoder-cli-${today}.jsonl`));
     const qoderLine = await readSingleJsonl(path.join(outputDir, `qoder-${today}.jsonl`));
 
-    expect(qoderCliLine['agent.type']).toBe('qoder-cli');
-    expect(qoderLine['agent.type']).toBe('qoder');
+    expect(qoderCliLine['gen_ai.agent.type']).toBe('qoder-cli');
+    expect(qoderLine['gen_ai.agent.type']).toBe('qoder');
   });
 
   async function collectRows(records: Record<string, unknown>[]): Promise<AgentActivityEntry[]> {

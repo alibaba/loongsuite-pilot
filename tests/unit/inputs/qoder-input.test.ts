@@ -56,8 +56,8 @@ describe('QoderInput', () => {
 
       await input.start();
       expect(allEntries).toHaveLength(1);
-      expect(allEntries[0]!.filePath).toBe('/proj/file.ts');
-      expect(allEntries[0]!.actionType).toBe(ActionType.Edit);
+      expect(allEntries[0]!['agent.file_path']).toBe('/proj/file.ts');
+      expect(allEntries[0]!['agent.action_type']).toBe(ActionType.Edit);
       await input.stop();
     });
 
@@ -110,9 +110,9 @@ describe('QoderInput', () => {
 
       await input.start();
       expect(allEntries.length).toBeGreaterThanOrEqual(1);
-      const trackerEntries = allEntries.filter(e => e.attributes?.toolName === 'qoder-ai-tracker');
+      const trackerEntries = allEntries.filter(e => e['agent.toolName'] === 'qoder-ai-tracker');
       expect(trackerEntries).toHaveLength(1);
-      expect(trackerEntries[0]!.filePath).toBe('/proj/tracked.ts');
+      expect(trackerEntries[0]!['agent.file_path']).toBe('/proj/tracked.ts');
       await input.stop();
     });
 
@@ -146,9 +146,9 @@ describe('QoderInput', () => {
 
       await input2.start();
       await input2.stop();
-      const trackerEntries = moreEntries.filter(e => e.attributes?.toolName === 'qoder-ai-tracker');
+      const trackerEntries = moreEntries.filter(e => e['agent.toolName'] === 'qoder-ai-tracker');
       expect(trackerEntries).toHaveLength(1);
-      expect(trackerEntries[0]!.filePath).toBe('/second.ts');
+      expect(trackerEntries[0]!['agent.file_path']).toBe('/second.ts');
     });
 
     it('should handle missing tracker directory gracefully', async () => {
@@ -178,9 +178,8 @@ describe('QoderInput', () => {
       await input.stop();
 
       expect(allEntries.length).toBeGreaterThanOrEqual(1);
-      expect(allEntries[0]!.agentType).toBe(ClientType.Qoder);
-      expect(allEntries[0]!['agent.type']).toBe(ClientType.Qoder);
-      expect(allEntries[0]!.actionType).toBe(ActionType.Edit);
+      expect(allEntries[0]!['gen_ai.agent.type']).toBe(ClientType.Qoder);
+      expect(allEntries[0]!['agent.action_type']).toBe(ActionType.Edit);
     });
   });
 
@@ -291,7 +290,7 @@ describe('QoderInput', () => {
       await input.start();
       await input.stop();
 
-      const trackerEntries = allEntries.filter(e => e.attributes?.toolName === 'qoder-ai-tracker');
+      const trackerEntries = allEntries.filter(e => e['agent.toolName'] === 'qoder-ai-tracker');
       expect(trackerEntries.length).toBeGreaterThanOrEqual(1);
     });
 
@@ -308,7 +307,7 @@ describe('QoderInput', () => {
       await input.start();
       await input.stop();
 
-      const trackerEntries = allEntries.filter(e => e.attributes?.toolName === 'qoder-ai-tracker');
+      const trackerEntries = allEntries.filter(e => e['agent.toolName'] === 'qoder-ai-tracker');
       expect(trackerEntries.length).toBeGreaterThanOrEqual(1);
     });
 
@@ -326,7 +325,7 @@ describe('QoderInput', () => {
       await input.start();
       await input.stop();
 
-      const trackerEntries = allEntries.filter(e => e.attributes?.toolName === 'qoder-ai-tracker');
+      const trackerEntries = allEntries.filter(e => e['agent.toolName'] === 'qoder-ai-tracker');
       expect(trackerEntries.length).toBeGreaterThanOrEqual(1);
     });
   });

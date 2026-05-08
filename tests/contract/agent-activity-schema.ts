@@ -8,7 +8,8 @@ const eventNameValues = [
   'tool.call',
   'tool.result',
   'skill.use',
-  'event',
+  'tool.approve',
+  'other',
 ] as const;
 
 export const AgentActivityEntrySchema = z.object({
@@ -17,9 +18,9 @@ export const AgentActivityEntrySchema = z.object({
   'event.id': z.string().min(1),
   'event.name': z.enum(eventNameValues),
   'user.id': z.string(),
-  'session.id': z.string(),
-  'agent.type': z.enum(clientTypeValues).or(z.string().min(1)),
-  attributes: z.record(z.unknown()).optional(),
+  'gen_ai.session.id': z.string(),
+  'gen_ai.agent.type': z.enum(clientTypeValues).or(z.string().min(1)),
+  'gen_ai.provider.name': z.string().min(1),
 }).passthrough();
 
 export type ValidatedAgentActivityEntry = z.infer<typeof AgentActivityEntrySchema>;

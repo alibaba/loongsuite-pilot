@@ -59,15 +59,15 @@ describe('CursorHookInput', () => {
     await input.stop();
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]!['agent.type']).toBe(ClientType.Cursor);
+    expect(entries[0]!['gen_ai.agent.type']).toBe(ClientType.Cursor);
     expect(entries[0]!['event.name']).toBe('tool.call');
-    expect(entries[0]!['session.id']).toBe('sess-1');
-    expect(entries[0]!['turn.id']).toBe('turn-1');
-    expect(entries[0]!['tool.name']).toBe('Shell');
-    expect(entries[0]!['tool.call.id']).toBe('tool-1');
-    expect(entries[0]!['tool.arguments']).toEqual({ command: 'echo hello', cwd: '/workspace' });
-    expect(entries[0]!['request.model']).toBe('gpt-5.5');
-    expect(entries[0]!['response.model']).toBe('gpt-5.5');
+    expect(entries[0]!['gen_ai.session.id']).toBe('sess-1');
+    expect(entries[0]!['gen_ai.turn.id']).toBe('turn-1');
+    expect(entries[0]!['gen_ai.tool.name']).toBe('Shell');
+    expect(entries[0]!['gen_ai.tool.call.id']).toBe('tool-1');
+    expect(entries[0]!['gen_ai.tool.call.arguments']).toEqual({ command: 'echo hello', cwd: '/workspace' });
+    expect(entries[0]!['gen_ai.request.model']).toBe('gpt-5.5');
+    expect(entries[0]!['gen_ai.response.model']).toBe('gpt-5.5');
   });
 
   it('maps raw postToolUse hook record to tool.result event_t fields', async () => {
@@ -93,12 +93,11 @@ describe('CursorHookInput', () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]!['event.name']).toBe('tool.result');
-    expect(entries[0]!['session.id']).toBe('sess-from-raw');
-    expect(entries[0]!['request.model']).toBe('unknown');
-    expect(entries[0]!['response.model']).toBe('unknown');
-    expect(entries[0]!['tool.result.payload']).toEqual({ output: 'ok', exitCode: 0 });
-    expect(entries[0]!['tool.result.status']).toBe('success');
-    expect(entries[0]!['tool.result.duration_ms']).toBe(12.5);
+    expect(entries[0]!['gen_ai.session.id']).toBe('sess-from-raw');
+    expect(entries[0]!['gen_ai.request.model']).toBe('unknown');
+    expect(entries[0]!['gen_ai.response.model']).toBe('unknown');
+    expect(entries[0]!['gen_ai.tool.call.result']).toEqual({ output: 'ok', exitCode: 0 });
+    expect(entries[0]!['gen_ai.tool.call.duration_ms']).toBe(12.5);
   });
 
   it('maps agent thought to llm.response output messages', async () => {
@@ -122,8 +121,7 @@ describe('CursorHookInput', () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]!['event.name']).toBe('llm.response');
-    expect(entries[0]!['message.role']).toBe('assistant');
-    expect(entries[0]!['output.messages']).toEqual([{ type: 'reasoning', content: 'thinking...' }]);
+    expect(entries[0]!['gen_ai.output.messages']).toEqual([{ type: 'reasoning', content: 'thinking...' }]);
   });
 
   it('maps prompt, token, and cost fields', async () => {
@@ -156,18 +154,17 @@ describe('CursorHookInput', () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]!['event.name']).toBe('llm.request');
-    expect(entries[0]!['message.role']).toBe('user');
     expect(entries[0]!['user.id']).toBe('');
-    expect(entries[0]!['input.messages_delta']).toEqual([{ role: 'user', content: 'please inspect this' }]);
-    expect(entries[0]!['usage.input_tokens']).toBe(10);
-    expect(entries[0]!['usage.output_tokens']).toBe(4);
-    expect(entries[0]!['usage.total_tokens']).toBe(14);
-    expect(entries[0]!['usage.cache_read_tokens']).toBe(2);
-    expect(entries[0]!['usage.cache_write_tokens']).toBe(1);
-    expect(entries[0]!['cost.input']).toBe(0.1);
-    expect(entries[0]!['cost.output']).toBe(0.2);
-    expect(entries[0]!.attributes?.user_email).toBe('cursor@example.com');
-    expect(entries[0]!.attributes?.transcript_path).toBe('/tmp/transcript.jsonl');
+    expect(entries[0]!['gen_ai.input.messages_delta']).toEqual([{ role: 'user', content: 'please inspect this' }]);
+    expect(entries[0]!['gen_ai.usage.input_tokens']).toBe(10);
+    expect(entries[0]!['gen_ai.usage.output_tokens']).toBe(4);
+    expect(entries[0]!['gen_ai.usage.total_tokens']).toBe(14);
+    expect(entries[0]!['gen_ai.usage.cache_read.input_tokens']).toBe(2);
+    expect(entries[0]!['gen_ai.usage.cache_creation.input_tokens']).toBe(1);
+    expect(entries[0]!['gen_ai.usage.input_cost']).toBe(0.1);
+    expect(entries[0]!['gen_ai.usage.output_cost']).toBe(0.2);
+    expect(entries[0]!['agent.user_email']).toBe('cursor@example.com');
+    expect(entries[0]!['agent.transcript_path']).toBe('/tmp/transcript.jsonl');
   });
 
   it('maps postToolUseFailure to error fields', async () => {
@@ -192,8 +189,6 @@ describe('CursorHookInput', () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]!['event.name']).toBe('tool.result');
-    expect(entries[0]!['tool.result.status']).toBe('failure');
-    expect(entries[0]!.is_error).toBe(true);
     expect(entries[0]!['error.type']).toBe('tool_use_failure');
     expect(entries[0]!['error.message']).toBe('tool failed');
   });
@@ -217,9 +212,9 @@ describe('CursorHookInput', () => {
     await input.stop();
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]!['event.name']).toBe('event');
-    expect(entries[0]!['request.model']).toBe('unknown');
-    expect(entries[0]!['response.model']).toBe('unknown');
+    expect(entries[0]!['event.name']).toBe('other');
+    expect(entries[0]!['gen_ai.request.model']).toBe('unknown');
+    expect(entries[0]!['gen_ai.response.model']).toBe('unknown');
     expect(entries[0]!['error.message']).toBeUndefined();
   });
 
@@ -240,9 +235,9 @@ describe('CursorHookInput', () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]!['event.name']).toBe('tool.result');
-    expect(entries[0]!['agent.type']).toBe(ClientType.Cursor);
-    expect(entries[0]!['session.id']).toBeTruthy();
-    expect(entries[0]!['tool.name']).toBe('Shell');
-    expect(entries[0]!['tool.result.payload']).toMatchObject({ output: '' });
+    expect(entries[0]!['gen_ai.agent.type']).toBe(ClientType.Cursor);
+    expect(entries[0]!['gen_ai.session.id']).toBeTruthy();
+    expect(entries[0]!['gen_ai.tool.name']).toBe('Shell');
+    expect(entries[0]!['gen_ai.tool.call.result']).toMatchObject({ output: '' });
   });
 });

@@ -64,28 +64,25 @@ describe('QoderSqliteInput', () => {
     expect(entries[0]).toMatchObject({
       'event.id': 'message-1',
       'event.name': 'llm.response',
-      'agent.type': ClientType.Qoder,
-      'session.id': 'session-1',
-      'request.model': 'unknown',
-      'response.model': 'unknown',
-      'message.role': 'assistant',
-      'usage.input_tokens': 22030,
-      'usage.output_tokens': 163,
-      'usage.cache_read_tokens': 21814,
-      'usage.total_tokens': 22193,
+      'gen_ai.agent.type': ClientType.Qoder,
+      'gen_ai.session.id': 'session-1',
+      'gen_ai.request.model': 'unknown',
+      'gen_ai.response.model': 'unknown',
+      'gen_ai.usage.input_tokens': 22030,
+      'gen_ai.usage.output_tokens': 163,
+      'gen_ai.usage.cache_read.input_tokens': 21814,
+      'gen_ai.usage.total_tokens': 22193,
       time_unix_nano: `${gmtCreate}000000`,
     });
     expect(entries[0]?.observed_time_unix_nano).not.toBe(`${gmtCreate}000000`);
     expect(entries[0]?.['client.channel']).toBeUndefined();
-    expect(entries[0]?.attributes).toMatchObject({
-      source: 'qoder-sqlite-chat-message',
-      rowid: 1,
-      message_id: 'message-1',
-      request_id: 'request-1',
-      max_input_tokens: 180000,
-    });
-    expect(entries[0]?.['request.id']).toBeUndefined();
-    expect(entries[0]?.attributes?.token_info).toBeUndefined();
+    expect(entries[0]?.['agent.source']).toBe('qoder-sqlite-chat-message');
+    expect(entries[0]?.['agent.rowid']).toBe(1);
+    expect(entries[0]?.['agent.message_id']).toBe('message-1');
+    expect(entries[0]?.['agent.request_id']).toBe('request-1');
+    expect(entries[0]?.['agent.max_input_tokens']).toBe(180000);
+    expect(entries[0]?.['gen_ai.request.id']).toBeUndefined();
+    expect(entries[0]?.['agent.token_info']).toBeUndefined();
   });
 
   it('excludes non-usage chat_message fields from emitted attributes', async () => {
@@ -101,13 +98,11 @@ describe('QoderSqliteInput', () => {
     });
 
     const [entry] = await collectOnce(makeInput());
-    const attributes = entry?.attributes ?? {};
-
-    expect(attributes.model_info).toBeUndefined();
-    expect(attributes.content).toBeUndefined();
-    expect(attributes.summary).toBeUndefined();
-    expect(attributes.tool_result).toBeUndefined();
-    expect(attributes.extra).toBeUndefined();
+    expect(entry?.['agent.model_info']).toBeUndefined();
+    expect(entry?.['agent.content']).toBeUndefined();
+    expect(entry?.['agent.summary']).toBeUndefined();
+    expect(entry?.['agent.tool_result']).toBeUndefined();
+    expect(entry?.['agent.extra']).toBeUndefined();
   });
 
   it('tracks rowid cursor and avoids duplicate emission', async () => {
@@ -172,7 +167,7 @@ describe('QoderSqliteInput', () => {
     await input2.stop();
 
     expect(newEntries).toHaveLength(1);
-    expect(newEntries[0]?.attributes?.message_id).toBe('new-after-baseline');
+    expect(newEntries[0]?.['agent.message_id']).toBe('new-after-baseline');
     expect(stateStore.getRowId('qoder-sqlite')).toBe(2);
   });
 
@@ -192,7 +187,7 @@ describe('QoderSqliteInput', () => {
     const entries = await collectOnce(makeInput());
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.attributes?.message_id).toBe('arrived-while-stopped');
+    expect(entries[0]?.['agent.message_id']).toBe('arrived-while-stopped');
     expect(stateStore.getRowId('qoder-sqlite')).toBe(2);
   });
 
@@ -240,7 +235,7 @@ describe('QoderSqliteInput', () => {
     const entries = await collectOnce(makeInput());
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.attributes?.message_id).toBe('message-valid');
+    expect(entries[0]?.['agent.message_id']).toBe('message-valid');
     expect(stateStore.getRowId('qoder-sqlite')).toBe(3);
   });
 
@@ -273,10 +268,10 @@ describe('QoderSqliteInput', () => {
     expect(jsonlLikeFlusher.batchCalls[0]?.[0]).toEqual(slsLikeFlusher.batchCalls[0]?.[0]);
 
     const serialized = serialiseLogEntry(jsonlLikeFlusher.batchCalls[0]![0]!);
-    expect(serialized['usage.input_tokens']).toBe('11');
-    expect(serialized['usage.output_tokens']).toBe('7');
-    expect(serialized['usage.cache_read_tokens']).toBe('5');
-    expect(serialized.attributes).toContain('qoder-sqlite-chat-message');
+    expect(serialized['gen_ai.usage.input_tokens']).toBe('11');
+    expect(serialized['gen_ai.usage.output_tokens']).toBe('7');
+    expect(serialized['gen_ai.usage.cache_read.input_tokens']).toBe('5');
+    expect(serialized['agent.source']).toBe('qoder-sqlite-chat-message');
   });
 
   function makeInput(): QoderSqliteInput {

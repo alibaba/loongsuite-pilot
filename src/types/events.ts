@@ -17,7 +17,8 @@ export type AgentEventName =
   | 'tool.call'
   | 'tool.result'
   | 'skill.use'
-  | 'event';
+  | 'tool.approve'
+  | 'other';
 
 export type JsonValue =
   | string
@@ -47,46 +48,41 @@ export interface AgentActivityEntry {
   'host.name'?: string;
   'host.ip'?: string;
   'service.name'?: string;
-  'session.id': string;
-  'turn.id'?: string;
-  'step.id'?: string;
-  'response.id'?: string;
-  'agent.type': string;
-  'agent.id'?: string;
-  'agent.name'?: string;
-  'message.role'?: 'system' | 'user' | 'assistant' | 'tool' | string;
-  'client.channel'?: string;
-  'provider.name'?: string;
-  'request.id'?: string;
-  'request.model'?: string;
-  'response.model'?: string;
-  'response.finish_reasons'?: string;
-  'usage.input_tokens'?: number;
-  'usage.output_tokens'?: number;
-  'usage.cache_read_tokens'?: number;
-  'usage.cache_write_tokens'?: number;
-  'usage.total_tokens'?: number;
-  'cost.input'?: number;
-  'cost.output'?: number;
-  'cost.cache_read'?: number;
-  'cost.cache_write'?: number;
-  'cost.total'?: number;
-  'input.messages_hash'?: string;
-  'input.messages_delta'?: JsonValue;
-  'input.messages'?: JsonValue;
-  'output.messages'?: JsonValue;
-  'tool.name'?: string;
-  'tool.call.id'?: string;
-  'tool.exec.id'?: string;
-  'tool.arguments'?: JsonValue;
-  'tool.result.payload'?: JsonValue;
-  'tool.result.status'?: string;
-  'tool.result.duration_ms'?: number;
-  'skill.name'?: string;
+  'gen_ai.session.id': string;
+  'gen_ai.turn.id'?: string;
+  'gen_ai.step.id'?: string;
+  'gen_ai.response.id'?: string;
+  'gen_ai.agent.type': string;
+  'gen_ai.agent.id'?: string;
+  'gen_ai.agent.name'?: string;
+  'gen_ai.provider.name': string;
+  'gen_ai.request.id'?: string;
+  'gen_ai.request.model'?: string;
+  'gen_ai.response.model'?: string;
+  'gen_ai.response.finish_reasons'?: string[];
+  'gen_ai.usage.input_tokens'?: number;
+  'gen_ai.usage.output_tokens'?: number;
+  'gen_ai.usage.cache_read.input_tokens'?: number;
+  'gen_ai.usage.cache_creation.input_tokens'?: number;
+  'gen_ai.usage.total_tokens'?: number;
+  'gen_ai.usage.input_cost'?: number;
+  'gen_ai.usage.output_cost'?: number;
+  'gen_ai.usage.cache_read.input_cost'?: number;
+  'gen_ai.usage.cache_creation.input_cost'?: number;
+  'gen_ai.usage.total_cost'?: number;
+  'gen_ai.input.messages_hash'?: string;
+  'gen_ai.input.messages_delta'?: JsonValue;
+  'gen_ai.input.messages'?: JsonValue;
+  'gen_ai.output.messages'?: JsonValue;
+  'gen_ai.tool.name'?: string;
+  'gen_ai.tool.call.id'?: string;
+  'gen_ai.tool.call.exec.id'?: string;
+  'gen_ai.tool.call.arguments'?: JsonValue;
+  'gen_ai.tool.call.result'?: JsonValue;
+  'gen_ai.tool.call.duration_ms'?: number;
+  'gen_ai.skill.name'?: string;
   'error.type'?: string;
   'error.message'?: string;
-  is_error?: boolean;
-  attributes?: { [key: string]: JsonValue };
 }
 
 /**

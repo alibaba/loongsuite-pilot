@@ -1,7 +1,7 @@
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry, AgentEventName, JsonValue } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
-import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
+import { buildAgentActivityEntry, normalizeFinishReasons } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 
 const UNKNOWN_MODEL = 'unknown';
@@ -57,43 +57,44 @@ export class CursorHookInput extends BaseHookInput {
         ?? undefined,
       'event.name': eventName,
       'user.id': '',
-      'session.id': getStringValue(payload, 'session_id')
+      'gen_ai.session.id': getStringValue(payload, 'gen_ai.session.id')
+        ?? getStringValue(payload, 'session_id')
         ?? getStringValue(payload, 'conversation_id')
         ?? getStringValue(payload, 'session.id')
         ?? '',
-      'turn.id': getStringValue(payload, 'generation_id') ?? getStringValue(payload, 'turn.id'),
-      'agent.type': ClientType.Cursor,
-      'request.model': model,
-      'response.model': model,
-      'response.finish_reasons': getStringValue(payload, 'response_finish_reasons'),
-      'message.role': inferRole(hookEvent, eventName),
-      'usage.input_tokens': getNumberValue(payload, 'input_tokens'),
-      'usage.output_tokens': getNumberValue(payload, 'output_tokens'),
-      'usage.cache_read_tokens': getNumberValue(payload, 'cache_read_tokens'),
-      'usage.cache_write_tokens': getNumberValue(payload, 'cache_write_tokens'),
-      'usage.total_tokens': getNumberValue(payload, 'total_tokens') ?? sumTokens(
+      'gen_ai.turn.id': getStringValue(payload, 'gen_ai.turn.id')
+        ?? getStringValue(payload, 'generation_id')
+        ?? getStringValue(payload, 'turn.id'),
+      'gen_ai.agent.type': ClientType.Cursor,
+      'gen_ai.request.model': model,
+      'gen_ai.response.model': model,
+      'gen_ai.response.finish_reasons': normalizeFinishReasons(getStringValue(payload, 'response_finish_reasons')),
+      'gen_ai.usage.input_tokens': getNumberValue(payload, 'input_tokens'),
+      'gen_ai.usage.output_tokens': getNumberValue(payload, 'output_tokens'),
+      'gen_ai.usage.cache_read.input_tokens': getNumberValue(payload, 'cache_read_tokens'),
+      'gen_ai.usage.cache_creation.input_tokens': getNumberValue(payload, 'cache_write_tokens'),
+      'gen_ai.usage.total_tokens': getNumberValue(payload, 'total_tokens') ?? sumTokens(
         getNumberValue(payload, 'input_tokens'),
         getNumberValue(payload, 'output_tokens'),
       ),
-      'cost.input': getNumberValue(payload, 'cost_input'),
-      'cost.output': getNumberValue(payload, 'cost_output'),
-      'cost.cache_read': getNumberValue(payload, 'cost_cache_read'),
-      'cost.cache_write': getNumberValue(payload, 'cost_cache_write'),
-      'cost.total': getNumberValue(payload, 'cost_total'),
-      'input.messages_hash': getStringValue(payload, 'input_messages_hash'),
-      'input.messages_delta': eventName === 'llm.request' ? buildInputMessagesDelta(payload) : undefined,
-      'input.messages': eventName === 'llm.request' ? toJsonValue(parseMaybeJson(payload.input_messages)) : undefined,
-      'tool.name': getStringValue(payload, 'tool_name'),
-      'tool.call.id': getStringValue(payload, 'tool_use_id'),
-      'tool.exec.id': getStringValue(payload, 'tool_use_id'),
-      'tool.arguments': eventName === 'tool.call' ? toolArguments : undefined,
-      'tool.result.payload': eventName === 'tool.result' ? toJsonValue(toolOutput) : undefined,
+      'gen_ai.usage.input_cost': getNumberValue(payload, 'cost_input'),
+      'gen_ai.usage.output_cost': getNumberValue(payload, 'cost_output'),
+      'gen_ai.usage.cache_read.input_cost': getNumberValue(payload, 'cost_cache_read'),
+      'gen_ai.usage.cache_creation.input_cost': getNumberValue(payload, 'cost_cache_write'),
+      'gen_ai.usage.total_cost': getNumberValue(payload, 'cost_total'),
+      'gen_ai.input.messages_hash': getStringValue(payload, 'input_messages_hash'),
+      'gen_ai.input.messages_delta': eventName === 'llm.request' ? buildInputMessagesDelta(payload) : undefined,
+      'gen_ai.input.messages': eventName === 'llm.request' ? toJsonValue(parseMaybeJson(payload.input_messages)) : undefined,
+      'gen_ai.tool.name': getStringValue(payload, 'tool_name'),
+      'gen_ai.tool.call.id': getStringValue(payload, 'tool_use_id'),
+      'gen_ai.tool.call.exec.id': getStringValue(payload, 'tool_use_id'),
+      'gen_ai.tool.call.arguments': eventName === 'tool.call' ? toolArguments : undefined,
+      'gen_ai.tool.call.result': eventName === 'tool.result' ? toJsonValue(toolOutput) : undefined,
       'tool.result.status': eventName === 'tool.result' ? inferToolStatus(toolOutput, hookEvent) : undefined,
-      'tool.result.duration_ms': getDurationMs(payload),
-      'output.messages': eventName === 'llm.response' ? buildOutputMessages(payload, hookEvent) : undefined,
+      'gen_ai.tool.call.duration_ms': getDurationMs(payload),
+      'gen_ai.output.messages': eventName === 'llm.response' ? buildOutputMessages(payload, hookEvent) : undefined,
       'error.type': inferErrorType(payload, hookEvent),
       'error.message': inferErrorMessage(payload, hookEvent, toolOutput),
-      is_error: inferIsError(toolOutput, hookEvent),
       attributes,
     });
   }
@@ -134,15 +135,7 @@ function inferEventName(hookEvent: string, payload: Record<string, unknown>): Ag
   ) {
     return 'tool.result';
   }
-  return 'event';
-}
-
-function inferRole(hookEvent: string, eventName: AgentEventName): string | undefined {
-  if (eventName === 'llm.response') return 'assistant';
-  if (eventName === 'tool.result') return 'tool';
-  if (eventName === 'tool.call') return 'assistant';
-  if (hookEvent.toLowerCase().includes('submitprompt')) return 'user';
-  return undefined;
+  return 'other';
 }
 
 function buildToolArguments(payload: Record<string, unknown>): JsonValue | undefined {

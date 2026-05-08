@@ -7,11 +7,12 @@ function makeEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEn
   return {
     time_unix_nano: '1700000000000000000',
     'event.id': 'test-uuid',
-    'event.name': 'event',
+    'event.name': 'other',
     'user.id': 'user-1',
-    'session.id': 'sess-1',
-    'agent.type': ClientType.Qoder,
-    attributes: { filePath: '/src/app.ts' },
+    'gen_ai.session.id': 'sess-1',
+    'gen_ai.agent.type': ClientType.Qoder,
+    'gen_ai.provider.name': 'qwen',
+    'agent.file_path': '/src/app.ts',
     ...overrides,
   };
 }
@@ -19,42 +20,40 @@ function makeEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEn
 describe('serialiseLogEntry', () => {
   it('serializes basic fields', () => {
     const out = serialiseLogEntry(makeEntry());
-    expect(out['session.id']).toBe('sess-1');
+    expect(out['gen_ai.session.id']).toBe('sess-1');
     expect(out['event.id']).toBe('test-uuid');
     expect(out['user.id']).toBe('user-1');
-    expect(out['agent.type']).toBe('qoder');
-    expect(out['event.name']).toBe('event');
+    expect(out['gen_ai.agent.type']).toBe('qoder');
+    expect(out['event.name']).toBe('other');
   });
 
-  it('serializes standard extra attributes as JSON', () => {
+  it('serializes standard extra fields', () => {
     const out = serialiseLogEntry(makeEntry({
-      attributes: { customKey: 'customVal' },
+      'agent.custom_key': 'customVal',
     }));
-    expect(out.attributes).toBe(JSON.stringify({ customKey: 'customVal' }));
+    expect(out['agent.custom_key']).toBe('customVal');
   });
 
   it('converts scalar values to strings', () => {
     const out = serialiseLogEntry(makeEntry({
-      'usage.input_tokens': 42,
-      is_error: true,
+      'gen_ai.usage.input_tokens': 42,
     }));
-    expect(out['usage.input_tokens']).toBe('42');
-    expect(out.is_error).toBe('true');
+    expect(out['gen_ai.usage.input_tokens']).toBe('42');
   });
 
   it('JSON.stringifies JSON object values', () => {
     const nested = { a: 1 };
     const out = serialiseLogEntry(makeEntry({
-      'tool.arguments': nested,
+      'gen_ai.tool.call.arguments': nested,
     }));
-    expect(out['tool.arguments']).toBe(JSON.stringify(nested));
+    expect(out['gen_ai.tool.call.arguments']).toBe(JSON.stringify(nested));
   });
 
   it('keeps content fields before endpoint redaction', () => {
     const out = serialiseLogEntry(makeEntry({
-      'tool.result.payload': { output: 'visible' },
+      'gen_ai.tool.call.result': { output: 'visible' },
     }));
-    expect(out['tool.result.payload']).toBe(JSON.stringify({ output: 'visible' }));
+    expect(out['gen_ai.tool.call.result']).toBe(JSON.stringify({ output: 'visible' }));
   });
 
   it('skips null and undefined values', () => {
@@ -72,18 +71,37 @@ describe('serialiseLogEntry', () => {
   });
 
   it('includes input messages when present', () => {
-    const out = serialiseLogEntry(makeEntry({ 'input.messages_delta': [{ role: 'user', content: 'hi' }] }));
-    expect(out['input.messages_delta']).toBe(JSON.stringify([{ role: 'user', content: 'hi' }]));
+    const out = serialiseLogEntry(makeEntry({ 'gen_ai.input.messages_delta': [{ role: 'user', content: 'hi' }] }));
+    expect(out['gen_ai.input.messages_delta']).toBe(JSON.stringify([{ role: 'user', content: 'hi' }]));
   });
 
   it('includes output messages when present', () => {
-    const out = serialiseLogEntry(makeEntry({ 'output.messages': [{ type: 'text', content: 'ok' }] }));
-    expect(out['output.messages']).toBe(JSON.stringify([{ type: 'text', content: 'ok' }]));
+    const out = serialiseLogEntry(makeEntry({ 'gen_ai.output.messages': [{ type: 'text', content: 'ok' }] }));
+    expect(out['gen_ai.output.messages']).toBe(JSON.stringify([{ type: 'text', content: 'ok' }]));
   });
 
   it('omits optional message fields when undefined', () => {
     const out = serialiseLogEntry(makeEntry());
-    expect(out).not.toHaveProperty('input.messages_delta');
-    expect(out).not.toHaveProperty('output.messages');
+    expect(out).not.toHaveProperty('gen_ai.input.messages_delta');
+    expect(out).not.toHaveProperty('gen_ai.output.messages');
+  });
+
+  it('omits legacy aliases from new output', () => {
+    const out = serialiseLogEntry(makeEntry({
+      'session.id': 'legacy-session',
+      'agent.type': ClientType.Cursor,
+      'usage.input_tokens': 42,
+      'tool.arguments': { legacy: true },
+      'gen_ai.message.role': 'user',
+      is_error: true,
+      attributes: { legacy: true },
+    }));
+    expect(out).not.toHaveProperty('session.id');
+    expect(out).not.toHaveProperty('agent.type');
+    expect(out).not.toHaveProperty('usage.input_tokens');
+    expect(out).not.toHaveProperty('tool.arguments');
+    expect(out).not.toHaveProperty('gen_ai.message.role');
+    expect(out).not.toHaveProperty('is_error');
+    expect(out).not.toHaveProperty('attributes');
   });
 });
