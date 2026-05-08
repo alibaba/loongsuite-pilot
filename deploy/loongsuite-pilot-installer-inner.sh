@@ -172,16 +172,18 @@ msg() { [ "$LANG_MODE" = "zh" ] && echo "$1" || echo "$2"; }
 # ============================================================
 # Common: check dependencies
 # ============================================================
+_resolve_realpath() {
+    realpath "$1" 2>/dev/null || readlink -f "$1" 2>/dev/null || echo "$1"
+}
+
 check_deps() {
     msg "==> 检查依赖..." "==> Checking dependencies..."
 
-    for cmd in node npm; do
-        if ! command -v "$cmd" &>/dev/null; then
-            msg "❌ 缺少依赖: $cmd，请先安装后重试" \
-                "❌ Missing dependency: $cmd — please install it first"
-            exit 1
-        fi
-    done
+    if ! command -v node &>/dev/null; then
+        msg "❌ 缺少依赖: node，请先安装后重试" \
+            "❌ Missing dependency: node — please install it first"
+        exit 1
+    fi
 
     NODE_MAJOR=$(node -e "process.stdout.write(String(process.versions.node.split('.')[0]))")
     if [ "$NODE_MAJOR" -lt 18 ]; then
@@ -190,14 +192,32 @@ check_deps() {
         exit 1
     fi
 
+    # Pin the node binary path
+    NODE_BIN=$(_resolve_realpath "$(command -v node)")
+    mkdir -p "$DATA_DIR" 2>/dev/null || true
+    echo "$NODE_BIN" > "$DATA_DIR/node-bin"
+
+    # Derive npm from the same installation
+    NPM_BIN="$(dirname "$NODE_BIN")/npm"
+    if [ ! -x "$NPM_BIN" ]; then
+        if command -v npm &>/dev/null; then
+            NPM_BIN=$(command -v npm)
+        else
+            msg "❌ 缺少依赖: npm，请先安装后重试" \
+                "❌ Missing dependency: npm — please install it first"
+            exit 1
+        fi
+    fi
+
     if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
         msg "❌ 需要 curl 或 wget，请先安装" \
             "❌ curl or wget is required — please install one first"
         exit 1
     fi
 
-    msg "    ✅ node $(node --version)  npm $(npm --version)" \
-        "    ✅ node $(node --version)  npm $(npm --version)"
+    msg "    ✅ node $("$NODE_BIN" --version)  npm $("$NPM_BIN" --version)" \
+        "    ✅ node $("$NODE_BIN" --version)  npm $("$NPM_BIN" --version)"
+    msg "    📌 node pinned: $NODE_BIN" "    📌 node pinned: $NODE_BIN"
     echo ""
 }
 
@@ -303,13 +323,13 @@ deploy_package() {
     deploy_bootstrap_scripts
 
     msg "==> 安装依赖..." "==> Installing dependencies..."
-    (cd "$PERMANENT_DIR" && npm install --production --no-optional 2>&1 | tail -1)
+    (cd "$PERMANENT_DIR" && "$NPM_BIN" install --production --no-optional 2>&1 | tail -1)
     msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     echo ""
 
     msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
     if [ -f scripts/postinstall.js ]; then
-        node scripts/postinstall.js
+        "$NODE_BIN" scripts/postinstall.js
     fi
     msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
     echo ""
@@ -362,7 +382,7 @@ write_config() {
         "==> Writing config to $config_file ..."
     mkdir -p "$DATA_DIR"
 
-    node -e "
+    "$NODE_BIN" -e "
 const fs = require('fs');
 const path = '$config_file';
 
@@ -577,28 +597,28 @@ install_otel_plugin() {
             else tar -xzf "$tarball_path" -C "$dest_dir"; fi
 
             cd "$dest_dir"
-            if ! npm install --silent 2>/tmp/otel-plugin-npm-err.log; then
+            if ! "$NPM_BIN" install --silent 2>/tmp/otel-plugin-npm-err.log; then
                 msg "  ⚠️  npm install 失败（不影响其他功能）" \
                     "  ⚠️  npm install failed (non-blocking)"
                 return 0
             fi
 
-            if npm install -g . --silent 2>/dev/null; then :
-            elif npm link --silent 2>/dev/null; then :
+            if "$NPM_BIN" install -g . --silent 2>/dev/null; then :
+            elif "$NPM_BIN" link --silent 2>/dev/null; then :
             else
                 local local_bin="$HOME/.local/bin"
                 mkdir -p "$local_bin"
                 cat > "$local_bin/$hook_cmd" << WRAPPER
 #!/usr/bin/env bash
-exec node "$dest_dir/bin/$hook_cmd" "\$@"
+exec "$NODE_BIN" "$dest_dir/bin/$hook_cmd" "\$@"
 WRAPPER
                 chmod +x "$local_bin/$hook_cmd"
             fi
 
             if [ -n "$hook_install_args" ]; then
-                node "$dest_dir/bin/$hook_cmd" install $hook_install_args 2>/dev/null || true
+                "$NODE_BIN" "$dest_dir/bin/$hook_cmd" install $hook_install_args 2>/dev/null || true
             else
-                node "$dest_dir/bin/$hook_cmd" install 2>/dev/null || true
+                "$NODE_BIN" "$dest_dir/bin/$hook_cmd" install 2>/dev/null || true
             fi
 
         elif [ -n "$remote_url" ]; then
@@ -637,7 +657,7 @@ WRAPPER
     local otel_config="$HOME/.claude/otel-config.json"
     mkdir -p "$(dirname "$otel_config")"
 
-    node -e "
+    "$NODE_BIN" -e "
 const fs = require('fs');
 const cfgPath = process.argv[1];
 const logDir = process.argv[2];
@@ -672,7 +692,7 @@ fs.writeFileSync(cfgPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
         local codex_otel_config="$HOME/.codex/otel-config.json"
         mkdir -p "$(dirname "$codex_otel_config")"
 
-        node -e "
+        "$NODE_BIN" -e "
 const fs = require('fs');
 const cfgPath = process.argv[1];
 const logDir = process.argv[2];

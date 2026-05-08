@@ -142,29 +142,54 @@ _node_is_suitable() {
     return 0
 }
 
+_resolve_realpath() {
+    realpath "$1" 2>/dev/null || readlink -f "$1" 2>/dev/null || echo "$1"
+}
+
+NODE_PIN_FILE="$CACHE_DIR/node-bin"
+
 resolve_node() {
-    if command -v node >/dev/null 2>&1; then
-        local sys_node; sys_node=$(command -v node)
-        if _node_is_suitable "$sys_node"; then
-            echo "$sys_node"
+    # 1. Pinned file
+    if [ -f "$NODE_PIN_FILE" ]; then
+        local pinned
+        pinned=$(cat "$NODE_PIN_FILE" 2>/dev/null | tr -d '[:space:]')
+        if [ -n "$pinned" ] && _node_is_suitable "$pinned"; then
+            echo "$pinned"
             return 0
         fi
     fi
-    local _nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
+
+    # 2. Fallback search (unified order)
     local _candidates=()
+
+    # PATH
+    if command -v node >/dev/null 2>&1; then
+        _candidates+=("$(command -v node)")
+    fi
+
+    # nvm (descending — newest first)
+    local _nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
     local i
     for (( i=${#_nvm_candidates[@]}-1; i>=0; i-- )); do
         _candidates+=("${_nvm_candidates[i]}")
     done
+
+    # volta, fnm, homebrew, local
     _candidates+=(
-        /opt/homebrew/bin/node
-        /usr/local/bin/node
         "$HOME/.volta/bin/node"
         "$HOME/.fnm/aliases/default/bin/node"
+        /opt/homebrew/bin/node
+        /usr/local/bin/node
         "$HOME/.local/bin/node"
     )
+
     for candidate in "${_candidates[@]}"; do
         if _node_is_suitable "$candidate"; then
+            # Auto-heal: update pin file
+            local resolved
+            resolved=$(_resolve_realpath "$candidate")
+            mkdir -p "$(dirname "$NODE_PIN_FILE")" 2>/dev/null || true
+            echo "$resolved" > "$NODE_PIN_FILE" 2>/dev/null || true
             echo "$candidate"
             return 0
         fi
@@ -328,8 +353,14 @@ cmd_start() {
         exit 1
     fi
 
+    local node_bin
+    node_bin=$(resolve_node) || {
+        echo "❌ node runtime not found" >&2
+        exit 1
+    }
+
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-    nohup node "$entry" >> "$LOG_FILE" 2>&1 &
+    nohup "$node_bin" "$entry" >> "$LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$PID_FILE"
     echo "✅ loongsuite-pilot started (PID $pid)"
@@ -338,7 +369,7 @@ cmd_start() {
     local updater_entry="$BOOTSTRAP_DIR/updater-daemon.js"
     if [ -f "$updater_entry" ]; then
         if ! is_pid_file_running "$UPDATER_PID_FILE"; then
-            nohup node "$updater_entry" >> "$UPDATER_LOG_FILE" 2>&1 &
+            nohup "$node_bin" "$updater_entry" >> "$UPDATER_LOG_FILE" 2>&1 &
             echo "$!" > "$UPDATER_PID_FILE"
             echo "✅ loongsuite-pilot updater started (PID $!)"
         fi
@@ -504,8 +535,13 @@ cmd_restart_collector() {
             echo "❌ Bootstrap script missing"
             exit 1
         fi
+        local node_bin
+        node_bin=$(resolve_node) || {
+            echo "❌ node runtime not found" >&2
+            exit 1
+        }
         export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-        nohup node "$entry" >> "$LOG_FILE" 2>&1 &
+        nohup "$node_bin" "$entry" >> "$LOG_FILE" 2>&1 &
         echo "$!" > "$PID_FILE"
         echo "✅ collector restarted (PID $!)"
     fi
@@ -566,6 +602,29 @@ cmd_info() {
     echo "config=$CONFIG_FILE"
     echo "log=$LOG_FILE"
     echo "versions_dir=$VERSIONS_DIR"
+
+    if [ -f "$NODE_PIN_FILE" ]; then
+        local pinned_node
+        pinned_node=$(cat "$NODE_PIN_FILE" 2>/dev/null | tr -d '[:space:]')
+        if [ -n "$pinned_node" ] && [ -x "$pinned_node" ]; then
+            echo "node_bin=$pinned_node"
+            echo "node_version=$("$pinned_node" --version 2>/dev/null || echo 'unknown')"
+        else
+            echo "node_bin=$pinned_node (stale)"
+            local resolved
+            resolved=$(resolve_node 2>/dev/null) || true
+            echo "node_version=$("${resolved:-node}" --version 2>/dev/null || echo 'unknown')"
+        fi
+    else
+        echo "node_bin=not pinned"
+        local resolved
+        resolved=$(resolve_node 2>/dev/null) || true
+        if [ -n "$resolved" ]; then
+            echo "node_resolved=$resolved"
+            echo "node_version=$("$resolved" --version 2>/dev/null || echo 'unknown')"
+        fi
+    fi
+
     echo ""
     if [ -f "$CONFIG_FILE" ]; then
         cat "$CONFIG_FILE"

@@ -50,28 +50,42 @@ node_is_suitable() {
   return 0
 }
 
+NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
+
 NODE_BIN=""
-if command -v node >/dev/null 2>&1 && node_is_suitable "$(command -v node)"; then
-  NODE_BIN="$(command -v node)"
-else
-  nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
-  candidates=()
-  for (( i=${#nvm_candidates[@]}-1; i>=0; i-- )); do
-    candidates+=("${nvm_candidates[i]}")
-  done
-  candidates+=(
-    /opt/homebrew/bin/node
-    /usr/local/bin/node
-    "$HOME/.volta/bin/node"
-    "$HOME/.fnm/aliases/default/bin/node"
-    "$HOME/.local/bin/node"
-  )
-  for candidate in "${candidates[@]}"; do
-    if node_is_suitable "$candidate"; then
-      NODE_BIN="$candidate"
-      break
-    fi
-  done
+
+# 1. Try pinned node
+if [[ -f "$NODE_PIN_FILE" ]]; then
+  pinned="$(cat "$NODE_PIN_FILE" 2>/dev/null | tr -d '[:space:]')"
+  if [[ -n "$pinned" ]] && node_is_suitable "$pinned"; then
+    NODE_BIN="$pinned"
+  fi
+fi
+
+# 2. Fallback search (unified order, read-only — does NOT update pin)
+if [[ -z "$NODE_BIN" ]]; then
+  if command -v node >/dev/null 2>&1 && node_is_suitable "$(command -v node)"; then
+    NODE_BIN="$(command -v node)"
+  else
+    nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
+    candidates=()
+    for (( i=${#nvm_candidates[@]}-1; i>=0; i-- )); do
+      candidates+=("${nvm_candidates[i]}")
+    done
+    candidates+=(
+      "$HOME/.volta/bin/node"
+      "$HOME/.fnm/aliases/default/bin/node"
+      /opt/homebrew/bin/node
+      /usr/local/bin/node
+      "$HOME/.local/bin/node"
+    )
+    for candidate in "${candidates[@]}"; do
+      if node_is_suitable "$candidate"; then
+        NODE_BIN="$candidate"
+        break
+      fi
+    done
+  fi
 fi
 
 if [[ -z "$NODE_BIN" ]]; then
