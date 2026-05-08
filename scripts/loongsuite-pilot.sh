@@ -322,6 +322,7 @@ cmd_run_updater() {
         exit 1
     }
 
+    echo "$$" > "$UPDATER_PID_FILE"
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
     exec "$node_bin" "$BOOTSTRAP_DIR/updater-daemon.js"
 }
