@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 import { buildAgentActivityEntry } from '../../../src/normalization/entry-builder.js';
 import { ClientType, ActionType } from '../../../src/types/index.js';
 
@@ -9,7 +9,7 @@ vi.mock('uuid', () => ({
 import { v4 as mockUuidV4 } from 'uuid';
 
 describe('buildAgentActivityEntry', () => {
-  let nowSpy: ReturnType<typeof vi.spyOn>;
+  let nowSpy: MockInstance<[], number>;
 
   beforeEach(() => {
     nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1700000000000);
@@ -93,6 +93,26 @@ describe('buildAgentActivityEntry', () => {
       filePath: '/a.ts', extra,
     });
     expect(entry).toMatchObject({ 'agent.foo': 'bar', 'agent.num': 42 });
+  });
+
+  it('does not let extra agent fields override legacy option fields', () => {
+    const entry = buildAgentActivityEntry({
+      sessionId: 's', userId: 'u',
+      agentType: ClientType.QoderWork, actionType: ActionType.Edit,
+      filePath: '/source.ts', content: 'from option',
+      extra: {
+        type: 'user',
+        'agent.type': 'user',
+        file_path: '/extra.ts',
+        action_type: ActionType.Other,
+        content: 'from extra',
+      },
+    });
+
+    expect(entry['gen_ai.agent.type']).toBe(ClientType.QoderWork);
+    expect(entry['agent.file_path']).toBe('/source.ts');
+    expect(entry['agent.action_type']).toBe(ActionType.Edit);
+    expect(entry['agent.content']).toBe('from option');
   });
 
   it('leaves optional fields undefined when not provided', () => {
