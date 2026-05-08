@@ -6,7 +6,7 @@ The collector's current `AgentActivityEntry` shape uses a partial OTel style wit
 
 - Standardize `AgentActivityEntry` on the field definitions from section 3 of the current endpoint-side Agent schema.
 - Treat OTel-style top-level fields as canonical where listed: `time_unix_nano`, `observed_time_unix_nano`, `event.*`, `user.id`, `trace_id`, `span_id`, `parent_span_id`, `host.*`, `service.name`, and `error.*`.
-- Move Agent, request, response, usage, cost, tool, and skill fields into their canonical `gen_ai.*` names, including `gen_ai.turn.id`, `gen_ai.step.id`, `gen_ai.agent.*`, `gen_ai.request.id`, `gen_ai.usage.*_cost`, `gen_ai.tool.call.exec.id`, and `gen_ai.tool.call.duration_ms`.
+- Move Agent, request, response, usage, cost, tool, and skill fields into their canonical `gen_ai.*` names, including `gen_ai.turn.id`, `gen_ai.step.id`, `gen_ai.agent.*`, `gen_ai.request.id`, `gen_ai.usage.*_cost`, `gen_ai.tool.call.exec.id`, and `gen_ai.tool.call.duration`.
 - Update `event.name` handling to the current enum: `llm.request`, `llm.response`, `tool.call`, `tool.result`, `skill.use`, `tool.approve`, and `other`.
 - Treat the new dotted field names as the canonical output schema for JSONL, SLS, HTTP, and contract tests.
 - Keep input compatibility for old local logs and existing hook/transcript records by accepting legacy aliases such as `session.id`, `turn.id`, `step.id`, `agent.type`, `request.id`, `provider.name`, `request.model`, `usage.input_tokens`, `cost.input`, `tool.exec.id`, `tool.result.duration_ms`, `input.messages`, `tool.arguments`, and `tool.result.payload`.
@@ -30,7 +30,7 @@ The collector's current `AgentActivityEntry` shape uses a partial OTel style wit
 - Affected code areas:
   - `src/types/events.ts`: Update the `AgentActivityEntry` contract and related event/provider/status types.
   - `src/normalization/entry-builder.ts`: Build canonical entries, map legacy option names to new fields, serialize canonical fields only, and infer providers.
-  - `src/normalization/content-data-policy.ts`: Apply upload policy to new GenAI content fields and legacy aliases.
+  - `src/normalization/agent-content-policy.ts`: Apply message content capture policy to new GenAI content fields and legacy aliases.
   - Inputs under `src/inputs/**`: Emit canonical fields while reading both new and legacy raw log keys.
   - `src/core/input-manager.ts`: Continue enriching `user.id` after entries use the canonical schema.
   - Flushers under `src/flushers/**`: Preserve canonical dotted keys during output.

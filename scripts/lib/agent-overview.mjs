@@ -117,10 +117,12 @@ export function classifyMethod(inputId) {
 
 export function classifyRecord(record) {
   const attributes = parseAttributes(record.attributes);
-  const agentType = stringValue(record['agent.type']).toLowerCase();
-  const source = stringValue(attributes.source).toLowerCase();
-  const variant = stringValue(attributes.qoder_variant).toLowerCase();
-  const entrypoint = stringValue(attributes.entrypoint ?? record.entrypoint).toLowerCase();
+  const agentType = stringValue(record['gen_ai.agent.type'] ?? record['agent.type']).toLowerCase();
+  const source = stringValue(attributes.source ?? record['agent.source']).toLowerCase();
+  const variant = stringValue(attributes.qoder_variant ?? record['agent.qoder_variant']).toLowerCase();
+  const entrypoint = stringValue(
+    attributes.entrypoint ?? record['agent.entrypoint'] ?? record.entrypoint,
+  ).toLowerCase();
 
   if (agentType === 'cursor') return 'cursor';
   if (agentType === 'qoder-work') return 'qoder-work';
@@ -480,7 +482,7 @@ async function summarizeJsonlFile(filePath, options) {
     if (agentId === 'unknown') continue;
     const timestamp = recordTime(record);
     const eventName = stringValue(record['event.name']) || 'event';
-    const tokens = numberValue(record['usage.total_tokens']);
+    const tokens = numberValue(record['gen_ai.usage.total_tokens'] ?? record['usage.total_tokens']);
     const agent = ensureAgentOutput(summary.byAgent, agentId);
     agent.total += 1;
     agent.tokens += tokens;
@@ -488,7 +490,7 @@ async function summarizeJsonlFile(filePath, options) {
     agent.eventTypes[eventName] = (agent.eventTypes[eventName] || 0) + 1;
 
     const attributes = parseAttributes(record.attributes);
-    const source = stringValue(attributes.source) || 'normalized-output';
+    const source = stringValue(attributes.source ?? record['agent.source']) || 'normalized-output';
     const method = ensureMethodOutput(agent.methods, source);
     method.count += 1;
     method.lastActivityAt = maxIso(method.lastActivityAt, timestamp);

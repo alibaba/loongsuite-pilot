@@ -96,7 +96,10 @@ export class ClaudeCodeLogInput extends BaseHookInput {
       'gen_ai.tool.call.arguments': toJsonValue(record['gen_ai.tool.call.arguments'] ?? record['tool.arguments']),
       'gen_ai.tool.call.result': toJsonValue(record['gen_ai.tool.call.result'] ?? record['tool.result']),
       'tool.result.status': getStringValue(record, 'tool.result.status'),
-      'gen_ai.tool.call.duration_ms': getNumberValue(record, 'gen_ai.tool.call.duration_ms') ?? getNumberValue(record, 'tool.result.duration_ms'),
+      'gen_ai.tool.call.duration': getNumberValue(record, 'gen_ai.tool.call.duration')
+        ?? getNumberValue(record, 'gen_ai.tool.call.duration_ms')
+        ?? getNumberValue(record, 'tool.result.duration')
+        ?? getNumberValue(record, 'tool.result.duration_ms'),
       'error.type': getStringValue(record, 'error.type'),
       'error.message': getStringValue(record, 'error.message'),
     });

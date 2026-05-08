@@ -88,8 +88,8 @@ while [[ $# -gt 0 ]]; do
         --data-dir=*)         DATA_DIR="${1#*=}"; shift ;;
         --log-level)          LOG_LEVEL="$2"; shift 2 ;;
         --log-level=*)        LOG_LEVEL="${1#*=}"; shift ;;
-        --user.id)            USER_ID="$2"; shift 2 ;;
-        --user.id=*)          USER_ID="${1#*=}"; shift ;;
+        --userId|--user.id)   USER_ID="$2"; shift 2 ;;
+        --userId=*|--user.id=*) USER_ID="${1#*=}"; shift ;;
         --lang)               export LOONGSUITE_PILOT_LANG="$2"; shift 2 ;;
         --lang=*)             export LOONGSUITE_PILOT_LANG="${1#--lang=}"; shift ;;
         --version)            INSTALL_VERSION="$2"; shift 2 ;;
@@ -361,6 +361,10 @@ const config = {
   enabled: true,
   dataDir: '$DATA_DIR',
 };
+if (config.userId === undefined && config['user.id'] !== undefined) {
+  config.userId = config['user.id'];
+}
+delete config['user.id'];
 
 const slsEndpoint = '${SLS_ENDPOINT}';
 const slsProject  = '${SLS_PROJECT}';
@@ -370,9 +374,12 @@ const slsAkSecret = '${SLS_AK_SECRET}';
 const logLevel    = '${LOG_LEVEL}';
 const userId      = '${USER_ID}';
 
-if (slsEndpoint) {
+if (slsEndpoint || slsProject || slsLogstore) {
   config.sls = config.sls || {};
-  config.sls.endpoint = slsEndpoint;
+  config.sls.destinationOverride = true;
+  if (slsEndpoint) {
+    config.sls.endpoint = slsEndpoint;
+  }
   if (slsAkId && slsAkSecret) {
     config.sls.mode = 'ak';
     config.sls.accessKeyId = slsAkId;
@@ -390,7 +397,7 @@ if (logLevel) {
 }
 
 if (userId) {
-  config['user.id'] = userId;
+  config.userId = userId;
   delete config.identity;
 }
 

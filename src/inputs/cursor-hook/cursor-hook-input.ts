@@ -91,7 +91,7 @@ export class CursorHookInput extends BaseHookInput {
       'gen_ai.tool.call.arguments': eventName === 'tool.call' ? toolArguments : undefined,
       'gen_ai.tool.call.result': eventName === 'tool.result' ? toJsonValue(toolOutput) : undefined,
       'tool.result.status': eventName === 'tool.result' ? inferToolStatus(toolOutput, hookEvent) : undefined,
-      'gen_ai.tool.call.duration_ms': getDurationMs(payload),
+      'gen_ai.tool.call.duration': getDuration(payload),
       'gen_ai.output.messages': eventName === 'llm.response' ? buildOutputMessages(payload, hookEvent) : undefined,
       'error.type': inferErrorType(payload, hookEvent),
       'error.message': inferErrorMessage(payload, hookEvent, toolOutput),
@@ -170,7 +170,7 @@ function buildToolResultPayload(payload: Record<string, unknown>): unknown {
   return undefined;
 }
 
-function getDurationMs(payload: Record<string, unknown>): number | undefined {
+function getDuration(payload: Record<string, unknown>): number | undefined {
   const duration = payload.duration_ms ?? payload.duration;
   return typeof duration === 'number' && Number.isFinite(duration) ? duration : undefined;
 }

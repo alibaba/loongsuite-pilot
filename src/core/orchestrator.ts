@@ -90,7 +90,7 @@ export class Orchestrator extends EventEmitter {
     this.inputManager = new InputManager();
     this.inputManager.setFlusher(this.flusher);
     this.inputManager.setConfiguredUserId(this.config.userId);
-    this.inputManager.setContentDataConfig(this.config.contentData);
+    this.inputManager.setAgentsConfig(this.config.agents);
 
     // 5. Install hooks into agent config files (best-effort, non-blocking)
     await this.installHooks();

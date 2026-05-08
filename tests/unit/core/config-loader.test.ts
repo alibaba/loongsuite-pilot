@@ -14,11 +14,22 @@ vi.mock('../../../src/utils/logger.js', () => ({
 }));
 
 import { loadConfig } from '../../../src/core/config-loader.js';
+import { INTERNAL_SLS_DESTINATION } from '../../../src/internal/sls-destination.js';
+
+function clearSlsEnv() {
+  delete process.env.SLS_MODE;
+  delete process.env.SLS_ACCESS_KEY_ID;
+  delete process.env.SLS_ACCESS_KEY_SECRET;
+  delete process.env.SLS_ENDPOINT;
+  delete process.env.SLS_PROJECT;
+  delete process.env.SLS_LOGSTORE;
+}
 
 describe('ConfigLoader', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllEnvs();
+    clearSlsEnv();
   });
 
   afterEach(() => {
@@ -53,9 +64,9 @@ describe('ConfigLoader', () => {
       expect(config.autoStart).toBe(true);
     });
 
-    it('loads configured user.id from env over config file', async () => {
+    it('loads configured userId from env over config file', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
-        'user.id': 'from-file',
+        userId: 'from-file',
       });
       vi.stubEnv('LOONGSUITE_PILOT_USER_ID', 'from-env');
 
@@ -63,7 +74,16 @@ describe('ConfigLoader', () => {
       expect(config.userId).toBe('from-env');
     });
 
-    it('loads configured user.id from config file', async () => {
+    it('loads configured userId from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        userId: 'from-file',
+      });
+
+      const config = await loadConfig();
+      expect(config.userId).toBe('from-file');
+    });
+
+    it('keeps legacy user.id config compatibility', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         'user.id': 'from-file',
       });
@@ -84,41 +104,48 @@ describe('ConfigLoader', () => {
   });
 
   describe('SLS/HTTP/JSONL config merge (T027)', () => {
-    it('merges SLS endpoints from file and env (deduplication)', async () => {
-      mockReadJsonFile.mockResolvedValueOnce({
-        sls: {
-          accessKeyId: 'ak',
-          accessKeySecret: 'sk',
-          endpoint: 'https://sls.example.com',
-          endpoints: [
-            { project: 'proj1', logstore: 'log1', kind: 'agentActivity' },
-          ],
-        },
-      });
-      vi.stubEnv('SLS_ACCESS_KEY_ID', 'ak');
-      vi.stubEnv('SLS_ACCESS_KEY_SECRET', 'sk');
-      vi.stubEnv('SLS_ENDPOINT', 'https://sls.example.com');
-      vi.stubEnv('SLS_PROJECT', 'proj1');
-      vi.stubEnv('SLS_LOGSTORE', 'log1');
+    it('uses built-in SLS destination when config file has no destination', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
 
       const config = await loadConfig();
-      // Same project/logstore should be deduplicated
-      expect(config.flushers.sls?.endpoints).toHaveLength(1);
+      expect(config.flushers.sls?.enabled).toBe(true);
+      expect(config.flushers.sls?.mode).toBe(INTERNAL_SLS_DESTINATION.mode);
+      expect(config.flushers.sls?.endpoint).toBe(INTERNAL_SLS_DESTINATION.endpoint);
+      expect(config.flushers.sls?.endpoints).toEqual([
+        {
+          name: INTERNAL_SLS_DESTINATION.endpointName,
+          project: INTERNAL_SLS_DESTINATION.project,
+          logstore: INTERNAL_SLS_DESTINATION.logstore,
+          kind: 'agentActivity',
+        },
+      ]);
     });
 
-    it('uses env SLS endpoint over file endpoint list', async () => {
+    it('ignores legacy config file SLS destination fields', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
-          accessKeyId: 'ak',
-          accessKeySecret: 'sk',
-          endpoint: 'https://sls.example.com',
-          endpoints: [
-            { project: 'proj1', logstore: 'log1' },
-          ],
+          endpoint: 'https://legacy.example.com',
+          project: 'legacy-project',
+          logstore: 'legacy-logstore',
         },
       });
-      vi.stubEnv('SLS_ACCESS_KEY_ID', 'ak');
-      vi.stubEnv('SLS_ACCESS_KEY_SECRET', 'sk');
+
+      const config = await loadConfig();
+      expect(config.flushers.sls?.endpoint).toBe(INTERNAL_SLS_DESTINATION.endpoint);
+      expect(config.flushers.sls?.endpoints[0]).toMatchObject({
+        project: INTERNAL_SLS_DESTINATION.project,
+        logstore: INTERNAL_SLS_DESTINATION.logstore,
+      });
+    });
+
+    it('uses env SLS destination over built-in and legacy file values', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: {
+          endpoint: 'https://legacy.example.com',
+          project: 'legacy-project',
+          logstore: 'legacy-logstore',
+        },
+      });
       vi.stubEnv('SLS_ENDPOINT', 'https://sls.example.com');
       vi.stubEnv('SLS_PROJECT', 'proj2');
       vi.stubEnv('SLS_LOGSTORE', 'log2');
@@ -129,6 +156,43 @@ describe('ConfigLoader', () => {
         project: 'proj2',
         logstore: 'log2',
       });
+    });
+
+    it('uses explicit installer SLS destination override from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: {
+          destinationOverride: true,
+          endpoint: 'sls.example.com',
+          project: 'operator-project',
+          logstore: 'operator-logstore',
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.flushers.sls?.endpoint).toBe('https://sls.example.com');
+      expect(config.flushers.sls?.endpoints[0]).toMatchObject({
+        project: 'operator-project',
+        logstore: 'operator-logstore',
+      });
+    });
+
+    it('keeps non-destination SLS controls configurable', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: {
+          enabled: false,
+          batchMaxSize: 5,
+          flushIntervalMs: 750,
+          endpoint: 'https://legacy.example.com',
+          project: 'legacy-project',
+          logstore: 'legacy-logstore',
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.flushers.sls?.enabled).toBe(false);
+      expect(config.flushers.sls?.batchMaxSize).toBe(5);
+      expect(config.flushers.sls?.flushIntervalMs).toBe(750);
+      expect(config.flushers.sls?.endpoint).toBe(INTERNAL_SLS_DESTINATION.endpoint);
     });
 
     it('resolves HTTP enabled from env', async () => {
@@ -261,66 +325,65 @@ describe('ConfigLoader', () => {
     });
   });
 
-  describe('contentData config', () => {
+  describe('agents config', () => {
     it('defaults to no per-agent policies when config is missing', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
 
       const config = await loadConfig();
-      expect(config.contentData).toEqual({});
+      expect(config.agents).toEqual({});
     });
 
-    it('loads per-agent uploadEnabled overrides', async () => {
+    it('loads per-agent captureMessageContent overrides', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
-        contentData: {
-          cursor: { uploadEnabled: false },
-          'qoder-cli': { uploadEnabled: true },
+        agents: {
+          cursor: { captureMessageContent: false },
+          qoder: { captureMessageContent: true },
         },
       });
 
       const config = await loadConfig();
-      expect(config.contentData.cursor.uploadEnabled).toBe(false);
-      expect(config.contentData['qoder-cli'].uploadEnabled).toBe(true);
+      expect(config.agents.cursor.captureMessageContent).toBe(false);
+      expect(config.agents.qoder.captureMessageContent).toBe(true);
     });
 
-    it('parses string boolean uploadEnabled values', async () => {
+    it('parses string boolean captureMessageContent values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
-        contentData: {
-          cursor: { uploadEnabled: 'false' },
-          'qoder-cli': { uploadEnabled: 'true' },
+        agents: {
+          cursor: { captureMessageContent: 'false' },
+          qoder: { captureMessageContent: 'true' },
         },
       });
 
       const config = await loadConfig();
-      expect(config.contentData.cursor.uploadEnabled).toBe(false);
-      expect(config.contentData['qoder-cli'].uploadEnabled).toBe(true);
+      expect(config.agents.cursor.captureMessageContent).toBe(false);
+      expect(config.agents.qoder.captureMessageContent).toBe(true);
     });
 
-    it('falls back to upload enabled for invalid or omitted values', async () => {
+    it('falls back to capturing message content for invalid or omitted values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
-        contentData: {
-          cursor: { uploadEnabled: 'sometimes' },
-          'qoder-cli': {},
+        agents: {
+          cursor: { captureMessageContent: 'sometimes' },
+          qoder: {},
         },
       });
 
       const config = await loadConfig();
-      expect(config.contentData.cursor.uploadEnabled).toBe(true);
-      expect(config.contentData['qoder-cli'].uploadEnabled).toBe(true);
+      expect(config.agents.cursor.captureMessageContent).toBe(true);
+      expect(config.agents.qoder.captureMessageContent).toBe(true);
     });
 
-    it('ignores unsupported contentData fields for this stage', async () => {
+    it('ignores unsupported agent fields for this stage', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
-        contentData: {
+        agents: {
           cursor: {
-            uploadEnabled: 'true',
-            maskEnabled: 'true',
-            excludedWorkspace: ['/workspace'],
+            captureMessageContent: 'true',
+            unknownFutureOption: 'ignored',
           },
         },
       });
 
       const config = await loadConfig();
-      expect(config.contentData.cursor).toEqual({ uploadEnabled: true });
+      expect(config.agents.cursor).toEqual({ captureMessageContent: true });
     });
   });
 });

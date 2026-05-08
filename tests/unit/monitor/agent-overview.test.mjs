@@ -19,16 +19,20 @@ describe('agent overview classification', () => {
 
   it('splits Qoder and Qoder CLI records by variant hints', () => {
     expect(classifyRecord({
+      'gen_ai.agent.type': 'qoder',
+      'agent.source': 'qoder-sqlite-chat-message',
+    })).toBe('qoder');
+    expect(classifyRecord({
+      'gen_ai.agent.type': 'qoder-cli',
+      'agent.qoder_variant': 'qoder-cli',
+    })).toBe('qoder-cli');
+    expect(classifyRecord({
+      'agent.entrypoint': 'cli',
+    })).toBe('qoder-cli');
+    expect(classifyRecord({
       'agent.type': 'qoder',
       attributes: JSON.stringify({ source: 'qoder-sqlite-chat-message' }),
     })).toBe('qoder');
-    expect(classifyRecord({
-      'agent.type': 'qoder-cli',
-      attributes: JSON.stringify({ qoder_variant: 'qoder-cli' }),
-    })).toBe('qoder-cli');
-    expect(classifyRecord({
-      attributes: JSON.stringify({ entrypoint: 'cli' }),
-    })).toBe('qoder-cli');
   });
 });
 
@@ -181,10 +185,10 @@ function eventLine({ id, agentType, eventName, tokens, attributes = {}, output }
   return JSON.stringify({
     'event.id': id,
     'event.name': eventName,
-    'agent.type': agentType,
-    'usage.total_tokens': tokens,
+    'gen_ai.agent.type': agentType,
+    'gen_ai.usage.total_tokens': tokens,
     time_unix_nano: '1777953600000000000',
-    attributes: JSON.stringify(attributes),
-    'output.messages': output,
+    ...Object.fromEntries(Object.entries(attributes).map(([key, value]) => [`agent.${key}`, value])),
+    'gen_ai.output.messages': output,
   });
 }

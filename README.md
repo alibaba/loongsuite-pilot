@@ -132,7 +132,7 @@ bash deploy/upload.sh --bucket my-bucket --prefix my/path --region cn-beijing
 # 最简安装（不传子命令默认为 install）
 curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/<PREFIX>/loongsuite-pilot-installer.sh | bash
 
-# 带 SLS 后端配置
+# 可选：内部/运维场景覆盖 SLS 后端配置
 curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install \
   --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
   --sls-project "my-project" \
@@ -146,7 +146,7 @@ curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install \
 2. 下载并解压安装包到 `~/.loongsuite-pilot/package`
 3. `npm install --production` 安装依赖
 4. 执行 `postinstall.js` 部署 hook 脚本到 `~/.loongsuite-pilot/hooks/`
-5. 将安装参数写入 `~/.loongsuite-pilot/config.json`（非环境变量）
+5. 将安装参数写入 `~/.loongsuite-pilot/config.json`（默认 SLS 上报目的地由程序内置，不写入用户配置）
 6. 安装 `loongsuite-pilot` 服务管理命令（root 用户链接到 `/usr/local/bin`，普通用户安装到 `~/.local/bin`）
 7. 配置开机自启动（macOS: launchd / Linux: systemd user unit）
 8. 自动启动服务
@@ -338,27 +338,10 @@ loongsuite-pilot restart
 {
   "enabled": true,
   "dataDir": "~/.loongsuite-pilot",
+  "userId": "user-123",
 
   "sls": {
     "enabled": true,
-    "accessKeyId": "LTAI5t...",
-    "accessKeySecret": "xxxxxxxx",
-    "region": "cn-hangzhou",
-    "endpoints": [
-      {
-        "name": "agent-activity",
-        "project": "my-ai-analytics",
-        "logstore": "agent-activity",
-        "kind": "agentActivity"
-      },
-      {
-        "name": "agent-telemetry",
-        "project": "my-ai-analytics",
-        "logstore": "agent-telemetry-telemetry",
-        "kind": "agentTelemetry",
-        "redact": true
-      }
-    ],
     "batchMaxSize": 20,
     "flushIntervalMs": 2000
   },
@@ -386,26 +369,29 @@ loongsuite-pilot restart
     "cursor-hook":    { "enabled": true, "pollInterval": 60000 }
   },
 
-  "contentData": {
+  "agents": {
     "cursor": {
-      "uploadEnabled": "true"
+      "captureMessageContent": "true"
     },
-    "qoder-cli": {
-      "uploadEnabled": "true"
+    "qoder": {
+      "captureMessageContent": "true"
     }
   }
 }
 ```
 
+默认 SLS 上报目的地由程序内置，不通过用户配置文件暴露。旧版本安装产生的 `sls.endpoint`、`sls.project`、`sls.logstore` 字段可以继续留在 `config.json` 中，但普通运行时不再读取这些字段；需要运维覆盖时，请使用 `SLS_ENDPOINT`、`SLS_PROJECT`、`SLS_LOGSTORE` 环境变量或安装脚本的显式 `--sls-*` 参数。
+
+升级提示：如果你曾经通过 `config.json` 自定义 SLS 目的地，请改用环境变量或重新运行安装脚本并显式传入 `--sls-endpoint`、`--sls-project`、`--sls-logstore`。
+
 > AK/SK 等敏感信息建议通过环境变量传入，配置文件中只放非敏感项。
 
 #### 敏感内容上报控制
 
-`contentData` 按 `agent.type` 配置内容字段是否上报到输出通道（SLS / JSONL / HTTP）。当前阶段只实现 `uploadEnabled`：
+`agents` 按 `agent.type` 配置内容字段是否上报到输出通道（SLS / JSONL / HTTP）。当前阶段只实现 `captureMessageContent`：
 
 - 默认值为 `true`：上报敏感内容字段。
 - 设置为 `"false"` 或 `false`：删除敏感内容字段，但保留模型、token、cost、session、event 等非敏感元数据。
-- `maskEnabled`、`excludedWorkspace` 等字段当前会被忽略，预留给后续能力。
 
 敏感内容字段包括 `input.messages`、`input.messages_delta`、`output.messages`、`tool.arguments`、`tool.result.payload`，以及 legacy 采集链路里的 `content` / `inlineDiffMessage`。
 

@@ -1,11 +1,11 @@
 import type {
   AgentActivityEntry,
-  ContentDataAgentPolicy,
-  ContentDataConfig,
+  AgentConfig,
+  AgentsConfig,
   JsonValue,
 } from '../types/index.js';
 
-const CONTENT_FIELDS = new Set([
+const MESSAGE_CONTENT_FIELDS = new Set([
   'gen_ai.input.messages',
   'gen_ai.input.messages_delta',
   'gen_ai.output.messages',
@@ -22,32 +22,32 @@ const CONTENT_FIELDS = new Set([
   'agent.inline_diff_message',
 ]);
 
-const CONTENT_ATTRIBUTE_FIELDS = new Set([
+const MESSAGE_CONTENT_ATTRIBUTE_FIELDS = new Set([
   'content',
   'inlineDiffMessage',
   'agent.content',
   'agent.inline_diff_message',
 ]);
 
-const DEFAULT_POLICY: ContentDataAgentPolicy = {
-  uploadEnabled: true,
+const DEFAULT_CONFIG: AgentConfig = {
+  captureMessageContent: true,
 };
 
-export function applyContentDataPolicy(
+export function applyAgentContentPolicy(
   entry: AgentActivityEntry,
-  config: ContentDataConfig,
+  config: AgentsConfig,
 ): AgentActivityEntry {
-  const policy = resolvePolicy(entry, config);
-  if (policy.uploadEnabled) return { ...entry };
+  const agentConfig = resolveAgentConfig(entry, config);
+  if (agentConfig.captureMessageContent) return { ...entry };
 
   const next: AgentActivityEntry = { ...entry };
-  for (const field of CONTENT_FIELDS) {
+  for (const field of MESSAGE_CONTENT_FIELDS) {
     delete next[field];
   }
 
   if (next.attributes && typeof next.attributes === 'object' && !Array.isArray(next.attributes)) {
     const attributes = { ...next.attributes };
-    for (const field of CONTENT_ATTRIBUTE_FIELDS) {
+    for (const field of MESSAGE_CONTENT_ATTRIBUTE_FIELDS) {
       delete attributes[field];
     }
     next.attributes = attributes as { [key: string]: JsonValue };
@@ -56,11 +56,11 @@ export function applyContentDataPolicy(
   return next;
 }
 
-function resolvePolicy(
+function resolveAgentConfig(
   entry: AgentActivityEntry,
-  config: ContentDataConfig,
-): ContentDataAgentPolicy {
+  config: AgentsConfig,
+): AgentConfig {
   const agentType = entry['gen_ai.agent.type'] ?? entry['agent.type'];
-  if (!agentType) return DEFAULT_POLICY;
-  return config[agentType] ?? DEFAULT_POLICY;
+  if (!agentType) return DEFAULT_CONFIG;
+  return config[agentType] ?? DEFAULT_CONFIG;
 }

@@ -68,7 +68,7 @@ Important renames:
 - `tool.exec.id` -> `gen_ai.tool.call.exec.id`
 - `tool.arguments` -> `gen_ai.tool.call.arguments`
 - `tool.result.payload` -> `gen_ai.tool.call.result`
-- `tool.result.duration_ms` -> `gen_ai.tool.call.duration_ms`
+- `tool.result.duration_ms` -> `gen_ai.tool.call.duration`
 - `skill.name` -> `gen_ai.skill.name`
 - `attributes` should be replaced for new output by structured canonical fields where available, with non-standard temporary extension data kept under `agent.xxx` only when needed.
 

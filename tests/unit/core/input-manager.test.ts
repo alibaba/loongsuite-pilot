@@ -121,12 +121,12 @@ describe('InputManager', () => {
     });
   });
 
-  describe('content data policy', () => {
-    it('deletes sensitive fields before dispatch when upload is disabled', async () => {
+  describe('agent content policy', () => {
+    it('deletes sensitive fields before dispatch when message content capture is disabled', async () => {
       const input = new StubInput('cursor-hook');
       manager.registerInput(input as any);
-      manager.setContentDataConfig({
-        [ClientType.Cursor]: { uploadEnabled: false },
+      manager.setAgentsConfig({
+        [ClientType.Cursor]: { captureMessageContent: false },
       });
 
       const entry = buildTestEntry({
@@ -150,7 +150,7 @@ describe('InputManager', () => {
       expect(dispatched['event.name']).toBe('other');
     });
 
-    it('preserves sensitive fields when upload is enabled by default', async () => {
+    it('preserves sensitive fields when message content capture is enabled by default', async () => {
       const input = new StubInput('cursor-hook');
       manager.registerInput(input as any);
 
@@ -170,8 +170,8 @@ describe('InputManager', () => {
       const sqliteInput = new StubInput('cursor-sqlite');
       manager.registerInput(hookInput as any);
       manager.registerInput(sqliteInput as any);
-      manager.setContentDataConfig({
-        [ClientType.Cursor]: { uploadEnabled: false },
+      manager.setAgentsConfig({
+        [ClientType.Cursor]: { captureMessageContent: false },
       });
 
       const hookEntry = buildTestEntry({
@@ -197,8 +197,8 @@ describe('InputManager', () => {
       const http = new MockFlusher('http');
       const multi = new MultiFlusher([jsonl, sls, http]);
       manager.setFlusher(multi);
-      manager.setContentDataConfig({
-        [ClientType.Cursor]: { uploadEnabled: false },
+      manager.setAgentsConfig({
+        [ClientType.Cursor]: { captureMessageContent: false },
       });
       const input = new StubInput('cursor-hook');
       manager.registerInput(input as any);

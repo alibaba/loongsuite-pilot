@@ -1,37 +1,37 @@
 ## ADDED Requirements
 
 ### Requirement: Per-Agent Sensitive Data Config
-The system SHALL load a top-level `contentData` object from the user config file and interpret each direct child key as an `agent.type` policy.
+The system SHALL load a top-level `agents` object from the user config file and interpret each direct child key as an `agent.type` policy.
 
 #### Scenario: Defaults when config is missing
-- **WHEN** the config file does not contain `contentData`
+- **WHEN** the config file does not contain `agents`
 - **THEN** the collector SHALL upload sensitive content fields.
 
 #### Scenario: Defaults for omitted policy fields
-- **WHEN** an agent policy omits `uploadEnabled`
-- **THEN** the collector SHALL default `uploadEnabled` to true for that agent.
+- **WHEN** an agent policy omits `captureMessageContent`
+- **THEN** the collector SHALL default `captureMessageContent` to true for that agent.
 
 #### Scenario: String boolean config values
-- **WHEN** an agent policy contains string boolean values such as `"true"` or `"false"` for `uploadEnabled`
+- **WHEN** an agent policy contains string boolean values such as `"true"` or `"false"` for `captureMessageContent`
 - **THEN** the collector SHALL parse them as boolean values.
 
 #### Scenario: Agent type policy lookup
 - **WHEN** multiple inputs produce entries with the same `agent.type`
-- **THEN** the collector SHALL apply the same `contentData.<agent.type>` policy to all of those entries.
+- **THEN** the collector SHALL apply the same `agents.<agent.type>` policy to all of those entries.
 
 ### Requirement: Sensitive Content Upload Control
-The system SHALL treat message and tool-call content fields as sensitive content and SHALL delete those fields before dispatch when upload is disabled for the entry's `agent.type`.
+The system SHALL treat message and tool-call content fields as sensitive content and SHALL delete those fields before dispatch when message content capture is disabled for the entry's `agent.type`.
 
-#### Scenario: Upload disabled for agent
-- **WHEN** `contentData.cursor.uploadEnabled` is false and a Cursor entry contains `input.messages`
+#### Scenario: Message content capture disabled for agent
+- **WHEN** `agents.cursor.captureMessageContent` is false and a Cursor entry contains `input.messages`
 - **THEN** the collector SHALL delete `input.messages` before the entry is dispatched to any flusher.
 
 #### Scenario: Non-sensitive metadata remains
-- **WHEN** sensitive content fields are deleted because upload is disabled
+- **WHEN** sensitive content fields are deleted because message content capture is disabled
 - **THEN** the collector SHALL retain non-sensitive fields such as event name, agent type, session id, model, usage, cost, and timestamps.
 
-#### Scenario: Upload enabled for agent
-- **WHEN** `contentData.cursor.uploadEnabled` is true
+#### Scenario: Message content capture enabled for agent
+- **WHEN** `agents.cursor.captureMessageContent` is true
 - **THEN** the collector SHALL preserve sensitive content fields for Cursor entries.
 
 ### Requirement: Flusher-Independent Policy Application

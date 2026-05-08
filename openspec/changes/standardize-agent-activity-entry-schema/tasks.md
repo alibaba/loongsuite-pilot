@@ -1,6 +1,6 @@
 ## 1. Contract And Helpers
 
-- [x] 1.1 Update `AgentActivityEntry` in `src/types/events.ts` to use section-3 canonical fields and types, including `gen_ai.turn.id`, `gen_ai.step.id`, `gen_ai.agent.*`, `gen_ai.usage.*_cost`, `gen_ai.tool.call.exec.id`, `gen_ai.tool.call.duration_ms`, and `gen_ai.response.finish_reasons` as `string[]`; omit `gen_ai.message.role` and `is_error` from canonical output.
+- [x] 1.1 Update `AgentActivityEntry` in `src/types/events.ts` to use section-3 canonical fields and types, including `gen_ai.turn.id`, `gen_ai.step.id`, `gen_ai.agent.*`, `gen_ai.usage.*_cost`, `gen_ai.tool.call.exec.id`, `gen_ai.tool.call.duration`, and `gen_ai.response.finish_reasons` as `string[]`; omit `gen_ai.message.role` and `is_error` from canonical output.
 - [x] 1.2 Update `AgentEventName` to the current enum: `llm.request`, `llm.response`, `tool.call`, `tool.result`, `skill.use`, `tool.approve`, and `other`.
 - [x] 1.3 Add shared normalization helpers for reading canonical-or-legacy aliases, normalizing event names, normalizing finish reasons, and converting unknown values to `JsonValue`.
 - [x] 1.4 Implement `inferProviderName()` with explicit-provider precedence, model-name rules, source/agent fallback rules, and a stable unknown fallback.
@@ -10,7 +10,7 @@
 
 - [x] 2.1 Update `serialiseLogEntry()` to serialize canonical fields and omit legacy shortened aliases from new output.
 - [x] 2.2 Update `redactCodeGenerationFields()` to redact canonical sensitive fields plus legacy aliases.
-- [x] 2.3 Update `applyContentDataPolicy()` to delete canonical sensitive fields plus legacy aliases when upload is disabled.
+- [x] 2.3 Update `applyAgentContentPolicy()` to delete canonical sensitive fields plus legacy aliases when message content capture is disabled.
 - [x] 2.4 Update content policy lookup to use `gen_ai.agent.type` first and legacy `agent.type` as an input-compatibility fallback.
 - [x] 2.5 Ensure `InputManager` user enrichment still works with canonical entries and does not reintroduce legacy field names.
 

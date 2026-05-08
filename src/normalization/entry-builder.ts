@@ -56,6 +56,7 @@ export type StandardAgentActivityOptions = Partial<AgentActivityEntry> & {
   'tool.arguments'?: JsonValue;
   'tool.result.payload'?: JsonValue;
   'tool.result.status'?: string;
+  'tool.result.duration'?: number;
   'tool.result.duration_ms'?: number;
   'skill.name'?: string;
   attributes?: { [key: string]: JsonValue };
@@ -125,11 +126,7 @@ export function buildAgentActivityEntry(
     'gen_ai.tool.call.exec.id': stringAlias(opts, 'gen_ai.tool.call.exec.id', 'tool.exec.id'),
     'gen_ai.tool.call.arguments': jsonAlias(opts, 'gen_ai.tool.call.arguments', 'tool.arguments'),
     'gen_ai.tool.call.result': jsonAlias(opts, 'gen_ai.tool.call.result', 'tool.result.payload'),
-    'gen_ai.tool.call.duration_ms': numberAlias(
-      opts,
-      'gen_ai.tool.call.duration_ms',
-      'tool.result.duration_ms',
-    ),
+    'gen_ai.tool.call.duration': resolveToolCallDuration(opts),
     'gen_ai.skill.name': stringAlias(opts, 'gen_ai.skill.name', 'skill.name'),
   };
   applyLegacyToolStatus(entry, opts);
@@ -182,6 +179,7 @@ const LEGACY_ALIAS_FIELDS = new Set([
   'agent.id',
   'agent.name',
   'gen_ai.message.role',
+  'gen_ai.tool.call.duration_ms',
   'message.role',
   'client.channel',
   'provider.name',
@@ -208,6 +206,7 @@ const LEGACY_ALIAS_FIELDS = new Set([
   'tool.arguments',
   'tool.result.payload',
   'tool.result.status',
+  'tool.result.duration',
   'tool.result.duration_ms',
   'skill.name',
   'is_error',
@@ -395,6 +394,14 @@ function stringAlias(input: Record<string, unknown>, canonical: string, legacy: 
 
 function numberAlias(input: Record<string, unknown>, canonical: string, legacy: string): number | undefined {
   const value = input[canonical] ?? input[legacy];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function resolveToolCallDuration(input: Record<string, unknown>): number | undefined {
+  const value = input['gen_ai.tool.call.duration']
+    ?? input['gen_ai.tool.call.duration_ms']
+    ?? input['tool.result.duration']
+    ?? input['tool.result.duration_ms'];
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 

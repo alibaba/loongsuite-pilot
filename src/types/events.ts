@@ -79,7 +79,7 @@ export interface AgentActivityEntry {
   'gen_ai.tool.call.exec.id'?: string;
   'gen_ai.tool.call.arguments'?: JsonValue;
   'gen_ai.tool.call.result'?: JsonValue;
-  'gen_ai.tool.call.duration_ms'?: number;
+  'gen_ai.tool.call.duration'?: number;
   'gen_ai.skill.name'?: string;
   'error.type'?: string;
   'error.message'?: string;

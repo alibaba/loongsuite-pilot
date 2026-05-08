@@ -1,13 +1,14 @@
 import * as os from 'node:os';
 import type {
+  AgentsConfig,
   AnalyticsConfig,
   AutoUpdateConfig,
-  ContentDataConfig,
   FlusherConfig,
   LogRetentionConfig,
   SlsEndpoint,
   SlsMode,
 } from '../types/index.js';
+import { INTERNAL_SLS_DESTINATION } from '../internal/sls-destination.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -22,6 +23,7 @@ const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
 interface ConfigFile {
   enabled?: boolean;
   dataDir?: string;
+  userId?: string;
   'user.id'?: string;
 
   sls?: {
@@ -33,6 +35,7 @@ interface ConfigFile {
     endpoint?: string;
     project?: string;
     logstore?: string;
+    destinationOverride?: boolean;
     batchMaxSize?: number;
     flushIntervalMs?: number;
   };
@@ -68,8 +71,8 @@ interface ConfigFile {
     slsFailedDays?: number;
   };
 
-  contentData?: Record<string, {
-    uploadEnabled?: boolean | string;
+  agents?: Record<string, {
+    captureMessageContent?: boolean | string;
   }>;
 }
 
@@ -110,7 +113,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
 
   const dataDir = env('LOONGSUITE_PILOT_DATA_DIR') ?? file?.dataDir ?? '~/.loongsuite-pilot';
 
-  const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.['user.id'] ?? os.hostname();
+  const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
 
   return {
     enabled: envBool('LOONGSUITE_PILOT_ENABLED', file?.enabled ?? true),
@@ -121,7 +124,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     listeners: buildListenersConfig(file),
     flushers: buildFlushersConfig(file, dataDir),
     retention: buildRetentionConfig(file),
-    contentData: buildContentDataConfig(file),
+    agents: buildAgentsConfig(file),
   };
 }
 
@@ -134,14 +137,14 @@ function parseOptionalBool(value: unknown): boolean | undefined {
   return undefined;
 }
 
-function buildContentDataConfig(file: ConfigFile | null): ContentDataConfig {
-  const result: ContentDataConfig = {};
-  if (!file?.contentData || typeof file.contentData !== 'object') return result;
+function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
+  const result: AgentsConfig = {};
+  if (!file?.agents || typeof file.agents !== 'object') return result;
 
-  for (const [agentType, policy] of Object.entries(file.contentData)) {
+  for (const [agentType, policy] of Object.entries(file.agents)) {
     if (!agentType || !policy || typeof policy !== 'object') continue;
     result[agentType] = {
-      uploadEnabled: parseOptionalBool(policy.uploadEnabled) ?? true,
+      captureMessageContent: parseOptionalBool(policy.captureMessageContent) ?? true,
     };
   }
 
@@ -218,23 +221,36 @@ function buildFlushersConfig(
 }
 
 function buildSlsConfig(file: ConfigFile | null) {
-  const modeRaw = env('SLS_MODE') ?? file?.sls?.mode;
+  const fileDestinationOverride = file?.sls?.destinationOverride === true;
+  const modeRaw = env('SLS_MODE')
+    ?? (fileDestinationOverride ? file?.sls?.mode : undefined)
+    ?? INTERNAL_SLS_DESTINATION.mode;
   const mode: SlsMode = modeRaw === 'ak' ? 'ak' : 'webtracking';
 
-  const ak = env('SLS_ACCESS_KEY_ID') ?? file?.sls?.accessKeyId ?? '';
-  const sk = env('SLS_ACCESS_KEY_SECRET') ?? file?.sls?.accessKeySecret ?? '';
-  const rawEndpoint = env('SLS_ENDPOINT') ?? file?.sls?.endpoint ?? '';
+  const ak = env('SLS_ACCESS_KEY_ID')
+    ?? (fileDestinationOverride ? file?.sls?.accessKeyId : undefined)
+    ?? '';
+  const sk = env('SLS_ACCESS_KEY_SECRET')
+    ?? (fileDestinationOverride ? file?.sls?.accessKeySecret : undefined)
+    ?? '';
+  const rawEndpoint = env('SLS_ENDPOINT')
+    ?? (fileDestinationOverride ? file?.sls?.endpoint : undefined)
+    ?? INTERNAL_SLS_DESTINATION.endpoint;
   const endpoint = rawEndpoint && !/^https?:\/\//.test(rawEndpoint)
     ? `https://${rawEndpoint}`
     : rawEndpoint;
 
-  const project = env('SLS_PROJECT') ?? file?.sls?.project ?? '';
-  const logstore = env('SLS_LOGSTORE') ?? file?.sls?.logstore ?? '';
+  const project = env('SLS_PROJECT')
+    ?? (fileDestinationOverride ? file?.sls?.project : undefined)
+    ?? INTERNAL_SLS_DESTINATION.project;
+  const logstore = env('SLS_LOGSTORE')
+    ?? (fileDestinationOverride ? file?.sls?.logstore : undefined)
+    ?? INTERNAL_SLS_DESTINATION.logstore;
 
   const endpoints: SlsEndpoint[] = [];
   if (project && logstore) {
     endpoints.push({
-      name: 'agent-activity',
+      name: INTERNAL_SLS_DESTINATION.endpointName,
       project,
       logstore,
       kind: 'agentActivity',

@@ -37,7 +37,7 @@ The system SHALL represent newly normalized agent activity events using the fiel
 #### Scenario: Tool fields use GenAI namespace
 
 - **WHEN** a tool call or tool result event is normalized
-- **THEN** the entry SHALL use `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.call.exec.id`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, and `gen_ai.tool.call.duration_ms`
+- **THEN** the entry SHALL use `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.call.exec.id`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, and `gen_ai.tool.call.duration`
 
 #### Scenario: Event names use current enum
 

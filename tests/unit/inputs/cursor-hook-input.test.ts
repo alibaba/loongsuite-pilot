@@ -97,7 +97,7 @@ describe('CursorHookInput', () => {
     expect(entries[0]!['gen_ai.request.model']).toBe('unknown');
     expect(entries[0]!['gen_ai.response.model']).toBe('unknown');
     expect(entries[0]!['gen_ai.tool.call.result']).toEqual({ output: 'ok', exitCode: 0 });
-    expect(entries[0]!['gen_ai.tool.call.duration_ms']).toBe(12.5);
+    expect(entries[0]!['gen_ai.tool.call.duration']).toBe(12.5);
   });
 
   it('maps agent thought to llm.response output messages', async () => {

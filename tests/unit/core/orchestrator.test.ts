@@ -173,7 +173,7 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       outputDays: 7,
       slsFailedDays: 7,
     },
-    contentData: {},
+    agents: {},
     ...overrides,
   };
 }

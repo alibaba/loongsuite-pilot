@@ -4,8 +4,8 @@ Agent inputs can collect sensitive prompt, response, and tool-call content such 
 
 ## What Changes
 
-- Add a user-configurable `contentData` section in `~/.loongsuite-pilot/config.json`, keyed directly by `agent.type` values such as `cursor`, `qoder-cli`, and `qoder-work`.
-- Support per-agent `uploadEnabled` as the first-stage sensitive content upload control.
+- Add a user-configurable `agents` section in `~/.loongsuite-pilot/config.json`, keyed directly by `agent.type` values such as `cursor`, `qoder`, and `qoder-work`.
+- Support per-agent `captureMessageContent` as the first-stage sensitive content upload control.
 - Default behavior remains backward compatible: sensitive content is uploaded unless the user explicitly configures otherwise.
 - Apply the policy in the input collection layer after each input has mapped raw records into `AgentActivityEntry` fields and before entries are dispatched to any flusher.
 - Ensure all inputs that emit the same `agent.type` share the same policy, regardless of collection method.
@@ -25,7 +25,7 @@ Agent inputs can collect sensitive prompt, response, and tool-call content such 
 
 - Affected code areas:
   - `src/types/index.ts`: Add sensitive-data config types.
-  - `src/core/config-loader.ts`: Parse `contentData` from `config.json` with defaults.
+  - `src/core/config-loader.ts`: Parse `agents` from `config.json` with defaults.
   - `src/core/input-manager.ts`: Apply per-agent sensitive-data policy before dispatching entries.
   - New helper module for classifying sensitive fields and applying upload behavior.
 - All flushers (`jsonl`, `sls`, `http`) receive entries after the same input-layer policy is applied.
