@@ -47,6 +47,7 @@ REGION="${OSS_REGION:-}"
 PKG_PATH="$PROJECT_ROOT/loongsuite-pilot.tar.gz"
 INSTALLER_SCRIPT="$PROJECT_ROOT/deploy/loongsuite-pilot-installer.sh"
 INSTALLER_INNER_SCRIPT="$PROJECT_ROOT/deploy/loongsuite-pilot-installer-inner.sh"
+PATCHELF_SCRIPT="$PROJECT_ROOT/deploy/patchelf_node_for_7u.sh"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -116,6 +117,11 @@ fi
 
 if [ ! -f "$INSTALLER_INNER_SCRIPT" ]; then
     echo "❌ Inner installer script not found: $INSTALLER_INNER_SCRIPT"
+    exit 1
+fi
+
+if [ ! -f "$PATCHELF_SCRIPT" ]; then
+    echo "❌ Patchelf script not found: $PATCHELF_SCRIPT"
     exit 1
 fi
 
@@ -200,7 +206,8 @@ echo ""
 # ── Upload installer scripts (version-independent, stays at prefix root) ──
 INSTALLER_NAME="loongsuite-pilot-installer.sh"
 INSTALLER_INNER_NAME="loongsuite-pilot-installer-inner.sh"
-echo "==> Uploading installers: $INSTALLER_NAME, $INSTALLER_INNER_NAME"
+PATCHELF_NAME="patchelf_node_for_7u.sh"
+echo "==> Uploading installers: $INSTALLER_NAME, $INSTALLER_INNER_NAME, $PATCHELF_NAME"
 INSTALLER_UPLOAD="$(prepare_channel_installer "$INSTALLER_SCRIPT")"
 INSTALLER_INNER_UPLOAD="$(prepare_channel_installer "$INSTALLER_INNER_SCRIPT")"
 trap 'rm -f "$MANIFEST_TMP" "$INSTALLER_UPLOAD" "$INSTALLER_INNER_UPLOAD"' EXIT
@@ -208,6 +215,8 @@ upload_file "$INSTALLER_UPLOAD"       "${OSS_BASE}/${INSTALLER_NAME}"       "ins
 echo "    ✅ ${PUBLIC_BASE}/${INSTALLER_NAME}"
 upload_file "$INSTALLER_INNER_UPLOAD" "${OSS_BASE}/${INSTALLER_INNER_NAME}" "installer-inner"
 echo "    ✅ ${PUBLIC_BASE}/${INSTALLER_INNER_NAME}"
+upload_file "$PATCHELF_SCRIPT"        "${OSS_BASE}/${PATCHELF_NAME}"        "patchelf-script"
+echo "    ✅ ${PUBLIC_BASE}/${PATCHELF_NAME}"
 echo ""
 
 # ── Summary ──

@@ -1,11 +1,16 @@
+import * as path from 'path';
 import { Orchestrator } from './core/orchestrator.js';
 import { loadConfig } from './core/config-loader.js';
-import { createLogger } from './utils/logger.js';
+import { createLogger, initFileLogging } from './utils/logger.js';
+import { resolveHome } from './utils/fs-utils.js';
 
 const logger = createLogger('Main');
 
 async function main(): Promise<void> {
   const config = await loadConfig();
+
+  const logDir = path.join(resolveHome(config.dataDir), 'logs');
+  await initFileLogging(path.join(logDir, 'loongsuite-pilot-service.log'));
 
   if (!config.enabled) {
     logger.info('analytics disabled via config or LOONGSUITE_PILOT_ENABLED=false');

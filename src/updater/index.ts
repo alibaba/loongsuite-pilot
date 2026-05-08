@@ -1,6 +1,8 @@
+import * as path from 'path';
+import * as os from 'os';
 import { Updater } from './updater.js';
 import { buildAutoUpdateConfig } from '../core/config-loader.js';
-import { createLogger } from '../utils/logger.js';
+import { createLogger, initFileLogging } from '../utils/logger.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 
 const logger = createLogger('UpdaterMain');
@@ -8,6 +10,11 @@ const logger = createLogger('UpdaterMain');
 const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
 
 async function main(): Promise<void> {
+  const dataDir = resolveHome(
+    process.env.LOONGSUITE_PILOT_DATA_DIR ?? path.join(os.homedir(), '.loongsuite-pilot'),
+  );
+  await initFileLogging(path.join(dataDir, 'logs', 'loongsuite-pilot-updater.log'));
+
   logger.info('updater process starting');
 
   const configPath = resolveHome(

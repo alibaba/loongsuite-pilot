@@ -1,70 +1,59 @@
-const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 } as const;
+import pino from 'pino';
+import build from 'pino-roll';
 
-type LogMethodLevel = keyof typeof LEVELS;
+const LOG_LEVEL = (process.env.LOG_LEVEL?.toLowerCase() ?? 'info') as pino.Level;
 
-function getThreshold(): number {
-  const raw = process.env.LOG_LEVEL?.toLowerCase();
-  if (raw && raw in LEVELS) {
-    return LEVELS[raw as LogMethodLevel];
-  }
-  return LEVELS.info;
-}
+const pinoOpts: pino.LoggerOptions = {
+  level: LOG_LEVEL,
+  formatters: {
+    level(label) {
+      return { level: label.toUpperCase() };
+    },
+  },
+  timestamp: pino.stdTimeFunctions.isoTime,
+};
 
-function shouldLog(methodLevel: LogMethodLevel): boolean {
-  return LEVELS[methodLevel] >= getThreshold();
-}
+let rootLogger: pino.Logger = pino(pinoOpts);
 
-function formatLine(
-  level: string,
-  tag: string,
-  message: string,
-  meta?: Record<string, unknown>
-): string {
-  const time = new Date().toISOString();
-  const metaStr =
-    meta && Object.keys(meta).length > 0 ? ` ${JSON.stringify(meta)}` : '';
-  return `[${time}] [${level}] [${tag}] ${message}${metaStr}`;
+let fileLoggingInitialized = false;
+let loggerVersion = 0;
+const childCache = new Map<string, { version: number; child: pino.Logger }>();
+
+function getChild(tag: string): pino.Logger {
+  const cached = childCache.get(tag);
+  if (cached && cached.version === loggerVersion) return cached.child;
+  const child = rootLogger.child({ tag });
+  childCache.set(tag, { version: loggerVersion, child });
+  return child;
 }
 
 /**
- * Simple structured logger with `LOG_LEVEL` filtering (debug / info / warn / error, default info).
+ * Enable file logging with daily rotation via pino-roll.
+ * Uses direct in-process streams (no worker threads) so writes are
+ * immediate and survive fast process exits.
  */
-export class Logger {
-  static info(
-    tag: string,
-    message: string,
-    meta?: Record<string, unknown>
-  ): void {
-    if (!shouldLog('info')) return;
-    console.log(formatLine('INFO', tag, message, meta));
-  }
+export async function initFileLogging(logFilePath: string): Promise<void> {
+  if (fileLoggingInitialized) return;
+  fileLoggingInitialized = true;
 
-  static warn(
-    tag: string,
-    message: string,
-    meta?: Record<string, unknown>
-  ): void {
-    if (!shouldLog('warn')) return;
-    console.warn(formatLine('WARN', tag, message, meta));
-  }
+  const fileStream = await build({
+    file: logFilePath,
+    frequency: 'daily',
+    mkdir: true,
+    size: '50m',
+    dateFormat: 'yyyy-MM-dd',
+  });
 
-  static error(
-    tag: string,
-    message: string,
-    meta?: Record<string, unknown>
-  ): void {
-    if (!shouldLog('error')) return;
-    console.error(formatLine('ERROR', tag, message, meta));
-  }
+  rootLogger = pino(
+    pinoOpts,
+    pino.multistream([
+      { stream: process.stdout, level: LOG_LEVEL },
+      { stream: fileStream, level: LOG_LEVEL },
+    ]),
+  );
 
-  static debug(
-    tag: string,
-    message: string,
-    meta?: Record<string, unknown>
-  ): void {
-    if (!shouldLog('debug')) return;
-    console.log(formatLine('DEBUG', tag, message, meta));
-  }
+  loggerVersion++;
+  childCache.clear();
 }
 
 export type BoundLogger = {
@@ -76,9 +65,21 @@ export type BoundLogger = {
 
 export function createLogger(tag: string): BoundLogger {
   return {
-    info: (message, meta) => Logger.info(tag, message, meta),
-    warn: (message, meta) => Logger.warn(tag, message, meta),
-    error: (message, meta) => Logger.error(tag, message, meta),
-    debug: (message, meta) => Logger.debug(tag, message, meta),
+    info: (message, meta) => {
+      const c = getChild(tag);
+      meta ? c.info(meta, message) : c.info(message);
+    },
+    warn: (message, meta) => {
+      const c = getChild(tag);
+      meta ? c.warn(meta, message) : c.warn(message);
+    },
+    error: (message, meta) => {
+      const c = getChild(tag);
+      meta ? c.error(meta, message) : c.error(message);
+    },
+    debug: (message, meta) => {
+      const c = getChild(tag);
+      meta ? c.debug(meta, message) : c.debug(message);
+    },
   };
 }

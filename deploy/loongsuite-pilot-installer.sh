@@ -54,6 +54,7 @@ SLS_AK_SECRET=""
 DATA_DIR="$DEFAULT_DATA_DIR"
 LOG_LEVEL=""
 USER_ID=""
+HAS_SUDO=0
 PURGE=0
 
 # First arg is sub-command (or option -> default to install)
@@ -102,6 +103,29 @@ while [[ $# -gt 0 ]]; do
             exit 1 ;;
     esac
 done
+
+# Validate current user and sudo access on Linux
+validate_install_user() {
+    case "$(uname -s)" in
+        Linux)
+            local current_user
+            current_user=$(whoami)
+            if [ "$(id -u)" -eq 0 ]; then
+                HAS_SUDO=1
+                msg "   ✅ 以 root 身份安装" \
+                    "   ✅ Installing as root"
+            elif sudo -v 2>/dev/null; then
+                HAS_SUDO=1
+                msg "   ✅ sudo 权限校验通过 (user: $current_user)" \
+                    "   ✅ sudo access verified (user: $current_user)"
+            else
+                HAS_SUDO=0
+                msg "⚠️  无 sudo 权限 — 服务注册需要 sudo。将使用 nohup 回退（无开机启动）。" \
+                    "⚠️  No sudo access — service registration requires sudo. Falling back to nohup (no autostart)."
+            fi
+            ;;
+    esac
+}
 
 # Resolve PACKAGE_URL from channel + version if not explicitly set
 if [ -z "$PACKAGE_URL" ]; then
@@ -434,7 +458,11 @@ install_loongsuite_pilot_command() {
         ensure_path_block() {
             local file="$1"
             if [ ! -f "$file" ]; then
-                touch "$file"
+                touch "$file" 2>/dev/null || return 0
+            fi
+            if [ ! -w "$file" ]; then
+                msg "    ⚠️  $file 不可写，跳过" "    ⚠️  $file is not writable, skipping"
+                return 0
             fi
             if grep -q '\.local/bin' "$file" 2>/dev/null; then return 0; fi
             cat >> "$file" << 'PATHBLOCK'
@@ -906,6 +934,7 @@ cmd_install() {
         "🚀 Installing $PACKAGE_NAME ..."
     echo ""
 
+    validate_install_user
     check_deps
 
     # Migrate legacy layout if needed
@@ -976,6 +1005,8 @@ cmd_upgrade() {
     msg "🔄 开始升级 $PACKAGE_NAME ..." \
         "🔄 Upgrading $PACKAGE_NAME ..."
     echo ""
+
+    validate_install_user
 
     # Migrate legacy layout if needed
     migrate_legacy_layout
@@ -1171,21 +1202,38 @@ cmd_uninstall() {
         # Manual autostart cleanup when loongsuite-pilot is unavailable
         local _plist="$HOME/Library/LaunchAgents/com.loongsuite-pilot.plist"
         local _uplist="$HOME/Library/LaunchAgents/com.loongsuite-pilot.updater.plist"
-        local _unit="$HOME/.config/systemd/user/loongsuite-pilot.service"
-        local _uunit="$HOME/.config/systemd/user/loongsuite-pilot-updater.service"
         for f in "$_uplist" "$_plist"; do
             if [ -f "$f" ]; then
                 launchctl unload -w "$f" 2>/dev/null || true
                 rm -f "$f"
             fi
         done
-        for f in "$_uunit" "$_unit"; do
+
+        # Clean up system-level systemd units
+        local _run_user
+        _run_user="$(whoami)"
+        local _sys_unit="/etc/systemd/system/loongsuite-pilot-${_run_user}.service"
+        local _sys_uunit="/etc/systemd/system/loongsuite-pilot-updater-${_run_user}.service"
+        for f in "$_sys_uunit" "$_sys_unit"; do
             if [ -f "$f" ]; then
-                systemctl --user disable --now "$(basename "$f")" 2>/dev/null || true
-                rm -f "$f"
+                sudo systemctl disable --now "$(basename "$f")" &>/dev/null || true
+                sudo rm -f "$f"
             fi
         done
-        systemctl --user daemon-reload 2>/dev/null || true
+        sudo systemctl daemon-reload &>/dev/null || true
+
+        # Clean up init.d scripts
+        local _initd="/etc/init.d/loongsuite-pilot-${_run_user}"
+        local _initd_u="/etc/init.d/loongsuite-pilot-updater-${_run_user}"
+        for f in "$_initd_u" "$_initd"; do
+            if [ -f "$f" ]; then
+                sudo "$f" stop &>/dev/null || true
+                local _name; _name=$(basename "$f")
+                if command -v chkconfig &>/dev/null; then sudo chkconfig --del "$_name" &>/dev/null || true
+                elif command -v update-rc.d &>/dev/null; then sudo update-rc.d "$_name" remove &>/dev/null || true; fi
+                sudo rm -f "$f"
+            fi
+        done
     fi
     msg "    ✅ 服务已停止" "    ✅ Service stopped"
     echo ""
