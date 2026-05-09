@@ -1,0 +1,52 @@
+{
+  "description": "Agent matrix for remote E2E. Cursor ensure stages install.sh+lib.sh+cursor.sh in ~/.cache (jsDelivr + raw fallback) then bash ./install.sh stable --extract. Qoder -q -p needs QODER_PERSONAL_ACCESS_TOKEN — set E2E_QODER_PERSONAL_ACCESS_TOKEN locally.",
+  "agents": [
+    {
+      "id": "codex-cli-latest",
+      "name": "Codex CLI",
+      "binary": "codex",
+      "versionArg": "--version",
+      "slsAgentTypeHint": "codex",
+      "notes": "OpenAI Codex CLI; hooks installed by loongsuite-pilot installer.",
+      "representativeVersions": ["latest", "rolling"],
+      "ensureInstallSh": "npm install -g @openai/codex || echo '[e2e-ensure] npm install @openai/codex failed'",
+      "defaultProbeSh": "command -v codex >/dev/null && codex exec \"你好\" --skip-git-repo-check < /dev/null || true",
+      "installHint": "Use E2E_USE_MATRIX_PROBE=1; codex exec must use < /dev/null."
+    },
+    {
+      "id": "claude-code-cli",
+      "name": "Claude Code",
+      "binary": "claude",
+      "versionArg": "--version",
+      "slsAgentTypeHint": "claude-code",
+      "representativeVersions": ["latest"],
+      "ensureInstallSh": "npm install -g @anthropic-ai/claude-code || echo '[e2e-ensure] npm install claude-code failed'",
+      "defaultProbeSh": "command -v claude >/dev/null && claude -p \"你好\" --dangerously-skip-permissions || true",
+      "installHint": "claude -p needs login or ANTHROPIC_API_KEY; expect Not logged in until configured."
+    },
+    {
+      "id": "cursor-cli",
+      "name": "Cursor",
+      "binary": "cursor",
+      "versionArg": "--version",
+      "slsAgentTypeHint": "cursor-hook",
+      "notes": "ensureInstallSh is generated in code (jsDelivr+raw GitHub, --extract). Primary SLS is often cursor-hook from IDE, not CLI --version.",
+      "representativeVersions": ["latest"],
+      "ensureInstallSh": "",
+      "defaultProbeSh": "_CX=\"$HOME/.local/share/cursor/cursor/usr/bin/cursor\"; _CX2=\"$HOME/.cursor/cursor/usr/bin/cursor\"; if command -v cursor >/dev/null 2>&1; then cursor --version 2>&1 || true; elif [ -x \"$_CX\" ]; then \"$_CX\" --version 2>&1 || true; elif [ -x \"$_CX2\" ]; then \"$_CX2\" --version 2>&1 || true; elif command -v cursor-installer >/dev/null 2>&1; then echo \"[e2e-probe] no cursor on PATH or extracted usr/bin; cursor-installer:\"; cursor-installer --version 2>/dev/null || true; else echo \"[e2e-probe] neither cursor nor cursor-installer on PATH\"; fi",
+      "installHint": "Override with E2E_CURSOR_ENSURE_INSTALL_SH or apt (cursor.com/docs)."
+    },
+    {
+      "id": "qoder-cli",
+      "name": "Qoder CLI",
+      "binary": "qoder",
+      "versionArg": "--version",
+      "slsAgentTypeHint": "qoder-cli-hook",
+      "notes": "Hook input watches ~/.loongsuite-pilot/logs/qoder-cli/history; qoder-cli-session reads ~/.qoder/logs/sessions. Print probe uses qodercli -q -p (needs token).",
+      "representativeVersions": ["latest"],
+      "ensureInstallSh": "npm install -g @qoder-ai/qodercli && mkdir -p \"$HOME/.local/bin\" && ( command -v qoder >/dev/null || ( command -v qodercli >/dev/null && ln -sf \"$(command -v qodercli)\" \"$HOME/.local/bin/qoder\" ) ) || echo '[e2e-ensure] qoder npm/symlink failed'",
+      "defaultProbeSh": "Q=\"$(command -v qodercli 2>/dev/null || command -v qoder 2>/dev/null)\"; [ -z \"$Q\" ] && exit 0; mkdir -p \"$HOME/.qoder\"; if [ -z \"${QODER_PERSONAL_ACCESS_TOKEN:-}\" ]; then echo \"[e2e-probe] QODER_PERSONAL_ACCESS_TOKEN unset — set E2E_QODER_PERSONAL_ACCESS_TOKEN on **local** npm env to inject for qodercli -p\"; exit 0; fi; \"$Q\" -q -p \"你好\" --max-turns 1 --yolo -w \"$HOME\" </dev/null || true",
+      "installHint": "Logstore needs a real model turn; --version alone emits nothing. Use PAT via E2E_QODER_PERSONAL_ACCESS_TOKEN."
+    }
+  ]
+}

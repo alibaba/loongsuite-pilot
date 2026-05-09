@@ -17,6 +17,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:e2e:remote": "node scripts/e2e/run-remote-e2e.mjs",
     "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {

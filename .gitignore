@@ -28,4 +28,7 @@ VERSION
 # Test coverage
 coverage/
 
+# Remote E2E local artifacts (SSH diagnostics)
+e2e-artifacts/
+
 package
