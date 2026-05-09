@@ -538,7 +538,9 @@
       $('events-value').textContent = formatCount(overview.totals.eventsToday);
       $('tokens-value').textContent = formatCount(overview.totals.tokensToday);
       $('failures-value').textContent = formatCount(overview.totals.failedUploadsToday);
-      $('reporting-wording').textContent = overview.reporting.wording;
+      $('reporting-wording').textContent = overview.cache?.outputPartial
+        ? `${overview.reporting.wording} Indexing local output logs; today's totals may still be catching up.`
+        : overview.reporting.wording;
       $('reporting-channels').innerHTML = overview.reporting.channels.map((channel) => (
         `<span class="${badgeClass(channel.status)}">${escapeHtml(channel.label)}: ${escapeHtml(channel.message)}</span>`
       )).join('');

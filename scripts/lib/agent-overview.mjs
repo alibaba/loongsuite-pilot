@@ -1,10 +1,13 @@
 import { constants as fsConstants, createReadStream } from 'node:fs';
 import {
   access,
+  mkdir,
   open,
   readFile,
   readdir,
+  rename,
   stat,
+  writeFile,
 } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -14,6 +17,9 @@ const DEFAULT_SERVICE_LOG_TAIL_BYTES = 512 * 1024;
 const DEFAULT_JSONL_MAX_BYTES = 2 * 1024 * 1024;
 const DEFAULT_FAILED_LOG_MAX_BYTES = 512 * 1024;
 const DEFAULT_TIMELINE_LIMIT = 100;
+const OVERVIEW_CACHE_VERSION = 1;
+const DEFAULT_INDEX_BYTES_PER_REFRESH = 2 * 1024 * 1024;
+const DEFAULT_INDEX_LINES_PER_REFRESH = 10_000;
 const STALE_AFTER_MS = 30 * 60 * 1000;
 
 export const AGENTS = [
@@ -142,11 +148,15 @@ export function createOverviewAggregator(options = {}) {
   const jsonlMaxBytes = options.jsonlMaxBytes ?? DEFAULT_JSONL_MAX_BYTES;
   const failedLogMaxBytes = options.failedLogMaxBytes ?? DEFAULT_FAILED_LOG_MAX_BYTES;
   const timelineLimit = options.timelineLimit ?? DEFAULT_TIMELINE_LIMIT;
+  const maxIndexBytesPerRefresh = options.maxIndexBytesPerRefresh ?? DEFAULT_INDEX_BYTES_PER_REFRESH;
+  const maxIndexLinesPerRefresh = options.maxIndexLinesPerRefresh ?? DEFAULT_INDEX_LINES_PER_REFRESH;
+  const overviewCachePath = options.overviewCachePath
+    || path.join(dataDir, 'cache', 'agent-overview', 'output-summary-cache.json');
   const nowProvider = options.nowProvider || (() => new Date());
 
   let cachedSummary = null;
   let cachedAt = 0;
-  const fileSummaryCache = new Map();
+  let overviewCache = null;
 
   async function getOverview({ force = false } = {}) {
     const now = nowProvider();
@@ -156,6 +166,7 @@ export function createOverviewAggregator(options = {}) {
         cache: { ...cachedSummary.cache, hit: true },
       };
     }
+    overviewCache ||= await loadOverviewCache(overviewCachePath);
 
     const summary = await buildOverview({
       dataDir,
@@ -164,7 +175,10 @@ export function createOverviewAggregator(options = {}) {
       jsonlMaxBytes,
       failedLogMaxBytes,
       timelineLimit,
-      fileSummaryCache,
+      overviewCache,
+      overviewCachePath,
+      maxIndexBytesPerRefresh,
+      maxIndexLinesPerRefresh,
     });
     cachedSummary = summary;
     cachedAt = now.getTime();
@@ -189,8 +203,10 @@ async function buildOverview(opts) {
   });
   const output = await aggregateOutputFiles(path.join(opts.dataDir, 'logs', 'output'), {
     date: localDateString(opts.now),
-    maxBytes: opts.jsonlMaxBytes,
-    fileSummaryCache: opts.fileSummaryCache,
+    overviewCache: opts.overviewCache,
+    overviewCachePath: opts.overviewCachePath,
+    maxIndexBytesPerRefresh: opts.maxIndexBytesPerRefresh,
+    maxIndexLinesPerRefresh: opts.maxIndexLinesPerRefresh,
   });
   const failures = await aggregateFailedUploads(path.join(opts.dataDir, 'sls-failed-logs'), {
     maxBytes: opts.failedLogMaxBytes,
@@ -228,9 +244,13 @@ async function buildOverview(opts) {
       hit: false,
       ttlMs: DEFAULT_CACHE_TTL_MS,
       bounded: true,
+      indexing: output.indexing,
+      outputPartial: output.partial,
+      outputProgress: output.progress,
       limits: {
         serviceLogTailBytes: opts.serviceLogTailBytes,
-        jsonlMaxBytes: opts.jsonlMaxBytes,
+        maxIndexBytesPerRefresh: opts.maxIndexBytesPerRefresh,
+        maxIndexLinesPerRefresh: opts.maxIndexLinesPerRefresh,
         failedLogMaxBytes: opts.failedLogMaxBytes,
         timelineLimit: opts.timelineLimit,
       },
@@ -424,11 +444,21 @@ async function aggregateOutputFiles(outputDir, options) {
     total: 0,
     tokens: 0,
     partial: false,
+    indexing: false,
+    progress: {
+      indexedFiles: 0,
+      totalFiles: 0,
+      indexedBytes: 0,
+      totalBytes: 0,
+      files: [],
+    },
   };
   const entries = await safeReaddir(outputDir);
   const files = entries
     .filter((entry) => entry.isFile() && entry.name.endsWith(`-${options.date}.jsonl`))
     .map((entry) => path.join(outputDir, entry.name));
+  const activeFileKeys = new Set(files);
+  result.progress.totalFiles = files.length;
 
   for (const filePath of files) {
     const fileSummary = await summarizeJsonlFile(filePath, options);
@@ -436,6 +466,16 @@ async function aggregateOutputFiles(outputDir, options) {
     result.total += fileSummary.total;
     result.tokens += fileSummary.tokens;
     result.partial = result.partial || fileSummary.partial;
+    result.indexing = result.indexing || fileSummary.indexing;
+    result.progress.indexedBytes += fileSummary.file.indexedBytes || 0;
+    result.progress.totalBytes += fileSummary.file.sizeBytes || 0;
+    if (!fileSummary.indexing) result.progress.indexedFiles += 1;
+    result.progress.files.push({
+      name: fileSummary.file.name,
+      sizeBytes: fileSummary.file.sizeBytes,
+      indexedBytes: fileSummary.file.indexedBytes || 0,
+      indexing: Boolean(fileSummary.indexing),
+    });
     for (const [agentId, agentSummary] of Object.entries(fileSummary.byAgent)) {
       const target = ensureAgentOutput(result.byAgent, agentId);
       mergeAgentOutput(target, agentSummary);
@@ -444,6 +484,8 @@ async function aggregateOutputFiles(outputDir, options) {
   }
 
   result.events.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
+  pruneOverviewCache(options.overviewCache, activeFileKeys, options.date);
+  await saveOverviewCache(options.overviewCachePath, options.overviewCache);
   return result;
 }
 
@@ -453,69 +495,135 @@ async function summarizeJsonlFile(filePath, options) {
     return emptyFileSummary(filePath);
   }
 
-  const cacheKey = filePath;
-  const cached = options.fileSummaryCache.get(cacheKey);
-  if (cached && cached.size === fileStat.size && cached.mtimeMs === fileStat.mtimeMs) {
-    return cached.summary;
+  const cached = validOutputCacheEntry(options.overviewCache.files[filePath], filePath, fileStat);
+  const shouldRebuild = !cached || fileStat.size < cached.indexedThroughOffset;
+  const entry = shouldRebuild
+    ? newOutputCacheEntry(filePath, options.date, fileStat)
+    : {
+      ...cached,
+      file: fileMetadata(filePath, fileStat, cached.indexedThroughOffset, cached.indexing),
+    };
+
+  if (entry.indexedThroughOffset < fileStat.size) {
+    const readResult = await readJsonlChunk(filePath, {
+      start: entry.indexedThroughOffset,
+      fileSize: fileStat.size,
+      maxBytes: options.maxIndexBytesPerRefresh,
+      maxLines: options.maxIndexLinesPerRefresh,
+    });
+    applyOutputLines(entry.summary, readResult.lines);
+    entry.indexedThroughOffset = readResult.nextOffset;
+    entry.indexing = entry.indexedThroughOffset < fileStat.size;
+  } else {
+    entry.indexing = false;
   }
 
-  const partial = fileStat.size > options.maxBytes;
-  const text = await readTail(filePath, options.maxBytes);
-  const summary = emptyFileSummary(filePath);
-  summary.file = {
-    path: filePath,
-    name: path.basename(filePath),
-    sizeBytes: fileStat.size,
-    updatedAt: fileStat.mtime.toISOString(),
-    partial,
-  };
-  summary.partial = partial;
+  entry.size = fileStat.size;
+  entry.mtimeMs = fileStat.mtimeMs;
+  entry.dev = fileStat.dev;
+  entry.ino = fileStat.ino;
+  entry.file = fileMetadata(filePath, fileStat, entry.indexedThroughOffset, entry.indexing);
+  entry.summary.file = entry.file;
+  entry.summary.partial = entry.indexing;
+  entry.summary.indexing = entry.indexing;
+  options.overviewCache.files[filePath] = entry;
+  return cloneSummary(entry.summary);
+}
 
-  for (const line of text.split(/\r?\n/).filter(Boolean)) {
+function applyOutputLines(summary, lines) {
+  for (const line of lines) {
     let record;
     try {
       record = JSON.parse(line);
     } catch {
       continue;
     }
-    const agentId = classifyRecord(record);
-    if (agentId === 'unknown') continue;
-    const timestamp = recordTime(record);
-    const eventName = stringValue(record['event.name']) || 'event';
-    const tokens = numberValue(record['gen_ai.usage.total_tokens'] ?? record['usage.total_tokens']);
-    const agent = ensureAgentOutput(summary.byAgent, agentId);
-    agent.total += 1;
-    agent.tokens += tokens;
-    agent.lastActivityAt = maxIso(agent.lastActivityAt, timestamp);
-    agent.eventTypes[eventName] = (agent.eventTypes[eventName] || 0) + 1;
-
-    const attributes = parseAttributes(record.attributes);
-    const source = stringValue(attributes.source ?? record['agent.source']) || 'normalized-output';
-    const method = ensureMethodOutput(agent.methods, source);
-    method.count += 1;
-    method.lastActivityAt = maxIso(method.lastActivityAt, timestamp);
-    method.tokens += tokens;
-
-    summary.total += 1;
-    summary.tokens += tokens;
-    if (timestamp) {
-      summary.events.push(activityEvent({
-        timestamp,
-        type: 'output.record',
-        severity: 'info',
-        agentId,
-        count: 1,
-        summary: `${agentLabel(agentId)} processed ${eventName}`,
-      }));
-    }
+    applyOutputRecord(summary, record);
   }
+}
 
-  options.fileSummaryCache.set(cacheKey, {
+function applyOutputRecord(summary, record) {
+  const agentId = classifyRecord(record);
+  if (agentId === 'unknown') return;
+  const timestamp = recordTime(record);
+  const eventName = stringValue(record['event.name']) || 'event';
+  const tokens = numberValue(record['gen_ai.usage.total_tokens'] ?? record['usage.total_tokens']);
+  const agent = ensureAgentOutput(summary.byAgent, agentId);
+  agent.total += 1;
+  agent.tokens += tokens;
+  agent.lastActivityAt = maxIso(agent.lastActivityAt, timestamp);
+  agent.eventTypes[eventName] = (agent.eventTypes[eventName] || 0) + 1;
+
+  const attributes = parseAttributes(record.attributes);
+  const source = stringValue(attributes.source ?? record['agent.source']) || 'normalized-output';
+  const method = ensureMethodOutput(agent.methods, source);
+  method.count += 1;
+  method.lastActivityAt = maxIso(method.lastActivityAt, timestamp);
+  method.tokens += tokens;
+
+  summary.total += 1;
+  summary.tokens += tokens;
+  if (timestamp) {
+    summary.events.push(activityEvent({
+      timestamp,
+      type: 'output.record',
+      severity: 'info',
+      agentId,
+      count: 1,
+      summary: `${agentLabel(agentId)} processed ${eventName}`,
+    }));
+    summary.events = summary.events.slice(-DEFAULT_TIMELINE_LIMIT * 2);
+  }
+}
+
+function newOutputCacheEntry(filePath, date, fileStat) {
+  const summary = emptyFileSummary(filePath);
+  return {
+    version: OVERVIEW_CACHE_VERSION,
+    path: filePath,
+    date,
     size: fileStat.size,
     mtimeMs: fileStat.mtimeMs,
+    dev: fileStat.dev,
+    ino: fileStat.ino,
+    indexedThroughOffset: 0,
+    indexing: fileStat.size > 0,
+    file: fileMetadata(filePath, fileStat, 0, fileStat.size > 0),
     summary,
-  });
-  return summary;
+  };
+}
+
+function validOutputCacheEntry(entry, filePath, fileStat) {
+  if (!entry || entry.version !== OVERVIEW_CACHE_VERSION || entry.path !== filePath) return null;
+  if (!Number.isFinite(entry.indexedThroughOffset) || entry.indexedThroughOffset < 0) return null;
+  if (!entry.summary || typeof entry.summary !== 'object') return null;
+  if (entry.indexedThroughOffset > fileStat.size) return null;
+  if (Number.isFinite(entry.dev) && Number.isFinite(entry.ino)
+    && (entry.dev !== fileStat.dev || entry.ino !== fileStat.ino)) {
+    return null;
+  }
+  return entry;
+}
+
+function fileMetadata(filePath, fileStat, indexedThroughOffset, indexing) {
+  return {
+    path: filePath,
+    name: path.basename(filePath),
+    sizeBytes: fileStat.size,
+    indexedBytes: Math.min(indexedThroughOffset, fileStat.size),
+    updatedAt: fileStat.mtime.toISOString(),
+    partial: Boolean(indexing),
+  };
+}
+
+function cloneSummary(summary) {
+  return JSON.parse(JSON.stringify(summary));
+}
+
+function pruneOverviewCache(cache, activeFileKeys, date) {
+  for (const [filePath, entry] of Object.entries(cache.files)) {
+    if (entry?.date !== date || !activeFileKeys.has(filePath)) delete cache.files[filePath];
+  }
 }
 
 function emptyFileSummary(filePath) {
@@ -532,6 +640,7 @@ function emptyFileSummary(filePath) {
     total: 0,
     tokens: 0,
     partial: false,
+    indexing: false,
   };
 }
 
@@ -617,7 +726,7 @@ function buildAgentSummaries({ methodStates, output, service, now }) {
     const lastActivityAt = outputSummary.lastActivityAt || null;
     const status = service.running ? agentStatus(outputSummary, lastActivityAt, now) : 'not_detected';
     const warnings = [];
-    if (output.partial) warnings.push('Large output files were summarized with bounded reads.');
+    if (output.partial) warnings.push('Output totals are still indexing local JSONL files.');
     if (agent.id === 'qoder-combined' && outputSummary.total > 0) {
       warnings.push('Some Qoder-family records could not be split reliably.');
     }
@@ -826,6 +935,72 @@ async function readTail(filePath, maxBytes) {
   } finally {
     await handle.close();
   }
+}
+
+async function readJsonlChunk(filePath, options) {
+  const remaining = Math.max(0, options.fileSize - options.start);
+  if (remaining === 0) return { lines: [], nextOffset: options.start };
+  const length = Math.min(remaining, options.maxBytes);
+  const handle = await open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, options.start);
+    const text = buffer.subarray(0, bytesRead).toString('utf8');
+    const reachedEof = options.start + bytesRead >= options.fileSize;
+    const lastNewline = text.lastIndexOf('\n');
+    let processText = text;
+    let nextOffset = options.start + bytesRead;
+
+    if (!reachedEof) {
+      if (lastNewline < 0) {
+        return { lines: [], nextOffset: options.start };
+      }
+      processText = text.slice(0, lastNewline + 1);
+      nextOffset = options.start + Buffer.byteLength(processText);
+    }
+
+    const availableLines = processText.split(/\r?\n/).filter(Boolean);
+    const lines = availableLines.slice(0, options.maxLines);
+    if (availableLines.length > lines.length) {
+      nextOffset = options.start + Buffer.byteLength(`${lines.join('\n')}\n`);
+    }
+    return { lines, nextOffset };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function loadOverviewCache(cachePath) {
+  const raw = await safeReadFile(cachePath, 'utf8');
+  if (!raw) return emptyOverviewCache();
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed?.version !== OVERVIEW_CACHE_VERSION || !parsed.files || typeof parsed.files !== 'object') {
+      return emptyOverviewCache();
+    }
+    return {
+      version: OVERVIEW_CACHE_VERSION,
+      files: parsed.files,
+    };
+  } catch {
+    return emptyOverviewCache();
+  }
+}
+
+function emptyOverviewCache() {
+  return {
+    version: OVERVIEW_CACHE_VERSION,
+    files: {},
+  };
+}
+
+async function saveOverviewCache(cachePath, cache) {
+  try {
+    await mkdir(path.dirname(cachePath), { recursive: true });
+    const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(tmpPath, `${JSON.stringify(cache, null, 2)}\n`, 'utf8');
+    await rename(tmpPath, cachePath);
+  } catch {}
 }
 
 async function safeReadFile(filePath, encoding) {

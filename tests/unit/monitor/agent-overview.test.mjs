@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -112,14 +112,13 @@ describe('agent overview aggregation', () => {
     expect(second.cache.hit).toBe(true);
   });
 
-  it('uses bounded JSONL reads for large files', async () => {
+  it('indexes cold large files in bounded batches without exposing message bodies', async () => {
     const dataDir = await fixtureDir();
-    const filler = `${JSON.stringify({ output: 'old sensitive body' })}\n`.repeat(200);
     await writeRuntimeFiles(dataDir, {
       outputLines: {
         'cursor-2026-05-05.jsonl': [
-          filler,
-          eventLine({ id: 'cursor-tail', agentType: 'cursor', eventName: 'tool.result', tokens: 0 }),
+          eventLine({ id: 'cursor-1', agentType: 'cursor', eventName: 'tool.result', tokens: 10, output: 'old sensitive body' }),
+          eventLine({ id: 'cursor-2', agentType: 'cursor', eventName: 'tool.result', tokens: 20 }),
         ],
       },
     });
@@ -127,12 +126,151 @@ describe('agent overview aggregation', () => {
     const overview = await createOverviewAggregator({
       dataDir,
       nowProvider: () => new Date('2026-05-05T04:01:00.000Z'),
-      jsonlMaxBytes: 500,
+      maxIndexLinesPerRefresh: 1,
     }).getOverview({ force: true });
 
     expect(overview.cache.bounded).toBe(true);
-    expect(overview.agents.find((agent) => agent.id === 'cursor').warnings.join(' ')).toContain('bounded reads');
+    expect(overview.cache.indexing).toBe(true);
+    expect(overview.cache.outputPartial).toBe(true);
+    expect(overview.agents.find((agent) => agent.id === 'cursor').tokensToday).toBe(10);
+    expect(overview.agents.find((agent) => agent.id === 'cursor').warnings.join(' ')).toContain('indexing');
     expect(JSON.stringify(overview)).not.toContain('old sensitive body');
+  });
+
+  it('continues indexing from the saved offset until totals catch up', async () => {
+    const dataDir = await fixtureDir();
+    await writeRuntimeFiles(dataDir, {
+      outputLines: {
+        'qoder-2026-05-05.jsonl': [
+          eventLine({ id: 'qoder-1', agentType: 'qoder', eventName: 'llm.response', tokens: 10 }),
+          eventLine({ id: 'qoder-2', agentType: 'qoder', eventName: 'llm.response', tokens: 20 }),
+          eventLine({ id: 'qoder-3', agentType: 'qoder', eventName: 'llm.response', tokens: 30 }),
+        ],
+      },
+    });
+    const aggregator = createOverviewAggregator({
+      dataDir,
+      nowProvider: () => new Date('2026-05-05T04:01:00.000Z'),
+      maxIndexLinesPerRefresh: 1,
+    });
+
+    const first = await aggregator.getOverview({ force: true });
+    const second = await aggregator.getOverview({ force: true });
+    const third = await aggregator.getOverview({ force: true });
+
+    expect(first.totals.tokensToday).toBe(10);
+    expect(first.cache.indexing).toBe(true);
+    expect(second.totals.tokensToday).toBe(30);
+    expect(second.cache.indexing).toBe(true);
+    expect(third.totals.tokensToday).toBe(60);
+    expect(third.cache.indexing).toBe(false);
+  });
+
+  it('processes only appended records after a file is fully indexed', async () => {
+    const dataDir = await fixtureDir();
+    const outputPath = path.join(dataDir, 'logs', 'output', 'qoder-2026-05-05.jsonl');
+    await writeRuntimeFiles(dataDir, {
+      outputLines: {
+        'qoder-2026-05-05.jsonl': [
+          eventLine({ id: 'qoder-1', agentType: 'qoder', eventName: 'llm.response', tokens: 10 }),
+        ],
+      },
+    });
+    const aggregator = createOverviewAggregator({
+      dataDir,
+      nowProvider: () => new Date('2026-05-05T04:01:00.000Z'),
+    });
+
+    const first = await aggregator.getOverview({ force: true });
+    await appendFile(outputPath, `\n${eventLine({ id: 'qoder-2', agentType: 'qoder', eventName: 'llm.response', tokens: 20 })}`);
+    const second = await aggregator.getOverview({ force: true });
+
+    expect(first.totals.tokensToday).toBe(10);
+    expect(first.cache.indexing).toBe(false);
+    expect(second.totals.tokensToday).toBe(30);
+    expect(second.cache.indexing).toBe(false);
+  });
+
+  it('rebuilds in bounded batches when a file shrinks', async () => {
+    const dataDir = await fixtureDir();
+    const outputPath = path.join(dataDir, 'logs', 'output', 'qoder-2026-05-05.jsonl');
+    await writeRuntimeFiles(dataDir, {
+      outputLines: {
+        'qoder-2026-05-05.jsonl': [
+          eventLine({ id: 'qoder-1', agentType: 'qoder', eventName: 'llm.response', tokens: 10 }),
+          eventLine({ id: 'qoder-2', agentType: 'qoder', eventName: 'llm.response', tokens: 20 }),
+        ],
+      },
+    });
+    const aggregator = createOverviewAggregator({
+      dataDir,
+      nowProvider: () => new Date('2026-05-05T04:01:00.000Z'),
+      maxIndexLinesPerRefresh: 1,
+    });
+    await aggregator.getOverview({ force: true });
+    await aggregator.getOverview({ force: true });
+
+    await writeFile(outputPath, eventLine({ id: 'qoder-new', agentType: 'qoder', eventName: 'llm.response', tokens: 5 }));
+    const rebuilt = await aggregator.getOverview({ force: true });
+
+    expect(rebuilt.totals.tokensToday).toBe(5);
+    expect(rebuilt.cache.indexing).toBe(false);
+  });
+
+  it('persists derived cache across aggregator instances without storing sensitive bodies', async () => {
+    const dataDir = await fixtureDir();
+    await writeRuntimeFiles(dataDir, {
+      outputLines: {
+        'qoder-2026-05-05.jsonl': [
+          eventLine({ id: 'qoder-1', agentType: 'qoder', eventName: 'llm.response', tokens: 10, output: 'secret qoder body' }),
+          eventLine({ id: 'qoder-2', agentType: 'qoder', eventName: 'llm.response', tokens: 20 }),
+        ],
+      },
+    });
+    const firstAggregator = createOverviewAggregator({
+      dataDir,
+      nowProvider: () => new Date('2026-05-05T04:01:00.000Z'),
+    });
+    await firstAggregator.getOverview({ force: true });
+
+    const secondOverview = await createOverviewAggregator({
+      dataDir,
+      nowProvider: () => new Date('2026-05-05T04:02:00.000Z'),
+      maxIndexLinesPerRefresh: 1,
+    }).getOverview({ force: true });
+    const cacheText = await readFile(path.join(dataDir, 'cache', 'agent-overview', 'output-summary-cache.json'), 'utf8');
+
+    expect(secondOverview.totals.tokensToday).toBe(30);
+    expect(secondOverview.cache.indexing).toBe(false);
+    expect(cacheText).not.toContain('secret qoder body');
+  });
+
+  it('prunes previous-day cache entries after date rollover', async () => {
+    const dataDir = await fixtureDir();
+    await writeRuntimeFiles(dataDir, {
+      outputLines: {
+        'qoder-2026-05-05.jsonl': [
+          eventLine({ id: 'qoder-old', agentType: 'qoder', eventName: 'llm.response', tokens: 10 }),
+        ],
+        'qoder-2026-05-06.jsonl': [
+          eventLine({ id: 'qoder-new', agentType: 'qoder', eventName: 'llm.response', tokens: 20 }),
+        ],
+      },
+    });
+    let now = new Date('2026-05-05T23:59:00.000Z');
+    const aggregator = createOverviewAggregator({
+      dataDir,
+      nowProvider: () => now,
+    });
+    await aggregator.getOverview({ force: true });
+
+    now = new Date('2026-05-06T00:01:00.000Z');
+    const nextDay = await aggregator.getOverview({ force: true });
+    const cacheText = await readFile(path.join(dataDir, 'cache', 'agent-overview', 'output-summary-cache.json'), 'utf8');
+
+    expect(nextDay.totals.tokensToday).toBe(20);
+    expect(cacheText).toContain('qoder-2026-05-06.jsonl');
+    expect(cacheText).not.toContain('qoder-2026-05-05.jsonl');
   });
 
   it('marks agents without output evidence as not detected and hides last activity', async () => {
