@@ -213,7 +213,7 @@ detect_init_system() {
                 echo "none"
                 return
             fi
-            if command -v systemctl &>/dev/null && systemctl --version &>/dev/null 2>&1; then
+            if [ -d /run/systemd/system ] && command -v systemctl &>/dev/null; then
                 echo "systemd"
             elif [ -d /etc/init.d ]; then
                 echo "initd"
