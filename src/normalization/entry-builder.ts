@@ -288,23 +288,24 @@ export function unixNanosToMillis(value: string | number | undefined): number {
 }
 
 function buildFromLegacyOptions(opts: LegacyAgentActivityOptions): AgentActivityEntry {
-  const extra = toJsonObject({
+  const agentFields = toJsonObject({
     'agent.file_path': opts.filePath,
     'agent.action_type': opts.actionType,
     'agent.inline_diff_message': opts.inlineDiffMessage,
   });
   for (const [key, value] of Object.entries(toJsonObject(opts.extra ?? {}))) {
-    extra[key.startsWith('agent.') ? key : `agent.${key}`] = value;
+    const agentKey = key.startsWith('agent.') ? key : `agent.${key}`;
+    if (agentFields[agentKey] === undefined) agentFields[agentKey] = value;
   }
-  if (opts.content !== undefined) extra['agent.content'] = opts.content;
+  if (opts.content !== undefined) agentFields['agent.content'] = opts.content;
 
   return buildAgentActivityEntry({
+    ...agentFields,
     timestamp: opts.timestamp,
     'session.id': opts.sessionId,
     'user.id': opts.userId,
     'agent.type': opts.agentType,
     'event.name': 'other',
-    ...extra,
   });
 }
 

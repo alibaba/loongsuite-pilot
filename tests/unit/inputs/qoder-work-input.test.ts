@@ -169,6 +169,34 @@ describe('QoderWorkInput', () => {
     });
   });
 
+  describe('transcript rows', () => {
+    it('keeps qoder-work as the agent type for user rows', async () => {
+      const today = getTodayDateString();
+      const logFile = path.join(tmpDir, `qoder-work-${today}.jsonl`);
+      const record = {
+        type: 'user',
+        session_id: 'sess-1',
+        user_id: 'u1',
+        timestamp: Date.now(),
+        message: {
+          role: 'user',
+          content: 'hello qoder work',
+        },
+      };
+      await fs.writeFile(logFile, JSON.stringify(record) + '\n');
+
+      const allEntries: AgentActivityEntry[] = [];
+      input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
+
+      await input.start();
+      expect(allEntries).toHaveLength(1);
+      expect(allEntries[0]!['gen_ai.agent.type']).toBe(ClientType.QoderWork);
+      expect(allEntries[0]!['agent.type']).toBeUndefined();
+      expect(allEntries[0]!['agent.type']).not.toBe('user');
+      await input.stop();
+    });
+  });
+
   describe('content extraction', () => {
     it('should extract content from tool_input.content', async () => {
       const today = getTodayDateString();

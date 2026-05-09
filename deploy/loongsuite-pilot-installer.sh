@@ -649,15 +649,12 @@ WRAPPER
     _install_plugin "Claude Code 插件" "otel-claude-hook.tar.gz" \
         "$OTEL_CLAUDE_DIR/package" "otel-claude-hook" \
         "$OTEL_CLAUDE_DIR/package/src/cli.js" \
-        "$OTEL_PLUGIN_INSTALL_URL" "--user"
+        "$OTEL_PLUGIN_INSTALL_URL" "--user --no-alias"
 
-    # Claude extra: copy intercept.js + setup alias
-    if [ -f "$OTEL_CLAUDE_DIR/package/src/intercept.js" ]; then
-        cp "$OTEL_CLAUDE_DIR/package/src/intercept.js" "$OTEL_CLAUDE_DIR/intercept.js"
-    fi
+    # Claude extra: clean up legacy alias (keep intercept.js to avoid MODULE_NOT_FOUND in stale shells)
     if [ -f "$OTEL_CLAUDE_DIR/package/scripts/setup-alias.sh" ]; then
-        bash "$OTEL_CLAUDE_DIR/package/scripts/setup-alias.sh" >/dev/null 2>&1 || true
-        msg "  · claude 别名已配置" "  · claude alias configured"
+        bash "$OTEL_CLAUDE_DIR/package/scripts/setup-alias.sh" --minimal >/dev/null 2>&1 || true
+        msg "  · 旧版别名已清理" "  · Legacy alias cleaned up"
     fi
 
     local OTEL_LOG_DIR="$DATA_DIR/logs/claude-code"
@@ -842,9 +839,10 @@ try {
 " "$codex_hooks_json" 2>/dev/null || true
         fi
 
-        # Clean config.toml (legacy format)
+        # Clean config.toml (legacy hooks + trust block)
         local codex_config="$HOME/.codex/config.toml"
         if [ -f "$codex_config" ] && grep -q "otel-codex-hook" "$codex_config" 2>/dev/null; then
+            # Remove legacy hook block (# OpenTelemetry instrumentation hooks ... stop)
             local marker="# OpenTelemetry instrumentation hooks"
             local end_str='command = "otel-codex-hook stop"'
             if grep -q "$marker" "$codex_config" 2>/dev/null && grep -qF "$end_str" "$codex_config" 2>/dev/null; then
@@ -857,7 +855,20 @@ try {
                     { skip=0; print }
                 ' "$codex_config" > "$tmp"
                 mv "$tmp" "$codex_config"
-            else
+            fi
+            # Remove trust block (# BEGIN otel-codex-hook trust ... # END otel-codex-hook trust)
+            if grep -q "# BEGIN otel-codex-hook trust" "$codex_config" 2>/dev/null; then
+                local tmp; tmp=$(mktemp)
+                awk '
+                    /# BEGIN otel-codex-hook trust/ { skip=1; next }
+                    /# END otel-codex-hook trust/   { skip=0; next }
+                    skip { next }
+                    { print }
+                ' "$codex_config" > "$tmp"
+                mv "$tmp" "$codex_config"
+            fi
+            # Remove any remaining otel-codex-hook lines (catch-all)
+            if grep -q "otel-codex-hook" "$codex_config" 2>/dev/null; then
                 local tmp; tmp=$(mktemp)
                 grep -v "otel-codex-hook" "$codex_config" > "$tmp" || true
                 mv "$tmp" "$codex_config"
@@ -868,8 +879,14 @@ try {
                 grep -v '^\s*codex_hooks\s*=' "$codex_config" > "$tmp" || true
                 mv "$tmp" "$codex_config"
             fi
-            msg "    ✅ Codex hooks 已从 config.toml 清理 (via sed)" \
-                "    ✅ Codex hooks cleaned from config.toml (via sed)"
+            # Clean up multiple blank lines
+            if [ -f "$codex_config" ]; then
+                local tmp; tmp=$(mktemp)
+                awk 'NF{blank=0} !NF{blank++} blank<=1' "$codex_config" > "$tmp"
+                mv "$tmp" "$codex_config"
+            fi
+            msg "    ✅ Codex hooks 已从 config.toml 清理" \
+                "    ✅ Codex hooks cleaned from config.toml"
         fi
     fi
 
@@ -929,9 +946,8 @@ print_summary() {
 
     if [ -f "$OTEL_CLAUDE_DIR/package/src/cli.js" ]; then
         echo ""
-        msg "💡 Claude Code 插件已安装，请执行以下命令使 alias 生效：" \
-            "💡 Claude Code plugin installed. Reload your shell for the alias:"
-        echo "   source ~/.bashrc   # or source ~/.zshrc"
+        msg "💡 Claude Code 插件已安装" \
+            "💡 Claude Code plugin installed"
     fi
 
     if [ -f "$OTEL_CODEX_DIR/package/dist/index.js" ]; then
