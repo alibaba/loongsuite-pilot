@@ -16,7 +16,8 @@ const DEFAULT_CACHE_TTL_MS = 5_000;
 const DEFAULT_SERVICE_LOG_TAIL_BYTES = 512 * 1024;
 const DEFAULT_JSONL_MAX_BYTES = 2 * 1024 * 1024;
 const DEFAULT_FAILED_LOG_MAX_BYTES = 512 * 1024;
-const DEFAULT_TIMELINE_LIMIT = 100;
+const DEFAULT_TIMELINE_LIMIT = 200;
+const DEFAULT_CACHED_OUTPUT_EVENTS_PER_FILE = 50;
 const OVERVIEW_CACHE_VERSION = 1;
 const DEFAULT_INDEX_BYTES_PER_REFRESH = 2 * 1024 * 1024;
 const DEFAULT_INDEX_LINES_PER_REFRESH = 10_000;
@@ -148,6 +149,7 @@ export function createOverviewAggregator(options = {}) {
   const jsonlMaxBytes = options.jsonlMaxBytes ?? DEFAULT_JSONL_MAX_BYTES;
   const failedLogMaxBytes = options.failedLogMaxBytes ?? DEFAULT_FAILED_LOG_MAX_BYTES;
   const timelineLimit = options.timelineLimit ?? DEFAULT_TIMELINE_LIMIT;
+  const cachedOutputEventsPerFile = options.cachedOutputEventsPerFile ?? DEFAULT_CACHED_OUTPUT_EVENTS_PER_FILE;
   const maxIndexBytesPerRefresh = options.maxIndexBytesPerRefresh ?? DEFAULT_INDEX_BYTES_PER_REFRESH;
   const maxIndexLinesPerRefresh = options.maxIndexLinesPerRefresh ?? DEFAULT_INDEX_LINES_PER_REFRESH;
   const overviewCachePath = options.overviewCachePath
@@ -177,6 +179,7 @@ export function createOverviewAggregator(options = {}) {
       timelineLimit,
       overviewCache,
       overviewCachePath,
+      cachedOutputEventsPerFile,
       maxIndexBytesPerRefresh,
       maxIndexLinesPerRefresh,
     });
@@ -205,6 +208,7 @@ async function buildOverview(opts) {
     date: localDateString(opts.now),
     overviewCache: opts.overviewCache,
     overviewCachePath: opts.overviewCachePath,
+    cachedOutputEventsPerFile: opts.cachedOutputEventsPerFile,
     maxIndexBytesPerRefresh: opts.maxIndexBytesPerRefresh,
     maxIndexLinesPerRefresh: opts.maxIndexLinesPerRefresh,
   });
@@ -249,10 +253,11 @@ async function buildOverview(opts) {
       outputProgress: output.progress,
       limits: {
         serviceLogTailBytes: opts.serviceLogTailBytes,
+        timelineLimit: opts.timelineLimit,
+        cachedOutputEventsPerFile: opts.cachedOutputEventsPerFile,
         maxIndexBytesPerRefresh: opts.maxIndexBytesPerRefresh,
         maxIndexLinesPerRefresh: opts.maxIndexLinesPerRefresh,
         failedLogMaxBytes: opts.failedLogMaxBytes,
-        timelineLimit: opts.timelineLimit,
       },
     },
   };
@@ -511,12 +516,13 @@ async function summarizeJsonlFile(filePath, options) {
       maxBytes: options.maxIndexBytesPerRefresh,
       maxLines: options.maxIndexLinesPerRefresh,
     });
-    applyOutputLines(entry.summary, readResult.lines);
+    applyOutputLines(entry.summary, readResult.lines, options.cachedOutputEventsPerFile);
     entry.indexedThroughOffset = readResult.nextOffset;
     entry.indexing = entry.indexedThroughOffset < fileStat.size;
   } else {
     entry.indexing = false;
   }
+  trimCachedOutputEvents(entry.summary, options.cachedOutputEventsPerFile);
 
   entry.size = fileStat.size;
   entry.mtimeMs = fileStat.mtimeMs;
@@ -530,7 +536,7 @@ async function summarizeJsonlFile(filePath, options) {
   return cloneSummary(entry.summary);
 }
 
-function applyOutputLines(summary, lines) {
+function applyOutputLines(summary, lines, cachedOutputEventsPerFile) {
   for (const line of lines) {
     let record;
     try {
@@ -538,11 +544,11 @@ function applyOutputLines(summary, lines) {
     } catch {
       continue;
     }
-    applyOutputRecord(summary, record);
+    applyOutputRecord(summary, record, cachedOutputEventsPerFile);
   }
 }
 
-function applyOutputRecord(summary, record) {
+function applyOutputRecord(summary, record, cachedOutputEventsPerFile) {
   const agentId = classifyRecord(record);
   if (agentId === 'unknown') return;
   const timestamp = recordTime(record);
@@ -572,8 +578,12 @@ function applyOutputRecord(summary, record) {
       count: 1,
       summary: `${agentLabel(agentId)} processed ${eventName}`,
     }));
-    summary.events = summary.events.slice(-DEFAULT_TIMELINE_LIMIT * 2);
+    trimCachedOutputEvents(summary, cachedOutputEventsPerFile);
   }
+}
+
+function trimCachedOutputEvents(summary, limit) {
+  summary.events = summary.events.slice(-Math.max(0, limit));
 }
 
 function newOutputCacheEntry(filePath, date, fileStat) {
@@ -751,9 +761,7 @@ function buildReportingSummary(config, output, failures) {
   const sls = config.sls || {};
   const http = config.http || {};
   const jsonl = config.jsonl || {};
-  const slsEnabled = sls.enabled !== undefined
-    ? Boolean(sls.enabled)
-    : Boolean(sls.endpoint && sls.project && sls.logstore);
+  const slsEnabled = resolveSlsEnabled(config);
   const jsonlEnabled = jsonl.enabled !== false;
   const httpEnabled = Boolean(http.enabled || http.url);
 
@@ -793,6 +801,43 @@ function buildReportingSummary(config, output, failures) {
     failedUploadsToday: failures.total,
     channels,
   };
+}
+
+function resolveSlsEnabled(config) {
+  const sls = config.sls || {};
+  if (sls.enabled !== undefined) return Boolean(sls.enabled);
+
+  const destinationOverride = sls.destinationOverride === true;
+  const mode = normalizeSlsMode(
+    process.env.SLS_MODE
+      ?? (destinationOverride ? sls.mode : undefined)
+      ?? 'webtracking',
+  );
+
+  const endpoint = process.env.SLS_ENDPOINT
+    ?? (destinationOverride ? sls.endpoint : undefined)
+    ?? '__internal_sls_endpoint__';
+  const project = process.env.SLS_PROJECT
+    ?? (destinationOverride ? sls.project : undefined)
+    ?? '__internal_sls_project__';
+  const logstore = process.env.SLS_LOGSTORE
+    ?? (destinationOverride ? sls.logstore : undefined)
+    ?? '__internal_sls_logstore__';
+  const hasEndpoint = Boolean(project && logstore);
+
+  if (mode === 'webtracking') return Boolean(endpoint && hasEndpoint);
+
+  const accessKeyId = process.env.SLS_ACCESS_KEY_ID
+    ?? (destinationOverride ? sls.accessKeyId : undefined)
+    ?? '';
+  const accessKeySecret = process.env.SLS_ACCESS_KEY_SECRET
+    ?? (destinationOverride ? sls.accessKeySecret : undefined)
+    ?? '';
+  return Boolean(accessKeyId && accessKeySecret && endpoint && hasEndpoint);
+}
+
+function normalizeSlsMode(mode) {
+  return mode === 'ak' ? 'ak' : 'webtracking';
 }
 
 function buildTimeline({ serviceLog, output, failures, limit }) {

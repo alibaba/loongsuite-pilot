@@ -273,6 +273,34 @@ describe('agent overview aggregation', () => {
     expect(cacheText).not.toContain('qoder-2026-05-05.jsonl');
   });
 
+  it('limits cached output activity events per file', async () => {
+    const dataDir = await fixtureDir();
+    await writeRuntimeFiles(dataDir, {
+      outputLines: {
+        'qoder-2026-05-05.jsonl': Array.from({ length: 5 }, (_, index) => (
+          eventLine({
+            id: `qoder-${index}`,
+            agentType: 'qoder',
+            eventName: 'llm.response',
+            tokens: index + 1,
+          })
+        )),
+      },
+    });
+    await createOverviewAggregator({
+      dataDir,
+      nowProvider: () => new Date('2026-05-05T04:01:00.000Z'),
+      cachedOutputEventsPerFile: 2,
+    }).getOverview({ force: true });
+
+    const cache = JSON.parse(await readFile(path.join(dataDir, 'cache', 'agent-overview', 'output-summary-cache.json'), 'utf8'));
+    const [entry] = Object.values(cache.files);
+
+    expect(entry.summary.total).toBe(5);
+    expect(entry.summary.tokens).toBe(15);
+    expect(entry.summary.events).toHaveLength(2);
+  });
+
   it('marks agents without output evidence as not detected and hides last activity', async () => {
     const dataDir = await fixtureDir();
     await writeRuntimeFiles(dataDir, {
@@ -290,23 +318,73 @@ describe('agent overview aggregation', () => {
     expect(claude.status).toBe('not_detected');
     expect(claude.lastActivityAt).toBe(null);
   });
+
+  it('uses the built-in SLS destination when overview config omits sls fields', async () => {
+    const savedEnv = snapshotEnv([
+      'SLS_MODE',
+      'SLS_ENDPOINT',
+      'SLS_PROJECT',
+      'SLS_LOGSTORE',
+      'SLS_ACCESS_KEY_ID',
+      'SLS_ACCESS_KEY_SECRET',
+    ]);
+    clearEnv(Object.keys(savedEnv));
+
+    try {
+      const dataDir = await fixtureDir({ withoutSls: true });
+
+      const overview = await createOverviewAggregator({
+        dataDir,
+        nowProvider: () => new Date('2026-05-05T04:01:00.000Z'),
+      }).getOverview({ force: true });
+
+      const sls = overview.reporting.channels.find((channel) => channel.id === 'sls');
+      expect(sls.enabled).toBe(true);
+      expect(sls.message).toBe('SLS enabled; no persisted upload failures detected');
+    } finally {
+      restoreEnv(savedEnv);
+    }
+  });
 });
 
-async function fixtureDir() {
+async function fixtureDir(options = {}) {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'loongsuite-pilot-overview-'));
   await mkdir(path.join(dataDir, 'logs', 'output'), { recursive: true });
   await mkdir(path.join(dataDir, 'sls-failed-logs'), { recursive: true });
-  await writeFile(path.join(dataDir, 'config.json'), JSON.stringify({
+  const config = {
     enabled: true,
     dataDir,
-    sls: {
+  };
+  if (!options.withoutSls) {
+    config.sls = {
       endpoint: 'https://example.log.aliyuncs.com',
       project: 'project',
       logstore: 'logstore',
-    },
-  }));
+    };
+  }
+  await writeFile(path.join(dataDir, 'config.json'), JSON.stringify(config));
   await writeFile(path.join(dataDir, 'loongsuite-pilot.pid'), String(process.pid));
   return dataDir;
+}
+
+function snapshotEnv(keys) {
+  return Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+}
+
+function clearEnv(keys) {
+  for (const key of keys) {
+    delete process.env[key];
+  }
+}
+
+function restoreEnv(snapshot) {
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
 }
 
 async function writeRuntimeFiles(dataDir, options) {
