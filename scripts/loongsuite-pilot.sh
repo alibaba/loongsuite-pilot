@@ -35,11 +35,13 @@ validate_current_user() {
 
 check_sudo_access() {
     [ "$(id -u)" -eq 0 ] && return 0
-    if sudo -v 2>/dev/null; then
+    if sudo -n true 2>/dev/null; then
+        return 0
+    elif sudo -v 2>/dev/null; then
         return 0
     else
-        echo "⚠️  No sudo access — service registration requires sudo." >&2
-        echo "   Falling back to nohup (no autostart on boot)." >&2
+        echo "⚠️  No sudo access — cannot register system-level service." >&2
+        echo "   Falling back to user-level systemd service." >&2
         return 1
     fi
 }
@@ -198,6 +200,8 @@ resolve_node() {
 }
 
 detect_init_system() {
+    local system_service="${1:-false}"
+
     if [ -f "$INIT_TYPE_FILE" ]; then
         local saved
         saved=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
@@ -209,31 +213,57 @@ detect_init_system() {
     case "$(uname -s)" in
         Darwin) echo "launchd" ;;
         Linux)
-            if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
-                echo "none"
-                return
-            fi
-            if [ -d /run/systemd/system ] && command -v systemctl &>/dev/null; then
-                echo "systemd"
-            elif [ -d /etc/init.d ]; then
-                echo "initd"
+            if [ "$system_service" = "true" ]; then
+                if [ "$(id -u)" -ne 0 ] && ! check_sudo_access; then
+                    echo "systemd-user"
+                    return
+                fi
+                if [ -d /run/systemd/system ] && command -v systemctl &>/dev/null; then
+                    echo "systemd-system"
+                elif [ -d /etc/init.d ]; then
+                    echo "initd"
+                else
+                    echo "systemd-user"
+                fi
             else
-                echo "none"
+                if command -v systemctl &>/dev/null && systemctl --user show-environment &>/dev/null 2>&1; then
+                    echo "systemd-user"
+                else
+                    echo "none"
+                fi
             fi
             ;;
         *) echo "none" ;;
     esac
 }
 
+enable_linger() {
+    local user
+    user="$(whoami)"
+    if loginctl enable-linger "$user" 2>/dev/null; then
+        echo "✓ Linger enabled — service will persist after logout."
+        return 0
+    else
+        echo "⚠️  Cannot enable linger (requires polkit policy or root privilege)." >&2
+        echo "   Service may stop when you log out." >&2
+        echo "   To fix: run 'sudo loginctl enable-linger $user' or use --system-service." >&2
+        return 1
+    fi
+}
+
 is_managed_by_launchd() {
     [ -f "$LAUNCHD_PLIST" ] && launchctl list "$SERVICE_LABEL" &>/dev/null
+}
+
+is_managed_by_systemd_user() {
+    systemctl --user is-enabled loongsuite-pilot.service &>/dev/null
 }
 
 is_managed_by_systemd_system() {
     local user
     user=$(whoami)
     local unit_name="loongsuite-pilot-${user}.service"
-    [ -f "/etc/systemd/system/$unit_name" ] && sudo systemctl is-enabled "$unit_name" &>/dev/null
+    [ -f "/etc/systemd/system/$unit_name" ] && sudo -n systemctl is-enabled "$unit_name" &>/dev/null
 }
 
 is_managed_by_initd() {
@@ -330,6 +360,13 @@ cmd_run_updater() {
 # ---- User-facing commands ----
 
 cmd_start() {
+    local system_service="false"
+    for arg in "$@"; do
+        case "$arg" in
+            --system-service) system_service="true" ;;
+        esac
+    done
+
     if is_running; then
         echo "✅ loongsuite-pilot is already running (PID $(cat "$PID_FILE"))"
         return 0
@@ -338,10 +375,9 @@ cmd_start() {
     ensure_dirs
     sync_bootstrap_scripts
 
-    # Try launchd/systemd/initd first
-    if autostart_install 2>/dev/null; then
+    if autostart_install "$system_service" 2>/dev/null; then
         sleep 2
-        if is_managed_by_launchd || is_managed_by_systemd_system || is_managed_by_initd; then
+        if is_managed_by_launchd || is_managed_by_systemd_user || is_managed_by_systemd_system || is_managed_by_initd; then
             echo "✅ loongsuite-pilot started ($(detect_init_system))"
             return 0
         fi
@@ -364,6 +400,7 @@ cmd_start() {
     nohup "$node_bin" "$entry" >> "$LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$PID_FILE"
+    echo "nohup" > "$INIT_TYPE_FILE"
     echo "✅ loongsuite-pilot started (PID $pid)"
 
     # Also start the updater daemon if available
@@ -383,6 +420,10 @@ cmd_stop() {
 
     local target_user
     target_user=$(whoami)
+    local init_type=""
+    if [ -f "$INIT_TYPE_FILE" ]; then
+        init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
+    fi
 
     case "$(uname -s)" in
         Darwin)
@@ -390,10 +431,20 @@ cmd_stop() {
             launchctl stop "$UPDATER_LABEL" 2>/dev/null || true
             ;;
         Linux)
-            sudo systemctl stop "loongsuite-pilot-${target_user}.service" &>/dev/null || true
-            sudo systemctl stop "loongsuite-pilot-updater-${target_user}.service" &>/dev/null || true
-            [ -f "/etc/init.d/loongsuite-pilot-${target_user}" ] && sudo "/etc/init.d/loongsuite-pilot-${target_user}" stop &>/dev/null || true
-            [ -f "/etc/init.d/loongsuite-pilot-updater-${target_user}" ] && sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" stop &>/dev/null || true
+            case "$init_type" in
+                systemd-user)
+                    systemctl --user stop loongsuite-pilot.service &>/dev/null || true
+                    systemctl --user stop loongsuite-pilot-updater.service &>/dev/null || true
+                    ;;
+                systemd-system|systemd)
+                    sudo systemctl stop "loongsuite-pilot-${target_user}.service" &>/dev/null || true
+                    sudo systemctl stop "loongsuite-pilot-updater-${target_user}.service" &>/dev/null || true
+                    ;;
+                initd)
+                    [ -f "/etc/init.d/loongsuite-pilot-${target_user}" ] && sudo "/etc/init.d/loongsuite-pilot-${target_user}" stop &>/dev/null || true
+                    [ -f "/etc/init.d/loongsuite-pilot-updater-${target_user}" ] && sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" stop &>/dev/null || true
+                    ;;
+            esac
             ;;
     esac
 
@@ -495,6 +546,10 @@ cmd_restart_collector() {
     target_user=$(whoami)
     local sys_unit="loongsuite-pilot-${target_user}.service"
     local initd_script="/etc/init.d/loongsuite-pilot-${target_user}"
+    local init_type=""
+    if [ -f "$INIT_TYPE_FILE" ]; then
+        init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
+    fi
 
     # Stop collector only (leave updater running)
     case "$(uname -s)" in
@@ -502,8 +557,17 @@ cmd_restart_collector() {
             launchctl stop "$SERVICE_LABEL" 2>/dev/null || true
             ;;
         Linux)
-            sudo systemctl stop "$sys_unit" &>/dev/null || true
-            [ -f "$initd_script" ] && sudo "$initd_script" stop &>/dev/null || true
+            case "$init_type" in
+                systemd-user)
+                    systemctl --user stop loongsuite-pilot.service &>/dev/null || true
+                    ;;
+                systemd-system|systemd)
+                    sudo systemctl stop "$sys_unit" &>/dev/null || true
+                    ;;
+                initd)
+                    [ -f "$initd_script" ] && sudo "$initd_script" stop &>/dev/null || true
+                    ;;
+            esac
             ;;
     esac
     pkill -f "loongsuite-pilot/bin/collector-daemon" 2>/dev/null || true
@@ -538,15 +602,29 @@ cmd_restart_collector() {
             fi
             ;;
         Linux)
-            if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && sudo systemctl is-enabled "$sys_unit" &>/dev/null; then
-                sudo systemctl start "$sys_unit" &>/dev/null
-                echo "✅ collector restarted (systemd)"
-                _restarted=true
-            elif [ -f "$initd_script" ]; then
-                sudo "$initd_script" start &>/dev/null
-                echo "✅ collector restarted (init.d)"
-                _restarted=true
-            fi
+            case "$init_type" in
+                systemd-user)
+                    if systemctl --user is-enabled loongsuite-pilot.service &>/dev/null; then
+                        systemctl --user start loongsuite-pilot.service &>/dev/null
+                        echo "✅ collector restarted (systemd user-level)"
+                        _restarted=true
+                    fi
+                    ;;
+                systemd-system|systemd)
+                    if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && sudo -n systemctl is-enabled "$sys_unit" &>/dev/null; then
+                        sudo systemctl start "$sys_unit" &>/dev/null
+                        echo "✅ collector restarted (systemd system-level)"
+                        _restarted=true
+                    fi
+                    ;;
+                initd)
+                    if [ -f "$initd_script" ]; then
+                        sudo "$initd_script" start &>/dev/null
+                        echo "✅ collector restarted (init.d)"
+                        _restarted=true
+                    fi
+                    ;;
+            esac
             ;;
     esac
     if [ "$_restarted" = false ]; then
@@ -731,6 +809,50 @@ _write_launchd_plist() {
 </dict>
 </plist>
 PLISTEOF
+}
+
+SYSTEMD_USER_UNIT_DIR="$HOME/.config/systemd/user"
+
+_write_systemd_user_unit() {
+    mkdir -p "$SYSTEMD_USER_UNIT_DIR"
+    cat > "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot.service" << UNITEOF
+[Unit]
+Description=LoongSuite Pilot
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/loongsuite-pilot run
+WorkingDirectory=%h/.loongsuite-pilot
+Environment=AGENT_DATA_COLLECTION_CONFIG=%h/.loongsuite-pilot/config.json
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target
+UNITEOF
+}
+
+_write_systemd_user_updater_unit() {
+    mkdir -p "$SYSTEMD_USER_UNIT_DIR"
+    cat > "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot-updater.service" << UNITEOF
+[Unit]
+Description=LoongSuite Pilot Auto-Updater
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/loongsuite-pilot run-updater
+WorkingDirectory=%h/.loongsuite-pilot
+Environment=AGENT_DATA_COLLECTION_CONFIG=%h/.loongsuite-pilot/config.json
+Restart=on-failure
+RestartSec=60
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target
+UNITEOF
 }
 
 _write_systemd_system_unit() {
@@ -1114,8 +1236,15 @@ _unregister_initd_boot() {
 }
 
 autostart_install() {
+    local system_service="${1:-false}"
+
+    # Root users have no user session — auto-escalate to system-level
+    if [ "$(id -u)" -eq 0 ]; then
+        system_service="true"
+    fi
+
     local init_system
-    init_system=$(detect_init_system)
+    init_system=$(detect_init_system "$system_service")
     local target_user
     target_user=$(whoami)
 
@@ -1129,13 +1258,22 @@ autostart_install() {
             launchctl load -w "$UPDATER_PLIST"
             echo "launchd" > "$INIT_TYPE_FILE"
             ;;
-        systemd)
+        systemd-user)
+            _write_systemd_user_unit
+            _write_systemd_user_updater_unit
+            systemctl --user daemon-reload &>/dev/null
+            systemctl --user enable --now loongsuite-pilot.service &>/dev/null
+            systemctl --user enable --now loongsuite-pilot-updater.service &>/dev/null
+            enable_linger || true
+            echo "systemd-user" > "$INIT_TYPE_FILE"
+            ;;
+        systemd-system)
             _write_systemd_system_unit "$target_user"
             _write_systemd_system_updater_unit "$target_user"
             sudo systemctl daemon-reload &>/dev/null
             sudo systemctl enable --now "loongsuite-pilot-${target_user}.service" &>/dev/null
             sudo systemctl enable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null
-            echo "systemd" > "$INIT_TYPE_FILE"
+            echo "systemd-system" > "$INIT_TYPE_FILE"
             ;;
         initd)
             _write_initd_script "$target_user"
@@ -1165,7 +1303,14 @@ autostart_remove() {
             launchctl unload -w "$LAUNCHD_PLIST" 2>/dev/null || true
             rm -f "$LAUNCHD_PLIST"
             ;;
-        systemd)
+        systemd-user)
+            systemctl --user disable --now loongsuite-pilot-updater.service &>/dev/null || true
+            systemctl --user disable --now loongsuite-pilot.service &>/dev/null || true
+            rm -f "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot.service"
+            rm -f "$SYSTEMD_USER_UNIT_DIR/loongsuite-pilot-updater.service"
+            systemctl --user daemon-reload &>/dev/null || true
+            ;;
+        systemd-system|systemd)
             sudo systemctl disable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null || true
             sudo systemctl disable --now "loongsuite-pilot-${target_user}.service" &>/dev/null || true
             sudo rm -f "$SYSTEMD_SYSTEM_UNIT_DIR/loongsuite-pilot-${target_user}.service"
@@ -1200,9 +1345,20 @@ autostart_status() {
                 echo "   autostart: disabled"
             fi
             ;;
-        systemd)
+        systemd-user)
+            if systemctl --user is-enabled loongsuite-pilot.service &>/dev/null; then
+                local linger_status=""
+                if [ -f "/var/lib/systemd/linger/$target_user" ]; then
+                    linger_status=", linger active"
+                fi
+                echo "   autostart: enabled (systemd user-level${linger_status})"
+            else
+                echo "   autostart: disabled"
+            fi
+            ;;
+        systemd-system|systemd)
             local unit_name="loongsuite-pilot-${target_user}.service"
-            if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name" ] && sudo systemctl is-enabled "$unit_name" &>/dev/null; then
+            if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name" ] && sudo -n systemctl is-enabled "$unit_name" &>/dev/null; then
                 echo "   autostart: enabled (systemd system-level)"
             else
                 echo "   autostart: disabled"
@@ -1216,13 +1372,13 @@ autostart_status() {
             fi
             ;;
         *)
-            echo "   autostart: not available (sudo required for Linux service registration)"
+            echo "   autostart: not available"
             ;;
     esac
 }
 
 cmd_help() {
-    echo "Usage: loongsuite-pilot <command>"
+    echo "Usage: loongsuite-pilot <command> [options]"
     echo ""
     echo "Commands:"
     echo "  start           Start the collector service"
@@ -1234,6 +1390,9 @@ cmd_help() {
     echo "  monitor stop    Stop process resource monitor"
     echo "  rollback        Roll back to the previous version"
     echo "  help            Show this help message"
+    echo ""
+    echo "Options:"
+    echo "  --system-service  Use system-level service registration (requires sudo)"
 }
 
 cmd_monitor() {
@@ -1250,7 +1409,7 @@ cmd_monitor() {
 # ---- Dispatch ----
 
 case "${1:-status}" in
-    start)       cmd_start ;;
+    start)       shift; cmd_start "$@" ;;
     stop)        cmd_stop ;;
     restart)     cmd_restart ;;
     status)      cmd_status ;;

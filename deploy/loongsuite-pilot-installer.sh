@@ -56,6 +56,7 @@ LOG_LEVEL=""
 USER_ID=""
 HAS_SUDO=0
 PURGE=0
+SYSTEM_SERVICE=0
 
 # First arg is sub-command (or option -> default to install)
 if [[ $# -gt 0 ]]; then
@@ -98,6 +99,7 @@ while [[ $# -gt 0 ]]; do
         --channel)            CHANNEL="$2"; shift 2 ;;
         --channel=*)          CHANNEL="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
+        --system-service)     SYSTEM_SERVICE=1; shift ;;
         *)
             echo "Unknown option: $1" >&2
             exit 1 ;;
@@ -112,16 +114,27 @@ validate_install_user() {
             current_user=$(whoami)
             if [ "$(id -u)" -eq 0 ]; then
                 HAS_SUDO=1
-                msg "   ✅ 以 root 身份安装" \
-                    "   ✅ Installing as root"
-            elif sudo -v 2>/dev/null; then
-                HAS_SUDO=1
-                msg "   ✅ sudo 权限校验通过 (user: $current_user)" \
-                    "   ✅ sudo access verified (user: $current_user)"
+                SYSTEM_SERVICE=1
+                msg "   ✅ 以 root 身份安装（自动使用系统级服务）" \
+                    "   ✅ Installing as root (auto system-level service)"
+            elif [ "$SYSTEM_SERVICE" -eq 1 ]; then
+                if sudo -n true 2>/dev/null; then
+                    HAS_SUDO=1
+                    msg "   ✅ sudo 权限校验通过 (user: $current_user)" \
+                        "   ✅ sudo access verified (user: $current_user)"
+                elif sudo -v 2>/dev/null; then
+                    HAS_SUDO=1
+                    msg "   ✅ sudo 权限校验通过 (user: $current_user)" \
+                        "   ✅ sudo access verified (user: $current_user)"
+                else
+                    HAS_SUDO=0
+                    SYSTEM_SERVICE=0
+                    msg "⚠️  无 sudo 权限 — 无法注册系统级服务。将使用用户态 systemd 服务。" \
+                        "⚠️  No sudo access — cannot register system-level service. Using user-level systemd."
+                fi
             else
-                HAS_SUDO=0
-                msg "⚠️  无 sudo 权限 — 服务注册需要 sudo。将使用 nohup 回退（无开机启动）。" \
-                    "⚠️  No sudo access — service registration requires sudo. Falling back to nohup (no autostart)."
+                msg "   ℹ️  使用用户态 systemd 服务 (user: $current_user)" \
+                    "   ℹ️  Using user-level systemd service (user: $current_user)"
             fi
             ;;
     esac
@@ -1017,7 +1030,11 @@ cmd_install() {
     install_otel_plugin
 
     msg "==> 启动服务..." "==> Starting service..."
-    if loongsuite-pilot start; then
+    local _start_args=""
+    if [ "$SYSTEM_SERVICE" -eq 1 ]; then
+        _start_args="--system-service"
+    fi
+    if loongsuite-pilot start $_start_args; then
         sleep 2
         if loongsuite-pilot status 2>/dev/null | grep -q "is running"; then
             msg "    ✅ 服务已启动" "    ✅ Service started"
@@ -1250,6 +1267,18 @@ cmd_uninstall() {
             Linux)
                 local _run_user
                 _run_user="$(whoami)"
+
+                # Clean up user-level systemd units
+                local _user_unit_dir="$HOME/.config/systemd/user"
+                if [ -f "$_user_unit_dir/loongsuite-pilot.service" ]; then
+                    systemctl --user disable --now loongsuite-pilot.service &>/dev/null || true
+                    systemctl --user disable --now loongsuite-pilot-updater.service &>/dev/null || true
+                    rm -f "$_user_unit_dir/loongsuite-pilot.service"
+                    rm -f "$_user_unit_dir/loongsuite-pilot-updater.service"
+                    systemctl --user daemon-reload &>/dev/null || true
+                fi
+
+                # Clean up system-level systemd units
                 local _sys_unit="/etc/systemd/system/loongsuite-pilot-${_run_user}.service"
                 local _sys_uunit="/etc/systemd/system/loongsuite-pilot-updater-${_run_user}.service"
                 for f in "$_sys_uunit" "$_sys_unit"; do
@@ -1260,6 +1289,7 @@ cmd_uninstall() {
                 done
                 sudo systemctl daemon-reload &>/dev/null || true
 
+                # Clean up init.d scripts
                 local _initd="/etc/init.d/loongsuite-pilot-${_run_user}"
                 local _initd_u="/etc/init.d/loongsuite-pilot-updater-${_run_user}"
                 for f in "$_initd_u" "$_initd"; do

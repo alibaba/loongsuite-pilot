@@ -2,9 +2,9 @@
 
 The `loongsuite-pilot.sh` service management script is the single entry point for starting, stopping, and managing the loongsuite-pilot service. It already handles macOS launchd and Linux systemd user-level services. The installer (`loongsuite-pilot-installer.sh`) orchestrates first-time install and calls `loongsuite-pilot start`, which delegates to `autostart_install()`.
 
-Key constraint: multiple OS users on the same Linux host may each have their own loongsuite-pilot installation. Service files must be namespaced per user to prevent conflicts.
+Key constraint: multiple OS users on the same Linux host may each have their own loongsuite-pilot installation. User-level systemd units are inherently per-user; system-level units use per-user naming to prevent conflicts.
 
-**Key design shift**: The installer runs as the **current user** (including root). File installation happens under the user's `$HOME` with correct ownership by default. For non-root users, systemd/init.d privileged operations are elevated via `sudo`. Root users already have privileges so `sudo` is a no-op. This eliminates the need for `--run-as-user` parameter and `fix_ownership()`.
+**Key design shift**: Linux defaults to **systemd user-level** service (`systemctl --user`). This requires no sudo and works out-of-the-box. To ensure the service survives user session logout, `loginctl enable-linger` is attempted. System-level service registration (system-level systemd or init.d) is only activated via an explicit `--system-service` parameter — all sudo privilege checks are gated behind this flag.
 
 All changes are in shell scripts — no TypeScript/Node.js changes required (logging changes are handled separately).
 
@@ -12,12 +12,13 @@ All changes are in shell scripts — no TypeScript/Node.js changes required (log
 
 **Goals:**
 
-- Replace existing systemd user-level support with system-level systemd service registration, using `sudo` for privileged operations (not requiring the entire installer to run as root).
-- Add `sudo -v` pre-check to validate sudo access before attempting service registration. Fall back to nohup with a clear warning if sudo is unavailable.
-- Record current user identity via `$(whoami)` (including root) for per-user naming.
-- Support init.d/SysVinit service registration as fallback when systemd is unavailable, also via `sudo`.
-- Prioritize systemd over init.d when both are available.
-- Clean up all registered services on uninstall, including system-level units and init.d scripts.
+- Keep systemd user-level service as the default on Linux — no sudo required for normal operation.
+- Attempt `loginctl enable-linger <user>` to ensure user-level services persist after session logout. If linger cannot be enabled (no permission), warn the user but proceed.
+- Add `--system-service` parameter to opt-in to system-level systemd (or init.d fallback) registration. Only this path requires sudo.
+- When `--system-service` is specified: add `sudo -v` pre-check, fall back to user-level service if sudo is unavailable.
+- Support init.d/SysVinit service registration as fallback when systemd is unavailable and `--system-service` is specified.
+- Prioritize systemd over init.d when both are available (in system-service mode).
+- Clean up all registered services on uninstall (both user-level and system-level if applicable).
 
 **Non-Goals:**
 
@@ -29,44 +30,107 @@ All changes are in shell scripts — no TypeScript/Node.js changes required (log
 
 ## Decisions
 
-### Decision 1: sudo pre-check and current user identity
+### Decision 1: Default to systemd user-level service (no sudo)
 
-The installer and service management script check the execution context before attempting privileged operations:
+Linux defaults to **systemd user-level** service via `systemctl --user`. This is the unprivileged path that requires no sudo:
+
+- Unit files live in `~/.config/systemd/user/`
+- Managed via `systemctl --user enable/start/stop/disable`
+- No root or sudo needed
+- Inherently per-user (no naming conflicts)
+
+For root users, user-level systemd is not available; they always use system-level service (equivalent to `--system-service`).
+
+### Decision 2: `loginctl enable-linger` for session persistence
+
+By default, systemd user-level services are tied to the user's login session — they stop when all sessions end. To make the service survive logout:
 
 ```bash
-# Check if current user has sudo/root privileges for service registration
-check_sudo_access() {
-    if [ "$(id -u)" -eq 0 ] || sudo -v 2>/dev/null; then
+enable_linger() {
+    local user
+    user="$(whoami)"
+    if loginctl enable-linger "$user" 2>/dev/null; then
+        echo "✓ Linger enabled — service will persist after logout."
         return 0
     else
-        echo "⚠️  No sudo access — service registration requires sudo."
-        echo "   Falling back to nohup (no autostart on boot)."
+        echo "⚠️  Cannot enable linger (requires polkit policy or root privilege)."
+        echo "   Service may stop when you log out."
+        echo "   To fix: run 'sudo loginctl enable-linger $user' or use --system-service."
         return 1
     fi
 }
 ```
 
-Root users are allowed — they install under `/root/` and have privileges by default. Non-root users need `sudo -v` to pass. If `sudo -v` fails, the installer proceeds with file installation but skips service registration (nohup fallback).
+Only attempts direct `loginctl enable-linger` — works if the distro's polkit policy allows users to enable their own linger (e.g., Ubuntu 22.04+ permits this by default). No `sudo` of any form (`sudo -v`, `sudo -n`, etc.) is invoked in the default path. If it fails, warn the user and suggest manual remediation or `--system-service`.
 
-### Decision 2: Extended init system detection
+### Decision 3: `--system-service` parameter for system-level registration
 
-Replace the current `detect_init_system()`. On Linux, check `sudo -v` instead of `id -u == 0`:
+An explicit `--system-service` flag opts in to system-level service registration:
+
+```bash
+loongsuite-pilot start --system-service
+# or during install:
+bash installer.sh install --system-service
+```
+
+When `--system-service` is specified:
+- `sudo -v` pre-check is performed
+- System-level systemd unit (or init.d fallback) is created
+- All `sudo` commands are executed
+- If sudo check fails, fall back to user-level service (not nohup)
+
+When `--system-service` is **not** specified (default):
+- **No sudo of any form** (`sudo -v`, `sudo -n`, `sudo <cmd>`) is ever invoked
+- User-level systemd is used
+- `loginctl enable-linger` is attempted directly (without sudo; may fail if polkit disallows)
+
+### Decision 4: sudo pre-check (only with `--system-service`)
+
+```bash
+check_sudo_access() {
+    if [ "$(id -u)" -eq 0 ]; then
+        return 0
+    fi
+    if sudo -v 2>/dev/null; then
+        return 0
+    else
+        echo "⚠️  No sudo access — cannot register system-level service."
+        echo "   Falling back to user-level systemd service."
+        return 1
+    fi
+}
+```
+
+This function is **only called** when `--system-service` is specified. The default user-level path never triggers sudo.
+
+### Decision 5: Init system detection (mode-aware)
 
 ```bash
 detect_init_system() {
+    local system_service="${1:-false}"
     case "$(uname -s)" in
         Darwin) echo "launchd" ;;
         Linux)
-            if ! sudo -n true 2>/dev/null; then
-                echo "none"
-                return
-            fi
-            if command -v systemctl &>/dev/null && systemctl --version &>/dev/null 2>&1; then
-                echo "systemd"
-            elif [ -d /etc/init.d ]; then
-                echo "initd"
+            if [ "$system_service" = "true" ]; then
+                # System-level: requires sudo, checks system init
+                if ! check_sudo_access; then
+                    echo "systemd-user"  # fallback
+                    return
+                fi
+                if command -v systemctl &>/dev/null && systemctl --version &>/dev/null 2>&1; then
+                    echo "systemd-system"
+                elif [ -d /etc/init.d ]; then
+                    echo "initd"
+                else
+                    echo "systemd-user"  # fallback
+                fi
             else
-                echo "none"
+                # Default: user-level systemd
+                if command -v systemctl &>/dev/null && systemctl --user --version &>/dev/null 2>&1; then
+                    echo "systemd-user"
+                else
+                    echo "none"
+                fi
             fi
             ;;
         *) echo "none" ;;
@@ -78,24 +142,45 @@ Return values:
 | Value | Meaning |
 |---|---|
 | `launchd` | macOS (unchanged) |
-| `systemd` | Linux, systemd available, user has sudo → system-level unit via sudo |
-| `initd` | Linux, no systemd, `/etc/init.d/` exists, user has sudo |
-| `none` | No suitable init system, or no sudo access |
+| `systemd-user` | Linux, user-level systemd (default, no sudo) |
+| `systemd-system` | Linux, system-level systemd (`--system-service`, requires sudo) |
+| `initd` | Linux, no systemd, init.d fallback (`--system-service`, requires sudo) |
+| `none` | No suitable init system available |
 
-Uses `sudo -n true` (non-interactive) to check if sudo credentials are already cached, avoiding a password prompt during detection. The interactive `sudo -v` prompt happens once at installer start.
+### Decision 6: User-level systemd unit template (default)
 
-### Decision 3: Per-user service naming
+```ini
+[Unit]
+Description=LoongSuite Pilot
+After=default.target
 
-All system-level service files include the current username in the filename:
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/loongsuite-pilot run
+WorkingDirectory=%h/.loongsuite-pilot
+Environment=AGENT_DATA_COLLECTION_CONFIG=%h/.loongsuite-pilot/config.json
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
 
-| Init system | Collector | Updater |
-|---|---|---|
-| systemd | `/etc/systemd/system/loongsuite-pilot-<user>.service` | `/etc/systemd/system/loongsuite-pilot-updater-<user>.service` |
-| init.d | `/etc/init.d/loongsuite-pilot-<user>` | `/etc/init.d/loongsuite-pilot-updater-<user>` |
+[Install]
+WantedBy=default.target
+```
 
-The `<user>` is always `$(whoami)` — the current user running the installer.
+Key points:
+- `%h` expands to the user's home directory (systemd user-level specifier)
+- No `User=`/`Group=` directives (user-level services always run as the owning user)
+- `WantedBy=default.target` (user session target)
+- No `sudo tee` — written directly to `~/.config/systemd/user/`
+- `LimitNOFILE=65536` to prevent "Too many open files" in Node.js
 
-### Decision 4: System-level systemd unit template
+Unit file paths:
+| Service | Path |
+|---|---|
+| Collector | `~/.config/systemd/user/loongsuite-pilot.service` |
+| Updater | `~/.config/systemd/user/loongsuite-pilot-updater.service` |
+
+### Decision 7: System-level systemd unit template (`--system-service` only)
 
 ```ini
 [Unit]
@@ -119,15 +204,20 @@ WantedBy=multi-user.target
 ```
 
 Key points:
-- `User=` / `Group=` directives (service runs as the current user, not root)
-- `WantedBy=multi-user.target` instead of `default.target`
-- `After=network.target` instead of `default.target`
-- `Environment=HOME=<user_home>` (systemd doesn't set HOME for non-login services by default)
-- All paths are absolute, resolved at install time via `getent passwd` or `$HOME`
-- `LimitNOFILE=65536` to prevent "Too many open files" in Node.js
-- **Written via `sudo tee`** — not direct file write (since current user is not root)
+- `User=` / `Group=` directives (service runs as the target user, not root)
+- `WantedBy=multi-user.target` (system boot target)
+- `After=network.target`
+- `Environment=HOME=<user_home>` (systemd doesn't set HOME for non-login services)
+- All paths are absolute, resolved at install time
+- **Written via `sudo tee`**
 
-### Decision 5: init.d script template
+System-level unit file paths (per-user naming to avoid conflicts):
+| Service | Path |
+|---|---|
+| Collector | `/etc/systemd/system/loongsuite-pilot-<user>.service` |
+| Updater | `/etc/systemd/system/loongsuite-pilot-updater-<user>.service` |
+
+### Decision 8: init.d script template (`--system-service` only)
 
 The generated script follows LSB conventions with chkconfig compatibility:
 
@@ -168,34 +258,46 @@ User switching strategy in `do_start()`:
 
 Written via **`sudo tee`**. Boot registration via `sudo chkconfig` or `sudo update-rc.d`.
 
-### Decision 6: `autostart_install()` extended flow
-
-All systemd/init.d commands are prefixed with `sudo`:
+### Decision 9: `autostart_install()` extended flow
 
 ```
-autostart_install()
+autostart_install(system_service=false)
 ├── launchd → (unchanged, no sudo needed)
-├── systemd
-│   ├── _write_systemd_system_unit <user>         # uses sudo tee
-│   ├── _write_systemd_system_updater_unit <user>  # uses sudo tee
+├── systemd-user (default)
+│   ├── mkdir -p ~/.config/systemd/user/
+│   ├── _write_systemd_user_unit              # direct write, no sudo
+│   ├── _write_systemd_user_updater_unit      # direct write, no sudo
+│   ├── systemctl --user daemon-reload
+│   ├── systemctl --user enable --now loongsuite-pilot.service
+│   ├── systemctl --user enable --now loongsuite-pilot-updater.service
+│   └── enable_linger()                       # best-effort, may warn
+├── systemd-system (--system-service)
+│   ├── _write_systemd_system_unit <user>         # sudo tee
+│   ├── _write_systemd_system_updater_unit <user>  # sudo tee
 │   ├── sudo systemctl daemon-reload
 │   ├── sudo systemctl enable --now loongsuite-pilot-<user>.service
 │   └── sudo systemctl enable --now loongsuite-pilot-updater-<user>.service
-├── initd
-│   ├── _write_initd_script <user>           # uses sudo tee
-│   ├── _write_initd_updater_script <user>    # uses sudo tee
+├── initd (--system-service, no systemd)
+│   ├── _write_initd_script <user>           # sudo tee
+│   ├── _write_initd_updater_script <user>    # sudo tee
 │   ├── sudo chmod +x /etc/init.d/loongsuite-pilot-<user>
 │   ├── sudo chkconfig --add ... OR sudo update-rc.d ... defaults
 │   └── sudo /etc/init.d/loongsuite-pilot-<user> start
 └── none → return 1 (nohup fallback in caller)
 ```
 
-### Decision 7: `autostart_remove()` extended flow
+### Decision 10: `autostart_remove()` extended flow
 
 ```
 autostart_remove()
 ├── launchd → (unchanged)
-├── systemd
+├── systemd-user
+│   ├── systemctl --user disable --now loongsuite-pilot.service
+│   ├── systemctl --user disable --now loongsuite-pilot-updater.service
+│   ├── rm -f ~/.config/systemd/user/loongsuite-pilot.service
+│   ├── rm -f ~/.config/systemd/user/loongsuite-pilot-updater.service
+│   └── systemctl --user daemon-reload
+├── systemd-system
 │   ├── sudo systemctl disable --now loongsuite-pilot-<user>.service
 │   ├── sudo systemctl disable --now loongsuite-pilot-updater-<user>.service
 │   ├── sudo rm -f /etc/systemd/system/loongsuite-pilot-<user>.service
@@ -210,53 +312,56 @@ autostart_remove()
 └── none → no-op
 ```
 
-### Decision 8: State persistence for service type
+### Decision 11: State persistence for service type
 
-Same as before — store the init type in a marker file:
+Store the init type in a marker file:
 
 ```
 ~/.loongsuite-pilot/init-type
 ```
 
-Contents: one of `launchd`, `systemd`, `initd`, `nohup`.
+Contents: one of `launchd`, `systemd-user`, `systemd-system`, `initd`, `nohup`.
 
 Written by `autostart_install()`. Read by `autostart_remove()` and `autostart_status()` as an override when the marker file exists. This file is in the user's home directory, so no sudo needed to read/write it.
 
-### Decision 9: Installer flow changes
-
-Remove `--run-as-user` parameter. The install flow becomes:
+### Decision 12: Installer flow changes
 
 ```
-cmd_install()
-├── install files to ~/...      # as current user, correct ownership by default
-├── check_sudo_access()         # root → always pass; non-root → sudo -v
-│   ├── success → proceed to service registration
-│   └── failure → warn, skip to nohup fallback
-├── autostart_install()         # uses sudo internally for privileged ops
+cmd_install(--system-service?)
+├── install files to ~/...              # as current user, no sudo
+├── if --system-service:
+│   ├── check_sudo_access()            # root → always pass; non-root → sudo -v
+│   │   ├── success → system-level registration
+│   │   └── failure → warn, fall back to user-level
+│   └── autostart_install(system_service=true)
+├── else (default):
+│   └── autostart_install(system_service=false)  # user-level, no sudo
 └── verify service is running
 ```
 
-No `fix_ownership()` needed since the installer runs as the target user.
+### Decision 13: Root user special case
 
-### Decision 10: Handling no-sudo install on Linux
-
-When `sudo -v` fails on Linux:
-- Print a warning: sudo access is required for service registration, falling back to nohup.
-- Service will run but will not auto-start on boot.
-- Suggest: ensure the user has sudo access and re-run the installer.
+When the installer runs as root (`id -u == 0`):
+- User-level systemd is not available (root doesn't have a user session by default)
+- Automatically behaves as if `--system-service` was specified
+- No `sudo` prefix needed (already root)
+- Service files go to `/etc/systemd/system/loongsuite-pilot-root.service`
 
 ## Risks / Trade-offs
 
-- **sudo credential timeout**: `sudo -v` caches credentials for a limited time (typically 5-15 minutes). Long-running installs may need to re-validate. The `sudo -n true` check in `detect_init_system()` uses non-interactive mode to avoid hanging.
-- **init.d script variability**: Different distros have slightly different conventions. The dual-strategy (start-stop-daemon + su fallback) mitigates this.
-- **getent not available**: Some minimal containers may not have `getent`. Fallback to `$HOME` is used.
+- **Linger not available**: On some minimal or locked-down systems, `loginctl enable-linger` may not be available or permitted. In this case the user-level service stops on logout. Mitigation: clear warning message with instructions to either get linger enabled or use `--system-service`.
+- **User-level systemd not available**: Some older distros or containers don't have user-level systemd. Detection falls through to `none`, triggering nohup fallback. Users can use `--system-service` if they have sudo.
+- **sudo credential timeout** (system-service mode only): `sudo -v` caches credentials for a limited time (typically 5-15 minutes). Long-running installs may need to re-validate.
+- **init.d script variability** (system-service mode only): Different distros have slightly different conventions. The dual-strategy (start-stop-daemon + su fallback) mitigates this.
 - **Stale init-type marker**: If someone manually modifies the init system after installation, the marker file may be stale. The `autostart_remove()` function should attempt both the marker-indicated type and a fresh detection as a safety net.
+- **Root user edge case**: Root doesn't typically have a user session, so user-level systemd won't work. The automatic fallback to system-level is the correct behavior.
 
 ## Migration Plan
 
 1. **macOS**: No changes. Launchd behavior is untouched.
-2. **Linux with existing systemd-user install**: On upgrade or re-install, the new system-level units supersede the old user-level units. Users should manually remove old `~/.config/systemd/user/` units if present.
-3. **Linux fresh install**: Run `bash installer.sh install` as the target user. The installer uses `sudo` internally for systemd registration.
-4. **Linux no-sudo install**: Falls back to nohup with a warning.
-5. No config file migration needed — service registration is orthogonal to `config.json`.
-6. The `init-type` marker file is created on first `autostart_install()` after the upgrade.
+2. **Linux with existing systemd-user install**: Units stay in place. The new code continues to manage them as `systemd-user` type. No migration needed.
+3. **Linux with existing system-level install** (if any from manual setup): The `init-type` marker file determines cleanup strategy. If no marker exists, detection is used.
+4. **Linux fresh install (default)**: Run `bash installer.sh install` as the target user. No sudo needed. User-level systemd + linger.
+5. **Linux fresh install (system-service)**: Run `bash installer.sh install --system-service` as the target user. Sudo is prompted.
+6. No config file migration needed — service registration is orthogonal to `config.json`.
+7. The `init-type` marker file is created on first `autostart_install()` after the upgrade.

@@ -1,55 +1,43 @@
-## 1. sudo Pre-check & User Validation
+## 1. Core Infrastructure (user-level default)
 
-- [x] 1.1 Add `validate_current_user()` function to `scripts/loongsuite-pilot.sh`: `whoami`, reject `root` with clear error message.
-- [x] 1.2 Add `check_sudo_access()` function to `scripts/loongsuite-pilot.sh`: run `sudo -v`, return 0 on success, print warning and return 1 on failure.
-- [x] 1.3 Add `validate_current_user()` and `check_sudo_access()` calls to installer scripts (`deploy/loongsuite-pilot-installer.sh` and `deploy/loongsuite-pilot-installer-inner.sh`) before service registration in `cmd_install()` and `cmd_upgrade()`.
-- [x] 1.4 Remove `--run-as-user` parameter parsing from installer scripts (no longer needed). Remove `resolve_run_as_user()` — replace usages with `$(whoami)`.
+- [x] 1.1 Refactor `detect_init_system()` to accept a `system_service` parameter. Default path: check for user-level systemd (`systemctl --user`). `--system-service` path: check sudo then system-level systemd/init.d. Return values: `systemd-user`, `systemd-system`, `initd`, `launchd`, `none`.
+- [x] 1.2 Add `enable_linger()` function: attempt `loginctl enable-linger $(whoami)` directly (no sudo). Warn on failure with instructions.
+- [x] 1.3 Add `_write_systemd_user_unit()` function: write unit to `~/.config/systemd/user/loongsuite-pilot.service` using `%h` specifiers, no sudo.
+- [x] 1.4 Add `_write_systemd_user_updater_unit()` function: same approach for updater service.
+- [x] 1.5 Add `is_managed_by_systemd_user()` check function: `systemctl --user is-enabled loongsuite-pilot.service`.
+- [x] 1.6 Update `check_sudo_access()` to only be called when `--system-service` is active. Change message to suggest falling back to user-level service.
 
-## 2. Init System Detection
+## 2. autostart_install / autostart_remove / autostart_status Refactor
 
-- [x] 2.1 Update `detect_init_system()` in `scripts/loongsuite-pilot.sh`: replace `id -u == 0` check with `sudo -n true 2>/dev/null` to determine if privileged operations are available without an interactive prompt.
-- [x] 2.2 Keep `init-type` marker file support unchanged: write `$DATA_DIR/init-type` in `autostart_install()`, read it in `autostart_remove()` and `autostart_status()`.
-- [x] 2.3 Remove `_clean_legacy_systemd_user_units()` — user-level systemd cleanup is no longer supported.
+- [x] 2.1 Refactor `autostart_install()` to accept a `system_service` parameter. Add `systemd-user` branch: mkdir user unit dir, write units, `systemctl --user daemon-reload`, `systemctl --user enable --now`, call `enable_linger()`. No sudo in this branch.
+- [x] 2.2 Rename existing `systemd` branch to `systemd-system` — keep sudo logic unchanged.
+- [x] 2.3 Update `INIT_TYPE_FILE` values: `systemd-user`, `systemd-system`, `initd`, `launchd`, `nohup`.
+- [x] 2.4 Refactor `autostart_remove()` to handle `systemd-user` type: `systemctl --user disable --now`, remove user unit files, `systemctl --user daemon-reload`. No sudo.
+- [x] 2.5 Update `autostart_status()` to handle `systemd-user` type: `systemctl --user is-enabled`. No sudo.
 
-## 3. System-level Systemd Units (sudo)
+## 3. Command-level `--system-service` Gating
 
-- [x] 3.1 Update `_write_systemd_system_unit()`: use `sudo tee` instead of direct write to `/etc/systemd/system/`. Unit content remains the same (User=, Group=, LimitNOFILE=65536, absolute paths).
-- [x] 3.2 Update `_write_systemd_system_updater_unit()`: same `sudo tee` approach.
-- [x] 3.3 Update all `systemctl` calls in `autostart_install()` systemd branch: prefix with `sudo` (`sudo systemctl daemon-reload`, `sudo systemctl enable --now`).
-- [x] 3.4 Update all `systemctl` calls in `autostart_remove()` systemd branch: prefix with `sudo`.
-- [x] 3.5 Update `systemctl` calls in `autostart_status()` systemd branch: prefix with `sudo`.
-- [x] 3.6 Update `rm -f` of system-level unit files in `autostart_remove()`: prefix with `sudo`.
+- [x] 3.1 Update `cmd_start()`: remove unconditional `check_sudo_access` call on Linux. Parse `--system-service` flag. Pass it to `autostart_install()`. Default path uses user-level systemd (no sudo).
+- [x] 3.2 Update `cmd_stop()`: read `INIT_TYPE_FILE` to determine mode. Only use sudo for `systemd-system`/`initd`. User-level uses `systemctl --user stop`.
+- [x] 3.3 Update `cmd_restart_collector()`: same pattern — read init-type, only sudo for system-level.
+- [x] 3.4 Add `--system-service` parsing to the main dispatch (pass through to cmd_start).
 
-## 4. init.d Script Generation (sudo)
+## 4. Root User Special Case
 
-- [x] 4.1 Update `_write_initd_script()`: use `sudo tee` and `sudo chmod +x` instead of direct write.
-- [x] 4.2 Update `_write_initd_updater_script()`: same approach.
-- [x] 4.3 Update `_register_initd_boot()`: prefix `chkconfig`/`update-rc.d` with `sudo`.
-- [x] 4.4 Update `_unregister_initd_boot()`: prefix with `sudo`.
-- [x] 4.5 Update init.d start/stop calls in `autostart_install()`/`autostart_remove()`: prefix with `sudo`.
+- [x] 4.1 In `cmd_start()` / `autostart_install()`: if `id -u == 0`, automatically behave as `--system-service` (root has no user session). No sudo prefix needed (already root).
 
-## 5. Stop & Restart Integration (sudo)
+## 5. Installer Updates
 
-- [x] 5.1 Update `cmd_stop()` systemd branch: use `sudo systemctl stop`.
-- [x] 5.2 Update `cmd_stop()` init.d branch: use `sudo /etc/init.d/... stop`.
-- [x] 5.3 Update `cmd_restart_collector()` systemd branch: use `sudo systemctl stop/start`.
-- [x] 5.4 Update `cmd_restart_collector()` init.d branch: use `sudo /etc/init.d/... stop/start`.
+- [x] 5.1 Add `--system-service` parameter parsing to `deploy/loongsuite-pilot-installer.sh`. Pass it through to `loongsuite-pilot start`.
+- [x] 5.2 Move `check_sudo_access()` call in installer to only execute when `--system-service` is specified.
+- [x] 5.3 Mirror changes to `deploy/loongsuite-pilot-installer-inner.sh`.
 
-## 6. Installer Cleanup
+## 6. Testing
 
-- [x] 6.1 Remove `--run-as-user` parameter parsing and `RUN_AS_USER` variable from `deploy/loongsuite-pilot-installer.sh`.
-- [x] 6.2 Remove `--run-as-user` parameter parsing from `deploy/loongsuite-pilot-installer-inner.sh`.
-- [x] 6.3 Remove `fix_ownership()` function from installer scripts (no longer needed).
-- [x] 6.4 Update `cmd_uninstall()` fallback cleanup to use `sudo` for system-level systemd units and init.d scripts.
-- [x] 6.5 Mirror all changes to `deploy/loongsuite-pilot-installer-inner.sh`.
-
-## 7. Testing
-
-- [ ] 7.1 Manual test: install as non-root user with sudo access on a systemd-enabled Linux VM, verify `sudo -v` check passes, system-level unit is created via `sudo tee`, service starts and survives reboot.
-- [ ] 7.2 Manual test: install as non-root user for two different users, verify both services coexist.
-- [ ] 7.3 Manual test: install as non-root user without sudo access, verify nohup fallback with warning.
-- [ ] 7.4 Manual test: attempt install as `root` directly, verify rejection with clear message.
-- [ ] 7.5 Manual test: install on a non-systemd Linux environment, verify init.d via sudo.
-- [ ] 7.6 Manual test: uninstall, verify `sudo` cleanup of system-level units/init.d scripts.
-- [ ] 7.7 Manual test: upgrade from existing systemd-user install, verify new system-level units are created.
-- [ ] 7.8 Verify macOS behavior is completely unchanged.
+- [ ] 6.1 Manual test: install as non-root user (default), verify user-level systemd unit is created, service starts, `loginctl enable-linger` is attempted.
+- [ ] 6.2 Manual test: install with `--system-service`, verify sudo prompt, system-level unit created.
+- [ ] 6.3 Manual test: install as non-root without sudo + no `--system-service`, verify no sudo is ever invoked and user-level service works.
+- [ ] 6.4 Manual test: install as root, verify auto-escalation to system-level without sudo prefix.
+- [ ] 6.5 Manual test: stop/restart reads init-type marker correctly for both modes.
+- [ ] 6.6 Manual test: uninstall cleans up the correct service type.
+- [ ] 6.7 Verify macOS behavior is completely unchanged.
