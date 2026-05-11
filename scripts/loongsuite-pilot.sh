@@ -384,6 +384,14 @@ cmd_start() {
     fi
 
     # Fallback to nohup
+    echo "⚠️  No service manager available — using nohup fallback." >&2
+    echo "   Service will NOT auto-start on boot or survive session logout." >&2
+    case "$(uname -s)" in
+        Linux)
+            echo "   To fix: use '--system-service' (requires sudo) or enable systemd user session." >&2
+            ;;
+    esac
+
     local entry="$BOOTSTRAP_DIR/collector-daemon.js"
     if [ ! -f "$entry" ]; then
         echo "❌ Bootstrap script missing"
@@ -401,7 +409,7 @@ cmd_start() {
     local pid=$!
     echo "$pid" > "$PID_FILE"
     echo "nohup" > "$INIT_TYPE_FILE"
-    echo "✅ loongsuite-pilot started (PID $pid)"
+    echo "✅ loongsuite-pilot started (PID $pid, nohup)"
 
     # Also start the updater daemon if available
     local updater_entry="$BOOTSTRAP_DIR/updater-daemon.js"
@@ -1370,6 +1378,9 @@ autostart_status() {
             else
                 echo "   autostart: disabled"
             fi
+            ;;
+        nohup)
+            echo "   autostart: disabled (nohup fallback, no service manager)"
             ;;
         *)
             echo "   autostart: not available"

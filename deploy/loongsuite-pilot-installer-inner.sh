@@ -133,8 +133,8 @@ validate_install_user() {
                         "⚠️  No sudo access — cannot register system-level service. Using user-level systemd."
                 fi
             else
-                msg "   ℹ️  使用用户态 systemd 服务 (user: $current_user)" \
-                    "   ℹ️  Using user-level systemd service (user: $current_user)"
+                msg "   ℹ️  安装用户: $current_user（服务类型将在启动时检测）" \
+                    "   ℹ️  Install user: $current_user (service type determined at start)"
             fi
             ;;
     esac
