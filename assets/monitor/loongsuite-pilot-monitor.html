@@ -67,6 +67,21 @@
       font-size: 13px;
     }
 
+    .toolbar {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .refresh-select {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--fg);
+      padding: 5px 10px;
+      font-size: 12px;
+      outline: none;
+    }
+
     .dot {
       width: 9px;
       height: 9px;
@@ -314,6 +329,14 @@
       <div class="toolbar">
         <span id="status-dot" class="dot"></span>
         <span id="status-text">连接中...</span>
+        <label class="meta" for="refresh-select">
+          Refresh
+          <select id="refresh-select" class="refresh-select">
+            <option value="5000">5s</option>
+            <option value="10000" selected>10s</option>
+            <option value="20000">20s</option>
+          </select>
+        </label>
       </div>
     </header>
 
@@ -360,6 +383,7 @@
     <section class="section">
       <div class="panel">
         <h2>Recent Activity</h2>
+        <p id="timeline-window" class="subvalue" style="margin-bottom: 12px;">Showing latest 200 activities.</p>
         <div id="timeline" class="timeline"></div>
       </div>
     </section>
@@ -414,10 +438,17 @@
   <div id="chart-tooltip" class="chart-tooltip"></div>
 
   <script>
-    const REFRESH_MS = 15000;
+    const DEFAULT_REFRESH_MS = 10000;
     const MAX_POINTS = 240;
     const METRICS_WINDOW_MINUTES = 60;
-    const state = { rows: [], overview: null, metricsStatus: null, charts: new Map() };
+    const state = {
+      rows: [],
+      overview: null,
+      metricsStatus: null,
+      charts: new Map(),
+      refreshMs: DEFAULT_REFRESH_MS,
+      refreshTimer: null,
+    };
     const $ = (id) => document.getElementById(id);
 
     function parseCsvLine(line) {
@@ -538,7 +569,9 @@
       $('events-value').textContent = formatCount(overview.totals.eventsToday);
       $('tokens-value').textContent = formatCount(overview.totals.tokensToday);
       $('failures-value').textContent = formatCount(overview.totals.failedUploadsToday);
-      $('reporting-wording').textContent = overview.reporting.wording;
+      $('reporting-wording').textContent = overview.cache?.outputPartial
+        ? `${overview.reporting.wording} Indexing local output logs; today's totals may still be catching up.`
+        : overview.reporting.wording;
       $('reporting-channels').innerHTML = overview.reporting.channels.map((channel) => (
         `<span class="${badgeClass(channel.status)}">${escapeHtml(channel.label)}: ${escapeHtml(channel.message)}</span>`
       )).join('');
@@ -707,12 +740,31 @@
         if (metricsStatusResponse.ok) state.metricsStatus = await metricsStatusResponse.json();
         renderOverview(state.overview);
         renderCharts();
-        setStatus(true, `启动时间 ${formatDateTime(state.overview.monitorDashboardStartedAt)} · 最新刷新 ${formatTime(state.overview.generatedAt)} · 每 ${REFRESH_MS / 1000} 秒自动刷新`);
+        setStatus(true, `启动时间 ${formatDateTime(state.overview.monitorDashboardStartedAt)} · 最新刷新 ${formatTime(state.overview.generatedAt)} · 每 ${state.refreshMs / 1000} 秒自动刷新`);
         setNotice('');
       } catch (error) {
         setStatus(false, '读取失败');
         setNotice(error.message);
       }
+    }
+
+    function startRefreshTimer() {
+      if (state.refreshTimer) clearInterval(state.refreshTimer);
+      state.refreshTimer = setInterval(refresh, state.refreshMs);
+    }
+
+    function setupRefreshSelect() {
+      const select = $('refresh-select');
+      select.value = String(DEFAULT_REFRESH_MS);
+      select.addEventListener('change', () => {
+        const nextMs = Number(select.value);
+        if (!Number.isFinite(nextMs) || nextMs <= 0) return;
+        state.refreshMs = nextMs;
+        startRefreshTimer();
+        if (state.overview) {
+          setStatus(true, `启动时间 ${formatDateTime(state.overview.monitorDashboardStartedAt)} · 最新刷新 ${formatTime(state.overview.generatedAt)} · 每 ${state.refreshMs / 1000} 秒自动刷新`);
+        }
+      });
     }
 
     function escapeHtml(value) {
@@ -758,8 +810,9 @@
 
     window.addEventListener('resize', renderCharts);
     setupChartTooltips();
+    setupRefreshSelect();
     refresh();
-    setInterval(refresh, REFRESH_MS);
+    startRefreshTimer();
   </script>
 </body>
 </html>
