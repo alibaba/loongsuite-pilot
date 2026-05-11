@@ -17,12 +17,18 @@ import {
 import { normalizeE2eQoderPersonalAccessToken } from './lib/qoder-pat.mjs';
 import {
   buildRemoteCodexConfigSh,
+  buildRemoteClaudeOnboardingSkipSh,
+  buildRemoteClaudeProxyConfigSh,
   buildRemoteSecretExportsSh,
+  isE2eClaudeBailianEnabled,
+  resolveE2eClaudeProxyApiKey,
 } from './lib/remote-agent-config.mjs';
 import {
   loadAgentMatrix,
   buildEnsureAgentClisScript,
   buildMatrixProbeScript,
+  resolveE2eCursorInstallStrategy,
+  isE2eOldGlibcCursorHostProfile,
 } from './lib/agent-matrix.mjs';
 import { buildAgentProbeRemoteBody } from './lib/agent-probe-body.mjs';
 
@@ -136,6 +142,38 @@ function buildInstallSmokeAgentPhase(env) {
   const matrix = loadAgentMatrix(env);
   const ensure = shouldEnsureAgentClis(env, useMatrix);
 
+  if (env.E2E_WRITE_REMOTE_CODEX_CONFIG?.trim() === '1') {
+    console.log(
+      '[e2e] Codex remote config: writes Dashscope ~/.codex/config.toml (merges with existing file when hooks.json / config references otel-codex; use E2E_WRITE_REMOTE_CODEX_CONFIG_REPLACE=1 to force full replace). Then onboarding/proxy, ensure, codex exec — set E2E_CODEX_OPENAI_API_KEY (or E2E_OPENAI_API_KEY).',
+    );
+  }
+
+  if (useMatrix && env.E2E_CODEX_FORCE_ENSURE?.trim() === '1') {
+    console.warn(
+      '[e2e] Codex: E2E_CODEX_FORCE_ENSURE=1 reinstalls global @openai/codex. If Logstore stops showing codex events, leave this unset for normal runs, or re-run the pilot installer after reinstall. Shell snapshot errors (see Codex stderr) often come from ~/.bashrc — fix or simplify rc for headless probes.',
+    );
+  }
+
+  if (useMatrix && !env.E2E_CURSOR_INSTALL_STRATEGY?.trim()) {
+    const strat = resolveE2eCursorInstallStrategy(env);
+    if (strat === 'watzon' && isE2eOldGlibcCursorHostProfile(env)) {
+      console.log(
+        `[e2e] Cursor: E2E_PROFILE=${(env.E2E_PROFILE ?? 'linux-8u').trim()} → install strategy watzon (official Agent CLI needs newer glibc). Override with E2E_CURSOR_INSTALL_STRATEGY=official if the host is actually new enough.`,
+      );
+    }
+  }
+
+  if (useMatrix) {
+    const skipRaw = (env.E2E_CURSOR_SKIP_IF_INCOMPAT ?? '1').trim();
+    const skipOn = skipRaw !== '0';
+    console.log(
+      `[e2e] Cursor incompat-skip: E2E_CURSOR_SKIP_IF_INCOMPAT=${skipRaw || '1'} (${skipOn ? 'default: skip cursor probe on old-glibc hosts, exit 0' : 'strict: probe exits 78 when GLIBC too old'}).`,
+    );
+  }
+
+  const claudeBailianReady =
+    isE2eClaudeBailianEnabled(env) && Boolean(env.E2E_CLAUDE_BAILIAN_API_KEY?.trim());
+
   if (useMatrix && !normalizeE2eQoderPersonalAccessToken(env.E2E_QODER_PERSONAL_ACCESS_TOKEN)) {
     console.warn(
       '[e2e] Qoder: without E2E_QODER_PERSONAL_ACCESS_TOKEN the matrix skips qodercli -p (no model turn → usually nothing in Logstore).',
@@ -143,16 +181,33 @@ function buildInstallSmokeAgentPhase(env) {
   }
   if (
     useMatrix &&
+    !claudeBailianReady &&
     !env.E2E_ANTHROPIC_API_KEY?.trim() &&
     !env.E2E_CLAUDE_API_KEY?.trim()
   ) {
     console.warn(
-      '[e2e] Claude Code: without E2E_ANTHROPIC_API_KEY (or E2E_CLAUDE_API_KEY) remote `claude -p` stays “Not logged in”. Dashscope / E2E_OPENAI_API_KEY is for Codex only — Claude needs an Anthropic API key or interactive `/login`.',
+      '[e2e] Claude Code: without E2E_CLAUDE_BAILIAN + E2E_CLAUDE_BAILIAN_API_KEY, or E2E_ANTHROPIC_API_KEY / E2E_CLAUDE_API_KEY, remote `claude -p` often stays “Not logged in”. Codex uses CODEX_OPENAI_API_KEY only — not Anthropic.',
+    );
+  }
+  if (useMatrix && isE2eClaudeBailianEnabled(env) && !env.E2E_CLAUDE_BAILIAN_API_KEY?.trim()) {
+    console.warn(
+      '[e2e] Claude 百炼: E2E_CLAUDE_BAILIAN=1 but E2E_CLAUDE_BAILIAN_API_KEY is unset — remote will not get ANTHROPIC_BASE_URL /apps/anthropic.',
+    );
+  }
+  if (
+    useMatrix &&
+    env.E2E_WRITE_REMOTE_CLAUDE_PROXY_CONFIG?.trim() === '1' &&
+    !resolveE2eClaudeProxyApiKey(env)
+  ) {
+    console.warn(
+      '[e2e] Claude proxy file: E2E_WRITE_REMOTE_CLAUDE_PROXY_CONFIG=1 but E2E_CLAUDE_PROXY_API_KEY is unset — skipping ~/.config/claude-code-proxy/config.json.',
     );
   }
 
   let body = '';
   body += buildRemoteCodexConfigSh(env);
+  body += buildRemoteClaudeOnboardingSkipSh(env);
+  body += buildRemoteClaudeProxyConfigSh(env);
   if (ensure) {
     console.log(
       '[e2e] Ensuring agent-matrix CLIs on remote (set E2E_ENSURE_AGENT_CLIS=0 to skip; edit scripts/e2e/agent-matrix.json ensureInstallSh as needed)',
@@ -165,7 +220,7 @@ function buildInstallSmokeAgentPhase(env) {
     if (customProbe) {
       console.warn('[e2e] E2E_USE_MATRIX_PROBE=1 ignores E2E_AGENT_PROBE_CMD (uses agent-matrix.json defaultProbeSh)');
     }
-    body += buildMatrixProbeScript(matrix);
+    body += buildMatrixProbeScript(matrix, env);
     return body;
   }
 

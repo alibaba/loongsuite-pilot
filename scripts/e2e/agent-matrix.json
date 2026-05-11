@@ -1,5 +1,5 @@
 {
-  "description": "Agent matrix for remote E2E. Cursor ensure stages install.sh+lib.sh+cursor.sh in ~/.cache (jsDelivr + raw fallback) then bash ./install.sh stable --extract. Qoder -q -p needs QODER_PERSONAL_ACCESS_TOKEN — set E2E_QODER_PERSONAL_ACCESS_TOKEN locally.",
+  "description": "Remote E2E agent matrix. Cursor: official cursor.com/install (new glibc) unless E2E_PROFILE is linux-7u/alios7 (then default watzon AppImage) or E2E_CURSOR_INSTALL_STRATEGY=watzon|official. On hosts with too-old glibc, cursor is auto-skipped (E2E_CURSOR_SKIP_IF_INCOMPAT=1 default; set 0 to fail loudly). Codex: npm global; E2E_CODEX_FORCE_ENSURE=1 reinstalls global CLI (see run-remote-e2e warn re: Logstore). Qoder: E2E_QODER_PERSONAL_ACCESS_TOKEN.",
   "agents": [
     {
       "id": "codex-cli-latest",
@@ -7,7 +7,7 @@
       "binary": "codex",
       "versionArg": "--version",
       "slsAgentTypeHint": "codex",
-      "notes": "OpenAI Codex CLI; hooks installed by loongsuite-pilot installer.",
+      "notes": "OpenAI Codex CLI; hooks from loongsuite-pilot installer. Ensure command is built in agent-matrix.mjs from E2E_CODEX_NPM_SPEC (default @openai/codex). E2E_CODEX_FORCE_ENSURE=1 reinstalls even if codex exists. Config: E2E_WRITE_REMOTE_CODEX_CONFIG=1 + E2E_CODEX_OPENAI_API_KEY; run-remote-e2e writes ~/.codex/config.toml then runs ensure then probe.",
       "representativeVersions": ["latest", "rolling"],
       "ensureInstallSh": "npm install -g @openai/codex || echo '[e2e-ensure] npm install @openai/codex failed'",
       "defaultProbeSh": "command -v codex >/dev/null && codex exec \"你好\" --skip-git-repo-check < /dev/null || true",
@@ -22,7 +22,7 @@
       "representativeVersions": ["latest"],
       "ensureInstallSh": "npm install -g @anthropic-ai/claude-code || echo '[e2e-ensure] npm install claude-code failed'",
       "defaultProbeSh": "command -v claude >/dev/null && claude -p \"你好\" --dangerously-skip-permissions || true",
-      "installHint": "claude -p needs login or ANTHROPIC_API_KEY; expect Not logged in until configured."
+      "installHint": "Headless: E2E_WRITE_REMOTE_CLAUDE_ONBOARDING_SKIP=1 + E2E_CLAUDE_BAILIAN=1 + E2E_CLAUDE_BAILIAN_API_KEY (…/apps/anthropic). Optional: E2E_WRITE_REMOTE_CLAUDE_PROXY_CONFIG + E2E_CLAUDE_PROXY_API_KEY for claude-code-proxy. Legacy: E2E_ANTHROPIC_API_KEY."
     },
     {
       "id": "cursor-cli",
@@ -30,11 +30,11 @@
       "binary": "cursor",
       "versionArg": "--version",
       "slsAgentTypeHint": "cursor-hook",
-      "notes": "ensureInstallSh is generated in code (jsDelivr+raw GitHub, --extract). Primary SLS is often cursor-hook from IDE, not CLI --version.",
+      "notes": "Default ensure: official cursor.com/install (Agent CLI). E2E_CURSOR_INSTALL_STRATEGY=watzon for watzon AppImage extract. Probe runs --version on AppImage / PATH cursor / cursor-agent / agent; if the binary fails with GLIBC_/not found, it emits '[e2e-probe] cursor skipped: host glibc too old' and exits 0 when E2E_CURSOR_SKIP_IF_INCOMPAT=1 (default), or exit 78 when =0.",
       "representativeVersions": ["latest"],
       "ensureInstallSh": "",
-      "defaultProbeSh": "_CX=\"$HOME/.local/share/cursor/cursor/usr/bin/cursor\"; _CX2=\"$HOME/.cursor/cursor/usr/bin/cursor\"; if command -v cursor >/dev/null 2>&1; then cursor --version 2>&1 || true; elif [ -x \"$_CX\" ]; then \"$_CX\" --version 2>&1 || true; elif [ -x \"$_CX2\" ]; then \"$_CX2\" --version 2>&1 || true; elif command -v cursor-installer >/dev/null 2>&1; then echo \"[e2e-probe] no cursor on PATH or extracted usr/bin; cursor-installer:\"; cursor-installer --version 2>/dev/null || true; else echo \"[e2e-probe] neither cursor nor cursor-installer on PATH\"; fi",
-      "installHint": "Override with E2E_CURSOR_ENSURE_INSTALL_SH or apt (cursor.com/docs)."
+      "defaultProbeSh": "set +e; _SKIP=\"${_E2E_CURSOR_SKIP_IF_INCOMPAT:-1}\"; _FAIL_CODE=78; _run_check() { _b=\"$1\"; [ -n \"$_b\" ] || return 99; _out=$(\"$_b\" --version </dev/null 2>&1); _rc=$?; if [ \"$_rc\" -eq 0 ]; then printf '%s\\n' \"$_out\"; return 0; fi; case \"$_out\" in *GLIBC_*|*\"not found\"*|*\"No such file or directory\"*|*\"cannot execute\"*) echo \"[e2e-probe] cursor skipped: host glibc too old (binary=$_b)\"; return 2;; esac; echo \"[e2e-probe] cursor probe failed rc=$_rc for $_b: $_out\"; return 1; }; _finish() { case \"$1\" in 0) exit 0;; *) if [ \"$_SKIP\" = \"1\" ]; then exit 0; else exit \"$_FAIL_CODE\"; fi;; esac; }; _CX=\"$HOME/.local/share/cursor/cursor/usr/bin/cursor\"; _CX2=\"$HOME/.cursor/cursor/usr/bin/cursor\"; if [ -x \"$_CX\" ]; then echo \"[e2e-probe] AppImage (~/.local/share/cursor):\"; _run_check \"$_CX\"; _finish $?; fi; if [ -x \"$_CX2\" ]; then echo \"[e2e-probe] AppImage (~/.cursor):\"; _run_check \"$_CX2\"; _finish $?; fi; if command -v cursor >/dev/null 2>&1; then echo \"[e2e-probe] cursor (PATH):\"; _run_check \"$(command -v cursor)\"; _finish $?; fi; if [ -x \"$HOME/.local/bin/cursor-agent\" ]; then echo \"[e2e-probe] cursor-agent (~/.local/bin):\"; _run_check \"$HOME/.local/bin/cursor-agent\"; _finish $?; fi; if command -v cursor-agent >/dev/null 2>&1; then echo \"[e2e-probe] cursor-agent (PATH):\"; _run_check \"$(command -v cursor-agent)\"; _finish $?; fi; if [ -x \"$HOME/.local/bin/agent\" ]; then echo \"[e2e-probe] agent (~/.local/bin):\"; _run_check \"$HOME/.local/bin/agent\"; _finish $?; fi; if command -v agent >/dev/null 2>&1; then echo \"[e2e-probe] agent (PATH):\"; _run_check \"$(command -v agent)\"; _finish $?; fi; if command -v cursor-installer >/dev/null 2>&1; then echo \"[e2e-probe] cursor-installer:\"; cursor-installer --version 2>/dev/null || true; exit 0; fi; echo \"[e2e-probe] no agent/cursor/cursor-installer on PATH\"; exit 0",
+      "installHint": "Default: official Agent installer (cursor.com/install). Full IDE AppImage: E2E_CURSOR_INSTALL_STRATEGY=watzon or E2E_CURSOR_ENSURE_INSTALL_SH. APT: downloads.cursor.com/aptrepo (needs sudo). On old-glibc hosts (CentOS/AliOS 7) both strategies may ship a binary that cannot run; ensure/probe auto-skip with E2E_CURSOR_SKIP_IF_INCOMPAT=1 (default) or fail loudly with =0."
     },
     {
       "id": "qoder-cli",
