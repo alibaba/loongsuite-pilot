@@ -107,6 +107,9 @@ export function buildEnsureAgentClisScript(matrix, env = process.env) {
 
   const extra = env.E2E_EXTRA_ENSURE_BASH?.trim();
   if (extra) {
+    if (extra.length > 10_000) {
+      console.warn('[e2e] E2E_EXTRA_ENSURE_BASH exceeds 10 000 chars — verify no accidental injection');
+    }
     lines.push('# E2E_EXTRA_ENSURE_BASH');
     lines.push(extra);
   }

@@ -42,5 +42,5 @@ export function buildAgentProbeRemoteBody(probeCmd) {
  */
 export function wrapInBase64Bash(bashSnippet) {
   const b64 = Buffer.from(`${bashSnippet}\n`, 'utf8').toString('base64');
-  return `printf '%s' '${b64}' | base64 -d | bash --norc --noprofile -s || true`;
+  return `printf '%s' '${b64}' | base64 -d | bash --norc --noprofile -s`;
 }

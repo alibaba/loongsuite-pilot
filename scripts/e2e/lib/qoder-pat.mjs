@@ -8,9 +8,9 @@ export function normalizeE2eQoderPersonalAccessToken(raw) {
   if (!s) return '';
   if (/^bearer\s+/i.test(s)) s = s.replace(/^bearer\s+/i, '').trim();
   if (s.length >= 2) {
-    const q = s[0];
-    if ((q === '"' || q === "'") && s.endsWith(q)) {
-      s = s.slice(1, -1).replace(/\r/g, '').trim();
+    const quoteChar = s[0];
+    if ((quoteChar === '"' || quoteChar === "'") && s.endsWith(quoteChar)) {
+      s = s.slice(1, -1);
     }
   }
   return s;

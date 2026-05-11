@@ -18,10 +18,6 @@ import * as path from 'node:path';
 export const REMOTE_SCRIPT_VIA_BASE64 = 'base64 -d | exec bash --norc --noprofile -s';
 
 /**
- * @param {NodeJS.ProcessEnv} env
- * @returns {string}
- */
-/**
  * @param {string | undefined} identity
  * @returns {string | undefined}
  */
@@ -81,7 +77,7 @@ export function buildSshArgs(target, identity, interactivePassword, env = proces
   const remoteTty = env.E2E_SSH_REMOTE_TTY?.trim().toLowerCase();
   if (interactivePassword && ['1', 'true', 'yes'].includes(remoteTty ?? '')) args.push('-tt');
   if (!interactivePassword) args.push('-o', 'BatchMode=yes');
-  args.push('-o', 'StrictHostKeyChecking=accept-new');
+  args.push('-o', 'StrictHostKeyChecking=accept-new'); // E2E dev hosts: accept unknown keys automatically
   if (identity) args.push('-i', identity);
   if (interactivePassword) args.push(target, REMOTE_SCRIPT_VIA_BASE64);
   else args.push(target, 'bash', '-s');
@@ -103,11 +99,17 @@ export async function runSshRemoteScript(opts) {
   const identity = resolveSshIdentity(opts.identity);
   const interactivePassword = isSshInteractivePasswordEnv();
   const args = buildSshArgs(target, identity, interactivePassword, process.env);
+  const timeoutMs = parseInt(process.env.E2E_SSH_TIMEOUT_MS ?? '', 10) || 600_000;
+  const ac = new AbortController();
+  const timer = setTimeout(() => {
+    ac.abort();
+    console.warn(`[e2e] ssh: timeout after ${timeoutMs}ms — killing subprocess`);
+  }, timeoutMs);
 
   /** @type {import('node:child_process').SpawnOptions} */
   const spawnOpts = interactivePassword
-    ? { stdio: ['pipe', 'inherit', 'inherit'] }
-    : { stdio: ['pipe', 'pipe', 'pipe'] };
+    ? { stdio: ['pipe', 'inherit', 'inherit'], signal: ac.signal }
+    : { stdio: ['pipe', 'pipe', 'pipe'], signal: ac.signal };
 
   const proc = spawn('ssh', args, spawnOpts);
   if (interactivePassword) proc.stdin?.write(Buffer.from(script, 'utf8').toString('base64'));
@@ -117,21 +119,19 @@ export async function runSshRemoteScript(opts) {
   let stdout = '';
   let stderr = '';
   if (!interactivePassword) {
-    proc.stdout?.on('data', c => {
-      stdout += c.toString();
-    });
-    proc.stderr?.on('data', c => {
-      stderr += c.toString();
-    });
+    proc.stdout?.on('data', c => { stdout += c.toString(); });
+    proc.stderr?.on('data', c => { stderr += c.toString(); });
   } else {
-    stdout = '';
-    stderr =
-      '(stdout/stderr streamed to terminal; not captured when E2E_SSH_PASSWORD_AUTH / batch-mode-off is enabled)';
+    stderr = '(stdout/stderr streamed to terminal; not captured when E2E_SSH_PASSWORD_AUTH / batch-mode-off is enabled)';
   }
 
   const code = await new Promise((resolve, reject) => {
-    proc.on('error', reject);
-    proc.on('close', resolve);
+    proc.on('error', err => {
+      clearTimeout(timer);
+      if (err.name === 'AbortError' || /** @type {any} */ (err).code === 'ABORT_ERR') resolve(124);
+      else reject(err);
+    });
+    proc.on('close', c => { clearTimeout(timer); resolve(c); });
   });
 
   if (artifactDir && (code !== 0 || process.env.E2E_ALWAYS_COLLECT === '1')) {

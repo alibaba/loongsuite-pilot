@@ -225,7 +225,10 @@ export function buildRemoteClaudeOnboardingSkipSh(env = process.env) {
 export function buildRemoteClaudeProxyConfigSh(env = process.env) {
   if (env.E2E_WRITE_REMOTE_CLAUDE_PROXY_CONFIG?.trim() !== '1') return '';
   const apiKey = resolveE2eClaudeProxyApiKey(env);
-  if (!apiKey) return '';
+  if (!apiKey) {
+    console.warn('[e2e] Claude proxy file: E2E_WRITE_REMOTE_CLAUDE_PROXY_CONFIG=1 but E2E_CLAUDE_PROXY_API_KEY is unset — skipping ~/.config/claude-code-proxy/config.json.');
+    return '';
+  }
   const baseURL =
     env.E2E_CLAUDE_PROXY_BASE_URL?.trim() ||
     'https://dashscope.aliyuncs.com/compatible-mode/v1';
