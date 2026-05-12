@@ -115,6 +115,7 @@ wire_api = "${esc(wireApi)}"
 
 [features]
 hooks = true
+shell_snapshot = false
 `;
   const b64 = Buffer.from(`${toml}\n`, 'utf8').toString('base64');
   const forceReplace = env.E2E_WRITE_REMOTE_CODEX_CONFIG_REPLACE?.trim() === '1' ? '1' : '0';
@@ -140,6 +141,7 @@ hooks = true
     "function stripForMerge(text) {",
     "  const lines = text.split('\\n');",
     "  const res = [];",
+    "  const seenHookState = new Set();",
     "  let i = 0;",
     "  while (i < lines.length) {",
     "    const line = lines[i];",
@@ -153,6 +155,15 @@ hooks = true
     "    if (/^\\[features\\]/.test(line)) {",
     "      i++;",
     "      while (i < lines.length && !/^\\[[^\\]]+\\]/.test(lines[i])) i++;",
+    "      continue;",
+    "    }",
+    "    const hs = line.match(/^\\[hooks\\.state\\.(\".*?\"|[^\\]]+)\\]/);",
+    "    if (hs) {",
+    "      const key = hs[1];",
+    "      const dup = seenHookState.has(key);",
+    "      if (!dup) { seenHookState.add(key); res.push(line); }",
+    "      i++;",
+    "      while (i < lines.length && !/^\\[[^\\]]+\\]/.test(lines[i])) { if (!dup) res.push(lines[i]); i++; }",
     "      continue;",
     "    }",
     "    res.push(line);",

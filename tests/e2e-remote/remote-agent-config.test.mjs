@@ -35,6 +35,7 @@ describe('remote-agent-config', () => {
     expect(toml).toContain('dashscope.aliyuncs.com');
     expect(toml).toContain('env_key = "CODEX_OPENAI_API_KEY"');
     expect(toml).toContain('hooks = true');
+    expect(toml).toContain('shell_snapshot = false');
     expect(toml).not.toContain('codex_hooks');
   });
 
@@ -103,5 +104,20 @@ describe('remote-agent-config', () => {
     const cfg = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
     expect(cfg.apiKey).toBe('proxy-k');
     expect(cfg.baseURL).toContain('compatible-mode');
+  });
+
+  it('buildRemoteCodexConfigSh merge node script dedupes [hooks.state."..."] duplicates', () => {
+    const sh = buildRemoteCodexConfigSh({ E2E_WRITE_REMOTE_CODEX_CONFIG: '1' });
+    const m = sh.match(/'([A-Za-z0-9+/=]{200,})'/g) || [];
+    const decoded = m
+      .map(x => x.replace(/'/g, ''))
+      .map(b64 => {
+        try { return Buffer.from(b64, 'base64').toString('utf8'); } catch { return ''; }
+      })
+      .join('\n');
+    expect(decoded).toContain('seenHookState');
+    expect(decoded).toContain('hooks\\.state\\.');
+    expect(decoded).toContain('seenHookState.has');
+    expect(decoded).toContain('seenHookState.add');
   });
 });

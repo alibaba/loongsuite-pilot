@@ -1,5 +1,5 @@
 {
-  "description": "Remote E2E agent matrix. Cursor: official cursor.com/install (new glibc) unless E2E_PROFILE is linux-7u/alios7 (then default watzon AppImage) or E2E_CURSOR_INSTALL_STRATEGY=watzon|official. On hosts with too-old glibc, cursor is auto-skipped (E2E_CURSOR_SKIP_IF_INCOMPAT=1 default; set 0 to fail loudly). Codex: npm global; E2E_CODEX_FORCE_ENSURE=1 reinstalls global CLI (see run-remote-e2e warn re: Logstore). Qoder: E2E_QODER_PERSONAL_ACCESS_TOKEN.",
+  "description": "Remote E2E agent matrix. npmPackage 字段用于 E2E_SCENARIO=version-matrix 场景：远端 `npm view <pkg> versions --json` 拉最近 N 个版本串行测试。Cursor: official cursor.com/install (new glibc) unless E2E_PROFILE is linux-7u/alios7 (then default watzon AppImage) or E2E_CURSOR_INSTALL_STRATEGY=watzon|official. On hosts with too-old glibc, cursor is auto-skipped (E2E_CURSOR_SKIP_IF_INCOMPAT=1 default; set 0 to fail loudly). Codex: npm global; E2E_CODEX_FORCE_ENSURE=1 reinstalls global CLI (see run-remote-e2e warn re: Logstore). Qoder: E2E_QODER_PERSONAL_ACCESS_TOKEN.",
   "agents": [
     {
       "id": "codex-cli-latest",
@@ -8,6 +8,7 @@
       "versionArg": "--version",
       "slsAgentTypeHint": "codex",
       "notes": "OpenAI Codex CLI; hooks from loongsuite-pilot installer. Ensure command is built in agent-matrix.mjs from E2E_CODEX_NPM_SPEC (default @openai/codex). E2E_CODEX_FORCE_ENSURE=1 reinstalls even if codex exists. Config: E2E_WRITE_REMOTE_CODEX_CONFIG=1 + E2E_CODEX_OPENAI_API_KEY; run-remote-e2e writes ~/.codex/config.toml then runs ensure then probe.",
+      "npmPackage": "@openai/codex",
       "representativeVersions": ["latest", "rolling"],
       "ensureInstallSh": "npm install -g @openai/codex || echo '[e2e-ensure] npm install @openai/codex failed'",
       "defaultProbeSh": "command -v codex >/dev/null && codex exec \"你好\" --skip-git-repo-check < /dev/null || true",
@@ -19,6 +20,7 @@
       "binary": "claude",
       "versionArg": "--version",
       "slsAgentTypeHint": "claude-code",
+      "npmPackage": "@anthropic-ai/claude-code",
       "representativeVersions": ["latest"],
       "ensureInstallSh": "npm install -g @anthropic-ai/claude-code || echo '[e2e-ensure] npm install claude-code failed'",
       "defaultProbeSh": "command -v claude >/dev/null && claude -p \"你好\" --dangerously-skip-permissions || true",
@@ -43,9 +45,10 @@
       "versionArg": "--version",
       "slsAgentTypeHint": "qoder-cli-hook",
       "notes": "Hook input watches ~/.loongsuite-pilot/logs/qoder-cli/history; qoder-cli-session reads ~/.qoder/logs/sessions. Print probe uses qodercli -q -p (needs token).",
+      "npmPackage": "@qoder-ai/qodercli",
       "representativeVersions": ["latest"],
       "ensureInstallSh": "npm install -g @qoder-ai/qodercli && mkdir -p \"$HOME/.local/bin\" && ( command -v qoder >/dev/null || ( command -v qodercli >/dev/null && ln -sf \"$(command -v qodercli)\" \"$HOME/.local/bin/qoder\" ) ) || echo '[e2e-ensure] qoder npm/symlink failed'",
-      "defaultProbeSh": "Q=\"$(command -v qodercli 2>/dev/null || command -v qoder 2>/dev/null)\"; [ -z \"$Q\" ] && exit 0; mkdir -p \"$HOME/.qoder\"; if [ -z \"${QODER_PERSONAL_ACCESS_TOKEN:-}\" ]; then echo \"[e2e-probe] QODER_PERSONAL_ACCESS_TOKEN unset — set E2E_QODER_PERSONAL_ACCESS_TOKEN on **local** npm env to inject for qodercli -p\"; exit 0; fi; \"$Q\" -q -p \"你好\" --max-turns 1 --yolo -w \"$HOME\" </dev/null || true",
+      "defaultProbeSh": "Q=\"$(command -v qodercli 2>/dev/null || command -v qoder 2>/dev/null)\"\n[ -z \"$Q\" ] && exit 0\nmkdir -p \"$HOME/.qoder\"\nif [ -z \"${QODER_PERSONAL_ACCESS_TOKEN:-}\" ]; then\n  echo \"[e2e-probe] QODER_PERSONAL_ACCESS_TOKEN unset — set E2E_QODER_PERSONAL_ACCESS_TOKEN on **local** npm env to inject for qodercli -p\"\n  exit 0\nfi\n_VER_RAW=\"$(\"$Q\" --version 2>&1 | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -1)\"\n_MAJ=\"${_VER_RAW%%.*}\"\n_REST=\"${_VER_RAW#*.}\"\n_MIN=\"${_REST%%.*}\"\n_PATCH=\"${_REST##*.}\"\n_IS_NEW=0\nif [ \"${_MAJ:-0}\" -gt 0 ] 2>/dev/null; then _IS_NEW=1\nelif [ \"${_MAJ:-0}\" = \"0\" ] && [ \"${_MIN:-0}\" -gt 2 ] 2>/dev/null; then _IS_NEW=1\nelif [ \"${_MAJ:-0}\" = \"0\" ] && [ \"${_MIN:-0}\" = \"2\" ] && [ \"${_PATCH:-0}\" -ge 12 ] 2>/dev/null; then _IS_NEW=1\nfi\nif [ \"$_IS_NEW\" = \"1\" ]; then\n  \"$Q\" --print --yolo --cwd \"$HOME\" \"你好\" </dev/null || true\nelse\n  \"$Q\" -p \"你好\" --max-turns 1 --yolo -w \"$HOME\" </dev/null || true\nfi",
       "installHint": "Logstore needs a real model turn; --version alone emits nothing. Use PAT via E2E_QODER_PERSONAL_ACCESS_TOKEN."
     }
   ]

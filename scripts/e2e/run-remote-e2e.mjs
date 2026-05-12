@@ -31,6 +31,13 @@ import {
   isE2eOldGlibcCursorHostProfile,
 } from './lib/agent-matrix.mjs';
 import { buildAgentProbeRemoteBody } from './lib/agent-probe-body.mjs';
+import {
+  rebootAutostartScript,
+  postRebootVerificationScript,
+  multiAccountInstallScript,
+  autoUpgradeScript,
+  versionMatrixScript,
+} from './lib/e2e-scenarios.mjs';
 
 const DEFAULT_INSTALLER_URL =
   'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite/loongsuite-pilot/loongsuite-pilot-installer-inner.sh';
@@ -236,6 +243,7 @@ async function main() {
   const artifactDir = env.E2E_ARTIFACT_DIR?.trim() || undefined;
   const installerUrl = (env.E2E_INSTALLER_URL ?? DEFAULT_INSTALLER_URL).trim();
   const userId = env.E2E_USER_ID?.trim();
+  const userIds = env.E2E_USER_IDS?.trim();
   const profile = (env.E2E_PROFILE ?? 'linux-8u').trim().toLowerCase();
 
   console.log(`[e2e] scenario=${scenario} target=${target} profile=${profile}`);
@@ -248,8 +256,13 @@ async function main() {
     }
   }
 
-  if (scenario === 'install-smoke' && !userId) {
-    console.error('E2E_USER_ID is required for install-smoke');
+  if ((scenario === 'install-smoke' || scenario === 'reboot-autostart' || scenario === 'auto-upgrade') && !userId) {
+    console.error('E2E_USER_ID is required for install-smoke, reboot-autostart, and auto-upgrade');
+    process.exit(2);
+  }
+
+  if (scenario === 'multi-account' && !userIds) {
+    console.error('E2E_USER_IDS (comma-separated) is required for multi-account scenario');
     process.exit(2);
   }
 
@@ -267,8 +280,58 @@ async function main() {
     remoteBody = `${bootstrap}\n${installSmokeScript(installerUrl, userId ?? '', env)}`;
   } else if (scenario === 'uninstall') {
     remoteBody = uninstallScript(installerUrl);
+  } else if (scenario === 'reboot-autostart') {
+    remoteBody = rebootAutostartScript(installerUrl, userId ?? '', env);
+  } else if (scenario === 'post-reboot-verify') {
+    remoteBody = postRebootVerificationScript();
+  } else if (scenario === 'multi-account') {
+    remoteBody = multiAccountInstallScript(installerUrl, userIds ?? '', env);
+  } else if (scenario === 'auto-upgrade') {
+    const bootstrap = needsLinux7Bootstrap(profile) ? linux7uBootstrapScript() : '';
+    remoteBody = `${bootstrap}\n${autoUpgradeScript(installerUrl, userId ?? '', env)}`;
+  } else if (scenario === 'version-matrix') {
+    const vmMatrix = loadAgentMatrix(env);
+    // 如果设了 E2E_USER_ID，version-matrix 会自动重装 pilot + SLS 配置，确保 Logstore 有数据
+    if (!env.E2E_USER_ID?.trim()) {
+      console.warn(
+        '[e2e] version-matrix: E2E_USER_ID 未设 — 跳过 pilot (re-)install + SLS 注入。如果要在 SLS 端看到数据，请配 E2E_USER_ID (+ E2E_SLS_PROJECT / E2E_SLS_LOGSTORE / AK/SK)。',
+      );
+    } else if (!shouldPropagateSlsToRemoteInstall(env)) {
+      console.warn(
+        '[e2e] version-matrix: E2E_USER_ID 已设但 E2E_SLS_PROJECT / E2E_SLS_LOGSTORE 未配 — pilot 会重装但不带 SLS destinationOverride，可能依赖已有配置。',
+      );
+    }
+    // 复用 install-smoke 的友情提示：agent 鉴权 / onboarding / 百炼 / qoder PAT
+    if (!env.E2E_CODEX_OPENAI_API_KEY?.trim() && !env.E2E_OPENAI_API_KEY?.trim()) {
+      console.warn(
+        '[e2e] version-matrix: E2E_CODEX_OPENAI_API_KEY unset — codex exec 会报无效密钥/401，采不到模型回合。建议配 E2E_CODEX_OPENAI_API_KEY (+ E2E_WRITE_REMOTE_CODEX_CONFIG=1)。',
+      );
+    }
+    const claudeBailianReady =
+      isE2eClaudeBailianEnabled(env) && Boolean(env.E2E_CLAUDE_BAILIAN_API_KEY?.trim());
+    if (
+      !claudeBailianReady &&
+      !env.E2E_ANTHROPIC_API_KEY?.trim() &&
+      !env.E2E_CLAUDE_API_KEY?.trim()
+    ) {
+      console.warn(
+        '[e2e] version-matrix: Claude Code 未配百炼 / Anthropic Key — 运行时 `claude -p` 会 “Not logged in”。推荐 E2E_CLAUDE_BAILIAN=1 + E2E_CLAUDE_BAILIAN_API_KEY + E2E_WRITE_REMOTE_CLAUDE_ONBOARDING_SKIP=1。',
+      );
+    }
+    if (env.E2E_WRITE_REMOTE_CLAUDE_PROXY_CONFIG?.trim() === '1' && !resolveE2eClaudeProxyApiKey(env)) {
+      console.warn(
+        '[e2e] version-matrix: E2E_WRITE_REMOTE_CLAUDE_PROXY_CONFIG=1 但 E2E_CLAUDE_PROXY_API_KEY 未设 — 跳过 ~/.config/claude-code-proxy/config.json。',
+      );
+    }
+    if (!normalizeE2eQoderPersonalAccessToken(env.E2E_QODER_PERSONAL_ACCESS_TOKEN)) {
+      console.warn(
+        '[e2e] version-matrix: E2E_QODER_PERSONAL_ACCESS_TOKEN 未设 — qodercli -p 会直接跳过（无模型回合）；这不影响 install/uninstall，但 Logstore 不会有 qoder-cli 数据。',
+      );
+    }
+    remoteBody = versionMatrixScript(vmMatrix, env);
   } else {
     console.error(`Unknown E2E_SCENARIO: ${scenario}`);
+    console.error('Supported scenarios: preflight, install-smoke, uninstall, reboot-autostart, post-reboot-verify, multi-account, auto-upgrade, version-matrix');
     process.exit(2);
   }
 
@@ -281,6 +344,22 @@ async function main() {
     script: remoteBody,
   });
   if (r.code !== 0) {
+    // Reboot 场景下，SSH 被远端 sshd 关闭导致的异常断开会返回非 0 退出码（通常 255）
+    // 并伴随 'Connection reset by peer' / 'Broken pipe'。只要远端执行中已确认进入 reboot 流程，
+    // 就视为成功。
+    if (scenario === 'reboot-autostart') {
+      const combined = `${r.stdout || ''}\n${r.stderr || ''}`;
+      const rebootScheduled = /Reboot scheduled|Triggering reboot \(SSH will disconnect/.test(combined);
+      const sshDisconnected = /Connection reset by peer|Broken pipe|client_loop: send disconnect/.test(combined);
+      if (rebootScheduled || sshDisconnected) {
+        console.log('[e2e] reboot-autostart: remote reboot triggered (SSH disconnect is EXPECTED).');
+        if (r.stdout?.trim()) console.log(r.stdout);
+        console.log('\nℹ  Wait ~30s for the host to come back online, then run:');
+        console.log('    export E2E_SCENARIO=post-reboot-verify');
+        console.log('    npm run test:e2e:remote');
+        process.exit(0);
+      }
+    }
     console.error(r.stderr || r.stdout);
     if (artifactDir && target) await collectRemoteDiagnostics({ target, identity, artifactDir });
     process.exit(r.code ?? 1);
