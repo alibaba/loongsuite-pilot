@@ -606,57 +606,33 @@ install_otel_plugin() {
         local hook_install_args="$7"
 
         local tarball_path="$PERMANENT_DIR/plugins/$tarball_name"
-        local need_install=1
 
-        # --- Phase 1: Package install (version-gated) ---
+        # --- Phase 1: Clean install (always reinstall from tarball) ---
         if [ -f "$tarball_path" ]; then
-            # Extract bundled version from tarball
-            local bundled_ver=""
-            bundled_ver=$("$NODE_BIN" -e "
-                const tar = require('child_process');
-                const r = tar.execSync('tar -xzf \"$tarball_path\" --include=\"*/package.json\" -O 2>/dev/null || tar -xzf \"$tarball_path\" -O \"package.json\" 2>/dev/null', {encoding:'utf-8',shell:true});
-                try { console.log(JSON.parse(r).version || ''); } catch { console.log(''); }
-            " 2>/dev/null || echo "")
+            msg "  · 安装 $plugin_label..." \
+                "  · Installing $plugin_label..."
+            rm -rf "$dest_dir"
+            mkdir -p "$dest_dir"
+            if tar --warning=no-unknown-keyword -xzf "$tarball_path" -C "$dest_dir" 2>/dev/null; then :
+            else tar -xzf "$tarball_path" -C "$dest_dir"; fi
 
-            # Read installed version
-            local installed_ver=""
-            if [ -f "$dest_dir/package.json" ]; then
-                installed_ver=$("$NODE_BIN" -e "
-                    try { console.log(require('$dest_dir/package.json').version || ''); } catch { console.log(''); }
-                " 2>/dev/null || echo "")
+            cd "$dest_dir"
+            if ! "$NPM_BIN" install --silent 2>/tmp/otel-plugin-npm-err.log; then
+                msg "  ⚠️  npm install 失败（不影响其他功能）" \
+                    "  ⚠️  npm install failed (non-blocking)"
+                return 0
             fi
 
-            if [ -n "$bundled_ver" ] && [ "$bundled_ver" = "$installed_ver" ]; then
-                msg "  · $plugin_label 版本相同 ($installed_ver)，跳过安装" \
-                    "  · $plugin_label version unchanged ($installed_ver), skipping install"
-                need_install=0
-            fi
-
-            if [ "$need_install" -eq 1 ]; then
-                msg "  · 安装 $plugin_label${bundled_ver:+ v$bundled_ver}..." \
-                    "  · Installing $plugin_label${bundled_ver:+ v$bundled_ver}..."
-                mkdir -p "$dest_dir"
-                if tar --warning=no-unknown-keyword -xzf "$tarball_path" -C "$dest_dir" 2>/dev/null; then :
-                else tar -xzf "$tarball_path" -C "$dest_dir"; fi
-
-                cd "$dest_dir"
-                if ! "$NPM_BIN" install --silent 2>/tmp/otel-plugin-npm-err.log; then
-                    msg "  ⚠️  npm install 失败（不影响其他功能）" \
-                        "  ⚠️  npm install failed (non-blocking)"
-                    return 0
-                fi
-
-                if "$NPM_BIN" install -g . --silent 2>/dev/null; then :
-                elif "$NPM_BIN" link --silent 2>/dev/null; then :
-                else
-                    local local_bin="$HOME/.local/bin"
-                    mkdir -p "$local_bin"
-                    cat > "$local_bin/$hook_cmd" << WRAPPER
+            if "$NPM_BIN" install -g . --silent 2>/dev/null; then :
+            elif "$NPM_BIN" link --silent 2>/dev/null; then :
+            else
+                local local_bin="$HOME/.local/bin"
+                mkdir -p "$local_bin"
+                cat > "$local_bin/$hook_cmd" << WRAPPER
 #!/usr/bin/env bash
 exec "$NODE_BIN" "$dest_dir/bin/$hook_cmd" "\$@"
 WRAPPER
-                    chmod +x "$local_bin/$hook_cmd"
-                fi
+                chmod +x "$local_bin/$hook_cmd"
             fi
 
         elif [ -n "$remote_url" ]; then
