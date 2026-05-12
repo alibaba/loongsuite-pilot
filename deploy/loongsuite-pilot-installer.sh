@@ -498,6 +498,8 @@ install_loongsuite_pilot_command() {
                 return 0
             fi
             if grep -q '\.local/bin' "$file" 2>/dev/null; then return 0; fi
+            # Ensure file ends with a newline before appending
+            [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
             cat >> "$file" << 'PATHBLOCK'
 
 # loongsuite-pilot: add ~/.local/bin to PATH
@@ -603,42 +605,58 @@ install_otel_plugin() {
         local remote_url="$6"
         local hook_install_args="$7"
 
-        if [ -f "$marker_file" ]; then
-            msg "  · $plugin_label 已存在，跳过" \
-                "  · $plugin_label already installed, skipping"
-            return 0
-        fi
-
         local tarball_path="$PERMANENT_DIR/plugins/$tarball_name"
+        local need_install=1
 
+        # --- Phase 1: Package install (version-gated) ---
         if [ -f "$tarball_path" ]; then
-            mkdir -p "$dest_dir"
-            if tar --warning=no-unknown-keyword -xzf "$tarball_path" -C "$dest_dir" 2>/dev/null; then :
-            else tar -xzf "$tarball_path" -C "$dest_dir"; fi
+            # Extract bundled version from tarball
+            local bundled_ver=""
+            bundled_ver=$("$NODE_BIN" -e "
+                const tar = require('child_process');
+                const r = tar.execSync('tar -xzf \"$tarball_path\" --include=\"*/package.json\" -O 2>/dev/null || tar -xzf \"$tarball_path\" -O \"package.json\" 2>/dev/null', {encoding:'utf-8',shell:true});
+                try { console.log(JSON.parse(r).version || ''); } catch { console.log(''); }
+            " 2>/dev/null || echo "")
 
-            cd "$dest_dir"
-            if ! "$NPM_BIN" install --silent 2>/tmp/otel-plugin-npm-err.log; then
-                msg "  ⚠️  npm install 失败（不影响其他功能）" \
-                    "  ⚠️  npm install failed (non-blocking)"
-                return 0
+            # Read installed version
+            local installed_ver=""
+            if [ -f "$dest_dir/package.json" ]; then
+                installed_ver=$("$NODE_BIN" -e "
+                    try { console.log(require('$dest_dir/package.json').version || ''); } catch { console.log(''); }
+                " 2>/dev/null || echo "")
             fi
 
-            if "$NPM_BIN" install -g . --silent 2>/dev/null; then :
-            elif "$NPM_BIN" link --silent 2>/dev/null; then :
-            else
-                local local_bin="$HOME/.local/bin"
-                mkdir -p "$local_bin"
-                cat > "$local_bin/$hook_cmd" << WRAPPER
+            if [ -n "$bundled_ver" ] && [ "$bundled_ver" = "$installed_ver" ]; then
+                msg "  · $plugin_label 版本相同 ($installed_ver)，跳过安装" \
+                    "  · $plugin_label version unchanged ($installed_ver), skipping install"
+                need_install=0
+            fi
+
+            if [ "$need_install" -eq 1 ]; then
+                msg "  · 安装 $plugin_label${bundled_ver:+ v$bundled_ver}..." \
+                    "  · Installing $plugin_label${bundled_ver:+ v$bundled_ver}..."
+                mkdir -p "$dest_dir"
+                if tar --warning=no-unknown-keyword -xzf "$tarball_path" -C "$dest_dir" 2>/dev/null; then :
+                else tar -xzf "$tarball_path" -C "$dest_dir"; fi
+
+                cd "$dest_dir"
+                if ! "$NPM_BIN" install --silent 2>/tmp/otel-plugin-npm-err.log; then
+                    msg "  ⚠️  npm install 失败（不影响其他功能）" \
+                        "  ⚠️  npm install failed (non-blocking)"
+                    return 0
+                fi
+
+                if "$NPM_BIN" install -g . --silent 2>/dev/null; then :
+                elif "$NPM_BIN" link --silent 2>/dev/null; then :
+                else
+                    local local_bin="$HOME/.local/bin"
+                    mkdir -p "$local_bin"
+                    cat > "$local_bin/$hook_cmd" << WRAPPER
 #!/usr/bin/env bash
 exec "$NODE_BIN" "$dest_dir/bin/$hook_cmd" "\$@"
 WRAPPER
-                chmod +x "$local_bin/$hook_cmd"
-            fi
-
-            if [ -n "$hook_install_args" ]; then
-                "$NODE_BIN" "$dest_dir/bin/$hook_cmd" install $hook_install_args 2>/dev/null || true
-            else
-                "$NODE_BIN" "$dest_dir/bin/$hook_cmd" install 2>/dev/null || true
+                    chmod +x "$local_bin/$hook_cmd"
+                fi
             fi
 
         elif [ -n "$remote_url" ]; then
@@ -648,10 +666,21 @@ WRAPPER
             else
                 msg "  ⚠️  安装失败（不影响其他功能）" \
                     "  ⚠️  Installation failed (non-blocking)"
+                return 0
             fi
         else
             msg "  ⚠️  tarball 不可用，跳过" \
                 "  ⚠️  Tarball not available, skipping"
+            return 0
+        fi
+
+        # --- Phase 2: Hook registration (always run, idempotent) ---
+        if [ -f "$dest_dir/bin/$hook_cmd" ]; then
+            if [ -n "$hook_install_args" ]; then
+                "$NODE_BIN" "$dest_dir/bin/$hook_cmd" install $hook_install_args 2>/dev/null || true
+            else
+                "$NODE_BIN" "$dest_dir/bin/$hook_cmd" install 2>/dev/null || true
+            fi
         fi
     }
 
@@ -1027,7 +1056,8 @@ cmd_install() {
     deploy_package "$INSTALL_SRC"
     write_config
     install_loongsuite_pilot_command
-    install_otel_plugin
+    install_otel_plugin || msg "  ⚠️  插件安装异常（不影响核心功能）" \
+                              "  ⚠️  Plugin install had errors (non-blocking)"
 
     msg "==> 启动服务..." "==> Starting service..."
     local _start_args=""
