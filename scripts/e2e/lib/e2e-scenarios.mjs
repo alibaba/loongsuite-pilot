@@ -714,6 +714,184 @@ ${perAgentBlocks}
 echo ""
 echo "=== [version-matrix] all agents finished ==="
 echo "ℹ  SLS 数据差异以运行时间段 + 上面的 '>>> agent=X version=Y >>>' 日志指示线人工对齐。"
+${buildJsonlValidationSh(env)}
 exit 0
+`;
+}
+
+/**
+ * 生成内嵌在远端 bash 中的 Node 校验器源码，校验 ~/.loongsuite-pilot/logs/output/*.jsonl
+ * 是否满足 AgentActivityEntry (src/types/events.ts) 的必填字段 schema。
+ * 独立导出便于单元测试。
+ */
+export const JSONL_VALIDATOR_JS = `'use strict';
+const fs = require('fs');
+const path = require('path');
+
+const LOG_DIR = process.env._JV_LOG_DIR || (process.env.HOME + '/.loongsuite-pilot/logs/output');
+const SINCE_SECONDS = parseInt(process.env.E2E_JSONL_SINCE_SECONDS || '0', 10);
+const STRICT = (process.env.E2E_JSONL_STRICT || '0') === '1';
+const DEFAULT_AGENT_FILTER = 'claude,codex,qoder';
+const _RAW_FILTER = process.env.E2E_JSONL_AGENT_FILTER;
+const _FILTER_SRC = (_RAW_FILTER === undefined || _RAW_FILTER === '') ? DEFAULT_AGENT_FILTER : _RAW_FILTER;
+const AGENT_FILTER = (_FILTER_SRC.trim().toLowerCase() === 'all' || _FILTER_SRC.trim() === '*')
+  ? []
+  : _FILTER_SRC.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const MAX_SAMPLES = parseInt(process.env.E2E_JSONL_MAX_SAMPLES || '3', 10);
+
+const REQUIRED = [
+  'time_unix_nano', 'event.id', 'user.id', 'event.name',
+  'gen_ai.session.id', 'gen_ai.agent.type', 'gen_ai.provider.name',
+];
+const EVENT_NAME_ENUM = new Set([
+  'llm.request', 'llm.response', 'tool.call', 'tool.result',
+  'skill.use', 'tool.approve', 'other',
+]);
+const OPTIONAL_COVERAGE = [
+  'trace_id', 'span_id', 'gen_ai.request.model', 'gen_ai.response.model',
+  'gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens',
+  'gen_ai.tool.call.id',
+];
+
+function listJsonl(dir) {
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
+  return fs.readdirSync(dir)
+    .filter(f => f.endsWith('.jsonl'))
+    .map(f => path.join(dir, f));
+}
+
+function matchesAgentFilter(file) {
+  if (!AGENT_FILTER.length) return true;
+  const base = path.basename(file, '.jsonl').toLowerCase();
+  return AGENT_FILTER.some(a => base.startsWith(a + '-') || base === a);
+}
+
+function withinWindow(entry) {
+  if (!SINCE_SECONDS || SINCE_SECONDS <= 0) return true;
+  const ns = entry && entry.time_unix_nano;
+  if (!ns || typeof ns !== 'string') return true;
+  const ms = Number(ns.slice(0, -6)) || 0;
+  return (Date.now() - ms) <= SINCE_SECONDS * 1000;
+}
+
+function pct(num, total) {
+  if (!total) return '0.0%';
+  return ((num / total) * 100).toFixed(1) + '%';
+}
+
+const files = listJsonl(LOG_DIR).filter(matchesAgentFilter);
+if (!files.length) {
+  console.log('[jsonl-validate] no .jsonl files in ' + LOG_DIR + (AGENT_FILTER.length ? ' (filter=' + AGENT_FILTER.join(',') + ')' : ''));
+  console.log('[jsonl-validate] hint: run install-smoke + agent probe, or version-matrix with E2E_USER_ID first.');
+  process.exit(STRICT ? 1 : 0);
+}
+
+let totalEntries = 0;
+let totalWindowed = 0;
+let totalMissing = 0;
+let totalBadEnum = 0;
+let totalParseErr = 0;
+const globalEventName = Object.create(null);
+const globalAgentType = Object.create(null);
+const globalProvider = Object.create(null);
+const globalCoverage = Object.create(null);
+OPTIONAL_COVERAGE.forEach(k => { globalCoverage[k] = 0; });
+const missingSamples = [];
+
+for (const file of files) {
+  const base = path.basename(file);
+  let entries = 0;
+  let windowed = 0;
+  let missing = 0;
+  let badEnum = 0;
+  let parseErr = 0;
+  const eventName = Object.create(null);
+  const raw = fs.readFileSync(file, 'utf8').split(/\\r?\\n/);
+  for (const line of raw) {
+    if (!line.trim()) continue;
+    let entry;
+    try { entry = JSON.parse(line); } catch (e) { parseErr++; totalParseErr++; continue; }
+    entries++; totalEntries++;
+    if (!withinWindow(entry)) continue;
+    windowed++; totalWindowed++;
+    const miss = REQUIRED.filter(k => entry[k] === undefined || entry[k] === null || entry[k] === '');
+    if (miss.length) {
+      missing++; totalMissing++;
+      if (missingSamples.length < MAX_SAMPLES) missingSamples.push({ file: base, missing: miss, eventId: entry['event.id'] || '<no-id>' });
+    }
+    const en = entry['event.name'];
+    if (en !== undefined && !EVENT_NAME_ENUM.has(en)) { badEnum++; totalBadEnum++; }
+    if (en) eventName[en] = (eventName[en] || 0) + 1;
+    if (en) globalEventName[en] = (globalEventName[en] || 0) + 1;
+    const at = entry['gen_ai.agent.type']; if (at) globalAgentType[at] = (globalAgentType[at] || 0) + 1;
+    const pr = entry['gen_ai.provider.name']; if (pr) globalProvider[pr] = (globalProvider[pr] || 0) + 1;
+    for (const k of OPTIONAL_COVERAGE) if (entry[k] !== undefined && entry[k] !== null && entry[k] !== '') globalCoverage[k]++;
+  }
+  const tag = missing || badEnum || parseErr ? 'FAIL' : 'OK';
+  const summary = Object.entries(eventName).map(([k, v]) => k + '=' + v).join(', ') || '<none>';
+  console.log('[jsonl-validate] ' + tag + ' ' + base + ' entries=' + entries + ' windowed=' + windowed + ' missing=' + missing + ' badEnum=' + badEnum + ' parseErr=' + parseErr + ' event.name{' + summary + '}');
+}
+
+console.log('');
+console.log('=== [jsonl-validate] summary ===');
+console.log('  files=' + files.length + ' entries=' + totalEntries + ' windowed=' + totalWindowed);
+console.log('  missing_required=' + totalMissing + ' (' + pct(totalMissing, totalWindowed) + ')');
+console.log('  bad_event_name=' + totalBadEnum + ' parse_errors=' + totalParseErr);
+console.log('  event.name: ' + (Object.entries(globalEventName).map(([k, v]) => k + '=' + v).join(', ') || '<none>'));
+console.log('  gen_ai.agent.type: ' + (Object.entries(globalAgentType).map(([k, v]) => k + '=' + v).join(', ') || '<none>'));
+console.log('  gen_ai.provider.name: ' + (Object.entries(globalProvider).map(([k, v]) => k + '=' + v).join(', ') || '<none>'));
+console.log('  optional field coverage (of windowed):');
+for (const k of OPTIONAL_COVERAGE) console.log('    ' + k + '=' + globalCoverage[k] + ' (' + pct(globalCoverage[k], totalWindowed) + ')');
+if (missingSamples.length) {
+  console.log('  missing samples (up to ' + MAX_SAMPLES + '):');
+  for (const s of missingSamples) console.log('    - ' + s.file + ' eventId=' + s.eventId + ' missing=[' + s.missing.join(',') + ']');
+}
+
+const failed = totalMissing > 0 || totalBadEnum > 0 || totalParseErr > 0;
+if (failed && STRICT) {
+  console.error('[jsonl-validate] STRICT: failures detected → exit 1');
+  process.exit(1);
+}
+process.exit(0);
+`;
+
+/**
+ * 追加到 install-smoke (probe 之后) / version-matrix 末尾的 JSONL 字段校验 bash 片段。
+ * 校验 ~/.loongsuite-pilot/logs/output/*.jsonl 是否满足 AgentActivityEntry schema。
+ * 环境变量：
+ *   E2E_JSONL_VALIDATE=0         禁用
+ *   E2E_JSONL_STRICT=1           有任何缺失/枚举错即 exit 1
+ *   E2E_JSONL_SINCE_SECONDS=600  仅统计最近 N 秒的条目
+ *   E2E_JSONL_AGENT_FILTER=claude,codex,qoder  仅校验 agent 前缀匹配的文件（默认）；设为 all 或 * 关闭过滤
+ *   E2E_JSONL_LOG_DIR=/path      覆盖默认 ~/.loongsuite-pilot/logs/output
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string}
+ */
+export function buildJsonlValidationSh(env = process.env) {
+  if ((env?.E2E_JSONL_VALIDATE ?? '1').toString().trim() === '0') return '';
+  const b64 = Buffer.from(JSONL_VALIDATOR_JS, 'utf8').toString('base64');
+  return `
+# === [jsonl-validate] AgentActivityEntry schema check (src/types/events.ts) ===
+if ! command -v node >/dev/null 2>&1; then
+  echo "[jsonl-validate] WARN: node not on PATH — skipping schema check"
+else
+  export _JV_LOG_DIR="\${E2E_JSONL_LOG_DIR:-$HOME/.loongsuite-pilot/logs/output}"
+  if [ ! -d "$_JV_LOG_DIR" ]; then
+    echo "[jsonl-validate] WARN: log dir not found: $_JV_LOG_DIR (pilot may not have flushed yet)"
+  else
+    echo ""
+    echo "=== [jsonl-validate] scanning $_JV_LOG_DIR ==="
+    printf '%s' '${b64}' | base64 -d | node -
+    _jv_st=$?
+    if [ "$_jv_st" -ne 0 ]; then
+      if [ "\${E2E_JSONL_STRICT:-0}" = "1" ]; then
+        echo "[jsonl-validate] STRICT mode: validation failed (exit $_jv_st)"
+        exit $_jv_st
+      else
+        echo "[jsonl-validate] validation returned non-zero ($_jv_st) — set E2E_JSONL_STRICT=1 to fail the job"
+      fi
+    fi
+  fi
+fi
 `;
 }

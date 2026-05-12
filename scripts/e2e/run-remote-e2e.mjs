@@ -37,6 +37,7 @@ import {
   multiAccountInstallScript,
   autoUpgradeScript,
   versionMatrixScript,
+  buildJsonlValidationSh,
 } from './lib/e2e-scenarios.mjs';
 
 const DEFAULT_INSTALLER_URL =
@@ -370,7 +371,8 @@ async function main() {
   if (scenario === 'install-smoke') {
     const probeBody = buildInstallSmokeAgentPhase(env);
     if (probeBody) {
-      const probeScript = `${buildRemoteProbeEnvInjections(env)}${probeBody}`;
+      const jsonlSh = buildJsonlValidationSh(env);
+      const probeScript = `${buildRemoteProbeEnvInjections(env)}${probeBody}${jsonlSh}`;
       const probe = await runSshRemoteScript({
         target,
         identity,
@@ -390,7 +392,7 @@ async function main() {
 
   if (scenario === 'install-smoke') {
     console.log(
-      '[e2e] Done. Confirm telemetry in the SLS console (project/logstore match remote ~/.loongsuite-pilot/config.json → sls). No automated Logstore polling is performed.',
+      '[e2e] Done. Confirm telemetry in the SLS console (project/logstore match remote ~/.loongsuite-pilot/config.json → sls). Local JSONL schema was auto-checked against AgentActivityEntry (src/types/events.ts) — set E2E_JSONL_VALIDATE=0 to skip or E2E_JSONL_STRICT=1 to fail on missing fields.',
     );
   }
 
