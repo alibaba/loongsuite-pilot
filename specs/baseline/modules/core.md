@@ -8,89 +8,32 @@
 
 ## 公共接口 (Public Interface)
 
-### Orchestrator (`orchestrator.ts`)
-```ts
-class Orchestrator extends EventEmitter {
-  constructor(config: AnalyticsConfig)
-  start(): Promise<void>
-  stop(): Promise<void>
-  getInputManager(): InputManager
-  getAgentControlManager(): AgentControlManager
-  getAgentDiscoveryService(): AgentDiscoveryService
-  setUserId(userId: string): void
-}
-// Events: 'starting' | 'started' | 'stopped'
-```
+- **Orchestrator** — 系统核心协调器，管理整个服务生命周期（启动、停止），提供对 InputManager、AgentControlManager、AgentDiscoveryService 等子系统的访问入口。继承 EventEmitter，发射 starting/started/stopped 事件。
+- **ConfigLoader** — 负责加载和合并三层配置（环境变量 > 配置文件 > 默认值），返回统一的 AnalyticsConfig 对象；同时提供 AutoUpdateConfig 构建能力。
+- **InputManager** — Input 源的注册中心与数据流调度器。负责注入 flusher/userId/agents 配置，管理各 Input 的启停，并将 Input 产出的 entries 经策略处理后转发至 flusher。继承 EventEmitter，发射 dispatched 事件。
+- **AgentDiscoveryService** — Agent 存在性发现服务，通过 fs.watch + 定时轮询监测 agent 数据目录，自动触发 Input 的 start/stop。继承 EventEmitter，发射 agent:started/agent:stopped 事件。
+- **AgentControlManager** — Agent 准入控制器，管理每个 agent 的启用模式（on/off/auto），支持持久化到文件并按需加载。
+- **LogRetentionService** — 日志保留服务，按配置的保留天数和文件日期后缀定期清理过期日志文件。
 
-### loadConfig (`config-loader.ts`)
-```ts
-function loadConfig(): Promise<AnalyticsConfig>
-function buildAutoUpdateConfig(file): AutoUpdateConfig
-```
+## 不负责 (NOT Responsible For)
 
-### InputManager (`input-manager.ts`)
-```ts
-class InputManager extends EventEmitter {
-  setFlusher(flusher: BaseFlusher): void
-  setUserId(userId: string): void
-  setConfiguredUserId(userId: string): void
-  setAgentsConfig(config: AgentsConfig): void
-  registerInput(input: BaseInput): void
-  startInput(id: string): Promise<void>
-  stopInput(id: string): Promise<void>
-  stopAll(): Promise<void>
-  buildDetectionEntry(input, opts): AgentDetectionEntry
-}
-// Events: 'dispatched'
-```
-
-### AgentDiscoveryService (`agent-discovery-service.ts`)
-```ts
-class AgentDiscoveryService extends EventEmitter {
-  constructor(entries: AgentDetectionEntry[])
-  start(): Promise<void>
-  stop(): Promise<void>
-  refresh(trigger?: string): Promise<void>
-  getStates(): Record<string, EntryState>
-}
-// Events: 'agent:started' | 'agent:stopped'
-```
-
-### AgentControlManager (`agent-control-manager.ts`)
-```ts
-class AgentControlManager {
-  constructor(filePath?: string)
-  load(): Promise<void>
-  save(): Promise<void>
-  resolveEnabled(agentId: string, defaultWhenAuto?: boolean): boolean
-  getMode(agentId: string): AgentControlMode
-  setMode(agentId: string, mode: AgentControlMode): void
-  getAllModes(): Record<string, AgentControlMode>
-}
-```
-
-### LogRetentionService (`log-retention-service.ts`)
-```ts
-class LogRetentionService {
-  constructor(dataDir: string, config: LogRetentionConfig)
-  start(): void
-  stop(): void
-  runCleanup(): Promise<{ deleted: number; errors: number }>
-}
-function extractDate(filename: string): string | null
-```
+- 数据采集逻辑 → inputs 模块负责
+- 数据序列化与脱敏 → normalization 模块负责
+- 数据输出/发送 → flushers 模块负责
+- Hook 脚本安装与管理 → hooks 模块负责
+- 自动更新逻辑 → updater 模块负责
 
 ## 内部设计 (Internal Design)
 
-### Orchestrator 启动序列
-1. 确保 dataDir 和 logs 目录存在
-2. 加载 StateStore（输入游标持久化）和 AgentControlManager（准入控制）
-3. 构建 Flusher 管线（SLS → JSONL → HTTP，多目标使用 MultiFlusher）
-4. 创建 InputManager，注入 flusher 和配置
-5. 安装 Hook 脚本（Cursor, Qoder CLI, QoderWork）
-6. 注册所有 Input 并生成 AgentDetectionEntry 列表
-7. 启动 AgentDiscoveryService（fs.watch + 定时轮询）
-8. 启动 LogRetentionService
+### 启动序列 (Startup Sequence)
+
+Orchestrator 启动分为以下阶段：
+
+1. **存储与控制层初始化** — 初始化 StateStore（偏移量追踪）、SnapshotStore（去重缓存）、AgentControlManager（准入控制）
+2. **输出管道构建** — 根据配置构建 flusher 实例（SLS、JSONL、HTTP），组装为 MultiFlusher
+3. **输入源注册** — 通过 InputManager 注册所有 Agent Input source
+4. **发现与生命周期管理** — 启动 AgentDiscoveryService（fs.watch + 轮询），检测 Agent 存在并管理 Input 的 start/stop 生命周期
+5. **清理服务** — 启动 LogRetentionService 进行日志轮转
 
 ### ConfigLoader 优先级模型
 三层配置加载，高优先级覆盖低优先级：

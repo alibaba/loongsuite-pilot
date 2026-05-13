@@ -8,56 +8,18 @@
 
 ## 公共接口 (Public Interface)
 
-### BaseFlusher (`base-flusher.ts`)
-```ts
-abstract class BaseFlusher {
-  abstract readonly name: string
-  abstract send(entry: AgentActivityEntry): Promise<void>
-  abstract sendBatch(entries: AgentActivityEntry[]): Promise<void>
-  abstract flush(): Promise<void>
-  abstract shutdown(): Promise<void>
-  async sendRaw(topic: string, payload: Record<string, unknown>): Promise<void>  // no-op default
-}
-```
+- **BaseFlusher** — 所有 Flusher 的抽象基类，定义了发送单条/批量、刷新缓冲、关闭等核心能力，并提供可选的 sendRaw 原始发送接口（默认 no-op）。
+- **SlsFlusher** — 阿里云 SLS 输出实现，支持 AK 签名模式和 WebTracking 匿名模式，具备内部缓冲队列、定时刷新和重试机制。
+- **JsonlFlusher** — 本地 JSONL 文件输出实现，每条立即追加写入，按 agentType + 日期分文件。
+- **HttpFlusher** — 通用 HTTP POST 输出实现，具备内存缓冲和定时批量发送能力。
+- **MultiFlusher** — 多目标输出组合器，将数据并行分发至多个子 flusher，单个失败不影响其他目标。
 
-### SlsFlusher (`sls-flusher.ts`)
-```ts
-class SlsFlusher extends BaseFlusher {
-  readonly name = 'sls'
-  constructor(config: SlsFlusherConfig, dataDir: string)
-  start(): Promise<void>
-  override sendRaw(topic, payload): Promise<void>
-}
-```
+## 不负责 (NOT Responsible For)
 
-### JsonlFlusher (`jsonl-flusher.ts`)
-```ts
-class JsonlFlusher extends BaseFlusher {
-  readonly name = 'jsonl'
-  constructor(config: JsonlFlusherConfig)
-  start(): Promise<void>
-  override sendRaw(topic, payload): Promise<void>
-}
-```
-
-### HttpFlusher (`http-flusher.ts`)
-```ts
-class HttpFlusher extends BaseFlusher {
-  readonly name = 'http'
-  constructor(config: HttpFlusherConfig)
-  start(): Promise<void>
-  override sendRaw(topic, payload): Promise<void>
-}
-```
-
-### MultiFlusher (`multi-flusher.ts`)
-```ts
-class MultiFlusher extends BaseFlusher {
-  readonly name = 'multi'
-  constructor(flushers: BaseFlusher[])
-  override sendRaw(topic, payload): Promise<void>
-}
-```
+- 数据采集 → inputs 模块负责
+- 数据标准化/脱敏 → normalization 模块负责
+- 决定何时刷新 → InputManager (core) 驱动
+- 重试策略以外的错误处理 → 调用方负责
 
 ## 内部设计 (Internal Design)
 
@@ -98,26 +60,14 @@ class MultiFlusher extends BaseFlusher {
 
 ### 添加新输出目标
 
-1. **创建文件** `src/flushers/my-flusher.ts`
-2. **继承 `BaseFlusher`**，实现所有 abstract 方法：
-   ```ts
-   export class MyFlusher extends BaseFlusher {
-     readonly name = 'my-target';
-     async send(entry) { /* ... */ }
-     async sendBatch(entries) { /* ... */ }
-     async flush() { /* ... */ }
-     async shutdown() { /* ... */ }
-   }
-   ```
-3. **在 `types/index.ts` 中添加** 对应 config interface `MyFlusherConfig`
-4. **在 `config-loader.ts` 中添加** `buildMyConfig()` 构建函数
-5. **在 `Orchestrator.buildFlusher()` 中注册**：
-   ```ts
-   if (cfg.my?.enabled) {
-     flushers.push(new MyFlusher(cfg.my));
-   }
-   ```
-6. 如果有 batch/定时 flush 需求，在 `start()` 中创建 interval，`shutdown()` 中清理。
+创建新 Flusher 需要继承 BaseFlusher 并实现发送/批量发送/刷新/关闭方法，然后在 Orchestrator 的 flusher builder 中注册。参考现有实现: [src/flushers/http-flusher.ts](../../src/flushers/http-flusher.ts)
+
+步骤概要：
+1. 创建文件 `src/flushers/my-flusher.ts`，继承 `BaseFlusher`
+2. 在 `types/index.ts` 中添加对应 config interface
+3. 在 `config-loader.ts` 中添加构建函数
+4. 在 `Orchestrator.buildFlusher()` 中注册
+5. 如有 batch/定时 flush 需求，在 `start()` 中创建 interval，`shutdown()` 中清理
 
 ## 约束 (Constraints)
 

@@ -8,49 +8,11 @@
 
 ## 公共接口 (Public Interface)
 
-### Updater (`updater.ts`)
-```ts
-interface VersionManifest {
-  version: string
-  git_commit: string
-  package_url: string
-  released_at?: string
-  sha256?: string
-}
-
-interface LocalVersion {
-  version: string
-  gitCommit: string
-}
-
-interface UpdaterPaths {
-  cacheDir: string
-  versionsDir: string
-  currentFile: string
-  previousFile: string
-  bootstrapDir: string
-  loongsuitePilotBin: string
-}
-
-class Updater {
-  constructor(config: AutoUpdateConfig, baseDir?: string)
-  start(): void
-  stop(): void
-  check(): Promise<void>
-  needsUpdate(local: LocalVersion | null, manifest: VersionManifest): boolean
-}
-
-function buildPaths(baseDir: string): UpdaterPaths
-```
-
-### version-utils.ts
-```ts
-function compareVersions(a: string, b: string): number   // 1 | -1 | 0
-function computeSha256(filePath: string): Promise<string>
-```
-
-### index.ts (Updater Entry Point)
-独立进程入口，读取配置后创建 Updater 实例并启动定时检查循环。
+- **Updater** — 自动更新核心类，负责定时检查远端版本清单、判断是否需要更新、执行下载部署与服务重启。支持指数退避重试和自动停止。
+- **VersionManifest / LocalVersion** — 版本信息接口，分别描述远端清单和本地版本的结构（版本号、git commit、下载地址、SHA-256 等）。
+- **UpdaterPaths** — 更新器路径配置接口，定义 cache、versions、pointer files、bootstrap 等目录布局。
+- **version-utils** — 版本比较和 SHA-256 校验工具函数。
+- **index.ts (Updater Entry Point)** — 独立进程入口，读取配置后创建 Updater 实例并启动定时检查循环。
 
 ## 内部设计 (Internal Design)
 

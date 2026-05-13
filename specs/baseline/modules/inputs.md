@@ -8,62 +8,20 @@
 
 ## 公共接口 (Public Interface)
 
-### BaseInput (`base/base-input.ts`)
-```ts
-abstract class BaseInput extends EventEmitter {
-  abstract readonly id: string
-  abstract readonly agentType: ClientType
-  abstract readonly collectionMethod: CollectionMethod
-  get running(): boolean
-  start(): Promise<void>
-  stop(): Promise<void>
-  // Events: 'entries' → AgentActivityEntry[]
-}
-```
+- **BaseInput** — 所有 Input 的抽象基类，定义了统一的生命周期（start/stop）、标识信息（id、agentType、collectionMethod）和数据发射机制。继承 EventEmitter，通过 entries 事件输出采集结果。
+- **BaseIdeInput** — IDE 本地文件快照轮询策略的基类，子类需实现历史条目扫描和单条目构建逻辑，配合 SnapshotStore 实现去重。
+- **BaseSqliteInput** — SQLite rowid 游标增量查询策略的基类，子类需实现新行读取和行转换逻辑。
+- **BaseHookInput** — Hook JSONL 日志字节偏移增量读取策略的基类，子类需实现原始记录到标准 entry 的转换。
+- **BaseSessionInput** — Session 文件轮询策略的基类，支持 inode rotation 检测，子类需实现文件发现和行解析逻辑。
+- **BaseCliForwarder** — CLI 遥测日志转发策略的基类，子类需实现事件过滤和 payload 转换逻辑。
 
-### BaseIdeInput (`base/base-ide-input.ts`)
-```ts
-abstract class BaseIdeInput extends BaseInput {
-  readonly collectionMethod = CollectionMethod.IdeSnapshotPolling
-  protected abstract scanHistoryEntries(sinceTs: number): Promise<CodeGenerationEvent[]>
-  protected abstract buildEntry(event: CodeGenerationEvent): Promise<AgentActivityEntry | null>
-}
-```
+## 不负责 (NOT Responsible For)
 
-### BaseSqliteInput (`base/base-sqlite-input.ts`)
-```ts
-abstract class BaseSqliteInput extends BaseInput {
-  readonly collectionMethod = CollectionMethod.SqlitePolling
-  protected abstract readNewRows(lastRowId: number): Promise<SqliteRow[]>
-  protected abstract transformRow(row: SqliteRow): Promise<AgentActivityEntry | null>
-}
-```
-
-### BaseHookInput (`base/base-hook-input.ts`)
-```ts
-abstract class BaseHookInput extends BaseInput {
-  readonly collectionMethod = CollectionMethod.HookJsonl
-  protected abstract transformRecord(record: Record<string, unknown>): Promise<AgentActivityEntry | null>
-}
-```
-
-### BaseSessionInput (`base/base-session-input.ts`)
-```ts
-abstract class BaseSessionInput extends BaseInput {
-  readonly collectionMethod = CollectionMethod.SessionFilePolling
-  protected abstract discoverSessionFiles(): Promise<string[]>
-  protected abstract processSessionLine(record, filePath): Promise<AgentActivityEntry | null>
-}
-```
-
-### BaseCliForwarder (`base/base-cli-forwarder.ts`)
-```ts
-abstract class BaseCliForwarder extends BaseInput {
-  readonly collectionMethod = CollectionMethod.CliTelemetryForwarding
-  protected abstract isRelevantEvent(event: Record<string, unknown>): boolean
-  protected abstract transformPayload(event: Record<string, unknown>): Promise<AgentActivityEntry | null>
-}
-```
+- 数据标准化或转换 → normalization 模块负责
+- 数据输出/刷新 → flushers 模块负责
+- 配置加载与解析 → core 模块 (config-loader) 负责
+- Hook 脚本安装 → hooks 模块负责
+- 状态存储的序列化格式 → checkpoints 模块负责
 
 ## 内部设计 (Internal Design)
 
@@ -120,14 +78,7 @@ BaseInput
    - Agent 有 IDE 本地历史快照 → 继承 `BaseIdeInput`
    - Agent 的 CLI 写入遥测日志需要转发 → 继承 `BaseCliForwarder`
 
-2. **创建实现文件** `src/inputs/<agent-name>/<agent-name>-input.ts`：
-   ```ts
-   export class MyAgentInput extends BaseHookInput {
-     readonly id = 'my-agent';
-     readonly agentType = ClientType.MyAgent;
-     // 实现 abstract 方法
-   }
-   ```
+2. **创建实现文件** `src/inputs/<agent-name>/<agent-name>-input.ts`：创建新 Input 需要继承对应的 Base class 并实现其 lifecycle 方法。参考现有实现: [src/inputs/qoder/qoder-input.ts](../../src/inputs/qoder/qoder-input.ts)
 
 3. **导出静态方法** `getWatchPaths()` 和 `checkAvailability()`。
 

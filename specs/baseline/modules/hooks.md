@@ -8,31 +8,8 @@ Hook 脚本管理层，负责将数据采集 hook 脚本注入到各 AI coding a
 
 ## 公共接口 (Public Interface)
 
-### HookManager (`hook-manager.ts`)
-```ts
-interface HookDefinition {
-  agentId: string
-  settingsPath: string
-  hookJsonPath: string[]
-  hookCommand: string
-  matcher?: string
-  historyDir?: string
-  useNestedFormat?: boolean
-}
-
-class HookManager {
-  constructor(hookScriptDir?: string, logBaseDir?: string)
-  installHook(def: HookDefinition): Promise<boolean>
-  uninstallHook(def: HookDefinition): Promise<boolean>
-  isHookInstalled(def: HookDefinition): Promise<boolean>
-
-  // Static factory methods for known agents
-  static buildCursorHooks(loongsuitePilotDir?: string): HookDefinition[]
-  static buildQoderCliHooks(loongsuitePilotDir?: string): HookDefinition[]
-  static buildQoderWorkHooks(loongsuitePilotDir?: string): HookDefinition[]
-  static buildGenericHook(opts: { agentId, settingsDir, loongsuitePilotDir? }): HookDefinition
-}
-```
+- **HookDefinition** — Hook 定义接口，描述一个 agent hook 的完整信息：目标 agent 标识、settings 文件路径、JSON 导航路径、hook 命令、匹配器以及格式标志。
+- **HookManager** — Hook 脚本管理器，提供 hook 的安装、卸载和安装状态检查能力。同时通过静态工厂方法为已知 agent（Cursor、Qoder CLI、QoderWork）生成预定义的 HookDefinition 列表，也提供通用模板用于快速接入新 agent。
 
 ## 内部设计 (Internal Design)
 
@@ -86,36 +63,14 @@ class HookManager {
 
 ### 为新 Agent 添加 Hook 支持
 
-1. **确定 agent 的 settings 文件路径和格式**（通常为 `~/.agent-name/settings.json`）
+新增 Agent hook 需要实现一个静态工厂方法返回 HookDefinition 数组，指定 agent 的 settings 路径、hook 命令和格式。参考现有实现: [src/hooks/hook-manager.ts](../../src/hooks/hook-manager.ts)
 
-2. **在 HookManager 中添加静态工厂方法**：
-   ```ts
-   static buildMyAgentHooks(loongsuitePilotDir?: string): HookDefinition[] {
-     const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
-     const command = `${baseDir}/hooks/my-agent-hook.sh`;
-     return [{
-       agentId: 'my-agent',
-       settingsPath: resolveHome('~/.my-agent/settings.json'),
-       hookJsonPath: ['hooks', 'PostToolUse'],
-       hookCommand: command,
-       matcher: '*',
-       useNestedFormat: false,  // or true for Qoder-style
-     }];
-   }
-   ```
-
-3. **创建 hook shell 脚本** `assets/hooks/my-agent-hook.sh`，调用 `hook-processor.mjs`。
-
-4. **在 `Orchestrator.installHooks()` 中调用**：
-   ```ts
-   const myAgentAvailable = await MyAgentInput.checkAvailability();
-   if (myAgentAvailable) {
-     const defs = HookManager.buildMyAgentHooks(this.dataDir);
-     for (const def of defs) { /* install logic */ }
-   }
-   ```
-
-5. **在 `postinstall.js` 中部署** hook 脚本到 `~/.loongsuite-pilot/hooks/`。
+步骤概要：
+1. 确定 agent 的 settings 文件路径和格式（通常为 `~/.agent-name/settings.json`）
+2. 在 HookManager 中添加静态工厂方法
+3. 创建 hook shell 脚本 `assets/hooks/my-agent-hook.sh`，调用 `hook-processor.mjs`
+4. 在 `Orchestrator.installHooks()` 中调用
+5. 在 `postinstall.js` 中部署 hook 脚本到 `~/.loongsuite-pilot/hooks/`
 
 ## 约束 (Constraints)
 

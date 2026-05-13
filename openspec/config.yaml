@@ -1,20 +1,28 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# Project context — shown to AI when creating artifacts
+context: |
+  ## Baseline Architecture (specs/baseline/)
+  本项目维护基准文档 (baseline documentation) 于 specs/baseline/。
+  所有 changes 必须符合基准文档描述的架构。
+  如需修改基准文档，必须在 proposal 中明确声明并获得用户确认。
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  Key files:
+  - specs/baseline/constitution.md — 项目宪法（架构原则、数据流、扩展模式、约束）
+  - specs/baseline/modules/*.md — 各模块描述（职责、接口、设计、约束）
+  - specs/baseline/ai_event_schema.md — AgentActivityEntry 数据格式规范
+  - specs/baseline/README.md — 基准文档使用指南
+
+rules:
+  proposal:
+    - Read specs/baseline/constitution.md (especially Module Routing Map) to identify affected modules
+    - Read relevant specs/baseline/modules/*.md for the modules this change touches
+    - Include an "Affected Baseline Modules" section listing which module docs are relevant
+    - If the change would violate or modify any baseline constraint, add a "Baseline Modification" section explaining what changes and why
+  design:
+    - Ensure technical design aligns with architecture principles in specs/baseline/constitution.md
+    - Follow extension patterns documented in baseline when adding new inputs/flushers/hooks
+  tasks:
+    - Include a validation task: "Verify implementation conforms to baseline constraints"
+    - If baseline modification declared in proposal, include a FINAL task: "Update baseline docs (requires human confirmation)"
+    - Optionally include: "Run local E2E tests (user-initiated, see specs/local-e2e-testing-guide.md)"

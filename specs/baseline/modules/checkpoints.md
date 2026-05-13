@@ -8,43 +8,8 @@
 
 ## 公共接口 (Public Interface)
 
-### StateStore (`state-store.ts`)
-```ts
-class StateStore {
-  constructor(filePath: string)
-  load(): Promise<void>
-  save(): Promise<void>
-  get(inputId: string): InputState
-  set(inputId: string, state: InputState): void
-  update(inputId: string, partial: Partial<InputState>): void
-  getOffset(inputId: string): number
-  setOffset(inputId: string, offset: number): void
-  getRowId(inputId: string): number
-  setRowId(inputId: string, rowId: number): void
-}
-```
-
-### SnapshotStore (`snapshot-store.ts`)
-```ts
-interface SnapshotEntry {
-  key: string
-  timestamp: number
-  seenAt: number
-  status: 'pending' | 'processed'
-  reason?: string
-}
-
-class SnapshotStore {
-  constructor(filePath: string, retentionMs?: number)  // default 7 days
-  load(): Promise<void>
-  flush(): Promise<void>
-  shouldProcess(key: string): boolean
-  markPending(key: string, timestamp: number): void
-  markProcessed(key: string, reason?: string): void
-  getSuggestedSinceTimestamp(): number
-  get size(): number
-}
-```
+- **StateStore** — 输入游标状态存储器，为每个 Input 持久化跟踪偏移量（字节偏移、rowId、时间戳水位等），支持 load/save 生命周期、dirty tracking 和复合 key 查询。
+- **SnapshotStore** — IDE 快照去重存储器，通过 key 查找判断条目是否已处理，支持两阶段提交（pending → processed）、自动过期清理和 high watermark 优化扫描范围。
 
 ## 内部设计 (Internal Design)
 

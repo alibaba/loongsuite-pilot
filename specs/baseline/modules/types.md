@@ -8,76 +8,16 @@
 
 ## 公共接口 (Public Interface)
 
-### client-type.ts — 枚举定义
-```ts
-enum ClientType {
-  // IDE tools
-  Cursor, Qoder, QoderIdea, QoderWork, Kiro, KiroCli,
-  Antigravity, Lingma, LingmaVscode,
-  // CLI tools
-  GeminiCli, YkCli, QwenCodeCli, KimiCodeCli, CodexSession, QoderCli,
-  // Hook-based tools
-  ClaudeCliHook, IflowCliHook, CursorHook, QoderCliHook,
-  CodexCliHook, ClineHook, GithubCopilotHook, AoneCopilotHook, OpencodePlugin,
-}
-
-enum ToolType { IDE, CLI, Hook, Plugin }
-
-enum CollectionMethod {
-  IdeSnapshotPolling, SqlitePolling, HookJsonl,
-  CliTelemetryForwarding, SessionFilePolling, LsHttpApi,
-}
-```
-
-### events.ts — 核心事件类型
-```ts
-enum ActionType { Create, Edit, Delete, Read, Search, Execute, Browse, Other }
-
-type AgentEventName = 'llm.request' | 'llm.response' | 'tool.call'
-  | 'tool.result' | 'skill.use' | 'tool.approve' | 'other'
-
-type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
-
-interface AgentActivityEntry {
-  [key: string]: JsonValue | undefined
-  time_unix_nano: string
-  'event.id': string
-  'user.id': string
-  'event.name': AgentEventName
-  'gen_ai.session.id': string
-  'gen_ai.agent.type': string
-  'gen_ai.provider.name': string
-  // ... 40+ optional gen_ai.* fields (usage, cost, tool, messages)
-}
-
-interface CodeGenerationEvent { agentType, filePath, actionType, content?, diff?, sourceTimestamp, rawData }
-interface SessionRecord { sessionId, agentType, model?, usage?, startedAt, endedAt? }
-interface ToolCallRecord { toolName, parameters?, result?, status, durationMs? }
-interface MessageRecord { role, content, items? }
-interface TokenUsage { inputTokens, outputTokens, cacheReadTokens?, cacheWriteTokens? }
-type SerializedLogEntry = Record<string, string>
-interface GitHookEvent { eventType, repoRoot, commitHash, branchName, changedFiles, timestamp }
-```
-
-### index.ts — 配置与运行时类型（re-exports + 补充定义）
-```ts
-interface AnalyticsConfig { enabled, autoStart, dataDir, userId, listeners, flushers, retention, agents }
-interface AutoUpdateConfig { enabled, checkIntervalMs, manifestUrl?, packageUrl? }
-interface FlusherConfig { sls?, jsonl?, http? }
-interface SlsFlusherConfig { enabled, mode, accessKeyId, accessKeySecret, endpoint, endpoints, batchMaxSize, flushIntervalMs }
-interface SlsEndpoint { name, project, logstore, kind, redact? }
-interface JsonlFlusherConfig { enabled, outputDir, rotateDaily, maxFileSizeMb }
-interface HttpFlusherConfig { enabled, url, headers?, batchMaxSize, flushIntervalMs, requestTimeoutMs }
-interface AgentDetectionEntry { id, type, isAvailable, watchPaths, enabled, start, stop, pollIntervalMs }
-interface LogRetentionConfig { enabled, intervalMs, hookHistoryDays, hookErrorDays, hookDebugDays, outputDays, slsFailedDays }
-interface InputState { lastOffset?, lastFile?, lastRowId?, lastTimestamp?, highWatermark?, extra? }
-type AgentControlMode = 'on' | 'off' | 'auto'
-interface AgentControlConfig { version, tools: Record<string, AgentControlMode> }
-type EntryState = 'idle' | 'starting' | 'running' | 'stopping'
-type AgentsConfig = Record<string, AgentConfig>
-interface AgentConfig { captureMessageContent: boolean }
-type SlsMode = 'ak' | 'webtracking'
-```
+- **ClientType** — Agent 类型枚举，定义系统支持的所有 AI coding agent 标识，按 IDE、CLI、Hook 三类分组。
+- **ToolType** — 工具类型枚举（IDE/CLI/Hook/Plugin），用于 agent 的高层分类。
+- **CollectionMethod** — 采集方法枚举，定义各种数据采集策略（快照轮询、SQLite、Hook JSONL、Session、CLI 转发、HTTP API）。
+- **AgentActivityEntry** — 核心事件类型，统一的 agent 活动条目结构，采用 dotted-key 命名直接映射 SLS 宽表列名，含必填最小字段集和可扩展的 index signature。
+- **ActionType / AgentEventName** — 事件动作类型和事件名称类型定义。
+- **CodeGenerationEvent / SessionRecord / ToolCallRecord / MessageRecord / TokenUsage** — 各种原始输入事件的结构化接口，用于 Input 模块解析原始数据。
+- **AnalyticsConfig / AutoUpdateConfig / FlusherConfig** — 系统级配置接口，定义整体服务配置、自动更新配置和输出配置的结构。
+- **AgentDetectionEntry / InputState / EntryState / AgentControlMode** — 运行时状态类型，用于 agent 发现、输入状态追踪和准入控制。
+- **LogRetentionConfig** — 日志保留配置接口，定义各类日志的保留天数。
+- **SerializedLogEntry / JsonValue** — 序列化相关类型，用于 flusher 输出层的数据格式约定。
 
 ## 内部设计 (Internal Design)
 

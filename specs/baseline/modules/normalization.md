@@ -8,34 +8,12 @@
 
 ## 公共接口 (Public Interface)
 
-### entry-builder.ts
-```ts
-function buildAgentActivityEntry(
-  opts: LegacyAgentActivityOptions | StandardAgentActivityOptions
-): AgentActivityEntry
-
-function buildFromCodeGenerationEvent(
-  event: CodeGenerationEvent, userId: string, sessionId: string
-): AgentActivityEntry
-
-function serialiseLogEntry(entry: AgentActivityEntry): SerializedLogEntry
-
-function redactCodeGenerationFields(serialized: SerializedLogEntry): SerializedLogEntry
-
-function timestampToUnixNanos(ts: number | string | undefined): string
-function unixNanosToMillis(value: string | number | undefined): number
-function normalizeEventName(value: unknown): AgentEventName
-function normalizeFinishReasons(value: unknown): string[] | undefined
-function inferProviderName(input: Record<string, unknown>): string
-function toJsonValue(value: unknown): JsonValue | undefined
-```
-
-### agent-content-policy.ts
-```ts
-function applyAgentContentPolicy(
-  entry: AgentActivityEntry, config: AgentsConfig
-): AgentActivityEntry
-```
+- **buildAgentActivityEntry** — Entry 构建器，将原始输入参数（支持 Legacy 和 Standard 两种模式）转换为统一的 AgentActivityEntry。
+- **buildFromCodeGenerationEvent** — 专用构建器，将 IDE 代码生成事件转换为标准 AgentActivityEntry。
+- **serialiseLogEntry** — 序列化器，将 entry 转为扁平的 Record<string, string> KV 格式，用于 flusher 发送。
+- **redactCodeGenerationFields** — 脱敏器，删除序列化结果中可能含代码内容的字段集合。
+- **applyAgentContentPolicy** — 内容策略执行器，根据 per-agent 配置决定是否保留消息内容字段。
+- **辅助工具函数** — 提供时间戳转换、事件名标准化、provider 推断、finish reason 解析等通用能力。
 
 ## 内部设计 (Internal Design)
 
