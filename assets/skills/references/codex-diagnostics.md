@@ -25,10 +25,18 @@ Codex 数据未出现时，**按以下顺序逐步排查，勿跳步**——后�
 
 ```bash
 codex --version          # 必须 >= 2026-04-22 stable hooks 版本（约 codex >= 0.103）
-codex hooks list         # 查看 5 个 hook 的 trust 状态
 ```
 
-`codex hooks list` 中我们的 5 个 hook（`SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop`）应当全部为 **`Trusted`** 或 **`Managed`**。
+trust 状态没有顶层 CLI 命令查看，需要进入 codex TUI 后用 slash 命令：
+
+```bash
+codex                    # 启动 TUI
+# 在输入框输入: /hooks   →  打开 hooks browser，逐 event 查看 trust 状态
+```
+
+或者：如果存在任何 `Untrusted` / `Modified` hook，**`codex` 启动时会自动弹出 "Hooks need review" 对话框**——这是最常见的发现入口，无需手工查询。
+
+我们的 5 个 hook（`SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop`）应当全部为 **`Trusted`** 或 **`Managed`**。
 
 | 状态 | 含义 | 处理 |
 |------|------|------|
@@ -37,7 +45,7 @@ codex hooks list         # 查看 5 个 hook 的 trust 状态
 | `Untrusted` ❌ | `[hooks.state]` 里没写 trusted_hash | 重跑 `~/.loongsuite-pilot/plugins/otel-codex-hook/bin/otel-codex-hook install` |
 | `Modified` ❌ | 写过但 hash 不匹配（环境变化或算法漂移） | 同上重装；若仍 Modified 见第 4 步 |
 
-> ⚠️ codex 启动时如果存在任何 `Untrusted` / `Modified` hook，会弹出 "Hooks need review" 对话框；用户必须选 "Trust all and continue" 否则 hook 不会执行。
+不便启动 TUI 时，可直接用第 4 步的 grep 命令离线核对 `[hooks.state]` 段。
 
 ---
 
@@ -78,9 +86,9 @@ cat /tmp/codex-debug.log
 # 3.1 增量进度是否前进
 cat ~/.loongsuite-pilot/logs/input-state.json | python3 -m json.tool | grep -A 2 '"codex-log"'
 
-# 3.2 pilot 输出是否产出（按 agentType=codex 分目录）
-ls -la ~/.loongsuite-pilot/logs/output/codex/
-tail -2 ~/.loongsuite-pilot/logs/output/codex/*.jsonl
+# 3.2 pilot 输出是否产出（平铺文件，文件名前缀含 agentType）
+ls -la ~/.loongsuite-pilot/logs/output/ | grep '^.*codex-'
+tail -2 ~/.loongsuite-pilot/logs/output/codex-$(date +%Y-%m-%d).jsonl
 ```
 
 预期：
@@ -96,7 +104,7 @@ tail -2 ~/.loongsuite-pilot/logs/output/codex/*.jsonl
 
 ## 第 4 步：Trust / Feature flag 细节定位
 
-仅当第 1 步 `codex hooks list` 不全 `Trusted` 时进入此步。
+仅当第 1 步 `/hooks` 不全 `Trusted` 时进入此步。
 
 #### 4.1 检查 `[hooks.state]` 是否写入
 
@@ -187,7 +195,7 @@ ls -l ~/.cache/opentelemetry.instrumentation.codex/hook-entry.sh   # 应有 x �
 | `~/.cache/opentelemetry.instrumentation.codex/sessions/` | 运行时 session state（成功导出后清理；残留=Stop hook 失败） |
 | `~/.loongsuite-pilot/plugins/otel-codex-hook/` | pilot 解压目录 |
 | `~/.loongsuite-pilot/logs/codex/codex-YYYY-MM-DD.jsonl` | 插件输出原始 JSONL（默认目录） |
-| `~/.loongsuite-pilot/logs/output/codex/` | pilot 处理后的 JSONL |
+| `~/.loongsuite-pilot/logs/output/codex-YYYY-MM-DD.jsonl` | pilot 处理后的 JSONL（平铺,文件名前缀 = agentType） |
 | `~/.loongsuite-pilot/logs/input-state.json` | 含 `codex-log` 增量游标 |
 
 ---
@@ -197,14 +205,14 @@ ls -l ~/.cache/opentelemetry.instrumentation.codex/hook-entry.sh   # 应有 x �
 | 现象 | 解决方法 |
 |------|---------|
 | `failed to load configuration: ... duplicate key` | 老版插件残留导致 `[hooks.state."...:0:0"]` 段重复出现。重跑 `otel-codex-hook install` ≥ 2026-05-13 版本（会自动清理） |
-| `codex hooks list` 全部 Untrusted | trust block 缺失。重跑 `otel-codex-hook install` |
-| `codex hooks list` 显示 Modified | hash 不匹配，常因 hook-entry.sh 路径变了或 codex 升级导致算法漂移。重跑 install 重新计算 |
+| TUI `/hooks` 显示全部 Untrusted | trust block 缺失。重跑 `otel-codex-hook install` |
+| TUI `/hooks` 显示 Modified | hash 不匹配，常因 hook-entry.sh 路径变了或 codex 升级导致算法漂移。重跑 install 重新计算 |
 | 启动时弹 "Hooks need review" 对话框 | 任意 hook 处于 Untrusted/Modified；处理 trust 后再启动，或临时选 "Trust all and continue" |
 | `[features] hooks = false` 警告 | 用户主动禁用过；install 会自动改 true 并提醒（注意这是全局开关） |
 | `hook: Stop Failed` 异常 | 多见于 `OTEL_EXPORTER_OTLP_ENDPOINT=""` 空值导致。**不要**设置空 endpoint 环境变量，未启用 OTLP 直接不设置即可 |
 | 重装 pilot 后 hook 不生效 | pilot 安装脚本必须始终调用 `otel-codex-hook install` 注册（不能因解压跳过而 early return）。检查 pilot 版本 |
 | `~/.loongsuite-pilot/logs/codex/` 不生成日志 | 1) `~/.codex/otel-config.json` 的 `log_enabled` 不为 true；2) hook 未触发（看第 1/2 步）；3) `log_dir` 指向了别的路径（`grep log_dir ~/.codex/otel-config.json`） |
 | pilot output 目录无产出但原始 JSONL 有 | pilot 服务未运行 / `codex-log` Input 未注册 / `log_dir` 与 pilot resolveCodexLogDir 不一致 |
-| 桌面版 codex 装完后仍提示需手动启用 | 桌面版可能有独立 codex_home 路径或自有 hooks 设置面板；先核对 `codex hooks list`（CLI 视图）；详见 codex-plugin-context.md 9.4.5 |
+| 桌面版 codex 装完后仍提示需手动启用 | 桌面版可能有独立 codex_home 路径或自有 hooks 设置面板；先用 TUI `/hooks` 或第 4 步 grep 离线核对 `[hooks.state]`；详见 codex-plugin-context.md 9.4.5 |
 | `CLAUDE_TELEMETRY_DEBUG` 不生效 | codex 插件用 `CODEX_TELEMETRY_DEBUG`，环境变量名不要混用 |
 | `~/.cache/.../sessions/` 长期残留 session 文件 | Stop hook 异常未触发 clearState；通常伴随 `Export failed` 错误日志，重跑或清空 sessions 目录 |
