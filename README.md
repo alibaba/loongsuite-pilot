@@ -1100,54 +1100,174 @@ mkdir -p specs/105-agent-example
 
 ## 集成 OTel Agent 插件（Trace → Event 采集）
 
-### 背景
+> 本章节基于已落地的 `opentelemetry-instrumentation-claude` 与 `opentelemetry-instrumentation-codex` 两个插件的实战经验整理，给新插件作者一份可照抄的接入指引。
 
-许多 AI Agent 可观测插件（如 opentelemetry-instrumentation-claude）仅支持 OTel Trace 采集。loongsuite-pilot 提供互补的事件级采集通道，通过让插件增加本地 JSONL 日志输出，loongsuite-pilot 增加对应的 Input 消费，实现完整的数据采集闭环。
+### 背景与数据流
 
-数据流：
+许多 AI Agent 可观测插件仅原生支持 OTel Trace 采集；loongsuite-pilot 提供互补的事件级通道：插件以 hook 触发把每轮对话事件写入本地 JSONL 文件，pilot 增量读取、归一化、扇出到 SLS/JSONL/HTTP。
 
 ```
-OTel Plugin (hooks) → JSONL files (event_t schema) → loongsuite-pilot BaseHookInput → flushers (SLS/JSONL/HTTP)
+Agent CLI ─hook─► <plugin>-hook ─解析 transcript / 进程内拦截─► JSONL (event_t schema)
+                                                                    │
+                                                                    ▼
+                  pilot BaseHookInput ─▶ AgentActivityEntry ─▶ MultiFlusher (SLS / JSONL / HTTP)
 ```
 
-### 第 1 步：插件侧 — 添加 JSONL 日志输出
+参考实现：claude 插件双路径（transcript + intercept.js），codex 插件单路径（仅 transcript）。详见 `context/claude-code-plugin-context.md` / `context/codex-plugin-context.md`。
 
-插件在每轮对话结束时将事件写入本地 JSONL 文件，每行一个 JSON 对象，字段遵循 [AI Agent EventSchema（event_t）语义规范](https://code.alibaba-inc.com/yt348264/ai-agent-audit/blob/main/docs/guide/architecture.md)。
+### 7.1 插件侧契约
 
-核心要求：
+#### 7.1.1 JSONL 输出 schema
 
-- **event.name 枚举**：`llm.request`、`llm.response`、`tool.call`、`tool.result`
+每行一个 JSON，字段遵循 [AI Agent EventSchema（event_t）](https://code.alibaba-inc.com/yt348264/ai-agent-audit/blob/main/docs/guide/architecture.md)。
+
+- **event.name 枚举**：`llm.request` / `llm.response` / `tool.call` / `tool.result`
 - **必填字段**：`time_unix_nano`、`event.id`、`event.name`、`session.id`、`user.id`、`agent.type`
-- **文件命名格式**：必须匹配 `{prefix}-{YYYY-MM-DD}.jsonl`（如 `claude-code-2026-05-02.jsonl`），与 BaseHookInput 的发现逻辑对齐
-- **配置项**：通过配置文件支持 `log_enabled`、`log_dir`、`log_filename_format`，允许 loongsuite-pilot 安装器统一协调路径
+- **文件命名**：必须匹配 `{prefix}-{YYYY-MM-DD}.jsonl`（pilot 的 `BaseHookInput` 按这个 glob 发现文件）
+- **`agent.type`**：每个插件用唯一标识，例如 `"claude-code"` / `"codex"`，pilot Input 用它路由
 
-### 第 2 步：loongsuite-pilot 侧 — 实现 Input
+#### 7.1.2 配置文件 `~/.<agent>/otel-config.json`
 
-继承 `BaseHookInput`，实现以下内容：
+插件与 pilot 通过这个共享文件协商。约定字段：
+
+```jsonc
+{
+  "log_enabled": true,                              // pilot 强制设为 true
+  "log_dir": "~/.loongsuite-pilot/logs/<agent>",    // pilot 写入；插件不要硬编码
+  "log_filename_format": "hook",                    // 决定文件名前缀
+  "otlp_endpoint": "",                              // 用户可选；与 log 模式互不冲突
+  "debug": false
+}
+```
+
+- **环境变量 fallback**：每个字段都要支持环境变量覆盖（如 `OTEL_EXPORTER_OTLP_ENDPOINT`）
+- **DEBUG 环境变量命名**：用 `<AGENT>_TELEMETRY_DEBUG`，避免和 `CLAUDE_TELEMETRY_DEBUG` 撞车
+
+#### 7.1.3 install / uninstall 命令参数约定
+
+pilot 安装脚本会调用 `<plugin>-hook install`，插件需支持以下参数：
+
+| 参数 | 用途 | 必须支持 |
+|---|---|---|
+| `--quiet` | 抑制非错误 stderr，避免污染 pilot 日志 | ✅ |
+| `--user` | 仅修改用户级配置，不动系统级 | 推荐 |
+| `--no-alias` | 不写 shell profile（避免 pilot 场景下重复污染 .zshrc） | claude 类插件需要 |
+
+`uninstall` 应当幂等且不依赖 `install` 时的状态文件。
+
+#### 7.1.4 Hook trust 机制（按需）
+
+如果目标 agent 启用了 hook trust（如 codex >= 2026-04-22 stable hooks），插件 install 时必须**在目标机器动态计算** trust hash 并写入 agent 配置文件——hash 包含绝对路径，**不能在打包时预计算**。详见 `codex-plugin-context.md` 第 4.2 / 9.4 节。
+
+### 7.2 pilot 侧 Input 实现
+
+继承 `BaseHookInput`，实现 3 个方法：
 
 | 方法 | 职责 |
 |---|---|
-| `transformRecord()` | 将 event_t 字段映射为 `AgentActivityEntry`（event.name → ActionType，提取 content/filePath） |
-| `checkAvailability()` | 检测日志目录是否存在 |
-| `getWatchPaths()` | 返回监控路径 |
+| `transformRecord(record)` | event_t 字段 → `AgentActivityEntry`（event.name → ActionType，抽 content/filePath） |
+| `static checkAvailability()` | 检测日志目录是否存在 |
+| `static getWatchPaths()` | 返回 fs.watch 的目录列表 |
 
-在 `orchestrator.ts` 的 `registerAllInputs()` 中注册，并实现日志目录发现逻辑（如从插件配置文件读取 `log_dir`）。
+参考实现：
 
-参考实现：`src/inputs/claude-code-log/claude-code-log-input.ts`
+- `src/inputs/claude-code-log/claude-code-log-input.ts`
+- `src/inputs/codex-log/codex-log-input.ts`
 
-### 第 3 步：安装集成
+在 `src/core/orchestrator.ts` 的 `registerAllInputs()` 注册即可。
 
-在 `loongsuite-pilot-installer.sh` 中添加插件安装/卸载逻辑：
+### 7.3 部署链路
 
-- 安装时自动拉取 OTel 插件并写入配置文件（`log_enabled=true`、`log_dir` 指向 loongsuite-pilot 的数据目录）
-- 卸载时清理插件文件和 hook 配置
-- 关键：确保插件写入路径与 loongsuite-pilot 读取路径一致，通过共享配置文件协商
+#### 7.3.1 目录与产物约定
 
-### 第 4 步：验证
+| 路径 | 作用 |
+|---|---|
+| `loongsuite-pilot/plugins/<plugin>.tar.gz` | 仓库内同步的插件 tarball（CI 上传 OSS 时一并发布） |
+| `~/.loongsuite-pilot/plugins/<plugin>/` | 安装后解压目录 |
+| `~/.loongsuite-pilot/logs/<agent>/` | 插件输出 JSONL 的目录（pilot 创建并写入 `otel-config.json`） |
+| `~/.<agent>/otel-config.json` | 双方共享配置文件 |
 
-1. 运行 Agent CLI 产生事件，检查 JSONL 文件内容是否符合 event_t 规范
-2. 启动 loongsuite-pilot，确认 Input 注册成功且增量采集正常
-3. 检查输出目标（JSONL flusher / SLS）中数据完整性
+插件 `scripts/pack.sh` 把 `dist/` + `package.json` + `bin/` 打包到 `<plugin>.tar.gz`，**不打 node_modules**（pilot 安装时跑 `npm install --silent`）。
+
+#### 7.3.2 `_install_plugin` 的两段式模式 ⚠️ 必须
+
+pilot installer 中调用插件的统一函数。**关键设计**：解压重装与 hook 注册必须分离，否则重装 pilot 时 hooks 会丢失。
+
+```bash
+_install_plugin() {
+    local plugin_label="$1" tarball_name="$2" dest_dir="$3" hook_cmd="$4"
+    local hook_install_args="$5"   # 例: "--user --no-alias --quiet"
+    local tarball_path="$PERMANENT_DIR/plugins/$tarball_name"
+
+    # ── Phase 1: 解压重装（每次都做；如要做版本对比可在此加 if）──
+    if [ -f "$tarball_path" ]; then
+        rm -rf "$dest_dir" && mkdir -p "$dest_dir"
+        tar -xzf "$tarball_path" -C "$dest_dir"
+        ( cd "$dest_dir" && "$NPM_BIN" install --silent ) || return 0  # 失败不阻塞
+    else
+        return 0
+    fi
+
+    # ── Phase 2: 始终调用 install（幂等注册 hooks）──
+    if [ -f "$dest_dir/bin/$hook_cmd" ]; then
+        "$NODE_BIN" "$dest_dir/bin/$hook_cmd" install $hook_install_args 2>/dev/null || true
+    fi
+}
+```
+
+**调用时必须用 `||` 隔离失败**，否则插件失败会让整个 pilot 安装在 `set -e` 下崩掉：
+
+```bash
+install_otel_plugin || msg "  ⚠️  插件安装异常（不影响核心功能）"
+```
+
+#### 7.3.3 `otel-config.json` 协商写法
+
+pilot 不能直接覆盖文件（用户可能配过 OTLP endpoint）。固定用 Node 内嵌脚本做合并：
+
+```bash
+"$NODE_BIN" -e "
+const fs = require('fs');
+const cfgPath = process.argv[1], logDir = process.argv[2];
+let existing = {};
+try { existing = JSON.parse(fs.readFileSync(cfgPath, 'utf-8')); } catch {}
+existing.log_enabled = true;                                  // 强制启用
+if (existing.log_dir === undefined || existing.log_dir === '') existing.log_dir = logDir;
+if (existing.log_filename_format === undefined) existing.log_filename_format = 'hook';
+fs.writeFileSync(cfgPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
+" "$HOME/.<agent>/otel-config.json" "$DATA_DIR/logs/<agent>"
+```
+
+#### 7.3.4 卸载链路
+
+主路径调用 `<plugin>-hook uninstall`。**fallback 路径**(插件文件已损坏/旧版本无 uninstall)：deploy 脚本必须自行手动清理，常见步骤：
+
+1. 从 agent 配置文件（`settings.json` / `hooks.json`）中过滤含 `<plugin>-hook` 或 `hook-entry.sh` 的条目
+2. 从 TOML 类配置（`config.toml`）按 BEGIN/END marker 删除插件写入段
+3. 删 shell profile 中的 alias / env block（如适用）
+4. 删缓存目录 `~/.cache/opentelemetry.instrumentation.<agent>/`
+
+参考 `deploy/loongsuite-pilot-installer-inner.sh` 中 Claude/Codex 的卸载段。
+
+### 7.4 已知陷阱
+
+按已踩过的坑严重度排序：
+
+1. **`_install_plugin` 用 marker 文件 early return 会丢 hooks**（claude context 7.4）— Phase 1/2 必须分离，Phase 2 始终跑 `install`。
+2. **`hook-entry.sh` 硬编码绝对路径在远程开发机会 MODULE_NOT_FOUND**（claude context 7.3）— 模板要做相对路径优先 + 绝对路径 fallback + 找不到时 `exit 0`。
+3. **`cat >> shell_profile` 会吞掉用户最后一行**（claude context 7.2）— 写入前用 `[ "$(tail -c1 "$f" | wc -l)" -eq 0 ] && echo "" >> "$f"` 保证尾部换行。
+4. **TOML duplicate key 启动失败**（codex context 9.4）— 重写带表头的 trust state 块前必须先清掉同表头的旧"裸"段，不能光删 BEGIN/END marker 包裹的部分。
+5. **agent 自身 feature flag 升级会让 install 写入失效或冗余**（codex context 9.4）— 写 `[features]` 字段前先确认 agent 当前版本是否还需要；若 default_enabled 已开，不要强写。
+6. **agent 显式禁用功能不能被插件静默覆盖**（codex `hooks = false` 案例）— 检测到要改时必须 stderr 警告并告知影响范围。
+7. **空 endpoint 环境变量比未设置更糟**（codex 常见问题）— `OTEL_EXPORTER_OTLP_ENDPOINT=""` 会让插件初始化报错；插件应当把空字符串视同未设置。
+
+### 7.5 验证清单
+
+- [ ] 运行 Agent CLI 产生事件 → JSONL 文件按日期生成，schema 符合 event_t
+- [ ] `loongsuite-pilot status` 显示 Input 已注册，无 startup 异常
+- [ ] 重启 pilot 后能从 `lastOffset` 增量继续（不重复采集）
+- [ ] `loongsuite-pilot uninstall` 后 agent 配置文件干净，无插件残留
+- [ ] 重新 `install` → `uninstall` → `install` 三轮幂等无副作用
 
 ## License
 
