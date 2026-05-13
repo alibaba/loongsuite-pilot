@@ -8,6 +8,8 @@
 |------|------|----------|
 | `constitution.md` | 项目宪法：架构全景、原则、约束 | 每次变更前 |
 | `modules/*.md` | 模块级描述：接口、设计模式、约束 | 实现涉及该模块时 |
+| `modules/runtime.md` | 安装、CLI、服务管理、版本指针、运行时部署 | 改 installer / CLI / daemon / autostart / rollback 时 |
+| `modules/monitor.md` | 本地 dashboard、进程采样、健康状态展示 | 改 monitor UI/API/metrics 时 |
 | 本文件 | 使用指南 | 首次接触 baseline 时 |
 
 ---
@@ -27,7 +29,15 @@ specs/baseline/
 ├── README.md          ← 本文件（使用指南）
 ├── constitution.md    ← 项目宪法：overall architecture, principles, constraints
 └── modules/
-    └── *.md           ← 每个模块一个文件：interfaces, design patterns, constraints
+    ├── core.md        ← collector 编排、配置、agent lifecycle
+    ├── inputs.md      ← input source 采集策略
+    ├── normalization.md
+    ├── flushers.md
+    ├── checkpoints.md
+    ├── hooks.md
+    ├── updater.md
+    ├── runtime.md     ← installer / CLI / bootstrap / service lifecycle
+    └── monitor.md     ← dashboard / process metrics / health overview
 ```
 
 ## 3. 如何在开发中使用 (How to Use During Development)

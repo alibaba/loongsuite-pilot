@@ -16,6 +16,31 @@
 
 ## 内部设计 (Internal Design)
 
+### 代码布局 (Code Layout)
+
+```
+src/updater/
+├── index.ts          # updater 独立进程入口
+├── updater.ts        # manifest 检查、下载、部署、重启、GC
+└── version-utils.ts  # semver 比较与 SHA-256 校验
+
+scripts/
+└── updater-daemon.js # runtime shim，按 current 指针加载 dist/updater/index.js
+```
+
+### 运行时布局 (Runtime Layout)
+
+```
+~/.loongsuite-pilot/
+├── current
+├── previous
+├── versions/{version}_{commit}/
+├── bin/updater-daemon.js
+└── logs/loongsuite-pilot-updater.log
+```
+
+Updater 与 installer/CLI 共享 version pointer 协议；任何部署或回滚语义变化都需要同步检查 `runtime.md`。
+
 ### 更新检查流程
 ```
 start() → 延迟 60s 首次 check → setInterval 周期 check

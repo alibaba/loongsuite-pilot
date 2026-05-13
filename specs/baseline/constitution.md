@@ -66,6 +66,8 @@ Output (Local JSONL files, SLS logstore, external HTTP endpoint)
 | 修改配置 | `core.md`（config-loader section） |
 | 修改 hook 行为 | `hooks.md`, `core.md` |
 | Auto-update 相关 | `updater.md` |
+| 安装、升级、卸载、CLI、后台服务、自启动、版本回滚 | `runtime.md`, `updater.md`, `hooks.md` |
+| Monitor dashboard、进程资源采样、健康状态展示 | `monitor.md`, `runtime.md`, `flushers.md` |
 
 ---
 

@@ -6,7 +6,8 @@
  * appends the raw-ish hook record to:
  *   ~/.loongsuite-pilot/logs/cursor/history/cursor-YYYY-MM-DD.jsonl
  *
- * Semantic event_t mapping belongs in CursorHookInput, not in this processor.
+ * Current semantic event_t mapping is finalized in CursorHookInput. When moving
+ * source-specific normalization into this processor, follow assets/hooks/README.md.
  */
 
 import fs from 'node:fs/promises';

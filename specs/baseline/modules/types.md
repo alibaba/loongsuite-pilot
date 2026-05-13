@@ -21,6 +21,19 @@
 
 ## 内部设计 (Internal Design)
 
+### 代码布局 (Code Layout)
+
+```
+src/types/
+├── index.ts          # 类型聚合导出，其他模块优先从这里导入
+├── client-type.ts    # ClientType / ToolType / CollectionMethod 枚举
+├── events.ts         # AgentActivityEntry 与原始事件结构
+├── alicloud-log.d.ts # @alicloud/log 类型补充
+└── pino-roll.d.ts    # pino-roll 类型补充
+```
+
+`types/index.ts` 是模块边界入口；新增共享类型时优先放在具体语义文件中，再从 `index.ts` re-export。
+
 ### AgentActivityEntry 设计哲学
 - **Index signature** `[key: string]: JsonValue | undefined` 允许动态扩展字段（如 `agent.*` 属性展开）
 - **Dotted key 命名** 直接映射 SLS wide-table 列名，避免序列化时额外投影

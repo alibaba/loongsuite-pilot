@@ -25,6 +25,29 @@
 
 ## 内部设计 (Internal Design)
 
+### 代码布局 (Code Layout)
+
+```
+src/inputs/
+├── base/
+│   ├── base-input.ts
+│   ├── base-ide-input.ts
+│   ├── base-sqlite-input.ts
+│   ├── base-hook-input.ts
+│   ├── base-session-input.ts
+│   └── base-cli-forwarder.ts
+├── qoder/                  # IDE snapshot polling
+├── qoder-sqlite/           # SQLite token usage polling
+├── qoder-cli/              # Hook JSONL input
+├── qoder-cli-session/      # Native session file polling
+├── qoder-work/             # Hook JSONL input
+├── cursor-hook/            # Cursor hook history input
+├── claude-code-log/        # OTel plugin JSONL input
+└── codex-log/              # OTel plugin JSONL input
+```
+
+每个 concrete input 目录通常只暴露一个 `<agent>-input.ts`，并通过 static `getWatchPaths()` / `checkAvailability()` 与 `AgentDiscoveryService` 对接。
+
 ### 生命周期 (Lifecycle)
 
 ```
@@ -78,7 +101,7 @@ BaseInput
    - Agent 有 IDE 本地历史快照 → 继承 `BaseIdeInput`
    - Agent 的 CLI 写入遥测日志需要转发 → 继承 `BaseCliForwarder`
 
-2. **创建实现文件** `src/inputs/<agent-name>/<agent-name>-input.ts`：创建新 Input 需要继承对应的 Base class 并实现其 lifecycle 方法。参考现有实现: [src/inputs/qoder/qoder-input.ts](../../src/inputs/qoder/qoder-input.ts)
+2. **创建实现文件** `src/inputs/<agent-name>/<agent-name>-input.ts`：创建新 Input 需要继承对应的 Base class 并实现其 lifecycle 方法。参考现有实现: [src/inputs/qoder/qoder-input.ts](../../../src/inputs/qoder/qoder-input.ts)
 
 3. **导出静态方法** `getWatchPaths()` 和 `checkAvailability()`。
 

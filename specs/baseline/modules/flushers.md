@@ -23,6 +23,31 @@
 
 ## 内部设计 (Internal Design)
 
+### 代码布局 (Code Layout)
+
+```
+src/flushers/
+├── base-flusher.ts    # Flusher 抽象基类
+├── multi-flusher.ts   # 多目标并行分发
+├── sls-flusher.ts     # Aliyun SLS 输出
+├── jsonl-flusher.ts   # 本地 JSONL 输出
+└── http-flusher.ts    # 通用 HTTP POST 输出
+```
+
+### 运行时输出布局 (Runtime Output Layout)
+
+```
+~/.loongsuite-pilot/logs/
+├── output/
+│   ├── cursor-YYYY-MM-DD.jsonl
+│   ├── qoder-YYYY-MM-DD.jsonl
+│   └── <agent>-YYYY-MM-DD.jsonl
+└── sls-failed-logs/
+    └── *.jsonl
+```
+
+本地 JSONL 是默认兜底输出；SLS 失败缓存用于诊断和后续补偿，不应被当成正常输出通道。
+
 ### 写入策略
 
 | Flusher | 缓冲 | 定时 Flush | 写入方式 |
@@ -60,7 +85,7 @@
 
 ### 添加新输出目标
 
-创建新 Flusher 需要继承 BaseFlusher 并实现发送/批量发送/刷新/关闭方法，然后在 Orchestrator 的 flusher builder 中注册。参考现有实现: [src/flushers/http-flusher.ts](../../src/flushers/http-flusher.ts)
+创建新 Flusher 需要继承 BaseFlusher 并实现发送/批量发送/刷新/关闭方法，然后在 Orchestrator 的 flusher builder 中注册。参考现有实现: [src/flushers/http-flusher.ts](../../../src/flushers/http-flusher.ts)
 
 步骤概要：
 1. 创建文件 `src/flushers/my-flusher.ts`，继承 `BaseFlusher`
