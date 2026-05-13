@@ -1,0 +1,127 @@
+# Module: hooks
+
+> Last verified: 2026-05-13
+
+## 职责 (Responsibility)
+
+Hook 脚本管理层，负责将数据采集 hook 脚本注入到各 AI coding agent 的配置文件中，使其在关键事件时触发数据上报。
+
+## 公共接口 (Public Interface)
+
+### HookManager (`hook-manager.ts`)
+```ts
+interface HookDefinition {
+  agentId: string
+  settingsPath: string
+  hookJsonPath: string[]
+  hookCommand: string
+  matcher?: string
+  historyDir?: string
+  useNestedFormat?: boolean
+}
+
+class HookManager {
+  constructor(hookScriptDir?: string, logBaseDir?: string)
+  installHook(def: HookDefinition): Promise<boolean>
+  uninstallHook(def: HookDefinition): Promise<boolean>
+  isHookInstalled(def: HookDefinition): Promise<boolean>
+
+  // Static factory methods for known agents
+  static buildCursorHooks(loongsuitePilotDir?: string): HookDefinition[]
+  static buildQoderCliHooks(loongsuitePilotDir?: string): HookDefinition[]
+  static buildQoderWorkHooks(loongsuitePilotDir?: string): HookDefinition[]
+  static buildGenericHook(opts: { agentId, settingsDir, loongsuitePilotDir? }): HookDefinition
+}
+```
+
+## 内部设计 (Internal Design)
+
+### Hook 注入流程
+1. 确保 settings 文件所在目录存在
+2. 读取 agent 的 settings JSON 文件（不存在则创建空对象）
+3. 沿 `hookJsonPath` 导航到目标数组位置（逐层创建缺失的对象/数组节点）
+4. 检查数组中是否已存在该 command（支持 flat 和 nested 两种格式匹配）
+5. 不存在则追加 hook entry，写回 settings 文件
+6. 确保对应 agent 的日志目录存在
+
+### 两种 Hook Entry 格式
+
+**Flat 格式**（Cursor 等标准 hooks.json）：
+```json
+{ "type": "command", "command": "path/to/hook.sh", "matcher": "*" }
+```
+
+**Nested 格式**（Qoder CLI settings.json）：
+```json
+{ "matcher": "*", "hooks": [{ "command": "path/to/hook.sh", "type": "command" }] }
+```
+
+通过 `useNestedFormat` 标志控制输出格式。
+
+### 已注册 Agent Hooks
+
+| Agent | Settings Path | Events | Format |
+|-------|--------------|--------|--------|
+| Cursor | `~/.cursor/hooks.json` | stop, preToolUse, postToolUse, postToolUseFailure, beforeSubmitPrompt, preCompact, sessionStart, sessionEnd, subagentStart, subagentStop, afterAgentResponse, afterAgentThought | flat |
+| Qoder CLI | `~/.qoder/settings.json` | Stop | nested |
+| QoderWork | `~/.qoderwork/settings.json` | Stop | nested |
+
+### 卸载流程
+读取 settings → 过滤掉匹配 command 的条目 → 写回文件。
+
+### Command 匹配逻辑
+支持两层查找：
+- `entry.command === target`（flat 格式）
+- `entry.hooks[].command === target`（nested 格式）
+
+## 依赖关系 (Dependencies)
+
+| 依赖模块 | 导入内容 |
+|---------|---------|
+| utils | `readJsonFile`, `writeJsonFile`, `ensureDir`, `resolveHome`, `fileExists`, `createLogger` |
+| node:fs/promises | 文件操作 |
+| node:path | 路径构造 |
+
+## 扩展指南 (Extension Guide)
+
+### 为新 Agent 添加 Hook 支持
+
+1. **确定 agent 的 settings 文件路径和格式**（通常为 `~/.agent-name/settings.json`）
+
+2. **在 HookManager 中添加静态工厂方法**：
+   ```ts
+   static buildMyAgentHooks(loongsuitePilotDir?: string): HookDefinition[] {
+     const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
+     const command = `${baseDir}/hooks/my-agent-hook.sh`;
+     return [{
+       agentId: 'my-agent',
+       settingsPath: resolveHome('~/.my-agent/settings.json'),
+       hookJsonPath: ['hooks', 'PostToolUse'],
+       hookCommand: command,
+       matcher: '*',
+       useNestedFormat: false,  // or true for Qoder-style
+     }];
+   }
+   ```
+
+3. **创建 hook shell 脚本** `assets/hooks/my-agent-hook.sh`，调用 `hook-processor.mjs`。
+
+4. **在 `Orchestrator.installHooks()` 中调用**：
+   ```ts
+   const myAgentAvailable = await MyAgentInput.checkAvailability();
+   if (myAgentAvailable) {
+     const defs = HookManager.buildMyAgentHooks(this.dataDir);
+     for (const def of defs) { /* install logic */ }
+   }
+   ```
+
+5. **在 `postinstall.js` 中部署** hook 脚本到 `~/.loongsuite-pilot/hooks/`。
+
+## 约束 (Constraints)
+
+1. **Hook 安装为幂等操作**：重复安装不应产生重复条目。
+2. **Settings 文件写入必须保持原有内容不变**：仅追加/删除 hook 相关条目。
+3. **安装失败不得中断主流程**：返回 false 而非抛出异常。
+4. **hook shell 脚本必须为可执行文件**：postinstall 时设置 chmod +x。
+5. **hookJsonPath 深度无限制但须为有效 JSON path**：每个 segment 为对象 key。
+6. **buildGenericHook 为通用模板**：仅适用于支持 PostToolUse 事件的 MCP-compatible 工具。
