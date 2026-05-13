@@ -136,6 +136,7 @@ stop_pid_file() {
 _node_is_suitable() {
     local bin="$1"
     [ -x "$bin" ] || return 1
+    _node_is_app_bundle "$bin" && return 1
     local ver
     ver="$("$bin" --version 2>/dev/null)" || return 1
     local major="${ver#v}"
@@ -146,6 +147,17 @@ _node_is_suitable() {
 
 _resolve_realpath() {
     realpath "$1" 2>/dev/null || readlink -f "$1" 2>/dev/null || echo "$1"
+}
+
+_node_is_app_bundle() {
+    local resolved
+    resolved=$(_resolve_realpath "$1")
+    case "$resolved" in
+        /Applications/*.app/Contents/*|/System/Applications/*.app/Contents/*|"$HOME"/Applications/*.app/Contents/*)
+            return 0
+            ;;
+    esac
+    return 1
 }
 
 NODE_PIN_FILE="$CACHE_DIR/node-bin"
@@ -161,13 +173,8 @@ resolve_node() {
         fi
     fi
 
-    # 2. Fallback search (unified order)
+    # 2. Fallback search: prefer user-managed Node over app-bundled PATH shims.
     local _candidates=()
-
-    # PATH
-    if command -v node >/dev/null 2>&1; then
-        _candidates+=("$(command -v node)")
-    fi
 
     # nvm (descending — newest first)
     local _nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
@@ -184,6 +191,11 @@ resolve_node() {
         /usr/local/bin/node
         "$HOME/.local/bin/node"
     )
+
+    # PATH is last because shells launched by apps may expose bundled Node runtimes.
+    if command -v node >/dev/null 2>&1; then
+        _candidates+=("$(command -v node)")
+    fi
 
     for candidate in "${_candidates[@]}"; do
         if _node_is_suitable "$candidate"; then

@@ -189,24 +189,76 @@ _resolve_realpath() {
     realpath "$1" 2>/dev/null || readlink -f "$1" 2>/dev/null || echo "$1"
 }
 
+_node_is_app_bundle() {
+    local resolved
+    resolved=$(_resolve_realpath "$1")
+    case "$resolved" in
+        /Applications/*.app/Contents/*|/System/Applications/*.app/Contents/*|"$HOME"/Applications/*.app/Contents/*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+_node_is_suitable() {
+    local bin="$1"
+    [ -x "$bin" ] || return 1
+    _node_is_app_bundle "$bin" && return 1
+    local ver
+    ver="$("$bin" --version 2>/dev/null)" || return 1
+    local major="${ver#v}"
+    major="${major%%.*}"
+    [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 18 )) || return 1
+    return 0
+}
+
+resolve_node() {
+    local _candidates=()
+
+    local _nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
+    local i
+    for (( i=${#_nvm_candidates[@]}-1; i>=0; i-- )); do
+        _candidates+=("${_nvm_candidates[i]}")
+    done
+
+    _candidates+=(
+        "$HOME/.volta/bin/node"
+        "$HOME/.fnm/aliases/default/bin/node"
+        /opt/homebrew/bin/node
+        /usr/local/bin/node
+        "$HOME/.local/bin/node"
+    )
+
+    if command -v node >/dev/null 2>&1; then
+        _candidates+=("$(command -v node)")
+    fi
+
+    for candidate in "${_candidates[@]}"; do
+        if _node_is_suitable "$candidate"; then
+            _resolve_realpath "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 check_deps() {
     msg "==> 检查依赖..." "==> Checking dependencies..."
 
-    if ! command -v node &>/dev/null; then
+    NODE_BIN=$(resolve_node) || {
         msg "❌ 缺少依赖: node，请先安装后重试" \
             "❌ Missing dependency: node — please install it first"
         exit 1
-    fi
+    }
 
-    NODE_MAJOR=$(node -e "process.stdout.write(String(process.versions.node.split('.')[0]))")
+    NODE_MAJOR=$("$NODE_BIN" -e "process.stdout.write(String(process.versions.node.split('.')[0]))")
     if [ "$NODE_MAJOR" -lt 18 ]; then
-        msg "❌ 需要 Node.js >= 18，当前版本: $(node --version)" \
-            "❌ Requires Node.js >= 18, current: $(node --version)"
+        msg "❌ 需要 Node.js >= 18，当前版本: $("$NODE_BIN" --version)" \
+            "❌ Requires Node.js >= 18, current: $("$NODE_BIN" --version)"
         exit 1
     fi
 
     # Pin the node binary path
-    NODE_BIN=$(_resolve_realpath "$(command -v node)")
     mkdir -p "$DATA_DIR" 2>/dev/null || true
     echo "$NODE_BIN" > "$DATA_DIR/node-bin"
 
