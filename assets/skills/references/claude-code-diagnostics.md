@@ -217,10 +217,17 @@ ls -l ~/.cache/opentelemetry.instrumentation.claude/hook-entry.sh   # 应有 x �
 验证 hook-entry.sh 中引用的 bin 路径是否存在：
 
 ```bash
-# 提取 BIN_PATH 行并检查文件是否存在
+# 提取 BIN_PATH 行，查看实际解析路径
 grep 'BIN_PATH=' ~/.cache/opentelemetry.instrumentation.claude/hook-entry.sh
+
+# 检查相对路径（hook-entry.sh 同级 package/ 目录）
+ls -l ~/.cache/opentelemetry.instrumentation.claude/package/bin/otel-claude-hook
+
+# pilot 安装场景的解压目录（两者可能不同）
 ls -l ~/.loongsuite-pilot/plugins/otel-claude-hook/package/bin/otel-claude-hook
 ```
+
+> hook-entry.sh 优先使用相对路径（`$SCRIPT_DIR/package/bin/`），找不到时退回安装时写入的绝对路径。两个路径都不存在时 hook 静默 exit 0。
 
 ---
 
