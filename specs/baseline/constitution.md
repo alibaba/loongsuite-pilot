@@ -38,9 +38,9 @@ Input Source (BaseIdeInput / BaseSqliteInput / BaseHookInput / BaseSessionInput 
     ↓
 State Tracking (StateStore for offsets; SnapshotStore for dedup)
     ↓
-Normalization (entry-builder → AgentActivityEntry; content-policy redaction)
+Normalization (entry-builder → AgentActivityEntry schema 转换)
     ↓
-InputManager (enriches with userId; applies content policy)
+InputManager (routing-only: 路由 entries 至 flusher)
     ↓
 MultiFlusher (routes to SLS / JSONL / HTTP in parallel)
     ↓
@@ -128,7 +128,7 @@ Output (Local JSONL files, SLS logstore, external HTTP endpoint)
 |---------|------|
 | 使用 CommonJS `require()` | 项目为 ESM-only |
 | 在主事件循环中执行同步 I/O | 阻塞采集与 flush 调度 |
-| 绕过 `InputManager` 直接 flush entries | 破坏 userId 注入与 content policy |
+| 绕过数据管道直接 flush entries | 破坏 hook 层的数据富化与策略控制 |
 | 在输出 entry 中存储敏感数据（token、key）而不经 content-policy redaction | 数据泄露风险 |
 | 破坏 BaseInput 生命周期契约（init → start → collect → stop） | 导致 checkpoint 丢失或重复采集 |
 | 修改 StateStore / SnapshotStore 格式而不提供迁移逻辑 | 破坏重启恢复能力 |

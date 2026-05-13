@@ -10,7 +10,7 @@
 
 - **Orchestrator** — 系统核心协调器，管理整个服务生命周期（启动、停止），提供对 InputManager、AgentControlManager、AgentDiscoveryService 等子系统的访问入口。继承 EventEmitter，发射 starting/started/stopped 事件。
 - **ConfigLoader** — 负责加载和合并三层配置（环境变量 > 配置文件 > 默认值），返回统一的 AnalyticsConfig 对象；同时提供 AutoUpdateConfig 构建能力。
-- **InputManager** — Input 源的注册中心与数据流调度器。负责注入 flusher/userId/agents 配置，管理各 Input 的启停，并将 Input 产出的 entries 经策略处理后转发至 flusher。继承 EventEmitter，发射 dispatched 事件。
+- **InputManager** — Input 源生命周期管理器与数据路由器。核心职责**仅限于**：(1) Input source 的注册、启动、停止等生命周期管理；(2) 监听各 Input 的 `entries` 事件；(3) 将 entries 路由至 flusher(s)。InputManager 不应承载任何数据富化或数据变换逻辑。继承 EventEmitter，发射 dispatched 事件。
 - **AgentDiscoveryService** — Agent 存在性发现服务，通过 fs.watch + 定时轮询监测 agent 数据目录，自动触发 Input 的 start/stop。继承 EventEmitter，发射 agent:started/agent:stopped 事件。
 - **AgentControlManager** — Agent 准入控制器，管理每个 agent 的启用模式（on/off/auto），支持持久化到文件并按需加载。
 - **LogRetentionService** — 日志保留服务，按配置的保留天数和文件日期后缀定期清理过期日志文件。
@@ -22,6 +22,8 @@
 - 数据输出/发送 → flushers 模块负责
 - Hook 脚本安装与管理 → hooks 模块负责
 - 自动更新逻辑 → updater 模块负责
+- 数据富化（如 userId 注入）→ 应通过 middleware 或 hook 层实现
+- 数据过滤/脱敏（如 content policy）→ 应通过 middleware 或 hook 层实现
 
 ## 内部设计 (Internal Design)
 
@@ -52,7 +54,10 @@ Orchestrator 启动分为以下阶段：
 - `"auto"`（默认）→ 委派给配置默认值 / isAvailable 检测
 
 ### InputManager 数据流
-`Input.emit('entries')` → enrich `user.id` → `applyAgentContentPolicy()` → `flusher.sendBatch()`
+
+`Input.emit('entries')` → `InputManager` routes → `flusher.sendBatch()`
+
+InputManager 仅负责将 Input 产出的 entries 路由至已注册的 flusher(s)。所有 cross-cutting 数据处理（userId 富化、content policy、字段标准化）在 hook 层完成，发生在 entries 进入 InputManager 之前。
 
 ### LogRetentionService
 延迟 30s 后执行首次清理，之后按 `intervalMs` 周期运行。按日期后缀和分类目录决定保留天数。
@@ -78,3 +83,4 @@ Orchestrator 启动分为以下阶段：
 5. **Flusher 始终存在**：无任何 flusher 启用时自动回退到 JSONL。
 6. **AgentDiscoveryService 不直接操作 Input**：通过 `AgentDetectionEntry.start/stop` 回调间接委派给 InputManager。
 7. **LogRetentionService 仅删除包含日期后缀的文件**：不匹配 `YYYY-MM-DD` 格式的文件永不被清理。
+8. **InputManager 不应承载数据变换逻辑**：如需新增 cross-cutting 数据处理（富化、过滤、脱敏等），应以 middleware 形式实现，而非修改 InputManager。
