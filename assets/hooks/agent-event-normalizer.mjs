@@ -405,7 +405,8 @@ export function buildCursorHookRecord(payload, options = {}) {
 
 export function buildQoderHookRecord(row, options = {}) {
   const runtimeConfig = options.runtimeConfig || {};
-  const hookEntry = buildQoderPostToolUseRecord(row, runtimeConfig);
+  const sourceAgentId = getStringValue(options, 'agentId');
+  const hookEntry = buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId);
   if (hookEntry) return hookEntry;
 
   const rowType = getStringValue(row, 'type');
@@ -416,10 +417,10 @@ export function buildQoderHookRecord(row, options = {}) {
   const content = selectDominantContentBlock(message.content);
   if (!content) return null;
 
-  const variant = inferQoderVariant(row);
+  const variant = inferQoderVariant(row, sourceAgentId);
   const eventName = inferQoderEventName(rowType, content);
   const model = getStringValue(message, 'model') || 'unknown';
-  const agentType = variant === 'qoder-cli' ? 'qoder-cli' : 'qoder';
+  const agentType = variant;
   const toolCallId = getStringValue(content, 'id') || getStringValue(content, 'tool_use_id');
   const record = {
     'event.id': getStringValue(row, 'event.id') || getStringValue(row, 'uuid') || crypto.randomUUID(),
@@ -455,22 +456,23 @@ export function buildQoderHookRecord(row, options = {}) {
     time_unix_nano: timestampToUnixNanos(row.time_unix_nano ?? row.timestamp ?? Date.now()),
     observed_time_unix_nano: timestampToUnixNanos(Date.now()),
   };
-  addSourceAttributes(record, 'qoder', row, QODER_MAPPED_SOURCE_KEYS);
+  addSourceAttributes(record, qoderSourceNamespace(variant), row, QODER_MAPPED_SOURCE_KEYS);
   return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
 }
 
-function buildQoderPostToolUseRecord(row, runtimeConfig) {
+function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId) {
   const data = asRecord(row.data) && Object.keys(asRecord(row.data)).length > 0 ? asRecord(row.data) : row;
   const eventType = getStringValue(data, 'event_type') || getStringValue(data, 'hook_event_name') || getStringValue(row, 'hookEvent');
   if (eventType !== 'PostToolUse') return null;
   const toolInput = asRecord(data.tool_input);
+  const variant = sourceAgentId === 'qoder-work' ? 'qoder-work' : 'qoder-cli';
   const record = {
     'event.id': getStringValue(data, 'event.id') || crypto.randomUUID(),
     'event.name': 'tool.result',
     'user.id': resolveUserId(data, runtimeConfig),
     'gen_ai.session.id': getStringValue(data, 'session_id') || '',
-    'gen_ai.agent.type': 'qoder-cli',
-    'gen_ai.provider.name': inferProviderName({ 'gen_ai.agent.type': 'qoder-cli' }),
+    'gen_ai.agent.type': variant,
+    'gen_ai.provider.name': inferProviderName({ 'gen_ai.agent.type': variant }),
     'gen_ai.request.model': 'unknown',
     'gen_ai.response.model': 'unknown',
     'gen_ai.tool.name': getStringValue(data, 'tool_name'),
@@ -483,15 +485,19 @@ function buildQoderPostToolUseRecord(row, runtimeConfig) {
     }),
     'tool.result.status': 'success',
     'agent.source': 'qoder-transcript-hook',
-    'agent.qoder_variant': 'qoder-cli',
+    'agent.qoder_variant': variant,
     'agent.raw_type': eventType,
     'agent.loongsuite_pilot_pre_file_exists': data.loongsuite_pilot_pre_file_exists,
     'agent.file_path': getStringValue(toolInput, 'file_path') || getStringValue(data, 'file_path'),
     time_unix_nano: timestampToUnixNanos(data.time_unix_nano ?? data.timestamp ?? Date.now()),
     observed_time_unix_nano: timestampToUnixNanos(Date.now()),
   };
-  addSourceAttributes(record, 'qoder', data, QODER_MAPPED_SOURCE_KEYS);
+  addSourceAttributes(record, qoderSourceNamespace(variant), data, QODER_MAPPED_SOURCE_KEYS);
   return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
+}
+
+function qoderSourceNamespace(variant) {
+  return variant === 'qoder-work' ? 'qoderwork' : 'qoder';
 }
 
 function buildCursorInputMessagesDelta(payload) {
@@ -546,7 +552,8 @@ function asRecord(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
-function inferQoderVariant(row) {
+function inferQoderVariant(row, sourceAgentId) {
+  if (sourceAgentId === 'qoder-work') return 'qoder-work';
   return getStringValue(row, 'entrypoint') === 'cli'
     || row.promptId !== undefined
     || row.permissionMode !== undefined

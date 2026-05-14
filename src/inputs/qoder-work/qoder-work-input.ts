@@ -3,6 +3,7 @@ import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
+import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 
 /**
  * Qoder Work — transcript JSONL input.
@@ -10,9 +11,8 @@ import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
  * Reads rows from ~/.loongsuite-pilot/logs/qoder-work/history/ and keeps
  * assistant/user messages that have message.content[0].type.
  *
- * Reuses the same hook script as Qoder CLI (qoder-loongsuite-pilot-hook.sh)
- * with "qoder-work" as the agent ID parameter.
- * Hook config lives at ~/.qoderwork/settings.json.
+ * Hook config lives at ~/.qoderwork/settings.json and invokes the dedicated
+ * qoderwork-loongsuite-pilot-hook.sh entrypoint.
  */
 export class QoderWorkInput extends BaseHookInput {
   readonly id = 'qoder-work-hook';
@@ -38,6 +38,9 @@ export class QoderWorkInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
+    const canonicalEntry = buildCanonicalHookEntry(record, ClientType.QoderWork);
+    if (canonicalEntry) return canonicalEntry;
+
     const hookEntry = buildPostToolUseEntry(record, ClientType.QoderWork);
     if (hookEntry) return hookEntry;
 

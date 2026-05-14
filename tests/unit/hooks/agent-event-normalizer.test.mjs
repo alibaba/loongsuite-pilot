@@ -134,6 +134,37 @@ describe('asset hook agent event normalizer', () => {
     expect(record['agent.qoder.entrypoint']).toBeUndefined();
   });
 
+  it('uses the Qoder Work hook agent id as the canonical agent type', () => {
+    const record = buildQoderHookRecord({
+      type: 'assistant',
+      uuid: 'work-row-1',
+      timestamp: '2026-05-14T00:00:00.000Z',
+      sessionId: 'sess-work',
+      userType: 'external',
+      cwd: '/Users/lukechen/.qoderwork/workspace/project',
+      message: {
+        id: 'work-resp-1',
+        model: 'unknown',
+        content: [{ type: 'text', text: 'hello from work' }],
+      },
+    }, {
+      agentId: 'qoder-work',
+      runtimeConfig: { userId: 'u-work', agents: {} },
+    });
+
+    expect(record).toMatchObject({
+      'event.id': 'work-row-1',
+      'event.name': 'llm.response',
+      'user.id': 'u-work',
+      'gen_ai.agent.type': 'qoder-work',
+      'gen_ai.session.id': 'sess-work',
+      'agent.qoder_variant': 'qoder-work',
+      'agent.qoderwork.cwd': '/Users/lukechen/.qoderwork/workspace/project',
+      'gen_ai.output.messages': [{ type: 'text', content: 'hello from work' }],
+    });
+    expect(record['agent.qoder.cwd']).toBeUndefined();
+  });
+
   it('returns null for Qoder non-event metadata rows', () => {
     expect(buildQoderHookRecord({
       type: 'session_meta',
