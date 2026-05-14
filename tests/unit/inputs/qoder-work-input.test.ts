@@ -170,6 +170,38 @@ describe('QoderWorkInput', () => {
   });
 
   describe('transcript rows', () => {
+    it('prefers canonical qoder-work hook records when present', async () => {
+      const today = getTodayDateString();
+      const logFile = path.join(tmpDir, `qoder-work-${today}.jsonl`);
+      const record = {
+        'event.id': 'canonical-work-1',
+        'event.name': 'llm.response',
+        time_unix_nano: '1777628163513000000',
+        observed_time_unix_nano: '1777628163513000000',
+        'user.id': 'u-work',
+        'gen_ai.agent.type': ClientType.QoderWork,
+        'gen_ai.session.id': 'sess-work',
+        'gen_ai.output.messages': [{ type: 'text', content: 'hello work' }],
+        'agent.source': 'qoder-transcript-hook',
+      };
+      await fs.writeFile(logFile, JSON.stringify(record) + '\n');
+
+      const allEntries: AgentActivityEntry[] = [];
+      input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
+
+      await input.start();
+      expect(allEntries).toHaveLength(1);
+      expect(allEntries[0]).toMatchObject({
+        'event.id': 'canonical-work-1',
+        'event.name': 'llm.response',
+        'user.id': 'u-work',
+        'gen_ai.agent.type': ClientType.QoderWork,
+        'gen_ai.session.id': 'sess-work',
+        'gen_ai.output.messages': [{ type: 'text', content: 'hello work' }],
+      });
+      await input.stop();
+    });
+
     it('keeps qoder-work as the agent type for user rows', async () => {
       const today = getTodayDateString();
       const logFile = path.join(tmpDir, `qoder-work-${today}.jsonl`);

@@ -6,6 +6,8 @@
 
 数据标准化层，负责将各种原始输入格式转换为统一的 AgentActivityEntry，并根据内容策略决定敏感字段的保留或脱敏。
 
+Hook JSONL 输入在进入 collector 前可能已经由 `assets/hooks/agent-event-normalizer.mjs` 做过 pre-standardization。该 hook-side 逻辑可以 best-effort 复制 `user.id` defaulting、provider fallback 和 content-policy filtering；本模块仍是最终权威层，负责 final `AgentActivityEntry` 构建、alias cleanup、provider fallback re-apply、content policy re-apply 和序列化前 schema 语义收敛。
+
 ## 公共接口 (Public Interface)
 
 - **buildAgentActivityEntry** — Entry 构建器，将原始输入参数（支持 Legacy 和 Standard 两种模式）转换为统一的 AgentActivityEntry。
@@ -25,7 +27,7 @@ src/normalization/
 └── agent-content-policy.ts   # per-agent message content policy
 ```
 
-`entry-builder.ts` 是 schema 映射的主入口；新增稳定字段、legacy alias、provider/model 推断或序列化规则时优先在这里集中处理。
+`entry-builder.ts` 是 collector 侧 schema 映射的主入口；新增稳定字段、legacy alias、provider/model 推断或序列化规则时优先在这里集中处理。若 hook runtime 需要复制部分规则，必须保持 dependency-free，并在 collector 侧继续执行最终权威规则。
 
 ### Entry Builder 双模式构建
 
@@ -59,7 +61,7 @@ src/normalization/
 
 ### Agent Content Policy
 
-`applyAgentContentPolicy()` 根据 per-agent config 中 `captureMessageContent` 设置：
+`applyAgentContentPolicy()` 根据 per-agent config 中 `captureMessageContent` 设置。即使 hook processor 已执行 best-effort policy filtering，collector 侧仍必须再次执行该策略：
 
 - `true`（默认）→ 原样透传
 - `false` → 删除 MESSAGE_CONTENT_FIELDS 集合中的所有消息内容字段
@@ -87,4 +89,5 @@ src/normalization/
 4. **Redaction 是不可逆操作**：在 serialized 副本上操作，不修改原始 entry。
 5. `**applyAgentContentPolicy` 返回新对象**：不修改输入 entry（immutable semantics）。
 6. **时间戳格式为 nanoseconds string**：`time_unix_nano` 长度≥16位，毫秒输入自动补零。
+7. **Hook-side pre-standardization 不是最终权威层**：collector normalization 必须保留最终构建、provider fallback、content policy 和 alias cleanup。
 

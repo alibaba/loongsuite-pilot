@@ -57,6 +57,35 @@ describe('QoderCliInput', () => {
     expect(entries[0]?.['agent.cwd']).toBe('/Users/lukechen/.qoder/projects/-Users-lukechen-ai-agent-audit/transcript');
   });
 
+  it('prefers canonical hook records when present', async () => {
+    const entries = await collectRows([{
+      'event.id': 'canonical-qoder-1',
+      'event.name': 'llm.response',
+      time_unix_nano: '1777628163513000000',
+      observed_time_unix_nano: '1777628163513000000',
+      'user.id': 'hook-user',
+      'gen_ai.agent.type': ClientType.QoderCli,
+      'gen_ai.provider.name': 'qwen',
+      'gen_ai.session.id': 'sess-canonical-q',
+      'gen_ai.response.model': 'qwen-max',
+      'gen_ai.output.messages': [{ type: 'text', content: 'hello' }],
+      'agent.source': 'qoder-transcript-hook',
+    }]);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      'event.id': 'canonical-qoder-1',
+      'event.name': 'llm.response',
+      'user.id': 'hook-user',
+      'gen_ai.agent.type': ClientType.QoderCli,
+      'gen_ai.provider.name': 'qwen',
+      'gen_ai.session.id': 'sess-canonical-q',
+      'gen_ai.response.model': 'qwen-max',
+      'gen_ai.output.messages': [{ type: 'text', content: 'hello' }],
+      'agent.source': 'qoder-transcript-hook',
+    });
+  });
+
   it('maps IDE user rows to qoder llm.request entries', async () => {
     const entries = await collectRows([await fixtureRow('raw-qoder-ide.jsonl', 3)]);
 

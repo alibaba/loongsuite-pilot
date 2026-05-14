@@ -2,18 +2,24 @@
 /**
  * Lightweight Cursor hook processor for loongsuite-pilot.
  *
- * Reads Cursor hook JSON from stdin, supplements collector-owned fields, and
- * appends the raw-ish hook record to:
+ * Reads Cursor hook JSON from stdin, normalizes deterministic hook-time fields,
+ * and appends the standard-compatible hook record to:
  *   ~/.loongsuite-pilot/logs/cursor/history/cursor-YYYY-MM-DD.jsonl
  *
- * Current semantic event_t mapping is finalized in CursorHookInput. When moving
- * source-specific normalization into this processor, follow assets/hooks/README.md.
+ * CursorHookInput still performs final AgentActivityEntry building and legacy
+ * fallback handling. Keep this processor fail-open and dependency-light.
  */
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import crypto from 'node:crypto';
+import {
+  buildCursorHookRecord,
+  getSourceHookEvent,
+  hashJson,
+  loadHookRuntimeConfig,
+  sanitizeObject,
+} from './agent-event-normalizer.mjs';
 
 function resolveDataDir() {
   const configured = process.env.LOONGSUITE_PILOT_DATA_DIR || process.env.LOONGSUITE_PILOT_DATA_DIR;
@@ -25,37 +31,9 @@ function toIsoUtc(date) {
   return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
-function timestampNs(date) {
-  return `${date.getTime()}000000`;
-}
-
 function normalizeHookEvent(payload) {
-  const eventName = payload.hook_event_name ?? payload.hookEventName ?? payload.hookEvent ?? 'unknown';
+  const eventName = getSourceHookEvent(payload);
   return typeof eventName === 'string' && eventName.trim() ? eventName.trim() : 'unknown';
-}
-
-function sanitizeObject(obj) {
-  if (obj === null || obj === undefined) return undefined;
-  if (Array.isArray(obj)) {
-    const list = obj.map(item => sanitizeObject(item)).filter(item => item !== undefined);
-    return list.length > 0 ? list : undefined;
-  }
-  if (typeof obj !== 'object') return obj;
-  const out = {};
-  for (const [key, value] of Object.entries(obj)) {
-    const cleaned = sanitizeObject(value);
-    if (cleaned !== undefined) out[key] = cleaned;
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
-function hashJson(value) {
-  try {
-    const serialized = typeof value === 'string' ? value : JSON.stringify(value);
-    return crypto.createHash('sha256').update(serialized).digest('hex');
-  } catch {
-    return undefined;
-  }
 }
 
 async function appendErrorJsonl(dataDir, now, fields) {
@@ -78,20 +56,6 @@ async function appendErrorJsonl(dataDir, now, fields) {
       // Error logging is best effort and must never affect Cursor.
     }
   }
-}
-
-function buildRecord(payload, now) {
-  const observedTime = timestampNs(now);
-  const eventId = typeof payload['event.id'] === 'string' && payload['event.id'].trim()
-    ? payload['event.id']
-    : crypto.randomUUID();
-  return sanitizeObject({
-    ...payload,
-    'event.id': eventId,
-    'agent.type': payload['agent.type'] ?? 'cursor',
-    observed_time_unix_nano: payload.observed_time_unix_nano ?? observedTime,
-    time_unix_nano: payload.time_unix_nano ?? observedTime,
-  }) || {};
 }
 
 async function readStdin() {
@@ -150,7 +114,10 @@ async function main() {
   const day = toIsoUtc(now).slice(0, 10);
   const logFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
   try {
-    await appendJsonl(logFile, buildRecord(payload, now));
+    await appendJsonl(logFile, buildCursorHookRecord(payload, {
+      now,
+      runtimeConfig: loadHookRuntimeConfig(dataDir),
+    }));
   } catch (err) {
     await appendErrorJsonl(dataDir, now, {
       stage: 'append',

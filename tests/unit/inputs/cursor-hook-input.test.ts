@@ -70,6 +70,46 @@ describe('CursorHookInput', () => {
     expect(entries[0]!['gen_ai.response.model']).toBe('gpt-5.5');
   });
 
+  it('prefers canonical hook records when present', async () => {
+    const today = getTodayDateString();
+    const logFile = path.join(tmpDir, `cursor-${today}.jsonl`);
+    const record = {
+      'event.id': 'canonical-1',
+      'event.name': 'tool.call',
+      time_unix_nano: '1777628163513000000',
+      observed_time_unix_nano: '1777628163513000000',
+      'user.id': 'hook-user',
+      'gen_ai.agent.type': ClientType.Cursor,
+      'gen_ai.provider.name': 'openai',
+      'gen_ai.session.id': 'sess-canonical',
+      'gen_ai.tool.name': 'Shell',
+      'gen_ai.tool.call.id': 'tool-canonical',
+      'gen_ai.tool.call.arguments': { command: 'pwd' },
+      hook_event_name: 'preToolUse',
+    };
+    await fs.writeFile(logFile, `${JSON.stringify(record)}\n`);
+
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      'event.id': 'canonical-1',
+      'event.name': 'tool.call',
+      'user.id': 'hook-user',
+      'gen_ai.agent.type': ClientType.Cursor,
+      'gen_ai.provider.name': 'openai',
+      'gen_ai.session.id': 'sess-canonical',
+      'gen_ai.tool.name': 'Shell',
+      'gen_ai.tool.call.id': 'tool-canonical',
+      'gen_ai.tool.call.arguments': { command: 'pwd' },
+      'agent.cursor.hook_event_name': 'preToolUse',
+    });
+    expect(entries[0]!['agent.hook_event_name']).toBeUndefined();
+  });
+
   it('maps raw postToolUse hook record to tool.result event_t fields', async () => {
     const today = getTodayDateString();
     const logFile = path.join(tmpDir, `cursor-${today}.jsonl`);

@@ -26,6 +26,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import {
+  buildQoderHookRecord,
+  loadHookRuntimeConfig,
+} from './agent-event-normalizer.mjs';
 
 const ENABLE_LOGGING = true;
 const HOOKS_DIR = path.dirname(new URL(import.meta.url).pathname);
@@ -175,12 +179,21 @@ function readTranscriptLines(transcriptPath, startLine, endLine) {
   return lines;
 }
 
-function parseTranscriptLine(line) {
+function parseTranscriptLine(line, agentId, runtimeConfig) {
   try {
-    return JSON.stringify(JSON.parse(line));
+    const parsed = JSON.parse(line);
+    const normalized = normalizeTranscriptRecord(parsed, agentId, runtimeConfig);
+    return normalized ? JSON.stringify(normalized) : null;
   } catch {
     return null;
   }
+}
+
+function normalizeTranscriptRecord(record, agentId, runtimeConfig) {
+  if (agentId === 'qoder-cli' || agentId === 'qoder-work' || agentId === 'qoder') {
+    return buildQoderHookRecord(record, { agentId, runtimeConfig });
+  }
+  return record;
 }
 
 // --- History file -----------------------------------------------------------
@@ -207,7 +220,7 @@ function appendRowsToHistory(agentId, logPrefix, rows) {
 
 // --- Core pipeline ----------------------------------------------------------
 
-function uploadLines(agentId, logPrefix, transcriptPath, startLine, endLine, sessionId) {
+function uploadLines(agentId, logPrefix, transcriptPath, startLine, endLine, sessionId, runtimeConfig) {
   if (startLine >= endLine) return true;
 
   const expectedCount = endLine - startLine;
@@ -221,7 +234,7 @@ function uploadLines(agentId, logPrefix, transcriptPath, startLine, endLine, ses
 
   const rowsToAppend = [];
   for (const line of lines) {
-    const row = parseTranscriptLine(line);
+    const row = parseTranscriptLine(line, agentId, runtimeConfig);
     if (row) rowsToAppend.push(row);
   }
 
@@ -286,7 +299,15 @@ async function main() {
   if (!range) return;
 
   const [startLine, endLine] = range;
-  uploadLines(agentId, logPrefix, transcriptPath, startLine, endLine, sessionId);
+  uploadLines(
+    agentId,
+    logPrefix,
+    transcriptPath,
+    startLine,
+    endLine,
+    sessionId,
+    loadHookRuntimeConfig(path.dirname(LOONGSUITE_PILOT_LOGS_BASE_DIR)),
+  );
 }
 
 main().catch((e) => {

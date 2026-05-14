@@ -207,10 +207,20 @@ describe('Hook JSONL integration flow', () => {
       path.resolve(process.cwd(), 'assets/hooks/hook-processor.mjs'),
       path.join(hookDir, 'hook-processor.mjs'),
     );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/agent-event-normalizer.mjs'),
+      path.join(hookDir, 'agent-event-normalizer.mjs'),
+    );
     await fs.chmod(hookScript, 0o755);
 
     const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
     await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        type: 'session_meta',
+        uuid: 'meta-ignored',
+        sessionId: 'sess-hook',
+        cwd: '/tmp/project',
+      }),
       JSON.stringify({
         type: 'user',
         uuid: 'user-1',
@@ -234,6 +244,15 @@ describe('Hook JSONL integration flow', () => {
     expect(result.stdout.trim()).toBe('{}');
 
     const logDir = path.join(dataDir, 'logs', 'qoder-cli', 'history');
+    const historyFile = path.join(logDir, `qoder-cli-${getTodayDateString()}.jsonl`);
+    const historyLines = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n');
+    expect(historyLines).toHaveLength(1);
+    const historyRecord = JSON.parse(historyLines[0]!);
+    expect(historyRecord.type).toBeUndefined();
+    expect(historyRecord.uuid).toBeUndefined();
+    expect(historyRecord.sessionId).toBeUndefined();
+    expect(historyRecord['event.name']).toBe('llm.request');
+
     const input = new QoderCliInput({
       stateStore: stateStore as any,
       logDir,
@@ -270,7 +289,7 @@ describe('Cursor hook script integration flow', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it('should write raw-ish record with collector fields for valid payload', async () => {
+  it('should write standard-compatible record with namespaced raw context for valid payload', async () => {
     const result = runCursorHook(JSON.stringify({
       hook_event_name: 'postToolUse',
       session_id: 'sess-1',
@@ -293,14 +312,21 @@ describe('Cursor hook script integration flow', () => {
 
     const record = JSON.parse(lines[0]!);
     expect(record['event.id']).toBeDefined();
-    expect(record['agent.type']).toBe('cursor');
+    expect(record['event.name']).toBe('tool.result');
+    expect(record['gen_ai.agent.type']).toBe(ClientType.Cursor);
+    expect(record['gen_ai.session.id']).toBe('sess-1');
+    expect(record['gen_ai.tool.name']).toBe('Shell');
+    expect(record['gen_ai.tool.call.result']).toEqual({ ok: true });
     expect(record.observed_time_unix_nano).toMatch(/^\d+$/);
-    expect(record.hook_event_name).toBe('postToolUse');
-    expect(record.session_id).toBe('sess-1');
-    expect(record.generation_id).toBe('turn-1');
-    expect(record.tool_name).toBe('Shell');
-    expect(record.tool_input).toEqual({ command: 'pwd' });
-    expect(record.tool_output).toBe('{"ok":true}');
+    expect(record['agent.cursor.hook_event_name']).toBe('postToolUse');
+    expect(record['agent.raw']).toBeUndefined();
+    expect(record['agent.cursor.cursor_version']).toBe('1.0.0');
+    expect(record.hook_event_name).toBeUndefined();
+    expect(record.session_id).toBeUndefined();
+    expect(record.generation_id).toBeUndefined();
+    expect(record.tool_name).toBeUndefined();
+    expect(record.tool_input).toBeUndefined();
+    expect(record.tool_output).toBeUndefined();
   });
 
   it('should append records for multiple invocations on same day', async () => {
@@ -315,10 +341,14 @@ describe('Cursor hook script integration flow', () => {
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
     expect(lines).toHaveLength(2);
     const records = lines.map(line => JSON.parse(line));
-    expect(records[0].text).toBe('a1');
-    expect(records[0].hook_event_name).toBe('afterAgentResponse');
-    expect(records[1].text).toBe('t1');
-    expect(records[1].hook_event_name).toBe('afterAgentThought');
+    expect(records[0]['gen_ai.output.messages']).toEqual([{ type: 'text', content: 'a1' }]);
+    expect(records[0]['agent.cursor.hook_event_name']).toBe('afterAgentResponse');
+    expect(records[0].text).toBeUndefined();
+    expect(records[0].hook_event_name).toBeUndefined();
+    expect(records[1]['gen_ai.output.messages']).toEqual([{ type: 'reasoning', content: 't1' }]);
+    expect(records[1]['agent.cursor.hook_event_name']).toBe('afterAgentThought');
+    expect(records[1].text).toBeUndefined();
+    expect(records[1].hook_event_name).toBeUndefined();
   });
 
   it('should infer mapping role and parse tool fields', async () => {
@@ -336,10 +366,13 @@ describe('Cursor hook script integration flow', () => {
     const logFile = path.join(tmpDir, 'logs', 'cursor', 'history', `cursor-${getTodayDateString()}.jsonl`);
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
     const record = JSON.parse(lines.at(-1)!);
-    expect(record.hook_event_name).toBe('beforeMCPExecution');
-    expect(record.tool_input).toBe('{"query":"abc"}');
-    expect(record.result_json).toBe('{"items":[1]}');
-    expect(record.conversation_id).toBe('conv-1');
+    expect(record['agent.cursor.hook_event_name']).toBe('beforeMCPExecution');
+    expect(record['gen_ai.tool.call.arguments']).toEqual({ query: 'abc' });
+    expect(record['gen_ai.session.id']).toBe('conv-1');
+    expect(record.hook_event_name).toBeUndefined();
+    expect(record.tool_input).toBeUndefined();
+    expect(record.result_json).toBeUndefined();
+    expect(record.conversation_id).toBeUndefined();
   });
 
   it('should map user input text into input message fields', async () => {
@@ -358,11 +391,15 @@ describe('Cursor hook script integration flow', () => {
     const logFile = path.join(tmpDir, 'logs', 'cursor', 'history', `cursor-${getTodayDateString()}.jsonl`);
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
     const record = JSON.parse(lines.at(-1)!);
-    expect(record.hook_event_name).toBe('beforeSubmitPrompt');
-    expect(record.model).toBe('gpt-input');
-    expect(record.input_messages_delta).toEqual([{ role: 'user', content: 'Please edit the file' }]);
-    expect(record.input_messages).toEqual([{ role: 'system', content: 'You are helpful' }]);
-    expect(record.text).toBe('Please edit the file');
+    expect(record['agent.cursor.hook_event_name']).toBe('beforeSubmitPrompt');
+    expect(record['gen_ai.request.model']).toBe('gpt-input');
+    expect(record['gen_ai.input.messages_delta']).toEqual([{ role: 'user', content: 'Please edit the file' }]);
+    expect(record['gen_ai.input.messages']).toEqual([{ role: 'system', content: 'You are helpful' }]);
+    expect(record.hook_event_name).toBeUndefined();
+    expect(record.model).toBeUndefined();
+    expect(record.input_messages_delta).toBeUndefined();
+    expect(record.input_messages).toBeUndefined();
+    expect(record.text).toBeUndefined();
   });
 
   it('should keep fail-open behavior for invalid json payload', async () => {
@@ -416,7 +453,7 @@ describe('Cursor hook script integration flow', () => {
 
     const logFile = path.join(tmpDir, 'logs', 'cursor', 'history', `cursor-${getTodayDateString()}.jsonl`);
     const lines = (await fs.readFile(logFile, 'utf-8')).trim().split('\n');
-    const emitted = lines.map(line => JSON.parse(line).hook_event_name);
+    const emitted = lines.map(line => JSON.parse(line)['agent.cursor.hook_event_name']);
     for (const eventName of events) {
       expect(emitted).toContain(eventName);
     }
@@ -450,6 +487,6 @@ describe('Cursor hook script integration flow', () => {
     expect(entries[0]!['gen_ai.agent.type']).toBe(ClientType.Cursor);
     expect(entries[0]!['event.name']).toBe('other');
     expect(entries[0]!['gen_ai.session.id']).toBe('sess-integ-cursor');
-    expect(entries[0]!['agent.hook_event_name']).toBe('beforeReadFile');
+    expect(entries[0]!['agent.cursor.hook_event_name']).toBe('beforeReadFile');
   });
 });

@@ -11,7 +11,8 @@ Hook 脚本管理层，负责将数据采集 hook 脚本注入到各 AI coding a
 - **HookDefinition** — Hook 定义接口，描述一个 agent hook 的完整信息：目标 agent 标识、settings 文件路径、JSON 导航路径、hook 命令、匹配器以及格式标志。
 - **HookManager** — Hook 脚本管理器，提供 hook 的安装、卸载和安装状态检查能力。同时通过静态工厂方法为已知 agent（Cursor、Qoder CLI、QoderWork）生成预定义的 HookDefinition 列表，也提供通用模板用于快速接入新 agent。
 - **Asset hook entrypoints** (`assets/hooks/*-loongsuite-pilot-hook.sh`) — Agent 调用的 shell 入口，负责 Node runtime 解析、fail-open 行为和委派给 processor。
-- **Asset hook processors** (`assets/hooks/*processor.mjs`) — Hook 事件处理器，读取 stdin payload / transcript，写入 daily JSONL history；后续可承载 source-specific 字段归一化。
+- **Asset hook processors** (`assets/hooks/*processor.mjs`) — Hook 事件处理器，读取 stdin payload / transcript，调用共享 normalizer 生成 standard-compatible hook record，写入 daily JSONL history。
+- **Asset hook normalizer** (`assets/hooks/agent-event-normalizer.mjs`) — 共享的 dependency-free 归一化 helper，负责 timestamp/event id、source event → `event.name`、canonical dotted key 构造、raw context namespacing、best-effort `user.id`、provider fallback、content-policy filtering，以及通用 tool/status/error 映射。
 
 ## 内部设计 (Internal Design)
 
@@ -25,6 +26,7 @@ assets/hooks/
 ├── README.md
 ├── *-loongsuite-pilot-hook.sh
 ├── *-loongsuite-pilot-hook.ps1
+├── agent-event-normalizer.mjs
 ├── hook-processor.mjs
 └── cursor-hook-processor.mjs
 ```
@@ -49,14 +51,14 @@ Agent hook event
     ↓
 *-loongsuite-pilot-hook.sh        # resolve Node, never block agent on failure
     ↓
-*processor.mjs                    # parse stdin/transcript, normalize source fields
+*processor.mjs                    # parse stdin/transcript, emit standard-compatible hook records
     ↓
 ~/.loongsuite-pilot/logs/<agent>/history/<agent>-YYYY-MM-DD.jsonl
     ↓
 BaseHookInput subclass            # incremental tail + final AgentActivityEntry build/validation
 ```
 
-Asset hook processors 是 agent 原始事件离开 agent 进程后的第一层边界。它们可以做 source-specific 字段抽取和轻量归一化，但不能绕过 history JSONL，也不能直接发送到 flusher。
+Asset hook processors 是 agent 原始事件离开 agent 进程后的第一层边界。它们默认承载从 stdin/transcript 单条事件可确定的 deterministic per-event normalization，并通过 `agent-event-normalizer.mjs` 复用通用映射逻辑；source processor 只保留 source-specific extraction。它们不能绕过 history JSONL，也不能直接发送到 flusher。
 
 ### Hook 注入流程
 1. 确保 settings 文件所在目录存在
@@ -110,15 +112,15 @@ history JSONL 每行必须是一个 JSON object。迁移字段归一化到 hook 
   "gen_ai.agent.type": "cursor",
   "gen_ai.tool.name": "edit_file",
   "gen_ai.tool.call.id": "tool-call-id",
-  "agent.raw": { "hook_event_name": "postToolUse" }
+  "agent.cursor.hook_event_name": "postToolUse"
 }
 ```
 
 字段分层约定：
 
-- Canonical dotted keys（如 `event.name`, `gen_ai.*`, `error.*`）用于稳定查询字段。
-- Source-specific 原始信息放在 `agent.raw` 或带 agent 前缀的 `agent.<source>.*` 字段，避免污染顶层 schema。
-- 消息内容、工具参数、工具结果等高敏字段只有在对应 agent policy 允许时才应完整保留；否则写 hash、摘要或删除字段。
+- Canonical dotted keys（如 `event.name`, `user.id`, `gen_ai.*`, `error.*`）用于稳定查询字段。
+- Source-specific 原始信息放在带 agent 前缀的 `agent.<source>.*` 字段，避免污染顶层 schema；已经映射到 canonical 字段的原始 key 不应重复保留。
+- 消息内容、工具参数、工具结果等高敏字段只有在对应 agent policy 允许时才应完整保留；hook processor 会做 best-effort policy filtering，collector 侧仍会权威地再次执行内容策略。
 - `BaseHookInput` 仍负责增量读取、checkpoint、最终调用 `buildAgentActivityEntry()` 以及向 `InputManager` 发射 entries。
 
 兼容期内，processor 可以继续输出原始 transcript row；对应 Input 负责兼容旧格式和 standard-compatible hook record。新增 hook processor 应优先输出 standard-compatible hook record。
@@ -148,11 +150,12 @@ history JSONL 每行必须是一个 JSON object。迁移字段归一化到 hook 
 
 详细约定见 [assets/hooks/README.md](../../../assets/hooks/README.md)。
 
-1. 在 processor 中解析 agent 原始 payload，生成 standard-compatible hook record。
-2. 保留必要的 source raw/context 字段，放入 `agent.raw` 或 `agent.<source>.*`。
-3. 在对应 `BaseHookInput` 子类中优先识别 canonical dotted keys；仅对旧格式走 fallback 解析。
-4. 更新或新增 contract test，覆盖 processor 输出 record 和 input fallback 兼容。
-5. 确认 processor 失败时仍输出空 JSON/退出 0，并把错误写入本地 error log。
+1. 在 processor 中解析 agent 原始 payload，调用 `agent-event-normalizer.mjs` 生成 standard-compatible hook record。
+2. 默认将 stdin/transcript 单条事件可确定的字段映射为 canonical dotted keys，包括 event/session/model/token/tool/error 字段，以及 best-effort `user.id`、provider fallback、content-policy filtering。
+3. 保留必要的 source context 字段，放入 `agent.<source>.*`；已转换字段不得在顶层或 source namespace 中重复保留。
+4. 在对应 `BaseHookInput` 子类中优先识别 canonical dotted keys；仅对旧格式走 fallback 解析。
+5. 更新或新增 contract test，覆盖 processor 输出 record 和 input fallback 兼容。
+6. 确认 processor 失败时仍输出空 JSON/退出 0，并把错误写入本地 error log。
 
 ## 约束 (Constraints)
 

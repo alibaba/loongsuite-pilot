@@ -126,13 +126,18 @@ export function classifyRecord(record) {
   const attributes = parseAttributes(record.attributes);
   const agentType = stringValue(record['gen_ai.agent.type'] ?? record['agent.type']).toLowerCase();
   const source = stringValue(attributes.source ?? record['agent.source']).toLowerCase();
-  const variant = stringValue(attributes.qoder_variant ?? record['agent.qoder_variant']).toLowerCase();
+  const variant = stringValue(
+    attributes.qoder_variant ??
+    record['agent.qoder_variant'] ??
+    record['agent.qoder.variant'] ??
+    record['agent.qoderwork.variant'],
+  ).toLowerCase();
   const entrypoint = stringValue(
     attributes.entrypoint ?? record['agent.entrypoint'] ?? record.entrypoint,
   ).toLowerCase();
 
   if (agentType === 'cursor') return 'cursor';
-  if (agentType === 'qoder-work') return 'qoder-work';
+  if (agentType === 'qoder-work' || variant === 'qoder-work') return 'qoder-work';
   if (agentType === 'qoder-cli' || variant === 'qoder-cli' || entrypoint === 'cli') return 'qoder-cli';
   if (agentType === 'qoder' || variant === 'qoder') return 'qoder';
   if (source === 'qoder-sqlite-chat-message') return 'qoder';

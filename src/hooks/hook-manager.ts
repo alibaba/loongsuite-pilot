@@ -25,6 +25,8 @@ export interface HookDefinition {
   matcher?: string;
   /** Optional explicit history log directory for agents whose control id differs from storage path. */
   historyDir?: string;
+  /** Hook commands that should be removed when installing this definition. */
+  replaceHookCommands?: string[];
   /**
    * If true, use Qoder's nested format:
    *   { matcher: "...", hooks: [{ command, type }] }
@@ -76,7 +78,16 @@ export class HookManager {
 
       const arr = target[lastKey] as any[];
 
-      if (this.isCommandPresent(arr, def.hookCommand)) {
+      if (def.replaceHookCommands?.length) {
+        target[lastKey] = this.removeCommands(arr, def.replaceHookCommands);
+      }
+
+      const updatedArr = target[lastKey] as any[];
+
+      if (this.isCommandPresent(updatedArr, def.hookCommand)) {
+        if (updatedArr !== arr) {
+          await writeJsonFile(def.settingsPath, settings);
+        }
         logger.debug('hook already installed', { agentId: def.agentId });
         return true;
       }
@@ -92,7 +103,7 @@ export class HookManager {
             ...(def.matcher ? { matcher: def.matcher } : {}),
           };
 
-      arr.push(hookEntry);
+      updatedArr.push(hookEntry);
       await writeJsonFile(def.settingsPath, settings);
 
       // Ensure log directory for this agent
@@ -157,7 +168,12 @@ export class HookManager {
       const lastKey = def.hookJsonPath[def.hookJsonPath.length - 1];
       if (!Array.isArray(target[lastKey])) return false;
 
-      return this.isCommandPresent(target[lastKey] as any[], def.hookCommand);
+      const hooks = target[lastKey] as any[];
+      if (def.replaceHookCommands?.some(command => this.isCommandPresent(hooks, command))) {
+        return false;
+      }
+
+      return this.isCommandPresent(hooks, def.hookCommand);
     } catch {
       return false;
     }
@@ -217,12 +233,12 @@ export class HookManager {
   }
 
   /**
-   * Build hook definitions for QoderWork (Stop only).
-   * Reuses the same hook script as Qoder CLI, passing "qoder-work" as agent ID.
+   * Build hook definitions for Qoder Work (Stop only).
    */
   static buildQoderWorkHooks(loongsuitePilotDir?: string): HookDefinition[] {
     const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
-    const command = `${baseDir}/hooks/qoder-loongsuite-pilot-hook.sh qoder-work`;
+    const command = `${baseDir}/hooks/qoderwork-loongsuite-pilot-hook.sh`;
+    const legacyCommand = `${baseDir}/hooks/qoder-loongsuite-pilot-hook.sh qoder-work`;
     const settingsPath = resolveHome('~/.qoderwork/settings.json');
 
     return [
@@ -231,6 +247,7 @@ export class HookManager {
         settingsPath,
         hookJsonPath: ['hooks', 'Stop'],
         hookCommand: command,
+        replaceHookCommands: [legacyCommand],
         matcher: '*',
         useNestedFormat: true,
       },
@@ -277,5 +294,21 @@ export class HookManager {
 
   private isCommandPresent(arr: any[], command: string): boolean {
     return arr.some((entry: any) => this.entryMatchesCommand(entry, command));
+  }
+
+  private removeCommands(arr: any[], commands: string[]): any[] {
+    return arr
+      .map((entry: any) => this.removeCommandsFromEntry(entry, commands))
+      .filter((entry: any) => entry !== null);
+  }
+
+  private removeCommandsFromEntry(entry: any, commands: string[]): any | null {
+    if (commands.includes(entry.command)) return null;
+    if (!Array.isArray(entry.hooks)) return entry;
+
+    const hooks = entry.hooks.filter((h: any) => !commands.includes(h.command));
+    if (hooks.length === 0) return null;
+    if (hooks.length === entry.hooks.length) return entry;
+    return { ...entry, hooks };
   }
 }
