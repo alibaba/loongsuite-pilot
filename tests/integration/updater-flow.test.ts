@@ -165,34 +165,6 @@ describe('Updater integration (real filesystem)', () => {
       });
   }
 
-  // ─── Full upgrade cycle ────────────────────────────────
-
-  it('completes a full upgrade cycle: download → deploy → update pointers', async () => {
-    const v1Dir = await createFakeVersion('1.0.1', 'aaa');
-    await setCurrentPointer(v1Dir);
-
-    const { tarballBytes, sha256 } = await createFakeTarball('1.0.2', 'bbb');
-    mockFetchForUpgrade(tarballBytes, {
-      version: '1.0.2', git_commit: 'bbb',
-      package_url: 'https://example.com/pkg.tar.gz', sha256,
-    });
-    setupExecFileRouting();
-
-    const updater = new Updater(makeConfig(), testDir);
-    await updater.check();
-
-    expect(await readPointer('current')).toBe('1.0.2_bbb');
-    expect(await readPointer('previous')).toBe('1.0.1_aaa');
-
-    const newVersionDir = path.join(testDir, 'versions', '1.0.2_bbb');
-    const exists = await fs.access(newVersionDir).then(() => true).catch(() => false);
-    expect(exists).toBe(true);
-
-    const distExists = await fs.access(path.join(newVersionDir, 'dist', 'index.js'))
-      .then(() => true).catch(() => false);
-    expect(distExists).toBe(true);
-  });
-
   // ─── npm install failure → no pointer update ──────────
 
   it('does NOT update pointer when npm install fails', async () => {

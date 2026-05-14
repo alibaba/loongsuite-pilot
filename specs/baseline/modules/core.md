@@ -27,20 +27,6 @@
 
 ## 内部设计 (Internal Design)
 
-### 代码布局 (Code Layout)
-
-```
-src/core/
-├── orchestrator.ts              # 系统组装与 collector lifecycle
-├── config-loader.ts             # env / config file / defaults 合并
-├── input-manager.ts             # input lifecycle 与 entries 路由
-├── agent-discovery-service.ts   # agent 可用性发现与 start/stop 委派
-├── agent-control-manager.ts     # agent on/off/auto 准入控制
-└── log-retention-service.ts     # 日志保留与定期清理
-```
-
-`Orchestrator` 是 core 的唯一高层装配点；其他 core class 应保持单一职责，避免把 input 解析、flusher 实现或 hook 注入细节搬入 core。
-
 ### 启动序列 (Startup Sequence)
 
 Orchestrator 启动分为以下阶段：
@@ -52,21 +38,17 @@ Orchestrator 启动分为以下阶段：
 5. **清理服务** — 启动 LogRetentionService 进行日志轮转
 
 ### ConfigLoader 优先级模型
-
 三层配置加载，高优先级覆盖低优先级：
-
 - Environment variables（最高）
 - Config file (`~/.loongsuite-pilot/config.json`)
 - Built-in defaults（最低）
 
 ### AgentDiscoveryService 状态机
-
 每个 entry 拥有独立状态：`Idle → Starting → Running → Stopping → Idle`
 
 发现策略：优先 `fs.watch` 监控 watchPaths；watch 失败自动降级到定时 polling。
 
 ### AgentControlManager 三级门控
-
 - `"on"` → 强制启用
 - `"off"` → 强制禁用
 - `"auto"`（默认）→ 委派给配置默认值 / isAvailable 检测
@@ -75,24 +57,22 @@ Orchestrator 启动分为以下阶段：
 
 `Input.emit('entries')` → `InputManager` routes → `flusher.sendBatch()`
 
-InputManager 仅负责将 Input 产出的 entries 路由至已注册的 flusher(s)
+InputManager 仅负责将 Input 产出的 entries 路由至已注册的 flusher(s)。所有 cross-cutting 数据处理（userId 富化、content policy、字段标准化）在 hook 层完成，发生在 entries 进入 InputManager 之前。
 
 ### LogRetentionService
-
 延迟 30s 后执行首次清理，之后按 `intervalMs` 周期运行。按日期后缀和分类目录决定保留天数。
 
 ## 依赖关系 (Dependencies)
 
-
-| 依赖模块        | 导入内容                                                                                               |
-| ----------- | -------------------------------------------------------------------------------------------------- |
-| types       | `AnalyticsConfig`, `AgentDetectionEntry`, `EntryState`, `AgentControlConfig`, `LogRetentionConfig` |
-| inputs      | `BaseInput` (type only), 所有具体 Input 类                                                              |
-| flushers    | `BaseFlusher`, `SlsFlusher`, `JsonlFlusher`, `HttpFlusher`, `MultiFlusher`                         |
-| checkpoints | `StateStore`                                                                                       |
-| hooks       | `HookManager`                                                                                      |
-| utils       | `createLogger`, `resolveHome`, `ensureDir`, `readJsonFile`, `writeJsonFile`                        |
-
+| 依赖模块 | 导入内容 |
+|---------|---------|
+| types | `AnalyticsConfig`, `AgentDetectionEntry`, `EntryState`, `AgentControlConfig`, `LogRetentionConfig` |
+| inputs | `BaseInput` (type only), 所有具体 Input 类 |
+| flushers | `BaseFlusher`, `SlsFlusher`, `JsonlFlusher`, `HttpFlusher`, `MultiFlusher` |
+| checkpoints | `StateStore` |
+| hooks | `HookManager` |
+| normalization | `applyAgentContentPolicy` |
+| utils | `createLogger`, `resolveHome`, `ensureDir`, `readJsonFile`, `writeJsonFile` |
 
 ## 约束 (Constraints)
 
@@ -104,4 +84,3 @@ InputManager 仅负责将 Input 产出的 entries 路由至已注册的 flusher(
 6. **AgentDiscoveryService 不直接操作 Input**：通过 `AgentDetectionEntry.start/stop` 回调间接委派给 InputManager。
 7. **LogRetentionService 仅删除包含日期后缀的文件**：不匹配 `YYYY-MM-DD` 格式的文件永不被清理。
 8. **InputManager 不应承载数据变换逻辑**：如需新增 cross-cutting 数据处理（富化、过滤、脱敏等），应以 middleware 形式实现，而非修改 InputManager。
-

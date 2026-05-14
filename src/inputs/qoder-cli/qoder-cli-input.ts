@@ -3,6 +3,7 @@ import type { AgentActivityEntry, AgentEventName, JsonValue } from '../../types/
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
+import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 
 const SOURCE = 'qoder-transcript-hook';
 const IGNORED_ROW_TYPES = new Set(['ai-title', 'last-prompt', 'session_meta', 'progress']);
@@ -40,6 +41,9 @@ export class QoderCliInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
+    const canonicalEntry = buildCanonicalHookEntry(record, ClientType.QoderCli);
+    if (canonicalEntry) return canonicalEntry;
+
     const hookEntry = buildPostToolUseEntry(record);
     if (hookEntry) return hookEntry;
 

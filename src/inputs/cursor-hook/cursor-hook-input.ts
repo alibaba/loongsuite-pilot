@@ -3,6 +3,7 @@ import type { AgentActivityEntry, AgentEventName, JsonValue } from '../../types/
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { buildAgentActivityEntry, normalizeFinishReasons } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
+import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 
 const UNKNOWN_MODEL = 'unknown';
 
@@ -39,6 +40,13 @@ export class CursorHookInput extends BaseHookInput {
   ): Promise<AgentActivityEntry | null> {
     const payload = getPayload(record);
     const hookEvent = getHookEvent(record, payload);
+    const canonicalEntry = buildCanonicalHookEntry(
+      record,
+      ClientType.Cursor,
+      buildAttributes(record, payload, hookEvent),
+    );
+    if (canonicalEntry) return canonicalEntry;
+
     const eventName = inferEventName(hookEvent, payload);
     const toolOutput = buildToolResultPayload(payload);
     const toolArguments = buildToolArguments(payload);

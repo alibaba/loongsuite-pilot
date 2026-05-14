@@ -68,6 +68,7 @@ When ready to implement, run /opsx:apply
       - Read any completed dependency files for context
       - Create the artifact file using `template` as the structure
       - Apply `context` and `rules` as constraints - but do NOT copy them into the file
+      - Run the **Baseline Impact Check** below before considering the artifact complete
       - Show brief progress: "Created <artifact-id>"
 
    b. **Continue until all `applyRequires` artifacts are complete**
@@ -83,6 +84,14 @@ When ready to implement, run /opsx:apply
    ```bash
    openspec status --change "<name>"
    ```
+
+6. **Final baseline consistency check**
+
+   Before final output, re-read the created `proposal.md`, `design.md`, `specs/**/*.md`, and `tasks.md` and verify:
+   - Any affected baseline modules are listed in `proposal.md`
+   - Any baseline documentation updates are explicitly declared in `proposal.md`
+   - `design.md` mentions baseline documentation sync when module responsibilities or boundaries change
+   - `tasks.md` contains explicit baseline review/update tasks, not only vague "if needed" wording
 
 **Output**
 
@@ -102,9 +111,28 @@ After completing all artifacts, summarize:
   - Do NOT copy `<context>`, `<rules>`, `<project_context>` blocks into the artifact
   - These guide what you write, but should never appear in the output
 
+**Baseline Impact Check**
+
+After creating or editing `proposal.md`, `design.md`, `specs/**/*.md`, or `tasks.md`, explicitly re-evaluate whether the change affects `specs/baseline/`:
+
+- Does the artifact change or strengthen a baseline module's responsibility?
+- Does it introduce a new module boundary, helper, runtime component, data contract, or ownership rule?
+- Does it change how data flows between modules, even if the high-level pipeline remains the same?
+- Does it require updating `specs/baseline/modules/*.md`, `specs/baseline/constitution.md`, or `specs/baseline/ai_event_schema.md` after implementation?
+
+If yes:
+- Add `Affected Baseline Modules` and `Baseline Documentation Updates` content to `proposal.md`
+- Mention baseline documentation sync in `design.md`
+- Add explicit baseline review/update tasks to `tasks.md`
+
+If no:
+- State why no baseline documentation update is needed in `proposal.md`
+- Ensure later artifact edits repeat this check; a later design decision can change the answer
+
 **Guardrails**
 - Create ALL artifacts needed for implementation (as defined by schema's `apply.requires`)
 - Always read dependency artifacts before creating a new one
 - If context is critically unclear, ask the user - but prefer making reasonable decisions to keep momentum
 - If a change with that name already exists, ask if user wants to continue it or create a new one
 - Verify each artifact file exists after writing before proceeding to next
+- Never rely on the initial baseline impact decision after design/spec changes; re-check it whenever artifact content changes materially

@@ -5,6 +5,17 @@ import { BaseInput } from '../../../src/inputs/base/base-input.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
 import { buildTestEntry } from '../../helpers/fixture-builder.js';
 
+const mockLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  debug: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('../../../src/utils/logger.js', () => ({
+  createLogger: () => mockLogger,
+}));
+
 class LogTestInput extends BaseInput {
   readonly id = 'log-test';
   readonly agentType = ClientType.Qoder;
@@ -22,44 +33,36 @@ describe('US4: Logging verification', () => {
   let input: LogTestInput;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     stateStore = new MockStateStore();
     input = new LogTestInput({ stateStore: stateStore as any, pollIntervalMs: 60_000 });
   });
 
   afterEach(async () => {
     if (input.running) await input.stop();
-    vi.restoreAllMocks();
+    delete process.env.LOG_LEVEL;
   });
 
   describe('lifecycle logging', () => {
     it('should log info on start', async () => {
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-
       await input.start();
       await input.stop();
 
-      const startLog = logSpy.mock.calls.find(
-        call => typeof call[0] === 'string' && call[0].includes('starting'),
-      );
+      const startLog = mockLogger.info.mock.calls.find(call => call[0] === 'starting');
       expect(startLog).toBeDefined();
     });
 
     it('should log info on stop', async () => {
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-
       await input.start();
       await input.stop();
 
-      const stopLog = logSpy.mock.calls.find(
-        call => typeof call[0] === 'string' && call[0].includes('stopped'),
-      );
+      const stopLog = mockLogger.info.mock.calls.find(call => call[0] === 'stopped');
       expect(stopLog).toBeDefined();
     });
   });
 
   describe('collect success logging', () => {
     it('should log debug with entry count on successful collect', async () => {
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       process.env.LOG_LEVEL = 'debug';
 
       input.collectFn = async () => [buildTestEntry(), buildTestEntry()];
@@ -67,29 +70,22 @@ describe('US4: Logging verification', () => {
       await input.start();
       await input.stop();
 
-      const debugLog = logSpy.mock.calls.find(
-        call => typeof call[0] === 'string' && call[0].includes('cycle produced entries'),
-      );
+      const debugLog = mockLogger.debug.mock.calls.find(call => call[0] === 'cycle produced entries');
       expect(debugLog).toBeDefined();
-
-      delete process.env.LOG_LEVEL;
+      expect(debugLog?.[1]).toEqual({ count: 2 });
     });
   });
 
   describe('collect error logging', () => {
     it('should log error on collect failure', async () => {
-      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      vi.spyOn(console, 'log').mockImplementation(() => {});
-
       input.collectFn = async () => { throw new Error('test collection error'); };
 
       await input.start();
       await input.stop();
 
-      const errorLog = errSpy.mock.calls.find(
-        call => typeof call[0] === 'string' && call[0].includes('collection cycle failed'),
-      );
+      const errorLog = mockLogger.error.mock.calls.find(call => call[0] === 'collection cycle failed');
       expect(errorLog).toBeDefined();
+      expect(errorLog?.[1]).toEqual({ error: 'Error: test collection error' });
     });
   });
 });

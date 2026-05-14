@@ -9,6 +9,17 @@ import { BaseInput } from '../../../src/inputs/base/base-input.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
 import { buildTestEntry } from '../../helpers/fixture-builder.js';
 
+const mockLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  debug: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('../../../src/utils/logger.js', () => ({
+  createLogger: () => mockLogger,
+}));
+
 function getTodayDateString(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -45,21 +56,18 @@ describe('US4: Error recovery', () => {
   let stateStore: MockStateStore;
 
   beforeEach(async () => {
+    vi.clearAllMocks();
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'err-test-'));
     stateStore = new MockStateStore();
   });
 
   afterEach(async () => {
-    vi.restoreAllMocks();
     vi.useRealTimers();
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   describe('malformed JSON warning', () => {
     it('should emit warn log for malformed JSONL but continue processing', async () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      vi.spyOn(console, 'log').mockImplementation(() => {});
-
       const today = getTodayDateString();
       const logFile = path.join(tmpDir, `err-hook-${today}.jsonl`);
       await fs.writeFile(logFile,
@@ -81,17 +89,14 @@ describe('US4: Error recovery', () => {
       await input.stop();
 
       expect(allEntries).toHaveLength(1);
-      const warnLog = warnSpy.mock.calls.find(
-        call => typeof call[0] === 'string' && call[0].includes('invalid JSONL line'),
-      );
+      const warnLog = mockLogger.warn.mock.calls.find(call => call[0] === 'invalid JSONL line');
       expect(warnLog).toBeDefined();
+      expect(warnLog?.[1]?.error).toContain('BAD_JSON_LINE');
     });
   });
 
   describe('missing file handling', () => {
     it('should handle missing log file and retry on next cycle', async () => {
-      vi.spyOn(console, 'log').mockImplementation(() => {});
-
       const logDir = path.join(tmpDir, 'nonexistent-dir');
 
       const input1 = new ErrorTestHookInput({
@@ -133,8 +138,6 @@ describe('US4: Error recovery', () => {
 
   describe('runCycle exception resilience', () => {
     it('should continue polling after collect throws an error', async () => {
-      vi.spyOn(console, 'log').mockImplementation(() => {});
-      vi.spyOn(console, 'error').mockImplementation(() => {});
       vi.useFakeTimers();
 
       const input = new ErrorTestInput({ stateStore: stateStore as any, pollIntervalMs: 5_000 });

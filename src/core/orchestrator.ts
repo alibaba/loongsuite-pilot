@@ -283,7 +283,11 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Qoder Work (Hook JSONL) ---
-    const qoderWorkInput = new QoderWorkInput({ stateStore: this.stateStore });
+    const qoderWorkLogDir = path.join(this.dataDir, 'logs', 'qoder-work', 'history');
+    const qoderWorkInput = new QoderWorkInput({
+      stateStore: this.stateStore,
+      logDir: qoderWorkLogDir,
+    });
     this.inputManager.registerInput(qoderWorkInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkInput, {
@@ -298,7 +302,11 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Qoder CLI (Hook JSONL) ---
-    const qoderCliInput = new QoderCliInput({ stateStore: this.stateStore });
+    const qoderCliLogDir = path.join(this.dataDir, 'logs', 'qoder-cli', 'history');
+    const qoderCliInput = new QoderCliInput({
+      stateStore: this.stateStore,
+      logDir: qoderCliLogDir,
+    });
     this.inputManager.registerInput(qoderCliInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderCliInput, {
