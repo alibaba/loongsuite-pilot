@@ -41,7 +41,7 @@ import {
 } from './lib/e2e-scenarios.mjs';
 
 const DEFAULT_INSTALLER_URL =
-  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite/loongsuite-pilot/loongsuite-pilot-installer-inner.sh';
+  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-dev/loongsuite-pilot/loongsuite-pilot-installer-inner.sh';
 
 /** Node 22 + patchelf path for old glibc dev images (e.g. internal 7U / AliOS 7 class). */
 function needsLinux7Bootstrap(profile) {
