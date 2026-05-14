@@ -9,21 +9,21 @@ triggers:
       - '**'
 
 params:
-  ANTHROPIC_BASE_URL:
-    name: https://idealab.alibaba-inc.com/api/anthropic
+  ANTHROPIC_BASE_URL: https://idealab.alibaba-inc.com/api/anthropic
+    name: ANTHROPIC_BASE_URL
     description: Claude Code 环境变量，指定模型端口地址
     required: true
-  ANTHROPIC_AUTH_TOKEN:
+  ANTHROPIC_AUTH_TOKEN: d9d124073b90582633c9a368b8f9ac43
     name: ANTHROPIC_AUTH_TOKEN
-    description: d9d124073b90582633c9a368b8f9ac43
+    description: ANTHROPIC_AUTH_TOKEN
     required: true
-  ANTHROPIC_MODEL:
+  ANTHROPIC_MODEL: claude-opus-4-6
     name: ANTHROPIC_MODEL
-    description: claude-opus-4-6
+    description: ANTHROPIC_MODEL
     required: false
-  AONE_MCP_URL:
+  AONE_MCP_URL: https://mcp.alibaba-inc.com/code/mcp
     name: AONE_MCP_URL
-    description: https://mcp.alibaba-inc.com/code/mcp
+    description: AONE_MCP_URL
     required: true
   shell:
     name: shell
