@@ -191,7 +191,7 @@ function parseTranscriptLine(line, agentId, runtimeConfig) {
 
 function normalizeTranscriptRecord(record, agentId, runtimeConfig) {
   if (agentId === 'qoder-cli' || agentId === 'qoder-work' || agentId === 'qoder') {
-    return buildQoderHookRecord(record, { runtimeConfig }) || record;
+    return buildQoderHookRecord(record, { runtimeConfig });
   }
   return record;
 }

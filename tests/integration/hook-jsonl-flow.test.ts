@@ -216,6 +216,12 @@ describe('Hook JSONL integration flow', () => {
     const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
     await fs.writeFile(transcriptPath, [
       JSON.stringify({
+        type: 'session_meta',
+        uuid: 'meta-ignored',
+        sessionId: 'sess-hook',
+        cwd: '/tmp/project',
+      }),
+      JSON.stringify({
         type: 'user',
         uuid: 'user-1',
         timestamp: '2026-05-01T18:15:22.122Z',
@@ -238,6 +244,15 @@ describe('Hook JSONL integration flow', () => {
     expect(result.stdout.trim()).toBe('{}');
 
     const logDir = path.join(dataDir, 'logs', 'qoder-cli', 'history');
+    const historyFile = path.join(logDir, `qoder-cli-${getTodayDateString()}.jsonl`);
+    const historyLines = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n');
+    expect(historyLines).toHaveLength(1);
+    const historyRecord = JSON.parse(historyLines[0]!);
+    expect(historyRecord.type).toBeUndefined();
+    expect(historyRecord.uuid).toBeUndefined();
+    expect(historyRecord.sessionId).toBeUndefined();
+    expect(historyRecord['event.name']).toBe('llm.request');
+
     const input = new QoderCliInput({
       stateStore: stateStore as any,
       logDir,

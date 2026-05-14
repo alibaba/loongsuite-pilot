@@ -134,6 +134,25 @@ describe('asset hook agent event normalizer', () => {
     expect(record['agent.qoder.entrypoint']).toBeUndefined();
   });
 
+  it('returns null for Qoder non-event metadata rows', () => {
+    expect(buildQoderHookRecord({
+      type: 'session_meta',
+      uuid: 'meta-1',
+      sessionId: 'sess-meta',
+      cwd: '/tmp/project',
+    }, {
+      runtimeConfig: { userId: 'u-qoder', agents: {} },
+    })).toBeNull();
+
+    expect(buildQoderHookRecord({
+      type: 'progress',
+      uuid: 'progress-1',
+      sessionId: 'sess-meta',
+    }, {
+      runtimeConfig: { userId: 'u-qoder', agents: {} },
+    })).toBeNull();
+  });
+
   it('shares provider fallback rules with collector normalization', () => {
     expect(inferProviderName({ 'gen_ai.request.model': 'claude-sonnet' })).toBe('anthropic');
     expect(inferProviderName({ 'gen_ai.request.model': 'gpt-5.5' })).toBe('openai');
