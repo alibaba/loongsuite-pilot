@@ -28,6 +28,7 @@ export interface AnalyticsConfig {
   flushers: FlusherConfig;
   retention: LogRetentionConfig;
   agents: AgentsConfig;
+  hookWatchdog: HookWatchdogConfig;
   autoUpdate?: AutoUpdateConfig;
 }
 
@@ -105,6 +106,12 @@ export interface LogRetentionConfig {
   hookDebugDays: number;
   outputDays: number;
   slsFailedDays: number;
+}
+
+export interface HookWatchdogConfig {
+  enabled: boolean;
+  intervalMs: number;
+  repairCooldownMs: number;
 }
 
 export type AgentControlMode = 'on' | 'off' | 'auto';

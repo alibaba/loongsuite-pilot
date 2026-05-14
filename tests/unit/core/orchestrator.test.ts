@@ -173,6 +173,11 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       outputDays: 7,
       slsFailedDays: 7,
     },
+    hookWatchdog: {
+      enabled: false, // disabled by default in tests to avoid spawning child processes
+      intervalMs: 5 * 60_000,
+      repairCooldownMs: 10 * 60_000,
+    },
     agents: {},
     ...overrides,
   };

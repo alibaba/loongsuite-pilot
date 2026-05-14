@@ -4,6 +4,7 @@ import type {
   AnalyticsConfig,
   AutoUpdateConfig,
   FlusherConfig,
+  HookWatchdogConfig,
   LogRetentionConfig,
   SlsEndpoint,
   SlsMode,
@@ -71,6 +72,12 @@ interface ConfigFile {
     slsFailedDays?: number;
   };
 
+  hookWatchdog?: {
+    enabled?: boolean;
+    intervalMs?: number;
+    repairCooldownMs?: number;
+  };
+
   agents?: Record<string, {
     captureMessageContent?: boolean | string;
   }>;
@@ -125,6 +132,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     flushers: buildFlushersConfig(file, dataDir),
     retention: buildRetentionConfig(file),
     agents: buildAgentsConfig(file),
+    hookWatchdog: buildHookWatchdogConfig(file),
   };
 }
 
@@ -206,6 +214,20 @@ function buildRetentionConfig(file: ConfigFile | null): LogRetentionConfig {
     hookDebugDays: resolve(file?.retention?.hookDebugDays, 7),
     outputDays: resolve(file?.retention?.outputDays, 7),
     slsFailedDays: resolve(file?.retention?.slsFailedDays, 7),
+  };
+}
+
+function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
+  return {
+    enabled: envBool('LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED', file?.hookWatchdog?.enabled ?? true),
+    intervalMs: envInt(
+      'LOONGSUITE_PILOT_HOOK_WATCHDOG_INTERVAL_MS',
+      file?.hookWatchdog?.intervalMs ?? 5 * 60_000, // 5 minutes
+    ),
+    repairCooldownMs: envInt(
+      'LOONGSUITE_PILOT_HOOK_WATCHDOG_COOLDOWN_MS',
+      file?.hookWatchdog?.repairCooldownMs ?? 10 * 60_000, // 10 minutes
+    ),
   };
 }
 

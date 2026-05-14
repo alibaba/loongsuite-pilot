@@ -26,6 +26,7 @@ import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-in
 import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
+import { PluginHookWatchdog } from './plugin-hook-watchdog.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 
@@ -53,6 +54,7 @@ export class Orchestrator extends EventEmitter {
   private stateStore!: StateStore;
   private flusher!: BaseFlusher;
   private logRetentionService!: LogRetentionService;
+  private hookWatchdog!: PluginHookWatchdog;
   private isRunning = false;
 
   constructor(config: AnalyticsConfig) {
@@ -112,6 +114,11 @@ export class Orchestrator extends EventEmitter {
     this.logRetentionService = new LogRetentionService(this.dataDir, this.config.retention);
     this.logRetentionService.start();
 
+    // 9. Start plugin hook watchdog (periodically restores Claude/Codex hooks
+    //    if other tools overwrite ~/.claude/settings.json or ~/.codex/hooks.json)
+    this.hookWatchdog = new PluginHookWatchdog(this.config.hookWatchdog);
+    this.hookWatchdog.start();
+
     this.isRunning = true;
     this.emit('started');
     logger.info('orchestrator started', {
@@ -123,6 +130,7 @@ export class Orchestrator extends EventEmitter {
     if (!this.isRunning) return;
     logger.info('stopping orchestrator');
 
+    this.hookWatchdog?.stop();
     this.logRetentionService?.stop();
     await this.agentDiscoveryService?.stop();
     await this.inputManager?.stopAll();
