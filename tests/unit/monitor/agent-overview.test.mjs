@@ -27,6 +27,12 @@ describe('agent overview classification', () => {
       'agent.qoder_variant': 'qoder-cli',
     })).toBe('qoder-cli');
     expect(classifyRecord({
+      'agent.qoder.variant': 'qoder-cli',
+    })).toBe('qoder-cli');
+    expect(classifyRecord({
+      'agent.qoderwork.variant': 'qoder-work',
+    })).toBe('qoder-work');
+    expect(classifyRecord({
       'agent.entrypoint': 'cli',
     })).toBe('qoder-cli');
     expect(classifyRecord({

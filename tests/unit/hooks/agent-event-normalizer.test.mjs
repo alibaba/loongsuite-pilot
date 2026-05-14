@@ -122,6 +122,9 @@ describe('asset hook agent event normalizer', () => {
       'gen_ai.provider.name': 'qwen',
       'gen_ai.session.id': 'sess-q',
       'gen_ai.response.id': 'resp-1',
+      'agent.qoder.variant': 'qoder-cli',
+      'agent.qoder.raw_type': 'assistant',
+      'agent.qoder.content_type': 'text',
       'gen_ai.output.messages': [{ type: 'text', content: 'hello' }],
     });
     expect(record.type).toBeUndefined();
@@ -132,6 +135,9 @@ describe('asset hook agent event normalizer', () => {
     expect(record['agent.raw']).toBeUndefined();
     expect(record['agent.qoder.sessionId']).toBeUndefined();
     expect(record['agent.qoder.entrypoint']).toBeUndefined();
+    expect(record['agent.qoder_variant']).toBeUndefined();
+    expect(record['agent.raw_type']).toBeUndefined();
+    expect(record['agent.content_type']).toBeUndefined();
   });
 
   it('uses the Qoder Work hook agent id as the canonical agent type', () => {
@@ -158,11 +164,16 @@ describe('asset hook agent event normalizer', () => {
       'user.id': 'u-work',
       'gen_ai.agent.type': 'qoder-work',
       'gen_ai.session.id': 'sess-work',
-      'agent.qoder_variant': 'qoder-work',
+      'agent.qoderwork.variant': 'qoder-work',
+      'agent.qoderwork.raw_type': 'assistant',
+      'agent.qoderwork.content_type': 'text',
       'agent.qoderwork.cwd': '/Users/lukechen/.qoderwork/workspace/project',
       'gen_ai.output.messages': [{ type: 'text', content: 'hello from work' }],
     });
     expect(record['agent.qoder.cwd']).toBeUndefined();
+    expect(record['agent.qoder_variant']).toBeUndefined();
+    expect(record['agent.raw_type']).toBeUndefined();
+    expect(record['agent.content_type']).toBeUndefined();
   });
 
   it('returns null for Qoder non-event metadata rows', () => {

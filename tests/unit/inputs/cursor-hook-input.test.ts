@@ -105,8 +105,9 @@ describe('CursorHookInput', () => {
       'gen_ai.tool.name': 'Shell',
       'gen_ai.tool.call.id': 'tool-canonical',
       'gen_ai.tool.call.arguments': { command: 'pwd' },
-      'agent.hook_event_name': 'preToolUse',
+      'agent.cursor.hook_event_name': 'preToolUse',
     });
+    expect(entries[0]!['agent.hook_event_name']).toBeUndefined();
   });
 
   it('maps raw postToolUse hook record to tool.result event_t fields', async () => {

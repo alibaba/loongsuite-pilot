@@ -235,7 +235,7 @@ function buildAttributes(
   hookEvent: string,
 ): { [key: string]: JsonValue } {
   return toJsonObject({
-    hook_event_name: hookEvent,
+    'cursor.hook_event_name': hookEvent,
     user_email: payload.user_email,
     cursor_version: payload.cursor_version,
     workspace_roots: payload.workspace_roots,

@@ -418,6 +418,7 @@ export function buildQoderHookRecord(row, options = {}) {
   if (!content) return null;
 
   const variant = inferQoderVariant(row, sourceAgentId);
+  const sourceNamespace = qoderSourceNamespace(variant);
   const eventName = inferQoderEventName(rowType, content);
   const model = getStringValue(message, 'model') || 'unknown';
   const agentType = variant;
@@ -450,13 +451,13 @@ export function buildQoderHookRecord(row, options = {}) {
     'gen_ai.tool.call.result': eventName === 'tool.result' ? toJsonValue(row.toolUseResult ?? content.content) : undefined,
     'tool.result.status': eventName === 'tool.result' ? inferQoderToolResultStatus(content) : undefined,
     'agent.source': 'qoder-transcript-hook',
-    'agent.qoder_variant': variant,
-    'agent.raw_type': rowType,
-    'agent.content_type': content.type,
+    [`agent.${sourceNamespace}.variant`]: variant,
+    [`agent.${sourceNamespace}.raw_type`]: rowType,
+    [`agent.${sourceNamespace}.content_type`]: content.type,
     time_unix_nano: timestampToUnixNanos(row.time_unix_nano ?? row.timestamp ?? Date.now()),
     observed_time_unix_nano: timestampToUnixNanos(Date.now()),
   };
-  addSourceAttributes(record, qoderSourceNamespace(variant), row, QODER_MAPPED_SOURCE_KEYS);
+  addSourceAttributes(record, sourceNamespace, row, QODER_MAPPED_SOURCE_KEYS);
   return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
 }
 
@@ -466,6 +467,7 @@ function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId) {
   if (eventType !== 'PostToolUse') return null;
   const toolInput = asRecord(data.tool_input);
   const variant = sourceAgentId === 'qoder-work' ? 'qoder-work' : 'qoder-cli';
+  const sourceNamespace = qoderSourceNamespace(variant);
   const record = {
     'event.id': getStringValue(data, 'event.id') || crypto.randomUUID(),
     'event.name': 'tool.result',
@@ -485,14 +487,14 @@ function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId) {
     }),
     'tool.result.status': 'success',
     'agent.source': 'qoder-transcript-hook',
-    'agent.qoder_variant': variant,
-    'agent.raw_type': eventType,
+    [`agent.${sourceNamespace}.variant`]: variant,
+    [`agent.${sourceNamespace}.raw_type`]: eventType,
     'agent.loongsuite_pilot_pre_file_exists': data.loongsuite_pilot_pre_file_exists,
     'agent.file_path': getStringValue(toolInput, 'file_path') || getStringValue(data, 'file_path'),
     time_unix_nano: timestampToUnixNanos(data.time_unix_nano ?? data.timestamp ?? Date.now()),
     observed_time_unix_nano: timestampToUnixNanos(Date.now()),
   };
-  addSourceAttributes(record, qoderSourceNamespace(variant), data, QODER_MAPPED_SOURCE_KEYS);
+  addSourceAttributes(record, sourceNamespace, data, QODER_MAPPED_SOURCE_KEYS);
   return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
 }
 
