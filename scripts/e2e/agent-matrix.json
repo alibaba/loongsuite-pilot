@@ -1,0 +1,55 @@
+{
+  "description": "Remote E2E agent matrix. npmPackage 字段用于 E2E_SCENARIO=version-matrix 场景：远端 `npm view <pkg> versions --json` 拉最近 N 个版本串行测试。Cursor: official cursor.com/install (new glibc) unless E2E_PROFILE is linux-7u/alios7 (then default watzon AppImage) or E2E_CURSOR_INSTALL_STRATEGY=watzon|official. On hosts with too-old glibc, cursor is auto-skipped (E2E_CURSOR_SKIP_IF_INCOMPAT=1 default; set 0 to fail loudly). Codex: npm global; E2E_CODEX_FORCE_ENSURE=1 reinstalls global CLI (see run-remote-e2e warn re: Logstore). Qoder: E2E_QODER_PERSONAL_ACCESS_TOKEN.",
+  "agents": [
+    {
+      "id": "codex-cli-latest",
+      "name": "Codex CLI",
+      "binary": "codex",
+      "versionArg": "--version",
+      "slsAgentTypeHint": "codex",
+      "notes": "OpenAI Codex CLI; hooks from loongsuite-pilot installer. Ensure command is built in agent-matrix.mjs from E2E_CODEX_NPM_SPEC (default @openai/codex). E2E_CODEX_FORCE_ENSURE=1 reinstalls even if codex exists. Config: E2E_WRITE_REMOTE_CODEX_CONFIG=1 + E2E_CODEX_OPENAI_API_KEY; run-remote-e2e writes ~/.codex/config.toml then runs ensure then probe.",
+      "npmPackage": "@openai/codex",
+      "representativeVersions": ["latest", "rolling"],
+      "ensureInstallSh": "npm install -g @openai/codex || echo '[e2e-ensure] npm install @openai/codex failed'",
+      "defaultProbeSh": "command -v codex >/dev/null && codex exec \"你好\" --skip-git-repo-check < /dev/null || true",
+      "installHint": "Use E2E_USE_MATRIX_PROBE=1; codex exec must use < /dev/null."
+    },
+    {
+      "id": "claude-code-cli",
+      "name": "Claude Code",
+      "binary": "claude",
+      "versionArg": "--version",
+      "slsAgentTypeHint": "claude-code",
+      "npmPackage": "@anthropic-ai/claude-code",
+      "representativeVersions": ["latest"],
+      "ensureInstallSh": "npm install -g @anthropic-ai/claude-code || echo '[e2e-ensure] npm install claude-code failed'",
+      "defaultProbeSh": "command -v claude >/dev/null && claude -p \"你好\" --dangerously-skip-permissions || true",
+      "installHint": "Headless: E2E_WRITE_REMOTE_CLAUDE_ONBOARDING_SKIP=1 + E2E_CLAUDE_BAILIAN=1 + E2E_CLAUDE_BAILIAN_API_KEY (…/apps/anthropic). Optional: E2E_WRITE_REMOTE_CLAUDE_PROXY_CONFIG + E2E_CLAUDE_PROXY_API_KEY for claude-code-proxy. Legacy: E2E_ANTHROPIC_API_KEY."
+    },
+    {
+      "id": "cursor-cli",
+      "name": "Cursor",
+      "binary": "cursor",
+      "versionArg": "--version",
+      "slsAgentTypeHint": "cursor-hook",
+      "notes": "Default ensure: official cursor.com/install (Agent CLI). E2E_CURSOR_INSTALL_STRATEGY=watzon for watzon AppImage extract. Probe runs --version on AppImage / PATH cursor / cursor-agent / agent; if the binary fails with GLIBC_/not found, it emits '[e2e-probe] cursor skipped: host glibc too old' and exits 0 when E2E_CURSOR_SKIP_IF_INCOMPAT=1 (default), or exit 78 when =0.",
+      "representativeVersions": ["latest"],
+      "ensureInstallSh": "",
+      "defaultProbeSh": "set +e; _SKIP=\"${_E2E_CURSOR_SKIP_IF_INCOMPAT:-1}\"; _FAIL_CODE=78; _run_check() { _b=\"$1\"; [ -n \"$_b\" ] || return 99; _out=$(\"$_b\" --version </dev/null 2>&1); _rc=$?; if [ \"$_rc\" -eq 0 ]; then printf '%s\\n' \"$_out\"; return 0; fi; case \"$_out\" in *GLIBC_*|*\"not found\"*|*\"No such file or directory\"*|*\"cannot execute\"*) echo \"[e2e-probe] cursor skipped: host glibc too old (binary=$_b)\"; return 2;; esac; echo \"[e2e-probe] cursor probe failed rc=$_rc for $_b: $_out\"; return 1; }; _finish() { case \"$1\" in 0) exit 0;; *) if [ \"$_SKIP\" = \"1\" ]; then exit 0; else exit \"$_FAIL_CODE\"; fi;; esac; }; _CX=\"$HOME/.local/share/cursor/cursor/usr/bin/cursor\"; _CX2=\"$HOME/.cursor/cursor/usr/bin/cursor\"; if [ -x \"$_CX\" ]; then echo \"[e2e-probe] AppImage (~/.local/share/cursor):\"; _run_check \"$_CX\"; _finish $?; fi; if [ -x \"$_CX2\" ]; then echo \"[e2e-probe] AppImage (~/.cursor):\"; _run_check \"$_CX2\"; _finish $?; fi; if command -v cursor >/dev/null 2>&1; then echo \"[e2e-probe] cursor (PATH):\"; _run_check \"$(command -v cursor)\"; _finish $?; fi; if [ -x \"$HOME/.local/bin/cursor-agent\" ]; then echo \"[e2e-probe] cursor-agent (~/.local/bin):\"; _run_check \"$HOME/.local/bin/cursor-agent\"; _finish $?; fi; if command -v cursor-agent >/dev/null 2>&1; then echo \"[e2e-probe] cursor-agent (PATH):\"; _run_check \"$(command -v cursor-agent)\"; _finish $?; fi; if [ -x \"$HOME/.local/bin/agent\" ]; then echo \"[e2e-probe] agent (~/.local/bin):\"; _run_check \"$HOME/.local/bin/agent\"; _finish $?; fi; if command -v agent >/dev/null 2>&1; then echo \"[e2e-probe] agent (PATH):\"; _run_check \"$(command -v agent)\"; _finish $?; fi; if command -v cursor-installer >/dev/null 2>&1; then echo \"[e2e-probe] cursor-installer:\"; cursor-installer --version 2>/dev/null || true; exit 0; fi; echo \"[e2e-probe] no agent/cursor/cursor-installer on PATH\"; exit 0",
+      "installHint": "Default: official Agent installer (cursor.com/install). Full IDE AppImage: E2E_CURSOR_INSTALL_STRATEGY=watzon or E2E_CURSOR_ENSURE_INSTALL_SH. APT: downloads.cursor.com/aptrepo (needs sudo). On old-glibc hosts (CentOS/AliOS 7) both strategies may ship a binary that cannot run; ensure/probe auto-skip with E2E_CURSOR_SKIP_IF_INCOMPAT=1 (default) or fail loudly with =0."
+    },
+    {
+      "id": "qoder-cli",
+      "name": "Qoder CLI",
+      "binary": "qoder",
+      "versionArg": "--version",
+      "slsAgentTypeHint": "qoder-cli-hook",
+      "notes": "Hook input watches ~/.loongsuite-pilot/logs/qoder-cli/history; qoder-cli-session reads ~/.qoder/logs/sessions. Print probe uses qodercli -q -p (needs token).",
+      "npmPackage": "@qoder-ai/qodercli",
+      "representativeVersions": ["latest"],
+      "ensureInstallSh": "npm install -g @qoder-ai/qodercli && mkdir -p \"$HOME/.local/bin\" && ( command -v qoder >/dev/null || ( command -v qodercli >/dev/null && ln -sf \"$(command -v qodercli)\" \"$HOME/.local/bin/qoder\" ) ) || echo '[e2e-ensure] qoder npm/symlink failed'",
+      "defaultProbeSh": "Q=\"$(command -v qodercli 2>/dev/null || command -v qoder 2>/dev/null)\"\n[ -z \"$Q\" ] && exit 0\nmkdir -p \"$HOME/.qoder\"\nif [ -z \"${QODER_PERSONAL_ACCESS_TOKEN:-}\" ]; then\n  echo \"[e2e-probe] QODER_PERSONAL_ACCESS_TOKEN unset — set E2E_QODER_PERSONAL_ACCESS_TOKEN on **local** npm env to inject for qodercli -p\"\n  exit 0\nfi\n_VER_RAW=\"$(\"$Q\" --version 2>&1 | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -1)\"\n_MAJ=\"${_VER_RAW%%.*}\"\n_REST=\"${_VER_RAW#*.}\"\n_MIN=\"${_REST%%.*}\"\n_PATCH=\"${_REST##*.}\"\n_IS_NEW=0\nif [ \"${_MAJ:-0}\" -gt 0 ] 2>/dev/null; then _IS_NEW=1\nelif [ \"${_MAJ:-0}\" = \"0\" ] && [ \"${_MIN:-0}\" -gt 2 ] 2>/dev/null; then _IS_NEW=1\nelif [ \"${_MAJ:-0}\" = \"0\" ] && [ \"${_MIN:-0}\" = \"2\" ] && [ \"${_PATCH:-0}\" -ge 12 ] 2>/dev/null; then _IS_NEW=1\nfi\nif [ \"$_IS_NEW\" = \"1\" ]; then\n  \"$Q\" --print --yolo --cwd \"$HOME\" \"你好\" </dev/null || true\nelse\n  \"$Q\" -p \"你好\" --max-turns 1 --yolo -w \"$HOME\" </dev/null || true\nfi",
+      "installHint": "Logstore needs a real model turn; --version alone emits nothing. Use PAT via E2E_QODER_PERSONAL_ACCESS_TOKEN."
+    }
+  ]
+}
