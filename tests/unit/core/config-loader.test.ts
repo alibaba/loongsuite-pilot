@@ -325,6 +325,56 @@ describe('ConfigLoader', () => {
     });
   });
 
+  describe('hookWatchdog config', () => {
+    it('provides defaults when no config or env vars', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+
+      const config = await loadConfig();
+      expect(config.hookWatchdog.enabled).toBe(true);
+      expect(config.hookWatchdog.intervalMs).toBe(5 * 60_000);
+      expect(config.hookWatchdog.repairCooldownMs).toBe(10 * 60_000);
+    });
+
+    it('uses config file values over defaults', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        hookWatchdog: {
+          enabled: false,
+          intervalMs: 120_000,
+          repairCooldownMs: 60_000,
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.hookWatchdog.enabled).toBe(false);
+      expect(config.hookWatchdog.intervalMs).toBe(120_000);
+      expect(config.hookWatchdog.repairCooldownMs).toBe(60_000);
+    });
+
+    it('LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED disables watchdog', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED', 'false');
+
+      const config = await loadConfig();
+      expect(config.hookWatchdog.enabled).toBe(false);
+    });
+
+    it('LOONGSUITE_PILOT_HOOK_WATCHDOG_INTERVAL_MS overrides interval', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_HOOK_WATCHDOG_INTERVAL_MS', '90000');
+
+      const config = await loadConfig();
+      expect(config.hookWatchdog.intervalMs).toBe(90_000);
+    });
+
+    it('LOONGSUITE_PILOT_HOOK_WATCHDOG_COOLDOWN_MS overrides cooldown', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_HOOK_WATCHDOG_COOLDOWN_MS', '300000');
+
+      const config = await loadConfig();
+      expect(config.hookWatchdog.repairCooldownMs).toBe(300_000);
+    });
+  });
+
   describe('agents config', () => {
     it('defaults to no per-agent policies when config is missing', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
