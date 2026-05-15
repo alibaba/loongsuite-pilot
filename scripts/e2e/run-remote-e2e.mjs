@@ -38,10 +38,9 @@ import {
   autoUpgradeScript,
   versionMatrixScript,
   buildJsonlValidationSh,
+  DEFAULT_E2E_INSTALLER_URL,
+  buildInstallerChannelTail,
 } from './lib/e2e-scenarios.mjs';
-
-const DEFAULT_INSTALLER_URL =
-  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-dev/loongsuite-pilot/loongsuite-pilot-installer-inner.sh';
 
 /** Node 22 + patchelf path for old glibc dev images (e.g. internal 7U / AliOS 7 class). */
 function needsLinux7Bootstrap(profile) {
@@ -82,7 +81,8 @@ function installSmokeScript(installerUrl, userId, env) {
   const u = installerUrl.replace(/'/g, `'\\''`);
   const id = userId.replace(/'/g, `'\\''`);
   const slsFlags = buildRemoteInstallSlsCliQuotedArgs(env);
-  const installTail = slsFlags ? ` ${slsFlags}` : '';
+  const channelTail = buildInstallerChannelTail(env);
+  const installTail = `${slsFlags ? ` ${slsFlags}` : ''}${channelTail}`;
   return `
 set -euo pipefail
 INSTALLER_URL='${u}'
@@ -242,7 +242,7 @@ async function main() {
   const target = resolveSshTarget(env);
   const identity = env.E2E_SSH_IDENTITY?.trim() || undefined;
   const artifactDir = env.E2E_ARTIFACT_DIR?.trim() || undefined;
-  const installerUrl = (env.E2E_INSTALLER_URL ?? DEFAULT_INSTALLER_URL).trim();
+  const installerUrl = (env.E2E_INSTALLER_URL ?? DEFAULT_E2E_INSTALLER_URL).trim();
   const userId = env.E2E_USER_ID?.trim();
   const userIds = env.E2E_USER_IDS?.trim();
   const profile = (env.E2E_PROFILE ?? 'linux-8u').trim().toLowerCase();

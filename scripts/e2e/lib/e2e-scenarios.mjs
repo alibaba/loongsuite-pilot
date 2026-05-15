@@ -16,6 +16,29 @@ import {
 } from './remote-agent-config.mjs';
 
 /**
+ * Default installer URL shared by run-remote-e2e and the per-scenario script generators.
+ * Points at the loongsuite-dev OSS bucket so pre-release artifacts are exercised.
+ */
+export const DEFAULT_E2E_INSTALLER_URL =
+  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-dev/loongsuite-pilot/loongsuite-pilot-installer-inner.sh';
+
+/**
+ * Compute installer `--channel <ch>` tail.
+ * `E2E_INSTALLER_CHANNEL` defaults to `test` (paired with the dev-bucket DEFAULT_E2E_INSTALLER_URL),
+ * so the installer pulls `latest/loongsuite-pilot.tar.gz` from `loongsuite-dev/`. Set to
+ * `release` / `prod` to omit the flag and let the installer fall back to the production bucket.
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string} ' --channel test' or '' (leading space already included)
+ */
+export function buildInstallerChannelTail(env = process.env) {
+  const ch = (env?.E2E_INSTALLER_CHANNEL ?? 'test').toString().trim();
+  if (!ch) return '';
+  const lower = ch.toLowerCase();
+  if (lower === 'release' || lower === 'prod') return '';
+  return ` --channel ${ch}`;
+}
+
+/**
  * Reboot autostart verification script generator.
  * 默认自动 sudo reboot。关键技巧：用 `nohup ... &` + `disown` 让 reboot 后台触发，
  * 然后本地脚本主动 exit 0，避免 SSH 被强制断开时得到 "Connection reset by peer" 被误判为失败。
@@ -27,7 +50,8 @@ export function rebootAutostartScript(installerUrl, userId, env) {
   const u = installerUrl.replace(/'/g, `'\\''`);
   const id = userId.replace(/'/g, `'\\''`);
   const slsFlags = buildRemoteInstallSlsCliQuotedArgs(env);
-  const installTail = slsFlags ? ` ${slsFlags}` : '';
+  const channelTail = buildInstallerChannelTail(env);
+  const installTail = `${slsFlags ? ` ${slsFlags}` : ''}${channelTail}`;
   return `
 set -euo pipefail
 INSTALLER_URL='${u}'
@@ -175,7 +199,8 @@ export function multiAccountInstallScript(installerUrl, userIds, env) {
   const u = installerUrl.replace(/'/g, `'\\''`);
   const ids = userIds.replace(/'/g, `'\\''`);
   const slsFlags = buildRemoteInstallSlsCliQuotedArgs(env);
-  const installTail = slsFlags ? ` ${slsFlags}` : '';
+  const channelTail = buildInstallerChannelTail(env);
+  const installTail = `${slsFlags ? ` ${slsFlags}` : ''}${channelTail}`;
   return `
 set -euo pipefail
 INSTALLER_URL='${u}'
@@ -247,7 +272,8 @@ export function autoUpgradeScript(installerUrl, userId, env) {
   const u = installerUrl.replace(/'/g, `'\\''`);
   const id = userId.replace(/'/g, `'\\''`);
   const slsFlags = buildRemoteInstallSlsCliQuotedArgs(env);
-  const installTail = slsFlags ? ` ${slsFlags}` : '';
+  const channelTail = buildInstallerChannelTail(env);
+  const installTail = `${slsFlags ? ` ${slsFlags}` : ''}${channelTail}`;
   return `
 set -euo pipefail
 INSTALLER_URL='${u}'
@@ -277,7 +303,7 @@ ps aux | grep -E 'loongsuite-pilot|node.*dist/index' | grep -v grep || true
 echo ""
 echo "--- Phase 3: Trigger upgrade ---"
 echo "Running upgrade command..."
-curl -fsSL "$INSTALLER_URL" | bash -s -- upgrade
+curl -fsSL "$INSTALLER_URL" | bash -s -- upgrade${channelTail}
 
 # Wait for upgrade to complete
 echo "Waiting 10s for upgrade to stabilize..."
@@ -418,9 +444,10 @@ export function buildVersionMatrixPrologueSh(env = process.env) {
 export function buildVersionMatrixInstallPreludeSh(env = process.env) {
   const userId = (env?.E2E_USER_ID ?? '').trim();
   if (!userId) return '';
-  const installerUrl = (env?.E2E_INSTALLER_URL ?? 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite/loongsuite-pilot/loongsuite-pilot-installer-inner.sh').replace(/'/g, `'\\''`);
+  const installerUrl = (env?.E2E_INSTALLER_URL ?? DEFAULT_E2E_INSTALLER_URL).replace(/'/g, `'\\''`);
   const slsFlags = buildRemoteInstallSlsCliQuotedArgs(env);
-  const installTail = slsFlags ? ` ${slsFlags}` : '';
+  const channelTail = buildInstallerChannelTail(env);
+  const installTail = `${slsFlags ? ` ${slsFlags}` : ''}${channelTail}`;
   const uid = userId.replace(/'/g, `'\\''`);
   return `
 # [version-matrix] 重装/刷新 pilot + SLS 配置（同 install-smoke），保证 SLS Logstore 能收到数据
