@@ -43,6 +43,9 @@ Orchestrator 启动分为以下阶段：
 - Config file (`~/.loongsuite-pilot/config.json`)
 - Built-in defaults（最低）
 
+### SLS 目的地解析
+ConfigLoader 根据用户提供的 SLS 字段和 `destinationOverride` 开关，解析出最终的 SLS endpoint 列表（单写或双写）。
+
 ### AgentDiscoveryService 状态机
 每个 entry 拥有独立状态：`Idle → Starting → Running → Stopping → Idle`
 

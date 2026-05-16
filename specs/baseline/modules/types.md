@@ -66,4 +66,5 @@ src/types/
 3. **新增 agent 必须注册 ClientType**：不允许使用裸字符串作为 agent type。
 4. **JsonValue 递归类型严格**：不接受 `undefined`、`Date`、`RegExp` 等非 JSON-safe 值。
 5. **SlsEndpoint.kind 枚举固定**：仅 `'agentActivity' | 'agentTelemetry' | 'mcp' | 'trace'`。
-6. **EntryState 状态机顺序性**：必须遵循 idle→starting→running→stopping→idle 转换。
+6. **SlsEndpoint 自包含**：每个 endpoint 携带完整的 URL、mode、凭据，独立于同一 flusher 中的其他 endpoint。
+7. **EntryState 状态机顺序性**：必须遵循 idle→starting→running→stopping→idle 转换。
