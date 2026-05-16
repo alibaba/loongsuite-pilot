@@ -39,9 +39,13 @@ function makeConfig(overrides: Partial<SlsFlusherConfig> = {}): SlsFlusherConfig
     endpoints: [
       {
         name: 'activity',
+        endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
         project: 'proj-a',
         logstore: 'store-a',
         kind: 'agentActivity',
+        mode: 'ak',
+        accessKeyId: 'ak',
+        accessKeySecret: 'sk',
         redact: false,
       },
     ],
@@ -81,8 +85,8 @@ describe('SlsFlusher', () => {
     it('sends to multiple endpoints', async () => {
       const config = makeConfig({
         endpoints: [
-          { name: 'ep1', project: 'p1', logstore: 'l1', kind: 'agentActivity' },
-          { name: 'ep2', project: 'p2', logstore: 'l2', kind: 'agentTelemetry', redact: true },
+          { name: 'ep1', endpoint: 'https://r1.log.aliyuncs.com', project: 'p1', logstore: 'l1', kind: 'agentActivity', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+          { name: 'ep2', endpoint: 'https://r2.log.aliyuncs.com', project: 'p2', logstore: 'l2', kind: 'agentTelemetry', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk', redact: true },
         ],
       });
       flusher = new SlsFlusher(config, '/tmp/data');
@@ -98,7 +102,7 @@ describe('SlsFlusher', () => {
     it('applies redactCodeGenerationFields when redact=true', async () => {
       const config = makeConfig({
         endpoints: [
-          { name: 'ep-redact', project: 'p', logstore: 'l', kind: 'agentTelemetry', redact: true },
+          { name: 'ep-redact', endpoint: 'https://r.log.aliyuncs.com', project: 'p', logstore: 'l', kind: 'agentTelemetry', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk', redact: true },
         ],
       });
       flusher = new SlsFlusher(config, '/tmp/data');
@@ -152,7 +156,7 @@ describe('SlsFlusher', () => {
   });
 
   describe('failure persistence (T015)', () => {
-    it('persists failed log group to sls-failed-logs/{kind}.jsonl', async () => {
+    it('persists failed log group to sls-failed-logs/<endpoint.name>.jsonl', async () => {
       mockPostLogStoreLogs.mockRejectedValueOnce(new Error('invalid request'));
 
       await flusher.send(buildTestEntry());
@@ -161,10 +165,14 @@ describe('SlsFlusher', () => {
       expect(mockAppendLine).toHaveBeenCalledOnce();
       const [filePath, line] = mockAppendLine.mock.calls[0];
       expect(filePath).toContain('sls-failed-logs');
-      expect(filePath).toContain('agentActivity.jsonl');
+      // Filename is keyed on endpoint.name (the makeConfig fixture uses name='activity').
+      expect(filePath).toContain('activity.jsonl');
       const parsed = JSON.parse(line);
       expect(parsed.error).toContain('invalid request');
       expect(parsed.project).toBe('proj-a');
+      // The kind is preserved inside the JSON payload for debugging.
+      expect(parsed.kind).toBe('agentActivity');
+      expect(parsed.endpoint).toBe('activity');
     });
   });
 
@@ -183,9 +191,9 @@ describe('SlsFlusher', () => {
     it('only forwards to mcp or trace endpoints', async () => {
       const config = makeConfig({
         endpoints: [
-          { name: 'ep-activity', project: 'p1', logstore: 'l1', kind: 'agentActivity' },
-          { name: 'ep-mcp', project: 'p2', logstore: 'l2', kind: 'mcp' },
-          { name: 'ep-trace', project: 'p3', logstore: 'l3', kind: 'trace' },
+          { name: 'ep-activity', endpoint: 'https://r.log.aliyuncs.com', project: 'p1', logstore: 'l1', kind: 'agentActivity', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+          { name: 'ep-mcp', endpoint: 'https://r.log.aliyuncs.com', project: 'p2', logstore: 'l2', kind: 'mcp', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+          { name: 'ep-trace', endpoint: 'https://r.log.aliyuncs.com', project: 'p3', logstore: 'l3', kind: 'trace', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
         ],
       });
       flusher = new SlsFlusher(config, '/tmp/data');
@@ -202,7 +210,7 @@ describe('SlsFlusher', () => {
     it('skips silently when sendRaw fails', async () => {
       const config = makeConfig({
         endpoints: [
-          { name: 'ep-mcp', project: 'p2', logstore: 'l2', kind: 'mcp' },
+          { name: 'ep-mcp', endpoint: 'https://r.log.aliyuncs.com', project: 'p2', logstore: 'l2', kind: 'mcp', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
         ],
       });
       flusher = new SlsFlusher(config, '/tmp/data');

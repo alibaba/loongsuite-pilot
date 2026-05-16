@@ -9,7 +9,7 @@ import type {
   SlsEndpoint,
   SlsMode,
 } from '../types/index.js';
-import { INTERNAL_SLS_DESTINATION } from '../internal/sls-destination.js';
+import { INTERNAL_SLS_DESTINATION, buildInternalSlsEndpoint } from '../internal/sls-destination.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -243,62 +243,148 @@ function buildFlushersConfig(
 }
 
 function buildSlsConfig(file: ConfigFile | null) {
-  const fileDestinationOverride = file?.sls?.destinationOverride === true;
-  const modeRaw = env('SLS_MODE')
-    ?? (fileDestinationOverride ? file?.sls?.mode : undefined)
-    ?? INTERNAL_SLS_DESTINATION.mode;
-  const mode: SlsMode = modeRaw === 'ak' ? 'ak' : 'webtracking';
+  // ============================================================
+  // Step 1: Read user-provided fields. Env > config.sls.* > undefined.
+  // ============================================================
+  const userMode = readUserSlsMode(file);
+  const userAk = env('SLS_ACCESS_KEY_ID') ?? file?.sls?.accessKeyId;
+  const userSk = env('SLS_ACCESS_KEY_SECRET') ?? file?.sls?.accessKeySecret;
+  const userRawEndpoint = env('SLS_ENDPOINT') ?? file?.sls?.endpoint;
+  const userProject = env('SLS_PROJECT') ?? file?.sls?.project;
+  const userLogstore = env('SLS_LOGSTORE') ?? file?.sls?.logstore;
 
-  const ak = env('SLS_ACCESS_KEY_ID')
-    ?? (fileDestinationOverride ? file?.sls?.accessKeyId : undefined)
-    ?? '';
-  const sk = env('SLS_ACCESS_KEY_SECRET')
-    ?? (fileDestinationOverride ? file?.sls?.accessKeySecret : undefined)
-    ?? '';
-  const rawEndpoint = env('SLS_ENDPOINT')
-    ?? (fileDestinationOverride ? file?.sls?.endpoint : undefined)
-    ?? INTERNAL_SLS_DESTINATION.endpoint;
-  const endpoint = rawEndpoint && !/^https?:\/\//.test(rawEndpoint)
-    ? `https://${rawEndpoint}`
-    : rawEndpoint;
+  // ============================================================
+  // Step 2-3: hasUserDestination requires BOTH project AND logstore.
+  //            Without both, the user destination is incomplete; fall back to INTERNAL.
+  // ============================================================
+  const hasUserDestination = !!(userProject && userLogstore);
 
-  const project = env('SLS_PROJECT')
-    ?? (fileDestinationOverride ? file?.sls?.project : undefined)
-    ?? INTERNAL_SLS_DESTINATION.project;
-  const logstore = env('SLS_LOGSTORE')
-    ?? (fileDestinationOverride ? file?.sls?.logstore : undefined)
-    ?? INTERNAL_SLS_DESTINATION.logstore;
-
-  const endpoints: SlsEndpoint[] = [];
-  if (project && logstore) {
-    endpoints.push({
-      name: INTERNAL_SLS_DESTINATION.endpointName,
-      project,
-      logstore,
-      kind: 'agentActivity',
+  let endpoints: SlsEndpoint[];
+  if (!hasUserDestination) {
+    endpoints = [buildInternalSlsEndpoint()];
+  } else {
+    // ============================================================
+    // Step 4: Build the user endpoint. Default destinationOverride to true
+    //          (only meaningful when hasUserDestination is true).
+    // ============================================================
+    const userEndpoint = buildUserSlsEndpoint({
+      mode: userMode,
+      rawEndpoint: userRawEndpoint,
+      project: userProject!,
+      logstore: userLogstore!,
+      accessKeyId: userAk,
+      accessKeySecret: userSk,
     });
+
+    const destinationOverride = file?.sls?.destinationOverride !== false;
+    endpoints = destinationOverride
+      ? [userEndpoint]
+      : [userEndpoint, buildInternalSlsEndpoint()];
   }
 
-  const hasEndpoints = endpoints.length > 0;
+  // ============================================================
+  // Step 6: Dedup by normalized (endpoint URL, project, logstore) triple.
+  //          First entry wins on collision so user-leg name/credentials/redact survive.
+  // ============================================================
+  endpoints = dedupSlsEndpoints(endpoints);
+
+  // ============================================================
+  // Top-level defaults: kept for back-compat with code paths that still read them.
+  // Authoritative routing happens off each endpoint at runtime.
+  // ============================================================
+  const primary = endpoints[0];
+  const topLevelMode = primary.mode;
+  const topLevelEndpoint = primary.endpoint;
+  const topLevelAk = primary.accessKeyId ?? '';
+  const topLevelSk = primary.accessKeySecret ?? '';
+
   let enabled: boolean;
   if (file?.sls?.enabled !== undefined) {
     enabled = file.sls.enabled;
-  } else if (mode === 'webtracking') {
-    enabled = !!(endpoint && hasEndpoints);
   } else {
-    enabled = !!(ak && sk && endpoint && hasEndpoints);
+    // Enabled iff every endpoint has the credentials its mode requires.
+    enabled = endpoints.length > 0 && endpoints.every(ep => {
+      if (!ep.endpoint || !ep.project || !ep.logstore) return false;
+      if (ep.mode === 'ak') return !!(ep.accessKeyId && ep.accessKeySecret);
+      return true;
+    });
   }
 
   return {
     enabled,
-    mode,
-    accessKeyId: ak,
-    accessKeySecret: sk,
-    endpoint,
+    mode: topLevelMode,
+    accessKeyId: topLevelAk,
+    accessKeySecret: topLevelSk,
+    endpoint: topLevelEndpoint,
     endpoints,
     batchMaxSize: file?.sls?.batchMaxSize ?? 20,
     flushIntervalMs: file?.sls?.flushIntervalMs ?? 2_000,
   };
+}
+
+function readUserSlsMode(file: ConfigFile | null): SlsMode | undefined {
+  const raw = env('SLS_MODE') ?? file?.sls?.mode;
+  if (raw === 'ak' || raw === 'webtracking') return raw;
+  return undefined;
+}
+
+function buildUserSlsEndpoint(args: {
+  mode: SlsMode | undefined;
+  rawEndpoint: string | undefined;
+  project: string;
+  logstore: string;
+  accessKeyId: string | undefined;
+  accessKeySecret: string | undefined;
+}): SlsEndpoint {
+  // Mode inference: explicit > AK presence > webtracking default.
+  const mode: SlsMode = args.mode ?? (args.accessKeyId && args.accessKeySecret ? 'ak' : 'webtracking');
+
+  // URL normalization: prepend https:// if scheme missing.
+  const rawEndpoint = args.rawEndpoint || INTERNAL_SLS_DESTINATION.endpoint;
+  const endpoint = /^https?:\/\//.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`;
+
+  const result: SlsEndpoint = {
+    name: 'user-sls',
+    endpoint,
+    project: args.project,
+    logstore: args.logstore,
+    kind: 'agentActivity',
+    mode,
+    redact: false,
+  };
+  if (mode === 'ak') {
+    result.accessKeyId = args.accessKeyId ?? '';
+    result.accessKeySecret = args.accessKeySecret ?? '';
+  }
+  return result;
+}
+
+/**
+ * Normalize an SLS endpoint URL for dedup comparison:
+ *   - prepend https:// if no scheme
+ *   - strip trailing slash
+ *   - lowercase host (preserve path case)
+ */
+function normalizeEndpointUrl(raw: string): string {
+  let s = raw.trim();
+  if (!/^https?:\/\//.test(s)) s = `https://${s}`;
+  s = s.replace(/\/+$/, '');
+  // Lowercase scheme + host portion only.
+  return s.replace(/^(https?:\/\/)([^/]+)/i, (_, scheme: string, host: string) =>
+    `${scheme.toLowerCase()}${host.toLowerCase()}`,
+  );
+}
+
+function dedupSlsEndpoints(endpoints: SlsEndpoint[]): SlsEndpoint[] {
+  const seen = new Set<string>();
+  const result: SlsEndpoint[] = [];
+  for (const ep of endpoints) {
+    const key = `${normalizeEndpointUrl(ep.endpoint)}|${ep.project}|${ep.logstore}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(ep);
+  }
+  return result;
 }
 
 function buildJsonlConfig(file: ConfigFile | null, dataDir: string) {

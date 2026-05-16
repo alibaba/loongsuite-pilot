@@ -43,7 +43,8 @@ src/flushers/
 │   ├── qoder-YYYY-MM-DD.jsonl
 │   └── <agent>-YYYY-MM-DD.jsonl
 └── sls-failed-logs/
-    └── *.jsonl
+    ├── user-sls.jsonl          # 用户 SLS 失败缓存
+    └── internal-sls.jsonl      # 内置 SLS 失败缓存
 ```
 
 本地 JSONL 是默认兜底输出；SLS 失败缓存用于诊断和后续补偿，不应被当成正常输出通道。
@@ -60,6 +61,10 @@ src/flushers/
 ### SlsFlusher 双模式
 - **AK 模式** (`mode: 'ak'`)：使用 `@alicloud/log` SDK `postLogStoreLogs`
 - **WebTracking 模式** (`mode: 'webtracking'`)：匿名 HTTP POST 到 `{project}.{endpoint}/logstores/{logstore}/track`
+
+### SlsFlusher 多目的地派发
+- 支持同时向多个 SLS endpoint 发送（如用户自有 + 内置默认），各 endpoint 独立失败不互相影响
+- 每个 endpoint 携带自己的 URL、mode、凭据，通过 `endpoint.name` 隔离失败日志文件
 
 ### 重试与容错
 - **SlsFlusher**：最多 3 次指数退避重试；可重试状态码 408/429/500/502/503/504；失败后持久化到 `sls-failed-logs/` 目录

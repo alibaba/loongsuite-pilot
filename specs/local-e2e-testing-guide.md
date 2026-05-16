@@ -331,6 +331,183 @@ npx vitest run tests/contract/
 echo "=== Done ==="
 ```
 
+## 11. SLS 双写（dual-write）场景验证
+
+从 v1.1 开始，loongsuite-pilot 支持将 Agent 活动同时发到「用户自建 SLS」与「内置默认 SLS」两个目的地。本节说明如何本地验证三种解析场景：
+
+| 场景 | `--sls-*` 参数 | `destinationOverride` | 结果 |
+|------|------------|----------------------|------|
+| **Case A** | 未传 | N/A | 仅写内置目的地 |
+| **Case B** | 传入 | 默认 / `true` | 用户目的地替换内置 | 
+| **Case C** | 传入 | `false` | 双写到用户 + 内置两个目的地 |
+
+### 11.1 准备：需要的信息
+
+最少需要以下信息才能跳转到 Case B / C：
+
+- `--sls-endpoint`（如 `https://cn-hangzhou.log.aliyuncs.com`）
+- `--sls-project` 与 `--sls-logstore`　← 两者必须同时提供，缺一就会被视为 Case A
+- 模式选择：
+  - **webtracking**（匿名写入）：仅需 logstore 开启 WebTracking；AK 可以留空。
+  - **ak**：传入 `SLS_ACCESS_KEY_ID` / `SLS_ACCESS_KEY_SECRET`（环境变量优先）或 `--sls-ak-id`/`--sls-ak-secret`。
+
+### 11.2 准备隔离的测试环境
+
+如果你本地已装了一个运行的正式安装（读取 `~/.loongsuite-pilot/`），推荐临时停掉它以避免两个 collector 同时读取同一个 hook history。
+
+```bash
+# 临时停止正式服务（测试后重启）
+loongsuite-pilot stop
+
+# 可选：备份当前配置
+cp ~/.loongsuite-pilot/config.json ~/.loongsuite-pilot/config.json.bak
+```
+
+### 11.3 配置 Case C」双写
+
+在 `~/.loongsuite-pilot/config.json` 中加入 `sls` 节点：
+
+```json
+{
+  "enabled": true,
+  "dataDir": "/Users/<username>/.loongsuite-pilot",
+  "userId": "<your-user-id>",
+  "sls": {
+    "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+    "project": "<你的 project>",
+    "logstore": "<你的 logstore>",
+    "destinationOverride": false
+  },
+  "autoUpdate": { "enabled": false }
+}
+```
+
+关键点：
+
+- `destinationOverride: false` 是双写的**唯一开关**。省略或设为 `true` 都会退化为 Case B（仅写用户目的地）。
+- 不填 `accessKeyId` / `accessKeySecret` 时默认 webtracking。需 logstore 后台开启 WebTracking。
+- AK 模式下，建议用环境变量避免明文入盘：
+  ```bash
+  export SLS_ACCESS_KEY_ID="..."
+  export SLS_ACCESS_KEY_SECRET="..."
+  ```
+
+### 11.4 启动开发版 collector
+
+```bash
+npm run build
+LOG_LEVEL=debug JSONL_ENABLED=true node dist/index.js
+```
+
+启动后从服务日志中检查：
+
+1. **启动行**：`{"tag":"Main","flushers":["sls","jsonl"],"msg":"AI Agent Input is running"}`　← 表示 sls flusher 已启用（注意：即使双写，`flushers` 里也只出现一个 `sls`，多 endpoint 是 flusher 内部调度的。）
+2. **首次轮询后的批量发送日志**（debug 级别）应同时出现两条：
+   ```json
+   // 用户侧（AK 模式为例）
+   {"tag":"SlsFlusher","endpoint":"user-sls","project":"<你的 project>","logstore":"<你的 logstore>","count":N,"msg":"batch sent via ak"}
+   // 内置侧（webtracking）
+   {"tag":"SlsFlusher","project":"ai-coding-devops","logstore":"loongsuite_pilot_for_ai_coding","count":N,"msg":"batch sent via webtracking"}
+   ```
+
+两侧的 `count` 应严格相等。只出现一侧、或 count 不一致，检查：
+
+- `destinationOverride` 是否为 `false`
+- `project` 和 `logstore` 是否同时填写
+- 用户与内置的 `(URL, project, logstore)` 三元组是否重复（发生去重，只会看到一侧）
+- webtracking 失败会走 `"webtracking retrying" → "send failed after retries"`。AK 失败会走 `"ak send retrying"`。
+
+### 11.5 触发 Agent 活动
+
+```bash
+qoder "hello, dual-write smoke test"
+```
+
+然后等待一个轮询周期（默认 60s）。
+
+### 11.6 验证 SLS 发送路径
+
+#### 验证点 1：本地 JSONL 应存在条目
+
+```bash
+ls -la ~/.loongsuite-pilot/logs/output/qoder-cli-$(date +%Y-%m-%d).jsonl
+wc -l ~/.loongsuite-pilot/logs/output/qoder-cli-$(date +%Y-%m-%d).jsonl
+```
+
+#### 验证点 2：`sls-failed-logs/` 应为空（双写都成功）
+
+```bash
+ls -la ~/.loongsuite-pilot/sls-failed-logs/
+# 期望：空目录，或只有老文件
+```
+
+若中化路失败，会生成 `sls-failed-logs/<endpoint.name>.jsonl`：
+
+- `sls-failed-logs/user-sls.jsonl` → 用户 SLS 失败
+- `sls-failed-logs/internal-sls.jsonl` → 内置 SLS 失败
+
+#### 验证点 3：服务日志中的调试输出
+
+```bash
+# webtracking 路径会走 fetch：
+grep -E 'sls.*(webtracking|posted|sent|fail)' ~/.loongsuite-pilot/logs/loongsuite-pilot-service.log | tail -20
+
+# AK 路径会调用 @alicloud/log：
+grep -E 'sls.*(postLogStoreLogs|ak)' ~/.loongsuite-pilot/logs/loongsuite-pilot-service.log | tail -20
+```
+
+#### 验证点 4：SLS 控制台交叉验证
+
+在阿里云 SLS 控制台中查询：
+
+- 用户项目 `<你的 project>` / logstore `<你的 logstore>` 应能看到刚刚调用 qoder 产生的条目
+- 内置项目（参考 `src/internal/sls-destination.ts`）也应看到同一批条目
+- 两边的 `event.id` / `time_unix_nano` 应一致
+
+### 11.7 Case B / Case A 验证
+
+- **Case B**：把上面 config 中的 `destinationOverride: false` 删掉（或改为 `true`）重启，应只看到一条 endpoint（`agent-activity`）。SLS 控制台仅用户 logstore 有数据。
+- **Case A**：完全删除 `sls` 节点。应只看到一条 endpoint（`internal-default`）。
+
+### 11.8 去重验证点
+
+为验证去重：设置 `sls.endpoint` / `project` / `logstore` 为内置默认值（参考 `src/internal/sls-destination.ts` 中的 `INTERNAL_SLS_DESTINATION`），同时保留 `destinationOverride: false`。本应双写但会被去重为一条（name 为 `user-sls`，用户侧胜出）。
+
+### 11.9 测试后恢复
+
+```bash
+# 停掉 dev collector（Ctrl+C）
+# 恢复原配置
+mv ~/.loongsuite-pilot/config.json.bak ~/.loongsuite-pilot/config.json
+
+# 重启正式服务
+loongsuite-pilot start
+loongsuite-pilot status
+```
+
+### 11.10 通过安装脚本验证双写
+
+安装器提供了 `--default-sls-override` 参数控制是否双写：
+
+```bash
+# Case C：双写
+bash deploy/loongsuite-pilot-installer.sh install \
+  --local ./loongsuite-pilot.tar.gz \
+  --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
+  --sls-project "<你的 project>" \
+  --sls-logstore "<你的 logstore>" \
+  --default-sls-override=false
+
+# Case B（默认）：仅用户目的地
+bash deploy/loongsuite-pilot-installer.sh install \
+  --local ./loongsuite-pilot.tar.gz \
+  --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
+  --sls-project "<你的 project>" \
+  --sls-logstore "<你的 logstore>"
+```
+
+安装后检查写入的 `~/.loongsuite-pilot/config.json` 是否包含 `"destinationOverride": false`（Case C）或 `"destinationOverride": true`（Case B）。
+
 ## 附录：数据目录结构参考
 
 ```

@@ -60,10 +60,17 @@ export interface SlsFlusherConfig {
 }
 
 export interface SlsEndpoint {
+  /** Unique identifier for this destination. Drives the failed-log filename `<name>.jsonl`. */
   name: string;
+  /** Per-endpoint base URL, e.g. "https://cn-hangzhou.log.aliyuncs.com". */
+  endpoint: string;
   project: string;
   logstore: string;
   kind: 'agentActivity' | 'agentTelemetry' | 'mcp' | 'trace';
+  /** Per-endpoint transport mode. 'ak' requires accessKeyId/accessKeySecret. */
+  mode: SlsMode;
+  accessKeyId?: string;
+  accessKeySecret?: string;
   redact?: boolean;
 }
 

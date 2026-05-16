@@ -38,22 +38,26 @@ export class SlsFlusher extends BaseFlusher {
   private readonly queue: Map<string, QueuedLog[]> = new Map();
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private readonly failedLogDir: string;
-  private readonly client: any;
+  /** Lazy AK client cache keyed by `endpoint.name`. Built on first AK send. */
+  private readonly akClients: Map<string, any> = new Map();
 
   constructor(config: SlsFlusherConfig, dataDir: string) {
     super();
     this.config = config;
     this.failedLogDir = path.join(dataDir, 'sls-failed-logs');
+  }
 
-    if (config.mode === 'ak') {
-      this.client = new ALY({
-        accessKeyId: config.accessKeyId,
-        accessKeySecret: config.accessKeySecret,
-        endpoint: config.endpoint,
+  private getAkClient(endpoint: SlsEndpoint): any {
+    let client = this.akClients.get(endpoint.name);
+    if (!client) {
+      client = new ALY({
+        accessKeyId: endpoint.accessKeyId ?? '',
+        accessKeySecret: endpoint.accessKeySecret ?? '',
+        endpoint: endpoint.endpoint,
       } as any);
-    } else {
-      this.client = null;
+      this.akClients.set(endpoint.name, client);
     }
+    return client;
   }
 
   async start(): Promise<void> {
@@ -85,16 +89,23 @@ export class SlsFlusher extends BaseFlusher {
     const batches = Array.from(this.queue.entries());
     this.queue.clear();
 
-    for (const [, logs] of batches) {
-      if (logs.length === 0) continue;
-      const endpoint = logs[0].endpoint;
-
-      if (this.config.mode === 'ak') {
-        await this.flushViaAk(endpoint, logs);
-      } else {
-        await this.flushViaWebtracking(endpoint, logs);
-      }
-    }
+    // Per-endpoint dispatch with per-batch failure isolation:
+    // one endpoint's error must NOT block sends to other endpoints.
+    const tasks = batches
+      .filter(([, logs]) => logs.length > 0)
+      .map(([, logs]) => {
+        const endpoint = logs[0].endpoint;
+        const send = endpoint.mode === 'ak'
+          ? this.flushViaAk(endpoint, logs)
+          : this.flushViaWebtracking(endpoint, logs);
+        return send.catch(err => {
+          logger.error('SLS endpoint flush failed', {
+            endpoint: endpoint.name,
+            error: String(err),
+          });
+        });
+      });
+    await Promise.all(tasks);
   }
 
   private async flushViaAk(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
@@ -108,15 +119,17 @@ export class SlsFlusher extends BaseFlusher {
       topic: endpoint.kind,
     };
 
+    const client = this.getAkClient(endpoint);
     let lastErr: unknown;
     for (let attempt = 0; attempt < RETRY_MAX_ATTEMPTS; attempt++) {
       try {
-        await this.client.postLogStoreLogs(
+        await client.postLogStoreLogs(
           endpoint.project,
           endpoint.logstore,
           logGroup,
         );
         logger.debug('batch sent via ak', {
+          endpoint: endpoint.name,
           project: endpoint.project,
           logstore: endpoint.logstore,
           count: logs.length,
@@ -188,7 +201,8 @@ export class SlsFlusher extends BaseFlusher {
     };
 
     const raw = JSON.stringify(body);
-    const base = this.config.endpoint.replace(/^(https?:\/\/)/, `$1${endpoint.project}.`);
+    // Per-endpoint URL: derive from the endpoint's own base, not a flusher-wide setting.
+    const base = endpoint.endpoint.replace(/^(https?:\/\/)/, `$1${endpoint.project}.`);
     const url = `${base}/logstores/${endpoint.logstore}/track`;
 
     let lastErr: unknown;
@@ -260,8 +274,9 @@ export class SlsFlusher extends BaseFlusher {
     for (const endpoint of this.config.endpoints) {
       if (endpoint.kind !== 'mcp' && endpoint.kind !== 'trace') continue;
       try {
-        if (this.config.mode === 'ak') {
-          await this.client.postLogStoreLogs(endpoint.project, endpoint.logstore, {
+        if (endpoint.mode === 'ak') {
+          const client = this.getAkClient(endpoint);
+          await client.postLogStoreLogs(endpoint.project, endpoint.logstore, {
             logs: [{ timestamp: Math.floor(Date.now() / 1000), content }],
             source: 'ai-agent-input',
             topic,
@@ -312,10 +327,14 @@ export class SlsFlusher extends BaseFlusher {
     logGroup: unknown,
     err: unknown,
   ): Promise<void> {
-    const fileName = `${endpoint.kind}.jsonl`;
+    // Failed-log filename is keyed by endpoint.name so two endpoints serving
+    // the same `kind` (e.g. dual-write `agentActivity`) do not collide.
+    const fileName = `${endpoint.name}.jsonl`;
     const filePath = path.join(this.failedLogDir, fileName);
     const line = JSON.stringify({
       ts: Date.now(),
+      endpoint: endpoint.name,
+      kind: endpoint.kind,
       project: endpoint.project,
       logstore: endpoint.logstore,
       logGroup,
