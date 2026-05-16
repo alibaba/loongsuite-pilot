@@ -132,14 +132,29 @@ bash deploy/upload.sh --bucket my-bucket --prefix my/path --region cn-beijing
 # 最简安装（不传子命令默认为 install）
 curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/<PREFIX>/loongsuite-pilot-installer.sh | bash
 
-# 可选：内部/运维场景覆盖 SLS 后端配置
+# 可选：内部/运维场景覆盖 SLS 后端配置（默认替换内置目的地）
 curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install \
   --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
   --sls-project "my-project" \
   --sls-logstore "my-logstore" \
   --sls-ak-id "your-ak-id" \
   --sls-ak-secret "your-ak-secret"
+
+# 可选：双写到「用户 SLS + 内置目的地」（dual-write）
+# 显式传 --default-sls-override=false 即可，省略或传 true 表示仅写用户目的地
+curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install \
+  --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
+  --sls-project "my-project" \
+  --sls-logstore "my-logstore" \
+  --sls-ak-id "your-ak-id" \
+  --sls-ak-secret "your-ak-secret" \
+  --default-sls-override=false
 ```
+
+SLS 目的地解析规则：
+- 不传任何 `--sls-*` 参数：仅写入内置目的地（默认行为，对外发布场景）。
+- 传 `--sls-*` 参数（不传 `--default-sls-override` 或传 `true`）：用户目的地**替换**内置（运维/排障场景）。
+- 传 `--sls-*` 参数 + `--default-sls-override=false`：双写到用户目的地与内置目的地（任一失败不影响另一路）。
 
 安装流程：
 1. 检查 Node.js >= 18、npm、curl/wget

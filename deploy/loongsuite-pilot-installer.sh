@@ -10,6 +10,10 @@
 #     --sls-ak-id "your-ak-id" \
 #     --sls-ak-secret "your-ak-secret"
 #
+# Dual-write to user SLS + built-in destination (opt-in):
+#   ... install --sls-project P --sls-logstore L --default-sls-override=false
+#   (omit the flag or pass true => only user SLS is written; built-in is replaced)
+#
 # Install from test channel:
 #   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install --channel test
 #
@@ -51,6 +55,7 @@ SLS_PROJECT=""
 SLS_LOGSTORE=""
 SLS_AK_ID=""
 SLS_AK_SECRET=""
+DEFAULT_SLS_OVERRIDE_RAW=""
 DATA_DIR="$DEFAULT_DATA_DIR"
 LOG_LEVEL=""
 USER_ID=""
@@ -72,6 +77,16 @@ else
     COMMAND="install"
 fi
 
+validate_default_sls_override() {
+    case "$DEFAULT_SLS_OVERRIDE_RAW" in
+        ""|true|false) ;;
+        *)
+            echo "❌ --default-sls-override must be 'true' or 'false' (got: $DEFAULT_SLS_OVERRIDE_RAW)" >&2
+            exit 1
+            ;;
+    esac
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --sls-endpoint)       SLS_ENDPOINT="$2"; shift 2 ;;
@@ -84,6 +99,8 @@ while [[ $# -gt 0 ]]; do
         --sls-ak-id=*)        SLS_AK_ID="${1#*=}"; shift ;;
         --sls-ak-secret)      SLS_AK_SECRET="$2"; shift 2 ;;
         --sls-ak-secret=*)    SLS_AK_SECRET="${1#*=}"; shift ;;
+        --default-sls-override)   DEFAULT_SLS_OVERRIDE_RAW="$2"; shift 2 ;;
+        --default-sls-override=*) DEFAULT_SLS_OVERRIDE_RAW="${1#*=}"; shift ;;
         --package-url)        PACKAGE_URL="$2"; shift 2 ;;
         --package-url=*)      PACKAGE_URL="${1#--package-url=}"; shift ;;
         --data-dir)           DATA_DIR="$2"; shift 2 ;;
@@ -105,6 +122,15 @@ while [[ $# -gt 0 ]]; do
             exit 1 ;;
     esac
 done
+
+validate_default_sls_override
+
+# --default-sls-override only takes effect when at least one --sls-* argument is supplied.
+# Without --sls-* args, the resolver only writes to the built-in destination, so the flag is moot.
+if [ -n "$DEFAULT_SLS_OVERRIDE_RAW" ] && [ -z "$SLS_ENDPOINT" ] && [ -z "$SLS_PROJECT" ] && [ -z "$SLS_LOGSTORE" ]; then
+    echo "⚠️  --default-sls-override has no effect without --sls-endpoint / --sls-project / --sls-logstore; ignoring" >&2
+    DEFAULT_SLS_OVERRIDE_RAW=""
+fi
 
 # Validate current user and sudo access on Linux
 validate_install_user() {
@@ -483,9 +509,17 @@ const slsAkSecret = '${SLS_AK_SECRET}';
 const logLevel    = '${LOG_LEVEL}';
 const userId      = '${USER_ID}';
 
+const defaultSlsOverrideRaw = '${DEFAULT_SLS_OVERRIDE_RAW}';
+
 if (slsEndpoint || slsProject || slsLogstore) {
   config.sls = config.sls || {};
-  config.sls.destinationOverride = true;
+  // destinationOverride defaults to true unless caller explicitly passed --default-sls-override=false.
+  // 'false' enables dual-write to user + built-in destinations.
+  if (defaultSlsOverrideRaw === 'false') {
+    config.sls.destinationOverride = false;
+  } else {
+    config.sls.destinationOverride = true;
+  }
   if (slsEndpoint) {
     config.sls.endpoint = slsEndpoint;
   }

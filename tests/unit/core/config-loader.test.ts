@@ -111,17 +111,18 @@ describe('ConfigLoader', () => {
       expect(config.flushers.sls?.enabled).toBe(true);
       expect(config.flushers.sls?.mode).toBe(INTERNAL_SLS_DESTINATION.mode);
       expect(config.flushers.sls?.endpoint).toBe(INTERNAL_SLS_DESTINATION.endpoint);
-      expect(config.flushers.sls?.endpoints).toEqual([
-        {
-          name: INTERNAL_SLS_DESTINATION.endpointName,
-          project: INTERNAL_SLS_DESTINATION.project,
-          logstore: INTERNAL_SLS_DESTINATION.logstore,
-          kind: 'agentActivity',
-        },
-      ]);
+      expect(config.flushers.sls?.endpoints).toHaveLength(1);
+      expect(config.flushers.sls?.endpoints[0]).toMatchObject({
+        name: INTERNAL_SLS_DESTINATION.endpointName,
+        endpoint: INTERNAL_SLS_DESTINATION.endpoint,
+        project: INTERNAL_SLS_DESTINATION.project,
+        logstore: INTERNAL_SLS_DESTINATION.logstore,
+        kind: 'agentActivity',
+        mode: INTERNAL_SLS_DESTINATION.mode,
+      });
     });
 
-    it('ignores legacy config file SLS destination fields', async () => {
+    it('honors user SLS fields from config file (default destinationOverride=true)', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
           endpoint: 'https://legacy.example.com',
@@ -131,10 +132,13 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.flushers.sls?.endpoint).toBe(INTERNAL_SLS_DESTINATION.endpoint);
+      // Behavior change: when user fields are present without explicit destinationOverride,
+      // we treat the field as true (Case B). User destination replaces the built-in.
+      expect(config.flushers.sls?.endpoints).toHaveLength(1);
       expect(config.flushers.sls?.endpoints[0]).toMatchObject({
-        project: INTERNAL_SLS_DESTINATION.project,
-        logstore: INTERNAL_SLS_DESTINATION.logstore,
+        endpoint: 'https://legacy.example.com',
+        project: 'legacy-project',
+        logstore: 'legacy-logstore',
       });
     });
 
@@ -192,7 +196,8 @@ describe('ConfigLoader', () => {
       expect(config.flushers.sls?.enabled).toBe(false);
       expect(config.flushers.sls?.batchMaxSize).toBe(5);
       expect(config.flushers.sls?.flushIntervalMs).toBe(750);
-      expect(config.flushers.sls?.endpoint).toBe(INTERNAL_SLS_DESTINATION.endpoint);
+      // The user-provided endpoint surfaces as the primary now.
+      expect(config.flushers.sls?.endpoint).toBe('https://legacy.example.com');
     });
 
     it('resolves HTTP enabled from env', async () => {
