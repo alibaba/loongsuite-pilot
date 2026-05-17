@@ -1,0 +1,22 @@
+{
+  "id": "claude-code",
+  "displayName": "Claude Code",
+  "deployMode": "plugin-probe",
+  "detection": {
+    "paths": ["~/.claude"],
+    "commands": ["claude"]
+  },
+  "pluginProbe": {
+    "source": {
+      "type": "tar",
+      "tarball": "$PILOT_DIR/plugins/otel-claude-hook.tar.gz",
+      "destDir": "~/.cache/opentelemetry.instrumentation.claude/package",
+      "remoteUrl": ""
+    },
+    "mountType": "wrapper"
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/claude-code"
+  }
+}

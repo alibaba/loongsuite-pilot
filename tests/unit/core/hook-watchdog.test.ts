@@ -4,9 +4,9 @@ import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { createTempDir, cleanupTempDir } from '../../helpers/fixture-builder.js';
 import {
-  PluginHookWatchdog,
+  HookWatchdog,
   type PluginCheckTarget,
-} from '../../../src/core/plugin-hook-watchdog.js';
+} from '../../../src/core/hook-watchdog.js';
 import type { HookWatchdogConfig } from '../../../src/types/index.js';
 
 // Mock logger to silence output and allow assertions
@@ -100,7 +100,7 @@ function buildHealthySettings(target: PluginCheckTarget): Record<string, unknown
   return { hooks };
 }
 
-describe('PluginHookWatchdog', () => {
+describe('HookWatchdog', () => {
   let tmpDir: string;
 
   beforeEach(async () => {
@@ -119,7 +119,7 @@ describe('PluginHookWatchdog', () => {
       await makeBin(target.binPath);
       await writeSettings(target.settingsPath, buildHealthySettings(target));
 
-      const wd = new PluginHookWatchdog(makeConfig(), [target]);
+      const wd = new HookWatchdog(makeConfig(), [target]);
       const summary = await wd.runCheck();
 
       expect(summary.checked).toBe(1);
@@ -138,7 +138,7 @@ describe('PluginHookWatchdog', () => {
       delete (settings.hooks as Record<string, unknown>).Stop;
       await writeSettings(target.settingsPath, settings);
 
-      const wd = new PluginHookWatchdog(makeConfig(), [target]);
+      const wd = new HookWatchdog(makeConfig(), [target]);
       const summary = await wd.runCheck();
 
       expect(summary.repaired).toBe(1);
@@ -156,7 +156,7 @@ describe('PluginHookWatchdog', () => {
       (settings.hooks as Record<string, unknown>).PreToolUse = []; // empty array
       await writeSettings(target.settingsPath, settings);
 
-      const wd = new PluginHookWatchdog(makeConfig(), [target]);
+      const wd = new HookWatchdog(makeConfig(), [target]);
       const summary = await wd.runCheck();
 
       expect(summary.repaired).toBe(1);
@@ -172,7 +172,7 @@ describe('PluginHookWatchdog', () => {
       ];
       await writeSettings(target.settingsPath, settings);
 
-      const wd = new PluginHookWatchdog(makeConfig(), [target]);
+      const wd = new HookWatchdog(makeConfig(), [target]);
       const summary = await wd.runCheck();
 
       expect(summary.repaired).toBe(1);
@@ -187,7 +187,7 @@ describe('PluginHookWatchdog', () => {
       delete (settings.hooks as Record<string, unknown>).Stop;
       await writeSettings(target.settingsPath, settings);
 
-      const wd = new PluginHookWatchdog(
+      const wd = new HookWatchdog(
         makeConfig({ repairCooldownMs: 60_000_000 }),
         [target],
       );
@@ -211,7 +211,7 @@ describe('PluginHookWatchdog', () => {
       // No bin written
       await writeSettings(target.settingsPath, buildHealthySettings(target));
 
-      const wd = new PluginHookWatchdog(makeConfig(), [target]);
+      const wd = new HookWatchdog(makeConfig(), [target]);
       const summary = await wd.runCheck();
 
       expect(summary.skipped).toBe(1);
@@ -225,7 +225,7 @@ describe('PluginHookWatchdog', () => {
       await makeBin(target.binPath);
       // No settings dir created
 
-      const wd = new PluginHookWatchdog(makeConfig(), [target]);
+      const wd = new HookWatchdog(makeConfig(), [target]);
       const summary = await wd.runCheck();
 
       expect(summary.skipped).toBe(1);
@@ -238,7 +238,7 @@ describe('PluginHookWatchdog', () => {
       // settings.json doesn't exist but its parent dir does
       await fs.mkdir(path.dirname(target.settingsPath), { recursive: true });
 
-      const wd = new PluginHookWatchdog(makeConfig(), [target]);
+      const wd = new HookWatchdog(makeConfig(), [target]);
       const summary = await wd.runCheck();
 
       expect(summary.repaired).toBe(1);
@@ -255,7 +255,7 @@ describe('PluginHookWatchdog', () => {
       await writeSettings(target.settingsPath, settings);
 
       spawnBehavior = 'fail';
-      const wd = new PluginHookWatchdog(makeConfig(), [target]);
+      const wd = new HookWatchdog(makeConfig(), [target]);
       await expect(wd.runCheck()).resolves.toBeDefined();
     });
 
@@ -267,7 +267,7 @@ describe('PluginHookWatchdog', () => {
       await writeSettings(target.settingsPath, settings);
 
       spawnBehavior = 'error';
-      const wd = new PluginHookWatchdog(makeConfig(), [target]);
+      const wd = new HookWatchdog(makeConfig(), [target]);
       await expect(wd.runCheck()).resolves.toBeDefined();
     });
   });
@@ -276,7 +276,7 @@ describe('PluginHookWatchdog', () => {
     it('does not arm timer when disabled', () => {
       vi.useFakeTimers();
       try {
-        const wd = new PluginHookWatchdog(makeConfig({ enabled: false }), []);
+        const wd = new HookWatchdog(makeConfig({ enabled: false }), []);
         wd.start();
         // Advance past startup delay; no timer should have been set.
         vi.advanceTimersByTime(60_000);
@@ -289,7 +289,7 @@ describe('PluginHookWatchdog', () => {
     it('arms timer when enabled and runs check after startup delay', () => {
       vi.useFakeTimers();
       try {
-        const wd = new PluginHookWatchdog(makeConfig(), []);
+        const wd = new HookWatchdog(makeConfig(), []);
         const spy = vi.spyOn(wd as any, 'runCheck').mockResolvedValue({ checked: 0, repaired: 0, skipped: 0 });
 
         wd.start();
@@ -324,13 +324,113 @@ describe('PluginHookWatchdog', () => {
       delete (codexSettings.hooks as Record<string, unknown>).Stop;
       await writeSettings(codex.settingsPath, codexSettings);
 
-      const wd = new PluginHookWatchdog(makeConfig(), [claude, codex]);
+      const wd = new HookWatchdog(makeConfig(), [claude, codex]);
       const summary = await wd.runCheck();
 
       expect(summary.checked).toBe(1); // claude healthy
       expect(summary.repaired).toBe(1); // codex repaired
       expect(spawnCalls).toHaveLength(1);
       expect(spawnCalls[0].args[0]).toBe(codex.binPath);
+    });
+  });
+
+  describe('repairFn target', () => {
+    function makeRepairFnTarget(tmpDir: string, repairFn: () => Promise<boolean>, overrides: Partial<PluginCheckTarget> = {}): PluginCheckTarget {
+      return {
+        agentId: 'cursor-hook',
+        settingsPath: path.join(tmpDir, '.cursor', 'hooks.json'),
+        expectedHooks: ['stop', 'preToolUse'],
+        markers: ['cursor-loongsuite-pilot-hook.sh'],
+        repairFn,
+        ...overrides,
+      };
+    }
+
+    it('reports healthy when all hooks present (no repairFn call)', async () => {
+      const repairFn = vi.fn().mockResolvedValue(true);
+      const target = makeRepairFnTarget(tmpDir, repairFn);
+      await writeSettings(target.settingsPath, buildHealthySettings(target));
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary.checked).toBe(1);
+      expect(summary.repaired).toBe(0);
+      expect(repairFn).not.toHaveBeenCalled();
+      expect(spawnCalls).toHaveLength(0);
+    });
+
+    it('calls repairFn when hooks are missing', async () => {
+      const repairFn = vi.fn().mockResolvedValue(true);
+      const target = makeRepairFnTarget(tmpDir, repairFn);
+      const settings = buildHealthySettings(target);
+      delete (settings.hooks as Record<string, unknown>).stop;
+      await writeSettings(target.settingsPath, settings);
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary.repaired).toBe(1);
+      expect(repairFn).toHaveBeenCalledTimes(1);
+      expect(spawnCalls).toHaveLength(0);
+    });
+
+    it('reports repair-failed when repairFn returns false', async () => {
+      const repairFn = vi.fn().mockResolvedValue(false);
+      const target = makeRepairFnTarget(tmpDir, repairFn);
+      await fs.mkdir(path.dirname(target.settingsPath), { recursive: true });
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary.checked).toBe(1);
+      expect(summary.repaired).toBe(0);
+      expect(repairFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports repair-failed when repairFn throws', async () => {
+      const repairFn = vi.fn().mockRejectedValue(new Error('oops'));
+      const target = makeRepairFnTarget(tmpDir, repairFn);
+      await fs.mkdir(path.dirname(target.settingsPath), { recursive: true });
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      await expect(wd.runCheck()).resolves.toBeDefined();
+      expect(repairFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not require binPath (no unavailable skip)', async () => {
+      const repairFn = vi.fn().mockResolvedValue(true);
+      const target = makeRepairFnTarget(tmpDir, repairFn);
+      // No binPath set, and no bin file created — should NOT be skipped
+      await fs.mkdir(path.dirname(target.settingsPath), { recursive: true });
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      // All hooks missing → repairFn called
+      expect(repairFn).toHaveBeenCalledTimes(1);
+      expect(summary.skipped).toBe(0);
+    });
+
+    it('mixes command and repairFn targets independently', async () => {
+      const commandTarget = makeClaudeTarget(tmpDir, { agentId: 'claude-code' });
+      await makeBin(commandTarget.binPath!);
+      const commandSettings = buildHealthySettings(commandTarget);
+      delete (commandSettings.hooks as Record<string, unknown>).Stop;
+      await writeSettings(commandTarget.settingsPath, commandSettings);
+
+      const repairFn = vi.fn().mockResolvedValue(true);
+      const fnTarget = makeRepairFnTarget(tmpDir, repairFn);
+      const fnSettings = buildHealthySettings(fnTarget);
+      delete (fnSettings.hooks as Record<string, unknown>).stop;
+      await writeSettings(fnTarget.settingsPath, fnSettings);
+
+      const wd = new HookWatchdog(makeConfig(), [commandTarget, fnTarget]);
+      const summary = await wd.runCheck();
+
+      expect(summary.repaired).toBe(2);
+      expect(spawnCalls).toHaveLength(1);
+      expect(repairFn).toHaveBeenCalledTimes(1);
     });
   });
 });
