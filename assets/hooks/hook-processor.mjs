@@ -55,15 +55,24 @@ function parseArgs() {
   return { agentId, logPrefix: logPrefix || agentId };
 }
 
+// --- Date helper (local timezone) --------------------------------------------
+
+function getLocalDateString(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
 // --- Logging ----------------------------------------------------------------
 
 function getDebugLogFile(agentId) {
-  const day = new Date().toISOString().slice(0, 10);
+  const day = getLocalDateString();
   return path.join(LOONGSUITE_PILOT_LOGS_BASE_DIR, agentId, 'debug', `${agentId}-debug-${day}.log`);
 }
 
 function getErrorLogFile(agentId) {
-  const day = new Date().toISOString().slice(0, 10);
+  const day = getLocalDateString();
   return path.join(LOONGSUITE_PILOT_LOGS_BASE_DIR, agentId, 'errors', `${agentId}-error-${day}.log`);
 }
 
@@ -199,7 +208,7 @@ function normalizeTranscriptRecord(record, agentId, runtimeConfig) {
 // --- History file -----------------------------------------------------------
 
 function getHistoryLogFile(agentId, logPrefix) {
-  const day = new Date().toISOString().slice(0, 10);
+  const day = getLocalDateString();
   const historyDir = path.join(LOONGSUITE_PILOT_LOGS_BASE_DIR, agentId, 'history');
   return path.join(historyDir, `${logPrefix}-${day}.jsonl`);
 }

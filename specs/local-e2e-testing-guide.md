@@ -4,10 +4,12 @@
 
 本指南介绍如何在本地环境中对 loongsuite-pilot 进行端到端验证 —— 从构建、安装、启动服务、触发真实 Agent 活动，到验证输出正确性的完整流程。
 
+> **核心原则：** 每次完整 E2E 验证必须对每个已安装的 Agent 触发至少一次真实对话（或模拟 hook 调用），然后验证 output JSONL 中出现了对应的**新增**条目。仅验证基础设施（启动、注册、watchdog 健康）不足以发现采集链路中的 bug（如 hook 脚本异常、processor 格式变更、normalization 回归等）。不能用历史数据替代验证。
+
 ## 前置条件
 
 - Node.js >= 18, npm >= 8
-- 至少安装了一个 AI Agent（Qoder CLI、Cursor 等）
+- 至少安装了一个 AI Agent（Qoder CLI、Qoder Work、Claude Code、Codex CLI、Cursor 等）
 - 干净或已存在的 `~/.loongsuite-pilot/` 数据目录
 
 ## 1. 构建与打包
@@ -99,30 +101,132 @@ loongsuite-pilot log      # 查看服务日志
 
 ## 4. 触发 Agent 活动
 
+本节覆盖所有已支持的 Agent 类型。每种 Agent 的采集机制不同，触发方式也不同。
+
+> **安装提示**：agent-matrix.json（`scripts/e2e/agent-matrix.json`）中记录了每种 Agent CLI 的 npm 包名和安装命令，可参考其中的 `ensureInstallSh` 字段。
+
 ### 4.1 Qoder CLI
 
-使用 qoder 开始一次对话：
+Qoder CLI 的实际可执行文件名为 `qodercli`（npm 包 `@qoder-ai/qodercli`）。安装后可能需要手动创建 `qoder` 软链接：
 
 ```bash
-qoder "hello, just testing"
+# 安装（如尚未安装）
+npm install -g @qoder-ai/qodercli
+
+# 确认可用
+qodercli --version
 ```
 
-这会触发 `~/.loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.sh`，进而调用 `hook-processor.mjs`。
-
-### 4.2 Cursor
-
-打开 Cursor IDE 并与 AI 助手交互。`~/.cursor/hooks.json` 中的配置会触发 `cursor-loongsuite-pilot-hook.sh`。
-
-### 4.3 手动模拟 Hook 调用（不依赖真实 Agent）
-
-如果不需要真实 Agent，可以手动调用 hook：
+触发一次对话（需要 `QODER_PERSONAL_ACCESS_TOKEN`）：
 
 ```bash
-echo '{"transcript_path":"/tmp/test-transcript.jsonl","session_id":"test-session-123"}' | \
-  bash ~/.loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli
+# >= 0.2.12 版本
+qodercli --print --yolo --cwd "$HOME" "你好" </dev/null
+
+# < 0.2.12 旧版本
+qodercli -p "你好" --max-turns 1 --yolo -w "$HOME" </dev/null
 ```
 
-（注意：需要先创建一个包含有效 JSONL 内容的模拟 transcript 文件）
+对话结束时，`~/.qoder/settings.json` 中配置的 `Stop` hook 会调用 `~/.loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.sh`，进而调用 `hook-processor.mjs`。
+
+### 4.2 Qoder Work
+
+Qoder Work 使用独立的配置目录 `~/.qoderwork/`，目前没有公开的独立 CLI，无法通过命令行自动触发。
+
+**需要人工操作：** 请在 IDE 中打开 Qoder Work 并完成一次对话（发送任意消息并等待回复结束）。对话结束时 `~/.qoderwork/settings.json` 中配置的 `Stop` hook 会调用 `~/.loongsuite-pilot/hooks/qoderwork-loongsuite-pilot-hook.sh`。
+
+> **卡点：** 请确认已在 Qoder Work 中完成一次对话后再继续后续验证步骤。
+
+### 4.3 Claude Code
+
+Claude Code 通过 `otel-claude-hook` 插件（`~/.cache/opentelemetry.instrumentation.claude/`）采集数据，hook 配置在 `~/.claude/settings.json` 中。
+
+```bash
+# 触发一次对话
+claude -p "你好" --dangerously-skip-permissions
+```
+
+对话过程中的各种事件（`pre-tool-use`、`post-tool-use`、`stop` 等）会通过 otel hook 写入 `~/.loongsuite-pilot/logs/claude-code/` 目录。
+
+### 4.4 Codex CLI
+
+Codex CLI（npm 包 `@openai/codex`）通过 `otel-codex-hook` 插件（`~/.cache/opentelemetry.instrumentation.codex/`）采集数据，hook 配置在 `~/.codex/hooks.json` 中。
+
+```bash
+# 安装（如尚未安装）
+npm install -g @openai/codex
+
+# 触发一次对话（需要 CODEX_OPENAI_API_KEY 或 OPENAI_API_KEY）
+codex exec "你好" --skip-git-repo-check </dev/null
+```
+
+事件通过 otel hook 写入 `~/.loongsuite-pilot/logs/codex/` 目录。
+
+### 4.5 Cursor
+
+Cursor 提供了 `cursor agent` 子命令，支持命令行触发对话（需要 `CURSOR_API_KEY` 或已登录）：
+
+```bash
+# 触发一次非交互式对话
+cursor agent -p "你好" --yolo
+```
+
+对话过程中 `~/.cursor/hooks.json` 中的 hook 配置会触发 `cursor-loongsuite-pilot-hook.sh`，进而调用 `cursor-hook-processor.mjs`。
+
+也可以通过 GUI 方式：打开 Cursor IDE 并与 AI 助手交互。
+
+### 4.6 采集链路端到端验证检查表
+
+触发每个 Agent 对话后，**必须**验证新数据出现在 output JSONL 中，且**必须**确认新增条目确实来自刚触发的对话（通过 session ID 交叉验证），而非历史残留数据。
+
+| Agent | 触发方式 | Session ID 来源 | 标准化输出文件 |
+|-------|---------|----------------|--------------|
+| Qoder CLI | `qodercli --print --yolo --cwd "$HOME" "hello" </dev/null` | CLI 输出中的 `session:` 行 | `output/qoder-cli-{date}.jsonl` |
+| Qoder Work | IDE 中完成一次对话（无 CLI） | hook 日志中 `gen_ai.session.id` | `output/qoder-work-{date}.jsonl` |
+| Claude Code | `claude -p "hello" --dangerously-skip-permissions` | CLI 启动时的 session ID | `output/claude-code-{date}.jsonl` |
+| Codex | `codex exec "list files in /tmp" --skip-git-repo-check </dev/null` | CLI 输出中的 `session id:` 行 | `output/codex-{date}.jsonl` |
+| Cursor | `cursor agent -p "hello" --yolo` | hook 日志中 `gen_ai.session.id` | `output/cursor-{date}.jsonl` |
+
+#### 验证流程（每个 Agent 必须执行）
+
+```bash
+OUTPUT=~/.loongsuite-pilot/logs/output/{agent}-$(date +%Y-%m-%d).jsonl
+
+# Step 1: 记录触发前的行数
+BEFORE=$(wc -l "$OUTPUT" 2>/dev/null | awk '{print $1}')
+BEFORE=${BEFORE:-0}
+
+# Step 2: 触发对话，捕获 session ID
+# 示例（Qoder CLI）：
+SESSION_ID=$(qodercli --print --yolo --cwd "$HOME" "hello" </dev/null 2>&1 | grep -o 'session:[^ ]*' | cut -d: -f2)
+# 示例（Codex）：
+SESSION_ID=$(codex exec "hello" --skip-git-repo-check </dev/null 2>&1 | grep 'session id:' | awk '{print $NF}')
+# 示例（Cursor）：
+cursor agent -p "hello" --yolo
+# cursor 的 session ID 需从 hook 日志中提取：
+SESSION_ID=$(tail -1 ~/.loongsuite-pilot/logs/cursor/history/cursor-*.jsonl | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('gen_ai.session.id',''))")
+
+# Step 3: 等待轮询周期（默认 30-60s）
+sleep 60
+
+# Step 4: 验证行数增长
+AFTER=$(wc -l "$OUTPUT" 2>/dev/null | awk '{print $1}')
+AFTER=${AFTER:-0}
+[ "$AFTER" -gt "$BEFORE" ] || { echo "❌ No new data collected"; exit 1; }
+
+# Step 5: 验证新增条目包含本次触发的 session ID
+NEW_ENTRIES=$(tail -n +$((BEFORE+1)) "$OUTPUT")
+echo "$NEW_ENTRIES" | grep -q "$SESSION_ID" || { echo "❌ New entries don't match triggered session"; exit 1; }
+
+echo "✅ ${agent}: $((AFTER-BEFORE)) new entries, session $SESSION_ID confirmed"
+```
+
+#### 为什么必须验证 Session ID？
+
+仅检查"行数增加了"不够严谨：
+- 可能是其他后台进程（IDE 自动补全、定时任务）产生的数据
+- 可能是上一次未处理的积压数据被轮询读取
+- 只有确认 session ID 匹配，才能证明**触发→hook 执行→日志写入→标准化输出**完整链路正确
 
 ## 5. 观察与验证输出
 
@@ -132,8 +236,17 @@ echo '{"transcript_path":"/tmp/test-transcript.jsonl","session_id":"test-session
 # Qoder CLI hook 历史：
 cat ~/.loongsuite-pilot/logs/qoder-cli/history/qoder-cli-$(date +%Y-%m-%d).jsonl
 
+# Qoder Work hook 历史：
+cat ~/.loongsuite-pilot/logs/qoder-work/history/qoder-work-$(date +%Y-%m-%d).jsonl
+
 # Cursor hook 历史：
 cat ~/.loongsuite-pilot/logs/cursor/history/cursor-$(date +%Y-%m-%d).jsonl
+
+# Claude Code otel hook 历史：
+ls ~/.loongsuite-pilot/logs/claude-code/history/
+
+# Codex otel hook 历史：
+ls ~/.loongsuite-pilot/logs/codex/history/
 ```
 
 ### 5.2 查看标准化输出（核心验证点）
@@ -141,7 +254,10 @@ cat ~/.loongsuite-pilot/logs/cursor/history/cursor-$(date +%Y-%m-%d).jsonl
 ```bash
 # JSONL 输出（标准化条目）：
 cat ~/.loongsuite-pilot/logs/output/qoder-$(date +%Y-%m-%d).jsonl | jq .
+cat ~/.loongsuite-pilot/logs/output/qoder-work-$(date +%Y-%m-%d).jsonl | jq .
 cat ~/.loongsuite-pilot/logs/output/cursor-$(date +%Y-%m-%d).jsonl | jq .
+cat ~/.loongsuite-pilot/logs/output/claude-code-$(date +%Y-%m-%d).jsonl | jq .
+cat ~/.loongsuite-pilot/logs/output/codex-$(date +%Y-%m-%d).jsonl | jq .
 ```
 
 ### 5.3 输出格式验证
@@ -206,10 +322,10 @@ cat ~/.loongsuite-pilot/logs/input-state.json | jq .
 ### 6.2 验证重启不重复
 
 1. 停止服务：`loongsuite-pilot stop` 或 Ctrl+C
-2. 记录输出行数：`wc -l ~/.loongsuite-pilot/logs/output/qoder-*.jsonl`
+2. 记录输出行数：`wc -l ~/.loongsuite-pilot/logs/output/*.jsonl`
 3. 重启：`loongsuite-pilot start` 或 `LOG_LEVEL=debug node dist/index.js`
 4. 等待一个轮询周期（默认 60 秒）
-5. 验证行数未变（无重复数据）：`wc -l ~/.loongsuite-pilot/logs/output/qoder-*.jsonl`
+5. 验证行数未变（无重复数据）：`wc -l ~/.loongsuite-pilot/logs/output/*.jsonl`
 
 ## 7. 运行时 Agent 发现验证
 
@@ -544,9 +660,14 @@ node scripts/serve-loongsuite-pilot-monitor.mjs
 
 - 确认 hook 脚本存在：`ls ~/.loongsuite-pilot/hooks/`
 - 确认 Agent 配置中包含 hook 条目：
-  - Qoder：`cat ~/.qoder/settings.json | jq .hooks`
+  - Qoder CLI：`cat ~/.qoder/settings.json | jq .hooks`
+  - Qoder Work：`cat ~/.qoderwork/settings.json | jq .hooks`
   - Cursor：`cat ~/.cursor/hooks.json`
-- 手动测试 hook（见 4.3 节）
+  - Claude Code：`cat ~/.claude/settings.json | jq .hooks`
+  - Codex：`cat ~/.codex/hooks.json | jq .hooks`
+- 确认 otel hook 插件已安装（Claude Code / Codex）：
+  - `ls ~/.cache/opentelemetry.instrumentation.claude/hook-entry.sh`
+  - `ls ~/.cache/opentelemetry.instrumentation.codex/hook-entry.sh`
 - 确认 hook 脚本具有可执行权限：`chmod +x ~/.loongsuite-pilot/hooks/*.sh`
 
 ### 9.3 输出文件无新数据
@@ -724,8 +845,20 @@ LOG_LEVEL=debug JSONL_ENABLED=true node dist/index.js
 
 ### 12.5 触发 Agent 活动
 
+使用任意已安装的 Agent 触发一次对话：
+
 ```bash
-qoder "hello, dual-write smoke test"
+# Qoder CLI（需要 QODER_PERSONAL_ACCESS_TOKEN）
+qodercli --print --yolo --cwd "$HOME" "hello, dual-write smoke test" </dev/null
+
+# 或 Claude Code
+claude -p "hello, dual-write smoke test" --dangerously-skip-permissions
+
+# 或 Codex CLI（需要 CODEX_OPENAI_API_KEY）
+codex exec "hello, dual-write smoke test" --skip-git-repo-check </dev/null
+
+# 或 Cursor Agent（需要 CURSOR_API_KEY 或已登录）
+cursor agent -p "hello, dual-write smoke test" --yolo
 ```
 
 然后等待一个轮询周期（默认 60s）。
@@ -765,7 +898,7 @@ grep -E 'sls.*(postLogStoreLogs|ak)' ~/.loongsuite-pilot/logs/loongsuite-pilot-s
 
 在阿里云 SLS 控制台中查询：
 
-- 用户项目 `<你的 project>` / logstore `<你的 logstore>` 应能看到刚刚调用 qoder 产生的条目
+- 用户项目 `<你的 project>` / logstore `<你的 logstore>` 应能看到刚刚触发 Agent 产生的条目
 - 内置项目（参考 `src/internal/sls-destination.ts`）也应看到同一批条目
 - 两边的 `event.id` / `time_unix_nano` 应一致
 
@@ -821,19 +954,26 @@ bash deploy/loongsuite-pilot-installer.sh install \
 ├── agent-control.json                  # Agent 准入策略
 ├── hooks/                              # Hook 脚本
 │   ├── qoder-loongsuite-pilot-hook.sh
+│   ├── qoderwork-loongsuite-pilot-hook.sh
 │   ├── cursor-loongsuite-pilot-hook.sh
-│   ├── hook-processor.mjs
-│   └── cursor-hook-processor.mjs
+│   ├── hook-processor.mjs              # Qoder/QoderWork 共用
+│   ├── cursor-hook-processor.mjs
+│   └── agent-event-normalizer.mjs
 ├── logs/
 │   ├── loongsuite-pilot-service.log   # 服务运行日志
 │   ├── input-state.json               # 输入源偏移量状态
 │   ├── snapshot-store.json            # IDE 快照去重缓存
 │   ├── output/                        # 标准化输出（核心验证点）
-│   │   ├── cursor-YYYY-MM-DD.jsonl
 │   │   ├── qoder-YYYY-MM-DD.jsonl
-│   │   └── qoder-work-YYYY-MM-DD.jsonl
+│   │   ├── qoder-work-YYYY-MM-DD.jsonl
+│   │   ├── cursor-YYYY-MM-DD.jsonl
+│   │   ├── claude-code-YYYY-MM-DD.jsonl
+│   │   └── codex-YYYY-MM-DD.jsonl
 │   ├── qoder-cli/history/             # Qoder CLI hook 原始日志
+│   ├── qoder-work/history/            # Qoder Work hook 原始日志
 │   ├── cursor/history/                # Cursor hook 原始日志
+│   ├── claude-code/history/           # Claude Code otel hook 原始日志
+│   ├── codex/history/                 # Codex otel hook 原始日志
 │   └── process-monitor/               # Monitor 指标缓存
 ├── versions/                          # 版本目录（正式安装时）
 │   └── {version}_{commit}/
