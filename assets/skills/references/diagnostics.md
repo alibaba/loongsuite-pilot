@@ -36,6 +36,22 @@
 
 ---
 
+## 按平台子系统分诊
+
+如果用户的问题**不是某个 agent 的数据缺失**，而是 pilot 服务自身、自动更新、SLS 上报或 SQLite 采集等平台级异常，
+请根据下表阅读对应的诊断文档：
+
+| 排查场景 | 应阅读的诊断文档 |
+|---------|---------------|
+| pilot 服务异常（启动序列、Input 注册、Flusher、日志异常） | `~/.loongsuite-pilot/skills/references/service-diagnostics.md` |
+| 自动更新异常（版本不更新、更新后服务异常、回滚） | `~/.loongsuite-pilot/skills/references/updater-diagnostics.md` |
+| SLS 数据上报异常（数据采集正常但 SLS 查不到、上报失败、failed-logs 堆积） | `~/.loongsuite-pilot/skills/references/sls-diagnostics.md` |
+| SQLite 数据采集异常（Qoder IDE token 数据缺失） | `~/.loongsuite-pilot/skills/references/sqlite-diagnostics.md` |
+
+> **分诊提示**：如果用户同时遇到"某个 agent 没数据" + "pilot 服务异常"，先走平台子系统排查（确保 pilot 服务自身健康），再走 agent 分诊。
+
+---
+
 ## 通用前置检查（任意 agent 都先做这一步）
 
 不论用户使用哪个 agent，先确认 `loongsuite-pilot` 自身在运行，再去看对应分诊文档：
