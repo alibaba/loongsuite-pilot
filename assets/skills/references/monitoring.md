@@ -109,3 +109,49 @@ sleep 2
 ```bash
 ~/.local/bin/loongsuite-pilot info
 ```
+
+---
+
+## Dashboard `Last activity` 显示落后于真实时间
+
+**现象**：原始 JSONL 文件末尾已是较新的时间，但监控面板的 `Last activity` 仍停留在更早的时间点。这是 dashboard 显示侧问题，不是采集链路问题。
+
+### 根因：按需懒索引
+
+监控面板的 `Last activity` 与当天事件统计来自本地 `~/.loongsuite-pilot/logs/output/*-YYYY-MM-DD.jsonl`，但 dashboard 不会主动跟随写入：
+
+- 只有 `/api/overview` 接口被请求时才会推进读取
+- 单次请求最多读取 **5 MiB / 2 万行**（先到为准）
+- 进程内有 5 秒内存缓存
+
+较大的当天 JSONL 需要多次连续请求才能完整索引到尾。只打开一次就离开 dashboard 会停留在第一次推进到的位置。
+
+### 一键确认
+
+```bash
+grep '\[overview\] partial index' ~/.loongsuite-pilot/logs/loongsuite-pilot-dashboard.log | tail -20
+```
+
+命中 `partial index` 告警即说明触发了懒索引上限；命中 `index caught up` 表示该文件已追上，`Last activity` 为实时值。
+
+### 解决方法
+
+```bash
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  curl -s 'http://127.0.0.1:8765/api/overview?force=true' >/dev/null
+  sleep 1
+done
+```
+
+或在浏览器里反复刷新 dashboard 页面（每次间隔 ≥5 秒），直到 `Last activity` 推进到最新时间。
+
+### 排除项
+
+出现该现象时，以下方向不是原因：
+
+- ❌ SLS 上报：dashboard `Last activity` 完全不读 SLS
+- ❌ `sls-failed-logs/`：上报失败的本地兜底，与 last activity 无关
+- ❌ pilot service 状态：service 只负责写 output，不参与 dashboard 索引
+- ❌ `input-state.json` 的 lastOffset：是 pilot 消费原始 JSONL 的进度，不是 dashboard 索引 output 的进度
+
+若 `loongsuite-pilot-dashboard.log` 中无 `partial index` 告警但 `Last activity` 仍卡住，则属另一类问题（如文件日期不为当天、agent 分类异常等），需按各 agent 诊断文档继续排查。
