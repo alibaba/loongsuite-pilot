@@ -216,3 +216,4 @@ ls -l ~/.cache/opentelemetry.instrumentation.codex/hook-entry.sh   # 应有 x �
 | 桌面版 codex 装完后仍提示需手动启用 | 桌面版可能有独立 codex_home 路径或自有 hooks 设置面板；先用 TUI `/hooks` 或第 4 步 grep 离线核对 `[hooks.state]`；详见 codex-plugin-context.md 9.4.5 |
 | `CLAUDE_TELEMETRY_DEBUG` 不生效 | codex 插件用 `CODEX_TELEMETRY_DEBUG`，环境变量名不要混用 |
 | `~/.cache/.../sessions/` 长期残留 session 文件 | Stop hook 异常未触发 clearState；通常伴随 `Export failed` 错误日志，重跑或清空 sessions 目录 |
+| 监控面板 `Last activity` 显示时间早于 JSONL 末尾时间（数据已采集但 dashboard 卡住） | dashboard 是按需懒索引，单次刷新最多吃 5 MiB / 2 万行。Codex 单行通常 5–30 KB，多轮长会话 jsonl 仍可能超阈值。先 `grep '\[overview\] partial index' ~/.loongsuite-pilot/logs/loongsuite-pilot-dashboard.log` 确认；命中后多刷几次 dashboard（间隔 ≥5 秒）即可。详见 `monitoring.md` 的 "Dashboard Last activity 显示落后于真实时间" 章节 |

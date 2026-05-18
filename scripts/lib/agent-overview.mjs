@@ -19,8 +19,9 @@ const DEFAULT_FAILED_LOG_MAX_BYTES = 512 * 1024;
 const DEFAULT_TIMELINE_LIMIT = 200;
 const DEFAULT_CACHED_OUTPUT_EVENTS_PER_FILE = 50;
 const OVERVIEW_CACHE_VERSION = 1;
-const DEFAULT_INDEX_BYTES_PER_REFRESH = 2 * 1024 * 1024;
-const DEFAULT_INDEX_LINES_PER_REFRESH = 10_000;
+const DEFAULT_INDEX_BYTES_PER_REFRESH = 5 * 1024 * 1024;
+const DEFAULT_INDEX_LINES_PER_REFRESH = 20_000;
+const partialIndexLogState = new Map();
 const STALE_AFTER_MS = 30 * 60 * 1000;
 
 export const AGENTS = [
@@ -472,6 +473,7 @@ async function aggregateOutputFiles(outputDir, options) {
 
   for (const filePath of files) {
     const fileSummary = await summarizeJsonlFile(filePath, options);
+    logPartialIndexProgress(fileSummary);
     result.files.push(fileSummary.file);
     result.total += fileSummary.total;
     result.tokens += fileSummary.tokens;
@@ -589,6 +591,38 @@ function applyOutputRecord(summary, record, cachedOutputEventsPerFile) {
 
 function trimCachedOutputEvents(summary, limit) {
   summary.events = summary.events.slice(-Math.max(0, limit));
+}
+
+function logPartialIndexProgress(fileSummary) {
+  if (!fileSummary || !fileSummary.file) return;
+  const filePath = fileSummary.file.path;
+  if (!filePath) return;
+
+  if (fileSummary.indexing) {
+    const indexed = fileSummary.file.indexedBytes || 0;
+    const total = fileSummary.file.sizeBytes || 0;
+    const lastLogged = partialIndexLogState.get(filePath);
+    if (lastLogged === indexed) return;
+    partialIndexLogState.set(filePath, indexed);
+    const remaining = Math.max(0, total - indexed);
+    const indexedMib = (indexed / (1024 * 1024)).toFixed(2);
+    const totalMib = (total / (1024 * 1024)).toFixed(2);
+    const remainingMib = (remaining / (1024 * 1024)).toFixed(2);
+    console.warn(
+      `[overview] partial index: file=${fileSummary.file.name} `
+        + `indexed=${indexedMib}MiB/${totalMib}MiB remaining=${remainingMib}MiB `
+        + '— last activity may lag behind real time until further refreshes catch up '
+        + '(per-refresh budget=5MiB / 20k lines)',
+    );
+    return;
+  }
+
+  if (partialIndexLogState.has(filePath)) {
+    partialIndexLogState.delete(filePath);
+    console.warn(
+      `[overview] index caught up: file=${fileSummary.file.name} — last activity is now real-time`,
+    );
+  }
 }
 
 function newOutputCacheEntry(filePath, date, fileStat) {
