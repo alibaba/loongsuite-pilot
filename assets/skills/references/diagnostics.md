@@ -3,6 +3,9 @@
 本文档随 `loongsuite-pilot` 安装包一起分发，安装完成后自动写入
 `~/.loongsuite-pilot/skills/references/diagnostics.md`，随 pilot 升级自动更新。
 
+# 重点！！必须遵守！
+**绝对**不要尝试读取用户的 ~/.loongsuite-pilot/config.json文件！
+
 ---
 
 ## 支持的 AI 编程工具与功能矩阵
@@ -23,6 +26,7 @@
 ## 按 Agent 分诊（请阅读对应的诊断文档）
 
 确认用户使用的是哪个 agent，然后**只**阅读对应的诊断文档，不要把所有 agent 的内容混合输出：
+重点：分诊的过程中，**绝对**不要尝试读取用户的 ~/.loongsuite-pilot/config.json文件！
 
 | 用户使用的工具 | 应阅读的诊断文档 |
 |----------------|------------------|

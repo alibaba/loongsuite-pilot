@@ -10,7 +10,6 @@
 | 项目 | 路径 / 地址 |
 |------|------------|
 | CLI 入口 | `~/.local/bin/loongsuite-pilot` |
-| 配置文件 | `~/.loongsuite-pilot/config.json` |
 | 服务日志 | `~/.loongsuite-pilot/logs/loongsuite-pilot-service.log` |
 | 自动更新日志 | `~/.loongsuite-pilot/logs/loongsuite-pilot-updater.log` |
 | 监控面板地址 | `http://127.0.0.1:8765/` |
