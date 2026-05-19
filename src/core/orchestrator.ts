@@ -19,6 +19,8 @@ import { MultiFlusher } from '../flushers/multi-flusher.js';
 // Concrete inputs
 import { QoderSqliteInput } from '../inputs/qoder-sqlite/qoder-sqlite-input.js';
 import { QoderWorkInput } from '../inputs/qoder-work/qoder-work-input.js';
+import { QoderWorkLogInput } from '../inputs/qoder-work-log/qoder-work-log-input.js';
+import { QoderWorkSqliteInput } from '../inputs/qoder-work-sqlite/qoder-work-sqlite-input.js';
 import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
 import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-session-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
@@ -306,6 +308,36 @@ export class Orchestrator extends EventEmitter {
           listenerCfg['qoder-work']?.enabled ?? true,
         ),
         pollIntervalMs: listenerCfg['qoder-work']?.pollInterval,
+      }),
+    );
+
+    // --- Qoder Work (SDK Log tail) ---
+    const qoderWorkLogInput = new QoderWorkLogInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(qoderWorkLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderWorkLogInput, {
+        watchPaths: QoderWorkLogInput.getWatchPaths(),
+        isAvailable: QoderWorkLogInput.checkAvailability,
+        enabled: () => this.agentControlManager.resolveEnabled(
+          'qoder-work-log',
+          listenerCfg['qoder-work-log']?.enabled ?? true,
+        ),
+        pollIntervalMs: listenerCfg['qoder-work-log']?.pollInterval,
+      }),
+    );
+
+    // --- Qoder Work (SQLite agents.db) ---
+    const qoderWorkSqliteInput = new QoderWorkSqliteInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(qoderWorkSqliteInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderWorkSqliteInput, {
+        watchPaths: QoderWorkSqliteInput.getWatchPaths(),
+        isAvailable: QoderWorkSqliteInput.checkAvailability,
+        enabled: () => this.agentControlManager.resolveEnabled(
+          'qoder-work-sqlite',
+          listenerCfg['qoder-work-sqlite']?.enabled ?? true,
+        ),
+        pollIntervalMs: listenerCfg['qoder-work-sqlite']?.pollInterval,
       }),
     );
 

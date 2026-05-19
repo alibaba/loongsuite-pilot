@@ -166,6 +166,8 @@ function buildListenersConfig(
     qoder:           { enabled: true, pollInterval: 30_000 },
     'qoder-sqlite':  { enabled: true, pollInterval: 30_000 },
     'qoder-work':    { enabled: true, pollInterval: 30_000 },
+    'qoder-work-log': { enabled: true, pollInterval: 30_000 },
+    'qoder-work-sqlite': { enabled: true, pollInterval: 30_000 },
     'qoder-cli-hook':{ enabled: true, pollInterval: 30_000 },
     'qoder-cli-session':{ enabled: true, pollInterval: 30_000 },
     'cursor-hook':   { enabled: true, pollInterval: 30_000 },

@@ -1,7 +1,7 @@
 import { ClientType, ActionType } from '../../types/index.js';
-import type { AgentActivityEntry } from '../../types/index.js';
+import type { AgentActivityEntry, AgentEventName, JsonValue } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
-import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
+import { buildAgentActivityEntry, toJsonValue } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 
@@ -50,79 +50,124 @@ export class QoderWorkInput extends BaseHookInput {
     const message = (typeof record.message === 'object' && record.message !== null
       ? record.message
       : {}) as Record<string, unknown>;
+    const role = typeof message.role === 'string' && message.role.length > 0
+      ? message.role
+      : rowType;
     const messageContent = message.content;
 
-    let ctype: unknown;
-    let cname: unknown;
-    let cinput: unknown;
-    let ctext: unknown;
-    let ccontent: unknown;
-    let cthinking: unknown;
-    let cid: unknown;
-    let ctoolUseId: unknown;
+    // Parse the single part QoderWork hook emits per transcript row.
+    let partType: string | undefined;
+    let partText: string | undefined;
+    let partThinking: string | undefined;
+    let toolName: string | undefined;
+    let toolCallId: string | undefined;
+    let toolArgs: JsonValue | undefined;
+    let toolUseId: string | undefined;
+    let toolResult: JsonValue | undefined;
 
     if (typeof messageContent === 'string') {
-      ctype = 'text';
-      ctext = messageContent;
+      partType = 'text';
+      partText = messageContent;
     } else {
       const contentList = Array.isArray(messageContent) ? messageContent : [];
       const content0 = (contentList[0] && typeof contentList[0] === 'object' && contentList[0] !== null
         ? contentList[0]
         : null) as Record<string, unknown> | null;
+      if (!content0 || typeof content0.type !== 'string') return null;
 
-      ctype = content0?.type;
-      if (ctype === null || ctype === undefined) return null;
-
-      cname = content0?.name;
-      cinput = content0?.input;
-      ctext = content0?.text;
-      ccontent = content0?.content;
-      cthinking = content0?.thinking;
-      cid = content0?.id;
-      ctoolUseId = content0?.tool_use_id;
+      partType = content0.type;
+      if (typeof content0.text === 'string') partText = content0.text;
+      if (typeof content0.thinking === 'string') partThinking = content0.thinking;
+      if (typeof content0.name === 'string') toolName = content0.name;
+      if (typeof content0.id === 'string') toolCallId = content0.id;
+      if (typeof content0.tool_use_id === 'string') toolUseId = content0.tool_use_id;
+      toolArgs = toJsonValue(content0.input);
+      toolResult = toJsonValue(content0.content);
     }
 
+    // Route event.name by part type + role.
+    let eventName: AgentEventName;
+    if (partType === 'tool_use') eventName = 'tool.call';
+    else if (partType === 'tool_result') eventName = 'tool.result';
+    else if (role === 'assistant') eventName = 'llm.response';
+    else eventName = 'llm.request';
+
     const timestamp = parseTimestamp(record.timestamp) ?? Date.now();
-    const content = typeof ctext === 'string'
-      ? ctext
-      : typeof cthinking === 'string'
-        ? cthinking
-        : typeof ccontent === 'string'
-          ? ccontent
-          : '';
+    const standard: Record<string, JsonValue | undefined> = {};
+
+    if (eventName === 'llm.request' && typeof partText === 'string') {
+      standard['gen_ai.input.messages_delta'] = [
+        { role: 'user', parts: [{ type: 'text', content: partText }] },
+      ];
+    } else if (eventName === 'llm.response') {
+      const parts: JsonValue[] = [];
+      if (partType === 'thinking' && typeof partThinking === 'string') {
+        parts.push({ type: 'reasoning', content: partThinking });
+      } else if (typeof partText === 'string') {
+        parts.push({ type: 'text', content: partText });
+      }
+      if (parts.length > 0) {
+        const msg: { [key: string]: JsonValue } = { role: 'assistant', parts };
+        if (typeof message.stop_reason === 'string' && message.stop_reason.length > 0) {
+          msg.finish_reason = message.stop_reason;
+        }
+        standard['gen_ai.output.messages'] = [msg];
+      }
+      if (typeof message.stop_reason === 'string' && message.stop_reason.length > 0) {
+        standard['gen_ai.response.finish_reasons'] = [message.stop_reason];
+      }
+      if (typeof message.id === 'string' && message.id.length > 0) {
+        standard['gen_ai.response.id'] = message.id;
+      }
+    } else if (eventName === 'tool.call') {
+      if (toolName) standard['gen_ai.tool.name'] = toolName;
+      if (toolCallId) standard['gen_ai.tool.call.id'] = toolCallId;
+      if (toolArgs !== undefined) standard['gen_ai.tool.call.arguments'] = toolArgs;
+    } else if (eventName === 'tool.result') {
+      if (toolUseId) standard['gen_ai.tool.call.id'] = toolUseId;
+      if (toolResult !== undefined) standard['gen_ai.tool.call.result'] = toolResult;
+    }
+
+    const attributes: { [key: string]: JsonValue } = {};
+    if (typeof record.cwd === 'string' && record.cwd.length > 0) attributes.cwd = record.cwd;
+    if (typeof record.parentUuid === 'string' && record.parentUuid.length > 0) {
+      attributes.parent_uuid = record.parentUuid;
+    }
+    if (typeof record.userType === 'string' && record.userType.length > 0) {
+      attributes.user_type = record.userType;
+    }
+    if (typeof record.entrypoint === 'string' && record.entrypoint.length > 0) {
+      attributes.entrypoint = record.entrypoint;
+    }
+    if (typeof rowType === 'string') attributes.row_type = rowType;
+
+    // Backward-compatible fields for downstream dashboards still referencing
+    // the legacy agent._c* naming convention. Remove once all consumers have
+    // migrated to the OTel-aligned gen_ai.* fields above.
+    if (partType !== undefined) attributes._ctype = partType;
+    if (toolName) attributes._cname = toolName;
+    if (toolArgs !== undefined) attributes._cinput = toolArgs;
+    if (partText !== undefined) attributes._ctext = partText;
+    if (toolResult !== undefined) attributes._ccontent = toolResult;
+    if (partThinking !== undefined) attributes._cthinking = partThinking;
+    if (toolCallId) attributes._cid = toolCallId;
+    if (toolUseId) attributes._ctool_use_id = toolUseId;
 
     const entry = buildAgentActivityEntry({
-      sessionId: (record.session_id as string)
+      ...standard,
+      timestamp,
+      'session.id': (record.session_id as string)
         ?? (record.sessionId as string)
         ?? (record.sessionid as string)
         ?? '',
-      userId: (record.user_id as string)
-        ?? (record.userId as string)
-        ?? '',
-      agentType: ClientType.QoderWork,
-      actionType: rowType === 'assistant' ? ActionType.Edit : ActionType.Other,
-      filePath: (record.filePath as string) ?? '',
-      content,
-      timestamp,
-      extra: {
-        type: rowType,
-        _ctype: ctype,
-        _cname: cname,
-        _cinput: cinput,
-        _ctext: ctext,
-        _ccontent: ccontent,
-        _cthinking: cthinking,
-        _cid: cid,
-        _ctool_use_id: ctoolUseId,
-        entrypoint: record.entrypoint,
-        cwd: record.cwd,
-        userType: record.userType,
-        parentUuid: record.parentUuid,
-        role: message.role,
-        model: message.model,
-        stop_reason: message.stop_reason,
-      },
+      'user.id': (record.user_id as string) ?? (record.userId as string) ?? '',
+      'agent.type': ClientType.QoderWork,
+      'event.name': eventName,
+      attributes,
     });
+
+    // Silence unused locals — ActionType is kept for the PostToolUse branch only.
+    void ActionType;
 
     const sourceUuid = record.uuid;
     if (typeof sourceUuid === 'string' && sourceUuid.trim().length > 0) {

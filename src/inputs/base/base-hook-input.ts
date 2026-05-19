@@ -49,7 +49,17 @@ export abstract class BaseHookInput extends BaseInput {
     }
 
     const state = this.getState();
-    const offset = state.lastFile === logFileName ? (state.lastOffset ?? 0) : 0;
+    let offset = state.lastFile === logFileName ? (state.lastOffset ?? 0) : 0;
+    // File truncation recovery: if file shrank below recorded offset (e.g.
+    // daemon reinstall/rotation), reset to 0 to re-read the new file.
+    if (offset > 0 && stat.size < offset) {
+      this.logger.info('file truncated, resetting offset', {
+        file: logFile,
+        recorded: offset,
+        actual: stat.size,
+      });
+      offset = 0;
+    }
     if (stat.size <= offset) return [];
 
     const handle = await fs.open(logFile, 'r');

@@ -170,6 +170,18 @@ describe('QoderWorkInput', () => {
   });
 
   describe('transcript rows', () => {
+    async function writeAndDrain(record: unknown): Promise<AgentActivityEntry> {
+      const today = getTodayDateString();
+      const logFile = path.join(tmpDir, `qoder-work-${today}.jsonl`);
+      await fs.writeFile(logFile, JSON.stringify(record) + '\n');
+      const allEntries: AgentActivityEntry[] = [];
+      input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
+      await input.start();
+      await input.stop();
+      expect(allEntries).toHaveLength(1);
+      return allEntries[0]!;
+    }
+
     it('prefers canonical qoder-work hook records when present', async () => {
       const today = getTodayDateString();
       const logFile = path.join(tmpDir, `qoder-work-${today}.jsonl`);
@@ -202,34 +214,145 @@ describe('QoderWorkInput', () => {
       await input.stop();
     });
 
-    it('keeps qoder-work as the agent type for user rows', async () => {
-      const today = getTodayDateString();
-      const logFile = path.join(tmpDir, `qoder-work-${today}.jsonl`);
-      const record = {
+    it('drops legacy agent.* noise fields for transcript rows', async () => {
+      const entry = await writeAndDrain({
         type: 'user',
         session_id: 'sess-1',
         user_id: 'u1',
+        cwd: '/tmp/ws',
+        parentUuid: 'p-1',
+        userType: 'external',
+        timestamp: Date.now(),
+        message: { role: 'user', content: 'hello qoder work' },
+      });
+
+      expect(entry['gen_ai.agent.type']).toBe(ClientType.QoderWork);
+      for (const dropped of [
+        'agent.type',
+        'agent.role',
+        'agent.content',
+        'agent.model',
+        'agent.stop_reason',
+        'agent.file_path',
+        'agent.action_type',
+        'agent._ctype',
+        'agent._ctext',
+        'agent._cthinking',
+        'agent._cname',
+        'agent._cinput',
+        'agent._ccontent',
+        'agent._cid',
+        'agent._ctool_use_id',
+      ]) {
+        expect(entry[dropped]).toBeUndefined();
+      }
+      expect(entry['agent.cwd']).toBe('/tmp/ws');
+      expect(entry['agent.parent_uuid']).toBe('p-1');
+      expect(entry['agent.user_type']).toBe('external');
+      expect(entry['agent.row_type']).toBe('user');
+    });
+
+    it('maps user text into llm.request with gen_ai.input.messages_delta', async () => {
+      const entry = await writeAndDrain({
+        type: 'user',
+        session_id: 'sess-u',
+        timestamp: Date.now(),
+        message: { role: 'user', content: '你好' },
+      });
+
+      expect(entry['event.name']).toBe('llm.request');
+      expect(entry['gen_ai.input.messages_delta']).toEqual([
+        { role: 'user', parts: [{ type: 'text', content: '你好' }] },
+      ]);
+      expect(entry['gen_ai.output.messages']).toBeUndefined();
+    });
+
+    it('maps assistant text into llm.response with gen_ai.output.messages and finish_reasons', async () => {
+      const entry = await writeAndDrain({
+        type: 'assistant',
+        session_id: 'sess-a',
+        timestamp: Date.now(),
+        message: {
+          role: 'assistant',
+          id: 'msg-42',
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: '我是 QoderWork' }],
+        },
+      });
+
+      expect(entry['event.name']).toBe('llm.response');
+      expect(entry['gen_ai.response.id']).toBe('msg-42');
+      expect(entry['gen_ai.response.finish_reasons']).toEqual(['end_turn']);
+      expect(entry['gen_ai.output.messages']).toEqual([
+        {
+          role: 'assistant',
+          parts: [{ type: 'text', content: '我是 QoderWork' }],
+          finish_reason: 'end_turn',
+        },
+      ]);
+    });
+
+    it('maps assistant thinking into reasoning part', async () => {
+      const entry = await writeAndDrain({
+        type: 'assistant',
+        session_id: 'sess-t',
+        timestamp: Date.now(),
+        message: {
+          role: 'assistant',
+          content: [{ type: 'thinking', thinking: '用户在问名字…' }],
+        },
+      });
+
+      expect(entry['event.name']).toBe('llm.response');
+      expect(entry['gen_ai.output.messages']).toEqual([
+        { role: 'assistant', parts: [{ type: 'reasoning', content: '用户在问名字…' }] },
+      ]);
+    });
+
+    it('maps tool_use content into tool.call with gen_ai.tool.*', async () => {
+      const entry = await writeAndDrain({
+        type: 'assistant',
+        session_id: 'sess-tc',
+        timestamp: Date.now(),
+        message: {
+          role: 'assistant',
+          content: [{
+            type: 'tool_use',
+            id: 'toolu_01',
+            name: 'Bash',
+            input: { command: 'ls' },
+          }],
+        },
+      });
+
+      expect(entry['event.name']).toBe('tool.call');
+      expect(entry['gen_ai.tool.name']).toBe('Bash');
+      expect(entry['gen_ai.tool.call.id']).toBe('toolu_01');
+      expect(entry['gen_ai.tool.call.arguments']).toEqual({ command: 'ls' });
+    });
+
+    it('maps tool_result content into tool.result with gen_ai.tool.call.result', async () => {
+      const entry = await writeAndDrain({
+        type: 'user',
+        session_id: 'sess-tr',
         timestamp: Date.now(),
         message: {
           role: 'user',
-          content: 'hello qoder work',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: 'toolu_01',
+            content: 'file1\nfile2',
+          }],
         },
-      };
-      await fs.writeFile(logFile, JSON.stringify(record) + '\n');
+      });
 
-      const allEntries: AgentActivityEntry[] = [];
-      input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
-
-      await input.start();
-      expect(allEntries).toHaveLength(1);
-      expect(allEntries[0]!['gen_ai.agent.type']).toBe(ClientType.QoderWork);
-      expect(allEntries[0]!['agent.type']).toBeUndefined();
-      expect(allEntries[0]!['agent.type']).not.toBe('user');
-      await input.stop();
+      expect(entry['event.name']).toBe('tool.result');
+      expect(entry['gen_ai.tool.call.id']).toBe('toolu_01');
+      expect(entry['gen_ai.tool.call.result']).toBe('file1\nfile2');
     });
   });
 
-  describe('content extraction', () => {
+  describe('content extraction (PostToolUse)', () => {
     it('should extract content from tool_input.content', async () => {
       const today = getTodayDateString();
       const logFile = path.join(tmpDir, `qoder-work-${today}.jsonl`);
