@@ -9,6 +9,7 @@ import {
   readRecordPath,
   sourceFieldsFromContext,
 } from '../../normalization/source-context.js';
+import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { inferGitContext, BoundedTtlCache } from '../../utils/git-context.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
@@ -62,7 +63,10 @@ export class CursorHookInput extends BaseHookInput {
       ClientType.Cursor,
       buildAttributes(record, payload, hookEvent),
     );
-    if (canonicalEntry) return canonicalEntry;
+    if (canonicalEntry) {
+      await enrichCanonicalEntryWithGit(canonicalEntry, record, 'cursor');
+      return canonicalEntry;
+    }
 
     const eventName = inferEventName(hookEvent, payload);
     const toolOutput = buildToolResultPayload(payload);

@@ -142,3 +142,4 @@ function isAbsolutePath(value: string): boolean {
 function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/g, '') || '/';
 }
+

@@ -7,6 +7,7 @@ import {
   pickFirstValue,
   sourceFieldsFromContext,
 } from '../../normalization/source-context.js';
+import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { inferGitContext } from '../../utils/git-context.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
@@ -42,7 +43,10 @@ export class QoderCliInput extends BaseHookInput {
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
     const canonicalEntry = buildCanonicalHookEntry(record, ClientType.QoderCli);
-    if (canonicalEntry) return canonicalEntry;
+    if (canonicalEntry) {
+      await enrichCanonicalEntryWithGit(canonicalEntry, record, 'qoder');
+      return canonicalEntry;
+    }
 
     const hookEntry = await buildPostToolUseEntry(record);
     if (hookEntry) return hookEntry;
