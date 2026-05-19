@@ -557,9 +557,6 @@
     }
 
     function tokenDisplay(agent) {
-      if (agent.id === 'qoder-work') {
-        return '<div><div class="label">Tokens</div><div class="value">--</div><div class="subvalue">Not supported yet</div></div>';
-      }
       return `<div><div class="label">Tokens</div><div class="value">${formatCount(agent.tokensToday)}</div></div>`;
     }
 
