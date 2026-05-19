@@ -80,6 +80,18 @@ describe('serialiseLogEntry', () => {
     expect(out['gen_ai.output.messages']).toBe(JSON.stringify([{ type: 'text', content: 'ok' }]));
   });
 
+  it('serializes canonical source contract fields', () => {
+    const out = serialiseLogEntry(makeEntry({
+      'git.repo': 'sls/loongsuite-pilot',
+      'git.branch': 'feature/source-contract',
+      'workspace.current_root': '/Users/yutao/workspace/sls/loongsuite-pilot',
+    }));
+
+    expect(out['git.repo']).toBe('sls/loongsuite-pilot');
+    expect(out['git.branch']).toBe('feature/source-contract');
+    expect(out['workspace.current_root']).toBe('/Users/yutao/workspace/sls/loongsuite-pilot');
+  });
+
   it('omits optional message fields when undefined', () => {
     const out = serialiseLogEntry(makeEntry());
     expect(out).not.toHaveProperty('gen_ai.input.messages_delta');

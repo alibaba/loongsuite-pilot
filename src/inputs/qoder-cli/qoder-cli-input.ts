@@ -2,7 +2,13 @@ import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry, AgentEventName, JsonValue } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
+import {
+  normalizeSourceContext,
+  pickFirstValue,
+  sourceFieldsFromContext,
+} from '../../normalization/source-context.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
+import { inferGitContext } from '../../utils/git-context.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 
 const SOURCE = 'qoder-transcript-hook';
@@ -10,13 +16,7 @@ const IGNORED_ROW_TYPES = new Set(['ai-title', 'last-prompt', 'session_meta', 'p
 const UNKNOWN_MODEL = 'unknown';
 type QoderVariant = 'qoder-cli' | 'qoder';
 
-/**
- * Qoder transcript hook input.
- *
- * Reads rows from the compatibility history channel
- * ~/.loongsuite-pilot/logs/qoder-cli/history/ and maps both Qoder CLI and
- * Qoder IDE transcript row shapes to standard AgentActivityEntry fields.
- */
+/** Qoder transcript hook input. */
 export class QoderCliInput extends BaseHookInput {
   readonly id = 'qoder-cli-hook';
   readonly agentType = ClientType.QoderCli;
@@ -44,7 +44,7 @@ export class QoderCliInput extends BaseHookInput {
     const canonicalEntry = buildCanonicalHookEntry(record, ClientType.QoderCli);
     if (canonicalEntry) return canonicalEntry;
 
-    const hookEntry = buildPostToolUseEntry(record);
+    const hookEntry = await buildPostToolUseEntry(record);
     if (hookEntry) return hookEntry;
 
     const rowType = record.type as string | undefined;
@@ -67,8 +67,10 @@ export class QoderCliInput extends BaseHookInput {
     const model = getStringValue(message, 'model') ?? UNKNOWN_MODEL;
     const toolResultPayload = buildToolResultPayload(record, contentBlock);
     const messageId = getStringValue(message, 'id');
+    const sourceFields = await buildSourceFields(record);
 
     return buildAgentActivityEntry({
+      ...sourceFields,
       timestamp,
       'event.id': getStringValue(record, 'uuid') ?? undefined,
       'event.name': eventName,
@@ -117,7 +119,7 @@ function parseTimestamp(value: unknown): number | undefined {
   return Number.isNaN(parsed) ? undefined : parsed;
 }
 
-function buildPostToolUseEntry(record: Record<string, unknown>): AgentActivityEntry | null {
+async function buildPostToolUseEntry(record: Record<string, unknown>): Promise<AgentActivityEntry | null> {
   const data = (record.data && typeof record.data === 'object' && !Array.isArray(record.data))
     ? record.data as Record<string, unknown>
     : record;
@@ -127,7 +129,10 @@ function buildPostToolUseEntry(record: Record<string, unknown>): AgentActivityEn
   const toolInput = (data.tool_input && typeof data.tool_input === 'object' && !Array.isArray(data.tool_input))
     ? data.tool_input as Record<string, unknown>
     : {};
+  const sourceFields = await buildSourceFields(data);
+
   return buildAgentActivityEntry({
+    ...sourceFields,
     timestamp: parseTimestamp(data.timestamp) ?? Date.now(),
     'event.name': 'tool.result',
     'gen_ai.session.id': getStringValue(data, 'session_id') ?? '',
@@ -247,6 +252,57 @@ function buildAttributes(
     message_type: message.type,
   });
 }
+
+async function buildSourceFields(
+  record: Record<string, unknown>,
+): Promise<Record<string, JsonValue>> {
+  const context = normalizeSourceContext({
+    repo: pickFirstValue(
+      record['git.repo'],
+      record.repo,
+      record.repository,
+      record.repo_path,
+      record.repository_path,
+      record.project_path,
+    ),
+    branch: pickFirstValue(
+      record['git.branch'],
+      record.branch,
+      record.git_branch,
+      record.current_branch,
+      record.currentBranch,
+    ),
+    domain: pickFirstValue(
+      record['git.domain'],
+      record.domain,
+    ),
+    cwd: record.cwd,
+    workspaceRoots: record.workspace_roots,
+  });
+
+  let inferredRoot: string | undefined;
+  if (!context.repo || !context.branch || !context.domain) {
+    const gitProbeDir = pickFirstValue(record.cwd, context.currentRoot);
+    if (typeof gitProbeDir === 'string' && gitProbeDir.trim().length > 0) {
+      const inferred = await inferGitContext(gitProbeDir);
+      if (!context.repo && inferred.repo) context.repo = inferred.repo;
+      if (!context.branch && inferred.branch) context.branch = inferred.branch;
+      if (!context.domain && inferred.domain) context.domain = inferred.domain;
+      inferredRoot = inferred.root;
+    }
+  }
+
+  if (!context.currentRoot && inferredRoot) {
+    context.currentRoot = inferredRoot;
+  }
+
+  const fields = sourceFieldsFromContext(context);
+  if (inferredRoot) {
+    fields['git.repo_root'] = inferredRoot;
+  }
+  return fields;
+}
+
 
 function getStringValue(data: Record<string, unknown>, key: string): string | undefined {
   const val = data[key];

@@ -2,10 +2,27 @@ import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry, AgentEventName, JsonValue } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { buildAgentActivityEntry, normalizeFinishReasons } from '../../normalization/entry-builder.js';
+import {
+  collectAbsolutePathValues,
+  normalizeSourceContext,
+  pickFirstValue,
+  readRecordPath,
+  sourceFieldsFromContext,
+} from '../../normalization/source-context.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
+import { inferGitContext, BoundedTtlCache } from '../../utils/git-context.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 
 const UNKNOWN_MODEL = 'unknown';
+
+const SESSION_CD_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+interface SessionCdCacheEntry {
+  cdPath: string;
+  expiresAt: number;
+}
+
+const sessionCdCache = new BoundedTtlCache<SessionCdCacheEntry>();
 
 function getStringValue(data: Record<string, unknown>, key: string): string | undefined {
   const val = data[key];
@@ -52,8 +69,30 @@ export class CursorHookInput extends BaseHookInput {
     const toolArguments = buildToolArguments(payload);
     const attributes = buildAttributes(record, payload, hookEvent);
     const model = getStringValue(payload, 'model') ?? UNKNOWN_MODEL;
+    const sessionId = getStringValue(payload, 'session_id')
+      ?? getStringValue(payload, 'conversation_id')
+      ?? getStringValue(payload, 'session.id')
+      ?? '';
+
+    // Cache cd path from preToolUse command for fallback git probing
+    if (hookEvent.toLowerCase().includes('pretooluse')) {
+      const toolInput = parseMaybeJson(payload.tool_input) as Record<string, unknown> | undefined;
+      const command = getStringValue(toolInput ?? {}, 'command');
+      if (command) {
+        const cdPath = extractCdPathFromCommand(command);
+        if (cdPath) {
+          sessionCdCache.set(sessionId, {
+            cdPath,
+            expiresAt: Date.now() + SESSION_CD_CACHE_TTL_MS,
+          });
+        }
+      }
+    }
+
+    const sourceFields = await buildSourceFields(payload, toolArguments, toolOutput, sessionId);
 
     return buildAgentActivityEntry({
+      ...sourceFields,
       time_unix_nano: getStringValue(payload, 'time_unix_nano')
         ?? getStringValue(record, 'time_unix_nano')
         ?? undefined,
@@ -248,6 +287,91 @@ function buildAttributes(
     status: payload.status,
     loop_count: payload.loop_count,
   });
+}
+
+async function buildSourceFields(
+  payload: Record<string, unknown>,
+  toolArguments: JsonValue | undefined,
+  toolOutput: unknown,
+  sessionId: string,
+): Promise<Record<string, JsonValue>> {
+  const context = normalizeSourceContext({
+    repo: pickFirstValue(
+      payload['git.repo'],
+      payload.repo,
+      payload.repository,
+      payload.repo_path,
+      payload.repository_path,
+      payload.project_path,
+      readRecordPath(payload, 'git.repo'),
+    ),
+    branch: pickFirstValue(
+      payload['git.branch'],
+      payload.branch,
+      payload.git_branch,
+      payload.current_branch,
+      payload.currentBranch,
+      readRecordPath(payload, 'git.branch'),
+    ),
+    domain: pickFirstValue(
+      payload['git.domain'],
+      payload.domain,
+      readRecordPath(payload, 'git.domain'),
+    ),
+    cwd: pickFirstValue(
+      payload.cwd,
+      readRecordPath(toolArguments, 'cwd'),
+      readRecordPath(toolOutput, 'cwd'),
+    ),
+    workspaceRoots: payload.workspace_roots,
+    absolutePaths: [
+      ...collectAbsolutePathValues(toolArguments),
+      ...collectAbsolutePathValues(toolOutput),
+    ],
+  });
+
+  const gitProbeDir = pickFirstValue(
+    payload.cwd,
+    readRecordPath(toolArguments, 'cwd'),
+    readRecordPath(toolOutput, 'cwd'),
+    context.currentRoot,
+  );
+  if (!context.repo && !context.branch && !context.domain && typeof gitProbeDir === 'string' && gitProbeDir.trim().length > 0) {
+    const inferred = await inferGitContext(gitProbeDir);
+    if (!context.repo && inferred.repo) context.repo = inferred.repo;
+    if (!context.branch && inferred.branch) context.branch = inferred.branch;
+    if (!context.domain && inferred.domain) context.domain = inferred.domain;
+  }
+
+  // Fallback: use cached cd path from preToolUse command in the same session
+  if (!context.repo || !context.branch || !context.domain) {
+    const cachedCdPath = getCachedCdPath(sessionId);
+    if (cachedCdPath) {
+      const inferred = await inferGitContext(cachedCdPath);
+      if (!context.repo && inferred.repo) context.repo = inferred.repo;
+      if (!context.branch && inferred.branch) context.branch = inferred.branch;
+      if (!context.domain && inferred.domain) context.domain = inferred.domain;
+    }
+  }
+
+  return sourceFieldsFromContext(context);
+}
+
+function extractCdPathFromCommand(command: string): string | undefined {
+  const trimmed = command.trim();
+  // Match patterns like: cd /path, cd "/path", cd '/path' followed by separator or end
+  // Known limitation: env vars (e.g. $HOME) are not expanded.
+  const match = trimmed.match(/^\s*cd\s+["']?([^"';|&\n\r]+?)["']?(?:\s*[;|&]|$)/);
+  if (!match) return undefined;
+  const raw = match[1].trim();
+  if (raw.startsWith('~')) return resolveHome(raw);
+  return raw;
+}
+
+function getCachedCdPath(sessionId: string): string | undefined {
+  if (!sessionId) return undefined;
+  const cached = sessionCdCache.get(sessionId);
+  return cached?.cdPath;
 }
 
 function parseMaybeJson(value: unknown): unknown {

@@ -40,6 +40,7 @@ export abstract class BaseHookInput extends BaseInput {
     const today = getTodayDateString();
     const logFileName = `${this.logPrefix}-${today}.jsonl`;
     const logFile = path.join(this.logDir, logFileName);
+    const entries: AgentActivityEntry[] = [];
 
     let stat;
     try {
@@ -69,7 +70,6 @@ export abstract class BaseHookInput extends BaseInput {
       const text = buf.toString('utf-8');
       this.setState({ lastFile: logFileName, lastOffset: stat.size });
 
-      const entries: AgentActivityEntry[] = [];
       const lines = text.split('\n').filter(l => l.trim().length > 0);
 
       for (const line of lines) {
@@ -81,10 +81,11 @@ export abstract class BaseHookInput extends BaseInput {
           this.logger.warn('invalid JSONL line', { error: String(err) });
         }
       }
-      return entries;
     } finally {
       await handle.close();
     }
+    
+    return entries;
   }
 
   /**

@@ -11,8 +11,8 @@
  */
 
 import fs from 'node:fs/promises';
-import path from 'node:path';
 import os from 'node:os';
+import path from 'node:path';
 import {
   buildCursorHookRecord,
   getSourceHookEvent,
@@ -31,13 +31,21 @@ function toIsoUtc(date) {
   return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
+function localDateString(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+
 function normalizeHookEvent(payload) {
   const eventName = getSourceHookEvent(payload);
   return typeof eventName === 'string' && eventName.trim() ? eventName.trim() : 'unknown';
 }
 
 async function appendErrorJsonl(dataDir, now, fields) {
-  const day = toIsoUtc(now).slice(0, 10);
+  const day = localDateString(now);
   const record = sanitizeObject({
     time: toIsoUtc(now),
     clientType: 'CursorHook',
@@ -111,7 +119,7 @@ async function main() {
     return;
   }
 
-  const day = toIsoUtc(now).slice(0, 10);
+  const day = localDateString(now);
   const logFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
   try {
     await appendJsonl(logFile, buildCursorHookRecord(payload, {

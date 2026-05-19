@@ -172,6 +172,7 @@ export class QoderWorkInput extends BaseHookInput {
     const sourceUuid = record.uuid;
     if (typeof sourceUuid === 'string' && sourceUuid.trim().length > 0) {
       entry['event.id'] = sourceUuid;
+      entry.uuid = sourceUuid;
     }
     return entry;
   }

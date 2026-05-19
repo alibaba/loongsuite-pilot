@@ -81,6 +81,16 @@ export interface AgentActivityEntry {
   'gen_ai.tool.call.result'?: JsonValue;
   'gen_ai.tool.call.duration'?: number;
   'gen_ai.skill.name'?: string;
+  /** Canonical repository identity for source attribution, e.g. sls/loongsuite-pilot. */
+  'git.repo'?: string;
+  /** Current branch when observed at collection time. */
+  'git.branch'?: string;
+  /** Filesystem top-level of the Git repository used to infer Git metadata. */
+  'git.repo_root'?: string;
+  /** Git hosting domain (e.g. github.com, gitlab.alibaba-inc.com). */
+  'git.domain'?: string;
+  /** Selected workspace root for path normalization/repo attribution. */
+  'workspace.current_root'?: string;
   'error.type'?: string;
   'error.message'?: string;
 }

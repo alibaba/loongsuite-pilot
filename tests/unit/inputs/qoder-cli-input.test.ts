@@ -253,6 +253,63 @@ describe('QoderCliInput', () => {
     expect(qoderLine['gen_ai.agent.type']).toBe('qoder');
   });
 
+  it('infers git fields from cwd when inside a git repository', async () => {
+    const { execFile: execFileCb } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFile = promisify(execFileCb);
+
+    const repoDir = path.join(tmpDir, 'qoder-repo');
+    await fs.mkdir(repoDir, { recursive: true });
+    await execFile('git', ['init', '-b', 'feature/qoder-git'], { cwd: repoDir });
+    await execFile('git', ['config', 'user.name', 'qoder-test'], { cwd: repoDir });
+    await execFile('git', ['config', 'user.email', 'qoder-test@example.com'], { cwd: repoDir });
+    await execFile('git', ['remote', 'add', 'origin', 'git@github.com:acme/qoder-test.git'], { cwd: repoDir });
+    await fs.writeFile(path.join(repoDir, 'README.md'), 'ok\n', 'utf-8');
+    await execFile('git', ['add', 'README.md'], { cwd: repoDir });
+    await execFile('git', ['commit', '-m', 'init'], { cwd: repoDir });
+
+    const record = {
+      type: 'user',
+      uuid: 'test-git-1',
+      timestamp: '2026-05-07T10:00:00.000Z',
+      cwd: repoDir,
+      message: { role: 'user', content: 'hello' },
+      sessionId: 'sess-git',
+      entrypoint: 'cli',
+    };
+
+    const entries = await collectRows([record]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!['git.repo']).toBe('acme/qoder-test');
+    expect(entries[0]!['git.branch']).toBe('feature/qoder-git');
+    expect(entries[0]!['git.domain']).toBe('github.com');
+    expect(entries[0]!['git.repo_root']).toContain('qoder-repo');
+    expect(entries[0]!['workspace.current_root']).toContain('qoder-repo');
+  });
+
+  it('leaves git fields empty when cwd is not a git repository', async () => {
+    const nonRepoDir = path.join(tmpDir, 'non-repo');
+    await fs.mkdir(nonRepoDir, { recursive: true });
+
+    const record = {
+      type: 'user',
+      uuid: 'test-no-git-1',
+      timestamp: '2026-05-07T10:00:00.000Z',
+      cwd: nonRepoDir,
+      message: { role: 'user', content: 'hello' },
+      sessionId: 'sess-no-git',
+      entrypoint: 'cli',
+    };
+
+    const entries = await collectRows([record]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!['git.repo']).toBeUndefined();
+    expect(entries[0]!['git.branch']).toBeUndefined();
+    expect(entries[0]!['git.domain']).toBeUndefined();
+    expect(entries[0]!['git.repo_root']).toBeUndefined();
+    expect(entries[0]!['workspace.current_root']).toBeUndefined();
+  });
+
   async function collectRows(records: Record<string, unknown>[]): Promise<AgentActivityEntry[]> {
     const today = getTodayDateString();
     const logFile = path.join(tmpDir, `qoder-cli-${today}.jsonl`);

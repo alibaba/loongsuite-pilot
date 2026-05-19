@@ -2,10 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { execFile as execFileCb } from 'node:child_process';
+import { promisify } from 'node:util';
 import { ClientType } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { CursorHookInput } from '../../../src/inputs/cursor-hook/cursor-hook-input.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+
+const execFile = promisify(execFileCb);
 
 function getTodayDateString(): string {
   const d = new Date();
@@ -43,12 +47,17 @@ describe('CursorHookInput', () => {
       hook_event_name: 'preToolUse',
       conversation_id: 'sess-1',
       generation_id: 'turn-1',
+      message_id: 'msg-1',
       model: 'gpt-5.5',
+      repo: 'sls/loongsuite-pilot',
+      branch: 'feature/source-contract',
+      domain: 'github.com',
+      workspace_roots: ['/workspace', '/workspace/project'],
       tool_name: 'Shell',
       tool_use_id: 'tool-1',
       tool_input: {
         command: 'echo hello',
-        cwd: '/workspace',
+        cwd: '/workspace/project',
       },
     };
     await fs.writeFile(logFile, `${JSON.stringify(record)}\n`);
@@ -65,9 +74,13 @@ describe('CursorHookInput', () => {
     expect(entries[0]!['gen_ai.turn.id']).toBe('turn-1');
     expect(entries[0]!['gen_ai.tool.name']).toBe('Shell');
     expect(entries[0]!['gen_ai.tool.call.id']).toBe('tool-1');
-    expect(entries[0]!['gen_ai.tool.call.arguments']).toEqual({ command: 'echo hello', cwd: '/workspace' });
+    expect(entries[0]!['gen_ai.tool.call.arguments']).toEqual({ command: 'echo hello', cwd: '/workspace/project' });
     expect(entries[0]!['gen_ai.request.model']).toBe('gpt-5.5');
     expect(entries[0]!['gen_ai.response.model']).toBe('gpt-5.5');
+    expect(entries[0]!['git.repo']).toBe('sls/loongsuite-pilot');
+    expect(entries[0]!['git.branch']).toBe('feature/source-contract');
+    expect(entries[0]!['git.domain']).toBe('github.com');
+    expect(entries[0]!['workspace.current_root']).toBe('/workspace/project');
   });
 
   it('prefers canonical hook records when present', async () => {
@@ -279,5 +292,181 @@ describe('CursorHookInput', () => {
     expect(entries[0]!['gen_ai.session.id']).toBeTruthy();
     expect(entries[0]!['gen_ai.tool.name']).toBe('Shell');
     expect(entries[0]!['gen_ai.tool.call.result']).toMatchObject({ output: '' });
+  });
+
+  it('infers git repo and branch from workspace.current_root when payload fields are missing', async () => {
+    const repoDir = path.join(tmpDir, 'repo');
+    await fs.mkdir(repoDir, { recursive: true });
+    await execFile('git', ['init', '-b', 'feature/infer-git'], { cwd: repoDir });
+    await execFile('git', ['config', 'user.name', 'cursor-test'], { cwd: repoDir });
+    await execFile('git', ['config', 'user.email', 'cursor-test@example.com'], { cwd: repoDir });
+    await execFile('git', ['remote', 'add', 'origin', 'git@github.com:acme/agent-collector.git'], { cwd: repoDir });
+    await fs.writeFile(path.join(repoDir, 'README.md'), 'ok\n', 'utf-8');
+    await execFile('git', ['add', 'README.md'], { cwd: repoDir });
+    await execFile('git', ['commit', '-m', 'init'], { cwd: repoDir });
+
+    const today = getTodayDateString();
+    const logFile = path.join(tmpDir, `cursor-${today}.jsonl`);
+    const record = {
+      'event.id': 'r-7',
+      observed_time_unix_nano: '1777628163513000000',
+      time_unix_nano: '1777628163513000000',
+      hook_event_name: 'postToolUse',
+      session_id: 's-infer',
+      tool_name: 'Read',
+      tool_use_id: 'tool-infer',
+      tool_output: '{"content_length":12}',
+      workspace_roots: [repoDir],
+      cwd: repoDir,
+    };
+    await fs.writeFile(logFile, `${JSON.stringify(record)}\n`);
+
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!['workspace.current_root']).toBe(repoDir);
+    expect(entries[0]!['git.repo']).toBe('acme/agent-collector');
+    expect(entries[0]!['git.branch']).toBe('feature/infer-git');
+    expect(entries[0]!['git.domain']).toBe('github.com');
+  });
+
+  it('keeps git fields empty when root is not a git repository', async () => {
+    const nonRepoDir = path.join(tmpDir, 'non-repo');
+    await fs.mkdir(nonRepoDir, { recursive: true });
+
+    const today = getTodayDateString();
+    const logFile = path.join(tmpDir, `cursor-${today}.jsonl`);
+    const record = {
+      'event.id': 'r-8',
+      observed_time_unix_nano: '1777628163513000000',
+      time_unix_nano: '1777628163513000000',
+      hook_event_name: 'postToolUse',
+      session_id: 's-no-git',
+      tool_name: 'Read',
+      tool_use_id: 'tool-no-git',
+      tool_output: '{"content_length":7}',
+      workspace_roots: [nonRepoDir],
+      cwd: nonRepoDir,
+    };
+    await fs.writeFile(logFile, `${JSON.stringify(record)}\n`);
+
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!['workspace.current_root']).toBe(nonRepoDir);
+    expect(entries[0]!['git.repo']).toBeUndefined();
+    expect(entries[0]!['git.branch']).toBeUndefined();
+    expect(entries[0]!['git.domain']).toBeUndefined();
+  });
+
+  it('keeps workspace root but infers git from cwd repository root', async () => {
+    const workspaceDir = path.join(tmpDir, 'workspace');
+    const repoDir = path.join(workspaceDir, 'repo-a');
+    const workDir = path.join(repoDir, 'subdir');
+    await fs.mkdir(workDir, { recursive: true });
+    await execFile('git', ['init', '-b', 'feature/ws-vs-git'], { cwd: repoDir });
+    await execFile('git', ['config', 'user.name', 'cursor-test'], { cwd: repoDir });
+    await execFile('git', ['config', 'user.email', 'cursor-test@example.com'], { cwd: repoDir });
+    await execFile('git', ['remote', 'add', 'origin', 'git@github.com:acme/workspace-vs-git.git'], { cwd: repoDir });
+    await fs.writeFile(path.join(repoDir, 'README.md'), 'ok\n', 'utf-8');
+    await execFile('git', ['add', 'README.md'], { cwd: repoDir });
+    await execFile('git', ['commit', '-m', 'init'], { cwd: repoDir });
+
+    const today = getTodayDateString();
+    const logFile = path.join(tmpDir, `cursor-${today}.jsonl`);
+    const record = {
+      'event.id': 'r-9',
+      observed_time_unix_nano: '1777628163513000000',
+      time_unix_nano: '1777628163513000000',
+      hook_event_name: 'postToolUse',
+      session_id: 's-ws-git',
+      tool_name: 'Read',
+      tool_use_id: 'tool-ws-git',
+      tool_output: '{"content_length":7}',
+      workspace_roots: [workspaceDir],
+      cwd: workDir,
+    };
+    await fs.writeFile(logFile, `${JSON.stringify(record)}\n`);
+
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!['workspace.current_root']).toBe(workspaceDir);
+    expect(entries[0]!['git.repo']).toBe('acme/workspace-vs-git');
+    expect(entries[0]!['git.branch']).toBe('feature/ws-vs-git');
+    expect(entries[0]!['git.domain']).toBe('github.com');
+  });
+
+  it('falls back to cached cd path from preToolUse command when git fields are missing', async () => {
+    const repoDir = path.join(tmpDir, 'fallback-repo');
+    await fs.mkdir(repoDir, { recursive: true });
+    await execFile('git', ['init', '-b', 'feature/fallback-cd'], { cwd: repoDir });
+    await execFile('git', ['config', 'user.name', 'cursor-test'], { cwd: repoDir });
+    await execFile('git', ['config', 'user.email', 'cursor-test@example.com'], { cwd: repoDir });
+    await execFile('git', ['remote', 'add', 'origin', 'git@github.com:acme/fallback-cd.git'], { cwd: repoDir });
+    await fs.writeFile(path.join(repoDir, 'README.md'), 'ok\n', 'utf-8');
+    await execFile('git', ['add', 'README.md'], { cwd: repoDir });
+    await execFile('git', ['commit', '-m', 'init'], { cwd: repoDir });
+
+    const today = getTodayDateString();
+    const logFile = path.join(tmpDir, `cursor-${today}.jsonl`);
+
+    // preToolUse record with cd command in tool_input — no repo/branch/workspace_roots
+    const preToolUseRecord = {
+      'event.id': 'r-10',
+      observed_time_unix_nano: '1777628163513000000',
+      time_unix_nano: '1777628163513000000',
+      hook_event_name: 'preToolUse',
+      session_id: 's-fallback',
+      generation_id: 'turn-1',
+      tool_name: 'Shell',
+      tool_use_id: 'tool-1',
+      tool_input: {
+        command: `cd ${repoDir} && git status`,
+      },
+    };
+
+    // llm.request record in the same session — also no repo/branch/workspace_roots
+    const llmRequestRecord = {
+      'event.id': 'r-11',
+      observed_time_unix_nano: '1777628163513001000',
+      time_unix_nano: '1777628163513001000',
+      hook_event_name: 'beforeSubmitPrompt',
+      session_id: 's-fallback',
+      generation_id: 'turn-2',
+      prompt: 'hello',
+    };
+
+    await fs.writeFile(
+      logFile,
+      `${JSON.stringify(preToolUseRecord)}\n${JSON.stringify(llmRequestRecord)}\n`,
+    );
+
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(2);
+
+    // preToolUse entry should have cached the cd path but no git info because
+    // workspace_roots is absent and payload has no repo/branch
+    expect(entries[0]!['event.name']).toBe('tool.call');
+
+    // llm.request entry should use the cached cd path to infer git info
+    expect(entries[1]!['event.name']).toBe('llm.request');
+    expect(entries[1]!['gen_ai.session.id']).toBe('s-fallback');
+    expect(entries[1]!['git.repo']).toBe('acme/fallback-cd');
+    expect(entries[1]!['git.branch']).toBe('feature/fallback-cd');
+    expect(entries[1]!['git.domain']).toBe('github.com');
   });
 });

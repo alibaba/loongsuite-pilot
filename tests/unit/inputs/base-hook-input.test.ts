@@ -125,6 +125,33 @@ describe('BaseHookInput', () => {
       await input.stop();
       vi.useRealTimers();
     });
+
+    it('should recover when file is truncated and stored offset is stale', async () => {
+      const today = getTodayDateString();
+      const logFile = path.join(tmpDir, `test-hook-${today}.jsonl`);
+      await fs.writeFile(logFile, JSON.stringify({ file_path: '/first-entry-with-long-path.ts' }) + '\n');
+
+      await input.start();
+      await input.stop();
+
+      // Simulate log truncation/rotation with same file name.
+      await fs.writeFile(logFile, JSON.stringify({ file_path: '/short.ts' }) + '\n');
+
+      const input2 = new TestHookInput({
+        stateStore: stateStore as any,
+        logDir: tmpDir,
+        logPrefix: 'test-hook',
+        pollIntervalMs: 60_000,
+      });
+      const entries: AgentActivityEntry[] = [];
+      input2.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+
+      await input2.start();
+      await input2.stop();
+
+      expect(entries).toHaveLength(1);
+      expect(entries[0]!.filePath).toBe('/short.ts');
+    });
   });
 
   describe('transformRecord delegation', () => {
