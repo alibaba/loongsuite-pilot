@@ -157,11 +157,13 @@ export class QoderWorkLogInput extends BaseSessionInput {
   private pendingEntries: AgentActivityEntry[] = [];
   private currentFilePath: string = '';
   /**
-   * Most recent `set_model_policy` payload, updated whenever a
-   * `Sending control request: set_model_policy` line is parsed. Each turn's
-   * effective model is selected from this map at `message_start` based on
-   * the session's subscription tier (see `pickModelForTier`).
+   * Per-file model policy state. Each SDK log file may belong to a different
+   * SDK process with its own `set_model_policy` line, so we isolate policy
+   * by file path. The policy is restored at the start of each `processLogFile`
+   * call and saved back after processing, ensuring cross-poll-cycle continuity
+   * without cross-file leakage.
    */
+  private readonly fileModelPolicies: Map<string, { chat: string; compact: string; scene: string }> = new Map();
   private currentModelPolicy: { chat: string; compact: string; scene: string } = {
     chat: '',
     compact: '',
@@ -221,7 +223,20 @@ export class QoderWorkLogInput extends BaseSessionInput {
 
     for (const dir of sessionDirs) {
       if (!dir.isDirectory()) continue;
-      const mainDir = path.join(this.sessionDir, dir.name, 'main');
+      const sessionPath = path.join(this.sessionDir, dir.name);
+
+      // New layout: <session>/main.log (SDK events mixed into a single file)
+      const mainLogPath = path.join(sessionPath, 'main.log');
+      try {
+        const st = await fs.stat(mainLogPath);
+        if (st.isFile()) {
+          files.push(mainLogPath);
+          continue;
+        }
+      } catch { /* fall through to legacy layout */ }
+
+      // Legacy layout: <session>/main/sdk-*.log
+      const mainDir = path.join(sessionPath, 'main');
       let entries: Dirent[];
       try {
         entries = await fs.readdir(mainDir, { withFileTypes: true });
@@ -283,7 +298,8 @@ export class QoderWorkLogInput extends BaseSessionInput {
   }
 
   private async processLogFile(filePath: string): Promise<AgentActivityEntry[]> {
-    this.currentModelPolicy = { chat: '', compact: '', scene: '' };
+    this.currentModelPolicy = this.fileModelPolicies.get(filePath)
+      ?? { chat: '', compact: '', scene: '' };
     const stateKey = `${this.id}:${filePath}`;
     let stat;
     try {
@@ -299,8 +315,8 @@ export class QoderWorkLogInput extends BaseSessionInput {
     if (prevInode !== undefined && prevInode !== currentInode) {
       this.stateStore.setOffset(stateKey, 0);
       this.stateStore.update(stateKey, { extra: { inode: currentInode } });
-      this.sessions.clear();
-      this.activeTurns.clear();
+      this.fileModelPolicies.delete(filePath);
+      this.currentModelPolicy = { chat: '', compact: '', scene: '' };
     } else if (prevInode === undefined) {
       this.stateStore.update(stateKey, { extra: { inode: currentInode } });
     }
@@ -315,7 +331,20 @@ export class QoderWorkLogInput extends BaseSessionInput {
       const buf = Buffer.alloc(readSize);
       await handle.read(buf, 0, readSize, offset);
       text = buf.toString('utf-8');
-      this.stateStore.setOffset(stateKey, offset + readSize);
+
+      // When capped by MAX_READ_BYTES the last "line" is likely truncated.
+      // Roll back to the last complete newline so the partial line is re-read
+      // next cycle.
+      let consumedBytes = readSize;
+      if (readSize < stat.size - offset) {
+        const lastNL = text.lastIndexOf('\n');
+        if (lastNL >= 0) {
+          text = text.substring(0, lastNL);
+          consumedBytes = Buffer.byteLength(text, 'utf-8') + 1; // +1 for the \n
+        }
+      }
+
+      this.stateStore.setOffset(stateKey, offset + consumedBytes);
       this.stateStore.update(stateKey, { extra: { inode: currentInode } });
     } finally {
       await handle.close();
@@ -328,6 +357,8 @@ export class QoderWorkLogInput extends BaseSessionInput {
       if (!event) continue;
       this.handleEvent(event, filePath, out);
     }
+
+    this.fileModelPolicies.set(filePath, { ...this.currentModelPolicy });
     return out;
   }
 
