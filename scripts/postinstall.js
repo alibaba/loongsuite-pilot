@@ -96,6 +96,22 @@ function main() {
       console.error('[loongsuite-pilot] Failed to install skill docs:', error.message);
     }
   }
+
+  // Place a no-op intercept.js stub at the legacy path.
+  // Old otel-claude-hook versions injected NODE_OPTIONS="--require intercept.js" into shell profiles.
+  // After upgrade the real file is removed, but already-open terminals still have NODE_OPTIONS set,
+  // causing MODULE_NOT_FOUND errors. This stub prevents that.
+  const legacyIntercept = path.join(process.env.HOME || '', '.cache', 'opentelemetry.instrumentation.claude', 'intercept.js');
+  if (!fs.existsSync(legacyIntercept)) {
+    try {
+      ensureDir(path.dirname(legacyIntercept));
+      fs.writeFileSync(legacyIntercept, '/* no-op stub for legacy NODE_OPTIONS --require */\n');
+      console.log(`  ✓ Created legacy intercept.js stub`);
+    } catch (error) {
+      // Non-critical, don't fail
+      console.error(`  ✗ Failed to create intercept.js stub:`, error.message);
+    }
+  }
 }
 
 // Run installation
