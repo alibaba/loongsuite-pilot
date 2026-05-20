@@ -420,16 +420,6 @@ deploy_package() {
 
     deploy_bootstrap_scripts
 
-    # Deploy agent definition files (overwrite builtin, preserve user's agents.d.local)
-    if [ -d "$PERMANENT_DIR/agents.d" ]; then
-        msg "==> 部署 Agent 定义文件..." "==> Deploying agent definitions..."
-        mkdir -p "$DATA_DIR/agents.d"
-        cp -f "$PERMANENT_DIR/agents.d/"*.json "$DATA_DIR/agents.d/" 2>/dev/null || true
-        mkdir -p "$DATA_DIR/agents.d.local"
-        msg "    ✅ Agent 定义文件已部署" "    ✅ Agent definitions deployed"
-        echo ""
-    fi
-
     msg "==> 安装依赖..." "==> Installing dependencies..."
     (cd "$PERMANENT_DIR" && "$NPM_BIN" install --production --no-optional 2>&1 | tail -1)
     msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
