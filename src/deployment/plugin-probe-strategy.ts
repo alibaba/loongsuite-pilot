@@ -172,10 +172,16 @@ export class PluginProbeStrategy implements DeployStrategy {
 
   private buildScriptEnv(agentId: string): Record<string, string> {
     const nodeBin = process.execPath;
-    const npmBin = path.join(path.dirname(nodeBin), 'npm');
+    const nodeDir = path.dirname(nodeBin);
+    const npmBin = path.join(nodeDir, 'npm');
+    const existingPath = process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin';
+    const augmentedPath = existingPath.includes(nodeDir)
+      ? existingPath
+      : `${nodeDir}:${existingPath}`;
 
     return {
       ...process.env as Record<string, string>,
+      PATH: augmentedPath,
       NODE_OPTIONS: '',
       PILOT_DATA_DIR: this.dataDir,
       PILOT_LOG_DIR: path.join(this.dataDir, 'logs', agentId),

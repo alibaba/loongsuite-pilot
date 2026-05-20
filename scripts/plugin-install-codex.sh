@@ -13,7 +13,11 @@ NPM_BIN="${PILOT_NPM_BIN:-npm}"
 LOG_DIR="${PILOT_LOG_DIR:-}"
 
 # 1. Install dependencies
-"$NPM_BIN" install --production --silent 2>/dev/null || true
+if ! "$NPM_BIN" install --production --silent 2>/tmp/pilot-plugin-npm-err.log; then
+    echo "npm install failed" >&2
+    cat /tmp/pilot-plugin-npm-err.log >&2 2>/dev/null
+    exit 1
+fi
 
 # 2. Register hooks in ~/.codex/hooks.json
 if [ -f "$DEST_DIR/bin/otel-codex-hook" ]; then

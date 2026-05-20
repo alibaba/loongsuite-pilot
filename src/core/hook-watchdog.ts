@@ -240,8 +240,9 @@ export class HookWatchdog {
   private repairViaCommand(target: PluginCheckTarget): Promise<boolean> {
     return new Promise(resolve => {
       let settled = false;
-      const child = spawn('node', [target.binPath!, ...target.installArgs!], {
+      const child = spawn(process.execPath, [target.binPath!, ...target.installArgs!], {
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, NODE_OPTIONS: '' },
       });
 
       const timer = setTimeout(() => {
