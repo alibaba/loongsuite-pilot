@@ -28,6 +28,6 @@ Hook history logs are currently treated mostly as raw source payloads, so Cursor
 
 ## Baseline Documentation Updates
 
-- Update `specs/baseline/modules/hooks.md` to document the shared asset-side normalizer/helper and the stronger rule that deterministic per-event normalization from hook stdin/transcripts belongs in `assets/hooks/*.mjs` by default.
-- Update `specs/baseline/modules/normalization.md` to clarify that hook-side pre-standardization may duplicate user defaulting, provider fallback, and content-policy filtering, while collector normalization remains responsible for final `AgentActivityEntry` building, alias cleanup, and authoritative policy enforcement.
+- Update `docs/modules/hooks.md` to document the shared asset-side normalizer/helper and the stronger rule that deterministic per-event normalization from hook stdin/transcripts belongs in `assets/hooks/*.mjs` by default.
+- Update `docs/modules/normalization.md` to clarify that hook-side pre-standardization may duplicate user defaulting, provider fallback, and content-policy filtering, while collector normalization remains responsible for final `AgentActivityEntry` building, alias cleanup, and authoritative policy enforcement.
 - No baseline architecture violation is proposed: hook processors still write append-only local history/error/debug files only, and normalized entries still flow through Input -> InputManager -> Flusher.

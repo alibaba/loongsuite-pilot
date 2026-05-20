@@ -19,7 +19,7 @@ This is a review workflow. Do not modify application code or spec files unless t
 Review against:
 
 - active OpenSpec change artifacts under `openspec/changes/<change>/`
-- baseline architecture documents under `specs/baseline/`
+- baseline architecture documents under `docs/`
 - feature or testing documents under `specs/`
 - task lists and design notes when present
 
@@ -43,7 +43,7 @@ Review against:
 
 3. Read review context:
    - relevant `proposal.md`, `design.md`, `tasks.md`, and spec deltas from the active change
-   - relevant `specs/baseline/` module documents for touched code areas
+   - relevant `docs/` module documents for touched code areas
    - any local guide or contract document referenced by the change
 
 4. Compare implementation to design:

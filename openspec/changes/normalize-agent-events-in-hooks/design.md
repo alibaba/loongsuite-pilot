@@ -82,7 +82,7 @@ Alternative considered: switch the input parser in one breaking step. That would
 
 ## Baseline Documentation Sync
 
-This change should update baseline docs as part of implementation, not as a separate afterthought. `specs/baseline/modules/hooks.md` should describe the shared asset-side normalizer and the default ownership of deterministic hook-time mapping, including best-effort user defaulting, provider fallback, and content-policy filtering. `specs/baseline/modules/normalization.md` should describe collector-side final building and authoritative policy responsibilities after hook-side pre-standardization.
+This change should update baseline docs as part of implementation, not as a separate afterthought. `docs/modules/hooks.md` should describe the shared asset-side normalizer and the default ownership of deterministic hook-time mapping, including best-effort user defaulting, provider fallback, and content-policy filtering. `docs/modules/normalization.md` should describe collector-side final building and authoritative policy responsibilities after hook-side pre-standardization.
 
 ## Open Questions
 

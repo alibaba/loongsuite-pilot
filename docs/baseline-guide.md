@@ -25,7 +25,7 @@ Baseline docs 描述项目架构的**当前状态**（as-is），而非期望状
 ## 2. 文档结构 (Document Structure)
 
 ```
-specs/baseline/
+docs/
 ├── README.md          ← 本文件（使用指南）
 ├── constitution.md    ← 项目宪法：overall architecture, principles, constraints
 └── modules/

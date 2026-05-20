@@ -140,6 +140,6 @@ Output (Local JSONL files, SLS logstore, external HTTP endpoint)
 | 文档 | 定位 | 内容 |
 |------|------|------|
 | `README.md` | 运维 / 入门文档 | 如何 build、deploy、run、configure |
-| `specs/baseline/` | 架构 / 结构文档 | 系统是什么、如何设计、有哪些约束 |
+| `docs/` | 架构 / 结构文档 | 系统是什么、如何设计、有哪些约束 |
 
 两者**不重叠**——各司其职，避免信息冗余。

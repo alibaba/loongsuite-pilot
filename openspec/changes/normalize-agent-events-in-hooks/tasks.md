@@ -34,6 +34,6 @@
 ## 5. Documentation
 
 - [x] 5.1 Update `assets/hooks/README.md` with the final hook record contract and field ownership guidance.
-- [x] 5.2 Update `specs/baseline/modules/hooks.md` to document the shared asset-side normalizer, default hook ownership of deterministic per-event normalization, and best-effort hook-side user/provider/content-policy logic.
-- [x] 5.3 Update `specs/baseline/modules/normalization.md` to document collector-side authoritative final build, provider fallback, content policy, and schema cleanup responsibilities after hook-side pre-standardization.
-- [x] 5.4 Re-run a baseline impact check against `specs/baseline/constitution.md`, `specs/baseline/modules/hooks.md`, and `specs/baseline/modules/normalization.md` before marking the change complete.
+- [x] 5.2 Update `docs/modules/hooks.md` to document the shared asset-side normalizer, default hook ownership of deterministic per-event normalization, and best-effort hook-side user/provider/content-policy logic.
+- [x] 5.3 Update `docs/modules/normalization.md` to document collector-side authoritative final build, provider fallback, content policy, and schema cleanup responsibilities after hook-side pre-standardization.
+- [x] 5.4 Re-run a baseline impact check against `docs/constitution.md`, `docs/modules/hooks.md`, and `docs/modules/normalization.md` before marking the change complete.

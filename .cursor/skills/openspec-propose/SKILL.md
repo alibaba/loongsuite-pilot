@@ -113,12 +113,12 @@ After completing all artifacts, summarize:
 
 **Baseline Impact Check**
 
-After creating or editing `proposal.md`, `design.md`, `specs/**/*.md`, or `tasks.md`, explicitly re-evaluate whether the change affects `specs/baseline/`:
+After creating or editing `proposal.md`, `design.md`, `specs/**/*.md`, or `tasks.md`, explicitly re-evaluate whether the change affects `docs/`:
 
 - Does the artifact change or strengthen a baseline module's responsibility?
 - Does it introduce a new module boundary, helper, runtime component, data contract, or ownership rule?
 - Does it change how data flows between modules, even if the high-level pipeline remains the same?
-- Does it require updating `specs/baseline/modules/*.md`, `specs/baseline/constitution.md`, or `specs/baseline/ai_event_schema.md` after implementation?
+- Does it require updating `docs/modules/*.md`, `docs/constitution.md`, or `docs/ai_event_schema.md` after implementation?
 
 If yes:
 - Add `Affected Baseline Modules` and `Baseline Documentation Updates` content to `proposal.md`
