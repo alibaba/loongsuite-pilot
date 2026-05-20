@@ -5,9 +5,12 @@ import { AgentDiscoveryService } from './agent-discovery-service.js';
 import { InputManager } from './input-manager.js';
 import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
+import { DeploymentManager } from '../deployment/deployment-manager.js';
+import { detectAgent } from '../deployment/detect-utils.js';
 import { createLogger } from '../utils/logger.js';
-import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile } from '../utils/fs-utils.js';
+import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists } from '../utils/fs-utils.js';
 import * as path from 'node:path';
+import * as fsSync from 'node:fs';
 
 // Flushers
 import { BaseFlusher } from '../flushers/base-flusher.js';
@@ -28,7 +31,7 @@ import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-in
 import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
-import { PluginHookWatchdog } from './plugin-hook-watchdog.js';
+import { HookWatchdog, type PluginCheckTarget } from './hook-watchdog.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 
@@ -56,7 +59,8 @@ export class Orchestrator extends EventEmitter {
   private stateStore!: StateStore;
   private flusher!: BaseFlusher;
   private logRetentionService!: LogRetentionService;
-  private hookWatchdog!: PluginHookWatchdog;
+  private hookWatchdog!: HookWatchdog;
+  private deploymentManager!: DeploymentManager;
   private isRunning = false;
 
   constructor(config: AnalyticsConfig) {
@@ -96,14 +100,22 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setConfiguredUserId(this.config.userId);
     this.inputManager.setAgentsConfig(this.config.agents);
 
-    // 5. Install hooks into agent config files (best-effort, non-blocking)
-    await this.installHooks();
+    // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
+    const pilotDir = this.resolvePilotDir();
+    this.deploymentManager = new DeploymentManager({
+      dataDir: this.dataDir,
+      pilotDir,
+    });
+    await this.deploymentManager.deployAll();
 
     // 6. Register inputs & build detection entries
     const detectionEntries = await this.registerAllInputs();
 
-    // 7. Start AgentDiscoveryService
-    this.agentDiscoveryService = new AgentDiscoveryService(detectionEntries);
+    // 7. Build deployment detection entries for dynamic discovery
+    const deployDetectionEntries = this.buildDeployDetectionEntries();
+
+    // 8. Start AgentDiscoveryService (input entries + deploy detection entries)
+    this.agentDiscoveryService = new AgentDiscoveryService([...detectionEntries, ...deployDetectionEntries]);
     this.agentDiscoveryService.on('agent:started', (id: string) => {
       logger.info('agent detected and started', { id });
     });
@@ -112,13 +124,16 @@ export class Orchestrator extends EventEmitter {
     });
     await this.agentDiscoveryService.start();
 
-    // 8. Start log retention service
+    // 9. Start log retention service
     this.logRetentionService = new LogRetentionService(this.dataDir, this.config.retention);
     this.logRetentionService.start();
 
-    // 9. Start plugin hook watchdog (periodically restores Claude/Codex hooks
-    //    if other tools overwrite ~/.claude/settings.json or ~/.codex/hooks.json)
-    this.hookWatchdog = new PluginHookWatchdog(this.config.hookWatchdog);
+    // 10. Start hook watchdog (periodically restores hooks overwritten by other tools)
+    const hookWatchdogTargets = [
+      ...HookWatchdog.defaultTargets(),
+      ...this.buildHookWatchdogTargets(),
+    ];
+    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets);
     this.hookWatchdog.start();
 
     this.isRunning = true;
@@ -156,11 +171,67 @@ export class Orchestrator extends EventEmitter {
     return this.agentDiscoveryService;
   }
 
+  getDeploymentManager(): DeploymentManager {
+    return this.deploymentManager;
+  }
+
   /**
    * Set a fallback user id (typically resolved asynchronously).
    */
   setUserId(userId: string): void {
     this.inputManager?.setUserId(userId);
+  }
+
+  /**
+   * Build detection entries for agent definitions that haven't been deployed yet.
+   * When a new agent is discovered at runtime, triggers deploySingle().
+   */
+  private buildDeployDetectionEntries(): AgentDetectionEntry[] {
+    const defs = this.deploymentManager.getDefinitions();
+    const entries: AgentDetectionEntry[] = [];
+
+    for (const def of defs) {
+      const watchPaths = def.detection.paths.map(p =>
+        p.startsWith('~') ? resolveHome(p) : p,
+      );
+      if (watchPaths.length === 0) continue;
+
+      const entryId = `deploy:${def.id}`;
+      entries.push({
+        id: entryId,
+        type: 'deploy-detection',
+        watchPaths,
+        isAvailable: () => detectAgent(def.detection),
+        enabled: () => true,
+        start: async () => {
+          logger.info('new agent discovered, deploying', { agentId: def.id });
+          await this.deploymentManager.deploySingle(def);
+        },
+        stop: async () => {},
+        pollIntervalMs: 300_000,
+      });
+    }
+
+    return entries;
+  }
+
+  private buildHookWatchdogTargets(): PluginCheckTarget[] {
+    const defs = this.deploymentManager.getDefinitions();
+    const targets: PluginCheckTarget[] = [];
+
+    for (const def of defs) {
+      if (def.deployMode !== 'hook' || !def.hook) continue;
+
+      targets.push({
+        agentId: def.id,
+        settingsPath: def.hook.settingsPath,
+        expectedHooks: def.hook.events,
+        markers: [def.hook.hookCommand],
+        repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
+      });
+    }
+
+    return targets;
   }
 
   private buildFlusher(): BaseFlusher {
@@ -465,5 +536,32 @@ export class Orchestrator extends EventEmitter {
       }
     }
     return path.join(this.dataDir, 'logs', 'claude-code');
+  }
+
+  /**
+   * Resolve the package installation directory by reading the `current` pointer file.
+   * Falls back to dataDir if the versioned layout is not in use.
+   */
+  private resolvePilotDir(): string {
+    try {
+      const currentFile = path.join(this.dataDir, 'current');
+      const versionName = fsSync.readFileSync(currentFile, 'utf-8').trim();
+      if (versionName) {
+        const versionDir = path.join(this.dataDir, 'versions', versionName);
+        if (fsSync.existsSync(versionDir)) {
+          logger.debug('resolved pilotDir from current pointer', { pilotDir: versionDir });
+          return versionDir;
+        }
+      }
+    } catch {
+      // current file doesn't exist — legacy or dev layout
+    }
+
+    const legacyPackageDir = path.join(this.dataDir, 'package');
+    if (fsSync.existsSync(path.join(legacyPackageDir, 'dist', 'index.js'))) {
+      return legacyPackageDir;
+    }
+
+    return this.dataDir;
   }
 }

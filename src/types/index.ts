@@ -1,4 +1,5 @@
 export * from './client-type.js';
+export * from './deployment.js';
 export * from './events.js';
 
 /**

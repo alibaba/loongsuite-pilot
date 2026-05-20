@@ -73,6 +73,12 @@ cp -r dist     "$PKG_DIR/dist"
 cp -r assets   "$PKG_DIR/assets"
 cp -r scripts  "$PKG_DIR/scripts"
 
+# Agent definition files (declarative deployment configs)
+if [ -d agents.d ]; then
+    cp -r agents.d "$PKG_DIR/agents.d"
+    echo "    ✅ Agent definitions bundled: $(ls agents.d/*.json 2>/dev/null | wc -l | tr -d ' ') files"
+fi
+
 # Plugin tarballs (pre-built, bundled)
 if [ -d plugins ] && ls plugins/*.tar.gz &>/dev/null; then
     cp -r plugins  "$PKG_DIR/plugins"

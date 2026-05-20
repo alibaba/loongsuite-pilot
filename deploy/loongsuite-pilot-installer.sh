@@ -33,10 +33,6 @@ set -euo pipefail
 PACKAGE_NAME="loongsuite-pilot"
 PERMANENT_DIR="$HOME/.loongsuite-pilot/package"
 DEFAULT_DATA_DIR="$HOME/.loongsuite-pilot"
-OTEL_PLUGIN_INSTALL_URL="https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/opentelemetry-instrumentation-claude/remote-install.sh"
-OTEL_CLAUDE_DIR="$HOME/.cache/opentelemetry.instrumentation.claude"
-OTEL_CODEX_PLUGIN_INSTALL_URL="https://arms-apm-cn-hangzhou-pre.oss-cn-hangzhou.aliyuncs.com/opentelemetry-instrumentation-codex/remote-install.sh"
-OTEL_CODEX_DIR="$HOME/.cache/opentelemetry.instrumentation.codex"
 
 # Channel presets: release (production) vs test (pre-release)
 _RELEASE_BASE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite/loongsuite-pilot"
@@ -674,162 +670,12 @@ show_version_info() {
 # Common: print summary
 # ============================================================
 # ============================================================
-# Install OTel Claude plugin (log-only mode for loongsuite-pilot integration)
-# ============================================================
-install_otel_plugin() {
-    # Prevent NODE_OPTIONS --require intercept.js from breaking npm/node commands
-    # (inherited from Claude Code parent process via the alias)
-    unset NODE_OPTIONS 2>/dev/null || true
-
-    # Helper: install a single plugin from bundled tarball (or remote fallback)
-    _install_plugin() {
-        local plugin_label="$1"
-        local tarball_name="$2"
-        local dest_dir="$3"
-        local hook_cmd="$4"
-        local marker_file="$5"
-        local remote_url="$6"
-        local hook_install_args="$7"
-
-        local tarball_path="$PERMANENT_DIR/plugins/$tarball_name"
-
-        # --- Phase 1: Clean install (always reinstall from tarball) ---
-        if [ -f "$tarball_path" ]; then
-            msg "  · 安装 $plugin_label..." \
-                "  · Installing $plugin_label..."
-            rm -rf "$dest_dir"
-            mkdir -p "$dest_dir"
-            if tar --warning=no-unknown-keyword -xzf "$tarball_path" -C "$dest_dir" 2>/dev/null; then :
-            else tar -xzf "$tarball_path" -C "$dest_dir"; fi
-
-            cd "$dest_dir"
-            if ! "$NPM_BIN" install --silent 2>/tmp/otel-plugin-npm-err.log; then
-                msg "  ⚠️  npm install 失败（不影响其他功能）" \
-                    "  ⚠️  npm install failed (non-blocking)"
-                return 0
-            fi
-
-            if "$NPM_BIN" install -g . --silent 2>/dev/null; then :
-            elif "$NPM_BIN" link --silent 2>/dev/null; then :
-            else
-                local local_bin="$HOME/.local/bin"
-                mkdir -p "$local_bin"
-                cat > "$local_bin/$hook_cmd" << WRAPPER
-#!/usr/bin/env bash
-exec "$NODE_BIN" "$dest_dir/bin/$hook_cmd" "\$@"
-WRAPPER
-                chmod +x "$local_bin/$hook_cmd"
-            fi
-
-        elif [ -n "$remote_url" ]; then
-            msg "  · 本地 tarball 不存在，尝试远程安装..." \
-                "  · Local tarball not found, trying remote install..."
-            if curl -fsSL "$remote_url" | bash 2>/dev/null; then :
-            else
-                msg "  ⚠️  安装失败（不影响其他功能）" \
-                    "  ⚠️  Installation failed (non-blocking)"
-                return 0
-            fi
-        else
-            msg "  ⚠️  tarball 不可用，跳过" \
-                "  ⚠️  Tarball not available, skipping"
-            return 0
-        fi
-
-        # --- Phase 2: Hook registration (always run, idempotent) ---
-        if [ -f "$dest_dir/bin/$hook_cmd" ]; then
-            if [ -n "$hook_install_args" ]; then
-                "$NODE_BIN" "$dest_dir/bin/$hook_cmd" install $hook_install_args 2>/dev/null || true
-            else
-                "$NODE_BIN" "$dest_dir/bin/$hook_cmd" install 2>/dev/null || true
-            fi
-        fi
-    }
-
-    # ─── Claude Code plugin ───
-    msg "==> 安装 Claude Code 插件..." \
-        "==> Installing Claude Code plugin..."
-
-    _install_plugin "Claude Code 插件" "otel-claude-hook.tar.gz" \
-        "$OTEL_CLAUDE_DIR/package" "otel-claude-hook" \
-        "$OTEL_CLAUDE_DIR/package/src/cli.js" \
-        "$OTEL_PLUGIN_INSTALL_URL" "--user --no-alias"
-
-    # Claude extra: clean up legacy alias (keep intercept.js to avoid MODULE_NOT_FOUND in stale shells)
-    if [ -f "$OTEL_CLAUDE_DIR/package/scripts/setup-alias.sh" ]; then
-        bash "$OTEL_CLAUDE_DIR/package/scripts/setup-alias.sh" --minimal >/dev/null 2>&1 || true
-        msg "  · 旧版别名已清理" "  · Legacy alias cleaned up"
-    fi
-
-    local OTEL_LOG_DIR="$DATA_DIR/logs/claude-code"
-    local otel_config="$HOME/.claude/otel-config.json"
-    mkdir -p "$(dirname "$otel_config")"
-
-    "$NODE_BIN" -e "
-const fs = require('fs');
-const cfgPath = process.argv[1];
-const logDir = process.argv[2];
-
-let existing = {};
-try { existing = JSON.parse(fs.readFileSync(cfgPath, 'utf-8')); } catch {}
-
-existing.log_enabled = true;
-if (existing.log_dir === undefined || existing.log_dir === '') existing.log_dir = logDir;
-if (existing.log_filename_format === undefined) existing.log_filename_format = 'hook';
-
-fs.writeFileSync(cfgPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
-" "$otel_config" "$OTEL_LOG_DIR"
-
-    msg "  · otel-config.json 已写入" "  · otel-config.json written"
-    mkdir -p "$OTEL_LOG_DIR"
-    msg "  ✅ Claude Code 插件安装完成" "  ✅ Claude Code plugin installed"
-    echo ""
-
-    # ─── Codex plugin (conditional) ───
-    if [ -d "$HOME/.codex" ]; then
-        local CODEX_LOG_DIR="$DATA_DIR/logs/codex"
-
-        msg "==> 安装 Codex 插件..." \
-            "==> Installing Codex plugin..."
-
-        _install_plugin "Codex 插件" "otel-codex-hook.tar.gz" \
-            "$OTEL_CODEX_DIR/package" "otel-codex-hook" \
-            "$OTEL_CODEX_DIR/package/dist/index.js" \
-            "$OTEL_CODEX_PLUGIN_INSTALL_URL" ""
-
-        local codex_otel_config="$HOME/.codex/otel-config.json"
-        mkdir -p "$(dirname "$codex_otel_config")"
-
-        "$NODE_BIN" -e "
-const fs = require('fs');
-const cfgPath = process.argv[1];
-const logDir = process.argv[2];
-
-let existing = {};
-try { existing = JSON.parse(fs.readFileSync(cfgPath, 'utf-8')); } catch {}
-
-existing.log_enabled = true;
-if (existing.log_dir === undefined || existing.log_dir === '') existing.log_dir = logDir;
-if (existing.log_filename_format === undefined) existing.log_filename_format = 'hook';
-
-fs.writeFileSync(cfgPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
-" "$codex_otel_config" "$CODEX_LOG_DIR"
-
-        msg "  · otel-config.json 已写入" "  · otel-config.json written"
-        mkdir -p "$CODEX_LOG_DIR"
-        msg "  ✅ Codex 插件安装完成" "  ✅ Codex plugin installed"
-        echo ""
-    else
-        msg "  · 未检测到 Codex，跳过" \
-            "  · Codex not detected, skipping"
-        echo ""
-    fi
-}
-
-# ============================================================
 # Remove OTel Claude plugin
 # ============================================================
 remove_otel_plugin() {
+    local OTEL_CLAUDE_DIR="$HOME/.cache/opentelemetry.instrumentation.claude"
+    local OTEL_CODEX_DIR="$HOME/.cache/opentelemetry.instrumentation.codex"
+
     # Prevent NODE_OPTIONS --require intercept.js from breaking node commands
     # after the Claude plugin directory (and intercept.js) is deleted
     unset NODE_OPTIONS 2>/dev/null || true
@@ -1048,18 +894,6 @@ print_summary() {
         echo ""
     fi
 
-    if [ -f "$OTEL_CLAUDE_DIR/package/src/cli.js" ]; then
-        echo ""
-        msg "💡 Claude Code 插件已安装" \
-            "💡 Claude Code plugin installed"
-    fi
-
-    if [ -f "$OTEL_CODEX_DIR/package/dist/index.js" ]; then
-        msg "💡 Codex 插件已安装" \
-            "💡 Codex plugin installed"
-        msg "   如果正在使用 Codex 桌面版，请重启 App 以使 hooks 生效。" \
-            "   If using Codex Desktop, restart the app for hooks to take effect."
-    fi
     msg "命令:" "Commands:"
     echo "   loongsuite-pilot          # 查看状态 / Status"
     echo "   loongsuite-pilot info     # 版本与配置 / Version & config"
@@ -1118,8 +952,6 @@ cmd_install() {
     deploy_package "$INSTALL_SRC"
     write_config
     install_loongsuite_pilot_command
-    install_otel_plugin || msg "  ⚠️  插件安装异常（不影响核心功能）" \
-                              "  ⚠️  Plugin install had errors (non-blocking)"
 
     msg "==> 启动服务..." "==> Starting service..."
     local _start_args=""

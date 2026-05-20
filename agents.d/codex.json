@@ -1,0 +1,22 @@
+{
+  "id": "codex",
+  "displayName": "Codex",
+  "deployMode": "plugin-probe",
+  "detection": {
+    "paths": ["~/.codex"],
+    "commands": []
+  },
+  "pluginProbe": {
+    "source": {
+      "type": "tar",
+      "tarball": "$PILOT_DIR/plugins/otel-codex-hook.tar.gz",
+      "destDir": "~/.cache/opentelemetry.instrumentation.codex/package",
+      "remoteUrl": ""
+    },
+    "mountType": "wrapper"
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/codex"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "id": "qoder-work",
+  "displayName": "QoderWork",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.qoderwork"],
+    "commands": []
+  },
+  "hook": {
+    "settingsPath": "~/.qoderwork/settings.json",
+    "events": ["Stop"],
+    "hookCommand": "$PILOT_DATA/hooks/qoderwork-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "matcher": "*",
+    "replaceHookCommands": ["$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder-work"]
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/qoder-work/history"
+  }
+}

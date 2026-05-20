@@ -13,10 +13,15 @@ export interface PluginCheckTarget {
   agentId: string;
   settingsPath: string;
   expectedHooks: string[];
-  binPath: string;
-  installArgs: string[];
   /** Substrings that identify our hook command in settings.json */
   markers: string[];
+
+  /** External command binary path (for plugin-type repair). Required if repairFn is not set. */
+  binPath?: string;
+  /** Arguments for the external install command. */
+  installArgs?: string[];
+  /** Direct repair function (for hook-type repair via HookManager). Takes precedence over binPath. */
+  repairFn?: () => Promise<boolean>;
 }
 
 export interface CheckResult {
@@ -34,14 +39,16 @@ export interface TargetResult {
 }
 
 /**
- * Periodically verifies that our hook commands are still registered
- * in agent settings (~/.claude/settings.json, ~/.codex/hooks.json).
+ * Periodically verifies that our hook commands are still registered in agent
+ * settings files. Supports two repair strategies:
  *
- * Other tools sharing the same settings.json may overwrite our entries.
- * When missing, the watchdog re-runs the plugin's own `install` command
- * (which is idempotent) to restore them.
+ * - Command-based (plugin agents): spawns an external install command
+ * - Function-based (hook agents): calls HookManager.deploy() directly
+ *
+ * When hooks go missing (e.g. overwritten by another tool sharing the same
+ * settings file), the watchdog detects and restores them.
  */
-export class PluginHookWatchdog {
+export class HookWatchdog {
   private readonly config: HookWatchdogConfig;
   private readonly targets: PluginCheckTarget[];
   private readonly lastRepairAt: Map<string, number> = new Map();
@@ -50,7 +57,7 @@ export class PluginHookWatchdog {
 
   constructor(config: HookWatchdogConfig, targets?: PluginCheckTarget[]) {
     this.config = config;
-    this.targets = targets ?? PluginHookWatchdog.defaultTargets();
+    this.targets = targets ?? HookWatchdog.defaultTargets();
   }
 
   start(): void {
@@ -107,15 +114,24 @@ export class PluginHookWatchdog {
   }
 
   private async checkTarget(target: PluginCheckTarget): Promise<TargetResult> {
-    // Pre-check: skip if plugin or settings parent dir is absent
-    const binOk = await fileExists(target.binPath);
     const settingsDirOk = await directoryExists(path.dirname(target.settingsPath));
-    if (!binOk || !settingsDirOk) {
+    if (!settingsDirOk) {
       logger.debug('hook-watchdog.skipped', {
         agent: target.agentId,
-        reason: !binOk ? 'bin-missing' : 'settings-dir-missing',
+        reason: 'settings-dir-missing',
       });
       return { agentId: target.agentId, status: 'unavailable' };
+    }
+
+    if (!target.repairFn && target.binPath) {
+      const binOk = await fileExists(target.binPath);
+      if (!binOk) {
+        logger.debug('hook-watchdog.skipped', {
+          agent: target.agentId,
+          reason: 'bin-missing',
+        });
+        return { agentId: target.agentId, status: 'unavailable' };
+      }
     }
 
     const settings = await readJsonFile<Record<string, unknown>>(target.settingsPath);
@@ -137,8 +153,6 @@ export class PluginHookWatchdog {
       };
     }
 
-    // Throttle: avoid fighting other tools that may overwrite us.
-    // Only applies after the first repair — first detection always repairs.
     const lastAt = this.lastRepairAt.get(target.agentId);
     if (lastAt !== undefined) {
       const sinceLast = Date.now() - lastAt;
@@ -158,7 +172,7 @@ export class PluginHookWatchdog {
       expected: target.expectedHooks.length,
       found,
       missing,
-      action: 'install',
+      action: target.repairFn ? 'hook-manager' : 'install',
     });
 
     const ok = await this.repairTarget(target);
@@ -170,11 +184,6 @@ export class PluginHookWatchdog {
     return { agentId: target.agentId, status: 'repaired', missing };
   }
 
-  /**
-   * Count how many of `target.expectedHooks` events have at least one
-   * command containing one of `target.markers`. Returns the names of
-   * events with NO matching command (i.e., what's missing).
-   */
   private findMissingHooks(
     settings: Record<string, unknown> | null,
     target: PluginCheckTarget,
@@ -195,11 +204,6 @@ export class PluginHookWatchdog {
     return missing;
   }
 
-  /**
-   * Check a single hook array entry (flat or nested format) for a marker.
-   * Flat:   { type, command, matcher? }
-   * Nested: { matcher?, hooks: [{ type, command }] }
-   */
   private entryContainsMarker(entry: unknown, markers: string[]): boolean {
     if (!entry || typeof entry !== 'object') return false;
     const e = entry as Record<string, unknown>;
@@ -218,11 +222,27 @@ export class PluginHookWatchdog {
     return false;
   }
 
-  private repairTarget(target: PluginCheckTarget): Promise<boolean> {
+  private async repairTarget(target: PluginCheckTarget): Promise<boolean> {
+    if (target.repairFn) {
+      try {
+        return await target.repairFn();
+      } catch (err) {
+        logger.error('hook-watchdog.repair-failed', {
+          agent: target.agentId,
+          error: String(err),
+        });
+        return false;
+      }
+    }
+    return this.repairViaCommand(target);
+  }
+
+  private repairViaCommand(target: PluginCheckTarget): Promise<boolean> {
     return new Promise(resolve => {
       let settled = false;
-      const child = spawn('node', [target.binPath, ...target.installArgs], {
+      const child = spawn(process.execPath, [target.binPath!, ...target.installArgs!], {
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, NODE_OPTIONS: '' },
       });
 
       const timer = setTimeout(() => {
@@ -271,9 +291,6 @@ export class PluginHookWatchdog {
     });
   }
 
-  /**
-   * Default targets for Claude Code and Codex plugins as installed by pilot.
-   */
   static defaultTargets(): PluginCheckTarget[] {
     return [
       {

@@ -1,0 +1,20 @@
+{
+  "id": "qoder-cli",
+  "displayName": "Qoder CLI",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.qoder"],
+    "commands": ["qoder"]
+  },
+  "hook": {
+    "settingsPath": "~/.qoder/settings.json",
+    "events": ["Stop"],
+    "hookCommand": "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli",
+    "format": "nested",
+    "matcher": "*"
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/qoder-cli/history"
+  }
+}
