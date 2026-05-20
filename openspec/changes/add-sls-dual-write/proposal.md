@@ -28,8 +28,8 @@ Today, an SLS-configured installation can only write to **one** SLS destination:
   - `src/flushers/sls-flusher.ts` — webtracking URL builder uses `endpoint.endpoint`; AK client is constructed per endpoint at send time (or cached by name); `persistFailedLogs` keys by `endpoint.name`.
   - `deploy/loongsuite-pilot-installer.sh` and `deploy/loongsuite-pilot-installer-inner.sh` — new `--default-sls-override` arg parsing and `write_config` branch.
 - **Affected Baseline Modules**:
-  - `specs/baseline/modules/flushers.md` — SLS multi-endpoint dispatch and per-endpoint mode.
-  - `specs/baseline/modules/core.md` — `config-loader` resolution rules for SLS.
-  - `specs/baseline/modules/types.md` — `SlsEndpoint` shape.
+  - `docs/modules/flushers.md` — SLS multi-endpoint dispatch and per-endpoint mode.
+  - `docs/modules/core.md` — `config-loader` resolution rules for SLS.
+  - `docs/modules/types.md` — `SlsEndpoint` shape.
 - **APIs / Schemas**: `config.json` `sls.destinationOverride: false` gains a new meaning. The change is **additive for the installer-written shape** (today the installer only ever writes `true`), but technically reinterprets a value a hand-edited file might have had. Documented in design.md.
 - **Dependencies**: none added.

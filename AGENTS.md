@@ -28,13 +28,16 @@
 
 | 模块 | 路径 | 职责 | 详细文档 |
 |------|------|------|---------|
-| 核心编排 | `src/core/` | 启动流程、生命周期、Agent 发现与准入控制 | [docs/core.md](docs/core.md) |
-| 输入源 | `src/inputs/` | 6 种采集基类 + 各 Agent 实现 | [docs/inputs.md](docs/inputs.md) |
-| 数据输出 | `src/flushers/` | SLS / JSONL / HTTP 多目标扇出 | [docs/flushers.md](docs/flushers.md) |
-| 部署管理 | `src/deployment/` | 声明式 Agent 部署（Hook / Plugin-Probe） | [docs/deployment.md](docs/deployment.md) |
-| 归一化 | `src/normalization/` | 原始数据 → AgentActivityEntry 标准格式 | [docs/normalization.md](docs/normalization.md) |
-| 持久化 | `src/checkpoints/` | StateStore + SnapshotStore 状态管理 | [docs/checkpoint.md](docs/checkpoint.md) |
-| 自动更新 | `src/updater/` | 多版本管理、增量更新、自动回滚 | [docs/updater.md](docs/updater.md) |
+| 核心编排 | `src/core/` | 启动流程、生命周期、Agent 发现与准入控制 | [docs/modules/core.md](docs/modules/core.md) |
+| 输入源 | `src/inputs/` | 6 种采集基类 + 各 Agent 实现 | [docs/modules/inputs.md](docs/modules/inputs.md) |
+| 数据输出 | `src/flushers/` | SLS / JSONL / HTTP 多目标扇出 | [docs/modules/flushers.md](docs/modules/flushers.md) |
+| 部署管理 | `src/deployment/` | 声明式 Agent 部署（Hook / Plugin-Probe） | [docs/modules/hooks.md](docs/modules/hooks.md) |
+| 归一化 | `src/normalization/` | 原始数据 → AgentActivityEntry 标准格式 | [docs/modules/normalization.md](docs/modules/normalization.md) |
+| 持久化 | `src/checkpoints/` | StateStore + SnapshotStore 状态管理 | [docs/modules/checkpoints.md](docs/modules/checkpoints.md) |
+| 自动更新 | `src/updater/` | 多版本管理、增量更新、自动回滚 | [docs/modules/updater.md](docs/modules/updater.md) |
+| 运行时 | `deploy/` | 安装、CLI、服务管理、版本指针 | [docs/modules/runtime.md](docs/modules/runtime.md) |
+| 监控 | `src/internal/` | 本地 dashboard、进程采样、健康状态 | [docs/modules/monitor.md](docs/modules/monitor.md) |
+| 类型定义 | `src/types/` | ClientType、事件结构、配置类型 | [docs/modules/types.md](docs/modules/types.md) |
 
 ## Agent 采集矩阵
 
@@ -100,8 +103,10 @@ AgentDiscoveryService ──发现──→ InputManager ──注册──→ I
 
 ## 快速入口
 
-- **我要接入新 Agent** → [docs/agent-onboarding-guide.md](docs/agent-onboarding-guide.md) + [docs/deployment.md](docs/deployment.md)
-- **我要理解数据流** → [docs/core.md](docs/core.md) + [docs/inputs.md](docs/inputs.md)
-- **我要新增输出通道** → [docs/flushers.md](docs/flushers.md)
+- **我要理解整体架构** → [docs/constitution.md](docs/constitution.md)
+- **我要接入新 Agent** → [docs/agent-onboarding-guide.md](docs/agent-onboarding-guide.md) + [docs/modules/hooks.md](docs/modules/hooks.md)
+- **我要理解数据流** → [docs/modules/core.md](docs/modules/core.md) + [docs/modules/inputs.md](docs/modules/inputs.md)
+- **我要新增输出通道** → [docs/modules/flushers.md](docs/modules/flushers.md)
 - **我要本地调试** → [specs/local-e2e-testing-guide.md](specs/local-e2e-testing-guide.md)
 - **我要了解部署运维** → [README.md](README.md)（打包/安装/升级/卸载）
+- **我要了解数据 Schema** → [docs/ai_event_schema.md](docs/ai_event_schema.md)

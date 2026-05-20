@@ -43,9 +43,9 @@
 
 ## 6. Baseline doc updates
 
-- [ ] 6.1 Update `specs/baseline/modules/flushers.md` to describe per-endpoint mode and dual-write resolution
-- [ ] 6.2 Update `specs/baseline/modules/core.md` (config-loader section) with the three-case resolution matrix
-- [ ] 6.3 Update `specs/baseline/modules/types.md` with the new `SlsEndpoint` shape
+- [ ] 6.1 Update `docs/modules/flushers.md` to describe per-endpoint mode and dual-write resolution
+- [ ] 6.2 Update `docs/modules/core.md` (config-loader section) with the three-case resolution matrix
+- [ ] 6.3 Update `docs/modules/types.md` with the new `SlsEndpoint` shape
 
 ## 7. Release notes and verification
 
