@@ -42,3 +42,15 @@ fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n');
 
     mkdir -p "$LOG_DIR"
 fi
+
+# 4. Place a no-op intercept.js stub at the legacy path.
+#    Old installations injected NODE_OPTIONS="--require ~/.cache/opentelemetry.instrumentation.claude/intercept.js"
+#    into shell profiles. After upgrade, uninstall.sh removes the real file and cleans up profiles,
+#    but already-open terminal sessions still have NODE_OPTIONS set. Without this stub, any node
+#    process in those sessions fails with MODULE_NOT_FOUND. The stub is harmless and avoids the error
+#    until the user opens a new terminal.
+LEGACY_INTERCEPT="$HOME/.cache/opentelemetry.instrumentation.claude/intercept.js"
+if [ ! -f "$LEGACY_INTERCEPT" ]; then
+    mkdir -p "$(dirname "$LEGACY_INTERCEPT")"
+    echo "/* no-op stub for legacy NODE_OPTIONS --require */" > "$LEGACY_INTERCEPT"
+fi
