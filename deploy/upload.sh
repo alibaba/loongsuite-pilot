@@ -11,6 +11,7 @@
 #   bash deploy/upload.sh                              # defaults to test channel
 #   bash deploy/upload.sh --channel release            # upload to release path
 #   bash deploy/upload.sh --channel test               # upload to test path (default)
+#   bash deploy/upload.sh --channel test-<self>        # upload to test path (self dir)
 #   bash deploy/upload.sh --bucket my-bucket           # custom bucket (overrides channel)
 #   bash deploy/upload.sh --prefix custom/path         # custom OSS prefix
 #   bash deploy/upload.sh --package /tmp/out.tar.gz    # custom package path
@@ -33,7 +34,6 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 _RELEASE_BUCKET="aliyun-observability-release-cn-shanghai"
 _RELEASE_PREFIX="loongsuite/loongsuite-pilot"
 _RELEASE_REGION="cn-shanghai"
-
 
 _TEST_BUCKET="aliyun-observability-release-cn-shanghai"
 _TEST_PREFIX="loongsuite-dev/loongsuite-pilot"
@@ -89,6 +89,18 @@ case "$CHANNEL" in
         BUCKET="${BUCKET:-$_TEST_BUCKET}"
         PREFIX="${PREFIX:-$_TEST_PREFIX}"
         REGION="${REGION:-$_TEST_REGION}"
+        ;;
+    test-*)
+        # check test-suffix: test-taiye → prefix loongsuite-dev/test-taiye/loongsuite-pilot
+        if [[ "$CHANNEL" =~ ^test-[a-zA-Z0-9]+$ ]]; then
+            CHANNEL_CANONICAL="${CHANNEL}"
+            BUCKET="${BUCKET:-$_TEST_BUCKET}"
+            PREFIX="${PREFIX:-loongsuite-dev/${CHANNEL}/loongsuite-pilot}"
+            REGION="${REGION:-$_TEST_REGION}"
+        else
+            echo "❌ Invalid format: requires a single suffix after 'test-'" >&2
+            exit 1
+        fi
         ;;
     *)
         echo "❌ Unknown channel: $CHANNEL (use 'release' or 'test')" >&2
@@ -161,7 +173,7 @@ prepare_channel_installer() {
     local src="$1"
     local out
     out="$(mktemp)"
-    sed "s/LOONGSUITE_PILOT_DEFAULT_CHANNEL:-release/LOONGSUITE_PILOT_DEFAULT_CHANNEL:-${CHANNEL_CANONICAL}/" "$src" > "$out"
+    sed "s#LOONGSUITE_PILOT_DEFAULT_CHANNEL:-release#LOONGSUITE_PILOT_DEFAULT_CHANNEL:-${CHANNEL_CANONICAL}#" "$src" > "$out"    
     chmod +x "$out"
     echo "$out"
 }

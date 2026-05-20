@@ -113,12 +113,30 @@ brew install ossutil   # 或 pip install ossutil2
 # 配置凭证
 ossutil config -e oss-cn-hangzhou.aliyuncs.com -i <AK_ID> -k <AK_SECRET>
 
-# 上传（默认上传到 arms-apm-cn-hangzhou-pre bucket）
+# 上传到 test 渠道（默认）
 bash deploy/upload.sh
+
+# 上传到 release 渠道（正式发布）
+bash deploy/upload.sh --channel release
+
+# 上传到个人隔离渠道（互不覆盖，适合多人并行测试）
+bash deploy/upload.sh --channel test-taiye
 
 # 自定义 bucket / 前缀 / 区域
 bash deploy/upload.sh --bucket my-bucket --prefix my/path --region cn-beijing
 ```
+
+#### 渠道隔离
+
+支持三种渠道模式，产物上传到不同的 OSS 路径，互不干扰：
+
+| 渠道 | 命令 | OSS 路径 |
+|------|------|----------|
+| `release` | `--channel release` | `loongsuite/loongsuite-pilot/latest/` |
+| `test` | `--channel test`（默认） | `loongsuite-dev/loongsuite-pilot/latest/` |
+| `test-<suffix>` | `--channel test-taiye` | `loongsuite-dev/test-taiye/loongsuite-pilot/latest/` |
+
+`test-<suffix>` 用于多人并行开发时各自隔离测试环境，`<suffix>` 仅允许字母和数字。上传后生成的 installer 和安装包 URL 会自动指向对应的隔离路径。
 
 上传后会打印一键安装命令。
 
@@ -131,6 +149,9 @@ bash deploy/upload.sh --bucket my-bucket --prefix my/path --region cn-beijing
 ```bash
 # 最简安装（不传子命令默认为 install）
 curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/<PREFIX>/loongsuite-pilot-installer.sh | bash
+
+# 从个人隔离渠道安装（使用对应渠道上传后打印的 URL）
+curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/loongsuite-dev/test-taiye/loongsuite-pilot/loongsuite-pilot-installer.sh | bash
 
 # 可选：内部/运维场景覆盖 SLS 后端配置（默认替换内置目的地）
 curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install \

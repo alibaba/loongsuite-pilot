@@ -16,6 +16,7 @@
 #
 # Install from test channel:
 #   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install --channel test
+#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install --channel test-<self> or test/<self>
 #
 # Upgrade (preserve config, auto-rollback on failure):
 #   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- upgrade
@@ -172,6 +173,14 @@ if [ -z "$PACKAGE_URL" ]; then
             _channel_base="$_RELEASE_BASE_URL" ;;
         test|pre)
             _channel_base="$_TEST_BASE_URL" ;;
+        test-*)
+            if [[ "$CHANNEL" =~ ^test-[a-zA-Z0-9]+$ ]]; then
+                _channel_base="${_TEST_BASE_URL%/loongsuite-pilot}/${CHANNEL}/loongsuite-pilot"
+            else
+                echo "❌ Invalid format: requires a single suffix after" >&2
+                exit 1
+            fi
+            ;;
         *)
             echo "❌ Unknown channel: $CHANNEL (use 'release' or 'test')" >&2
             exit 1 ;;

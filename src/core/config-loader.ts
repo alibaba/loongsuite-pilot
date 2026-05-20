@@ -163,16 +163,16 @@ function buildListenersConfig(
   file: ConfigFile | null,
 ): Record<string, { enabled: boolean; pollInterval: number }> {
   const defaults: Record<string, { enabled: boolean; pollInterval: number }> = {
-    qoder:           { enabled: true, pollInterval: 30_000 },
-    'qoder-sqlite':  { enabled: true, pollInterval: 30_000 },
-    'qoder-work':    { enabled: true, pollInterval: 30_000 },
+    qoder: { enabled: true, pollInterval: 30_000 },
+    'qoder-sqlite': { enabled: true, pollInterval: 30_000 },
+    'qoder-work': { enabled: true, pollInterval: 30_000 },
     'qoder-work-log': { enabled: true, pollInterval: 30_000 },
     'qoder-work-sqlite': { enabled: true, pollInterval: 30_000 },
-    'qoder-cli-hook':{ enabled: true, pollInterval: 30_000 },
-    'qoder-cli-session':{ enabled: true, pollInterval: 30_000 },
-    'cursor-hook':   { enabled: true, pollInterval: 30_000 },
+    'qoder-cli-hook': { enabled: true, pollInterval: 30_000 },
+    'qoder-cli-session': { enabled: true, pollInterval: 30_000 },
+    'cursor-hook': { enabled: true, pollInterval: 30_000 },
     'claude-code-log': { enabled: true, pollInterval: 30_000 },
-    'codex-log':       { enabled: true, pollInterval: 30_000 },
+    'codex-log': { enabled: true, pollInterval: 30_000 },
   };
 
   const result = { ...defaults };
@@ -424,15 +424,22 @@ function buildHttpConfig(file: ConfigFile | null) {
   };
 }
 
-const RELEASE_PACKAGE_URL =
-  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite/loongsuite-pilot/latest/loongsuite-pilot.tar.gz';
-const TEST_PACKAGE_URL =
-  'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-dev/loongsuite-pilot/latest/loongsuite-pilot.tar.gz';
+const BASE_PACKAGE_URL = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/';
+const RELEASE_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite/loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
+const TEST_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite-dev/loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
+
 const DEFAULT_CHECK_INTERVAL_MS = 60_000; // 1 minute
 
 function resolveDefaultPackageUrl(): string {
   const channel = env('LOONGSUITE_PILOT_CHANNEL') ?? 'release';
-  return (channel === 'test' || channel === 'pre') ? TEST_PACKAGE_URL : RELEASE_PACKAGE_URL;
+
+  if (channel === 'test' || channel === 'pre') {
+    return TEST_PACKAGE_URL;
+  } else if (/^(test-[a-zA-Z0-9]+)$/.test(channel)) {
+    return `${BASE_PACKAGE_URL}loongsuite-dev/${channel}/loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
+  } else {
+    return RELEASE_PACKAGE_URL;
+  }
 }
 
 /**
