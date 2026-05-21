@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
 import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -311,7 +312,7 @@ export class PluginProbeStrategy implements DeployStrategy {
       const protocol = url.startsWith('https') ? https : http;
 
       await new Promise<void>((resolve, reject) => {
-        const file = require('node:fs').createWriteStream(destFile);
+        const file = createWriteStream(destFile);
         protocol.get(url, response => {
           if (response.statusCode !== 200) {
             reject(new Error(`HTTP ${response.statusCode}`));
