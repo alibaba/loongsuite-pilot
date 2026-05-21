@@ -8,23 +8,16 @@ export interface InternalSlsDestination {
   logstore: string;
 }
 
-/**
- * Internal telemetry destination for the packaged runtime.
- * Keep destination constants centralized so release packaging can obfuscate this module later.
- */
-export const INTERNAL_SLS_DESTINATION: InternalSlsDestination = {
-  mode: 'webtracking',
-  endpoint: 'https://cn-heyuan.log.aliyuncs.com',
-  endpointName: 'internal-sls',
-  project: 'ai-coding-devops',
-  logstore: 'loongsuite_pilot_for_ai_coding',
-};
+export const INTERNAL_SLS_DESTINATION: InternalSlsDestination = __INTERNAL_BUILD__
+  ? {
+      mode: 'webtracking',
+      endpoint: 'https://cn-heyuan.log.aliyuncs.com',
+      endpointName: 'internal-sls',
+      project: 'ai-coding-devops',
+      logstore: 'loongsuite_pilot_for_ai_coding',
+    }
+  : { mode: 'webtracking', endpoint: '', endpointName: '', project: '', logstore: '' };
 
-/**
- * Build a fully-populated SlsEndpoint for the internal destination.
- * Used by the resolver in `buildSlsConfig` when dual-write is selected
- * or when no user destination is configured.
- */
 export function buildInternalSlsEndpoint(): SlsEndpoint {
   return {
     name: INTERNAL_SLS_DESTINATION.endpointName,

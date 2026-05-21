@@ -44,7 +44,7 @@ Orchestrator 启动分为以下阶段：
 - Built-in defaults（最低）
 
 ### SLS 目的地解析
-ConfigLoader 根据用户提供的 SLS 字段和 `destinationOverride` 开关，解析出最终的 SLS endpoint 列表（单写或双写）。
+ConfigLoader 根据用户提供的 SLS 字段和编译期常量 `__INTERNAL_BUILD__` 解析出最终的 SLS endpoint 列表。集团内版本（`__INTERNAL_BUILD__ = true`）始终包含内置目的地，用户配了自有 SLS 时自动双发；集团外版本（`__INTERNAL_BUILD__ = false`）仅使用用户目的地。
 
 ### AgentDiscoveryService 状态机
 每个 entry 拥有独立状态：`Idle → Starting → Running → Stopping → Idle`

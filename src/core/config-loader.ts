@@ -36,6 +36,7 @@ interface ConfigFile {
     endpoint?: string;
     project?: string;
     logstore?: string;
+    /** @deprecated Ignored since build-time isolation replaced runtime override. */
     destinationOverride?: boolean;
     batchMaxSize?: number;
     flushIntervalMs?: number;
@@ -255,33 +256,41 @@ function buildSlsConfig(file: ConfigFile | null) {
   const userProject = env('SLS_PROJECT') ?? file?.sls?.project;
   const userLogstore = env('SLS_LOGSTORE') ?? file?.sls?.logstore;
 
-  // ============================================================
-  // Step 2-3: hasUserDestination requires BOTH project AND logstore.
-  //            Without both, the user destination is incomplete; fall back to INTERNAL.
-  // ============================================================
+  if (file?.sls?.destinationOverride !== undefined) {
+    logger.warn('config.sls.destinationOverride is deprecated and ignored — remove it from config.json');
+  }
+
   const hasUserDestination = !!(userProject && userLogstore);
 
   let endpoints: SlsEndpoint[];
-  if (!hasUserDestination) {
-    endpoints = [buildInternalSlsEndpoint()];
+  if (__INTERNAL_BUILD__) {
+    if (!hasUserDestination) {
+      endpoints = [buildInternalSlsEndpoint()];
+    } else {
+      const userEndpoint = buildUserSlsEndpoint({
+        mode: userMode,
+        rawEndpoint: userRawEndpoint,
+        project: userProject!,
+        logstore: userLogstore!,
+        accessKeyId: userAk,
+        accessKeySecret: userSk,
+      });
+      endpoints = [userEndpoint, buildInternalSlsEndpoint()];
+    }
   } else {
-    // ============================================================
-    // Step 4: Build the user endpoint. Default destinationOverride to true
-    //          (only meaningful when hasUserDestination is true).
-    // ============================================================
-    const userEndpoint = buildUserSlsEndpoint({
-      mode: userMode,
-      rawEndpoint: userRawEndpoint,
-      project: userProject!,
-      logstore: userLogstore!,
-      accessKeyId: userAk,
-      accessKeySecret: userSk,
-    });
-
-    const destinationOverride = file?.sls?.destinationOverride !== false;
-    endpoints = destinationOverride
-      ? [userEndpoint]
-      : [userEndpoint, buildInternalSlsEndpoint()];
+    if (!hasUserDestination) {
+      endpoints = [];
+    } else {
+      const userEndpoint = buildUserSlsEndpoint({
+        mode: userMode,
+        rawEndpoint: userRawEndpoint,
+        project: userProject!,
+        logstore: userLogstore!,
+        accessKeyId: userAk,
+        accessKeySecret: userSk,
+      });
+      endpoints = [userEndpoint];
+    }
   }
 
   // ============================================================
@@ -290,21 +299,16 @@ function buildSlsConfig(file: ConfigFile | null) {
   // ============================================================
   endpoints = dedupSlsEndpoints(endpoints);
 
-  // ============================================================
-  // Top-level defaults: kept for back-compat with code paths that still read them.
-  // Authoritative routing happens off each endpoint at runtime.
-  // ============================================================
-  const primary = endpoints[0];
-  const topLevelMode = primary.mode;
-  const topLevelEndpoint = primary.endpoint;
-  const topLevelAk = primary.accessKeyId ?? '';
-  const topLevelSk = primary.accessKeySecret ?? '';
+  const primary = endpoints[0] as SlsEndpoint | undefined;
+  const topLevelMode = primary?.mode ?? 'webtracking';
+  const topLevelEndpoint = primary?.endpoint ?? '';
+  const topLevelAk = primary?.accessKeyId ?? '';
+  const topLevelSk = primary?.accessKeySecret ?? '';
 
   let enabled: boolean;
   if (file?.sls?.enabled !== undefined) {
     enabled = file.sls.enabled;
   } else {
-    // Enabled iff every endpoint has the credentials its mode requires.
     enabled = endpoints.length > 0 && endpoints.every(ep => {
       if (!ep.endpoint || !ep.project || !ep.logstore) return false;
       if (ep.mode === 'ak') return !!(ep.accessKeyId && ep.accessKeySecret);
@@ -341,8 +345,7 @@ function buildUserSlsEndpoint(args: {
   // Mode inference: explicit > AK presence > webtracking default.
   const mode: SlsMode = args.mode ?? (args.accessKeyId && args.accessKeySecret ? 'ak' : 'webtracking');
 
-  // URL normalization: prepend https:// if scheme missing.
-  const rawEndpoint = args.rawEndpoint || INTERNAL_SLS_DESTINATION.endpoint;
+  const rawEndpoint = args.rawEndpoint || (__INTERNAL_BUILD__ ? INTERNAL_SLS_DESTINATION.endpoint : '');
   const endpoint = /^https?:\/\//.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`;
 
   const result: SlsEndpoint = {
