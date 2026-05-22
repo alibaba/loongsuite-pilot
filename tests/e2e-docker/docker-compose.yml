@@ -46,10 +46,12 @@ services:
       - E2E_DOCKER_MODE=1
       - E2E_DOCKER_KEEP_ALIVE
       - E2E_DOCKER_EXIT_ON_FAILURE
+      - E2E_LOCAL_BUILD=${E2E_LOCAL_BUILD:-0}
       - LOONGSUITE_PILOT_DISCOVERY_INTERVAL_MS=${LOONGSUITE_PILOT_DISCOVERY_INTERVAL_MS:-30000}
       - LOONGSUITE_PILOT_HOOK_WATCHDOG_INTERVAL_MS=${LOONGSUITE_PILOT_HOOK_WATCHDOG_INTERVAL_MS:-30000}
       - E2E_LOG_DIR=/opt/artifacts
     volumes:
+      - ../../:/opt/project:ro
       - ../../scripts/e2e:/opt/e2e:ro
       - ./output:/opt/artifacts
     tmpfs:

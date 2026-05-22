@@ -82,6 +82,91 @@ echo "install-smoke: loongsuite-pilot on PATH and data dir present"
 `;
 }
 
+function localBuildInstallScript(userId, env) {
+  const id = (userId || '').replace(/'/g, `'\\''`);
+
+  const configObj = { userId: userId || '' };
+  if (shouldPropagateSlsToRemoteInstall(env)) {
+    const rawEndpoint = env.E2E_SLS_ENDPOINT?.trim() || 'cn-hangzhou.log.aliyuncs.com';
+    const endpoint = /^https?:\/\//i.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`;
+    configObj.sls = {
+      endpoint,
+      project: env.E2E_SLS_PROJECT.trim(),
+      logstore: env.E2E_SLS_LOGSTORE.trim(),
+      destinationOverride: true,
+    };
+    if (env.E2E_SLS_ACCESS_KEY_ID?.trim() && env.E2E_SLS_ACCESS_KEY_SECRET?.trim()) {
+      configObj.sls.accessKeyId = env.E2E_SLS_ACCESS_KEY_ID.trim();
+      configObj.sls.accessKeySecret = env.E2E_SLS_ACCESS_KEY_SECRET.trim();
+    }
+  }
+  const configJson = JSON.stringify(configObj, null, 2);
+
+  return `
+set -euo pipefail
+SRC=/opt/project
+DEST="$HOME/.loongsuite-pilot/versions/local"
+DATA_DIR="$HOME/.loongsuite-pilot"
+BIN_DIR="$HOME/.local/bin"
+USER_ID='${id}'
+
+echo "[local-install] Deploying from local build ($SRC)..."
+
+# Verify source has dist/
+if [ ! -f "$SRC/dist/index.js" ]; then
+  echo "[local-install] ERROR: $SRC/dist/index.js not found. Run 'npm run build' first."
+  exit 1
+fi
+
+# Copy project (exclude heavy/unnecessary dirs)
+rm -rf "$DEST"
+mkdir -p "$DEST"
+cp -r "$SRC/dist" "$DEST/dist"
+cp -r "$SRC/scripts" "$DEST/scripts"
+cp "$SRC/package.json" "$DEST/package.json"
+cp "$SRC/package-lock.json" "$DEST/package-lock.json" 2>/dev/null || true
+
+# Install production deps
+cd "$DEST"
+npm install --production --no-optional 2>&1 | tail -5
+echo "[local-install] npm install done"
+
+# Set version pointer
+mkdir -p "$DATA_DIR"
+echo "local" > "$DATA_DIR/current"
+
+# Sync bootstrap scripts
+mkdir -p "$DATA_DIR/bin"
+cp -f "$DEST/scripts/collector-daemon.js" "$DATA_DIR/bin/collector-daemon.js"
+cp -f "$DEST/scripts/updater-daemon.js" "$DATA_DIR/bin/updater-daemon.js"
+mkdir -p "$BIN_DIR"
+cp -f "$DEST/scripts/loongsuite-pilot.sh" "$BIN_DIR/loongsuite-pilot"
+chmod 755 "$BIN_DIR/loongsuite-pilot"
+
+# Write config.json
+mkdir -p "$DATA_DIR/logs"
+cat > "$DATA_DIR/config.json" << 'CFGEOF'
+${configJson}
+CFGEOF
+
+# Verify deployment
+command -v loongsuite-pilot >/dev/null
+test -f "$DATA_DIR/config.json"
+test -f "$DEST/dist/index.js"
+echo "[local-install] loongsuite-pilot deployed from local build"
+echo "[local-install] config: $(cat "$DATA_DIR/config.json")"
+
+# Start service
+loongsuite-pilot start 2>&1 || {
+  echo "[local-install] 'start' failed, falling back to background 'run'"
+  nohup loongsuite-pilot run >> "$DATA_DIR/logs/loongsuite-pilot-service.log" 2>&1 &
+}
+sleep 2
+loongsuite-pilot status || true
+echo "[local-install] pilot started"
+`;
+}
+
 function uninstallScript(installerUrl) {
   const u = installerUrl.replace(/'/g, `'\\''`);
   return `
@@ -268,7 +353,12 @@ async function main() {
   if (scenario === 'preflight') {
     script = preflightScript();
   } else if (scenario === 'install-smoke') {
-    script = installSmokeScript(installerUrl, userId ?? '', env);
+    if (env.E2E_LOCAL_BUILD === '1') {
+      console.log('[e2e-docker] LOCAL BUILD mode: deploying from /opt/project');
+      script = localBuildInstallScript(userId ?? '', env);
+    } else {
+      script = installSmokeScript(installerUrl, userId ?? '', env);
+    }
   } else if (scenario === 'uninstall') {
     script = uninstallScript(installerUrl);
   } else if (scenario === 'reboot-autostart') {

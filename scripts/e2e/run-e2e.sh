@@ -51,6 +51,10 @@ echo ""
 
 case "$MODE" in
   docker)
+    if [ "${E2E_LOCAL_BUILD:-0}" = "1" ]; then
+      echo "[e2e] Local build mode: running npm run build..."
+      npm run build
+    fi
     # Stop any leftover container from previous keep-alive run
     docker compose -f tests/e2e-docker/docker-compose.yml down -v 2>/dev/null || true
     exec npm run test:e2e:docker
