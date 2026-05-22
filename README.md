@@ -73,20 +73,30 @@ npm run typecheck
 
 ### 编译与运行
 
+项目使用 esbuild 进行编译，通过编译期常量 `__INTERNAL_BUILD__` 区分内部/外部版本：
+
 ```bash
-# 完整编译（输出到 dist/）
+# 集团内版本（默认，包含内置 SLS 目的地）
 npm run build
+
+# 集团外版本（物理消除内置 SLS 相关代码）
+npm run build:external
 
 # 启动服务（开发环境）
 npm start
 # 等价于: node dist/index.js
 ```
 
+| 构建目标 | 命令 | 内置 SLS 目的地 | 用户配了自有 SLS 时 |
+|---------|------|----------------|-------------------|
+| 集团内 | `npm run build` | 包含 | 双发（用户 + 内置） |
+| 集团外 | `npm run build:external` | 不存在于产物中 | 仅发用户目的地 |
+
 ### 开发最佳实践
 
-1. **增量编译**：修改代码后重新运行 `npm run build`，或启用 TypeScript watch 模式：
+1. **增量编译**：修改代码后重新运行 `npm run build`。类型检查使用：
    ```bash
-   npx tsc --watch
+   npm run typecheck
    ```
 
 2. **直接运行测试**：编译后直接运行测试：
@@ -118,8 +128,11 @@ deploy/
 ### 第一步：打包
 
 ```bash
-# 编译 TypeScript 并打包（输出 loongsuite-pilot.tar.gz）
+# 集团内版本打包（默认）
 bash deploy/package.sh
+
+# 集团外版本打包
+bash deploy/package.sh --external
 
 # 自定义输出路径
 bash deploy/package.sh -o /tmp/loongsuite-pilot.tar.gz
