@@ -154,3 +154,51 @@ This skill supports the "actions on a change" model:
 
 - **Can be invoked anytime**: Before all artifacts are done (if tasks exist), after partial implementation, interleaved with other actions
 - **Allows artifact updates**: If implementation reveals design issues, suggest updating artifacts - not phase-locked, work fluidly
+
+---
+
+## Post-Implementation Automation (Steps 8-11)
+
+When **all tasks are complete**, automatically proceed through the following steps:
+
+8. **E2E Docker 验证**
+
+   Run the E2E test suite:
+
+   ```bash
+   ./scripts/e2e/run-e2e.sh docker install-smoke
+   ```
+
+   **Failure handling loop (max 3 rounds):**
+   1. Analyze container log output and identify failure type:
+      - Compile/syntax errors → fix source code
+      - Agent probe failures (network timeout, stream disconnect) → judge if transient, retry directly
+      - JSONL validation failures → check pilot hook logic or deployment timing
+      - Container startup failures → check Dockerfile / docker-compose config
+   2. Fix the code
+   3. Re-run `./scripts/e2e/run-e2e.sh docker install-smoke`
+   4. After 3 rounds still failing → **pause**, report failure details and let user decide
+
+   **Only proceed to Step 9 after E2E passes.**
+
+9. **Git 提交 + Push**
+
+   - If not on a feature branch, create `feature/<git-user>/<change-name>` and switch to it
+   - `git add` all relevant changed files (be specific, avoid secrets)
+   - `git commit` with a message describing the change
+   - `git push origin <branch>`
+
+10. **创建 CR + Code Review**
+
+    执行 `/submit-cr` 技能，自动完成 CR 创建与评审意见发布。
+
+**Output After Automation**
+
+```
+## Post-Implementation Complete
+
+**E2E:** ✓ Passed (attempt N/3)
+**Submit CR:** See `/submit-cr` output for CR link and review details
+
+All done! CR is ready for human review.
+```

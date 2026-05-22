@@ -22,21 +22,6 @@ import {
 export const DEFAULT_E2E_INSTALLER_URL =
   'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-dev/loongsuite-pilot/loongsuite-pilot-installer-inner.sh';
 
-/**
- * Compute installer `--channel <ch>` tail.
- * `E2E_INSTALLER_CHANNEL` defaults to `test` (paired with the dev-bucket DEFAULT_E2E_INSTALLER_URL),
- * so the installer pulls `latest/loongsuite-pilot.tar.gz` from `loongsuite-dev/`. Set to
- * `release` / `prod` to omit the flag and let the installer fall back to the production bucket.
- * @param {NodeJS.ProcessEnv} env
- * @returns {string} ' --channel test' or '' (leading space already included)
- */
-export function buildInstallerChannelTail(env = process.env) {
-  const ch = (env?.E2E_INSTALLER_CHANNEL ?? 'test').toString().trim();
-  if (!ch) return '';
-  const lower = ch.toLowerCase();
-  if (lower === 'release' || lower === 'prod') return '';
-  return ` --channel ${ch}`;
-}
 
 /**
  * Reboot autostart verification script generator.
@@ -50,8 +35,7 @@ export function rebootAutostartScript(installerUrl, userId, env) {
   const u = installerUrl.replace(/'/g, `'\\''`);
   const id = userId.replace(/'/g, `'\\''`);
   const slsFlags = buildRemoteInstallSlsCliQuotedArgs(env);
-  const channelTail = buildInstallerChannelTail(env);
-  const installTail = `${slsFlags ? ` ${slsFlags}` : ''}${channelTail}`;
+  const installTail = slsFlags ? ` ${slsFlags}` : '';
   return `
 set -euo pipefail
 INSTALLER_URL='${u}'
@@ -199,8 +183,7 @@ export function multiAccountInstallScript(installerUrl, userIds, env) {
   const u = installerUrl.replace(/'/g, `'\\''`);
   const ids = userIds.replace(/'/g, `'\\''`);
   const slsFlags = buildRemoteInstallSlsCliQuotedArgs(env);
-  const channelTail = buildInstallerChannelTail(env);
-  const installTail = `${slsFlags ? ` ${slsFlags}` : ''}${channelTail}`;
+  const installTail = slsFlags ? ` ${slsFlags}` : '';
   return `
 set -euo pipefail
 INSTALLER_URL='${u}'
@@ -272,8 +255,7 @@ export function autoUpgradeScript(installerUrl, userId, env) {
   const u = installerUrl.replace(/'/g, `'\\''`);
   const id = userId.replace(/'/g, `'\\''`);
   const slsFlags = buildRemoteInstallSlsCliQuotedArgs(env);
-  const channelTail = buildInstallerChannelTail(env);
-  const installTail = `${slsFlags ? ` ${slsFlags}` : ''}${channelTail}`;
+  const installTail = slsFlags ? ` ${slsFlags}` : '';
   return `
 set -euo pipefail
 INSTALLER_URL='${u}'
@@ -303,7 +285,7 @@ ps aux | grep -E 'loongsuite-pilot|node.*dist/index' | grep -v grep || true
 echo ""
 echo "--- Phase 3: Trigger upgrade ---"
 echo "Running upgrade command..."
-curl -fsSL "$INSTALLER_URL" | bash -s -- upgrade${channelTail}
+curl -fsSL "$INSTALLER_URL" | bash -s -- upgrade
 
 # Wait for upgrade to complete
 echo "Waiting 10s for upgrade to stabilize..."
@@ -446,8 +428,7 @@ export function buildVersionMatrixInstallPreludeSh(env = process.env) {
   if (!userId) return '';
   const installerUrl = (env?.E2E_INSTALLER_URL ?? DEFAULT_E2E_INSTALLER_URL).replace(/'/g, `'\\''`);
   const slsFlags = buildRemoteInstallSlsCliQuotedArgs(env);
-  const channelTail = buildInstallerChannelTail(env);
-  const installTail = `${slsFlags ? ` ${slsFlags}` : ''}${channelTail}`;
+  const installTail = slsFlags ? ` ${slsFlags}` : '';
   const uid = userId.replace(/'/g, `'\\''`);
   return `
 # [version-matrix] 重装/刷新 pilot + SLS 配置（同 install-smoke），保证 SLS Logstore 能收到数据

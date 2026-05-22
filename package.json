@@ -17,7 +17,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:e2e": "bash scripts/e2e/run-e2e.sh",
     "test:e2e:remote": "node scripts/e2e/run-remote-e2e.mjs",
+    "test:e2e:docker": "docker compose -f tests/e2e-docker/docker-compose.yml up --build --exit-code-from e2e-agent",
+    "test:e2e:docker:down": "docker compose -f tests/e2e-docker/docker-compose.yml down -v",
     "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {

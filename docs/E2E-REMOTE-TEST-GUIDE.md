@@ -663,10 +663,117 @@ A: 需要 sudo 创建用户。如果没有 sudo，脚本会回退到"隔离目�
 
 ---
 
+## 🐳 Docker Compose 模式（推荐）
+
+除了 SSH 远程执行，还支持通过 Docker Compose 在本地拉起容器运行 E2E 测试。无需远程机器和 SSH 配置，环境可复现。
+
+### 前置条件
+
+- Docker Desktop 或 Docker Engine 已安装
+- `docker compose` 命令可用
+
+### 基本用法
+
+```bash
+# 最简运行（preflight 检查）
+npm run test:e2e:docker
+
+# 完整 install-smoke + agent probe + JSONL 验证
+E2E_SCENARIO=install-smoke \
+E2E_USER_ID=test-user \
+E2E_USE_MATRIX_PROBE=1 \
+E2E_CODEX_OPENAI_API_KEY='your-dashscope-key' \
+E2E_ANTHROPIC_API_KEY='your-dashscope-key' \
+E2E_CLAUDE_BAILIAN=1 \
+E2E_CLAUDE_BAILIAN_API_KEY='your-dashscope-key' \
+E2E_QODER_PERSONAL_ACCESS_TOKEN='your-qoder-pat' \
+E2E_CURSOR_API_KEY='your-cursor-key' \
+E2E_WRITE_REMOTE_CODEX_CONFIG=1 \
+E2E_WRITE_REMOTE_CLAUDE_ONBOARDING_SKIP=1 \
+E2E_SLS_PROJECT='your-sls-project' \
+E2E_SLS_ENDPOINT='cn-hongkong.log.aliyuncs.com' \
+E2E_SLS_LOGSTORE='your-logstore' \
+E2E_JSONL_VALIDATE=1 \
+npm run test:e2e:docker
+```
+
+### 保留容器用于排查
+
+```bash
+# 设置 E2E_DOCKER_KEEP_ALIVE=1，测试完成后容器不退出
+E2E_DOCKER_KEEP_ALIVE=1 E2E_SCENARIO=install-smoke E2E_USER_ID=test-user \
+  npm run test:e2e:docker
+
+# 进入容器排查
+docker exec -it e2e-docker-e2e-agent-1 sudo -u testuser bash
+
+# 查看 pilot 日志
+cat /home/testuser/.loongsuite-pilot/logs/loongsuite-pilot-service.log
+ls /home/testuser/.loongsuite-pilot/logs/output/
+
+# 排查完毕后清理
+npm run test:e2e:docker:down
+```
+
+### Docker 模式支持的场景
+
+| 场景 | 命令 | 说明 |
+|------|------|------|
+| preflight | `E2E_SCENARIO=preflight` | 检查容器环境、agent CLI 可用性 |
+| install-smoke | `E2E_SCENARIO=install-smoke` | 安装 pilot + agent 探针 + JSONL 验证 |
+| uninstall | `E2E_SCENARIO=uninstall` | 卸载测试 |
+| reboot-autostart | `E2E_SCENARIO=reboot-autostart` | 模拟重启（kill 进程 + 验证恢复） |
+| multi-account | `E2E_SCENARIO=multi-account` | 多用户安装隔离（需 `E2E_USER_IDS`） |
+| auto-upgrade | `E2E_SCENARIO=auto-upgrade` | 自动升级流程验证 |
+| version-matrix | `E2E_SCENARIO=version-matrix` | Agent 多版本兼容性测试 |
+
+### Docker 特有环境变量
+
+| 变量 | 说明 |
+|------|------|
+| `E2E_DOCKER_KEEP_ALIVE=1` | 无论成功失败都保留容器 |
+| `E2E_DOCKER_EXIT_ON_FAILURE=1` | 失败时立即退出（CI 场景） |
+| `E2E_CURSOR_API_KEY` | Cursor Agent CLI 的 API key |
+
+### Docker 模式与 SSH 模式的区别
+
+| 项目 | Docker 模式 | SSH 模式 |
+|------|-------------|----------|
+| 环境 | 本地 Docker 容器 | 远程 Linux 机器 |
+| 复现性 | 完全可复现 | 依赖远程机器状态 |
+| reboot 测试 | 模拟（kill + restart） | 真实 reboot |
+| 服务管理 | nohup fallback | systemd |
+| 配置 | 无需 SSH 密钥 | 需要 SSH 访问 |
+| 适用场景 | 开发调试、CI | 生产环境验证 |
+
+### 测试产物
+
+Docker 模式的日志输出到 `tests/e2e-docker/output/` 目录，可以实时查看：
+
+```bash
+# 实时查看测试输出
+tail -f tests/e2e-docker/output/e2e-docker-*.log
+```
+
+### 测试流程说明
+
+`install-smoke` 完整流程：
+
+1. **Docker build** — 预装 Node.js 22 + 4 个 agent CLI (codex, claude, cursor, qoder)
+2. **Pilot 安装** — 容器内 curl 安装 loongsuite-pilot（测试真实安装流程）
+3. **等待 hook 部署** — 等待 pilot DeploymentManager 完成插件部署（~60s）
+4. **Agent 探针** — 依次对 4 个 agent 发送对话请求
+5. **等待处理** — 60s 等待 pilot 处理 agent 日志
+6. **JSONL 验证** — 检查 `logs/output/` 下的 JSONL 文件格式和内容
+
+---
+
 ## 📚 相关文档
 
 - [SKILL.md](../../../.cursor/skills/loongsuite-pilot-remote-e2e/SKILL.md) - E2E 测试 Skill 文档
 - [agent-matrix.json](../../../scripts/e2e/agent-matrix.json) - Agent 矩阵定义
-- [run-remote-e2e.mjs](../../../scripts/e2e/run-remote-e2e.mjs) - E2E 入口脚本
-- [ssh-runner.mjs](../../../scripts/e2e/lib/ssh-runner.mjs) - SSH 执行基础设施
+- [run-remote-e2e.mjs](../../../scripts/e2e/run-remote-e2e.mjs) - SSH E2E 入口脚本
+- [run-docker-e2e.mjs](../../../scripts/e2e/run-docker-e2e.mjs) - Docker E2E 入口脚本
+- [docker-compose.yml](../../../tests/e2e-docker/docker-compose.yml) - Docker Compose 编排
+- [Dockerfile](../../../tests/e2e-docker/Dockerfile) - E2E 测试容器镜像
 - [README.md](../../../README.md) - 项目主文档
