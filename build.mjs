@@ -1,11 +1,12 @@
 import { build } from 'esbuild';
-import { globSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 const isInternal = process.argv.includes('--internal');
 
-const entryPoints = globSync('src/**/*.ts', {
-  exclude: ['**/*.d.ts', '**/*.test.ts'],
-});
+const entryPoints = readdirSync('src', { recursive: true })
+  .filter(f => f.endsWith('.ts') && !f.endsWith('.d.ts') && !f.endsWith('.test.ts'))
+  .map(f => join('src', f));
 
 await build({
   entryPoints,
