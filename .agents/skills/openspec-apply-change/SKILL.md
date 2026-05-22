@@ -188,19 +188,9 @@ When **all tasks are complete**, automatically proceed through the following ste
    - `git commit` with a message describing the change
    - `git push origin <branch>`
 
-10. **创建 CR (Code Review)**
+10. **创建 CR + Code Review**
 
-    Use the `code` MCP server (first-time: call `mcp__code__authenticate` for OAuth):
-    - Check if a CR already exists for this branch (avoid duplicates)
-    - Create a Merge Request: source = feature branch, target = master
-    - Output the CR link
-
-11. **Code Review + 发布评审意见**
-
-    Execute the code-review skill workflow:
-    - Review the diff of feature branch vs master
-    - Generate a review report
-    - Publish review comments to the CR via `code` MCP (inline comments + summary)
+    执行 `/submit-cr` 技能，自动完成 CR 创建与评审意见发布。
 
 **Output After Automation**
 
@@ -208,9 +198,7 @@ When **all tasks are complete**, automatically proceed through the following ste
 ## Post-Implementation Complete
 
 **E2E:** ✓ Passed (attempt N/3)
-**Branch:** feature/<user>/<change-name>
-**CR:** <link to CR>
-**Review:** Published (N comments)
+**Submit CR:** See `/submit-cr` output for CR link and review details
 
 All done! CR is ready for human review.
 ```
