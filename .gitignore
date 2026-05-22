@@ -32,3 +32,5 @@ coverage/
 e2e-artifacts/
 
 package
+
+tests/e2e-docker/output

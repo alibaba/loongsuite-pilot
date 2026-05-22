@@ -1,0 +1,391 @@
+#!/usr/bin/env node
+/**
+ * Docker-based E2E entry — replaces SSH-based run-remote-e2e.mjs.
+ * Runs inside the Docker container with agents pre-installed.
+ * Reuses the same scenario script generators.
+ */
+import process from 'node:process';
+import { runLocalScript, simulateReboot } from './lib/docker-runner.mjs';
+import {
+  buildRemoteInstallSlsCliQuotedArgs,
+  shouldPropagateSlsToRemoteInstall,
+  shellSingleQuoteBash,
+} from './lib/propagate-sls-install.mjs';
+import { normalizeE2eQoderPersonalAccessToken } from './lib/qoder-pat.mjs';
+import {
+  buildRemoteCodexConfigSh,
+  buildRemoteClaudeOnboardingSkipSh,
+  buildRemoteClaudeProxyConfigSh,
+  buildRemoteSecretExportsSh,
+  isE2eClaudeBailianEnabled,
+  resolveE2eClaudeProxyApiKey,
+} from './lib/remote-agent-config.mjs';
+import {
+  loadAgentMatrix,
+  buildEnsureAgentClisScript,
+  buildMatrixProbeScript,
+  resolveE2eCursorInstallStrategy,
+  isE2eOldGlibcCursorHostProfile,
+} from './lib/agent-matrix.mjs';
+import { buildAgentProbeRemoteBody } from './lib/agent-probe-body.mjs';
+import {
+  rebootAutostartScript,
+  postRebootVerificationScript,
+  multiAccountInstallScript,
+  autoUpgradeScript,
+  versionMatrixScript,
+  buildJsonlValidationSh,
+  DEFAULT_E2E_INSTALLER_URL,
+  buildInstallerChannelTail,
+} from './lib/e2e-scenarios.mjs';
+
+const ARTIFACT_DIR = process.env.E2E_ARTIFACT_DIR?.trim() || '/opt/artifacts';
+
+function preflightScript() {
+  return `
+set -euo pipefail
+echo "=== uname ==="
+uname -a || true
+echo "=== node ==="
+command -v node && node -v || echo "node missing"
+echo "=== npm ==="
+command -v npm && npm -v || echo "npm missing"
+echo "=== agents ==="
+for b in codex claude cursor agent qoder qodercli; do
+  if command -v "$b" >/dev/null 2>&1; then
+    echo "have $b: $("$b" --version 2>/dev/null || echo 'version unknown')"
+  else
+    echo "missing $b"
+  fi
+done
+echo "=== disk ==="
+df -h . 2>/dev/null || true
+echo "=== E2E_DOCKER_MODE ==="
+echo "Running inside Docker container"
+`;
+}
+
+function installSmokeScript(installerUrl, userId, env) {
+  const u = installerUrl.replace(/'/g, `'\\''`);
+  const id = userId.replace(/'/g, `'\\''`);
+  const slsFlags = buildRemoteInstallSlsCliQuotedArgs(env);
+  const channelTail = buildInstallerChannelTail(env);
+  const installTail = `${slsFlags ? ` ${slsFlags}` : ''}${channelTail}`;
+  return `
+set -euo pipefail
+INSTALLER_URL='${u}'
+USER_ID='${id}'
+curl -fsSL "$INSTALLER_URL" | bash -s -- install --user.id "$USER_ID"${installTail}
+command -v loongsuite-pilot >/dev/null
+test -d "$HOME/.loongsuite-pilot"
+echo "install-smoke: loongsuite-pilot on PATH and data dir present"
+`;
+}
+
+function uninstallScript(installerUrl) {
+  const u = installerUrl.replace(/'/g, `'\\''`);
+  return `
+set -euo pipefail
+INSTALLER_URL='${u}'
+curl -fsSL "$INSTALLER_URL" | bash -s -- uninstall --purge
+echo "uninstall: script finished"
+`;
+}
+
+/**
+ * Docker-adapted reboot script: installs pilot, verifies status,
+ * then simulates reboot via process kill + service restart.
+ */
+function dockerRebootAutostartScript(installerUrl, userId, env) {
+  const u = installerUrl.replace(/'/g, `'\\''`);
+  const id = userId.replace(/'/g, `'\\''`);
+  const slsFlags = buildRemoteInstallSlsCliQuotedArgs(env);
+  const channelTail = buildInstallerChannelTail(env);
+  const installTail = `${slsFlags ? ` ${slsFlags}` : ''}${channelTail}`;
+  return `
+set -euo pipefail
+INSTALLER_URL='${u}'
+USER_ID='${id}'
+
+echo "=== Phase 1: Install loongsuite-pilot ==="
+curl -fsSL "$INSTALLER_URL" | bash -s -- install --user.id "$USER_ID"${installTail}
+command -v loongsuite-pilot >/dev/null
+echo "install: loongsuite-pilot on PATH"
+
+echo "=== Phase 2: Verify initial service status ==="
+loongsuite-pilot status || true
+if systemctl --user is-active --quiet loongsuite-pilot.service 2>/dev/null; then
+  echo "autostart: systemd user unit is active"
+elif pgrep -f 'loongsuite-pilot|collector-daemon|updater-daemon' >/dev/null; then
+  echo "autostart: process running"
+else
+  echo "WARNING: service not detected after install"
+fi
+
+echo "=== Pre-reboot diagnostics ==="
+loongsuite-pilot info || true
+ps aux | grep -E 'loongsuite-pilot|node.*dist/index' | grep -v grep || true
+
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HOME/.loongsuite-pilot/.e2e-reboot-marker"
+echo "Marker written: $HOME/.loongsuite-pilot/.e2e-reboot-marker"
+
+echo "=== Phase 3: Simulating reboot (Docker: kill + restart) ==="
+pkill -f 'loongsuite-pilot|collector-daemon|updater-daemon' 2>/dev/null || true
+sleep 3
+echo "Processes killed, waiting for auto-restart..."
+sleep 5
+`;
+}
+
+function shouldEnsureAgentClis(env, useMatrixProbe) {
+  const v = env.E2E_ENSURE_AGENT_CLIS?.trim().toLowerCase();
+  if (v === '0' || v === 'false' || v === 'no') return false;
+  if (v === '1' || v === 'true' || v === 'yes') return true;
+  return useMatrixProbe;
+}
+
+function buildProbeEnvInjections(env) {
+  const chunks = [buildRemoteSecretExportsSh(env)];
+  const tok = normalizeE2eQoderPersonalAccessToken(env.E2E_QODER_PERSONAL_ACCESS_TOKEN);
+  if (tok) {
+    console.log(
+      `[e2e-docker] Injecting QODER_PERSONAL_ACCESS_TOKEN (${tok.length} chars)`,
+    );
+    chunks.push(`export QODER_PERSONAL_ACCESS_TOKEN=${shellSingleQuoteBash(tok)}`);
+  }
+  const cursorKey = env.E2E_CURSOR_API_KEY?.trim();
+  if (cursorKey) {
+    console.log(`[e2e-docker] Injecting CURSOR_API_KEY (${cursorKey.length} chars)`);
+    chunks.push(`export CURSOR_API_KEY=${shellSingleQuoteBash(cursorKey)}`);
+  }
+  const joined = chunks.filter(Boolean).join('\n');
+  return joined ? `${joined}\n` : '';
+}
+
+function buildInstallSmokeAgentPhase(env) {
+  const useMatrix = env.E2E_USE_MATRIX_PROBE?.trim() === '1';
+  const customProbe = env.E2E_AGENT_PROBE_CMD?.trim();
+  if (!useMatrix && !customProbe) return '';
+
+  const matrix = loadAgentMatrix(env);
+  const ensure = shouldEnsureAgentClis(env, useMatrix);
+
+  let body = '';
+  body += buildRemoteCodexConfigSh(env);
+  body += buildRemoteClaudeOnboardingSkipSh(env);
+  body += buildRemoteClaudeProxyConfigSh(env);
+  if (ensure) {
+    console.log('[e2e-docker] Ensuring agent-matrix CLIs');
+    body += buildEnsureAgentClisScript(matrix, env);
+    body += '\n';
+  }
+
+  if (useMatrix) {
+    body += buildMatrixProbeScript(matrix, env);
+    return body;
+  }
+
+  body += buildAgentProbeRemoteBody(customProbe);
+  return body;
+}
+
+async function main() {
+  const env = process.env;
+  const scenario = (env.E2E_SCENARIO ?? 'preflight').trim();
+  const installerUrl = (env.E2E_INSTALLER_URL ?? DEFAULT_E2E_INSTALLER_URL).trim();
+  const userId = env.E2E_USER_ID?.trim();
+  const userIds = env.E2E_USER_IDS?.trim();
+  const profile = (env.E2E_PROFILE ?? 'linux-8u').trim().toLowerCase();
+
+  console.log(`[e2e-docker] scenario=${scenario} profile=${profile} (Docker mode)`);
+
+  if ((scenario === 'install-smoke' || scenario === 'reboot-autostart' || scenario === 'auto-upgrade') && !userId) {
+    console.error('E2E_USER_ID is required for install-smoke, reboot-autostart, and auto-upgrade');
+    process.exit(2);
+  }
+
+  if (scenario === 'multi-account' && !userIds) {
+    console.error('E2E_USER_IDS (comma-separated) is required for multi-account scenario');
+    process.exit(2);
+  }
+
+  let script = '';
+
+  if (scenario === 'preflight') {
+    script = preflightScript();
+  } else if (scenario === 'install-smoke') {
+    script = installSmokeScript(installerUrl, userId ?? '', env);
+  } else if (scenario === 'uninstall') {
+    script = uninstallScript(installerUrl);
+  } else if (scenario === 'reboot-autostart') {
+    script = dockerRebootAutostartScript(installerUrl, userId ?? '', env);
+  } else if (scenario === 'post-reboot-verify') {
+    script = postRebootVerificationScript();
+  } else if (scenario === 'multi-account') {
+    script = multiAccountInstallScript(installerUrl, userIds ?? '', env);
+  } else if (scenario === 'auto-upgrade') {
+    script = autoUpgradeScript(installerUrl, userId ?? '', env);
+  } else if (scenario === 'version-matrix') {
+    const vmMatrix = loadAgentMatrix(env);
+    script = versionMatrixScript(vmMatrix, env);
+  } else {
+    console.error(`Unknown E2E_SCENARIO: ${scenario}`);
+    console.error('Supported: preflight, install-smoke, uninstall, reboot-autostart, post-reboot-verify, multi-account, auto-upgrade, version-matrix');
+    process.exit(2);
+  }
+
+  if (!script) throw new Error('Internal error: empty script');
+
+  const r = await runLocalScript({
+    script,
+    artifactDir: ARTIFACT_DIR,
+    artifactLabel: scenario,
+  });
+
+  if (r.code !== 0) {
+    console.error(r.stderr || r.stdout);
+    await keepAliveOnFailure(r.code ?? 1);
+  }
+
+  console.log(`[e2e-docker] "${scenario}" completed successfully (exit 0).`);
+
+  // For reboot-autostart: run post-reboot verification after simulated reboot
+  if (scenario === 'reboot-autostart') {
+    console.log('[e2e-docker] Running post-reboot verification...');
+    const verifyScript = postRebootVerificationScript();
+    const verify = await runLocalScript({
+      script: verifyScript,
+      artifactDir: ARTIFACT_DIR,
+      artifactLabel: 'post-reboot-verify',
+    });
+    if (verify.code !== 0) {
+      console.error('[e2e-docker] Post-reboot verification failed:');
+      console.error(verify.stderr || verify.stdout);
+      await keepAliveOnFailure(verify.code ?? 1);
+    }
+    console.log('[e2e-docker] Post-reboot verification passed.');
+  }
+
+  // Agent probe phase for install-smoke
+  if (scenario === 'install-smoke') {
+    const probeBody = buildInstallSmokeAgentPhase(env);
+    if (probeBody) {
+      // Wait for pilot to finish deploying hooks before running agent probes.
+      // Pilot's DeploymentManager needs time to install plugins (codex npm install ~20s).
+      console.log('[e2e-docker] Waiting for pilot hook deployment to complete...');
+      const waitScript = [
+        'set -euo pipefail',
+        'LOG="$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log"',
+        'TIMEOUT=120',
+        'ELAPSED=0',
+        'while [ $ELAPSED -lt $TIMEOUT ]; do',
+        '  if grep -q "deployAll complete" "$LOG" 2>/dev/null; then',
+        '    echo "[pilot-ready] Hook deployment complete (${ELAPSED}s)"',
+        '    exit 0',
+        '  fi',
+        '  sleep 2',
+        '  ELAPSED=$((ELAPSED + 2))',
+        'done',
+        'echo "[pilot-ready] WARNING: timed out waiting for hook deployment (${TIMEOUT}s), proceeding anyway"',
+        'grep -i "deploy" "$LOG" 2>/dev/null | tail -5 || true',
+      ].join('\n');
+      await runLocalScript({
+        script: waitScript,
+        artifactDir: ARTIFACT_DIR,
+        artifactLabel: 'pilot-ready-wait',
+      });
+
+      const probeScript = `${buildProbeEnvInjections(env)}${probeBody}`;
+      const probe = await runLocalScript({
+        script: probeScript,
+        artifactDir: ARTIFACT_DIR,
+        artifactLabel: 'agent-probe',
+      });
+      if (probe.code !== 0) {
+        console.error(probe.stderr || probe.stdout);
+        await keepAliveOnFailure(probe.code ?? 1);
+      }
+      console.log('[e2e-docker] agent probe phase completed successfully.');
+
+      // Wait for pilot to flush collected agent activity to JSONL/SLS
+      console.log('[e2e-docker] Waiting 60s for pilot to process agent activity logs...');
+      await new Promise(resolve => setTimeout(resolve, 60_000));
+
+      // Diagnostics: check pilot state and log directories
+      await runLocalScript({
+        script: `set +e
+echo "=== [diagnostics] pilot process ==="
+ps aux | grep -E 'loongsuite-pilot|node.*dist/index' | grep -v grep || echo "NO pilot process found"
+echo ""
+echo "=== [diagnostics] logs directory tree ==="
+find "$HOME/.loongsuite-pilot/logs" -type f 2>/dev/null | head -30 || echo "logs dir not found"
+echo ""
+echo "=== [diagnostics] logs/output contents ==="
+ls -la "$HOME/.loongsuite-pilot/logs/output/" 2>/dev/null || echo "logs/output dir not found"
+echo ""
+echo "=== [diagnostics] logs/codex contents ==="
+ls -la "$HOME/.loongsuite-pilot/logs/codex/" 2>/dev/null || echo "logs/codex dir not found"
+echo ""
+echo "=== [diagnostics] logs/claude contents ==="
+ls -la "$HOME/.loongsuite-pilot/logs/claude/" 2>/dev/null || echo "logs/claude dir not found"
+`,
+        artifactDir: ARTIFACT_DIR,
+        artifactLabel: 'diagnostics',
+      });
+
+      // JSONL validation after pilot has had time to process
+      const jsonlSh = buildJsonlValidationSh(env);
+      if (jsonlSh) {
+        console.log('[e2e-docker] Running JSONL validation...');
+        const jsonlResult = await runLocalScript({
+          script: jsonlSh,
+          artifactDir: ARTIFACT_DIR,
+          artifactLabel: 'jsonl-validate',
+        });
+        if (jsonlResult.code !== 0) {
+          console.error('[e2e-docker] JSONL validation failed.');
+          await keepAliveOnFailure(jsonlResult.code ?? 1);
+        }
+        console.log('[e2e-docker] JSONL validation passed.');
+      }
+    }
+  }
+
+  await keepAliveIfRequested(0);
+  process.exit(0);
+}
+
+/**
+ * Keep container alive for debugging (docker exec -it <container> bash).
+ *
+ * Behavior matrix:
+ *   E2E_DOCKER_KEEP_ALIVE=1  → always keep alive (success or failure)
+ *   E2E_DOCKER_EXIT_ON_FAILURE=1 → exit immediately on failure
+ *   default → keep alive on failure only
+ */
+async function keepAliveIfRequested(code) {
+  const keepAlive = process.env.E2E_DOCKER_KEEP_ALIVE === '1';
+  const exitOnFailure = process.env.E2E_DOCKER_EXIT_ON_FAILURE === '1';
+
+  if (code === 0 && !keepAlive) return;
+  if (code !== 0 && exitOnFailure && !keepAlive) {
+    process.exit(code);
+  }
+
+  const status = code === 0 ? 'PASSED' : 'FAILED';
+  console.log(`[e2e-docker] Test ${status} (exit ${code}). Container kept alive for debugging.`);
+  console.log('[e2e-docker] Attach with: docker exec -it <container> bash');
+  console.log('[e2e-docker] Set E2E_DOCKER_KEEP_ALIVE=0 to exit immediately on success.');
+  // setInterval keeps the Node event loop alive (a bare Promise doesn't)
+  await new Promise(() => { setInterval(() => {}, 1 << 30); });
+}
+
+async function keepAliveOnFailure(code) {
+  await keepAliveIfRequested(code);
+  process.exit(code);
+}
+
+main().catch(async err => {
+  console.error(err);
+  await keepAliveOnFailure(1);
+});
