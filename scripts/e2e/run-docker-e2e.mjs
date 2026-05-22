@@ -36,7 +36,6 @@ import {
   versionMatrixScript,
   buildJsonlValidationSh,
   DEFAULT_E2E_INSTALLER_URL,
-  buildInstallerChannelTail,
 } from './lib/e2e-scenarios.mjs';
 
 const ARTIFACT_DIR = process.env.E2E_ARTIFACT_DIR?.trim() || '/opt/artifacts';
@@ -69,12 +68,13 @@ function installSmokeScript(installerUrl, userId, env) {
   const u = installerUrl.replace(/'/g, `'\\''`);
   const id = userId.replace(/'/g, `'\\''`);
   const slsFlags = buildRemoteInstallSlsCliQuotedArgs(env);
-  const channelTail = buildInstallerChannelTail(env);
-  const installTail = `${slsFlags ? ` ${slsFlags}` : ''}${channelTail}`;
+  const installTail = slsFlags ? ` ${slsFlags}` : '';
   return `
 set -euo pipefail
 INSTALLER_URL='${u}'
 USER_ID='${id}'
+echo "[install-smoke] INSTALLER_URL=$INSTALLER_URL"
+echo "[install-smoke] command: curl -fsSL \\"$INSTALLER_URL\\" | bash -s -- install --user.id \\"$USER_ID\\"${installTail}"
 curl -fsSL "$INSTALLER_URL" | bash -s -- install --user.id "$USER_ID"${installTail}
 command -v loongsuite-pilot >/dev/null
 test -d "$HOME/.loongsuite-pilot"
@@ -100,8 +100,7 @@ function dockerRebootAutostartScript(installerUrl, userId, env) {
   const u = installerUrl.replace(/'/g, `'\\''`);
   const id = userId.replace(/'/g, `'\\''`);
   const slsFlags = buildRemoteInstallSlsCliQuotedArgs(env);
-  const channelTail = buildInstallerChannelTail(env);
-  const installTail = `${slsFlags ? ` ${slsFlags}` : ''}${channelTail}`;
+  const installTail = slsFlags ? ` ${slsFlags}` : '';
   return `
 set -euo pipefail
 INSTALLER_URL='${u}'
@@ -162,7 +161,65 @@ function buildProbeEnvInjections(env) {
   return joined ? `${joined}\n` : '';
 }
 
-function buildInstallSmokeAgentPhase(env) {
+/**
+ * Build a bash script that checks all required agents have produced non-empty JSONL files.
+ * @param {string} requiredAgentsCsv - comma-separated agent prefixes (e.g. "claude-code,codex,qoder")
+ */
+function buildJsonlAgentCoverageCheck(requiredAgentsCsv) {
+  const agents = requiredAgentsCsv.split(',').map(s => s.trim()).filter(Boolean);
+  const checks = agents.map(agent => [
+    `_found_${agent.replace(/[^a-zA-Z0-9]/g, '_')}=0`,
+    `for f in "$LOG_DIR"/${agent}-*.jsonl "$LOG_DIR"/${agent}.jsonl; do`,
+    `  if [ -f "$f" ] && [ -s "$f" ]; then`,
+    `    _found_${agent.replace(/[^a-zA-Z0-9]/g, '_')}=1`,
+    `    echo "[agent-coverage] OK: ${agent} -> $(basename "$f") ($(wc -l < "$f") lines)"`,
+    `    break`,
+    `  fi`,
+    `done`,
+    `if [ "$_found_${agent.replace(/[^a-zA-Z0-9]/g, '_')}" -eq 0 ]; then`,
+    `  echo "[agent-coverage] MISSING: ${agent} — no JSONL output found"`,
+    `  MISSING="$MISSING ${agent}"`,
+    `fi`,
+  ].join('\n')).join('\n\n');
+
+  return [
+    'set -euo pipefail',
+    'LOG_DIR="${E2E_JSONL_LOG_DIR:-$HOME/.loongsuite-pilot/logs/output}"',
+    'MISSING=""',
+    '',
+    'echo "[agent-coverage] checking: ' + agents.join(', ') + '"',
+    'echo "[agent-coverage] log dir: $LOG_DIR"',
+    'ls "$LOG_DIR"/*.jsonl 2>/dev/null || echo "[agent-coverage] (no jsonl files found)"',
+    '',
+    checks,
+    '',
+    'if [ -n "$MISSING" ]; then',
+    '  echo ""',
+    '  echo "[agent-coverage] FAILED: missing agents:$MISSING"',
+    '  echo "[agent-coverage] All of: ' + agents.join(', ') + ' must produce JSONL data."',
+    '  exit 1',
+    'fi',
+    'echo "[agent-coverage] ALL required agents produced JSONL data."',
+  ].join('\n');
+}
+
+/**
+ * Build script that writes agent configs (codex config.toml, claude onboarding, proxy).
+ * Must run BEFORE pilot discovery so agents are found on first poll.
+ */
+function buildAgentConfigSetupScript(env) {
+  let body = '';
+  body += buildRemoteCodexConfigSh(env);
+  body += buildRemoteClaudeOnboardingSkipSh(env);
+  body += buildRemoteClaudeProxyConfigSh(env);
+  return body;
+}
+
+/**
+ * Build the probe-only script (ensure CLIs + run probes).
+ * Agent configs must already be written and plugins deployed before this runs.
+ */
+function buildAgentProbeOnlyScript(env) {
   const useMatrix = env.E2E_USE_MATRIX_PROBE?.trim() === '1';
   const customProbe = env.E2E_AGENT_PROBE_CMD?.trim();
   if (!useMatrix && !customProbe) return '';
@@ -171,9 +228,6 @@ function buildInstallSmokeAgentPhase(env) {
   const ensure = shouldEnsureAgentClis(env, useMatrix);
 
   let body = '';
-  body += buildRemoteCodexConfigSh(env);
-  body += buildRemoteClaudeOnboardingSkipSh(env);
-  body += buildRemoteClaudeProxyConfigSh(env);
   if (ensure) {
     console.log('[e2e-docker] Ensuring agent-matrix CLIs');
     body += buildEnsureAgentClisScript(matrix, env);
@@ -268,26 +322,58 @@ async function main() {
 
   // Agent probe phase for install-smoke
   if (scenario === 'install-smoke') {
-    const probeBody = buildInstallSmokeAgentPhase(env);
+    const probeBody = buildAgentProbeOnlyScript(env);
     if (probeBody) {
-      // Wait for pilot to finish deploying hooks before running agent probes.
-      // Pilot's DeploymentManager needs time to install plugins (codex npm install ~20s).
-      console.log('[e2e-docker] Waiting for pilot hook deployment to complete...');
+      // Step 1: Write agent configs IMMEDIATELY so pilot can discover agents on next poll.
+      // This creates ~/.codex/ (for codex discovery), ~/.claude.json, proxy config, etc.
+      const configScript = buildAgentConfigSetupScript(env);
+      if (configScript) {
+        console.log('[e2e-docker] Writing agent configs (codex, claude, proxy)...');
+        await runLocalScript({
+          script: configScript,
+          artifactDir: ARTIFACT_DIR,
+          artifactLabel: 'agent-config-setup',
+        });
+      }
+
+      // Step 2: Wait for ALL required agents to be deployed by pilot.
+      // Pilot discovers agents when their config dirs exist, then deploys plugins.
+      const requiredAgents = ['claude-code', 'codex', 'qoder-cli'];
+      console.log(`[e2e-docker] Waiting for pilot to deploy all agents: ${requiredAgents.join(', ')}...`);
       const waitScript = [
         'set -euo pipefail',
         'LOG="$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log"',
-        'TIMEOUT=120',
+        'TIMEOUT=180',
         'ELAPSED=0',
+        'REQUIRED="claude-code codex qoder-cli"',
+        '',
         'while [ $ELAPSED -lt $TIMEOUT ]; do',
-        '  if grep -q "deployAll complete" "$LOG" 2>/dev/null; then',
-        '    echo "[pilot-ready] Hook deployment complete (${ELAPSED}s)"',
+        '  ALL_FOUND=1',
+        '  for agent in $REQUIRED; do',
+        '    if ! grep -q "\\\"id\\\":\\\"deploy:${agent}\\\".*agent detected and started" "$LOG" 2>/dev/null; then',
+        '      ALL_FOUND=0',
+        '      break',
+        '    fi',
+        '  done',
+        '  if [ "$ALL_FOUND" -eq 1 ]; then',
+        '    echo "[pilot-ready] All agents deployed (${ELAPSED}s): $REQUIRED"',
         '    exit 0',
         '  fi',
-        '  sleep 2',
-        '  ELAPSED=$((ELAPSED + 2))',
+        '  sleep 3',
+        '  ELAPSED=$((ELAPSED + 3))',
         'done',
-        'echo "[pilot-ready] WARNING: timed out waiting for hook deployment (${TIMEOUT}s), proceeding anyway"',
-        'grep -i "deploy" "$LOG" 2>/dev/null | tail -5 || true',
+        '',
+        'echo "[pilot-ready] WARNING: timed out (${TIMEOUT}s). Agent deployment status:"',
+        'for agent in $REQUIRED; do',
+        '  if grep -q "\\\"id\\\":\\\"deploy:${agent}\\\".*agent detected and started" "$LOG" 2>/dev/null; then',
+        '    echo "  OK: $agent"',
+        '  else',
+        '    echo "  MISSING: $agent"',
+        '  fi',
+        'done',
+        'echo ""',
+        'echo "[pilot-ready] Last 10 deploy-related log lines:"',
+        'grep -iE "deploy|Discover|detected" "$LOG" 2>/dev/null | tail -10 || true',
       ].join('\n');
       await runLocalScript({
         script: waitScript,
@@ -295,6 +381,7 @@ async function main() {
         artifactLabel: 'pilot-ready-wait',
       });
 
+      // Step 3: Run agent probes (ensure CLIs + matrix probe)
       const probeScript = `${buildProbeEnvInjections(env)}${probeBody}`;
       const probe = await runLocalScript({
         script: probeScript,
@@ -347,6 +434,24 @@ ls -la "$HOME/.loongsuite-pilot/logs/claude/" 2>/dev/null || echo "logs/claude d
           await keepAliveOnFailure(jsonlResult.code ?? 1);
         }
         console.log('[e2e-docker] JSONL validation passed.');
+      }
+
+      // Agent coverage check: require all expected agents to produce JSONL data
+      const requiredJsonlAgents = (env.E2E_REQUIRED_JSONL_AGENTS ?? 'claude-code,codex,qoder').trim();
+      if (requiredJsonlAgents) {
+        console.log(`[e2e-docker] Checking JSONL agent coverage: ${requiredJsonlAgents}`);
+        const coverageScript = buildJsonlAgentCoverageCheck(requiredJsonlAgents);
+        const coverageResult = await runLocalScript({
+          script: coverageScript,
+          artifactDir: ARTIFACT_DIR,
+          artifactLabel: 'jsonl-agent-coverage',
+        });
+        if (coverageResult.code !== 0) {
+          console.error('[e2e-docker] JSONL agent coverage check FAILED — not all required agents produced data.');
+          console.error(coverageResult.stdout || coverageResult.stderr);
+          await keepAliveOnFailure(coverageResult.code ?? 1);
+        }
+        console.log('[e2e-docker] JSONL agent coverage check passed.');
       }
     }
   }

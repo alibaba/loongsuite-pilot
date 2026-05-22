@@ -39,7 +39,6 @@ import {
   versionMatrixScript,
   buildJsonlValidationSh,
   DEFAULT_E2E_INSTALLER_URL,
-  buildInstallerChannelTail,
 } from './lib/e2e-scenarios.mjs';
 
 /** Node 22 + patchelf path for old glibc dev images (e.g. internal 7U / AliOS 7 class). */
@@ -81,8 +80,7 @@ function installSmokeScript(installerUrl, userId, env) {
   const u = installerUrl.replace(/'/g, `'\\''`);
   const id = userId.replace(/'/g, `'\\''`);
   const slsFlags = buildRemoteInstallSlsCliQuotedArgs(env);
-  const channelTail = buildInstallerChannelTail(env);
-  const installTail = `${slsFlags ? ` ${slsFlags}` : ''}${channelTail}`;
+  const installTail = slsFlags ? ` ${slsFlags}` : '';
   return `
 set -euo pipefail
 INSTALLER_URL='${u}'

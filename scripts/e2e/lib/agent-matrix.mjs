@@ -121,10 +121,12 @@ export function buildEnsureAgentClisScript(matrix, env = process.env) {
   lines.push('  if [ -n "$_npfx" ] && [ -d "$_npfx/bin" ]; then export PATH="$_npfx/bin:$PATH"; fi');
 
   const forceCodex = env.E2E_CODEX_FORCE_ENSURE?.trim() === '1';
+  const skipAgents = resolveProbeSkipAgents(env);
 
   for (const a of matrix.agents) {
     const bin = String(a.binary ?? '').trim();
     if (!bin) continue;
+    if (skipAgents.has(bin.toLowerCase())) continue;
     const label = String(a.name ?? bin);
     let install = resolveEnsureInstallSh(a, env);
     const codexSh = buildCodexEnsureInstallSh(bin, env);
@@ -284,12 +286,24 @@ export function buildEnsureAgentClisScript(matrix, env = process.env) {
 }
 
 /**
+ * Parse E2E_PROBE_SKIP_AGENTS: comma-separated list of agent binary names to skip.
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {Set<string>}
+ */
+export function resolveProbeSkipAgents(env = process.env) {
+  const raw = (env?.E2E_PROBE_SKIP_AGENTS ?? '').toString().trim();
+  if (!raw) return new Set();
+  return new Set(raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
+}
+
+/**
  * One isolated bash -s per agent (stdin from decoded pipe, not SSH session).
  * @param {{ agents: object[] }} matrix
  * @param {NodeJS.ProcessEnv} [env]
  */
 export function buildMatrixProbeScript(matrix, env = process.env) {
   const cursorSkipIfIncompat = (env.E2E_CURSOR_SKIP_IF_INCOMPAT ?? '1').trim() === '0' ? '0' : '1';
+  const skipAgents = resolveProbeSkipAgents(env);
   const lines = [
     'set +e -o pipefail',
     'export PATH="$HOME/.local/bin:$PATH"',
@@ -301,10 +315,17 @@ export function buildMatrixProbeScript(matrix, env = process.env) {
   for (const a of matrix.agents) {
     const block = String(a.defaultProbeSh ?? '').trim();
     if (!block) continue;
-    const label = String(a.name ?? a.binary ?? 'agent').replace(/'/g, `'\\''`);
-    const bin = String(a.binary ?? '').replace(/'/g, `'\\''`);
+    const bin = String(a.binary ?? '').trim();
+    const label = String(a.name ?? bin ?? 'agent').replace(/'/g, `'\\''`);
+    const binEsc = bin.replace(/'/g, `'\\''`);
+    if (skipAgents.has(bin.toLowerCase())) {
+      lines.push(`echo "[e2e-probe] >>> SKIP: ${label} (binary=${binEsc}) — E2E_PROBE_SKIP_AGENTS"`);
+      continue;
+    }
     const b64 = Buffer.from(`${block}\n`, 'utf8').toString('base64');
-    lines.push(`echo "[e2e-probe] >>> start: ${label} (binary=${bin})"`);
+    lines.push(`echo "[e2e-probe] >>> start: ${label} (binary=${binEsc})"`);
+    lines.push(`echo "[e2e-probe] command:"; printf '%s' '${b64}' | base64 -d | sed 's/^/  /'`);
+    lines.push(`echo ""`);
     lines.push(
       `printf '%s' '${b64}' | base64 -d | bash --norc --noprofile -s; _st=$?; ` +
         `if [ "$_st" -eq 0 ]; then echo "[e2e-probe] <<< end: ${label} (exit 0)"; ` +
