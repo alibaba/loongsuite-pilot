@@ -20,6 +20,9 @@ WORKDIR /home/testuser
 ENV NPM_CONFIG_PREFIX="/home/testuser/.local"
 ENV PATH="/home/testuser/.local/bin:$PATH"
 
+# use mirror npm registry to accelerate speed
+RUN npm config set registry https://registry.npmmirror.com
+
 RUN npm install -g @openai/codex @anthropic-ai/claude-code @qoder-ai/qodercli \
     && mkdir -p "$HOME/.local/bin" \
     && (command -v qodercli >/dev/null 2>&1 && ln -sf "$(command -v qodercli)" "$HOME/.local/bin/qoder" || true)

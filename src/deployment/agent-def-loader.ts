@@ -60,7 +60,7 @@ export class AgentDefLoader {
 
     const defs: AgentDefinition[] = [];
     for (const entry of entries) {
-      if (!entry.endsWith('.json')) continue;
+      if (!entry.endsWith('.json') || path.basename(entry).startsWith('._')) continue;
       const filePath = path.join(dir, entry);
       try {
         const raw = await fs.readFile(filePath, 'utf-8');

@@ -85,7 +85,7 @@ echo "install-smoke: loongsuite-pilot on PATH and data dir present"
 function localBuildInstallScript(userId, env) {
   const id = (userId || '').replace(/'/g, `'\\''`);
 
-  const configObj = { userId: userId || '' };
+  const configObj = { userId: userId || '', autoUpdate: { enabled: false } };
   if (shouldPropagateSlsToRemoteInstall(env)) {
     const rawEndpoint = env.E2E_SLS_ENDPOINT?.trim() || 'cn-hangzhou.log.aliyuncs.com';
     const endpoint = /^https?:\/\//i.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`;
@@ -123,8 +123,13 @@ rm -rf "$DEST"
 mkdir -p "$DEST"
 cp -r "$SRC/dist" "$DEST/dist"
 cp -r "$SRC/scripts" "$DEST/scripts"
+cp -r "$SRC/agents.d" "$DEST/agents.d" 2>/dev/null || true
+cp -r "$SRC/plugins" "$DEST/plugins" 2>/dev/null || true
 cp "$SRC/package.json" "$DEST/package.json"
 cp "$SRC/package-lock.json" "$DEST/package-lock.json" 2>/dev/null || true
+
+# Remove macOS AppleDouble resource fork files (._*) that cause parse warnings
+find "$DEST" -name '._*' -delete 2>/dev/null || true
 
 # Install production deps
 cd "$DEST"
