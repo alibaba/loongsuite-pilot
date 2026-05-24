@@ -346,7 +346,9 @@ function buildUserSlsEndpoint(args: {
   const mode: SlsMode = args.mode ?? (args.accessKeyId && args.accessKeySecret ? 'ak' : 'webtracking');
 
   const rawEndpoint = args.rawEndpoint || (__INTERNAL_BUILD__ ? INTERNAL_SLS_DESTINATION.endpoint : '');
-  const endpoint = /^https?:\/\//.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`;
+  const endpoint = rawEndpoint
+    ? (/^https?:\/\//.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`)
+    : '';
 
   const result: SlsEndpoint = {
     name: 'user-sls',

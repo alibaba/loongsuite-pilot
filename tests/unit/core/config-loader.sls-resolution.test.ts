@@ -2,7 +2,7 @@
  * SLS endpoint resolution — __INTERNAL_BUILD__-based matrix + dedup pass.
  * Mirrors scenarios from openspec/changes/rm-sls-override-config/specs/sls-dual-write/spec.md
  *
- * These tests run with __INTERNAL_BUILD__ = true (set in vitest.config.ts define).
+ * Covers all 4 scenarios: internal+no-user, internal+user, external+no-user, external+user.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
@@ -241,6 +241,117 @@ describe('SLS resolver — internal build (__INTERNAL_BUILD__ = true)', () => {
 
       const cfg = await loadConfig();
       expect(cfg.flushers.sls?.enabled).toBe(false);
+    });
+  });
+});
+
+describe('SLS resolver — external build (__INTERNAL_BUILD__ = false)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllEnvs();
+    clearSlsEnv();
+    // @ts-expect-error override compile-time constant for external build tests
+    globalThis.__INTERNAL_BUILD__ = false;
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    // @ts-expect-error restore compile-time constant
+    globalThis.__INTERNAL_BUILD__ = true;
+  });
+
+  describe('No user destination → SLS disabled (empty endpoints)', () => {
+    it('returns empty endpoints and disables SLS', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(0);
+      expect(cfg.flushers.sls?.enabled).toBe(false);
+    });
+
+    it('treats project-only as incomplete → disabled', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: { project: 'orphan-project' },
+      });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(0);
+      expect(cfg.flushers.sls?.enabled).toBe(false);
+    });
+  });
+
+  describe('User destination present → [USER] only (no internal)', () => {
+    it('returns only user endpoint, no internal', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: {
+          endpoint: 'https://cn-shanghai.log.aliyuncs.com',
+          project: 'user-proj',
+          logstore: 'user-store',
+        },
+      });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(1);
+      expect(cfg.flushers.sls?.endpoints[0]).toMatchObject({
+        name: 'user-sls',
+        endpoint: 'https://cn-shanghai.log.aliyuncs.com',
+        project: 'user-proj',
+        logstore: 'user-store',
+        mode: 'webtracking',
+      });
+      expect(cfg.flushers.sls?.enabled).toBe(true);
+    });
+
+    it('ignores legacy destinationOverride and returns only user endpoint', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: {
+          destinationOverride: true,
+          endpoint: 'https://cn-shanghai.log.aliyuncs.com',
+          project: 'user-proj',
+          logstore: 'user-store',
+        },
+      });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(1);
+      expect(cfg.flushers.sls?.endpoints[0].name).toBe('user-sls');
+    });
+
+    it('produces empty endpoint URL when user omits endpoint (no malformed https://)', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: {
+          project: 'user-proj',
+          logstore: 'user-store',
+        },
+      });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(1);
+      expect(cfg.flushers.sls?.endpoints[0].endpoint).toBe('');
+      expect(cfg.flushers.sls?.enabled).toBe(false);
+    });
+  });
+
+  describe('AK mode in external build', () => {
+    it('infers AK mode and enables when all fields present', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: {
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'ext-proj',
+          logstore: 'ext-store',
+          accessKeyId: 'ak-id',
+          accessKeySecret: 'ak-secret',
+        },
+      });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(1);
+      expect(cfg.flushers.sls?.endpoints[0]).toMatchObject({
+        mode: 'ak',
+        accessKeyId: 'ak-id',
+        accessKeySecret: 'ak-secret',
+      });
+      expect(cfg.flushers.sls?.enabled).toBe(true);
     });
   });
 });
