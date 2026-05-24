@@ -66,6 +66,7 @@ export interface DeployResult {
   success: boolean;
   agentId: string;
   deployMode: DeployMode;
+  skipped?: boolean;
   error?: string;
 }
 

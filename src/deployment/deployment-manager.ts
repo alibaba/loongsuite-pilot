@@ -70,9 +70,10 @@ export class DeploymentManager {
     }
 
     await this.saveState();
-    const deployed = results.filter(r => r.success).length;
+    const deployed = results.filter(r => r.success && !r.skipped).length;
+    const skipped = results.filter(r => r.skipped).length;
     const failed = results.filter(r => !r.success && r.error).length;
-    logger.info('deployAll complete', { total: results.length, deployed, failed });
+    logger.info('deployAll complete', { total: results.length, deployed, skipped, failed });
 
     return results;
   }
@@ -94,7 +95,7 @@ export class DeploymentManager {
     const detected = await strategy.detect(def);
     if (!detected) {
       logger.debug('agent not detected, skipping', { agentId: def.id });
-      return { success: true, agentId: def.id, deployMode: def.deployMode };
+      return { success: true, agentId: def.id, deployMode: def.deployMode, skipped: true };
     }
 
     const record = this.state[def.id];
@@ -108,7 +109,7 @@ export class DeploymentManager {
         record.lastRemoteCheckedAt = new Date().toISOString();
       }
       logger.debug('agent already deployed, skipping', { agentId: def.id });
-      return { success: true, agentId: def.id, deployMode: def.deployMode };
+      return { success: true, agentId: def.id, deployMode: def.deployMode, skipped: true };
     }
 
     logger.info('deploying agent', { agentId: def.id, deployMode: def.deployMode });
