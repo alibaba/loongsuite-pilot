@@ -4,9 +4,22 @@ import { join } from 'node:path';
 
 const isInternal = process.argv.includes('--internal');
 
-const entryPoints = readdirSync('src', { recursive: true })
-  .filter(f => f.endsWith('.ts') && !f.endsWith('.d.ts') && !f.endsWith('.test.ts'))
-  .map(f => join('src', f));
+function readDirRecursive(dir, depth = 0) {
+  if (depth > 10) throw new Error(`readDirRecursive: exceeded max depth at ${dir}`);
+  const results = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...readDirRecursive(fullPath, depth + 1));
+    } else {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
+
+const entryPoints = readDirRecursive('src')
+  .filter(f => f.endsWith('.ts') && !f.endsWith('.d.ts') && !f.endsWith('.test.ts'));
 
 await build({
   entryPoints,
