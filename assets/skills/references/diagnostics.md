@@ -11,11 +11,11 @@
 |-------|:---:|:---:|---|:---:|
 | Cursor | ✅ | ✅ | 正常 | ✅ |
 | Qoder IDE / CLI | ✅ | ✅ | 正常 | ✅ |
-| Qoder Work | ❌（暂不支持） | ❌ | - | - |
+| Qoder Work | ✅ | ✅ | 正常 | ✅ |
 | Claude Code | ✅ | ✅ | 安装后需要 `source` 一下 shell rc | ✅ |
 | Codex | ✅ | ✅ | 正常 | ✅ |
 
-> **如果用户使用的工具不在上表中，或对应单元格为「❌ 暂不支持」（如 Qoder Work），
+> **如果用户使用的工具不在上表中，或对应单元格为「❌ 暂不支持」，
 > 请直接告知用户：当前 `loongsuite-pilot` 暂未支持该工具的数据采集，无需进一步排查。**
 
 ---
@@ -28,9 +28,9 @@
 |----------------|------------------|
 | Cursor | `~/.loongsuite-pilot/skills/references/cursor-diagnostics.md` |
 | Qoder IDE / Qoder CLI | `~/.loongsuite-pilot/skills/references/qoder-diagnostics.md` |
+| Qoder Work | `~/.loongsuite-pilot/skills/references/qoderwork-diagnostics.md` |
 | Claude Code | `~/.loongsuite-pilot/skills/references/claude-code-diagnostics.md` |
 | Codex | `~/.loongsuite-pilot/skills/references/codex-diagnostics.md` |
-| Qoder Work | 暂不支持 — 直接答复用户后结束 |
 
 每份分诊文档独立给出该 agent 的：服务状态检查、原始日志路径、Hook 配置位置、常见问题与修复步骤。
 
