@@ -227,6 +227,9 @@ describe('QoderWorkInput', () => {
       });
 
       expect(entry['gen_ai.agent.type']).toBe(ClientType.QoderWork);
+      // Fields that get rewritten by the gen_ai.* normalisation or never set
+      // on text-only user rows. agent._c* are intentionally retained for
+      // legacy dashboards — see qoder-work-input.ts back-compat block.
       for (const dropped of [
         'agent.type',
         'agent.role',
@@ -235,17 +238,12 @@ describe('QoderWorkInput', () => {
         'agent.stop_reason',
         'agent.file_path',
         'agent.action_type',
-        'agent._ctype',
-        'agent._ctext',
-        'agent._cthinking',
-        'agent._cname',
-        'agent._cinput',
-        'agent._ccontent',
-        'agent._cid',
-        'agent._ctool_use_id',
       ]) {
         expect(entry[dropped]).toBeUndefined();
       }
+      // Legacy back-compat: text user rows still carry agent._ctype/_ctext.
+      expect(entry['agent._ctype']).toBe('text');
+      expect(entry['agent._ctext']).toBe('hello qoder work');
       expect(entry['agent.cwd']).toBe('/tmp/ws');
       expect(entry['agent.parent_uuid']).toBe('p-1');
       expect(entry['agent.user_type']).toBe('external');

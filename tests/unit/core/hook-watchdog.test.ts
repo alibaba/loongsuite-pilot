@@ -143,7 +143,7 @@ describe('HookWatchdog', () => {
 
       expect(summary.repaired).toBe(1);
       expect(spawnCalls).toHaveLength(1);
-      expect(spawnCalls[0].cmd).toBe('node');
+      expect(spawnCalls[0].cmd).toBe(process.execPath);
       expect(spawnCalls[0].args[0]).toBe(target.binPath);
       expect(spawnCalls[0].args.slice(1)).toEqual(target.installArgs);
     });
