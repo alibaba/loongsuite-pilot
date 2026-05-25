@@ -308,6 +308,8 @@ function buildSlsConfig(file: ConfigFile | null) {
   let enabled: boolean;
   if (file?.sls?.enabled !== undefined) {
     enabled = file.sls.enabled;
+  } else if (__INTERNAL_BUILD__) {
+    enabled = true;
   } else {
     enabled = endpoints.length > 0 && endpoints.every(ep => {
       if (!ep.endpoint || !ep.project || !ep.logstore) return false;

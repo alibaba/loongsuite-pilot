@@ -215,7 +215,7 @@ describe('SLS resolver — internal build (__INTERNAL_BUILD__ = true)', () => {
   });
 
   describe('enabled derivation', () => {
-    it('disables flusher when AK endpoint is missing credentials', async () => {
+    it('stays enabled in internal build even when user AK endpoint is missing credentials', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
           mode: 'ak',
@@ -226,7 +226,7 @@ describe('SLS resolver — internal build (__INTERNAL_BUILD__ = true)', () => {
       });
 
       const cfg = await loadConfig();
-      expect(cfg.flushers.sls?.enabled).toBe(false);
+      expect(cfg.flushers.sls?.enabled).toBe(true);
     });
 
     it('respects explicit enabled=false', async () => {
