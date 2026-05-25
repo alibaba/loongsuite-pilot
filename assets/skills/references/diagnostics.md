@@ -14,11 +14,11 @@
 |-------|:---:|:---:|---|:---:|
 | Cursor | ✅ | ✅ | 正常 | ✅ |
 | Qoder IDE / CLI | ✅ | ✅ | 正常 | ✅ |
-| Qoder Work | ❌（暂不支持） | ❌ | - | - |
+| Qoder Work | ✅ | ✅ | 正常 | ✅ |
 | Claude Code | ✅ | ✅ | 安装后需要 `source` 一下 shell rc | ✅ |
 | Codex | ✅ | ✅ | 正常 | ✅ |
 
-> **如果用户使用的工具不在上表中，或对应单元格为「❌ 暂不支持」（如 Qoder Work），
+> **如果用户使用的工具不在上表中，或对应单元格为「❌ 暂不支持」，
 > 请直接告知用户：当前 `loongsuite-pilot` 暂未支持该工具的数据采集，无需进一步排查。**
 
 ---
@@ -32,11 +32,27 @@
 |----------------|------------------|
 | Cursor | `~/.loongsuite-pilot/skills/references/cursor-diagnostics.md` |
 | Qoder IDE / Qoder CLI | `~/.loongsuite-pilot/skills/references/qoder-diagnostics.md` |
+| Qoder Work | `~/.loongsuite-pilot/skills/references/qoderwork-diagnostics.md` |
 | Claude Code | `~/.loongsuite-pilot/skills/references/claude-code-diagnostics.md` |
 | Codex | `~/.loongsuite-pilot/skills/references/codex-diagnostics.md` |
-| Qoder Work | 暂不支持 — 直接答复用户后结束 |
 
 每份分诊文档独立给出该 agent 的：服务状态检查、原始日志路径、Hook 配置位置、常见问题与修复步骤。
+
+---
+
+## 按平台子系统分诊
+
+如果用户的问题**不是某个 agent 的数据缺失**，而是 pilot 服务自身、自动更新、SLS 上报或 SQLite 采集等平台级异常，
+请根据下表阅读对应的诊断文档：
+
+| 排查场景 | 应阅读的诊断文档 |
+|---------|---------------|
+| pilot 服务异常（启动序列、Input 注册、Flusher、日志异常） | `~/.loongsuite-pilot/skills/references/service-diagnostics.md` |
+| 自动更新异常（版本不更新、更新后服务异常、回滚） | `~/.loongsuite-pilot/skills/references/updater-diagnostics.md` |
+| SLS 数据上报异常（数据采集正常但 SLS 查不到、上报失败、failed-logs 堆积） | `~/.loongsuite-pilot/skills/references/sls-diagnostics.md` |
+| SQLite 数据采集异常（Qoder IDE token 数据缺失） | `~/.loongsuite-pilot/skills/references/sqlite-diagnostics.md` |
+
+> **分诊提示**：如果用户同时遇到"某个 agent 没数据" + "pilot 服务异常"，先走平台子系统排查（确保 pilot 服务自身健康），再走 agent 分诊。
 
 ---
 

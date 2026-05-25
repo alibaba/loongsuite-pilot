@@ -4,7 +4,8 @@
 `~/.loongsuite-pilot/skills/references/qoder-diagnostics.md`，随 pilot 升级自动更新。
 
 仅覆盖 **pilot 场景下的 Qoder 本地数据采集链路**，不包含 OTLP trace 远端导出排查。
-**本文档不覆盖 Qoder Work** — Qoder Work 在 `diagnostics.md` 主表中标记为 ❌，无需排查。
+**本文档不覆盖 Qoder Work** —— Qoder Work 是独立产品，链路与 Qoder IDE/CLI 完全不同，
+排查请阅读 `~/.loongsuite-pilot/skills/references/qoderwork-diagnostics.md`。
 
 ---
 
@@ -296,4 +297,4 @@ ls -la "${XDG_CONFIG_HOME:-$HOME/.config}/Qoder"
 | **Qoder / Qoder CLI 完全无数据** | **先和用户确认用的是桌面版 Qoder（独立应用）**，而不是 IntelliJ IDEA 里的 Qoder 插件 —— 后者暂不支持（仍在开发中），pilot 不会采到任何数据。确认是桌面版后再继续往下查 |
 | **Qoder CLI 完全无数据** | **首查 Qoder CLI 版本**。老版本不执行 `hooks.Stop`，也可能不写 session segments。升级到最新稳定版后 `loongsuite-pilot restart` |
 | **Qoder IDE 完全无数据** | **首查 Qoder IDE 版本**。老版本缺 `ai_tracker/` 目录或 `chat_message.token_info` 字段。升级 Qoder 后重启 IDE |
-| Qoder Work（`~/.qoderwork/`）用户问怎么排查 | 当前 pilot 不支持 Qoder Work 的 Chat/Tool 采集（见 `diagnostics.md` 支持矩阵），直接答复用户暂不支持后结束 |
+| Qoder Work（`~/.qoderwork/`）用户问怎么排查 | Qoder Work 已独立支持，链路与本文档不同，直接阅读 `~/.loongsuite-pilot/skills/references/qoderwork-diagnostics.md` |
