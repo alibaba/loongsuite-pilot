@@ -122,7 +122,7 @@ describe('ConfigLoader', () => {
       });
     });
 
-    it('honors user SLS fields from config file (default destinationOverride=true)', async () => {
+    it('dual-writes when user SLS fields are present in config file', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
           endpoint: 'https://legacy.example.com',
@@ -132,17 +132,16 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      // Behavior change: when user fields are present without explicit destinationOverride,
-      // we treat the field as true (Case B). User destination replaces the built-in.
-      expect(config.flushers.sls?.endpoints).toHaveLength(1);
+      expect(config.flushers.sls?.endpoints).toHaveLength(2);
       expect(config.flushers.sls?.endpoints[0]).toMatchObject({
         endpoint: 'https://legacy.example.com',
         project: 'legacy-project',
         logstore: 'legacy-logstore',
       });
+      expect(config.flushers.sls?.endpoints[1].name).toBe(INTERNAL_SLS_DESTINATION.endpointName);
     });
 
-    it('uses env SLS destination over built-in and legacy file values', async () => {
+    it('uses env SLS destination over file values (still dual-writes)', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
           endpoint: 'https://legacy.example.com',
@@ -155,14 +154,14 @@ describe('ConfigLoader', () => {
       vi.stubEnv('SLS_LOGSTORE', 'log2');
 
       const config = await loadConfig();
-      expect(config.flushers.sls?.endpoints).toHaveLength(1);
+      expect(config.flushers.sls?.endpoints).toHaveLength(2);
       expect(config.flushers.sls?.endpoints[0]).toMatchObject({
         project: 'proj2',
         logstore: 'log2',
       });
     });
 
-    it('uses explicit installer SLS destination override from config file', async () => {
+    it('ignores legacy destinationOverride and still dual-writes', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
           destinationOverride: true,
@@ -174,10 +173,12 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.flushers.sls?.endpoint).toBe('https://sls.example.com');
+      expect(config.flushers.sls?.endpoints).toHaveLength(2);
       expect(config.flushers.sls?.endpoints[0]).toMatchObject({
         project: 'operator-project',
         logstore: 'operator-logstore',
       });
+      expect(config.flushers.sls?.endpoints[1].name).toBe(INTERNAL_SLS_DESTINATION.endpointName);
     });
 
     it('keeps non-destination SLS controls configurable', async () => {

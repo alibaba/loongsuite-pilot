@@ -73,20 +73,30 @@ npm run typecheck
 
 ### 编译与运行
 
+项目使用 esbuild 进行编译，通过编译期常量 `__INTERNAL_BUILD__` 区分内部/外部版本：
+
 ```bash
-# 完整编译（输出到 dist/）
+# 集团内版本（默认，包含内置 SLS 目的地）
 npm run build
+
+# 集团外版本（物理消除内置 SLS 相关代码）
+npm run build:external
 
 # 启动服务（开发环境）
 npm start
 # 等价于: node dist/index.js
 ```
 
+| 构建目标 | 命令 | 内置 SLS 目的地 | 用户配了自有 SLS 时 |
+|---------|------|----------------|-------------------|
+| 集团内 | `npm run build` | 包含 | 双发（用户 + 内置） |
+| 集团外 | `npm run build:external` | 不存在于产物中 | 仅发用户目的地 |
+
 ### 开发最佳实践
 
-1. **增量编译**：修改代码后重新运行 `npm run build`，或启用 TypeScript watch 模式：
+1. **增量编译**：修改代码后重新运行 `npm run build`。类型检查使用：
    ```bash
-   npx tsc --watch
+   npm run typecheck
    ```
 
 2. **直接运行测试**：编译后直接运行测试：
@@ -118,8 +128,11 @@ deploy/
 ### 第一步：打包
 
 ```bash
-# 编译 TypeScript 并打包（输出 loongsuite-pilot.tar.gz）
+# 集团内版本打包（默认）
 bash deploy/package.sh
+
+# 集团外版本打包
+bash deploy/package.sh --external
 
 # 自定义输出路径
 bash deploy/package.sh -o /tmp/loongsuite-pilot.tar.gz
@@ -191,29 +204,18 @@ curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/<PREFIX>/loongsuite-pilot-
 # 从个人隔离渠道安装（使用对应渠道上传后打印的 URL）
 curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/loongsuite-dev/test-taiye/loongsuite-pilot/loongsuite-pilot-installer.sh | bash
 
-# 可选：内部/运维场景覆盖 SLS 后端配置（默认替换内置目的地）
+# 可选：配置用户 SLS 目的地（自动双写到用户 + 内置目的地）
 curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install \
   --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
   --sls-project "my-project" \
   --sls-logstore "my-logstore" \
   --sls-ak-id "your-ak-id" \
   --sls-ak-secret "your-ak-secret"
-
-# 可选：双写到「用户 SLS + 内置目的地」（dual-write）
-# 显式传 --default-sls-override=false 即可，省略或传 true 表示仅写用户目的地
-curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install \
-  --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
-  --sls-project "my-project" \
-  --sls-logstore "my-logstore" \
-  --sls-ak-id "your-ak-id" \
-  --sls-ak-secret "your-ak-secret" \
-  --default-sls-override=false
 ```
 
-SLS 目的地解析规则：
-- 不传任何 `--sls-*` 参数：仅写入内置目的地（默认行为，对外发布场景）。
-- 传 `--sls-*` 参数（不传 `--default-sls-override` 或传 `true`）：用户目的地**替换**内置（运维/排障场景）。
-- 传 `--sls-*` 参数 + `--default-sls-override=false`：双写到用户目的地与内置目的地（任一失败不影响另一路）。
+SLS 目的地解析规则（集团内版本）：
+- 不传任何 `--sls-*` 参数：仅写入内置目的地。
+- 传 `--sls-*` 参数：**双写**到用户目的地与内置目的地（任一失败不影响另一路）。
 
 安装流程：
 1. 检查 Node.js >= 18、npm、curl/wget

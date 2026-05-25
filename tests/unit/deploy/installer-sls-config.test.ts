@@ -19,10 +19,18 @@ describe('installer SLS config output', () => {
     expect(content).toContain('SLS_LOGSTORE=""');
   });
 
-  it.each(installers)('%s marks explicit SLS flag values as operator overrides', async (installer) => {
+  it.each(installers)('%s writes user SLS fields without destinationOverride', async (installer) => {
     const content = await readFile(path.join(rootDir, installer), 'utf8');
 
     expect(content).toContain('if (slsEndpoint || slsProject || slsLogstore)');
-    expect(content).toContain('config.sls.destinationOverride = true;');
+    expect(content).toContain('delete config.sls.destinationOverride');
+    expect(content).not.toContain('config.sls.destinationOverride = true');
+    expect(content).not.toContain('config.sls.destinationOverride = false');
+  });
+
+  it.each(installers)('%s rejects --default-sls-override as unsupported', async (installer) => {
+    const content = await readFile(path.join(rootDir, installer), 'utf8');
+
+    expect(content).toContain('--default-sls-override is no longer supported');
   });
 });

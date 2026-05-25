@@ -13,6 +13,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PACKAGE_NAME="loongsuite-pilot"
 OUTPUT_PATH=""
 SKIP_BUILD=0
+BUILD_VARIANT="internal"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -20,6 +21,8 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_PATH="$2"; shift 2 ;;
         --skip-build)
             SKIP_BUILD=1; shift ;;
+        --external)
+            BUILD_VARIANT="external"; shift ;;
         *)
             echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -33,9 +36,9 @@ cd "$PROJECT_ROOT"
 
 # ── Build ──
 if [ "$SKIP_BUILD" -eq 0 ]; then
-    echo "==> Building TypeScript..."
+    echo "==> Building ($BUILD_VARIANT)..."
     rm -rf dist
-    npx tsc
+    npm run "build:$BUILD_VARIANT"
     echo "    ✅ Build complete"
 else
     echo "==> Skipping build (--skip-build)"

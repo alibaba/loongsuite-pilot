@@ -9,7 +9,9 @@
     "loongsuite-pilot": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node build.mjs --internal",
+    "build:internal": "node build.mjs --internal",
+    "build:external": "node build.mjs",
     "start": "node dist/index.js",
     "monitor:dashboard": "node scripts/serve-loongsuite-pilot-monitor.mjs",
     "perf:cursor-hook": "node tests/performance/cursor-hook-processor.perf.mjs",
@@ -38,6 +40,7 @@
     "@types/node": "^18.0.0",
     "@types/uuid": "^9.0.0",
     "@vitest/coverage-v8": "^1.6.1",
+    "esbuild": "^0.28.0",
     "typescript": "^5.3.0",
     "vitest": "^1.6.1"
   },
