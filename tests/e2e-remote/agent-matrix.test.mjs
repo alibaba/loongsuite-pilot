@@ -19,7 +19,7 @@ describe('agent-matrix', () => {
     expect(qoder?.defaultProbeSh).toContain('--print --yolo --cwd');
     expect(qoder?.defaultProbeSh).toContain('--max-turns 1');
     const cur = agents.find(a => a.binary === 'cursor');
-    expect(cur?.defaultProbeSh).toContain('.local/bin/agent');
+    expect(cur?.defaultProbeSh).toContain('for _c in cursor cursor-agent agent');
   });
 
   it('resolveE2eCursorInstallStrategy: official by default, watzon for linux-7u', () => {
