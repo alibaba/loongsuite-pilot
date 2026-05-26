@@ -14,4 +14,4 @@ loginctl enable-linger testuser 2>/dev/null || true
 exec sudo -u testuser --preserve-env \
   env HOME=/home/testuser \
   PATH="/home/testuser/.local/bin:/usr/local/bin:/usr/bin:/bin" \
-  node /opt/e2e/run-docker-e2e.mjs
+  node /opt/e2e/"${E2E_RUNNER_SCRIPT:-run-docker-e2e.mjs}"

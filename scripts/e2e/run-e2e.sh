@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
-# Unified E2E test runner — loads env from .env.e2e and dispatches to docker or ssh mode.
+# L1 E2E runner — Docker quick check for current branch code.
 #
 # Usage:
-#   ./scripts/e2e/run-e2e.sh [docker|ssh] [scenario]
+#   ./scripts/e2e/run-e2e.sh                  # default scenario: install-smoke
+#   ./scripts/e2e/run-e2e.sh preflight        # validate container only
+#   ./scripts/e2e/run-e2e.sh install-smoke    # install + 4-agent probe + JSONL/SLS check
+#   ./scripts/e2e/run-e2e.sh uninstall        # install + uninstall + residue check
 #
-# Examples:
-#   ./scripts/e2e/run-e2e.sh docker install-smoke
-#   ./scripts/e2e/run-e2e.sh docker preflight
-#   ./scripts/e2e/run-e2e.sh ssh install-smoke
-#   ./scripts/e2e/run-e2e.sh docker                  # uses E2E_SCENARIO from .env.e2e
+# Required env (in .env.e2e):
+#   E2E_USER_ID
+#   E2E_CODEX_OPENAI_API_KEY / E2E_ANTHROPIC_API_KEY / E2E_CURSOR_API_KEY / E2E_QODER_PERSONAL_ACCESS_TOKEN
+#   E2E_SLS_PROJECT / E2E_SLS_LOGSTORE / E2E_SLS_ACCESS_KEY_ID / E2E_SLS_ACCESS_KEY_SECRET
+# Optional: E2E_SLS_ENDPOINT (default cn-hangzhou.log.aliyuncs.com)
+# Debug:    E2E_KEEP_ALIVE=1 (keep container on failure for docker exec)
 #
-# Environment file: .env.e2e (project root, gitignored)
-#   Copy .env.e2e.example to .env.e2e and fill in your values.
+# For L2 (complex scenarios / SSH remote), see docs/E2E-REMOTE-TEST-GUIDE.md.
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 ENV_FILE=".env.e2e"
+SCENARIO="${1:-install-smoke}"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "ERROR: $ENV_FILE not found."
@@ -25,7 +29,6 @@ if [ ! -f "$ENV_FILE" ]; then
   exit 1
 fi
 
-# Load env file (skip comments and empty lines)
 set -a
 while IFS= read -r line || [ -n "$line" ]; do
   line="${line%%#*}"
@@ -36,34 +39,16 @@ while IFS= read -r line || [ -n "$line" ]; do
 done < "$ENV_FILE"
 set +a
 
-# CLI overrides
-MODE="${1:-docker}"
-if [ -n "${2:-}" ]; then
-  export E2E_SCENARIO="$2"
-fi
+export E2E_SCENARIO="$SCENARIO"
 
-echo "=== E2E Test Runner ==="
-echo "Mode:     $MODE"
-echo "Scenario: ${E2E_SCENARIO:-preflight}"
-echo "User ID:  ${E2E_USER_ID:-<not set>}"
-echo "========================"
-echo ""
+echo "=== L1 E2E Runner (Docker, current branch code) ==="
+echo "Scenario: $SCENARIO"
+echo "User ID:  ${E2E_USER_ID:-<MISSING>}"
+echo "SLS:      ${E2E_SLS_PROJECT:-<MISSING>}/${E2E_SLS_LOGSTORE:-<MISSING>}"
+echo "===================================================="
 
-case "$MODE" in
-  docker)
-    if [ "${E2E_LOCAL_BUILD:-0}" = "1" ]; then
-      echo "[e2e] Local build mode: running npm run build..."
-      npm run build
-    fi
-    # Stop any leftover container from previous keep-alive run
-    docker compose -f tests/e2e-docker/docker-compose.yml down -v 2>/dev/null || true
-    exec npm run test:e2e:docker
-    ;;
-  ssh)
-    exec npm run test:e2e:remote
-    ;;
-  *)
-    echo "ERROR: Unknown mode '$MODE'. Use 'docker' or 'ssh'."
-    exit 1
-    ;;
-esac
+echo "[e2e-l1] Building current branch (npm run build)..."
+npm run build
+
+docker compose -f tests/e2e-docker/docker-compose.l1.yml down -v 2>/dev/null || true
+exec docker compose -f tests/e2e-docker/docker-compose.l1.yml up --build --exit-code-from e2e-agent

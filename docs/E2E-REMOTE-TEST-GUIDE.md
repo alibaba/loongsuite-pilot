@@ -1,4 +1,60 @@
-# LoongSuite-Pilot E2E 远程测试完整操作指南
+# LoongSuite-Pilot E2E 测试指南
+
+本文档分两层：
+- **L1（推荐先看）** — Docker 本地快速验证当前分支代码，9 个 env 就够
+- **L2** — 远程 SSH 真机、reboot 真重启、多账号、版本矩阵等复杂场景
+
+---
+
+## L1 快速验证（Docker，当前分支代码）
+
+适用：日常开发改完代码想立刻验证"装得起来 + 4 个 agent 数据采得到"。
+
+### 5 步跑起来
+
+```bash
+# 1. 准备 env
+cp .env.e2e.example .env.e2e
+# 编辑 .env.e2e，填入 8 个值（cursor 默认跳过，不需要）：
+#   E2E_USER_ID, E2E_CODEX_OPENAI_API_KEY, E2E_ANTHROPIC_API_KEY,
+#   E2E_QODER_PERSONAL_ACCESS_TOKEN,
+#   E2E_SLS_PROJECT, E2E_SLS_LOGSTORE, E2E_SLS_ACCESS_KEY_ID, E2E_SLS_ACCESS_KEY_SECRET
+
+# 2. 装依赖
+npm install
+
+# 3. 跑（默认 install-smoke）
+bash scripts/e2e/run-e2e.sh
+
+# 或者:
+bash scripts/e2e/run-e2e.sh preflight       # 30s 只验环境
+bash scripts/e2e/run-e2e.sh install-smoke   # 装+probe+JSONL校验
+bash scripts/e2e/run-e2e.sh uninstall       # 装→卸→验残留
+
+# 4. 看输出: 通过 = "JSONL agent coverage check passed"
+# 5. SLS 控制台对照数据 (可选)
+```
+
+### 失败调试
+
+```bash
+E2E_KEEP_ALIVE=1 bash scripts/e2e/run-e2e.sh install-smoke
+docker exec -it loongsuite-pilot-e2e-l1 bash
+# /opt/artifacts/ 下有 stdout/stderr 文件
+# ~/.loongsuite-pilot/logs/loongsuite-pilot-service.log 是 pilot 主日志
+```
+
+### 啥时候要 L2？
+
+- 测真 reboot 自启（不是 kill+restart 模拟） → L2
+- 多账号 / 多 OS / 多版本（Linux 7u / macOS / Windows） → L2
+- 远程真机（非 Docker） → L2 SSH
+
+---
+
+## L2 远程 / 复杂场景
+
+> **以下原 SSH 测试指南内容保留。L2 用 `.env.e2e.l2.example`，env 数量远超 L1。**
 
 本文档详细说明如何在远程开发机上执行各类 E2E 测试场景，包括部署测试、自动升级测试等。
 

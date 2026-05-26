@@ -6,6 +6,16 @@
 
 > **核心原则：** 每次完整 E2E 验证必须对每个已安装的 Agent 触发至少一次真实对话（或模拟 hook 调用），然后验证 output JSONL 中出现了对应的**新增**条目。仅验证基础设施（启动、注册、watchdog 健康）不足以发现采集链路中的 bug（如 hook 脚本异常、processor 格式变更、normalization 回归等）。不能用历史数据替代验证。
 
+## 0. 快速验证（推荐先跑）
+
+如果你只想验证"当前分支代码能装起来 + 4 个 agent 的数据能采到"，跳过下面的手动步骤：
+
+    cp .env.e2e.example .env.e2e
+    # 填 8 个 env（cursor 默认跳过）
+    bash scripts/e2e/run-e2e.sh
+
+详见 [docs/E2E-REMOTE-TEST-GUIDE.md 的 L1 章节](../docs/E2E-REMOTE-TEST-GUIDE.md#l1-快速验证docker当前分支代码)。下面 1-N 节是手动调试 / 单组件验证流程。
+
 ## 前置条件
 
 - Node.js >= 18, npm >= 8

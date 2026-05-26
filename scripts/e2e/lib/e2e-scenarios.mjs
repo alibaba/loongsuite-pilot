@@ -5,6 +5,7 @@
 
 import {
   buildRemoteInstallSlsCliQuotedArgs,
+  shouldPropagateSlsToRemoteInstall,
   shellSingleQuoteBash,
 } from './propagate-sls-install.mjs';
 import { normalizeE2eQoderPersonalAccessToken } from './qoder-pat.mjs';
@@ -14,6 +15,12 @@ import {
   buildRemoteClaudeOnboardingSkipSh,
   buildRemoteClaudeProxyConfigSh,
 } from './remote-agent-config.mjs';
+import {
+  loadAgentMatrix,
+  buildEnsureAgentClisScript,
+  buildMatrixProbeScript,
+} from './agent-matrix.mjs';
+import { buildAgentProbeRemoteBody } from './agent-probe-body.mjs';
 
 /**
  * Default installer URL shared by run-remote-e2e and the per-scenario script generators.
@@ -902,4 +909,243 @@ else
   fi
 fi
 `;
+}
+
+// ──────────────────────────────────────────────────────────
+// Helpers used by both run-l1.mjs and run-docker-e2e.mjs.
+// Moved from run-docker-e2e.mjs so L1 can reuse without copy.
+// ──────────────────────────────────────────────────────────
+
+export function preflightScript() {
+  return `
+set -euo pipefail
+echo "=== uname ==="
+uname -a || true
+echo "=== node ==="
+command -v node && node -v || echo "node missing"
+echo "=== npm ==="
+command -v npm && npm -v || echo "npm missing"
+echo "=== agents ==="
+for b in codex claude cursor agent qoder qodercli; do
+  if command -v "$b" >/dev/null 2>&1; then
+    echo "have $b: $("$b" --version 2>/dev/null || echo 'version unknown')"
+  else
+    echo "missing $b"
+  fi
+done
+echo "=== disk ==="
+df -h . 2>/dev/null || true
+echo "=== E2E_DOCKER_MODE ==="
+echo "Running inside Docker container"
+`;
+}
+
+export function localBuildInstallScript(userId, env) {
+  const id = (userId || '').replace(/'/g, `'\\''`);
+
+  const configObj = { userId: userId || '', autoUpdate: { enabled: false } };
+  if (shouldPropagateSlsToRemoteInstall(env)) {
+    const rawEndpoint = env.E2E_SLS_ENDPOINT?.trim() || 'cn-hangzhou.log.aliyuncs.com';
+    const endpoint = /^https?:\/\//i.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`;
+    configObj.sls = {
+      endpoint,
+      project: env.E2E_SLS_PROJECT.trim(),
+      logstore: env.E2E_SLS_LOGSTORE.trim(),
+      destinationOverride: true,
+    };
+    if (env.E2E_SLS_ACCESS_KEY_ID?.trim() && env.E2E_SLS_ACCESS_KEY_SECRET?.trim()) {
+      configObj.sls.accessKeyId = env.E2E_SLS_ACCESS_KEY_ID.trim();
+      configObj.sls.accessKeySecret = env.E2E_SLS_ACCESS_KEY_SECRET.trim();
+    }
+  }
+  const configJson = JSON.stringify(configObj, null, 2);
+
+  return `
+set -euo pipefail
+SRC=/opt/project
+DEST="$HOME/.loongsuite-pilot/versions/local"
+DATA_DIR="$HOME/.loongsuite-pilot"
+BIN_DIR="$HOME/.local/bin"
+USER_ID='${id}'
+
+echo "[local-install] Deploying from local build ($SRC)..."
+
+# Verify source has dist/
+if [ ! -f "$SRC/dist/index.js" ]; then
+  echo "[local-install] ERROR: $SRC/dist/index.js not found. Run 'npm run build' first."
+  exit 1
+fi
+
+# Copy project (exclude heavy/unnecessary dirs)
+rm -rf "$DEST"
+mkdir -p "$DEST"
+cp -r "$SRC/dist" "$DEST/dist"
+cp -r "$SRC/scripts" "$DEST/scripts"
+cp -r "$SRC/agents.d" "$DEST/agents.d" 2>/dev/null || true
+cp -r "$SRC/plugins" "$DEST/plugins" 2>/dev/null || true
+cp "$SRC/package.json" "$DEST/package.json"
+cp "$SRC/package-lock.json" "$DEST/package-lock.json" 2>/dev/null || true
+
+# Remove macOS AppleDouble resource fork files (._*) that cause parse warnings
+find "$DEST" -name '._*' -delete 2>/dev/null || true
+
+# Install production deps
+cd "$DEST"
+npm install --production --no-optional 2>&1 | tail -5
+echo "[local-install] npm install done"
+
+# Set version pointer
+mkdir -p "$DATA_DIR"
+echo "local" > "$DATA_DIR/current"
+
+# Sync bootstrap scripts
+mkdir -p "$DATA_DIR/bin"
+cp -f "$DEST/scripts/collector-daemon.js" "$DATA_DIR/bin/collector-daemon.js"
+cp -f "$DEST/scripts/updater-daemon.js" "$DATA_DIR/bin/updater-daemon.js"
+mkdir -p "$BIN_DIR"
+cp -f "$DEST/scripts/loongsuite-pilot.sh" "$BIN_DIR/loongsuite-pilot"
+chmod 755 "$BIN_DIR/loongsuite-pilot"
+
+# Write config.json
+mkdir -p "$DATA_DIR/logs"
+cat > "$DATA_DIR/config.json" << 'CFGEOF'
+${configJson}
+CFGEOF
+
+# Verify deployment
+command -v loongsuite-pilot >/dev/null
+test -f "$DATA_DIR/config.json"
+test -f "$DEST/dist/index.js"
+echo "[local-install] loongsuite-pilot deployed from local build"
+echo "[local-install] config: $(cat "$DATA_DIR/config.json")"
+
+# Start service
+loongsuite-pilot start 2>&1 || {
+  echo "[local-install] 'start' failed, falling back to background 'run'"
+  nohup loongsuite-pilot run >> "$DATA_DIR/logs/loongsuite-pilot-service.log" 2>&1 &
+}
+sleep 2
+loongsuite-pilot status || true
+echo "[local-install] pilot started"
+`;
+}
+
+export function uninstallScript(installerUrl) {
+  const u = installerUrl.replace(/'/g, `'\\''`);
+  return `
+set -euo pipefail
+INSTALLER_URL='${u}'
+curl -fsSL "$INSTALLER_URL" | bash -s -- uninstall --purge
+echo "uninstall: script finished"
+`;
+}
+
+/**
+ * Build a bash script that checks all required agents have produced non-empty JSONL files.
+ * @param {string} requiredAgentsCsv - comma-separated agent prefixes (e.g. "claude-code,codex,qoder")
+ */
+export function buildJsonlAgentCoverageCheck(requiredAgentsCsv) {
+  const agents = requiredAgentsCsv.split(',').map(s => s.trim()).filter(Boolean);
+  const checks = agents.map(agent => [
+    `_found_${agent.replace(/[^a-zA-Z0-9]/g, '_')}=0`,
+    `for f in "$LOG_DIR"/${agent}-*.jsonl "$LOG_DIR"/${agent}.jsonl; do`,
+    `  if [ -f "$f" ] && [ -s "$f" ]; then`,
+    `    _found_${agent.replace(/[^a-zA-Z0-9]/g, '_')}=1`,
+    `    echo "[agent-coverage] OK: ${agent} -> $(basename "$f") ($(wc -l < "$f") lines)"`,
+    `    break`,
+    `  fi`,
+    `done`,
+    `if [ "$_found_${agent.replace(/[^a-zA-Z0-9]/g, '_')}" -eq 0 ]; then`,
+    `  echo "[agent-coverage] MISSING: ${agent} — no JSONL output found"`,
+    `  MISSING="$MISSING ${agent}"`,
+    `fi`,
+  ].join('\n')).join('\n\n');
+
+  return [
+    'set -euo pipefail',
+    'LOG_DIR="${E2E_JSONL_LOG_DIR:-$HOME/.loongsuite-pilot/logs/output}"',
+    'MISSING=""',
+    '',
+    'echo "[agent-coverage] checking: ' + agents.join(', ') + '"',
+    'echo "[agent-coverage] log dir: $LOG_DIR"',
+    'ls "$LOG_DIR"/*.jsonl 2>/dev/null || echo "[agent-coverage] (no jsonl files found)"',
+    '',
+    checks,
+    '',
+    'if [ -n "$MISSING" ]; then',
+    '  echo ""',
+    '  echo "[agent-coverage] FAILED: missing agents:$MISSING"',
+    '  echo "[agent-coverage] All of: ' + agents.join(', ') + ' must produce JSONL data."',
+    '  exit 1',
+    'fi',
+    'echo "[agent-coverage] ALL required agents produced JSONL data."',
+  ].join('\n');
+}
+
+/**
+ * Build script that writes agent configs (codex config.toml, claude onboarding, proxy).
+ * Should run before `waitForPilotReady`: pilot polls discovery every 30s, so as long
+ * as configs land before the 180s readiness wait completes, pilot will pick them up
+ * within the wait window. (Runs after `loongsuite-pilot start` in install-smoke; the
+ * first poll may see no configs, but a subsequent poll will.)
+ */
+export function buildAgentConfigSetupScript(env) {
+  let body = '';
+  body += buildRemoteCodexConfigSh(env);
+  body += buildRemoteClaudeOnboardingSkipSh(env);
+  body += buildRemoteClaudeProxyConfigSh(env);
+  return body;
+}
+
+function shouldEnsureAgentClis(env, useMatrixProbe) {
+  const v = env.E2E_ENSURE_AGENT_CLIS?.trim().toLowerCase();
+  if (v === '0' || v === 'false' || v === 'no') return false;
+  if (v === '1' || v === 'true' || v === 'yes') return true;
+  return useMatrixProbe;
+}
+
+/**
+ * Build the probe-only script (ensure CLIs + run probes).
+ * Agent configs must already be written and plugins deployed before this runs.
+ */
+export function buildAgentProbeOnlyScript(env) {
+  const useMatrix = env.E2E_USE_MATRIX_PROBE?.trim() === '1';
+  const customProbe = env.E2E_AGENT_PROBE_CMD?.trim();
+  if (!useMatrix && !customProbe) return '';
+
+  const matrix = loadAgentMatrix(env);
+  const ensure = shouldEnsureAgentClis(env, useMatrix);
+
+  let body = '';
+  if (ensure) {
+    console.log('[e2e-docker] Ensuring agent-matrix CLIs');
+    body += buildEnsureAgentClisScript(matrix, env);
+    body += '\n';
+  }
+
+  if (useMatrix) {
+    body += buildMatrixProbeScript(matrix, env);
+    return body;
+  }
+
+  body += buildAgentProbeRemoteBody(customProbe);
+  return body;
+}
+
+export function buildProbeEnvInjections(env) {
+  const chunks = [buildRemoteSecretExportsSh(env)];
+  const tok = normalizeE2eQoderPersonalAccessToken(env.E2E_QODER_PERSONAL_ACCESS_TOKEN);
+  if (tok) {
+    console.log(
+      `[e2e-docker] Injecting QODER_PERSONAL_ACCESS_TOKEN (${tok.length} chars)`,
+    );
+    chunks.push(`export QODER_PERSONAL_ACCESS_TOKEN=${shellSingleQuoteBash(tok)}`);
+  }
+  const cursorKey = env.E2E_CURSOR_API_KEY?.trim();
+  if (cursorKey) {
+    console.log(`[e2e-docker] Injecting CURSOR_API_KEY (${cursorKey.length} chars)`);
+    chunks.push(`export CURSOR_API_KEY=${shellSingleQuoteBash(cursorKey)}`);
+  }
+  const joined = chunks.filter(Boolean).join('\n');
+  return joined ? `${joined}\n` : '';
 }

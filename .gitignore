@@ -20,6 +20,8 @@ Thumbs.db
 # Environment
 .env
 .env.*
+!.env.e2e.example
+!.env.e2e.l2.example
 
 # Build artifacts
 *.tsbuildinfo
