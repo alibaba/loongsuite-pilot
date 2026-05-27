@@ -943,98 +943,55 @@ echo "Running inside Docker container"
 export function localBuildInstallScript(userId, env) {
   const id = (userId || '').replace(/'/g, `'\\''`);
 
-  const configObj = { userId: userId || '', autoUpdate: { enabled: false } };
+  const installerFlags = [`--user.id '${id}'`];
+
   if (shouldPropagateSlsToRemoteInstall(env)) {
     const rawEndpoint = env.E2E_SLS_ENDPOINT?.trim() || 'cn-hangzhou.log.aliyuncs.com';
     const endpoint = /^https?:\/\//i.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`;
-    configObj.sls = {
-      endpoint,
-      project: env.E2E_SLS_PROJECT.trim(),
-      logstore: env.E2E_SLS_LOGSTORE.trim(),
-      destinationOverride: true,
-    };
+    installerFlags.push(`--sls-endpoint ${shellSingleQuoteBash(endpoint)}`);
+    installerFlags.push(`--sls-project ${shellSingleQuoteBash(env.E2E_SLS_PROJECT.trim())}`);
+    installerFlags.push(`--sls-logstore ${shellSingleQuoteBash(env.E2E_SLS_LOGSTORE.trim())}`);
     if (env.E2E_SLS_ACCESS_KEY_ID?.trim() && env.E2E_SLS_ACCESS_KEY_SECRET?.trim()) {
-      configObj.sls.accessKeyId = env.E2E_SLS_ACCESS_KEY_ID.trim();
-      configObj.sls.accessKeySecret = env.E2E_SLS_ACCESS_KEY_SECRET.trim();
+      installerFlags.push(`--sls-ak-id ${shellSingleQuoteBash(env.E2E_SLS_ACCESS_KEY_ID.trim())}`);
+      installerFlags.push(`--sls-ak-secret ${shellSingleQuoteBash(env.E2E_SLS_ACCESS_KEY_SECRET.trim())}`);
     }
   }
-  const configJson = JSON.stringify(configObj, null, 2);
+
+  const flagsStr = installerFlags.join(' \\\n    ');
 
   return `
 set -euo pipefail
-SRC=/opt/project
-DEST="$HOME/.loongsuite-pilot/versions/local"
-DATA_DIR="$HOME/.loongsuite-pilot"
-BIN_DIR="$HOME/.local/bin"
-USER_ID='${id}'
+INSTALLER=/opt/project/deploy/loongsuite-pilot-installer.sh
+PACKAGE=/opt/project/loongsuite-pilot.tar.gz
 
-echo "[local-install] Deploying from local build ($SRC)..."
-
-# Verify source has dist/
-if [ ! -f "$SRC/dist/index.js" ]; then
-  echo "[local-install] ERROR: $SRC/dist/index.js not found. Run 'npm run build' first."
+echo "[installer-e2e] Verifying local package and installer..."
+if [ ! -f "$PACKAGE" ]; then
+  echo "[installer-e2e] ERROR: $PACKAGE not found. Run 'deploy/package.sh --external' first."
+  exit 1
+fi
+if [ ! -f "$INSTALLER" ]; then
+  echo "[installer-e2e] ERROR: $INSTALLER not found."
   exit 1
 fi
 
-# Copy project (exclude heavy/unnecessary dirs)
-rm -rf "$DEST"
-mkdir -p "$DEST"
-cp -r "$SRC/dist" "$DEST/dist"
-cp -r "$SRC/scripts" "$DEST/scripts"
-cp -r "$SRC/agents.d" "$DEST/agents.d" 2>/dev/null || true
-cp -r "$SRC/plugins" "$DEST/plugins" 2>/dev/null || true
-cp "$SRC/package.json" "$DEST/package.json"
-cp "$SRC/package-lock.json" "$DEST/package-lock.json" 2>/dev/null || true
+echo "[installer-e2e] Running installer with local package..."
+bash "$INSTALLER" install \\
+    --package-url "file://$PACKAGE" \\
+    ${flagsStr}
 
-# Remove macOS AppleDouble resource fork files (._*) that cause parse warnings
-find "$DEST" -name '._*' -delete 2>/dev/null || true
-
-# Install production deps
-cd "$DEST"
-npm install --production --no-optional 2>&1 | tail -5
-echo "[local-install] npm install done"
-
-# Deploy hook scripts (mirrors postinstall.js)
-if [ -d "$SRC/assets/hooks" ]; then
-  mkdir -p "$DATA_DIR/hooks"
-  cp -f "$SRC/assets/hooks/"* "$DATA_DIR/hooks/" 2>/dev/null || true
-  chmod 755 "$DATA_DIR/hooks/"*.sh 2>/dev/null || true
-  echo "[local-install] hook scripts deployed to $DATA_DIR/hooks/"
-fi
-
-# Set version pointer
-mkdir -p "$DATA_DIR"
-echo "local" > "$DATA_DIR/current"
-
-# Sync bootstrap scripts
-mkdir -p "$DATA_DIR/bin"
-cp -f "$DEST/scripts/collector-daemon.js" "$DATA_DIR/bin/collector-daemon.js"
-cp -f "$DEST/scripts/updater-daemon.js" "$DATA_DIR/bin/updater-daemon.js"
-mkdir -p "$BIN_DIR"
-cp -f "$DEST/scripts/loongsuite-pilot.sh" "$BIN_DIR/loongsuite-pilot"
-chmod 755 "$BIN_DIR/loongsuite-pilot"
-
-# Write config.json
-mkdir -p "$DATA_DIR/logs"
-cat > "$DATA_DIR/config.json" << 'CFGEOF'
-${configJson}
-CFGEOF
-
-# Verify deployment
-command -v loongsuite-pilot >/dev/null
-test -f "$DATA_DIR/config.json"
-test -f "$DEST/dist/index.js"
-echo "[local-install] loongsuite-pilot deployed from local build"
-echo "[local-install] config: $(cat "$DATA_DIR/config.json")"
-
-# Start service
-loongsuite-pilot start 2>&1 || {
-  echo "[local-install] 'start' failed, falling back to background 'run'"
-  nohup loongsuite-pilot run >> "$DATA_DIR/logs/loongsuite-pilot-service.log" 2>&1 &
+echo "[installer-e2e] Verifying installation..."
+command -v loongsuite-pilot >/dev/null || {
+  echo "[installer-e2e] ERROR: loongsuite-pilot not on PATH after install"
+  export PATH="$HOME/.local/bin:$PATH"
+  command -v loongsuite-pilot >/dev/null || exit 1
 }
-sleep 2
+
+echo "[installer-e2e] config.json:"
+cat "$HOME/.loongsuite-pilot/config.json" 2>/dev/null || echo "(no config found)"
+
+echo "[installer-e2e] service status:"
 loongsuite-pilot status || true
-echo "[local-install] pilot started"
+echo "[installer-e2e] installer flow complete"
 `;
 }
 

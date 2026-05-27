@@ -52,6 +52,13 @@ SLS_AK_SECRET=""
 DATA_DIR="$DEFAULT_DATA_DIR"
 LOG_LEVEL=""
 USER_ID=""
+COLLECT_LOG=""
+COLLECT_TRACE=""
+CMS_LICENSE_KEY=""
+CMS_ENDPOINT=""
+CMS_WORKSPACE=""
+SERVICE_NAME_PREFIX=""
+SELECTED_AGENTS=""
 HAS_SUDO=0
 PURGE=0
 SYSTEM_SERVICE=0
@@ -99,6 +106,20 @@ while [[ $# -gt 0 ]]; do
         --version=*)          INSTALL_VERSION="${1#*=}"; shift ;;
         --channel)            CHANNEL="$2"; shift 2 ;;
         --channel=*)          CHANNEL="${1#*=}"; shift ;;
+        --collect-log)        COLLECT_LOG="$2"; shift 2 ;;
+        --collect-log=*)      COLLECT_LOG="${1#*=}"; shift ;;
+        --collect-trace)      COLLECT_TRACE="$2"; shift 2 ;;
+        --collect-trace=*)    COLLECT_TRACE="${1#*=}"; shift ;;
+        --cms-license-key)    CMS_LICENSE_KEY="$2"; shift 2 ;;
+        --cms-license-key=*)  CMS_LICENSE_KEY="${1#*=}"; shift ;;
+        --cms-endpoint)       CMS_ENDPOINT="$2"; shift 2 ;;
+        --cms-endpoint=*)     CMS_ENDPOINT="${1#*=}"; shift ;;
+        --cms-workspace)      CMS_WORKSPACE="$2"; shift 2 ;;
+        --cms-workspace=*)    CMS_WORKSPACE="${1#*=}"; shift ;;
+        --service-name-prefix) SERVICE_NAME_PREFIX="$2"; shift 2 ;;
+        --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
+        --agents)             SELECTED_AGENTS="$2"; shift 2 ;;
+        --agents=*)           SELECTED_AGENTS="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
         --system-service)     SYSTEM_SERVICE=1; shift ;;
         *)
@@ -348,6 +369,106 @@ download_and_extract() {
 }
 
 # ============================================================
+# Agent probe: detect available agents via Node.js CLI probe
+# ============================================================
+PROBE_RESULT="[]"
+
+probe_agents() {
+    msg "==> 探测 AI Agent..." "==> Probing AI Agents..."
+    PROBE_RESULT=$("$NODE_BIN" "$INSTALL_SRC/dist/cli-probe.cjs" 2>/dev/null) || {
+        msg "    ⚠️  Agent 探测失败，将跳过选择" "    ⚠️  Agent probe failed, skipping selection"
+        PROBE_RESULT="[]"
+        return 0
+    }
+    local count
+    count=$("$NODE_BIN" -e "const r=JSON.parse(process.argv[1]);process.stdout.write(String(r.length))" "$PROBE_RESULT" 2>/dev/null || echo "0")
+    msg "    ✅ 探测到 ${count} 个 Agent 定义" "    ✅ Found ${count} agent definitions"
+    echo ""
+}
+
+# ============================================================
+# Agent selection: interactive menu or --agents flag
+# ============================================================
+select_agents() {
+    if [ -n "$SELECTED_AGENTS" ]; then
+        msg "    使用指定的 Agent: $SELECTED_AGENTS" "    Using specified agents: $SELECTED_AGENTS"
+        echo ""
+        return 0
+    fi
+
+    local agent_count
+    agent_count=$("$NODE_BIN" -e "const r=JSON.parse(process.argv[1]);process.stdout.write(String(r.length))" "$PROBE_RESULT" 2>/dev/null || echo "0")
+    if [ "$agent_count" = "0" ]; then
+        return 0
+    fi
+
+    # Non-interactive: auto-select all detected agents
+    if [ ! -t 0 ]; then
+        SELECTED_AGENTS=$("$NODE_BIN" -e "
+const r = JSON.parse(process.argv[1]);
+const detected = r.filter(a => a.detected).map(a => a.id);
+process.stdout.write(detected.join(','));
+" "$PROBE_RESULT" 2>/dev/null || true)
+        msg "    (非交互模式) 自动选择已检测到的 Agent: $SELECTED_AGENTS" \
+            "    (non-interactive) Auto-selected detected agents: $SELECTED_AGENTS"
+        echo ""
+        return 0
+    fi
+
+    # Interactive menu
+    "$NODE_BIN" -e "
+const r = JSON.parse(process.argv[1]);
+const lang = process.argv[2];
+for (let i = 0; i < r.length; i++) {
+  const a = r[i];
+  const mark = a.detected ? '✅' : '❌';
+  const status = lang === 'zh'
+    ? (a.detected ? '已检测到: ' + a.reason : '未检测到')
+    : (a.detected ? 'detected: ' + a.reason : 'not detected');
+  console.log('    [' + (i+1) + '] ' + mark + ' ' + a.displayName.padEnd(16) + '(' + status + ')');
+}
+console.log('');
+if (lang === 'zh') {
+  console.log('    已检测到的 Agent 默认启用 (✅)');
+  console.log('    输入编号切换选择 (空格分隔)，直接回车确认:');
+} else {
+  console.log('    Detected agents are selected by default (✅)');
+  console.log('    Enter numbers to toggle (space-separated), press Enter to confirm:');
+}
+" "$PROBE_RESULT" "$LANG_MODE"
+
+    # Read user input
+    local toggle_input
+    read -r toggle_input
+
+    # Compute final selection
+    SELECTED_AGENTS=$("$NODE_BIN" -e "
+const r = JSON.parse(process.argv[1]);
+const input = process.argv[2] || '';
+const selected = new Set(r.filter(a => a.detected).map((_, i) => i));
+
+if (input.trim()) {
+  const toggles = input.trim().split(/[\s,]+/).map(Number).filter(n => n >= 1 && n <= r.length);
+  for (const t of toggles) {
+    const idx = t - 1;
+    if (selected.has(idx)) selected.delete(idx);
+    else selected.add(idx);
+  }
+}
+
+const ids = [...selected].sort((a,b) => a-b).map(i => r[i].id);
+process.stdout.write(ids.join(','));
+" "$PROBE_RESULT" "$toggle_input" 2>/dev/null || true)
+
+    if [ -n "$SELECTED_AGENTS" ]; then
+        msg "    已选择: $SELECTED_AGENTS" "    Selected: $SELECTED_AGENTS"
+    else
+        msg "    未选择任何 Agent" "    No agents selected"
+    fi
+    echo ""
+}
+
+# ============================================================
 # Common: deploy bootstrap scripts from the current version
 # ============================================================
 deploy_bootstrap_scripts() {
@@ -525,8 +646,38 @@ if (updateUrl) {
   config.autoUpdate.packageUrl = updateUrl;
 }
 
+const collectLog = '${COLLECT_LOG}';
+const collectTrace = '${COLLECT_TRACE}';
+const cmsLicenseKey = '${CMS_LICENSE_KEY}';
+const cmsEndpoint = '${CMS_ENDPOINT}';
+const cmsWorkspace = '${CMS_WORKSPACE}';
+const serviceNamePrefix = '${SERVICE_NAME_PREFIX}';
+const selectedAgents = '${SELECTED_AGENTS}';
+
+if (collectLog) config.collectLog = collectLog === 'true';
+if (collectTrace) config.collectTrace = collectTrace === 'true';
+
+if (cmsLicenseKey || cmsEndpoint || cmsWorkspace) {
+  config.cms = config.cms || {};
+  if (cmsLicenseKey) config.cms.licenseKey = cmsLicenseKey;
+  if (cmsEndpoint) config.cms.endpoint = cmsEndpoint;
+  if (cmsWorkspace) config.cms.workspace = cmsWorkspace;
+}
+
+if (serviceNamePrefix) config.serviceNamePrefix = serviceNamePrefix;
+
+if (selectedAgents) {
+  config.agents = config.agents || {};
+  const selected = selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
+  const allAgents = JSON.parse(process.argv[1] || '[]');
+  for (const agent of allAgents) {
+    config.agents[agent.id] = config.agents[agent.id] || {};
+    config.agents[agent.id].enabled = selected.includes(agent.id);
+  }
+}
+
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
-"
+" -- "$PROBE_RESULT"
     msg "    ✅ 配置已写入" "    ✅ Config written"
     echo ""
 }
@@ -928,6 +1079,8 @@ cmd_install() {
 
     trap 'rm -rf "${TMP_DIR:-}"' EXIT
     download_and_extract
+    probe_agents
+    select_agents
     deploy_package "$INSTALL_SRC"
     write_config
     install_loongsuite_pilot_command

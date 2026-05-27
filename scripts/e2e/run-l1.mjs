@@ -83,7 +83,7 @@ async function waitForPilotReady(requiredAgents) {
 }
 
 async function installSmokeScenario(env) {
-  console.log('[e2e-l1] install-smoke: phase 1 = local install');
+  console.log('[e2e-l1] install-smoke: phase 1 = installer with local package');
   const install = await runLocalScript({
     script: localBuildInstallScript(env.E2E_USER_ID, env),
     artifactDir: ARTIFACT_DIR,
@@ -157,7 +157,7 @@ async function installSmokeScenario(env) {
 
 async function uninstallScenario(env) {
   const installerUrl = (env.E2E_INSTALLER_URL ?? DEFAULT_E2E_INSTALLER_URL).trim();
-  console.log('[e2e-l1] uninstall scenario: phase 1 = local install');
+  console.log('[e2e-l1] uninstall scenario: phase 1 = installer with local package');
   const install = await runLocalScript({
     script: localBuildInstallScript(env.E2E_USER_ID, env),
     artifactDir: ARTIFACT_DIR,

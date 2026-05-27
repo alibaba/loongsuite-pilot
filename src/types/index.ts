@@ -20,11 +20,22 @@ export interface AutoUpdateConfig {
   packageUrl?: string;
 }
 
+export interface CmsConfig {
+  enabled: boolean;
+  licenseKey: string;
+  endpoint: string;
+  workspace: string;
+}
+
 export interface AnalyticsConfig {
   enabled: boolean;
   autoStart: boolean;
   dataDir: string;
   userId: string;
+  collectLog: boolean;
+  collectTrace: boolean;
+  serviceNamePrefix: string;
+  cms: CmsConfig;
   listeners: Record<string, ListenerConfig>;
   flushers: FlusherConfig;
   retention: LogRetentionConfig;
@@ -34,6 +45,7 @@ export interface AnalyticsConfig {
 }
 
 export interface AgentConfig {
+  enabled?: boolean;
   captureMessageContent: boolean;
 }
 

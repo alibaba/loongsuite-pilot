@@ -19,7 +19,7 @@ function readDirRecursive(dir, depth = 0) {
 }
 
 const entryPoints = readDirRecursive('src')
-  .filter(f => f.endsWith('.ts') && !f.endsWith('.d.ts') && !f.endsWith('.test.ts'));
+  .filter(f => f.endsWith('.ts') && !f.endsWith('.d.ts') && !f.endsWith('.test.ts') && !f.endsWith('cli-probe.ts'));
 
 await build({
   entryPoints,
@@ -28,6 +28,22 @@ await build({
   target: 'es2022',
   format: 'esm',
   bundle: false,
+  sourcemap: isInternal ? true : 'external',
+  sourcesContent: isInternal,
+  define: {
+    __INTERNAL_BUILD__: String(isInternal),
+  },
+  minifySyntax: !isInternal,
+});
+
+await build({
+  entryPoints: ['src/cli-probe.ts'],
+  outfile: 'dist/cli-probe.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  banner: { js: "process.env.LOG_LEVEL = 'silent';" },
   sourcemap: isInternal ? true : 'external',
   sourcesContent: isInternal,
   define: {

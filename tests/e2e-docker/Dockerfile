@@ -25,7 +25,8 @@ RUN npm config set registry https://registry.npmmirror.com
 
 RUN npm install -g @openai/codex @anthropic-ai/claude-code @qoder-ai/qodercli \
     && mkdir -p "$HOME/.local/bin" \
-    && (command -v qodercli >/dev/null 2>&1 && ln -sf "$(command -v qodercli)" "$HOME/.local/bin/qoder" || true)
+    && (command -v qodercli >/dev/null 2>&1 && ln -sf "$(command -v qodercli)" "$HOME/.local/bin/qoder" || true) \
+    && mkdir -p "$HOME/.codex" "$HOME/.cursor"
 
 RUN curl -fsSL --connect-timeout 30 --max-time 300 https://cursor.com/install | bash || \
     echo "[dockerfile] cursor official install failed (non-fatal, will retry in ensure phase)"

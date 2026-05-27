@@ -441,5 +441,102 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.agents.cursor).toEqual({ captureMessageContent: true });
     });
+
+    it('parses agents with enabled field', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          'claude-code': { enabled: true },
+          'cursor-hook': { enabled: false },
+          'codex': { enabled: true, captureMessageContent: false },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents['claude-code']).toEqual({ enabled: true, captureMessageContent: true });
+      expect(config.agents['cursor-hook']).toEqual({ enabled: false, captureMessageContent: true });
+      expect(config.agents['codex']).toEqual({ enabled: true, captureMessageContent: false });
+    });
+
+    it('backward compat: empty agents config means no gate', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({});
+
+      const config = await loadConfig();
+      expect(config.agents).toEqual({});
+    });
+  });
+
+  describe('collectLog, collectTrace, serviceNamePrefix, cms', () => {
+    it('defaults when config file is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+
+      const config = await loadConfig();
+      expect(config.collectLog).toBe(true);
+      expect(config.collectTrace).toBe(true);
+      expect(config.serviceNamePrefix).toBe('');
+      expect(config.cms).toEqual({ enabled: false, licenseKey: '', endpoint: '', workspace: '' });
+    });
+
+    it('reads values from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectLog: false,
+        collectTrace: false,
+        serviceNamePrefix: 'my-team',
+        cms: { licenseKey: 'key123', endpoint: 'https://cms.example.com', workspace: 'ws1' },
+      });
+
+      const config = await loadConfig();
+      expect(config.collectLog).toBe(false);
+      expect(config.collectTrace).toBe(false);
+      expect(config.serviceNamePrefix).toBe('my-team');
+      expect(config.cms).toEqual({
+        enabled: true,
+        licenseKey: 'key123',
+        endpoint: 'https://cms.example.com',
+        workspace: 'ws1',
+      });
+    });
+
+    it('env vars override config file for collectLog/collectTrace', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectLog: true,
+        collectTrace: true,
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_COLLECT_LOG', 'false');
+      vi.stubEnv('LOONGSUITE_PILOT_COLLECT_TRACE', '0');
+
+      const config = await loadConfig();
+      expect(config.collectLog).toBe(false);
+      expect(config.collectTrace).toBe(false);
+    });
+
+    it('env vars override config file for cms fields', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        cms: { licenseKey: 'from-file' },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_CMS_LICENSE_KEY', 'from-env');
+
+      const config = await loadConfig();
+      expect(config.cms.licenseKey).toBe('from-env');
+      expect(config.cms.enabled).toBe(true);
+    });
+
+    it('cms.enabled is false when no licenseKey', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        cms: { endpoint: 'https://cms.example.com' },
+      });
+
+      const config = await loadConfig();
+      expect(config.cms.enabled).toBe(false);
+    });
+
+    it('env override for serviceNamePrefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'from-file',
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX', 'from-env');
+
+      const config = await loadConfig();
+      expect(config.serviceNamePrefix).toBe('from-env');
+    });
   });
 });

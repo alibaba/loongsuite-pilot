@@ -51,6 +51,18 @@ const DEFAULT_DATA_DIR = '~/.loongsuite-pilot';
  *   6. Emit 'started'
  */
 export class Orchestrator extends EventEmitter {
+  private static readonly LISTENER_AGENT_MAP: Record<string, string> = {
+    'qoder-sqlite': 'qoder-cli',
+    'qoder-work': 'qoder-work',
+    'qoder-work-log': 'qoder-work',
+    'qoder-work-sqlite': 'qoder-work',
+    'qoder-cli-hook': 'qoder-cli',
+    'qoder-cli-session': 'qoder-cli',
+    'cursor-hook': 'cursor-hook',
+    'claude-code-log': 'claude-code',
+    'codex-log': 'codex',
+  };
+
   private readonly config: AnalyticsConfig;
   private readonly dataDir: string;
   private agentControlManager!: AgentControlManager;
@@ -202,7 +214,7 @@ export class Orchestrator extends EventEmitter {
         type: 'deploy-detection',
         watchPaths,
         isAvailable: () => detectAgent(def.detection),
-        enabled: () => true,
+        enabled: () => this.isAgentGatedEnabled(def.id),
         start: async () => {
           logger.info('new agent discovered, deploying', { agentId: def.id });
           await this.deploymentManager.deploySingle(def);
@@ -238,7 +250,7 @@ export class Orchestrator extends EventEmitter {
     const flushers: BaseFlusher[] = [];
     const cfg = this.config.flushers;
 
-    if (cfg.sls?.enabled) {
+    if (cfg.sls?.enabled && this.config.collectLog !== false) {
       const r = new SlsFlusher(cfg.sls, this.dataDir);
       void (r as any).start?.();
       flushers.push(r);
@@ -355,10 +367,11 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderSqliteInput, {
         watchPaths: QoderSqliteInput.getWatchPaths(),
         isAvailable: QoderSqliteInput.checkAvailability,
-        enabled: () => this.agentControlManager.resolveEnabled(
-          'qoder-sqlite',
-          listenerCfg['qoder-sqlite']?.enabled ?? true,
-        ),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-sqlite']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-sqlite',
+            listenerCfg['qoder-sqlite']?.enabled ?? true,
+          ),
         pollIntervalMs: listenerCfg['qoder-sqlite']?.pollInterval,
       }),
     );
@@ -374,10 +387,11 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderWorkInput, {
         watchPaths: QoderWorkInput.getWatchPaths(),
         isAvailable: QoderWorkInput.checkAvailability,
-        enabled: () => this.agentControlManager.resolveEnabled(
-          'qoder-work',
-          listenerCfg['qoder-work']?.enabled ?? true,
-        ),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-work',
+            listenerCfg['qoder-work']?.enabled ?? true,
+          ),
         pollIntervalMs: listenerCfg['qoder-work']?.pollInterval,
       }),
     );
@@ -389,10 +403,11 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderWorkLogInput, {
         watchPaths: QoderWorkLogInput.getWatchPaths(),
         isAvailable: QoderWorkLogInput.checkAvailability,
-        enabled: () => this.agentControlManager.resolveEnabled(
-          'qoder-work-log',
-          listenerCfg['qoder-work-log']?.enabled ?? true,
-        ),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-work-log',
+            listenerCfg['qoder-work-log']?.enabled ?? true,
+          ),
         pollIntervalMs: listenerCfg['qoder-work-log']?.pollInterval,
       }),
     );
@@ -404,10 +419,11 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderWorkSqliteInput, {
         watchPaths: QoderWorkSqliteInput.getWatchPaths(),
         isAvailable: QoderWorkSqliteInput.checkAvailability,
-        enabled: () => this.agentControlManager.resolveEnabled(
-          'qoder-work-sqlite',
-          listenerCfg['qoder-work-sqlite']?.enabled ?? true,
-        ),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-sqlite']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-work-sqlite',
+            listenerCfg['qoder-work-sqlite']?.enabled ?? true,
+          ),
         pollIntervalMs: listenerCfg['qoder-work-sqlite']?.pollInterval,
       }),
     );
@@ -423,10 +439,11 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderCliInput, {
         watchPaths: QoderCliInput.getWatchPaths(),
         isAvailable: QoderCliInput.checkAvailability,
-        enabled: () => this.agentControlManager.resolveEnabled(
-          'qoder-cli-hook',
-          listenerCfg['qoder-cli-hook']?.enabled ?? true,
-        ),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-hook']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-cli-hook',
+            listenerCfg['qoder-cli-hook']?.enabled ?? true,
+          ),
         pollIntervalMs: listenerCfg['qoder-cli-hook']?.pollInterval,
       }),
     );
@@ -438,10 +455,11 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderCliSessionInput, {
         watchPaths: QoderCliSessionInput.getWatchPaths(),
         isAvailable: QoderCliSessionInput.checkAvailability,
-        enabled: () => this.agentControlManager.resolveEnabled(
-          'qoder-cli-session',
-          listenerCfg['qoder-cli-session']?.enabled ?? true,
-        ),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-session']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-cli-session',
+            listenerCfg['qoder-cli-session']?.enabled ?? true,
+          ),
         pollIntervalMs: listenerCfg['qoder-cli-session']?.pollInterval,
       }),
     );
@@ -457,10 +475,11 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(cursorHookInput, {
         watchPaths: [cursorHookLogDir],
         isAvailable: async () => directoryExists(cursorHookLogDir),
-        enabled: () => this.agentControlManager.resolveEnabled(
-          'cursor-hook',
-          listenerCfg['cursor-hook']?.enabled ?? true,
-        ),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['cursor-hook']) &&
+          this.agentControlManager.resolveEnabled(
+            'cursor-hook',
+            listenerCfg['cursor-hook']?.enabled ?? true,
+          ),
         pollIntervalMs: listenerCfg['cursor-hook']?.pollInterval,
       }),
     );
@@ -476,10 +495,11 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(claudeCodeLogInput, {
         watchPaths: [claudeCodeLogDir],
         isAvailable: async () => directoryExists(claudeCodeLogDir),
-        enabled: () => this.agentControlManager.resolveEnabled(
-          'claude-code-log',
-          listenerCfg['claude-code-log']?.enabled ?? true,
-        ),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['claude-code-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'claude-code-log',
+            listenerCfg['claude-code-log']?.enabled ?? true,
+          ),
         pollIntervalMs: listenerCfg['claude-code-log']?.pollInterval,
       }),
     );
@@ -495,10 +515,11 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(codexLogInput, {
         watchPaths: [codexLogDir],
         isAvailable: async () => directoryExists(codexLogDir),
-        enabled: () => this.agentControlManager.resolveEnabled(
-          'codex-log',
-          listenerCfg['codex-log']?.enabled ?? true,
-        ),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codex-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'codex-log',
+            listenerCfg['codex-log']?.enabled ?? true,
+          ),
         pollIntervalMs: listenerCfg['codex-log']?.pollInterval,
       }),
     );
@@ -536,6 +557,19 @@ export class Orchestrator extends EventEmitter {
       }
     }
     return path.join(this.dataDir, 'logs', 'claude-code');
+  }
+
+  /**
+   * Check whether an agent is allowed to run based on config.agents gate.
+   * - Internal builds: always true (auto-detect)
+   * - No config.agents or empty: always true (backward compat)
+   * - Otherwise: only if config.agents[agentId].enabled !== false
+   */
+  private isAgentGatedEnabled(agentId: string): boolean {
+    if (__INTERNAL_BUILD__) return true;
+    const agents = this.config.agents;
+    if (!agents || Object.keys(agents).length === 0) return true;
+    return agents[agentId]?.enabled !== false;
   }
 
   /**

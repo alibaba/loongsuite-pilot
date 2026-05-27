@@ -47,8 +47,9 @@ echo "User ID:  ${E2E_USER_ID:-<MISSING>}"
 echo "SLS:      ${E2E_SLS_PROJECT:-<MISSING>}/${E2E_SLS_LOGSTORE:-<MISSING>}"
 echo "===================================================="
 
-echo "[e2e-l1] Building current branch (npm run build)..."
-npm run build
+echo "[e2e-l1] Building external package (deploy/package.sh --external)..."
+bash deploy/package.sh --external -o "$(pwd)/loongsuite-pilot.tar.gz"
+echo "[e2e-l1] Package ready: $(pwd)/loongsuite-pilot.tar.gz"
 
 docker compose -f tests/e2e-docker/docker-compose.l1.yml down -v 2>/dev/null || true
 exec docker compose -f tests/e2e-docker/docker-compose.l1.yml up --build --exit-code-from e2e-agent

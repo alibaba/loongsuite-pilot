@@ -3,6 +3,7 @@ import type {
   AgentsConfig,
   AnalyticsConfig,
   AutoUpdateConfig,
+  CmsConfig,
   FlusherConfig,
   HookWatchdogConfig,
   LogRetentionConfig,
@@ -79,7 +80,18 @@ interface ConfigFile {
     repairCooldownMs?: number;
   };
 
+  collectLog?: boolean;
+  collectTrace?: boolean;
+  serviceNamePrefix?: string;
+
+  cms?: {
+    licenseKey?: string;
+    endpoint?: string;
+    workspace?: string;
+  };
+
   agents?: Record<string, {
+    enabled?: boolean;
     captureMessageContent?: boolean | string;
   }>;
 }
@@ -128,6 +140,10 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     autoStart: true,
     dataDir,
     userId,
+    collectLog: envBool('LOONGSUITE_PILOT_COLLECT_LOG', file?.collectLog ?? true),
+    collectTrace: envBool('LOONGSUITE_PILOT_COLLECT_TRACE', file?.collectTrace ?? true),
+    serviceNamePrefix: env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? '',
+    cms: buildCmsConfig(file),
 
     listeners: buildListenersConfig(file),
     flushers: buildFlushersConfig(file, dataDir),
@@ -146,6 +162,18 @@ function parseOptionalBool(value: unknown): boolean | undefined {
   return undefined;
 }
 
+function buildCmsConfig(file: ConfigFile | null) {
+  const licenseKey = env('LOONGSUITE_PILOT_CMS_LICENSE_KEY') ?? file?.cms?.licenseKey ?? '';
+  const endpoint = env('LOONGSUITE_PILOT_CMS_ENDPOINT') ?? file?.cms?.endpoint ?? '';
+  const workspace = env('LOONGSUITE_PILOT_CMS_WORKSPACE') ?? file?.cms?.workspace ?? '';
+  return {
+    enabled: !!licenseKey,
+    licenseKey,
+    endpoint,
+    workspace,
+  };
+}
+
 function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
   const result: AgentsConfig = {};
   if (!file?.agents || typeof file.agents !== 'object') return result;
@@ -153,6 +181,7 @@ function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
   for (const [agentType, policy] of Object.entries(file.agents)) {
     if (!agentType || !policy || typeof policy !== 'object') continue;
     result[agentType] = {
+      enabled: policy.enabled,
       captureMessageContent: parseOptionalBool(policy.captureMessageContent) ?? true,
     };
   }
