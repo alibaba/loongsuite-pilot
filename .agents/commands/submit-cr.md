@@ -81,31 +81,31 @@ description: 创建 CR 并执行 Code Review，发布评审意见到 CR
 
 ---
 
-**Output**
+**输出**
 
 ```
-## Submit CR Complete
+## CR 提交完成
 
-**Branch:** <source-branch> → <target-branch>
-**CR:** <CR link>
-**Review:** Published (N findings: X Critical, Y High, Z Medium, W Low)
+**分支:** <source-branch> → <target-branch>
+**CR:** <CR 链接>
+**评审:** 已发布（共 N 个发现：X 严重、Y 高危、Z 中危、W 低危）
 
-CR is ready for human review.
+CR 已就绪，等待人工评审。
 ```
 
-**Output On Failure**
+**失败输出**
 
 ```
-## Submit CR Failed
+## CR 提交失败
 
-**Phase:** <failed phase>
-**Reason:** <failure reason>
-**Recovery:** <suggested next steps>
+**阶段:** <失败阶段>
+**原因:** <失败原因>
+**恢复建议:** <建议的后续步骤>
 ```
 
 ---
 
-**Guardrails**
+**护栏规则**
 
 - 必须在 feature 分支上执行，禁止从 master/main 创建 CR
 - 推送代码前必须获得用户确认
