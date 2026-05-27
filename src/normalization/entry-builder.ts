@@ -8,6 +8,11 @@ import {
   ClientType,
   ActionType,
 } from '../types/index.js';
+import {
+  normalizeOutputMessages,
+  normalizeInputMessages,
+  normalizeInputMessagesDelta,
+} from './normalize-messages.js';
 
 export interface LegacyAgentActivityOptions {
   sessionId: string;
@@ -131,6 +136,9 @@ export function buildAgentActivityEntry(
   };
   applyLegacyToolStatus(entry, opts);
   flattenAttributes(entry, opts.attributes);
+  entry['gen_ai.output.messages'] = normalizeOutputMessages(entry['gen_ai.output.messages']);
+  entry['gen_ai.input.messages_delta'] = normalizeInputMessagesDelta(entry['gen_ai.input.messages_delta']);
+  entry['gen_ai.input.messages'] = normalizeInputMessages(entry['gen_ai.input.messages']);
   removeLegacyAliases(entry);
   return entry;
 }

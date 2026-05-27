@@ -174,7 +174,7 @@ describe('CursorHookInput', () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]!['event.name']).toBe('llm.response');
-    expect(entries[0]!['gen_ai.output.messages']).toEqual([{ type: 'reasoning', content: 'thinking...' }]);
+    expect(entries[0]!['gen_ai.output.messages']).toEqual([{ role: 'assistant', parts: [{ type: 'reasoning', content: 'thinking...' }] }]);
   });
 
   it('maps prompt, token, and cost fields', async () => {
@@ -208,7 +208,7 @@ describe('CursorHookInput', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]!['event.name']).toBe('llm.request');
     expect(entries[0]!['user.id']).toBe('');
-    expect(entries[0]!['gen_ai.input.messages_delta']).toEqual([{ role: 'user', content: 'please inspect this' }]);
+    expect(entries[0]!['gen_ai.input.messages_delta']).toEqual([{ role: 'user', parts: [{ type: 'text', content: 'please inspect this' }] }]);
     expect(entries[0]!['gen_ai.usage.input_tokens']).toBe(10);
     expect(entries[0]!['gen_ai.usage.output_tokens']).toBe(4);
     expect(entries[0]!['gen_ai.usage.total_tokens']).toBe(14);

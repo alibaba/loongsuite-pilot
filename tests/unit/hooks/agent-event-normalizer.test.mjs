@@ -125,7 +125,7 @@ describe('asset hook agent event normalizer', () => {
       'agent.qoder.variant': 'qoder-cli',
       'agent.qoder.raw_type': 'assistant',
       'agent.qoder.content_type': 'text',
-      'gen_ai.output.messages': [{ type: 'text', content: 'hello' }],
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'hello' }] }],
     });
     expect(record.type).toBeUndefined();
     expect(record.uuid).toBeUndefined();
@@ -168,7 +168,7 @@ describe('asset hook agent event normalizer', () => {
       'agent.qoderwork.raw_type': 'assistant',
       'agent.qoderwork.content_type': 'text',
       'agent.qoderwork.cwd': '/Users/lukechen/.qoderwork/workspace/project',
-      'gen_ai.output.messages': [{ type: 'text', content: 'hello from work' }],
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'hello from work' }] }],
     });
     expect(record['agent.qoder.cwd']).toBeUndefined();
     expect(record['agent.qoder_variant']).toBeUndefined();

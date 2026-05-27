@@ -506,13 +506,14 @@ function buildCursorInputMessagesDelta(payload) {
   const delta = parseMaybeJson(payload.input_messages_delta);
   if (delta !== undefined) return toJsonValue(delta);
   const prompt = getStringValue(payload, 'prompt') || getStringValue(payload, 'text');
-  return prompt ? [{ role: 'user', content: prompt }] : undefined;
+  return prompt ? [{ role: 'user', parts: [{ type: 'text', content: prompt }] }] : undefined;
 }
 
 function buildCursorOutputMessages(payload, sourceEvent) {
   const text = getStringValue(payload, 'text');
   if (!text) return undefined;
-  return [{ type: String(sourceEvent).toLowerCase().includes('thought') ? 'reasoning' : 'text', content: text }];
+  const type = String(sourceEvent).toLowerCase().includes('thought') ? 'reasoning' : 'text';
+  return [{ role: 'assistant', parts: [{ type, content: text }] }];
 }
 
 function inferToolStatus(toolOutput, sourceEvent) {
@@ -585,7 +586,7 @@ function selectDominantContentBlock(rawContent) {
 
 function buildQoderInputMessagesDelta(content) {
   const text = getStringValue(content, 'text') || getStringValue(content, 'content');
-  return text ? [{ role: 'user', content: text }] : undefined;
+  return text ? [{ role: 'user', parts: [{ type: 'text', content: text }] }] : undefined;
 }
 
 function buildQoderOutputMessages(content) {
@@ -594,7 +595,8 @@ function buildQoderOutputMessages(content) {
     || getStringValue(content, 'thinking')
     || getStringValue(content, 'content');
   if (!text) return undefined;
-  return [{ type: contentType === 'thinking' ? 'reasoning' : 'text', content: text }];
+  const type = contentType === 'thinking' ? 'reasoning' : 'text';
+  return [{ role: 'assistant', parts: [{ type, content: text }] }];
 }
 
 function inferQoderToolResultStatus(content) {

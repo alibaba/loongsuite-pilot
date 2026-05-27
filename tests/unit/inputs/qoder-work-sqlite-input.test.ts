@@ -77,8 +77,8 @@ describe('QoderWorkSqliteInput', () => {
     expect(e['gen_ai.session.id']).toBe('sess-1');
     expect(e['gen_ai.agent.type']).toBe(ClientType.QoderWork);
     expect(e['gen_ai.request.model']).toBe('qwork-ultimate');
-    const inputMsgs = e['gen_ai.input.messages_delta'] as Array<{ role: string; content: string }>;
-    expect(inputMsgs[0]).toEqual({ role: 'user', content: 'hello world' });
+    const inputMsgs = e['gen_ai.input.messages_delta'] as Array<{ role: string; parts: Array<{ type: string; content: string }> }>;
+    expect(inputMsgs[0]).toEqual({ role: 'user', parts: [{ type: 'text', content: 'hello world' }] });
     // updated_at stored as seconds; entry's nano timestamp must reflect ms*1e6.
     expect(e.time_unix_nano).toBe(String(BigInt(1_777_000_001) * 1_000_000_000n));
   });

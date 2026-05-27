@@ -48,7 +48,7 @@ describe('QoderCliInput', () => {
     expect(entries[0]?.['gen_ai.turn.id']).toBeUndefined();
     expect(entries[0]?.['gen_ai.request.id']).toBeUndefined();
     expect(entries[0]?.['gen_ai.input.messages_delta']).toEqual([
-      { role: 'user', content: 'hi, good night' },
+      { role: 'user', parts: [{ type: 'text', content: 'hi, good night' }] },
     ]);
     expect(entries[0]?.['agent.source']).toBe('qoder-transcript-hook');
     expect(entries[0]?.['agent.qoder_variant']).toBe('qoder-cli');
@@ -81,7 +81,7 @@ describe('QoderCliInput', () => {
       'gen_ai.provider.name': 'qwen',
       'gen_ai.session.id': 'sess-canonical-q',
       'gen_ai.response.model': 'qwen-max',
-      'gen_ai.output.messages': [{ type: 'text', content: 'hello' }],
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'hello' }] }],
       'agent.source': 'qoder-transcript-hook',
     });
   });
@@ -100,7 +100,7 @@ describe('QoderCliInput', () => {
     });
     expect(entries[0]?.['gen_ai.request.id']).toBeUndefined();
     expect(entries[0]?.['gen_ai.input.messages_delta']).toEqual([
-      { role: 'user', content: 'woooo!' },
+      { role: 'user', parts: [{ type: 'text', content: 'woooo!' }] },
     ]);
     expect(entries[0]?.['agent.source']).toBe('qoder-transcript-hook');
     expect(entries[0]?.['agent.qoder_variant']).toBe('qoder');
@@ -123,7 +123,7 @@ describe('QoderCliInput', () => {
       'gen_ai.response.id': '2026050202152442e8836f99bb4830',
     });
     expect(entries[0]?.['gen_ai.output.messages']).toEqual([
-      { type: 'reasoning', content: 'The user is just greeting me casually.' },
+      { role: 'assistant', parts: [{ type: 'reasoning', content: 'The user is just greeting me casually.' }] },
     ]);
     expect(entries[1]).toMatchObject({
       'event.name': 'llm.response',
@@ -131,7 +131,7 @@ describe('QoderCliInput', () => {
       'gen_ai.response.finish_reasons': ['end_turn'],
     });
     expect(entries[1]?.['gen_ai.output.messages']).toEqual([
-      { type: 'text', content: 'Good night! How can I help you?' },
+      { role: 'assistant', parts: [{ type: 'text', content: 'Good night! How can I help you?' }] },
     ]);
   });
 
