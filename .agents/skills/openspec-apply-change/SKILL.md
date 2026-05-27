@@ -166,7 +166,7 @@ When **all tasks are complete**, automatically proceed through the following ste
    Run the E2E test suite:
 
    ```bash
-   ./scripts/e2e/run-e2e.sh docker install-smoke
+   ./scripts/e2e/run-e2e.sh install-smoke
    ```
 
    **Failure handling loop (max 3 rounds):**
@@ -176,7 +176,7 @@ When **all tasks are complete**, automatically proceed through the following ste
       - JSONL validation failures → check pilot hook logic or deployment timing
       - Container startup failures → check Dockerfile / docker-compose config
    2. Fix the code
-   3. Re-run `./scripts/e2e/run-e2e.sh docker install-smoke`
+   3. Re-run `./scripts/e2e/run-e2e.sh install-smoke`
    4. After 3 rounds still failing → **pause**, report failure details and let user decide
 
    **Only proceed to Step 9 after E2E passes.**

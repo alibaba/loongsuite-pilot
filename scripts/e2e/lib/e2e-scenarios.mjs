@@ -994,6 +994,14 @@ cd "$DEST"
 npm install --production --no-optional 2>&1 | tail -5
 echo "[local-install] npm install done"
 
+# Deploy hook scripts (mirrors postinstall.js)
+if [ -d "$SRC/assets/hooks" ]; then
+  mkdir -p "$DATA_DIR/hooks"
+  cp -f "$SRC/assets/hooks/"* "$DATA_DIR/hooks/" 2>/dev/null || true
+  chmod 755 "$DATA_DIR/hooks/"*.sh 2>/dev/null || true
+  echo "[local-install] hook scripts deployed to $DATA_DIR/hooks/"
+fi
+
 # Set version pointer
 mkdir -p "$DATA_DIR"
 echo "local" > "$DATA_DIR/current"
