@@ -37,4 +37,4 @@ package
 
 tests/e2e-docker/output
 
-code-review
+/code-review
