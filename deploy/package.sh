@@ -114,3 +114,4 @@ tar -tzf "$OUTPUT_PATH" | head -20
 echo "    ... (truncated)"
 echo ""
 echo "Done. Upload with:  bash deploy/upload.sh"
+
