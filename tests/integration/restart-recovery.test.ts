@@ -28,7 +28,7 @@ describe('US3: End-to-end restart recovery (BaseHookInput)', () => {
     const logDir = path.join(tmpDir, 'logs');
     await fs.mkdir(logDir, { recursive: true });
     const today = getTodayDateString();
-    const logFile = path.join(logDir, `qoder-cli-${today}.jsonl`);
+    const logFile = path.join(logDir, `qoder-${today}.jsonl`);
 
     // --- Phase 1: First run collects N=3 records ---
     const batch1 = Array.from({ length: 3 }, (_, i) => ({
@@ -46,7 +46,7 @@ describe('US3: End-to-end restart recovery (BaseHookInput)', () => {
     const input1 = new QoderCliInput({
       stateStore: store1 as any,
       logDir,
-      logPrefix: 'qoder-cli',
+      logPrefix: 'qoder',
       pollIntervalMs: 60_000,
     });
     const entries1: AgentActivityEntry[] = [];
@@ -75,7 +75,7 @@ describe('US3: End-to-end restart recovery (BaseHookInput)', () => {
     const input2 = new QoderCliInput({
       stateStore: store2 as any,
       logDir,
-      logPrefix: 'qoder-cli',
+      logPrefix: 'qoder',
       pollIntervalMs: 60_000,
     });
     const entries2: AgentActivityEntry[] = [];

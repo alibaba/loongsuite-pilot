@@ -312,7 +312,7 @@ describe('QoderCliInput', () => {
 
   async function collectRows(records: Record<string, unknown>[]): Promise<AgentActivityEntry[]> {
     const today = getTodayDateString();
-    const logFile = path.join(tmpDir, `qoder-cli-${today}.jsonl`);
+    const logFile = path.join(tmpDir, `qoder-${today}.jsonl`);
     await fs.writeFile(logFile, records.map(r => JSON.stringify(r)).join('\n') + '\n');
 
     const input = makeInput();
@@ -327,7 +327,7 @@ describe('QoderCliInput', () => {
     return new QoderCliInput({
       stateStore: stateStore as any,
       logDir: tmpDir,
-      logPrefix: 'qoder-cli',
+      logPrefix: 'qoder',
       pollIntervalMs: 60_000,
     });
   }

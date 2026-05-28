@@ -337,7 +337,7 @@ describe('HookWatchdog', () => {
   describe('repairFn target', () => {
     function makeRepairFnTarget(tmpDir: string, repairFn: () => Promise<boolean>, overrides: Partial<PluginCheckTarget> = {}): PluginCheckTarget {
       return {
-        agentId: 'cursor-hook',
+        agentId: 'cursor',
         settingsPath: path.join(tmpDir, '.cursor', 'hooks.json'),
         expectedHooks: ['stop', 'preToolUse'],
         markers: ['cursor-loongsuite-pilot-hook.sh'],

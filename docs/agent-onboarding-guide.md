@@ -154,7 +154,7 @@ DeploymentManager 会在运行时：
 
 ```json
 {
-  "id": "cursor-hook",
+  "id": "cursor",
   "displayName": "Cursor",
   "deployMode": "hook",
   "detection": { "paths": ["~/.cursor"], "commands": [] },
@@ -176,18 +176,18 @@ DeploymentManager 会在运行时：
 
 ```json
 {
-  "id": "qoder-cli",
+  "id": "qoder",
   "displayName": "Qoder CLI",
   "deployMode": "hook",
   "detection": { "paths": ["~/.qoder"], "commands": ["qoder"] },
   "hook": {
     "settingsPath": "~/.qoder/settings.json",
     "events": ["Stop"],
-    "hookCommand": "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli",
+    "hookCommand": "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder",
     "format": "nested",
     "matcher": "*"
   },
-  "input": { "type": "hook-jsonl", "logDir": "$PILOT_DATA/logs/qoder-cli/history" }
+  "input": { "type": "hook-jsonl", "logDir": "$PILOT_DATA/logs/qoder/history" }
 }
 ```
 

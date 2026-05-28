@@ -73,9 +73,9 @@ describe('LogRetentionService', () => {
 
     it('cleans multiple categories with different retention', async () => {
       const logsDir = path.join(tmpDir, 'logs');
-      const historyDir = path.join(logsDir, 'qoder-cli', 'history');
-      const debugDir = path.join(logsDir, 'qoder-cli', 'debug');
-      const errorsDir = path.join(logsDir, 'qoder-cli', 'errors');
+      const historyDir = path.join(logsDir, 'qoder', 'history');
+      const debugDir = path.join(logsDir, 'qoder', 'debug');
+      const errorsDir = path.join(logsDir, 'qoder', 'errors');
       await fs.mkdir(historyDir, { recursive: true });
       await fs.mkdir(debugDir, { recursive: true });
       await fs.mkdir(errorsDir, { recursive: true });

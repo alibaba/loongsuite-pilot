@@ -1,5 +1,5 @@
 {
-  "id": "cursor-hook",
+  "id": "cursor",
   "displayName": "Cursor",
   "deployMode": "hook",
   "detection": {

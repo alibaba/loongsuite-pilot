@@ -986,7 +986,7 @@ entries.push(
     "qoder": "auto",
     "qoder-work": "on",
     "qoder-cli-hook": "off",
-    "cursor-hook": "auto"
+    "cursor": "auto"
   }
 }
 ```

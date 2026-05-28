@@ -1,5 +1,5 @@
 /**
- * Normalize PAT copied from env / docs (common footguns for Qoder CLI exchange).
+ * Normalize PAT copied from env / docs (common footguns for Qoder exchange).
  * @param {string | undefined} raw
  * @returns {string}
  */

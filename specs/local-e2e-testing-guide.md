@@ -244,7 +244,7 @@ echo "✅ ${agent}: $((AFTER-BEFORE)) new entries, session $SESSION_ID confirmed
 
 ```bash
 # Qoder CLI hook 历史：
-cat ~/.loongsuite-pilot/logs/qoder-cli/history/qoder-cli-$(date +%Y-%m-%d).jsonl
+cat ~/.loongsuite-pilot/logs/qoder/history/qoder-$(date +%Y-%m-%d).jsonl
 
 # Qoder Work hook 历史：
 cat ~/.loongsuite-pilot/logs/qoder-work/history/qoder-work-$(date +%Y-%m-%d).jsonl
@@ -606,7 +606,7 @@ grep 'hook-watchdog.repair' ~/.loongsuite-pilot/logs/loongsuite-pilot-service.lo
 
 #### 说明
 
-- `HookWatchdog` 同时监控 plugin 类型（claude-code、codex）和 hook 类型（cursor、qoder-cli 等）Agent
+- `HookWatchdog` 同时监控 plugin 类型（claude-code、codex）和 hook 类型（cursor、qoder 等）Agent
 - Plugin 类型通过 spawn 外部命令修复，hook 类型通过 `DeploymentManager.deploySingle()` → `HookStrategy.deploy()` 修复
 - Watchdog 有冷却机制（默认 10 分钟），同一 Agent 不会被频繁重复修复
 - 轮询间隔通过 `LOONGSUITE_PILOT_HOOK_WATCHDOG_INTERVAL_MS` 环境变量调整（默认 1 分钟）

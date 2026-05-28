@@ -36,7 +36,7 @@ function buildDeployDetectionEntry(
 
 describe('dynamic discovery flow', () => {
   const cursorDef: AgentDefinition = {
-    id: 'cursor-hook',
+    id: 'cursor',
     displayName: 'Cursor',
     deployMode: 'hook',
     detection: { paths: ['~/.cursor'], commands: [] },
@@ -65,7 +65,7 @@ describe('dynamic discovery flow', () => {
     const entries = [cursorDef, pluginDef].map(d => buildDeployDetectionEntry(d, deploySingle));
 
     expect(entries).toHaveLength(2);
-    expect(entries[0].id).toBe('deploy:cursor-hook');
+    expect(entries[0].id).toBe('deploy:cursor');
     expect(entries[1].id).toBe('deploy:claude-code');
   });
 

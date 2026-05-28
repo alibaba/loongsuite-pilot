@@ -189,14 +189,14 @@ async function main() {
 
       // Step 2: Wait for ALL required agents to be deployed by pilot.
       // Pilot discovers agents when their config dirs exist, then deploys plugins.
-      const requiredAgents = ['claude-code', 'codex', 'qoder-cli'];
+      const requiredAgents = ['claude-code', 'codex', 'qoder'];
       console.log(`[e2e-docker] Waiting for pilot to deploy all agents: ${requiredAgents.join(', ')}...`);
       const waitScript = [
         'set -euo pipefail',
         'LOG="$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log"',
         'TIMEOUT=180',
         'ELAPSED=0',
-        'REQUIRED="claude-code codex qoder-cli"',
+        'REQUIRED="claude-code codex qoder"',
         '',
         'while [ $ELAPSED -lt $TIMEOUT ]; do',
         '  ALL_FOUND=1',

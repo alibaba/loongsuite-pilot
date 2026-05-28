@@ -13,7 +13,7 @@ import { createLogger } from '../utils/logger.js';
 const logger = createLogger('HookManager');
 
 export interface HookDefinition {
-  /** Agent identifier (e.g. "qoder-cli", "claude"). */
+  /** Agent identifier (e.g. "qoder", "claude"). */
   agentId: string;
   /** Path to the agent's settings file (e.g. ~/.qoder/settings.json). */
   settingsPath: string;
@@ -204,7 +204,7 @@ export class HookManager {
     ];
 
     return events.map(event => ({
-      agentId: 'cursor-hook',
+      agentId: 'cursor',
       settingsPath,
       hookJsonPath: ['hooks', event],
       hookCommand: command,
@@ -217,12 +217,12 @@ export class HookManager {
    */
   static buildQoderCliHooks(loongsuitePilotDir?: string): HookDefinition[] {
     const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
-    const command = `${baseDir}/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli`;
+    const command = `${baseDir}/hooks/qoder-loongsuite-pilot-hook.sh qoder`;
     const settingsPath = resolveHome('~/.qoder/settings.json');
 
     return [
       {
-        agentId: 'qoder-cli',
+        agentId: 'qoder',
         settingsPath,
         hookJsonPath: ['hooks', 'Stop'],
         hookCommand: command,

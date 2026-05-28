@@ -50,7 +50,7 @@ describe('Hook JSONL integration flow', () => {
     await fs.mkdir(logDir, { recursive: true });
 
     const today = getTodayDateString();
-    const logFile = path.join(logDir, `qoder-cli-${today}.jsonl`);
+    const logFile = path.join(logDir, `qoder-${today}.jsonl`);
 
     const records = [
       {
@@ -77,7 +77,7 @@ describe('Hook JSONL integration flow', () => {
     const input = new QoderCliInput({
       stateStore: stateStore as any,
       logDir,
-      logPrefix: 'qoder-cli',
+      logPrefix: 'qoder',
       pollIntervalMs: 60_000,
     });
 
@@ -121,7 +121,7 @@ describe('Hook JSONL integration flow', () => {
     const input2 = new QoderCliInput({
       stateStore: stateStore as any,
       logDir,
-      logPrefix: 'qoder-cli',
+      logPrefix: 'qoder',
       pollIntervalMs: 60_000,
     });
 
@@ -138,7 +138,7 @@ describe('Hook JSONL integration flow', () => {
     await fs.mkdir(logDir, { recursive: true });
 
     const today = getTodayDateString();
-    const logFile = path.join(logDir, `qoder-cli-${today}.jsonl`);
+    const logFile = path.join(logDir, `qoder-${today}.jsonl`);
 
     // First batch
     await fs.writeFile(logFile, JSON.stringify({
@@ -152,7 +152,7 @@ describe('Hook JSONL integration flow', () => {
     const input = new QoderCliInput({
       stateStore: stateStore as any,
       logDir: logDir,
-      logPrefix: 'qoder-cli',
+      logPrefix: 'qoder',
       pollIntervalMs: 60_000,
     });
 
@@ -178,7 +178,7 @@ describe('Hook JSONL integration flow', () => {
     const input2 = new QoderCliInput({
       stateStore: stateStore as any,
       logDir: logDir,
-      logPrefix: 'qoder-cli',
+      logPrefix: 'qoder',
       pollIntervalMs: 60_000,
     });
 
@@ -243,8 +243,8 @@ describe('Hook JSONL integration flow', () => {
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
 
-    const logDir = path.join(dataDir, 'logs', 'qoder-cli', 'history');
-    const historyFile = path.join(logDir, `qoder-cli-${getTodayDateString()}.jsonl`);
+    const logDir = path.join(dataDir, 'logs', 'qoder', 'history');
+    const historyFile = path.join(logDir, `qoder-${getTodayDateString()}.jsonl`);
     const historyLines = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n');
     expect(historyLines).toHaveLength(1);
     const historyRecord = JSON.parse(historyLines[0]!);
@@ -256,7 +256,7 @@ describe('Hook JSONL integration flow', () => {
     const input = new QoderCliInput({
       stateStore: stateStore as any,
       logDir,
-      logPrefix: 'qoder-cli',
+      logPrefix: 'qoder',
       pollIntervalMs: 60_000,
     });
 

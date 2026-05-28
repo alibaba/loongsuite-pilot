@@ -77,13 +77,13 @@ describe('AgentDefLoader', () => {
 
   it('local definitions override builtin by id', async () => {
     const builtin = {
-      id: 'cursor-hook',
+      id: 'cursor',
       displayName: 'Cursor Builtin',
       deployMode: 'hook',
       detection: { paths: ['~/.cursor'], commands: [] },
     };
     const local = {
-      id: 'cursor-hook',
+      id: 'cursor',
       displayName: 'Cursor Local Override',
       deployMode: 'hook',
       detection: { paths: ['~/.cursor-custom'], commands: [] },

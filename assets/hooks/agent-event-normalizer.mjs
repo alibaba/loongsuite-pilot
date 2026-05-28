@@ -272,9 +272,18 @@ export function resolveUserId(record, runtimeConfig = {}) {
     || os.hostname();
 }
 
+const AGENT_TYPE_TO_CONFIG_KEY = {
+  'qoder-cli': 'qoder',
+  'qoder-cli-hook': 'qoder',
+  'cursor-hook': 'cursor',
+};
+
 export function applyHookContentPolicy(record, runtimeConfig = {}) {
   const agentType = getStringValue(record, 'gen_ai.agent.type') || getStringValue(record, 'agent.type');
-  const policy = agentType && runtimeConfig.agents ? runtimeConfig.agents[agentType] : undefined;
+  const agents = runtimeConfig.agents;
+  const policy = agentType && agents
+    ? (agents[agentType] || agents[AGENT_TYPE_TO_CONFIG_KEY[agentType] || ''])
+    : undefined;
   const capture = parseCaptureMessageContent(policy?.captureMessageContent);
   if (capture !== false) return record;
 

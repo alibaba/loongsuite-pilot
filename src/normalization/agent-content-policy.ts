@@ -33,6 +33,12 @@ const DEFAULT_CONFIG: AgentConfig = {
   captureMessageContent: true,
 };
 
+const AGENT_TYPE_TO_CONFIG_KEY: Record<string, string> = {
+  'qoder-cli': 'qoder',
+  'qoder-cli-hook': 'qoder',
+  'cursor-hook': 'cursor',
+};
+
 export function applyAgentContentPolicy(
   entry: AgentActivityEntry,
   config: AgentsConfig,
@@ -62,5 +68,7 @@ function resolveAgentConfig(
 ): AgentConfig {
   const agentType = entry['gen_ai.agent.type'] ?? entry['agent.type'];
   if (!agentType) return DEFAULT_CONFIG;
-  return config[agentType] ?? DEFAULT_CONFIG;
+  return config[agentType]
+    ?? config[AGENT_TYPE_TO_CONFIG_KEY[agentType] ?? '']
+    ?? DEFAULT_CONFIG;
 }

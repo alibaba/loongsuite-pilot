@@ -39,12 +39,12 @@
       "installHint": "Default: official Agent installer (cursor.com/install). Full IDE AppImage: E2E_CURSOR_INSTALL_STRATEGY=watzon or E2E_CURSOR_ENSURE_INSTALL_SH. APT: downloads.cursor.com/aptrepo (needs sudo). On old-glibc hosts (CentOS/AliOS 7) both strategies may ship a binary that cannot run; ensure/probe auto-skip with E2E_CURSOR_SKIP_IF_INCOMPAT=1 (default) or fail loudly with =0."
     },
     {
-      "id": "qoder-cli",
-      "name": "Qoder CLI",
+      "id": "qoder",
+      "name": "Qoder",
       "binary": "qoder",
       "versionArg": "--version",
       "slsAgentTypeHint": "qoder-cli-hook",
-      "notes": "Hook input watches ~/.loongsuite-pilot/logs/qoder-cli/history; qoder-cli-session reads ~/.qoder/logs/sessions. Print probe uses qodercli -q -p (needs token).",
+      "notes": "Hook input watches ~/.loongsuite-pilot/logs/qoder/history; qoder-cli-session reads ~/.qoder/logs/sessions. Print probe uses qodercli -q -p (needs token).",
       "npmPackage": "@qoder-ai/qodercli",
       "representativeVersions": ["latest"],
       "ensureInstallSh": "npm install -g @qoder-ai/qodercli && mkdir -p \"$HOME/.local/bin\" && ( command -v qoder >/dev/null || ( command -v qodercli >/dev/null && ln -sf \"$(command -v qodercli)\" \"$HOME/.local/bin/qoder\" ) ) || echo '[e2e-ensure] qoder npm/symlink failed'",

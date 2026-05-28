@@ -25,8 +25,8 @@ export class QoderCliInput extends BaseHookInput {
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
       stateStore: opts!.stateStore,
-      logDir: opts?.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder-cli/history'),
-      logPrefix: opts?.logPrefix ?? 'qoder-cli',
+      logDir: opts?.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder/history'),
+      logPrefix: opts?.logPrefix ?? 'qoder',
       pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
     });
   }

@@ -55,14 +55,14 @@ const DEFAULT_DATA_DIR = '~/.loongsuite-pilot';
  */
 export class Orchestrator extends EventEmitter {
   private static readonly LISTENER_AGENT_MAP: Record<string, string> = {
-    'qoder-sqlite': 'qoder-cli',
+    'qoder-sqlite': 'qoder',
     'qoder-work': 'qoder-work',
     'qoder-work-log': 'qoder-work',
     'qoder-work-trace': 'qoder-work',
     'qoder-work-sqlite': 'qoder-work',
-    'qoder-cli-hook': 'qoder-cli',
-    'qoder-cli-session': 'qoder-cli',
-    'cursor-hook': 'cursor-hook',
+    'qoder-cli-hook': 'qoder',
+    'qoder-cli-session': 'qoder',
+    'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
     'codex-log': 'codex',
   };
@@ -460,7 +460,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Qoder CLI (Hook JSONL) ---
-    const qoderCliLogDir = path.join(this.dataDir, 'logs', 'qoder-cli', 'history');
+    const qoderCliLogDir = path.join(this.dataDir, 'logs', 'qoder', 'history');
     const qoderCliInput = new QoderCliInput({
       stateStore: this.stateStore,
       logDir: qoderCliLogDir,

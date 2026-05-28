@@ -43,10 +43,10 @@
 
 | Agent | ID | 部署模式 | 采集基类 | Input 实现 | 声明文件 |
 |-------|----|---------|---------|-----------|---------|
-| Qoder IDE | `qoder` | Hook | `BaseIdeInput` | `inputs/qoder/` | `agents.d/qoder-cli.json` |
+| Qoder IDE | `qoder` | Hook | `BaseIdeInput` | `inputs/qoder/` | `agents.d/qoder.json` |
 | Qoder Work | `qoder-work` | Hook | `BaseSqliteInput` / `BaseHookInput` | `inputs/qoder-work*/` | `agents.d/qoder-work.json` |
-| Qoder CLI | `qoder-cli` | Hook | `BaseHookInput` / `BaseSessionInput` | `inputs/qoder-cli*/` | `agents.d/qoder-cli.json` |
-| Cursor | `cursor-hook` | Hook | `BaseHookInput` | `inputs/cursor-hook/` | `agents.d/cursor-hook.json` |
+| Qoder CLI | `qoder` | Hook | `BaseHookInput` / `BaseSessionInput` | `inputs/qoder-cli*/` | `agents.d/qoder.json` |
+| Cursor | `cursor` | Hook | `BaseHookInput` | `inputs/cursor-hook/` | `agents.d/cursor.json` |
 | Claude Code | `claude-code` | Plugin-Probe | `BaseHookInput` | `inputs/claude-code-log/` | `agents.d/claude-code.json` |
 | Codex | `codex` | Plugin-Probe | `BaseHookInput` | `inputs/codex-log/` | `agents.d/codex.json` |
 

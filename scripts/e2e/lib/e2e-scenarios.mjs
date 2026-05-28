@@ -998,7 +998,7 @@ echo "[installer-e2e] installer flow complete"
 /**
  * Build a bash script that validates cli-probe.cjs detection results.
  * Runs the probe independently and asserts expected agents are detected
- * (cursor-hook via ~/.cursor path, CLI agents via command lookup).
+ * (cursor via ~/.cursor path, CLI agents via command lookup).
  */
 export function buildProbeDetectionValidationScript() {
   return `
@@ -1020,23 +1020,23 @@ echo "[probe-validate] probe output: $PROBE_OUTPUT"
 
 CURSOR_DETECTED=$(node -e "
 const r = JSON.parse(process.argv[1]);
-const cursor = r.find(a => a.id === 'cursor-hook');
+const cursor = r.find(a => a.id === 'cursor');
 if (!cursor) { console.log('missing'); process.exit(0); }
 console.log(cursor.detected ? 'yes' : 'no');
 " "$PROBE_OUTPUT")
 
 if [ "$CURSOR_DETECTED" = "yes" ]; then
-  echo "[probe-validate] OK: cursor-hook detected (via ~/.cursor)"
+  echo "[probe-validate] OK: cursor detected (via ~/.cursor)"
 elif [ "$CURSOR_DETECTED" = "missing" ]; then
-  echo "[probe-validate] WARN: cursor-hook not in agent definitions"
+  echo "[probe-validate] WARN: cursor not in agent definitions"
 else
-  echo "[probe-validate] FAIL: cursor-hook NOT detected despite ~/.cursor existing"
+  echo "[probe-validate] FAIL: cursor NOT detected despite ~/.cursor existing"
   ls -la "$HOME/.cursor" 2>/dev/null || echo "(~/.cursor does not exist!)"
   exit 1
 fi
 
 FAIL=0
-for AGENT_ID in claude-code codex qoder-cli; do
+for AGENT_ID in claude-code codex qoder; do
   DETECTED=$(node -e "
 const r = JSON.parse(process.argv[1]);
 const a = r.find(x => x.id === process.argv[2]);

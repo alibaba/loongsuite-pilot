@@ -117,7 +117,7 @@ async function installSmokeScenario(env) {
     });
   }
 
-  const requiredAgents = ['claude-code', 'codex', 'qoder-cli'];
+  const requiredAgents = ['claude-code', 'codex', 'qoder'];
   console.log(`[e2e-l1] phase 3 = wait pilot detect agents: ${requiredAgents.join(', ')}`);
   await waitForPilotReady(requiredAgents);
 

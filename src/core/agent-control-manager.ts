@@ -38,7 +38,7 @@ export class AgentControlManager {
   /**
    * Resolve whether a tool should be enabled.
    *
-   * @param agentId   — unique agent identifier (e.g. "qoder", "cursor-hook")
+   * @param agentId   — unique agent identifier (e.g. "qoder", "cursor")
    * @param defaultWhenAuto — what to return when mode is "auto" (from config/defaults)
    */
   resolveEnabled(agentId: string, defaultWhenAuto = true): boolean {

@@ -324,7 +324,7 @@ async function main() {
     }
     if (!normalizeE2eQoderPersonalAccessToken(env.E2E_QODER_PERSONAL_ACCESS_TOKEN)) {
       console.warn(
-        '[e2e] version-matrix: E2E_QODER_PERSONAL_ACCESS_TOKEN 未设 — qodercli -p 会直接跳过（无模型回合）；这不影响 install/uninstall，但 Logstore 不会有 qoder-cli 数据。',
+        '[e2e] version-matrix: E2E_QODER_PERSONAL_ACCESS_TOKEN 未设 — qodercli -p 会直接跳过（无模型回合）；这不影响 install/uninstall，但 Logstore 不会有 qoder 数据。',
       );
     }
     remoteBody = versionMatrixScript(vmMatrix, env);

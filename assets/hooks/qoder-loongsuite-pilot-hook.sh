@@ -7,7 +7,7 @@ set -euo pipefail
 # Usage:
 #   qoder-loongsuite-pilot-hook.sh [agent-id]
 #
-#   agent-id  Optional. Defaults to "qoder-cli".
+#   agent-id  Optional. Defaults to "qoder".
 #             Controls the log subdirectory and history file prefix.
 #             e.g. "qoder-work" → logs/qoder-work/history/qoder-work-*.jsonl
 #
@@ -21,7 +21,7 @@ set -euo pipefail
 # Skip immediately when stdin is a terminal (no payload)
 [[ -t 0 ]] && exit 0
 
-AGENT_ID="${1:-qoder-cli}"
+AGENT_ID="${1:-qoder}"
 
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROCESSOR="$HOOKS_DIR/hook-processor.mjs"

@@ -32,8 +32,8 @@ const MATRIX = {
       // intentionally no npmPackage — should be filtered out
     },
     {
-      id: 'qoder-cli',
-      name: 'Qoder CLI',
+      id: 'qoder',
+      name: 'Qoder',
       binary: 'qoder',
       npmPackage: '@qoder-ai/qodercli',
       defaultProbeSh: 'qoder --version',
@@ -65,9 +65,9 @@ describe('version-matrix helpers', () => {
     expect(byBinary).toHaveLength(1);
     expect(byBinary[0].binary).toBe('codex');
 
-    const byId = resolveVersionMatrixAgents(MATRIX, { E2E_AGENT_VERSIONS_FILTER: 'qoder-cli' });
+    const byId = resolveVersionMatrixAgents(MATRIX, { E2E_AGENT_VERSIONS_FILTER: 'qoder' });
     expect(byId).toHaveLength(1);
-    expect(byId[0].id).toBe('qoder-cli');
+    expect(byId[0].id).toBe('qoder');
   });
 });
 
@@ -93,7 +93,7 @@ describe('versionMatrixScript', () => {
     const s = versionMatrixScript(MATRIX, {});
     expect(s).toContain('agent=Codex CLI');
     expect(s).toContain('agent=Claude Code');
-    expect(s).toContain('agent=Qoder CLI');
+    expect(s).toContain('agent=Qoder');
     expect(s).not.toContain('agent=Cursor');
   });
 
@@ -119,7 +119,7 @@ describe('versionMatrixScript', () => {
     const s = versionMatrixScript(MATRIX, { E2E_AGENT_VERSIONS_FILTER: 'codex' });
     expect(s).toContain('agent=Codex CLI');
     expect(s).not.toContain('agent=Claude Code');
-    expect(s).not.toContain('agent=Qoder CLI');
+    expect(s).not.toContain('agent=Qoder');
   });
 
   it('filters platform-specific subpackage tags (win32/linux/darwin etc.)', () => {

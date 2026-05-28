@@ -1,0 +1,21 @@
+{
+  "id": "qoder",
+  "displayName": "Qoder",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.qoder"],
+    "commands": ["qoder"]
+  },
+  "hook": {
+    "settingsPath": "~/.qoder/settings.json",
+    "events": ["Stop"],
+    "hookCommand": "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder",
+    "format": "nested",
+    "matcher": "*",
+    "replaceHookCommands": ["$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli"]
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/qoder/history"
+  }
+}

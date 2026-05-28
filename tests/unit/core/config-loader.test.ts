@@ -446,14 +446,14 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           'claude-code': { enabled: true },
-          'cursor-hook': { enabled: false },
+          'cursor': { enabled: false },
           'codex': { enabled: true, captureMessageContent: false },
         },
       });
 
       const config = await loadConfig();
       expect(config.agents['claude-code']).toEqual({ enabled: true, captureMessageContent: true });
-      expect(config.agents['cursor-hook']).toEqual({ enabled: false, captureMessageContent: true });
+      expect(config.agents['cursor']).toEqual({ enabled: false, captureMessageContent: true });
       expect(config.agents['codex']).toEqual({ enabled: true, captureMessageContent: false });
     });
 
