@@ -397,7 +397,8 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderWorkInput, {
         watchPaths: QoderWorkInput.getWatchPaths(),
         isAvailable: QoderWorkInput.checkAvailability,
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work']) &&
+        enabled: () => !traceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-work',
             listenerCfg['qoder-work']?.enabled ?? true,
