@@ -995,6 +995,72 @@ echo "[installer-e2e] installer flow complete"
 `;
 }
 
+/**
+ * Build a bash script that validates cli-probe.cjs detection results.
+ * Runs the probe independently and asserts expected agents are detected
+ * (cursor-hook via ~/.cursor path, CLI agents via command lookup).
+ */
+export function buildProbeDetectionValidationScript() {
+  return `
+set -euo pipefail
+echo "[probe-validate] Running cli-probe.cjs detection validation..."
+
+PROBE_CJS="$HOME/.loongsuite-pilot/versions/$(cat $HOME/.loongsuite-pilot/current)/dist/cli-probe.cjs"
+if [ ! -f "$PROBE_CJS" ]; then
+  echo "[probe-validate] ERROR: cli-probe.cjs not found at $PROBE_CJS"
+  exit 1
+fi
+
+PROBE_OUTPUT=$(node "$PROBE_CJS" 2>/dev/null) || {
+  echo "[probe-validate] ERROR: cli-probe.cjs failed to run"
+  exit 1
+}
+
+echo "[probe-validate] probe output: $PROBE_OUTPUT"
+
+CURSOR_DETECTED=$(node -e "
+const r = JSON.parse(process.argv[1]);
+const cursor = r.find(a => a.id === 'cursor-hook');
+if (!cursor) { console.log('missing'); process.exit(0); }
+console.log(cursor.detected ? 'yes' : 'no');
+" "$PROBE_OUTPUT")
+
+if [ "$CURSOR_DETECTED" = "yes" ]; then
+  echo "[probe-validate] OK: cursor-hook detected (via ~/.cursor)"
+elif [ "$CURSOR_DETECTED" = "missing" ]; then
+  echo "[probe-validate] WARN: cursor-hook not in agent definitions"
+else
+  echo "[probe-validate] FAIL: cursor-hook NOT detected despite ~/.cursor existing"
+  ls -la "$HOME/.cursor" 2>/dev/null || echo "(~/.cursor does not exist!)"
+  exit 1
+fi
+
+FAIL=0
+for AGENT_ID in claude-code codex qoder-cli; do
+  DETECTED=$(node -e "
+const r = JSON.parse(process.argv[1]);
+const a = r.find(x => x.id === process.argv[2]);
+if (!a) { console.log('missing'); process.exit(0); }
+console.log(a.detected ? 'yes' : 'no');
+" "$PROBE_OUTPUT" "$AGENT_ID")
+  if [ "$DETECTED" = "yes" ]; then
+    echo "[probe-validate] OK: $AGENT_ID detected"
+  elif [ "$DETECTED" = "missing" ]; then
+    echo "[probe-validate] SKIP: $AGENT_ID not in definitions"
+  else
+    echo "[probe-validate] FAIL: $AGENT_ID NOT detected"
+    FAIL=1
+  fi
+done
+
+if [ "$FAIL" -ne 0 ]; then
+  echo "[probe-validate] FAILED: some agents not detected"
+  exit 1
+fi
+echo "[probe-validate] ALL expected agents detected successfully"
+`;
+}
+
 export function uninstallScript(installerUrl) {
   const u = installerUrl.replace(/'/g, `'\\''`);
   return `

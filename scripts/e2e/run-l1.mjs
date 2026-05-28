@@ -21,6 +21,7 @@ import {
   buildAgentConfigSetupScript,
   buildAgentProbeOnlyScript,
   buildProbeEnvInjections,
+  buildProbeDetectionValidationScript,
   DEFAULT_E2E_INSTALLER_URL,
 } from './lib/e2e-scenarios.mjs';
 
@@ -92,6 +93,18 @@ async function installSmokeScenario(env) {
   if (install.code !== 0) {
     console.error(install.stderr || install.stdout);
     await keepAliveOnFailure(install.code ?? 1);
+  }
+
+  console.log('[e2e-l1] phase 1.5 = probe detection validation');
+  const probeValidation = await runLocalScript({
+    script: buildProbeDetectionValidationScript(),
+    artifactDir: ARTIFACT_DIR,
+    artifactLabel: 'probe-detection-validate',
+  });
+  if (probeValidation.code !== 0) {
+    console.error('[e2e-l1] Probe detection validation FAILED');
+    console.error(probeValidation.stdout || probeValidation.stderr);
+    await keepAliveOnFailure(probeValidation.code ?? 1);
   }
 
   const configScript = buildAgentConfigSetupScript(env);
