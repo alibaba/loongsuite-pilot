@@ -352,6 +352,8 @@ export function buildCursorHookRecord(payload, options = {}) {
   const model = getStringValue(payload, 'model') || 'unknown';
   const toolOutput = parseMaybeJson(payload.tool_output ?? payload.result_json ?? payload.tool_results);
   const toolArguments = parseMaybeJson(payload.tool_input);
+  // Stop events duplicate token/cost data already reported by afterAgentResponse
+  const isStopEvent = sourceEvent.toLowerCase() === 'stop';
   const record = {
     'event.id': getStringValue(payload, 'event.id') || crypto.randomUUID(),
     'event.name': eventName,
@@ -371,17 +373,17 @@ export function buildCursorHookRecord(payload, options = {}) {
     'gen_ai.request.model': getStringValue(payload, 'gen_ai.request.model') || model,
     'gen_ai.response.model': getStringValue(payload, 'gen_ai.response.model') || model,
     'gen_ai.response.finish_reasons': getStringValue(payload, 'response_finish_reasons'),
-    'gen_ai.usage.input_tokens': getNumberValue(payload, 'input_tokens'),
-    'gen_ai.usage.output_tokens': getNumberValue(payload, 'output_tokens'),
-    'gen_ai.usage.cache_read.input_tokens': getNumberValue(payload, 'cache_read_tokens'),
-    'gen_ai.usage.cache_creation.input_tokens': getNumberValue(payload, 'cache_write_tokens'),
-    'gen_ai.usage.total_tokens': getNumberValue(payload, 'total_tokens')
-      || sumTokens(getNumberValue(payload, 'input_tokens'), getNumberValue(payload, 'output_tokens')),
-    'gen_ai.usage.input_cost': getNumberValue(payload, 'cost_input'),
-    'gen_ai.usage.output_cost': getNumberValue(payload, 'cost_output'),
-    'gen_ai.usage.cache_read.input_cost': getNumberValue(payload, 'cost_cache_read'),
-    'gen_ai.usage.cache_creation.input_cost': getNumberValue(payload, 'cost_cache_write'),
-    'gen_ai.usage.total_cost': getNumberValue(payload, 'cost_total'),
+    'gen_ai.usage.input_tokens': isStopEvent ? undefined : getNumberValue(payload, 'input_tokens'),
+    'gen_ai.usage.output_tokens': isStopEvent ? undefined : getNumberValue(payload, 'output_tokens'),
+    'gen_ai.usage.cache_read.input_tokens': isStopEvent ? undefined : getNumberValue(payload, 'cache_read_tokens'),
+    'gen_ai.usage.cache_creation.input_tokens': isStopEvent ? undefined : getNumberValue(payload, 'cache_write_tokens'),
+    'gen_ai.usage.total_tokens': isStopEvent ? undefined : (getNumberValue(payload, 'total_tokens')
+      || sumTokens(getNumberValue(payload, 'input_tokens'), getNumberValue(payload, 'output_tokens'))),
+    'gen_ai.usage.input_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_input'),
+    'gen_ai.usage.output_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_output'),
+    'gen_ai.usage.cache_read.input_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_cache_read'),
+    'gen_ai.usage.cache_creation.input_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_cache_write'),
+    'gen_ai.usage.total_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_total'),
     'gen_ai.input.messages_hash': getStringValue(payload, 'input_messages_hash'),
     'gen_ai.input.messages_delta': eventName === 'llm.request' ? buildCursorInputMessagesDelta(payload) : undefined,
     'gen_ai.input.messages': eventName === 'llm.request' ? toJsonValue(parseMaybeJson(payload.input_messages)) : undefined,

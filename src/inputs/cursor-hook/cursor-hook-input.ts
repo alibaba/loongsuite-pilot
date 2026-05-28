@@ -64,10 +64,14 @@ export class CursorHookInput extends BaseHookInput {
       buildAttributes(record, payload, hookEvent),
     );
     if (canonicalEntry) {
+      if (hookEvent.toLowerCase() === 'stop') {
+        stripTokenFields(canonicalEntry);
+      }
       await enrichCanonicalEntryWithGit(canonicalEntry, record, 'cursor');
       return canonicalEntry;
     }
 
+    const isStopEvent = hookEvent.toLowerCase() === 'stop';
     const eventName = inferEventName(hookEvent, payload);
     const toolOutput = buildToolResultPayload(payload);
     const toolArguments = buildToolArguments(payload);
@@ -120,19 +124,19 @@ export class CursorHookInput extends BaseHookInput {
       'gen_ai.request.model': model,
       'gen_ai.response.model': model,
       'gen_ai.response.finish_reasons': normalizeFinishReasons(getStringValue(payload, 'response_finish_reasons')),
-      'gen_ai.usage.input_tokens': getNumberValue(payload, 'input_tokens'),
-      'gen_ai.usage.output_tokens': getNumberValue(payload, 'output_tokens'),
-      'gen_ai.usage.cache_read.input_tokens': getNumberValue(payload, 'cache_read_tokens'),
-      'gen_ai.usage.cache_creation.input_tokens': getNumberValue(payload, 'cache_write_tokens'),
-      'gen_ai.usage.total_tokens': getNumberValue(payload, 'total_tokens') ?? sumTokens(
+      'gen_ai.usage.input_tokens': isStopEvent ? undefined : getNumberValue(payload, 'input_tokens'),
+      'gen_ai.usage.output_tokens': isStopEvent ? undefined : getNumberValue(payload, 'output_tokens'),
+      'gen_ai.usage.cache_read.input_tokens': isStopEvent ? undefined : getNumberValue(payload, 'cache_read_tokens'),
+      'gen_ai.usage.cache_creation.input_tokens': isStopEvent ? undefined : getNumberValue(payload, 'cache_write_tokens'),
+      'gen_ai.usage.total_tokens': isStopEvent ? undefined : (getNumberValue(payload, 'total_tokens') ?? sumTokens(
         getNumberValue(payload, 'input_tokens'),
         getNumberValue(payload, 'output_tokens'),
-      ),
-      'gen_ai.usage.input_cost': getNumberValue(payload, 'cost_input'),
-      'gen_ai.usage.output_cost': getNumberValue(payload, 'cost_output'),
-      'gen_ai.usage.cache_read.input_cost': getNumberValue(payload, 'cost_cache_read'),
-      'gen_ai.usage.cache_creation.input_cost': getNumberValue(payload, 'cost_cache_write'),
-      'gen_ai.usage.total_cost': getNumberValue(payload, 'cost_total'),
+      )),
+      'gen_ai.usage.input_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_input'),
+      'gen_ai.usage.output_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_output'),
+      'gen_ai.usage.cache_read.input_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_cache_read'),
+      'gen_ai.usage.cache_creation.input_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_cache_write'),
+      'gen_ai.usage.total_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_total'),
       'gen_ai.input.messages_hash': getStringValue(payload, 'input_messages_hash'),
       'gen_ai.input.messages_delta': eventName === 'llm.request' ? buildInputMessagesDelta(payload) : undefined,
       'gen_ai.input.messages': eventName === 'llm.request' ? toJsonValue(parseMaybeJson(payload.input_messages)) : undefined,
@@ -163,6 +167,7 @@ function getHookEvent(record: Record<string, unknown>, payload: Record<string, u
     ?? getStringValue(payload, 'hook_event_name')
     ?? getStringValue(payload, 'hookEventName')
     ?? getStringValue(payload, 'hookEvent')
+    ?? getStringValue(record, 'agent.cursor.hook_event_name')
     ?? 'unknown';
 }
 
@@ -386,6 +391,25 @@ function parseMaybeJson(value: unknown): unknown {
     return JSON.parse(trimmed);
   } catch {
     return value;
+  }
+}
+
+const TOKEN_COST_KEYS = [
+  'gen_ai.usage.input_tokens',
+  'gen_ai.usage.output_tokens',
+  'gen_ai.usage.cache_read.input_tokens',
+  'gen_ai.usage.cache_creation.input_tokens',
+  'gen_ai.usage.total_tokens',
+  'gen_ai.usage.input_cost',
+  'gen_ai.usage.output_cost',
+  'gen_ai.usage.cache_read.input_cost',
+  'gen_ai.usage.cache_creation.input_cost',
+  'gen_ai.usage.total_cost',
+] as const;
+
+function stripTokenFields(entry: AgentActivityEntry): void {
+  for (const key of TOKEN_COST_KEYS) {
+    delete (entry as Record<string, unknown>)[key];
   }
 }
 

@@ -469,4 +469,107 @@ describe('CursorHookInput', () => {
     expect(entries[1]!['git.branch']).toBe('feature/fallback-cd');
     expect(entries[1]!['git.domain']).toBe('github.com');
   });
+
+  it('strips token/cost fields from legacy stop records to avoid duplication', async () => {
+    const today = getTodayDateString();
+    const logFile = path.join(tmpDir, `cursor-${today}.jsonl`);
+    const record = {
+      'event.id': 'r-stop-legacy',
+      observed_time_unix_nano: '1777628163513000000',
+      time_unix_nano: '1777628163513000000',
+      hook_event_name: 'stop',
+      session_id: 'sess-stop',
+      generation_id: 'turn-stop',
+      model: 'gpt-5.5',
+      input_tokens: 15809,
+      output_tokens: 141,
+      cache_read_tokens: 7424,
+      cache_write_tokens: 0,
+      total_tokens: 15950,
+      status: 'completed',
+      loop_count: 0,
+    };
+    await fs.writeFile(logFile, `${JSON.stringify(record)}\n`);
+
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!['event.name']).toBe('other');
+    expect(entries[0]!['gen_ai.session.id']).toBe('sess-stop');
+    expect(entries[0]!['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(entries[0]!['gen_ai.usage.output_tokens']).toBeUndefined();
+    expect(entries[0]!['gen_ai.usage.cache_read.input_tokens']).toBeUndefined();
+    expect(entries[0]!['gen_ai.usage.cache_creation.input_tokens']).toBeUndefined();
+    expect(entries[0]!['gen_ai.usage.total_tokens']).toBeUndefined();
+  });
+
+  it('strips token fields from canonical stop records to avoid duplication', async () => {
+    const today = getTodayDateString();
+    const logFile = path.join(tmpDir, `cursor-${today}.jsonl`);
+    const record = {
+      'event.id': 'r-stop-canonical',
+      'event.name': 'other',
+      'gen_ai.agent.type': 'cursor',
+      'gen_ai.session.id': 'sess-stop-c',
+      'gen_ai.turn.id': 'turn-stop-c',
+      'gen_ai.request.model': 'gpt-5.5',
+      'gen_ai.response.model': 'gpt-5.5',
+      'gen_ai.usage.input_tokens': 15809,
+      'gen_ai.usage.output_tokens': 141,
+      'gen_ai.usage.total_tokens': 15950,
+      'agent.cursor.hook_event_name': 'stop',
+      'agent.cursor.status': 'completed',
+      'agent.cursor.loop_count': 0,
+      observed_time_unix_nano: '1777628163513000000',
+      time_unix_nano: '1777628163513000000',
+    };
+    await fs.writeFile(logFile, `${JSON.stringify(record)}\n`);
+
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!['event.name']).toBe('other');
+    expect(entries[0]!['gen_ai.session.id']).toBe('sess-stop-c');
+    expect(entries[0]!['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(entries[0]!['gen_ai.usage.output_tokens']).toBeUndefined();
+    expect(entries[0]!['gen_ai.usage.total_tokens']).toBeUndefined();
+  });
+
+  it('preserves token fields on afterAgentResponse records', async () => {
+    const today = getTodayDateString();
+    const logFile = path.join(tmpDir, `cursor-${today}.jsonl`);
+    const record = {
+      'event.id': 'r-resp',
+      observed_time_unix_nano: '1777628163513000000',
+      time_unix_nano: '1777628163513000000',
+      hook_event_name: 'afterAgentResponse',
+      session_id: 'sess-resp',
+      generation_id: 'turn-resp',
+      model: 'gpt-5.5',
+      input_tokens: 15809,
+      output_tokens: 141,
+      cache_read_tokens: 7424,
+      total_tokens: 15950,
+      text: 'hello world',
+    };
+    await fs.writeFile(logFile, `${JSON.stringify(record)}\n`);
+
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!['event.name']).toBe('llm.response');
+    expect(entries[0]!['gen_ai.usage.input_tokens']).toBe(15809);
+    expect(entries[0]!['gen_ai.usage.output_tokens']).toBe(141);
+    expect(entries[0]!['gen_ai.usage.cache_read.input_tokens']).toBe(7424);
+    expect(entries[0]!['gen_ai.usage.total_tokens']).toBe(15950);
+  });
 });
