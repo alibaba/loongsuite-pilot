@@ -12,6 +12,7 @@
 - **SlsFlusher** — 阿里云 SLS 输出实现，支持 AK 签名模式和 WebTracking 匿名模式，具备内部缓冲队列、定时刷新和重试机制。
 - **JsonlFlusher** — 本地 JSONL 文件输出实现，每条立即追加写入，按 agentType + 日期分文件。
 - **HttpFlusher** — 通用 HTTP POST 输出实现，具备内存缓冲和定时批量发送能力。
+- **OtlpTraceFlusher** — OTLP trace 输出实现，将 AgentActivityEntry 按 turn 聚合后通过 `@loongsuite/otel-util-genai` 转换为 OTel spans，经 per-agent OTLPTraceExporter 上报到 CMS 2.0。支持 debug 本地落盘和失败持久化。
 - **MultiFlusher** — 多目标输出组合器，将数据并行分发至多个子 flusher，单个失败不影响其他目标。
 
 ## 不负责 (NOT Responsible For)
@@ -27,11 +28,13 @@
 
 ```
 src/flushers/
-├── base-flusher.ts    # Flusher 抽象基类
-├── multi-flusher.ts   # 多目标并行分发
-├── sls-flusher.ts     # Aliyun SLS 输出
-├── jsonl-flusher.ts   # 本地 JSONL 输出
-└── http-flusher.ts    # 通用 HTTP POST 输出
+├── base-flusher.ts          # Flusher 抽象基类
+├── multi-flusher.ts         # 多目标并行分发
+├── sls-flusher.ts           # Aliyun SLS 输出
+├── jsonl-flusher.ts         # 本地 JSONL 输出
+├── http-flusher.ts          # 通用 HTTP POST 输出
+├── otlp-trace-flusher.ts    # OTLP trace 输出 (CMS 2.0)
+└── otlp-json-serializer.ts  # OTLP/JSON 序列化辅助
 ```
 
 ### 运行时输出布局 (Runtime Output Layout)
@@ -42,9 +45,13 @@ src/flushers/
 │   ├── cursor-YYYY-MM-DD.jsonl
 │   ├── qoder-YYYY-MM-DD.jsonl
 │   └── <agent>-YYYY-MM-DD.jsonl
-└── sls-failed-logs/
-    ├── user-sls.jsonl          # 用户 SLS 失败缓存
-    └── internal-sls.jsonl      # 内置 SLS 失败缓存
+├── sls-failed-logs/
+│   ├── user-sls.jsonl          # 用户 SLS 失败缓存
+│   └── internal-sls.jsonl      # 内置 SLS 失败缓存
+├── otlp-debug/                   # OTLP trace debug 落盘 (cms.debug=true 时)
+│   └── <svc>-YYYY-MM-DD.jsonl   # 每行一个 span 的 OTLP/JSON
+└── otlp-failed/                  # OTLP trace 失败持久化
+    └── <svc>.jsonl               # 含 _error 字段的失败 span
 ```
 
 本地 JSONL 是默认兜底输出；SLS 失败缓存用于诊断和后续补偿，不应被当成正常输出通道。
@@ -56,6 +63,7 @@ src/flushers/
 | SlsFlusher | 按 endpoint 分 bucket 队列 | `flushIntervalMs` 定时 | AK 签名 / WebTracking HTTP POST |
 | JsonlFlusher | 无 (每条立即写入) | — | `appendLine()` 追加到按 agentType + date 分的文件 |
 | HttpFlusher | 内存 buffer | `flushIntervalMs` 定时 | axios POST batch |
+| OtlpTraceFlusher | 按 turn 分桶（per-agent） | 事件驱动（turn-end 信号触发） | `@loongsuite/otel-util-genai` 转换 + `OTLPTraceExporter` HTTP POST |
 | MultiFlusher | — | — | `Promise.allSettled` 并行分发到子 flushers |
 
 ### SlsFlusher 双模式
@@ -81,10 +89,10 @@ src/flushers/
 
 | 依赖模块 | 导入内容 |
 |---------|---------|
-| types | `AgentActivityEntry`, `SlsFlusherConfig`, `JsonlFlusherConfig`, `HttpFlusherConfig`, `SlsEndpoint` |
-| normalization | `serialiseLogEntry`, `redactCodeGenerationFields` |
-| utils | `createLogger`, `appendLine`, `ensureDir`, `getTodayDateString` |
-| 外部库 | `@alicloud/log` (SlsFlusher), `axios` (HttpFlusher) |
+| types | `AgentActivityEntry`, `SlsFlusherConfig`, `JsonlFlusherConfig`, `HttpFlusherConfig`, `OtlpTraceFlusherConfig`, `SlsEndpoint` |
+| normalization | `serialiseLogEntry`, `redactCodeGenerationFields`, `resolveAgentSystem` |
+| utils | `createLogger`, `appendLine`, `ensureDir`, `getTodayDateString`, `normalizeAgentType` |
+| 外部库 | `@alicloud/log` (SlsFlusher), `axios` (HttpFlusher), `@loongsuite/otel-util-genai` + `@opentelemetry/*` (OtlpTraceFlusher) |
 
 ## 扩展指南 (Extension Guide)
 

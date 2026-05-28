@@ -25,6 +25,7 @@ export interface CmsConfig {
   licenseKey: string;
   endpoint: string;
   workspace: string;
+  debug?: boolean;
 }
 
 export interface AnalyticsConfig {
@@ -55,6 +56,18 @@ export interface FlusherConfig {
   sls?: SlsFlusherConfig;
   jsonl?: JsonlFlusherConfig;
   http?: HttpFlusherConfig;
+}
+
+export interface OtlpTraceFlusherConfig {
+  enabled: boolean;
+  endpoint: string;
+  protocol: 'http/protobuf';
+  headers: Record<string, string>;
+  serviceName: string;
+  resourceAttributes?: Record<string, string>;
+  captureMessageContent?: boolean;
+  debug?: boolean;
+  turnIdleTimeoutMs?: number;
 }
 
 export type SlsMode = 'ak' | 'webtracking';

@@ -7,6 +7,7 @@ import type {
   FlusherConfig,
   HookWatchdogConfig,
   LogRetentionConfig,
+  OtlpTraceFlusherConfig,
   SlsEndpoint,
   SlsMode,
 } from '../types/index.js';
@@ -88,6 +89,7 @@ interface ConfigFile {
     licenseKey?: string;
     endpoint?: string;
     workspace?: string;
+    debug?: boolean;
   };
 
   agents?: Record<string, {
@@ -162,7 +164,7 @@ function parseOptionalBool(value: unknown): boolean | undefined {
   return undefined;
 }
 
-function buildCmsConfig(file: ConfigFile | null) {
+function buildCmsConfig(file: ConfigFile | null): CmsConfig {
   const licenseKey = env('LOONGSUITE_PILOT_CMS_LICENSE_KEY') ?? file?.cms?.licenseKey ?? '';
   const endpoint = env('LOONGSUITE_PILOT_CMS_ENDPOINT') ?? file?.cms?.endpoint ?? '';
   const workspace = env('LOONGSUITE_PILOT_CMS_WORKSPACE') ?? file?.cms?.workspace ?? '';
@@ -171,6 +173,7 @@ function buildCmsConfig(file: ConfigFile | null) {
     licenseKey,
     endpoint,
     workspace,
+    debug: file?.cms?.debug ?? false,
   };
 }
 
@@ -272,6 +275,54 @@ function buildFlushersConfig(
     jsonl: buildJsonlConfig(file, dataDir),
     http: buildHttpConfig(file),
   };
+}
+
+/**
+ * Build OtlpTraceFlusherConfig from top-level fields:
+ *   collectTrace, serviceNamePrefix, cms.{licenseKey, endpoint, workspace, debug}
+ *
+ * Headers are assembled from structured CMS fields.
+ * x-arms-project is derived from the endpoint hostname prefix.
+ */
+export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherConfig | undefined {
+  if (!config.collectTrace) return undefined;
+  const { cms, serviceNamePrefix } = config;
+  if (!cms.enabled || !cms.endpoint) return undefined;
+
+  const armsProject = extractArmsProject(cms.endpoint);
+  const headers: Record<string, string> = {};
+  if (cms.licenseKey) headers['x-arms-license-key'] = cms.licenseKey;
+  if (armsProject) headers['x-arms-project'] = armsProject;
+  if (cms.workspace) headers['x-cms-workspace'] = cms.workspace;
+
+  const captureMessageContent = resolveCaptureMessageContent(config.agents);
+
+  return {
+    enabled: true,
+    endpoint: cms.endpoint,
+    protocol: 'http/protobuf',
+    headers,
+    serviceName: serviceNamePrefix || 'loongsuite-pilot',
+    captureMessageContent,
+    debug: cms.debug ?? false,
+    turnIdleTimeoutMs: 0,
+  };
+}
+
+function extractArmsProject(endpoint: string): string {
+  try {
+    const url = new URL(endpoint);
+    const hostParts = url.hostname.split('.');
+    return hostParts[0] ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function resolveCaptureMessageContent(agents: AgentsConfig): boolean {
+  const values = Object.values(agents);
+  if (values.length === 0) return true;
+  return values.every(a => a.captureMessageContent !== false);
 }
 
 function buildSlsConfig(file: ConfigFile | null) {

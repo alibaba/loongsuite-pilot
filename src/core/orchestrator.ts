@@ -18,6 +18,8 @@ import { SlsFlusher } from '../flushers/sls-flusher.js';
 import { JsonlFlusher } from '../flushers/jsonl-flusher.js';
 import { HttpFlusher } from '../flushers/http-flusher.js';
 import { MultiFlusher } from '../flushers/multi-flusher.js';
+import { OtlpTraceFlusher } from '../flushers/otlp-trace-flusher.js';
+import { buildOtlpTraceConfig } from './config-loader.js';
 
 // Concrete inputs
 import { QoderSqliteInput } from '../inputs/qoder-sqlite/qoder-sqlite-input.js';
@@ -267,6 +269,12 @@ export class Orchestrator extends EventEmitter {
     if (cfg.http?.enabled) {
       const r = new HttpFlusher(cfg.http);
       void (r as any).start?.();
+      flushers.push(r);
+    }
+
+    const otlpTraceCfg = buildOtlpTraceConfig(this.config);
+    if (otlpTraceCfg?.enabled) {
+      const r = new OtlpTraceFlusher(otlpTraceCfg);
       flushers.push(r);
     }
 

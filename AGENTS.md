@@ -15,8 +15,8 @@
 │ AgentDiscov │ Deployment  │ InputManager  │ MultiFlusher         │
 │ eryService  │ Manager     │              │  ├─ SlsFlusher        │
 │             │ AgentDef    │ BaseIdeInput  │  ├─ JsonlFlusher     │
-│ AgentContro │ Loader      │ BaseSqlite..  │  └─ HttpFlusher      │
-│ lManager    │ HookStrategy│ BaseHookInput │                      │
+│ AgentContro │ Loader      │ BaseSqlite..  │  ├─ HttpFlusher      │
+│ lManager    │ HookStrategy│ BaseHookInput │  └─ OtlpTraceFlusher │
 │             │ PluginProbe │ BaseSession.. │                      │
 │             │ Strategy    │ BaseCliForw.. │                      │
 ├─────────────┴─────────────┴───────────────┴──────────────────────┤
@@ -62,7 +62,7 @@ AgentDiscoveryService ──发现──→ InputManager ──注册──→ I
                               EntryBuilder ──归一化──→ AgentActivityEntry
                                                          │
                                                          ▼ (输出)
-                              MultiFlusher ──扇出──→ SLS / JSONL / HTTP
+                              MultiFlusher ──扇出──→ SLS / JSONL / HTTP / OTLP Trace
 ```
 
 **模块间依赖**：
@@ -98,6 +98,8 @@ AgentDiscoveryService ──发现──→ InputManager ──注册──→ I
 | `~/.loongsuite-pilot/logs/output/` | JSONL 采集输出 |
 | `~/.loongsuite-pilot/logs/input-state.json` | 输入源偏移状态 |
 | `~/.loongsuite-pilot/logs/snapshot-store.json` | 快照去重状态 |
+| `~/.loongsuite-pilot/logs/otlp-debug/` | OTLP trace debug 落盘 |
+| `~/.loongsuite-pilot/logs/otlp-failed/` | OTLP trace 失败持久化 |
 | `~/.loongsuite-pilot/versions/` | 多版本安装目录 |
 | `~/.loongsuite-pilot/current` | 当前版本指针 |
 

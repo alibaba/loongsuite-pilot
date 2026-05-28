@@ -445,6 +445,15 @@ loongsuite-pilot restart
     "cursor-hook":    { "enabled": true, "pollInterval": 60000 }
   },
 
+  "collectTrace": true,
+  "serviceNamePrefix": "my-team-pilot",
+  "cms": {
+    "licenseKey": "<x-arms-license-key>",
+    "endpoint": "<OTLP endpoint URL>",
+    "workspace": "<x-cms-workspace>",
+    "debug": false
+  },
+
   "agents": {
     "cursor": {
       "captureMessageContent": "true"
@@ -461,6 +470,23 @@ loongsuite-pilot restart
 升级提示：如果你曾经通过 `config.json` 自定义 SLS 目的地，请改用环境变量或重新运行安装脚本并显式传入 `--sls-endpoint`、`--sls-project`、`--sls-logstore`。
 
 > AK/SK 等敏感信息建议通过环境变量传入，配置文件中只放非敏感项。
+
+#### OTLP Trace 上报
+
+`collectTrace` 控制是否启用 OTLP trace 上报。启用后，pilot 将 event log entries 按 turn 聚合，通过 `@loongsuite/otel-util-genai` 转换为 OTel spans（ENTRY/AGENT/STEP/LLM/TOOL 树），经 OTLP/HTTP 上报到 CMS 2.0。
+
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `collectTrace` | 启用 trace 上报 | `true` |
+| `serviceNamePrefix` | 服务名前缀，运行时拼接 `${prefix}-${agentType}` | `""` |
+| `cms.licenseKey` | ARMS license key（x-arms-license-key） | `""` |
+| `cms.endpoint` | CMS 2.0 OTLP endpoint URL | `""` |
+| `cms.workspace` | CMS workspace（x-cms-workspace） | `""` |
+| `cms.debug` | 开启时在 `~/.loongsuite-pilot/logs/otlp-debug/` 本地落盘 OTLP/JSON | `false` |
+
+安装时通过 `--collect-trace`、`--cms-license-key`、`--cms-endpoint`、`--cms-workspace`、`--service-name-prefix` 参数传入。
+
+trace 上报与 SLS log 上报并行运行，互不影响。
 
 #### 敏感内容上报控制
 

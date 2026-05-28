@@ -473,7 +473,7 @@ describe('ConfigLoader', () => {
       expect(config.collectLog).toBe(true);
       expect(config.collectTrace).toBe(true);
       expect(config.serviceNamePrefix).toBe('');
-      expect(config.cms).toEqual({ enabled: false, licenseKey: '', endpoint: '', workspace: '' });
+      expect(config.cms).toEqual({ enabled: false, licenseKey: '', endpoint: '', workspace: '', debug: false });
     });
 
     it('reads values from config file', async () => {
@@ -493,6 +493,7 @@ describe('ConfigLoader', () => {
         licenseKey: 'key123',
         endpoint: 'https://cms.example.com',
         workspace: 'ws1',
+        debug: false,
       });
     });
 
