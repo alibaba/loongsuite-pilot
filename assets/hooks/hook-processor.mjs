@@ -26,6 +26,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import {
   buildQoderHookRecord,
   loadHookRuntimeConfig,
@@ -188,19 +189,19 @@ function readTranscriptLines(transcriptPath, startLine, endLine) {
   return lines;
 }
 
-function parseTranscriptLine(line, agentId, runtimeConfig) {
+function parseTranscriptLine(line, agentId, runtimeConfig, turnId) {
   try {
     const parsed = JSON.parse(line);
-    const normalized = normalizeTranscriptRecord(parsed, agentId, runtimeConfig);
-    return normalized ? JSON.stringify(normalized) : null;
+    const normalized = normalizeTranscriptRecord(parsed, agentId, runtimeConfig, turnId);
+    return normalized;
   } catch {
     return null;
   }
 }
 
-function normalizeTranscriptRecord(record, agentId, runtimeConfig) {
+function normalizeTranscriptRecord(record, agentId, runtimeConfig, turnId) {
   if (agentId === 'qoder-cli' || agentId === 'qoder-work' || agentId === 'qoder') {
-    return buildQoderHookRecord(record, { agentId, runtimeConfig });
+    return buildQoderHookRecord(record, { agentId, runtimeConfig, turnId });
   }
   return record;
 }
@@ -241,12 +242,33 @@ function uploadLines(agentId, logPrefix, transcriptPath, startLine, endLine, ses
   }
   if (!lines.length) return true;
 
-  const rowsToAppend = [];
+  const isQoderCli = agentId === 'qoder-cli' || agentId === 'qoder';
+  const turnId = isQoderCli ? crypto.randomUUID() : undefined;
+
+  const records = [];
   for (const line of lines) {
-    const row = parseTranscriptLine(line, agentId, runtimeConfig);
-    if (row) rowsToAppend.push(row);
+    const record = parseTranscriptLine(line, agentId, runtimeConfig, turnId);
+    if (record) records.push(record);
   }
 
+  if (isQoderCli) {
+    let stepCounter = 1;
+    for (const record of records) {
+      record['gen_ai.step.id'] = `${turnId}:s${stepCounter}`;
+      if (record['event.name'] === 'llm.response') {
+        stepCounter++;
+      }
+    }
+    for (let i = records.length - 1; i >= 0; i--) {
+      if (records[i]['event.name'] === 'llm.response') {
+        records[i]['gen_ai.response.finish_reasons'] = records[i]['gen_ai.response.finish_reasons'] || 'end_turn';
+        break;
+      }
+    }
+    logDebug(agentId, `Assigned turn_id=${turnId}, ${stepCounter} step(s)`);
+  }
+
+  const rowsToAppend = records.map((r) => JSON.stringify(r));
   const success = appendRowsToHistory(agentId, logPrefix, rowsToAppend);
   if (success) {
     logDebug(agentId, `Successfully appended ${rowsToAppend.length} rows from ${transcriptPath}`);

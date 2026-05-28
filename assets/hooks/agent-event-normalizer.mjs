@@ -408,7 +408,7 @@ export function buildCursorHookRecord(payload, options = {}) {
 export function buildQoderHookRecord(row, options = {}) {
   const runtimeConfig = options.runtimeConfig || {};
   const sourceAgentId = getStringValue(options, 'agentId');
-  const hookEntry = buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId);
+  const hookEntry = buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId, options.turnId);
   if (hookEntry) return hookEntry;
 
   const rowType = getStringValue(row, 'type');
@@ -435,8 +435,8 @@ export function buildQoderHookRecord(row, options = {}) {
       || getStringValue(row, 'sessionid')
       || getStringValue(row, 'conversation_id')
       || '',
-    'gen_ai.turn.id': variant === 'qoder-cli'
-      ? undefined
+    'gen_ai.turn.id': (variant === 'qoder-cli' || variant === 'qoder')
+      ? options.turnId
       : getStringValue(row, 'turn_id'),
     'gen_ai.agent.type': agentType,
     'gen_ai.provider.name': inferProviderName({ ...row, 'gen_ai.request.model': model, 'gen_ai.agent.type': agentType }),
@@ -463,7 +463,7 @@ export function buildQoderHookRecord(row, options = {}) {
   return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
 }
 
-function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId) {
+function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId, turnId) {
   const data = asRecord(row.data) && Object.keys(asRecord(row.data)).length > 0 ? asRecord(row.data) : row;
   const eventType = getStringValue(data, 'event_type') || getStringValue(data, 'hook_event_name') || getStringValue(row, 'hookEvent');
   if (eventType !== 'PostToolUse') return null;
@@ -475,6 +475,7 @@ function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId) {
     'event.name': 'tool.result',
     'user.id': resolveUserId(data, runtimeConfig),
     'gen_ai.session.id': getStringValue(data, 'session_id') || '',
+    'gen_ai.turn.id': turnId,
     'gen_ai.agent.type': variant,
     'gen_ai.provider.name': inferProviderName({ 'gen_ai.agent.type': variant }),
     'gen_ai.request.model': 'unknown',
