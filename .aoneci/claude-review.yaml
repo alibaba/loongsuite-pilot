@@ -1,0 +1,47 @@
+name: "Claude Code Review"
+
+triggers:
+  merge_request:
+    target-branches:
+    - "master"
+    types:
+    - "opened"
+    - "updated"
+
+jobs:
+  claude-review:
+    steps:
+      - uses: checkout
+      - uses: checkout
+        inputs:
+          repository-url: "https://gitlab.alibaba-inc.com/arms/code-review-agent.git"
+          token: "${{secrets.gitlab_private_token}}"
+          username: "${{vars.gitlab_username}}"
+          ref: "master"
+          path: "code-review-agent"
+      - id: assemble-prompt
+        run: bash .aoneci/assemble-prompt.sh
+      - uses: claude-code@master
+        inputs:
+          init-config: '{"apiKey":"${{secrets.claude_code_api_key}}","baseURL":"${{vars.claude_code_base_url}}"}'
+          prompt: ".aoneci/review-prompt-full.md"
+          append-system-prompt: >-
+            You are a code review agent. EXECUTE every step in the user
+            prompt: use a1 CLI to get MR info, review the diff, post inline
+            comments, and submit a summary with a verdict.
+            SEVERITY RULES: Each comment MUST start with a priority tag
+            (🚨 P0 / ⚠️ P1 / 💡 P2 / ✨ P3). Only P0 and P1 block merging.
+            VERDICT: If any P0 or P1 issues exist, verdict is REQUEST_CHANGES.
+            If only P2/P3 or no issues, verdict MUST be APPROVED.
+            CONVERGENCE: Only review code in the diff — do NOT comment on
+            unchanged code. Check existing comments first and skip duplicates.
+            For non-code files (.yaml, .sh, .md), only flag P0/P1 issues.
+            The MR ID is in $AONE_CI_MERGE_REQUEST_ID. If empty, extract via:
+            python3 -c "import sys,json;
+            print(json.load(sys.stdin)['git']['merge_request']['id'])"
+            < /aoneci/wrapper/spelContext
+          allowedTools: "Bash(a1:*) Bash(git:*) Bash(cat:*) Bash(head:*) Bash(tail:*) Bash(grep:*) Bash(rg:*) Bash(python3:*) Bash(pip:*) Read"
+          output-format: "stream-json"
+          dangerously-skip-permissions: "true"
+          aone-access-token: "${{secrets.aone_access_token}}"
+          pre-cmd: "CLAUDE_MODEL_NAME='${{vars.claude_model_name}}' bash .aoneci/wrap-claude-model.sh"
