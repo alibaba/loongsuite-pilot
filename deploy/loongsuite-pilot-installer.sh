@@ -419,46 +419,42 @@ process.stdout.write(detected.join(','));
     "$NODE_BIN" -e "
 const r = JSON.parse(process.argv[1]);
 const lang = process.argv[2];
+const defaults = [];
 for (let i = 0; i < r.length; i++) {
   const a = r[i];
-  const mark = a.detected ? '✅' : '❌';
   const status = lang === 'zh'
     ? (a.detected ? '已检测到: ' + a.reason : '未检测到')
     : (a.detected ? 'detected: ' + a.reason : 'not detected');
-  console.log('    [' + (i+1) + '] ' + mark + ' ' + a.displayName.padEnd(16) + '(' + status + ')');
+  console.log('    [' + (i+1) + '] ' + a.displayName.padEnd(16) + '(' + status + ')');
+  if (a.detected) defaults.push(i+1);
 }
 console.log('');
 if (lang === 'zh') {
-  console.log('    已检测到的 Agent 默认启用 (✅)');
-  console.log('    输入编号切换选择 (空格分隔)，直接回车确认:');
+  console.log('    默认选择已检测到的 Agent: ' + defaults.join(', '));
+  console.log('    输入要启用的编号 (空格分隔)，直接回车使用默认:');
 } else {
-  console.log('    Detected agents are selected by default (✅)');
-  console.log('    Enter numbers to toggle (space-separated), press Enter to confirm:');
+  console.log('    Default selection (detected): ' + defaults.join(', '));
+  console.log('    Enter numbers to enable (space-separated), press Enter for default:');
 }
 " "$PROBE_RESULT" "$LANG_MODE"
 
     # Read user input
-    local toggle_input
-    read -r toggle_input
+    local select_input
+    read -r select_input
 
-    # Compute final selection
+    # Compute final selection: empty input = detected agents, otherwise use exact input
     SELECTED_AGENTS=$("$NODE_BIN" -e "
 const r = JSON.parse(process.argv[1]);
 const input = process.argv[2] || '';
-const selected = new Set(r.filter(a => a.detected).map((_, i) => i));
-
-if (input.trim()) {
-  const toggles = input.trim().split(/[\s,]+/).map(Number).filter(n => n >= 1 && n <= r.length);
-  for (const t of toggles) {
-    const idx = t - 1;
-    if (selected.has(idx)) selected.delete(idx);
-    else selected.add(idx);
-  }
+let indices;
+if (!input.trim()) {
+  indices = r.map((a, i) => a.detected ? i : -1).filter(i => i >= 0);
+} else {
+  indices = [...new Set(input.trim().split(/[\s,]+/).map(Number).filter(n => n >= 1 && n <= r.length))].map(n => n - 1);
 }
-
-const ids = [...selected].sort((a,b) => a-b).map(i => r[i].id);
+const ids = indices.sort((a,b) => a-b).map(i => r[i].id);
 process.stdout.write(ids.join(','));
-" "$PROBE_RESULT" "$toggle_input" 2>/dev/null || true)
+" "$PROBE_RESULT" "$select_input" 2>/dev/null || true)
 
     if [ -n "$SELECTED_AGENTS" ]; then
         msg "    已选择: $SELECTED_AGENTS" "    Selected: $SELECTED_AGENTS"

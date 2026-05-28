@@ -40,4 +40,5 @@ USER root
 COPY entrypoint.sh /opt/entrypoint.sh
 RUN chmod +x /opt/entrypoint.sh
 
+USER testuser
 ENTRYPOINT ["/opt/entrypoint.sh"]
