@@ -430,11 +430,11 @@ for (let i = 0; i < r.length; i++) {
 }
 console.log('');
 if (lang === 'zh') {
-  console.log('    默认选择已检测到的 Agent: ' + defaults.join(', '));
-  console.log('    输入要启用的编号 (空格分隔)，直接回车使用默认:');
+  console.log('    默认选择已检测到的 Agent: ' + defaults.join(','));
+  console.log('    输入要启用的编号 (逗号分隔)，直接回车使用默认:');
 } else {
-  console.log('    Default selection (detected): ' + defaults.join(', '));
-  console.log('    Enter numbers to enable (space-separated), press Enter for default:');
+  console.log('    Default selection (detected): ' + defaults.join(','));
+  console.log('    Enter numbers to enable (comma-separated), press Enter for default:');
 }
 " "$PROBE_RESULT" "$LANG_MODE"
 
