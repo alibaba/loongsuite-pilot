@@ -4,8 +4,10 @@
 
 接入方式分为两种：
 
-- **Hook 模式** — 目标 agent 原生支持 hook/callback 配置（如 Cursor、Qoder），直接在其配置文件中注入 hook 命令
-- **Plugin-Probe 模式** — 目标 agent 需要安装一个独立插件来实现数据采集（如 Claude Code、Codex）
+- **Hook 模式** — 目标 agent 原生支持 hook/callback 配置（如 Claude Code、Codex、Cursor、Qoder），直接在其配置文件中注入 hook 命令
+- **Plugin-Probe 模式** — 目标 agent 需要安装一个独立插件来实现数据采集（保留作为通用扩展点，当前无活跃使用）
+
+> **注意**：Claude Code 和 Codex 已从 Plugin-Probe 模式迁移到 Hook 模式（2026-05）。详见下方 Hook 模式示例。
 
 ---
 
@@ -317,28 +319,57 @@ mkdir -p "$LOG_DIR"
 
 ---
 
-### Plugin-Probe 模式示例
-
-**Claude Code：**
+### Hook 模式示例：Claude Code（8 事件 + nested format）
 
 ```json
 {
   "id": "claude-code",
   "displayName": "Claude Code",
-  "deployMode": "plugin-probe",
+  "deployMode": "hook",
   "detection": { "paths": ["~/.claude"], "commands": ["claude"] },
-  "pluginProbe": {
-    "source": {
-      "type": "tar",
-      "tarball": "$PILOT_DIR/plugins/otel-claude-hook.tar.gz",
-      "destDir": "~/.cache/opentelemetry.instrumentation.claude/package",
-      "remoteUrl": ""
-    },
-    "mountType": "wrapper"
+  "hook": {
+    "settingsPath": "~/.claude/settings.json",
+    "events": ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop",
+               "PreCompact", "SubagentStart", "SubagentStop", "Notification"],
+    "hookCommand": "$PILOT_DATA/hooks/claude-code-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "matcher": "*",
+    "eventSubcommand": "kebab-case"
   },
   "input": { "type": "hook-jsonl", "logDir": "$PILOT_DATA/logs/claude-code" }
 }
 ```
+
+### Hook 模式示例：Codex（5 事件 + trust hash）
+
+```json
+{
+  "id": "codex",
+  "displayName": "Codex",
+  "deployMode": "hook",
+  "detection": { "paths": ["~/.codex"], "commands": [] },
+  "hook": {
+    "settingsPath": "~/.codex/hooks.json",
+    "events": ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"],
+    "hookCommand": "$PILOT_DATA/hooks/codex-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "matcher": "*",
+    "eventSubcommand": "kebab-case",
+    "trustToml": {
+      "configPath": "~/.codex/config.toml",
+      "trustAlgo": "v1",
+      "marker": "otel-codex-hook"
+    }
+  },
+  "input": { "type": "hook-jsonl", "logDir": "$PILOT_DATA/logs/codex" }
+}
+```
+
+**Codex 特殊说明**：Codex v0.125+ 强制 hook trust 机制，`trustToml` 配置让 pilot 在 deploy 时动态计算 trust hash 并写入 `~/.codex/config.toml`。如使用 Codex 桌面版，首次启动需手动信任 hooks。
+
+### Plugin-Probe 模式示例（已弃用，保留作为通用扩展点）
+
+> ⚠️ Claude Code 和 Codex 已迁移到 Hook 模式。以下示例仅供参考。
 
 ---
 

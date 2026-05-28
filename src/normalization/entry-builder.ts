@@ -133,6 +133,16 @@ export function buildAgentActivityEntry(
     'gen_ai.tool.call.result': jsonAlias(opts, 'gen_ai.tool.call.result', 'tool.result.payload'),
     'gen_ai.tool.call.duration': resolveToolCallDuration(opts),
     'gen_ai.skill.name': stringAlias(opts, 'gen_ai.skill.name', 'skill.name'),
+    'gen_ai.system_instructions': jsonAlias(
+      opts,
+      'gen_ai.system_instructions',
+      'system_instructions',
+    ),
+    'gen_ai.tool.definitions': jsonAlias(
+      opts,
+      'gen_ai.tool.definitions',
+      'tool.definitions',
+    ),
   };
   applyLegacyToolStatus(entry, opts);
   flattenAttributes(entry, opts.attributes);

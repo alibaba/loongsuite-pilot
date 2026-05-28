@@ -534,6 +534,8 @@ deploy_package() {
         "$NODE_BIN" scripts/postinstall.js
     fi
     msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
+    msg "    ℹ️  如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
+        "    ℹ️  If using Codex desktop app, please manually trust hooks on first launch"
     echo ""
 }
 
@@ -932,18 +934,36 @@ try {
                 ' "$codex_config" > "$tmp"
                 mv "$tmp" "$codex_config"
             fi
-            # Remove trust block (# BEGIN otel-codex-hook trust ... # END otel-codex-hook trust)
-            if grep -q "# BEGIN otel-codex-hook trust" "$codex_config" 2>/dev/null; then
+            # Remove trust entries (逐条精确删除,不用 BEGIN/END 范围删以免误伤用户数据)
+            # Step a: 删 BEGIN/END marker 注释行(仅注释行本身)
+            if grep -qE "# (BEGIN|END) otel-codex-hook trust" "$codex_config" 2>/dev/null; then
                 local tmp; tmp=$(mktemp)
-                awk '
-                    /# BEGIN otel-codex-hook trust/ { skip=1; next }
-                    /# END otel-codex-hook trust/   { skip=0; next }
+                grep -v "# BEGIN otel-codex-hook trust\|# END otel-codex-hook trust" "$codex_config" > "$tmp" || true
+                mv "$tmp" "$codex_config"
+            fi
+            # Step b: 删 bypass_hook_trust 行
+            if grep -q "bypass_hook_trust" "$codex_config" 2>/dev/null; then
+                local tmp; tmp=$(mktemp)
+                grep -v '^\s*bypass_hook_trust\s*=' "$codex_config" > "$tmp" || true
+                mv "$tmp" "$codex_config"
+            fi
+            # Step c: 逐条删 [hooks.state."<hooks.json path>:<event>:<group>:0"] section
+            # 匹配 key 中包含 hooks.json 路径的条目(pilot 写的),不动其他 path 的条目
+            local codex_hooks_json_path
+            codex_hooks_json_path="$(cd "$HOME/.codex" 2>/dev/null && pwd)/hooks.json"
+            if grep -q "$codex_hooks_json_path" "$codex_config" 2>/dev/null; then
+                local tmp; tmp=$(mktemp)
+                awk -v owned_path="$codex_hooks_json_path" '
+                    /^\[hooks\.state\."/ {
+                        if (index($0, owned_path) > 0) { skip=1; next }
+                    }
+                    /^\[/ && !/^\[hooks\.state\."/ { skip=0 }
                     skip { next }
                     { print }
                 ' "$codex_config" > "$tmp"
                 mv "$tmp" "$codex_config"
             fi
-            # Remove any remaining otel-codex-hook lines (catch-all)
+            # Step d: 删 otel-codex-hook 相关的剩余行(legacy catch-all,不删 hooks.state section)
             if grep -q "otel-codex-hook" "$codex_config" 2>/dev/null; then
                 local tmp; tmp=$(mktemp)
                 grep -v "otel-codex-hook" "$codex_config" > "$tmp" || true
@@ -1234,6 +1254,8 @@ remove_hook_configs() {
         "$HOME/.cursor/hooks.json"
         "$HOME/.qoder/settings.json"
         "$HOME/.qoderwork/settings.json"
+        "$HOME/.claude/settings.json"
+        "$HOME/.codex/hooks.json"
     )
 
     for cfg in "${configs[@]}"; do

@@ -1,19 +1,31 @@
 {
   "id": "claude-code",
   "displayName": "Claude Code",
-  "deployMode": "plugin-probe",
+  "deployMode": "hook",
   "detection": {
     "paths": ["~/.claude"],
     "commands": ["claude"]
   },
-  "pluginProbe": {
-    "source": {
-      "type": "tar",
-      "tarball": "$PILOT_DIR/plugins/otel-claude-hook.tar.gz",
-      "destDir": "~/.cache/opentelemetry.instrumentation.claude/package",
-      "remoteUrl": ""
-    },
-    "mountType": "wrapper"
+  "hook": {
+    "settingsPath": "~/.claude/settings.json",
+    "events": [
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "Stop",
+      "PreCompact",
+      "SubagentStart",
+      "SubagentStop",
+      "Notification"
+    ],
+    "hookCommand": "$PILOT_DATA/hooks/claude-code-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "matcher": "*",
+    "eventSubcommand": "kebab-case",
+    "replaceHookCommands": [
+      "otel-claude-hook",
+      ".cache/opentelemetry.instrumentation.claude"
+    ]
   },
   "input": {
     "type": "hook-jsonl",

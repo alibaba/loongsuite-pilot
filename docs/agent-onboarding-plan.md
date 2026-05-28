@@ -25,10 +25,10 @@
 ### 已支持的Agent
 
 
-| Codex           | P1  | hook+nodejs启动项注入          |           |     | 方羞  | 完成  |
+| Codex           | P1  | hook（已从 plugin-probe 迁移到 hook 模式） |           | [进度: 已完成] | 方羞  | 完成  |
 | --------------- | --- | ------------------------- | --------- | --- | --- | --- |
 | Qoder/QoderWork | P1  | 改Hook？ 进程监听日志和sql         |           |     | 石木  | 完成  |
-| Cursor          | P0  | Plugin                    |           |     | 石木  | 完成  |
-| Claude Code     | P0  | [进度: 90%]hook+nodejs启动项注入 | [进度: 90%] |     | 方羞  | 完成  |
+| Cursor          | P0  | hook                      |           |     | 石木  | 完成  |
+| Claude Code     | P0  | hook（已从 plugin-probe 迁移到 hook 模式） |           | [进度: 已完成] | 方羞  | 完成  |
 
 

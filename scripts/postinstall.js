@@ -62,29 +62,55 @@ function main() {
   // Create target directory
   ensureDir(HOOKS_TARGET_DIR);
 
-  // Copy all hook scripts
-  const hookFiles = fs.readdirSync(HOOKS_SOURCE_DIR).filter(
-    f => f.endsWith('.sh') || f.endsWith('.ps1') || f.endsWith('.py') || f.endsWith('.mjs')
-  );
-  
-  if (hookFiles.length === 0) {
-    console.log('[loongsuite-pilot] No hook scripts to install.');
+  // Recursively copy all hook scripts (including subdirectories: shared/, claude-code/, codex/)
+  let copySuccess = false;
+  try {
+    fs.cpSync(HOOKS_SOURCE_DIR, HOOKS_TARGET_DIR, { recursive: true });
+    copySuccess = true;
+  } catch (error) {
+    console.error('[loongsuite-pilot] Recursive copy failed, falling back to file-by-file:', error.message);
+    // Fallback: walk source dir and copy files individually
+    try {
+      function copyRecursive(src, dest) {
+        ensureDir(dest);
+        for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+          const srcPath = path.join(src, entry.name);
+          const destPath = path.join(dest, entry.name);
+          if (entry.isDirectory()) {
+            copyRecursive(srcPath, destPath);
+          } else {
+            installHookFile(srcPath, destPath);
+          }
+        }
+      }
+      copyRecursive(HOOKS_SOURCE_DIR, HOOKS_TARGET_DIR);
+      copySuccess = true;
+    } catch (fallbackError) {
+      console.error('[loongsuite-pilot] File-by-file fallback also failed:', fallbackError.message);
+    }
+  }
+
+  if (!copySuccess) {
+    console.error('[loongsuite-pilot] Hook scripts installation failed. Hooks may not work correctly.');
     return;
   }
 
+  // Ensure .sh files have execute permission (cpSync preserves mode on most OS, belt-and-suspenders)
   let installedCount = 0;
-  for (const hookFile of hookFiles) {
-    const sourcePath = path.join(HOOKS_SOURCE_DIR, hookFile);
-    const targetPath = path.join(HOOKS_TARGET_DIR, hookFile);
-
-    try {
-      installHookFile(sourcePath, targetPath);
-      console.log(`  ✓ Installed: ${hookFile}`);
-      installedCount++;
-    } catch (error) {
-      console.error(`  ✗ Failed to install ${hookFile}:`, error.message);
+  function fixPermissions(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        fixPermissions(fullPath);
+      } else if (entry.name.endsWith('.sh') || entry.name.endsWith('.ps1')) {
+        try { fs.chmodSync(fullPath, 0o755); } catch {}
+        installedCount++;
+      } else if (entry.name.endsWith('.mjs') || entry.name.endsWith('.py')) {
+        installedCount++;
+      }
     }
   }
+  fixPermissions(HOOKS_TARGET_DIR);
 
   console.log(`[loongsuite-pilot] Installed ${installedCount} hook script(s) to ${HOOKS_TARGET_DIR}`);
 

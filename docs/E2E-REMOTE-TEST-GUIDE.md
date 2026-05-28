@@ -782,6 +782,9 @@ npm run test:e2e:docker:down
 | multi-account | `E2E_SCENARIO=multi-account` | 多用户安装隔离（需 `E2E_USER_IDS`） |
 | auto-upgrade | `E2E_SCENARIO=auto-upgrade` | 自动升级流程验证 |
 | version-matrix | `E2E_SCENARIO=version-matrix` | Agent 多版本兼容性测试 |
+| hook-mode-claude | `E2E_SCENARIO=hook-mode-claude` | Claude Code hook 模式验证：8 事件注入 + JSONL 字段 `gen_ai.*` + trace_id/span_id 自生成 |
+| hook-mode-codex | `E2E_SCENARIO=hook-mode-codex` | Codex hook 模式验证：5 事件注入 + trust hash + system_instructions/tool.definitions |
+| migration-from-plugin | `E2E_SCENARIO=migration-from-plugin` | 从老 plugin-probe 升级到 hook 模式：验证残留清理 + 配置无双写 |
 
 ### Docker 特有环境变量
 

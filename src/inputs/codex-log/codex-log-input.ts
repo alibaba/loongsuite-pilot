@@ -100,6 +100,8 @@ export class CodexLogInput extends BaseHookInput {
         ?? getNumberValue(record, 'gen_ai.tool.call.duration_ms')
         ?? getNumberValue(record, 'tool.result.duration')
         ?? getNumberValue(record, 'tool.result.duration_ms'),
+      'gen_ai.system_instructions': toJsonValue(record['gen_ai.system_instructions']),
+      'gen_ai.tool.definitions': toJsonValue(record['gen_ai.tool.definitions']),
       'error.type': getStringValue(record, 'error.type'),
       'error.message': getStringValue(record, 'error.message'),
     });

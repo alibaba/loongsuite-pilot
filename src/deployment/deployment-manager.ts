@@ -10,6 +10,7 @@ import { AgentDefLoader, type AgentDefLoaderOptions } from './agent-def-loader.j
 import { HookStrategy } from './hook-strategy.js';
 import { PluginProbeStrategy } from './plugin-probe-strategy.js';
 import { writeDeployNotification } from './deploy-notification.js';
+import { runPluginMigration } from './plugin-migration.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { readJsonFile, writeJsonFile } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
@@ -54,6 +55,13 @@ export class DeploymentManager {
   }
 
   async deployAll(): Promise<DeployResult[]> {
+    // ── Phase 0: migrate from old plugins (fail-open) ──
+    try {
+      await runPluginMigration();
+    } catch (err) {
+      logger.warn('plugin migration failed (non-blocking)', { error: String(err) });
+    }
+
     await this.loadState();
     this.definitions = await this.loader.load();
 

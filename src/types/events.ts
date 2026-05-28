@@ -81,6 +81,18 @@ export interface AgentActivityEntry {
   'gen_ai.tool.call.result'?: JsonValue;
   'gen_ai.tool.call.duration'?: number;
   'gen_ai.skill.name'?: string;
+  /**
+   * 模型的 system instructions（MessagePart[] 数组形式），数据源为 codex transcript 的
+   * `session_meta.payload.base_instructions.text` + `turn_context.payload.developer_instructions`。
+   * 仅 Codex 端有值；Claude transcript 不含此数据。
+   */
+  'gen_ai.system_instructions'?: JsonValue;
+  /**
+   * 模型可用的工具定义集合（FunctionToolDefinition[] 数组形式），数据源为 codex transcript
+   * 的 `session_meta.payload.dynamic_tools[]`。仅 Codex 端有值；codex 的核心工具（shell/apply_patch
+   * 等）是嵌入 system prompt 的伪工具，不在此字段中，但在 `gen_ai.system_instructions` 中可见。
+   */
+  'gen_ai.tool.definitions'?: JsonValue;
   /** Canonical repository identity for source attribution, e.g. sls/loongsuite-pilot. */
   'git.repo'?: string;
   /** Current branch when observed at collection time. */
