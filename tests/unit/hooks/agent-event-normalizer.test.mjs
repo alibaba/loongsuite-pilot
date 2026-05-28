@@ -195,6 +195,72 @@ describe('asset hook agent event normalizer', () => {
     })).toBeNull();
   });
 
+  it('strips token/cost fields from stop events to avoid duplication with afterAgentResponse', () => {
+    const record = buildCursorHookRecord({
+      hook_event_name: 'stop',
+      session_id: 'sess-stop',
+      generation_id: 'turn-stop',
+      model: 'gpt-5.5',
+      input_tokens: 15809,
+      output_tokens: 141,
+      cache_read_tokens: 7424,
+      cache_write_tokens: 0,
+      total_tokens: 15950,
+      cost_input: 0.01,
+      cost_output: 0.005,
+      cost_cache_read: 0.002,
+      cost_cache_write: 0,
+      cost_total: 0.017,
+      status: 'completed',
+      loop_count: 0,
+    }, {
+      now: new Date('2026-05-28T00:00:00.000Z'),
+      runtimeConfig: { userId: 'u-default', agents: {} },
+    });
+
+    expect(record['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(record['gen_ai.usage.output_tokens']).toBeUndefined();
+    expect(record['gen_ai.usage.cache_read.input_tokens']).toBeUndefined();
+    expect(record['gen_ai.usage.cache_creation.input_tokens']).toBeUndefined();
+    expect(record['gen_ai.usage.total_tokens']).toBeUndefined();
+    expect(record['gen_ai.usage.input_cost']).toBeUndefined();
+    expect(record['gen_ai.usage.output_cost']).toBeUndefined();
+    expect(record['gen_ai.usage.cache_read.input_cost']).toBeUndefined();
+    expect(record['gen_ai.usage.cache_creation.input_cost']).toBeUndefined();
+    expect(record['gen_ai.usage.total_cost']).toBeUndefined();
+
+    expect(record['event.name']).toBe('other');
+    expect(record['gen_ai.session.id']).toBe('sess-stop');
+    expect(record['gen_ai.turn.id']).toBe('turn-stop');
+    expect(record['agent.cursor.status']).toBe('completed');
+    expect(record['agent.cursor.loop_count']).toBe(0);
+    expect(record['agent.cursor.hook_event_name']).toBe('stop');
+  });
+
+  it('preserves token/cost fields on afterAgentResponse events', () => {
+    const record = buildCursorHookRecord({
+      hook_event_name: 'afterAgentResponse',
+      session_id: 'sess-resp',
+      generation_id: 'turn-resp',
+      model: 'gpt-5.5',
+      input_tokens: 15809,
+      output_tokens: 141,
+      cache_read_tokens: 7424,
+      total_tokens: 15950,
+      text: 'hello',
+    }, {
+      now: new Date('2026-05-28T00:00:00.000Z'),
+      runtimeConfig: { userId: 'u-default', agents: {} },
+    });
+
+    expect(record['gen_ai.usage.input_tokens']).toBe(15809);
+    expect(record['gen_ai.usage.output_tokens']).toBe(141);
+    expect(record['gen_ai.usage.cache_read.input_tokens']).toBe(7424);
+    expect(record['gen_ai.usage.total_tokens']).toBe(15950);
+    expect(record['event.name']).toBe('llm.response');
+    expect(record['agent.cursor.hook_event_name']).toBe('afterAgentResponse');
+  });
+
   it('shares provider fallback rules with collector normalization', () => {
     expect(inferProviderName({ 'gen_ai.request.model': 'claude-sonnet' })).toBe('anthropic');
     expect(inferProviderName({ 'gen_ai.request.model': 'gpt-5.5' })).toBe('openai');
