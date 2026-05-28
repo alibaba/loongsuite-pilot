@@ -1,4 +1,5 @@
 import ALY from '@alicloud/log';
+import * as os from 'node:os';
 import { BaseFlusher } from './base-flusher.js';
 import {
   serialiseLogEntry,
@@ -8,6 +9,20 @@ import type { AgentActivityEntry, SlsFlusherConfig, SlsEndpoint } from '../types
 import { createLogger } from '../utils/logger.js';
 import { appendLine, ensureDir } from '../utils/fs-utils.js';
 import * as path from 'node:path';
+
+function getLocalIp(): string {
+  const interfaces = os.networkInterfaces();
+  for (const addrs of Object.values(interfaces)) {
+    if (!addrs) continue;
+    for (const addr of addrs) {
+      if (addr.family === 'IPv4' && !addr.internal) return addr.address;
+    }
+  }
+  return '127.0.0.1';
+}
+
+const LOCAL_IP = getLocalIp();
+const HOSTNAME = os.hostname();
 
 const BATCH_MAX_SIZE = 20;
 const FLUSH_INTERVAL_MS = 2000;
@@ -115,8 +130,9 @@ export class SlsFlusher extends BaseFlusher {
         timestamp: now,
         content: l.content,
       })),
-      source: 'ai-agent-input',
+      source: LOCAL_IP,
       topic: endpoint.kind,
+      tags: [{ __hostname__: HOSTNAME }],
     };
 
     const client = this.getAkClient(endpoint);
@@ -195,9 +211,9 @@ export class SlsFlusher extends BaseFlusher {
   private async postWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
     const body = {
       __topic__: endpoint.kind ?? '',
-      __source__: 'ai-agent-input',
+      __source__: LOCAL_IP,
       __logs__: logs.map(l => l.content),
-      __tags__: {} as Record<string, string>,
+      __tags__: { __hostname__: HOSTNAME } as Record<string, string>,
     };
 
     const raw = JSON.stringify(body);
@@ -278,8 +294,9 @@ export class SlsFlusher extends BaseFlusher {
           const client = this.getAkClient(endpoint);
           await client.postLogStoreLogs(endpoint.project, endpoint.logstore, {
             logs: [{ timestamp: Math.floor(Date.now() / 1000), content }],
-            source: 'ai-agent-input',
+            source: LOCAL_IP,
             topic,
+            tags: [{ __hostname__: HOSTNAME }],
           });
         } else {
           await this.flushViaWebtracking(endpoint, [{ content, endpoint }]);

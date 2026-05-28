@@ -79,7 +79,7 @@ describe('SlsFlusher', () => {
       expect(project).toBe('proj-a');
       expect(logstore).toBe('store-a');
       expect(logGroup.logs).toHaveLength(1);
-      expect(logGroup.source).toBe('ai-agent-input');
+      expect(logGroup.source).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
     });
 
     it('sends to multiple endpoints', async () => {
