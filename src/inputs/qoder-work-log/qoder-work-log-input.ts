@@ -70,7 +70,7 @@ interface ActiveTurn {
   endTimestamp: number;
 }
 
-type SdkEvent =
+export type SdkEvent =
   | {
       kind: 'system_init';
       ts: number;
