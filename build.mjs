@@ -9,7 +9,7 @@ await build({
   target: 'es2022',
   format: 'esm',
   bundle: true,
-  minify: !isInternal,
+  minify: true,
   treeShaking: true,
   packages: 'external',
   define: {
@@ -28,5 +28,20 @@ await build({
   define: {
     __INTERNAL_BUILD__: String(isInternal),
   },
-  minifySyntax: !isInternal,
+  minifySyntax: true,
+});
+
+await build({
+  entryPoints: ['src/updater/index.ts'],
+  outdir: 'dist/updater',
+  platform: 'node',
+  target: 'es2022',
+  format: 'esm',
+  bundle: true,
+  minify: true,
+  treeShaking: true,
+  packages: 'external',
+  define: {
+    __INTERNAL_BUILD__: String(isInternal),
+  },
 });
