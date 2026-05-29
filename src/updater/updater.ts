@@ -385,6 +385,17 @@ export class Updater {
   }
 
   private async copyFileAtomic(src: string, dst: string, mode?: number): Promise<void> {
+    const srcContent = await fs.readFile(src);
+    const dstContent = await fs.readFile(dst).catch(() => null);
+    if (dstContent && srcContent.equals(dstContent)) {
+      if (mode !== undefined) {
+        const stat = await fs.stat(dst);
+        if ((stat.mode & 0o777) !== mode) {
+          await fs.chmod(dst, mode);
+        }
+      }
+      return;
+    }
     const tmp = dst + '.tmp';
     await fs.copyFile(src, tmp);
     if (mode !== undefined) {
