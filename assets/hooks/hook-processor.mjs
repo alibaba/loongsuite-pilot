@@ -253,11 +253,13 @@ function uploadLines(agentId, logPrefix, transcriptPath, startLine, endLine, ses
 
   if (isQoderCli) {
     let stepCounter = 1;
+    let responseCount = 0;
     for (const record of records) {
-      record['gen_ai.step.id'] = `${turnId}:s${stepCounter}`;
       if (record['event.name'] === 'llm.response') {
-        stepCounter++;
+        responseCount++;
+        if (responseCount >= 2) stepCounter++;
       }
+      record['gen_ai.step.id'] = `${turnId}:s${stepCounter}`;
     }
     for (let i = records.length - 1; i >= 0; i--) {
       if (records[i]['event.name'] === 'llm.response') {
