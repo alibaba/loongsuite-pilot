@@ -136,8 +136,8 @@ validate_install_user() {
                         "⚠️  No sudo access — cannot register system-level service. Using user-level systemd."
                 fi
             else
-                msg "   ℹ️  安装用户: $current_user（服务类型将在启动时检测）" \
-                    "   ℹ️  Install user: $current_user (service type determined at start)"
+                msg "   Install user: $current_user（服务类型将在启动时检测）" \
+                    "   Install user: $current_user (service type determined at start)"
             fi
             ;;
     esac
@@ -293,7 +293,7 @@ check_deps() {
 
     msg "    ✅ node $("$NODE_BIN" --version)  npm $("$NPM_BIN" --version)" \
         "    ✅ node $("$NODE_BIN" --version)  npm $("$NPM_BIN" --version)"
-    msg "    📌 node pinned: $NODE_BIN" "    📌 node pinned: $NODE_BIN"
+    msg "    node pinned: $NODE_BIN" "    node pinned: $NODE_BIN"
     echo ""
 }
 
@@ -304,8 +304,8 @@ download_and_extract() {
     TMP_DIR="$(mktemp -d)"
     # TMP_DIR cleanup is handled by the caller's trap
 
-    msg "📦 下载安装包: $PACKAGE_URL" \
-        "📦 Downloading: $PACKAGE_URL"
+    msg "==> 下载安装包: $PACKAGE_URL" \
+        "==> Downloading: $PACKAGE_URL"
 
     if command -v curl &>/dev/null; then
         curl -fsSL "$PACKAGE_URL" -o "$TMP_DIR/package.tar.gz"
@@ -856,7 +856,7 @@ print_summary() {
     echo ""
 
     if [ -n "$SLS_ENDPOINT" ]; then
-        msg "📊 SLS 后端: $SLS_ENDPOINT" "📊 SLS backend: $SLS_ENDPOINT"
+        msg "SLS 后端: $SLS_ENDPOINT" "SLS backend: $SLS_ENDPOINT"
         [ -n "$SLS_PROJECT" ]  && msg "   项目: $SLS_PROJECT" "   Project: $SLS_PROJECT"
         [ -n "$SLS_LOGSTORE" ] && msg "   日志库: $SLS_LOGSTORE" "   Logstore: $SLS_LOGSTORE"
         echo ""
@@ -884,8 +884,8 @@ print_summary() {
 # CMD: install
 # ============================================================
 cmd_install() {
-    msg "🚀 开始安装 $PACKAGE_NAME ..." \
-        "🚀 Installing $PACKAGE_NAME ..."
+    msg "==> 开始安装 $PACKAGE_NAME ..." \
+        "==> Installing $PACKAGE_NAME ..."
     echo ""
 
     validate_install_user
@@ -961,8 +961,8 @@ cmd_install() {
 # CMD: upgrade
 # ============================================================
 cmd_upgrade() {
-    msg "🔄 开始升级 $PACKAGE_NAME ..." \
-        "🔄 Upgrading $PACKAGE_NAME ..."
+    msg "==> 开始升级 $PACKAGE_NAME ..." \
+        "==> Upgrading $PACKAGE_NAME ..."
     echo ""
 
     validate_install_user
@@ -1018,7 +1018,9 @@ cmd_upgrade() {
     msg "==> 启动新版本..." "==> Starting new version..."
     if loongsuite-pilot start; then
         sleep 2
-        if loongsuite-pilot status 2>/dev/null | grep -q "is running"; then
+        local _status_out
+        _status_out="$(loongsuite-pilot status 2>/dev/null || true)"
+        if echo "$_status_out" | grep -q "is running"; then
             msg "    ✅ 新版本启动成功" "    ✅ New version started successfully"
             echo ""
 

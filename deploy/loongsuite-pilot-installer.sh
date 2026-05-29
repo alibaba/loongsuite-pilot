@@ -155,8 +155,8 @@ validate_install_user() {
                         "⚠️  No sudo access — cannot register system-level service. Using user-level systemd."
                 fi
             else
-                msg "   ℹ️  安装用户: $current_user（服务类型将在启动时检测）" \
-                    "   ℹ️  Install user: $current_user (service type determined at start)"
+                msg "   Install user: $current_user（服务类型将在启动时检测）" \
+                    "   Install user: $current_user (service type determined at start)"
             fi
             ;;
     esac
@@ -323,7 +323,7 @@ check_deps() {
 
     msg "    ✅ node $("$NODE_BIN" --version)  npm $("$NPM_BIN" --version)" \
         "    ✅ node $("$NODE_BIN" --version)  npm $("$NPM_BIN" --version)"
-    msg "    📌 node pinned: $NODE_BIN" "    📌 node pinned: $NODE_BIN"
+    msg "    node pinned: $NODE_BIN" "    node pinned: $NODE_BIN"
     echo ""
 }
 
@@ -334,8 +334,8 @@ download_and_extract() {
     TMP_DIR="$(mktemp -d)"
     # TMP_DIR cleanup is handled by the caller's trap
 
-    msg "📦 下载安装包: $PACKAGE_URL" \
-        "📦 Downloading: $PACKAGE_URL"
+    msg "==> 下载安装包: $PACKAGE_URL" \
+        "==> Downloading: $PACKAGE_URL"
 
     if command -v curl &>/dev/null; then
         curl -fsSL "$PACKAGE_URL" -o "$TMP_DIR/package.tar.gz"
@@ -465,6 +465,102 @@ process.stdout.write(ids.join(','));
 }
 
 # ============================================================
+# Interactive: prompt for userId (skipped when --userId given or non-interactive)
+# ============================================================
+prompt_user_id() {
+    if [ -n "$USER_ID" ]; then return 0; fi
+    if [ ! -t 0 ]; then return 0; fi
+
+    local existing_uid=""
+    local config_file="$DATA_DIR/config.json"
+    if [ -f "$config_file" ]; then
+        existing_uid=$("$NODE_BIN" -e "
+try { const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf-8')); process.stdout.write(c.userId||''); } catch {}
+" -- "$config_file" 2>/dev/null || true)
+    fi
+
+    echo ""
+    if [ -n "$existing_uid" ]; then
+        msg "    当前 userId: $existing_uid" \
+            "    Current userId: $existing_uid"
+        msg "    直接回车保留，或输入新值:" \
+            "    Press Enter to keep, or type a new value:"
+    else
+        msg "    请输入你的 userId（用于数据归属，可直接回车跳过）:" \
+            "    Enter your userId (for data attribution, press Enter to skip):"
+    fi
+    printf "    > "
+    local input
+    read -r input
+    input=$(echo "$input" | tr -d '[:space:]')
+    if [ -n "$input" ]; then
+        USER_ID="$input"
+    elif [ -n "$existing_uid" ]; then
+        USER_ID="$existing_uid"
+    fi
+}
+
+# ============================================================
+# Interactive: confirm config overwrite when key fields differ
+# ============================================================
+confirm_config_overwrite() {
+    local config_file="$DATA_DIR/config.json"
+    if [ ! -f "$config_file" ]; then return 0; fi
+
+    local diffs
+    diffs=$("$NODE_BIN" -e "
+const fs = require('fs');
+let old = {};
+try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
+
+const newVals = JSON.parse(process.argv[2]);
+const checks = [
+  { label: 'sls.endpoint',       oldVal: (old.sls||{}).endpoint||'',       newVal: newVals.slsEndpoint },
+  { label: 'sls.project',        oldVal: (old.sls||{}).project||'',        newVal: newVals.slsProject },
+  { label: 'sls.logstore',       oldVal: (old.sls||{}).logstore||'',       newVal: newVals.slsLogstore },
+  { label: 'cms.licenseKey',     oldVal: (old.cms||{}).licenseKey||'',     newVal: newVals.cmsLicenseKey },
+  { label: 'cms.endpoint',       oldVal: (old.cms||{}).endpoint||'',       newVal: newVals.cmsEndpoint },
+  { label: 'cms.workspace',      oldVal: (old.cms||{}).workspace||'',      newVal: newVals.cmsWorkspace },
+  { label: 'serviceNamePrefix',  oldVal: old.serviceNamePrefix||'',        newVal: newVals.serviceNamePrefix },
+];
+
+const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
+if (!changed.length) process.exit(0);
+
+for (const c of changed) {
+  console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
+}
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX")" 2>/dev/null || true)
+
+    if [ -z "$diffs" ]; then return 0; fi
+
+    echo ""
+    msg "⚠️  以下配置将被覆盖:" "⚠️  The following config will be overwritten:"
+    echo "$diffs" | while IFS= read -r line; do
+        echo "    $line"
+    done
+
+    if [ -t 0 ]; then
+        echo ""
+        msg "    确认覆盖? (y/N):" "    Confirm overwrite? (y/N):"
+        printf "    > "
+        local answer
+        read -r answer
+        case "$answer" in
+            y|Y|yes|YES) ;;
+            *)
+                msg "已取消安装" "Installation cancelled"
+                exit 0
+                ;;
+        esac
+    else
+        msg "    (非交互模式) 继续覆盖" \
+            "    (non-interactive) Proceeding with overwrite"
+    fi
+}
+
+# ============================================================
 # Common: deploy bootstrap scripts from the current version
 # ============================================================
 deploy_bootstrap_scripts() {
@@ -534,8 +630,8 @@ deploy_package() {
         "$NODE_BIN" scripts/postinstall.js
     fi
     msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
-    msg "    ℹ️  如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
-        "    ℹ️  If using Codex desktop app, please manually trust hooks on first launch"
+    msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
+        "    If using Codex desktop app, please manually trust hooks on first launch"
     echo ""
 }
 
@@ -1034,7 +1130,7 @@ print_summary() {
     echo ""
 
     if [ -n "$SLS_ENDPOINT" ]; then
-        msg "📊 SLS 后端: $SLS_ENDPOINT" "📊 SLS backend: $SLS_ENDPOINT"
+        msg "SLS 后端: $SLS_ENDPOINT" "SLS backend: $SLS_ENDPOINT"
         [ -n "$SLS_PROJECT" ]  && msg "   项目: $SLS_PROJECT" "   Project: $SLS_PROJECT"
         [ -n "$SLS_LOGSTORE" ] && msg "   日志库: $SLS_LOGSTORE" "   Logstore: $SLS_LOGSTORE"
         echo ""
@@ -1050,8 +1146,8 @@ print_summary() {
 # CMD: install
 # ============================================================
 cmd_install() {
-    msg "🚀 开始安装 $PACKAGE_NAME ..." \
-        "🚀 Installing $PACKAGE_NAME ..."
+    msg "==> 开始安装 $PACKAGE_NAME ..." \
+        "==> Installing $PACKAGE_NAME ..."
     echo ""
 
     validate_install_user
@@ -1097,6 +1193,8 @@ cmd_install() {
     download_and_extract
     probe_agents
     select_agents
+    prompt_user_id
+    confirm_config_overwrite
     deploy_package "$INSTALL_SRC"
     write_config
     install_loongsuite_pilot_command
@@ -1108,7 +1206,9 @@ cmd_install() {
     fi
     if loongsuite-pilot start $_start_args; then
         sleep 2
-        if loongsuite-pilot status 2>/dev/null | grep -q "is running"; then
+        local _status_out
+        _status_out="$(loongsuite-pilot status 2>/dev/null || true)"
+        if echo "$_status_out" | grep -q "is running"; then
             msg "    ✅ 服务已启动" "    ✅ Service started"
         else
             msg "    ⚠️  服务可能尚未就绪，请检查: loongsuite-pilot status" \
@@ -1127,8 +1227,8 @@ cmd_install() {
 # CMD: upgrade
 # ============================================================
 cmd_upgrade() {
-    msg "🔄 开始升级 $PACKAGE_NAME ..." \
-        "🔄 Upgrading $PACKAGE_NAME ..."
+    msg "==> 开始升级 $PACKAGE_NAME ..." \
+        "==> Upgrading $PACKAGE_NAME ..."
     echo ""
 
     validate_install_user
@@ -1184,7 +1284,9 @@ cmd_upgrade() {
     msg "==> 启动新版本..." "==> Starting new version..."
     if loongsuite-pilot start; then
         sleep 2
-        if loongsuite-pilot status 2>/dev/null | grep -q "is running"; then
+        local _status_out
+        _status_out="$(loongsuite-pilot status 2>/dev/null || true)"
+        if echo "$_status_out" | grep -q "is running"; then
             msg "    ✅ 新版本启动成功" "    ✅ New version started successfully"
             echo ""
 
