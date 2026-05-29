@@ -961,7 +961,7 @@ export function localBuildInstallScript(userId, env) {
 
   return `
 set -euo pipefail
-INSTALLER=/opt/project/deploy/loongsuite-pilot-installer.sh
+INSTALLER=/opt/project/deploy/installer.sh
 PACKAGE=/opt/project/loongsuite-pilot.tar.gz
 
 echo "[installer-e2e] Verifying local package and installer..."
