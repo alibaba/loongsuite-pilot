@@ -39,8 +39,8 @@ For enterprise deployment scenarios, the installer needs to reliably register a 
 
 - Affected code areas:
   - `scripts/loongsuite-pilot.sh`: `detect_init_system()`, `autostart_install()`, `autostart_remove()`, `autostart_status()`, `cmd_stop()`, `cmd_restart_collector()`, new `_write_systemd_system_unit()`, new `_write_initd_script()`. All systemctl/init.d operations now prefixed with `sudo`.
-  - `deploy/loongsuite-pilot-installer.sh`: Add `sudo -v` pre-check and current user validation in install flow. Remove `--run-as-user` parameter. `cmd_uninstall()` fallback cleanup uses `sudo`.
-  - `deploy/loongsuite-pilot-installer-inner.sh`: Same changes mirrored.
+  - `deploy/installer.sh`: Add `sudo -v` pre-check and current user validation in install flow. Remove `--run-as-user` parameter. `cmd_uninstall()` fallback cleanup uses `sudo`.
+  - `deploy/installer-inner.sh`: Same changes mirrored.
 - No breaking changes to existing macOS launchd behavior.
 - **Breaking change on Linux**: existing systemd user-level installs (`systemctl --user`) are superseded by system-level registration.
 - Non-sudo Linux installs fall back to nohup (no autostart) with a clear warning.

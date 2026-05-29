@@ -120,25 +120,30 @@ npm start
 
 ```
 deploy/
-├── package.sh        # 编译 + 打包 tar.gz
-├── upload.sh         # 上传 tar.gz + loongsuite-pilot-installer.sh 到 OSS
-└── loongsuite-pilot-installer.sh  # 统一安装/升级/卸载脚本（用户侧执行）
+├── package-inner.sh     # 打包内部版本（调用 package.sh）
+├── package-external.sh  # 打包外部版本（调用 package.sh --external）
+├── package.sh           # 打包核心逻辑（--external 切换内外版本）
+├── upload-inner.sh      # 上传到内部 OSS 路径（调用 upload.sh）
+├── upload-external.sh   # 上传到外部 OSS 路径（调用 upload.sh --external）
+├── upload.sh            # 上传核心逻辑（--external 切换内外路径）
+├── installer-inner.sh   # 内部安装脚本（内部 OSS 路径）
+└── installer.sh         # 外部安装脚本（外部 OSS 路径）
 ```
 
 ### 第一步：打包
 
 ```bash
-# 集团内版本打包（默认）
-bash deploy/package.sh
+# 集团内版本打包
+bash deploy/package-inner.sh
 
 # 集团外版本打包
-bash deploy/package.sh --external
+bash deploy/package-external.sh
 
 # 自定义输出路径
-bash deploy/package.sh -o /tmp/loongsuite-pilot.tar.gz
+bash deploy/package-inner.sh -o /tmp/loongsuite-pilot.tar.gz
 
 # 跳过编译，使用已有 dist/
-bash deploy/package.sh --skip-build
+bash deploy/package-inner.sh --skip-build
 ```
 
 打包产物结构：
@@ -164,14 +169,20 @@ brew install ossutil   # 或 pip install ossutil2
 # 配置凭证
 ossutil config -e oss-cn-hangzhou.aliyuncs.com -i <AK_ID> -k <AK_SECRET>
 
-# 上传到 test 渠道（默认）
-bash deploy/upload.sh
+# 内部上传到 test 渠道（默认）
+bash deploy/upload-inner.sh
 
-# 上传到 release 渠道（正式发布）
-bash deploy/upload.sh --channel release
+# 内部上传到 release 渠道（正式发布）
+bash deploy/upload-inner.sh --channel release
+
+# 外部上传到 test 渠道
+bash deploy/upload-external.sh
+
+# 外部上传到 release 渠道
+bash deploy/upload-external.sh --channel release
 
 # 上传到个人隔离渠道（互不覆盖，适合多人并行测试）
-bash deploy/upload.sh --channel test-taiye
+bash deploy/upload-inner.sh --channel test-taiye
 
 # 自定义 bucket / 前缀 / 区域
 bash deploy/upload.sh --bucket my-bucket --prefix my/path --region cn-beijing
@@ -179,13 +190,13 @@ bash deploy/upload.sh --bucket my-bucket --prefix my/path --region cn-beijing
 
 #### 渠道隔离
 
-支持三种渠道模式，产物上传到不同的 OSS 路径，互不干扰：
+支持三种渠道模式，产物上传到不同的 OSS 路径，互不干扰。通过 `--external` 切换内外部路径：
 
-| 渠道 | 命令 | OSS 路径 |
-|------|------|----------|
-| `release` | `--channel release` | `loongsuite/loongsuite-pilot/latest/` |
-| `test` | `--channel test`（默认） | `loongsuite-dev/loongsuite-pilot/latest/` |
-| `test-<suffix>` | `--channel test-taiye` | `loongsuite-dev/test-taiye/loongsuite-pilot/latest/` |
+| 渠道 | 命令 | 内部 OSS 路径 | 外部 OSS 路径（`--external`） |
+|------|------|---------------|-------------------------------|
+| `release` | `--channel release` | `loongsuite/loongsuite-pilot/latest/` | `loongsuite-pilot/latest/` |
+| `test` | `--channel test`（默认） | `loongsuite-dev/loongsuite-pilot/latest/` | `loongsuite-pilot-dev/latest/` |
+| `test-<suffix>` | `--channel test-taiye` | `loongsuite-dev/test-taiye/loongsuite-pilot/latest/` | `loongsuite-pilot-dev/test-taiye/latest/` |
 
 `test-<suffix>` 用于多人并行开发时各自隔离测试环境，`<suffix>` 仅允许字母和数字。上传后生成的 installer 和安装包 URL 会自动指向对应的隔离路径。
 
@@ -193,19 +204,22 @@ bash deploy/upload.sh --bucket my-bucket --prefix my/path --region cn-beijing
 
 ### 第三步：远程安装/升级/卸载（用户侧）
 
-`loongsuite-pilot-installer.sh` 支持三个子命令：`install`（默认）、`upgrade`、`uninstall`。
+`installer.sh` 支持三个子命令：`install`（默认）、`upgrade`、`uninstall`。
 
 #### 安装
 
 ```bash
-# 最简安装（不传子命令默认为 install）
-curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/<PREFIX>/loongsuite-pilot-installer.sh | bash
+# 内部安装
+curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/loongsuite/loongsuite-pilot/installer.sh | bash
+
+# 外部安装
+curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/loongsuite-pilot/installer.sh | bash
 
 # 从个人隔离渠道安装（使用对应渠道上传后打印的 URL）
-curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/loongsuite-dev/test-taiye/loongsuite-pilot/loongsuite-pilot-installer.sh | bash
+curl -fsSL https://<BUCKET>.oss-<REGION>.aliyuncs.com/loongsuite-dev/test-taiye/loongsuite-pilot/installer.sh | bash
 
 # 可选：配置用户 SLS 目的地（自动双写到用户 + 内置目的地）
-curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install \
+curl -fsSL <URL>/installer.sh | bash -s -- install \
   --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
   --sls-project "my-project" \
   --sls-logstore "my-logstore" \
@@ -230,7 +244,7 @@ SLS 目的地解析规则（集团内版本）：
 #### 升级
 
 ```bash
-curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- upgrade
+curl -fsSL <URL>/installer.sh | bash -s -- upgrade
 ```
 
 升级流程（无缝，自动回滚）：
@@ -247,10 +261,10 @@ curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- upgrade
 
 ```bash
 # 卸载（保留配置和日志数据）
-curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- uninstall
+curl -fsSL <URL>/installer.sh | bash -s -- uninstall
 
 # 彻底卸载（删除所有数据）
-curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- uninstall --purge
+curl -fsSL <URL>/installer.sh | bash -s -- uninstall --purge
 ```
 
 ### 服务管理
@@ -1349,7 +1363,7 @@ fs.writeFileSync(cfgPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
 3. 删 shell profile 中的 alias / env block（如适用）
 4. 删缓存目录 `~/.cache/opentelemetry.instrumentation.<agent>/`
 
-参考 `deploy/loongsuite-pilot-installer-inner.sh` 中 Claude/Codex 的卸载段。
+参考 `deploy/installer-inner.sh` 中 Claude/Codex 的卸载段。
 
 ### 7.4 已知陷阱
 

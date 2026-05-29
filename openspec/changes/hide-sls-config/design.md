@@ -61,7 +61,7 @@ The desired model is that Loongsuite Pilot owns its default SLS destination as p
 
 - Legacy deployments that intentionally used `config.json` to point SLS at a custom destination will silently stop doing so. Mitigation: document the behavior change in release notes and preserve explicit developer/operator environment overrides if custom routing is still required for internal testing.
 - Internal destination constants in TypeScript are still visible in unobfuscated `tsc` build output. Mitigation: add a release packaging step that bundles/minifies/obfuscates the runtime entrypoint before publishing.
-- Installer scripts may diverge if only one deployment script is updated. Mitigation: update both `deploy/loongsuite-pilot-installer.sh` and `deploy/loongsuite-pilot-installer-inner.sh` together and add script-level review coverage.
+- Installer scripts may diverge if only one deployment script is updated. Mitigation: update both `deploy/installer.sh` and `deploy/installer-inner.sh` together and add script-level review coverage.
 - Tests that assert config-file precedence will need to change. Mitigation: update config-loader tests to assert legacy destination fields are ignored while non-destination SLS settings still apply.
 
 ## Migration Plan

@@ -23,8 +23,8 @@
 
 ## 4. Installer Scripts
 
-- [ ] 4.1 Remove `--default-sls-override` case branch, `DEFAULT_SLS_OVERRIDE` variable, validation logic, and standalone warning from `deploy/loongsuite-pilot-installer.sh`
-- [ ] 4.2 Remove same from `deploy/loongsuite-pilot-installer-inner.sh`
+- [ ] 4.1 Remove `--default-sls-override` case branch, `DEFAULT_SLS_OVERRIDE` variable, validation logic, and standalone warning from `deploy/installer.sh`
+- [ ] 4.2 Remove same from `deploy/installer-inner.sh`
 - [ ] 4.3 Remove `destinationOverride` from the `write_config` Node.js inline snippet in both installer scripts
 - [ ] 4.4 Add error handling: if user passes `--default-sls-override`, print error "this argument is no longer supported" and exit 1
 

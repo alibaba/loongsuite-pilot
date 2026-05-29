@@ -113,5 +113,9 @@ echo "==> Contents:"
 tar -tzf "$OUTPUT_PATH" | head -20
 echo "    ... (truncated)"
 echo ""
-echo "Done. Upload with:  bash deploy/upload.sh"
+if [ "$BUILD_VARIANT" = "external" ]; then
+    echo "Done. Upload with:  bash deploy/upload-external.sh"
+else
+    echo "Done. Upload with:  bash deploy/upload-inner.sh"
+fi
 

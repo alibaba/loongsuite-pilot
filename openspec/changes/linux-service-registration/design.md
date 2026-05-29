@@ -1,6 +1,6 @@
 ## Context
 
-The `loongsuite-pilot.sh` service management script is the single entry point for starting, stopping, and managing the loongsuite-pilot service. It already handles macOS launchd and Linux systemd user-level services. The installer (`loongsuite-pilot-installer.sh`) orchestrates first-time install and calls `loongsuite-pilot start`, which delegates to `autostart_install()`.
+The `loongsuite-pilot.sh` service management script is the single entry point for starting, stopping, and managing the loongsuite-pilot service. It already handles macOS launchd and Linux systemd user-level services. The installer (`installer.sh`) orchestrates first-time install and calls `loongsuite-pilot start`, which delegates to `autostart_install()`.
 
 Key constraint: multiple OS users on the same Linux host may each have their own loongsuite-pilot installation. User-level systemd units are inherently per-user; system-level units use per-user naming to prevent conflicts.
 

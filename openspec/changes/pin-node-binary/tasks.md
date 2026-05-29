@@ -9,12 +9,12 @@
 
 ## 2. Installer — Pin node at install time
 
-- [x] 2.1 In `deploy/loongsuite-pilot-installer.sh`, after `check_deps()` passes, resolve the node binary's real absolute path using `realpath` (with `readlink -f` fallback) and write it to `$DATA_DIR/node-bin`.
+- [x] 2.1 In `deploy/installer.sh`, after `check_deps()` passes, resolve the node binary's real absolute path using `realpath` (with `readlink -f` fallback) and write it to `$DATA_DIR/node-bin`.
 - [x] 2.2 Set `NODE_BIN` and `NPM_BIN="$(dirname "$NODE_BIN")/npm"` from the pin file. Fall back to `command -v npm` if `$NPM_BIN` doesn't exist.
 - [x] 2.3 Replace all `node -e "..."` calls in the installer with `"$NODE_BIN" -e "..."`.
 - [x] 2.4 Replace `npm install --production` in `deploy_package()` with `"$NPM_BIN" install --production`.
 - [x] 2.5 Replace `node scripts/postinstall.js` in `deploy_package()` with `"$NODE_BIN" scripts/postinstall.js`.
-- [x] 2.6 Apply the same changes (2.1–2.5) to `deploy/loongsuite-pilot-installer-inner.sh`.
+- [x] 2.6 Apply the same changes (2.1–2.5) to `deploy/installer-inner.sh`.
 
 ## 3. Hook Scripts — Read pin, unified fallback (read-only)
 

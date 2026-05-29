@@ -2,26 +2,26 @@
 
 ### Requirement: Installer accepts --default-sls-override flag
 
-Both `deploy/loongsuite-pilot-installer.sh` and `deploy/loongsuite-pilot-installer-inner.sh` SHALL accept a `--default-sls-override` flag with a boolean value (`true` or `false`). The default value SHALL be `true`.
+Both `deploy/installer.sh` and `deploy/installer-inner.sh` SHALL accept a `--default-sls-override` flag with a boolean value (`true` or `false`). The default value SHALL be `true`.
 
 The flag SHALL only be persisted into `~/.loongsuite-pilot/config.json` when at least one of `--sls-endpoint`, `--sls-project`, or `--sls-logstore` is also supplied in the same install invocation.
 
 #### Scenario: Flag accepts --default-sls-override=false
-- **WHEN** the user invokes `bash loongsuite-pilot-installer.sh install --sls-project P --sls-logstore L --default-sls-override=false`
+- **WHEN** the user invokes `bash installer.sh install --sls-project P --sls-logstore L --default-sls-override=false`
 - **THEN** the installer SHALL parse the flag without error
 - **AND** SHALL write `sls.destinationOverride: false` into `~/.loongsuite-pilot/config.json`
 - **AND** SHALL also write the user-provided `sls.endpoint`, `sls.project`, `sls.logstore` fields
 
 #### Scenario: Flag accepts --default-sls-override=true
-- **WHEN** the user invokes `bash loongsuite-pilot-installer.sh install --sls-project P --sls-logstore L --default-sls-override=true`
+- **WHEN** the user invokes `bash installer.sh install --sls-project P --sls-logstore L --default-sls-override=true`
 - **THEN** the installer SHALL write `sls.destinationOverride: true` into `~/.loongsuite-pilot/config.json`
 
 #### Scenario: Flag omitted defaults to true with --sls-* args
-- **WHEN** the user invokes `bash loongsuite-pilot-installer.sh install --sls-project P --sls-logstore L` (no `--default-sls-override`)
+- **WHEN** the user invokes `bash installer.sh install --sls-project P --sls-logstore L` (no `--default-sls-override`)
 - **THEN** the installer SHALL write `sls.destinationOverride: true` into `~/.loongsuite-pilot/config.json` (preserving today's behavior)
 
 #### Scenario: Flag without --sls-* args is a no-op with warning
-- **WHEN** the user invokes `bash loongsuite-pilot-installer.sh install --default-sls-override=false` without any `--sls-*` flag
+- **WHEN** the user invokes `bash installer.sh install --default-sls-override=false` without any `--sls-*` flag
 - **THEN** the installer SHALL emit a warning explaining that the flag has no effect without `--sls-*` arguments
 - **AND** SHALL NOT write `sls.destinationOverride` into `~/.loongsuite-pilot/config.json`
 - **AND** the installation SHALL otherwise complete normally (built-in destination only)

@@ -42,7 +42,7 @@ The Updater runs independently so it can restart the Collector without terminati
     ├── latest.json          → { version, git_commit, package_url, released_at }
     ├── latest/*.tar.gz
     ├── <version>/*.tar.gz
-    └── loongsuite-pilot-installer.sh
+    └── installer.sh
 ```
 
 Dual channel: `release` (production) and `test` (pre-release).

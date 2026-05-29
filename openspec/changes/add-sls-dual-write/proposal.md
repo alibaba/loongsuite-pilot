@@ -6,7 +6,7 @@ Today, an SLS-configured installation can only write to **one** SLS destination:
 
 - Extend the existing `sls.destinationOverride` boolean in `config.json` with a new semantics for `false`: instead of being treated as "no override" (which today silently falls back to internal-only), `destinationOverride: false` together with user-provided `sls.*` fields enables **dual-write** to both the user destination and the built-in destination.
 - Move per-destination concerns (`endpoint` URL, `mode`, AK credentials, `redact`) **into each `SlsEndpoint`** so two destinations can live in different SLS regions and use different access methods (one webtracking, one AK).
-- Add a new installer flag `--default-sls-override=true|false` (default `true`) on `loongsuite-pilot-installer.sh` and `loongsuite-pilot-installer-inner.sh`. The flag is only written into `config.json` when at least one `--sls-*` flag is also supplied.
+- Add a new installer flag `--default-sls-override=true|false` (default `true`) on `installer.sh` and `installer-inner.sh`. The flag is only written into `config.json` when at least one `--sls-*` flag is also supplied.
 - The built-in destination (`INTERNAL_SLS_DESTINATION`) is **never** materialized in `config.json`. It is appended in memory by `buildSlsConfig` only when (a) user `sls.*` fields are present **and** (b) `destinationOverride === false`.
 - Switch failed-log persistence to key files by `endpoint.name` instead of `endpoint.kind`, so two endpoints serving the same `kind: 'agentActivity'` no longer collide on the same `.jsonl` file.
 
@@ -26,7 +26,7 @@ Today, an SLS-configured installation can only write to **one** SLS destination:
   - `src/core/config-loader.ts` — `buildSlsConfig` resolution rules updated to encode the three-case matrix.
   - `src/internal/sls-destination.ts` — adds an `endpoint.name` constant for the internal leg (e.g., `internal-default`).
   - `src/flushers/sls-flusher.ts` — webtracking URL builder uses `endpoint.endpoint`; AK client is constructed per endpoint at send time (or cached by name); `persistFailedLogs` keys by `endpoint.name`.
-  - `deploy/loongsuite-pilot-installer.sh` and `deploy/loongsuite-pilot-installer-inner.sh` — new `--default-sls-override` arg parsing and `write_config` branch.
+  - `deploy/installer.sh` and `deploy/installer-inner.sh` — new `--default-sls-override` arg parsing and `write_config` branch.
 - **Affected Baseline Modules**:
   - `docs/modules/flushers.md` — SLS multi-endpoint dispatch and per-endpoint mode.
   - `docs/modules/core.md` — `config-loader` resolution rules for SLS.

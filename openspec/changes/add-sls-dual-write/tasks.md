@@ -28,8 +28,8 @@
 
 ## 4. Installer flag wiring
 
-- [ ] 4.1 In `deploy/loongsuite-pilot-installer.sh`, add a `DEFAULT_SLS_OVERRIDE_RAW=""` variable and parse `--default-sls-override <val>` and `--default-sls-override=<val>` accepting `true|false`; reject other values
-- [ ] 4.2 Mirror the same parsing in `deploy/loongsuite-pilot-installer-inner.sh`
+- [ ] 4.1 In `deploy/installer.sh`, add a `DEFAULT_SLS_OVERRIDE_RAW=""` variable and parse `--default-sls-override <val>` and `--default-sls-override=<val>` accepting `true|false`; reject other values
+- [ ] 4.2 Mirror the same parsing in `deploy/installer-inner.sh`
 - [ ] 4.3 In `write_config` (both scripts), only inject `config.sls.destinationOverride` into the output JSON when the user supplied at least one of `--sls-endpoint`, `--sls-project`, `--sls-logstore`; otherwise emit a warning if `--default-sls-override` was supplied alone
 - [ ] 4.4 When `--sls-*` args are supplied and the override flag was not given, default to `destinationOverride: true` (preserves today's behavior)
 - [ ] 4.5 Update the help/comment block at the top of both installer scripts to document the new flag and the dual-write use case

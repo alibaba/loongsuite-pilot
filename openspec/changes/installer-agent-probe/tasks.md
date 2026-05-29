@@ -77,7 +77,7 @@ Ensure `AgentDiscoveryService.processEntry()` checks this gate before starting a
 
 ### Task 5: Add new parameters to non-inner installer script
 
-**File**: `deploy/loongsuite-pilot-installer.sh`
+**File**: `deploy/installer.sh`
 
 Add parameter parsing for:
 - `--collect-log` (value: true/false)
@@ -94,7 +94,7 @@ Add variables at the top alongside existing ones.
 
 ### Task 6: Add probe_agents() function to non-inner installer
 
-**File**: `deploy/loongsuite-pilot-installer.sh`
+**File**: `deploy/installer.sh`
 
 Implement `probe_agents()`:
 - Call `$NODE_BIN "$INSTALL_SRC/dist/cli-probe.js" --json`
@@ -107,7 +107,7 @@ Insert call in `cmd_install()` after `download_and_extract` and before `deploy_p
 
 ### Task 7: Add select_agents() interactive menu to non-inner installer
 
-**File**: `deploy/loongsuite-pilot-installer.sh`
+**File**: `deploy/installer.sh`
 
 Implement `select_agents()`:
 - If `--agents` was provided, use it directly and skip interaction
@@ -124,7 +124,7 @@ Handle non-tty stdin: if stdin is not a terminal, auto-select all detected agent
 
 ### Task 8: Extend write_config() with new parameters
 
-**File**: `deploy/loongsuite-pilot-installer.sh`
+**File**: `deploy/installer.sh`
 
 Extend the inline Node.js script in `write_config()` to persist:
 - `config.collectLog` (from `--collect-log`)

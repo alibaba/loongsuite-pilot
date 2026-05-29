@@ -2,7 +2,7 @@
 
 The SLS flusher today resolves a single SLS destination via `buildSlsConfig` in [`src/core/config-loader.ts`](file:///Users/lukechen/dev/loongsuite-pilot/src/core/config-loader.ts), producing a `SlsFlusherConfig` with a single shared `endpoint` URL/`mode`/AK pair plus an `endpoints[]` array of length 1. The flusher already iterates `endpoints[]`, so the structural fan-out path exists; it is the resolution layer and the per-endpoint shape that block multi-destination usage.
 
-Two installers (`loongsuite-pilot-installer.sh`, `loongsuite-pilot-installer-inner.sh`) live at `deploy/`. After diffing, they only differ in cosmetic places (an arch-mismatch warning and a status-check refactor) and are uploaded side-by-side to the same OSS prefix by [`deploy/upload.sh`](file:///Users/lukechen/dev/loongsuite-pilot/deploy/upload.sh). Today the `-inner` suffix carries no behavioral signal.
+Two installers (`installer.sh`, `installer-inner.sh`) live at `deploy/`. After diffing, they only differ in cosmetic places (an arch-mismatch warning and a status-check refactor) and are uploaded side-by-side to the same OSS prefix by [`deploy/upload.sh`](file:///Users/lukechen/dev/loongsuite-pilot/deploy/upload.sh). Today the `-inner` suffix carries no behavioral signal.
 
 External teams are now adopting loongsuite-pilot. They want to ship telemetry to their own SLS project for team-level analytics while internal teams still want the built-in `loongsuite_pilot_for_ai_coding` to receive a copy for ecosystem-wide observability. A single destination cannot serve both readers.
 

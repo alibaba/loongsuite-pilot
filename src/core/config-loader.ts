@@ -512,8 +512,15 @@ function buildHttpConfig(file: ConfigFile | null) {
 }
 
 const BASE_PACKAGE_URL = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/';
-const RELEASE_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite/loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
-const TEST_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite-dev/loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
+
+const INTERNAL_RELEASE_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite/loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
+const INTERNAL_TEST_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite-dev/loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
+
+const EXTERNAL_RELEASE_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
+const EXTERNAL_TEST_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite-pilot-dev/latest/loongsuite-pilot.tar.gz`;
+
+const RELEASE_PACKAGE_URL = __INTERNAL_BUILD__ ? INTERNAL_RELEASE_PACKAGE_URL : EXTERNAL_RELEASE_PACKAGE_URL;
+const TEST_PACKAGE_URL = __INTERNAL_BUILD__ ? INTERNAL_TEST_PACKAGE_URL : EXTERNAL_TEST_PACKAGE_URL;
 
 const DEFAULT_CHECK_INTERVAL_MS = 60_000; // 1 minute
 
@@ -523,7 +530,10 @@ function resolveDefaultPackageUrl(): string {
   if (channel === 'test' || channel === 'pre') {
     return TEST_PACKAGE_URL;
   } else if (/^(test-[a-zA-Z0-9]+)$/.test(channel)) {
-    return `${BASE_PACKAGE_URL}loongsuite-dev/${channel}/loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
+    const testPrefix = __INTERNAL_BUILD__
+      ? `loongsuite-dev/${channel}/loongsuite-pilot`
+      : `loongsuite-pilot-dev/${channel}`;
+    return `${BASE_PACKAGE_URL}${testPrefix}/latest/loongsuite-pilot.tar.gz`;
   } else {
     return RELEASE_PACKAGE_URL;
   }

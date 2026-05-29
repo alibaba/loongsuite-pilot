@@ -28,9 +28,9 @@
 
 ## 5. Installer Updates
 
-- [x] 5.1 Add `--system-service` parameter parsing to `deploy/loongsuite-pilot-installer.sh`. Pass it through to `loongsuite-pilot start`.
+- [x] 5.1 Add `--system-service` parameter parsing to `deploy/installer.sh`. Pass it through to `loongsuite-pilot start`.
 - [x] 5.2 Move `check_sudo_access()` call in installer to only execute when `--system-service` is specified.
-- [x] 5.3 Mirror changes to `deploy/loongsuite-pilot-installer-inner.sh`.
+- [x] 5.3 Mirror changes to `deploy/installer-inner.sh`.
 
 ## 6. Testing
 

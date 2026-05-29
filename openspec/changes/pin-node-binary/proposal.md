@@ -31,8 +31,8 @@ Node.js version discovery is duplicated across 5 shell scripts with subtly diffe
 ## Impact
 
 - Affected files:
-  - `deploy/loongsuite-pilot-installer.sh` — write pin after `check_deps()`; use pinned node for `npm install` and `node -e`.
-  - `deploy/loongsuite-pilot-installer-inner.sh` — same changes.
+  - `deploy/installer.sh` — write pin after `check_deps()`; use pinned node for `npm install` and `node -e`.
+  - `deploy/installer-inner.sh` — same changes.
   - `scripts/loongsuite-pilot.sh` — `resolve_node()` reads pin; fix bare `node` in `cmd_start()`/`cmd_restart_collector()`; show pin in `cmd_info()`.
   - `assets/hooks/cursor-loongsuite-pilot-hook.sh` — replace node discovery with pin-first + unified fallback.
   - `assets/hooks/qoder-loongsuite-pilot-hook.sh` — same.

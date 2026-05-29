@@ -7,8 +7,8 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.
 
 describe('installer SLS config output', () => {
   const installers = [
-    'deploy/loongsuite-pilot-installer.sh',
-    'deploy/loongsuite-pilot-installer-inner.sh',
+    'deploy/installer.sh',
+    'deploy/installer-inner.sh',
   ];
 
   it.each(installers)('%s does not default to a user-visible SLS destination', async (installer) => {

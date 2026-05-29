@@ -58,7 +58,7 @@ node dist/index.js
 ```bash
 bash deploy/package.sh
 # 然后像生产环境一样解压并安装：
-bash deploy/loongsuite-pilot-installer.sh install --local ./loongsuite-pilot.tar.gz
+bash deploy/installer.sh install --local ./loongsuite-pilot.tar.gz
 ```
 
 关键安装步骤说明：部署到 `~/.loongsuite-pilot/versions/{ver}_{commit}/`，执行 postinstall（部署 hooks），更新 `current` 指针，注册自动启动。
@@ -708,7 +708,7 @@ rm ~/.loongsuite-pilot/logs/snapshot-store.json
 rm ~/.loongsuite-pilot/logs/output/*.jsonl
 
 # 完全卸载（如果测试安装器）：
-bash deploy/loongsuite-pilot-installer.sh uninstall --purge
+bash deploy/installer.sh uninstall --purge
 ```
 
 ## 11. 自动化测试脚本示例
@@ -939,7 +939,7 @@ loongsuite-pilot status
 
 ```bash
 # Case C：双写
-bash deploy/loongsuite-pilot-installer.sh install \
+bash deploy/installer.sh install \
   --local ./loongsuite-pilot.tar.gz \
   --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
   --sls-project "<你的 project>" \
@@ -947,7 +947,7 @@ bash deploy/loongsuite-pilot-installer.sh install \
   --default-sls-override=false
 
 # Case B（默认）：仅用户目的地
-bash deploy/loongsuite-pilot-installer.sh install \
+bash deploy/installer.sh install \
   --local ./loongsuite-pilot.tar.gz \
   --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
   --sls-project "<你的 project>" \

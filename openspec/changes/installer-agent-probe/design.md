@@ -65,7 +65,7 @@ $ node dist/cli-probe.js [--json]
 
 ---
 
-## 2. 安装脚本改动 (`deploy/loongsuite-pilot-installer.sh`)
+## 2. 安装脚本改动 (`deploy/installer.sh`)
 
 ### 2.1 新增参数解析
 

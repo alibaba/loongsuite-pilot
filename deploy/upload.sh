@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# upload.sh — Upload package + loongsuite-pilot-installer.sh to Alibaba Cloud OSS
+# upload.sh — Upload package + installer.sh to Alibaba Cloud OSS
 #
 # Prerequisites:
 #   - ossutil installed (https://help.aliyun.com/document_detail/120075.html)
@@ -8,7 +8,8 @@
 #     ossutil config -e oss-cn-hangzhou.aliyuncs.com -i <AK_ID> -k <AK_SECRET>
 #
 # Usage:
-#   bash deploy/upload.sh                              # defaults to test channel
+#   bash deploy/upload.sh                              # internal (default), test channel
+#   bash deploy/upload.sh --external                   # external, test channel
 #   bash deploy/upload.sh --channel release            # upload to release path
 #   bash deploy/upload.sh --channel test               # upload to test path (default)
 #   bash deploy/upload.sh --channel test-<self>        # upload to test path (self dir)
@@ -28,16 +29,23 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# ── Channel presets ──
-# release: production bucket, end-user facing
-# test:    pre-release bucket, internal testing
-_RELEASE_BUCKET="aliyun-observability-release-cn-shanghai"
-_RELEASE_PREFIX="loongsuite/loongsuite-pilot"
-_RELEASE_REGION="cn-shanghai"
+# ── Internal channel presets (default) ──
+_INNER_RELEASE_BUCKET="aliyun-observability-release-cn-shanghai"
+_INNER_RELEASE_PREFIX="loongsuite/loongsuite-pilot"
+_INNER_RELEASE_REGION="cn-shanghai"
 
-_TEST_BUCKET="aliyun-observability-release-cn-shanghai"
-_TEST_PREFIX="loongsuite-dev/loongsuite-pilot"
-_TEST_REGION="cn-shanghai"
+_INNER_TEST_BUCKET="aliyun-observability-release-cn-shanghai"
+_INNER_TEST_PREFIX="loongsuite-dev/loongsuite-pilot"
+_INNER_TEST_REGION="cn-shanghai"
+
+# ── External channel presets ──
+_EXT_RELEASE_BUCKET="aliyun-observability-release-cn-shanghai"
+_EXT_RELEASE_PREFIX="loongsuite-pilot"
+_EXT_RELEASE_REGION="cn-shanghai"
+
+_EXT_TEST_BUCKET="aliyun-observability-release-cn-shanghai"
+_EXT_TEST_PREFIX="loongsuite-pilot-dev"
+_EXT_TEST_REGION="cn-shanghai"
 
 # ── Defaults (test channel is the safe default for dev) ──
 CHANNEL="${LOONGSUITE_PILOT_CHANNEL:-test}"
@@ -45,12 +53,13 @@ BUCKET="${OSS_BUCKET:-}"
 PREFIX="${OSS_PREFIX:-}"
 REGION="${OSS_REGION:-}"
 PKG_PATH="$PROJECT_ROOT/loongsuite-pilot.tar.gz"
-INSTALLER_SCRIPT="$PROJECT_ROOT/deploy/loongsuite-pilot-installer.sh"
-INSTALLER_INNER_SCRIPT="$PROJECT_ROOT/deploy/loongsuite-pilot-installer-inner.sh"
+DEPLOY_MODE="internal"
 PATCHELF_SCRIPT="$PROJECT_ROOT/deploy/patchelf_node_for_7u.sh"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --external)
+            DEPLOY_MODE="external"; shift ;;
         --channel)
             CHANNEL="$2"; shift 2 ;;
         --channel=*)
@@ -76,6 +85,25 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Select installer script and presets based on deploy mode
+if [ "$DEPLOY_MODE" = "external" ]; then
+    INSTALLER_SCRIPT="$PROJECT_ROOT/deploy/installer.sh"
+    _RELEASE_BUCKET="$_EXT_RELEASE_BUCKET"
+    _RELEASE_PREFIX="$_EXT_RELEASE_PREFIX"
+    _RELEASE_REGION="$_EXT_RELEASE_REGION"
+    _TEST_BUCKET="$_EXT_TEST_BUCKET"
+    _TEST_PREFIX="$_EXT_TEST_PREFIX"
+    _TEST_REGION="$_EXT_TEST_REGION"
+else
+    INSTALLER_SCRIPT="$PROJECT_ROOT/deploy/installer-inner.sh"
+    _RELEASE_BUCKET="$_INNER_RELEASE_BUCKET"
+    _RELEASE_PREFIX="$_INNER_RELEASE_PREFIX"
+    _RELEASE_REGION="$_INNER_RELEASE_REGION"
+    _TEST_BUCKET="$_INNER_TEST_BUCKET"
+    _TEST_PREFIX="$_INNER_TEST_PREFIX"
+    _TEST_REGION="$_INNER_TEST_REGION"
+fi
+
 # Apply channel presets for any value not explicitly overridden
 case "$CHANNEL" in
     release|prod)
@@ -91,11 +119,14 @@ case "$CHANNEL" in
         REGION="${REGION:-$_TEST_REGION}"
         ;;
     test-*)
-        # check test-suffix: test-taiye → prefix loongsuite-dev/test-taiye/loongsuite-pilot
         if [[ "$CHANNEL" =~ ^test-[a-zA-Z0-9]+$ ]]; then
             CHANNEL_CANONICAL="${CHANNEL}"
             BUCKET="${BUCKET:-$_TEST_BUCKET}"
-            PREFIX="${PREFIX:-loongsuite-dev/${CHANNEL}/loongsuite-pilot}"
+            if [ "$DEPLOY_MODE" = "external" ]; then
+                PREFIX="${PREFIX:-loongsuite-pilot-dev/${CHANNEL}}"
+            else
+                PREFIX="${PREFIX:-loongsuite-dev/${CHANNEL}/loongsuite-pilot}"
+            fi
             REGION="${REGION:-$_TEST_REGION}"
         else
             echo "❌ Invalid format: requires a single suffix after 'test-'" >&2
@@ -127,11 +158,6 @@ if [ ! -f "$INSTALLER_SCRIPT" ]; then
     exit 1
 fi
 
-if [ ! -f "$INSTALLER_INNER_SCRIPT" ]; then
-    echo "❌ Inner installer script not found: $INSTALLER_INNER_SCRIPT"
-    exit 1
-fi
-
 if [ ! -f "$PATCHELF_SCRIPT" ]; then
     echo "❌ Patchelf script not found: $PATCHELF_SCRIPT"
     exit 1
@@ -153,6 +179,7 @@ if [ -z "$PKG_VER" ]; then
 fi
 
 echo "==> Upload target"
+echo "    Mode:     $DEPLOY_MODE"
 echo "    Channel:  $CHANNEL"
 echo "    Bucket:   $BUCKET"
 echo "    Prefix:   $PREFIX"
@@ -173,7 +200,7 @@ prepare_channel_installer() {
     local src="$1"
     local out
     out="$(mktemp)"
-    sed "s#LOONGSUITE_PILOT_DEFAULT_CHANNEL:-release#LOONGSUITE_PILOT_DEFAULT_CHANNEL:-${CHANNEL_CANONICAL}#" "$src" > "$out"    
+    sed "s#LOONGSUITE_PILOT_DEFAULT_CHANNEL:-release#LOONGSUITE_PILOT_DEFAULT_CHANNEL:-${CHANNEL_CANONICAL}#" "$src" > "$out"
     chmod +x "$out"
     echo "$out"
 }
@@ -215,18 +242,14 @@ echo "    ✅ ${PUBLIC_BASE}/latest.json"
 rm -f "$MANIFEST_TMP"
 echo ""
 
-# ── Upload installer scripts (version-independent, stays at prefix root) ──
-INSTALLER_NAME="loongsuite-pilot-installer.sh"
-INSTALLER_INNER_NAME="loongsuite-pilot-installer-inner.sh"
+# ── Upload installer script (version-independent, stays at prefix root) ──
+INSTALLER_NAME="installer.sh"
 PATCHELF_NAME="patchelf_node_for_7u.sh"
-echo "==> Uploading installers: $INSTALLER_NAME, $INSTALLER_INNER_NAME, $PATCHELF_NAME"
+echo "==> Uploading installer ($DEPLOY_MODE): $INSTALLER_NAME, $PATCHELF_NAME"
 INSTALLER_UPLOAD="$(prepare_channel_installer "$INSTALLER_SCRIPT")"
-INSTALLER_INNER_UPLOAD="$(prepare_channel_installer "$INSTALLER_INNER_SCRIPT")"
-trap 'rm -f "$MANIFEST_TMP" "$INSTALLER_UPLOAD" "$INSTALLER_INNER_UPLOAD"' EXIT
+trap 'rm -f "$MANIFEST_TMP" "$INSTALLER_UPLOAD"' EXIT
 upload_file "$INSTALLER_UPLOAD"       "${OSS_BASE}/${INSTALLER_NAME}"       "installer"
 echo "    ✅ ${PUBLIC_BASE}/${INSTALLER_NAME}"
-upload_file "$INSTALLER_INNER_UPLOAD" "${OSS_BASE}/${INSTALLER_INNER_NAME}" "installer-inner"
-echo "    ✅ ${PUBLIC_BASE}/${INSTALLER_INNER_NAME}"
 upload_file "$PATCHELF_SCRIPT"        "${OSS_BASE}/${PATCHELF_NAME}"        "patchelf-script"
 echo "    ✅ ${PUBLIC_BASE}/${PATCHELF_NAME}"
 echo ""
@@ -235,7 +258,7 @@ echo ""
 PKG_SIZE=$(du -h "$PKG_PATH" | cut -f1)
 
 echo "============================================================"
-echo "✅ Upload complete!  Version: ${PKG_VER}"
+echo "✅ Upload complete!  Mode: ${DEPLOY_MODE}  Version: ${PKG_VER}"
 echo ""
 echo "📦 Versioned package ($PKG_SIZE):"
 echo "   ${PUBLIC_BASE}/${PKG_VER}/${PKG_NAME}"

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# loongsuite-pilot-installer.sh — Unified installer for loongsuite-pilot
+# installer.sh — Unified installer for loongsuite-pilot
 #
 # Install (first time):
-#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash
-#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install \
+#   curl -fsSL <URL>/installer.sh | bash
+#   curl -fsSL <URL>/installer.sh | bash -s -- install \
 #     --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
 #     --sls-project "my-project" \
 #     --sls-logstore "my-logstore" \
@@ -12,16 +12,16 @@
 #
 #
 # Install from test channel:
-#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install --channel test
-#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- install --channel test-<self> or test/<self>
+#   curl -fsSL <URL>/installer.sh | bash -s -- install --channel test
+#   curl -fsSL <URL>/installer.sh | bash -s -- install --channel test-<self> or test/<self>
 #
 # Upgrade (preserve config, auto-rollback on failure):
-#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- upgrade
-#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- upgrade --package-url <url>
+#   curl -fsSL <URL>/installer.sh | bash -s -- upgrade
+#   curl -fsSL <URL>/installer.sh | bash -s -- upgrade --package-url <url>
 #
 # Uninstall:
-#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- uninstall
-#   curl -fsSL <URL>/loongsuite-pilot-installer.sh | bash -s -- uninstall --purge
+#   curl -fsSL <URL>/installer.sh | bash -s -- uninstall
+#   curl -fsSL <URL>/installer.sh | bash -s -- uninstall --purge
 
 set -euo pipefail
 
@@ -31,6 +31,8 @@ set -euo pipefail
 PACKAGE_NAME="loongsuite-pilot"
 PERMANENT_DIR="$HOME/.loongsuite-pilot/package"
 DEFAULT_DATA_DIR="$HOME/.loongsuite-pilot"
+OTEL_CLAUDE_DIR="$HOME/.cache/opentelemetry.instrumentation.claude"
+OTEL_CODEX_DIR="$HOME/.cache/opentelemetry.instrumentation.codex"
 
 # Channel presets: release (production) vs test (pre-release)
 _RELEASE_BASE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite/loongsuite-pilot"
@@ -52,13 +54,6 @@ SLS_AK_SECRET=""
 DATA_DIR="$DEFAULT_DATA_DIR"
 LOG_LEVEL=""
 USER_ID=""
-COLLECT_LOG=""
-COLLECT_TRACE=""
-CMS_LICENSE_KEY=""
-CMS_ENDPOINT=""
-CMS_WORKSPACE=""
-SERVICE_NAME_PREFIX=""
-SELECTED_AGENTS=""
 HAS_SUDO=0
 PURGE=0
 SYSTEM_SERVICE=0
@@ -106,20 +101,6 @@ while [[ $# -gt 0 ]]; do
         --version=*)          INSTALL_VERSION="${1#*=}"; shift ;;
         --channel)            CHANNEL="$2"; shift 2 ;;
         --channel=*)          CHANNEL="${1#*=}"; shift ;;
-        --collect-log)        COLLECT_LOG="$2"; shift 2 ;;
-        --collect-log=*)      COLLECT_LOG="${1#*=}"; shift ;;
-        --collect-trace)      COLLECT_TRACE="$2"; shift 2 ;;
-        --collect-trace=*)    COLLECT_TRACE="${1#*=}"; shift ;;
-        --cms-license-key)    CMS_LICENSE_KEY="$2"; shift 2 ;;
-        --cms-license-key=*)  CMS_LICENSE_KEY="${1#*=}"; shift ;;
-        --cms-endpoint)       CMS_ENDPOINT="$2"; shift 2 ;;
-        --cms-endpoint=*)     CMS_ENDPOINT="${1#*=}"; shift ;;
-        --cms-workspace)      CMS_WORKSPACE="$2"; shift 2 ;;
-        --cms-workspace=*)    CMS_WORKSPACE="${1#*=}"; shift ;;
-        --service-name-prefix) SERVICE_NAME_PREFIX="$2"; shift 2 ;;
-        --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
-        --agents)             SELECTED_AGENTS="$2"; shift 2 ;;
-        --agents=*)           SELECTED_AGENTS="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
         --system-service)     SYSTEM_SERVICE=1; shift ;;
         *)
@@ -304,17 +285,6 @@ check_deps() {
         fi
     fi
 
-    if [ "$(uname)" = "Darwin" ]; then
-        local sys_arch; sys_arch=$(uname -m)
-        local node_arch; node_arch=$("$NODE_BIN" -e "process.stdout.write(process.arch)")
-        if [ "$sys_arch" = "arm64" ] && [ "$node_arch" = "x64" ]; then
-            msg "⚠️  架构不匹配: 系统为 arm64 (Apple Silicon)，但 Node.js 为 x64 (Intel)" \
-                "⚠️  Architecture mismatch: system is arm64 but Node.js is x64 (Intel)"
-            msg "   原生模块可能无法正常加载，建议安装 arm64 版本的 Node.js" \
-                "   Native modules may fail to load. Please install arm64 Node.js"
-        fi
-    fi
-
     if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
         msg "❌ 需要 curl 或 wget，请先安装" \
             "❌ curl or wget is required — please install one first"
@@ -366,198 +336,6 @@ download_and_extract() {
     fi
     msg "    ✅ 解压完成" "    ✅ Extracted"
     echo ""
-}
-
-# ============================================================
-# Agent probe: detect available agents via Node.js CLI probe
-# ============================================================
-PROBE_RESULT="[]"
-
-probe_agents() {
-    msg "==> 探测 AI Agent..." "==> Probing AI Agents..."
-    PROBE_RESULT=$("$NODE_BIN" "$INSTALL_SRC/dist/cli-probe.cjs" 2>/dev/null) || {
-        msg "    ⚠️  Agent 探测失败，将跳过选择" "    ⚠️  Agent probe failed, skipping selection"
-        PROBE_RESULT="[]"
-        return 0
-    }
-    local count
-    count=$("$NODE_BIN" -e "const r=JSON.parse(process.argv[1]);process.stdout.write(String(r.length))" "$PROBE_RESULT" 2>/dev/null || echo "0")
-    msg "    ✅ 探测到 ${count} 个 Agent 定义" "    ✅ Found ${count} agent definitions"
-    echo ""
-}
-
-# ============================================================
-# Agent selection: interactive menu or --agents flag
-# ============================================================
-select_agents() {
-    if [ -n "$SELECTED_AGENTS" ]; then
-        msg "    使用指定的 Agent: $SELECTED_AGENTS" "    Using specified agents: $SELECTED_AGENTS"
-        echo ""
-        return 0
-    fi
-
-    local agent_count
-    agent_count=$("$NODE_BIN" -e "const r=JSON.parse(process.argv[1]);process.stdout.write(String(r.length))" "$PROBE_RESULT" 2>/dev/null || echo "0")
-    if [ "$agent_count" = "0" ]; then
-        return 0
-    fi
-
-    # Non-interactive: auto-select all detected agents
-    if [ ! -t 0 ]; then
-        SELECTED_AGENTS=$("$NODE_BIN" -e "
-const r = JSON.parse(process.argv[1]);
-const detected = r.filter(a => a.detected).map(a => a.id);
-process.stdout.write(detected.join(','));
-" "$PROBE_RESULT" 2>/dev/null || true)
-        msg "    (非交互模式) 自动选择已检测到的 Agent: $SELECTED_AGENTS" \
-            "    (non-interactive) Auto-selected detected agents: $SELECTED_AGENTS"
-        echo ""
-        return 0
-    fi
-
-    # Interactive menu
-    "$NODE_BIN" -e "
-const r = JSON.parse(process.argv[1]);
-const lang = process.argv[2];
-const defaults = [];
-for (let i = 0; i < r.length; i++) {
-  const a = r[i];
-  const status = lang === 'zh'
-    ? (a.detected ? '已检测到: ' + a.reason : '未检测到')
-    : (a.detected ? 'detected: ' + a.reason : 'not detected');
-  console.log('    [' + (i+1) + '] ' + a.displayName.padEnd(16) + '(' + status + ')');
-  if (a.detected) defaults.push(i+1);
-}
-console.log('');
-if (lang === 'zh') {
-  console.log('    默认选择已检测到的 Agent: ' + defaults.join(','));
-  console.log('    输入要启用的编号 (逗号分隔)，直接回车使用默认:');
-} else {
-  console.log('    Default selection (detected): ' + defaults.join(','));
-  console.log('    Enter numbers to enable (comma-separated), press Enter for default:');
-}
-" "$PROBE_RESULT" "$LANG_MODE"
-
-    # Read user input
-    local select_input
-    read -r select_input
-
-    # Compute final selection: empty input = detected agents, otherwise use exact input
-    SELECTED_AGENTS=$("$NODE_BIN" -e "
-const r = JSON.parse(process.argv[1]);
-const input = process.argv[2] || '';
-let indices;
-if (!input.trim()) {
-  indices = r.map((a, i) => a.detected ? i : -1).filter(i => i >= 0);
-} else {
-  indices = [...new Set(input.trim().split(/[\s,]+/).map(Number).filter(n => n >= 1 && n <= r.length))].map(n => n - 1);
-}
-const ids = indices.sort((a,b) => a-b).map(i => r[i].id);
-process.stdout.write(ids.join(','));
-" "$PROBE_RESULT" "$select_input" 2>/dev/null || true)
-
-    if [ -n "$SELECTED_AGENTS" ]; then
-        msg "    已选择: $SELECTED_AGENTS" "    Selected: $SELECTED_AGENTS"
-    else
-        msg "    未选择任何 Agent" "    No agents selected"
-    fi
-    echo ""
-}
-
-# ============================================================
-# Interactive: prompt for userId (skipped when --userId given or non-interactive)
-# ============================================================
-prompt_user_id() {
-    if [ -n "$USER_ID" ]; then return 0; fi
-    if [ ! -t 0 ]; then return 0; fi
-
-    local existing_uid=""
-    local config_file="$DATA_DIR/config.json"
-    if [ -f "$config_file" ]; then
-        existing_uid=$("$NODE_BIN" -e "
-try { const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf-8')); process.stdout.write(c.userId||''); } catch {}
-" -- "$config_file" 2>/dev/null || true)
-    fi
-
-    echo ""
-    if [ -n "$existing_uid" ]; then
-        msg "    当前 userId: $existing_uid" \
-            "    Current userId: $existing_uid"
-        msg "    直接回车保留，或输入新值:" \
-            "    Press Enter to keep, or type a new value:"
-    else
-        msg "    请输入你的 userId（用于数据归属，可直接回车跳过）:" \
-            "    Enter your userId (for data attribution, press Enter to skip):"
-    fi
-    printf "    > "
-    local input
-    read -r input
-    input=$(echo "$input" | tr -d '[:space:]')
-    if [ -n "$input" ]; then
-        USER_ID="$input"
-    elif [ -n "$existing_uid" ]; then
-        USER_ID="$existing_uid"
-    fi
-}
-
-# ============================================================
-# Interactive: confirm config overwrite when key fields differ
-# ============================================================
-confirm_config_overwrite() {
-    local config_file="$DATA_DIR/config.json"
-    if [ ! -f "$config_file" ]; then return 0; fi
-
-    local diffs
-    diffs=$("$NODE_BIN" -e "
-const fs = require('fs');
-let old = {};
-try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
-
-const newVals = JSON.parse(process.argv[2]);
-const checks = [
-  { label: 'sls.endpoint',       oldVal: (old.sls||{}).endpoint||'',       newVal: newVals.slsEndpoint },
-  { label: 'sls.project',        oldVal: (old.sls||{}).project||'',        newVal: newVals.slsProject },
-  { label: 'sls.logstore',       oldVal: (old.sls||{}).logstore||'',       newVal: newVals.slsLogstore },
-  { label: 'cms.licenseKey',     oldVal: (old.cms||{}).licenseKey||'',     newVal: newVals.cmsLicenseKey },
-  { label: 'cms.endpoint',       oldVal: (old.cms||{}).endpoint||'',       newVal: newVals.cmsEndpoint },
-  { label: 'cms.workspace',      oldVal: (old.cms||{}).workspace||'',      newVal: newVals.cmsWorkspace },
-  { label: 'serviceNamePrefix',  oldVal: old.serviceNamePrefix||'',        newVal: newVals.serviceNamePrefix },
-];
-
-const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
-if (!changed.length) process.exit(0);
-
-for (const c of changed) {
-  console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
-}
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX")" 2>/dev/null || true)
-
-    if [ -z "$diffs" ]; then return 0; fi
-
-    echo ""
-    msg "⚠️  以下配置将被覆盖:" "⚠️  The following config will be overwritten:"
-    echo "$diffs" | while IFS= read -r line; do
-        echo "    $line"
-    done
-
-    if [ -t 0 ]; then
-        echo ""
-        msg "    确认覆盖? (y/N):" "    Confirm overwrite? (y/N):"
-        printf "    > "
-        local answer
-        read -r answer
-        case "$answer" in
-            y|Y|yes|YES) ;;
-            *)
-                msg "已取消安装" "Installation cancelled"
-                exit 0
-                ;;
-        esac
-    else
-        msg "    (非交互模式) 继续覆盖" \
-            "    (non-interactive) Proceeding with overwrite"
-    fi
 }
 
 # ============================================================
@@ -630,8 +408,6 @@ deploy_package() {
         "$NODE_BIN" scripts/postinstall.js
     fi
     msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
-    msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
-        "    If using Codex desktop app, please manually trust hooks on first launch"
     echo ""
 }
 
@@ -740,38 +516,8 @@ if (updateUrl) {
   config.autoUpdate.packageUrl = updateUrl;
 }
 
-const collectLog = '${COLLECT_LOG}';
-const collectTrace = '${COLLECT_TRACE}';
-const cmsLicenseKey = '${CMS_LICENSE_KEY}';
-const cmsEndpoint = '${CMS_ENDPOINT}';
-const cmsWorkspace = '${CMS_WORKSPACE}';
-const serviceNamePrefix = '${SERVICE_NAME_PREFIX}';
-const selectedAgents = '${SELECTED_AGENTS}';
-
-if (collectLog) config.collectLog = collectLog === 'true';
-if (collectTrace) config.collectTrace = collectTrace === 'true';
-
-if (cmsLicenseKey || cmsEndpoint || cmsWorkspace) {
-  config.cms = config.cms || {};
-  if (cmsLicenseKey) config.cms.licenseKey = cmsLicenseKey;
-  if (cmsEndpoint) config.cms.endpoint = cmsEndpoint;
-  if (cmsWorkspace) config.cms.workspace = cmsWorkspace;
-}
-
-if (serviceNamePrefix) config.serviceNamePrefix = serviceNamePrefix;
-
-if (selectedAgents) {
-  config.agents = config.agents || {};
-  const selected = selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
-  const allAgents = JSON.parse(process.argv[1] || '[]');
-  for (const agent of allAgents) {
-    config.agents[agent.id] = config.agents[agent.id] || {};
-    config.agents[agent.id].enabled = selected.includes(agent.id);
-  }
-}
-
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
-" -- "$PROBE_RESULT"
+"
     msg "    ✅ 配置已写入" "    ✅ Config written"
     echo ""
 }
@@ -835,6 +581,10 @@ PATHBLOCK
 }
 
 # ============================================================
+# Common: fix file ownership when installed via sudo
+# ============================================================
+
+# ============================================================
 # Common: read VERSION file fields
 # ============================================================
 get_installed_version() {
@@ -891,15 +641,9 @@ show_version_info() {
 }
 
 # ============================================================
-# Common: print summary
-# ============================================================
-# ============================================================
 # Remove OTel Claude plugin
 # ============================================================
 remove_otel_plugin() {
-    local OTEL_CLAUDE_DIR="$HOME/.cache/opentelemetry.instrumentation.claude"
-    local OTEL_CODEX_DIR="$HOME/.cache/opentelemetry.instrumentation.codex"
-
     # Prevent NODE_OPTIONS --require intercept.js from breaking node commands
     # after the Claude plugin directory (and intercept.js) is deleted
     unset NODE_OPTIONS 2>/dev/null || true
@@ -1030,36 +774,18 @@ try {
                 ' "$codex_config" > "$tmp"
                 mv "$tmp" "$codex_config"
             fi
-            # Remove trust entries (逐条精确删除,不用 BEGIN/END 范围删以免误伤用户数据)
-            # Step a: 删 BEGIN/END marker 注释行(仅注释行本身)
-            if grep -qE "# (BEGIN|END) otel-codex-hook trust" "$codex_config" 2>/dev/null; then
+            # Remove trust block (# BEGIN otel-codex-hook trust ... # END otel-codex-hook trust)
+            if grep -q "# BEGIN otel-codex-hook trust" "$codex_config" 2>/dev/null; then
                 local tmp; tmp=$(mktemp)
-                grep -v "# BEGIN otel-codex-hook trust\|# END otel-codex-hook trust" "$codex_config" > "$tmp" || true
-                mv "$tmp" "$codex_config"
-            fi
-            # Step b: 删 bypass_hook_trust 行
-            if grep -q "bypass_hook_trust" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                grep -v '^\s*bypass_hook_trust\s*=' "$codex_config" > "$tmp" || true
-                mv "$tmp" "$codex_config"
-            fi
-            # Step c: 逐条删 [hooks.state."<hooks.json path>:<event>:<group>:0"] section
-            # 匹配 key 中包含 hooks.json 路径的条目(pilot 写的),不动其他 path 的条目
-            local codex_hooks_json_path
-            codex_hooks_json_path="$(cd "$HOME/.codex" 2>/dev/null && pwd)/hooks.json"
-            if grep -q "$codex_hooks_json_path" "$codex_config" 2>/dev/null; then
-                local tmp; tmp=$(mktemp)
-                awk -v owned_path="$codex_hooks_json_path" '
-                    /^\[hooks\.state\."/ {
-                        if (index($0, owned_path) > 0) { skip=1; next }
-                    }
-                    /^\[/ && !/^\[hooks\.state\."/ { skip=0 }
+                awk '
+                    /# BEGIN otel-codex-hook trust/ { skip=1; next }
+                    /# END otel-codex-hook trust/   { skip=0; next }
                     skip { next }
                     { print }
                 ' "$codex_config" > "$tmp"
                 mv "$tmp" "$codex_config"
             fi
-            # Step d: 删 otel-codex-hook 相关的剩余行(legacy catch-all,不删 hooks.state section)
+            # Remove any remaining otel-codex-hook lines (catch-all)
             if grep -q "otel-codex-hook" "$codex_config" 2>/dev/null; then
                 local tmp; tmp=$(mktemp)
                 grep -v "otel-codex-hook" "$codex_config" > "$tmp" || true
@@ -1136,6 +862,18 @@ print_summary() {
         echo ""
     fi
 
+    if [ -f "$OTEL_CLAUDE_DIR/package/src/cli.js" ]; then
+        echo ""
+        msg "💡 Claude Code 插件已安装" \
+            "💡 Claude Code plugin installed"
+    fi
+
+    if [ -f "$OTEL_CODEX_DIR/package/dist/index.js" ]; then
+        msg "💡 Codex 插件已安装" \
+            "💡 Codex plugin installed"
+        msg "   如果正在使用 Codex 桌面版，请重启 App 以使 hooks 生效。" \
+            "   If using Codex Desktop, restart the app for hooks to take effect."
+    fi
     msg "命令:" "Commands:"
     echo "   loongsuite-pilot          # 查看状态 / Status"
     echo "   loongsuite-pilot info     # 版本与配置 / Version & config"
@@ -1191,10 +929,6 @@ cmd_install() {
 
     trap 'rm -rf "${TMP_DIR:-}"' EXIT
     download_and_extract
-    probe_agents
-    select_agents
-    prompt_user_id
-    confirm_config_overwrite
     deploy_package "$INSTALL_SRC"
     write_config
     install_loongsuite_pilot_command
@@ -1206,9 +940,9 @@ cmd_install() {
     fi
     if loongsuite-pilot start $_start_args; then
         sleep 2
-        local _status_out
-        _status_out="$(loongsuite-pilot status 2>/dev/null || true)"
-        if echo "$_status_out" | grep -q "is running"; then
+        local status_output
+        status_output=$(loongsuite-pilot status 2>/dev/null || true)
+        if printf '%s\n' "$status_output" | grep -q "is running"; then
             msg "    ✅ 服务已启动" "    ✅ Service started"
         else
             msg "    ⚠️  服务可能尚未就绪，请检查: loongsuite-pilot status" \
@@ -1356,8 +1090,6 @@ remove_hook_configs() {
         "$HOME/.cursor/hooks.json"
         "$HOME/.qoder/settings.json"
         "$HOME/.qoderwork/settings.json"
-        "$HOME/.claude/settings.json"
-        "$HOME/.codex/hooks.json"
     )
 
     for cfg in "${configs[@]}"; do

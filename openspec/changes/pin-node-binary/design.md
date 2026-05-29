@@ -106,7 +106,7 @@ Read from the pin file. If the pin file doesn't exist or the binary is gone, sho
 - **Stale pin after node uninstall**: Mitigated by auto-heal — `resolve_node()` detects the binary is gone, runs fallback, updates pin.
 - **realpath not available on all systems**: Fall back to `readlink -f`, then to the raw path. Even a symlink path works; it just won't survive alias changes.
 - **Hook scripts can't auto-heal**: By design — they are read-only consumers. If the pin goes stale and the hook can't find node via fallback either, it fails open (returns `{}`), which is the existing behavior.
-- **Two installer files to maintain**: `deploy/loongsuite-pilot-installer.sh` and `deploy/loongsuite-pilot-installer-inner.sh` have near-identical logic. Both need the same changes. Consider extracting shared functions in a future change.
+- **Two installer files to maintain**: `deploy/installer.sh` and `deploy/installer-inner.sh` have near-identical logic. Both need the same changes. Consider extracting shared functions in a future change.
 - **Pre-existing installs without pin file**: All scripts fall back to the current search logic — fully backward compatible. The pin file is created on next `install` or `upgrade`.
 
 ## Migration Plan

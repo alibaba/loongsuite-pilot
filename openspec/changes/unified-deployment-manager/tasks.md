@@ -63,8 +63,8 @@
 ## 7.6 Installer 插件逻辑迁移
 
 - [ ] 7.6.1 更新 `agents.d/claude-code.json` 和 `agents.d/codex.json`：移除 `install` 字段
-- [ ] 7.6.2 从 `deploy/loongsuite-pilot-installer.sh` 中删除 `install_otel_plugin()` 函数及相关调用和常量
-- [ ] 7.6.3 从 `deploy/loongsuite-pilot-installer.sh` 的 `print_summary()` 中移除插件相关提示
+- [ ] 7.6.2 从 `deploy/installer.sh` 中删除 `install_otel_plugin()` 函数及相关调用和常量
+- [ ] 7.6.3 从 `deploy/installer.sh` 的 `print_summary()` 中移除插件相关提示
 
 ## 8. 测试
 

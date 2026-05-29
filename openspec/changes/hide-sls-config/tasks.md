@@ -13,8 +13,8 @@
 
 ## 3. Installer Updates
 
-- [x] 3.1 Update `deploy/loongsuite-pilot-installer.sh` so fresh installs do not write default `sls.endpoint`, `sls.project`, or `sls.logstore` values into `config.json`.
-- [x] 3.2 Update `deploy/loongsuite-pilot-installer-inner.sh` with the same installer config behavior.
+- [x] 3.1 Update `deploy/installer.sh` so fresh installs do not write default `sls.endpoint`, `sls.project`, or `sls.logstore` values into `config.json`.
+- [x] 3.2 Update `deploy/installer-inner.sh` with the same installer config behavior.
 - [x] 3.3 Retain installer flags for SLS destination and ensure they only write destination fields when explicitly provided by the operator.
 - [x] 3.4 Ensure reinstall behavior preserves existing config files without relying on legacy SLS destination fields.
 

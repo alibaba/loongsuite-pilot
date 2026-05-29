@@ -10,7 +10,7 @@
 
 ## 公共接口 (Public Interface)
 
-- **Installer** (`deploy/loongsuite-pilot-installer.sh`) — 用户安装、升级、卸载入口，负责下载安装包、部署版本目录、写入配置、安装命令、部署 hooks/skills、安装 OTel plugin，并启动服务。
+- **Installer** (`deploy/installer.sh` / `deploy/installer-inner.sh`) — 用户安装、升级、卸载入口，负责下载安装包、部署版本目录、写入配置、安装命令、部署 hooks/skills、安装 OTel plugin，并启动服务。外部版本使用 `installer.sh`（路径 `loongsuite-pilot/`），内部版本使用 `installer-inner.sh`（路径 `loongsuite/loongsuite-pilot/`）。
 - **CLI bootstrap** (`scripts/loongsuite-pilot.sh`) — 用户侧服务管理命令，提供 `start` / `stop` / `restart` / `status` / `info` / `rollback` / `monitor` / `run` / `run-updater` 等命令。
 - **Collector daemon shim** (`scripts/collector-daemon.js`) — 根据 `current` / `previous` 指针加载当前 collector 版本的 `dist/index.js`。
 - **Updater daemon shim** (`scripts/updater-daemon.js`) — 根据 `current` 指针加载当前版本的 `dist/updater/index.js`。
@@ -87,7 +87,7 @@ Installer 和 CLI 负责本地运行时结构与服务管理；`updater.md` 负�
 
 涉及安装、升级、卸载、服务注册、版本目录、bootstrap shim 或 CLI service command 的变更，应先阅读本模块，并同时检查：
 
-- `deploy/loongsuite-pilot-installer.sh`
+- `deploy/installer.sh` / `deploy/installer-inner.sh`
 - `scripts/loongsuite-pilot.sh`
 - `scripts/collector-daemon.js`
 - `scripts/updater-daemon.js`

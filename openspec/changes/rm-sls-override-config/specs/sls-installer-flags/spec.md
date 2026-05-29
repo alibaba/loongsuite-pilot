@@ -16,22 +16,22 @@
 
 ### Requirement: Installer writes SLS configuration to config.json
 
-Both `deploy/loongsuite-pilot-installer.sh` and `deploy/loongsuite-pilot-installer-inner.sh` SHALL write user-provided SLS destination fields to `~/.loongsuite-pilot/config.json` when `--sls-*` arguments are supplied.
+Both `deploy/installer.sh` and `deploy/installer-inner.sh` SHALL write user-provided SLS destination fields to `~/.loongsuite-pilot/config.json` when `--sls-*` arguments are supplied.
 
 The installer SHALL NOT write a `destinationOverride` field to `config.json`.
 
 The installer SHALL NOT accept or parse a `--default-sls-override` argument. If a user passes `--default-sls-override`, the installer SHALL treat it as an unknown argument and exit with an error.
 
 #### Scenario: Install with SLS arguments writes user fields only
-- **WHEN** the user invokes `bash loongsuite-pilot-installer.sh install --sls-project P --sls-logstore L --sls-endpoint E`
+- **WHEN** the user invokes `bash installer.sh install --sls-project P --sls-logstore L --sls-endpoint E`
 - **THEN** the installer SHALL write `sls.project: 'P'`, `sls.logstore: 'L'`, `sls.endpoint: 'E'` into `config.json`
 - **AND** SHALL NOT write `sls.destinationOverride` into `config.json`
 
 #### Scenario: Install without SLS arguments produces no sls block
-- **WHEN** the user invokes `bash loongsuite-pilot-installer.sh install` without any `--sls-*` argument
+- **WHEN** the user invokes `bash installer.sh install` without any `--sls-*` argument
 - **THEN** the installer SHALL NOT write an `sls` block into `config.json`
 
 #### Scenario: Legacy --default-sls-override argument is rejected
-- **WHEN** the user invokes `bash loongsuite-pilot-installer.sh install --default-sls-override=false`
+- **WHEN** the user invokes `bash installer.sh install --default-sls-override=false`
 - **THEN** the installer SHALL print an error indicating the argument is no longer supported
 - **AND** SHALL exit with a non-zero status

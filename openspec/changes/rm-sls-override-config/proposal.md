@@ -29,8 +29,8 @@
 ### 受影响的代码
 - `src/core/config-loader.ts` — `buildSlsConfig` 解析逻辑重写
 - `src/internal/sls-destination.ts` — 被 `__INTERNAL_BUILD__` 条件守护
-- `deploy/loongsuite-pilot-installer.sh` — 删除 `--default-sls-override` 参数
-- `deploy/loongsuite-pilot-installer-inner.sh` — 同上
+- `deploy/installer.sh` — 删除 `--default-sls-override` 参数
+- `deploy/installer-inner.sh` — 同上
 - `package.json` — 构建脚本从 `tsc` 改为 esbuild，新增 `build:internal` / `build:external`
 - 新增 `build.mjs` — esbuild 构建配置
 - 新增 `src/internal/build-flags.d.ts` — `__INTERNAL_BUILD__` 类型声明

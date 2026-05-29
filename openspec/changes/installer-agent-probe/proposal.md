@@ -49,7 +49,7 @@
 - 修改 `src/core/config-loader.ts`（新字段解析）
 - 修改 `src/types/index.ts`（类型扩展）
 - 修改 `src/core/agent-discovery-service.ts` 或 `src/deployment/deployment-manager.ts`（enabled 门控）
-- 修改 `deploy/loongsuite-pilot-installer.sh`（非 inner 版本）
+- 修改 `deploy/installer.sh`（非 inner 版本）
 - 修改 `build.mjs`（新增 cli-probe 入口构建）
 
 ### Baseline Documentation Updates
