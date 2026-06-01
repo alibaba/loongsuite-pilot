@@ -30,6 +30,7 @@
  * finish_reasons 输出为 string[](规范要求 array)。
  */
 
+import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -324,6 +325,47 @@ async function cmdStop() {
 
 // ─── Stop 主流程 ───
 
+/**
+ * 等待 transcript 文件大小稳定(连续 3 次读到相同 size,间隔 150ms)。
+ * 最多等 10 × 150ms = 1.5s。用于解决 Linux 容器 OverlayFS 下
+ * Claude Code 主进程写 transcript 对 hook 子进程可见性延迟问题。
+ */
+async function waitForTranscriptStable(transcriptPath, minSize = 0) {
+  let prevSize = -1;
+  let stableCount = 0;
+  for (let i = 0; i < 10; i++) {
+    let size = 0;
+    try {
+      size = fs.statSync(transcriptPath).size;
+    } catch {
+      break;
+    }
+    if (size <= minSize) {
+      await new Promise((r) => setTimeout(r, 150));
+      continue;
+    }
+    if (size === prevSize) {
+      stableCount++;
+      if (stableCount >= 2) return;
+    } else {
+      stableCount = 0;
+    }
+    prevSize = size;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+
+/**
+ * 检查 llmEvents 中是否包含 stop_reason=end_turn 的记录。
+ * 用于内容校验: Stop hook 由 end_turn 触发时,transcript 应包含该记录。
+ */
+function hasEndTurnRecord(llmEvents) {
+  if (!llmEvents || llmEvents.length === 0) return false;
+  return llmEvents.some(
+    (ev) => ev.stop_reason === 'end_turn' || ev.stop_reason === 'stop',
+  );
+}
+
 function splitEventsByTurn(events) {
   const turns = [];
   let current = null;
@@ -347,11 +389,12 @@ function splitEventsByTurn(events) {
 
 /**
  * Stop 主导出流程:
- *   1. 增量读 transcript(retry 50ms × 3 防止 flush 慢)
- *   2. alignWithHookEvents 校准时间戳
- *   3. 合并到 events,按时间排序
- *   4. splitEventsByTurn
- *   5. 每 turn 调 buildTurnRecords + write JSONL
+ *   1. 等待 transcript 文件大小稳定 + 内容校验(end_turn)
+ *   2. 增量读 transcript
+ *   3. alignWithHookEvents 校准时间戳
+ *   4. 合并到 events,按时间排序
+ *   5. splitEventsByTurn
+ *   6. 每 turn 调 buildTurnRecords + write JSONL
  */
 async function exportSession(state, stopReason) {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
@@ -362,20 +405,38 @@ async function exportSession(state, stopReason) {
   let allEvents = Array.isArray(state.events) ? [...state.events] : [];
   let llmEvents = [];
 
-  // R9: transcript 增量读取,空时 retry 50ms × 3 防 flush 慢
+  // transcript 增量读取: 文件大小稳定性检测 + end_turn 内容校验
+  // Linux 容器(OverlayFS)下 transcript 写入对 hook 子进程可见有延迟,
+  // 单纯的 50ms × 3 盲等不够; 改为等文件大小连续稳定后再读,
+  // 并在 stop_reason=end_turn 时校验 transcript 最后一条是否包含 end_turn。
   if (state.transcript_path) {
-    for (let attempt = 0; attempt < 3; attempt++) {
+    const transcriptPath = state.transcript_path;
+    const baseOffset = state.transcript_offset || 0;
+    const expectEndTurn = stopReason === 'end_turn';
+
+    // Phase 1: 等文件大小稳定(连续 3 次读到相同 size 且 > offset)
+    await waitForTranscriptStable(transcriptPath, baseOffset);
+
+    // Phase 2: 读取并校验,若 expect end_turn 但未找到则追加等待
+    for (let attempt = 0; attempt < 5; attempt++) {
       try {
         llmEvents = parseClaudeTranscript(
-          state.transcript_path,
+          transcriptPath,
           startTime,
           stopTime,
-          state.transcript_offset || 0,
+          baseOffset,
         );
         if (typeof llmEvents.nextOffset === 'number') {
           state._next_transcript_offset = llmEvents.nextOffset;
         }
         if (llmEvents.length > 0) {
+          // 内容校验: stop_reason=end_turn 时检查最后一条 llm_call
+          if (expectEndTurn && !hasEndTurnRecord(llmEvents)) {
+            // transcript 尚未包含 end_turn,等待后重读
+            await new Promise((r) => setTimeout(r, 200));
+            await waitForTranscriptStable(transcriptPath, baseOffset);
+            continue;
+          }
           alignWithHookEvents(llmEvents, allEvents, stopTime);
           break;
         }
@@ -388,8 +449,15 @@ async function exportSession(state, stopReason) {
         });
         break;
       }
-      // 空读 → 等 50ms 再试(transcript 可能还没 flush)
-      await new Promise((r) => setTimeout(r, 50));
+      // 空读 → 等待后重试
+      await new Promise((r) => setTimeout(r, 150));
+    }
+
+    // 兜底: 循环耗尽(expectEndTurn 重试未果)或异常 break 时,
+    // llmEvents 可能有数据但未经 alignWithHookEvents 校准。
+    // alignWithHookEvents 是幂等的,重复调用无副作用。
+    if (llmEvents.length > 0) {
+      alignWithHookEvents(llmEvents, allEvents, stopTime);
     }
   }
 
@@ -488,14 +556,52 @@ function buildTurnRecords(turn, turnIndex, sessionId, fallbackModel, prevHash, u
 
   let currentStepId = null;
   let currentStepSpanId = null;
+  // 记录每个 step 的时间区间,用于孤儿 PreToolUse 的 step 归属推断
+  const stepTimeRanges = [];
+  // 收集 llm_call input_messages 中的 tool_call_response,用于孤儿 tool.result 回填
+  const orphanToolResults = {};
 
   for (const ev of turn.events) {
     const evTs = ev.timestamp || turn.endTime;
 
     if (ev.type === 'llm_call') {
+      // 回填上一个 step 的 endTime(到当前 llm_call 的 request_start_time)
+      if (stepTimeRanges.length > 0) {
+        stepTimeRanges[stepTimeRanges.length - 1].endTime = ev.request_start_time || evTs;
+      }
+
       stepRound++;
       currentStepId = `${turnId}:s${stepRound}`;
       currentStepSpanId = generateSpanId();
+
+      // 记录本 step 的起始时间
+      stepTimeRanges.push({
+        stepId: currentStepId,
+        stepSpanId: currentStepSpanId,
+        startTime: ev.request_start_time || evTs,
+        endTime: null, // 由下一个 llm_call 回填,或循环结束后设为 turn.endTime
+      });
+
+      // 扫描 input_messages 中的 tool_call_response,提取孤儿 tool result
+      if (Array.isArray(ev.input_messages)) {
+        for (const msg of ev.input_messages) {
+          const content = msg.content || msg.parts;
+          if (!Array.isArray(content)) continue;
+          for (const part of content) {
+            if (!part) continue;
+            const partType = part.type || (part.tool_use_id ? 'tool_result' : '');
+            const partId = part.tool_use_id || part.id;
+            if ((partType === 'tool_result' || partType === 'tool_call_response') && partId) {
+              if (preToolUseMap[partId] && !orphanToolResults[partId]) {
+                orphanToolResults[partId] = {
+                  response: part.content || part.response || part.output || '',
+                  timestamp: ev.request_start_time || evTs,
+                };
+              }
+            }
+          }
+        }
+      }
       const llmSpanId = generateSpanId();
       const responseId = ev.message_id || `${currentStepId}:r`;
       const protocol = ev.protocol || 'anthropic';
@@ -620,8 +726,14 @@ function buildTurnRecords(turn, turnIndex, sessionId, fallbackModel, prevHash, u
     }
   }
 
+  // 回填最后一个 step 的 endTime
+  if (stepTimeRanges.length > 0) {
+    stepTimeRanges[stepTimeRanges.length - 1].endTime = turn.endTime;
+  }
+
   // 30% PostToolUse drop 修复:
-  // 末尾扫剩余的 PreToolUse(没配上 PostToolUse 的孤儿)输出 tool.call,无对应 result。
+  // 末尾扫剩余的 PreToolUse(没配上 PostToolUse 的孤儿)输出 tool.call。
+  // 修正: 根据 preEv.timestamp 推断正确的所属 step,不再一律归入最后一个 step。
   const consumedIds = new Set(
     turn.events
       .filter((e) => e.type === 'post_tool_use' && e.tool_use_id)
@@ -631,21 +743,57 @@ function buildTurnRecords(turn, turnIndex, sessionId, fallbackModel, prevHash, u
     if (consumedIds.has(toolUseId)) continue;
     const toolName = preEv.tool_name || 'unknown';
     if (toolName === 'Agent' || toolName === 'agent') continue;
+
+    // 按时间戳推断所属 step
+    let resolvedStepId = currentStepId || turnId;
+    let resolvedStepSpanId = currentStepSpanId || agentSpanId;
+    const preTs = preEv.timestamp || 0;
+    if (preTs > 0 && stepTimeRanges.length > 0) {
+      const matched = stepTimeRanges.find(
+        (s) => preTs >= s.startTime && (s.endTime === null || preTs <= s.endTime),
+      );
+      if (matched) {
+        resolvedStepId = matched.stepId;
+        resolvedStepSpanId = matched.stepSpanId;
+      }
+    }
+
     const orphanSpanId = generateSpanId();
-    const parentStepSpan = currentStepSpanId || agentSpanId;
+    const orphanResult = orphanToolResults[toolUseId];
+
     records.push({
-      time_unix_nano: timestampToUnixNanos((preEv.timestamp || turn.endTime) * 1000),
+      time_unix_nano: timestampToUnixNanos((preTs || turn.endTime) * 1000),
       'event.id': crypto.randomUUID(),
       'event.name': 'tool.call',
       ...baseFields,
       span_id: orphanSpanId,
-      parent_span_id: parentStepSpan,
-      'gen_ai.step.id': currentStepId || turnId,
+      parent_span_id: resolvedStepSpanId,
+      'gen_ai.step.id': resolvedStepId,
       'gen_ai.tool.name': toolName,
       'gen_ai.tool.call.id': toolUseId,
       'gen_ai.tool.call.arguments': toJsonValue(preEv.tool_input || {}),
-      'tool.result.status': 'orphaned',
     });
+
+    // 如果从后续 llm_call 的 input_messages 中提取到了 tool result,补发 tool.result
+    if (orphanResult) {
+      const resultTs = orphanResult.timestamp || preTs || turn.endTime;
+      records.push({
+        time_unix_nano: timestampToUnixNanos(resultTs * 1000),
+        'event.id': crypto.randomUUID(),
+        'event.name': 'tool.result',
+        ...baseFields,
+        span_id: orphanSpanId,
+        parent_span_id: resolvedStepSpanId,
+        'gen_ai.step.id': resolvedStepId,
+        'gen_ai.tool.name': toolName,
+        'gen_ai.tool.call.id': toolUseId,
+        'gen_ai.tool.call.result': toJsonValue(orphanResult.response),
+        'tool.result.status': 'recovered',
+      });
+    } else {
+      // 无法回填 result,标记为 orphaned(保持向后兼容)
+      records[records.length - 1]['tool.result.status'] = 'orphaned';
+    }
   }
 
   // turn-level llm.response(代表 final assistant message,可选)
