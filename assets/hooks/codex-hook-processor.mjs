@@ -99,6 +99,25 @@ function requireSessionId(event, stage = 'cmd') {
   return null;
 }
 
+// ─── transcript tool event injection ───
+
+function appendMissingTranscriptToolEvents(state, transcriptToolEvents) {
+  if (!Array.isArray(transcriptToolEvents) || transcriptToolEvents.length === 0) return;
+  if (!Array.isArray(state.events)) state.events = [];
+  const seen = new Set(
+    state.events
+      .filter((event) => event.type === 'pre_tool_use' || event.type === 'post_tool_use')
+      .map((event) => `${event.type}:${event.tool_use_id || ''}`),
+  );
+  for (const event of transcriptToolEvents) {
+    const key = `${event.type}:${event.tool_use_id || ''}`;
+    if (!seen.has(key)) {
+      state.events.push(event);
+      seen.add(key);
+    }
+  }
+}
+
 // ─── 5 cmd handlers — 累积 event 到 state ───
 
 function cmdSessionStart() {
@@ -207,7 +226,7 @@ async function cmdStop() {
         break;
       }
       // null 或本次没有任何新业务内容 → retry 让 transcript 再 flush 一会
-      if (transcriptData && (transcriptData.tokenEvents.length > 0 || transcriptData.systemInstruction || transcriptData.toolDefinitions)) {
+      if (transcriptData && (transcriptData.tokenEvents.length > 0 || transcriptData.systemInstruction || transcriptData.toolDefinitions || transcriptData.toolEvents?.length > 0)) {
         break;
       }
       await new Promise((r) => setTimeout(r, 50));
@@ -220,9 +239,24 @@ async function cmdStop() {
     }
   }
 
+  // 从 transcript 提取的工具调用事件，补充 state.events 中缺失的 pre/post_tool_use
+  // exec 模式下 user_prompt_submit 必定存在（已验证 250/250 sessions），
+  // splitIntoTurns 按事件顺序分配，不依赖 turn_id 字段匹配
+  if (transcriptData?.toolEvents?.length > 0) {
+    appendMissingTranscriptToolEvents(state, transcriptData.toolEvents);
+  }
+
   // 切 turn + 写 JSONL
   try {
     await writeSessionJsonl(state, transcriptData);
+    // 写成功后才推进 offset 和清空 events，避免 write 失败导致数据永久丢失
+    if (transcriptData) {
+      state.transcript_offset = transcriptData.nextOffset;
+      if (transcriptData.lastEmittedUsage) {
+        state.transcript_last_token_usage = transcriptData.lastEmittedUsage;
+      }
+    }
+    state.events = [];
   } catch (err) {
     logHookError({
       agentId: AGENT_ID,
@@ -231,15 +265,6 @@ async function cmdStop() {
       errorMessage: err?.message || String(err),
     });
   }
-
-  // R9.9: state 不 clearState — 仅 events=[] + 持久化 transcript offset / lastEmittedUsage
-  if (transcriptData) {
-    state.transcript_offset = transcriptData.nextOffset;
-    if (transcriptData.lastEmittedUsage) {
-      state.transcript_last_token_usage = transcriptData.lastEmittedUsage;
-    }
-  }
-  state.events = [];
   saveState(sessionId, state);
 }
 
