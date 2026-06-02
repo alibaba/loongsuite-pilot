@@ -1152,10 +1152,39 @@ else
 fi
 
 # Verify truncation detection in service log
-if grep -q "file truncated.*copytruncate rotation" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+if grep -q "copytruncate rotation" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
   echo "[file-collection-e2e] OK: copytruncate rotation detected in service log"
 else
   echo "[file-collection-e2e] WARN: copytruncate detection not found in service log"
+fi
+
+# 7d. Edge case: copytruncate where new data exceeds old offset (signature-based detection)
+echo ""
+echo "[file-collection-e2e] Step 7b: Testing copytruncate with new data exceeding old offset..."
+sleep 15
+OFFSET_BEFORE_SIG=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+echo "[file-collection-e2e] current offset: $OFFSET_BEFORE_SIG"
+
+# Simulate: cp + truncate + write MORE data than old file size
+cp "$FC_TEST_LOG_DIR/app.log" "$FC_TEST_LOG_DIR/app.log.3"
+: > "$FC_TEST_LOG_DIR/app.log"
+for i in $(seq 1 50); do
+  echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) [INFO] copytruncate-overflow-line-$i padding-data-to-exceed-old-offset" >> "$FC_TEST_LOG_DIR/app.log"
+done
+NEW_SIZE=$(wc -c < "$FC_TEST_LOG_DIR/app.log" | tr -d ' ')
+echo "[file-collection-e2e] truncated + wrote 50 lines ($NEW_SIZE bytes, old offset was $OFFSET_BEFORE_SIG)"
+
+sleep 15
+
+OFFSET_AFTER_SIG=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+echo "[file-collection-e2e] after signature-based copytruncate: offset=$OFFSET_AFTER_SIG"
+
+if grep -q "signature changed.*copytruncate rotation.*content replaced" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+  echo "[file-collection-e2e] OK: signature-based copytruncate detected (file head content changed)"
+elif grep -q "copytruncate rotation.*size < offset" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+  echo "[file-collection-e2e] OK: size-based copytruncate detected (fallback, new data didn't exceed old offset)"
+else
+  echo "[file-collection-e2e] WARN: copytruncate detection not found for overflow case (may need more time)"
 fi
 
 # ──────────────────────────────────────────────────────────

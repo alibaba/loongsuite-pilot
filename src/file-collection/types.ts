@@ -25,6 +25,7 @@ export interface FileCollectionConfig {
 export interface FileCheckpoint {
   offset: number;
   inode: number;
+  signature?: string;
 }
 
 export interface FileCollectionManagerOptions {

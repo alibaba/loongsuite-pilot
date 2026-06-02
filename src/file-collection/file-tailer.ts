@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 import type { FileCheckpoint } from './types.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -8,6 +9,7 @@ const logger = createLogger('FileTailer');
 
 const MAX_READ_BYTES = 4 * 1024 * 1024; // 4MB per read
 const MAX_FILES_PER_CYCLE = 100;
+const SIGNATURE_BYTES = 1024; // first 1KB for file signature
 
 export interface ReadResult {
   lines: string[];
@@ -57,27 +59,52 @@ export class FileTailer {
     const currentInode = stat.ino;
 
     if (!checkpoint || checkpoint.inode === 0) {
+      const sig = await computeFileSignature(filePath);
       return this.readFromOffset(filePath, 0, {
         offset: 0,
         inode: currentInode,
+        signature: sig,
       });
     }
 
     if (currentInode === checkpoint.inode) {
+      // Same inode: check for copytruncate via size OR signature
       if (stat.size < checkpoint.offset) {
-        logger.info('file truncated (copytruncate rotation), resetting offset', {
+        logger.info('file truncated (copytruncate rotation, size < offset), resetting', {
           file: filePath,
           recorded: checkpoint.offset,
           actual: stat.size,
         });
+        const sig = await computeFileSignature(filePath);
         return this.readFromOffset(filePath, 0, {
           offset: 0,
           inode: currentInode,
+          signature: sig,
         });
       }
+
+      // Size >= offset: could still be copytruncate if new data filled past old offset.
+      // Compare file head signature to detect this case.
+      if (checkpoint.signature) {
+        const currentSig = await computeFileSignature(filePath);
+        if (currentSig !== checkpoint.signature) {
+          logger.info('file head signature changed (copytruncate rotation, content replaced), resetting', {
+            file: filePath,
+            oldSignature: checkpoint.signature.substring(0, 16),
+            newSignature: currentSig.substring(0, 16),
+          });
+          return this.readFromOffset(filePath, 0, {
+            offset: 0,
+            inode: currentInode,
+            signature: currentSig,
+          });
+        }
+      }
+
       return this.readFromOffset(filePath, checkpoint.offset, {
         offset: checkpoint.offset,
         inode: currentInode,
+        signature: checkpoint.signature,
       });
     }
 
@@ -93,9 +120,11 @@ export class FileTailer {
       checkpoint.offset,
     );
 
+    const sig = await computeFileSignature(filePath);
     const newResult = await this.readFromOffset(filePath, 0, {
       offset: 0,
       inode: currentInode,
+      signature: sig,
     });
 
     return {
@@ -189,11 +218,27 @@ export class FileTailer {
         checkpoint: {
           offset: newOffset,
           inode: stat.ino,
+          signature: baseCheckpoint.signature,
         },
       };
     } finally {
       await handle.close();
     }
+  }
+}
+
+async function computeFileSignature(filePath: string): Promise<string> {
+  let handle;
+  try {
+    handle = await fs.open(filePath, 'r');
+    const buf = Buffer.alloc(SIGNATURE_BYTES);
+    const { bytesRead } = await handle.read(buf, 0, SIGNATURE_BYTES, 0);
+    if (bytesRead === 0) return '';
+    return crypto.createHash('md5').update(buf.subarray(0, bytesRead)).digest('hex');
+  } catch {
+    return '';
+  } finally {
+    await handle?.close();
   }
 }
 

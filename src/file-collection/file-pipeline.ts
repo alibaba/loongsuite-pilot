@@ -133,6 +133,7 @@ export class FilePipeline {
         this.checkpoints.set(key, {
           offset: state.lastOffset,
           inode: state.extra.inode as number,
+          signature: state.extra.signature as string | undefined,
         });
       }
     }
@@ -142,7 +143,7 @@ export class FilePipeline {
     for (const [filePath, cp] of this.checkpoints) {
       this.stateStore.update(filePath, {
         lastOffset: cp.offset,
-        extra: { inode: cp.inode },
+        extra: { inode: cp.inode, signature: cp.signature },
       });
     }
   }
