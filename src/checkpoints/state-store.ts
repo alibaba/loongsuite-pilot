@@ -65,6 +65,10 @@ export class StateStore {
     this.dirty = true;
   }
 
+  keys(): string[] {
+    return Array.from(this.states.keys());
+  }
+
   getOffset(inputId: string): number {
     return this.get(inputId).lastOffset ?? 0;
   }

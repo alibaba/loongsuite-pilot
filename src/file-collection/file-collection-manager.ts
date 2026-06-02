@@ -9,6 +9,7 @@ import { ensureDir } from '../utils/fs-utils.js';
 const logger = createLogger('FileCollectionManager');
 
 const RESCAN_INTERVAL_MS = 60_000;
+const VALID_CONFIG_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
 export class FileCollectionManager {
   private readonly configDir: string;
@@ -19,6 +20,8 @@ export class FileCollectionManager {
   private watcher: fs.FSWatcher | null = null;
   private rescanTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private rescanInProgress = false;
+  private rescanQueued = false;
 
   constructor(opts: FileCollectionManagerOptions) {
     this.configDir = opts.configDir;
@@ -92,6 +95,25 @@ export class FileCollectionManager {
   }
 
   private async fullRescan(): Promise<void> {
+    if (this.rescanInProgress) {
+      this.rescanQueued = true;
+      return;
+    }
+    this.rescanInProgress = true;
+    this.rescanQueued = false;
+
+    try {
+      await this.doRescan();
+    } finally {
+      this.rescanInProgress = false;
+      if (this.rescanQueued && this.running) {
+        this.rescanQueued = false;
+        void this.fullRescan();
+      }
+    }
+  }
+
+  private async doRescan(): Promise<void> {
     const diskConfigs = await this.scanConfigDir();
     const diskNames = new Set(diskConfigs.map((c) => c.configName));
 
@@ -149,6 +171,13 @@ export class FileCollectionManager {
   private validateConfig(config: FileCollectionConfig, fileName: string): boolean {
     if (!config.configName) {
       logger.warn('config missing configName', { file: fileName });
+      return false;
+    }
+    if (!VALID_CONFIG_NAME.test(config.configName)) {
+      logger.warn('config has invalid configName (must match [a-zA-Z0-9._-])', {
+        file: fileName,
+        configName: config.configName,
+      });
       return false;
     }
     if (!config.inputs || config.inputs.length === 0) {

@@ -14,6 +14,7 @@ export class FilePipeline {
   private readonly tailer: FileTailer;
   private readonly sender: FileSlsSender;
   private readonly stateStore: StateStore;
+  private readonly stateFilePath: string;
   private readonly logger;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
@@ -37,15 +38,15 @@ export class FilePipeline {
       opts.failedLogDir,
     );
 
-    const stateFilePath = path.join(opts.stateDir, `${opts.config.configName}.json`);
-    this.stateStore = new StateStore(stateFilePath);
+    this.stateFilePath = path.join(opts.stateDir, `${opts.config.configName}.json`);
+    this.stateStore = new StateStore(this.stateFilePath);
   }
 
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
 
-    await ensureDir(path.dirname(this.stateStore['filePath']));
+    await ensureDir(path.dirname(this.stateFilePath));
     await this.stateStore.load();
     this.loadCheckpoints();
 
@@ -68,7 +69,6 @@ export class FilePipeline {
       this.pollTimer = null;
     }
 
-    await this.sender.flush();
     await this.sender.shutdown();
     this.saveCheckpoints();
     await this.stateStore.save();
@@ -77,10 +77,14 @@ export class FilePipeline {
   }
 
   private async pollCycle(): Promise<void> {
+    if (!this.running) return;
+
     try {
       const files = this.tailer.discoverFiles();
 
       for (const filePath of files) {
+        if (!this.running) return;
+
         try {
           const checkpoint = this.checkpoints.get(filePath) ?? null;
           const result = await this.tailer.readNewLines(filePath, checkpoint);
@@ -90,7 +94,6 @@ export class FilePipeline {
           }
 
           if (this.sender.bufferSize() >= HIGH_WATERMARK) {
-            this.checkpoints.set(filePath, result.checkpoint);
             this.logger.debug('backpressure active, skipping remaining files', {
               bufferSize: this.sender.bufferSize(),
             });
@@ -119,8 +122,8 @@ export class FilePipeline {
 
   private loadCheckpoints(): void {
     this.checkpoints.clear();
-    const keys = Object.keys(this.stateStore['states'] ? Object.fromEntries(this.stateStore['states']) : {});
-    for (const key of keys) {
+    const allKeys = this.stateStore.keys();
+    for (const key of allKeys) {
       const state = this.stateStore.get(key);
       if (state.lastOffset !== undefined && state.extra?.inode !== undefined) {
         this.checkpoints.set(key, {

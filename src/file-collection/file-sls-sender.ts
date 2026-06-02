@@ -24,6 +24,7 @@ const LOCAL_IP = getLocalIp();
 
 const DEFAULT_FLUSH_INTERVAL_MS = 2000;
 const DEFAULT_BATCH_SIZE = 100;
+const MAX_BUFFER_SIZE = 50_000;
 
 export class FileSlsSender {
   private readonly transportConfig: SlsTransportConfig;
@@ -55,6 +56,7 @@ export class FileSlsSender {
   }
 
   start(): void {
+    if (this.flushTimer) return;
     this.flushTimer = setInterval(
       () => void this.flush(),
       this.flushIntervalMs,
@@ -64,6 +66,14 @@ export class FileSlsSender {
   enqueue(lines: string[]): void {
     for (const line of lines) {
       this.buffer.push({ content: line });
+    }
+    if (this.buffer.length > MAX_BUFFER_SIZE) {
+      const dropped = this.buffer.length - MAX_BUFFER_SIZE;
+      this.buffer = this.buffer.slice(-MAX_BUFFER_SIZE);
+      logger.warn('buffer overflow, dropped oldest entries', {
+        configName: this.configName,
+        dropped,
+      });
     }
   }
 
