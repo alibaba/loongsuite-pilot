@@ -88,6 +88,7 @@ fi
 # Package metadata & version
 cp package.json      "$PKG_DIR/"
 cp package-lock.json "$PKG_DIR/" 2>/dev/null || true
+cp .npmrc            "$PKG_DIR/" 2>/dev/null || true
 cp README.md         "$PKG_DIR/" 2>/dev/null || true
 cp VERSION           "$PKG_DIR/"
 
