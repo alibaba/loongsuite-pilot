@@ -45,6 +45,13 @@ export class FileCollectionManager {
           void this.fullRescan();
         }
       });
+      this.watcher.on('error', (err) => {
+        logger.warn('config dir watcher error, relying on rescan', {
+          error: String(err),
+        });
+        this.watcher?.close();
+        this.watcher = null;
+      });
     } catch (err) {
       logger.warn('failed to watch config dir, relying on rescan', {
         error: String(err),
@@ -114,6 +121,8 @@ export class FileCollectionManager {
   }
 
   private async doRescan(): Promise<void> {
+    if (!this.running) return;
+
     const diskConfigs = await this.scanConfigDir();
     const diskNames = new Set(diskConfigs.map((c) => c.configName));
 
@@ -126,6 +135,8 @@ export class FileCollectionManager {
     for (const config of diskConfigs) {
       const configJson = stableStringify(config);
       const existingHash = this.configHashes.get(config.configName);
+
+      if (!this.running) return;
 
       if (!this.pipelines.has(config.configName)) {
         await this.createPipeline(config);

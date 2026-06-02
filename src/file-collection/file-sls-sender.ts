@@ -122,7 +122,22 @@ export class FileSlsSender {
     while (this.flushing) {
       await new Promise((r) => setTimeout(r, 100));
     }
-    await this.flush();
+    const maxAttempts = 3;
+    for (let attempt = 0; attempt < maxAttempts && this.buffer.length > 0; attempt++) {
+      await this.flush();
+    }
+    if (this.buffer.length > 0) {
+      logger.warn('shutdown: buffer not fully drained, persisting remaining', {
+        configName: this.configName,
+        remaining: this.buffer.length,
+      });
+      await persistFailedLogs(
+        this.failedLogDir,
+        this.configName,
+        { __logs__: this.buffer.splice(0) },
+        new Error('shutdown drain incomplete'),
+      );
+    }
   }
 
   bufferSize(): number {
