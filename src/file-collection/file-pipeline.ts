@@ -91,6 +91,10 @@ export class FilePipeline {
 
           if (result.drainedLines && result.drainedLines.length > 0) {
             this.sender.enqueue(result.drainedLines);
+            this.checkpoints.set(filePath, {
+              offset: 0,
+              inode: result.checkpoint.inode,
+            });
           }
 
           if (this.sender.bufferSize() >= HIGH_WATERMARK) {

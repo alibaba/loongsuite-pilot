@@ -85,16 +85,3 @@ export class StateStore {
     this.update(inputId, { lastRowId: rowId });
   }
 }
-
-function mergeExtra(
-  base: Record<string, unknown> | undefined,
-  patch: Record<string, unknown> | undefined
-): Record<string, unknown> | undefined {
-  if (patch === undefined) {
-    return base;
-  }
-  if (Object.keys(patch).length === 0) {
-    return base;
-  }
-  return { ...base, ...patch };
-}

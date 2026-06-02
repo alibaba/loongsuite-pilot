@@ -54,7 +54,7 @@ export class FileTailer {
       };
     }
 
-    const currentInode = (stat as any).ino as number;
+    const currentInode = stat.ino;
 
     if (!checkpoint || checkpoint.inode === 0) {
       return this.readFromOffset(filePath, 0, {
@@ -111,7 +111,7 @@ export class FileTailer {
   ): Promise<string[]> {
     let entries: fsSync.Dirent[];
     try {
-      entries = fsSync.readdirSync(dir, { withFileTypes: true });
+      entries = await fs.readdir(dir, { withFileTypes: true });
     } catch {
       return [];
     }
@@ -120,8 +120,8 @@ export class FileTailer {
       if (!entry.isFile()) continue;
       const fullPath = path.join(dir, entry.name);
       try {
-        const s = fsSync.statSync(fullPath);
-        if ((s as any).ino === oldInode) {
+        const s = await fs.stat(fullPath);
+        if (s.ino === oldInode) {
           if (s.size <= oldOffset) return [];
           const handle = await fs.open(fullPath, 'r');
           try {
@@ -188,7 +188,7 @@ export class FileTailer {
         lines,
         checkpoint: {
           offset: newOffset,
-          inode: (stat as any).ino as number,
+          inode: stat.ino,
         },
       };
     } finally {

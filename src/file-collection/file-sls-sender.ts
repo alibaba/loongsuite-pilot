@@ -78,30 +78,32 @@ export class FileSlsSender {
   }
 
   async flush(): Promise<void> {
-    if (this.buffer.length === 0) return;
-
-    const batch = this.buffer.splice(0, this.batchSize);
-    try {
-      await postWebtracking(this.transportConfig, batch, {
-        topic: this.configName,
-        source: LOCAL_IP,
-      });
-      logger.debug('flush complete', {
-        configName: this.configName,
-        count: batch.length,
-      });
-    } catch (err) {
-      logger.error('flush failed, persisting to failed log', {
-        configName: this.configName,
-        count: batch.length,
-        error: String(err),
-      });
-      await persistFailedLogs(
-        this.failedLogDir,
-        this.configName,
-        { __logs__: batch },
-        err,
-      );
+    while (this.buffer.length > 0) {
+      const batch = this.buffer.splice(0, this.batchSize);
+      try {
+        await postWebtracking(this.transportConfig, batch, {
+          topic: this.configName,
+          source: LOCAL_IP,
+        });
+        logger.debug('flush batch sent', {
+          configName: this.configName,
+          count: batch.length,
+          remaining: this.buffer.length,
+        });
+      } catch (err) {
+        logger.error('flush failed, persisting to failed log', {
+          configName: this.configName,
+          count: batch.length,
+          error: String(err),
+        });
+        await persistFailedLogs(
+          this.failedLogDir,
+          this.configName,
+          { __logs__: batch },
+          err,
+        );
+        break;
+      }
     }
   }
 
