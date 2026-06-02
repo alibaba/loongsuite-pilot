@@ -938,35 +938,36 @@ for i in $(seq 1 20); do
 done
 echo "[file-collection-e2e] wrote 20 lines to $FC_TEST_LOG_DIR/app.log"
 
-# Step 2: Create file-collection config (using a dummy SLS endpoint — we only verify pickup, not delivery)
+# Step 2: Create file-collection config using real SLS endpoint from E2E env
 echo "[file-collection-e2e] Step 2: Creating file-collection config..."
 mkdir -p "$FC_CONFIG_DIR"
-cat > "$FC_CONFIG_DIR/$FC_CONFIG_NAME.json" <<'FCEOF'
-{
-  "configName": "e2e-file-test",
-  "inputs": [
-    {
-      "Type": "input_file",
-      "FilePaths": ["PLACEHOLDER"],
-      "FileEncoding": "utf8",
-      "MaxDirSearchDepth": 0
-    }
-  ],
-  "flushers": [
-    {
-      "Type": "flusher_sls",
-      "Endpoint": "cn-hangzhou.log.aliyuncs.com",
-      "Project": "e2e-test-project",
-      "Logstore": "e2e-test-logstore",
-      "Region": "cn-hangzhou",
-      "TelemetryType": "logs"
-    }
-  ]
-}
-FCEOF
 
-# Replace placeholder with actual path (contains dynamic HOME)
-sed -i "s|PLACEHOLDER|$FC_TEST_LOG_DIR/*.log|g" "$FC_CONFIG_DIR/$FC_CONFIG_NAME.json"
+# Read SLS config from pilot's config.json (written by installer with real E2E_SLS_* values)
+FC_SLS_ENDPOINT=$(node -e "try{const c=require('$HOME/.loongsuite-pilot/config.json');const e=c.sls?.endpoint||'';console.log(e.replace(/^https?:\\/\\//,''))}catch{console.log('cn-hangzhou.log.aliyuncs.com')}" 2>/dev/null)
+FC_SLS_PROJECT=$(node -e "try{const c=require('$HOME/.loongsuite-pilot/config.json');console.log(c.sls?.project||'e2e-test-project')}catch{console.log('e2e-test-project')}" 2>/dev/null)
+FC_SLS_LOGSTORE=$(node -e "try{const c=require('$HOME/.loongsuite-pilot/config.json');console.log(c.sls?.logstore||'e2e-test-logstore')}catch{console.log('e2e-test-logstore')}" 2>/dev/null)
+echo "[file-collection-e2e] using SLS: endpoint=$FC_SLS_ENDPOINT project=$FC_SLS_PROJECT logstore=$FC_SLS_LOGSTORE"
+
+node -e "
+const config = {
+  configName: 'e2e-file-test',
+  inputs: [{
+    Type: 'input_file',
+    FilePaths: [process.argv[1]],
+    FileEncoding: 'utf8',
+    MaxDirSearchDepth: 0
+  }],
+  flushers: [{
+    Type: 'flusher_sls',
+    Endpoint: process.argv[2],
+    Project: process.argv[3],
+    Logstore: process.argv[4],
+    TelemetryType: 'logs'
+  }]
+};
+require('fs').writeFileSync(process.argv[5], JSON.stringify(config, null, 2));
+" "$FC_TEST_LOG_DIR/*.log" "$FC_SLS_ENDPOINT" "$FC_SLS_PROJECT" "$FC_SLS_LOGSTORE" "$FC_CONFIG_DIR/$FC_CONFIG_NAME.json"
+
 echo "[file-collection-e2e] config written: $FC_CONFIG_DIR/$FC_CONFIG_NAME.json"
 cat "$FC_CONFIG_DIR/$FC_CONFIG_NAME.json"
 
@@ -1198,6 +1199,22 @@ echo "[file-collection-e2e] rotated files in directory: $ROTATED_COUNT (app.log.
 echo "[file-collection-e2e] INFO: drain supports 1 immediate predecessor per rotation event (by inode lookup)"
 echo "[file-collection-e2e] INFO: glob pattern *.log only matches app.log, rotated files (app.log.1) are not re-collected"
 ls -la "$FC_TEST_LOG_DIR"/ 2>/dev/null
+
+# ──────────────────────────────────────────────────────────
+# Step 9: Verify data delivery status
+# ──────────────────────────────────────────────────────────
+echo ""
+echo "[file-collection-e2e] Step 9: Verifying data delivery..."
+
+FC_FAILED_LOG="$HOME/.loongsuite-pilot/logs/file-collection-failed/$FC_CONFIG_NAME.jsonl"
+if [ -f "$FC_FAILED_LOG" ]; then
+  FC_FAILED_LINES=$(wc -l < "$FC_FAILED_LOG" | tr -d ' ')
+  echo "[file-collection-e2e] WARN: failed-log has $FC_FAILED_LINES entries (some data failed to deliver to SLS)"
+  echo "[file-collection-e2e] failed-log sample:"
+  head -1 "$FC_FAILED_LOG" | cut -c1-200
+else
+  echo "[file-collection-e2e] OK: no failed-log (all data delivered to SLS successfully)"
+fi
 
 # Cleanup
 echo ""
