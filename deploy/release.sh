@@ -131,9 +131,17 @@ echo "    ✅ package.json → ${NEXT_VERSION}"
 # ── Commit & Tag ──
 echo "==> Committing and tagging..."
 git add package.json
-git commit -m "release: v${NEXT_VERSION}"
-git tag -a "v${NEXT_VERSION}" -m "Release v${NEXT_VERSION}"
-echo "    ✅ Tagged v${NEXT_VERSION}"
+if git diff --cached --quiet; then
+    echo "    ⏭️  No changes to commit (version already ${NEXT_VERSION})"
+else
+    git commit -m "release: v${NEXT_VERSION}"
+fi
+if git rev-parse "v${NEXT_VERSION}" >/dev/null 2>&1; then
+    echo "    ⏭️  Tag v${NEXT_VERSION} already exists"
+else
+    git tag -a "v${NEXT_VERSION}" -m "Release v${NEXT_VERSION}"
+    echo "    ✅ Tagged v${NEXT_VERSION}"
+fi
 
 # ── Build ──
 echo ""
