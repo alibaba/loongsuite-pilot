@@ -62,6 +62,9 @@
     "scripts/"
   ],
   "overrides": {
+    "cookie": "1.0.0",
+    "tar": "^7.5.16",
+    "https-proxy-agent": "^7.0.6",
     "sqlite3": {
       "prebuild-install": "^7.1.3"
     }
