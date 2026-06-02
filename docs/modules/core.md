@@ -36,6 +36,7 @@ Orchestrator 启动分为以下阶段：
 3. **输入源注册** — 通过 InputManager 注册所有 Agent Input source
 4. **发现与生命周期管理** — 启动 AgentDiscoveryService（fs.watch + 轮询），检测 Agent 存在并管理 Input 的 start/stop 生命周期
 5. **清理服务** — 启动 LogRetentionService 进行日志轮转
+6. **文件采集管道** — 启动 FileCollectionManager，监控 `~/.loongsuite-pilot/file-collection/` 目录，动态加载/卸载文件采集 pipeline（与 agent activity 管道独立运行）
 
 ### ConfigLoader 优先级模型
 三层配置加载，高优先级覆盖低优先级：
@@ -74,6 +75,7 @@ InputManager 仅负责将 Input 产出的 entries 路由至已注册的 flusher(
 | flushers | `BaseFlusher`, `SlsFlusher`, `JsonlFlusher`, `HttpFlusher`, `MultiFlusher` |
 | checkpoints | `StateStore` |
 | hooks | `HookManager` |
+| file-collection | `FileCollectionManager` |
 | normalization | `applyAgentContentPolicy` |
 | utils | `createLogger`, `resolveHome`, `ensureDir`, `readJsonFile`, `writeJsonFile` |
 

@@ -2,6 +2,21 @@ import { build } from 'esbuild';
 
 const isInternal = process.argv.includes('--internal');
 
+// Packages that must remain external (need native binaries or are too large to bundle).
+// @loongsuite/otel-util-genai and @opentelemetry/* are intentionally NOT listed here
+// so they get inlined into the bundle — avoids runtime 404 when the private package
+// is unavailable on public npm registries.
+const externalPackages = [
+  '@alicloud/log',
+  'axios',
+  'express',
+  'pino',
+  'pino-roll',
+  'sqlite3',
+  'uuid',
+  'zod',
+];
+
 await build({
   entryPoints: ['src/index.ts'],
   outfile: 'dist/index.js',
@@ -11,7 +26,7 @@ await build({
   bundle: true,
   minify: true,
   treeShaking: true,
-  packages: 'external',
+  external: externalPackages,
   define: {
     __INTERNAL_BUILD__: String(isInternal),
   },
@@ -40,7 +55,7 @@ await build({
   bundle: true,
   minify: true,
   treeShaking: true,
-  packages: 'external',
+  external: externalPackages,
   define: {
     __INTERNAL_BUILD__: String(isInternal),
   },

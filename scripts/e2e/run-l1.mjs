@@ -22,6 +22,7 @@ import {
   buildAgentProbeOnlyScript,
   buildProbeEnvInjections,
   buildProbeDetectionValidationScript,
+  buildFileCollectionValidationSh,
   DEFAULT_E2E_INSTALLER_URL,
 } from './lib/e2e-scenarios.mjs';
 
@@ -153,8 +154,20 @@ async function installSmokeScenario(env) {
     }
   }
 
+  console.log('[e2e-l1] phase 7 = file-collection pipeline validation');
+  const fcValidation = await runLocalScript({
+    script: buildFileCollectionValidationSh(),
+    artifactDir: ARTIFACT_DIR,
+    artifactLabel: 'file-collection-validate',
+  });
+  if (fcValidation.code !== 0) {
+    console.error('[e2e-l1] File collection validation FAILED');
+    console.error(fcValidation.stdout || fcValidation.stderr);
+    await keepAliveOnFailure(fcValidation.code ?? 1);
+  }
+
   const required = env.E2E_REQUIRED_JSONL_AGENTS;
-  console.log(`[e2e-l1] phase 7 = JSONL agent coverage (${required})`);
+  console.log(`[e2e-l1] phase 8 = JSONL agent coverage (${required})`);
   const coverage = await runLocalScript({
     script: buildJsonlAgentCoverageCheck(required),
     artifactDir: ARTIFACT_DIR,

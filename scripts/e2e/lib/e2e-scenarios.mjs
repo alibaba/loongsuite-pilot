@@ -912,6 +912,169 @@ fi
 }
 
 // ──────────────────────────────────────────────────────────
+// File Collection E2E validation
+// ──────────────────────────────────────────────────────────
+
+/**
+ * Build a bash script that creates a file-collection config + test log files,
+ * waits for pilot to pick them up, and verifies the pipeline processed them.
+ */
+export function buildFileCollectionValidationSh() {
+  return `
+set -euo pipefail
+echo ""
+echo "=== [file-collection-e2e] File Collection Pipeline Validation ==="
+
+FC_CONFIG_DIR="$HOME/.loongsuite-pilot/file-collection"
+FC_STATE_DIR="$HOME/.loongsuite-pilot/logs/file-collection-state"
+FC_TEST_LOG_DIR="$HOME/.loongsuite-pilot/e2e-test-logs"
+FC_CONFIG_NAME="e2e-file-test"
+
+# Step 1: Create test log directory and write test data
+echo "[file-collection-e2e] Step 1: Creating test log files..."
+mkdir -p "$FC_TEST_LOG_DIR"
+for i in $(seq 1 20); do
+  echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) [INFO] e2e-test-line-$i key=value idx=$i" >> "$FC_TEST_LOG_DIR/app.log"
+done
+echo "[file-collection-e2e] wrote 20 lines to $FC_TEST_LOG_DIR/app.log"
+
+# Step 2: Create file-collection config (using a dummy SLS endpoint — we only verify pickup, not delivery)
+echo "[file-collection-e2e] Step 2: Creating file-collection config..."
+mkdir -p "$FC_CONFIG_DIR"
+cat > "$FC_CONFIG_DIR/$FC_CONFIG_NAME.json" <<'FCEOF'
+{
+  "configName": "e2e-file-test",
+  "inputs": [
+    {
+      "Type": "input_file",
+      "FilePaths": ["PLACEHOLDER"],
+      "FileEncoding": "utf8",
+      "MaxDirSearchDepth": 0
+    }
+  ],
+  "flushers": [
+    {
+      "Type": "flusher_sls",
+      "Endpoint": "cn-hangzhou.log.aliyuncs.com",
+      "Project": "e2e-test-project",
+      "Logstore": "e2e-test-logstore",
+      "Region": "cn-hangzhou",
+      "TelemetryType": "logs"
+    }
+  ]
+}
+FCEOF
+
+# Replace placeholder with actual path (contains dynamic HOME)
+sed -i "s|PLACEHOLDER|$FC_TEST_LOG_DIR/*.log|g" "$FC_CONFIG_DIR/$FC_CONFIG_NAME.json"
+echo "[file-collection-e2e] config written: $FC_CONFIG_DIR/$FC_CONFIG_NAME.json"
+cat "$FC_CONFIG_DIR/$FC_CONFIG_NAME.json"
+
+# Step 3: Wait for pilot to detect the config and process files
+# FileCollectionManager rescans every 60s; we also trigger via fs.watch.
+echo "[file-collection-e2e] Step 3: Waiting for pilot to process config (up to 90s)..."
+TIMEOUT=90
+ELAPSED=0
+while [ $ELAPSED -lt $TIMEOUT ]; do
+  if [ -f "$FC_STATE_DIR/$FC_CONFIG_NAME.json" ]; then
+    STATE_SIZE=$(wc -c < "$FC_STATE_DIR/$FC_CONFIG_NAME.json" | tr -d ' ')
+    if [ "$STATE_SIZE" -gt 2 ]; then
+      echo "[file-collection-e2e] state file detected after \${ELAPSED}s (size=\${STATE_SIZE}B)"
+      break
+    fi
+  fi
+  sleep 3
+  ELAPSED=$((ELAPSED + 3))
+done
+
+# Step 4: Validate results
+echo "[file-collection-e2e] Step 4: Validating results..."
+FC_FAIL=0
+
+# Check state file exists and is non-empty
+if [ -f "$FC_STATE_DIR/$FC_CONFIG_NAME.json" ]; then
+  STATE_CONTENT=$(cat "$FC_STATE_DIR/$FC_CONFIG_NAME.json")
+  STATE_SIZE=$(echo -n "$STATE_CONTENT" | wc -c | tr -d ' ')
+  if [ "$STATE_SIZE" -gt 2 ]; then
+    echo "[file-collection-e2e] OK: state file exists and has content (\${STATE_SIZE}B)"
+    # Check that offset was advanced (file was read)
+    if echo "$STATE_CONTENT" | grep -q '"lastOffset"'; then
+      echo "[file-collection-e2e] OK: state contains lastOffset (file was read)"
+    else
+      echo "[file-collection-e2e] WARN: state exists but no lastOffset found"
+    fi
+    if echo "$STATE_CONTENT" | grep -q '"inode"'; then
+      echo "[file-collection-e2e] OK: state contains inode (rotation tracking active)"
+    fi
+  else
+    echo "[file-collection-e2e] FAIL: state file exists but is empty/trivial"
+    FC_FAIL=1
+  fi
+else
+  echo "[file-collection-e2e] FAIL: state file not found at $FC_STATE_DIR/$FC_CONFIG_NAME.json"
+  echo "[file-collection-e2e] pilot service log (last 20 lines with FileCollection):"
+  grep -iE "FileCollection|file-collection|FilePipeline|FileTailer" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null | tail -20 || echo "(no file-collection log lines found)"
+  FC_FAIL=1
+fi
+
+# Check service log for file-collection activity
+if grep -q "FileCollectionManager.*started" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+  echo "[file-collection-e2e] OK: FileCollectionManager started in service log"
+else
+  echo "[file-collection-e2e] WARN: FileCollectionManager start not found in service log"
+fi
+
+if grep -q "FilePipeline.*started" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+  echo "[file-collection-e2e] OK: FilePipeline started in service log"
+else
+  echo "[file-collection-e2e] WARN: FilePipeline start not found in service log"
+fi
+
+# Step 5: Test log rotation (write more data to verify incremental read)
+echo ""
+echo "[file-collection-e2e] Step 5: Testing incremental read..."
+OFFSET_BEFORE=""
+if [ -f "$FC_STATE_DIR/$FC_CONFIG_NAME.json" ]; then
+  OFFSET_BEFORE=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+fi
+echo "[file-collection-e2e] offset before append: $OFFSET_BEFORE"
+
+for i in $(seq 21 30); do
+  echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) [INFO] e2e-incremental-line-$i" >> "$FC_TEST_LOG_DIR/app.log"
+done
+echo "[file-collection-e2e] appended 10 more lines"
+
+# Wait for next poll cycle
+sleep 15
+
+OFFSET_AFTER=""
+if [ -f "$FC_STATE_DIR/$FC_CONFIG_NAME.json" ]; then
+  OFFSET_AFTER=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+fi
+echo "[file-collection-e2e] offset after append: $OFFSET_AFTER"
+
+if [ "$OFFSET_AFTER" -gt "$OFFSET_BEFORE" ] 2>/dev/null; then
+  echo "[file-collection-e2e] OK: offset advanced ($OFFSET_BEFORE -> $OFFSET_AFTER), incremental read works"
+else
+  echo "[file-collection-e2e] WARN: offset did not advance (may need more time)"
+fi
+
+# Cleanup
+echo "[file-collection-e2e] Cleaning up test config..."
+rm -f "$FC_CONFIG_DIR/$FC_CONFIG_NAME.json"
+
+if [ "$FC_FAIL" -eq 0 ]; then
+  echo ""
+  echo "=== [file-collection-e2e] File Collection Validation PASSED ==="
+else
+  echo ""
+  echo "=== [file-collection-e2e] File Collection Validation FAILED ==="
+  exit 1
+fi
+`;
+}
+
+// ──────────────────────────────────────────────────────────
 // Helpers used by both run-l1.mjs and run-docker-e2e.mjs.
 // Moved from run-docker-e2e.mjs so L1 can reuse without copy.
 // ──────────────────────────────────────────────────────────

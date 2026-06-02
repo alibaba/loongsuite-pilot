@@ -7,8 +7,15 @@ import {
 } from '../normalization/entry-builder.js';
 import type { AgentActivityEntry, SlsFlusherConfig, SlsEndpoint } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
-import { appendLine, ensureDir } from '../utils/fs-utils.js';
+import { ensureDir } from '../utils/fs-utils.js';
 import * as path from 'node:path';
+import {
+  postWebtracking,
+  persistFailedLogs,
+  isRetryable,
+  RETRY_MAX_ATTEMPTS,
+  RETRY_BASE_DELAY_MS,
+} from './sls-transport.js';
 
 function getLocalIp(): string {
   const interfaces = os.networkInterfaces();
@@ -26,13 +33,6 @@ const HOSTNAME = os.hostname();
 
 const BATCH_MAX_SIZE = 20;
 const FLUSH_INTERVAL_MS = 2000;
-const WEBTRACKING_TIMEOUT_MS = 10_000;
-const WEBTRACKING_MAX_BODY_BYTES = 2_800_000;
-const WEBTRACKING_MAX_LOGS = 4096;
-const RETRY_MAX_ATTEMPTS = 3;
-const RETRY_BASE_DELAY_MS = 1000;
-
-const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 
 interface QueuedLog {
   content: Record<string, string>;
@@ -41,19 +41,12 @@ interface QueuedLog {
 
 const logger = createLogger('SlsFlusher');
 
-class HttpError extends Error {
-  constructor(readonly status: number, body: string) {
-    super(`${status} ${body}`);
-  }
-}
-
 export class SlsFlusher extends BaseFlusher {
   readonly name = 'sls';
   private readonly config: SlsFlusherConfig;
   private readonly queue: Map<string, QueuedLog[]> = new Map();
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private readonly failedLogDir: string;
-  /** Lazy AK client cache keyed by `endpoint.name`. Built on first AK send. */
   private readonly akClients: Map<string, any> = new Map();
 
   constructor(config: SlsFlusherConfig, dataDir: string) {
@@ -104,8 +97,6 @@ export class SlsFlusher extends BaseFlusher {
     const batches = Array.from(this.queue.entries());
     this.queue.clear();
 
-    // Per-endpoint dispatch with per-batch failure isolation:
-    // one endpoint's error must NOT block sends to other endpoints.
     const tasks = batches
       .filter(([, logs]) => logs.length > 0)
       .map(([, logs]) => {
@@ -153,7 +144,7 @@ export class SlsFlusher extends BaseFlusher {
         return;
       } catch (err) {
         lastErr = err;
-        if (!this.isRetryable(err) || attempt === RETRY_MAX_ATTEMPTS - 1) break;
+        if (!isRetryable(err) || attempt === RETRY_MAX_ATTEMPTS - 1) break;
         const delay = RETRY_BASE_DELAY_MS * 2 ** attempt;
         logger.warn('SLS ak send retrying', {
           endpoint: endpoint.name,
@@ -169,108 +160,42 @@ export class SlsFlusher extends BaseFlusher {
       endpoint: endpoint.name,
       error: String(lastErr),
     });
-    await this.persistFailedLogs(endpoint, logGroup, lastErr);
+    await persistFailedLogs(
+      this.failedLogDir,
+      endpoint.name,
+      logGroup,
+      lastErr,
+    );
   }
 
   private async flushViaWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
-    const chunks = this.splitForWebtracking(logs);
-    for (const chunk of chunks) {
-      await this.postWebtracking(endpoint, chunk);
-    }
-  }
-
-  /**
-   * 按条数 (4096) 和体积 (3MB) 分片，确保每个 chunk 不超过 PutWebtracking 接口限制。
-   */
-  private splitForWebtracking(logs: QueuedLog[]): QueuedLog[][] {
-    const chunks: QueuedLog[][] = [];
-    let current: QueuedLog[] = [];
-    let currentSize = 0;
-
-    for (const log of logs) {
-      const logSize = Buffer.byteLength(JSON.stringify(log.content));
-
-      if (current.length > 0 &&
-          (current.length >= WEBTRACKING_MAX_LOGS ||
-           currentSize + logSize > WEBTRACKING_MAX_BODY_BYTES)) {
-        chunks.push(current);
-        current = [];
-        currentSize = 0;
-      }
-
-      current.push(log);
-      currentSize += logSize;
-    }
-
-    if (current.length > 0) {
-      chunks.push(current);
-    }
-    return chunks;
-  }
-
-  private async postWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
-    const body = {
-      __topic__: endpoint.kind ?? '',
-      __source__: LOCAL_IP,
-      __logs__: logs.map(l => l.content),
-      __tags__: { __hostname__: HOSTNAME } as Record<string, string>,
-    };
-
-    const raw = JSON.stringify(body);
-    // Per-endpoint URL: derive from the endpoint's own base, not a flusher-wide setting.
-    const base = endpoint.endpoint.replace(/^(https?:\/\/)/, `$1${endpoint.project}.`);
-    const url = `${base}/logstores/${endpoint.logstore}/track`;
-
-    let lastErr: unknown;
-    for (let attempt = 0; attempt < RETRY_MAX_ATTEMPTS; attempt++) {
-      try {
-        const resp = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'x-log-apiversion': '0.6.0',
-            'x-log-bodyrawsize': String(Buffer.byteLength(raw)),
-            'Content-Type': 'application/json',
-          },
-          body: raw,
-          signal: AbortSignal.timeout(WEBTRACKING_TIMEOUT_MS),
-        });
-
-        if (!resp.ok) {
-          const text = await resp.text();
-          const err = new HttpError(resp.status, text);
-          if (!RETRYABLE_STATUS_CODES.has(resp.status) || attempt === RETRY_MAX_ATTEMPTS - 1) {
-            throw err;
-          }
-          lastErr = err;
-        } else {
-          logger.debug('batch sent via webtracking', {
-            project: endpoint.project,
-            logstore: endpoint.logstore,
-            count: logs.length,
-          });
-          return;
-        }
-      } catch (err) {
-        lastErr = err;
-        if (err instanceof HttpError && !RETRYABLE_STATUS_CODES.has(err.status)) break;
-        if (attempt === RETRY_MAX_ATTEMPTS - 1) break;
-      }
-
-      const delay = RETRY_BASE_DELAY_MS * 2 ** attempt;
-      logger.warn('SLS webtracking retrying', {
+    const contents = logs.map(l => l.content);
+    try {
+      await postWebtracking(
+        {
+          endpoint: endpoint.endpoint,
+          project: endpoint.project,
+          logstore: endpoint.logstore,
+        },
+        contents,
+        {
+          topic: endpoint.kind,
+          source: LOCAL_IP,
+          tags: { __hostname__: HOSTNAME },
+        },
+      );
+    } catch (err) {
+      logger.error('SLS webtracking send failed after retries', {
         endpoint: endpoint.name,
-        attempt: attempt + 1,
-        delayMs: delay,
-        error: String(lastErr),
+        error: String(err),
       });
-      await this.sleep(delay);
+      await persistFailedLogs(
+        this.failedLogDir,
+        endpoint.name,
+        { __logs__: contents },
+        err,
+      );
     }
-
-    logger.error('SLS webtracking send failed after retries', {
-      endpoint: endpoint.name,
-      error: String(lastErr),
-    });
-    await this.persistFailedLogs(endpoint, body, lastErr);
   }
 
   async shutdown(): Promise<void> {
@@ -299,7 +224,19 @@ export class SlsFlusher extends BaseFlusher {
             tags: [{ __hostname__: HOSTNAME }],
           });
         } else {
-          await this.flushViaWebtracking(endpoint, [{ content, endpoint }]);
+          await postWebtracking(
+            {
+              endpoint: endpoint.endpoint,
+              project: endpoint.project,
+              logstore: endpoint.logstore,
+            },
+            [content],
+            {
+              topic,
+              source: LOCAL_IP,
+              tags: { __hostname__: HOSTNAME },
+            },
+          );
         }
       } catch {
         logger.warn('sendRaw failed', { topic, endpoint: endpoint.name });
@@ -322,41 +259,7 @@ export class SlsFlusher extends BaseFlusher {
     }
   }
 
-  private isRetryable(err: unknown): boolean {
-    if (err instanceof HttpError) return RETRYABLE_STATUS_CODES.has(err.status);
-    const msg = String(err);
-    return msg.includes('ECONNRESET') ||
-           msg.includes('ETIMEDOUT') ||
-           msg.includes('ECONNREFUSED') ||
-           msg.includes('socket hang up') ||
-           msg.includes('network') ||
-           msg.includes('TimeoutError') ||
-           msg.includes('InternalServerError') ||
-           msg.includes('ServerBusy');
-  }
-
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  private async persistFailedLogs(
-    endpoint: SlsEndpoint,
-    logGroup: unknown,
-    err: unknown,
-  ): Promise<void> {
-    // Failed-log filename is keyed by endpoint.name so two endpoints serving
-    // the same `kind` (e.g. dual-write `agentActivity`) do not collide.
-    const fileName = `${endpoint.name}.jsonl`;
-    const filePath = path.join(this.failedLogDir, fileName);
-    const line = JSON.stringify({
-      ts: Date.now(),
-      endpoint: endpoint.name,
-      kind: endpoint.kind,
-      project: endpoint.project,
-      logstore: endpoint.logstore,
-      logGroup,
-      error: String(err),
-    });
-    await appendLine(filePath, line);
   }
 }

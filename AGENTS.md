@@ -20,6 +20,9 @@
 │             │ PluginProbe │ BaseSession.. │                      │
 │             │ Strategy    │ BaseCliForw.. │                      │
 ├─────────────┴─────────────┴───────────────┴──────────────────────┤
+│  File Collection (独立文件采集管道)                                │
+│  FileCollectionManager → N × FilePipeline (FileTailer + SlsSender)│
+├──────────────────────────────────────────────────────────────────┤
 │  Checkpoint (StateStore / SnapshotStore)  │  Updater (自动更新)    │
 └──────────────────────────────────────────┴───────────────────────┘
 ```
@@ -31,6 +34,7 @@
 | 核心编排 | `src/core/` | 启动流程、生命周期、Agent 发现与准入控制 | [docs/modules/core.md](docs/modules/core.md) |
 | 输入源 | `src/inputs/` | 6 种采集基类 + 各 Agent 实现 | [docs/modules/inputs.md](docs/modules/inputs.md) |
 | 数据输出 | `src/flushers/` | SLS / JSONL / HTTP 多目标扇出 | [docs/modules/flushers.md](docs/modules/flushers.md) |
+| 文件采集 | `src/file-collection/` | 本地文件采集 → SLS 独立管道 | [docs/modules/file-collection.md](docs/modules/file-collection.md) |
 | 部署管理 | `src/deployment/` | 声明式 Agent 部署（Hook / Plugin-Probe） | [docs/modules/hooks.md](docs/modules/hooks.md) |
 | 归一化 | `src/normalization/` | 原始数据 → AgentActivityEntry 标准格式 | [docs/modules/normalization.md](docs/modules/normalization.md) |
 | 持久化 | `src/checkpoints/` | StateStore + SnapshotStore 状态管理 | [docs/modules/checkpoints.md](docs/modules/checkpoints.md) |

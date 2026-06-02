@@ -18,7 +18,6 @@ import { SlsFlusher } from '../flushers/sls-flusher.js';
 import { JsonlFlusher } from '../flushers/jsonl-flusher.js';
 import { HttpFlusher } from '../flushers/http-flusher.js';
 import { MultiFlusher } from '../flushers/multi-flusher.js';
-import { OtlpTraceFlusher } from '../flushers/otlp-trace-flusher.js';
 import { buildOtlpTraceConfig } from './config-loader.js';
 
 // Concrete inputs
@@ -35,6 +34,7 @@ import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { HookWatchdog, type PluginCheckTarget } from './hook-watchdog.js';
+import { FileCollectionManager } from '../file-collection/file-collection-manager.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 
@@ -77,6 +77,7 @@ export class Orchestrator extends EventEmitter {
   private logRetentionService!: LogRetentionService;
   private hookWatchdog!: HookWatchdog;
   private deploymentManager!: DeploymentManager;
+  private fileCollectionManager!: FileCollectionManager;
   private isRunning = false;
 
   constructor(config: AnalyticsConfig) {
@@ -108,7 +109,7 @@ export class Orchestrator extends EventEmitter {
     await this.agentControlManager.load();
 
     // 3. Build flushers
-    this.flusher = this.buildFlusher();
+    this.flusher = await this.buildFlusher();
 
     // 4. Build InputManager
     this.inputManager = new InputManager();
@@ -152,6 +153,14 @@ export class Orchestrator extends EventEmitter {
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets);
     this.hookWatchdog.start();
 
+    // 11. Start file collection pipelines
+    this.fileCollectionManager = new FileCollectionManager({
+      configDir: path.join(this.dataDir, 'file-collection'),
+      stateDir: path.join(this.dataDir, 'logs', 'file-collection-state'),
+      failedLogDir: path.join(this.dataDir, 'logs', 'file-collection-failed'),
+    });
+    await this.fileCollectionManager.start();
+
     this.isRunning = true;
     this.emit('started');
     logger.info('orchestrator started', {
@@ -163,6 +172,7 @@ export class Orchestrator extends EventEmitter {
     if (!this.isRunning) return;
     logger.info('stopping orchestrator');
 
+    await this.fileCollectionManager?.stop();
     this.hookWatchdog?.stop();
     this.logRetentionService?.stop();
     await this.agentDiscoveryService?.stop();
@@ -250,7 +260,7 @@ export class Orchestrator extends EventEmitter {
     return targets;
   }
 
-  private buildFlusher(): BaseFlusher {
+  private async buildFlusher(): Promise<BaseFlusher> {
     const flushers: BaseFlusher[] = [];
     const cfg = this.config.flushers;
 
@@ -274,8 +284,13 @@ export class Orchestrator extends EventEmitter {
 
     const otlpTraceCfg = buildOtlpTraceConfig(this.config);
     if (otlpTraceCfg?.enabled) {
-      const r = new OtlpTraceFlusher(otlpTraceCfg);
-      flushers.push(r);
+      try {
+        const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
+        const r = new OtlpTraceFlusher(otlpTraceCfg);
+        flushers.push(r);
+      } catch (err) {
+        logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
+      }
     }
 
     if (flushers.length === 0) {

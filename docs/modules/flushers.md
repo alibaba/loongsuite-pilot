@@ -31,11 +31,20 @@ src/flushers/
 ├── base-flusher.ts          # Flusher 抽象基类
 ├── multi-flusher.ts         # 多目标并行分发
 ├── sls-flusher.ts           # Aliyun SLS 输出
+├── sls-transport.ts         # SLS WebTracking 公共传输层（SlsFlusher + FileSlsSender 共用）
 ├── jsonl-flusher.ts         # 本地 JSONL 输出
 ├── http-flusher.ts          # 通用 HTTP POST 输出
 ├── otlp-trace-flusher.ts    # OTLP trace 输出 (CMS 2.0)
 └── otlp-json-serializer.ts  # OTLP/JSON 序列化辅助
 ```
+
+### SLS WebTracking 公共传输层 (sls-transport.ts)
+
+从 `SlsFlusher` 中抽取的公共逻辑，供 `SlsFlusher` 和 `file-collection/FileSlsSender` 共用：
+- `postWebtracking()` — HTTP POST + 指数退避重试
+- `splitForWebtracking()` — 按条数（4096）和体积（2.8MB）自动分片
+- `isRetryable()` — 可重试错误判断（408/429/5xx + 网络错误）
+- `persistFailedLogs()` — 失败日志持久化到 JSONL 文件
 
 ### 运行时输出布局 (Runtime Output Layout)
 
