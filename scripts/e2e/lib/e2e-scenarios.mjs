@@ -1059,7 +1059,119 @@ else
   echo "[file-collection-e2e] WARN: offset did not advance (may need more time)"
 fi
 
+# ──────────────────────────────────────────────────────────
+# Step 6: Rename rotation test
+# ──────────────────────────────────────────────────────────
+echo ""
+echo "[file-collection-e2e] Step 6: Testing RENAME rotation..."
+
+# 6a. Record current state (offset + inode) before rotation
+INODE_BEFORE=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+OFFSET_BEFORE=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+echo "[file-collection-e2e] before rename: inode=$INODE_BEFORE offset=$OFFSET_BEFORE"
+
+# 6b. Append lines that haven't been collected yet (simulate unread tail)
+for i in $(seq 1 5); do
+  echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) [INFO] rename-pre-rotate-line-$i" >> "$FC_TEST_LOG_DIR/app.log"
+done
+echo "[file-collection-e2e] appended 5 lines before rotation (these must be drained from old file)"
+
+# 6c. Simulate rename rotation: mv app.log -> app.log.1, create new app.log
+mv "$FC_TEST_LOG_DIR/app.log" "$FC_TEST_LOG_DIR/app.log.1"
+for i in $(seq 1 5); do
+  echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) [INFO] rename-post-rotate-line-$i" >> "$FC_TEST_LOG_DIR/app.log"
+done
+echo "[file-collection-e2e] renamed app.log -> app.log.1, created new app.log with 5 lines"
+
+# 6d. Wait for poll cycle to detect rotation and drain
+sleep 15
+
+INODE_AFTER=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+OFFSET_AFTER=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+echo "[file-collection-e2e] after rename: inode=$INODE_AFTER offset=$OFFSET_AFTER"
+
+if [ "$INODE_AFTER" != "$INODE_BEFORE" ] && [ "$INODE_AFTER" != "0" ]; then
+  echo "[file-collection-e2e] OK: inode changed ($INODE_BEFORE -> $INODE_AFTER), rename rotation detected"
+else
+  echo "[file-collection-e2e] FAIL: inode did not change after rename rotation"
+  FC_FAIL=1
+fi
+
+if [ "$OFFSET_AFTER" -gt 0 ] 2>/dev/null; then
+  echo "[file-collection-e2e] OK: new file read (offset=$OFFSET_AFTER)"
+else
+  echo "[file-collection-e2e] FAIL: new file not read after rename rotation"
+  FC_FAIL=1
+fi
+
+# 6e. Verify old file drain via service log
+if grep -q "drained old file after rotation" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+  echo "[file-collection-e2e] OK: old file drain logged (unread lines from app.log.1 collected)"
+else
+  echo "[file-collection-e2e] WARN: old file drain not found in service log (may have been fully read before rotation)"
+fi
+
+# ──────────────────────────────────────────────────────────
+# Step 7: Copytruncate rotation test
+# ──────────────────────────────────────────────────────────
+echo ""
+echo "[file-collection-e2e] Step 7: Testing COPYTRUNCATE rotation..."
+
+# 7a. Wait for current data to be collected
+sleep 15
+OFFSET_BEFORE_CT=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+INODE_BEFORE_CT=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+echo "[file-collection-e2e] before copytruncate: inode=$INODE_BEFORE_CT offset=$OFFSET_BEFORE_CT"
+
+# 7b. Simulate copytruncate: cp app.log -> app.log.2, truncate app.log, write new data
+cp "$FC_TEST_LOG_DIR/app.log" "$FC_TEST_LOG_DIR/app.log.2"
+: > "$FC_TEST_LOG_DIR/app.log"
+for i in $(seq 1 5); do
+  echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) [INFO] copytruncate-new-line-$i" >> "$FC_TEST_LOG_DIR/app.log"
+done
+echo "[file-collection-e2e] copytruncate done: truncated app.log, wrote 5 new lines"
+
+# 7c. Wait for poll cycle
+sleep 15
+
+INODE_AFTER_CT=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+OFFSET_AFTER_CT=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+echo "[file-collection-e2e] after copytruncate: inode=$INODE_AFTER_CT offset=$OFFSET_AFTER_CT"
+
+if [ "$INODE_AFTER_CT" = "$INODE_BEFORE_CT" ]; then
+  echo "[file-collection-e2e] OK: inode unchanged ($INODE_AFTER_CT), copytruncate correctly detected (same file)"
+else
+  echo "[file-collection-e2e] WARN: inode changed unexpectedly ($INODE_BEFORE_CT -> $INODE_AFTER_CT)"
+fi
+
+if [ "$OFFSET_AFTER_CT" -lt "$OFFSET_BEFORE_CT" ] 2>/dev/null && [ "$OFFSET_AFTER_CT" -gt 0 ] 2>/dev/null; then
+  echo "[file-collection-e2e] OK: offset reset and advanced ($OFFSET_BEFORE_CT -> $OFFSET_AFTER_CT), truncated file re-read from start"
+else
+  echo "[file-collection-e2e] FAIL: offset not properly reset after copytruncate (before=$OFFSET_BEFORE_CT after=$OFFSET_AFTER_CT)"
+  FC_FAIL=1
+fi
+
+# Verify truncation detection in service log
+if grep -q "file truncated.*copytruncate rotation" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+  echo "[file-collection-e2e] OK: copytruncate rotation detected in service log"
+else
+  echo "[file-collection-e2e] WARN: copytruncate detection not found in service log"
+fi
+
+# ──────────────────────────────────────────────────────────
+# Step 8: Rotated file count check
+# ──────────────────────────────────────────────────────────
+echo ""
+echo "[file-collection-e2e] Step 8: Rotated file handling summary..."
+
+ROTATED_COUNT=$(ls "$FC_TEST_LOG_DIR"/app.log.* 2>/dev/null | wc -l | tr -d ' ')
+echo "[file-collection-e2e] rotated files in directory: $ROTATED_COUNT (app.log.1, app.log.2, ...)"
+echo "[file-collection-e2e] INFO: drain supports 1 immediate predecessor per rotation event (by inode lookup)"
+echo "[file-collection-e2e] INFO: glob pattern *.log only matches app.log, rotated files (app.log.1) are not re-collected"
+ls -la "$FC_TEST_LOG_DIR"/ 2>/dev/null
+
 # Cleanup
+echo ""
 echo "[file-collection-e2e] Cleaning up test config..."
 rm -f "$FC_CONFIG_DIR/$FC_CONFIG_NAME.json"
 
