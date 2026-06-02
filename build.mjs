@@ -1,7 +1,5 @@
 import { build } from 'esbuild';
 
-const isInternal = process.argv.includes('--internal');
-
 await build({
   entryPoints: ['src/index.ts'],
   outfile: 'dist/index.js',
@@ -12,9 +10,6 @@ await build({
   minify: true,
   treeShaking: true,
   packages: 'external',
-  define: {
-    __INTERNAL_BUILD__: String(isInternal),
-  },
 });
 
 await build({
@@ -25,9 +20,6 @@ await build({
   format: 'cjs',
   bundle: true,
   banner: { js: "process.env.LOG_LEVEL = 'silent';" },
-  define: {
-    __INTERNAL_BUILD__: String(isInternal),
-  },
   minifySyntax: true,
 });
 
@@ -41,7 +33,4 @@ await build({
   minify: true,
   treeShaking: true,
   packages: 'external',
-  define: {
-    __INTERNAL_BUILD__: String(isInternal),
-  },
 });

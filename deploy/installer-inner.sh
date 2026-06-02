@@ -468,6 +468,7 @@ try { existing = JSON.parse(fs.readFileSync(path, 'utf-8')); } catch {}
 const config = {
   ...existing,
   enabled: true,
+  internal: true,
   dataDir: '$DATA_DIR',
 };
 if (config.userId === undefined && config['user.id'] !== undefined) {
@@ -1090,6 +1091,8 @@ remove_hook_configs() {
         "$HOME/.cursor/hooks.json"
         "$HOME/.qoder/settings.json"
         "$HOME/.qoderwork/settings.json"
+        "$HOME/.claude/settings.json"
+        "$HOME/.codex/hooks.json"
     )
 
     for cfg in "${configs[@]}"; do

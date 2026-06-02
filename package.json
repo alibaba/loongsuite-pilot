@@ -9,9 +9,7 @@
     "loongsuite-pilot": "dist/index.js"
   },
   "scripts": {
-    "build": "node build.mjs --internal",
-    "build:internal": "node build.mjs --internal",
-    "build:external": "node build.mjs",
+    "build": "node build.mjs",
     "start": "node dist/index.js",
     "monitor:dashboard": "node scripts/serve-loongsuite-pilot-monitor.mjs",
     "perf:cursor-hook": "node tests/performance/cursor-hook-processor.perf.mjs",

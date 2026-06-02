@@ -4,7 +4,7 @@
 # Usage:
 #   bash deploy/package.sh                       # default output: ./loongsuite-pilot.tar.gz
 #   bash deploy/package.sh -o /tmp/out.tar.gz    # custom output path
-#   bash deploy/package.sh --skip-build          # skip tsc, use existing dist/
+#   bash deploy/package.sh --skip-build          # skip build, use existing dist/
 
 set -euo pipefail
 
@@ -13,7 +13,6 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PACKAGE_NAME="loongsuite-pilot"
 OUTPUT_PATH=""
 SKIP_BUILD=0
-BUILD_VARIANT="internal"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -21,8 +20,6 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_PATH="$2"; shift 2 ;;
         --skip-build)
             SKIP_BUILD=1; shift ;;
-        --external)
-            BUILD_VARIANT="external"; shift ;;
         *)
             echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -36,9 +33,9 @@ cd "$PROJECT_ROOT"
 
 # ── Build ──
 if [ "$SKIP_BUILD" -eq 0 ]; then
-    echo "==> Building ($BUILD_VARIANT)..."
+    echo "==> Building..."
     rm -rf dist
-    npm run "build:$BUILD_VARIANT"
+    npm run build
     echo "    ✅ Build complete"
 else
     echo "==> Skipping build (--skip-build)"
@@ -113,9 +110,5 @@ echo "==> Contents:"
 tar -tzf "$OUTPUT_PATH" | head -20
 echo "    ... (truncated)"
 echo ""
-if [ "$BUILD_VARIANT" = "external" ]; then
-    echo "Done. Upload with:  bash deploy/upload-external.sh"
-else
-    echo "Done. Upload with:  bash deploy/upload-inner.sh"
-fi
+echo "Done. Upload with:  bash deploy/upload.sh"
 

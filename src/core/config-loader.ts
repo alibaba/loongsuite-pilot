@@ -25,6 +25,7 @@ const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
  */
 interface ConfigFile {
   enabled?: boolean;
+  internal?: boolean;
   dataDir?: string;
   userId?: string;
   'user.id'?: string;
@@ -133,12 +134,15 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     logger.debug('no config file found, using env + defaults', { path: configPath });
   }
 
+  const internal = envBool('LOONGSUITE_PILOT_INTERNAL', file?.internal ?? true);
+
   const dataDir = env('LOONGSUITE_PILOT_DATA_DIR') ?? file?.dataDir ?? '~/.loongsuite-pilot';
 
   const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
 
   return {
     enabled: envBool('LOONGSUITE_PILOT_ENABLED', file?.enabled ?? true),
+    internal,
     autoStart: true,
     dataDir,
     userId,
@@ -148,7 +152,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     cms: buildCmsConfig(file),
 
     listeners: buildListenersConfig(file),
-    flushers: buildFlushersConfig(file, dataDir),
+    flushers: buildFlushersConfig(file, dataDir, internal),
     retention: buildRetentionConfig(file),
     agents: buildAgentsConfig(file),
     hookWatchdog: buildHookWatchdogConfig(file),
@@ -269,9 +273,10 @@ function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
 function buildFlushersConfig(
   file: ConfigFile | null,
   dataDir: string,
+  internal: boolean,
 ): FlusherConfig {
   return {
-    sls: buildSlsConfig(file),
+    sls: buildSlsConfig(file, internal),
     jsonl: buildJsonlConfig(file, dataDir),
     http: buildHttpConfig(file),
   };
@@ -325,7 +330,7 @@ function resolveCaptureMessageContent(agents: AgentsConfig): boolean {
   return values.every(a => a.captureMessageContent !== false);
 }
 
-function buildSlsConfig(file: ConfigFile | null) {
+function buildSlsConfig(file: ConfigFile | null, internal: boolean) {
   // ============================================================
   // Step 1: Read user-provided fields. Env > config.sls.* > undefined.
   // ============================================================
@@ -343,11 +348,12 @@ function buildSlsConfig(file: ConfigFile | null) {
   const hasUserDestination = !!(userProject && userLogstore);
 
   let endpoints: SlsEndpoint[];
-  if (__INTERNAL_BUILD__) {
+  if (internal) {
     if (!hasUserDestination) {
       endpoints = [buildInternalSlsEndpoint()];
     } else {
       const userEndpoint = buildUserSlsEndpoint({
+        internal,
         mode: userMode,
         rawEndpoint: userRawEndpoint,
         project: userProject!,
@@ -362,6 +368,7 @@ function buildSlsConfig(file: ConfigFile | null) {
       endpoints = [];
     } else {
       const userEndpoint = buildUserSlsEndpoint({
+        internal,
         mode: userMode,
         rawEndpoint: userRawEndpoint,
         project: userProject!,
@@ -388,7 +395,7 @@ function buildSlsConfig(file: ConfigFile | null) {
   let enabled: boolean;
   if (file?.sls?.enabled !== undefined) {
     enabled = file.sls.enabled;
-  } else if (__INTERNAL_BUILD__) {
+  } else if (internal) {
     enabled = true;
   } else {
     enabled = endpoints.length > 0 && endpoints.every(ep => {
@@ -417,6 +424,7 @@ function readUserSlsMode(file: ConfigFile | null): SlsMode | undefined {
 }
 
 function buildUserSlsEndpoint(args: {
+  internal: boolean;
   mode: SlsMode | undefined;
   rawEndpoint: string | undefined;
   project: string;
@@ -427,7 +435,7 @@ function buildUserSlsEndpoint(args: {
   // Mode inference: explicit > AK presence > webtracking default.
   const mode: SlsMode = args.mode ?? (args.accessKeyId && args.accessKeySecret ? 'ak' : 'webtracking');
 
-  const rawEndpoint = args.rawEndpoint || (__INTERNAL_BUILD__ ? INTERNAL_SLS_DESTINATION.endpoint : '');
+  const rawEndpoint = args.rawEndpoint || (args.internal ? INTERNAL_SLS_DESTINATION.endpoint : '');
   const endpoint = rawEndpoint
     ? (/^https?:\/\//.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`)
     : '';
@@ -519,23 +527,23 @@ const INTERNAL_TEST_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite-dev/loongsuite-
 const EXTERNAL_RELEASE_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
 const EXTERNAL_TEST_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite-pilot-dev/latest/loongsuite-pilot.tar.gz`;
 
-const RELEASE_PACKAGE_URL = __INTERNAL_BUILD__ ? INTERNAL_RELEASE_PACKAGE_URL : EXTERNAL_RELEASE_PACKAGE_URL;
-const TEST_PACKAGE_URL = __INTERNAL_BUILD__ ? INTERNAL_TEST_PACKAGE_URL : EXTERNAL_TEST_PACKAGE_URL;
-
 const DEFAULT_CHECK_INTERVAL_MS = 60_000; // 1 minute
 
-function resolveDefaultPackageUrl(): string {
+function resolveDefaultPackageUrl(internal: boolean): string {
   const channel = env('LOONGSUITE_PILOT_CHANNEL') ?? 'release';
 
+  const releaseUrl = internal ? INTERNAL_RELEASE_PACKAGE_URL : EXTERNAL_RELEASE_PACKAGE_URL;
+  const testUrl = internal ? INTERNAL_TEST_PACKAGE_URL : EXTERNAL_TEST_PACKAGE_URL;
+
   if (channel === 'test' || channel === 'pre') {
-    return TEST_PACKAGE_URL;
+    return testUrl;
   } else if (/^(test-[a-zA-Z0-9]+)$/.test(channel)) {
-    const testPrefix = __INTERNAL_BUILD__
+    const testPrefix = internal
       ? `loongsuite-dev/${channel}/loongsuite-pilot`
       : `loongsuite-pilot-dev/${channel}`;
     return `${BASE_PACKAGE_URL}${testPrefix}/latest/loongsuite-pilot.tar.gz`;
   } else {
-    return RELEASE_PACKAGE_URL;
+    return releaseUrl;
   }
 }
 
@@ -544,9 +552,10 @@ function resolveDefaultPackageUrl(): string {
  * Exported for use by the standalone updater process.
  */
 export function buildAutoUpdateConfig(
-  file: { autoUpdate?: { enabled?: boolean; checkIntervalMs?: number; manifestUrl?: string; packageUrl?: string } } | null,
+  file: { internal?: boolean; autoUpdate?: { enabled?: boolean; checkIntervalMs?: number; manifestUrl?: string; packageUrl?: string } } | null,
 ): AutoUpdateConfig {
-  const packageUrl = env('LOONGSUITE_PILOT_PACKAGE_URL') ?? file?.autoUpdate?.packageUrl ?? resolveDefaultPackageUrl();
+  const internal = envBool('LOONGSUITE_PILOT_INTERNAL', file?.internal ?? true);
+  const packageUrl = env('LOONGSUITE_PILOT_PACKAGE_URL') ?? file?.autoUpdate?.packageUrl ?? resolveDefaultPackageUrl(internal);
 
   let manifestUrl = env('LOONGSUITE_PILOT_MANIFEST_URL') ?? file?.autoUpdate?.manifestUrl;
   if (!manifestUrl && packageUrl) {

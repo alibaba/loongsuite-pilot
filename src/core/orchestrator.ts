@@ -598,7 +598,7 @@ export class Orchestrator extends EventEmitter {
    * - Otherwise: only if config.agents[agentId].enabled !== false
    */
   private isAgentGatedEnabled(agentId: string): boolean {
-    if (__INTERNAL_BUILD__) return true;
+    if (this.config.internal) return true;
     const agents = this.config.agents;
     if (!agents || Object.keys(agents).length === 0) return true;
     return agents[agentId]?.enabled !== false;

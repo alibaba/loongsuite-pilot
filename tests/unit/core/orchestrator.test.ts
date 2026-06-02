@@ -145,6 +145,7 @@ import { Orchestrator } from '../../../src/core/orchestrator.js';
 function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
   return {
     enabled: true,
+    internal: true,
     autoStart: true,
     dataDir: '/tmp/test-data',
     userId: 'test-user',

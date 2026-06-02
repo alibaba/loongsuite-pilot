@@ -8,8 +8,8 @@
 #     ossutil config -e oss-cn-hangzhou.aliyuncs.com -i <AK_ID> -k <AK_SECRET>
 #
 # Usage:
-#   bash deploy/upload.sh                              # internal (default), test channel
-#   bash deploy/upload.sh --external                   # external, test channel
+#   bash deploy/upload.sh                              # internal target (default), test channel
+#   bash deploy/upload.sh --external                   # external target, test channel
 #   bash deploy/upload.sh --channel release            # upload to release path
 #   bash deploy/upload.sh --channel test               # upload to test path (default)
 #   bash deploy/upload.sh --channel test-<self>        # upload to test path (self dir)
@@ -17,6 +17,9 @@
 #   bash deploy/upload.sh --prefix custom/path         # custom OSS prefix
 #   bash deploy/upload.sh --package /tmp/out.tar.gz    # custom package path
 #   bash deploy/upload.sh --region cn-hangzhou         # custom region
+#
+# The --external flag selects the deploy target (OSS path + installer script),
+# not the build variant. The same unified build is uploaded to either target.
 #
 # Environment variables (override CLI args):
 #   LOONGSUITE_PILOT_CHANNEL   — release or test (default: test)

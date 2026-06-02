@@ -30,6 +30,7 @@ export interface CmsConfig {
 
 export interface AnalyticsConfig {
   enabled: boolean;
+  internal: boolean;
   autoStart: boolean;
   dataDir: string;
   userId: string;

@@ -1,6 +1,5 @@
 /**
- * SLS endpoint resolution — __INTERNAL_BUILD__-based matrix + dedup pass.
- * Mirrors scenarios from openspec/changes/rm-sls-override-config/specs/sls-dual-write/spec.md
+ * SLS endpoint resolution — runtime `internal` config flag matrix + dedup pass.
  *
  * Covers all 4 scenarios: internal+no-user, internal+user, external+no-user, external+user.
  */
@@ -29,9 +28,10 @@ function clearSlsEnv() {
   delete process.env.SLS_ENDPOINT;
   delete process.env.SLS_PROJECT;
   delete process.env.SLS_LOGSTORE;
+  delete process.env.LOONGSUITE_PILOT_INTERNAL;
 }
 
-describe('SLS resolver — internal build (__INTERNAL_BUILD__ = true)', () => {
+describe('SLS resolver — internal mode (config.internal = true)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllEnvs();
@@ -44,7 +44,7 @@ describe('SLS resolver — internal build (__INTERNAL_BUILD__ = true)', () => {
 
   describe('No user destination → [INTERNAL] only', () => {
     it('returns [INTERNAL] when no sls fields are present', async () => {
-      mockReadJsonFile.mockResolvedValueOnce(null);
+      mockReadJsonFile.mockResolvedValueOnce({ internal: true });
 
       const cfg = await loadConfig();
       expect(cfg.flushers.sls?.endpoints).toHaveLength(1);
@@ -55,6 +55,15 @@ describe('SLS resolver — internal build (__INTERNAL_BUILD__ = true)', () => {
         logstore: INTERNAL_SLS_DESTINATION.logstore,
         mode: INTERNAL_SLS_DESTINATION.mode,
       });
+    });
+
+    it('defaults to internal=true when field is omitted', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+
+      const cfg = await loadConfig();
+      expect(cfg.internal).toBe(true);
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(1);
+      expect(cfg.flushers.sls?.endpoints[0].name).toBe(INTERNAL_SLS_DESTINATION.endpointName);
     });
 
     it('treats project-only as incomplete and falls back to INTERNAL', async () => {
@@ -215,7 +224,7 @@ describe('SLS resolver — internal build (__INTERNAL_BUILD__ = true)', () => {
   });
 
   describe('enabled derivation', () => {
-    it('stays enabled in internal build even when user AK endpoint is missing credentials', async () => {
+    it('stays enabled in internal mode even when user AK endpoint is missing credentials', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
           mode: 'ak',
@@ -243,26 +252,34 @@ describe('SLS resolver — internal build (__INTERNAL_BUILD__ = true)', () => {
       expect(cfg.flushers.sls?.enabled).toBe(false);
     });
   });
+
+  describe('env var override', () => {
+    it('LOONGSUITE_PILOT_INTERNAL=false overrides config file internal=true', async () => {
+      vi.stubEnv('LOONGSUITE_PILOT_INTERNAL', 'false');
+      mockReadJsonFile.mockResolvedValueOnce({ internal: true });
+
+      const cfg = await loadConfig();
+      expect(cfg.internal).toBe(false);
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(0);
+      expect(cfg.flushers.sls?.enabled).toBe(false);
+    });
+  });
 });
 
-describe('SLS resolver — external build (__INTERNAL_BUILD__ = false)', () => {
+describe('SLS resolver — external mode (config.internal = false)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllEnvs();
     clearSlsEnv();
-    // @ts-expect-error override compile-time constant for external build tests
-    globalThis.__INTERNAL_BUILD__ = false;
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
-    // @ts-expect-error restore compile-time constant
-    globalThis.__INTERNAL_BUILD__ = true;
   });
 
   describe('No user destination → SLS disabled (empty endpoints)', () => {
     it('returns empty endpoints and disables SLS', async () => {
-      mockReadJsonFile.mockResolvedValueOnce(null);
+      mockReadJsonFile.mockResolvedValueOnce({ internal: false });
 
       const cfg = await loadConfig();
       expect(cfg.flushers.sls?.endpoints).toHaveLength(0);
@@ -271,6 +288,7 @@ describe('SLS resolver — external build (__INTERNAL_BUILD__ = false)', () => {
 
     it('treats project-only as incomplete → disabled', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
+        internal: false,
         sls: { project: 'orphan-project' },
       });
 
@@ -283,6 +301,7 @@ describe('SLS resolver — external build (__INTERNAL_BUILD__ = false)', () => {
   describe('User destination present → [USER] only (no internal)', () => {
     it('returns only user endpoint, no internal', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
+        internal: false,
         sls: {
           endpoint: 'https://cn-shanghai.log.aliyuncs.com',
           project: 'user-proj',
@@ -304,6 +323,7 @@ describe('SLS resolver — external build (__INTERNAL_BUILD__ = false)', () => {
 
     it('ignores legacy destinationOverride and returns only user endpoint', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
+        internal: false,
         sls: {
           destinationOverride: true,
           endpoint: 'https://cn-shanghai.log.aliyuncs.com',
@@ -319,6 +339,7 @@ describe('SLS resolver — external build (__INTERNAL_BUILD__ = false)', () => {
 
     it('produces empty endpoint URL when user omits endpoint (no malformed https://)', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
+        internal: false,
         sls: {
           project: 'user-proj',
           logstore: 'user-store',
@@ -332,9 +353,10 @@ describe('SLS resolver — external build (__INTERNAL_BUILD__ = false)', () => {
     });
   });
 
-  describe('AK mode in external build', () => {
+  describe('AK mode in external mode', () => {
     it('infers AK mode and enables when all fields present', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
+        internal: false,
         sls: {
           endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
           project: 'ext-proj',

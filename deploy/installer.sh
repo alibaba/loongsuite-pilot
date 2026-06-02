@@ -692,6 +692,7 @@ try { existing = JSON.parse(fs.readFileSync(path, 'utf-8')); } catch {}
 const config = {
   ...existing,
   enabled: true,
+  internal: false,
   dataDir: '$DATA_DIR',
 };
 if (config.userId === undefined && config['user.id'] !== undefined) {

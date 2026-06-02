@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# package-external.sh — Build external variant (no built-in SLS destination)
-#
-# Usage:
-#   bash deploy/package-external.sh                       # default output
-#   bash deploy/package-external.sh -o /tmp/out.tar.gz    # custom output path
-#   bash deploy/package-external.sh --skip-build          # skip tsc, use existing dist/
+# DEPRECATED: There is no longer a separate external build variant.
+# Use package.sh directly — it produces a unified build.
+# The internal/external distinction is now a runtime config, not a build-time flag.
 
-exec bash "$(dirname "${BASH_SOURCE[0]}")/package.sh" --external "$@"
+echo "⚠️  package-external.sh is deprecated. Use 'bash deploy/package.sh' instead." >&2
+exec bash "$(dirname "${BASH_SOURCE[0]}")/package.sh" "$@"

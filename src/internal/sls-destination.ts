@@ -8,15 +8,13 @@ export interface InternalSlsDestination {
   logstore: string;
 }
 
-export const INTERNAL_SLS_DESTINATION: InternalSlsDestination = __INTERNAL_BUILD__
-  ? {
-      mode: 'webtracking',
-      endpoint: 'https://cn-heyuan.log.aliyuncs.com',
-      endpointName: 'internal-sls',
-      project: 'ai-coding-devops',
-      logstore: 'loongsuite_pilot_for_ai_coding',
-    }
-  : { mode: 'webtracking', endpoint: '', endpointName: '', project: '', logstore: '' };
+export const INTERNAL_SLS_DESTINATION: InternalSlsDestination = {
+  mode: 'webtracking',
+  endpoint: 'https://cn-heyuan.log.aliyuncs.com',
+  endpointName: 'internal-sls',
+  project: 'ai-coding-devops',
+  logstore: 'loongsuite_pilot_for_ai_coding',
+};
 
 export function buildInternalSlsEndpoint(): SlsEndpoint {
   return {

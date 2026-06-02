@@ -73,24 +73,23 @@ npm run typecheck
 
 ### 编译与运行
 
-项目使用 esbuild 进行编译，通过编译期常量 `__INTERNAL_BUILD__` 区分内部/外部版本：
+项目使用 esbuild 进行编译，产出统一的单一构建产物。内部/外部行为由运行时配置 `config.json` 中的 `internal` 字段控制（默认 `true`）：
 
 ```bash
-# 集团内版本（默认，包含内置 SLS 目的地）
+# 构建（唯一命令，产出统一产物）
 npm run build
-
-# 集团外版本（物理消除内置 SLS 相关代码）
-npm run build:external
 
 # 启动服务（开发环境）
 npm start
 # 等价于: node dist/index.js
 ```
 
-| 构建目标 | 命令 | 内置 SLS 目的地 | 用户配了自有 SLS 时 |
-|---------|------|----------------|-------------------|
-| 集团内 | `npm run build` | 包含 | 双发（用户 + 内置） |
-| 集团外 | `npm run build:external` | 不存在于产物中 | 仅发用户目的地 |
+| `config.internal` | 内置 SLS 目的地 | 用户配了自有 SLS 时 | 更新包来源 |
+|-------------------|----------------|-------------------|-----------|
+| `true`（默认） | 启用 | 双发（用户 + 内置） | 内部 OSS 路径 |
+| `false` | 不启用 | 仅发用户目的地 | 外部 OSS 路径 |
+
+可通过环境变量 `LOONGSUITE_PILOT_INTERNAL=false` 覆盖 config.json 中的值。
 
 ### 开发最佳实践
 
@@ -120,30 +119,26 @@ npm start
 
 ```
 deploy/
-├── package-inner.sh     # 打包内部版本（调用 package.sh）
-├── package-external.sh  # 打包外部版本（调用 package.sh --external）
-├── package.sh           # 打包核心逻辑（--external 切换内外版本）
+├── package.sh           # 打包（统一构建，产出单一 tar.gz）
+├── package-inner.sh     # 打包快捷入口（调用 package.sh）
+├── upload.sh            # 上传核心逻辑（--external 切换上传目标路径）
 ├── upload-inner.sh      # 上传到内部 OSS 路径（调用 upload.sh）
 ├── upload-external.sh   # 上传到外部 OSS 路径（调用 upload.sh --external）
-├── upload.sh            # 上传核心逻辑（--external 切换内外路径）
-├── installer-inner.sh   # 内部安装脚本（内部 OSS 路径）
-└── installer.sh         # 外部安装脚本（外部 OSS 路径）
+├── installer-inner.sh   # 内部安装脚本（写入 internal: true）
+└── installer.sh         # 外部安装脚本（写入 internal: false）
 ```
 
 ### 第一步：打包
 
 ```bash
-# 集团内版本打包
-bash deploy/package-inner.sh
-
-# 集团外版本打包
-bash deploy/package-external.sh
+# 打包（统一构建，产出单一产物）
+bash deploy/package.sh
 
 # 自定义输出路径
-bash deploy/package-inner.sh -o /tmp/loongsuite-pilot.tar.gz
+bash deploy/package.sh -o /tmp/loongsuite-pilot.tar.gz
 
 # 跳过编译，使用已有 dist/
-bash deploy/package-inner.sh --skip-build
+bash deploy/package.sh --skip-build
 ```
 
 打包产物结构：
@@ -169,20 +164,20 @@ brew install ossutil   # 或 pip install ossutil2
 # 配置凭证
 ossutil config -e oss-cn-hangzhou.aliyuncs.com -i <AK_ID> -k <AK_SECRET>
 
-# 内部上传到 test 渠道（默认）
-bash deploy/upload-inner.sh
+# 上传到内部 OSS 路径，test 渠道（默认）
+bash deploy/upload.sh
 
-# 内部上传到 release 渠道（正式发布）
-bash deploy/upload-inner.sh --channel release
+# 上传到内部 OSS 路径，release 渠道（正式发布）
+bash deploy/upload.sh --channel release
 
-# 外部上传到 test 渠道
-bash deploy/upload-external.sh
+# 上传到外部 OSS 路径，test 渠道（同一份包，不同目标）
+bash deploy/upload.sh --external
 
-# 外部上传到 release 渠道
-bash deploy/upload-external.sh --channel release
+# 上传到外部 OSS 路径，release 渠道
+bash deploy/upload.sh --external --channel release
 
 # 上传到个人隔离渠道（互不覆盖，适合多人并行测试）
-bash deploy/upload-inner.sh --channel test-taiye
+bash deploy/upload.sh --channel test-taiye
 
 # 自定义 bucket / 前缀 / 区域
 bash deploy/upload.sh --bucket my-bucket --prefix my/path --region cn-beijing
@@ -190,7 +185,7 @@ bash deploy/upload.sh --bucket my-bucket --prefix my/path --region cn-beijing
 
 #### 渠道隔离
 
-支持三种渠道模式，产物上传到不同的 OSS 路径，互不干扰。通过 `--external` 切换内外部路径：
+支持三种渠道模式，同一份构建产物上传到不同的 OSS 路径，互不干扰。通过 `--external` 切换上传目标路径（代码相同，仅路径不同）：
 
 | 渠道 | 命令 | 内部 OSS 路径 | 外部 OSS 路径（`--external`） |
 |------|------|---------------|-------------------------------|
@@ -227,7 +222,7 @@ curl -fsSL <URL>/installer.sh | bash -s -- install \
   --sls-ak-secret "your-ak-secret"
 ```
 
-SLS 目的地解析规则（集团内版本）：
+SLS 目的地解析规则（`internal: true` 时）：
 - 不传任何 `--sls-*` 参数：仅写入内置目的地。
 - 传 `--sls-*` 参数：**双写**到用户目的地与内置目的地（任一失败不影响另一路）。
 
