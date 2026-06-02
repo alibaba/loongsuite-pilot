@@ -58,6 +58,7 @@ fi
 
 # ── Determine current version from git tags ──
 get_latest_version_from_tags() {
+    git fetch origin --prune --prune-tags --quiet 2>/dev/null || true
     local latest
     latest=$(git tag -l 'v*' --sort=-v:refname | head -1 | sed 's/^v//')
     if [ -z "$latest" ]; then
