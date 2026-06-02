@@ -32,6 +32,7 @@ export class FileSlsSender {
   private readonly configName: string;
   private buffer: Record<string, string>[] = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private flushing = false;
   private readonly flushIntervalMs: number;
   private readonly batchSize: number;
 
@@ -78,32 +79,38 @@ export class FileSlsSender {
   }
 
   async flush(): Promise<void> {
-    while (this.buffer.length > 0) {
-      const batch = this.buffer.splice(0, this.batchSize);
-      try {
-        await postWebtracking(this.transportConfig, batch, {
-          topic: this.configName,
-          source: LOCAL_IP,
-        });
-        logger.debug('flush batch sent', {
-          configName: this.configName,
-          count: batch.length,
-          remaining: this.buffer.length,
-        });
-      } catch (err) {
-        logger.error('flush failed, persisting to failed log', {
-          configName: this.configName,
-          count: batch.length,
-          error: String(err),
-        });
-        await persistFailedLogs(
-          this.failedLogDir,
-          this.configName,
-          { __logs__: batch },
-          err,
-        );
-        break;
+    if (this.flushing) return;
+    this.flushing = true;
+    try {
+      while (this.buffer.length > 0) {
+        const batch = this.buffer.splice(0, this.batchSize);
+        try {
+          await postWebtracking(this.transportConfig, batch, {
+            topic: this.configName,
+            source: LOCAL_IP,
+          });
+          logger.debug('flush batch sent', {
+            configName: this.configName,
+            count: batch.length,
+            remaining: this.buffer.length,
+          });
+        } catch (err) {
+          logger.error('flush failed, persisting to failed log', {
+            configName: this.configName,
+            count: batch.length,
+            error: String(err),
+          });
+          await persistFailedLogs(
+            this.failedLogDir,
+            this.configName,
+            { __logs__: batch },
+            err,
+          );
+          break;
+        }
       }
+    } finally {
+      this.flushing = false;
     }
   }
 
@@ -112,9 +119,10 @@ export class FileSlsSender {
       clearInterval(this.flushTimer);
       this.flushTimer = null;
     }
-    while (this.buffer.length > 0) {
-      await this.flush();
+    while (this.flushing) {
+      await new Promise((r) => setTimeout(r, 100));
     }
+    await this.flush();
   }
 
   bufferSize(): number {

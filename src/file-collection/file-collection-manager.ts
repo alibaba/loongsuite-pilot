@@ -124,7 +124,7 @@ export class FileCollectionManager {
     }
 
     for (const config of diskConfigs) {
-      const configJson = JSON.stringify(config);
+      const configJson = stableStringify(config);
       const existingHash = this.configHashes.get(config.configName);
 
       if (!this.pipelines.has(config.configName)) {
@@ -234,4 +234,16 @@ export class FileCollectionManager {
     this.configHashes.delete(configName);
     logger.info('pipeline destroyed', { configName });
   }
+}
+
+function stableStringify(obj: unknown): string {
+  return JSON.stringify(obj, (_key, value) => {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return Object.keys(value).sort().reduce<Record<string, unknown>>((sorted, k) => {
+        sorted[k] = (value as Record<string, unknown>)[k];
+        return sorted;
+      }, {});
+    }
+    return value;
+  });
 }
