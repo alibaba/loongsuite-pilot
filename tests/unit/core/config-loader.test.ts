@@ -472,7 +472,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.collectLog).toBe(true);
       expect(config.collectTrace).toBe(true);
-      expect(config.serviceNamePrefix).toBe('');
+      expect(config.serviceNamePrefix).toBe('loongsuite-pilot');
       expect(config.cms).toEqual({ enabled: false, licenseKey: '', endpoint: '', workspace: '', debug: false });
     });
 

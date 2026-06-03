@@ -140,6 +140,8 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
 
   const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
 
+  const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? (internal ? 'loongsuite-pilot' : '');
+
   return {
     enabled: envBool('LOONGSUITE_PILOT_ENABLED', file?.enabled ?? true),
     internal,
@@ -148,11 +150,11 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     userId,
     collectLog: envBool('LOONGSUITE_PILOT_COLLECT_LOG', file?.collectLog ?? true),
     collectTrace: envBool('LOONGSUITE_PILOT_COLLECT_TRACE', file?.collectTrace ?? true),
-    serviceNamePrefix: env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? '',
+    serviceNamePrefix,
     cms: buildCmsConfig(file),
 
     listeners: buildListenersConfig(file),
-    flushers: buildFlushersConfig(file, dataDir, internal),
+    flushers: buildFlushersConfig(file, dataDir, internal, serviceNamePrefix),
     retention: buildRetentionConfig(file),
     agents: buildAgentsConfig(file),
     hookWatchdog: buildHookWatchdogConfig(file),
@@ -274,9 +276,10 @@ function buildFlushersConfig(
   file: ConfigFile | null,
   dataDir: string,
   internal: boolean,
+  serviceNamePrefix: string,
 ): FlusherConfig {
   return {
-    sls: buildSlsConfig(file, internal),
+    sls: buildSlsConfig(file, internal, serviceNamePrefix),
     jsonl: buildJsonlConfig(file, dataDir),
     http: buildHttpConfig(file),
   };
@@ -330,7 +333,7 @@ function resolveCaptureMessageContent(agents: AgentsConfig): boolean {
   return values.every(a => a.captureMessageContent !== false);
 }
 
-function buildSlsConfig(file: ConfigFile | null, internal: boolean) {
+function buildSlsConfig(file: ConfigFile | null, internal: boolean, serviceNamePrefix: string) {
   // ============================================================
   // Step 1: Read user-provided fields. Env > config.sls.* > undefined.
   // ============================================================
@@ -414,6 +417,8 @@ function buildSlsConfig(file: ConfigFile | null, internal: boolean) {
     endpoints,
     batchMaxSize: file?.sls?.batchMaxSize ?? 20,
     flushIntervalMs: file?.sls?.flushIntervalMs ?? 2_000,
+    serviceNamePrefix,
+    internal,
   };
 }
 

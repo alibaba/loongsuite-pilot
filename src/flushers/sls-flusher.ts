@@ -8,6 +8,7 @@ import {
 import type { AgentActivityEntry, SlsFlusherConfig, SlsEndpoint } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { appendLine, ensureDir } from '../utils/fs-utils.js';
+import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import * as path from 'node:path';
 
 function getLocalIp(): string {
@@ -37,6 +38,7 @@ const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 interface QueuedLog {
   content: Record<string, string>;
   endpoint: SlsEndpoint;
+  agentType?: string;
 }
 
 const logger = createLogger('SlsFlusher');
@@ -56,10 +58,15 @@ export class SlsFlusher extends BaseFlusher {
   /** Lazy AK client cache keyed by `endpoint.name`. Built on first AK send. */
   private readonly akClients: Map<string, any> = new Map();
 
+  private readonly serviceName: string;
+  private readonly internal: boolean;
+
   constructor(config: SlsFlusherConfig, dataDir: string) {
     super();
     this.config = config;
     this.failedLogDir = path.join(dataDir, 'sls-failed-logs');
+    this.serviceName = config.serviceNamePrefix || '';
+    this.internal = config.internal;
   }
 
   private getAkClient(endpoint: SlsEndpoint): any {
@@ -85,12 +92,13 @@ export class SlsFlusher extends BaseFlusher {
 
   async send(entry: AgentActivityEntry): Promise<void> {
     const serialized = serialiseLogEntry(entry);
+    const agentType = normalizeAgentType(String(entry['gen_ai.agent.type'] ?? 'unknown'));
 
     for (const endpoint of this.config.endpoints) {
       const content = endpoint.redact
         ? redactCodeGenerationFields(serialized)
         : serialized;
-      this.enqueue(endpoint, content);
+      this.enqueue(endpoint, content, agentType);
     }
   }
 
@@ -103,6 +111,13 @@ export class SlsFlusher extends BaseFlusher {
   async flush(): Promise<void> {
     const batches = Array.from(this.queue.entries());
     this.queue.clear();
+
+    if (batches.length > 0) {
+      logger.debug('flush dispatching', {
+        buckets: batches.length,
+        totalLogs: batches.reduce((sum, [, logs]) => sum + logs.length, 0),
+      });
+    }
 
     // Per-endpoint dispatch with per-batch failure isolation:
     // one endpoint's error must NOT block sends to other endpoints.
@@ -123,8 +138,37 @@ export class SlsFlusher extends BaseFlusher {
     await Promise.all(tasks);
   }
 
+  private resolveServiceName(agentType?: string): string {
+    if (!this.serviceName) return '';
+    if (this.internal) return this.serviceName;
+    return agentType ? `${this.serviceName}-${agentType}` : this.serviceName;
+  }
+
+  private buildAkTags(agentType?: string): Record<string, string>[] {
+    const tags: Record<string, string>[] = [{ __hostname__: HOSTNAME }];
+    const sn = this.resolveServiceName(agentType);
+    if (sn) tags.push({ __service_name__: sn });
+    return tags;
+  }
+
+  private buildWebtrackingTags(agentType?: string): Record<string, string> {
+    const tags: Record<string, string> = { __hostname__: HOSTNAME };
+    const sn = this.resolveServiceName(agentType);
+    if (sn) tags['__service_name__'] = sn;
+    return tags;
+  }
+
+  private warnIfMixedAgentTypes(logs: QueuedLog[]): void {
+    if (!this.internal && this.serviceName) {
+      const types = new Set(logs.map(l => l.agentType));
+      if (types.size > 1) logger.warn('mixed agentTypes in batch', { types: [...types] });
+    }
+  }
+
   private async flushViaAk(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
+    this.warnIfMixedAgentTypes(logs);
     const now = Math.floor(Date.now() / 1000);
+    const agentType = logs[0]?.agentType;
     const logGroup = {
       logs: logs.map(l => ({
         timestamp: now,
@@ -132,7 +176,7 @@ export class SlsFlusher extends BaseFlusher {
       })),
       source: LOCAL_IP,
       topic: endpoint.kind,
-      tags: [{ __hostname__: HOSTNAME }],
+      tags: this.buildAkTags(agentType),
     };
 
     const client = this.getAkClient(endpoint);
@@ -209,11 +253,13 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   private async postWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
+    this.warnIfMixedAgentTypes(logs);
+    const agentType = logs[0]?.agentType;
     const body = {
       __topic__: endpoint.kind ?? '',
       __source__: LOCAL_IP,
       __logs__: logs.map(l => l.content),
-      __tags__: { __hostname__: HOSTNAME } as Record<string, string>,
+      __tags__: this.buildWebtrackingTags(agentType),
     };
 
     const raw = JSON.stringify(body);
@@ -296,7 +342,7 @@ export class SlsFlusher extends BaseFlusher {
             logs: [{ timestamp: Math.floor(Date.now() / 1000), content }],
             source: LOCAL_IP,
             topic,
-            tags: [{ __hostname__: HOSTNAME }],
+            tags: this.buildAkTags(),
           });
         } else {
           await this.flushViaWebtracking(endpoint, [{ content, endpoint }]);
@@ -307,14 +353,17 @@ export class SlsFlusher extends BaseFlusher {
     }
   }
 
-  private enqueue(endpoint: SlsEndpoint, content: Record<string, string>): void {
-    const key = `${endpoint.project}/${endpoint.logstore}`;
+  private enqueue(endpoint: SlsEndpoint, content: Record<string, string>, agentType?: string): void {
+    const base = `${endpoint.project}/${endpoint.logstore}`;
+    const key = (!this.internal && this.serviceName && agentType)
+      ? `${base}/${agentType}`
+      : base;
     let bucket = this.queue.get(key);
     if (!bucket) {
       bucket = [];
       this.queue.set(key, bucket);
     }
-    bucket.push({ content, endpoint });
+    bucket.push({ content, endpoint, agentType });
 
     const maxSize = this.config.batchMaxSize || BATCH_MAX_SIZE;
     if (bucket.length >= maxSize) {
