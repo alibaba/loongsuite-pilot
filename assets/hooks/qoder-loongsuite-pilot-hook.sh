@@ -2,20 +2,18 @@
 set -euo pipefail
 
 # ============================================================================
-# Qoder Hook Script — delegates to shared hook-processor.mjs
+# Qoder Hook Script — delegates to qoder-hook-processor.mjs
 # ============================================================================
 # Usage:
 #   qoder-loongsuite-pilot-hook.sh [agent-id]
 #
 #   agent-id  Optional. Defaults to "qoder".
 #             Controls the log subdirectory and history file prefix.
-#             e.g. "qoder-work" → logs/qoder-work/history/qoder-work-*.jsonl
 #
 # Installation:
-#   HookManager copies this script + hook-processor.mjs to
-#   ~/.loongsuite-pilot/hooks/ and injects the command into
-#   the tool's settings.json (e.g. ~/.qoder/settings.json,
-#   ~/.qoderwork/settings.json)
+#   HookManager copies this script + qoder-hook-processor.mjs +
+#   shared/hook-processor-base.mjs to ~/.loongsuite-pilot/hooks/
+#   and injects the command into ~/.qoder/settings.json
 # ============================================================================
 
 # Skip immediately when stdin is a terminal (no payload)
@@ -24,7 +22,7 @@ set -euo pipefail
 AGENT_ID="${1:-qoder}"
 
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROCESSOR="$HOOKS_DIR/hook-processor.mjs"
+PROCESSOR="$HOOKS_DIR/qoder-hook-processor.mjs"
 
 # Fail silently if the processor is missing
 [[ -f "$PROCESSOR" ]] || exit 0

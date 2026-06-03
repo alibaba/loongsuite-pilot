@@ -266,4 +266,64 @@ describe('asset hook agent event normalizer', () => {
     expect(inferProviderName({ 'gen_ai.request.model': 'gpt-5.5' })).toBe('openai');
     expect(inferProviderName({ 'gen_ai.request.model': 'qwen-max' })).toBe('qwen');
   });
+
+  it('user-type rows produce no model fields (user-hook format)', () => {
+    const record = buildQoderHookRecord({
+      type: 'user',
+      uuid: 'user-row-1',
+      timestamp: '2026-06-01T00:00:00.000Z',
+      sessionId: 'sess-user',
+      entrypoint: 'cli',
+      message: {
+        role: 'user',
+        content: 'hello world',
+      },
+    }, {
+      runtimeConfig: { userId: 'u-qoder', agents: {} },
+    });
+
+    expect(record['event.name']).toBe('llm.request');
+    expect(record['gen_ai.request.model']).toBeUndefined();
+    expect(record['gen_ai.response.model']).toBeUndefined();
+    expect(record['gen_ai.provider.name']).toBe('qwen');
+    expect(record['gen_ai.session.id']).toBe('sess-user');
+  });
+
+  it('assistant thinking+text rows preserve response.id from message.id', () => {
+    const thinkingRecord = buildQoderHookRecord({
+      type: 'assistant',
+      uuid: 'row-think',
+      timestamp: '2026-06-01T00:00:01.000Z',
+      sessionId: 'sess-multi',
+      entrypoint: 'cli',
+      message: {
+        id: 'msg-shared-id',
+        model: 'auto',
+        content: [{ type: 'thinking', thinking: 'Let me think...' }],
+      },
+    }, {
+      runtimeConfig: { userId: 'u-qoder', agents: {} },
+    });
+
+    const textRecord = buildQoderHookRecord({
+      type: 'assistant',
+      uuid: 'row-text',
+      timestamp: '2026-06-01T00:00:02.000Z',
+      sessionId: 'sess-multi',
+      entrypoint: 'cli',
+      message: {
+        id: 'msg-shared-id',
+        model: 'auto',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'The answer is 42.' }],
+      },
+    }, {
+      runtimeConfig: { userId: 'u-qoder', agents: {} },
+    });
+
+    expect(thinkingRecord['gen_ai.response.id']).toBe('msg-shared-id');
+    expect(textRecord['gen_ai.response.id']).toBe('msg-shared-id');
+    expect(thinkingRecord['event.name']).toBe('llm.response');
+    expect(textRecord['event.name']).toBe('llm.response');
+  });
 });

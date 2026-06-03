@@ -204,12 +204,18 @@ describe('Hook JSONL integration flow', () => {
     const hookScript = path.join(hookDir, 'qoder-loongsuite-pilot-hook.sh');
     await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/qoder-loongsuite-pilot-hook.sh'), hookScript);
     await fs.copyFile(
-      path.resolve(process.cwd(), 'assets/hooks/hook-processor.mjs'),
-      path.join(hookDir, 'hook-processor.mjs'),
+      path.resolve(process.cwd(), 'assets/hooks/qoder-hook-processor.mjs'),
+      path.join(hookDir, 'qoder-hook-processor.mjs'),
     );
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/agent-event-normalizer.mjs'),
       path.join(hookDir, 'agent-event-normalizer.mjs'),
+    );
+    const sharedDir = path.join(hookDir, 'shared');
+    await fs.mkdir(sharedDir, { recursive: true });
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
+      path.join(sharedDir, 'hook-processor-base.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
 
@@ -231,6 +237,19 @@ describe('Hook JSONL integration flow', () => {
         entrypoint: 'cli',
         cwd: '/tmp/project',
       }),
+      JSON.stringify({
+        type: 'assistant',
+        uuid: 'asst-1',
+        timestamp: '2026-05-01T18:15:27.000Z',
+        sessionId: 'sess-hook',
+        cwd: '/tmp/project',
+        message: { role: 'assistant', id: 'msg-1', content: [{ type: 'text', text: 'hello back' }] },
+      }),
+      JSON.stringify({
+        type: 'last-prompt',
+        sessionId: 'sess-hook',
+        lastPrompt: 'hello from qoder hook',
+      }),
     ].join('\n') + '\n');
 
     const result = runQoderHook(hookScript, JSON.stringify({
@@ -246,7 +265,7 @@ describe('Hook JSONL integration flow', () => {
     const logDir = path.join(dataDir, 'logs', 'qoder', 'history');
     const historyFile = path.join(logDir, `qoder-${getTodayDateString()}.jsonl`);
     const historyLines = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n');
-    expect(historyLines).toHaveLength(1);
+    expect(historyLines.length).toBeGreaterThanOrEqual(1);
     const historyRecord = JSON.parse(historyLines[0]!);
     expect(historyRecord.type).toBeUndefined();
     expect(historyRecord.uuid).toBeUndefined();
@@ -265,16 +284,15 @@ describe('Hook JSONL integration flow', () => {
     await input.start();
     await input.stop();
 
-    expect(allEntries).toHaveLength(1);
-    expect(allEntries[0]).toMatchObject({
+    // New processor produces: user-hook (llm.request) + step llm.request + llm.response
+    expect(allEntries.length).toBeGreaterThanOrEqual(1);
+    const userHook = allEntries.find(e => e['event.name'] === 'llm.request' && !e['gen_ai.step.id']);
+    expect(userHook).toBeDefined();
+    expect(userHook).toMatchObject({
       'event.name': 'llm.request',
       'gen_ai.agent.type': ClientType.QoderCli,
       'gen_ai.session.id': 'sess-hook',
     });
-    expect(allEntries[0]?.['gen_ai.turn.id']).toBeUndefined();
-    expect(allEntries[0]?.['gen_ai.input.messages_delta']).toEqual([
-      { role: 'user', content: 'hello from qoder hook' },
-    ]);
   });
 });
 

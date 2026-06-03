@@ -431,7 +431,7 @@ export function buildQoderHookRecord(row, options = {}) {
   const variant = inferQoderVariant(row, sourceAgentId);
   const sourceNamespace = qoderSourceNamespace(variant);
   const eventName = inferQoderEventName(rowType, content);
-  const model = getStringValue(message, 'model') || 'unknown';
+  const model = rowType === 'user' ? undefined : (getStringValue(message, 'model') || 'unknown');
   const agentType = variant;
   const toolCallId = getStringValue(content, 'id') || getStringValue(content, 'tool_use_id');
   const record = {

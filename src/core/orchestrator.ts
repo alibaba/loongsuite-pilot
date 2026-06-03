@@ -29,6 +29,7 @@ import { QoderWorkTraceInput } from '../inputs/qoder-work-log/qoder-work-trace-i
 import { QoderWorkSqliteInput } from '../inputs/qoder-work-sqlite/qoder-work-sqlite-input.js';
 import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
 import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-session-input.js';
+import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
 import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
@@ -56,6 +57,7 @@ const DEFAULT_DATA_DIR = '~/.loongsuite-pilot';
 export class Orchestrator extends EventEmitter {
   private static readonly LISTENER_AGENT_MAP: Record<string, string> = {
     'qoder-sqlite': 'qoder',
+    'qoder-trace': 'qoder',
     'qoder-work': 'qoder-work',
     'qoder-work-log': 'qoder-work',
     'qoder-work-trace': 'qoder-work',
@@ -370,14 +372,23 @@ export class Orchestrator extends EventEmitter {
     const entries: AgentDetectionEntry[] = [];
     const listenerCfg = this.config.listeners;
 
-    // --- Qoder (SQLite token usage polling) ---
+    // Qoder trace input mutual exclusion closure (used by sqlite/hook/session guards below)
+    const qoderTraceEnabled = () =>
+      this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-trace']) &&
+      this.agentControlManager.resolveEnabled(
+        'qoder-trace',
+        listenerCfg['qoder-trace']?.enabled ?? true,
+      );
+
+    // --- Qoder (SQLite token usage polling) — disabled when qoder-trace is enabled ---
     const qoderSqliteInput = new QoderSqliteInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(qoderSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderSqliteInput, {
         watchPaths: QoderSqliteInput.getWatchPaths(),
         isAvailable: QoderSqliteInput.checkAvailability,
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-sqlite']) &&
+        enabled: () => !qoderTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-sqlite']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-sqlite',
             listenerCfg['qoder-sqlite']?.enabled ?? true,
@@ -460,8 +471,23 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Qoder CLI (Hook JSONL) ---
+    // --- Qoder Trace (multi-source merge, supersedes hook/session/sqlite) ---
     const qoderCliLogDir = path.join(this.dataDir, 'logs', 'qoder', 'history');
+    const qoderTraceInput = new QoderTraceInput({
+      stateStore: this.stateStore,
+      logDir: qoderCliLogDir,
+    });
+    this.inputManager.registerInput(qoderTraceInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderTraceInput, {
+        watchPaths: QoderTraceInput.getWatchPaths(),
+        isAvailable: QoderTraceInput.checkAvailability,
+        enabled: qoderTraceEnabled,
+        pollIntervalMs: listenerCfg['qoder-trace']?.pollInterval,
+      }),
+    );
+
+    // --- Qoder CLI (Hook JSONL) — disabled when qoder-trace is enabled ---
     const qoderCliInput = new QoderCliInput({
       stateStore: this.stateStore,
       logDir: qoderCliLogDir,
@@ -471,7 +497,8 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderCliInput, {
         watchPaths: QoderCliInput.getWatchPaths(),
         isAvailable: QoderCliInput.checkAvailability,
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-hook']) &&
+        enabled: () => !qoderTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-hook']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-cli-hook',
             listenerCfg['qoder-cli-hook']?.enabled ?? true,
@@ -480,14 +507,15 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Qoder CLI (Native session segments) ---
+    // --- Qoder CLI (Native session segments) — disabled when qoder-trace is enabled ---
     const qoderCliSessionInput = new QoderCliSessionInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(qoderCliSessionInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderCliSessionInput, {
         watchPaths: QoderCliSessionInput.getWatchPaths(),
         isAvailable: QoderCliSessionInput.checkAvailability,
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-session']) &&
+        enabled: () => !qoderTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-session']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-cli-session',
             listenerCfg['qoder-cli-session']?.enabled ?? true,
