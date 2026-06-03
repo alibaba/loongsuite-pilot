@@ -9,12 +9,14 @@
 #   bash deploy/release.sh --external         # external deploy mode
 #   bash deploy/release.sh --dry-run          # show what would happen, don't execute
 #
-# The script will:
-#   1. Determine next version from git tags (or use --version)
-#   2. Update package.json
-#   3. Commit & tag
-#   4. Build (package.sh)
-#   5. Upload (upload.sh)
+# Flow:
+#   1. Fetch latest tags from remote
+#   2. Determine next version
+#   3. Create release/<version> branch from origin/master
+#   4. Bump package.json, commit, tag
+#   5. Build (package.sh) & Upload (upload.sh)
+#   6. Push branch + tag to remote
+#   7. Print CR creation hint
 
 set -euo pipefail
 
@@ -56,13 +58,16 @@ if [ -n "$(git status --porcelain)" ]; then
     exit 1
 fi
 
+# ── Fetch latest state from remote ──
+echo "==> Fetching from remote..."
+git fetch origin --prune --prune-tags --quiet
+echo "    ✅ Synced tags and branches"
+
 # ── Determine current version from git tags ──
 get_latest_version_from_tags() {
-    git fetch origin --prune --prune-tags --quiet 2>/dev/null || true
     local latest
     latest=$(git tag -l 'v*' --sort=-v:refname | head -1 | sed 's/^v//')
     if [ -z "$latest" ]; then
-        # Fallback: read from package.json if no tags exist yet
         latest=$(node -e "process.stdout.write(require('./package.json').version)")
     fi
     echo "$latest"
@@ -99,15 +104,20 @@ fi
 
 validate_semver "$NEXT_VERSION"
 
+RELEASE_BRANCH="release/v${NEXT_VERSION}"
+
 echo "==> Version"
 echo "    Current: ${CURRENT_VERSION}"
 echo "    Next:    ${NEXT_VERSION} (${BUMP_TYPE})"
+echo "    Branch:  ${RELEASE_BRANCH}"
 echo ""
 
 if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] Would create branch: ${RELEASE_BRANCH} from origin/master"
     echo "[dry-run] Would update package.json: ${CURRENT_VERSION} → ${NEXT_VERSION}"
     echo "[dry-run] Would commit and tag: v${NEXT_VERSION}"
     echo "[dry-run] Would build and upload (channel=release, mode=${DEPLOY_MODE:-internal})"
+    echo "[dry-run] Would push branch + tag, then prompt to create CR → master"
     exit 0
 fi
 
@@ -117,6 +127,16 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     echo "Aborted."
     exit 0
 fi
+
+# ── Create release branch from origin/master ──
+echo "==> Creating release branch..."
+if git show-ref --verify --quiet "refs/heads/${RELEASE_BRANCH}"; then
+    echo "    Branch ${RELEASE_BRANCH} already exists locally, switching to it"
+    git checkout "${RELEASE_BRANCH}"
+else
+    git checkout -b "${RELEASE_BRANCH}" origin/master
+fi
+echo "    ✅ On branch ${RELEASE_BRANCH}"
 
 # ── Update package.json ──
 echo "==> Updating package.json..."
@@ -160,11 +180,11 @@ else
     bash "$SCRIPT_DIR/upload.sh" "${UPLOAD_ARGS[@]}"
 fi
 
-# ── Push commit and tag to remote ──
+# ── Push branch and tag to remote ──
 echo ""
 echo "==> Pushing to remote..."
-git push origin HEAD "v${NEXT_VERSION}"
-echo "    ✅ Pushed commit and tag v${NEXT_VERSION}"
+git push origin "${RELEASE_BRANCH}" "v${NEXT_VERSION}" -u
+echo "    ✅ Pushed branch ${RELEASE_BRANCH} and tag v${NEXT_VERSION}"
 
 # ── Done ──
 echo ""
@@ -172,8 +192,10 @@ echo "============================================================"
 echo "✅ Release v${NEXT_VERSION} complete!"
 echo ""
 echo "   Tag:     v${NEXT_VERSION}"
+echo "   Branch:  ${RELEASE_BRANCH}"
 echo "   Channel: release"
 echo "   Mode:    ${DEPLOY_MODE:-internal}"
 echo ""
-echo "   To see all releases: git tag -l 'v*' --sort=-v:refname"
+echo "   Next step: create CR to merge ${RELEASE_BRANCH} → master"
+echo "   Run: claude /submit-cr"
 echo "============================================================"
