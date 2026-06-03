@@ -13,6 +13,7 @@ export enum ClientType {
   Antigravity = 'antigravity',
   Lingma = 'lingma',
   LingmaVscode = 'lingma-vscode',
+  Wukong = 'wukong',
 
   // CLI tools
   GeminiCli = 'gemini-cli',
@@ -55,4 +56,6 @@ export enum CollectionMethod {
   SessionFilePolling = 'session-file-polling',
   /** Access tool's Language Server via HTTP API */
   LsHttpApi = 'ls-http-api',
+  /** Poll agent data via local CLI API (e.g. wukong) */
+  CliApiPolling = 'cli-api-polling',
 }

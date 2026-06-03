@@ -49,6 +49,7 @@
 | Cursor | `cursor` | Hook | `BaseHookInput` | `inputs/cursor-hook/` | `agents.d/cursor.json` |
 | Claude Code | `claude-code` | Plugin-Probe | `BaseHookInput` | `inputs/claude-code-log/` | `agents.d/claude-code.json` |
 | Codex | `codex` | Plugin-Probe | `BaseHookInput` | `inputs/codex-log/` | `agents.d/codex.json` |
+| Wukong | `wukong` | CLI API Polling | `BaseInput` | `inputs/wukong/` | N/A |
 
 ## 依赖关系
 

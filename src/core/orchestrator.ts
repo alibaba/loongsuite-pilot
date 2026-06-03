@@ -33,6 +33,7 @@ import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
 import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
+import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { HookWatchdog, type PluginCheckTarget } from './hook-watchdog.js';
@@ -67,6 +68,7 @@ export class Orchestrator extends EventEmitter {
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
     'codex-log': 'codex',
+    'wukong': 'wukong',
   };
 
   private readonly config: AnalyticsConfig;
@@ -581,6 +583,22 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['codex-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['codex-log']?.pollInterval,
+      }),
+    );
+
+    // --- Wukong (CLI API polling) ---
+    const wukongInput = new WukongInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(wukongInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(wukongInput, {
+        watchPaths: WukongInput.getWatchPaths(),
+        isAvailable: WukongInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['wukong']) &&
+          this.agentControlManager.resolveEnabled(
+            'wukong',
+            listenerCfg['wukong']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['wukong']?.pollInterval,
       }),
     );
 
