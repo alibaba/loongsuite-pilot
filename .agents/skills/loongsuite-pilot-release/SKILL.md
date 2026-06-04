@@ -68,7 +68,7 @@ bash deploy/release.sh <mapped-args>
    git log ${PREV_TAG}..${CURRENT_TAG} --format="%an" --no-merges | sort -u
    ```
 
-3. 按 conventional commit prefix 分类生成 Release Note：
+3. 按 conventional commit prefix 分类，**用中文撰写** Release Note：
 
    ```markdown
    ## Release vX.Y.Z
@@ -77,13 +77,13 @@ bash deploy/release.sh <mapped-args>
    **上一版本:** <prev-version> (YYYY-MM-DD)
 
    ### 新功能
-   - **scope**: description (`short-hash`)
+   - **scope**: 中文描述 (`short-hash`)
 
    ### 问题修复
-   - **scope**: description (`short-hash`)
+   - **scope**: 中文描述 (`short-hash`)
 
    ### 优化重构
-   - **scope**: description (`short-hash`)
+   - **scope**: 中文描述 (`short-hash`)
    ```
 
    分类规则：
@@ -93,26 +93,48 @@ bash deploy/release.sh <mapped-args>
    - `release:` 开头 → 跳过
    - 无 prefix 或其他 → 归入最相近的类别（根据内容语义判断），如果无法归类放入问题修复
    - 空 section 不输出
+   - 所有 description 翻译为中文
 
 ### Step 4: 发布 Release Note 到 Tag
 
-直接执行，不再额外确认。
+直接执行，不再额外确认。获取 tag 应指向的 commit SHA（`git rev-parse HEAD`）。
 
-1. 删除远端已有的同名 tag：
+**先检查 tag 状态，按需操作：**
+
+1. 检查远端 tag 是否存在及指向的 commit：
    ```bash
-   git push origin :refs/tags/${CURRENT_TAG}
+   git ls-remote origin refs/tags/${CURRENT_TAG}
    ```
 
-2. 通过 `mcp__code__create_tag` 重建 tag 并附带 releaseDescription：
+2. 检查本地 tag 是否存在及指向的 commit：
+   ```bash
+   git rev-parse ${CURRENT_TAG}^{commit} 2>/dev/null
+   ```
+
+3. 根据检查结果决定操作：
+
+   - **tag 不存在（本地+远端均无）**→ 直接通过 `mcp__code__create_tag` 创建，一步到位
+   - **tag 已存在且 commit 一致** → 需要删除后重建以附加 releaseDescription：
+     - 删除本地 tag：`git tag -d ${CURRENT_TAG}`
+     - 删除远端 tag：`git push origin :refs/tags/${CURRENT_TAG}`
+     - 通过 `mcp__code__create_tag` 重建
+   - **tag 已存在但 commit 不一致** → 同上，删除后重建
+
+4. `mcp__code__create_tag` 参数：
    - repo: 从 `git remote get-url origin` 提取仓库路径
    - tagName: `v${NEXT_VERSION}`
    - ref: tag 指向的 commit SHA
    - message: `Release v${NEXT_VERSION}`
-   - releaseDescription: 生成的 Release Note 内容
+   - releaseDescription: 生成的中文 Release Note 内容
 
-### Step 5: 提示创建 CR
+5. 同步远端 tag 到本地：
+   ```bash
+   git fetch origin --tags
+   ```
 
-输出最终结果：
+### Step 5: 创建 CR
+
+输出发布结果后，直接调用 `/submit-cr` 创建 CR 合入 master：
 
 ```
 ============================================================
@@ -123,10 +145,11 @@ bash deploy/release.sh <mapped-args>
    Channel:  release
    Mode:     ${MODE}
 
-   下一步: 创建 CR 合入 master
-   运行: /submit-cr
+   正在创建 CR 合入 master...
 ============================================================
 ```
+
+然后通过 Skill 工具调用 `submit-cr`，自动完成 CR 创建。
 
 ---
 
@@ -136,4 +159,6 @@ bash deploy/release.sh <mapped-args>
 - `deploy/release.sh` 内部会确认版本号（`Proceed with release?`），这是唯一的交互确认点
 - 删除远端 tag 不需要额外确认（发布流程隐含授权）
 - Release Note 生成后直接发布，不额外询问
+- Release Note 所有内容用中文撰写
 - commit 分类基于 prefix，`release:` commit 始终跳过
+- CR 创建在发布完成后自动执行，不需要用户手动触发
