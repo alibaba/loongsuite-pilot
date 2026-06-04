@@ -20,6 +20,7 @@ export function enrichCliTurn(
 
     matches[0]['gen_ai.usage.input_tokens'] = seg.inputTokens;
     matches[0]['gen_ai.usage.output_tokens'] = seg.outputTokens;
+    matches[0]['gen_ai.usage.total_tokens'] = seg.inputTokens + seg.outputTokens;
     matches[0]['gen_ai.usage.cache_read.input_tokens'] = seg.cacheReadTokens;
     matches[0]['gen_ai.usage.cache_creation.input_tokens'] = seg.cacheCreationTokens;
 
@@ -30,6 +31,7 @@ export function enrichCliTurn(
     for (let i = 1; i < matches.length; i++) {
       matches[i]['gen_ai.usage.input_tokens'] = 0;
       matches[i]['gen_ai.usage.output_tokens'] = 0;
+      matches[i]['gen_ai.usage.total_tokens'] = 0;
       matches[i]['gen_ai.usage.cache_read.input_tokens'] = 0;
       matches[i]['gen_ai.usage.cache_creation.input_tokens'] = 0;
     }
@@ -124,6 +126,7 @@ export function enrichIdeTurn(
         if (!tokenWritten.has(dedupeKey)) {
           bestEntry['gen_ai.usage.input_tokens'] = row.inputTokens;
           bestEntry['gen_ai.usage.output_tokens'] = row.outputTokens;
+          bestEntry['gen_ai.usage.total_tokens'] = row.inputTokens + row.outputTokens;
           bestEntry['gen_ai.usage.cache_read.input_tokens'] = row.cacheReadTokens;
           tokenWritten.add(dedupeKey);
         }
@@ -145,6 +148,7 @@ export function enrichIdeTurn(
     if (entry['gen_ai.usage.input_tokens'] !== undefined) continue;
     entry['gen_ai.usage.input_tokens'] = 0;
     entry['gen_ai.usage.output_tokens'] = 0;
+    entry['gen_ai.usage.total_tokens'] = 0;
     entry['gen_ai.usage.cache_read.input_tokens'] = 0;
   }
 
