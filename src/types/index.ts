@@ -85,7 +85,6 @@ export interface SlsFlusherConfig {
   batchMaxSize: number;
   flushIntervalMs: number;
   serviceNamePrefix: string;
-  internal: boolean;
 }
 
 export interface SlsEndpoint {

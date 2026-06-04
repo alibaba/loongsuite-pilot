@@ -418,7 +418,6 @@ function buildSlsConfig(file: ConfigFile | null, internal: boolean, serviceNameP
     batchMaxSize: file?.sls?.batchMaxSize ?? 20,
     flushIntervalMs: file?.sls?.flushIntervalMs ?? 2_000,
     serviceNamePrefix,
-    internal,
   };
 }
 

@@ -59,14 +59,12 @@ export class SlsFlusher extends BaseFlusher {
   private readonly akClients: Map<string, any> = new Map();
 
   private readonly serviceName: string;
-  private readonly internal: boolean;
 
   constructor(config: SlsFlusherConfig, dataDir: string) {
     super();
     this.config = config;
     this.failedLogDir = path.join(dataDir, 'sls-failed-logs');
     this.serviceName = config.serviceNamePrefix || '';
-    this.internal = config.internal;
   }
 
   private getAkClient(endpoint: SlsEndpoint): any {
@@ -140,7 +138,6 @@ export class SlsFlusher extends BaseFlusher {
 
   private resolveServiceName(agentType?: string): string {
     if (!this.serviceName) return '';
-    if (this.internal) return this.serviceName;
     return agentType ? `${this.serviceName}-${agentType}` : this.serviceName;
   }
 
@@ -159,7 +156,7 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   private warnIfMixedAgentTypes(logs: QueuedLog[]): void {
-    if (!this.internal && this.serviceName) {
+    if (this.serviceName) {
       const types = new Set(logs.map(l => l.agentType));
       if (types.size > 1) logger.warn('mixed agentTypes in batch', { types: [...types] });
     }
@@ -355,7 +352,7 @@ export class SlsFlusher extends BaseFlusher {
 
   private enqueue(endpoint: SlsEndpoint, content: Record<string, string>, agentType?: string): void {
     const base = `${endpoint.project}/${endpoint.logstore}`;
-    const key = (!this.internal && this.serviceName && agentType)
+    const key = (this.serviceName && agentType)
       ? `${base}/${agentType}`
       : base;
     let bucket = this.queue.get(key);

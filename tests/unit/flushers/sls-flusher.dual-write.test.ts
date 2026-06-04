@@ -69,7 +69,6 @@ function makeConfig(endpoints: SlsEndpoint[]): SlsFlusherConfig {
     batchMaxSize: 20,
     flushIntervalMs: 99999,
     serviceNamePrefix: '',
-    internal: true,
   };
 }
 
