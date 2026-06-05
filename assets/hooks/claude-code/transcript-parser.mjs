@@ -4,31 +4,38 @@
 /**
  * transcript-parser.mjs — Claude Code 原生 transcript JSONL 解析。
  *
- * 移植自 claude-code-plugin .../src/transcript.js,改 ESM 导出。
- *
  * Claude Code 在 ~/.claude/projects/<hash>/<sessionId>.jsonl 里存全部对话历史。
  * 同一 LLM 调用可能写入多条 assistant 记录(streaming chunks),共享 message.id;
  * 我们按 id 分组、合并、去重,提取每次 LLM 调用的 token usage、stop_reason、output content。
  *
- * 关键 bug fix(均已保留):
- *   7.5 byteOffset 增量读取 — 跨 turn 跳过已消费的字节
- *   7.6 PostToolUse 丢失排序 — alignWithHookEvents 用 prevEnd + 0.001 下界
- *   7.8 历史锚点抢占 — expectedCount + _discarded = true,只配对最末 N 条
+ * v2 重构:
+ *   - 时间戳全部从 transcript record.timestamp 字段获取(ISO8601),不再依赖 hook 事件推导
+ *   - 新增 declaredToolIds: 从 output_content 的 tool_use block 提取 tool_use_id
+ *   - 新增 toolDetails: 从 tool_use/tool_result record 提取每个 tool 的 call/result 时间和内容
+ *   - turn 切分使用 user record 的 promptId 字段(Claude Code 的 turn 级标识符)
+ *   - 支持 message.id 缺失的 assistant 记录(如 end_turn 的最终回答)
+ *   - 删除 alignWithHookEvents / assignTimestamps (不再需要 hook 事件做时间校准)
  *
  * 增量约定:
- *   parseClaudeTranscript(path, startTime, stopTime, byteOffset) 返回 llm_call 事件数组,
- *   并在数组上挂 .nextOffset 属性,调用方持久化到 state.transcript_offset 即可下次只读增量。
+ *   parseClaudeTranscript(path, byteOffset) 返回 { turns, nextOffset }
  */
 
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 
 export const MAX_TRANSCRIPT_BYTES = 50 * 1024 * 1024; // 50 MB safety limit
 
-export function parseClaudeTranscript(transcriptPath, startTime, stopTime, byteOffset = 0) {
+/**
+ * 解析 Claude Code transcript JSONL 文件。
+ *
+ * @param {string} transcriptPath - transcript 文件路径
+ * @param {number} byteOffset - 增量读取起点(字节偏移)
+ * @returns {{ turns: Array, nextOffset: number }}
+ *   turns: 按 promptId 切分的 turn 数组,每个 turn 包含 llmCalls + prompt + timestamps
+ */
+export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-    const empty = [];
-    empty.nextOffset = byteOffset;
-    return empty;
+    return { turns: [], nextOffset: byteOffset };
   }
 
   let content;
@@ -38,16 +45,13 @@ export function parseClaudeTranscript(transcriptPath, startTime, stopTime, byteO
     fileSize = stat.size;
 
     if (byteOffset >= fileSize) {
-      const empty = [];
-      empty.nextOffset = byteOffset;
-      return empty;
+      return { turns: [], nextOffset: byteOffset };
     }
 
     const readFrom = Math.max(byteOffset, 0);
     const readLen = fileSize - readFrom;
 
     if (readLen > MAX_TRANSCRIPT_BYTES) {
-      // 超过安全上限,退化为读最尾 50MB
       const fd = fs.openSync(transcriptPath, 'r');
       try {
         const tailOffset = fileSize - MAX_TRANSCRIPT_BYTES;
@@ -57,7 +61,6 @@ export function parseClaudeTranscript(transcriptPath, startTime, stopTime, byteO
         fs.readSync(fd, buf, 0, actualLen, actualOffset);
         content = buf.toString('utf-8');
         if (actualOffset > readFrom) {
-          // 截断了开头,丢弃首行(可能不完整)
           const firstNewline = content.indexOf('\n');
           if (firstNewline >= 0) content = content.slice(firstNewline + 1);
         }
@@ -77,14 +80,16 @@ export function parseClaudeTranscript(transcriptPath, startTime, stopTime, byteO
       content = fs.readFileSync(transcriptPath, 'utf-8');
     }
   } catch {
-    const empty = [];
-    empty.nextOffset = byteOffset;
-    return empty;
+    return { turns: [], nextOffset: byteOffset };
   }
 
-  // Phase 1: 收集 assistant 分组 + 顺序的对话记录
-  const assistantGroups = new Map(); // message.id → { chunks, usage, model, stop_reason, order }
+  // Phase 1: 收集 assistant 分组 + 顺序的对话记录 + 时间戳
+  const assistantGroups = new Map(); // message.id → group
   const conversationRecords = []; // [{ type:'user'|'assistant', ... }]
+  const toolResultTimestamps = new Map(); // tool_use_id → ISO8601 timestamp
+  const toolResultContents = new Map(); // tool_use_id → result content
+  const toolResultErrors = new Map(); // tool_use_id → boolean (is_error)
+  let currentPromptId = null; // 当前 turn 的 promptId(从 user record 提取)
 
   for (const line of content.split('\n')) {
     const trimmed = line.trim();
@@ -102,9 +107,12 @@ export function parseClaudeTranscript(transcriptPath, startTime, stopTime, byteO
 
     if (recordType === 'assistant') {
       const msg = record.message;
-      if (!msg || !msg.id) continue;
+      if (!msg) continue;
 
-      const msgId = msg.id;
+      // 支持 msg.id 缺失: 生成合成 ID
+      const msgId = msg.id || `_syn_${crypto.randomUUID()}`;
+      const recordTs = record.timestamp || null;
+
       if (!assistantGroups.has(msgId)) {
         assistantGroups.set(msgId, {
           id: msgId,
@@ -113,15 +121,22 @@ export function parseClaudeTranscript(transcriptPath, startTime, stopTime, byteO
           model: null,
           stop_reason: null,
           order: conversationRecords.length,
+          firstTimestamp: recordTs,
+          toolUseTimestamps: new Map(),
+          promptId: currentPromptId,
         });
-        conversationRecords.push({ type: 'assistant', msgId });
+        conversationRecords.push({ type: 'assistant', msgId, promptId: currentPromptId });
       }
 
       const group = assistantGroups.get(msgId);
+      if (!group.firstTimestamp && recordTs) group.firstTimestamp = recordTs;
 
       if (Array.isArray(msg.content)) {
         for (const block of msg.content) {
           group.chunks.push(block);
+          if (block.type === 'tool_use' && block.id && recordTs) {
+            group.toolUseTimestamps.set(block.id, recordTs);
+          }
         }
       }
       if (msg.usage) group.usage = msg.usage;
@@ -130,15 +145,36 @@ export function parseClaudeTranscript(transcriptPath, startTime, stopTime, byteO
     } else if (recordType === 'user') {
       const msg = record.message;
       if (!msg) continue;
-      conversationRecords.push({ type: 'user', content: msg.content });
+      const recordTs = record.timestamp || null;
+      const promptId = record.promptId || null;
+
+      // promptId 变化 = 新 turn 开始
+      if (promptId) currentPromptId = promptId;
+
+      // 提取 tool_result 的时间戳和内容
+      const userContent = msg.content;
+      if (Array.isArray(userContent)) {
+        for (const part of userContent) {
+          if (part && part.type === 'tool_result' && part.tool_use_id) {
+            if (recordTs) toolResultTimestamps.set(part.tool_use_id, recordTs);
+            const resultContent = part.content || part.output || part.result || '';
+            toolResultContents.set(part.tool_use_id, resultContent);
+            if (part.is_error) toolResultErrors.set(part.tool_use_id, true);
+          }
+        }
+      }
+
+      conversationRecords.push({
+        type: 'user',
+        content: userContent,
+        timestamp: recordTs,
+        promptId: currentPromptId,
+      });
     }
-    // 其余 record type(permission-mode、attachment、last-prompt 等)忽略
   }
 
   if (assistantGroups.size === 0) {
-    const empty = [];
-    empty.nextOffset = fileSize;
-    return empty;
+    return { turns: [], nextOffset: fileSize };
   }
 
   // Phase 2: 每组内 content blocks 去重(streaming chunks 会重复)
@@ -147,14 +183,25 @@ export function parseClaudeTranscript(transcriptPath, startTime, stopTime, byteO
     delete group.chunks;
   }
 
-  // Phase 3: 构建 llm_call 事件,input_messages 用 delta 形式(避免 O(N²) 复制)
-  const llmEvents = [];
+  // Phase 3: 构建 llm_call 事件(带时间戳 + tool 归属信息)
+  const llmCalls = [];
   const conversationHistory = [];
   let prevCount = 0;
+  let lastToolResultTs = null;
 
   for (const rec of conversationRecords) {
     if (rec.type === 'user') {
       conversationHistory.push({ role: 'user', content: rec.content });
+      if (Array.isArray(rec.content)) {
+        for (const part of rec.content) {
+          if (part && part.type === 'tool_result' && part.tool_use_id) {
+            const ts = toolResultTimestamps.get(part.tool_use_id);
+            if (ts && (!lastToolResultTs || ts > lastToolResultTs)) {
+              lastToolResultTs = ts;
+            }
+          }
+        }
+      }
     } else if (rec.type === 'assistant') {
       const group = assistantGroups.get(rec.msgId);
       if (!group) continue;
@@ -167,10 +214,28 @@ export function parseClaudeTranscript(transcriptPath, startTime, stopTime, byteO
 
       const delta = conversationHistory.slice(prevCount);
 
-      llmEvents.push({
+      const declaredToolIds = [];
+      for (const block of group.mergedContent) {
+        if (block.type === 'tool_use' && block.id) {
+          declaredToolIds.push(block.id);
+        }
+      }
+
+      const toolDetails = new Map();
+      for (const toolId of declaredToolIds) {
+        const callTs = group.toolUseTimestamps.get(toolId) || group.firstTimestamp;
+        const resultTs = toolResultTimestamps.get(toolId) || null;
+        const resultContent = toolResultContents.get(toolId) || '';
+        const isError = toolResultErrors.get(toolId) || false;
+        toolDetails.set(toolId, { call: callTs, result: resultTs, resultContent, isError });
+      }
+
+      const requestStartTime = lastToolResultTs || null;
+
+      llmCalls.push({
         type: 'llm_call',
-        timestamp: 0,
-        request_start_time: 0,
+        timestamp: group.firstTimestamp,
+        request_start_time: requestStartTime,
         protocol: 'anthropic',
         model: group.model || 'unknown',
         message_id: group.id,
@@ -182,6 +247,9 @@ export function parseClaudeTranscript(transcriptPath, startTime, stopTime, byteO
         output_tokens: outputTokens,
         cache_read_input_tokens: cacheRead,
         cache_creation_input_tokens: cacheCreate,
+        declaredToolIds,
+        toolDetails,
+        promptId: group.promptId,
       });
 
       conversationHistory.push({
@@ -189,16 +257,118 @@ export function parseClaudeTranscript(transcriptPath, startTime, stopTime, byteO
         content: group.mergedContent,
       });
       prevCount = conversationHistory.length;
+
+      for (const toolId of declaredToolIds) {
+        const ts = toolResultTimestamps.get(toolId);
+        if (ts && (!lastToolResultTs || ts > lastToolResultTs)) {
+          lastToolResultTs = ts;
+        }
+      }
     }
   }
 
-  // Phase 4: 没有时间戳,按 startTime/stopTime 均匀分配(用于 span 顺序)
-  if (llmEvents.length > 0) {
-    assignTimestamps(llmEvents, startTime, stopTime);
+  // Phase 4: 按 promptId 切分 turns
+  const turns = splitIntoTurns(conversationRecords, llmCalls);
+
+  return { turns, nextOffset: fileSize };
+}
+
+/**
+ * 按 promptId 切分 turns。
+ *
+ * Claude Code 的每条 user record 携带 promptId(turn 级标识符),
+ * 同一 turn 内所有 user record 共享同一 promptId。
+ * promptId 变化 = 新 turn 开始。
+ */
+function splitIntoTurns(conversationRecords, llmCalls) {
+  if (llmCalls.length === 0) return [];
+
+  // 收集所有出现的 promptId(按首次出现顺序)
+  const promptIdOrder = [];
+  const promptIdSet = new Set();
+  const promptIdInfo = new Map(); // promptId → { promptText, promptTimestamp }
+
+  for (const rec of conversationRecords) {
+    if (rec.type !== 'user' || !rec.promptId) continue;
+    if (!promptIdSet.has(rec.promptId)) {
+      promptIdSet.add(rec.promptId);
+      promptIdOrder.push(rec.promptId);
+
+      // 每个 promptId 的首条 user record 决定 prompt 内容和时间
+      const isToolResult = Array.isArray(rec.content) &&
+        rec.content.every((p) => p && p.type === 'tool_result');
+      if (!isToolResult) {
+        const promptText = Array.isArray(rec.content)
+          ? rec.content.map((p) => (p && p.type === 'text' ? (p.text || p.content || '') : '')).join('')
+          : (typeof rec.content === 'string' ? rec.content : '');
+        promptIdInfo.set(rec.promptId, {
+          promptText,
+          promptTimestamp: rec.timestamp,
+        });
+      }
+    }
+    // 补充: 如果首条是 tool_result 但后续有 prompt,更新 info
+    if (!promptIdInfo.has(rec.promptId)) {
+      const isToolResult = Array.isArray(rec.content) &&
+        rec.content.every((p) => p && p.type === 'tool_result');
+      if (!isToolResult) {
+        const promptText = Array.isArray(rec.content)
+          ? rec.content.map((p) => (p && p.type === 'text' ? (p.text || p.content || '') : '')).join('')
+          : (typeof rec.content === 'string' ? rec.content : '');
+        promptIdInfo.set(rec.promptId, {
+          promptText,
+          promptTimestamp: rec.timestamp,
+        });
+      }
+    }
   }
 
-  llmEvents.nextOffset = fileSize;
-  return llmEvents;
+  if (promptIdOrder.length === 0) {
+    // 无 promptId (所有 user record 都是系统注入的),fallback 为单 turn
+    const firstTs = llmCalls[0]?.timestamp || null;
+    return [{
+      prompt: '',
+      promptTimestamp: firstTs,
+      llmCalls,
+    }];
+  }
+
+  // 按 promptId 分组 llmCalls
+  const turns = [];
+  for (const pid of promptIdOrder) {
+    const turnLlmCalls = llmCalls.filter((c) => c.promptId === pid);
+    if (turnLlmCalls.length === 0) continue;
+
+    const info = promptIdInfo.get(pid) || {};
+
+    // request_start_time: 首个 llmCall 的 request_start_time 若为空,用 prompt 时间
+    if (turnLlmCalls[0] && !turnLlmCalls[0].request_start_time && info.promptTimestamp) {
+      turnLlmCalls[0].request_start_time = info.promptTimestamp;
+    }
+
+    turns.push({
+      prompt: info.promptText || '',
+      promptTimestamp: info.promptTimestamp || turnLlmCalls[0]?.timestamp || null,
+      llmCalls: turnLlmCalls,
+    });
+  }
+
+  // 处理没有 promptId 的 llmCalls (edge case: assistant record 出现在任何 user record 之前)
+  const orphanCalls = llmCalls.filter((c) => !c.promptId);
+  if (orphanCalls.length > 0) {
+    if (turns.length > 0) {
+      // 归入最后一个 turn
+      turns[turns.length - 1].llmCalls.push(...orphanCalls);
+    } else {
+      turns.push({
+        prompt: '',
+        promptTimestamp: orphanCalls[0]?.timestamp || null,
+        llmCalls: orphanCalls,
+      });
+    }
+  }
+
+  return turns;
 }
 
 /**
@@ -244,84 +414,4 @@ export function deduplicateContentBlocks(blocks) {
   if (bestThinking) result.unshift(bestThinking);
 
   return result;
-}
-
-function assignTimestamps(llmEvents, startTime, stopTime) {
-  const n = llmEvents.length;
-  const duration = Math.max(stopTime - startTime, 1);
-  const interval = duration / (n + 1);
-
-  for (let i = 0; i < n; i++) {
-    const ts = startTime + interval * (i + 1);
-    llmEvents[i].timestamp = ts;
-    llmEvents[i].request_start_time = ts - Math.min(interval * 0.5, 1);
-  }
-}
-
-/**
- * 用 hook events 时间戳锚点对齐 transcript llm_call 时间。
- *
- * 模式:
- *   user_prompt_submit (t0)
- *     llm_call #1 → pre_tool_use (t1) → post_tool_use (t2)
- *     llm_call #2 → pre_tool_use (t3) → post_tool_use (t4)
- *     llm_call #3 → stop
- *
- * 关键修复:
- *   7.6 prevEnd + 0.001 下界 — 防止 PostToolUse 时间错位
- *   7.8 expectedCount + _discarded = true — 只配对最末 N 条 llm_call,
- *       避免历史 transcript 数据偷走当前 turn 的锚点
- */
-export function alignWithHookEvents(llmEvents, hookEvents, stopTime) {
-  if (llmEvents.length === 0 || hookEvents.length === 0) return;
-
-  const anchors = [];
-  for (const ev of hookEvents) {
-    if (ev.type === 'user_prompt_submit' && ev.timestamp) {
-      anchors.push({ type: 'start', ts: ev.timestamp });
-    } else if (ev.type === 'pre_tool_use' && ev.timestamp) {
-      anchors.push({ type: 'pre_tool', ts: ev.timestamp });
-    } else if (ev.type === 'post_tool_use' && ev.timestamp) {
-      anchors.push({ type: 'post_tool', ts: ev.timestamp });
-    }
-  }
-
-  const preToolAnchors = anchors.filter((a) => a.type === 'pre_tool');
-  const startAnchors = anchors.filter((a) => a.type === 'start' || a.type === 'post_tool');
-
-  const expectedCount = preToolAnchors.length + 1;
-  const startIdx = Math.max(0, llmEvents.length - expectedCount);
-
-  for (let i = 0; i < startIdx; i++) {
-    llmEvents[i]._discarded = true;
-  }
-
-  let preToolIdx = 0;
-  for (let i = startIdx; i < llmEvents.length; i++) {
-    const ev = llmEvents[i];
-    const relIdx = i - startIdx;
-
-    if (relIdx === 0 && startAnchors.length > 0) {
-      ev.request_start_time = startAnchors[0].ts;
-    } else if (relIdx > 0) {
-      const prevEnd = llmEvents[i - 1].timestamp;
-      const postAfterPrev = startAnchors.find((a) => a.ts >= prevEnd);
-      if (postAfterPrev) {
-        ev.request_start_time = postAfterPrev.ts;
-      } else {
-        ev.request_start_time = prevEnd + 0.001;
-      }
-    }
-
-    if (relIdx < expectedCount - 1 && preToolIdx < preToolAnchors.length) {
-      ev.timestamp = preToolAnchors[preToolIdx].ts;
-      preToolIdx++;
-    } else {
-      ev.timestamp = stopTime;
-    }
-
-    if (ev.request_start_time >= ev.timestamp) {
-      ev.request_start_time = ev.timestamp - 0.5;
-    }
-  }
 }

@@ -113,6 +113,86 @@ npm start
    tail -f ~/.loongsuite-pilot/logs/output/*.jsonl
    ```
 
+## Trace 数据规范校验
+
+pilot 内置了 GenAI Trace 自动化校验工具，可按照 [ARMS GenAI 语义规范](https://code.alibaba-inc.com/arms/semantic-conventions/blob/arms/arms_docs/trace/gen-ai.md) 校验 otlp-debug 输出的 trace 数据。
+
+### 校验维度
+
+| 维度 | 覆盖内容 | 严重度 |
+|---|---|---|
+| 结构 | trace 树完整性（ENTRY/AGENT/STEP/LLM/TOOL 层级、STEP 恰好含 1 个 LLM、LLM 先于 TOOL） | ERROR |
+| 属性 | 按 span kind 校验 MUST/SHOULD 属性存在性、类型、枚举值 | ERROR/WARN |
+| 时间 | 零时长、STEP 重叠、父 span 严格包含子 span、LLM 超长告警 | ERROR/WARN |
+| 格式 | token 非负整数且 total=input+output、messages JSON Schema、traceId/spanId 格式 | ERROR/WARN |
+| 语义 | AGENT token 聚合一致性、TOOL-LLM 双向匹配、session/user ID 全 trace 一致、operation-kind 映射 | ERROR/WARN |
+
+### CLI 使用
+
+前提：开启 `cms.debug` 产生 otlp-debug JSONL 数据。
+
+```bash
+# 校验最新的 otlp-debug 文件（文本报告）
+node scripts/validate-trace.mjs --latest
+
+# 校验指定文件
+node scripts/validate-trace.mjs --input ~/.loongsuite-pilot/logs/otlp-debug/my-app-claude-code-2026-06-04.jsonl
+
+# 只看 error（过滤 warning）
+node scripts/validate-trace.mjs --latest --severity error
+
+# 校验特定 trace
+node scripts/validate-trace.mjs --latest --trace-id <32-hex-traceId>
+
+# JSON 输出（CI 集成用）
+node scripts/validate-trace.mjs --latest --format json --output report.json
+
+# 单行摘要
+node scripts/validate-trace.mjs --latest --format summary
+```
+
+退出码：`0` = 无 error（PASS），`1` = 有 error（FAIL），`2` = 输入错误。
+
+### Skill 使用
+
+在 Claude Code 中通过 `/validate-trace` 触发，自动发现最新 JSONL 文件、运行校验、展示问题并给出修复建议。
+
+```
+/validate-trace              # 自动发现最新文件
+/validate-trace <file-path>  # 校验指定文件
+```
+
+### 规则更新
+
+校验规则从 ARMS 语义规范自动提取，存储在 `docs/trace-validation-rules.json`。当规范更新后：
+
+```bash
+# 从本地 spec 副本重新生成规则
+node scripts/update-validation-rules.mjs
+
+# 仅检查差异，不写入
+node scripts/update-validation-rules.mjs --diff
+
+# 从指定 spec 文件生成
+node scripts/update-validation-rules.mjs --spec-file /path/to/gen-ai.md
+```
+
+### 已知限制
+
+- **Subagent 调用**：Claude Code 的 `Agent` 子调用（subagent spawn）暂未建模为 TOOL span，校验时降级为 WARN
+- **CI/E2E 集成**：下期支持在 E2E 脚本中自动运行 trace 校验，校验失败时阻断流水线
+
+### 相关文件
+
+| 文件 | 说明 |
+|---|---|
+| `scripts/validate-trace.mjs` | 校验引擎 CLI |
+| `scripts/update-validation-rules.mjs` | 规则更新工具 |
+| `docs/trace-validation-rules.json` | 结构化校验规则（10 span kinds，101 属性） |
+| `docs/trace-validation-design.md` | 校验方案设计文档 |
+| `assets/skills/validate-trace/SKILL.md` | Claude Code Skill 定义 |
+| `specs/gen-ai-*.json` | 消息体 JSON Schema（5 个） |
+
 ## 打包与部署
 
 项目提供 `deploy/` 目录下的三个脚本完成打包、上传、远程安装/升级/卸载的全流程。这些脚本不会被打包进发布产物中。

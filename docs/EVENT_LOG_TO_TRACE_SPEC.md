@@ -253,11 +253,22 @@ step_3:  LLM(最终回答, 无工具)
 
 → 它被识别为 **user-hook 事件**，其 `gen_ai.input.messages` 内容被合并进 **ENTRY span 的 input.messages**，**不生成独立的 LLM span**。
 
-### 5.1 [SHOULD] 上游的两种正确做法
+### 5.1 [MUST] 上游的正确做法
 
-**做法 A（推荐）**：用户输入不要发 `llm.request`，而是发 `event.name = "other"` 或专门的事件，把用户原始 prompt 放进去。
+**做法 A（[MUST] 推荐，0.1.0-beta.3+）**：用户输入发 `event.name = "other"`，在 `gen_ai.input.messages_delta`（或 `gen_ai.input.messages`）字段携带用户原始 prompt。转换器会提取该字段归并到 ENTRY/AGENT 的 `input.messages`，**不会**为 `other` 事件生成任何 span。没有 messages 字段的 `other` 事件（如 cursor 的 stop 信号）会被静默丢弃。
 
-**做法 B（兼容现状）**：用户输入仍发 `llm.request`，但**必须**保证它缺 step.id + 缺 model（这样转换器能识别为 user-hook 并归并到 ENTRY，不会产生幽灵 LLM span）。
+```json
+{
+  "event.name": "other",
+  "gen_ai.input.messages_delta": [
+    { "role": "user", "parts": [{ "type": "text", "content": "用户输入内容" }] }
+  ],
+  "gen_ai.session.id": "...", "gen_ai.turn.id": "...", "trace_id": "...",
+  "user.id": "...", "gen_ai.agent.type": "..."
+}
+```
+
+**做法 B（⚠️ 已过期，准备废弃）**：用户输入仍发 `llm.request`，但保证它缺 step.id + 缺 model。转换器仍能识别为 user-hook 并归并到 ENTRY，但会产出一条 deprecation warning（`"Consider migrating to event.name='other'"`）。**新插件必须用做法 A；已有插件应尽快迁移。**
 
 > **[MUST] 真实的 LLM 调用必须有 step.id + model**，这样才能和"用户输入伪请求"区分开。如果真实 LLM 调用也缺 step.id+model，会被误判为 user-hook 而丢失。
 

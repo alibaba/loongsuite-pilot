@@ -107,7 +107,8 @@ function convertAnthropicMessage(msg) {
       const part = convertAnthropicContentBlock(block);
       if (part) parts.push(part);
     }
-    return { role, parts };
+    const effectiveRole = parts.some((p) => p.type === 'tool_call_response') ? 'tool' : role;
+    return { role: effectiveRole, parts };
   }
 
   return { role, parts: content != null ? [{ type: 'text', content: String(content) }] : [] };
