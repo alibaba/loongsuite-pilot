@@ -277,9 +277,17 @@ async function exportSession(state, stopReason) {
 
   const baseTurnCount = state.turn_count || 0;
 
-  for (let i = 0; i < parseResult.turns.length; i++) {
-    const turn = parseResult.turns[i];
-    const isLast = i === parseResult.turns.length - 1;
+  // 首次运行防护: 新安装/重装后 state 被清空(offset=0, 无 turn_count),
+  // 如果 transcript 包含大量历史 turn, 只上报最后一个(当前对话), 跳过历史。
+  const isFirstRun = !state.turn_count && baseOffset === 0;
+  let turnsToExport = parseResult.turns;
+  if (isFirstRun && parseResult.turns.length > 1) {
+    turnsToExport = parseResult.turns.slice(-1);
+  }
+
+  for (let i = 0; i < turnsToExport.length; i++) {
+    const turn = turnsToExport[i];
+    const isLast = i === turnsToExport.length - 1;
     const turnStopReason = isLast ? stopReason : 'end_turn';
     const { records, hash } = buildTurnRecords(
       turn,
@@ -293,6 +301,7 @@ async function exportSession(state, stopReason) {
     logHash = hash;
   }
 
+  // turn_count 计入全部 turns(含跳过的历史), 确保 offset 正确推进不重复上报
   state.turn_count = baseTurnCount + parseResult.turns.length;
 
   const cleaned = allRecords.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
