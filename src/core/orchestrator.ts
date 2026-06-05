@@ -25,8 +25,8 @@ import { buildOtlpTraceConfig } from './config-loader.js';
 import { QoderSqliteInput } from '../inputs/qoder-sqlite/qoder-sqlite-input.js';
 import { QoderWorkInput } from '../inputs/qoder-work/qoder-work-input.js';
 import { QoderWorkLogInput } from '../inputs/qoder-work-log/qoder-work-log-input.js';
-import { QoderWorkTraceInput } from '../inputs/qoder-work-log/qoder-work-trace-input.js';
 import { QoderWorkSqliteInput } from '../inputs/qoder-work-sqlite/qoder-work-sqlite-input.js';
+import { QoderWorkTraceInput } from '../inputs/qoder-work-trace/qoder-work-trace-input.js';
 import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
 import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-session-input.js';
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
@@ -60,8 +60,8 @@ export class Orchestrator extends EventEmitter {
     'qoder-sqlite': 'qoder',
     'qoder-trace': 'qoder',
     'qoder-work': 'qoder-work',
-    'qoder-work-log': 'qoder-work',
     'qoder-work-trace': 'qoder-work',
+    'qoder-work-log': 'qoder-work',
     'qoder-work-sqlite': 'qoder-work',
     'qoder-cli-hook': 'qoder',
     'qoder-cli-session': 'qoder',
@@ -399,7 +399,27 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Qoder Work (Hook JSONL) ---
+    // --- Qoder Work CN Trace (multi-source merge, supersedes hook/log/sqlite) ---
+    const qoderWorkTraceInput = new QoderWorkTraceInput({
+      stateStore: this.stateStore,
+      logDir: path.join(this.dataDir, 'logs', 'qoder-work', 'history'),
+    });
+    this.inputManager.registerInput(qoderWorkTraceInput);
+    const qoderWorkTraceEnabled = () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-trace']) &&
+      this.agentControlManager.resolveEnabled(
+        'qoder-work-trace',
+        listenerCfg['qoder-work-trace']?.enabled ?? true,
+      );
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderWorkTraceInput, {
+        watchPaths: QoderWorkTraceInput.getWatchPaths(),
+        isAvailable: QoderWorkTraceInput.checkAvailability,
+        enabled: qoderWorkTraceEnabled,
+        pollIntervalMs: listenerCfg['qoder-work-trace']?.pollInterval,
+      }),
+    );
+
+    // --- Qoder Work (Hook JSONL) — disabled when CN trace is active ---
     const qoderWorkLogDir = path.join(this.dataDir, 'logs', 'qoder-work', 'history');
     const qoderWorkInput = new QoderWorkInput({
       stateStore: this.stateStore,
@@ -410,7 +430,7 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderWorkInput, {
         watchPaths: QoderWorkInput.getWatchPaths(),
         isAvailable: QoderWorkInput.checkAvailability,
-        enabled: () => !traceEnabled() &&
+        enabled: () => !qoderWorkTraceEnabled() &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-work',
@@ -420,33 +440,14 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Qoder Work (Trace: SDK Log + SQLite aggregation) ---
-    // When trace input is enabled, it supersedes qoder-work-log and qoder-work-sqlite
-    // to avoid duplicate events from the same data sources.
-    const qoderWorkTraceInput = new QoderWorkTraceInput({ stateStore: this.stateStore });
-    this.inputManager.registerInput(qoderWorkTraceInput);
-    const traceEnabled = () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-trace']) &&
-      this.agentControlManager.resolveEnabled(
-        'qoder-work-trace',
-        listenerCfg['qoder-work-trace']?.enabled ?? true,
-      );
-    entries.push(
-      this.inputManager.buildDetectionEntry(qoderWorkTraceInput, {
-        watchPaths: QoderWorkTraceInput.getWatchPaths(),
-        isAvailable: QoderWorkTraceInput.checkAvailability,
-        enabled: traceEnabled,
-        pollIntervalMs: listenerCfg['qoder-work-trace']?.pollInterval,
-      }),
-    );
-
-    // --- Qoder Work (SDK Log tail) — disabled when trace input is active ---
+    // --- Qoder Work (SDK Log tail) — disabled when CN trace is active ---
     const qoderWorkLogInput = new QoderWorkLogInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(qoderWorkLogInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkLogInput, {
         watchPaths: QoderWorkLogInput.getWatchPaths(),
         isAvailable: QoderWorkLogInput.checkAvailability,
-        enabled: () => !traceEnabled() &&
+        enabled: () => !qoderWorkTraceEnabled() &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-log']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-work-log',
@@ -456,14 +457,14 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Qoder Work (SQLite agents.db) — disabled when trace input is active ---
+    // --- Qoder Work (SQLite agents.db) — disabled when CN trace is active ---
     const qoderWorkSqliteInput = new QoderWorkSqliteInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(qoderWorkSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkSqliteInput, {
         watchPaths: QoderWorkSqliteInput.getWatchPaths(),
         isAvailable: QoderWorkSqliteInput.checkAvailability,
-        enabled: () => !traceEnabled() &&
+        enabled: () => !qoderWorkTraceEnabled() &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-sqlite']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-work-sqlite',
