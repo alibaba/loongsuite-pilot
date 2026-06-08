@@ -3,11 +3,15 @@
 #
 # Usage:
 #   bash deploy/release.sh                    # patch bump, internal, release channel
+#   bash deploy/release.sh --patch            # same as default (explicit patch bump)
 #   bash deploy/release.sh --minor            # minor bump (1.0.x → 1.1.0)
 #   bash deploy/release.sh --major            # major bump (1.x.x → 2.0.0)
 #   bash deploy/release.sh --version 1.2.3    # explicit version
+#   bash deploy/release.sh --canary            # canary release (灰度发布)
+#   bash deploy/release.sh --canary --hotfix  # canary hotfix (bump hotfix_version only)
 #   bash deploy/release.sh --external         # external deploy mode
 #   bash deploy/release.sh --dry-run          # show what would happen, don't execute
+#   bash deploy/release.sh --skip-upload      # build only, skip OSS upload
 #
 # Flow:
 #   1. Fetch latest tags from remote
@@ -28,6 +32,8 @@ EXPLICIT_VERSION=""
 DEPLOY_MODE=""
 DRY_RUN=0
 SKIP_UPLOAD=0
+CANARY=0
+HOTFIX=0
 UPLOAD_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -41,6 +47,8 @@ while [[ $# -gt 0 ]]; do
             fi
             EXPLICIT_VERSION="$2"; shift 2 ;;
         --version=*)      EXPLICIT_VERSION="${1#*=}"; shift ;;
+        --canary)          CANARY=1; shift ;;
+        --hotfix)          HOTFIX=1; shift ;;
         --external)       DEPLOY_MODE="external"; shift ;;
         --dry-run)        DRY_RUN=1; shift ;;
         --skip-upload)    SKIP_UPLOAD=1; shift ;;
@@ -50,6 +58,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$PROJECT_ROOT"
+
+# ── Validate canary/hotfix combination ──
+if [ "$HOTFIX" -eq 1 ] && [ "$CANARY" -eq 0 ]; then
+    echo "❌ --hotfix can only be used with --canary"
+    exit 1
+fi
 
 # ── Ensure working tree is clean ──
 if [ -n "$(git status --porcelain)" ]; then
@@ -96,7 +110,10 @@ validate_semver() {
 # ── Resolve next version ──
 CURRENT_VERSION=$(get_latest_version_from_tags)
 
-if [ -n "$EXPLICIT_VERSION" ]; then
+if [ "$CANARY" -eq 1 ] && [ "$HOTFIX" -eq 1 ]; then
+    # Hotfix mode: keep current canary version, no bump
+    NEXT_VERSION="$CURRENT_VERSION"
+elif [ -n "$EXPLICIT_VERSION" ]; then
     NEXT_VERSION="$EXPLICIT_VERSION"
 else
     NEXT_VERSION=$(bump_version "$CURRENT_VERSION" "$BUMP_TYPE")
@@ -106,9 +123,17 @@ validate_semver "$NEXT_VERSION"
 
 RELEASE_BRANCH="release/v${NEXT_VERSION}"
 
+RELEASE_TYPE="stable"
+if [ "$CANARY" -eq 1 ] && [ "$HOTFIX" -eq 1 ]; then
+    RELEASE_TYPE="canary-hotfix"
+elif [ "$CANARY" -eq 1 ]; then
+    RELEASE_TYPE="canary"
+fi
+
 echo "==> Version"
 echo "    Current: ${CURRENT_VERSION}"
 echo "    Next:    ${NEXT_VERSION} (${BUMP_TYPE})"
+echo "    Type:    ${RELEASE_TYPE}"
 echo "    Branch:  ${RELEASE_BRANCH}"
 echo ""
 
@@ -116,13 +141,13 @@ if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] Would create branch: ${RELEASE_BRANCH} from origin/master"
     echo "[dry-run] Would update package.json: ${CURRENT_VERSION} → ${NEXT_VERSION}"
     echo "[dry-run] Would commit and tag: v${NEXT_VERSION}"
-    echo "[dry-run] Would build and upload (channel=release, mode=${DEPLOY_MODE:-internal})"
+    echo "[dry-run] Would build and upload (channel=release, type=${RELEASE_TYPE}, mode=${DEPLOY_MODE:-internal})"
     echo "[dry-run] Would push branch + tag, then prompt to create CR → master"
     exit 0
 fi
 
 # ── Confirm ──
-read -r -p "Proceed with release v${NEXT_VERSION}? [y/N] " confirm
+read -r -p "Proceed with ${RELEASE_TYPE} release v${NEXT_VERSION}? [y/N] " confirm
 if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     echo "Aborted."
     exit 0
@@ -177,6 +202,12 @@ else
     if [ -n "$DEPLOY_MODE" ]; then
         UPLOAD_ARGS+=("--${DEPLOY_MODE}")
     fi
+    if [ "$CANARY" -eq 1 ]; then
+        UPLOAD_ARGS+=(--canary)
+    fi
+    if [ "$HOTFIX" -eq 1 ]; then
+        UPLOAD_ARGS+=(--hotfix)
+    fi
     bash "$SCRIPT_DIR/upload.sh" "${UPLOAD_ARGS[@]}"
 fi
 
@@ -194,8 +225,14 @@ echo ""
 echo "   Tag:     v${NEXT_VERSION}"
 echo "   Branch:  ${RELEASE_BRANCH}"
 echo "   Channel: release"
+echo "   Type:    ${RELEASE_TYPE}"
 echo "   Mode:    ${DEPLOY_MODE:-internal}"
 echo ""
-echo "   Next step: create CR to merge ${RELEASE_BRANCH} → master"
-echo "   Run: claude /submit-cr"
+if [ "$CANARY" -eq 1 ]; then
+    echo "   Next step: adjust rollout percentage"
+    echo "   Run: bash deploy/rollout.sh --percentage 5"
+else
+    echo "   Next step: create CR to merge ${RELEASE_BRANCH} → master"
+    echo "   Run: claude /submit-cr"
+fi
 echo "============================================================"

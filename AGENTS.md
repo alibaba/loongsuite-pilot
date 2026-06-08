@@ -34,7 +34,7 @@
 | 部署管理 | `src/deployment/` | 声明式 Agent 部署（Hook / Plugin-Probe） | [docs/modules/hooks.md](docs/modules/hooks.md) |
 | 归一化 | `src/normalization/` | 原始数据 → AgentActivityEntry 标准格式 | [docs/modules/normalization.md](docs/modules/normalization.md) |
 | 持久化 | `src/checkpoints/` | StateStore + SnapshotStore 状态管理 | [docs/modules/checkpoints.md](docs/modules/checkpoints.md) |
-| 自动更新 | `src/updater/` | 多版本管理、增量更新、自动回滚 | [docs/modules/updater.md](docs/modules/updater.md) |
+| 自动更新 | `src/updater/` | 多版本管理、增量更新、灰度发布、自动回滚 | [docs/modules/updater.md](docs/modules/updater.md) |
 | 运行时 | `deploy/` | 安装、CLI、服务管理、版本指针 | [docs/modules/runtime.md](docs/modules/runtime.md) |
 | 监控 | `src/internal/` | 本地 dashboard、进程采样、健康状态 | [docs/modules/monitor.md](docs/modules/monitor.md) |
 | 类型定义 | `src/types/` | ClientType、事件结构、配置类型 | [docs/modules/types.md](docs/modules/types.md) |

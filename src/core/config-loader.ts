@@ -25,7 +25,7 @@ const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
  * On-disk config file shape.
  * All fields optional — missing fields fall back to env vars then defaults.
  */
-interface ConfigFile {
+export interface ConfigFile {
   enabled?: boolean;
   internal?: boolean;
   dataDir?: string;
@@ -104,6 +104,19 @@ interface ConfigFile {
     enabled?: boolean;
     captureMessageContent?: boolean | string;
   }>;
+
+  autoUpdate?: {
+    enabled?: boolean;
+    checkIntervalMs?: number;
+    manifestUrl?: string;
+    packageUrl?: string;
+  };
+
+  installId?: string;
+  canary?: {
+    policy?: 'auto' | 'off';
+    hotfix_version?: number;
+  };
 }
 
 function env(key: string): string | undefined {
@@ -599,7 +612,7 @@ function resolveDefaultPackageUrl(internal: boolean): string {
  * Exported for use by the standalone updater process.
  */
 export function buildAutoUpdateConfig(
-  file: { internal?: boolean; autoUpdate?: { enabled?: boolean; checkIntervalMs?: number; manifestUrl?: string; packageUrl?: string } } | null,
+  file: ConfigFile | null,
 ): AutoUpdateConfig {
   const internal = envBool('LOONGSUITE_PILOT_INTERNAL', file?.internal ?? true);
   const packageUrl = env('LOONGSUITE_PILOT_PACKAGE_URL') ?? file?.autoUpdate?.packageUrl ?? resolveDefaultPackageUrl(internal);
@@ -620,5 +633,8 @@ export function buildAutoUpdateConfig(
     ),
     manifestUrl,
     packageUrl,
+    installId: file?.installId,
+    canaryPolicy: file?.canary?.policy,
+    canaryHotfixVersion: file?.canary?.hotfix_version ?? 0,
   };
 }

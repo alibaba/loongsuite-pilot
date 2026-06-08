@@ -18,6 +18,9 @@ export interface AutoUpdateConfig {
   checkIntervalMs: number;
   manifestUrl?: string;
   packageUrl?: string;
+  installId?: string;
+  canaryPolicy?: 'auto' | 'off';
+  canaryHotfixVersion?: number;
 }
 
 export interface CmsConfig {

@@ -39,17 +39,18 @@ export async function readJsonFile<T>(path: string): Promise<T | null> {
 }
 
 /**
- * Writes pretty-printed JSON and ensures parent directories exist.
+ * Writes pretty-printed JSON atomically (write-to-tmp + rename) and ensures
+ * parent directories exist. Errors are propagated to the caller.
  */
 export async function writeJsonFile(
   path: string,
   data: unknown
 ): Promise<void> {
-  try {
-    await ensureDir(nodePath.dirname(path));
-    const text = `${JSON.stringify(data, null, 2)}\n`;
-    await fsp.writeFile(path, text, 'utf8');
-  } catch {}
+  await ensureDir(nodePath.dirname(path));
+  const text = `${JSON.stringify(data, null, 2)}\n`;
+  const tmp = path + '.tmp';
+  await fsp.writeFile(tmp, text, 'utf8');
+  await fsp.rename(tmp, path);
 }
 
 /**

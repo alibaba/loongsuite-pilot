@@ -43,6 +43,14 @@ Orchestrator 启动分为以下阶段：
 - Config file (`~/.loongsuite-pilot/config.json`)
 - Built-in defaults（最低）
 
+### config.json 灰度发布字段
+`config.json` 中与灰度发布相关的字段：
+- `installId` (string) — 机器唯一标识，updater 首次运行时自动生成 UUID v4，用于灰度分桶
+- `canary.policy` (`'auto'` | `'off'`) — 灰度策略：`auto` 强制加入，`off` 强制退出，不设置则由服务端百分比控制
+- `canary.hotfix_version` (number) — updater 维护，记录当前 canary hotfix 版本号，用于 hotfix 比较
+
+`buildAutoUpdateConfig()` 从上述字段构建 `AutoUpdateConfig`，其中 `canaryHotfixVersion` 默认值为 `config.canary?.hotfix_version ?? 0`。
+
 ### SLS 目的地解析
 ConfigLoader 根据用户提供的 SLS 字段和运行时配置 `config.internal`（来自 config.json 或环境变量 `LOONGSUITE_PILOT_INTERNAL`，默认 `true`）解析出最终的 SLS endpoint 列表。`internal = true` 时始终包含内置目的地，用户配了自有 SLS 时自动双发；`internal = false` 时仅使用用户目的地。
 

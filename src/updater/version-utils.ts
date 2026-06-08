@@ -21,6 +21,12 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
+export function deterministicBucket(installId: string, version: string): number {
+  const hash = crypto.createHash('sha256').update(installId + version).digest();
+  const num = hash.readUInt32BE(0);
+  return num % 100;
+}
+
 export async function computeSha256(filePath: string): Promise<string> {
   const hash = crypto.createHash('sha256');
   const stream = createReadStream(filePath);

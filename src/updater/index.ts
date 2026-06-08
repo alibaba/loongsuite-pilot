@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as os from 'os';
 import { Updater } from './updater.js';
-import { buildAutoUpdateConfig } from '../core/config-loader.js';
+import { buildAutoUpdateConfig, type ConfigFile } from '../core/config-loader.js';
 import { createLogger, initFileLogging } from '../utils/logger.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 
@@ -20,15 +20,6 @@ async function main(): Promise<void> {
   const configPath = resolveHome(
     process.env.AGENT_DATA_COLLECTION_CONFIG ?? DEFAULT_CONFIG_PATH,
   );
-
-  interface ConfigFile {
-    autoUpdate?: {
-      enabled?: boolean;
-      checkIntervalMs?: number;
-      manifestUrl?: string;
-      packageUrl?: string;
-    };
-  }
 
   const file = await readJsonFile<ConfigFile>(configPath);
   const config = buildAutoUpdateConfig(file);

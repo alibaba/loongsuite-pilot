@@ -663,6 +663,114 @@ cmd_restart_collector() {
         echo "$!" > "$PID_FILE"
         echo "✅ collector restarted (PID $!)"
     fi
+
+    # Schedule updater restart in a NEW process group so that
+    # "launchctl stop / systemctl stop" of the updater won't kill this subprocess.
+    local _restart_bin="$LOONGSUITE_PILOT_BIN"
+    local _restart_log="$UPDATER_LOG_FILE"
+    if command -v setsid &>/dev/null; then
+        setsid bash -c 'sleep 10 && "$0" restart-updater' "$_restart_bin" >> "$_restart_log" 2>&1 &
+    else
+        perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- bash -c 'sleep 10 && "$0" restart-updater' "$_restart_bin" >> "$_restart_log" 2>&1 &
+    fi
+}
+
+cmd_restart_updater() {
+    local target_user
+    target_user=$(whoami)
+    local sys_unit="loongsuite-pilot-updater-${target_user}.service"
+    local initd_script="/etc/init.d/loongsuite-pilot-updater-${target_user}"
+    local init_type=""
+    if [ -f "$INIT_TYPE_FILE" ]; then
+        init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
+    fi
+
+    # Stop updater via service manager
+    case "$(uname -s)" in
+        Darwin)
+            launchctl stop "$UPDATER_LABEL" 2>/dev/null || true
+            ;;
+        Linux)
+            case "$init_type" in
+                systemd-user)
+                    systemctl --user stop loongsuite-pilot-updater.service &>/dev/null || true
+                    ;;
+                systemd-system|systemd)
+                    sudo systemctl stop "$sys_unit" &>/dev/null || true
+                    ;;
+                initd)
+                    [ -f "$initd_script" ] && sudo "$initd_script" stop &>/dev/null || true
+                    ;;
+            esac
+            ;;
+    esac
+    pkill -f "loongsuite-pilot/bin/updater-daemon" 2>/dev/null || true
+    stop_pid_file "$UPDATER_PID_FILE"
+
+    sleep 1
+
+    ensure_dirs
+    sync_bootstrap_scripts
+
+    # Start updater via service manager
+    local _restarted=false
+    case "$(uname -s)" in
+        Darwin)
+            if launchctl list "$UPDATER_LABEL" &>/dev/null; then
+                launchctl start "$UPDATER_LABEL" 2>/dev/null || true
+                _restarted=true
+            fi
+            ;;
+        Linux)
+            case "$init_type" in
+                systemd-user)
+                    if systemctl --user is-enabled loongsuite-pilot-updater.service &>/dev/null; then
+                        systemctl --user start loongsuite-pilot-updater.service &>/dev/null
+                        echo "✅ updater restarted (systemd user-level)"
+                        _restarted=true
+                    fi
+                    ;;
+                systemd-system|systemd)
+                    if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && sudo -n systemctl is-enabled "$sys_unit" &>/dev/null; then
+                        sudo systemctl start "$sys_unit" &>/dev/null
+                        echo "✅ updater restarted (systemd system-level)"
+                        _restarted=true
+                    fi
+                    ;;
+                initd)
+                    if [ -f "$initd_script" ]; then
+                        sudo "$initd_script" start &>/dev/null
+                        echo "✅ updater restarted (init.d)"
+                        _restarted=true
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+    # Verify the service manager actually started the updater process
+    if [ "$_restarted" = true ]; then
+        sleep 1
+        if ! pgrep -f "loongsuite-pilot/bin/updater-daemon" >/dev/null 2>&1; then
+            echo "⚠️  service manager reported success but updater process not found, falling back to nohup"
+            _restarted=false
+        fi
+    fi
+    if [ "$_restarted" = false ]; then
+        local entry="$BOOTSTRAP_DIR/updater-daemon.js"
+        if [ ! -f "$entry" ]; then
+            echo "❌ Updater bootstrap script missing"
+            return 1
+        fi
+        local node_bin
+        node_bin=$(resolve_node) || {
+            echo "❌ node runtime not found" >&2
+            return 1
+        }
+        export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+        nohup "$node_bin" "$entry" >> "$UPDATER_LOG_FILE" 2>&1 &
+        echo "$!" > "$UPDATER_PID_FILE"
+        echo "✅ updater restarted (PID $!)"
+    fi
 }
 
 cmd_restart() {
@@ -866,6 +974,7 @@ Type=simple
 ExecStart=%h/.local/bin/loongsuite-pilot run-updater
 WorkingDirectory=%h/.loongsuite-pilot
 Environment=AGENT_DATA_COLLECTION_CONFIG=%h/.loongsuite-pilot/config.json
+KillMode=process
 Restart=on-failure
 RestartSec=60
 LimitNOFILE=65536
@@ -942,6 +1051,8 @@ _write_launchd_updater_plist() {
     </dict>
     <key>ProcessType</key>
     <string>Background</string>
+    <key>AbandonProcessGroup</key>
+    <true/>
 </dict>
 </plist>
 PLISTEOF
@@ -972,6 +1083,7 @@ ExecStart=${target_bin} run-updater
 WorkingDirectory=${target_workdir}
 Environment=HOME=${target_home}
 Environment=AGENT_DATA_COLLECTION_CONFIG=${target_config}
+KillMode=process
 Restart=on-failure
 RestartSec=60
 LimitNOFILE=65536
@@ -1440,6 +1552,7 @@ case "${1:-status}" in
     monitor)             cmd_monitor "${2:-}" ;;
     rollback)            cmd_rollback ;;
     restart-collector)   cmd_restart_collector ;;
+    restart-updater)     cmd_restart_updater ;;
     run)                 cmd_run ;;
     run-updater)         cmd_run_updater ;;
     help|--help|-h) cmd_help ;;

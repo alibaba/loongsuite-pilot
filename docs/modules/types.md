@@ -14,7 +14,7 @@
 - **AgentActivityEntry** — 核心事件类型，统一的 agent 活动条目结构，采用 dotted-key 命名直接映射 SLS 宽表列名，含必填最小字段集和可扩展的 index signature。
 - **ActionType / AgentEventName** — 事件动作类型和事件名称类型定义。
 - **CodeGenerationEvent / SessionRecord / ToolCallRecord / MessageRecord / TokenUsage** — 各种原始输入事件的结构化接口，用于 Input 模块解析原始数据。
-- **AnalyticsConfig / AutoUpdateConfig / FlusherConfig / MaskConfig** — 系统级配置接口，定义整体服务配置、自动更新配置、输出配置和 collector mask 配置的结构。
+- **AnalyticsConfig / AutoUpdateConfig / FlusherConfig / MaskConfig** — 系统级配置接口，定义整体服务配置、自动更新配置和输出配置的结构。
 - **AgentDetectionEntry / InputState / EntryState / AgentControlMode** — 运行时状态类型，用于 agent 发现、输入状态追踪和准入控制。
 - **LogRetentionConfig** — 日志保留配置接口，定义各类日志的保留天数。
 - **SerializedLogEntry / JsonValue** — 序列化相关类型，用于 flusher 输出层的数据格式约定。
