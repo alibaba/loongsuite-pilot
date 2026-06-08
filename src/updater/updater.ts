@@ -10,6 +10,7 @@ import type { AutoUpdateConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { compareVersions, computeSha256, deterministicBucket } from './version-utils.js';
+import type { UpdaterMetrics } from './updater-metrics.js';
 
 const execFileAsync = promisify(execFile);
 const logger = createLogger('Updater');
@@ -102,6 +103,7 @@ export class Updater {
   private consecutiveFailures = 0;
   private nextCheckAt = 0;
   private readonly paths: UpdaterPaths;
+  private metrics: UpdaterMetrics | null = null;
   private readonly configPath: string;
 
   constructor(
@@ -114,6 +116,10 @@ export class Updater {
     );
   }
 
+  setMetrics(metrics: UpdaterMetrics): void {
+    this.metrics = metrics;
+  }
+
   start(): void {
     if (!this.config.enabled) {
       logger.debug('auto-update disabled');
@@ -124,6 +130,7 @@ export class Updater {
       intervalMs: this.config.checkIntervalMs,
       manifestUrl: this.config.manifestUrl,
     });
+    void this.metrics?.writeEvent('updater_started');
 
     setTimeout(() => void this.check(), 60_000);
 
@@ -139,6 +146,7 @@ export class Updater {
       this.timer = null;
     }
     logger.info('updater stopped');
+    void this.metrics?.writeEvent('updater_stopped');
   }
 
   async check(): Promise<void> {
@@ -177,6 +185,10 @@ export class Updater {
         commit: target.git_commit,
         channel,
       });
+      void this.metrics?.writeEvent('new_version_available', {
+        current_version: local?.version ?? 'unknown',
+        latest_version: target.version,
+      });
 
       const packageUrl = target.package_url || this.config.packageUrl;
       if (!packageUrl) {
@@ -184,7 +196,13 @@ export class Updater {
         return;
       }
 
+      void this.metrics?.writeEvent('downloading', {
+        latest_version: target.version,
+      });
       await this.downloadAndDeploy(packageUrl, target);
+      void this.metrics?.writeEvent('deployed', {
+        latest_version: target.version,
+      });
 
       if (channel === 'canary') {
         await this.persistCanaryState(hotfixVersion ?? 0);
@@ -192,6 +210,10 @@ export class Updater {
       }
 
       await this.restartCollector();
+      void this.metrics?.writeEvent('collector_restarted', {
+        latest_version: target.version,
+      });
+
       await this.restartMonitorIfRunning();
       await this.gcOldVersions();
       this.consecutiveFailures = 0;
@@ -207,8 +229,22 @@ export class Updater {
         consecutiveFailures: this.consecutiveFailures,
         nextRetryIn: `${Math.round(backoffMs / 1000)}s`,
       });
+
+      void this.metrics?.writeEvent('update_failure', {
+        error: String(err),
+        consecutive_failures: this.consecutiveFailures,
+      });
+      void this.metrics?.writeAlarm(
+        'UPDATER_FAILURE_ALARM', '2',
+        `update check failed (attempt ${this.consecutiveFailures}): ${String(err)}`,
+      );
+
       if (this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
         logger.error('too many consecutive failures, stopping updater');
+        void this.metrics?.writeEvent('updater_stopped_max_failures', {
+          error: `${MAX_CONSECUTIVE_FAILURES} consecutive failures`,
+          consecutive_failures: this.consecutiveFailures,
+        });
         this.stop();
       }
     } finally {
@@ -408,6 +444,9 @@ export class Updater {
           );
         }
         logger.info('SHA-256 verified');
+        void this.metrics?.writeEvent('download_verified', {
+          latest_version: manifest.version,
+        });
       } else {
         logger.warn('manifest missing sha256, skipping integrity check');
       }

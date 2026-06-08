@@ -17,6 +17,11 @@ import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 export class QoderWorkInput extends BaseHookInput {
   readonly id = 'qoder-work-hook';
   readonly agentType = ClientType.QoderWork;
+  private lastAgentVersion = '';
+
+  getAgentVersion(): string {
+    return this.lastAgentVersion;
+  }
 
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
@@ -38,6 +43,9 @@ export class QoderWorkInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
+    const ver = record['agent.qoderwork.version'];
+    if (typeof ver === 'string' && ver) this.lastAgentVersion = ver;
+
     const canonicalEntry = buildCanonicalHookEntry(record, ClientType.QoderWork);
     if (canonicalEntry) return canonicalEntry;
 

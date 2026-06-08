@@ -8,7 +8,7 @@ import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { detectAgent } from '../deployment/detect-utils.js';
 import { createLogger } from '../utils/logger.js';
-import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists } from '../utils/fs-utils.js';
+import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import * as fsSync from 'node:fs';
 
@@ -37,8 +37,12 @@ import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { HookWatchdog, type PluginCheckTarget } from './hook-watchdog.js';
+import { MetricsWriter } from '../metrics/metrics-writer.js';
+import { AlarmManager } from '../metrics/alarm-manager.js';
+import type { DataflowSnapshot } from '../metrics/metrics-collector.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
+import { resolveLocalIp } from '../utils/network-utils.js';
 
 const logger = createLogger('Orchestrator');
 
@@ -81,6 +85,8 @@ export class Orchestrator extends EventEmitter {
   private logRetentionService!: LogRetentionService;
   private hookWatchdog!: HookWatchdog;
   private deploymentManager!: DeploymentManager;
+  private metricsWriter!: MetricsWriter;
+  private alarmManager!: AlarmManager;
   private isRunning = false;
 
   constructor(config: AnalyticsConfig) {
@@ -112,13 +118,17 @@ export class Orchestrator extends EventEmitter {
     await this.agentControlManager.load();
 
     // 3. Build flushers
-    this.flusher = this.buildFlusher();
+    this.flusher = await this.buildFlusher();
 
-    // 4. Build InputManager
+    // 4. Build InputManager & AlarmManager
+    const version = readInstalledVersion(this.dataDir);
+    this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version });
+
     this.inputManager = new InputManager();
     this.inputManager.setFlusher(this.flusher);
     this.inputManager.setConfiguredUserId(this.config.userId);
     this.inputManager.setAgentsConfig(this.config.agents);
+    this.inputManager.setAlarmManager(this.alarmManager);
     this.inputManager.setMaskConfig(this.config.mask ?? { mode: 'none', types: [] });
 
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
@@ -142,6 +152,11 @@ export class Orchestrator extends EventEmitter {
     });
     this.agentDiscoveryService.on('agent:stopped', (id: string) => {
       logger.info('agent stopped', { id });
+      this.alarmManager.record(
+        'INPUT_STOP_ALARM', '3',
+        `input ${id} stopped unexpectedly`,
+        { input_name: id },
+      );
     });
     await this.agentDiscoveryService.start();
 
@@ -157,6 +172,18 @@ export class Orchestrator extends EventEmitter {
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets);
     this.hookWatchdog.start();
 
+    // 11. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
+    const slsFlusher = this.getSlsFlusher();
+    if (slsFlusher) slsFlusher.setAlarmManager(this.alarmManager);
+    this.metricsWriter = new MetricsWriter({
+      dataDir: this.dataDir,
+      version,
+      userId: this.config.userId,
+      getSnapshot: () => this.buildDataflowSnapshot(),
+      alarmManager: this.alarmManager,
+    });
+    await this.metricsWriter.start();
+
     this.isRunning = true;
     this.emit('started');
     logger.info('orchestrator started', {
@@ -168,6 +195,7 @@ export class Orchestrator extends EventEmitter {
     if (!this.isRunning) return;
     logger.info('stopping orchestrator');
 
+    await this.metricsWriter?.stop();
     this.hookWatchdog?.stop();
     this.logRetentionService?.stop();
     await this.agentDiscoveryService?.stop();
@@ -255,25 +283,25 @@ export class Orchestrator extends EventEmitter {
     return targets;
   }
 
-  private buildFlusher(): BaseFlusher {
+  private async buildFlusher(): Promise<BaseFlusher> {
     const flushers: BaseFlusher[] = [];
     const cfg = this.config.flushers;
 
     if (cfg.sls?.enabled && this.config.collectLog !== false) {
       const r = new SlsFlusher(cfg.sls, this.dataDir);
-      void (r as any).start?.();
+      await r.start().catch(err => logger.warn('sls flusher start failed', { error: String(err) }));
       flushers.push(r);
     }
 
     if (cfg.jsonl?.enabled) {
       const r = new JsonlFlusher(cfg.jsonl);
-      void (r as any).start?.();
+      await r.start().catch(err => logger.warn('jsonl flusher start failed', { error: String(err) }));
       flushers.push(r);
     }
 
     if (cfg.http?.enabled) {
       const r = new HttpFlusher(cfg.http);
-      void (r as any).start?.();
+      await r.start().catch(err => logger.warn('http flusher start failed', { error: String(err) }));
       flushers.push(r);
     }
 
@@ -291,7 +319,7 @@ export class Orchestrator extends EventEmitter {
         rotateDaily: true,
         maxFileSizeMb: 100,
       });
-      void (fallback as any).start?.();
+      await fallback.start().catch(err => logger.warn('jsonl fallback flusher start failed', { error: String(err) }));
       flushers.push(fallback);
     }
 
@@ -328,6 +356,10 @@ export class Orchestrator extends EventEmitter {
           if (ok) {
             const event = def.hookJsonPath[def.hookJsonPath.length - 1];
             logger.info('cursor hook registered', { event });
+          } else {
+            this.alarmManager.record('HOOK_INSTALL_ALARM', '2',
+              `cursor hook install failed: ${def.hookJsonPath.join('.')}`,
+              { input_name: 'cursor-hook' });
           }
         }
       }
@@ -344,6 +376,10 @@ export class Orchestrator extends EventEmitter {
           if (ok) {
             const event = def.hookJsonPath[def.hookJsonPath.length - 1];
             logger.info('qoder-cli hook registered', { event });
+          } else {
+            this.alarmManager.record('HOOK_INSTALL_ALARM', '2',
+              `qoder-cli hook install failed: ${def.hookJsonPath.join('.')}`,
+              { input_name: 'qoder-cli-hook' });
           }
         }
       }
@@ -359,6 +395,10 @@ export class Orchestrator extends EventEmitter {
           if (ok) {
             const event = def.hookJsonPath[def.hookJsonPath.length - 1];
             logger.info('qoder-work hook registered', { event });
+          } else {
+            this.alarmManager.record('HOOK_INSTALL_ALARM', '2',
+              `qoder-work hook install failed: ${def.hookJsonPath.join('.')}`,
+              { input_name: 'qoder-work' });
           }
         }
       }
@@ -678,4 +718,83 @@ export class Orchestrator extends EventEmitter {
 
     return this.dataDir;
   }
+
+  private buildDataflowSnapshot(): DataflowSnapshot {
+    const inputCounters = this.inputManager.getInputCounters();
+    const activeIds = this.inputManager.getActiveInputIds();
+
+    let sendEntriesTotal = 0;
+    let receivedBytesTotal = 0;
+    for (const counter of inputCounters.values()) {
+      sendEntriesTotal += counter.outEvents;
+      receivedBytesTotal += counter.inBytes;
+    }
+
+    // Aggregate flusher runner stats
+    const flusherRunner = {
+      inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0,
+      totalDelayMs: 0, lastFlushTime: '', startTime: '',
+    };
+
+    const flushers = new Map<string, { inEntries: number; inBytes: number; outEntries: number; outFailed: number; totalDelayMs: number; lastFlushTime: string; startTime: string; flusherName: string; mode: string; endpoint: string; project: string; logstore: string }>();
+
+    // Get SLS flusher counters if available
+    const slsFlusher = this.getSlsFlusher();
+    if (slsFlusher) {
+      for (const [epName, counter] of slsFlusher.getEndpointCounters()) {
+        flusherRunner.inEntries += counter.inEntries;
+        flusherRunner.inBytes += counter.inBytes;
+        flusherRunner.outEntries += counter.outEntries;
+        flusherRunner.outFailed += counter.outFailed;
+        flusherRunner.totalDelayMs += counter.totalDelayMs;
+        if (counter.lastFlushTime > flusherRunner.lastFlushTime) {
+          flusherRunner.lastFlushTime = counter.lastFlushTime;
+        }
+        if (!flusherRunner.startTime || counter.startTime < flusherRunner.startTime) {
+          flusherRunner.startTime = counter.startTime;
+        }
+        flushers.set(epName, {
+          ...counter,
+          flusherName: 'sls',
+        });
+      }
+    }
+
+    const inputs = new Map<string, { inEvents: number; inBytes: number; outEvents: number; outFailed: number; lastPollTime: string; startTime: string; type: string }>();
+    const inputIdleMinutes = new Map<string, number>();
+    for (const [id, counter] of inputCounters) {
+      inputs.set(id, { ...counter });
+      inputIdleMinutes.set(id, this.inputManager.getInputIdleMinutes(id));
+    }
+
+    const agentVersions = this.inputManager.getAgentVersions();
+
+    return {
+      sendEntriesTotal,
+      receivedBytesTotal,
+      inputCount: inputCounters.size,
+      activeInputCount: activeIds.length,
+      flusherRunner,
+      inputs,
+      flushers,
+      agentVersions,
+      inputIdleMinutes,
+    };
+  }
+
+  private getSlsFlusher(): SlsFlusher | null {
+    if (this.flusher instanceof SlsFlusher) return this.flusher;
+    if (this.flusher instanceof MultiFlusher) {
+      for (const f of this.flusher.getFlushers()) {
+        if (f instanceof SlsFlusher) return f;
+      }
+    }
+    return null;
+  }
+
+  getAlarmManager(): AlarmManager {
+    return this.alarmManager;
+  }
 }
+
+

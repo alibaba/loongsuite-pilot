@@ -38,3 +38,6 @@ package
 tests/e2e-docker/output
 
 /code-review
+
+# Internal overlay files (injected by internal CI, not in open-source repo)
+src/internal/alarm-sender.internal.ts

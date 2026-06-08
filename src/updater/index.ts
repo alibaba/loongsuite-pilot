@@ -1,9 +1,10 @@
 import * as path from 'path';
 import * as os from 'os';
 import { Updater } from './updater.js';
+import { UpdaterMetrics } from './updater-metrics.js';
 import { buildAutoUpdateConfig, type ConfigFile } from '../core/config-loader.js';
 import { createLogger, initFileLogging } from '../utils/logger.js';
-import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
+import { readJsonFile, resolveHome, readInstalledVersion } from '../utils/fs-utils.js';
 
 const logger = createLogger('UpdaterMain');
 
@@ -29,12 +30,25 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  const version = readInstalledVersion(dataDir);
+  const metrics = new UpdaterMetrics({
+    dataDir,
+    version,
+    collectorPidFile: path.join(dataDir, 'loongsuite-pilot.pid'),
+  });
+  await metrics.start();
+
   const updater = new Updater(config);
+  updater.setMetrics(metrics);
 
   const shutdown = () => {
     logger.info('received shutdown signal');
     updater.stop();
-    process.exit(0);
+    const exitTimeout = setTimeout(() => process.exit(1), 10_000);
+    exitTimeout.unref();
+    metrics.stop()
+      .catch(err => logger.warn('metrics stop failed', { error: String(err) }))
+      .finally(() => process.exit(0));
   };
 
   process.on('SIGTERM', shutdown);

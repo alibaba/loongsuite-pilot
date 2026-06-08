@@ -6,7 +6,9 @@ import {
   redactCodeGenerationFields,
 } from '../normalization/entry-builder.js';
 import type { AgentActivityEntry, SlsFlusherConfig, SlsEndpoint } from '../types/index.js';
+import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
+import { formatTime } from '../utils/time-utils.js';
 import { appendLine, ensureDir } from '../utils/fs-utils.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import * as path from 'node:path';
@@ -49,6 +51,20 @@ class HttpError extends Error {
   }
 }
 
+export interface EndpointCounter {
+  inEntries: number;
+  inBytes: number;
+  outEntries: number;
+  outFailed: number;
+  totalDelayMs: number;
+  lastFlushTime: string;
+  startTime: string;
+  mode: string;
+  endpoint: string;
+  project: string;
+  logstore: string;
+}
+
 export class SlsFlusher extends BaseFlusher {
   readonly name = 'sls';
   private readonly config: SlsFlusherConfig;
@@ -57,6 +73,8 @@ export class SlsFlusher extends BaseFlusher {
   private readonly failedLogDir: string;
   /** Lazy AK client cache keyed by `endpoint.name`. Built on first AK send. */
   private readonly akClients: Map<string, any> = new Map();
+  private readonly endpointCounters: Map<string, EndpointCounter> = new Map();
+  private alarmManager: AlarmManager | null = null;
 
   private readonly serviceName: string;
 
@@ -65,6 +83,21 @@ export class SlsFlusher extends BaseFlusher {
     this.config = config;
     this.failedLogDir = path.join(dataDir, 'sls-failed-logs');
     this.serviceName = config.serviceNamePrefix || '';
+    for (const ep of config.endpoints) {
+      this.endpointCounters.set(ep.name, {
+        inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0,
+        totalDelayMs: 0, lastFlushTime: '', startTime: '',
+        mode: ep.mode, endpoint: ep.endpoint, project: ep.project, logstore: ep.logstore,
+      });
+    }
+  }
+
+  getEndpointCounters(): Map<string, EndpointCounter> {
+    return this.endpointCounters;
+  }
+
+  setAlarmManager(alarmManager: AlarmManager): void {
+    this.alarmManager = alarmManager;
   }
 
   private getAkClient(endpoint: SlsEndpoint): any {
@@ -117,16 +150,26 @@ export class SlsFlusher extends BaseFlusher {
       });
     }
 
-    // Per-endpoint dispatch with per-batch failure isolation:
-    // one endpoint's error must NOT block sends to other endpoints.
     const tasks = batches
       .filter(([, logs]) => logs.length > 0)
       .map(([, logs]) => {
         const endpoint = logs[0].endpoint;
+        const counter = this.endpointCounters.get(endpoint.name);
+        const startMs = Date.now();
         const send = endpoint.mode === 'ak'
           ? this.flushViaAk(endpoint, logs)
           : this.flushViaWebtracking(endpoint, logs);
-        return send.catch(err => {
+        return send.then(() => {
+          if (counter) {
+            counter.outEntries += logs.length;
+            counter.totalDelayMs += Date.now() - startMs;
+            counter.lastFlushTime = formatTime(new Date());
+          }
+        }).catch(err => {
+          if (counter) {
+            counter.outFailed += logs.length;
+            counter.totalDelayMs += Date.now() - startMs;
+          }
           logger.error('SLS endpoint flush failed', {
             endpoint: endpoint.name,
             error: String(err),
@@ -210,6 +253,18 @@ export class SlsFlusher extends BaseFlusher {
       endpoint: endpoint.name,
       error: String(lastErr),
     });
+    this.alarmManager?.record(
+      'FLUSH_SEND_ALARM', '2',
+      `SLS ak send failed: ${String(lastErr)}`,
+      { endpoint_name: endpoint.name },
+    );
+    if (lastErr instanceof HttpError && lastErr.status === 429) {
+      this.alarmManager?.record(
+        'FLUSH_QUOTA_ALARM', '2',
+        `SLS endpoint throttled (429)`,
+        { endpoint_name: endpoint.name },
+      );
+    }
     await this.persistFailedLogs(endpoint, logGroup, lastErr);
   }
 
@@ -313,6 +368,18 @@ export class SlsFlusher extends BaseFlusher {
       endpoint: endpoint.name,
       error: String(lastErr),
     });
+    this.alarmManager?.record(
+      'FLUSH_SEND_ALARM', '2',
+      `SLS webtracking send failed: ${String(lastErr)}`,
+      { endpoint_name: endpoint.name },
+    );
+    if (lastErr instanceof HttpError && lastErr.status === 429) {
+      this.alarmManager?.record(
+        'FLUSH_QUOTA_ALARM', '2',
+        `SLS endpoint throttled (429)`,
+        { endpoint_name: endpoint.name },
+      );
+    }
     await this.persistFailedLogs(endpoint, body, lastErr);
   }
 
@@ -361,6 +428,13 @@ export class SlsFlusher extends BaseFlusher {
       this.queue.set(key, bucket);
     }
     bucket.push({ content, endpoint, agentType });
+
+    const counter = this.endpointCounters.get(endpoint.name);
+    if (counter) {
+      counter.inEntries++;
+      counter.inBytes += Buffer.byteLength(JSON.stringify(content));
+      if (!counter.startTime) counter.startTime = formatTime(new Date());
+    }
 
     const maxSize = this.config.batchMaxSize || BATCH_MAX_SIZE;
     if (bucket.length >= maxSize) {

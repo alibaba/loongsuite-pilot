@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as nodePath from 'node:path';
@@ -90,6 +91,28 @@ export function resolveHome(filepath: string): string {
     return nodePath.join(os.homedir(), filepath.slice(2));
   }
   return filepath;
+}
+
+/**
+ * Reads the installed package version from the dataDir's `current` pointer,
+ * falling back to the local package.json, then to 'unknown'.
+ */
+export function readInstalledVersion(dataDir: string): string {
+  try {
+    const currentFile = nodePath.join(dataDir, 'current');
+    const name = fs.readFileSync(currentFile, 'utf-8').trim();
+    const versionFile = nodePath.join(dataDir, 'versions', name, 'VERSION');
+    const content = fs.readFileSync(versionFile, 'utf-8');
+    const match = content.match(/^version=(.+)$/m);
+    if (match) return match[1];
+  } catch { /* ignore */ }
+  try {
+    const localPkg = nodePath.join(nodePath.dirname(new URL(import.meta.url).pathname), '..', '..', 'package.json');
+    const raw = fs.readFileSync(localPkg, 'utf-8');
+    return JSON.parse(raw).version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 /**

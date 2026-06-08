@@ -17,6 +17,10 @@ export class MultiFlusher extends BaseFlusher {
     this.flushers = flushers;
   }
 
+  getFlushers(): BaseFlusher[] {
+    return this.flushers;
+  }
+
   async send(entry: AgentActivityEntry): Promise<void> {
     const results = await Promise.allSettled(
       this.flushers.map(r => r.send(entry)),

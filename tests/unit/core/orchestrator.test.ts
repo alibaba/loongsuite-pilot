@@ -18,6 +18,7 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
   appendLine: vi.fn().mockResolvedValue(undefined),
   directoryExists: vi.fn().mockResolvedValue(false),
   getTodayDateString: () => '2026-04-27',
+  readInstalledVersion: () => '1.0.0-test',
 }));
 
 const mockStateStoreLoad = vi.fn().mockResolvedValue(undefined);
