@@ -28,6 +28,15 @@ export interface CmsConfig {
   debug?: boolean;
 }
 
+export type MaskMode = 'none' | 'all' | 'custom';
+
+export type MaskType = 'cloudAccessKey' | 'apiKey' | 'privateKey' | 'databaseUrl';
+
+export interface MaskConfig {
+  mode: MaskMode;
+  types: MaskType[];
+}
+
 export interface AnalyticsConfig {
   enabled: boolean;
   internal: boolean;
@@ -42,6 +51,7 @@ export interface AnalyticsConfig {
   flushers: FlusherConfig;
   retention: LogRetentionConfig;
   agents: AgentsConfig;
+  mask: MaskConfig;
   hookWatchdog: HookWatchdogConfig;
   autoUpdate?: AutoUpdateConfig;
 }

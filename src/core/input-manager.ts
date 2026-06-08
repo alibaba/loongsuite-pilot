@@ -1,9 +1,17 @@
 import { EventEmitter } from 'node:events';
-import type { AgentActivityEntry, AgentDetectionEntry, AgentsConfig } from '../types/index.js';
+import type {
+  AgentActivityEntry,
+  AgentDetectionEntry,
+  AgentsConfig,
+  MaskConfig,
+} from '../types/index.js';
 import type { BaseInput } from '../inputs/base/base-input.js';
 import type { BaseFlusher } from '../flushers/base-flusher.js';
 import { createLogger } from '../utils/logger.js';
 import { applyAgentContentPolicy } from '../normalization/agent-content-policy.js';
+import { maskAgentActivityEntry } from '../mask/entry-masker.js';
+import { loadEnabledRules } from '../mask/rule-loader.js';
+import type { CompiledMaskRule } from '../mask/types.js';
 
 const logger = createLogger('InputManager');
 
@@ -22,6 +30,8 @@ export class InputManager extends EventEmitter {
   private userId: string = '';
   private configuredUserId: string = '';
   private agentsConfig: AgentsConfig = {};
+  private maskConfig: MaskConfig = { mode: 'none', types: [] };
+  private maskRules: CompiledMaskRule[] = [];
 
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;
@@ -37,6 +47,11 @@ export class InputManager extends EventEmitter {
 
   setAgentsConfig(config: AgentsConfig): void {
     this.agentsConfig = config;
+  }
+
+  setMaskConfig(config: MaskConfig): void {
+    this.maskConfig = config;
+    this.maskRules = loadEnabledRules(config);
   }
 
   registerInput(input: BaseInput): void {
@@ -122,8 +137,14 @@ export class InputManager extends EventEmitter {
       applyAgentContentPolicy(entry, this.agentsConfig),
     );
 
-    logger.info('dispatching entries', { inputId, count: policyAppliedEntries.length });
-    await this.dispatchEntries(policyAppliedEntries);
+    const maskedEntries = this.maskRules.length === 0
+      ? policyAppliedEntries
+      : policyAppliedEntries.map(entry =>
+          maskAgentActivityEntry(entry, this.maskConfig, this.maskRules),
+        );
+
+    logger.info('dispatching entries', { inputId, count: maskedEntries.length });
+    await this.dispatchEntries(maskedEntries);
   }
 
   private async dispatchEntries(entries: AgentActivityEntry[]): Promise<void> {

@@ -7,6 +7,8 @@ import type {
   FlusherConfig,
   HookWatchdogConfig,
   LogRetentionConfig,
+  MaskConfig,
+  MaskType,
   OtlpTraceFlusherConfig,
   SlsEndpoint,
   SlsMode,
@@ -86,6 +88,11 @@ interface ConfigFile {
   collectTrace?: boolean;
   serviceNamePrefix?: string;
 
+  mask?: {
+    mode?: string;
+    types?: string[];
+  };
+
   cms?: {
     licenseKey?: string;
     endpoint?: string;
@@ -157,6 +164,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     flushers: buildFlushersConfig(file, dataDir, internal, serviceNamePrefix),
     retention: buildRetentionConfig(file),
     agents: buildAgentsConfig(file),
+    mask: buildMaskConfig(file),
     hookWatchdog: buildHookWatchdogConfig(file),
   };
 }
@@ -196,6 +204,41 @@ function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
   }
 
   return result;
+}
+
+const SUPPORTED_MASK_TYPES: readonly MaskType[] = [
+  'cloudAccessKey',
+  'apiKey',
+  'privateKey',
+  'databaseUrl',
+];
+
+const SUPPORTED_MASK_TYPE_SET = new Set<string>(SUPPORTED_MASK_TYPES);
+
+function parseMaskTypes(value: string | string[] | undefined): MaskType[] {
+  const rawTypes = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(',')
+      : [];
+  return rawTypes
+    .map(type => type.trim())
+    .filter((type): type is MaskType => SUPPORTED_MASK_TYPE_SET.has(type));
+}
+
+function buildMaskConfig(file: ConfigFile | null): MaskConfig {
+  const mode = env('LOONGSUITE_PILOT_MASK_MODE') ?? file?.mask?.mode;
+  if (mode !== 'all' && mode !== 'custom' && mode !== 'none') {
+    return { mode: 'none', types: [] };
+  }
+
+  if (mode === 'all' || mode === 'none') {
+    return { mode, types: [] };
+  }
+
+  const types = parseMaskTypes(env('LOONGSUITE_PILOT_MASK_TYPES') ?? file?.mask?.types);
+
+  return { mode: 'custom', types };
 }
 
 function buildListenersConfig(

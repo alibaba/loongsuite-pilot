@@ -1,4 +1,5 @@
 import { build } from 'esbuild';
+import { copyFile, mkdir } from 'node:fs/promises';
 
 await build({
   entryPoints: ['src/index.ts'],
@@ -34,3 +35,6 @@ await build({
   treeShaking: true,
   packages: 'external',
 });
+
+await mkdir('dist', { recursive: true });
+await copyFile('src/mask/sensitive-rules.json', 'dist/sensitive-rules.json');

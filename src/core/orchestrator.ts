@@ -119,6 +119,7 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setFlusher(this.flusher);
     this.inputManager.setConfiguredUserId(this.config.userId);
     this.inputManager.setAgentsConfig(this.config.agents);
+    this.inputManager.setMaskConfig(this.config.mask ?? { mode: 'none', types: [] });
 
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
     const pilotDir = this.resolvePilotDir();

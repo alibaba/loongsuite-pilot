@@ -465,6 +465,101 @@ describe('ConfigLoader', () => {
     });
   });
 
+  describe('mask config', () => {
+    it('defaults to none when mask config is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({ mode: 'none', types: [] });
+    });
+
+    it('defaults to none when mask.mode is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { types: ['apiKey'] },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({ mode: 'none', types: [] });
+    });
+
+    it('loads all mode and ignores types', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          types: ['apiKey'],
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({ mode: 'all', types: [] });
+    });
+
+    it('loads custom mode with supported types only', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'custom',
+          types: ['apiKey', 'cloudAccessKey', 'pii', 'databaseUrl'],
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({
+        mode: 'custom',
+        types: ['apiKey', 'cloudAccessKey', 'databaseUrl'],
+      });
+    });
+
+    it('treats invalid mode as none', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'audit',
+          types: ['apiKey'],
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({ mode: 'none', types: [] });
+    });
+
+    it('custom mode with empty or omitted types enables no mask types', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'custom' },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({ mode: 'custom', types: [] });
+    });
+
+    it('uses mask mode env over config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'none',
+          types: ['apiKey'],
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_MODE', 'all');
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({ mode: 'all', types: [] });
+    });
+
+    it('uses mask types env for custom mode and filters unsupported values', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'custom',
+          types: ['apiKey'],
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_TYPES', 'cloudAccessKey,pii,databaseUrl');
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({
+        mode: 'custom',
+        types: ['cloudAccessKey', 'databaseUrl'],
+      });
+    });
+  });
+
   describe('collectLog, collectTrace, serviceNamePrefix, cms', () => {
     it('defaults when config file is missing', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);

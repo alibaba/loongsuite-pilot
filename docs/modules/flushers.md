@@ -83,7 +83,9 @@ src/flushers/
 按条数 (≤4096) 和体积 (≤2.8MB) 自动分片，确保不超 PutWebtracking 接口限制。
 
 ### Serialization
-所有 flusher 通过 `serialiseLogEntry()` 将 `AgentActivityEntry` 转换为 `Record<string, string>` 扁平 KV 格式。SlsFlusher 支持对指定 endpoint 应用 `redactCodeGenerationFields()`。
+所有 flusher 收到的 `AgentActivityEntry` 已经经过 collector 侧 content policy 和 mask 处理。log 类 flusher 通过 `serialiseLogEntry()` 将 entry 转换为 `Record<string, string>` 扁平 KV 格式；OtlpTraceFlusher 使用收到的 entry records 调用 `convertEventLogToTrace(records)`。
+
+SlsFlusher 支持对指定 endpoint 应用 `redactCodeGenerationFields()`。该开关发生在 SLS endpoint 序列化后，是整字段删除；collector mask 发生在分发前，是字段内 secret 打码，两者保持并存。
 
 ## 依赖关系 (Dependencies)
 

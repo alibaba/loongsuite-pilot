@@ -218,6 +218,79 @@ describe('InputManager', () => {
     });
   });
 
+  describe('collector mask', () => {
+    it('masks whitelisted content fields before dispatching to the flusher', async () => {
+      const input = new StubInput('cursor-hook');
+      manager.registerInput(input as any);
+      manager.setMaskConfig({ mode: 'all', types: [] });
+
+      const accessKey = 'AKIAIOSFODNN7EXAMPLE';
+      const entry = buildTestEntry({
+        agentType: ClientType.Cursor,
+        'gen_ai.input.messages': [{ role: 'user', content: `use ${accessKey}` }],
+        'workspace.current_root': `/tmp/${accessKey}`,
+      });
+
+      input.emit('entries', [entry]);
+      await new Promise(r => setTimeout(r, 50));
+
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched['gen_ai.input.messages']).toEqual([
+        { role: 'user', content: 'use [ACCESSKEY_MASKED]' },
+      ]);
+      expect(dispatched['workspace.current_root']).toBe(`/tmp/${accessKey}`);
+    });
+
+    it('applies content policy before mask when message content capture is disabled', async () => {
+      const input = new StubInput('cursor-hook');
+      manager.registerInput(input as any);
+      manager.setAgentsConfig({
+        [ClientType.Cursor]: { captureMessageContent: false },
+      });
+      manager.setMaskConfig({ mode: 'all', types: [] });
+
+      const apiKey = 'sk-1234567890abcdefghijklmnop';
+      const entry = buildTestEntry({
+        agentType: ClientType.Cursor,
+      });
+      entry['input.messages'] = [{ role: 'user', content: apiKey }];
+
+      input.emit('entries', [entry]);
+      await new Promise(r => setTimeout(r, 50));
+
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched).not.toHaveProperty('input.messages');
+      expect(JSON.stringify(dispatched)).not.toContain('[APIKEY_MASKED]');
+      expect(JSON.stringify(dispatched)).not.toContain(apiKey);
+    });
+
+    it('dispatches masked entries consistently to all child flushers', async () => {
+      const jsonl = new MockFlusher('jsonl');
+      const sls = new MockFlusher('sls');
+      const http = new MockFlusher('http');
+      const multi = new MultiFlusher([jsonl, sls, http]);
+      manager.setFlusher(multi);
+      manager.setMaskConfig({ mode: 'all', types: [] });
+      const input = new StubInput('cursor-hook');
+      manager.registerInput(input as any);
+
+      const apiKey = 'sk-1234567890abcdefghijklmnop';
+      const entry = buildTestEntry({
+        agentType: ClientType.Cursor,
+        'gen_ai.output.messages': [{ role: 'assistant', content: apiKey }],
+      });
+
+      input.emit('entries', [entry]);
+      await new Promise(r => setTimeout(r, 50));
+
+      for (const child of [jsonl, sls, http]) {
+        expect(child.batchCalls).toHaveLength(1);
+        expect(JSON.stringify(child.batchCalls[0][0])).toContain('[APIKEY_MASKED]');
+        expect(JSON.stringify(child.batchCalls[0][0])).not.toContain(apiKey);
+      }
+    });
+  });
+
   describe('registerInput deduplication (T032)', () => {
     it('ignores duplicate registration for same id', () => {
       const input1 = new StubInput('dup-id');
