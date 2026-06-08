@@ -33,4 +33,20 @@ describe('installer SLS config output', () => {
 
     expect(content).toContain('--default-sls-override is no longer supported');
   });
+
+  it('deploy/installer.sh supports mask mode and custom mask types flags', async () => {
+    const content = await readFile(path.join(rootDir, 'deploy/installer.sh'), 'utf8');
+
+    expect(content).toContain('MASK_MODE=""');
+    expect(content).toContain('MASK_TYPES=""');
+    expect(content).toContain('--mask-mode)');
+    expect(content).toContain('--mask-types)');
+    expect(content).toContain('Unknown mask mode');
+    expect(content).not.toContain('Unknown mask type');
+    expect(content).toContain('config.mask.mode = maskMode');
+    expect(content).toContain('delete config.mask.types');
+    expect(content).toContain('const normalizeCsv = value =>');
+    expect(content).toContain('if (maskMode) {');
+    expect(content).toContain("if (maskMode === 'custom')");
+  });
 });
