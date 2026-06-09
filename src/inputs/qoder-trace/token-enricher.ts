@@ -36,8 +36,18 @@ export function enrichCliTurn(
       matches[i]['gen_ai.usage.cache_creation.input_tokens'] = 0;
     }
 
-    // Inject segment-derived timestamps for the entire step (unified clock source)
+    // Inject segment-derived timestamps and model for the entire step (unified clock source)
     const stepId = matches[0]['gen_ai.step.id'];
+
+    // Inject real model name from segment (overrides 'auto' from hook-processor)
+    if (seg.model && seg.model !== 'unknown') {
+      matches[0]['gen_ai.request.model'] = seg.model;
+      matches[0]['gen_ai.response.model'] = seg.model;
+      const req = entries.find(e =>
+        e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId,
+      );
+      if (req) req['gen_ai.request.model'] = seg.model;
+    }
 
     // llm.request: use segment requestStartTs
     if (seg.requestStartTs > 0) {

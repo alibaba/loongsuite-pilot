@@ -37,7 +37,9 @@ describe('QoderTraceInput token-enricher', () => {
         cacheCreationTokens: 0,
         requestStartTs: 1780000000000,
         responseEndTs: 1780000002000,
+        toolFinishedTs: 0,
         stopReason: 'end_turn',
+        model: '',
       }];
 
       enrichCliTurn(entries, segments);
@@ -67,6 +69,7 @@ describe('QoderTraceInput token-enricher', () => {
         responseEndTs: 1780000002000,
         toolFinishedTs: 0,
         stopReason: 'end_turn',
+        model: '',
       }];
 
       enrichCliTurn(entries, segments);
@@ -89,7 +92,9 @@ describe('QoderTraceInput token-enricher', () => {
         cacheCreationTokens: 0,
         requestStartTs: 1780000000000,
         responseEndTs: 1780000002000,
+        toolFinishedTs: 0,
         stopReason: 'end_turn',
+        model: '',
       }];
 
       enrichCliTurn(entries, segments);
@@ -98,6 +103,53 @@ describe('QoderTraceInput token-enricher', () => {
       expect(entries[0]['gen_ai.usage.output_tokens']).toBe(500);
       expect(entries[1]['gen_ai.usage.input_tokens']).toBe(0);
       expect(entries[1]['gen_ai.usage.output_tokens']).toBe(0);
+    });
+
+    it('injects real model name from segment into llm.request and llm.response', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.request', 'gen_ai.step.id': 'turn-1:s1', 'gen_ai.request.model': 'auto' } as any),
+        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', 'gen_ai.step.id': 'turn-1:s1', 'gen_ai.request.model': 'auto', 'gen_ai.response.model': 'auto' } as any),
+      ];
+      const segments: SegmentTokenData[] = [{
+        requestId: 'req-A',
+        inputTokens: 5000,
+        outputTokens: 200,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        requestStartTs: 0,
+        responseEndTs: 0,
+        toolFinishedTs: 0,
+        stopReason: '',
+        model: 'ultimate',
+      }];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.request.model']).toBe('ultimate');
+      expect(entries[1]['gen_ai.request.model']).toBe('ultimate');
+      expect((entries[1] as any)['gen_ai.response.model']).toBe('ultimate');
+    });
+
+    it('does not override model when segment model is empty or unknown', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response', 'gen_ai.request.model': 'auto' } as any),
+      ];
+      const segments: SegmentTokenData[] = [{
+        requestId: 'req-A',
+        inputTokens: 5000,
+        outputTokens: 200,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        requestStartTs: 0,
+        responseEndTs: 0,
+        toolFinishedTs: 0,
+        stopReason: '',
+        model: '',
+      }];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.request.model']).toBe('auto');
     });
 
     it('handles no matching segments gracefully', () => {

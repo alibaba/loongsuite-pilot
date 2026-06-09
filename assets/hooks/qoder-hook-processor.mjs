@@ -352,6 +352,9 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
     const startNanos = isoToUnixNanos(boundary.startTs);
     const endNanos = boundary.endTs ? isoToUnixNanos(boundary.endTs) : startNanos;
 
+    // Pre-scan: extract model name from this step's assistant rows (CLI has message.model)
+    const stepModel = content.find(r => r.type === 'assistant' && r.message?.model)?.message?.model || 'auto';
+
     // llm.request for this step
     let inputDelta;
     if (i === 0 && userRow) {
@@ -372,7 +375,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
         'gen_ai.session.id': sessionId,
         'gen_ai.agent.type': agentType,
         'gen_ai.provider.name': providerName,
-        'gen_ai.request.model': 'auto',
+        'gen_ai.request.model': stepModel,
         'user.id': userId,
         'gen_ai.input.messages_delta': inputDelta,
         'agent.source': 'qoder-transcript-hook',
@@ -392,7 +395,6 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
       if (row.type === 'assistant') {
         const msg = row.message || {};
         const blocks = Array.isArray(msg.content) ? msg.content : [];
-        // Extract message.id for CLI variant (used as gen_ai.response.id for token matching)
         if (msg.id && !responseId) responseId = msg.id;
         if (row.timestamp) lastAssistantTs = row.timestamp;
         for (const block of blocks) {
@@ -437,8 +439,8 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
         'gen_ai.session.id': sessionId,
         'gen_ai.agent.type': agentType,
         'gen_ai.provider.name': providerName,
-        'gen_ai.request.model': 'auto',
-        'gen_ai.response.model': 'auto',
+        'gen_ai.request.model': stepModel,
+        'gen_ai.response.model': stepModel,
         'gen_ai.response.id': responseId,
         'gen_ai.response.finish_reasons': [finishReason],
         'user.id': userId,

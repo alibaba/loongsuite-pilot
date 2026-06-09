@@ -24,6 +24,7 @@ export interface SegmentTokenData {
   responseEndTs: number;
   toolFinishedTs: number;
   stopReason: string;
+  model: string;
 }
 
 export async function readSegmentTokensForSession(sessionId: string): Promise<SegmentTokenData[]> {
@@ -90,6 +91,7 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
         responseEndTs: evt.ts,
         toolFinishedTs: 0,
         stopReason: (data.stop_reason as string) ?? '',
+        model: (data.model as string) ?? '',
       });
     }
   }
