@@ -59,8 +59,8 @@ start() → 延迟 60s 首次 check → setInterval 周期 check
 
 当远端 `latest.json` 含 `canary` 字段时，`resolveTargetVersion()` 按以下优先级决定客户端走 stable 还是 canary：
 1. `canary.policy = 'off'` → 强制 stable
-2. `canary.policy = 'auto'` → 强制 canary
-3. `deterministicBucket(installId, canaryVersion) < rollout_percentage` → canary，否则 stable
+2. `canary.policy = 'latest'` → 强制 canary
+3. `canary.policy = 'auto'`（默认）→ `deterministicBucket(installId, canaryVersion) < rollout_percentage` → canary，否则 stable
 
 整个函数用 try/catch 包裹，异常时 fallback 到 stable，确保灰度逻辑不影响现有更新路径。
 

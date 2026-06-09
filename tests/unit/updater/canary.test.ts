@@ -108,11 +108,27 @@ describe('resolveTargetVersion', () => {
     expect(result.manifest.version).toBe('1.0.35');
   });
 
-  it('returns canary when canaryPolicy is auto', () => {
-    const updater = new Updater(makeConfig({ canaryPolicy: 'auto' }), tmpDir);
+  it('returns canary when canaryPolicy is latest', () => {
+    const updater = new Updater(makeConfig({ canaryPolicy: 'latest' }), tmpDir);
     const result = updater.resolveTargetVersion(makeLatest(makeCanary()));
     expect(result.channel).toBe('canary');
     expect(result.manifest.version).toBe('1.0.36');
+  });
+
+  it('returns canary via bucketing when canaryPolicy is auto', () => {
+    const canaryVersion = '1.0.36';
+    let targetInstallId = '';
+    for (let i = 0; i < 1000; i++) {
+      const id = `test-${i}`;
+      if (deterministicBucket(id, canaryVersion) < 50) {
+        targetInstallId = id;
+        break;
+      }
+    }
+
+    const updater = new Updater(makeConfig({ canaryPolicy: 'auto', installId: targetInstallId }), tmpDir);
+    const result = updater.resolveTargetVersion(makeLatest(makeCanary({ rollout_percentage: 50 })));
+    expect(result.channel).toBe('canary');
   });
 
   it('returns canary when bucket is within rollout_percentage', () => {
@@ -172,7 +188,7 @@ describe('resolveTargetVersion', () => {
   });
 
   it('returns hotfixVersion from canary manifest', () => {
-    const updater = new Updater(makeConfig({ canaryPolicy: 'auto' }), tmpDir);
+    const updater = new Updater(makeConfig({ canaryPolicy: 'latest' }), tmpDir);
     const result = updater.resolveTargetVersion(makeLatest(makeCanary({ hotfix_version: 3 })));
     expect(result.hotfixVersion).toBe(3);
   });

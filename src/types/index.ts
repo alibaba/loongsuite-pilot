@@ -19,7 +19,7 @@ export interface AutoUpdateConfig {
   manifestUrl?: string;
   packageUrl?: string;
   installId?: string;
-  canaryPolicy?: 'auto' | 'off';
+  canaryPolicy?: 'auto' | 'latest' | 'off';
   canaryHotfixVersion?: number;
 }
 
