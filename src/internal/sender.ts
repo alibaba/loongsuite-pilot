@@ -1,7 +1,7 @@
 import { INTERNAL_BUILD } from '../core/build-constants.js';
 
-let _sendAlarm: (data: Record<string, unknown>) => void;
-let _sendStatus: (data: Record<string, unknown>) => void;
+let _sendAlarm: (topic: string, data: Record<string, unknown>) => void;
+let _sendStatus: (topic: string, data: Record<string, unknown>) => void;
 
 if (INTERNAL_BUILD) {
   const m = await import('./alarm-sender.internal.js');

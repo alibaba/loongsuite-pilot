@@ -123,7 +123,7 @@ export class UpdaterMetrics {
         logger.warn('updater event write failed', { error: String(err) });
       }
       for (const ev of events) {
-        sendStatus({ ...flattenToStrings(ev), __topic__: 'pilot_updater_event' });
+        sendStatus('pilot_updater_event', flattenToStrings(ev));
       }
     }
 
@@ -137,7 +137,7 @@ export class UpdaterMetrics {
         logger.warn('updater alarm write failed', { error: String(err) });
       }
       for (const al of alarms) {
-        sendAlarm({ ...flattenToStrings(al), __topic__: 'pilot_alarm' });
+        sendAlarm('pilot_alarm', flattenToStrings(al));
       }
     }
   }

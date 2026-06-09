@@ -191,31 +191,42 @@ describe('MetricsCollector', () => {
     });
   });
 
-  describe('collectL1Pipeline', () => {
-    it('returns one PipelineMetrics per input', () => {
-      const inputs = new Map<string, any>();
-      inputs.set('cursor-hook', {
-        inEvents: 10, inBytes: 2048, outEvents: 9, outFailed: 1,
-        lastPollTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00', type: 'hook-jsonl',
-      });
-      inputs.set('qoder-cli', {
-        inEvents: 5, inBytes: 512, outEvents: 5, outFailed: 0,
-        lastPollTime: '2026-05-19 10:01:00', startTime: '2026-05-19 09:00:00', type: 'hook-jsonl',
-      });
-
-      const result = collector.collectL1Pipeline(buildSnapshot({ inputs }));
-
-      expect(result).toHaveLength(2);
-      expect(result[0].i).toBe('cursor-hook');
-      expect(result[0].b).toBe('2048');
-      expect(result[0].e).toBe('1');
-      expect(result[1].i).toBe('qoder-cli');
-      expect(result[1].b).toBe('512');
-      expect(result[1].e).toBe('0');
+  describe('calcCpuPercent (via collectL1)', () => {
+    it('reports zero CPU on first sample to avoid startup inflation', () => {
+      const result = collector.collectL1(buildSnapshot());
+      expect(Number(result.cpu)).toBe(0);
     });
 
-    it('returns empty array when no inputs', () => {
-      expect(collector.collectL1Pipeline(buildSnapshot())).toEqual([]);
+    it('reports non-negative CPU on second sample', async () => {
+      collector.collectL1(buildSnapshot());
+      await new Promise(r => setTimeout(r, 50));
+      const result = collector.collectL1(buildSnapshot());
+      expect(Number(result.cpu)).toBeGreaterThanOrEqual(0);
+    });
+
+    it('computes per-process CPU percentage from cpuUsage deltas', () => {
+      const cpuSpy = vi.spyOn(process, 'cpuUsage');
+      let clock = 1_000_000;
+      const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user' });
+
+      // First collectL1 → calcCpuPercent seeds baseline, returns 0
+      cpuSpy.mockReturnValueOnce({ user: 0, system: 0 });
+      const r1 = col.collectL1(buildSnapshot());
+      expect(Number(r1.cpu)).toBe(0);
+
+      // Advance wall clock by 1000ms
+      clock += 1000;
+
+      // Second collectL1 → 150ms of CPU time (100ms user + 50ms system)
+      cpuSpy.mockReturnValueOnce({ user: 100_000, system: 50_000 });
+      const r2 = col.collectL1(buildSnapshot());
+      // Per-process CPU: (150_000µs / 1000 / 1000ms) * 100 = 15%
+      expect(Number(r2.cpu)).toBe(15);
+
+      cpuSpy.mockRestore();
+      dateSpy.mockRestore();
     });
   });
 

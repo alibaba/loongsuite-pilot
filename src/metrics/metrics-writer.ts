@@ -85,23 +85,9 @@ export class MetricsWriter {
       const filePath = path.join(this.logsDir, 'pilot-metrics.jsonl');
       await appendLine(filePath, JSON.stringify(metrics));
 
-      const pipelineMetrics = this.collector.collectL1Pipeline(snapshot);
-      if (pipelineMetrics.length > 0) {
-        const pipelinePath = path.join(this.logsDir, 'pilot-pipeline-metrics.jsonl');
-        for (const m of pipelineMetrics) {
-          await appendLine(pipelinePath, JSON.stringify(m));
-        }
-      }
-
       this.checkThresholds(metrics);
 
-      sendStatus({ ...flattenToStrings(metrics), __topic__: 'pilot_status' });
-
-      if (pipelineMetrics.length > 0) {
-        for (const m of pipelineMetrics) {
-          sendStatus({ ...flattenToStrings(m), __topic__: 'pilot_pipeline' });
-        }
-      }
+      sendStatus('pilot_status', flattenToStrings(metrics));
     } catch (err) {
       logger.warn('L1 metrics write failed', { error: String(err) });
     }
@@ -138,7 +124,7 @@ export class MetricsWriter {
           await appendLine(inputPath, JSON.stringify(m));
         }
         for (const m of inputMetrics) {
-          sendStatus({ ...flattenToStrings(m), __topic__: 'pilot_input_detail' });
+          sendStatus('pilot_input_detail', flattenToStrings(m));
         }
       }
 
@@ -149,7 +135,7 @@ export class MetricsWriter {
           await appendLine(flusherPath, JSON.stringify(m));
         }
         for (const m of flusherMetrics) {
-          sendStatus({ ...flattenToStrings(m), __topic__: 'pilot_flusher_detail' });
+          sendStatus('pilot_flusher_detail', flattenToStrings(m));
         }
       }
 
@@ -160,7 +146,7 @@ export class MetricsWriter {
           await appendLine(alarmPath, JSON.stringify(m));
         }
         for (const m of alarmMetrics) {
-          sendStatus({ ...flattenToStrings(m), __topic__: 'pilot_alarm_metric' });
+          sendStatus('pilot_alarm_metric', flattenToStrings(m));
         }
       }
     } catch (err) {
@@ -178,7 +164,7 @@ export class MetricsWriter {
         await appendLine(filePath, JSON.stringify(entry));
       }
       for (const entry of entries) {
-        sendAlarm({ ...flattenToStrings(entry), __topic__: 'pilot_alarm' });
+        sendAlarm('pilot_alarm', flattenToStrings(entry));
       }
     } catch (err) {
       logger.warn('alarm write failed', { error: String(err) });

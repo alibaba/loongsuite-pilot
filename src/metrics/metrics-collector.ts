@@ -37,13 +37,6 @@ export interface L1Metrics {
   __time__: number;
 }
 
-export interface PipelineMetrics {
-  i: string;
-  b: string;
-  e: string;
-  __time__: number;
-}
-
 export interface AlarmMetrics {
   category: 'alarm';
   input_name: string;
@@ -129,7 +122,9 @@ export class MetricsCollector {
   private readonly localIp: string;
 
   private lastCpuUsage: NodeJS.CpuUsage | null = null;
+  private lastCpuTime = 0;
   private lastCollectTime = 0;
+  private isFirstCpuSample = true;
   // null until the first L1 sample seeds the baseline; until then rates are reported as 0
   private prevSendEntries: number | null = null;
   private prevReceivedBytes: number | null = null;
@@ -142,9 +137,6 @@ export class MetricsCollector {
     this.localIp = resolveLocalIp();
     this.instanceId = `${opts.userId}_${this.localIp}_${this.startTimestamp}`;
 
-    // Seed CPU baseline
-    this.lastCpuUsage = process.cpuUsage();
-    this.lastCollectTime = Date.now();
   }
 
   collectL1(snapshot: DataflowSnapshot): L1Metrics {
@@ -203,20 +195,6 @@ export class MetricsCollector {
       },
       __time__: Math.floor(now / 1000),
     };
-  }
-
-  collectL1Pipeline(snapshot: DataflowSnapshot): PipelineMetrics[] {
-    const now = Math.floor(Date.now() / 1000);
-    const results: PipelineMetrics[] = [];
-    for (const [name, stats] of snapshot.inputs) {
-      results.push({
-        i: name,
-        b: String(stats.inBytes),
-        e: String(stats.outFailed),
-        __time__: now,
-      });
-    }
-    return results;
   }
 
   collectL2Inputs(snapshot: DataflowSnapshot): InputMetrics[] {
@@ -294,10 +272,17 @@ export class MetricsCollector {
 
   private calcCpuPercent(now: number): number {
     const cpuUsage = process.cpuUsage();
-    let percent = 0;
 
-    if (this.lastCpuUsage && this.lastCollectTime > 0) {
-      const elapsedMs = now - this.lastCollectTime;
+    if (this.isFirstCpuSample) {
+      this.isFirstCpuSample = false;
+      this.lastCpuUsage = cpuUsage;
+      this.lastCpuTime = now;
+      return 0;
+    }
+
+    let percent = 0;
+    if (this.lastCpuUsage && this.lastCpuTime > 0) {
+      const elapsedMs = now - this.lastCpuTime;
       if (elapsedMs > 0) {
         const userDelta = cpuUsage.user - this.lastCpuUsage.user;
         const systemDelta = cpuUsage.system - this.lastCpuUsage.system;
@@ -306,6 +291,7 @@ export class MetricsCollector {
     }
 
     this.lastCpuUsage = cpuUsage;
+    this.lastCpuTime = now;
     return Math.round(percent * 100) / 100;
   }
 }

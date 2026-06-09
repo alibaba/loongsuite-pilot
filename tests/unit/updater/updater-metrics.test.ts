@@ -164,9 +164,10 @@ describe('UpdaterMetrics', () => {
 
       expect(mockSendStatus).toHaveBeenCalled();
       const call = mockSendStatus.mock.calls.find(
-        (c: unknown[]) => (c[0] as Record<string, unknown>).__topic__ === 'pilot_updater_event',
+        (c: unknown[]) => c[0] === 'pilot_updater_event',
       );
       expect(call).toBeDefined();
+      expect(call![1]).not.toHaveProperty('__topic__');
     });
 
     it('calls sendAlarm for queued alarms on flush', async () => {
@@ -176,9 +177,10 @@ describe('UpdaterMetrics', () => {
       await m.stop();
 
       const call = mockSendAlarm.mock.calls.find(
-        (c: unknown[]) => (c[0] as Record<string, unknown>).__topic__ === 'pilot_alarm',
+        (c: unknown[]) => c[0] === 'pilot_alarm',
       );
       expect(call).toBeDefined();
+      expect(call![1]).not.toHaveProperty('__topic__');
     });
   });
 

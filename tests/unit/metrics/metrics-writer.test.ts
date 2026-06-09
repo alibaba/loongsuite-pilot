@@ -94,9 +94,11 @@ describe('MetricsWriter', () => {
 
     expect(mockSendStatus).toHaveBeenCalled();
     const call = mockSendStatus.mock.calls.find(
-      (c: unknown[]) => (c[0] as Record<string, unknown>).__topic__ === 'pilot_status',
+      (c: unknown[]) => c[0] === 'pilot_status',
     );
     expect(call).toBeDefined();
+    expect(call![1]).toHaveProperty('version', '2.0.0');
+    expect(call![1]).not.toHaveProperty('__topic__');
   });
 
   it('writes L2 input/flusher metrics on stop (final flush)', async () => {
