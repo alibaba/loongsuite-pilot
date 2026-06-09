@@ -121,6 +121,9 @@ function cmdSubagentStart() {
   if (!state.transcript_path && event.transcript_path) {
     state.transcript_path = event.transcript_path;
   }
+  if (!state.cwd && event.cwd && typeof event.cwd === 'string') {
+    state.cwd = event.cwd;
+  }
   state.events = state.events || [];
   state.events.push({
     type: 'subagent_start',
@@ -141,6 +144,9 @@ function cmdSubagentStop() {
   const state = loadState(sessionId);
   if (!state.transcript_path && event.transcript_path) {
     state.transcript_path = event.transcript_path;
+  }
+  if (!state.cwd && event.cwd && typeof event.cwd === 'string') {
+    state.cwd = event.cwd;
   }
 
   const childSid = event.subagent_session_id || 'unknown';
@@ -176,6 +182,9 @@ async function cmdStop() {
   const state = loadState(sessionId);
   if (!state.transcript_path && event.transcript_path) {
     state.transcript_path = event.transcript_path;
+  }
+  if (event.cwd && typeof event.cwd === 'string') {
+    state.cwd = event.cwd;
   }
   state.stop_time = nowSec();
   saveState(sessionId, state);
@@ -285,6 +294,8 @@ async function exportSession(state, stopReason) {
     turnsToExport = parseResult.turns.slice(-1);
   }
 
+  const cwd = state.cwd || undefined;
+
   for (let i = 0; i < turnsToExport.length; i++) {
     const turn = turnsToExport[i];
     const isLast = i === turnsToExport.length - 1;
@@ -296,6 +307,7 @@ async function exportSession(state, stopReason) {
       logHash,
       userId,
       turnStopReason,
+      cwd,
     );
     allRecords.push(...records);
     logHash = hash;
@@ -310,7 +322,7 @@ async function exportSession(state, stopReason) {
 
 // ─── buildTurnRecords — 单 turn 的 JSONL 记录构造 (v2: tool_use_id 归属) ───
 
-function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStopReason) {
+function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStopReason, cwd) {
   const records = [];
   const turnId = `${sessionId}:t${turnIndex + 1}`;
   let stepRound = 0;
@@ -328,6 +340,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     'gen_ai.agent.type': AGENT_ID,
     'gen_ai.agent.id': sessionId,
     'user.id': userId,
+    ...(cwd ? { 'agent.claude-code.cwd': cwd } : {}),
   };
 
   // 用户输入: 做法 A (EVENT_LOG_TO_TRACE_SPEC §5.1, 0.1.0-beta.3+)

@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
+import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
 import { parseSdkLogLine, type SdkEvent } from '../qoder-work-log/qoder-work-log-input.js';
@@ -68,11 +69,18 @@ export class QoderWorkTraceInput extends BaseInput {
     // 3. Group by turn.id
     const turnGroups = this.groupByTurn(rawEntries);
 
-    // 4. Enrich each turn with tokens + trace_id
+    // 4. Enrich each turn with tokens + trace_id + git context
     const allEntries: AgentActivityEntry[] = [];
     for (const [, turnEntries] of turnGroups) {
       this.enrichTurnWithTokens(turnEntries, sessionTokens);
       this.injectTraceId(turnEntries);
+      for (const entry of turnEntries) {
+        await enrichCanonicalEntryWithGit(
+          entry as Record<string, unknown>,
+          entry as Record<string, unknown>,
+          'qoder-work',
+        );
+      }
       allEntries.push(...turnEntries);
     }
 

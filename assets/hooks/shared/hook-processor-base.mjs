@@ -252,7 +252,8 @@ export async function parseStdinPayload(agentId) {
     return null;
   }
 
-  return { transcriptPath, sessionId };
+  const cwd = typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : undefined;
+  return { transcriptPath, sessionId, cwd };
 }
 
 // --- Re-export normalizer utilities -----------------------------------------

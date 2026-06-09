@@ -12,7 +12,9 @@
  */
 
 import path from 'node:path';
+import os from 'node:os';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import {
   parseArgs,
   parseStdinPayload,
@@ -38,7 +40,8 @@ async function main() {
   const payload = await parseStdinPayload(agentId);
   if (!payload) return;
 
-  const { transcriptPath, sessionId } = payload;
+  const { transcriptPath, sessionId, cwd: rawCwd } = payload;
+  const cwd = resolveQoderWorkProjectDir(rawCwd, agentId);
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
 
   const range = getLineRange(agentId, transcriptPath, sessionId);
@@ -61,7 +64,7 @@ async function main() {
     return;
   }
 
-  const records = processTranscript(parsed, sessionId, agentId, runtimeConfig);
+  const records = processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd);
   logDebug(agentId, `Produced ${records.length} events`);
 
   const rowsToAppend = records.filter(Boolean).map(r => JSON.stringify(r));
@@ -72,7 +75,7 @@ async function main() {
   }
 }
 
-function processTranscript(parsed, sessionId, agentId, runtimeConfig) {
+function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd) {
   const observedTs = timestampToUnixNanos(Date.now());
   const records = [];
 
@@ -98,7 +101,7 @@ function processTranscript(parsed, sessionId, agentId, runtimeConfig) {
 
   for (const turn of turns) {
     const turnId = crypto.randomUUID();
-    const turnRecords = buildTurnEvents(turn, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig);
+    const turnRecords = buildTurnEvents(turn, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd);
     records.push(...turnRecords);
   }
 
@@ -123,7 +126,7 @@ function splitIntoTurns(contentRows) {
   return turns;
 }
 
-function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig) {
+function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd) {
   const records = [];
 
   // Find the user prompt
@@ -144,7 +147,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
         time_unix_nano: timestampToUnixNanos(userRow.timestamp),
         observed_time_unix_nano: observedTs,
         version,
-      }, turnRows[0], runtimeConfig));
+      }, turnRows[0], runtimeConfig, cwd));
     }
   }
 
@@ -158,7 +161,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
   for (const group of llmGroups) {
     stepCounter++;
     const stepId = `${turnId}:s${stepCounter}`;
-    const stepRecords = buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, stepCounter === llmGroups.length);
+    const stepRecords = buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, stepCounter === llmGroups.length, cwd);
     records.push(...stepRecords);
   }
 
@@ -187,7 +190,7 @@ function groupByParentUuid(assistantRows) {
   return groups;
 }
 
-function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, isLastStep) {
+function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, isLastStep, cwd) {
   const records = [];
   const firstRow = group[0];
   const lastRow = group[group.length - 1];
@@ -236,7 +239,7 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
     time_unix_nano: timestampToUnixNanos(firstRow.timestamp),
     observed_time_unix_nano: observedTs,
     version,
-  }, firstRow, runtimeConfig));
+  }, firstRow, runtimeConfig, cwd));
 
   // llm.response (merged multi-parts)
   if (outputParts.length > 0) {
@@ -256,7 +259,7 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
       time_unix_nano: timestampToUnixNanos(lastRow.timestamp),
       observed_time_unix_nano: observedTs,
       version,
-    }, firstRow, runtimeConfig));
+    }, firstRow, runtimeConfig, cwd));
   }
 
   // tool.call + tool.result events
@@ -275,7 +278,7 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
       time_unix_nano: timestampToUnixNanos(lastRow.timestamp),
       observed_time_unix_nano: observedTs,
       version,
-    }, firstRow, runtimeConfig));
+    }, firstRow, runtimeConfig, cwd));
 
     // Find matching tool_result
     const matchingResult = toolResultRows.find(r => {
@@ -301,20 +304,21 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
         time_unix_nano: timestampToUnixNanos(matchingResult.timestamp),
         observed_time_unix_nano: observedTs,
         version,
-      }, matchingResult, runtimeConfig));
+      }, matchingResult, runtimeConfig, cwd));
     }
   }
 
   return records;
 }
 
-function buildRecord(fields, sourceRow, runtimeConfig) {
+function buildRecord(fields, sourceRow, runtimeConfig, cwd) {
   const record = {
     'event.id': crypto.randomUUID(),
     'agent.source': 'qoder-transcript-hook',
     'agent.qoderwork.variant': 'qoder-work',
     ...fields,
   };
+  if (cwd) record['agent.qoder-work.cwd'] = cwd;
   if (sourceRow) {
     if (sourceRow.isSidechain !== undefined) record['agent.qoderwork.isSidechain'] = String(sourceRow.isSidechain);
     if (sourceRow.userType) record['agent.qoderwork.userType'] = sourceRow.userType;
@@ -340,6 +344,43 @@ function extractText(row) {
     }
   }
   return '';
+}
+
+/**
+ * Resolve QoderWork sandbox cwd to the real project directory.
+ *
+ * QoderWork stores the user's chosen project path in SQLite
+ * (chats.additional_directories), but the hook payload only contains
+ * the internal sandbox path (~/.qoderwork/workspace/<chatId>).
+ * We query the DB to recover the real project path.
+ */
+function resolveQoderWorkProjectDir(sandboxCwd, agentId) {
+  if (!sandboxCwd) return undefined;
+  const qwWorkspacePrefix = path.join(os.homedir(), '.qoderwork', 'workspace') + path.sep;
+  if (!sandboxCwd.startsWith(qwWorkspacePrefix)) return sandboxCwd;
+
+  const relative = sandboxCwd.slice(qwWorkspacePrefix.length);
+  const chatId = relative.split(path.sep)[0];
+  if (!chatId || !/^[a-f0-9-]{1,64}$/i.test(chatId)) return sandboxCwd;
+
+  const dbPath = process.platform === 'darwin'
+    ? path.join(os.homedir(), 'Library', 'Application Support', 'QoderWork', 'data', 'agents.db')
+    : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'QoderWork', 'data', 'agents.db');
+
+  try {
+    const sql = `SELECT additional_directories FROM chats WHERE id = '${chatId.replace(/'/g, "''")}'`;
+    const result = execFileSync('sqlite3', [dbPath, sql], { encoding: 'utf-8', timeout: 5000 }).trim();
+    if (result) {
+      const dirs = JSON.parse(result);
+      if (Array.isArray(dirs) && dirs.length > 0 && typeof dirs[0] === 'string') {
+        logDebug(agentId, `Resolved project dir: ${sandboxCwd} -> ${dirs[0]}`);
+        return dirs[0];
+      }
+    }
+  } catch (err) {
+    logDebug(agentId, `Failed to resolve project dir from sqlite: ${err.message || err}`);
+  }
+  return sandboxCwd;
 }
 
 main().catch(() => { /* fail-open */ });

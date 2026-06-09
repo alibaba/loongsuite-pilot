@@ -72,6 +72,9 @@ function maybeSaveTranscriptPath(state, input) {
     const tp = input.transcript_path;
     if (typeof tp === 'string' && tp) state.transcript_path = tp;
   }
+  if (!state.cwd && input.cwd && typeof input.cwd === 'string') {
+    state.cwd = input.cwd;
+  }
 }
 
 function tryReadStdin() {
@@ -195,6 +198,9 @@ async function cmdStop() {
   if (!sessionId) return;
   const state = loadState(sessionId);
   maybeSaveTranscriptPath(state, input);
+  if (input.cwd && typeof input.cwd === 'string') {
+    state.cwd = input.cwd;
+  }
   const model = String(input.model || state.model || 'unknown');
   if (model !== 'unknown') state.model = model;
 
@@ -305,6 +311,7 @@ async function writeSessionJsonl(state, transcriptData) {
       systemInstruction: transcriptData?.systemInstruction,
       toolDefinitions: transcriptData?.toolDefinitions,
       prevHash: logHash,
+      cwd: state.cwd,
     });
     allRecords.push(...records);
     logHash = hash;
@@ -330,6 +337,7 @@ function buildTurnRecords({
   systemInstruction,
   toolDefinitions,
   prevHash,
+  cwd,
 }) {
   const records = [];
   const turnId = `${sessionId}:t${turnIndex + 1}`;
@@ -347,6 +355,7 @@ function buildTurnRecords({
     'gen_ai.agent.id': sessionId,
     'user.id': userId,
     'gen_ai.provider.name': provider,
+    ...(cwd ? { 'agent.codex.cwd': cwd } : {}),
   };
 
   // turn-level llm.request(代表 user prompt)

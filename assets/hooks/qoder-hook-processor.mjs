@@ -61,15 +61,17 @@ async function main() {
   if (isRetry) {
     const transcriptIdx = args.indexOf('--transcript');
     const sessionIdx = args.indexOf('--session');
+    const cwdIdx = args.indexOf('--cwd');
     const transcriptPath = transcriptIdx >= 0 ? args[transcriptIdx + 1] : '';
     const sessionId = sessionIdx >= 0 ? args[sessionIdx + 1] : '';
+    const cwd = cwdIdx >= 0 ? args[cwdIdx + 1] : undefined;
     const { agentId, logPrefix } = parseArgs();
     if (!transcriptPath || !sessionId) return;
     logDebug(agentId, `Retry: processing ${transcriptPath} for session ${sessionId}`);
     const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
     const range = getLineRange(agentId, transcriptPath, sessionId);
     if (!range) return;
-    await processTranscript(agentId, logPrefix, transcriptPath, sessionId, range[0], range[1], runtimeConfig);
+    await processTranscript(agentId, logPrefix, transcriptPath, sessionId, range[0], range[1], runtimeConfig, cwd);
     return;
   }
 
@@ -78,7 +80,7 @@ async function main() {
   const payload = await parseStdinPayload(agentId);
   if (!payload) return;
 
-  const { transcriptPath, sessionId } = payload;
+  const { transcriptPath, sessionId, cwd } = payload;
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
 
   const range = getLineRange(agentId, transcriptPath, sessionId);
@@ -106,27 +108,29 @@ async function main() {
   const MIN_COMPLETE_LINES = 3;
   if (parsed.length > 0 && parsed[parsed.length - 1]?.type !== 'last-prompt' && parsed.length < MIN_COMPLETE_LINES) {
     logDebug(agentId, `Transcript incomplete (${parsed.length} lines). Spawning background retry in 5s.`);
-    spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix);
+    spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd);
     return;
   }
 
-  await processTranscript(agentId, logPrefix, transcriptPath, sessionId, startLine, endLine, runtimeConfig);
+  await processTranscript(agentId, logPrefix, transcriptPath, sessionId, startLine, endLine, runtimeConfig, cwd);
 }
 
 // NOTE: Retry subprocess won't race with normal hook because non-interactive mode (--print)
 // only fires Stop once per session (process exits after hook returns). The offset check in
 // getLineRange prevents double-processing if another hook invocation somehow occurs.
-function spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix) {
+function spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd) {
   const nodebin = process.argv[0];
   const script = new URL(import.meta.url).pathname;
-  const child = spawn(nodebin, [
+  const spawnArgs = [
     script,
     '--agent-id', agentId,
     '--log-prefix', logPrefix,
     '--retry',
     '--transcript', transcriptPath,
     '--session', sessionId,
-  ], {
+    ...(cwd ? ['--cwd', cwd] : []),
+  ];
+  const child = spawn(nodebin, spawnArgs, {
     detached: true,
     stdio: 'ignore',
     env: { ...process.env, HOOK_RETRY_DELAY: '5000' },
@@ -135,7 +139,7 @@ function spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix) {
   logDebug(agentId, `Spawned retry subprocess (PID ${child.pid})`);
 }
 
-async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, startLine, initialEndLine, runtimeConfig) {
+async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, startLine, initialEndLine, runtimeConfig, cwd) {
   // Handle retry delay
   const retryDelay = parseInt(process.env.HOOK_RETRY_DELAY || '0', 10);
   if (retryDelay > 0) {
@@ -193,7 +197,7 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
   // --- Phase 4: Build events using boundaries ---
   const turnId = crypto.randomUUID();
   const records = buildEventsFromBoundaries(
-    llmBoundaries, contentEvents, parsed, turnId, sessionId, agentId, runtimeConfig,
+    llmBoundaries, contentEvents, parsed, turnId, sessionId, agentId, runtimeConfig, cwd,
   );
 
   logDebug(agentId, `Produced ${records.length} events, turn_id=${turnId}`);
@@ -295,7 +299,7 @@ function buildLlmBoundaries(progressEvents, contentEvents) {
 
 // --- Event Builder -----------------------------------------------------------
 
-function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId, sessionId, agentId, runtimeConfig) {
+function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId, sessionId, agentId, runtimeConfig, cwd) {
   const records = [];
   const observedTs = timestampToUnixNanos(Date.now());
 
@@ -329,7 +333,9 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
 
   // If no progress boundaries detected, fall back to legacy behavior
   if (boundaries.length === 0) {
-    return buildLegacyEvents(contentEvents, turnId, sessionId, agentId, runtimeConfig, records, observedTs);
+    const legacyRecords = buildLegacyEvents(contentEvents, turnId, sessionId, agentId, runtimeConfig, records, observedTs);
+    if (cwd) for (const r of legacyRecords) r['agent.qoder.cwd'] = cwd;
+    return legacyRecords;
   }
 
   // Assign content events to boundaries.
@@ -490,6 +496,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
     }
   }
 
+  if (cwd) for (const r of records) r['agent.qoder.cwd'] = cwd;
   return records;
 }
 
