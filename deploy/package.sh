@@ -13,6 +13,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PACKAGE_NAME="loongsuite-pilot"
 OUTPUT_PATH=""
 SKIP_BUILD=0
+EXTERNAL=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -20,6 +21,8 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_PATH="$2"; shift 2 ;;
         --skip-build)
             SKIP_BUILD=1; shift ;;
+        --external)
+            EXTERNAL=1; shift ;;
         *)
             echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -95,6 +98,12 @@ cp VERSION           "$PKG_DIR/"
 # Ensure scripts are executable
 chmod +x "$PKG_DIR/scripts/"*.sh 2>/dev/null || true
 chmod +x "$PKG_DIR/assets/hooks/"*.sh 2>/dev/null || true
+
+# Strip internal-only files for commercial / open-source packages
+if [ "$EXTERNAL" -eq 1 ]; then
+    rm -f "$PKG_DIR/scripts/migrate-internal-config.js"
+    echo "    ✅ Stripped internal-only files (--external)"
+fi
 
 echo "    ✅ Staged into $PKG_DIR"
 

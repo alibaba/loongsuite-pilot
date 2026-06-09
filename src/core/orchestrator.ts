@@ -681,12 +681,10 @@ export class Orchestrator extends EventEmitter {
 
   /**
    * Check whether an agent is allowed to run based on config.agents gate.
-   * - Internal builds: always true (auto-detect)
    * - No config.agents or empty: always true (backward compat)
    * - Otherwise: only if config.agents[agentId].enabled !== false
    */
   private isAgentGatedEnabled(agentId: string): boolean {
-    if (this.config.internal) return true;
     const agents = this.config.agents;
     if (!agents || Object.keys(agents).length === 0) return true;
     return agents[agentId]?.enabled !== false;

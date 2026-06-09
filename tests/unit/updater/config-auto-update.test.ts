@@ -22,17 +22,20 @@ describe('buildAutoUpdateConfig', () => {
     vi.unstubAllEnvs();
   });
 
-  it('uses defaults when no file and no env', () => {
+  it('disabled when no packageUrl configured', () => {
     const config = buildAutoUpdateConfig(null);
-    expect(config.enabled).toBe(true);
-    expect(config.checkIntervalMs).toBe(60_000); // 1 minute
-    expect(config.manifestUrl).toBeDefined();
-    expect(config.packageUrl).toBeDefined();
+    expect(config.enabled).toBe(false);
+    expect(config.packageUrl).toBeUndefined();
+    expect(config.manifestUrl).toBeUndefined();
   });
 
   it('derives manifest URL from package URL', () => {
-    const config = buildAutoUpdateConfig(null);
-    expect(config.manifestUrl).toMatch(/\/latest\.json$/);
+    const config = buildAutoUpdateConfig({
+      autoUpdate: {
+        packageUrl: 'https://example.com/latest/pkg.tar.gz',
+      },
+    });
+    expect(config.manifestUrl).toBe('https://example.com/latest/latest.json');
   });
 
   it('uses file values over defaults', () => {
@@ -52,6 +55,7 @@ describe('buildAutoUpdateConfig', () => {
 
   it('env LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED=false disables', () => {
     vi.stubEnv('LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED', 'false');
+    vi.stubEnv('LOONGSUITE_PILOT_PACKAGE_URL', 'https://example.com/pkg.tar.gz');
     const config = buildAutoUpdateConfig(null);
     expect(config.enabled).toBe(false);
   });
@@ -62,30 +66,19 @@ describe('buildAutoUpdateConfig', () => {
     expect(config.checkIntervalMs).toBe(300_000);
   });
 
-  it('env LOONGSUITE_PILOT_PACKAGE_URL overrides package URL', () => {
+  it('env LOONGSUITE_PILOT_PACKAGE_URL overrides package URL and enables', () => {
     vi.stubEnv('LOONGSUITE_PILOT_PACKAGE_URL', 'https://custom.com/pkg.tar.gz');
     const config = buildAutoUpdateConfig(null);
+    expect(config.enabled).toBe(true);
     expect(config.packageUrl).toBe('https://custom.com/pkg.tar.gz');
     expect(config.manifestUrl).toBe('https://custom.com/latest.json');
   });
 
   it('env LOONGSUITE_PILOT_MANIFEST_URL overrides manifest URL', () => {
     vi.stubEnv('LOONGSUITE_PILOT_MANIFEST_URL', 'https://custom.com/versions.json');
+    vi.stubEnv('LOONGSUITE_PILOT_PACKAGE_URL', 'https://custom.com/pkg.tar.gz');
     const config = buildAutoUpdateConfig(null);
     expect(config.manifestUrl).toBe('https://custom.com/versions.json');
-  });
-
-  it('channel=test uses test package URL', () => {
-    vi.stubEnv('LOONGSUITE_PILOT_CHANNEL', 'test');
-    const config = buildAutoUpdateConfig(null);
-    expect(config.packageUrl).toContain('loongsuite-dev/loongsuite-pilot');
-  });
-
-  it('channel=release uses release package URL', () => {
-    vi.stubEnv('LOONGSUITE_PILOT_CHANNEL', 'release');
-    const config = buildAutoUpdateConfig(null);
-    expect(config.packageUrl).toContain('loongsuite/loongsuite-pilot');
-    expect(config.packageUrl).not.toContain('loongsuite-dev/loongsuite-pilot');
   });
 
   it('env overrides file values', () => {
@@ -94,5 +87,16 @@ describe('buildAutoUpdateConfig', () => {
       autoUpdate: { checkIntervalMs: 5000 },
     });
     expect(config.checkIntervalMs).toBe(999);
+  });
+
+  it('reads installId and canary fields from config', () => {
+    const config = buildAutoUpdateConfig({
+      installId: 'test-install-id',
+      canary: { policy: 'auto', hotfix_version: 3 },
+      autoUpdate: { packageUrl: 'https://example.com/pkg.tar.gz' },
+    });
+    expect(config.installId).toBe('test-install-id');
+    expect(config.canaryPolicy).toBe('auto');
+    expect(config.canaryHotfixVersion).toBe(3);
   });
 });

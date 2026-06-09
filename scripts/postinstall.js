@@ -11,7 +11,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -145,6 +145,14 @@ try {
   main();
 } catch (error) {
   console.error('[loongsuite-pilot] Post-install failed:', error.message);
-  // Don't fail the npm install, just warn
-  process.exit(0);
+}
+
+// Run config migrations (if any exist in this package variant)
+const migrationScript = path.join(__dirname, 'migrate-internal-config.js');
+if (fs.existsSync(migrationScript)) {
+  try {
+    await import(pathToFileURL(migrationScript).href);
+  } catch (err) {
+    console.error('[loongsuite-pilot] Config migration failed (non-fatal):', err.message);
+  }
 }

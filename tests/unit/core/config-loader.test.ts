@@ -14,7 +14,6 @@ vi.mock('../../../src/utils/logger.js', () => ({
 }));
 
 import { loadConfig } from '../../../src/core/config-loader.js';
-import { INTERNAL_SLS_DESTINATION } from '../../../src/internal/sls-destination.js';
 
 function clearSlsEnv() {
   delete process.env.SLS_MODE;
@@ -104,25 +103,15 @@ describe('ConfigLoader', () => {
   });
 
   describe('SLS/HTTP/JSONL config merge (T027)', () => {
-    it('uses built-in SLS destination when config file has no destination', async () => {
+    it('SLS disabled with empty endpoints when no config', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
 
       const config = await loadConfig();
-      expect(config.flushers.sls?.enabled).toBe(true);
-      expect(config.flushers.sls?.mode).toBe(INTERNAL_SLS_DESTINATION.mode);
-      expect(config.flushers.sls?.endpoint).toBe(INTERNAL_SLS_DESTINATION.endpoint);
-      expect(config.flushers.sls?.endpoints).toHaveLength(1);
-      expect(config.flushers.sls?.endpoints[0]).toMatchObject({
-        name: INTERNAL_SLS_DESTINATION.endpointName,
-        endpoint: INTERNAL_SLS_DESTINATION.endpoint,
-        project: INTERNAL_SLS_DESTINATION.project,
-        logstore: INTERNAL_SLS_DESTINATION.logstore,
-        kind: 'agentActivity',
-        mode: INTERNAL_SLS_DESTINATION.mode,
-      });
+      expect(config.flushers.sls?.enabled).toBe(false);
+      expect(config.flushers.sls?.endpoints).toHaveLength(0);
     });
 
-    it('dual-writes when user SLS fields are present in config file', async () => {
+    it('uses user SLS fields from config file', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
           endpoint: 'https://legacy.example.com',
@@ -132,16 +121,16 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.flushers.sls?.endpoints).toHaveLength(2);
+      expect(config.flushers.sls?.endpoints).toHaveLength(1);
       expect(config.flushers.sls?.endpoints[0]).toMatchObject({
         endpoint: 'https://legacy.example.com',
         project: 'legacy-project',
         logstore: 'legacy-logstore',
       });
-      expect(config.flushers.sls?.endpoints[1].name).toBe(INTERNAL_SLS_DESTINATION.endpointName);
+      expect(config.flushers.sls?.enabled).toBe(true);
     });
 
-    it('uses env SLS destination over file values (still dual-writes)', async () => {
+    it('uses env SLS destination over file values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
           endpoint: 'https://legacy.example.com',
@@ -154,14 +143,14 @@ describe('ConfigLoader', () => {
       vi.stubEnv('SLS_LOGSTORE', 'log2');
 
       const config = await loadConfig();
-      expect(config.flushers.sls?.endpoints).toHaveLength(2);
+      expect(config.flushers.sls?.endpoints).toHaveLength(1);
       expect(config.flushers.sls?.endpoints[0]).toMatchObject({
         project: 'proj2',
         logstore: 'log2',
       });
     });
 
-    it('ignores legacy destinationOverride and still dual-writes', async () => {
+    it('ignores legacy destinationOverride', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
           destinationOverride: true,
@@ -173,12 +162,11 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.flushers.sls?.endpoint).toBe('https://sls.example.com');
-      expect(config.flushers.sls?.endpoints).toHaveLength(2);
+      expect(config.flushers.sls?.endpoints).toHaveLength(1);
       expect(config.flushers.sls?.endpoints[0]).toMatchObject({
         project: 'operator-project',
         logstore: 'operator-logstore',
       });
-      expect(config.flushers.sls?.endpoints[1].name).toBe(INTERNAL_SLS_DESTINATION.endpointName);
     });
 
     it('keeps non-destination SLS controls configurable', async () => {
@@ -197,7 +185,6 @@ describe('ConfigLoader', () => {
       expect(config.flushers.sls?.enabled).toBe(false);
       expect(config.flushers.sls?.batchMaxSize).toBe(5);
       expect(config.flushers.sls?.flushIntervalMs).toBe(750);
-      // The user-provided endpoint surfaces as the primary now.
       expect(config.flushers.sls?.endpoint).toBe('https://legacy.example.com');
     });
 

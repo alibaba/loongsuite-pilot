@@ -19,11 +19,20 @@ describe('installer SLS config output', () => {
     expect(content).toContain('SLS_LOGSTORE=""');
   });
 
-  it.each(installers)('%s writes user SLS fields without destinationOverride', async (installer) => {
-    const content = await readFile(path.join(rootDir, installer), 'utf8');
+  it('deploy/installer.sh writes user SLS fields without destinationOverride', async () => {
+    const content = await readFile(path.join(rootDir, 'deploy/installer.sh'), 'utf8');
 
     expect(content).toContain('if (slsEndpoint || slsProject || slsLogstore)');
     expect(content).toContain('delete config.sls.destinationOverride');
+    expect(content).not.toContain('config.sls.destinationOverride = true');
+    expect(content).not.toContain('config.sls.destinationOverride = false');
+  });
+
+  it('deploy/installer-inner.sh replaces sls config entirely', async () => {
+    const content = await readFile(path.join(rootDir, 'deploy/installer-inner.sh'), 'utf8');
+
+    expect(content).toContain('if (slsProject && slsLogstore)');
+    expect(content).toContain('config.sls = [userEp, INTERNAL_SLS]');
     expect(content).not.toContain('config.sls.destinationOverride = true');
     expect(content).not.toContain('config.sls.destinationOverride = false');
   });

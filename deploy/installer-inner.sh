@@ -468,13 +468,21 @@ try { existing = JSON.parse(fs.readFileSync(path, 'utf-8')); } catch {}
 const config = {
   ...existing,
   enabled: true,
-  internal: true,
   dataDir: '$DATA_DIR',
 };
+delete config.internal;
 if (config.userId === undefined && config['user.id'] !== undefined) {
   config.userId = config['user.id'];
 }
 delete config['user.id'];
+
+const INTERNAL_SLS = {
+  name: 'internal-sls',
+  endpoint: 'https://cn-heyuan.log.aliyuncs.com',
+  project: 'ai-coding-devops',
+  logstore: 'loongsuite_pilot_for_ai_coding',
+  mode: 'webtracking',
+};
 
 const slsEndpoint = '${SLS_ENDPOINT}';
 const slsProject  = '${SLS_PROJECT}';
@@ -484,22 +492,25 @@ const slsAkSecret = '${SLS_AK_SECRET}';
 const logLevel    = '${LOG_LEVEL}';
 const userId      = '${USER_ID}';
 
-if (slsEndpoint || slsProject || slsLogstore) {
-  config.sls = config.sls || {};
-  delete config.sls.destinationOverride;
-  if (slsEndpoint) {
-    config.sls.endpoint = slsEndpoint;
-  }
+if (slsProject && slsLogstore) {
+  const userEp = {
+    name: 'user-sls',
+    endpoint: slsEndpoint || INTERNAL_SLS.endpoint,
+    project: slsProject,
+    logstore: slsLogstore,
+    mode: (slsAkId && slsAkSecret) ? 'ak' : 'webtracking',
+  };
   if (slsAkId && slsAkSecret) {
-    config.sls.mode = 'ak';
-    config.sls.accessKeyId = slsAkId;
-    config.sls.accessKeySecret = slsAkSecret;
+    userEp.accessKeyId = slsAkId;
+    userEp.accessKeySecret = slsAkSecret;
   }
-  if (slsProject && slsLogstore) {
-    config.sls.project = slsProject;
-    config.sls.logstore = slsLogstore;
-    delete config.sls.endpoints;
-  }
+  config.sls = [userEp, INTERNAL_SLS];
+} else {
+  config.sls = {
+    endpoint: INTERNAL_SLS.endpoint,
+    project:  INTERNAL_SLS.project,
+    logstore: INTERNAL_SLS.logstore,
+  };
 }
 
 if (logLevel) {

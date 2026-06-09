@@ -13,7 +13,6 @@ import type {
   SlsEndpoint,
   SlsMode,
 } from '../types/index.js';
-import { INTERNAL_SLS_DESTINATION, buildInternalSlsEndpoint } from '../internal/sls-destination.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -21,31 +20,41 @@ const logger = createLogger('ConfigLoader');
 
 const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
 
+export interface SlsEndpointEntry {
+  name?: string;
+  endpoint: string;
+  project: string;
+  logstore: string;
+  mode?: SlsMode;
+  accessKeyId?: string;
+  accessKeySecret?: string;
+}
+
+export interface SlsSingleConfig {
+  enabled?: boolean;
+  mode?: SlsMode;
+  accessKeyId?: string;
+  accessKeySecret?: string;
+  endpoint?: string;
+  project?: string;
+  logstore?: string;
+  /** @deprecated Ignored. */
+  destinationOverride?: boolean;
+  batchMaxSize?: number;
+  flushIntervalMs?: number;
+}
+
 /**
  * On-disk config file shape.
  * All fields optional — missing fields fall back to env vars then defaults.
  */
 export interface ConfigFile {
   enabled?: boolean;
-  internal?: boolean;
   dataDir?: string;
   userId?: string;
   'user.id'?: string;
 
-  sls?: {
-    enabled?: boolean;
-    mode?: SlsMode;
-    accessKeyId?: string;
-    accessKeySecret?: string;
-    /** 完整 SLS endpoint URL，如 https://cn-hangzhou.log.aliyuncs.com */
-    endpoint?: string;
-    project?: string;
-    logstore?: string;
-    /** @deprecated Ignored since build-time isolation replaced runtime override. */
-    destinationOverride?: boolean;
-    batchMaxSize?: number;
-    flushIntervalMs?: number;
-  };
+  sls?: SlsSingleConfig | SlsEndpointEntry[];
 
   jsonl?: {
     enabled?: boolean;
@@ -154,17 +163,14 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     logger.debug('no config file found, using env + defaults', { path: configPath });
   }
 
-  const internal = envBool('LOONGSUITE_PILOT_INTERNAL', file?.internal ?? true);
-
   const dataDir = env('LOONGSUITE_PILOT_DATA_DIR') ?? file?.dataDir ?? '~/.loongsuite-pilot';
 
   const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
 
-  const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? (internal ? 'loongsuite-pilot' : '');
+  const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? 'loongsuite-pilot';
 
   return {
     enabled: envBool('LOONGSUITE_PILOT_ENABLED', file?.enabled ?? true),
-    internal,
     autoStart: true,
     dataDir,
     userId,
@@ -174,7 +180,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     cms: buildCmsConfig(file),
 
     listeners: buildListenersConfig(file),
-    flushers: buildFlushersConfig(file, dataDir, internal, serviceNamePrefix),
+    flushers: buildFlushersConfig(file, dataDir, serviceNamePrefix),
     retention: buildRetentionConfig(file),
     agents: buildAgentsConfig(file),
     mask: buildMaskConfig(file),
@@ -331,11 +337,10 @@ function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
 function buildFlushersConfig(
   file: ConfigFile | null,
   dataDir: string,
-  internal: boolean,
   serviceNamePrefix: string,
 ): FlusherConfig {
   return {
-    sls: buildSlsConfig(file, internal, serviceNamePrefix),
+    sls: buildSlsConfig(file, serviceNamePrefix),
     jsonl: buildJsonlConfig(file, dataDir),
     http: buildHttpConfig(file),
   };
@@ -389,45 +394,53 @@ function resolveCaptureMessageContent(agents: AgentsConfig): boolean {
   return values.every(a => a.captureMessageContent !== false);
 }
 
-function buildSlsConfig(file: ConfigFile | null, internal: boolean, serviceNamePrefix: string) {
-  // ============================================================
-  // Step 1: Read user-provided fields. Env > config.sls.* > undefined.
-  // ============================================================
-  const userMode = readUserSlsMode(file);
-  const userAk = env('SLS_ACCESS_KEY_ID') ?? file?.sls?.accessKeyId;
-  const userSk = env('SLS_ACCESS_KEY_SECRET') ?? file?.sls?.accessKeySecret;
-  const userRawEndpoint = env('SLS_ENDPOINT') ?? file?.sls?.endpoint;
-  const userProject = env('SLS_PROJECT') ?? file?.sls?.project;
-  const userLogstore = env('SLS_LOGSTORE') ?? file?.sls?.logstore;
+function parseSlsEndpointEntry(ep: SlsEndpointEntry, index: number): SlsEndpoint {
+  const mode: SlsMode = ep.mode ?? (ep.accessKeyId && ep.accessKeySecret ? 'ak' : 'webtracking');
+  const rawEndpoint = ep.endpoint ?? '';
+  const endpoint = rawEndpoint
+    ? (/^https?:\/\//.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`)
+    : '';
+  const result: SlsEndpoint = {
+    name: ep.name ?? `sls-${index}`,
+    endpoint,
+    project: ep.project,
+    logstore: ep.logstore,
+    kind: 'agentActivity',
+    mode,
+    redact: false,
+  };
+  if (mode === 'ak') {
+    result.accessKeyId = ep.accessKeyId ?? '';
+    result.accessKeySecret = ep.accessKeySecret ?? '';
+  }
+  return result;
+}
 
-  if (file?.sls?.destinationOverride !== undefined) {
+function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string) {
+  const rawSls = file?.sls;
+  const isArray = Array.isArray(rawSls);
+  const single = isArray ? null : (rawSls as SlsSingleConfig | undefined) ?? null;
+
+  if (single?.destinationOverride !== undefined) {
     logger.warn('config.sls.destinationOverride is deprecated and ignored — remove it from config.json');
   }
 
-  const hasUserDestination = !!(userProject && userLogstore);
-
   let endpoints: SlsEndpoint[];
-  if (internal) {
-    if (!hasUserDestination) {
-      endpoints = [buildInternalSlsEndpoint()];
-    } else {
+
+  if (isArray) {
+    endpoints = (rawSls as SlsEndpointEntry[]).map((ep, i) => parseSlsEndpointEntry(ep, i));
+  } else if (single) {
+    const userMode = readUserSlsMode(single);
+    const userAk = env('SLS_ACCESS_KEY_ID') ?? single.accessKeyId;
+    const userSk = env('SLS_ACCESS_KEY_SECRET') ?? single.accessKeySecret;
+    const userRawEndpoint = env('SLS_ENDPOINT') ?? single.endpoint;
+    const userProject = env('SLS_PROJECT') ?? single.project;
+    const userLogstore = env('SLS_LOGSTORE') ?? single.logstore;
+
+    const hasUserDestination = !!(userProject && userLogstore);
+
+    if (hasUserDestination) {
       const userEndpoint = buildUserSlsEndpoint({
-        internal,
-        mode: userMode,
-        rawEndpoint: userRawEndpoint,
-        project: userProject!,
-        logstore: userLogstore!,
-        accessKeyId: userAk,
-        accessKeySecret: userSk,
-      });
-      endpoints = [userEndpoint, buildInternalSlsEndpoint()];
-    }
-  } else {
-    if (!hasUserDestination) {
-      endpoints = [];
-    } else {
-      const userEndpoint = buildUserSlsEndpoint({
-        internal,
         mode: userMode,
         rawEndpoint: userRawEndpoint,
         project: userProject!,
@@ -436,13 +449,13 @@ function buildSlsConfig(file: ConfigFile | null, internal: boolean, serviceNameP
         accessKeySecret: userSk,
       });
       endpoints = [userEndpoint];
+    } else {
+      endpoints = [];
     }
+  } else {
+    endpoints = [];
   }
 
-  // ============================================================
-  // Step 6: Dedup by normalized (endpoint URL, project, logstore) triple.
-  //          First entry wins on collision so user-leg name/credentials/redact survive.
-  // ============================================================
   endpoints = dedupSlsEndpoints(endpoints);
 
   const primary = endpoints[0] as SlsEndpoint | undefined;
@@ -451,18 +464,13 @@ function buildSlsConfig(file: ConfigFile | null, internal: boolean, serviceNameP
   const topLevelAk = primary?.accessKeyId ?? '';
   const topLevelSk = primary?.accessKeySecret ?? '';
 
-  let enabled: boolean;
-  if (file?.sls?.enabled !== undefined) {
-    enabled = file.sls.enabled;
-  } else if (internal) {
-    enabled = true;
-  } else {
-    enabled = endpoints.length > 0 && endpoints.every(ep => {
-      if (!ep.endpoint || !ep.project || !ep.logstore) return false;
-      if (ep.mode === 'ak') return !!(ep.accessKeyId && ep.accessKeySecret);
-      return true;
-    });
-  }
+  const enabled = single?.enabled !== undefined
+    ? single.enabled
+    : endpoints.length > 0 && endpoints.every(ep => {
+        if (!ep.endpoint || !ep.project || !ep.logstore) return false;
+        if (ep.mode === 'ak') return !!(ep.accessKeyId && ep.accessKeySecret);
+        return true;
+      });
 
   return {
     enabled,
@@ -471,20 +479,19 @@ function buildSlsConfig(file: ConfigFile | null, internal: boolean, serviceNameP
     accessKeySecret: topLevelSk,
     endpoint: topLevelEndpoint,
     endpoints,
-    batchMaxSize: file?.sls?.batchMaxSize ?? 20,
-    flushIntervalMs: file?.sls?.flushIntervalMs ?? 2_000,
+    batchMaxSize: single?.batchMaxSize ?? 20,
+    flushIntervalMs: single?.flushIntervalMs ?? 2_000,
     serviceNamePrefix,
   };
 }
 
-function readUserSlsMode(file: ConfigFile | null): SlsMode | undefined {
-  const raw = env('SLS_MODE') ?? file?.sls?.mode;
+function readUserSlsMode(single: SlsSingleConfig | null): SlsMode | undefined {
+  const raw = env('SLS_MODE') ?? single?.mode;
   if (raw === 'ak' || raw === 'webtracking') return raw;
   return undefined;
 }
 
 function buildUserSlsEndpoint(args: {
-  internal: boolean;
   mode: SlsMode | undefined;
   rawEndpoint: string | undefined;
   project: string;
@@ -492,10 +499,9 @@ function buildUserSlsEndpoint(args: {
   accessKeyId: string | undefined;
   accessKeySecret: string | undefined;
 }): SlsEndpoint {
-  // Mode inference: explicit > AK presence > webtracking default.
   const mode: SlsMode = args.mode ?? (args.accessKeyId && args.accessKeySecret ? 'ak' : 'webtracking');
 
-  const rawEndpoint = args.rawEndpoint || (args.internal ? INTERNAL_SLS_DESTINATION.endpoint : '');
+  const rawEndpoint = args.rawEndpoint ?? '';
   const endpoint = rawEndpoint
     ? (/^https?:\/\//.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`)
     : '';
@@ -579,33 +585,7 @@ function buildHttpConfig(file: ConfigFile | null) {
   };
 }
 
-const BASE_PACKAGE_URL = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/';
-
-const INTERNAL_RELEASE_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite/loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
-const INTERNAL_TEST_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite-dev/loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
-
-const EXTERNAL_RELEASE_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
-const EXTERNAL_TEST_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite-pilot-dev/latest/loongsuite-pilot.tar.gz`;
-
 const DEFAULT_CHECK_INTERVAL_MS = 60_000; // 1 minute
-
-function resolveDefaultPackageUrl(internal: boolean): string {
-  const channel = env('LOONGSUITE_PILOT_CHANNEL') ?? 'release';
-
-  const releaseUrl = internal ? INTERNAL_RELEASE_PACKAGE_URL : EXTERNAL_RELEASE_PACKAGE_URL;
-  const testUrl = internal ? INTERNAL_TEST_PACKAGE_URL : EXTERNAL_TEST_PACKAGE_URL;
-
-  if (channel === 'test' || channel === 'pre') {
-    return testUrl;
-  } else if (/^(test-[a-zA-Z0-9]+)$/.test(channel)) {
-    const testPrefix = internal
-      ? `loongsuite-dev/${channel}/loongsuite-pilot`
-      : `loongsuite-pilot-dev/${channel}`;
-    return `${BASE_PACKAGE_URL}${testPrefix}/latest/loongsuite-pilot.tar.gz`;
-  } else {
-    return releaseUrl;
-  }
-}
 
 /**
  * Build AutoUpdateConfig from env vars + config file.
@@ -614,8 +594,7 @@ function resolveDefaultPackageUrl(internal: boolean): string {
 export function buildAutoUpdateConfig(
   file: ConfigFile | null,
 ): AutoUpdateConfig {
-  const internal = envBool('LOONGSUITE_PILOT_INTERNAL', file?.internal ?? true);
-  const packageUrl = env('LOONGSUITE_PILOT_PACKAGE_URL') ?? file?.autoUpdate?.packageUrl ?? resolveDefaultPackageUrl(internal);
+  const packageUrl = env('LOONGSUITE_PILOT_PACKAGE_URL') ?? file?.autoUpdate?.packageUrl;
 
   let manifestUrl = env('LOONGSUITE_PILOT_MANIFEST_URL') ?? file?.autoUpdate?.manifestUrl;
   if (!manifestUrl && packageUrl) {
@@ -625,8 +604,10 @@ export function buildAutoUpdateConfig(
       : undefined;
   }
 
+  const hasPackageConfig = !!packageUrl;
+
   return {
-    enabled: envBool('LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
+    enabled: hasPackageConfig && envBool('LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
     checkIntervalMs: envInt(
       'LOONGSUITE_PILOT_AUTO_UPDATE_INTERVAL_MS',
       file?.autoUpdate?.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS,
