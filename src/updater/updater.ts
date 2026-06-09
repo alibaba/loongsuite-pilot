@@ -339,8 +339,8 @@ export class Updater {
         return { manifest: latest, channel: 'stable' };
       }
 
-      if (this.config.canaryPolicy === 'auto') {
-        logger.info('rollout resolved: channel=canary (canary policy=auto)', {
+      if (this.config.canaryPolicy === 'latest') {
+        logger.info('rollout resolved: channel=canary (canary policy=latest)', {
           ...canaryInfo,
           target: canary.version,
         });

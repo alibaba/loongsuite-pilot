@@ -127,7 +127,7 @@ export interface ConfigFile {
 
   installId?: string;
   canary?: {
-    policy?: 'auto' | 'off';
+    policy?: 'auto' | 'latest' | 'off';
     hotfix_version?: number;
   };
 }

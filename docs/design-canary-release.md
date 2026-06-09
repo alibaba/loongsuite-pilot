@@ -120,15 +120,15 @@ interface CanaryManifest extends VersionManifest {
 }
 ```
 
-用户可按需在 `canary` 对象中设置 `"policy": "auto"` 或 `"policy": "off"`。
+用户可按需在 `canary` 对象中设置 `"policy"` 字段。
 
 | 字段 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `installId` | string (UUID) | 自动生成 | 安装标识，用于百分比分桶，每台机器唯一 |
-| `canary.policy` | `'auto'` \| `'off'` | 不设置 | `auto`：始终使用 canary 版本；`off`：永远不参与灰度。不设置则由服务端百分比控制 |
+| `canary.policy` | `'auto'` \| `'latest'` \| `'off'` | `auto` | `auto`：走默认灰度逻辑（由服务端百分比控制）；`latest`：始终使用最新 canary 版本；`off`：永远不参与灰度。不设置等同于 `auto` |
 | `canary.hotfix_version` | number | 0 | updater 自动维护，记录当前安装的灰度 hotfix 版本。用于与 latest.json 中的 hotfix_version 比较，判断是否需要更新 |
 
-决策优先级：`policy=off` > `policy=auto` > 百分比分桶。
+决策优先级：`policy=off` > `policy=latest` > 百分比分桶。
 
 ---
 
@@ -150,8 +150,8 @@ interface CanaryManifest extends VersionManifest {
 
 1. 没有 canary 字段 → 使用 stable
 2. `canary.policy = 'off'` → 使用 stable
-3. `canary.policy = 'auto'` → 使用 canary
-4. `bucket < rollout_percentage` → 使用 canary
+3. `canary.policy = 'latest'` → 使用 canary
+4. `bucket < rollout_percentage` → 使用 canary（`auto` 或不设置时走此逻辑）
 5. 其他 → 使用 stable
 
 ### 4.3 灰度修复与 hotfix_version

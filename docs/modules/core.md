@@ -46,7 +46,7 @@ Orchestrator 启动分为以下阶段：
 ### config.json 灰度发布字段
 `config.json` 中与灰度发布相关的字段：
 - `installId` (string) — 机器唯一标识，updater 首次运行时自动生成 UUID v4，用于灰度分桶
-- `canary.policy` (`'auto'` | `'off'`) — 灰度策略：`auto` 强制加入，`off` 强制退出，不设置则由服务端百分比控制
+- `canary.policy` (`'auto'` | `'latest'` | `'off'`) — 灰度策略：`auto`（默认）走服务端百分比控制；`latest` 强制使用最新 canary 版本；`off` 强制退出灰度
 - `canary.hotfix_version` (number) — updater 维护，记录当前 canary hotfix 版本号，用于 hotfix 比较
 
 `buildAutoUpdateConfig()` 从上述字段构建 `AutoUpdateConfig`，其中 `canaryHotfixVersion` 默认值为 `config.canary?.hotfix_version ?? 0`。

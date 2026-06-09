@@ -108,8 +108,8 @@ describe('resolveTargetVersion', () => {
     expect(result.manifest.version).toBe('1.0.35');
   });
 
-  it('returns canary when canaryPolicy is auto', () => {
-    const updater = new Updater(makeConfig({ canaryPolicy: 'auto' }), tmpDir);
+  it('returns canary when canaryPolicy is latest', () => {
+    const updater = new Updater(makeConfig({ canaryPolicy: 'latest' }), tmpDir);
     const result = updater.resolveTargetVersion(makeLatest(makeCanary()));
     expect(result.channel).toBe('canary');
     expect(result.manifest.version).toBe('1.0.36');
@@ -172,7 +172,7 @@ describe('resolveTargetVersion', () => {
   });
 
   it('returns hotfixVersion from canary manifest', () => {
-    const updater = new Updater(makeConfig({ canaryPolicy: 'auto' }), tmpDir);
+    const updater = new Updater(makeConfig({ canaryPolicy: 'latest' }), tmpDir);
     const result = updater.resolveTargetVersion(makeLatest(makeCanary({ hotfix_version: 3 })));
     expect(result.hotfixVersion).toBe(3);
   });
