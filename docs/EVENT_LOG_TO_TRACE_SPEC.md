@@ -240,6 +240,47 @@ step_3:  LLM(最终回答, 无工具)
 
 同一 step 内，按 `gen_ai.tool.call.id` 配对 `tool.call` 和 `tool.result`。同一次工具调用两端**必须**带相同的 `tool.call.id`。
 
+### 4.4 Subagent 嵌套（0.1.0-beta.5+）[MAY]
+
+当 AI Agent 的一次工具调用触发了子 agent（如 Claude Code 的 Agent tool、Cursor 的 subagent），子 agent 的 LLM/TOOL 调用可以嵌套在父 TOOL span 下，形成：
+
+```
+ENTRY → AGENT → STEP → LLM + TOOL(Agent)
+                                  └── AGENT(child) → STEP → LLM + TOOL
+```
+
+**协议字段**：子 session 的 records 必须在每条事件上携带：
+
+| 字段 | 值 | 说明 |
+|---|---|---|
+| `gen_ai.agent.scope` | `"subagent"` | [MUST] 标识此 record 属于子 session |
+| `gen_ai.subagent.parent_tool_call.id` | 父 TOOL 的 `gen_ai.tool.call.id` | [MUST] 关联到哪个 TOOL span 下 |
+
+**转换器行为**：
+- 标记为 `subagent` 的 records 被从父级 turn 中分离，**不参与**父级 ENTRY/AGENT 的 token 聚合和 output.messages 构建。
+- 按 `parent_tool_call.id` 分组后，在对应 TOOL span 内部创建子 AGENT → STEP → LLM/TOOL 子树。
+- 子 agent 的 `agentName` 从子 records 的 `gen_ai.agent.type` / `agent.name` 取值。
+- TOOL span 的 startTime/endTime 自动扩展以包裹子 agent 时间范围。
+- 子 agent **不生成 ENTRY span**（子 agent 不是用户入口）。
+- 当前支持 **1 层嵌套**（子 agent 的 TOOL 下不再嵌套孙 agent）。
+
+**向后兼容**：不携带 `gen_ai.agent.scope` 字段的 records 完全走原有路径，行为不变。
+
+**示例**：
+
+```jsonc
+// 子 session 的 llm.request（注意 scope + parent_tool_call.id）
+{
+  "event.name": "llm.request",
+  "gen_ai.agent.scope": "subagent",
+  "gen_ai.subagent.parent_tool_call.id": "call-agent-001",
+  "gen_ai.step.id": "child:s1",
+  "gen_ai.agent.type": "search-agent",
+  "gen_ai.request.model": "claude-haiku",
+  // ... 其余标准字段
+}
+```
+
 ---
 
 ## 5. user-hook 机制：用户输入不是 LLM 调用 [MUST 理解]
@@ -575,3 +616,5 @@ import('@loongsuite/otel-util-genai').then(async ({ convertEventLogToReadableSpa
 | 内容 | `gen_ai.output.messages` | SHOULD | thinking+text 同条 |
 | 工具 | `gen_ai.tool.name` | MUST | |
 | 工具 | `gen_ai.tool.call.{arguments,result}` | SHOULD | |
+| 子 agent | `gen_ai.agent.scope` | MAY | `"subagent"` 标识子 session |
+| 子 agent | `gen_ai.subagent.parent_tool_call.id` | MAY | 关联父 TOOL 的 call.id |
