@@ -757,7 +757,7 @@ function validateSemantic(trace, rules) {
       const hasInput = s.attributes?.['gen_ai.input.messages'] !== undefined;
       const hasOutput = s.attributes?.['gen_ai.output.messages'] !== undefined;
       if (!hasInput || !hasOutput) {
-        checks.push(warn('semantic.llm_has_input_output',
+        checks.push(error('semantic.llm_has_input_output',
           `LLM missing ${!hasInput ? 'input' : ''}${!hasInput && !hasOutput ? ' and ' : ''}${!hasOutput ? 'output' : ''}.messages`,
           s.spanId, s.name));
         allOk = false;
@@ -800,7 +800,7 @@ function validateSemantic(trace, rules) {
     const stepSpans = spans.filter(s => s._kind === 'STEP');
     if (stepSpans.length > 0) {
       const sorted = [...stepSpans].sort((a, b) => {
-        const d = BigInt(a.endTimeUnixNano) - BigInt(b.endTimeUnixNano);
+        const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
         return d < 0n ? -1 : d > 0n ? 1 : 0;
       });
       const lastStep = sorted[sorted.length - 1];

@@ -739,7 +739,7 @@
     },
     {
       "id": "semantic.llm_has_input_output",
-      "severity": "warn",
+      "severity": "error",
       "requiresMessageContent": true
     },
     {

@@ -79,6 +79,19 @@ function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd) {
   const observedTs = timestampToUnixNanos(Date.now());
   const records = [];
 
+  // Skip review-copy sessions: QoderWork forks a duplicate transcript with an
+  // appended automated review task. The original session already covers the
+  // user conversation, so processing the copy would produce duplicate traces.
+  const isReviewCopy = parsed.some(row =>
+    row.type === 'user' &&
+    typeof row.message?.content?.[0]?.text === 'string' &&
+    row.message.content[0].text.startsWith('[SYSTEM: This is an automated background review task')
+  );
+  if (isReviewCopy) {
+    logDebug(agentId, `Skipping review-copy session ${sessionId}`);
+    return records;
+  }
+
   // Filter out non-content rows
   const contentRows = parsed.filter(row => {
     const type = row.type;
@@ -113,7 +126,7 @@ function splitIntoTurns(contentRows) {
   let currentTurn = [];
 
   for (const row of contentRows) {
-    if (row.type === 'user' && !isToolResult(row)) {
+    if (row.type === 'user' && !isToolResult(row) && !isSystemInjection(row)) {
       if (currentTurn.length > 0) {
         turns.push(currentTurn);
       }
@@ -124,6 +137,11 @@ function splitIntoTurns(contentRows) {
   }
   if (currentTurn.length > 0) turns.push(currentTurn);
   return turns;
+}
+
+function isSystemInjection(row) {
+  const text = extractText(row).trimStart();
+  return text.startsWith('<command-message>') || text.startsWith('<command-name>');
 }
 
 function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd) {
@@ -157,12 +175,51 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
 
   const llmGroups = groupByParentUuid(assistantRows);
 
+  const userText = userRow ? extractText(userRow) : '';
+  let prevToolCalls = []; // tool_call ids from previous step, for building tool_result delta
+
   let stepCounter = 0;
   for (const group of llmGroups) {
     stepCounter++;
     const stepId = `${turnId}:s${stepCounter}`;
-    const stepRecords = buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, stepCounter === llmGroups.length, cwd);
+
+    // Build input.messages_delta for this step's llm.request:
+    // - Step 1: user prompt
+    // - Step N>1: previous step's tool results
+    let inputDelta;
+    if (stepCounter === 1 && userText) {
+      inputDelta = [{ role: 'user', parts: [{ type: 'text', content: userText }] }];
+    } else if (prevToolCalls.length > 0) {
+      const toolParts = [];
+      for (const tc of prevToolCalls) {
+        const matchingResult = toolResultRows.find(r => {
+          const content = Array.isArray(r.message?.content) ? r.message.content : [];
+          return content.some(b => b.type === 'tool_result' && b.tool_use_id === tc.id);
+        });
+        if (matchingResult) {
+          const resultContent = Array.isArray(matchingResult.message?.content) ? matchingResult.message.content : [];
+          const resultBlock = resultContent.find(b => b.tool_use_id === tc.id);
+          const resultText = typeof resultBlock?.content === 'string' ? resultBlock.content : JSON.stringify(resultBlock?.content);
+          toolParts.push({ type: 'tool_call_response', id: tc.id, response: resultText });
+        }
+      }
+      if (toolParts.length > 0) {
+        inputDelta = [{ role: 'tool', parts: toolParts }];
+      }
+    }
+
+    const stepRecords = buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, stepCounter === llmGroups.length, inputDelta, cwd);
     records.push(...stepRecords);
+
+    // Collect this step's tool_calls for next step's input delta
+    prevToolCalls = [];
+    for (const row of group) {
+      const msg = row.message || {};
+      const content = Array.isArray(msg.content) ? msg.content : [];
+      for (const b of content) {
+        if (b.type === 'tool_use') prevToolCalls.push({ id: b.id, name: b.name });
+      }
+    }
   }
 
   return records;
@@ -190,7 +247,7 @@ function groupByParentUuid(assistantRows) {
   return groups;
 }
 
-function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, isLastStep, cwd) {
+function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, isLastStep, inputDelta, cwd) {
   const records = [];
   const firstRow = group[0];
   const lastRow = group[group.length - 1];
@@ -226,8 +283,8 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
 
   const finishReason = toolCalls.length > 0 ? 'tool_calls' : (isLastStep ? 'end_turn' : 'stop');
 
-  // llm.request for this step
-  records.push(buildRecord({
+  // llm.request for this step (with input.messages_delta per EVENT_LOG_TO_TRACE_SPEC §3.2)
+  const llmRequestFields = {
     'event.name': 'llm.request',
     'gen_ai.step.id': stepId,
     'gen_ai.turn.id': turnId,
@@ -239,7 +296,11 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
     time_unix_nano: timestampToUnixNanos(firstRow.timestamp),
     observed_time_unix_nano: observedTs,
     version,
-  }, firstRow, runtimeConfig, cwd));
+  };
+  if (inputDelta) {
+    llmRequestFields['gen_ai.input.messages_delta'] = inputDelta;
+  }
+  records.push(buildRecord(llmRequestFields, firstRow, runtimeConfig, cwd));
 
   // llm.response (merged multi-parts)
   if (outputParts.length > 0) {

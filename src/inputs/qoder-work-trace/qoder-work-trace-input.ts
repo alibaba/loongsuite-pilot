@@ -9,14 +9,23 @@ import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js
 import { getTodayDateString } from '../../utils/fs-utils.js';
 import { parseSdkLogLine, type SdkEvent } from '../qoder-work-log/qoder-work-log-input.js';
 
+const BUFFER_TTL_MS = 24 * 60 * 60 * 1000;
+
 export interface QoderWorkTraceInputOptions extends InputOptions {
   logDir?: string;
   sdkLogDir?: string;
 }
 
-interface SessionTokenData {
+interface SdkMessageData {
+  messageId: string;
+  sessionId: string;
+  startTimeMs: number;
+  endTimeMs: number;
   inputTokens: number;
   outputTokens: number;
+  stopReason: string;
+  complete: boolean;
+  createdAtMs: number; // 用于 eviction
 }
 
 /**
@@ -36,6 +45,14 @@ export class QoderWorkTraceInput extends BaseInput {
   private readonly logDir: string;
   private readonly sdkLogDir: string;
   private readonly logPrefix = 'qoder-work';
+
+  // SDK log 状态机缓冲 — 实例级持久化，跨 collect() 周期存活
+  private sdkMessageBuffer: Map<string, SdkMessageData[]> = new Map();
+  private sdkInFlightMessages: Map<string, SdkMessageData> = new Map();
+
+  // Model policy 按文件路径隔离，防止不同 SDK 进程的 model 交叉污染
+  private fileModelPolicies: Map<string, { chat: string; compact: string; scene: string }> = new Map();
+  private currentModelPolicy: { chat: string; compact: string; scene: string } = { chat: '', compact: '', scene: '' };
 
   constructor(opts: QoderWorkTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
@@ -59,20 +76,20 @@ export class QoderWorkTraceInput extends BaseInput {
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
-    // 1. Read SDK log tokens first (so they're available for enrichment)
-    const sessionTokens = await this.readSdkLogTokens();
+    // 1. 读取 SDK log 状态（token + timing + model），积累到实例级缓冲
+    await this.readSdkLogState();
 
-    // 2. Read hook JSONL entries
+    // 2. 读取 hook JSONL 条目
     const rawEntries = await this.readHookJsonl();
     if (rawEntries.length === 0) return [];
 
-    // 3. Group by turn.id
+    // 3. 按 turn.id 分组
     const turnGroups = this.groupByTurn(rawEntries);
 
-    // 4. Enrich each turn with tokens + trace_id + git context
+    // 4. 对每个 turn 进行全量 enrichment（token + timing + model + git context）
     const allEntries: AgentActivityEntry[] = [];
     for (const [, turnEntries] of turnGroups) {
-      this.enrichTurnWithTokens(turnEntries, sessionTokens);
+      this.enrichTurn(turnEntries);
       this.injectTraceId(turnEntries);
       for (const entry of turnEntries) {
         await enrichCanonicalEntryWithGit(
@@ -83,6 +100,9 @@ export class QoderWorkTraceInput extends BaseInput {
       }
       allEntries.push(...turnEntries);
     }
+
+    // 5. 清理超过 24 小时未消费的缓冲条目
+    this.evictStaleBuffers();
 
     return allEntries;
   }
@@ -141,20 +161,23 @@ export class QoderWorkTraceInput extends BaseInput {
     return entries;
   }
 
-  // ─── SDK Log token reading ─────────────────────────────────────────────────
+  // ─── SDK Log state reading ──────────────────────────────────────────────────
 
-  private async readSdkLogTokens(): Promise<Map<string, SessionTokenData[]>> {
-    const tokens = new Map<string, SessionTokenData[]>();
+  private async readSdkLogState(): Promise<void> {
     const stateKey = `${this.id}:sdk-log`;
 
     let logFiles: string[];
     try {
       logFiles = await this.discoverSdkLogFiles();
     } catch {
-      return tokens;
+      return;
     }
 
     for (const filePath of logFiles) {
+      // 恢复该文件的 model policy 快照，防止跨文件污染
+      this.currentModelPolicy = this.fileModelPolicies.get(filePath)
+        ?? { chat: '', compact: '', scene: '' };
+
       const fileStateKey = `${stateKey}:${filePath}`;
       let stat;
       try { stat = await fs.stat(filePath); } catch { continue; }
@@ -171,7 +194,11 @@ export class QoderWorkTraceInput extends BaseInput {
       }
 
       const offset = this.stateStore.getOffset(fileStateKey);
-      if (stat.size <= offset) continue;
+      if (stat.size <= offset) {
+        // 即使没有新数据，也要保存当前文件的 model policy
+        this.fileModelPolicies.set(filePath, { ...this.currentModelPolicy });
+        continue;
+      }
 
       const handle = await fs.open(filePath, 'r');
       try {
@@ -188,25 +215,72 @@ export class QoderWorkTraceInput extends BaseInput {
         this.stateStore.setOffset(fileStateKey, offset + consumedBytes);
         this.stateStore.update(fileStateKey, { extra: { inode: currentInode } });
 
-        // Parse SDK log lines for message_delta events with tokens
         for (const line of text.split('\n')) {
           if (!line.trim()) continue;
           const event = parseSdkLogLine(line);
           if (!event) continue;
-          if (event.kind === 'message_delta' && event.sessionId) {
-            if (event.inputTokens > 0 || event.outputTokens > 0) {
-              const list = tokens.get(event.sessionId) ?? [];
-              list.push({ inputTokens: event.inputTokens, outputTokens: event.outputTokens });
-              tokens.set(event.sessionId, list);
-            }
-          }
+          this.handleSdkEvent(event);
         }
       } finally {
         await handle.close();
       }
-    }
 
-    return tokens;
+      // 保存该文件处理后的 model policy 快照
+      this.fileModelPolicies.set(filePath, { ...this.currentModelPolicy });
+    }
+  }
+
+  private handleSdkEvent(event: SdkEvent): void {
+    switch (event.kind) {
+      case 'set_model_policy':
+        if (event.chatModel) this.currentModelPolicy.chat = event.chatModel;
+        if (event.compactModel) this.currentModelPolicy.compact = event.compactModel;
+        if (event.sceneModel) this.currentModelPolicy.scene = event.sceneModel;
+        return;
+
+      case 'message_start': {
+        const existing = this.sdkInFlightMessages.get(event.sessionId);
+        if (existing) {
+          this.logger.debug('overwriting incomplete in-flight message', {
+            droppedMessageId: existing.messageId,
+            sessionId: event.sessionId,
+          });
+        }
+        const msg: SdkMessageData = {
+          messageId: event.messageId,
+          sessionId: event.sessionId,
+          startTimeMs: event.ts,
+          endTimeMs: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          stopReason: '',
+          complete: false,
+          createdAtMs: Date.now(),
+        };
+        this.sdkInFlightMessages.set(event.sessionId, msg);
+        return;
+      }
+
+      case 'message_delta': {
+        const inFlight = this.sdkInFlightMessages.get(event.sessionId);
+        if (!inFlight) return;
+        inFlight.endTimeMs = event.ts;
+        inFlight.inputTokens = event.inputTokens;
+        inFlight.outputTokens = event.outputTokens;
+        inFlight.stopReason = event.stopReason;
+        inFlight.complete = true;
+        // 移入完成缓冲
+        this.sdkInFlightMessages.delete(event.sessionId);
+        const list = this.sdkMessageBuffer.get(event.sessionId) ?? [];
+        list.push(inFlight);
+        this.sdkMessageBuffer.set(event.sessionId, list);
+        return;
+      }
+
+      // message_stop / 其他事件类型不需要特殊处理
+      default:
+        return;
+    }
   }
 
   private async discoverSdkLogFiles(): Promise<string[]> {
@@ -238,41 +312,133 @@ export class QoderWorkTraceInput extends BaseInput {
     return files.sort();
   }
 
-  // ─── Token enrichment ──────────────────────────────────────────────────────
+  // ─── Enrichment ─────────────────────────────────────────────────────────────
 
-  // Token-to-response matching relies on FIFO order within the same sessionId.
-  // This is safe because QoderWork sessions are serial (one turn at a time) and
-  // SDK log message_delta events arrive in the same order as hook transcript lines.
-  private enrichTurnWithTokens(entries: AgentActivityEntry[], sessionTokens: Map<string, SessionTokenData[]>): void {
-    const responses = entries.filter(e => e['event.name'] === 'llm.response');
-    if (responses.length === 0) return;
-
-    const sessionId = (responses[0]['gen_ai.session.id'] as string) || '';
+  private enrichTurn(entries: AgentActivityEntry[]): void {
+    const sessionId = entries.find(e => e['gen_ai.session.id'])?.['gen_ai.session.id'] as string || '';
     if (!sessionId) return;
 
-    const tokenList = sessionTokens.get(sessionId);
-    if (!tokenList || tokenList.length === 0) return;
+    const buffer = this.sdkMessageBuffer.get(sessionId);
+    const steps = this.groupByStep(entries);
+    const stepOrder = [...steps.keys()].filter((k): k is string => k !== undefined);
 
-    // Consume ALL token entries for this turn's responses and aggregate into first response.
-    // Multi-step turns (tool_use) produce one message_delta per step — we must drain them
-    // all to prevent leftover tokens from leaking into subsequent turns.
-    let totalInput = 0;
-    let totalOutput = 0;
-    for (let i = 0; i < responses.length; i++) {
-      const tokenData = tokenList.shift();
-      if (tokenData) {
-        totalInput += tokenData.inputTokens;
-        totalOutput += tokenData.outputTokens;
+    for (const [stepId, stepEntries] of steps) {
+      if (!stepId) continue;
+
+      const response = stepEntries.find(e => e['event.name'] === 'llm.response');
+      const request = stepEntries.find(e => e['event.name'] === 'llm.request');
+      if (!response) continue;
+
+      // FIFO 消费一个 SdkMessageData
+      const sdkData = buffer?.length ? buffer.shift() : undefined;
+      if (sdkData) {
+        // Token enrichment — only set when SDK reports non-zero values.
+        // QoderWork message_delta always carries positive token counts;
+        // 0 means the SDK event was malformed, so we skip to avoid
+        // overwriting with misleading zeros.
+        if (sdkData.inputTokens > 0) {
+          (response as Record<string, unknown>)['gen_ai.usage.input_tokens'] = sdkData.inputTokens;
+        }
+        if (sdkData.outputTokens > 0) {
+          (response as Record<string, unknown>)['gen_ai.usage.output_tokens'] = sdkData.outputTokens;
+        }
+        if (sdkData.inputTokens > 0 || sdkData.outputTokens > 0) {
+          (response as Record<string, unknown>)['gen_ai.usage.total_tokens'] =
+            (sdkData.inputTokens || 0) + (sdkData.outputTokens || 0);
+        }
+
+        // Timing enrichment — 用 SDK log 的精确时间戳覆盖 hook 的粗粒度时间戳
+        if (sdkData.startTimeMs > 0 && request) {
+          (request as Record<string, unknown>)['time_unix_nano'] = String(BigInt(sdkData.startTimeMs) * 1_000_000n);
+        }
+        if (sdkData.endTimeMs > 0) {
+          const endNano = String(BigInt(sdkData.endTimeMs) * 1_000_000n);
+          (response as Record<string, unknown>)['time_unix_nano'] = endNano;
+          // tool.call 时间戳跟随 response（LLM 声明 tool_use 的时刻）
+          for (const e of stepEntries) {
+            if (e['event.name'] === 'tool.call') {
+              (e as Record<string, unknown>)['time_unix_nano'] = endNano;
+            }
+          }
+        }
+      }
+
+      // Model enrichment — uses currentModelPolicy which reflects the last
+      // processed SDK log file. This assumes a single active QoderWork process
+      // (single SDK log directory). If multiple workspaces run in parallel in
+      // the future, model policy should be keyed by sessionId instead.
+      const resolvedModel = this.resolveModel();
+      if (resolvedModel && resolvedModel !== 'unknown') {
+        for (const e of stepEntries) {
+          if (!e['gen_ai.request.model'] || e['gen_ai.request.model'] === 'auto') {
+            (e as Record<string, unknown>)['gen_ai.request.model'] = resolvedModel;
+          }
+          if (e['event.name'] === 'llm.response') {
+            (e as Record<string, unknown>)['gen_ai.response.model'] = resolvedModel;
+          }
+        }
       }
     }
-    responses[0]['gen_ai.usage.input_tokens'] = totalInput;
-    responses[0]['gen_ai.usage.output_tokens'] = totalOutput;
-    responses[0]['gen_ai.usage.total_tokens'] = totalInput + totalOutput;
 
-    for (let i = 1; i < responses.length; i++) {
-      responses[i]['gen_ai.usage.input_tokens'] = 0;
-      responses[i]['gen_ai.usage.output_tokens'] = 0;
-      responses[i]['gen_ai.usage.total_tokens'] = 0;
+    // Fix STEP overlap: cap tool.result 时间戳使其不超过下一个 step 的 llm.request 开始时间
+    for (let i = 0; i < stepOrder.length - 1; i++) {
+      const currentStepEntries = steps.get(stepOrder[i]);
+      const nextStepEntries = steps.get(stepOrder[i + 1]);
+      if (!currentStepEntries || !nextStepEntries) continue;
+
+      const nextRequest = nextStepEntries.find(e => e['event.name'] === 'llm.request');
+      if (!nextRequest) continue;
+      const nextStartNano = nextRequest['time_unix_nano'] as string | undefined;
+      if (!nextStartNano) continue;
+      const nextStartBig = BigInt(nextStartNano);
+      const capNano = String(nextStartBig - 1_000_000n); // 减 1ms
+
+      for (const e of currentStepEntries) {
+        if (e['event.name'] !== 'tool.result') continue;
+        const ts = e['time_unix_nano'] as string | undefined;
+        if (ts && BigInt(ts) > nextStartBig) {
+          (e as Record<string, unknown>)['time_unix_nano'] = capNano;
+        }
+      }
+    }
+
+    // 清理空 buffer
+    if (buffer && buffer.length === 0) {
+      this.sdkMessageBuffer.delete(sessionId);
+    }
+  }
+
+  private resolveModel(): string {
+    const policy = this.currentModelPolicy;
+    return policy.chat || policy.scene || policy.compact || '';
+  }
+
+  private groupByStep(entries: AgentActivityEntry[]): Map<string | undefined, AgentActivityEntry[]> {
+    const groups = new Map<string | undefined, AgentActivityEntry[]>();
+    for (const entry of entries) {
+      const stepId = (entry['gen_ai.step.id'] as string) || undefined;
+      const group = groups.get(stepId) ?? [];
+      group.push(entry);
+      groups.set(stepId, group);
+    }
+    return groups;
+  }
+
+  private evictStaleBuffers(): void {
+    const now = Date.now();
+    for (const [sessionId, list] of this.sdkMessageBuffer) {
+      const filtered = list.filter(m => now - m.createdAtMs < BUFFER_TTL_MS);
+      if (filtered.length === 0) {
+        this.sdkMessageBuffer.delete(sessionId);
+      } else if (filtered.length < list.length) {
+        this.sdkMessageBuffer.set(sessionId, filtered);
+      }
+    }
+    // 同时清理停滞的 in-flight messages
+    for (const [sessionId, msg] of this.sdkInFlightMessages) {
+      if (now - msg.createdAtMs > BUFFER_TTL_MS) {
+        this.sdkInFlightMessages.delete(sessionId);
+      }
     }
   }
 
