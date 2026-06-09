@@ -51,7 +51,7 @@ fi
 echo ""
 
 echo "==> Step 4: Install from local tarball"
-bash deploy/installer.sh install --package-url "file://$TARBALL"
+bash deploy/installer.sh install --package-url "file://$TARBALL" || true
 echo ""
 
 echo "==> Step 5: Restore config"
