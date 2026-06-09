@@ -204,7 +204,7 @@ describe('SLS resolver — config-driven', () => {
     });
   });
 
-  describe('sls array (multi-endpoint)', () => {
+  describe('sls array (multi-endpoint) from config.json', () => {
     it('parses sls array with multiple endpoints', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: [
@@ -286,6 +286,184 @@ describe('SLS resolver — config-driven', () => {
       const cfg = await loadConfig();
       expect(cfg.flushers.sls?.endpoints[0].name).toBe('sls-0');
       expect(cfg.flushers.sls?.endpoints[1].name).toBe('sls-1');
+    });
+  });
+
+  describe('inner data_config.json merging', () => {
+    it('merges inner data_config.json endpoints with config.json endpoints', async () => {
+      mockReadJsonFile
+        .mockResolvedValueOnce({
+          sls: {
+            endpoint: 'https://cn-shanghai.log.aliyuncs.com',
+            project: 'user-proj',
+            logstore: 'user-store',
+          },
+        })
+        .mockResolvedValueOnce({
+          sls: [
+            {
+              name: 'internal-sls',
+              endpoint: 'https://cn-heyuan.log.aliyuncs.com',
+              project: 'ai-coding-devops',
+              logstore: 'loongsuite_pilot_for_ai_coding',
+              mode: 'webtracking',
+            },
+          ],
+        });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(2);
+      expect(cfg.flushers.sls?.endpoints[0]).toMatchObject({
+        name: 'user-sls',
+        project: 'user-proj',
+      });
+      expect(cfg.flushers.sls?.endpoints[1]).toMatchObject({
+        name: 'internal-sls',
+        project: 'ai-coding-devops',
+      });
+      expect(cfg.flushers.sls?.enabled).toBe(true);
+    });
+
+    it('uses only inner endpoints when config.json has no sls', async () => {
+      mockReadJsonFile
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({
+          sls: [
+            {
+              name: 'internal-sls',
+              endpoint: 'https://cn-heyuan.log.aliyuncs.com',
+              project: 'ai-coding-devops',
+              logstore: 'loongsuite_pilot_for_ai_coding',
+              mode: 'webtracking',
+            },
+          ],
+        });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(1);
+      expect(cfg.flushers.sls?.endpoints[0]).toMatchObject({
+        name: 'internal-sls',
+        project: 'ai-coding-devops',
+      });
+      expect(cfg.flushers.sls?.enabled).toBe(true);
+    });
+
+    it('deduplicates when both files have the same endpoint', async () => {
+      mockReadJsonFile
+        .mockResolvedValueOnce({
+          sls: [
+            {
+              name: 'internal-sls',
+              endpoint: 'https://cn-heyuan.log.aliyuncs.com',
+              project: 'ai-coding-devops',
+              logstore: 'loongsuite_pilot_for_ai_coding',
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          sls: [
+            {
+              name: 'internal-sls',
+              endpoint: 'https://cn-heyuan.log.aliyuncs.com',
+              project: 'ai-coding-devops',
+              logstore: 'loongsuite_pilot_for_ai_coding',
+              mode: 'webtracking',
+            },
+          ],
+        });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(1);
+      expect(cfg.flushers.sls?.endpoints[0]).toMatchObject({
+        project: 'ai-coding-devops',
+      });
+    });
+
+    it('proceeds normally when data_config.json does not exist', async () => {
+      mockReadJsonFile
+        .mockResolvedValueOnce({
+          sls: {
+            endpoint: 'https://cn-shanghai.log.aliyuncs.com',
+            project: 'user-proj',
+            logstore: 'user-store',
+          },
+        })
+        .mockResolvedValueOnce(null);
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(1);
+      expect(cfg.flushers.sls?.endpoints[0]).toMatchObject({
+        name: 'user-sls',
+        project: 'user-proj',
+      });
+    });
+
+    it('skips inner entries with missing required fields', async () => {
+      mockReadJsonFile
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({
+          sls: [
+            { name: 'incomplete', endpoint: 'https://x.log.aliyuncs.com', project: 'p' },
+            {
+              name: 'complete',
+              endpoint: 'https://cn-heyuan.log.aliyuncs.com',
+              project: 'ai-coding-devops',
+              logstore: 'loongsuite_pilot_for_ai_coding',
+            },
+          ],
+        });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(1);
+      expect(cfg.flushers.sls?.endpoints[0]).toMatchObject({
+        name: 'complete',
+        project: 'ai-coding-devops',
+      });
+    });
+
+    it('returns empty endpoints when neither file has SLS', async () => {
+      mockReadJsonFile
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce(null);
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(0);
+      expect(cfg.flushers.sls?.enabled).toBe(false);
+    });
+
+    it('config.json endpoints take priority during dedup', async () => {
+      mockReadJsonFile
+        .mockResolvedValueOnce({
+          sls: [
+            {
+              name: 'user-override',
+              endpoint: 'https://cn-heyuan.log.aliyuncs.com',
+              project: 'ai-coding-devops',
+              logstore: 'loongsuite_pilot_for_ai_coding',
+              mode: 'ak',
+              accessKeyId: 'ak-id',
+              accessKeySecret: 'ak-secret',
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          sls: [
+            {
+              name: 'internal-sls',
+              endpoint: 'https://cn-heyuan.log.aliyuncs.com',
+              project: 'ai-coding-devops',
+              logstore: 'loongsuite_pilot_for_ai_coding',
+              mode: 'webtracking',
+            },
+          ],
+        });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(1);
+      expect(cfg.flushers.sls?.endpoints[0]).toMatchObject({
+        name: 'user-override',
+        mode: 'ak',
+      });
     });
   });
 });

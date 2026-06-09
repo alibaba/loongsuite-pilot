@@ -151,7 +151,12 @@ try {
 const migrationScript = path.join(__dirname, 'migrate-internal-config.js');
 if (fs.existsSync(migrationScript)) {
   try {
-    await import(pathToFileURL(migrationScript).href);
+    const { migrate } = await import(pathToFileURL(migrationScript).href);
+    const dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(process.env.HOME || '', '.loongsuite-pilot');
+    const configPath = path.join(dataDir, 'config.json');
+    if (migrate(configPath)) {
+      console.log('[loongsuite-pilot] Config migrated: internal SLS moved to configs/inner/data_config.json');
+    }
   } catch (err) {
     console.error('[loongsuite-pilot] Config migration failed (non-fatal):', err.message);
   }

@@ -44,6 +44,10 @@ export interface SlsSingleConfig {
   flushIntervalMs?: number;
 }
 
+export interface InnerDataConfig {
+  sls?: SlsEndpointEntry[];
+}
+
 /**
  * On-disk config file shape.
  * All fields optional — missing fields fall back to env vars then defaults.
@@ -165,6 +169,9 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
 
   const dataDir = env('LOONGSUITE_PILOT_DATA_DIR') ?? file?.dataDir ?? '~/.loongsuite-pilot';
 
+  const innerDataConfigPath = resolveHome(`${dataDir}/configs/inner/data_config.json`);
+  const innerDataConfig = await readJsonFile<InnerDataConfig>(innerDataConfigPath);
+
   const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
 
   const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? 'loongsuite-pilot';
@@ -180,7 +187,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     cms: buildCmsConfig(file),
 
     listeners: buildListenersConfig(file),
-    flushers: buildFlushersConfig(file, dataDir, serviceNamePrefix),
+    flushers: buildFlushersConfig(file, dataDir, serviceNamePrefix, innerDataConfig),
     retention: buildRetentionConfig(file),
     agents: buildAgentsConfig(file),
     mask: buildMaskConfig(file),
@@ -338,9 +345,10 @@ function buildFlushersConfig(
   file: ConfigFile | null,
   dataDir: string,
   serviceNamePrefix: string,
+  innerDataConfig: InnerDataConfig | null,
 ): FlusherConfig {
   return {
-    sls: buildSlsConfig(file, serviceNamePrefix),
+    sls: buildSlsConfig(file, serviceNamePrefix, innerDataConfig),
     jsonl: buildJsonlConfig(file, dataDir),
     http: buildHttpConfig(file),
   };
@@ -416,7 +424,7 @@ function parseSlsEndpointEntry(ep: SlsEndpointEntry, index: number): SlsEndpoint
   return result;
 }
 
-function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string) {
+function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, innerDataConfig: InnerDataConfig | null) {
   const rawSls = file?.sls;
   const isArray = Array.isArray(rawSls);
   const single = isArray ? null : (rawSls as SlsSingleConfig | undefined) ?? null;
@@ -454,6 +462,13 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string) {
     }
   } else {
     endpoints = [];
+  }
+
+  if (innerDataConfig?.sls && Array.isArray(innerDataConfig.sls)) {
+    const innerEndpoints = innerDataConfig.sls
+      .filter(ep => ep.endpoint && ep.project && ep.logstore)
+      .map((ep, i) => parseSlsEndpointEntry(ep, i));
+    endpoints = [...endpoints, ...innerEndpoints];
   }
 
   endpoints = dedupSlsEndpoints(endpoints);

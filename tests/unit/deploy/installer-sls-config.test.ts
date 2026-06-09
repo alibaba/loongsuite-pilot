@@ -28,11 +28,15 @@ describe('installer SLS config output', () => {
     expect(content).not.toContain('config.sls.destinationOverride = false');
   });
 
-  it('deploy/installer-inner.sh replaces sls config entirely', async () => {
+  it('deploy/installer-inner.sh writes user SLS to config.json and internal SLS to data_config.json', async () => {
     const content = await readFile(path.join(rootDir, 'deploy/installer-inner.sh'), 'utf8');
 
     expect(content).toContain('if (slsProject && slsLogstore)');
-    expect(content).toContain('config.sls = [userEp, INTERNAL_SLS]');
+    expect(content).toContain('config.sls = [userEp]');
+    expect(content).toContain('delete config.sls');
+    expect(content).toContain('innerDataConfig');
+    expect(content).toContain('configs/inner');
+    expect(content).not.toContain('config.sls = [userEp, INTERNAL_SLS]');
     expect(content).not.toContain('config.sls.destinationOverride = true');
     expect(content).not.toContain('config.sls.destinationOverride = false');
   });

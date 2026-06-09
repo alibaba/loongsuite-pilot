@@ -92,6 +92,7 @@ AgentDiscoveryService ──发现──→ InputManager ──注册──→ I
 |------|------|
 | `~/.loongsuite-pilot/` | 数据根目录 |
 | `~/.loongsuite-pilot/config.json` | 用户配置文件 |
+| `~/.loongsuite-pilot/configs/inner/data_config.json` | 集团版内置 SLS 配置（仅集团版） |
 | `~/.loongsuite-pilot/agent-control.json` | 准入控制策略 |
 | `~/.loongsuite-pilot/deployed-agents.json` | 部署状态记录 |
 | `~/.loongsuite-pilot/hooks/` | 已部署的 Hook 脚本 |

@@ -52,7 +52,11 @@ Orchestrator 启动分为以下阶段：
 `buildAutoUpdateConfig()` 从上述字段构建 `AutoUpdateConfig`，其中 `canaryHotfixVersion` 默认值为 `config.canary?.hotfix_version ?? 0`。
 
 ### SLS 目的地解析
-ConfigLoader 根据 config.json 中的 SLS 字段（或对应环境变量）解析出最终的 SLS endpoint 列表。有完整的 endpoint/project/logstore 配置则启用，没有则禁用。安装脚本在部署时按需注入 SLS 配置。
+ConfigLoader 从两个来源合并 SLS endpoint 列表：
+- `~/.loongsuite-pilot/config.json` — 用户自定义 SLS endpoints
+- `~/.loongsuite-pilot/configs/inner/data_config.json` — 集团版内置 SLS endpoints（仅集团版存在）
+
+合并时 config.json 的 endpoints 排在前面，通过 `endpoint|project|logstore` 组合键去重，用户配置优先。有完整的 endpoint/project/logstore 配置则启用，没有则禁用。安装脚本在部署时按需注入 SLS 配置。
 
 ### AgentDiscoveryService 状态机
 每个 entry 拥有独立状态：`Idle → Starting → Running → Stopping → Idle`

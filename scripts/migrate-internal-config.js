@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
- * One-time config migration for internal (集团版) installations.
+ * Config migration for internal (集团版) installations.
  *
  * Runs via postinstall.js after auto-update. Idempotent — safe to execute multiple times.
  *
  * What it does:
- *   1. Ensures the internal SLS endpoint (ai-coding-devops) is present in config.sls
- *   2. Ensures autoUpdate.packageUrl is set (so auto-update continues to work)
- *   3. Removes the deprecated `internal` field
+ *   1. Ensures the internal SLS endpoint lives in configs/inner/data_config.json (not config.json)
+ *   2. Removes any internal SLS endpoint from config.json
+ *   3. Ensures autoUpdate.packageUrl is set (so auto-update continues to work)
+ *   4. Removes the deprecated `internal` field from config.json
  *
  * This file is ONLY included in internal (集团版) packages.
  * Commercial / open-source packages must NOT ship this file.
@@ -36,53 +37,49 @@ function resolveDefaultPackageUrl(cfg) {
   return `${BASE_PACKAGE_URL}loongsuite/loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
 }
 
-function hasInternalSlsEndpoint(sls) {
-  if (Array.isArray(sls)) {
-    return sls.some(ep => ep.project === INTERNAL_SLS_ENDPOINT.project);
-  }
-  if (sls && typeof sls === 'object') {
-    return sls.project === INTERNAL_SLS_ENDPOINT.project;
-  }
-  return false;
+function isInternalEndpoint(ep) {
+  if (!ep || typeof ep !== 'object') return false;
+  return ep.name === 'internal-sls' || ep.project === INTERNAL_SLS_ENDPOINT.project;
 }
 
-function ensureInternalSlsEndpoint(sls) {
-  if (!sls) {
-    return {
-      endpoint: INTERNAL_SLS_ENDPOINT.endpoint,
-      project: INTERNAL_SLS_ENDPOINT.project,
-      logstore: INTERNAL_SLS_ENDPOINT.logstore,
-    };
+function atomicWriteJson(filePath, data) {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
   }
+  const content = JSON.stringify(data, null, 2) + '\n';
+  const tmp = filePath + '.tmp';
+  fs.writeFileSync(tmp, content);
+  fs.renameSync(tmp, filePath);
+}
+
+function writeInnerDataConfig(dataDir) {
+  const innerDataConfigPath = path.join(dataDir, 'configs', 'inner', 'data_config.json');
+  const innerDataConfig = { sls: [INTERNAL_SLS_ENDPOINT] };
+  atomicWriteJson(innerDataConfigPath, innerDataConfig);
+}
+
+function removeInternalSlsFromConfig(cfg) {
+  const sls = cfg.sls;
+  if (!sls) return false;
 
   if (Array.isArray(sls)) {
-    // Filter out incomplete entries that would cause enabled=false
-    const valid = sls.filter(ep => ep.endpoint && ep.project && ep.logstore);
-    if (!valid.some(ep => ep.project === INTERNAL_SLS_ENDPOINT.project)) {
-      valid.push(INTERNAL_SLS_ENDPOINT);
+    const filtered = sls.filter(ep => !isInternalEndpoint(ep));
+    if (filtered.length === sls.length) return false;
+    if (filtered.length === 0) {
+      delete cfg.sls;
+    } else {
+      cfg.sls = filtered;
     }
-    return valid;
+    return true;
   }
 
-  // sls is a single object — determine if it represents a user endpoint
-  const isInternal = sls.project === INTERNAL_SLS_ENDPOINT.project;
-
-  if (sls.project && sls.logstore && !isInternal) {
-    // User endpoint — backfill missing endpoint with internal default
-    // (old internal mode used INTERNAL_SLS_DESTINATION.endpoint as fallback)
-    const patched = { ...sls };
-    if (!patched.endpoint) {
-      patched.endpoint = INTERNAL_SLS_ENDPOINT.endpoint;
-    }
-    return [patched, INTERNAL_SLS_ENDPOINT];
+  if (typeof sls === 'object' && isInternalEndpoint(sls)) {
+    delete cfg.sls;
+    return true;
   }
 
-  // No user project, or already the internal one — use clean flat internal config
-  return {
-    endpoint: INTERNAL_SLS_ENDPOINT.endpoint,
-    project: INTERNAL_SLS_ENDPOINT.project,
-    logstore: INTERNAL_SLS_ENDPOINT.logstore,
-  };
+  return false;
 }
 
 export function migrate(configPath) {
@@ -95,53 +92,40 @@ export function migrate(configPath) {
     return false;
   }
 
-  // Skip if this is clearly a commercial install (old commercial had internal: false)
   if (cfg.internal === false) return false;
 
-  // Detect: this is likely an internal install if internal !== false AND
-  // the internal SLS endpoint is not already configured.
-  // This covers: internal: true (normal), internal: undefined (edge case).
-  const needsSlsMigration = !hasInternalSlsEndpoint(cfg.sls);
+  const dataDir = path.dirname(configPath);
+
   const needsPackageUrl = !cfg.autoUpdate?.packageUrl;
   const hasInternalField = cfg.internal !== undefined;
+  const hasInternalSlsInConfig = (() => {
+    if (Array.isArray(cfg.sls)) return cfg.sls.some(ep => isInternalEndpoint(ep));
+    if (cfg.sls && typeof cfg.sls === 'object') return isInternalEndpoint(cfg.sls);
+    return false;
+  })();
 
-  if (!needsSlsMigration && !needsPackageUrl && !hasInternalField) return false;
+  writeInnerDataConfig(dataDir);
 
-  let changed = false;
+  let configChanged = false;
 
-  // 1. Ensure internal SLS endpoint is present
-  if (needsSlsMigration) {
-    cfg.sls = ensureInternalSlsEndpoint(cfg.sls);
-    changed = true;
+  if (hasInternalSlsInConfig) {
+    configChanged = removeInternalSlsFromConfig(cfg);
   }
 
-  // 2. Ensure autoUpdate.packageUrl exists
   if (needsPackageUrl) {
     cfg.autoUpdate = cfg.autoUpdate || {};
     cfg.autoUpdate.packageUrl = resolveDefaultPackageUrl(cfg);
-    changed = true;
+    configChanged = true;
   }
 
-  // 3. Remove deprecated internal field
   if (hasInternalField) {
     delete cfg.internal;
-    changed = true;
+    configChanged = true;
   }
 
-  if (changed) {
-    const content = JSON.stringify(cfg, null, 2) + '\n';
-    const tmp = configPath + '.tmp';
-    fs.writeFileSync(tmp, content);
-    fs.renameSync(tmp, configPath);
+  if (configChanged) {
+    atomicWriteJson(configPath, cfg);
   }
 
-  return changed;
-}
-
-// Direct execution (from postinstall.js)
-const dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(process.env.HOME || '', '.loongsuite-pilot');
-const configPath = path.join(dataDir, 'config.json');
-
-if (migrate(configPath)) {
-  console.log('[loongsuite-pilot] Config migrated: ensured internal SLS endpoint, removed internal flag');
+  return configChanged;
 }

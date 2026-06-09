@@ -454,16 +454,20 @@ migrate_legacy_layout() {
 # ============================================================
 write_config() {
     local config_file="$DATA_DIR/config.json"
+    local inner_data_config_dir="$DATA_DIR/configs/inner"
+    local inner_data_config_file="$inner_data_config_dir/data_config.json"
     msg "==> 写入配置文件 $config_file ..." \
         "==> Writing config to $config_file ..."
     mkdir -p "$DATA_DIR"
+    mkdir -p "$inner_data_config_dir"
 
     "$NODE_BIN" -e "
 const fs = require('fs');
-const path = '$config_file';
+const configPath = '$config_file';
+const innerDataConfigPath = '$inner_data_config_file';
 
 let existing = {};
-try { existing = JSON.parse(fs.readFileSync(path, 'utf-8')); } catch {}
+try { existing = JSON.parse(fs.readFileSync(configPath, 'utf-8')); } catch {}
 
 const config = {
   ...existing,
@@ -504,13 +508,9 @@ if (slsProject && slsLogstore) {
     userEp.accessKeyId = slsAkId;
     userEp.accessKeySecret = slsAkSecret;
   }
-  config.sls = [userEp, INTERNAL_SLS];
+  config.sls = [userEp];
 } else {
-  config.sls = {
-    endpoint: INTERNAL_SLS.endpoint,
-    project:  INTERNAL_SLS.project,
-    logstore: INTERNAL_SLS.logstore,
-  };
+  delete config.sls;
 }
 
 if (logLevel) {
@@ -528,7 +528,10 @@ if (updateUrl) {
   config.autoUpdate.packageUrl = updateUrl;
 }
 
-fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
+fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+
+const innerDataConfig = { sls: [INTERNAL_SLS] };
+fs.writeFileSync(innerDataConfigPath, JSON.stringify(innerDataConfig, null, 2) + '\n');
 "
     msg "    ✅ 配置已写入" "    ✅ Config written"
     echo ""
