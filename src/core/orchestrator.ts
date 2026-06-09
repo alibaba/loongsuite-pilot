@@ -23,6 +23,9 @@ import { buildOtlpTraceConfig } from './config-loader.js';
 
 // Concrete inputs
 import { QoderSqliteInput } from '../inputs/qoder-sqlite/qoder-sqlite-input.js';
+import { QoderCnSqliteInput } from '../inputs/qoder-cn-sqlite/qoder-cn-sqlite-input.js';
+import { QoderCnInput } from '../inputs/qoder-cn/qoder-cn-input.js';
+import { QoderCnTraceInput } from '../inputs/qoder-cn-trace/qoder-cn-trace-input.js';
 import { QoderWorkInput } from '../inputs/qoder-work/qoder-work-input.js';
 import { QoderWorkLogInput } from '../inputs/qoder-work-log/qoder-work-log-input.js';
 import { QoderWorkSqliteInput } from '../inputs/qoder-work-sqlite/qoder-work-sqlite-input.js';
@@ -63,6 +66,9 @@ export class Orchestrator extends EventEmitter {
   private static readonly LISTENER_AGENT_MAP: Record<string, string> = {
     'qoder-sqlite': 'qoder',
     'qoder-trace': 'qoder',
+    'qoder-cn-trace': 'qoder-cn',
+    'qoder-cn-sqlite': 'qoder-cn',
+    'qoder-cn': 'qoder-cn',
     'qoder-work': 'qoder-work',
     'qoder-work-trace': 'qoder-work',
     'qoder-work-log': 'qoder-work',
@@ -457,6 +463,64 @@ export class Orchestrator extends EventEmitter {
         isAvailable: QoderWorkTraceInput.checkAvailability,
         enabled: qoderWorkTraceEnabled,
         pollIntervalMs: listenerCfg['qoder-work-trace']?.pollInterval,
+      }),
+    );
+
+    // QoderCN trace input mutual exclusion closure
+    const qoderCnTraceEnabled = () =>
+      this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cn-trace']) &&
+      this.agentControlManager.resolveEnabled(
+        'qoder-cn-trace',
+        listenerCfg['qoder-cn-trace']?.enabled ?? true,
+      );
+
+    // --- QoderCN (SQLite token usage polling) — disabled when qoder-cn-trace is enabled ---
+    const qoderCnSqliteInput = new QoderCnSqliteInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(qoderCnSqliteInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderCnSqliteInput, {
+        watchPaths: QoderCnSqliteInput.getWatchPaths(),
+        isAvailable: QoderCnSqliteInput.checkAvailability,
+        enabled: () => !qoderCnTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cn-sqlite']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-cn-sqlite',
+            listenerCfg['qoder-cn-sqlite']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qoder-cn-sqlite']?.pollInterval,
+      }),
+    );
+
+    // --- QoderCN (IDE snapshot — file history + ai_tracker) — disabled when qoder-cn-trace is enabled ---
+    const qoderCnInput = new QoderCnInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(qoderCnInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderCnInput, {
+        watchPaths: QoderCnInput.getWatchPaths(),
+        isAvailable: QoderCnInput.checkAvailability,
+        enabled: () => !qoderCnTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cn']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-cn',
+            listenerCfg['qoder-cn']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qoder-cn']?.pollInterval,
+      }),
+    );
+
+    // --- QoderCN Trace (multi-source merge, supersedes sqlite/ide) ---
+    const qoderCnLogDir = path.join(this.dataDir, 'logs', 'qoder-cn', 'history');
+    const qoderCnTraceInput = new QoderCnTraceInput({
+      stateStore: this.stateStore,
+      logDir: qoderCnLogDir,
+    });
+    this.inputManager.registerInput(qoderCnTraceInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderCnTraceInput, {
+        watchPaths: QoderCnTraceInput.getWatchPaths(),
+        isAvailable: QoderCnTraceInput.checkAvailability,
+        enabled: qoderCnTraceEnabled,
+        pollIntervalMs: listenerCfg['qoder-cn-trace']?.pollInterval,
       }),
     );
 

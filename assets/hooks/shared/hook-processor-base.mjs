@@ -179,7 +179,7 @@ export function parseTranscriptLine(line, agentId, runtimeConfig, turnId) {
 }
 
 export function normalizeTranscriptRecord(record, agentId, runtimeConfig, turnId) {
-  if (agentId === 'qoder-cli' || agentId === 'qoder-work' || agentId === 'qoder') {
+  if (agentId === 'qoder-cli' || agentId === 'qoder-work' || agentId === 'qoder' || agentId === 'qoder-cn') {
     return buildQoderHookRecord(record, { agentId, runtimeConfig, turnId });
   }
   return record;

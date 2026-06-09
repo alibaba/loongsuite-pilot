@@ -6,6 +6,7 @@ export enum ClientType {
   // IDE tools
   Cursor = 'cursor',
   Qoder = 'qoder',
+  QoderCn = 'qoder-cn',
   QoderIdea = 'qoder-idea',
   QoderWork = 'qoder-work',
   Kiro = 'kiro',
@@ -28,6 +29,7 @@ export enum ClientType {
   IflowCliHook = 'iflow-cli-hook',
   CursorHook = 'cursor-hook',
   QoderCliHook = 'qoder-cli-hook',
+  QoderCnHook = 'qoder-cn-hook',
   CodexCliHook = 'codex',
   ClineHook = 'cline-hook',
   GithubCopilotHook = 'github-copilot-hook',

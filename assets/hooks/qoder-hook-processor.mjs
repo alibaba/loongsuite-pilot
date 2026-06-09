@@ -559,6 +559,7 @@ function extractUserText(row) {
 }
 
 function inferVariant(row, sourceAgentId) {
+  if (sourceAgentId === 'qoder-cn') return 'qoder-cn';
   if (!row) return sourceAgentId === 'qoder' ? 'qoder' : 'qoder-cli';
   if (row.entrypoint === 'cli' || row.promptId || row.permissionMode || row.userType) {
     return 'qoder-cli';

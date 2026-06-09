@@ -115,6 +115,7 @@ export function enrichIdeTurn(
 
       if (bestEntry && bestDiff <= TIMESTAMP_THRESHOLD_MS) {
         used.add(bestEntry);
+        (bestEntry as Record<string, unknown>).__matched_gmt_create = row.gmtCreate;
 
         if (!bestEntry['gen_ai.response.id']) {
           bestEntry['gen_ai.response.id'] = requestId;
@@ -130,16 +131,67 @@ export function enrichIdeTurn(
           bestEntry['gen_ai.usage.cache_read.input_tokens'] = row.cacheReadTokens;
           tokenWritten.add(dedupeKey);
         }
-
-        // Only overwrite timestamp if the event doesn't already have a progress-derived timestamp
-        // (progress-aware hook processor sets time != observed_time; old processor sets them equal)
-        const currentTs = bestEntry.time_unix_nano as string;
-        const observedTs = (bestEntry as Record<string, unknown>).observed_time_unix_nano as string;
-        if (!currentTs || currentTs === observedTs) {
-          bestEntry.time_unix_nano = String(BigInt(row.gmtCreate) * 1_000_000n);
-        }
       }
     }
+  }
+
+  // Inject real timestamps from SQLite gmt_create (similar to enrichCliTurn using segment timestamps).
+  // Collect matched entries with their gmt_create, sorted chronologically.
+  const matchedPairs: { entry: AgentActivityEntry; gmtCreate: number }[] = [];
+  for (const entry of responseEntries) {
+    if (!used.has(entry)) continue;
+    const gmtCreate = (entry as Record<string, unknown>).__matched_gmt_create as number | undefined;
+    if (gmtCreate) matchedPairs.push({ entry, gmtCreate });
+  }
+  matchedPairs.sort((a, b) => a.gmtCreate - b.gmtCreate);
+
+  // Find the user-boundary entry (llm.request without step_id) for step 1's request time
+  const userBoundary = entries.find(e =>
+    e['event.name'] === 'llm.request' && !e['gen_ai.step.id'],
+  );
+
+  for (let i = 0; i < matchedPairs.length; i++) {
+    const { entry: respEntry, gmtCreate } = matchedPairs[i];
+
+    // llm.response: use gmt_create as real response time
+    respEntry.time_unix_nano = String(BigInt(gmtCreate) * 1_000_000n);
+
+    // Find the llm.request that immediately precedes this response in entries order
+    const respIdx = entries.indexOf(respEntry);
+    let req: AgentActivityEntry | undefined;
+    for (let j = respIdx - 1; j >= 0; j--) {
+      if (entries[j]['event.name'] === 'llm.request' && entries[j]['gen_ai.step.id']) {
+        req = entries[j];
+        break;
+      }
+    }
+
+    if (req) {
+      if (i > 0) {
+        // Previous step's gmt_create + 1ms (accounts for tool.result buffer in prior step)
+        req.time_unix_nano = String(BigInt(matchedPairs[i - 1].gmtCreate + 1) * 1_000_000n);
+      } else if (userBoundary) {
+        req.time_unix_nano = String(userBoundary.time_unix_nano);
+      }
+    }
+
+    // IDE data has no tool-finished timestamp; place tool.call at response time
+    // and tool.result 1ms later. The next step's llm.request is offset by +1ms
+    // to match, keeping steps non-overlapping.
+    const toolCallTs = String(BigInt(gmtCreate) * 1_000_000n);
+    const toolResultTs = String(BigInt(gmtCreate + 1) * 1_000_000n);
+    const rightBound = i < matchedPairs.length - 1
+      ? entries.indexOf(matchedPairs[i + 1].entry)
+      : entries.length;
+    for (let j = respIdx + 1; j < rightBound; j++) {
+      if (entries[j]['event.name'] === 'tool.call') entries[j].time_unix_nano = toolCallTs;
+      if (entries[j]['event.name'] === 'tool.result') entries[j].time_unix_nano = toolResultTs;
+    }
+  }
+
+  // Clean up temporary marker
+  for (const entry of responseEntries) {
+    delete (entry as Record<string, unknown>).__matched_gmt_create;
   }
 
   // Set token fields to 0 on all llm.response entries that didn't receive tokens.
@@ -153,6 +205,7 @@ export function enrichIdeTurn(
   }
 
 }
+
 
 export function injectTraceId(entries: AgentActivityEntry[]): void {
   if (entries.length === 0) return;
