@@ -190,7 +190,11 @@ fi
 
 # ── Build ──
 echo ""
-bash "$SCRIPT_DIR/package.sh"
+if [ "$DEPLOY_MODE" = "external" ]; then
+    bash "$SCRIPT_DIR/package.sh" --external
+else
+    bash "$SCRIPT_DIR/package.sh"
+fi
 
 # ── Upload ──
 if [ "$SKIP_UPLOAD" -eq 1 ]; then
