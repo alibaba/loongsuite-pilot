@@ -439,11 +439,11 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
     endpoints = (rawSls as SlsEndpointEntry[]).map((ep, i) => parseSlsEndpointEntry(ep, i));
   } else if (single) {
     const userMode = readUserSlsMode(single);
-    const userAk = env('SLS_ACCESS_KEY_ID') ?? single.accessKeyId;
-    const userSk = env('SLS_ACCESS_KEY_SECRET') ?? single.accessKeySecret;
-    const userRawEndpoint = env('SLS_ENDPOINT') ?? single.endpoint;
-    const userProject = env('SLS_PROJECT') ?? single.project;
-    const userLogstore = env('SLS_LOGSTORE') ?? single.logstore;
+    const userAk = env('LOONGSUITE_SLS_ACCESS_KEY_ID') ?? single.accessKeyId;
+    const userSk = env('LOONGSUITE_SLS_ACCESS_KEY_SECRET') ?? single.accessKeySecret;
+    const userRawEndpoint = env('LOONGSUITE_SLS_ENDPOINT') ?? single.endpoint;
+    const userProject = env('LOONGSUITE_SLS_PROJECT') ?? single.project;
+    const userLogstore = env('LOONGSUITE_SLS_LOGSTORE') ?? single.logstore;
 
     const hasUserDestination = !!(userProject && userLogstore);
 
@@ -501,7 +501,7 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
 }
 
 function readUserSlsMode(single: SlsSingleConfig | null): SlsMode | undefined {
-  const raw = env('SLS_MODE') ?? single?.mode;
+  const raw = env('LOONGSUITE_SLS_MODE') ?? single?.mode;
   if (raw === 'ak' || raw === 'webtracking') return raw;
   return undefined;
 }

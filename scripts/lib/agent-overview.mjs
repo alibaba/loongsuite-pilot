@@ -848,28 +848,28 @@ function resolveSlsEnabled(config) {
 
   const destinationOverride = sls.destinationOverride === true;
   const mode = normalizeSlsMode(
-    process.env.SLS_MODE
+    process.env.LOONGSUITE_SLS_MODE
       ?? (destinationOverride ? sls.mode : undefined)
       ?? 'webtracking',
   );
 
-  const endpoint = process.env.SLS_ENDPOINT
+  const endpoint = process.env.LOONGSUITE_SLS_ENDPOINT
     ?? (destinationOverride ? sls.endpoint : undefined)
     ?? '__internal_sls_endpoint__';
-  const project = process.env.SLS_PROJECT
+  const project = process.env.LOONGSUITE_SLS_PROJECT
     ?? (destinationOverride ? sls.project : undefined)
     ?? '__internal_sls_project__';
-  const logstore = process.env.SLS_LOGSTORE
+  const logstore = process.env.LOONGSUITE_SLS_LOGSTORE
     ?? (destinationOverride ? sls.logstore : undefined)
     ?? '__internal_sls_logstore__';
   const hasEndpoint = Boolean(project && logstore);
 
   if (mode === 'webtracking') return Boolean(endpoint && hasEndpoint);
 
-  const accessKeyId = process.env.SLS_ACCESS_KEY_ID
+  const accessKeyId = process.env.LOONGSUITE_SLS_ACCESS_KEY_ID
     ?? (destinationOverride ? sls.accessKeyId : undefined)
     ?? '';
-  const accessKeySecret = process.env.SLS_ACCESS_KEY_SECRET
+  const accessKeySecret = process.env.LOONGSUITE_SLS_ACCESS_KEY_SECRET
     ?? (destinationOverride ? sls.accessKeySecret : undefined)
     ?? '';
   return Boolean(accessKeyId && accessKeySecret && endpoint && hasEndpoint);

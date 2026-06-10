@@ -16,12 +16,12 @@ vi.mock('../../../src/utils/logger.js', () => ({
 import { loadConfig } from '../../../src/core/config-loader.js';
 
 function clearSlsEnv() {
-  delete process.env.SLS_MODE;
-  delete process.env.SLS_ACCESS_KEY_ID;
-  delete process.env.SLS_ACCESS_KEY_SECRET;
-  delete process.env.SLS_ENDPOINT;
-  delete process.env.SLS_PROJECT;
-  delete process.env.SLS_LOGSTORE;
+  delete process.env.LOONGSUITE_SLS_MODE;
+  delete process.env.LOONGSUITE_SLS_ACCESS_KEY_ID;
+  delete process.env.LOONGSUITE_SLS_ACCESS_KEY_SECRET;
+  delete process.env.LOONGSUITE_SLS_ENDPOINT;
+  delete process.env.LOONGSUITE_SLS_PROJECT;
+  delete process.env.LOONGSUITE_SLS_LOGSTORE;
 }
 
 describe('ConfigLoader', () => {
@@ -138,9 +138,9 @@ describe('ConfigLoader', () => {
           logstore: 'legacy-logstore',
         },
       });
-      vi.stubEnv('SLS_ENDPOINT', 'https://sls.example.com');
-      vi.stubEnv('SLS_PROJECT', 'proj2');
-      vi.stubEnv('SLS_LOGSTORE', 'log2');
+      vi.stubEnv('LOONGSUITE_SLS_ENDPOINT', 'https://sls.example.com');
+      vi.stubEnv('LOONGSUITE_SLS_PROJECT', 'proj2');
+      vi.stubEnv('LOONGSUITE_SLS_LOGSTORE', 'log2');
 
       const config = await loadConfig();
       expect(config.flushers.sls?.endpoints).toHaveLength(1);

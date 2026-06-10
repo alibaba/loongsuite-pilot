@@ -554,7 +554,7 @@ loongsuite-pilot restart
 }
 ```
 
-默认 SLS 上报目的地由程序内置，不通过用户配置文件暴露。旧版本安装产生的 `sls.endpoint`、`sls.project`、`sls.logstore` 字段可以继续留在 `config.json` 中，但普通运行时不再读取这些字段；需要运维覆盖时，请使用 `SLS_ENDPOINT`、`SLS_PROJECT`、`SLS_LOGSTORE` 环境变量或安装脚本的显式 `--sls-*` 参数。
+默认 SLS 上报目的地由程序内置，不通过用户配置文件暴露。旧版本安装产生的 `sls.endpoint`、`sls.project`、`sls.logstore` 字段可以继续留在 `config.json` 中，但普通运行时不再读取这些字段；需要运维覆盖时，请使用 `LOONGSUITE_SLS_ENDPOINT`、`LOONGSUITE_SLS_PROJECT`、`LOONGSUITE_SLS_LOGSTORE` 环境变量或安装脚本的显式 `--sls-*` 参数。
 
 升级提示：如果你曾经通过 `config.json` 自定义 SLS 目的地，请改用环境变量或重新运行安装脚本并显式传入 `--sls-endpoint`、`--sls-project`、`--sls-logstore`。
 
@@ -607,13 +607,13 @@ trace 上报与 SLS log 上报并行运行，互不影响。
 
 | 环境变量 | 说明 | 默认值 |
 |---------|------|--------|
-| `SLS_ACCESS_KEY_ID` | AccessKey ID | 空 |
-| `SLS_ACCESS_KEY_SECRET` | AccessKey Secret | 空 |
-| `SLS_REGION` | SLS 地域 | `cn-hangzhou` |
-| `SLS_PROJECT` | Agent 活动数据 Project | 空 |
-| `SLS_LOGSTORE` | Agent 活动数据 Logstore | 空 |
-| `SLS_AGENT_TELEMETRY_PROJECT` | Agent 遥测 Project（脱敏） | 空 |
-| `SLS_AGENT_TELEMETRY_LOGSTORE` | Agent 遥测 Logstore（脱敏） | 空 |
+| `LOONGSUITE_SLS_ACCESS_KEY_ID` | AccessKey ID | 空 |
+| `LOONGSUITE_SLS_ACCESS_KEY_SECRET` | AccessKey Secret | 空 |
+| `LOONGSUITE_SLS_REGION` | SLS 地域 | `cn-hangzhou` |
+| `LOONGSUITE_SLS_PROJECT` | Agent 活动数据 Project | 空 |
+| `LOONGSUITE_SLS_LOGSTORE` | Agent 活动数据 Logstore | 空 |
+| `LOONGSUITE_SLS_AGENT_TELEMETRY_PROJECT` | Agent 遥测 Project（脱敏） | 空 |
+| `LOONGSUITE_SLS_AGENT_TELEMETRY_LOGSTORE` | Agent 遥测 Logstore（脱敏） | 空 |
 
 #### JSONL / HTTP
 

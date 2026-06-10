@@ -21,12 +21,12 @@ vi.mock('../../../src/utils/logger.js', () => ({
 import { loadConfig } from '../../../src/core/config-loader.js';
 
 function clearSlsEnv() {
-  delete process.env.SLS_MODE;
-  delete process.env.SLS_ACCESS_KEY_ID;
-  delete process.env.SLS_ACCESS_KEY_SECRET;
-  delete process.env.SLS_ENDPOINT;
-  delete process.env.SLS_PROJECT;
-  delete process.env.SLS_LOGSTORE;
+  delete process.env.LOONGSUITE_SLS_MODE;
+  delete process.env.LOONGSUITE_SLS_ACCESS_KEY_ID;
+  delete process.env.LOONGSUITE_SLS_ACCESS_KEY_SECRET;
+  delete process.env.LOONGSUITE_SLS_ENDPOINT;
+  delete process.env.LOONGSUITE_SLS_PROJECT;
+  delete process.env.LOONGSUITE_SLS_LOGSTORE;
 }
 
 describe('SLS resolver — config-driven', () => {
@@ -106,8 +106,8 @@ describe('SLS resolver — config-driven', () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: { project: 'file-proj', logstore: 'file-store' },
       });
-      vi.stubEnv('SLS_PROJECT', 'env-proj');
-      vi.stubEnv('SLS_LOGSTORE', 'env-store');
+      vi.stubEnv('LOONGSUITE_SLS_PROJECT', 'env-proj');
+      vi.stubEnv('LOONGSUITE_SLS_LOGSTORE', 'env-store');
 
       const cfg = await loadConfig();
       expect(cfg.flushers.sls?.endpoints).toHaveLength(1);

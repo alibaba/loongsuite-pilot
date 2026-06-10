@@ -62,13 +62,13 @@ print(json.dumps(sls, indent=2, ensure_ascii=False))
 
 | 层级 | 来源 | 示例 |
 |------|------|------|
-| 1（最高） | 环境变量 | `SLS_ENDPOINT`、`SLS_PROJECT`、`SLS_LOGSTORE`、`SLS_MODE`、`SLS_ACCESS_KEY_ID`、`SLS_ACCESS_KEY_SECRET` |
+| 1（最高） | 环境变量 | `LOONGSUITE_SLS_ENDPOINT`、`LOONGSUITE_SLS_PROJECT`、`LOONGSUITE_SLS_LOGSTORE`、`LOONGSUITE_SLS_MODE`、`LOONGSUITE_SLS_ACCESS_KEY_ID`、`LOONGSUITE_SLS_ACCESS_KEY_SECRET` |
 | 2 | `config.json` → `sls` 段 | `sls.endpoint`、`sls.project`、`sls.logstore`、`sls.mode` |
 | 3（最低） | 内置默认 | 内部 webtracking endpoint |
 
 ```bash
 # 检查是否有 SLS 相关环境变量
-env | grep -E '^SLS_' 2>/dev/null || echo "无 SLS_ 环境变量"
+env | grep -E '^LOONGSUITE_SLS_' 2>/dev/null || echo "无 LOONGSUITE_SLS_ 环境变量"
 ```
 
 若 SLS 被禁用（`config.json` 的 `sls.enabled = false`），服务日志中不会有任何 SLS 发送日志。
@@ -243,7 +243,7 @@ rm -f ~/.loongsuite-pilot/sls-failed-logs/*.jsonl
 | 本地 `logs/output/` 有数据但 SLS 查不到 | 1) SLS Flusher 未启用 → 检查第 1 步；2) endpoint 配错 → 检查第 2 步；3) 发送失败 → 检查第 3 步的服务日志和第 4 步的失败日志 |
 | 服务日志中无任何 `SlsFlusher` 日志 | SLS Flusher 未启用。检查 `config.json` 的 `sls.enabled` 和凭证是否齐全 |
 | `SLS endpoint flush failed` 持续出现 | 某个 endpoint 持续不可达。不影响其他 endpoint 的发送。检查网络和 endpoint 配置 |
-| `401 Unauthorized` | ak 模式下 AK/SK 无效。检查 `SLS_ACCESS_KEY_ID` / `SLS_ACCESS_KEY_SECRET` 或 `config.json` 中的值 |
+| `401 Unauthorized` | ak 模式下 AK/SK 无效。检查 `LOONGSUITE_SLS_ACCESS_KEY_ID` / `LOONGSUITE_SLS_ACCESS_KEY_SECRET` 或 `config.json` 中的值 |
 | `403 Forbidden` | AK 对应的 RAM 角色无 SLS 写入权限。需要 `log:PostLogStoreLogs` 或 `log:PutWebtracking` 权限 |
 | `404 Not Found` | project 或 logstore 不存在。在 SLS 控制台确认名称拼写正确 |
 | `sls-failed-logs/` 目录持续增大 | 上报持续失败。先修复根因（网络/凭证/配置），修复后新数据会正常发送，历史失败数据保留在文件中 |

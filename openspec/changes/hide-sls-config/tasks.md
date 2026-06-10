@@ -9,7 +9,7 @@
 - [x] 2.1 Update `buildSlsConfig()` to use the internal destination for endpoint, project, logstore, mode, and generated `SlsEndpoint` entries.
 - [x] 2.2 Stop reading `file.sls.endpoint`, `file.sls.project`, and `file.sls.logstore` from `config.json` for normal SLS destination resolution.
 - [x] 2.3 Preserve supported non-destination config controls such as `sls.enabled`, `sls.batchMaxSize`, and `sls.flushIntervalMs`.
-- [x] 2.4 Keep `SLS_ENDPOINT`, `SLS_PROJECT`, and `SLS_LOGSTORE` environment overrides active and make their precedence explicit in tests.
+- [x] 2.4 Keep `LOONGSUITE_SLS_ENDPOINT`, `LOONGSUITE_SLS_PROJECT`, and `LOONGSUITE_SLS_LOGSTORE` environment overrides active and make their precedence explicit in tests.
 
 ## 3. Installer Updates
 

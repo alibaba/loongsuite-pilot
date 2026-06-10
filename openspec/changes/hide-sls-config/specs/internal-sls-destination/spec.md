@@ -22,7 +22,7 @@ The system SHALL NOT use `config.json` values for `sls.endpoint`, `sls.project`,
 The system SHALL continue to support explicit operator-provided SLS destination overrides through environment variables and retained installer flags.
 
 #### Scenario: Environment override is provided
-- **WHEN** `SLS_ENDPOINT`, `SLS_PROJECT`, and `SLS_LOGSTORE` are set in the process environment
+- **WHEN** `LOONGSUITE_SLS_ENDPOINT`, `LOONGSUITE_SLS_PROJECT`, and `LOONGSUITE_SLS_LOGSTORE` are set in the process environment
 - **THEN** Loongsuite Pilot MUST use those explicit environment values instead of the built-in destination.
 
 #### Scenario: Installer flags are provided
