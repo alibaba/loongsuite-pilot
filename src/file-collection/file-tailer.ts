@@ -152,18 +152,26 @@ export class FileTailer {
         const s = await fs.stat(fullPath);
         if (s.ino === oldInode) {
           if (s.size <= oldOffset) return [];
+          const allLines: string[] = [];
           const handle = await fs.open(fullPath, 'r');
           try {
-            const readSize = Math.min(s.size - oldOffset, MAX_READ_BYTES);
-            const buf = Buffer.alloc(readSize);
-            await handle.read(buf, 0, readSize, oldOffset);
-            const text = buf.toString(this.encoding);
-            const lines = text.split('\n').filter((l) => l.length > 0);
+            let pos = oldOffset;
+            while (pos < s.size) {
+              const readSize = Math.min(s.size - pos, MAX_READ_BYTES);
+              const buf = Buffer.alloc(readSize);
+              await handle.read(buf, 0, readSize, pos);
+              const text = buf.toString(this.encoding);
+              const lastNewline = text.lastIndexOf('\n');
+              if (lastNewline === -1) break;
+              const completeText = text.substring(0, lastNewline);
+              allLines.push(...completeText.split('\n').filter((l) => l.length > 0));
+              pos += Buffer.byteLength(text.substring(0, lastNewline + 1), this.encoding);
+            }
             logger.info('drained old file after rotation', {
               file: fullPath,
-              lines: lines.length,
+              lines: allLines.length,
             });
-            return lines;
+            return allLines;
           } finally {
             await handle.close();
           }
@@ -196,27 +204,26 @@ export class FileTailer {
       return { lines: [], checkpoint: { ...baseCheckpoint, offset } };
     }
 
-    const readSize = Math.min(stat.size - offset, MAX_READ_BYTES);
+    const allLines: string[] = [];
     const handle = await fs.open(filePath, 'r');
     try {
-      const buf = Buffer.alloc(readSize);
-      await handle.read(buf, 0, readSize, offset);
-      const text = buf.toString(this.encoding);
-
-      const lastNewline = text.lastIndexOf('\n');
-      if (lastNewline === -1) {
-        return { lines: [], checkpoint: { ...baseCheckpoint, offset } };
+      let pos = offset;
+      while (pos < stat.size) {
+        const readSize = Math.min(stat.size - pos, MAX_READ_BYTES);
+        const buf = Buffer.alloc(readSize);
+        await handle.read(buf, 0, readSize, pos);
+        const text = buf.toString(this.encoding);
+        const lastNewline = text.lastIndexOf('\n');
+        if (lastNewline === -1) break;
+        const completeText = text.substring(0, lastNewline);
+        allLines.push(...completeText.split('\n').filter((l) => l.length > 0));
+        pos += Buffer.byteLength(text.substring(0, lastNewline + 1), this.encoding);
       }
 
-      const completeText = text.substring(0, lastNewline);
-      const lines = completeText.split('\n').filter((l) => l.length > 0);
-      const newOffset =
-        offset + Buffer.byteLength(text.substring(0, lastNewline + 1), this.encoding);
-
       return {
-        lines,
+        lines: allLines,
         checkpoint: {
-          offset: newOffset,
+          offset: pos,
           inode: stat.ino,
           signature: baseCheckpoint.signature,
         },

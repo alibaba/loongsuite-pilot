@@ -6,8 +6,8 @@ import { StateStore } from '../checkpoints/state-store.js';
 import { createLogger } from '../utils/logger.js';
 import { ensureDir } from '../utils/fs-utils.js';
 
-const DEFAULT_POLL_INTERVAL_MS = 10_000;
-const HIGH_WATERMARK = 8000;
+const DEFAULT_POLL_INTERVAL_MS = 1_000;
+const HIGH_WATERMARK = 100_000;
 
 export class FilePipeline {
   private readonly config: FileCollectionConfig;
@@ -90,7 +90,7 @@ export class FilePipeline {
           const result = await this.tailer.readNewLines(filePath, checkpoint);
 
           if (result.drainedLines && result.drainedLines.length > 0) {
-            this.sender.enqueue(result.drainedLines);
+            this.sender.enqueue(result.drainedLines, filePath);
             this.checkpoints.set(filePath, {
               offset: 0,
               inode: result.checkpoint.inode,
@@ -105,7 +105,7 @@ export class FilePipeline {
           }
 
           if (result.lines.length > 0) {
-            this.sender.enqueue(result.lines);
+            this.sender.enqueue(result.lines, filePath);
           }
 
           this.checkpoints.set(filePath, result.checkpoint);
