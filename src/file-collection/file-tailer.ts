@@ -378,7 +378,7 @@ function collectFiles(
   }
 }
 
-function globToRegex(pattern: string): RegExp {
+export function globToRegex(pattern: string): RegExp {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
   const regexStr = escaped.replace(/\*/g, '[^/]*');
   return new RegExp(`^${regexStr}$`);

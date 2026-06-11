@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import type { FileCollectionConfig, FileCheckpoint, FilePipelineOptions } from './types.js';
-import { FileTailer } from './file-tailer.js';
+import { FileTailer, globToRegex } from './file-tailer.js';
 import { FileSlsSender } from './file-sls-sender.js';
 import { FileWatcher, extractParentDirs } from './file-watcher.js';
 import { StateStore } from '../checkpoints/state-store.js';
@@ -22,8 +22,11 @@ export class FilePipeline {
   private readonly logger;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private polling = false;
   private readonly checkpoints: Map<string, FileCheckpoint> = new Map();
+  private readonly pendingLines: Map<string, string[]> = new Map();
   private lastRescanTime = 0;
+  private readonly patternMatchers: { dir: string; regex: RegExp }[];
 
   constructor(opts: FilePipelineOptions) {
     this.config = opts.config;
@@ -35,6 +38,11 @@ export class FilePipeline {
       encoding: input.FileEncoding,
       maxDirSearchDepth: input.MaxDirSearchDepth,
     });
+
+    this.patternMatchers = input.FilePaths.map((p) => ({
+      dir: path.dirname(p),
+      regex: globToRegex(path.basename(p)),
+    }));
 
     const flusher = opts.config.flushers[0];
     this.sender = new FileSlsSender(
@@ -81,6 +89,12 @@ export class FilePipeline {
     }
 
     this.fileWatcher.close();
+
+    for (const [filePath, lines] of this.pendingLines) {
+      this.sender.enqueue(lines, filePath);
+    }
+    this.pendingLines.clear();
+
     await this.sender.shutdown();
     this.saveCheckpoints();
     await this.stateStore.save();
@@ -89,14 +103,17 @@ export class FilePipeline {
   }
 
   private async pollCycle(): Promise<void> {
-    if (!this.running) return;
+    if (!this.running || this.polling) return;
+    this.polling = true;
 
     try {
       const filesToProcess = new Set<string>();
 
       const dirtyFiles = this.fileWatcher.getDirtyFiles();
       for (const f of dirtyFiles) {
-        filesToProcess.add(f);
+        if (this.matchesPattern(f)) {
+          filesToProcess.add(f);
+        }
       }
 
       for (const f of this.tailer.getActiveFiles()) {
@@ -125,6 +142,16 @@ export class FilePipeline {
         }
 
         try {
+          const pending = this.pendingLines.get(filePath);
+          if (pending) {
+            const accepted = this.sender.enqueue(pending, filePath);
+            if (!accepted) {
+              this.fileWatcher.addDirty(filePath);
+              continue;
+            }
+            this.pendingLines.delete(filePath);
+          }
+
           const sliceStart = Date.now();
           let hasMore = true;
 
@@ -132,16 +159,17 @@ export class FilePipeline {
             const checkpoint = this.checkpoints.get(filePath) ?? null;
             const result = await this.tailer.readNewLines(filePath, checkpoint);
 
+            this.checkpoints.set(filePath, result.checkpoint);
+            hasMore = result.hasMore;
+
             if (result.lines.length > 0) {
               const accepted = this.sender.enqueue(result.lines, filePath);
               if (!accepted) {
+                this.pendingLines.set(filePath, result.lines);
                 this.fileWatcher.addDirty(filePath);
                 break;
               }
             }
-
-            this.checkpoints.set(filePath, result.checkpoint);
-            hasMore = result.hasMore;
           }
 
           if (hasMore) {
@@ -160,7 +188,15 @@ export class FilePipeline {
       await this.stateStore.save();
     } catch (err) {
       this.logger.error('poll cycle failed', { error: String(err) });
+    } finally {
+      this.polling = false;
     }
+  }
+
+  private matchesPattern(filePath: string): boolean {
+    const dir = path.dirname(filePath);
+    const name = path.basename(filePath);
+    return this.patternMatchers.some((m) => dir === m.dir && m.regex.test(name));
   }
 
   private loadCheckpoints(): void {
