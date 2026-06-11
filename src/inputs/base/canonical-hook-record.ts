@@ -39,10 +39,17 @@ export function buildCanonicalHookEntry(
 
   opts['gen_ai.agent.type'] = stringValue(record, 'gen_ai.agent.type') ?? fallbackAgentType;
 
-  return buildAgentActivityEntry({
+  // Fallback: when the hook record has no model at all, set 'unknown'.
+  // Preserve 'auto' — token enricher may override it with the real model later.
+  if (!opts['gen_ai.request.model']) opts['gen_ai.request.model'] = 'unknown';
+  if (!opts['gen_ai.response.model']) opts['gen_ai.response.model'] = opts['gen_ai.request.model'];
+
+  const entry = buildAgentActivityEntry({
     ...opts,
     attributes: toJsonObject(attributes ?? {}),
   });
+
+  return entry;
 }
 
 function isCanonicalHookRecord(record: Record<string, unknown>): boolean {

@@ -313,6 +313,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
   if (userRow) {
     const userText = extractUserText(userRow);
     if (userText) {
+      const userHookModel = contentEvents.find(r => r.type === 'assistant' && r.message?.model)?.message?.model || 'unknown';
       records.push({
         'event.id': crypto.randomUUID(),
         'event.name': 'llm.request',
@@ -320,6 +321,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
         'gen_ai.session.id': sessionId,
         'gen_ai.agent.type': agentType,
         'gen_ai.provider.name': providerName,
+        'gen_ai.request.model': userHookModel,
         'user.id': userId,
         'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: userText }] }],
         'agent.source': 'qoder-transcript-hook',
