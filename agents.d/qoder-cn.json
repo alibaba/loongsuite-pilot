@@ -1,0 +1,20 @@
+{
+  "id": "qoder-cn",
+  "displayName": "QoderCN",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.qoder-cn"],
+    "commands": []
+  },
+  "hook": {
+    "settingsPath": "~/.qoder-cn/settings.json",
+    "events": ["Stop", "PreToolUse", "PostToolUse", "UserPromptSubmit"],
+    "hookCommand": "$PILOT_DATA/hooks/qodercn-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "matcher": "*"
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/qoder-cn/history"
+  }
+}

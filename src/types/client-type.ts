@@ -6,6 +6,7 @@ export enum ClientType {
   // IDE tools
   Cursor = 'cursor',
   Qoder = 'qoder',
+  QoderCn = 'qoder-cn',
   QoderIdea = 'qoder-idea',
   QoderWork = 'qoder-work',
   Kiro = 'kiro',
@@ -13,6 +14,7 @@ export enum ClientType {
   Antigravity = 'antigravity',
   Lingma = 'lingma',
   LingmaVscode = 'lingma-vscode',
+  Wukong = 'wukong',
 
   // CLI tools
   GeminiCli = 'gemini-cli',
@@ -27,6 +29,7 @@ export enum ClientType {
   IflowCliHook = 'iflow-cli-hook',
   CursorHook = 'cursor-hook',
   QoderCliHook = 'qoder-cli-hook',
+  QoderCnHook = 'qoder-cn-hook',
   CodexCliHook = 'codex',
   ClineHook = 'cline-hook',
   GithubCopilotHook = 'github-copilot-hook',
@@ -55,4 +58,6 @@ export enum CollectionMethod {
   SessionFilePolling = 'session-file-polling',
   /** Access tool's Language Server via HTTP API */
   LsHttpApi = 'ls-http-api',
+  /** Poll agent data via local CLI API (e.g. wukong) */
+  CliApiPolling = 'cli-api-polling',
 }

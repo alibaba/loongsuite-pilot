@@ -297,14 +297,9 @@ export class HookWatchdog {
         agentId: 'claude-code',
         settingsPath: resolveHome('~/.claude/settings.json'),
         expectedHooks: [
-          'UserPromptSubmit',
-          'PreToolUse',
-          'PostToolUse',
           'Stop',
-          'PreCompact',
           'SubagentStart',
           'SubagentStop',
-          'Notification',
         ],
         binPath: resolveHome(
           '~/.cache/opentelemetry.instrumentation.claude/package/bin/otel-claude-hook',

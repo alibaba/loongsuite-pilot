@@ -61,6 +61,8 @@ export abstract class BaseInput extends EventEmitter {
   /** Override to implement collection logic; return agent activity entries. */
   protected abstract collect(): Promise<AgentActivityEntry[]>;
 
+  getAgentVersion?(): string;
+
   /** Optional hook called once on start. */
   protected async onStart(): Promise<void> {}
   /** Optional hook called once on stop. */
@@ -76,6 +78,7 @@ export abstract class BaseInput extends EventEmitter {
       await this.stateStore.save();
     } catch (err) {
       this.logger.error('collection cycle failed', { error: String(err) });
+      this.emit('collect-error', err);
     }
   }
 

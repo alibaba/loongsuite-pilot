@@ -101,6 +101,7 @@ const CURSOR_MAPPED_SOURCE_KEYS = new Set([
 
 const QODER_MAPPED_SOURCE_KEYS = new Set([
   'conversation_id',
+  'cwd',
   'entrypoint',
   'event.id',
   'event_type',
@@ -275,6 +276,8 @@ export function resolveUserId(record, runtimeConfig = {}) {
 const AGENT_TYPE_TO_CONFIG_KEY = {
   'qoder-cli': 'qoder',
   'qoder-cli-hook': 'qoder',
+  'qoder-cn': 'qoder-cn',
+  'qoder-cn-hook': 'qoder-cn',
   'cursor-hook': 'cursor',
 };
 
@@ -431,7 +434,7 @@ export function buildQoderHookRecord(row, options = {}) {
   const variant = inferQoderVariant(row, sourceAgentId);
   const sourceNamespace = qoderSourceNamespace(variant);
   const eventName = inferQoderEventName(rowType, content);
-  const model = getStringValue(message, 'model') || 'unknown';
+  const model = rowType === 'user' ? undefined : (getStringValue(message, 'model') || 'unknown');
   const agentType = variant;
   const toolCallId = getStringValue(content, 'id') || getStringValue(content, 'tool_use_id');
   const record = {
@@ -444,7 +447,7 @@ export function buildQoderHookRecord(row, options = {}) {
       || getStringValue(row, 'sessionid')
       || getStringValue(row, 'conversation_id')
       || '',
-    'gen_ai.turn.id': (variant === 'qoder-cli' || variant === 'qoder')
+    'gen_ai.turn.id': (variant === 'qoder-cli' || variant === 'qoder' || variant === 'qoder-cn')
       ? options.turnId
       : getStringValue(row, 'turn_id'),
     'gen_ai.agent.type': agentType,
@@ -461,6 +464,8 @@ export function buildQoderHookRecord(row, options = {}) {
     'gen_ai.tool.call.arguments': eventName === 'tool.call' ? toJsonValue(content.input) : undefined,
     'gen_ai.tool.call.result': eventName === 'tool.result' ? toJsonValue(row.toolUseResult ?? content.content) : undefined,
     'tool.result.status': eventName === 'tool.result' ? inferQoderToolResultStatus(content) : undefined,
+    'host.name': os.hostname(),
+    'workspace.current_root': getStringValue(row, 'cwd') || undefined,
     'agent.source': 'qoder-transcript-hook',
     [`agent.${sourceNamespace}.variant`]: variant,
     [`agent.${sourceNamespace}.raw_type`]: rowType,
@@ -477,7 +482,9 @@ function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId, turnId) 
   const eventType = getStringValue(data, 'event_type') || getStringValue(data, 'hook_event_name') || getStringValue(row, 'hookEvent');
   if (eventType !== 'PostToolUse') return null;
   const toolInput = asRecord(data.tool_input);
-  const variant = sourceAgentId === 'qoder-work' ? 'qoder-work' : 'qoder-cli';
+  const variant = sourceAgentId === 'qoder-work' ? 'qoder-work'
+    : sourceAgentId === 'qoder-cn' ? 'qoder-cn'
+    : 'qoder-cli';
   const sourceNamespace = qoderSourceNamespace(variant);
   const record = {
     'event.id': getStringValue(data, 'event.id') || crypto.randomUUID(),
@@ -498,6 +505,8 @@ function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId, turnId) 
       content: toolInput.content ?? toolInput.new_string,
     }),
     'tool.result.status': 'success',
+    'host.name': os.hostname(),
+    'workspace.current_root': getStringValue(data, 'cwd') || getStringValue(row, 'cwd') || undefined,
     'agent.source': 'qoder-transcript-hook',
     [`agent.${sourceNamespace}.variant`]: variant,
     [`agent.${sourceNamespace}.raw_type`]: eventType,
@@ -511,7 +520,9 @@ function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId, turnId) 
 }
 
 function qoderSourceNamespace(variant) {
-  return variant === 'qoder-work' ? 'qoderwork' : 'qoder';
+  if (variant === 'qoder-work') return 'qoderwork';
+  if (variant === 'qoder-cn') return 'qodercn';
+  return 'qoder';
 }
 
 function buildCursorInputMessagesDelta(payload) {
@@ -569,6 +580,7 @@ function asRecord(value) {
 
 function inferQoderVariant(row, sourceAgentId) {
   if (sourceAgentId === 'qoder-work') return 'qoder-work';
+  if (sourceAgentId === 'qoder-cn') return 'qoder-cn';
   return getStringValue(row, 'entrypoint') === 'cli'
     || row.promptId !== undefined
     || row.permissionMode !== undefined

@@ -21,6 +21,11 @@ type QoderVariant = 'qoder-cli' | 'qoder';
 export class QoderCliInput extends BaseHookInput {
   readonly id = 'qoder-cli-hook';
   readonly agentType = ClientType.QoderCli;
+  private lastAgentVersion = '';
+
+  getAgentVersion(): string {
+    return this.lastAgentVersion;
+  }
 
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
@@ -42,6 +47,9 @@ export class QoderCliInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
+    const ver = record['agent.qoder.version'] ?? record.version;
+    if (typeof ver === 'string' && ver) this.lastAgentVersion = ver;
+
     const canonicalEntry = buildCanonicalHookEntry(record, ClientType.QoderCli);
     if (canonicalEntry) {
       await enrichCanonicalEntryWithGit(canonicalEntry, record, 'qoder');

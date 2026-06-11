@@ -13,16 +13,15 @@ vi.mock('../../../src/utils/logger.js', () => ({
   }),
 }));
 
-import { loadConfig } from '../../../src/core/config-loader.js';
-import { INTERNAL_SLS_DESTINATION } from '../../../src/internal/sls-destination.js';
+import { loadConfig, buildOtlpTraceConfig } from '../../../src/core/config-loader.js';
 
 function clearSlsEnv() {
-  delete process.env.SLS_MODE;
-  delete process.env.SLS_ACCESS_KEY_ID;
-  delete process.env.SLS_ACCESS_KEY_SECRET;
-  delete process.env.SLS_ENDPOINT;
-  delete process.env.SLS_PROJECT;
-  delete process.env.SLS_LOGSTORE;
+  delete process.env.LOONGSUITE_SLS_MODE;
+  delete process.env.LOONGSUITE_SLS_ACCESS_KEY_ID;
+  delete process.env.LOONGSUITE_SLS_ACCESS_KEY_SECRET;
+  delete process.env.LOONGSUITE_SLS_ENDPOINT;
+  delete process.env.LOONGSUITE_SLS_PROJECT;
+  delete process.env.LOONGSUITE_SLS_LOGSTORE;
 }
 
 describe('ConfigLoader', () => {
@@ -104,25 +103,15 @@ describe('ConfigLoader', () => {
   });
 
   describe('SLS/HTTP/JSONL config merge (T027)', () => {
-    it('uses built-in SLS destination when config file has no destination', async () => {
+    it('SLS disabled with empty endpoints when no config', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
 
       const config = await loadConfig();
-      expect(config.flushers.sls?.enabled).toBe(true);
-      expect(config.flushers.sls?.mode).toBe(INTERNAL_SLS_DESTINATION.mode);
-      expect(config.flushers.sls?.endpoint).toBe(INTERNAL_SLS_DESTINATION.endpoint);
-      expect(config.flushers.sls?.endpoints).toHaveLength(1);
-      expect(config.flushers.sls?.endpoints[0]).toMatchObject({
-        name: INTERNAL_SLS_DESTINATION.endpointName,
-        endpoint: INTERNAL_SLS_DESTINATION.endpoint,
-        project: INTERNAL_SLS_DESTINATION.project,
-        logstore: INTERNAL_SLS_DESTINATION.logstore,
-        kind: 'agentActivity',
-        mode: INTERNAL_SLS_DESTINATION.mode,
-      });
+      expect(config.flushers.sls?.enabled).toBe(false);
+      expect(config.flushers.sls?.endpoints).toHaveLength(0);
     });
 
-    it('dual-writes when user SLS fields are present in config file', async () => {
+    it('uses user SLS fields from config file', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
           endpoint: 'https://legacy.example.com',
@@ -132,16 +121,16 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.flushers.sls?.endpoints).toHaveLength(2);
+      expect(config.flushers.sls?.endpoints).toHaveLength(1);
       expect(config.flushers.sls?.endpoints[0]).toMatchObject({
         endpoint: 'https://legacy.example.com',
         project: 'legacy-project',
         logstore: 'legacy-logstore',
       });
-      expect(config.flushers.sls?.endpoints[1].name).toBe(INTERNAL_SLS_DESTINATION.endpointName);
+      expect(config.flushers.sls?.enabled).toBe(true);
     });
 
-    it('uses env SLS destination over file values (still dual-writes)', async () => {
+    it('uses env SLS destination over file values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
           endpoint: 'https://legacy.example.com',
@@ -149,19 +138,19 @@ describe('ConfigLoader', () => {
           logstore: 'legacy-logstore',
         },
       });
-      vi.stubEnv('SLS_ENDPOINT', 'https://sls.example.com');
-      vi.stubEnv('SLS_PROJECT', 'proj2');
-      vi.stubEnv('SLS_LOGSTORE', 'log2');
+      vi.stubEnv('LOONGSUITE_SLS_ENDPOINT', 'https://sls.example.com');
+      vi.stubEnv('LOONGSUITE_SLS_PROJECT', 'proj2');
+      vi.stubEnv('LOONGSUITE_SLS_LOGSTORE', 'log2');
 
       const config = await loadConfig();
-      expect(config.flushers.sls?.endpoints).toHaveLength(2);
+      expect(config.flushers.sls?.endpoints).toHaveLength(1);
       expect(config.flushers.sls?.endpoints[0]).toMatchObject({
         project: 'proj2',
         logstore: 'log2',
       });
     });
 
-    it('ignores legacy destinationOverride and still dual-writes', async () => {
+    it('ignores legacy destinationOverride', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
           destinationOverride: true,
@@ -173,12 +162,11 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.flushers.sls?.endpoint).toBe('https://sls.example.com');
-      expect(config.flushers.sls?.endpoints).toHaveLength(2);
+      expect(config.flushers.sls?.endpoints).toHaveLength(1);
       expect(config.flushers.sls?.endpoints[0]).toMatchObject({
         project: 'operator-project',
         logstore: 'operator-logstore',
       });
-      expect(config.flushers.sls?.endpoints[1].name).toBe(INTERNAL_SLS_DESTINATION.endpointName);
     });
 
     it('keeps non-destination SLS controls configurable', async () => {
@@ -197,7 +185,6 @@ describe('ConfigLoader', () => {
       expect(config.flushers.sls?.enabled).toBe(false);
       expect(config.flushers.sls?.batchMaxSize).toBe(5);
       expect(config.flushers.sls?.flushIntervalMs).toBe(750);
-      // The user-provided endpoint surfaces as the primary now.
       expect(config.flushers.sls?.endpoint).toBe('https://legacy.example.com');
     });
 
@@ -465,6 +452,101 @@ describe('ConfigLoader', () => {
     });
   });
 
+  describe('mask config', () => {
+    it('defaults to none when mask config is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({ mode: 'none', types: [] });
+    });
+
+    it('defaults to none when mask.mode is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { types: ['apiKey'] },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({ mode: 'none', types: [] });
+    });
+
+    it('loads all mode and ignores types', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          types: ['apiKey'],
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({ mode: 'all', types: [] });
+    });
+
+    it('loads custom mode with supported types only', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'custom',
+          types: ['apiKey', 'cloudAccessKey', 'pii', 'databaseUrl'],
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({
+        mode: 'custom',
+        types: ['apiKey', 'cloudAccessKey', 'databaseUrl'],
+      });
+    });
+
+    it('treats invalid mode as none', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'audit',
+          types: ['apiKey'],
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({ mode: 'none', types: [] });
+    });
+
+    it('custom mode with empty or omitted types enables no mask types', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'custom' },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({ mode: 'custom', types: [] });
+    });
+
+    it('uses mask mode env over config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'none',
+          types: ['apiKey'],
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_MODE', 'all');
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({ mode: 'all', types: [] });
+    });
+
+    it('uses mask types env for custom mode and filters unsupported values', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'custom',
+          types: ['apiKey'],
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_TYPES', 'cloudAccessKey,pii,databaseUrl');
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({
+        mode: 'custom',
+        types: ['cloudAccessKey', 'databaseUrl'],
+      });
+    });
+  });
+
   describe('collectLog, collectTrace, serviceNamePrefix, cms', () => {
     it('defaults when config file is missing', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
@@ -472,7 +554,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.collectLog).toBe(true);
       expect(config.collectTrace).toBe(true);
-      expect(config.serviceNamePrefix).toBe('');
+      expect(config.serviceNamePrefix).toBe('loongsuite-pilot');
       expect(config.cms).toEqual({ enabled: false, licenseKey: '', endpoint: '', workspace: '', debug: false });
     });
 
@@ -538,6 +620,147 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.serviceNamePrefix).toBe('from-env');
+    });
+  });
+
+  describe('otlpTrace config (new path) and cms fallback', () => {
+    it('loadConfig populates otlpTrace from file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlpTrace: {
+          endpoint: 'http://localhost:4318',
+          headers: { Authorization: 'Bearer token' },
+          resourceAttributes: { 'deployment.env': 'prod' },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.otlpTrace).toEqual({
+        endpoint: 'http://localhost:4318',
+        headers: { Authorization: 'Bearer token' },
+        resourceAttributes: { 'deployment.env': 'prod' },
+      });
+    });
+
+    it('otlpTrace is undefined when not in config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+
+      const config = await loadConfig();
+      expect(config.otlpTrace).toBeUndefined();
+    });
+
+    it('buildOtlpTraceConfig uses new path when otlpTrace.endpoint present', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          endpoint: 'http://jaeger:4318',
+          headers: { 'X-Custom': 'val' },
+          resourceAttributes: { 'team': 'infra' },
+          serviceName: 'my-svc',
+          debug: true,
+          turnIdleTimeoutMs: 5000,
+        },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.endpoint).toBe('http://jaeger:4318');
+      expect(result!.headers).toEqual({ 'X-Custom': 'val' });
+      expect(result!.resourceAttributes).toEqual({ 'team': 'infra' });
+      expect(result!.serviceName).toBe('my-svc');
+      expect(result!.debug).toBe(true);
+      expect(result!.turnIdleTimeoutMs).toBe(5000);
+    });
+
+    it('buildOtlpTraceConfig falls back to cms path when no otlpTrace', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        cms: { licenseKey: 'key123', endpoint: 'https://arms.cn-hangzhou.arms.aliyuncs.com', workspace: 'ws1' },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.endpoint).toBe('https://arms.cn-hangzhou.arms.aliyuncs.com');
+      expect(result!.headers).toEqual({
+        'x-arms-license-key': 'key123',
+        'x-arms-project': 'arms',
+        'x-cms-workspace': 'ws1',
+      });
+      expect(result!.resourceAttributes).toEqual({ 'acs.arms.service.feature': 'genai_app' });
+    });
+
+    it('buildOtlpTraceConfig prefers otlpTrace over cms', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        cms: { licenseKey: 'key', endpoint: 'https://arms.example.com', workspace: 'ws' },
+        otlpTrace: { endpoint: 'http://tempo:4318' },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.endpoint).toBe('http://tempo:4318');
+      expect(result!.headers).toBeUndefined();
+      expect(result!.resourceAttributes).toBeUndefined();
+    });
+
+    it('buildOtlpTraceConfig returns undefined when collectTrace is false', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: false,
+        otlpTrace: { endpoint: 'http://localhost:4318' },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+      expect(result).toBeUndefined();
+    });
+
+    it('env var LOONGSUITE_PILOT_OTLP_ENDPOINT overrides file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://from-file:4318' },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_OTLP_ENDPOINT', 'http://from-env:4318');
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.endpoint).toBe('http://from-env:4318');
+    });
+
+    it('env var LOONGSUITE_PILOT_OTLP_HEADERS overrides file headers', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          endpoint: 'http://localhost:4318',
+          headers: { 'from': 'file' },
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_OTLP_HEADERS', '{"from":"env"}');
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.headers).toEqual({ from: 'env' });
+    });
+
+    it('new path with empty headers produces undefined headers', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://localhost:4318' },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.headers).toBeUndefined();
     });
   });
 });

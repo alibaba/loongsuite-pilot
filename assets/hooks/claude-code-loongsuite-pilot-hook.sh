@@ -6,9 +6,8 @@ set -euo pipefail
 # Usage (registered in ~/.claude/settings.json by pilot HookStrategy):
 #   $PILOT_DATA/hooks/claude-code-loongsuite-pilot-hook.sh <subcommand>
 #
-# Subcommand 与 Claude hook event 一一对应:
-#   user-prompt-submit / pre-tool-use / post-tool-use / stop /
-#   pre-compact / subagent-start / subagent-stop / notification
+# Subcommand (v2: 只处理 3 个):
+#   stop / subagent-start / subagent-stop
 #
 # Fail-open 原则: 任何错误都输出 "{}" 并 exit 0,不阻塞宿主 agent。
 
@@ -16,6 +15,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROCESSOR="$SCRIPT_DIR/claude-code-hook-processor.mjs"
 EMPTY_RESULT='{}'
 SUBCOMMAND="${1:-unknown}"
+
+# Only process registered subcommands; early-return for legacy/unregistered ones.
+case "$SUBCOMMAND" in
+  stop|subagent-start|subagent-stop)
+    ;;
+  *)
+    printf '%s\n' "$EMPTY_RESULT"
+    exit 0
+    ;;
+esac
 
 log_error() {
   local stage="$1"

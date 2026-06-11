@@ -83,7 +83,7 @@ bash deploy/installer.sh install --local ./loongsuite-pilot.tar.gz
 - `LOG_LEVEL=debug`（测试时推荐使用，输出更详细的日志）
 - `JSONL_ENABLED=true`（确保本地 JSONL 输出已开启）
 - `LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED=false`（开发期间禁用自动更新）
-- `SLS_ACCESS_KEY_ID` / `SLS_ACCESS_KEY_SECRET`（可选，用于 SLS 测试）
+- `LOONGSUITE_SLS_ACCESS_KEY_ID` / `LOONGSUITE_SLS_ACCESS_KEY_SECRET`（可选，用于 SLS 测试）
 
 ## 3. 启动服务
 
@@ -785,7 +785,7 @@ echo "=== Done ==="
 - `--sls-project` 与 `--sls-logstore`　← 两者必须同时提供，缺一就会被视为 Case A
 - 模式选择：
   - **webtracking**（匿名写入）：仅需 logstore 开启 WebTracking；AK 可以留空。
-  - **ak**：传入 `SLS_ACCESS_KEY_ID` / `SLS_ACCESS_KEY_SECRET`（环境变量优先）或 `--sls-ak-id`/`--sls-ak-secret`。
+  - **ak**：传入 `LOONGSUITE_SLS_ACCESS_KEY_ID` / `LOONGSUITE_SLS_ACCESS_KEY_SECRET`（环境变量优先）或 `--sls-ak-id`/`--sls-ak-secret`。
 
 ### 12.2 准备隔离的测试环境
 
@@ -824,8 +824,8 @@ cp ~/.loongsuite-pilot/config.json ~/.loongsuite-pilot/config.json.bak
 - 不填 `accessKeyId` / `accessKeySecret` 时默认 webtracking。需 logstore 后台开启 WebTracking。
 - AK 模式下，建议用环境变量避免明文入盘：
   ```bash
-  export SLS_ACCESS_KEY_ID="..."
-  export SLS_ACCESS_KEY_SECRET="..."
+  export LOONGSUITE_SLS_ACCESS_KEY_ID="..."
+  export LOONGSUITE_SLS_ACCESS_KEY_SECRET="..."
   ```
 
 ### 12.4 启动开发版 collector

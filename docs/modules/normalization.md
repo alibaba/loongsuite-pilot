@@ -1,10 +1,10 @@
 # Module: normalization
 
-> Last verified: 2026-05-13
+> Last verified: 2026-06-04
 
 ## 职责 (Responsibility)
 
-数据标准化层，负责将各种原始输入格式转换为统一的 AgentActivityEntry，并根据内容策略决定敏感字段的保留或脱敏。
+数据标准化层，负责将各种原始输入格式转换为统一的 AgentActivityEntry，并根据内容策略决定内容字段是否保留。字段内 secret 打码由独立的 mask 模块负责。
 
 Hook JSONL 输入在进入 collector 前可能已经由 `assets/hooks/agent-event-normalizer.mjs` 做过 pre-standardization。该 hook-side 逻辑可以 best-effort 复制 `user.id` defaulting、provider fallback 和 content-policy filtering；本模块仍是最终权威层，负责 final `AgentActivityEntry` 构建、alias cleanup、provider fallback re-apply、content policy re-apply 和序列化前 schema 语义收敛。
 
@@ -68,6 +68,8 @@ src/normalization/
 
 按 agent type 查找策略：`entry['gen_ai.agent.type']` → `config[agentType]` → 默认允许。
 
+字段内 secret 打码不在 normalization 模块内实现。collector 链路在 `applyAgentContentPolicy()` 之后调用 `maskAgentActivityEntry()`，因此 `captureMessageContent=false` 删除的字段不会再进入 mask 扫描。
+
 
 
 目前上面的配置放在 InputManager里面，但这是代码不合理的设置，后面会进行统一迁移处理。
@@ -90,4 +92,3 @@ src/normalization/
 5. `**applyAgentContentPolicy` 返回新对象**：不修改输入 entry（immutable semantics）。
 6. **时间戳格式为 nanoseconds string**：`time_unix_nano` 长度≥16位，毫秒输入自动补零。
 7. **Hook-side pre-standardization 不是最终权威层**：collector normalization 必须保留最终构建、provider fallback、content policy 和 alias cleanup。
-

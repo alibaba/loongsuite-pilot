@@ -9,14 +9,9 @@
   "hook": {
     "settingsPath": "~/.claude/settings.json",
     "events": [
-      "UserPromptSubmit",
-      "PreToolUse",
-      "PostToolUse",
       "Stop",
-      "PreCompact",
       "SubagentStart",
-      "SubagentStop",
-      "Notification"
+      "SubagentStop"
     ],
     "hookCommand": "$PILOT_DATA/hooks/claude-code-loongsuite-pilot-hook.sh",
     "format": "nested",

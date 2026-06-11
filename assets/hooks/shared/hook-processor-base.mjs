@@ -1,47 +1,27 @@
-#!/usr/bin/env node
 /**
- * Shared hook transcript forwarder for loongsuite-pilot.
- *
- * Incrementally reads new lines from a transcript file and appends them
- * to daily-rotated JSONL history logs. Tracks line offsets per transcript
- * to avoid duplicate processing.
- *
- * Usage:
- *   hook-processor.mjs --agent-id <id> [--log-prefix <prefix>]
- *
- *   --agent-id    Required. Determines the history directory:
- *                   ~/.loongsuite-pilot/logs/{agent-id}/history/
- *   --log-prefix  Optional. JSONL file name prefix (defaults to agent-id).
- *                   e.g. --log-prefix cursor → cursor-2026-04-29.jsonl
- *
- * Stdin:
- *   JSON payload from the hook event, must contain:
- *     - transcript_path: path to the transcript JSONL file
- *     - session_id (or conversation_id): session identifier
- *
- * Called by cursor-loongsuite-pilot-hook.sh and qoder-loongsuite-pilot-hook.sh.
- * Fail-open: errors are logged locally and never block the caller.
+ * Shared infrastructure for hook transcript processors.
+ * Provides file I/O, offset tracking, logging, and common utilities
+ * used by both qoder-hook-processor.mjs and qoderwork-hook-processor.mjs.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import crypto from 'node:crypto';
 import {
   buildQoderHookRecord,
   loadHookRuntimeConfig,
-} from './agent-event-normalizer.mjs';
+} from '../agent-event-normalizer.mjs';
 
 const ENABLE_LOGGING = true;
-const HOOKS_DIR = path.dirname(new URL(import.meta.url).pathname);
-const LOONGSUITE_PILOT_LOGS_BASE_DIR = (() => {
-  const configured = process.env.LOONGSUITE_PILOT_DATA_DIR || process.env.LOONGSUITE_PILOT_DATA_DIR;
+export const HOOKS_DIR = path.dirname(path.dirname(new URL(import.meta.url).pathname));
+export const LOONGSUITE_PILOT_LOGS_BASE_DIR = (() => {
+  const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
   return path.join(configured || path.join(os.homedir(), '.loongsuite-pilot'), 'logs');
 })();
 
 // --- CLI argument parsing ---------------------------------------------------
 
-function parseArgs() {
+export function parseArgs() {
   const args = process.argv.slice(2);
   let agentId = '';
   let logPrefix = '';
@@ -50,7 +30,7 @@ function parseArgs() {
     else if (args[i] === '--log-prefix' && i + 1 < args.length) { logPrefix = args[++i]; }
   }
   if (!agentId) {
-    process.stderr.write('hook-processor.mjs: --agent-id is required\n');
+    process.stderr.write('hook-processor: --agent-id is required\n');
     process.exit(1);
   }
   return { agentId, logPrefix: logPrefix || agentId };
@@ -58,7 +38,7 @@ function parseArgs() {
 
 // --- Date helper (local timezone) --------------------------------------------
 
-function getLocalDateString(date = new Date()) {
+export function getLocalDateString(date = new Date()) {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, '0');
   const d = String(date.getDate()).padStart(2, '0');
@@ -67,17 +47,17 @@ function getLocalDateString(date = new Date()) {
 
 // --- Logging ----------------------------------------------------------------
 
-function getDebugLogFile(agentId) {
+export function getDebugLogFile(agentId) {
   const day = getLocalDateString();
   return path.join(LOONGSUITE_PILOT_LOGS_BASE_DIR, agentId, 'debug', `${agentId}-debug-${day}.log`);
 }
 
-function getErrorLogFile(agentId) {
+export function getErrorLogFile(agentId) {
   const day = getLocalDateString();
   return path.join(LOONGSUITE_PILOT_LOGS_BASE_DIR, agentId, 'errors', `${agentId}-error-${day}.log`);
 }
 
-function logDebug(agentId, message) {
+export function logDebug(agentId, message) {
   if (!ENABLE_LOGGING) return;
   try {
     const file = getDebugLogFile(agentId);
@@ -93,7 +73,7 @@ function lineRecordFile(agentId) {
   return path.join(HOOKS_DIR, `.line_records.${agentId}.json`);
 }
 
-function loadLineRecords(agentId) {
+export function loadLineRecords(agentId) {
   try {
     const f = lineRecordFile(agentId);
     if (!fs.existsSync(f)) return {};
@@ -103,7 +83,7 @@ function loadLineRecords(agentId) {
   }
 }
 
-function saveLineRecords(agentId, records) {
+export function saveLineRecords(agentId, records) {
   try {
     const f = lineRecordFile(agentId);
     fs.mkdirSync(path.dirname(f), { recursive: true });
@@ -114,7 +94,7 @@ function saveLineRecords(agentId, records) {
   }
 }
 
-function updateLineRecord(agentId, transcriptPath, sessionId, endLine) {
+export function updateLineRecord(agentId, transcriptPath, sessionId, endLine) {
   const records = loadLineRecords(agentId);
   records[transcriptPath] = {
     session_id: sessionId,
@@ -129,7 +109,7 @@ function updateLineRecord(agentId, transcriptPath, sessionId, endLine) {
 
 // --- Transcript reading -----------------------------------------------------
 
-function getTranscriptLineCount(transcriptPath) {
+export function getTranscriptLineCount(transcriptPath) {
   try {
     if (!fs.existsSync(transcriptPath)) return 0;
     const content = fs.readFileSync(transcriptPath, 'utf-8');
@@ -144,7 +124,7 @@ function getTranscriptLineCount(transcriptPath) {
   }
 }
 
-function getLineRange(agentId, transcriptPath, sessionId) {
+export function getLineRange(agentId, transcriptPath, sessionId) {
   const records = loadLineRecords(agentId);
   const record = records[transcriptPath] || {};
   let lastCount = record.last_line_count || 0;
@@ -173,7 +153,7 @@ function getLineRange(agentId, transcriptPath, sessionId) {
   return [lastCount, currentCount];
 }
 
-function readTranscriptLines(transcriptPath, startLine, endLine) {
+export function readTranscriptLines(transcriptPath, startLine, endLine) {
   const lines = [];
   try {
     if (!fs.existsSync(transcriptPath)) return lines;
@@ -189,18 +169,17 @@ function readTranscriptLines(transcriptPath, startLine, endLine) {
   return lines;
 }
 
-function parseTranscriptLine(line, agentId, runtimeConfig, turnId) {
+export function parseTranscriptLine(line, agentId, runtimeConfig, turnId) {
   try {
     const parsed = JSON.parse(line);
-    const normalized = normalizeTranscriptRecord(parsed, agentId, runtimeConfig, turnId);
-    return normalized;
+    return normalizeTranscriptRecord(parsed, agentId, runtimeConfig, turnId);
   } catch {
     return null;
   }
 }
 
-function normalizeTranscriptRecord(record, agentId, runtimeConfig, turnId) {
-  if (agentId === 'qoder-cli' || agentId === 'qoder-work' || agentId === 'qoder') {
+export function normalizeTranscriptRecord(record, agentId, runtimeConfig, turnId) {
+  if (agentId === 'qoder-cli' || agentId === 'qoder-work' || agentId === 'qoder' || agentId === 'qoder-cn') {
     return buildQoderHookRecord(record, { agentId, runtimeConfig, turnId });
   }
   return record;
@@ -208,13 +187,13 @@ function normalizeTranscriptRecord(record, agentId, runtimeConfig, turnId) {
 
 // --- History file -----------------------------------------------------------
 
-function getHistoryLogFile(agentId, logPrefix) {
+export function getHistoryLogFile(agentId, logPrefix) {
   const day = getLocalDateString();
   const historyDir = path.join(LOONGSUITE_PILOT_LOGS_BASE_DIR, agentId, 'history');
   return path.join(historyDir, `${logPrefix}-${day}.jsonl`);
 }
 
-function appendRowsToHistory(agentId, logPrefix, rows) {
+export function appendRowsToHistory(agentId, logPrefix, rows) {
   if (!rows.length) return true;
   const logFile = getHistoryLogFile(agentId, logPrefix);
   try {
@@ -228,62 +207,9 @@ function appendRowsToHistory(agentId, logPrefix, rows) {
   }
 }
 
-// --- Core pipeline ----------------------------------------------------------
+// --- Stdin helper -----------------------------------------------------------
 
-function uploadLines(agentId, logPrefix, transcriptPath, startLine, endLine, sessionId, runtimeConfig) {
-  if (startLine >= endLine) return true;
-
-  const expectedCount = endLine - startLine;
-  const lines = readTranscriptLines(transcriptPath, startLine, endLine);
-  logDebug(agentId, `Read ${lines.length} lines from ${transcriptPath} (range: ${startLine}-${endLine}, expected: ${expectedCount})`);
-
-  if (lines.length < expectedCount) {
-    logDebug(agentId, `Warning: Expected ${expectedCount} lines but only read ${lines.length}`);
-  }
-  if (!lines.length) return true;
-
-  const isQoderCli = agentId === 'qoder-cli' || agentId === 'qoder';
-  const turnId = isQoderCli ? crypto.randomUUID() : undefined;
-
-  const records = [];
-  for (const line of lines) {
-    const record = parseTranscriptLine(line, agentId, runtimeConfig, turnId);
-    if (record) records.push(record);
-  }
-
-  if (isQoderCli) {
-    let stepCounter = 1;
-    let responseCount = 0;
-    for (const record of records) {
-      if (record['event.name'] === 'llm.response') {
-        responseCount++;
-        if (responseCount >= 2) stepCounter++;
-      }
-      record['gen_ai.step.id'] = `${turnId}:s${stepCounter}`;
-    }
-    for (let i = records.length - 1; i >= 0; i--) {
-      if (records[i]['event.name'] === 'llm.response') {
-        records[i]['gen_ai.response.finish_reasons'] = records[i]['gen_ai.response.finish_reasons'] || 'end_turn';
-        break;
-      }
-    }
-    logDebug(agentId, `Assigned turn_id=${turnId}, ${stepCounter} step(s)`);
-  }
-
-  const rowsToAppend = records.map((r) => JSON.stringify(r));
-  const success = appendRowsToHistory(agentId, logPrefix, rowsToAppend);
-  if (success) {
-    logDebug(agentId, `Successfully appended ${rowsToAppend.length} rows from ${transcriptPath}`);
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-  } else {
-    logDebug(agentId, `Failed to append rows from ${transcriptPath}`);
-  }
-  return success;
-}
-
-// --- Stdin / entry point ----------------------------------------------------
-
-async function readStdin() {
+export async function readStdin() {
   const chunks = [];
   for await (const chunk of process.stdin) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
@@ -291,28 +217,26 @@ async function readStdin() {
   return Buffer.concat(chunks).toString('utf-8');
 }
 
-async function main() {
-  const { agentId, logPrefix } = parseArgs();
-
+export async function parseStdinPayload(agentId) {
   const raw = await readStdin();
   process.stdout.write('{}\n');
 
-  if (!raw || !raw.trim()) return;
+  if (!raw || !raw.trim()) return null;
 
   let payload;
   try {
     payload = JSON.parse(raw);
   } catch {
     logDebug(agentId, 'Failed to parse stdin JSON');
-    return;
+    return null;
   }
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
 
   logDebug(agentId, `event: ${payload.hook_event_name || 'unknown'}, session: ${payload.session_id || ''}`);
 
   if (payload.stop_hooks_active) {
     logDebug(agentId, 'stop_hooks_active=true, exiting to avoid recursion');
-    return;
+    return null;
   }
 
   const transcriptPath = payload.transcript_path || '';
@@ -320,36 +244,18 @@ async function main() {
 
   if (!transcriptPath || !sessionId) {
     logDebug(agentId, 'No transcript_path or session_id in payload');
-    return;
+    return null;
   }
 
   if (!fs.existsSync(transcriptPath)) {
     logDebug(agentId, `Transcript file not found: ${transcriptPath}`);
-    return;
+    return null;
   }
 
-  const range = getLineRange(agentId, transcriptPath, sessionId);
-  if (!range) return;
-
-  const [startLine, endLine] = range;
-  uploadLines(
-    agentId,
-    logPrefix,
-    transcriptPath,
-    startLine,
-    endLine,
-    sessionId,
-    loadHookRuntimeConfig(path.dirname(LOONGSUITE_PILOT_LOGS_BASE_DIR)),
-  );
+  const cwd = typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : undefined;
+  return { transcriptPath, sessionId, cwd };
 }
 
-main().catch((e) => {
-  // Fail-open: never block the caller.
-  try {
-    const agentId = parseArgs().agentId || 'unknown';
-    const file = getErrorLogFile(agentId);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
-    fs.appendFileSync(file, `[${ts}] ${e.message}\n`, 'utf-8');
-  } catch { /* ignore */ }
-});
+// --- Re-export normalizer utilities -----------------------------------------
+
+export { loadHookRuntimeConfig };

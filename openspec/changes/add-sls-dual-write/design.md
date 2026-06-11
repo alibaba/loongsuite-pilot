@@ -107,7 +107,7 @@ The current `SlsFlusher` constructor builds a single `ALY` client when `config.m
    so that user-leg name/credentials/redact win when there is a collision.
 ```
 
-Env var precedence (`SLS_ACCESS_KEY_ID`, `SLS_ENDPOINT`, etc.) is preserved for the user destination only; the internal leg is always pinned to its constants.
+Env var precedence (`LOONGSUITE_SLS_ACCESS_KEY_ID`, `LOONGSUITE_SLS_ENDPOINT`, etc.) is preserved for the user destination only; the internal leg is always pinned to its constants.
 
 ### D8. Dedup user destination against the internal destination
 

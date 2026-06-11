@@ -1,10 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-# idealab proxy: disable adaptive thinking (required for Claude Code 2.1.143+)
-export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1
+# idealab proxy: disable extended thinking entirely (required for Claude Code 2.1.143+)
+# idealab rejects both thinking.adaptive.effort and thinking.adaptive.budget_tokens
+export CLAUDE_CODE_DISABLE_THINKING=1
 export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
-export CLAUDE_CODE_EFFORT_LEVEL=high
 
 echo "=== Setting up Claude model wrapper ==="
 
@@ -75,10 +75,9 @@ if [ -n "$MR_ID" ]; then
 fi
 
 cat >> "$CLAUDE_PATH" << 'WRAPPER_EOF2'
-# idealab proxy does not support Claude Code 2.1.143+ adaptive thinking params
-export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1
+# idealab proxy does not support extended thinking params (effort/budget_tokens)
+export CLAUDE_CODE_DISABLE_THINKING=1
 export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
-export CLAUDE_CODE_EFFORT_LEVEL=high
 exec "$(dirname "$0")/claude-real" --model "$MODEL" "$@"
 WRAPPER_EOF2
 

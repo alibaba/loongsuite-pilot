@@ -18,6 +18,9 @@ export interface AutoUpdateConfig {
   checkIntervalMs: number;
   manifestUrl?: string;
   packageUrl?: string;
+  installId?: string;
+  canaryPolicy?: 'auto' | 'latest' | 'off';
+  canaryHotfixVersion?: number;
 }
 
 export interface CmsConfig {
@@ -26,6 +29,25 @@ export interface CmsConfig {
   endpoint: string;
   workspace: string;
   debug?: boolean;
+}
+
+export type MaskMode = 'none' | 'all' | 'custom';
+
+export type MaskType = 'cloudAccessKey' | 'apiKey' | 'privateKey' | 'databaseUrl';
+
+export interface MaskConfig {
+  mode: MaskMode;
+  types: MaskType[];
+}
+
+export interface OtlpTraceRawConfig {
+  endpoint?: string;
+  headers?: Record<string, string>;
+  resourceAttributes?: Record<string, string>;
+  serviceName?: string;
+  debug?: boolean;
+  captureMessageContent?: boolean;
+  turnIdleTimeoutMs?: number;
 }
 
 export interface AnalyticsConfig {
@@ -37,10 +59,12 @@ export interface AnalyticsConfig {
   collectTrace: boolean;
   serviceNamePrefix: string;
   cms: CmsConfig;
+  otlpTrace?: OtlpTraceRawConfig;
   listeners: Record<string, ListenerConfig>;
   flushers: FlusherConfig;
   retention: LogRetentionConfig;
   agents: AgentsConfig;
+  mask: MaskConfig;
   hookWatchdog: HookWatchdogConfig;
   autoUpdate?: AutoUpdateConfig;
 }
@@ -62,7 +86,7 @@ export interface OtlpTraceFlusherConfig {
   enabled: boolean;
   endpoint: string;
   protocol: 'http/protobuf';
-  headers: Record<string, string>;
+  headers?: Record<string, string>;
   serviceName: string;
   resourceAttributes?: Record<string, string>;
   captureMessageContent?: boolean;
@@ -83,6 +107,7 @@ export interface SlsFlusherConfig {
   endpoints: SlsEndpoint[];
   batchMaxSize: number;
   flushIntervalMs: number;
+  serviceNamePrefix: string;
 }
 
 export interface SlsEndpoint {

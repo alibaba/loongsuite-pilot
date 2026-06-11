@@ -5,9 +5,12 @@ import { promisify } from 'node:util';
 import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
+import * as crypto from 'node:crypto';
 import type { AutoUpdateConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
-import { compareVersions, computeSha256 } from './version-utils.js';
+import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
+import { compareVersions, computeSha256, deterministicBucket } from './version-utils.js';
+import type { UpdaterMetrics } from './updater-metrics.js';
 
 const execFileAsync = promisify(execFile);
 const logger = createLogger('Updater');
@@ -38,6 +41,15 @@ export interface VersionManifest {
   package_url: string;
   released_at?: string;
   sha256?: string;
+}
+
+export interface CanaryManifest extends VersionManifest {
+  rollout_percentage: number;
+  hotfix_version?: number;
+}
+
+export interface LatestManifest extends VersionManifest {
+  canary?: CanaryManifest;
 }
 
 export interface LocalVersion {
@@ -77,18 +89,35 @@ export function buildPaths(baseDir: string): UpdaterPaths {
   };
 }
 
+export interface ResolvedTarget {
+  manifest: VersionManifest;
+  channel: 'stable' | 'canary';
+  hotfixVersion?: number;
+}
+
+const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
+
 export class Updater {
   private timer: ReturnType<typeof setInterval> | null = null;
   private checking = false;
   private consecutiveFailures = 0;
   private nextCheckAt = 0;
   private readonly paths: UpdaterPaths;
+  private metrics: UpdaterMetrics | null = null;
+  private readonly configPath: string;
 
   constructor(
-    private readonly config: AutoUpdateConfig,
+    private config: AutoUpdateConfig,
     baseDir?: string,
   ) {
     this.paths = baseDir ? buildPaths(baseDir) : defaultPaths();
+    this.configPath = resolveHome(
+      process.env.AGENT_DATA_COLLECTION_CONFIG ?? DEFAULT_CONFIG_PATH,
+    );
+  }
+
+  setMetrics(metrics: UpdaterMetrics): void {
+    this.metrics = metrics;
   }
 
   start(): void {
@@ -101,6 +130,7 @@ export class Updater {
       intervalMs: this.config.checkIntervalMs,
       manifestUrl: this.config.manifestUrl,
     });
+    void this.metrics?.writeEvent('updater_started');
 
     setTimeout(() => void this.check(), 60_000);
 
@@ -116,6 +146,7 @@ export class Updater {
       this.timer = null;
     }
     logger.info('updater stopped');
+    void this.metrics?.writeEvent('updater_stopped');
   }
 
   async check(): Promise<void> {
@@ -131,14 +162,18 @@ export class Updater {
     this.checking = true;
 
     try {
-      const manifest = await this.fetchManifest();
-      if (!manifest) return;
+      const latestManifest = await this.fetchManifest() as LatestManifest | null;
+      if (!latestManifest) return;
+
+      await this.ensureInstallId();
+      const { manifest: target, channel, hotfixVersion } = this.resolveTargetVersion(latestManifest);
 
       const local = await this.readLocalVersion();
-      if (!this.needsUpdate(local, manifest)) {
+      if (!this.needsUpdate(local, target, channel)) {
         logger.debug('already up to date', {
           local: local?.version ?? 'unknown',
-          remote: manifest.version,
+          remote: target.version,
+          channel,
         });
         this.consecutiveFailures = 0;
         return;
@@ -146,18 +181,39 @@ export class Updater {
 
       logger.info('new version available', {
         current: local?.version ?? 'unknown',
-        latest: manifest.version,
-        commit: manifest.git_commit,
+        latest: target.version,
+        commit: target.git_commit,
+        channel,
+      });
+      void this.metrics?.writeEvent('new_version_available', {
+        current_version: local?.version ?? 'unknown',
+        latest_version: target.version,
       });
 
-      const packageUrl = manifest.package_url || this.config.packageUrl;
+      const packageUrl = target.package_url || this.config.packageUrl;
       if (!packageUrl) {
         logger.warn('no package URL in manifest or config');
         return;
       }
 
-      await this.downloadAndDeploy(packageUrl, manifest);
+      void this.metrics?.writeEvent('downloading', {
+        latest_version: target.version,
+      });
+      await this.downloadAndDeploy(packageUrl, target);
+      void this.metrics?.writeEvent('deployed', {
+        latest_version: target.version,
+      });
+
+      if (channel === 'canary') {
+        await this.persistCanaryState(hotfixVersion ?? 0);
+        this.config = { ...this.config, canaryHotfixVersion: hotfixVersion ?? 0 };
+      }
+
       await this.restartCollector();
+      void this.metrics?.writeEvent('collector_restarted', {
+        latest_version: target.version,
+      });
+
       await this.restartMonitorIfRunning();
       await this.gcOldVersions();
       this.consecutiveFailures = 0;
@@ -173,8 +229,22 @@ export class Updater {
         consecutiveFailures: this.consecutiveFailures,
         nextRetryIn: `${Math.round(backoffMs / 1000)}s`,
       });
+
+      void this.metrics?.writeEvent('update_failure', {
+        error: String(err),
+        consecutive_failures: this.consecutiveFailures,
+      });
+      void this.metrics?.writeAlarm(
+        'UPDATER_FAILURE_ALARM', '2',
+        `update check failed (attempt ${this.consecutiveFailures}): ${String(err)}`,
+      );
+
       if (this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
         logger.error('too many consecutive failures, stopping updater');
+        void this.metrics?.writeEvent('updater_stopped_max_failures', {
+          error: `${MAX_CONSECUTIVE_FAILURES} consecutive failures`,
+          consecutive_failures: this.consecutiveFailures,
+        });
         this.stop();
       }
     } finally {
@@ -219,7 +289,7 @@ export class Updater {
     }
   }
 
-  needsUpdate(local: LocalVersion | null, manifest: VersionManifest): boolean {
+  needsUpdate(local: LocalVersion | null, manifest: VersionManifest, channel: 'stable' | 'canary' = 'stable'): boolean {
     if (!local) return true;
     const cmp = compareVersions(manifest.version, local.version);
     if (cmp > 0) return true;
@@ -230,9 +300,112 @@ export class Updater {
       });
       return false;
     }
-    // Same version — check if git commit differs (rebuild)
+
+    if (channel === 'canary') {
+      const remoteHotfix = (manifest as CanaryManifest).hotfix_version ?? 0;
+      const localHotfix = this.config.canaryHotfixVersion ?? 0;
+      if (remoteHotfix > localHotfix) return true;
+    }
+
     if (manifest.git_commit && local.gitCommit !== manifest.git_commit) return true;
     return false;
+  }
+
+  resolveTargetVersion(latest: LatestManifest): ResolvedTarget {
+    try {
+      const canary = latest.canary;
+      if (!canary || typeof canary.rollout_percentage !== 'number') {
+        logger.info('rollout resolved: channel=stable (no canary in manifest)', {
+          stableVersion: latest.version,
+          stableCommit: latest.git_commit,
+        });
+        return { manifest: latest, channel: 'stable' };
+      }
+
+      const canaryInfo = {
+        canaryVersion: canary.version,
+        canaryCommit: canary.git_commit,
+        canaryHotfix: canary.hotfix_version ?? 0,
+        rolloutPercentage: canary.rollout_percentage,
+        stableVersion: latest.version,
+        stableCommit: latest.git_commit,
+      };
+
+      if (this.config.canaryPolicy === 'off') {
+        logger.info('rollout resolved: channel=stable (canary policy=off)', {
+          ...canaryInfo,
+          target: latest.version,
+        });
+        return { manifest: latest, channel: 'stable' };
+      }
+
+      if (this.config.canaryPolicy === 'latest') {
+        logger.info('rollout resolved: channel=canary (canary policy=latest)', {
+          ...canaryInfo,
+          target: canary.version,
+        });
+        return { manifest: canary, channel: 'canary', hotfixVersion: canary.hotfix_version };
+      }
+
+      const installId = this.config.installId;
+      if (!installId) {
+        logger.warn('rollout resolved: channel=stable (no installId for bucketing)', canaryInfo);
+        return { manifest: latest, channel: 'stable' };
+      }
+      const bucket = deterministicBucket(installId, canary.version);
+
+      if (bucket < canary.rollout_percentage) {
+        logger.info('rollout resolved: channel=canary', {
+          ...canaryInfo,
+          target: canary.version,
+          installId,
+          bucket,
+        });
+        return { manifest: canary, channel: 'canary', hotfixVersion: canary.hotfix_version };
+      }
+
+      logger.info('rollout resolved: channel=stable', {
+        ...canaryInfo,
+        target: latest.version,
+        installId,
+        bucket,
+      });
+      return { manifest: latest, channel: 'stable' };
+    } catch (err) {
+      logger.warn('canary resolution failed, falling back to stable', {
+        error: String(err),
+        stableVersion: latest.version,
+        hasCanary: !!latest.canary,
+      });
+      return { manifest: latest, channel: 'stable' };
+    }
+  }
+
+  private async ensureInstallId(): Promise<void> {
+    if (this.config.installId) return;
+
+    const id = crypto.randomUUID();
+    this.config = { ...this.config, installId: id };
+
+    try {
+      const configFile = await readJsonFile<Record<string, unknown>>(this.configPath) ?? {};
+      configFile.installId = id;
+      await writeJsonFile(this.configPath, configFile);
+      logger.info('generated installId', { installId: id });
+    } catch (err) {
+      logger.warn('failed to persist installId', { error: String(err) });
+    }
+  }
+
+  private async persistCanaryState(hotfixVersion: number): Promise<void> {
+    try {
+      const configFile = await readJsonFile<Record<string, unknown>>(this.configPath) ?? {};
+      const existing = (configFile.canary as Record<string, unknown>) ?? {};
+      configFile.canary = { ...existing, hotfix_version: hotfixVersion };
+      await writeJsonFile(this.configPath, configFile);
+    } catch (err) {
+      logger.warn('failed to persist canary state', { error: String(err) });
+    }
   }
 
   private async downloadAndDeploy(
@@ -271,6 +444,9 @@ export class Updater {
           );
         }
         logger.info('SHA-256 verified');
+        void this.metrics?.writeEvent('download_verified', {
+          latest_version: manifest.version,
+        });
       } else {
         logger.warn('manifest missing sha256, skipping integrity check');
       }

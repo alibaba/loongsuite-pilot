@@ -21,7 +21,7 @@ set -euo pipefail
 AGENT_ID="${1:-qoder-work}"
 
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROCESSOR="$HOOKS_DIR/hook-processor.mjs"
+PROCESSOR="$HOOKS_DIR/qoderwork-hook-processor.mjs"
 
 # Fail silently if the processor is missing
 [[ -f "$PROCESSOR" ]] || exit 0

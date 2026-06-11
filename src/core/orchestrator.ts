@@ -8,7 +8,7 @@ import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { detectAgent } from '../deployment/detect-utils.js';
 import { createLogger } from '../utils/logger.js';
-import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists } from '../utils/fs-utils.js';
+import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import * as fsSync from 'node:fs';
 
@@ -22,21 +22,30 @@ import { buildOtlpTraceConfig } from './config-loader.js';
 
 // Concrete inputs
 import { QoderSqliteInput } from '../inputs/qoder-sqlite/qoder-sqlite-input.js';
+import { QoderCnSqliteInput } from '../inputs/qoder-cn-sqlite/qoder-cn-sqlite-input.js';
+import { QoderCnInput } from '../inputs/qoder-cn/qoder-cn-input.js';
+import { QoderCnTraceInput } from '../inputs/qoder-cn-trace/qoder-cn-trace-input.js';
 import { QoderWorkInput } from '../inputs/qoder-work/qoder-work-input.js';
 import { QoderWorkLogInput } from '../inputs/qoder-work-log/qoder-work-log-input.js';
-import { QoderWorkTraceInput } from '../inputs/qoder-work-log/qoder-work-trace-input.js';
 import { QoderWorkSqliteInput } from '../inputs/qoder-work-sqlite/qoder-work-sqlite-input.js';
+import { QoderWorkTraceInput } from '../inputs/qoder-work-trace/qoder-work-trace-input.js';
 import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
 import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-session-input.js';
+import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
 import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
+import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { HookWatchdog, type PluginCheckTarget } from './hook-watchdog.js';
 import { FileCollectionManager } from '../file-collection/file-collection-manager.js';
+import { MetricsWriter } from '../metrics/metrics-writer.js';
+import { AlarmManager } from '../metrics/alarm-manager.js';
+import type { DataflowSnapshot } from '../metrics/metrics-collector.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
+import { resolveLocalIp } from '../utils/network-utils.js';
 
 const logger = createLogger('Orchestrator');
 
@@ -56,15 +65,20 @@ const DEFAULT_DATA_DIR = '~/.loongsuite-pilot';
 export class Orchestrator extends EventEmitter {
   private static readonly LISTENER_AGENT_MAP: Record<string, string> = {
     'qoder-sqlite': 'qoder',
+    'qoder-trace': 'qoder',
+    'qoder-cn-trace': 'qoder-cn',
+    'qoder-cn-sqlite': 'qoder-cn',
+    'qoder-cn': 'qoder-cn',
     'qoder-work': 'qoder-work',
-    'qoder-work-log': 'qoder-work',
     'qoder-work-trace': 'qoder-work',
+    'qoder-work-log': 'qoder-work',
     'qoder-work-sqlite': 'qoder-work',
     'qoder-cli-hook': 'qoder',
     'qoder-cli-session': 'qoder',
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
     'codex-log': 'codex',
+    'wukong': 'wukong',
   };
 
   private readonly config: AnalyticsConfig;
@@ -78,6 +92,8 @@ export class Orchestrator extends EventEmitter {
   private hookWatchdog!: HookWatchdog;
   private deploymentManager!: DeploymentManager;
   private fileCollectionManager!: FileCollectionManager;
+  private metricsWriter!: MetricsWriter;
+  private alarmManager!: AlarmManager;
   private isRunning = false;
 
   constructor(config: AnalyticsConfig) {
@@ -111,11 +127,16 @@ export class Orchestrator extends EventEmitter {
     // 3. Build flushers
     this.flusher = await this.buildFlusher();
 
-    // 4. Build InputManager
+    // 4. Build InputManager & AlarmManager
+    const version = readInstalledVersion(this.dataDir);
+    this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version });
+
     this.inputManager = new InputManager();
     this.inputManager.setFlusher(this.flusher);
     this.inputManager.setConfiguredUserId(this.config.userId);
     this.inputManager.setAgentsConfig(this.config.agents);
+    this.inputManager.setAlarmManager(this.alarmManager);
+    this.inputManager.setMaskConfig(this.config.mask ?? { mode: 'none', types: [] });
 
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
     const pilotDir = this.resolvePilotDir();
@@ -138,6 +159,11 @@ export class Orchestrator extends EventEmitter {
     });
     this.agentDiscoveryService.on('agent:stopped', (id: string) => {
       logger.info('agent stopped', { id });
+      this.alarmManager.record(
+        'INPUT_STOP_ALARM', '3',
+        `input ${id} stopped unexpectedly`,
+        { input_name: id },
+      );
     });
     await this.agentDiscoveryService.start();
 
@@ -161,6 +187,18 @@ export class Orchestrator extends EventEmitter {
     });
     await this.fileCollectionManager.start();
 
+    // 12. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
+    const slsFlusher = this.getSlsFlusher();
+    if (slsFlusher) slsFlusher.setAlarmManager(this.alarmManager);
+    this.metricsWriter = new MetricsWriter({
+      dataDir: this.dataDir,
+      version,
+      userId: this.config.userId,
+      getSnapshot: () => this.buildDataflowSnapshot(),
+      alarmManager: this.alarmManager,
+    });
+    await this.metricsWriter.start();
+
     this.isRunning = true;
     this.emit('started');
     logger.info('orchestrator started', {
@@ -173,6 +211,7 @@ export class Orchestrator extends EventEmitter {
     logger.info('stopping orchestrator');
 
     await this.fileCollectionManager?.stop();
+    await this.metricsWriter?.stop();
     this.hookWatchdog?.stop();
     this.logRetentionService?.stop();
     await this.agentDiscoveryService?.stop();
@@ -266,19 +305,19 @@ export class Orchestrator extends EventEmitter {
 
     if (cfg.sls?.enabled && this.config.collectLog !== false) {
       const r = new SlsFlusher(cfg.sls, this.dataDir);
-      void (r as any).start?.();
+      await r.start().catch(err => logger.warn('sls flusher start failed', { error: String(err) }));
       flushers.push(r);
     }
 
     if (cfg.jsonl?.enabled) {
       const r = new JsonlFlusher(cfg.jsonl);
-      void (r as any).start?.();
+      await r.start().catch(err => logger.warn('jsonl flusher start failed', { error: String(err) }));
       flushers.push(r);
     }
 
     if (cfg.http?.enabled) {
       const r = new HttpFlusher(cfg.http);
-      void (r as any).start?.();
+      await r.start().catch(err => logger.warn('http flusher start failed', { error: String(err) }));
       flushers.push(r);
     }
 
@@ -301,7 +340,7 @@ export class Orchestrator extends EventEmitter {
         rotateDaily: true,
         maxFileSizeMb: 100,
       });
-      void (fallback as any).start?.();
+      await fallback.start().catch(err => logger.warn('jsonl fallback flusher start failed', { error: String(err) }));
       flushers.push(fallback);
     }
 
@@ -338,6 +377,10 @@ export class Orchestrator extends EventEmitter {
           if (ok) {
             const event = def.hookJsonPath[def.hookJsonPath.length - 1];
             logger.info('cursor hook registered', { event });
+          } else {
+            this.alarmManager.record('HOOK_INSTALL_ALARM', '2',
+              `cursor hook install failed: ${def.hookJsonPath.join('.')}`,
+              { input_name: 'cursor-hook' });
           }
         }
       }
@@ -354,6 +397,10 @@ export class Orchestrator extends EventEmitter {
           if (ok) {
             const event = def.hookJsonPath[def.hookJsonPath.length - 1];
             logger.info('qoder-cli hook registered', { event });
+          } else {
+            this.alarmManager.record('HOOK_INSTALL_ALARM', '2',
+              `qoder-cli hook install failed: ${def.hookJsonPath.join('.')}`,
+              { input_name: 'qoder-cli-hook' });
           }
         }
       }
@@ -369,6 +416,10 @@ export class Orchestrator extends EventEmitter {
           if (ok) {
             const event = def.hookJsonPath[def.hookJsonPath.length - 1];
             logger.info('qoder-work hook registered', { event });
+          } else {
+            this.alarmManager.record('HOOK_INSTALL_ALARM', '2',
+              `qoder-work hook install failed: ${def.hookJsonPath.join('.')}`,
+              { input_name: 'qoder-work' });
           }
         }
       }
@@ -385,14 +436,23 @@ export class Orchestrator extends EventEmitter {
     const entries: AgentDetectionEntry[] = [];
     const listenerCfg = this.config.listeners;
 
-    // --- Qoder (SQLite token usage polling) ---
+    // Qoder trace input mutual exclusion closure (used by sqlite/hook/session guards below)
+    const qoderTraceEnabled = () =>
+      this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-trace']) &&
+      this.agentControlManager.resolveEnabled(
+        'qoder-trace',
+        listenerCfg['qoder-trace']?.enabled ?? true,
+      );
+
+    // --- Qoder (SQLite token usage polling) — disabled when qoder-trace is enabled ---
     const qoderSqliteInput = new QoderSqliteInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(qoderSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderSqliteInput, {
         watchPaths: QoderSqliteInput.getWatchPaths(),
         isAvailable: QoderSqliteInput.checkAvailability,
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-sqlite']) &&
+        enabled: () => !qoderTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-sqlite']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-sqlite',
             listenerCfg['qoder-sqlite']?.enabled ?? true,
@@ -401,7 +461,85 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Qoder Work (Hook JSONL) ---
+    // --- Qoder Work CN Trace (multi-source merge, supersedes hook/log/sqlite) ---
+    const qoderWorkTraceInput = new QoderWorkTraceInput({
+      stateStore: this.stateStore,
+      logDir: path.join(this.dataDir, 'logs', 'qoder-work', 'history'),
+    });
+    this.inputManager.registerInput(qoderWorkTraceInput);
+    const qoderWorkTraceEnabled = () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-trace']) &&
+      this.agentControlManager.resolveEnabled(
+        'qoder-work-trace',
+        listenerCfg['qoder-work-trace']?.enabled ?? true,
+      );
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderWorkTraceInput, {
+        watchPaths: QoderWorkTraceInput.getWatchPaths(),
+        isAvailable: QoderWorkTraceInput.checkAvailability,
+        enabled: qoderWorkTraceEnabled,
+        pollIntervalMs: listenerCfg['qoder-work-trace']?.pollInterval,
+      }),
+    );
+
+    // QoderCN trace input mutual exclusion closure
+    const qoderCnTraceEnabled = () =>
+      this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cn-trace']) &&
+      this.agentControlManager.resolveEnabled(
+        'qoder-cn-trace',
+        listenerCfg['qoder-cn-trace']?.enabled ?? true,
+      );
+
+    // --- QoderCN (SQLite token usage polling) — disabled when qoder-cn-trace is enabled ---
+    const qoderCnSqliteInput = new QoderCnSqliteInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(qoderCnSqliteInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderCnSqliteInput, {
+        watchPaths: QoderCnSqliteInput.getWatchPaths(),
+        isAvailable: QoderCnSqliteInput.checkAvailability,
+        enabled: () => !qoderCnTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cn-sqlite']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-cn-sqlite',
+            listenerCfg['qoder-cn-sqlite']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qoder-cn-sqlite']?.pollInterval,
+      }),
+    );
+
+    // --- QoderCN (IDE snapshot — file history + ai_tracker) — disabled when qoder-cn-trace is enabled ---
+    const qoderCnInput = new QoderCnInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(qoderCnInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderCnInput, {
+        watchPaths: QoderCnInput.getWatchPaths(),
+        isAvailable: QoderCnInput.checkAvailability,
+        enabled: () => !qoderCnTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cn']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-cn',
+            listenerCfg['qoder-cn']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qoder-cn']?.pollInterval,
+      }),
+    );
+
+    // --- QoderCN Trace (multi-source merge, supersedes sqlite/ide) ---
+    const qoderCnLogDir = path.join(this.dataDir, 'logs', 'qoder-cn', 'history');
+    const qoderCnTraceInput = new QoderCnTraceInput({
+      stateStore: this.stateStore,
+      logDir: qoderCnLogDir,
+    });
+    this.inputManager.registerInput(qoderCnTraceInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderCnTraceInput, {
+        watchPaths: QoderCnTraceInput.getWatchPaths(),
+        isAvailable: QoderCnTraceInput.checkAvailability,
+        enabled: qoderCnTraceEnabled,
+        pollIntervalMs: listenerCfg['qoder-cn-trace']?.pollInterval,
+      }),
+    );
+
+    // --- Qoder Work (Hook JSONL) — disabled when CN trace is active ---
     const qoderWorkLogDir = path.join(this.dataDir, 'logs', 'qoder-work', 'history');
     const qoderWorkInput = new QoderWorkInput({
       stateStore: this.stateStore,
@@ -412,7 +550,7 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderWorkInput, {
         watchPaths: QoderWorkInput.getWatchPaths(),
         isAvailable: QoderWorkInput.checkAvailability,
-        enabled: () => !traceEnabled() &&
+        enabled: () => !qoderWorkTraceEnabled() &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-work',
@@ -422,33 +560,14 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Qoder Work (Trace: SDK Log + SQLite aggregation) ---
-    // When trace input is enabled, it supersedes qoder-work-log and qoder-work-sqlite
-    // to avoid duplicate events from the same data sources.
-    const qoderWorkTraceInput = new QoderWorkTraceInput({ stateStore: this.stateStore });
-    this.inputManager.registerInput(qoderWorkTraceInput);
-    const traceEnabled = () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-trace']) &&
-      this.agentControlManager.resolveEnabled(
-        'qoder-work-trace',
-        listenerCfg['qoder-work-trace']?.enabled ?? true,
-      );
-    entries.push(
-      this.inputManager.buildDetectionEntry(qoderWorkTraceInput, {
-        watchPaths: QoderWorkTraceInput.getWatchPaths(),
-        isAvailable: QoderWorkTraceInput.checkAvailability,
-        enabled: traceEnabled,
-        pollIntervalMs: listenerCfg['qoder-work-trace']?.pollInterval,
-      }),
-    );
-
-    // --- Qoder Work (SDK Log tail) — disabled when trace input is active ---
+    // --- Qoder Work (SDK Log tail) — disabled when CN trace is active ---
     const qoderWorkLogInput = new QoderWorkLogInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(qoderWorkLogInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkLogInput, {
         watchPaths: QoderWorkLogInput.getWatchPaths(),
         isAvailable: QoderWorkLogInput.checkAvailability,
-        enabled: () => !traceEnabled() &&
+        enabled: () => !qoderWorkTraceEnabled() &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-log']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-work-log',
@@ -458,14 +577,14 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Qoder Work (SQLite agents.db) — disabled when trace input is active ---
+    // --- Qoder Work (SQLite agents.db) — disabled when CN trace is active ---
     const qoderWorkSqliteInput = new QoderWorkSqliteInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(qoderWorkSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkSqliteInput, {
         watchPaths: QoderWorkSqliteInput.getWatchPaths(),
         isAvailable: QoderWorkSqliteInput.checkAvailability,
-        enabled: () => !traceEnabled() &&
+        enabled: () => !qoderWorkTraceEnabled() &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-sqlite']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-work-sqlite',
@@ -475,8 +594,23 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Qoder CLI (Hook JSONL) ---
+    // --- Qoder Trace (multi-source merge, supersedes hook/session/sqlite) ---
     const qoderCliLogDir = path.join(this.dataDir, 'logs', 'qoder', 'history');
+    const qoderTraceInput = new QoderTraceInput({
+      stateStore: this.stateStore,
+      logDir: qoderCliLogDir,
+    });
+    this.inputManager.registerInput(qoderTraceInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderTraceInput, {
+        watchPaths: QoderTraceInput.getWatchPaths(),
+        isAvailable: QoderTraceInput.checkAvailability,
+        enabled: qoderTraceEnabled,
+        pollIntervalMs: listenerCfg['qoder-trace']?.pollInterval,
+      }),
+    );
+
+    // --- Qoder CLI (Hook JSONL) — disabled when qoder-trace is enabled ---
     const qoderCliInput = new QoderCliInput({
       stateStore: this.stateStore,
       logDir: qoderCliLogDir,
@@ -486,7 +620,8 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qoderCliInput, {
         watchPaths: QoderCliInput.getWatchPaths(),
         isAvailable: QoderCliInput.checkAvailability,
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-hook']) &&
+        enabled: () => !qoderTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-hook']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-cli-hook',
             listenerCfg['qoder-cli-hook']?.enabled ?? true,
@@ -495,14 +630,15 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Qoder CLI (Native session segments) ---
+    // --- Qoder CLI (Native session segments) — disabled when qoder-trace is enabled ---
     const qoderCliSessionInput = new QoderCliSessionInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(qoderCliSessionInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderCliSessionInput, {
         watchPaths: QoderCliSessionInput.getWatchPaths(),
         isAvailable: QoderCliSessionInput.checkAvailability,
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-session']) &&
+        enabled: () => !qoderTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cli-session']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-cli-session',
             listenerCfg['qoder-cli-session']?.enabled ?? true,
@@ -571,6 +707,22 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- Wukong (CLI API polling) ---
+    const wukongInput = new WukongInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(wukongInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(wukongInput, {
+        watchPaths: WukongInput.getWatchPaths(),
+        isAvailable: WukongInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['wukong']) &&
+          this.agentControlManager.resolveEnabled(
+            'wukong',
+            listenerCfg['wukong']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['wukong']?.pollInterval,
+      }),
+    );
+
     return entries;
   }
 
@@ -608,12 +760,10 @@ export class Orchestrator extends EventEmitter {
 
   /**
    * Check whether an agent is allowed to run based on config.agents gate.
-   * - Internal builds: always true (auto-detect)
    * - No config.agents or empty: always true (backward compat)
    * - Otherwise: only if config.agents[agentId].enabled !== false
    */
   private isAgentGatedEnabled(agentId: string): boolean {
-    if (__INTERNAL_BUILD__) return true;
     const agents = this.config.agents;
     if (!agents || Object.keys(agents).length === 0) return true;
     return agents[agentId]?.enabled !== false;
@@ -645,4 +795,83 @@ export class Orchestrator extends EventEmitter {
 
     return this.dataDir;
   }
+
+  private buildDataflowSnapshot(): DataflowSnapshot {
+    const inputCounters = this.inputManager.getInputCounters();
+    const activeIds = this.inputManager.getActiveInputIds();
+
+    let sendEntriesTotal = 0;
+    let receivedBytesTotal = 0;
+    for (const counter of inputCounters.values()) {
+      sendEntriesTotal += counter.outEvents;
+      receivedBytesTotal += counter.inBytes;
+    }
+
+    // Aggregate flusher runner stats
+    const flusherRunner = {
+      inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0,
+      totalDelayMs: 0, lastFlushTime: '', startTime: '',
+    };
+
+    const flushers = new Map<string, { inEntries: number; inBytes: number; outEntries: number; outFailed: number; totalDelayMs: number; lastFlushTime: string; startTime: string; flusherName: string; mode: string; endpoint: string; project: string; logstore: string }>();
+
+    // Get SLS flusher counters if available
+    const slsFlusher = this.getSlsFlusher();
+    if (slsFlusher) {
+      for (const [epName, counter] of slsFlusher.getEndpointCounters()) {
+        flusherRunner.inEntries += counter.inEntries;
+        flusherRunner.inBytes += counter.inBytes;
+        flusherRunner.outEntries += counter.outEntries;
+        flusherRunner.outFailed += counter.outFailed;
+        flusherRunner.totalDelayMs += counter.totalDelayMs;
+        if (counter.lastFlushTime > flusherRunner.lastFlushTime) {
+          flusherRunner.lastFlushTime = counter.lastFlushTime;
+        }
+        if (!flusherRunner.startTime || counter.startTime < flusherRunner.startTime) {
+          flusherRunner.startTime = counter.startTime;
+        }
+        flushers.set(epName, {
+          ...counter,
+          flusherName: 'sls',
+        });
+      }
+    }
+
+    const inputs = new Map<string, { inEvents: number; inBytes: number; outEvents: number; outFailed: number; lastPollTime: string; startTime: string; type: string }>();
+    const inputIdleMinutes = new Map<string, number>();
+    for (const [id, counter] of inputCounters) {
+      inputs.set(id, { ...counter });
+      inputIdleMinutes.set(id, this.inputManager.getInputIdleMinutes(id));
+    }
+
+    const agentVersions = this.inputManager.getAgentVersions();
+
+    return {
+      sendEntriesTotal,
+      receivedBytesTotal,
+      inputCount: inputCounters.size,
+      activeInputCount: activeIds.length,
+      flusherRunner,
+      inputs,
+      flushers,
+      agentVersions,
+      inputIdleMinutes,
+    };
+  }
+
+  private getSlsFlusher(): SlsFlusher | null {
+    if (this.flusher instanceof SlsFlusher) return this.flusher;
+    if (this.flusher instanceof MultiFlusher) {
+      for (const f of this.flusher.getFlushers()) {
+        if (f instanceof SlsFlusher) return f;
+      }
+    }
+    return null;
+  }
+
+  getAlarmManager(): AlarmManager {
+    return this.alarmManager;
+  }
 }
+
+

@@ -22,12 +22,21 @@ describe('OtlpTraceFlusher - config validation', () => {
     })).toThrow('serviceName is required');
   });
 
-  it('does not throw with valid config and empty headers (just warns)', () => {
+  it('does not throw with empty headers', () => {
     expect(() => new OtlpTraceFlusher({
       enabled: true,
       endpoint: 'http://localhost:4318',
       protocol: 'http/protobuf',
       headers: {},
+      serviceName: 'test',
+    })).not.toThrow();
+  });
+
+  it('does not throw with undefined headers', () => {
+    expect(() => new OtlpTraceFlusher({
+      enabled: true,
+      endpoint: 'http://localhost:4318',
+      protocol: 'http/protobuf',
       serviceName: 'test',
     })).not.toThrow();
   });
@@ -42,6 +51,17 @@ describe('OtlpTraceFlusher - config validation', () => {
       debug: true,
       captureMessageContent: true,
       turnIdleTimeoutMs: 0,
+    });
+    expect(flusher.name).toBe('otlp-trace');
+  });
+
+  it('passes resourceAttributes to buildResource', () => {
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      endpoint: 'http://localhost:4318',
+      protocol: 'http/protobuf',
+      serviceName: 'test',
+      resourceAttributes: { 'acs.arms.service.feature': 'genai_app', 'custom.key': 'val' },
     });
     expect(flusher.name).toBe('otlp-trace');
   });

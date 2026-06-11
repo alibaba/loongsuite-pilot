@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "cloudAccessKey.alicloud.accessKeyId",
+      "type": "cloudAccessKey",
+      "kind": "regex",
+      "replacement": "[ACCESSKEY_MASKED]",
+      "prefilter": ["LTAI"],
+      "pattern": "\\bLTAI[A-Za-z0-9]{12,}\\b",
+      "flags": "g"
+    },
+    {
+      "id": "cloudAccessKey.aws.accessKeyId",
+      "type": "cloudAccessKey",
+      "kind": "regex",
+      "replacement": "[ACCESSKEY_MASKED]",
+      "prefilter": ["AKIA", "ASIA", "ABIA", "ACCA"],
+      "pattern": "\\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\\b",
+      "flags": "g"
+    },
+    {
+      "id": "cloudAccessKey.tencent.secretId",
+      "type": "cloudAccessKey",
+      "kind": "regex",
+      "replacement": "[ACCESSKEY_MASKED]",
+      "prefilter": ["AKID"],
+      "pattern": "\\bAKID[A-Za-z0-9]{13,}\\b",
+      "flags": "g"
+    },
+    {
+      "id": "apiKey.openaiCompatible",
+      "type": "apiKey",
+      "kind": "regex",
+      "replacement": "[APIKEY_MASKED]",
+      "prefilter": ["sk-"],
+      "pattern": "\\bsk-[A-Za-z0-9_-]{20,}\\b",
+      "flags": "g"
+    },
+    {
+      "id": "apiKey.github",
+      "type": "apiKey",
+      "kind": "regex",
+      "replacement": "[APIKEY_MASKED]",
+      "prefilter": ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"],
+      "pattern": "\\b(?:(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\\b",
+      "flags": "g"
+    },
+    {
+      "id": "privateKey.pem",
+      "type": "privateKey",
+      "kind": "block",
+      "replacement": "[PRIVATEKEY_MASKED]",
+      "prefilter": ["PRIVATE KEY", "OPENSSH PRIVATE KEY"],
+      "beginPattern": "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "endPattern": "-----END [A-Z ]*PRIVATE KEY-----"
+    },
+    {
+      "id": "databaseUrl.withPassword",
+      "type": "databaseUrl",
+      "kind": "urlWithPassword",
+      "replacement": "[DATABASEURL_MASKED]",
+      "prefilter": ["mysql://", "postgres://", "postgresql://", "mongodb://", "redis://"],
+      "schemes": ["mysql", "postgres", "postgresql", "mongodb", "redis"]
+    },
+    {
+      "id": "databaseUrl.jdbcWithPassword",
+      "type": "databaseUrl",
+      "kind": "regex",
+      "replacement": "[DATABASEURL_MASKED]",
+      "prefilter": ["password=", "pwd="],
+      "pattern": "\\bjdbc:(?:mysql|postgresql)://[A-Za-z0-9._~:/#\\[\\]@!$()*+,=%-]*(?:[?&;](?!(?:password|pwd)=)[A-Za-z0-9._~:/#\\[\\]@!$()*+,=%-]+)*[?&;](?:password|pwd)=[A-Za-z0-9._~:/#\\[\\]@!$()*+,=%-]+(?:[&;][A-Za-z0-9._~:/#\\[\\]@!$()*+,=%-]+)*",
+      "flags": "gi"
+    }
+  ]
+}

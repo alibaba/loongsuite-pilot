@@ -7,11 +7,13 @@ import type {
   FlusherConfig,
   HookWatchdogConfig,
   LogRetentionConfig,
+  MaskConfig,
+  MaskType,
   OtlpTraceFlusherConfig,
+  OtlpTraceRawConfig,
   SlsEndpoint,
   SlsMode,
 } from '../types/index.js';
-import { INTERNAL_SLS_DESTINATION, buildInternalSlsEndpoint } from '../internal/sls-destination.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -19,30 +21,45 @@ const logger = createLogger('ConfigLoader');
 
 const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
 
+export interface SlsEndpointEntry {
+  name?: string;
+  endpoint: string;
+  project: string;
+  logstore: string;
+  mode?: SlsMode;
+  accessKeyId?: string;
+  accessKeySecret?: string;
+}
+
+export interface SlsSingleConfig {
+  enabled?: boolean;
+  mode?: SlsMode;
+  accessKeyId?: string;
+  accessKeySecret?: string;
+  endpoint?: string;
+  project?: string;
+  logstore?: string;
+  /** @deprecated Ignored. */
+  destinationOverride?: boolean;
+  batchMaxSize?: number;
+  flushIntervalMs?: number;
+}
+
+export interface InnerDataConfig {
+  sls?: SlsEndpointEntry[];
+}
+
 /**
  * On-disk config file shape.
  * All fields optional — missing fields fall back to env vars then defaults.
  */
-interface ConfigFile {
+export interface ConfigFile {
   enabled?: boolean;
   dataDir?: string;
   userId?: string;
   'user.id'?: string;
 
-  sls?: {
-    enabled?: boolean;
-    mode?: SlsMode;
-    accessKeyId?: string;
-    accessKeySecret?: string;
-    /** 完整 SLS endpoint URL，如 https://cn-hangzhou.log.aliyuncs.com */
-    endpoint?: string;
-    project?: string;
-    logstore?: string;
-    /** @deprecated Ignored since build-time isolation replaced runtime override. */
-    destinationOverride?: boolean;
-    batchMaxSize?: number;
-    flushIntervalMs?: number;
-  };
+  sls?: SlsSingleConfig | SlsEndpointEntry[];
 
   jsonl?: {
     enabled?: boolean;
@@ -85,6 +102,11 @@ interface ConfigFile {
   collectTrace?: boolean;
   serviceNamePrefix?: string;
 
+  mask?: {
+    mode?: string;
+    types?: string[];
+  };
+
   cms?: {
     licenseKey?: string;
     endpoint?: string;
@@ -92,10 +114,33 @@ interface ConfigFile {
     debug?: boolean;
   };
 
+  otlpTrace?: {
+    endpoint?: string;
+    headers?: Record<string, string>;
+    resourceAttributes?: Record<string, string>;
+    serviceName?: string;
+    debug?: boolean;
+    captureMessageContent?: boolean;
+    turnIdleTimeoutMs?: number;
+  };
+
   agents?: Record<string, {
     enabled?: boolean;
     captureMessageContent?: boolean | string;
   }>;
+
+  autoUpdate?: {
+    enabled?: boolean;
+    checkIntervalMs?: number;
+    manifestUrl?: string;
+    packageUrl?: string;
+  };
+
+  installId?: string;
+  canary?: {
+    policy?: 'auto' | 'latest' | 'off';
+    hotfix_version?: number;
+  };
 }
 
 function env(key: string): string | undefined {
@@ -135,7 +180,12 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
 
   const dataDir = env('LOONGSUITE_PILOT_DATA_DIR') ?? file?.dataDir ?? '~/.loongsuite-pilot';
 
+  const innerDataConfigPath = resolveHome(`${dataDir}/configs/inner/data_config.json`);
+  const innerDataConfig = await readJsonFile<InnerDataConfig>(innerDataConfigPath);
+
   const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
+
+  const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? 'loongsuite-pilot';
 
   return {
     enabled: envBool('LOONGSUITE_PILOT_ENABLED', file?.enabled ?? true),
@@ -144,15 +194,22 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     userId,
     collectLog: envBool('LOONGSUITE_PILOT_COLLECT_LOG', file?.collectLog ?? true),
     collectTrace: envBool('LOONGSUITE_PILOT_COLLECT_TRACE', file?.collectTrace ?? true),
-    serviceNamePrefix: env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? '',
+    serviceNamePrefix,
     cms: buildCmsConfig(file),
+    otlpTrace: buildOtlpTraceRawConfig(file),
 
     listeners: buildListenersConfig(file),
-    flushers: buildFlushersConfig(file, dataDir),
+    flushers: buildFlushersConfig(file, dataDir, serviceNamePrefix, innerDataConfig),
     retention: buildRetentionConfig(file),
     agents: buildAgentsConfig(file),
+    mask: buildMaskConfig(file),
     hookWatchdog: buildHookWatchdogConfig(file),
   };
+}
+
+function buildOtlpTraceRawConfig(file: ConfigFile | null): OtlpTraceRawConfig | undefined {
+  if (!file?.otlpTrace) return undefined;
+  return { ...file.otlpTrace };
 }
 
 function parseOptionalBool(value: unknown): boolean | undefined {
@@ -190,6 +247,41 @@ function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
   }
 
   return result;
+}
+
+const SUPPORTED_MASK_TYPES: readonly MaskType[] = [
+  'cloudAccessKey',
+  'apiKey',
+  'privateKey',
+  'databaseUrl',
+];
+
+const SUPPORTED_MASK_TYPE_SET = new Set<string>(SUPPORTED_MASK_TYPES);
+
+function parseMaskTypes(value: string | string[] | undefined): MaskType[] {
+  const rawTypes = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(',')
+      : [];
+  return rawTypes
+    .map(type => type.trim())
+    .filter((type): type is MaskType => SUPPORTED_MASK_TYPE_SET.has(type));
+}
+
+function buildMaskConfig(file: ConfigFile | null): MaskConfig {
+  const mode = env('LOONGSUITE_PILOT_MASK_MODE') ?? file?.mask?.mode;
+  if (mode !== 'all' && mode !== 'custom' && mode !== 'none') {
+    return { mode: 'none', types: [] };
+  }
+
+  if (mode === 'all' || mode === 'none') {
+    return { mode, types: [] };
+  }
+
+  const types = parseMaskTypes(env('LOONGSUITE_PILOT_MASK_TYPES') ?? file?.mask?.types);
+
+  return { mode: 'custom', types };
 }
 
 function buildListenersConfig(
@@ -269,23 +361,65 @@ function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
 function buildFlushersConfig(
   file: ConfigFile | null,
   dataDir: string,
+  serviceNamePrefix: string,
+  innerDataConfig: InnerDataConfig | null,
 ): FlusherConfig {
   return {
-    sls: buildSlsConfig(file),
+    sls: buildSlsConfig(file, serviceNamePrefix, innerDataConfig),
     jsonl: buildJsonlConfig(file, dataDir),
     http: buildHttpConfig(file),
   };
 }
 
 /**
- * Build OtlpTraceFlusherConfig from top-level fields:
- *   collectTrace, serviceNamePrefix, cms.{licenseKey, endpoint, workspace, debug}
+ * Build OtlpTraceFlusherConfig with two paths:
+ *   1. New path: config.otlpTrace (generic OTLP, headers passthrough)
+ *   2. Fallback: config.cms (ARMS-specific, auto-assembles x-arms-* headers)
  *
- * Headers are assembled from structured CMS fields.
- * x-arms-project is derived from the endpoint hostname prefix.
+ * Both paths require collectTrace=true.
  */
 export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherConfig | undefined {
   if (!config.collectTrace) return undefined;
+
+  const otlpEndpoint = env('LOONGSUITE_PILOT_OTLP_ENDPOINT') ?? config.otlpTrace?.endpoint;
+  if (otlpEndpoint) {
+    return buildOtlpTraceConfigNew(otlpEndpoint, config);
+  }
+
+  return buildOtlpTraceConfigLegacy(config);
+}
+
+function buildOtlpTraceConfigNew(
+  endpoint: string,
+  config: AnalyticsConfig,
+): OtlpTraceFlusherConfig {
+  const otlp = config.otlpTrace;
+
+  let headers: Record<string, string> | undefined;
+  const envHeaders = env('LOONGSUITE_PILOT_OTLP_HEADERS');
+  if (envHeaders) {
+    try { headers = JSON.parse(envHeaders); } catch { logger.warn('LOONGSUITE_PILOT_OTLP_HEADERS is not valid JSON, ignoring', { raw: envHeaders }); }
+  } else {
+    headers = otlp?.headers;
+  }
+
+  const captureMessageContent = otlp?.captureMessageContent ?? resolveCaptureMessageContent(config.agents);
+  const serviceName = otlp?.serviceName ?? (config.serviceNamePrefix || 'loongsuite-pilot');
+
+  return {
+    enabled: true,
+    endpoint,
+    protocol: 'http/protobuf',
+    headers,
+    serviceName,
+    resourceAttributes: otlp?.resourceAttributes,
+    captureMessageContent,
+    debug: otlp?.debug ?? false,
+    turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
+  };
+}
+
+function buildOtlpTraceConfigLegacy(config: AnalyticsConfig): OtlpTraceFlusherConfig | undefined {
   const { cms, serviceNamePrefix } = config;
   if (!cms.enabled || !cms.endpoint) return undefined;
 
@@ -303,6 +437,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     protocol: 'http/protobuf',
     headers,
     serviceName: serviceNamePrefix || 'loongsuite-pilot',
+    resourceAttributes: { 'acs.arms.service.feature': 'genai_app' },
     captureMessageContent,
     debug: cms.debug ?? false,
     turnIdleTimeoutMs: 0,
@@ -325,42 +460,52 @@ function resolveCaptureMessageContent(agents: AgentsConfig): boolean {
   return values.every(a => a.captureMessageContent !== false);
 }
 
-function buildSlsConfig(file: ConfigFile | null) {
-  // ============================================================
-  // Step 1: Read user-provided fields. Env > config.sls.* > undefined.
-  // ============================================================
-  const userMode = readUserSlsMode(file);
-  const userAk = env('SLS_ACCESS_KEY_ID') ?? file?.sls?.accessKeyId;
-  const userSk = env('SLS_ACCESS_KEY_SECRET') ?? file?.sls?.accessKeySecret;
-  const userRawEndpoint = env('SLS_ENDPOINT') ?? file?.sls?.endpoint;
-  const userProject = env('SLS_PROJECT') ?? file?.sls?.project;
-  const userLogstore = env('SLS_LOGSTORE') ?? file?.sls?.logstore;
+function parseSlsEndpointEntry(ep: SlsEndpointEntry, index: number): SlsEndpoint {
+  const mode: SlsMode = ep.mode ?? (ep.accessKeyId && ep.accessKeySecret ? 'ak' : 'webtracking');
+  const rawEndpoint = ep.endpoint ?? '';
+  const endpoint = rawEndpoint
+    ? (/^https?:\/\//.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`)
+    : '';
+  const result: SlsEndpoint = {
+    name: ep.name ?? `sls-${index}`,
+    endpoint,
+    project: ep.project,
+    logstore: ep.logstore,
+    kind: 'agentActivity',
+    mode,
+    redact: false,
+  };
+  if (mode === 'ak') {
+    result.accessKeyId = ep.accessKeyId ?? '';
+    result.accessKeySecret = ep.accessKeySecret ?? '';
+  }
+  return result;
+}
 
-  if (file?.sls?.destinationOverride !== undefined) {
+function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, innerDataConfig: InnerDataConfig | null) {
+  const rawSls = file?.sls;
+  const isArray = Array.isArray(rawSls);
+  const single = isArray ? null : (rawSls as SlsSingleConfig | undefined) ?? null;
+
+  if (single?.destinationOverride !== undefined) {
     logger.warn('config.sls.destinationOverride is deprecated and ignored — remove it from config.json');
   }
 
-  const hasUserDestination = !!(userProject && userLogstore);
-
   let endpoints: SlsEndpoint[];
-  if (__INTERNAL_BUILD__) {
-    if (!hasUserDestination) {
-      endpoints = [buildInternalSlsEndpoint()];
-    } else {
-      const userEndpoint = buildUserSlsEndpoint({
-        mode: userMode,
-        rawEndpoint: userRawEndpoint,
-        project: userProject!,
-        logstore: userLogstore!,
-        accessKeyId: userAk,
-        accessKeySecret: userSk,
-      });
-      endpoints = [userEndpoint, buildInternalSlsEndpoint()];
-    }
-  } else {
-    if (!hasUserDestination) {
-      endpoints = [];
-    } else {
+
+  if (isArray) {
+    endpoints = (rawSls as SlsEndpointEntry[]).map((ep, i) => parseSlsEndpointEntry(ep, i));
+  } else if (single) {
+    const userMode = readUserSlsMode(single);
+    const userAk = env('LOONGSUITE_SLS_ACCESS_KEY_ID') ?? single.accessKeyId;
+    const userSk = env('LOONGSUITE_SLS_ACCESS_KEY_SECRET') ?? single.accessKeySecret;
+    const userRawEndpoint = env('LOONGSUITE_SLS_ENDPOINT') ?? single.endpoint;
+    const userProject = env('LOONGSUITE_SLS_PROJECT') ?? single.project;
+    const userLogstore = env('LOONGSUITE_SLS_LOGSTORE') ?? single.logstore;
+
+    const hasUserDestination = !!(userProject && userLogstore);
+
+    if (hasUserDestination) {
       const userEndpoint = buildUserSlsEndpoint({
         mode: userMode,
         rawEndpoint: userRawEndpoint,
@@ -370,13 +515,20 @@ function buildSlsConfig(file: ConfigFile | null) {
         accessKeySecret: userSk,
       });
       endpoints = [userEndpoint];
+    } else {
+      endpoints = [];
     }
+  } else {
+    endpoints = [];
   }
 
-  // ============================================================
-  // Step 6: Dedup by normalized (endpoint URL, project, logstore) triple.
-  //          First entry wins on collision so user-leg name/credentials/redact survive.
-  // ============================================================
+  if (innerDataConfig?.sls && Array.isArray(innerDataConfig.sls)) {
+    const innerEndpoints = innerDataConfig.sls
+      .filter(ep => ep.endpoint && ep.project && ep.logstore)
+      .map((ep, i) => parseSlsEndpointEntry(ep, i));
+    endpoints = [...endpoints, ...innerEndpoints];
+  }
+
   endpoints = dedupSlsEndpoints(endpoints);
 
   const primary = endpoints[0] as SlsEndpoint | undefined;
@@ -385,18 +537,13 @@ function buildSlsConfig(file: ConfigFile | null) {
   const topLevelAk = primary?.accessKeyId ?? '';
   const topLevelSk = primary?.accessKeySecret ?? '';
 
-  let enabled: boolean;
-  if (file?.sls?.enabled !== undefined) {
-    enabled = file.sls.enabled;
-  } else if (__INTERNAL_BUILD__) {
-    enabled = true;
-  } else {
-    enabled = endpoints.length > 0 && endpoints.every(ep => {
-      if (!ep.endpoint || !ep.project || !ep.logstore) return false;
-      if (ep.mode === 'ak') return !!(ep.accessKeyId && ep.accessKeySecret);
-      return true;
-    });
-  }
+  const enabled = single?.enabled !== undefined
+    ? single.enabled
+    : endpoints.length > 0 && endpoints.every(ep => {
+        if (!ep.endpoint || !ep.project || !ep.logstore) return false;
+        if (ep.mode === 'ak') return !!(ep.accessKeyId && ep.accessKeySecret);
+        return true;
+      });
 
   return {
     enabled,
@@ -405,13 +552,14 @@ function buildSlsConfig(file: ConfigFile | null) {
     accessKeySecret: topLevelSk,
     endpoint: topLevelEndpoint,
     endpoints,
-    batchMaxSize: file?.sls?.batchMaxSize ?? 20,
-    flushIntervalMs: file?.sls?.flushIntervalMs ?? 2_000,
+    batchMaxSize: single?.batchMaxSize ?? 20,
+    flushIntervalMs: single?.flushIntervalMs ?? 2_000,
+    serviceNamePrefix,
   };
 }
 
-function readUserSlsMode(file: ConfigFile | null): SlsMode | undefined {
-  const raw = env('SLS_MODE') ?? file?.sls?.mode;
+function readUserSlsMode(single: SlsSingleConfig | null): SlsMode | undefined {
+  const raw = env('LOONGSUITE_SLS_MODE') ?? single?.mode;
   if (raw === 'ak' || raw === 'webtracking') return raw;
   return undefined;
 }
@@ -424,10 +572,9 @@ function buildUserSlsEndpoint(args: {
   accessKeyId: string | undefined;
   accessKeySecret: string | undefined;
 }): SlsEndpoint {
-  // Mode inference: explicit > AK presence > webtracking default.
   const mode: SlsMode = args.mode ?? (args.accessKeyId && args.accessKeySecret ? 'ak' : 'webtracking');
 
-  const rawEndpoint = args.rawEndpoint || (__INTERNAL_BUILD__ ? INTERNAL_SLS_DESTINATION.endpoint : '');
+  const rawEndpoint = args.rawEndpoint ?? '';
   const endpoint = rawEndpoint
     ? (/^https?:\/\//.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`)
     : '';
@@ -511,42 +658,16 @@ function buildHttpConfig(file: ConfigFile | null) {
   };
 }
 
-const BASE_PACKAGE_URL = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/';
-
-const INTERNAL_RELEASE_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite/loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
-const INTERNAL_TEST_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite-dev/loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
-
-const EXTERNAL_RELEASE_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite-pilot/latest/loongsuite-pilot.tar.gz`;
-const EXTERNAL_TEST_PACKAGE_URL = `${BASE_PACKAGE_URL}loongsuite-pilot-dev/latest/loongsuite-pilot.tar.gz`;
-
-const RELEASE_PACKAGE_URL = __INTERNAL_BUILD__ ? INTERNAL_RELEASE_PACKAGE_URL : EXTERNAL_RELEASE_PACKAGE_URL;
-const TEST_PACKAGE_URL = __INTERNAL_BUILD__ ? INTERNAL_TEST_PACKAGE_URL : EXTERNAL_TEST_PACKAGE_URL;
-
 const DEFAULT_CHECK_INTERVAL_MS = 60_000; // 1 minute
-
-function resolveDefaultPackageUrl(): string {
-  const channel = env('LOONGSUITE_PILOT_CHANNEL') ?? 'release';
-
-  if (channel === 'test' || channel === 'pre') {
-    return TEST_PACKAGE_URL;
-  } else if (/^(test-[a-zA-Z0-9]+)$/.test(channel)) {
-    const testPrefix = __INTERNAL_BUILD__
-      ? `loongsuite-dev/${channel}/loongsuite-pilot`
-      : `loongsuite-pilot-dev/${channel}`;
-    return `${BASE_PACKAGE_URL}${testPrefix}/latest/loongsuite-pilot.tar.gz`;
-  } else {
-    return RELEASE_PACKAGE_URL;
-  }
-}
 
 /**
  * Build AutoUpdateConfig from env vars + config file.
  * Exported for use by the standalone updater process.
  */
 export function buildAutoUpdateConfig(
-  file: { autoUpdate?: { enabled?: boolean; checkIntervalMs?: number; manifestUrl?: string; packageUrl?: string } } | null,
+  file: ConfigFile | null,
 ): AutoUpdateConfig {
-  const packageUrl = env('LOONGSUITE_PILOT_PACKAGE_URL') ?? file?.autoUpdate?.packageUrl ?? resolveDefaultPackageUrl();
+  const packageUrl = env('LOONGSUITE_PILOT_PACKAGE_URL') ?? file?.autoUpdate?.packageUrl;
 
   let manifestUrl = env('LOONGSUITE_PILOT_MANIFEST_URL') ?? file?.autoUpdate?.manifestUrl;
   if (!manifestUrl && packageUrl) {
@@ -556,13 +677,18 @@ export function buildAutoUpdateConfig(
       : undefined;
   }
 
+  const hasPackageConfig = !!packageUrl;
+
   return {
-    enabled: envBool('LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
+    enabled: hasPackageConfig && envBool('LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
     checkIntervalMs: envInt(
       'LOONGSUITE_PILOT_AUTO_UPDATE_INTERVAL_MS',
       file?.autoUpdate?.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS,
     ),
     manifestUrl,
     packageUrl,
+    installId: file?.installId,
+    canaryPolicy: file?.canary?.policy,
+    canaryHotfixVersion: file?.canary?.hotfix_version ?? 0,
   };
 }

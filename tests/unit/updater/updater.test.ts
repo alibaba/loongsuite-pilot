@@ -67,6 +67,18 @@ vi.mock('node:util', () => ({
   promisify: () => (...args: any[]) => mockExecFile(...args),
 }));
 
+// --- Mock fs-utils (readJsonFile, writeJsonFile) ---
+const mockReadJsonFile = vi.fn();
+const mockWriteJsonFile = vi.fn();
+vi.mock('../../../src/utils/fs-utils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/utils/fs-utils.js')>();
+  return {
+    ...actual,
+    readJsonFile: (...args: any[]) => mockReadJsonFile(...args),
+    writeJsonFile: (...args: any[]) => mockWriteJsonFile(...args),
+  };
+});
+
 // --- Mock global fetch ---
 const mockFetch = vi.fn<[string, any?], Promise<Response>>();
 
@@ -141,6 +153,9 @@ describe('Updater', () => {
     mockFsAccess.mockRejectedValue(new Error('ENOENT'));
     // Default: execFile succeeds
     mockExecFile.mockResolvedValue({ stdout: '', stderr: '' });
+    // Default: readJsonFile / writeJsonFile
+    mockReadJsonFile.mockResolvedValue({});
+    mockWriteJsonFile.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -285,6 +300,11 @@ describe('Updater', () => {
         if (p.includes('updater-daemon')) return Promise.reject(new Error('ENOENT'));
         return Promise.reject(new Error('ENOENT'));
       });
+      // copyFileAtomic reads source files via fs.readFile before copying
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (filePath.includes('/scripts/')) return Promise.resolve(Buffer.from('script'));
+        return Promise.reject(new Error('ENOENT'));
+      });
     }
 
     it('deploys successfully on first install', async () => {
@@ -346,6 +366,7 @@ describe('Updater', () => {
         if (filePath.endsWith('/current')) return Promise.resolve('1.0.1_aaa\n');
         if (filePath.endsWith('/previous')) return Promise.resolve('1.0.0_zzz\n');
         if (filePath.endsWith('/VERSION')) return Promise.resolve('version=1.0.1\ngit_commit=aaa\n');
+        if (filePath.includes('/scripts/')) return Promise.resolve(Buffer.from('script'));
         return Promise.reject(new Error('ENOENT'));
       });
       mockFsAccess.mockImplementation((p: string) => {
@@ -388,10 +409,11 @@ describe('Updater', () => {
       });
 
       setupForDownload();
-      // Override readFile to handle pointer reads
+      // Override readFile to handle pointer reads and scripts
       mockFsReadFile.mockImplementation((filePath: string) => {
         if (filePath.endsWith('/current')) return Promise.resolve('1.0.1_aaa\n');
         if (filePath.endsWith('/VERSION')) return Promise.resolve('version=1.0.1\ngit_commit=aaa\n');
+        if (filePath.includes('/scripts/')) return Promise.resolve(Buffer.from('script'));
         return Promise.reject(new Error('ENOENT'));
       });
       mockFsAccess.mockImplementation((p: string) => {
@@ -516,6 +538,7 @@ describe('Updater', () => {
       mockFsReadFile.mockImplementation((filePath: string) => {
         if (filePath.endsWith('/loongsuite-pilot-monitor.pid')) return Promise.resolve('12345\n');
         if (filePath.endsWith('/loongsuite-pilot-dashboard.pid')) return Promise.reject(new Error('ENOENT'));
+        if (filePath.includes('/scripts/')) return Promise.resolve(Buffer.from('script'));
         return Promise.reject(new Error('ENOENT'));
       });
 

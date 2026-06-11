@@ -29,6 +29,17 @@ import fs from 'node:fs';
  */
 
 /**
+ * @typedef {object} ToolEvent
+ * @property {'pre_tool_use'|'post_tool_use'} type
+ * @property {number} timestamp
+ * @property {string} turn_id
+ * @property {string} tool_name
+ * @property {any} [tool_input]
+ * @property {any} [tool_response]
+ * @property {string} tool_use_id
+ */
+
+/**
  * @typedef {object} TranscriptData
  * @property {string} model
  * @property {string} modelProvider
@@ -37,9 +48,22 @@ import fs from 'node:fs';
  * @property {TokenUsage|null} totalUsage
  * @property {Array<{type:string, content:string}>=} systemInstruction
  * @property {Array<{type:string, name:string, description:string|null, parameters:any}>=} toolDefinitions
+ * @property {ToolEvent[]} toolEvents 从 response_item 提取的工具调用事件
  * @property {number} nextOffset 增量读取的下一个字节偏移
  * @property {TokenUsage|null} lastEmittedUsage 跨调用心跳去重锚点
  */
+
+const MAX_TRANSCRIPT_READ_BYTES = 50 * 1024 * 1024; // 50MB
+
+function parseMaybeJsonValue(value) {
+  if (typeof value !== 'string') return value ?? null;
+  try { return JSON.parse(value); } catch { return value; }
+}
+
+function entryTimestampSeconds(entry) {
+  const ms = Date.parse(entry?.timestamp || '');
+  return Number.isFinite(ms) ? ms / 1000 : 0;
+}
 
 function mapDynamicTool(t) {
   const rawName = typeof t.name === 'string' ? t.name : '';
@@ -101,16 +125,21 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
         tokenEvents: [],
         tokenEventsByTurn: new Map(),
         totalUsage: null,
+        toolEvents: [],
         nextOffset: byteOffset,
         lastEmittedUsage: initialLastUsage,
       };
     }
 
     const readFrom = Math.max(byteOffset, 0);
+    const rawLen = fileSize - readFrom;
+    const readLen = Math.min(rawLen, MAX_TRANSCRIPT_READ_BYTES);
+    if (readLen < rawLen) {
+      process.stderr.write(`[codex-transcript-parser] transcript ${transcriptPath} truncated: ${rawLen} bytes > ${MAX_TRANSCRIPT_READ_BYTES} limit\n`);
+    }
     if (readFrom > 0) {
       const fd = fs.openSync(transcriptPath, 'r');
       try {
-        const readLen = fileSize - readFrom;
         const buf = Buffer.alloc(readLen);
         fs.readSync(fd, buf, 0, readLen, readFrom);
         content = buf.toString('utf-8');
@@ -118,10 +147,10 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
         fs.closeSync(fd);
       }
     } else {
-      content = fs.readFileSync(transcriptPath, 'utf-8');
+      content = fs.readFileSync(transcriptPath, 'utf-8').slice(0, MAX_TRANSCRIPT_READ_BYTES);
     }
-  } catch {
-    return null;
+  } catch (err) {
+    throw new Error(`[codex-transcript-parser] failed to read ${transcriptPath}: ${err?.message || err}`);
   }
 
   let model = 'unknown';
@@ -136,6 +165,11 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
   let lastDeveloperInstructions = '';
   /** @type {Array<ReturnType<typeof mapDynamicTool>>} */
   const toolDefs = [];
+
+  // tool 事件提取（从 response_item:function_call/function_call_output）
+  /** @type {ToolEvent[]} */
+  const toolEvents = [];
+  const pendingToolCalls = new Map();
 
   // 当前正在处理的 turn_id;由 task_started / turn_context 设置
   let currentTurnId = null;
@@ -221,7 +255,52 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
           lastTotalUsage = parseTokenUsage(info.total_token_usage);
         }
       }
+    } else if (entryType === 'response_item') {
+      const itemType = payload.type;
+      if (itemType === 'function_call') {
+        const callId = String(payload.call_id || payload.id || '');
+        if (callId) {
+          const toolName = String(payload.name || 'unknown');
+          const evt = {
+            type: 'pre_tool_use',
+            timestamp: entryTimestampSeconds(entry),
+            turn_id: currentTurnId ?? '',
+            tool_name: toolName,
+            tool_input: parseMaybeJsonValue(payload.arguments),
+            tool_use_id: callId,
+          };
+          pendingToolCalls.set(callId, evt);
+          toolEvents.push(evt);
+        }
+      } else if (itemType === 'function_call_output') {
+        const callId = String(payload.call_id || payload.id || '');
+        if (callId) {
+          const pre = pendingToolCalls.get(callId);
+          toolEvents.push({
+            type: 'post_tool_use',
+            timestamp: entryTimestampSeconds(entry),
+            turn_id: currentTurnId ?? pre?.turn_id ?? '',
+            tool_name: pre?.tool_name || 'unknown',
+            tool_response: parseMaybeJsonValue(payload.output),
+            tool_use_id: callId,
+          });
+          pendingToolCalls.delete(callId);
+        }
+      }
     }
+  }
+
+  // 为孤立的 function_call（无 function_call_output）生成 synthetic post_tool_use，
+  // 避免 buildReactSteps 中 pendingToolIds 永远不清空导致 step 切分失效
+  for (const [callId, preEvent] of pendingToolCalls) {
+    toolEvents.push({
+      type: 'post_tool_use',
+      timestamp: preEvent.timestamp,
+      turn_id: preEvent.turn_id,
+      tool_name: preEvent.tool_name,
+      tool_response: null,
+      tool_use_id: callId,
+    });
   }
 
   /** @type {Array<{type:string, content:string}>} */
@@ -237,7 +316,8 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
     tokenEvents.length > 0 ||
     !!lastTotalUsage ||
     systemInstruction.length > 0 ||
-    toolDefs.length > 0;
+    toolDefs.length > 0 ||
+    toolEvents.length > 0;
 
   if (!hasContent) {
     return {
@@ -246,6 +326,7 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
       tokenEvents: [],
       tokenEventsByTurn: new Map(),
       totalUsage: null,
+      toolEvents: [],
       nextOffset: fileSize,
       lastEmittedUsage,
     };
@@ -259,6 +340,7 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
     totalUsage: lastTotalUsage,
     systemInstruction: systemInstruction.length > 0 ? systemInstruction : undefined,
     toolDefinitions: toolDefs.length > 0 ? toolDefs : undefined,
+    toolEvents,
     nextOffset: fileSize,
     lastEmittedUsage,
   };

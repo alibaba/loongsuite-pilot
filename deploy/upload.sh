@@ -8,8 +8,8 @@
 #     ossutil config -e oss-cn-hangzhou.aliyuncs.com -i <AK_ID> -k <AK_SECRET>
 #
 # Usage:
-#   bash deploy/upload.sh                              # internal (default), test channel
-#   bash deploy/upload.sh --external                   # external, test channel
+#   bash deploy/upload.sh                              # internal target (default), test channel
+#   bash deploy/upload.sh --external                   # external target, test channel
 #   bash deploy/upload.sh --channel release            # upload to release path
 #   bash deploy/upload.sh --channel test               # upload to test path (default)
 #   bash deploy/upload.sh --channel test-<self>        # upload to test path (self dir)
@@ -17,6 +17,11 @@
 #   bash deploy/upload.sh --prefix custom/path         # custom OSS prefix
 #   bash deploy/upload.sh --package /tmp/out.tar.gz    # custom package path
 #   bash deploy/upload.sh --region cn-hangzhou         # custom region
+#   bash deploy/upload.sh --canary                     # canary mode: update canary field in latest.json
+#   bash deploy/upload.sh --canary --hotfix             # canary hotfix: bump hotfix_version
+#
+# The --external flag selects the deploy target (OSS path + installer script),
+# not the build variant. The same unified build is uploaded to either target.
 #
 # Environment variables (override CLI args):
 #   LOONGSUITE_PILOT_CHANNEL   — release or test (default: test)
@@ -55,6 +60,8 @@ REGION="${OSS_REGION:-}"
 PKG_PATH="$PROJECT_ROOT/loongsuite-pilot.tar.gz"
 DEPLOY_MODE="internal"
 PATCHELF_SCRIPT="$PROJECT_ROOT/deploy/patchelf_node_for_7u.sh"
+CANARY=0
+HOTFIX=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -80,10 +87,20 @@ while [[ $# -gt 0 ]]; do
             PKG_PATH="$2"; shift 2 ;;
         --package=*)
             PKG_PATH="${1#*=}"; shift ;;
+        --canary)
+            CANARY=1; shift ;;
+        --hotfix)
+            HOTFIX=1; shift ;;
         *)
             echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+# ── Validate canary/hotfix combination ──
+if [ "$HOTFIX" -eq 1 ] && [ "$CANARY" -eq 0 ]; then
+    echo "❌ --hotfix can only be used with --canary" >&2
+    exit 1
+fi
 
 # Select installer script and presets based on deploy mode
 if [ "$DEPLOY_MODE" = "external" ]; then
@@ -209,7 +226,67 @@ prepare_channel_installer() {
 RELEASED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 PKG_SHA256="$(shasum -a 256 "$PKG_PATH" | cut -d' ' -f1)"
 MANIFEST_TMP="$(mktemp)"
-cat > "$MANIFEST_TMP" << MJSON
+
+if [ "$CANARY" -eq 1 ]; then
+    # ── Canary mode: merge canary field into existing latest.json ──
+    echo "==> Canary mode: downloading existing latest.json..."
+    EXISTING_MANIFEST="$(mktemp)"
+    ossutil cp "${OSS_BASE}/latest.json" "$EXISTING_MANIFEST" --force 2>/dev/null || true
+
+    if [ ! -s "$EXISTING_MANIFEST" ]; then
+        echo "❌ Cannot fetch existing latest.json for canary merge."
+        echo "   A stable release must exist before publishing a canary."
+        rm -f "$EXISTING_MANIFEST"
+        exit 1
+    fi
+
+    HOTFIX_VERSION=0
+    if [ "$HOTFIX" -eq 1 ]; then
+        PREV_HOTFIX=$(node -e "
+            const m = JSON.parse(require('fs').readFileSync('$EXISTING_MANIFEST','utf8'));
+            process.stdout.write(String((m.canary && m.canary.hotfix_version) || 0));
+        " 2>/dev/null || echo "0")
+        HOTFIX_VERSION=$((PREV_HOTFIX + 1))
+        echo "    Hotfix version: ${PREV_HOTFIX} → ${HOTFIX_VERSION}"
+    fi
+
+    node -e "
+        const fs = require('fs');
+        const existing = JSON.parse(fs.readFileSync('$EXISTING_MANIFEST', 'utf8'));
+        existing.canary = {
+            version: '${PKG_VER}',
+            git_commit: '${PKG_COMMIT}',
+            package_url: '${PUBLIC_BASE}/${PKG_VER}/${PKG_NAME}',
+            released_at: '${RELEASED_AT}',
+            sha256: '${PKG_SHA256}',
+            rollout_percentage: 0
+        };
+        if (${HOTFIX_VERSION} > 0) {
+            existing.canary.hotfix_version = ${HOTFIX_VERSION};
+        }
+        fs.writeFileSync('$MANIFEST_TMP', JSON.stringify(existing, null, 2) + '\n');
+    "
+    rm -f "$EXISTING_MANIFEST"
+    echo "    ✅ Canary manifest generated (rollout_percentage=0${HOTFIX_VERSION:+, hotfix_version=${HOTFIX_VERSION}})"
+    echo ""
+
+    # Upload package to versioned path only (do NOT upload to latest/ — that would overwrite the stable package)
+    echo "==> Uploading canary package to versioned path: ${PREFIX}/${PKG_VER}/"
+    upload_file "$PKG_PATH"         "${OSS_BASE}/${PKG_VER}/${PKG_NAME}" "versioned package"
+    echo "    ✅ ${PUBLIC_BASE}/${PKG_VER}/${PKG_NAME}"
+    echo ""
+
+    # Update latest.json with canary field (preserves stable fields)
+    echo "==> Updating latest.json with canary field"
+    upload_file "$MANIFEST_TMP"     "${OSS_BASE}/latest/latest.json"     "latest manifest"
+    echo "    ✅ ${PUBLIC_BASE}/latest/latest.json"
+    upload_file "$MANIFEST_TMP"     "${OSS_BASE}/latest.json"            "root manifest"
+    echo "    ✅ ${PUBLIC_BASE}/latest.json"
+    rm -f "$MANIFEST_TMP"
+    echo ""
+else
+    # ── Stable mode: full manifest replacement ──
+    cat > "$MANIFEST_TMP" << MJSON
 {
   "version": "${PKG_VER}",
   "git_commit": "${PKG_COMMIT}",
@@ -219,28 +296,29 @@ cat > "$MANIFEST_TMP" << MJSON
 }
 MJSON
 
-# ── Upload to versioned path: <prefix>/<version>/ ──
-echo "==> Uploading to versioned path: ${PREFIX}/${PKG_VER}/"
-upload_file "$PKG_PATH"         "${OSS_BASE}/${PKG_VER}/${PKG_NAME}" "versioned package"
-echo "    ✅ ${PUBLIC_BASE}/${PKG_VER}/${PKG_NAME}"
-upload_file "$MANIFEST_TMP"     "${OSS_BASE}/${PKG_VER}/latest.json" "versioned manifest"
-echo "    ✅ ${PUBLIC_BASE}/${PKG_VER}/latest.json"
-echo ""
+    # ── Upload to versioned path: <prefix>/<version>/ ──
+    echo "==> Uploading to versioned path: ${PREFIX}/${PKG_VER}/"
+    upload_file "$PKG_PATH"         "${OSS_BASE}/${PKG_VER}/${PKG_NAME}" "versioned package"
+    echo "    ✅ ${PUBLIC_BASE}/${PKG_VER}/${PKG_NAME}"
+    upload_file "$MANIFEST_TMP"     "${OSS_BASE}/${PKG_VER}/latest.json" "versioned manifest"
+    echo "    ✅ ${PUBLIC_BASE}/${PKG_VER}/latest.json"
+    echo ""
 
-# ── Upload to latest path: <prefix>/latest/ ──
-echo "==> Uploading to latest path: ${PREFIX}/latest/"
-upload_file "$PKG_PATH"         "${OSS_BASE}/latest/${PKG_NAME}"     "latest package"
-echo "    ✅ ${PUBLIC_BASE}/latest/${PKG_NAME}"
-upload_file "$MANIFEST_TMP"     "${OSS_BASE}/latest/latest.json"     "latest manifest"
-echo "    ✅ ${PUBLIC_BASE}/latest/latest.json"
-echo ""
+    # ── Upload to latest path: <prefix>/latest/ ──
+    echo "==> Uploading to latest path: ${PREFIX}/latest/"
+    upload_file "$PKG_PATH"         "${OSS_BASE}/latest/${PKG_NAME}"     "latest package"
+    echo "    ✅ ${PUBLIC_BASE}/latest/${PKG_NAME}"
+    upload_file "$MANIFEST_TMP"     "${OSS_BASE}/latest/latest.json"     "latest manifest"
+    echo "    ✅ ${PUBLIC_BASE}/latest/latest.json"
+    echo ""
 
-# ── Upload root-level latest.json (for backward compat & quick version check) ──
-echo "==> Uploading root latest.json"
-upload_file "$MANIFEST_TMP"     "${OSS_BASE}/latest.json"            "root manifest"
-echo "    ✅ ${PUBLIC_BASE}/latest.json"
-rm -f "$MANIFEST_TMP"
-echo ""
+    # ── Upload root-level latest.json (for backward compat & quick version check) ──
+    echo "==> Uploading root latest.json"
+    upload_file "$MANIFEST_TMP"     "${OSS_BASE}/latest.json"            "root manifest"
+    echo "    ✅ ${PUBLIC_BASE}/latest.json"
+    rm -f "$MANIFEST_TMP"
+    echo ""
+fi
 
 # ── Upload installer script (version-independent, stays at prefix root) ──
 INSTALLER_NAME="installer.sh"
@@ -257,35 +335,52 @@ echo ""
 # ── Summary ──
 PKG_SIZE=$(du -h "$PKG_PATH" | cut -f1)
 
-echo "============================================================"
-echo "✅ Upload complete!  Mode: ${DEPLOY_MODE}  Version: ${PKG_VER}"
-echo ""
-echo "📦 Versioned package ($PKG_SIZE):"
-echo "   ${PUBLIC_BASE}/${PKG_VER}/${PKG_NAME}"
-echo ""
-echo "📦 Latest package:"
-echo "   ${PUBLIC_BASE}/latest/${PKG_NAME}"
-echo ""
-echo "📜 Installer:"
-echo "   ${PUBLIC_BASE}/${INSTALLER_NAME}"
-echo ""
-echo "Install (latest):"
-echo "   curl -fsSL ${PUBLIC_BASE}/${INSTALLER_NAME} | bash"
-echo ""
-echo "Install specific version:"
-echo "   curl -fsSL ${PUBLIC_BASE}/${INSTALLER_NAME} | bash -s -- install --version ${PKG_VER}"
-echo ""
-echo "Install with SLS backend:"
-echo "   curl -fsSL ${PUBLIC_BASE}/${INSTALLER_NAME} | bash -s -- install \\"
-echo "     --sls-endpoint \"cn-hangzhou.log.aliyuncs.com\" \\"
-echo "     --sls-project \"your-project\" \\"
-echo "     --sls-logstore \"your-logstore\" \\"
-echo "     --sls-ak-id \"your-ak-id\" \\"
-echo "     --sls-ak-secret \"your-ak-secret\""
-echo ""
-echo "Upgrade:"
-echo "   curl -fsSL ${PUBLIC_BASE}/${INSTALLER_NAME} | bash -s -- upgrade"
-echo ""
-echo "Uninstall:"
-echo "   curl -fsSL ${PUBLIC_BASE}/${INSTALLER_NAME} | bash -s -- uninstall"
-echo "============================================================"
+if [ "$CANARY" -eq 1 ]; then
+    echo "============================================================"
+    echo "✅ Canary upload complete!  Mode: ${DEPLOY_MODE}  Version: ${PKG_VER}"
+    echo ""
+    echo "📦 Canary package ($PKG_SIZE):"
+    echo "   ${PUBLIC_BASE}/${PKG_VER}/${PKG_NAME}"
+    echo ""
+    echo "   rollout_percentage: 0 (paused)"
+    if [ "$HOTFIX" -eq 1 ]; then
+        echo "   hotfix_version:     ${HOTFIX_VERSION}"
+    fi
+    echo ""
+    echo "Next step: set rollout percentage"
+    echo "   bash deploy/rollout.sh --percentage 5"
+    echo "============================================================"
+else
+    echo "============================================================"
+    echo "✅ Upload complete!  Mode: ${DEPLOY_MODE}  Version: ${PKG_VER}"
+    echo ""
+    echo "📦 Versioned package ($PKG_SIZE):"
+    echo "   ${PUBLIC_BASE}/${PKG_VER}/${PKG_NAME}"
+    echo ""
+    echo "📦 Latest package:"
+    echo "   ${PUBLIC_BASE}/latest/${PKG_NAME}"
+    echo ""
+    echo "📜 Installer:"
+    echo "   ${PUBLIC_BASE}/${INSTALLER_NAME}"
+    echo ""
+    echo "Install (latest):"
+    echo "   curl -fsSL ${PUBLIC_BASE}/${INSTALLER_NAME} | bash"
+    echo ""
+    echo "Install specific version:"
+    echo "   curl -fsSL ${PUBLIC_BASE}/${INSTALLER_NAME} | bash -s -- install --version ${PKG_VER}"
+    echo ""
+    echo "Install with SLS backend:"
+    echo "   curl -fsSL ${PUBLIC_BASE}/${INSTALLER_NAME} | bash -s -- install \\"
+    echo "     --sls-endpoint \"cn-hangzhou.log.aliyuncs.com\" \\"
+    echo "     --sls-project \"your-project\" \\"
+    echo "     --sls-logstore \"your-logstore\" \\"
+    echo "     --sls-ak-id \"your-ak-id\" \\"
+    echo "     --sls-ak-secret \"your-ak-secret\""
+    echo ""
+    echo "Upgrade:"
+    echo "   curl -fsSL ${PUBLIC_BASE}/${INSTALLER_NAME} | bash -s -- upgrade"
+    echo ""
+    echo "Uninstall:"
+    echo "   curl -fsSL ${PUBLIC_BASE}/${INSTALLER_NAME} | bash -s -- uninstall"
+    echo "============================================================"
+fi

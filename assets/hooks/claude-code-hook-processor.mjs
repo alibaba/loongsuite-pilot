@@ -3,28 +3,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * claude-code-hook-processor.mjs — Claude Code hook 主分发器。
+ * claude-code-hook-processor.mjs — Claude Code hook 主分发器 (v2)。
  *
- * 由 claude-code-loongsuite-pilot-hook.sh 调用,每个 hook 事件触发一次:
+ * 由 claude-code-loongsuite-pilot-hook.sh 调用:
  *   $ node claude-code-hook-processor.mjs <subcommand>
  *
- * Subcommand ↔ Claude hook event:
- *   user-prompt-submit / pre-tool-use / post-tool-use / stop
- *   pre-compact / subagent-start / subagent-stop / notification
- *
- * 整体职责:
- *   - UserPromptSubmit / PreToolUse / PostToolUse / PreCompact / SubagentStart /
- *     SubagentStop / Notification: 累积 event 到 state.events,持久化
- *   - Stop: 触发 transcript 增量解析 + 切 turn + 写 JSONL,持久化 transcript_offset
- *
- * 关键移植 + 修复:
- *   - isCursorCaller 早返回 (cursor IDE 调用 Claude 时避免双重采集)
- *   - 7.5 byteOffset 增量读 (跨 turn 跳过已消费字节)
- *   - 7.7 input_tokens 全量公式 (input = apiInput + cacheRead + cacheCreation)
- *   - 7.9 logOnly 模式 trace_id / span_id 自生成 (无 OTel SDK)
- *   - 30% PostToolUse drop 修复 (孤儿 PreToolUse 输出 tool.call,无对应 result)
- *   - SubagentStop 子 state 合并 (readAndDeleteChildState)
- *   - cmdStop transcript 解析空时 retry 50ms × 3 (R9: 防止 transcript flush 慢)
+ * v2 重构:
+ *   - 只处理 3 个 subcommand: stop / subagent-start / subagent-stop
+ *   - 纯 transcript 驱动: 时间戳从 transcript record.timestamp 获取
+ *   - tool→step 归属: 通过 tool_use_id 从 LLM output_content 匹配到声明方 step
+ *   - 不再依赖 alignWithHookEvents / hook 事件累积
  *
  * 字段命名全部使用 ai_event_schema.md 标准 `gen_ai.*` 前缀。
  * finish_reasons 输出为 string[](规范要求 array)。
@@ -47,7 +35,6 @@ import {
 import { logHookError } from './shared/error-logger.mjs';
 import {
   sanitizeObject,
-  timestampToUnixNanos,
   toJsonValue,
   loadHookRuntimeConfig,
   resolveUserId,
@@ -61,17 +48,12 @@ import {
 } from './claude-code/state.mjs';
 import {
   parseClaudeTranscript,
-  alignWithHookEvents,
 } from './claude-code/transcript-parser.mjs';
 import {
   convertInputMessages,
   convertOutputMessages,
   mapStopReason,
 } from './claude-code/message-converter.mjs';
-import {
-  extractToolResult,
-  extractToolError,
-} from './claude-code/tool-utils.mjs';
 
 const AGENT_ID = 'claude-code';
 
@@ -89,12 +71,6 @@ function defaultLogDir() {
   return path.join(pilotDataDir(), 'logs', AGENT_ID);
 }
 
-function maybeSaveTranscriptPath(state, event) {
-  if (!state.transcript_path && event.transcript_path) {
-    state.transcript_path = event.transcript_path;
-  }
-}
-
 function tryReadStdin() {
   try {
     return readStdinJson();
@@ -109,11 +85,6 @@ function tryReadStdin() {
   }
 }
 
-/**
- * 没拿到合法 session_id 时跳过 state 写入,避免污染 sessions/ 目录。
- * Claude / Cursor / Codex 的 hook stdin 都会带 session_id;若缺失说明 stdin 解析有问题
- * 或调用方异常,直接早返回(已 logHookError 记录,fail-open)。
- */
 function requireSessionId(event, stage = 'cmd') {
   const sid = event && event.session_id;
   if (typeof sid === 'string' && sid.length > 0) return sid;
@@ -126,94 +97,20 @@ function requireSessionId(event, stage = 'cmd') {
   return null;
 }
 
-// ─── 8 cmd handlers — 累积 event 到 state ───
-
-function cmdUserPromptSubmit() {
-  const event = tryReadStdin();
-  if (isCursorCaller(event)) return;
-  const sessionId = requireSessionId(event, 'cmd');
-  if (!sessionId) return;
-  const prompt = event.prompt || '';
-
-  const state = loadState(sessionId);
-  maybeSaveTranscriptPath(state, event);
-  state.start_time = state.start_time || nowSec();
-  if (!state.prompt) state.prompt = prompt;
-  state.metrics = state.metrics || {};
-  state.metrics.turns = (state.metrics.turns || 0) + 1;
-  if (event.model) state.model = event.model;
-
-  state.events.push({
-    type: 'user_prompt_submit',
-    timestamp: nowSec(),
-    prompt,
-  });
-  saveState(sessionId, state);
+/**
+ * ISO8601 字符串转为 time_unix_nano 字符串。
+ */
+function isoToUnixNanos(isoStr) {
+  if (!isoStr) return '0';
+  const ms = new Date(isoStr).getTime();
+  if (isNaN(ms)) return '0';
+  return String(ms) + '000000';
 }
 
-function cmdPreToolUse() {
-  const event = tryReadStdin();
-  if (isCursorCaller(event)) return;
-  const sessionId = requireSessionId(event, 'cmd');
-  if (!sessionId) return;
-  const toolName = event.tool_name || 'unknown';
-  const toolInput = event.tool_input || {};
-  // 缺 tool_use_id 时不 fallback uuid — 让 cmdPostToolUse 配不上,孤儿 → 30% drop 修复路径处理
-  const toolUseId = event.tool_use_id || null;
+// ─── cmd handlers ───
 
-  const state = loadState(sessionId);
-  maybeSaveTranscriptPath(state, event);
-  state.metrics = state.metrics || {};
-  state.metrics.tools_used = (state.metrics.tools_used || 0) + 1;
-  state.tools_used = state.tools_used || [];
-  if (!state.tools_used.includes(toolName)) state.tools_used.push(toolName);
-
-  state.events.push({
-    type: 'pre_tool_use',
-    timestamp: nowSec(),
-    tool_name: toolName,
-    tool_input: toolInput,
-    tool_use_id: toolUseId,
-  });
-  saveState(sessionId, state);
-}
-
-function cmdPostToolUse() {
-  const event = tryReadStdin();
-  if (isCursorCaller(event)) return;
-  const sessionId = requireSessionId(event, 'cmd');
-  if (!sessionId) return;
-
-  const state = loadState(sessionId);
-  maybeSaveTranscriptPath(state, event);
-  state.events.push({
-    type: 'post_tool_use',
-    timestamp: nowSec(),
-    tool_name: event.tool_name || 'unknown',
-    tool_response: event.tool_response,
-    tool_use_id: event.tool_use_id || null,
-  });
-  saveState(sessionId, state);
-}
-
-function cmdPreCompact() {
-  const event = tryReadStdin();
-  if (isCursorCaller(event)) return;
-  const sessionId = requireSessionId(event, 'cmd');
-  if (!sessionId) return;
-
-  const state = loadState(sessionId);
-  maybeSaveTranscriptPath(state, event);
-  state.events.push({
-    type: 'pre_compact',
-    timestamp: nowSec(),
-    trigger: event.trigger || 'unknown',
-    has_custom_instructions:
-      event.custom_instructions !== null && event.custom_instructions !== undefined,
-  });
-  saveState(sessionId, state);
-}
-
+// TODO: subagent 事件累积到 state.events，当前 exportSession 未消费。
+// 预留用于未来子 agent trace 合并（将子 agent 的 span 关联到主 trace）。
 function cmdSubagentStart() {
   const event = tryReadStdin();
   if (isCursorCaller(event)) return;
@@ -221,7 +118,13 @@ function cmdSubagentStart() {
   if (!sessionId) return;
 
   const state = loadState(sessionId);
-  maybeSaveTranscriptPath(state, event);
+  if (!state.transcript_path && event.transcript_path) {
+    state.transcript_path = event.transcript_path;
+  }
+  if (!state.cwd && event.cwd && typeof event.cwd === 'string') {
+    state.cwd = event.cwd;
+  }
+  state.events = state.events || [];
   state.events.push({
     type: 'subagent_start',
     timestamp: nowSec(),
@@ -237,17 +140,14 @@ function cmdSubagentStop() {
   if (isCursorCaller(event)) return;
   const sessionId = requireSessionId(event, 'cmd');
   if (!sessionId) return;
-  const stopReason = event.stop_reason || 'end_turn';
-
-  const usage = event.usage || {};
-  const inputTokens = usage.input_tokens || event.input_tokens || 0;
-  const outputTokens = usage.output_tokens || event.output_tokens || 0;
-  const cacheRead = usage.cache_read_input_tokens || event.cache_read_input_tokens || 0;
-  const cacheCreate =
-    usage.cache_creation_input_tokens || event.cache_creation_input_tokens || 0;
 
   const state = loadState(sessionId);
-  maybeSaveTranscriptPath(state, event);
+  if (!state.transcript_path && event.transcript_path) {
+    state.transcript_path = event.transcript_path;
+  }
+  if (!state.cwd && event.cwd && typeof event.cwd === 'string') {
+    state.cwd = event.cwd;
+  }
 
   const childSid = event.subagent_session_id || 'unknown';
   let childStateSnapshot = null;
@@ -255,39 +155,21 @@ function cmdSubagentStop() {
     childStateSnapshot = readAndDeleteChildState(childSid);
   }
 
+  state.events = state.events || [];
   const evData = {
     type: 'subagent_stop',
     timestamp: nowSec(),
     subagent_session_id: childSid,
-    stop_reason: stopReason,
-    input_tokens: inputTokens,
-    output_tokens: outputTokens,
-    cache_read_input_tokens: cacheRead,
-    cache_creation_input_tokens: cacheCreate,
+    stop_reason: event.stop_reason || 'end_turn',
+    input_tokens: event.usage?.input_tokens || event.input_tokens || 0,
+    output_tokens: event.usage?.output_tokens || event.output_tokens || 0,
+    cache_read_input_tokens: event.usage?.cache_read_input_tokens || event.cache_read_input_tokens || 0,
+    cache_creation_input_tokens: event.usage?.cache_creation_input_tokens || event.cache_creation_input_tokens || 0,
   };
   if (childStateSnapshot && Array.isArray(childStateSnapshot.events) && childStateSnapshot.events.length > 0) {
     evData._child_state = childStateSnapshot;
   }
-
   state.events.push(evData);
-  saveState(sessionId, state);
-}
-
-function cmdNotification() {
-  const event = tryReadStdin();
-  if (isCursorCaller(event)) return;
-  const sessionId = requireSessionId(event, 'cmd');
-  if (!sessionId) return;
-
-  const state = loadState(sessionId);
-  maybeSaveTranscriptPath(state, event);
-  state.events.push({
-    type: 'notification',
-    timestamp: nowSec(),
-    message: event.message || '',
-    title: event.title || '',
-    level: event.level || 'info',
-  });
   saveState(sessionId, state);
 }
 
@@ -296,16 +178,19 @@ async function cmdStop() {
   if (isCursorCaller(event)) return;
   const sessionId = requireSessionId(event, 'cmd');
   if (!sessionId) return;
-  const stopReason = event.stop_reason || 'end_turn';
 
   const state = loadState(sessionId);
-  maybeSaveTranscriptPath(state, event);
+  if (!state.transcript_path && event.transcript_path) {
+    state.transcript_path = event.transcript_path;
+  }
+  if (event.cwd && typeof event.cwd === 'string') {
+    state.cwd = event.cwd;
+  }
   state.stop_time = nowSec();
   saveState(sessionId, state);
 
   try {
-    await exportSession(state, stopReason);
-    // 固化下次 transcript 增量起点 + 清空 events
+    await exportSession(state, event.stop_reason || 'end_turn');
     if (typeof state._next_transcript_offset === 'number') {
       state.transcript_offset = state._next_transcript_offset;
       delete state._next_transcript_offset;
@@ -323,13 +208,8 @@ async function cmdStop() {
   }
 }
 
-// ─── Stop 主流程 ───
+// ─── transcript 稳定性等待 ───
 
-/**
- * 等待 transcript 文件大小稳定(连续 3 次读到相同 size,间隔 150ms)。
- * 最多等 10 × 150ms = 1.5s。用于解决 Linux 容器 OverlayFS 下
- * Claude Code 主进程写 transcript 对 hook 子进程可见性延迟问题。
- */
 async function waitForTranscriptStable(transcriptPath, minSize = 0) {
   let prevSize = -1;
   let stableCount = 0;
@@ -355,169 +235,100 @@ async function waitForTranscriptStable(transcriptPath, minSize = 0) {
   }
 }
 
-/**
- * 检查 llmEvents 中是否包含 stop_reason=end_turn 的记录。
- * 用于内容校验: Stop hook 由 end_turn 触发时,transcript 应包含该记录。
- */
-function hasEndTurnRecord(llmEvents) {
-  if (!llmEvents || llmEvents.length === 0) return false;
-  return llmEvents.some(
-    (ev) => ev.stop_reason === 'end_turn' || ev.stop_reason === 'stop',
-  );
-}
+// ─── Stop 主导出流程 ───
 
-function splitEventsByTurn(events) {
-  const turns = [];
-  let current = null;
-
-  for (const ev of events) {
-    if (ev.type === 'user_prompt_submit') {
-      if (current) current.endTime = ev.timestamp || current.startTime;
-      current = {
-        prompt: ev.prompt || '',
-        startTime: ev.timestamp || nowSec(),
-        endTime: null,
-        events: [],
-      };
-      turns.push(current);
-    } else if (current) {
-      current.events.push(ev);
-    }
-  }
-  return turns;
-}
-
-/**
- * Stop 主导出流程:
- *   1. 等待 transcript 文件大小稳定 + 内容校验(end_turn)
- *   2. 增量读 transcript
- *   3. alignWithHookEvents 校准时间戳
- *   4. 合并到 events,按时间排序
- *   5. splitEventsByTurn
- *   6. 每 turn 调 buildTurnRecords + write JSONL
- */
 async function exportSession(state, stopReason) {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   const sessionId = state.session_id || 'unknown';
-  const startTime = typeof state.start_time === 'number' ? state.start_time : nowSec();
-  const stopTime = typeof state.stop_time === 'number' ? state.stop_time : nowSec();
 
-  let allEvents = Array.isArray(state.events) ? [...state.events] : [];
-  let llmEvents = [];
+  if (!state.transcript_path) {
+    logHookError({
+      agentId: AGENT_ID,
+      stage: 'export',
+      errorType: 'missing_transcript_path',
+      errorMessage: 'no transcript_path in state; cannot export',
+    });
+    return;
+  }
 
-  // transcript 增量读取: 文件大小稳定性检测 + end_turn 内容校验
-  // Linux 容器(OverlayFS)下 transcript 写入对 hook 子进程可见有延迟,
-  // 单纯的 50ms × 3 盲等不够; 改为等文件大小连续稳定后再读,
-  // 并在 stop_reason=end_turn 时校验 transcript 最后一条是否包含 end_turn。
-  if (state.transcript_path) {
-    const transcriptPath = state.transcript_path;
-    const baseOffset = state.transcript_offset || 0;
-    const expectEndTurn = stopReason === 'end_turn';
+  const transcriptPath = state.transcript_path;
+  const baseOffset = state.transcript_offset || 0;
 
-    // Phase 1: 等文件大小稳定(连续 3 次读到相同 size 且 > offset)
+  // 等待 transcript 文件写入稳定
+  await waitForTranscriptStable(transcriptPath, baseOffset);
+
+  // 解析 transcript (纯 transcript 驱动,不需要 hook 事件)
+  let parseResult;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      parseResult = parseClaudeTranscript(transcriptPath, baseOffset);
+      if (parseResult.turns.length > 0) break;
+    } catch (err) {
+      logHookError({
+        agentId: AGENT_ID,
+        stage: 'transcript_parse',
+        errorType: 'parse_failed',
+        errorMessage: err?.message || String(err),
+      });
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 200));
     await waitForTranscriptStable(transcriptPath, baseOffset);
-
-    // Phase 2: 读取并校验,若 expect end_turn 但未找到则追加等待
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        llmEvents = parseClaudeTranscript(
-          transcriptPath,
-          startTime,
-          stopTime,
-          baseOffset,
-        );
-        if (typeof llmEvents.nextOffset === 'number') {
-          state._next_transcript_offset = llmEvents.nextOffset;
-        }
-        if (llmEvents.length > 0) {
-          // 内容校验: stop_reason=end_turn 时检查最后一条 llm_call
-          if (expectEndTurn && !hasEndTurnRecord(llmEvents)) {
-            // transcript 尚未包含 end_turn,等待后重读
-            await new Promise((r) => setTimeout(r, 200));
-            await waitForTranscriptStable(transcriptPath, baseOffset);
-            continue;
-          }
-          alignWithHookEvents(llmEvents, allEvents, stopTime);
-          break;
-        }
-      } catch (err) {
-        logHookError({
-          agentId: AGENT_ID,
-          stage: 'transcript_parse',
-          errorType: 'parse_failed',
-          errorMessage: err?.message || String(err),
-        });
-        break;
-      }
-      // 空读 → 等待后重试
-      await new Promise((r) => setTimeout(r, 150));
-    }
-
-    // 兜底: 循环耗尽(expectEndTurn 重试未果)或异常 break 时,
-    // llmEvents 可能有数据但未经 alignWithHookEvents 校准。
-    // alignWithHookEvents 是幂等的,重复调用无副作用。
-    if (llmEvents.length > 0) {
-      alignWithHookEvents(llmEvents, allEvents, stopTime);
-    }
   }
 
-  if (llmEvents.length > 0) {
-    const valid = llmEvents.filter((e) => !e._discarded);
-    if (valid.length > 0) {
-      const sortKey = (e) => {
-        if (e.type === 'llm_call' && e.request_start_time) return e.request_start_time;
-        return e.timestamp || 0;
-      };
-      allEvents = [...allEvents, ...valid].sort((a, b) => sortKey(a) - sortKey(b));
-    }
-  }
+  if (!parseResult || parseResult.turns.length === 0) return;
 
-  const turns = splitEventsByTurn(allEvents);
-  if (turns.length === 0) return;
-  turns[turns.length - 1].endTime = stopTime;
+  state._next_transcript_offset = parseResult.nextOffset;
 
   const userId = resolveUserId({}, runtimeConfig);
   const allRecords = [];
   let logHash = INITIAL_HASH;
 
-  // turn_count 跨 Stop 持久化,确保多 turn session 中 turn_id 递增(不重复 :t1)
   const baseTurnCount = state.turn_count || 0;
 
-  for (let i = 0; i < turns.length; i++) {
-    const isLast = i === turns.length - 1;
+  // 首次运行防护: 新安装/重装后 state 被清空(offset=0, 无 turn_count),
+  // 如果 transcript 包含大量历史 turn, 只上报最后一个(当前对话), 跳过历史。
+  const isFirstRun = !state.turn_count && baseOffset === 0;
+  let turnsToExport = parseResult.turns;
+  if (isFirstRun && parseResult.turns.length > 1) {
+    turnsToExport = parseResult.turns.slice(-1);
+  }
+
+  const cwd = state.cwd || undefined;
+
+  for (let i = 0; i < turnsToExport.length; i++) {
+    const turn = turnsToExport[i];
+    const isLast = i === turnsToExport.length - 1;
     const turnStopReason = isLast ? stopReason : 'end_turn';
     const { records, hash } = buildTurnRecords(
-      turns[i],
+      turn,
       baseTurnCount + i,
       sessionId,
-      state.model || 'unknown',
       logHash,
       userId,
       turnStopReason,
+      cwd,
     );
     allRecords.push(...records);
     logHash = hash;
   }
 
-  // 持久化 turn_count
-  state.turn_count = baseTurnCount + turns.length;
+  // turn_count 计入全部 turns(含跳过的历史), 确保 offset 正确推进不重复上报
+  state.turn_count = baseTurnCount + parseResult.turns.length;
 
-  // 应用 content policy(可选 redact)
   const cleaned = allRecords.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
 }
 
-// ─── buildTurnRecords — 单 turn 的 JSONL 记录构造 ───
+// ─── buildTurnRecords — 单 turn 的 JSONL 记录构造 (v2: tool_use_id 归属) ───
 
-function buildTurnRecords(turn, turnIndex, sessionId, fallbackModel, prevHash, userId, turnStopReason) {
+function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStopReason, cwd) {
   const records = [];
   const turnId = `${sessionId}:t${turnIndex + 1}`;
   let stepRound = 0;
   let runningHash = prevHash;
   let prevInputMsgs = [];
 
-  // 每 turn 一个 trace_id;ENTRY 是 turn 根 span(parent=null)
-  // AGENT 在 ENTRY 下;每 step 一个 STEP span;LLM/TOOL 在 STEP 下
   const traceId = generateTraceId();
   const entrySpanId = generateSpanId();
   const agentSpanId = generateSpanId();
@@ -529,277 +340,179 @@ function buildTurnRecords(turn, turnIndex, sessionId, fallbackModel, prevHash, u
     'gen_ai.agent.type': AGENT_ID,
     'gen_ai.agent.id': sessionId,
     'user.id': userId,
+    ...(cwd ? { 'agent.claude-code.cwd': cwd } : {}),
   };
 
-  // turn-level llm.request(代表 user prompt)— 挂在 AGENT span 下
+  // 用户输入: 做法 A (EVENT_LOG_TO_TRACE_SPEC §5.1, 0.1.0-beta.3+)
+  // event.name="other" + messages_delta → 转换器归并到 ENTRY/AGENT 的 input.messages
   if (turn.prompt) {
     records.push({
-      time_unix_nano: timestampToUnixNanos(turn.startTime * 1000),
+      time_unix_nano: isoToUnixNanos(turn.promptTimestamp),
       'event.id': crypto.randomUUID(),
-      'event.name': 'llm.request',
+      'event.name': 'other',
       ...baseFields,
-      span_id: agentSpanId,
-      parent_span_id: entrySpanId,
       'gen_ai.input.messages_delta': [
         { role: 'user', parts: [{ type: 'text', content: turn.prompt }] },
       ],
     });
   }
 
-  // 索引 PreToolUse(用于 30% drop 修复 + tool.result 时取参数)
-  const preToolUseMap = {};
-  for (const ev of turn.events) {
-    if (ev.type === 'pre_tool_use' && ev.tool_use_id) {
-      preToolUseMap[ev.tool_use_id] = ev;
+  // Phase 1: 为每个 llm_call 创建 step + 生成 LLM 事件
+  const toolIdToStep = new Map(); // tool_use_id → { stepId, stepSpanId }
+  const llmCalls = turn.llmCalls || [];
+
+  for (const ev of llmCalls) {
+    stepRound++;
+    const currentStepId = `${turnId}:s${stepRound}`;
+    const currentStepSpanId = generateSpanId();
+    const llmSpanId = generateSpanId();
+    const responseId = ev.message_id || `${currentStepId}:r`;
+
+    // 注册该 LLM 声明的所有 tool_use_id → 当前 step
+    for (const toolId of (ev.declaredToolIds || [])) {
+      toolIdToStep.set(toolId, { stepId: currentStepId, stepSpanId: currentStepSpanId });
     }
+
+    // input messages delta/full hash
+    const inputMsgs = convertInputMessages(ev.input_messages, ev.protocol || 'anthropic');
+    let currentFullHash;
+    let delta;
+    let logFull;
+    if (ev._input_is_delta) {
+      delta = inputMsgs;
+      currentFullHash = computeHash(runningHash, delta);
+      logFull = false;
+    } else {
+      currentFullHash = computeHash(INITIAL_HASH, inputMsgs);
+      delta = inputMsgs.slice(prevInputMsgs.length);
+      logFull = shouldLogFullMessages(runningHash, delta, currentFullHash);
+    }
+
+    // llm.request
+    const reqRecord = {
+      time_unix_nano: isoToUnixNanos(ev.request_start_time),
+      'event.id': crypto.randomUUID(),
+      'event.name': 'llm.request',
+      ...baseFields,
+      span_id: llmSpanId,
+      parent_span_id: currentStepSpanId,
+      'gen_ai.step.id': currentStepId,
+      'gen_ai.response.id': responseId,
+      'gen_ai.provider.name': 'anthropic',
+      'gen_ai.request.model': ev.model || 'unknown',
+      'gen_ai.input.messages_hash': currentFullHash,
+      'gen_ai.input.messages_delta': delta,
+    };
+    if (logFull) {
+      reqRecord['gen_ai.input.messages'] = inputMsgs;
+    }
+    records.push(reqRecord);
+
+    // token 全量公式: input = api + cacheRead + cacheCreation
+    const apiInputTokens = ev.input_tokens || 0;
+    const cacheRead = ev.cache_read_input_tokens || 0;
+    const cacheCreation = ev.cache_creation_input_tokens || 0;
+    const inputTokens = apiInputTokens + cacheRead + cacheCreation;
+    const outputTokens = ev.output_tokens || 0;
+    const totalTokens = inputTokens + outputTokens;
+
+    // llm.response
+    const respRecord = {
+      time_unix_nano: isoToUnixNanos(ev.timestamp),
+      'event.id': crypto.randomUUID(),
+      'event.name': 'llm.response',
+      ...baseFields,
+      span_id: llmSpanId,
+      parent_span_id: currentStepSpanId,
+      'gen_ai.step.id': currentStepId,
+      'gen_ai.response.id': responseId,
+      'gen_ai.provider.name': 'anthropic',
+      'gen_ai.request.model': ev.model || 'unknown',
+      'gen_ai.response.model': ev.model || 'unknown',
+      'gen_ai.response.finish_reasons': [mapStopReason(ev.stop_reason || 'stop')],
+      'gen_ai.usage.input_tokens': inputTokens,
+      'gen_ai.usage.output_tokens': outputTokens,
+      'gen_ai.usage.cache_read.input_tokens': cacheRead,
+      'gen_ai.usage.cache_creation.input_tokens': cacheCreation,
+      'gen_ai.usage.total_tokens': totalTokens,
+      'gen_ai.output.messages': convertOutputMessages(ev.output_content, ev.stop_reason),
+    };
+    records.push(respRecord);
+
+    runningHash = currentFullHash;
+    prevInputMsgs = ev._input_is_delta ? [] : inputMsgs;
   }
 
-  let currentStepId = null;
-  let currentStepSpanId = null;
-  // 记录每个 step 的时间区间,用于孤儿 PreToolUse 的 step 归属推断
-  const stepTimeRanges = [];
-  // 收集 llm_call input_messages 中的 tool_call_response,用于孤儿 tool.result 回填
-  const orphanToolResults = {};
+  // Phase 2: 为每个 tool 生成 tool.call + tool.result，归属到声明方 LLM 的 step
+  for (const ev of llmCalls) {
+    for (const toolId of (ev.declaredToolIds || [])) {
+      const owner = toolIdToStep.get(toolId);
+      if (!owner) continue;
 
-  for (const ev of turn.events) {
-    const evTs = ev.timestamp || turn.endTime;
+      const timestamps = ev.toolDetails?.get(toolId);
+      if (!timestamps) continue;
 
-    if (ev.type === 'llm_call') {
-      // 回填上一个 step 的 endTime(到当前 llm_call 的 request_start_time)
-      if (stepTimeRanges.length > 0) {
-        stepTimeRanges[stepTimeRanges.length - 1].endTime = ev.request_start_time || evTs;
-      }
+      // 从 output_content 找到该 tool_use block 的 name + input
+      const toolBlock = ev.output_content.find(
+        (b) => b.type === 'tool_use' && b.id === toolId,
+      );
+      if (!toolBlock) continue;
 
-      stepRound++;
-      currentStepId = `${turnId}:s${stepRound}`;
-      currentStepSpanId = generateSpanId();
-
-      // 记录本 step 的起始时间
-      stepTimeRanges.push({
-        stepId: currentStepId,
-        stepSpanId: currentStepSpanId,
-        startTime: ev.request_start_time || evTs,
-        endTime: null, // 由下一个 llm_call 回填,或循环结束后设为 turn.endTime
-      });
-
-      // 扫描 input_messages 中的 tool_call_response,提取孤儿 tool result
-      if (Array.isArray(ev.input_messages)) {
-        for (const msg of ev.input_messages) {
-          const content = msg.content || msg.parts;
-          if (!Array.isArray(content)) continue;
-          for (const part of content) {
-            if (!part) continue;
-            const partType = part.type || (part.tool_use_id ? 'tool_result' : '');
-            const partId = part.tool_use_id || part.id;
-            if ((partType === 'tool_result' || partType === 'tool_call_response') && partId) {
-              if (preToolUseMap[partId] && !orphanToolResults[partId]) {
-                orphanToolResults[partId] = {
-                  response: part.content || part.response || part.output || '',
-                  timestamp: ev.request_start_time || evTs,
-                };
-              }
-            }
-          }
-        }
-      }
-      const llmSpanId = generateSpanId();
-      const responseId = ev.message_id || `${currentStepId}:r`;
-      const protocol = ev.protocol || 'anthropic';
-
-      const inputMsgs = convertInputMessages(ev.input_messages, protocol);
-      let currentFullHash;
-      let delta;
-      let logFull;
-      if (ev._input_is_delta) {
-        delta = inputMsgs;
-        currentFullHash = computeHash(runningHash, delta);
-        logFull = false;
-      } else {
-        currentFullHash = computeHash(INITIAL_HASH, inputMsgs);
-        delta = inputMsgs.slice(prevInputMsgs.length);
-        logFull = shouldLogFullMessages(runningHash, delta, currentFullHash);
-      }
-
-      // llm.request
-      const reqRecord = {
-        time_unix_nano: timestampToUnixNanos((ev.request_start_time || evTs) * 1000),
-        'event.id': crypto.randomUUID(),
-        'event.name': 'llm.request',
-        ...baseFields,
-        span_id: llmSpanId,
-        parent_span_id: currentStepSpanId,
-        'gen_ai.step.id': currentStepId,
-        'gen_ai.response.id': responseId,
-        'gen_ai.provider.name': 'anthropic',
-        'gen_ai.request.model': ev.model || fallbackModel,
-        'gen_ai.input.messages_hash': currentFullHash,
-        'gen_ai.input.messages_delta': delta,
-      };
-      if (logFull) {
-        reqRecord['gen_ai.input.messages'] = inputMsgs;
-      }
-      records.push(reqRecord);
-
-      // 7.7 token 全量公式: input = api + cacheRead + cacheCreation
-      const apiInputTokens = ev.input_tokens || 0;
-      const cacheRead = ev.cache_read_input_tokens || 0;
-      const cacheCreation = ev.cache_creation_input_tokens || 0;
-      const inputTokens = apiInputTokens + cacheRead + cacheCreation;
-      const outputTokens = ev.output_tokens || 0;
-      const totalTokens = inputTokens + outputTokens;
-
-      const respRecord = {
-        time_unix_nano: timestampToUnixNanos(evTs * 1000),
-        'event.id': crypto.randomUUID(),
-        'event.name': 'llm.response',
-        ...baseFields,
-        span_id: llmSpanId,
-        parent_span_id: currentStepSpanId,
-        'gen_ai.step.id': currentStepId,
-        'gen_ai.response.id': responseId,
-        'gen_ai.provider.name': 'anthropic',
-        'gen_ai.request.model': ev.model || fallbackModel,
-        'gen_ai.response.model': ev.model || fallbackModel,
-        'gen_ai.response.finish_reasons': [mapStopReason(ev.stop_reason || 'stop')],
-        'gen_ai.usage.input_tokens': inputTokens,
-        'gen_ai.usage.output_tokens': outputTokens,
-        'gen_ai.usage.cache_read.input_tokens': cacheRead,
-        'gen_ai.usage.cache_creation.input_tokens': cacheCreation,
-        'gen_ai.usage.total_tokens': totalTokens,
-        'gen_ai.output.messages': convertOutputMessages(ev.output_content, ev.stop_reason),
-      };
-
-      if (ev.is_error) {
-        respRecord['error.type'] = 'LLMError';
-        respRecord['error.message'] = ev.error_message || 'unknown error';
-      }
-
-      records.push(respRecord);
-      runningHash = currentFullHash;
-      prevInputMsgs = ev._input_is_delta ? [] : inputMsgs;
-    } else if (ev.type === 'post_tool_use') {
-      const toolName = ev.tool_name || 'unknown';
+      const toolName = toolBlock.name || 'unknown';
       if (toolName === 'Agent' || toolName === 'agent') continue;
 
-      const preEv = preToolUseMap[ev.tool_use_id] || {};
-      const effectiveName = preEv.tool_name || toolName;
-      const effectiveInput = preEv.tool_input || {};
       const toolSpanId = generateSpanId();
-      const parentStepSpan = currentStepSpanId || agentSpanId;
-      const stepIdForTool = currentStepId || turnId;
 
+      // tool.call
       records.push({
-        time_unix_nano: timestampToUnixNanos((preEv.timestamp || evTs) * 1000),
+        time_unix_nano: isoToUnixNanos(timestamps.call),
         'event.id': crypto.randomUUID(),
         'event.name': 'tool.call',
         ...baseFields,
         span_id: toolSpanId,
-        parent_span_id: parentStepSpan,
-        'gen_ai.step.id': stepIdForTool,
-        'gen_ai.tool.name': effectiveName,
-        'gen_ai.tool.call.id': ev.tool_use_id || '',
-        'gen_ai.tool.call.arguments': toJsonValue(effectiveInput),
-      });
-
-      const toolErr = extractToolError(ev.tool_response);
-      const durationMs = preEv.timestamp ? (evTs - preEv.timestamp) * 1000 : undefined;
-
-      const resultRecord = {
-        time_unix_nano: timestampToUnixNanos(evTs * 1000),
-        'event.id': crypto.randomUUID(),
-        'event.name': 'tool.result',
-        ...baseFields,
-        span_id: toolSpanId,
-        parent_span_id: parentStepSpan,
-        'gen_ai.step.id': stepIdForTool,
-        'gen_ai.tool.name': effectiveName,
-        'gen_ai.tool.call.id': ev.tool_use_id || '',
-        'gen_ai.tool.call.result': toJsonValue(extractToolResult(ev.tool_response)),
-        'tool.result.status': toolErr ? 'error' : 'success',
-      };
-      if (durationMs !== undefined) resultRecord['gen_ai.tool.call.duration'] = durationMs;
-      if (toolErr) {
-        resultRecord['error.type'] = toolErr.type || 'ToolError';
-        resultRecord['error.message'] = toolErr.message || 'unknown error';
-      }
-      records.push(resultRecord);
-    }
-  }
-
-  // 回填最后一个 step 的 endTime
-  if (stepTimeRanges.length > 0) {
-    stepTimeRanges[stepTimeRanges.length - 1].endTime = turn.endTime;
-  }
-
-  // 30% PostToolUse drop 修复:
-  // 末尾扫剩余的 PreToolUse(没配上 PostToolUse 的孤儿)输出 tool.call。
-  // 修正: 根据 preEv.timestamp 推断正确的所属 step,不再一律归入最后一个 step。
-  const consumedIds = new Set(
-    turn.events
-      .filter((e) => e.type === 'post_tool_use' && e.tool_use_id)
-      .map((e) => e.tool_use_id),
-  );
-  for (const [toolUseId, preEv] of Object.entries(preToolUseMap)) {
-    if (consumedIds.has(toolUseId)) continue;
-    const toolName = preEv.tool_name || 'unknown';
-    if (toolName === 'Agent' || toolName === 'agent') continue;
-
-    // 按时间戳推断所属 step
-    let resolvedStepId = currentStepId || turnId;
-    let resolvedStepSpanId = currentStepSpanId || agentSpanId;
-    const preTs = preEv.timestamp || 0;
-    if (preTs > 0 && stepTimeRanges.length > 0) {
-      const matched = stepTimeRanges.find(
-        (s) => preTs >= s.startTime && (s.endTime === null || preTs <= s.endTime),
-      );
-      if (matched) {
-        resolvedStepId = matched.stepId;
-        resolvedStepSpanId = matched.stepSpanId;
-      }
-    }
-
-    const orphanSpanId = generateSpanId();
-    const orphanResult = orphanToolResults[toolUseId];
-
-    records.push({
-      time_unix_nano: timestampToUnixNanos((preTs || turn.endTime) * 1000),
-      'event.id': crypto.randomUUID(),
-      'event.name': 'tool.call',
-      ...baseFields,
-      span_id: orphanSpanId,
-      parent_span_id: resolvedStepSpanId,
-      'gen_ai.step.id': resolvedStepId,
-      'gen_ai.tool.name': toolName,
-      'gen_ai.tool.call.id': toolUseId,
-      'gen_ai.tool.call.arguments': toJsonValue(preEv.tool_input || {}),
-    });
-
-    // 如果从后续 llm_call 的 input_messages 中提取到了 tool result,补发 tool.result
-    if (orphanResult) {
-      const resultTs = orphanResult.timestamp || preTs || turn.endTime;
-      records.push({
-        time_unix_nano: timestampToUnixNanos(resultTs * 1000),
-        'event.id': crypto.randomUUID(),
-        'event.name': 'tool.result',
-        ...baseFields,
-        span_id: orphanSpanId,
-        parent_span_id: resolvedStepSpanId,
-        'gen_ai.step.id': resolvedStepId,
+        parent_span_id: owner.stepSpanId,
+        'gen_ai.step.id': owner.stepId,
         'gen_ai.tool.name': toolName,
-        'gen_ai.tool.call.id': toolUseId,
-        'gen_ai.tool.call.result': toJsonValue(orphanResult.response),
-        'tool.result.status': 'recovered',
+        'gen_ai.tool.call.id': toolId,
+        'gen_ai.tool.call.arguments': toJsonValue(toolBlock.input || {}),
       });
-    } else {
-      // 无法回填 result,标记为 orphaned(保持向后兼容)
-      records[records.length - 1]['tool.result.status'] = 'orphaned';
+
+      // tool.result (only if we have a result timestamp)
+      if (timestamps.result) {
+        const resultRecord = {
+          time_unix_nano: isoToUnixNanos(timestamps.result),
+          'event.id': crypto.randomUUID(),
+          'event.name': 'tool.result',
+          ...baseFields,
+          span_id: toolSpanId,
+          parent_span_id: owner.stepSpanId,
+          'gen_ai.step.id': owner.stepId,
+          'gen_ai.tool.name': toolName,
+          'gen_ai.tool.call.id': toolId,
+          'gen_ai.tool.call.result': toJsonValue(timestamps.resultContent || ''),
+          'tool.result.status': timestamps.isError ? 'error' : 'success',
+        };
+        if (timestamps.isError) {
+          resultRecord['error.type'] = 'ToolError';
+          resultRecord['error.message'] = typeof timestamps.resultContent === 'string'
+            ? timestamps.resultContent.slice(0, 500)
+            : 'tool execution failed';
+        }
+        records.push(resultRecord);
+      }
     }
   }
 
-  // turn-level llm.response(代表 final assistant message,可选)
-  // 老插件这里没单独写,我们也保持一致 — final message 已经在最末 llm_call 的 llm.response 里
-  // 为了合规 turn 闭环,可选添加一条以 turn finish_reason 标记 turn 结束。
-  // 这里保持精简:不补 turn 结束 record。
+  // 按 time_unix_nano 排序，确保 tool 事件交错在 LLM 事件之间。
+  // OTLP flusher 在收到 finish_reasons=stop 时立即 flush turn buffer，
+  // 如果 tool 事件全部堆在末尾（在 stop 之后），会被丢弃。
+  records.sort((a, b) => {
+    const ta = BigInt(a.time_unix_nano || '0');
+    const tb = BigInt(b.time_unix_nano || '0');
+    if (ta < tb) return -1;
+    if (ta > tb) return 1;
+    return 0;
+  });
 
   return { records, hash: runningHash };
 }
@@ -807,48 +520,24 @@ function buildTurnRecords(turn, turnIndex, sessionId, fallbackModel, prevHash, u
 // ─── dispatcher ───
 
 const DISPATCH = {
-  'user-prompt-submit': cmdUserPromptSubmit,
-  'pre-tool-use': cmdPreToolUse,
-  'post-tool-use': cmdPostToolUse,
   'stop': cmdStop,
-  'pre-compact': cmdPreCompact,
   'subagent-start': cmdSubagentStart,
   'subagent-stop': cmdSubagentStop,
-  'notification': cmdNotification,
 };
 
-async function main() {
-  const subcmd = (process.argv[2] || '').trim();
-  const fn = DISPATCH[subcmd];
-  if (!fn) {
+const sub = process.argv[2] || 'unknown';
+const fn = DISPATCH[sub];
+if (fn) {
+  Promise.resolve(fn()).catch((err) => {
     logHookError({
       agentId: AGENT_ID,
-      stage: 'dispatch',
-      errorType: 'unknown_subcommand',
-      errorMessage: `subcommand=${subcmd}`,
-    });
-    process.stdout.write('{}\n');
-    return;
-  }
-  try {
-    await fn();
-  } catch (err) {
-    logHookError({
-      agentId: AGENT_ID,
-      stage: subcmd,
-      errorType: 'handler_failed',
+      stage: `dispatch_${sub}`,
+      errorType: 'unhandled',
       errorMessage: err?.message || String(err),
     });
-  }
+  }).finally(() => {
+    process.stdout.write('{}\n');
+  });
+} else {
   process.stdout.write('{}\n');
 }
-
-main().catch((err) => {
-  logHookError({
-    agentId: AGENT_ID,
-    stage: 'main',
-    errorType: 'unhandled',
-    errorMessage: err?.message || String(err),
-  });
-  process.stdout.write('{}\n');
-});

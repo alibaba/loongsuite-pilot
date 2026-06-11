@@ -1,6 +1,28 @@
 import { build } from 'esbuild';
+import { copyFile, mkdir } from 'node:fs/promises';
 
-const isInternal = process.argv.includes('--internal');
+const isInternal = process.env.BUILD_TYPE === 'internal';
+
+const commonDefine = {
+  '__INTERNAL_BUILD__': String(isInternal),
+};
+
+const internalStubPlugin = {
+  name: 'internal-stub',
+  setup(b) {
+    if (isInternal) return;
+    b.onResolve({ filter: /alarm-sender\.internal/ }, (args) => ({
+      path: args.path,
+      namespace: 'internal-stub',
+    }));
+    b.onLoad({ filter: /.*/, namespace: 'internal-stub' }, () => ({
+      contents: 'export function sendAlarm() {} export function sendStatus() {}',
+      loader: 'ts',
+    }));
+  },
+};
+
+const commonPlugins = [internalStubPlugin];
 
 await build({
   entryPoints: ['src/index.ts'],
@@ -12,9 +34,8 @@ await build({
   minify: true,
   treeShaking: true,
   packages: 'external',
-  define: {
-    __INTERNAL_BUILD__: String(isInternal),
-  },
+  define: commonDefine,
+  plugins: commonPlugins,
 });
 
 await build({
@@ -25,10 +46,9 @@ await build({
   format: 'cjs',
   bundle: true,
   banner: { js: "process.env.LOG_LEVEL = 'silent';" },
-  define: {
-    __INTERNAL_BUILD__: String(isInternal),
-  },
   minifySyntax: true,
+  define: commonDefine,
+  plugins: commonPlugins,
 });
 
 await build({
@@ -41,7 +61,9 @@ await build({
   minify: true,
   treeShaking: true,
   packages: 'external',
-  define: {
-    __INTERNAL_BUILD__: String(isInternal),
-  },
+  define: commonDefine,
+  plugins: commonPlugins,
 });
+
+await mkdir('dist', { recursive: true });
+await copyFile('src/mask/sensitive-rules.json', 'dist/sensitive-rules.json');

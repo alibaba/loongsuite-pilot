@@ -73,24 +73,23 @@ npm run typecheck
 
 ### 编译与运行
 
-项目使用 esbuild 进行编译，通过编译期常量 `__INTERNAL_BUILD__` 区分内部/外部版本：
+项目使用 esbuild 进行编译，产出统一的单一构建产物。内部/外部行为由运行时配置 `config.json` 中的 `internal` 字段控制（默认 `true`）：
 
 ```bash
-# 集团内版本（默认，包含内置 SLS 目的地）
+# 构建（唯一命令，产出统一产物）
 npm run build
-
-# 集团外版本（物理消除内置 SLS 相关代码）
-npm run build:external
 
 # 启动服务（开发环境）
 npm start
 # 等价于: node dist/index.js
 ```
 
-| 构建目标 | 命令 | 内置 SLS 目的地 | 用户配了自有 SLS 时 |
-|---------|------|----------------|-------------------|
-| 集团内 | `npm run build` | 包含 | 双发（用户 + 内置） |
-| 集团外 | `npm run build:external` | 不存在于产物中 | 仅发用户目的地 |
+| `config.internal` | 内置 SLS 目的地 | 用户配了自有 SLS 时 | 更新包来源 |
+|-------------------|----------------|-------------------|-----------|
+| `true`（默认） | 启用 | 双发（用户 + 内置） | 内部 OSS 路径 |
+| `false` | 不启用 | 仅发用户目的地 | 外部 OSS 路径 |
+
+可通过环境变量 `LOONGSUITE_PILOT_INTERNAL=false` 覆盖 config.json 中的值。
 
 ### 开发最佳实践
 
@@ -114,36 +113,112 @@ npm start
    tail -f ~/.loongsuite-pilot/logs/output/*.jsonl
    ```
 
+## Trace 数据规范校验
+
+pilot 内置了 GenAI Trace 自动化校验工具，可按照 [ARMS GenAI 语义规范](https://code.alibaba-inc.com/arms/semantic-conventions/blob/arms/arms_docs/trace/gen-ai.md) 校验 otlp-debug 输出的 trace 数据。
+
+### 校验维度
+
+| 维度 | 覆盖内容 | 严重度 |
+|---|---|---|
+| 结构 | trace 树完整性（ENTRY/AGENT/STEP/LLM/TOOL 层级、STEP 恰好含 1 个 LLM、LLM 先于 TOOL） | ERROR |
+| 属性 | 按 span kind 校验 MUST/SHOULD 属性存在性、类型、枚举值 | ERROR/WARN |
+| 时间 | 零时长、STEP 重叠、父 span 严格包含子 span、LLM 超长告警 | ERROR/WARN |
+| 格式 | token 非负整数且 total=input+output、messages JSON Schema、traceId/spanId 格式 | ERROR/WARN |
+| 语义 | AGENT token 聚合一致性、TOOL-LLM 双向匹配、session/user ID 全 trace 一致、operation-kind 映射 | ERROR/WARN |
+
+### CLI 使用
+
+前提：开启 `cms.debug` 产生 otlp-debug JSONL 数据。
+
+```bash
+# 校验最新的 otlp-debug 文件（文本报告）
+node scripts/validate-trace.mjs --latest
+
+# 校验指定文件
+node scripts/validate-trace.mjs --input ~/.loongsuite-pilot/logs/otlp-debug/my-app-claude-code-2026-06-04.jsonl
+
+# 只看 error（过滤 warning）
+node scripts/validate-trace.mjs --latest --severity error
+
+# 校验特定 trace
+node scripts/validate-trace.mjs --latest --trace-id <32-hex-traceId>
+
+# JSON 输出（CI 集成用）
+node scripts/validate-trace.mjs --latest --format json --output report.json
+
+# 单行摘要
+node scripts/validate-trace.mjs --latest --format summary
+```
+
+退出码：`0` = 无 error（PASS），`1` = 有 error（FAIL），`2` = 输入错误。
+
+### Skill 使用
+
+在 Claude Code 中通过 `/validate-trace` 触发，自动发现最新 JSONL 文件、运行校验、展示问题并给出修复建议。
+
+```
+/validate-trace              # 自动发现最新文件
+/validate-trace <file-path>  # 校验指定文件
+```
+
+### 规则更新
+
+校验规则从 ARMS 语义规范自动提取，存储在 `docs/trace-validation-rules.json`。当规范更新后：
+
+```bash
+# 从本地 spec 副本重新生成规则
+node scripts/update-validation-rules.mjs
+
+# 仅检查差异，不写入
+node scripts/update-validation-rules.mjs --diff
+
+# 从指定 spec 文件生成
+node scripts/update-validation-rules.mjs --spec-file /path/to/gen-ai.md
+```
+
+### 已知限制
+
+- **Subagent 调用**：Claude Code 的 `Agent` 子调用（subagent spawn）暂未建模为 TOOL span，校验时降级为 WARN
+- **CI/E2E 集成**：下期支持在 E2E 脚本中自动运行 trace 校验，校验失败时阻断流水线
+
+### 相关文件
+
+| 文件 | 说明 |
+|---|---|
+| `scripts/validate-trace.mjs` | 校验引擎 CLI |
+| `scripts/update-validation-rules.mjs` | 规则更新工具 |
+| `docs/trace-validation-rules.json` | 结构化校验规则（10 span kinds，101 属性） |
+| `docs/trace-validation-design.md` | 校验方案设计文档 |
+| `assets/skills/validate-trace/SKILL.md` | Claude Code Skill 定义 |
+| `specs/gen-ai-*.json` | 消息体 JSON Schema（5 个） |
+
 ## 打包与部署
 
 项目提供 `deploy/` 目录下的三个脚本完成打包、上传、远程安装/升级/卸载的全流程。这些脚本不会被打包进发布产物中。
 
 ```
 deploy/
-├── package-inner.sh     # 打包内部版本（调用 package.sh）
-├── package-external.sh  # 打包外部版本（调用 package.sh --external）
-├── package.sh           # 打包核心逻辑（--external 切换内外版本）
+├── package.sh           # 打包（统一构建，产出单一 tar.gz）
+├── package-inner.sh     # 打包快捷入口（调用 package.sh）
+├── upload.sh            # 上传核心逻辑（--external 切换上传目标路径）
 ├── upload-inner.sh      # 上传到内部 OSS 路径（调用 upload.sh）
 ├── upload-external.sh   # 上传到外部 OSS 路径（调用 upload.sh --external）
-├── upload.sh            # 上传核心逻辑（--external 切换内外路径）
-├── installer-inner.sh   # 内部安装脚本（内部 OSS 路径）
-└── installer.sh         # 外部安装脚本（外部 OSS 路径）
+├── installer-inner.sh   # 内部安装脚本（写入 internal: true）
+└── installer.sh         # 外部安装脚本（写入 internal: false）
 ```
 
 ### 第一步：打包
 
 ```bash
-# 集团内版本打包
-bash deploy/package-inner.sh
-
-# 集团外版本打包
-bash deploy/package-external.sh
+# 打包（统一构建，产出单一产物）
+bash deploy/package.sh
 
 # 自定义输出路径
-bash deploy/package-inner.sh -o /tmp/loongsuite-pilot.tar.gz
+bash deploy/package.sh -o /tmp/loongsuite-pilot.tar.gz
 
 # 跳过编译，使用已有 dist/
-bash deploy/package-inner.sh --skip-build
+bash deploy/package.sh --skip-build
 ```
 
 打包产物结构：
@@ -169,20 +244,20 @@ brew install ossutil   # 或 pip install ossutil2
 # 配置凭证
 ossutil config -e oss-cn-hangzhou.aliyuncs.com -i <AK_ID> -k <AK_SECRET>
 
-# 内部上传到 test 渠道（默认）
-bash deploy/upload-inner.sh
+# 上传到内部 OSS 路径，test 渠道（默认）
+bash deploy/upload.sh
 
-# 内部上传到 release 渠道（正式发布）
-bash deploy/upload-inner.sh --channel release
+# 上传到内部 OSS 路径，release 渠道（正式发布）
+bash deploy/upload.sh --channel release
 
-# 外部上传到 test 渠道
-bash deploy/upload-external.sh
+# 上传到外部 OSS 路径，test 渠道（同一份包，不同目标）
+bash deploy/upload.sh --external
 
-# 外部上传到 release 渠道
-bash deploy/upload-external.sh --channel release
+# 上传到外部 OSS 路径，release 渠道
+bash deploy/upload.sh --external --channel release
 
 # 上传到个人隔离渠道（互不覆盖，适合多人并行测试）
-bash deploy/upload-inner.sh --channel test-taiye
+bash deploy/upload.sh --channel test-taiye
 
 # 自定义 bucket / 前缀 / 区域
 bash deploy/upload.sh --bucket my-bucket --prefix my/path --region cn-beijing
@@ -190,7 +265,7 @@ bash deploy/upload.sh --bucket my-bucket --prefix my/path --region cn-beijing
 
 #### 渠道隔离
 
-支持三种渠道模式，产物上传到不同的 OSS 路径，互不干扰。通过 `--external` 切换内外部路径：
+支持三种渠道模式，同一份构建产物上传到不同的 OSS 路径，互不干扰。通过 `--external` 切换上传目标路径（代码相同，仅路径不同）：
 
 | 渠道 | 命令 | 内部 OSS 路径 | 外部 OSS 路径（`--external`） |
 |------|------|---------------|-------------------------------|
@@ -227,7 +302,7 @@ curl -fsSL <URL>/installer.sh | bash -s -- install \
   --sls-ak-secret "your-ak-secret"
 ```
 
-SLS 目的地解析规则（集团内版本）：
+SLS 目的地解析规则（`internal: true` 时）：
 - 不传任何 `--sls-*` 参数：仅写入内置目的地。
 - 传 `--sls-*` 参数：**双写**到用户目的地与内置目的地（任一失败不影响另一路）。
 
@@ -479,7 +554,7 @@ loongsuite-pilot restart
 }
 ```
 
-默认 SLS 上报目的地由程序内置，不通过用户配置文件暴露。旧版本安装产生的 `sls.endpoint`、`sls.project`、`sls.logstore` 字段可以继续留在 `config.json` 中，但普通运行时不再读取这些字段；需要运维覆盖时，请使用 `SLS_ENDPOINT`、`SLS_PROJECT`、`SLS_LOGSTORE` 环境变量或安装脚本的显式 `--sls-*` 参数。
+默认 SLS 上报目的地由程序内置，不通过用户配置文件暴露。旧版本安装产生的 `sls.endpoint`、`sls.project`、`sls.logstore` 字段可以继续留在 `config.json` 中，但普通运行时不再读取这些字段；需要运维覆盖时，请使用 `LOONGSUITE_SLS_ENDPOINT`、`LOONGSUITE_SLS_PROJECT`、`LOONGSUITE_SLS_LOGSTORE` 环境变量或安装脚本的显式 `--sls-*` 参数。
 
 升级提示：如果你曾经通过 `config.json` 自定义 SLS 目的地，请改用环境变量或重新运行安装脚本并显式传入 `--sls-endpoint`、`--sls-project`、`--sls-logstore`。
 
@@ -532,13 +607,13 @@ trace 上报与 SLS log 上报并行运行，互不影响。
 
 | 环境变量 | 说明 | 默认值 |
 |---------|------|--------|
-| `SLS_ACCESS_KEY_ID` | AccessKey ID | 空 |
-| `SLS_ACCESS_KEY_SECRET` | AccessKey Secret | 空 |
-| `SLS_REGION` | SLS 地域 | `cn-hangzhou` |
-| `SLS_PROJECT` | Agent 活动数据 Project | 空 |
-| `SLS_LOGSTORE` | Agent 活动数据 Logstore | 空 |
-| `SLS_AGENT_TELEMETRY_PROJECT` | Agent 遥测 Project（脱敏） | 空 |
-| `SLS_AGENT_TELEMETRY_LOGSTORE` | Agent 遥测 Logstore（脱敏） | 空 |
+| `LOONGSUITE_SLS_ACCESS_KEY_ID` | AccessKey ID | 空 |
+| `LOONGSUITE_SLS_ACCESS_KEY_SECRET` | AccessKey Secret | 空 |
+| `LOONGSUITE_SLS_REGION` | SLS 地域 | `cn-hangzhou` |
+| `LOONGSUITE_SLS_PROJECT` | Agent 活动数据 Project | 空 |
+| `LOONGSUITE_SLS_LOGSTORE` | Agent 活动数据 Logstore | 空 |
+| `LOONGSUITE_SLS_AGENT_TELEMETRY_PROJECT` | Agent 遥测 Project（脱敏） | 空 |
+| `LOONGSUITE_SLS_AGENT_TELEMETRY_LOGSTORE` | Agent 遥测 Logstore（脱敏） | 空 |
 
 #### JSONL / HTTP
 

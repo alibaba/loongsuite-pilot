@@ -32,6 +32,7 @@ docs/
     ├── core.md        ← collector 编排、配置、agent lifecycle
     ├── inputs.md      ← input source 采集策略
     ├── normalization.md
+    ├── mask.md
     ├── flushers.md
     ├── checkpoints.md
     ├── hooks.md

@@ -38,7 +38,7 @@
 | 部署管理 | `src/deployment/` | 声明式 Agent 部署（Hook / Plugin-Probe） | [docs/modules/hooks.md](docs/modules/hooks.md) |
 | 归一化 | `src/normalization/` | 原始数据 → AgentActivityEntry 标准格式 | [docs/modules/normalization.md](docs/modules/normalization.md) |
 | 持久化 | `src/checkpoints/` | StateStore + SnapshotStore 状态管理 | [docs/modules/checkpoints.md](docs/modules/checkpoints.md) |
-| 自动更新 | `src/updater/` | 多版本管理、增量更新、自动回滚 | [docs/modules/updater.md](docs/modules/updater.md) |
+| 自动更新 | `src/updater/` | 多版本管理、增量更新、灰度发布、自动回滚 | [docs/modules/updater.md](docs/modules/updater.md) |
 | 运行时 | `deploy/` | 安装、CLI、服务管理、版本指针 | [docs/modules/runtime.md](docs/modules/runtime.md) |
 | 监控 | `src/internal/` | 本地 dashboard、进程采样、健康状态 | [docs/modules/monitor.md](docs/modules/monitor.md) |
 | 类型定义 | `src/types/` | ClientType、事件结构、配置类型 | [docs/modules/types.md](docs/modules/types.md) |
@@ -53,6 +53,7 @@
 | Cursor | `cursor` | Hook | `BaseHookInput` | `inputs/cursor-hook/` | `agents.d/cursor.json` |
 | Claude Code | `claude-code` | Plugin-Probe | `BaseHookInput` | `inputs/claude-code-log/` | `agents.d/claude-code.json` |
 | Codex | `codex` | Plugin-Probe | `BaseHookInput` | `inputs/codex-log/` | `agents.d/codex.json` |
+| Wukong | `wukong` | CLI API Polling | `BaseInput` | `inputs/wukong/` | N/A |
 
 ## 依赖关系
 
@@ -95,6 +96,7 @@ AgentDiscoveryService ──发现──→ InputManager ──注册──→ I
 |------|------|
 | `~/.loongsuite-pilot/` | 数据根目录 |
 | `~/.loongsuite-pilot/config.json` | 用户配置文件 |
+| `~/.loongsuite-pilot/configs/inner/data_config.json` | 集团版内置 SLS 配置（仅集团版） |
 | `~/.loongsuite-pilot/agent-control.json` | 准入控制策略 |
 | `~/.loongsuite-pilot/deployed-agents.json` | 部署状态记录 |
 | `~/.loongsuite-pilot/hooks/` | 已部署的 Hook 脚本 |

@@ -9,6 +9,8 @@
 #     --sls-logstore "my-logstore" \
 #     --sls-ak-id "your-ak-id" \
 #     --sls-ak-secret "your-ak-secret"
+#   curl -fsSL <URL>/installer.sh | bash -s -- install --mask-mode all
+#   curl -fsSL <URL>/installer.sh | bash -s -- install --mask-mode custom --mask-types cloudAccessKey,apiKey
 #
 #
 # Install from test channel:
@@ -59,6 +61,8 @@ CMS_ENDPOINT=""
 CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
 SELECTED_AGENTS=""
+MASK_MODE=""
+MASK_TYPES=""
 HAS_SUDO=0
 PURGE=0
 SYSTEM_SERVICE=0
@@ -120,6 +124,10 @@ while [[ $# -gt 0 ]]; do
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
         --agents)             SELECTED_AGENTS="$2"; shift 2 ;;
         --agents=*)           SELECTED_AGENTS="${1#*=}"; shift ;;
+        --mask-mode)          MASK_MODE="$2"; shift 2 ;;
+        --mask-mode=*)        MASK_MODE="${1#*=}"; shift ;;
+        --mask-types)         MASK_TYPES="$2"; shift 2 ;;
+        --mask-types=*)       MASK_TYPES="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
         --system-service)     SYSTEM_SERVICE=1; shift ;;
         *)
@@ -127,6 +135,23 @@ while [[ $# -gt 0 ]]; do
             exit 1 ;;
     esac
 done
+
+if [ -n "$MASK_MODE" ]; then
+    case "$MASK_MODE" in
+        all|none|custom) ;;
+        *)
+            echo "❌ Unknown mask mode: $MASK_MODE (use 'all', 'custom', or 'none')" >&2
+            exit 1 ;;
+    esac
+fi
+if [ "$MASK_MODE" = "custom" ] && [ -z "$MASK_TYPES" ]; then
+    echo "❌ --mask-types is required when --mask-mode custom" >&2
+    exit 1
+fi
+if [ -n "$MASK_TYPES" ] && [ "$MASK_MODE" != "custom" ]; then
+    echo "❌ --mask-types can only be used with --mask-mode custom" >&2
+    exit 1
+fi
 
 # Validate current user and sudo access on Linux
 validate_install_user() {
@@ -514,6 +539,7 @@ let old = {};
 try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
 
 const newVals = JSON.parse(process.argv[2]);
+const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
 const checks = [
   { label: 'sls.endpoint',       oldVal: (old.sls||{}).endpoint||'',       newVal: newVals.slsEndpoint },
   { label: 'sls.project',        oldVal: (old.sls||{}).project||'',        newVal: newVals.slsProject },
@@ -522,6 +548,8 @@ const checks = [
   { label: 'cms.endpoint',       oldVal: (old.cms||{}).endpoint||'',       newVal: newVals.cmsEndpoint },
   { label: 'cms.workspace',      oldVal: (old.cms||{}).workspace||'',      newVal: newVals.cmsWorkspace },
   { label: 'serviceNamePrefix',  oldVal: old.serviceNamePrefix||'',        newVal: newVals.serviceNamePrefix },
+  { label: 'mask.mode',          oldVal: (old.mask||{}).mode||'',          newVal: newVals.maskMode },
+  { label: 'mask.types',         oldVal: Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: normalizeCsv(newVals.maskTypes) },
 ];
 
 const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
@@ -530,8 +558,8 @@ if (!changed.length) process.exit(0);
 for (const c of changed) {
   console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX")" 2>/dev/null || true)
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","maskMode":"%s","maskTypes":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$MASK_MODE" "$MASK_TYPES")" 2>/dev/null || true)
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -694,6 +722,7 @@ const config = {
   enabled: true,
   dataDir: '$DATA_DIR',
 };
+delete config.internal;
 if (config.userId === undefined && config['user.id'] !== undefined) {
   config.userId = config['user.id'];
 }
@@ -747,6 +776,8 @@ const cmsEndpoint = '${CMS_ENDPOINT}';
 const cmsWorkspace = '${CMS_WORKSPACE}';
 const serviceNamePrefix = '${SERVICE_NAME_PREFIX}';
 const selectedAgents = '${SELECTED_AGENTS}';
+const maskMode = '${MASK_MODE}';
+const maskTypes = '${MASK_TYPES}';
 
 if (collectLog) config.collectLog = collectLog === 'true';
 if (collectTrace) config.collectTrace = collectTrace === 'true';
@@ -759,6 +790,19 @@ if (cmsLicenseKey || cmsEndpoint || cmsWorkspace) {
 }
 
 if (serviceNamePrefix) config.serviceNamePrefix = serviceNamePrefix;
+
+if (maskMode) {
+  config.mask = config.mask || {};
+  config.mask.mode = maskMode;
+  if (maskMode === 'custom') {
+    config.mask.types = maskTypes
+      .split(',')
+      .map(type => type.trim())
+      .filter(Boolean);
+  } else {
+    delete config.mask.types;
+  }
+}
 
 if (selectedAgents) {
   config.agents = config.agents || {};

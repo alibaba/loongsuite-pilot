@@ -4,7 +4,7 @@
 # Usage:
 #   bash deploy/package.sh                       # default output: ./loongsuite-pilot.tar.gz
 #   bash deploy/package.sh -o /tmp/out.tar.gz    # custom output path
-#   bash deploy/package.sh --skip-build          # skip tsc, use existing dist/
+#   bash deploy/package.sh --skip-build          # skip build, use existing dist/
 
 set -euo pipefail
 
@@ -13,7 +13,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PACKAGE_NAME="loongsuite-pilot"
 OUTPUT_PATH=""
 SKIP_BUILD=0
-BUILD_VARIANT="internal"
+EXTERNAL=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -22,7 +22,7 @@ while [[ $# -gt 0 ]]; do
         --skip-build)
             SKIP_BUILD=1; shift ;;
         --external)
-            BUILD_VARIANT="external"; shift ;;
+            EXTERNAL=1; shift ;;
         *)
             echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -36,9 +36,9 @@ cd "$PROJECT_ROOT"
 
 # ── Build ──
 if [ "$SKIP_BUILD" -eq 0 ]; then
-    echo "==> Building ($BUILD_VARIANT)..."
+    echo "==> Building..."
     rm -rf dist
-    npm run "build:$BUILD_VARIANT"
+    npm run build
     echo "    ✅ Build complete"
 else
     echo "==> Skipping build (--skip-build)"
@@ -91,12 +91,19 @@ fi
 # Package metadata & version
 cp package.json      "$PKG_DIR/"
 cp package-lock.json "$PKG_DIR/" 2>/dev/null || true
+cp .npmrc            "$PKG_DIR/" 2>/dev/null || true
 cp README.md         "$PKG_DIR/" 2>/dev/null || true
 cp VERSION           "$PKG_DIR/"
 
 # Ensure scripts are executable
 chmod +x "$PKG_DIR/scripts/"*.sh 2>/dev/null || true
 chmod +x "$PKG_DIR/assets/hooks/"*.sh 2>/dev/null || true
+
+# Strip internal-only files for commercial / open-source packages
+if [ "$EXTERNAL" -eq 1 ]; then
+    rm -f "$PKG_DIR/scripts/migrate-internal-config.js"
+    echo "    ✅ Stripped internal-only files (--external)"
+fi
 
 echo "    ✅ Staged into $PKG_DIR"
 
@@ -113,9 +120,5 @@ echo "==> Contents:"
 tar -tzf "$OUTPUT_PATH" | head -20
 echo "    ... (truncated)"
 echo ""
-if [ "$BUILD_VARIANT" = "external" ]; then
-    echo "Done. Upload with:  bash deploy/upload-external.sh"
-else
-    echo "Done. Upload with:  bash deploy/upload-inner.sh"
-fi
+echo "Done. Upload with:  bash deploy/upload.sh"
 

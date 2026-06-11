@@ -51,6 +51,7 @@ function makeConfig(overrides: Partial<SlsFlusherConfig> = {}): SlsFlusherConfig
     ],
     batchMaxSize: 20,
     flushIntervalMs: 99999,
+    serviceNamePrefix: '',
     ...overrides,
   };
 }
@@ -217,6 +218,98 @@ describe('SlsFlusher', () => {
       mockPostLogStoreLogs.mockRejectedValueOnce(new Error('fail'));
 
       await expect(flusher.sendRaw('t', { d: 1 })).resolves.toBeUndefined();
+    });
+  });
+
+  describe('__service_name__ tag injection', () => {
+    it('appends agentType to serviceNamePrefix via AK', async () => {
+      const config = makeConfig({ serviceNamePrefix: 'loongsuite-pilot' });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry({ agentType: ClientType.ClaudeCliHook }));
+      await flusher.flush();
+
+      const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
+      expect(logGroup.tags).toContainEqual({ __hostname__: expect.any(String) });
+      expect(logGroup.tags).toContainEqual({ __service_name__: 'loongsuite-pilot-claude-code' });
+    });
+
+    it('omits __service_name__ tag when serviceNamePrefix is empty', async () => {
+      const config = makeConfig({ serviceNamePrefix: '' });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
+      expect(logGroup.tags).toContainEqual({ __hostname__: expect.any(String) });
+      expect(logGroup.tags).not.toContainEqual(expect.objectContaining({ __service_name__: expect.any(String) }));
+    });
+
+    it('sendRaw uses prefix without agentType suffix', async () => {
+      const config = makeConfig({
+        serviceNamePrefix: 'my-service',
+        endpoints: [
+          { name: 'ep-mcp', endpoint: 'https://r.log.aliyuncs.com', project: 'p', logstore: 'l', kind: 'mcp', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.sendRaw('topic', { key: 'val' });
+
+      const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
+      expect(logGroup.tags).toContainEqual({ __service_name__: 'my-service' });
+    });
+
+    it('webtracking appends agentType to serviceNamePrefix', async () => {
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '' });
+      vi.stubGlobal('fetch', fetchSpy);
+
+      const config = makeConfig({
+        serviceNamePrefix: 'loongsuite-pilot',
+        endpoints: [
+          { name: 'ep-wt', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p', logstore: 'l', kind: 'agentActivity', mode: 'webtracking' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry({ agentType: ClientType.Cursor }));
+      await flusher.flush();
+
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+      expect(body.__tags__.__service_name__).toBe('loongsuite-pilot-cursor');
+
+      vi.unstubAllGlobals();
+    });
+
+    it('different agentTypes produce separate batches', async () => {
+      const config = makeConfig({ serviceNamePrefix: 'pilot' });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry({ agentType: ClientType.ClaudeCliHook }));
+      await flusher.send(buildTestEntry({ agentType: ClientType.Cursor }));
+      await flusher.flush();
+
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(2);
+      const tags0 = mockPostLogStoreLogs.mock.calls[0][2].tags;
+      const tags1 = mockPostLogStoreLogs.mock.calls[1][2].tags;
+      const names = [
+        tags0.find((t: Record<string, string>) => '__service_name__' in t)?.__service_name__,
+        tags1.find((t: Record<string, string>) => '__service_name__' in t)?.__service_name__,
+      ].sort();
+      expect(names).toEqual(['pilot-claude-code', 'pilot-cursor']);
+    });
+
+    it('appends normalized fallback when agentType is empty', async () => {
+      const config = makeConfig({ serviceNamePrefix: 'pilot' });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry({ agentType: '' as any }));
+      await flusher.flush();
+
+      const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
+      expect(logGroup.tags).toContainEqual({ __service_name__: 'pilot-unknown' });
     });
   });
 });

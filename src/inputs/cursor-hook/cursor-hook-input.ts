@@ -38,6 +38,11 @@ function getNumberValue(data: Record<string, unknown>, key: string): number | un
 export class CursorHookInput extends BaseHookInput {
   readonly id = 'cursor-hook';
   readonly agentType = ClientType.Cursor;
+  private lastAgentVersion = '';
+
+  getAgentVersion(): string {
+    return this.lastAgentVersion;
+  }
 
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
@@ -56,6 +61,9 @@ export class CursorHookInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
+    const ver = record['agent.cursor.cursor_version'];
+    if (typeof ver === 'string' && ver) this.lastAgentVersion = ver;
+
     const payload = getPayload(record);
     const hookEvent = getHookEvent(record, payload);
     const canonicalEntry = buildCanonicalHookEntry(

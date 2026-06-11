@@ -2,6 +2,7 @@ import { ClientType, ActionType } from '../../types/index.js';
 import type { AgentActivityEntry, AgentEventName, JsonValue } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { buildAgentActivityEntry, toJsonValue } from '../../normalization/entry-builder.js';
+import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 
@@ -17,6 +18,11 @@ import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 export class QoderWorkInput extends BaseHookInput {
   readonly id = 'qoder-work-hook';
   readonly agentType = ClientType.QoderWork;
+  private lastAgentVersion = '';
+
+  getAgentVersion(): string {
+    return this.lastAgentVersion;
+  }
 
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
@@ -38,11 +44,20 @@ export class QoderWorkInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
+    const ver = record['agent.qoderwork.version'];
+    if (typeof ver === 'string' && ver) this.lastAgentVersion = ver;
+
     const canonicalEntry = buildCanonicalHookEntry(record, ClientType.QoderWork);
-    if (canonicalEntry) return canonicalEntry;
+    if (canonicalEntry) {
+      await enrichCanonicalEntryWithGit(canonicalEntry as Record<string, unknown>, record, 'qoder-work');
+      return canonicalEntry;
+    }
 
     const hookEntry = buildPostToolUseEntry(record, ClientType.QoderWork);
-    if (hookEntry) return hookEntry;
+    if (hookEntry) {
+      await enrichCanonicalEntryWithGit(hookEntry as Record<string, unknown>, record, 'qoder-work');
+      return hookEntry;
+    }
 
     const rowType = record.type as string | undefined;
     if (rowType !== 'assistant' && rowType !== 'user') return null;
@@ -165,15 +180,14 @@ export class QoderWorkInput extends BaseHookInput {
       'event.name': eventName,
       attributes,
     });
-
-    // Silence unused locals — ActionType is kept for the PostToolUse branch only.
-    void ActionType;
+    if (!entry) return null;
 
     const sourceUuid = record.uuid;
     if (typeof sourceUuid === 'string' && sourceUuid.trim().length > 0) {
       entry['event.id'] = sourceUuid;
       entry.uuid = sourceUuid;
     }
+    await enrichCanonicalEntryWithGit(entry as Record<string, unknown>, record, 'qoder-work');
     return entry;
   }
 }

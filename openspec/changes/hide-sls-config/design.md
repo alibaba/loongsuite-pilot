@@ -49,7 +49,7 @@ The desired model is that Loongsuite Pilot owns its default SLS destination as p
 
 5. Keep environment and installer override paths active for operator use.
 
-   `SLS_ENDPOINT`, `SLS_PROJECT`, and `SLS_LOGSTORE` environment variables will continue to override the built-in destination. Installer CLI flags such as `--sls-endpoint`, `--sls-project`, and `--sls-logstore` will also be retained for internal/operator installs, but normal installs will not write the default internal destination into user-visible config unless those flags are explicitly supplied.
+   `LOONGSUITE_SLS_ENDPOINT`, `LOONGSUITE_SLS_PROJECT`, and `LOONGSUITE_SLS_LOGSTORE` environment variables will continue to override the built-in destination. Installer CLI flags such as `--sls-endpoint`, `--sls-project`, and `--sls-logstore` will also be retained for internal/operator installs, but normal installs will not write the default internal destination into user-visible config unless those flags are explicitly supplied.
 
    Alternative considered: remove all destination override paths. This would better hide internals but would make internal testing and controlled deployments harder.
 

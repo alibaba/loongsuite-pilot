@@ -43,7 +43,8 @@ src/inputs/
 ├── qoder-work/             # Hook JSONL input
 ├── cursor-hook/            # Cursor hook history input
 ├── claude-code-log/        # OTel plugin JSONL input
-└── codex-log/              # OTel plugin JSONL input
+├── codex-log/              # OTel plugin JSONL input
+└── wukong/                 # CLI API polling (Wukong desktop app)
 ```
 
 每个 concrete input 目录通常只暴露一个 `<agent>-input.ts`，并通过 static `getWatchPaths()` / `checkAvailability()` 与 `AgentDiscoveryService` 对接。

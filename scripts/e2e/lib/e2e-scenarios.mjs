@@ -1287,7 +1287,7 @@ PACKAGE=/opt/project/loongsuite-pilot.tar.gz
 
 echo "[installer-e2e] Verifying local package and installer..."
 if [ ! -f "$PACKAGE" ]; then
-  echo "[installer-e2e] ERROR: $PACKAGE not found. Run 'deploy/package.sh --external' first."
+  echo "[installer-e2e] ERROR: $PACKAGE not found. Run 'deploy/package.sh' first."
   exit 1
 fi
 if [ ! -f "$INSTALLER" ]; then

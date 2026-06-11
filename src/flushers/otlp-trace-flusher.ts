@@ -57,7 +57,6 @@ const RESERVED_RESOURCE_KEYS = new Set([
   'host.name',
   'gen_ai.agent.type',
   'gen_ai.agent.system',
-  'acs.arms.service.feature',
 ]);
 
 function resolveEndpointUrl(raw: string): string {
@@ -105,10 +104,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (!cfg.serviceName) {
       throw new Error('[otlp-trace-flusher] config.serviceName is required when enabled');
     }
-    if (!cfg.headers || Object.keys(cfg.headers).length === 0) {
-      logger.warn('otlpTrace.headers is empty — CMS 2.0 normally requires x-arms-license-key, x-arms-project, x-cms-workspace');
-    }
-
     this.cfg = cfg;
     this.resolvedEndpointUrl = resolveEndpointUrl(cfg.endpoint);
     this.debugDir = path.join(os.homedir(), '.loongsuite-pilot', 'logs', 'otlp-debug');
@@ -381,7 +376,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     const exporter = new OTLPTraceExporter({
       url: this.resolvedEndpointUrl,
-      headers: this.cfg.headers,
+      headers: this.cfg.headers ?? {},
     });
 
     state = { exporter };
@@ -409,7 +404,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
       'host.name': os.hostname(),
       'gen_ai.agent.type': agentType,
       'gen_ai.agent.system': resolveAgentSystem(agentType),
-      'acs.arms.service.feature': 'genai_app',
       ...userAttrs,
     });
   }
