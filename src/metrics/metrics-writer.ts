@@ -2,7 +2,7 @@ import * as path from 'node:path';
 import { appendLine, ensureDir } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { flattenToStrings } from '../utils/record-utils.js';
-import { sendAlarm, sendStatus } from '../internal/sender.js';
+import { sendAlarm, sendRunningStatus, sendStatus } from '../internal/sender.js';
 import { MetricsCollector } from './metrics-collector.js';
 import type { DataflowSnapshot } from './metrics-collector.js';
 import type { AlarmManager } from './alarm-manager.js';
@@ -88,6 +88,7 @@ export class MetricsWriter {
       this.checkThresholds(metrics);
 
       sendStatus('pilot_status', flattenToStrings(metrics));
+      sendRunningStatus(flattenToStrings(metrics));
     } catch (err) {
       logger.warn('L1 metrics write failed', { error: String(err) });
     }
