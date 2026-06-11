@@ -11,7 +11,7 @@ const MAX_READ_BYTES = 4 * 1024 * 1024;
 const MAX_FILES_PER_CYCLE = 100;
 const SIGNATURE_BYTES = 1024;
 const MAX_READER_QUEUE_LENGTH = 20;
-const READER_TIMEOUT_MS = 1_800_000;
+const READER_TIMEOUT_MS = 3_600_000;
 const MAX_CACHE_BYTES = 1024 * 1024;
 
 export interface ReadResult {

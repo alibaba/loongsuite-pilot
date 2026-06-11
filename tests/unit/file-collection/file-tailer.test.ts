@@ -207,7 +207,7 @@ describe('FileTailer reader queue', () => {
     const cp = {
       offset: 6, inode: stat.ino, dev: stat.dev,
       signatureHash: '', signatureSize: 1024,
-      lastUpdateTime: Date.now() - 2_000_000, cache: '',
+      lastUpdateTime: Date.now() - 4_000_000, cache: '',
     };
     await tailer2.initReaderFromCheckpoint(filePath, cp);
 
