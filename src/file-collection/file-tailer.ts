@@ -127,7 +127,7 @@ export class FileTailer {
 
   async readNewLines(filePath: string, checkpoint?: FileCheckpoint | null): Promise<ReadResult> {
     if (checkpoint && !this.readerQueues.has(filePath)) {
-      this.initReaderFromCheckpoint(filePath, checkpoint);
+      await this.initReaderFromCheckpoint(filePath, checkpoint);
     }
 
     let queue = this.readerQueues.get(filePath);
@@ -254,8 +254,20 @@ export class FileTailer {
         : reader.filePath;
 
       if (!readPath) {
-        queue.shift();
-        continue;
+        if (reader.deleted && Date.now() - reader.deletedTime > READER_TIMEOUT_MS) {
+          logger.warn('deleted reader file not found after timeout, discarding', {
+            file: filePath,
+            inode: reader.devInode.ino,
+            offset: reader.offset,
+          });
+          queue.shift();
+          continue;
+        }
+        logger.debug('deleted reader file temporarily not found, skipping to next reader', {
+          file: filePath,
+          inode: reader.devInode.ino,
+        });
+        break;
       }
 
       const result = await this.readFromReader(readPath, reader);
