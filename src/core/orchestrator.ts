@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { ClientType } from '../types/index.js';
 import type { AnalyticsConfig, AgentDetectionEntry } from '../types/index.js';
 import { AgentControlManager } from './agent-control-manager.js';
 import { AgentDiscoveryService } from './agent-discovery-service.js';
@@ -27,7 +28,8 @@ import { QoderCnSqliteInput } from '../inputs/qoder-cn-sqlite/qoder-cn-sqlite-in
 import { QoderCnInput } from '../inputs/qoder-cn/qoder-cn-input.js';
 import { QoderCnTraceInput } from '../inputs/qoder-cn-trace/qoder-cn-trace-input.js';
 import { QoderWorkInput } from '../inputs/qoder-work/qoder-work-input.js';
-import { QoderWorkLogInput } from '../inputs/qoder-work-log/qoder-work-log-input.js';
+import { QoderWorkLogInput, resolveQoderWorkRoot } from '../inputs/qoder-work-log/qoder-work-log-input.js';
+import { QoderWorkTraceInput as QoderWorkCNTraceInput } from '../inputs/qoder-work-log/qoder-work-trace-input.js';
 import { QoderWorkSqliteInput } from '../inputs/qoder-work-sqlite/qoder-work-sqlite-input.js';
 import { QoderWorkTraceInput } from '../inputs/qoder-work-trace/qoder-work-trace-input.js';
 import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
@@ -74,6 +76,10 @@ export class Orchestrator extends EventEmitter {
     'qoder-work-trace': 'qoder-work',
     'qoder-work-log': 'qoder-work',
     'qoder-work-sqlite': 'qoder-work',
+    'qoder-work-cn-trace': 'qoder-work-cn',
+    'qoder-work-cn-hook': 'qoder-work-cn',
+    'qoder-work-cn-log': 'qoder-work-cn',
+    'qoder-work-cn-sqlite': 'qoder-work-cn',
     'qoder-cli-hook': 'qoder',
     'qoder-cli-session': 'qoder',
     'cursor-hook': 'cursor',
@@ -434,6 +440,25 @@ export class Orchestrator extends EventEmitter {
         }
       }
     }
+
+    const qoderWorkCNAvailable = await directoryExists(resolveHome('~/.qoderworkcn'));
+    if (qoderWorkCNAvailable) {
+      const defs = HookManager.buildQoderWorkCNHooks(this.dataDir);
+      for (const def of defs) {
+        const installed = await hookManager.isHookInstalled(def);
+        if (!installed) {
+          const ok = await hookManager.installHook(def);
+          if (ok) {
+            const event = def.hookJsonPath[def.hookJsonPath.length - 1];
+            logger.info('qoder-work-cn hook registered', { event });
+          } else {
+            this.alarmManager.record('HOOK_INSTALL_ALARM', '2',
+              `qoder-work-cn hook install failed: ${def.hookJsonPath.join('.')}`,
+              { input_name: 'qoder-work-cn' });
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -601,6 +626,96 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['qoder-work-sqlite']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['qoder-work-sqlite']?.pollInterval,
+      }),
+    );
+
+    // --- Qoder Work CN ---
+    const qoderWorkCNDataRoot = resolveQoderWorkRoot('cn');
+    const qoderWorkCNLogDir = path.join(this.dataDir, 'logs', 'qoder-work-cn', 'history');
+    const qoderWorkCNDetectionPath = resolveHome('~/.qoderworkcn');
+
+    // --- Qoder Work CN (Trace: SDK Log + SQLite aggregation) ---
+    const qoderWorkCNTraceInput = new QoderWorkCNTraceInput({
+      stateStore: this.stateStore,
+      agentType: ClientType.QoderWorkCN,
+      dataRoot: qoderWorkCNDataRoot,
+    });
+    this.inputManager.registerInput(qoderWorkCNTraceInput);
+    const qoderWorkCNTraceEnabled = () =>
+      this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-cn-trace']) &&
+      this.agentControlManager.resolveEnabled(
+        'qoder-work-cn-trace',
+        listenerCfg['qoder-work-cn-trace']?.enabled ?? false,
+      );
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderWorkCNTraceInput, {
+        watchPaths: [path.join(qoderWorkCNDataRoot, 'logs')],
+        isAvailable: () => directoryExists(path.join(qoderWorkCNDataRoot, 'logs')),
+        enabled: qoderWorkCNTraceEnabled,
+        pollIntervalMs: listenerCfg['qoder-work-cn-trace']?.pollInterval,
+      }),
+    );
+
+    // --- Qoder Work CN (Hook JSONL) — disabled when CN trace is active ---
+    const qoderWorkCNHookInput = new QoderWorkInput({
+      stateStore: this.stateStore,
+      agentType: ClientType.QoderWorkCN,
+      logDir: qoderWorkCNLogDir,
+    });
+    this.inputManager.registerInput(qoderWorkCNHookInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderWorkCNHookInput, {
+        watchPaths: [qoderWorkCNDetectionPath],
+        isAvailable: () => directoryExists(qoderWorkCNDetectionPath),
+        enabled: () => !qoderWorkCNTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-cn-hook']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-work-cn-hook',
+            listenerCfg['qoder-work-cn-hook']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qoder-work-cn-hook']?.pollInterval,
+      }),
+    );
+
+    // --- Qoder Work CN (SDK Log tail) — disabled when CN trace is active ---
+    const qoderWorkCNLogInput = new QoderWorkLogInput({
+      stateStore: this.stateStore,
+      agentType: ClientType.QoderWorkCN,
+      dataRoot: qoderWorkCNDataRoot,
+    });
+    this.inputManager.registerInput(qoderWorkCNLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderWorkCNLogInput, {
+        watchPaths: [path.join(qoderWorkCNDataRoot, 'logs')],
+        isAvailable: () => directoryExists(path.join(qoderWorkCNDataRoot, 'logs')),
+        enabled: () => !qoderWorkCNTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-cn-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-work-cn-log',
+            listenerCfg['qoder-work-cn-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qoder-work-cn-log']?.pollInterval,
+      }),
+    );
+
+    // --- Qoder Work CN (SQLite agents.db) — disabled when CN trace is active ---
+    const qoderWorkCNSqliteInput = new QoderWorkSqliteInput({
+      stateStore: this.stateStore,
+      agentType: ClientType.QoderWorkCN,
+      dataRoot: qoderWorkCNDataRoot,
+    });
+    this.inputManager.registerInput(qoderWorkCNSqliteInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qoderWorkCNSqliteInput, {
+        watchPaths: [path.join(qoderWorkCNDataRoot, 'data')],
+        isAvailable: () => fileExists(path.join(qoderWorkCNDataRoot, 'data', 'agents.db')),
+        enabled: () => !qoderWorkCNTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-cn-sqlite']) &&
+          this.agentControlManager.resolveEnabled(
+            'qoder-work-cn-sqlite',
+            listenerCfg['qoder-work-cn-sqlite']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qoder-work-cn-sqlite']?.pollInterval,
       }),
     );
 

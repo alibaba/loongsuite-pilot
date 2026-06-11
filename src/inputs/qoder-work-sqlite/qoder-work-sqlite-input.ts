@@ -5,11 +5,8 @@ import sqlite3 from 'sqlite3';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
-import { resolveHome } from '../../utils/fs-utils.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
-
-const DEFAULT_QODERWORK_ROOT_MAC = '~/Library/Application Support/QoderWork';
-const DEFAULT_QODERWORK_ROOT_LINUX = '~/.config/QoderWork';
+import { resolveQoderWorkRoot } from '../qoder-work-log/qoder-work-log-input.js';
 /** Relative path of the SQLite DB inside the QoderWork data root. */
 const DB_REL_PATH = path.join('data', 'agents.db');
 const SOURCE = 'qoder-work-sqlite';
@@ -19,6 +16,7 @@ const SQL_BATCH_LIMIT = 1000;
 export interface QoderWorkSqliteInputOptions extends InputOptions {
   dbPath?: string;
   dataRoot?: string;
+  agentType?: ClientType;
 }
 
 /**
@@ -58,15 +56,18 @@ interface MessageRow {
  * so repeated reads of the same row produce the same entries.
  */
 export class QoderWorkSqliteInput extends BaseInput {
-  readonly id = 'qoder-work-sqlite';
-  readonly agentType = ClientType.QoderWork;
+  readonly id: string;
+  readonly agentType: ClientType;
   readonly collectionMethod = CollectionMethod.SqlitePolling;
 
   protected readonly dbPath: string;
 
   constructor(opts: QoderWorkSqliteInputOptions) {
     super(opts);
-    const dataRoot = opts.dataRoot ?? resolveQoderWorkRoot();
+    const agentType = opts.agentType ?? ClientType.QoderWork;
+    const dataRoot = opts.dataRoot ?? resolveQoderWorkRoot(agentType === ClientType.QoderWorkCN ? 'cn' : 'standard');
+    this.agentType = agentType;
+    this.id = `${agentType}-sqlite`;
     this.dbPath = opts.dbPath ?? path.join(dataRoot, DB_REL_PATH);
     this.pollIntervalMs = opts.pollIntervalMs ?? 30_000;
   }
@@ -119,7 +120,7 @@ export class QoderWorkSqliteInput extends BaseInput {
     for (const row of rows) {
       if (row.updatedAt > maxUpdate) maxUpdate = row.updatedAt;
       try {
-        const rowEntries = transformRow(row);
+        const rowEntries = transformRow(row, this.agentType);
         entries.push(...rowEntries);
       } catch (err) {
         this.logger.warn('row transform failed', {
@@ -136,7 +137,7 @@ export class QoderWorkSqliteInput extends BaseInput {
   }
 }
 
-function transformRow(row: MessageRow): AgentActivityEntry[] {
+function transformRow(row: MessageRow, agentType: ClientType): AgentActivityEntry[] {
   const sessionId = row.sessionId ?? '';
   // QoderWork stores `updated_at` as unix seconds; normalise to milliseconds
   // so downstream timestamp serialisation matches the rest of the pipeline.
@@ -164,7 +165,7 @@ function transformRow(row: MessageRow): AgentActivityEntry[] {
         'event.id': hashId([sessionId, row.id, 'user']),
         'event.name': 'llm.request',
         'gen_ai.session.id': sessionId,
-        'gen_ai.agent.type': ClientType.QoderWork,
+        'gen_ai.agent.type': agentType,
         'gen_ai.request.model': model,
         'gen_ai.input.messages_delta': [
           { role: 'user', content },
@@ -209,7 +210,7 @@ function transformRow(row: MessageRow): AgentActivityEntry[] {
         'event.id': hashId([sessionId, row.id, 'tool_result', callId, String(i)]),
         'event.name': 'tool.result',
         'gen_ai.session.id': sessionId,
-        'gen_ai.agent.type': ClientType.QoderWork,
+        'gen_ai.agent.type': agentType,
         'gen_ai.request.model': model,
         'gen_ai.tool.name': toolName,
         'gen_ai.tool.call.id': callId,
@@ -303,14 +304,6 @@ function queryReadonly<T>(
   });
 }
 
-function resolveQoderWorkRoot(): string {
-  if (process.platform === 'darwin') {
-    return resolveHome(DEFAULT_QODERWORK_ROOT_MAC);
-  }
-  const xdg = process.env.XDG_CONFIG_HOME;
-  if (xdg) return path.join(xdg, 'QoderWork');
-  return resolveHome(DEFAULT_QODERWORK_ROOT_LINUX);
-}
 
 function stringOr(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.length > 0 ? value : fallback;

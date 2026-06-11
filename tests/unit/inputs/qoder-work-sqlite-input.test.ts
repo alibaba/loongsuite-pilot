@@ -238,6 +238,65 @@ describe('QoderWorkSqliteInput', () => {
       pollIntervalMs: 60_000,
     });
   }
+
+  describe('QoderWork CN variant (parameterized)', () => {
+    it('has CN id and agentType', () => {
+      const cnInput = new QoderWorkSqliteInput({
+        stateStore: stateStore as any,
+        dbPath,
+        agentType: ClientType.QoderWorkCN,
+        pollIntervalMs: 60_000,
+      });
+      expect(cnInput.id).toBe('qoder-work-cn-sqlite');
+      expect(cnInput.agentType).toBe(ClientType.QoderWorkCN);
+      expect(cnInput.collectionMethod).toBe(CollectionMethod.SqlitePolling);
+    });
+
+    it('emits entries with qoder-work-cn agent type', async () => {
+      const cnInput = new QoderWorkSqliteInput({
+        stateStore: stateStore as any,
+        dbPath,
+        agentType: ClientType.QoderWorkCN,
+        pollIntervalMs: 60_000,
+      });
+
+      // Baseline first (onStart sets cursor to max updated_at)
+      await insertSubChat(dbPath, { id: 'sc-cn-0', session_id: 'sess-cn-0' });
+      await insertMessage(dbPath, {
+        id: 'mcn-baseline',
+        sub_chat_id: 'sc-cn-0',
+        sequence: 0,
+        role: 'user',
+        parts: JSON.stringify([{ type: 'text', text: 'baseline' }]),
+        updated_at: 1_777_000_000,
+      });
+
+      // Start (baselines existing rows)
+      const captured: AgentActivityEntry[] = [];
+      cnInput.on('entries', (batch: AgentActivityEntry[]) => captured.push(...batch));
+      await cnInput.start();
+      expect(captured).toHaveLength(0);
+
+      // Insert a new row after baseline
+      await insertSubChat(dbPath, { id: 'sc-cn-1', session_id: 'sess-cn-1', model_level: 'qwork-ultimate' });
+      await insertMessage(dbPath, {
+        id: 'mcn-1',
+        sub_chat_id: 'sc-cn-1',
+        sequence: 0,
+        role: 'user',
+        parts: JSON.stringify([{ type: 'text', text: 'cn user prompt' }]),
+        updated_at: 1_777_000_100,
+      });
+
+      // Trigger a manual collect cycle
+      await (cnInput as any).runCycle();
+      await cnInput.stop();
+
+      expect(captured).toHaveLength(1);
+      expect(captured[0]!['gen_ai.agent.type']).toBe(ClientType.QoderWorkCN);
+      expect(captured[0]!['event.name']).toBe('llm.request');
+    });
+  });
 });
 
 async function collectOnce(input: QoderWorkSqliteInput): Promise<AgentActivityEntry[]> {

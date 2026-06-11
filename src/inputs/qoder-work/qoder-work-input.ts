@@ -6,6 +6,11 @@ import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-cont
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 
+export interface QoderWorkInputOptions extends Partial<HookInputOptions> {
+  stateStore: HookInputOptions['stateStore'];
+  agentType?: ClientType;
+}
+
 /**
  * Qoder Work — transcript JSONL input.
  *
@@ -14,23 +19,32 @@ import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
  *
  * Hook config lives at ~/.qoderwork/settings.json and invokes the dedicated
  * qoderwork-loongsuite-pilot-hook.sh entrypoint.
+ *
+ * Parameterized to support both QoderWork and QoderWork CN variants.
  */
 export class QoderWorkInput extends BaseHookInput {
-  readonly id = 'qoder-work-hook';
-  readonly agentType = ClientType.QoderWork;
+  readonly id: string;
+  readonly agentType: ClientType;
   private lastAgentVersion = '';
 
   getAgentVersion(): string {
     return this.lastAgentVersion;
   }
 
-  constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
+  constructor(opts: QoderWorkInputOptions) {
+    const agentType = opts.agentType ?? ClientType.QoderWork;
+    const logPrefix = opts.logPrefix ?? (agentType === ClientType.QoderWork ? 'qoder-work' : agentType);
+    const defaultLogDir = agentType === ClientType.QoderWork
+      ? '~/.loongsuite-pilot/logs/qoder-work/history'
+      : `~/.loongsuite-pilot/logs/${agentType}/history`;
     super({
-      stateStore: opts!.stateStore,
-      logDir: opts?.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder-work/history'),
-      logPrefix: opts?.logPrefix ?? 'qoder-work',
-      pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
+      stateStore: opts.stateStore,
+      logDir: opts.logDir ?? resolveHome(defaultLogDir),
+      logPrefix,
+      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
     });
+    this.agentType = agentType;
+    this.id = `${agentType}-hook`;
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -47,13 +61,13 @@ export class QoderWorkInput extends BaseHookInput {
     const ver = record['agent.qoderwork.version'];
     if (typeof ver === 'string' && ver) this.lastAgentVersion = ver;
 
-    const canonicalEntry = buildCanonicalHookEntry(record, ClientType.QoderWork);
+    const canonicalEntry = buildCanonicalHookEntry(record, this.agentType);
     if (canonicalEntry) {
       await enrichCanonicalEntryWithGit(canonicalEntry as Record<string, unknown>, record, 'qoder-work');
       return canonicalEntry;
     }
 
-    const hookEntry = buildPostToolUseEntry(record, ClientType.QoderWork);
+    const hookEntry = buildPostToolUseEntry(record, this.agentType);
     if (hookEntry) {
       await enrichCanonicalEntryWithGit(hookEntry as Record<string, unknown>, record, 'qoder-work');
       return hookEntry;
@@ -176,7 +190,7 @@ export class QoderWorkInput extends BaseHookInput {
         ?? (record.sessionid as string)
         ?? '',
       'user.id': (record.user_id as string) ?? (record.userId as string) ?? '',
-      'agent.type': ClientType.QoderWork,
+      'agent.type': this.agentType,
       'event.name': eventName,
       attributes,
     });

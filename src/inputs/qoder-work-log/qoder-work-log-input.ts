@@ -13,6 +13,8 @@ import {
 
 const DEFAULT_QODERWORK_ROOT_MAC = '~/Library/Application Support/QoderWork';
 const DEFAULT_QODERWORK_ROOT_LINUX = '~/.config/QoderWork';
+const DEFAULT_QODERWORK_CN_ROOT_MAC = '~/Library/Application Support/QoderWork CN';
+const DEFAULT_QODERWORK_CN_ROOT_LINUX = '~/.config/QoderWork CN';
 const SOURCE = 'qoder-work-sdk-log';
 const UNKNOWN_MODEL = 'unknown';
 const MAX_READ_BYTES = 16 * 1024 * 1024;
@@ -34,6 +36,8 @@ const SET_MODEL_POLICY_RE =
 export interface QoderWorkLogInputOptions extends Omit<SessionInputOptions, 'sessionDir' | 'filePattern'> {
   /** Override QoderWork data root (default resolves to platform-specific dir). */
   dataRoot?: string;
+  /** Agent type for this instance (default QoderWork). */
+  agentType?: ClientType;
 }
 
 interface SessionState {
@@ -49,6 +53,8 @@ interface SessionState {
   agents: string[];
   tools: string[];
   lastSeenMs: number;
+  traceId: string;
+  turnCounter: number;
 }
 
 interface ToolCallSlot {
@@ -122,7 +128,8 @@ export type SdkEvent =
       durationApiMs: number;
       numTurns: number;
       contextUsageRatio: number;
-    };
+    }
+  | { kind: 'post_tool_use'; ts: number; sessionId: string; toolUseId: string; toolName: string; toolResponse: string; transcriptPath: string };
 
 /**
  * Qoder Work — SDK log tail input.
@@ -149,8 +156,8 @@ export type SdkEvent =
  * On `result` events we additionally emit a session-level `other` summary.
  */
 export class QoderWorkLogInput extends BaseSessionInput {
-  readonly id = 'qoder-work-log';
-  readonly agentType = ClientType.QoderWork;
+  readonly id: string;
+  readonly agentType: ClientType;
 
   private readonly sessions: Map<string, SessionState> = new Map();
   private readonly activeTurns: Map<string, ActiveTurn> = new Map();
@@ -169,15 +176,17 @@ export class QoderWorkLogInput extends BaseSessionInput {
     compact: '',
     scene: '',
   };
-
   constructor(opts: QoderWorkLogInputOptions) {
-    const dataRoot = opts.dataRoot ?? resolveQoderWorkRoot();
+    const agentType = opts.agentType ?? ClientType.QoderWork;
+    const dataRoot = opts.dataRoot ?? resolveQoderWorkRoot(agentType === ClientType.QoderWorkCN ? 'cn' : 'standard');
     super({
       stateStore: opts.stateStore,
       sessionDir: path.join(dataRoot, 'logs'),
       filePattern: 'sdk-*.log',
       pollIntervalMs: opts.pollIntervalMs ?? 30_000,
     });
+    this.agentType = agentType;
+    this.id = `${agentType}-log`;
   }
 
   static getWatchPaths(): string[] {
@@ -375,7 +384,22 @@ export class QoderWorkLogInput extends BaseSessionInput {
           agents: event.agents,
           tools: event.tools,
           lastSeenMs: event.ts,
+          traceId: crypto.randomBytes(16).toString('hex'),
+          turnCounter: 0,
         });
+        // QoderWork CN only sends `set_model_policy` once per SDK process
+        // start, which may be skipped by baseline. Use system init's `model`
+        // field as a fallback policy seed when no explicit policy has been
+        // observed yet (e.g. init.model = "Auto" in CN, "Premium" in intl).
+        if (event.subscriptionTier &&
+            !this.currentModelPolicy.chat &&
+            !this.currentModelPolicy.scene &&
+            !this.currentModelPolicy.compact) {
+          const candidate = event.subscriptionTier.toLowerCase();
+          if (candidate !== 'premium' && candidate !== 'standard') {
+            this.currentModelPolicy.chat = candidate;
+          }
+        }
         return;
 
       case 'set_model_policy':
@@ -391,7 +415,10 @@ export class QoderWorkLogInput extends BaseSessionInput {
         // close prior turn before starting new one
         this.finalizeTurn(event.sessionId, filePath, out);
         const sess = this.sessions.get(event.sessionId);
-        if (sess) sess.lastSeenMs = event.ts;
+        if (sess) {
+          sess.lastSeenMs = event.ts;
+          sess.turnCounter++;
+        }
         this.activeTurns.set(event.sessionId, {
           messageId: event.messageId,
           model: this.pickModelForSession(event.sessionId),
@@ -447,7 +474,6 @@ export class QoderWorkLogInput extends BaseSessionInput {
 
       case 'result': {
         this.finalizeTurn(event.sessionId, filePath, out);
-        // Optional: emit a session-level summary entry (other) for visibility.
         const session = this.sessions.get(event.sessionId);
         const resultModel = this.pickModelForSession(event.sessionId);
         out.push(
@@ -460,8 +486,9 @@ export class QoderWorkLogInput extends BaseSessionInput {
               String(event.ts),
             ]),
             'event.name': 'other',
+            trace_id: session?.traceId,
             'gen_ai.session.id': event.sessionId,
-            'gen_ai.agent.type': ClientType.QoderWork,
+            'gen_ai.agent.type': this.agentType,
             'gen_ai.request.model': resultModel,
             'gen_ai.response.model': resultModel,
             attributes: {
@@ -512,23 +539,40 @@ export class QoderWorkLogInput extends BaseSessionInput {
     this.activeTurns.delete(sessionId);
 
     const session = this.sessions.get(sessionId);
-    // The real LLM model key was snapshotted onto the turn at `message_start`
-    // from the most recent `set_model_policy.chat.model`. The `system init.model`
-    // field is a subscription tier label and is surfaced separately via
-    // `attributes.subscription_tier`.
     const model = turn.model || UNKNOWN_MODEL;
     const sharedAttrs = sessionAttributes(session);
 
-    // Single metadata-only llm.response per turn. No output.messages content
-    // is reconstructed (delta write order is unreliable, see class doc).
+    const traceId = session?.traceId;
+    const turnId = session ? `${sessionId}:t${session.turnCounter}` : undefined;
+    const stepId = turnId ? `${turnId}:s1` : undefined;
+
+    // Emit llm.request at turn start so OTLP flusher can compute span duration
+    out.push(
+      buildAgentActivityEntry({
+        timestamp: turn.startTimestamp,
+        'event.id': hashId([filePath, sessionId, turn.messageId, 'request']),
+        'event.name': 'llm.request',
+        trace_id: traceId,
+        'gen_ai.session.id': sessionId,
+        'gen_ai.turn.id': turnId,
+        'gen_ai.step.id': stepId,
+        'gen_ai.agent.type': this.agentType,
+        'gen_ai.request.model': model,
+        attributes: { source: SOURCE, event_kind: 'request', ...sharedAttrs },
+      }),
+    );
+
     out.push(
       buildAgentActivityEntry({
         timestamp: turn.endTimestamp,
         'event.id': hashId([filePath, sessionId, turn.messageId, 'response']),
         'event.name': 'llm.response',
+        trace_id: traceId,
         'gen_ai.session.id': sessionId,
+        'gen_ai.turn.id': turnId,
+        'gen_ai.step.id': stepId,
         'gen_ai.response.id': turn.messageId,
-        'gen_ai.agent.type': ClientType.QoderWork,
+        'gen_ai.agent.type': this.agentType,
         'gen_ai.request.model': model,
         'gen_ai.response.model': model,
         'gen_ai.usage.input_tokens': finiteNum(turn.inputTokens),
@@ -548,7 +592,6 @@ export class QoderWorkLogInput extends BaseSessionInput {
       }),
     );
 
-    // One tool.call per tool_use block — name + id only, no arguments.
     for (let i = 0; i < turn.toolCalls.length; i++) {
       const tc = turn.toolCalls[i];
       out.push(
@@ -563,9 +606,12 @@ export class QoderWorkLogInput extends BaseSessionInput {
             String(i),
           ]),
           'event.name': 'tool.call',
+          trace_id: traceId,
           'gen_ai.session.id': sessionId,
+          'gen_ai.turn.id': turnId,
+          'gen_ai.step.id': stepId,
           'gen_ai.response.id': turn.messageId,
-          'gen_ai.agent.type': ClientType.QoderWork,
+          'gen_ai.agent.type': this.agentType,
           'gen_ai.request.model': model,
           'gen_ai.response.model': model,
           'gen_ai.tool.name': tc.name,
@@ -598,13 +644,14 @@ function sessionAttributes(session: SessionState | undefined): Record<string, Js
   return out;
 }
 
-function resolveQoderWorkRoot(): string {
+export function resolveQoderWorkRoot(variant: 'standard' | 'cn' = 'standard'): string {
   if (process.platform === 'darwin') {
-    return resolveHome(DEFAULT_QODERWORK_ROOT_MAC);
+    return resolveHome(variant === 'cn' ? DEFAULT_QODERWORK_CN_ROOT_MAC : DEFAULT_QODERWORK_ROOT_MAC);
   }
   const xdg = process.env.XDG_CONFIG_HOME;
-  if (xdg) return path.join(xdg, 'QoderWork');
-  return resolveHome(DEFAULT_QODERWORK_ROOT_LINUX);
+  const dirName = variant === 'cn' ? 'QoderWork CN' : 'QoderWork';
+  if (xdg) return path.join(xdg, dirName);
+  return resolveHome(variant === 'cn' ? DEFAULT_QODERWORK_CN_ROOT_LINUX : DEFAULT_QODERWORK_ROOT_LINUX);
 }
 
 export function parseSdkLogLine(line: string): SdkEvent | null {
@@ -675,6 +722,25 @@ export function parseSdkLogLine(line: string): SdkEvent | null {
       numTurns: numberOr(data.num_turns, 0),
       contextUsageRatio: numberOr(data.context_usage_ratio, 0),
     };
+  }
+
+  if (msgType === 'control_request') {
+    const req = data.request as Record<string, unknown> | undefined;
+    const input = (req && typeof req === 'object'
+      ? (req as Record<string, unknown>).input
+      : undefined) as Record<string, unknown> | undefined;
+    if (input && input.hook_event_name === 'PostToolUse') {
+      return {
+        kind: 'post_tool_use',
+        ts: tsNum,
+        sessionId: stringOr(input.session_id, ''),
+        toolUseId: stringOr(input.tool_use_id, ''),
+        toolName: stringOr(input.tool_name, ''),
+        toolResponse: stringOr(input.tool_response, ''),
+        transcriptPath: stringOr(input.transcript_path, ''),
+      };
+    }
+    return null;
   }
 
   return null;

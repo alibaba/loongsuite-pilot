@@ -67,7 +67,8 @@ describe('QoderWorkLogInput', () => {
     expect(resp['gen_ai.usage.total_tokens']).toBe(1290);
     expect(resp['gen_ai.session.id']).toBe('sess-1');
     expect(resp['gen_ai.response.id']).toBe('msg-1');
-    // No `set_model_policy` in this fixture, so model falls back to UNKNOWN.
+    // No `set_model_policy` in this fixture; tier "Standard" is filtered out
+    // by the model fallback (not a valid model key), so falls back to UNKNOWN.
     expect(resp['gen_ai.response.model']).toBe('unknown');
     expect(resp['agent.subscription_tier']).toBe('Standard');
     expect(resp['agent.cwd']).toBe('/home/dev/proj');
@@ -276,6 +277,19 @@ describe('QoderWorkLogInput', () => {
   function seedOffset(offset: number): void {
     stateStore.setOffset(`qoder-work-log:${logFile}`, offset);
   }
+
+  describe('QoderWork CN variant (parameterized)', () => {
+    it('has CN id and agentType', () => {
+      const cnInput = new QoderWorkLogInput({
+        stateStore: stateStore as any,
+        dataRoot: tmpRoot,
+        agentType: ClientType.QoderWorkCN,
+        pollIntervalMs: 60_000,
+      });
+      expect(cnInput.id).toBe('qoder-work-cn-log');
+      expect(cnInput.agentType).toBe(ClientType.QoderWorkCN);
+    });
+  });
 });
 
 async function collectOnce(input: QoderWorkLogInput): Promise<AgentActivityEntry[]> {
