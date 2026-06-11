@@ -466,4 +466,76 @@ describe('SLS resolver — config-driven', () => {
       });
     });
   });
+
+  describe('webtracking with empty project', () => {
+    it('allows empty project for webtracking mode (enabled=true)', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: [
+          {
+            name: 'wt-no-project',
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: '',
+            logstore: 'raw',
+            mode: 'webtracking',
+          },
+        ],
+      });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(1);
+      expect(cfg.flushers.sls?.endpoints[0]).toMatchObject({
+        name: 'wt-no-project',
+        project: '',
+        logstore: 'raw',
+        mode: 'webtracking',
+      });
+      expect(cfg.flushers.sls?.enabled).toBe(true);
+    });
+
+    it('rejects empty project for AK mode (enabled=false)', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: [
+          {
+            name: 'ak-no-project',
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: '',
+            logstore: 'raw',
+            mode: 'ak',
+            accessKeyId: 'ak-id',
+            accessKeySecret: 'ak-secret',
+          },
+        ],
+      });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.enabled).toBe(false);
+    });
+
+    it('mixed endpoints: empty-project webtracking + valid AK both pass', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: [
+          {
+            name: 'wt-empty',
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: '',
+            logstore: 'raw',
+            mode: 'webtracking',
+          },
+          {
+            name: 'ak-valid',
+            endpoint: 'https://cn-shanghai.log.aliyuncs.com',
+            project: 'prod-proj',
+            logstore: 'prod-store',
+            mode: 'ak',
+            accessKeyId: 'ak-id',
+            accessKeySecret: 'ak-secret',
+          },
+        ],
+      });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(2);
+      expect(cfg.flushers.sls?.enabled).toBe(true);
+    });
+  });
 });

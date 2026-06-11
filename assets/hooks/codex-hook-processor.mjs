@@ -280,7 +280,10 @@ async function writeSessionJsonl(state, transcriptData) {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   const userId = resolveUserId({}, runtimeConfig);
   const sessionId = state.session_id || 'unknown';
-  const turns = splitIntoTurns(state);
+
+  // 优先用 transcript 的 turnBoundaries 驱动 turn 切分（覆盖所有用户交互），
+  // fallback 到 state.events 的 user_prompt_submit（hook 可能漏报）。
+  const turns = resolveTurns(state, transcriptData);
   if (turns.length === 0) return;
 
   const provider = transcriptData?.modelProvider || 'openai';
@@ -322,6 +325,88 @@ async function writeSessionJsonl(state, transcriptData) {
 
   const cleaned = allRecords.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
+}
+
+// ─── Turn 切分：transcript 驱动 + state.events fallback ───
+
+function resolveTurns(state, transcriptData) {
+  const boundaries = transcriptData?.turnBoundaries;
+
+  // 无 transcript 数据时回退到原有的 splitIntoTurns（按 user_prompt_submit 切分）
+  if (!boundaries || boundaries.length === 0) {
+    return splitIntoTurns(state);
+  }
+
+  // 用 transcript turnBoundaries 作为权威 turn 边界。
+  // 每个 boundary 代表一次真实用户交互（turn_context 事件），
+  // 子 agent 的 turn_context 在子 transcript 中，不会出现在父 transcript 里。
+  const allEvents = state.events.filter(
+    (e) => e.type !== 'session_start',
+  );
+  const stopEvent = allEvents.find((e) => e.type === 'stop');
+
+  // 父 agent 工具调用的 call_id 白名单。state.events 中 tool_use_id 不在此集合中的
+  // pre/post_tool_use 是子 agent 进程混入的事件（子 agent hook 使用父 session_id），
+  // 应当过滤掉，避免干扰父 turn 的 step 构建和时间线。
+  const parentCallIds = transcriptData?.parentToolCallIds;
+
+  const turns = [];
+  for (let i = 0; i < boundaries.length; i++) {
+    const boundary = boundaries[i];
+    const nextBoundary = boundaries[i + 1];
+    const startTime = boundary.timestamp;
+    const endTime = nextBoundary ? nextBoundary.timestamp : (stopEvent?.timestamp ?? startTime);
+
+    // 找到 state.events 中对应这个 turn 时间范围内的事件。
+    // 1. 过滤掉子 agent 混入的 pre/post_tool_use（tool_use_id 不在父白名单中）
+    // 2. 对同一 tool_use_id 去重（hook 事件 + appendMissingTranscriptToolEvents
+    //    可能各产生一条，优先保留有 tool_input 的那条）
+    const seenToolIds = new Map();  // tool_use_id:type → event
+    const turnEvents = [];
+    for (const e of allEvents) {
+      if (e.type === 'stop' || e.type === 'user_prompt_submit') continue;
+      const ts = e.timestamp;
+      if (ts < startTime || (nextBoundary && ts >= nextBoundary.timestamp)) continue;
+
+      if (e.type === 'pre_tool_use' || e.type === 'post_tool_use') {
+        // 白名单过滤：不在父 transcript 中的 tool_use_id 是子 agent 事件
+        if (parentCallIds && e.tool_use_id && !parentCallIds.has(e.tool_use_id)) continue;
+        // 去重：同一 tool_use_id + type 只保留第一条（hook 事件在前，有 tool_input）
+        const dedup = `${e.type}:${e.tool_use_id || ''}`;
+        if (seenToolIds.has(dedup)) continue;
+        seenToolIds.set(dedup, true);
+      }
+
+      turnEvents.push(e);
+    }
+
+    // prompt 优先从 transcript 的 user_message 获取（覆盖所有交互），
+    // fallback 到 state.events 的 user_prompt_submit（hook 可能漏报）
+    const promptEvent = allEvents.find(
+      (e) => e.type === 'user_prompt_submit' && e.timestamp >= startTime
+        && (!nextBoundary || e.timestamp < nextBoundary.timestamp),
+    );
+
+    turns.push({
+      turn_id: boundary.turn_id,
+      prompt: boundary.prompt || promptEvent?.prompt || '',
+      model: promptEvent?.model || state.model || 'unknown',
+      start_time: startTime,
+      end_time: stopEvent && i === boundaries.length - 1
+        ? stopEvent.timestamp
+        : endTime,
+      events: turnEvents,
+      last_assistant_message: i === boundaries.length - 1
+        ? stopEvent?.last_assistant_message
+        : undefined,
+      agentMessages: (transcriptData?.agentMessages || []).filter((am) => {
+        if (am.turn_id && boundary.turn_id && am.turn_id !== boundary.turn_id) return false;
+        return am.timestamp >= startTime && (!nextBoundary || am.timestamp < nextBoundary.timestamp);
+      }),
+    });
+  }
+
+  return turns;
 }
 
 // ─── buildTurnRecords — 单 turn 的 JSONL records 构造 ───

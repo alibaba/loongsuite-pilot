@@ -6,6 +6,8 @@
  * Everything else gets a hardcoded default in lib/l1-env.mjs.
  */
 import process from 'node:process';
+import path from 'node:path';
+import os from 'node:os';
 import { runLocalScript } from './lib/docker-runner.mjs';
 import {
   assertL1Env,
@@ -25,6 +27,18 @@ import {
   buildFileCollectionValidationSh,
   DEFAULT_E2E_INSTALLER_URL,
 } from './lib/e2e-scenarios.mjs';
+import {
+  buildAgentDiscoveryPhaseScript,
+  buildAutoUpgradePhaseScript,
+  buildAutoRollbackPhaseScript,
+  buildDualSendPhaseScript,
+  buildMaskingPhaseScript,
+} from './lib/expand-features.mjs';
+import {
+  createManifestServer,
+  createWebtrackingCollector,
+  createBrokenPackage,
+} from './lib/mock-server.mjs';
 
 const ARTIFACT_DIR = process.env.E2E_ARTIFACT_DIR?.trim() || '/opt/artifacts';
 
@@ -218,6 +232,178 @@ exit $fail
   console.log('[e2e-l1] uninstall scenario PASSED.');
 }
 
+async function expandFeaturesScenario(env) {
+  const skipPhases = (env.E2E_EXPAND_SKIP_PHASES || '').split(',').map(s => s.trim()).filter(Boolean);
+  const failFast = env.E2E_EXPAND_FAIL_FAST === '1';
+  const portBase = Number(env.E2E_EXPAND_MOCK_PORT_BASE || '19100');
+  let failures = 0;
+
+  // Phase 0: Install pilot
+  console.log('[e2e-expand] phase 0: install pilot');
+  const install = await runLocalScript({
+    script: localBuildInstallScript(env.E2E_USER_ID, env),
+    artifactDir: ARTIFACT_DIR,
+    artifactLabel: 'expand-install',
+  });
+  if (install.code !== 0) {
+    console.error('[e2e-expand] Install failed:', install.stderr || install.stdout);
+    await keepAliveOnFailure(install.code ?? 1);
+  }
+
+  // Phase 1: Agent Dynamic Discovery
+  if (!skipPhases.includes('1')) {
+    console.log('[e2e-expand] phase 1: agent dynamic discovery');
+    const r = await runLocalScript({
+      script: buildAgentDiscoveryPhaseScript(env),
+      artifactDir: ARTIFACT_DIR,
+      artifactLabel: 'expand-phase1-discovery',
+    });
+    if (r.code !== 0) {
+      console.error('[e2e-expand] Phase 1 FAILED:', r.stdout || r.stderr);
+      failures++;
+      if (failFast) await keepAliveOnFailure(r.code ?? 1);
+    }
+  } else {
+    console.log('[e2e-expand] phase 1: SKIPPED');
+  }
+
+  // Phase 2: Auto Upgrade
+  if (!skipPhases.includes('2')) {
+    console.log('[e2e-expand] phase 2: auto upgrade');
+    const manifestPort = portBase;
+    const pkgPath = '/opt/project/loongsuite-pilot.tar.gz';
+    const manifest = { version: '99.0.0', git_commit: 'e2e-fake', package_url: `http://127.0.0.1:${manifestPort}/pkg.tar.gz` };
+    let manifestServer;
+    try {
+      manifestServer = await createManifestServer(manifestPort, { manifest, packagePath: pkgPath });
+      const r = await runLocalScript({
+        script: buildAutoUpgradePhaseScript(env, manifestPort),
+        artifactDir: ARTIFACT_DIR,
+        artifactLabel: 'expand-phase2-upgrade',
+      });
+      if (r.code !== 0) {
+        console.error('[e2e-expand] Phase 2 FAILED:', r.stdout || r.stderr);
+        failures++;
+        if (failFast) await keepAliveOnFailure(r.code ?? 1);
+      }
+    } catch (e) {
+      console.error('[e2e-expand] Phase 2 mock server error:', e.message);
+      failures++;
+      if (failFast) await keepAliveOnFailure(1);
+    } finally {
+      if (manifestServer) await manifestServer.close();
+    }
+  } else {
+    console.log('[e2e-expand] phase 2: SKIPPED');
+  }
+
+  // Phase 3: Auto Rollback
+  if (!skipPhases.includes('3')) {
+    console.log('[e2e-expand] phase 3: auto rollback');
+    const rollbackPort = portBase + 1;
+    const brokenPkgPath = path.join(os.tmpdir(), 'e2e-broken-pkg.tar.gz');
+    createBrokenPackage(brokenPkgPath);
+    const brokenManifest = { version: '99.9.9', git_commit: 'broken' };
+    let brokenServer;
+    try {
+      brokenServer = await createManifestServer(rollbackPort, { manifest: brokenManifest, packagePath: brokenPkgPath });
+      const r = await runLocalScript({
+        script: buildAutoRollbackPhaseScript(env, rollbackPort),
+        artifactDir: ARTIFACT_DIR,
+        artifactLabel: 'expand-phase3-rollback',
+      });
+      if (r.code !== 0) {
+        console.error(`[e2e-expand] Phase 3 FAILED (exit code ${r.code}):`);
+        console.error('--- stdout tail ---');
+        console.error((r.stdout || '').split('\n').slice(-30).join('\n'));
+        console.error('--- stderr ---');
+        console.error(r.stderr || '(empty)');
+        failures++;
+        if (failFast) await keepAliveOnFailure(r.code ?? 1);
+      }
+    } catch (e) {
+      console.error('[e2e-expand] Phase 3 mock server error:', e.message);
+      failures++;
+      if (failFast) await keepAliveOnFailure(1);
+    } finally {
+      if (brokenServer) await brokenServer.close();
+    }
+  } else {
+    console.log('[e2e-expand] phase 3: SKIPPED');
+  }
+
+  // Phase 4: Dual Send
+  if (!skipPhases.includes('4')) {
+    console.log('[e2e-expand] phase 4: dual send');
+    const portA = portBase + 2;
+    const portB = portBase + 3;
+    let collectorA, collectorB;
+    try {
+      collectorA = await createWebtrackingCollector(portA);
+      collectorB = await createWebtrackingCollector(portB);
+      const r = await runLocalScript({
+        script: buildDualSendPhaseScript(env, portA, portB),
+        artifactDir: ARTIFACT_DIR,
+        artifactLabel: 'expand-phase4-dualsend',
+      });
+      if (r.code !== 0) {
+        console.error('[e2e-expand] Phase 4 script FAILED:', r.stdout || r.stderr);
+        failures++;
+        if (failFast) await keepAliveOnFailure(r.code ?? 1);
+      } else {
+        // Assert both collectors received data
+        let phase4Pass = true;
+        if (collectorA.received.length === 0) {
+          console.error('[e2e-expand] Phase 4 FAILED: endpoint A received 0 requests');
+          failures++;
+          phase4Pass = false;
+        }
+        if (collectorB.received.length === 0) {
+          console.error('[e2e-expand] Phase 4 FAILED: endpoint B received 0 requests');
+          failures++;
+          phase4Pass = false;
+        }
+        if (phase4Pass) {
+          console.log(`[e2e-expand] Phase 4: endpoint A got ${collectorA.received.length} requests, B got ${collectorB.received.length}`);
+        }
+        if (failures > 0 && failFast) await keepAliveOnFailure(1);
+      }
+    } catch (e) {
+      console.error('[e2e-expand] Phase 4 mock server error:', e.message);
+      failures++;
+      if (failFast) await keepAliveOnFailure(1);
+    } finally {
+      if (collectorA) await collectorA.close();
+      if (collectorB) await collectorB.close();
+    }
+  } else {
+    console.log('[e2e-expand] phase 4: SKIPPED');
+  }
+
+  // Phase 5: Masking Validation
+  if (!skipPhases.includes('5')) {
+    console.log('[e2e-expand] phase 5: masking validation');
+    const r = await runLocalScript({
+      script: buildMaskingPhaseScript(env),
+      artifactDir: ARTIFACT_DIR,
+      artifactLabel: 'expand-phase5-masking',
+    });
+    if (r.code !== 0) {
+      console.error('[e2e-expand] Phase 5 FAILED:', r.stdout || r.stderr);
+      failures++;
+      if (failFast) await keepAliveOnFailure(r.code ?? 1);
+    }
+  } else {
+    console.log('[e2e-expand] phase 5: SKIPPED');
+  }
+
+  if (failures > 0) {
+    console.error(`[e2e-expand] FAILED: ${failures} phase(s) failed`);
+    await keepAliveOnFailure(1);
+  }
+  console.log('[e2e-expand] expand-features PASSED (all phases).');
+}
+
 async function main() {
   const env = process.env;
   const scenario = (env.E2E_SCENARIO ?? 'install-smoke').trim();
@@ -253,6 +439,8 @@ async function main() {
       await installSmokeScenario(env);
     } else if (scenario === 'uninstall') {
       await uninstallScenario(env);
+    } else if (scenario === 'expand-features') {
+      await expandFeaturesScenario(env);
     }
   } catch (e) {
     console.error('[e2e-l1] unexpected error:', e);

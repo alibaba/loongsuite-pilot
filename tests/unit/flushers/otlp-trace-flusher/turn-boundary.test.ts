@@ -125,6 +125,169 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     }
   });
 
+  describe('sendBatch — regression vs master sequential send()', () => {
+    it('Codex-like step: tool_call response then tools in same batch does not early-flush', async () => {
+      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+      const mockConvert = vi.mocked(convertEventLogToTrace);
+      mockConvert.mockClear();
+
+      const turnId = 'session-1:t1';
+      const base = {
+        'gen_ai.turn.id': turnId,
+        'gen_ai.agent.type': 'codex',
+        'trace_id': '4bf92f3577b34da6a3ce929d0e0e4736',
+      };
+
+      // Per-step order from codex-hook-processor: llm.response(tool_call) → tool.call → tool.result
+      await flusher.sendBatch([
+        makeEntry({ ...base, 'event.name': 'llm.request', 'gen_ai.step.id': `${turnId}:s1` }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'gen_ai.step.id': `${turnId}:s1`,
+          'gen_ai.response.finish_reasons': ['tool_call'],
+        }),
+        makeEntry({ ...base, 'event.name': 'tool.call', 'gen_ai.step.id': `${turnId}:s1` }),
+        makeEntry({ ...base, 'event.name': 'tool.result', 'gen_ai.step.id': `${turnId}:s1` }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'gen_ai.step.id': `${turnId}:s2`,
+          'gen_ai.response.finish_reasons': ['stop'],
+        }),
+      ]);
+
+      expect(mockConvert).toHaveBeenCalledTimes(1);
+      expect(mockConvert.mock.calls[0][0]).toHaveLength(5);
+    });
+
+    it('Claude-like batch: tools sorted before stop are all included in one flush', async () => {
+      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+      const mockConvert = vi.mocked(convertEventLogToTrace);
+      mockConvert.mockClear();
+
+      const turnId = 'session-1:t1';
+      const base = {
+        'gen_ai.turn.id': turnId,
+        'gen_ai.agent.type': 'claude-code',
+        'trace_id': '4bf92f3577b34da6a3ce929d0e0e4736',
+      };
+
+      // claude-code-hook-processor sorts by time_unix_nano so tools precede stop
+      await flusher.sendBatch([
+        makeEntry({ ...base, 'event.name': 'llm.request' }),
+        makeEntry({ ...base, 'event.name': 'tool.call' }),
+        makeEntry({ ...base, 'event.name': 'tool.result' }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'gen_ai.response.finish_reasons': ['stop'],
+        }),
+      ]);
+
+      expect(mockConvert).toHaveBeenCalledTimes(1);
+      expect(mockConvert.mock.calls[0][0]).toHaveLength(4);
+    });
+
+    it('Cursor-like batch: records after stop in same batch are kept (differs from master send loop)', async () => {
+      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+      const mockConvert = vi.mocked(convertEventLogToTrace);
+      mockConvert.mockClear();
+
+      const turnId = 'gen-abc';
+      const base = {
+        'gen_ai.turn.id': turnId,
+        'gen_ai.agent.type': 'cursor',
+        'trace_id': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      };
+
+      await flusher.sendBatch([
+        makeEntry({ ...base, 'event.name': 'llm.request' }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'gen_ai.response.finish_reasons': ['stop'],
+        }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.request',
+          'gen_ai.agent.scope': 'subagent',
+          'gen_ai.subagent.parent_tool_call.id': 'call-sub',
+        }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'gen_ai.agent.scope': 'subagent',
+          'gen_ai.subagent.parent_tool_call.id': 'call-sub',
+          'gen_ai.response.finish_reasons': ['stop'],
+        }),
+      ]);
+
+      expect(mockConvert).toHaveBeenCalledTimes(1);
+      expect(mockConvert.mock.calls[0][0]).toHaveLength(4);
+    });
+
+    it('multi-turn batch: each completed turn flushes once at batch end', async () => {
+      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+      const mockConvert = vi.mocked(convertEventLogToTrace);
+      mockConvert.mockClear();
+
+      await flusher.sendBatch([
+        makeEntry({
+          'gen_ai.turn.id': 'session:t1',
+          'gen_ai.agent.type': 'codex',
+          'event.name': 'llm.response',
+          'gen_ai.response.finish_reasons': ['stop'],
+        }),
+        makeEntry({
+          'gen_ai.turn.id': 'session:t2',
+          'gen_ai.agent.type': 'codex',
+          'event.name': 'llm.request',
+        }),
+        makeEntry({
+          'gen_ai.turn.id': 'session:t2',
+          'gen_ai.agent.type': 'codex',
+          'event.name': 'llm.response',
+          'gen_ai.response.finish_reasons': ['stop'],
+        }),
+      ]);
+      // sendBatch defers triggerFlush; wait for in-flight exports before asserting
+      await flusher.flush();
+
+      expect(mockConvert).toHaveBeenCalledTimes(2);
+      expect(mockConvert.mock.calls[0][0]).toHaveLength(1);
+      expect(mockConvert.mock.calls[1][0]).toHaveLength(2);
+    });
+
+    it('cross-batch late entries after stop are still dropped (dual-root guard unchanged)', async () => {
+      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+      const mockConvert = vi.mocked(convertEventLogToTrace);
+      mockConvert.mockClear();
+
+      const turnId = 'session-1:t1';
+      const base = {
+        'gen_ai.turn.id': turnId,
+        'gen_ai.agent.type': 'claude-code',
+      };
+
+      await flusher.sendBatch([
+        makeEntry({ ...base, 'event.name': 'llm.request' }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'gen_ai.response.finish_reasons': ['stop'],
+        }),
+      ]);
+      expect(mockConvert).toHaveBeenCalledTimes(1);
+
+      await flusher.sendBatch([
+        makeEntry({ ...base, 'event.name': 'tool.call' }),
+      ]);
+
+      expect(mockConvert).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('drops late entries for already-flushed turns (prevents dual-root)', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);

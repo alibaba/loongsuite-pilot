@@ -39,6 +39,7 @@
 
 export function buildReactSteps(turn) {
   const events = turn.events;
+  const agentMessages = turn.agentMessages || [];
   /** @type {ReActStep[]} */
   const steps = [];
 
@@ -52,6 +53,7 @@ export function buildReactSteps(turn) {
   let round = 0;
   /** @type {ToolRecord[]} */
   let previousToolResults = [];
+  let lastAgentMsgIndex = 0;
 
   for (let i = 0; i < events.length; i++) {
     const event = events[i];
@@ -60,8 +62,10 @@ export function buildReactSteps(turn) {
       // pendingToolIds 清空 + 已有 tools = 上一步骤 LLM/Tool 完成,进入新 step
       if (pendingToolIds.size === 0 && currentTools.length > 0) {
         const llmEndTime = llmStartTime;
+        const reasoning = extractStepReasoning(agentMessages, lastAgentMsgIndex, llmStartTime, currentTools[0].start_time);
+        lastAgentMsgIndex = reasoning.nextIndex;
         steps.push(
-          finalizeStep(++round, turn, llmStartTime, llmEndTime, previousToolResults, currentTools),
+          finalizeStep(++round, turn, llmStartTime, llmEndTime, previousToolResults, currentTools, reasoning.text),
         );
         previousToolResults = [...currentTools];
         currentTools = [];
@@ -93,24 +97,46 @@ export function buildReactSteps(turn) {
 
   // 末尾:有未关闭的 tool step + 可选的 final assistant step
   if (currentTools.length > 0) {
+    const reasoning = extractStepReasoning(agentMessages, lastAgentMsgIndex, llmStartTime, currentTools[0].start_time);
+    lastAgentMsgIndex = reasoning.nextIndex;
     steps.push(
-      finalizeStep(++round, turn, llmStartTime, 0, previousToolResults, currentTools),
+      finalizeStep(++round, turn, llmStartTime, 0, previousToolResults, currentTools, reasoning.text),
     );
     previousToolResults = [...currentTools];
     currentTools = [];
 
     if (turn.last_assistant_message) {
       const lastToolEnd = steps[steps.length - 1].end_time;
-      steps.push(finalizeFinalStep(++round, turn, lastToolEnd, previousToolResults));
+      const finalReasoning = extractStepReasoning(agentMessages, lastAgentMsgIndex, lastToolEnd, turn.end_time + 1);
+      steps.push(finalizeFinalStep(++round, turn, lastToolEnd, previousToolResults, finalReasoning.text));
     }
   } else {
-    steps.push(finalizeFinalStep(++round, turn, turn.start_time, previousToolResults));
+    const finalReasoning = extractStepReasoning(agentMessages, lastAgentMsgIndex, llmStartTime, turn.end_time + 1);
+    steps.push(finalizeFinalStep(++round, turn, turn.start_time, previousToolResults, finalReasoning.text));
   }
 
   return steps;
 }
 
-function finalizeStep(round, turn, llmStartTime, _llmEndTimeHint, previousTools, tools) {
+/**
+ * 从 agentMessages 中提取属于当前 step 的 reasoning 文本。
+ * 使用 (afterTime, beforeTime] 区间：排除上一轮的，包含当前轮的。
+ * agent_message 与 function_call 时间戳相同时，应归入当前 step。
+ */
+function extractStepReasoning(agentMessages, startIndex, afterTime, beforeTime) {
+  const parts = [];
+  let idx = startIndex;
+  for (let i = startIndex; i < agentMessages.length; i++) {
+    const am = agentMessages[i];
+    if (am.timestamp <= afterTime) { idx = i + 1; continue; }
+    if (am.timestamp > beforeTime) break;
+    parts.push(am.message);
+    idx = i + 1;
+  }
+  return { text: parts.length > 0 ? parts.join('\n\n') : null, nextIndex: idx };
+}
+
+function finalizeStep(round, turn, llmStartTime, _llmEndTimeHint, previousTools, tools, reasoning) {
   const firstToolStart = tools.length > 0 ? tools[0].start_time : turn.end_time;
   const lastToolEnd =
     tools.length > 0 ? Math.max(...tools.map((t) => t.end_time)) : turn.end_time;
@@ -118,7 +144,7 @@ function finalizeStep(round, turn, llmStartTime, _llmEndTimeHint, previousTools,
   const llmEndTime = firstToolStart;
 
   const llmInputMessages = buildLlmInputMessages(round === 1 ? turn.prompt : null, previousTools);
-  const llmOutputMessages = buildLlmOutputMessagesWithTools(tools);
+  const llmOutputMessages = buildLlmOutputMessagesWithTools(tools, reasoning);
 
   return {
     round,
@@ -132,18 +158,21 @@ function finalizeStep(round, turn, llmStartTime, _llmEndTimeHint, previousTools,
   };
 }
 
-function finalizeFinalStep(round, turn, llmStartTime, previousTools) {
+function finalizeFinalStep(round, turn, llmStartTime, previousTools, reasoning) {
   const llmInputMessages = buildLlmInputMessages(round === 1 ? turn.prompt : null, previousTools);
 
+  /** @type {MessagePart[]} */
+  const parts = [];
+  if (reasoning) {
+    parts.push({ type: 'reasoning', content: reasoning });
+  }
+  if (turn.last_assistant_message) {
+    parts.push({ type: 'text', content: turn.last_assistant_message });
+  }
+
   /** @type {Message[]} */
-  const llmOutputMessages = turn.last_assistant_message
-    ? [
-        {
-          role: 'assistant',
-          parts: [{ type: 'text', content: turn.last_assistant_message }],
-          finish_reason: 'stop',
-        },
-      ]
+  const llmOutputMessages = parts.length > 0
+    ? [{ role: 'assistant', parts, finish_reason: 'stop' }]
     : [];
 
   return {
@@ -177,17 +206,25 @@ function buildLlmInputMessages(userPrompt, previousTools) {
   return [];
 }
 
-function buildLlmOutputMessagesWithTools(tools) {
-  if (tools.length === 0) return [];
+function buildLlmOutputMessagesWithTools(tools, reasoning) {
+  if (tools.length === 0 && !reasoning) return [];
+  /** @type {MessagePart[]} */
+  const parts = [];
+  if (reasoning) {
+    parts.push({ type: 'reasoning', content: reasoning });
+  }
+  for (const t of tools) {
+    parts.push({
+      type: 'tool_call',
+      id: t.tool_use_id,
+      name: t.tool_name,
+      arguments: t.tool_input,
+    });
+  }
   return [
     {
       role: 'assistant',
-      parts: tools.map((t) => ({
-        type: 'tool_call',
-        id: t.tool_use_id,
-        name: t.tool_name,
-        arguments: t.tool_input,
-      })),
+      parts,
       finish_reason: 'tool_call',
     },
   ];

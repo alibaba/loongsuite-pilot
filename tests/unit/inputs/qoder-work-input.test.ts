@@ -392,4 +392,52 @@ describe('QoderWorkInput', () => {
       await input.stop();
     });
   });
+
+  describe('QoderWork CN variant (parameterized)', () => {
+    let cnTmpDir: string;
+    let cnInput: QoderWorkInput;
+
+    beforeEach(async () => {
+      cnTmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwcn-test-'));
+      cnInput = new QoderWorkInput({
+        stateStore: stateStore as any,
+        agentType: ClientType.QoderWorkCN,
+        logDir: cnTmpDir,
+        logPrefix: 'qoder-work-cn',
+        pollIntervalMs: 60_000,
+      });
+    });
+
+    afterEach(async () => {
+      if (cnInput.running) await cnInput.stop();
+      await fs.rm(cnTmpDir, { recursive: true, force: true });
+    });
+
+    it('should have CN id and agentType', () => {
+      expect(cnInput.id).toBe('qoder-work-cn-hook');
+      expect(cnInput.agentType).toBe(ClientType.QoderWorkCN);
+    });
+
+    it('should emit entries with qoder-work-cn agent type', async () => {
+      const today = getTodayDateString();
+      const logFile = path.join(cnTmpDir, `qoder-work-cn-${today}.jsonl`);
+      const record = {
+        event_type: 'PostToolUse',
+        tool_name: 'write_to_file',
+        tool_input: { file_path: '/src/cn.ts', content: 'cn content' },
+        session_id: 'sess-cn-1',
+        user_id: 'cn-user',
+        timestamp: Date.now(),
+      };
+      await fs.writeFile(logFile, JSON.stringify(record) + '\n');
+
+      const allEntries: AgentActivityEntry[] = [];
+      cnInput.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
+
+      await cnInput.start();
+      expect(allEntries).toHaveLength(1);
+      expect(allEntries[0]!['gen_ai.agent.type']).toBe(ClientType.QoderWorkCN);
+      await cnInput.stop();
+    });
+  });
 });

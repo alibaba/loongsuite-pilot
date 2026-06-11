@@ -15,6 +15,7 @@ describe('resolveAgentSystem', () => {
     expect(resolveAgentSystem('qoder')).toBe('qoder');
     expect(resolveAgentSystem('qoder-idea')).toBe('qoder');
     expect(resolveAgentSystem('qoder-work')).toBe('qoder');
+    expect(resolveAgentSystem('qoder-work-cn')).toBe('qoder');
     expect(resolveAgentSystem('qoder-cli')).toBe('qoder');
     expect(resolveAgentSystem('qoder-cli-hook')).toBe('qoder');
   });
@@ -32,7 +33,7 @@ describe('resolveAgentSystem', () => {
   it('has entries for all expected agent types', () => {
     const expectedKeys = [
       'claude-code', 'codex', 'codex-session',
-      'qoder', 'qoder-idea', 'qoder-work', 'qoder-cli', 'qoder-cli-hook',
+      'qoder', 'qoder-idea', 'qoder-work', 'qoder-work-cn', 'qoder-cli', 'qoder-cli-hook',
       'cursor', 'cursor-hook',
     ];
     for (const key of expectedKeys) {

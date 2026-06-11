@@ -466,6 +466,7 @@ export function buildQoderHookRecord(row, options = {}) {
     'tool.result.status': eventName === 'tool.result' ? inferQoderToolResultStatus(content) : undefined,
     'host.name': os.hostname(),
     'workspace.current_root': getStringValue(row, 'cwd') || undefined,
+    [`agent.${sourceNamespace}.cwd`]: getStringValue(row, 'cwd') || undefined,
     'agent.source': 'qoder-transcript-hook',
     [`agent.${sourceNamespace}.variant`]: variant,
     [`agent.${sourceNamespace}.raw_type`]: rowType,

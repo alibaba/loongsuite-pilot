@@ -37,12 +37,18 @@ Orchestrator 启动分为以下阶段：
 4. **发现与生命周期管理** — 启动 AgentDiscoveryService（fs.watch + 轮询），检测 Agent 存在并管理 Input 的 start/stop 生命周期
 5. **清理服务** — 启动 LogRetentionService 进行日志轮转
 6. **文件采集管道** — 启动 FileCollectionManager，监控 `~/.loongsuite-pilot/file-collection/` 目录，动态加载/卸载文件采集 pipeline（与 agent activity 管道独立运行）
+7. **状态栏支持** — 启动 RuntimeWriter（写 runtime.json）、MetricsSummaryWriter（聚合 metrics-summary.json）、StatusBarAppManager（管理 Swift binary 进程，仅 macOS）。由 `config.statusBar.enabled` 控制。
 
 ### ConfigLoader 优先级模型
 三层配置加载，高优先级覆盖低优先级：
 - Environment variables（最高）
 - Config file (`~/.loongsuite-pilot/config.json`)
 - Built-in defaults（最低）
+
+### config.json 状态栏字段
+- `enableStatusBarApp` (boolean|string) — 控制状态栏 App 开关，默认 `true`。环境变量: `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP`
+
+`buildStatusBarConfig()` 构建 `StatusBarConfig { enabled, metricsSummaryIntervalMs(60s), runtimeRefreshIntervalMs(30s) }`。
 
 ### config.json 灰度发布字段
 `config.json` 中与灰度发布相关的字段：

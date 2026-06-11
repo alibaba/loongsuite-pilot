@@ -254,6 +254,25 @@ export class HookManager {
     ];
   }
 
+  static buildQoderWorkCNHooks(loongsuitePilotDir?: string): HookDefinition[] {
+    const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
+    const command = `${baseDir}/hooks/qoderworkcn-loongsuite-pilot-hook.sh`;
+    const legacyCommand = `${baseDir}/hooks/qoder-loongsuite-pilot-hook.sh qoder-work-cn`;
+    const settingsPath = resolveHome('~/.qoderworkcn/settings.json');
+
+    return [
+      {
+        agentId: 'qoder-work-cn',
+        settingsPath,
+        hookJsonPath: ['hooks', 'Stop'],
+        hookCommand: command,
+        replaceHookCommands: [legacyCommand],
+        matcher: '*',
+        useNestedFormat: true,
+      },
+    ];
+  }
+
   /**
    * @deprecated Use buildQoderCliHooks() instead.
    */

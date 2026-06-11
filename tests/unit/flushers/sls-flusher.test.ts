@@ -283,6 +283,27 @@ describe('SlsFlusher', () => {
       vi.unstubAllGlobals();
     });
 
+    it('webtracking skips subdomain prepend when project is empty', async () => {
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => '' });
+      vi.stubGlobal('fetch', fetchSpy);
+
+      const config = makeConfig({
+        endpoints: [
+          { name: 'ep-wt', endpoint: 'http://127.0.0.1:9999', project: '', logstore: 'raw', kind: 'agentActivity', mode: 'webtracking' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      const url = fetchSpy.mock.calls[0][0];
+      expect(url).toBe('http://127.0.0.1:9999/logstores/raw/track');
+
+      vi.unstubAllGlobals();
+    });
+
     it('different agentTypes produce separate batches', async () => {
       const config = makeConfig({ serviceNamePrefix: 'pilot' });
       flusher = new SlsFlusher(config, '/tmp/data');

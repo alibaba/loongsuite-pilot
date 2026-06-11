@@ -379,7 +379,7 @@ function buildRecord(fields, sourceRow, runtimeConfig, cwd) {
     'agent.qoderwork.variant': 'qoder-work',
     ...fields,
   };
-  if (cwd) record['agent.qoder-work.cwd'] = cwd;
+  if (cwd) record['agent.qoderwork.cwd'] = cwd;
   if (sourceRow) {
     if (sourceRow.isSidechain !== undefined) record['agent.qoderwork.isSidechain'] = String(sourceRow.isSidechain);
     if (sourceRow.userType) record['agent.qoderwork.userType'] = sourceRow.userType;

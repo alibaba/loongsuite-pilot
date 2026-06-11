@@ -13,6 +13,7 @@ import type {
   OtlpTraceRawConfig,
   SlsEndpoint,
   SlsMode,
+  StatusBarConfig,
 } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
@@ -136,6 +137,8 @@ export interface ConfigFile {
     packageUrl?: string;
   };
 
+  enableStatusBarApp?: boolean | string;
+
   installId?: string;
   canary?: {
     policy?: 'auto' | 'latest' | 'off';
@@ -204,6 +207,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     agents: buildAgentsConfig(file),
     mask: buildMaskConfig(file),
     hookWatchdog: buildHookWatchdogConfig(file),
+    statusBar: buildStatusBarConfig(file),
   };
 }
 
@@ -355,6 +359,20 @@ function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
       'LOONGSUITE_PILOT_HOOK_WATCHDOG_COOLDOWN_MS',
       file?.hookWatchdog?.repairCooldownMs ?? 10 * 60_000, // 10 minutes
     ),
+  };
+}
+
+function buildStatusBarConfig(file: ConfigFile | null): StatusBarConfig {
+  // Intentionally accepts '0' as false (differs from parseOptionalBool which only handles 'true'/'false').
+  // This matches AI Trace's resolveStatusBarAppEnabled() semantics for cross-product consistency.
+  const rawEnabled = file?.enableStatusBarApp;
+  const fallback = typeof rawEnabled === 'string'
+    ? rawEnabled.trim().toLowerCase() !== 'false' && rawEnabled.trim() !== '0'
+    : rawEnabled ?? true;
+  return {
+    enabled: envBool('LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP', fallback),
+    metricsSummaryIntervalMs: 60_000,
+    runtimeRefreshIntervalMs: 30_000,
   };
 }
 
@@ -524,7 +542,7 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
 
   if (innerDataConfig?.sls && Array.isArray(innerDataConfig.sls)) {
     const innerEndpoints = innerDataConfig.sls
-      .filter(ep => ep.endpoint && ep.project && ep.logstore)
+      .filter(ep => ep.endpoint && ep.logstore)
       .map((ep, i) => parseSlsEndpointEntry(ep, i));
     endpoints = [...endpoints, ...innerEndpoints];
   }
@@ -540,8 +558,8 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
   const enabled = single?.enabled !== undefined
     ? single.enabled
     : endpoints.length > 0 && endpoints.every(ep => {
-        if (!ep.endpoint || !ep.project || !ep.logstore) return false;
-        if (ep.mode === 'ak') return !!(ep.accessKeyId && ep.accessKeySecret);
+        if (!ep.endpoint || !ep.logstore) return false;
+        if (ep.mode === 'ak') return !!(ep.project && ep.accessKeyId && ep.accessKeySecret);
         return true;
       });
 

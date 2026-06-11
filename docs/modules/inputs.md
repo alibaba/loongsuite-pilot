@@ -40,7 +40,9 @@ src/inputs/
 ├── qoder-sqlite/           # SQLite token usage polling
 ├── qoder-cli/              # Hook JSONL input
 ├── qoder-cli-session/      # Native session file polling
-├── qoder-work/             # Hook JSONL input
+├── qoder-work/             # Hook JSONL input (parameterized: QoderWork + QoderWork CN)
+├── qoder-work-log/         # SDK log tail (parameterized: QoderWork + QoderWork CN)
+├── qoder-work-sqlite/      # SQLite agents.db (parameterized: QoderWork + QoderWork CN)
 ├── cursor-hook/            # Cursor hook history input
 ├── claude-code-log/        # OTel plugin JSONL input
 ├── codex-log/              # OTel plugin JSONL input

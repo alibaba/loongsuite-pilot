@@ -71,7 +71,7 @@ describe('assertL1Env', () => {
   });
 
   it('exposes L1_SCENARIOS and L1_REQUIRED_BY_SCENARIO', () => {
-    expect(L1_SCENARIOS).toEqual(['preflight', 'install-smoke', 'uninstall']);
+    expect(L1_SCENARIOS).toEqual(['preflight', 'install-smoke', 'uninstall', 'expand-features']);
     expect(L1_REQUIRED_BY_SCENARIO['install-smoke']).toHaveLength(8);
   });
 });

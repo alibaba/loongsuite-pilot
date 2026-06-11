@@ -39,6 +39,7 @@ assets/hooks/
 └── logs/
     ├── qoder-cli/history/
     ├── qoder-work/history/
+    ├── qoder-work-cn/history/
     └── cursor/history/
 ```
 

@@ -23,6 +23,7 @@ export const L1_REQUIRED_BY_SCENARIO = {
   preflight: [],
   'install-smoke': COMMON_REQUIRED,
   uninstall: COMMON_REQUIRED,
+  'expand-features': COMMON_REQUIRED,
 };
 
 export const L1_SCENARIOS = Object.keys(L1_REQUIRED_BY_SCENARIO);
@@ -53,6 +54,7 @@ const DEFAULTS = {
   E2E_REQUIRED_JSONL_AGENTS: 'claude-code,codex,qoder',
   E2E_SLS_ENDPOINT: 'cn-hangzhou.log.aliyuncs.com',
   E2E_PROBE_SKIP_AGENTS: 'cursor',
+  E2E_EXPAND_MOCK_PORT_BASE: '19100',
 };
 
 export function applyL1Defaults(env) {
