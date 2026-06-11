@@ -316,7 +316,9 @@ export class SlsFlusher extends BaseFlusher {
 
     const raw = JSON.stringify(body);
     // Per-endpoint URL: derive from the endpoint's own base, not a flusher-wide setting.
-    const base = endpoint.endpoint.replace(/^(https?:\/\/)/, `$1${endpoint.project}.`);
+    const base = endpoint.project
+      ? endpoint.endpoint.replace(/^(https?:\/\/)/, `$1${endpoint.project}.`)
+      : endpoint.endpoint;
     const url = `${base}/logstores/${endpoint.logstore}/track`;
 
     let lastErr: unknown;
@@ -418,7 +420,7 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   private enqueue(endpoint: SlsEndpoint, content: Record<string, string>, agentType?: string): void {
-    const base = `${endpoint.project}/${endpoint.logstore}`;
+    const base = `${endpoint.name}/${endpoint.project}/${endpoint.logstore}`;
     const key = (this.serviceName && agentType)
       ? `${base}/${agentType}`
       : base;

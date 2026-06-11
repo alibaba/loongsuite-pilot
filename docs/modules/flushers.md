@@ -68,7 +68,7 @@ src/flushers/
 
 ### SlsFlusher 双模式
 - **AK 模式** (`mode: 'ak'`)：使用 `@alicloud/log` SDK `postLogStoreLogs`
-- **WebTracking 模式** (`mode: 'webtracking'`)：匿名 HTTP POST 到 `{project}.{endpoint}/logstores/{logstore}/track`
+- **WebTracking 模式** (`mode: 'webtracking'`)：匿名 HTTP POST 到 `{project}.{endpoint}/logstores/{logstore}/track`（当 project 非空时）或 `{endpoint}/logstores/{logstore}/track`（当 project 为空时）
 
 ### SlsFlusher 多目的地派发
 - 支持同时向多个 SLS endpoint 发送（如用户自有 + 内置默认），各 endpoint 独立失败不互相影响

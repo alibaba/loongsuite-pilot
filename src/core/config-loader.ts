@@ -542,7 +542,7 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
 
   if (innerDataConfig?.sls && Array.isArray(innerDataConfig.sls)) {
     const innerEndpoints = innerDataConfig.sls
-      .filter(ep => ep.endpoint && ep.project && ep.logstore)
+      .filter(ep => ep.endpoint && ep.logstore)
       .map((ep, i) => parseSlsEndpointEntry(ep, i));
     endpoints = [...endpoints, ...innerEndpoints];
   }
@@ -558,8 +558,8 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
   const enabled = single?.enabled !== undefined
     ? single.enabled
     : endpoints.length > 0 && endpoints.every(ep => {
-        if (!ep.endpoint || !ep.project || !ep.logstore) return false;
-        if (ep.mode === 'ak') return !!(ep.accessKeyId && ep.accessKeySecret);
+        if (!ep.endpoint || !ep.logstore) return false;
+        if (ep.mode === 'ak') return !!(ep.project && ep.accessKeyId && ep.accessKeySecret);
         return true;
       });
 
