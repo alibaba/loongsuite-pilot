@@ -404,6 +404,14 @@ struct PanelContentView: View {
     }
 
     private func shortTime(_ iso: String) -> String {
-        String(iso.prefix(19)).replacingOccurrences(of: "T", with: " ")
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = parser.date(from: iso) else {
+            return String(iso.prefix(19)).replacingOccurrences(of: "T", with: " ")
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        formatter.timeZone = .current
+        return formatter.string(from: date)
     }
 }
