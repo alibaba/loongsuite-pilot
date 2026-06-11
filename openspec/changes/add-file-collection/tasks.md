@@ -10,144 +10,116 @@
 - [x] 1.2 重构 `src/flushers/sls-flusher.ts`，将 `flushViaWebtracking`、`postWebtracking`、`splitForWebtracking`、`isRetryable`、`persistFailedLogs` 改为调用 `sls-transport.ts` 中的公共方法，确保行为不变
 - [x] 1.3 运行现有 SlsFlusher 单元测试，确保重构后所有测试通过
 
-## 2. 文件采集类型定义
+## 2. 文件采集类型定义（增强版）
 
-- [x] 2.1 创建 `src/file-collection/types.ts`，定义以下类型：
-  - `FileInputConfig`：`Type`, `FilePaths: string[]`, `FileEncoding`, `MaxDirSearchDepth`, `AllowingIncludedByMultiConfigs`
-  - `FileSlsFlusherConfig`：`Type`, `Endpoint`, `Project`, `Logstore`, `Region`, `Aliuid`, `TelemetryType`
-  - `FileCollectionConfig`：`configName`, `inputs: FileInputConfig[]`, `flushers: FileSlsFlusherConfig[]`
-  - `FileCheckpoint`：`offset: number`, `inode: number`
-  - `FileCollectionManagerOptions`：`configDir`, `stateDir`, `failedLogDir`
-  - `FilePipelineOptions`：`config`, `stateDir`, `failedLogDir`
+- [ ] 2.1 更新 `src/file-collection/types.ts`，增强以下类型：
+  - `DevInode`：`{ dev: number; ino: number }`
+  - `FileCheckpoint` 增强：增加 `dev`, `signatureHash`, `signatureSize`, `lastUpdateTime`, `cache` 字段
+  - `FileReaderState`：`filePath`, `devInode: DevInode`, `offset`, `signatureHash`, `lastUpdateTime`, `cache`, `deleted`, `deletedTime`
+  - `ReadResult` 增强：增加 `hasMore: boolean` 字段
+  - 其他已有类型保持不变
 
-## 3. FileTailer — 文件发现与增量读取
+## 3. FileWatcher — 事件驱动文件监控
 
-- [x] 3.1 创建 `src/file-collection/file-tailer.ts`
-- [x] 3.2 实现 `discoverFiles(filePaths: string[], maxDepth: number): string[]`
-  - 对每个 FilePaths 配置项进行 glob 匹配（支持 `*` 通配符）
-  - 遵循 `MaxDirSearchDepth` 控制递归深度
-  - 过滤掉目录和不可读文件
-  - 单次最多返回 100 个文件
-- [x] 3.3 实现 `readNewLines(filePath, checkpoint): { lines: string[], checkpoint: FileCheckpoint }`
-  - `stat(filePath)` 获取文件信息
-  - 轮转检测（D6）：
-    - 正常追加：`inode 相同 && size >= offset` → 从 offset 继续读
-    - copytruncate：`inode 相同 && size < offset` → offset 归零
-    - rename：`inode 不同` → 调用 `drainOldFile()` 后 offset 归零
-  - 限制单次读取量：`MAX_READ_BYTES = 4MB`
-  - 处理末尾不完整行：只推进 offset 到最后一个 `\n`
-  - 返回完整行数组和新的 checkpoint
-- [x] 3.4 实现 `drainOldFile(dir, oldInode, oldOffset): string[]`
-  - 扫描同目录下所有文件，找到 `inode === oldInode` 的文件
-  - 从 `oldOffset` 读取到文件末尾
-  - 未找到则返回空数组并记录 warn
+- [ ] 3.1 创建 `src/file-collection/file-watcher.ts`
+- [ ] 3.2 实现 `FileWatcher` 类：
+  - `watch(dirs: string[]): void` — 对每个目录创建 `fs.watch`，change 事件中将变更文件加入 `dirtyFiles` set
+  - `getDirtyFiles(): string[]` — 取出并清空 dirtyFiles set
+  - `addDirty(filePath: string): void` — 外部手动标记 dirty（供 polling 兜底使用）
+  - `close(): void` — 关闭所有 watcher
+- [ ] 3.3 fs.watch 错误处理：创建失败或运行中出错时静默降级（warn 日志，不影响 polling 兜底）
+- [ ] 3.4 从 glob pattern 列表提取需要监听的父目录去重列表
 
-## 4. FileSlsSender — SLS 原始日志发送
+## 4. FileTailer — 增强文件读取（Reader 队列 + 签名优化）
 
-- [x] 4.1 创建 `src/file-collection/file-sls-sender.ts`
-- [x] 4.2 构造函数接收 `FileSlsFlusherConfig`，构建 `SlsTransportConfig`
-  - endpoint URL 补全：无 scheme 时自动加 `https://`
-- [x] 4.3 实现 `enqueue(lines: string[], configName: string)`
-  - 每行转为 `{ content: line }` 格式
-  - 推入内部 buffer
-- [x] 4.4 实现 `flush()`
-  - 从 buffer 中取出数据
-  - 调用 `sls-transport.postWebtracking()` 发送
-  - `__topic__` 设为 configName，`__source__` 设为本机 IP
-  - 失败时调用 `sls-transport.persistFailedLogs()` 持久化
-- [x] 4.5 实现 `start()` — 启动 `flushIntervalMs` 定时 flush（默认 2s）
-- [x] 4.6 实现 `shutdown()` — 清理 timer + flush 剩余 buffer
-- [x] 4.7 实现 `bufferSize(): number` — 返回当前 buffer 中的行数（供反压检查）
+- [ ] 4.1 更新 `src/file-collection/file-tailer.ts`，增加 Reader 队列管理：
+  - `readerQueues: Map<string, FileReaderState[]>` — 同一文件名的 reader 队列（旧在前，新在后）
+  - `devInodeMap: Map<string, FileReaderState>` — devInode→reader 快速查找
+  - `initReaderFromCheckpoint(filePath, checkpoint)` — 从 checkpoint 恢复 reader
+  - `cleanupStaleReaders()` — 清理超时旧 reader（10 分钟未更新）
+- [ ] 4.2 重构 `readNewLines()` 返回值增加 `hasMore: boolean`
+  - 当 `stat.size > newOffset` 时 `hasMore = true`，告知调用方还有数据可读
+- [ ] 4.3 优化签名计算策略：
+  - 仅在首次发现文件、`size < offset`、`inode 变化` 时计算签名
+  - 正常追加读取时不做签名检查
+- [ ] 4.4 实现不完整行缓存（cache）：
+  - 读取时若整块无 `\n`，追加到 `checkpoint.cache`
+  - 下次读取时，将 cache 前缀拼接到新数据
+  - cache 大小上限 `MAX_CACHE_BYTES = 1MB`，超出时丢弃并 warn
+- [ ] 4.5 轮转处理增强（Reader 队列版本）：
+  - rename 轮转：创建新 reader 追加到队列尾部，旧 reader 保留在前端继续读完
+  - copytruncate 轮转：相同 inode，通过 `size < offset` 或 signature 变化检测
+  - reader 队列最大长度 = 3，超出时丢弃最旧
+- [ ] 4.6 `getActiveFiles(): string[]` — 返回当前有活跃 reader 的文件列表（供 pollCycle 使用）
+- [ ] 4.7 `processReaderQueue(fileName): ReadResult` — 优先处理队列前端旧 reader，读完后移除
 
-## 5. FilePipeline — 单个配置的完整 pipeline
+## 5. FileSlsSender — 反压改造
 
-- [x] 5.1 创建 `src/file-collection/file-pipeline.ts`
-- [x] 5.2 构造函数：根据 config 创建 `FileTailer`、`FileSlsSender`、独立 `StateStore`
-  - StateStore 路径：`<stateDir>/<configName>.json`
-  - 失败日志路径：`<failedLogDir>/<configName>.jsonl`
-- [x] 5.3 实现 `start()`
-  - `stateStore.load()`
-  - `sender.start()`
-  - 启动 poll timer（默认 `pollIntervalMs = 10_000`）
-- [x] 5.4 实现 `pollCycle()`
-  - 步骤 1：对所有已知文件执行轮转检测，如有 rename 轮转则追尾旧文件并入 buffer（不受反压限制）
-  - 步骤 2：检查反压 — `sender.bufferSize() >= HIGH_WATERMARK` 则跳过正常读取
-  - 步骤 3：正常读取 — `tailer.discoverFiles()` + `tailer.readNewLines()` → `sender.enqueue(lines)`
-  - 步骤 4：`stateStore.save()`
-- [x] 5.5 实现 `stop()`
-  - 清理 poll timer
-  - `sender.flush()` + `sender.shutdown()`
-  - `stateStore.save()`
-- [x] 5.6 错误处理：`pollCycle` 整体 try-catch，单个文件的错误不影响其他文件
+- [ ] 5.1 更新 `src/file-collection/file-sls-sender.ts`：
+  - `enqueue()` 返回 `boolean`：buffer 满时返回 `false`（取代 drop-oldest）
+  - 增加 `isBackpressured(): boolean` — 返回 `bufferSize() >= HIGH_WATERMARK`
+- [ ] 5.2 保持 `flushLoop()` 独立 setInterval 消费，与 pollCycle 完全解耦
+- [ ] 5.3 `HIGH_WATERMARK` = 400_000（MAX_BUFFER_SIZE 的 80%）
 
-## 6. FileCollectionManager — 配置目录管理
+## 6. FilePipeline — 整合事件驱动 + 时间片控制
 
-- [x] 6.1 创建 `src/file-collection/file-collection-manager.ts`
-- [x] 6.2 实现 `start()`
-  - `ensureDir(configDir)`
-  - `scanConfigDir()` — 加载所有 `.json` 文件，逐个 `createPipeline()`
-  - `watchConfigDir()` — `fs.watch` 监听配置目录变化
-  - 启动 rescan timer（每 60s 全量 rescan 兜底）
-- [x] 6.3 实现 `scanConfigDir(): FileCollectionConfig[]`
-  - 读取 configDir 下所有 `.json` 文件
-  - 逐个 JSON.parse，解析失败则 warn 并跳过
-  - 返回有效配置列表
-- [x] 6.4 实现 `onConfigChanged(fileName)`
-  - 文件新增：`createPipeline(config)`
-  - 文件删除：`destroyPipeline(configName)`
-  - 文件修改：`destroyPipeline()` + `createPipeline()`
-  - 通过比较内存中的 pipeline 列表与磁盘文件列表判断增删改
-- [x] 6.5 实现 `createPipeline(config)`
-  - 校验 config（必填字段检查：configName, inputs, flushers）
-  - 创建 `FilePipeline` 实例并 `start()`
-  - 注册到 `pipelines: Map<string, FilePipeline>`
-- [x] 6.6 实现 `destroyPipeline(configName)`
-  - 从 map 中取出并 `stop()`
-- [x] 6.7 实现 `stop()`
-  - 关闭 `fs.watch` watcher
-  - 关闭 rescan timer
-  - 所有 pipeline `stop()`
+- [ ] 6.1 更新 `src/file-collection/file-pipeline.ts`，整合 FileWatcher：
+  - 构造函数中创建 `FileWatcher` 实例
+  - `start()` 时从 glob pattern 提取父目录，调用 `fileWatcher.watch(dirs)`
+  - `stop()` 时调用 `fileWatcher.close()`
+- [ ] 6.2 重写 `pollCycle()` 引入事件驱动 + 时间片：
+  - 步骤 1：`dirtyFiles = fileWatcher.getDirtyFiles()`
+  - 步骤 2：合并 dirty 文件 + 已知 reader 的活跃文件列表
+  - 步骤 3：每 `RESCAN_INTERVAL`（30s）执行一次 `discoverFiles()` 全量 rescan
+  - 步骤 4：对每个文件执行时间片读取循环（50ms max per file）
+    - `while (hasMore && elapsed < READ_TIME_SLICE_MS)`
+    - 如果 `sender.isBackpressured()`：跳过正常读取（旧文件追尾不受限）
+    - 如果时间片耗尽但 hasMore：标记为 dirty，下次继续
+  - 步骤 5：`tailer.cleanupStaleReaders()` 清理超时 reader
+  - 步骤 6：`stateStore.save()` 批量持久化 checkpoint
+- [ ] 6.3 `loadCheckpoints()` / `saveCheckpoints()` 适配增强后的 `FileCheckpoint` 结构
 
-## 7. Orchestrator 集成
+## 7. FileCollectionManager — 配置目录管理（无变更）
 
-- [x] 7.1 在 `src/core/orchestrator.ts` 中 import `FileCollectionManager`
-- [x] 7.2 在 `Orchestrator` 类中新增 `fileCollectionManager` 字段
-- [x] 7.3 在 `start()` 方法末尾（步骤 10 之后）新增步骤 11：创建并启动 `FileCollectionManager`
-  - configDir: `path.join(this.dataDir, 'file-collection')`
-  - stateDir: `path.join(this.dataDir, 'logs', 'file-collection-state')`
-  - failedLogDir: `path.join(this.dataDir, 'logs', 'file-collection-failed')`
-- [x] 7.4 在 `stop()` 方法中新增 `this.fileCollectionManager?.stop()`（在现有 stop 步骤之前）
-- [x] 7.5 在 `index.ts` 中 export `FileCollectionManager`
+已实现，保持不变。
 
-## 8. 测试
+## 8. Orchestrator 集成（无变更）
 
-- [x] 8.1 `tests/unit/flushers/sls-transport.test.ts`：测试 `splitForWebtracking` 分片逻辑、`isRetryable` 错误判断
-- [x] 8.2 `tests/unit/file-collection/file-tailer.test.ts`：
-  - glob 文件发现（通配符匹配、深度限制）
-  - 增量逐行读取（正常追加、末尾不完整行处理）
-  - copytruncate 轮转检测与处理
-  - rename 轮转检测与旧文件追尾
-- [x] 8.3 `tests/unit/file-collection/file-sls-sender.test.ts`：
-  - enqueue + flush 基本流程
-  - bufferSize 反压查询
-- [x] 8.4 `tests/unit/file-collection/file-pipeline.test.ts`：
-  - pipeline 生命周期（start/stop）
-  - 反压机制（buffer 满时跳过读取）
-  - 轮转追尾优先于反压
-- [x] 8.5 `tests/unit/file-collection/file-collection-manager.test.ts`：
-  - 配置加载与 pipeline 创建
-  - 配置新增/删除/修改的动态响应
-- [x] 8.6 运行全量测试套件 `npm test`，确保无回归（注：本地 Node 16 环境无法运行 Vitest，需 Node 18+）
+已实现，保持不变。
 
-## 9. 验证
+## 9. 测试
 
-- [x] 9.1 验证实现是否符合基准约束（ESM-only、strict TypeScript、BaseInput 生命周期不受影响）
-- [x] 9.2 编译检查：`npm run typecheck` 通过
-- [x] 9.3 确认 `SlsFlusher` 重构后行为不变（现有 SLS 发送路径无回归）
+- [ ] 9.1 `tests/unit/file-collection/file-watcher.test.ts`（新增）：
+  - fs.watch 触发时正确标记 dirtyFiles
+  - getDirtyFiles() 取出后清空
+  - fs.watch 失败时静默降级
+  - 多个目录监听去重
+- [ ] 9.2 更新 `tests/unit/file-collection/file-tailer.test.ts`：
+  - Reader 队列：rename 轮转时旧 reader 排在前面优先读
+  - Reader 队列溢出（长度 > 3）时丢弃最旧
+  - 签名优化：正常追加时不计算签名
+  - 不完整行缓存：跨 read 拼接、cache 超限丢弃
+  - readNewLines 返回 hasMore
+  - 超时 reader 清理
+- [ ] 9.3 更新 `tests/unit/file-collection/file-sls-sender.test.ts`：
+  - enqueue 满时返回 false
+  - isBackpressured() 水位检查
+- [ ] 9.4 更新 `tests/unit/file-collection/file-pipeline.test.ts`：
+  - 事件驱动：dirty 文件优先处理
+  - 时间片控制：大文件不阻塞其他文件
+  - 反压：sender 满时跳过读取
+  - 兜底 rescan 定期执行
+- [ ] 9.5 运行全量测试套件 `npm test`，确保无回归
 
-## 10. 基准文档更新（需人工确认后执行）
+## 10. 验证
 
-- [x] 10.1 新增 `docs/modules/file-collection.md` — 文件采集模块文档（职责、接口、内部设计、约束）
-- [x] 10.2 更新 `docs/modules/flushers.md` — 新增 `sls-transport` 公共传输层说明
-- [x] 10.3 更新 `docs/modules/core.md` — Orchestrator 启动步骤新增 FileCollectionManager
-- [x] 10.4 更新 `AGENTS.md` — 架构总览增加 File Collection 模块
+- [ ] 10.1 验证实现是否符合基准约束（ESM-only、strict TypeScript、BaseInput 生命周期不受影响）
+- [ ] 10.2 编译检查：`npm run typecheck` 通过
+- [ ] 10.3 确认 `SlsFlusher` 重构后行为不变（现有 SLS 发送路径无回归）
+
+## 11. 基准文档更新（需人工确认后执行）
+
+- [ ] 11.1 新增 `docs/modules/file-collection.md` — 文件采集模块文档（职责、接口、内部设计、约束）
+- [ ] 11.2 更新 `docs/modules/flushers.md` — 新增 `sls-transport` 公共传输层说明
+- [ ] 11.3 更新 `docs/modules/core.md` — Orchestrator 启动步骤新增 FileCollectionManager
+- [ ] 11.4 更新 `AGENTS.md` — 架构总览增加 File Collection 模块

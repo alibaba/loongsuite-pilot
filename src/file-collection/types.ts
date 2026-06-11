@@ -22,10 +22,30 @@ export interface FileCollectionConfig {
   flushers: FileSlsFlusherConfig[];
 }
 
+export interface DevInode {
+  dev: number;
+  ino: number;
+}
+
 export interface FileCheckpoint {
   offset: number;
   inode: number;
-  signature?: string;
+  dev: number;
+  signatureHash: string;
+  signatureSize: number;
+  lastUpdateTime: number;
+  cache: string;
+}
+
+export interface FileReaderState {
+  filePath: string;
+  devInode: DevInode;
+  offset: number;
+  signatureHash: string;
+  lastUpdateTime: number;
+  cache: string;
+  deleted: boolean;
+  deletedTime: number;
 }
 
 export interface FileCollectionManagerOptions {

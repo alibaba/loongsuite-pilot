@@ -34,16 +34,37 @@ describe('FileSlsSender', () => {
     vi.clearAllMocks();
   });
 
-  it('enqueue adds lines to buffer', () => {
+  it('enqueue adds lines to buffer and returns true', () => {
     const sender = makeSender();
     expect(sender.bufferSize()).toBe(0);
-    sender.enqueue(['line1', 'line2', 'line3']);
+    const result = sender.enqueue(['line1', 'line2', 'line3'], '/tmp/test.log');
+    expect(result).toBe(true);
     expect(sender.bufferSize()).toBe(3);
+  });
+
+  it('enqueue returns false when buffer is full', () => {
+    const sender = makeSender();
+    const bigBatch = Array.from({ length: 500_001 }, (_, i) => `line${i}`);
+    const r1 = sender.enqueue(bigBatch.slice(0, 500_000), '/tmp/test.log');
+    expect(r1).toBe(true);
+
+    const r2 = sender.enqueue(['overflow_line'], '/tmp/test.log');
+    expect(r2).toBe(false);
+    expect(sender.bufferSize()).toBe(500_000);
+  });
+
+  it('isBackpressured returns true at high watermark', () => {
+    const sender = makeSender();
+    expect(sender.isBackpressured()).toBe(false);
+
+    const batch = Array.from({ length: 400_000 }, (_, i) => `line${i}`);
+    sender.enqueue(batch, '/tmp/test.log');
+    expect(sender.isBackpressured()).toBe(true);
   });
 
   it('flush sends buffered lines via postWebtracking', async () => {
     const sender = makeSender();
-    sender.enqueue(['line1', 'line2']);
+    sender.enqueue(['line1', 'line2'], '/tmp/test.log');
     await sender.flush();
 
     expect(mockPostWebtracking).toHaveBeenCalledTimes(1);
@@ -64,7 +85,7 @@ describe('FileSlsSender', () => {
   it('flush persists failed logs on error', async () => {
     mockPostWebtracking.mockRejectedValueOnce(new Error('network error'));
     const sender = makeSender();
-    sender.enqueue(['line1']);
+    sender.enqueue(['line1'], '/tmp/test.log');
     await sender.flush();
     expect(mockPersistFailedLogs).toHaveBeenCalledTimes(1);
   });
@@ -72,7 +93,7 @@ describe('FileSlsSender', () => {
   it('shutdown flushes remaining buffer', async () => {
     const sender = makeSender();
     sender.start();
-    sender.enqueue(['line1']);
+    sender.enqueue(['line1'], '/tmp/test.log');
     await sender.shutdown();
     expect(mockPostWebtracking).toHaveBeenCalled();
     expect(sender.bufferSize()).toBe(0);
@@ -81,9 +102,9 @@ describe('FileSlsSender', () => {
   it('bufferSize reflects current count', () => {
     const sender = makeSender();
     expect(sender.bufferSize()).toBe(0);
-    sender.enqueue(['a', 'b']);
+    sender.enqueue(['a', 'b'], '/tmp/a.log');
     expect(sender.bufferSize()).toBe(2);
-    sender.enqueue(['c']);
+    sender.enqueue(['c'], '/tmp/b.log');
     expect(sender.bufferSize()).toBe(3);
   });
 });

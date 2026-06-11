@@ -78,7 +78,6 @@ describe('FilePipeline', () => {
       failedLogDir: failedDir,
     });
     await pipeline.start();
-    // Wait for flush timer to fire
     await new Promise((r) => setTimeout(r, 3000));
     await pipeline.stop();
 

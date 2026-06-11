@@ -11,18 +11,23 @@
 
 ## What Changes
 
-- **新模块 `src/file-collection/`**：与现有 agent activity 管道并行的独立文件采集管道
-- **`FileCollectionManager`**：监控配置目录 `~/.loongsuite-pilot/file-collection/`，动态加载/卸载采集 pipeline
-- **`FilePipeline`**：每个配置文件对应一个独立的 pipeline 实例，包含文件发现、逐行读取、SLS 发送、checkpoint 持久化
-- **`FileTailer`**：文件发现（glob 通配符）+ 增量逐行读取 + 日志轮转处理（rename 和 copytruncate 两种模式）
-- **`FileSlsSender`**：基于 WebTracking 模式的 SLS 发送器，复用从 `SlsFlusher` 抽取的 `sls-transport` 公共传输层
-- **反压机制**：有界缓冲区 + 水位线控制，发送慢时自动暂停读取
+- **新模块 `src/file-collection/`**：与现有 agent activity 管道并行的独立文件采集管道，参考 ilogtail 核心引擎架构重新设计
+- **`FileCollectionManager`**：监控配置目录 `~/.loongsuite-pilot/configs/local/`，动态加载/卸载采集 pipeline
+- **`FilePipeline`**：每个配置文件对应一个独立的 pipeline 实例，整合事件驱动监控 + 时间片控制 + 反压读取
+- **`FileWatcher`**（新增）：基于 `fs.watch` 的事件驱动文件监控，维护 dirtyFiles set，降级到 polling 兜底
+- **`FileTailer`**：文件发现（glob）+ 增量逐行读取 + Reader 队列管理 + 签名优化 + 不完整行缓存
+- **`FileSlsSender`**：基于 WebTracking 模式的 SLS 发送器，复用 `sls-transport` 公共传输层，反压改造（enqueue 拒绝写入）
+- **事件驱动 + Polling 双层监控**：fs.watch 实时感知文件变更 + 30s 兜底 rescan，降低延迟和 CPU 开销
+- **读取-发送异步解耦**：通过 FileSlsSender 有界 buffer 解耦，反压逐级传导
+- **Reader 队列**：轮转时旧文件和新文件可并行追踪（最简版，max length 3）
+- **时间片控制**：单文件最多 50ms，防止大文件阻塞其他文件读取
+- **增强 Checkpoint**：增加 DevInode、签名、不完整行缓存、最后更新时间
 - **SLS 传输层抽取**：将 `SlsFlusher` 中的 WebTracking POST、分片、重试、失败持久化逻辑抽取到 `src/flushers/sls-transport.ts`，供 `SlsFlusher` 和 `FileSlsSender` 共用
 
 ## Capabilities
 
 ### New Capabilities
-- `file-collection`：本地文件采集管道 — 配置动态加载、glob 文件发现、增量逐行读取、日志轮转处理（rename + copytruncate）、反压控制、WebTracking SLS 发送、per-config 状态隔离与失败持久化
+- `file-collection`：本地文件采集管道 — 事件驱动 + polling 双层文件监控、glob 文件发现、Reader 队列轮转追踪、时间片控制、读写异步解耦反压、增强 checkpoint（DevInode/签名/缓存）、WebTracking SLS 发送、per-config 状态隔离与失败持久化
 
 ### Modified Capabilities
 - `sls-transport`（内部重构）：从 `SlsFlusher` 抽取 WebTracking 传输层为独立模块，原有行为不变
@@ -30,14 +35,15 @@
 ## Impact
 
 - **Code**:
-  - `src/file-collection/file-collection-manager.ts`（新）— 配置目录监控 + pipeline 生命周期管理
-  - `src/file-collection/file-pipeline.ts`（新）— 单个采集配置的完整 pipeline
-  - `src/file-collection/file-tailer.ts`（新）— 文件发现 + 增量读取 + 轮转处理
-  - `src/file-collection/file-sls-sender.ts`（新）— WebTracking SLS 原始日志发送
-  - `src/file-collection/types.ts`（新）— 配置类型定义
-  - `src/flushers/sls-transport.ts`（新）— 抽取的 SLS WebTracking 公共传输层
-  - `src/flushers/sls-flusher.ts`（修改）— 改为调用 `sls-transport` 中的公共方法
-  - `src/core/orchestrator.ts`（修改）— 新增步骤启动 `FileCollectionManager`
+  - `src/file-collection/file-watcher.ts`（新增）— fs.watch 事件驱动文件监控 + dirtyFiles 管理
+  - `src/file-collection/file-collection-manager.ts`（已实现）— 配置目录监控 + pipeline 生命周期管理
+  - `src/file-collection/file-pipeline.ts`（重构）— 整合 FileWatcher + 时间片控制 + 事件驱动 pollCycle
+  - `src/file-collection/file-tailer.ts`（重构）— Reader 队列 + 签名优化 + 不完整行缓存 + hasMore 返回
+  - `src/file-collection/file-sls-sender.ts`（重构）— enqueue 返回 boolean 反压 + isBackpressured()
+  - `src/file-collection/types.ts`（增强）— DevInode、FileReaderState、增强 FileCheckpoint
+  - `src/flushers/sls-transport.ts`（已实现）— 抽取的 SLS WebTracking 公共传输层
+  - `src/flushers/sls-flusher.ts`（已重构）— 改为调用 `sls-transport` 中的公共方法
+  - `src/core/orchestrator.ts`（已修改）— 新增步骤启动 `FileCollectionManager`
 - **Affected Baseline Modules**:
   - `docs/modules/flushers.md` — 新增 `sls-transport` 公共传输层说明
   - `docs/modules/core.md` — Orchestrator 启动步骤新增 FileCollectionManager

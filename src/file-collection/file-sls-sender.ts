@@ -25,6 +25,7 @@ const LOCAL_IP = getLocalIp();
 const DEFAULT_FLUSH_INTERVAL_MS = 2000;
 const DEFAULT_BATCH_SIZE = 4000;
 const MAX_BUFFER_SIZE = 500_000;
+const HIGH_WATERMARK = 400_000;
 const FLUSH_CONCURRENCY = 8;
 
 export class FileSlsSender {
@@ -65,7 +66,15 @@ export class FileSlsSender {
     );
   }
 
-  enqueue(lines: string[], filePath: string): void {
+  enqueue(lines: string[], filePath: string): boolean {
+    if (this.bufferSize() >= MAX_BUFFER_SIZE) {
+      logger.warn('buffer full, rejecting enqueue', {
+        configName: this.configName,
+        bufferSize: this.bufferSize(),
+      });
+      return false;
+    }
+
     let bucket = this.buckets.get(filePath);
     if (!bucket) {
       bucket = [];
@@ -74,23 +83,11 @@ export class FileSlsSender {
     for (const line of lines) {
       bucket.push({ content: line });
     }
-    const totalSize = this.bufferSize();
-    if (totalSize > MAX_BUFFER_SIZE) {
-      const dropped = totalSize - MAX_BUFFER_SIZE;
-      // trim oldest from the largest bucket
-      let max = 0;
-      let maxKey = filePath;
-      for (const [k, b] of this.buckets) {
-        if (b.length > max) { max = b.length; maxKey = k; }
-      }
-      const b = this.buckets.get(maxKey)!;
-      b.splice(0, Math.min(dropped, b.length));
-      if (b.length === 0) this.buckets.delete(maxKey);
-      logger.warn('buffer overflow, dropped oldest entries', {
-        configName: this.configName,
-        dropped,
-      });
-    }
+    return true;
+  }
+
+  isBackpressured(): boolean {
+    return this.bufferSize() >= HIGH_WATERMARK;
   }
 
   async flush(): Promise<void> {
