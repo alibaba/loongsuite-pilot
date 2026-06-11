@@ -89,14 +89,21 @@ export class FilePipeline {
   async handleWake(): Promise<void> {
     if (!this.running) return;
 
-    this.tailer.refreshReaderTimestamps();
+    try {
+      this.tailer.refreshReaderTimestamps();
 
-    this.fileWatcher.rewatch();
+      this.fileWatcher.rewatch();
 
-    this.saveCheckpoints();
-    await this.stateStore.save();
+      this.lastRescanTime = 0;
 
-    this.lastRescanTime = 0;
+      this.saveCheckpoints();
+      await this.stateStore.save();
+    } catch (err) {
+      this.logger.error('wake recovery failed', {
+        configName: this.config.configName,
+        error: String(err),
+      });
+    }
 
     this.logger.info('wake recovery complete', { configName: this.config.configName });
 

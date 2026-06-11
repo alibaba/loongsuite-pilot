@@ -26,7 +26,7 @@ export class SleepDetector extends EventEmitter {
       clearInterval(this.timer);
       this.timer = null;
     }
-    this.removeAllListeners();
+    this.removeAllListeners('wake');
   }
 
   private tick(): void {

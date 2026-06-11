@@ -42,7 +42,10 @@ export class FileWatcher {
 
   rewatch(): void {
     const dirs = [...this.watchers.keys()];
-    this.close();
+    for (const [, watcher] of this.watchers) {
+      watcher.close();
+    }
+    this.watchers.clear();
     this.watch(dirs);
   }
 

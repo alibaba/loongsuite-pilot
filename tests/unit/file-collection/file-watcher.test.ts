@@ -86,14 +86,15 @@ describe('FileWatcher', () => {
     expect(watcher.getDirtyFiles()).toHaveLength(0);
   });
 
-  it('rewatch reinitializes watchers and clears dirty set', async () => {
+  it('rewatch reinitializes watchers and preserves dirty files', async () => {
     const watcher = new FileWatcher();
     watcher.watch([tmpDir]);
-    watcher.addDirty('/tmp/stale.log');
+    watcher.addDirty('/tmp/pending.log');
 
     watcher.rewatch();
 
-    expect(watcher.getDirtyFiles()).toHaveLength(0);
+    const preserved = watcher.getDirtyFiles();
+    expect(preserved).toEqual(['/tmp/pending.log']);
 
     fs.writeFileSync(path.join(tmpDir, 'after-rewatch.log'), 'data\n');
     await new Promise((r) => setTimeout(r, 200));
