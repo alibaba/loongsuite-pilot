@@ -181,7 +181,7 @@ export class Orchestrator extends EventEmitter {
 
     // 11. Start file collection pipelines
     this.fileCollectionManager = new FileCollectionManager({
-      configDir: path.join(this.dataDir, 'file-collection'),
+      configDir: path.join(this.dataDir, 'configs', 'local'),
       stateDir: path.join(this.dataDir, 'logs', 'file-collection-state'),
       failedLogDir: path.join(this.dataDir, 'logs', 'file-collection-failed'),
     });
