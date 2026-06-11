@@ -103,11 +103,11 @@ async function main() {
     try { parsed.push(JSON.parse(line)); } catch { /* skip */ }
   }
 
-  // A complete transcript has at least: user + assistant(s) + last-prompt = 3+ lines.
-  // If fewer than this and no last-prompt marker, transcript is likely still being written.
-  const MIN_COMPLETE_LINES = 3;
-  if (parsed.length > 0 && parsed[parsed.length - 1]?.type !== 'last-prompt' && parsed.length < MIN_COMPLETE_LINES) {
-    logDebug(agentId, `Transcript incomplete (${parsed.length} lines). Spawning background retry in 5s.`);
+  // last-prompt is the authoritative end-of-transcript marker written by qodercli on exit.
+  // If absent, the file is still being flushed (race: Stop hook fires before transcript flush).
+  const hasLastPrompt = parsed.some(p => p.type === 'last-prompt');
+  if (parsed.length > 0 && !hasLastPrompt) {
+    logDebug(agentId, `Transcript incomplete (${parsed.length} lines, no last-prompt marker). Spawning background retry in 5s.`);
     spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd);
     return;
   }

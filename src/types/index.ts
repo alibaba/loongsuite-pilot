@@ -40,6 +40,16 @@ export interface MaskConfig {
   types: MaskType[];
 }
 
+export interface OtlpTraceRawConfig {
+  endpoint?: string;
+  headers?: Record<string, string>;
+  resourceAttributes?: Record<string, string>;
+  serviceName?: string;
+  debug?: boolean;
+  captureMessageContent?: boolean;
+  turnIdleTimeoutMs?: number;
+}
+
 export interface AnalyticsConfig {
   enabled: boolean;
   autoStart: boolean;
@@ -49,6 +59,7 @@ export interface AnalyticsConfig {
   collectTrace: boolean;
   serviceNamePrefix: string;
   cms: CmsConfig;
+  otlpTrace?: OtlpTraceRawConfig;
   listeners: Record<string, ListenerConfig>;
   flushers: FlusherConfig;
   retention: LogRetentionConfig;
@@ -75,7 +86,7 @@ export interface OtlpTraceFlusherConfig {
   enabled: boolean;
   endpoint: string;
   protocol: 'http/protobuf';
-  headers: Record<string, string>;
+  headers?: Record<string, string>;
   serviceName: string;
   resourceAttributes?: Record<string, string>;
   captureMessageContent?: boolean;

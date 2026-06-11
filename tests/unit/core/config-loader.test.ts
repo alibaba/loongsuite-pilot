@@ -13,7 +13,7 @@ vi.mock('../../../src/utils/logger.js', () => ({
   }),
 }));
 
-import { loadConfig } from '../../../src/core/config-loader.js';
+import { loadConfig, buildOtlpTraceConfig } from '../../../src/core/config-loader.js';
 
 function clearSlsEnv() {
   delete process.env.LOONGSUITE_SLS_MODE;
@@ -620,6 +620,147 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.serviceNamePrefix).toBe('from-env');
+    });
+  });
+
+  describe('otlpTrace config (new path) and cms fallback', () => {
+    it('loadConfig populates otlpTrace from file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlpTrace: {
+          endpoint: 'http://localhost:4318',
+          headers: { Authorization: 'Bearer token' },
+          resourceAttributes: { 'deployment.env': 'prod' },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.otlpTrace).toEqual({
+        endpoint: 'http://localhost:4318',
+        headers: { Authorization: 'Bearer token' },
+        resourceAttributes: { 'deployment.env': 'prod' },
+      });
+    });
+
+    it('otlpTrace is undefined when not in config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+
+      const config = await loadConfig();
+      expect(config.otlpTrace).toBeUndefined();
+    });
+
+    it('buildOtlpTraceConfig uses new path when otlpTrace.endpoint present', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          endpoint: 'http://jaeger:4318',
+          headers: { 'X-Custom': 'val' },
+          resourceAttributes: { 'team': 'infra' },
+          serviceName: 'my-svc',
+          debug: true,
+          turnIdleTimeoutMs: 5000,
+        },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.endpoint).toBe('http://jaeger:4318');
+      expect(result!.headers).toEqual({ 'X-Custom': 'val' });
+      expect(result!.resourceAttributes).toEqual({ 'team': 'infra' });
+      expect(result!.serviceName).toBe('my-svc');
+      expect(result!.debug).toBe(true);
+      expect(result!.turnIdleTimeoutMs).toBe(5000);
+    });
+
+    it('buildOtlpTraceConfig falls back to cms path when no otlpTrace', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        cms: { licenseKey: 'key123', endpoint: 'https://arms.cn-hangzhou.arms.aliyuncs.com', workspace: 'ws1' },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.endpoint).toBe('https://arms.cn-hangzhou.arms.aliyuncs.com');
+      expect(result!.headers).toEqual({
+        'x-arms-license-key': 'key123',
+        'x-arms-project': 'arms',
+        'x-cms-workspace': 'ws1',
+      });
+      expect(result!.resourceAttributes).toEqual({ 'acs.arms.service.feature': 'genai_app' });
+    });
+
+    it('buildOtlpTraceConfig prefers otlpTrace over cms', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        cms: { licenseKey: 'key', endpoint: 'https://arms.example.com', workspace: 'ws' },
+        otlpTrace: { endpoint: 'http://tempo:4318' },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.endpoint).toBe('http://tempo:4318');
+      expect(result!.headers).toBeUndefined();
+      expect(result!.resourceAttributes).toBeUndefined();
+    });
+
+    it('buildOtlpTraceConfig returns undefined when collectTrace is false', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: false,
+        otlpTrace: { endpoint: 'http://localhost:4318' },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+      expect(result).toBeUndefined();
+    });
+
+    it('env var LOONGSUITE_PILOT_OTLP_ENDPOINT overrides file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://from-file:4318' },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_OTLP_ENDPOINT', 'http://from-env:4318');
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.endpoint).toBe('http://from-env:4318');
+    });
+
+    it('env var LOONGSUITE_PILOT_OTLP_HEADERS overrides file headers', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          endpoint: 'http://localhost:4318',
+          headers: { 'from': 'file' },
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_OTLP_HEADERS', '{"from":"env"}');
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.headers).toEqual({ from: 'env' });
+    });
+
+    it('new path with empty headers produces undefined headers', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://localhost:4318' },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.headers).toBeUndefined();
     });
   });
 });

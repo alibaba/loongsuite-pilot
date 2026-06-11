@@ -10,6 +10,7 @@ import type {
   MaskConfig,
   MaskType,
   OtlpTraceFlusherConfig,
+  OtlpTraceRawConfig,
   SlsEndpoint,
   SlsMode,
 } from '../types/index.js';
@@ -113,6 +114,16 @@ export interface ConfigFile {
     debug?: boolean;
   };
 
+  otlpTrace?: {
+    endpoint?: string;
+    headers?: Record<string, string>;
+    resourceAttributes?: Record<string, string>;
+    serviceName?: string;
+    debug?: boolean;
+    captureMessageContent?: boolean;
+    turnIdleTimeoutMs?: number;
+  };
+
   agents?: Record<string, {
     enabled?: boolean;
     captureMessageContent?: boolean | string;
@@ -185,6 +196,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     collectTrace: envBool('LOONGSUITE_PILOT_COLLECT_TRACE', file?.collectTrace ?? true),
     serviceNamePrefix,
     cms: buildCmsConfig(file),
+    otlpTrace: buildOtlpTraceRawConfig(file),
 
     listeners: buildListenersConfig(file),
     flushers: buildFlushersConfig(file, dataDir, serviceNamePrefix, innerDataConfig),
@@ -193,6 +205,11 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     mask: buildMaskConfig(file),
     hookWatchdog: buildHookWatchdogConfig(file),
   };
+}
+
+function buildOtlpTraceRawConfig(file: ConfigFile | null): OtlpTraceRawConfig | undefined {
+  if (!file?.otlpTrace) return undefined;
+  return { ...file.otlpTrace };
 }
 
 function parseOptionalBool(value: unknown): boolean | undefined {
@@ -355,14 +372,54 @@ function buildFlushersConfig(
 }
 
 /**
- * Build OtlpTraceFlusherConfig from top-level fields:
- *   collectTrace, serviceNamePrefix, cms.{licenseKey, endpoint, workspace, debug}
+ * Build OtlpTraceFlusherConfig with two paths:
+ *   1. New path: config.otlpTrace (generic OTLP, headers passthrough)
+ *   2. Fallback: config.cms (ARMS-specific, auto-assembles x-arms-* headers)
  *
- * Headers are assembled from structured CMS fields.
- * x-arms-project is derived from the endpoint hostname prefix.
+ * Both paths require collectTrace=true.
  */
 export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherConfig | undefined {
   if (!config.collectTrace) return undefined;
+
+  const otlpEndpoint = env('LOONGSUITE_PILOT_OTLP_ENDPOINT') ?? config.otlpTrace?.endpoint;
+  if (otlpEndpoint) {
+    return buildOtlpTraceConfigNew(otlpEndpoint, config);
+  }
+
+  return buildOtlpTraceConfigLegacy(config);
+}
+
+function buildOtlpTraceConfigNew(
+  endpoint: string,
+  config: AnalyticsConfig,
+): OtlpTraceFlusherConfig {
+  const otlp = config.otlpTrace;
+
+  let headers: Record<string, string> | undefined;
+  const envHeaders = env('LOONGSUITE_PILOT_OTLP_HEADERS');
+  if (envHeaders) {
+    try { headers = JSON.parse(envHeaders); } catch { logger.warn('LOONGSUITE_PILOT_OTLP_HEADERS is not valid JSON, ignoring', { raw: envHeaders }); }
+  } else {
+    headers = otlp?.headers;
+  }
+
+  const captureMessageContent = otlp?.captureMessageContent ?? resolveCaptureMessageContent(config.agents);
+  const serviceName = otlp?.serviceName ?? (config.serviceNamePrefix || 'loongsuite-pilot');
+
+  return {
+    enabled: true,
+    endpoint,
+    protocol: 'http/protobuf',
+    headers,
+    serviceName,
+    resourceAttributes: otlp?.resourceAttributes,
+    captureMessageContent,
+    debug: otlp?.debug ?? false,
+    turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
+  };
+}
+
+function buildOtlpTraceConfigLegacy(config: AnalyticsConfig): OtlpTraceFlusherConfig | undefined {
   const { cms, serviceNamePrefix } = config;
   if (!cms.enabled || !cms.endpoint) return undefined;
 
@@ -380,6 +437,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     protocol: 'http/protobuf',
     headers,
     serviceName: serviceNamePrefix || 'loongsuite-pilot',
+    resourceAttributes: { 'acs.arms.service.feature': 'genai_app' },
     captureMessageContent,
     debug: cms.debug ?? false,
     turnIdleTimeoutMs: 0,
