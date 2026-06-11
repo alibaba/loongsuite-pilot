@@ -135,4 +135,52 @@ describe('FilePipeline', () => {
       expect(Number(parts[2])).toBeGreaterThan(0);
     }
   });
+
+  it('handleWake preserves checkpoint and picks up new data', async () => {
+    const logFile = path.join(logDir, 'app.log');
+    fs.writeFileSync(logFile, 'before-sleep\n');
+
+    const pipeline = new FilePipeline({
+      config: makeConfig(),
+      stateDir,
+      failedLogDir: failedDir,
+    });
+    await pipeline.start();
+    await new Promise((r) => setTimeout(r, 2000));
+
+    const stateFile = path.join(stateDir, 'test-pipeline.json');
+    const stateBefore = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    const keysBefore = Object.keys(stateBefore);
+    expect(keysBefore.length).toBeGreaterThan(0);
+    const offsetBefore = stateBefore[keysBefore[0]].lastOffset;
+
+    fs.appendFileSync(logFile, 'after-wake\n');
+
+    await pipeline.handleWake();
+    await new Promise((r) => setTimeout(r, 2000));
+    await pipeline.stop();
+
+    const stateAfter = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    const keysAfter = Object.keys(stateAfter);
+    expect(keysAfter.length).toBeGreaterThan(0);
+    const offsetAfter = stateAfter[keysAfter[0]].lastOffset;
+    expect(offsetAfter).toBeGreaterThan(offsetBefore);
+
+    const allCalls = mockPostWebtracking.mock.calls.flatMap((c: unknown[]) => c[1] as Record<string, string>[]);
+    expect(allCalls).toEqual(
+      expect.arrayContaining([{ content: 'after-wake' }]),
+    );
+  });
+
+  it('handleWake is safe when pipeline is stopped', async () => {
+    const pipeline = new FilePipeline({
+      config: makeConfig(),
+      stateDir,
+      failedLogDir: failedDir,
+    });
+    await pipeline.start();
+    await pipeline.stop();
+
+    await expect(pipeline.handleWake()).resolves.toBeUndefined();
+  });
 });

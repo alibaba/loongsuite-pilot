@@ -86,6 +86,23 @@ export class FilePipeline {
     this.logger.info('started', { configName: this.config.configName });
   }
 
+  async handleWake(): Promise<void> {
+    if (!this.running) return;
+
+    this.tailer.refreshReaderTimestamps();
+
+    this.fileWatcher.rewatch();
+
+    this.saveCheckpoints();
+    await this.stateStore.save();
+
+    this.lastRescanTime = 0;
+
+    this.logger.info('wake recovery complete', { configName: this.config.configName });
+
+    void this.pollCycle();
+  }
+
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;

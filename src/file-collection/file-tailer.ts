@@ -165,6 +165,18 @@ export class FileTailer {
     await this.detectRotation(filePath, queue);
   }
 
+  refreshReaderTimestamps(): void {
+    const now = Date.now();
+    for (const [, queue] of this.readerQueues) {
+      for (const reader of queue) {
+        reader.lastUpdateTime = now;
+        if (reader.deleted) {
+          reader.deletedTime = now;
+        }
+      }
+    }
+  }
+
   cleanupStaleReaders(): void {
     const now = Date.now();
     for (const [filePath, queue] of this.readerQueues) {

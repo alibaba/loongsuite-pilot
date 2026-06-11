@@ -85,6 +85,30 @@ describe('FileWatcher', () => {
     watcher.close();
     expect(watcher.getDirtyFiles()).toHaveLength(0);
   });
+
+  it('rewatch reinitializes watchers and clears dirty set', async () => {
+    const watcher = new FileWatcher();
+    watcher.watch([tmpDir]);
+    watcher.addDirty('/tmp/stale.log');
+
+    watcher.rewatch();
+
+    expect(watcher.getDirtyFiles()).toHaveLength(0);
+
+    fs.writeFileSync(path.join(tmpDir, 'after-rewatch.log'), 'data\n');
+    await new Promise((r) => setTimeout(r, 200));
+
+    const dirty = watcher.getDirtyFiles();
+    expect(dirty.some((f) => f.includes('after-rewatch.log'))).toBe(true);
+
+    watcher.close();
+  });
+
+  it('rewatch on unwatched instance is a no-op', () => {
+    const watcher = new FileWatcher();
+    expect(() => watcher.rewatch()).not.toThrow();
+    watcher.close();
+  });
 });
 
 describe('extractParentDirs', () => {

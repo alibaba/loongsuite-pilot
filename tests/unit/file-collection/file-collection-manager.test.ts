@@ -15,6 +15,7 @@ vi.mock('../../../src/flushers/sls-transport.js', () => ({
 }));
 
 import { FileCollectionManager } from '../../../src/file-collection/file-collection-manager.js';
+import { SleepDetector } from '../../../src/file-collection/sleep-detector.js';
 
 let tmpDir: string;
 let configDir: string;
@@ -109,5 +110,24 @@ describe('FileCollectionManager', () => {
     });
     await manager.start();
     await manager.stop();
+  });
+
+  it('stop is safe to call multiple times', async () => {
+    const manager = new FileCollectionManager({
+      configDir,
+      stateDir,
+      failedLogDir: failedDir,
+    });
+    await manager.start();
+    await manager.stop();
+    await manager.stop();
+  });
+});
+
+describe('SleepDetector integration', () => {
+  it('SleepDetector can be started and stopped independently', () => {
+    const detector = new SleepDetector();
+    detector.start();
+    detector.stop();
   });
 });

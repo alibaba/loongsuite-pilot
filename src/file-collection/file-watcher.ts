@@ -40,6 +40,12 @@ export class FileWatcher {
     this.dirtyFiles.add(filePath);
   }
 
+  rewatch(): void {
+    const dirs = [...this.watchers.keys()];
+    this.close();
+    this.watch(dirs);
+  }
+
   close(): void {
     for (const [, watcher] of this.watchers) {
       watcher.close();

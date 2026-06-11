@@ -3,6 +3,7 @@ import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import type { FileCollectionConfig, FileCollectionManagerOptions } from './types.js';
 import { FilePipeline } from './file-pipeline.js';
+import { SleepDetector, type WakeEvent } from './sleep-detector.js';
 import { createLogger } from '../utils/logger.js';
 import { ensureDir } from '../utils/fs-utils.js';
 
@@ -19,6 +20,7 @@ export class FileCollectionManager {
   private readonly configHashes: Map<string, string> = new Map();
   private watcher: fs.FSWatcher | null = null;
   private rescanTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly sleepDetector = new SleepDetector();
   private running = false;
   private rescanInProgress = false;
   private rescanQueued = false;
@@ -63,6 +65,11 @@ export class FileCollectionManager {
       RESCAN_INTERVAL_MS,
     );
 
+    if (process.platform === 'darwin') {
+      this.sleepDetector.on('wake', (event: WakeEvent) => void this.handleWake(event));
+      this.sleepDetector.start();
+    }
+
     logger.info('started', {
       configDir: this.configDir,
       pipelines: this.pipelines.size,
@@ -72,6 +79,8 @@ export class FileCollectionManager {
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
+
+    this.sleepDetector.stop();
 
     if (this.watcher) {
       this.watcher.close();
@@ -99,6 +108,30 @@ export class FileCollectionManager {
     this.configHashes.clear();
 
     logger.info('stopped');
+  }
+
+  private async handleWake(event: WakeEvent): Promise<void> {
+    if (!this.running) return;
+    logger.info('handling system wake, recovering pipelines', {
+      sleepDurationMs: event.sleepDurationMs,
+      pipelines: this.pipelines.size,
+    });
+
+    const wakeTasks = Array.from(this.pipelines.entries()).map(
+      async ([name, pipeline]) => {
+        try {
+          await pipeline.handleWake();
+        } catch (err) {
+          logger.error('wake recovery failed for pipeline', {
+            configName: name,
+            error: String(err),
+          });
+        }
+      },
+    );
+    await Promise.all(wakeTasks);
+
+    void this.fullRescan();
   }
 
   private async fullRescan(): Promise<void> {

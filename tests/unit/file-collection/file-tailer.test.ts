@@ -340,4 +340,43 @@ describe('FileTailer checkpoint management', () => {
     expect(all.has(oldKey)).toBe(true);
     expect(all.has(newKey)).toBe(true);
   });
+
+  it('refreshReaderTimestamps prevents stale cleanup after sleep', async () => {
+    const filePath = path.join(tmpDir, 'app.log');
+    fs.writeFileSync(filePath, 'line1\n');
+
+    const tailer = new FileTailer({ filePaths: [path.join(tmpDir, '*.log')] });
+    await tailer.readNewLines(filePath);
+
+    const cpBefore = tailer.getCheckpoints().get(filePath)!;
+    const oldTime = cpBefore.lastUpdateTime;
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    tailer.refreshReaderTimestamps();
+
+    const cpAfter = tailer.getCheckpoints().get(filePath)!;
+    expect(cpAfter.lastUpdateTime).toBeGreaterThan(oldTime);
+    expect(cpAfter.offset).toBe(cpBefore.offset);
+  });
+
+  it('refreshReaderTimestamps also refreshes deleted readers', async () => {
+    const filePath = path.join(tmpDir, 'app.log');
+    fs.writeFileSync(filePath, 'line1\n');
+
+    const tailer = new FileTailer({ filePaths: [path.join(tmpDir, '*.log')] });
+    await tailer.readNewLines(filePath);
+
+    fs.renameSync(filePath, path.join(tmpDir, 'app.log.1'));
+    fs.writeFileSync(filePath, 'new\n');
+    await tailer.checkRotation(filePath);
+
+    tailer.refreshReaderTimestamps();
+
+    const all = tailer.getAllReaderCheckpoints();
+    const now = Date.now();
+    for (const [, cp] of all) {
+      expect(now - cp.lastUpdateTime).toBeLessThan(1000);
+    }
+  });
 });
