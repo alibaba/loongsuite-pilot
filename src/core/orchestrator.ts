@@ -43,6 +43,7 @@ import { HookWatchdog, type PluginCheckTarget } from './hook-watchdog.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
 import { AlarmManager } from '../metrics/alarm-manager.js';
 import type { DataflowSnapshot } from '../metrics/metrics-collector.js';
+import { RuntimeWriter, MetricsSummaryWriter, StatusBarAppManager } from '../status-bar/index.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import { resolveLocalIp } from '../utils/network-utils.js';
@@ -93,6 +94,9 @@ export class Orchestrator extends EventEmitter {
   private deploymentManager!: DeploymentManager;
   private metricsWriter!: MetricsWriter;
   private alarmManager!: AlarmManager;
+  private runtimeWriter: RuntimeWriter | null = null;
+  private metricsSummaryWriter: MetricsSummaryWriter | null = null;
+  private statusBarAppManager: StatusBarAppManager | null = null;
   private isRunning = false;
 
   constructor(config: AnalyticsConfig) {
@@ -190,6 +194,24 @@ export class Orchestrator extends EventEmitter {
     });
     await this.metricsWriter.start();
 
+    // 12. Start status bar support (runtime.json + metrics summary + native app)
+    if (this.config.statusBar.enabled) {
+      const packageVersion = this.readPackageVersion();
+
+      this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
+      this.runtimeWriter.start();
+
+      this.metricsSummaryWriter = new MetricsSummaryWriter(this.dataDir, this.config.statusBar);
+      this.metricsSummaryWriter.start();
+
+      if (process.platform === 'darwin') {
+        this.statusBarAppManager = new StatusBarAppManager({ dataDir: this.dataDir, packageVersion });
+        await this.statusBarAppManager.syncDesiredState(true).catch(err => {
+          logger.warn('status bar app start failed (non-fatal)', { error: String(err) });
+        });
+      }
+    }
+
     this.isRunning = true;
     this.emit('started');
     logger.info('orchestrator started', {
@@ -202,6 +224,9 @@ export class Orchestrator extends EventEmitter {
     logger.info('stopping orchestrator');
 
     await this.metricsWriter?.stop();
+    await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(() => {});
+    this.metricsSummaryWriter?.stop();
+    this.runtimeWriter?.stop();
     this.hookWatchdog?.stop();
     this.logRetentionService?.stop();
     await this.agentDiscoveryService?.stop();
@@ -758,6 +783,21 @@ export class Orchestrator extends EventEmitter {
    * Resolve the package installation directory by reading the `current` pointer file.
    * Falls back to dataDir if the versioned layout is not in use.
    */
+  private readPackageVersion(): string {
+    try {
+      const pilotDir = this.resolvePilotDir();
+      const versionFile = path.join(pilotDir, 'VERSION');
+      if (fsSync.existsSync(versionFile)) {
+        const content = fsSync.readFileSync(versionFile, 'utf8');
+        const match = content.match(/^version=(.+)$/m);
+        if (match) return match[1].trim();
+      }
+    } catch {
+      // ignore
+    }
+    return 'unknown';
+  }
+
   private resolvePilotDir(): string {
     try {
       const currentFile = path.join(this.dataDir, 'current');

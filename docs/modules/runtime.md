@@ -100,6 +100,42 @@ Installer 和 CLI 负责本地运行时结构与服务管理；`updater.md` 负�
 3. 如运行时 CLI 需要访问，确保 `scripts/loongsuite-pilot.sh` 能从当前版本目录或 bootstrap 目录解析到它。
 4. 如果影响升级/回滚，必须保持 `current` / `previous` 指针协议可恢复。
 
+## 状态栏 App 运行时管理
+
+### runtime.json 规范
+
+Collector daemon 启动后在 `{dataDir}/logs/runtime.json` 写入运行时状态：
+
+```json
+{ "status": "active", "packageVersion": "1.1.3", "pid": 14491, "updatedAt": "ISO" }
+```
+
+- 30s 刷新 `updatedAt`（证明进程活着）
+- daemon stop 时删除文件
+- 原子写入（write-tmp + rename）
+
+### StatusBarAppManager
+
+管理 Swift binary 进程生命周期（仅 macOS）：
+- 优先使用预编译 binary: `{versionDir}/app/macos-status-bar/bin/darwin-{arch}/LoongSuitePilotMenuBarApp`
+- Fallback: 使用 `swiftc` 直接编译 Swift 源文件（绕过 SPM，不依赖 `Package.swift` 解析）
+- 编译产出路径: `{dataDir}/apps/macos-status-bar/build/LoongSuitePilotMenuBarApp`
+- 运行时记录: `{dataDir}/logs/status-bar-app-runtime.json`
+- 配置开关: `enableStatusBarApp` (config.json) / `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` (env)
+
+### 构建策略
+
+**打包时构建** (`scripts/build-status-bar-app.mjs`)：
+- 使用 `swiftc` 直接编译，产出预编译 binary 到 `app/macos-status-bar/bin/darwin-{arch}/`
+- 集成到 `build.mjs`（best-effort，编译失败不阻塞主构建）
+- `deploy/package.sh` 将 `app/macos-status-bar/` 含预编译 binary 打入 tarball
+
+**运行时 fallback 构建** (`StatusBarAppManager.buildExecutable()`)：
+- 当预编译 binary 不存在时（如 arm64 包安装到 x64 Mac），自动尝试本地编译
+- 使用 `swiftc` 直接编译（与打包脚本一致），不走 SPM（避免 `Package.swift` 解析因 CLT 版本不匹配而失败）
+- 异步执行，不阻塞 daemon 事件循环
+- 编译失败只 log warning，不影响 daemon 采集功能
+
 ## 约束 (Constraints)
 
 1. **版本目录视为不可变**：部署后不得原地修改业务代码；升级通过新目录 + pointer 切换完成。

@@ -82,6 +82,46 @@ Monitor 通过 PID file 优先定位 collector 进程，找不到时按进程名
 4. 更新 `assets/monitor/loongsuite-pilot-monitor.html` 和 `assets/monitor/README.md`。
 5. 为聚合逻辑添加 unit test，避免 dashboard 读取大文件或阻塞采集路径。
 
+## macOS 状态栏 App
+
+Pilot 提供一个原生 macOS 状态栏 App 作为轻量可视化通道，与 dashboard server 并行共存。
+
+### 架构
+
+```
+Orchestrator (collector daemon)
+├── RuntimeWriter        → ~/.loongsuite-pilot/logs/runtime.json (30s 刷新)
+├── MetricsSummaryWriter → ~/.loongsuite-pilot/logs/metrics-summary.json (60s 聚合)
+└── StatusBarAppManager  → 管理 Swift binary 进程 (macOS only)
+
+LoongSuitePilotMenuBarApp (Swift, 独立进程)
+├── PilotRuntimeStore    ← 读 runtime.json (30s 轮询)
+└── PilotMetricsStore    ← 读 metrics-summary.json (60s 轮询)
+```
+
+### 数据流
+
+- **runtime.json**: `{ status, packageVersion, pid, updatedAt }` — daemon 存活证据
+- **metrics-summary.json**: 预聚合的 token/session/request/tool 统计、provider 分布、repo 分布、趋势数据
+
+### 进程管理
+
+- `StatusBarAppManager` 在 Orchestrator 启动时自动启动 Swift binary
+- 优先使用预编译 binary (`app/macos-status-bar/bin/darwin-{arch}/`)，fallback 到 `swift build`
+- daemon 停止时 SIGTERM → 3s → SIGKILL
+- App 检测到 daemon 连续 5 分钟不可用时自动退出
+
+### 配置
+
+- `enableStatusBarApp`: config.json 字段（默认 `true`）
+- 环境变量: `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP`
+- 仅 macOS 生效，非 darwin 平台跳过所有相关逻辑
+
+### 源码位置
+
+- Swift: `app/macos-status-bar/Sources/LoongSuitePilotMenuBarApp/`
+- Daemon 侧: `src/status-bar/` (runtime-writer.ts, metrics-summary-writer.ts, status-bar-app-manager.ts)
+
 ## 约束 (Constraints)
 
 1. **Monitor 必须保持可选**：collector 启停不依赖 monitor；monitor 失败不影响采集。
@@ -91,3 +131,4 @@ Monitor 通过 PID file 优先定位 collector 进程，找不到时按进程名
 5. **默认只监听本机地址**：dashboard host 默认为 `127.0.0.1`，避免无意暴露本地数据。
 6. **PID 文件是生命周期边界**：start/stop/status 应通过 PID 文件和进程探测保持幂等。
 7. **保留策略必须本地有界**：process metrics 文件按 retention 清理，避免长期增长。
+8. **状态栏 App 必须保持可选**：编译/运行失败不影响 daemon 采集；非 macOS 跳过。

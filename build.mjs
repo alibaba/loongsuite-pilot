@@ -67,3 +67,13 @@ await build({
 
 await mkdir('dist', { recursive: true });
 await copyFile('src/mask/sensitive-rules.json', 'dist/sensitive-rules.json');
+
+// Best-effort: build macOS status bar app (Swift)
+if (process.platform === 'darwin') {
+  try {
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('node', ['scripts/build-status-bar-app.mjs'], { stdio: 'inherit', timeout: 200_000 });
+  } catch {
+    // non-fatal — status bar app build failure doesn't block the main build
+  }
+}

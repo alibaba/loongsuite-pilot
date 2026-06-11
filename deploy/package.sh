@@ -88,6 +88,20 @@ if [ -d plugins ] && ls plugins/*.tar.gz &>/dev/null; then
     echo "    ✅ Plugins bundled: $(ls plugins/*.tar.gz | xargs -I{} basename {} | tr '\n' ' ')"
 fi
 
+# Status bar app (macOS native binary + Swift source)
+if [ -d app/macos-status-bar ]; then
+    mkdir -p "$PKG_DIR/app/macos-status-bar"
+    cp -r app/macos-status-bar/Sources "$PKG_DIR/app/macos-status-bar/Sources"
+    cp app/macos-status-bar/Package.swift "$PKG_DIR/app/macos-status-bar/"
+    # Include pre-built binaries if available
+    if [ -d app/macos-status-bar/bin ]; then
+        cp -r app/macos-status-bar/bin "$PKG_DIR/app/macos-status-bar/bin"
+        echo "    ✅ Status bar app bundled (with pre-built binary)"
+    else
+        echo "    ✅ Status bar app bundled (source only, will build on install)"
+    fi
+fi
+
 # Package metadata & version
 cp package.json      "$PKG_DIR/"
 cp package-lock.json "$PKG_DIR/" 2>/dev/null || true

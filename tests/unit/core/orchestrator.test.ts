@@ -179,6 +179,11 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
       intervalMs: 5 * 60_000,
       repairCooldownMs: 10 * 60_000,
     },
+    statusBar: {
+      enabled: false,
+      metricsSummaryIntervalMs: 60_000,
+      runtimeRefreshIntervalMs: 30_000,
+    },
     agents: {},
     ...overrides,
   };
