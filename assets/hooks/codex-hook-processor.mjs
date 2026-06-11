@@ -399,6 +399,10 @@ function resolveTurns(state, transcriptData) {
       last_assistant_message: i === boundaries.length - 1
         ? stopEvent?.last_assistant_message
         : undefined,
+      agentMessages: (transcriptData?.agentMessages || []).filter((am) => {
+        if (am.turn_id && boundary.turn_id && am.turn_id !== boundary.turn_id) return false;
+        return am.timestamp >= startTime && (!nextBoundary || am.timestamp < nextBoundary.timestamp);
+      }),
     });
   }
 

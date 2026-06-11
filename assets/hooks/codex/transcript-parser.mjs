@@ -49,6 +49,7 @@ import fs from 'node:fs';
  * @property {Array<{type:string, content:string}>=} systemInstruction
  * @property {Array<{type:string, name:string, description:string|null, parameters:any}>=} toolDefinitions
  * @property {ToolEvent[]} toolEvents 从 response_item 提取的工具调用事件
+ * @property {Array<{turn_id:string, timestamp:number, message:string, phase:string}>} agentMessages 从 event_msg:agent_message 提取的推理/评论文本
  * @property {number} nextOffset 增量读取的下一个字节偏移
  * @property {TokenUsage|null} lastEmittedUsage 跨调用心跳去重锚点
  */
@@ -171,6 +172,10 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
   const toolEvents = [];
   const pendingToolCalls = new Map();
 
+  // agent_message 事件提取（从 event_msg:agent_message）— 模型的推理/评论文本
+  /** @type {Array<{turn_id:string, timestamp:number, message:string, phase:string}>} */
+  const agentMessages = [];
+
   // 当前正在处理的 turn_id;由 task_started / turn_context 设置
   let currentTurnId = null;
 
@@ -247,6 +252,19 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
         if (msg && turnBoundaries.length > 0) {
           const lastBoundary = turnBoundaries[turnBoundaries.length - 1];
           if (!lastBoundary.prompt) lastBoundary.prompt = msg;
+        }
+      }
+
+      // 提取 agent_message（模型的推理/评论文本，Codex TUI 中显示的"思考"内容）
+      if (payloadType === 'agent_message') {
+        const msg = typeof payload.message === 'string' ? payload.message : '';
+        if (msg) {
+          agentMessages.push({
+            turn_id: currentTurnId ?? '',
+            timestamp: entryTimestampSeconds(entry),
+            message: msg,
+            phase: typeof payload.phase === 'string' ? payload.phase : '',
+          });
         }
       }
 
@@ -367,7 +385,8 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
     !!lastTotalUsage ||
     systemInstruction.length > 0 ||
     toolDefs.length > 0 ||
-    toolEvents.length > 0;
+    toolEvents.length > 0 ||
+    agentMessages.length > 0;
 
   if (!hasContent) {
     return {
@@ -378,6 +397,7 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
       turnBoundaries,
       parentToolCallIds,
       childAgents,
+      agentMessages: [],
       totalUsage: null,
       toolEvents: [],
       nextOffset: fileSize,
@@ -397,6 +417,7 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
     turnBoundaries,
     parentToolCallIds,
     childAgents,
+    agentMessages,
     nextOffset: fileSize,
     lastEmittedUsage,
   };
