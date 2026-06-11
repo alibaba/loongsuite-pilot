@@ -24,8 +24,8 @@ const LOCAL_IP = getLocalIp();
 
 const DEFAULT_FLUSH_INTERVAL_MS = 2000;
 const DEFAULT_BATCH_SIZE = 4000;
-const MAX_BUFFER_SIZE = 500_000;
-const HIGH_WATERMARK = 400_000;
+const MAX_BUFFER_SIZE = 64_000;
+const HIGH_WATERMARK = 32_000;
 const FLUSH_CONCURRENCY = 8;
 
 export class FileSlsSender {

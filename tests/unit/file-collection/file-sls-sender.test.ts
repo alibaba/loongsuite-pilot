@@ -44,20 +44,20 @@ describe('FileSlsSender', () => {
 
   it('enqueue returns false when buffer is full', () => {
     const sender = makeSender();
-    const bigBatch = Array.from({ length: 500_001 }, (_, i) => `line${i}`);
-    const r1 = sender.enqueue(bigBatch.slice(0, 500_000), '/tmp/test.log');
+    const bigBatch = Array.from({ length: 64_001 }, (_, i) => `line${i}`);
+    const r1 = sender.enqueue(bigBatch.slice(0, 64_000), '/tmp/test.log');
     expect(r1).toBe(true);
 
     const r2 = sender.enqueue(['overflow_line'], '/tmp/test.log');
     expect(r2).toBe(false);
-    expect(sender.bufferSize()).toBe(500_000);
+    expect(sender.bufferSize()).toBe(64_000);
   });
 
   it('isBackpressured returns true at high watermark', () => {
     const sender = makeSender();
     expect(sender.isBackpressured()).toBe(false);
 
-    const batch = Array.from({ length: 400_000 }, (_, i) => `line${i}`);
+    const batch = Array.from({ length: 32_000 }, (_, i) => `line${i}`);
     sender.enqueue(batch, '/tmp/test.log');
     expect(sender.isBackpressured()).toBe(true);
   });
