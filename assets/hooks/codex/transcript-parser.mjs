@@ -174,6 +174,20 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
   // 当前正在处理的 turn_id;由 task_started / turn_context 设置
   let currentTurnId = null;
 
+  // turn 边界列表：记录 transcript 中每个 turn_context 的 turn_id 和时间戳，
+  // 用于在 writeSessionJsonl 中驱动 turn 切分（替代仅靠 user_prompt_submit hook）
+  const turnBoundaries = [];
+
+  // 父 agent 工具调用的 call_id 白名单。父 transcript 只包含父 agent 的 function_call，
+  // 子 agent 的工具调用在子 transcript 中。resolveTurns 用此集合过滤 state.events 中
+  // 混入的子 agent pre/post_tool_use 事件。
+  const parentToolCallIds = new Set();
+
+  // 子 agent 信息列表。从 spawn_agent 的 function_call_output 中提取。
+  // 将来实现 subagent 嵌套时使用：通过 agent_id 定位子 transcript，
+  // 通过 parent_call_id 关联到父 TOOL span。
+  const childAgents = [];
+
   // 跨 turn 心跳去重锚点;由调用方从 state.transcript_last_token_usage 传入
   let lastEmittedUsage = initialLastUsage;
 
@@ -218,9 +232,23 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
       }
       if (typeof payload.turn_id === 'string' && payload.turn_id) {
         currentTurnId = payload.turn_id;
+        turnBoundaries.push({
+          turn_id: payload.turn_id,
+          timestamp: entryTimestampSeconds(entry),
+          prompt: '',
+        });
       }
     } else if (entryType === 'event_msg') {
       const payloadType = payload.type;
+
+      // 提取用户输入文本，关联到当前 turn（turnBoundaries 最后一项）
+      if (payloadType === 'user_message') {
+        const msg = typeof payload.message === 'string' ? payload.message : '';
+        if (msg && turnBoundaries.length > 0) {
+          const lastBoundary = turnBoundaries[turnBoundaries.length - 1];
+          if (!lastBoundary.prompt) lastBoundary.prompt = msg;
+        }
+      }
 
       if (payloadType === 'task_started') {
         if (typeof payload.turn_id === 'string' && payload.turn_id) {
@@ -271,6 +299,9 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
           };
           pendingToolCalls.set(callId, evt);
           toolEvents.push(evt);
+          // 父 transcript 中所有 function_call 的 call_id 都是父 agent 的工具调用。
+          // 子 agent 的工具调用在子 transcript 中，不会出现在这里。
+          parentToolCallIds.add(callId);
         }
       } else if (itemType === 'function_call_output') {
         const callId = String(payload.call_id || payload.id || '');
@@ -285,6 +316,25 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
             tool_use_id: callId,
           });
           pendingToolCalls.delete(callId);
+
+          // spawn_agent 的结果包含子 agent 的 session_id（agent_id）和 call_id 的映射。
+          // 将来实现 subagent 嵌套时，可以用 agent_id 定位子 transcript，
+          // 用 call_id 关联到父 TOOL span（类似 Cursor 的 parent_tool_call.id 协议）。
+          if (pre?.tool_name === 'spawn_agent') {
+            let output = parseMaybeJsonValue(payload.output);
+            if (typeof output === 'string') {
+              try { output = JSON.parse(output); } catch {}
+            }
+            if (output && typeof output === 'object' && output.agent_id) {
+              childAgents.push({
+                agent_id: output.agent_id,
+                nickname: output.nickname || '',
+                parent_call_id: callId,
+                parent_turn_id: currentTurnId ?? '',
+                timestamp: entryTimestampSeconds(entry),
+              });
+            }
+          }
         }
       }
     }
@@ -325,6 +375,9 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
       modelProvider,
       tokenEvents: [],
       tokenEventsByTurn: new Map(),
+      turnBoundaries,
+      parentToolCallIds,
+      childAgents,
       totalUsage: null,
       toolEvents: [],
       nextOffset: fileSize,
@@ -341,6 +394,9 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
     systemInstruction: systemInstruction.length > 0 ? systemInstruction : undefined,
     toolDefinitions: toolDefs.length > 0 ? toolDefs : undefined,
     toolEvents,
+    turnBoundaries,
+    parentToolCallIds,
+    childAgents,
     nextOffset: fileSize,
     lastEmittedUsage,
   };

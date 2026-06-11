@@ -96,6 +96,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private flushedTurnKeys = new Set<string>();
   private readonly convertLocks = new Map<string, Promise<void>>();
 
+  // 批量模式标记：为 true 时 send() 中 Signal A（finish_reason=stop）只标记
+  // completed 不立即 flush，由 sendBatch() 在所有 entries 处理完后统一 flush。
+  // 解决的问题：Cursor subagent 的子 records 排在父 stop 之后，如果 Signal A
+  // 即时 flush 会把 key 加入 flushedTurnKeys，导致后续同 key 的子 records 被丢弃。
+  private _deferSignalA = false;
+
   constructor(cfg: OtlpTraceFlusherConfig) {
     super();
     if (!cfg.endpoint) {
@@ -165,18 +171,31 @@ export class OtlpTraceFlusher extends BaseFlusher {
     buf.records.push(entry);
     buf.lastActivityMs = Date.now();
 
-    // Signal A: finish_reason=stop or end_turn
+    // Signal A: 检测到 finish_reason=stop/end_turn，标记 turn 完成。
+    // 逐条模式下立即 flush；批量模式下（_deferSignalA=true）仅标记 completed，
+    // 由 sendBatch() 在所有 entries append 完后统一 flush。
     const finishReasons = entry['gen_ai.response.finish_reasons'];
     if (Array.isArray(finishReasons) && (finishReasons.includes('stop') || finishReasons.includes('end_turn'))) {
       buf.completed = true;
-      this.triggerFlush(buf);
+      if (!this._deferSignalA) {
+        this.triggerFlush(buf);
+      }
     }
   }
 
   async sendBatch(entries: AgentActivityEntry[]): Promise<void> {
-    for (const entry of entries) {
-      await this.send(entry);
+    // 批量模式：先 append 全部 entries，再统一 flush 已完成的 buffer。
+    // 避免 Signal A 即时 flush 导致同 batch 内排在 stop 之后的子 records 被丢弃。
+    this._deferSignalA = true;
+    try {
+      for (const entry of entries) {
+        await this.send(entry);
+      }
+    } finally {
+      this._deferSignalA = false;
     }
+    // 统一 flush 所有在批量处理期间被 Signal A 标记为 completed 的 buffer
+    await this.flushCompleted();
   }
 
   async flush(): Promise<void> {
