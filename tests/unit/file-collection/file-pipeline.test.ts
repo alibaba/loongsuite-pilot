@@ -17,7 +17,7 @@ vi.mock('../../../src/flushers/sls-transport.js', () => ({
   persistFailedLogs: (...args: unknown[]) => mockPersistFailedLogs(...args),
 }));
 
-import { FilePipeline } from '../../../src/file-collection/file-pipeline.js';
+import { FilePipeline, parseCheckpointKey } from '../../../src/file-collection/file-pipeline.js';
 import type { FileCollectionConfig } from '../../../src/file-collection/types.js';
 
 let tmpDir: string;
@@ -58,6 +58,24 @@ function makeConfig(): FileCollectionConfig {
   };
 }
 
+describe('parseCheckpointKey', () => {
+  it('parses path*dev*inode format', () => {
+    expect(parseCheckpointKey('/tmp/file_test/data.log*16777229*425807574')).toBe('/tmp/file_test/data.log');
+  });
+
+  it('handles paths with special characters', () => {
+    expect(parseCheckpointKey('/tmp/my app/data.log*1*2')).toBe('/tmp/my app/data.log');
+  });
+
+  it('returns the key itself for legacy plain path keys', () => {
+    expect(parseCheckpointKey('/tmp/file_test/data.log')).toBe('/tmp/file_test/data.log');
+  });
+
+  it('returns null for malformed key with single star', () => {
+    expect(parseCheckpointKey('/tmp/data.log*123')).toBe(null);
+  });
+});
+
 describe('FilePipeline', () => {
   it('starts and stops without error', async () => {
     const pipeline = new FilePipeline({
@@ -89,5 +107,32 @@ describe('FilePipeline', () => {
         { content: 'world' },
       ]),
     );
+  });
+
+  it('persists checkpoints with path*dev*inode key format', async () => {
+    const logFile = path.join(logDir, 'app.log');
+    fs.writeFileSync(logFile, 'line1\n');
+
+    const pipeline = new FilePipeline({
+      config: makeConfig(),
+      stateDir,
+      failedLogDir: failedDir,
+    });
+    await pipeline.start();
+    await new Promise((r) => setTimeout(r, 2000));
+    await pipeline.stop();
+
+    const stateFile = path.join(stateDir, 'test-pipeline.json');
+    const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    const keys = Object.keys(state);
+    expect(keys.length).toBeGreaterThan(0);
+
+    for (const key of keys) {
+      const parts = key.split('*');
+      expect(parts.length).toBe(3);
+      expect(parts[0]).toBe(logFile);
+      expect(Number(parts[1])).toBeGreaterThanOrEqual(0);
+      expect(Number(parts[2])).toBeGreaterThan(0);
+    }
   });
 });

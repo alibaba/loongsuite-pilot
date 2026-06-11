@@ -10,7 +10,7 @@ const logger = createLogger('FileTailer');
 const MAX_READ_BYTES = 4 * 1024 * 1024;
 const MAX_FILES_PER_CYCLE = 100;
 const SIGNATURE_BYTES = 1024;
-const MAX_READER_QUEUE_LENGTH = 3;
+const MAX_READER_QUEUE_LENGTH = 20;
 const READER_TIMEOUT_MS = 600_000;
 const MAX_CACHE_BYTES = 1024 * 1024;
 
@@ -46,7 +46,39 @@ export class FileTailer {
     return result.slice(0, MAX_FILES_PER_CYCLE);
   }
 
-  initReaderFromCheckpoint(filePath: string, checkpoint: FileCheckpoint): void {
+  async initReaderFromCheckpoint(filePath: string, checkpoint: FileCheckpoint): Promise<boolean> {
+    let stat: fsSync.Stats;
+    try {
+      stat = await fs.stat(filePath);
+    } catch {
+      logger.info('checkpoint file no longer exists, skipping', { file: filePath });
+      return false;
+    }
+
+    if (stat.dev !== checkpoint.dev || stat.ino !== checkpoint.inode) {
+      logger.info('checkpoint dev/inode mismatch, skipping', {
+        file: filePath,
+        checkpointDev: checkpoint.dev,
+        checkpointInode: checkpoint.inode,
+        actualDev: stat.dev,
+        actualInode: stat.ino,
+      });
+      return false;
+    }
+
+    if (checkpoint.signatureHash) {
+      const currentSig = await computeFileSignature(filePath);
+      if (currentSig && currentSig !== checkpoint.signatureHash) {
+        logger.info('inode reused (signature mismatch), discarding checkpoint', {
+          file: filePath,
+          inode: checkpoint.inode,
+          savedSig: checkpoint.signatureHash,
+          currentSig,
+        });
+        return false;
+      }
+    }
+
     const reader: FileReaderState = {
       filePath,
       devInode: { dev: checkpoint.dev, ino: checkpoint.inode },
@@ -57,7 +89,14 @@ export class FileTailer {
       deleted: false,
       deletedTime: 0,
     };
-    this.readerQueues.set(filePath, [reader]);
+
+    const existing = this.readerQueues.get(filePath);
+    if (existing) {
+      existing.push(reader);
+    } else {
+      this.readerQueues.set(filePath, [reader]);
+    }
+    return true;
   }
 
   getActiveFiles(): string[] {
@@ -70,6 +109,17 @@ export class FileTailer {
       const latestReader = queue[queue.length - 1];
       if (latestReader) {
         result.set(filePath, this.readerToCheckpoint(latestReader));
+      }
+    }
+    return result;
+  }
+
+  getAllReaderCheckpoints(): Map<string, FileCheckpoint> {
+    const result = new Map<string, FileCheckpoint>();
+    for (const [filePath, queue] of this.readerQueues) {
+      for (const reader of queue) {
+        const key = `${filePath}*${reader.devInode.dev}*${reader.devInode.ino}`;
+        result.set(key, this.readerToCheckpoint(reader));
       }
     }
     return result;
@@ -107,6 +157,12 @@ export class FileTailer {
     await this.detectRotation(filePath, queue);
 
     return this.processQueue(filePath, queue);
+  }
+
+  async checkRotation(filePath: string): Promise<void> {
+    const queue = this.readerQueues.get(filePath);
+    if (!queue || queue.length === 0) return;
+    await this.detectRotation(filePath, queue);
   }
 
   cleanupStaleReaders(): void {
@@ -167,7 +223,13 @@ export class FileTailer {
       queue.push(newReader);
 
       while (queue.length > MAX_READER_QUEUE_LENGTH) {
-        queue.shift();
+        const evicted = queue.shift()!;
+        logger.warn('reader queue overflow, evicting oldest reader', {
+          file: filePath,
+          evictedInode: evicted.devInode.ino,
+          evictedOffset: evicted.offset,
+          queueLength: queue.length,
+        });
       }
     } else if (stat.size < latestReader.offset) {
       logger.info('file truncated (copytruncate rotation)', {

@@ -7,6 +7,14 @@ import { StateStore } from '../checkpoints/state-store.js';
 import { createLogger } from '../utils/logger.js';
 import { ensureDir } from '../utils/fs-utils.js';
 
+export function parseCheckpointKey(key: string): string | null {
+  const lastStar = key.lastIndexOf('*');
+  if (lastStar === -1) return key;
+  const secondLastStar = key.lastIndexOf('*', lastStar - 1);
+  if (secondLastStar === -1) return null;
+  return key.substring(0, secondLastStar);
+}
+
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const RESCAN_INTERVAL_MS = 30_000;
 const READ_TIME_SLICE_MS = 50;
@@ -23,7 +31,6 @@ export class FilePipeline {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private polling = false;
-  private readonly checkpoints: Map<string, FileCheckpoint> = new Map();
   private readonly pendingLines: Map<string, string[]> = new Map();
   private lastRescanTime = 0;
   private readonly patternMatchers: { dir: string; regex: RegExp }[];
@@ -63,7 +70,7 @@ export class FilePipeline {
 
     await ensureDir(path.dirname(this.stateFilePath));
     await this.stateStore.load();
-    this.loadCheckpoints();
+    await this.loadCheckpoints();
 
     const input = this.config.inputs[0];
     const parentDirs = extractParentDirs(input.FilePaths);
@@ -117,7 +124,9 @@ export class FilePipeline {
       }
 
       for (const f of this.tailer.getActiveFiles()) {
-        filesToProcess.add(f);
+        if (this.matchesPattern(f)) {
+          filesToProcess.add(f);
+        }
       }
 
       const now = Date.now();
@@ -132,34 +141,34 @@ export class FilePipeline {
       for (const filePath of filesToProcess) {
         if (!this.running) return;
 
-        if (this.sender.isBackpressured()) {
-          this.fileWatcher.addDirty(filePath);
-          this.logger.debug('backpressure active, deferring file', {
-            file: filePath,
-            bufferSize: this.sender.bufferSize(),
-          });
-          continue;
-        }
-
         try {
           const pending = this.pendingLines.get(filePath);
           if (pending) {
             const accepted = this.sender.enqueue(pending, filePath);
             if (!accepted) {
               this.fileWatcher.addDirty(filePath);
+              await this.tailer.checkRotation(filePath);
               continue;
             }
             this.pendingLines.delete(filePath);
+          }
+
+          if (this.sender.isBackpressured()) {
+            await this.tailer.checkRotation(filePath);
+            this.fileWatcher.addDirty(filePath);
+            this.logger.debug('backpressure active, deferring file', {
+              file: filePath,
+              bufferSize: this.sender.bufferSize(),
+            });
+            continue;
           }
 
           const sliceStart = Date.now();
           let hasMore = true;
 
           while (hasMore && Date.now() - sliceStart < READ_TIME_SLICE_MS) {
-            const checkpoint = this.checkpoints.get(filePath) ?? null;
-            const result = await this.tailer.readNewLines(filePath, checkpoint);
+            const result = await this.tailer.readNewLines(filePath);
 
-            this.checkpoints.set(filePath, result.checkpoint);
             hasMore = result.hasMore;
 
             if (result.lines.length > 0) {
@@ -199,10 +208,12 @@ export class FilePipeline {
     return this.patternMatchers.some((m) => dir === m.dir && m.regex.test(name));
   }
 
-  private loadCheckpoints(): void {
-    this.checkpoints.clear();
+  private async loadCheckpoints(): Promise<void> {
     const allKeys = this.stateStore.keys();
     for (const key of allKeys) {
+      const filePath = parseCheckpointKey(key);
+      if (!filePath || !this.matchesPattern(filePath)) continue;
+
       const state = this.stateStore.get(key);
       if (state.lastOffset !== undefined && state.extra?.inode !== undefined) {
         const cp: FileCheckpoint = {
@@ -214,20 +225,21 @@ export class FilePipeline {
           lastUpdateTime: (state.extra.lastUpdateTime as number) || Date.now(),
           cache: (state.extra.cache as string) || '',
         };
-        this.checkpoints.set(key, cp);
-        this.tailer.initReaderFromCheckpoint(key, cp);
+        const restored = await this.tailer.initReaderFromCheckpoint(filePath, cp);
+        if (!restored) {
+          this.logger.info('checkpoint discarded', { key, reason: 'validation failed' });
+        }
       }
     }
   }
 
   private saveCheckpoints(): void {
-    const tailerCheckpoints = this.tailer.getCheckpoints();
-    for (const [filePath, cp] of tailerCheckpoints) {
-      this.checkpoints.set(filePath, cp);
-    }
+    const allCheckpoints = this.tailer.getAllReaderCheckpoints();
+    const currentKeys = new Set<string>();
 
-    for (const [filePath, cp] of this.checkpoints) {
-      this.stateStore.update(filePath, {
+    for (const [key, cp] of allCheckpoints) {
+      currentKeys.add(key);
+      this.stateStore.update(key, {
         lastOffset: cp.offset,
         extra: {
           inode: cp.inode,
@@ -238,6 +250,12 @@ export class FilePipeline {
           cache: cp.cache,
         },
       });
+    }
+
+    for (const existingKey of this.stateStore.keys()) {
+      if (!currentKeys.has(existingKey)) {
+        this.stateStore.delete(existingKey);
+      }
     }
   }
 }

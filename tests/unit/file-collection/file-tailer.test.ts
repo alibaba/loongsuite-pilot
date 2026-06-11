@@ -165,7 +165,7 @@ describe('FileTailer reader queue', () => {
     expect(third.lines).toEqual(['new_file_line1']);
   });
 
-  it('reader queue max length is 3', async () => {
+  it('reader queue max length is 20', async () => {
     const filePath = path.join(tmpDir, 'app.log');
     fs.writeFileSync(filePath, 'gen1\n');
 
@@ -182,22 +182,38 @@ describe('FileTailer reader queue', () => {
     expect(activeFiles).toContain(filePath);
   });
 
-  it('cleanupStaleReaders removes old inactive readers', async () => {
+  it('checkRotation detects rotation without reading data', async () => {
     const filePath = path.join(tmpDir, 'app.log');
     fs.writeFileSync(filePath, 'line1\n');
 
     const tailer = new FileTailer({ filePaths: [filePath] });
     await tailer.readNewLines(filePath);
 
-    expect(tailer.getActiveFiles()).toContain(filePath);
+    fs.renameSync(filePath, path.join(tmpDir, 'app.log.1'));
+    fs.writeFileSync(filePath, 'new_line1\n');
 
-    const checkpoints = tailer.getCheckpoints();
-    const cp = checkpoints.get(filePath)!;
-    cp.lastUpdateTime = Date.now() - 700_000;
-    tailer.initReaderFromCheckpoint(filePath, cp);
+    await tailer.checkRotation(filePath);
 
-    tailer.cleanupStaleReaders();
-    expect(tailer.getActiveFiles()).not.toContain(filePath);
+    const result = await tailer.readNewLines(filePath);
+    expect(result.lines).toEqual(['new_line1']);
+  });
+
+  it('cleanupStaleReaders removes old inactive readers', async () => {
+    const filePath = path.join(tmpDir, 'app.log');
+    fs.writeFileSync(filePath, 'line1\n');
+
+    const tailer2 = new FileTailer({ filePaths: [filePath] });
+    const stat = fs.statSync(filePath);
+    const cp = {
+      offset: 6, inode: stat.ino, dev: stat.dev,
+      signatureHash: '', signatureSize: 1024,
+      lastUpdateTime: Date.now() - 700_000, cache: '',
+    };
+    await tailer2.initReaderFromCheckpoint(filePath, cp);
+
+    expect(tailer2.getActiveFiles()).toContain(filePath);
+    tailer2.cleanupStaleReaders();
+    expect(tailer2.getActiveFiles()).not.toContain(filePath);
   });
 });
 
@@ -226,11 +242,60 @@ describe('FileTailer checkpoint management', () => {
     expect(first.lines).toEqual(['line1', 'line2', 'line3']);
 
     const tailer2 = new FileTailer({ filePaths: [filePath] });
-    tailer2.initReaderFromCheckpoint(filePath, first.checkpoint);
+    const restored = await tailer2.initReaderFromCheckpoint(filePath, first.checkpoint);
+    expect(restored).toBe(true);
 
     fs.appendFileSync(filePath, 'line4\n');
     const second = await tailer2.readNewLines(filePath);
     expect(second.lines).toEqual(['line4']);
+  });
+
+  it('initReaderFromCheckpoint returns false for non-existent file', async () => {
+    const tailer = new FileTailer({ filePaths: [] });
+    const result = await tailer.initReaderFromCheckpoint('/nonexistent/file.log', {
+      offset: 100, inode: 999, dev: 1, signatureHash: 'abc',
+      signatureSize: 1024, lastUpdateTime: Date.now(), cache: '',
+    });
+    expect(result).toBe(false);
+  });
+
+  it('initReaderFromCheckpoint returns false on inode mismatch', async () => {
+    const filePath = path.join(tmpDir, 'test.log');
+    fs.writeFileSync(filePath, 'data\n');
+
+    const stat = fs.statSync(filePath);
+    const tailer = new FileTailer({ filePaths: [filePath] });
+    const result = await tailer.initReaderFromCheckpoint(filePath, {
+      offset: 0, inode: stat.ino + 999, dev: stat.dev, signatureHash: '',
+      signatureSize: 1024, lastUpdateTime: Date.now(), cache: '',
+    });
+    expect(result).toBe(false);
+  });
+
+  it('initReaderFromCheckpoint detects inode reuse via signature mismatch', async () => {
+    const filePath = path.join(tmpDir, 'test.log');
+    fs.writeFileSync(filePath, 'original content\n');
+
+    const tailer = new FileTailer({ filePaths: [filePath] });
+    const first = await tailer.readNewLines(filePath);
+    const cp = first.checkpoint;
+
+    fs.unlinkSync(filePath);
+    fs.writeFileSync(filePath, 'completely different content\n');
+    const newStat = fs.statSync(filePath);
+
+    const tailer2 = new FileTailer({ filePaths: [filePath] });
+    const result = await tailer2.initReaderFromCheckpoint(filePath, {
+      ...cp,
+      dev: newStat.dev,
+      inode: newStat.ino,
+    });
+
+    if (newStat.ino === cp.inode) {
+      expect(result).toBe(false);
+    } else {
+      expect(result).toBe(false);
+    }
   });
 
   it('getCheckpoints returns current state', async () => {
@@ -248,5 +313,31 @@ describe('FileTailer checkpoint management', () => {
     expect(cp.dev).toBeGreaterThanOrEqual(0);
     expect(typeof cp.signatureHash).toBe('string');
     expect(typeof cp.cache).toBe('string');
+  });
+
+  it('getAllReaderCheckpoints returns all readers with dev*inode keys', async () => {
+    const filePath = path.join(tmpDir, 'app.log');
+    fs.writeFileSync(filePath, 'line1\n');
+
+    const tailer = new FileTailer({ filePaths: [filePath] });
+    await tailer.readNewLines(filePath);
+
+    const oldStat = fs.statSync(filePath);
+
+    fs.appendFileSync(filePath, 'line2_unread\n');
+    fs.renameSync(filePath, path.join(tmpDir, 'app.log.1'));
+    fs.writeFileSync(filePath, 'new_line1\n');
+
+    await tailer.checkRotation(filePath);
+
+    const newStat = fs.statSync(filePath);
+
+    const all = tailer.getAllReaderCheckpoints();
+    expect(all.size).toBe(2);
+
+    const oldKey = `${filePath}*${oldStat.dev}*${oldStat.ino}`;
+    const newKey = `${filePath}*${newStat.dev}*${newStat.ino}`;
+    expect(all.has(oldKey)).toBe(true);
+    expect(all.has(newKey)).toBe(true);
   });
 });

@@ -65,6 +65,12 @@ export class StateStore {
     this.dirty = true;
   }
 
+  delete(inputId: string): boolean {
+    const deleted = this.states.delete(inputId);
+    if (deleted) this.dirty = true;
+    return deleted;
+  }
+
   keys(): string[] {
     return Array.from(this.states.keys());
   }
