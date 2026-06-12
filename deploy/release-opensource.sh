@@ -15,7 +15,8 @@
 #   3. Create release/<version> branch from origin/main
 #   4. Bump package.json, commit, tag
 #   5. Push branch + tag to remote
-#   6. GitHub Actions (release.yml) picks up the tag → build, package, create Release
+#   6. Build, package, and upload to OSS
+#   7. GitHub Actions (release.yml) picks up the tag → create GitHub Release
 
 set -euo pipefail
 
@@ -25,6 +26,10 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUMP_TYPE="patch"
 EXPLICIT_VERSION=""
 DRY_RUN=0
+SKIP_OSS=0
+
+OSS_BUCKET="oss://loongcollector-community-edition"
+OSS_PREFIX="loongsuite-pilot"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -38,6 +43,7 @@ while [[ $# -gt 0 ]]; do
             EXPLICIT_VERSION="$2"; shift 2 ;;
         --version=*)      EXPLICIT_VERSION="${1#*=}"; shift ;;
         --dry-run)        DRY_RUN=1; shift ;;
+        --skip-oss)       SKIP_OSS=1; shift ;;
         *)
             echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -111,6 +117,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] Would update package.json: ${CURRENT_VERSION} → ${NEXT_VERSION}"
     echo "[dry-run] Would commit and tag: v${NEXT_VERSION}"
     echo "[dry-run] Would push tag → GitHub Actions creates the Release"
+    echo "[dry-run] Would build, package, and upload to OSS:"
+    echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.tar.gz"
+    echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/latest/${PACKAGE_NAME}.tar.gz"
+    echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/installer.sh"
     exit 0
 fi
 
@@ -162,14 +172,56 @@ echo "==> Pushing to remote..."
 git push origin "${RELEASE_BRANCH}" "v${NEXT_VERSION}" -u
 echo "    ✅ Pushed branch ${RELEASE_BRANCH} and tag v${NEXT_VERSION}"
 
+# ── Build, package, and upload to OSS ──
+PACKAGE_NAME="loongsuite-pilot"
+
+if [ "$SKIP_OSS" -eq 0 ]; then
+    echo ""
+    echo "==> Building and packaging..."
+    bash deploy/package.sh --opensource
+    PACKAGE_FILE="$PROJECT_ROOT/${PACKAGE_NAME}.tar.gz"
+
+    if [ ! -f "$PACKAGE_FILE" ]; then
+        echo "❌ Package file not found: $PACKAGE_FILE"
+        exit 1
+    fi
+
+    if ! command -v ossutil &>/dev/null; then
+        echo "❌ ossutil not found. Install it or use --skip-oss to skip OSS upload."
+        exit 1
+    fi
+
+    echo ""
+    echo "==> Uploading to OSS..."
+
+    # Upload versioned package
+    ossutil cp "$PACKAGE_FILE" "${OSS_BUCKET}/${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.tar.gz" -f
+    echo "    ✅ ${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.tar.gz"
+
+    # Upload as latest
+    ossutil cp "$PACKAGE_FILE" "${OSS_BUCKET}/${OSS_PREFIX}/latest/${PACKAGE_NAME}.tar.gz" -f
+    echo "    ✅ ${OSS_PREFIX}/latest/${PACKAGE_NAME}.tar.gz"
+
+    # Upload installer script
+    ossutil cp deploy/installer-opensource.sh "${OSS_BUCKET}/${OSS_PREFIX}/installer.sh" -f
+    echo "    ✅ ${OSS_PREFIX}/installer.sh"
+
+    # Cleanup
+    rm -f "$PACKAGE_FILE"
+else
+    echo ""
+    echo "==> Skipping OSS upload (--skip-oss)"
+fi
+
 # ── Done ──
 echo ""
 echo "============================================================"
-echo "✅ Release v${NEXT_VERSION} tagged and pushed!"
+echo "✅ Release v${NEXT_VERSION} complete!"
 echo ""
 echo "   Tag:     v${NEXT_VERSION}"
 echo "   Branch:  ${RELEASE_BRANCH}"
 echo ""
-echo "   GitHub Actions will build, package, and create the Release."
+echo "   OSS:     https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.tar.gz"
+echo "   GitHub Actions will create the GitHub Release."
 echo "   Next step: create PR to merge ${RELEASE_BRANCH} → main"
 echo "============================================================"
