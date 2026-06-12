@@ -155,7 +155,7 @@ describe('WukongInput', () => {
     expect(userEntry!['gen_ai.agent.id']).toBe('task-1');
     expect(userEntry!['gen_ai.agent.name']).toBe('Test task');
     expect(userEntry!['gen_ai.provider.name']).toBe('dingtalk_deap');
-    expect(userEntry!['gen_ai.turn.id']).toBe('sess-1:t0');
+    expect(userEntry!['gen_ai.turn.id']).toBe('sess-1:t1');
   });
 
   it('maps assistant events to llm.response with token usage', async () => {
@@ -498,7 +498,7 @@ describe('WukongInput', () => {
     await input.stop();
 
     const reqEntry = entries.find(e => e['event.name'] === 'llm.request');
-    expect(reqEntry!['gen_ai.turn.id']).toBe('sess-1:msg-1');
+    expect(reqEntry!['gen_ai.turn.id']).toBe('sess-1:msg-2');
 
     const respEntry = entries.find(e => e['event.name'] === 'llm.response');
     expect(respEntry!['gen_ai.turn.id']).toBe('sess-1:msg-2');
@@ -664,5 +664,447 @@ describe('WukongInput', () => {
     expect(toolResults).toHaveLength(2);
     expect(toolResults[0]!['gen_ai.tool.call.duration']).toBe(200);
     expect(toolResults[1]!['gen_ai.tool.call.duration']).toBe(500);
+  });
+
+  it('sets gen_ai.step.id on all events (fallback single step)', async () => {
+    const listResp = JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] });
+    const msgsResp = JSON.stringify({ messages: SAMPLE_MESSAGES });
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: listResp,
+      get_spark_agui_messages: msgsResp,
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const respEntry = entries.find(e => e['event.name'] === 'llm.response');
+    expect(respEntry!['gen_ai.step.id']).toBe('sess-1:t1:s1');
+  });
+
+  it('generates step.id from STEP_STARTED events', async () => {
+    const stepMessages = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-steps',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-s1', threadId: 'sess-1', timestamp: 1779240560000 },
+          { type: 'STEP_STARTED', messageId: 'step-uuid-1', stepName: 'Read file', timestamp: 1779240560010 },
+          { type: 'TOOL_CALL_START', toolCallId: 'tc-s1', toolName: 'file_read', timestamp: 1779240560100 },
+          { type: 'TOOL_CALL_END', toolCallId: 'tc-s1', toolName: 'file_read', result: 'content', timestamp: 1779240560300 },
+          { type: 'STEP_FINISHED', messageId: 'step-uuid-1', timestamp: 1779240560400 },
+          { type: 'STEP_STARTED', messageId: 'step-uuid-2', stepName: 'Respond', timestamp: 1779240560500 },
+          { type: 'TEXT_MESSAGE_CONTENT', delta: 'Done!', messageId: 'text-1', timestamp: 1779240560600 },
+          { type: 'USAGE', prompt_tokens: 200, completion_tokens: 30, total_tokens: 230, timestamp: 1779240560700 },
+          { type: 'STEP_FINISHED', messageId: 'step-uuid-2', timestamp: 1779240560700 },
+          { type: 'RUN_FINISHED', runId: 'run-s1', threadId: 'sess-1', timestamp: 1779240560800 },
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: stepMessages }),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const toolCall = entries.find(e => e['event.name'] === 'tool.call');
+    expect(toolCall!['gen_ai.step.id']).toBe('sess-1:t1:s1');
+
+    const toolResult = entries.find(e => e['event.name'] === 'tool.result');
+    expect(toolResult!['gen_ai.step.id']).toBe('sess-1:t1:s1');
+
+    const respEntry = entries.find(e => e['event.name'] === 'llm.response');
+    expect(respEntry!['gen_ai.step.id']).toBe('sess-1:t1:s2');
+  });
+
+  it('sets finish_reasons to ["tool_calls"] when step has tool calls', async () => {
+    const toolMessages = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-fr-tools',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-fr', threadId: 'sess-1', timestamp: 1779240560000 },
+          { type: 'TOOL_CALL_START', toolCallId: 'tc-fr', toolName: 'bash', timestamp: 1779240560100 },
+          { type: 'TOOL_CALL_END', toolCallId: 'tc-fr', toolName: 'bash', result: 'ok', timestamp: 1779240560300 },
+          { type: 'TEXT_MESSAGE_CONTENT', delta: 'Ran command.', messageId: 'text-1', timestamp: 1779240560400 },
+          { type: 'USAGE', prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, timestamp: 1779240560500 },
+          { type: 'RUN_FINISHED', runId: 'run-fr', threadId: 'sess-1', timestamp: 1779240560500 },
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: toolMessages }),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const respEntry = entries.find(e => e['event.name'] === 'llm.response');
+    expect(respEntry!['gen_ai.response.finish_reasons']).toEqual(['tool_calls']);
+  });
+
+  it('sets finish_reasons to ["end_turn"] for text-only responses', async () => {
+    const listResp = JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] });
+    const msgsResp = JSON.stringify({ messages: SAMPLE_MESSAGES });
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: listResp,
+      get_spark_agui_messages: msgsResp,
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const respEntry = entries.find(e => e['event.name'] === 'llm.response');
+    expect(respEntry!['gen_ai.response.finish_reasons']).toEqual(['end_turn']);
+  });
+
+  it('sets finish_reasons to ["stop"] on RUN_ERROR and populates error fields', async () => {
+    const errorMessages = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-err',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-err', threadId: 'sess-1', timestamp: 1779240560000 },
+          { type: 'TEXT_MESSAGE_CONTENT', delta: 'Working...', messageId: 'text-1', timestamp: 1779240560100 },
+          { type: 'RUN_ERROR', code: 'CANCELLED', message: '任务已终止', runId: 'run-err', timestamp: 1779240560200 },
+          { type: 'RUN_FINISHED', runId: 'run-err', threadId: 'sess-1', timestamp: 1779240560200 },
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: errorMessages }),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const respEntry = entries.find(e => e['event.name'] === 'llm.response');
+    expect(respEntry!['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    expect(respEntry!['error.type']).toBe('CANCELLED');
+    expect(respEntry!['error.message']).toBe('任务已终止');
+  });
+
+  it('accumulates TOOL_CALL_ARGS delta into tool.call arguments', async () => {
+    const argsMessages = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-args',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-a', threadId: 'sess-1', timestamp: 1779240560000 },
+          { type: 'TOOL_CALL_START', toolCallId: 'tc-a', toolName: 'browser_use', timestamp: 1779240560100 },
+          { type: 'TOOL_CALL_ARGS', toolCallId: 'tc-a', delta: '{"action":', timestamp: 1779240560150 },
+          { type: 'TOOL_CALL_ARGS', toolCallId: 'tc-a', delta: '"click","selector":"#btn"}', timestamp: 1779240560200 },
+          { type: 'TOOL_CALL_END', toolCallId: 'tc-a', toolName: 'browser_use', result: 'clicked', timestamp: 1779240560500 },
+          { type: 'TEXT_MESSAGE_CONTENT', delta: 'Clicked.', messageId: 'text-1', timestamp: 1779240560600 },
+          { type: 'USAGE', prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, timestamp: 1779240560700 },
+          { type: 'RUN_FINISHED', runId: 'run-a', threadId: 'sess-1', timestamp: 1779240560700 },
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: argsMessages }),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const toolCall = entries.find(e => e['event.name'] === 'tool.call');
+    expect(toolCall!['gen_ai.tool.call.arguments']).toEqual({ action: 'click', selector: '#btn' });
+  });
+
+  it('transforms ACTIVITY_SNAPSHOT into tool.call + tool.result pair', async () => {
+    const activityMessages = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-activity',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-act', threadId: 'sess-1', timestamp: 1779240560000 },
+          {
+            type: 'ACTIVITY_SNAPSHOT', activityType: 'TERMINAL', timestamp: 1779240560100,
+            content: { command: 'ls -la', output: 'total 0\ndrwxr-xr-x', exit_code: 0, start_time: 1779240560100, finish_time: 1779240560300 },
+          },
+          { type: 'TEXT_MESSAGE_CONTENT', delta: 'Listed files.', messageId: 'text-1', timestamp: 1779240560400 },
+          { type: 'USAGE', prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, timestamp: 1779240560500 },
+          { type: 'RUN_FINISHED', runId: 'run-act', threadId: 'sess-1', timestamp: 1779240560500 },
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: activityMessages }),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const toolCall = entries.find(e => e['event.name'] === 'tool.call');
+    expect(toolCall).toBeDefined();
+    expect(toolCall!['gen_ai.tool.name']).toBe('terminal');
+    expect(toolCall!['gen_ai.tool.call.arguments']).toEqual({ command: 'ls -la' });
+
+    const toolResult = entries.find(e => e['event.name'] === 'tool.result');
+    expect(toolResult).toBeDefined();
+    expect(toolResult!['gen_ai.tool.name']).toBe('terminal');
+    expect(toolResult!['gen_ai.tool.call.result']).toEqual({ output: 'total 0\ndrwxr-xr-x', exit_code: 0 });
+    expect(toolResult!['gen_ai.tool.call.duration']).toBe(200);
+  });
+
+  it('generates trace_id and span_id on all assistant-derived entries', async () => {
+    const listResp = JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] });
+    const msgsResp = JSON.stringify({ messages: SAMPLE_MESSAGES });
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: listResp,
+      get_spark_agui_messages: msgsResp,
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const respEntry = entries.find(e => e['event.name'] === 'llm.response');
+    expect(respEntry!['trace_id']).toMatch(/^[0-9a-f]{32}$/);
+    expect(respEntry!['span_id']).toMatch(/^[0-9a-f]{16}$/);
+    expect(respEntry!['parent_span_id']).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it('does not process incomplete assistant messages (no RUN_FINISHED)', async () => {
+    const incompleteMessages = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-incomplete',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-inc', threadId: 'sess-1', timestamp: 1779240560000 },
+          { type: 'TEXT_MESSAGE_CONTENT', delta: 'Still thinking...', messageId: 'text-1', timestamp: 1779240560100 },
+          // No RUN_FINISHED — message is still streaming
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: incompleteMessages }),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    // Only the user message (msg-1) should be processed, incomplete assistant skipped
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!['event.name']).toBe('llm.request');
+
+    // seenCounts should advance only to the user message (index 0 + 1 = 1)
+    const state = stateStore.get('wukong');
+    expect((state.extra as any).seenCounts['sess-1']).toBe(1);
+  });
+
+  it('processes incomplete message once it becomes complete on next poll', async () => {
+    const incompleteMessages = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-stream',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-s', threadId: 'sess-1', timestamp: 1779240560000 },
+          { type: 'TEXT_MESSAGE_CONTENT', delta: 'Thinking...', messageId: 'text-1', timestamp: 1779240560100 },
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    const completeMessages = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-stream',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-s', threadId: 'sess-1', timestamp: 1779240560000 },
+          { type: 'TEXT_MESSAGE_CONTENT', delta: 'Thinking...', messageId: 'text-1', timestamp: 1779240560100 },
+          { type: 'TEXT_MESSAGE_CONTENT', delta: ' Done!', messageId: 'text-1', timestamp: 1779240560200 },
+          { type: 'USAGE', prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, timestamp: 1779240560300 },
+          { type: 'RUN_FINISHED', runId: 'run-s', threadId: 'sess-1', timestamp: 1779240560300 },
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    // First poll: incomplete
+    let callCount = 0;
+    mockExecFile.mockImplementation((...allArgs: unknown[]) => {
+      const cb = allArgs[allArgs.length - 1] as Function;
+      const args = allArgs[1] as string[];
+      const subcommand = args.join(' ');
+
+      if (subcommand.includes('list_tasks')) {
+        cb(null, { stdout: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }), stderr: '' });
+        return;
+      }
+      if (subcommand.includes('get_spark_agui_messages')) {
+        callCount++;
+        const msgs = callCount === 1 ? incompleteMessages : completeMessages;
+        cb(null, { stdout: JSON.stringify({ messages: msgs }), stderr: '' });
+        return;
+      }
+      cb(new Error(`unexpected: ${subcommand}`), { stdout: '', stderr: '' });
+    });
+
+    createInput();
+    seedSeenCounts();
+
+    // First poll
+    const entries1: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries1.push(...e));
+    await input.start();
+    await input.stop();
+
+    expect(entries1).toHaveLength(1); // only user msg
+    const state1 = stateStore.get('wukong');
+    expect((state1.extra as any).seenCounts['sess-1']).toBe(1);
+
+    // Second poll: message is now complete
+    const entries2: AgentActivityEntry[] = [];
+    const input2 = new WukongInput({
+      stateStore: stateStore as any,
+      cliPath: '/usr/bin/wukong-cli',
+      pollIntervalMs: 60_000,
+    });
+    input2.on('entries', (e: AgentActivityEntry[]) => entries2.push(...e));
+    await input2.start();
+    await input2.stop();
+
+    const respEntry = entries2.find(e => e['event.name'] === 'llm.response');
+    expect(respEntry).toBeDefined();
+    expect(respEntry!['gen_ai.usage.input_tokens']).toBe(100);
+    expect(respEntry!['gen_ai.usage.output_tokens']).toBe(20);
+    expect(respEntry!['gen_ai.output.messages']).toEqual([
+      { role: 'assistant', parts: [{ type: 'text', content: 'Thinking... Done!' }] },
+    ]);
+  });
+
+  it('sets gen_ai.tool.name on tool.result from TOOL_CALL_START', async () => {
+    const toolMessages = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-tn',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-tn', threadId: 'sess-1', timestamp: 1779240560000 },
+          { type: 'TOOL_CALL_START', toolCallId: 'tc-tn', toolName: 'web_search', timestamp: 1779240560100 },
+          { type: 'TOOL_CALL_END', toolCallId: 'tc-tn', result: 'found', timestamp: 1779240560500 },
+          { type: 'USAGE', prompt_tokens: 50, completion_tokens: 5, total_tokens: 55, timestamp: 1779240560600 },
+          { type: 'RUN_FINISHED', runId: 'run-tn', threadId: 'sess-1', timestamp: 1779240560600 },
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: toolMessages }),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const toolResult = entries.find(e => e['event.name'] === 'tool.result');
+    expect(toolResult!['gen_ai.tool.name']).toBe('web_search');
   });
 });
