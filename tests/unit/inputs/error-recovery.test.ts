@@ -91,7 +91,7 @@ describe('US4: Error recovery', () => {
       expect(allEntries).toHaveLength(1);
       const warnLog = mockLogger.warn.mock.calls.find(call => call[0] === 'invalid JSONL line');
       expect(warnLog).toBeDefined();
-      expect(warnLog?.[1]?.error).toContain('BAD_JSON_LINE');
+      expect(warnLog?.[1]?.line).toContain('BAD_JSON_LINE');
     });
   });
 

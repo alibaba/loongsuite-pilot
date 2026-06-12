@@ -49,7 +49,7 @@ export async function writeJsonFile(
 ): Promise<void> {
   await ensureDir(nodePath.dirname(path));
   const text = `${JSON.stringify(data, null, 2)}\n`;
-  const tmp = path + '.tmp';
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
   await fsp.writeFile(tmp, text, 'utf8');
   await fsp.rename(tmp, path);
 }

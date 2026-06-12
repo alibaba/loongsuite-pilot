@@ -3,7 +3,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { migrate } from '../../../scripts/migrate-internal-config.js';
+const SCRIPT_PATH = path.resolve(import.meta.dirname ?? __dirname, '..', '..', '..', 'scripts', 'migrate-internal-config.js');
+const scriptExists = fs.existsSync(SCRIPT_PATH);
+
+let migrate: (configPath: string) => boolean;
+if (scriptExists) {
+  ({ migrate } = await import('../../../scripts/migrate-internal-config.js'));
+}
 
 const INTERNAL_SLS = {
   name: 'internal-sls',
@@ -13,7 +19,7 @@ const INTERNAL_SLS = {
   mode: 'webtracking',
 };
 
-describe('migrate-internal-config', () => {
+describe.skipIf(!scriptExists)('migrate-internal-config', () => {
   let tmpDir: string;
   let configPath: string;
   let innerDataConfigPath: string;

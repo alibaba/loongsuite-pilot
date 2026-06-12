@@ -193,9 +193,13 @@ export class QoderWorkTraceInput extends BaseInput {
         this.stateStore.update(fileStateKey, { extra: { inode: currentInode } });
       }
 
-      const offset = this.stateStore.getOffset(fileStateKey);
+      let offset = this.stateStore.getOffset(fileStateKey);
+      if (offset > 0 && stat.size < offset) {
+        this.logger.info('SDK log truncated or rotated, resetting offset', { file: filePath });
+        offset = 0;
+        this.stateStore.setOffset(fileStateKey, 0);
+      }
       if (stat.size <= offset) {
-        // 即使没有新数据，也要保存当前文件的 model policy
         this.fileModelPolicies.set(filePath, { ...this.currentModelPolicy });
         continue;
       }

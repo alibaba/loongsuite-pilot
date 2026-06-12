@@ -78,7 +78,7 @@ export abstract class BaseHookInput extends BaseInput {
           const entry = await this.transformRecord(record);
           if (entry) entries.push(entry);
         } catch (err) {
-          this.logger.warn('invalid JSONL line', { error: String(err) });
+          this.logger.warn('invalid JSONL line', { error: String(err), line: line.slice(0, 200) });
         }
       }
     } finally {
