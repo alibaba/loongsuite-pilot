@@ -36,7 +36,8 @@ Orchestrator 启动分为以下阶段：
 3. **输入源注册** — 通过 InputManager 注册所有 Agent Input source
 4. **发现与生命周期管理** — 启动 AgentDiscoveryService（fs.watch + 轮询），检测 Agent 存在并管理 Input 的 start/stop 生命周期
 5. **清理服务** — 启动 LogRetentionService 进行日志轮转
-6. **状态栏支持** — 启动 RuntimeWriter（写 runtime.json）、MetricsSummaryWriter（聚合 metrics-summary.json）、StatusBarAppManager（管理 Swift binary 进程，仅 macOS）。由 `config.statusBar.enabled` 控制。
+6. **文件采集管道** — 启动 FileCollectionManager，监控 `~/.loongsuite-pilot/file-collection/` 目录，动态加载/卸载文件采集 pipeline（与 agent activity 管道独立运行）
+7. **状态栏支持** — 启动 RuntimeWriter（写 runtime.json）、MetricsSummaryWriter（聚合 metrics-summary.json）、StatusBarAppManager（管理 Swift binary 进程，仅 macOS）。由 `config.statusBar.enabled` 控制。
 
 ### ConfigLoader 优先级模型
 三层配置加载，高优先级覆盖低优先级：
@@ -92,6 +93,7 @@ InputManager 负责调用 collector 级统一处理器并将处理后的 entries
 | flushers | `BaseFlusher`, `SlsFlusher`, `JsonlFlusher`, `HttpFlusher`, `MultiFlusher` |
 | checkpoints | `StateStore` |
 | hooks | `HookManager` |
+| file-collection | `FileCollectionManager` |
 | normalization | `applyAgentContentPolicy` |
 | mask | `maskAgentActivityEntry`, `loadEnabledRules` |
 | utils | `createLogger`, `resolveHome`, `ensureDir`, `readJsonFile`, `writeJsonFile` |

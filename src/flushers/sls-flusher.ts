@@ -8,10 +8,21 @@ import {
 import type { AgentActivityEntry, SlsFlusherConfig, SlsEndpoint } from '../types/index.js';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
-import { formatTime } from '../utils/time-utils.js';
 import { appendLine, ensureDir } from '../utils/fs-utils.js';
+import { formatTime } from '../utils/time-utils.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import * as path from 'node:path';
+import {
+  HttpError,
+  postWebtracking,
+  isRetryable,
+  RETRY_MAX_ATTEMPTS,
+  RETRY_BASE_DELAY_MS,
+  WEBTRACKING_TIMEOUT_MS,
+  WEBTRACKING_MAX_BODY_BYTES,
+  WEBTRACKING_MAX_LOGS,
+  RETRYABLE_STATUS_CODES,
+} from './sls-transport.js';
 
 function getLocalIp(): string {
   const interfaces = os.networkInterfaces();
@@ -29,13 +40,6 @@ const HOSTNAME = os.hostname();
 
 const BATCH_MAX_SIZE = 20;
 const FLUSH_INTERVAL_MS = 2000;
-const WEBTRACKING_TIMEOUT_MS = 10_000;
-const WEBTRACKING_MAX_BODY_BYTES = 2_800_000;
-const WEBTRACKING_MAX_LOGS = 4096;
-const RETRY_MAX_ATTEMPTS = 3;
-const RETRY_BASE_DELAY_MS = 1000;
-
-const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 
 interface QueuedLog {
   content: Record<string, string>;
@@ -44,12 +48,6 @@ interface QueuedLog {
 }
 
 const logger = createLogger('SlsFlusher');
-
-class HttpError extends Error {
-  constructor(readonly status: number, body: string) {
-    super(`${status} ${body}`);
-  }
-}
 
 export interface EndpointCounter {
   inEntries: number;
@@ -71,7 +69,6 @@ export class SlsFlusher extends BaseFlusher {
   private readonly queue: Map<string, QueuedLog[]> = new Map();
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private readonly failedLogDir: string;
-  /** Lazy AK client cache keyed by `endpoint.name`. Built on first AK send. */
   private readonly akClients: Map<string, any> = new Map();
   private readonly endpointCounters: Map<string, EndpointCounter> = new Map();
   private alarmManager: AlarmManager | null = null;
@@ -237,7 +234,7 @@ export class SlsFlusher extends BaseFlusher {
         return;
       } catch (err) {
         lastErr = err;
-        if (!this.isRetryable(err) || attempt === RETRY_MAX_ATTEMPTS - 1) break;
+        if (!isRetryable(err) || attempt === RETRY_MAX_ATTEMPTS - 1) break;
         const delay = RETRY_BASE_DELAY_MS * 2 ** attempt;
         logger.warn('SLS ak send retrying', {
           endpoint: endpoint.name,
@@ -275,9 +272,6 @@ export class SlsFlusher extends BaseFlusher {
     }
   }
 
-  /**
-   * 按条数 (4096) 和体积 (3MB) 分片，确保每个 chunk 不超过 PutWebtracking 接口限制。
-   */
   private splitForWebtracking(logs: QueuedLog[]): QueuedLog[][] {
     const chunks: QueuedLog[][] = [];
     let current: QueuedLog[] = [];
@@ -315,7 +309,6 @@ export class SlsFlusher extends BaseFlusher {
     };
 
     const raw = JSON.stringify(body);
-    // Per-endpoint URL: derive from the endpoint's own base, not a flusher-wide setting.
     const base = endpoint.project
       ? endpoint.endpoint.replace(/^(https?:\/\/)/, `$1${endpoint.project}.`)
       : endpoint.endpoint;
@@ -385,6 +378,21 @@ export class SlsFlusher extends BaseFlusher {
     await this.persistFailedLogs(endpoint, body, lastErr);
   }
 
+  private async persistFailedLogs(endpoint: SlsEndpoint, logGroup: unknown, err: unknown): Promise<void> {
+    await ensureDir(this.failedLogDir);
+    const filePath = path.join(this.failedLogDir, `${endpoint.name}.jsonl`);
+    const line = JSON.stringify({
+      ts: Date.now(),
+      endpoint: endpoint.name,
+      project: endpoint.project,
+      logstore: endpoint.logstore,
+      kind: endpoint.kind,
+      logGroup,
+      error: String(err),
+    });
+    await appendLine(filePath, line);
+  }
+
   async shutdown(): Promise<void> {
     if (this.flushTimer) {
       clearInterval(this.flushTimer);
@@ -411,7 +419,19 @@ export class SlsFlusher extends BaseFlusher {
             tags: this.buildAkTags(),
           });
         } else {
-          await this.flushViaWebtracking(endpoint, [{ content, endpoint }]);
+          await postWebtracking(
+            {
+              endpoint: endpoint.endpoint,
+              project: endpoint.project,
+              logstore: endpoint.logstore,
+            },
+            [content],
+            {
+              topic,
+              source: LOCAL_IP,
+              tags: { __hostname__: HOSTNAME },
+            },
+          );
         }
       } catch {
         logger.warn('sendRaw failed', { topic, endpoint: endpoint.name });
@@ -444,41 +464,7 @@ export class SlsFlusher extends BaseFlusher {
     }
   }
 
-  private isRetryable(err: unknown): boolean {
-    if (err instanceof HttpError) return RETRYABLE_STATUS_CODES.has(err.status);
-    const msg = String(err);
-    return msg.includes('ECONNRESET') ||
-           msg.includes('ETIMEDOUT') ||
-           msg.includes('ECONNREFUSED') ||
-           msg.includes('socket hang up') ||
-           msg.includes('network') ||
-           msg.includes('TimeoutError') ||
-           msg.includes('InternalServerError') ||
-           msg.includes('ServerBusy');
-  }
-
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  private async persistFailedLogs(
-    endpoint: SlsEndpoint,
-    logGroup: unknown,
-    err: unknown,
-  ): Promise<void> {
-    // Failed-log filename is keyed by endpoint.name so two endpoints serving
-    // the same `kind` (e.g. dual-write `agentActivity`) do not collide.
-    const fileName = `${endpoint.name}.jsonl`;
-    const filePath = path.join(this.failedLogDir, fileName);
-    const line = JSON.stringify({
-      ts: Date.now(),
-      endpoint: endpoint.name,
-      kind: endpoint.kind,
-      project: endpoint.project,
-      logstore: endpoint.logstore,
-      logGroup,
-      error: String(err),
-    });
-    await appendLine(filePath, line);
   }
 }

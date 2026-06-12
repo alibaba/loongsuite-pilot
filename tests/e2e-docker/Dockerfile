@@ -21,7 +21,8 @@ ENV NPM_CONFIG_PREFIX="/home/testuser/.local"
 ENV PATH="/home/testuser/.local/bin:$PATH"
 
 # use mirror npm registry to accelerate speed
-RUN npm config set registry https://registry.npmmirror.com
+RUN npm config set registry https://registry.npmmirror.com \
+    && npm config set @loongsuite:registry https://registry.npmjs.org
 
 RUN npm install -g @openai/codex @anthropic-ai/claude-code @qoder-ai/qodercli \
     && mkdir -p "$HOME/.local/bin" \

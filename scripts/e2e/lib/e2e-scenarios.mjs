@@ -912,6 +912,327 @@ fi
 }
 
 // ──────────────────────────────────────────────────────────
+// File Collection E2E validation
+// ──────────────────────────────────────────────────────────
+
+/**
+ * Build a bash script that creates a file-collection config + test log files,
+ * waits for pilot to pick them up, and verifies the pipeline processed them.
+ */
+export function buildFileCollectionValidationSh() {
+  return `
+set -euo pipefail
+echo ""
+echo "=== [file-collection-e2e] File Collection Pipeline Validation ==="
+
+FC_CONFIG_DIR="$HOME/.loongsuite-pilot/configs/local"
+FC_STATE_DIR="$HOME/.loongsuite-pilot/state/file-collection"
+FC_TEST_LOG_DIR="$HOME/.loongsuite-pilot/e2e-test-logs"
+FC_CONFIG_NAME="e2e-file-test"
+
+# Step 1: Create test log directory and write test data
+echo "[file-collection-e2e] Step 1: Creating test log files..."
+mkdir -p "$FC_TEST_LOG_DIR"
+for i in $(seq 1 20); do
+  echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) [INFO] e2e-test-line-$i key=value idx=$i" >> "$FC_TEST_LOG_DIR/app.log"
+done
+echo "[file-collection-e2e] wrote 20 lines to $FC_TEST_LOG_DIR/app.log"
+
+# Step 2: Create file-collection config using real SLS endpoint from E2E env
+echo "[file-collection-e2e] Step 2: Creating file-collection config..."
+mkdir -p "$FC_CONFIG_DIR"
+
+# Read SLS config from pilot's config.json (written by installer with real E2E_SLS_* values)
+FC_SLS_ENDPOINT=$(node -e "try{const c=require('$HOME/.loongsuite-pilot/config.json');const e=c.sls?.endpoint||'';console.log(e.replace(/^https?:\\/\\//,''))}catch{console.log('cn-hangzhou.log.aliyuncs.com')}" 2>/dev/null)
+FC_SLS_PROJECT=$(node -e "try{const c=require('$HOME/.loongsuite-pilot/config.json');console.log(c.sls?.project||'e2e-test-project')}catch{console.log('e2e-test-project')}" 2>/dev/null)
+FC_SLS_LOGSTORE=$(node -e "try{const c=require('$HOME/.loongsuite-pilot/config.json');console.log(c.sls?.logstore||'e2e-test-logstore')}catch{console.log('e2e-test-logstore')}" 2>/dev/null)
+echo "[file-collection-e2e] using SLS: endpoint=$FC_SLS_ENDPOINT project=$FC_SLS_PROJECT logstore=$FC_SLS_LOGSTORE"
+
+node -e "
+const config = {
+  configName: 'e2e-file-test',
+  inputs: [{
+    Type: 'input_file',
+    FilePaths: [process.argv[1]],
+    FileEncoding: 'utf8',
+    MaxDirSearchDepth: 0
+  }],
+  flushers: [{
+    Type: 'flusher_sls',
+    Endpoint: process.argv[2],
+    Project: process.argv[3],
+    Logstore: process.argv[4],
+    TelemetryType: 'logs'
+  }]
+};
+require('fs').writeFileSync(process.argv[5], JSON.stringify(config, null, 2));
+" "$FC_TEST_LOG_DIR/*.log" "$FC_SLS_ENDPOINT" "$FC_SLS_PROJECT" "$FC_SLS_LOGSTORE" "$FC_CONFIG_DIR/$FC_CONFIG_NAME.json"
+
+echo "[file-collection-e2e] config written: $FC_CONFIG_DIR/$FC_CONFIG_NAME.json"
+cat "$FC_CONFIG_DIR/$FC_CONFIG_NAME.json"
+
+# Step 3: Wait for pilot to detect the config and process files
+# FileCollectionManager rescans every 60s; we also trigger via fs.watch.
+echo "[file-collection-e2e] Step 3: Waiting for pilot to process config (up to 90s)..."
+TIMEOUT=90
+ELAPSED=0
+while [ $ELAPSED -lt $TIMEOUT ]; do
+  if [ -f "$FC_STATE_DIR/$FC_CONFIG_NAME.json" ]; then
+    STATE_SIZE=$(wc -c < "$FC_STATE_DIR/$FC_CONFIG_NAME.json" | tr -d ' ')
+    if [ "$STATE_SIZE" -gt 2 ]; then
+      echo "[file-collection-e2e] state file detected after \${ELAPSED}s (size=\${STATE_SIZE}B)"
+      break
+    fi
+  fi
+  sleep 3
+  ELAPSED=$((ELAPSED + 3))
+done
+
+# Step 4: Validate results
+echo "[file-collection-e2e] Step 4: Validating results..."
+FC_FAIL=0
+
+# Check state file exists and is non-empty
+if [ -f "$FC_STATE_DIR/$FC_CONFIG_NAME.json" ]; then
+  STATE_CONTENT=$(cat "$FC_STATE_DIR/$FC_CONFIG_NAME.json")
+  STATE_SIZE=$(echo -n "$STATE_CONTENT" | wc -c | tr -d ' ')
+  if [ "$STATE_SIZE" -gt 2 ]; then
+    echo "[file-collection-e2e] OK: state file exists and has content (\${STATE_SIZE}B)"
+    # Check that offset was advanced (file was read)
+    if echo "$STATE_CONTENT" | grep -q '"lastOffset"'; then
+      echo "[file-collection-e2e] OK: state contains lastOffset (file was read)"
+    else
+      echo "[file-collection-e2e] WARN: state exists but no lastOffset found"
+    fi
+    if echo "$STATE_CONTENT" | grep -q '"inode"'; then
+      echo "[file-collection-e2e] OK: state contains inode (rotation tracking active)"
+    fi
+  else
+    echo "[file-collection-e2e] FAIL: state file exists but is empty/trivial"
+    FC_FAIL=1
+  fi
+else
+  echo "[file-collection-e2e] FAIL: state file not found at $FC_STATE_DIR/$FC_CONFIG_NAME.json"
+  echo "[file-collection-e2e] pilot service log (last 20 lines with FileCollection):"
+  grep -iE "FileCollection|file-collection|FilePipeline|FileTailer" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null | tail -20 || echo "(no file-collection log lines found)"
+  FC_FAIL=1
+fi
+
+# Check service log for file-collection activity
+if grep -q "FileCollectionManager.*started" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+  echo "[file-collection-e2e] OK: FileCollectionManager started in service log"
+else
+  echo "[file-collection-e2e] WARN: FileCollectionManager start not found in service log"
+fi
+
+if grep -q "FilePipeline.*started" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+  echo "[file-collection-e2e] OK: FilePipeline started in service log"
+else
+  echo "[file-collection-e2e] WARN: FilePipeline start not found in service log"
+fi
+
+# Step 5: Test log rotation (write more data to verify incremental read)
+echo ""
+echo "[file-collection-e2e] Step 5: Testing incremental read..."
+OFFSET_BEFORE=""
+if [ -f "$FC_STATE_DIR/$FC_CONFIG_NAME.json" ]; then
+  OFFSET_BEFORE=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+fi
+echo "[file-collection-e2e] offset before append: $OFFSET_BEFORE"
+
+for i in $(seq 21 30); do
+  echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) [INFO] e2e-incremental-line-$i" >> "$FC_TEST_LOG_DIR/app.log"
+done
+echo "[file-collection-e2e] appended 10 more lines"
+
+# Wait for next poll cycle
+sleep 15
+
+OFFSET_AFTER=""
+if [ -f "$FC_STATE_DIR/$FC_CONFIG_NAME.json" ]; then
+  OFFSET_AFTER=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+fi
+echo "[file-collection-e2e] offset after append: $OFFSET_AFTER"
+
+if [ "$OFFSET_AFTER" -gt "$OFFSET_BEFORE" ] 2>/dev/null; then
+  echo "[file-collection-e2e] OK: offset advanced ($OFFSET_BEFORE -> $OFFSET_AFTER), incremental read works"
+else
+  echo "[file-collection-e2e] WARN: offset did not advance (may need more time)"
+fi
+
+# ──────────────────────────────────────────────────────────
+# Step 6: Rename rotation test
+# ──────────────────────────────────────────────────────────
+echo ""
+echo "[file-collection-e2e] Step 6: Testing RENAME rotation..."
+
+# 6a. Record current state (offset + inode) before rotation
+INODE_BEFORE=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+OFFSET_BEFORE=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+echo "[file-collection-e2e] before rename: inode=$INODE_BEFORE offset=$OFFSET_BEFORE"
+
+# 6b. Append lines that haven't been collected yet (simulate unread tail)
+for i in $(seq 1 5); do
+  echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) [INFO] rename-pre-rotate-line-$i" >> "$FC_TEST_LOG_DIR/app.log"
+done
+echo "[file-collection-e2e] appended 5 lines before rotation (these must be drained from old file)"
+
+# 6c. Simulate rename rotation: mv app.log -> app.log.1, create new app.log
+mv "$FC_TEST_LOG_DIR/app.log" "$FC_TEST_LOG_DIR/app.log.1"
+for i in $(seq 1 5); do
+  echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) [INFO] rename-post-rotate-line-$i" >> "$FC_TEST_LOG_DIR/app.log"
+done
+echo "[file-collection-e2e] renamed app.log -> app.log.1, created new app.log with 5 lines"
+
+# 6d. Wait for poll cycle to detect rotation and drain
+sleep 15
+
+INODE_AFTER=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+OFFSET_AFTER=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+echo "[file-collection-e2e] after rename: inode=$INODE_AFTER offset=$OFFSET_AFTER"
+
+if [ "$INODE_AFTER" != "$INODE_BEFORE" ] && [ "$INODE_AFTER" != "0" ]; then
+  echo "[file-collection-e2e] OK: inode changed ($INODE_BEFORE -> $INODE_AFTER), rename rotation detected"
+else
+  echo "[file-collection-e2e] FAIL: inode did not change after rename rotation"
+  FC_FAIL=1
+fi
+
+if [ "$OFFSET_AFTER" -gt 0 ] 2>/dev/null; then
+  echo "[file-collection-e2e] OK: new file read (offset=$OFFSET_AFTER)"
+else
+  echo "[file-collection-e2e] FAIL: new file not read after rename rotation"
+  FC_FAIL=1
+fi
+
+# 6e. Verify old file drain via service log
+if grep -q "drained old file after rotation" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+  echo "[file-collection-e2e] OK: old file drain logged (unread lines from app.log.1 collected)"
+else
+  echo "[file-collection-e2e] WARN: old file drain not found in service log (may have been fully read before rotation)"
+fi
+
+# ──────────────────────────────────────────────────────────
+# Step 7: Copytruncate rotation test
+# ──────────────────────────────────────────────────────────
+echo ""
+echo "[file-collection-e2e] Step 7: Testing COPYTRUNCATE rotation..."
+
+# 7a. Wait for current data to be collected
+sleep 15
+OFFSET_BEFORE_CT=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+INODE_BEFORE_CT=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+echo "[file-collection-e2e] before copytruncate: inode=$INODE_BEFORE_CT offset=$OFFSET_BEFORE_CT"
+
+# 7b. Simulate copytruncate: cp app.log -> app.log.2, truncate app.log, write new data
+cp "$FC_TEST_LOG_DIR/app.log" "$FC_TEST_LOG_DIR/app.log.2"
+: > "$FC_TEST_LOG_DIR/app.log"
+for i in $(seq 1 5); do
+  echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) [INFO] copytruncate-new-line-$i" >> "$FC_TEST_LOG_DIR/app.log"
+done
+echo "[file-collection-e2e] copytruncate done: truncated app.log, wrote 5 new lines"
+
+# 7c. Wait for poll cycle
+sleep 15
+
+INODE_AFTER_CT=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+OFFSET_AFTER_CT=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+echo "[file-collection-e2e] after copytruncate: inode=$INODE_AFTER_CT offset=$OFFSET_AFTER_CT"
+
+if [ "$INODE_AFTER_CT" = "$INODE_BEFORE_CT" ]; then
+  echo "[file-collection-e2e] OK: inode unchanged ($INODE_AFTER_CT), copytruncate correctly detected (same file)"
+else
+  echo "[file-collection-e2e] WARN: inode changed unexpectedly ($INODE_BEFORE_CT -> $INODE_AFTER_CT)"
+fi
+
+if [ "$OFFSET_AFTER_CT" -lt "$OFFSET_BEFORE_CT" ] 2>/dev/null && [ "$OFFSET_AFTER_CT" -gt 0 ] 2>/dev/null; then
+  echo "[file-collection-e2e] OK: offset reset and advanced ($OFFSET_BEFORE_CT -> $OFFSET_AFTER_CT), truncated file re-read from start"
+else
+  echo "[file-collection-e2e] FAIL: offset not properly reset after copytruncate (before=$OFFSET_BEFORE_CT after=$OFFSET_AFTER_CT)"
+  FC_FAIL=1
+fi
+
+# Verify truncation detection in service log
+if grep -q "copytruncate rotation" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+  echo "[file-collection-e2e] OK: copytruncate rotation detected in service log"
+else
+  echo "[file-collection-e2e] WARN: copytruncate detection not found in service log"
+fi
+
+# 7d. Edge case: copytruncate where new data exceeds old offset (signature-based detection)
+echo ""
+echo "[file-collection-e2e] Step 7b: Testing copytruncate with new data exceeding old offset..."
+sleep 15
+OFFSET_BEFORE_SIG=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+echo "[file-collection-e2e] current offset: $OFFSET_BEFORE_SIG"
+
+# Simulate: cp + truncate + write MORE data than old file size
+cp "$FC_TEST_LOG_DIR/app.log" "$FC_TEST_LOG_DIR/app.log.3"
+: > "$FC_TEST_LOG_DIR/app.log"
+for i in $(seq 1 50); do
+  echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) [INFO] copytruncate-overflow-line-$i padding-data-to-exceed-old-offset" >> "$FC_TEST_LOG_DIR/app.log"
+done
+NEW_SIZE=$(wc -c < "$FC_TEST_LOG_DIR/app.log" | tr -d ' ')
+echo "[file-collection-e2e] truncated + wrote 50 lines ($NEW_SIZE bytes, old offset was $OFFSET_BEFORE_SIG)"
+
+sleep 15
+
+OFFSET_AFTER_SIG=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+echo "[file-collection-e2e] after signature-based copytruncate: offset=$OFFSET_AFTER_SIG"
+
+if grep -q "signature changed.*copytruncate rotation.*content replaced" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+  echo "[file-collection-e2e] OK: signature-based copytruncate detected (file head content changed)"
+elif grep -q "copytruncate rotation.*size < offset" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+  echo "[file-collection-e2e] OK: size-based copytruncate detected (fallback, new data didn't exceed old offset)"
+else
+  echo "[file-collection-e2e] WARN: copytruncate detection not found for overflow case (may need more time)"
+fi
+
+# ──────────────────────────────────────────────────────────
+# Step 8: Rotated file count check
+# ──────────────────────────────────────────────────────────
+echo ""
+echo "[file-collection-e2e] Step 8: Rotated file handling summary..."
+
+ROTATED_COUNT=$(ls "$FC_TEST_LOG_DIR"/app.log.* 2>/dev/null | wc -l | tr -d ' ')
+echo "[file-collection-e2e] rotated files in directory: $ROTATED_COUNT (app.log.1, app.log.2, ...)"
+echo "[file-collection-e2e] INFO: drain supports 1 immediate predecessor per rotation event (by inode lookup)"
+echo "[file-collection-e2e] INFO: glob pattern *.log only matches app.log, rotated files (app.log.1) are not re-collected"
+ls -la "$FC_TEST_LOG_DIR"/ 2>/dev/null
+
+# ──────────────────────────────────────────────────────────
+# Step 9: Verify data delivery status
+# ──────────────────────────────────────────────────────────
+echo ""
+echo "[file-collection-e2e] Step 9: Verifying data delivery..."
+
+FC_FAILED_LOG="$HOME/.loongsuite-pilot/logs/file-collection-failed/$FC_CONFIG_NAME.jsonl"
+if [ -f "$FC_FAILED_LOG" ]; then
+  FC_FAILED_LINES=$(wc -l < "$FC_FAILED_LOG" | tr -d ' ')
+  echo "[file-collection-e2e] WARN: failed-log has $FC_FAILED_LINES entries (some data failed to deliver to SLS)"
+  echo "[file-collection-e2e] failed-log sample:"
+  head -1 "$FC_FAILED_LOG" | cut -c1-200
+else
+  echo "[file-collection-e2e] OK: no failed-log (all data delivered to SLS successfully)"
+fi
+
+# Cleanup
+echo ""
+echo "[file-collection-e2e] Cleaning up test config..."
+rm -f "$FC_CONFIG_DIR/$FC_CONFIG_NAME.json"
+
+if [ "$FC_FAIL" -eq 0 ]; then
+  echo ""
+  echo "=== [file-collection-e2e] File Collection Validation PASSED ==="
+else
+  echo ""
+  echo "=== [file-collection-e2e] File Collection Validation FAILED ==="
+  exit 1
+fi
+`;
+}
+
+// ──────────────────────────────────────────────────────────
 // Helpers used by both run-l1.mjs and run-docker-e2e.mjs.
 // Moved from run-docker-e2e.mjs so L1 can reuse without copy.
 // ──────────────────────────────────────────────────────────

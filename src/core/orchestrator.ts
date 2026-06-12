@@ -19,7 +19,6 @@ import { SlsFlusher } from '../flushers/sls-flusher.js';
 import { JsonlFlusher } from '../flushers/jsonl-flusher.js';
 import { HttpFlusher } from '../flushers/http-flusher.js';
 import { MultiFlusher } from '../flushers/multi-flusher.js';
-import { OtlpTraceFlusher } from '../flushers/otlp-trace-flusher.js';
 import { buildOtlpTraceConfig } from './config-loader.js';
 
 // Concrete inputs
@@ -42,6 +41,7 @@ import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { HookWatchdog, type PluginCheckTarget } from './hook-watchdog.js';
+import { FileCollectionManager } from '../file-collection/file-collection-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
 import { AlarmManager } from '../metrics/alarm-manager.js';
 import type { DataflowSnapshot } from '../metrics/metrics-collector.js';
@@ -98,6 +98,7 @@ export class Orchestrator extends EventEmitter {
   private logRetentionService!: LogRetentionService;
   private hookWatchdog!: HookWatchdog;
   private deploymentManager!: DeploymentManager;
+  private fileCollectionManager!: FileCollectionManager;
   private metricsWriter!: MetricsWriter;
   private alarmManager!: AlarmManager;
   private runtimeWriter: RuntimeWriter | null = null;
@@ -188,7 +189,15 @@ export class Orchestrator extends EventEmitter {
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets);
     this.hookWatchdog.start();
 
-    // 11. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
+    // 11. Start file collection pipelines
+    this.fileCollectionManager = new FileCollectionManager({
+      configDir: path.join(this.dataDir, 'configs', 'local'),
+      stateDir: path.join(this.dataDir, 'state', 'file-collection'),
+      failedLogDir: path.join(this.dataDir, 'logs', 'file-collection-failed'),
+    });
+    await this.fileCollectionManager.start();
+
+    // 12. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
     const slsFlusher = this.getSlsFlusher();
     if (slsFlusher) slsFlusher.setAlarmManager(this.alarmManager);
     this.metricsWriter = new MetricsWriter({
@@ -229,6 +238,7 @@ export class Orchestrator extends EventEmitter {
     if (!this.isRunning) return;
     logger.info('stopping orchestrator');
 
+    await this.fileCollectionManager?.stop();
     await this.metricsWriter?.stop();
     await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(() => {});
     this.metricsSummaryWriter?.stop();
@@ -344,8 +354,13 @@ export class Orchestrator extends EventEmitter {
 
     const otlpTraceCfg = buildOtlpTraceConfig(this.config);
     if (otlpTraceCfg?.enabled) {
-      const r = new OtlpTraceFlusher(otlpTraceCfg);
-      flushers.push(r);
+      try {
+        const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
+        const r = new OtlpTraceFlusher(otlpTraceCfg);
+        flushers.push(r);
+      } catch (err) {
+        logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
+      }
     }
 
     if (flushers.length === 0) {

@@ -61,8 +61,22 @@ export class StateStore {
 
   update(inputId: string, partial: Partial<InputState>): void {
     const current = { ...this.get(inputId) };
-    this.states.set(inputId, cloneState({ ...current, ...partial }));
+    const merged = { ...current, ...partial };
+    if (partial.extra && current.extra && typeof current.extra === 'object' && typeof partial.extra === 'object') {
+      merged.extra = { ...current.extra, ...partial.extra };
+    }
+    this.states.set(inputId, cloneState(merged));
     this.dirty = true;
+  }
+
+  delete(inputId: string): boolean {
+    const deleted = this.states.delete(inputId);
+    if (deleted) this.dirty = true;
+    return deleted;
+  }
+
+  keys(): string[] {
+    return Array.from(this.states.keys());
   }
 
   getOffset(inputId: string): number {
@@ -80,17 +94,4 @@ export class StateStore {
   setRowId(inputId: string, rowId: number): void {
     this.update(inputId, { lastRowId: rowId });
   }
-}
-
-function mergeExtra(
-  base: Record<string, unknown> | undefined,
-  patch: Record<string, unknown> | undefined
-): Record<string, unknown> | undefined {
-  if (patch === undefined) {
-    return base;
-  }
-  if (Object.keys(patch).length === 0) {
-    return base;
-  }
-  return { ...base, ...patch };
 }
