@@ -2,67 +2,99 @@ name: "Sync from GitHub Open Source"
 
 triggers:
   schedule:
-    - cron: "0 10 * * *"  # 每天上午 10 点
-  workflow_dispatch: {}    # 支持手动触发
+    - cron: "0 10 * * *"
+  workflow_dispatch: {}
 
 jobs:
   sync:
     steps:
       - uses: checkout
         inputs:
-          fetch-depth: 0   # 需要完整历史才能 rebase
+          fetch-depth: 0
 
-      - id: fetch-upstream
+      - id: fetch
         run: |
           set -e
-
-          # 内部仓库的远程已经配好：
-          #   origin     = gitlab.alibaba-inc.com/sls/loongsuite-pilot（内部）
-          #   opensource = gitlab.alibaba-inc.com/sls/loongsuite-pilot-opensource（开源镜像）
-          # GitHub 开源地址
           GITHUB_URL="https://github.com/alibaba/loongsuite-pilot.git"
-
-          # 添加 GitHub 作为上游（幂等）
           git remote add github "$GITHUB_URL" 2>/dev/null || true
-
-          # 拉取 GitHub 最新
           git fetch github main
 
-          # 确保本地有 upstream 分支（首次跑时创建）
-          if ! git rev-parse --verify upstream >/dev/null 2>&1; then
-            git checkout -b upstream github/main
-            git checkout master
-          fi
-
-      - id: rebase
+      - id: cherry-pick
         run: |
           set -e
 
-          # upstream 分支 = 开源版本的纯镜像
-          git checkout upstream
-          git reset --hard github/main
+          git config user.email "opensource-sync@alibaba-inc.com"
+          git config user.name "Open Source Sync"
 
-          # master = upstream + 内部增量 commit，rebase 到新的 upstream 之上
-          git checkout master
-          if ! git rebase upstream; then
-            echo "REBASE_CONFLICT=true" >> $AONE_CI_OUTPUT
-            git rebase --abort
-            echo "❌ Rebase 冲突，需要人工介入"
+          # 标记文件：记录上次同步到的 GitHub commit SHA
+          # 提交到 master，保证任务无状态——任何 runner 都能从仓库自身恢复进度
+          MARKER=".opensource-sync-state"
+          BASELINE="46c56553e7f51f428ed413d58a3b65bb1a764549"  # 开源 init squash commit
+
+          if [ -f "$MARKER" ]; then
+            LAST_SHA=$(cat "$MARKER")
+          else
+            # 首次运行：从 init squash commit 之后开始
+            LAST_SHA="$BASELINE"
+          fi
+
+          # GitHub 新增的 commit（--first-parent 跟随主线，跳过 merge 的侧分支）
+          COMMITS=$(git rev-list --first-parent --reverse "${LAST_SHA}..github/main")
+
+          if [ -z "$COMMITS" ]; then
+            echo "无新变更，跳过"
+            exit 0
+          fi
+
+          TOTAL=$(echo "$COMMITS" | wc -l | tr -d ' ')
+          echo "待同步: $TOTAL 个 commit"
+
+          COUNT=0
+          FAILED_SHA=""
+          for SHA in $COMMITS; do
+            COUNT=$((COUNT + 1))
+            SUBJECT=$(git log -1 --format='%s' "$SHA")
+            echo "[$COUNT/$TOTAL] cherry-pick ${SHA:0:7} $SUBJECT"
+
+            # merge commit 需要 -m 1（相对于第一个 parent，即主线之前状态）
+            if git cat-file -p "$SHA" | grep -q '^parent.*parent'; then
+              PICK_ARGS="-m 1"
+            else
+              PICK_ARGS=""
+            fi
+
+            if ! git cherry-pick $PICK_ARGS "$SHA"; then
+              FAILED_SHA="$SHA"
+              echo "❌ cherry-pick 冲突: ${SHA:0:7} $SUBJECT"
+              git cherry-pick --abort
+              break
+            fi
+          done
+
+          # 更新标记文件并提交（即使部分成功也更新，避免下次重跑已成功的 commit）
+          LAST_SUCCESSFUL=$(git log -1 --format='%H')
+          echo "$LAST_SUCCESSFUL" > "$MARKER"
+          git add "$MARKER"
+          git commit -m "chore: update opensource sync state to ${LAST_SUCCESSFUL:0:7}" --allow-empty
+
+          if [ -n "$FAILED_SHA" ]; then
+            SUBJECT=$(git log -1 --format='%s' "$FAILED_SHA")
+            echo "FAILED_SHA=$FAILED_SHA" >> "$AONE_CI_OUTPUT"
+            echo "同步中断于 ${FAILED_SHA:0:7}: $SUBJECT"
             exit 1
           fi
+
+          echo "✅ 同步完成: $TOTAL 个 commit"
 
       - id: push
         run: |
           set -e
-          # 推送 upstream 和 master 到内部仓库
-          git push origin upstream --force-with-lease
           git push origin master
 
       - id: notify-on-conflict
         if: failure()
         run: |
-          echo "同步失败，请检查冲突并手动处理"
-          # 如果有钉钉 webhook，在这里加通知
+          echo "同步冲突，需人工介入"
           # curl -s -X POST "$DINGTALK_WEBHOOK" \
           #   -H 'Content-Type: application/json' \
-          #   -d '{"msgtype":"text","text":{"content":"loongsuite-pilot 开源同步失败，rebase 冲突需人工介入"}}'
+          #   -d '{"msgtype":"text","text":{"content":"loongsuite-pilot 开源同步冲突，需人工介入"}}'
