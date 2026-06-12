@@ -26,23 +26,20 @@ jobs:
           git config user.email "opensource-sync@alibaba-inc.com"
           git config user.name "Open Source Sync"
 
-          # 标记文件：记录上次同步到的 GitHub commit SHA
-          # 提交到 master，保证任务无状态——任何 runner 都能从仓库自身恢复进度
           MARKER=".opensource-sync-state"
-          BASELINE="46c56553e7f51f428ed413d58a3b65bb1a764549"  # 开源 init squash commit
+          BASELINE="46c56553e7f51f428ed413d58a3b65bb1a764549"
 
           if [ -f "$MARKER" ]; then
             LAST_SHA=$(cat "$MARKER")
           else
-            # 首次运行：从 init squash commit 之后开始
             LAST_SHA="$BASELINE"
           fi
 
-          # GitHub 新增的 commit（--first-parent 跟随主线，跳过 merge 的侧分支）
           COMMITS=$(git rev-list --first-parent --reverse "${LAST_SHA}..github/main")
 
           if [ -z "$COMMITS" ]; then
             echo "无新变更，跳过"
+            echo "HAS_CHANGES=false" >> "${AONE_CI_OUTPUT:-/dev/null}"
             exit 0
           fi
 
@@ -98,14 +95,15 @@ jobs:
       - id: push
         run: |
           set -e
-          # Aone CI runner 默认只有 pull 权限，push 需要用 GitLab token
-          git remote set-url origin "https://oauth2:${{secrets.gitlab_private_token}}@gitlab.alibaba-inc.com/sls/loongsuite-pilot.git"
+
+          mkdir -p ~/.ssh
+          echo "${{secrets.ssh_deploy_key}}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          git remote set-url origin "git@gitlab.alibaba-inc.com:sls/loongsuite-pilot.git"
           git push origin master
 
       - id: notify-on-conflict
         if: failure()
         run: |
           echo "同步冲突，需人工介入"
-          # curl -s -X POST "$DINGTALK_WEBHOOK" \
-          #   -H 'Content-Type: application/json' \
-          #   -d '{"msgtype":"text","text":{"content":"loongsuite-pilot 开源同步冲突，需人工介入"}}'
