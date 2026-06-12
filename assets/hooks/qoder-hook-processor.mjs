@@ -434,7 +434,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
       .find(r => r.type === 'assistant' && r.message?.stop_reason)?.message?.stop_reason;
     let finishReason;
     if (toolCalls.length > 0) {
-      finishReason = 'tool_calls';
+      finishReason = 'tool_call';
     } else if (lastStopReason === 'max_tokens') {
       finishReason = 'max_tokens';
     } else if (lastStopReason === 'end_turn' || (i === boundaries.length - 1)) {

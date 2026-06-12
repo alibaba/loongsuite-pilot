@@ -146,6 +146,9 @@ export class PluginInjectStrategy implements DeployStrategy {
 
       await fs.writeFile(configPath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
 
+      if (raw !== JSON.stringify(JSON.parse(stripJsoncComments(raw)), null, 2) + '\n') {
+        logger.warn('config rewritten as JSON; JSONC comments in the original file have been removed', { configPath });
+      }
       logger.info('plugin injected', { agentId: def.id, configPath, spec: resolvedSpec });
       return { success: true, agentId: def.id, deployMode: 'plugin-inject' };
     } catch (err) {

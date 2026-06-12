@@ -6,6 +6,16 @@
  * for consumption by loongsuite-pilot's BaseHookInput pipeline.
  *
  * Zero external dependencies — only Node/Bun built-in APIs.
+ *
+ * OpenCode plugin hooks used (requires OpenCode >= 0.1.x):
+ *   - chat.message           — turn start, user message capture
+ *   - chat.params            — model / provider metadata
+ *   - message.part.updated   — step-start, step-finish, tool invocation parts
+ *   - message.updated        — LLM response aggregation, token metrics
+ *   - tool.execute.before    — tool call arguments capture
+ *   - tool.execute.after     — tool result & duration capture
+ *   - experimental.chat.system.transform — system instructions capture (experimental API)
+ *   - session.idle / session.error       — session lifecycle cleanup
  */
 
 import fs from "node:fs";
@@ -813,9 +823,19 @@ export default {
             handleMessageUpdated(props, userId);
             break;
           case "session.idle":
-          case "session.error":
-            if (props.sessionID) clearSession(props.sessionID);
+          case "session.error": {
+            if (props.sessionID) {
+              const s = sessions.get(props.sessionID);
+              if (s && s.pendingParts && s.pendingParts.length > 0) {
+                safeLog("warn", `session ${eventName}: discarding ${s.pendingParts.length} unflushed pending part(s)`, {
+                  sessionID: props.sessionID,
+                  pendingPartTypes: s.pendingParts.map(p => p.type || "unknown"),
+                });
+              }
+              clearSession(props.sessionID);
+            }
             break;
+          }
         }
       }),
 

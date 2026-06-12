@@ -11,8 +11,8 @@ const TAG = '[validate-trace]';
 const OTLP_DEBUG_DIR = path.join(homedir(), '.loongsuite-pilot', 'logs', 'otlp-debug');
 const VALID_SPAN_KINDS = ['ENTRY', 'AGENT', 'STEP', 'LLM', 'TOOL', 'CHAIN', 'RETRIEVER', 'RERANKER', 'EMBEDDING', 'TASK'];
 const KNOWN_SUBAGENT_TOOLS = new Set(['Agent']);
-const VALID_FINISH_REASONS = new Set(['stop', 'length', 'content_filter', 'tool_call', 'error']);
-const VALID_PART_TYPES = new Set(['text', 'tool_call', 'tool_call_response']);
+const VALID_FINISH_REASONS = new Set(['stop', 'length', 'content_filter', 'tool_call', 'error', 'end_turn', 'max_tokens']);
+const VALID_PART_TYPES = new Set(['text', 'tool_call', 'tool_call_response', 'reasoning']);
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -566,11 +566,11 @@ function validateMessageField(attrs, key, ruleId, span, checks) {
             if (part.type === 'text' && part.content === undefined) {
               checks.push(error(ruleId, `${key}[${i}].parts[${j}] TextPart missing required "content"`, span.spanId, span.name));
             }
-            if (part.type === 'tool_call' && !part.tool_call_id) {
-              checks.push(warn(ruleId, `${key}[${i}].parts[${j}] ToolCallPart missing "tool_call_id"`, span.spanId, span.name));
+            if (part.type === 'tool_call' && !part.id) {
+              checks.push(warn(ruleId, `${key}[${i}].parts[${j}] ToolCallPart missing "id"`, span.spanId, span.name));
             }
-            if (part.type === 'tool_call_response' && !part.tool_call_id) {
-              checks.push(warn(ruleId, `${key}[${i}].parts[${j}] ToolCallResponsePart missing "tool_call_id"`, span.spanId, span.name));
+            if (part.type === 'tool_call_response' && !part.id) {
+              checks.push(warn(ruleId, `${key}[${i}].parts[${j}] ToolCallResponsePart missing "id"`, span.spanId, span.name));
             }
           } else {
             checks.push(warn(ruleId, `${key}[${i}].parts[${j}] unknown part type="${part.type}"`, span.spanId, span.name));
