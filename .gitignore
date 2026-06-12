@@ -1,0 +1,62 @@
+node_modules/
+dist/
+*.tgz
+*.tar.gz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# Runtime data
+~/.r2c/
+*.log
+
+# Environment
+.env
+.env.*
+!.env.e2e.example
+!.env.e2e.l2.example
+
+# Build artifacts
+*.tsbuildinfo
+VERSION
+
+# Test coverage
+coverage/
+
+# Remote E2E local artifacts (SSH diagnostics)
+e2e-artifacts/
+
+package
+
+tests/e2e-docker/output
+
+/code-review
+
+# Internal overlay files (injected by internal CI, not in open-source repo)
+src/internal/alarm-sender.internal.ts
+src/internal/statistic.internal.ts
+
+# Internal deploy / release scripts
+deploy/installer-inner.sh
+deploy/package-inner.sh
+deploy/upload-inner.sh
+deploy/upload.sh
+deploy/upload-external.sh
+deploy/rollout.sh
+deploy/patchelf_node_for_7u.sh
+
+# Internal scripts
+scripts/migrate-internal-config.js
+
+# Internal README
+README-inner.md
+
+/openspec
+/specs

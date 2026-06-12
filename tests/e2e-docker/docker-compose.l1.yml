@@ -1,0 +1,36 @@
+services:
+  e2e-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: loongsuite-pilot-e2e-l1
+    privileged: true
+    environment:
+      - E2E_RUNNER_SCRIPT=run-l1.mjs
+      - E2E_SCENARIO=${E2E_SCENARIO:-install-smoke}
+      - E2E_USER_ID
+      - E2E_CODEX_OPENAI_API_KEY
+      - E2E_ANTHROPIC_API_KEY
+      - E2E_CURSOR_API_KEY
+      - E2E_QODER_PERSONAL_ACCESS_TOKEN
+      - E2E_SLS_PROJECT
+      - E2E_SLS_LOGSTORE
+      - E2E_SLS_ACCESS_KEY_ID
+      - E2E_SLS_ACCESS_KEY_SECRET
+      - E2E_SLS_ENDPOINT
+      - E2E_KEEP_ALIVE
+      - E2E_PROBE_SKIP_AGENTS
+      - E2E_EXPAND_SKIP_PHASES
+      - E2E_EXPAND_MOCK_PORT_BASE
+      - E2E_EXPAND_FAIL_FAST
+      - E2E_DOCKER_MODE=1
+      - E2E_LOG_DIR=/opt/artifacts
+      - LOONGSUITE_PILOT_DISCOVERY_INTERVAL_MS=${LOONGSUITE_PILOT_DISCOVERY_INTERVAL_MS:-30000}
+    volumes:
+      - ../../:/opt/project:ro
+      - ../../scripts/e2e:/opt/e2e:ro
+      - ./output:/opt/artifacts
+    tmpfs:
+      - /run
+      - /run/lock
+    stop_grace_period: 30s

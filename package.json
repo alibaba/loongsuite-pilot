@@ -1,0 +1,73 @@
+{
+  "name": "loongsuite-pilot",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Multi-agent AI coding data collection platform",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "loongsuite-pilot": "dist/index.js"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node dist/index.js",
+    "monitor:dashboard": "node scripts/serve-loongsuite-pilot-monitor.mjs",
+    "perf:cursor-hook": "node tests/performance/cursor-hook-processor.perf.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "bash scripts/e2e/run-e2e.sh",
+    "test:e2e:down": "docker compose -f tests/e2e-docker/docker-compose.l1.yml down -v",
+    "test:e2e:l1": "docker compose -f tests/e2e-docker/docker-compose.l1.yml up --build --exit-code-from e2e-agent",
+    "test:e2e:l2": "docker compose -f tests/e2e-docker/docker-compose.yml up --build --exit-code-from e2e-agent",
+    "test:e2e:l2:down": "docker compose -f tests/e2e-docker/docker-compose.yml down -v",
+    "test:e2e:l2:remote": "node scripts/e2e/run-remote-e2e.mjs",
+    "test:e2e:docker": "npm run test:e2e:l2",
+    "test:e2e:docker:down": "npm run test:e2e:l2:down",
+    "test:e2e:remote": "npm run test:e2e:l2:remote",
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "dependencies": {
+    "@alicloud/log": "^1.2.6",
+    "@loongsuite/otel-util-genai": "^0.1.0-beta.5",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "^0.57.0",
+    "@opentelemetry/otlp-transformer": "^0.57.0",
+    "@opentelemetry/resources": "^1.30.0",
+    "@opentelemetry/sdk-trace-base": "^1.30.0",
+    "axios": "^1.6.0",
+    "express": "^4.18.0",
+    "pino": "^9.14.0",
+    "pino-roll": "^3.1.0",
+    "sqlite3": "^5.1.7",
+    "uuid": "^9.0.0",
+    "zod": "^3.22.0",
+    "zstd-napi": "^0.0.12"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.0",
+    "@types/node": "^18.0.0",
+    "@types/uuid": "^9.0.0",
+    "@vitest/coverage-v8": "^1.6.1",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.6.1"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-darwin-arm64": "^4.60.2"
+  },
+  "files": [
+    "dist/",
+    "assets/",
+    "scripts/"
+  ],
+  "overrides": {
+    "cookie": "1.0.0",
+    "tar": "^7.5.16",
+    "https-proxy-agent": "^7.0.6",
+    "sqlite3": {
+      "prebuild-install": "^7.1.3"
+    }
+  }
+}

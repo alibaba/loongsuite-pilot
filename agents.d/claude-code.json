@@ -1,0 +1,29 @@
+{
+  "id": "claude-code",
+  "displayName": "Claude Code",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.claude"],
+    "commands": ["claude"]
+  },
+  "hook": {
+    "settingsPath": "~/.claude/settings.json",
+    "events": [
+      "Stop",
+      "SubagentStart",
+      "SubagentStop"
+    ],
+    "hookCommand": "$PILOT_DATA/hooks/claude-code-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "matcher": "*",
+    "eventSubcommand": "kebab-case",
+    "replaceHookCommands": [
+      "otel-claude-hook",
+      ".cache/opentelemetry.instrumentation.claude"
+    ]
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/claude-code"
+  }
+}

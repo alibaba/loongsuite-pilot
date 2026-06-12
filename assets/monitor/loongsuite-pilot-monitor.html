@@ -1,0 +1,815 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LoongSuite Pilot Dashboard</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1020;
+      --panel: rgba(17, 24, 43, 0.9);
+      --panel-soft: rgba(21, 31, 54, 0.86);
+      --line: rgba(148, 163, 184, 0.16);
+      --text: #edf2ff;
+      --muted: #94a3b8;
+      --accent: #69e6a6;
+      --blue: #7dd3fc;
+      --warn: #fbbf24;
+      --danger: #fb7185;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at top left, #1a2a4a 0, var(--bg) 42%);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(1240px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 28px 0 36px;
+    }
+
+    header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+
+    h1 {
+      margin: 0 0 6px;
+      font-size: 28px;
+      letter-spacing: -0.03em;
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 16px;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .toolbar, .status-pill, .meta {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .toolbar {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .refresh-select {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--fg);
+      padding: 5px 10px;
+      font-size: 12px;
+      outline: none;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--warn);
+      box-shadow: 0 0 16px var(--warn);
+    }
+
+    .dot.ok {
+      background: var(--accent);
+      box-shadow: 0 0 16px var(--accent);
+    }
+
+    .section {
+      margin-top: 16px;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr;
+      gap: 16px;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .agent-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+    }
+
+    .card, .panel, .agent-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.22);
+    }
+
+    .card, .agent-card, .panel {
+      padding: 16px;
+    }
+
+    .label {
+      margin-bottom: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .value {
+      font-size: 25px;
+      font-weight: 720;
+      letter-spacing: -0.03em;
+    }
+
+    .subvalue {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .agent-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .agent-title {
+      font-weight: 700;
+      font-size: 17px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 9px;
+      background: rgba(148, 163, 184, 0.12);
+      color: #cbd5e1;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .badge.active { background: rgba(105, 230, 166, 0.13); color: #b8f7d4; }
+    .badge.no_recent_activity, .badge.warning { background: rgba(251, 191, 36, 0.13); color: #fde68a; }
+    .badge.not_detected, .badge.error { background: rgba(251, 113, 133, 0.13); color: #fecdd3; }
+    .badge.normal, .badge.running { background: rgba(105, 230, 166, 0.13); color: #b8f7d4; }
+    .badge.best_available { background: rgba(125, 211, 252, 0.12); color: #bae6fd; }
+    .badge.disabled { opacity: 0.65; }
+
+    .kv {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .kv div {
+      padding: 10px;
+      border-radius: 12px;
+      background: var(--panel-soft);
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+    }
+
+    .timeline {
+      max-height: 390px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+
+    .timeline-item {
+      display: grid;
+      grid-template-columns: 88px minmax(0, 1fr);
+      gap: 10px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .timeline-time {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .timeline-summary {
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .details {
+      margin-top: 10px;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+
+    details summary {
+      cursor: pointer;
+      color: var(--blue);
+      font-size: 13px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      color: #dbeafe;
+      font-size: 12px;
+    }
+
+    th, td {
+      padding: 8px 6px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .notice {
+      display: none;
+      margin-bottom: 16px;
+      padding: 12px 14px;
+      border: 1px solid rgba(251, 191, 36, 0.35);
+      border-radius: 14px;
+      background: rgba(251, 191, 36, 0.1);
+      color: #fde68a;
+      font-size: 13px;
+    }
+
+    .notice.show { display: block; }
+
+    .chart-wrap {
+      position: relative;
+    }
+
+    .chart-tooltip {
+      display: none;
+      position: fixed;
+      z-index: 20;
+      min-width: 170px;
+      max-width: 260px;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(11, 16, 32, 0.96);
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
+      color: var(--text);
+      font-size: 12px;
+      pointer-events: none;
+      line-height: 1.5;
+    }
+
+    canvas {
+      width: 100%;
+      height: 220px;
+      display: block;
+    }
+
+    .wide { grid-column: 1 / -1; }
+
+    @media (max-width: 1000px) {
+      header, .summary-grid {
+        align-items: flex-start;
+        grid-template-columns: 1fr;
+      }
+
+      header { flex-direction: column; }
+      .cards, .agent-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 640px) {
+      .cards, .agent-grid, .kv { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>LoongSuite Pilot Dashboard</h1>
+        <p>面向用户的采集与上报概览，按 Agent 聚合展示，底部保留本机资源监控。</p>
+      </div>
+      <div class="toolbar">
+        <span id="status-dot" class="dot"></span>
+        <span id="status-text">连接中...</span>
+        <label class="meta" for="refresh-select">
+          Refresh
+          <select id="refresh-select" class="refresh-select">
+            <option value="5000">5s</option>
+            <option value="10000" selected>10s</option>
+            <option value="20000">20s</option>
+          </select>
+        </label>
+      </div>
+    </header>
+
+    <div id="notice" class="notice"></div>
+
+    <section class="section summary-grid">
+      <div>
+        <div class="cards">
+          <div class="card">
+            <div class="label">Service</div>
+            <div id="service-value" class="value">--</div>
+            <div id="service-sub" class="subvalue">--</div>
+          </div>
+          <div class="card">
+            <div class="label">Events Today</div>
+            <div id="events-value" class="value">--</div>
+            <div class="subvalue">processed locally</div>
+          </div>
+          <div class="card">
+            <div class="label">Tokens Today</div>
+            <div id="tokens-value" class="value">--</div>
+            <div class="subvalue">when available</div>
+          </div>
+          <div class="card">
+            <div class="label">Upload Failures</div>
+            <div id="failures-value" class="value">--</div>
+            <div class="subvalue">persisted failures</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Reporting Health</h2>
+        <div id="reporting-channels" class="chips"></div>
+        <p id="reporting-wording" class="subvalue" style="margin-top: 12px;"></p>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Agent Collection</h2>
+      <div id="agent-grid" class="agent-grid"></div>
+    </section>
+
+    <section class="section">
+      <div class="panel">
+        <h2>Recent Activity</h2>
+        <p id="timeline-window" class="subvalue" style="margin-bottom: 12px;">Showing latest 200 activities.</p>
+        <div id="timeline" class="timeline"></div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Process Resources</h2>
+      <p id="metrics-window" class="subvalue" style="margin-bottom: 12px;">Showing recent process metrics.</p>
+      <div class="cards">
+        <div class="card">
+          <div class="label">CPU</div>
+          <div id="cpu-value" class="value">--</div>
+          <div class="subvalue">percent</div>
+        </div>
+        <div class="card">
+          <div class="label">RSS Memory</div>
+          <div id="rss-value" class="value">--</div>
+          <div class="subvalue">resident set</div>
+        </div>
+        <div class="card">
+          <div class="label">Network</div>
+          <div id="net-value" class="value">--</div>
+          <div class="subvalue">inet connections</div>
+        </div>
+        <div class="card">
+          <div class="label">Open Files</div>
+          <div id="files-value" class="value">--</div>
+          <div class="subvalue">file descriptors</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section grid">
+      <div class="panel">
+        <h2>CPU Usage</h2>
+        <div class="chart-wrap"><canvas id="cpu-chart"></canvas></div>
+      </div>
+      <div class="panel">
+        <h2>Memory Usage</h2>
+        <div class="chart-wrap"><canvas id="memory-chart"></canvas></div>
+      </div>
+      <div class="panel">
+        <h2>Network Connections</h2>
+        <p class="subvalue" style="margin-bottom: 8px;">INET: all network connections; EST: established TCP connections; LISTEN: listening TCP sockets.</p>
+        <div class="chart-wrap"><canvas id="network-chart"></canvas></div>
+      </div>
+      <div class="panel">
+        <h2>Files / Threads</h2>
+        <div class="chart-wrap"><canvas id="process-chart"></canvas></div>
+      </div>
+    </section>
+  </main>
+  <div id="chart-tooltip" class="chart-tooltip"></div>
+
+  <script>
+    const DEFAULT_REFRESH_MS = 10000;
+    const MAX_POINTS = 240;
+    const METRICS_WINDOW_MINUTES = 60;
+    const state = {
+      rows: [],
+      overview: null,
+      metricsStatus: null,
+      charts: new Map(),
+      refreshMs: DEFAULT_REFRESH_MS,
+      refreshTimer: null,
+    };
+    const $ = (id) => document.getElementById(id);
+
+    function parseCsvLine(line) {
+      const values = [];
+      let current = '';
+      let quoted = false;
+      for (let i = 0; i < line.length; i += 1) {
+        const char = line[i];
+        const next = line[i + 1];
+        if (char === '"' && quoted && next === '"') {
+          current += '"';
+          i += 1;
+        } else if (char === '"') {
+          quoted = !quoted;
+        } else if (char === ',' && !quoted) {
+          values.push(current);
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      values.push(current);
+      return values;
+    }
+
+    function parseCsv(csv) {
+      const lines = csv.trim().split(/\r?\n/).filter(Boolean);
+      if (lines.length <= 1) return [];
+      const header = parseCsvLine(lines[0]);
+      return lines.slice(1).map((line) => {
+        const values = parseCsvLine(line);
+        const row = {};
+        header.forEach((field, index) => { row[field] = values[index] ?? ''; });
+        return row;
+      }).filter((row) => Boolean(row.timestamp && row.pid && row.command)
+        && Number.isFinite(Number(row.cpu_percent))
+        && Number.isFinite(Number(row.rss_kb))
+        && Number(row.rss_kb) > 0);
+    }
+
+    function number(row, key) {
+      const value = Number(row[key]);
+      return Number.isFinite(value) ? value : 0;
+    }
+
+    function formatBytesFromKb(kb) {
+      const bytes = kb * 1024;
+      if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+      return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    }
+
+    function formatCount(value) {
+      return new Intl.NumberFormat().format(value || 0);
+    }
+
+    function formatNumber(value, digits = 0) {
+      return Number(value || 0).toLocaleString(undefined, {
+        maximumFractionDigits: digits,
+        minimumFractionDigits: digits,
+      });
+    }
+
+    function formatTime(value) {
+      if (!value) return '--';
+      const normalized = typeof value === 'string' ? value.replace(' ', 'T') : value;
+      const date = new Date(normalized);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleTimeString();
+    }
+
+    function formatDateTime(value) {
+      if (!value) return '--';
+      const normalized = typeof value === 'string' ? value.replace(' ', 'T') : value;
+      const date = new Date(normalized);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'medium' });
+    }
+
+    function setNotice(message) {
+      $('notice').textContent = message || '';
+      $('notice').classList.toggle('show', Boolean(message));
+    }
+
+    function setStatus(ok, message) {
+      $('status-dot').classList.toggle('ok', ok);
+      $('status-text').textContent = message;
+    }
+
+    function badgeClass(status) {
+      return `badge ${status || ''}`;
+    }
+
+    function statusLabel(status) {
+      const labels = {
+        active: 'Active',
+        no_recent_activity: 'No recent activity',
+        not_detected: 'Not detected',
+        normal: 'Normal',
+        best_available: 'Best available',
+        disabled: 'Disabled',
+        warning: 'Warning',
+        error: 'Error',
+        running: 'Running',
+      };
+      return labels[status] || status || '--';
+    }
+
+    function tokenDisplay(agent) {
+      return `<div><div class="label">Tokens</div><div class="value">${formatCount(agent.tokensToday)}</div></div>`;
+    }
+
+    function renderOverview(overview) {
+      $('service-value').textContent = overview.service.running ? 'Running' : 'Stopped';
+      $('service-sub').textContent = `PID ${overview.service.pid || '--'} · v${overview.service.version || 'unknown'}`;
+      $('events-value').textContent = formatCount(overview.totals.eventsToday);
+      $('tokens-value').textContent = formatCount(overview.totals.tokensToday);
+      $('failures-value').textContent = formatCount(overview.totals.failedUploadsToday);
+      $('reporting-wording').textContent = overview.cache?.outputPartial
+        ? `${overview.reporting.wording} Indexing local output logs; today's totals may still be catching up.`
+        : overview.reporting.wording;
+      $('reporting-channels').innerHTML = overview.reporting.channels.map((channel) => (
+        `<span class="${badgeClass(channel.status)}">${escapeHtml(channel.label)}: ${escapeHtml(channel.message)}</span>`
+      )).join('');
+
+      $('agent-grid').innerHTML = overview.agents.map((agent) => {
+        const eventTypes = Object.entries(agent.eventTypes || {})
+          .map(([name, count]) => `<span class="badge">${escapeHtml(name)} ${formatCount(count)}</span>`)
+          .join('');
+        return `
+          <article class="agent-card">
+            <div class="agent-head">
+              <div class="agent-title">${escapeHtml(agent.label)}</div>
+              <span class="${badgeClass(agent.status)}">${escapeHtml(statusLabel(agent.status))}</span>
+            </div>
+            <div class="kv">
+              <div><div class="label">Events</div><div class="value">${formatCount(agent.todayEvents)}</div></div>
+              ${tokenDisplay(agent)}
+            </div>
+            <div class="subvalue">Last activity: ${agent.lastActivityAt ? formatTime(agent.lastActivityAt) : 'No events today'}</div>
+            <div class="chips">${agent.collectionTypes.map((type) => `<span class="badge">${escapeHtml(type)}</span>`).join('')}${eventTypes}</div>
+            ${agent.warnings?.length ? `<p class="subvalue">${agent.warnings.map(escapeHtml).join(' ')}</p>` : ''}
+          </article>
+        `;
+      }).join('');
+
+      $('timeline').innerHTML = overview.timeline.map((item) => `
+        <div class="timeline-item">
+          <div class="timeline-time">${formatTime(item.timestamp)}</div>
+          <div>
+            <div class="timeline-summary">${escapeHtml(item.summary || item.type)}</div>
+            ${item.agentLabel ? `<div class="subvalue">${escapeHtml(item.agentLabel)}</div>` : ''}
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function renderProcessCards(rows) {
+      const latest = rows[rows.length - 1];
+      if (!latest) return;
+      $('cpu-value').textContent = `${number(latest, 'cpu_percent').toFixed(1)}%`;
+      $('rss-value').textContent = formatBytesFromKb(number(latest, 'rss_kb'));
+      $('net-value').textContent = String(number(latest, 'inet_connections'));
+      $('files-value').textContent = String(number(latest, 'open_files'));
+    }
+
+    function niceMax(value) {
+      if (!Number.isFinite(value) || value <= 0) return 1;
+      const exponent = Math.floor(Math.log10(value));
+      const base = 10 ** exponent;
+      const normalized = value / base;
+      const nice = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+      return nice * base;
+    }
+
+    function drawChart(canvas, rows, series, options = {}) {
+      const context = canvas.getContext('2d');
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(rect.width * dpr);
+      canvas.height = Math.floor(rect.height * dpr);
+      context.scale(dpr, dpr);
+      const width = rect.width;
+      const height = rect.height;
+      const padding = { left: 52, right: 28, top: 34, bottom: 34 };
+      const plotWidth = width - padding.left - padding.right;
+      const plotHeight = height - padding.top - padding.bottom;
+      const peak = Math.max(0, ...series.flatMap((item) => item.values));
+      const yMax = niceMax(Math.max(options.minMax || 0, peak));
+      const yFormat = options.yFormat || ((value) => String(value));
+      const scaleY = (value) => padding.top + plotHeight - (value / yMax) * plotHeight;
+      registerChart(canvas, rows, series, { padding, plotWidth, plotHeight, yMax }, yFormat);
+      context.clearRect(0, 0, width, height);
+      context.font = '11px ui-sans-serif, system-ui';
+      context.textBaseline = 'middle';
+      for (let tick = 0; tick <= 4; tick += 1) {
+        const value = (yMax / 4) * tick;
+        const y = scaleY(value);
+        context.strokeStyle = tick === 0 ? '#27324d' : 'rgba(39, 50, 77, 0.65)';
+        context.lineWidth = 1;
+        context.beginPath();
+        context.moveTo(padding.left, y);
+        context.lineTo(width - padding.right, y);
+        context.stroke();
+        context.fillStyle = '#94a3b8';
+        context.textAlign = 'right';
+        context.fillText(yFormat(value), padding.left - 8, y);
+      }
+      context.strokeStyle = '#27324d';
+      context.lineWidth = 1;
+      context.beginPath();
+      context.moveTo(padding.left, padding.top);
+      context.lineTo(padding.left, height - padding.bottom);
+      context.lineTo(width - padding.right, height - padding.bottom);
+      context.stroke();
+      if (rows.length < 2) {
+        context.fillStyle = '#94a3b8';
+        context.textAlign = 'left';
+        context.fillText('等待更多采样数据...', padding.left + 8, height / 2);
+        return;
+      }
+      const stepX = plotWidth / Math.max(1, rows.length - 1);
+      series.forEach((item) => {
+        context.strokeStyle = item.color;
+        context.lineWidth = 2;
+        context.beginPath();
+        item.values.forEach((value, index) => {
+          const x = padding.left + index * stepX;
+          const y = scaleY(value);
+          if (index === 0) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        });
+        context.stroke();
+      });
+      context.fillStyle = '#94a3b8';
+      context.font = '12px ui-sans-serif, system-ui';
+      context.textAlign = 'left';
+      context.fillText(formatTime(rows[0].timestamp), padding.left, height - 10);
+      context.textAlign = 'right';
+      context.fillText(formatTime(rows[rows.length - 1].timestamp), width - padding.right, height - 10);
+      let legendX = padding.left;
+      series.forEach((item) => {
+        const latest = item.values[item.values.length - 1] || 0;
+        const itemPeak = Math.max(0, ...item.values);
+        context.fillStyle = item.color;
+        context.fillRect(legendX, 10, 10, 10);
+        context.fillStyle = '#cbd5e1';
+        context.textAlign = 'left';
+        context.fillText(`${item.label}: ${yFormat(latest)} · peak ${yFormat(itemPeak)}`, legendX + 15, 15);
+        legendX += item.label.length * 8 + 142;
+      });
+    }
+
+    function renderCharts() {
+      const rows = state.rows.slice(-MAX_POINTS);
+      renderProcessCards(rows);
+      $('metrics-window').textContent = state.metricsStatus
+        ? `Showing last ${state.metricsStatus.windowMinutes} minutes`
+        : `Showing last ${METRICS_WINDOW_MINUTES} minutes`;
+      drawChart($('cpu-chart'), rows, [
+        { label: 'CPU %', color: '#69e6a6', values: rows.map((row) => number(row, 'cpu_percent')) },
+      ], { minMax: 10, yFormat: (value) => `${formatNumber(value, value < 10 ? 1 : 0)}%` });
+      drawChart($('memory-chart'), rows, [
+        { label: 'RSS MB', color: '#7dd3fc', values: rows.map((row) => Math.round(number(row, 'rss_kb') / 1024)) },
+      ], { yFormat: (value) => `${formatNumber(value)} MB` });
+      drawChart($('network-chart'), rows, [
+        { label: 'INET', color: '#69e6a6', values: rows.map((row) => number(row, 'inet_connections')) },
+        { label: 'EST', color: '#7dd3fc', values: rows.map((row) => number(row, 'tcp_established')) },
+        { label: 'LISTEN', color: '#fbbf24', values: rows.map((row) => number(row, 'tcp_listen')) },
+      ], { yFormat: (value) => formatNumber(value) });
+      drawChart($('process-chart'), rows, [
+        { label: 'Files', color: '#7dd3fc', values: rows.map((row) => number(row, 'open_files')) },
+        { label: 'Threads', color: '#69e6a6', values: rows.map((row) => number(row, 'threads')) },
+      ], { yFormat: (value) => formatNumber(value) });
+    }
+
+    async function refresh() {
+      try {
+        const [overviewResponse, csvResponse, metricsStatusResponse] = await Promise.all([
+          fetch('/api/overview', { cache: 'no-store' }),
+          fetch(`/api/metrics?minutes=${METRICS_WINDOW_MINUTES}`, { cache: 'no-store' }),
+          fetch(`/api/status?minutes=${METRICS_WINDOW_MINUTES}`, { cache: 'no-store' }),
+        ]);
+        if (!overviewResponse.ok) throw new Error(`overview request failed: ${overviewResponse.status}`);
+        state.overview = await overviewResponse.json();
+        if (csvResponse.ok) state.rows = parseCsv(await csvResponse.text());
+        if (metricsStatusResponse.ok) state.metricsStatus = await metricsStatusResponse.json();
+        renderOverview(state.overview);
+        renderCharts();
+        setStatus(true, `启动时间 ${formatDateTime(state.overview.monitorDashboardStartedAt)} · 最新刷新 ${formatTime(state.overview.generatedAt)} · 每 ${state.refreshMs / 1000} 秒自动刷新`);
+        setNotice('');
+      } catch (error) {
+        setStatus(false, '读取失败');
+        setNotice(error.message);
+      }
+    }
+
+    function startRefreshTimer() {
+      if (state.refreshTimer) clearInterval(state.refreshTimer);
+      state.refreshTimer = setInterval(refresh, state.refreshMs);
+    }
+
+    function setupRefreshSelect() {
+      const select = $('refresh-select');
+      select.value = String(DEFAULT_REFRESH_MS);
+      select.addEventListener('change', () => {
+        const nextMs = Number(select.value);
+        if (!Number.isFinite(nextMs) || nextMs <= 0) return;
+        state.refreshMs = nextMs;
+        startRefreshTimer();
+        if (state.overview) {
+          setStatus(true, `启动时间 ${formatDateTime(state.overview.monitorDashboardStartedAt)} · 最新刷新 ${formatTime(state.overview.generatedAt)} · 每 ${state.refreshMs / 1000} 秒自动刷新`);
+        }
+      });
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+      }[char]));
+    }
+
+    function registerChart(canvas, rows, series, layout, yFormat) {
+      state.charts.set(canvas.id, { rows, series, layout, yFormat });
+    }
+
+    function setupChartTooltips() {
+      const tooltip = $('chart-tooltip');
+      document.querySelectorAll('canvas').forEach((canvas) => {
+        canvas.addEventListener('mousemove', (event) => {
+          const chart = state.charts.get(canvas.id);
+          if (!chart || chart.rows.length < 2) return;
+          const rect = canvas.getBoundingClientRect();
+          const x = event.clientX - rect.left;
+          const { padding, plotWidth } = chart.layout;
+          const clamped = Math.max(padding.left, Math.min(x, padding.left + plotWidth));
+          const ratio = (clamped - padding.left) / Math.max(1, plotWidth);
+          const index = Math.round(ratio * (chart.rows.length - 1));
+          const row = chart.rows[index];
+          const values = chart.series.map((item) => (
+            `<div><span style="color:${item.color}">${escapeHtml(item.label)}</span>: ${escapeHtml(chart.yFormat(item.values[index] || 0))}</div>`
+          )).join('');
+          tooltip.innerHTML = `<strong>${escapeHtml(formatTime(row.timestamp))}</strong>${values}`;
+          tooltip.style.left = `${event.clientX + 12}px`;
+          tooltip.style.top = `${event.clientY + 12}px`;
+          tooltip.style.display = 'block';
+        });
+        canvas.addEventListener('mouseleave', () => {
+          tooltip.style.display = 'none';
+        });
+      });
+    }
+
+    window.addEventListener('resize', renderCharts);
+    setupChartTooltips();
+    setupRefreshSelect();
+    refresh();
+    startRefreshTimer();
+  </script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+{
+  "id": "codex",
+  "displayName": "Codex",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.codex"],
+    "commands": []
+  },
+  "hook": {
+    "settingsPath": "~/.codex/hooks.json",
+    "events": ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"],
+    "hookCommand": "$PILOT_DATA/hooks/codex-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "matcher": "*",
+    "eventSubcommand": "kebab-case",
+    "replaceHookCommands": [
+      "otel-codex-hook",
+      ".cache/opentelemetry.instrumentation.codex"
+    ],
+    "trustToml": {
+      "configPath": "~/.codex/config.toml",
+      "trustAlgo": "v1",
+      "marker": "otel-codex-hook"
+    }
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/codex"
+  }
+}

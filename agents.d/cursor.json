@@ -1,0 +1,32 @@
+{
+  "id": "cursor",
+  "displayName": "Cursor",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.cursor"],
+    "commands": []
+  },
+  "hook": {
+    "settingsPath": "~/.cursor/hooks.json",
+    "events": [
+      "stop",
+      "preToolUse",
+      "postToolUse",
+      "postToolUseFailure",
+      "beforeSubmitPrompt",
+      "preCompact",
+      "sessionStart",
+      "sessionEnd",
+      "subagentStart",
+      "subagentStop",
+      "afterAgentResponse",
+      "afterAgentThought"
+    ],
+    "hookCommand": "$PILOT_DATA/hooks/cursor-loongsuite-pilot-hook.sh",
+    "format": "flat"
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/cursor/history"
+  }
+}
