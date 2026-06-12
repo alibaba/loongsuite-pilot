@@ -98,7 +98,7 @@ export class Orchestrator extends EventEmitter {
   private logRetentionService!: LogRetentionService;
   private hookWatchdog!: HookWatchdog;
   private deploymentManager!: DeploymentManager;
-  private fileCollectionManager!: FileCollectionManager;
+  private fileCollectionManager: FileCollectionManager | null = null;
   private metricsWriter!: MetricsWriter;
   private alarmManager!: AlarmManager;
   private runtimeWriter: RuntimeWriter | null = null;
@@ -189,13 +189,17 @@ export class Orchestrator extends EventEmitter {
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets);
     this.hookWatchdog.start();
 
-    // 11. Start file collection pipelines
-    this.fileCollectionManager = new FileCollectionManager({
-      configDir: path.join(this.dataDir, 'configs', 'local'),
-      stateDir: path.join(this.dataDir, 'state', 'file-collection'),
-      failedLogDir: path.join(this.dataDir, 'logs', 'file-collection-failed'),
-    });
-    await this.fileCollectionManager.start();
+    // 11. Start file collection pipelines (disabled by default)
+    if (this.config.fileCollection.enabled) {
+      this.fileCollectionManager = new FileCollectionManager({
+        configDir: path.join(this.dataDir, 'configs', 'local'),
+        stateDir: path.join(this.dataDir, 'state', 'file-collection'),
+        failedLogDir: path.join(this.dataDir, 'logs', 'file-collection-failed'),
+      });
+      await this.fileCollectionManager.start();
+    } else {
+      logger.info('file collection disabled, skipping');
+    }
 
     // 12. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
     const slsFlusher = this.getSlsFlusher();

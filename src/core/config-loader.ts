@@ -4,6 +4,7 @@ import type {
   AnalyticsConfig,
   AutoUpdateConfig,
   CmsConfig,
+  FileCollectionToggle,
   FlusherConfig,
   HookWatchdogConfig,
   LogRetentionConfig,
@@ -137,6 +138,10 @@ export interface ConfigFile {
     packageUrl?: string;
   };
 
+  fileCollection?: {
+    enabled?: boolean;
+  };
+
   enableStatusBarApp?: boolean | string;
 
   installId?: string;
@@ -207,6 +212,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     agents: buildAgentsConfig(file),
     mask: buildMaskConfig(file),
     hookWatchdog: buildHookWatchdogConfig(file),
+    fileCollection: buildFileCollectionConfig(file),
     statusBar: buildStatusBarConfig(file),
   };
 }
@@ -359,6 +365,12 @@ function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
       'LOONGSUITE_PILOT_HOOK_WATCHDOG_COOLDOWN_MS',
       file?.hookWatchdog?.repairCooldownMs ?? 10 * 60_000, // 10 minutes
     ),
+  };
+}
+
+function buildFileCollectionConfig(file: ConfigFile | null): FileCollectionToggle {
+  return {
+    enabled: envBool('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', file?.fileCollection?.enabled ?? false),
   };
 }
 

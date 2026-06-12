@@ -72,6 +72,18 @@ src/file-collection/
 | checkpoints | `StateStore` |
 | utils | `createLogger`, `ensureDir` |
 
+## 配置 (Configuration)
+
+文件采集功能默认关闭，需要显式启用：
+
+- **配置文件** (`~/.loongsuite-pilot/config.json`)：
+  ```json
+  { "fileCollection": { "enabled": true } }
+  ```
+- **环境变量**：`LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED=true`
+
+环境变量优先级高于配置文件。未配置时默认为 `false`。
+
 ## 约束 (Constraints)
 
 1. **每个 pipeline 完全隔离**：state、flusher、buffer、失败日志互不共享。

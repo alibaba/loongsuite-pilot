@@ -547,6 +547,44 @@ describe('ConfigLoader', () => {
     });
   });
 
+  describe('fileCollection config', () => {
+    it('defaults to disabled when no config', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+
+      const config = await loadConfig();
+      expect(config.fileCollection.enabled).toBe(false);
+    });
+
+    it('uses config file value', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        fileCollection: { enabled: true },
+      });
+
+      const config = await loadConfig();
+      expect(config.fileCollection.enabled).toBe(true);
+    });
+
+    it('env var overrides config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        fileCollection: { enabled: false },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', 'true');
+
+      const config = await loadConfig();
+      expect(config.fileCollection.enabled).toBe(true);
+    });
+
+    it('env var "false" disables even if config file enables', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        fileCollection: { enabled: true },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', 'false');
+
+      const config = await loadConfig();
+      expect(config.fileCollection.enabled).toBe(false);
+    });
+  });
+
   describe('collectLog, collectTrace, serviceNamePrefix, cms', () => {
     it('defaults when config file is missing', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);

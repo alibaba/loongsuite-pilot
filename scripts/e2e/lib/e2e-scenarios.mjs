@@ -925,6 +925,30 @@ set -euo pipefail
 echo ""
 echo "=== [file-collection-e2e] File Collection Pipeline Validation ==="
 
+# Step 0: Enable file collection in pilot config and restart
+echo "[file-collection-e2e] Step 0: Enabling fileCollection in config.json..."
+PILOT_CONFIG="$HOME/.loongsuite-pilot/config.json"
+
+echo "[file-collection-e2e] stopping pilot before config update..."
+loongsuite-pilot stop 2>/dev/null || true
+sleep 2
+
+if [ -f "$PILOT_CONFIG" ]; then
+  node -e "
+    const fs = require('fs');
+    const cfg = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+    cfg.fileCollection = { enabled: true };
+    fs.writeFileSync(process.argv[1], JSON.stringify(cfg, null, 2));
+  " "$PILOT_CONFIG"
+else
+  echo '{"fileCollection":{"enabled":true}}' > "$PILOT_CONFIG"
+fi
+echo "[file-collection-e2e] config updated: $(node -e "const c=require('$PILOT_CONFIG');console.log(JSON.stringify(c.fileCollection))" 2>/dev/null)"
+
+echo "[file-collection-e2e] starting pilot with fileCollection.enabled..."
+loongsuite-pilot start 2>/dev/null || true
+sleep 5
+
 FC_CONFIG_DIR="$HOME/.loongsuite-pilot/configs/local"
 FC_STATE_DIR="$HOME/.loongsuite-pilot/state/file-collection"
 FC_TEST_LOG_DIR="$HOME/.loongsuite-pilot/e2e-test-logs"

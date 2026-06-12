@@ -66,6 +66,7 @@ export interface AnalyticsConfig {
   agents: AgentsConfig;
   mask: MaskConfig;
   hookWatchdog: HookWatchdogConfig;
+  fileCollection: FileCollectionToggle;
   statusBar: StatusBarConfig;
   autoUpdate?: AutoUpdateConfig;
 }
@@ -171,6 +172,10 @@ export interface HookWatchdogConfig {
   enabled: boolean;
   intervalMs: number;
   repairCooldownMs: number;
+}
+
+export interface FileCollectionToggle {
+  enabled: boolean;
 }
 
 export interface StatusBarConfig {
