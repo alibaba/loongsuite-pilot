@@ -12,7 +12,7 @@
 # Flow:
 #   1. Fetch latest tags from remote
 #   2. Determine next version
-#   3. Create release/<version> branch from origin/master
+#   3. Create release/<version> branch from origin/main
 #   4. Bump package.json, commit, tag
 #   5. Push branch + tag to remote
 #   6. GitHub Actions (release.yml) picks up the tag → build, package, create Release
@@ -107,7 +107,7 @@ echo "    Branch:  ${RELEASE_BRANCH}"
 echo ""
 
 if [ "$DRY_RUN" -eq 1 ]; then
-    echo "[dry-run] Would create branch: ${RELEASE_BRANCH} from origin/master"
+    echo "[dry-run] Would create branch: ${RELEASE_BRANCH} from origin/main"
     echo "[dry-run] Would update package.json: ${CURRENT_VERSION} → ${NEXT_VERSION}"
     echo "[dry-run] Would commit and tag: v${NEXT_VERSION}"
     echo "[dry-run] Would push tag → GitHub Actions creates the Release"
@@ -121,13 +121,13 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-# ── Create release branch from origin/master ──
+# ── Create release branch from origin/main ──
 echo "==> Creating release branch..."
 if git show-ref --verify --quiet "refs/heads/${RELEASE_BRANCH}"; then
     echo "    Branch ${RELEASE_BRANCH} already exists locally, switching to it"
     git checkout "${RELEASE_BRANCH}"
 else
-    git checkout -b "${RELEASE_BRANCH}" origin/master
+    git checkout -b "${RELEASE_BRANCH}" origin/main
 fi
 echo "    ✅ On branch ${RELEASE_BRANCH}"
 
@@ -171,5 +171,5 @@ echo "   Tag:     v${NEXT_VERSION}"
 echo "   Branch:  ${RELEASE_BRANCH}"
 echo ""
 echo "   GitHub Actions will build, package, and create the Release."
-echo "   Next step: create PR to merge ${RELEASE_BRANCH} → master"
+echo "   Next step: create PR to merge ${RELEASE_BRANCH} → main"
 echo "============================================================"
