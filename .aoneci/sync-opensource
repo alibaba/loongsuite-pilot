@@ -1,0 +1,68 @@
+name: "Sync from GitHub Open Source"
+
+triggers:
+  schedule:
+    - cron: "0 10 * * *"  # 每天上午 10 点
+  workflow_dispatch: {}    # 支持手动触发
+
+jobs:
+  sync:
+    steps:
+      - uses: checkout
+        inputs:
+          fetch-depth: 0   # 需要完整历史才能 rebase
+
+      - id: fetch-upstream
+        run: |
+          set -e
+
+          # 内部仓库的远程已经配好：
+          #   origin     = gitlab.alibaba-inc.com/sls/loongsuite-pilot（内部）
+          #   opensource = gitlab.alibaba-inc.com/sls/loongsuite-pilot-opensource（开源镜像）
+          # GitHub 开源地址
+          GITHUB_URL="https://github.com/alibaba/loongsuite-pilot.git"
+
+          # 添加 GitHub 作为上游（幂等）
+          git remote add github "$GITHUB_URL" 2>/dev/null || true
+
+          # 拉取 GitHub 最新
+          git fetch github main
+
+          # 确保本地有 upstream 分支（首次跑时创建）
+          if ! git rev-parse --verify upstream >/dev/null 2>&1; then
+            git checkout -b upstream github/main
+            git checkout master
+          fi
+
+      - id: rebase
+        run: |
+          set -e
+
+          # upstream 分支 = 开源版本的纯镜像
+          git checkout upstream
+          git reset --hard github/main
+
+          # master = upstream + 内部增量 commit，rebase 到新的 upstream 之上
+          git checkout master
+          if ! git rebase upstream; then
+            echo "REBASE_CONFLICT=true" >> $AONE_CI_OUTPUT
+            git rebase --abort
+            echo "❌ Rebase 冲突，需要人工介入"
+            exit 1
+          fi
+
+      - id: push
+        run: |
+          set -e
+          # 推送 upstream 和 master 到内部仓库
+          git push origin upstream --force-with-lease
+          git push origin master
+
+      - id: notify-on-conflict
+        if: failure()
+        run: |
+          echo "同步失败，请检查冲突并手动处理"
+          # 如果有钉钉 webhook，在这里加通知
+          # curl -s -X POST "$DINGTALK_WEBHOOK" \
+          #   -H 'Content-Type: application/json' \
+          #   -d '{"msgtype":"text","text":{"content":"loongsuite-pilot 开源同步失败，rebase 冲突需人工介入"}}'
