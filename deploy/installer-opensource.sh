@@ -30,7 +30,7 @@ PERMANENT_DIR="$HOME/.loongsuite-pilot/package"
 DEFAULT_DATA_DIR="$HOME/.loongsuite-pilot"
 
 # GitHub Releases base URL
-_GITHUB_REPO="loongsuite/loongsuite-pilot"
+_GITHUB_REPO="alibaba/loongsuite-pilot"
 _RELEASE_BASE_URL="https://github.com/${_GITHUB_REPO}/releases"
 
 # ============================================================
