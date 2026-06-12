@@ -55,16 +55,17 @@ jobs:
             SUBJECT=$(git log -1 --format='%s' "$SHA")
             echo "[$COUNT/$TOTAL] cherry-pick ${SHA:0:7} $SUBJECT"
 
-            if git cat-file -p "$SHA" | grep -q '^parent.*parent'; then
+            PARENT_COUNT=$(git cat-file -p "$SHA" | grep -c '^parent ' || true)
+            if [ "$PARENT_COUNT" -gt 1 ]; then
               PICK_ARGS="-m 1"
             else
               PICK_ARGS=""
             fi
 
             if ! git cherry-pick $PICK_ARGS "$SHA"; then
-              if git diff --quiet HEAD; then
+              if git diff --quiet HEAD 2>/dev/null; then
                 echo "⏭ 空 cherry-pick（改动已存在），跳过"
-                git cherry-pick --skip
+                git cherry-pick --skip 2>/dev/null || git cherry-pick --abort
                 SKIPPED=$((SKIPPED + 1))
                 LAST_SUCCESS_GITHUB_SHA="$SHA"
                 continue
