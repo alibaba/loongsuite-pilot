@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# installer-opensource.sh — Open-source installer for loongsuite-pilot (GitHub Releases)
+# installer-opensource.sh — Open-source installer for loongsuite-pilot
 #
 # Install (first time):
-#   curl -fsSL https://github.com/<org>/loongsuite-pilot/releases/latest/download/installer.sh | bash
+#   curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh | bash
 #   curl -fsSL <URL>/installer.sh | bash -s -- install \
 #     --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
 #     --sls-project "my-project" \
@@ -29,9 +29,8 @@ PACKAGE_NAME="loongsuite-pilot"
 PERMANENT_DIR="$HOME/.loongsuite-pilot/package"
 DEFAULT_DATA_DIR="$HOME/.loongsuite-pilot"
 
-# GitHub Releases base URL
-_GITHUB_REPO="loongsuite/loongsuite-pilot"
-_RELEASE_BASE_URL="https://github.com/${_GITHUB_REPO}/releases"
+# OSS download base URL
+_OSS_BASE_URL="https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot"
 
 # ============================================================
 # Parse sub-command
@@ -175,12 +174,12 @@ validate_install_user() {
     esac
 }
 
-# Resolve PACKAGE_URL from GitHub Releases if not explicitly set
+# Resolve PACKAGE_URL from OSS if not explicitly set
 if [ -z "$PACKAGE_URL" ]; then
     if [ -n "$INSTALL_VERSION" ]; then
-        PACKAGE_URL="${_RELEASE_BASE_URL}/download/v${INSTALL_VERSION}/${PACKAGE_NAME}.tar.gz"
+        PACKAGE_URL="${_OSS_BASE_URL}/${INSTALL_VERSION}/${PACKAGE_NAME}.tar.gz"
     else
-        PACKAGE_URL="${_RELEASE_BASE_URL}/latest/download/${PACKAGE_NAME}.tar.gz"
+        PACKAGE_URL="${_OSS_BASE_URL}/latest/${PACKAGE_NAME}.tar.gz"
     fi
 fi
 

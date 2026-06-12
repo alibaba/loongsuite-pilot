@@ -11,12 +11,16 @@ const internalStubPlugin = {
   name: 'internal-stub',
   setup(b) {
     if (isInternal) return;
-    b.onResolve({ filter: /alarm-sender\.internal/ }, (args) => ({
+    b.onResolve({ filter: /\.internal/ }, (args) => ({
       path: args.path,
       namespace: 'internal-stub',
     }));
-    b.onLoad({ filter: /.*/, namespace: 'internal-stub' }, () => ({
+    b.onLoad({ filter: /alarm-sender\.internal/, namespace: 'internal-stub' }, () => ({
       contents: 'export function sendAlarm() {} export function sendStatus() {}',
+      loader: 'ts',
+    }));
+    b.onLoad({ filter: /statistic\.internal/, namespace: 'internal-stub' }, () => ({
+      contents: 'export function sendRunningStatus() {}',
       loader: 'ts',
     }));
   },
