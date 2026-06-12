@@ -327,7 +327,7 @@ export class WukongInput extends BaseInput {
     return buildAgentActivityEntry({
       timestamp: msg.createdAt,
       'event.id': hashId([task.session_id, msg.id, 'user']),
-      'event.name': 'llm.request',
+      'event.name': 'other',
       ...common,
       'gen_ai.turn.id': turnId,
       'gen_ai.step.id': stepId,
@@ -378,7 +378,7 @@ export class WukongInput extends BaseInput {
     const toolStartTimestamps = new Map<string, number>();
     const toolArgsAccumulator = new Map<string, string>();
     const toolNames = new Map<string, string>();
-    const toolCallParts: Array<{ type: string; tool_call_id: string; tool_name: string }> = [];
+    const toolCallParts: Array<{ type: string; id: string; name: string }> = [];
 
     const startNewStep = (evt: AguiEvent): void => {
       stepIndex++;
@@ -437,6 +437,54 @@ export class WukongInput extends BaseInput {
           break;
 
         case 'TEXT_MESSAGE_CONTENT':
+          // Auto-split step: if we haven't had explicit STEP events and the current step
+          // already has tool calls, this text is the "final answer" from a new LLM decision.
+          // Emit step N (tools) and start step N+1 (final answer).
+          if (!hasStepEvents && currentStep && currentStep.hasToolCalls && !textContent) {
+            // Emit intermediate llm.response for the tool-calling step
+            // Use runStartedTs to ensure it precedes tool timestamps
+            const midLlmSpanId = generateSpanId();
+            const midFinish = this.inferFinishReasons(true, undefined);
+            const midOutputParts: Array<Record<string, string>> = [];
+            for (const tc of toolCallParts) {
+              midOutputParts.push({ type: tc.type, id: tc.id, name: tc.name });
+            }
+            entries.push(buildAgentActivityEntry({
+              timestamp: runStartedTs ?? currentStep.startTimestamp,
+              'event.id': hashId([sessionId, msg.id, 'response', String(currentStep.stepIndex)]),
+              'event.name': 'llm.response',
+              ...common,
+              'gen_ai.turn.id': turnId,
+              'gen_ai.step.id': currentStep.stepId,
+              'gen_ai.response.id': runId,
+              'gen_ai.request.model': model,
+              'gen_ai.response.model': model,
+              'gen_ai.response.finish_reasons': midFinish,
+              'trace_id': traceId,
+              'span_id': midLlmSpanId,
+              'parent_span_id': currentStep.stepSpanId,
+              ...(midOutputParts.length > 0 ? {
+                'gen_ai.output.messages': [{ role: 'assistant', parts: midOutputParts }],
+              } : {}),
+              'gen_ai.usage.input_tokens': 0,
+              'gen_ai.usage.output_tokens': 0,
+              'gen_ai.usage.cache_read.input_tokens': 0,
+              'gen_ai.usage.total_tokens': 0,
+              attributes: { source: 'wukong', message_id: msg.id, conversation_id: msg.conversationId },
+            }));
+
+            // Start new final step
+            stepIndex++;
+            currentStep = {
+              stepIndex,
+              stepId: `${turnId}:s${stepIndex}`,
+              stepMessageId: `synth-step-${stepIndex}`,
+              hasToolCalls: false,
+              startTimestamp: evt.timestamp,
+              stepSpanId: generateSpanId(),
+            };
+            toolCallParts.length = 0;
+          }
           if (typeof evt.delta === 'string') textContent += evt.delta;
           break;
 
@@ -454,7 +502,7 @@ export class WukongInput extends BaseInput {
           toolStartTimestamps.set(tcId, evt.timestamp);
           const toolName = (evt.toolName as string | undefined) ?? (evt.name as string | undefined) ?? '';
           toolNames.set(tcId, toolName);
-          toolCallParts.push({ type: 'tool_call', tool_call_id: tcId, tool_name: toolName });
+          toolCallParts.push({ type: 'tool_call', id: tcId, name: toolName });
           toolStartCount++;
           break;
         }
@@ -513,7 +561,7 @@ export class WukongInput extends BaseInput {
           if (activityType && activityType !== 'TASK_LINE_PLAN') {
             const actToolName = ACTIVITY_TYPE_TO_TOOL_NAME[activityType] ?? activityType.toLowerCase();
             const actToolCallId = `activity-${msg.id}-${toolIdx}`;
-            toolCallParts.push({ type: 'tool_call', tool_call_id: actToolCallId, tool_name: actToolName });
+            toolCallParts.push({ type: 'tool_call', id: actToolCallId, name: actToolName });
             const activityEntries = this.transformActivitySnapshot(
               task, msg, evt, model, turnId, toolIdx, common,
               currentStep, traceId, agentSpanId,
@@ -532,10 +580,10 @@ export class WukongInput extends BaseInput {
       const finishReasons = this.inferFinishReasons(currentStep.hasToolCalls, runError);
       const llmSpanId = generateSpanId();
 
-      const inputTokens = numOr(usageEvent?.prompt_tokens);
-      const outputTokens = numOr(usageEvent?.completion_tokens);
-      const cachedTokens = numOr(usageEvent?.cached_tokens);
-      const totalTokens = numOr(usageEvent?.total_tokens);
+      const inputTokens = numOr(usageEvent?.prompt_tokens) ?? 0;
+      const outputTokens = numOr(usageEvent?.completion_tokens) ?? 0;
+      const cachedTokens = numOr(usageEvent?.cached_tokens) ?? 0;
+      const totalTokens = numOr(usageEvent?.total_tokens) ?? (inputTokens + outputTokens);
 
       // Build output message parts: text + tool_call declarations
       const outputParts: Array<Record<string, string>> = [];
@@ -543,7 +591,7 @@ export class WukongInput extends BaseInput {
         outputParts.push({ type: 'text', content: textContent });
       }
       for (const tc of toolCallParts) {
-        outputParts.push({ type: tc.type, tool_call_id: tc.tool_call_id, tool_name: tc.tool_name });
+        outputParts.push({ type: tc.type, id: tc.id, name: tc.name });
       }
 
       const responseEntry = buildAgentActivityEntry({
@@ -565,10 +613,10 @@ export class WukongInput extends BaseInput {
             { role: 'assistant', parts: outputParts },
           ],
         } : {}),
-        ...(inputTokens !== undefined ? { 'gen_ai.usage.input_tokens': inputTokens } : {}),
-        ...(outputTokens !== undefined ? { 'gen_ai.usage.output_tokens': outputTokens } : {}),
-        ...(cachedTokens !== undefined ? { 'gen_ai.usage.cache_read.input_tokens': cachedTokens } : {}),
-        ...(totalTokens !== undefined ? { 'gen_ai.usage.total_tokens': totalTokens } : {}),
+        'gen_ai.usage.input_tokens': inputTokens,
+        'gen_ai.usage.output_tokens': outputTokens,
+        'gen_ai.usage.cache_read.input_tokens': cachedTokens,
+        'gen_ai.usage.total_tokens': totalTokens,
         ...(runError ? { 'error.type': runError.code, 'error.message': runError.message } : {}),
         attributes: {
           source: 'wukong',

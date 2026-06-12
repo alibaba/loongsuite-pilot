@@ -126,7 +126,7 @@ describe('WukongInput', () => {
     stateStore.update('wukong', { extra: { seenCounts: counts } });
   }
 
-  it('maps user message to llm.request entry', async () => {
+  it('maps user message to other event (user-hook approach)', async () => {
     const listResp = JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] });
     const msgsResp = JSON.stringify({ messages: SAMPLE_MESSAGES });
 
@@ -142,7 +142,7 @@ describe('WukongInput', () => {
     await input.start();
     await input.stop();
 
-    const userEntry = entries.find(e => e['event.name'] === 'llm.request');
+    const userEntry = entries.find(e => e['event.name'] === 'other');
     expect(userEntry).toBeDefined();
     expect(userEntry!['gen_ai.agent.type']).toBe(ClientType.Wukong);
     expect(userEntry!['gen_ai.session.id']).toBe('sess-1');
@@ -226,7 +226,7 @@ describe('WukongInput', () => {
     await input.stop();
 
     expect(entries).toHaveLength(2);
-    expect(entries[0]!['event.name']).toBe('llm.request');
+    expect(entries[0]!['event.name']).toBe('other');
     expect(entries[0]!['gen_ai.input.messages_delta']).toEqual([
       { role: 'user', parts: [{ type: 'text', content: 'Follow up question' }] },
     ]);
@@ -497,7 +497,7 @@ describe('WukongInput', () => {
     await input.start();
     await input.stop();
 
-    const reqEntry = entries.find(e => e['event.name'] === 'llm.request');
+    const reqEntry = entries.find(e => e['event.name'] === 'other');
     expect(reqEntry!['gen_ai.turn.id']).toBe('sess-1:msg-2');
 
     const respEntry = entries.find(e => e['event.name'] === 'llm.response');
@@ -973,7 +973,7 @@ describe('WukongInput', () => {
 
     // Only the user message (msg-1) should be processed, incomplete assistant skipped
     expect(entries).toHaveLength(1);
-    expect(entries[0]!['event.name']).toBe('llm.request');
+    expect(entries[0]!['event.name']).toBe('other');
 
     // seenCounts should advance only to the user message (index 0 + 1 = 1)
     const state = stateStore.get('wukong');
