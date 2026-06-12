@@ -61,7 +61,11 @@ export class StateStore {
 
   update(inputId: string, partial: Partial<InputState>): void {
     const current = { ...this.get(inputId) };
-    this.states.set(inputId, cloneState({ ...current, ...partial }));
+    const merged = { ...current, ...partial };
+    if (partial.extra && current.extra && typeof current.extra === 'object' && typeof partial.extra === 'object') {
+      merged.extra = { ...current.extra, ...partial.extra };
+    }
+    this.states.set(inputId, cloneState(merged));
     this.dirty = true;
   }
 

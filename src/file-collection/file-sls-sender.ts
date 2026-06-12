@@ -27,6 +27,7 @@ const DEFAULT_BATCH_SIZE = 4000;
 const MAX_BUFFER_SIZE = 64_000;
 const HIGH_WATERMARK = 32_000;
 const FLUSH_CONCURRENCY = 8;
+const SHUTDOWN_WAIT_TIMEOUT_MS = 30_000;
 
 export class FileSlsSender {
   private readonly transportConfig: SlsTransportConfig;
@@ -97,43 +98,50 @@ export class FileSlsSender {
       for (const [filePath, bucket] of this.buckets) {
         let failed = false;
         while (bucket.length > 0 && !failed) {
-          const tasks: { batch: Record<string, string>[]; filePath: string }[] = [];
-          for (let i = 0; i < FLUSH_CONCURRENCY && bucket.length > 0; i++) {
-            tasks.push({ batch: bucket.splice(0, this.batchSize), filePath });
+          const sliceEnd = Math.min(bucket.length, this.batchSize * FLUSH_CONCURRENCY);
+          const tasks: { batch: Record<string, string>[]; startIdx: number }[] = [];
+          for (let offset = 0; offset < sliceEnd; offset += this.batchSize) {
+            const end = Math.min(offset + this.batchSize, sliceEnd);
+            tasks.push({ batch: bucket.slice(offset, end), startIdx: offset });
           }
+
           const results = await Promise.allSettled(
             tasks.map((t) =>
               postWebtracking(this.transportConfig, t.batch, {
                 topic: this.configName,
                 source: LOCAL_IP,
-                tags: { __path__: t.filePath },
-              }).then(() => ({ ok: true as const, batch: t.batch })),
+                tags: { __path__: filePath },
+              }).then(() => ({ ok: true as const })),
             ),
           );
+
           let sentCount = 0;
-          for (const r of results) {
+          let hasFailure = false;
+          for (let i = 0; i < results.length; i++) {
+            const r = results[i];
             if (r.status === 'fulfilled' && r.value.ok) {
-              sentCount += r.value.batch.length;
+              sentCount += tasks[i].batch.length;
             } else {
-              failed = true;
-              const err = r.status === 'rejected' ? r.reason : r.value;
-              const failedBatch = r.status === 'rejected'
-                ? tasks[results.indexOf(r)].batch
-                : r.value.batch;
+              hasFailure = true;
+              const err = r.status === 'rejected' ? r.reason : 'unknown';
               logger.error('flush failed, persisting to failed log', {
                 configName: this.configName,
                 filePath,
-                count: failedBatch.length,
+                count: tasks[i].batch.length,
                 error: String(err),
               });
               await persistFailedLogs(
                 this.failedLogDir,
                 this.configName,
-                { __logs__: failedBatch },
+                { __logs__: tasks[i].batch },
                 err,
               );
             }
           }
+
+          bucket.splice(0, sliceEnd);
+          if (hasFailure) failed = true;
+
           if (sentCount > 0) {
             logger.debug('flush batch sent', {
               configName: this.configName,
@@ -155,8 +163,15 @@ export class FileSlsSender {
       clearInterval(this.flushTimer);
       this.flushTimer = null;
     }
-    while (this.flushing) {
+    const waitStart = Date.now();
+    while (this.flushing && Date.now() - waitStart < SHUTDOWN_WAIT_TIMEOUT_MS) {
       await new Promise((r) => setTimeout(r, 100));
+    }
+    if (this.flushing) {
+      logger.warn('shutdown: flush still in progress after timeout, proceeding', {
+        configName: this.configName,
+        timeoutMs: SHUTDOWN_WAIT_TIMEOUT_MS,
+      });
     }
     const maxAttempts = 3;
     for (let attempt = 0; attempt < maxAttempts && this.bufferSize() > 0; attempt++) {
