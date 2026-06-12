@@ -37,12 +37,12 @@ src/file-collection/
 
 ```
 ~/.loongsuite-pilot/
-├── file-collection/                    ← 配置目录（用户管理）
+├── configs/local/                      ← 配置目录（用户管理）
 │   ├── sample-file-config.json
 │   └── nginx-access.json
+├── state/file-collection/              ← 每配置独立状态
+│   └── <configName>.json
 ├── logs/
-│   ├── file-collection-state/          ← 每配置独立状态
-│   │   └── <configName>.json
 │   └── file-collection-failed/         ← 每配置独立失败日志
 │       └── <configName>.jsonl
 ```

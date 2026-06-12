@@ -926,7 +926,7 @@ echo ""
 echo "=== [file-collection-e2e] File Collection Pipeline Validation ==="
 
 FC_CONFIG_DIR="$HOME/.loongsuite-pilot/configs/local"
-FC_STATE_DIR="$HOME/.loongsuite-pilot/logs/file-collection-state"
+FC_STATE_DIR="$HOME/.loongsuite-pilot/state/file-collection"
 FC_TEST_LOG_DIR="$HOME/.loongsuite-pilot/e2e-test-logs"
 FC_CONFIG_NAME="e2e-file-test"
 
