@@ -4,7 +4,7 @@
 
 // ─── Deploy Mode ───
 
-export type DeployMode = 'hook' | 'plugin-probe';
+export type DeployMode = 'hook' | 'plugin-probe' | 'plugin-inject';
 export type MountType = 'wrapper' | 'rc-inject' | 'env-inject';
 export type HookFormat = 'flat' | 'nested';
 export type PluginSourceType = 'oss' | 'tar';
@@ -79,6 +79,13 @@ export interface AgentInputConfig {
   [key: string]: unknown;
 }
 
+export interface PluginInjectConfig {
+  configPaths: string[];
+  pluginSpec: string;
+  pluginId: string;
+  replaceSpecs?: string[];
+}
+
 export interface AgentDefinition {
   id: string;
   displayName: string;
@@ -86,6 +93,7 @@ export interface AgentDefinition {
   detection: AgentDetectionConfig;
   hook?: AgentHookConfig;
   pluginProbe?: PluginProbeConfig;
+  pluginInject?: PluginInjectConfig;
   input?: AgentInputConfig;
 }
 

@@ -1,0 +1,26 @@
+{
+  "id": "opencode",
+  "displayName": "OpenCode",
+  "deployMode": "plugin-inject",
+  "detection": {
+    "paths": ["~/.config/opencode"],
+    "commands": ["opencode"]
+  },
+  "pluginInject": {
+    "configPaths": [
+      "~/.config/opencode/opencode.jsonc",
+      "~/.config/opencode/opencode.json",
+      "~/.config/opencode/config.json"
+    ],
+    "pluginSpec": "file://$PILOT_DATA/plugins/opencode/plugin.mjs",
+    "pluginId": "loongsuite-pilot-opencode",
+    "replaceSpecs": [
+      "loongsuite-pilot-opencode",
+      "loongsuite-pilot-opencode-smoke"
+    ]
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/opencode"
+  }
+}
