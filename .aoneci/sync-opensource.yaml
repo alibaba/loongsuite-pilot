@@ -98,6 +98,8 @@ jobs:
       - id: push
         run: |
           set -e
+          # Aone CI runner 默认只有 pull 权限，push 需要用 GitLab token
+          git remote set-url origin "https://oauth2:${{secrets.gitlab_private_token}}@gitlab.alibaba-inc.com/sls/loongsuite-pilot.git"
           git push origin master
 
       - id: notify-on-conflict
