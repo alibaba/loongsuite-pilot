@@ -279,7 +279,8 @@ export class WukongInput extends BaseInput {
         }
 
         const turnId = resolveTurnId(sessionId, msg);
-        const turnEntries = this.transformAssistantMessage(task, msg, events, model, turnId, commonFields);
+        const userContent = pendingUserMessages.map(m => m.content).filter(Boolean).join('\n');
+        const turnEntries = this.transformAssistantMessage(task, msg, events, model, turnId, commonFields, userContent);
 
         // Extract trace_id and first step.id from the assistant's entries for user message linkage
         const firstAssistantEntry = turnEntries[0];
@@ -290,9 +291,10 @@ export class WukongInput extends BaseInput {
 
         // Emit pending user messages linked to this trace
         // Use the assistant's turnId so request+response pair share the same turn
+        // Don't set step.id on 'other' events — they merge into ENTRY, not STEP
         for (const userMsg of pendingUserMessages) {
           entries.push(this.buildUserRequestEntry(
-            task, userMsg, model, turnId, commonFields, traceId, firstStepId, stepSpanId,
+            task, userMsg, model, turnId, commonFields, traceId, undefined, undefined,
           ));
         }
         pendingUserMessages = [];
@@ -352,6 +354,7 @@ export class WukongInput extends BaseInput {
     model: string,
     turnId: string,
     common: Record<string, unknown>,
+    userContent: string,
   ): AgentActivityEntry[] {
     const entries: AgentActivityEntry[] = [];
     const sessionId = task.session_id;
@@ -585,6 +588,12 @@ export class WukongInput extends BaseInput {
       const cachedTokens = numOr(usageEvent?.cached_tokens) ?? 0;
       const totalTokens = numOr(usageEvent?.total_tokens) ?? (inputTokens + outputTokens);
 
+      // Timestamp: if step has tools, LLM must start BEFORE tools (use runStartedTs).
+      // If text-only final step, use runFinishedTs for non-zero duration.
+      const responseTimestamp = currentStep.hasToolCalls
+        ? (runStartedTs ?? currentStep.startTimestamp)
+        : (runFinishedTs ?? msg.createdAt);
+
       // Build output message parts: text + tool_call declarations
       const outputParts: Array<Record<string, string>> = [];
       if (textContent) {
@@ -595,7 +604,7 @@ export class WukongInput extends BaseInput {
       }
 
       const responseEntry = buildAgentActivityEntry({
-        timestamp: runFinishedTs ?? msg.createdAt,
+        timestamp: responseTimestamp,
         'event.id': hashId([sessionId, msg.id, 'response', String(currentStep.stepIndex)]),
         'event.name': 'llm.response',
         ...common,
@@ -608,6 +617,11 @@ export class WukongInput extends BaseInput {
         'trace_id': traceId,
         'span_id': llmSpanId,
         'parent_span_id': currentStep.stepSpanId,
+        ...(userContent ? {
+          'gen_ai.input.messages': [
+            { role: 'user', parts: [{ type: 'text', content: userContent }] },
+          ],
+        } : {}),
         ...(outputParts.length > 0 ? {
           'gen_ai.output.messages': [
             { role: 'assistant', parts: outputParts },
