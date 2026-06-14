@@ -24,6 +24,7 @@ export enum ClientType {
   KimiCodeCli = 'kimi-code-cli',
   CodexSession = 'codex-session',
   QoderCli = 'qoder-cli',
+  CursorCli = 'cursor-cli',
 
   // Hook-based tools
   ClaudeCliHook = 'claude-code',
