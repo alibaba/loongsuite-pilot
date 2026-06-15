@@ -107,18 +107,76 @@ function requireSessionId(event, stage = 'cmd') {
 function appendMissingTranscriptToolEvents(state, transcriptToolEvents) {
   if (!Array.isArray(transcriptToolEvents) || transcriptToolEvents.length === 0) return;
   if (!Array.isArray(state.events)) state.events = [];
-  const seen = new Set(
-    state.events
-      .filter((event) => event.type === 'pre_tool_use' || event.type === 'post_tool_use')
-      .map((event) => `${event.type}:${event.tool_use_id || ''}`),
-  );
-  for (const event of transcriptToolEvents) {
-    const key = `${event.type}:${event.tool_use_id || ''}`;
-    if (!seen.has(key)) {
-      state.events.push(event);
-      seen.add(key);
+  const seen = new Map();
+  for (const event of state.events) {
+    if (event.type === 'pre_tool_use' || event.type === 'post_tool_use') {
+      seen.set(`${event.type}:${event.tool_use_id || ''}`, event);
     }
   }
+  for (const event of transcriptToolEvents) {
+    const key = `${event.type}:${event.tool_use_id || ''}`;
+    const existing = seen.get(key);
+    if (existing) {
+      mergeTranscriptToolEvent(existing, event);
+    } else {
+      if (event.type === 'pre_tool_use') {
+        event.tool_input = formatCodexToolArguments(event.tool_name, event.tool_input, event.tool_name, event.tool_input);
+      }
+      state.events.push(event);
+      seen.set(key, event);
+    }
+  }
+}
+
+function mergeTranscriptToolEvent(target, transcriptEvent) {
+  if (!target || !transcriptEvent) return;
+  if (target.type === 'pre_tool_use' && transcriptEvent.type === 'pre_tool_use') {
+    target.tool_input = formatCodexToolArguments(target.tool_name, target.tool_input, transcriptEvent.tool_name, transcriptEvent.tool_input);
+    if ((!target.tool_name || target.tool_name === 'unknown') && transcriptEvent.tool_name) {
+      target.tool_name = transcriptEvent.tool_name;
+    }
+  } else if (target.type === 'post_tool_use' && transcriptEvent.type === 'post_tool_use') {
+    if (target.tool_response === undefined || target.tool_response === null || target.tool_response === '') {
+      target.tool_response = transcriptEvent.tool_response;
+    }
+    if ((!target.tool_name || target.tool_name === 'unknown') && transcriptEvent.tool_name) {
+      target.tool_name = transcriptEvent.tool_name;
+    }
+  }
+}
+
+function formatCodexToolArguments(toolName, hookInput, transcriptToolName, transcriptInput) {
+  const hookArgs = isPlainObject(hookInput) ? hookInput : {};
+  const transcriptArgs = isPlainObject(transcriptInput) ? transcriptInput : {};
+  const normalizedName = String(toolName || transcriptToolName || '').toLowerCase();
+  const normalizedTranscriptName = String(transcriptToolName || '').toLowerCase();
+
+  if (normalizedName === 'bash' || normalizedTranscriptName === 'exec_command') {
+    const command = hookArgs.command ?? transcriptArgs.command ?? transcriptArgs.cmd;
+    const workdir = hookArgs.workdir ?? transcriptArgs.workdir;
+    const out = {};
+    if (command !== undefined) out.command = command;
+    if (workdir !== undefined) out.workdir = workdir;
+    return Object.keys(out).length > 0 ? out : hookInput;
+  }
+
+  if (normalizedName === 'apply_patch') {
+    if (hookArgs.command !== undefined) return hookArgs;
+    if (transcriptArgs.command !== undefined) return transcriptArgs;
+    if (typeof hookInput === 'string') return { command: hookInput };
+    if (typeof transcriptInput === 'string') return { command: transcriptInput };
+    if (isPlainObject(hookInput)) return hookInput;
+    if (isPlainObject(transcriptInput)) return transcriptInput;
+    const command = hookInput ?? transcriptInput;
+    return command !== undefined ? { command } : command;
+  }
+
+  if (isPlainObject(transcriptInput)) return transcriptInput;
+  return hookInput ?? transcriptInput;
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 // ─── 5 cmd handlers — 累积 event 到 state ───
@@ -390,6 +448,7 @@ function resolveTurns(state, transcriptData) {
     turns.push({
       turn_id: boundary.turn_id,
       prompt: boundary.prompt || promptEvent?.prompt || '',
+      inputMessages: boundary.inputMessages,
       model: promptEvent?.model || state.model || 'unknown',
       start_time: startTime,
       end_time: stopEvent && i === boundaries.length - 1
@@ -448,7 +507,7 @@ function buildTurnRecords({
     records.push({
       time_unix_nano: timestampToUnixNanos(turn.start_time * 1000),
       'event.id': crypto.randomUUID(),
-      'event.name': 'llm.request',
+      'event.name': 'other',
       ...baseFields,
       span_id: agentSpanId,
       parent_span_id: entrySpanId,
@@ -471,7 +530,10 @@ function buildTurnRecords({
     const llmSpanId = generateSpanId();
 
     const inputMsgs = step.llm_input_messages;
-    const currentFullHash = computeHash(INITIAL_HASH, inputMsgs);
+    const fullInputMsgs = Array.isArray(step.llm_full_input_messages) && step.llm_full_input_messages.length > 0
+      ? step.llm_full_input_messages
+      : inputMsgs;
+    const currentFullHash = computeHash(INITIAL_HASH, fullInputMsgs);
     const logFull = shouldLogFullMessages(runningHash, inputMsgs, currentFullHash);
 
     // llm.request
@@ -487,7 +549,7 @@ function buildTurnRecords({
       'gen_ai.input.messages_hash': currentFullHash,
       'gen_ai.input.messages_delta': inputMsgs,
     };
-    if (logFull) reqRecord['gen_ai.input.messages'] = inputMsgs;
+    if (logFull) reqRecord['gen_ai.input.messages'] = fullInputMsgs;
     // Codex 专属:system_instructions / tool.definitions(每条 LLM record 都贴,符合 ARMS 规范)
     if (systemInstruction) reqRecord['gen_ai.system_instructions'] = systemInstruction;
     if (toolDefinitions) reqRecord['gen_ai.tool.definitions'] = toolDefinitions;
