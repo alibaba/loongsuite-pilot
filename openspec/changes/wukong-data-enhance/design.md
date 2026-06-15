@@ -110,28 +110,34 @@ case 'TOOL_CALL_ARGS': {
 
 ### 7. Trace/Span ID 生成
 
-为支持 OTLP trace 输出，生成完整 span tree ID：
+为支持 OTLP trace 输出，Wukong input 生成 trace_id 和具体的 span_id；ENTRY/AGENT 容器 span 由下游 OTLP converter 根据分组键自动合成（不由 input 生成 span_id）：
 
 ```
 trace_id: 每个 turn 生成一个（crypto.randomBytes(16).toString('hex')）
-span_id 分层:
-  ├── entrySpanId:  randomBytes(8) — ENTRY span
-  ├── agentSpanId:  randomBytes(8) — AGENT span
+
+input 生成的 span_id（下游 converter 直接使用）:
+  ├── agentSpanId:  randomBytes(8) — 作为 fallback parent_span_id
   ├── stepSpanId:   randomBytes(8) per step — STEP span
   ├── llmSpanId:    randomBytes(8) per LLM call — LLM span
   └── toolSpanId:   randomBytes(8) per tool — TOOL span
 
+下游 OTLP converter 自动合成的 span:
+  ├── ENTRY span（按 turn.id 分组生成）
+  └── AGENT span（按 agent.name 分组生成）
+
 parent_span_id 规则:
-  llm.request/response → parent = stepSpanId
-  tool.call/result     → parent = stepSpanId
+  llm.request/response → parent = stepSpanId（或 agentSpanId 作为 fallback）
+  tool.call/result     → parent = stepSpanId（或 agentSpanId 作为 fallback）
 ```
+
+注：ENTRY 和 AGENT span 的层级关系由 converter 通过 `gen_ai.turn.id` / `gen_ai.session.id` / `gen_ai.agent.name` 等分组键自动构建。
 
 ### 8. 事件处理时序（重构后的 transformMessages）
 
 ```
 for each assistant message (only complete ones):
   initialize: currentStep = null, stepIndex = 0
-  generate: turnTraceId, entrySpanId, agentSpanId
+  generate: turnTraceId, agentSpanId
   
   for each event in msg.events:
     switch (event.type):
