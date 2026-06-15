@@ -9,6 +9,7 @@ import type {
 import { AgentDefLoader, type AgentDefLoaderOptions } from './agent-def-loader.js';
 import { HookStrategy } from './hook-strategy.js';
 import { PluginProbeStrategy } from './plugin-probe-strategy.js';
+import { PluginInjectStrategy } from './plugin-inject-strategy.js';
 import { writeDeployNotification } from './deploy-notification.js';
 import { runPluginMigration } from './plugin-migration.js';
 import { HookManager } from '../hooks/hook-manager.js';
@@ -28,6 +29,7 @@ export class DeploymentManager {
   private readonly pilotDir: string;
   private readonly hookStrategy: HookStrategy;
   private readonly pluginProbeStrategy: PluginProbeStrategy;
+  private readonly pluginInjectStrategy: PluginInjectStrategy;
   private readonly loader: AgentDefLoader;
   private readonly stateFilePath: string;
   private state: DeployedAgentsState = {};
@@ -44,6 +46,7 @@ export class DeploymentManager {
     );
     this.hookStrategy = new HookStrategy(hookManager);
     this.pluginProbeStrategy = new PluginProbeStrategy(opts.dataDir, opts.pilotDir);
+    this.pluginInjectStrategy = new PluginInjectStrategy(opts.dataDir, opts.pilotDir);
 
     const loaderOpts: AgentDefLoaderOptions = {
       builtinDir: opts.builtinAgentsDir ?? path.join(opts.pilotDir, 'agents.d'),
@@ -152,6 +155,8 @@ export class DeploymentManager {
         return this.hookStrategy;
       case 'plugin-probe':
         return this.pluginProbeStrategy;
+      case 'plugin-inject':
+        return this.pluginInjectStrategy;
       default:
         throw new Error(`unknown deployMode: ${def.deployMode}`);
     }

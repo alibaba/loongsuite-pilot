@@ -428,9 +428,22 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
       responseEndNanos = isoToUnixNanos(lastAssistantTs) || endNanos;
     }
 
-    // Determine finish reason
-    const isLastStep = i === boundaries.length - 1;
-    const finishReason = toolCalls.length > 0 ? 'tool_calls' : (isLastStep ? 'end_turn' : 'stop');
+    // Determine finish reason from the last assistant row's stop_reason (authoritative),
+    // falling back to inference when not available.
+    const lastStopReason = [...content].reverse()
+      .find(r => r.type === 'assistant' && r.message?.stop_reason)?.message?.stop_reason;
+    let finishReason;
+    if (toolCalls.length > 0) {
+      finishReason = 'tool_call';
+    } else if (lastStopReason === 'max_tokens') {
+      finishReason = 'max_tokens';
+    } else if (lastStopReason === 'end_turn' || (i === boundaries.length - 1)) {
+      finishReason = 'end_turn';
+    } else if (lastStopReason) {
+      finishReason = lastStopReason;
+    } else {
+      finishReason = 'stop';
+    }
 
     if (outputParts.length > 0) {
       records.push({

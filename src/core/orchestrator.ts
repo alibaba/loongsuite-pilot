@@ -37,6 +37,7 @@ import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
 import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
+import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
@@ -85,6 +86,7 @@ export class Orchestrator extends EventEmitter {
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
     'codex-log': 'codex',
+    'opencode-log': 'opencode',
     'wukong': 'wukong',
   };
 
@@ -848,6 +850,26 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['codex-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['codex-log']?.pollInterval,
+      }),
+    );
+
+    // --- OpenCode Log (event_t plugin JSONL) ---
+    const opencodeLogDir = path.join(this.dataDir, 'logs', 'opencode');
+    const opencodeLogInput = new OpenCodeLogInput({
+      stateStore: this.stateStore,
+      logDir: opencodeLogDir,
+    });
+    this.inputManager.registerInput(opencodeLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(opencodeLogInput, {
+        watchPaths: [opencodeLogDir],
+        isAvailable: async () => directoryExists(opencodeLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['opencode-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'opencode-log',
+            listenerCfg['opencode-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['opencode-log']?.pollInterval,
       }),
     );
 

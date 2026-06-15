@@ -185,17 +185,36 @@ export class QoderWorkTraceInput extends BaseInput {
       const prevState = this.stateStore.get(fileStateKey);
       const prevInode = prevState.extra?.inode as number | undefined;
       const currentInode = (stat as unknown as { ino: number }).ino;
+      let cachedSig: string | undefined;
 
       if (prevInode !== undefined && prevInode !== currentInode) {
         this.stateStore.setOffset(fileStateKey, 0);
-        this.stateStore.update(fileStateKey, { extra: { inode: currentInode } });
+        cachedSig = await computeFileSignature(filePath);
+        this.stateStore.update(fileStateKey, { extra: { inode: currentInode, signatureHash: cachedSig } });
       } else if (prevInode === undefined) {
-        this.stateStore.update(fileStateKey, { extra: { inode: currentInode } });
+        cachedSig = await computeFileSignature(filePath);
+        this.stateStore.update(fileStateKey, { extra: { inode: currentInode, signatureHash: cachedSig } });
       }
 
-      const offset = this.stateStore.getOffset(fileStateKey);
+      let offset = this.stateStore.getOffset(fileStateKey);
+      if (offset > 0 && stat.size < offset) {
+        this.logger.info('SDK log truncated or rotated, resetting offset', { file: filePath });
+        offset = 0;
+        this.stateStore.setOffset(fileStateKey, 0);
+      }
+
+      // Signature-based rotation detection: handles inode reuse on tmpfs (Linux CI)
+      if (offset > 0 && stat.size > 0) {
+        const currentSig = cachedSig ?? await computeFileSignature(filePath);
+        cachedSig = currentSig;
+        const prevSig = prevState.extra?.signatureHash as string | undefined;
+        if (prevSig && currentSig && prevSig !== currentSig) {
+          this.logger.info('SDK log content signature changed (inode reused), resetting offset', { file: filePath });
+          offset = 0;
+          this.stateStore.setOffset(fileStateKey, 0);
+        }
+      }
       if (stat.size <= offset) {
-        // 即使没有新数据，也要保存当前文件的 model policy
         this.fileModelPolicies.set(filePath, { ...this.currentModelPolicy });
         continue;
       }
@@ -213,7 +232,8 @@ export class QoderWorkTraceInput extends BaseInput {
           if (lastNL >= 0) { text = text.substring(0, lastNL); consumedBytes = Buffer.byteLength(text, 'utf-8') + 1; }
         }
         this.stateStore.setOffset(fileStateKey, offset + consumedBytes);
-        this.stateStore.update(fileStateKey, { extra: { inode: currentInode } });
+        const sig = cachedSig ?? await computeFileSignature(filePath);
+        this.stateStore.update(fileStateKey, { extra: { inode: currentInode, signatureHash: sig } });
 
         for (const line of text.split('\n')) {
           if (!line.trim()) continue;
@@ -463,6 +483,23 @@ export class QoderWorkTraceInput extends BaseInput {
       groups.set(turnId, group);
     }
     return groups;
+  }
+}
+
+const SIGNATURE_BYTES = 1024;
+
+async function computeFileSignature(filePath: string): Promise<string> {
+  let handle;
+  try {
+    handle = await fs.open(filePath, 'r');
+    const buf = Buffer.alloc(SIGNATURE_BYTES);
+    const { bytesRead } = await handle.read(buf, 0, SIGNATURE_BYTES, 0);
+    if (bytesRead === 0) return '';
+    return crypto.createHash('md5').update(buf.subarray(0, bytesRead)).digest('hex');
+  } catch {
+    return '';
+  } finally {
+    await handle?.close();
   }
 }
 
