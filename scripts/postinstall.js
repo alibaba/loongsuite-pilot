@@ -20,9 +20,11 @@ const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const HOOKS_SOURCE_DIR = path.join(PROJECT_ROOT, 'assets', 'hooks');
 const SKILLS_SOURCE_DIR = path.join(PROJECT_ROOT, 'assets', 'skills');
+const PLUGINS_SOURCE_DIR = path.join(PROJECT_ROOT, 'assets', 'plugins');
 const LOONGSUITE_PILOT_DIR = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(process.env.HOME || '', '.loongsuite-pilot');
 const HOOKS_TARGET_DIR = path.join(LOONGSUITE_PILOT_DIR, 'hooks');
 const SKILLS_TARGET_DIR = path.join(LOONGSUITE_PILOT_DIR, 'skills');
+const PLUGINS_TARGET_DIR = path.join(LOONGSUITE_PILOT_DIR, 'plugins');
 
 /**
  * Ensure directory exists
@@ -120,6 +122,26 @@ function main() {
       console.log(`[loongsuite-pilot] Installed skill docs to ${SKILLS_TARGET_DIR}`);
     } catch (error) {
       console.error('[loongsuite-pilot] Failed to install skill docs:', error.message);
+    }
+  }
+
+  if (fs.existsSync(PLUGINS_SOURCE_DIR)) {
+    try {
+      fs.cpSync(PLUGINS_SOURCE_DIR, PLUGINS_TARGET_DIR, { recursive: true });
+      let pluginCount = 0;
+      function countPlugins(dir) {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (entry.isDirectory()) {
+            countPlugins(path.join(dir, entry.name));
+          } else if (entry.name.endsWith('.mjs') || entry.name.endsWith('.js')) {
+            pluginCount++;
+          }
+        }
+      }
+      countPlugins(PLUGINS_TARGET_DIR);
+      console.log(`[loongsuite-pilot] Installed ${pluginCount} plugin(s) to ${PLUGINS_TARGET_DIR}`);
+    } catch (error) {
+      console.error('[loongsuite-pilot] Failed to install plugins:', error.message);
     }
   }
 

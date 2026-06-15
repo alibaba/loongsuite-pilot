@@ -11,6 +11,9 @@ const TAG = '[validate-trace]';
 const OTLP_DEBUG_DIR = path.join(homedir(), '.loongsuite-pilot', 'logs', 'otlp-debug');
 const VALID_SPAN_KINDS = ['ENTRY', 'AGENT', 'STEP', 'LLM', 'TOOL', 'CHAIN', 'RETRIEVER', 'RERANKER', 'EMBEDDING', 'TASK'];
 const KNOWN_SUBAGENT_TOOLS = new Set(['Agent']);
+// TODO: remove 'tool_calls' once all producers are migrated to singular 'tool_call'
+const VALID_FINISH_REASONS = new Set(['stop', 'length', 'content_filter', 'tool_call', 'tool_calls', 'error', 'end_turn', 'max_tokens']);
+const VALID_PART_TYPES = new Set(['text', 'tool_call', 'tool_call_response', 'reasoning']);
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -544,13 +547,34 @@ function validateMessageField(attrs, key, ruleId, span, checks) {
       if (!msg.role) {
         checks.push(error(ruleId, `${key}[${i}] missing role`, span.spanId, span.name));
       }
-      if (ruleId === 'schema.output_messages' && msg.finish_reason === undefined) {
-        checks.push(warn(ruleId, `${key}[${i}] missing finish_reason`, span.spanId, span.name));
+      if (ruleId === 'schema.output_messages') {
+        if (msg.finish_reason === undefined) {
+          checks.push(warn(ruleId, `${key}[${i}] missing finish_reason`, span.spanId, span.name));
+        } else if (!VALID_FINISH_REASONS.has(msg.finish_reason)) {
+          checks.push(error(ruleId,
+            `${key}[${i}] finish_reason="${msg.finish_reason}" is not a valid FinishReason (expected: ${[...VALID_FINISH_REASONS].join(', ')})`,
+            span.spanId, span.name));
+        }
       }
       if (msg.parts && Array.isArray(msg.parts)) {
         for (let j = 0; j < msg.parts.length; j++) {
-          if (!msg.parts[j].type) {
+          const part = msg.parts[j];
+          if (!part.type) {
             checks.push(error(ruleId, `${key}[${i}].parts[${j}] missing type`, span.spanId, span.name));
+            continue;
+          }
+          if (VALID_PART_TYPES.has(part.type)) {
+            if (part.type === 'text' && part.content === undefined) {
+              checks.push(error(ruleId, `${key}[${i}].parts[${j}] TextPart missing required "content"`, span.spanId, span.name));
+            }
+            if (part.type === 'tool_call' && !part.id) {
+              checks.push(warn(ruleId, `${key}[${i}].parts[${j}] ToolCallPart missing "id"`, span.spanId, span.name));
+            }
+            if (part.type === 'tool_call_response' && !part.id) {
+              checks.push(warn(ruleId, `${key}[${i}].parts[${j}] ToolCallResponsePart missing "id"`, span.spanId, span.name));
+            }
+          } else {
+            checks.push(warn(ruleId, `${key}[${i}].parts[${j}] unknown part type="${part.type}"`, span.spanId, span.name));
           }
         }
       }
@@ -791,6 +815,23 @@ function validateSemantic(trace, rules) {
       } catch { /* skip parse errors */ }
     }
     if (allRolesOk) checks.push(pass('semantic.tool_response_role'));
+  }
+
+  // tool_has_arguments: TOOL spans should have gen_ai.tool.call.arguments
+  {
+    const toolSpans = spans.filter(s => s._kind === 'TOOL');
+    let allHaveArgs = true;
+    for (const t of toolSpans) {
+      const args = t.attributes?.['gen_ai.tool.call.arguments'];
+      if (args === undefined || args === null || args === '') {
+        checks.push(error('semantic.tool_has_arguments',
+          `TOOL ${t.attributes?.['gen_ai.tool.name'] || t.name} missing gen_ai.tool.call.arguments`,
+          t.spanId, t.name));
+        allHaveArgs = false;
+      }
+    }
+    if (allHaveArgs && toolSpans.length > 0) checks.push(pass('semantic.tool_has_arguments'));
+    if (toolSpans.length === 0) checks.push(pass('semantic.tool_has_arguments'));
   }
 
   // last_step_no_tool_call: last STEP's LLM output should not contain tool_call

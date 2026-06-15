@@ -60,7 +60,17 @@ export abstract class BaseSessionInput extends BaseInput {
       this.stateStore.update(stateKey, { extra: { inode: (stat as any).ino } });
     }
 
-    const offset = this.stateStore.getOffset(stateKey);
+    let offset = this.stateStore.getOffset(stateKey);
+    if (offset > 0 && stat.size < offset) {
+      this.logger.info('file truncated or rotated, resetting offset', {
+        file: filePath,
+        recorded: offset,
+        actual: stat.size,
+      });
+      offset = 0;
+      this.stateStore.setOffset(stateKey, 0);
+      this.stateStore.update(stateKey, { extra: { inode: Number((stat as any).ino) } });
+    }
     if (stat.size <= offset) return [];
 
     const handle = await fs.open(filePath, 'r');

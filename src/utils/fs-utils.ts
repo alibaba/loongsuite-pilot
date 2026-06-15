@@ -47,11 +47,26 @@ export async function writeJsonFile(
   path: string,
   data: unknown
 ): Promise<void> {
-  await ensureDir(nodePath.dirname(path));
+  const dir = nodePath.dirname(path);
+  await ensureDir(dir);
   const text = `${JSON.stringify(data, null, 2)}\n`;
-  const tmp = path + '.tmp';
-  await fsp.writeFile(tmp, text, 'utf8');
-  await fsp.rename(tmp, path);
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await fsp.writeFile(tmp, text, 'utf8');
+    await fsp.rename(tmp, path);
+  } catch (err: unknown) {
+    // Directory may vanish between ensureDir and write/rename (e.g. concurrent cleanup).
+    // Retry once after re-creating the directory.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      await fsp.unlink(tmp).catch(() => {});
+      await ensureDir(dir);
+      const tmp2 = `${path}.${process.pid}.${Date.now()}.tmp`;
+      await fsp.writeFile(tmp2, text, 'utf8');
+      await fsp.rename(tmp2, path);
+    } else {
+      throw err;
+    }
+  }
 }
 
 /**
