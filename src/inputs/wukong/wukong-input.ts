@@ -541,6 +541,12 @@ export class WukongInput extends BaseInput {
       for (const tc of toolCallParts) {
         outputParts.push({ type: tc.type, id: tc.id, name: tc.name });
       }
+      // For RUN_ERROR-only turns (no text, no tools), still populate
+      // output.messages with the error info so the LLM span has both
+      // input and output (satisfies semantic.llm_has_input_output).
+      if (outputParts.length === 0 && runError) {
+        outputParts.push({ type: 'text', content: `[error] ${runError.code}: ${runError.message}` });
+      }
 
       entries.push(buildAgentActivityEntry({
         timestamp: responseTimestamp,
@@ -876,6 +882,11 @@ export class WukongInput extends BaseInput {
       }
       for (const tc of toolCallParts) {
         outputParts.push({ type: tc.type, id: tc.id, name: tc.name });
+      }
+      // For RUN_ERROR-only turns, populate output.messages with error info
+      // so the LLM span has both input and output (validator constraint).
+      if (outputParts.length === 0 && runError) {
+        outputParts.push({ type: 'text', content: `[error] ${runError.code}: ${runError.message}` });
       }
 
       const responseEntry = buildAgentActivityEntry({
