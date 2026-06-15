@@ -832,6 +832,55 @@ export class WukongInput extends BaseInput {
       }
     }
 
+    // Enrich llm.request messages_delta with tool_call_response messages from prior step's tools.
+    // This makes messages_delta truly incremental: step 1 = user input, step 2+ = prior tool results.
+    const toolResultsByStep = new Map<string, Array<{ id: string; name: string; result: unknown }>>();
+    for (const entry of entries) {
+      if (entry['event.name'] !== 'tool.result') continue;
+      const sid = entry['gen_ai.step.id'];
+      if (typeof sid !== 'string' || !sid) continue;
+      const arr = toolResultsByStep.get(sid) ?? [];
+      arr.push({
+        id: String(entry['gen_ai.tool.call.id'] ?? ''),
+        name: String(entry['gen_ai.tool.name'] ?? ''),
+        result: entry['gen_ai.tool.call.result'],
+      });
+      toolResultsByStep.set(sid, arr);
+    }
+    // Get sorted step.ids by stepIndex (parsed from suffix :sN)
+    const stepIds = Array.from(new Set(entries
+      .map(e => e['gen_ai.step.id'])
+      .filter((s): s is string => typeof s === 'string' && !!s)
+    )).sort((a, b) => {
+      const na = parseInt(a.match(/:s(\d+)$/)?.[1] ?? '0', 10);
+      const nb = parseInt(b.match(/:s(\d+)$/)?.[1] ?? '0', 10);
+      return na - nb;
+    });
+    // For each step N>=2, prepend tool_call_response from step N-1 to its llm.request messages_delta
+    for (let i = 1; i < stepIds.length; i++) {
+      const prevStepId = stepIds[i - 1];
+      const curStepId = stepIds[i];
+      const priorTools = toolResultsByStep.get(prevStepId) ?? [];
+      if (priorTools.length === 0) continue;
+      const toolResponseMessages = priorTools.map(t => ({
+        role: 'tool',
+        parts: [{
+          type: 'tool_call_response',
+          id: t.id,
+          response: typeof t.result === 'string' ? t.result : JSON.stringify(t.result ?? ''),
+        }],
+      }));
+      // Find the llm.request for this step
+      for (const entry of entries) {
+        if (entry['event.name'] !== 'llm.request') continue;
+        if (entry['gen_ai.step.id'] !== curStepId) continue;
+        const existing = entry['gen_ai.input.messages_delta'];
+        const existingArr = Array.isArray(existing) ? existing : [];
+        entry['gen_ai.input.messages_delta'] = toJsonValue([...toolResponseMessages, ...existingArr]);
+        break;
+      }
+    }
+
     return entries;
   }
 
