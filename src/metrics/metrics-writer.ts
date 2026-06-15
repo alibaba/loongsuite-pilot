@@ -4,7 +4,7 @@ import { createLogger } from '../utils/logger.js';
 import { flattenToStrings } from '../utils/record-utils.js';
 import { sendAlarm, sendRunningStatus, sendStatus } from '../internal/sender.js';
 import { MetricsCollector } from './metrics-collector.js';
-import type { DataflowSnapshot } from './metrics-collector.js';
+import type { DataflowSnapshot, L1Metrics } from './metrics-collector.js';
 import type { AlarmManager } from './alarm-manager.js';
 import type { AgentsConfig } from '../types/index.js';
 
@@ -40,6 +40,7 @@ export class MetricsWriter {
     this.collector = new MetricsCollector({
       version: opts.version,
       userId: opts.userId,
+      dataDir: opts.dataDir,
       agentsConfig: opts.agentsConfig,
     });
     this.getSnapshot = opts.getSnapshot;
@@ -91,7 +92,7 @@ export class MetricsWriter {
 
       this.checkThresholds(metrics);
       this.checkUserId();
-
+      this.checkStartupMode(metrics);
       sendStatus('pilot_status', flattenToStrings(metrics));
       sendRunningStatus(flattenToStrings(metrics));
     } catch (err) {
@@ -127,6 +128,18 @@ export class MetricsWriter {
       this.alarmManager.record(
         'USER_ID_FORMAT_ALARM', '1',
         `userId "${userId}" contains braces, expected plain number like "123456"`,
+      );
+    }
+  }
+
+  private checkStartupMode(metrics: L1Metrics): void {
+    if (!this.alarmManager) return;
+
+    const initType = metrics.init_type;
+    if (initType === 'nohup' || initType === 'unknown') {
+      this.alarmManager.record(
+        'DEGRADED_STARTUP_ALARM', '2',
+        `Service started without autostart registration (init_type=${initType}), will not survive reboot`,
       );
     }
   }

@@ -18,6 +18,7 @@ const SELECTED_FIELDS = new Set([
   'os_detail',
   'metric_json',
   'agent_versions',
+  'init_type',
 ]);
 
 let callCount = 0;

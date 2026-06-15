@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import { MetricsWriter } from '../../../src/metrics/metrics-writer.js';
+import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -13,10 +14,11 @@ vi.mock('../../../src/utils/logger.js', () => ({
 
 const mockSendAlarm = vi.fn();
 const mockSendStatus = vi.fn();
+const mockSendRunningStatus = vi.fn();
 vi.mock('../../../src/internal/sender.js', () => ({
   sendAlarm: (...args: unknown[]) => mockSendAlarm(...args),
   sendStatus: (...args: unknown[]) => mockSendStatus(...args),
-  sendRunningStatus: vi.fn(),
+  sendRunningStatus: (...args: unknown[]) => mockSendRunningStatus(...args),
 }));
 
 function buildSnapshot(): DataflowSnapshot {
@@ -50,6 +52,7 @@ describe('MetricsWriter', () => {
     fs.mkdirSync(path.join(tmpDir, 'logs'), { recursive: true });
     mockSendAlarm.mockClear();
     mockSendStatus.mockClear();
+    mockSendRunningStatus.mockClear();
   });
 
   afterEach(async () => {
@@ -203,5 +206,85 @@ describe('MetricsWriter', () => {
     const flusherPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-flusher-metrics.jsonl');
     const flusherLine = JSON.parse(fs.readFileSync(flusherPath, 'utf-8').trim().split('\n')[0]);
     expect(flusherLine.user_id).toBe('u1');
+  });
+
+  describe('DEGRADED_STARTUP_ALARM', () => {
+    it('records alarm when init_type is nohup', async () => {
+      fs.writeFileSync(path.join(tmpDir, 'init-type'), 'nohup');
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      writer = new MetricsWriter({
+        dataDir: tmpDir,
+        version: '2.0.0',
+        userId: 'u1',
+        getSnapshot: buildSnapshot,
+        alarmManager,
+      });
+
+      vi.useRealTimers();
+      await writer.start();
+
+      const entries = alarmManager.serialize();
+      const alarm = entries.find(e => e.alarm_type === 'DEGRADED_STARTUP_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_level).toBe('2');
+      expect(alarm!.alarm_message).toContain('nohup');
+    });
+
+    it('records alarm when init_type is unknown (file missing)', async () => {
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      writer = new MetricsWriter({
+        dataDir: tmpDir,
+        version: '2.0.0',
+        userId: 'u1',
+        getSnapshot: buildSnapshot,
+        alarmManager,
+      });
+
+      vi.useRealTimers();
+      await writer.start();
+
+      const entries = alarmManager.serialize();
+      const alarm = entries.find(e => e.alarm_type === 'DEGRADED_STARTUP_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_message).toContain('unknown');
+    });
+
+    it('does not record alarm when init_type is launchd', async () => {
+      fs.writeFileSync(path.join(tmpDir, 'init-type'), 'launchd');
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      writer = new MetricsWriter({
+        dataDir: tmpDir,
+        version: '2.0.0',
+        userId: 'u1',
+        getSnapshot: buildSnapshot,
+        alarmManager,
+      });
+
+      vi.useRealTimers();
+      await writer.start();
+
+      const entries = alarmManager.serialize();
+      const alarm = entries.find(e => e.alarm_type === 'DEGRADED_STARTUP_ALARM');
+      expect(alarm).toBeUndefined();
+    });
+
+    it('does not record alarm when init_type is systemd-user', async () => {
+      fs.writeFileSync(path.join(tmpDir, 'init-type'), 'systemd-user');
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      writer = new MetricsWriter({
+        dataDir: tmpDir,
+        version: '2.0.0',
+        userId: 'u1',
+        getSnapshot: buildSnapshot,
+        alarmManager,
+      });
+
+      vi.useRealTimers();
+      await writer.start();
+
+      const entries = alarmManager.serialize();
+      const alarm = entries.find(e => e.alarm_type === 'DEGRADED_STARTUP_ALARM');
+      expect(alarm).toBeUndefined();
+    });
   });
 });

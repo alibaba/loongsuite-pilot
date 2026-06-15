@@ -36,6 +36,7 @@ export interface L1Metrics {
     out_failed_entries_total: string;
     last_flush_time: string;
   };
+  init_type: string;
   __time__: number;
 }
 
@@ -126,6 +127,7 @@ export class MetricsCollector {
   private readonly startTimestamp: number;
   private readonly instanceId: string;
   private readonly localIp: string;
+  private readonly initType: string;
 
   private lastCpuUsage: NodeJS.CpuUsage | null = null;
   private lastCpuTime = 0;
@@ -135,7 +137,7 @@ export class MetricsCollector {
   private prevSendEntries: number | null = null;
   private prevReceivedBytes: number | null = null;
 
-  constructor(opts: { version: string; userId: string; agentsConfig?: AgentsConfig }) {
+  constructor(opts: { version: string; userId: string; dataDir: string; agentsConfig?: AgentsConfig }) {
     this.version = opts.version;
     this.userId = opts.userId;
     this.agentsConfig = opts.agentsConfig ?? {};
@@ -143,7 +145,7 @@ export class MetricsCollector {
     this.startTime = formatTime(new Date());
     this.localIp = resolveLocalIp();
     this.instanceId = `${opts.userId}_${this.localIp}_${this.startTimestamp}`;
-
+    this.initType = readInitType(opts.dataDir);
   }
 
   getUserId(): string {
@@ -205,6 +207,7 @@ export class MetricsCollector {
         out_failed_entries_total: String(snapshot.flusherRunner.outFailed),
         last_flush_time: snapshot.flusherRunner.lastFlushTime,
       },
+      init_type: this.initType,
       __time__: Math.floor(now / 1000),
     };
   }
@@ -331,5 +334,14 @@ function getOpenFdCount(): number {
     }
   }
   return -1;
+}
+
+function readInitType(dataDir: string): string {
+  try {
+    const raw = fs.readFileSync(path.join(dataDir, 'init-type'), 'utf-8').trim();
+    return raw || 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 

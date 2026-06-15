@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { MetricsCollector } from '../../../src/metrics/metrics-collector.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
 
@@ -22,9 +25,15 @@ function buildSnapshot(overrides: Partial<DataflowSnapshot> = {}): DataflowSnaps
 
 describe('MetricsCollector', () => {
   let collector: MetricsCollector;
+  let tmpDir: string;
 
   beforeEach(() => {
-    collector = new MetricsCollector({ version: '1.0.0', userId: 'test-user' });
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metrics-collector-test-'));
+    collector = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   describe('collectL1', () => {
@@ -209,7 +218,7 @@ describe('MetricsCollector', () => {
       let clock = 1_000_000;
       const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
 
-      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user' });
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
 
       // First collectL1 → calcCpuPercent seeds baseline, returns 0
       cpuSpy.mockReturnValueOnce({ user: 0, system: 0 });
@@ -258,6 +267,30 @@ describe('MetricsCollector', () => {
 
     it('returns empty when no inputs', () => {
       expect(collector.collectL2Alarms(buildSnapshot())).toEqual([]);
+    });
+  });
+
+  describe('init_type', () => {
+    it('reads launchd from init-type file', () => {
+      fs.writeFileSync(path.join(tmpDir, 'init-type'), 'launchd');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).init_type).toBe('launchd');
+    });
+
+    it('reads nohup from init-type file', () => {
+      fs.writeFileSync(path.join(tmpDir, 'init-type'), 'nohup');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).init_type).toBe('nohup');
+    });
+
+    it('defaults to unknown when init-type file does not exist', () => {
+      expect(collector.collectL1(buildSnapshot()).init_type).toBe('unknown');
+    });
+
+    it('defaults to unknown when init-type file is empty', () => {
+      fs.writeFileSync(path.join(tmpDir, 'init-type'), '');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).init_type).toBe('unknown');
     });
   });
 });
