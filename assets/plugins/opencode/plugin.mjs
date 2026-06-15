@@ -827,10 +827,7 @@ export default {
             if (props.sessionID) {
               const s = sessions.get(props.sessionID);
               if (s && s.pendingParts && s.pendingParts.length > 0) {
-                safeLog("warn", `session ${eventName}: discarding ${s.pendingParts.length} unflushed pending part(s)`, {
-                  sessionID: props.sessionID,
-                  pendingPartTypes: s.pendingParts.map(p => p.type || "unknown"),
-                });
+                writeError("session-cleanup", `session ${type}: discarding ${s.pendingParts.length} unflushed pending part(s) [${s.pendingParts.map(p => p.kind || "unknown").join(",")}]`);
               }
               clearSession(props.sessionID);
             }

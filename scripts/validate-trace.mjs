@@ -11,7 +11,8 @@ const TAG = '[validate-trace]';
 const OTLP_DEBUG_DIR = path.join(homedir(), '.loongsuite-pilot', 'logs', 'otlp-debug');
 const VALID_SPAN_KINDS = ['ENTRY', 'AGENT', 'STEP', 'LLM', 'TOOL', 'CHAIN', 'RETRIEVER', 'RERANKER', 'EMBEDDING', 'TASK'];
 const KNOWN_SUBAGENT_TOOLS = new Set(['Agent']);
-const VALID_FINISH_REASONS = new Set(['stop', 'length', 'content_filter', 'tool_call', 'error', 'end_turn', 'max_tokens']);
+// TODO: remove 'tool_calls' once all producers are migrated to singular 'tool_call'
+const VALID_FINISH_REASONS = new Set(['stop', 'length', 'content_filter', 'tool_call', 'tool_calls', 'error', 'end_turn', 'max_tokens']);
 const VALID_PART_TYPES = new Set(['text', 'tool_call', 'tool_call_response', 'reasoning']);
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────

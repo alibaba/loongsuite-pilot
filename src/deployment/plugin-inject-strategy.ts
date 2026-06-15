@@ -90,7 +90,8 @@ export class PluginInjectStrategy implements DeployStrategy {
     try {
       const raw = await fs.readFile(configPath, 'utf-8');
       const json = JSON.parse(stripJsoncComments(raw));
-      const plugins: unknown[] = json.plugin ?? json.plugins ?? [];
+      const pluginKey = this.resolvePluginKey(json);
+      const plugins: unknown[] = json[pluginKey] ?? [];
       if (!Array.isArray(plugins)) return true;
 
       const resolvedSpec = this.resolveSpec(config.pluginSpec);
@@ -120,16 +121,17 @@ export class PluginInjectStrategy implements DeployStrategy {
 
       const raw = await fs.readFile(configPath, 'utf-8');
       const json = JSON.parse(stripJsoncComments(raw));
+      const pluginKey = this.resolvePluginKey(json);
 
-      if (!Array.isArray(json.plugin)) {
-        json.plugin = [];
+      if (!Array.isArray(json[pluginKey])) {
+        json[pluginKey] = [];
       }
 
       const resolvedSpec = this.resolveSpec(config.pluginSpec);
 
       // Remove old/replaced specs
       if (config.replaceSpecs?.length) {
-        json.plugin = (json.plugin as unknown[]).filter((entry) => {
+        json[pluginKey] = (json[pluginKey] as unknown[]).filter((entry) => {
           const entryStr = typeof entry === 'string' ? entry : Array.isArray(entry) ? entry[0] : '';
           return !config.replaceSpecs!.some((old) =>
             typeof entryStr === 'string' && entryStr.includes(old),
@@ -138,17 +140,19 @@ export class PluginInjectStrategy implements DeployStrategy {
       }
 
       // Remove existing matching spec to avoid duplicates
-      json.plugin = (json.plugin as unknown[]).filter(
+      json[pluginKey] = (json[pluginKey] as unknown[]).filter(
         (entry) => !this.matchesSpec(entry, resolvedSpec, config.pluginId),
       );
 
-      json.plugin.push(resolvedSpec);
+      json[pluginKey].push(resolvedSpec);
+
+      const hasComments = raw !== JSON.stringify(JSON.parse(stripJsoncComments(raw)), null, 2) + '\n';
+      if (hasComments) {
+        logger.warn('config will be rewritten as JSON; JSONC comments in the original file will be removed', { configPath });
+        await fs.writeFile(configPath + '.bak', raw, 'utf-8');
+      }
 
       await fs.writeFile(configPath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
-
-      if (raw !== JSON.stringify(JSON.parse(stripJsoncComments(raw)), null, 2) + '\n') {
-        logger.warn('config rewritten as JSON; JSONC comments in the original file have been removed', { configPath });
-      }
       logger.info('plugin injected', { agentId: def.id, configPath, spec: resolvedSpec });
       return { success: true, agentId: def.id, deployMode: 'plugin-inject' };
     } catch (err) {
@@ -166,16 +170,22 @@ export class PluginInjectStrategy implements DeployStrategy {
 
       const raw = await fs.readFile(configPath, 'utf-8');
       const json = JSON.parse(stripJsoncComments(raw));
+      const pluginKey = this.resolvePluginKey(json);
 
-      if (!Array.isArray(json.plugin)) return true;
+      if (!Array.isArray(json[pluginKey])) return true;
 
       const resolvedSpec = this.resolveSpec(config.pluginSpec);
-      const before = json.plugin.length;
-      json.plugin = (json.plugin as unknown[]).filter(
+      const before = (json[pluginKey] as unknown[]).length;
+      json[pluginKey] = (json[pluginKey] as unknown[]).filter(
         (entry) => !this.matchesSpec(entry, resolvedSpec, config.pluginId),
       );
 
-      if (json.plugin.length < before) {
+      if ((json[pluginKey] as unknown[]).length < before) {
+        const hasComments = raw !== JSON.stringify(JSON.parse(stripJsoncComments(raw)), null, 2) + '\n';
+        if (hasComments) {
+          logger.warn('config will be rewritten as JSON; JSONC comments in the original file will be removed', { configPath });
+          await fs.writeFile(configPath + '.bak', raw, 'utf-8');
+        }
         await fs.writeFile(configPath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
         logger.info('plugin removed', { agentId: def.id, configPath });
       }
@@ -193,6 +203,11 @@ export class PluginInjectStrategy implements DeployStrategy {
       if (await fileExists(resolved)) return resolved;
     }
     return null;
+  }
+
+  private resolvePluginKey(json: Record<string, unknown>): string {
+    if (Array.isArray(json.plugins)) return 'plugins';
+    return 'plugin';
   }
 
   private resolveSpec(spec: string): string {
