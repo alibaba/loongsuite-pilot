@@ -16,7 +16,7 @@ jobs:
         run: |
           set -e
           GITHUB_URL="https://github.com/alibaba/loongsuite-pilot.git"
-          git remote add github "$GITHUB_URL" 2>/dev/null || true
+          git remote set-url github "$GITHUB_URL" 2>/dev/null || git remote add github "$GITHUB_URL"
           git fetch github main
 
       - id: cherry-pick
@@ -35,6 +35,16 @@ jobs:
             LAST_SHA="$BASELINE"
           fi
 
+          if ! git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
+            echo "⚠️ Marker SHA ${LAST_SHA} 无效，回退到 baseline"
+            LAST_SHA="$BASELINE"
+          fi
+
+          if ! git merge-base --is-ancestor "$LAST_SHA" github/main 2>/dev/null; then
+            echo "⚠️ Marker SHA ${LAST_SHA} 不在 github/main 历史中，回退到 baseline"
+            LAST_SHA="$BASELINE"
+          fi
+
           COMMITS=$(git rev-list --first-parent --reverse "${LAST_SHA}..github/main")
 
           if [ -z "$COMMITS" ]; then
@@ -44,7 +54,7 @@ jobs:
           fi
 
           TOTAL=$(echo "$COMMITS" | wc -l | tr -d ' ')
-          echo "待同步: $TOTAL 个 commit"
+          echo "待同步: $TOTAL 个 commit (从 ${LAST_SHA:0:7} 开始)"
 
           COUNT=0
           SKIPPED=0
@@ -63,17 +73,18 @@ jobs:
             fi
 
             if ! git cherry-pick $PICK_ARGS "$SHA"; then
-              if git diff --quiet HEAD 2>/dev/null; then
-                echo "⏭ 空 cherry-pick（改动已存在），跳过"
-                git cherry-pick --skip 2>/dev/null || git cherry-pick --abort
-                SKIPPED=$((SKIPPED + 1))
-                LAST_SUCCESS_GITHUB_SHA="$SHA"
-                continue
+              UNMERGED=$(git diff --name-only --diff-filter=U 2>/dev/null | wc -l | tr -d ' ')
+              if [ "$UNMERGED" -gt 0 ]; then
+                FAILED_SHA="$SHA"
+                echo "❌ cherry-pick 冲突 ($UNMERGED 个文件): ${SHA:0:7} $SUBJECT"
+                git cherry-pick --abort 2>/dev/null || true
+                break
               fi
-              FAILED_SHA="$SHA"
-              echo "❌ cherry-pick 冲突: ${SHA:0:7} $SUBJECT"
-              git cherry-pick --abort
-              break
+              echo "⏭ 空 cherry-pick（改动已存在），跳过"
+              git cherry-pick --skip
+              SKIPPED=$((SKIPPED + 1))
+              LAST_SUCCESS_GITHUB_SHA="$SHA"
+              continue
             fi
             LAST_SUCCESS_GITHUB_SHA="$SHA"
           done
@@ -81,10 +92,14 @@ jobs:
           if [ -n "$LAST_SUCCESS_GITHUB_SHA" ]; then
             echo "$LAST_SUCCESS_GITHUB_SHA" > "$MARKER"
             git add "$MARKER"
-            git commit -m "chore: update opensource sync state to ${LAST_SUCCESS_GITHUB_SHA:0:7}"
+            git diff --cached --quiet || git commit -m "chore: update opensource sync state to ${LAST_SUCCESS_GITHUB_SHA:0:7}"
           fi
 
-          echo "✅ 同步完成: $TOTAL 个 commit ($SKIPPED 个已存在被跳过)"
+          APPLIED=$((COUNT - SKIPPED))
+          if [ -n "$FAILED_SHA" ]; then
+            APPLIED=$((APPLIED - 1))
+          fi
+          echo "✅ 同步完成: $COUNT/$TOTAL 个 commit 已处理 ($APPLIED 个应用, $SKIPPED 个已存在被跳过)"
 
           if [ -n "$FAILED_SHA" ]; then
             SUBJECT=$(git log -1 --format='%s' "$FAILED_SHA")
