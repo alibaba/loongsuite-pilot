@@ -422,7 +422,7 @@ describe('WukongInput', () => {
     expect(sessionIds.has('sess-1')).toBe(true);
   });
 
-  it('prunes seenCounts for sessions no longer in task list', async () => {
+  it('does not prune seenCounts on first miss (grace window)', async () => {
     mockExecFile.mockImplementation(makeExecFileImpl({
       list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
       get_spark_agui_messages: JSON.stringify({ messages: SAMPLE_MESSAGES }),
@@ -437,8 +437,12 @@ describe('WukongInput', () => {
 
     const state = stateStore.get('wukong');
     const seenCounts = (state.extra as any).seenCounts;
+    const staleCounters = (state.extra as any).staleCounters ?? {};
+    // Active session unchanged
     expect(seenCounts['sess-1']).toBe(2);
-    expect(seenCounts['stale-sess']).toBeUndefined();
+    // Missing session is NOT pruned on first miss; staleCounter increments to 1
+    expect(seenCounts['stale-sess']).toBe(10);
+    expect(staleCounters['stale-sess']).toBe(1);
   });
 
   it('marks tool.result.status as failure when event has error', async () => {
@@ -730,8 +734,20 @@ describe('WukongInput', () => {
     const toolResult = entries.find(e => e['event.name'] === 'tool.result');
     expect(toolResult!['gen_ai.step.id']).toBe('sess-1:t1:s1');
 
-    const respEntry = entries.find(e => e['event.name'] === 'llm.response');
-    expect(respEntry!['gen_ai.step.id']).toBe('sess-1:t1:s2');
+    // Per-step LLM emission: each STEP_FINISHED emits its own llm.response
+    const llmResponses = entries.filter(e => e['event.name'] === 'llm.response');
+    expect(llmResponses).toHaveLength(2);
+    const respS1 = llmResponses.find(e => e['gen_ai.step.id'] === 'sess-1:t1:s1');
+    const respS2 = llmResponses.find(e => e['gen_ai.step.id'] === 'sess-1:t1:s2');
+    expect(respS1).toBeDefined();
+    expect(respS2).toBeDefined();
+    // s1 had a tool call → finish_reasons = tool_calls
+    expect(respS1!['gen_ai.response.finish_reasons']).toEqual(['tool_calls']);
+    // s2 was text-only and is the final step → finish_reasons = end_turn
+    expect(respS2!['gen_ai.response.finish_reasons']).toEqual(['end_turn']);
+    // Real USAGE captured for s2 (no longer zeroed by orphan-synthesis fallback)
+    expect(respS2!['gen_ai.usage.input_tokens']).toBe(200);
+    expect(respS2!['gen_ai.usage.output_tokens']).toBe(30);
   });
 
   it('sets finish_reasons to ["tool_calls"] when step has tool calls', async () => {
@@ -1105,5 +1121,181 @@ describe('WukongInput', () => {
 
     const toolResult = entries.find(e => e['event.name'] === 'tool.result');
     expect(toolResult!['gen_ai.tool.name']).toBe('web_search');
+  });
+
+  it('emits llm.response for RUN_ERROR-only assistant turn (no text/tools)', async () => {
+    const errMessages = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-erronly',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-eo', threadId: 'sess-1', timestamp: 1779240560000 },
+          { type: 'RUN_ERROR', code: 'CANCELLED', message: '任务被取消', runId: 'run-eo', timestamp: 1779240560100 },
+          { type: 'RUN_FINISHED', runId: 'run-eo', threadId: 'sess-1', timestamp: 1779240560100 },
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: errMessages }),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const respEntry = entries.find(e => e['event.name'] === 'llm.response');
+    expect(respEntry).toBeDefined();
+    expect(respEntry!['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    expect(respEntry!['error.type']).toBe('CANCELLED');
+    expect(respEntry!['error.message']).toBe('任务被取消');
+  });
+
+  it('handles task with null/missing metadata gracefully', async () => {
+    const taskWithBadMeta = { ...SAMPLE_TASK, metadata: null as any };
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [taskWithBadMeta] }),
+      get_spark_agui_messages: JSON.stringify({ messages: SAMPLE_MESSAGES }),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    // Should not throw; should still emit llm.response with model='unknown'
+    const respEntry = entries.find(e => e['event.name'] === 'llm.response');
+    expect(respEntry).toBeDefined();
+    expect(respEntry!['gen_ai.request.model']).toBe('unknown');
+  });
+
+  it('sanitizes invalid evt.timestamp to msg.createdAt', async () => {
+    const badTsMessages = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-bad-ts',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-bad', threadId: 'sess-1', timestamp: 'not-a-number' as any },
+          { type: 'TEXT_MESSAGE_CONTENT', delta: 'hi', messageId: 'text-1', timestamp: null as any },
+          { type: 'USAGE', prompt_tokens: 50, completion_tokens: 5, total_tokens: 55, timestamp: 1779240560700 },
+          { type: 'RUN_FINISHED', runId: 'run-bad', threadId: 'sess-1', timestamp: undefined as any },
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: badTsMessages }),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    // Should not crash; entries should have finite time_unix_nano
+    const respEntry = entries.find(e => e['event.name'] === 'llm.response');
+    expect(respEntry).toBeDefined();
+    const ts = String(respEntry!['time_unix_nano']);
+    expect(ts).not.toContain('NaN');
+    expect(Number.isFinite(Number(ts))).toBe(true);
+  });
+
+  it('STEP_FINISHED captures per-step USAGE so each step has real tokens', async () => {
+    const multiStepMsgs = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-multistep',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-ms', threadId: 'sess-1', timestamp: 1779240560000 },
+          // Step 1: tool call with USAGE
+          { type: 'STEP_STARTED', messageId: 'step-1', stepName: 'Search', timestamp: 1779240560010 },
+          { type: 'TOOL_CALL_START', toolCallId: 'tc-1', toolName: 'search', timestamp: 1779240560020 },
+          { type: 'TOOL_CALL_END', toolCallId: 'tc-1', toolName: 'search', result: 'data', timestamp: 1779240560100 },
+          { type: 'USAGE', prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, timestamp: 1779240560110 },
+          { type: 'STEP_FINISHED', messageId: 'step-1', timestamp: 1779240560120 },
+          // Step 2: text only with different USAGE
+          { type: 'STEP_STARTED', messageId: 'step-2', stepName: 'Answer', timestamp: 1779240560200 },
+          { type: 'TEXT_MESSAGE_CONTENT', delta: 'Final answer', messageId: 'text-1', timestamp: 1779240560300 },
+          { type: 'USAGE', prompt_tokens: 250, completion_tokens: 50, total_tokens: 300, timestamp: 1779240560400 },
+          { type: 'STEP_FINISHED', messageId: 'step-2', timestamp: 1779240560400 },
+          { type: 'RUN_FINISHED', runId: 'run-ms', threadId: 'sess-1', timestamp: 1779240560500 },
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: multiStepMsgs }),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const llmResponses = entries.filter(e => e['event.name'] === 'llm.response');
+    expect(llmResponses).toHaveLength(2);
+    const respS1 = llmResponses.find(e => e['gen_ai.step.id'] === 'sess-1:t1:s1')!;
+    const respS2 = llmResponses.find(e => e['gen_ai.step.id'] === 'sess-1:t1:s2')!;
+    // Each step captured its own real USAGE (not zeroed by orphan-synthesis fallback)
+    expect(respS1['gen_ai.usage.input_tokens']).toBe(100);
+    expect(respS1['gen_ai.usage.output_tokens']).toBe(20);
+    expect(respS2['gen_ai.usage.input_tokens']).toBe(250);
+    expect(respS2['gen_ai.usage.output_tokens']).toBe(50);
+    // s1 has tool_calls finish, s2 has end_turn
+    expect(respS1['gen_ai.response.finish_reasons']).toEqual(['tool_calls']);
+    expect(respS2['gen_ai.response.finish_reasons']).toEqual(['end_turn']);
+  });
+
+  it('prunes seenCounts after STALE_PRUNE_THRESHOLD consecutive misses', async () => {
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: SAMPLE_MESSAGES }),
+    }));
+
+    createInput();
+    // Pre-seed with stale counter at threshold-1 → next miss should prune
+    stateStore.update('wukong', {
+      extra: { seenCounts: { 'sess-1': 2, 'stale-sess': 10 }, staleCounters: { 'stale-sess': 4 } },
+    });
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const state = stateStore.get('wukong');
+    const seenCounts = (state.extra as any).seenCounts;
+    const staleCounters = (state.extra as any).staleCounters ?? {};
+    expect(seenCounts['stale-sess']).toBeUndefined();
+    expect(staleCounters['stale-sess']).toBeUndefined();
   });
 });

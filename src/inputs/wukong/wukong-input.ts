@@ -15,7 +15,13 @@ const CLI_TIMEOUT_MS = 10_000;
 const TASK_BATCH_LIMIT = 50;
 const MAX_TASKS = 500;
 const BASELINE_CONCURRENCY = 5;
+const COLLECT_CONCURRENCY = 5;
 const DAEMON_SOCK_REL = '.real/daemon.sock';
+// Number of consecutive list_tasks cycles a session must be absent before pruning its cursor.
+// Prevents churn when sessions transiently fall off pagination or the daemon flakes.
+const STALE_PRUNE_THRESHOLD = 5;
+// listAllTasks may return large payloads with full task metadata; align maxBuffer with getMessages.
+const CLI_MAX_BUFFER = 10 * 1024 * 1024;
 
 interface WukongTask {
   id: string;
@@ -91,7 +97,9 @@ export class WukongInput extends BaseInput {
   readonly collectionMethod = CollectionMethod.CliApiPolling;
 
   private readonly cliPath: string;
-  private _collecting = false;
+  private _collectInFlight: Promise<AgentActivityEntry[]> | null = null;
+  private _abortController = new AbortController();
+  private _lastSkipWarnAt = 0;
 
   constructor(opts: WukongInputOptions) {
     super(opts);
@@ -107,12 +115,11 @@ export class WukongInput extends BaseInput {
   }
 
   static getWatchPaths(): string[] {
-    const home = process.env.HOME ?? '';
-    return [path.join(home, DAEMON_SOCK_REL)];
+    return [path.join(os.homedir(), DAEMON_SOCK_REL)];
   }
 
   static async checkAvailability(): Promise<boolean> {
-    const sockPath = path.join(process.env.HOME ?? '', DAEMON_SOCK_REL);
+    const sockPath = path.join(os.homedir(), DAEMON_SOCK_REL);
     try {
       await fsp.access(sockPath);
     } catch {
@@ -161,13 +168,46 @@ export class WukongInput extends BaseInput {
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
-    if (this._collecting) return [];
-    this._collecting = true;
-    try {
-      return await this.doCollect();
-    } finally {
-      this._collecting = false;
+    if (this._collectInFlight) {
+      // Observability: a previous cycle is still running. Rate-limit warnings to once per minute.
+      const now = Date.now();
+      if (now - this._lastSkipWarnAt > 60_000) {
+        this._lastSkipWarnAt = now;
+        this.logger.warn('skip collect: previous cycle still running', {
+          pollIntervalMs: this.pollIntervalMs,
+        });
+      }
+      return [];
     }
+    const startedAt = Date.now();
+    this._collectInFlight = this.doCollect();
+    try {
+      const result = await this._collectInFlight;
+      const elapsed = Date.now() - startedAt;
+      if (elapsed > this.pollIntervalMs) {
+        this.logger.warn('collect cycle exceeded poll interval', {
+          elapsedMs: elapsed,
+          pollIntervalMs: this.pollIntervalMs,
+        });
+      }
+      return result;
+    } finally {
+      this._collectInFlight = null;
+    }
+  }
+
+  protected override async onStop(): Promise<void> {
+    // Abort in-flight execFile children and wait for the cycle to settle.
+    this._abortController.abort();
+    if (this._collectInFlight) {
+      try {
+        await this._collectInFlight;
+      } catch {
+        // ignore — already logged inside doCollect
+      }
+    }
+    // Reset for potential subsequent start()
+    this._abortController = new AbortController();
   }
 
   private async doCollect(): Promise<AgentActivityEntry[]> {
@@ -190,58 +230,109 @@ export class WukongInput extends BaseInput {
     const entries: AgentActivityEntry[] = [];
     let stateChanged = false;
 
-    for (const task of tasks) {
-      const prevCount = seenCounts[task.session_id] ?? 0;
-
-      let messages: WukongMessage[];
-      try {
-        const messagesResp = await this.getMessages(task.session_id);
-        messages = messagesResp.messages;
-      } catch (err) {
-        this.logger.warn('failed to fetch messages for task', {
-          taskId: task.id,
-          error: String(err),
-        });
-        continue;
+    // Process tasks in concurrent batches (parallel within batch, sequential between batches)
+    // — mirrors the BASELINE_CONCURRENCY pattern in onStart.
+    for (let i = 0; i < tasks.length; i += COLLECT_CONCURRENCY) {
+      // Cooperative cancellation: stop processing more batches if shutdown signaled
+      if (!this.running) break;
+      const batch = tasks.slice(i, i + COLLECT_CONCURRENCY);
+      const results = await Promise.allSettled(
+        batch.map(task => this.processOneTask(task, seenCounts[task.session_id] ?? 0)),
+      );
+      let batchChanged = false;
+      for (let j = 0; j < batch.length; j++) {
+        const r = results[j];
+        const task = batch[j];
+        if (r.status === 'fulfilled') {
+          if (r.value) {
+            entries.push(...r.value.entries);
+            seenCounts[task.session_id] = r.value.newSeenCount;
+            batchChanged = true;
+          }
+        } else {
+          this.logger.warn('failed to process task', {
+            taskId: task.id,
+            sessionId: task.session_id,
+            error: String(r.reason),
+          });
+        }
       }
-
-      if (messages.length <= prevCount) continue;
-
-      const newMessages = messages.slice(prevCount);
-
-      // Only process completed messages to avoid the token race condition.
-      // An incomplete assistant message (still streaming) will be retried next poll.
-      const lastCompleteIdx = findLastCompleteIndex(newMessages);
-      if (lastCompleteIdx < 0) continue;
-
-      const processable = newMessages.slice(0, lastCompleteIdx + 1);
-      const taskEntries = this.transformMessages(task, processable);
-      entries.push(...taskEntries);
-
-      seenCounts[task.session_id] = prevCount + processable.length;
-      stateChanged = true;
+      if (batchChanged) stateChanged = true;
+      // Persist incrementally: a mid-cycle kill should not lose all batch progress.
+      if (batchChanged) {
+        this.stateStore.update(this.id, { extra: { seenCounts } });
+      }
     }
 
     // Prune seenCounts entries for tasks no longer returned by the API.
+    // Use a grace window: only delete after STALE_PRUNE_THRESHOLD consecutive
+    // missed cycles, to avoid churn when sessions transiently fall off pagination.
+    const staleCounters: Record<string, number> =
+      (state.extra?.staleCounters != null && typeof state.extra.staleCounters === 'object')
+        ? { ...(state.extra.staleCounters as Record<string, number>) }
+        : {};
     const activeIds = new Set(tasks.map(t => t.session_id));
     for (const key of Object.keys(seenCounts)) {
-      if (!activeIds.has(key)) {
+      if (activeIds.has(key)) {
+        if (staleCounters[key] !== undefined) {
+          delete staleCounters[key];
+          stateChanged = true;
+        }
+        continue;
+      }
+      const missed = (staleCounters[key] ?? 0) + 1;
+      if (missed >= STALE_PRUNE_THRESHOLD) {
         delete seenCounts[key];
+        delete staleCounters[key];
+        stateChanged = true;
+      } else {
+        staleCounters[key] = missed;
+        stateChanged = true;
+      }
+    }
+    // Drop staleCounters that are no longer tied to any tracked seenCounts entry
+    for (const key of Object.keys(staleCounters)) {
+      if (seenCounts[key] === undefined) {
+        delete staleCounters[key];
         stateChanged = true;
       }
     }
 
     if (stateChanged) {
-      this.stateStore.update(this.id, { extra: { seenCounts } });
+      this.stateStore.update(this.id, { extra: { seenCounts, staleCounters } });
     }
     return entries;
+  }
+
+  private async processOneTask(
+    task: WukongTask,
+    prevCount: number,
+  ): Promise<{ entries: AgentActivityEntry[]; newSeenCount: number } | null> {
+    const messagesResp = await this.getMessages(task.session_id);
+    const messages = messagesResp.messages;
+
+    if (messages.length <= prevCount) return null;
+
+    const newMessages = messages.slice(prevCount);
+
+    // Only process completed messages to avoid the token race condition.
+    // An incomplete assistant message (still streaming) will be retried next poll.
+    const lastCompleteIdx = findLastCompleteIndex(newMessages);
+    if (lastCompleteIdx < 0) return null;
+
+    const processable = newMessages.slice(0, lastCompleteIdx + 1);
+    const entries = this.transformMessages(task, processable);
+    return { entries, newSeenCount: prevCount + processable.length };
   }
 
   private transformMessages(task: WukongTask, messages: WukongMessage[]): AgentActivityEntry[] {
     const entries: AgentActivityEntry[] = [];
     const sessionId = task.session_id;
-    const model = task.metadata.modelName ?? 'unknown';
-    const provider = task.metadata.modelProvider ?? undefined;
+    const meta = (task.metadata && typeof task.metadata === 'object')
+      ? task.metadata as Record<string, unknown>
+      : {};
+    const model = (typeof meta.modelName === 'string' && meta.modelName) ? meta.modelName : 'unknown';
+    const provider = (typeof meta.modelProvider === 'string' && meta.modelProvider) ? meta.modelProvider : undefined;
     const hostname = os.hostname();
 
     const commonFields = {
@@ -282,14 +373,6 @@ export class WukongInput extends BaseInput {
           continue;
         }
 
-        // Extract trace_id and first step.id from the assistant's entries for user message linkage
-        const firstAssistantEntry = turnEntries[0];
-        const traceId = firstAssistantEntry?.['trace_id'] as string | undefined;
-        const firstStepId = turnEntries.find(e =>
-          e['gen_ai.step.id'])?.['gen_ai.step.id'] as string | undefined;
-        const stepSpanId = firstAssistantEntry?.['parent_span_id'] as string | undefined;
-        void traceId; void firstStepId; void stepSpanId;
-
         // User content is already merged into step 1's llm.request gen_ai.input.messages_delta.
         // The OTLP converter falls back to that for ENTRY input.messages. So we don't
         // emit a separate user-hook llm.request — this avoids events without step.id
@@ -298,7 +381,12 @@ export class WukongInput extends BaseInput {
 
         entries.push(...turnEntries);
       } catch (err) {
-        this.logger.warn('failed to transform message', { msgId: msg.id, error: String(err) });
+        this.logger.warn('failed to transform message', {
+          taskId: task.id,
+          sessionId: task.session_id,
+          msgId: msg.id,
+          error: String(err),
+        });
       }
     }
 
@@ -310,38 +398,6 @@ export class WukongInput extends BaseInput {
     // logic in doCollect already handles this via isMessageComplete checks.
 
     return entries;
-  }
-
-  private buildUserRequestEntry(
-    task: WukongTask,
-    msg: WukongMessage,
-    model: string,
-    turnId: string,
-    common: Record<string, unknown>,
-    traceId: string | undefined,
-    stepId: string | undefined,
-    parentSpanId: string | undefined,
-  ): AgentActivityEntry {
-    // User-hook pattern: emit llm.request without step.id and without model.
-    // The OTLP converter (partitionUserHookRequests) will merge these into ENTRY
-    // rather than creating phantom LLM spans.
-    void model; void stepId; void parentSpanId;
-    return buildAgentActivityEntry({
-      timestamp: msg.createdAt,
-      'event.id': hashId([task.session_id, msg.id, 'user']),
-      'event.name': 'llm.request',
-      ...common,
-      'gen_ai.turn.id': turnId,
-      'gen_ai.input.messages_delta': [
-        { role: 'user', parts: [{ type: 'text', content: msg.content }] },
-      ],
-      ...(traceId ? { 'trace_id': traceId } : {}),
-      attributes: {
-        source: 'wukong',
-        message_id: msg.id,
-        conversation_id: msg.conversationId,
-      },
-    });
   }
 
   private transformAssistantMessage(
@@ -422,14 +478,137 @@ export class WukongInput extends BaseInput {
       };
     }
 
-    for (const evt of events) {
+    // Track step.ids that have been flushed by flushStepLlm so the post-loop
+    // main emit block does not double-emit for those steps.
+    const flushedStepIds = new Set<string>();
+
+    // flushStepLlm: emit the paired llm.request + llm.response for the current step
+    // using the currently-accumulated step state, then clear per-step accumulators.
+    // Called from STEP_FINISHED so each step gets its own real token/text/error data
+    // (instead of only the last step capturing it). Returns true if it emitted.
+    const flushStepLlm = (): boolean => {
+      if (!currentStep) return false;
+      const hasContent = !!textContent || !!usageEvent || toolCallParts.length > 0 || !!runError;
+      if (!hasContent) return false;
+
+      const finishReasons = this.inferFinishReasons(currentStep.hasToolCalls, runError);
+      const llmSpanId = generateSpanId();
+
+      const inputTokens = numOr(usageEvent?.prompt_tokens) ?? 0;
+      const outputTokens = numOr(usageEvent?.completion_tokens) ?? 0;
+      const cachedTokens = numOr(usageEvent?.cached_tokens) ?? 0;
+      const totalTokens = numOr(usageEvent?.total_tokens) ?? (inputTokens + outputTokens);
+
+      const requestTimestamp = Math.max(currentStep.startTimestamp, runStartedTs ?? 0) || msg.createdAt;
+      // For tool-calling step: response just before first tool. Else: max of req+1, runFinishedTs.
+      let responseTimestamp: number;
+      if (currentStep.hasToolCalls && allToolStartTimes.length > 0) {
+        const firstToolTs = Math.min(...allToolStartTimes);
+        responseTimestamp = Math.max(requestTimestamp + 1, firstToolTs - 1);
+      } else if (currentStep.hasToolCalls) {
+        responseTimestamp = requestTimestamp + 1;
+      } else {
+        responseTimestamp = Math.max(requestTimestamp + 1, runFinishedTs ?? msg.createdAt);
+      }
+
+      // Only inject userContent on step 1 (it's a turn-level prompt, not per-step)
+      const includeUserContent = !!userContent && currentStep.stepIndex === 1;
+
+      entries.push(buildAgentActivityEntry({
+        timestamp: requestTimestamp,
+        'event.id': hashId([sessionId, msg.id, 'request', String(currentStep.stepIndex)]),
+        'event.name': 'llm.request',
+        ...common,
+        'gen_ai.turn.id': turnId,
+        'gen_ai.step.id': currentStep.stepId,
+        'gen_ai.request.model': model,
+        'gen_ai.response.id': runId,
+        'trace_id': traceId,
+        ...(includeUserContent ? {
+          'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: userContent }] },
+          ],
+        } : {}),
+        attributes: {
+          source: 'wukong',
+          message_id: msg.id,
+          conversation_id: msg.conversationId,
+        },
+      }));
+
+      const outputParts: Array<Record<string, string>> = [];
+      if (textContent) outputParts.push({ type: 'text', content: textContent });
+      for (const tc of toolCallParts) {
+        outputParts.push({ type: tc.type, id: tc.id, name: tc.name });
+      }
+
+      entries.push(buildAgentActivityEntry({
+        timestamp: responseTimestamp,
+        'event.id': hashId([sessionId, msg.id, 'response', String(currentStep.stepIndex)]),
+        'event.name': 'llm.response',
+        ...common,
+        'gen_ai.turn.id': turnId,
+        'gen_ai.step.id': currentStep.stepId,
+        'gen_ai.response.id': runId,
+        'gen_ai.request.model': model,
+        'gen_ai.response.model': model,
+        'gen_ai.response.finish_reasons': finishReasons,
+        'trace_id': traceId,
+        'span_id': llmSpanId,
+        'parent_span_id': currentStep.stepSpanId,
+        ...(includeUserContent ? {
+          'gen_ai.input.messages': [
+            { role: 'user', parts: [{ type: 'text', content: userContent }] },
+          ],
+        } : {}),
+        ...(outputParts.length > 0 ? {
+          'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts }],
+        } : {}),
+        'gen_ai.usage.input_tokens': inputTokens,
+        'gen_ai.usage.output_tokens': outputTokens,
+        'gen_ai.usage.cache_read.input_tokens': cachedTokens,
+        'gen_ai.usage.total_tokens': totalTokens,
+        ...(runError ? { 'error.type': runError.code, 'error.message': runError.message } : {}),
+        attributes: {
+          source: 'wukong',
+          message_id: msg.id,
+          conversation_id: msg.conversationId,
+          ...(firstTokenEvent ? {
+            ttft_ms: firstTokenEvent.ttft_ms as number,
+            e2e_ttft_ms: firstTokenEvent.e2e_ttft_ms as number,
+          } : {}),
+          ...(runStartedTs && runFinishedTs ? {
+            run_duration_ms: runFinishedTs - runStartedTs,
+          } : {}),
+        },
+      }));
+
+      // Clear per-step accumulators so the next step starts fresh.
+      flushedStepIds.add(currentStep.stepId);
+      textContent = '';
+      usageEvent = undefined;
+      firstTokenEvent = undefined;
+      toolCallParts.length = 0;
+      // runError stays cleared too: it belongs to the step that just ended.
+      runError = undefined;
+      return true;
+    };
+
+    for (const rawEvt of events) {
+      // Defensive: AGUI is external data. Sanitize timestamp before any use.
+      const sanitizedTs = numOr(rawEvt.timestamp) ?? msg.createdAt;
+      const evt: AguiEvent = sanitizedTs === rawEvt.timestamp ? rawEvt : { ...rawEvt, timestamp: sanitizedTs };
       switch (evt.type) {
         case 'STEP_STARTED':
           startNewStep(evt);
           break;
 
         case 'STEP_FINISHED':
-          // Will be handled after the loop
+          // Emit the paired llm.request + llm.response for this step before the
+          // next STEP_STARTED resets per-step accumulators. This ensures every
+          // step gets its own real tokens / text / error info instead of only
+          // the last step capturing them.
+          flushStepLlm();
           break;
 
         case 'RUN_STARTED':
@@ -510,16 +689,20 @@ export class WukongInput extends BaseInput {
 
         case 'TOOL_CALL_RESULT': {
           // TOOL_CALL_RESULT provides richer content than TOOL_CALL_END.
-          // If we already emitted a tool.result from TOOL_CALL_END, this is supplementary.
-          // For simplicity, we update the last tool.result entry with richer data.
-          const lastToolResult = findLastEntry(entries, 'tool.result');
-          if (lastToolResult) {
+          // Match by toolCallId rather than "last tool.result" to avoid
+          // mis-attributing results when tools complete out of order.
+          const tcId = evt.toolCallId as string | undefined;
+          if (!tcId) break;
+          const match = findEntryByToolCallId(entries, 'tool.result', tcId);
+          if (match) {
             const content = evt.content;
             if (content !== undefined) {
-              lastToolResult['gen_ai.tool.call.result'] = toJsonValue(content);
+              match['gen_ai.tool.call.result'] = toJsonValue(content);
             }
             if (evt.is_error === true) {
-              lastToolResult['tool.result.status'] = 'failure';
+              // Use canonical field — `tool.result.status` is a legacy alias
+              // that the entry-builder already stripped during construction.
+              match['error.type'] = match['error.type'] ?? '_OTHER';
             }
           }
           break;
@@ -629,9 +812,14 @@ export class WukongInput extends BaseInput {
       }
     }
 
-    // Emit llm.response for the current (possibly only) step
-    const shouldEmitFinalLlm = currentStep && (textContent || usageEvent || toolCallParts.length > 0
-      || (currentStep.stepIndex > 1 && !currentStep.hasToolCalls));
+    // Emit llm.response for the current (possibly only) step.
+    // Skip if STEP_FINISHED already flushed this step.
+    const alreadyFlushed = currentStep && flushedStepIds.has(currentStep.stepId);
+    const shouldEmitFinalLlm = !alreadyFlushed && currentStep && (
+      textContent || usageEvent || toolCallParts.length > 0
+      || runError
+      || (currentStep.stepIndex > 1 && !currentStep.hasToolCalls)
+    );
     if (currentStep && shouldEmitFinalLlm) {
       const finishReasons = this.inferFinishReasons(currentStep.hasToolCalls, runError);
       const llmSpanId = generateSpanId();
@@ -1080,33 +1268,51 @@ export class WukongInput extends BaseInput {
   private async listAllTasks(): Promise<WukongTask[]> {
     const allTasks: WukongTask[] = [];
     let cursor: string | undefined;
+    let hasMore = false;
     do {
       const params: Record<string, unknown> = { limit: TASK_BATCH_LIMIT };
       if (cursor) params.cursor = cursor;
-      const { stdout } = await execFile(
+      const { stdout, stderr } = await execFile(
         this.cliPath,
         ['agent', 'data', 'list_tasks', '--json', JSON.stringify(params)],
-        { timeout: CLI_TIMEOUT_MS },
+        { timeout: CLI_TIMEOUT_MS, maxBuffer: CLI_MAX_BUFFER, signal: this._abortController.signal },
       );
-      const parsed = JSON.parse(stdout);
-      if (!parsed || !Array.isArray(parsed.items)) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(stdout);
+      } catch (e) {
+        throw new Error(`wukong-cli list_tasks returned non-JSON (stderr=${(stderr ?? '').slice(0, 256)}, head=${stdout.slice(0, 256)}): ${e}`);
+      }
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as { items?: unknown }).items)) {
         throw new Error('unexpected listTasks response structure');
       }
       const resp = parsed as ListTasksResponse;
       allTasks.push(...resp.items);
       cursor = resp.hasMore ? resp.nextCursor : undefined;
+      hasMore = !!resp.hasMore;
     } while (cursor && allTasks.length < MAX_TASKS);
+    if (cursor && hasMore) {
+      this.logger.warn('wukong task pagination truncated by MAX_TASKS', {
+        limit: MAX_TASKS,
+        fetched: allTasks.length,
+      });
+    }
     return allTasks;
   }
 
   private async getMessages(conversationId: string): Promise<GetMessagesResponse> {
-    const { stdout } = await execFile(
+    const { stdout, stderr } = await execFile(
       this.cliPath,
       ['agent', 'data', 'get_spark_agui_messages', '--json', JSON.stringify({ conversationId })],
-      { timeout: CLI_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 },
+      { timeout: CLI_TIMEOUT_MS, maxBuffer: CLI_MAX_BUFFER, signal: this._abortController.signal },
     );
-    const parsed = JSON.parse(stdout);
-    if (!parsed || !Array.isArray(parsed.messages)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stdout);
+    } catch (e) {
+      throw new Error(`wukong-cli get_spark_agui_messages returned non-JSON (stderr=${(stderr ?? '').slice(0, 256)}, head=${stdout.slice(0, 256)}): ${e}`);
+    }
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as { messages?: unknown }).messages)) {
       throw new Error('unexpected getMessages response structure');
     }
     return parsed as GetMessagesResponse;
@@ -1160,9 +1366,18 @@ function findLastCompleteIndex(messages: WukongMessage[]): number {
   return lastComplete;
 }
 
-function findLastEntry(entries: AgentActivityEntry[], eventName: string): AgentActivityEntry | undefined {
+function findEntryByToolCallId(
+  entries: AgentActivityEntry[],
+  eventName: string,
+  toolCallId: string,
+): AgentActivityEntry | undefined {
   for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i]['event.name'] === eventName) return entries[i];
+    if (
+      entries[i]['event.name'] === eventName &&
+      entries[i]['gen_ai.tool.call.id'] === toolCallId
+    ) {
+      return entries[i];
+    }
   }
   return undefined;
 }
