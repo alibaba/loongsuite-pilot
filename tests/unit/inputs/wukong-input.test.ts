@@ -142,11 +142,10 @@ describe('WukongInput', () => {
     await input.start();
     await input.stop();
 
-    const userEntry = entries.find(e => e['event.name'] === 'other');
+    const userEntry = entries.find(e => e['event.name'] === 'llm.request' && !e['gen_ai.step.id']);
     expect(userEntry).toBeDefined();
     expect(userEntry!['gen_ai.agent.type']).toBe(ClientType.Wukong);
     expect(userEntry!['gen_ai.session.id']).toBe('sess-1');
-    expect(userEntry!['gen_ai.request.model']).toBe('dingtalk_deap/dingtalk-standard');
     expect(userEntry!['gen_ai.input.messages_delta']).toEqual([
       { role: 'user', parts: [{ type: 'text', content: 'Hello wukong' }] },
     ]);
@@ -225,13 +224,15 @@ describe('WukongInput', () => {
     await input.start();
     await input.stop();
 
-    expect(entries).toHaveLength(2);
-    expect(entries[0]!['event.name']).toBe('other');
-    expect(entries[0]!['gen_ai.input.messages_delta']).toEqual([
+    expect(entries).toHaveLength(3);
+    const userReq = entries.find(e => e['event.name'] === 'llm.request' && !e['gen_ai.step.id']);
+    expect(userReq).toBeDefined();
+    expect(userReq!['gen_ai.input.messages_delta']).toEqual([
       { role: 'user', parts: [{ type: 'text', content: 'Follow up question' }] },
     ]);
-    expect(entries[1]!['event.name']).toBe('llm.response');
-    expect(entries[1]!['gen_ai.usage.input_tokens']).toBe(200);
+    const llmResp = entries.find(e => e['event.name'] === 'llm.response');
+    expect(llmResp).toBeDefined();
+    expect(llmResp!['gen_ai.usage.input_tokens']).toBe(200);
 
     const state = stateStore.get('wukong');
     expect((state.extra as any).seenCounts['sess-1']).toBe(4);
@@ -260,11 +261,9 @@ describe('WukongInput', () => {
     await input.start();
     await input.stop();
 
-    expect(entries).toHaveLength(1);
-    expect(entries[0]!['gen_ai.session.id']).toBe('sess-2');
-
+    expect(entries).toHaveLength(0);
     const state = stateStore.get('wukong');
-    expect((state.extra as any).seenCounts['sess-2']).toBe(1);
+    expect((state.extra as any).seenCounts['sess-2'] ?? 0).toBe(0);
   });
 
   it('handles daemon-not-running gracefully', async () => {
@@ -419,7 +418,6 @@ describe('WukongInput', () => {
     expect(listCallCount).toBe(2);
     const sessionIds = new Set(entries.map(e => e['gen_ai.session.id']));
     expect(sessionIds.has('sess-1')).toBe(true);
-    expect(sessionIds.has('sess-2')).toBe(true);
   });
 
   it('prunes seenCounts for sessions no longer in task list', async () => {
@@ -497,7 +495,7 @@ describe('WukongInput', () => {
     await input.start();
     await input.stop();
 
-    const reqEntry = entries.find(e => e['event.name'] === 'other');
+    const reqEntry = entries.find(e => e['event.name'] === 'llm.request' && !e['gen_ai.step.id']);
     expect(reqEntry!['gen_ai.turn.id']).toBe('sess-1:msg-2');
 
     const respEntry = entries.find(e => e['event.name'] === 'llm.response');
@@ -971,13 +969,12 @@ describe('WukongInput', () => {
     await input.start();
     await input.stop();
 
-    // Only the user message (msg-1) should be processed, incomplete assistant skipped
-    expect(entries).toHaveLength(1);
-    expect(entries[0]!['event.name']).toBe('other');
+    // Both user msg and incomplete assistant should be deferred (no orphan emissions)
+    expect(entries).toHaveLength(0);
 
-    // seenCounts should advance only to the user message (index 0 + 1 = 1)
+    // seenCounts should not advance - both messages will be re-evaluated on next poll
     const state = stateStore.get('wukong');
-    expect((state.extra as any).seenCounts['sess-1']).toBe(1);
+    expect((state.extra as any).seenCounts['sess-1'] ?? 0).toBe(0);
   });
 
   it('processes incomplete message once it becomes complete on next poll', async () => {
@@ -1047,9 +1044,9 @@ describe('WukongInput', () => {
     await input.start();
     await input.stop();
 
-    expect(entries1).toHaveLength(1); // only user msg
+    expect(entries1).toHaveLength(0); // both user and incomplete assistant deferred
     const state1 = stateStore.get('wukong');
-    expect((state1.extra as any).seenCounts['sess-1']).toBe(1);
+    expect((state1.extra as any).seenCounts['sess-1'] ?? 0).toBe(0);
 
     // Second poll: message is now complete
     const entries2: AgentActivityEntry[] = [];
