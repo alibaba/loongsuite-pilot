@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { formatTime } from '../utils/time-utils.js';
 import { resolveLocalIp } from '../utils/network-utils.js';
+import { isPidFileRunning } from '../utils/pid-utils.js';
 import type { AgentsConfig } from '../types/index.js';
 
 export interface L1Metrics {
@@ -411,23 +412,13 @@ function readInitType(dataDir: string): string {
   }
 }
 
-function isPidFileRunning(pidFile: string): boolean {
-  try {
-    const raw = fs.readFileSync(pidFile, 'utf-8');
-    const pid = Number(raw.trim());
-    if (!Number.isInteger(pid) || pid <= 0) return false;
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function checkVersionPointer(dataDir: string): boolean {
   try {
     const current = fs.readFileSync(path.join(dataDir, 'current'), 'utf-8').trim();
     if (!current) return false;
-    return fs.existsSync(path.join(dataDir, 'versions', current));
+    const resolved = path.resolve(path.join(dataDir, 'versions', current));
+    if (!resolved.startsWith(path.join(dataDir, 'versions'))) return false;
+    return fs.existsSync(resolved);
   } catch {
     return false;
   }
@@ -448,7 +439,9 @@ function checkRollbackAvailable(dataDir: string): boolean {
   try {
     const previous = fs.readFileSync(path.join(dataDir, 'previous'), 'utf-8').trim();
     if (!previous) return false;
-    return fs.existsSync(path.join(dataDir, 'versions', previous));
+    const resolved = path.resolve(path.join(dataDir, 'versions', previous));
+    if (!resolved.startsWith(path.join(dataDir, 'versions'))) return false;
+    return fs.existsSync(resolved);
   } catch {
     return false;
   }
@@ -456,7 +449,7 @@ function checkRollbackAvailable(dataDir: string): boolean {
 
 function countVersions(dataDir: string): number {
   try {
-    return fs.readdirSync(path.join(dataDir, 'versions')).length;
+    return fs.readdirSync(path.join(dataDir, 'versions')).filter(e => !e.startsWith('.')).length;
   } catch {
     return 0;
   }
