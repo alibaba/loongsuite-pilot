@@ -293,4 +293,89 @@ describe('MetricsCollector', () => {
       expect(col.collectL1(buildSnapshot()).init_type).toBe('unknown');
     });
   });
+
+  describe('collectInfraHealth', () => {
+    it('returns updaterPidAlive=true during grace period even if PID file missing', () => {
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      const h1 = col.collectInfraHealth();
+      const h2 = col.collectInfraHealth();
+      expect(h1.updaterPidAlive).toBe(true);
+      expect(h2.updaterPidAlive).toBe(true);
+    });
+
+    it('returns updaterPidAlive=false after grace period when PID file missing', () => {
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      col.collectInfraHealth(); // cycle 1
+      col.collectInfraHealth(); // cycle 2
+      const h3 = col.collectInfraHealth(); // cycle 3 - past grace
+      expect(h3.updaterPidAlive).toBe(false);
+    });
+
+    it('returns updaterPidAlive=true when PID file contains current process PID', () => {
+      fs.writeFileSync(path.join(tmpDir, 'loongsuite-pilot-updater.pid'), String(process.pid));
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      col.collectInfraHealth(); // cycle 1
+      col.collectInfraHealth(); // cycle 2
+      const h3 = col.collectInfraHealth(); // cycle 3
+      expect(h3.updaterPidAlive).toBe(true);
+    });
+
+    it('increments updaterConsecutiveFailures and resets on alive', () => {
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      col.collectInfraHealth(); // grace 1
+      col.collectInfraHealth(); // grace 2
+      const h3 = col.collectInfraHealth(); // fail 1
+      expect(h3.updaterConsecutiveFailures).toBe(1);
+      const h4 = col.collectInfraHealth(); // fail 2
+      expect(h4.updaterConsecutiveFailures).toBe(2);
+
+      // Now make it alive
+      fs.writeFileSync(path.join(tmpDir, 'loongsuite-pilot-updater.pid'), String(process.pid));
+      const h5 = col.collectInfraHealth();
+      expect(h5.updaterConsecutiveFailures).toBe(0);
+      expect(h5.updaterPidAlive).toBe(true);
+    });
+
+    it('returns currentVersionValid=true when current points to existing version dir', () => {
+      fs.mkdirSync(path.join(tmpDir, 'versions', '1.0.0_abc'), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, 'current'), '1.0.0_abc');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectInfraHealth().currentVersionValid).toBe(true);
+    });
+
+    it('returns currentVersionValid=false when current points to non-existent dir', () => {
+      fs.writeFileSync(path.join(tmpDir, 'current'), 'missing_version');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectInfraHealth().currentVersionValid).toBe(false);
+    });
+
+    it('returns nodeBinValid=true when node-bin points to executable', () => {
+      fs.writeFileSync(path.join(tmpDir, 'node-bin'), process.execPath);
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectInfraHealth().nodeBinValid).toBe(true);
+    });
+
+    it('returns nodeBinValid=false when node-bin points to non-existent path', () => {
+      fs.writeFileSync(path.join(tmpDir, 'node-bin'), '/nonexistent/path/node');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectInfraHealth().nodeBinValid).toBe(false);
+    });
+
+    it('returns rollbackAvailable based on previous file validity', () => {
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectInfraHealth().rollbackAvailable).toBe(false);
+
+      fs.mkdirSync(path.join(tmpDir, 'versions', '0.9.0_def'), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, 'previous'), '0.9.0_def');
+      const col2 = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col2.collectInfraHealth().rollbackAvailable).toBe(true);
+    });
+
+    it('returns correct versionCount', () => {
+      fs.mkdirSync(path.join(tmpDir, 'versions', 'v1'), { recursive: true });
+      fs.mkdirSync(path.join(tmpDir, 'versions', 'v2'), { recursive: true });
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectInfraHealth().versionCount).toBe(2);
+    });
+  });
 });

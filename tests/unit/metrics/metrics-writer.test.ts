@@ -287,4 +287,127 @@ describe('MetricsWriter', () => {
       expect(alarm).toBeUndefined();
     });
   });
+
+  describe('infra health alarms', () => {
+    it('UPDATER_NOT_RUNNING_ALARM does not fire during grace period', async () => {
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      writer = new MetricsWriter({
+        dataDir: tmpDir,
+        version: '2.0.0',
+        userId: 'u1',
+        getSnapshot: buildSnapshot,
+        alarmManager,
+      });
+
+      vi.useRealTimers();
+      await writer.start(); // first writeL1 (cycle 1)
+
+      const entries = alarmManager.serialize();
+      const alarm = entries.find(e => e.alarm_type === 'UPDATER_NOT_RUNNING_ALARM');
+      expect(alarm).toBeUndefined();
+    });
+
+    it('UPDATER_NOT_RUNNING_ALARM fires after 2 consecutive failures post-grace', async () => {
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      writer = new MetricsWriter({
+        dataDir: tmpDir,
+        version: '2.0.0',
+        userId: 'u1',
+        getSnapshot: buildSnapshot,
+        alarmManager,
+      });
+
+      vi.useRealTimers();
+      // Manually invoke writeL1 multiple times to pass grace + accumulate failures
+      await (writer as any).writeL1(); // cycle 1 (grace)
+      await (writer as any).writeL1(); // cycle 2 (grace)
+      await (writer as any).writeL1(); // cycle 3 (fail 1)
+      alarmManager.serialize(); // clear
+      await (writer as any).writeL1(); // cycle 4 (fail 2 → alarm)
+
+      const entries = alarmManager.serialize();
+      const alarm = entries.find(e => e.alarm_type === 'UPDATER_NOT_RUNNING_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_level).toBe('3');
+    });
+
+    it('BROKEN_VERSION_POINTER_ALARM fires when current points to missing dir', async () => {
+      fs.writeFileSync(path.join(tmpDir, 'current'), 'nonexistent_version');
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      writer = new MetricsWriter({
+        dataDir: tmpDir,
+        version: '2.0.0',
+        userId: 'u1',
+        getSnapshot: buildSnapshot,
+        alarmManager,
+      });
+
+      vi.useRealTimers();
+      await writer.start();
+
+      const entries = alarmManager.serialize();
+      const alarm = entries.find(e => e.alarm_type === 'BROKEN_VERSION_POINTER_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_level).toBe('2');
+    });
+
+    it('BROKEN_VERSION_POINTER_ALARM does not fire when current is valid', async () => {
+      fs.mkdirSync(path.join(tmpDir, 'versions', '1.0.0_abc'), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, 'current'), '1.0.0_abc');
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      writer = new MetricsWriter({
+        dataDir: tmpDir,
+        version: '2.0.0',
+        userId: 'u1',
+        getSnapshot: buildSnapshot,
+        alarmManager,
+      });
+
+      vi.useRealTimers();
+      await writer.start();
+
+      const entries = alarmManager.serialize();
+      const alarm = entries.find(e => e.alarm_type === 'BROKEN_VERSION_POINTER_ALARM');
+      expect(alarm).toBeUndefined();
+    });
+
+    it('INVALID_NODE_BIN_ALARM fires when node-bin is invalid', async () => {
+      fs.writeFileSync(path.join(tmpDir, 'node-bin'), '/nonexistent/path/node');
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      writer = new MetricsWriter({
+        dataDir: tmpDir,
+        version: '2.0.0',
+        userId: 'u1',
+        getSnapshot: buildSnapshot,
+        alarmManager,
+      });
+
+      vi.useRealTimers();
+      await writer.start();
+
+      const entries = alarmManager.serialize();
+      const alarm = entries.find(e => e.alarm_type === 'INVALID_NODE_BIN_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_level).toBe('2');
+    });
+
+    it('INVALID_NODE_BIN_ALARM does not fire when node-bin is valid', async () => {
+      fs.writeFileSync(path.join(tmpDir, 'node-bin'), process.execPath);
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      writer = new MetricsWriter({
+        dataDir: tmpDir,
+        version: '2.0.0',
+        userId: 'u1',
+        getSnapshot: buildSnapshot,
+        alarmManager,
+      });
+
+      vi.useRealTimers();
+      await writer.start();
+
+      const entries = alarmManager.serialize();
+      const alarm = entries.find(e => e.alarm_type === 'INVALID_NODE_BIN_ALARM');
+      expect(alarm).toBeUndefined();
+    });
+  });
 });
