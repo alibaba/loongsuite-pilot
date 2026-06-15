@@ -126,7 +126,7 @@ describe('WukongInput', () => {
     stateStore.update('wukong', { extra: { seenCounts: counts } });
   }
 
-  it('maps user message to other event (user-hook approach)', async () => {
+  it('user content is merged into step 1 llm.request messages_delta', async () => {
     const listResp = JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] });
     const msgsResp = JSON.stringify({ messages: SAMPLE_MESSAGES });
 
@@ -142,19 +142,21 @@ describe('WukongInput', () => {
     await input.start();
     await input.stop();
 
-    const userEntry = entries.find(e => e['event.name'] === 'llm.request' && !e['gen_ai.step.id']);
-    expect(userEntry).toBeDefined();
-    expect(userEntry!['gen_ai.agent.type']).toBe(ClientType.Wukong);
-    expect(userEntry!['gen_ai.session.id']).toBe('sess-1');
-    expect(userEntry!['gen_ai.input.messages_delta']).toEqual([
+    // User-hook llm.request is no longer emitted; user content is in step 1 llm.request
+    const reqEntry = entries.find(e => e['event.name'] === 'llm.request');
+    expect(reqEntry).toBeDefined();
+    expect(reqEntry!['gen_ai.agent.type']).toBe(ClientType.Wukong);
+    expect(reqEntry!['gen_ai.session.id']).toBe('sess-1');
+    expect(reqEntry!['gen_ai.step.id']).toBeDefined();
+    expect(reqEntry!['gen_ai.input.messages_delta']).toEqual([
       { role: 'user', parts: [{ type: 'text', content: 'Hello wukong' }] },
     ]);
-    expect(userEntry!['host.name']).toBe(os.hostname());
-    expect(userEntry!['service.name']).toBe('wukong');
-    expect(userEntry!['gen_ai.agent.id']).toBe('task-1');
-    expect(userEntry!['gen_ai.agent.name']).toBe('Test task');
-    expect(userEntry!['gen_ai.provider.name']).toBe('dingtalk_deap');
-    expect(userEntry!['gen_ai.turn.id']).toBe('sess-1:t1');
+    expect(reqEntry!['host.name']).toBe(os.hostname());
+    expect(reqEntry!['service.name']).toBe('wukong');
+    expect(reqEntry!['gen_ai.agent.id']).toBe('task-1');
+    expect(reqEntry!['gen_ai.agent.name']).toBe('Test task');
+    expect(reqEntry!['gen_ai.provider.name']).toBe('dingtalk_deap');
+    expect(reqEntry!['gen_ai.turn.id']).toBe('sess-1:t1');
   });
 
   it('maps assistant events to llm.response with token usage', async () => {
@@ -224,10 +226,10 @@ describe('WukongInput', () => {
     await input.start();
     await input.stop();
 
-    expect(entries).toHaveLength(3);
-    const userReq = entries.find(e => e['event.name'] === 'llm.request' && !e['gen_ai.step.id']);
-    expect(userReq).toBeDefined();
-    expect(userReq!['gen_ai.input.messages_delta']).toEqual([
+    expect(entries).toHaveLength(2);
+    const llmReq = entries.find(e => e['event.name'] === 'llm.request');
+    expect(llmReq).toBeDefined();
+    expect(llmReq!['gen_ai.input.messages_delta']).toEqual([
       { role: 'user', parts: [{ type: 'text', content: 'Follow up question' }] },
     ]);
     const llmResp = entries.find(e => e['event.name'] === 'llm.response');
@@ -495,7 +497,7 @@ describe('WukongInput', () => {
     await input.start();
     await input.stop();
 
-    const reqEntry = entries.find(e => e['event.name'] === 'llm.request' && !e['gen_ai.step.id']);
+    const reqEntry = entries.find(e => e['event.name'] === 'llm.request');
     expect(reqEntry!['gen_ai.turn.id']).toBe('sess-1:msg-2');
 
     const respEntry = entries.find(e => e['event.name'] === 'llm.response');

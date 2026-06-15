@@ -288,15 +288,12 @@ export class WukongInput extends BaseInput {
         const firstStepId = turnEntries.find(e =>
           e['gen_ai.step.id'])?.['gen_ai.step.id'] as string | undefined;
         const stepSpanId = firstAssistantEntry?.['parent_span_id'] as string | undefined;
+        void traceId; void firstStepId; void stepSpanId;
 
-        // Emit pending user messages linked to this trace
-        // Use the assistant's turnId so request+response pair share the same turn
-        // Don't set step.id on 'other' events — they merge into ENTRY, not STEP
-        for (const userMsg of pendingUserMessages) {
-          entries.push(this.buildUserRequestEntry(
-            task, userMsg, model, turnId, commonFields, traceId, undefined, undefined,
-          ));
-        }
+        // User content is already merged into step 1's llm.request gen_ai.input.messages_delta.
+        // The OTLP converter falls back to that for ENTRY input.messages. So we don't
+        // emit a separate user-hook llm.request — this avoids events without step.id
+        // and keeps llm.request field-coverage at 100%.
         pendingUserMessages = [];
 
         entries.push(...turnEntries);
