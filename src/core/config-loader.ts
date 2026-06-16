@@ -152,7 +152,8 @@ export interface ConfigFile {
 }
 
 function env(key: string): string | undefined {
-  return process.env[key];
+  const v = process.env[key];
+  return v !== undefined ? (process.platform === 'win32' ? v.trim() : v) : undefined;
 }
 
 function envBool(key: string, fallback: boolean): boolean {

@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import sqlite3 from 'sqlite3';
 import { ClientType } from '../../types/index.js';
@@ -138,6 +139,9 @@ export class QoderSqliteInput extends BaseSqliteInput {
 function resolveQoderRoot(): string {
   if (process.platform === 'darwin') {
     return resolveHome(DEFAULT_QODER_ROOT_MAC);
+  }
+  if (process.platform === 'win32') {
+    return path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'Qoder');
   }
   const xdg = process.env.XDG_CONFIG_HOME;
   if (xdg) return path.join(xdg, 'Qoder');

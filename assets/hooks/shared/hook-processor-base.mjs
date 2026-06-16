@@ -214,7 +214,10 @@ export async function readStdin() {
   for await (const chunk of process.stdin) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   }
-  return Buffer.concat(chunks).toString('utf-8');
+  let str = Buffer.concat(chunks).toString('utf-8');
+  // Strip UTF-8 BOM — PowerShell 5.x adds BOM when piping strings to native commands
+  if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
+  return str;
 }
 
 export async function parseStdinPayload(agentId) {
@@ -223,16 +226,19 @@ export async function parseStdinPayload(agentId) {
 
   if (!raw || !raw.trim()) return null;
 
+  logDebug(agentId, `stdin payload: ${raw.length} bytes`);
+
   let payload;
   try {
     payload = JSON.parse(raw);
-  } catch {
-    logDebug(agentId, 'Failed to parse stdin JSON');
+  } catch (e) {
+    logDebug(agentId, `Failed to parse stdin JSON: ${e.message}`);
     return null;
   }
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
 
   logDebug(agentId, `event: ${payload.hook_event_name || 'unknown'}, session: ${payload.session_id || ''}`);
+  logDebug(agentId, `payload keys: ${Object.keys(payload).join(', ')}`);
 
   if (payload.stop_hooks_active) {
     logDebug(agentId, 'stop_hooks_active=true, exiting to avoid recursion');

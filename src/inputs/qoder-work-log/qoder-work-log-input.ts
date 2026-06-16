@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Dirent } from 'node:fs';
 import { ClientType } from '../../types/index.js';
@@ -648,8 +649,11 @@ export function resolveQoderWorkRoot(variant: 'standard' | 'cn' = 'standard'): s
   if (process.platform === 'darwin') {
     return resolveHome(variant === 'cn' ? DEFAULT_QODERWORK_CN_ROOT_MAC : DEFAULT_QODERWORK_ROOT_MAC);
   }
-  const xdg = process.env.XDG_CONFIG_HOME;
   const dirName = variant === 'cn' ? 'QoderWork CN' : 'QoderWork';
+  if (process.platform === 'win32') {
+    return path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), dirName);
+  }
+  const xdg = process.env.XDG_CONFIG_HOME;
   if (xdg) return path.join(xdg, dirName);
   return resolveHome(variant === 'cn' ? DEFAULT_QODERWORK_CN_ROOT_LINUX : DEFAULT_QODERWORK_ROOT_LINUX);
 }

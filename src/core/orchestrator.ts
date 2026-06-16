@@ -324,11 +324,12 @@ export class Orchestrator extends EventEmitter {
     for (const def of defs) {
       if (def.deployMode !== 'hook' || !def.hook) continue;
 
+      const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
       targets.push({
         agentId: def.id,
         settingsPath: def.hook.settingsPath,
         expectedHooks: def.hook.events,
-        markers: [def.hook.hookCommand],
+        markers: [scriptName],
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
       });
     }
@@ -500,14 +501,16 @@ export class Orchestrator extends EventEmitter {
         listenerCfg['qoder-trace']?.enabled ?? true,
       );
 
-    // --- Qoder (SQLite token usage polling) — disabled when qoder-trace is enabled ---
+    // --- Qoder (SQLite token usage polling) ---
+    // On Windows, Qoder IDE's agent backend does not fire user-defined hooks,
+    // so qoder-trace produces no IDE data. Allow qoder-sqlite as fallback.
     const qoderSqliteInput = new QoderSqliteInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(qoderSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderSqliteInput, {
         watchPaths: QoderSqliteInput.getWatchPaths(),
         isAvailable: QoderSqliteInput.checkAvailability,
-        enabled: () => !qoderTraceEnabled() &&
+        enabled: () => (process.platform === 'win32' || !qoderTraceEnabled()) &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-sqlite']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-sqlite',
@@ -545,14 +548,15 @@ export class Orchestrator extends EventEmitter {
         listenerCfg['qoder-cn-trace']?.enabled ?? true,
       );
 
-    // --- QoderCN (SQLite token usage polling) — disabled when qoder-cn-trace is enabled ---
+    // --- QoderCN (SQLite token usage polling) ---
+    // Same Windows fallback as qoder-sqlite above.
     const qoderCnSqliteInput = new QoderCnSqliteInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(qoderCnSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderCnSqliteInput, {
         watchPaths: QoderCnSqliteInput.getWatchPaths(),
         isAvailable: QoderCnSqliteInput.checkAvailability,
-        enabled: () => !qoderCnTraceEnabled() &&
+        enabled: () => (process.platform === 'win32' || !qoderCnTraceEnabled()) &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cn-sqlite']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-cn-sqlite',

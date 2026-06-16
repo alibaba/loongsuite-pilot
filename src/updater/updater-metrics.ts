@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { appendLine, ensureDir } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveLocalIp } from '../utils/network-utils.js';
@@ -143,7 +144,7 @@ export class UpdaterMetrics {
   }
 
   private checkCollectorHealth(): void {
-    if (!isPidFileRunning(this.collectorPidFile)) {
+    if (!isCollectorRunning(this.collectorPidFile)) {
       logger.warn('collector process not running');
       this.writeAlarm(
         'SERVICE_NOT_RUNNING_ALARM', '3',
@@ -160,6 +161,24 @@ function isPidFileRunning(pidFile: string): boolean {
     if (!Number.isInteger(pid) || pid <= 0) return false;
     process.kill(pid, 0);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+function isCollectorRunning(pidFile: string): boolean {
+  if (isPidFileRunning(pidFile)) return true;
+  if (process.platform !== 'win32') return false;
+
+  // On Windows, Task Scheduler launches the collector without writing a PID file.
+  // Fall back to checking if a node process running collector-daemon.js exists.
+  try {
+    const ps = 'Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "node.exe" -and $_.CommandLine -like "*collector-daemon*" } | Select-Object -ExpandProperty ProcessId';
+    const out = execFileSync('powershell.exe', [
+      '-NoProfile', '-WindowStyle', 'Hidden', '-Command', ps,
+    ], { timeout: 8000, encoding: 'utf-8', windowsHide: true });
+    const pids = out.split(/\r?\n/).map(l => l.trim()).filter(l => /^\d+$/.test(l));
+    return pids.length > 0;
   } catch {
     return false;
   }

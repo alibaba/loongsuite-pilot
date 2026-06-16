@@ -124,6 +124,10 @@ export class AgentDefLoader {
       .replace(/\$PILOT_DATA/g, this.dataDir);
 
     result = resolveHome(result);
+
+    if (process.platform === 'win32') {
+      result = result.replace(/\.sh$/, '.ps1');
+    }
     return result;
   }
 }
