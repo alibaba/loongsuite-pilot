@@ -11,6 +11,14 @@ import {
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('HookManager');
+const hookExt = process.platform === 'win32' ? '.ps1' : '.sh';
+const isWin = process.platform === 'win32';
+
+function wrapHookCommand(scriptPath: string, args?: string): string {
+  if (!isWin) return args ? `${scriptPath} ${args}` : scriptPath;
+  const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`;
+  return args ? `${cmd} ${args}` : cmd;
+}
 
 export interface HookDefinition {
   /** Agent identifier (e.g. "qoder", "claude"). */
@@ -185,7 +193,7 @@ export class HookManager {
    */
   static buildCursorHooks(loongsuitePilotDir?: string): HookDefinition[] {
     const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
-    const command = `${baseDir}/hooks/cursor-loongsuite-pilot-hook.sh`;
+    const command = wrapHookCommand(`${baseDir}/hooks/cursor-loongsuite-pilot-hook${hookExt}`);
     const settingsPath = resolveHome('~/.cursor/hooks.json');
 
     const events = [
@@ -217,7 +225,7 @@ export class HookManager {
    */
   static buildQoderCliHooks(loongsuitePilotDir?: string): HookDefinition[] {
     const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
-    const command = `${baseDir}/hooks/qoder-loongsuite-pilot-hook.sh qoder`;
+    const command = wrapHookCommand(`${baseDir}/hooks/qoder-loongsuite-pilot-hook${hookExt}`, 'qoder');
     const settingsPath = resolveHome('~/.qoder/settings.json');
 
     return [
@@ -237,9 +245,17 @@ export class HookManager {
    */
   static buildQoderWorkHooks(loongsuitePilotDir?: string): HookDefinition[] {
     const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
-    const command = `${baseDir}/hooks/qoderwork-loongsuite-pilot-hook.sh`;
-    const legacyCommand = `${baseDir}/hooks/qoder-loongsuite-pilot-hook.sh qoder-work`;
+    const command = wrapHookCommand(`${baseDir}/hooks/qoderwork-loongsuite-pilot-hook${hookExt}`);
+    const legacyCommand = wrapHookCommand(`${baseDir}/hooks/qoder-loongsuite-pilot-hook${hookExt}`, 'qoder-work');
     const settingsPath = resolveHome('~/.qoderwork/settings.json');
+
+    const replaceCmds = [legacyCommand];
+    if (isWin) {
+      replaceCmds.push(`${baseDir}/hooks/qoderwork-loongsuite-pilot-hook.sh`);
+      replaceCmds.push(`${baseDir}/hooks/qoderwork-loongsuite-pilot-hook.ps1`);
+      replaceCmds.push(`${baseDir}/hooks/qoder-loongsuite-pilot-hook.sh qoder-work`);
+      replaceCmds.push(`${baseDir}/hooks/qoder-loongsuite-pilot-hook.ps1 qoder-work`);
+    }
 
     return [
       {
@@ -247,7 +263,7 @@ export class HookManager {
         settingsPath,
         hookJsonPath: ['hooks', 'Stop'],
         hookCommand: command,
-        replaceHookCommands: [legacyCommand],
+        replaceHookCommands: replaceCmds,
         matcher: '*',
         useNestedFormat: true,
       },
@@ -256,9 +272,17 @@ export class HookManager {
 
   static buildQoderWorkCNHooks(loongsuitePilotDir?: string): HookDefinition[] {
     const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
-    const command = `${baseDir}/hooks/qoderworkcn-loongsuite-pilot-hook.sh`;
-    const legacyCommand = `${baseDir}/hooks/qoder-loongsuite-pilot-hook.sh qoder-work-cn`;
+    const command = wrapHookCommand(`${baseDir}/hooks/qoderworkcn-loongsuite-pilot-hook${hookExt}`);
+    const legacyCommand = wrapHookCommand(`${baseDir}/hooks/qoder-loongsuite-pilot-hook${hookExt}`, 'qoder-work-cn');
     const settingsPath = resolveHome('~/.qoderworkcn/settings.json');
+
+    const replaceCmds = [legacyCommand];
+    if (isWin) {
+      replaceCmds.push(`${baseDir}/hooks/qoderworkcn-loongsuite-pilot-hook.sh`);
+      replaceCmds.push(`${baseDir}/hooks/qoderworkcn-loongsuite-pilot-hook.ps1`);
+      replaceCmds.push(`${baseDir}/hooks/qoder-loongsuite-pilot-hook.sh qoder-work-cn`);
+      replaceCmds.push(`${baseDir}/hooks/qoder-loongsuite-pilot-hook.ps1 qoder-work-cn`);
+    }
 
     return [
       {
@@ -266,7 +290,7 @@ export class HookManager {
         settingsPath,
         hookJsonPath: ['hooks', 'Stop'],
         hookCommand: command,
-        replaceHookCommands: [legacyCommand],
+        replaceHookCommands: replaceCmds,
         matcher: '*',
         useNestedFormat: true,
       },
@@ -294,7 +318,7 @@ export class HookManager {
       agentId: opts.agentId,
       settingsPath: path.join(opts.settingsDir, 'settings.json'),
       hookJsonPath: ['hooks', 'PostToolUse'],
-      hookCommand: `${baseDir}/hooks/${opts.agentId}-hook.sh`,
+      hookCommand: wrapHookCommand(`${baseDir}/hooks/${opts.agentId}-hook${hookExt}`),
       matcher: '*',
     };
   }

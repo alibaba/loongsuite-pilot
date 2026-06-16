@@ -28,6 +28,21 @@ function eventToSubcommand(event: string): string {
 }
 
 /**
+ * On Windows, .ps1 scripts must be invoked via `powershell -File` for stdin
+ * piping to work correctly.  Bare `.ps1` paths fail to receive stdin when
+ * spawned through cmd.exe / child_process.
+ */
+function wrapPs1Command(cmd: string): string {
+  if (process.platform !== 'win32') return cmd;
+  const parts = cmd.split(' ');
+  const script = parts[0];
+  if (!script.endsWith('.ps1')) return cmd;
+  const args = parts.slice(1).join(' ');
+  const wrapped = `powershell -NoProfile -ExecutionPolicy Bypass -File "${script}"`;
+  return args ? `${wrapped} ${args}` : wrapped;
+}
+
+/**
  * 拼 hooks.json 中实际写入的 command 字符串。
  * 必须与 codex trust hash 算用的字符串完全一致。
  */
@@ -36,10 +51,11 @@ function formatHookCommand(
   event: string,
   style: AgentHookConfig['eventSubcommand'],
 ): string {
+  const cmd = wrapPs1Command(hookCommand);
   if (style === 'kebab-case') {
-    return `${hookCommand} ${eventToSubcommand(event)}`;
+    return `${cmd} ${eventToSubcommand(event)}`;
   }
-  return hookCommand;
+  return cmd;
 }
 
 export class HookStrategy implements DeployStrategy {

@@ -62,7 +62,9 @@ async function readStdin() {
   for await (const chunk of process.stdin) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   }
-  return Buffer.concat(chunks).toString('utf-8');
+  let str = Buffer.concat(chunks).toString('utf-8');
+  if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
+  return str;
 }
 
 async function appendJsonl(filePath, record) {
@@ -92,16 +94,30 @@ async function main() {
   let payload;
   try {
     payload = JSON.parse(raw);
-  } catch (err) {
-    await appendErrorJsonl(dataDir, now, {
-      stage: 'parse',
-      'error.type': 'invalid_json',
-      'error.message': err instanceof Error ? err.message : String(err),
-      input_bytes: Buffer.byteLength(raw),
-      input_sha256: hashJson(raw),
-    });
-    writeEmptyResponse();
-    return;
+  } catch (firstErr) {
+    // Cursor on Windows may replace 0x22 (") with 0x3F (?) in JSON events
+    // containing Chinese text, corrupting the closing quote of string values.
+    if (process.platform === 'win32') {
+      const repaired = raw.replace(/\?,"/g, '","').replace(/\?}/g, '"}');
+      if (repaired !== raw) {
+        try {
+          payload = JSON.parse(repaired);
+        } catch {
+          // repair didn't help
+        }
+      }
+    }
+    if (!payload) {
+      await appendErrorJsonl(dataDir, now, {
+        stage: 'parse',
+        'error.type': 'invalid_json',
+        'error.message': firstErr instanceof Error ? firstErr.message : String(firstErr),
+        input_bytes: Buffer.byteLength(raw),
+        input_sha256: hashJson(raw),
+      });
+      writeEmptyResponse();
+      return;
+    }
   }
 
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {

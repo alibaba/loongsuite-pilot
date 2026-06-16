@@ -29,7 +29,8 @@ export function readStdinJson() {
     if (fd !== 0) {
       try { fs.closeSync(fd); } catch {}
     }
-    const raw = Buffer.concat(chunks).toString('utf-8');
+    let raw = Buffer.concat(chunks).toString('utf-8');
+    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
     if (!raw.trim()) return {};
     return JSON.parse(raw);
   } catch {
