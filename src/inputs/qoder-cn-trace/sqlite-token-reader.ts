@@ -1,4 +1,6 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import sqlite3 from 'sqlite3';
 import { resolveHome } from '../../utils/fs-utils.js';
 import { createLogger } from '../../utils/logger.js';
@@ -52,9 +54,12 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
 }
 
 function resolveQoderCnDbPath(): string | null {
+  const appdata = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
   const candidates = process.platform === 'darwin'
     ? [resolveHome('~/Library/Application Support/QoderCN/SharedClientCache/cache/db/local.db')]
-    : [resolveHome('~/.config/QoderCN/SharedClientCache/cache/db/local.db')];
+    : process.platform === 'win32'
+      ? [path.join(appdata, 'QoderCN', 'SharedClientCache', 'cache', 'db', 'local.db')]
+      : [resolveHome('~/.config/QoderCN/SharedClientCache/cache/db/local.db')];
 
   for (const candidate of candidates) {
     try {
