@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    runs-on: loongsuite-pilot
     strategy:
       matrix:
         node-version: [18, 20, 22]
