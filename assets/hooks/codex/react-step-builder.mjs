@@ -33,6 +33,7 @@
  * @property {number} llm_start_time
  * @property {number} llm_end_time
  * @property {Message[]} llm_input_messages
+ * @property {Message[]} llm_full_input_messages
  * @property {Message[]} llm_output_messages
  * @property {ToolRecord[]} tools
  */
@@ -144,6 +145,11 @@ function finalizeStep(round, turn, llmStartTime, _llmEndTimeHint, previousTools,
   const llmEndTime = firstToolStart;
 
   const llmInputMessages = buildLlmInputMessages(round === 1 ? turn.prompt : null, previousTools);
+  const llmFullInputMessages = buildLlmFullInputMessages(
+    round === 1 ? turn.inputMessages : null,
+    llmInputMessages,
+    previousTools,
+  );
   const llmOutputMessages = buildLlmOutputMessagesWithTools(tools, reasoning);
 
   return {
@@ -153,6 +159,7 @@ function finalizeStep(round, turn, llmStartTime, _llmEndTimeHint, previousTools,
     llm_start_time: llmStartTime,
     llm_end_time: llmEndTime,
     llm_input_messages: llmInputMessages,
+    llm_full_input_messages: llmFullInputMessages,
     llm_output_messages: llmOutputMessages,
     tools,
   };
@@ -160,6 +167,11 @@ function finalizeStep(round, turn, llmStartTime, _llmEndTimeHint, previousTools,
 
 function finalizeFinalStep(round, turn, llmStartTime, previousTools, reasoning) {
   const llmInputMessages = buildLlmInputMessages(round === 1 ? turn.prompt : null, previousTools);
+  const llmFullInputMessages = buildLlmFullInputMessages(
+    round === 1 ? turn.inputMessages : null,
+    llmInputMessages,
+    previousTools,
+  );
 
   /** @type {MessagePart[]} */
   const parts = [];
@@ -182,6 +194,7 @@ function finalizeFinalStep(round, turn, llmStartTime, previousTools, reasoning) 
     llm_start_time: llmStartTime,
     llm_end_time: turn.end_time,
     llm_input_messages: llmInputMessages,
+    llm_full_input_messages: llmFullInputMessages,
     llm_output_messages: llmOutputMessages,
     tools: [],
   };
@@ -204,6 +217,23 @@ function buildLlmInputMessages(userPrompt, previousTools) {
     ];
   }
   return [];
+}
+
+function buildLlmFullInputMessages(turnInputMessages, deltaMessages, previousTools) {
+  const hasTurnInput = Array.isArray(turnInputMessages) && turnInputMessages.length > 0;
+  const base = hasTurnInput ? [...turnInputMessages] : [...deltaMessages];
+  if (!hasTurnInput || previousTools.length === 0) return base;
+  return [
+    ...base,
+    {
+      role: 'tool',
+      parts: previousTools.map((t) => ({
+        type: 'tool_call_response',
+        id: t.tool_use_id,
+        response: t.tool_response,
+      })),
+    },
+  ];
 }
 
 function buildLlmOutputMessagesWithTools(tools, reasoning) {

@@ -120,6 +120,305 @@ describe('codex-hook-processor 端到端', () => {
     expect(state.transcript_last_token_usage?.inputTokens).toBe(1);
   });
 
+  test('UserPromptSubmit 输出 other 事件,不作为缺少 step/model 的 llm.request', () => {
+    writeFakeTranscript([
+      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
+      { timestamp: '2026-05-27T10:00:01Z', type: 'turn_context', payload: { turn_id: 'turn-1', model: 'gpt-5.5' }},
+      { timestamp: '2026-05-27T10:00:02Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-1' }},
+      { timestamp: '2026-05-27T10:00:03Z', type: 'event_msg', payload: { type: 'token_count', info: {
+        last_token_usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 2 },
+      }}},
+    ]);
+
+    runHook('session-start', { session_id: 'cdx-user', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
+    runHook('user-prompt-submit', { session_id: 'cdx-user', prompt: 'hello', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+    runHook('stop', { session_id: 'cdx-user', turn_id: 'turn-1', last_assistant_message: 'hi', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+
+    const records = readJsonl();
+    const userPromptRecord = records.find((r) =>
+      r['event.name'] === 'other' && r['gen_ai.input.messages_delta']?.[0]?.parts?.[0]?.content === 'hello');
+    expect(userPromptRecord).toBeTruthy();
+
+    const stepRequests = records.filter((r) => r['event.name'] === 'llm.request');
+    expect(stepRequests.length).toBeGreaterThan(0);
+    expect(stepRequests.every((r) => r['gen_ai.step.id'] && r['gen_ai.request.model'])).toBe(true);
+  });
+
+  test('Bash tool.call arguments 合并 transcript workdir,其他参数保持原始结构', () => {
+    writeFakeTranscript([
+      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
+      { timestamp: '2026-05-27T10:00:01Z', type: 'turn_context', payload: { turn_id: 'turn-1', model: 'gpt-5.5' }},
+      { timestamp: '2026-05-27T10:00:02Z', type: 'response_item', payload: {
+        type: 'function_call',
+        name: 'exec_command',
+        call_id: 'call-1',
+        arguments: JSON.stringify({ cmd: 'pwd', workdir: '/tmp/project', yield_time_ms: 1000 }),
+      }},
+      { timestamp: '2026-05-27T10:00:03Z', type: 'response_item', payload: {
+        type: 'function_call_output',
+        call_id: 'call-1',
+        output: 'ok',
+      }},
+      { timestamp: '2026-05-27T10:00:04Z', type: 'event_msg', payload: { type: 'token_count', info: {
+        last_token_usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 15 },
+      }}},
+    ]);
+
+    runHook('session-start', { session_id: 'cdx-bash', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
+    runHook('user-prompt-submit', { session_id: 'cdx-bash', prompt: 'run pwd', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+    runHook('pre-tool-use', {
+      session_id: 'cdx-bash',
+      turn_id: 'turn-1',
+      tool_name: 'Bash',
+      tool_use_id: 'call-1',
+      tool_input: { command: 'pwd' },
+      transcript_path: TRANSCRIPT,
+    });
+    runHook('post-tool-use', {
+      session_id: 'cdx-bash',
+      turn_id: 'turn-1',
+      tool_name: 'Bash',
+      tool_use_id: 'call-1',
+      tool_response: 'ok',
+      transcript_path: TRANSCRIPT,
+    });
+    runHook('stop', { session_id: 'cdx-bash', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+
+    const records = readJsonl();
+    const toolCall = records.find((r) => r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'call-1');
+    expect(toolCall?.['gen_ai.tool.call.arguments']).toEqual({
+      command: 'pwd',
+      workdir: '/tmp/project',
+    });
+
+    const outputToolCall = records
+      .find((r) => r['event.name'] === 'llm.response')
+      ?.['gen_ai.output.messages']?.[0]?.parts
+      ?.find((part) => part.type === 'tool_call' && part.id === 'call-1');
+    expect(outputToolCall?.arguments).toEqual({
+      command: 'pwd',
+      workdir: '/tmp/project',
+    });
+  });
+
+  test('非 Bash tool.call arguments 使用 transcript 原始参数', () => {
+    writeFakeTranscript([
+      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
+      { timestamp: '2026-05-27T10:00:01Z', type: 'turn_context', payload: { turn_id: 'turn-1', model: 'gpt-5.5' }},
+      { timestamp: '2026-05-27T10:00:02Z', type: 'response_item', payload: {
+        type: 'function_call',
+        name: 'write_stdin',
+        call_id: 'call-write',
+        arguments: JSON.stringify({ session_id: 7, chars: 'q', yield_time_ms: 500 }),
+      }},
+      { timestamp: '2026-05-27T10:00:03Z', type: 'response_item', payload: {
+        type: 'function_call_output',
+        call_id: 'call-write',
+        output: 'ok',
+      }},
+      { timestamp: '2026-05-27T10:00:04Z', type: 'event_msg', payload: { type: 'token_count', info: {
+        last_token_usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 15 },
+      }}},
+    ]);
+
+    runHook('session-start', { session_id: 'cdx-other-tool', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
+    runHook('user-prompt-submit', { session_id: 'cdx-other-tool', prompt: 'send stdin', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+    runHook('pre-tool-use', {
+      session_id: 'cdx-other-tool',
+      turn_id: 'turn-1',
+      tool_name: 'write_stdin',
+      tool_use_id: 'call-write',
+      tool_input: { session_id: 7 },
+      transcript_path: TRANSCRIPT,
+    });
+    runHook('post-tool-use', {
+      session_id: 'cdx-other-tool',
+      turn_id: 'turn-1',
+      tool_name: 'write_stdin',
+      tool_use_id: 'call-write',
+      tool_response: 'ok',
+      transcript_path: TRANSCRIPT,
+    });
+    runHook('stop', { session_id: 'cdx-other-tool', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+
+    const records = readJsonl();
+    const toolCall = records.find((r) => r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'call-write');
+    expect(toolCall?.['gen_ai.tool.call.arguments']).toEqual({
+      session_id: 7,
+      chars: 'q',
+      yield_time_ms: 500,
+    });
+  });
+
+  test('transcript-only apply_patch/web_search/tool_search 生成 tool.call arguments', () => {
+    writeFakeTranscript([
+      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
+      { timestamp: '2026-05-27T10:00:01Z', type: 'turn_context', payload: { turn_id: 'turn-1', model: 'gpt-5.5' }},
+      { timestamp: '2026-05-27T10:00:02Z', type: 'response_item', payload: {
+        type: 'custom_tool_call',
+        name: 'apply_patch',
+        call_id: 'call-patch',
+        input: '*** Begin Patch\n*** End Patch',
+      }},
+      { timestamp: '2026-05-27T10:00:03Z', type: 'response_item', payload: {
+        type: 'custom_tool_call_output',
+        call_id: 'call-patch',
+        output: 'ok',
+      }},
+      { timestamp: '2026-05-27T10:00:04Z', type: 'response_item', payload: {
+        type: 'web_search_call',
+        status: 'completed',
+        action: { type: 'search', query: 'codex hooks' },
+      }},
+      { timestamp: '2026-05-27T10:00:05Z', type: 'response_item', payload: {
+        type: 'tool_search_call',
+        call_id: 'call-tool-search',
+        status: 'completed',
+        execution: 'client',
+        arguments: { query: 'browser mcp', limit: 5 },
+      }},
+      { timestamp: '2026-05-27T10:00:06Z', type: 'response_item', payload: {
+        type: 'tool_search_output',
+        call_id: 'call-tool-search',
+        status: 'completed',
+        execution: 'client',
+        tools: [{ name: 'browser.open' }],
+      }},
+      { timestamp: '2026-05-27T10:00:07Z', type: 'event_msg', payload: { type: 'token_count', info: {
+        last_token_usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 15 },
+      }}},
+    ]);
+
+    runHook('session-start', { session_id: 'cdx-transcript-tools', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
+    runHook('user-prompt-submit', { session_id: 'cdx-transcript-tools', prompt: 'use tools', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+    runHook('stop', { session_id: 'cdx-transcript-tools', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+
+    const records = readJsonl();
+    const calls = records.filter((r) => r['event.name'] === 'tool.call');
+    expect(calls.map((r) => r['gen_ai.tool.name'])).toEqual([
+      'apply_patch',
+      'web_search',
+      'tool_search',
+    ]);
+
+    expect(calls.find((r) => r['gen_ai.tool.name'] === 'apply_patch')?.['gen_ai.tool.call.arguments']).toEqual({
+      command: '*** Begin Patch\n*** End Patch',
+    });
+    expect(calls.find((r) => r['gen_ai.tool.name'] === 'web_search')?.['gen_ai.tool.call.arguments']).toEqual({
+      type: 'search',
+      query: 'codex hooks',
+    });
+    expect(calls.find((r) => r['gen_ai.tool.name'] === 'tool_search')?.['gen_ai.tool.call.arguments']).toEqual({
+      query: 'browser mcp',
+      limit: 5,
+    });
+
+    const outputParts = records
+      .filter((r) => r['event.name'] === 'llm.response')
+      .flatMap((r) => r['gen_ai.output.messages']?.[0]?.parts ?? []);
+    expect(outputParts.filter((part) => part.type === 'tool_call').map((part) => part.arguments)).toEqual([
+      { command: '*** Begin Patch\n*** End Patch' },
+      { type: 'search', query: 'codex hooks' },
+      { query: 'browser mcp', limit: 5 },
+    ]);
+  });
+
+  test('上下文压缩后 llm.request 记录全量 input.messages', () => {
+    writeFakeTranscript([
+      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
+      { timestamp: '2026-05-27T10:00:01Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-compact' }},
+      { timestamp: '2026-05-27T10:00:02Z', type: 'response_item', payload: {
+        type: 'message',
+        role: 'developer',
+        content: [{ type: 'input_text', text: 'compressed developer context' }],
+      }},
+      { timestamp: '2026-05-27T10:00:03Z', type: 'response_item', payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'compressed environment context' }],
+      }},
+      { timestamp: '2026-05-27T10:00:04Z', type: 'turn_context', payload: { turn_id: 'turn-compact', model: 'gpt-5.5' }},
+      { timestamp: '2026-05-27T10:00:05Z', type: 'response_item', payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'actual user prompt' }],
+      }},
+      { timestamp: '2026-05-27T10:00:06Z', type: 'event_msg', payload: {
+        type: 'user_message',
+        message: 'actual user prompt',
+      }},
+      { timestamp: '2026-05-27T10:00:07Z', type: 'event_msg', payload: { type: 'token_count', info: {
+        last_token_usage: { input_tokens: 20, output_tokens: 5, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 25 },
+      }}},
+    ]);
+
+    runHook('session-start', { session_id: 'cdx-compact', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
+    runHook('stop', { session_id: 'cdx-compact', turn_id: 'turn-compact', last_assistant_message: 'done', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+
+    const req = readJsonl().find((r) => r['event.name'] === 'llm.request' && r['gen_ai.step.id']);
+    expect(req?.['gen_ai.input.messages_delta']).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'actual user prompt' }] },
+    ]);
+    expect(req?.['gen_ai.input.messages']).toEqual([
+      { role: 'developer', parts: [{ type: 'text', content: 'compressed developer context' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'compressed environment context' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'actual user prompt' }] },
+    ]);
+  });
+
+  test('同一 turn 压缩后的重复 turn_context 不产生空 input.messages_delta', () => {
+    writeFakeTranscript([
+      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
+      { timestamp: '2026-05-27T10:00:01Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-compact-repeat' }},
+      { timestamp: '2026-05-27T10:00:02Z', type: 'turn_context', payload: { turn_id: 'turn-compact-repeat', model: 'gpt-5.5' }},
+      { timestamp: '2026-05-27T10:00:03Z', type: 'event_msg', payload: { type: 'user_message', message: 'before compact' }},
+      { timestamp: '2026-05-27T10:00:04Z', type: 'response_item', payload: {
+        type: 'function_call',
+        name: 'exec_command',
+        call_id: 'call-before',
+        arguments: JSON.stringify({ cmd: 'pwd' }),
+      }},
+      { timestamp: '2026-05-27T10:00:05Z', type: 'response_item', payload: {
+        type: 'function_call_output',
+        call_id: 'call-before',
+        output: 'ok-before',
+      }},
+      { timestamp: '2026-05-27T10:00:06Z', type: 'compacted', payload: {
+        message: 'compact',
+        replacement_history: [],
+      }},
+      { timestamp: '2026-05-27T10:00:07Z', type: 'turn_context', payload: { turn_id: 'turn-compact-repeat', model: 'gpt-5.5' }},
+      { timestamp: '2026-05-27T10:00:08Z', type: 'event_msg', payload: { type: 'context_compacted' }},
+      { timestamp: '2026-05-27T10:00:09Z', type: 'response_item', payload: {
+        type: 'function_call',
+        name: 'exec_command',
+        call_id: 'call-after',
+        arguments: JSON.stringify({ cmd: 'ls' }),
+      }},
+      { timestamp: '2026-05-27T10:00:10Z', type: 'response_item', payload: {
+        type: 'function_call_output',
+        call_id: 'call-after',
+        output: 'ok-after',
+      }},
+      { timestamp: '2026-05-27T10:00:11Z', type: 'event_msg', payload: { type: 'token_count', info: {
+        last_token_usage: { input_tokens: 20, output_tokens: 5, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 25 },
+      }}},
+    ]);
+
+    runHook('session-start', { session_id: 'cdx-repeat-context', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
+    runHook('stop', { session_id: 'cdx-repeat-context', turn_id: 'turn-compact-repeat', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+
+    const requests = readJsonl().filter((r) => r['event.name'] === 'llm.request' && r['gen_ai.step.id']);
+    expect(requests).toHaveLength(2);
+    expect(requests.every((r) => Array.isArray(r['gen_ai.input.messages_delta']))).toBe(true);
+    expect(requests[0]?.['gen_ai.input.messages_delta']).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'before compact' }] },
+    ]);
+    expect(requests[1]?.['gen_ai.input.messages_delta']).toEqual([
+      { role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-before', response: 'ok-before' }] },
+    ]);
+  });
+
   test('缺 session_id 不污染 state 目录', () => {
     runHook('post-tool-use', { tool_name: 'Bash' });
     const dir = path.join(DATA_DIR, 'state', 'codex', 'sessions');

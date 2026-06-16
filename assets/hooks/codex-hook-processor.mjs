@@ -54,6 +54,10 @@ import {
 import { loadState, saveState, splitIntoTurns } from './codex/state.mjs';
 import { parseTranscript } from './codex/transcript-parser.mjs';
 import { buildReactSteps } from './codex/react-step-builder.mjs';
+import {
+  mergeCodexToolArguments,
+  normalizeCodexToolArguments,
+} from './codex/tool-arguments.mjs';
 
 const AGENT_ID = 'codex';
 
@@ -107,16 +111,40 @@ function requireSessionId(event, stage = 'cmd') {
 function appendMissingTranscriptToolEvents(state, transcriptToolEvents) {
   if (!Array.isArray(transcriptToolEvents) || transcriptToolEvents.length === 0) return;
   if (!Array.isArray(state.events)) state.events = [];
-  const seen = new Set(
-    state.events
-      .filter((event) => event.type === 'pre_tool_use' || event.type === 'post_tool_use')
-      .map((event) => `${event.type}:${event.tool_use_id || ''}`),
-  );
+  const seen = new Map();
+  for (const event of state.events) {
+    if (event.type === 'pre_tool_use' || event.type === 'post_tool_use') {
+      seen.set(`${event.type}:${event.tool_use_id || ''}`, event);
+    }
+  }
   for (const event of transcriptToolEvents) {
     const key = `${event.type}:${event.tool_use_id || ''}`;
-    if (!seen.has(key)) {
+    const existing = seen.get(key);
+    if (existing) {
+      mergeTranscriptToolEvent(existing, event);
+    } else {
+      if (event.type === 'pre_tool_use') {
+        event.tool_input = normalizeCodexToolArguments(event.tool_name, event.tool_input);
+      }
       state.events.push(event);
-      seen.add(key);
+      seen.set(key, event);
+    }
+  }
+}
+
+function mergeTranscriptToolEvent(target, transcriptEvent) {
+  if (!target || !transcriptEvent) return;
+  if (target.type === 'pre_tool_use' && transcriptEvent.type === 'pre_tool_use') {
+    target.tool_input = mergeCodexToolArguments(target.tool_name, target.tool_input, transcriptEvent.tool_name, transcriptEvent.tool_input);
+    if ((!target.tool_name || target.tool_name === 'unknown') && transcriptEvent.tool_name) {
+      target.tool_name = transcriptEvent.tool_name;
+    }
+  } else if (target.type === 'post_tool_use' && transcriptEvent.type === 'post_tool_use') {
+    if (target.tool_response === undefined || target.tool_response === null || target.tool_response === '') {
+      target.tool_response = transcriptEvent.tool_response;
+    }
+    if ((!target.tool_name || target.tool_name === 'unknown') && transcriptEvent.tool_name) {
+      target.tool_name = transcriptEvent.tool_name;
     }
   }
 }
@@ -390,6 +418,7 @@ function resolveTurns(state, transcriptData) {
     turns.push({
       turn_id: boundary.turn_id,
       prompt: boundary.prompt || promptEvent?.prompt || '',
+      inputMessages: boundary.inputMessages,
       model: promptEvent?.model || state.model || 'unknown',
       start_time: startTime,
       end_time: stopEvent && i === boundaries.length - 1
@@ -448,7 +477,7 @@ function buildTurnRecords({
     records.push({
       time_unix_nano: timestampToUnixNanos(turn.start_time * 1000),
       'event.id': crypto.randomUUID(),
-      'event.name': 'llm.request',
+      'event.name': 'other',
       ...baseFields,
       span_id: agentSpanId,
       parent_span_id: entrySpanId,
@@ -471,7 +500,10 @@ function buildTurnRecords({
     const llmSpanId = generateSpanId();
 
     const inputMsgs = step.llm_input_messages;
-    const currentFullHash = computeHash(INITIAL_HASH, inputMsgs);
+    const fullInputMsgs = Array.isArray(step.llm_full_input_messages) && step.llm_full_input_messages.length > 0
+      ? step.llm_full_input_messages
+      : inputMsgs;
+    const currentFullHash = computeHash(INITIAL_HASH, fullInputMsgs);
     const logFull = shouldLogFullMessages(runningHash, inputMsgs, currentFullHash);
 
     // llm.request
@@ -487,7 +519,7 @@ function buildTurnRecords({
       'gen_ai.input.messages_hash': currentFullHash,
       'gen_ai.input.messages_delta': inputMsgs,
     };
-    if (logFull) reqRecord['gen_ai.input.messages'] = inputMsgs;
+    if (logFull) reqRecord['gen_ai.input.messages'] = fullInputMsgs;
     // Codex 专属:system_instructions / tool.definitions(每条 LLM record 都贴,符合 ARMS 规范)
     if (systemInstruction) reqRecord['gen_ai.system_instructions'] = systemInstruction;
     if (toolDefinitions) reqRecord['gen_ai.tool.definitions'] = toolDefinitions;
