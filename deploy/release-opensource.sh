@@ -81,8 +81,11 @@ if [ "$OSS_ONLY" -eq 1 ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
         echo "[dry-run] Would build, package, and upload to OSS:"
         echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.tar.gz"
+        echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.zip"
         echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/latest/${PACKAGE_NAME}.tar.gz"
+        echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/latest/${PACKAGE_NAME}.zip"
         echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/installer.sh"
+        echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/installer.ps1"
         exit 0
     fi
 else
@@ -142,8 +145,11 @@ else
         echo "[dry-run] Would push tag → GitHub Actions creates the Release"
         echo "[dry-run] Would build, package, and upload to OSS:"
         echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.tar.gz"
+        echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.zip"
         echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/latest/${PACKAGE_NAME}.tar.gz"
+        echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/latest/${PACKAGE_NAME}.zip"
         echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/installer.sh"
+        echo "[dry-run]   ${OSS_BUCKET}/${OSS_PREFIX}/installer.ps1"
         exit 0
     fi
 
@@ -199,11 +205,16 @@ fi
 if [ "$SKIP_OSS" -eq 0 ]; then
     echo ""
     echo "==> Building and packaging..."
-    bash deploy/package.sh --opensource
-    PACKAGE_FILE="$PROJECT_ROOT/${PACKAGE_NAME}.tar.gz"
+    bash deploy/package-opensource.sh
+    TARBALL="$PROJECT_ROOT/${PACKAGE_NAME}.tar.gz"
+    ZIPFILE="$PROJECT_ROOT/${PACKAGE_NAME}.zip"
 
-    if [ ! -f "$PACKAGE_FILE" ]; then
-        echo "❌ Package file not found: $PACKAGE_FILE"
+    if [ ! -f "$TARBALL" ]; then
+        echo "❌ Package file not found: $TARBALL"
+        exit 1
+    fi
+    if [ ! -f "$ZIPFILE" ]; then
+        echo "❌ Package file not found: $ZIPFILE"
         exit 1
     fi
 
@@ -215,20 +226,29 @@ if [ "$SKIP_OSS" -eq 0 ]; then
     echo ""
     echo "==> Uploading to OSS..."
 
-    # Upload versioned package
-    ossutil cp "$PACKAGE_FILE" "${OSS_BUCKET}/${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.tar.gz" -f
+    # Upload versioned packages (Linux/macOS .tar.gz + Windows .zip)
+    ossutil cp "$TARBALL" "${OSS_BUCKET}/${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.tar.gz" -f
     echo "    ✅ ${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.tar.gz"
 
+    ossutil cp "$ZIPFILE" "${OSS_BUCKET}/${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.zip" -f
+    echo "    ✅ ${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.zip"
+
     # Upload as latest
-    ossutil cp "$PACKAGE_FILE" "${OSS_BUCKET}/${OSS_PREFIX}/latest/${PACKAGE_NAME}.tar.gz" -f
+    ossutil cp "$TARBALL" "${OSS_BUCKET}/${OSS_PREFIX}/latest/${PACKAGE_NAME}.tar.gz" -f
     echo "    ✅ ${OSS_PREFIX}/latest/${PACKAGE_NAME}.tar.gz"
 
-    # Upload installer script
+    ossutil cp "$ZIPFILE" "${OSS_BUCKET}/${OSS_PREFIX}/latest/${PACKAGE_NAME}.zip" -f
+    echo "    ✅ ${OSS_PREFIX}/latest/${PACKAGE_NAME}.zip"
+
+    # Upload installer scripts (Linux/macOS .sh + Windows .ps1)
     ossutil cp deploy/installer-opensource.sh "${OSS_BUCKET}/${OSS_PREFIX}/installer.sh" -f
     echo "    ✅ ${OSS_PREFIX}/installer.sh"
 
+    ossutil cp deploy/installer-opensource.ps1 "${OSS_BUCKET}/${OSS_PREFIX}/installer.ps1" -f
+    echo "    ✅ ${OSS_PREFIX}/installer.ps1"
+
     # Cleanup
-    rm -f "$PACKAGE_FILE"
+    rm -f "$TARBALL" "$ZIPFILE"
 else
     echo ""
     echo "==> Skipping OSS upload (--skip-oss)"
@@ -246,7 +266,8 @@ else
     echo "   Branch:  ${RELEASE_BRANCH}"
 fi
 echo ""
-echo "   OSS:     https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.tar.gz"
+echo "   OSS:     https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.tar.gz (Linux/macOS)"
+echo "            https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/${OSS_PREFIX}/${NEXT_VERSION}/${PACKAGE_NAME}.zip (Windows)"
 if [ "$OSS_ONLY" -eq 0 ]; then
     echo "   GitHub Actions will create the GitHub Release."
     echo "   Next step: create PR to merge ${RELEASE_BRANCH} → main"
