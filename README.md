@@ -4,14 +4,16 @@ A lightweight, multi-agent AI coding telemetry collector. LoongSuite Pilot disco
 
 ## Supported Agents
 
-| Agent | Collection Method |
-|-------|------------------|
-| Claude Code | Hook JSONL logs |
-| Codex | CLI telemetry log forwarding |
-| Cursor | Hook JSONL logs |
-| Qoder | IDE history snapshot polling |
-| QoderCN | SQLite incremental polling |
-| QoderWork | Hook JSONL logs |
+| Agent | Collection Method | Trace Reporting | Log Reporting | Token Collection | Conversation / Tool Call Collection |
+|-------|------------------|-----------------|---------------|------------------|-------------------------------------|
+| Claude Code | Hook JSONL logs | Yes | Yes | Yes | Yes |
+| Codex | CLI telemetry log forwarding | Yes | Yes | Yes | Yes |
+| Cursor | Hook JSONL logs | Yes | Yes | Yes | Yes |
+| Qoder | IDE history snapshot polling | Yes | Yes | Yes | Yes |
+| Qoder CN | SQLite incremental polling | Yes | Yes | Yes | Yes |
+| Qoder CLI | Hook JSONL logs / session polling | Yes | Yes | No | Yes |
+| Qoder Work | Hook JSONL logs / SQLite incremental polling | Yes | Yes | No | Yes |
+| Qoder Work CN | Hook JSONL logs / SQLite incremental polling | Yes | Yes | No | Yes |
 
 Agent support is declarative — see `agents.d/` for definitions. Adding a new agent requires no changes to the core framework.
 
@@ -168,6 +170,10 @@ Default config path: `~/.loongsuite-pilot/config.json` (override via `AGENT_DATA
 | **OTLP Trace** | `OtlpTraceFlusher` | OpenTelemetry trace export via OTLP/HTTP |
 
 If no backend is configured, the collector defaults to JSONL local file output.
+
+### Output Event Schema
+
+LoongSuite Pilot emits a normalized GenAI event schema across all supported agents. See [Output Event Schema](docs/output-event-schema.md) for event names, field definitions, provider values, finish reasons, and sensitivity notes for opt-in content fields.
 
 ### Environment Variables
 
