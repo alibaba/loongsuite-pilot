@@ -133,6 +133,24 @@ stop_pid_file() {
     rm -f "$pid_file"
 }
 
+updater_process_exists() {
+    if [ -f "$UPDATER_PID_FILE" ]; then
+        local pid
+        pid=$(cat "$UPDATER_PID_FILE" 2>/dev/null || true)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            local command_line
+            command_line=$(ps -p "$pid" -o command= 2>/dev/null || true)
+            case "$command_line" in
+                *updater-daemon.js*|*"/bin/updater-daemon"*|*"loongsuite-pilot run-updater"*|*"dist/updater/index.js"*)
+                    return 0
+                    ;;
+            esac
+        fi
+    fi
+
+    pgrep -f "loongsuite-pilot/bin/updater-daemon" >/dev/null 2>&1
+}
+
 _node_is_suitable() {
     local bin="$1"
     [ -x "$bin" ] || return 1
@@ -749,7 +767,7 @@ cmd_restart_updater() {
     # Verify the service manager actually started the updater process
     if [ "$_restarted" = true ]; then
         sleep 1
-        if ! pgrep -f "loongsuite-pilot/bin/updater-daemon" >/dev/null 2>&1; then
+        if ! updater_process_exists; then
             echo "⚠️  service manager reported success but updater process not found, falling back to nohup"
             _restarted=false
         fi
@@ -769,6 +787,11 @@ cmd_restart_updater() {
         nohup "$node_bin" "$entry" >> "$UPDATER_LOG_FILE" 2>&1 &
         echo "$!" > "$UPDATER_PID_FILE"
         echo "✅ updater restarted (PID $!)"
+    fi
+
+    if ! updater_process_exists; then
+        echo "❌ updater process not found after restart" >&2
+        return 1
     fi
 }
 

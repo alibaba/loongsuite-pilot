@@ -42,6 +42,7 @@ import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { HookWatchdog, type PluginCheckTarget } from './hook-watchdog.js';
+import { UpdaterWatchdog } from './updater-watchdog.js';
 import { FileCollectionManager } from '../file-collection/file-collection-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
 import { AlarmManager } from '../metrics/alarm-manager.js';
@@ -99,6 +100,7 @@ export class Orchestrator extends EventEmitter {
   private flusher!: BaseFlusher;
   private logRetentionService!: LogRetentionService;
   private hookWatchdog!: HookWatchdog;
+  private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
   private fileCollectionManager: FileCollectionManager | null = null;
   private metricsWriter!: MetricsWriter;
@@ -191,7 +193,17 @@ export class Orchestrator extends EventEmitter {
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets);
     this.hookWatchdog.start();
 
-    // 11. Start file collection pipelines (disabled by default)
+    // 11. Start updater watchdog only when resolved auto-update is enabled.
+    if (this.config.autoUpdate?.enabled) {
+      this.updaterWatchdog = new UpdaterWatchdog({
+        enabled: true,
+        dataDir: this.dataDir,
+        alarmManager: this.alarmManager,
+      });
+      this.updaterWatchdog.start();
+    }
+
+    // 12. Start file collection pipelines (disabled by default)
     if (this.config.fileCollection.enabled) {
       this.fileCollectionManager = new FileCollectionManager({
         configDir: path.join(this.dataDir, 'configs', 'local'),
@@ -203,7 +215,7 @@ export class Orchestrator extends EventEmitter {
       logger.info('file collection disabled, skipping');
     }
 
-    // 12. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
+    // 13. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
     const slsFlusher = this.getSlsFlusher();
     if (slsFlusher) slsFlusher.setAlarmManager(this.alarmManager);
     this.metricsWriter = new MetricsWriter({
@@ -215,7 +227,7 @@ export class Orchestrator extends EventEmitter {
     });
     await this.metricsWriter.start();
 
-    // 12. Start status bar support (runtime.json + metrics summary + native app)
+    // 14. Start status bar support (runtime.json + metrics summary + native app)
     if (this.config.statusBar.enabled) {
       const packageVersion = this.readPackageVersion();
 
@@ -249,6 +261,8 @@ export class Orchestrator extends EventEmitter {
     await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(() => {});
     this.metricsSummaryWriter?.stop();
     this.runtimeWriter?.stop();
+    this.updaterWatchdog?.stop();
+    this.updaterWatchdog = null;
     this.hookWatchdog?.stop();
     this.logRetentionService?.stop();
     await this.agentDiscoveryService?.stop();
@@ -1058,5 +1072,4 @@ export class Orchestrator extends EventEmitter {
     return this.alarmManager;
   }
 }
-
 
