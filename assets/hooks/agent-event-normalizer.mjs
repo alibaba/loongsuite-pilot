@@ -343,7 +343,7 @@ export function getSourceHookEvent(payload) {
 export function mapSourceHookEventToEventName(sourceEvent) {
   const event = String(sourceEvent || '').toLowerCase();
   if (event.includes('agentresponse') || event.includes('agentthought')) return 'llm.response';
-  if (event.includes('beforesubmitprompt')) return 'llm.request';
+  if (event.includes('beforesubmitprompt')) return 'other';
   if (event.includes('pretooluse') || event.includes('beforemcpexecution') || event.includes('beforeshellexecution')) return 'tool.call';
   if (
     event.includes('posttooluse') ||
@@ -361,7 +361,8 @@ export function buildCursorHookRecord(payload, options = {}) {
   const runtimeConfig = options.runtimeConfig || {};
   const sourceEvent = getSourceHookEvent(payload);
   const eventName = getStringValue(payload, 'event.name') || mapSourceHookEventToEventName(sourceEvent);
-  const model = getStringValue(payload, 'model') || 'unknown';
+  const rawModel = getStringValue(payload, 'model') || 'unknown';
+  const model = (rawModel === 'default' || rawModel === 'unknown') ? 'composer-2.5' : rawModel;
   const toolOutput = parseMaybeJson(payload.tool_output ?? payload.result_json ?? payload.tool_results);
   const toolArguments = parseMaybeJson(payload.tool_input);
   // Stop events duplicate token/cost data already reported by afterAgentResponse
@@ -381,7 +382,7 @@ export function buildCursorHookRecord(payload, options = {}) {
       || getStringValue(payload, 'turn.id'),
     'gen_ai.step.id': getStringValue(payload, 'gen_ai.step.id') || getStringValue(payload, 'step_id'),
     'gen_ai.agent.type': 'cursor',
-    'gen_ai.provider.name': inferProviderName({ ...payload, 'gen_ai.request.model': model, 'gen_ai.agent.type': 'cursor' }),
+    'gen_ai.provider.name': /^composer/i.test(model) ? 'cursor' : inferProviderName({ ...payload, 'gen_ai.request.model': model, 'gen_ai.agent.type': 'cursor' }),
     'gen_ai.request.model': getStringValue(payload, 'gen_ai.request.model') || model,
     'gen_ai.response.model': getStringValue(payload, 'gen_ai.response.model') || model,
     'gen_ai.response.finish_reasons': getStringValue(payload, 'response_finish_reasons'),
@@ -397,8 +398,8 @@ export function buildCursorHookRecord(payload, options = {}) {
     'gen_ai.usage.cache_creation.input_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_cache_write'),
     'gen_ai.usage.total_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_total'),
     'gen_ai.input.messages_hash': getStringValue(payload, 'input_messages_hash'),
-    'gen_ai.input.messages_delta': eventName === 'llm.request' ? buildCursorInputMessagesDelta(payload) : undefined,
-    'gen_ai.input.messages': eventName === 'llm.request' ? toJsonValue(parseMaybeJson(payload.input_messages)) : undefined,
+    'gen_ai.input.messages_delta': (eventName === 'llm.request' || eventName === 'other') ? buildCursorInputMessagesDelta(payload) : undefined,
+    'gen_ai.input.messages': (eventName === 'llm.request' || eventName === 'other') ? toJsonValue(parseMaybeJson(payload.input_messages)) : undefined,
     'gen_ai.output.messages': eventName === 'llm.response' ? buildCursorOutputMessages(payload, sourceEvent) : undefined,
     'gen_ai.tool.name': getStringValue(payload, 'tool_name'),
     'gen_ai.tool.call.id': getStringValue(payload, 'tool_use_id'),

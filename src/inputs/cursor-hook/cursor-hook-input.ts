@@ -84,7 +84,8 @@ export class CursorHookInput extends BaseHookInput {
     const toolOutput = buildToolResultPayload(payload);
     const toolArguments = buildToolArguments(payload);
     const attributes = buildAttributes(record, payload, hookEvent);
-    const model = getStringValue(payload, 'model') ?? UNKNOWN_MODEL;
+    const rawModel = getStringValue(payload, 'model') ?? UNKNOWN_MODEL;
+    const model = (rawModel === 'default' || rawModel === 'unknown') ? 'composer-2.5' : rawModel;
     const sessionId = getStringValue(payload, 'session_id')
       ?? getStringValue(payload, 'conversation_id')
       ?? getStringValue(payload, 'session.id')
@@ -146,8 +147,8 @@ export class CursorHookInput extends BaseHookInput {
       'gen_ai.usage.cache_creation.input_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_cache_write'),
       'gen_ai.usage.total_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_total'),
       'gen_ai.input.messages_hash': getStringValue(payload, 'input_messages_hash'),
-      'gen_ai.input.messages_delta': eventName === 'llm.request' ? buildInputMessagesDelta(payload) : undefined,
-      'gen_ai.input.messages': eventName === 'llm.request' ? toJsonValue(parseMaybeJson(payload.input_messages)) : undefined,
+      'gen_ai.input.messages_delta': (eventName === 'llm.request' || eventName === 'other') ? buildInputMessagesDelta(payload) : undefined,
+      'gen_ai.input.messages': (eventName === 'llm.request' || eventName === 'other') ? toJsonValue(parseMaybeJson(payload.input_messages)) : undefined,
       'gen_ai.tool.name': getStringValue(payload, 'tool_name'),
       'gen_ai.tool.call.id': getStringValue(payload, 'tool_use_id'),
       'gen_ai.tool.call.exec.id': getStringValue(payload, 'tool_use_id'),
@@ -188,7 +189,7 @@ function inferEventName(hookEvent: string, payload: Record<string, unknown>): Ag
     return 'llm.response';
   }
   if (event.includes('beforesubmitprompt')) {
-    return 'llm.request';
+    return 'other';
   }
   if (event.includes('pretooluse')) {
     return 'tool.call';
