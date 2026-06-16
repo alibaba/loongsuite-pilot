@@ -6,6 +6,7 @@ import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import * as crypto from 'node:crypto';
+import * as os from 'node:os';
 import type { AutoUpdateConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
@@ -66,15 +67,26 @@ export interface UpdaterPaths {
   loongsuitePilotBin: string;
 }
 
+function homeDir(): string {
+  return process.env.HOME ?? process.env.USERPROFILE ?? os.homedir();
+}
+
+function pilotBinPath(): string {
+  const home = homeDir();
+  const ext = process.platform === 'win32' ? '.ps1' : '';
+  return path.join(home, '.local', 'bin', `loongsuite-pilot${ext}`);
+}
+
 function defaultPaths(): UpdaterPaths {
-  const cacheDir = path.join(process.env.HOME ?? '', '.loongsuite-pilot');
+  const home = homeDir();
+  const cacheDir = path.join(home, '.loongsuite-pilot');
   return {
     cacheDir,
     versionsDir: path.join(cacheDir, 'versions'),
     currentFile: path.join(cacheDir, 'current'),
     previousFile: path.join(cacheDir, 'previous'),
     bootstrapDir: path.join(cacheDir, 'bin'),
-    loongsuitePilotBin: path.join(process.env.HOME ?? '', '.local', 'bin', 'loongsuite-pilot'),
+    loongsuitePilotBin: pilotBinPath(),
   };
 }
 
@@ -85,7 +97,7 @@ export function buildPaths(baseDir: string): UpdaterPaths {
     currentFile: path.join(baseDir, 'current'),
     previousFile: path.join(baseDir, 'previous'),
     bootstrapDir: path.join(baseDir, 'bin'),
-    loongsuitePilotBin: path.join(process.env.HOME ?? '', '.local', 'bin', 'loongsuite-pilot'),
+    loongsuitePilotBin: pilotBinPath(),
   };
 }
 
@@ -476,6 +488,7 @@ export class Updater {
         cwd: targetDir,
         env: childEnv,
         timeout: NPM_INSTALL_TIMEOUT_MS,
+        shell: process.platform === 'win32',
       });
 
       const postinstallScript = path.join(targetDir, 'scripts', 'postinstall.js');
@@ -546,7 +559,8 @@ export class Updater {
       await this.copyFileAtomic(src, dst);
     }
 
-    const cliScript = path.join(srcDir, 'loongsuite-pilot.sh');
+    const cliExt = process.platform === 'win32' ? '.ps1' : '.sh';
+    const cliScript = path.join(srcDir, `loongsuite-pilot${cliExt}`);
     await fs.mkdir(path.dirname(loongsuitePilotBin), { recursive: true });
     await this.copyFileAtomic(cliScript, loongsuitePilotBin, 0o755);
 
@@ -604,7 +618,14 @@ export class Updater {
   private async restartCollector(): Promise<void> {
     logger.info('restarting collector service');
     try {
-      await execFileAsync(this.paths.loongsuitePilotBin, ['restart-collector'], { timeout: 30_000 });
+      const bin = this.paths.loongsuitePilotBin;
+      if (process.platform === 'win32') {
+        await execFileAsync('powershell.exe', [
+          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, 'restart-collector',
+        ], { timeout: 30_000 });
+      } else {
+        await execFileAsync(bin, ['restart-collector'], { timeout: 30_000 });
+      }
       logger.info('collector restarted');
     } catch (err) {
       logger.warn('collector restart failed', { error: String(err) });
@@ -621,8 +642,18 @@ export class Updater {
 
     logger.info('restarting monitor after update');
     try {
-      await execFileAsync(this.paths.loongsuitePilotBin, ['monitor', 'stop'], { timeout: 30_000 });
-      await execFileAsync(this.paths.loongsuitePilotBin, ['monitor', 'start'], { timeout: 30_000 });
+      const bin = this.paths.loongsuitePilotBin;
+      if (process.platform === 'win32') {
+        await execFileAsync('powershell.exe', [
+          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, 'monitor', 'stop',
+        ], { timeout: 30_000 });
+        await execFileAsync('powershell.exe', [
+          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, 'monitor', 'start',
+        ], { timeout: 30_000 });
+      } else {
+        await execFileAsync(bin, ['monitor', 'stop'], { timeout: 30_000 });
+        await execFileAsync(bin, ['monitor', 'start'], { timeout: 30_000 });
+      }
       logger.info('monitor restarted');
     } catch (err) {
       logger.warn('monitor restart failed', { error: String(err) });
