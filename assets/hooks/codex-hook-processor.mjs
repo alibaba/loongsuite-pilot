@@ -54,6 +54,10 @@ import {
 import { loadState, saveState, splitIntoTurns } from './codex/state.mjs';
 import { parseTranscript } from './codex/transcript-parser.mjs';
 import { buildReactSteps } from './codex/react-step-builder.mjs';
+import {
+  mergeCodexToolArguments,
+  normalizeCodexToolArguments,
+} from './codex/tool-arguments.mjs';
 
 const AGENT_ID = 'codex';
 
@@ -120,7 +124,7 @@ function appendMissingTranscriptToolEvents(state, transcriptToolEvents) {
       mergeTranscriptToolEvent(existing, event);
     } else {
       if (event.type === 'pre_tool_use') {
-        event.tool_input = formatCodexToolArguments(event.tool_name, event.tool_input, event.tool_name, event.tool_input);
+        event.tool_input = normalizeCodexToolArguments(event.tool_name, event.tool_input);
       }
       state.events.push(event);
       seen.set(key, event);
@@ -131,7 +135,7 @@ function appendMissingTranscriptToolEvents(state, transcriptToolEvents) {
 function mergeTranscriptToolEvent(target, transcriptEvent) {
   if (!target || !transcriptEvent) return;
   if (target.type === 'pre_tool_use' && transcriptEvent.type === 'pre_tool_use') {
-    target.tool_input = formatCodexToolArguments(target.tool_name, target.tool_input, transcriptEvent.tool_name, transcriptEvent.tool_input);
+    target.tool_input = mergeCodexToolArguments(target.tool_name, target.tool_input, transcriptEvent.tool_name, transcriptEvent.tool_input);
     if ((!target.tool_name || target.tool_name === 'unknown') && transcriptEvent.tool_name) {
       target.tool_name = transcriptEvent.tool_name;
     }
@@ -143,40 +147,6 @@ function mergeTranscriptToolEvent(target, transcriptEvent) {
       target.tool_name = transcriptEvent.tool_name;
     }
   }
-}
-
-function formatCodexToolArguments(toolName, hookInput, transcriptToolName, transcriptInput) {
-  const hookArgs = isPlainObject(hookInput) ? hookInput : {};
-  const transcriptArgs = isPlainObject(transcriptInput) ? transcriptInput : {};
-  const normalizedName = String(toolName || transcriptToolName || '').toLowerCase();
-  const normalizedTranscriptName = String(transcriptToolName || '').toLowerCase();
-
-  if (normalizedName === 'bash' || normalizedTranscriptName === 'exec_command') {
-    const command = hookArgs.command ?? transcriptArgs.command ?? transcriptArgs.cmd;
-    const workdir = hookArgs.workdir ?? transcriptArgs.workdir;
-    const out = {};
-    if (command !== undefined) out.command = command;
-    if (workdir !== undefined) out.workdir = workdir;
-    return Object.keys(out).length > 0 ? out : hookInput;
-  }
-
-  if (normalizedName === 'apply_patch') {
-    if (hookArgs.command !== undefined) return hookArgs;
-    if (transcriptArgs.command !== undefined) return transcriptArgs;
-    if (typeof hookInput === 'string') return { command: hookInput };
-    if (typeof transcriptInput === 'string') return { command: transcriptInput };
-    if (isPlainObject(hookInput)) return hookInput;
-    if (isPlainObject(transcriptInput)) return transcriptInput;
-    const command = hookInput ?? transcriptInput;
-    return command !== undefined ? { command } : command;
-  }
-
-  if (isPlainObject(transcriptInput)) return transcriptInput;
-  return hookInput ?? transcriptInput;
-}
-
-function isPlainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 // ─── 5 cmd handlers — 累积 event 到 state ───
