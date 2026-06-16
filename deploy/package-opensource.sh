@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# package.sh — Build the project and create a distributable .tar.gz package
+# package-opensource.sh — Build the project and create distributable packages
+#
+# Produces both .tar.gz (Linux/macOS) and .zip (Windows) packages.
+# Internal-only and updater files are stripped automatically.
 #
 # Usage:
-#   bash deploy/package.sh                       # default output: ./loongsuite-pilot.tar.gz
-#   bash deploy/package.sh -o /tmp/out.tar.gz    # custom output path
-#   bash deploy/package.sh --skip-build          # skip build, use existing dist/
+#   bash deploy/package-opensource.sh                       # default output
+#   bash deploy/package-opensource.sh -o /tmp/out.tar.gz    # custom .tar.gz path
+#   bash deploy/package-opensource.sh --skip-build          # skip build, use existing dist/
 
 set -euo pipefail
 
@@ -13,8 +16,6 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PACKAGE_NAME="loongsuite-pilot"
 OUTPUT_PATH=""
 SKIP_BUILD=0
-EXTERNAL=0
-OPENSOURCE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -22,10 +23,6 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_PATH="$2"; shift 2 ;;
         --skip-build)
             SKIP_BUILD=1; shift ;;
-        --external)
-            EXTERNAL=1; shift ;;
-        --opensource)
-            OPENSOURCE=1; EXTERNAL=1; shift ;;
         *)
             echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -34,6 +31,7 @@ done
 if [ -z "$OUTPUT_PATH" ]; then
     OUTPUT_PATH="$PROJECT_ROOT/$PACKAGE_NAME.tar.gz"
 fi
+ZIP_OUTPUT_PATH="${OUTPUT_PATH%.tar.gz}.zip"
 
 cd "$PROJECT_ROOT"
 
@@ -116,24 +114,26 @@ cp VERSION           "$PKG_DIR/"
 chmod +x "$PKG_DIR/scripts/"*.sh 2>/dev/null || true
 chmod +x "$PKG_DIR/assets/hooks/"*.sh 2>/dev/null || true
 
-# Strip internal-only files for commercial / open-source packages
-if [ "$EXTERNAL" -eq 1 ]; then
-    rm -f "$PKG_DIR/scripts/migrate-internal-config.js"
-    echo "    ✅ Stripped migrate-internal-config.js (--external)"
-fi
-if [ "$OPENSOURCE" -eq 1 ]; then
-    rm -f "$PKG_DIR/scripts/updater-daemon.js"
-    echo "    ✅ Stripped updater-daemon.js (--opensource)"
-fi
+# Strip internal-only files (always for opensource)
+rm -f "$PKG_DIR/scripts/migrate-internal-config.js"
+rm -f "$PKG_DIR/scripts/updater-daemon.js"
+echo "    ✅ Stripped internal-only files"
 
 echo "    ✅ Staged into $PKG_DIR"
 
-# ── Create package ──
-echo "==> Creating package..."
+# ── Create .tar.gz (Linux/macOS) ──
+echo "==> Creating .tar.gz package..."
 tar -czf "$OUTPUT_PATH" -C "$STAGE_DIR" "$PACKAGE_NAME"
 
 PKG_SIZE=$(du -h "$OUTPUT_PATH" | cut -f1)
-echo "    ✅ Package created: $OUTPUT_PATH ($PKG_SIZE)"
+echo "    ✅ $OUTPUT_PATH ($PKG_SIZE)"
+
+# ── Create .zip (Windows) ──
+echo "==> Creating .zip package..."
+(cd "$STAGE_DIR" && zip -qr "$ZIP_OUTPUT_PATH" "$PACKAGE_NAME")
+
+ZIP_SIZE=$(du -h "$ZIP_OUTPUT_PATH" | cut -f1)
+echo "    ✅ $ZIP_OUTPUT_PATH ($ZIP_SIZE)"
 
 # ── Summary ──
 echo ""
@@ -141,5 +141,5 @@ echo "==> Contents:"
 tar -tzf "$OUTPUT_PATH" | head -20
 echo "    ... (truncated)"
 echo ""
-echo "Done. Upload with:  bash deploy/upload.sh"
+echo "Done."
 
