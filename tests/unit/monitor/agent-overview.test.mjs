@@ -223,6 +223,32 @@ describe('agent overview aggregation', () => {
     expect(rebuilt.cache.indexing).toBe(false);
   });
 
+  it('rebuilds cached totals when a fully indexed file changes without changing size', async () => {
+    const dataDir = await fixtureDir();
+    const outputPath = path.join(dataDir, 'logs', 'output', 'qoder-2026-05-05.jsonl');
+    const original = eventLine({ id: 'qoder-1', agentType: 'qoder', eventName: 'llm.response', tokens: 10 });
+    await writeRuntimeFiles(dataDir, {
+      outputLines: {
+        'qoder-2026-05-05.jsonl': [original],
+      },
+    });
+    const aggregator = createOverviewAggregator({
+      dataDir,
+      nowProvider: () => new Date('2026-05-05T04:01:00.000Z'),
+    });
+
+    const first = await aggregator.getOverview({ force: true });
+    const rewritten = eventLine({ id: 'qoder-2', agentType: 'qoder', eventName: 'llm.response', tokens: 20 });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await writeFile(outputPath, rewritten.padEnd(Buffer.byteLength(original), ' '));
+    const rebuilt = await aggregator.getOverview({ force: true });
+
+    expect(Buffer.byteLength(rewritten.padEnd(Buffer.byteLength(original), ' '))).toBe(Buffer.byteLength(original));
+    expect(first.totals.tokensToday).toBe(10);
+    expect(rebuilt.totals.tokensToday).toBe(20);
+    expect(rebuilt.cache.indexing).toBe(false);
+  });
+
   it('persists derived cache across aggregator instances without storing sensitive bodies', async () => {
     const dataDir = await fixtureDir();
     await writeRuntimeFiles(dataDir, {
