@@ -105,6 +105,7 @@ fi
 # Select installer script and presets based on deploy mode
 if [ "$DEPLOY_MODE" = "external" ]; then
     INSTALLER_SCRIPT="$PROJECT_ROOT/deploy/installer.sh"
+    INSTALLER_PS1_SCRIPT="$PROJECT_ROOT/deploy/installer.ps1"
     _RELEASE_BUCKET="$_EXT_RELEASE_BUCKET"
     _RELEASE_PREFIX="$_EXT_RELEASE_PREFIX"
     _RELEASE_REGION="$_EXT_RELEASE_REGION"
@@ -113,6 +114,7 @@ if [ "$DEPLOY_MODE" = "external" ]; then
     _TEST_REGION="$_EXT_TEST_REGION"
 else
     INSTALLER_SCRIPT="$PROJECT_ROOT/deploy/installer-inner.sh"
+    INSTALLER_PS1_SCRIPT="$PROJECT_ROOT/deploy/installer-inner.ps1"
     _RELEASE_BUCKET="$_INNER_RELEASE_BUCKET"
     _RELEASE_PREFIX="$_INNER_RELEASE_PREFIX"
     _RELEASE_REGION="$_INNER_RELEASE_REGION"
@@ -222,6 +224,14 @@ prepare_channel_installer() {
     echo "$out"
 }
 
+prepare_channel_installer_ps1() {
+    local src="$1"
+    local out
+    out="$(mktemp)"
+    sed "s#else { \"release\" }#else { \"${CHANNEL_CANONICAL}\" }#" "$src" > "$out"
+    echo "$out"
+}
+
 # ── Generate manifest JSON ──
 RELEASED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 PKG_SHA256="$(shasum -a 256 "$PKG_PATH" | cut -d' ' -f1)"
@@ -322,12 +332,22 @@ fi
 
 # ── Upload installer script (version-independent, stays at prefix root) ──
 INSTALLER_NAME="installer.sh"
+INSTALLER_PS1_NAME="installer.ps1"
 PATCHELF_NAME="patchelf_node_for_7u.sh"
-echo "==> Uploading installer ($DEPLOY_MODE): $INSTALLER_NAME, $PATCHELF_NAME"
+echo "==> Uploading installer ($DEPLOY_MODE): $INSTALLER_NAME, $INSTALLER_PS1_NAME, $PATCHELF_NAME"
 INSTALLER_UPLOAD="$(prepare_channel_installer "$INSTALLER_SCRIPT")"
 trap 'rm -f "$MANIFEST_TMP" "$INSTALLER_UPLOAD"' EXIT
 upload_file "$INSTALLER_UPLOAD"       "${OSS_BASE}/${INSTALLER_NAME}"       "installer"
 echo "    ✅ ${PUBLIC_BASE}/${INSTALLER_NAME}"
+
+# Upload Windows installer (PowerShell)
+if [ -f "$INSTALLER_PS1_SCRIPT" ]; then
+    INSTALLER_PS1_UPLOAD="$(prepare_channel_installer_ps1 "$INSTALLER_PS1_SCRIPT")"
+    upload_file "$INSTALLER_PS1_UPLOAD" "${OSS_BASE}/${INSTALLER_PS1_NAME}" "installer (Windows)"
+    rm -f "$INSTALLER_PS1_UPLOAD"
+    echo "    ✅ ${PUBLIC_BASE}/${INSTALLER_PS1_NAME}"
+fi
+
 upload_file "$PATCHELF_SCRIPT"        "${OSS_BASE}/${PATCHELF_NAME}"        "patchelf-script"
 echo "    ✅ ${PUBLIC_BASE}/${PATCHELF_NAME}"
 echo ""
@@ -382,5 +402,8 @@ else
     echo ""
     echo "Uninstall:"
     echo "   curl -fsSL ${PUBLIC_BASE}/${INSTALLER_NAME} | bash -s -- uninstall"
+    echo ""
+    echo "Install (Windows PowerShell):"
+    echo "   irm ${PUBLIC_BASE}/${INSTALLER_PS1_NAME} | iex"
     echo "============================================================"
 fi
