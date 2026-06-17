@@ -83,10 +83,16 @@ const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
 
 function estimateSpanSize(span: ReadableSpan): number {
   let size = 512;
-  const attrs = span.attributes;
-  for (const val of Object.values(attrs)) {
+  for (const val of Object.values(span.attributes)) {
     if (typeof val === 'string') size += val.length;
     else size += 32;
+  }
+  for (const event of span.events ?? []) {
+    size += 64;
+    for (const val of Object.values(event.attributes ?? {})) {
+      if (typeof val === 'string') size += val.length;
+      else size += 32;
+    }
   }
   return size;
 }
@@ -439,7 +445,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const exporter = new OTLPTraceExporter({
       url: this.resolvedEndpointUrl,
       headers: this.cfg.headers ?? {},
-      compression: (this.cfg.compression ?? 'gzip') as CompressionAlgorithm,
+      compression: this.cfg.compression === 'none'
+        ? CompressionAlgorithm.NONE
+        : CompressionAlgorithm.GZIP,
     });
 
     state = { exporter };

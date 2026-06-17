@@ -24,6 +24,7 @@ vi.spyOn(fsUtils, 'appendLine').mockResolvedValue(undefined);
 vi.spyOn(fsUtils, 'ensureDir').mockResolvedValue(undefined);
 
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -158,6 +159,19 @@ describe('OtlpTraceFlusher - export', () => {
 
     expect(mockExport).toHaveBeenCalledTimes(1);
     expect(mockExport.mock.calls[0][0]).toHaveLength(100);
+  });
+
+  it('enables gzip compression by default on OTLPTraceExporter', async () => {
+    const flusher = new OtlpTraceFlusher(makeConfig());
+    const spans = [makeMockSpan()] as any;
+
+    await flusher.exportSpansForAgent('claude-code', spans);
+    await flusher.shutdown();
+
+    const MockExporter = vi.mocked(OTLPTraceExporter);
+    expect(MockExporter).toHaveBeenCalled();
+    const ctorArg = MockExporter.mock.calls[0][0] as Record<string, unknown>;
+    expect(ctorArg.compression).toBe('gzip');
   });
 
   it('writes to BOTH debug and failed-log when debug=true and export fails', async () => {
