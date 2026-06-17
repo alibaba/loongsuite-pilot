@@ -163,6 +163,18 @@ async function main() {
   if (internalEvent.hook_event === 'stop') {
     try {
       const allEvents = readAllEvents();
+
+      // Guard against duplicate stop events: if journal has no beforeSubmitPrompt
+      // for this conversation, the turn was already processed — skip to avoid duplication.
+      const hasPendingTurn = allEvents.some(e =>
+        e.hook_event === 'beforeSubmitPrompt' &&
+        e.conversation_id === internalEvent.conversation_id
+      );
+      if (!hasPendingTurn) {
+        writeEmptyResponse();
+        return;
+      }
+
       const runtimeConfig = loadHookRuntimeConfig(dataDir);
 
       // Aborted generations (e.g. GPT quota exhaustion → Cursor auto-switches

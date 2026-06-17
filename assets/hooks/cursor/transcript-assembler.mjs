@@ -2,14 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * transcript-assembler.mjs — Cursor Windows transcript 驱动的 output 组装。
+ * transcript-assembler.mjs — Cursor Windows transcript-driven output assembly.
  *
- * 仅在 Windows 平台 (process.platform === 'win32') 的 stop 事件中调用。
- * 解析 Cursor agent-transcripts/<sessionId>/<sessionId>.jsonl，
- * 结合 journal hook events 提供的 metadata（tokens, timestamps, tool details），
- * 生成符合 schema 的 output records，彻底绕过 hook payload 的中文乱码问题。
+ * Called on stop event (Windows only). Parses Cursor's agent-transcript JSONL
+ * which is always valid UTF-8, then aligns with journal hook events to produce
+ * correctly structured output records without any GB18030 garbling.
  *
- * 架构参考 claude-code/transcript-parser.mjs 的 exportSession 模式。
+ * Key design decisions:
+ * - Only processes the CURRENT turn (after the second-to-last turn_ended marker)
+ * - Tool calls are assigned positionally (transcript has no tool IDs)
+ * - Tokens come from per-step thought events; last step uses afterAgentResponse/stop
+ * - Falls back to hook-driven assembleTurn if transcript is unavailable
  */
 
 import crypto from 'node:crypto';
@@ -27,12 +30,12 @@ import {
 // ─── Public API ───
 
 /**
- * 从 transcript 文件 + journal events 构建 output records。
+ * Build output records from transcript + journal hook events.
  *
- * @param {string}   transcriptPath - Cursor transcript JSONL 文件路径
- * @param {object[]} journalEvents  - 当前 turn 的所有 journal events
+ * @param {string}   transcriptPath - Cursor agent-transcript JSONL path
+ * @param {object[]} journalEvents  - All journal events for this turn
  * @param {object}   options        - { runtimeConfig, stopConversationId }
- * @returns {object[]|null}  records，失败时返回 null（触发 fallback）
+ * @returns {object[]|null}  records, or null to trigger assembleTurn fallback
  */
 export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, options = {}) {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
@@ -68,15 +71,15 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
   };
 
   const records = [];
-
-  // 1. user prompt entry (other event)
   const userText = turn.userText || promptEvent.prompt;
+
+  // Entry event (other): user prompt, no step_id
   if (userText) {
     records.push(applyPolicy({
       time_unix_nano: eventTs(promptEvent),
       observed_time_unix_nano: eventTs(promptEvent),
       'event.id': crypto.randomUUID(),
-      'event.name': 'llm.request',
+      'event.name': 'other',
       ...baseFields,
       'gen_ai.provider.name': inferProvider(model),
       'gen_ai.input.messages_delta': [
@@ -87,95 +90,101 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
     }, runtimeConfig));
   }
 
-  // 2. Align transcript assistant entries with hook steps
+  // Build per-step records
   const steps = alignSteps(turn.assistantEntries, parentEvents);
-
-  // 3. Build per-step records
   const stopEvent = parentEvents.find(e => e.hook_event === 'stop');
+  let prevToolResults = [];
+
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
-    const stepRound = i + 1;
-    const stepId = `${turnId}:s${stepRound}`;
+    const stepId = `${turnId}:s${i + 1}`;
     const isLast = i === steps.length - 1;
 
-    // llm.request
-    const reqEvent = step.thoughtEvent || step.responseEvent || parentEvents[0];
-    const prevToolResults = step.toolResults.map(tr => ({
-      toolUseId: tr.tool_use_id,
-      result: tr.tool_output,
-    }));
+    // ── llm.request ──
+    // Use thought event for timing (gives actual LLM start time via duration backtrack)
+    const reqSource = step.thoughtEvent || (isLast ? step.responseEvent : null)
+      || parentEvents.find(e => e.hook_event === 'afterAgentThought' || e.hook_event === 'afterAgentResponse')
+      || promptEvent;
+    const reqTs = step.thoughtEvent?.duration_ms != null
+      ? timestampToUnixNanos(durationStartMs(step.thoughtEvent))
+      : eventTs(reqSource);
+
     const inputMessages = [];
-    if (stepRound === 1 && userText) {
+    if (i === 0 && userText) {
       inputMessages.push({ role: 'user', parts: [{ type: 'text', content: userText }] });
     } else if (prevToolResults.length > 0) {
       inputMessages.push({
         role: 'tool',
         parts: prevToolResults.map(tr => ({
           type: 'tool_call_response',
-          id: tr.toolUseId || null,
-          response: tr.result ? (typeof tr.result === 'string' ? tr.result : JSON.stringify(tr.result)) : '',
+          id: tr.tool_use_id || null,
+          response: tr.tool_output != null
+            ? (typeof tr.tool_output === 'string' ? tr.tool_output : JSON.stringify(tr.tool_output))
+            : '',
         })),
       });
     }
 
     records.push(applyPolicy({
-      time_unix_nano: eventTs(reqEvent),
-      observed_time_unix_nano: eventTs(reqEvent),
+      time_unix_nano: reqTs,
+      observed_time_unix_nano: reqTs,
       'event.id': crypto.randomUUID(),
       'event.name': 'llm.request',
       ...baseFields,
       'gen_ai.step.id': stepId,
-      'gen_ai.provider.name': inferProvider(model),
-      'gen_ai.request.model': reqEvent.model || model,
+      'gen_ai.provider.name': inferProvider(reqSource.model || model),
+      'gen_ai.request.model': reqSource.model || model,
       'gen_ai.input.messages': inputMessages.length > 0 ? inputMessages : undefined,
-      'agent.cursor.hook_event_name': reqEvent.hook_event,
-      'agent.cursor.llm_request_time_source': reqEvent.hook_event === 'afterAgentThought' && reqEvent.duration_ms != null
+      'agent.cursor.hook_event_name': reqSource.hook_event,
+      'agent.cursor.llm_request_time_source': step.thoughtEvent?.duration_ms != null
         ? 'thought_duration' : undefined,
     }, runtimeConfig));
 
-    // tool.call records
-    for (const toolCallEv of step.toolCalls) {
+    // ── tool.call records ──
+    for (const tc of step.toolCalls) {
       records.push(applyPolicy({
-        time_unix_nano: eventTs(toolCallEv),
-        observed_time_unix_nano: eventTs(toolCallEv),
+        time_unix_nano: eventTs(tc),
+        observed_time_unix_nano: eventTs(tc),
         'event.id': crypto.randomUUID(),
         'event.name': 'tool.call',
         ...baseFields,
         'gen_ai.step.id': stepId,
-        'gen_ai.tool.name': toolCallEv.tool_name,
-        'gen_ai.tool.call.id': toolCallEv.tool_use_id,
-        'gen_ai.tool.call.arguments': toJsonValue(parseMaybeJson(toolCallEv.tool_input)),
-        'agent.cursor.hook_event_name': toolCallEv.hook_event,
+        'gen_ai.tool.name': tc.tool_name,
+        'gen_ai.tool.call.id': tc.tool_use_id,
+        'gen_ai.tool.call.arguments': toJsonValue(parseMaybeJson(tc.tool_input)),
+        'agent.cursor.hook_event_name': tc.hook_event,
       }, runtimeConfig));
     }
 
-    // tool.result records
-    for (const toolResultEv of step.toolResults) {
-      const isFailure = toolResultEv.hook_event === 'postToolUseFailure';
+    // ── tool.result records ──
+    for (const tr of step.toolResults) {
+      const isFailure = tr.hook_event === 'postToolUseFailure';
       records.push(applyPolicy({
-        time_unix_nano: eventTs(toolResultEv),
-        observed_time_unix_nano: eventTs(toolResultEv),
+        time_unix_nano: eventTs(tr),
+        observed_time_unix_nano: eventTs(tr),
         'event.id': crypto.randomUUID(),
         'event.name': 'tool.result',
         ...baseFields,
         'gen_ai.step.id': stepId,
-        'gen_ai.tool.name': toolResultEv.tool_name,
-        'gen_ai.tool.call.id': toolResultEv.tool_use_id,
-        'gen_ai.tool.call.result': isFailure ? undefined : toJsonValue(parseMaybeJson(toolResultEv.tool_output)),
-        'gen_ai.tool.call.duration': toolResultEv.duration_ms,
+        'gen_ai.tool.name': tr.tool_name,
+        'gen_ai.tool.call.id': tr.tool_use_id,
+        'gen_ai.tool.call.result': isFailure ? undefined : toJsonValue(parseMaybeJson(tr.tool_output)),
+        'gen_ai.tool.call.duration': tr.duration_ms,
         'tool.result.status': isFailure ? 'failure' : undefined,
-        'error.type': isFailure ? (toolResultEv.failure_type || 'tool_use_failure') : undefined,
-        'error.message': isFailure ? toolResultEv.error_message : undefined,
-        'agent.cursor.hook_event_name': toolResultEv.hook_event,
+        'error.type': isFailure ? (tr.failure_type || 'tool_use_failure') : undefined,
+        'error.message': isFailure ? tr.error_message : undefined,
+        'agent.cursor.hook_event_name': tr.hook_event,
       }, runtimeConfig));
     }
 
-    // llm.response — text from transcript, tokens from hook
-    const respEvent = step.responseEvent || step.thoughtEvent || (isLast ? stopEvent : null);
-    const respTs = respEvent ? eventTs(respEvent) : eventTs(parentEvents[parentEvents.length - 1] || promptEvent);
-    const assistantText = step.text;
+    // ── llm.response ──
+    const finishReason = isLast ? 'stop' : (step.toolCalls.length > 0 ? 'tool_calls' : 'stop');
+    const respSource = isLast
+      ? (step.responseEvent || stopEvent)
+      : (step.thoughtEvent || null);
+    const respTs = respSource ? eventTs(respSource) : reqTs;
 
-    const responseRec = applyPolicy({
+    const respRecord = applyPolicy({
       time_unix_nano: respTs,
       observed_time_unix_nano: respTs,
       'event.id': crypto.randomUUID(),
@@ -183,30 +192,33 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
       ...baseFields,
       'gen_ai.step.id': stepId,
       'gen_ai.response.id': crypto.randomUUID(),
-      'gen_ai.provider.name': inferProvider(respEvent?.model || model),
-      'gen_ai.request.model': respEvent?.model || model,
-      'gen_ai.response.model': respEvent?.model || model,
-      'gen_ai.output.messages': [
-        {
-          role: 'assistant',
-          parts: assistantText ? [{ type: 'text', content: assistantText }] : [],
-          finish_reason: isLast ? 'stop' : (step.toolCalls.length > 0 ? 'tool_calls' : 'stop'),
-        },
-      ],
-      'gen_ai.response.finish_reasons': [isLast ? 'stop' : (step.toolCalls.length > 0 ? 'tool_calls' : 'stop')],
-      'agent.cursor.hook_event_name': respEvent?.hook_event || 'afterAgentResponse',
-      'agent.cursor.llm_response_time_source': respEvent?.hook_event === 'afterAgentThought'
-        ? 'after_agent_thought' : 'after_agent_response',
+      'gen_ai.provider.name': inferProvider(respSource?.model || model),
+      'gen_ai.request.model': respSource?.model || model,
+      'gen_ai.response.model': respSource?.model || model,
+      'gen_ai.output.messages': [{
+        role: 'assistant',
+        parts: step.text ? [{ type: 'text', content: step.text }] : [],
+        finish_reason: finishReason,
+      }],
+      'gen_ai.response.finish_reasons': [finishReason],
+      'agent.cursor.hook_event_name': respSource?.hook_event
+        || (isLast ? 'afterAgentResponse' : 'afterAgentThought'),
+      'agent.cursor.llm_response_time_source': respSource?.hook_event === 'afterAgentThought'
+        ? 'after_agent_thought'
+        : respSource?.hook_event === 'afterAgentResponse'
+        ? 'after_agent_response'
+        : undefined,
     }, runtimeConfig);
 
-    // Merge tokens from hook event
-    if (respEvent) mergeTokens(responseRec, respEvent);
-    // If last step and no per-step tokens, use stop event tokens
-    if (isLast && !responseRec['gen_ai.usage.input_tokens'] && stopEvent) {
-      mergeTokens(responseRec, stopEvent);
+    // Tokens: per-step thought tokens for intermediate steps, response/stop for last
+    if (!isLast && step.thoughtEvent) {
+      mergeTokens(respRecord, step.thoughtEvent);
+    } else if (isLast) {
+      mergeTokens(respRecord, step.responseEvent || stopEvent);
     }
 
-    records.push(responseRec);
+    records.push(respRecord);
+    prevToolResults = step.toolResults;
   }
 
   return records.length > 0 ? records : null;
@@ -215,147 +227,155 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
 // ─── Transcript Parser ───
 
 /**
- * 解析 Cursor transcript JSONL，返回当前 turn 的 userText 和 assistantEntries。
- * Cursor transcript 格式：
- *   {"role":"user","message":{"content":[{"type":"text","text":"<user_query>...<user_query>"}]}}
- *   {"role":"assistant","message":{"content":[{"type":"text","text":"..."},{"type":"tool_use","name":"...","id":"..."}]}}
- *   {"type":"turn_ended","status":"success"}
+ * Parse Cursor transcript, returning ONLY the current turn's content.
+ *
+ * Cursor appends multiple turns to the same file, separated by turn_ended markers.
+ * We must filter to the CURRENT turn only (between the last two turn_ended markers).
  */
 function parseCursorTranscript(transcriptPath) {
   try {
     const content = fs.readFileSync(transcriptPath, 'utf-8');
     const lines = content.trim().split('\n').filter(Boolean);
 
-    let lastUserText = null;
+    // Collect all turn_ended positions to determine current turn boundaries
+    const turnEndedPositions = [];
+    for (let i = 0; i < lines.length; i++) {
+      try {
+        const entry = JSON.parse(lines[i]);
+        if (entry.type === 'turn_ended') turnEndedPositions.push(i);
+      } catch {}
+    }
+
+    // Determine whether the last line is a turn_ended
+    let lastEntry = null;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try { lastEntry = JSON.parse(lines[i]); break; } catch {}
+    }
+    const endsWithTurnEnded = lastEntry?.type === 'turn_ended';
+
+    let currentTurnStart, currentTurnEnd;
+
+    if (endsWithTurnEnded && turnEndedPositions.length >= 1) {
+      // Current (most recent) turn: from after the previous turn_ended to before last turn_ended
+      const lastPos = turnEndedPositions[turnEndedPositions.length - 1];
+      const prevPos = turnEndedPositions.length >= 2
+        ? turnEndedPositions[turnEndedPositions.length - 2]
+        : -1;
+      currentTurnStart = prevPos + 1;
+      currentTurnEnd = lastPos; // exclusive
+    } else {
+      // Turn still in progress: from after last turn_ended to EOF
+      const lastPos = turnEndedPositions.length > 0
+        ? turnEndedPositions[turnEndedPositions.length - 1]
+        : -1;
+      currentTurnStart = lastPos + 1;
+      currentTurnEnd = lines.length;
+    }
+
+    let userText = null;
     const assistantEntries = [];
 
-    for (const line of lines) {
+    for (let i = currentTurnStart; i < currentTurnEnd; i++) {
       let entry;
-      try { entry = JSON.parse(line); } catch { continue; }
+      try { entry = JSON.parse(lines[i]); } catch { continue; }
 
       if (entry.role === 'user' && entry.message?.content) {
         const parts = entry.message.content.filter(p => p.type === 'text' && p.text);
-        const text = parts.map(p => p.text.replace(/<\/?user_query>\n?/g, '').trim()).filter(Boolean).join('');
-        if (text) lastUserText = text;
+        const text = parts
+          .map(p => p.text.replace(/<\/?user_query>\n?/g, '').trim())
+          .filter(Boolean)
+          .join('');
+        if (text) userText = text;
       }
 
       if (entry.role === 'assistant' && entry.message?.content) {
         const textParts = entry.message.content.filter(p => p.type === 'text' && p.text);
         const toolUseParts = entry.message.content.filter(p => p.type === 'tool_use');
-
         const rawText = textParts.map(p => p.text).join('');
         const text = isUsableText(rawText) ? rawText : null;
-        const toolUseIds = toolUseParts.map(p => p.id).filter(Boolean);
-
-        assistantEntries.push({ text, toolUseIds });
+        // toolUseCount used for positional tool assignment (transcript has no tool IDs)
+        assistantEntries.push({ text, toolUseCount: toolUseParts.length });
       }
     }
 
-    if (!lastUserText && assistantEntries.length === 0) return null;
-    return { userText: lastUserText, assistantEntries };
+    if (!userText && assistantEntries.length === 0) return null;
+    return { userText, assistantEntries };
   } catch {
     return null;
   }
 }
 
-/** Text is usable if it's non-empty and not purely [REDACTED] */
+/** Text is usable if non-empty after stripping [REDACTED] markers */
 function isUsableText(text) {
   if (!text || !text.trim()) return false;
-  const stripped = text.replace(/\[REDACTED\]/g, '').trim();
-  return stripped.length > 0;
+  return text.replace(/\[REDACTED\]/g, '').trim().length > 0;
 }
 
 // ─── Step Alignment ───
 
 /**
- * 将 transcript assistant entries 与 journal hook events 对齐，构建 steps 数组。
+ * Align transcript assistant entries with journal hook events to build steps.
  *
- * 对齐策略：
- * 1. 构建 toolUseId → assistantEntry index 的映射
- * 2. 遍历 journal preToolUse events，通过 tool_use_id 找到对应的 entry index
- * 3. 将 journal events（thoughts/responses/toolCalls/toolResults）按 step 分组
- * 4. 最后一个无 toolUseIds 的 assistant entry = 最终 step
+ * Transcript entries are the source of truth for step count and text.
+ * Tool calls are assigned positionally: entry i with toolUseCount=N gets the
+ * next N preToolUse/postToolUse events from the journal (sorted by time).
+ * Thought events are mapped one-to-one to non-final steps.
  */
 function alignSteps(assistantEntries, parentEvents) {
+  const sortedToolCalls = parentEvents
+    .filter(e => e.hook_event === 'preToolUse')
+    .sort((a, b) => tsMs(a) - tsMs(b));
+  const sortedToolResults = parentEvents
+    .filter(e => e.hook_event === 'postToolUse' || e.hook_event === 'postToolUseFailure')
+    .sort((a, b) => tsMs(a) - tsMs(b));
+  const thoughtEvents = parentEvents
+    .filter(e => e.hook_event === 'afterAgentThought')
+    .sort((a, b) => tsMs(a) - tsMs(b));
+  const responseEvents = parentEvents
+    .filter(e => e.hook_event === 'afterAgentResponse')
+    .sort((a, b) => tsMs(a) - tsMs(b));
+
   if (!assistantEntries || assistantEntries.length === 0) {
-    // No transcript entries: create a single step with all events
-    return [buildStepFromEvents(parentEvents, null)];
+    return [{
+      text: null,
+      toolCalls: sortedToolCalls,
+      toolResults: sortedToolResults,
+      thoughtEvent: thoughtEvents[0] || null,
+      responseEvent: responseEvents[0] || null,
+    }];
   }
 
-  // Build toolUseId → entryIndex map
-  const toolIdToEntryIdx = new Map();
-  for (let i = 0; i < assistantEntries.length; i++) {
-    for (const id of assistantEntries[i].toolUseIds) {
-      toolIdToEntryIdx.set(id, i);
-    }
-  }
-
-  // Find which journal tool calls belong to which entry
-  const toolCalls = parentEvents.filter(e => e.hook_event === 'preToolUse');
-  const toolResults = parentEvents.filter(e =>
-    e.hook_event === 'postToolUse' || e.hook_event === 'postToolUseFailure'
-  );
-
-  // Determine entry index for each tool call
-  const entryToToolCalls = new Map();
-  const entryToToolResults = new Map();
-  for (const tc of toolCalls) {
-    const entryIdx = toolIdToEntryIdx.has(tc.tool_use_id)
-      ? toolIdToEntryIdx.get(tc.tool_use_id)
-      : assistantEntries.length - 1; // fallback: last entry
-    if (!entryToToolCalls.has(entryIdx)) entryToToolCalls.set(entryIdx, []);
-    entryToToolCalls.get(entryIdx).push(tc);
-  }
-  for (const tr of toolResults) {
-    const entryIdx = toolIdToEntryIdx.has(tr.tool_use_id)
-      ? toolIdToEntryIdx.get(tr.tool_use_id)
-      : assistantEntries.length - 1;
-    if (!entryToToolResults.has(entryIdx)) entryToToolResults.set(entryIdx, []);
-    entryToToolResults.get(entryIdx).push(tr);
-  }
-
-  // Find thought/response hook events per step
-  // Group thought events: each thought event corresponds to the step that produced it
-  const thoughtEvents = parentEvents.filter(e => e.hook_event === 'afterAgentThought');
-  const responseEvents = parentEvents.filter(e => e.hook_event === 'afterAgentResponse');
-
-  // Build steps: one per assistant entry
+  let toolCallIdx = 0;
+  let toolResultIdx = 0;
   const steps = [];
+
   for (let i = 0; i < assistantEntries.length; i++) {
     const entry = assistantEntries[i];
+    const count = entry.toolUseCount || 0;
+    const isFinal = i === assistantEntries.length - 1;
+
+    const stepToolCalls = sortedToolCalls.slice(toolCallIdx, toolCallIdx + count);
+    const stepToolResults = sortedToolResults.slice(toolResultIdx, toolResultIdx + count);
+    toolCallIdx += count;
+    toolResultIdx += count;
+
     steps.push({
       text: entry.text,
-      toolUseIds: entry.toolUseIds,
-      toolCalls: entryToToolCalls.get(i) || [],
-      toolResults: entryToToolResults.get(i) || [],
-      // Assign thought events: steps with tool calls get earlier thoughts; last step gets last thought
-      thoughtEvent: thoughtEvents[i] || thoughtEvents[thoughtEvents.length - 1] || null,
-      responseEvent: responseEvents[i] || (i === assistantEntries.length - 1 ? responseEvents[responseEvents.length - 1] : null) || null,
+      toolCalls: stepToolCalls,
+      toolResults: stepToolResults,
+      // One thought event per non-final step; final step gets responseEvent
+      thoughtEvent: !isFinal ? (thoughtEvents[i] || null) : null,
+      responseEvent: isFinal ? (responseEvents[0] || null) : null,
     });
-  }
-
-  // If no transcript entries matched steps, fall back to single step
-  if (steps.length === 0) {
-    return [buildStepFromEvents(parentEvents, null)];
   }
 
   return steps;
 }
 
-function buildStepFromEvents(parentEvents, text) {
-  return {
-    text,
-    toolUseIds: [],
-    toolCalls: parentEvents.filter(e => e.hook_event === 'preToolUse'),
-    toolResults: parentEvents.filter(e => e.hook_event === 'postToolUse' || e.hook_event === 'postToolUseFailure'),
-    thoughtEvent: parentEvents.find(e => e.hook_event === 'afterAgentThought') || null,
-    responseEvent: parentEvents.find(e => e.hook_event === 'afterAgentResponse') || null,
-  };
-}
-
 // ─── Helpers ───
 
 function mergeTokens(rec, ev) {
+  if (!ev) return;
   if (ev.input_tokens != null) rec['gen_ai.usage.input_tokens'] = ev.input_tokens;
   if (ev.output_tokens != null) rec['gen_ai.usage.output_tokens'] = ev.output_tokens;
   if (ev.cache_read_tokens != null) rec['gen_ai.usage.cache_read.input_tokens'] = ev.cache_read_tokens;
@@ -378,6 +398,13 @@ function eventTs(ev) {
 function tsMs(ev) {
   if (ev?._journal_ts) return new Date(ev._journal_ts).getTime();
   return Date.now();
+}
+
+function durationStartMs(ev) {
+  const endMs = tsMs(ev);
+  const durationMs = Number(ev?.duration_ms);
+  if (!Number.isFinite(durationMs) || durationMs < 0) return endMs;
+  return endMs - durationMs;
 }
 
 function inferProvider(model) {
