@@ -141,7 +141,9 @@ function splitIntoTurns(contentRows) {
 
 function isSystemInjection(row) {
   const text = extractText(row).trimStart();
-  return text.startsWith('<command-message>') || text.startsWith('<command-name>');
+  return text.startsWith('<command-message>') ||
+    text.startsWith('<command-name>') ||
+    text.startsWith('<system-reminder>');
 }
 
 function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd) {
@@ -152,7 +154,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
 
   // User-hook event (no step.id, no model — per §5 of EVENT_LOG_TO_TRACE_SPEC)
   if (userRow) {
-    const userText = extractText(userRow);
+    const userText = stripSystemReminders(extractText(userRow));
     if (userText) {
       records.push(buildRecord({
         'event.name': 'llm.request',
@@ -169,14 +171,22 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
     }
   }
 
-  // Group assistant rows by parentUuid — each group = one LLM call
+  // Group assistant rows by tool_result boundaries — each group = one LLM call.
+  // Reason: QoderWork sometimes splits one LLM response across multiple assistant
+  // rows with different parentUuids (e.g. thinking row + separate tool_use row).
+  // groupByParentUuid would wrongly split these into multiple "steps" and break
+  // timing (the second half would incorrectly inherit the tool_result's ts as
+  // llm.request time). Tool_result boundaries are the semantically correct split
+  // since the LLM only receives tool outputs and issues a new response at those points.
   const assistantRows = turnRows.filter(r => r.type === 'assistant');
   const toolResultRows = turnRows.filter(r => r.type === 'user' && isToolResult(r));
 
-  const llmGroups = groupByParentUuid(assistantRows);
+  const llmGroups = groupAssistantRowsByToolResults(turnRows);
 
-  const userText = userRow ? extractText(userRow) : '';
+  const userText = userRow ? stripSystemReminders(extractText(userRow)) : '';
+  const userTs = userRow ? timestampToUnixNanos(userRow.timestamp) : undefined;
   let prevToolCalls = []; // tool_call ids from previous step, for building tool_result delta
+  let prevStepLastToolResultTs = undefined; // 上一个 step 最后一个 tool_result 的 nano ts，用于本 step llm.request 时间
 
   let stepCounter = 0;
   for (const group of llmGroups) {
@@ -208,17 +218,38 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
       }
     }
 
-    const stepRecords = buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, stepCounter === llmGroups.length, inputDelta, cwd);
+    // llm.request time:
+    //   step 1 = user input ts (user message arrival, a reasonable proxy for LLM start)
+    //   step N>1 = 上一个 step 最后一个 tool_result ts (工具返回后模型立刻开始处理)
+    // 否则用 assistant 行写盘时间会导致 LLM span 退化为 0ms（thinking/tool_use 同毫秒批量 flush）
+    const llmRequestTs = stepCounter === 1 ? userTs : prevStepLastToolResultTs;
+
+    const stepRecords = buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, stepCounter === llmGroups.length, inputDelta, cwd, llmRequestTs);
     records.push(...stepRecords);
 
     // Collect this step's tool_calls for next step's input delta
     prevToolCalls = [];
+    let lastToolResultTsInStep = undefined;
     for (const row of group) {
       const msg = row.message || {};
       const content = Array.isArray(msg.content) ? msg.content : [];
       for (const b of content) {
-        if (b.type === 'tool_use') prevToolCalls.push({ id: b.id, name: b.name });
+        if (b.type === 'tool_use') {
+          prevToolCalls.push({ id: b.id, name: b.name });
+          // 找到本 step 该 tool_use 对应的 tool_result 行，记录 ts；多 tool 场景保留最后一个
+          const trRow = toolResultRows.find(r => {
+            const c = Array.isArray(r.message?.content) ? r.message.content : [];
+            return c.some(bl => bl.type === 'tool_result' && bl.tool_use_id === b.id);
+          });
+          if (trRow?.timestamp) {
+            const nano = timestampToUnixNanos(trRow.timestamp);
+            if (nano) lastToolResultTsInStep = nano;
+          }
+        }
       }
+    }
+    if (lastToolResultTsInStep) {
+      prevStepLastToolResultTs = lastToolResultTsInStep;
     }
   }
 
@@ -247,10 +278,53 @@ function groupByParentUuid(assistantRows) {
   return groups;
 }
 
-function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, isLastStep, inputDelta, cwd) {
+/**
+ * Group consecutive assistant rows between tool_result boundaries.
+ *
+ * Each group represents ONE LLM response. A tool_result row marks the
+ * boundary because it delivers a tool's output back to the model — the
+ * next assistant row is the start of the model's next response.
+ *
+ * Why not parentUuid: QoderWork occasionally emits a single LLM response
+ * as multiple assistant rows with different parentUuids (e.g. a thinking
+ * row + a separate tool_use row). Using parentUuid would incorrectly
+ * split them into multiple "steps", and a "prev tool_result ts as
+ * llm.request start" rule would then attribute the tool's execution time
+ * to the second half's LLM time.
+ */
+function groupAssistantRowsByToolResults(turnRows) {
+  const groups = [];
+  let current = [];
+
+  for (const row of turnRows) {
+    if (row.type === 'assistant') {
+      current.push(row);
+    } else if (row.type === 'user' && isToolResult(row)) {
+      if (current.length > 0) {
+        groups.push(current);
+        current = [];
+      }
+    }
+    // Non-assistant non-tool_result user rows (the prompt) are ignored here;
+    // they don't end an LLM-response group.
+  }
+  if (current.length > 0) groups.push(current);
+  return groups;
+}
+
+function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, isLastStep, inputDelta, cwd, llmRequestTs) {
   const records = [];
   const firstRow = group[0];
   const lastRow = group[group.length - 1];
+
+  // thinking 行的 ts 用作 llm.response 时间（模型完成输出的真实时刻）；
+  // 没有 thinking 时回退到 lastRow.timestamp（与现有行为一致）
+  const thinkingRow = group.find(r => {
+    const content = Array.isArray(r.message?.content) ? r.message.content : [];
+    const firstType = content[0]?.type;
+    return firstType === 'thinking' || r.content_type === 'thinking';
+  });
+  const llmResponseTs = timestampToUnixNanos(thinkingRow ? thinkingRow.timestamp : lastRow.timestamp);
 
   // Determine response.id from parentUuid
   const responseId = firstRow.parentUuid || firstRow.uuid;
@@ -293,7 +367,7 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
     'gen_ai.provider.name': providerName,
     'gen_ai.request.model': 'auto',
     'user.id': userId,
-    time_unix_nano: timestampToUnixNanos(firstRow.timestamp),
+    time_unix_nano: llmRequestTs || timestampToUnixNanos(firstRow.timestamp),
     observed_time_unix_nano: observedTs,
     version,
   };
@@ -317,7 +391,7 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
       'gen_ai.response.finish_reasons': [finishReason],
       'user.id': userId,
       'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts, finish_reason: finishReason }],
-      time_unix_nano: timestampToUnixNanos(lastRow.timestamp),
+      time_unix_nano: llmResponseTs,
       observed_time_unix_nano: observedTs,
       version,
     }, firstRow, runtimeConfig, cwd));
@@ -405,6 +479,17 @@ function extractText(row) {
     }
   }
   return '';
+}
+
+/**
+ * Strip <system-reminder>...</system-reminder> blocks from user message text.
+ * QoderWork injects these for context (timezone, MCP tools, memory diffs) into
+ * the user role message. They are not real user input and should not be emitted
+ * as gen_ai.input.messages_delta — they add noise, leak private context (MEMORY),
+ * and produce empty "user turns" when the message is purely system-reminder.
+ */
+function stripSystemReminders(text) {
+  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>\s*/g, '').trim();
 }
 
 /**
