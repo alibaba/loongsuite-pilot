@@ -356,13 +356,26 @@ export function mapSourceHookEventToEventName(sourceEvent) {
   return 'other';
 }
 
+const DEFAULT_CURSOR_MODEL = 'composer-2.5';
+
+/** Coerce raw model string to a concrete model name. */
+export function resolveCursorModel(rawModel) {
+  if (!rawModel || rawModel === 'default' || rawModel === 'unknown') return DEFAULT_CURSOR_MODEL;
+  return rawModel;
+}
+
+/** Whether this event type carries user input messages (prompt). */
+export function hasInputMessages(eventName) {
+  return eventName === 'llm.request' || eventName === 'other';
+}
+
 export function buildCursorHookRecord(payload, options = {}) {
   const now = options.now || new Date();
   const runtimeConfig = options.runtimeConfig || {};
   const sourceEvent = getSourceHookEvent(payload);
   const eventName = getStringValue(payload, 'event.name') || mapSourceHookEventToEventName(sourceEvent);
   const rawModel = getStringValue(payload, 'model') || 'unknown';
-  const model = (rawModel === 'default' || rawModel === 'unknown') ? 'composer-2.5' : rawModel;
+  const model = resolveCursorModel(rawModel);
   const toolOutput = parseMaybeJson(payload.tool_output ?? payload.result_json ?? payload.tool_results);
   const toolArguments = parseMaybeJson(payload.tool_input);
   // Stop events duplicate token/cost data already reported by afterAgentResponse
@@ -398,8 +411,8 @@ export function buildCursorHookRecord(payload, options = {}) {
     'gen_ai.usage.cache_creation.input_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_cache_write'),
     'gen_ai.usage.total_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_total'),
     'gen_ai.input.messages_hash': getStringValue(payload, 'input_messages_hash'),
-    'gen_ai.input.messages_delta': (eventName === 'llm.request' || eventName === 'other') ? buildCursorInputMessagesDelta(payload) : undefined,
-    'gen_ai.input.messages': (eventName === 'llm.request' || eventName === 'other') ? toJsonValue(parseMaybeJson(payload.input_messages)) : undefined,
+    'gen_ai.input.messages_delta': hasInputMessages(eventName) ? buildCursorInputMessagesDelta(payload) : undefined,
+    'gen_ai.input.messages': hasInputMessages(eventName) ? toJsonValue(parseMaybeJson(payload.input_messages)) : undefined,
     'gen_ai.output.messages': eventName === 'llm.response' ? buildCursorOutputMessages(payload, sourceEvent) : undefined,
     'gen_ai.tool.name': getStringValue(payload, 'tool_name'),
     'gen_ai.tool.call.id': getStringValue(payload, 'tool_use_id'),

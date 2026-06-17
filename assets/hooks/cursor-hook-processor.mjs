@@ -7,7 +7,8 @@
  * records with proper step division, subagent nesting, and trace ids.
  *
  * History JSONL is the sole formal data source for CursorHookInput.
- * Raw capture is behind LOONGSUITE_CURSOR_RAW_TRACE=1 env flag.
+ * Raw capture is controlled by LOONGSUITE_CURSOR_RAW_TRACE env flag
+ * (default '1' = enabled; set to '0' to disable).
  */
 
 import fs from 'node:fs/promises';
@@ -131,12 +132,14 @@ async function main() {
     return;
   }
 
-  // Always write raw trace for debugging — original Cursor hook payload
-  try {
-    const rawFile = path.join(dataDir, 'logs', 'cursor', 'raw', 'cursor-raw-trace.jsonl');
-    await appendJsonl(rawFile, { _captured_at: now.toISOString(), ...payload });
-  } catch {
-    // best-effort
+  // Write raw trace when LOONGSUITE_CURSOR_RAW_TRACE !== '0' (default: enabled)
+  if (process.env.LOONGSUITE_CURSOR_RAW_TRACE !== '0') {
+    try {
+      const rawFile = path.join(dataDir, 'logs', 'cursor', 'raw', 'cursor-raw-trace.jsonl');
+      await appendJsonl(rawFile, { _captured_at: now.toISOString(), ...payload });
+    } catch {
+      // best-effort
+    }
   }
 
   // On stop: assemble turn and write history

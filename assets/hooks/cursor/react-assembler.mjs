@@ -17,6 +17,7 @@ import {
   sanitizeObject,
   toJsonValue,
   parseMaybeJson,
+  resolveCursorModel,
 } from '../agent-event-normalizer.mjs';
 
 // ─── Public API ───
@@ -422,12 +423,12 @@ function buildParentSteps(events, ctx) {
           openNewStep(ev, stepRound === 0, ctx.userPrompt);
           flushPendingTools(currentStepId);
           currentStepHasTools = true;
-          // Close step N with an implicit response indicating tool_calls
+          // Close step N with an implicit response (assignFinishReasons will
+          // set finish_reasons=['tool_calls'] because this step has tools)
           currentLlmResponse = buildEmptyLlmResponse(
             { _journal_ts: lastStepEndTs || ev._journal_ts, hook_event: 'implicit' },
             ctx, currentStepId,
           );
-          currentLlmResponse['gen_ai.response.finish_reasons'] = ['tool_calls'];
           // Open step N+1 for the final LLM answer
           openNewStep(ev, false, null);
           currentLlmResponse = buildLlmResponseWithToken(ev, ctx, currentStepId, 'text');
@@ -746,6 +747,13 @@ function applyToolDurationToCall(records, stepId, resultEvent) {
 
 // ─── finish_reasons ───
 
+/**
+ * Assign finish_reasons to all llm.response records:
+ *   - Final response in the turn → ['stop']
+ *   - Non-final response in a step that has tools → ['tool_calls']
+ *     (this includes the implicit response from the ReAct split path)
+ *   - Other non-final responses → ['stop']
+ */
 function assignFinishReasons(records) {
   const stepsWithTools = new Set();
   for (const r of records) {
@@ -837,8 +845,7 @@ function findLastItem(items, predicate) {
 }
 
 function resolveModel(rawModel) {
-  if (!rawModel || rawModel === 'default' || rawModel === 'unknown') return 'composer-2.5';
-  return rawModel;
+  return resolveCursorModel(rawModel);
 }
 
 function inferProvider(model) {
