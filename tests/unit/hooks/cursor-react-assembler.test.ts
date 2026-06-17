@@ -470,4 +470,213 @@ describe('Cursor react assembler', () => {
       response: 'cursor fallback result',
     });
   });
+
+  it('isolates assembly to the stopping generation when two generations share a conversation', () => {
+    // Scenario: GPT quota exhaustion → Cursor auto-switches mid-prompt and
+    // re-emits beforeSubmitPrompt with a new generation_id under the SAME
+    // conversation_id. The aborted generation's events must not leak into
+    // the live (completed) generation's assembled turn.
+    const journalEvents = [
+      // Gen A — aborted GPT attempt (no actual model output yet)
+      {
+        _journal_ts: iso(0),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-shared',
+        generation_id: 'gen-a',
+        model: 'gpt-5.4',
+        prompt: 'do the task (gpt)',
+      },
+      // Gen B — auto-switched composer attempt with the same prompt text
+      {
+        _journal_ts: iso(50),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-shared',
+        generation_id: 'gen-b',
+        model: 'composer-2.5-fast',
+        prompt: 'do the task (composer)',
+      },
+      // Gen A stop arrives later (aborted) — but here we exercise the
+      // assembler's generation-scoped filtering directly.
+      {
+        _journal_ts: iso(60),
+        hook_event: 'stop',
+        conversation_id: 'conv-shared',
+        generation_id: 'gen-a',
+        status: 'aborted',
+      },
+      // Gen B normal flow
+      {
+        _journal_ts: iso(200),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-shared',
+        generation_id: 'gen-b',
+        model: 'composer-2.5-fast',
+        text: 'composer thinking',
+        duration_ms: 100,
+      },
+      {
+        _journal_ts: iso(400),
+        hook_event: 'preToolUse',
+        conversation_id: 'conv-shared',
+        generation_id: 'gen-b',
+        tool_name: 'Write',
+        tool_use_id: 'call-b-write',
+        tool_input: { path: 'a.md' },
+      },
+      {
+        _journal_ts: iso(600),
+        hook_event: 'postToolUse',
+        conversation_id: 'conv-shared',
+        generation_id: 'gen-b',
+        tool_name: 'Write',
+        tool_use_id: 'call-b-write',
+        tool_output: 'ok',
+        duration_ms: 150,
+      },
+      {
+        _journal_ts: iso(700),
+        hook_event: 'afterAgentResponse',
+        conversation_id: 'conv-shared',
+        generation_id: 'gen-b',
+        model: 'composer-2.5-fast',
+        text: 'composer done',
+        input_tokens: 5,
+        output_tokens: 1,
+      },
+      {
+        _journal_ts: iso(800),
+        hook_event: 'stop',
+        conversation_id: 'conv-shared',
+        generation_id: 'gen-b',
+        status: 'completed',
+      },
+    ];
+
+    const { records, consumedConversationIds, consumedGenerationIds } = assembleTurn(journalEvents, {
+      stopConversationId: 'conv-shared',
+      stopGenerationId: 'gen-b',
+    });
+
+    // ENTRY user-prompt record must come from gen-b, not gen-a
+    const entryRecord = records.find(r => r['event.name'] === 'other');
+    expect(entryRecord?.['gen_ai.input.messages_delta']?.[0]?.parts?.[0]?.content)
+      .toBe('do the task (composer)');
+    expect(entryRecord?.['gen_ai.turn.id']).toBe('gen-b');
+
+    // No record should reference gen-a as turn id
+    for (const r of records) {
+      expect(r['gen_ai.turn.id']).toBe('gen-b');
+    }
+
+    // gen-b owns a tool.call/tool.result pair; gen-a's events must not appear
+    const toolCalls = records.filter(r => r['event.name'] === 'tool.call');
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls[0]?.['gen_ai.tool.call.id']).toBe('call-b-write');
+
+    // Cleanup contract: parent conversation must NOT be globally consumed,
+    // so gen-a's lingering events stay in the journal until the aborted
+    // stop path cleans them by generation_id.
+    expect(consumedGenerationIds.has('gen-b')).toBe(true);
+    expect(consumedGenerationIds.has('gen-a')).toBe(false);
+    expect(consumedConversationIds.has('conv-shared')).toBe(false);
+  });
+
+  it('starts s2 LLM request at the last buffered tool result (composer ReAct split)', () => {
+    // Scenario: composer-2.5-fast emits no afterAgentThought; tool calls and
+    // results stream before any LLM event arrives. When afterAgentResponse
+    // finally fires, the assembler splits into:
+    //   s1 = tools + implicit response (finish=tool_calls)
+    //   s2 = the final LLM answer
+    // Bug guarded here: previously lastStepEndTs stayed at promptEventTs
+    // because flushPendingTools never advanced it, so s2's LLM request
+    // started at time 0 and the s2 span covered the entire turn.
+    const { records } = assembleTurn([
+      {
+        _journal_ts: iso(0),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-composer-split',
+        generation_id: 'turn-composer-split',
+        model: 'composer-2.5-fast',
+        prompt: 'do many things',
+      },
+      {
+        _journal_ts: iso(100),
+        hook_event: 'preToolUse',
+        conversation_id: 'conv-composer-split',
+        generation_id: 'turn-composer-split',
+        tool_name: 'Read',
+        tool_use_id: 'call-c-1',
+        tool_input: { path: 'a.ts' },
+      },
+      {
+        _journal_ts: iso(200),
+        hook_event: 'postToolUse',
+        conversation_id: 'conv-composer-split',
+        generation_id: 'turn-composer-split',
+        tool_name: 'Read',
+        tool_use_id: 'call-c-1',
+        tool_output: 'r1',
+        duration_ms: 100,
+      },
+      {
+        _journal_ts: iso(300),
+        hook_event: 'preToolUse',
+        conversation_id: 'conv-composer-split',
+        generation_id: 'turn-composer-split',
+        tool_name: 'Grep',
+        tool_use_id: 'call-c-2',
+        tool_input: { pattern: 'foo' },
+      },
+      {
+        _journal_ts: iso(450),
+        hook_event: 'postToolUse',
+        conversation_id: 'conv-composer-split',
+        generation_id: 'turn-composer-split',
+        tool_name: 'Grep',
+        tool_use_id: 'call-c-2',
+        tool_output: 'r2',
+        duration_ms: 150,
+      },
+      {
+        _journal_ts: iso(800),
+        hook_event: 'afterAgentResponse',
+        conversation_id: 'conv-composer-split',
+        generation_id: 'turn-composer-split',
+        model: 'composer-2.5-fast',
+        text: 'final answer',
+        input_tokens: 10,
+        output_tokens: 3,
+      },
+      {
+        _journal_ts: iso(900),
+        hook_event: 'stop',
+        conversation_id: 'conv-composer-split',
+        generation_id: 'turn-composer-split',
+        status: 'completed',
+      },
+    ], { stopConversationId: 'conv-composer-split', stopGenerationId: 'turn-composer-split' });
+
+    const s1Request = records.find(r =>
+      r['event.name'] === 'llm.request' && r['gen_ai.step.id'] === 'turn-composer-split:s1'
+    );
+    const s2Request = records.find(r =>
+      r['event.name'] === 'llm.request' && r['gen_ai.step.id'] === 'turn-composer-split:s2'
+    );
+    const s2Response = records.find(r =>
+      r['event.name'] === 'llm.response' && r['gen_ai.step.id'] === 'turn-composer-split:s2'
+    );
+
+    // s1 still anchors to prompt time (the LLM that decided to call tools)
+    // — the timing-guard may pull it slightly back; we just want it not
+    // exceeding the first tool's start.
+    expect(BigInt(s1Request!.time_unix_nano as string))
+      .toBeLessThanOrEqual(BigInt(ns(100)));
+
+    // s2 must start AT or AFTER the last buffered tool.result (iso(450)).
+    // Critically it must NOT fall back to prompt time (ns(0)).
+    expect(s2Request).toBeDefined();
+    expect(BigInt(s2Request!.time_unix_nano as string))
+      .toBeGreaterThanOrEqual(BigInt(ns(450)));
+    expect(s2Response?.time_unix_nano).toBe(ns(800));
+  });
 });

@@ -7,7 +7,8 @@
  * records with proper step division, subagent nesting, and trace ids.
  *
  * History JSONL is the sole formal data source for CursorHookInput.
- * Raw capture is behind LOONGSUITE_CURSOR_RAW_TRACE=1 env flag.
+ * Raw capture is controlled by LOONGSUITE_CURSOR_RAW_TRACE env flag
+ * (default '1' = enabled; set to '0' to disable).
  */
 
 import fs from 'node:fs/promises';
@@ -147,7 +148,8 @@ async function main() {
     return;
   }
 
-  if (process.env.LOONGSUITE_CURSOR_RAW_TRACE === '1') {
+  // Write raw trace when LOONGSUITE_CURSOR_RAW_TRACE !== '0' (default: enabled)
+  if (process.env.LOONGSUITE_CURSOR_RAW_TRACE !== '0') {
     try {
       const rawFile = path.join(dataDir, 'logs', 'cursor', 'raw', 'cursor-raw-trace.jsonl');
       await appendJsonl(rawFile, { _captured_at: now.toISOString(), ...payload });
@@ -161,11 +163,33 @@ async function main() {
     try {
       const allEvents = readAllEvents();
       const runtimeConfig = loadHookRuntimeConfig(dataDir);
-      const { records, consumedConversationIds } = assembleTurn(allEvents, {
-        runtimeConfig,
-        stopConversationId: internalEvent.conversation_id,
-        transcriptPath: internalEvent.transcript_path,
-      });
+
+      // Aborted generations (e.g. GPT quota exhaustion → Cursor auto-switches
+      // to composer) share the same conversation_id with the auto-switched
+      // generation that follows. From the user's perspective both prompts are
+      // the same trace, so the aborted half must NOT produce a history record.
+      // We just surgically clean the aborted generation_id's events from the
+      // journal so the live generation can still assemble on its own stop.
+      const isAborted = internalEvent.status === 'aborted';
+      const abortedGenId = isAborted ? internalEvent.generation_id : null;
+
+      let records = [];
+      let consumedConversationIds = new Set();
+      let consumedGenerationIds = new Set();
+
+      if (isAborted && abortedGenId) {
+        consumedGenerationIds.add(abortedGenId);
+      } else {
+        const result = assembleTurn(allEvents, {
+          runtimeConfig,
+          stopConversationId: internalEvent.conversation_id,
+          stopGenerationId: internalEvent.generation_id,
+          transcriptPath: internalEvent.transcript_path,
+        });
+        records = result.records;
+        consumedConversationIds = result.consumedConversationIds || new Set();
+        consumedGenerationIds = result.consumedGenerationIds || new Set();
+      }
 
       if (records.length > 0) {
         const day = localDateString(now);
@@ -174,16 +198,25 @@ async function main() {
       }
 
       // Rewrite journal: keep only events that belong to a pending user turn
-      // (has beforeSubmitPrompt but no stop yet). Drop everything else:
-      // consumed parent, child sessions, subagent meta, and orphan delayed events.
+      // (has beforeSubmitPrompt but no stop yet). Drop:
+      //   - events whose generation_id was consumed (parent generation, or
+      //     an aborted generation we deliberately discarded);
+      //   - events whose conversation_id was consumed (subagents, orphans,
+      //     legacy path with no generation_id);
+      //   - orphan child/delayed events without any pending parent turn.
+      const isConsumed = (ev) => {
+        if (ev.generation_id && consumedGenerationIds.has(ev.generation_id)) return true;
+        if (consumedConversationIds.has(ev.conversation_id)) return true;
+        return false;
+      };
       const pendingTurnConvIds = new Set();
       const remaining = [];
       for (const ev of allEvents) {
-        if (consumedConversationIds.has(ev.conversation_id)) continue;
+        if (isConsumed(ev)) continue;
         if (ev.hook_event === 'beforeSubmitPrompt') pendingTurnConvIds.add(ev.conversation_id);
       }
       for (const ev of allEvents) {
-        if (consumedConversationIds.has(ev.conversation_id)) continue;
+        if (isConsumed(ev)) continue;
         if (pendingTurnConvIds.has(ev.conversation_id)) remaining.push(ev);
         // else: orphan child/delayed event without a pending parent turn → drop
       }
