@@ -120,6 +120,43 @@ describe('codex-hook-processor 端到端', () => {
     expect(state.transcript_last_token_usage?.inputTokens).toBe(1);
   });
 
+  test('首次接管多 turn transcript 时只导出最后一个 turn 并推进完整进度', () => {
+    writeFakeTranscript([
+      { timestamp: '2026-06-11T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
+      { timestamp: '2026-06-11T10:00:01Z', type: 'turn_context', payload: { turn_id: 'old-turn', model: 'gpt-5.5' }},
+      { timestamp: '2026-06-11T10:00:02Z', type: 'event_msg', payload: { type: 'user_message', message: 'old prompt' }},
+      { timestamp: '2026-06-11T10:00:03Z', type: 'event_msg', payload: { type: 'token_count', info: {
+        last_token_usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 15 },
+      }}},
+      { timestamp: '2026-06-17T10:00:01Z', type: 'turn_context', payload: { turn_id: 'new-turn', model: 'gpt-5.5' }},
+      { timestamp: '2026-06-17T10:00:02Z', type: 'event_msg', payload: { type: 'user_message', message: 'new prompt' }},
+      { timestamp: '2026-06-17T10:00:03Z', type: 'event_msg', payload: { type: 'token_count', info: {
+        last_token_usage: { input_tokens: 20, output_tokens: 6, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 26 },
+      }}},
+    ]);
+
+    runHook('session-start', { session_id: 'cdx-old-session', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
+    runHook('stop', { session_id: 'cdx-old-session', turn_id: 'new-turn', last_assistant_message: 'new answer', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+
+    const records = readJsonl();
+    const promptContents = records
+      .filter((r) => r['event.name'] === 'other')
+      .map((r) => r['gen_ai.input.messages_delta']?.[0]?.parts?.[0]?.content);
+    expect(promptContents).toEqual(['new prompt']);
+
+    const llmResponses = records.filter((r) => r['event.name'] === 'llm.response');
+    expect(llmResponses).toHaveLength(1);
+    expect(llmResponses[0]?.['gen_ai.usage.total_tokens']).toBe(26);
+
+    const state = readState('cdx-old-session');
+    expect(state.turn_count).toBe(2);
+    expect(state.transcript_offset).toBe(fs.statSync(TRANSCRIPT).size);
+
+    const recordsBefore = readJsonl().length;
+    runHook('stop', { session_id: 'cdx-old-session', turn_id: 'new-turn', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+    expect(readJsonl()).toHaveLength(recordsBefore);
+  });
+
   test('UserPromptSubmit 输出 other 事件,不作为缺少 step/model 的 llm.request', () => {
     writeFakeTranscript([
       { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
