@@ -340,7 +340,10 @@ export class WukongInput extends BaseInput {
       'gen_ai.session.id': sessionId,
       'gen_ai.agent.type': ClientType.Wukong,
       'gen_ai.agent.id': task.id,
-      'gen_ai.agent.name': task.name,
+      // Use the agent type as the stable name for OTLP grouping.
+      // task.name is the user-created session title (changes per conversation)
+      // which would cause consistent_agent_name validation to fail.
+      'gen_ai.agent.name': ClientType.Wukong,
       ...(provider ? { 'gen_ai.provider.name': provider } : {}),
     } as const;
 

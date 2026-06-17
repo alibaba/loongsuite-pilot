@@ -154,7 +154,7 @@ describe('WukongInput', () => {
     expect(reqEntry!['host.name']).toBe(os.hostname());
     expect(reqEntry!['service.name']).toBe('wukong');
     expect(reqEntry!['gen_ai.agent.id']).toBe('task-1');
-    expect(reqEntry!['gen_ai.agent.name']).toBe('Test task');
+    expect(reqEntry!['gen_ai.agent.name']).toBe('wukong');
     expect(reqEntry!['gen_ai.provider.name']).toBe('dingtalk_deap');
     expect(reqEntry!['gen_ai.turn.id']).toBe('sess-1:t1');
   });
@@ -190,7 +190,7 @@ describe('WukongInput', () => {
     expect(respEntry!['host.name']).toBe(os.hostname());
     expect(respEntry!['service.name']).toBe('wukong');
     expect(respEntry!['gen_ai.agent.id']).toBe('task-1');
-    expect(respEntry!['gen_ai.agent.name']).toBe('Test task');
+    expect(respEntry!['gen_ai.agent.name']).toBe('wukong');
     expect(respEntry!['gen_ai.provider.name']).toBe('dingtalk_deap');
     expect(respEntry!['gen_ai.turn.id']).toBe('sess-1:t1');
   });
