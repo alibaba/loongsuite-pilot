@@ -33,6 +33,12 @@ export function assembleTurn(journalEvents, options = {}) {
   const stopGenerationId = options.stopGenerationId;
   const transcriptPath = options.transcriptPath;
 
+  // On Windows, Cursor corrupts non-ASCII response text through the system codepage.
+  // Read the correct text from the transcript file (which is always valid UTF-8).
+  const transcriptTexts = process.platform === 'win32'
+    ? readTranscriptTexts(transcriptPath)
+    : null;
+
   // Find the prompt for THIS stop's conversation+generation. When generationId
   // is provided, prefer an exact match so that two beforeSubmitPrompt events
   // in the same conversation (e.g. GPT quota exhaustion auto-switch to
@@ -96,7 +102,8 @@ export function assembleTurn(journalEvents, options = {}) {
 
   // User-hook: user prompt is not an LLM call — emit as "other" so converter
   // merges messages_delta into ENTRY span without generating a standalone LLM span.
-  if (promptEvent.prompt) {
+  const userPromptText = transcriptTexts?.userPrompt || promptEvent.prompt;
+  if (userPromptText) {
     records.push(applyPolicy({
       time_unix_nano: eventTs(promptEvent),
       observed_time_unix_nano: eventTs(promptEvent),
@@ -105,7 +112,7 @@ export function assembleTurn(journalEvents, options = {}) {
       ...baseFields,
       'gen_ai.provider.name': inferProvider(model),
       'gen_ai.input.messages_delta': [
-        { role: 'user', parts: [{ type: 'text', content: promptEvent.prompt }] },
+        { role: 'user', parts: [{ type: 'text', content: userPromptText }] },
       ],
       'agent.cursor.hook_event_name': 'beforeSubmitPrompt',
       'agent.cursor.composer_mode': promptEvent.composer_mode,
@@ -184,9 +191,10 @@ export function assembleTurn(journalEvents, options = {}) {
   // Build parent ReAct steps (with subagentResults for input enrichment)
   const stepRecords = buildParentSteps(parentEvents, {
     turnId, traceId, model, userId, baseFields, runtimeConfig,
-    userPrompt: promptEvent.prompt,
+    userPrompt: transcriptTexts?.userPrompt || promptEvent.prompt,
     promptEventTs: promptEvent._journal_ts,
     subagentResults,
+    transcriptResponseText: transcriptTexts?.assistantResponse,
   });
   records.push(...stepRecords);
 
@@ -258,6 +266,39 @@ export function assembleTurn(journalEvents, options = {}) {
 }
 
 // ─── Transcript Directory Scanning ───
+
+function readTranscriptTexts(transcriptPath) {
+  if (!transcriptPath || String(transcriptPath) === 'None') return null;
+  try {
+    if (!fs.existsSync(transcriptPath)) return null;
+    const content = fs.readFileSync(transcriptPath, 'utf-8');
+    const lines = content.trim().split('\n').filter(Boolean);
+    let lastUserText = null;
+    let lastAssistantText = null;
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.role === 'user' && entry.message?.content) {
+          const parts = entry.message.content
+            .filter(p => p.type === 'text' && p.text)
+            .map(p => p.text.replace(/<\/?user_query>\n?/g, '').trim())
+            .filter(Boolean);
+          if (parts.length > 0) lastUserText = parts.join('');
+        }
+        if (entry.role === 'assistant' && entry.message?.content) {
+          const parts = entry.message.content
+            .filter(p => p.type === 'text' && p.text)
+            .map(p => p.text);
+          if (parts.length > 0) lastAssistantText = parts.join('');
+        }
+      } catch { /* skip unparseable lines */ }
+    }
+    if (!lastUserText && !lastAssistantText) return null;
+    return { userPrompt: lastUserText, assistantResponse: lastAssistantText };
+  } catch {
+    return null;
+  }
+}
 
 function scanSubagentDir(transcriptPath) {
   if (!transcriptPath || String(transcriptPath) === 'None') return [];
@@ -403,14 +444,15 @@ function buildParentSteps(events, ctx) {
 
     else if (ev.hook_event === 'afterAgentResponse') {
       if (currentStepId !== null && currentStepHasTools) {
-        // lastStepEndTs stays at previous tool's end time (already updated by postToolUse)
-        // Do NOT set it to afterAgentResponse's time — that would make req == resp → 0ms LLM
         openNewStep(ev, false, null);
         currentLlmResponse = buildLlmResponseWithToken(ev, ctx, currentStepId, 'text');
         if (flushPendingTools(currentStepId)) currentStepHasTools = true;
       } else if (currentStepId !== null) {
         if (currentLlmResponse) {
-          appendPart(currentLlmResponse, 'text', ev.text);
+          // If transcript text already provided the response, just merge tokens
+          if (!ctx.transcriptResponseText) {
+            appendPart(currentLlmResponse, 'text', ev.text);
+          }
           mergeTokens(currentLlmResponse, ev);
         } else {
           currentLlmResponse = buildLlmResponseWithToken(ev, ctx, currentStepId, 'text');
@@ -555,6 +597,10 @@ function buildLlmRequestWithTs(reqTs, ev, ctx, stepId, userPrompt, prevToolResul
 }
 
 function buildLlmResponse(ev, ctx, stepId, partType) {
+  // On Windows, use transcript text to replace Cursor's codepage-garbled response
+  const responseText = (ctx.transcriptResponseText && ev.hook_event === 'afterAgentResponse')
+    ? ctx.transcriptResponseText
+    : ev.text;
   const rec = applyPolicy({
     time_unix_nano: eventTs(ev),
     observed_time_unix_nano: eventTs(ev),
@@ -566,8 +612,8 @@ function buildLlmResponse(ev, ctx, stepId, partType) {
     'gen_ai.provider.name': inferProvider(ev.model || ctx.model),
     'gen_ai.request.model': resolveModel(ev.model || ctx.model),
     'gen_ai.response.model': resolveModel(ev.model || ctx.model),
-    'gen_ai.output.messages': ev.text
-      ? [{ role: 'assistant', parts: [{ type: partType, content: ev.text }] }]
+    'gen_ai.output.messages': responseText
+      ? [{ role: 'assistant', parts: [{ type: partType, content: responseText }] }]
       : [{ role: 'assistant', parts: [] }],
     'agent.cursor.hook_event_name': ev.hook_event,
     'agent.cursor.reasoning_observed_at': partType === 'reasoning' ? ev._journal_ts : undefined,
