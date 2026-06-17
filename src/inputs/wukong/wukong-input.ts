@@ -258,10 +258,9 @@ export class WukongInput extends BaseInput {
         }
       }
       if (batchChanged) stateChanged = true;
-      // Persist incrementally: a mid-cycle kill should not lose all batch progress.
-      if (batchChanged) {
-        this.stateStore.update(this.id, { extra: { seenCounts } });
-      }
+      // Note: stateStore.save() is called once per cycle by BaseInput.runCycle
+      // after collect() returns. Mid-cycle batch progress is held in memory only
+      // and committed atomically at end-of-cycle (no per-batch disk fsync).
     }
 
     // Prune seenCounts entries for tasks no longer returned by the API.
@@ -454,6 +453,10 @@ export class WukongInput extends BaseInput {
       usageEvent = undefined;
       firstTokenEvent = undefined;
       toolCallParts.length = 0;
+      // Tool timestamp arrays are per-step (not turn-level) so flushStepLlm
+      // computes the correct response timestamp for the CURRENT step's tools.
+      allToolStartTimes.length = 0;
+      allToolEndTimes.length = 0;
     };
 
     // Determine if we need to pre-create initial step s1.
@@ -503,7 +506,7 @@ export class WukongInput extends BaseInput {
       // For tool-calling step: response just before first tool. Else: max of req+1, runFinishedTs.
       let responseTimestamp: number;
       if (currentStep.hasToolCalls && allToolStartTimes.length > 0) {
-        const firstToolTs = Math.min(...allToolStartTimes);
+        const firstToolTs = minOf(allToolStartTimes);
         responseTimestamp = Math.max(requestTimestamp + 1, firstToolTs - 1);
       } else if (currentStep.hasToolCalls) {
         responseTimestamp = requestTimestamp + 1;
@@ -749,8 +752,8 @@ export class WukongInput extends BaseInput {
         midOutputParts.push({ type: tc.type, id: tc.id, name: tc.name });
       }
       const midReqTs = runStartedTs ?? currentStep.startTimestamp;
-      const firstToolTs = Math.min(...allToolStartTimes);
-      const lastToolTs = Math.max(...allToolStartTimes, ...allToolEndTimes);
+      const firstToolTs = minOf(allToolStartTimes);
+      const lastToolTs = maxOf(allToolStartTimes, allToolEndTimes);
       const midRespTs = Math.max(midReqTs + 1, firstToolTs - 1);
 
       // Emit step 1 llm.request + llm.response (tool-calling)
@@ -845,7 +848,7 @@ export class WukongInput extends BaseInput {
       let responseTimestamp: number;
       if (currentStep.hasToolCalls && allToolStartTimes.length > 0) {
         // Find earliest tool timestamp (across TOOL_CALL_START and ACTIVITY_SNAPSHOT)
-        const firstToolTs = Math.min(...allToolStartTimes);
+        const firstToolTs = minOf(allToolStartTimes);
         responseTimestamp = Math.max(requestTimestamp + 1, firstToolTs - 1);
       } else if (currentStep.hasToolCalls) {
         // Tool-calling step but no tool timestamps available; fallback
@@ -903,7 +906,7 @@ export class WukongInput extends BaseInput {
         'trace_id': traceId,
         'span_id': llmSpanId,
         'parent_span_id': currentStep.stepSpanId,
-        ...(userContent ? {
+        ...(userContent && currentStep.stepIndex === 1 ? {
           'gen_ai.input.messages': [
             { role: 'user', parts: [{ type: 'text', content: userContent }] },
           ],
@@ -965,8 +968,8 @@ export class WukongInput extends BaseInput {
       }
       // Compute timing from tool entries
       const toolTimes = toolEntries.map(e => Number(e['time_unix_nano'] ?? 0) / 1e6);
-      const synthReqTs = Math.min(...toolTimes) - 1;
-      const synthRespTs = Math.max(...toolTimes) + 1;
+      const synthReqTs = minOf(toolTimes) - 1;
+      const synthRespTs = maxOf(toolTimes) + 1;
       const synthLlmSpanId = generateSpanId();
       // Find the parent_span_id from one of the tool entries (they all share step's parent)
       const stepParentSpanId = (toolEntries[0]['parent_span_id'] as string | undefined) ?? agentSpanId;
@@ -1352,6 +1355,27 @@ function generateTraceId(): string {
 
 function generateSpanId(): string {
   return crypto.randomBytes(8).toString('hex');
+}
+
+// Iterative min/max to avoid spread-arg call stack limits on large arrays.
+function minOf(arr: ReadonlyArray<number>): number {
+  let m = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    if (v < m) m = v;
+  }
+  return m;
+}
+
+function maxOf(...arrs: ReadonlyArray<ReadonlyArray<number>>): number {
+  let m = Number.NEGATIVE_INFINITY;
+  for (const arr of arrs) {
+    for (let i = 0; i < arr.length; i++) {
+      const v = arr[i];
+      if (v > m) m = v;
+    }
+  }
+  return m;
 }
 
 function isMessageComplete(msg: WukongMessage): boolean {
