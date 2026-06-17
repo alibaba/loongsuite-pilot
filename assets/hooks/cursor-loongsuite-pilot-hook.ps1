@@ -93,32 +93,9 @@ try {
     $rawBytes = $ms.ToArray()
     $ms.Dispose()
 
-    # Strip UTF-8 BOM (EF BB BF) before any encoding fixup
+    # Strip UTF-8 BOM (EF BB BF) before passing to Node.
     if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
         $rawBytes = $rawBytes[3..($rawBytes.Length - 1)]
-    }
-
-    # Fix Cursor's UTF-8→GBK double-encoding on Chinese Windows.
-    # Cursor encodes hook payloads through the system codepage (GBK/CP936), garbling
-    # all non-ASCII text.  Reversal: decode the garbled bytes as UTF-8, encode the
-    # resulting string as GBK — this recovers the ORIGINAL UTF-8 bytes.  We validate
-    # by checking that the recovered bytes are valid UTF-8; if not, keep the originals.
-    if ($rawBytes.Length -gt 2) {
-        try {
-            $utf8    = [System.Text.Encoding]::UTF8
-            $gbk     = [System.Text.Encoding]::GetEncoding(936)
-            $garbled = $utf8.GetString($rawBytes)
-            $recovered = $gbk.GetBytes($garbled)
-
-            # Validate: recovered bytes must be valid UTF-8 (strict decoder throws on invalid sequences)
-            $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)  # throwOnInvalidBytes = true
-            [void]$strictUtf8.GetString($recovered)
-
-            # Passed validation — use recovered bytes
-            $rawBytes = $recovered
-        } catch {
-            # Validation failed — original bytes are already correct UTF-8, keep them
-        }
     }
 
     if ($rawBytes.Length -eq 0) {
