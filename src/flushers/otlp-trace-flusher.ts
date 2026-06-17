@@ -7,6 +7,7 @@ import {
 } from '@opentelemetry/sdk-trace-base';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
+import { CompressionAlgorithm } from '@opentelemetry/otlp-exporter-base';
 import {
   convertEventLogToTrace,
   ExtendedTelemetryHandler,
@@ -76,6 +77,24 @@ function getPilotVersion(): string {
   } catch {
     return 'unknown';
   }
+}
+
+const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
+
+function estimateSpanSize(span: ReadableSpan): number {
+  let size = 512;
+  for (const val of Object.values(span.attributes)) {
+    if (typeof val === 'string') size += val.length;
+    else size += 32;
+  }
+  for (const event of span.events ?? []) {
+    size += 64;
+    for (const val of Object.values(event.attributes ?? {})) {
+      if (typeof val === 'string') size += val.length;
+      else size += 32;
+    }
+  }
+  return size;
 }
 
 export class OtlpTraceFlusher extends BaseFlusher {
@@ -238,7 +257,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (this.cfg.debug) {
       await this.writeDebugLog(agentType, spans);
     }
-    await this.doExport(exportState, agentType, spans);
+    await this.exportInBatches(exportState, agentType, spans);
   }
 
   // --- Internal ---
@@ -349,7 +368,37 @@ export class OtlpTraceFlusher extends BaseFlusher {
       await this.writeDebugLog(agentType, spans);
     }
 
-    await this.doExport(exportState, agentType, spans);
+    await this.exportInBatches(exportState, agentType, spans);
+  }
+
+  private async exportInBatches(
+    exportState: AgentExportState,
+    agentType: string,
+    spans: ReadableSpan[],
+  ): Promise<void> {
+    const maxBytes = this.cfg.maxExportBatchBytes ?? DEFAULT_MAX_EXPORT_BATCH_BYTES;
+    const batches: ReadableSpan[][] = [];
+    let current: ReadableSpan[] = [];
+    let currentSize = 0;
+
+    for (const span of spans) {
+      const size = estimateSpanSize(span);
+      if (current.length > 0 && currentSize + size > maxBytes) {
+        batches.push(current);
+        current = [];
+        currentSize = 0;
+      }
+      current.push(span);
+      currentSize += size;
+    }
+    if (current.length > 0) batches.push(current);
+
+    if (batches.length > 1) {
+      logger.info(`Exporting ${spans.length} spans in ${batches.length} batches`, { agentType, maxBytes });
+    }
+    for (const batch of batches) {
+      await this.doExport(exportState, agentType, batch);
+    }
   }
 
   private doExport(
@@ -396,6 +445,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const exporter = new OTLPTraceExporter({
       url: this.resolvedEndpointUrl,
       headers: this.cfg.headers ?? {},
+      compression: this.cfg.compression === 'none'
+        ? CompressionAlgorithm.NONE
+        : CompressionAlgorithm.GZIP,
     });
 
     state = { exporter };

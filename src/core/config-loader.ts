@@ -447,6 +447,8 @@ function buildOtlpTraceConfigNew(
     captureMessageContent,
     debug: otlp?.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
+    maxExportBatchBytes: otlp?.maxExportBatchBytes,
+    compression: otlp?.compression,
   };
 }
 
@@ -472,6 +474,8 @@ function buildOtlpTraceConfigLegacy(config: AnalyticsConfig): OtlpTraceFlusherCo
     captureMessageContent,
     debug: cms.debug ?? false,
     turnIdleTimeoutMs: 0,
+    maxExportBatchBytes: undefined,
+    compression: undefined,
   };
 }
 
