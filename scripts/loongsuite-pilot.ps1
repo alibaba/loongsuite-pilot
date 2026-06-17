@@ -267,15 +267,25 @@ function Install-CollectorTask {
         -Argument "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry'`"" `
         -WorkingDirectory $CACHE_DIR
 
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
+    # Two triggers: AtLogOn for initial start + repeating every 5 min as a watchdog.
+    # If the process crashes or is killed, the repeating trigger re-launches it.
+    # MultipleInstances=IgnoreNew ensures a second instance is never spawned while running.
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
+    $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+        -RepetitionInterval (New-TimeSpan -Minutes 5)
 
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
         -DontStopOnIdleEnd `
+        -MultipleInstances IgnoreNew `
         -RestartCount 3 `
         -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit ([TimeSpan]::Zero)
+
+    # S4U logon type: runs under the user's identity in a non-interactive session,
+    # so the process survives RDP/SSH disconnect without requiring a stored password.
+    $principal = New-ScheduledTaskPrincipal -UserId (whoami) -LogonType S4U -RunLevel Limited
 
     # Remove existing task first (schtasks is more reliable than Unregister-ScheduledTask)
     # Use try/catch because schtasks stderr + $ErrorActionPreference=Stop can throw
@@ -286,8 +296,9 @@ function Install-CollectorTask {
         -TaskName $TASK_NAME_COLLECTOR `
         -TaskPath "$TASK_FOLDER\" `
         -Action $action `
-        -Trigger $trigger `
+        -Trigger @($triggerLogon, $triggerRepeat) `
         -Settings $settings `
+        -Principal $principal `
         -Description "LoongSuite Pilot data collector" `
         -ErrorAction Stop | Out-Null
 
@@ -304,15 +315,20 @@ function Install-UpdaterTask {
         -Argument "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry'`"" `
         -WorkingDirectory $CACHE_DIR
 
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
+    $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+        -RepetitionInterval (New-TimeSpan -Minutes 5)
 
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
         -DontStopOnIdleEnd `
+        -MultipleInstances IgnoreNew `
         -RestartCount 3 `
         -RestartInterval (New-TimeSpan -Minutes 5) `
         -ExecutionTimeLimit ([TimeSpan]::Zero)
+
+    $principal = New-ScheduledTaskPrincipal -UserId (whoami) -LogonType S4U -RunLevel Limited
 
     try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_UPDATER" /F 2>$null | Out-Null } catch {}
     try { schtasks.exe /Delete /TN "$TASK_NAME_UPDATER" /F 2>$null | Out-Null } catch {}
@@ -321,8 +337,9 @@ function Install-UpdaterTask {
         -TaskName $TASK_NAME_UPDATER `
         -TaskPath "$TASK_FOLDER\" `
         -Action $action `
-        -Trigger $trigger `
+        -Trigger @($triggerLogon, $triggerRepeat) `
         -Settings $settings `
+        -Principal $principal `
         -Description "LoongSuite Pilot auto-updater" `
         -ErrorAction Stop | Out-Null
 
