@@ -7,13 +7,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import {
   buildQoderHookRecord,
   loadHookRuntimeConfig,
 } from '../agent-event-normalizer.mjs';
 
 const ENABLE_LOGGING = true;
-export const HOOKS_DIR = path.dirname(path.dirname(new URL(import.meta.url).pathname));
+export const HOOKS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 export const LOONGSUITE_PILOT_LOGS_BASE_DIR = (() => {
   const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
   return path.join(configured || path.join(os.homedir(), '.loongsuite-pilot'), 'logs');
