@@ -402,44 +402,52 @@ bash deploy/rollout.sh --percentage 0 --dry-run [--external]
    stable release 沿用 tag 范围：
 
    ```bash
-   git log ${PREV_TAG}..${CURRENT_TAG} --format="%H %s" --no-merges
-   git log ${PREV_TAG}..${CURRENT_TAG} --format="%an" --no-merges | sort -u
+   git log ${PREV_TAG}..${CURRENT_TAG} --format="%h|%an|%s%n%b" --no-merges
    ```
 
    promote 场景如果 tag 尚未重建，使用 release 分支 commit：
 
    ```bash
    TAG_REF=$(git rev-parse "release/v${NEXT_VERSION}" 2>/dev/null || git rev-parse HEAD)
-   git log ${PREV_TAG}..${TAG_REF} --format="%H %s" --no-merges
-   git log ${PREV_TAG}..${TAG_REF} --format="%an" --no-merges | sort -u
+   git log ${PREV_TAG}..${TAG_REF} --format="%h|%an|%s%n%b" --no-merges
    ```
 
-3. 按 conventional commit prefix 分类，**用中文撰写** Release Note：
+   从 commit message 和 body 中提取 CR 链接，支持 `codereview/NNNNNN` 或 `Link: https://...codereview/NNNNNN`。同一 CR 的多条 commit 合并成一条 release note；无 CR 链接时保留 commit hash 作为追溯信息，但不要把 hash 写进正文描述。
+
+3. 按 ClickHouse CHANGELOG 风格生成 tag releaseDescription，**用中文撰写** Release Note：
 
    ```markdown
-   ## Release vX.Y.Z
+   # Release vX.Y.Z
 
-   **发布日期:** YYYY-MM-DD
-   **上一版本:** <prev-version> (YYYY-MM-DD)
+   ### LoongSuite Pilot release vX.Y.Z, YYYY-MM-DD
 
-   ### 新功能
-   - **scope**: 中文描述 (`short-hash`)
+   #### 新 Agent 支持
+   * <一句话描述新增 Agent 或采集链路，以及对用户的影响>。 [#CR_ID](https://code.alibaba-inc.com/sls/loongsuite-pilot/codereview/CR_ID) (作者)
 
-   ### 问题修复
-   - **scope**: 中文描述 (`short-hash`)
+   #### Pilot 新功能
+   * <一句话描述新增 Pilot 平台能力，以及用户如何受益或如何启用>。 [#CR_ID](https://code.alibaba-inc.com/sls/loongsuite-pilot/codereview/CR_ID) (作者)
 
-   ### 优化重构
-   - **scope**: 中文描述 (`short-hash`)
+   #### 问题修复
+   * <一句话描述修复的问题，以及修复后的用户可见效果>。 [#CR_ID](https://code.alibaba-inc.com/sls/loongsuite-pilot/codereview/CR_ID) (作者)
    ```
 
    分类规则：
-   - `feat` / `feature` → 新功能
-   - `fix` → 问题修复
-   - `refactor` / `perf` → 优化重构
+   - `新 Agent 支持` → 新增 Agent、Agent 新采集链路、新 IDE/CLI 适配；该 section 放在所有功能类 section 前面。对已有 Agent 的采集增强、字段补充、trace 完整性提升、bug 修复不归入本类，应按语义归入 `改进` 或 `问题修复`。
+   - `Pilot 新功能` → Pilot 平台自身能力，例如脱敏、灰度、监控、updater、输出通道、采集框架能力。
+   - `性能优化` → `perf`，或明确的性能提升。
+   - `改进` → 已有功能增强、CLI/安装脚本改进、配置优化、已有 Agent 采集字段补充。
+   - `问题修复` → `fix`，或 bug 修复。
+   - `构建/打包改进` → `build` / `deploy` / `chore(deploy)`，构建分离、打包脚本变更。
    - `release:` 开头 → 跳过
-   - 无 prefix 或其他 → 归入最相近的类别（根据内容语义判断），如果无法归类放入问题修复
+   - 无 prefix 或其他 → 归入最相近的类别（根据内容语义判断），如果无法归类放入改进
    - 空 section 不输出
    - 所有 description 翻译为中文
+
+   撰写要求：
+   - 每条变更使用一个扁平 bullet，格式为 `* <一句话描述用户可见的变更及影响>。 [#CR_ID](https://code.alibaba-inc.com/sls/loongsuite-pilot/codereview/CR_ID) (作者)`。
+   - 每条 1-2 句话，说明「改了什么」和「对用户的影响」。
+   - 不使用子标题、表格、代码块，不使用 commit hash 作为正文内容。
+   - 破坏性变更必须写明如何恢复旧行为或迁移路径。
 
 ### Step 2: 发布 Release Note 到 Tag
 
