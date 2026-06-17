@@ -22,6 +22,7 @@ import {
 import { toInternalEvent } from './cursor/source-event.mjs';
 import { appendEvent, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
 import { assembleTurn } from './cursor/react-assembler.mjs';
+import { buildCursorRecordsFromTranscript } from './cursor/transcript-assembler.mjs';
 
 function resolveDataDir() {
   const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
@@ -180,15 +181,37 @@ async function main() {
       if (isAborted && abortedGenId) {
         consumedGenerationIds.add(abortedGenId);
       } else {
-        const result = assembleTurn(allEvents, {
-          runtimeConfig,
-          stopConversationId: internalEvent.conversation_id,
-          stopGenerationId: internalEvent.generation_id,
-          transcriptPath: internalEvent.transcript_path,
-        });
-        records = result.records;
-        consumedConversationIds = result.consumedConversationIds || new Set();
-        consumedGenerationIds = result.consumedGenerationIds || new Set();
+        // On Windows: use transcript as source of truth for text content.
+        // This bypasses GB18030 codepage corruption of hook payload text.
+        if (process.platform === 'win32' && internalEvent.transcript_path) {
+          const transcriptRecords = buildCursorRecordsFromTranscript(
+            internalEvent.transcript_path,
+            allEvents,
+            { runtimeConfig, stopConversationId: internalEvent.conversation_id }
+          );
+          if (transcriptRecords && transcriptRecords.length > 0) {
+            records = transcriptRecords;
+            const promptEvent = allEvents.find(e =>
+              e.hook_event === 'beforeSubmitPrompt' &&
+              e.conversation_id === internalEvent.conversation_id
+            );
+            const convId = promptEvent?.conversation_id || internalEvent.conversation_id;
+            consumedConversationIds = new Set([convId]);
+          }
+        }
+
+        // Fallback: use hook-event-driven assembleTurn (Mac/Linux or transcript unavailable)
+        if (records.length === 0) {
+          const result = assembleTurn(allEvents, {
+            runtimeConfig,
+            stopConversationId: internalEvent.conversation_id,
+            stopGenerationId: internalEvent.generation_id,
+            transcriptPath: internalEvent.transcript_path,
+          });
+          records = result.records;
+          consumedConversationIds = result.consumedConversationIds || new Set();
+          consumedGenerationIds = result.consumedGenerationIds || new Set();
+        }
       }
 
       if (records.length > 0) {
