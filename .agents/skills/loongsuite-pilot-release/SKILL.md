@@ -31,6 +31,7 @@ metadata:
 - 发布目标不明确时必须暂停并询问用户选择 internal（集团版）或 external（商业版）。
 - 任何会上传包或更新 OSS `latest.json` 的动作，都必须先展示发布 summary，并等待用户明确确认后再执行真实命令。
 - 所有真实发布动作都依赖仓库内脚本：`deploy/release.sh` 与 `deploy/rollout.sh`。
+- 发布动作成功后，如果配置了钉钉机器人环境变量，必须发送 Loongsuite 发布通知；通知失败只输出 warning，不阻断发布流程。
 
 ---
 
@@ -510,6 +511,96 @@ bash deploy/rollout.sh --percentage 0 --dry-run [--external]
 
 ---
 
+## DingTalk Notification Flow
+
+发布通知是可选增强能力。只有配置了钉钉机器人环境变量时才发送；未配置时跳过，不视为失败。
+
+### 配置方式
+
+不要把 webhook 或 secret 写入仓库。使用环境变量：
+
+```bash
+export DINGTALK_RELEASE_WEBHOOK_INTERNAL='https://oapi.dingtalk.com/robot/send?access_token=...'
+export DINGTALK_RELEASE_SECRET_INTERNAL='SEC...' # 如果机器人启用了加签
+
+export DINGTALK_RELEASE_WEBHOOK_EXTERNAL='https://oapi.dingtalk.com/robot/send?access_token=...'
+export DINGTALK_RELEASE_SECRET_EXTERNAL='SEC...' # 如果 external 使用不同机器人
+```
+
+如果 internal/external 共用同一个机器人，也可以使用通用变量：
+
+```bash
+export DINGTALK_RELEASE_WEBHOOK='https://oapi.dingtalk.com/robot/send?access_token=...'
+export DINGTALK_RELEASE_SECRET='SEC...'
+```
+
+机器人如配置了关键词校验，通知标题和正文必须包含 `Loongsuite`。
+
+### 调用脚本
+
+使用仓库内脚本发送通知：
+
+```bash
+node .agents/skills/loongsuite-pilot-release/notify-dingtalk-release.mjs \
+  --mode internal \
+  --title "Loongsuite Pilot 发布完成" \
+  --action "canary release" \
+  --version "vX.Y.Z" \
+  --rollout "0%" \
+  --branch "release/vX.Y.Z" \
+  --tag "vX.Y.Z" \
+  --next "/release rollout 5 internal"
+```
+
+脚本会自动：
+
+- 根据 `--mode` 选择 internal/external webhook。
+- 对启用加签的机器人计算钉钉签名。
+- 发送 markdown 消息。
+- 默认操作人优先读取 `git config user.name` 和 `git config user.email`；如需覆盖，显式传 `--operator`。
+- 在未配置 webhook 或发送失败时输出 warning 并以 `0` 退出，避免通知问题中断发布。
+
+### 发送时机
+
+只在真实动作成功后发送通知；dry-run、status、用户确认前不发送。
+
+- stable release：`deploy/release.sh` 成功，Release Note/tag/CR 完成后发送，包含版本、分支、tag、CR 链接（如可获得）。
+- canary release：`deploy/release.sh --canary` 成功后发送，包含版本、分支、tag、rollout `0%`，下一步建议 rollout。
+- rollout：`deploy/rollout.sh --percentage <N>` 成功后发送，标题使用 `Loongsuite Pilot 扩大灰度比例` 或 `Loongsuite Pilot 调整灰度比例`，包含当前 stable/canary 和灰度比例变化；不要输出“下一步”。
+- canary hotfix：`deploy/release.sh --canary --hotfix` 成功后发送，包含 canary 版本和 hotfix version（如可获得）。
+- promote：`deploy/rollout.sh --promote` 成功，Release Note/tag/CR 完成后发送，包含上一 stable、提升后的 stable、tag、CR 链接（如可获得）。
+
+示例消息：
+
+```markdown
+### Loongsuite Pilot 发布完成
+
+- 状态：成功
+- 动作：canary release
+- 目标：internal（集团版）
+- 版本：v1.2.3
+- 灰度比例：0%
+- 分支：release/v1.2.3
+- Tag：v1.2.3
+- 操作人：release skill
+- 下一步：/release rollout 5 internal
+```
+
+rollout 示例消息：
+
+```markdown
+### Loongsuite Pilot 扩大灰度比例
+
+- 状态：成功
+- 动作：rollout
+- 目标：internal（集团版）
+- 版本：v1.2.3
+- 灰度比例：10% -> 20%
+- 操作人：石木 <suqing.cy@alibaba-inc.com>
+```
+
+---
+
 ## 护栏规则
 
 - 不要自动 stash 或丢弃用户改动。
@@ -521,6 +612,8 @@ bash deploy/rollout.sh --percentage 0 --dry-run [--external]
 - `deploy/rollout.sh --promote` 内部会确认 promote，这是 promote 的交互确认点。
 - canary 发布、rollout、hotfix 阶段不得创建 CR，不得发布正式 Release Note。
 - 只有 stable release 与 promote 成功后才执行 Release Note/tag/CR。
+- dry-run、status、用户确认前不得发送钉钉发布通知。
+- 钉钉通知失败不得阻断已经成功的发布、rollout、promote、tag 或 CR 流程。
 - 删除远端 tag 不需要额外确认；发布流程已隐含授权。
 - Release Note 所有内容用中文撰写。
 - commit 分类基于 prefix，`release:` commit 始终跳过。
