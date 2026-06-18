@@ -320,9 +320,14 @@ async function writeSessionJsonl(state, transcriptData) {
 
   // turn_count 跨 Stop 持久化,确保多 turn session 中 turn_id 递增(不重复 :t1)
   const baseTurnCount = state.turn_count || 0;
+  const baseTranscriptOffset = state.transcript_offset || 0;
+  // 首次运行防护: 新安装/重装后 state 被清空(offset=0, 无 turn_count),
+  // 如果 transcript 包含大量历史 turn, 只上报最后一个(当前对话), 跳过历史。
+  const isFirstRun = !state.turn_count && baseTranscriptOffset === 0;
+  const turnsToExport = isFirstRun && turns.length > 1 ? turns.slice(-1) : turns;
 
-  for (let turnIdx = 0; turnIdx < turns.length; turnIdx++) {
-    const turn = turns[turnIdx];
+  for (let turnIdx = 0; turnIdx < turnsToExport.length; turnIdx++) {
+    const turn = turnsToExport[turnIdx];
     // 主路径:按 turn_id 取本 turn 的 token 事件;fallback 从扁平队列尾部
     let turnTokens = transcriptData?.tokenEventsByTurn?.get(turn.turn_id);
     if (!turnTokens || turnTokens.length === 0) {
@@ -349,6 +354,7 @@ async function writeSessionJsonl(state, transcriptData) {
   }
 
   // 持久化 turn_count(跨 Stop 递增)
+  // turn_count 计入全部 turns(含跳过的历史), 确保 offset 正确推进不重复上报
   state.turn_count = baseTurnCount + turns.length;
 
   const cleaned = allRecords.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
