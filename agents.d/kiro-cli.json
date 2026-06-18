@@ -1,0 +1,25 @@
+{
+  "id": "kiro-cli",
+  "displayName": "Kiro CLI",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.kiro", "~/.local/share/kiro-cli"],
+    "commands": ["kiro-cli"]
+  },
+  "hook": {
+    "settingsPath": "~/.kiro/agents/pilot-kiro.json",
+    "events": ["userPromptSubmit", "preToolUse", "postToolUse", "stop"],
+    "hookCommand": "$PILOT_DATA/hooks/kiro-cli-loongsuite-pilot-hook.sh",
+    "format": "flat",
+    "matcher": "*",
+    "eventSubcommand": "as-is",
+    "kiroAgent": {
+      "name": "pilot-kiro",
+      "tools": ["read", "write", "shell", "grep", "glob", "report", "thinking", "todo"]
+    }
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/kiro-cli"
+  }
+}

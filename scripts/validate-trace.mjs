@@ -790,6 +790,45 @@ function validateSemantic(trace, rules) {
     if (allOk) checks.push(pass('semantic.llm_has_input_output'));
   }
 
+  // llm_input_nonempty: 第一个 LLM span 的 input.messages 必须含非空文本（用户原始 prompt 不能丢）。
+  // 现有 llm_has_input_output 只校验字段存在，content 为空串时会假绿。
+  if (!hasMessageContent) {
+    checks.push(skipped('semantic.llm_input_nonempty'));
+  } else {
+    const llmSpans = spans
+      .filter(s => s._kind === 'LLM')
+      .sort((a, b) => {
+        const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
+        return d < 0n ? -1 : d > 0n ? 1 : 0;
+      });
+    const firstLlm = llmSpans[0];
+    if (!firstLlm) {
+      checks.push(skipped('semantic.llm_input_nonempty'));
+    } else {
+      const raw = firstLlm.attributes?.['gen_ai.input.messages'];
+      let firstNonEmpty = false;
+      let reason = 'missing gen_ai.input.messages';
+      if (raw !== undefined && raw !== null) {
+        try {
+          const msgs = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (Array.isArray(msgs)) {
+            firstNonEmpty = msgs.some(m =>
+              Array.isArray(m?.parts) &&
+              m.parts.some(p => p?.type === 'text' && typeof p.content === 'string' && p.content.length > 0));
+            if (!firstNonEmpty) reason = 'no text part with non-empty content';
+          } else {
+            reason = 'input.messages is not an array';
+          }
+        } catch {
+          reason = 'input.messages is not valid JSON';
+        }
+      }
+      checks.push(firstNonEmpty
+        ? pass('semantic.llm_input_nonempty')
+        : warn('semantic.llm_input_nonempty', `first LLM input.messages has empty content: ${reason}`, firstLlm.spanId, firstLlm.name));
+    }
+  }
+
   // tool_response_role: input.messages with tool_call_response parts must have role=tool
   if (!hasMessageContent) {
     checks.push(skipped('semantic.tool_response_role'));
