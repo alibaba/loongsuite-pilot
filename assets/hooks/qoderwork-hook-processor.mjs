@@ -113,7 +113,7 @@ function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd) {
   const turns = splitIntoTurns(contentRows);
 
   for (const turn of turns) {
-    const turnId = crypto.randomUUID();
+    const turnId = getTurnIdForRows(turn);
     const turnRecords = buildTurnEvents(turn, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd);
     records.push(...turnRecords);
   }
@@ -139,11 +139,19 @@ function splitIntoTurns(contentRows) {
   return turns;
 }
 
+function getTurnIdForRows(turnRows) {
+  const promptRow = turnRows.find(r => r.type === 'user' && !isToolResult(r));
+  return promptRow?.promptId || promptRow?.uuid || crypto.randomUUID();
+}
+
 function isSystemInjection(row) {
   const text = extractText(row).trimStart();
-  return text.startsWith('<command-message>') ||
+  if (text.startsWith('<command-message>') ||
     text.startsWith('<command-name>') ||
-    text.startsWith('<system-reminder>');
+    text.startsWith('[SYSTEM: This is an automated background review task')) {
+    return true;
+  }
+  return text.startsWith('<system-reminder>') && !extractPromptText(row);
 }
 
 function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd) {
@@ -151,12 +159,15 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
 
   // Find the user prompt
   const userRow = turnRows.find(r => r.type === 'user' && !isToolResult(r));
+  const promptId = userRow?.promptId || turnId;
+  const turnMetadata = promptId ? { 'agent.qoderwork.promptId': promptId } : {};
 
   // User-hook event (no step.id, no model — per §5 of EVENT_LOG_TO_TRACE_SPEC)
   if (userRow) {
-    const userText = stripSystemReminders(extractText(userRow));
+    const userText = extractPromptText(userRow);
     if (userText) {
       records.push(buildRecord({
+        ...turnMetadata,
         'event.name': 'llm.request',
         'gen_ai.turn.id': turnId,
         'gen_ai.session.id': sessionId,
@@ -183,7 +194,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
 
   const llmGroups = groupAssistantRowsByToolResults(turnRows);
 
-  const userText = userRow ? stripSystemReminders(extractText(userRow)) : '';
+  const userText = userRow ? extractPromptText(userRow) : '';
   const userTs = userRow ? timestampToUnixNanos(userRow.timestamp) : undefined;
   let prevToolCalls = []; // tool_call ids from previous step, for building tool_result delta
   let prevStepLastToolResultTs = undefined; // 上一个 step 最后一个 tool_result 的 nano ts，用于本 step llm.request 时间
@@ -224,7 +235,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
     // 否则用 assistant 行写盘时间会导致 LLM span 退化为 0ms（thinking/tool_use 同毫秒批量 flush）
     const llmRequestTs = stepCounter === 1 ? userTs : prevStepLastToolResultTs;
 
-    const stepRecords = buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, stepCounter === llmGroups.length, inputDelta, cwd, llmRequestTs);
+    const stepRecords = buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, stepCounter === llmGroups.length, inputDelta, cwd, llmRequestTs, turnMetadata);
     records.push(...stepRecords);
 
     // Collect this step's tool_calls for next step's input delta
@@ -312,7 +323,7 @@ function groupAssistantRowsByToolResults(turnRows) {
   return groups;
 }
 
-function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, isLastStep, inputDelta, cwd, llmRequestTs) {
+function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, isLastStep, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
   const records = [];
   const firstRow = group[0];
   const lastRow = group[group.length - 1];
@@ -359,6 +370,7 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
 
   // llm.request for this step (with input.messages_delta per EVENT_LOG_TO_TRACE_SPEC §3.2)
   const llmRequestFields = {
+    ...turnMetadata,
     'event.name': 'llm.request',
     'gen_ai.step.id': stepId,
     'gen_ai.turn.id': turnId,
@@ -379,6 +391,7 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
   // llm.response (merged multi-parts)
   if (outputParts.length > 0) {
     records.push(buildRecord({
+      ...turnMetadata,
       'event.name': 'llm.response',
       'gen_ai.step.id': stepId,
       'gen_ai.turn.id': turnId,
@@ -400,6 +413,7 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
   // tool.call + tool.result events
   for (const tc of toolCalls) {
     records.push(buildRecord({
+      ...turnMetadata,
       'event.name': 'tool.call',
       'gen_ai.step.id': stepId,
       'gen_ai.turn.id': turnId,
@@ -425,6 +439,7 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
       const resultBlock = resultContent.find(b => b.tool_use_id === tc.id);
       const resultText = typeof resultBlock?.content === 'string' ? resultBlock.content : JSON.stringify(resultBlock?.content);
       records.push(buildRecord({
+        ...turnMetadata,
         'event.name': 'tool.result',
         'gen_ai.step.id': stepId,
         'gen_ai.turn.id': turnId,
@@ -482,14 +497,53 @@ function extractText(row) {
 }
 
 /**
- * Strip <system-reminder>...</system-reminder> blocks from user message text.
+ * Extract the human prompt text from QoderWork's mixed user message payload.
+ *
+ * QoderWork can place runtime context in the user role, either as a separate
+ * text block before the prompt or inline after/around it. Keep the user's text
+ * outside those wrappers, but drop the injected context itself.
+ */
+function extractPromptText(row) {
+  const msg = row.message || {};
+  const content = msg.content;
+  const textBlocks = [];
+  if (typeof content === 'string') {
+    textBlocks.push(content);
+  } else if (Array.isArray(content)) {
+    for (const block of content) {
+      if (typeof block === 'string') {
+        textBlocks.push(block);
+      } else if (block?.type === 'text' && typeof block.text === 'string') {
+        textBlocks.push(block.text);
+      }
+    }
+  }
+
+  const cleaned = textBlocks
+    .map(cleanPromptText)
+    .filter(Boolean);
+  return cleaned.join('\n\n');
+}
+
+/**
+ * Strip injected context wrappers from one text block while preserving text
+ * outside the wrappers, e.g. "<user-selected-text>...</user-selected-text> 讲讲这个".
+ *
  * QoderWork injects these for context (timezone, MCP tools, memory diffs) into
  * the user role message. They are not real user input and should not be emitted
  * as gen_ai.input.messages_delta — they add noise, leak private context (MEMORY),
  * and produce empty "user turns" when the message is purely system-reminder.
  */
-function stripSystemReminders(text) {
-  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>\s*/g, '').trim();
+function cleanPromptText(text) {
+  const value = String(text || '');
+  if (/^\s*<(?:command-message|command-name)>/.test(value)) return '';
+  return value
+    .replace(/^\[SYSTEM: This is an automated background review task[\s\S]*$/g, '')
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>\s*/g, ' ')
+    .replace(/<user-selected-text>[\s\S]*?<\/user-selected-text>\s*/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 /**

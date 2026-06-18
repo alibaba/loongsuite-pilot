@@ -54,6 +54,15 @@ describe('QoderWorkTraceInput', () => {
   function segModelEnd(turnId: string, requestId: string, ts: string, model = 'qwork-ultimate') {
     return { ts, type: 'model.response.completed', turn_id: turnId, request_id: requestId, data: { model } };
   }
+  function segToolRequested(turnId: string, toolCallId: string, ts: string, toolName = 'TodoWrite') {
+    return { ts, type: 'tool.requested', turn_id: turnId, tool_call_id: toolCallId, data: { tool_name: toolName, args: {} } };
+  }
+  function segToolFinished(turnId: string, toolCallId: string, ts: string, toolName = 'TodoWrite') {
+    return { ts, type: 'tool.execution.finished', turn_id: turnId, tool_call_id: toolCallId, data: { tool_name: toolName, status: 'success' } };
+  }
+  function nano(iso: string) {
+    return String(BigInt(Date.parse(iso)) * 1_000_000n);
+  }
 
   function todayFileName() {
     const d = new Date();
@@ -227,9 +236,9 @@ describe('QoderWorkTraceInput', () => {
 
     // Segment: main turn, one LLM pair from 2026-06-16T10:00:00.000Z to 10:00:05.000Z
     await writeSegments(sessionId, 'run1.jsonl', [
-      segTurnStarted('seg-turn-X', false),
-      segModelStart('seg-turn-X', 'req-X', '2026-06-16T10:00:00.000Z', 'qwork-ultimate'),
-      segModelEnd('seg-turn-X', 'req-X', '2026-06-16T10:00:05.000Z', 'qwork-ultimate'),
+      segTurnStarted('hook-turn-1', false),
+      segModelStart('hook-turn-1', 'req-X', '2026-06-16T10:00:00.000Z', 'qwork-ultimate'),
+      segModelEnd('hook-turn-1', 'req-X', '2026-06-16T10:00:05.000Z', 'qwork-ultimate'),
     ]);
 
     const input = makeInput();
@@ -275,9 +284,9 @@ describe('QoderWorkTraceInput', () => {
       segTurnStarted('sub-turn', true),
       segModelStart('sub-turn', 'sub-req', '2026-06-16T09:00:00.000Z', 'qwork-fast'),
       segModelEnd('sub-turn', 'sub-req', '2026-06-16T09:00:01.000Z', 'qwork-fast'),
-      segTurnStarted('main-turn', false),
-      segModelStart('main-turn', 'main-req', '2026-06-16T10:00:00.000Z', 'qwork-ultimate'),
-      segModelEnd('main-turn', 'main-req', '2026-06-16T10:00:05.000Z', 'qwork-ultimate'),
+      segTurnStarted('hook-turn-1', false),
+      segModelStart('hook-turn-1', 'main-req', '2026-06-16T10:00:00.000Z', 'qwork-ultimate'),
+      segModelEnd('hook-turn-1', 'main-req', '2026-06-16T10:00:05.000Z', 'qwork-ultimate'),
     ]);
 
     const input = makeInput();
@@ -317,13 +326,13 @@ describe('QoderWorkTraceInput', () => {
     await fs.writeFile(hookFile, lines.map(l => JSON.stringify(l)).join('\n') + '\n');
 
     await writeSegments(sessionId, 'run1.jsonl', [
-      segTurnStarted('seg-turn-A', false),
-      segModelStart('seg-turn-A', 'r1', '2026-06-16T10:00:00.000Z'),
-      segModelEnd('seg-turn-A', 'r1', '2026-06-16T10:00:01.000Z'),
-      segModelStart('seg-turn-A', 'r2', '2026-06-16T10:00:02.000Z'),
-      segModelEnd('seg-turn-A', 'r2', '2026-06-16T10:00:03.000Z'),
-      segModelStart('seg-turn-A', 'r3', '2026-06-16T10:00:04.000Z'),
-      segModelEnd('seg-turn-A', 'r3', '2026-06-16T10:00:05.000Z'),
+      segTurnStarted(turnId, false),
+      segModelStart(turnId, 'r1', '2026-06-16T10:00:00.000Z'),
+      segModelEnd(turnId, 'r1', '2026-06-16T10:00:01.000Z'),
+      segModelStart(turnId, 'r2', '2026-06-16T10:00:02.000Z'),
+      segModelEnd(turnId, 'r2', '2026-06-16T10:00:03.000Z'),
+      segModelStart(turnId, 'r3', '2026-06-16T10:00:04.000Z'),
+      segModelEnd(turnId, 'r3', '2026-06-16T10:00:05.000Z'),
     ]);
 
     const input = makeInput();
@@ -336,6 +345,161 @@ describe('QoderWorkTraceInput', () => {
     expect(s1Resp.time_unix_nano).toBe(String(BigInt(Date.parse('2026-06-16T10:00:01.000Z')) * 1_000_000n));
     expect(s2Resp.time_unix_nano).toBe(String(BigInt(Date.parse('2026-06-16T10:00:03.000Z')) * 1_000_000n));
     expect(s3Resp.time_unix_nano).toBe(String(BigInt(Date.parse('2026-06-16T10:00:05.000Z')) * 1_000_000n));
+  });
+
+  it('matches segment timing by turn id and uses segment tool timing without consuming background pairs', async () => {
+    const sessionId = 'sess-background-pair';
+    const turnId = 'prompt-real-turn';
+    const toolCallId = 'tool-call-real';
+    const hookFile = path.join(hookLogDir, todayFileName());
+
+    const step1Req = buildHookEntry({
+      'event.id': 's1-req',
+      'event.name': 'llm.request' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      'agent.qoderwork.promptId': turnId,
+      time_unix_nano: nano('2026-06-18T02:37:42.905Z'),
+    });
+    const step1Resp = buildHookEntry({
+      'event.id': 's1-resp',
+      'event.name': 'llm.response',
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      'agent.qoderwork.promptId': turnId,
+      time_unix_nano: nano('2026-06-18T02:38:05.180Z'),
+    });
+    const step1ToolCall = buildHookEntry({
+      'event.id': 's1-tool-call',
+      'event.name': 'tool.call' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      'gen_ai.tool.call.id': toolCallId,
+      'agent.qoderwork.promptId': turnId,
+      time_unix_nano: nano('2026-06-18T02:38:05.180Z'),
+    });
+    const step1ToolResult = buildHookEntry({
+      'event.id': 's1-tool-result',
+      'event.name': 'tool.result' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      'gen_ai.tool.call.id': toolCallId,
+      'agent.qoderwork.promptId': turnId,
+      time_unix_nano: nano('2026-06-18T02:38:06.722Z'),
+    });
+    const step2Req = buildHookEntry({
+      'event.id': 's2-req',
+      'event.name': 'llm.request' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s2`,
+      'agent.qoderwork.promptId': turnId,
+      time_unix_nano: nano('2026-06-18T02:38:06.722Z'),
+    });
+    const step2Resp = buildHookEntry({
+      'event.id': 's2-resp',
+      'event.name': 'llm.response',
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s2`,
+      'agent.qoderwork.promptId': turnId,
+      time_unix_nano: nano('2026-06-18T02:38:11.107Z'),
+    });
+
+    await fs.writeFile(hookFile, [
+      step1Req,
+      step1Resp,
+      step1ToolCall,
+      step1ToolResult,
+      step2Req,
+      step2Resp,
+    ].map(l => JSON.stringify(l)).join('\n') + '\n');
+
+    await writeSegments(sessionId, 'run1.jsonl', [
+      segModelStart('qoderwork-memory-sink-fork-qoderwork-memory-sink', 'memory-1', '2026-06-18T09:39:42.866+08:00'),
+      segModelEnd('qoderwork-memory-sink-fork-qoderwork-memory-sink', 'memory-1', '2026-06-18T09:39:50.736+08:00'),
+      segModelStart(turnId, 'real-1', '2026-06-18T10:37:43.032+08:00'),
+      segToolRequested(turnId, toolCallId, '2026-06-18T10:38:05.093+08:00'),
+      segModelEnd(turnId, 'real-1', '2026-06-18T10:38:05.168+08:00'),
+      segToolFinished(turnId, toolCallId, '2026-06-18T10:38:06.616+08:00'),
+      segModelStart(turnId, 'real-2', '2026-06-18T10:38:06.840+08:00'),
+      segModelEnd(turnId, 'real-2', '2026-06-18T10:38:11.107+08:00'),
+    ]);
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    expect(entries.find(e => e['event.id'] === 's1-req')!.time_unix_nano).toBe(nano('2026-06-18T10:37:43.032+08:00'));
+    expect(entries.find(e => e['event.id'] === 's1-resp')!.time_unix_nano).toBe(nano('2026-06-18T10:38:05.168+08:00'));
+    expect(entries.find(e => e['event.id'] === 's1-tool-call')!.time_unix_nano).toBe(nano('2026-06-18T10:38:05.093+08:00'));
+    expect(entries.find(e => e['event.id'] === 's1-tool-result')!.time_unix_nano).toBe(nano('2026-06-18T10:38:06.616+08:00'));
+    expect(entries.find(e => e['event.id'] === 's2-req')!.time_unix_nano).toBe(nano('2026-06-18T10:38:06.840+08:00'));
+    expect(entries.find(e => e['event.id'] === 's2-resp')!.time_unix_nano).toBe(nano('2026-06-18T10:38:11.107+08:00'));
+  });
+
+  it('retains segment tool timing when tool.call and tool.result arrive in separate batches', async () => {
+    const sessionId = 'sess-split-tool';
+    const turnId = 'prompt-split-tool';
+    const toolCallId = 'tool-call-split';
+    const hookFile = path.join(hookLogDir, todayFileName());
+
+    const req = buildHookEntry({
+      'event.id': 'req',
+      'event.name': 'llm.request' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      time_unix_nano: nano('2026-06-18T02:00:00.000Z'),
+    });
+    const resp = buildHookEntry({
+      'event.id': 'resp',
+      'event.name': 'llm.response',
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      time_unix_nano: nano('2026-06-18T02:00:05.000Z'),
+    });
+    const toolCall = buildHookEntry({
+      'event.id': 'tool-call',
+      'event.name': 'tool.call' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      'gen_ai.tool.call.id': toolCallId,
+      time_unix_nano: nano('2026-06-18T02:00:05.100Z'),
+    });
+    const toolResult = buildHookEntry({
+      'event.id': 'tool-result',
+      'event.name': 'tool.result' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      'gen_ai.tool.call.id': toolCallId,
+      time_unix_nano: nano('2026-06-18T02:00:06.900Z'),
+    });
+
+    await fs.writeFile(hookFile, [req, resp, toolCall].map(l => JSON.stringify(l)).join('\n') + '\n');
+    await writeSegments(sessionId, 'run1.jsonl', [
+      segModelStart(turnId, 'r1', '2026-06-18T10:00:00.000+08:00'),
+      segToolRequested(turnId, toolCallId, '2026-06-18T10:00:05.050+08:00'),
+      segModelEnd(turnId, 'r1', '2026-06-18T10:00:05.200+08:00'),
+      segToolFinished(turnId, toolCallId, '2026-06-18T10:00:06.700+08:00'),
+    ]);
+
+    const input = makeInput();
+    const firstBatch = await startAndCollect(input);
+    expect(firstBatch.find(e => e['event.id'] === 'tool-call')!.time_unix_nano).toBe(nano('2026-06-18T10:00:05.050+08:00'));
+
+    await fs.appendFile(hookFile, JSON.stringify(toolResult) + '\n');
+    const secondBatch = await triggerCycle(input);
+    await input.stop();
+
+    expect(secondBatch.find(e => e['event.id'] === 'tool-result')!.time_unix_nano).toBe(nano('2026-06-18T10:00:06.700+08:00'));
   });
 
   it('keeps hook timing when segments are unavailable', async () => {
@@ -369,7 +533,7 @@ describe('QoderWorkTraceInput', () => {
     expect(respOut.time_unix_nano).toBe('1700001000000000000');
   });
 
-  it('aligns tool.call timestamp to segment llm.response', async () => {
+  it('keeps hook tool.call timestamp when segments have no tool.requested event', async () => {
     const sessionId = 'sess-tc';
     const hookFile = path.join(hookLogDir, todayFileName());
 
@@ -400,18 +564,17 @@ describe('QoderWorkTraceInput', () => {
     await fs.writeFile(hookFile, [JSON.stringify(req), JSON.stringify(resp), JSON.stringify(toolCall)].join('\n') + '\n');
 
     await writeSegments(sessionId, 'run1.jsonl', [
-      segTurnStarted('seg-turn', false),
-      segModelStart('seg-turn', 'r1', '2026-06-16T10:00:00.000Z'),
-      segModelEnd('seg-turn', 'r1', '2026-06-16T10:00:05.000Z'),
+      segTurnStarted('turn-tc', false),
+      segModelStart('turn-tc', 'r1', '2026-06-16T10:00:00.000Z'),
+      segModelEnd('turn-tc', 'r1', '2026-06-16T10:00:05.000Z'),
     ]);
 
     const input = makeInput();
     const entries = await startAndCollect(input);
     await input.stop();
 
-    const endNano = String(BigInt(Date.parse('2026-06-16T10:00:05.000Z')) * 1_000_000n);
     const tcOut = entries.find(e => e['event.id'] === 'tc')!;
-    expect(tcOut.time_unix_nano).toBe(endNano);
+    expect(tcOut.time_unix_nano).toBe('999999999999000000');
   });
 });
 

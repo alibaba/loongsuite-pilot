@@ -8,6 +8,9 @@ import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-cont
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
 
+const NANO_PER_MILLI = 1_000_000n;
+const SEGMENT_TIMING_TOLERANCE_MS = 5 * 60 * 1000;
+
 /**
  * QoderWork TraceInput — hook JSONL + segments enrichment.
  *
@@ -35,6 +38,8 @@ export class QoderWorkTraceInput extends BaseInput {
   // Per-session in-memory state for segment enrichment
   // Key: sessionId. Value: FIFO of LLM pairs from main-turn segments.
   private readonly segmentPairs: Map<string, SegmentLlmPair[]> = new Map();
+  // Per-session tool timing from segments, keyed by tool_call_id.
+  private readonly segmentToolTimings: Map<string, Map<string, SegmentToolTiming>> = new Map();
   // Per-session set of turn_ids known to be subagent. We only filter LLM calls
   // whose turn_id is in this set. A turn_id absent from the set is treated as
   // main (covers the rare case where turn.started is split across files).
@@ -244,7 +249,7 @@ export class QoderWorkTraceInput extends BaseInput {
   private handleSegmentEvent(sessionId: string, event: SegmentEvent): void {
     switch (event.type) {
       case 'turn.started': {
-        if (event.turn_id && event.data?.is_subagent === true) {
+        if (event.turn_id && (event.data?.is_subagent === true || isIgnoredSegmentTurn(event.turn_id))) {
           let set = this.subagentTurns.get(sessionId);
           if (!set) { set = new Set(); this.subagentTurns.set(sessionId, set); }
           set.add(event.turn_id);
@@ -254,12 +259,13 @@ export class QoderWorkTraceInput extends BaseInput {
       case 'model.request.started': {
         if (!event.turn_id || !event.request_id || !event.ts) return;
         // Skip subagent LLM calls — hook transcript only carries main agent.
-        if (this.subagentTurns.get(sessionId)?.has(event.turn_id)) return;
+        if (this.shouldSkipSegmentTurn(sessionId, event.turn_id)) return;
         const startNano = isoToNano(event.ts);
         if (!startNano) return;
         let m = this.inFlightPairs.get(sessionId);
         if (!m) { m = new Map(); this.inFlightPairs.set(sessionId, m); }
         m.set(event.request_id, {
+          turnId: event.turn_id,
           startNano,
           model: event.data?.model || '',
         });
@@ -267,7 +273,7 @@ export class QoderWorkTraceInput extends BaseInput {
       }
       case 'model.response.completed': {
         if (!event.turn_id || !event.request_id || !event.ts) return;
-        if (this.subagentTurns.get(sessionId)?.has(event.turn_id)) return;
+        if (this.shouldSkipSegmentTurn(sessionId, event.turn_id)) return;
         const inFlightForSession = this.inFlightPairs.get(sessionId);
         const inFlight = inFlightForSession?.get(event.request_id);
         if (!inFlight) return; // orphan response (e.g. resumed mid-stream)
@@ -276,6 +282,7 @@ export class QoderWorkTraceInput extends BaseInput {
         if (!endNano) return;
         const list = this.segmentPairs.get(sessionId) ?? [];
         list.push({
+          turnId: inFlight.turnId,
           startNano: inFlight.startNano,
           endNano,
           model: event.data?.model || inFlight.model || '',
@@ -283,54 +290,71 @@ export class QoderWorkTraceInput extends BaseInput {
         this.segmentPairs.set(sessionId, list);
         return;
       }
+      case 'tool.requested':
+      case 'tool.execution.finished': {
+        if (!event.turn_id || !event.tool_call_id || !event.ts) return;
+        if (this.shouldSkipSegmentTurn(sessionId, event.turn_id)) return;
+        const nano = isoToNano(event.ts);
+        if (!nano) return;
+        const timings = this.segmentToolTimings.get(sessionId) ?? new Map<string, SegmentToolTiming>();
+        const existing = timings.get(event.tool_call_id) ?? { turnId: event.turn_id };
+        existing.turnId = event.turn_id;
+        if (event.data?.tool_name) existing.toolName = String(event.data.tool_name);
+        if (event.type === 'tool.requested') {
+          existing.requestedNano = nano;
+        } else {
+          existing.finishedNano = nano;
+        }
+        timings.set(event.tool_call_id, existing);
+        this.segmentToolTimings.set(sessionId, timings);
+        return;
+      }
       default:
         return;
     }
+  }
+
+  private shouldSkipSegmentTurn(sessionId: string, turnId: string): boolean {
+    return isIgnoredSegmentTurn(turnId) || this.subagentTurns.get(sessionId)?.has(turnId) === true;
   }
 
   // ─── Enrichment ─────────────────────────────────────────────────────────────
 
   private enrichTurn(entries: AgentActivityEntry[]): void {
     const sessionId = entries.find(e => e['gen_ai.session.id'])?.['gen_ai.session.id'] as string | undefined;
+    const turnId = entries.find(e => e['gen_ai.turn.id'])?.['gen_ai.turn.id'] as string | undefined;
 
     const steps = this.groupByStep(entries);
     const stepOrder = [...steps.keys()].filter((k): k is string => k !== undefined);
 
     // Apply segment-derived timing + model to each step in transcript order.
     if (sessionId) {
-      const buffer = this.segmentPairs.get(sessionId);
       for (const stepId of stepOrder) {
         const stepEntries = steps.get(stepId);
         if (!stepEntries) continue;
         const request = stepEntries.find(e => e['event.name'] === 'llm.request');
         const response = stepEntries.find(e => e['event.name'] === 'llm.response');
-        if (!request || !response) continue;
+        if (request && response) {
+          const pair = this.takeSegmentPair(sessionId, turnId, request, response);
+          if (pair) {
+            (request as Record<string, unknown>)['time_unix_nano'] = pair.startNano;
+            (response as Record<string, unknown>)['time_unix_nano'] = pair.endNano;
 
-        const pair = buffer?.length ? buffer.shift() : undefined;
-        if (!pair) continue;
-
-        (request as Record<string, unknown>)['time_unix_nano'] = pair.startNano;
-        (response as Record<string, unknown>)['time_unix_nano'] = pair.endNano;
-
-        if (pair.model) {
-          for (const e of stepEntries) {
-            if (!e['gen_ai.request.model'] || e['gen_ai.request.model'] === 'auto') {
-              (e as Record<string, unknown>)['gen_ai.request.model'] = pair.model;
-            }
-            if (e['event.name'] === 'llm.response') {
-              (e as Record<string, unknown>)['gen_ai.response.model'] = pair.model;
+            if (pair.model) {
+              for (const e of stepEntries) {
+                if (!e['gen_ai.request.model'] || e['gen_ai.request.model'] === 'auto') {
+                  (e as Record<string, unknown>)['gen_ai.request.model'] = pair.model;
+                }
+                if (e['event.name'] === 'llm.response') {
+                  (e as Record<string, unknown>)['gen_ai.response.model'] = pair.model;
+                }
+              }
             }
           }
         }
 
-        // tool.call carries no native timestamp from segments; align to llm.response.
-        for (const e of stepEntries) {
-          if (e['event.name'] === 'tool.call') {
-            (e as Record<string, unknown>)['time_unix_nano'] = pair.endNano;
-          }
-        }
+        this.applySegmentToolTiming(sessionId, stepEntries);
       }
-      if (buffer && buffer.length === 0) this.segmentPairs.delete(sessionId);
     }
 
     // Defensive STEP overlap clamp: ensure tool.result of step N doesn't exceed
@@ -356,6 +380,75 @@ export class QoderWorkTraceInput extends BaseInput {
         }
       }
     }
+  }
+
+  private takeSegmentPair(
+    sessionId: string,
+    turnId: string | undefined,
+    request: AgentActivityEntry,
+    response: AgentActivityEntry,
+  ): SegmentLlmPair | undefined {
+    const buffer = this.segmentPairs.get(sessionId);
+    if (!buffer?.length) return undefined;
+
+    let idx = turnId ? buffer.findIndex(pair => pair.turnId === turnId) : -1;
+    if (idx < 0) {
+      idx = buffer.findIndex(pair => this.isSegmentPairCompatible(pair, request, response));
+    }
+    if (idx < 0) return undefined;
+
+    const [pair] = buffer.splice(idx, 1);
+    if (buffer.length === 0) this.segmentPairs.delete(sessionId);
+    return pair;
+  }
+
+  private isSegmentPairCompatible(
+    pair: SegmentLlmPair,
+    request: AgentActivityEntry,
+    response: AgentActivityEntry,
+  ): boolean {
+    const requestNano = request['time_unix_nano'] as string | undefined;
+    const responseNano = response['time_unix_nano'] as string | undefined;
+    if (!requestNano || !responseNano) return false;
+    return isWithinTolerance(pair.startNano, requestNano, SEGMENT_TIMING_TOLERANCE_MS)
+      && isWithinTolerance(pair.endNano, responseNano, SEGMENT_TIMING_TOLERANCE_MS);
+  }
+
+  private applySegmentToolTiming(sessionId: string, stepEntries: AgentActivityEntry[]): void {
+    const timings = this.segmentToolTimings.get(sessionId);
+    if (!timings?.size) return;
+
+    const usedCallIds = new Set<string>();
+    for (const entry of stepEntries) {
+      const eventName = entry['event.name'];
+      if (eventName !== 'tool.call' && eventName !== 'tool.result') continue;
+      const callId = entry['gen_ai.tool.call.id'] as string | undefined;
+      if (!callId) continue;
+      const timing = timings.get(callId);
+      if (!timing) continue;
+
+      if (eventName === 'tool.call' && timing.requestedNano) {
+        (entry as Record<string, unknown>)['time_unix_nano'] = timing.requestedNano;
+        usedCallIds.add(callId);
+      } else if (eventName === 'tool.result' && timing.finishedNano) {
+        (entry as Record<string, unknown>)['time_unix_nano'] = timing.finishedNano;
+        usedCallIds.add(callId);
+      }
+    }
+
+    for (const callId of usedCallIds) {
+      const timing = timings.get(callId);
+      const hasCallEntry = stepEntries.some(entry =>
+        entry['event.name'] === 'tool.call' && entry['gen_ai.tool.call.id'] === callId
+      );
+      const hasResultEntry = stepEntries.some(entry =>
+        entry['event.name'] === 'tool.result' && entry['gen_ai.tool.call.id'] === callId
+      );
+      if (hasCallEntry && hasResultEntry && timing?.requestedNano && timing.finishedNano) {
+        timings.delete(callId);
+      }
+    }
+    if (timings.size === 0) this.segmentToolTimings.delete(sessionId);
   }
 
   private groupByStep(entries: AgentActivityEntry[]): Map<string | undefined, AgentActivityEntry[]> {
@@ -403,26 +496,51 @@ interface SegmentEvent {
   type?: string;
   turn_id?: string;
   request_id?: string;
+  tool_call_id?: string;
   data?: {
     model?: string;
     is_subagent?: boolean;
+    tool_name?: string;
     [key: string]: unknown;
   };
 }
 
 interface InFlightPair {
+  turnId: string;
   startNano: string;
   model: string;
 }
 
 interface SegmentLlmPair {
+  turnId: string;
   startNano: string;
   endNano: string;
   model: string;
+}
+
+interface SegmentToolTiming {
+  turnId: string;
+  toolName?: string;
+  requestedNano?: string;
+  finishedNano?: string;
 }
 
 function isoToNano(iso: string): string | undefined {
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) return undefined;
   return String(BigInt(ms) * 1_000_000n);
+}
+
+function isIgnoredSegmentTurn(turnId: string): boolean {
+  return turnId.startsWith('qoderwork-memory-sink');
+}
+
+function isWithinTolerance(leftNano: string, rightNano: string, toleranceMs: number): boolean {
+  try {
+    const delta = BigInt(leftNano) - BigInt(rightNano);
+    const abs = delta < 0n ? -delta : delta;
+    return abs <= BigInt(toleranceMs) * NANO_PER_MILLI;
+  } catch {
+    return false;
+  }
 }
