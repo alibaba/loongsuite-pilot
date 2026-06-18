@@ -324,16 +324,20 @@ $script:PROBE_RESULT = "[]"
 function Probe-Agents {
     Msg "==> 探测 AI Agent..." "==> Probing AI Agents..."
     $probeScript = Join-Path $script:INSTALL_SRC "dist\cli-probe.cjs"
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     if (Test-Path $probeScript) {
         try {
-            $script:PROBE_RESULT = & $script:NODE_BIN $probeScript 2>$null
-            if (-not $script:PROBE_RESULT) { $script:PROBE_RESULT = "[]" }
+            $raw = & $script:NODE_BIN $probeScript 2>$null
+            if ($raw) {
+                $script:PROBE_RESULT = if ($raw -is [array]) { $raw -join "" } else { $raw }
+            }
         } catch {
             Msg "    ⚠️  Agent 探测失败，将跳过选择" "    ⚠️  Agent probe failed, skipping selection"
             $script:PROBE_RESULT = "[]"
         }
     }
-    $count = & $script:NODE_BIN -e "const r=JSON.parse(process.argv[1]);process.stdout.write(String(r.length))" $script:PROBE_RESULT 2>$null
+    $count = $script:PROBE_RESULT | & $script:NODE_BIN -e "const r=JSON.parse(require('fs').readFileSync(0,'utf-8'));process.stdout.write(String(r.length))" 2>$null
+    $ErrorActionPreference = $prevEAP
     if (-not $count) { $count = "0" }
     Msg "    ✅ 探测到 ${count} 个 Agent 定义" "    ✅ Found ${count} agent definitions"
     Write-Host ""
@@ -351,17 +355,21 @@ function Select-Agents {
         return
     }
 
-    $agentCount = & $script:NODE_BIN -e "const r=JSON.parse(process.argv[1]);process.stdout.write(String(r.length))" $script:PROBE_RESULT 2>$null
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    $agentCount = $script:PROBE_RESULT | & $script:NODE_BIN -e "const r=JSON.parse(require('fs').readFileSync(0,'utf-8'));process.stdout.write(String(r.length))" 2>$null
+    $ErrorActionPreference = $prevEAP
     if (-not $agentCount -or $agentCount -eq "0") { return }
 
     # Non-interactive detection
     $isInteractive = [Environment]::UserInteractive -and $Host.UI.RawUI -ne $null
     if (-not $isInteractive) {
-        $script:SELECTED_AGENTS = & $script:NODE_BIN -e @'
-const r = JSON.parse(process.argv[1]);
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
+const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
 const detected = r.filter(a => a.detected).map(a => a.id);
 process.stdout.write(detected.join(','));
-'@ $script:PROBE_RESULT 2>$null
+'@ 2>$null
+        $ErrorActionPreference = $prevEAP
         Msg "    (非交互模式) 自动选择已检测到的 Agent: $($script:SELECTED_AGENTS)" `
             "    (non-interactive) Auto-selected detected agents: $($script:SELECTED_AGENTS)"
         Write-Host ""
@@ -369,9 +377,10 @@ process.stdout.write(detected.join(','));
     }
 
     # Interactive menu
-    & $script:NODE_BIN -e @'
-const r = JSON.parse(process.argv[1]);
-const lang = process.argv[2];
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    $script:PROBE_RESULT | & $script:NODE_BIN -e @'
+const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
+const lang = process.argv[1];
 const defaults = [];
 for (let i = 0; i < r.length; i++) {
   const a = r[i];
@@ -389,13 +398,15 @@ if (lang === 'zh') {
   console.log('    Default selection (detected): ' + defaults.join(','));
   console.log('    Enter numbers to enable (comma-separated), press Enter for default:');
 }
-'@ $script:PROBE_RESULT $LANG_MODE
+'@ $LANG_MODE
+    $ErrorActionPreference = $prevEAP
 
     $selectInput = Read-Host "    >"
 
-    $script:SELECTED_AGENTS = & $script:NODE_BIN -e @'
-const r = JSON.parse(process.argv[1]);
-const input = process.argv[2] || '';
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
+const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
+const input = process.argv[1] || '';
 let indices;
 if (!input.trim()) {
   indices = r.map((a, i) => a.detected ? i : -1).filter(i => i >= 0);
@@ -404,7 +415,8 @@ if (!input.trim()) {
 }
 const ids = indices.sort((a,b) => a-b).map(i => r[i].id);
 process.stdout.write(ids.join(','));
-'@ $script:PROBE_RESULT $selectInput 2>$null
+'@ $selectInput 2>$null
+    $ErrorActionPreference = $prevEAP
 
     if ($script:SELECTED_AGENTS) {
         Msg "    已选择: $($script:SELECTED_AGENTS)" "    Selected: $($script:SELECTED_AGENTS)"
@@ -426,9 +438,11 @@ function Prompt-UserId {
     $existingUid = ""
     if (Test-Path $configFile) {
         try {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
             $existingUid = & $script:NODE_BIN -e @'
 try { const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf-8')); process.stdout.write(c.userId||''); } catch {}
 '@ $configFile 2>$null
+            $ErrorActionPreference = $prevEAP
         } catch {}
     }
 
@@ -467,6 +481,7 @@ function Confirm-ConfigOverwrite {
         maskTypes = $MaskTypes
     } | ConvertTo-Json -Compress
 
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $diffs = & $script:NODE_BIN -e @'
 const fs = require('fs');
 let old = {};
@@ -488,6 +503,7 @@ const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal
 if (!changed.length) process.exit(0);
 for (const c of changed) { console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal); }
 '@ $configFile $jsonArg 2>$null
+    $ErrorActionPreference = $prevEAP
 
     if (-not $diffs) { return }
 
@@ -585,7 +601,9 @@ function Deploy-Package {
     Msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
     $postinstallScript = Join-Path $script:PERMANENT_DIR "scripts\postinstall.js"
     if (Test-Path $postinstallScript) {
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
         & $script:NODE_BIN $postinstallScript
+        $ErrorActionPreference = $prevEAP
     }
     Msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
     Write-Host ""
@@ -662,6 +680,7 @@ function Write-Config {
     $cfgTmp = Join-Path $env:TEMP "lp-config-args.json"
     [System.IO.File]::WriteAllText($cfgTmp, $cfgJson, [System.Text.UTF8Encoding]::new($false))
 
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     & $script:NODE_BIN -e @'
 const fs = require('fs');
 const opts = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8'));
@@ -729,6 +748,7 @@ if (opts.selectedAgents) {
 
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 '@ $cfgTmp
+    $ErrorActionPreference = $prevEAP
 
     Remove-Item $cfgTmp -Force -ErrorAction SilentlyContinue
 
@@ -945,6 +965,7 @@ function Remove-HookConfigs {
         $short = $cfg -replace [regex]::Escape($env:USERPROFILE), "~"
 
         try {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
             & $script:NODE_BIN -e @'
 const fs = require('fs');
 const cfg = process.argv[1];
@@ -971,6 +992,7 @@ try {
   }
 } catch(e) { process.stderr.write(e.message); process.exit(1); }
 '@ $cfg $HOOK_MARKER 2>$null
+            $ErrorActionPreference = $prevEAP
             Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short"
         } catch {
             Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)"
@@ -990,6 +1012,7 @@ function Remove-OtelPlugin {
     if ((Test-Path $claudeSettings) -and $script:NODE_BIN) {
         $content = Get-Content $claudeSettings -Raw -ErrorAction SilentlyContinue
         if ($content -match "otel-claude-hook|hook-entry") {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
             & $script:NODE_BIN -e @'
 const fs = require('fs');
 const f = process.argv[1];
@@ -1011,6 +1034,7 @@ try {
   }
 } catch {}
 '@ $claudeSettings 2>$null
+            $ErrorActionPreference = $prevEAP
             Msg "    ✅ settings.json hooks 已清理" "    ✅ settings.json hooks cleaned"
         }
     }
