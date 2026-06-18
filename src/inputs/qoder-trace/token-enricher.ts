@@ -8,6 +8,7 @@ const TIMESTAMP_THRESHOLD_MS = 1000;
 export function enrichCliTurn(
   entries: AgentActivityEntry[],
   segments: SegmentTokenData[],
+  systemPrompt?: string,
 ): void {
   if (segments.length === 0) return;
 
@@ -77,6 +78,17 @@ export function enrichCliTurn(
       const toolResultTs = String(BigInt(seg.toolFinishedTs) * 1_000_000n);
       for (const tc of toolCalls) tc.time_unix_nano = toolCallTs;
       for (const tr of toolResults) tr.time_unix_nano = toolResultTs;
+    }
+  }
+
+  if (systemPrompt) {
+    const firstReq = entries.find(e =>
+      e['event.name'] === 'llm.request' && !e['gen_ai.step.id'],
+    );
+    if (firstReq) {
+      (firstReq as Record<string, unknown>)['gen_ai.system_instructions'] = [
+        { type: 'text', content: systemPrompt },
+      ];
     }
   }
 }

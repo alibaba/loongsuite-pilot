@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import type { Dirent } from 'node:fs';
 import { resolveHome } from '../../utils/fs-utils.js';
 import { createLogger } from '../../utils/logger.js';
+import { readInterceptData } from './intercept-token-reader.js';
 
 const logger = createLogger('SegmentTokenReader');
 
@@ -109,6 +110,25 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
       }
     }
     results[i].toolFinishedTs = lastToolFinish;
+  }
+
+  // When all segment tokens are 0 (qodercli 1.0.21+ regression), fill from intercept data
+  if (results.length > 0 && results.every(r => r.inputTokens === 0 && r.outputTokens === 0)) {
+    try {
+      const earliest = Math.min(...results.map(r => r.requestStartTs || r.responseEndTs));
+      const { tokens } = await readInterceptData(earliest > 0 ? earliest - 5000 : undefined);
+      for (const seg of results) {
+        const match = tokens.find(t => t.id === seg.requestId);
+        if (match) {
+          seg.inputTokens = match.promptTokens;
+          seg.outputTokens = match.completionTokens;
+          seg.cacheReadTokens = match.cachedTokens;
+          seg.cacheCreationTokens = 0;
+        }
+      }
+    } catch (err) {
+      logger.debug('intercept fallback failed', { error: String(err) });
+    }
   }
 
   // Evict expired entries and enforce max size
