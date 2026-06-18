@@ -38,6 +38,7 @@ import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
 import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
+import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
@@ -87,6 +88,7 @@ export class Orchestrator extends EventEmitter {
     'claude-code-log': 'claude-code',
     'codex-log': 'codex',
     'opencode-log': 'opencode',
+    'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
   };
 
@@ -874,6 +876,26 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['opencode-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['opencode-log']?.pollInterval,
+      }),
+    );
+
+    // --- Qwen Code CLI Log (transcript-driven hook JSONL) ---
+    const qwenCodeCliLogDir = path.join(this.dataDir, 'logs', 'qwen-code-cli');
+    const qwenCodeCliLogInput = new QwenCodeCliLogInput({
+      stateStore: this.stateStore,
+      logDir: qwenCodeCliLogDir,
+    });
+    this.inputManager.registerInput(qwenCodeCliLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qwenCodeCliLogInput, {
+        watchPaths: [qwenCodeCliLogDir],
+        isAvailable: async () => directoryExists(qwenCodeCliLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qwen-code-cli-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'qwen-code-cli-log',
+            listenerCfg['qwen-code-cli-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qwen-code-cli-log']?.pollInterval,
       }),
     );
 

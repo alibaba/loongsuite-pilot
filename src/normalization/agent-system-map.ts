@@ -10,6 +10,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'qoder-cli-hook': 'qoder',
   'cursor': 'cursor',
   'cursor-hook': 'cursor',
+  'qwen-code-cli': 'qwen-code',
 };
 
 export function resolveAgentSystem(agentType: string): string {
