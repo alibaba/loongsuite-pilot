@@ -1148,7 +1148,7 @@ print_summary() {
     fi
 
     msg "命令:" "Commands:"
-    echo "   loongsuite-pilot          # 查看状态 / Status"
+    echo "   loongsuite-pilot status   # 查看状态 / Status"
     echo "   loongsuite-pilot info     # 版本与配置 / Version & config"
     echo "============================================================"
 }
