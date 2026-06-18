@@ -13,7 +13,7 @@ import {
   loadHookRuntimeConfig,
 } from '../agent-event-normalizer.mjs';
 
-const ENABLE_LOGGING = true;
+const ENABLE_LOGGING = false;
 export const HOOKS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 export const LOONGSUITE_PILOT_LOGS_BASE_DIR = (() => {
   const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
