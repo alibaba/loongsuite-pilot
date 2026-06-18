@@ -1,0 +1,570 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 60 as time, COUNT(*) * -1 as pv, avg(request_time) as duration GROUP BY time order by time limit 1000",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 60 as time, COUNT(*) * -1 as pv, avg(request_time) as duration GROUP BY time order by time limit 1000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    },
+                    {
+                        "datasource": "logstore",
+                        "displayName": "B",
+                        "query": "* and request_method: GET | select __time__ - __time__ % 60 as time, COUNT(*) as getpv, avg(request_time) as duration GROUP BY time order by time limit 1000",
+                        "name": "B",
+                        "tokenQuery": "* and request_method: GET | select __time__ - __time__ % 60 as time, COUNT(*) as getpv, avg(request_time) as duration GROUP BY time order by time limit 1000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "sizeKey": "duration",
+                        "xAxisKey": "time",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "pv"
+                        ]
+                    },
+                    "B": {
+                        "xAxisKey": "time",
+                        "name": "B",
+                        "yAxisKeys": [
+                            "getpv"
+                        ]
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "builtin",
+                        "color": "#f7a35b"
+                    },
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1681898962176",
+                "fieldOptions": [
+                    {
+                        "name": "getpv",
+                        "queryName": "B",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "scatterGraphOptions",
+                                    "fillOpacity"
+                                ],
+                                "value": 71
+                            },
+                            {
+                                "optionKeys": [
+                                    "scatterGraphOptions",
+                                    "pointSize"
+                                ],
+                                "value": 12
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "threshold",
+                                    "color": "#f15c80"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "thresholdOption",
+                                    "thresholds"
+                                ],
+                                "value": [
+                                    {
+                                        "color": "rgb(115, 191, 105)",
+                                        "rule": ">",
+                                        "value": 0
+                                    },
+                                    {
+                                        "color": "rgb(92 ,183 ,74)",
+                                        "rule": ">",
+                                        "value": 100
+                                    },
+                                    {
+                                        "color": "rgb(208 ,172 ,88)",
+                                        "rule": ">",
+                                        "value": 200
+                                    },
+                                    {
+                                        "color": "rgb(230 ,131 ,65)",
+                                        "rule": ">",
+                                        "value": 210
+                                    },
+                                    {
+                                        "color": "rgb(208 ,74 ,90)",
+                                        "rule": ">",
+                                        "value": 220
+                                    },
+                                    {
+                                        "color": "rgb(202 ,81 ,184)",
+                                        "rule": ">",
+                                        "value": 230
+                                    },
+                                    {
+                                        "color": "rgb(232 ,136 ,147)",
+                                        "rule": ">",
+                                        "value": 240
+                                    },
+                                    {
+                                        "color": "rgb(139 ,180 ,216)",
+                                        "rule": ">",
+                                        "value": 250
+                                    },
+                                    {
+                                        "color": "rgb(142 ,217 ,128)",
+                                        "rule": ">",
+                                        "value": 300
+                                    },
+                                    {
+                                        "color": "rgb(83 ,171 ,184)",
+                                        "rule": ">",
+                                        "value": 310
+                                    },
+                                    {
+                                        "color": "rgb(73 ,133 ,186)",
+                                        "rule": ">",
+                                        "value": 320
+                                    },
+                                    {
+                                        "color": "rgb(54 ,208 ,232)",
+                                        "rule": ">",
+                                        "value": 330
+                                    },
+                                    {
+                                        "color": "rgb(49 ,170 ,25)",
+                                        "rule": ">",
+                                        "value": 340
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "name": "pv",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "threshold",
+                                    "color": "#f7a35b"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "thresholdOption",
+                                    "thresholds"
+                                ],
+                                "value": [
+                                    {
+                                        "color": "rgb(115, 191, 105)",
+                                        "rule": ">",
+                                        "value": 0
+                                    },
+                                    {
+                                        "color": "rgb(92 ,183 ,74)",
+                                        "rule": ">",
+                                        "value": 10
+                                    },
+                                    {
+                                        "color": "rgba(111, 88, 208,1)",
+                                        "rule": ">",
+                                        "value": 20
+                                    },
+                                    {
+                                        "color": "rgb(230 ,131 ,65)",
+                                        "rule": ">",
+                                        "value": 30
+                                    },
+                                    {
+                                        "color": "rgb(208 ,74 ,90)",
+                                        "rule": ">",
+                                        "value": 40
+                                    },
+                                    {
+                                        "color": "rgb(202 ,81 ,184)",
+                                        "rule": ">",
+                                        "value": 50
+                                    },
+                                    {
+                                        "color": "rgb(232 ,136 ,147)",
+                                        "rule": ">",
+                                        "value": 60
+                                    },
+                                    {
+                                        "color": "rgb(139 ,180 ,216)",
+                                        "rule": ">",
+                                        "value": 400
+                                    },
+                                    {
+                                        "color": "rgb(142 ,217 ,128)",
+                                        "rule": ">",
+                                        "value": 500
+                                    },
+                                    {
+                                        "color": "rgb(83 ,171 ,184)",
+                                        "rule": ">",
+                                        "value": 600
+                                    },
+                                    {
+                                        "color": "rgb(73 ,133 ,186)",
+                                        "rule": ">",
+                                        "value": 610
+                                    },
+                                    {
+                                        "color": "rgb(54 ,208 ,232)",
+                                        "rule": "<",
+                                        "value": -200
+                                    },
+                                    {
+                                        "color": "rgb(49 ,170 ,25)",
+                                        "rule": "<=",
+                                        "value": -300
+                                    },
+                                    {
+                                        "color": "rgb(244 ,181 ,36)",
+                                        "rule": "<",
+                                        "value": -400
+                                    },
+                                    {
+                                        "color": "rgb(255 ,129 ,45)",
+                                        "rule": "<",
+                                        "value": -500
+                                    }
+                                ]
+                            },
+                            {
+                                "optionKeys": [
+                                    "scatterGraphOptions",
+                                    "fillOpacity"
+                                ],
+                                "value": 95
+                            }
+                        ]
+                    }
+                ],
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "scatterGraphOptions": {
+                    "pointSize": 0,
+                    "fillOpacity": 12,
+                    "lineWidth": 1
+                },
+                "tooltipOption": {
+                    "labelFormat": ""
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 24,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "散点图（阈值）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 8,
+                "scatterOption": {
+                    "pointSize": 5,
+                    "fillOpacity": 20,
+                    "showPoint": "always",
+                    "lineInterpolation": "linear",
+                    "pointType": "Triangle",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 1
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690438918863",
+            "type": "scatterchart"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select request_time, request_length, request_method, upstream_response_time",
+                        "name": "A",
+                        "tokenQuery": "* | select request_time, request_length, request_method, upstream_response_time",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "sizeKey": "upstream_response_time",
+                        "xAxisKey": "request_time",
+                        "name": "A",
+                        "aggField": "request_method",
+                        "yAxisKeys": "request_length"
+                    }
+                },
+                "yPos": 8,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "builtin",
+                        "color": "#f7a35b"
+                    },
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1661491884252",
+                "fieldOptions": [
+                    {
+                        "name": "request_length",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "thresholdOption",
+                                    "thresholds"
+                                ],
+                                "value": [
+                                    {
+                                        "color": "rgb(115, 191, 105)",
+                                        "rule": ">",
+                                        "value": 0
+                                    },
+                                    {
+                                        "color": "rgb(92 ,183 ,74)",
+                                        "rule": ">",
+                                        "value": 10
+                                    },
+                                    {
+                                        "color": "rgb(208 ,172 ,88)",
+                                        "rule": ">",
+                                        "value": 100
+                                    },
+                                    {
+                                        "color": "rgb(230 ,131 ,65)",
+                                        "rule": ">",
+                                        "value": 500
+                                    },
+                                    {
+                                        "color": "rgba(255, 0, 26,1)",
+                                        "rule": ">",
+                                        "value": 1000
+                                    },
+                                    {
+                                        "color": "rgb(202 ,81 ,184)",
+                                        "rule": ">",
+                                        "value": 1500
+                                    },
+                                    {
+                                        "color": "rgb(232 ,136 ,147)",
+                                        "rule": ">",
+                                        "value": 2000
+                                    },
+                                    {
+                                        "color": "rgb(139 ,180 ,216)",
+                                        "rule": ">",
+                                        "value": 2500
+                                    },
+                                    {
+                                        "color": "rgb(142 ,217 ,128)",
+                                        "rule": ">",
+                                        "value": 3000
+                                    },
+                                    {
+                                        "color": "rgb(83 ,171 ,184)",
+                                        "rule": ">",
+                                        "value": 3500
+                                    },
+                                    {
+                                        "color": "rgb(73 ,133 ,186)",
+                                        "rule": ">",
+                                        "value": 4000
+                                    },
+                                    {
+                                        "color": "rgb(54 ,208 ,232)",
+                                        "rule": ">",
+                                        "value": 4500
+                                    },
+                                    {
+                                        "color": "rgba(21, 74, 11,1)",
+                                        "rule": ">",
+                                        "value": 5000
+                                    }
+                                ]
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "threshold",
+                                    "color": "#0070cc"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "scatterGraphOptions",
+                                    "fillOpacity"
+                                ],
+                                "value": 41
+                            }
+                        ]
+                    }
+                ],
+                "yAxisOption": {
+                    "show": true,
+                    "label": "请求长度",
+                    "position": 3
+                },
+                "scatterGraphOptions": {
+                    "pointSize": 13,
+                    "fillOpacity": 12,
+                    "lineWidth": 1
+                },
+                "tooltipOption": {
+                    "labelFormat": "upstream_response_time: ${{upstream_response_time}}"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "label": "请求时间"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": false,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 24,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "nginx请求时间和请求长度关系(阈值)",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 9,
+                "scatterOption": {
+                    "pointSize": 5,
+                    "fillOpacity": 20,
+                    "showPoint": "always",
+                    "lineInterpolation": "linear",
+                    "pointType": "Triangle",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 1
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690438924167",
+            "type": "scatterchart"
+        }
+    ],
+    "displayName": "散点图-阈值",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690438908181-599984"
+}

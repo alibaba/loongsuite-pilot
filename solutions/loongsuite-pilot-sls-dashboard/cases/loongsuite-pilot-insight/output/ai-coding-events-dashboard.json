@@ -1,0 +1,1839 @@
+{
+  "dashboardName": "loongsuite-pilot-ai-coding-events",
+  "displayName": "LoongSuite Pilot AI Coding 事件洞察",
+  "description": "只基于 AI Coding 事件事实表的使用、Token、模型、Skill、Tool 与集中度洞察。",
+  "attribute": {
+    "type": "grid",
+    "remark": "按spec重新生成并发布事件报表",
+    "update": "1781662902538",
+    "version": "62902538"
+  },
+  "charts": [
+    {
+      "title": "row-events-core",
+      "type": "dashboardrow",
+      "search": {
+        "query": "",
+        "start": "-900s",
+        "topic": "",
+        "end": "now",
+        "logstore": ""
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "核心概览",
+          "showTitle": false,
+          "showBackground": false,
+          "showTime": false,
+          "showBorder": false
+        },
+        "xPos": 0,
+        "yPos": 0,
+        "width": 24,
+        "height": 1,
+        "version": 2
+      },
+      "action": {}
+    },
+    {
+      "title": "card-active-users",
+      "type": "statpro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT approx_distinct(user_id) AS \"活跃用户数\" FROM event_user_day",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT approx_distinct(user_id) AS \"活跃用户数\" FROM event_user_day",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "活跃用户数",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 0,
+        "yPos": 1,
+        "width": 6,
+        "height": 3,
+        "version": 2,
+        "isTimeSeries": false,
+        "queryOptionMap": {
+          "A": {
+            "showField": [
+              "活跃用户数"
+            ]
+          }
+        },
+        "standardOption": {
+          "format": "none",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "statStyleOptions": {
+          "customValueColor": "#333333",
+          "textAlignment": "center",
+          "colorMode": "value",
+          "graphMode": "none",
+          "textMode": "value",
+          "customBackgroundColor": "#ffffff"
+        },
+        "statValueOption": {
+          "calculationType": "first",
+          "limitCount": 25,
+          "minItemHeight": 50,
+          "showMode": "calculate",
+          "layoutOrientation": "auto",
+          "minItemWidth": 50
+        },
+        "thresholdOption": {
+          "thresholdMode": "absolute"
+        },
+        "documentLinkOption": {
+          "showIcon": false,
+          "documentLinks": []
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "card-event-count",
+      "type": "statpro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT coalesce(sum(events), 0) AS \"事件数\" FROM event_user_day",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT coalesce(sum(events), 0) AS \"事件数\" FROM event_user_day",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "事件数",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 6,
+        "yPos": 1,
+        "width": 6,
+        "height": 3,
+        "version": 2,
+        "isTimeSeries": false,
+        "queryOptionMap": {
+          "A": {
+            "showField": [
+              "事件数"
+            ]
+          }
+        },
+        "standardOption": {
+          "format": "KMB",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "statStyleOptions": {
+          "customValueColor": "#333333",
+          "textAlignment": "center",
+          "colorMode": "value",
+          "graphMode": "none",
+          "textMode": "value",
+          "customBackgroundColor": "#ffffff"
+        },
+        "statValueOption": {
+          "calculationType": "first",
+          "limitCount": 25,
+          "minItemHeight": 50,
+          "showMode": "calculate",
+          "layoutOrientation": "auto",
+          "minItemWidth": 50
+        },
+        "thresholdOption": {
+          "thresholdMode": "absolute"
+        },
+        "documentLinkOption": {
+          "showIcon": false,
+          "documentLinks": []
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "card-total-tokens",
+      "type": "statpro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_day",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_day",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "总Token",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 12,
+        "yPos": 1,
+        "width": 6,
+        "height": 3,
+        "version": 2,
+        "isTimeSeries": false,
+        "queryOptionMap": {
+          "A": {
+            "showField": [
+              "总Token"
+            ]
+          }
+        },
+        "standardOption": {
+          "format": "KMB",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "statStyleOptions": {
+          "customValueColor": "#333333",
+          "textAlignment": "center",
+          "colorMode": "value",
+          "graphMode": "none",
+          "textMode": "value",
+          "customBackgroundColor": "#ffffff"
+        },
+        "statValueOption": {
+          "calculationType": "first",
+          "limitCount": 25,
+          "minItemHeight": 50,
+          "showMode": "calculate",
+          "layoutOrientation": "auto",
+          "minItemWidth": 50
+        },
+        "thresholdOption": {
+          "thresholdMode": "absolute"
+        },
+        "documentLinkOption": {
+          "showIcon": false,
+          "documentLinks": []
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "card-avg-token-per-event",
+      "type": "statpro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT round(coalesce(sum(total_tokens), 0) / nullif(sum(events), 0), 2) AS \"单事件平均Token\" FROM event_user_day",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT round(coalesce(sum(total_tokens), 0) / nullif(sum(events), 0), 2) AS \"单事件平均Token\" FROM event_user_day",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "单事件平均Token",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 18,
+        "yPos": 1,
+        "width": 6,
+        "height": 3,
+        "version": 2,
+        "isTimeSeries": false,
+        "queryOptionMap": {
+          "A": {
+            "showField": [
+              "单事件平均Token"
+            ]
+          }
+        },
+        "standardOption": {
+          "format": "none",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "statStyleOptions": {
+          "customValueColor": "#333333",
+          "textAlignment": "center",
+          "colorMode": "value",
+          "graphMode": "none",
+          "textMode": "value",
+          "customBackgroundColor": "#ffffff"
+        },
+        "statValueOption": {
+          "calculationType": "first",
+          "limitCount": 25,
+          "minItemHeight": 50,
+          "showMode": "calculate",
+          "layoutOrientation": "auto",
+          "minItemWidth": 50
+        },
+        "thresholdOption": {
+          "thresholdMode": "absolute"
+        },
+        "documentLinkOption": {
+          "showIcon": false,
+          "documentLinks": []
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "row-events-distribution",
+      "type": "dashboardrow",
+      "search": {
+        "query": "",
+        "start": "-900s",
+        "topic": "",
+        "end": "now",
+        "logstore": ""
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "结构分布",
+          "showTitle": false,
+          "showBackground": false,
+          "showTime": false,
+          "showBorder": false
+        },
+        "xPos": 0,
+        "yPos": 4,
+        "width": 24,
+        "height": 1,
+        "version": 2
+      },
+      "action": {}
+    },
+    {
+      "title": "pie-agent-token-share",
+      "type": "piepro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT agent_type AS \"AI Agent\", coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_day GROUP BY agent_type HAVING coalesce(sum(total_tokens), 0) > 0 ORDER BY \"总Token\" DESC LIMIT 20",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT agent_type AS \"AI Agent\", coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_day GROUP BY agent_type HAVING coalesce(sum(total_tokens), 0) > 0 ORDER BY \"总Token\" DESC LIMIT 20",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "AI Agent Token 占比",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 0,
+        "yPos": 5,
+        "width": 8,
+        "height": 6,
+        "version": 2,
+        "isTimeSeries": false,
+        "queryOptionMap": {
+          "A": {
+            "name": "A",
+            "showFieldKey": "AI Agent",
+            "numFieldKey": "总Token",
+            "xAxisConcatKeys": []
+          }
+        },
+        "standardOption": {
+          "format": "KMB",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "pieOption": {
+          "chartType": "PieChart",
+          "labelType": "type_num_percent",
+          "showLabel": true
+        },
+        "legendOption": {
+          "maxContent": 30,
+          "actionMode": "toggle",
+          "show": true,
+          "position": "bottom"
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "pie-model-token-share",
+      "type": "piepro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT model AS \"模型\", coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_day GROUP BY model HAVING coalesce(sum(total_tokens), 0) > 0 ORDER BY \"总Token\" DESC LIMIT 20",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT model AS \"模型\", coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_day GROUP BY model HAVING coalesce(sum(total_tokens), 0) > 0 ORDER BY \"总Token\" DESC LIMIT 20",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "模型 Token 占比",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 8,
+        "yPos": 5,
+        "width": 8,
+        "height": 6,
+        "version": 2,
+        "isTimeSeries": false,
+        "queryOptionMap": {
+          "A": {
+            "name": "A",
+            "showFieldKey": "模型",
+            "numFieldKey": "总Token",
+            "xAxisConcatKeys": []
+          }
+        },
+        "standardOption": {
+          "format": "KMB",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "pieOption": {
+          "chartType": "PieChart",
+          "labelType": "type_num_percent",
+          "showLabel": true
+        },
+        "legendOption": {
+          "maxContent": 30,
+          "actionMode": "toggle",
+          "show": true,
+          "position": "bottom"
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "pie-provider-token-share",
+      "type": "piepro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT provider AS \"模型供应商\", coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_day GROUP BY provider HAVING coalesce(sum(total_tokens), 0) > 0 ORDER BY \"总Token\" DESC LIMIT 20",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT provider AS \"模型供应商\", coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_day GROUP BY provider HAVING coalesce(sum(total_tokens), 0) > 0 ORDER BY \"总Token\" DESC LIMIT 20",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "模型供应商 Token 占比",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 16,
+        "yPos": 5,
+        "width": 8,
+        "height": 6,
+        "version": 2,
+        "isTimeSeries": false,
+        "queryOptionMap": {
+          "A": {
+            "name": "A",
+            "showFieldKey": "模型供应商",
+            "numFieldKey": "总Token",
+            "xAxisConcatKeys": []
+          }
+        },
+        "standardOption": {
+          "format": "KMB",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "pieOption": {
+          "chartType": "PieChart",
+          "labelType": "type_num_percent",
+          "showLabel": true
+        },
+        "legendOption": {
+          "maxContent": 30,
+          "actionMode": "toggle",
+          "show": true,
+          "position": "bottom"
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "row-events-trends",
+      "type": "dashboardrow",
+      "search": {
+        "query": "",
+        "start": "-900s",
+        "topic": "",
+        "end": "now",
+        "logstore": ""
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "趋势",
+          "showTitle": false,
+          "showBackground": false,
+          "showTime": false,
+          "showBorder": false
+        },
+        "xPos": 0,
+        "yPos": 11,
+        "width": 24,
+        "height": 1,
+        "version": 2
+      },
+      "action": {}
+    },
+    {
+      "title": "line-daily-usage",
+      "type": "linepro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT t, approx_distinct(user_id) AS \"活跃用户数\", coalesce(sum(events), 0) AS \"事件数\" FROM event_user_day GROUP BY t ORDER BY t LIMIT 10000",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT t, approx_distinct(user_id) AS \"活跃用户数\", coalesce(sum(events), 0) AS \"事件数\" FROM event_user_day GROUP BY t ORDER BY t LIMIT 10000",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "每日使用规模趋势",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 0,
+        "yPos": 12,
+        "width": 12,
+        "height": 6,
+        "version": 2,
+        "isTimeSeries": true,
+        "queryOptionMap": {
+          "A": {
+            "name": "A",
+            "xAxisKey": "t",
+            "yAxisKeys": [
+              "活跃用户数",
+              "事件数"
+            ]
+          }
+        },
+        "standardOption": {
+          "format": "KMB",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "xAxisOption": {
+          "timeRangeMode": "dataTime",
+          "format": {
+            "value": "auto"
+          },
+          "show": true,
+          "zoomTarget": "global"
+        },
+        "yAxisOption": {
+          "stackingMode": "none",
+          "show": true,
+          "position": 3
+        },
+        "tooltipOption": {
+          "mode": "all",
+          "labelFormat": "",
+          "sortOrder": "none"
+        },
+        "dataOption": {
+          "autoFill": false,
+          "autoFillNumber": 0
+        },
+        "legendOption": {
+          "maxContent": 30,
+          "actionMode": "toggle",
+          "show": true,
+          "position": "right"
+        },
+        "graphOptions": {
+          "pointSize": 5,
+          "fillOpacity": 0,
+          "showPoint": "none",
+          "lineInterpolation": "smooth",
+          "barStyle": "middle",
+          "gradientMode": "opacity",
+          "lineWidth": 1.5,
+          "seriesStyle": "lines"
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "line-daily-tokens",
+      "type": "linepro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT t, coalesce(sum(input_tokens), 0) AS \"输入Token\", coalesce(sum(output_tokens), 0) AS \"输出Token\", coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_day GROUP BY t ORDER BY t LIMIT 10000",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT t, coalesce(sum(input_tokens), 0) AS \"输入Token\", coalesce(sum(output_tokens), 0) AS \"输出Token\", coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_day GROUP BY t ORDER BY t LIMIT 10000",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "每日 Token 趋势",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 12,
+        "yPos": 12,
+        "width": 12,
+        "height": 6,
+        "version": 2,
+        "isTimeSeries": true,
+        "queryOptionMap": {
+          "A": {
+            "name": "A",
+            "xAxisKey": "t",
+            "yAxisKeys": [
+              "输入Token",
+              "输出Token",
+              "总Token"
+            ]
+          }
+        },
+        "standardOption": {
+          "format": "KMB",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "xAxisOption": {
+          "timeRangeMode": "dataTime",
+          "format": {
+            "value": "auto"
+          },
+          "show": true,
+          "zoomTarget": "global"
+        },
+        "yAxisOption": {
+          "stackingMode": "none",
+          "show": true,
+          "position": 3
+        },
+        "tooltipOption": {
+          "mode": "all",
+          "labelFormat": "",
+          "sortOrder": "none"
+        },
+        "dataOption": {
+          "autoFill": false,
+          "autoFillNumber": 0
+        },
+        "legendOption": {
+          "maxContent": 30,
+          "actionMode": "toggle",
+          "show": true,
+          "position": "right"
+        },
+        "graphOptions": {
+          "pointSize": 5,
+          "fillOpacity": 0,
+          "showPoint": "none",
+          "lineInterpolation": "smooth",
+          "barStyle": "middle",
+          "gradientMode": "opacity",
+          "lineWidth": 1.5,
+          "seriesStyle": "lines"
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "agg-agent-events",
+      "type": "aggpro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT t, agent_type AS \"AI Agent\", coalesce(sum(events), 0) AS \"事件数\" FROM event_user_day GROUP BY t, agent_type ORDER BY t LIMIT 10000",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT t, agent_type AS \"AI Agent\", coalesce(sum(events), 0) AS \"事件数\" FROM event_user_day GROUP BY t, agent_type ORDER BY t LIMIT 10000",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "AI Agent 事件趋势",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 0,
+        "yPos": 18,
+        "width": 12,
+        "height": 6,
+        "version": 2,
+        "isTimeSeries": true,
+        "queryOptionMap": {
+          "A": {
+            "name": "A",
+            "xAxisKey": "t",
+            "aggField": "AI Agent",
+            "yAxisKey": "事件数"
+          }
+        },
+        "standardOption": {
+          "format": "KMB",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "xAxisOption": {
+          "timeRangeMode": "dataTime",
+          "format": {
+            "value": "auto"
+          },
+          "show": true,
+          "zoomTarget": "global"
+        },
+        "yAxisOption": {
+          "stackingMode": "none",
+          "show": true,
+          "position": 3
+        },
+        "tooltipOption": {
+          "mode": "all",
+          "labelFormat": "",
+          "sortOrder": "none"
+        },
+        "dataOption": {
+          "autoFill": false,
+          "maxClassifyGroupNum": 50,
+          "autoFillNumber": 0
+        },
+        "aggChartOption": {
+          "chartType": "line"
+        },
+        "legendOption": {
+          "maxContent": 30,
+          "actionMode": "toggle",
+          "show": true,
+          "position": "right"
+        },
+        "graphOptions": {
+          "pointSize": 5,
+          "fillOpacity": 0,
+          "showPoint": "none",
+          "lineInterpolation": "smooth",
+          "barStyle": "middle",
+          "gradientMode": "none",
+          "lineWidth": 1,
+          "seriesStyle": "lines"
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "bar-hourly-tokens",
+      "type": "barpro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_hour AS (\n  SELECT\n    date_format(from_unixtime(__time__), '%H:00') AS h,\n    \"user.id\" AS user_id,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY h, user_id\n)\nSELECT h AS \"小时\", coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_hour GROUP BY h ORDER BY h",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_hour AS (\n  SELECT\n    date_format(from_unixtime(__time__), '%H:00') AS h,\n    \"user.id\" AS user_id,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY h, user_id\n)\nSELECT h AS \"小时\", coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_hour GROUP BY h ORDER BY h",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "Token 使用时段分布",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 12,
+        "yPos": 18,
+        "width": 12,
+        "height": 6,
+        "version": 2,
+        "isTimeSeries": false,
+        "queryOptionMap": {
+          "A": {
+            "name": "A",
+            "xAxisKey": "小时",
+            "xAxisConcatKeys": [],
+            "yAxisKeys": [
+              "总Token"
+            ]
+          }
+        },
+        "standardOption": {
+          "format": "KMB",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "xAxisOption": {
+          "show": true
+        },
+        "yAxisOption": {
+          "show": true,
+          "position": 3
+        },
+        "tooltipOption": {
+          "mode": "single",
+          "sortOrder": "none"
+        },
+        "legendOption": {
+          "maxContent": 30,
+          "actionMode": "toggle",
+          "show": false,
+          "position": "right"
+        },
+        "barOptions": {
+          "barWidth": 0.85,
+          "orientation": "vertical",
+          "showValues": "auto",
+          "fillOpacity": 85,
+          "stackingMode": "none",
+          "groupWidth": 0.35,
+          "labelLocation": "xAxis",
+          "gradientMode": "none",
+          "lineWidth": 1
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "row-events-people-models",
+      "type": "dashboardrow",
+      "search": {
+        "query": "",
+        "start": "-900s",
+        "topic": "",
+        "end": "now",
+        "logstore": ""
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "用户与模型明细",
+          "showTitle": false,
+          "showBackground": false,
+          "showTime": false,
+          "showBorder": false
+        },
+        "xPos": 0,
+        "yPos": 24,
+        "width": 24,
+        "height": 1,
+        "version": 2
+      },
+      "action": {}
+    },
+    {
+      "title": "table-user-token-detail",
+      "type": "tablepro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT user_id AS \"用户ID\", coalesce(sum(input_tokens), 0) AS \"输入Token\", coalesce(sum(output_tokens), 0) AS \"输出Token\", coalesce(sum(total_tokens), 0) AS \"总Token\", coalesce(sum(events), 0) AS \"事件数\", round(coalesce(sum(total_tokens), 0) / nullif(sum(events), 0), 2) AS \"单事件平均Token\", array_join(array_sort(array_agg(DISTINCT agent_type)), ', ') AS \"AI Agent\", array_join(array_sort(array_agg(DISTINCT model)), ', ') AS \"模型\" FROM event_user_day GROUP BY user_id ORDER BY \"总Token\" DESC LIMIT 500",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT user_id AS \"用户ID\", coalesce(sum(input_tokens), 0) AS \"输入Token\", coalesce(sum(output_tokens), 0) AS \"输出Token\", coalesce(sum(total_tokens), 0) AS \"总Token\", coalesce(sum(events), 0) AS \"事件数\", round(coalesce(sum(total_tokens), 0) / nullif(sum(events), 0), 2) AS \"单事件平均Token\", array_join(array_sort(array_agg(DISTINCT agent_type)), ', ') AS \"AI Agent\", array_join(array_sort(array_agg(DISTINCT model)), ', ') AS \"模型\" FROM event_user_day GROUP BY user_id ORDER BY \"总Token\" DESC LIMIT 500",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "用户 Token 明细",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 0,
+        "yPos": 25,
+        "width": 24,
+        "height": 10,
+        "version": 2,
+        "queryOptionMap": {
+          "A": {}
+        },
+        "standardOption": {
+          "format": "none",
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "tableOptions": {
+          "sortMethod": "default",
+          "showHeader": true,
+          "showTotal": false,
+          "transparentBackground": false,
+          "showGaugeTitle": true,
+          "sortField": "",
+          "pageSize": 20,
+          "showMode": "pagination",
+          "rowHeight": 36
+        },
+        "columnOptions": {
+          "showAll": false,
+          "closeSearch": false,
+          "searchAccurate": false,
+          "columnMinWidth": 100,
+          "searchMode": "search",
+          "searchMultiple": true,
+          "fontSize": 12,
+          "closeSort": false,
+          "columnAlign": "left",
+          "cellMode": "none"
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "table-agent-detail",
+      "type": "tablepro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT agent_type AS \"AI Agent\", approx_distinct(user_id) AS \"活跃用户数\", coalesce(sum(events), 0) AS \"事件数\", coalesce(sum(input_tokens), 0) AS \"输入Token\", coalesce(sum(output_tokens), 0) AS \"输出Token\", coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_day GROUP BY agent_type ORDER BY \"总Token\" DESC LIMIT 200",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT agent_type AS \"AI Agent\", approx_distinct(user_id) AS \"活跃用户数\", coalesce(sum(events), 0) AS \"事件数\", coalesce(sum(input_tokens), 0) AS \"输入Token\", coalesce(sum(output_tokens), 0) AS \"输出Token\", coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_day GROUP BY agent_type ORDER BY \"总Token\" DESC LIMIT 200",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "AI Agent 明细",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 0,
+        "yPos": 35,
+        "width": 12,
+        "height": 8,
+        "version": 2,
+        "queryOptionMap": {
+          "A": {}
+        },
+        "standardOption": {
+          "format": "none",
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "tableOptions": {
+          "sortMethod": "default",
+          "showHeader": true,
+          "showTotal": false,
+          "transparentBackground": false,
+          "showGaugeTitle": true,
+          "sortField": "",
+          "pageSize": 20,
+          "showMode": "pagination",
+          "rowHeight": 36
+        },
+        "columnOptions": {
+          "showAll": false,
+          "closeSearch": false,
+          "searchAccurate": false,
+          "columnMinWidth": 100,
+          "searchMode": "search",
+          "searchMultiple": true,
+          "fontSize": 12,
+          "closeSort": false,
+          "columnAlign": "left",
+          "cellMode": "none"
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "table-model-detail",
+      "type": "tablepro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT model AS \"模型\", provider AS \"模型供应商\", approx_distinct(user_id) AS \"活跃用户数\", coalesce(sum(events), 0) AS \"事件数\", coalesce(sum(input_tokens), 0) AS \"输入Token\", coalesce(sum(output_tokens), 0) AS \"输出Token\", coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_day GROUP BY model, provider ORDER BY \"总Token\" DESC LIMIT 200",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n)\nSELECT model AS \"模型\", provider AS \"模型供应商\", approx_distinct(user_id) AS \"活跃用户数\", coalesce(sum(events), 0) AS \"事件数\", coalesce(sum(input_tokens), 0) AS \"输入Token\", coalesce(sum(output_tokens), 0) AS \"输出Token\", coalesce(sum(total_tokens), 0) AS \"总Token\" FROM event_user_day GROUP BY model, provider ORDER BY \"总Token\" DESC LIMIT 200",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "模型明细",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 12,
+        "yPos": 35,
+        "width": 12,
+        "height": 8,
+        "version": 2,
+        "queryOptionMap": {
+          "A": {}
+        },
+        "standardOption": {
+          "format": "none",
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "tableOptions": {
+          "sortMethod": "default",
+          "showHeader": true,
+          "showTotal": false,
+          "transparentBackground": false,
+          "showGaugeTitle": true,
+          "sortField": "",
+          "pageSize": 20,
+          "showMode": "pagination",
+          "rowHeight": 36
+        },
+        "columnOptions": {
+          "showAll": false,
+          "closeSearch": false,
+          "searchAccurate": false,
+          "columnMinWidth": 100,
+          "searchMode": "search",
+          "searchMultiple": true,
+          "fontSize": 12,
+          "closeSort": false,
+          "columnAlign": "left",
+          "cellMode": "none"
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "row-events-skill-tool",
+      "type": "dashboardrow",
+      "search": {
+        "query": "",
+        "start": "-900s",
+        "topic": "",
+        "end": "now",
+        "logstore": ""
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "Skill & 工具",
+          "showTitle": false,
+          "showBackground": false,
+          "showTime": false,
+          "showBorder": false
+        },
+        "xPos": 0,
+        "yPos": 43,
+        "width": 24,
+        "height": 1,
+        "version": 2
+      },
+      "action": {}
+    },
+    {
+      "title": "bar-skill-calls-top10",
+      "type": "barpro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | SELECT skill_name AS \"Skill\", count(1) AS \"调用次数\" FROM (\n  SELECT CASE\n  WHEN regexp_like(regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/[^/]+$', 1), '^v?[0-9]+\\.[0-9]+')\n  THEN regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/v?[0-9][^/]*/[^/]+$', 1)\n  WHEN lower(regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/[^/]+$', 1)) IN ('skills', 'skill', '.claude', 'agents', 'resources', '.qoderwork', 'docs')\n  THEN regexp_replace(regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)$', 1), '(?i)(\\.skill)?\\.md$', '')\n  ELSE regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/[^/]+$', 1)\nEND AS skill_name\n  FROM log\n  WHERE regexp_like(\"gen_ai.tool.call.arguments.file_path\", '(?i)(/SKILL\\.md|/[^/]+\\.skill\\.md)$')\n) WHERE skill_name IS NOT NULL AND skill_name <> '' AND upper(skill_name) <> 'SKILL' GROUP BY skill_name ORDER BY \"调用次数\" DESC LIMIT 10",
+            "name": "A",
+            "tokenQuery": "* | SELECT skill_name AS \"Skill\", count(1) AS \"调用次数\" FROM (\n  SELECT CASE\n  WHEN regexp_like(regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/[^/]+$', 1), '^v?[0-9]+\\.[0-9]+')\n  THEN regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/v?[0-9][^/]*/[^/]+$', 1)\n  WHEN lower(regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/[^/]+$', 1)) IN ('skills', 'skill', '.claude', 'agents', 'resources', '.qoderwork', 'docs')\n  THEN regexp_replace(regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)$', 1), '(?i)(\\.skill)?\\.md$', '')\n  ELSE regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/[^/]+$', 1)\nEND AS skill_name\n  FROM log\n  WHERE regexp_like(\"gen_ai.tool.call.arguments.file_path\", '(?i)(/SKILL\\.md|/[^/]+\\.skill\\.md)$')\n) WHERE skill_name IS NOT NULL AND skill_name <> '' AND upper(skill_name) <> 'SKILL' GROUP BY skill_name ORDER BY \"调用次数\" DESC LIMIT 10",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "Top 10 Skill（调用次数）",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 0,
+        "yPos": 44,
+        "width": 8,
+        "height": 8,
+        "version": 2,
+        "isTimeSeries": false,
+        "queryOptionMap": {
+          "A": {
+            "name": "A",
+            "xAxisKey": "Skill",
+            "xAxisConcatKeys": [],
+            "yAxisKeys": [
+              "调用次数"
+            ]
+          }
+        },
+        "standardOption": {
+          "format": "KMB",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "xAxisOption": {
+          "show": true
+        },
+        "yAxisOption": {
+          "show": true,
+          "position": 3
+        },
+        "tooltipOption": {
+          "mode": "single",
+          "sortOrder": "none"
+        },
+        "legendOption": {
+          "maxContent": 30,
+          "actionMode": "toggle",
+          "show": false,
+          "position": "right"
+        },
+        "barOptions": {
+          "barWidth": 0.85,
+          "orientation": "horizontal",
+          "showValues": "auto",
+          "fillOpacity": 85,
+          "stackingMode": "none",
+          "groupWidth": 0.35,
+          "labelLocation": "xAxis",
+          "gradientMode": "none",
+          "lineWidth": 1
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "bar-skill-users-top10",
+      "type": "barpro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | SELECT skill_name AS \"Skill\", approx_distinct(user_id) AS \"使用人数\" FROM (\n  SELECT \"user.id\" AS user_id, CASE\n  WHEN regexp_like(regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/[^/]+$', 1), '^v?[0-9]+\\.[0-9]+')\n  THEN regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/v?[0-9][^/]*/[^/]+$', 1)\n  WHEN lower(regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/[^/]+$', 1)) IN ('skills', 'skill', '.claude', 'agents', 'resources', '.qoderwork', 'docs')\n  THEN regexp_replace(regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)$', 1), '(?i)(\\.skill)?\\.md$', '')\n  ELSE regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/[^/]+$', 1)\nEND AS skill_name\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> '' AND regexp_like(\"gen_ai.tool.call.arguments.file_path\", '(?i)(/SKILL\\.md|/[^/]+\\.skill\\.md)$')\n) WHERE skill_name IS NOT NULL AND skill_name <> '' AND upper(skill_name) <> 'SKILL' GROUP BY skill_name ORDER BY \"使用人数\" DESC LIMIT 10",
+            "name": "A",
+            "tokenQuery": "* | SELECT skill_name AS \"Skill\", approx_distinct(user_id) AS \"使用人数\" FROM (\n  SELECT \"user.id\" AS user_id, CASE\n  WHEN regexp_like(regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/[^/]+$', 1), '^v?[0-9]+\\.[0-9]+')\n  THEN regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/v?[0-9][^/]*/[^/]+$', 1)\n  WHEN lower(regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/[^/]+$', 1)) IN ('skills', 'skill', '.claude', 'agents', 'resources', '.qoderwork', 'docs')\n  THEN regexp_replace(regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)$', 1), '(?i)(\\.skill)?\\.md$', '')\n  ELSE regexp_extract(\"gen_ai.tool.call.arguments.file_path\", '/([^/]+)/[^/]+$', 1)\nEND AS skill_name\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> '' AND regexp_like(\"gen_ai.tool.call.arguments.file_path\", '(?i)(/SKILL\\.md|/[^/]+\\.skill\\.md)$')\n) WHERE skill_name IS NOT NULL AND skill_name <> '' AND upper(skill_name) <> 'SKILL' GROUP BY skill_name ORDER BY \"使用人数\" DESC LIMIT 10",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "Top 10 Skill（使用人数）",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 8,
+        "yPos": 44,
+        "width": 8,
+        "height": 8,
+        "version": 2,
+        "isTimeSeries": false,
+        "queryOptionMap": {
+          "A": {
+            "name": "A",
+            "xAxisKey": "Skill",
+            "xAxisConcatKeys": [],
+            "yAxisKeys": [
+              "使用人数"
+            ]
+          }
+        },
+        "standardOption": {
+          "format": "KMB",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "xAxisOption": {
+          "show": true
+        },
+        "yAxisOption": {
+          "show": true,
+          "position": 3
+        },
+        "tooltipOption": {
+          "mode": "single",
+          "sortOrder": "none"
+        },
+        "legendOption": {
+          "maxContent": 30,
+          "actionMode": "toggle",
+          "show": false,
+          "position": "right"
+        },
+        "barOptions": {
+          "barWidth": 0.85,
+          "orientation": "horizontal",
+          "showValues": "auto",
+          "fillOpacity": 85,
+          "stackingMode": "none",
+          "groupWidth": 0.35,
+          "labelLocation": "xAxis",
+          "gradientMode": "none",
+          "lineWidth": 1
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "bar-tool-calls-top10",
+      "type": "barpro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | SELECT tool_name AS \"Tool\", count(1) AS \"调用次数\" FROM (\n  SELECT nullif(nullif(\"gen_ai.tool.name\", 'null'), '') AS tool_name\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n) WHERE tool_name IS NOT NULL AND tool_name <> '' GROUP BY tool_name ORDER BY \"调用次数\" DESC LIMIT 10",
+            "name": "A",
+            "tokenQuery": "* | SELECT tool_name AS \"Tool\", count(1) AS \"调用次数\" FROM (\n  SELECT nullif(nullif(\"gen_ai.tool.name\", 'null'), '') AS tool_name\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n) WHERE tool_name IS NOT NULL AND tool_name <> '' GROUP BY tool_name ORDER BY \"调用次数\" DESC LIMIT 10",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "Top 10 Tool（调用次数）",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 16,
+        "yPos": 44,
+        "width": 8,
+        "height": 8,
+        "version": 2,
+        "isTimeSeries": false,
+        "queryOptionMap": {
+          "A": {
+            "name": "A",
+            "xAxisKey": "Tool",
+            "xAxisConcatKeys": [],
+            "yAxisKeys": [
+              "调用次数"
+            ]
+          }
+        },
+        "standardOption": {
+          "format": "KMB",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "xAxisOption": {
+          "show": true
+        },
+        "yAxisOption": {
+          "show": true,
+          "position": 3
+        },
+        "tooltipOption": {
+          "mode": "single",
+          "sortOrder": "none"
+        },
+        "legendOption": {
+          "maxContent": 30,
+          "actionMode": "toggle",
+          "show": false,
+          "position": "right"
+        },
+        "barOptions": {
+          "barWidth": 0.85,
+          "orientation": "horizontal",
+          "showValues": "auto",
+          "fillOpacity": 85,
+          "stackingMode": "none",
+          "groupWidth": 0.35,
+          "labelLocation": "xAxis",
+          "gradientMode": "none",
+          "lineWidth": 1
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "row-events-token-concentration",
+      "type": "dashboardrow",
+      "search": {
+        "query": "",
+        "start": "-900s",
+        "topic": "",
+        "end": "now",
+        "logstore": ""
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "Token 集中度",
+          "showTitle": false,
+          "showBackground": false,
+          "showTime": false,
+          "showBorder": false
+        },
+        "xPos": 0,
+        "yPos": 52,
+        "width": 24,
+        "height": 1,
+        "version": 2
+      },
+      "action": {}
+    },
+    {
+      "title": "card-top10-token-share",
+      "type": "statpro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n),\nuser_token AS (\n  SELECT user_id, sum(total_tokens) AS total_tokens\n  FROM event_user_day\n  GROUP BY user_id\n  HAVING total_tokens > 0\n),\nranked AS (\n  SELECT\n    user_id,\n    total_tokens,\n    row_number() OVER (ORDER BY total_tokens DESC) AS rn,\n    count(1) OVER () AS user_count,\n    sum(total_tokens) OVER () AS all_tokens\n  FROM user_token\n)\nSELECT round(sum(CASE WHEN rn <= cast(ceil(user_count * 0.10) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS \"Top10% Token占比\" FROM ranked",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n),\nuser_token AS (\n  SELECT user_id, sum(total_tokens) AS total_tokens\n  FROM event_user_day\n  GROUP BY user_id\n  HAVING total_tokens > 0\n),\nranked AS (\n  SELECT\n    user_id,\n    total_tokens,\n    row_number() OVER (ORDER BY total_tokens DESC) AS rn,\n    count(1) OVER () AS user_count,\n    sum(total_tokens) OVER () AS all_tokens\n  FROM user_token\n)\nSELECT round(sum(CASE WHEN rn <= cast(ceil(user_count * 0.10) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS \"Top10% Token占比\" FROM ranked",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "Top10% Token占比",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 0,
+        "yPos": 53,
+        "width": 6,
+        "height": 3,
+        "version": 2,
+        "isTimeSeries": false,
+        "queryOptionMap": {
+          "A": {
+            "showField": [
+              "Top10% Token占比"
+            ]
+          }
+        },
+        "standardOption": {
+          "format": "none",
+          "decimals": 2,
+          "unit": {
+            "unit": "%"
+          }
+        },
+        "statStyleOptions": {
+          "customValueColor": "#333333",
+          "textAlignment": "center",
+          "colorMode": "value",
+          "graphMode": "none",
+          "textMode": "value",
+          "customBackgroundColor": "#ffffff"
+        },
+        "statValueOption": {
+          "calculationType": "first",
+          "limitCount": 25,
+          "minItemHeight": 50,
+          "showMode": "calculate",
+          "layoutOrientation": "auto",
+          "minItemWidth": 50
+        },
+        "thresholdOption": {
+          "thresholdMode": "absolute"
+        },
+        "documentLinkOption": {
+          "showIcon": true,
+          "documentLinks": [
+            {
+              "title": "按当前部门过滤后的在册员工总 Token 排序，取人数 Top10% 员工贡献的 Token 占比。"
+            }
+          ]
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "card-top20-token-share",
+      "type": "statpro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n),\nuser_token AS (\n  SELECT user_id, sum(total_tokens) AS total_tokens\n  FROM event_user_day\n  GROUP BY user_id\n  HAVING total_tokens > 0\n),\nranked AS (\n  SELECT\n    user_id,\n    total_tokens,\n    row_number() OVER (ORDER BY total_tokens DESC) AS rn,\n    count(1) OVER () AS user_count,\n    sum(total_tokens) OVER () AS all_tokens\n  FROM user_token\n)\nSELECT round(sum(CASE WHEN rn <= cast(ceil(user_count * 0.20) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS \"Top20% Token占比\" FROM ranked",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n),\nuser_token AS (\n  SELECT user_id, sum(total_tokens) AS total_tokens\n  FROM event_user_day\n  GROUP BY user_id\n  HAVING total_tokens > 0\n),\nranked AS (\n  SELECT\n    user_id,\n    total_tokens,\n    row_number() OVER (ORDER BY total_tokens DESC) AS rn,\n    count(1) OVER () AS user_count,\n    sum(total_tokens) OVER () AS all_tokens\n  FROM user_token\n)\nSELECT round(sum(CASE WHEN rn <= cast(ceil(user_count * 0.20) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS \"Top20% Token占比\" FROM ranked",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "Top20% Token占比",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 6,
+        "yPos": 53,
+        "width": 6,
+        "height": 3,
+        "version": 2,
+        "isTimeSeries": false,
+        "queryOptionMap": {
+          "A": {
+            "showField": [
+              "Top20% Token占比"
+            ]
+          }
+        },
+        "standardOption": {
+          "format": "none",
+          "decimals": 2,
+          "unit": {
+            "unit": "%"
+          }
+        },
+        "statStyleOptions": {
+          "customValueColor": "#333333",
+          "textAlignment": "center",
+          "colorMode": "value",
+          "graphMode": "none",
+          "textMode": "value",
+          "customBackgroundColor": "#ffffff"
+        },
+        "statValueOption": {
+          "calculationType": "first",
+          "limitCount": 25,
+          "minItemHeight": 50,
+          "showMode": "calculate",
+          "layoutOrientation": "auto",
+          "minItemWidth": 50
+        },
+        "thresholdOption": {
+          "thresholdMode": "absolute"
+        },
+        "documentLinkOption": {
+          "showIcon": true,
+          "documentLinks": [
+            {
+              "title": "按当前部门过滤后的在册员工总 Token 排序，取人数 Top20% 员工贡献的 Token 占比。"
+            }
+          ]
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "bar-token-layer-share",
+      "type": "barpro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n),\nuser_token AS (\n  SELECT user_id, sum(total_tokens) AS total_tokens\n  FROM event_user_day\n  GROUP BY user_id\n  HAVING total_tokens > 0\n),\nranked AS (\n  SELECT\n    user_id,\n    total_tokens,\n    row_number() OVER (ORDER BY total_tokens DESC) AS rn,\n    count(1) OVER () AS user_count,\n    sum(total_tokens) OVER () AS all_tokens\n  FROM user_token\n),\nlayered AS (\n  SELECT\n    CASE\n      WHEN rn <= cast(ceil(user_count * 0.10) AS bigint) THEN 'Top 10%'\n      WHEN rn <= cast(ceil(user_count * 0.20) AS bigint) THEN '10%-20%'\n      ELSE '后80%'\n    END AS user_layer,\n    CASE\n      WHEN rn <= cast(ceil(user_count * 0.10) AS bigint) THEN 1\n      WHEN rn <= cast(ceil(user_count * 0.20) AS bigint) THEN 2\n      ELSE 3\n    END AS layer_rank,\n    total_tokens,\n    all_tokens\n  FROM ranked\n)\nSELECT user_layer AS \"人群分层\", count(1) AS \"人数\", coalesce(sum(total_tokens), 0) AS \"Token\", round(sum(total_tokens) * 100.0 / nullif(max(all_tokens), 0), 2) AS \"Token占比(%)\" FROM layered GROUP BY user_layer, layer_rank ORDER BY layer_rank",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n),\nuser_token AS (\n  SELECT user_id, sum(total_tokens) AS total_tokens\n  FROM event_user_day\n  GROUP BY user_id\n  HAVING total_tokens > 0\n),\nranked AS (\n  SELECT\n    user_id,\n    total_tokens,\n    row_number() OVER (ORDER BY total_tokens DESC) AS rn,\n    count(1) OVER () AS user_count,\n    sum(total_tokens) OVER () AS all_tokens\n  FROM user_token\n),\nlayered AS (\n  SELECT\n    CASE\n      WHEN rn <= cast(ceil(user_count * 0.10) AS bigint) THEN 'Top 10%'\n      WHEN rn <= cast(ceil(user_count * 0.20) AS bigint) THEN '10%-20%'\n      ELSE '后80%'\n    END AS user_layer,\n    CASE\n      WHEN rn <= cast(ceil(user_count * 0.10) AS bigint) THEN 1\n      WHEN rn <= cast(ceil(user_count * 0.20) AS bigint) THEN 2\n      ELSE 3\n    END AS layer_rank,\n    total_tokens,\n    all_tokens\n  FROM ranked\n)\nSELECT user_layer AS \"人群分层\", count(1) AS \"人数\", coalesce(sum(total_tokens), 0) AS \"Token\", round(sum(total_tokens) * 100.0 / nullif(max(all_tokens), 0), 2) AS \"Token占比(%)\" FROM layered GROUP BY user_layer, layer_rank ORDER BY layer_rank",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "Token 人群分层占比",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 0,
+        "yPos": 56,
+        "width": 12,
+        "height": 8,
+        "version": 2,
+        "isTimeSeries": false,
+        "queryOptionMap": {
+          "A": {
+            "name": "A",
+            "xAxisKey": "人群分层",
+            "xAxisConcatKeys": [],
+            "yAxisKeys": [
+              "人数",
+              "Token占比(%)"
+            ]
+          }
+        },
+        "standardOption": {
+          "format": "KMB",
+          "decimals": 2,
+          "unit": {
+            "unit": "none"
+          }
+        },
+        "xAxisOption": {
+          "show": true
+        },
+        "yAxisOption": {
+          "show": true,
+          "position": 3
+        },
+        "tooltipOption": {
+          "mode": "single",
+          "sortOrder": "none"
+        },
+        "legendOption": {
+          "maxContent": 30,
+          "actionMode": "toggle",
+          "show": true,
+          "position": "right"
+        },
+        "barOptions": {
+          "barWidth": 0.85,
+          "orientation": "vertical",
+          "showValues": "auto",
+          "fillOpacity": 85,
+          "stackingMode": "none",
+          "groupWidth": 0.35,
+          "labelLocation": "xAxis",
+          "gradientMode": "none",
+          "lineWidth": 1
+        }
+      },
+      "action": {}
+    },
+    {
+      "title": "line-daily-top-token-share",
+      "type": "linepro",
+      "search": {
+        "query": "@",
+        "start": "-604800s",
+        "topic": "",
+        "end": "now",
+        "chartQueries": [
+          {
+            "datasource": "logstore",
+            "displayName": "A",
+            "query": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n),\ndaily_user AS (\n  SELECT t, user_id, sum(total_tokens) AS total_tokens\n  FROM event_user_day\n  GROUP BY t, user_id\n  HAVING total_tokens > 0\n),\nranked AS (\n  SELECT\n    t,\n    user_id,\n    total_tokens,\n    row_number() OVER (PARTITION BY t ORDER BY total_tokens DESC) AS rn,\n    count(1) OVER (PARTITION BY t) AS user_count,\n    sum(total_tokens) OVER (PARTITION BY t) AS all_tokens\n  FROM daily_user\n)\nSELECT t, round(sum(CASE WHEN rn <= cast(ceil(user_count * 0.10) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS \"Top10% Token占比\", round(sum(CASE WHEN rn <= cast(ceil(user_count * 0.20) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS \"Top20% Token占比\" FROM ranked GROUP BY t ORDER BY t LIMIT 10000",
+            "name": "A",
+            "tokenQuery": "* | WITH event_user_day AS (\n  SELECT\n    date_trunc('day', __time__) AS t,\n    \"user.id\" AS user_id,\n    coalesce(nullif(\"gen_ai.agent.type\", 'null'), nullif(\"gen_ai.agent.name\", 'null'), 'unknown') AS agent_type,\n    coalesce(nullif(\"gen_ai.provider.name\", 'null'), 'unknown') AS provider,\n    coalesce(nullif(\"gen_ai.request.model\", 'null'), nullif(\"gen_ai.response.model\", 'null'), 'unknown') AS model,\n    sum(coalesce(\"gen_ai.usage.input_tokens\", 0)) AS input_tokens,\n    sum(coalesce(\"gen_ai.usage.output_tokens\", 0)) AS output_tokens,\n    sum(coalesce(\"gen_ai.usage.total_tokens\", 0)) AS total_tokens,\n    count(1) AS events\n  FROM log\n  WHERE \"user.id\" IS NOT NULL AND \"user.id\" <> ''\n  GROUP BY t, user_id, agent_type, provider, model\n),\ndaily_user AS (\n  SELECT t, user_id, sum(total_tokens) AS total_tokens\n  FROM event_user_day\n  GROUP BY t, user_id\n  HAVING total_tokens > 0\n),\nranked AS (\n  SELECT\n    t,\n    user_id,\n    total_tokens,\n    row_number() OVER (PARTITION BY t ORDER BY total_tokens DESC) AS rn,\n    count(1) OVER (PARTITION BY t) AS user_count,\n    sum(total_tokens) OVER (PARTITION BY t) AS all_tokens\n  FROM daily_user\n)\nSELECT t, round(sum(CASE WHEN rn <= cast(ceil(user_count * 0.10) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS \"Top10% Token占比\", round(sum(CASE WHEN rn <= cast(ceil(user_count * 0.20) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS \"Top20% Token占比\" FROM ranked GROUP BY t ORDER BY t LIMIT 10000",
+            "project": "agentloop-xxx",
+            "logstore": "agent-event-webtracking"
+          }
+        ],
+        "logstore": "@",
+        "dataSourceType": "current"
+      },
+      "display": {
+        "basicOptions": {
+          "displayName": "每日 Top10/Top20 Token占比",
+          "showTitle": true,
+          "showBackground": true,
+          "showTime": true,
+          "showBorder": true
+        },
+        "xPos": 12,
+        "yPos": 56,
+        "width": 12,
+        "height": 6,
+        "version": 2,
+        "isTimeSeries": true,
+        "queryOptionMap": {
+          "A": {
+            "name": "A",
+            "xAxisKey": "t",
+            "yAxisKeys": [
+              "Top10% Token占比",
+              "Top20% Token占比"
+            ]
+          }
+        },
+        "standardOption": {
+          "format": "KMB",
+          "decimals": 2,
+          "unit": {
+            "unit": "custom",
+            "customUnit": "%"
+          }
+        },
+        "xAxisOption": {
+          "timeRangeMode": "dataTime",
+          "format": {
+            "value": "auto"
+          },
+          "show": true,
+          "zoomTarget": "global"
+        },
+        "yAxisOption": {
+          "stackingMode": "none",
+          "show": true,
+          "position": 3
+        },
+        "tooltipOption": {
+          "mode": "all",
+          "labelFormat": "",
+          "sortOrder": "none"
+        },
+        "dataOption": {
+          "autoFill": false,
+          "autoFillNumber": 0
+        },
+        "legendOption": {
+          "maxContent": 30,
+          "actionMode": "toggle",
+          "show": true,
+          "position": "right"
+        },
+        "graphOptions": {
+          "pointSize": 5,
+          "fillOpacity": 0,
+          "showPoint": "none",
+          "lineInterpolation": "smooth",
+          "barStyle": "middle",
+          "gradientMode": "opacity",
+          "lineWidth": 1.5,
+          "seriesStyle": "lines"
+        }
+      },
+      "action": {}
+    }
+  ]
+}

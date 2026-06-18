@@ -148,9 +148,12 @@ describe('BaseSessionInput', () => {
       await input.stop();
       expect(allEntries).toHaveLength(1);
 
-      // Simulate file rotation: delete + recreate (creates new inode)
-      await fs.unlink(file);
+      // Simulate file rotation: rename old file first then create new one.
+      // Keep old file alive during creation to prevent inode reuse on Linux.
+      const oldFile = file + '.old';
+      await fs.rename(file, oldFile);
       await fs.writeFile(file, JSON.stringify({ file_path: '/rotated.ts' }) + '\n');
+      await fs.unlink(oldFile);
 
       const input2 = new TestSessionInput({
         stateStore: stateStore as any,

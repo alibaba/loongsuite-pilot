@@ -1,0 +1,1683 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LoongSuite Pilot AI Coding 团队报表</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f0f2f5;color:#2c3e50;padding:20px;max-width:1400px;margin:0 auto}
+.hdr{background:#fff;border-radius:8px;padding:20px 28px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.hdr h1{font-size:20px;margin-bottom:6px}
+.hdr .meta{color:#888;font-size:12px}
+.sec{background:#34495e;color:#fff;padding:8px 18px;border-radius:6px;font-size:15px;font-weight:600;margin:20px 0 8px}
+.dash-grid{display:grid;grid-template-columns:repeat(24,1fr);gap:8px;margin-bottom:14px}
+.dash-grid>.card,.dash-grid>.block{min-width:0}
+.card{background:#fff;border-radius:8px;padding:14px 18px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.card-t{font-size:12px;color:#888;margin-bottom:6px}
+.card-v{font-size:26px;font-weight:700}
+.card-c{font-size:12px;margin-top:3px}
+.card-cd{color:#aaa;margin-left:3px}
+.card-doc{font-size:10px;color:#bbb;margin-top:5px;border-top:1px solid #f0f0f0;padding-top:3px}
+.block{background:#fff;border-radius:8px;padding:14px 18px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.block h3{font-size:13px;color:#2c3e50;margin-bottom:6px}
+.doc{font-size:10px;color:#bbb;margin-bottom:6px}
+.muted{color:#999;font-size:12px}.small{font-size:11px;margin-top:4px}
+.tbl-wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th{background:#f8f9fa;padding:6px 10px;text-align:left;border-bottom:2px solid #e0e0e0;white-space:nowrap;font-weight:600}
+td{padding:5px 10px;border-bottom:1px solid #f0f0f0;white-space:nowrap}
+td.r{text-align:right;font-variant-numeric:tabular-nums}
+tr:hover td{background:#fafbfc}
+.bar-chart{margin:6px 0}
+.bar-row{display:flex;align-items:center;margin-bottom:3px;font-size:12px}
+.bar-label{width:120px;text-align:right;padding-right:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0}
+.bar-track{flex:1;height:18px;background:#f0f2f5;border-radius:3px;overflow:hidden}
+.bar-fill{height:100%;background:linear-gradient(90deg,#3498db,#2980b9);border-radius:3px;transition:width .3s}
+.bar-val{width:70px;text-align:right;padding-left:6px;font-variant-numeric:tabular-nums;flex-shrink:0}
+.pie-bar{display:flex;height:20px;border-radius:4px;overflow:hidden;margin:8px 0}
+.pie-seg{height:100%;min-width:2px}
+.pie-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;margin-top:6px}
+.pie-row{display:flex;align-items:center;gap:4px}
+.pie-color{width:10px;height:10px;border-radius:2px;flex-shrink:0}
+.pie-label{max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pie-pct{color:#888;font-variant-numeric:tabular-nums}
+.pie-val{color:#aaa;font-variant-numeric:tabular-nums}
+.spark-group{margin:6px 0 10px}
+.spark-row{display:flex;align-items:center;margin-bottom:4px}
+.spark-label{width:120px;font-size:11px;text-align:right;padding-right:8px;color:#666}
+.spark-box{flex:1;height:24px;background:#f8f9fa;border-radius:3px;position:relative;overflow:hidden}
+.spark-dot{position:absolute;width:5px;height:5px;background:#3498db;border-radius:50%}
+.cte-tag{display:inline-block;background:#e8f4fd;color:#2980b9;font-size:10px;padding:1px 6px;border-radius:3px;font-weight:400;vertical-align:middle;margin-left:2px}
+.sql-details{margin-top:8px}
+.sql-details summary{font-size:11px;color:#888;cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px}
+.sql-details summary:hover{color:#3498db}
+.sql-time{font-size:10px;color:#999;margin-left:4px}
+.copy-btn{margin-left:auto;font-size:10px;padding:1px 8px;border:1px solid #ccc;border-radius:3px;background:#fff;color:#666;cursor:pointer}
+.copy-btn:hover{background:#f0f0f0;color:#333}
+.sql-diff{background:#fff3cd;border-radius:2px;padding:0 2px}
+.diff-full{background:#fff;border-radius:8px;padding:14px 18px;box-shadow:0 1px 3px rgba(0,0,0,.06);border-left:3px solid #f39c12}
+.diff-added{border-left-color:#2ecc71}
+.diff-removed{border-left-color:#e74c3c}
+.diff-layout{border-left-color:#3498db}
+.change-badge{display:inline-block;color:#fff;font-size:11px;font-weight:700;border-radius:999px;padding:2px 8px;margin-bottom:6px;background:#f39c12}
+.change-badge.added{background:#2ecc71}
+.change-badge.removed{background:#e74c3c}
+.change-badge.layout{background:#3498db}
+.change-title{font-size:14px;font-weight:700;color:#2c3e50;margin-bottom:8px}
+.change-meta{width:100%;border-collapse:collapse;font-size:11px;margin:6px 0 10px}
+.change-meta th{background:#f8f9fa;color:#555;font-weight:600}
+.change-meta th,.change-meta td{padding:5px 8px;border-bottom:1px solid #eee;vertical-align:top;white-space:normal}
+.diff-container{overflow-x:auto;margin-top:4px}
+.diff-table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:11px}
+.diff-table th{background:#f0f0f0;padding:4px 8px;text-align:left;font-weight:600;width:50%;border-bottom:2px solid #ddd}
+.diff-table td{padding:2px 6px;vertical-align:top;border-bottom:1px solid #f0f0f0;width:50%}
+.diff-table td pre{margin:0;white-space:pre-wrap;word-break:break-all;font-size:11px;font-family:Menlo,Monaco,Consolas,monospace}
+.diff-changed td{background:#fff8e1}
+.diff-result-wrap{display:grid;grid-template-columns:1fr 1fr;gap:0}
+.diff-result-panel{overflow-x:auto;border:1px solid #e8e8e8;border-radius:4px}
+.diff-result-panel:first-child{border-right:none;border-radius:4px 0 0 4px}
+.diff-result-panel:last-child{border-left:3px solid #ccc;border-radius:0 4px 4px 0}
+.diff-result-panel-title{background:#f0f0f0;text-align:center;font-size:11px;font-weight:600;color:#555;padding:4px;position:sticky;top:0;z-index:1}
+.diff-result-table{border-collapse:collapse;width:100%;font-size:11px}
+.diff-result-table th,.diff-result-table td{padding:4px 8px;border-bottom:1px solid #eee;white-space:nowrap}
+.diff-result-table td.r{text-align:right;font-variant-numeric:tabular-nums}
+.diff-val{background:#fff3cd;font-weight:600}
+.diff-row-add td{background:#dfd}
+.diff-row-del td{background:#fdd}
+.sql-pre{background:#f8f9fa;border:1px solid #e8e8e8;border-radius:4px;padding:10px 12px;font-size:11px;line-height:1.5;overflow-x:auto;white-space:pre-wrap;word-break:break-all;color:#555;margin-top:4px;font-family:Menlo,Monaco,Consolas,monospace}
+.err{color:#e74c3c;font-size:12px;padding:6px;background:#fdf0ef;border-radius:4px}
+.ft{text-align:center;color:#aaa;font-size:11px;margin-top:28px;padding:14px}
+</style>
+</head>
+<body>
+<div class="hdr"><h1>LoongSuite Pilot AI Coding 团队报表</h1><div class="meta">2026-06-10 10:17 ~ 2026-06-17 10:17 &nbsp;|&nbsp; 2026-06-17 10:18:11 &nbsp;|&nbsp; 30 个图表</div></div>
+<div class="dash-grid"><div class="block" style="grid-column:1/9;grid-row:1/span 1"><h3>部门选择 <span class="cte-tag">dept_user</span></h3>
+<div class="tbl-wrap"><table><thead><tr><th>dept_name_2</th></tr></thead><tbody><tr><td>平台工程部</td></tr><tr><td>研发效能部</td></tr></tbody></table></div><details class="sql-details">
+<summary>SQL <span class="sql-time">1.8s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ) SELECT dept_name_2 AS &quot;dept_name_2&quot; FROM dept_user WHERE dept_name_2 &lt;&gt; &#x27;&#x27; GROUP BY dept_name_2 ORDER BY dept_name_2 LIMIT 1000">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+)
+SELECT dept_name_2 AS &quot;dept_name_2&quot;
+FROM dept_user
+WHERE dept_name_2 &lt;&gt; &#x27;&#x27;
+GROUP BY dept_name_2
+ORDER BY dept_name_2
+LIMIT 1000</pre></details></div><div class="block" style="grid-column:9/25;grid-row:1/span 1">
+<h3>使用提示</h3>
+<div style="white-space:pre-wrap;color:#555;line-height:1.7">可选择二级部门查看团队明细；不选择时展示全部团队。</div>
+
+</div></div>
+<div class="sec">核心概览</div>
+<div class="dash-grid"><div class="card" style="grid-column:1/6;grid-row:1/span 1"><div class="card-t">总人数 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></div><div class="card-v">10</div><details class="sql-details">
+<summary>SQL <span class="sql-time">2.0s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT approx_distinct(d.work_no) AS &quot;总人数&quot; FROM dept_user d WHERE 1 = 1">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT approx_distinct(d.work_no) AS &quot;总人数&quot;
+FROM dept_user d
+WHERE 1 = 1</pre></details></div><div class="card" style="grid-column:6/11;grid-row:1/span 1"><div class="card-t">使用人数 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></div><div class="card-v">1</div><details class="sql-details">
+<summary>SQL <span class="sql-time">15.1s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT approx_distinct(d.work_no) AS &quot;使用人数&quot; FROM dept_user d JOIN (SELECT user_id FROM active_user GROUP BY user_id) a ON d.work_no = a.user_id WHERE 1 = 1">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT approx_distinct(d.work_no) AS &quot;<span class="sql-diff">使用</span>人数&quot;
+FROM dept_user d
+<span class="sql-diff">JOIN (</span>
+<span class="sql-diff">  SELECT user_id</span>
+<span class="sql-diff">  FROM active_user</span>
+<span class="sql-diff">  GROUP BY user_id</span>
+<span class="sql-diff">) a ON d.work_no = a.user_id</span>
+<span class="sql-diff">WHERE 1 = 1</span></pre></details></div><div class="card" style="grid-column:11/16;grid-row:1/span 1"><div class="card-t">覆盖率(%) <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></div><div class="card-v">10.0%</div><details class="sql-details">
+<summary>SQL <span class="sql-time">2.5s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT round(approx_distinct(a.user_id) * 100.0 / nullif(approx_distinct(d.work_no), 0), 2) AS &quot;覆盖率(%)&quot; FROM dept_user d LEFT JOIN (SELECT user_id FROM active_user GROUP BY user_id) a ON d.work_no = a.user_id WHERE 1 = 1">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT <span class="sql-diff">round(approx_distinct(a.user_id) * 100.0 / nullif(approx_distinct(d.work_no), 0), 2) AS &quot;覆盖率(%)</span>&quot;
+FROM dept_user d
+<span class="sql-diff">LEFT JOIN (</span>
+<span class="sql-diff">  SELECT user_id</span>
+<span class="sql-diff">  FROM active_user</span>
+<span class="sql-diff">  GROUP BY user_id</span>
+<span class="sql-diff">) a ON d.work_no = a.user_id</span>
+<span class="sql-diff">WHERE 1 = 1</span></pre></details></div><div class="card" style="grid-column:16/21;grid-row:1/span 1"><div class="card-t">事件数 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></div><div class="card-v">4334</div><details class="sql-details">
+<summary>SQL <span class="sql-time">5.0s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT coalesce(sum(a.events), 0) AS &quot;事件数&quot; FROM active_user a JOIN dept_user d ON d.work_no = a.user_id WHERE 1 = 1">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT <span class="sql-diff">coalesce(sum(a.events), 0) AS &quot;事件</span>数&quot;
+FROM <span class="sql-diff">active_user a</span>
+<span class="sql-diff">JOIN dept_user d ON d.work_no = a.user_id</span>
+<span class="sql-diff">WHERE 1 = 1</span></pre></details></div><div class="card" style="grid-column:21/25;grid-row:1/span 1"><div class="card-t">总Token <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></div><div class="card-v">90.64M</div><details class="sql-details">
+<summary>SQL <span class="sql-time">3.9s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot; FROM active_user a JOIN dept_user d ON d.work_no = a.user_id WHERE 1 = 1">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT <span class="sql-diff">coalesce(sum(a.total_tokens), 0) AS &quot;总Token</span>&quot;
+FROM <span class="sql-diff">active_user a</span>
+<span class="sql-diff">JOIN dept_user d ON d.work_no = a.user_id</span>
+<span class="sql-diff">WHERE 1 = 1</span></pre></details></div></div>
+<div class="sec">结构分布</div>
+<div class="dash-grid"><div class="block" style="grid-column:1/9;grid-row:1/span 1"><h3>AI Agent Token 占比 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3>
+<div class="pie-bar"><div class="pie-seg" style="width:99.0%;background:#3498db" title="codex 99.0%"></div><div class="pie-seg" style="width:0.8%;background:#2ecc71" title="qoder-work 0.8%"></div><div class="pie-seg" style="width:0.2%;background:#e74c3c" title="cursor 0.2%"></div></div>
+<div class="pie-legend"><div class="pie-row"><span class="pie-color" style="background:#3498db"></span><span class="pie-label">codex</span><span class="pie-pct">99.0%</span><span class="pie-val">89.74M</span></div><div class="pie-row"><span class="pie-color" style="background:#2ecc71"></span><span class="pie-label">qoder-work</span><span class="pie-pct">0.8%</span><span class="pie-val">743.0K</span></div><div class="pie-row"><span class="pie-color" style="background:#e74c3c"></span><span class="pie-label">cursor</span><span class="pie-pct">0.2%</span><span class="pie-val">162.2K</span></div></div><details class="sql-details">
+<summary>SQL <span class="sql-time">4.6s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT a.agent_type AS &quot;AI Agent&quot;, coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot; FROM active_user a JOIN dept_user d ON d.work_no = a.user_id WHERE 1 = 1 GROUP BY a.agent_type HAVING coalesce(sum(a.total_tokens), 0) &gt; 0 ORDER BY &quot;总Token&quot; DESC LIMIT 20">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  a.agent_type AS &quot;AI Agent&quot;,
+  coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot;
+FROM active_user a
+JOIN dept_user d ON d.work_no = a.user_id
+WHERE 1 = 1
+GROUP BY a.agent_type
+HAVING coalesce(sum(a.total_tokens), 0) &gt; 0
+ORDER BY &quot;总Token&quot; DESC
+LIMIT 20</pre></details></div><div class="block" style="grid-column:9/17;grid-row:1/span 1"><h3>模型 Token 占比 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3>
+<div class="pie-bar"><div class="pie-seg" style="width:99.0%;background:#3498db" title="gpt-5.5 99.0%"></div><div class="pie-seg" style="width:0.8%;background:#2ecc71" title="qwork-ultimate 0.8%"></div><div class="pie-seg" style="width:0.2%;background:#e74c3c" title="default 0.2%"></div></div>
+<div class="pie-legend"><div class="pie-row"><span class="pie-color" style="background:#3498db"></span><span class="pie-label">gpt-5.5</span><span class="pie-pct">99.0%</span><span class="pie-val">89.74M</span></div><div class="pie-row"><span class="pie-color" style="background:#2ecc71"></span><span class="pie-label">qwork-ultimate</span><span class="pie-pct">0.8%</span><span class="pie-val">743.0K</span></div><div class="pie-row"><span class="pie-color" style="background:#e74c3c"></span><span class="pie-label">default</span><span class="pie-pct">0.2%</span><span class="pie-val">162.2K</span></div></div><details class="sql-details">
+<summary>SQL <span class="sql-time">9.0s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT a.model AS &quot;模型&quot;, coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot; FROM active_user a JOIN dept_user d ON d.work_no = a.user_id WHERE 1 = 1 GROUP BY a.model HAVING coalesce(sum(a.total_tokens), 0) &gt; 0 ORDER BY &quot;总Token&quot; DESC LIMIT 20">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  a.<span class="sql-diff">model AS &quot;模型</span>&quot;,
+  coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot;
+FROM active_user a
+JOIN dept_user d ON d.work_no = a.user_id
+WHERE 1 = 1
+GROUP BY a.<span class="sql-diff">model</span>
+HAVING coalesce(sum(a.total_tokens), 0) &gt; 0
+ORDER BY &quot;总Token&quot; DESC
+LIMIT 20</pre></details></div><div class="block" style="grid-column:17/25;grid-row:1/span 1"><h3>模型供应商 Token 占比 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3>
+<div class="pie-bar"><div class="pie-seg" style="width:99.0%;background:#3498db" title="openai 99.0%"></div><div class="pie-seg" style="width:0.8%;background:#2ecc71" title="qwen 0.8%"></div><div class="pie-seg" style="width:0.2%;background:#e74c3c" title="unknown 0.2%"></div></div>
+<div class="pie-legend"><div class="pie-row"><span class="pie-color" style="background:#3498db"></span><span class="pie-label">openai</span><span class="pie-pct">99.0%</span><span class="pie-val">89.74M</span></div><div class="pie-row"><span class="pie-color" style="background:#2ecc71"></span><span class="pie-label">qwen</span><span class="pie-pct">0.8%</span><span class="pie-val">743.0K</span></div><div class="pie-row"><span class="pie-color" style="background:#e74c3c"></span><span class="pie-label">unknown</span><span class="pie-pct">0.2%</span><span class="pie-val">162.2K</span></div></div><details class="sql-details">
+<summary>SQL <span class="sql-time">4.6s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT a.provider AS &quot;模型供应商&quot;, coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot; FROM active_user a JOIN dept_user d ON d.work_no = a.user_id WHERE 1 = 1 GROUP BY a.provider HAVING coalesce(sum(a.total_tokens), 0) &gt; 0 ORDER BY &quot;总Token&quot; DESC LIMIT 20">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  a.<span class="sql-diff">provider AS &quot;模型供应商</span>&quot;,
+  coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot;
+FROM active_user a
+JOIN dept_user d ON d.work_no = a.user_id
+WHERE 1 = 1
+GROUP BY a.<span class="sql-diff">provider</span>
+HAVING coalesce(sum(a.total_tokens), 0) &gt; 0
+ORDER BY &quot;总Token&quot; DESC
+LIMIT 20</pre></details></div></div>
+<div class="sec">趋势</div>
+<div class="dash-grid"><div class="block" style="grid-column:1/13;grid-row:1/span 1"><h3>每日使用规模趋势 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3><div class="spark-group"><div class="spark-row"><span class="spark-label">使用员工数</span><div class="spark-box"><div class="spark-dot" style="left:0.0%;bottom:80.0%" title="1"></div><div class="spark-dot" style="left:100.0%;bottom:80.0%" title="1"></div></div></div><div class="spark-row"><span class="spark-label">Agent事件数</span><div class="spark-box"><div class="spark-dot" style="left:0.0%;bottom:80.0%" title="3337"></div><div class="spark-dot" style="left:100.0%;bottom:23.9%" title="997"></div></div></div></div>
+<div class="tbl-wrap"><table><thead><tr><th>t</th><th>使用员工数</th><th>Agent事件数</th></tr></thead><tbody><tr><td>2026-06-16 00:00:00.000</td><td class="r">1</td><td class="r">3337</td></tr><tr><td>2026-06-17 00:00:00.000</td><td class="r">1</td><td class="r">997</td></tr></tbody></table></div><details class="sql-details">
+<summary>SQL <span class="sql-time">3.9s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT a.t, approx_distinct(d.work_no) AS &quot;使用员工数&quot;, coalesce(sum(a.events), 0) AS &quot;Agent事件数&quot; FROM active_user a JOIN dept_user d ON d.work_no = a.user_id WHERE 1 = 1 GROUP BY a.t ORDER BY a.t LIMIT 10000">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  a.t,
+  approx_distinct(d.work_no) AS &quot;使用员工数&quot;,
+  coalesce(sum(a.events), 0) AS &quot;Agent事件数&quot;
+FROM active_user a
+JOIN dept_user d ON d.work_no = a.user_id
+WHERE 1 = 1
+GROUP BY a.t
+ORDER BY a.t
+LIMIT 10000</pre></details></div><div class="block" style="grid-column:13/25;grid-row:1/span 1"><h3>每日 Token 趋势 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3><div class="spark-group"><div class="spark-row"><span class="spark-label">输入Token</span><div class="spark-box"><div class="spark-dot" style="left:0.0%;bottom:80.0%" title="64.97M"></div><div class="spark-dot" style="left:100.0%;bottom:29.4%" title="23.89M"></div></div></div><div class="spark-row"><span class="spark-label">输出Token</span><div class="spark-box"><div class="spark-dot" style="left:0.0%;bottom:80.0%" title="365.8K"></div><div class="spark-dot" style="left:100.0%;bottom:27.2%" title="124.4K"></div></div></div><div class="spark-row"><span class="spark-label">总Token</span><div class="spark-box"><div class="spark-dot" style="left:0.0%;bottom:80.0%" title="66.23M"></div><div class="spark-dot" style="left:100.0%;bottom:29.5%" title="24.41M"></div></div></div></div>
+<div class="tbl-wrap"><table><thead><tr><th>t</th><th>输入Token</th><th>输出Token</th><th>总Token</th></tr></thead><tbody><tr><td>2026-06-16 00:00:00.000</td><td class="r">64.97M</td><td class="r">365.8K</td><td class="r">66.23M</td></tr><tr><td>2026-06-17 00:00:00.000</td><td class="r">23.89M</td><td class="r">124.4K</td><td class="r">24.41M</td></tr></tbody></table></div><details class="sql-details">
+<summary>SQL <span class="sql-time">5.1s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT a.t, coalesce(sum(a.input_tokens), 0) AS &quot;输入Token&quot;, coalesce(sum(a.output_tokens), 0) AS &quot;输出Token&quot;, coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot; FROM active_user a JOIN dept_user d ON d.work_no = a.user_id WHERE 1 = 1 GROUP BY a.t ORDER BY a.t LIMIT 10000">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  a.t,
+  <span class="sql-diff">coalesce(sum(a.input_tokens), 0) AS &quot;输入Token</span>&quot;,
+  coalesce(sum(a.<span class="sql-diff">output_tokens), 0) AS &quot;输出Token&quot;,</span>
+<span class="sql-diff">  coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot;</span>
+<span class="sql-diff">FROM active_user a</span>
+<span class="sql-diff">JOIN dept_user d ON d.work_no = a.user_id</span>
+<span class="sql-diff">WHERE 1 = 1</span>
+<span class="sql-diff">GROUP</span> BY a.t
+<span class="sql-diff">ORDER BY a.t</span>
+<span class="sql-diff">LIMIT 10000</span></pre></details></div><div class="block" style="grid-column:1/13;grid-row:2/span 1"><h3>AI Agent 事件趋势 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3>
+<div class="tbl-wrap"><table><thead><tr><th>t</th><th>codex</th><th>qoder-work</th><th>cursor</th></tr></thead><tbody><tr><td>2026-06-16 00:00:00.000</td><td class="r">3275</td><td class="r">52</td><td class="r">10</td></tr><tr><td>2026-06-17 00:00:00.000</td><td class="r">991</td><td class="r">6</td><td class="r">0</td></tr></tbody></table></div><details class="sql-details">
+<summary>SQL <span class="sql-time">4.4s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT a.t, a.agent_type AS &quot;AI Agent&quot;, coalesce(sum(a.events), 0) AS &quot;事件数&quot; FROM active_user a JOIN dept_user d ON d.work_no = a.user_id WHERE 1 = 1 GROUP BY a.t, a.agent_type ORDER BY a.t LIMIT 10000">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  a.t,
+  a<span class="sql-diff">.agent_type AS &quot;AI Agent</span>&quot;,
+  coalesce(sum(a.events), 0) AS &quot;<span class="sql-diff"></span>事件数&quot;
+FROM active_user a
+JOIN dept_user d ON d.work_no = a.user_id
+WHERE 1 = 1
+GROUP BY a.t<span class="sql-diff">, a.agent_type</span>
+ORDER BY a.t
+LIMIT 10000</pre></details></div><div class="block" style="grid-column:13/25;grid-row:2/span 1"><h3>AI Agent Token 趋势 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3>
+<div class="tbl-wrap"><table><thead><tr><th>t</th><th>codex</th><th>qoder-work</th><th>cursor</th></tr></thead><tbody><tr><td>2026-06-16 00:00:00.000</td><td class="r">65.40M</td><td class="r">673.7K</td><td class="r">162.2K</td></tr><tr><td>2026-06-17 00:00:00.000</td><td class="r">24.34M</td><td class="r">69.3K</td><td class="r">0</td></tr></tbody></table></div><details class="sql-details">
+<summary>SQL <span class="sql-time">3.0s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT a.t, a.agent_type AS &quot;AI Agent&quot;, coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot; FROM active_user a JOIN dept_user d ON d.work_no = a.user_id WHERE 1 = 1 GROUP BY a.t, a.agent_type ORDER BY a.t LIMIT 10000">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  a.t,
+  a<span class="sql-diff">.agent_type AS &quot;AI Agent</span>&quot;,
+  coalesce(sum(a.<span class="sql-diff">total_tokens), 0) AS &quot;总Token</span>&quot;
+FROM active_user a
+JOIN dept_user d ON d.work_no = a.user_id
+WHERE 1 = 1
+GROUP BY a.t<span class="sql-diff">, a.agent_type</span>
+ORDER BY a.t
+LIMIT 10000</pre></details></div><div class="block" style="grid-column:1/25;grid-row:3/span 1"><h3>Token 使用时段分布 <span class="cte-tag">dept_user</span> <span class="cte-tag">hourly_user</span></h3><div class="bar-chart"><div class="bar-row"><span class="bar-label">06:00</span><div class="bar-track"><div class="bar-fill" style="width:79.8%"></div></div><span class="bar-val">10.80M</span></div><div class="bar-row"><span class="bar-label">07:00</span><div class="bar-track"><div class="bar-fill" style="width:100.0%"></div></div><span class="bar-val">13.53M</span></div><div class="bar-row"><span class="bar-label">09:00</span><div class="bar-track"><div class="bar-fill" style="width:31.4%"></div></div><span class="bar-val">4.26M</span></div><div class="bar-row"><span class="bar-label">10:00</span><div class="bar-track"><div class="bar-fill" style="width:29.9%"></div></div><span class="bar-val">4.05M</span></div><div class="bar-row"><span class="bar-label">11:00</span><div class="bar-track"><div class="bar-fill" style="width:30.2%"></div></div><span class="bar-val">4.08M</span></div><div class="bar-row"><span class="bar-label">13:00</span><div class="bar-track"><div class="bar-fill" style="width:16.0%"></div></div><span class="bar-val">2.17M</span></div><div class="bar-row"><span class="bar-label">14:00</span><div class="bar-track"><div class="bar-fill" style="width:75.5%"></div></div><span class="bar-val">10.22M</span></div><div class="bar-row"><span class="bar-label">15:00</span><div class="bar-track"><div class="bar-fill" style="width:10.9%"></div></div><span class="bar-val">1.47M</span></div><div class="bar-row"><span class="bar-label">16:00</span><div class="bar-track"><div class="bar-fill" style="width:81.8%"></div></div><span class="bar-val">11.07M</span></div><div class="bar-row"><span class="bar-label">17:00</span><div class="bar-track"><div class="bar-fill" style="width:2.8%"></div></div><span class="bar-val">373.8K</span></div><div class="bar-row"><span class="bar-label">19:00</span><div class="bar-track"><div class="bar-fill" style="width:18.6%"></div></div><span class="bar-val">2.52M</span></div><div class="bar-row"><span class="bar-label">20:00</span><div class="bar-track"><div class="bar-fill" style="width:16.9%"></div></div><span class="bar-val">2.29M</span></div><div class="bar-row"><span class="bar-label">21:00</span><div class="bar-track"><div class="bar-fill" style="width:22.8%"></div></div><span class="bar-val">3.09M</span></div><div class="bar-row"><span class="bar-label">22:00</span><div class="bar-track"><div class="bar-fill" style="width:88.7%"></div></div><span class="bar-val">12.01M</span></div><div class="bar-row"><span class="bar-label">23:00</span><div class="bar-track"><div class="bar-fill" style="width:64.3%"></div></div><span class="bar-val">8.70M</span></div></div><details class="sql-details">
+<summary>SQL <span class="sql-time">9.9s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+hourly_user AS (
+  SELECT
+    date_format(from_unixtime(__time__), &#x27;%H:00&#x27;) AS h,
+    &quot;user.id&quot; AS user_id,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY h, user_id
+)
+
+SELECT
+  a.h AS &quot;小时&quot;,
+  coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot;
+FROM hourly_user a
+JOIN dept_user d ON d.work_no = a.user_id
+WHERE 1 = 1
+GROUP BY a.h
+ORDER BY a.h">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+<span class="sql-diff">hourly</span>_user AS (
+  SELECT
+    date_<span class="sql-diff">format(from_unixtime(__time__), &#x27;%H:00&#x27;) AS h</span>,
+    &quot;user.id&quot; AS user_id,
+    <span class="sql-diff">sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens</span>
+  <span class="sql-diff">FROM log</span>
+  <span class="sql-diff">WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;</span>
+  <span class="sql-diff">GROUP BY h, user_id</span>
+<span class="sql-diff">)</span>
+<span class="sql-diff">SELECT</span>
+  <span class="sql-diff">a.h AS &quot;小时&quot;,</span>
+  <span class="sql-diff">coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot;</span>
+<span class="sql-diff">FROM hourly_user a</span>
+<span class="sql-diff">JOIN dept_user d ON d.work_no = a.user_id</span>
+<span class="sql-diff">WHERE 1 = 1</span>
+<span class="sql-diff">GROUP BY a.h</span>
+<span class="sql-diff">ORDER BY a.h</span></pre></details></div></div>
+<div class="sec">团队统计</div>
+<div class="dash-grid"><div class="block" style="grid-column:1/17;grid-row:1/span 1"><h3>团队 Token 明细 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3>
+<div class="tbl-wrap"><table><thead><tr><th>团队</th><th>总人数</th><th>使用人数</th><th>覆盖率(%)</th><th>事件数</th><th>输入Token</th><th>输出Token</th><th>总Token</th><th>人均Token</th></tr></thead><tbody><tr><td>AI研发工具组</td><td class="r">3</td><td class="r">1</td><td class="r">33.33</td><td class="r">4334</td><td class="r">88.86M</td><td class="r">490.2K</td><td class="r">90.64M</td><td class="r">90.64M</td></tr><tr><td>工程效率平台组</td><td class="r">3</td><td class="r">0</td><td class="r">0</td><td class="r">0</td><td class="r">0</td><td class="r">0</td><td class="r">0</td><td>null</td></tr><tr><td>开发者平台组</td><td class="r">4</td><td class="r">0</td><td class="r">0</td><td class="r">0</td><td class="r">0</td><td class="r">0</td><td class="r">0</td><td>null</td></tr></tbody></table></div><details class="sql-details">
+<summary>SQL <span class="sql-time">2.1s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;) AS &quot;团队&quot;,
+  approx_distinct(d.work_no) AS &quot;总人数&quot;,
+  approx_distinct(a.user_id) AS &quot;使用人数&quot;,
+  round(approx_distinct(a.user_id) * 100.0 / nullif(approx_distinct(d.work_no), 0), 2) AS &quot;覆盖率(%)&quot;,
+  coalesce(sum(a.events), 0) AS &quot;事件数&quot;,
+  coalesce(sum(a.input_tokens), 0) AS &quot;输入Token&quot;,
+  coalesce(sum(a.output_tokens), 0) AS &quot;输出Token&quot;,
+  coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot;,
+  round(coalesce(sum(a.total_tokens), 0) / nullif(approx_distinct(a.user_id), 0), 2) AS &quot;人均Token&quot;
+FROM dept_user d
+LEFT JOIN active_user a ON d.work_no = a.user_id
+WHERE 1 = 1
+GROUP BY coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;)
+ORDER BY &quot;总Token&quot; DESC
+LIMIT 1000">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;) AS &quot;团队&quot;,
+  approx_distinct(d.work_no) AS &quot;总人数&quot;,
+  approx_distinct(a.user_id) AS &quot;使用人数&quot;,
+  round(approx_distinct(a.user_id) * 100.0 / nullif(approx_distinct(d.work_no), 0), 2) AS &quot;覆盖率(%)&quot;,
+  coalesce(sum(a.events), 0) AS &quot;事件数&quot;,
+  coalesce(sum(a.input_tokens), 0) AS &quot;输入Token&quot;,
+  coalesce(sum(a.output_tokens), 0) AS &quot;输出Token&quot;,
+  coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot;,
+  round(coalesce(sum(a.total_tokens), 0) / nullif(approx_distinct(a.user_id), 0), 2) AS &quot;人均Token&quot;
+FROM dept_user d
+LEFT JOIN active_user a ON d.work_no = a.user_id
+WHERE 1 = 1
+GROUP BY coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;)
+ORDER BY &quot;总Token&quot; DESC
+LIMIT 1000</pre></details></div><div class="block" style="grid-column:17/25;grid-row:1/span 1"><h3>未产生日志员工列表 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3>
+<div class="tbl-wrap"><table><thead><tr><th>姓名</th><th>工号</th><th>团队</th></tr></thead><tbody><tr><td>诸葛亮</td><td>582736</td><td>AI研发工具组</td></tr><tr><td>赵云</td><td>913084</td><td>AI研发工具组</td></tr><tr><td>关羽</td><td>467219</td><td>工程效率平台组</td></tr><tr><td>张飞</td><td>735628</td><td>工程效率平台组</td></tr><tr><td>曹操</td><td>190473</td><td>工程效率平台组</td></tr><tr><td>吕布</td><td>641285</td><td>开发者平台组</td></tr><tr><td>周瑜</td><td>824016</td><td>开发者平台组</td></tr><tr><td>孙权</td><td>356907</td><td>开发者平台组</td></tr><tr><td>貂蝉</td><td>709538</td><td>开发者平台组</td></tr></tbody></table></div><details class="sql-details">
+<summary>SQL <span class="sql-time">5.4s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  d.name AS &quot;姓名&quot;,
+  d.work_no AS &quot;工号&quot;,
+  coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;) AS &quot;团队&quot;
+FROM dept_user d
+LEFT JOIN active_user a ON d.work_no = a.user_id
+WHERE a.user_id IS NULL AND 1 = 1
+ORDER BY coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;), d.name
+LIMIT 500">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  <span class="sql-diff">d.name AS &quot;姓名</span>&quot;,
+  <span class="sql-diff">d.work_no AS &quot;工号</span>&quot;,
+  <span class="sql-diff">coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;) AS &quot;团队&quot;</span>
+<span class="sql-diff">FROM dept_user d</span>
+<span class="sql-diff">LEFT JOIN active_user a ON d.work_no = a.user_id</span>
+<span class="sql-diff">WHERE a.user_id IS NULL AND 1 = 1</span>
+<span class="sql-diff">ORDER BY coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;), d.name</span>
+<span class="sql-diff">LIMIT 500</span></pre></details></div><div class="block" style="grid-column:1/9;grid-row:2/span 1"><h3>团队总Token Top10 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3><div class="bar-chart"><div class="bar-row"><span class="bar-label">AI研发工具组</span><div class="bar-track"><div class="bar-fill" style="width:100.0%"></div></div><span class="bar-val">90.64M</span></div><div class="bar-row"><span class="bar-label">工程效率平台组</span><div class="bar-track"><div class="bar-fill" style="width:0.0%"></div></div><span class="bar-val">0</span></div><div class="bar-row"><span class="bar-label">开发者平台组</span><div class="bar-track"><div class="bar-fill" style="width:0.0%"></div></div><span class="bar-val">0</span></div></div><details class="sql-details">
+<summary>SQL <span class="sql-time">8.7s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;) AS &quot;团队&quot;,
+  coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot;
+FROM dept_user d
+LEFT JOIN active_user a ON d.work_no = a.user_id
+WHERE 1 = 1
+GROUP BY coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;)
+ORDER BY &quot;总Token&quot; DESC
+LIMIT 10">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;) AS &quot;团队&quot;,
+  <span class="sql-diff">coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot;</span>
+<span class="sql-diff">FROM dept_user d</span>
+<span class="sql-diff">LEFT JOIN active_user a ON d.work_no = a.user_id</span>
+<span class="sql-diff">WHERE 1 = 1</span>
+<span class="sql-diff">GROUP BY coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;)</span>
+<span class="sql-diff">ORDER BY &quot;总Token&quot; DESC</span>
+<span class="sql-diff">LIMIT 10</span></pre></details></div><div class="block" style="grid-column:9/17;grid-row:2/span 1"><h3>团队使用覆盖率 Top10 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3><div class="bar-chart"><div class="bar-row"><span class="bar-label">AI研发工具组</span><div class="bar-track"><div class="bar-fill" style="width:100.0%"></div></div><span class="bar-val">33.33</span></div><div class="bar-row"><span class="bar-label">工程效率平台组</span><div class="bar-track"><div class="bar-fill" style="width:0.0%"></div></div><span class="bar-val">0</span></div><div class="bar-row"><span class="bar-label">开发者平台组</span><div class="bar-track"><div class="bar-fill" style="width:0.0%"></div></div><span class="bar-val">0</span></div></div><details class="sql-details">
+<summary>SQL <span class="sql-time">3.0s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;) AS &quot;团队&quot;,
+  round(approx_distinct(a.user_id) * 100.0 / nullif(approx_distinct(d.work_no), 0), 2) AS &quot;覆盖率(%)&quot;
+FROM dept_user d
+LEFT JOIN active_user a ON d.work_no = a.user_id
+WHERE 1 = 1
+GROUP BY coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;)
+ORDER BY &quot;覆盖率(%)&quot; DESC
+LIMIT 10">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;) AS &quot;团队&quot;,
+  <span class="sql-diff">round(approx_distinct(a.user_id) * 100.0 / nullif(approx_distinct(d.work_no), 0), 2) AS &quot;覆盖率(%)&quot;</span>
+<span class="sql-diff">FROM dept_user d</span>
+<span class="sql-diff">LEFT JOIN active_user a ON d.work_no = a.user_id</span>
+<span class="sql-diff">WHERE 1 = 1</span>
+<span class="sql-diff">GROUP BY coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;)</span>
+<span class="sql-diff">ORDER BY &quot;覆盖率(%)&quot; DESC</span>
+<span class="sql-diff">LIMIT 10</span></pre></details></div><div class="block" style="grid-column:17/25;grid-row:2/span 1"><h3>团队人均Token Top10 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3><div class="bar-chart"><div class="bar-row"><span class="bar-label">AI研发工具组</span><div class="bar-track"><div class="bar-fill" style="width:100.0%"></div></div><span class="bar-val">90.64M</span></div></div><details class="sql-details">
+<summary>SQL <span class="sql-time">2.0s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;) AS &quot;团队&quot;,
+  round(coalesce(sum(a.total_tokens), 0) / nullif(approx_distinct(a.user_id), 0), 2) AS &quot;人均Token&quot;
+FROM dept_user d
+LEFT JOIN active_user a ON d.work_no = a.user_id
+WHERE 1 = 1
+GROUP BY coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;)
+HAVING approx_distinct(a.user_id) &gt; 0
+ORDER BY &quot;人均Token&quot; DESC
+LIMIT 10">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;) AS &quot;团队&quot;,
+  <span class="sql-diff">round(coalesce(sum(a.total_tokens), 0) / nullif(approx_distinct(a.user_id), 0), 2) AS &quot;人均Token&quot;</span>
+<span class="sql-diff">FROM dept_user d</span>
+<span class="sql-diff">LEFT JOIN active_user a ON d.work_no = a.user_id</span>
+<span class="sql-diff">WHERE 1 = 1</span>
+<span class="sql-diff">GROUP BY coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;)</span>
+<span class="sql-diff">HAVING approx_distinct(a.user_id) &gt; 0</span>
+<span class="sql-diff">ORDER BY &quot;人均Token&quot; DESC</span>
+<span class="sql-diff">LIMIT 10</span></pre></details></div></div>
+<div class="sec">组织与人员</div>
+<div class="dash-grid"><div class="block" style="grid-column:1/25;grid-row:1/span 1"><h3>员工 Token 明细 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3>
+<div class="tbl-wrap"><table><thead><tr><th>姓名</th><th>工号</th><th>团队</th><th>输入Token</th><th>输出Token</th><th>总Token</th><th>事件数</th><th>单事件平均Token</th><th>AI Agent</th><th>模型</th></tr></thead><tbody><tr><td>荀彧</td><td>248451</td><td>AI研发工具组</td><td class="r">88.86M</td><td class="r">490.2K</td><td class="r">90.64M</td><td class="r">4334</td><td class="r">20.9K</td><td>codex, cursor, qoder-work</td><td>default, gpt-5.4, gpt-5.4-mini, gpt-5.5, qwork-ultimate, unknown</td></tr></tbody></table></div><details class="sql-details">
+<summary>SQL <span class="sql-time">9.9s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT d.name AS &quot;姓名&quot;, d.work_no AS &quot;工号&quot;, coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;) AS &quot;团队&quot;, coalesce(sum(a.input_tokens), 0) AS &quot;输入Token&quot;, coalesce(sum(a.output_tokens), 0) AS &quot;输出Token&quot;, coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot;, coalesce(sum(a.events), 0) AS &quot;事件数&quot;, round(coalesce(sum(a.total_tokens), 0) / nullif(sum(a.events), 0), 2) AS &quot;单事件平均Token&quot;, array_join(array_sort(array_agg(DISTINCT a.agent_type)), &#x27;, &#x27;) AS &quot;AI Agent&quot;, array_join(array_sort(array_agg(DISTINCT a.model)), &#x27;, &#x27;) AS &quot;模型&quot; FROM active_user a JOIN dept_user d ON d.work_no = a.user_id WHERE 1 = 1 GROUP BY d.name, d.work_no, coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;) ORDER BY &quot;总Token&quot; DESC LIMIT 500">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  d.name AS &quot;姓名&quot;,
+  d.work_no AS &quot;工号&quot;,
+  coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;) AS &quot;团队&quot;,
+  coalesce(sum(a.input_tokens), 0) AS &quot;输入Token&quot;,
+  coalesce(sum(a.output_tokens), 0) AS &quot;输出Token&quot;,
+  coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot;,
+  coalesce(sum(a.events), 0) AS &quot;事件数&quot;,
+  round(coalesce(sum(a.total_tokens), 0) / nullif(sum(a.events), 0), 2) AS &quot;单事件平均Token&quot;,
+  array_join(array_sort(array_agg(DISTINCT a.agent_type)), &#x27;, &#x27;) AS &quot;AI Agent&quot;,
+  array_join(array_sort(array_agg(DISTINCT a.model)), &#x27;, &#x27;) AS &quot;模型&quot;
+FROM active_user a
+JOIN dept_user d ON d.work_no = a.user_id
+WHERE 1 = 1
+GROUP BY d.name, d.work_no, coalesce(nullif(d.dept_name_3, &#x27;&#x27;), &#x27;未分组&#x27;)
+ORDER BY &quot;总Token&quot; DESC
+LIMIT 500</pre></details></div><div class="block" style="grid-column:1/13;grid-row:2/span 1"><h3>AI Agent 明细 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3>
+<div class="tbl-wrap"><table><thead><tr><th>AI Agent</th><th>使用人数</th><th>事件数</th><th>输入Token</th><th>输出Token</th><th>总Token</th></tr></thead><tbody><tr><td>codex</td><td class="r">1</td><td class="r">4266</td><td class="r">87.96M</td><td class="r">481.5K</td><td class="r">89.74M</td></tr><tr><td>qoder-work</td><td class="r">1</td><td class="r">58</td><td class="r">735.4K</td><td class="r">7545</td><td class="r">743.0K</td></tr><tr><td>cursor</td><td class="r">1</td><td class="r">10</td><td class="r">160.9K</td><td class="r">1216</td><td class="r">162.2K</td></tr></tbody></table></div><details class="sql-details">
+<summary>SQL <span class="sql-time">2.0s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT a.agent_type AS &quot;AI Agent&quot;, approx_distinct(d.work_no) AS &quot;使用人数&quot;, coalesce(sum(a.events), 0) AS &quot;事件数&quot;, coalesce(sum(a.input_tokens), 0) AS &quot;输入Token&quot;, coalesce(sum(a.output_tokens), 0) AS &quot;输出Token&quot;, coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot; FROM active_user a JOIN dept_user d ON d.work_no = a.user_id WHERE 1 = 1 GROUP BY a.agent_type ORDER BY &quot;总Token&quot; DESC LIMIT 200">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  <span class="sql-diff">a.agent_type AS &quot;AI Agent</span>&quot;,
+  <span class="sql-diff">approx_distinct(d.work_no) AS &quot;使用人数</span>&quot;,
+  coalesce(<span class="sql-diff">sum(a.events), 0) AS &quot;事件数</span>&quot;,
+  coalesce(sum(a.input_tokens), 0) AS &quot;输入Token&quot;,
+  coalesce(sum(a.output_tokens), 0) AS &quot;输出Token&quot;,
+  coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot;<span class="sql-diff"></span>
+<span class="sql-diff">FROM active_user a</span>
+<span class="sql-diff">JOIN dept_user d ON d.work_no = a.user_id</span>
+<span class="sql-diff">WHERE 1 = 1</span>
+<span class="sql-diff">GROUP BY a.agent_type</span>
+<span class="sql-diff">ORDER BY &quot;总Token&quot; DESC</span>
+<span class="sql-diff">LIMIT 200</span></pre></details></div><div class="block" style="grid-column:13/25;grid-row:2/span 1"><h3>模型明细 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span></h3>
+<div class="tbl-wrap"><table><thead><tr><th>模型</th><th>模型供应商</th><th>使用人数</th><th>事件数</th><th>输入Token</th><th>输出Token</th><th>总Token</th></tr></thead><tbody><tr><td>gpt-5.5</td><td>openai</td><td class="r">1</td><td class="r">1392</td><td class="r">87.96M</td><td class="r">481.5K</td><td class="r">89.74M</td></tr><tr><td>qwork-ultimate</td><td>qwen</td><td class="r">1</td><td class="r">32</td><td class="r">735.4K</td><td class="r">7545</td><td class="r">743.0K</td></tr><tr><td>default</td><td>unknown</td><td class="r">1</td><td class="r">6</td><td class="r">160.9K</td><td class="r">1216</td><td class="r">162.2K</td></tr><tr><td>unknown</td><td>unknown</td><td class="r">1</td><td class="r">4</td><td class="r">0</td><td class="r">0</td><td class="r">0</td></tr><tr><td>gpt-5.4-mini</td><td>openai</td><td class="r">1</td><td class="r">4</td><td class="r">0</td><td class="r">0</td><td class="r">0</td></tr><tr><td>unknown</td><td>openai</td><td class="r">1</td><td class="r">2834</td><td class="r">0</td><td class="r">0</td><td class="r">0</td></tr><tr><td>qwork-ultimate</td><td>unknown</td><td class="r">1</td><td class="r">20</td><td class="r">0</td><td class="r">0</td><td class="r">0</td></tr><tr><td>gpt-5.4</td><td>openai</td><td class="r">1</td><td class="r">36</td><td class="r">0</td><td class="r">0</td><td class="r">0</td></tr><tr><td>unknown</td><td>qwen</td><td class="r">1</td><td class="r">6</td><td class="r">0</td><td class="r">0</td><td class="r">0</td></tr></tbody></table></div><details class="sql-details">
+<summary>SQL <span class="sql-time">5.6s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ), active_user AS ( SELECT date_trunc(&#x27;day&#x27;, __time__) AS t, &quot;user.id&quot; AS user_id, coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type, coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider, coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model, sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens, sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens, sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens, count(1) AS events FROM log WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27; GROUP BY t, user_id, agent_type, provider, model ) SELECT a.model AS &quot;模型&quot;, a.provider AS &quot;模型供应商&quot;, approx_distinct(d.work_no) AS &quot;使用人数&quot;, coalesce(sum(a.events), 0) AS &quot;事件数&quot;, coalesce(sum(a.input_tokens), 0) AS &quot;输入Token&quot;, coalesce(sum(a.output_tokens), 0) AS &quot;输出Token&quot;, coalesce(sum(a.total_tokens), 0) AS &quot;总Token&quot; FROM active_user a JOIN dept_user d ON d.work_no = a.user_id WHERE 1 = 1 GROUP BY a.model, a.provider ORDER BY &quot;总Token&quot; DESC LIMIT 200">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+)
+SELECT
+  <span class="sql-diff">a.model AS &quot;模型</span>&quot;,
+  <span class="sql-diff">a.provider AS &quot;模型供应商</span>&quot;,
+  <span class="sql-diff">approx_distinct(d.work_no) AS &quot;使用人数</span>&quot;,
+  coalesce(sum(a.<span class="sql-diff">events), 0) AS &quot;事件数</span>&quot;,
+  coalesce(sum(a.<span class="sql-diff">input_tokens), 0) AS &quot;输入</span>Token&quot;,
+  coalesce(sum(a.<span class="sql-diff">output_tokens), 0) AS &quot;输出</span>Token&quot;,
+  coalesce(sum(a.<span class="sql-diff">total_tokens), 0) AS &quot;总Token&quot;</span>
+<span class="sql-diff">FROM active_user a</span>
+<span class="sql-diff">JOIN dept_user d ON d.work_no = a.user_id</span>
+<span class="sql-diff">WHERE 1 = 1</span>
+<span class="sql-diff">GROUP BY a.model, a.provider</span>
+<span class="sql-diff">ORDER BY &quot;总Token&quot; DESC</span>
+<span class="sql-diff">LIMIT 200</span></pre></details></div></div>
+<div class="sec">Skill &amp; 工具</div>
+<div class="dash-grid"><div class="block" style="grid-column:1/9;grid-row:1/span 1"><h3>Top 10 Skill（调用次数） <span class="cte-tag">dept_user</span></h3><div class="bar-chart"><div class="bar-row"><span class="bar-label">ata-all</span><div class="bar-track"><div class="bar-fill" style="width:100.0%"></div></div><span class="bar-val">1</span></div></div><details class="sql-details">
+<summary>SQL <span class="sql-time">2.0s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ) SELECT skill_name AS &quot;Skill&quot;, count(1) AS &quot;调用次数&quot; FROM ( SELECT t.&quot;user.id&quot; AS user_id, CASE WHEN regexp_like(regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/[^/]+$&#x27;, 1), &#x27;^v?[0-9]+\.[0-9]+&#x27;) THEN regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/v?[0-9][^/]*/[^/]+$&#x27;, 1) WHEN lower(regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/[^/]+$&#x27;, 1)) IN (&#x27;skills&#x27;, &#x27;skill&#x27;, &#x27;.claude&#x27;, &#x27;agents&#x27;, &#x27;resources&#x27;, &#x27;.qoderwork&#x27;, &#x27;docs&#x27;) THEN regexp_replace(regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)$&#x27;, 1), &#x27;(?i)(\.skill)?\.md$&#x27;, &#x27;&#x27;) ELSE regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/[^/]+$&#x27;, 1) END AS skill_name FROM log t JOIN dept_user d ON t.&quot;user.id&quot; = d.work_no WHERE regexp_like(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;(?i)(/SKILL\.md|/[^/]+\.skill\.md)$&#x27;) AND 1 = 1 ) WHERE skill_name IS NOT NULL AND skill_name &lt;&gt; &#x27;&#x27; AND upper(skill_name) &lt;&gt; &#x27;SKILL&#x27; GROUP BY skill_name ORDER BY &quot;调用次数&quot; DESC LIMIT 10">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+)
+SELECT
+  skill_name AS &quot;Skill&quot;,
+  count(1) AS &quot;调用次数&quot;
+FROM (
+  SELECT
+    t.&quot;user.id&quot; AS user_id,
+    CASE
+        WHEN regexp_like(regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/[^/]+$&#x27;, 1), &#x27;^v?[0-9]+\.[0-9]+&#x27;)
+        THEN regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/v?[0-9][^/]*/[^/]+$&#x27;, 1)
+        WHEN lower(regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/[^/]+$&#x27;, 1)) IN (&#x27;skills&#x27;, &#x27;skill&#x27;, &#x27;.claude&#x27;, &#x27;agents&#x27;, &#x27;resources&#x27;, &#x27;.qoderwork&#x27;, &#x27;docs&#x27;)
+        THEN regexp_replace(regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)$&#x27;, 1), &#x27;(?i)(\.skill)?\.md$&#x27;, &#x27;&#x27;)
+        ELSE regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/[^/]+$&#x27;, 1)
+      END AS skill_name
+  FROM log t
+  JOIN dept_user d ON t.&quot;user.id&quot; = d.work_no
+  WHERE regexp_like(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;(?i)(/SKILL\.md|/[^/]+\.skill\.md)$&#x27;) AND 1 = 1
+)
+WHERE skill_name IS NOT NULL AND skill_name &lt;&gt; &#x27;&#x27; AND upper(skill_name) &lt;&gt; &#x27;SKILL&#x27;
+GROUP BY skill_name
+ORDER BY &quot;调用次数&quot; DESC
+LIMIT 10</pre></details></div><div class="block" style="grid-column:9/17;grid-row:1/span 1"><h3>Top 10 Skill（使用人数） <span class="cte-tag">dept_user</span></h3><div class="bar-chart"><div class="bar-row"><span class="bar-label">ata-all</span><div class="bar-track"><div class="bar-fill" style="width:100.0%"></div></div><span class="bar-val">1</span></div></div><details class="sql-details">
+<summary>SQL <span class="sql-time">3.1s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ) SELECT skill_name AS &quot;Skill&quot;, approx_distinct(work_no) AS &quot;使用人数&quot; FROM ( SELECT d.work_no, CASE WHEN regexp_like(regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/[^/]+$&#x27;, 1), &#x27;^v?[0-9]+\.[0-9]+&#x27;) THEN regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/v?[0-9][^/]*/[^/]+$&#x27;, 1) WHEN lower(regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/[^/]+$&#x27;, 1)) IN (&#x27;skills&#x27;, &#x27;skill&#x27;, &#x27;.claude&#x27;, &#x27;agents&#x27;, &#x27;resources&#x27;, &#x27;.qoderwork&#x27;, &#x27;docs&#x27;) THEN regexp_replace(regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)$&#x27;, 1), &#x27;(?i)(\.skill)?\.md$&#x27;, &#x27;&#x27;) ELSE regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/[^/]+$&#x27;, 1) END AS skill_name FROM log t JOIN dept_user d ON t.&quot;user.id&quot; = d.work_no WHERE regexp_like(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;(?i)(/SKILL\.md|/[^/]+\.skill\.md)$&#x27;) AND 1 = 1 ) WHERE skill_name IS NOT NULL AND skill_name &lt;&gt; &#x27;&#x27; AND upper(skill_name) &lt;&gt; &#x27;SKILL&#x27; GROUP BY skill_name ORDER BY &quot;使用人数&quot; DESC LIMIT 10">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+)
+SELECT
+  skill_name AS &quot;Skill&quot;,
+  <span class="sql-diff">approx_distinct(work_no) AS &quot;使用人</span>数&quot;
+FROM (
+  SELECT
+    <span class="sql-diff">d.work_no</span>,
+    CASE
+        WHEN regexp_like(regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/[^/]+$&#x27;, 1), &#x27;^v?[0-9]+\.[0-9]+&#x27;)
+        THEN regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/v?[0-9][^/]*/[^/]+$&#x27;, 1)
+        WHEN lower(regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/[^/]+$&#x27;, 1)) IN (&#x27;skills&#x27;, &#x27;skill&#x27;, &#x27;.claude&#x27;, &#x27;agents&#x27;, &#x27;resources&#x27;, &#x27;.qoderwork&#x27;, &#x27;docs&#x27;)
+        THEN regexp_replace(regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)$&#x27;, 1), &#x27;(?i)(\.skill)?\.md$&#x27;, &#x27;&#x27;)
+        ELSE regexp_extract(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;/([^/]+)/[^/]+$&#x27;, 1)
+      END AS skill_name
+  FROM log t
+  JOIN dept_user d ON t.&quot;user.id&quot; = d.work_no
+  WHERE regexp_like(t.&quot;gen_ai.tool.call.arguments.file_path&quot;, &#x27;(?i)(/SKILL\.md|/[^/]+\.skill\.md)$&#x27;) AND 1 = 1
+)
+WHERE skill_name IS NOT NULL AND skill_name &lt;&gt; &#x27;&#x27; AND upper(skill_name) &lt;&gt; &#x27;SKILL&#x27;
+GROUP BY skill_name
+ORDER BY &quot;<span class="sql-diff">使用人</span>数&quot; DESC
+LIMIT 10</pre></details></div><div class="block" style="grid-column:17/25;grid-row:1/span 1"><h3>Top 10 Tool（调用次数） <span class="cte-tag">dept_user</span></h3><div class="bar-chart"><div class="bar-row"><span class="bar-label">Bash</span><div class="bar-track"><div class="bar-fill" style="width:100.0%"></div></div><span class="bar-val">2662</span></div><div class="bar-row"><span class="bar-label">write_stdin</span><div class="bar-track"><div class="bar-fill" style="width:2.0%"></div></div><span class="bar-val">54</span></div><div class="bar-row"><span class="bar-label">Read</span><div class="bar-track"><div class="bar-fill" style="width:0.2%"></div></div><span class="bar-val">6</span></div><div class="bar-row"><span class="bar-label">mcp__node_repl__js</span><div class="bar-track"><div class="bar-fill" style="width:0.2%"></div></div><span class="bar-val">4</span></div><div class="bar-row"><span class="bar-label">WebFetch</span><div class="bar-track"><div class="bar-fill" style="width:0.1%"></div></div><span class="bar-val">2</span></div><div class="bar-row"><span class="bar-label">WebSearch</span><div class="bar-track"><div class="bar-fill" style="width:0.1%"></div></div><span class="bar-val">2</span></div><div class="bar-row"><span class="bar-label">AskUserQuestion</span><div class="bar-track"><div class="bar-fill" style="width:0.1%"></div></div><span class="bar-val">2</span></div><div class="bar-row"><span class="bar-label">update_plan</span><div class="bar-track"><div class="bar-fill" style="width:0.1%"></div></div><span class="bar-val">2</span></div><div class="bar-row"><span class="bar-label">list_mcp_resource_templates</span><div class="bar-track"><div class="bar-fill" style="width:0.1%"></div></div><span class="bar-val">2</span></div><div class="bar-row"><span class="bar-label">list_mcp_resources</span><div class="bar-track"><div class="bar-fill" style="width:0.1%"></div></div><span class="bar-val">2</span></div></div><details class="sql-details">
+<summary>SQL <span class="sql-time">2.0s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS ( SELECT work_no, name, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2, COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3 FROM department WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27; GROUP BY work_no, name, dept_name ) SELECT tool_name AS &quot;Tool&quot;, count(1) AS &quot;调用次数&quot; FROM ( SELECT nullif(nullif(t.&quot;gen_ai.tool.name&quot;, &#x27;null&#x27;), &#x27;&#x27;) AS tool_name FROM log t JOIN dept_user d ON t.&quot;user.id&quot; = d.work_no WHERE t.&quot;user.id&quot; IS NOT NULL AND t.&quot;user.id&quot; &lt;&gt; &#x27;&#x27; AND 1 = 1 ) WHERE tool_name IS NOT NULL AND tool_name &lt;&gt; &#x27;&#x27; GROUP BY tool_name ORDER BY &quot;调用次数&quot; DESC LIMIT 10">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+)
+SELECT
+  <span class="sql-diff">tool_name AS &quot;Too</span>l&quot;,
+  count(1) AS &quot;调用次数&quot;
+FROM (
+  SELECT<span class="sql-diff"> nullif(nullif(t.&quot;gen_ai.tool.name&quot;, &#x27;null&#x27;), &#x27;&#x27;) AS tool_name</span>
+  <span class="sql-diff">FROM log t</span>
+  <span class="sql-diff">JOIN dept_user d ON t.&quot;user.id&quot; = d.work_no</span>
+  <span class="sql-diff">WHERE t.&quot;user.id&quot; IS NOT NULL AND t.&quot;user.id&quot; &lt;&gt; &#x27;&#x27; AND 1 = 1</span>
+<span class="sql-diff"></span>)
+<span class="sql-diff">WHERE tool_name IS NOT NULL AND tool_name &lt;&gt; &#x27;&#x27;</span>
+<span class="sql-diff">GROUP BY tool_name</span>
+<span class="sql-diff">ORDER BY &quot;调用次数&quot; DESC</span>
+<span class="sql-diff">LIMIT 10</span></pre></details></div></div>
+<div class="sec">Token 集中度</div>
+<div class="dash-grid"><div class="card" style="grid-column:1/7;grid-row:1/span 1"><div class="card-t">Top10% Token占比 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span> <span class="cte-tag">user_token</span> <span class="cte-tag">ranked</span></div><div class="card-v">100.0%</div><div class="card-doc">按当前部门过滤后的在册员工总 Token 排序，取人数 Top10% 员工贡献的 Token 占比。</div><details class="sql-details">
+<summary>SQL <span class="sql-time">2.6s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+),
+user_token AS (
+  SELECT
+    d.work_no,
+    coalesce(sum(a.total_tokens), 0) AS total_tokens
+  FROM dept_user d
+  LEFT JOIN active_user a ON d.work_no = a.user_id
+  WHERE 1 = 1
+  GROUP BY d.work_no
+),
+ranked AS (
+  SELECT
+    work_no,
+    total_tokens,
+    row_number() OVER (ORDER BY total_tokens DESC) AS rn,
+    count(1) OVER () AS user_count,
+    sum(total_tokens) OVER () AS all_tokens
+  FROM user_token
+)
+
+SELECT
+  round(sum(CASE WHEN rn &lt;= cast(ceil(user_count * 0.1) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS &quot;Top10% Token占比&quot;
+FROM ranked">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+),
+user_token AS (
+  SELECT
+    d.work_no,
+    coalesce(sum(a.total_tokens), 0) AS total_tokens
+  FROM dept_user d
+  LEFT JOIN active_user a ON d.work_no = a.user_id
+  WHERE 1 = 1
+  GROUP BY d.work_no
+),
+ranked AS (
+  SELECT
+    work_no,
+    total_tokens,
+    row_number() OVER (ORDER BY total_tokens DESC) AS rn,
+    count(1) OVER () AS user_count,
+    sum(total_tokens) OVER () AS all_tokens
+  FROM user_token
+)
+SELECT round(sum(CASE WHEN rn &lt;= cast(ceil(user_count * 0.1) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS &quot;Top10% Token占比&quot;
+FROM ranked</pre></details></div><div class="card" style="grid-column:7/13;grid-row:1/span 1"><div class="card-t">Top20% Token占比 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span> <span class="cte-tag">user_token</span> <span class="cte-tag">ranked</span></div><div class="card-v">100.0%</div><div class="card-doc">按当前部门过滤后的在册员工总 Token 排序，取人数 Top20% 员工贡献的 Token 占比。</div><details class="sql-details">
+<summary>SQL <span class="sql-time">2.6s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+),
+user_token AS (
+  SELECT
+    d.work_no,
+    coalesce(sum(a.total_tokens), 0) AS total_tokens
+  FROM dept_user d
+  LEFT JOIN active_user a ON d.work_no = a.user_id
+  WHERE 1 = 1
+  GROUP BY d.work_no
+),
+ranked AS (
+  SELECT
+    work_no,
+    total_tokens,
+    row_number() OVER (ORDER BY total_tokens DESC) AS rn,
+    count(1) OVER () AS user_count,
+    sum(total_tokens) OVER () AS all_tokens
+  FROM user_token
+)
+
+SELECT
+  round(sum(CASE WHEN rn &lt;= cast(ceil(user_count * 0.2) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS &quot;Top20% Token占比&quot;
+FROM ranked">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+),
+user_token AS (
+  SELECT
+    d.work_no,
+    coalesce(sum(a.total_tokens), 0) AS total_tokens
+  FROM dept_user d
+  LEFT JOIN active_user a ON d.work_no = a.user_id
+  WHERE 1 = 1
+  GROUP BY d.work_no
+),
+ranked AS (
+  SELECT
+    work_no,
+    total_tokens,
+    row_number() OVER (ORDER BY total_tokens DESC) AS rn,
+    count(1) OVER () AS user_count,
+    sum(total_tokens) OVER () AS all_tokens
+  FROM user_token
+)
+SELECT round(sum(CASE WHEN rn &lt;= cast(ceil(user_count * 0.<span class="sql-diff">2) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS &quot;Top2</span>0% Token占比&quot;
+FROM ranked</pre></details></div><div class="block" style="grid-column:1/13;grid-row:2/span 1"><h3>Token 人群分层占比 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span> <span class="cte-tag">user_token</span> <span class="cte-tag">ranked</span> <span class="cte-tag">layered</span></h3><div class="bar-chart"><div class="bar-row"><span class="bar-label">Top 10%</span><div class="bar-track"><div class="bar-fill" style="width:100.0%"></div></div><span class="bar-val">1</span></div></div><details class="sql-details">
+<summary>SQL <span class="sql-time">4.3s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+),
+user_token AS (
+  SELECT
+    d.work_no,
+    sum(a.total_tokens) AS total_tokens
+  FROM dept_user d
+  JOIN active_user a ON d.work_no = a.user_id
+  WHERE 1 = 1
+  GROUP BY d.work_no
+  HAVING total_tokens &gt; 0
+),
+ranked AS (
+  SELECT
+    work_no,
+    total_tokens,
+    row_number() OVER (ORDER BY total_tokens DESC) AS rn,
+    count(1) OVER () AS user_count,
+    sum(total_tokens) OVER () AS all_tokens
+  FROM user_token
+),
+layered AS (
+  SELECT
+    CASE
+      WHEN rn &lt;= cast(ceil(user_count * 0.10) AS bigint) THEN &#x27;Top 10%&#x27;
+      WHEN rn &lt;= cast(ceil(user_count * 0.20) AS bigint) THEN &#x27;10%-20%&#x27;
+      ELSE &#x27;后80%&#x27;
+    END AS user_layer,
+    CASE
+      WHEN rn &lt;= cast(ceil(user_count * 0.10) AS bigint) THEN 1
+      WHEN rn &lt;= cast(ceil(user_count * 0.20) AS bigint) THEN 2
+      ELSE 3
+    END AS layer_rank,
+    total_tokens,
+    all_tokens
+  FROM ranked
+)
+
+SELECT
+  user_layer AS &quot;人群分层&quot;,
+  count(1) AS &quot;人数&quot;,
+  coalesce(sum(total_tokens), 0) AS &quot;Token&quot;,
+  round(sum(total_tokens) * 100.0 / nullif(max(all_tokens), 0), 2) AS &quot;Token占比(%)&quot;
+FROM layered
+GROUP BY user_layer, layer_rank
+ORDER BY layer_rank">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+),
+user_token AS (
+  SELECT
+    d.work_no,
+    <span class="sql-diff">sum(a.total_tokens</span>) AS total_tokens
+  FROM dept_user d
+  <span class="sql-diff"></span>JOIN active_user a ON d.work_no = a.user_id
+  WHERE 1 = 1
+  GROUP BY d.work_no
+<span class="sql-diff">  HAVING total_tokens &gt; 0</span>
+<span class="sql-diff">),</span>
+<span class="sql-diff">ranked AS (</span>
+  <span class="sql-diff">SELECT</span>
+    <span class="sql-diff">work_no</span>,
+    <span class="sql-diff">total_tokens</span>,
+    <span class="sql-diff">row_number() OVER (ORDER BY total_tokens DESC) AS rn</span>,
+    <span class="sql-diff">count(1) OVER () AS user_count,</span>
+  <span class="sql-diff">  sum(total_tokens) OVER () AS all_tokens</span>
+<span class="sql-diff">  FROM user_token</span>
+<span class="sql-diff">),</span>
+<span class="sql-diff">layered AS (</span>
+<span class="sql-diff">  SELECT</span>
+<span class="sql-diff">    CASE</span>
+<span class="sql-diff">        WHEN rn &lt;= cast(ceil(user_count * 0.10) AS bigint)</span>
+<span class="sql-diff">        THEN &#x27;Top 10%&#x27;</span>
+<span class="sql-diff">        WHEN rn &lt;= cast(ceil(user_count * 0.20) AS bigint)</span>
+<span class="sql-diff">        THEN &#x27;10%-20%&#x27;</span>
+<span class="sql-diff">        ELSE &#x27;后80%&#x27;</span>
+<span class="sql-diff">      END AS user_layer,</span>
+<span class="sql-diff">    CASE</span>
+<span class="sql-diff">        WHEN rn &lt;= cast(ceil(user_count * 0.10) AS bigint)</span>
+<span class="sql-diff">        THEN 1</span>
+<span class="sql-diff">        WHEN rn &lt;= cast(ceil(user_count * 0.20) AS bigint)</span>
+<span class="sql-diff">        THEN 2</span>
+<span class="sql-diff">        ELSE 3</span>
+<span class="sql-diff">      END AS layer_rank,</span>
+<span class="sql-diff">    total_tokens,</span>
+<span class="sql-diff">    all_tokens</span>
+<span class="sql-diff">  FROM ranked</span>
+<span class="sql-diff">)</span>
+<span class="sql-diff">SELECT</span>
+<span class="sql-diff">  user_layer AS &quot;人群分层&quot;,</span>
+<span class="sql-diff">  count(1) AS &quot;人数&quot;,</span>
+<span class="sql-diff">  coalesce(sum(total_tokens), 0) AS &quot;Token&quot;,</span>
+<span class="sql-diff">  round(sum(total_tokens) * 100.0 / nullif(max(all_tokens), 0), 2) AS &quot;Token占比(%)&quot;</span>
+<span class="sql-diff">FROM layered</span>
+<span class="sql-diff">GROUP BY user_layer, layer_rank</span>
+<span class="sql-diff">ORDER BY layer_rank</span></pre></details></div><div class="block" style="grid-column:13/25;grid-row:2/span 1"><h3>每日 Top10/Top20 Token占比 <span class="cte-tag">dept_user</span> <span class="cte-tag">active_user</span> <span class="cte-tag">daily_user</span> <span class="cte-tag">ranked</span></h3><div class="spark-group"><div class="spark-row"><span class="spark-label">Top10% Token占比</span><div class="spark-box"><div class="spark-dot" style="left:0.0%;bottom:80.0%" title="100"></div><div class="spark-dot" style="left:100.0%;bottom:80.0%" title="100"></div></div></div><div class="spark-row"><span class="spark-label">Top20% Token占比</span><div class="spark-box"><div class="spark-dot" style="left:0.0%;bottom:80.0%" title="100"></div><div class="spark-dot" style="left:100.0%;bottom:80.0%" title="100"></div></div></div></div>
+<div class="tbl-wrap"><table><thead><tr><th>t</th><th>Top10% Token占比</th><th>Top20% Token占比</th></tr></thead><tbody><tr><td>2026-06-16 00:00:00.000</td><td class="r">100</td><td class="r">100</td></tr><tr><td>2026-06-17 00:00:00.000</td><td class="r">100</td><td class="r">100</td></tr></tbody></table></div><details class="sql-details">
+<summary>SQL <span class="sql-time">5.0s (含CLI)</span><button class="copy-btn" onclick="(function(b){var t=b.parentElement.nextElementSibling;navigator.clipboard.writeText(t.getAttribute('data-raw'));b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1500)})(this)">复制</button></summary>
+<pre class="sql-pre" data-raw="* | WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+),
+daily_user AS (
+  SELECT
+    a.t,
+    d.work_no,
+    sum(a.total_tokens) AS total_tokens
+  FROM active_user a
+  JOIN dept_user d ON d.work_no = a.user_id
+  WHERE 1 = 1
+  GROUP BY a.t, d.work_no
+  HAVING total_tokens &gt; 0
+),
+ranked AS (
+  SELECT
+    t,
+    work_no,
+    total_tokens,
+    row_number() OVER (PARTITION BY t ORDER BY total_tokens DESC) AS rn,
+    count(1) OVER (PARTITION BY t) AS user_count,
+    sum(total_tokens) OVER (PARTITION BY t) AS all_tokens
+  FROM daily_user
+)
+
+SELECT
+  t,
+  round(sum(CASE WHEN rn &lt;= cast(ceil(user_count * 0.10) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS &quot;Top10% Token占比&quot;,
+  round(sum(CASE WHEN rn &lt;= cast(ceil(user_count * 0.20) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS &quot;Top20% Token占比&quot;
+FROM ranked
+GROUP BY t
+ORDER BY t
+LIMIT 10000">* |
+WITH dept_user AS (
+  SELECT
+    work_no,
+    name,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 1), &#x27;&#x27;) AS dept_name_1,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 2), &#x27;&#x27;) AS dept_name_2,
+    COALESCE(SPLIT_PART(dept_name, &#x27;-&#x27;, 3), &#x27;&#x27;) AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no &lt;&gt; &#x27;&#x27;
+  GROUP BY work_no, name, dept_name
+),
+active_user AS (
+  SELECT
+    date_trunc(&#x27;day&#x27;, __time__) AS t,
+    &quot;user.id&quot; AS user_id,
+    coalesce(nullif(&quot;gen_ai.agent.type&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.agent.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS agent_type,
+    coalesce(nullif(&quot;gen_ai.provider.name&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS provider,
+    coalesce(nullif(&quot;gen_ai.request.model&quot;, &#x27;null&#x27;), nullif(&quot;gen_ai.response.model&quot;, &#x27;null&#x27;), &#x27;unknown&#x27;) AS model,
+    sum(coalesce(&quot;gen_ai.usage.input_tokens&quot;, 0)) AS input_tokens,
+    sum(coalesce(&quot;gen_ai.usage.output_tokens&quot;, 0)) AS output_tokens,
+    sum(coalesce(&quot;gen_ai.usage.total_tokens&quot;, 0)) AS total_tokens,
+    count(1) AS events
+  FROM log
+  WHERE &quot;user.id&quot; IS NOT NULL AND &quot;user.id&quot; &lt;&gt; &#x27;&#x27;
+  GROUP BY t, user_id, agent_type, provider, model
+),
+<span class="sql-diff">daily_user</span> AS (
+  SELECT
+    <span class="sql-diff">a.t</span>,
+    <span class="sql-diff">d.work_no,</span>
+  <span class="sql-diff">  sum(a.total_tokens) AS total_tokens</span>
+  <span class="sql-diff">FROM active_user a</span>
+  <span class="sql-diff">JOIN dept_user d ON d.work_no = a.user_id</span>
+  <span class="sql-diff">WHERE 1 = 1</span>
+<span class="sql-diff">  GROUP BY a.t, d.work_no</span>
+<span class="sql-diff">  HAVING total_tokens &gt; 0</span>
+<span class="sql-diff">),</span>
+<span class="sql-diff">ranked AS (</span>
+  <span class="sql-diff">SELECT</span>
+    <span class="sql-diff">t</span>,
+    <span class="sql-diff">work_no</span>,
+    <span class="sql-diff">total_tokens,</span>
+  <span class="sql-diff">  row_number() OVER (PARTITION BY t ORDER BY total_tokens DESC) AS rn,</span>
+<span class="sql-diff">    count(1) OVER (PARTITION BY t) AS user_count,</span>
+<span class="sql-diff">    sum(total_tokens) OVER (PARTITION BY t) AS all_tokens</span>
+<span class="sql-diff">  FROM daily_user</span>
+<span class="sql-diff">)</span>
+<span class="sql-diff">SELECT</span>
+<span class="sql-diff">  t,</span>
+<span class="sql-diff">  round(sum(CASE WHEN rn &lt;= cast(ceil(user_count * 0.10) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS &quot;Top10% Token占比&quot;,</span>
+<span class="sql-diff">  round(sum(CASE WHEN rn &lt;= cast(ceil(user_count * 0.20) AS bigint) THEN total_tokens ELSE 0 END) * 100.0 / nullif(max(all_tokens), 0), 2) AS &quot;Top20% Token占比&quot;</span>
+<span class="sql-diff">FROM ranked</span>
+<span class="sql-diff">GROUP BY t</span>
+<span class="sql-diff">ORDER BY t</span>
+<span class="sql-diff">LIMIT 10000</span></pre></details></div></div>
+<div class="ft">render_report.py &nbsp;|&nbsp; cases/loongsuite-pilot-insight/output/ai-coding-team-dashboard.json</div>
+</body>
+</html>

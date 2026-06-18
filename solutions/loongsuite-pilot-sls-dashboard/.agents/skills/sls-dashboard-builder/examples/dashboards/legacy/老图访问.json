@@ -1,0 +1,47 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "* | SELECT COUNT(*) as c, request_method GROUP by request_method LIMIT 10000",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "name": "A",
+                        "tokenQuery": "* | SELECT COUNT(*) as c, request_method GROUP by request_method LIMIT 10000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "yAxis": [
+                    "c"
+                ],
+                "xAxis": [
+                    "request_method"
+                ],
+                "yPos": 0,
+                "displayName": "",
+                "showBackground": true,
+                "width": 8,
+                "xPos": 0,
+                "fixedTime": false,
+                "showBorder": true,
+                "height": 9
+            },
+            "action": {},
+            "title": "charts-demo1710838204112",
+            "type": "treemap"
+        }
+    ],
+    "displayName": "老图访问",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1710838201017-15786"
+}

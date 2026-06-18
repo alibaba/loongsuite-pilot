@@ -147,8 +147,8 @@ describe('CursorHookInput', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]!['event.name']).toBe('tool.result');
     expect(entries[0]!['gen_ai.session.id']).toBe('sess-from-raw');
-    expect(entries[0]!['gen_ai.request.model']).toBe('unknown');
-    expect(entries[0]!['gen_ai.response.model']).toBe('unknown');
+    expect(entries[0]!['gen_ai.request.model']).toBe('composer-2.5');
+    expect(entries[0]!['gen_ai.response.model']).toBe('composer-2.5');
     expect(entries[0]!['gen_ai.tool.call.result']).toEqual({ output: 'ok', exitCode: 0 });
     expect(entries[0]!['gen_ai.tool.call.duration']).toBe(12.5);
   });
@@ -206,7 +206,7 @@ describe('CursorHookInput', () => {
     await input.stop();
 
     expect(entries).toHaveLength(1);
-    expect(entries[0]!['event.name']).toBe('llm.request');
+    expect(entries[0]!['event.name']).toBe('other');
     expect(entries[0]!['user.id']).toBe('');
     expect(entries[0]!['gen_ai.input.messages_delta']).toEqual([{ role: 'user', parts: [{ type: 'text', content: 'please inspect this' }] }]);
     expect(entries[0]!['gen_ai.usage.input_tokens']).toBe(10);
@@ -266,8 +266,8 @@ describe('CursorHookInput', () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]!['event.name']).toBe('other');
-    expect(entries[0]!['gen_ai.request.model']).toBe('unknown');
-    expect(entries[0]!['gen_ai.response.model']).toBe('unknown');
+    expect(entries[0]!['gen_ai.request.model']).toBe('composer-2.5');
+    expect(entries[0]!['gen_ai.response.model']).toBe('composer-2.5');
     expect(entries[0]!['error.message']).toBeUndefined();
   });
 
@@ -439,8 +439,8 @@ describe('CursorHookInput', () => {
     // workspace_roots is absent and payload has no repo/branch
     expect(entries[0]!['event.name']).toBe('tool.call');
 
-    // llm.request entry should use the cached cd path to infer git info
-    expect(entries[1]!['event.name']).toBe('llm.request');
+    // beforeSubmitPrompt entry should use the cached cd path to infer git info
+    expect(entries[1]!['event.name']).toBe('other');
     expect(entries[1]!['gen_ai.session.id']).toBe('s-fallback');
     expect(entries[1]!['git.repo']).toBe('acme/fallback-cd');
     expect(entries[1]!['git.branch']).toBe('feature/fallback-cd');

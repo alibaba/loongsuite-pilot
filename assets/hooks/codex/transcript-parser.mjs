@@ -61,6 +61,28 @@ function parseMaybeJsonValue(value) {
   try { return JSON.parse(value); } catch { return value; }
 }
 
+function extractMessageContentText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const parts = [];
+  for (const block of content) {
+    if (typeof block === 'string') {
+      parts.push(block);
+    } else if (block && typeof block === 'object' && typeof block.text === 'string') {
+      parts.push(block.text);
+    }
+  }
+  return parts.filter(Boolean).join('\n');
+}
+
+function transcriptMessageToInputMessage(payload) {
+  const role = typeof payload?.role === 'string' ? payload.role : '';
+  if (!role || role === 'assistant') return null;
+  const content = extractMessageContentText(payload.content);
+  if (!content) return null;
+  return { role, parts: [{ type: 'text', content }] };
+}
+
 function entryTimestampSeconds(entry) {
   const ms = Date.parse(entry?.timestamp || '');
   return Number.isFinite(ms) ? ms / 1000 : 0;
@@ -182,6 +204,7 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
   // turn 边界列表：记录 transcript 中每个 turn_context 的 turn_id 和时间戳，
   // 用于在 writeSessionJsonl 中驱动 turn 切分（替代仅靠 user_prompt_submit hook）
   const turnBoundaries = [];
+  const pendingInputMessages = [];
 
   // 父 agent 工具调用的 call_id 白名单。父 transcript 只包含父 agent 的 function_call，
   // 子 agent 的工具调用在子 transcript 中。resolveTurns 用此集合过滤 state.events 中
@@ -196,7 +219,13 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
   // 跨 turn 心跳去重锚点;由调用方从 state.transcript_last_token_usage 传入
   let lastEmittedUsage = initialLastUsage;
 
+  let lineIndex = 0;
+  // web_search_call 只有完成时间（web_search_end），没有开始时间。
+  // 用搜索前最后一个非 web_search 事件的时间戳近似搜索发起时刻，
+  // 使 tool.call 与 tool.result 有合理的时间差（duration > 0）。
+  let lastNonWebSearchTs = 0;
   for (const line of content.split('\n')) {
+    lineIndex++;
     const trimmed = line.trim();
     if (!trimmed) continue;
 
@@ -210,6 +239,13 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
     const entryType = entry.type;
     const payload = entry.payload;
     if (!payload || typeof payload !== 'object') continue;
+
+    // Track the last non-web_search timestamp for approximating web_search duration
+    const payloadTypeForTs = payload.type;
+    if (payloadTypeForTs !== 'web_search_end' && payloadTypeForTs !== 'web_search_call') {
+      const ts = entryTimestampSeconds(entry);
+      if (ts > 0) lastNonWebSearchTs = ts;
+    }
 
     if (entryType === 'session_meta') {
       if (typeof payload.model_provider === 'string' && payload.model_provider) {
@@ -237,11 +273,20 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
       }
       if (typeof payload.turn_id === 'string' && payload.turn_id) {
         currentTurnId = payload.turn_id;
-        turnBoundaries.push({
-          turn_id: payload.turn_id,
-          timestamp: entryTimestampSeconds(entry),
-          prompt: '',
-        });
+        const lastBoundary = turnBoundaries[turnBoundaries.length - 1];
+        if (lastBoundary?.turn_id === payload.turn_id) {
+          if (pendingInputMessages.length > 0) {
+            lastBoundary.inputMessages ??= [];
+            lastBoundary.inputMessages.push(...pendingInputMessages.splice(0));
+          }
+        } else {
+          turnBoundaries.push({
+            turn_id: payload.turn_id,
+            timestamp: entryTimestampSeconds(entry),
+            prompt: '',
+            inputMessages: pendingInputMessages.splice(0),
+          });
+        }
       }
     } else if (entryType === 'event_msg') {
       const payloadType = payload.type;
@@ -303,7 +348,21 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
       }
     } else if (entryType === 'response_item') {
       const itemType = payload.type;
-      if (itemType === 'function_call') {
+      if (itemType === 'message') {
+        const inputMessage = transcriptMessageToInputMessage(payload);
+        if (inputMessage) {
+          const lastBoundary = turnBoundaries[turnBoundaries.length - 1];
+          if (lastBoundary && currentTurnId) {
+            lastBoundary.inputMessages ??= [];
+            lastBoundary.inputMessages.push(inputMessage);
+            if (inputMessage.role === 'user' && !lastBoundary.prompt) {
+              lastBoundary.prompt = inputMessage.parts[0]?.content || '';
+            }
+          } else {
+            pendingInputMessages.push(inputMessage);
+          }
+        }
+      } else if (itemType === 'function_call') {
         const callId = String(payload.call_id || payload.id || '');
         if (callId) {
           const toolName = String(payload.name || 'unknown');
@@ -319,6 +378,62 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
           toolEvents.push(evt);
           // 父 transcript 中所有 function_call 的 call_id 都是父 agent 的工具调用。
           // 子 agent 的工具调用在子 transcript 中，不会出现在这里。
+          parentToolCallIds.add(callId);
+        }
+      } else if (itemType === 'custom_tool_call') {
+        const callId = String(payload.call_id || payload.id || '');
+        if (callId) {
+          const toolName = String(payload.name || 'custom_tool');
+          const evt = {
+            type: 'pre_tool_use',
+            timestamp: entryTimestampSeconds(entry),
+            turn_id: currentTurnId ?? '',
+            tool_name: toolName,
+            tool_input: parseMaybeJsonValue(payload.input),
+            tool_use_id: callId,
+          };
+          pendingToolCalls.set(callId, evt);
+          toolEvents.push(evt);
+          parentToolCallIds.add(callId);
+        }
+      } else if (itemType === 'web_search_call') {
+        const endTime = entryTimestampSeconds(entry);
+        const startTime = lastNonWebSearchTs > 0 ? lastNonWebSearchTs : endTime;
+        const callId = String(payload.call_id || payload.id || `web_search:${endTime}:${lineIndex}`);
+        const evt = {
+          type: 'pre_tool_use',
+          timestamp: startTime,
+          turn_id: currentTurnId ?? '',
+          tool_name: 'web_search',
+          tool_input: parseMaybeJsonValue(payload.action),
+          tool_use_id: callId,
+        };
+        toolEvents.push(evt);
+        toolEvents.push({
+          type: 'post_tool_use',
+          timestamp: endTime,
+          turn_id: currentTurnId ?? '',
+          tool_name: 'web_search',
+          tool_response: {
+            ...(payload.status !== undefined ? { status: payload.status } : {}),
+            ...(payload.action !== undefined ? { action: parseMaybeJsonValue(payload.action) } : {}),
+          },
+          tool_use_id: callId,
+        });
+        parentToolCallIds.add(callId);
+      } else if (itemType === 'tool_search_call') {
+        const callId = String(payload.call_id || payload.id || '');
+        if (callId) {
+          const evt = {
+            type: 'pre_tool_use',
+            timestamp: entryTimestampSeconds(entry),
+            turn_id: currentTurnId ?? '',
+            tool_name: 'tool_search',
+            tool_input: parseMaybeJsonValue(payload.arguments),
+            tool_use_id: callId,
+          };
+          pendingToolCalls.set(callId, evt);
+          toolEvents.push(evt);
           parentToolCallIds.add(callId);
         }
       } else if (itemType === 'function_call_output') {
@@ -353,6 +468,38 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
               });
             }
           }
+        }
+      } else if (itemType === 'custom_tool_call_output') {
+        const callId = String(payload.call_id || payload.id || '');
+        if (callId) {
+          const pre = pendingToolCalls.get(callId);
+          toolEvents.push({
+            type: 'post_tool_use',
+            timestamp: entryTimestampSeconds(entry),
+            turn_id: currentTurnId ?? pre?.turn_id ?? '',
+            tool_name: pre?.tool_name || 'custom_tool',
+            tool_response: parseMaybeJsonValue(payload.output),
+            tool_use_id: callId,
+          });
+          pendingToolCalls.delete(callId);
+        }
+      } else if (itemType === 'tool_search_output') {
+        const callId = String(payload.call_id || payload.id || '');
+        if (callId) {
+          const pre = pendingToolCalls.get(callId);
+          toolEvents.push({
+            type: 'post_tool_use',
+            timestamp: entryTimestampSeconds(entry),
+            turn_id: currentTurnId ?? pre?.turn_id ?? '',
+            tool_name: pre?.tool_name || 'tool_search',
+            tool_response: {
+              ...(payload.status !== undefined ? { status: payload.status } : {}),
+              ...(payload.execution !== undefined ? { execution: payload.execution } : {}),
+              ...(payload.tools !== undefined ? { tools: parseMaybeJsonValue(payload.tools) } : {}),
+            },
+            tool_use_id: callId,
+          });
+          pendingToolCalls.delete(callId);
         }
       }
     }

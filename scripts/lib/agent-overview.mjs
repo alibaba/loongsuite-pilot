@@ -165,6 +165,7 @@ export function createOverviewAggregator(options = {}) {
   let cachedSummary = null;
   let cachedAt = 0;
   let overviewCache = null;
+  let buildChain = Promise.resolve();
 
   async function getOverview({ force = false } = {}) {
     const now = nowProvider();
@@ -174,24 +175,42 @@ export function createOverviewAggregator(options = {}) {
         cache: { ...cachedSummary.cache, hit: true },
       };
     }
-    overviewCache ||= await loadOverviewCache(overviewCachePath);
 
-    const summary = await buildOverview({
-      dataDir,
-      now,
-      serviceLogTailBytes,
-      jsonlMaxBytes,
-      failedLogMaxBytes,
-      timelineLimit,
-      overviewCache,
-      overviewCachePath,
-      cachedOutputEventsPerFile,
-      maxIndexBytesPerRefresh,
-      maxIndexLinesPerRefresh,
+    const previousBuild = buildChain;
+    let releaseBuild;
+    buildChain = new Promise((resolve) => {
+      releaseBuild = resolve;
     });
-    cachedSummary = summary;
-    cachedAt = now.getTime();
-    return summary;
+    await previousBuild.catch(() => {});
+    try {
+      const lockedNow = nowProvider();
+      if (!force && cachedSummary && lockedNow.getTime() - cachedAt < cacheTtlMs) {
+        return {
+          ...cachedSummary,
+          cache: { ...cachedSummary.cache, hit: true },
+        };
+      }
+      overviewCache ||= await loadOverviewCache(overviewCachePath);
+
+      const summary = await buildOverview({
+        dataDir,
+        now: lockedNow,
+        serviceLogTailBytes,
+        jsonlMaxBytes,
+        failedLogMaxBytes,
+        timelineLimit,
+        overviewCache,
+        overviewCachePath,
+        cachedOutputEventsPerFile,
+        maxIndexBytesPerRefresh,
+        maxIndexLinesPerRefresh,
+      });
+      cachedSummary = summary;
+      cachedAt = lockedNow.getTime();
+      return summary;
+    } finally {
+      releaseBuild();
+    }
   }
 
   async function getAgent(agentId) {
@@ -646,7 +665,14 @@ function validOutputCacheEntry(entry, filePath, fileStat) {
   if (!entry || entry.version !== OVERVIEW_CACHE_VERSION || entry.path !== filePath) return null;
   if (!Number.isFinite(entry.indexedThroughOffset) || entry.indexedThroughOffset < 0) return null;
   if (!entry.summary || typeof entry.summary !== 'object') return null;
+  if (Number.isFinite(entry.size) && entry.size < entry.indexedThroughOffset) return null;
   if (entry.indexedThroughOffset > fileStat.size) return null;
+  if (entry.indexedThroughOffset === fileStat.size) {
+    if (Number.isFinite(entry.size) && entry.size !== fileStat.size) return null;
+    if (Number.isFinite(entry.mtimeMs) && Math.abs(entry.mtimeMs - fileStat.mtimeMs) > 1) {
+      return null;
+    }
+  }
   if (Number.isFinite(entry.dev) && Number.isFinite(entry.ino)
     && (entry.dev !== fileStat.dev || entry.ino !== fileStat.ino)) {
     return null;

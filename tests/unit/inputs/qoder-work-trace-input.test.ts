@@ -171,10 +171,13 @@ describe('QoderWorkTraceInput', () => {
     const batch1 = await startAndCollect(input);
     expect(batch1[0]['gen_ai.usage.input_tokens']).toBe(1000);
 
-    // Simulate rotation: delete and recreate with new content
-    await fs.rm(sdkFile);
+    // Simulate rotation: rename old file first then create new one.
+    // Keep old file alive during creation to prevent inode reuse on Linux.
+    const oldSdkFile = sdkFile + '.old';
+    await fs.rename(sdkFile, oldSdkFile);
     const lines2 = buildSdkMessagePair(sessionId, 'msg-r2', 2000, 100);
     await fs.writeFile(sdkFile, lines2.join('\n') + '\n');
+    await fs.rm(oldSdkFile);
 
     // Write new hook entry
     const resp2 = buildHookEntry({ 'event.id': 'r2', 'gen_ai.session.id': sessionId, 'gen_ai.turn.id': 'turn-2' });

@@ -1,0 +1,959 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "builtin",
+                        "displayName": "A",
+                        "name": "A",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "B",
+                        "name": "B",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "C",
+                        "name": "C",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "D",
+                        "name": "D",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "E",
+                        "name": "E",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "F",
+                        "name": "F",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "B": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "C": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "D": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "E": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "F": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "threshold",
+                        "color": "#0070cc"
+                    },
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1658807484615",
+                "fieldOptions": [
+                    {
+                        "name": "count",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "A查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "B",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "B查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "C",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "C查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "D",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "D查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "E",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "E查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "F",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "F查询"
+                            }
+                        ]
+                    }
+                ],
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "show": true
+                },
+                "xPos": 0,
+                "version": 2,
+                "burGaugeValueOption": {
+                    "calculationType": "first",
+                    "limitCount": 25,
+                    "minItemHeight": 50,
+                    "showGaugeTitle": true,
+                    "showMode": "calculate",
+                    "layoutOrientation": "horizontal",
+                    "minItemWidth": 60,
+                    "showDialTitle": true
+                },
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholds": [
+                        {
+                            "color": "rgb(115, 191, 105)",
+                            "rule": ">",
+                            "value": 0
+                        },
+                        {
+                            "color": "rgb(92 ,183 ,74)",
+                            "rule": ">",
+                            "value": 10
+                        },
+                        {
+                            "color": "rgb(208 ,172 ,88)",
+                            "rule": ">",
+                            "value": 20
+                        },
+                        {
+                            "color": "rgb(230 ,131 ,65)",
+                            "rule": ">",
+                            "value": 30
+                        },
+                        {
+                            "color": "rgb(208 ,74 ,90)",
+                            "rule": ">",
+                            "value": 40
+                        },
+                        {
+                            "color": "rgb(202 ,81 ,184)",
+                            "rule": ">",
+                            "value": 50
+                        },
+                        {
+                            "color": "rgb(232 ,136 ,147)",
+                            "rule": ">",
+                            "value": 60
+                        },
+                        {
+                            "color": "rgb(139 ,180 ,216)",
+                            "rule": ">",
+                            "value": 70
+                        },
+                        {
+                            "color": "rgb(142 ,217 ,128)",
+                            "rule": ">",
+                            "value": 80
+                        },
+                        {
+                            "color": "rgb(83 ,171 ,184)",
+                            "rule": ">",
+                            "value": 90
+                        }
+                    ],
+                    "thresholdMode": "absolute"
+                },
+                "burGaugeStylesOption": {
+                    "showGradient": false,
+                    "maxRange": 100,
+                    "displayMode": "basic",
+                    "showUnfilledArea": true,
+                    "minRange": 0
+                },
+                "showTitle": true,
+                "width": 10,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "基础计量图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 8,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1690429660945",
+            "type": "burgauge"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "builtin",
+                        "name": "A",
+                        "type": "random_time_line"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "threshold",
+                        "color": "#ca51b8"
+                    },
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1658807484619",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "show": true
+                },
+                "xPos": 10,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": 2,
+                "burGaugeValueOption": {
+                    "calculationType": "mean",
+                    "limitCount": 25,
+                    "minItemHeight": 50,
+                    "showGaugeTitle": true,
+                    "showMode": "allValues",
+                    "layoutOrientation": "vertical",
+                    "minItemWidth": 50,
+                    "showDialTitle": true
+                },
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholds": [
+                        {
+                            "color": "rgb(112, 219, 206)",
+                            "rule": ">",
+                            "value": 0
+                        },
+                        {
+                            "color": "rgb(92 ,183 ,74)",
+                            "rule": ">",
+                            "value": 20
+                        },
+                        {
+                            "color": "rgb(208 ,172 ,88)",
+                            "rule": ">",
+                            "value": 40
+                        },
+                        {
+                            "color": "rgb(230 ,131 ,65)",
+                            "rule": ">",
+                            "value": 60
+                        },
+                        {
+                            "color": "rgb(208 ,74 ,90)",
+                            "rule": ">",
+                            "value": 80
+                        },
+                        {
+                            "color": "rgb(202 ,81 ,184)",
+                            "rule": ">",
+                            "value": 100
+                        }
+                    ],
+                    "thresholdMode": "absolute"
+                },
+                "burGaugeStylesOption": {
+                    "showGradient": false,
+                    "maxRange": 100,
+                    "displayMode": "lcd",
+                    "showUnfilledArea": true,
+                    "minRange": 0
+                },
+                "showTitle": true,
+                "width": 14,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "LCD模式（水平）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 18,
+                "zIndex": 14
+            },
+            "action": {},
+            "title": "charts-demo1690429667832",
+            "type": "burgauge"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "builtin",
+                        "displayName": "A",
+                        "name": "A",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "B",
+                        "name": "B",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "C",
+                        "name": "C",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "B",
+                        "name": "D",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "C",
+                        "name": "E",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "B",
+                        "name": "F",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "threshold",
+                        "color": "#0070cc"
+                    },
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "byte"
+                },
+                "displayName": "simulator-nginx-demo1658807484616",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 0,
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholds": [
+                        {
+                            "color": "rgb(110, 179, 240)",
+                            "rule": ">",
+                            "value": 0
+                        },
+                        {
+                            "color": "rgb(92 ,183 ,74)",
+                            "rule": ">",
+                            "value": 20
+                        },
+                        {
+                            "color": "rgb(208 ,172 ,88)",
+                            "rule": ">",
+                            "value": 40
+                        },
+                        {
+                            "color": "rgb(230 ,131 ,65)",
+                            "rule": ">",
+                            "value": 60
+                        },
+                        {
+                            "color": "rgb(208 ,74 ,90)",
+                            "rule": ">",
+                            "value": 80
+                        }
+                    ],
+                    "thresholdMode": "absolute"
+                },
+                "basicOptions": {
+                    "displayName": "渐变模式",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "height": 10,
+                "zIndex": 11,
+                "queryOptionMap": {
+                    "A": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "B": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "C": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "D": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "E": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "F": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    }
+                },
+                "yPos": 8,
+                "fieldOptions": [
+                    {
+                        "name": "count",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "A查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "B",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "B查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "C",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "C查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "D",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "D查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "E",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "E查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "F",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "F查询"
+                            }
+                        ]
+                    }
+                ],
+                "xAxisOption": {
+                    "show": true
+                },
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": 2,
+                "burGaugeValueOption": {
+                    "calculationType": "last",
+                    "limitCount": 14,
+                    "minItemHeight": 50,
+                    "showGaugeTitle": false,
+                    "showMode": "calculate",
+                    "layoutOrientation": "horizontal",
+                    "minItemWidth": 20,
+                    "showDialTitle": true
+                },
+                "burGaugeStylesOption": {
+                    "showGradient": false,
+                    "maxRange": 100,
+                    "displayMode": "gradient",
+                    "showUnfilledArea": true,
+                    "minRange": 0
+                },
+                "showTitle": true,
+                "width": 10,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690429672134",
+            "type": "burgauge"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "builtin",
+                        "name": "A",
+                        "type": "random_time_line"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1658807484621",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "equalHeight",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 0,
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "basicOptions": {
+                    "displayName": "表格模式添加计量图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "height": 11,
+                "zIndex": 16,
+                "queryOptionMap": {
+                    "A": {}
+                },
+                "yPos": 18,
+                "fieldOptions": [
+                    {
+                        "name": "count",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "columnOptions",
+                                    "cellMode"
+                                ],
+                                "value": "lcd_gauge"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#0070cc"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "xAxisOption": {
+                    "show": true
+                },
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": 2,
+                "showTitle": true,
+                "width": 24,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690429695638",
+            "type": "tablepro"
+        }
+    ],
+    "displayName": "计量图-基础计量图",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690429619942-631677"
+}

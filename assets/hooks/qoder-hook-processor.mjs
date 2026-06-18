@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import {
   parseArgs,
@@ -120,7 +121,7 @@ async function main() {
 // getLineRange prevents double-processing if another hook invocation somehow occurs.
 function spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd) {
   const nodebin = process.argv[0];
-  const script = new URL(import.meta.url).pathname;
+  const script = fileURLToPath(import.meta.url);
   const spawnArgs = [
     script,
     '--agent-id', agentId,

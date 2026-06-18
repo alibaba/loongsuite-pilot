@@ -21,7 +21,7 @@ const PROJECT_ROOT = path.resolve(__dirname, '..');
 const HOOKS_SOURCE_DIR = path.join(PROJECT_ROOT, 'assets', 'hooks');
 const SKILLS_SOURCE_DIR = path.join(PROJECT_ROOT, 'assets', 'skills');
 const PLUGINS_SOURCE_DIR = path.join(PROJECT_ROOT, 'assets', 'plugins');
-const LOONGSUITE_PILOT_DIR = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(process.env.HOME || '', '.loongsuite-pilot');
+const LOONGSUITE_PILOT_DIR = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(process.env.HOME || process.env.USERPROFILE || '', '.loongsuite-pilot');
 const HOOKS_TARGET_DIR = path.join(LOONGSUITE_PILOT_DIR, 'hooks');
 const SKILLS_TARGET_DIR = path.join(LOONGSUITE_PILOT_DIR, 'skills');
 const PLUGINS_TARGET_DIR = path.join(LOONGSUITE_PILOT_DIR, 'plugins');
@@ -149,7 +149,7 @@ function main() {
   // Old otel-claude-hook versions injected NODE_OPTIONS="--require intercept.js" into shell profiles.
   // After upgrade the real file is removed, but already-open terminals still have NODE_OPTIONS set,
   // causing MODULE_NOT_FOUND errors. This stub prevents that.
-  const legacyIntercept = path.join(process.env.HOME || '', '.cache', 'opentelemetry.instrumentation.claude', 'intercept.js');
+  const legacyIntercept = path.join(process.env.HOME || process.env.USERPROFILE || '', '.cache', 'opentelemetry.instrumentation.claude', 'intercept.js');
   if (!fs.existsSync(legacyIntercept)) {
     try {
       ensureDir(path.dirname(legacyIntercept));
@@ -174,7 +174,7 @@ const migrationScript = path.join(__dirname, 'migrate-internal-config.js');
 if (fs.existsSync(migrationScript)) {
   try {
     const { migrate } = await import(pathToFileURL(migrationScript).href);
-    const dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(process.env.HOME || '', '.loongsuite-pilot');
+    const dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(process.env.HOME || process.env.USERPROFILE || '', '.loongsuite-pilot');
     const configPath = path.join(dataDir, 'config.json');
     if (migrate(configPath)) {
       console.log('[loongsuite-pilot] Config migrated: internal SLS moved to configs/inner/data_config.json');

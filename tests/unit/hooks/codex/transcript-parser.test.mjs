@@ -92,3 +92,92 @@ describe('codex parseTranscript - 单 turn / 多 step', () => {
     expect(data).not.toBeNull();
   });
 });
+
+describe('codex parseTranscript - tool response_item variants', () => {
+  test('解析 function/custom/web/tool_search 工具调用并保留原始 arguments', () => {
+    const transcript = path.join(fs.mkdtempSync(path.join(process.cwd(), '.tmp-codex-parser-')), 'rollout.jsonl');
+    try {
+      fs.writeFileSync(transcript, [
+        { timestamp: '2026-05-27T10:00:00Z', type: 'turn_context', payload: { turn_id: 'turn-1', model: 'gpt-5.5' }},
+        { timestamp: '2026-05-27T10:00:01Z', type: 'response_item', payload: {
+          type: 'function_call',
+          name: 'write_stdin',
+          call_id: 'call-fn',
+          arguments: JSON.stringify({ session_id: 1, chars: 'q' }),
+        }},
+        { timestamp: '2026-05-27T10:00:02Z', type: 'response_item', payload: {
+          type: 'function_call_output',
+          call_id: 'call-fn',
+          output: JSON.stringify({ ok: true }),
+        }},
+        { timestamp: '2026-05-27T10:00:03Z', type: 'response_item', payload: {
+          type: 'custom_tool_call',
+          name: 'apply_patch',
+          call_id: 'call-patch',
+          input: '*** Begin Patch\n*** End Patch',
+        }},
+        { timestamp: '2026-05-27T10:00:04Z', type: 'response_item', payload: {
+          type: 'custom_tool_call_output',
+          call_id: 'call-patch',
+          output: 'ok',
+        }},
+        { timestamp: '2026-05-27T10:00:05Z', type: 'response_item', payload: {
+          type: 'web_search_call',
+          status: 'completed',
+          action: { type: 'search', query: 'codex hooks', queries: ['codex hooks'] },
+        }},
+        { timestamp: '2026-05-27T10:00:06Z', type: 'response_item', payload: {
+          type: 'tool_search_call',
+          call_id: 'call-search',
+          status: 'completed',
+          execution: 'client',
+          arguments: { query: 'browser mcp', limit: 10 },
+        }},
+        { timestamp: '2026-05-27T10:00:07Z', type: 'response_item', payload: {
+          type: 'tool_search_output',
+          call_id: 'call-search',
+          status: 'completed',
+          execution: 'client',
+          tools: [{ name: 'browser.open' }],
+        }},
+      ].map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf-8');
+
+      const data = parseTranscript(transcript);
+      const preEvents = data.toolEvents.filter((event) => event.type === 'pre_tool_use');
+      const postEvents = data.toolEvents.filter((event) => event.type === 'post_tool_use');
+
+      expect(preEvents.map((event) => event.tool_name)).toEqual([
+        'write_stdin',
+        'apply_patch',
+        'web_search',
+        'tool_search',
+      ]);
+      expect(preEvents.find((event) => event.tool_use_id === 'call-fn')?.tool_input).toEqual({ session_id: 1, chars: 'q' });
+      expect(preEvents.find((event) => event.tool_use_id === 'call-patch')?.tool_input).toBe('*** Begin Patch\n*** End Patch');
+      expect(preEvents.find((event) => event.tool_name === 'web_search')?.tool_input).toEqual({
+        type: 'search',
+        query: 'codex hooks',
+        queries: ['codex hooks'],
+      });
+      expect(preEvents.find((event) => event.tool_use_id === 'call-search')?.tool_input).toEqual({
+        query: 'browser mcp',
+        limit: 10,
+      });
+
+      expect(postEvents.find((event) => event.tool_use_id === 'call-patch')?.tool_response).toBe('ok');
+      expect(postEvents.find((event) => event.tool_name === 'web_search')?.tool_response).toEqual({
+        status: 'completed',
+        action: { type: 'search', query: 'codex hooks', queries: ['codex hooks'] },
+      });
+      expect(postEvents.find((event) => event.tool_use_id === 'call-search')?.tool_response).toMatchObject({
+        status: 'completed',
+        execution: 'client',
+        tools: [{ name: 'browser.open' }],
+      });
+      expect(data.parentToolCallIds.has('call-patch')).toBe(true);
+      expect([...data.parentToolCallIds].some((id) => id.startsWith('web_search:'))).toBe(true);
+    } finally {
+      fs.rmSync(path.dirname(transcript), { recursive: true, force: true });
+    }
+  });
+});

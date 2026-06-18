@@ -1,0 +1,666 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-3600s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | SELECT minute, c, request_method  from ( select date_format(from_unixtime(__time__ - __time__% 60), '%H:%i') as minute, count(1) as c,  request_method from log group by minute, request_method order by minute asc limit 100000)",
+                        "name": "A",
+                        "tokenQuery": "* | SELECT minute, c, request_method  from ( select date_format(from_unixtime(__time__ - __time__% 60), '%H:%i') as minute, count(1) as c,  request_method from log group by minute, request_method order by minute asc limit 100000)",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "KMB"
+                },
+                "displayName": "simulator-nginx-demo1656411612000",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "A-GET",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 0,
+                "actionOptions": [],
+                "isTimeSeries": false,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "aggChartOption": {
+                    "chartType": "crossover"
+                },
+                "basicOptions": {
+                    "displayName": "基础交叉表",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "height": 11,
+                "zIndex": 52,
+                "queryOptionMap": {
+                    "A": {
+                        "yAxisKey": "c",
+                        "name": "A",
+                        "aggField": "request_method",
+                        "xAxisKeys": [
+                            "minute"
+                        ]
+                    }
+                },
+                "yPos": 0,
+                "fieldOptions": [
+                    {
+                        "name": "c",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "valueMappingOption"
+                                ],
+                                "value": [
+                                    {
+                                        "replaceText": "0",
+                                        "replaceIcon": "",
+                                        "matchType": "special",
+                                        "matchValue": "null",
+                                        "replaceType": "text"
+                                    }
+                                ]
+                            },
+                            {
+                                "optionKeys": [
+                                    "columnOptions",
+                                    "cellMode"
+                                ],
+                                "value": "text"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#0070cc"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "xAxisOption": {
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "dataOption": {
+                    "autoFill": false,
+                    "maxClassifyGroupNum": 50,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690437768760",
+            "type": "crosstable"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-3600s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | SELECT minute, c, request_method  from ( select date_format(from_unixtime(__time__ - __time__% 60), '%H:%i') as minute, count(1) as c,  request_method from log group by minute, request_method order by minute asc limit 100000)",
+                        "name": "A",
+                        "tokenQuery": "* | SELECT minute, c, request_method  from ( select date_format(from_unixtime(__time__ - __time__% 60), '%H:%i') as minute, count(1) as c,  request_method from log group by minute, request_method order by minute asc limit 100000)",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "KMB"
+                },
+                "displayName": "simulator-nginx-demo1656411612000",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "asc",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "A-PUT",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 12,
+                "actionOptions": [],
+                "isTimeSeries": false,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "aggChartOption": {
+                    "chartType": "crossover"
+                },
+                "basicOptions": {
+                    "displayName": "基础交叉表（PUT升序）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "height": 11,
+                "zIndex": 52,
+                "queryOptionMap": {
+                    "A": {
+                        "yAxisKey": "c",
+                        "name": "A",
+                        "aggField": "request_method",
+                        "xAxisKeys": [
+                            "minute"
+                        ]
+                    }
+                },
+                "yPos": 0,
+                "fieldOptions": [
+                    {
+                        "name": "c",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "valueMappingOption"
+                                ],
+                                "value": [
+                                    {
+                                        "replaceText": "0",
+                                        "replaceIcon": "",
+                                        "matchType": "special",
+                                        "matchValue": "null",
+                                        "replaceType": "text"
+                                    }
+                                ]
+                            },
+                            {
+                                "optionKeys": [
+                                    "columnOptions",
+                                    "cellMode"
+                                ],
+                                "value": "text"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#d04a5a"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "xAxisOption": {
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "dataOption": {
+                    "autoFill": false,
+                    "maxClassifyGroupNum": 50,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690437859608",
+            "type": "crosstable"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-3600s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select date_format(from_unixtime(__time__ - __time__% 60), '%H:%i') as minute, substr(cast(request_method as varchar), 1, 2) as hour, count(1) as c,  request_method group by minute, hour, request_method order by minute asc limit 100000",
+                        "name": "A",
+                        "tokenQuery": "* | select date_format(from_unixtime(__time__ - __time__% 60), '%H:%i') as minute, substr(cast(request_method as varchar), 1, 2) as hour, count(1) as c,  request_method group by minute, hour, request_method order by minute asc limit 100000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "KMB"
+                },
+                "displayName": "simulator-nginx-demo1656411612000",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 0,
+                "actionOptions": [],
+                "isTimeSeries": false,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "aggChartOption": {
+                    "chartType": "crossover"
+                },
+                "basicOptions": {
+                    "displayName": "多聚合字段交叉表",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "height": 9,
+                "zIndex": 52,
+                "queryOptionMap": {
+                    "A": {
+                        "yAxisKey": "c",
+                        "name": "A",
+                        "aggField": "request_method",
+                        "xAxisKeys": [
+                            "minute",
+                            "hour"
+                        ]
+                    }
+                },
+                "yPos": 11,
+                "fieldOptions": [
+                    {
+                        "name": "c",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "valueMappingOption"
+                                ],
+                                "value": [
+                                    {
+                                        "replaceText": "0",
+                                        "replaceIcon": "",
+                                        "matchType": "special",
+                                        "matchValue": "null",
+                                        "replaceType": "text"
+                                    }
+                                ]
+                            },
+                            {
+                                "optionKeys": [
+                                    "columnOptions",
+                                    "cellMode"
+                                ],
+                                "value": "text"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#5cb74a"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "xAxisOption": {
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "dataOption": {
+                    "autoFill": false,
+                    "maxClassifyGroupNum": 50,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690438017653",
+            "type": "crosstable"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-3600s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": " * | select host, http_referer, request_method, sum(request_time) as storage group by host, http_referer, request_method",
+                        "name": "A",
+                        "tokenQuery": " * | select host, http_referer, request_method, sum(request_time) as storage group by host, http_referer, request_method",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "yAxisKey": "storage",
+                        "name": "A",
+                        "aggField": "request_method",
+                        "xAxisKeys": [
+                            "http_referer",
+                            "host"
+                        ]
+                    }
+                },
+                "yPos": 11,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "sls-operation1661487539204",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 12,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "多维度分类交叉表",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "state": {
+                    "fieldOptions": [
+                        {
+                            "name": "http_referer",
+                            "queryName": "A",
+                            "overrides": [
+                                {
+                                    "optionKeys": [
+                                        "columnOptions",
+                                        "columnWidth"
+                                    ],
+                                    "value": 151
+                                }
+                            ]
+                        },
+                        {
+                            "name": "host",
+                            "queryName": "A",
+                            "overrides": [
+                                {
+                                    "optionKeys": [
+                                        "columnOptions",
+                                        "columnWidth"
+                                    ],
+                                    "value": 140
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 9,
+                "zIndex": 17
+            },
+            "action": {},
+            "title": "charts-demo1690438062360",
+            "type": "crosstable"
+        }
+    ],
+    "displayName": "交叉表-基础交叉表",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690437753752-134017"
+}

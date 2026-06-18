@@ -1,0 +1,353 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-604800s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select COUNT(*) as pv, COUNT(*) as uv",
+                        "name": "A",
+                        "tokenQuery": "* | select COUNT(*) as pv, COUNT(*) as uv",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    },
+                    {
+                        "datasource": "logstore",
+                        "displayName": "B",
+                        "query": "* | select COUNT(*) as pv, COUNT(*) as uv",
+                        "name": "B",
+                        "tokenQuery": "* | select COUNT(*) as pv, COUNT(*) as uv",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    },
+                    {
+                        "datasource": "logstore",
+                        "displayName": "C",
+                        "query": "* | select diff[1],diff[2], diff[1]-diff[2] from (select compare( pv , 86400) as diff from (select count(1) as pv from log))",
+                        "name": "C",
+                        "tokenQuery": "* | select diff[1],diff[2], diff[1]-diff[2] from (select compare( pv , 86400) as diff from (select count(1) as pv from log))",
+                        "project": "charts-demo",
+                        "logstore": "internal-etl-log"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "D",
+                        "name": "D",
+                        "project": "charts-demo",
+                        "type": "random_time_line"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [],
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "B": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "descriptionFontSize": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "C": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "_col0"
+                        ],
+                        "descriptionFontSize": "",
+                        "compareField": "_col2",
+                        "descriptionFormat": "percent",
+                        "compareValueDescription": "同比上个月"
+                    },
+                    "D": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [],
+                        "descriptionFontSize": "",
+                        "compareField": "count",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "single",
+                        "color": "#f54d61"
+                    },
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "KMB"
+                },
+                "displayName": "simulator-nginx-demo1657878417873",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "show": true
+                },
+                "xPos": 0,
+                "actionOptions": [],
+                "version": 2,
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "showTitle": true,
+                "width": 10,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "对比值",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "statValueOption": {
+                    "calculationType": "mean",
+                    "limitCount": 25,
+                    "minItemHeight": 50,
+                    "showMode": "calculate",
+                    "layoutOrientation": "auto",
+                    "minItemWidth": 50
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "statStyleOptions": {
+                    "customValueColor": "#333333",
+                    "textAlignment": "center",
+                    "colorMode": "value",
+                    "graphMode": "area",
+                    "textMode": "value",
+                    "customBackgroundColor": "#ffffff"
+                },
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 10,
+                "zIndex": 16
+            },
+            "action": {},
+            "title": "charts-demo1690429021513",
+            "type": "statpro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "builtin",
+                        "displayName": "D",
+                        "name": "D",
+                        "project": "charts-demo",
+                        "type": "random_time_line"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "D": {
+                        "associatedField": "__time__",
+                        "descriptionDecimals": 1,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "compareField": "count",
+                        "descriptionFormat": "percent",
+                        "compareValueDescription": "同比上月"
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "threshold",
+                        "color": "#0070cc"
+                    },
+                    "unit": "none",
+                    "displayName": "Count",
+                    "decimals": 2,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1657878417875",
+                "fieldOptions": [
+                    {
+                        "name": "__time__",
+                        "queryName": "D",
+                        "newAdd": true,
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "format"
+                                ],
+                                "value": "localtime"
+                            }
+                        ]
+                    }
+                ],
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "show": true
+                },
+                "xPos": 10,
+                "version": 2,
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholds": [
+                        {
+                            "color": "rgb(115, 191, 105)",
+                            "rule": ">",
+                            "value": 0
+                        },
+                        {
+                            "color": "rgb(92 ,183 ,74)",
+                            "rule": ">",
+                            "value": 10
+                        },
+                        {
+                            "color": "rgb(208 ,172 ,88)",
+                            "rule": ">",
+                            "value": 20
+                        },
+                        {
+                            "color": "rgb(230 ,131 ,65)",
+                            "rule": ">",
+                            "value": 30
+                        },
+                        {
+                            "color": "rgb(208 ,74 ,90)",
+                            "rule": ">",
+                            "value": 40
+                        },
+                        {
+                            "color": "rgb(202 ,81 ,184)",
+                            "rule": ">",
+                            "value": 50
+                        },
+                        {
+                            "color": "rgb(232 ,136 ,147)",
+                            "rule": ">",
+                            "value": 60
+                        }
+                    ],
+                    "thresholdMode": "absolute"
+                },
+                "showTitle": true,
+                "width": 14,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "对比值",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "statValueOption": {
+                    "calculationType": "mean",
+                    "limitCount": 25,
+                    "minItemHeight": 50,
+                    "showMode": "calculate",
+                    "layoutOrientation": "auto",
+                    "minItemWidth": 100
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "statStyleOptions": {
+                    "customValueColor": "#333333",
+                    "textAlignment": "auto",
+                    "colorMode": "background",
+                    "graphMode": "area",
+                    "textMode": "auto",
+                    "customBackgroundColor": "#ffffff"
+                },
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 10,
+                "zIndex": 19
+            },
+            "action": {},
+            "title": "charts-demo1690429028963",
+            "type": "statpro"
+        }
+    ],
+    "displayName": "统计图-对比值模式",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690429012230-245372"
+}

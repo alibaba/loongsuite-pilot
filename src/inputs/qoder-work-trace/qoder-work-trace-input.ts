@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
@@ -506,6 +507,9 @@ async function computeFileSignature(filePath: string): Promise<string> {
 function resolveQoderWorkSdkLogDir(): string {
   if (process.platform === 'darwin') {
     return resolveHome('~/Library/Application Support/QoderWork/logs');
+  }
+  if (process.platform === 'win32') {
+    return path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'QoderWork', 'logs');
   }
   const xdg = process.env.XDG_CONFIG_HOME;
   if (xdg) return path.join(xdg, 'QoderWork', 'logs');

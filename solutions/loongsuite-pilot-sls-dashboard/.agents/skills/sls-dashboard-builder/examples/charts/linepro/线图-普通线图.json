@@ -1,0 +1,649 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-14400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 60 as time, COUNT(*) * random(3) as line1, COUNT(*) * random(8) as line2,   COUNT(*) * random(10) as line3, COUNT(*) * random(5) as line4 GROUP BY time order by time limit 10000",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 60 as time, COUNT(*) * random(3) as line1, COUNT(*) * random(8) as line2,   COUNT(*) * random(10) as line3, COUNT(*) * random(5) as line4 GROUP BY time order by time limit 10000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "time",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "line1"
+                        ]
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "single",
+                        "color": "#0070cc"
+                    },
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "timeRangeMode": "dataTime",
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "单维度",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 0,
+                    "showPoint": "never",
+                    "lineInterpolation": "linear",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 8,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1688697755073",
+            "type": "linepro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-14400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 60 as time, COUNT(*) * random(3) as line1, COUNT(*) * random(8) as line2,   COUNT(*) * random(10) as line3, COUNT(*) * random(5) as line4 GROUP BY time order by time limit 10000",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 60 as time, COUNT(*) * random(3) as line1, COUNT(*) * random(8) as line2,   COUNT(*) * random(10) as line3, COUNT(*) * random(5) as line4 GROUP BY time order by time limit 10000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "time",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "line1",
+                            "line2",
+                            "line3",
+                            "line4"
+                        ]
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "builtin",
+                        "color": "#0070cc"
+                    },
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "charts-demo1688698356407",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "timeRangeMode": "dataTime",
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 12,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "多维度",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 0,
+                    "showPoint": "never",
+                    "lineInterpolation": "linear",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 8,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1688698356407",
+            "type": "linepro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-14400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 60 as time, COUNT(*) * random(3) as line1, COUNT(*) * random(8) as line2,   COUNT(*) * random(10) as line3, COUNT(*) * random(5) as line4 GROUP BY time order by time limit 10000",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 60 as time, COUNT(*) * random(3) as line1, COUNT(*) * random(8) as line2,   COUNT(*) * random(10) as line3, COUNT(*) * random(5) as line4 GROUP BY time order by time limit 10000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "time",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "__all_numeric__"
+                        ]
+                    }
+                },
+                "yPos": 16,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "builtin",
+                        "color": "#0070cc"
+                    },
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "charts-demo1688699110930",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": false,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "timeRangeMode": "dataTime",
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": false,
+                    "zoomTarget": "global"
+                },
+                "xPos": 12,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "隐藏x/y轴",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "never",
+                    "lineInterpolation": "linear",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 1,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 8,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1688699110930",
+            "type": "linepro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-14400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 60 as time, COUNT(*) * random(3) as line1, COUNT(*) * random(8) as line2,   COUNT(*) * random(10) as line3, COUNT(*) * random(5) as line4 GROUP BY time order by time limit 10000",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 60 as time, COUNT(*) * random(3) as line1, COUNT(*) * random(8) as line2,   COUNT(*) * random(10) as line3, COUNT(*) * random(5) as line4 GROUP BY time order by time limit 10000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "time",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "line1"
+                        ]
+                    }
+                },
+                "yPos": 16,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "builtin",
+                        "color": "#0070cc"
+                    },
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "charts-demo1688698356407",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "timeRangeMode": "dataTime",
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "显示点",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 9,
+                    "fillOpacity": 23,
+                    "showPoint": "always",
+                    "lineInterpolation": "linear",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 8,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1688699383317",
+            "type": "linepro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-14400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 60 as time, COUNT(*) * random(3) as line1, COUNT(*) * random(8) as line2,   COUNT(*) * random(10) as line3, COUNT(*) * random(5) as line4 GROUP BY time order by time limit 10000",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 60 as time, COUNT(*) * random(3) as line1, COUNT(*) * random(8) as line2,   COUNT(*) * random(10) as line3, COUNT(*) * random(5) as line4 GROUP BY time order by time limit 10000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "time",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "line1"
+                        ]
+                    }
+                },
+                "yPos": 8,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "single",
+                        "color": "#d04a5a"
+                    },
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "charts-demo1688698356407",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "timeRangeMode": "dataTime",
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "光滑线条 + 渐变",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 100,
+                    "showPoint": "never",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 8,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1688700571335",
+            "type": "linepro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-14400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 60 as time, COUNT(*) * random(3) as line1, COUNT(*) * random(8) as line2,   COUNT(*) * random(10) as line3, COUNT(*) * random(5) as line4 GROUP BY time order by time limit 10000",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 60 as time, COUNT(*) * random(3) as line1, COUNT(*) * random(8) as line2,   COUNT(*) * random(10) as line3, COUNT(*) * random(5) as line4 GROUP BY time order by time limit 10000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "time",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "line1"
+                        ]
+                    }
+                },
+                "yPos": 8,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "builtin",
+                        "color": "#0070cc"
+                    },
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "charts-demo1688698356407",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "timeRangeMode": "dataTime",
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 12,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "宽线条 + 渐变",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 39,
+                    "showPoint": "never",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 6,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 8,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1688700666066",
+            "type": "linepro"
+        }
+    ],
+    "displayName": "线图-普通线图",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1688697691549-359026"
+}

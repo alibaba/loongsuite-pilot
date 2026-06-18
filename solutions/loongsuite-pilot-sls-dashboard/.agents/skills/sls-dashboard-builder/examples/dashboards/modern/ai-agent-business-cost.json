@@ -1,0 +1,358 @@
+{
+  "dashboardName": "ai-agent-business-cost",
+  "displayName": "AI Agent 业务与成本",
+  "description": "业务与成本分析盘示例，覆盖会话量、Token、估算成本、客户与 Workspace 消耗。",
+  "attribute": { "type": "grid" },
+  "charts": [
+    {
+      "title": "row-business-overview",
+      "type": "dashboardrow",
+      "search": { "logstore": "", "topic": "", "query": "", "start": "-900s", "end": "now" },
+      "action": {},
+      "display": { "basicOptions": { "displayName": "核心概览" }, "xPos": 0, "yPos": 0, "width": 24, "height": 1, "version": "2" }
+    },
+    {
+      "title": "card-session-count",
+      "type": "statpro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-session",
+            "query": "* | SELECT diff[1] as today, diff[2] as yesterday, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(total_calls, 86400) as diff FROM (SELECT count(*) as total_calls FROM log))",
+            "tokenQuery": "* | SELECT diff[1] as today, diff[2] as yesterday, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(total_calls, 86400) as diff FROM (SELECT count(*) as total_calls FROM log))"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-172800s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "isTimeSeries": false,
+        "basicOptions": { "displayName": "按业务会话量", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "standardOption": { "format": "KMB", "unit": { "unit": "none" } },
+        "statStyleOptions": { "textAlignment": "center", "colorMode": "value", "graphMode": "none", "textMode": "value", "customValueColor": "#333333", "customBackgroundColor": "#FFFFFF" },
+        "statValueOption": { "calculationType": "first", "limitCount": 25, "showMode": "calculate", "layoutOrientation": "auto", "minItemHeight": 50, "minItemWidth": 50 },
+        "thresholdOption": { "thresholdMode": "absolute" },
+        "queryOptionMap": {
+          "A": {
+            "showField": ["today"],
+            "compareField": "growth",
+            "compareThreshold": 0,
+            "compareUnit": { "unit": "none" },
+            "compareValueDescription": "较昨日变化",
+            "descriptionDecimals": 2,
+            "descriptionFormat": "none"
+          }
+        },
+        "xPos": 0,
+        "yPos": 1,
+        "width": 4,
+        "height": 3,
+        "version": "2"
+      }
+    },
+    {
+      "title": "card-token-count",
+      "type": "statpro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-session",
+            "query": "* | SELECT diff[1] as today, diff[2] as yesterday, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(total_tokens, 86400) as diff FROM (SELECT sum(llmTotalTokens) as total_tokens FROM log))",
+            "tokenQuery": "* | SELECT diff[1] as today, diff[2] as yesterday, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(total_tokens, 86400) as diff FROM (SELECT sum(llmTotalTokens) as total_tokens FROM log))"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-172800s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "isTimeSeries": false,
+        "basicOptions": { "displayName": "按业务 Token 消耗", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "standardOption": { "format": "KMB", "unit": { "unit": "none" } },
+        "statStyleOptions": { "textAlignment": "center", "colorMode": "value", "graphMode": "none", "textMode": "value", "customValueColor": "#333333", "customBackgroundColor": "#FFFFFF" },
+        "statValueOption": { "calculationType": "first", "limitCount": 25, "showMode": "calculate", "layoutOrientation": "auto", "minItemHeight": 50, "minItemWidth": 50 },
+        "thresholdOption": { "thresholdMode": "absolute" },
+        "queryOptionMap": {
+          "A": {
+            "showField": ["today"],
+            "compareField": "growth",
+            "compareThreshold": 0,
+            "compareUnit": { "unit": "none" },
+            "compareValueDescription": "较昨日变化",
+            "descriptionDecimals": 2,
+            "descriptionFormat": "none"
+          }
+        },
+        "xPos": 4,
+        "yPos": 1,
+        "width": 4,
+        "height": 3,
+        "version": "2"
+      }
+    },
+    {
+      "title": "note-business-cost",
+      "type": "markdownpro",
+      "search": { "query": "", "start": "-900s", "topic": "", "end": "now", "tokens": [], "logstore": "" },
+      "action": {},
+      "display": {
+        "isTimeSeries": false,
+        "markdownStr": "### 成本说明\\n\\n- 成本按 `inputTokens / outputTokens / cachedTokens` 与当前价格表估算。\\n- 当前是估算成本，不是结算账单口径。",
+        "basicOptions": { "displayName": "成本口径说明", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": false },
+        "xPos": 8,
+        "yPos": 1,
+        "width": 16,
+        "height": 3,
+        "version": "2"
+      }
+    },
+    {
+      "title": "row-business-trends",
+      "type": "dashboardrow",
+      "search": { "logstore": "", "topic": "", "query": "", "start": "-900s", "end": "now" },
+      "action": {},
+      "display": { "basicOptions": { "displayName": "业务趋势" }, "xPos": 0, "yPos": 4, "width": 24, "height": 1, "version": "2" }
+    },
+    {
+      "title": "agg-session-trend",
+      "type": "aggpro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-session",
+            "query": "* | SELECT date_trunc('day', __time__) as t, CASE WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('sql_diagnosis', 'sql_generation') THEN 'sql' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('main', 'agent_main', 'sop', 'sop_recommend') THEN 'ops' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('intelligent_recommend') THEN 'recommend' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('spl_generation', 'spl_simple_qa', 'spl_intent_recognition', 'spl_diagnosis', 'promql') THEN 'query_language' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('trace-analysis', 'apm-analysis', 'logstore_analysis', 'alert-rule-analysis', 'log_cluster_result_analysis', 'metricset_abnormal_analysis', 'probe_diagnosis') THEN 'analysis' ELSE 'other' END as business_type, count(*) as session_count FROM log GROUP BY t, business_type ORDER BY t LIMIT 100000",
+            "tokenQuery": "* | SELECT date_trunc('day', __time__) as t, CASE WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('sql_diagnosis', 'sql_generation') THEN 'sql' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('main', 'agent_main', 'sop', 'sop_recommend') THEN 'ops' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('intelligent_recommend') THEN 'recommend' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('spl_generation', 'spl_simple_qa', 'spl_intent_recognition', 'spl_diagnosis', 'promql') THEN 'query_language' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('trace-analysis', 'apm-analysis', 'logstore_analysis', 'alert-rule-analysis', 'log_cluster_result_analysis', 'metricset_abnormal_analysis', 'probe_diagnosis') THEN 'analysis' ELSE 'other' END as business_type, count(*) as session_count FROM log GROUP BY t, business_type ORDER BY t LIMIT 100000"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-2592000s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "isTimeSeries": true,
+        "aggChartOption": { "chartType": "line" },
+        "basicOptions": { "displayName": "业务会话趋势", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "dataOption": { "autoFill": false, "autoFillNumber": 0, "maxClassifyGroupNum": 50 },
+        "standardOption": { "format": "KMB", "unit": { "unit": "none" } },
+        "legendOption": { "show": true, "position": "right", "actionMode": "single", "maxContent": 30, "sortOrder": "desc" },
+        "tooltipOption": { "mode": "all", "sortOrder": "desc", "labelFormat": "" },
+        "xAxisOption": { "show": true, "timeRangeMode": "dataTime", "zoomTarget": "global", "format": { "value": "auto" } },
+        "yAxisOption": { "show": true, "position": 3, "stackingMode": "none" },
+        "graphOptions": { "seriesStyle": "lines", "lineInterpolation": "smooth", "barStyle": "middle", "lineWidth": 1.5, "fillOpacity": 40, "pointSize": 6, "gradientMode": "opacity", "showPoint": "none" },
+        "queryOptionMap": { "A": { "name": "A", "xAxisKey": "t", "aggField": "business_type", "yAxisKey": "session_count" } },
+        "xPos": 0,
+        "yPos": 5,
+        "width": 12,
+        "height": 6,
+        "version": "2"
+      }
+    },
+    {
+      "title": "agg-token-trend",
+      "type": "aggpro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-session",
+            "query": "* | SELECT date_trunc('day', __time__) as t, CASE WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('sql_diagnosis', 'sql_generation') THEN 'sql' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('main', 'agent_main', 'sop', 'sop_recommend') THEN 'ops' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('intelligent_recommend') THEN 'recommend' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('spl_generation', 'spl_simple_qa', 'spl_intent_recognition', 'spl_diagnosis', 'promql') THEN 'query_language' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('trace-analysis', 'apm-analysis', 'logstore_analysis', 'alert-rule-analysis', 'log_cluster_result_analysis', 'metricset_abnormal_analysis', 'probe_diagnosis') THEN 'analysis' ELSE 'other' END as business_type, sum(llmTotalTokens) as total_tokens FROM log GROUP BY t, business_type ORDER BY t LIMIT 100000",
+            "tokenQuery": "* | SELECT date_trunc('day', __time__) as t, CASE WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('sql_diagnosis', 'sql_generation') THEN 'sql' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('main', 'agent_main', 'sop', 'sop_recommend') THEN 'ops' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('intelligent_recommend') THEN 'recommend' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('spl_generation', 'spl_simple_qa', 'spl_intent_recognition', 'spl_diagnosis', 'promql') THEN 'query_language' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('trace-analysis', 'apm-analysis', 'logstore_analysis', 'alert-rule-analysis', 'log_cluster_result_analysis', 'metricset_abnormal_analysis', 'probe_diagnosis') THEN 'analysis' ELSE 'other' END as business_type, sum(llmTotalTokens) as total_tokens FROM log GROUP BY t, business_type ORDER BY t LIMIT 100000"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-2592000s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "isTimeSeries": true,
+        "aggChartOption": { "chartType": "line" },
+        "basicOptions": { "displayName": "业务 Token 趋势", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "dataOption": { "autoFill": false, "autoFillNumber": 0, "maxClassifyGroupNum": 50 },
+        "standardOption": { "format": "KMB", "unit": { "unit": "none" } },
+        "legendOption": { "show": true, "position": "right", "actionMode": "single", "maxContent": 30, "sortOrder": "desc" },
+        "tooltipOption": { "mode": "all", "sortOrder": "desc", "labelFormat": "" },
+        "xAxisOption": { "show": true, "timeRangeMode": "dataTime", "zoomTarget": "global", "format": { "value": "auto" } },
+        "yAxisOption": { "show": true, "position": 3, "stackingMode": "none" },
+        "graphOptions": { "seriesStyle": "lines", "lineInterpolation": "smooth", "barStyle": "middle", "lineWidth": 1.5, "fillOpacity": 40, "pointSize": 6, "gradientMode": "opacity", "showPoint": "none" },
+        "queryOptionMap": { "A": { "name": "A", "xAxisKey": "t", "aggField": "business_type", "yAxisKey": "total_tokens" } },
+        "xPos": 12,
+        "yPos": 5,
+        "width": 12,
+        "height": 6,
+        "version": "2"
+      }
+    },
+    {
+      "title": "agg-cost-trend",
+      "type": "aggpro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-llm",
+            "query": "* | SELECT date_trunc('day', __time__) as t, CASE WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('sql_diagnosis', 'sql_generation') THEN 'sql' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('main', 'agent_main', 'sop', 'sop_recommend') THEN 'ops' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('intelligent_recommend') THEN 'recommend' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('spl_generation', 'spl_simple_qa', 'spl_intent_recognition', 'spl_diagnosis', 'promql') THEN 'query_language' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('trace-analysis', 'apm-analysis', 'logstore_analysis', 'alert-rule-analysis', 'log_cluster_result_analysis', 'metricset_abnormal_analysis', 'probe_diagnosis') THEN 'analysis' ELSE 'other' END as business_type, round(sum(coalesce(cast(inputTokens as double), 0) * CASE model WHEN 'qwen3.5-plus' THEN 0.8 / 1000000.0 WHEN 'qwen-flash' THEN 0.3 / 1000000.0 WHEN 'qwen3-coder-plus' THEN 4.0 / 1000000.0 WHEN 'qwen-plus' THEN 4.0 / 1000000.0 ELSE 0.8 / 1000000.0 END + coalesce(cast(outputTokens as double), 0) * CASE model WHEN 'qwen3.5-plus' THEN 3.0 / 1000000.0 WHEN 'qwen-flash' THEN 0.6 / 1000000.0 WHEN 'qwen3-coder-plus' THEN 16.0 / 1000000.0 WHEN 'qwen-plus' THEN 16.0 / 1000000.0 ELSE 3.0 / 1000000.0 END + coalesce(cast(cachedTokens as double), 0) * CASE model WHEN 'qwen3.5-plus' THEN 0.08 / 1000000.0 WHEN 'qwen-flash' THEN 0.03 / 1000000.0 WHEN 'qwen3-coder-plus' THEN 0.4 / 1000000.0 WHEN 'qwen-plus' THEN 0.4 / 1000000.0 ELSE 0.08 / 1000000.0 END), 2) as estimated_cost FROM log GROUP BY t, business_type ORDER BY t LIMIT 100000",
+            "tokenQuery": "* | SELECT date_trunc('day', __time__) as t, CASE WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('sql_diagnosis', 'sql_generation') THEN 'sql' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('main', 'agent_main', 'sop', 'sop_recommend') THEN 'ops' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('intelligent_recommend') THEN 'recommend' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('spl_generation', 'spl_simple_qa', 'spl_intent_recognition', 'spl_diagnosis', 'promql') THEN 'query_language' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('trace-analysis', 'apm-analysis', 'logstore_analysis', 'alert-rule-analysis', 'log_cluster_result_analysis', 'metricset_abnormal_analysis', 'probe_diagnosis') THEN 'analysis' ELSE 'other' END as business_type, round(sum(coalesce(cast(inputTokens as double), 0) * CASE model WHEN 'qwen3.5-plus' THEN 0.8 / 1000000.0 WHEN 'qwen-flash' THEN 0.3 / 1000000.0 WHEN 'qwen3-coder-plus' THEN 4.0 / 1000000.0 WHEN 'qwen-plus' THEN 4.0 / 1000000.0 ELSE 0.8 / 1000000.0 END + coalesce(cast(outputTokens as double), 0) * CASE model WHEN 'qwen3.5-plus' THEN 3.0 / 1000000.0 WHEN 'qwen-flash' THEN 0.6 / 1000000.0 WHEN 'qwen3-coder-plus' THEN 16.0 / 1000000.0 WHEN 'qwen-plus' THEN 16.0 / 1000000.0 ELSE 3.0 / 1000000.0 END + coalesce(cast(cachedTokens as double), 0) * CASE model WHEN 'qwen3.5-plus' THEN 0.08 / 1000000.0 WHEN 'qwen-flash' THEN 0.03 / 1000000.0 WHEN 'qwen3-coder-plus' THEN 0.4 / 1000000.0 WHEN 'qwen-plus' THEN 0.4 / 1000000.0 ELSE 0.08 / 1000000.0 END), 2) as estimated_cost FROM log GROUP BY t, business_type ORDER BY t LIMIT 100000"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-2592000s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "isTimeSeries": true,
+        "aggChartOption": { "chartType": "line" },
+        "basicOptions": { "displayName": "业务成本趋势", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "dataOption": { "autoFill": false, "autoFillNumber": 0, "maxClassifyGroupNum": 50 },
+        "standardOption": { "format": "none", "unit": { "unit": "custom", "customUnit": "￥" } },
+        "legendOption": { "show": true, "position": "right", "actionMode": "single", "maxContent": 30, "sortOrder": "desc" },
+        "tooltipOption": { "mode": "all", "sortOrder": "desc", "labelFormat": "" },
+        "xAxisOption": { "show": true, "timeRangeMode": "dataTime", "zoomTarget": "global", "format": { "value": "auto" } },
+        "yAxisOption": { "show": true, "position": 3, "stackingMode": "none" },
+        "graphOptions": { "seriesStyle": "lines", "lineInterpolation": "smooth", "barStyle": "middle", "lineWidth": 1.5, "fillOpacity": 40, "pointSize": 6, "gradientMode": "opacity", "showPoint": "none" },
+        "queryOptionMap": { "A": { "name": "A", "xAxisKey": "t", "aggField": "business_type", "yAxisKey": "estimated_cost" } },
+        "xPos": 0,
+        "yPos": 11,
+        "width": 24,
+        "height": 6,
+        "version": "2"
+      }
+    },
+    {
+      "title": "row-business-drilldown",
+      "type": "dashboardrow",
+      "search": { "logstore": "", "topic": "", "query": "", "start": "-900s", "end": "now" },
+      "action": {},
+      "display": { "basicOptions": { "displayName": "客户与 Workspace" }, "xPos": 0, "yPos": 17, "width": 24, "height": 1, "version": "2" }
+    },
+    {
+      "title": "table-customer-token",
+      "type": "tablepro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-thread",
+            "query": "* | SELECT ownerId, user_list.gc, user_list.cid_name, sum(totalTokens) as total_tokens, count(distinct threadId) as thread_count FROM log l JOIN (SELECT userid, arbitrary(gc) AS gc, arbitrary(cid_name) AS cid_name FROM user_list GROUP BY userid) as user_list ON cast(l.ownerId as bigint) = cast(user_list.userid as bigint) GROUP BY ownerId, user_list.gc, user_list.cid_name ORDER BY total_tokens DESC LIMIT 10",
+            "tokenQuery": "* | SELECT ownerId, user_list.gc, user_list.cid_name, sum(totalTokens) as total_tokens, count(distinct threadId) as thread_count FROM log l JOIN (SELECT userid, arbitrary(gc) AS gc, arbitrary(cid_name) AS cid_name FROM user_list GROUP BY userid) as user_list ON cast(l.ownerId as bigint) = cast(user_list.userid as bigint) GROUP BY ownerId, user_list.gc, user_list.cid_name ORDER BY total_tokens DESC LIMIT 10"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-2592000s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "basicOptions": { "displayName": "客户 Token TOP", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "standardOption": { "format": "none", "unit": { "unit": "none" } },
+        "xPos": 0,
+        "yPos": 18,
+        "width": 8,
+        "height": 7,
+        "version": "2"
+      }
+    },
+    {
+      "title": "table-customer-cost",
+      "type": "tablepro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-llm",
+            "query": "* | SELECT ownerId, user_list.gc, user_list.cid_name, round(sum(coalesce(cast(inputTokens as double), 0) * CASE model WHEN 'qwen3.5-plus' THEN 0.8 / 1000000.0 WHEN 'qwen-flash' THEN 0.3 / 1000000.0 WHEN 'qwen3-coder-plus' THEN 4.0 / 1000000.0 WHEN 'qwen-plus' THEN 4.0 / 1000000.0 ELSE 0.8 / 1000000.0 END + coalesce(cast(outputTokens as double), 0) * CASE model WHEN 'qwen3.5-plus' THEN 3.0 / 1000000.0 WHEN 'qwen-flash' THEN 0.6 / 1000000.0 WHEN 'qwen3-coder-plus' THEN 16.0 / 1000000.0 WHEN 'qwen-plus' THEN 16.0 / 1000000.0 ELSE 3.0 / 1000000.0 END + coalesce(cast(cachedTokens as double), 0) * CASE model WHEN 'qwen3.5-plus' THEN 0.08 / 1000000.0 WHEN 'qwen-flash' THEN 0.03 / 1000000.0 WHEN 'qwen3-coder-plus' THEN 0.4 / 1000000.0 WHEN 'qwen-plus' THEN 0.4 / 1000000.0 ELSE 0.08 / 1000000.0 END), 2) as estimated_cost, count(distinct threadId) as thread_count FROM log l JOIN (SELECT userid, arbitrary(gc) AS gc, arbitrary(cid_name) AS cid_name FROM user_list GROUP BY userid) as user_list ON cast(l.ownerId as bigint) = cast(user_list.userid as bigint) GROUP BY ownerId, user_list.gc, user_list.cid_name ORDER BY estimated_cost DESC LIMIT 10",
+            "tokenQuery": "* | SELECT ownerId, user_list.gc, user_list.cid_name, round(sum(coalesce(cast(inputTokens as double), 0) * CASE model WHEN 'qwen3.5-plus' THEN 0.8 / 1000000.0 WHEN 'qwen-flash' THEN 0.3 / 1000000.0 WHEN 'qwen3-coder-plus' THEN 4.0 / 1000000.0 WHEN 'qwen-plus' THEN 4.0 / 1000000.0 ELSE 0.8 / 1000000.0 END + coalesce(cast(outputTokens as double), 0) * CASE model WHEN 'qwen3.5-plus' THEN 3.0 / 1000000.0 WHEN 'qwen-flash' THEN 0.6 / 1000000.0 WHEN 'qwen3-coder-plus' THEN 16.0 / 1000000.0 WHEN 'qwen-plus' THEN 16.0 / 1000000.0 ELSE 3.0 / 1000000.0 END + coalesce(cast(cachedTokens as double), 0) * CASE model WHEN 'qwen3.5-plus' THEN 0.08 / 1000000.0 WHEN 'qwen-flash' THEN 0.03 / 1000000.0 WHEN 'qwen3-coder-plus' THEN 0.4 / 1000000.0 WHEN 'qwen-plus' THEN 0.4 / 1000000.0 ELSE 0.08 / 1000000.0 END), 2) as estimated_cost, count(distinct threadId) as thread_count FROM log l JOIN (SELECT userid, arbitrary(gc) AS gc, arbitrary(cid_name) AS cid_name FROM user_list GROUP BY userid) as user_list ON cast(l.ownerId as bigint) = cast(user_list.userid as bigint) GROUP BY ownerId, user_list.gc, user_list.cid_name ORDER BY estimated_cost DESC LIMIT 10"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-2592000s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "basicOptions": { "displayName": "客户成本 TOP", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "standardOption": { "format": "none", "unit": { "unit": "none" } },
+        "xPos": 8,
+        "yPos": 18,
+        "width": 8,
+        "height": 7,
+        "version": "2"
+      }
+    },
+    {
+      "title": "table-workspace",
+      "type": "tablepro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-thread",
+            "query": "* | SELECT CASE WHEN workspace IS NULL OR workspace = '' THEN '(empty)' ELSE workspace END as workspace_name, count(*) as total_sessions, count_if(status <> 'completed' OR (error IS NOT NULL AND error <> 'null')) as failed_sessions, sum(totalTokens) as total_tokens, sum(llmCalls) as total_llm_calls, sum(toolCalls) as total_tool_calls FROM log GROUP BY workspace_name ORDER BY total_tokens DESC LIMIT 20",
+            "tokenQuery": "* | SELECT CASE WHEN workspace IS NULL OR workspace = '' THEN '(empty)' ELSE workspace END as workspace_name, count(*) as total_sessions, count_if(status <> 'completed' OR (error IS NOT NULL AND error <> 'null')) as failed_sessions, sum(totalTokens) as total_tokens, sum(llmCalls) as total_llm_calls, sum(toolCalls) as total_tool_calls FROM log GROUP BY workspace_name ORDER BY total_tokens DESC LIMIT 20"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-2592000s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "basicOptions": { "displayName": "Workspace 消耗 TOP", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "standardOption": { "format": "none", "unit": { "unit": "none" } },
+        "xPos": 16,
+        "yPos": 18,
+        "width": 8,
+        "height": 7,
+        "version": "2"
+      }
+    }
+  ]
+}

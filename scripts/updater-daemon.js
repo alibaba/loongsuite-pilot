@@ -1,8 +1,9 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const { pathToFileURL } = require('url');
 
-const CACHE_DIR = path.join(process.env.HOME || '', '.loongsuite-pilot');
+const CACHE_DIR = path.join(process.env.HOME || process.env.USERPROFILE || '', '.loongsuite-pilot');
 const CURRENT_FILE = path.join(CACHE_DIR, 'current');
 const VERSIONS_DIR = path.join(CACHE_DIR, 'versions');
 
@@ -21,7 +22,7 @@ if (!entry) {
   console.error('[loongsuite-pilot] No valid updater version found');
   process.exit(1);
 }
-import(entry).catch(err => {
+import(pathToFileURL(entry).href).catch(err => {
   console.error('[loongsuite-pilot] Failed to load updater:', err.message);
   process.exit(1);
 });

@@ -152,7 +152,8 @@ export interface ConfigFile {
 }
 
 function env(key: string): string | undefined {
-  return process.env[key];
+  const v = process.env[key];
+  return v !== undefined ? (process.platform === 'win32' ? v.trim() : v) : undefined;
 }
 
 function envBool(key: string, fallback: boolean): boolean {
@@ -446,6 +447,8 @@ function buildOtlpTraceConfigNew(
     captureMessageContent,
     debug: otlp?.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
+    maxExportBatchBytes: otlp?.maxExportBatchBytes,
+    compression: otlp?.compression,
   };
 }
 
@@ -471,6 +474,8 @@ function buildOtlpTraceConfigLegacy(config: AnalyticsConfig): OtlpTraceFlusherCo
     captureMessageContent,
     debug: cms.debug ?? false,
     turnIdleTimeoutMs: 0,
+    maxExportBatchBytes: undefined,
+    compression: undefined,
   };
 }
 

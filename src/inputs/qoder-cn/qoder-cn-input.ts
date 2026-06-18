@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { ClientType, ActionType } from '../../types/index.js';
 import type { AgentActivityEntry, CodeGenerationEvent } from '../../types/index.js';
@@ -12,6 +13,9 @@ const DEFAULT_QODER_CN_ROOT_LINUX = '~/.config/QoderCN';
 function resolveQoderCnRoot(): string {
   if (process.platform === 'darwin') {
     return resolveHome(DEFAULT_QODER_CN_ROOT_MAC);
+  }
+  if (process.platform === 'win32') {
+    return path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'QoderCN');
   }
   const xdg = process.env.XDG_CONFIG_HOME;
   if (xdg) return path.join(xdg, 'QoderCN');

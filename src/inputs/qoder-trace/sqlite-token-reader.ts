@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import sqlite3 from 'sqlite3';
 import { resolveHome } from '../../utils/fs-utils.js';
@@ -53,9 +54,12 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
 }
 
 function resolveQoderDbPath(): string | null {
+  const appdata = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
   const candidates = process.platform === 'darwin'
     ? [resolveHome('~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db')]
-    : [resolveHome('~/.config/Qoder/SharedClientCache/cache/db/local.db')];
+    : process.platform === 'win32'
+      ? [path.join(appdata, 'Qoder', 'SharedClientCache', 'cache', 'db', 'local.db')]
+      : [resolveHome('~/.config/Qoder/SharedClientCache/cache/db/local.db')];
 
   // Sync access check: only runs once per collect cycle for a fixed set of paths.
   // Acceptable because the path list is small (1-2 candidates) and the result is cached by callers.

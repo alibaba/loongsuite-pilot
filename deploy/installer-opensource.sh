@@ -823,7 +823,16 @@ PATHBLOCK
                 ;;
             */bash)
                 ensure_path_block "$HOME/.bashrc" || true
-                ensure_path_block "$HOME/.bash_profile" || true
+                # Do not create ~/.bash_profile just to add PATH. On Debian/Ubuntu
+                # style accounts, its mere presence prevents bash login shells from
+                # reading ~/.profile, which often sources ~/.bashrc and user aliases.
+                if [ -f "$HOME/.bash_profile" ]; then
+                    ensure_path_block "$HOME/.bash_profile" || true
+                elif [ -f "$HOME/.bash_login" ]; then
+                    ensure_path_block "$HOME/.bash_login" || true
+                else
+                    ensure_path_block "$HOME/.profile" || true
+                fi
                 ;;
             *)
                 ensure_path_block "$HOME/.bashrc" || true
@@ -1139,7 +1148,7 @@ print_summary() {
     fi
 
     msg "命令:" "Commands:"
-    echo "   loongsuite-pilot          # 查看状态 / Status"
+    echo "   loongsuite-pilot status   # 查看状态 / Status"
     echo "   loongsuite-pilot info     # 版本与配置 / Version & config"
     echo "============================================================"
 }

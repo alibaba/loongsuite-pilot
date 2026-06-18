@@ -1,0 +1,761 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "* | select count(1) as pv, remote_addr as client_ip  group by client_ip order by pv desc limit 10",
+                "start": "-86400s",
+                "tokenQuery": "* | select count(1) as pv, http_x_forwarded_for as client_ip  group by client_ip order by pv desc limit 10",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "xAxis": [
+                    "client_ip"
+                ],
+                "yPos": 5.4545445,
+                "displayName": "访问前十IP",
+                "xPos": 6.570652,
+                "showBorder": true,
+                "yAxis": [
+                    "pv"
+                ],
+                "showTitle": true,
+                "showBackground": true,
+                "width": 3.480435,
+                "legendPosition": "right",
+                "formatType": "number",
+                "height": 4.1363635,
+                "zIndex": 0
+            },
+            "action": {
+                "type": "disabled"
+            },
+            "title": "dashboard-access-log1556887806396",
+            "type": "horizontalColumn"
+        },
+        {
+            "search": {
+                "query": "* | select diff[1] as today, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(pv, 86400) as diff FROM (SELECT COUNT(1) as pv FROM log))",
+                "start": "-86400s",
+                "tokenQuery": "* | select diff[1] as today, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(pv, 86400) as diff FROM (SELECT COUNT(1) as pv FROM log))",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "numberType": "compare",
+                "xAxis": [
+                    "today"
+                ],
+                "yPos": 0.022727273,
+                "compareUnit": "%",
+                "displayName": "今日PV",
+                "unitSize": 12,
+                "description": "今日PV同比昨日",
+                "threshold": 0,
+                "xPos": 1.5923914,
+                "compareSize": 16,
+                "showBorder": true,
+                "unit": "",
+                "yAxis": [],
+                "showTitle": true,
+                "showBackground": true,
+                "width": 1.572826,
+                "fontSize": 24,
+                "formatType": "number",
+                "descriptionSize": 12,
+                "height": 1.8863636,
+                "zIndex": 0
+            },
+            "action": {
+                "type": "disabled"
+            },
+            "title": "dashboard-access-log1556888331551",
+            "type": "number"
+        },
+        {
+            "search": {
+                "query": "* | select diff[1] as today, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(pv, 86400) as diff FROM (SELECT COUNT(DISTINCT remote_addr) as pv FROM log))",
+                "start": "-86400s",
+                "tokenQuery": "* | select diff[1] as today, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(pv, 86400) as diff FROM (SELECT COUNT(DISTINCT http_x_forwarded_for) as pv FROM log))",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "numberType": "compare",
+                "xAxis": [
+                    "today"
+                ],
+                "yPos": 0.022727273,
+                "compareUnit": "%",
+                "displayName": "今日UV",
+                "unitSize": 12,
+                "description": "今日UV同比昨日",
+                "threshold": 0,
+                "xPos": 0.0054345173,
+                "compareSize": 16,
+                "showBorder": true,
+                "unit": "",
+                "yAxis": [],
+                "showTitle": true,
+                "showBackground": true,
+                "width": 1.6217391,
+                "fontSize": 24,
+                "formatType": "number",
+                "descriptionSize": 12,
+                "height": 1.8863636,
+                "zIndex": 0
+            },
+            "action": {
+                "type": "disabled"
+            },
+            "title": "dashboard-access-log1556888392647",
+            "type": "number"
+        },
+        {
+            "search": {
+                "query": "* | select round(diff[1], 2) as today, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(fail, 86400) as diff from (select count_if(status>200)*1.0/count(1) as fail from log))",
+                "start": "-86400s",
+                "tokenQuery": "* | select round(diff[1], 2) as today, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(fail, 86400) as diff from (select count_if(status>200)*1.0/count(1) as fail from log))",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "numberType": "compare",
+                "xAxis": [
+                    "today"
+                ],
+                "yPos": 0.022727273,
+                "compareUnit": "%",
+                "displayName": "非200请求",
+                "unitSize": 12,
+                "description": "非200响应比例同比昨日",
+                "threshold": 0,
+                "xPos": 3.15,
+                "compareSize": 16,
+                "showBorder": true,
+                "unit": "%",
+                "yAxis": [],
+                "showTitle": true,
+                "showBackground": true,
+                "width": 1.78,
+                "fontSize": 24,
+                "formatType": "number",
+                "descriptionSize": 12,
+                "height": 1.875,
+                "zIndex": 0
+            },
+            "action": {
+                "type": "disabled"
+            },
+            "title": "dashboard-access-log1556889795760",
+            "type": "number"
+        },
+        {
+            "search": {
+                "query": "* | select diff[1] as today, round((diff[3]-1.0)*100, 2) as growth from(select compare(latency, 86400) as diff from (select round(avg(request_time) * 1000, 3) as latency  from log))",
+                "start": "-86400s",
+                "tokenQuery": "* | select diff[1] as today, round((diff[3]-1.0)*100, 2) as growth from(select compare(latency, 86400) as diff from (select round(approx_percentile(request_time, 0.95) * 1000, 3) as latency  from log))",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "numberType": "compare",
+                "xAxis": [
+                    "today"
+                ],
+                "yPos": 0.022727273,
+                "compareUnit": "%",
+                "displayName": "平均延迟",
+                "unitSize": 12,
+                "description": "平均延迟同比昨日",
+                "threshold": 0,
+                "xPos": 4.902174,
+                "compareSize": 16,
+                "showBorder": true,
+                "unit": "毫秒",
+                "yAxis": [],
+                "showTitle": true,
+                "showBackground": true,
+                "width": 1.7521739,
+                "fontSize": 24,
+                "formatType": "number",
+                "descriptionSize": 12,
+                "height": 1.875,
+                "zIndex": 0
+            },
+            "action": {
+                "type": "disabled"
+            },
+            "title": "dashboard-access-log1556890167813",
+            "type": "number"
+        },
+        {
+            "search": {
+                "query": "* | select round(diff[1], 2) as today, round((diff[3]-1.0)*100, 2) as growth from(select compare(in_flow, 86400) as diff from (select COALESCE(sum(body_bytes_sent)/1024.0/1024.0/1024.0, 0) as in_flow  from log))",
+                "start": "-86400s",
+                "tokenQuery": "* | select diff[1] as today, round((diff[3]-1.0)*100, 2) as growth from(select compare(in_flow, 86400) as diff from (select COALESCE(sum(body_bytes_sent)/1024.0/1024.0/1024.0, 0) as in_flow  from log))",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "numberType": "compare",
+                "xAxis": [
+                    "today"
+                ],
+                "yPos": 0.022727273,
+                "compareUnit": "%",
+                "displayName": "今日流出流量",
+                "unitSize": 12,
+                "description": "流出流量同比昨日",
+                "threshold": 0,
+                "xPos": 6.64,
+                "compareSize": 16,
+                "showBorder": true,
+                "unit": "GB",
+                "yAxis": [],
+                "showTitle": true,
+                "showBackground": true,
+                "width": 1.7,
+                "fontSize": 24,
+                "formatType": "number",
+                "descriptionSize": 12,
+                "height": 1.875,
+                "zIndex": 0
+            },
+            "action": {
+                "type": "disabled"
+            },
+            "title": "dashboard-access-log1556891607547",
+            "type": "number"
+        },
+        {
+            "search": {
+                "query": "* | select round(diff[1], 2) as today, round((diff[3]-1.0)*100, 2) as growth from(select compare(in_flow, 86400) as diff from (select COALESCE(sum(request_length)/1024.0/1024.0/1024.0, 0) as in_flow  from log))",
+                "start": "-86400s",
+                "tokenQuery": "* | select diff[1] as today, round((diff[3]-1.0)*100, 2) as growth from(select compare(in_flow, 86400) as diff from (select COALESCE(sum(request_length)/1024.0/1024.0/1024.0, 0) as in_flow  from log))",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "numberType": "compare",
+                "xAxis": [
+                    "today"
+                ],
+                "yPos": 0.022727273,
+                "compareUnit": "%",
+                "displayName": "今日流入流量",
+                "unitSize": 12,
+                "description": "流入流量同比昨日",
+                "threshold": 0,
+                "xPos": 8.32,
+                "compareSize": 16,
+                "showBorder": true,
+                "unit": "GB",
+                "yAxis": [],
+                "showTitle": true,
+                "showBackground": true,
+                "width": 1.72,
+                "fontSize": 24,
+                "formatType": "number",
+                "descriptionSize": 12,
+                "height": 1.875,
+                "zIndex": 0
+            },
+            "action": {
+                "type": "disabled"
+            },
+            "title": "dashboard-access-log1556891634628",
+            "type": "number"
+        },
+        {
+            "search": {
+                "query": "* | select ts_predicate_simple(stamp, value, 6, 1, 'sum') from (select __time__ - __time__ % 60 as stamp, COUNT(1) as value from log GROUP BY stamp order by stamp) LIMIT 1000",
+                "start": "-14400s",
+                "tokenQuery": "* | select ts_predicate_simple(stamp, value, 6, 1, 'sum') from (select __time__ - __time__ % 60 as stamp, COUNT(1) as value from log GROUP BY stamp order by stamp) LIMIT 1000",
+                "topic": "",
+                "end": "absolute",
+                "tokens": [],
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "yPos": 13.886364,
+                "displayName": "PV预测",
+                "showTitle": true,
+                "showBackground": true,
+                "width": 4.8663044,
+                "xPos": 0.005434849,
+                "showBorder": true,
+                "height": 4.534091,
+                "zIndex": 0
+            },
+            "action": {},
+            "title": "dashboard-access-log1556934955242",
+            "type": "timeseries"
+        },
+        {
+            "search": {
+                "query": "*|select t, diff[1] as today, diff[2] as yestoday, diff[3] as percentage from(select t, compare( pv , 86400) as diff from (select count(1) as pv, date_format(from_unixtime(__time__), '%H:%i') as t from log group by t limit 10000) group by t order by t limit 10000)",
+                "start": "-14400s",
+                "tokenQuery": "*|select t, diff[1] as today, diff[2] as yestoday, diff[3] as percentage from(select t, compare( pv , 86400) as diff from (select count(1) as pv, date_format(from_unixtime(__time__), '%H:%i') as t from log group by t limit 10000) group by t order by t limit 10000)",
+                "topic": "",
+                "end": "absolute",
+                "tokens": [],
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "xAxis": [
+                    "t"
+                ],
+                "yPos": 13.886365,
+                "displayName": "PV趋势同比昨日",
+                "yAxisRight": [
+                    "yestoday"
+                ],
+                "formatTypeRight": "number",
+                "xPos": 4.836956,
+                "showBorder": true,
+                "yAxis": [
+                    "today"
+                ],
+                "intervalArray": [
+                    ""
+                ],
+                "showTitle": true,
+                "showBackground": true,
+                "width": 5.208696,
+                "legendPosition": "right",
+                "formatType": "number",
+                "height": 4.534091,
+                "zIndex": 0
+            },
+            "action": {
+                "type": "disabled"
+            },
+            "title": "dashboard-access-log1556935361093",
+            "type": "line"
+        },
+        {
+            "search": {
+                "query": "* | select count(1) as pv ,request_method group by request_method",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "xAxis": [
+                    "request_method"
+                ],
+                "yPos": 1.9545459,
+                "displayName": "请求方法占比",
+                "xPos": 5.3878446,
+                "showBorder": true,
+                "yAxis": [
+                    "pv"
+                ],
+                "showTitle": true,
+                "showBackground": true,
+                "pieType": "normal",
+                "width": 2.3151298,
+                "legendPosition": "right",
+                "formatType": "number",
+                "height": 3.397805,
+                "zIndex": 0
+            },
+            "action": {},
+            "title": "http_method_percentage",
+            "type": "pie"
+        },
+        {
+            "search": {
+                "query": "* | select count(1) as pv ,status group by status",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "xAxis": [
+                    "status"
+                ],
+                "yPos": 1.9545455,
+                "displayName": "请求状态占比",
+                "yAxisRight": [],
+                "formatTypeRight": "number",
+                "xPos": 3.1520917,
+                "showBorder": true,
+                "yAxis": [
+                    "pv"
+                ],
+                "intervalArray": [
+                    ""
+                ],
+                "showTitle": true,
+                "showBackground": true,
+                "pieType": "normal",
+                "width": 2.2273245,
+                "legendPosition": "right",
+                "formatType": "number",
+                "height": 3.3865192,
+                "zIndex": 0
+            },
+            "action": {},
+            "title": "http_status_percentage",
+            "type": "pie"
+        },
+        {
+            "search": {
+                "query": "* | select count(1) as c, ip_to_province(remote_addr) as address group by address limit 100",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "yAxis": [
+                    "c"
+                ],
+                "xAxis": [
+                    "address"
+                ],
+                "yPos": 1.9545455,
+                "displayName": "来源IP分布",
+                "showTitle": true,
+                "showBackground": true,
+                "showLegend": false,
+                "width": 3.1597826,
+                "xPos": 0.005434766,
+                "showBorder": true,
+                "height": 3.409091,
+                "zIndex": 0
+            },
+            "action": {},
+            "title": "ip_distribution",
+            "type": "map"
+        },
+        {
+            "search": {
+                "query": "* | select sum(body_bytes_sent) as net_out, sum(request_length) as net_in ,date_format(date_trunc('hour', __time__), '%m-%d %H:%i')  as time group by date_format(date_trunc('hour', __time__), '%m-%d %H:%i') order by time limit 10000",
+                "start": "-86400s",
+                "topic": "",
+                "end": "absolute",
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "xAxis": [
+                    "time"
+                ],
+                "yPos": 5.4545455,
+                "displayName": "流入流出流量统计",
+                "xPos": 3.1467392,
+                "showBorder": true,
+                "yAxis": [
+                    "net_in",
+                    "net_out"
+                ],
+                "showTitle": true,
+                "showBackground": true,
+                "width": 3.453261,
+                "legendPosition": "right",
+                "formatType": "file",
+                "height": 4.1363635,
+                "zIndex": 0
+            },
+            "action": {},
+            "title": "net_in_net_out",
+            "type": "area"
+        },
+        {
+            "search": {
+                "query": "*| select approx_distinct(remote_addr) as uv ,count(1) as pv , date_format(date_trunc('hour', __time__), '%m-%d %H:%i')  as time group by date_format(date_trunc('hour', __time__), '%m-%d %H:%i')  order by time limit 1000",
+                "start": "-86400s",
+                "tokenQuery": "*| select approx_distinct(remote_addr) as uv ,count(1) as pv , date_format(date_trunc('hour', __time__), '%m-%d %H:%i')  as time group by date_format(date_trunc('hour', __time__), '%m-%d %H:%i')  order by time limit 1000",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "xAxis": [
+                    "time"
+                ],
+                "yPos": 9.772727,
+                "displayName": "访问PV/UV统计",
+                "yAxisRight": [
+                    "uv"
+                ],
+                "formatTypeRight": "number",
+                "xPos": 0.015217391,
+                "showBorder": true,
+                "yAxis": [
+                    "pv"
+                ],
+                "intervalArray": [
+                    "pv"
+                ],
+                "showTitle": true,
+                "showBackground": true,
+                "width": 3.6923914,
+                "legendPosition": "right",
+                "formatType": "number",
+                "height": 4,
+                "zIndex": 0
+            },
+            "action": {
+                "type": "disabled"
+            },
+            "title": "pv_uv",
+            "type": "line"
+        },
+        {
+            "search": {
+                "query": "* | select avg(request_time) as response_time, avg(upstream_response_time) as upstream_response_time  , date_format( from_unixtime(__time__ -__time__%1800),'%m-%d %H:%i' )  as time group by __time__ - __time__% 1800 order by time limit 10000",
+                "start": "-86400s",
+                "topic": "",
+                "end": "absolute",
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "xAxis": [
+                    "time"
+                ],
+                "yPos": 9.772727,
+                "displayName": "请求时间统计",
+                "yAxisRight": [],
+                "formatTypeRight": "number",
+                "xPos": 3.7108696,
+                "showBorder": true,
+                "yAxis": [
+                    "response_time",
+                    "upstream_response_time"
+                ],
+                "intervalArray": [
+                    ""
+                ],
+                "showTitle": true,
+                "showBackground": true,
+                "width": 6.3391304,
+                "legendPosition": "right",
+                "formatType": "number",
+                "height": 4,
+                "zIndex": 0
+            },
+            "action": {},
+            "title": "response_time",
+            "type": "line"
+        },
+        {
+            "search": {
+                "query": "* | select request_uri  as top_latency_request_uri, request_time order by request_time  desc limit 10",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "xAxis": [
+                    "top_latency_request_uri",
+                    "request_time"
+                ],
+                "yPos": 18.488638,
+                "displayName": "请求时间前十地址",
+                "pageSize": 20,
+                "showZebra": false,
+                "closeSort": false,
+                "xPos": 0.004347826,
+                "showBorder": true,
+                "highlight": false,
+                "yAxis": [
+                    "top_latency_request_uri",
+                    "request_time"
+                ],
+                "closeSearch": false,
+                "showTitle": true,
+                "showBackground": true,
+                "width": 4.8663044,
+                "transpose": false,
+                "height": 6.2954545,
+                "zIndex": 0
+            },
+            "action": {
+                "request_time": {},
+                "top_latency_request_uri": {}
+            },
+            "title": "top_10_latency_request_uri",
+            "type": "table"
+        },
+        {
+            "search": {
+                "query": "* | select count(1) as pv, split_part(request_uri,'?',1) as path  group by path order by pv desc limit 10",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "xAxis": [
+                    "path"
+                ],
+                "yPos": 18.488636,
+                "displayName": "访问前十地址",
+                "pageSize": 20,
+                "showZebra": false,
+                "closeSort": false,
+                "xPos": 4.83587,
+                "showBorder": true,
+                "highlight": false,
+                "yAxis": [
+                    "pv"
+                ],
+                "closeSearch": false,
+                "showTitle": true,
+                "showBackground": true,
+                "width": 5.2141304,
+                "transpose": false,
+                "height": 6.2954545,
+                "zIndex": 0
+            },
+            "action": {
+                "path": {},
+                "pv": {}
+            },
+            "title": "top_10_page",
+            "type": "table"
+        },
+        {
+            "search": {
+                "query": "* | select count(1) as pv , http_referer  group by http_referer order by pv desc limit 10",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "xAxis": [
+                    "http_referer"
+                ],
+                "yPos": 5.4772725,
+                "displayName": "前十访问来源",
+                "xPos": 0.015217391,
+                "showBorder": true,
+                "yAxis": [
+                    "pv"
+                ],
+                "showTitle": true,
+                "showBackground": true,
+                "width": 3.1489131,
+                "legendPosition": "right",
+                "formatType": "number",
+                "height": 4.1136365,
+                "zIndex": 0
+            },
+            "action": {},
+            "title": "top_10_referer",
+            "type": "horizontalColumn"
+        },
+        {
+            "search": {
+                "query": "* | select count(1) as pv, case when http_user_agent like '%Chrome%' then 'Chrome' when http_user_agent like '%Firefox%' then 'Firefox' when http_user_agent like '%Safari%' then 'Safari' else 'unKnown' end as http_user_agent  group by case when http_user_agent like '%Chrome%' then 'Chrome' when http_user_agent like '%Firefox%' then 'Firefox' when http_user_agent like '%Safari%' then 'Safari' else 'unKnown' end   order by pv desc limit 10",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "logstore": "charts-demo"
+            },
+            "display": {
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "xAxis": [
+                    "http_user_agent"
+                ],
+                "yPos": 1.9545448,
+                "displayName": "请求UA占比",
+                "xPos": 7.705435,
+                "showBorder": true,
+                "yAxis": [
+                    "pv"
+                ],
+                "showTitle": true,
+                "showBackground": true,
+                "pieType": "normal",
+                "width": 2.3445652,
+                "legendPosition": "right",
+                "formatType": "number",
+                "height": 3.4204545,
+                "zIndex": 0
+            },
+            "action": {},
+            "title": "user_agent",
+            "type": "pie"
+        }
+    ],
+    "displayName": "Nginx访问日志",
+    "description": "",
+    "attribute": {},
+    "dashboardName": "charts-demo_nginx_dashboard_cn"
+}
