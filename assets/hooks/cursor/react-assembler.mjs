@@ -96,7 +96,7 @@ export function assembleTurn(journalEvents, options = {}) {
       time_unix_nano: eventTs(promptEvent),
       observed_time_unix_nano: eventTs(promptEvent),
       'event.id': crypto.randomUUID(),
-      'event.name': 'llm.request',
+      'event.name': 'other',
       ...baseFields,
       'gen_ai.provider.name': inferProvider(model),
       'gen_ai.input.messages_delta': [
