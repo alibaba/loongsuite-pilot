@@ -141,7 +141,9 @@ function splitIntoTurns(contentRows) {
 
 function isSystemInjection(row) {
   const text = extractText(row).trimStart();
-  return text.startsWith('<command-message>') || text.startsWith('<command-name>');
+  return text.startsWith('<command-message>')
+    || text.startsWith('<command-name>')
+    || text.startsWith('[Request interrupted');
 }
 
 function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd) {
@@ -399,10 +401,12 @@ function extractText(row) {
   const content = msg.content;
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
+    const parts = [];
     for (const block of content) {
-      if (block.type === 'text') return block.text || '';
-      if (typeof block === 'string') return block;
+      if (block.type === 'text' && block.text) parts.push(block.text);
+      else if (typeof block === 'string') parts.push(block);
     }
+    return parts.join('\n');
   }
   return '';
 }
@@ -443,5 +447,7 @@ function resolveQoderWorkProjectDir(sandboxCwd, agentId) {
   }
   return sandboxCwd;
 }
+
+export { extractText, isSystemInjection, isToolResult, splitIntoTurns };
 
 main().catch(() => { /* fail-open */ });

@@ -7,8 +7,7 @@
  * records with proper step division, subagent nesting, and trace ids.
  *
  * History JSONL is the sole formal data source for CursorHookInput.
- * Raw capture is controlled by LOONGSUITE_CURSOR_RAW_TRACE env flag
- * (default '1' = enabled; set to '0' to disable).
+ * Raw capture is behind LOONGSUITE_CURSOR_RAW_TRACE=1 env flag.
  */
 
 import fs from 'node:fs/promises';
@@ -22,6 +21,7 @@ import {
 import { toInternalEvent } from './cursor/source-event.mjs';
 import { appendEvent, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
 import { assembleTurn } from './cursor/react-assembler.mjs';
+import { buildCursorRecordsFromTranscript } from './cursor/transcript-assembler.mjs';
 
 function resolveDataDir() {
   const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
@@ -96,10 +96,16 @@ async function main() {
   try {
     payload = JSON.parse(raw);
   } catch (firstErr) {
-    // Cursor on Windows may replace 0x22 (") with 0x3F (?) in JSON events
-    // containing Chinese text, corrupting the closing quote of string values.
+    // Cursor on Windows may insert spurious 0x3F (?) after closing quotes in JSON
+    // events containing Chinese text (GB18030 codepage maps some chars to ?).
+    // The ? appears after a closing " and before a structural char (, } ]):
+    //   "value"?,  → "value",
+    //   "value"?}  → "value"}
     if (process.platform === 'win32') {
-      const repaired = raw.replace(/\?,"/g, '","').replace(/\?}/g, '"}');
+      const repaired = raw
+        .replace(/"?\?,/g, '",')   // "?, or ?, before comma
+        .replace(/"?\?}/g, '"}')   // "?} or ?} before }
+        .replace(/"?\?]/g, '"]');  // "?] or ?] before ]
       if (repaired !== raw) {
         try {
           payload = JSON.parse(repaired);
@@ -148,8 +154,7 @@ async function main() {
     return;
   }
 
-  // Write raw trace when LOONGSUITE_CURSOR_RAW_TRACE !== '0' (default: enabled)
-  if (process.env.LOONGSUITE_CURSOR_RAW_TRACE !== '0') {
+  if (process.env.LOONGSUITE_CURSOR_RAW_TRACE === '1') {
     try {
       const rawFile = path.join(dataDir, 'logs', 'cursor', 'raw', 'cursor-raw-trace.jsonl');
       await appendJsonl(rawFile, { _captured_at: now.toISOString(), ...payload });
@@ -162,33 +167,54 @@ async function main() {
   if (internalEvent.hook_event === 'stop') {
     try {
       const allEvents = readAllEvents();
+
+      // NOTE: preToolUse events may arrive after stop is processed due to Cursor's
+      // parallel hook invocation. When this happens, tool.call/result records are
+      // absent from the output — this is a known Cursor hook timing limitation.
+
+      // Guard against duplicate stop events: if journal has no beforeSubmitPrompt
+      // for this conversation, the turn was already processed — skip to avoid duplication.
+      const hasPendingTurn = allEvents.some(e =>
+        e.hook_event === 'beforeSubmitPrompt' &&
+        e.conversation_id === internalEvent.conversation_id
+      );
+      if (!hasPendingTurn) {
+        await appendErrorJsonl(dataDir, now, {
+          stage: 'stop_guard',
+          'error.type': 'info',
+          'error.message': `skipped duplicate stop for conv=${internalEvent.conversation_id?.slice(0, 8)} (no pending beforeSubmitPrompt)`,
+        });
+        writeEmptyResponse();
+        return;
+      }
+
       const runtimeConfig = loadHookRuntimeConfig(dataDir);
+      let records;
+      let consumedConversationIds;
 
-      // Aborted generations (e.g. GPT quota exhaustion → Cursor auto-switches
-      // to composer) share the same conversation_id with the auto-switched
-      // generation that follows. From the user's perspective both prompts are
-      // the same trace, so the aborted half must NOT produce a history record.
-      // We just surgically clean the aborted generation_id's events from the
-      // journal so the live generation can still assemble on its own stop.
-      const isAborted = internalEvent.status === 'aborted';
-      const abortedGenId = isAborted ? internalEvent.generation_id : null;
+      // On Windows: use transcript as source of truth for text content.
+      // This bypasses GB18030 codepage corruption of hook payload text.
+      if (process.platform === 'win32' && internalEvent.transcript_path) {
+        const transcriptRecords = buildCursorRecordsFromTranscript(
+          internalEvent.transcript_path,
+          allEvents,
+          { runtimeConfig, stopConversationId: internalEvent.conversation_id }
+        );
+        if (transcriptRecords && transcriptRecords.length > 0) {
+          records = transcriptRecords;
+          consumedConversationIds = new Set([internalEvent.conversation_id]);
+        }
+      }
 
-      let records = [];
-      let consumedConversationIds = new Set();
-      let consumedGenerationIds = new Set();
-
-      if (isAborted && abortedGenId) {
-        consumedGenerationIds.add(abortedGenId);
-      } else {
+      // Fallback: use hook-event-driven assembleTurn (Mac/Linux or transcript unavailable)
+      if (!records) {
         const result = assembleTurn(allEvents, {
           runtimeConfig,
           stopConversationId: internalEvent.conversation_id,
-          stopGenerationId: internalEvent.generation_id,
           transcriptPath: internalEvent.transcript_path,
         });
         records = result.records;
-        consumedConversationIds = result.consumedConversationIds || new Set();
-        consumedGenerationIds = result.consumedGenerationIds || new Set();
+        consumedConversationIds = result.consumedConversationIds;
       }
 
       if (records.length > 0) {
@@ -198,25 +224,16 @@ async function main() {
       }
 
       // Rewrite journal: keep only events that belong to a pending user turn
-      // (has beforeSubmitPrompt but no stop yet). Drop:
-      //   - events whose generation_id was consumed (parent generation, or
-      //     an aborted generation we deliberately discarded);
-      //   - events whose conversation_id was consumed (subagents, orphans,
-      //     legacy path with no generation_id);
-      //   - orphan child/delayed events without any pending parent turn.
-      const isConsumed = (ev) => {
-        if (ev.generation_id && consumedGenerationIds.has(ev.generation_id)) return true;
-        if (consumedConversationIds.has(ev.conversation_id)) return true;
-        return false;
-      };
+      // (has beforeSubmitPrompt but no stop yet). Drop everything else:
+      // consumed parent, child sessions, subagent meta, and orphan delayed events.
       const pendingTurnConvIds = new Set();
       const remaining = [];
       for (const ev of allEvents) {
-        if (isConsumed(ev)) continue;
+        if (consumedConversationIds.has(ev.conversation_id)) continue;
         if (ev.hook_event === 'beforeSubmitPrompt') pendingTurnConvIds.add(ev.conversation_id);
       }
       for (const ev of allEvents) {
-        if (isConsumed(ev)) continue;
+        if (consumedConversationIds.has(ev.conversation_id)) continue;
         if (pendingTurnConvIds.has(ev.conversation_id)) remaining.push(ev);
         // else: orphan child/delayed event without a pending parent turn → drop
       }
