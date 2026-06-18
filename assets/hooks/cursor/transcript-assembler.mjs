@@ -13,6 +13,11 @@
  * - Tool calls are assigned positionally (transcript has no tool IDs)
  * - Journal provides: tool IDs, token counts, timestamps, model info
  * - Transcript provides: correct UTF-8 text content
+ *
+ * Known limitation: subagent/child sessions are not handled here. When a turn
+ * contains Subagent/Task tool calls, their child session records are not
+ * included. The fallback assembleTurn path handles subagents via scanSubagentDir.
+ * TODO: Add subagent support in a future iteration.
  */
 
 import crypto from 'node:crypto';
@@ -216,8 +221,10 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
     const respTs = respSource ? eventTs(respSource) : reqTs;
 
     // T1: Build output.messages parts: text + tool_call parts for each tool
+    // Non-final steps use 'reasoning' type (matches react-assembler afterAgentThought behavior)
+    const textPartType = isLast ? 'text' : 'reasoning';
     const outputParts = [];
-    if (step.text) outputParts.push({ type: 'text', content: step.text });
+    if (step.text) outputParts.push({ type: textPartType, content: step.text });
     for (const tc of step.toolCalls) {
       outputParts.push({
         type: 'tool_call',
@@ -372,6 +379,12 @@ function isUsableText(text) {
  * Journal preToolUse provides timing and real IDs when available.
  * When journal tools are absent (Cursor hook timing race), synthetic tool
  * entries are created from transcript data so tool.call records always exist.
+ *
+ * Known limitation: positional matching assumes transcript toolUseCount and
+ * journal preToolUse count are consistent. If a tool was interrupted (preToolUse
+ * without postToolUse) or Cursor retried internally (extra transcript tool_use),
+ * subsequent steps may get misaligned tool assignments. This is an inherent
+ * tradeoff — Cursor transcript lacks tool IDs for reliable matching.
  */
 function alignSteps(assistantEntries, parentEvents, turnId) {
   const sortedJournalCalls = parentEvents

@@ -295,12 +295,12 @@ describe('buildCursorRecordsFromTranscript', () => {
       ]);
     });
 
-    it('step 1 llm.response has text part + tool_call part', () => {
+    it('step 1 llm.response has reasoning part + tool_call part', () => {
       const s1Resp = records[4];
       expect(s1Resp['gen_ai.step.id']).toMatch(/:s1$/);
       const parts = s1Resp['gen_ai.output.messages'][0].parts;
       const types = parts.map(p => p.type);
-      expect(types).toContain('text');
+      expect(types).toContain('reasoning');
       expect(types).toContain('tool_call');
     });
 

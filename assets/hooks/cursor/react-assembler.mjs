@@ -17,70 +17,65 @@ import {
   sanitizeObject,
   toJsonValue,
   parseMaybeJson,
-  resolveCursorModel,
 } from '../agent-event-normalizer.mjs';
 
 // ─── Public API ───
 
 /**
  * @param {object[]} journalEvents - All events from the journal
- * @param {object}   options       - { runtimeConfig, stopConversationId, stopGenerationId, transcriptPath }
- * @returns {{ records: object[], consumedConversationIds: Set<string>, consumedGenerationIds: Set<string> }}
+ * @param {object}   options       - { runtimeConfig }
+ * @returns {{ records: object[], consumedConversationIds: Set<string> }}
  */
 export function assembleTurn(journalEvents, options = {}) {
   const runtimeConfig = options.runtimeConfig || {};
   const stopConversationId = options.stopConversationId;
-  const stopGenerationId = options.stopGenerationId;
   const transcriptPath = options.transcriptPath;
 
-  // Find the prompt for THIS stop's conversation+generation. When generationId
-  // is provided, prefer an exact match so that two beforeSubmitPrompt events
-  // in the same conversation (e.g. GPT quota exhaustion auto-switch to
-  // composer) don't get conflated into one turn. Fall back to conversation-
-  // only match for robustness when generation_id is missing on either side.
-  let promptEvent = null;
-  if (stopConversationId && stopGenerationId) {
-    promptEvent = journalEvents.find(e =>
-      e.hook_event === 'beforeSubmitPrompt' &&
-      e.conversation_id === stopConversationId &&
-      e.generation_id === stopGenerationId
-    ) || null;
+  // On Windows fallback: try to extract correct user text from transcript
+  // (transcript-assembler may have failed, but user prompt is still recoverable)
+  let transcriptUserPrompt = null;
+  if (process.platform === 'win32' && transcriptPath) {
+    try {
+      if (fs.existsSync(transcriptPath)) {
+        const content = fs.readFileSync(transcriptPath, 'utf-8');
+        const lines = content.trim().split('\n').filter(Boolean);
+        for (let i = lines.length - 1; i >= 0; i--) {
+          try {
+            const entry = JSON.parse(lines[i]);
+            if (entry.role === 'user' && entry.message?.content) {
+              const parts = entry.message.content.filter(p => p.type === 'text' && p.text);
+              const text = parts.map(p => p.text.replace(/<\/?user_query>\n?/g, '').trim()).filter(Boolean).join('');
+              if (text) { transcriptUserPrompt = text; break; }
+            }
+          } catch {}
+        }
+      }
+    } catch {}
   }
+
+  // Find the prompt for THIS stop's conversation
+  const promptEvent = stopConversationId
+    ? journalEvents.find(e => e.hook_event === 'beforeSubmitPrompt' && e.conversation_id === stopConversationId)
+    : journalEvents.find(e => e.hook_event === 'beforeSubmitPrompt');
   if (!promptEvent) {
-    promptEvent = stopConversationId
-      ? journalEvents.find(e => e.hook_event === 'beforeSubmitPrompt' && e.conversation_id === stopConversationId)
-      : journalEvents.find(e => e.hook_event === 'beforeSubmitPrompt');
-  }
-  if (!promptEvent) {
-    return { records: [], consumedConversationIds: new Set(), consumedGenerationIds: new Set() };
+    return { records: [], consumedConversationIds: new Set() };
   }
 
   const parentConvId = promptEvent.conversation_id;
-  const parentGenerationId = promptEvent.generation_id || null;
-  // Scope events to this generation when we have one; this prevents events
-  // belonging to a sibling generation in the same conversation from leaking
-  // into the assembled turn.
-  const generationScoped = Boolean(stopGenerationId && parentGenerationId);
-  const inParentTurn = (e) => {
-    if (e.conversation_id !== parentConvId) return false;
-    if (generationScoped && e.generation_id && e.generation_id !== parentGenerationId) return false;
-    return true;
-  };
-
-  const turnId = parentGenerationId || parentConvId;
+  const turnId = promptEvent.generation_id || parentConvId;
   const traceId = deriveTraceId(turnId);
   const userId = resolveUserId({}, runtimeConfig);
   const stopEvent = journalEvents.find(e =>
-    e.hook_event === 'stop' && inParentTurn(e)
+    e.hook_event === 'stop' && e.conversation_id === parentConvId
   );
   const responseEvent = journalEvents.find(e =>
-    e.hook_event === 'afterAgentResponse' && inParentTurn(e)
+    e.hook_event === 'afterAgentResponse' && e.conversation_id === parentConvId
   );
-  const model = resolveModel(responseEvent?.model || promptEvent?.model);
+  const model = responseEvent?.model || promptEvent?.model || 'unknown';
 
   // Filter to parent session events only (keep Subagent/Task tool calls + subagentStart/Stop)
   const parentEvents = journalEvents
-    .filter(e => inParentTurn(e))
+    .filter(e => e.conversation_id === parentConvId)
     .filter(e => e.hook_event !== 'sessionStart')
     .sort((a, b) => tsMs(a) - tsMs(b));
 
@@ -94,18 +89,18 @@ export function assembleTurn(journalEvents, options = {}) {
 
   const records = [];
 
-  // User-hook: user prompt is not an LLM call — emit as "other" so converter
-  // merges messages_delta into ENTRY span without generating a standalone LLM span.
-  if (promptEvent.prompt) {
+  // User-hook llm.request (no step_id, no model → ENTRY input)
+  const userPrompt = transcriptUserPrompt || promptEvent.prompt;
+  if (userPrompt) {
     records.push(applyPolicy({
       time_unix_nano: eventTs(promptEvent),
       observed_time_unix_nano: eventTs(promptEvent),
       'event.id': crypto.randomUUID(),
-      'event.name': 'other',
+      'event.name': 'llm.request',
       ...baseFields,
       'gen_ai.provider.name': inferProvider(model),
       'gen_ai.input.messages_delta': [
-        { role: 'user', parts: [{ type: 'text', content: promptEvent.prompt }] },
+        { role: 'user', parts: [{ type: 'text', content: userPrompt }] },
       ],
       'agent.cursor.hook_event_name': 'beforeSubmitPrompt',
       'agent.cursor.composer_mode': promptEvent.composer_mode,
@@ -184,7 +179,7 @@ export function assembleTurn(journalEvents, options = {}) {
   // Build parent ReAct steps (with subagentResults for input enrichment)
   const stepRecords = buildParentSteps(parentEvents, {
     turnId, traceId, model, userId, baseFields, runtimeConfig,
-    userPrompt: promptEvent.prompt,
+    userPrompt: userPrompt || promptEvent.prompt,
     promptEventTs: promptEvent._journal_ts,
     subagentResults,
   });
@@ -204,7 +199,7 @@ export function assembleTurn(journalEvents, options = {}) {
       'agent.cursor.subagent.link_confidence': parentToolCallId ? 'transcript_dir' : 'orphan',
     };
 
-    const childModel = resolveModel(childEvents[0]?.model || model);
+    const childModel = childEvents[0]?.model || model;
     const childStepRecords = buildParentSteps(childEvents, {
       turnId, traceId, model: childModel, userId,
       baseFields: childBaseFields, runtimeConfig,
@@ -215,20 +210,9 @@ export function assembleTurn(journalEvents, options = {}) {
     records.push(...childStepRecords);
   }
 
-  // Consumed ids:
-  //   - consumedGenerationIds: parent generation only (when generation-scoped)
-  //     → processor uses this for precise cleanup so sibling generations in
-  //       the same conversation can still assemble later.
-  //   - consumedConversationIds: child subagent sessions + orphan time-window
-  //     conversations. When NOT generation-scoped (legacy path / missing
-  //     generation_id), the parent conversation is also added here.
+  // Consumed conversation ids: parent + all child sessions from transcript dir + time-based
   const consumedConversationIds = new Set();
-  const consumedGenerationIds = new Set();
-  if (generationScoped) {
-    consumedGenerationIds.add(parentGenerationId);
-  } else {
-    consumedConversationIds.add(parentConvId);
-  }
+  consumedConversationIds.add(parentConvId);
   for (const cid of childConvIds) {
     consumedConversationIds.add(cid);
   }
@@ -242,9 +226,7 @@ export function assembleTurn(journalEvents, options = {}) {
     }
   }
   for (const ev of journalEvents) {
-    if (!ev.conversation_id) continue;
-    if (ev.conversation_id === parentConvId) continue; // never reclassify parent's own events
-    if (consumedConversationIds.has(ev.conversation_id)) continue;
+    if (!ev.conversation_id || consumedConversationIds.has(ev.conversation_id)) continue;
     const evTs = tsMs(ev);
     if (evTs >= parentPromptTs && evTs <= parentStopTs) {
       const hasOwnPrompt = conversationIdsWithPrompt.has(ev.conversation_id);
@@ -254,7 +236,7 @@ export function assembleTurn(journalEvents, options = {}) {
     }
   }
 
-  return { records, consumedConversationIds, consumedGenerationIds };
+  return { records, consumedConversationIds };
 }
 
 // ─── Transcript Directory Scanning ───
@@ -289,11 +271,6 @@ function buildParentSteps(events, ctx) {
   let pendingToolRecords = [];
   let pendingToolCalls = [];
   let pendingToolResults = [];
-  // Latest _journal_ts among buffered tool.result events. When pending tools
-  // are flushed into a step, this becomes the new lastStepEndTs so that the
-  // following step's LLM request starts at the last tool's end (not at the
-  // turn's prompt time).
-  let pendingLastEndTs = null;
   const synthesizedSubagentIds = new Set();
 
   const stepEvents = events.filter(e =>
@@ -359,16 +336,9 @@ function buildParentSteps(events, ctx) {
     stepToolCalls.set(stepId, calls);
     previousToolResults.push(...pendingToolResults);
     const hadTools = pendingToolRecords.length > 0;
-    // Advance the step-end clock to the last buffered tool.result, so the
-    // next openNewStep() doesn't fall back to ctx.promptEventTs (which would
-    // make the new step's LLM request span the entire turn from time 0).
-    if (pendingLastEndTs) {
-      lastStepEndTs = pendingLastEndTs;
-    }
     pendingToolRecords = [];
     pendingToolCalls = [];
     pendingToolResults = [];
-    pendingLastEndTs = null;
     return hadTools;
   }
 
@@ -414,26 +384,9 @@ function buildParentSteps(events, ctx) {
           currentLlmResponse = buildLlmResponseWithToken(ev, ctx, currentStepId, 'text');
         }
       } else {
-        if (pendingToolRecords.length > 0) {
-          // ReAct split: tools arrived before any thought/response. Create two steps:
-          //   Step N:   LLM decided to call tools → tools execute (finish=tool_calls)
-          //   Step N+1: LLM receives tool results → produces final answer
-          openNewStep(ev, stepRound === 0, ctx.userPrompt);
-          flushPendingTools(currentStepId);
-          currentStepHasTools = true;
-          // Close step N with an implicit response (assignFinishReasons will
-          // set finish_reasons=['tool_calls'] because this step has tools)
-          currentLlmResponse = buildEmptyLlmResponse(
-            { _journal_ts: lastStepEndTs || ev._journal_ts, hook_event: 'implicit' },
-            ctx, currentStepId,
-          );
-          // Open step N+1 for the final LLM answer
-          openNewStep(ev, false, null);
-          currentLlmResponse = buildLlmResponseWithToken(ev, ctx, currentStepId, 'text');
-        } else {
-          openNewStep(ev, stepRound === 0, ctx.userPrompt);
-          currentLlmResponse = buildLlmResponseWithToken(ev, ctx, currentStepId, 'text');
-        }
+        openNewStep(ev, stepRound === 0, ctx.userPrompt);
+        currentLlmResponse = buildLlmResponseWithToken(ev, ctx, currentStepId, 'text');
+        if (flushPendingTools(currentStepId)) currentStepHasTools = true;
       }
     }
 
@@ -489,7 +442,6 @@ function buildParentSteps(events, ctx) {
         pendingToolRecords.push(buildToolResult(ev, ctx, '__pending__'));
         applyToolDurationToCall(pendingToolRecords, '__pending__', ev);
         pendingToolResults.push({ toolName: ev.tool_name, toolUseId: ev.tool_use_id, result: ev.tool_output, error: ev.error_message });
-        if (ev._journal_ts) pendingLastEndTs = ev._journal_ts;
       } else {
         applyToolDurationToCall(records, currentStepId, ev);
         records.push(buildToolResult(ev, ctx, currentStepId));
@@ -545,7 +497,7 @@ function buildLlmRequestWithTs(reqTs, ev, ctx, stepId, userPrompt, prevToolResul
     ...ctx.baseFields,
     'gen_ai.step.id': stepId,
     'gen_ai.provider.name': inferProvider(ev.model || ctx.model),
-    'gen_ai.request.model': resolveModel(ev.model || ctx.model),
+    'gen_ai.request.model': ev.model || ctx.model,
     'gen_ai.input.messages': inputMessages.length > 0 ? inputMessages : undefined,
     'agent.cursor.hook_event_name': ev.hook_event,
     'agent.cursor.llm_request_time_source': timeSource,
@@ -562,8 +514,8 @@ function buildLlmResponse(ev, ctx, stepId, partType) {
     'gen_ai.step.id': stepId,
     'gen_ai.response.id': crypto.randomUUID(),
     'gen_ai.provider.name': inferProvider(ev.model || ctx.model),
-    'gen_ai.request.model': resolveModel(ev.model || ctx.model),
-    'gen_ai.response.model': resolveModel(ev.model || ctx.model),
+    'gen_ai.request.model': ev.model || ctx.model,
+    'gen_ai.response.model': ev.model || ctx.model,
     'gen_ai.output.messages': ev.text
       ? [{ role: 'assistant', parts: [{ type: partType, content: ev.text }] }]
       : [{ role: 'assistant', parts: [] }],
@@ -588,8 +540,8 @@ function buildEmptyLlmResponse(ev, ctx, stepId) {
     'gen_ai.step.id': stepId,
     'gen_ai.response.id': crypto.randomUUID(),
     'gen_ai.provider.name': inferProvider(ev.model || ctx.model),
-    'gen_ai.request.model': resolveModel(ev.model || ctx.model),
-    'gen_ai.response.model': resolveModel(ev.model || ctx.model),
+    'gen_ai.request.model': ev.model || ctx.model,
+    'gen_ai.response.model': ev.model || ctx.model,
     'gen_ai.output.messages': [{ role: 'assistant', parts: [] }],
     'agent.cursor.hook_event_name': 'implicit',
   }, ctx.runtimeConfig);
@@ -745,13 +697,6 @@ function applyToolDurationToCall(records, stepId, resultEvent) {
 
 // ─── finish_reasons ───
 
-/**
- * Assign finish_reasons to all llm.response records:
- *   - Final response in the turn → ['stop']
- *   - Non-final response in a step that has tools → ['tool_calls']
- *     (this includes the implicit response from the ReAct split path)
- *   - Other non-final responses → ['stop']
- */
 function assignFinishReasons(records) {
   const stepsWithTools = new Set();
   for (const r of records) {
@@ -842,14 +787,9 @@ function findLastItem(items, predicate) {
   return undefined;
 }
 
-function resolveModel(rawModel) {
-  return resolveCursorModel(rawModel);
-}
-
 function inferProvider(model) {
-  const resolved = resolveModel(model);
-  if (/^composer/i.test(resolved)) return 'cursor';
-  const provider = inferProviderName({ 'gen_ai.request.model': resolved, 'gen_ai.agent.type': 'cursor' });
+  const provider = inferProviderName({ 'gen_ai.request.model': model, 'gen_ai.agent.type': 'cursor' });
+  if (provider === 'unknown' && /composer/i.test(model)) return 'openai';
   return provider;
 }
 
