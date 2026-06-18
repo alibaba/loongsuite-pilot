@@ -163,7 +163,144 @@ describe('QoderTraceInput token-enricher', () => {
     });
   });
 
-  describe('enrichIdeTurn (timestamp-based match)', () => {
+  describe('enrichIdeTurn (SQLite structure match)', () => {
+    it('matches IDE turns by session request order and assistant order without timestamp proximity', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.agent.type': 'qoder',
+          'gen_ai.session.id': 'sess-ide',
+          'gen_ai.turn.id': 'turn-a',
+          'gen_ai.step.id': 'turn-a:s1',
+          'gen_ai.request.model': 'auto',
+          time_unix_nano: '1780000000000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.agent.type': 'qoder',
+          'gen_ai.session.id': 'sess-ide',
+          'gen_ai.turn.id': 'turn-a',
+          'gen_ai.step.id': 'turn-a:s1',
+          'gen_ai.request.model': 'auto',
+          'gen_ai.response.model': 'auto',
+          time_unix_nano: '1780000000000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.agent.type': 'qoder',
+          'gen_ai.session.id': 'sess-ide',
+          'gen_ai.turn.id': 'turn-b',
+          'gen_ai.step.id': 'turn-b:s1',
+          'gen_ai.request.model': 'auto',
+          time_unix_nano: '1780000010000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.agent.type': 'qoder',
+          'gen_ai.session.id': 'sess-ide',
+          'gen_ai.turn.id': 'turn-b',
+          'gen_ai.step.id': 'turn-b:s1',
+          'gen_ai.request.model': 'auto',
+          'gen_ai.response.model': 'auto',
+          time_unix_nano: '1780000010000000000',
+        } as any),
+      ];
+      const sqliteRows: SqliteTokenData[] = [
+        {
+          sessionId: 'sess-ide',
+          requestId: 'request-a',
+          messageId: 'message-a-1',
+          gmtCreate: 1780000100000,
+          inputTokens: 100,
+          outputTokens: 10,
+          cacheReadTokens: 3,
+          model: 'gm51model',
+        },
+        {
+          sessionId: 'sess-ide',
+          requestId: 'request-b',
+          messageId: 'message-b-1',
+          gmtCreate: 1780000200000,
+          inputTokens: 200,
+          outputTokens: 20,
+          cacheReadTokens: 4,
+          model: 'qmodel_latest',
+        },
+      ];
+
+      enrichIdeTurn(entries, sqliteRows);
+
+      expect(entries[0]['gen_ai.request.id']).toBe('request-a');
+      expect((entries[0] as any)['agent.request_id']).toBe('request-a');
+      expect(entries[0]['gen_ai.request.model']).toBe('gm51model');
+      expect(entries[1]['gen_ai.request.id']).toBe('request-a');
+      expect(entries[1]['gen_ai.response.id']).toBe('message-a-1');
+      expect(entries[1]['gen_ai.request.model']).toBe('gm51model');
+      expect(entries[1]['gen_ai.response.model']).toBe('gm51model');
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBe(100);
+
+      expect(entries[2]['gen_ai.request.id']).toBe('request-b');
+      expect(entries[2]['gen_ai.request.model']).toBe('qmodel_latest');
+      expect(entries[3]['gen_ai.response.id']).toBe('message-b-1');
+      expect(entries[3]['gen_ai.response.model']).toBe('qmodel_latest');
+      expect(entries[3]['gen_ai.usage.input_tokens']).toBe(200);
+    });
+
+    it('marks low confidence and avoids structural assignment when assistant counts differ', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.agent.type': 'qoder',
+          'gen_ai.session.id': 'sess-ide',
+          'gen_ai.turn.id': 'turn-a',
+          'gen_ai.step.id': 'turn-a:s1',
+          'gen_ai.request.model': 'auto',
+          time_unix_nano: '1780000000000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.agent.type': 'qoder',
+          'gen_ai.session.id': 'sess-ide',
+          'gen_ai.turn.id': 'turn-a',
+          'gen_ai.step.id': 'turn-a:s1',
+          'gen_ai.request.model': 'auto',
+          'gen_ai.response.model': 'auto',
+          time_unix_nano: '1780000000000000000',
+        } as any),
+      ];
+      const sqliteRows: SqliteTokenData[] = [
+        {
+          sessionId: 'sess-ide',
+          requestId: 'request-a',
+          messageId: 'message-a-1',
+          gmtCreate: 1780000100000,
+          inputTokens: 100,
+          outputTokens: 10,
+          cacheReadTokens: 3,
+          model: 'gm51model',
+        },
+        {
+          sessionId: 'sess-ide',
+          requestId: 'request-a',
+          messageId: 'message-a-2',
+          gmtCreate: 1780000200000,
+          inputTokens: 200,
+          outputTokens: 20,
+          cacheReadTokens: 4,
+          model: 'gm51model',
+        },
+      ];
+
+      enrichIdeTurn(entries, sqliteRows);
+
+      expect(entries[1]['gen_ai.response.id']).toBeUndefined();
+      expect(entries[1]['gen_ai.response.model']).toBe('auto');
+      expect((entries[1] as any)['qoder.match_confidence']).toBe('low');
+      expect((entries[1] as any)['qoder.match.warning']).toBe('assistant_count_mismatch');
+    });
+  });
+
+  describe('enrichIdeTurn (timestamp-based fallback)', () => {
     it('matches SQLite rows by timestamp within 1000ms', () => {
       const entries: AgentActivityEntry[] = [
         makeEntry({
@@ -185,6 +322,40 @@ describe('QoderTraceInput token-enricher', () => {
       expect(entries[0]['gen_ai.usage.input_tokens']).toBe(24841);
       expect(entries[0]['gen_ai.usage.output_tokens']).toBe(106);
       expect(entries[0]['gen_ai.response.id']).toBe('sqlite-req-1');
+    });
+
+    it('injects SQLite model key into matching IDE request and response entries', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.agent.type': 'qoder',
+          'gen_ai.step.id': 'turn-1:s1',
+          'gen_ai.request.model': 'auto',
+          time_unix_nano: '1780366977000000000',
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.agent.type': 'qoder',
+          'gen_ai.step.id': 'turn-1:s1',
+          'gen_ai.request.model': 'auto',
+          'gen_ai.response.model': 'auto',
+          time_unix_nano: '1780366977467000000',
+        } as any),
+      ];
+      const sqliteRows: SqliteTokenData[] = [{
+        requestId: 'sqlite-req-1',
+        gmtCreate: 1780366977466,
+        inputTokens: 24841,
+        outputTokens: 106,
+        cacheReadTokens: 23741,
+        model: 'gm51model',
+      }];
+
+      enrichIdeTurn(entries, sqliteRows);
+
+      expect(entries[0]['gen_ai.request.model']).toBe('gm51model');
+      expect(entries[1]['gen_ai.request.model']).toBe('gm51model');
+      expect(entries[1]['gen_ai.response.model']).toBe('gm51model');
     });
 
     it('does not match if timestamp difference exceeds 1000ms', () => {

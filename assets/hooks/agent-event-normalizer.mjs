@@ -470,7 +470,9 @@ export function buildQoderHookRecord(row, options = {}) {
     'gen_ai.response.model': model,
     'gen_ai.response.id': eventName === 'llm.response' ? getStringValue(message, 'id') : undefined,
     'gen_ai.response.finish_reasons': getStringValue(message, 'stop_reason'),
-    'gen_ai.input.messages_delta': eventName === 'llm.request' ? buildQoderInputMessagesDelta(content) : undefined,
+    'gen_ai.input.messages_delta': eventName === 'llm.request' || (eventName === 'other' && rowType === 'user')
+      ? buildQoderInputMessagesDelta(content)
+      : undefined,
     'gen_ai.output.messages': eventName === 'llm.response' ? buildQoderOutputMessages(content) : undefined,
     'gen_ai.tool.name': eventName === 'tool.call' ? getStringValue(content, 'name') : undefined,
     'gen_ai.tool.call.id': eventName === 'tool.call' || eventName === 'tool.result' ? toolCallId : undefined,
@@ -608,7 +610,7 @@ function inferQoderEventName(rowType, content) {
   const contentType = getStringValue(content, 'type');
   if (contentType === 'tool_result') return 'tool.result';
   if (contentType === 'tool_use') return 'tool.call';
-  return rowType === 'assistant' ? 'llm.response' : 'llm.request';
+  return rowType === 'assistant' ? 'llm.response' : 'other';
 }
 
 function selectDominantContentBlock(rawContent) {

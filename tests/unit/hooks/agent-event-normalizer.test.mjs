@@ -246,7 +246,7 @@ describe('asset hook agent event normalizer', () => {
       runtimeConfig: { userId: 'u-qoder', agents: {} },
     });
 
-    expect(record['event.name']).toBe('llm.request');
+    expect(record['event.name']).toBe('other');
     expect(record['gen_ai.request.model']).toBeUndefined();
     expect(record['gen_ai.response.model']).toBeUndefined();
     expect(record['gen_ai.provider.name']).toBe('qwen');

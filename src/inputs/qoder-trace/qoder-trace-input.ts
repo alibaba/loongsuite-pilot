@@ -58,9 +58,10 @@ export class QoderTraceInput extends BaseInput {
     // 2. Group by turn.id
     const turnGroups = this.groupByTurn(rawEntries);
 
-    // 3. Enrich each turn
-    const allEntries: AgentActivityEntry[] = [];
-    for (const [turnId, turnEntries] of turnGroups) {
+    // 3. Enrich each turn. IDE turns are enriched per session so SQLite request_id
+    // ordering can be matched against hook turn ordering without timestamp joins.
+    const ideSessionGroups = new Map<string, AgentActivityEntry[]>();
+    for (const [, turnEntries] of turnGroups) {
       const variant = this.inferTurnVariant(turnEntries);
       const sessionId = this.extractSessionId(turnEntries);
 
@@ -68,17 +69,23 @@ export class QoderTraceInput extends BaseInput {
         const segments = await readSegmentTokensForSession(sessionId);
         enrichCliTurn(turnEntries, segments);
       } else if (variant === 'qoder' && sessionId) {
-        const sqliteRows = await readSqliteTokensForSession(sessionId);
-        enrichIdeTurn(turnEntries, sqliteRows);
+        const sessionEntries = ideSessionGroups.get(sessionId) ?? [];
+        sessionEntries.push(...turnEntries);
+        ideSessionGroups.set(sessionId, sessionEntries);
       }
-
-      // 4. Inject trace_id
-      injectTraceId(turnEntries);
-
-      allEntries.push(...turnEntries);
     }
 
-    return allEntries;
+    for (const [sessionId, sessionEntries] of ideSessionGroups) {
+      const sqliteRows = await readSqliteTokensForSession(sessionId);
+      enrichIdeTurn(sessionEntries, sqliteRows);
+    }
+
+    // 4. Inject trace_id per turn
+    for (const turnEntries of turnGroups.values()) {
+      injectTraceId(turnEntries);
+    }
+
+    return rawEntries;
   }
 
   // ─── Hook JSONL reading (adapted from BaseHookInput) ────────────────────────
