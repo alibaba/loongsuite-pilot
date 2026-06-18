@@ -448,4 +448,6 @@ function resolveQoderWorkProjectDir(sandboxCwd, agentId) {
   return sandboxCwd;
 }
 
+export { extractText, isSystemInjection, isToolResult, splitIntoTurns };
+
 main().catch(() => { /* fail-open */ });
