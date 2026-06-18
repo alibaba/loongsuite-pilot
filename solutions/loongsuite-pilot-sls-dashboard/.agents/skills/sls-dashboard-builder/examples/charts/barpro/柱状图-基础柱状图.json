@@ -1,0 +1,356 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select host, COUNT(*) as pv, approx_distinct(remote_addr) as uv GROUP BY host ORDER BY uv desc LIMIT 5",
+                        "name": "A",
+                        "tokenQuery": "* | select host, COUNT(*) as pv, approx_distinct(remote_addr) as uv GROUP BY host ORDER BY uv desc LIMIT 5",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "host",
+                        "name": "A",
+                        "xAxisConcatKeys": [],
+                        "yAxisKeys": [
+                            "pv"
+                        ]
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "KMB"
+                },
+                "displayName": "simulator-nginx-demo1675825601503",
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "single",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "show": true
+                },
+                "xPos": 0,
+                "version": 2,
+                "isTimeSeries": false,
+                "showTitle": true,
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "right"
+                },
+                "barOptions": {
+                    "barWidth": 0.9,
+                    "orientation": "vertical",
+                    "showValues": "always",
+                    "fillOpacity": 85,
+                    "stackingMode": "none",
+                    "valueSize": 12,
+                    "groupWidth": 0.27,
+                    "labelLocation": "xAxis",
+                    "gradientMode": "none",
+                    "lineWidth": 1
+                },
+                "basicOptions": {
+                    "displayName": "基本柱状图（垂直）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 8,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1690425414725",
+            "type": "barpro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select host, COUNT(*) as pv, approx_distinct(remote_addr) as uv GROUP BY host ORDER BY uv desc LIMIT 5",
+                        "name": "A",
+                        "tokenQuery": "* | select host, COUNT(*) as pv, approx_distinct(remote_addr) as uv GROUP BY host ORDER BY uv desc LIMIT 5",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "host",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "pv",
+                            "uv"
+                        ]
+                    }
+                },
+                "yPos": 8,
+                "standardOption": {
+                    "decimals": 2,
+                    "format": "KMB"
+                },
+                "displayName": "charts-demo1690425436752",
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "xAxisOption": {
+                    "show": true
+                },
+                "xPos": 0,
+                "version": 2,
+                "isTimeSeries": false,
+                "showTitle": true,
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "分组柱状图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "height": 8,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1690425436752",
+            "type": "barpro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select host, COUNT(*) as pv, approx_distinct(remote_addr) as uv GROUP BY host ORDER BY uv desc LIMIT 5",
+                        "name": "A",
+                        "tokenQuery": "* | select host, COUNT(*) as pv, approx_distinct(remote_addr) as uv GROUP BY host ORDER BY uv desc LIMIT 5",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "host",
+                        "name": "A",
+                        "xAxisConcatKeys": [],
+                        "yAxisKeys": [
+                            "pv"
+                        ]
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "KMB"
+                },
+                "displayName": "simulator-nginx-demo1675825601503",
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "single",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "show": true
+                },
+                "xPos": 12,
+                "version": 2,
+                "isTimeSeries": false,
+                "showTitle": true,
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "right"
+                },
+                "barOptions": {
+                    "barWidth": 0.9,
+                    "orientation": "horizontal",
+                    "showValues": "always",
+                    "fillOpacity": 85,
+                    "stackingMode": "none",
+                    "valueSize": 12,
+                    "groupWidth": 0.27,
+                    "labelLocation": "xAxis",
+                    "gradientMode": "none",
+                    "lineWidth": 1
+                },
+                "basicOptions": {
+                    "displayName": "基本柱状图（水平）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 8,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1690425478254",
+            "type": "barpro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select host, COUNT(*) as pv, approx_distinct(remote_addr) as uv GROUP BY host ORDER BY uv desc LIMIT 5",
+                        "name": "A",
+                        "tokenQuery": "* | select host, COUNT(*) as pv, approx_distinct(remote_addr) as uv GROUP BY host ORDER BY uv desc LIMIT 5",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "host",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "pv",
+                            "uv"
+                        ]
+                    }
+                },
+                "yPos": 8,
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "KMB"
+                },
+                "displayName": "simulator-nginx-demo1655889886601",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 12,
+                "version": 2,
+                "isTimeSeries": false,
+                "showTitle": true,
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "barOptions": {
+                    "barWidth": 0.9,
+                    "orientation": "vertical",
+                    "showValues": "always",
+                    "fillOpacity": 85,
+                    "labelRotate": 0,
+                    "stackingMode": "normal",
+                    "valueSize": 12,
+                    "groupWidth": 0.42,
+                    "gradientMode": "none",
+                    "lineWidth": 1
+                },
+                "basicOptions": {
+                    "displayName": "堆叠柱状图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 8,
+                "zIndex": 11
+            },
+            "action": {},
+            "title": "charts-demo1690425527584",
+            "type": "barpro"
+        }
+    ],
+    "displayName": "柱状图-基础柱状图",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690425407306-385262"
+}

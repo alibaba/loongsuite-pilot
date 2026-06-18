@@ -1,0 +1,345 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | SELECT request_method, COUNT(*) as count, avg(request_time* 50) as request_time, avg(request_length) as request_length group by request_method",
+                        "name": "A",
+                        "tokenQuery": "* | SELECT request_method, COUNT(*) as count, avg(request_time* 50) as request_time, avg(request_length) as request_length group by request_method",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "name": "A",
+                        "numFieldKey": [
+                            "count",
+                            "request_time",
+                            "request_length"
+                        ],
+                        "showFieldKey": "request_method"
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1657716035509",
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "typeOption": {
+                    "chartType": "PolygonsChart",
+                    "showLabel": true
+                },
+                "xAxisOption": {
+                    "show": true
+                },
+                "xPos": 0,
+                "version": 2,
+                "isTimeSeries": true,
+                "radarOption": {
+                    "pointSize": 5,
+                    "lineWidth": 1
+                },
+                "showTitle": true,
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "bottom"
+                },
+                "basicOptions": {
+                    "displayName": "多边形雷达图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 9,
+                "zIndex": 13
+            },
+            "action": {},
+            "title": "charts-demo1690437311592",
+            "type": "radarchart"
+        },
+        {
+            "search": {
+                "transformers": [
+                    {
+                        "name": "TA",
+                        "fieldConfigs": [
+                            {
+                                "fieldName": "request_method",
+                                "handleType": "groupby"
+                            },
+                            {
+                                "calculationType": "Total",
+                                "fieldName": "c",
+                                "handleType": "calculate"
+                            }
+                        ],
+                        "type": "groupby"
+                    }
+                ],
+                "query": "* | SELECT  status, COUNT(*) as c  group by status ",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | SELECT request_method, COUNT(*) as c  group by request_method ",
+                        "name": "A",
+                        "tokenQuery": "* | SELECT request_method, COUNT(*) as c  group by request_method ",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    },
+                    {
+                        "datasource": "logstore",
+                        "displayName": "B",
+                        "query": "* | SELECT request_method, COUNT(*) as c  group by request_method ",
+                        "name": "B",
+                        "tokenQuery": "* | SELECT request_method, COUNT(*) as c  group by request_method ",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "nginx-access-log",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "xAxis": [],
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "none"
+                },
+                "displayName": "Old Pie",
+                "showLegend": true,
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xPos": 0,
+                "actionOptions": [
+                    {
+                        "name": "c",
+                        "queryName": "A",
+                        "events": [
+                            {
+                                "values": {
+                                    "logstoreName": "nginx-access-log",
+                                    "name": "打开日志库",
+                                    "project": "simulator-nginx-demo",
+                                    "filterInherit": false,
+                                    "searchFilter": " ${c}  and ${request_method}",
+                                    "timeRange": ""
+                                },
+                                "event": "logstore"
+                            }
+                        ]
+                    }
+                ],
+                "legendMaxWidth": 80,
+                "showBackground": true,
+                "pieLabelType": "percent",
+                "basicOptions": {
+                    "displayName": "多查询（Group By）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showBorder": true
+                },
+                "formatType": "number",
+                "height": 9,
+                "pieTypeOption": {
+                    "chartType": "PieChart"
+                },
+                "zIndex": 12,
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "queryOptionMap": {
+                    "TA": {
+                        "name": "TA",
+                        "numFieldKey": [
+                            "c"
+                        ],
+                        "showFieldKey": "request_method"
+                    }
+                },
+                "yPos": 9,
+                "typeOption": {
+                    "chartType": "PolygonsChart",
+                    "showLabel": true
+                },
+                "fixedTime": false,
+                "showBorder": true,
+                "version": 2,
+                "pieOption": {
+                    "chartType": "DountChart",
+                    "labelType": "type_num_percent",
+                    "showLabel": true
+                },
+                "yAxis": [],
+                "radarOption": {
+                    "pointSize": 5,
+                    "lineWidth": 1
+                },
+                "showTitle": true,
+                "pieType": "normal",
+                "width": 24,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "bottom"
+                },
+                "legendPosition": "right",
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690437417164",
+            "type": "radarchart"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | SELECT request_method, COUNT(*) as count, avg(request_time* 50) as request_time, avg(request_length) as request_length group by request_method",
+                        "name": "A",
+                        "tokenQuery": "* | SELECT request_method, COUNT(*) as count, avg(request_time* 50) as request_time, avg(request_length) as request_length group by request_method",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "name": "A",
+                        "numFieldKey": [
+                            "count",
+                            "request_time",
+                            "request_length"
+                        ],
+                        "showFieldKey": "request_method"
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1657716035509",
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "typeOption": {
+                    "chartType": "CircleChart",
+                    "showLabel": true
+                },
+                "xAxisOption": {
+                    "show": true
+                },
+                "xPos": 12,
+                "version": 2,
+                "isTimeSeries": true,
+                "radarOption": {
+                    "pointSize": 5,
+                    "lineWidth": 1
+                },
+                "showTitle": true,
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "bottom"
+                },
+                "basicOptions": {
+                    "displayName": "圆形雷达图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 9,
+                "zIndex": 13
+            },
+            "action": {},
+            "title": "charts-demo1690437549855",
+            "type": "radarchart"
+        }
+    ],
+    "displayName": "雷达图-基础雷达图",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690437304416-521089"
+}

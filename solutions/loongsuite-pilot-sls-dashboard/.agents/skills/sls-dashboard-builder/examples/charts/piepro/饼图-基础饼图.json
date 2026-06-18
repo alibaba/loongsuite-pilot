@@ -1,0 +1,313 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select count(1) as pv, case when http_user_agent like '%Chrome%' then 'Chrome' when http_user_agent like '%Firefox%' then 'Firefox' when http_user_agent like '%Safari%' then 'Safari' else 'unKnown' end as http_user_agent  group by case when http_user_agent like '%Chrome%' then 'Chrome' when http_user_agent like '%Firefox%' then 'Firefox' when http_user_agent like '%Safari%' then 'Safari' else 'unKnown' end   order by pv desc limit 10",
+                        "name": "A",
+                        "tokenQuery": "* | select count(1) as pv, case when http_user_agent like '%Chrome%' then 'Chrome' when http_user_agent like '%Firefox%' then 'Firefox' when http_user_agent like '%Safari%' then 'Safari' else 'unKnown' end as http_user_agent  group by case when http_user_agent like '%Chrome%' then 'Chrome' when http_user_agent like '%Firefox%' then 'Firefox' when http_user_agent like '%Safari%' then 'Safari' else 'unKnown' end   order by pv desc limit 10",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "name": "A",
+                        "numFieldKey": "pv",
+                        "xAxisConcatKeys": [],
+                        "showFieldKey": "http_user_agent"
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 2,
+                    "format": "KMB"
+                },
+                "displayName": "simulator-nginx-demo1679471499745",
+                "xPos": 0,
+                "actionOptions": [
+                    {
+                        "name": "pv",
+                        "queryName": "A",
+                        "events": [
+                            {
+                                "values": {
+                                    "blank": true,
+                                    "logstoreName": "nginx-access-log",
+                                    "name": "打开日志库",
+                                    "project": "simulator-nginx-demo",
+                                    "filterInherit": false,
+                                    "searchFilter": "",
+                                    "timeRange": -1
+                                },
+                                "event": "logstore"
+                            }
+                        ]
+                    }
+                ],
+                "version": 2,
+                "isTimeSeries": false,
+                "pieOption": {
+                    "chartType": "PieChart",
+                    "labelType": "percent",
+                    "showLabel": true
+                },
+                "showTitle": true,
+                "width": 11,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "bottom"
+                },
+                "basicOptions": {
+                    "displayName": "基础饼图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 9,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1690430312511",
+            "type": "piepro"
+        },
+        {
+            "search": {
+                "query": "* | SELECT  status, COUNT(*) as c  group by status ",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | SELECT request_method, arbitrary(request_length) as len, COUNT(*) as c  group by request_method ",
+                        "name": "A",
+                        "tokenQuery": "* | SELECT request_method, arbitrary(request_length) as len, COUNT(*) as c  group by request_method ",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "nginx-access-log",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "xAxis": [],
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "none"
+                },
+                "displayName": "Old Pie",
+                "showLegend": true,
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xPos": 11,
+                "actionOptions": [
+                    {
+                        "name": "c",
+                        "queryName": "A",
+                        "events": [
+                            {
+                                "values": {
+                                    "blank": false,
+                                    "logstoreName": "nginx-access-log",
+                                    "name": "打开日志库",
+                                    "project": "simulator-nginx-demo",
+                                    "filterInherit": false,
+                                    "searchFilter": " ${c}  and ${request_method} ${{len}}",
+                                    "timeRange": ""
+                                },
+                                "event": "logstore"
+                            }
+                        ]
+                    }
+                ],
+                "legendMaxWidth": 80,
+                "showBackground": true,
+                "pieLabelType": "percent",
+                "basicOptions": {
+                    "displayName": "组合字段",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showBorder": true
+                },
+                "formatType": "number",
+                "height": 9,
+                "pieTypeOption": {
+                    "chartType": "PieChart"
+                },
+                "zIndex": 12,
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "queryOptionMap": {
+                    "A": {
+                        "name": "A",
+                        "numFieldKey": "c",
+                        "xAxisConcatKeys": [
+                            "len"
+                        ],
+                        "showFieldKey": "request_method"
+                    }
+                },
+                "yPos": 0,
+                "fixedTime": false,
+                "showBorder": true,
+                "version": 2,
+                "pieOption": {
+                    "chartType": "PieChart",
+                    "labelType": "type_num_percent",
+                    "showLabel": true
+                },
+                "yAxis": [],
+                "showTitle": true,
+                "pieType": "normal",
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "bottom"
+                },
+                "legendPosition": "right",
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690430348644",
+            "type": "piepro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | SELECT  COUNT(*) as c, request_time group by request_time ",
+                        "name": "A",
+                        "tokenQuery": "* | SELECT  COUNT(*) as c, request_time group by request_time ",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "name": "A",
+                        "xAxisConcatKeys": []
+                    }
+                },
+                "yPos": 9,
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1659060738061",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "show": true
+                },
+                "xPos": 0,
+                "version": 2,
+                "isTimeSeries": true,
+                "pieOption": {
+                    "chartType": "PieChart",
+                    "labelType": "type_num_percent",
+                    "showLabel": true
+                },
+                "showTitle": true,
+                "width": 23,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "极端分类",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 9,
+                "pieTypeOption": {
+                    "chartType": "PieChart"
+                },
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1690430392617",
+            "type": "piepro"
+        }
+    ],
+    "displayName": "饼图-基础饼图",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690430292895-651430"
+}

@@ -1,0 +1,478 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "query": "* | select split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1) order by pv desc limit 10",
+                        "name": "A",
+                        "tokenQuery": "* | select split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1) order by pv desc limit 10",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {}
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": true,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": true,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "actionOptions": [],
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "基础表格",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 11
+            },
+            "action": {},
+            "title": "charts-demo1690422199492",
+            "type": "tablepro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "query": "* | select split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1) order by pv desc limit 10",
+                        "name": "A",
+                        "tokenQuery": "* | select split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1) order by pv desc limit 10",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {}
+                },
+                "yPos": 11,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "charts-demo1690422555163",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": true,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "actionOptions": [],
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "表格搜索",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 11
+            },
+            "action": {},
+            "title": "charts-demo1690422555163",
+            "type": "tablepro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "query": "* | select split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1) order by pv desc limit 10",
+                        "name": "A",
+                        "tokenQuery": "* | select split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1) order by pv desc limit 10",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {}
+                },
+                "yPos": 11,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "charts-demo1690422555163",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "filter",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": true,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 12,
+                "actionOptions": [],
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "表格过滤",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 11
+            },
+            "action": {},
+            "title": "charts-demo1690422610738",
+            "type": "tablepro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "query": "* | select split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1) order by pv desc limit 10",
+                        "name": "A",
+                        "tokenQuery": "* | select split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1) order by pv desc limit 10",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {}
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "charts-demo1690422662579",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "desc",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "A-pv",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": true,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 12,
+                "actionOptions": [],
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "表格排序",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 11
+            },
+            "action": {},
+            "title": "charts-demo1690422662579",
+            "type": "tablepro"
+        }
+    ],
+    "displayName": "表格-基础表格",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690422195014-620638"
+}

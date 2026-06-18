@@ -1,0 +1,208 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "1706284800",
+                "topic": "",
+                "end": "1706328000",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 60 as time, COUNT(*) as pv, approx_distinct(remote_addr) as uv where __time__ > 1706371200 and __time__ < 1706414400 GROUP BY time order by time limit 1000",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 60 as time, COUNT(*) as pv, approx_distinct(remote_addr) as uv where __time__ > 1706371200 and __time__ < 1706414400 GROUP BY time order by time limit 1000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "name": "A",
+                        "yAxisKeys": []
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "timeRangeMode": "searchTime",
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "width": 24,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "sortOrder": "none",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "x 轴-时间范围（查询时间）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 6,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 1.5,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 6
+            },
+            "action": {},
+            "title": "charts-demo1706429556214",
+            "type": "linepro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "1706284800",
+                "topic": "",
+                "end": "1706328000",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 60 as time, COUNT(*) as pv, approx_distinct(remote_addr) as uv where __time__ > 1706371200 and __time__ < 1706414400 GROUP BY time order by time limit 1000",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 60 as time, COUNT(*) as pv, approx_distinct(remote_addr) as uv where __time__ > 1706371200 and __time__ < 1706414400 GROUP BY time order by time limit 1000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "name": "A",
+                        "yAxisKeys": []
+                    }
+                },
+                "yPos": 6,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "charts-demo1706429985206",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "timeRangeMode": "dataTime",
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "width": 24,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "sortOrder": "none",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "x 轴-时间范围（数据时间）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 6,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 1.5,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 6
+            },
+            "action": {},
+            "title": "charts-demo1706429985206",
+            "type": "linepro"
+        }
+    ],
+    "displayName": "线图-时间范围",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1706429509711-450346"
+}

@@ -1,0 +1,1902 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "builtin",
+                        "displayName": "A",
+                        "name": "A",
+                        "project": "charts-demo",
+                        "type": "random_time_line"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "single",
+                        "color": "#d04a5a"
+                    },
+                    "unit": {
+                        "unit": "custom",
+                        "customUnit": "次"
+                    },
+                    "decimals": 2,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1657878417870",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 0,
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "basicOptions": {
+                    "displayName": "单值图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "statStyleOptions": {
+                    "customValueColor": "#333333",
+                    "textAlignment": "auto",
+                    "colorMode": "background",
+                    "graphMode": "none",
+                    "textMode": "value",
+                    "customBackgroundColor": "#ffffff"
+                },
+                "height": 4,
+                "zIndex": 10,
+                "queryOptionMap": {
+                    "A": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    }
+                },
+                "yPos": 0,
+                "fieldOptions": [],
+                "xAxisOption": {
+                    "show": true
+                },
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": 2,
+                "showTitle": true,
+                "width": 4,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "statValueOption": {
+                    "calculationType": "mean",
+                    "limitCount": 25,
+                    "minItemHeight": 50,
+                    "showMode": "calculate",
+                    "layoutOrientation": "auto",
+                    "minItemWidth": 50
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690426643010",
+            "type": "statpro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "builtin",
+                        "displayName": "A",
+                        "name": "A",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "B",
+                        "name": "B",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "C",
+                        "name": "C",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "D",
+                        "name": "D",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "E",
+                        "name": "E",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "F",
+                        "name": "F",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "G",
+                        "name": "G",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "H",
+                        "name": "H",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "threshold",
+                        "color": "#0070cc"
+                    },
+                    "unit": {
+                        "unit": "custom",
+                        "customUnit": "次"
+                    },
+                    "decimals": 2,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1657878417870",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 0,
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "basicOptions": {
+                    "displayName": "基础统计图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "statStyleOptions": {
+                    "customValueColor": "#333333",
+                    "textAlignment": "auto",
+                    "colorMode": "background",
+                    "graphMode": "area",
+                    "textMode": "auto",
+                    "customBackgroundColor": "#ffffff"
+                },
+                "height": 10,
+                "zIndex": 10,
+                "queryOptionMap": {
+                    "A": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "B": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "C": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "D": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "E": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "F": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "G": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "H": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    }
+                },
+                "yPos": 4,
+                "fieldOptions": [
+                    {
+                        "name": "count",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "A查询"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#f54d61"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "B",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "B查询"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#d04a5a"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "C",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "C查询"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#0070cc"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "D",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#d0ac58"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "D查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "E",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#8085e9"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "E查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "F",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#ec64d7"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "F查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "G",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#ff812d"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "G查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "H",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "H查询"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#5cb74a"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "xAxisOption": {
+                    "show": true
+                },
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": 2,
+                "showTitle": true,
+                "width": 8,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "statValueOption": {
+                    "calculationType": "mean",
+                    "limitCount": 25,
+                    "minItemHeight": 50,
+                    "showMode": "calculate",
+                    "layoutOrientation": "auto",
+                    "minItemWidth": 50
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690426741819",
+            "type": "statpro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "builtin",
+                        "displayName": "A",
+                        "name": "A",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "B",
+                        "name": "B",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "C",
+                        "name": "C",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "D",
+                        "name": "D",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "E",
+                        "name": "E",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "F",
+                        "name": "F",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "G",
+                        "name": "G",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "H",
+                        "name": "H",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "threshold",
+                        "color": "#0070cc"
+                    },
+                    "unit": {
+                        "unit": "custom",
+                        "customUnit": "次"
+                    },
+                    "decimals": 2,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1657878417871",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 8,
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "basicOptions": {
+                    "displayName": "垂直布局（有趋势图）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "statStyleOptions": {
+                    "customValueColor": "#333333",
+                    "textAlignment": "auto",
+                    "colorMode": "background",
+                    "graphMode": "area",
+                    "textMode": "auto",
+                    "customBackgroundColor": "#ffffff"
+                },
+                "height": 14,
+                "zIndex": 12,
+                "queryOptionMap": {
+                    "A": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "B": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "C": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "D": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "E": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "F": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "G": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "H": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    }
+                },
+                "yPos": 0,
+                "fieldOptions": [
+                    {
+                        "name": "count",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "A查询"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#f54d61"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "B",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "B查询"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#d04a5a"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "C",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "C查询"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#0070cc"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "D",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#d0ac58"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "D查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "E",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#8085e9"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "E查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "F",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#ec64d7"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "F查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "G",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#ff812d"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "G查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "H",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "H查询"
+                            }
+                        ]
+                    }
+                ],
+                "xAxisOption": {
+                    "show": true
+                },
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": 2,
+                "showTitle": true,
+                "width": 16,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "statValueOption": {
+                    "calculationType": "mean",
+                    "limitCount": 25,
+                    "minItemHeight": 50,
+                    "showMode": "calculate",
+                    "layoutOrientation": "vertical",
+                    "minItemWidth": 50
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690426781240",
+            "type": "statpro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "builtin",
+                        "displayName": "A",
+                        "name": "A",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "B",
+                        "name": "B",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "C",
+                        "name": "C",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "D",
+                        "name": "D",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "E",
+                        "name": "E",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "F",
+                        "name": "F",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "G",
+                        "name": "G",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    },
+                    {
+                        "datasource": "builtin",
+                        "displayName": "H",
+                        "name": "H",
+                        "project": "simulator-nginx-demo",
+                        "type": "random_time_line"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "threshold",
+                        "color": "#0070cc"
+                    },
+                    "unit": {
+                        "unit": "custom",
+                        "customUnit": "次"
+                    },
+                    "decimals": 2,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1657878417870",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 0,
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "basicOptions": {
+                    "displayName": "水平布局（无趋势图）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "statStyleOptions": {
+                    "customValueColor": "#333333",
+                    "textAlignment": "auto",
+                    "colorMode": "background",
+                    "graphMode": "none",
+                    "textMode": "auto",
+                    "customBackgroundColor": "#ffffff"
+                },
+                "height": 5,
+                "zIndex": 10,
+                "queryOptionMap": {
+                    "A": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "B": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "C": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "D": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "E": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "F": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "G": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    },
+                    "H": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    }
+                },
+                "yPos": 14,
+                "fieldOptions": [
+                    {
+                        "name": "count",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "A查询"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#f54d61"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "B",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "B查询"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#d04a5a"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "C",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "C查询"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#0070cc"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "D",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#d0ac58"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "D查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "E",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#8085e9"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "E查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "F",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#ec64d7"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "F查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "G",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#ff812d"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "G查询"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "count",
+                        "queryName": "H",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "displayName"
+                                ],
+                                "value": "H查询"
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#5cb74a"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "xAxisOption": {
+                    "show": true
+                },
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": 2,
+                "showTitle": true,
+                "width": 24,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "statValueOption": {
+                    "calculationType": "mean",
+                    "limitCount": 25,
+                    "minItemHeight": 50,
+                    "showMode": "calculate",
+                    "layoutOrientation": "auto",
+                    "minItemWidth": 50
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690427016752",
+            "type": "statpro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-604800s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select COUNT(*) as pv, __time__ - __time__ % 600 as t group by t ",
+                        "name": "A",
+                        "tokenQuery": "* | select COUNT(*) as pv, __time__ - __time__ % 600 as t group by t ",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "threshold",
+                        "color": "#0070cc"
+                    },
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "milli"
+                },
+                "displayName": "simulator-nginx-demo1657878417877",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 0,
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholds": [
+                        {
+                            "color": "rgb(115, 191, 105)",
+                            "rule": ">",
+                            "value": 0
+                        },
+                        {
+                            "color": "rgb(0, 112, 204)",
+                            "rule": ">",
+                            "value": 2000
+                        },
+                        {
+                            "color": "rgb(208 ,172 ,88)",
+                            "rule": ">",
+                            "value": 5000
+                        },
+                        {
+                            "color": "rgb(230 ,131 ,65)",
+                            "rule": ">",
+                            "value": 8000
+                        },
+                        {
+                            "color": "rgb(208 ,74 ,90)",
+                            "rule": ">",
+                            "value": 10000
+                        },
+                        {
+                            "color": "rgb(202 ,81 ,184)",
+                            "rule": ">",
+                            "value": 15000
+                        },
+                        {
+                            "color": "rgb(232 ,136 ,147)",
+                            "rule": ">",
+                            "value": 20000
+                        }
+                    ],
+                    "thresholdMode": "absolute"
+                },
+                "basicOptions": {
+                    "displayName": "无文本",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": true,
+                    "showBorder": true
+                },
+                "statStyleOptions": {
+                    "customValueColor": "#333333",
+                    "textAlignment": "auto",
+                    "colorMode": "background",
+                    "graphMode": "area",
+                    "textMode": "none",
+                    "customBackgroundColor": "#ffffff"
+                },
+                "height": 13,
+                "zIndex": 15,
+                "queryOptionMap": {
+                    "A": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "pv"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    }
+                },
+                "yPos": 19,
+                "fieldOptions": [
+                    {
+                        "name": "uv",
+                        "queryName": "B",
+                        "newAdd": true,
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#0070cc"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "xAxisOption": {
+                    "show": true
+                },
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": 2,
+                "showTitle": true,
+                "width": 11,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "statValueOption": {
+                    "calculationType": "last",
+                    "limitCount": 100,
+                    "minItemHeight": 50,
+                    "showMode": "allValues",
+                    "layoutOrientation": "auto",
+                    "minItemWidth": 50
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690427267632",
+            "type": "statpro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-604800s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select COUNT(*) as pv, __time__ - __time__ % 3600 as t group by t ",
+                        "name": "A",
+                        "tokenQuery": "* | select COUNT(*) as pv, __time__ - __time__ % 3600 as t group by t ",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "threshold",
+                        "color": "#0070cc"
+                    },
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "milli"
+                },
+                "displayName": "simulator-nginx-demo1657878417878",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 11,
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholds": [
+                        {
+                            "color": "rgb(115, 191, 105)",
+                            "rule": ">",
+                            "value": 0
+                        },
+                        {
+                            "color": "rgb(0, 112, 204)",
+                            "rule": ">",
+                            "value": 2000
+                        },
+                        {
+                            "color": "rgb(208 ,172 ,88)",
+                            "rule": ">",
+                            "value": 5000
+                        },
+                        {
+                            "color": "rgb(230 ,131 ,65)",
+                            "rule": ">",
+                            "value": 8000
+                        },
+                        {
+                            "color": "rgb(208 ,74 ,90)",
+                            "rule": ">",
+                            "value": 10000
+                        },
+                        {
+                            "color": "rgb(202 ,81 ,184)",
+                            "rule": ">",
+                            "value": 15000
+                        },
+                        {
+                            "color": "rgb(232 ,136 ,147)",
+                            "rule": ">",
+                            "value": 20000
+                        }
+                    ],
+                    "thresholdMode": "absolute"
+                },
+                "basicOptions": {
+                    "displayName": "只有值",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "statStyleOptions": {
+                    "customValueColor": "#333333",
+                    "textAlignment": "center",
+                    "colorMode": "background",
+                    "graphMode": "area",
+                    "textMode": "value",
+                    "customBackgroundColor": "#ffffff"
+                },
+                "height": 13,
+                "zIndex": 14,
+                "queryOptionMap": {
+                    "A": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "pv"
+                        ],
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    }
+                },
+                "yPos": 19,
+                "fieldOptions": [
+                    {
+                        "name": "uv",
+                        "queryName": "B",
+                        "newAdd": true,
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#0070cc"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "xAxisOption": {
+                    "show": true
+                },
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": 2,
+                "showTitle": true,
+                "width": 13,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "statValueOption": {
+                    "calculationType": "last",
+                    "limitCount": 25,
+                    "minItemHeight": 50,
+                    "showMode": "allValues",
+                    "layoutOrientation": "auto",
+                    "minItemWidth": 50
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690427281079",
+            "type": "statpro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select COUNT(*) as PV",
+                        "name": "A",
+                        "tokenQuery": "* | select COUNT(*) as PV",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "descriptionDecimals": 2,
+                        "compareThreshold": 0,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "PV"
+                        ],
+                        "compareField": "",
+                        "descriptionFormat": "none",
+                        "compareValueDescription": ""
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "single",
+                        "color": "rgb(74,144,226)"
+                    },
+                    "unit": "none",
+                    "displayName": "最近15分钟PV",
+                    "decimals": 2,
+                    "format": "milli"
+                },
+                "displayName": "charts-demo1690429297887",
+                "valueMappingOption": [],
+                "xPos": 4,
+                "version": "2",
+                "isTimeSeries": false,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 4,
+                "basicOptions": {
+                    "displayName": "单值图（标题+值）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "statValueOption": {
+                    "calculationType": "mean",
+                    "limitCount": 25,
+                    "minItemHeight": 50,
+                    "showMode": "calculate",
+                    "layoutOrientation": "auto",
+                    "minItemWidth": 50
+                },
+                "innerTokenOption": [],
+                "statStyleOptions": {
+                    "textFontSize": 32,
+                    "customValueColor": "#ffffff",
+                    "titleFontSize": 12,
+                    "textAlignment": "center",
+                    "colorMode": "background",
+                    "graphMode": "none",
+                    "textMode": "auto",
+                    "customBackgroundColor": "#ffffff"
+                },
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 4,
+                "zIndex": 12
+            },
+            "action": {},
+            "title": "charts-demo1690429297887",
+            "type": "statpro"
+        }
+    ],
+    "displayName": "统计图-基础统计图",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690426621720-118657"
+}

@@ -1,0 +1,509 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "* | select ip_to_province(http_x_forwarded_for) as province, count(1) as c group by province order by c desc limit 100000",
+                "start": "-86400s",
+                "tokenQuery": "* | select date_format(__time__, '%H:%i') as time, COUNT(*) as pv, approx_distinct(remote_addr) as uv GROUP BY time order by time",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select ip_to_province(http_x_forwarded_for) as province, count(1) as c group by province order by c desc limit 100000",
+                        "name": "A",
+                        "tokenQuery": "* | select ip_to_province(http_x_forwarded_for) as province, count(1) as c group by province order by c desc limit 100000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "nginx-access-log",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "numberType": "compare",
+                "xAxis": [
+                    "province"
+                ],
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "中国地图",
+                "yAxisRight": [],
+                "showLegend": false,
+                "description": "访问PV/今天环比昨日",
+                "threshold": 0,
+                "xPos": 0,
+                "bgColor": {
+                    "a": 1,
+                    "b": 217,
+                    "r": 255,
+                    "g": 141
+                },
+                "compareColors": [
+                    {
+                        "color": "rgba(245,34,45,1)"
+                    },
+                    {
+                        "color": "rgba(255,255,255,1)"
+                    },
+                    {
+                        "color": "rgba(55,214,122,1)"
+                    },
+                    {
+                        "color": "rgba(255,255,255,1)"
+                    }
+                ],
+                "intervalArray": [
+                    ""
+                ],
+                "showBackground": true,
+                "countAxis": [
+                    "value"
+                ],
+                "basicOptions": {
+                    "displayName": "区域定位（全国）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "formatType": "number",
+                "descriptionSize": 12,
+                "height": 8,
+                "zIndex": 46,
+                "margin": [
+                    "auto",
+                    55,
+                    "auto",
+                    "auto"
+                ],
+                "queryOptionMap": {
+                    "A": {
+                        "adcode": 100000,
+                        "dataType": 0,
+                        "name": "A",
+                        "numFieldKey": "c",
+                        "showFieldKey": "province"
+                    }
+                },
+                "yPos": 0,
+                "compareUnit": "",
+                "formatTypeRight": "number",
+                "unitSize": 10,
+                "compareSize": 10,
+                "showBorder": true,
+                "version": 2,
+                "mapOption": {
+                    "enableScrollWheel": true,
+                    "enableDrag": true
+                },
+                "unit": "",
+                "yAxis": [
+                    "c"
+                ],
+                "showTitle": true,
+                "width": 11,
+                "fontSize": 32,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "position": "bottom"
+                },
+                "legendPosition": "right",
+                "fontColor": {
+                    "a": 1,
+                    "b": 54,
+                    "r": 54,
+                    "g": 54
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {
+                "blank": true,
+                "logStoreName": "nginx-demo",
+                "logStoreFilter": "",
+                "filterInherit": false,
+                "type": "NewLogstore",
+                "timeRange": -2
+            },
+            "title": "charts-demo1690441908473",
+            "type": "chinadistrictmap"
+        },
+        {
+            "search": {
+                "query": "* | select ip_to_province(http_x_forwarded_for) as province, count(1) as c group by province order by c desc limit 100000",
+                "start": "-86400s",
+                "tokenQuery": "* | select date_format(__time__, '%H:%i') as time, COUNT(*) as pv, approx_distinct(remote_addr) as uv GROUP BY time order by time",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select ip_to_city(http_x_forwarded_for) as province, count(1) as c group by province order by c desc limit 100000",
+                        "name": "A",
+                        "tokenQuery": "* | select ip_to_city(http_x_forwarded_for) as province, count(1) as c group by province order by c desc limit 100000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "nginx-access-log",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "numberType": "compare",
+                "xAxis": [
+                    "province"
+                ],
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "中国地图",
+                "yAxisRight": [],
+                "showLegend": false,
+                "description": "访问PV/今天环比昨日",
+                "threshold": 0,
+                "xPos": 11,
+                "bgColor": {
+                    "a": 1,
+                    "b": 217,
+                    "r": 255,
+                    "g": 141
+                },
+                "compareColors": [
+                    {
+                        "color": "rgba(245,34,45,1)"
+                    },
+                    {
+                        "color": "rgba(255,255,255,1)"
+                    },
+                    {
+                        "color": "rgba(55,214,122,1)"
+                    },
+                    {
+                        "color": "rgba(255,255,255,1)"
+                    }
+                ],
+                "intervalArray": [
+                    ""
+                ],
+                "showBackground": true,
+                "countAxis": [
+                    "value"
+                ],
+                "basicOptions": {
+                    "displayName": "区域定位（杭州）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "formatType": "number",
+                "descriptionSize": 12,
+                "height": 8,
+                "zIndex": 46,
+                "margin": [
+                    "auto",
+                    55,
+                    "auto",
+                    "auto"
+                ],
+                "queryOptionMap": {
+                    "A": {
+                        "adcode": 440000,
+                        "dataType": 0,
+                        "name": "A",
+                        "numFieldKey": "c",
+                        "showFieldKey": "province"
+                    }
+                },
+                "yPos": 0,
+                "compareUnit": "",
+                "formatTypeRight": "number",
+                "unitSize": 10,
+                "compareSize": 10,
+                "showBorder": true,
+                "version": 2,
+                "mapOption": {
+                    "enableScrollWheel": true,
+                    "enableDrag": true
+                },
+                "unit": "",
+                "yAxis": [
+                    "c"
+                ],
+                "showTitle": true,
+                "width": 13,
+                "fontSize": 32,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "position": "bottom"
+                },
+                "legendPosition": "right",
+                "fontColor": {
+                    "a": 1,
+                    "b": 54,
+                    "r": 54,
+                    "g": 54
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {
+                "blank": true,
+                "logStoreName": "nginx-demo",
+                "logStoreFilter": "",
+                "filterInherit": false,
+                "type": "NewLogstore",
+                "timeRange": -2
+            },
+            "title": "charts-demo1690441973217",
+            "type": "chinadistrictmap"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select ip_to_geo(remote_addr) as geo, count(1) as count group by geo order by count desc limit 1000",
+                        "name": "A",
+                        "tokenQuery": "* | select ip_to_geo(remote_addr) as geo, count(1) as count group by geo order by count desc limit 1000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "adcode": 100000,
+                        "dataType": 2,
+                        "latitudeFieldKey": "y",
+                        "name": "A",
+                        "numFieldKey": "count",
+                        "showFieldKey": "province",
+                        "lnglatFieldKey": "geo",
+                        "longitudeFieldKey": "x",
+                        "extraInfo": [
+                            "province"
+                        ]
+                    }
+                },
+                "yPos": 8,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1684143525642",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "mapOption": {
+                    "enableScrollWheel": true,
+                    "enableDrag": true
+                },
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "width": 11,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "bottom"
+                },
+                "basicOptions": {
+                    "displayName": "[纬度,经度]定位",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 8
+            },
+            "action": {},
+            "title": "charts-demo1690442080830",
+            "type": "chinadistrictmap"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select split_part(ip_to_geo(remote_addr), ',', 1) as y, split_part(ip_to_geo(remote_addr), ',', 2) as x, count(1) as count group by x, y order by count desc limit 1000",
+                        "name": "A",
+                        "tokenQuery": "* | select split_part(ip_to_geo(remote_addr), ',', 1) as y, split_part(ip_to_geo(remote_addr), ',', 2) as x, count(1) as count group by x, y order by count desc limit 1000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "adcode": 100000,
+                        "dataType": 1,
+                        "latitudeFieldKey": "y",
+                        "name": "A",
+                        "numFieldKey": "count",
+                        "showFieldKey": "province",
+                        "longitudeFieldKey": "x",
+                        "extraInfo": [
+                            "province"
+                        ]
+                    }
+                },
+                "yPos": 8,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1684143525642",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 11,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "mapOption": {
+                    "enableScrollWheel": true,
+                    "enableDrag": true
+                },
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "width": 13,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "bottom"
+                },
+                "basicOptions": {
+                    "displayName": "经度和纬度定位",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 8
+            },
+            "action": {},
+            "title": "charts-demo1690442282230",
+            "type": "chinadistrictmap"
+        }
+    ],
+    "displayName": "地图-中国地图",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690441893559-914536"
+}

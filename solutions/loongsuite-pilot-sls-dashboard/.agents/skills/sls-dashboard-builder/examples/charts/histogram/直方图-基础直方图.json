@@ -1,0 +1,546 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select count(*)*1000 as count, request_length where request_length >= 1000 and request_length < 2000 group by request_length order by request_length limit 1000",
+                        "name": "A",
+                        "tokenQuery": "* | select count(*)*1000 as count, request_length where request_length >= 1000 and request_length < 2000 group by request_length order by request_length limit 1000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "request_length",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "count"
+                        ]
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1662450033681",
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": false,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "histogramOptions": {
+                    "orientation": "vertical",
+                    "combineMode": "no",
+                    "fillOpacity": 85,
+                    "bucketCount": 20,
+                    "bucketSize": 50,
+                    "gradientMode": "none",
+                    "lineWidth": 1
+                },
+                "width": 7,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "基本直方图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 12
+            },
+            "action": {},
+            "title": "charts-demo1690436509269",
+            "type": "histogram"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 1800 as t, COUNT(*) as c group by t order by t asc limit 10000 ",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 1800 as t, COUNT(*) as c group by t order by t asc limit 10000 ",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "t",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "c"
+                        ]
+                    }
+                },
+                "yPos": 6,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "single",
+                        "color": "#f15c80"
+                    },
+                    "unit": "none",
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "charts-demo1690436574579",
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 7,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "histogramOptions": {
+                    "orientation": "vertical",
+                    "combineMode": "no",
+                    "fillOpacity": 85,
+                    "bucketCount": 20,
+                    "timeType": "relativeTime",
+                    "timeSelect": 1800,
+                    "gradientMode": "none",
+                    "lineWidth": 1
+                },
+                "width": 17,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "时序模式",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 6
+            },
+            "action": {},
+            "title": "charts-demo1690436574579",
+            "type": "histogram"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 1800 as t, COUNT(*) as c group by t order by t asc limit 10000 ",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 1800 as t, COUNT(*) as c group by t order by t asc limit 10000 ",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "t",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "c"
+                        ]
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "single",
+                        "color": "#5cb74a"
+                    },
+                    "unit": "none",
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "charts-demo1690436574579",
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 7,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": false,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "histogramOptions": {
+                    "orientation": "vertical",
+                    "combineMode": "no",
+                    "fillOpacity": 85,
+                    "bucketCount": 20,
+                    "timeType": "relativeTime",
+                    "timeSelect": 1800,
+                    "gradientMode": "none",
+                    "lineWidth": 1
+                },
+                "width": 17,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "非时序模式",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 6
+            },
+            "action": {},
+            "title": "charts-demo1690436599391",
+            "type": "histogram"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "builtin",
+                        "name": "A",
+                        "type": "random_time_line"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "yPos": 12,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "single",
+                        "color": "#f7a35b"
+                    },
+                    "unit": "none",
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "charts-demo1690436653374",
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "histogramOptions": {
+                    "orientation": "horizontal",
+                    "combineMode": "no",
+                    "fillOpacity": 85,
+                    "bucketCount": 10,
+                    "timeType": "relativeTime",
+                    "timeSelect": 0,
+                    "gradientMode": "none",
+                    "lineWidth": 1
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "区间数量限制（10）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 10
+            },
+            "action": {},
+            "title": "charts-demo1690436653374",
+            "type": "histogram"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select count(*)*1000 as count, request_length where request_length >= 1000 and request_length < 2000 group by request_length order by request_length limit 1000",
+                        "name": "A",
+                        "tokenQuery": "* | select count(*)*1000 as count, request_length where request_length >= 1000 and request_length < 2000 group by request_length order by request_length limit 1000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "request_length",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "count"
+                        ]
+                    }
+                },
+                "yPos": 12,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1662450033681",
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 12,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": false,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "histogramOptions": {
+                    "orientation": "horizontal",
+                    "combineMode": "no",
+                    "fillOpacity": 85,
+                    "bucketCount": 20,
+                    "bucketSize": 100,
+                    "gradientMode": "none",
+                    "lineWidth": 1
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "区间大小限制（100）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 10
+            },
+            "action": {},
+            "title": "charts-demo1690436861815",
+            "type": "histogram"
+        }
+    ],
+    "displayName": "直方图-基础直方图",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690436479475-208426"
+}

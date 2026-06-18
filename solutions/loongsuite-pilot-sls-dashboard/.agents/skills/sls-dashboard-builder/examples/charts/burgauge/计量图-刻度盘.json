@@ -1,0 +1,291 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "builtin",
+                        "name": "A",
+                        "type": "random_time_line"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": 16,
+                        "compareField": "__time__",
+                        "descriptionFormat": "byte",
+                        "compareValueDescription": "刻度盘模式"
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "single",
+                        "color": "#0070cc"
+                    },
+                    "unit": "none",
+                    "displayName": "渐变色刻度盘",
+                    "decimals": 2,
+                    "format": "byte"
+                },
+                "displayName": "simulator-nginx-demo1658807484620",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 13,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "burGaugeValueOption": {
+                    "calculationType": "mean",
+                    "limitCount": 25,
+                    "minItemHeight": 20,
+                    "showGaugeTitle": false,
+                    "showMode": "calculate",
+                    "layoutOrientation": "vertical",
+                    "minItemWidth": 20,
+                    "showDialTitle": false
+                },
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholds": [
+                        {
+                            "color": "rgb(115, 191, 105)",
+                            "rule": ">",
+                            "value": 50
+                        }
+                    ],
+                    "thresholdMode": "absolute"
+                },
+                "burGaugeStylesOption": {
+                    "showGradient": true,
+                    "maxRange": 100,
+                    "displayMode": "dial",
+                    "showUnfilledArea": true,
+                    "minRange": 0
+                },
+                "width": 11,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "刻度盘（渐变）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 9,
+                "zIndex": 17
+            },
+            "action": {},
+            "title": "charts-demo1690430130685",
+            "type": "burgauge"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "builtin",
+                        "name": "A",
+                        "type": "random_time_line"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "descriptionDecimals": 2,
+                        "compareUnit": {
+                            "unit": "none"
+                        },
+                        "showField": [
+                            "count"
+                        ],
+                        "descriptionFontSize": 16,
+                        "compareField": "__time__",
+                        "descriptionFormat": "byte",
+                        "compareValueDescription": "刻度盘模式"
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "threshold",
+                        "color": "#0070cc"
+                    },
+                    "unit": "none",
+                    "displayName": "刻度盘",
+                    "decimals": 2,
+                    "format": "byte"
+                },
+                "displayName": "simulator-nginx-demo1658807484620",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "burGaugeValueOption": {
+                    "calculationType": "mean",
+                    "limitCount": 25,
+                    "minItemHeight": 20,
+                    "showGaugeTitle": false,
+                    "showMode": "calculate",
+                    "layoutOrientation": "vertical",
+                    "minItemWidth": 20,
+                    "showDialTitle": false
+                },
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholds": [
+                        {
+                            "color": "rgb(115, 191, 105)",
+                            "rule": ">",
+                            "value": 0
+                        },
+                        {
+                            "color": "rgb(92 ,183 ,74)",
+                            "rule": ">",
+                            "value": 10
+                        },
+                        {
+                            "color": "rgb(208 ,172 ,88)",
+                            "rule": ">",
+                            "value": 20
+                        },
+                        {
+                            "color": "rgb(230 ,131 ,65)",
+                            "rule": ">",
+                            "value": 30
+                        },
+                        {
+                            "color": "rgb(208 ,74 ,90)",
+                            "rule": ">",
+                            "value": 40
+                        },
+                        {
+                            "color": "rgb(202 ,81 ,184)",
+                            "rule": ">",
+                            "value": 50
+                        }
+                    ],
+                    "thresholdMode": "absolute"
+                },
+                "burGaugeStylesOption": {
+                    "showGradient": false,
+                    "maxRange": 100,
+                    "displayMode": "dial",
+                    "showUnfilledArea": true,
+                    "minRange": 0
+                },
+                "width": 13,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "刻度盘",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 9,
+                "zIndex": 17
+            },
+            "action": {},
+            "title": "charts-demo1690430135105",
+            "type": "burgauge"
+        }
+    ],
+    "displayName": "计量图-刻度盘",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690430112270-795747"
+}
