@@ -368,7 +368,22 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
 
   const finishReason = toolCalls.length > 0 ? 'tool_calls' : (isLastStep ? 'end_turn' : 'stop');
 
-  // llm.request for this step (with input.messages_delta per EVENT_LOG_TO_TRACE_SPEC §3.2)
+  // llm.request for this step.
+  //
+  // Field choice: gen_ai.input.messages (NOT messages_delta).
+  //
+  // The converter (@loongsuite/otel-util-genai) treats messages_delta as a
+  // turn-level accumulator: when an LLM pair only has messages_delta, it
+  // concatenates ALL prior pairs' deltas to build the LLM span's input.
+  // For QoderWork that means tool_call_response would grow across steps
+  // (step 1: 0 results, step 2: 1, step 3: 2, ...) — wrong for an LLM
+  // span which should show what THIS llm call received.
+  //
+  // Writing to messages (treated as "full") makes the converter use the
+  // value directly without accumulation. We still emit per-step incremental
+  // content, matching Codex's pattern. ENTRY/AGENT spans collect input from
+  // the user-hook event (no step.id, still messages_delta) above, so this
+  // change does not affect the turn-level overview spans.
   const llmRequestFields = {
     ...turnMetadata,
     'event.name': 'llm.request',
@@ -384,7 +399,7 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
     version,
   };
   if (inputDelta) {
-    llmRequestFields['gen_ai.input.messages_delta'] = inputDelta;
+    llmRequestFields['gen_ai.input.messages'] = inputDelta;
   }
   records.push(buildRecord(llmRequestFields, firstRow, runtimeConfig, cwd));
 

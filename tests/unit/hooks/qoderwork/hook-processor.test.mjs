@@ -58,7 +58,7 @@ function readJsonlRecords() {
 function inputContents(records) {
   return records
     .filter((r) => r['event.name'] === 'llm.request')
-    .flatMap((r) => r['gen_ai.input.messages_delta'] ?? [])
+    .flatMap((r) => r['gen_ai.input.messages'] ?? r['gen_ai.input.messages_delta'] ?? [])
     .flatMap((m) => m.parts ?? [])
     .filter((p) => p.type === 'text')
     .map((p) => p.content);
