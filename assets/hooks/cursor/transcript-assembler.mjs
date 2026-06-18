@@ -11,8 +11,8 @@
  * Key design decisions:
  * - Only processes the CURRENT turn (after the second-to-last turn_ended marker)
  * - Tool calls are assigned positionally (transcript has no tool IDs)
- * - Tokens come from per-step thought events; last step uses afterAgentResponse/stop
- * - Falls back to hook-driven assembleTurn if transcript is unavailable
+ * - Journal provides: tool IDs, token counts, timestamps, model info
+ * - Transcript provides: correct UTF-8 text content
  */
 
 import crypto from 'node:crypto';
@@ -55,18 +55,24 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
   const turnId = promptEvent.generation_id || parentConvId;
   const traceId = deriveTraceId(turnId);
   const userId = resolveUserId({}, runtimeConfig);
-  const model = promptEvent.model || 'unknown';
 
   const parentEvents = journalEvents
     .filter(e => e.conversation_id === parentConvId)
     .filter(e => e.hook_event !== 'sessionStart')
     .sort((a, b) => tsMs(a) - tsMs(b));
 
+  // T5: Resolve model from journal events (afterAgentThought/Response carry real model)
+  const model = parentEvents.find(e =>
+    e.model && e.model !== 'unknown' && e.model !== ''
+  )?.model || promptEvent?.model || 'unknown';
+
+  // T2: baseFields includes gen_ai.agent.id
   const baseFields = {
     trace_id: traceId,
     'gen_ai.session.id': parentConvId,
     'gen_ai.turn.id': turnId,
     'gen_ai.agent.type': 'cursor',
+    'gen_ai.agent.id': parentConvId,
     'user.id': userId,
   };
 
@@ -91,7 +97,7 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
   }
 
   // Build per-step records
-  const steps = alignSteps(turn.assistantEntries, parentEvents);
+  const steps = alignSteps(turn.assistantEntries, parentEvents, turnId);
   const stopEvent = parentEvents.find(e => e.hook_event === 'stop');
   let prevToolResults = [];
 
@@ -100,31 +106,49 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
     const stepId = `${turnId}:s${i + 1}`;
     const isLast = i === steps.length - 1;
 
-    // ── llm.request ──
-    // Use thought event for timing (gives actual LLM start time via duration backtrack)
-    const reqSource = step.thoughtEvent || (isLast ? step.responseEvent : null)
-      || parentEvents.find(e => e.hook_event === 'afterAgentThought' || e.hook_event === 'afterAgentResponse')
-      || promptEvent;
-    const reqTs = step.thoughtEvent?.duration_ms != null
-      ? timestampToUnixNanos(durationStartMs(step.thoughtEvent))
-      : eventTs(reqSource);
+    // T2: shared responseId between llm.request and llm.response
+    const responseId = crypto.randomUUID();
+
+    // T4: Precise request timestamp
+    // s1: prefer thought event duration backtrack (actual LLM start); fallback to prompt time
+    // s2+: use end time of previous step's last tool result
+    let reqTs;
+    if (i === 0) {
+      // Use thought event duration to backtrack to LLM start time if available
+      // This gives a different (later) timestamp than the 'other' entry event
+      reqTs = step.thoughtEvent?.duration_ms != null
+        ? timestampToUnixNanos(durationStartMs(step.thoughtEvent))
+        : eventTs(promptEvent);
+    } else {
+      const prevStepLastResult = steps[i - 1].toolResults[steps[i - 1].toolResults.length - 1];
+      reqTs = prevStepLastResult
+        ? eventTs(prevStepLastResult)
+        : (step.thoughtEvent?.duration_ms != null
+          ? timestampToUnixNanos(durationStartMs(step.thoughtEvent))
+          : eventTs(step.thoughtEvent || promptEvent));
+    }
+
+    // llm.request.model from step events
+    const stepModel = step.thoughtEvent?.model || step.responseEvent?.model || model;
 
     const inputMessages = [];
     if (i === 0 && userText) {
       inputMessages.push({ role: 'user', parts: [{ type: 'text', content: userText }] });
     } else if (prevToolResults.length > 0) {
+      // NOTE: tool_output from journal postToolUse may contain GB18030-garbled text.
+      // Omit response content to avoid garbled data in output; structure is preserved.
       inputMessages.push({
         role: 'tool',
         parts: prevToolResults.map(tr => ({
           type: 'tool_call_response',
           id: tr.tool_use_id || null,
-          response: tr.tool_output != null
-            ? (typeof tr.tool_output === 'string' ? tr.tool_output : JSON.stringify(tr.tool_output))
-            : '',
+          response: '',
         })),
       });
     }
 
+    // ── llm.request ──
+    const reqSource = step.thoughtEvent || step.responseEvent || promptEvent;
     records.push(applyPolicy({
       time_unix_nano: reqTs,
       observed_time_unix_nano: reqTs,
@@ -132,19 +156,23 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
       'event.name': 'llm.request',
       ...baseFields,
       'gen_ai.step.id': stepId,
-      'gen_ai.provider.name': inferProvider(reqSource.model || model),
-      'gen_ai.request.model': reqSource.model || model,
+      'gen_ai.response.id': responseId,
+      'gen_ai.provider.name': inferProvider(stepModel),
+      'gen_ai.request.model': stepModel,
       'gen_ai.input.messages': inputMessages.length > 0 ? inputMessages : undefined,
       'agent.cursor.hook_event_name': reqSource.hook_event,
-      'agent.cursor.llm_request_time_source': step.thoughtEvent?.duration_ms != null
-        ? 'thought_duration' : undefined,
+      'agent.cursor.llm_request_time_source': i === 0
+        ? 'prompt_submit'
+        : (steps[i - 1].toolResults.length > 0 ? 'previous_step_end' : undefined),
     }, runtimeConfig));
 
     // ── tool.call records ──
     for (const tc of step.toolCalls) {
+      // Synthetic entries have no real timestamp — use step request time
+      const tcTs = tc._synthetic ? reqTs : eventTs(tc);
       records.push(applyPolicy({
-        time_unix_nano: eventTs(tc),
-        observed_time_unix_nano: eventTs(tc),
+        time_unix_nano: tcTs,
+        observed_time_unix_nano: tcTs,
         'event.id': crypto.randomUUID(),
         'event.name': 'tool.call',
         ...baseFields,
@@ -156,7 +184,7 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
       }, runtimeConfig));
     }
 
-    // ── tool.result records ──
+    // ── tool.result records (journal only — transcript has no tool results) ──
     for (const tr of step.toolResults) {
       const isFailure = tr.hook_event === 'postToolUseFailure';
       records.push(applyPolicy({
@@ -178,11 +206,26 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
     }
 
     // ── llm.response ──
-    const finishReason = isLast ? 'stop' : (step.toolCalls.length > 0 ? 'tool_calls' : 'stop');
+    // T1: finish_reason is 'tool_calls' when this step has tool calls
+    const finishReason = step.toolCalls.length > 0 ? 'tool_calls' : 'stop';
+
+    // T4: Response timestamp from thoughtEvent or responseEvent
     const respSource = isLast
       ? (step.responseEvent || stopEvent)
       : (step.thoughtEvent || null);
     const respTs = respSource ? eventTs(respSource) : reqTs;
+
+    // T1: Build output.messages parts: text + tool_call parts for each tool
+    const outputParts = [];
+    if (step.text) outputParts.push({ type: 'text', content: step.text });
+    for (const tc of step.toolCalls) {
+      outputParts.push({
+        type: 'tool_call',
+        id: tc.tool_use_id || null,
+        name: tc.tool_name,
+        arguments: parseMaybeJson(tc.tool_input),
+      });
+    }
 
     const respRecord = applyPolicy({
       time_unix_nano: respTs,
@@ -191,13 +234,13 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
       'event.name': 'llm.response',
       ...baseFields,
       'gen_ai.step.id': stepId,
-      'gen_ai.response.id': crypto.randomUUID(),
-      'gen_ai.provider.name': inferProvider(respSource?.model || model),
-      'gen_ai.request.model': respSource?.model || model,
-      'gen_ai.response.model': respSource?.model || model,
+      'gen_ai.response.id': responseId,
+      'gen_ai.provider.name': inferProvider(respSource?.model || stepModel),
+      'gen_ai.request.model': respSource?.model || stepModel,
+      'gen_ai.response.model': respSource?.model || stepModel,
       'gen_ai.output.messages': [{
         role: 'assistant',
-        parts: step.text ? [{ type: 'text', content: step.text }] : [],
+        parts: outputParts,
         finish_reason: finishReason,
       }],
       'gen_ai.response.finish_reasons': [finishReason],
@@ -210,11 +253,16 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
         : undefined,
     }, runtimeConfig);
 
-    // Tokens: per-step thought tokens for intermediate steps, response/stop for last
-    if (!isLast && step.thoughtEvent) {
-      mergeTokens(respRecord, step.thoughtEvent);
-    } else if (isLast) {
+    // T3: Only the last step carries real tokens; intermediate steps are set to 0
+    // This prevents AGENT span double-counting (EVENT_LOG_TO_TRACE_SPEC §3.4)
+    if (isLast) {
       mergeTokens(respRecord, step.responseEvent || stopEvent);
+    } else {
+      respRecord['gen_ai.usage.input_tokens'] = 0;
+      respRecord['gen_ai.usage.output_tokens'] = 0;
+      respRecord['gen_ai.usage.cache_read.input_tokens'] = 0;
+      respRecord['gen_ai.usage.cache_creation.input_tokens'] = 0;
+      respRecord['gen_ai.usage.total_tokens'] = 0;
     }
 
     records.push(respRecord);
@@ -293,8 +341,12 @@ function parseCursorTranscript(transcriptPath) {
         const toolUseParts = entry.message.content.filter(p => p.type === 'tool_use');
         const rawText = textParts.map(p => p.text).join('');
         const text = isUsableText(rawText) ? rawText : null;
-        // toolUseCount used for positional tool assignment (transcript has no tool IDs)
-        assistantEntries.push({ text, toolUseCount: toolUseParts.length });
+        // Extract tool_use details: name and input (transcript has no tool IDs)
+        const toolUses = toolUseParts.map(p => ({
+          name: p.name || '',
+          input: p.input || {},
+        }));
+        assistantEntries.push({ text, toolUseCount: toolUseParts.length, toolUses });
       }
     }
 
@@ -316,13 +368,13 @@ function isUsableText(text) {
 /**
  * Align transcript assistant entries with journal hook events to build steps.
  *
- * Transcript entries are the source of truth for step count and text.
- * Tool calls are assigned positionally: entry i with toolUseCount=N gets the
- * next N preToolUse/postToolUse events from the journal (sorted by time).
- * Thought events are mapped one-to-one to non-final steps.
+ * Transcript is source of truth for tool identity (name, input, count).
+ * Journal preToolUse provides timing and real IDs when available.
+ * When journal tools are absent (Cursor hook timing race), synthetic tool
+ * entries are created from transcript data so tool.call records always exist.
  */
-function alignSteps(assistantEntries, parentEvents) {
-  const sortedToolCalls = parentEvents
+function alignSteps(assistantEntries, parentEvents, turnId) {
+  const sortedJournalCalls = parentEvents
     .filter(e => e.hook_event === 'preToolUse')
     .sort((a, b) => tsMs(a) - tsMs(b));
   const sortedToolResults = parentEvents
@@ -338,14 +390,14 @@ function alignSteps(assistantEntries, parentEvents) {
   if (!assistantEntries || assistantEntries.length === 0) {
     return [{
       text: null,
-      toolCalls: sortedToolCalls,
+      toolCalls: sortedJournalCalls,
       toolResults: sortedToolResults,
       thoughtEvent: thoughtEvents[0] || null,
       responseEvent: responseEvents[0] || null,
     }];
   }
 
-  let toolCallIdx = 0;
+  let journalCallIdx = 0;
   let toolResultIdx = 0;
   const steps = [];
 
@@ -354,16 +406,37 @@ function alignSteps(assistantEntries, parentEvents) {
     const count = entry.toolUseCount || 0;
     const isFinal = i === assistantEntries.length - 1;
 
-    const stepToolCalls = sortedToolCalls.slice(toolCallIdx, toolCallIdx + count);
+    // Build tool call entries: prefer journal (real ID + timing), fall back to transcript
+    const stepToolCalls = [];
+    for (let j = 0; j < count; j++) {
+      const journalEvent = sortedJournalCalls[journalCallIdx + j];
+      const transcriptTool = entry.toolUses?.[j];
+      if (journalEvent) {
+        // Journal has real timing and tool_use_id — use it directly
+        stepToolCalls.push(journalEvent);
+      } else if (transcriptTool) {
+        // No journal event — synthesize from transcript
+        // Stable synthetic ID: <turnId>:s<step>:t<toolIndex>
+        const syntheticId = `${turnId}:s${i + 1}:t${j + 1}`;
+        stepToolCalls.push({
+          _journal_ts: null, // no real timestamp available
+          hook_event: 'preToolUse',
+          tool_name: transcriptTool.name,
+          tool_use_id: syntheticId,
+          tool_input: JSON.stringify(transcriptTool.input),
+          _synthetic: true,
+        });
+      }
+    }
+    journalCallIdx += count;
+
     const stepToolResults = sortedToolResults.slice(toolResultIdx, toolResultIdx + count);
-    toolCallIdx += count;
     toolResultIdx += count;
 
     steps.push({
       text: entry.text,
       toolCalls: stepToolCalls,
       toolResults: stepToolResults,
-      // One thought event per non-final step; final step gets responseEvent
       thoughtEvent: !isFinal ? (thoughtEvents[i] || null) : null,
       responseEvent: isFinal ? (responseEvents[0] || null) : null,
     });

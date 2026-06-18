@@ -97,10 +97,16 @@ async function main() {
   try {
     payload = JSON.parse(raw);
   } catch (firstErr) {
-    // Cursor on Windows may replace 0x22 (") with 0x3F (?) in JSON events
-    // containing Chinese text, corrupting the closing quote of string values.
+    // Cursor on Windows may insert spurious 0x3F (?) after closing quotes in JSON
+    // events containing Chinese text (GB18030 codepage maps some chars to ?).
+    // The ? appears after a closing " and before a structural char (, } ]):
+    //   "value"?,  → "value",
+    //   "value"?}  → "value"}
     if (process.platform === 'win32') {
-      const repaired = raw.replace(/\?,"/g, '","').replace(/\?}/g, '"}');
+      const repaired = raw
+        .replace(/"?\?,/g, '",')   // "?, or ?, before comma
+        .replace(/"?\?}/g, '"}')   // "?} or ?} before }
+        .replace(/"?\?]/g, '"]');  // "?] or ?] before ]
       if (repaired !== raw) {
         try {
           payload = JSON.parse(repaired);
@@ -163,6 +169,10 @@ async function main() {
   if (internalEvent.hook_event === 'stop') {
     try {
       const allEvents = readAllEvents();
+
+      // NOTE: preToolUse events may arrive after stop is processed due to Cursor's
+      // parallel hook invocation. When this happens, tool.call/result records are
+      // absent from the output — this is a known Cursor hook timing limitation.
 
       // Guard against duplicate stop events: if journal has no beforeSubmitPrompt
       // for this conversation, the turn was already processed — skip to avoid duplication.
