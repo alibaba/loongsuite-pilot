@@ -36,6 +36,7 @@ import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-sess
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
+import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
@@ -86,6 +87,7 @@ export class Orchestrator extends EventEmitter {
     'qoder-cli-session': 'qoder',
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
+    'kiro-cli-log': 'kiro-cli',
     'codex-log': 'codex',
     'opencode-log': 'opencode',
     'qwen-code-cli-log': 'qwen-code-cli',
@@ -839,6 +841,26 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- Kiro CLI Log (sqlite transcript + hook JSONL) ---
+    const kiroCliLogDir = this.resolveKiroCliLogDir();
+    const kiroCliLogInput = new KiroCliLogInput({
+      stateStore: this.stateStore,
+      logDir: kiroCliLogDir,
+    });
+    this.inputManager.registerInput(kiroCliLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(kiroCliLogInput, {
+        watchPaths: [kiroCliLogDir],
+        isAvailable: async () => directoryExists(kiroCliLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['kiro-cli-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'kiro-cli-log',
+            listenerCfg['kiro-cli-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['kiro-cli-log']?.pollInterval,
+      }),
+    );
+
     // --- Codex Log (OTel plugin JSONL) ---
     const codexLogDir = this.resolveCodexLogDir();
     const codexLogInput = new CodexLogInput({
@@ -948,6 +970,10 @@ export class Orchestrator extends EventEmitter {
       }
     }
     return path.join(this.dataDir, 'logs', 'claude-code');
+  }
+
+  private resolveKiroCliLogDir(): string {
+    return path.join(this.dataDir, 'logs', 'kiro-cli');
   }
 
   /**

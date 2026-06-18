@@ -7,7 +7,7 @@ import type {
   DeployedAgentRecord,
 } from '../types/index.js';
 import { HookManager, type HookDefinition } from '../hooks/hook-manager.js';
-import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
+import { readJsonFile, writeJsonFile, resolveHome, ensureDir } from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 import {
@@ -57,6 +57,9 @@ function formatHookCommand(
   if (style === 'kebab-case') {
     return `${cmd} ${eventToSubcommand(event)}`;
   }
+  if (style === 'as-is') {
+    return `${cmd} ${event}`;
+  }
   return cmd;
 }
 
@@ -72,6 +75,9 @@ export class HookStrategy implements DeployStrategy {
   }
 
   async needsDeploy(def: AgentDefinition, _record?: DeployedAgentRecord): Promise<boolean> {
+    if (def.hook?.kiroAgent) {
+      return this.kiroAgentNeedsDeploy(def);
+    }
     const hookDefs = this.buildHookDefinitions(def);
     for (const hookDef of hookDefs) {
       if (!(await this.hookManager.isHookInstalled(hookDef))) {
@@ -89,6 +95,14 @@ export class HookStrategy implements DeployStrategy {
 
     try {
       await this.ensureSettingsFile(hookConfig.settingsPath);
+
+      // Kiro CLI: settingsPath 是整个 Agent 定义 JSON，需要顶层 name + tools +
+      // hooks:<event>:[{command, matcher}]（flat，无 type 字段）。
+      if (hookConfig.kiroAgent) {
+        await this.deployKiroAgent(def);
+        logger.info('hooks deployed', { agentId: def.id, events: hookConfig.events.length });
+        return { success: true, agentId: def.id, deployMode: 'hook' };
+      }
 
       const hookDefs = this.buildHookDefinitions(def);
       for (const hookDef of hookDefs) {
@@ -275,6 +289,68 @@ export class HookStrategy implements DeployStrategy {
       useNestedFormat: hookConfig.format === 'nested',
       replaceHookCommands: hookConfig.replaceHookCommands,
     }));
+  }
+
+  /**
+   * Kiro CLI Agent 定义 JSON（~/.kiro/agents/<name>.json）专用 deploy。
+   *
+   * 文件结构（round3 实证，hook.rs Hook 扁平结构无 type 字段）：
+   *   { "name": "...", "tools": [...], "hooks": { "<event>": [{"command": "..."}] } }
+   * 每个 hook 条目是 flat {command, matcher?}（无 type 字段，否则 Kiro loader 拒绝）。
+   */
+  private async deployKiroAgent(def: AgentDefinition): Promise<void> {
+    const hookConfig = def.hook!;
+    const settingsPath = resolveHome(hookConfig.settingsPath);
+    const agent = hookConfig.kiroAgent!;
+    const hookCommandBase = resolveHome(hookConfig.hookCommand);
+
+    await ensureDir(path.dirname(settingsPath));
+    const existing = (await readJsonFile<Record<string, unknown>>(settingsPath)) ?? {};
+
+    const merged: Record<string, unknown> = { ...existing };
+    merged['name'] = agent.name;
+    merged['tools'] = agent.tools;
+
+    const hooks = (merged['hooks'] && typeof merged['hooks'] === 'object')
+      ? { ...(merged['hooks'] as Record<string, unknown>) }
+      : {};
+
+    for (const event of hookConfig.events) {
+      const cmd = formatHookCommand(hookCommandBase, event, hookConfig.eventSubcommand);
+      const entry: Record<string, unknown> = { command: cmd };
+      if (hookConfig.matcher) entry['matcher'] = hookConfig.matcher;
+
+      const arr = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
+      // 移除旧的 pilot hook 条目（command 以 hookCommandBase 开头），保留第三方
+      const filtered = arr.filter((e) => {
+        const cmd = (e as any)?.command;
+        return typeof cmd !== 'string' || !cmd.startsWith(hookCommandBase);
+      });
+      // 幂等：已存在则不重复 push
+      const present = filtered.some((e) => (e as any)?.command === cmd);
+      if (!present) filtered.push(entry);
+      hooks[event] = filtered;
+    }
+
+    merged['hooks'] = hooks;
+    await writeJsonFile(settingsPath, merged);
+  }
+
+  private async kiroAgentNeedsDeploy(def: AgentDefinition): Promise<boolean> {
+    const hookConfig = def.hook!;
+    const settings = await readJsonFile<Record<string, unknown>>(hookConfig.settingsPath);
+    if (!settings) return true;
+    const hooks = settings['hooks'] as Record<string, unknown> | undefined;
+    if (!hooks || typeof hooks !== 'object') return true;
+    const base = resolveHome(hookConfig.hookCommand);
+    for (const event of hookConfig.events) {
+      const cmd = formatHookCommand(base, event, hookConfig.eventSubcommand);
+      const arr = hooks[event];
+      if (!Array.isArray(arr)) return true;
+      const found = arr.some((e) => (e as any)?.command === cmd);
+      if (!found) return true;
+    }
+    return false;
   }
 
   /**

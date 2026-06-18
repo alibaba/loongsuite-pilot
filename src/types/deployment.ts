@@ -50,14 +50,27 @@ export interface AgentHookConfig {
    * Claude / Codex 的 mjs handler 通过 argv 区分事件，设为 'kebab-case' 后，
    * buildHookDefinitions 会把 hookCommand 转成 `${hookCommand} ${kebabEvent}`，
    * trust hash 也用同样字符串，保证一致性。
+   *
+   * Kiro CLI 的 hook trigger 是 camelCase（userPromptSubmit/postToolUse/...），
+   * 设为 'as-is' 后，buildHookDefinitions 会把 hookCommand 转成
+   * `${hookCommand} ${event}`（事件名原样追加）。
    */
-  eventSubcommand?: 'kebab-case';
+  eventSubcommand?: 'kebab-case' | 'as-is';
   /**
    * If true, omit quotes around the -File path on Windows.
    * Use for agents whose hook executor does direct spawn (not shell),
    * where the quoted path in -File "..." would become literal characters.
    */
   rawCommand?: boolean;
+  /**
+   * Kiro CLI 专用：settingsPath 指向的是一整个 Agent 定义 JSON
+   * （~/.kiro/agents/<name>.json），需要顶层 name + tools 字段。
+   * HookStrategy 在 ensureSettingsFile 时若文件缺失会用此模板 seed。
+   */
+  kiroAgent?: {
+    name: string;
+    tools: string[];
+  };
 }
 
 export interface PluginSourceConfig {

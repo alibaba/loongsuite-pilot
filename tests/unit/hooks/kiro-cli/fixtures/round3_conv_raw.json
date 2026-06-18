@@ -1,0 +1,1048 @@
+{
+  "conversation_id": "f66fecc5-d8bb-4b26-ba93-c0575bf0fb4a",
+  "next_message": null,
+  "history": [
+    {
+      "user": {
+        "additional_context": "",
+        "env_context": {
+          "env_state": {
+            "operating_system": "linux",
+            "current_working_directory": "/tmp/kiro_probe/work_r3",
+            "environment_variables": []
+          }
+        },
+        "content": {
+          "Prompt": {
+            "prompt": "First read the file sample.txt and tell me its content. Then create a new file called done.txt containing the exact text: round3-finished. Finally summarize what you did."
+          }
+        },
+        "timestamp": "2026-06-17T16:51:32.820619384+08:00",
+        "images": null
+      },
+      "assistant": {
+        "ToolUse": {
+          "message_id": "dc3e8a2f-ea48-4eac-b502-ff074e52cc1b",
+          "content": "",
+          "tool_uses": [
+            {
+              "id": "tooluse_9ZXIR6XBjCnWiGGEZrHWGQ",
+              "name": "fs_read",
+              "orig_name": "fs_read",
+              "args": {
+                "operations": [
+                  {
+                    "mode": "Line",
+                    "path": "/tmp/kiro_probe/work_r3/sample.txt"
+                  }
+                ]
+              },
+              "orig_args": {
+                "operations": [
+                  {
+                    "mode": "Line",
+                    "path": "/tmp/kiro_probe/work_r3/sample.txt"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "request_metadata": {
+        "request_id": "b289b2a4-5f4f-4c05-ac08-b1bea4654dd2",
+        "context_usage_percentage": 0.7571,
+        "message_id": "dc3e8a2f-ea48-4eac-b502-ff074e52cc1b",
+        "request_start_timestamp_ms": 1781686292901,
+        "stream_end_timestamp_ms": 1781686296111,
+        "time_to_first_chunk": {
+          "secs": 2,
+          "nanos": 469001487
+        },
+        "time_between_chunks": [
+          {
+            "secs": 0,
+            "nanos": 41795
+          },
+          {
+            "secs": 0,
+            "nanos": 12018
+          },
+          {
+            "secs": 0,
+            "nanos": 504089021
+          },
+          {
+            "secs": 0,
+            "nanos": 6178362
+          },
+          {
+            "secs": 0,
+            "nanos": 12353
+          },
+          {
+            "secs": 0,
+            "nanos": 7006
+          },
+          {
+            "secs": 0,
+            "nanos": 13108
+          },
+          {
+            "secs": 0,
+            "nanos": 6296415
+          },
+          {
+            "secs": 0,
+            "nanos": 27894970
+          },
+          {
+            "secs": 0,
+            "nanos": 42832889
+          },
+          {
+            "secs": 0,
+            "nanos": 15160
+          },
+          {
+            "secs": 0,
+            "nanos": 7530
+          },
+          {
+            "secs": 0,
+            "nanos": 153858605
+          },
+          {
+            "secs": 0,
+            "nanos": 16811
+          },
+          {
+            "secs": 0,
+            "nanos": 12206
+          },
+          {
+            "secs": 0,
+            "nanos": 35065
+          },
+          {
+            "secs": 0,
+            "nanos": 32051
+          }
+        ],
+        "user_prompt_length": 331,
+        "response_size": 77,
+        "chat_conversation_type": "ToolUse",
+        "tool_use_ids_and_names": [
+          [
+            "tooluse_9ZXIR6XBjCnWiGGEZrHWGQ",
+            "fs_read"
+          ]
+        ],
+        "model_id": "auto",
+        "message_meta_tags": [],
+        "total_tokens": null,
+        "uncached_input_tokens": null,
+        "output_tokens": null,
+        "cache_read_input_tokens": null,
+        "cache_write_input_tokens": null
+      }
+    },
+    {
+      "user": {
+        "additional_context": "",
+        "env_context": {
+          "env_state": {
+            "operating_system": "linux",
+            "current_working_directory": "/tmp/kiro_probe/work_r3",
+            "environment_variables": []
+          }
+        },
+        "content": {
+          "ToolUseResults": {
+            "tool_use_results": [
+              {
+                "tool_use_id": "tooluse_9ZXIR6XBjCnWiGGEZrHWGQ",
+                "content": [
+                  {
+                    "Text": "hello kiro round3"
+                  }
+                ],
+                "status": "Success"
+              }
+            ]
+          }
+        },
+        "timestamp": null,
+        "images": null
+      },
+      "assistant": {
+        "ToolUse": {
+          "message_id": "b621f91f-b110-4ca2-9436-75729120f068",
+          "content": "",
+          "tool_uses": [
+            {
+              "id": "tooluse_MigrAULbTpGOiFQo4BFZ3d",
+              "name": "fs_write",
+              "orig_name": "fs_write",
+              "args": {
+                "command": "create",
+                "path": "/tmp/kiro_probe/work_r3/done.txt",
+                "file_text": "round3-finished"
+              },
+              "orig_args": {
+                "command": "create",
+                "path": "/tmp/kiro_probe/work_r3/done.txt",
+                "file_text": "round3-finished"
+              }
+            }
+          ]
+        }
+      },
+      "request_metadata": {
+        "request_id": "f4dafb34-4a6d-4a5f-9c25-5966a090e165",
+        "context_usage_percentage": 0.7695,
+        "message_id": "b621f91f-b110-4ca2-9436-75729120f068",
+        "request_start_timestamp_ms": 1781686296292,
+        "stream_end_timestamp_ms": 1781686298383,
+        "time_to_first_chunk": {
+          "secs": 1,
+          "nanos": 427188516
+        },
+        "time_between_chunks": [
+          {
+            "secs": 0,
+            "nanos": 19658
+          },
+          {
+            "secs": 0,
+            "nanos": 7325
+          },
+          {
+            "secs": 0,
+            "nanos": 269091880
+          },
+          {
+            "secs": 0,
+            "nanos": 6181005
+          },
+          {
+            "secs": 0,
+            "nanos": 5531
+          },
+          {
+            "secs": 0,
+            "nanos": 153465646
+          },
+          {
+            "secs": 0,
+            "nanos": 6224211
+          },
+          {
+            "secs": 0,
+            "nanos": 10858
+          },
+          {
+            "secs": 0,
+            "nanos": 4181
+          },
+          {
+            "secs": 0,
+            "nanos": 32604
+          },
+          {
+            "secs": 0,
+            "nanos": 12324
+          },
+          {
+            "secs": 0,
+            "nanos": 82130098
+          },
+          {
+            "secs": 0,
+            "nanos": 14172
+          },
+          {
+            "secs": 0,
+            "nanos": 57258400
+          },
+          {
+            "secs": 0,
+            "nanos": 6298553
+          },
+          {
+            "secs": 0,
+            "nanos": 12341
+          },
+          {
+            "secs": 0,
+            "nanos": 4240
+          },
+          {
+            "secs": 0,
+            "nanos": 26931
+          },
+          {
+            "secs": 0,
+            "nanos": 65143954
+          },
+          {
+            "secs": 0,
+            "nanos": 6218034
+          },
+          {
+            "secs": 0,
+            "nanos": 11058176
+          },
+          {
+            "secs": 0,
+            "nanos": 30774
+          }
+        ],
+        "user_prompt_length": 0,
+        "response_size": 97,
+        "chat_conversation_type": "ToolUse",
+        "tool_use_ids_and_names": [
+          [
+            "tooluse_MigrAULbTpGOiFQo4BFZ3d",
+            "fs_write"
+          ]
+        ],
+        "model_id": "auto",
+        "message_meta_tags": [],
+        "total_tokens": null,
+        "uncached_input_tokens": null,
+        "output_tokens": null,
+        "cache_read_input_tokens": null,
+        "cache_write_input_tokens": null
+      }
+    },
+    {
+      "user": {
+        "additional_context": "",
+        "env_context": {
+          "env_state": {
+            "operating_system": "linux",
+            "current_working_directory": "/tmp/kiro_probe/work_r3",
+            "environment_variables": []
+          }
+        },
+        "content": {
+          "ToolUseResults": {
+            "tool_use_results": [
+              {
+                "tool_use_id": "tooluse_MigrAULbTpGOiFQo4BFZ3d",
+                "content": [
+                  {
+                    "Text": ""
+                  }
+                ],
+                "status": "Success"
+              }
+            ]
+          }
+        },
+        "timestamp": null,
+        "images": null
+      },
+      "assistant": {
+        "Response": {
+          "message_id": "5ca50dc2-6cbb-40f1-b934-52e803af2111",
+          "content": "**sample.txt** contains: `hello kiro round3`\n\nI then created **done.txt** with the content: `round3-finished`."
+        }
+      },
+      "request_metadata": {
+        "request_id": "153ca0d0-eedd-4573-ad43-e4b16d742d51",
+        "context_usage_percentage": 0.77570003,
+        "message_id": "5ca50dc2-6cbb-40f1-b934-52e803af2111",
+        "request_start_timestamp_ms": 1781686298554,
+        "stream_end_timestamp_ms": 1781686300768,
+        "time_to_first_chunk": {
+          "secs": 1,
+          "nanos": 600029267
+        },
+        "time_between_chunks": [
+          {
+            "secs": 0,
+            "nanos": 18971
+          },
+          {
+            "secs": 0,
+            "nanos": 4690
+          },
+          {
+            "secs": 0,
+            "nanos": 46632184
+          },
+          {
+            "secs": 0,
+            "nanos": 180031130
+          },
+          {
+            "secs": 0,
+            "nanos": 18202281
+          },
+          {
+            "secs": 0,
+            "nanos": 80268593
+          },
+          {
+            "secs": 0,
+            "nanos": 54031799
+          },
+          {
+            "secs": 0,
+            "nanos": 65943097
+          },
+          {
+            "secs": 0,
+            "nanos": 19514054
+          },
+          {
+            "secs": 0,
+            "nanos": 6341850
+          },
+          {
+            "secs": 0,
+            "nanos": 6346854
+          },
+          {
+            "secs": 0,
+            "nanos": 130245009
+          },
+          {
+            "secs": 0,
+            "nanos": 6261039
+          },
+          {
+            "secs": 0,
+            "nanos": 22476
+          }
+        ],
+        "user_prompt_length": 0,
+        "response_size": 110,
+        "chat_conversation_type": "NotToolUse",
+        "tool_use_ids_and_names": [],
+        "model_id": "auto",
+        "message_meta_tags": [],
+        "total_tokens": null,
+        "uncached_input_tokens": null,
+        "output_tokens": null,
+        "cache_read_input_tokens": null,
+        "cache_write_input_tokens": null
+      }
+    }
+  ],
+  "valid_history_range": [
+    0,
+    2
+  ],
+  "transcript": [
+    "\n[Tool uses: fs_read]",
+    "\n[Tool uses: fs_write]",
+    "**sample.txt** contains: `hello kiro round3`\n\nI then created **done.txt** with the content: `round3-finished`.\n[Tool uses: none]"
+  ],
+  "tools": {
+    "native___": [
+      {
+        "ToolSpecification": {
+          "name": "glob",
+          "description": "Find files and directories whose paths match a glob pattern. Respects .gitignore. Prefer this over the bash 'find' command for listing or discovering paths. Returns JSON with totalFiles (count found), truncated (true if limited), and filePaths array. When truncated is true, just mention results are truncated, don't state the limit number.",
+          "input_schema": {
+            "json": {
+              "required": [
+                "pattern"
+              ],
+              "properties": {
+                "pattern": {
+                  "description": "Glob pattern, e.g. '**/*.rs', 'src/**/*.{ts,tsx}' or '**/test*'.",
+                  "type": "string"
+                },
+                "limit": {
+                  "type": "integer",
+                  "description": "Maximum files to return. If totalFiles exceeds this, truncated will be true."
+                },
+                "max_depth": {
+                  "description": "Maximum directory depth to traverse. Increase for deep nested structures.",
+                  "type": "integer"
+                },
+                "path": {
+                  "description": "Root directory to search from. Only set this when the user explicitly mentions a directory path. In all other cases, omit this so the tool searches from the current working directory (the project root).",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      },
+      {
+        "ToolSpecification": {
+          "name": "dummy",
+          "description": "This is a dummy tool. If you are seeing this that means the tool associated with this tool call is not in the list of available tools. This could be because a wrong tool name was supplied or the list of tools has changed since the conversation has started. Do not show this when user asks you to list tools.",
+          "input_schema": {
+            "json": {
+              "required": [],
+              "type": "object",
+              "properties": {}
+            }
+          }
+        }
+      },
+      {
+        "ToolSpecification": {
+          "name": "grep",
+          "description": "Fast text pattern search in files using regex. ALWAYS use this tool instead of 'grep', 'rg', or 'ag' commands in bash. Respects .gitignore.\n\n## Text Discovery Only\nUse grep for literal text/pattern matching: error messages, TODOs, config values, regex patterns.\n\n## For Semantic Code Understanding → Use 'code' tool if available\n- Finding symbol definitions or usages → code tool (search_symbols, goto_definition, find_references)\n- Understanding code structure/relationships → code tool\n- Distinguishing definition vs call vs import → code tool\n\n## Fallback\nIf the 'code' tool is available but returns insufficient symbol info, use grep to discover candidate files/lines, then return to 'code' for precise navigation.\n\nWhen you use this tool, prefer to show the user a small list of representative matches (including file paths and line numbers) instead of only giving a high-level summary.",
+          "input_schema": {
+            "json": {
+              "required": [
+                "pattern"
+              ],
+              "type": "object",
+              "properties": {
+                "max_total_lines": {
+                  "description": "Max total matched lines returned across all files (output limit). Increase when searching for many occurrences.",
+                  "type": "integer"
+                },
+                "max_matches_per_file": {
+                  "type": "integer",
+                  "description": "Max matches returned per file (output limit). Increase to see all occurrences in a file."
+                },
+                "include": {
+                  "type": "string",
+                  "description": "File filter glob. Examples: '*.rs', '*.{ts,tsx}', '*.py'"
+                },
+                "output_mode": {
+                  "type": "string",
+                  "enum": [
+                    "content",
+                    "files_with_matches",
+                    "count"
+                  ],
+                  "description": "Output format: 'content' returns matches as 'file:line:content' (default, best for seeing actual matches), 'files_with_matches' returns only file paths, 'count' returns match counts per file."
+                },
+                "path": {
+                  "description": "Directory to search from. Defaults to current working directory.",
+                  "type": "string"
+                },
+                "max_depth": {
+                  "type": "integer",
+                  "description": "Max directory depth to traverse when searching (search limit). Increase for deeply nested structures."
+                },
+                "case_sensitive": {
+                  "description": "Case-sensitive search. Defaults to false (case-insensitive).",
+                  "type": "boolean"
+                },
+                "pattern": {
+                  "type": "string",
+                  "description": "Regex pattern to search for. Examples: 'fn main', 'class.*Component', 'TODO|FIXME'. Start with simple patterns first (e.g. just the word you're looking for), then refine if needed."
+                },
+                "max_files": {
+                  "description": "Max number of files returned (output limit). Increase for comprehensive codebase searches.",
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "ToolSpecification": {
+          "name": "execute_bash",
+          "description": "Execute the specified bash command. NEVER prefix commands with cd to change the working directory, use the `working_dir` argument instead.",
+          "input_schema": {
+            "json": {
+              "type": "object",
+              "required": [
+                "command"
+              ],
+              "properties": {
+                "command": {
+                  "description": "Bash command to execute",
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string",
+                  "description": "A brief explanation of what the command does"
+                },
+                "working_dir": {
+                  "type": "string",
+                  "description": "Working directory for command execution. Supports tilde expansion (e.g., ~/projects). If not specified, uses the current working directory."
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "ToolSpecification": {
+          "name": "fs_write",
+          "description": "A tool for creating and editing files\n * The `create` command will override the file at `path` if it already exists as a file, and otherwise create a new file\n * The `append` command will add content to the end of an existing file, automatically adding a newline if the file doesn't end with one. The file must exist.\n Notes for using the `str_replace` command:\n * The `old_str` parameter should match EXACTLY one or more consecutive lines from the original file. Be mindful of whitespaces!\n * If the `old_str` parameter is not unique in the file, the replacement will not be performed. Make sure to include enough context in `old_str` to make it unique\n * The `new_str` parameter should contain the edited lines that should replace the `old_str`.",
+          "input_schema": {
+            "json": {
+              "properties": {
+                "command": {
+                  "enum": [
+                    "create",
+                    "str_replace",
+                    "insert",
+                    "append"
+                  ],
+                  "description": "The commands to run. Allowed options are: `create`, `str_replace`, `insert`, `append`.",
+                  "type": "string"
+                },
+                "old_str": {
+                  "description": "Required parameter of `str_replace` command containing the string in `path` to replace.",
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string",
+                  "description": "A brief explanation of what the file change does or why it's being made."
+                },
+                "new_str": {
+                  "type": "string",
+                  "description": "Required parameter of `str_replace` command containing the new string. Required parameter of `insert` command containing the string to insert. Required parameter of `append` command containing the content to append to the file."
+                },
+                "path": {
+                  "description": "Absolute path to file or directory, e.g. `/repo/file.py` or `/repo`.",
+                  "type": "string"
+                },
+                "insert_line": {
+                  "description": "Required parameter of `insert` command. The `new_str` will be inserted AFTER the line `insert_line` of `path`.",
+                  "type": "integer"
+                },
+                "file_text": {
+                  "description": "Required parameter of `create` command, with the content of the file to be created.",
+                  "type": "string"
+                }
+              },
+              "type": "object",
+              "required": [
+                "command",
+                "path"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ToolSpecification": {
+          "name": "fs_read",
+          "description": "Tool for reading files, directories and images. Always provide an 'operations' array.\n\nFor single operation: provide array with one element.\nFor batch operations: provide array with multiple elements.\n\nAvailable modes:\n- Line: Read lines from a file\n- Directory: List directory contents\n- Search: Search for patterns in files\n- Image: Read and process images\n\nExamples:\n1. Single: {\"operations\": [{\"mode\": \"Line\", \"path\": \"/file.txt\"}]}\n2. Batch: {\"operations\": [{\"mode\": \"Line\", \"path\": \"/file1.txt\"}, {\"mode\": \"Search\", \"path\": \"/file2.txt\", \"pattern\": \"test\"}]}",
+          "input_schema": {
+            "json": {
+              "type": "object",
+              "properties": {
+                "operations": {
+                  "description": "Array of operations to execute. Provide one element for single operation, multiple for batch.",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "mode"
+                    ],
+                    "properties": {
+                      "mode": {
+                        "description": "The operation mode to run in: `Line`, `Directory`, `Search`. `Line` and `Search` are only for text files, and `Directory` is only for directories. `Image` is for image files, in this mode `image_paths` is required.",
+                        "type": "string",
+                        "enum": [
+                          "Line",
+                          "Directory",
+                          "Search",
+                          "Image"
+                        ]
+                      },
+                      "end_line": {
+                        "description": "Ending line number (optional, for Line mode). A negative index represents a line number starting from the end of the file.",
+                        "type": "integer",
+                        "default": -1
+                      },
+                      "exclude_patterns": {
+                        "type": "array",
+                        "description": "Glob patterns to exclude from directory listing (optional, for Directory mode). If omitted, uses defaults. If empty array [] is provided, no exclusions are applied (shows everything). If patterns are provided, they completely override the defaults. Examples: '**/target/**', '*.log'",
+                        "default": [
+                          "node_modules",
+                          ".git",
+                          "dist",
+                          "build",
+                          "out",
+                          ".cache",
+                          "target"
+                        ],
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "offset": {
+                        "default": 0,
+                        "type": "integer",
+                        "description": "Number of entries to skip for pagination (optional, for Directory mode). Use with max_entries to iterate through large directories. Entries are sorted by last modified time (most recent first). Default: 0"
+                      },
+                      "max_entries": {
+                        "description": "Maximum number of entries to return (optional, for Directory mode). When limit is reached, results are truncated and metadata shows 'showing X of Y entries'. Use to prevent context window overflow. Default: 1000",
+                        "default": 1000,
+                        "type": "integer"
+                      },
+                      "start_line": {
+                        "description": "Starting line number (optional, for Line mode). A negative index represents a line number starting from the end of the file.",
+                        "default": 1,
+                        "type": "integer"
+                      },
+                      "depth": {
+                        "description": "Depth of a recursive directory listing (optional, for Directory mode)",
+                        "default": 0,
+                        "type": "integer"
+                      },
+                      "pattern": {
+                        "type": "string",
+                        "description": "Pattern to search for (required, for Search mode). Case insensitive. The pattern matching is performed per line."
+                      },
+                      "path": {
+                        "type": "string",
+                        "description": "Path to the file or directory. The path should be absolute, or otherwise start with ~ for the user's home (required for Line, Directory, Search modes)."
+                      },
+                      "image_paths": {
+                        "type": "array",
+                        "description": "List of paths to the images. This is currently supported by the Image mode.",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "context_lines": {
+                        "description": "Number of context lines around search results (optional, for Search mode)",
+                        "default": 2,
+                        "type": "integer"
+                      }
+                    }
+                  },
+                  "type": "array"
+                },
+                "summary": {
+                  "description": "Optional description of the purpose of this batch operation (mainly useful for multiple operations)",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "operations"
+              ]
+            }
+          }
+        }
+      }
+    ]
+  },
+  "context_manager": {
+    "max_context_files_size": 750000,
+    "current_profile": "pilot-probe",
+    "paths": [
+      "AmazonQ.md",
+      "AGENTS.md",
+      "README.md",
+      ".kiro/skills/*/SKILL.md",
+      "/home/admin/.kiro/skills/*/SKILL.md"
+    ],
+    "hooks": {
+      "userPromptSubmit": [
+        {
+          "command": "bash /tmp/kiro_probe/capture_hook.sh UserPromptSubmit",
+          "timeout_ms": 30000,
+          "max_output_size": 10240,
+          "cache_ttl_seconds": 0
+        }
+      ],
+      "stop": [
+        {
+          "command": "bash /tmp/kiro_probe/capture_hook.sh Stop",
+          "timeout_ms": 30000,
+          "max_output_size": 10240,
+          "cache_ttl_seconds": 0
+        }
+      ],
+      "postToolUse": [
+        {
+          "command": "bash /tmp/kiro_probe/capture_hook.sh PostToolUse",
+          "timeout_ms": 30000,
+          "max_output_size": 10240,
+          "cache_ttl_seconds": 0
+        }
+      ],
+      "preToolUse": [
+        {
+          "command": "bash /tmp/kiro_probe/capture_hook.sh PreToolUse",
+          "timeout_ms": 30000,
+          "max_output_size": 10240,
+          "cache_ttl_seconds": 0
+        }
+      ]
+    }
+  },
+  "context_message_length": 126,
+  "latest_summary": null,
+  "model_info": {
+    "model_name": "auto",
+    "description": "Models chosen by task for optimal usage and consistent quality",
+    "model_id": "auto",
+    "context_window_tokens": 1000000,
+    "rate_multiplier": 1.0,
+    "rate_unit": "Credit"
+  },
+  "file_line_tracker": {
+    "/tmp/kiro_probe/work_r3/done.txt": {
+      "prev_fswrite_lines": 1,
+      "before_fswrite_lines": 0,
+      "after_fswrite_lines": 1,
+      "lines_added_by_agent": 1,
+      "lines_removed_by_agent": 0,
+      "is_first_write": false
+    }
+  },
+  "mcp_enabled": true,
+  "mcp_last_checked": [
+    2026,
+    168,
+    8,
+    51,
+    32,
+    820520187,
+    0,
+    0,
+    0
+  ],
+  "mcp_server_versions": {},
+  "mcp_disabled_due_to_api_failure": false,
+  "user_turn_metadata": {
+    "continuation_id": "c9eb7963-b0ab-4561-b75b-8f30ffbe8ff4",
+    "requests": [
+      {
+        "request_id": "b289b2a4-5f4f-4c05-ac08-b1bea4654dd2",
+        "context_usage_percentage": 0.7571,
+        "message_id": "dc3e8a2f-ea48-4eac-b502-ff074e52cc1b",
+        "request_start_timestamp_ms": 1781686292901,
+        "stream_end_timestamp_ms": 1781686296111,
+        "time_to_first_chunk": {
+          "secs": 2,
+          "nanos": 469001487
+        },
+        "time_between_chunks": [
+          {
+            "secs": 0,
+            "nanos": 41795
+          },
+          {
+            "secs": 0,
+            "nanos": 12018
+          },
+          {
+            "secs": 0,
+            "nanos": 504089021
+          },
+          {
+            "secs": 0,
+            "nanos": 6178362
+          },
+          {
+            "secs": 0,
+            "nanos": 12353
+          },
+          {
+            "secs": 0,
+            "nanos": 7006
+          },
+          {
+            "secs": 0,
+            "nanos": 13108
+          },
+          {
+            "secs": 0,
+            "nanos": 6296415
+          },
+          {
+            "secs": 0,
+            "nanos": 27894970
+          },
+          {
+            "secs": 0,
+            "nanos": 42832889
+          },
+          {
+            "secs": 0,
+            "nanos": 15160
+          },
+          {
+            "secs": 0,
+            "nanos": 7530
+          },
+          {
+            "secs": 0,
+            "nanos": 153858605
+          },
+          {
+            "secs": 0,
+            "nanos": 16811
+          },
+          {
+            "secs": 0,
+            "nanos": 12206
+          },
+          {
+            "secs": 0,
+            "nanos": 35065
+          },
+          {
+            "secs": 0,
+            "nanos": 32051
+          }
+        ],
+        "user_prompt_length": 331,
+        "response_size": 77,
+        "chat_conversation_type": "ToolUse",
+        "tool_use_ids_and_names": [
+          [
+            "tooluse_9ZXIR6XBjCnWiGGEZrHWGQ",
+            "fs_read"
+          ]
+        ],
+        "model_id": "auto",
+        "message_meta_tags": [],
+        "total_tokens": null,
+        "uncached_input_tokens": null,
+        "output_tokens": null,
+        "cache_read_input_tokens": null,
+        "cache_write_input_tokens": null
+      },
+      {
+        "request_id": "f4dafb34-4a6d-4a5f-9c25-5966a090e165",
+        "context_usage_percentage": 0.7695,
+        "message_id": "b621f91f-b110-4ca2-9436-75729120f068",
+        "request_start_timestamp_ms": 1781686296292,
+        "stream_end_timestamp_ms": 1781686298383,
+        "time_to_first_chunk": {
+          "secs": 1,
+          "nanos": 427188516
+        },
+        "time_between_chunks": [
+          {
+            "secs": 0,
+            "nanos": 19658
+          },
+          {
+            "secs": 0,
+            "nanos": 7325
+          },
+          {
+            "secs": 0,
+            "nanos": 269091880
+          },
+          {
+            "secs": 0,
+            "nanos": 6181005
+          },
+          {
+            "secs": 0,
+            "nanos": 5531
+          },
+          {
+            "secs": 0,
+            "nanos": 153465646
+          },
+          {
+            "secs": 0,
+            "nanos": 6224211
+          },
+          {
+            "secs": 0,
+            "nanos": 10858
+          },
+          {
+            "secs": 0,
+            "nanos": 4181
+          },
+          {
+            "secs": 0,
+            "nanos": 32604
+          },
+          {
+            "secs": 0,
+            "nanos": 12324
+          },
+          {
+            "secs": 0,
+            "nanos": 82130098
+          },
+          {
+            "secs": 0,
+            "nanos": 14172
+          },
+          {
+            "secs": 0,
+            "nanos": 57258400
+          },
+          {
+            "secs": 0,
+            "nanos": 6298553
+          },
+          {
+            "secs": 0,
+            "nanos": 12341
+          },
+          {
+            "secs": 0,
+            "nanos": 4240
+          },
+          {
+            "secs": 0,
+            "nanos": 26931
+          },
+          {
+            "secs": 0,
+            "nanos": 65143954
+          },
+          {
+            "secs": 0,
+            "nanos": 6218034
+          },
+          {
+            "secs": 0,
+            "nanos": 11058176
+          },
+          {
+            "secs": 0,
+            "nanos": 30774
+          }
+        ],
+        "user_prompt_length": 0,
+        "response_size": 97,
+        "chat_conversation_type": "ToolUse",
+        "tool_use_ids_and_names": [
+          [
+            "tooluse_MigrAULbTpGOiFQo4BFZ3d",
+            "fs_write"
+          ]
+        ],
+        "model_id": "auto",
+        "message_meta_tags": [],
+        "total_tokens": null,
+        "uncached_input_tokens": null,
+        "output_tokens": null,
+        "cache_read_input_tokens": null,
+        "cache_write_input_tokens": null
+      }
+    ],
+    "usage_info": [
+      {
+        "value": 0.030340291376451077,
+        "unit": "credit",
+        "unit_plural": "credits"
+      },
+      {
+        "value": 0.025912616749585407,
+        "unit": "credit",
+        "unit_plural": "credits"
+      },
+      {
+        "value": 0.018781607296849086,
+        "unit": "credit",
+        "unit_plural": "credits"
+      }
+    ]
+  }
+}
