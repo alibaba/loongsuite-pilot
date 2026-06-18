@@ -191,7 +191,6 @@ async function main() {
       const runtimeConfig = loadHookRuntimeConfig(dataDir);
       let records;
       let consumedConversationIds;
-      let consumedGenerationIds = new Set();
 
       // On Windows: use transcript as source of truth for text content.
       // This bypasses GB18030 codepage corruption of hook payload text.
@@ -204,10 +203,6 @@ async function main() {
         if (transcriptRecords && transcriptRecords.length > 0) {
           records = transcriptRecords;
           consumedConversationIds = new Set([internalEvent.conversation_id]);
-          // Populate generation-level dedup for aborted-generation scenarios
-          if (internalEvent.generation_id) {
-            consumedGenerationIds.add(internalEvent.generation_id);
-          }
         }
       }
 

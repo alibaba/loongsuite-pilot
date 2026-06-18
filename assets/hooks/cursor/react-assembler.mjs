@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   inferProviderName,
+  resolveCursorModel,
   resolveUserId,
   timestampToUnixNanos,
   applyHookContentPolicy,
@@ -71,7 +72,7 @@ export function assembleTurn(journalEvents, options = {}) {
   const responseEvent = journalEvents.find(e =>
     e.hook_event === 'afterAgentResponse' && e.conversation_id === parentConvId
   );
-  const model = responseEvent?.model || promptEvent?.model || 'unknown';
+  const model = resolveModel(responseEvent?.model || promptEvent?.model);
 
   // Filter to parent session events only (keep Subagent/Task tool calls + subagentStart/Stop)
   const parentEvents = journalEvents
@@ -497,7 +498,7 @@ function buildLlmRequestWithTs(reqTs, ev, ctx, stepId, userPrompt, prevToolResul
     ...ctx.baseFields,
     'gen_ai.step.id': stepId,
     'gen_ai.provider.name': inferProvider(ev.model || ctx.model),
-    'gen_ai.request.model': ev.model || ctx.model,
+    'gen_ai.request.model': resolveModel(ev.model || ctx.model),
     'gen_ai.input.messages': inputMessages.length > 0 ? inputMessages : undefined,
     'agent.cursor.hook_event_name': ev.hook_event,
     'agent.cursor.llm_request_time_source': timeSource,
@@ -514,8 +515,8 @@ function buildLlmResponse(ev, ctx, stepId, partType) {
     'gen_ai.step.id': stepId,
     'gen_ai.response.id': crypto.randomUUID(),
     'gen_ai.provider.name': inferProvider(ev.model || ctx.model),
-    'gen_ai.request.model': ev.model || ctx.model,
-    'gen_ai.response.model': ev.model || ctx.model,
+    'gen_ai.request.model': resolveModel(ev.model || ctx.model),
+    'gen_ai.response.model': resolveModel(ev.model || ctx.model),
     'gen_ai.output.messages': ev.text
       ? [{ role: 'assistant', parts: [{ type: partType, content: ev.text }] }]
       : [{ role: 'assistant', parts: [] }],
@@ -540,8 +541,8 @@ function buildEmptyLlmResponse(ev, ctx, stepId) {
     'gen_ai.step.id': stepId,
     'gen_ai.response.id': crypto.randomUUID(),
     'gen_ai.provider.name': inferProvider(ev.model || ctx.model),
-    'gen_ai.request.model': ev.model || ctx.model,
-    'gen_ai.response.model': ev.model || ctx.model,
+    'gen_ai.request.model': resolveModel(ev.model || ctx.model),
+    'gen_ai.response.model': resolveModel(ev.model || ctx.model),
     'gen_ai.output.messages': [{ role: 'assistant', parts: [] }],
     'agent.cursor.hook_event_name': 'implicit',
   }, ctx.runtimeConfig);
@@ -785,6 +786,10 @@ function findLastItem(items, predicate) {
     if (predicate(item, i)) return item;
   }
   return undefined;
+}
+
+function resolveModel(rawModel) {
+  return resolveCursorModel(rawModel);
 }
 
 function inferProvider(model) {
