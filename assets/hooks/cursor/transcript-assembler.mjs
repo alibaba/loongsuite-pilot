@@ -425,8 +425,12 @@ function alignSteps(assistantEntries, parentEvents, turnId) {
       const journalEvent = sortedJournalCalls[journalCallIdx + j];
       const transcriptTool = entry.toolUses?.[j];
       if (journalEvent) {
-        // Journal has real timing and tool_use_id — use it directly
-        stepToolCalls.push(journalEvent);
+        // Journal has real timing and tool_use_id; use transcript input (correct UTF-8)
+        // because journal's tool_input may contain GB18030-garbled Chinese
+        stepToolCalls.push({
+          ...journalEvent,
+          tool_input: transcriptTool ? JSON.stringify(transcriptTool.input) : journalEvent.tool_input,
+        });
       } else if (transcriptTool) {
         // No journal event — synthesize from transcript
         // Stable synthetic ID: <turnId>:s<step>:t<toolIndex>

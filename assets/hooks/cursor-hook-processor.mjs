@@ -191,6 +191,7 @@ async function main() {
       const runtimeConfig = loadHookRuntimeConfig(dataDir);
       let records;
       let consumedConversationIds;
+      let consumedGenerationIds = new Set();
 
       // On Windows: use transcript as source of truth for text content.
       // This bypasses GB18030 codepage corruption of hook payload text.
