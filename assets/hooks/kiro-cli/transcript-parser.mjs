@@ -31,9 +31,29 @@
 import { createRequire } from 'node:module';
 import { resolveDbPath } from './db-path.mjs';
 
-// 用 createRequire 取 node 内置 node:sqlite，避免被 vite/vitest 静态 transform
-// （vite 会把 `import from 'node:sqlite'` 误解析为 url "sqlite"）。
-const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
+// node:sqlite 是 Node ≥ 22.5 的实验内置模块。顶层 require 会让本模块在
+// Node 18/20 上 import 即崩（ERR_UNKNOWN_BUILTIN_MODULE），且本模块被单测和
+// hook-processor 在顶层 import，故惰性加载到 queryReadonly() 内首次调用时取，
+// 保证模块在所有 Node 版本可 import、无 builtin 时 hook fail-open。
+// 用 createRequire 取，避免被 vite/vitest 静态 transform 误解析为 url "sqlite"。
+let _DatabaseSync = undefined;
+
+function loadDatabaseSync() {
+  if (_DatabaseSync !== undefined) return _DatabaseSync;
+  const req = createRequire(import.meta.url);
+  _DatabaseSync = req('node:sqlite').DatabaseSync;
+  return _DatabaseSync;
+}
+
+/** 运行时是否可用 node:sqlite（探针，供测试决定 DB 用例跑或 skip）。 */
+export function hasNodeSqlite() {
+  try {
+    loadDatabaseSync();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * @typedef {object} ToolUseInfo
@@ -78,6 +98,7 @@ function queryReadonly(dbPath, sql, params = []) {
   return new Promise((resolve, reject) => {
     let db;
     try {
+      const DatabaseSync = loadDatabaseSync();
       db = new DatabaseSync(dbPath, { readOnly: true });
     } catch (openErr) {
       reject(openErr);

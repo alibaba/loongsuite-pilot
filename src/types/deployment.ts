@@ -131,6 +131,15 @@ export interface PluginInjectConfig {
   replaceSpecs?: string[];
 }
 
+export interface AgentRuntimeConfig {
+  /** 运行时依赖的简述，如 "required-for-transcript" */
+  nodeSqlite?: string;
+  /** 该 builtin 首次可用的 Node 版本 */
+  nodeSqliteSince?: string;
+  /** 无该 builtin 时的 fallback 行为说明 */
+  fallback?: string;
+}
+
 export interface AgentDefinition {
   id: string;
   displayName: string;
@@ -142,6 +151,8 @@ export interface AgentDefinition {
   pluginProbe?: PluginProbeConfig;
   pluginInject?: PluginInjectConfig;
   input?: AgentInputConfig;
+  /** 运行时要求（如 node:sqlite）与无该依赖时的 fallback 声明 */
+  runtime?: AgentRuntimeConfig;
 }
 
 // ─── Deploy Result ───
