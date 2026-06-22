@@ -103,6 +103,9 @@ export class QoderTraceInput extends BaseInput {
     }
 
     const state = this.getState();
+    // Cold start: no prior state at all (e.g. after redeployment wiped input-state.json).
+    // Day rollover: state.lastFile exists but differs from today's file (normal new-day transition).
+    const isColdStart = !state.lastFile;
     let offset = state.lastFile === logFileName ? (state.lastOffset ?? 0) : 0;
 
     if (offset > 0 && stat.size < offset) {
@@ -112,7 +115,7 @@ export class QoderTraceInput extends BaseInput {
     if (stat.size <= offset) return [];
 
     const handle = await fs.open(logFile, 'r');
-    const entries: AgentActivityEntry[] = [];
+    let entries: AgentActivityEntry[] = [];
     try {
       // NOTE: No MAX_READ_BYTES cap here. Hook JSONL is daily-rotated and typically <100KB/day.
       // If a cap is added in the future, must truncate to last newline to avoid splitting JSONL lines.
@@ -134,6 +137,18 @@ export class QoderTraceInput extends BaseInput {
       }
     } finally {
       await handle.close();
+    }
+
+    // On cold start with multiple turns already in the file, only report the last turn
+    // to avoid replaying full history after a redeployment wipes the state store.
+    if (isColdStart && entries.length > 0) {
+      const turnIds = new Set(entries.map(e => (e['gen_ai.turn.id'] as string) || 'unknown'));
+      if (turnIds.size > 1) {
+        const lastTurnId = entries[entries.length - 1]['gen_ai.turn.id'] as string || 'unknown';
+        const skipped = turnIds.size - 1;
+        this.logger.info('cold start detected, skipping historical turns', { skipped, totalTurns: turnIds.size, keepTurnId: lastTurnId });
+        entries = entries.filter(e => ((e['gen_ai.turn.id'] as string) || 'unknown') === lastTurnId);
+      }
     }
 
     return entries;

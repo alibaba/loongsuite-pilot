@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { ClientType } from '../../src/types/index.js';
 import type { AgentActivityEntry } from '../../src/types/index.js';
 import { QoderCliInput } from '../../src/inputs/qoder-cli/qoder-cli-input.js';
+import { QoderTraceInput } from '../../src/inputs/qoder-trace/qoder-trace-input.js';
 import { StateStore } from '../../src/checkpoints/state-store.js';
 import { AgentActivityEntrySchema } from '../contract/agent-activity-schema.js';
 
@@ -425,6 +426,120 @@ describe('Hook JSONL integration flow', () => {
       [llmRequests[0]['gen_ai.step.id'], 'Write'],
       [llmRequests[1]['gen_ai.step.id'], 'Bash'],
     ]);
+  });
+
+  it('QoderTraceInput cold start: only reports last turn when state is empty', async () => {
+    const logDir = path.join(tmpDir, 'logs-cold');
+    await fs.mkdir(logDir, { recursive: true });
+
+    const today = getTodayDateString();
+    const logFile = path.join(logDir, `qoder-${today}.jsonl`);
+
+    // Write 3 turns (historical data present before pilot was deployed)
+    const lines = [
+      // Turn 1 (old)
+      JSON.stringify({
+        'event.name': 'other',
+        'event.id': 'e-1',
+        'gen_ai.turn.id': 'turn-old-1',
+        'gen_ai.session.id': 'sess-1',
+        'gen_ai.agent.type': 'qoder-cli',
+        'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'old prompt 1' }] }],
+        time_unix_nano: '1780000000000000000',
+        observed_time_unix_nano: '1780000000000000000',
+      }),
+      JSON.stringify({
+        'event.name': 'llm.response',
+        'event.id': 'e-2',
+        'gen_ai.turn.id': 'turn-old-1',
+        'gen_ai.session.id': 'sess-1',
+        'gen_ai.agent.type': 'qoder-cli',
+        'gen_ai.step.id': 'turn-old-1:s1',
+        time_unix_nano: '1780000001000000000',
+        observed_time_unix_nano: '1780000001000000000',
+      }),
+      // Turn 2 (old)
+      JSON.stringify({
+        'event.name': 'other',
+        'event.id': 'e-3',
+        'gen_ai.turn.id': 'turn-old-2',
+        'gen_ai.session.id': 'sess-1',
+        'gen_ai.agent.type': 'qoder-cli',
+        'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'old prompt 2' }] }],
+        time_unix_nano: '1780000010000000000',
+        observed_time_unix_nano: '1780000010000000000',
+      }),
+      JSON.stringify({
+        'event.name': 'llm.response',
+        'event.id': 'e-4',
+        'gen_ai.turn.id': 'turn-old-2',
+        'gen_ai.session.id': 'sess-1',
+        'gen_ai.agent.type': 'qoder-cli',
+        'gen_ai.step.id': 'turn-old-2:s1',
+        time_unix_nano: '1780000011000000000',
+        observed_time_unix_nano: '1780000011000000000',
+      }),
+      // Turn 3 (latest — should be reported)
+      JSON.stringify({
+        'event.name': 'other',
+        'event.id': 'e-5',
+        'gen_ai.turn.id': 'turn-latest',
+        'gen_ai.session.id': 'sess-1',
+        'gen_ai.agent.type': 'qoder-cli',
+        'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'latest prompt' }] }],
+        time_unix_nano: '1780000020000000000',
+        observed_time_unix_nano: '1780000020000000000',
+      }),
+      JSON.stringify({
+        'event.name': 'llm.response',
+        'event.id': 'e-6',
+        'gen_ai.turn.id': 'turn-latest',
+        'gen_ai.session.id': 'sess-1',
+        'gen_ai.agent.type': 'qoder-cli',
+        'gen_ai.step.id': 'turn-latest:s1',
+        time_unix_nano: '1780000021000000000',
+        observed_time_unix_nano: '1780000021000000000',
+      }),
+    ];
+    await fs.writeFile(logFile, lines.join('\n') + '\n');
+
+    // Fresh state store (simulates redeployment — no prior offset)
+    const freshStore = new StateStore(path.join(tmpDir, 'cold-state.json'));
+    await freshStore.load();
+
+    const input = new QoderTraceInput({
+      stateStore: freshStore as any,
+      logDir,
+      pollIntervalMs: 60_000,
+    });
+
+    const allEntries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
+
+    await input.start();
+    await input.stop();
+
+    // Only the last turn should be reported
+    expect(allEntries.length).toBe(2);
+    expect(allEntries.every(e => e['gen_ai.turn.id'] === 'turn-latest')).toBe(true);
+
+    // Offset should be at end of file
+    await freshStore.save();
+    const state = freshStore.get('qoder-trace');
+    expect(state.lastOffset).toBe((await fs.stat(logFile)).size);
+    expect(state.lastFile).toBe(`qoder-${today}.jsonl`);
+
+    // Subsequent run should not re-emit anything
+    const input2 = new QoderTraceInput({
+      stateStore: freshStore as any,
+      logDir,
+      pollIntervalMs: 60_000,
+    });
+    const newEntries: AgentActivityEntry[] = [];
+    input2.on('entries', (e: AgentActivityEntry[]) => newEntries.push(...e));
+    await input2.start();
+    await input2.stop();
+    expect(newEntries).toHaveLength(0);
   });
 });
 
