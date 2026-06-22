@@ -541,6 +541,96 @@ describe('Hook JSONL integration flow', () => {
     await input2.stop();
     expect(newEntries).toHaveLength(0);
   });
+
+  it('should split multi-turn transcript into separate turns with correct user inputs', async () => {
+    const hookDir = path.join(tmpDir, 'hooks-multi-turn');
+    const dataDir = path.join(tmpDir, 'data-multi-turn');
+    await fs.mkdir(hookDir, { recursive: true });
+    const hookScript = path.join(hookDir, 'qoder-loongsuite-pilot-hook.sh');
+    await fs.copyFile(path.resolve(process.cwd(), 'assets/hooks/qoder-loongsuite-pilot-hook.sh'), hookScript);
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/qoder-hook-processor.mjs'),
+      path.join(hookDir, 'qoder-hook-processor.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/agent-event-normalizer.mjs'),
+      path.join(hookDir, 'agent-event-normalizer.mjs'),
+    );
+    const sharedDir = path.join(hookDir, 'shared');
+    await fs.mkdir(sharedDir, { recursive: true });
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
+      path.join(sharedDir, 'hook-processor-base.mjs'),
+    );
+    await fs.chmod(hookScript, 0o755);
+
+    const transcriptPath = path.join(tmpDir, 'multi-turn-transcript.jsonl');
+    await fs.writeFile(transcriptPath, [
+      // Turn 1: hello
+      JSON.stringify({
+        type: 'user',
+        timestamp: '2026-06-18T08:00:00.000Z',
+        sessionId: 'sess-multi',
+        message: { role: 'user', content: 'hello' },
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-06-18T08:00:01.000Z',
+        sessionId: 'sess-multi',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Hi there.' }] },
+      }),
+      // Turn 2: leetcode
+      JSON.stringify({
+        type: 'user',
+        timestamp: '2026-06-18T08:01:00.000Z',
+        sessionId: 'sess-multi',
+        message: { role: 'user', content: '完成力扣第143题' },
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-06-18T08:01:05.000Z',
+        sessionId: 'sess-multi',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'I\'ll solve leetcode 143.' }] },
+      }),
+      JSON.stringify({
+        type: 'progress',
+        timestamp: '2026-06-18T08:01:10.000Z',
+        data: { hookEvent: 'Stop', hookName: 'Stop' },
+      }),
+      JSON.stringify({
+        type: 'last-prompt',
+        sessionId: 'sess-multi',
+        lastPrompt: '完成力扣第143题',
+      }),
+    ].join('\n') + '\n');
+
+    const result = runQoderHook(hookScript, JSON.stringify({
+      hook_event_name: 'Stop',
+      transcript_path: transcriptPath,
+      session_id: 'sess-multi',
+    }), {
+      LOONGSUITE_PILOT_DATA_DIR: dataDir,
+    });
+    expect(result.status).toBe(0);
+
+    const historyFile = path.join(dataDir, 'logs', 'qoder', 'history', `qoder-${getTodayDateString()}.jsonl`);
+    const records = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n').map(line => JSON.parse(line));
+    const userHookEvents = records.filter(r => r['event.name'] === 'other');
+
+    // Should have two distinct turns
+    expect(userHookEvents).toHaveLength(2);
+    const turnIds = new Set(userHookEvents.map(r => r['gen_ai.turn.id']));
+    expect(turnIds.size).toBe(2);
+
+    // Find the last turn's user input
+    const sortedByTs = userHookEvents.sort((a, b) => Number(a.time_unix_nano) - Number(b.time_unix_nano));
+    expect(sortedByTs[0]['gen_ai.input.messages_delta']).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'hello' }] },
+    ]);
+    expect(sortedByTs[1]['gen_ai.input.messages_delta']).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: '完成力扣第143题' }] },
+    ]);
+  });
 });
 
 describe('Cursor hook script integration flow', () => {

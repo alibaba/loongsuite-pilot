@@ -189,19 +189,30 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
     // session_meta, other types: ignored
   }
 
-  // --- Phase 3: Determine LLM call boundaries ---
-  // Use content events (assistant blocks) for boundary detection,
-  // then use progress timestamps for precise timing.
-  const llmBoundaries = buildLlmBoundaries(progressEvents, contentEvents);
-  logDebug(agentId, `Detected ${llmBoundaries.length} LLM call(s)`);
+  // --- Phase 3: Split content events into turns by real user prompts ---
+  // Each real user prompt starts a new turn. Tool results stay attached to the
+  // preceding turn. This ensures each turn gets its own user input instead of
+  // inheriting the first prompt of the whole transcript segment.
+  const turnSegments = splitContentEventsIntoTurns(contentEvents);
+  logDebug(agentId, `Split transcript segment into ${turnSegments.length} turn(s)`);
 
-  // --- Phase 4: Build events using boundaries ---
-  const turnId = crypto.randomUUID();
-  const records = buildEventsFromBoundaries(
-    llmBoundaries, contentEvents, parsed, turnId, sessionId, agentId, runtimeConfig, cwd,
-  );
+  // --- Phase 4: Build events per turn ---
+  const records = [];
+  for (let turnIdx = 0; turnIdx < turnSegments.length; turnIdx++) {
+    const turnContentEvents = turnSegments[turnIdx];
+    const turnId = crypto.randomUUID();
 
-  logDebug(agentId, `Produced ${records.length} events, turn_id=${turnId}`);
+    // Determine LLM call boundaries within this turn.
+    const llmBoundaries = buildLlmBoundaries(progressEvents, turnContentEvents);
+    logDebug(agentId, `Turn ${turnIdx + 1}: detected ${llmBoundaries.length} LLM call(s)`);
+
+    const turnRecords = buildEventsFromBoundaries(
+      llmBoundaries, turnContentEvents, parsed, turnId, sessionId, agentId, runtimeConfig, cwd,
+    );
+    records.push(...turnRecords);
+
+    logDebug(agentId, `Turn ${turnIdx + 1}: produced ${turnRecords.length} events, turn_id=${turnId}`);
+  }
 
   // --- Phase 5: Write to history ---
   const rowsToAppend = records.map(r => JSON.stringify(r));
@@ -586,6 +597,34 @@ function assignContentToBoundaries(boundaries, contentEvents) {
 }
 
 // --- Helpers -----------------------------------------------------------------
+
+/**
+ * Split a list of content events into turns.
+ * Each real user prompt (type === 'user' and not a tool result) starts a new
+ * turn. Tool results and assistant content following a prompt belong to that
+ * turn until the next real user prompt.
+ */
+function splitContentEventsIntoTurns(contentEvents) {
+  const turns = [];
+  let currentTurn = [];
+
+  for (const row of contentEvents) {
+    if (row.type === 'user' && !isToolResult(row)) {
+      if (currentTurn.length > 0) {
+        turns.push(currentTurn);
+      }
+      currentTurn = [row];
+    } else {
+      currentTurn.push(row);
+    }
+  }
+
+  if (currentTurn.length > 0) {
+    turns.push(currentTurn);
+  }
+
+  return turns;
+}
 
 function findPostToolUseTs(boundaries, currentIdx) {
   if (currentIdx + 1 < boundaries.length) {
