@@ -543,7 +543,7 @@ export DINGTALK_RELEASE_SECRET='SEC...'
 ```bash
 node .agents/skills/loongsuite-pilot-release/notify-dingtalk-release.mjs \
   --mode internal \
-  --title "Loongsuite Pilot 发布完成" \
+  --title "Loongsuite Pilot 开始灰度" \
   --action "canary release" \
   --version "vX.Y.Z" \
   --rollout "0%" \
@@ -565,15 +565,15 @@ node .agents/skills/loongsuite-pilot-release/notify-dingtalk-release.mjs \
 只在真实动作成功后发送通知；dry-run、status、用户确认前不发送。
 
 - stable release：`deploy/release.sh` 成功，Release Note/tag/CR 完成后发送，包含版本、分支、tag、CR 链接（如可获得）。
-- canary release：`deploy/release.sh --canary` 成功后发送，包含版本、分支、tag、rollout `0%`，下一步建议 rollout。
-- rollout：`deploy/rollout.sh --percentage <N>` 成功后发送，标题使用 `Loongsuite Pilot 扩大灰度比例` 或 `Loongsuite Pilot 调整灰度比例`，包含当前 stable/canary 和灰度比例变化；不要输出“下一步”。
+- canary release：`deploy/release.sh --canary` 成功后发送，标题必须使用 `Loongsuite Pilot 开始灰度`，包含版本、分支、tag、rollout `0%`，下一步建议 rollout。
+- rollout：`deploy/rollout.sh --percentage <N>` 成功后发送，标题必须使用 `Loongsuite Pilot 扩大灰度比例`，包含当前 stable/canary 和灰度比例变化；不要输出“下一步”。
 - canary hotfix：`deploy/release.sh --canary --hotfix` 成功后发送，包含 canary 版本和 hotfix version（如可获得）。
-- promote：`deploy/rollout.sh --promote` 成功，Release Note/tag/CR 完成后发送，包含上一 stable、提升后的 stable、tag、CR 链接（如可获得）。
+- promote：`deploy/rollout.sh --promote` 成功，Release Note/tag/CR 完成后发送，标题必须使用 `Loongsuite Pilot 正式发布`，包含上一 stable、提升后的 stable、tag、CR 链接（如可获得）。
 
 示例消息：
 
 ```markdown
-### Loongsuite Pilot 发布完成
+### Loongsuite Pilot 开始灰度
 
 - 状态：成功
 - 动作：canary release
