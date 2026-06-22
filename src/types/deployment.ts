@@ -52,6 +52,12 @@ export interface AgentHookConfig {
    * trust hash 也用同样字符串，保证一致性。
    */
   eventSubcommand?: 'kebab-case';
+  /**
+   * If true, omit quotes around the -File path on Windows.
+   * Use for agents whose hook executor does direct spawn (not shell),
+   * where the quoted path in -File "..." would become literal characters.
+   */
+  rawCommand?: boolean;
 }
 
 export interface PluginSourceConfig {
