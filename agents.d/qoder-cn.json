@@ -11,7 +11,8 @@
     "events": ["Stop", "PreToolUse", "PostToolUse", "UserPromptSubmit"],
     "hookCommand": "$PILOT_DATA/hooks/qodercn-loongsuite-pilot-hook.sh",
     "format": "nested",
-    "matcher": "*"
+    "matcher": "*",
+    "rawCommand": true
   },
   "input": {
     "type": "hook-jsonl",

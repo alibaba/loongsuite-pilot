@@ -32,13 +32,14 @@ function eventToSubcommand(event: string): string {
  * piping to work correctly.  Bare `.ps1` paths fail to receive stdin when
  * spawned through cmd.exe / child_process.
  */
-function wrapPs1Command(cmd: string): string {
+function wrapPs1Command(cmd: string, raw?: boolean): string {
   if (process.platform !== 'win32') return cmd;
   const parts = cmd.split(' ');
   const script = parts[0];
   if (!script.endsWith('.ps1')) return cmd;
   const args = parts.slice(1).join(' ');
-  const wrapped = `powershell -NoProfile -ExecutionPolicy Bypass -File "${script}"`;
+  const scriptRef = raw ? script : `"${script}"`;
+  const wrapped = `powershell -NoProfile -ExecutionPolicy Bypass -File ${scriptRef}`;
   return args ? `${wrapped} ${args}` : wrapped;
 }
 
@@ -50,8 +51,9 @@ function formatHookCommand(
   hookCommand: string,
   event: string,
   style: AgentHookConfig['eventSubcommand'],
+  raw?: boolean,
 ): string {
-  const cmd = wrapPs1Command(hookCommand);
+  const cmd = wrapPs1Command(hookCommand, raw);
   if (style === 'kebab-case') {
     return `${cmd} ${eventToSubcommand(event)}`;
   }
@@ -266,7 +268,9 @@ export class HookStrategy implements DeployStrategy {
       agentId: def.id,
       settingsPath: hookConfig.settingsPath,
       hookJsonPath: ['hooks', event],
-      hookCommand: formatHookCommand(hookConfig.hookCommand, event, hookConfig.eventSubcommand),
+      hookCommand: formatHookCommand(
+        hookConfig.hookCommand, event, hookConfig.eventSubcommand, hookConfig.rawCommand,
+      ),
       matcher: hookConfig.matcher,
       useNestedFormat: hookConfig.format === 'nested',
       replaceHookCommands: hookConfig.replaceHookCommands,
