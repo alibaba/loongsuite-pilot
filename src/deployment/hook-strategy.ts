@@ -275,15 +275,23 @@ export class HookStrategy implements DeployStrategy {
 
   /**
    * Ensure the settings file exists with a valid structure.
-   * Handles Cursor's hooks.json which needs a `version` field.
+   * Cursor's hooks.json requires a `version` field; Codex's does NOT
+   * (Codex uses `#[serde(deny_unknown_fields)]` and only allows `hooks`).
    */
   private async ensureSettingsFile(settingsPath: string): Promise<void> {
+    const isHooksJson = settingsPath.endsWith('hooks.json');
+    const needsVersion = isHooksJson && settingsPath.includes('.cursor');
+
     const existing = await readJsonFile<Record<string, unknown>>(settingsPath);
     if (!existing) {
-      if (settingsPath.endsWith('hooks.json')) {
-        await writeJsonFile(settingsPath, { version: 1, hooks: {} });
+      if (isHooksJson) {
+        const initial: Record<string, unknown> = { hooks: {} };
+        if (needsVersion) {
+          initial.version = 1;
+        }
+        await writeJsonFile(settingsPath, initial);
       }
-    } else if (settingsPath.endsWith('hooks.json') && existing.version === undefined) {
+    } else if (needsVersion && existing.version === undefined) {
       existing.version = 1;
       await writeJsonFile(settingsPath, existing);
     }

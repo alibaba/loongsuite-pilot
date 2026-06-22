@@ -145,21 +145,68 @@ describe('HookStrategy', () => {
 
       expect(writeJsonFile).toHaveBeenCalledWith(
         '/home/.test/hooks.json',
+        { hooks: {} },
+      );
+    });
+
+    it('creates settings file with version for Cursor hooks.json', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue(null);
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      const def = makeDef({
+        hook: {
+          settingsPath: '/home/.cursor/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/test.sh',
+          format: 'flat',
+        },
+      });
+      await strategy.deploy(def);
+
+      expect(writeJsonFile).toHaveBeenCalledWith(
+        '/home/.cursor/hooks.json',
         { version: 1, hooks: {} },
       );
     });
 
-    it('adds version field to existing hooks.json without one', async () => {
+    it('adds version field to existing Cursor hooks.json without one', async () => {
       vi.mocked(readJsonFile).mockResolvedValue({ hooks: {} });
       mockHookManager.isHookInstalled.mockResolvedValue(false);
       mockHookManager.installHook.mockResolvedValue(true);
 
-      await strategy.deploy(makeDef());
+      const def = makeDef({
+        hook: {
+          settingsPath: '/home/.cursor/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/test.sh',
+          format: 'flat',
+        },
+      });
+      await strategy.deploy(def);
 
       expect(writeJsonFile).toHaveBeenCalledWith(
-        '/home/.test/hooks.json',
+        '/home/.cursor/hooks.json',
         { version: 1, hooks: {} },
       );
+    });
+
+    it('does not add version to Codex hooks.json', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({ hooks: {} });
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      const def = makeDef({
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/test.sh',
+          format: 'nested',
+        },
+      });
+      await strategy.deploy(def);
+
+      expect(writeJsonFile).not.toHaveBeenCalled();
     });
 
     it('does not overwrite version on existing hooks.json that already has one', async () => {
@@ -167,7 +214,15 @@ describe('HookStrategy', () => {
       mockHookManager.isHookInstalled.mockResolvedValue(false);
       mockHookManager.installHook.mockResolvedValue(true);
 
-      await strategy.deploy(makeDef());
+      const def = makeDef({
+        hook: {
+          settingsPath: '/home/.cursor/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/test.sh',
+          format: 'flat',
+        },
+      });
+      await strategy.deploy(def);
 
       expect(writeJsonFile).not.toHaveBeenCalled();
     });
