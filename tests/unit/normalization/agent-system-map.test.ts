@@ -25,6 +25,10 @@ describe('resolveAgentSystem', () => {
     expect(resolveAgentSystem('cursor-hook')).toBe('cursor');
   });
 
+  it('maps qwen-code-cli to qwen-code', () => {
+    expect(resolveAgentSystem('qwen-code-cli')).toBe('qwen-code');
+  });
+
   it('returns unknown for unmapped types', () => {
     expect(resolveAgentSystem('some-future-agent')).toBe('unknown');
     expect(resolveAgentSystem('')).toBe('unknown');
@@ -35,6 +39,7 @@ describe('resolveAgentSystem', () => {
       'claude-code', 'codex', 'codex-session',
       'qoder', 'qoder-idea', 'qoder-work', 'qoder-work-cn', 'qoder-cli', 'qoder-cli-hook',
       'cursor', 'cursor-hook',
+      'qwen-code-cli',
     ];
     for (const key of expectedKeys) {
       expect(AGENT_SYSTEM_MAP[key]).toBeDefined();

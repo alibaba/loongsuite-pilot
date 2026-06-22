@@ -45,6 +45,7 @@ Pilot is designed to answer practical questions:
 | Qoder CLI     | Hook / session polling    | Yes          | Yes        | No          | Yes                       |
 | Qoder Work    | Hook / local data polling | Yes          | Yes        | No          | Yes                       |
 | Qoder Work CN | Hook / local data polling | Yes          | Yes        | No          | Yes                       |
+| Qwen Code CLI | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 
 
 Agent definitions live in `agents.d/`. You can add new agents without changing the deployment framework; see [Agent Onboarding](docs/agent-onboarding.md).

@@ -1,0 +1,29 @@
+{
+  "id": "qwen-code-cli",
+  "displayName": "Qwen Code CLI",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.qwen"],
+    "commands": ["qwen"]
+  },
+  "hook": {
+    "settingsPath": "~/.qwen/settings.json",
+    "events": [
+      "Stop",
+      "SubagentStart",
+      "SubagentStop"
+    ],
+    "hookCommand": "$PILOT_DATA/hooks/qwen-code-cli-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "matcher": "*",
+    "eventSubcommand": "kebab-case",
+    "replaceHookCommands": [
+      "otel-qwen-hook",
+      ".cache/opentelemetry.instrumentation.qwen"
+    ]
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/qwen-code-cli"
+  }
+}

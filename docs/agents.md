@@ -19,6 +19,7 @@ Use these IDs in installer options, `agent-control.json`, and `config.json`.
 | Qoder CLI | `qoder` | Shares the Qoder agent definition and uses hook/session sources. |
 | Qoder Work | `qoder-work` | Hook and local data sources. |
 | Qoder Work CN | `qoder-work-cn` | Hook and local data sources. |
+| Qwen Code CLI | `qwen-code-cli` | Hook integration; parses qwen-code transcript JSONL on Stop. |
 
 ## Choose Agents During Installation
 

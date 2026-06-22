@@ -19,6 +19,7 @@
 | Qoder CLI | `qoder` | 复用 Qoder Agent 定义，使用 Hook / session 数据源。 |
 | Qoder Work | `qoder-work` | Hook 和本地数据源。 |
 | Qoder Work CN | `qoder-work-cn` | Hook 和本地数据源。 |
+| Qwen Code CLI | `qwen-code-cli` | Hook 集成；Stop 时解析 qwen-code transcript JSONL。 |
 
 ## 安装时选择 Agent
 
