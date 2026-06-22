@@ -4,8 +4,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import sqlite3 from 'sqlite3';
 
+import { hasNodeSqlite } from '../../../../assets/hooks/kiro-cli/transcript-parser.mjs';
+
 const PARSER = '../../../../assets/hooks/kiro-cli/transcript-parser.mjs';
 const FIXTURE_CONV = new URL('./fixtures/round3_conv_raw.json', import.meta.url);
+
+// node:sqlite 仅 Node ≥ 22.5 内置。Node 18/20 上无该 builtin，DB 相关用例 skip
+// 而非 error（纯函数 parseConversationValue 不依赖 DB，始终跑）。
+const DB_AVAILABLE = hasNodeSqlite();
 
 // fixture 来源: researcher round3 调研报告同会话成对 fixture
 // conversation_id f66fecc5-d8bb-4b26-ba93-c0575bf0fb4a，cwd /tmp/kiro_probe/work_r3
@@ -154,7 +160,7 @@ describe('parseConversationValue (round3 fixture)', () => {
   });
 });
 
-describe('readTranscriptForCwd (sqlite, round3 fixture DB)', () => {
+describe.skipIf(!DB_AVAILABLE)('readTranscriptForCwd (sqlite, round3 fixture DB)', () => {
   test('按 cwd 命中会话，返回 steps + updatedMs', async () => {
     const { readTranscriptForCwd } = await import(PARSER);
     const t = await readTranscriptForCwd(CWD, { dbPath: DB_PATH });

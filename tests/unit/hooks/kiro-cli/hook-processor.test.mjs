@@ -6,10 +6,16 @@ import * as path from 'node:path';
 import sqlite3 from 'sqlite3';
 import { fileURLToPath } from 'node:url';
 
+import { hasNodeSqlite } from '../../../../assets/hooks/kiro-cli/transcript-parser.mjs';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/kiro-cli-hook-processor.mjs');
 const FIXTURE_CONV = path.resolve(__dirname, 'fixtures/round3_conv_raw.json');
 const FIXTURE_HOOK_EVENTS = path.resolve(__dirname, 'fixtures/round3_hook_events.jsonl');
+
+// node:sqlite 仅 Node ≥ 22.5 内置。无该 builtin 时 DB transcript 用例 skip 而非 error；
+// fail-open 用例（不触达 transcript 读取）始终跑。
+const DB_AVAILABLE = hasNodeSqlite();
 
 // fixture 来源: researcher round3 同会话成对 fixture
 // (hook_events.jsonl + conv_raw.json, conversation f66fecc5, cwd /tmp/kiro_probe/work_r3)
@@ -90,7 +96,22 @@ afterEach(() => {
   try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch {}
 });
 
-describe('kiro-cli-hook-processor 端到端', () => {
+describe('kiro-cli-hook-processor fail-open（无 DB 依赖，所有 Node 版本跑）', () => {
+  test('缺 cwd 不崩溃（fail-open，无 JSONL 产出）', () => {
+    const r = runHook('stop', { hook_event_name: 'stop' });
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe('{}');
+    expect(readJsonlRecords().length).toBe(0);
+  });
+
+  test('未注册 subcommand 早返回 {}', () => {
+    const r = runHook('bogus', {});
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe('{}');
+  });
+});
+
+describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor 端到端（DB transcript）', () => {
   test('多步多工具（3 STEP, 2 TOOL）+ 最终回答 — 完整 trace', () => {
     // 1. 缓冲 postToolUse（tool_response）
     bufferPostToolEvents();
@@ -225,19 +246,6 @@ describe('kiro-cli-hook-processor 端到端', () => {
       const d = r['gen_ai.input.messages_delta'];
       expect(d === undefined || (Array.isArray(d) && d.length === 0)).toBe(true);
     }
-  });
-
-  test('缺 cwd 不崩溃（fail-open，无 JSONL 产出）', () => {
-    const r = runHook('stop', { hook_event_name: 'stop' });
-    expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe('{}');
-    expect(readJsonlRecords().length).toBe(0);
-  });
-
-  test('未注册 subcommand 早返回 {}', () => {
-    const r = runHook('bogus', {});
-    expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe('{}');
   });
 
   test('增量：offset 推进后再次 stop 不重复上报', () => {
