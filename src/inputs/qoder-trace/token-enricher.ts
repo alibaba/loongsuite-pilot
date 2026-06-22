@@ -87,28 +87,19 @@ export function enrichIdeTurn(
 ): void {
   if (sqliteRows.length === 0) return;
 
-  // Level 1: Group SQLite rows by request_id (= turn-level grouping)
-  const requestGroups = new Map<string, SqliteTokenData[]>();
-  for (const row of sqliteRows) {
-    const group = requestGroups.get(row.requestId) ?? [];
-    group.push(row);
-    requestGroups.set(row.requestId, group);
-  }
-
-  // Sort request groups by earliest timestamp
-  const sortedGroups = [...requestGroups.entries()].sort(
-    (a, b) => a[1][0].gmtCreate - b[1][0].gmtCreate,
-  );
-
   // Get all llm.response entries sorted by time
   const responseEntries = entries
     .filter(e => e['event.name'] === 'llm.response')
     .sort((a, b) => extractMs(a) - extractMs(b));
 
-  // Level 2: Within each group, match by closest timestamp
   const used = new Set<AgentActivityEntry>();
   const tokenWritten = new Set<string>();
+  const sortedGroups = groupSqliteRowsByRequest(sqliteRows);
 
+  matchIdeTurnsBySqliteOrder(entries, sortedGroups, used, tokenWritten);
+
+  // Conservative fallback for incomplete SQLite metadata or structurally unmatched responses:
+  // match by close timestamp only, preserving the previous behavior.
   for (const [requestId, group] of sortedGroups) {
     for (const row of group) {
       let bestEntry: AgentActivityEntry | null = null;
@@ -128,12 +119,28 @@ export function enrichIdeTurn(
         (bestEntry as Record<string, unknown>).__matched_gmt_create = row.gmtCreate;
 
         if (!bestEntry['gen_ai.response.id']) {
-          bestEntry['gen_ai.response.id'] = requestId;
+          bestEntry['gen_ai.response.id'] = row.messageId || requestId;
+        }
+        bestEntry['gen_ai.request.id'] = requestId;
+        (bestEntry as Record<string, unknown>)['agent.request_id'] = requestId;
+
+        if (row.model && row.model !== 'unknown') {
+          bestEntry['gen_ai.request.model'] = row.model;
+          bestEntry['gen_ai.response.model'] = row.model;
+          const stepId = bestEntry['gen_ai.step.id'];
+          const req = entries.find(e =>
+            e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId,
+          );
+          if (req) {
+            req['gen_ai.request.id'] = requestId;
+            (req as Record<string, unknown>)['agent.request_id'] = requestId;
+            req['gen_ai.request.model'] = row.model;
+          }
         }
 
         // Each SQLite row = one LLM call. Write token on first match per row.
         // Use composite key (requestId:gmtCreate) to avoid collision if two calls share a millisecond.
-        const dedupeKey = `${row.requestId}:${row.gmtCreate}`;
+        const dedupeKey = sqliteDedupeKey(row);
         if (!tokenWritten.has(dedupeKey)) {
           bestEntry['gen_ai.usage.input_tokens'] = row.inputTokens;
           bestEntry['gen_ai.usage.output_tokens'] = row.outputTokens;
@@ -155,9 +162,11 @@ export function enrichIdeTurn(
   }
   matchedPairs.sort((a, b) => a.gmtCreate - b.gmtCreate);
 
-  // Find the user-boundary entry (llm.request without step_id) for step 1's request time
+  // Find the user-boundary entry for step 1's request time.
+  // The normalizer emits user prompts as 'other' (not 'llm.request'), so match both.
   const userBoundary = entries.find(e =>
-    e['event.name'] === 'llm.request' && !e['gen_ai.step.id'],
+    !e['gen_ai.step.id'] &&
+    (e['event.name'] === 'llm.request' || (e['event.name'] === 'other' && e['gen_ai.input.messages_delta'])),
   );
 
   for (let i = 0; i < matchedPairs.length; i++) {
@@ -214,6 +223,134 @@ export function enrichIdeTurn(
     entry['gen_ai.usage.cache_read.input_tokens'] = 0;
   }
 
+}
+
+function groupSqliteRowsByRequest(sqliteRows: SqliteTokenData[]): Array<[string, SqliteTokenData[]]> {
+  const requestGroups = new Map<string, SqliteTokenData[]>();
+  for (const row of sqliteRows) {
+    if (!row.requestId) continue;
+    const group = requestGroups.get(row.requestId) ?? [];
+    group.push(row);
+    requestGroups.set(row.requestId, group);
+  }
+
+  return [...requestGroups.entries()]
+    .map(([requestId, rows]) => [
+      requestId,
+      [...rows].sort((a, b) => a.gmtCreate - b.gmtCreate),
+    ] as [string, SqliteTokenData[]])
+    .sort((a, b) => a[1][0].gmtCreate - b[1][0].gmtCreate);
+}
+
+function matchIdeTurnsBySqliteOrder(
+  entries: AgentActivityEntry[],
+  requestGroups: Array<[string, SqliteTokenData[]]>,
+  used: Set<AgentActivityEntry>,
+  tokenWritten: Set<string>,
+): void {
+  if (requestGroups.length === 0) return;
+  if (!requestGroups.every(([, rows]) => rows.every(row => row.messageId && row.sessionId))) return;
+
+  const sessionId = entries.find(e => typeof e['gen_ai.session.id'] === 'string')?.['gen_ai.session.id'] as string | undefined;
+  const sessionGroups = sessionId
+    ? requestGroups.filter(([, rows]) => rows[0]?.sessionId === sessionId)
+    : requestGroups;
+  if (sessionGroups.length === 0) return;
+
+  const turnGroups = groupEntriesByTurn(entries);
+  if (turnGroups.length === 0) return;
+
+  if (sessionGroups.length < turnGroups.length) {
+    for (const [, turnEntries] of turnGroups) {
+      markLowConfidence(turnEntries, 'request_count_mismatch');
+    }
+    return;
+  }
+
+  const candidateGroups = sessionGroups.slice(sessionGroups.length - turnGroups.length);
+  for (let i = 0; i < turnGroups.length; i++) {
+    const [, turnEntries] = turnGroups[i];
+    const [requestId, sqliteRows] = candidateGroups[i];
+    const responses = turnEntries.filter(e => e['event.name'] === 'llm.response');
+
+    if (responses.length !== sqliteRows.length) {
+      markLowConfidence(turnEntries, 'assistant_count_mismatch');
+      continue;
+    }
+
+    for (let j = 0; j < responses.length; j++) {
+      applySqliteRowToIdeResponse(entries, turnEntries, responses[j], sqliteRows[j], requestId, used, tokenWritten);
+    }
+  }
+}
+
+function groupEntriesByTurn(entries: AgentActivityEntry[]): Array<[string, AgentActivityEntry[]]> {
+  const groups = new Map<string, AgentActivityEntry[]>();
+  for (const entry of entries) {
+    const turnId = entry['gen_ai.turn.id'];
+    if (typeof turnId !== 'string' || turnId.length === 0) continue;
+    const group = groups.get(turnId) ?? [];
+    group.push(entry);
+    groups.set(turnId, group);
+  }
+  return [...groups.entries()].filter(([, group]) => group.some(e => e['event.name'] === 'llm.response'));
+}
+
+function applySqliteRowToIdeResponse(
+  allEntries: AgentActivityEntry[],
+  turnEntries: AgentActivityEntry[],
+  response: AgentActivityEntry,
+  row: SqliteTokenData,
+  requestId: string,
+  used: Set<AgentActivityEntry>,
+  tokenWritten: Set<string>,
+): void {
+  used.add(response);
+  (response as Record<string, unknown>).__matched_gmt_create = row.gmtCreate;
+  response['gen_ai.request.id'] = requestId;
+  (response as Record<string, unknown>)['agent.request_id'] = requestId;
+  response['gen_ai.response.id'] = row.messageId || requestId;
+  (response as Record<string, unknown>)['qoder.match_confidence'] = 'high';
+  (response as Record<string, unknown>)['qoder.match.strategy'] = 'sqlite_request_order';
+
+  if (row.model && row.model !== 'unknown') {
+    response['gen_ai.request.model'] = row.model;
+    response['gen_ai.response.model'] = row.model;
+  }
+
+  const request = findStepRequest(allEntries, response) ?? turnEntries.find(e => e['event.name'] === 'llm.request');
+  if (request) {
+    request['gen_ai.request.id'] = requestId;
+    (request as Record<string, unknown>)['agent.request_id'] = requestId;
+    (request as Record<string, unknown>)['qoder.match_confidence'] = 'high';
+    (request as Record<string, unknown>)['qoder.match.strategy'] = 'sqlite_request_order';
+    if (row.model && row.model !== 'unknown') request['gen_ai.request.model'] = row.model;
+  }
+
+  const dedupeKey = sqliteDedupeKey(row);
+  if (tokenWritten.has(dedupeKey)) return;
+  response['gen_ai.usage.input_tokens'] = row.inputTokens;
+  response['gen_ai.usage.output_tokens'] = row.outputTokens;
+  response['gen_ai.usage.total_tokens'] = row.inputTokens + row.outputTokens;
+  response['gen_ai.usage.cache_read.input_tokens'] = row.cacheReadTokens;
+  tokenWritten.add(dedupeKey);
+}
+
+function findStepRequest(entries: AgentActivityEntry[], response: AgentActivityEntry): AgentActivityEntry | undefined {
+  const stepId = response['gen_ai.step.id'];
+  return entries.find(e => e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId);
+}
+
+function markLowConfidence(entries: AgentActivityEntry[], warning: string): void {
+  for (const entry of entries) {
+    if (entry['event.name'] !== 'llm.request' && entry['event.name'] !== 'llm.response') continue;
+    (entry as Record<string, unknown>)['qoder.match_confidence'] = 'low';
+    (entry as Record<string, unknown>)['qoder.match.warning'] = warning;
+  }
+}
+
+function sqliteDedupeKey(row: SqliteTokenData): string {
+  return row.messageId || `${row.requestId}:${row.gmtCreate}`;
 }
 
 

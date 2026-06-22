@@ -189,19 +189,30 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
     // session_meta, other types: ignored
   }
 
-  // --- Phase 3: Determine LLM call boundaries ---
-  // Use content events (assistant blocks) for boundary detection,
-  // then use progress timestamps for precise timing.
-  const llmBoundaries = buildLlmBoundaries(progressEvents, contentEvents);
-  logDebug(agentId, `Detected ${llmBoundaries.length} LLM call(s)`);
+  // --- Phase 3: Split content events into turns by real user prompts ---
+  // Each real user prompt starts a new turn. Tool results stay attached to the
+  // preceding turn. This ensures each turn gets its own user input instead of
+  // inheriting the first prompt of the whole transcript segment.
+  const turnSegments = splitContentEventsIntoTurns(contentEvents);
+  logDebug(agentId, `Split transcript segment into ${turnSegments.length} turn(s)`);
 
-  // --- Phase 4: Build events using boundaries ---
-  const turnId = crypto.randomUUID();
-  const records = buildEventsFromBoundaries(
-    llmBoundaries, contentEvents, parsed, turnId, sessionId, agentId, runtimeConfig, cwd,
-  );
+  // --- Phase 4: Build events per turn ---
+  const records = [];
+  for (let turnIdx = 0; turnIdx < turnSegments.length; turnIdx++) {
+    const turnContentEvents = turnSegments[turnIdx];
+    const turnId = crypto.randomUUID();
 
-  logDebug(agentId, `Produced ${records.length} events, turn_id=${turnId}`);
+    // Determine LLM call boundaries within this turn.
+    const llmBoundaries = buildLlmBoundaries(progressEvents, turnContentEvents);
+    logDebug(agentId, `Turn ${turnIdx + 1}: detected ${llmBoundaries.length} LLM call(s)`);
+
+    const turnRecords = buildEventsFromBoundaries(
+      llmBoundaries, turnContentEvents, parsed, turnId, sessionId, agentId, runtimeConfig, cwd,
+    );
+    records.push(...turnRecords);
+
+    logDebug(agentId, `Turn ${turnIdx + 1}: produced ${turnRecords.length} events, turn_id=${turnId}`);
+  }
 
   // --- Phase 5: Write to history ---
   const rowsToAppend = records.map(r => JSON.stringify(r));
@@ -216,50 +227,57 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
 
 function buildLlmBoundaries(progressEvents, contentEvents) {
   // Step 1: Group assistant blocks into LLM calls.
-  // Priority: use message.id (CLI variant has it) > fallback to timestamp proximity (IDE variant).
+  // Priority: use message.id (CLI variant has it) > progress window (IDE variant)
+  // > fallback to timestamp proximity when progress events are absent.
   const assistantGroups = [];
   let currentGroup = [];
   let lastTs = null;
-  let lastMessageId = null;
+  let currentKey = null;
+  const hasProgressWindows = progressEvents.some(pe =>
+    pe.hookEvent === 'UserPromptSubmit' || pe.hookEvent === 'PostToolUse' ||
+    pe.hookEvent === 'PreToolUse' || pe.hookEvent === 'Stop'
+  );
+
+  function flushGroup() {
+    if (currentGroup.length > 0) assistantGroups.push(currentGroup);
+    currentGroup = [];
+    lastTs = null;
+    currentKey = null;
+  }
 
   for (const row of contentEvents) {
     if (row.type !== 'assistant') {
-      if (currentGroup.length > 0) {
-        assistantGroups.push(currentGroup);
-        currentGroup = [];
-        lastTs = null;
-        lastMessageId = null;
-      }
+      flushGroup();
       continue;
     }
     const ts = row.timestamp ? Date.parse(row.timestamp) : 0;
     if (!ts) continue;
 
     const messageId = row.message?.id || null;
+    const key = messageId
+      ? `message:${messageId}`
+      : hasProgressWindows
+        ? progressWindowKey(progressEvents, ts)
+        : null;
 
     // Determine if this row starts a new LLM call
     let isNewCall = false;
-    if (messageId && lastMessageId) {
-      // Both have message.id: new call when id changes
-      isNewCall = messageId !== lastMessageId;
-    } else if (!messageId && !lastMessageId) {
-      // Neither has message.id (IDE): use timestamp proximity
+    if (currentGroup.length > 0 && key && currentKey) {
+      isNewCall = key !== currentKey;
+    } else if (currentGroup.length > 0 && !key && !currentKey) {
       isNewCall = lastTs !== null && (ts - lastTs) > 200;
-    } else if (currentGroup.length > 0) {
-      // Mixed (shouldn't happen, but handle gracefully)
+    } else if (currentGroup.length > 0 && key !== currentKey) {
+      // Mixed keyed/unkeyed rows are unusual; keep the old time-gap fallback.
       isNewCall = lastTs !== null && (ts - lastTs) > 200;
     }
 
-    if (isNewCall && currentGroup.length > 0) {
-      assistantGroups.push(currentGroup);
-      currentGroup = [];
-    }
+    if (isNewCall) flushGroup();
 
     currentGroup.push(row);
+    currentKey = key;
     lastTs = ts;
-    if (messageId) lastMessageId = messageId;
   }
-  if (currentGroup.length > 0) assistantGroups.push(currentGroup);
+  flushGroup();
 
   // Step 2: For each assistant group (= one LLM call), find timing from progress
   const boundaries = [];
@@ -298,6 +316,34 @@ function buildLlmBoundaries(progressEvents, contentEvents) {
   return boundaries;
 }
 
+function progressWindowKey(progressEvents, rowMs) {
+  let startTs = null;
+  for (const pe of progressEvents) {
+    const peMs = Date.parse(pe.ts) || 0;
+    if (peMs >= rowMs) break;
+    if (pe.hookEvent === 'PostToolUse' || pe.hookEvent === 'UserPromptSubmit') {
+      startTs = pe.ts;
+    }
+  }
+
+  // If no start boundary found, this row appears before any progress event.
+  // Return null to let the caller fall back to time-gap grouping, avoiding
+  // incorrect merging of distinct LLM calls that precede the first progress event.
+  if (!startTs) return null;
+
+  let endTs = null;
+  for (const pe of progressEvents) {
+    const peMs = Date.parse(pe.ts) || 0;
+    if (peMs <= rowMs) continue;
+    if (pe.hookEvent === 'PreToolUse' || pe.hookEvent === 'Stop') {
+      endTs = pe.ts;
+      break;
+    }
+  }
+
+  return `progress:${startTs}->${endTs || ''}`;
+}
+
 // --- Event Builder -----------------------------------------------------------
 
 function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId, sessionId, agentId, runtimeConfig, cwd) {
@@ -317,7 +363,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
       const userHookModel = contentEvents.find(r => r.type === 'assistant' && r.message?.model)?.message?.model || 'unknown';
       records.push({
         'event.id': crypto.randomUUID(),
-        'event.name': 'llm.request',
+        'event.name': 'other',
         'gen_ai.turn.id': turnId,
         'gen_ai.session.id': sessionId,
         'gen_ai.agent.type': agentType,
@@ -552,6 +598,34 @@ function assignContentToBoundaries(boundaries, contentEvents) {
 
 // --- Helpers -----------------------------------------------------------------
 
+/**
+ * Split a list of content events into turns.
+ * Each real user prompt (type === 'user' and not a tool result) starts a new
+ * turn. Tool results and assistant content following a prompt belong to that
+ * turn until the next real user prompt.
+ */
+function splitContentEventsIntoTurns(contentEvents) {
+  const turns = [];
+  let currentTurn = [];
+
+  for (const row of contentEvents) {
+    if (row.type === 'user' && !isToolResult(row)) {
+      if (currentTurn.length > 0) {
+        turns.push(currentTurn);
+      }
+      currentTurn = [row];
+    } else {
+      currentTurn.push(row);
+    }
+  }
+
+  if (currentTurn.length > 0) {
+    turns.push(currentTurn);
+  }
+
+  return turns;
+}
+
 function findPostToolUseTs(boundaries, currentIdx) {
   if (currentIdx + 1 < boundaries.length) {
     return isoToUnixNanos(boundaries[currentIdx + 1].startTs);
@@ -609,7 +683,7 @@ function buildLegacyEvents(contentEvents, turnId, sessionId, agentId, runtimeCon
   for (const record of existingRecords) {
     const eventName = record['event.name'];
     const rawType = record['agent.qoder.raw_type'];
-    if (eventName === 'llm.request' && rawType === 'user') continue;
+    if (rawType === 'user') continue;
     if (eventName === 'llm.response') {
       const responseTs = record['time_unix_nano'] || '';
       const tsDiff = lastResponseTs === null ? Infinity : Math.abs(Number(responseTs) - Number(lastResponseTs));

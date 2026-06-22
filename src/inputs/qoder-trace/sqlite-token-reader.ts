@@ -8,11 +8,14 @@ import { createLogger } from '../../utils/logger.js';
 const logger = createLogger('SqliteTokenReader');
 
 export interface SqliteTokenData {
+  sessionId?: string;
   requestId: string;
+  messageId?: string;
   gmtCreate: number;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  model?: string;
 }
 
 export async function readSqliteTokensForSession(sessionId: string): Promise<SqliteTokenData[]> {
@@ -20,17 +23,33 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
   if (!dbPath) return [];
 
   const sql = `
-    SELECT request_id, gmt_create, token_info
-    FROM chat_message
-    WHERE session_id = ?
-      AND role = 'assistant'
-      AND token_info IS NOT NULL
-      AND token_info != ''
-      AND json_valid(token_info)
-    ORDER BY gmt_create ASC
+    SELECT
+      cm.id AS message_id,
+      cm.session_id AS session_id,
+      cm.request_id AS request_id,
+      cm.gmt_create AS gmt_create,
+      cm.token_info AS token_info,
+      cm.model_info AS model_info,
+      cr.extra AS record_extra
+    FROM chat_message cm
+    LEFT JOIN chat_record cr ON cr.request_id = cm.request_id
+    WHERE cm.session_id = ?
+      AND cm.role = 'assistant'
+      AND cm.token_info IS NOT NULL
+      AND cm.token_info != ''
+      AND json_valid(cm.token_info)
+    ORDER BY cm.gmt_create ASC
   `;
 
-  let rows: Array<{ request_id: string; gmt_create: number; token_info: string }>;
+  let rows: Array<{
+    message_id?: string;
+    session_id?: string;
+    request_id: string;
+    gmt_create: number;
+    token_info: string;
+    model_info?: string | null;
+    record_extra?: string | null;
+  }>;
   try {
     rows = await queryReadonly(dbPath, sql, [sessionId]);
   } catch (err) {
@@ -43,11 +62,14 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
     const info = parseTokenInfo(row.token_info);
     if (!info) continue;
     results.push({
+      sessionId: row.session_id ?? '',
       requestId: row.request_id ?? '',
+      messageId: row.message_id ?? '',
       gmtCreate: row.gmt_create,
       inputTokens: info.promptTokens,
       outputTokens: info.completionTokens,
       cacheReadTokens: info.cachedTokens,
+      model: parseModelKey(row.model_info) ?? parseRecordModelKey(row.record_extra),
     });
   }
   return results;
@@ -84,6 +106,29 @@ function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: 
     return { promptTokens: pt, completionTokens: ct, cachedTokens: cached };
   } catch {
     return null;
+  }
+}
+
+function parseModelKey(raw: string | null | undefined): string | undefined {
+  if (!raw) return undefined;
+  try {
+    const obj = JSON.parse(raw);
+    return typeof obj.model_key === 'string' && obj.model_key.length > 0
+      ? obj.model_key
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseRecordModelKey(raw: string | null | undefined): string | undefined {
+  if (!raw) return undefined;
+  try {
+    const obj = JSON.parse(raw);
+    const key = obj?.modelConfig?.key;
+    return typeof key === 'string' && key.length > 0 ? key : undefined;
+  } catch {
+    return undefined;
   }
 }
 

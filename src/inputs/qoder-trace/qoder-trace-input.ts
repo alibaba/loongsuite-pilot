@@ -58,9 +58,10 @@ export class QoderTraceInput extends BaseInput {
     // 2. Group by turn.id
     const turnGroups = this.groupByTurn(rawEntries);
 
-    // 3. Enrich each turn
-    const allEntries: AgentActivityEntry[] = [];
-    for (const [turnId, turnEntries] of turnGroups) {
+    // 3. Enrich each turn. IDE turns are enriched per session so SQLite request_id
+    // ordering can be matched against hook turn ordering without timestamp joins.
+    const ideSessionGroups = new Map<string, AgentActivityEntry[]>();
+    for (const [, turnEntries] of turnGroups) {
       const variant = this.inferTurnVariant(turnEntries);
       const sessionId = this.extractSessionId(turnEntries);
 
@@ -68,17 +69,23 @@ export class QoderTraceInput extends BaseInput {
         const segments = await readSegmentTokensForSession(sessionId);
         enrichCliTurn(turnEntries, segments);
       } else if (variant === 'qoder' && sessionId) {
-        const sqliteRows = await readSqliteTokensForSession(sessionId);
-        enrichIdeTurn(turnEntries, sqliteRows);
+        const sessionEntries = ideSessionGroups.get(sessionId) ?? [];
+        sessionEntries.push(...turnEntries);
+        ideSessionGroups.set(sessionId, sessionEntries);
       }
-
-      // 4. Inject trace_id
-      injectTraceId(turnEntries);
-
-      allEntries.push(...turnEntries);
     }
 
-    return allEntries;
+    for (const [sessionId, sessionEntries] of ideSessionGroups) {
+      const sqliteRows = await readSqliteTokensForSession(sessionId);
+      enrichIdeTurn(sessionEntries, sqliteRows);
+    }
+
+    // 4. Inject trace_id per turn
+    for (const turnEntries of turnGroups.values()) {
+      injectTraceId(turnEntries);
+    }
+
+    return rawEntries;
   }
 
   // ─── Hook JSONL reading (adapted from BaseHookInput) ────────────────────────
@@ -96,6 +103,9 @@ export class QoderTraceInput extends BaseInput {
     }
 
     const state = this.getState();
+    // Cold start: no prior state at all (e.g. after redeployment wiped input-state.json).
+    // Day rollover: state.lastFile exists but differs from today's file (normal new-day transition).
+    const isColdStart = !state.lastFile;
     let offset = state.lastFile === logFileName ? (state.lastOffset ?? 0) : 0;
 
     if (offset > 0 && stat.size < offset) {
@@ -105,7 +115,7 @@ export class QoderTraceInput extends BaseInput {
     if (stat.size <= offset) return [];
 
     const handle = await fs.open(logFile, 'r');
-    const entries: AgentActivityEntry[] = [];
+    let entries: AgentActivityEntry[] = [];
     try {
       // NOTE: No MAX_READ_BYTES cap here. Hook JSONL is daily-rotated and typically <100KB/day.
       // If a cap is added in the future, must truncate to last newline to avoid splitting JSONL lines.
@@ -127,6 +137,18 @@ export class QoderTraceInput extends BaseInput {
       }
     } finally {
       await handle.close();
+    }
+
+    // On cold start with multiple turns already in the file, only report the last turn
+    // to avoid replaying full history after a redeployment wipes the state store.
+    if (isColdStart && entries.length > 0) {
+      const turnIds = new Set(entries.map(e => (e['gen_ai.turn.id'] as string) || 'unknown'));
+      if (turnIds.size > 1) {
+        const lastTurnId = entries[entries.length - 1]['gen_ai.turn.id'] as string || 'unknown';
+        const skipped = turnIds.size - 1;
+        this.logger.info('cold start detected, skipping historical turns', { skipped, totalTurns: turnIds.size, keepTurnId: lastTurnId });
+        entries = entries.filter(e => ((e['gen_ai.turn.id'] as string) || 'unknown') === lastTurnId);
+      }
     }
 
     return entries;
