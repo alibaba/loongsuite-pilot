@@ -6,7 +6,7 @@ import { transformHookRecord } from '../base/hook-record-transform.js';
 
 export class KiroCliLogInput extends BaseHookInput {
   readonly id = 'kiro-cli-log';
-  readonly agentType = ClientType.KiroCliHook;
+  readonly agentType = ClientType.KiroCli;
 
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
@@ -28,6 +28,6 @@ export class KiroCliLogInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    return transformHookRecord(record, ClientType.KiroCliHook, 'kiro-cli');
+    return transformHookRecord(record, ClientType.KiroCli, 'kiro-cli');
   }
 }
