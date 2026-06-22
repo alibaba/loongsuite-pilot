@@ -1,6 +1,5 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
@@ -8,35 +7,24 @@ import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
-import { parseSdkLogLine, type SdkEvent } from '../qoder-work-log/qoder-work-log-input.js';
 
-const BUFFER_TTL_MS = 24 * 60 * 60 * 1000;
-
-export interface QoderWorkTraceInputOptions extends InputOptions {
-  logDir?: string;
-  sdkLogDir?: string;
-}
-
-interface SdkMessageData {
-  messageId: string;
-  sessionId: string;
-  startTimeMs: number;
-  endTimeMs: number;
-  inputTokens: number;
-  outputTokens: number;
-  stopReason: string;
-  complete: boolean;
-  createdAtMs: number; // 用于 eviction
-}
+const NANO_PER_MILLI = 1_000_000n;
+const SEGMENT_TIMING_TOLERANCE_MS = 5 * 60 * 1000;
 
 /**
- * QoderWork CN TraceInput — multi-source merge.
+ * QoderWork TraceInput — hook JSONL + segments enrichment.
  *
- * Reads hook JSONL (messages + structure, produced by the rewritten
- * qoderwork-hook-processor.mjs) and SDK log (tokens from message_delta).
- * Merges tokens into the hook's llm.response events, injects trace_id.
+ * Pipeline:
+ *   1. Read hook processor's JSONL output (`logs/qoder-work/history/...`) —
+ *      this owns event structure (turn/step ids, message deltas, ordering).
+ *   2. Read QoderWork session segments (`~/.qoderwork/logs/sessions/<ws>/<sid>/segments/*.jsonl`) —
+ *      these own precise LLM timing and resolved model names.
+ *   3. Match each hook step's (llm.request, llm.response) with one segment
+ *      `model.request.started`/`model.response.completed` pair via per-session FIFO.
+ *      Subagent turns are skipped — hook transcript only contains main agent
+ *      conversation, so segment subagent LLM calls would mis-align the FIFO.
  *
- * When enabled, supersedes qoder-work-hook / qoder-work-log / qoder-work-sqlite.
+ * Outputs `AgentActivityEntry[]` with shared trace_id per turn.
  */
 export class QoderWorkTraceInput extends BaseInput {
   readonly id = 'qoder-work-trace';
@@ -44,21 +32,25 @@ export class QoderWorkTraceInput extends BaseInput {
   readonly collectionMethod = CollectionMethod.HookJsonl;
 
   private readonly logDir: string;
-  private readonly sdkLogDir: string;
+  private readonly segmentsRoot: string;
   private readonly logPrefix = 'qoder-work';
 
-  // SDK log 状态机缓冲 — 实例级持久化，跨 collect() 周期存活
-  private sdkMessageBuffer: Map<string, SdkMessageData[]> = new Map();
-  private sdkInFlightMessages: Map<string, SdkMessageData> = new Map();
-
-  // Model policy 按文件路径隔离，防止不同 SDK 进程的 model 交叉污染
-  private fileModelPolicies: Map<string, { chat: string; compact: string; scene: string }> = new Map();
-  private currentModelPolicy: { chat: string; compact: string; scene: string } = { chat: '', compact: '', scene: '' };
+  // Per-session in-memory state for segment enrichment
+  // Key: sessionId. Value: FIFO of LLM pairs from main-turn segments.
+  private readonly segmentPairs: Map<string, SegmentLlmPair[]> = new Map();
+  // Per-session tool timing from segments, keyed by tool_call_id.
+  private readonly segmentToolTimings: Map<string, Map<string, SegmentToolTiming>> = new Map();
+  // Per-session set of turn_ids known to be subagent. We only filter LLM calls
+  // whose turn_id is in this set. A turn_id absent from the set is treated as
+  // main (covers the rare case where turn.started is split across files).
+  private readonly subagentTurns: Map<string, Set<string>> = new Map();
+  // Per-session in-flight LLM pairs (request seen, response not yet seen).
+  private readonly inFlightPairs: Map<string, Map<string, InFlightPair>> = new Map();
 
   constructor(opts: QoderWorkTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder-work/history');
-    this.sdkLogDir = opts.sdkLogDir ?? resolveQoderWorkSdkLogDir();
+    this.segmentsRoot = opts.segmentsRoot ?? resolveHome('~/.qoderwork/logs/sessions');
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -68,7 +60,7 @@ export class QoderWorkTraceInput extends BaseInput {
   static getWatchPaths(): string[] {
     return [
       resolveHome('~/.loongsuite-pilot/logs/qoder-work/history'),
-      resolveQoderWorkSdkLogDir(),
+      resolveHome('~/.qoderwork/logs/sessions'),
     ];
   }
 
@@ -77,17 +69,37 @@ export class QoderWorkTraceInput extends BaseInput {
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
-    // 1. 读取 SDK log 状态（token + timing + model），积累到实例级缓冲
-    await this.readSdkLogState();
-
-    // 2. 读取 hook JSONL 条目
-    const rawEntries = await this.readHookJsonl();
+    // 1. Hook JSONL — primary source of structure.
+    const { entries: rawEntries, isFirstRun } = await this.readHookJsonl();
     if (rawEntries.length === 0) return [];
 
-    // 3. 按 turn.id 分组
-    const turnGroups = this.groupByTurn(rawEntries);
+    // A fresh collector must not replay a whole pre-existing daily hook log.
+    // The hook writes each turn contiguously, so the last group is the only
+    // current conversation worth exporting from a first-run baseline.
+    const allTurnGroups = this.groupByTurn(rawEntries);
+    const entries = isFirstRun
+      ? [...allTurnGroups.values()].at(-1) ?? []
+      : rawEntries;
+    if (isFirstRun) {
+      const state = this.getState();
+      const extra = state.extra && typeof state.extra === 'object'
+        ? state.extra as Record<string, unknown>
+        : {};
+      this.setState({
+        extra: { ...extra, qoderWorkTurnCount: allTurnGroups.size },
+      });
+    }
 
-    // 4. 对每个 turn 进行全量 enrichment（token + timing + model + git context）
+    // 2. Discover the (sessionId, cwd) pairs we have entries for, then read
+    //    fresh segments for each. Lazily — sessions absent from hook batch
+    //    don't trigger segment IO.
+    const sessionCwd = this.collectSessionCwd(entries);
+    for (const [sessionId, cwd] of sessionCwd) {
+      await this.readSegmentsForSession(sessionId, cwd);
+    }
+
+    // 3. Group → enrich → emit.
+    const turnGroups = this.groupByTurn(entries);
     const allEntries: AgentActivityEntry[] = [];
     for (const [, turnEntries] of turnGroups) {
       this.enrichTurn(turnEntries);
@@ -102,15 +114,12 @@ export class QoderWorkTraceInput extends BaseInput {
       allEntries.push(...turnEntries);
     }
 
-    // 5. 清理超过 24 小时未消费的缓冲条目
-    this.evictStaleBuffers();
-
     return allEntries;
   }
 
   // ─── Hook JSONL reading ────────────────────────────────────────────────────
 
-  private async readHookJsonl(): Promise<AgentActivityEntry[]> {
+  private async readHookJsonl(): Promise<HookJsonlBatch> {
     const today = getTodayDateString();
     const logFileName = `${this.logPrefix}-${today}.jsonl`;
     const logFile = path.join(this.logDir, logFileName);
@@ -119,7 +128,7 @@ export class QoderWorkTraceInput extends BaseInput {
     try {
       stat = await fs.stat(logFile);
     } catch {
-      return [];
+      return { entries: [], isFirstRun: false };
     }
 
     const state = this.getState();
@@ -129,18 +138,27 @@ export class QoderWorkTraceInput extends BaseInput {
       this.logger.info('file truncated, resetting offset', { file: logFile });
       offset = 0;
     }
-    if (stat.size <= offset) return [];
+    if (stat.size <= offset) return { entries: [], isFirstRun: false };
+
+    const hasFirstRunMarker = state.extra
+      && typeof state.extra === 'object'
+      && Object.hasOwn(state.extra, 'qoderWorkTurnCount');
+    const isFirstRun = offset === 0 && !hasFirstRunMarker;
 
     const handle = await fs.open(logFile, 'r');
     const entries: AgentActivityEntry[] = [];
     try {
       const maxReadSize = 16 * 1024 * 1024;
-      const readSize = Math.min(stat.size - offset, maxReadSize);
+      // The baseline must see the true last turn even when the history file
+      // exceeds the normal incremental read cap. It runs only once per state.
+      const readSize = isFirstRun
+        ? stat.size - offset
+        : Math.min(stat.size - offset, maxReadSize);
       const buf = Buffer.alloc(readSize);
       await handle.read(buf, 0, readSize, offset);
       let text = buf.toString('utf-8');
       let consumedBytes = readSize;
-      if (readSize < stat.size - offset) {
+      if (!isFirstRun && readSize < stat.size - offset) {
         const lastNL = text.lastIndexOf('\n');
         if (lastNL >= 0) { text = text.substring(0, lastNL); consumedBytes = Buffer.byteLength(text, 'utf-8') + 1; }
       }
@@ -159,249 +177,215 @@ export class QoderWorkTraceInput extends BaseInput {
       await handle.close();
     }
 
-    return entries;
+    return { entries, isFirstRun };
   }
 
-  // ─── SDK Log state reading ──────────────────────────────────────────────────
+  // ─── Segments reading ──────────────────────────────────────────────────────
 
-  private async readSdkLogState(): Promise<void> {
-    const stateKey = `${this.id}:sdk-log`;
+  private collectSessionCwd(entries: AgentActivityEntry[]): Map<string, string> {
+    const map = new Map<string, string>();
+    for (const e of entries) {
+      const sid = e['gen_ai.session.id'] as string | undefined;
+      const cwd = e['agent.qoderwork.cwd'] as string | undefined;
+      if (sid && cwd && !map.has(sid)) map.set(sid, cwd);
+    }
+    return map;
+  }
 
-    let logFiles: string[];
+  /** Encode a workspace cwd into the qoderwork sessions directory name. */
+  private encodeWorkspace(cwd: string): string {
+    return cwd.replace(/\//g, '-').replace(/\./g, '-');
+  }
+
+  private async readSegmentsForSession(sessionId: string, cwd: string): Promise<void> {
+    const ws = this.encodeWorkspace(cwd);
+    const segDir = path.join(this.segmentsRoot, ws, sessionId, 'segments');
+
+    let files: string[];
     try {
-      logFiles = await this.discoverSdkLogFiles();
+      const dirEntries = await fs.readdir(segDir, { withFileTypes: true });
+      files = dirEntries
+        .filter(d => d.isFile() && d.name.endsWith('.jsonl'))
+        .map(d => path.join(segDir, d.name))
+        .sort(); // filename starts with ISO timestamp → sort = chronological
+    } catch {
+      return; // no segments dir for this session yet
+    }
+
+    for (const filePath of files) {
+      await this.readSegmentsFile(sessionId, filePath);
+    }
+  }
+
+  private async readSegmentsFile(sessionId: string, filePath: string): Promise<void> {
+    const fileStateKey = `${this.id}:seg:${filePath}`;
+
+    let stat;
+    try {
+      stat = await fs.stat(filePath);
     } catch {
       return;
     }
 
-    for (const filePath of logFiles) {
-      // 恢复该文件的 model policy 快照，防止跨文件污染
-      this.currentModelPolicy = this.fileModelPolicies.get(filePath)
-        ?? { chat: '', compact: '', scene: '' };
+    const prevState = this.stateStore.get(fileStateKey);
+    const prevInode = (prevState.extra as { inode?: number } | undefined)?.inode;
+    const currentInode = (stat as unknown as { ino: number }).ino;
 
-      const fileStateKey = `${stateKey}:${filePath}`;
-      let stat;
-      try { stat = await fs.stat(filePath); } catch { continue; }
+    if (prevInode !== undefined && prevInode !== currentInode) {
+      this.stateStore.setOffset(fileStateKey, 0);
+      this.stateStore.update(fileStateKey, { extra: { inode: currentInode } });
+    } else if (prevInode === undefined) {
+      this.stateStore.update(fileStateKey, { extra: { inode: currentInode } });
+    }
 
-      const prevState = this.stateStore.get(fileStateKey);
-      const prevInode = prevState.extra?.inode as number | undefined;
-      const currentInode = (stat as unknown as { ino: number }).ino;
-      let cachedSig: string | undefined;
+    let offset = this.stateStore.getOffset(fileStateKey);
+    if (offset > 0 && stat.size < offset) offset = 0; // truncated
+    if (stat.size <= offset) return;
 
-      if (prevInode !== undefined && prevInode !== currentInode) {
-        this.stateStore.setOffset(fileStateKey, 0);
-        cachedSig = await computeFileSignature(filePath);
-        this.stateStore.update(fileStateKey, { extra: { inode: currentInode, signatureHash: cachedSig } });
-      } else if (prevInode === undefined) {
-        cachedSig = await computeFileSignature(filePath);
-        this.stateStore.update(fileStateKey, { extra: { inode: currentInode, signatureHash: cachedSig } });
+    const handle = await fs.open(filePath, 'r');
+    try {
+      const maxReadSize = 16 * 1024 * 1024;
+      const readSize = Math.min(stat.size - offset, maxReadSize);
+      const buf = Buffer.alloc(readSize);
+      await handle.read(buf, 0, readSize, offset);
+      let text = buf.toString('utf-8');
+
+      let consumedBytes = readSize;
+      if (readSize < stat.size - offset) {
+        const lastNL = text.lastIndexOf('\n');
+        if (lastNL >= 0) { text = text.substring(0, lastNL); consumedBytes = Buffer.byteLength(text, 'utf-8') + 1; }
       }
+      this.stateStore.setOffset(fileStateKey, offset + consumedBytes);
+      this.stateStore.update(fileStateKey, { extra: { inode: currentInode } });
 
-      let offset = this.stateStore.getOffset(fileStateKey);
-      if (offset > 0 && stat.size < offset) {
-        this.logger.info('SDK log truncated or rotated, resetting offset', { file: filePath });
-        offset = 0;
-        this.stateStore.setOffset(fileStateKey, 0);
-      }
-
-      // Signature-based rotation detection: handles inode reuse on tmpfs (Linux CI)
-      if (offset > 0 && stat.size > 0) {
-        const currentSig = cachedSig ?? await computeFileSignature(filePath);
-        cachedSig = currentSig;
-        const prevSig = prevState.extra?.signatureHash as string | undefined;
-        if (prevSig && currentSig && prevSig !== currentSig) {
-          this.logger.info('SDK log content signature changed (inode reused), resetting offset', { file: filePath });
-          offset = 0;
-          this.stateStore.setOffset(fileStateKey, 0);
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line) as SegmentEvent;
+          this.handleSegmentEvent(sessionId, event);
+        } catch {
+          this.logger.warn('invalid segments JSONL line');
         }
       }
-      if (stat.size <= offset) {
-        this.fileModelPolicies.set(filePath, { ...this.currentModelPolicy });
-        continue;
-      }
-
-      const handle = await fs.open(filePath, 'r');
-      try {
-        const readSize = Math.min(stat.size - offset, 16 * 1024 * 1024);
-        const buf = Buffer.alloc(readSize);
-        await handle.read(buf, 0, readSize, offset);
-        let text = buf.toString('utf-8');
-
-        let consumedBytes = readSize;
-        if (readSize < stat.size - offset) {
-          const lastNL = text.lastIndexOf('\n');
-          if (lastNL >= 0) { text = text.substring(0, lastNL); consumedBytes = Buffer.byteLength(text, 'utf-8') + 1; }
-        }
-        this.stateStore.setOffset(fileStateKey, offset + consumedBytes);
-        const sig = cachedSig ?? await computeFileSignature(filePath);
-        this.stateStore.update(fileStateKey, { extra: { inode: currentInode, signatureHash: sig } });
-
-        for (const line of text.split('\n')) {
-          if (!line.trim()) continue;
-          const event = parseSdkLogLine(line);
-          if (!event) continue;
-          this.handleSdkEvent(event);
-        }
-      } finally {
-        await handle.close();
-      }
-
-      // 保存该文件处理后的 model policy 快照
-      this.fileModelPolicies.set(filePath, { ...this.currentModelPolicy });
+    } finally {
+      await handle.close();
     }
   }
 
-  private handleSdkEvent(event: SdkEvent): void {
-    switch (event.kind) {
-      case 'set_model_policy':
-        if (event.chatModel) this.currentModelPolicy.chat = event.chatModel;
-        if (event.compactModel) this.currentModelPolicy.compact = event.compactModel;
-        if (event.sceneModel) this.currentModelPolicy.scene = event.sceneModel;
-        return;
-
-      case 'message_start': {
-        const existing = this.sdkInFlightMessages.get(event.sessionId);
-        if (existing) {
-          this.logger.debug('overwriting incomplete in-flight message', {
-            droppedMessageId: existing.messageId,
-            sessionId: event.sessionId,
-          });
+  private handleSegmentEvent(sessionId: string, event: SegmentEvent): void {
+    switch (event.type) {
+      case 'turn.started': {
+        if (event.turn_id && (event.data?.is_subagent === true || isIgnoredSegmentTurn(event.turn_id))) {
+          let set = this.subagentTurns.get(sessionId);
+          if (!set) { set = new Set(); this.subagentTurns.set(sessionId, set); }
+          set.add(event.turn_id);
         }
-        const msg: SdkMessageData = {
-          messageId: event.messageId,
-          sessionId: event.sessionId,
-          startTimeMs: event.ts,
-          endTimeMs: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-          stopReason: '',
-          complete: false,
-          createdAtMs: Date.now(),
-        };
-        this.sdkInFlightMessages.set(event.sessionId, msg);
         return;
       }
-
-      case 'message_delta': {
-        const inFlight = this.sdkInFlightMessages.get(event.sessionId);
-        if (!inFlight) return;
-        inFlight.endTimeMs = event.ts;
-        inFlight.inputTokens = event.inputTokens;
-        inFlight.outputTokens = event.outputTokens;
-        inFlight.stopReason = event.stopReason;
-        inFlight.complete = true;
-        // 移入完成缓冲
-        this.sdkInFlightMessages.delete(event.sessionId);
-        const list = this.sdkMessageBuffer.get(event.sessionId) ?? [];
-        list.push(inFlight);
-        this.sdkMessageBuffer.set(event.sessionId, list);
+      case 'model.request.started': {
+        if (!event.turn_id || !event.request_id || !event.ts) return;
+        // Skip subagent LLM calls — hook transcript only carries main agent.
+        if (this.shouldSkipSegmentTurn(sessionId, event.turn_id)) return;
+        const startNano = isoToNano(event.ts);
+        if (!startNano) return;
+        let m = this.inFlightPairs.get(sessionId);
+        if (!m) { m = new Map(); this.inFlightPairs.set(sessionId, m); }
+        m.set(event.request_id, {
+          turnId: event.turn_id,
+          startNano,
+          model: event.data?.model || '',
+        });
         return;
       }
-
-      // message_stop / 其他事件类型不需要特殊处理
+      case 'model.response.completed': {
+        if (!event.turn_id || !event.request_id || !event.ts) return;
+        if (this.shouldSkipSegmentTurn(sessionId, event.turn_id)) return;
+        const inFlightForSession = this.inFlightPairs.get(sessionId);
+        const inFlight = inFlightForSession?.get(event.request_id);
+        if (!inFlight) return; // orphan response (e.g. resumed mid-stream)
+        inFlightForSession!.delete(event.request_id);
+        const endNano = isoToNano(event.ts);
+        if (!endNano) return;
+        const list = this.segmentPairs.get(sessionId) ?? [];
+        list.push({
+          turnId: inFlight.turnId,
+          startNano: inFlight.startNano,
+          endNano,
+          model: event.data?.model || inFlight.model || '',
+        });
+        this.segmentPairs.set(sessionId, list);
+        return;
+      }
+      case 'tool.requested':
+      case 'tool.execution.finished': {
+        if (!event.turn_id || !event.tool_call_id || !event.ts) return;
+        if (this.shouldSkipSegmentTurn(sessionId, event.turn_id)) return;
+        const nano = isoToNano(event.ts);
+        if (!nano) return;
+        const timings = this.segmentToolTimings.get(sessionId) ?? new Map<string, SegmentToolTiming>();
+        const existing = timings.get(event.tool_call_id) ?? { turnId: event.turn_id };
+        existing.turnId = event.turn_id;
+        if (event.data?.tool_name) existing.toolName = String(event.data.tool_name);
+        if (event.type === 'tool.requested') {
+          existing.requestedNano = nano;
+        } else {
+          existing.finishedNano = nano;
+        }
+        timings.set(event.tool_call_id, existing);
+        this.segmentToolTimings.set(sessionId, timings);
+        return;
+      }
       default:
         return;
     }
   }
 
-  private async discoverSdkLogFiles(): Promise<string[]> {
-    const files: string[] = [];
-    let entries;
-    try {
-      entries = await fs.readdir(this.sdkLogDir, { withFileTypes: true });
-    } catch {
-      return files;
-    }
-
-    for (const dir of entries) {
-      if (!dir.isDirectory()) continue;
-      const sessionPath = path.join(this.sdkLogDir, dir.name);
-      const mainLogPath = path.join(sessionPath, 'main.log');
-      try {
-        const st = await fs.stat(mainLogPath);
-        if (st.isFile()) { files.push(mainLogPath); continue; }
-      } catch { /* fall through */ }
-      const mainDir = path.join(sessionPath, 'main');
-      let subEntries;
-      try { subEntries = await fs.readdir(mainDir, { withFileTypes: true }); } catch { continue; }
-      for (const entry of subEntries) {
-        if (entry.isFile() && entry.name.startsWith('sdk-') && entry.name.endsWith('.log')) {
-          files.push(path.join(mainDir, entry.name));
-        }
-      }
-    }
-    return files.sort();
+  private shouldSkipSegmentTurn(sessionId: string, turnId: string): boolean {
+    return isIgnoredSegmentTurn(turnId) || this.subagentTurns.get(sessionId)?.has(turnId) === true;
   }
 
   // ─── Enrichment ─────────────────────────────────────────────────────────────
 
   private enrichTurn(entries: AgentActivityEntry[]): void {
-    const sessionId = entries.find(e => e['gen_ai.session.id'])?.['gen_ai.session.id'] as string || '';
-    if (!sessionId) return;
+    const sessionId = entries.find(e => e['gen_ai.session.id'])?.['gen_ai.session.id'] as string | undefined;
+    const turnId = entries.find(e => e['gen_ai.turn.id'])?.['gen_ai.turn.id'] as string | undefined;
 
-    const buffer = this.sdkMessageBuffer.get(sessionId);
     const steps = this.groupByStep(entries);
     const stepOrder = [...steps.keys()].filter((k): k is string => k !== undefined);
 
-    for (const [stepId, stepEntries] of steps) {
-      if (!stepId) continue;
+    // Apply segment-derived timing + model to each step in transcript order.
+    if (sessionId) {
+      for (const stepId of stepOrder) {
+        const stepEntries = steps.get(stepId);
+        if (!stepEntries) continue;
+        const request = stepEntries.find(e => e['event.name'] === 'llm.request');
+        const response = stepEntries.find(e => e['event.name'] === 'llm.response');
+        if (request && response) {
+          const pair = this.takeSegmentPair(sessionId, turnId, request, response);
+          if (pair) {
+            (request as Record<string, unknown>)['time_unix_nano'] = pair.startNano;
+            (response as Record<string, unknown>)['time_unix_nano'] = pair.endNano;
 
-      const response = stepEntries.find(e => e['event.name'] === 'llm.response');
-      const request = stepEntries.find(e => e['event.name'] === 'llm.request');
-      if (!response) continue;
-
-      // FIFO 消费一个 SdkMessageData
-      const sdkData = buffer?.length ? buffer.shift() : undefined;
-      if (sdkData) {
-        // Token enrichment — only set when SDK reports non-zero values.
-        // QoderWork message_delta always carries positive token counts;
-        // 0 means the SDK event was malformed, so we skip to avoid
-        // overwriting with misleading zeros.
-        if (sdkData.inputTokens > 0) {
-          (response as Record<string, unknown>)['gen_ai.usage.input_tokens'] = sdkData.inputTokens;
-        }
-        if (sdkData.outputTokens > 0) {
-          (response as Record<string, unknown>)['gen_ai.usage.output_tokens'] = sdkData.outputTokens;
-        }
-        if (sdkData.inputTokens > 0 || sdkData.outputTokens > 0) {
-          (response as Record<string, unknown>)['gen_ai.usage.total_tokens'] =
-            (sdkData.inputTokens || 0) + (sdkData.outputTokens || 0);
-        }
-
-        // Timing enrichment — 用 SDK log 的精确时间戳覆盖 hook 的粗粒度时间戳
-        if (sdkData.startTimeMs > 0 && request) {
-          (request as Record<string, unknown>)['time_unix_nano'] = String(BigInt(sdkData.startTimeMs) * 1_000_000n);
-        }
-        if (sdkData.endTimeMs > 0) {
-          const endNano = String(BigInt(sdkData.endTimeMs) * 1_000_000n);
-          (response as Record<string, unknown>)['time_unix_nano'] = endNano;
-          // tool.call 时间戳跟随 response（LLM 声明 tool_use 的时刻）
-          for (const e of stepEntries) {
-            if (e['event.name'] === 'tool.call') {
-              (e as Record<string, unknown>)['time_unix_nano'] = endNano;
+            if (pair.model) {
+              for (const e of stepEntries) {
+                if (!e['gen_ai.request.model'] || e['gen_ai.request.model'] === 'auto') {
+                  (e as Record<string, unknown>)['gen_ai.request.model'] = pair.model;
+                }
+                if (e['event.name'] === 'llm.response') {
+                  (e as Record<string, unknown>)['gen_ai.response.model'] = pair.model;
+                }
+              }
             }
           }
         }
-      }
 
-      // Model enrichment — uses currentModelPolicy which reflects the last
-      // processed SDK log file. This assumes a single active QoderWork process
-      // (single SDK log directory). If multiple workspaces run in parallel in
-      // the future, model policy should be keyed by sessionId instead.
-      const resolvedModel = this.resolveModel();
-      if (resolvedModel && resolvedModel !== 'unknown') {
-        for (const e of stepEntries) {
-          if (!e['gen_ai.request.model'] || e['gen_ai.request.model'] === 'auto') {
-            (e as Record<string, unknown>)['gen_ai.request.model'] = resolvedModel;
-          }
-          if (e['event.name'] === 'llm.response') {
-            (e as Record<string, unknown>)['gen_ai.response.model'] = resolvedModel;
-          }
-        }
+        this.applySegmentToolTiming(sessionId, stepEntries);
       }
     }
 
-    // Fix STEP overlap: cap tool.result 时间戳使其不超过下一个 step 的 llm.request 开始时间
+    // Defensive STEP overlap clamp: ensure tool.result of step N doesn't exceed
+    // llm.request of step N+1. Hook is already monotonic; segments enrichment
+    // shouldn't break that, but we keep this guard for edge cases.
     for (let i = 0; i < stepOrder.length - 1; i++) {
       const currentStepEntries = steps.get(stepOrder[i]);
       const nextStepEntries = steps.get(stepOrder[i + 1]);
@@ -422,16 +406,75 @@ export class QoderWorkTraceInput extends BaseInput {
         }
       }
     }
-
-    // 清理空 buffer
-    if (buffer && buffer.length === 0) {
-      this.sdkMessageBuffer.delete(sessionId);
-    }
   }
 
-  private resolveModel(): string {
-    const policy = this.currentModelPolicy;
-    return policy.chat || policy.scene || policy.compact || '';
+  private takeSegmentPair(
+    sessionId: string,
+    turnId: string | undefined,
+    request: AgentActivityEntry,
+    response: AgentActivityEntry,
+  ): SegmentLlmPair | undefined {
+    const buffer = this.segmentPairs.get(sessionId);
+    if (!buffer?.length) return undefined;
+
+    let idx = turnId ? buffer.findIndex(pair => pair.turnId === turnId) : -1;
+    if (idx < 0) {
+      idx = buffer.findIndex(pair => this.isSegmentPairCompatible(pair, request, response));
+    }
+    if (idx < 0) return undefined;
+
+    const [pair] = buffer.splice(idx, 1);
+    if (buffer.length === 0) this.segmentPairs.delete(sessionId);
+    return pair;
+  }
+
+  private isSegmentPairCompatible(
+    pair: SegmentLlmPair,
+    request: AgentActivityEntry,
+    response: AgentActivityEntry,
+  ): boolean {
+    const requestNano = request['time_unix_nano'] as string | undefined;
+    const responseNano = response['time_unix_nano'] as string | undefined;
+    if (!requestNano || !responseNano) return false;
+    return isWithinTolerance(pair.startNano, requestNano, SEGMENT_TIMING_TOLERANCE_MS)
+      && isWithinTolerance(pair.endNano, responseNano, SEGMENT_TIMING_TOLERANCE_MS);
+  }
+
+  private applySegmentToolTiming(sessionId: string, stepEntries: AgentActivityEntry[]): void {
+    const timings = this.segmentToolTimings.get(sessionId);
+    if (!timings?.size) return;
+
+    const usedCallIds = new Set<string>();
+    for (const entry of stepEntries) {
+      const eventName = entry['event.name'];
+      if (eventName !== 'tool.call' && eventName !== 'tool.result') continue;
+      const callId = entry['gen_ai.tool.call.id'] as string | undefined;
+      if (!callId) continue;
+      const timing = timings.get(callId);
+      if (!timing) continue;
+
+      if (eventName === 'tool.call' && timing.requestedNano) {
+        (entry as Record<string, unknown>)['time_unix_nano'] = timing.requestedNano;
+        usedCallIds.add(callId);
+      } else if (eventName === 'tool.result' && timing.finishedNano) {
+        (entry as Record<string, unknown>)['time_unix_nano'] = timing.finishedNano;
+        usedCallIds.add(callId);
+      }
+    }
+
+    for (const callId of usedCallIds) {
+      const timing = timings.get(callId);
+      const hasCallEntry = stepEntries.some(entry =>
+        entry['event.name'] === 'tool.call' && entry['gen_ai.tool.call.id'] === callId
+      );
+      const hasResultEntry = stepEntries.some(entry =>
+        entry['event.name'] === 'tool.result' && entry['gen_ai.tool.call.id'] === callId
+      );
+      if (hasCallEntry && hasResultEntry && timing?.requestedNano && timing.finishedNano) {
+        timings.delete(callId);
+      }
+    }
+    if (timings.size === 0) this.segmentToolTimings.delete(sessionId);
   }
 
   private groupByStep(entries: AgentActivityEntry[]): Map<string | undefined, AgentActivityEntry[]> {
@@ -443,24 +486,6 @@ export class QoderWorkTraceInput extends BaseInput {
       groups.set(stepId, group);
     }
     return groups;
-  }
-
-  private evictStaleBuffers(): void {
-    const now = Date.now();
-    for (const [sessionId, list] of this.sdkMessageBuffer) {
-      const filtered = list.filter(m => now - m.createdAtMs < BUFFER_TTL_MS);
-      if (filtered.length === 0) {
-        this.sdkMessageBuffer.delete(sessionId);
-      } else if (filtered.length < list.length) {
-        this.sdkMessageBuffer.set(sessionId, filtered);
-      }
-    }
-    // 同时清理停滞的 in-flight messages
-    for (const [sessionId, msg] of this.sdkInFlightMessages) {
-      if (now - msg.createdAtMs > BUFFER_TTL_MS) {
-        this.sdkInFlightMessages.delete(sessionId);
-      }
-    }
   }
 
   // ─── Trace ID injection ────────────────────────────────────────────────────
@@ -487,31 +512,66 @@ export class QoderWorkTraceInput extends BaseInput {
   }
 }
 
-const SIGNATURE_BYTES = 1024;
-
-async function computeFileSignature(filePath: string): Promise<string> {
-  let handle;
-  try {
-    handle = await fs.open(filePath, 'r');
-    const buf = Buffer.alloc(SIGNATURE_BYTES);
-    const { bytesRead } = await handle.read(buf, 0, SIGNATURE_BYTES, 0);
-    if (bytesRead === 0) return '';
-    return crypto.createHash('md5').update(buf.subarray(0, bytesRead)).digest('hex');
-  } catch {
-    return '';
-  } finally {
-    await handle?.close();
-  }
+export interface QoderWorkTraceInputOptions extends InputOptions {
+  logDir?: string;
+  segmentsRoot?: string;
 }
 
-function resolveQoderWorkSdkLogDir(): string {
-  if (process.platform === 'darwin') {
-    return resolveHome('~/Library/Application Support/QoderWork/logs');
+interface HookJsonlBatch {
+  entries: AgentActivityEntry[];
+  isFirstRun: boolean;
+}
+
+interface SegmentEvent {
+  ts?: string;
+  type?: string;
+  turn_id?: string;
+  request_id?: string;
+  tool_call_id?: string;
+  data?: {
+    model?: string;
+    is_subagent?: boolean;
+    tool_name?: string;
+    [key: string]: unknown;
+  };
+}
+
+interface InFlightPair {
+  turnId: string;
+  startNano: string;
+  model: string;
+}
+
+interface SegmentLlmPair {
+  turnId: string;
+  startNano: string;
+  endNano: string;
+  model: string;
+}
+
+interface SegmentToolTiming {
+  turnId: string;
+  toolName?: string;
+  requestedNano?: string;
+  finishedNano?: string;
+}
+
+function isoToNano(iso: string): string | undefined {
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return undefined;
+  return String(BigInt(ms) * 1_000_000n);
+}
+
+function isIgnoredSegmentTurn(turnId: string): boolean {
+  return turnId.startsWith('qoderwork-memory-sink');
+}
+
+function isWithinTolerance(leftNano: string, rightNano: string, toleranceMs: number): boolean {
+  try {
+    const delta = BigInt(leftNano) - BigInt(rightNano);
+    const abs = delta < 0n ? -delta : delta;
+    return abs <= BigInt(toleranceMs) * NANO_PER_MILLI;
+  } catch {
+    return false;
   }
-  if (process.platform === 'win32') {
-    return path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'QoderWork', 'logs');
-  }
-  const xdg = process.env.XDG_CONFIG_HOME;
-  if (xdg) return path.join(xdg, 'QoderWork', 'logs');
-  return resolveHome('~/.config/QoderWork/logs');
 }

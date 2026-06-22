@@ -72,6 +72,26 @@ describe('isSystemInjection', () => {
     expect(isSystemInjection(row)).toBe(true);
   });
 
+  it('keeps pure system-reminders in the current turn without hiding mixed prompts', () => {
+    const systemOnly = {
+      message: { content: [{ type: 'text', text: '<system-reminder>runtime context</system-reminder>' }] },
+    };
+    const systemAndPrompt = {
+      message: {
+        content: [
+          { type: 'text', text: '<system-reminder>runtime context</system-reminder>' },
+          { type: 'text', text: 'implement the requested change' },
+        ],
+      },
+    };
+
+    expect(isSystemInjection(systemOnly)).toBe(true);
+    expect(isSystemInjection(systemAndPrompt)).toBe(false);
+    expect(extractText(systemAndPrompt)).toBe(
+      '<system-reminder>runtime context</system-reminder>\nimplement the requested change',
+    );
+  });
+
   it('returns false for normal user text', () => {
     const row = { message: { content: [{ type: 'text', text: 'how do I build a multi-turn scenario?' }] } };
     expect(isSystemInjection(row)).toBe(false);

@@ -113,7 +113,7 @@ function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd) {
   const turns = splitIntoTurns(contentRows);
 
   for (const turn of turns) {
-    const turnId = crypto.randomUUID();
+    const turnId = getTurnIdForRows(turn);
     const turnRecords = buildTurnEvents(turn, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd);
     records.push(...turnRecords);
   }
@@ -139,24 +139,41 @@ function splitIntoTurns(contentRows) {
   return turns;
 }
 
+function getTurnIdForRows(turnRows) {
+  const promptRow = turnRows.find(r => r.type === 'user' && !isToolResult(r));
+  return promptRow?.promptId || promptRow?.uuid || crypto.randomUUID();
+}
+
 function isSystemInjection(row) {
   const text = extractText(row).trimStart();
-  return text.startsWith('<command-message>')
-    || text.startsWith('<command-name>')
-    || text.startsWith('[Request interrupted');
+  if (text.startsWith('<command-message>') ||
+    text.startsWith('<command-name>') ||
+    text.startsWith('[Request interrupted') ||
+    text.startsWith('[SYSTEM: This is an automated background review task')) {
+    return true;
+  }
+  return isPureSystemReminder(text);
+}
+
+function isPureSystemReminder(text) {
+  return text.startsWith('<system-reminder>')
+    && text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim().length === 0;
 }
 
 function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd) {
   const records = [];
 
   // Find the user prompt
-  const userRow = turnRows.find(r => r.type === 'user' && !isToolResult(r));
+  const userRow = turnRows.find(r => r.type === 'user' && !isToolResult(r) && !isSystemInjection(r));
+  const promptId = userRow?.promptId || turnId;
+  const turnMetadata = promptId ? { 'agent.qoderwork.promptId': promptId } : {};
 
   // User-hook event (no step.id, no model — per §5 of EVENT_LOG_TO_TRACE_SPEC)
   if (userRow) {
     const userText = extractText(userRow);
     if (userText) {
       records.push(buildRecord({
+        ...turnMetadata,
         'event.name': 'llm.request',
         'gen_ai.turn.id': turnId,
         'gen_ai.session.id': sessionId,
@@ -171,14 +188,22 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
     }
   }
 
-  // Group assistant rows by parentUuid — each group = one LLM call
+  // Group assistant rows by tool_result boundaries — each group = one LLM call.
+  // Reason: QoderWork sometimes splits one LLM response across multiple assistant
+  // rows with different parentUuids (e.g. thinking row + separate tool_use row).
+  // groupByParentUuid would wrongly split these into multiple "steps" and break
+  // timing (the second half would incorrectly inherit the tool_result's ts as
+  // llm.request time). Tool_result boundaries are the semantically correct split
+  // since the LLM only receives tool outputs and issues a new response at those points.
   const assistantRows = turnRows.filter(r => r.type === 'assistant');
   const toolResultRows = turnRows.filter(r => r.type === 'user' && isToolResult(r));
 
-  const llmGroups = groupByParentUuid(assistantRows);
+  const llmGroups = groupAssistantRowsByToolResults(turnRows);
 
   const userText = userRow ? extractText(userRow) : '';
+  const userTs = userRow ? timestampToUnixNanos(userRow.timestamp) : undefined;
   let prevToolCalls = []; // tool_call ids from previous step, for building tool_result delta
+  let prevStepLastToolResultTs = undefined; // 上一个 step 最后一个 tool_result 的 nano ts，用于本 step llm.request 时间
 
   let stepCounter = 0;
   for (const group of llmGroups) {
@@ -210,17 +235,38 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
       }
     }
 
-    const stepRecords = buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, stepCounter === llmGroups.length, inputDelta, cwd);
+    // llm.request time:
+    //   step 1 = user input ts (user message arrival, a reasonable proxy for LLM start)
+    //   step N>1 = 上一个 step 最后一个 tool_result ts (工具返回后模型立刻开始处理)
+    // 否则用 assistant 行写盘时间会导致 LLM span 退化为 0ms（thinking/tool_use 同毫秒批量 flush）
+    const llmRequestTs = stepCounter === 1 ? userTs : prevStepLastToolResultTs;
+
+    const stepRecords = buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, stepCounter === llmGroups.length, inputDelta, cwd, llmRequestTs, turnMetadata);
     records.push(...stepRecords);
 
     // Collect this step's tool_calls for next step's input delta
     prevToolCalls = [];
+    let lastToolResultTsInStep = undefined;
     for (const row of group) {
       const msg = row.message || {};
       const content = Array.isArray(msg.content) ? msg.content : [];
       for (const b of content) {
-        if (b.type === 'tool_use') prevToolCalls.push({ id: b.id, name: b.name });
+        if (b.type === 'tool_use') {
+          prevToolCalls.push({ id: b.id, name: b.name });
+          // 找到本 step 该 tool_use 对应的 tool_result 行，记录 ts；多 tool 场景保留最后一个
+          const trRow = toolResultRows.find(r => {
+            const c = Array.isArray(r.message?.content) ? r.message.content : [];
+            return c.some(bl => bl.type === 'tool_result' && bl.tool_use_id === b.id);
+          });
+          if (trRow?.timestamp) {
+            const nano = timestampToUnixNanos(trRow.timestamp);
+            if (nano) lastToolResultTsInStep = nano;
+          }
+        }
       }
+    }
+    if (lastToolResultTsInStep) {
+      prevStepLastToolResultTs = lastToolResultTsInStep;
     }
   }
 
@@ -249,10 +295,53 @@ function groupByParentUuid(assistantRows) {
   return groups;
 }
 
-function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, isLastStep, inputDelta, cwd) {
+/**
+ * Group consecutive assistant rows between tool_result boundaries.
+ *
+ * Each group represents ONE LLM response. A tool_result row marks the
+ * boundary because it delivers a tool's output back to the model — the
+ * next assistant row is the start of the model's next response.
+ *
+ * Why not parentUuid: QoderWork occasionally emits a single LLM response
+ * as multiple assistant rows with different parentUuids (e.g. a thinking
+ * row + a separate tool_use row). Using parentUuid would incorrectly
+ * split them into multiple "steps", and a "prev tool_result ts as
+ * llm.request start" rule would then attribute the tool's execution time
+ * to the second half's LLM time.
+ */
+function groupAssistantRowsByToolResults(turnRows) {
+  const groups = [];
+  let current = [];
+
+  for (const row of turnRows) {
+    if (row.type === 'assistant') {
+      current.push(row);
+    } else if (row.type === 'user' && isToolResult(row)) {
+      if (current.length > 0) {
+        groups.push(current);
+        current = [];
+      }
+    }
+    // Non-assistant non-tool_result user rows (the prompt) are ignored here;
+    // they don't end an LLM-response group.
+  }
+  if (current.length > 0) groups.push(current);
+  return groups;
+}
+
+function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, isLastStep, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
   const records = [];
   const firstRow = group[0];
   const lastRow = group[group.length - 1];
+
+  // thinking 行的 ts 用作 llm.response 时间（模型完成输出的真实时刻）；
+  // 没有 thinking 时回退到 lastRow.timestamp（与现有行为一致）
+  const thinkingRow = group.find(r => {
+    const content = Array.isArray(r.message?.content) ? r.message.content : [];
+    const firstType = content[0]?.type;
+    return firstType === 'thinking' || r.content_type === 'thinking';
+  });
+  const llmResponseTs = timestampToUnixNanos(thinkingRow ? thinkingRow.timestamp : lastRow.timestamp);
 
   // Determine response.id from parentUuid
   const responseId = firstRow.parentUuid || firstRow.uuid;
@@ -285,8 +374,24 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
 
   const finishReason = toolCalls.length > 0 ? 'tool_calls' : (isLastStep ? 'end_turn' : 'stop');
 
-  // llm.request for this step (with input.messages_delta per EVENT_LOG_TO_TRACE_SPEC §3.2)
+  // llm.request for this step.
+  //
+  // Field choice: gen_ai.input.messages (NOT messages_delta).
+  //
+  // The converter (@loongsuite/otel-util-genai) treats messages_delta as a
+  // turn-level accumulator: when an LLM pair only has messages_delta, it
+  // concatenates ALL prior pairs' deltas to build the LLM span's input.
+  // For QoderWork that means tool_call_response would grow across steps
+  // (step 1: 0 results, step 2: 1, step 3: 2, ...) — wrong for an LLM
+  // span which should show what THIS llm call received.
+  //
+  // Writing to messages (treated as "full") makes the converter use the
+  // value directly without accumulation. We still emit per-step incremental
+  // content, matching Codex's pattern. ENTRY/AGENT spans collect input from
+  // the user-hook event (no step.id, still messages_delta) above, so this
+  // change does not affect the turn-level overview spans.
   const llmRequestFields = {
+    ...turnMetadata,
     'event.name': 'llm.request',
     'gen_ai.step.id': stepId,
     'gen_ai.turn.id': turnId,
@@ -295,18 +400,19 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
     'gen_ai.provider.name': providerName,
     'gen_ai.request.model': 'auto',
     'user.id': userId,
-    time_unix_nano: timestampToUnixNanos(firstRow.timestamp),
+    time_unix_nano: llmRequestTs || timestampToUnixNanos(firstRow.timestamp),
     observed_time_unix_nano: observedTs,
     version,
   };
   if (inputDelta) {
-    llmRequestFields['gen_ai.input.messages_delta'] = inputDelta;
+    llmRequestFields['gen_ai.input.messages'] = inputDelta;
   }
   records.push(buildRecord(llmRequestFields, firstRow, runtimeConfig, cwd));
 
   // llm.response (merged multi-parts)
   if (outputParts.length > 0) {
     records.push(buildRecord({
+      ...turnMetadata,
       'event.name': 'llm.response',
       'gen_ai.step.id': stepId,
       'gen_ai.turn.id': turnId,
@@ -319,7 +425,7 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
       'gen_ai.response.finish_reasons': [finishReason],
       'user.id': userId,
       'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts, finish_reason: finishReason }],
-      time_unix_nano: timestampToUnixNanos(lastRow.timestamp),
+      time_unix_nano: llmResponseTs,
       observed_time_unix_nano: observedTs,
       version,
     }, firstRow, runtimeConfig, cwd));
@@ -328,6 +434,7 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
   // tool.call + tool.result events
   for (const tc of toolCalls) {
     records.push(buildRecord({
+      ...turnMetadata,
       'event.name': 'tool.call',
       'gen_ai.step.id': stepId,
       'gen_ai.turn.id': turnId,
@@ -353,6 +460,7 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
       const resultBlock = resultContent.find(b => b.tool_use_id === tc.id);
       const resultText = typeof resultBlock?.content === 'string' ? resultBlock.content : JSON.stringify(resultBlock?.content);
       records.push(buildRecord({
+        ...turnMetadata,
         'event.name': 'tool.result',
         'gen_ai.step.id': stepId,
         'gen_ai.turn.id': turnId,
