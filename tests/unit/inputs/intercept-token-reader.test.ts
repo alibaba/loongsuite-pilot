@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { readInterceptData, clearInterceptCache } from '../../../src/inputs/qoder-trace/intercept-token-reader.js';
+import { readInterceptData } from '../../../src/inputs/qoder-trace/intercept-token-reader.js';
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
   resolveHome: (p: string) => p.replace('~', '/tmp/test-intercept-home'),
@@ -16,7 +16,6 @@ const TEST_FILE = path.join(TEST_DIR, 'qodercli-intercept.jsonl');
 
 describe('intercept-token-reader', () => {
   beforeEach(async () => {
-    clearInterceptCache();
     await fs.mkdir(TEST_DIR, { recursive: true });
     try { await fs.unlink(TEST_FILE); } catch {}
   });

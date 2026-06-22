@@ -112,17 +112,22 @@ export async function readSegmentTokensForSession(sessionId: string): Promise<Se
     results[i].toolFinishedTs = lastToolFinish;
   }
 
-  // When all segment tokens are 0 (qodercli 1.0.21+ regression), fill from intercept data
-  if (results.length > 0 && results.every(r => r.inputTokens === 0 && r.outputTokens === 0)) {
+  // Fill individual segments with 0 tokens from intercept data (qodercli 1.0.21+ regression)
+  const zeroSegments = results.filter(r => r.inputTokens === 0 && r.outputTokens === 0);
+  if (zeroSegments.length > 0) {
     try {
-      const earliest = Math.min(...results.map(r => r.requestStartTs || r.responseEndTs));
-      const { tokens } = await readInterceptData(earliest > 0 ? earliest - 5000 : undefined);
-      for (const seg of results) {
+      const earliest = results.reduce((min, r) => {
+        const v = r.requestStartTs || r.responseEndTs;
+        return v > 0 && v < min ? v : min;
+      }, Infinity);
+      const { tokens } = await readInterceptData(earliest < Infinity ? earliest - 5000 : undefined);
+      for (const seg of zeroSegments) {
         const match = tokens.find(t => t.id === seg.requestId);
         if (match) {
           seg.inputTokens = match.promptTokens;
           seg.outputTokens = match.completionTokens;
           seg.cacheReadTokens = match.cachedTokens;
+          // Intercept data has no cache_creation field — known limitation
           seg.cacheCreationTokens = 0;
         }
       }
