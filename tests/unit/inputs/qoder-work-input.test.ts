@@ -440,4 +440,55 @@ describe('QoderWorkInput', () => {
       await cnInput.stop();
     });
   });
+
+  describe('version field stripping', () => {
+    it('should preserve agent.qoderwork.version in output and track it for getAgentVersion', async () => {
+      const today = getTodayDateString();
+      const logFile = path.join(tmpDir, `qoder-work-${today}.jsonl`);
+      const record = {
+        'event.id': 'ver-test-1',
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': ClientType.QoderWork,
+        'gen_ai.session.id': 'sess-ver',
+        'agent.qoderwork.version': '1.2.3',
+        'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'hi' }] }],
+      };
+      await fs.writeFile(logFile, JSON.stringify(record) + '\n');
+
+      const allEntries: AgentActivityEntry[] = [];
+      input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
+
+      await input.start();
+      expect(allEntries).toHaveLength(1);
+      const entry = allEntries[0]!;
+      expect(entry['agent.qoderwork.version']).toBe('1.2.3');
+      expect(input.getAgentVersion()).toBe('1.2.3');
+      await input.stop();
+    });
+
+    it('should strip version field from PostToolUse output entries', async () => {
+      const today = getTodayDateString();
+      const logFile = path.join(tmpDir, `qoder-work-${today}.jsonl`);
+      const record = {
+        event_type: 'PostToolUse',
+        tool_name: 'write_to_file',
+        tool_input: { file_path: '/src/app.ts', content: 'hello' },
+        session_id: 'sess-1',
+        user_id: 'u1',
+        version: '2.0.0',
+        timestamp: Date.now(),
+      };
+      await fs.writeFile(logFile, JSON.stringify(record) + '\n');
+
+      const allEntries: AgentActivityEntry[] = [];
+      input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
+
+      await input.start();
+      expect(allEntries).toHaveLength(1);
+      const entry = allEntries[0]!;
+      expect(entry['agent.version']).toBeUndefined();
+      expect(entry['version']).toBeUndefined();
+      await input.stop();
+    });
+  });
 });

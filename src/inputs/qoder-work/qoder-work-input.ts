@@ -60,6 +60,7 @@ export class QoderWorkInput extends BaseHookInput {
   ): Promise<AgentActivityEntry | null> {
     const ver = record['agent.qoderwork.version'];
     if (typeof ver === 'string' && ver) this.lastAgentVersion = ver;
+    delete record['version'];
 
     const canonicalEntry = buildCanonicalHookEntry(record, this.agentType);
     if (canonicalEntry) {
