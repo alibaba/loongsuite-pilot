@@ -24,26 +24,6 @@
  * across multiple messages) — EVENT_LOG_TO_TRACE_SPEC §4.2.
  */
 
-// Normalized finish_reason values follow pilot's convention (singular
-// 'tool_call'), mirroring assets/hooks/claude-code/message-converter.mjs
-// STOP_REASON_MAP. Different upstream protocols use 'tool_calls' (OpenAI)
-// or 'tool_use' (Anthropic); both collapse to the same 'tool_call' here.
-const FINISH_REASON_MAP = {
-  stop: 'stop',
-  end_turn: 'stop',
-  tool_calls: 'tool_call',
-  tool_use: 'tool_call',
-  length: 'length',
-  max_tokens: 'length',
-  content_filter: 'content_filter',
-  error: 'error',
-};
-
-export function mapFinishReason(raw) {
-  if (!raw) return 'stop';
-  return FINISH_REASON_MAP[raw] || raw;
-}
-
 /**
  * Convert a single qwen-code message.parts[] element → ARMS part object.
  * Returns null for unrecognized parts (caller filters).

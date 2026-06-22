@@ -386,11 +386,28 @@ describe('pairToolCallsWithResults edge cases', () => {
       toolResultRec('tr-unmatched', 'orphan', 'or', '2026-06-17T08:00:11.000Z'),
       toolResultRec('tr-good', 'good', 'gr', '2026-06-17T08:00:12.000Z'),
     ];
-    pairToolCallsWithResults(llmCalls, turnRecords);
+    const stats = pairToolCallsWithResults(llmCalls, turnRecords);
     expect(llmCalls[0].declaredTools[0].result.response).toBe('gr');
     // null-callId tool grabs first unclaimed (which is tr-unmatched, callId='orphan')
     expect(llmCalls[0].declaredTools[1].result.response).toBe('or');
     expect(llmCalls[0].declaredTools[1].callId).toBe('orphan');  // backfilled
+    // null-callId case triggered the positional fallback (PR #37 review: A1+B4)
+    expect(stats.positionalFallbacksUsed).toBe(1);
+  });
+
+  test('returns positionalFallbacksUsed=0 when every tool has callId', () => {
+    const llmCalls = [{
+      declaredTools: [
+        { callId: 'c1', name: 'A', args: {}, partIndex: 0, result: null },
+        { callId: 'c2', name: 'B', args: {}, partIndex: 1, result: null },
+      ],
+    }];
+    const turnRecords = [
+      toolResultRec('tr1', 'c1', 'r1', '2026-06-17T08:00:11.000Z'),
+      toolResultRec('tr2', 'c2', 'r2', '2026-06-17T08:00:12.000Z'),
+    ];
+    const stats = pairToolCallsWithResults(llmCalls, turnRecords);
+    expect(stats.positionalFallbacksUsed).toBe(0);
   });
 });
 

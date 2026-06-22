@@ -4,7 +4,6 @@ import {
   convertQwenParts,
   buildOutputMessages,
   buildInputMessagesDelta,
-  mapFinishReason,
   inferAssistantFinishReason,
 } from '../../../../assets/hooks/qwen-code-cli/message-converter.mjs';
 
@@ -161,22 +160,6 @@ describe('inferAssistantFinishReason', () => {
   test('missing parts → stop', () => {
     expect(inferAssistantFinishReason({})).toBe('stop');
     expect(inferAssistantFinishReason({ message: {} })).toBe('stop');
-  });
-});
-
-describe('mapFinishReason', () => {
-  test.each([
-    ['stop', 'stop'],
-    ['end_turn', 'stop'],
-    ['tool_calls', 'tool_call'],
-    ['tool_use', 'tool_call'],
-    ['length', 'length'],
-    ['max_tokens', 'length'],
-    [undefined, 'stop'],
-    ['', 'stop'],
-    ['weird', 'weird'],  // passthrough
-  ])('%s → %s', (input, expected) => {
-    expect(mapFinishReason(input)).toBe(expected);
   });
 });
 

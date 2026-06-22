@@ -252,7 +252,7 @@ function enrichTurn(turn, mainSessionId) {
   }
 
   // Pair each declared tool with a tool_result in this turn (using callId or fallback).
-  pairToolCallsWithResults(llmCalls, turnRecords);
+  const pairStats = pairToolCallsWithResults(llmCalls, turnRecords);
 
   return {
     sessionId: userRec.sessionId,
@@ -262,6 +262,7 @@ function enrichTurn(turn, mainSessionId) {
     promptTimestamp: userRec.timestamp,
     promptUuid: userRec.uuid,
     llmCalls,
+    positionalFallbacksUsed: pairStats.positionalFallbacksUsed,
   };
 }
 
@@ -301,6 +302,8 @@ function extractApiResponseEvent(rec) {
  * functionCall.id missing): match by positional order of unclaimed tool_results.
  *
  * Mutates the llmCalls in place — sets llmCall.declaredTools[i].result.
+ * Returns `{ positionalFallbacksUsed }` so callers can surface a warning when
+ * the brittle fallback path actually fires (PR #37 review: A1 + B4).
  */
 export function pairToolCallsWithResults(llmCalls, turnRecords) {
   const toolResults = turnRecords.filter((r) => r.type === 'tool_result');
@@ -320,7 +323,14 @@ export function pairToolCallsWithResults(llmCalls, turnRecords) {
     }
   }
 
-  // Pass 2: positional fallback for tools with no callId or unmatched
+  // Pass 2: positional fallback for tools with no callId or unmatched.
+  // This is brittle when a turn has multiple tool calls with missing IDs
+  // and interleaved results — the global cursor cannot disambiguate. We
+  // count fallback uses so the caller can log a warning (qwen-code's
+  // @google/genai SDK almost always provides functionCall.id, so this path
+  // should rarely fire; if it starts firing in production, it's a signal
+  // that upstream behavior changed).
+  let positionalFallbacksUsed = 0;
   const unclaimedToolResults = toolResults.filter((tr) => !claimedToolResults.has(tr.uuid));
   let cursor = 0;
   for (const llmCall of llmCalls) {
@@ -328,6 +338,7 @@ export function pairToolCallsWithResults(llmCalls, turnRecords) {
       if (tool.result !== null) continue;
       if (cursor < unclaimedToolResults.length) {
         const tr = unclaimedToolResults[cursor++];
+        positionalFallbacksUsed++;
         // Backfill missing callId on the tool from the result's toolCallResult
         if (!tool.callId && tr?.toolCallResult?.callId) {
           tool.callId = tr.toolCallResult.callId;
@@ -336,6 +347,7 @@ export function pairToolCallsWithResults(llmCalls, turnRecords) {
       }
     }
   }
+  return { positionalFallbacksUsed };
 }
 
 function extractToolResult(toolResultRec) {

@@ -109,9 +109,21 @@ function isoToUnixNanos(isoStr) {
 
 // ─── cmd handlers ───
 
-// v1: subagent_start/stop events accumulate into state.events for future
-// v2 consumption. We don't process them now (subagent records are filtered
-// out in the transcript parser).
+// v1: subagent_start / subagent_stop are INTENTIONALLY INERT.
+//
+// We register these hooks so the wiring is in place for v2, but in v1 we
+// only persist the events into state.events for later consumption — we do
+// NOT emit any event_t records here. The transcript parser explicitly
+// filters out subagent (sidechain) records (`r.isSidechain === true || r.agentId`),
+// so subagent activity is dropped end-to-end in v1.
+//
+// v2 will: read state.events at Stop time, fetch the child session's chats
+// JSONL (via subagent_session_id), build a nested AGENT→STEP→LLM/TOOL
+// subtree, and attach it under the parent TOOL span via
+// `gen_ai.subagent.parent_tool_call.id`. See EVENT_LOG_TO_TRACE_SPEC §4.4.
+//
+// Until then, do not add record-emission logic here — leave the handlers
+// minimal and side-effect-free (state accumulation only).
 function cmdSubagentStart() {
   const event = tryReadStdin();
   const sessionId = requireSessionId(event, 'subagent_start');
@@ -289,6 +301,26 @@ async function exportSession(state, stopReason) {
     );
     allRecords.push(...records);
     logHash = hash;
+
+    // Surface positional-fallback usage so it is visible in operator
+    // dashboards rather than silently producing potentially-mismatched
+    // tool_call/tool_result links. The fallback is brittle (it uses a
+    // global cursor that can mis-pair when a turn has multiple ID-less
+    // tool calls with interleaved results) — but qwen-code's @google/genai
+    // SDK almost always supplies functionCall.id, so this should rarely
+    // fire. If it starts firing in production it's a signal that upstream
+    // behavior changed (PR #37 review: A1 + B4).
+    if (turn.positionalFallbacksUsed > 0) {
+      logHookError({
+        agentId: AGENT_ID,
+        stage: 'pair_tool_results',
+        errorType: 'tool_pair_ambiguous',
+        errorMessage:
+          `positional fallback used for ${turn.positionalFallbacksUsed} tool ` +
+          `call(s) in turn ${baseTurnCount + i + 1} (session=${sessionId}); ` +
+          `functionCall.id missing — pairings may be incorrect if multiple ID-less calls coexist`,
+      });
+    }
   }
 
   // turn_count includes ALL parsed turns (incl. ones skipped by first-run guard)
@@ -366,16 +398,13 @@ export function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, t
     // [C8] Provider from model name with auth_type fallback (not hardcoded)
     const provider = inferProvider(llm.model, llm.apiResponse?.authType);
 
-    // Map tool_result records to call.id so messages_delta uses the right id.
-    const toolCallIdByResponseUuid = new Map();
-    for (const tool of llm.declaredTools) {
-      if (tool.result?.uuid && tool.callId) {
-        toolCallIdByResponseUuid.set(tool.result.uuid, tool.callId);
-      }
-    }
+    // inputMessagesDeltaRecords holds the user/tool_result records produced
+    // BETWEEN the previous step and this one, so the call.id we need for each
+    // tool_call_response part lives on each record's own `toolCallResult.callId`.
+    // buildInputMessagesDelta reads that directly — no per-call override map is
+    // needed (PR #37 review: B1 dead-Map removed).
     const inputMsgsDelta = buildInputMessagesDelta(
       llm.inputMessagesDeltaRecords || [],
-      toolCallIdByResponseUuid,
     );
     const inputMsgsHash = computeHash(runningHash, inputMsgsDelta);
 
