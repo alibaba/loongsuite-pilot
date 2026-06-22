@@ -85,6 +85,24 @@ function bufferPostToolEvents() {
   }
 }
 
+/** 把 round3 hook_events.jsonl 中的 preToolUse 事件经 processor preToolUse 子命令缓冲。 */
+function bufferPreToolEvents() {
+  const lines = fs.readFileSync(FIXTURE_HOOK_EVENTS, 'utf-8').split('\n').filter(Boolean);
+  for (const l of lines) {
+    const e = JSON.parse(l);
+    const p = e._hook_payload;
+    if (p.hook_event_name === 'preToolUse') {
+      runHook('preToolUse', p);
+    }
+  }
+}
+
+/** 缓冲 postToolUse + preToolUse（完整 hook 事件流）。 */
+function bufferAllToolEvents() {
+  bufferPreToolEvents();
+  bufferPostToolEvents();
+}
+
 beforeEach(async () => {
   DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'kiro-hook-test-'));
   DB_PATH = path.join(DATA_DIR, 'data.sqlite3');
@@ -262,5 +280,76 @@ describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor 端到端（DB transcrip
     const total = readJsonlRecords().length;
     // 第二轮因 transcript updatedMs 未推进被跳过；允许少量误差但不应再次产出等量记录
     expect(total).toBeLessThan(firstCount * 2);
+  });
+
+  test('preToolUse 缓冲后 tool.call 使用 preToolUse startTs 而非 step.startTimeMs', () => {
+    bufferAllToolEvents();
+    runHook('stop', { hook_event_name: 'stop', cwd: CWD, assistant_response: 'done' });
+    const records = readJsonlRecords();
+    const toolCalls = records.filter((x) => x['event.name'] === 'tool.call');
+    expect(toolCalls.length).toBe(2);
+
+    for (const tc of toolCalls) {
+      // tool.call 时间不应等于 llm.request 时间（step.startTimeMs）
+      const stepId = tc['gen_ai.step.id'];
+      const llmRequest = records.find(
+        (r) => r['event.name'] === 'llm.request' && r['gen_ai.step.id'] === stepId,
+      );
+      expect(llmRequest).toBeTruthy();
+      expect(tc.time_unix_nano).not.toBe(llmRequest.time_unix_nano);
+      // tool.call 时间应晚于或等于 llm.response（工具在 LLM 流结束后执行）
+      const llmResponse = records.find(
+        (r) => r['event.name'] === 'llm.response' && r['gen_ai.step.id'] === stepId,
+      );
+      expect(BigInt(tc.time_unix_nano)).toBeGreaterThanOrEqual(BigInt(llmResponse.time_unix_nano));
+    }
+  });
+
+  test('tool.call 带 kiro.time_source 和 kiro.time_precision（preToolUse 匹配时为 processor_receive / ms）', () => {
+    bufferAllToolEvents();
+    runHook('stop', { hook_event_name: 'stop', cwd: CWD, assistant_response: 'done' });
+    const records = readJsonlRecords();
+    const toolCalls = records.filter((x) => x['event.name'] === 'tool.call');
+    expect(toolCalls.length).toBeGreaterThan(0);
+    for (const tc of toolCalls) {
+      expect(tc['kiro.time_source']).toBe('processor_receive');
+      expect(tc['kiro.time_precision']).toBe('ms');
+    }
+  });
+
+  test('无 preToolUse 时 tool.call 退化 step.endTimeMs，标 transcript_estimate', () => {
+    // 仅缓冲 postToolUse，不缓冲 preToolUse
+    bufferPostToolEvents();
+    runHook('stop', { hook_event_name: 'stop', cwd: CWD, assistant_response: 'done' });
+    const records = readJsonlRecords();
+    const toolCalls = records.filter((x) => x['event.name'] === 'tool.call');
+    expect(toolCalls.length).toBe(2);
+    for (const tc of toolCalls) {
+      expect(tc['kiro.time_source']).toBe('transcript_estimate');
+      expect(tc['kiro.time_precision']).toBe('ms');
+    }
+  });
+
+  test('consume-on-match: 并行同名同 args 工具不串台', () => {
+    // 手动构造两次相同 preToolUse（模拟同名同 args 并行工具）
+    const prePayload = {
+      hook_event_name: 'preToolUse',
+      cwd: CWD,
+      tool_name: 'fs_read',
+      tool_input: { operations: [{ mode: 'Line', path: '/tmp/kiro_probe/work_r3/sample.txt' }] },
+    };
+    runHook('preToolUse', prePayload);
+    runHook('preToolUse', prePayload); // 第二次同名
+
+    bufferPostToolEvents();
+    runHook('stop', { hook_event_name: 'stop', cwd: CWD, assistant_response: 'done' });
+    const records = readJsonlRecords();
+    const fsReadCalls = records.filter(
+      (x) => x['event.name'] === 'tool.call' && x['gen_ai.tool.name'] === 'fs_read',
+    );
+    // round3 fixture 只有 1 个 fs_read tool_use，所以应只匹配 1 条
+    expect(fsReadCalls.length).toBe(1);
+    // 两条 preToolUse 缓冲，一条被 consume，一条残留（不影响正确性）
+    expect(fsReadCalls[0]['kiro.time_source']).toBe('processor_receive');
   });
 });

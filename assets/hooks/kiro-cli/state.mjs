@@ -21,6 +21,7 @@ function pilotDataDir() {
 }
 
 const BUFFER_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'buffers');
+const PRE_TOOL_BUFFER_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'pre-tool-buffers');
 const OFFSET_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'offsets');
 
 function safeKey(cwd) {
@@ -38,6 +39,10 @@ function ensureDir(dir) {
 
 function bufferFile(cwd) {
   return path.join(ensureDir(BUFFER_DIR), `${safeKey(cwd)}.jsonl`);
+}
+
+function preToolBufferFile(cwd) {
+  return path.join(ensureDir(PRE_TOOL_BUFFER_DIR), `${safeKey(cwd)}.jsonl`);
 }
 
 /**
@@ -58,6 +63,49 @@ export function appendToolEvent(cwd, entry) {
  */
 export function drainToolEvents(cwd) {
   const file = bufferFile(cwd);
+  if (!fs.existsSync(file)) return [];
+  let raw = '';
+  try {
+    raw = fs.readFileSync(file, 'utf-8');
+  } catch {
+    return [];
+  }
+  try {
+    fs.writeFileSync(file, '', 'utf-8');
+  } catch {
+    // ignore
+  }
+  const out = [];
+  for (const line of raw.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      out.push(JSON.parse(t));
+    } catch {
+      // skip malformed
+    }
+  }
+  return out;
+}
+
+/**
+ * 追加一条 PreToolUse 事件到 per-cwd 独立缓冲（与 postToolUse 分开 drain）。
+ */
+export function appendPreToolEvent(cwd, entry) {
+  const file = preToolBufferFile(cwd);
+  try {
+    fs.appendFileSync(file, JSON.stringify(entry) + '\n', 'utf-8');
+  } catch {
+    // fail-open
+  }
+}
+
+/**
+ * 读出并清空 per-cwd PreToolUse 缓冲。
+ * @returns {Array<{toolName:string, toolInput:object, startTs:string}>}
+ */
+export function drainPreToolEvents(cwd) {
+  const file = preToolBufferFile(cwd);
   if (!fs.existsSync(file)) return [];
   let raw = '';
   try {

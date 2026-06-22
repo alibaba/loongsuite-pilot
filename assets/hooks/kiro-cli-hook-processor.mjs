@@ -46,7 +46,11 @@ import {
 } from './agent-event-normalizer.mjs';
 
 import { readTranscriptForCwd, parseConversationValue } from './kiro-cli/transcript-parser.mjs';
-import { appendToolEvent, drainToolEvents, loadOffset, saveOffset } from './kiro-cli/state.mjs';
+import {
+  appendToolEvent, drainToolEvents,
+  appendPreToolEvent, drainPreToolEvents,
+  loadOffset, saveOffset,
+} from './kiro-cli/state.mjs';
 import { resolveDbPath } from './kiro-cli/db-path.mjs';
 
 const AGENT_ID = 'kiro-cli';
@@ -112,8 +116,25 @@ function cmdPostToolUse() {
 }
 
 /**
- * preToolUse / userPromptSubmit: 不单独发 JSONL。
- * transcript 主干已覆盖 prompt 与 tool 声明。
+ * preToolUse: 缓冲 {toolName, toolInput, startTs} 到 per-cwd 独立文件。
+ * stop 时与 transcript tool_use join，为 tool.call 提供真实起点时间。
+ */
+function cmdPreToolUse() {
+  const event = tryReadStdin();
+  const cwd = event && event.cwd;
+  if (!cwd) return;
+  const toolName = event.tool_name || 'unknown';
+  const toolInput = event.tool_input ?? {};
+  appendPreToolEvent(cwd, {
+    toolName,
+    toolInput,
+    startTs: nowIso(),
+  });
+}
+
+/**
+ * userPromptSubmit: 不单独发 JSONL。
+ * transcript 主干已覆盖 prompt。
  */
 function cmdNoop() {
   // intentionally empty
@@ -156,6 +177,7 @@ async function cmdStop() {
   const userId = resolveUserId({}, runtimeConfig);
 
   const toolEvents = drainToolEvents(cwd);
+  const preToolEvents = drainPreToolEvents(cwd);
   const sinceMs = loadOffset(cwd);
 
   let transcript;
@@ -180,7 +202,7 @@ async function cmdStop() {
     return;
   }
 
-  const records = buildRecords(transcript, toolEvents, cwd, userId, event);
+  const records = buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, event);
   if (records.length === 0) return;
 
   const cleaned = records.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
@@ -191,7 +213,7 @@ async function cmdStop() {
 
 // ─── buildRecords — 整会话的 trace 记录构造 ───
 
-function buildRecords(transcript, toolEvents, cwd, userId, stopEvent) {
+function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEvent) {
   const records = [];
   const sessionId = transcript.conversationId || transcript.continuationId || 'unknown';
   const traceId = generateTraceId();
@@ -320,15 +342,21 @@ function buildRecords(transcript, toolEvents, cwd, userId, stopEvent) {
     runningHash = currentFullHash;
     prevInputMsgs = inputMsgs;
 
-    // tool.call + tool.result: hook 补 tool_response
+    // tool.call + tool.result: preToolUse 提供 tool.call 真实起点，postToolUse 补 tool_response
     for (const tool of step.tools) {
       const toolSpanId = generateSpanId();
-      const matched = matchToolEvent(toolEvents, tool);
+      const preMatch = matchToolEvent(preToolEvents, tool, 'toolName', 'toolInput');
+      const matched = matchToolEvent(toolEvents, tool, 'toolName', 'toolInput');
       const toolResult = matched ? matched.toolResponse : null;
       const toolTimeNs = matched ? isoToUnixNanos(matched.captureTs) : msToUnixNanos(step.endTimeMs || step.startTimeMs);
 
+      // tool.call time: preToolUse startTs > step.endTimeMs（LLM 流结束）; 禁用 step.startTimeMs（LLM 请求起点）
+      const toolCallTimeNs = preMatch
+        ? isoToUnixNanos(preMatch.startTs)
+        : msToUnixNanos(step.endTimeMs || step.startTimeMs);
+
       records.push({
-        time_unix_nano: msToUnixNanos(step.startTimeMs),
+        time_unix_nano: toolCallTimeNs,
         'event.id': crypto.randomUUID(),
         'event.name': 'tool.call',
         ...baseFields,
@@ -338,6 +366,8 @@ function buildRecords(transcript, toolEvents, cwd, userId, stopEvent) {
         'gen_ai.tool.name': tool.name,
         'gen_ai.tool.call.id': tool.id,
         'gen_ai.tool.call.arguments': toJsonValue(tool.args ?? {}),
+        'kiro.time_source': preMatch ? 'processor_receive' : 'transcript_estimate',
+        'kiro.time_precision': preMatch ? 'ms' : 'ms',
       });
 
       if (toolResult !== null && toolResult !== undefined) {
@@ -452,14 +482,15 @@ function buildRecords(transcript, toolEvents, cwd, userId, stopEvent) {
 }
 
 /**
- * 步内匹配 hook PostToolUse → tool_use（同名 + 同 args，round3 实证确定性匹配）。
- * 残留风险（同 step 同名同 args 多 tool_use）退化序号匹配 + 告警。
+ * 通用 hook 事件 → tool_use 匹配（consume-on-match）。
+ * 同名 + 同 args 确定性匹配；命中即 splice，解决同名同 args 并行工具串台。
  */
-function matchToolEvent(toolEvents, tool) {
-  const candidates = toolEvents.filter((e) => e.toolName === tool.name && argsEqual(e.toolInput, tool.args));
-  if (candidates.length === 0) return null;
-  // 取首个未消费的；用 shift 确保序号匹配
-  return candidates[0];
+function matchToolEvent(toolEvents, tool, nameKey = 'toolName', inputKey = 'toolInput') {
+  const idx = toolEvents.findIndex(
+    (e) => e[nameKey] === tool.name && argsEqual(e[inputKey], tool.args),
+  );
+  if (idx === -1) return null;
+  return toolEvents.splice(idx, 1)[0];
 }
 
 function argsEqual(a, b) {
@@ -496,7 +527,7 @@ function deriveToolResultText(step, transcript) {
 const DISPATCH = {
   'stop': cmdStop,
   'postToolUse': cmdPostToolUse,
-  'preToolUse': cmdNoop,
+  'preToolUse': cmdPreToolUse,
   'userPromptSubmit': cmdNoop,
 };
 
