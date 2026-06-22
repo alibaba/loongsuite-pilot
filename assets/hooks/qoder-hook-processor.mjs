@@ -315,6 +315,11 @@ function progressWindowKey(progressEvents, rowMs) {
     }
   }
 
+  // If no start boundary found, this row appears before any progress event.
+  // Return null to let the caller fall back to time-gap grouping, avoiding
+  // incorrect merging of distinct LLM calls that precede the first progress event.
+  if (!startTs) return null;
+
   let endTs = null;
   for (const pe of progressEvents) {
     const peMs = Date.parse(pe.ts) || 0;
@@ -325,7 +330,7 @@ function progressWindowKey(progressEvents, rowMs) {
     }
   }
 
-  return `progress:${startTs || ''}->${endTs || ''}`;
+  return `progress:${startTs}->${endTs || ''}`;
 }
 
 // --- Event Builder -----------------------------------------------------------

@@ -162,9 +162,11 @@ export function enrichIdeTurn(
   }
   matchedPairs.sort((a, b) => a.gmtCreate - b.gmtCreate);
 
-  // Find the user-boundary entry (llm.request without step_id) for step 1's request time
+  // Find the user-boundary entry for step 1's request time.
+  // The normalizer emits user prompts as 'other' (not 'llm.request'), so match both.
   const userBoundary = entries.find(e =>
-    e['event.name'] === 'llm.request' && !e['gen_ai.step.id'],
+    !e['gen_ai.step.id'] &&
+    (e['event.name'] === 'llm.request' || (e['event.name'] === 'other' && e['gen_ai.input.messages_delta'])),
   );
 
   for (let i = 0; i < matchedPairs.length; i++) {
