@@ -1214,6 +1214,17 @@ function Cmd-Uninstall {
     }
     Msg "    ✅ 已移除计划任务" "    ✅ Removed scheduled tasks"
 
+    # Resolve node BEFORE removing install dir (node-bin pin lives there)
+    if (-not $script:NODE_BIN) { $script:NODE_BIN = Resolve-Node }
+
+    Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
+    Remove-HookConfigs
+    Write-Host ""
+
+    Msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
+    Remove-OtelPlugin
+    Write-Host ""
+
     Msg "==> 删除安装目录..." "==> Removing installation..."
     $installDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
     if (Test-Path $installDir) {
@@ -1227,14 +1238,6 @@ function Cmd-Uninstall {
     if (Test-Path $cmdFile) { Remove-Item $cmdFile -Force }
     if (Test-Path $ps1File) { Remove-Item $ps1File -Force }
     Msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
-    Write-Host ""
-
-    Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
-    Remove-HookConfigs
-    Write-Host ""
-
-    Msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
-    Remove-OtelPlugin
     Write-Host ""
 
     if ($Purge) {

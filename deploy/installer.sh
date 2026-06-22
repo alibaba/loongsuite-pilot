@@ -1404,13 +1404,16 @@ remove_hook_configs() {
         "$HOME/.codex/hooks.json"
     )
 
+    local _node_bin=""
+    _node_bin=$(resolve_node 2>/dev/null) || true
+
     for cfg in "${configs[@]}"; do
         [ -f "$cfg" ] || continue
         local short="${cfg/#$HOME/\~}"
 
         local ok=0
-        if command -v node &>/dev/null; then
-            node -e "
+        if [ -n "$_node_bin" ]; then
+            "$_node_bin" -e "
 const fs = require('fs');
 const cfg = process.argv[1];
 const marker = process.argv[2];
@@ -1527,6 +1530,15 @@ cmd_uninstall() {
     msg "    ✅ 服务已停止" "    ✅ Service stopped"
     echo ""
 
+    # Clean hooks/plugins BEFORE removing install dir (node-bin pin lives there)
+    msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
+    remove_hook_configs
+    echo ""
+
+    msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
+    remove_otel_plugin
+    echo ""
+
     # Remove package directory
     msg "==> 删除安装目录..." "==> Removing installation..."
     rm -rf "$HOME/.loongsuite-pilot"
@@ -1538,16 +1550,6 @@ cmd_uninstall() {
     rm -f "$HOME/.local/bin/loongsuite-pilot"
     rm -f /usr/local/bin/loongsuite-pilot 2>/dev/null || true
     msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
-    echo ""
-
-    # Remove hook entries from tool configs
-    msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
-    remove_hook_configs
-    echo ""
-
-    # Remove OTel Claude plugin
-    msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
-    remove_otel_plugin
     echo ""
 
     # Data directory
