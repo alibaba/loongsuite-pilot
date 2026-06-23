@@ -23,6 +23,8 @@ function pilotDataDir() {
 const BUFFER_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'buffers');
 const PRE_TOOL_BUFFER_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'pre-tool-buffers');
 const OFFSET_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'offsets');
+const SESSION_OFFSET_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'session_offsets');
+const REPORTED_SESSIONS_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'reported_sessions');
 
 function safeKey(cwd) {
   return Buffer.from(String(cwd || 'unknown')).toString('base64url');
@@ -169,5 +171,86 @@ export function saveOffset(cwd, updatedMs) {
     } catch {
       // ignore
     }
+  }
+}
+
+// ─── per-cwd session JSONL offset（sidecar updated_at 增量游标）───
+
+function sessionOffsetFile(cwd) {
+  return path.join(ensureDir(SESSION_OFFSET_DIR), `${safeKey(cwd)}.json`);
+}
+
+/**
+ * 读取某 cwd 上次已上报的 session sidecar updated_at（毫秒）。
+ * 与 SQLite offset 同语义但独立文件。
+ */
+export function loadSessionOffset(cwd) {
+  const file = sessionOffsetFile(cwd);
+  try {
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      return typeof data?.updatedMs === 'number' ? data.updatedMs : 0;
+    }
+  } catch {
+    // ignore
+  }
+  return 0;
+}
+
+/**
+ * 记录某 cwd 已上报到的 session sidecar updated_at。
+ */
+export function saveSessionOffset(cwd, updatedMs) {
+  const file = sessionOffsetFile(cwd);
+  const dir = path.dirname(file);
+  const tmp = path.join(dir, `${safeKey(cwd)}.${process.pid}.tmp`);
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({ updatedMs }), 'utf-8');
+    fs.renameSync(tmp, file);
+  } catch {
+    try {
+      fs.writeFileSync(file, JSON.stringify({ updatedMs }), 'utf-8');
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// ─── per-cwd 已上报 session_id 集合（双写去重防御）───
+
+function reportedSessionsFile(cwd) {
+  return path.join(ensureDir(REPORTED_SESSIONS_DIR), `${safeKey(cwd)}.json`);
+}
+
+/**
+ * 读取某 cwd 已上报过的 session_id 集合。
+ * @returns {Set<string>}
+ */
+export function loadReportedSessions(cwd) {
+  const file = reportedSessionsFile(cwd);
+  try {
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      if (Array.isArray(data?.sessions)) {
+        return new Set(data.sessions);
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return new Set();
+}
+
+/**
+ * 标记某 session_id 已上报。
+ */
+export function markSessionReported(cwd, sessionId) {
+  const file = reportedSessionsFile(cwd);
+  const existing = loadReportedSessions(cwd);
+  existing.add(sessionId);
+  try {
+    fs.writeFileSync(file, JSON.stringify({ sessions: [...existing] }), 'utf-8');
+  } catch {
+    // ignore
   }
 }

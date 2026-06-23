@@ -12,6 +12,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/kiro-cli-hook-processor.mjs');
 const FIXTURE_CONV = path.resolve(__dirname, 'fixtures/round3_conv_raw.json');
 const FIXTURE_HOOK_EVENTS = path.resolve(__dirname, 'fixtures/round3_hook_events.jsonl');
+const FIXTURE_SESSION = path.resolve(__dirname, 'fixtures/session_interactive.jsonl');
+const FIXTURE_SIDECAR = path.resolve(__dirname, 'fixtures/session_sidecar.json');
 
 // node:sqlite 仅 Node ≥ 22.5 内置。无该 builtin 时 DB transcript 用例 skip 而非 error；
 // fail-open 用例（不触达 transcript 读取）始终跑。
@@ -22,8 +24,13 @@ const DB_AVAILABLE = hasNodeSqlite();
 const CWD = '/tmp/kiro_probe/work_r3';
 const CONV_ID = 'f66fecc5-d8bb-4b26-ba93-c0575bf0fb4a';
 
+// fixture 来源: researcher 调研报告中的真实 session JSONL (kiro CLI v2 session store)
+const SESSION_ID = '838a0f1b-1cfd-4421-972a-8807a1b20eb5';
+const SESSION_CWD = '/tmp/kiro_session_probe';
+
 let DATA_DIR;
 let DB_PATH;
+let SESSION_DIR;
 
 function buildFixtureDb(convRawJson, cwd, updatedMs) {
   return new Promise((resolve, reject) => {
@@ -49,10 +56,16 @@ function buildFixtureDb(convRawJson, cwd, updatedMs) {
   });
 }
 
-function runHook(subcommand, payload) {
+function runHook(subcommand, payload, extraEnv = {}) {
   return spawnSync('node', [PROCESSOR, subcommand], {
     input: JSON.stringify(payload),
-    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR, KIRO_CLI_DB: DB_PATH },
+    env: {
+      ...process.env,
+      LOONGSUITE_PILOT_DATA_DIR: DATA_DIR,
+      KIRO_CLI_DB: DB_PATH,
+      KIRO_SESSIONS_DIR: SESSION_DIR,
+      ...extraEnv,
+    },
     encoding: 'utf-8',
     timeout: 15_000,
   });
@@ -106,6 +119,8 @@ function bufferAllToolEvents() {
 beforeEach(async () => {
   DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'kiro-hook-test-'));
   DB_PATH = path.join(DATA_DIR, 'data.sqlite3');
+  SESSION_DIR = path.join(DATA_DIR, 'sessions');
+  fs.mkdirSync(SESSION_DIR, { recursive: true });
   const convRaw = JSON.parse(fs.readFileSync(FIXTURE_CONV, 'utf-8'));
   await buildFixtureDb(convRaw, CWD, Date.now());
 });
@@ -353,3 +368,168 @@ describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor 端到端（DB transcrip
     expect(fsReadCalls[0]['kiro.time_source']).toBe('processor_receive');
   });
 });
+
+// ─── session JSONL fallback 测试 ───
+
+/** 把 session fixture 写入 SESSION_DIR，模拟交互式对话落盘。 */
+function setupSessionFixture() {
+  const jsonl = fs.readFileSync(FIXTURE_SESSION, 'utf-8');
+  const sidecar = JSON.parse(fs.readFileSync(FIXTURE_SIDECAR, 'utf-8'));
+  fs.writeFileSync(path.join(SESSION_DIR, `${SESSION_ID}.jsonl`), jsonl, 'utf-8');
+  fs.writeFileSync(path.join(SESSION_DIR, `${SESSION_ID}.json`), JSON.stringify(sidecar), 'utf-8');
+}
+
+describe('kiro-cli-hook-processor 双源 fallback（session JSONL 兜底）', () => {
+  test('DB 不存在时 fallback 到 session JSONL，产出完整 trace', () => {
+    setupSessionFixture();
+    // 指向不存在的 DB 文件，强制走 JSONL 路径
+    const r = runHook('stop', {
+      hook_event_name: 'stop',
+      cwd: SESSION_CWD,
+      assistant_response: '',
+    }, { KIRO_CLI_DB: path.join(DATA_DIR, 'nonexistent.db') });
+
+    expect(r.status).toBe(0);
+    const records = readJsonlRecords();
+    expect(records.length).toBeGreaterThan(0);
+
+    // 2 个 LLM step（1 ToolUse + 1 NotToolUse）
+    const responses = records.filter((x) => x['event.name'] === 'llm.response');
+    expect(responses.length).toBe(2);
+
+    // 2 个 tool.call + 2 个 tool.result（fs_read + execute_bash）
+    const toolCalls = records.filter((x) => x['event.name'] === 'tool.call');
+    const toolResults = records.filter((x) => x['event.name'] === 'tool.result');
+    expect(toolCalls.length).toBe(2);
+    expect(toolResults.length).toBe(2);
+    expect(toolCalls.map((t) => t['gen_ai.tool.name']).sort()).toEqual(['execute_bash', 'fs_read']);
+
+    // 同一 turn 共享 trace_id
+    const traceIds = new Set(records.map((r) => r.trace_id));
+    expect(traceIds.size).toBe(1);
+
+    // 公共字段
+    for (const rec of records) {
+      expect(rec['gen_ai.agent.type']).toBe('kiro-cli');
+      expect(rec['gen_ai.conversation.id']).toBe(SESSION_ID);
+      expect(rec['agent.kiro-cli.cwd']).toBe(SESSION_CWD);
+    }
+  });
+
+  test('JSONL 路径标注 kiro.time_precision=turn_estimate + kiro.id_source=session_jsonl', () => {
+    setupSessionFixture();
+    runHook('stop', {
+      hook_event_name: 'stop',
+      cwd: SESSION_CWD,
+    }, { KIRO_CLI_DB: path.join(DATA_DIR, 'nonexistent.db') });
+
+    const records = readJsonlRecords();
+    const llmRecords = records.filter(
+      (r) => r['event.name'] === 'llm.request' || r['event.name'] === 'llm.response',
+    );
+    expect(llmRecords.length).toBeGreaterThan(0);
+    for (const rec of llmRecords) {
+      expect(rec['kiro.time_precision']).toBe('turn_estimate');
+      expect(rec['kiro.id_source']).toBe('session_jsonl');
+    }
+  });
+
+  test('JSONL 路径 tool.result 从 session ToolResults 取内容（无 hook postToolUse 时）', () => {
+    setupSessionFixture();
+    // 不缓冲任何 hook 事件，直接用 JSONL 的 ToolResults
+    runHook('stop', {
+      hook_event_name: 'stop',
+      cwd: SESSION_CWD,
+    }, { KIRO_CLI_DB: path.join(DATA_DIR, 'nonexistent.db') });
+
+    const records = readJsonlRecords();
+    const fsReadResult = records.find(
+      (x) => x['event.name'] === 'tool.result' && x['gen_ai.tool.name'] === 'fs_read',
+    );
+    expect(fsReadResult).toBeTruthy();
+    expect(fsReadResult['gen_ai.tool.call.result']).toContain('k57j05345.sqa.eu95');
+    expect(fsReadResult['kiro.time_source']).toBe('transcript_derived');
+  });
+
+  test('JSONL 路径首个 LLM input 含非空用户 prompt', () => {
+    setupSessionFixture();
+    runHook('stop', {
+      hook_event_name: 'stop',
+      cwd: SESSION_CWD,
+    }, { KIRO_CLI_DB: path.join(DATA_DIR, 'nonexistent.db') });
+
+    const records = readJsonlRecords();
+    const requests = records
+      .filter((x) => x['event.name'] === 'llm.request')
+      .sort((a, b) => Number(BigInt(a.time_unix_nano) - BigInt(b.time_unix_nano)));
+    expect(requests.length).toBeGreaterThan(0);
+
+    const first = requests[0];
+    const delta = first['gen_ai.input.messages_delta'];
+    expect(Array.isArray(delta)).toBe(true);
+    expect(delta.length).toBeGreaterThan(0);
+    expect(delta[0].parts[0].content).toContain('hostname');
+  });
+
+  test('JSONL 路径各 request 时间戳互不相同（无 0ms span）', () => {
+    setupSessionFixture();
+    runHook('stop', {
+      hook_event_name: 'stop',
+      cwd: SESSION_CWD,
+    }, { KIRO_CLI_DB: path.join(DATA_DIR, 'nonexistent.db') });
+
+    const records = readJsonlRecords();
+    const requests = records.filter((x) => x['event.name'] === 'llm.request');
+    const responses = records.filter((x) => x['event.name'] === 'llm.response');
+    expect(requests.length).toBe(2);
+    expect(responses.length).toBe(2);
+
+    // request 和 response 时间不同
+    for (let i = 0; i < requests.length; i++) {
+      expect(requests[i].time_unix_nano).not.toBe(responses[i].time_unix_nano);
+    }
+
+    // 两个 request 时间不同
+    expect(requests[0].time_unix_nano).not.toBe(requests[1].time_unix_nano);
+  });
+
+  test('session dedup: 同一 session_id 不重复上报', () => {
+    setupSessionFixture();
+    const noDb = { KIRO_CLI_DB: path.join(DATA_DIR, 'nonexistent.db') };
+
+    // 第一次 stop → 产出记录
+    runHook('stop', { hook_event_name: 'stop', cwd: SESSION_CWD }, noDb);
+    const firstCount = readJsonlRecords().length;
+    expect(firstCount).toBeGreaterThan(0);
+
+    // 第二次 stop（同 session_id）→ 不产出新记录（dedup）
+    runHook('stop', { hook_event_name: 'stop', cwd: SESSION_CWD }, noDb);
+    const secondCount = readJsonlRecords().length;
+    expect(secondCount).toBe(firstCount); // 没有新增
+  });
+
+  test('DB 存在但无匹配行时 fallback 到 JSONL', () => {
+    setupSessionFixture();
+    // DB 存在（beforeEach 已建），但 CWD 是 SESSION_CWD（DB 中没有该 key 的行）
+    runHook('stop', { hook_event_name: 'stop', cwd: SESSION_CWD });
+
+    const records = readJsonlRecords();
+    expect(records.length).toBeGreaterThan(0);
+    // 确认走了 JSONL 路径
+    const llmReq = records.find((r) => r['event.name'] === 'llm.request');
+    expect(llmReq['kiro.id_source']).toBe('session_jsonl');
+  });
+
+  test('session 目录不存在时 stop 不崩溃', () => {
+    const r = runHook('stop', {
+      hook_event_name: 'stop',
+      cwd: '/nonexistent/cwd',
+    }, {
+      KIRO_CLI_DB: path.join(DATA_DIR, 'nonexistent.db'),
+      KIRO_SESSIONS_DIR: path.join(DATA_DIR, 'no_such_dir'),
+    });
+    expect(r.status).toBe(0);
+    expect(readJsonlRecords().length).toBe(0);
+  });
+});
+

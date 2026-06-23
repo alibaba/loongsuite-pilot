@@ -46,10 +46,13 @@ import {
 } from './agent-event-normalizer.mjs';
 
 import { readTranscriptForCwd, parseConversationValue } from './kiro-cli/transcript-parser.mjs';
+import { readSessionForCwd } from './kiro-cli/session-parser.mjs';
 import {
   appendToolEvent, drainToolEvents,
   appendPreToolEvent, drainPreToolEvents,
   loadOffset, saveOffset,
+  loadSessionOffset, saveSessionOffset,
+  loadReportedSessions, markSessionReported,
 } from './kiro-cli/state.mjs';
 import { resolveDbPath } from './kiro-cli/db-path.mjs';
 
@@ -141,13 +144,15 @@ function cmdNoop() {
 }
 
 /**
- * stop: 主导出。
+ * stop: 主导出。双源互斥，SQLite 优先，miss 则 fallback 到 session JSONL。
  *  1. drain per-cwd PostToolUse 缓冲（tool_response）
  *  2. 读 transcript（sqlite），按 history[] 切 STEP
- *  3. join tool_response 到 step（按 tool_name + args 匹配）
- *  4. 发 llm.request / llm.response / tool.call / tool.result
- *  5. 若 history[] 缺最终 Response 步，用 stop.assistant_response 合成（兜底）
- *  6. 推进 per-cwd updated_at offset
+ *  3. SQLite miss → 读 session JSONL（交互式对话），按 Prompt 切 turn
+ *  4. per-cwd session_id 去重防御（双写不双计）
+ *  5. join tool_response 到 step（按 tool_name + args 匹配）
+ *  6. 发 llm.request / llm.response / tool.call / tool.result
+ *  7. 若 history[] 缺最终 Response 步，用 stop.assistant_response 合成（兜底）
+ *  8. 推进 per-cwd offset（SQLite 或 session 各自独立）
  */
 async function cmdStop() {
   const event = tryReadStdin();
@@ -162,40 +167,56 @@ async function cmdStop() {
     return;
   }
 
-  const dbPath = resolveDbPath();
-  if (!fs.existsSync(dbPath)) {
-    logHookError({
-      agentId: AGENT_ID,
-      stage: 'cmd_stop',
-      errorType: 'missing_db',
-      errorMessage: `kiro db not found: ${dbPath}`,
-    });
-    return;
-  }
-
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   const userId = resolveUserId({}, runtimeConfig);
 
   const toolEvents = drainToolEvents(cwd);
   const preToolEvents = drainPreToolEvents(cwd);
-  const sinceMs = loadOffset(cwd);
+  const reportedSessions = loadReportedSessions(cwd);
 
-  let transcript;
-  // transcript 落盘略滞后于 stop hook，轮询等待稳定。
-  for (let attempt = 0; attempt < 5; attempt++) {
+  let transcript = null;
+
+  // ── 路径 A：SQLite transcript（非交互式对话）──
+  const dbPath = resolveDbPath();
+  if (fs.existsSync(dbPath)) {
+    const sinceMs = loadOffset(cwd);
+    // transcript 落盘略滞后于 stop hook，轮询等待稳定。
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        transcript = await readTranscriptForCwd(cwd, { dbPath, sinceUpdatedMs: sinceMs });
+        if (transcript && transcript.steps.length > 0) break;
+      } catch (err) {
+        logHookError({
+          agentId: AGENT_ID,
+          stage: 'transcript_read',
+          errorType: 'read_failed',
+          errorMessage: err?.message || String(err),
+        });
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+
+  // ── 路径 B：session JSONL fallback（交互式对话）──
+  if (!transcript || transcript.steps.length === 0) {
+    const sessionSinceMs = loadSessionOffset(cwd);
     try {
-      transcript = await readTranscriptForCwd(cwd, { dbPath, sinceUpdatedMs: sinceMs });
-      if (transcript && transcript.steps.length > 0) break;
+      const sessionTranscript = readSessionForCwd(cwd, { sinceUpdatedMs: sessionSinceMs });
+      if (sessionTranscript && sessionTranscript.steps.length > 0) {
+        if (reportedSessions.has(sessionTranscript.conversationId)) {
+          return;
+        }
+        transcript = sessionTranscript;
+      }
     } catch (err) {
       logHookError({
         agentId: AGENT_ID,
-        stage: 'transcript_read',
+        stage: 'session_read',
         errorType: 'read_failed',
         errorMessage: err?.message || String(err),
       });
-      break;
     }
-    await new Promise((r) => setTimeout(r, 200));
   }
 
   if (!transcript || transcript.steps.length === 0) {
@@ -208,7 +229,13 @@ async function cmdStop() {
   const cleaned = records.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
 
-  saveOffset(cwd, transcript.updatedMs || Date.now());
+  // 推进 offset：区分来源
+  if (transcript.source === 'session_jsonl') {
+    saveSessionOffset(cwd, transcript.updatedMs || Date.now());
+    markSessionReported(cwd, transcript.conversationId);
+  } else {
+    saveOffset(cwd, transcript.updatedMs || Date.now());
+  }
 }
 
 // ─── buildRecords — 整会话的 trace 记录构造 ───
@@ -288,6 +315,12 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
     if (logFull) {
       reqRecord['gen_ai.input.messages'] = inputMsgs;
     }
+    if (step.timePrecision) {
+      reqRecord['kiro.time_precision'] = step.timePrecision;
+    }
+    if (step.idSource) {
+      reqRecord['kiro.id_source'] = step.idSource;
+    }
     records.push(reqRecord);
 
     // output messages:
@@ -337,6 +370,12 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
       'kiro.token_source': 'unavailable',
       ...(credit !== undefined ? { 'kiro.credit_cost': credit } : {}),
     };
+    if (step.timePrecision) {
+      respRecord['kiro.time_precision'] = step.timePrecision;
+    }
+    if (step.idSource) {
+      respRecord['kiro.id_source'] = step.idSource;
+    }
     records.push(respRecord);
 
     runningHash = currentFullHash;
@@ -518,7 +557,12 @@ function extractToolResultText(toolResponse) {
  * round3 实证：history[i+1].user.content.ToolUseResults.tool_use_results[].content[].Text
  */
 function deriveToolResultText(step, transcript) {
-  // 无 hook 时退化为空串（不臆造结果）。
+  if (step.toolResultsMap && step.toolResultsMap.size > 0) {
+    for (const tool of step.tools) {
+      const tr = step.toolResultsMap.get(tool.id);
+      if (tr?.resultText) return tr.resultText;
+    }
+  }
   return '';
 }
 
