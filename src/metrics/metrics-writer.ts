@@ -4,7 +4,7 @@ import { createLogger } from '../utils/logger.js';
 import { flattenToStrings } from '../utils/record-utils.js';
 import { sendAlarm, sendRunningStatus, sendStatus } from '../internal/sender.js';
 import { MetricsCollector } from './metrics-collector.js';
-import type { DataflowSnapshot } from './metrics-collector.js';
+import type { DataflowSnapshot, L1Metrics } from './metrics-collector.js';
 import type { AlarmManager } from './alarm-manager.js';
 import type { AgentsConfig } from '../types/index.js';
 
@@ -20,6 +20,7 @@ export interface MetricsWriterOptions {
   dataDir: string;
   version: string;
   userId: string;
+  canaryPolicy?: string;
   getSnapshot: () => DataflowSnapshot;
   alarmManager?: AlarmManager;
   agentsConfig?: AgentsConfig;
@@ -40,7 +41,9 @@ export class MetricsWriter {
     this.collector = new MetricsCollector({
       version: opts.version,
       userId: opts.userId,
+      dataDir: opts.dataDir,
       agentsConfig: opts.agentsConfig,
+      canaryPolicy: opts.canaryPolicy,
     });
     this.getSnapshot = opts.getSnapshot;
     this.alarmManager = opts.alarmManager ?? null;
@@ -91,7 +94,8 @@ export class MetricsWriter {
 
       this.checkThresholds(metrics);
       this.checkUserId();
-
+      this.checkStartupMode(metrics);
+      this.checkInfraHealth();
       sendStatus('pilot_status', flattenToStrings(metrics));
       sendRunningStatus(flattenToStrings(metrics));
     } catch (err) {
@@ -127,6 +131,46 @@ export class MetricsWriter {
       this.alarmManager.record(
         'USER_ID_FORMAT_ALARM', '1',
         `userId "${userId}" contains braces, expected plain number like "123456"`,
+      );
+    }
+  }
+
+  private checkStartupMode(metrics: L1Metrics): void {
+    if (!this.alarmManager) return;
+
+    const initType = metrics.init_type;
+    if (initType === 'nohup' || initType === 'unknown') {
+      this.alarmManager.record(
+        'DEGRADED_STARTUP_ALARM', '2',
+        `Service started without autostart registration (init_type=${initType}), will not survive reboot`,
+      );
+    }
+  }
+
+  private checkInfraHealth(): void {
+    if (!this.alarmManager) return;
+
+    const health = this.collector.getLastInfraHealth();
+    if (!health) return;
+
+    if (health.updaterConsecutiveFailures >= 2) {
+      this.alarmManager.record(
+        'UPDATER_NOT_RUNNING_ALARM', '3',
+        'Updater process is not running, automatic updates will not be applied',
+      );
+    }
+
+    if (!health.currentVersionValid) {
+      this.alarmManager.record(
+        'BROKEN_VERSION_POINTER_ALARM', '2',
+        'Version pointer (current) references a non-existent directory, service will fail on restart',
+      );
+    }
+
+    if (!health.nodeBinValid) {
+      this.alarmManager.record(
+        'INVALID_NODE_BIN_ALARM', '2',
+        'Node.js binary path (node-bin) is invalid or not executable, service will fail on restart',
       );
     }
   }

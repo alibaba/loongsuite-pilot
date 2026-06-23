@@ -227,6 +227,7 @@ export class Orchestrator extends EventEmitter {
       dataDir: this.dataDir,
       version,
       userId: this.config.userId,
+      canaryPolicy: this.config.autoUpdate?.canaryPolicy ?? '',
       getSnapshot: () => this.buildDataflowSnapshot(),
       alarmManager: this.alarmManager,
       agentsConfig: this.config.agents,

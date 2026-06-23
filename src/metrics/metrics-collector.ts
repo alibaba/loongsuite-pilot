@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { formatTime } from '../utils/time-utils.js';
 import { resolveLocalIp } from '../utils/network-utils.js';
+import { isPidFileRunning } from '../utils/pid-utils.js';
 import type { AgentsConfig } from '../types/index.js';
 
 export interface L1Metrics {
@@ -36,6 +37,13 @@ export interface L1Metrics {
     out_failed_entries_total: string;
     last_flush_time: string;
   };
+  init_type: string;
+  rollback_available: string;
+  canary_policy: string;
+  version_count: string;
+  updater_pid_alive: string;
+  node_bin_valid: string;
+  current_version_valid: string;
   __time__: number;
 }
 
@@ -118,14 +126,27 @@ export interface DataflowSnapshot {
   inputIdleMinutes: Map<string, number>;
 }
 
+export interface InfraHealthSnapshot {
+  updaterPidAlive: boolean;
+  currentVersionValid: boolean;
+  nodeBinValid: boolean;
+  rollbackAvailable: boolean;
+  versionCount: number;
+  canaryPolicy: string;
+  updaterConsecutiveFailures: number;
+}
+
 export class MetricsCollector {
   private readonly version: string;
   private readonly userId: string;
+  private readonly dataDir: string;
+  private readonly canaryPolicy: string;
   private readonly agentsConfig: AgentsConfig;
   private readonly startTime: string;
   private readonly startTimestamp: number;
   private readonly instanceId: string;
   private readonly localIp: string;
+  private readonly initType: string;
 
   private lastCpuUsage: NodeJS.CpuUsage | null = null;
   private lastCpuTime = 0;
@@ -134,16 +155,21 @@ export class MetricsCollector {
   // null until the first L1 sample seeds the baseline; until then rates are reported as 0
   private prevSendEntries: number | null = null;
   private prevReceivedBytes: number | null = null;
+  private l1CycleCount = 0;
+  private updaterConsecutiveFailures = 0;
+  private lastInfraHealth: InfraHealthSnapshot | null = null;
 
-  constructor(opts: { version: string; userId: string; agentsConfig?: AgentsConfig }) {
+  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig }) {
     this.version = opts.version;
     this.userId = opts.userId;
+    this.dataDir = opts.dataDir;
+    this.canaryPolicy = opts.canaryPolicy ?? '';
     this.agentsConfig = opts.agentsConfig ?? {};
     this.startTimestamp = Math.floor(Date.now() / 1000);
     this.startTime = formatTime(new Date());
     this.localIp = resolveLocalIp();
     this.instanceId = `${opts.userId}_${this.localIp}_${this.startTimestamp}`;
-
+    this.initType = readInitType(opts.dataDir);
   }
 
   getUserId(): string {
@@ -173,6 +199,8 @@ export class MetricsCollector {
     }
 
     this.lastCollectTime = now;
+
+    const health = this.collectInfraHealth();
 
     return {
       version: this.version,
@@ -205,6 +233,13 @@ export class MetricsCollector {
         out_failed_entries_total: String(snapshot.flusherRunner.outFailed),
         last_flush_time: snapshot.flusherRunner.lastFlushTime,
       },
+      init_type: this.initType,
+      rollback_available: String(health.rollbackAvailable),
+      canary_policy: health.canaryPolicy,
+      version_count: String(health.versionCount),
+      updater_pid_alive: String(health.updaterPidAlive),
+      node_bin_valid: String(health.nodeBinValid),
+      current_version_valid: String(health.currentVersionValid),
       __time__: Math.floor(now / 1000),
     };
   }
@@ -293,6 +328,41 @@ export class MetricsCollector {
     return JSON.stringify(settings);
   }
 
+  private collectInfraHealth(): InfraHealthSnapshot {
+    this.l1CycleCount++;
+
+    let updaterPidAlive = true;
+    if (this.l1CycleCount > 2) {
+      updaterPidAlive = isPidFileRunning(path.join(this.dataDir, 'loongsuite-pilot-updater.pid'));
+      if (updaterPidAlive) {
+        this.updaterConsecutiveFailures = 0;
+      } else {
+        this.updaterConsecutiveFailures++;
+      }
+    }
+
+    const currentVersionValid = checkVersionPointer(this.dataDir);
+    const nodeBinValid = checkNodeBin(this.dataDir);
+    const rollbackAvailable = checkRollbackAvailable(this.dataDir);
+    const versionCount = countVersions(this.dataDir);
+
+    this.lastInfraHealth = {
+      updaterPidAlive,
+      currentVersionValid,
+      nodeBinValid,
+      rollbackAvailable,
+      versionCount,
+      canaryPolicy: this.canaryPolicy,
+      updaterConsecutiveFailures: this.updaterConsecutiveFailures,
+    };
+
+    return this.lastInfraHealth;
+  }
+
+  getLastInfraHealth(): InfraHealthSnapshot | null {
+    return this.lastInfraHealth;
+  }
+
   private calcCpuPercent(now: number): number {
     const cpuUsage = process.cpuUsage();
 
@@ -331,5 +401,57 @@ function getOpenFdCount(): number {
     }
   }
   return -1;
+}
+
+function readInitType(dataDir: string): string {
+  try {
+    const raw = fs.readFileSync(path.join(dataDir, 'init-type'), 'utf-8').trim();
+    return raw || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function checkVersionPointer(dataDir: string): boolean {
+  try {
+    const current = fs.readFileSync(path.join(dataDir, 'current'), 'utf-8').trim();
+    if (!current) return false;
+    const resolved = path.resolve(path.join(dataDir, 'versions', current));
+    if (!resolved.startsWith(path.join(dataDir, 'versions'))) return false;
+    return fs.existsSync(resolved);
+  } catch {
+    return false;
+  }
+}
+
+function checkNodeBin(dataDir: string): boolean {
+  try {
+    const nodePath = fs.readFileSync(path.join(dataDir, 'node-bin'), 'utf-8').trim();
+    if (!nodePath) return false;
+    fs.accessSync(nodePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function checkRollbackAvailable(dataDir: string): boolean {
+  try {
+    const previous = fs.readFileSync(path.join(dataDir, 'previous'), 'utf-8').trim();
+    if (!previous) return false;
+    const resolved = path.resolve(path.join(dataDir, 'versions', previous));
+    if (!resolved.startsWith(path.join(dataDir, 'versions'))) return false;
+    return fs.existsSync(resolved);
+  } catch {
+    return false;
+  }
+}
+
+function countVersions(dataDir: string): number {
+  try {
+    return fs.readdirSync(path.join(dataDir, 'versions')).filter(e => !e.startsWith('.')).length;
+  } catch {
+    return 0;
+  }
 }
 
