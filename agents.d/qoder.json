@@ -12,7 +12,6 @@
     "hookCommand": "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",
-    "rawCommand": true,
     "replaceHookCommands": ["$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli", "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder"]
   },
   "input": {
