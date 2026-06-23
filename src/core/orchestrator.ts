@@ -858,6 +858,9 @@ export class Orchestrator extends EventEmitter {
 
     // --- OpenCode Log (event_t plugin JSONL) ---
     const opencodeLogDir = path.join(this.dataDir, 'logs', 'opencode');
+    // Pre-create log dir so fs.watch in AgentDiscoveryService succeeds immediately,
+    // avoiding a 5-minute polling fallback delay after fresh install with --purge.
+    await ensureDir(opencodeLogDir);
     const opencodeLogInput = new OpenCodeLogInput({
       stateStore: this.stateStore,
       logDir: opencodeLogDir,
@@ -878,6 +881,8 @@ export class Orchestrator extends EventEmitter {
 
     // --- Qwen Code CLI Log (transcript-driven hook JSONL) ---
     const qwenCodeCliLogDir = path.join(this.dataDir, 'logs', 'qwen-code-cli');
+    // Pre-create log dir so fs.watch in AgentDiscoveryService succeeds immediately.
+    await ensureDir(qwenCodeCliLogDir);
     const qwenCodeCliLogInput = new QwenCodeCliLogInput({
       stateStore: this.stateStore,
       logDir: qwenCodeCliLogDir,
