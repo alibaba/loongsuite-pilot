@@ -23,6 +23,8 @@ function pilotDataDir() {
 const BUFFER_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'buffers');
 const PRE_TOOL_BUFFER_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'pre-tool-buffers');
 const OFFSET_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'offsets');
+const SESSION_OFFSET_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'session-offsets');
+const SESSION_REPORTED_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'session-reported');
 
 function safeKey(cwd) {
   return Buffer.from(String(cwd || 'unknown')).toString('base64url');
@@ -169,5 +171,76 @@ export function saveOffset(cwd, updatedMs) {
     } catch {
       // ignore
     }
+  }
+}
+
+// ─── per-cwd session offset（session JSONL 增量游标）───
+
+function sessionOffsetFile(cwd) {
+  return path.join(ensureDir(SESSION_OFFSET_DIR), `${safeKey(cwd)}.json`);
+}
+
+export function loadSessionOffset(cwd) {
+  const file = sessionOffsetFile(cwd);
+  try {
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      return typeof data?.updatedMs === 'number' ? data.updatedMs : 0;
+    }
+  } catch {
+    // ignore
+  }
+  return 0;
+}
+
+export function saveSessionOffset(cwd, updatedMs) {
+  const file = sessionOffsetFile(cwd);
+  const dir = path.dirname(file);
+  const tmp = path.join(dir, `${safeKey(cwd)}.${process.pid}.tmp`);
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({ updatedMs }), 'utf-8');
+    fs.renameSync(tmp, file);
+  } catch {
+    try {
+      fs.writeFileSync(file, JSON.stringify({ updatedMs }), 'utf-8');
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// ─── per-cwd session dedup（已上报 session_id 集合）───
+
+function sessionReportedFile(cwd) {
+  return path.join(ensureDir(SESSION_REPORTED_DIR), `${safeKey(cwd)}.json`);
+}
+
+export function loadReportedSessions(cwd) {
+  const file = sessionReportedFile(cwd);
+  try {
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      if (Array.isArray(data?.sessionIds)) {
+        return new Set(data.sessionIds);
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return new Set();
+}
+
+export function markSessionReported(cwd, sessionId) {
+  const reported = loadReportedSessions(cwd);
+  reported.add(sessionId);
+  const file = sessionReportedFile(cwd);
+  try {
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ sessionIds: [...reported] }),
+      'utf-8',
+    );
+  } catch {
+    // ignore
   }
 }

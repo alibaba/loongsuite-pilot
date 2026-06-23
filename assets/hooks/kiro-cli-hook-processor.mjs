@@ -46,10 +46,13 @@ import {
 } from './agent-event-normalizer.mjs';
 
 import { readTranscriptForCwd, parseConversationValue } from './kiro-cli/transcript-parser.mjs';
+import { readSessionJsonl } from './kiro-cli/session-parser.mjs';
 import {
   appendToolEvent, drainToolEvents,
   appendPreToolEvent, drainPreToolEvents,
   loadOffset, saveOffset,
+  loadSessionOffset, saveSessionOffset,
+  loadReportedSessions, markSessionReported,
 } from './kiro-cli/state.mjs';
 import { resolveDbPath } from './kiro-cli/db-path.mjs';
 
@@ -144,10 +147,11 @@ function cmdNoop() {
  * stop: 主导出。
  *  1. drain per-cwd PostToolUse 缓冲（tool_response）
  *  2. 读 transcript（sqlite），按 history[] 切 STEP
- *  3. join tool_response 到 step（按 tool_name + args 匹配）
- *  4. 发 llm.request / llm.response / tool.call / tool.result
- *  5. 若 history[] 缺最终 Response 步，用 stop.assistant_response 合成（兜底）
- *  6. 推进 per-cwd updated_at offset
+ *  3. SQLite miss → fallback 到 session JSONL（~/.kiro/sessions/cli/*.jsonl）
+ *  4. join tool_response 到 step（按 tool_name + args 匹配）
+ *  5. 发 llm.request / llm.response / tool.call / tool.result
+ *  6. 若 history[] 缺最终 Response 步，用 stop.assistant_response 合成（兜底）
+ *  7. 推进 per-cwd updated_at offset
  */
 async function cmdStop() {
   const event = tryReadStdin();
@@ -162,17 +166,6 @@ async function cmdStop() {
     return;
   }
 
-  const dbPath = resolveDbPath();
-  if (!fs.existsSync(dbPath)) {
-    logHookError({
-      agentId: AGENT_ID,
-      stage: 'cmd_stop',
-      errorType: 'missing_db',
-      errorMessage: `kiro db not found: ${dbPath}`,
-    });
-    return;
-  }
-
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   const userId = resolveUserId({}, runtimeConfig);
 
@@ -181,21 +174,35 @@ async function cmdStop() {
   const sinceMs = loadOffset(cwd);
 
   let transcript;
-  // transcript 落盘略滞后于 stop hook，轮询等待稳定。
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      transcript = await readTranscriptForCwd(cwd, { dbPath, sinceUpdatedMs: sinceMs });
-      if (transcript && transcript.steps.length > 0) break;
-    } catch (err) {
-      logHookError({
-        agentId: AGENT_ID,
-        stage: 'transcript_read',
-        errorType: 'read_failed',
-        errorMessage: err?.message || String(err),
-      });
-      break;
+  let source = 'sqlite';
+
+  // 优先 SQLite transcript
+  const dbPath = resolveDbPath();
+  if (fs.existsSync(dbPath)) {
+    // transcript 落盘略滞后于 stop hook，轮询等待稳定。
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        transcript = await readTranscriptForCwd(cwd, { dbPath, sinceUpdatedMs: sinceMs });
+        if (transcript && transcript.steps.length > 0) break;
+      } catch (err) {
+        logHookError({
+          agentId: AGENT_ID,
+          stage: 'transcript_read',
+          errorType: 'read_failed',
+          errorMessage: err?.message || String(err),
+        });
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 200));
     }
-    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  // SQLite miss → session JSONL fallback
+  if (!transcript || transcript.steps.length === 0) {
+    transcript = await trySessionJsonl(cwd);
+    if (transcript) {
+      source = 'session_jsonl';
+    }
   }
 
   if (!transcript || transcript.steps.length === 0) {
@@ -208,7 +215,38 @@ async function cmdStop() {
   const cleaned = records.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
 
-  saveOffset(cwd, transcript.updatedMs || Date.now());
+  if (source === 'session_jsonl') {
+    saveSessionOffset(cwd, transcript.updatedMs || Date.now());
+    if (transcript.sessionId) {
+      markSessionReported(cwd, transcript.sessionId);
+    }
+  } else {
+    saveOffset(cwd, transcript.updatedMs || Date.now());
+  }
+}
+
+/**
+ * session JSONL fallback：扫描 ~/.kiro/sessions/cli/ 找 cwd 匹配的最新 session。
+ * @returns {Promise<import('./kiro-cli/transcript-parser.mjs').TranscriptData|null>}
+ */
+async function trySessionJsonl(cwd) {
+  const sessionSinceMs = loadSessionOffset(cwd);
+  const reported = loadReportedSessions(cwd);
+  try {
+    const session = await readSessionJsonl(cwd, {
+      sinceUpdatedMs: sessionSinceMs,
+      reportedSessions: reported,
+    });
+    return session;
+  } catch (err) {
+    logHookError({
+      agentId: AGENT_ID,
+      stage: 'session_jsonl_read',
+      errorType: 'read_failed',
+      errorMessage: err?.message || String(err),
+    });
+    return null;
+  }
 }
 
 // ─── buildRecords — 整会话的 trace 记录构造 ───
@@ -230,6 +268,12 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
     'gen_ai.conversation.id': transcript.conversationId || sessionId,
     'user.id': userId,
     ...(cwd ? { 'agent.kiro-cli.cwd': cwd } : {}),
+    ...(transcript.source === 'session_jsonl'
+      ? {
+          'kiro.id_source': 'session_jsonl',
+          'kiro.time_precision': 'turn_estimate',
+        }
+      : {}),
   };
 
   let runningHash = INITIAL_HASH;
@@ -343,6 +387,7 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
     prevInputMsgs = inputMsgs;
 
     // tool.call + tool.result: preToolUse 提供 tool.call 真实起点，postToolUse 补 tool_response
+    const isSessionJsonl = transcript.source === 'session_jsonl';
     for (const tool of step.tools) {
       const toolSpanId = generateSpanId();
       const preMatch = matchToolEvent(preToolEvents, tool, 'toolName', 'toolInput');
@@ -365,9 +410,9 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
         'gen_ai.step.id': currentStepId,
         'gen_ai.tool.name': tool.name,
         'gen_ai.tool.call.id': tool.id,
-        'gen_ai.tool.call.arguments': toJsonValue(tool.args ?? {}),
+        'gen_ai.tool.call.arguments': toJsonValue(stripMetaKeys(tool.args ?? {})),
         'kiro.time_source': preMatch ? 'processor_receive' : 'transcript_estimate',
-        'kiro.time_precision': preMatch ? 'ms' : 'ms',
+        'kiro.time_precision': preMatch ? 'ms' : (isSessionJsonl ? 'turn_estimate' : 'ms'),
       });
 
       if (toolResult !== null && toolResult !== undefined) {
@@ -385,7 +430,7 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
           'gen_ai.tool.call.result': toJsonValue(extractToolResultText(toolResult)),
           'tool.result.status': isErr ? 'error' : 'success',
           'kiro.time_source': matched ? 'processor_receive' : 'transcript_estimate',
-          'kiro.time_precision': matched ? '1s' : 'ms',
+          'kiro.time_precision': matched ? '1s' : (isSessionJsonl ? 'turn_estimate' : 'ms'),
         };
         if (isErr) {
           resultRecord['error.type'] = 'ToolError';
@@ -395,7 +440,7 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
       } else {
         // 无对应 hook 事件（transcript-only）：发一条 derived 的 tool.result 兜底，
         // 用 transcript 的 ToolUseResults（history 下一 entry 的 user.content）。
-        const derivedResult = deriveToolResultText(step, transcript);
+        const derivedResult = deriveToolResultText(step, transcript, tool);
         records.push({
           time_unix_nano: msToUnixNanos(step.endTimeMs || step.startTimeMs),
           'event.id': crypto.randomUUID(),
@@ -495,10 +540,21 @@ function matchToolEvent(toolEvents, tool, nameKey = 'toolName', inputKey = 'tool
 
 function argsEqual(a, b) {
   try {
-    return JSON.stringify(a ?? {}) === JSON.stringify(b ?? {});
+    return JSON.stringify(stripMetaKeys(a ?? {})) === JSON.stringify(stripMetaKeys(b ?? {}));
   } catch {
     return false;
   }
+}
+
+function stripMetaKeys(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) return obj.map(stripMetaKeys);
+  const clean = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (k.startsWith('__')) continue;
+    clean[k] = stripMetaKeys(v);
+  }
+  return clean;
 }
 
 /**
@@ -516,9 +572,14 @@ function extractToolResultText(toolResponse) {
 /**
  * 从 transcript history 的下一个 entry 的 user.content.ToolUseResults 取 tool 结果文本。
  * round3 实证：history[i+1].user.content.ToolUseResults.tool_use_results[].content[].Text
+ *
+ * session JSONL: 从 toolResultMap（toolUseId → resultText）取。
  */
-function deriveToolResultText(step, transcript) {
-  // 无 hook 时退化为空串（不臆造结果）。
+function deriveToolResultText(step, transcript, tool) {
+  if (transcript?.toolResultMap && tool?.id) {
+    const result = transcript.toolResultMap.get(tool.id);
+    if (result !== undefined) return result;
+  }
   return '';
 }
 
