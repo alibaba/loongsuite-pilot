@@ -857,9 +857,11 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- OpenCode Log (event_t plugin JSONL) ---
-    const opencodeLogDir = path.join(this.dataDir, 'logs', 'opencode');
-    // Pre-create log dir so fs.watch in AgentDiscoveryService succeeds immediately,
+    // Plugin-inject agents (opencode, qwen-code-cli) don't create their log dirs
+    // during hook deployment (unlike cursor/claude/codex whose shell hooks mkdir -p).
+    // Pre-create here so fs.watch in AgentDiscoveryService succeeds immediately,
     // avoiding a 5-minute polling fallback delay after fresh install with --purge.
+    const opencodeLogDir = path.join(this.dataDir, 'logs', 'opencode');
     await ensureDir(opencodeLogDir);
     const opencodeLogInput = new OpenCodeLogInput({
       stateStore: this.stateStore,

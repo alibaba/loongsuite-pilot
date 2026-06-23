@@ -205,7 +205,7 @@ function getSession(sessionID) {
     sessions.set(sessionID, s);
     if (sessions.size > MAX_SESSIONS) {
       const oldest = sessions.keys().next().value;
-      sessions.delete(oldest);
+      clearSession(oldest);
     }
   }
   return s;
