@@ -61,20 +61,27 @@ export function appendToolEvent(cwd, entry) {
 }
 
 /**
- * 读出并清空 per-cwd 缓冲。
+ * 读出并清空 per-cwd 缓冲（rename-then-read 原子化，防并发 hook 丢事件）。
  * @returns {Array<{toolName:string, toolInput:object, toolResponse:any, captureTs:string}>}
  */
 export function drainToolEvents(cwd) {
   const file = bufferFile(cwd);
-  if (!fs.existsSync(file)) return [];
-  let raw = '';
+  const tmp = file + '.drain.' + process.pid;
   try {
-    raw = fs.readFileSync(file, 'utf-8');
+    fs.renameSync(file, tmp);
   } catch {
     return [];
   }
+  let raw = '';
   try {
-    fs.writeFileSync(file, '', 'utf-8');
+    raw = fs.readFileSync(tmp, 'utf-8');
+  } catch {
+    // rename 成功但 read 失败，tmp 仍存在；尝试清理
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    return [];
+  }
+  try {
+    fs.unlinkSync(tmp);
   } catch {
     // ignore
   }
@@ -104,20 +111,26 @@ export function appendPreToolEvent(cwd, entry) {
 }
 
 /**
- * 读出并清空 per-cwd PreToolUse 缓冲。
+ * 读出并清空 per-cwd PreToolUse 缓冲（rename-then-read 原子化）。
  * @returns {Array<{toolName:string, toolInput:object, startTs:string}>}
  */
 export function drainPreToolEvents(cwd) {
   const file = preToolBufferFile(cwd);
-  if (!fs.existsSync(file)) return [];
-  let raw = '';
+  const tmp = file + '.drain.' + process.pid;
   try {
-    raw = fs.readFileSync(file, 'utf-8');
+    fs.renameSync(file, tmp);
   } catch {
     return [];
   }
+  let raw = '';
   try {
-    fs.writeFileSync(file, '', 'utf-8');
+    raw = fs.readFileSync(tmp, 'utf-8');
+  } catch {
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    return [];
+  }
+  try {
+    fs.unlinkSync(tmp);
   } catch {
     // ignore
   }

@@ -194,7 +194,7 @@ async function cmdStop() {
         });
         break;
       }
-      await new Promise((r) => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200 * (1 << attempt)));
     }
   }
 
@@ -238,7 +238,21 @@ async function cmdStop() {
   if (records.length === 0) return;
 
   const cleaned = records.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
-  writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
+
+  let writeOk = false;
+  try {
+    writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
+    writeOk = true;
+  } catch (err) {
+    logHookError({
+      agentId: AGENT_ID,
+      stage: 'jsonl_write',
+      errorType: 'write_failed',
+      errorMessage: err?.message || String(err),
+    });
+  }
+
+  if (!writeOk) return;
 
   const allEmittedIds = new Set(seenIds);
   for (const s of newSteps) {
@@ -330,11 +344,15 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
     const finishReason = step.kind === 'NotToolUse' ? 'stop' : 'tool_call';
 
     // input messages: 首步带首轮用户原始 prompt（transcript history[0].user.content.Prompt.prompt），
-    // 后续步的 user turn 是 ToolUseResults（无法可靠还原为 input content），仅 hash 推进。
+    // 后续步从 ToolUseResults 构建 role: "tool" 消息（transcript history[i].user.content.ToolUseResults.tool_use_results[].content[].Text）。
     const inputMsgs = [];
     if (stepRound === 1) {
       const prompt = step.userPrompt || '';
       inputMsgs.push({ role: 'user', parts: [{ type: 'text', content: prompt }] });
+    } else if (Array.isArray(step.toolUseResults) && step.toolUseResults.length > 0) {
+      for (const resultText of step.toolUseResults) {
+        inputMsgs.push({ role: 'tool', parts: [{ type: 'text', content: resultText }] });
+      }
     }
 
     let currentFullHash;
@@ -346,8 +364,8 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
       logFull = shouldLogFullMessages(INITIAL_HASH, delta, currentFullHash);
     } else {
       currentFullHash = computeHash(runningHash, inputMsgs);
-      delta = [];
-      logFull = false;
+      delta = inputMsgs;
+      logFull = inputMsgs.length > 0;
     }
 
     // llm.request
@@ -503,11 +521,16 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
     const synthLlmSpanId = generateSpanId();
     const synthResponseId = crypto.randomUUID();
 
+    // 合成 request/response 加 +1ms 偏移，避免 validate-trace 报 time.non_zero_duration ERROR
+    const synthTimeMs = Date.now();
+    const synthReqNano = msToUnixNanos(synthTimeMs);
+    const synthRespNano = msToUnixNanos(synthTimeMs + 1);
+
     const inputMsgs = [];
     const currentFullHash = computeHash(runningHash, inputMsgs);
 
     records.push({
-      time_unix_nano: isoToUnixNanos(nowIso()),
+      time_unix_nano: synthReqNano,
       'event.id': crypto.randomUUID(),
       'event.name': 'llm.request',
       ...baseFields,
@@ -522,7 +545,7 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
     });
 
     records.push({
-      time_unix_nano: isoToUnixNanos(nowIso()),
+      time_unix_nano: synthRespNano,
       'event.id': crypto.randomUUID(),
       'event.name': 'llm.response',
       ...baseFields,

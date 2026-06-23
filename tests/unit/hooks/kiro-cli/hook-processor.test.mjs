@@ -258,11 +258,15 @@ describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor 端到端（DB transcrip
     expect(textParts[0].content.length).toBeGreaterThan(0);
     expect(textParts[0].content).toContain('sample.txt');
 
-    // 后续步骤 delta 为空（仅 hash 推进，不臆造工具轮 input 内容；
-    // 经 normalize 后空 delta 会被剥离为 undefined）
+    // 后续步骤 delta 含 ToolUseResults（role: "tool"），由 transcript history 真实数据构建；
+    // 若 transcript 无 ToolUseResults（NotToolUse 步），delta 为空
     for (const r of requests.slice(1)) {
       const d = r['gen_ai.input.messages_delta'];
-      expect(d === undefined || (Array.isArray(d) && d.length === 0)).toBe(true);
+      if (Array.isArray(d) && d.length > 0) {
+        for (const msg of d) {
+          expect(msg.role).toBe('tool');
+        }
+      }
     }
   });
 

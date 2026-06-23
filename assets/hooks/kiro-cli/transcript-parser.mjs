@@ -75,6 +75,7 @@ export function hasNodeSqlite() {
  *                                   ToolUse 步为 ""，由 caller 合成 tool_call 摘要）
  * @property {string} userPrompt  该步 user turn 的原始 prompt（仅首轮 Prompt 型 entry 非空，
  *                                ToolUseResults 型为 ''）
+ * @property {string[]} toolUseResults 该步 user turn 的 ToolUseResults 文本列表（仅后续轮有值）
  * @property {number} [creditIndex] 对齐到 user_turn_metadata.usage_info[] 的下标
  * @property {number} index         在 history 中的序号（用于 credit 对齐）
  */
@@ -154,6 +155,32 @@ function str(value, fallback = '') {
 }
 
 /**
+ * 从 history entry 的 user.content.ToolUseResults 提取工具结果文本列表。
+ * 实证结构（round3）：
+ *   entry.user.content.ToolUseResults.tool_use_results[].content[].Text
+ * @returns {string[]} 每条 tool_use_result 的拼接文本；非 ToolUseResults 型返回 []。
+ */
+function extractToolUseResults(entry) {
+  const content = entry?.user?.content;
+  if (!content || typeof content !== 'object') return [];
+  const tur = content.ToolUseResults;
+  if (!tur || typeof tur !== 'object') return [];
+  const results = Array.isArray(tur.tool_use_results) ? tur.tool_use_results : [];
+  const out = [];
+  for (const r of results) {
+    if (!r || typeof r !== 'object') continue;
+    const contentArr = Array.isArray(r.content) ? r.content : [];
+    const texts = contentArr
+      .filter((c) => c && typeof c === 'object' && typeof c.Text === 'string')
+      .map((c) => c.Text);
+    if (texts.length > 0) {
+      out.push(texts.join('\n'));
+    }
+  }
+  return out;
+}
+
+/**
  * 从 history entry 的 user.content 提取用户原始 prompt 文本。
  * 实证结构（round3 + tester E2E）：
  *   entry.user.content => { "Prompt": { "prompt": "<用户输入>" } }     // 首轮 user turn
@@ -222,6 +249,7 @@ export function parseConversationValue(value) {
       tools: isToolUse ? extractToolUses(assistant) : [],
       assistantText: isToolUse ? '' : extractAssistantText(assistant),
       userPrompt: extractUserPrompt(entry),
+      toolUseResults: extractToolUseResults(entry),
       creditIndex: i < credits.length ? i : -1,
     });
   }
