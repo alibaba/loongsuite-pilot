@@ -76,12 +76,23 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
 }
 
 function resolveQoderDbPath(): string | null {
+  // Qoder Desktop (Electron app) keeps SQLite under platform app-support.
+  // Qoder for JetBrains shares state through ~/.qoder/shared_client/.
   const appdata = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
   const candidates = process.platform === 'darwin'
-    ? [resolveHome('~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db')]
+    ? [
+        resolveHome('~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db'),
+        resolveHome('~/.qoder/shared_client/cache/db/local.db'),
+      ]
     : process.platform === 'win32'
-      ? [path.join(appdata, 'Qoder', 'SharedClientCache', 'cache', 'db', 'local.db')]
-      : [resolveHome('~/.config/Qoder/SharedClientCache/cache/db/local.db')];
+      ? [
+          path.join(appdata, 'Qoder', 'SharedClientCache', 'cache', 'db', 'local.db'),
+          path.join(os.homedir(), '.qoder', 'shared_client', 'cache', 'db', 'local.db'),
+        ]
+      : [
+          resolveHome('~/.config/Qoder/SharedClientCache/cache/db/local.db'),
+          resolveHome('~/.qoder/shared_client/cache/db/local.db'),
+        ];
 
   // Sync access check: only runs once per collect cycle for a fixed set of paths.
   // Acceptable because the path list is small (1-2 candidates) and the result is cached by callers.

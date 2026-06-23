@@ -90,7 +90,7 @@ export class AgentDefLoader {
       }
     }
     const mode = obj.deployMode;
-    if (mode !== 'hook' && mode !== 'plugin-probe' && mode !== 'plugin-inject') {
+    if (mode !== 'hook' && mode !== 'plugin-probe' && mode !== 'plugin-inject' && mode !== 'detection-only') {
       logger.warn('invalid agent definition: unknown deployMode', { file: filePath, deployMode: mode });
       return false;
     }

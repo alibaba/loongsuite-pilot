@@ -30,6 +30,7 @@ export enum ClientType {
   IflowCliHook = 'iflow-cli-hook',
   CursorHook = 'cursor-hook',
   QoderCliHook = 'qoder-cli-hook',
+  QoderIdeaHook = 'qoder-idea-hook',
   QoderCnHook = 'qoder-cn-hook',
   CodexCliHook = 'codex',
   ClineHook = 'cline-hook',

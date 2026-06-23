@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isQoderIdeaSession } from './shared/qoder-db-utils.mjs';
 
 const MESSAGE_CONTENT_FIELDS = new Set([
   'gen_ai.input.messages',
@@ -445,7 +446,7 @@ export function buildQoderHookRecord(row, options = {}) {
   const content = selectDominantContentBlock(message.content);
   if (!content) return null;
 
-  const variant = inferQoderVariant(row, sourceAgentId);
+  const variant = inferQoderVariant(row, sourceAgentId, options.sessionId);
   const sourceNamespace = qoderSourceNamespace(variant);
   const eventName = inferQoderEventName(rowType, content);
   const model = rowType === 'user' ? undefined : (getStringValue(message, 'model') || 'unknown');
@@ -539,6 +540,7 @@ function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId, turnId) 
 function qoderSourceNamespace(variant) {
   if (variant === 'qoder-work') return 'qoderwork';
   if (variant === 'qoder-cn') return 'qodercn';
+  if (variant === 'qoder-idea') return 'qoderidea';
   return 'qoder';
 }
 
@@ -595,15 +597,24 @@ function asRecord(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
-function inferQoderVariant(row, sourceAgentId) {
+function inferQoderVariant(row, sourceAgentId, sessionId) {
   if (sourceAgentId === 'qoder-work') return 'qoder-work';
   if (sourceAgentId === 'qoder-cn') return 'qoder-cn';
-  return getStringValue(row, 'entrypoint') === 'cli'
+  if (
+    getStringValue(row, 'entrypoint') === 'cli'
     || row.promptId !== undefined
     || row.permissionMode !== undefined
     || row.userType !== undefined
-    ? 'qoder-cli'
-    : 'qoder';
+  ) {
+    return 'qoder-cli';
+  }
+  // DB-based detection via shared helper
+  if (sessionId) {
+    const result = isQoderIdeaSession(sessionId);
+    if (result === true) return 'qoder-idea';
+    if (result === false) return 'qoder';
+  }
+  return 'qoder';
 }
 
 function inferQoderEventName(rowType, content) {

@@ -31,6 +31,7 @@ import {
   buildQoderHookRecord,
   inferProviderName,
 } from './agent-event-normalizer.mjs';
+import { isQoderIdeaSession } from './shared/qoder-db-utils.mjs';
 
 // --- Timestamp helpers -------------------------------------------------------
 
@@ -353,7 +354,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
   // Find user prompt
   const userRow = contentEvents.find(r => r.type === 'user' && !isToolResult(r));
   const userId = resolveUserId(userRow || contentEvents[0], runtimeConfig);
-  const agentType = inferVariant(userRow || contentEvents[0], agentId);
+  const agentType = inferVariant(userRow || contentEvents[0], agentId, sessionId);
   const providerName = inferProviderName({ 'gen_ai.agent.type': agentType });
 
   // User-hook event (ENTRY input)
@@ -650,11 +651,19 @@ function extractUserText(row) {
   return '';
 }
 
-function inferVariant(row, sourceAgentId) {
+function inferVariant(row, sourceAgentId, sessionId) {
   if (sourceAgentId === 'qoder-cn') return 'qoder-cn';
   if (!row) return sourceAgentId === 'qoder' ? 'qoder' : 'qoder-cli';
   if (row.entrypoint === 'cli' || row.promptId || row.permissionMode || row.userType) {
     return 'qoder-cli';
+  }
+  // DB-based detection: Qoder for JetBrains writes chat_session rows exclusively to
+  // ~/.qoder/shared_client/cache/db/local.db, while Qoder Desktop IDE writes to
+  // ~/Library/Application Support/Qoder/.../local.db.
+  if (sessionId) {
+    const found = isQoderIdeaSession(sessionId);
+    if (found === true) return 'qoder-idea';
+    if (found === false) return 'qoder';
   }
   return 'qoder';
 }
