@@ -16,6 +16,7 @@ const mockSendStatus = vi.fn();
 vi.mock('../../../src/internal/sender.js', () => ({
   sendAlarm: (...args: unknown[]) => mockSendAlarm(...args),
   sendStatus: (...args: unknown[]) => mockSendStatus(...args),
+  sendRunningStatus: vi.fn(),
 }));
 
 function buildSnapshot(): DataflowSnapshot {
@@ -156,5 +157,51 @@ describe('MetricsWriter', () => {
 
     expect(fs.existsSync(inputPath)).toBe(false);
     expect(fs.existsSync(flusherPath)).toBe(false);
+  });
+
+  it('includes privacy_settings in L1 metrics', async () => {
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: buildSnapshot,
+      agentsConfig: {
+        cursor: { captureMessageContent: true },
+        qoder: { captureMessageContent: false },
+      },
+    });
+
+    vi.useRealTimers();
+    await writer.start();
+
+    const filePath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-metrics.jsonl');
+    const lines = fs.readFileSync(filePath, 'utf-8').trim().split('\n');
+    const entry = JSON.parse(lines[0]);
+
+    expect(entry.privacy_settings).toBeDefined();
+    const settings = JSON.parse(entry.privacy_settings);
+    expect(settings.cursor.captureMessageContent).toBe(true);
+    expect(settings.qoder.captureMessageContent).toBe(false);
+  });
+
+  it('includes user_id in L2 input and flusher metrics', async () => {
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: buildSnapshot,
+    });
+
+    vi.useRealTimers();
+    await writer.start();
+    await writer.stop();
+
+    const inputPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-input-metrics.jsonl');
+    const inputLine = JSON.parse(fs.readFileSync(inputPath, 'utf-8').trim().split('\n')[0]);
+    expect(inputLine.user_id).toBe('u1');
+
+    const flusherPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-flusher-metrics.jsonl');
+    const flusherLine = JSON.parse(fs.readFileSync(flusherPath, 'utf-8').trim().split('\n')[0]);
+    expect(flusherLine.user_id).toBe('u1');
   });
 });

@@ -143,7 +143,7 @@ export class Orchestrator extends EventEmitter {
 
     // 4. Build InputManager & AlarmManager
     const version = readInstalledVersion(this.dataDir);
-    this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version });
+    this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version, userId: this.config.userId });
 
     this.inputManager = new InputManager();
     this.inputManager.setFlusher(this.flusher);
@@ -214,6 +214,7 @@ export class Orchestrator extends EventEmitter {
       userId: this.config.userId,
       getSnapshot: () => this.buildDataflowSnapshot(),
       alarmManager: this.alarmManager,
+      agentsConfig: this.config.agents,
     });
     await this.metricsWriter.start();
 

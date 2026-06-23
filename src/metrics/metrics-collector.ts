@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { formatTime } from '../utils/time-utils.js';
 import { resolveLocalIp } from '../utils/network-utils.js';
+import type { AgentsConfig } from '../types/index.js';
 
 export interface L1Metrics {
   version: string;
@@ -18,6 +19,7 @@ export interface L1Metrics {
   mem_heap: string;
   start_time: string;
   agent_versions: string;
+  privacy_settings: string;
   metric_json: {
     input_count: string;
     active_input_count: string;
@@ -42,6 +44,7 @@ export interface AlarmMetrics {
   input_name: string;
   instance_id: string;
   source_ip: string;
+  user_id: string;
   succeed_events: string;
   failed_events: string;
   input_idle_minutes: string;
@@ -54,6 +57,7 @@ export interface InputMetrics {
     input_name: string;
     input_type: string;
   };
+  user_id: string;
   in_events_total: string;
   in_size_bytes: string;
   out_events_total: string;
@@ -72,6 +76,7 @@ export interface FlusherMetrics {
     logstore: string;
     mode: string;
   };
+  user_id: string;
   in_entries_total: string;
   in_size_bytes: string;
   out_entries_total: string;
@@ -116,6 +121,7 @@ export interface DataflowSnapshot {
 export class MetricsCollector {
   private readonly version: string;
   private readonly userId: string;
+  private readonly agentsConfig: AgentsConfig;
   private readonly startTime: string;
   private readonly startTimestamp: number;
   private readonly instanceId: string;
@@ -129,14 +135,19 @@ export class MetricsCollector {
   private prevSendEntries: number | null = null;
   private prevReceivedBytes: number | null = null;
 
-  constructor(opts: { version: string; userId: string }) {
+  constructor(opts: { version: string; userId: string; agentsConfig?: AgentsConfig }) {
     this.version = opts.version;
     this.userId = opts.userId;
+    this.agentsConfig = opts.agentsConfig ?? {};
     this.startTimestamp = Math.floor(Date.now() / 1000);
     this.startTime = formatTime(new Date());
     this.localIp = resolveLocalIp();
     this.instanceId = `${opts.userId}_${this.localIp}_${this.startTimestamp}`;
 
+  }
+
+  getUserId(): string {
+    return this.userId;
   }
 
   collectL1(snapshot: DataflowSnapshot): L1Metrics {
@@ -177,6 +188,7 @@ export class MetricsCollector {
       mem_heap: String(Math.round(mem.heapUsed / 1024 / 1024)),
       start_time: this.startTime,
       agent_versions: JSON.stringify(snapshot.agentVersions),
+      privacy_settings: this.buildPrivacySettings(),
       metric_json: {
         input_count: String(snapshot.inputCount),
         active_input_count: String(snapshot.activeInputCount),
@@ -208,6 +220,7 @@ export class MetricsCollector {
           input_name: name,
           input_type: stats.type,
         },
+        user_id: this.userId,
         in_events_total: String(stats.inEvents),
         in_size_bytes: String(stats.inBytes),
         out_events_total: String(stats.outEvents),
@@ -234,6 +247,7 @@ export class MetricsCollector {
           logstore: stats.logstore,
           mode: stats.mode,
         },
+        user_id: this.userId,
         in_entries_total: String(stats.inEntries),
         in_size_bytes: String(stats.inBytes),
         out_entries_total: String(stats.outEntries),
@@ -261,6 +275,7 @@ export class MetricsCollector {
         input_name: name,
         instance_id: this.instanceId,
         source_ip: this.localIp,
+        user_id: this.userId,
         succeed_events: String(stats.outEvents),
         failed_events: String(stats.outFailed),
         input_idle_minutes: String(idleMinutes),
@@ -268,6 +283,14 @@ export class MetricsCollector {
       });
     }
     return results;
+  }
+
+  private buildPrivacySettings(): string {
+    const settings: Record<string, { captureMessageContent: boolean }> = {};
+    for (const [agentType, config] of Object.entries(this.agentsConfig)) {
+      settings[agentType] = { captureMessageContent: config.captureMessageContent };
+    }
+    return JSON.stringify(settings);
   }
 
   private calcCpuPercent(now: number): number {

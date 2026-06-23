@@ -50,11 +50,12 @@ describe('UpdaterMetrics', () => {
     vi.useRealTimers();
   });
 
-  function createMetrics() {
+  function createMetrics(userId = 'test-user') {
     return new UpdaterMetrics({
       dataDir: '/tmp/test-data',
       version: '1.0.0',
       collectorPidFile: '/tmp/test-data/loongsuite-pilot.pid',
+      userId,
     });
   }
 
@@ -90,6 +91,17 @@ describe('UpdaterMetrics', () => {
       expect(parsed.latest_version).toBe('1.0.1');
     });
 
+    it('includes user_id in events', async () => {
+      const m = createMetrics('user-123');
+      await m.start();
+      m.writeEvent('updater_started');
+      await m.stop();
+
+      const eventLines = appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'));
+      const parsed = JSON.parse(eventLines[0].line);
+      expect(parsed.user_id).toBe('user-123');
+    });
+
     it('includes error info for failure events', async () => {
       const m = createMetrics();
       await m.start();
@@ -121,7 +133,54 @@ describe('UpdaterMetrics', () => {
       expect(parsed.alarm_level).toBe('2');
       expect(parsed.alarm_message).toBe('update failed');
       expect(parsed.alarm_count).toBe('1');
+      expect(parsed.user_id).toBe('test-user');
       expect(parsed.ver).toBe('1.0.0');
+    });
+  });
+
+  describe('userId format alarm', () => {
+    it('emits USER_ID_FORMAT_ALARM when userId has braces', async () => {
+      const m = createMetrics('{123456}');
+      await m.start();
+      await m.stop();
+
+      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const formatAlarm = alarmLines
+        .map(l => JSON.parse(l.line))
+        .find((a: { alarm_type: string }) => a.alarm_type === 'USER_ID_FORMAT_ALARM');
+      expect(formatAlarm).toBeDefined();
+      expect(formatAlarm.alarm_level).toBe('1');
+      expect(formatAlarm.alarm_message).toContain('{123456}');
+    });
+
+    it('does not emit USER_ID_FORMAT_ALARM when userId is plain', async () => {
+      const m = createMetrics('123456');
+      await m.start();
+      await m.stop();
+
+      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const formatAlarm = alarmLines
+        .map(l => JSON.parse(l.line))
+        .find((a: { alarm_type: string }) => a.alarm_type === 'USER_ID_FORMAT_ALARM');
+      expect(formatAlarm).toBeUndefined();
+    });
+
+    it('emits USER_ID_FORMAT_ALARM only once per lifetime', async () => {
+      const m = createMetrics('{123456}');
+      await m.start();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      await m.stop();
+
+      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const formatAlarms = alarmLines
+        .map(l => JSON.parse(l.line))
+        .filter((a: { alarm_type: string }) => a.alarm_type === 'USER_ID_FORMAT_ALARM');
+      expect(formatAlarms).toHaveLength(1);
     });
   });
 

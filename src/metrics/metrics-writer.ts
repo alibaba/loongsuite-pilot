@@ -6,6 +6,7 @@ import { sendAlarm, sendRunningStatus, sendStatus } from '../internal/sender.js'
 import { MetricsCollector } from './metrics-collector.js';
 import type { DataflowSnapshot } from './metrics-collector.js';
 import type { AlarmManager } from './alarm-manager.js';
+import type { AgentsConfig } from '../types/index.js';
 
 const logger = createLogger('MetricsWriter');
 
@@ -21,6 +22,7 @@ export interface MetricsWriterOptions {
   userId: string;
   getSnapshot: () => DataflowSnapshot;
   alarmManager?: AlarmManager;
+  agentsConfig?: AgentsConfig;
 }
 
 export class MetricsWriter {
@@ -31,12 +33,14 @@ export class MetricsWriter {
   private l1Timer: ReturnType<typeof setInterval> | null = null;
   private l2Timer: ReturnType<typeof setInterval> | null = null;
   private alarmTimer: ReturnType<typeof setInterval> | null = null;
+  private userIdAlarmEmitted = false;
 
   constructor(opts: MetricsWriterOptions) {
     this.logsDir = path.join(opts.dataDir, 'logs', 'metric_alarm');
     this.collector = new MetricsCollector({
       version: opts.version,
       userId: opts.userId,
+      agentsConfig: opts.agentsConfig,
     });
     this.getSnapshot = opts.getSnapshot;
     this.alarmManager = opts.alarmManager ?? null;
@@ -86,6 +90,7 @@ export class MetricsWriter {
       await appendLine(filePath, JSON.stringify(metrics));
 
       this.checkThresholds(metrics);
+      this.checkUserId();
 
       sendStatus('pilot_status', flattenToStrings(metrics));
       sendRunningStatus(flattenToStrings(metrics));
@@ -110,6 +115,18 @@ export class MetricsWriter {
       this.alarmManager.record(
         'PROCESS_RESOURCE_ALARM', '2',
         `Memory usage ${memMb}MB exceeds ${MEM_THRESHOLD_MB}MB`,
+      );
+    }
+  }
+
+  private checkUserId(): void {
+    if (!this.alarmManager || this.userIdAlarmEmitted) return;
+    const userId = this.collector.getUserId();
+    if (/^\{.*\}$/.test(userId)) {
+      this.userIdAlarmEmitted = true;
+      this.alarmManager.record(
+        'USER_ID_FORMAT_ALARM', '1',
+        `userId "${userId}" contains braces, expected plain number like "123456"`,
       );
     }
   }

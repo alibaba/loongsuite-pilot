@@ -31,6 +31,7 @@ export interface UpdaterEvent {
   latest_version?: string;
   error?: string;
   consecutive_failures?: number;
+  user_id: string;
   ip: string;
   __time__: number;
 }
@@ -39,22 +40,26 @@ export interface UpdaterMetricsOptions {
   dataDir: string;
   version: string;
   collectorPidFile: string;
+  userId: string;
 }
 
 export class UpdaterMetrics {
   private readonly logsDir: string;
   private readonly version: string;
   private readonly ip: string;
+  private readonly userId: string;
   private readonly collectorPidFile: string;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private eventQueue: UpdaterEvent[] = [];
   private alarmQueue: AlarmEntry[] = [];
+  private userIdAlarmEmitted = false;
 
   constructor(opts: UpdaterMetricsOptions) {
     this.logsDir = path.join(opts.dataDir, 'logs', 'metric_alarm');
     this.version = opts.version;
     this.collectorPidFile = opts.collectorPidFile;
+    this.userId = opts.userId;
     this.ip = resolveLocalIp();
   }
 
@@ -84,12 +89,13 @@ export class UpdaterMetrics {
 
   writeEvent(
     eventType: UpdaterEventType,
-    extra?: Partial<Omit<UpdaterEvent, 'event_type' | 'version' | 'ip' | '__time__'>>,
+    extra?: Partial<Omit<UpdaterEvent, 'event_type' | 'version' | 'user_id' | 'ip' | '__time__'>>,
   ): void {
     this.eventQueue.push({
       event_type: eventType,
       version: this.version,
       ...extra,
+      user_id: this.userId,
       ip: this.ip,
       __time__: Math.floor(Date.now() / 1000),
     });
@@ -101,6 +107,7 @@ export class UpdaterMetrics {
       alarm_level: level,
       alarm_message: message,
       alarm_count: '1',
+      user_id: this.userId,
       ip: this.ip,
       ver: this.version,
       __time__: Math.floor(Date.now() / 1000),
@@ -108,6 +115,14 @@ export class UpdaterMetrics {
   }
 
   private async flush(): Promise<void> {
+    if (!this.userIdAlarmEmitted && /^\{.*\}$/.test(this.userId)) {
+      this.userIdAlarmEmitted = true;
+      this.writeAlarm(
+        'USER_ID_FORMAT_ALARM', '1',
+        `userId "${this.userId}" contains braces, expected plain number like "123456"`,
+      );
+    }
+
     const events = this.eventQueue;
     const alarms = this.alarmQueue;
     if (events.length === 0 && alarms.length === 0) return;
