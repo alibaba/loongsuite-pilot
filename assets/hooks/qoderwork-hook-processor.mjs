@@ -126,7 +126,7 @@ function splitIntoTurns(contentRows) {
   let currentTurn = [];
 
   for (const row of contentRows) {
-    if (row.type === 'user' && !isToolResult(row) && !isSystemInjection(row)) {
+    if (isPromptRow(row)) {
       if (currentTurn.length > 0) {
         turns.push(currentTurn);
       }
@@ -139,8 +139,12 @@ function splitIntoTurns(contentRows) {
   return turns;
 }
 
+function isPromptRow(row) {
+  return row.type === 'user' && !isToolResult(row) && !isSystemInjection(row);
+}
+
 function getTurnIdForRows(turnRows) {
-  const promptRow = turnRows.find(r => r.type === 'user' && !isToolResult(r));
+  const promptRow = turnRows.find(isPromptRow);
   return promptRow?.promptId || promptRow?.uuid || crypto.randomUUID();
 }
 
@@ -164,7 +168,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
   const records = [];
 
   // Find the user prompt
-  const userRow = turnRows.find(r => r.type === 'user' && !isToolResult(r) && !isSystemInjection(r));
+  const userRow = turnRows.find(isPromptRow);
   const promptId = userRow?.promptId || turnId;
   const turnMetadata = promptId ? { 'agent.qoderwork.promptId': promptId } : {};
 
@@ -197,6 +201,15 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
   // since the LLM only receives tool outputs and issues a new response at those points.
   const assistantRows = turnRows.filter(r => r.type === 'assistant');
   const toolResultRows = turnRows.filter(r => r.type === 'user' && isToolResult(r));
+  const toolResultsByUseId = new Map();
+  for (const row of toolResultRows) {
+    const content = Array.isArray(row.message?.content) ? row.message.content : [];
+    for (const block of content) {
+      if (block.type === 'tool_result' && block.tool_use_id && !toolResultsByUseId.has(block.tool_use_id)) {
+        toolResultsByUseId.set(block.tool_use_id, { row, block });
+      }
+    }
+  }
 
   const llmGroups = groupAssistantRowsByToolResults(turnRows);
 
@@ -219,13 +232,9 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
     } else if (prevToolCalls.length > 0) {
       const toolParts = [];
       for (const tc of prevToolCalls) {
-        const matchingResult = toolResultRows.find(r => {
-          const content = Array.isArray(r.message?.content) ? r.message.content : [];
-          return content.some(b => b.type === 'tool_result' && b.tool_use_id === tc.id);
-        });
+        const matchingResult = toolResultsByUseId.get(tc.id);
         if (matchingResult) {
-          const resultContent = Array.isArray(matchingResult.message?.content) ? matchingResult.message.content : [];
-          const resultBlock = resultContent.find(b => b.tool_use_id === tc.id);
+          const resultBlock = matchingResult.block;
           const resultText = typeof resultBlock?.content === 'string' ? resultBlock.content : JSON.stringify(resultBlock?.content);
           toolParts.push({ type: 'tool_call_response', id: tc.id, response: resultText });
         }
@@ -241,7 +250,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
     // 否则用 assistant 行写盘时间会导致 LLM span 退化为 0ms（thinking/tool_use 同毫秒批量 flush）
     const llmRequestTs = stepCounter === 1 ? userTs : prevStepLastToolResultTs;
 
-    const stepRecords = buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, stepCounter === llmGroups.length, inputDelta, cwd, llmRequestTs, turnMetadata);
+    const stepRecords = buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, stepCounter === llmGroups.length, inputDelta, cwd, llmRequestTs, turnMetadata);
     records.push(...stepRecords);
 
     // Collect this step's tool_calls for next step's input delta
@@ -254,12 +263,9 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
         if (b.type === 'tool_use') {
           prevToolCalls.push({ id: b.id, name: b.name });
           // 找到本 step 该 tool_use 对应的 tool_result 行，记录 ts；多 tool 场景保留最后一个
-          const trRow = toolResultRows.find(r => {
-            const c = Array.isArray(r.message?.content) ? r.message.content : [];
-            return c.some(bl => bl.type === 'tool_result' && bl.tool_use_id === b.id);
-          });
-          if (trRow?.timestamp) {
-            const nano = timestampToUnixNanos(trRow.timestamp);
+          const matchingResult = toolResultsByUseId.get(b.id);
+          if (matchingResult?.row.timestamp) {
+            const nano = timestampToUnixNanos(matchingResult.row.timestamp);
             if (nano) lastToolResultTsInStep = nano;
           }
         }
@@ -329,7 +335,7 @@ function groupAssistantRowsByToolResults(turnRows) {
   return groups;
 }
 
-function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, isLastStep, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
+function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, isLastStep, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
   const records = [];
   const firstRow = group[0];
   const lastRow = group[group.length - 1];
@@ -451,13 +457,9 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
     }, firstRow, runtimeConfig, cwd));
 
     // Find matching tool_result
-    const matchingResult = toolResultRows.find(r => {
-      const content = Array.isArray(r.message?.content) ? r.message.content : [];
-      return content.some(b => b.type === 'tool_result' && b.tool_use_id === tc.id);
-    });
+    const matchingResult = toolResultsByUseId.get(tc.id);
     if (matchingResult) {
-      const resultContent = Array.isArray(matchingResult.message?.content) ? matchingResult.message.content : [];
-      const resultBlock = resultContent.find(b => b.tool_use_id === tc.id);
+      const { row: resultRow, block: resultBlock } = matchingResult;
       const resultText = typeof resultBlock?.content === 'string' ? resultBlock.content : JSON.stringify(resultBlock?.content);
       records.push(buildRecord({
         ...turnMetadata,
@@ -472,10 +474,10 @@ function buildStepEvents(group, toolResultRows, stepId, turnId, sessionId, userI
         'gen_ai.tool.call.result': resultText,
         'tool.result.status': resultBlock?.is_error ? 'failure' : 'success',
         'user.id': userId,
-        time_unix_nano: timestampToUnixNanos(matchingResult.timestamp),
+        time_unix_nano: timestampToUnixNanos(resultRow.timestamp),
         observed_time_unix_nano: observedTs,
         version,
-      }, matchingResult, runtimeConfig, cwd));
+      }, resultRow, runtimeConfig, cwd));
     }
   }
 
@@ -556,6 +558,6 @@ function resolveQoderWorkProjectDir(sandboxCwd, agentId) {
   return sandboxCwd;
 }
 
-export { extractText, isSystemInjection, isToolResult, splitIntoTurns };
+export { extractText, getTurnIdForRows, isSystemInjection, isToolResult, splitIntoTurns };
 
 main().catch(() => { /* fail-open */ });

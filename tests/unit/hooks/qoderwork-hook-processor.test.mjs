@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   extractText,
+  getTurnIdForRows,
   isSystemInjection,
   isToolResult,
   splitIntoTurns,
@@ -95,6 +96,24 @@ describe('isSystemInjection', () => {
   it('returns false for normal user text', () => {
     const row = { message: { content: [{ type: 'text', text: 'how do I build a multi-turn scenario?' }] } };
     expect(isSystemInjection(row)).toBe(false);
+  });
+});
+
+describe('getTurnIdForRows', () => {
+  it('uses the same real prompt row as turn event construction', () => {
+    const systemReminder = {
+      type: 'user',
+      uuid: 'system-row-id',
+      message: { content: [{ type: 'text', text: '<system-reminder>runtime context</system-reminder>' }] },
+    };
+    const prompt = {
+      type: 'user',
+      uuid: 'prompt-row-id',
+      promptId: 'real-prompt-id',
+      message: { content: [{ type: 'text', text: 'implement the requested change' }] },
+    };
+
+    expect(getTurnIdForRows([systemReminder, prompt])).toBe('real-prompt-id');
   });
 });
 

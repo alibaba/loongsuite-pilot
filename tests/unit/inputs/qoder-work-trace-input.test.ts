@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -11,6 +11,7 @@ describe('QoderWorkTraceInput', () => {
   let tmpRoot: string;
   let hookLogDir: string;
   let segmentsRoot: string;
+  let sdkLogDir: string;
   let stateStore: MockStateStore;
 
   const TEST_CWD = '/Users/test/.qoderwork/workspace/wsabc';
@@ -20,12 +21,15 @@ describe('QoderWorkTraceInput', () => {
     tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-work-trace-test-'));
     hookLogDir = path.join(tmpRoot, 'hook-history');
     segmentsRoot = path.join(tmpRoot, 'sessions');
+    sdkLogDir = path.join(tmpRoot, 'sdk-logs');
     await fs.mkdir(hookLogDir, { recursive: true });
     await fs.mkdir(segmentsRoot, { recursive: true });
+    await fs.mkdir(sdkLogDir, { recursive: true });
     stateStore = new MockStateStore();
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     await fs.rm(tmpRoot, { recursive: true, force: true });
   });
 
@@ -34,6 +38,7 @@ describe('QoderWorkTraceInput', () => {
       stateStore: stateStore as any,
       logDir: hookLogDir,
       segmentsRoot,
+      sdkLogDir,
     });
   }
 
@@ -45,14 +50,26 @@ describe('QoderWorkTraceInput', () => {
     return filePath;
   }
 
+  async function writeSdkLog(sessionDir: string, lines: string[]) {
+    const dir = path.join(sdkLogDir, sessionDir);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'main.log'), lines.join('\n') + '\n');
+  }
+
   function segTurnStarted(turnId: string, isSubagent = false, ts = '2026-06-16T10:00:00.000Z') {
     return { ts, type: 'turn.started', turn_id: turnId, data: { is_subagent: isSubagent } };
   }
   function segModelStart(turnId: string, requestId: string, ts: string, model = 'qwork-ultimate') {
     return { ts, type: 'model.request.started', turn_id: turnId, request_id: requestId, data: { model } };
   }
-  function segModelEnd(turnId: string, requestId: string, ts: string, model = 'qwork-ultimate') {
-    return { ts, type: 'model.response.completed', turn_id: turnId, request_id: requestId, data: { model } };
+  function segModelEnd(
+    turnId: string,
+    requestId: string,
+    ts: string,
+    model = 'qwork-ultimate',
+    usage: Record<string, number> = {},
+  ) {
+    return { ts, type: 'model.response.completed', turn_id: turnId, request_id: requestId, data: { model, ...usage } };
   }
   function segToolRequested(turnId: string, toolCallId: string, ts: string, toolName = 'TodoWrite') {
     return { ts, type: 'tool.requested', turn_id: turnId, tool_call_id: toolCallId, data: { tool_name: toolName, args: {} } };
@@ -62,6 +79,23 @@ describe('QoderWorkTraceInput', () => {
   }
   function nano(iso: string) {
     return String(BigInt(Date.parse(iso)) * 1_000_000n);
+  }
+
+  function sdkMessageStart(sessionId: string, messageId: string, iso: string) {
+    return `[${iso}] [INFO] [SDK] [QueryHandler] Received message: stream_event ${JSON.stringify({
+      event: { type: 'message_start', message: { id: messageId } }, session_id: sessionId,
+    })}`;
+  }
+
+  function sdkMessageDelta(sessionId: string, iso: string, inputTokens: number, outputTokens: number) {
+    return `[${iso}] [INFO] [SDK] [QueryHandler] Received message: stream_event ${JSON.stringify({
+      event: {
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn' },
+        usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+      },
+      session_id: sessionId,
+    })}`;
   }
 
   function todayFileName() {
@@ -191,6 +225,24 @@ describe('QoderWorkTraceInput', () => {
 
     expect(entries.map(entry => entry['event.id'])).toEqual(['only-response']);
     expect(stateStore.get('qoder-work-trace').extra).toMatchObject({ qoderWorkTurnCount: 1 });
+  });
+
+  it('streams a large first-run history and exports only its last turn', async () => {
+    const hookFile = path.join(hookLogDir, todayFileName());
+    const oldEntry = {
+      ...buildHookEntry({ 'event.id': 'large-old', 'gen_ai.turn.id': 'turn-old' }),
+      'agent.qoderwork.padding': 'x'.repeat(17 * 1024 * 1024),
+    };
+    const latestEntry = buildHookEntry({ 'event.id': 'large-latest', 'gen_ai.turn.id': 'turn-latest' });
+    const text = `${JSON.stringify(oldEntry)}\n${JSON.stringify(latestEntry)}\n`;
+    await fs.writeFile(hookFile, text);
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    expect(entries.map(entry => entry['event.id'])).toEqual(['large-latest']);
+    expect(stateStore.get('qoder-work-trace').lastOffset).toBe(Buffer.byteLength(text));
   });
 
   it('caps tool.result to not exceed next step llm.request', async () => {
@@ -325,6 +377,152 @@ describe('QoderWorkTraceInput', () => {
     expect(reqOut['gen_ai.request.model']).toBe('qwork-ultimate');
     expect(respOut['gen_ai.request.model']).toBe('qwork-ultimate');
     expect(respOut['gen_ai.response.model']).toBe('qwork-ultimate');
+  });
+
+  it('enriches response usage from a matched segment pair', async () => {
+    const sessionId = 'sess-segment-usage';
+    const turnId = 'turn-segment-usage';
+    const hookFile = path.join(hookLogDir, todayFileName());
+    const request = buildHookEntry({
+      'event.id': 'usage-request',
+      'event.name': 'llm.request' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+    });
+    const response = buildHookEntry({
+      'event.id': 'usage-response',
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+    });
+    await fs.writeFile(hookFile, [request, response].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+    await writeSegments(sessionId, 'usage.jsonl', [
+      segModelStart(turnId, 'usage-request-id', '2026-06-16T10:00:00.000Z'),
+      segModelEnd(turnId, 'usage-request-id', '2026-06-16T10:00:05.000Z', 'qwork-ultimate', {
+        input_tokens: 120,
+        output_tokens: 30,
+        cache_read_input_tokens: 50,
+        cache_creation_input_tokens: 10,
+      }),
+    ]);
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    const enriched = entries.find(entry => entry['event.id'] === 'usage-response')!;
+    expect(enriched['gen_ai.usage.input_tokens']).toBe(120);
+    expect(enriched['gen_ai.usage.output_tokens']).toBe(30);
+    expect(enriched['gen_ai.usage.total_tokens']).toBe(150);
+    expect(enriched['gen_ai.usage.cache_read.input_tokens']).toBe(50);
+    expect(enriched['gen_ai.usage.cache_creation.input_tokens']).toBe(10);
+  });
+
+  it('uses SDK token data only when the matched segment has no usage', async () => {
+    const sessionId = 'sess-sdk-usage';
+    const turnId = 'turn-sdk-usage';
+    const hookFile = path.join(hookLogDir, todayFileName());
+    const request = buildHookEntry({
+      'event.id': 'sdk-request',
+      'event.name': 'llm.request' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      time_unix_nano: nano('2026-06-16T10:00:00.000Z'),
+    });
+    const response = buildHookEntry({
+      'event.id': 'sdk-response',
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      time_unix_nano: nano('2026-06-16T10:00:05.000Z'),
+    });
+    await fs.writeFile(hookFile, [request, response].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+    await writeSdkLog('sdk-session', [
+      sdkMessageStart(sessionId, 'sdk-message-1', '2026-06-16T10:00:00.000Z'),
+      sdkMessageDelta(sessionId, '2026-06-16T10:00:05.000Z', 321, 45),
+    ]);
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    const enriched = entries.find(entry => entry['event.id'] === 'sdk-response')!;
+    expect(enriched['gen_ai.usage.input_tokens']).toBe(321);
+    expect(enriched['gen_ai.usage.output_tokens']).toBe(45);
+    expect(enriched['gen_ai.usage.total_tokens']).toBe(366);
+    expect(enriched.time_unix_nano).toBe(nano('2026-06-16T10:00:05.000Z'));
+  });
+
+  it('falls back to locating segment directories by session id', async () => {
+    const sessionId = 'sess-segment-directory-fallback';
+    const turnId = 'turn-segment-directory-fallback';
+    const hookFile = path.join(hookLogDir, todayFileName());
+    const request = buildHookEntry({
+      'event.id': 'fallback-request',
+      'event.name': 'llm.request' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+    });
+    const response = buildHookEntry({
+      'event.id': 'fallback-response',
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+    });
+    await fs.writeFile(hookFile, [request, response].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+    const fallbackDir = path.join(segmentsRoot, 'writer-format-changed', sessionId, 'segments');
+    await fs.mkdir(fallbackDir, { recursive: true });
+    await fs.writeFile(path.join(fallbackDir, 'fallback.jsonl'), [
+      segModelStart(turnId, 'fallback-request-id', '2026-06-16T10:00:00.000Z'),
+      segModelEnd(turnId, 'fallback-request-id', '2026-06-16T10:00:05.000Z', 'qwork-fallback'),
+    ].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    expect(entries.find(entry => entry['event.id'] === 'fallback-response')?.['gen_ai.response.model'])
+      .toBe('qwork-fallback');
+  });
+
+  it('evicts stale segment state even when no later hook entries arrive', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-16T10:00:00.000Z'));
+    const sessionId = 'sess-stale-segment';
+    const turnId = 'turn-stale-segment';
+    const hookFile = path.join(hookLogDir, todayFileName());
+    const toolCall = buildHookEntry({
+      'event.id': 'stale-tool-call',
+      'event.name': 'tool.call' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      'gen_ai.tool.call.id': 'stale-tool',
+    });
+    await fs.writeFile(hookFile, JSON.stringify(toolCall) + '\n');
+    await writeSegments(sessionId, 'stale.jsonl', [
+      segTurnStarted('stale-subagent', true),
+      segModelStart(turnId, 'stale-request', '2026-06-16T10:00:00.000Z'),
+      segModelEnd(turnId, 'stale-request', '2026-06-16T10:00:01.000Z'),
+      segToolRequested(turnId, 'stale-tool', '2026-06-16T10:00:00.100Z'),
+    ]);
+
+    const input = makeInput();
+    await startAndCollect(input);
+    expect((input as any).segmentPairs.size).toBe(1);
+    expect((input as any).subagentTurns.size).toBe(1);
+
+    vi.advanceTimersByTime(60 * 60 * 1000 + 1);
+    await triggerCycle(input);
+    await input.stop();
+
+    expect((input as any).segmentPairs.size).toBe(0);
+    expect((input as any).segmentToolTimings.size).toBe(0);
+    expect((input as any).subagentTurns.size).toBe(0);
+    expect((input as any).inFlightPairs.size).toBe(0);
   });
 
   it('skips subagent LLM pairs when matching to hook steps', async () => {
