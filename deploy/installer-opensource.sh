@@ -846,6 +846,63 @@ PATHBLOCK
 }
 
 # ============================================================
+# qodercli token intercept: inject/remove shell function
+# ============================================================
+_sed_inplace() {
+    if [[ "$(uname)" == "Darwin" ]]; then
+        sed -i '' "$@"
+    else
+        sed -i "$@"
+    fi
+}
+
+inject_qodercli_token_intercept() {
+    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder'; then return 0; fi
+    if ! command -v qodercli >/dev/null 2>&1; then return 0; fi
+
+    local intercept_script="$DATA_DIR/hooks/qodercli-token-intercept.mjs"
+    if [ ! -f "$intercept_script" ]; then return 0; fi
+
+    msg "==> 配置 qodercli token 采集..." "==> Configuring qodercli token intercept..."
+
+    _inject_to_rc() {
+        local file="$1"
+        if [ ! -f "$file" ]; then return 0; fi
+        if [ ! -w "$file" ]; then
+            msg "    ⚠️  $file 不可写，跳过" "    ⚠️  $file is not writable, skipping"
+            return 0
+        fi
+        if grep -q 'loongsuite-pilot BEGIN qodercli-intercept' "$file" 2>/dev/null; then return 0; fi
+        [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
+        cat >> "$file" << 'INTERCEPTBLOCK'
+
+# loongsuite-pilot BEGIN qodercli-intercept
+qodercli() { BUN_OPTIONS="--preload=$HOME/.loongsuite-pilot/hooks/qodercli-token-intercept.mjs" command qodercli "$@"; }
+# loongsuite-pilot END qodercli-intercept
+INTERCEPTBLOCK
+        msg "    ✅ 已写入 $file (请执行 source $file 或打开新终端)" \
+            "    ✅ Written to $file (run: source $file or open a new terminal)"
+    }
+
+    case "${SHELL:-/bin/bash}" in
+        */zsh)  _inject_to_rc "$HOME/.zshrc" ;;
+        */bash) _inject_to_rc "$HOME/.bashrc" ;;
+        *)      _inject_to_rc "$HOME/.bashrc" ;;
+    esac
+    echo ""
+}
+
+remove_qodercli_token_intercept() {
+    for file in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+        if [ -f "$file" ] && grep -q 'loongsuite-pilot BEGIN qodercli-intercept' "$file" 2>/dev/null; then
+            _sed_inplace '/# loongsuite-pilot BEGIN qodercli-intercept/,/# loongsuite-pilot END qodercli-intercept/d' "$file"
+            msg "    已清理 qodercli token intercept ($file)" \
+                "    Cleaned up qodercli token intercept ($file)"
+        fi
+    done
+}
+
+# ============================================================
 # Common: read VERSION file fields
 # ============================================================
 get_installed_version() {
@@ -1209,6 +1266,7 @@ cmd_install() {
     deploy_package "$INSTALL_SRC"
     write_config
     install_loongsuite_pilot_command
+    inject_qodercli_token_intercept
 
     msg "==> 启动服务..." "==> Starting service..."
     local _start_args=""
@@ -1510,6 +1568,7 @@ cmd_uninstall() {
     # Remove hook entries from tool configs
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     remove_hook_configs
+    remove_qodercli_token_intercept
     echo ""
 
     # Remove OTel Claude plugin
