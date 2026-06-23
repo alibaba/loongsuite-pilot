@@ -8,7 +8,19 @@ const TIMESTAMP_THRESHOLD_MS = 1000;
 export function enrichCliTurn(
   entries: AgentActivityEntry[],
   segments: SegmentTokenData[],
+  systemPrompt?: string,
 ): void {
+  if (systemPrompt) {
+    const firstReq = entries.find(e =>
+      e['event.name'] === 'llm.request' && !!e['gen_ai.step.id'],
+    );
+    if (firstReq) {
+      (firstReq as Record<string, unknown>)['gen_ai.system_instructions'] = [
+        { type: 'text', content: systemPrompt },
+      ];
+    }
+  }
+
   if (segments.length === 0) return;
 
   for (const seg of segments) {

@@ -9,6 +9,7 @@ import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSegmentTokensForSession } from './segment-token-reader.js';
 import { readSqliteTokensForSession } from './sqlite-token-reader.js';
+import { readInterceptData, type InterceptData } from './intercept-token-reader.js';
 import { enrichCliTurn, enrichIdeTurn, injectTraceId } from './token-enricher.js';
 
 export interface QoderTraceInputOptions extends InputOptions {
@@ -60,14 +61,17 @@ export class QoderTraceInput extends BaseInput {
 
     // 3. Enrich each turn. IDE turns are enriched per session so SQLite request_id
     // ordering can be matched against hook turn ordering without timestamp joins.
+    // Intercept data is loaded lazily on first qoder-cli turn.
+    let interceptData: InterceptData | null = null;
     const ideSessionGroups = new Map<string, AgentActivityEntry[]>();
     for (const [, turnEntries] of turnGroups) {
       const variant = this.inferTurnVariant(turnEntries);
       const sessionId = this.extractSessionId(turnEntries);
 
       if (variant === 'qoder-cli' && sessionId) {
+        interceptData ??= await readInterceptData();
         const segments = await readSegmentTokensForSession(sessionId);
-        enrichCliTurn(turnEntries, segments);
+        enrichCliTurn(turnEntries, segments, interceptData.systemPrompt?.content);
       } else if ((variant === 'qoder' || variant === 'qoder-idea') && sessionId) {
         const sessionEntries = ideSessionGroups.get(sessionId) ?? [];
         sessionEntries.push(...turnEntries);
