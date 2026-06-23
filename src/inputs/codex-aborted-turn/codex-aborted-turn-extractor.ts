@@ -2,10 +2,19 @@ import * as path from 'node:path';
 import type { JsonValue } from '../../types/index.js';
 import type {
   CodexExtractedAbortedTurn,
-  CodexExtractedTool,
   CodexTokenUsage,
+  CodexTokenUsageSample,
   CodexTranscriptMeta,
+  CodexTimelineAssistantMessage,
+  CodexTimelineEvent,
+  CodexTimelineToolCall,
+  CodexTimelineToolResult,
 } from './codex-aborted-turn-types.js';
+
+type CodexTimelineEventInput =
+  | Omit<CodexTimelineAssistantMessage, 'sequence'>
+  | Omit<CodexTimelineToolCall, 'sequence'>
+  | Omit<CodexTimelineToolResult, 'sequence'>;
 
 export function extractCodexTranscriptMeta(record: Record<string, unknown>): CodexTranscriptMeta | null {
   if (record.type !== 'session_meta') return null;
@@ -38,10 +47,41 @@ export function extractAbortedTurn(
   let model = 'unknown';
   let cwd: string | undefined;
   let developerInstructions: string | undefined;
-  let prompt: string | undefined;
-  const agentMessages: string[] = [];
-  const tools = new Map<string, CodexExtractedTool>();
+  const promptParts: string[] = [];
+  const timeline: CodexTimelineEvent[] = [];
+  const toolCallIds = new Set<string>();
+  const usageSamples: CodexTokenUsageSample[] = [];
   let lastUsage: CodexTokenUsage | undefined;
+  let sequence = 0;
+
+  const appendTimeline = (event: CodexTimelineEventInput): void => {
+    const nextSequence = sequence++;
+    if (event.kind === 'assistant_message') {
+      timeline.push({
+        kind: 'assistant_message',
+        timestampMs: event.timestampMs,
+        sequence: nextSequence,
+        content: event.content,
+      });
+    } else if (event.kind === 'tool_call') {
+      timeline.push({
+        kind: 'tool_call',
+        timestampMs: event.timestampMs,
+        sequence: nextSequence,
+        callId: event.callId,
+        name: event.name,
+        input: event.input,
+      });
+    } else {
+      timeline.push({
+        kind: 'tool_result',
+        timestampMs: event.timestampMs,
+        sequence: nextSequence,
+        callId: event.callId,
+        ...(event.output !== undefined ? { output: event.output } : {}),
+      });
+    }
+  };
 
   for (const record of records) {
     const payload = asRecord(record.payload);
@@ -73,10 +113,13 @@ export function extractAbortedTurn(
     if (record.type === 'event_msg') {
       if (payload.type === 'agent_message') {
         const message = stringValue(payload.message);
-        if (message) agentMessages.push(message);
+        if (message) appendTimeline({ kind: 'assistant_message', timestampMs: timestamp, content: message });
       } else if (payload.type === 'token_count') {
         const usage = extractLastTokenUsage(payload.info);
-        if (usage && !sameUsage(lastUsage, usage)) lastUsage = usage;
+        if (usage && !sameUsage(lastUsage, usage)) {
+          lastUsage = usage;
+          usageSamples.push({ timestampMs: timestamp, sequence: sequence++, usage });
+        }
       } else if (payload.type === 'turn_aborted' && stringValue(payload.turn_id) === expectedTurnId) {
         abortedAtMs = timestamp;
         abortReason = stringValue(payload.reason) ?? abortReason;
@@ -88,7 +131,8 @@ export function extractAbortedTurn(
     const itemType = stringValue(payload.type);
     if (itemType === 'message') {
       if (stringValue(payload.role) === 'user') {
-        prompt = prompt ?? extractMessageText(payload.content);
+        const text = extractMessageText(payload.content);
+        if (text && !isTurnAbortedInjection(text)) promptParts.push(text);
       }
       continue;
     }
@@ -97,27 +141,35 @@ export function extractAbortedTurn(
       const callId = stringValue(payload.call_id) ?? stringValue(payload.id);
       if (!callId) continue;
       const inputField = itemType === 'custom_tool_call' ? payload.input : payload.arguments;
-      tools.set(callId, {
+      appendTimeline({
+        kind: 'tool_call',
+        timestampMs: timestamp,
         callId,
         name: stringValue(payload.name) ?? (itemType === 'tool_search_call' ? 'tool_search' : 'unknown'),
         input: toJsonValue(parseMaybeJson(inputField)),
-        startedAtMs: timestamp,
       });
+      toolCallIds.add(callId);
       continue;
     }
 
     if (itemType === 'web_search_call') {
       const callId = stringValue(payload.call_id) ?? stringValue(payload.id) ?? `web_search:${timestamp}`;
-      tools.set(callId, {
+      appendTimeline({
+        kind: 'tool_call',
+        timestampMs: timestamp,
         callId,
         name: 'web_search',
         input: toJsonValue(parseMaybeJson(payload.action)),
-        startedAtMs: timestamp,
+      });
+      toolCallIds.add(callId);
+      appendTimeline({
+        kind: 'tool_result',
+        timestampMs: timestamp,
+        callId,
         output: toJsonValue({
           ...(payload.status !== undefined ? { status: payload.status } : {}),
           ...(payload.action !== undefined ? { action: parseMaybeJson(payload.action) } : {}),
         }),
-        completedAtMs: timestamp,
       });
       continue;
     }
@@ -129,16 +181,19 @@ export function extractAbortedTurn(
 
     const callId = stringValue(payload.call_id) ?? stringValue(payload.id);
     if (!callId) continue;
-    const tool = tools.get(callId);
-    if (!tool) continue;
-    tool.completedAtMs = timestamp;
-    tool.output = itemType === 'tool_search_output'
-      ? toJsonValue({
+    if (!toolCallIds.has(callId)) continue;
+    appendTimeline({
+      kind: 'tool_result',
+      timestampMs: timestamp,
+      callId,
+      output: itemType === 'tool_search_output'
+        ? toJsonValue({
         ...(payload.status !== undefined ? { status: payload.status } : {}),
         ...(payload.execution !== undefined ? { execution: payload.execution } : {}),
         ...(payload.tools !== undefined ? { tools: parseMaybeJson(payload.tools) } : {}),
       })
-      : toJsonValue(parseMaybeJson(payload.output));
+        : toJsonValue(parseMaybeJson(payload.output)),
+    });
   }
 
   if (!abortedAtMs) return null;
@@ -148,16 +203,15 @@ export function extractAbortedTurn(
     provider: meta?.provider ?? 'openai',
     model,
     ...(cwd ? { cwd } : {}),
-    ...(prompt ? { prompt } : {}),
+    ...(promptParts.length > 0 ? { prompt: promptParts.join('\n\n') } : {}),
     ...(developerInstructions ? { developerInstructions } : {}),
     ...(meta?.baseInstructions ? { baseInstructions: meta.baseInstructions } : {}),
     ...(meta?.toolDefinitions !== undefined ? { toolDefinitions: meta.toolDefinitions } : {}),
     startedAtMs: startedAtMs || abortedAtMs,
     abortedAtMs,
     reason: abortReason,
-    agentMessages,
-    tools: [...tools.values()],
-    ...(lastUsage ? { tokenUsage: lastUsage } : {}),
+    timeline,
+    usageSamples,
   };
 }
 
@@ -199,6 +253,10 @@ function extractMessageText(content: unknown): string | undefined {
     return text ? [text] : [];
   });
   return parts.length > 0 ? parts.join('\n') : undefined;
+}
+
+function isTurnAbortedInjection(text: string): boolean {
+  return text.trimStart().startsWith('<turn_aborted>');
 }
 
 function parseMaybeJson(value: unknown): unknown {

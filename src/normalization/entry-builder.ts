@@ -223,7 +223,6 @@ const LEGACY_ALIAS_FIELDS = new Set([
   'tool.exec.id',
   'tool.arguments',
   'tool.result.payload',
-  'tool.result.status',
   'tool.result.duration',
   'tool.result.duration_ms',
   'skill.name',

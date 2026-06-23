@@ -56,6 +56,12 @@ describe('serialiseLogEntry', () => {
     expect(out['gen_ai.tool.call.result']).toBe(JSON.stringify({ output: 'visible' }));
   });
 
+  it('keeps tool result status as a serialized field', () => {
+    const out = serialiseLogEntry(makeEntry({ 'tool.result.status': 'cancelled' }));
+
+    expect(out['tool.result.status']).toBe('cancelled');
+  });
+
   it('skips null and undefined values', () => {
     const out = serialiseLogEntry(makeEntry({
       'provider.name': undefined,

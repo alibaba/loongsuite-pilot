@@ -6,18 +6,22 @@ import { fileURLToPath } from 'node:url';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { CodexAbortedTurnInput } from '../../../../src/inputs/codex-aborted-turn/codex-aborted-turn-input.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
+import { CodexLogInput } from '../../../../src/inputs/codex-log/codex-log-input.js';
+import { getTodayDateString } from '../../../../src/utils/fs-utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE = path.join(__dirname, 'fixtures', 'aborted-turn.jsonl');
+const INTERLEAVED_WEB_SEARCH_FIXTURE = path.join(__dirname, 'fixtures', 'interleaved-web-search.jsonl');
+const MULTI_WAVE_FIXTURE = path.join(__dirname, 'fixtures', 'multi-wave-aborted-turn.jsonl');
 const tempDirs: string[] = [];
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 
-async function waitFor(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
+async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
+  while (!(await condition())) {
     if (Date.now() >= deadline) throw new Error('timed out waiting for entries');
     await new Promise(resolve => setTimeout(resolve, 10));
   }
@@ -32,6 +36,8 @@ async function createInput(root: string, stateStore: StateStore): Promise<{
   const input = new CodexAbortedTurnInput({
     stateStore,
     sessionDir,
+    hookStateDir: path.join(root, 'hook-state'),
+    diagnosticDir: path.join(root, 'diagnostics'),
     pollIntervalMs: 10,
   });
   const entries: AgentActivityEntry[] = [];
@@ -48,6 +54,216 @@ async function writeTranscript(sessionDir: string, content: string, name = 'roll
 }
 
 describe('CodexAbortedTurnInput', () => {
+  it('assigns messages after a completed web search to the cancelled follow-up step', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-aborted-interleaved-'));
+    tempDirs.push(root);
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const { input, entries, sessionDir } = await createInput(root, stateStore);
+    await fs.copyFile(INTERLEAVED_WEB_SEARCH_FIXTURE, await writeTranscript(sessionDir, ''));
+    await waitFor(() => entries.some(entry =>
+      entry['gen_ai.response.finish_reasons']?.includes('cancelled'),
+    ));
+    await input.stop();
+
+    const firstResponse = entries.find(entry =>
+      entry['event.name'] === 'llm.response'
+      && entry['gen_ai.step.id']?.endsWith(':s1'),
+    );
+    expect(firstResponse?.['gen_ai.output.messages']).toEqual([{
+      role: 'assistant',
+      parts: [
+        { type: 'reasoning', content: 'I will research the problem first.' },
+        { type: 'tool_call', id: 'web-search-1', name: 'web_search', arguments: { type: 'search', query: 'problem' } },
+      ],
+      finish_reason: 'tool_call',
+    }]);
+
+    const cancelledResponse = entries.find(entry =>
+      entry['event.name'] === 'llm.response'
+      && entry['gen_ai.response.finish_reasons']?.includes('cancelled'),
+    );
+    expect(cancelledResponse?.['gen_ai.step.id']).toMatch(/:s2$/);
+    expect(cancelledResponse?.['gen_ai.output.messages']).toEqual([{
+      role: 'assistant',
+      parts: [{ type: 'reasoning', content: 'The search confirms the problem name.' }],
+      finish_reason: 'cancelled',
+    }]);
+  });
+
+  it('creates a distinct step for each completed tool-call wave', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-aborted-multi-wave-'));
+    tempDirs.push(root);
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const { input, entries, sessionDir } = await createInput(root, stateStore);
+    await fs.copyFile(MULTI_WAVE_FIXTURE, await writeTranscript(sessionDir, ''));
+    await waitFor(() => entries.some(entry =>
+      entry['gen_ai.response.finish_reasons']?.includes('cancelled'),
+    ));
+    await input.stop();
+
+    const responses = entries.filter(entry => entry['event.name'] === 'llm.response');
+    expect(responses.map(entry => ({
+      step: entry['gen_ai.step.id']?.slice(-2),
+      finish: entry['gen_ai.response.finish_reasons'],
+      messages: entry['gen_ai.output.messages'],
+    }))).toEqual([
+      {
+        step: 's1',
+        finish: ['tool_call'],
+        messages: [{
+          role: 'assistant',
+          parts: [
+            { type: 'reasoning', content: 'I will inspect the files first.' },
+            { type: 'tool_call', id: 'call-first', name: 'exec_command', arguments: { cmd: 'pwd' } },
+          ],
+          finish_reason: 'tool_call',
+        }],
+      },
+      {
+        step: 's2',
+        finish: ['tool_call'],
+        messages: [{
+          role: 'assistant',
+          parts: [
+            { type: 'reasoning', content: 'Now I will inspect the project files.' },
+            { type: 'tool_call', id: 'call-second', name: 'exec_command', arguments: { cmd: 'ls' } },
+          ],
+          finish_reason: 'tool_call',
+        }],
+      },
+      {
+        step: 's3',
+        finish: ['cancelled'],
+        messages: [{
+          role: 'assistant',
+          parts: [{ type: 'reasoning', content: 'I found the project structure.' }],
+          finish_reason: 'cancelled',
+        }],
+      },
+    ]);
+  });
+
+  it('does not emit recovery entries for a normally completed transcript', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-normal-transcript-'));
+    tempDirs.push(root);
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const { input, entries, sessionDir } = await createInput(root, stateStore);
+    const normalTranscript = [
+      JSON.stringify({ timestamp: '2026-06-23T04:00:00.000Z', type: 'session_meta', payload: { id: 'session-normal', model_provider: 'openai' } }),
+      JSON.stringify({ timestamp: '2026-06-23T04:00:01.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-normal' } }),
+      JSON.stringify({ timestamp: '2026-06-23T04:00:01.010Z', type: 'turn_context', payload: { turn_id: 'turn-normal', model: 'gpt-5.4-mini' } }),
+      JSON.stringify({ timestamp: '2026-06-23T04:00:02.000Z', type: 'event_msg', payload: { type: 'agent_message', message: 'The task is complete.' } }),
+      JSON.stringify({ timestamp: '2026-06-23T04:00:03.000Z', type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-normal' } }),
+    ].join('\n') + '\n';
+    await writeTranscript(sessionDir, normalTranscript, 'rollout-normal.jsonl');
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await input.stop();
+
+    expect(entries).toEqual([]);
+  });
+
+  it('writes one diagnostic when a completed turn has no Hook state', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-hook-gap-'));
+    tempDirs.push(root);
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const sessionDir = path.join(root, 'sessions');
+    const diagnosticDir = path.join(root, 'diagnostics');
+    const input = new CodexAbortedTurnInput({
+      stateStore,
+      sessionDir,
+      hookStateDir: path.join(root, 'missing-hook-state'),
+      diagnosticDir,
+      hookGapGraceMs: 0,
+      pollIntervalMs: 10,
+    });
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', batch => entries.push(...batch));
+    await input.start();
+
+    await writeTranscript(sessionDir, [
+      JSON.stringify({ timestamp: '2026-06-23T04:00:00.000Z', type: 'session_meta', payload: { id: 'session-hook-gap', model_provider: 'openai' } }),
+      JSON.stringify({ timestamp: '2026-06-23T04:00:01.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-hook-gap' } }),
+      JSON.stringify({ timestamp: '2026-06-23T04:00:01.010Z', type: 'turn_context', payload: { turn_id: 'turn-hook-gap', model: 'gpt-5.4-mini' } }),
+      JSON.stringify({ timestamp: '2026-06-23T04:00:02.000Z', type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-hook-gap' } }),
+    ].join('\n') + '\n', 'rollout-hook-gap.jsonl');
+
+    await waitFor(async () => {
+      try {
+        return (await fs.readdir(diagnosticDir)).some(file => file.startsWith('codex-hook-gap-'));
+      } catch {
+        return false;
+      }
+    });
+    await input.stop();
+
+    const files = await fs.readdir(diagnosticDir);
+    const diagnostic = JSON.parse(await fs.readFile(path.join(diagnosticDir, files[0]!), 'utf8')) as Record<string, unknown>;
+    expect(entries).toEqual([]);
+    expect(diagnostic).toMatchObject({
+      type: 'codex_hook_missing',
+      session_id: 'session-hook-gap',
+      transcript_turn_id: 'turn-hook-gap',
+    });
+  });
+
+  it('does not interfere with normal Codex hook collection when sharing a state store', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-normal-isolation-'));
+    tempDirs.push(root);
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const sessionDir = path.join(root, 'sessions');
+    const hookLogDir = path.join(root, 'hook-logs');
+    const hookStateDir = path.join(root, 'hook-state');
+    const diagnosticDir = path.join(root, 'diagnostics');
+    await fs.mkdir(hookStateDir, { recursive: true });
+    await fs.writeFile(path.join(hookStateDir, 'session-normal-shared.json'), '{}', 'utf8');
+    const recoveryInput = new CodexAbortedTurnInput({
+      stateStore,
+      sessionDir,
+      hookStateDir,
+      diagnosticDir,
+      pollIntervalMs: 10,
+    });
+    const normalInput = new CodexLogInput({ stateStore, logDir: hookLogDir, pollIntervalMs: 10 });
+    const recoveryEntries: AgentActivityEntry[] = [];
+    const normalEntries: AgentActivityEntry[] = [];
+    recoveryInput.on('entries', batch => recoveryEntries.push(...batch));
+    normalInput.on('entries', batch => normalEntries.push(...batch));
+    await recoveryInput.start();
+    await normalInput.start();
+
+    await writeTranscript(sessionDir, [
+      JSON.stringify({ timestamp: '2026-06-23T05:00:00.000Z', type: 'session_meta', payload: { id: 'session-normal-shared', model_provider: 'openai' } }),
+      JSON.stringify({ timestamp: '2026-06-23T05:00:01.000Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-normal-shared' } }),
+      JSON.stringify({ timestamp: '2026-06-23T05:00:01.010Z', type: 'turn_context', payload: { turn_id: 'turn-normal-shared', model: 'gpt-5.4-mini' } }),
+      JSON.stringify({ timestamp: '2026-06-23T05:00:02.000Z', type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-normal-shared' } }),
+    ].join('\n') + '\n', 'rollout-normal-shared.jsonl');
+    await fs.writeFile(path.join(hookLogDir, `codex-${getTodayDateString()}.jsonl`), JSON.stringify({
+      time_unix_nano: '1782190800000000000',
+      'event.id': 'normal-hook-event',
+      'event.name': 'other',
+      'gen_ai.session.id': 'session-normal-shared',
+      'gen_ai.turn.id': 'session-normal-shared:t1',
+      'gen_ai.agent.type': 'codex',
+      'gen_ai.provider.name': 'openai',
+    }) + '\n', 'utf8');
+
+    await waitFor(() => normalEntries.length === 1);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await recoveryInput.stop();
+    await normalInput.stop();
+
+    expect(normalEntries).toHaveLength(1);
+    expect(normalEntries[0]?.['event.id']).toBe('normal-hook-event');
+    expect(recoveryEntries).toEqual([]);
+    expect(stateStore.get('codex-log').lastOffset).toBeGreaterThan(0);
+    await expect(fs.access(diagnosticDir)).rejects.toThrow();
+  });
+
   it('exports a transcript-backed cancelled turn with completed and pending tools', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-aborted-turn-'));
     tempDirs.push(root);
@@ -72,11 +288,39 @@ describe('CodexAbortedTurnInput', () => {
       'gen_ai.agent.type': 'codex',
       'gen_ai.response.finish_reasons': ['cancelled'],
       'agent.codex.turn_status': 'interrupted',
-      'gen_ai.usage.input_tokens': 120,
-      'gen_ai.usage.output_tokens': 12,
     });
+    expect(finalResponse?.['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(finalResponse?.['gen_ai.usage.output_tokens']).toBeUndefined();
     expect(finalResponse?.['error.type']).toBeUndefined();
     expect(finalResponse?.['gen_ai.output.messages']).toBeUndefined();
+
+    const firstToolResponse = entries.find(entry =>
+      entry['event.name'] === 'llm.response'
+      && entry['gen_ai.step.id']?.endsWith(':s1'),
+    );
+    expect(firstToolResponse?.['gen_ai.output.messages']).toEqual([{
+      role: 'assistant',
+      parts: [
+        { type: 'reasoning', content: 'I will inspect the project first.' },
+        {
+          type: 'tool_call',
+          id: 'call-bash',
+          name: 'exec_command',
+          arguments: { command: 'pwd', workdir: '/tmp/project' },
+        },
+      ],
+      finish_reason: 'tool_call',
+    }]);
+
+    const secondToolResponse = entries.find(entry =>
+      entry['event.name'] === 'llm.response'
+      && entry['gen_ai.step.id']?.endsWith(':s2'),
+    );
+    expect(secondToolResponse).toMatchObject({
+      'gen_ai.usage.input_tokens': 120,
+      'gen_ai.usage.output_tokens': 12,
+      'gen_ai.usage.total_tokens': 132,
+    });
 
     const completedTool = entries.find(entry =>
       entry['event.name'] === 'tool.result'
@@ -154,6 +398,38 @@ describe('CodexAbortedTurnInput', () => {
       role: 'assistant',
       parts: [{ type: 'reasoning', content: 'I will inspect the project first.' }],
       finish_reason: 'cancelled',
+    }]);
+  });
+
+  it('merges all user transcript messages into the recovered prompt', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-aborted-prompt-'));
+    tempDirs.push(root);
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const { input, entries, sessionDir } = await createInput(root, stateStore);
+    const fixture = await fs.readFile(FIXTURE, 'utf8');
+    const environment = JSON.stringify({
+      timestamp: '2026-06-22T08:57:48.025Z',
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: '<environment_context>cwd=/tmp/project</environment_context>' }],
+      },
+    });
+    const lines = fixture.trimEnd().split('\n');
+    lines.splice(3, 0, environment);
+    await writeTranscript(sessionDir, lines.join('\n') + '\n', 'rollout-merged-prompt.jsonl');
+    await waitFor(() => entries.some(entry => entry['event.name'] === 'other'));
+    await input.stop();
+
+    const promptEntry = entries.find(entry => entry['event.name'] === 'other');
+    expect(promptEntry?.['gen_ai.input.messages_delta']).toEqual([{
+      role: 'user',
+      parts: [{
+        type: 'text',
+        content: '<environment_context>cwd=/tmp/project</environment_context>\n\nsolve the task',
+      }],
     }]);
   });
 

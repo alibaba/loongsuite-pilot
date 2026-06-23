@@ -1,6 +1,7 @@
 import type { JsonValue } from '../../types/index.js';
 
 export const MAX_EMITTED_ABORTED_TURNS = 100;
+export const MAX_PENDING_COMPLETED_TURNS = 100;
 
 export interface CodexActiveTurn {
   turnId: string;
@@ -13,7 +14,16 @@ export interface CodexAbortedCheckpoint {
   scanOffset: number;
   activeTurn: CodexActiveTurn | null;
   latestSessionMetaOffset: number | null;
+  latestSessionId: string | null;
   emittedAbortedTurnIds: string[];
+  pendingCompletedTurns: CodexCompletedTurn[];
+  emittedHookGapTurnIds: string[];
+}
+
+export interface CodexCompletedTurn {
+  turnId: string;
+  sessionId: string;
+  completedAtMs: number;
 }
 
 export interface CodexTranscriptMeta {
@@ -23,14 +33,34 @@ export interface CodexTranscriptMeta {
   toolDefinitions?: JsonValue;
 }
 
-export interface CodexExtractedTool {
+export interface CodexTimelineAssistantMessage {
+  kind: 'assistant_message';
+  timestampMs: number;
+  sequence: number;
+  content: string;
+}
+
+export interface CodexTimelineToolCall {
+  kind: 'tool_call';
+  timestampMs: number;
+  sequence: number;
   callId: string;
   name: string;
   input: JsonValue | undefined;
-  startedAtMs: number;
-  output?: JsonValue;
-  completedAtMs?: number;
 }
+
+export interface CodexTimelineToolResult {
+  kind: 'tool_result';
+  timestampMs: number;
+  sequence: number;
+  callId: string;
+  output?: JsonValue;
+}
+
+export type CodexTimelineEvent =
+  | CodexTimelineAssistantMessage
+  | CodexTimelineToolCall
+  | CodexTimelineToolResult;
 
 export interface CodexTokenUsage {
   inputTokens: number;
@@ -38,6 +68,12 @@ export interface CodexTokenUsage {
   cachedInputTokens: number;
   reasoningOutputTokens?: number;
   totalTokens: number;
+}
+
+export interface CodexTokenUsageSample {
+  timestampMs: number;
+  sequence: number;
+  usage: CodexTokenUsage;
 }
 
 export interface CodexExtractedAbortedTurn {
@@ -53,7 +89,6 @@ export interface CodexExtractedAbortedTurn {
   startedAtMs: number;
   abortedAtMs: number;
   reason: string;
-  agentMessages: string[];
-  tools: CodexExtractedTool[];
-  tokenUsage?: CodexTokenUsage;
+  timeline: CodexTimelineEvent[];
+  usageSamples: CodexTokenUsageSample[];
 }

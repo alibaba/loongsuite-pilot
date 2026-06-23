@@ -13,13 +13,20 @@ import {
 } from './codex-aborted-turn-extractor.js';
 import {
   MAX_EMITTED_ABORTED_TURNS,
+  MAX_PENDING_COMPLETED_TURNS,
   type CodexAbortedCheckpoint,
 } from './codex-aborted-turn-types.js';
 
 const DEFAULT_SESSION_DIR = '~/.codex/sessions';
+const DEFAULT_HOOK_STATE_DIR = '~/.loongsuite-pilot/state/codex/sessions';
+const DEFAULT_DIAGNOSTIC_DIR = '~/.loongsuite-pilot/logs/diagnostics';
+const DEFAULT_HOOK_GAP_GRACE_MS = 60_000;
 
 export interface CodexAbortedTurnInputOptions extends InputOptions {
   sessionDir?: string;
+  hookStateDir?: string;
+  diagnosticDir?: string;
+  hookGapGraceMs?: number;
 }
 
 interface JsonLine {
@@ -34,6 +41,9 @@ export class CodexAbortedTurnInput extends BaseInput {
   readonly collectionMethod = CollectionMethod.SessionFilePolling;
 
   private readonly sessionDir: string;
+  private readonly hookStateDir: string;
+  private readonly diagnosticDir: string;
+  private readonly hookGapGraceMs: number;
   private collecting: Promise<AgentActivityEntry[]> | null = null;
 
   constructor(opts: CodexAbortedTurnInputOptions) {
@@ -42,6 +52,9 @@ export class CodexAbortedTurnInput extends BaseInput {
       pollIntervalMs: opts.pollIntervalMs ?? 30_000,
     });
     this.sessionDir = opts.sessionDir ?? resolveHome(DEFAULT_SESSION_DIR);
+    this.hookStateDir = opts.hookStateDir ?? resolveHome(DEFAULT_HOOK_STATE_DIR);
+    this.diagnosticDir = opts.diagnosticDir ?? resolveHome(DEFAULT_DIAGNOSTIC_DIR);
+    this.hookGapGraceMs = opts.hookGapGraceMs ?? DEFAULT_HOOK_GAP_GRACE_MS;
   }
 
   static getWatchPaths(): string[] {
@@ -92,14 +105,21 @@ export class CodexAbortedTurnInput extends BaseInput {
         scanOffset: 0,
         activeTurn: null,
         latestSessionMetaOffset: null,
+        latestSessionId: null,
         emittedAbortedTurnIds: [],
+        pendingCompletedTurns: [],
+        emittedHookGapTurnIds: [],
       };
     } else if (checkpoint.inode !== stat.ino) {
       await this.baselineFile(filePath, key);
       return [];
     }
 
-    if (stat.size <= checkpoint.scanOffset) return [];
+    if (stat.size <= checkpoint.scanOffset) {
+      await this.emitDueHookGapWarnings(checkpoint);
+      this.saveCheckpoint(key, checkpoint);
+      return [];
+    }
     const lines = await readJsonLines(filePath, checkpoint.scanOffset, stat.size);
     if (lines.nextOffset === checkpoint.scanOffset) return [];
 
@@ -109,6 +129,7 @@ export class CodexAbortedTurnInput extends BaseInput {
       if (!payload) continue;
       if (line.record.type === 'session_meta') {
         checkpoint.latestSessionMetaOffset = line.startOffset;
+        checkpoint.latestSessionId = extractCodexTranscriptMeta(line.record)?.sessionId ?? checkpoint.latestSessionId;
         continue;
       }
 
@@ -136,7 +157,22 @@ export class CodexAbortedTurnInput extends BaseInput {
         continue;
       }
 
-      if (line.record.type !== 'event_msg' || payload.type !== 'turn_aborted') continue;
+      if (line.record.type !== 'event_msg') continue;
+      if (payload.type === 'task_complete') {
+        const turnId = stringValue(payload.turn_id);
+        if (turnId && checkpoint.activeTurn?.turnId === turnId && !checkpoint.emittedHookGapTurnIds.includes(turnId)) {
+          checkpoint.pendingCompletedTurns.push({
+            turnId,
+            sessionId: checkpoint.latestSessionId ?? sessionIdFromTranscriptPath(filePath),
+            completedAtMs: timestampMs(line.record),
+          });
+          checkpoint.pendingCompletedTurns = checkpoint.pendingCompletedTurns
+            .slice(-MAX_PENDING_COMPLETED_TURNS);
+          checkpoint.activeTurn = null;
+        }
+        continue;
+      }
+      if (payload.type !== 'turn_aborted') continue;
       const turnId = stringValue(payload.turn_id);
       if (!turnId || checkpoint.activeTurn?.turnId !== turnId) continue;
       if (!checkpoint.emittedAbortedTurnIds.includes(turnId)) {
@@ -151,6 +187,7 @@ export class CodexAbortedTurnInput extends BaseInput {
     }
 
     checkpoint.scanOffset = lines.nextOffset;
+    await this.emitDueHookGapWarnings(checkpoint);
     this.saveCheckpoint(key, checkpoint);
     return entries;
   }
@@ -193,7 +230,10 @@ export class CodexAbortedTurnInput extends BaseInput {
       scanOffset: stat.size,
       activeTurn: null,
       latestSessionMetaOffset,
+      latestSessionId: null,
       emittedAbortedTurnIds: [],
+      pendingCompletedTurns: [],
+      emittedHookGapTurnIds: [],
     });
   }
 
@@ -226,9 +266,15 @@ export class CodexAbortedTurnInput extends BaseInput {
       latestSessionMetaOffset: typeof value.latestSessionMetaOffset === 'number'
         ? value.latestSessionMetaOffset
         : null,
+      latestSessionId: typeof value.latestSessionId === 'string' ? value.latestSessionId : null,
       emittedAbortedTurnIds: Array.isArray(value.emittedAbortedTurnIds)
         ? value.emittedAbortedTurnIds.filter((id): id is string => typeof id === 'string')
           .slice(0, MAX_EMITTED_ABORTED_TURNS)
+        : [],
+      pendingCompletedTurns: readCompletedTurns(value.pendingCompletedTurns),
+      emittedHookGapTurnIds: Array.isArray(value.emittedHookGapTurnIds)
+        ? value.emittedHookGapTurnIds.filter((id): id is string => typeof id === 'string')
+          .slice(0, MAX_PENDING_COMPLETED_TURNS)
         : [],
     };
   }
@@ -242,6 +288,52 @@ export class CodexAbortedTurnInput extends BaseInput {
         codexAbortedTurn: checkpoint,
       },
     });
+  }
+
+  private async emitDueHookGapWarnings(checkpoint: CodexAbortedCheckpoint): Promise<void> {
+    const now = Date.now();
+    const pending: typeof checkpoint.pendingCompletedTurns = [];
+    for (const completed of checkpoint.pendingCompletedTurns) {
+      if (now - completed.completedAtMs < this.hookGapGraceMs) {
+        pending.push(completed);
+        continue;
+      }
+      if (await this.hasHookState(completed.sessionId)) continue;
+      try {
+        await fs.mkdir(this.diagnosticDir, { recursive: true });
+        const day = new Date(completed.completedAtMs).toISOString().slice(0, 10);
+        await fs.appendFile(path.join(this.diagnosticDir, `codex-hook-gap-${day}.jsonl`), JSON.stringify({
+          type: 'codex_hook_missing',
+          session_id: completed.sessionId,
+          transcript_turn_id: completed.turnId,
+          completed_at: new Date(completed.completedAtMs).toISOString(),
+          detected_at: new Date(now).toISOString(),
+        }) + '\n', 'utf8');
+        this.logger.warn('Codex Hook state missing for completed transcript turn', {
+          sessionId: completed.sessionId,
+          transcriptTurnId: completed.turnId,
+        });
+        checkpoint.emittedHookGapTurnIds = [completed.turnId, ...checkpoint.emittedHookGapTurnIds]
+          .slice(0, MAX_PENDING_COMPLETED_TURNS);
+      } catch (error) {
+        this.logger.warn('failed to write Codex Hook gap diagnostic', {
+          sessionId: completed.sessionId,
+          transcriptTurnId: completed.turnId,
+          error: String(error),
+        });
+        pending.push(completed);
+      }
+    }
+    checkpoint.pendingCompletedTurns = pending;
+  }
+
+  private async hasHookState(sessionId: string): Promise<boolean> {
+    try {
+      await fs.access(path.join(this.hookStateDir, `${sessionId}.json`));
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -313,6 +405,19 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function readCompletedTurns(value: unknown): CodexAbortedCheckpoint['pendingCompletedTurns'] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(item => {
+    const record = asRecord(item);
+    const turnId = record && stringValue(record.turnId);
+    const sessionId = record && stringValue(record.sessionId);
+    const completedAtMs = record?.completedAtMs;
+    return turnId && sessionId && typeof completedAtMs === 'number'
+      ? [{ turnId, sessionId, completedAtMs }]
+      : [];
+  }).slice(-MAX_PENDING_COMPLETED_TURNS);
 }
 
 function timestampMs(record: Record<string, unknown>): number {
