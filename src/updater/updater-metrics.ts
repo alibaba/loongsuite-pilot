@@ -5,6 +5,7 @@ import { appendLine, ensureDir } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveLocalIp } from '../utils/network-utils.js';
 import { flattenToStrings } from '../utils/record-utils.js';
+import { isPidFileRunning } from '../utils/pid-utils.js';
 import { sendAlarm, sendStatus } from '../internal/sender.js';
 import type { AlarmLevel, AlarmType, AlarmEntry } from '../metrics/alarm-manager.js';
 
@@ -169,18 +170,6 @@ export class UpdaterMetrics {
   }
 }
 
-function isPidFileRunning(pidFile: string): boolean {
-  try {
-    const raw = fs.readFileSync(pidFile, 'utf-8');
-    const pid = Number(raw.trim());
-    if (!Number.isInteger(pid) || pid <= 0) return false;
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function isCollectorRunning(pidFile: string): boolean {
   if (isPidFileRunning(pidFile)) return true;
   if (process.platform !== 'win32') return false;
@@ -198,3 +187,4 @@ function isCollectorRunning(pidFile: string): boolean {
     return false;
   }
 }
+

@@ -13,7 +13,11 @@ export type AlarmType =
   | 'INPUT_STOP_ALARM'
   | 'SERVICE_NOT_RUNNING_ALARM'
   | 'UPDATER_FAILURE_ALARM'
-  | 'USER_ID_FORMAT_ALARM';
+  | 'USER_ID_FORMAT_ALARM'
+  | 'DEGRADED_STARTUP_ALARM'
+  | 'UPDATER_NOT_RUNNING_ALARM'
+  | 'BROKEN_VERSION_POINTER_ALARM'
+  | 'INVALID_NODE_BIN_ALARM';
 
 export interface AlarmContext {
   input_name?: string;
