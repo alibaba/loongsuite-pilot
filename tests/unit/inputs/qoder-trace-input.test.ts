@@ -393,9 +393,9 @@ describe('QoderTraceInput token-enricher', () => {
   });
 
   describe('enrichCliTurn with systemPrompt', () => {
-    it('injects system prompt into first llm.request without step_id', () => {
+    it('injects system prompt into first llm.request with step_id', () => {
       const entries: AgentActivityEntry[] = [
-        makeEntry({ 'event.name': 'llm.request', 'gen_ai.step.id': undefined } as any),
+        makeEntry({ 'event.name': 'other', 'gen_ai.step.id': undefined } as any),
         makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.request', 'gen_ai.step.id': 'turn-1:s1' } as any),
         makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response' }),
       ];
@@ -414,8 +414,9 @@ describe('QoderTraceInput token-enricher', () => {
 
       enrichCliTurn(entries, segments, 'You are a helpful assistant.');
 
-      const sysInstr = (entries[0] as Record<string, unknown>)['gen_ai.system_instructions'];
+      const sysInstr = (entries[1] as Record<string, unknown>)['gen_ai.system_instructions'];
       expect(sysInstr).toEqual([{ type: 'text', content: 'You are a helpful assistant.' }]);
+      expect((entries[0] as Record<string, unknown>)['gen_ai.system_instructions']).toBeUndefined();
     });
 
     it('does not inject system prompt when undefined', () => {

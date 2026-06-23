@@ -12,7 +12,7 @@ export function enrichCliTurn(
 ): void {
   if (systemPrompt) {
     const firstReq = entries.find(e =>
-      e['event.name'] === 'llm.request' && !e['gen_ai.step.id'],
+      e['event.name'] === 'llm.request' && !!e['gen_ai.step.id'],
     );
     if (firstReq) {
       (firstReq as Record<string, unknown>)['gen_ai.system_instructions'] = [
