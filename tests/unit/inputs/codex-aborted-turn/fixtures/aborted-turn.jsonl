@@ -1,0 +1,10 @@
+{"timestamp":"2026-06-22T08:57:48.000Z","type":"session_meta","payload":{"id":"session-aborted","model_provider":"openai","base_instructions":{"text":"System instructions"},"dynamic_tools":[]}}
+{"timestamp":"2026-06-22T08:57:48.010Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-aborted"}}
+{"timestamp":"2026-06-22T08:57:48.020Z","type":"turn_context","payload":{"turn_id":"turn-aborted","cwd":"/tmp/project","model":"gpt-5.4-mini","developer_instructions":"Developer instructions"}}
+{"timestamp":"2026-06-22T08:57:48.030Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"solve the task"}]}}
+{"timestamp":"2026-06-22T08:57:49.000Z","type":"event_msg","payload":{"type":"agent_message","message":"I will inspect the project first.","phase":"commentary"}}
+{"timestamp":"2026-06-22T08:57:50.000Z","type":"response_item","payload":{"type":"function_call","call_id":"call-bash","name":"exec_command","arguments":"{\"command\":\"pwd\",\"workdir\":\"/tmp/project\"}"}}
+{"timestamp":"2026-06-22T08:57:51.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-bash","output":"{\"stdout\":\"/tmp/project\"}"}}
+{"timestamp":"2026-06-22T08:57:52.000Z","type":"response_item","payload":{"type":"function_call","call_id":"call-pending","name":"write_stdin","arguments":"{\"session_id\":1,\"chars\":\"q\"}"}}
+{"timestamp":"2026-06-22T08:57:53.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":80,"output_tokens":12,"reasoning_output_tokens":4,"total_tokens":132}}}}
+{"timestamp":"2026-06-22T08:57:54.000Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-aborted","reason":"interrupted","completed_at":1782118674,"duration_ms":6000}}

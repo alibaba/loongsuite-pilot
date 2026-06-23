@@ -181,3 +181,20 @@ describe('codex parseTranscript - tool response_item variants', () => {
     }
   });
 });
+
+describe('codex parseTranscript - interrupted turns', () => {
+  test('returns turn ids that ended with turn_aborted', () => {
+    const transcript = path.join(fs.mkdtempSync(path.join(process.cwd(), '.tmp-codex-parser-')), 'rollout.jsonl');
+    try {
+      fs.writeFileSync(transcript, [
+        { timestamp: '2026-05-27T10:00:00Z', type: 'turn_context', payload: { turn_id: 'turn-aborted', model: 'gpt-5.5' }},
+        { timestamp: '2026-05-27T10:00:01Z', type: 'event_msg', payload: { type: 'turn_aborted', turn_id: 'turn-aborted', reason: 'interrupted' }},
+      ].map((record) => JSON.stringify(record)).join('\n') + '\n', 'utf-8');
+
+      const data = parseTranscript(transcript);
+      expect(data.abortedTurnIds).toEqual(new Set(['turn-aborted']));
+    } finally {
+      fs.rmSync(path.dirname(transcript), { recursive: true, force: true });
+    }
+  });
+});

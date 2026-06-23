@@ -37,6 +37,7 @@ import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
 import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
+import { CodexAbortedTurnInput } from '../inputs/codex-aborted-turn/codex-aborted-turn-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
@@ -87,6 +88,7 @@ export class Orchestrator extends EventEmitter {
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
     'codex-log': 'codex',
+    'codex-aborted-turn': 'codex',
     'opencode-log': 'opencode',
     'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
@@ -859,6 +861,24 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- Codex interrupted turns (transcript tailer) ---
+    const codexAbortedTurnInput = new CodexAbortedTurnInput({
+      stateStore: this.stateStore,
+    });
+    this.inputManager.registerInput(codexAbortedTurnInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(codexAbortedTurnInput, {
+        watchPaths: CodexAbortedTurnInput.getWatchPaths(),
+        isAvailable: CodexAbortedTurnInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codex-aborted-turn']) &&
+          this.agentControlManager.resolveEnabled(
+            'codex-aborted-turn',
+            listenerCfg['codex-aborted-turn']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['codex-aborted-turn']?.pollInterval,
+      }),
+    );
+
     // --- OpenCode Log (event_t plugin JSONL) ---
     const opencodeLogDir = path.join(this.dataDir, 'logs', 'opencode');
     const opencodeLogInput = new OpenCodeLogInput({
@@ -1080,5 +1100,4 @@ export class Orchestrator extends EventEmitter {
     return this.alarmManager;
   }
 }
-
 
