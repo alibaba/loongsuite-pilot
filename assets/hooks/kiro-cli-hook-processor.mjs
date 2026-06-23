@@ -216,12 +216,16 @@ async function cmdStop() {
   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
 
   if (source === 'session_jsonl') {
-    saveSessionOffset(cwd, transcript.updatedMs || Date.now());
+    if (transcript.updatedMs) {
+      saveSessionOffset(cwd, transcript.updatedMs);
+    }
     if (transcript.sessionId) {
       markSessionReported(cwd, transcript.sessionId);
     }
   } else {
-    saveOffset(cwd, transcript.updatedMs || Date.now());
+    if (transcript.updatedMs) {
+      saveOffset(cwd, transcript.updatedMs);
+    }
   }
 }
 
@@ -430,7 +434,7 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
           'gen_ai.tool.call.result': toJsonValue(extractToolResultText(toolResult)),
           'tool.result.status': isErr ? 'error' : 'success',
           'kiro.time_source': matched ? 'processor_receive' : 'transcript_estimate',
-          'kiro.time_precision': matched ? '1s' : (isSessionJsonl ? 'turn_estimate' : 'ms'),
+          'kiro.time_precision': matched ? 'ms' : (isSessionJsonl ? 'turn_estimate' : 'ms'),
         };
         if (isErr) {
           resultRecord['error.type'] = 'ToolError';
