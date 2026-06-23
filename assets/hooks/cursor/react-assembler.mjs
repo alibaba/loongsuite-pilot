@@ -31,6 +31,7 @@ export function assembleTurn(journalEvents, options = {}) {
   const runtimeConfig = options.runtimeConfig || {};
   const stopConversationId = options.stopConversationId;
   const transcriptPath = options.transcriptPath;
+  const variant = options.variant || 'cursor';
 
   // On Windows fallback: try to extract correct user text from transcript
   // (transcript-assembler may have failed, but user prompt is still recoverable)
@@ -84,13 +85,14 @@ export function assembleTurn(journalEvents, options = {}) {
     trace_id: traceId,
     'gen_ai.session.id': parentConvId,
     'gen_ai.turn.id': turnId,
-    'gen_ai.agent.type': 'cursor',
+    'gen_ai.agent.type': variant,
     'user.id': userId,
   };
 
   const records = [];
 
-  // User-hook llm.request (no step_id, no model → ENTRY input)
+  // User-hook: user prompt is not an LLM call — emit as "other" so converter
+  // merges messages_delta into ENTRY span without generating a standalone LLM span.
   const userPrompt = transcriptUserPrompt || promptEvent.prompt;
   if (userPrompt) {
     records.push(applyPolicy({
@@ -99,7 +101,6 @@ export function assembleTurn(journalEvents, options = {}) {
       'event.id': crypto.randomUUID(),
       'event.name': 'other',
       ...baseFields,
-      'gen_ai.provider.name': inferProvider(model),
       'gen_ai.input.messages_delta': [
         { role: 'user', parts: [{ type: 'text', content: userPrompt }] },
       ],

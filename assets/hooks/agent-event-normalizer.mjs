@@ -280,6 +280,7 @@ const AGENT_TYPE_TO_CONFIG_KEY = {
   'qoder-cn': 'qoder-cn',
   'qoder-cn-hook': 'qoder-cn',
   'cursor-hook': 'cursor',
+  'cursor-cli': 'cursor',
 };
 
 export function applyHookContentPolicy(record, runtimeConfig = {}) {

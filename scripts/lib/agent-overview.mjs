@@ -137,7 +137,7 @@ export function classifyRecord(record) {
     attributes.entrypoint ?? record['agent.entrypoint'] ?? record.entrypoint,
   ).toLowerCase();
 
-  if (agentType === 'cursor') return 'cursor';
+  if (agentType === 'cursor' || agentType === 'cursor-cli') return 'cursor';
   if (agentType === 'qoder-work' || variant === 'qoder-work') return 'qoder-work';
   if (agentType === 'qoder-cli' || variant === 'qoder-cli' || entrypoint === 'cli') return 'qoder-cli';
   if (agentType === 'qoder' || variant === 'qoder') return 'qoder';

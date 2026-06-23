@@ -83,6 +83,29 @@ function writeEmptyResponse() {
   process.stdout.write('{}\n');
 }
 
+const CLI_VERSION_PATTERN = /^\d{4}\.\d{2}\.\d{2}/;
+
+function inferVariant(events) {
+  for (const ev of events) {
+    if (ev.cursor_version && CLI_VERSION_PATTERN.test(ev.cursor_version)) return 'cursor-cli';
+  }
+  return 'cursor';
+}
+
+function compactJournal(allEvents, consumedConversationIds) {
+  const pendingTurnConvIds = new Set();
+  const remaining = [];
+  for (const ev of allEvents) {
+    if (consumedConversationIds.has(ev.conversation_id)) continue;
+    if (ev.hook_event === 'beforeSubmitPrompt') pendingTurnConvIds.add(ev.conversation_id);
+  }
+  for (const ev of allEvents) {
+    if (consumedConversationIds.has(ev.conversation_id)) continue;
+    if (pendingTurnConvIds.has(ev.conversation_id)) remaining.push(ev);
+  }
+  rewriteJournal(remaining, allEvents);
+}
+
 async function main() {
   const dataDir = resolveDataDir();
   const raw = await readStdin();
@@ -188,6 +211,22 @@ async function main() {
         return;
       }
 
+      // ─── Deferred-stop for Cursor CLI ───
+      // Cursor CLI fires stop BEFORE afterAgentResponse. If there's a prompt but
+      // no response yet for this conversation, defer assembly until the late
+      // response arrives. IDE sessions always assemble immediately (abort/error
+      // scenarios must not lose data).
+      const convId = internalEvent.conversation_id;
+      const variant = inferVariant(allEvents);
+      const hasResponse = allEvents.some(e =>
+        e.hook_event === 'afterAgentResponse' && e.conversation_id === convId
+      );
+      if (variant === 'cursor-cli' && !hasResponse) {
+        // defer — afterAgentResponse handler will trigger assembly
+        writeEmptyResponse();
+        return;
+      }
+
       const runtimeConfig = loadHookRuntimeConfig(dataDir);
       let records;
       let consumedConversationIds;
@@ -198,11 +237,11 @@ async function main() {
         const transcriptRecords = buildCursorRecordsFromTranscript(
           internalEvent.transcript_path,
           allEvents,
-          { runtimeConfig, stopConversationId: internalEvent.conversation_id }
+          { runtimeConfig, stopConversationId: convId }
         );
         if (transcriptRecords && transcriptRecords.length > 0) {
           records = transcriptRecords;
-          consumedConversationIds = new Set([internalEvent.conversation_id]);
+          consumedConversationIds = new Set([convId]);
         }
       }
 
@@ -210,7 +249,8 @@ async function main() {
       if (!records) {
         const result = assembleTurn(allEvents, {
           runtimeConfig,
-          stopConversationId: internalEvent.conversation_id,
+          variant,
+          stopConversationId: convId,
           transcriptPath: internalEvent.transcript_path,
         });
         records = result.records;
@@ -223,25 +263,49 @@ async function main() {
         await appendBatchJsonl(historyFile, records);
       }
 
-      // Rewrite journal: keep only events that belong to a pending user turn
-      // (has beforeSubmitPrompt but no stop yet). Drop everything else:
-      // consumed parent, child sessions, subagent meta, and orphan delayed events.
-      const pendingTurnConvIds = new Set();
-      const remaining = [];
-      for (const ev of allEvents) {
-        if (consumedConversationIds.has(ev.conversation_id)) continue;
-        if (ev.hook_event === 'beforeSubmitPrompt') pendingTurnConvIds.add(ev.conversation_id);
-      }
-      for (const ev of allEvents) {
-        if (consumedConversationIds.has(ev.conversation_id)) continue;
-        if (pendingTurnConvIds.has(ev.conversation_id)) remaining.push(ev);
-        // else: orphan child/delayed event without a pending parent turn → drop
-      }
-      rewriteJournal(remaining, allEvents);
+      compactJournal(allEvents, consumedConversationIds);
     } catch (err) {
       await appendErrorJsonl(dataDir, now, {
         stage: 'assemble',
         'error.type': 'assemble_failed',
+        'error.message': err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // ─── Deferred-stop compensation: assemble when late response arrives ───
+  // When stop was deferred (no response yet), afterAgentResponse triggers assembly.
+  if (internalEvent.hook_event === 'afterAgentResponse') {
+    try {
+      const allEvents = readAllEvents();
+      const convId = internalEvent.conversation_id;
+      const hasStop = allEvents.some(e =>
+        e.hook_event === 'stop' && e.conversation_id === convId
+      );
+      if (hasStop) {
+        const runtimeConfig = loadHookRuntimeConfig(dataDir);
+        const variant = inferVariant(allEvents);
+        // Note: transcriptPath is deliberately omitted here — assembleTurn falls
+        // back to stopEvent?.transcript_path internally. Passing internalEvent's
+        // transcriptPath (from afterAgentResponse) would be incorrect.
+        const result = assembleTurn(allEvents, {
+          runtimeConfig,
+          variant,
+          stopConversationId: convId,
+        });
+
+        if (result.records.length > 0) {
+          const day = localDateString(now);
+          const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
+          await appendBatchJsonl(historyFile, result.records);
+        }
+
+        compactJournal(allEvents, result.consumedConversationIds);
+      }
+    } catch (err) {
+      await appendErrorJsonl(dataDir, now, {
+        stage: 'deferred_assemble',
+        'error.type': 'deferred_assemble_failed',
         'error.message': err instanceof Error ? err.message : String(err),
       });
     }
