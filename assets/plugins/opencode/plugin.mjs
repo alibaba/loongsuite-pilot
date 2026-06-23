@@ -190,7 +190,7 @@ function getSession(sessionID) {
   let s = sessions.get(sessionID);
   if (!s) {
     s = {
-      turnSeq: sessionTurnSeqs.get(sessionID) || 0,
+      turnSeq: sessionTurnSeqs.get(sessionID) ?? 0,
       currentTurn: null,
       systemPrompt: null,
       systemInstructionsParts: null,
