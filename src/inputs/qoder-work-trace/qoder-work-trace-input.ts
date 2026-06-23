@@ -741,6 +741,12 @@ export class QoderWorkTraceInput extends BaseInput {
     evictNestedMapValues(this.subagentTurns, seenAtMs => seenAtMs >= cutoff);
     evictNestedMapValues(this.inFlightPairs, pair => pair.seenAtMs >= cutoff);
     evictMapValues(this.sdkTokenPairs, pair => pair.seenAtMs >= cutoff);
+    // Drop intercept tokens older than the TTL so a stale record from a prior
+    // session can't mismatch a fresh response. (readInterceptTokenState already
+    // re-reads within a 2h window each cycle; this is a defense-in-depth trim.)
+    if (this.interceptTokens.length) {
+      this.interceptTokens = this.interceptTokens.filter(t => t.ts >= cutoff);
+    }
     for (const [sessionId, message] of this.sdkInFlightMessages) {
       if (message.seenAtMs < cutoff) this.sdkInFlightMessages.delete(sessionId);
     }

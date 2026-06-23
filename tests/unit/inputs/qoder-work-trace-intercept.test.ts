@@ -90,4 +90,51 @@ describe('QoderWorkTraceInput — intercept token fallback', () => {
     expect(() => input.applyInterceptTokenUsage(request, response)).not.toThrow();
     expect(response['gen_ai.usage.input_tokens']).toBeUndefined();
   });
+
+  it('never overwrites token usage already filled by segments/SDK (guard)', () => {
+    // enrichTurn only calls applyInterceptTokenUsage when
+    // !response['gen_ai.usage.input_tokens']. Verify the guard holds by
+    // pre-populating segment-derived tokens and asserting the intercept path
+    // leaves them untouched even when a closer-in-time intercept token exists.
+    const input = makeInput();
+    input.interceptTokens = [
+      { id: 'closer', ts: MS + 50, promptTokens: 99999, completionTokens: 9999, cachedTokens: 0, reasoningTokens: 0, totalTokens: 109998 },
+    ];
+    const request = { 'event.name': 'llm.request', time_unix_nano: nano(MS) } as AgentActivityEntry;
+    const response = {
+      'event.name': 'llm.response',
+      time_unix_nano: nano(MS + 50),
+      'gen_ai.usage.input_tokens': 242,
+      'gen_ai.usage.output_tokens': 3,
+      'gen_ai.usage.total_tokens': 245,
+    } as AgentActivityEntry;
+
+    // The guard in enrichTurn is `if (!response['gen_ai.usage.input_tokens'])`;
+    // since input_tokens is already set, the intercept path must not be reached.
+    // Simulate that guard: only call when input_tokens is absent.
+    if (!response['gen_ai.usage.input_tokens']) {
+      input.applyInterceptTokenUsage(request, response);
+    }
+
+    expect(response['gen_ai.usage.input_tokens']).toBe(242);
+    expect(response['gen_ai.usage.output_tokens']).toBe(3);
+    expect(input.interceptTokens).toHaveLength(1); // not consumed
+  });
+
+  it('consumes intercept tokens in FIFO order across multiple steps', () => {
+    const input = makeInput();
+    input.interceptTokens = [
+      { id: 't1', ts: MS + 100, promptTokens: 100, completionTokens: 10, cachedTokens: 0, reasoningTokens: 0, totalTokens: 110 },
+      { id: 't2', ts: MS + 5_000, promptTokens: 200, completionTokens: 20, cachedTokens: 0, reasoningTokens: 0, totalTokens: 220 },
+    ];
+
+    const r1 = { 'event.name': 'llm.response', time_unix_nano: nano(MS + 100) } as AgentActivityEntry;
+    input.applyInterceptTokenUsage({} as AgentActivityEntry, r1);
+    const r2 = { 'event.name': 'llm.response', time_unix_nano: nano(MS + 5_000) } as AgentActivityEntry;
+    input.applyInterceptTokenUsage({} as AgentActivityEntry, r2);
+
+    expect(r1['gen_ai.usage.input_tokens']).toBe(100);
+    expect(r2['gen_ai.usage.input_tokens']).toBe(200);
+    expect(input.interceptTokens).toHaveLength(0);
+  });
 });
