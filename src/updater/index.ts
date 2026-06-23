@@ -30,11 +30,15 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  const userId = process.env.LOONGSUITE_PILOT_USER_ID
+    ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
+
   const version = readInstalledVersion(dataDir);
   const metrics = new UpdaterMetrics({
     dataDir,
     version,
     collectorPidFile: path.join(dataDir, 'loongsuite-pilot.pid'),
+    userId,
   });
   await metrics.start();
 
