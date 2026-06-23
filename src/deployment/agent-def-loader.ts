@@ -126,6 +126,7 @@ export class AgentDefLoader {
     result = resolveHome(result);
 
     if (process.platform === 'win32') {
+      result = result.replace(/\\/g, '/');
       result = result.replace(/\.sh(?=\s|$)/, '.ps1');
     }
     return result;

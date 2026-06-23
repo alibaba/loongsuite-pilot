@@ -9,11 +9,10 @@
   "hook": {
     "settingsPath": "~/.qoder/settings.json",
     "events": ["Stop"],
-    "hookCommand": "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder",
+    "hookCommand": "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",
-    "rawCommand": true,
-    "replaceHookCommands": ["$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli"]
+    "replaceHookCommands": ["$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli", "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder"]
   },
   "input": {
     "type": "hook-jsonl",
