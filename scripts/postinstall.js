@@ -11,6 +11,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -158,6 +159,23 @@ function main() {
     } catch (error) {
       // Non-critical, don't fail
       console.error(`  ✗ Failed to create intercept.js stub:`, error.message);
+    }
+  }
+
+  // Activate the QoderWork worker-runtime wrapper (macOS only).
+  // QoderWork 0.6.2+ reads QODER_WORKER_RUNTIME_PATH to locate its Node
+  // worker_thread runtime; pointing it at our wrapper lets us intercept token
+  // usage via a JSON.parse hook. macOS GUI apps only see env vars set via
+  // launchctl. Non-fatal on failure (CI, non-macOS, missing launchctl).
+  if (process.platform === 'darwin') {
+    const wrapperPath = path.join(HOOKS_TARGET_DIR, 'qoderwork-runtime-wrapper.mjs');
+    if (fs.existsSync(wrapperPath)) {
+      try {
+        execFileSync('launchctl', ['setenv', 'QODER_WORKER_RUNTIME_PATH', wrapperPath], { stdio: 'ignore' });
+        console.log(`  ✓ Set QODER_WORKER_RUNTIME_PATH (restart QoderWork to take effect)`);
+      } catch (error) {
+        console.error(`  ✗ Failed to set QODER_WORKER_RUNTIME_PATH (non-fatal):`, error.message);
+      }
     }
   }
 }

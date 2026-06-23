@@ -902,6 +902,41 @@ remove_qodercli_token_intercept() {
     done
 }
 
+# QoderWork 0.6.2+ runs its LLM calls in a Node worker_thread and no longer
+# writes token data to local files. We point QODER_WORKER_RUNTIME_PATH at our
+# wrapper (assets/hooks/qoderwork-runtime-wrapper.mjs) so the worker loads it
+# instead of the real runtime; the wrapper installs the JSON.parse hook and
+# then imports the real runtime. macOS GUI apps read env vars set via launchctl.
+inject_qoderwork_runtime_wrapper() {
+    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder-work\|qoderwork'; then return 0; fi
+    [ "$(uname -s)" != "Darwin" ] && return 0
+
+    local wrapper_script="$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs"
+    if [ ! -f "$wrapper_script" ]; then return 0; fi
+
+    msg "==> 配置 QoderWork token 采集..." "==> Configuring QoderWork runtime wrapper..."
+    if command -v launchctl >/dev/null 2>&1; then
+        launchctl setenv QODER_WORKER_RUNTIME_PATH "$wrapper_script" 2>/dev/null || true
+        msg "    ✅ 已设置 QODER_WORKER_RUNTIME_PATH (请重启 QoderWork 生效)" \
+            "    ✅ Set QODER_WORKER_RUNTIME_PATH (restart QoderWork to take effect)"
+    else
+        msg "    ⚠️  launchctl 不可用，跳过 QoderWork token 采集配置" \
+            "    ⚠️  launchctl unavailable, skipped QoderWork token intercept"
+    fi
+    echo ""
+}
+
+remove_qoderwork_runtime_wrapper() {
+    [ "$(uname -s)" != "Darwin" ] && return 0
+    if command -v launchctl >/dev/null 2>&1; then
+        if launchctl getenv QODER_WORKER_RUNTIME_PATH >/dev/null 2>&1; then
+            launchctl unsetenv QODER_WORKER_RUNTIME_PATH 2>/dev/null || true
+            msg "    已清理 QODER_WORKER_RUNTIME_PATH (请重启 QoderWork 生效)" \
+                "    Cleaned up QODER_WORKER_RUNTIME_PATH (restart QoderWork to take effect)"
+        fi
+    fi
+}
+
 # ============================================================
 # Common: read VERSION file fields
 # ============================================================
@@ -1267,6 +1302,7 @@ cmd_install() {
     write_config
     install_loongsuite_pilot_command
     inject_qodercli_token_intercept
+    inject_qoderwork_runtime_wrapper
 
     msg "==> 启动服务..." "==> Starting service..."
     local _start_args=""
@@ -1569,6 +1605,7 @@ cmd_uninstall() {
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     remove_hook_configs
     remove_qodercli_token_intercept
+    remove_qoderwork_runtime_wrapper
     echo ""
 
     # Remove OTel Claude plugin

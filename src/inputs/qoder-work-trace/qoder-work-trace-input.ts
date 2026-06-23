@@ -14,10 +14,12 @@ import {
   resolveQoderWorkRoot,
   type SdkEvent,
 } from '../qoder-work-log/qoder-work-log-input.js';
+import { readInterceptData, type InterceptTokenData } from '../qoder-trace/intercept-token-reader.js';
 
 const NANO_PER_MILLI = 1_000_000n;
 const SEGMENT_TIMING_TOLERANCE_MS = 5 * 60 * 1000;
 const SDK_TOKEN_MATCH_TOLERANCE_MS = 5 * 1000;
+const INTERCEPT_TOKEN_MATCH_TOLERANCE_MS = 5 * 1000;
 const SEGMENT_STATE_TTL_MS = 60 * 60 * 1000;
 
 /**
@@ -62,6 +64,12 @@ export class QoderWorkTraceInput extends BaseInput {
   // The encoded workspace directory is a fast path; session-id lookup handles
   // writer encoding changes and non-POSIX workspace paths.
   private readonly segmentDirBySession: Map<string, CachedSegmentDir> = new Map();
+  // Intercept tokens captured by the qoderwork-runtime-wrapper hook
+  // (assets/hooks/qoderwork-runtime-wrapper.mjs), shared with the qodercli CLI
+  // intercept via ~/.loongsuite-pilot/logs/qodercli-intercept.jsonl. Used as a
+  // last-resort fallback when QoderWork 0.6.2+ reports zero token usage.
+  private interceptTokens: InterceptTokenData[] = [];
+  private interceptTokensSeenAtMs = 0;
 
   constructor(opts: QoderWorkTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
@@ -90,6 +98,8 @@ export class QoderWorkTraceInput extends BaseInput {
       // Read legacy SDK logs only for token compatibility. Segment data remains
       // authoritative for LLM/tool timing and model attribution.
       await this.readSdkTokenState();
+      // Refresh the intercept-token cache (QoderWork 0.6.2+ zero-usage fallback).
+      await this.readInterceptTokenState();
 
       // 1. Hook JSONL — primary source of structure.
       const { entries: rawEntries, isFirstRun, turnCount } = await this.readHookJsonl();
@@ -476,6 +486,11 @@ export class QoderWorkTraceInput extends BaseInput {
             hasSegmentUsage = this.applyUsage(response, pair.usage);
           }
           if (!hasSegmentUsage) this.applySdkTokenUsage(sessionId, request, response);
+          // QoderWork 0.6.2+ regression: SDK log reports zero token usage.
+          // Fall back to tokens captured by the runtime-wrapper intercept hook.
+          if (!response['gen_ai.usage.input_tokens']) {
+            this.applyInterceptTokenUsage(request, response);
+          }
         }
 
         this.applySegmentToolTiming(sessionId, stepEntries);
@@ -550,11 +565,66 @@ export class QoderWorkTraceInput extends BaseInput {
     this.applyUsage(response, pair);
   }
 
+  // Last-resort token source: match an intercept token record to this LLM call
+  // by timestamp. The wrapper writes the record's `ts` at JSON.parse time ≈
+  // response completion, which aligns with the segment-enriched response time.
+  // Each token is consumed once (FIFO splice) to avoid double-counting.
+  // Known limitation: the intercept JSONL is shared with the qodercli CLI, so a
+  // CLI token captured closest-in-time to a QoderWork response could mismatch —
+  // acceptable since both agents are rarely used simultaneously.
+  private applyInterceptTokenUsage(
+    request: AgentActivityEntry,
+    response: AgentActivityEntry,
+  ): void {
+    if (!this.interceptTokens.length) return;
+    const requestMs = nanoToMillis(request['time_unix_nano'] as string | undefined);
+    const responseMs = nanoToMillis(response['time_unix_nano'] as string | undefined);
+    if (requestMs === undefined && responseMs === undefined) return;
+
+    let index = -1;
+    let smallestDelta = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < this.interceptTokens.length; i++) {
+      const ref = responseMs ?? requestMs!;
+      const delta = Math.abs(this.interceptTokens[i].ts - ref);
+      if (delta <= INTERCEPT_TOKEN_MATCH_TOLERANCE_MS && delta < smallestDelta) {
+        index = i;
+        smallestDelta = delta;
+      }
+    }
+    if (index < 0) return;
+
+    const [token] = this.interceptTokens.splice(index, 1);
+    this.applyUsage(response, {
+      inputTokens: token.promptTokens,
+      outputTokens: token.completionTokens,
+      cacheReadInputTokens: token.cachedTokens,
+      // Intercept data has no cache_creation field — known limitation (same as CLI).
+      cacheCreationInputTokens: undefined,
+    });
+  }
+
   // ─── SDK token compatibility ─────────────────────────────────────────────
 
   private async readSdkTokenState(): Promise<void> {
     for (const filePath of await this.discoverSdkLogFiles()) {
       await this.readSdkTokenFile(filePath);
+    }
+  }
+
+  // Read externally-intercepted token records written by
+  // qoderwork-runtime-wrapper.mjs (shared JSONL with the qodercli CLI intercept).
+  // Refreshed once per collect() cycle; consumed FIFO by applyInterceptTokenUsage.
+  private async readInterceptTokenState(): Promise<void> {
+    const now = Date.now();
+    // Cache for the poll interval window to avoid re-reading on rapid re-entrancy.
+    if (this.interceptTokensSeenAtMs !== 0 && now - this.interceptTokensSeenAtMs < 5_000) return;
+    this.interceptTokensSeenAtMs = now;
+    try {
+      const { tokens } = await readInterceptData(now - 2 * 60 * 60 * 1000);
+      this.interceptTokens = tokens;
+    } catch (err) {
+      this.logger.debug('intercept token read failed', { error: String(err) });
+      this.interceptTokens = [];
     }
   }
 
