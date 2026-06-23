@@ -353,3 +353,184 @@ describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor 端到端（DB transcrip
     expect(fsReadCalls[0]['kiro.time_source']).toBe('processor_receive');
   });
 });
+
+// ─── session JSONL fallback 端到端 ───
+
+const SESSION_FIXTURE_DIR_NAME = 'session_fixtures';
+const SESSION_CWD = '/tmp/kiro_session_probe';
+
+function setupSessionFixtures(dataDir) {
+  const fakeHome = path.join(dataDir, 'fake-home');
+  const sessionDir = path.join(fakeHome, '.kiro', 'sessions', 'cli');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const sidecar = JSON.parse(
+    fs.readFileSync(path.join(__dirname, 'fixtures/session_sidecar.json'), 'utf-8'),
+  );
+  const jsonlRaw = fs.readFileSync(
+    path.join(__dirname, 'fixtures/session_interactive.jsonl'),
+    'utf-8',
+  );
+  const sid = sidecar.session_id;
+  fs.writeFileSync(path.join(sessionDir, `${sid}.json`), JSON.stringify(sidecar));
+  fs.writeFileSync(path.join(sessionDir, `${sid}.jsonl`), jsonlRaw);
+  return fakeHome;
+}
+
+function runHookWithSessionDir(subcommand, payload, fakeHome) {
+  return spawnSync('node', [PROCESSOR, subcommand], {
+    input: JSON.stringify(payload),
+    env: {
+      ...process.env,
+      LOONGSUITE_PILOT_DATA_DIR: DATA_DIR,
+      KIRO_CLI_DB: DB_PATH,
+      HOME: fakeHome,
+    },
+    encoding: 'utf-8',
+    timeout: 15_000,
+  });
+}
+
+describe('kiro-cli-hook-processor session JSONL fallback（无 SQLite）', () => {
+  let fakeHome;
+
+  beforeEach(() => {
+    // 删除 DB 以强制 SQLite miss
+    try { fs.unlinkSync(DB_PATH); } catch {}
+    fakeHome = setupSessionFixtures(DATA_DIR);
+  });
+
+  test('SQLite miss → session JSONL 产出 STEP/LLM/TOOL records', () => {
+    const r = runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: SESSION_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+    expect(r.status).toBe(0);
+
+    const records = readJsonlRecords();
+    expect(records.length).toBeGreaterThan(0);
+
+    // 2 AssistantMessage → 2 llm.request + 2 llm.response
+    const requests = records.filter((x) => x['event.name'] === 'llm.request');
+    const responses = records.filter((x) => x['event.name'] === 'llm.response');
+    expect(requests.length).toBe(2);
+    expect(responses.length).toBe(2);
+
+    // 1 ToolUse step with 2 tools → 2 tool.call + 2 tool.result
+    const toolCalls = records.filter((x) => x['event.name'] === 'tool.call');
+    const toolResults = records.filter((x) => x['event.name'] === 'tool.result');
+    expect(toolCalls.length).toBe(2);
+    expect(toolResults.length).toBe(2);
+  });
+
+  test('session JSONL records 带 kiro.id_source=session_jsonl', () => {
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: SESSION_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+    const records = readJsonlRecords();
+    expect(records.length).toBeGreaterThan(0);
+    for (const r of records) {
+      expect(r['kiro.id_source']).toBe('session_jsonl');
+      expect(r['kiro.time_precision']).toBe('turn_estimate');
+    }
+  });
+
+  test('session JSONL tool.call 带 hook postToolUse tool_response', () => {
+    // 先缓冲 postToolUse
+    runHookWithSessionDir(
+      'postToolUse',
+      {
+        hook_event_name: 'postToolUse',
+        cwd: SESSION_CWD,
+        tool_name: 'fs_read',
+        tool_input: { operations: [{ mode: 'Line', path: '/etc/hostname' }] },
+        tool_response: { success: true, result: ['k57j05345.sqa.eu95'] },
+      },
+      fakeHome,
+    );
+
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: SESSION_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+
+    const records = readJsonlRecords();
+    const fsReadResult = records.find(
+      (x) => x['event.name'] === 'tool.result' && x['gen_ai.tool.name'] === 'fs_read',
+    );
+    expect(fsReadResult).toBeTruthy();
+    expect(fsReadResult['gen_ai.tool.call.result']).toBe('k57j05345.sqa.eu95');
+    expect(fsReadResult['kiro.time_source']).toBe('processor_receive');
+  });
+
+  test('session dedup: 第二次 stop 不重复导出同一 session', () => {
+    const stopPayload = { hook_event_name: 'stop', cwd: SESSION_CWD, assistant_response: 'done' };
+    runHookWithSessionDir('stop', stopPayload, fakeHome);
+    const firstCount = readJsonlRecords().length;
+    expect(firstCount).toBeGreaterThan(0);
+
+    // 第二次 stop
+    runHookWithSessionDir('stop', stopPayload, fakeHome);
+    const secondCount = readJsonlRecords().length;
+    // 不应有新增记录
+    expect(secondCount).toBe(firstCount);
+  });
+
+  test('cwd 不匹配 → session JSONL 返回 null → 无 JSONL 产出', () => {
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: '/some/other/dir', assistant_response: 'done' },
+      fakeHome,
+    );
+    const records = readJsonlRecords();
+    expect(records.length).toBe(0);
+  });
+
+  test('conversationId 从 sidecar 正确传播', () => {
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: SESSION_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+    const records = readJsonlRecords();
+    for (const r of records) {
+      expect(r['gen_ai.conversation.id']).toBe('838a0f1b-1cfd-4421-972a-8807a1b20eb5');
+    }
+  });
+
+  test('session JSONL 工具名映射: read→fs_read, shell→execute_bash', () => {
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: SESSION_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+    const records = readJsonlRecords();
+    const toolNames = records
+      .filter((x) => x['event.name'] === 'tool.call')
+      .map((x) => x['gen_ai.tool.name'])
+      .sort();
+    expect(toolNames).toEqual(['execute_bash', 'fs_read']);
+  });
+
+  test('session JSONL 最终回答步 NotToolUse 有正确 assistantText', () => {
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: SESSION_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+    const records = readJsonlRecords();
+    const finalResponse = records
+      .filter((x) => x['event.name'] === 'llm.response')
+      .sort((a, b) => Number(BigInt(a.time_unix_nano) - BigInt(b.time_unix_nano)))
+      .pop();
+    expect(finalResponse).toBeTruthy();
+    const msgs = finalResponse['gen_ai.output.messages'];
+    expect(Array.isArray(msgs)).toBe(true);
+    const textPart = msgs[0].parts.find((p) => p.type === 'text');
+    expect(textPart.content).toContain('k57j05345.sqa.eu95');
+    expect(finalResponse['gen_ai.response.finish_reasons']).toContain('stop');
+  });
+});
