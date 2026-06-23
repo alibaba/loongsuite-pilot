@@ -214,6 +214,7 @@ function getSession(sessionID) {
 function clearSession(sessionID) {
   const s = sessions.get(sessionID);
   if (s) {
+    sessionTurnSeqs.delete(sessionID);
     sessionTurnSeqs.set(sessionID, s.turnSeq);
     if (sessionTurnSeqs.size > MAX_SESSIONS) {
       const oldest = sessionTurnSeqs.keys().next().value;
