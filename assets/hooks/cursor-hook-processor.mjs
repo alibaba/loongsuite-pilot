@@ -92,6 +92,20 @@ function inferVariant(events) {
   return 'cursor';
 }
 
+function compactJournal(allEvents, consumedConversationIds) {
+  const pendingTurnConvIds = new Set();
+  const remaining = [];
+  for (const ev of allEvents) {
+    if (consumedConversationIds.has(ev.conversation_id)) continue;
+    if (ev.hook_event === 'beforeSubmitPrompt') pendingTurnConvIds.add(ev.conversation_id);
+  }
+  for (const ev of allEvents) {
+    if (consumedConversationIds.has(ev.conversation_id)) continue;
+    if (pendingTurnConvIds.has(ev.conversation_id)) remaining.push(ev);
+  }
+  rewriteJournal(remaining, allEvents);
+}
+
 async function main() {
   const dataDir = resolveDataDir();
   const raw = await readStdin();
@@ -200,19 +214,20 @@ async function main() {
       // ─── Deferred-stop for Cursor CLI ───
       // Cursor CLI fires stop BEFORE afterAgentResponse. If there's a prompt but
       // no response yet for this conversation, defer assembly until the late
-      // response arrives.
+      // response arrives. IDE sessions always assemble immediately (abort/error
+      // scenarios must not lose data).
       const convId = internalEvent.conversation_id;
+      const variant = inferVariant(allEvents);
       const hasResponse = allEvents.some(e =>
         e.hook_event === 'afterAgentResponse' && e.conversation_id === convId
       );
-      if (!hasResponse) {
+      if (variant === 'cursor-cli' && !hasResponse) {
         // defer — afterAgentResponse handler will trigger assembly
         writeEmptyResponse();
         return;
       }
 
       const runtimeConfig = loadHookRuntimeConfig(dataDir);
-      const variant = inferVariant(allEvents);
       let records;
       let consumedConversationIds;
 
@@ -248,17 +263,7 @@ async function main() {
         await appendBatchJsonl(historyFile, records);
       }
 
-      const pendingTurnConvIds = new Set();
-      const remaining = [];
-      for (const ev of allEvents) {
-        if (consumedConversationIds.has(ev.conversation_id)) continue;
-        if (ev.hook_event === 'beforeSubmitPrompt') pendingTurnConvIds.add(ev.conversation_id);
-      }
-      for (const ev of allEvents) {
-        if (consumedConversationIds.has(ev.conversation_id)) continue;
-        if (pendingTurnConvIds.has(ev.conversation_id)) remaining.push(ev);
-      }
-      rewriteJournal(remaining, allEvents);
+      compactJournal(allEvents, consumedConversationIds);
     } catch (err) {
       await appendErrorJsonl(dataDir, now, {
         stage: 'assemble',
@@ -280,6 +285,9 @@ async function main() {
       if (hasStop) {
         const runtimeConfig = loadHookRuntimeConfig(dataDir);
         const variant = inferVariant(allEvents);
+        // Note: transcriptPath is deliberately omitted here — assembleTurn falls
+        // back to stopEvent?.transcript_path internally. Passing internalEvent's
+        // transcriptPath (from afterAgentResponse) would be incorrect.
         const result = assembleTurn(allEvents, {
           runtimeConfig,
           variant,
@@ -292,17 +300,7 @@ async function main() {
           await appendBatchJsonl(historyFile, result.records);
         }
 
-        const pendingTurnConvIds = new Set();
-        const remaining = [];
-        for (const ev of allEvents) {
-          if (result.consumedConversationIds.has(ev.conversation_id)) continue;
-          if (ev.hook_event === 'beforeSubmitPrompt') pendingTurnConvIds.add(ev.conversation_id);
-        }
-        for (const ev of allEvents) {
-          if (result.consumedConversationIds.has(ev.conversation_id)) continue;
-          if (pendingTurnConvIds.has(ev.conversation_id)) remaining.push(ev);
-        }
-        rewriteJournal(remaining, allEvents);
+        compactJournal(allEvents, result.consumedConversationIds);
       }
     } catch (err) {
       await appendErrorJsonl(dataDir, now, {
