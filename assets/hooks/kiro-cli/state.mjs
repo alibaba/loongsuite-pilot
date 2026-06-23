@@ -25,6 +25,7 @@ const PRE_TOOL_BUFFER_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'pre-
 const OFFSET_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'offsets');
 const SESSION_OFFSET_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'session-offsets');
 const SESSION_REPORTED_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'session-reported');
+const EMITTED_STEPS_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'emitted-steps');
 
 function safeKey(cwd) {
   return Buffer.from(String(cwd || 'unknown')).toString('base64url');
@@ -242,6 +243,49 @@ export function markSessionReported(cwd, sessionId) {
   } catch {
     try {
       fs.writeFileSync(file, JSON.stringify({ sessionIds: [...reported] }), 'utf-8');
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// ─── per-cwd step-level idempotent dedup ───
+//
+// 交互式模式下 stop hook 可能多次触发。若 SQLite 行的 updated_at 在两次
+// stop 之间发生变化（kiro-cli 延迟写入），offset 机制失效，整个会话的所有
+// step 被重新读取并发射。此处按 (conversationId + stepId) 做幂等去重：
+// 已发射的 stepId 在后续 stop 中被跳过。
+
+function emittedStepsFile(cwd) {
+  return path.join(ensureDir(EMITTED_STEPS_DIR), `${safeKey(cwd)}.json`);
+}
+
+export function loadEmittedSteps(cwd) {
+  const file = emittedStepsFile(cwd);
+  try {
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      if (typeof data?.conversationId === 'string' && Array.isArray(data?.stepIds)) {
+        return { conversationId: data.conversationId, stepIds: new Set(data.stepIds) };
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { conversationId: null, stepIds: new Set() };
+}
+
+export function saveEmittedSteps(cwd, conversationId, stepIds) {
+  const file = emittedStepsFile(cwd);
+  const dir = path.dirname(file);
+  const tmp = path.join(dir, `${safeKey(cwd)}.${process.pid}.tmp`);
+  const payload = { conversationId, stepIds: [...stepIds] };
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(payload), 'utf-8');
+    fs.renameSync(tmp, file);
+  } catch {
+    try {
+      fs.writeFileSync(file, JSON.stringify(payload), 'utf-8');
     } catch {
       // ignore
     }

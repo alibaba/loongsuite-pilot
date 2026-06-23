@@ -276,10 +276,87 @@ describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor 端到端（DB transcrip
     // 第二次 stop（无新会话，updated_at 未变）→ 因 sinceUpdatedMs 过滤，无新增
     bufferPostToolEvents();
     runHook('stop', stopPayload);
-    // 第一次的记录仍在；总数不应翻倍（第二次无新 transcript）
     const total = readJsonlRecords().length;
-    // 第二轮因 transcript updatedMs 未推进被跳过；允许少量误差但不应再次产出等量记录
-    expect(total).toBeLessThan(firstCount * 2);
+    // 第二轮无新 transcript → 总数不变
+    expect(total).toBe(firstCount);
+  });
+
+  test('交互式去重：updated_at 变化后再次 stop 不重复发射同一 step', async () => {
+    // 模拟交互式模式：第一次 stop 发射所有 step，然后 SQLite updated_at 推进
+    // （kiro-cli 延迟写入），第二次 stop 读到同一会话但 updated_at 更大，
+    // step-level dedup 应阻止重复发射。
+    bufferPostToolEvents();
+    const stopPayload = { hook_event_name: 'stop', cwd: CWD, assistant_response: 'done' };
+    runHook('stop', stopPayload);
+    const firstCount = readJsonlRecords().length;
+    expect(firstCount).toBeGreaterThan(0);
+
+    // 模拟 kiro-cli 延迟写入：更新 SQLite 行的 updated_at（值变大）
+    // 使用 sqlite3 npm 包直接 UPDATE，不经过 hook processor
+    await new Promise((resolve, reject) => {
+      const db = new sqlite3.Database(DB_PATH, (err) => {
+        if (err) return reject(err);
+        db.run(
+          `UPDATE conversations_v2 SET updated_at = updated_at + 10000 WHERE key = ?`,
+          [CWD],
+          (uerr) => {
+            db.close();
+            uerr ? reject(uerr) : resolve();
+          },
+        );
+      });
+    });
+
+    // 第二次 stop：updated_at 已推进，SQLite 会重新返回同一会话
+    bufferPostToolEvents();
+    runHook('stop', stopPayload);
+    const total = readJsonlRecords().length;
+
+    // step-level dedup 应阻止重复：总数不应增加
+    expect(total).toBe(firstCount);
+
+    // 验证所有记录共享同一 trace_id（若 dedup 失败，第二次 stop 会生成新 trace_id）
+    const records = readJsonlRecords();
+    const traceIds = new Set(records.map((r) => r.trace_id).filter(Boolean));
+    expect(traceIds.size).toBe(1);
+  });
+
+  test('会话重置：新 conversation_id 清除去重状态，允许重新发射', async () => {
+    // 第一次 stop
+    bufferPostToolEvents();
+    runHook('stop', { hook_event_name: 'stop', cwd: CWD, assistant_response: 'done' });
+    const firstCount = readJsonlRecords().length;
+    expect(firstCount).toBeGreaterThan(0);
+
+    // 模拟新会话：替换 DB 中的 conversation_id（不同 conversation_id + 不同 stepId）
+    const newConvId = 'new-conv-' + Date.now();
+    const convRaw = JSON.parse(fs.readFileSync(FIXTURE_CONV, 'utf-8'));
+    convRaw.conversation_id = newConvId;
+    for (const entry of (convRaw.history || [])) {
+      if (entry.request_metadata) {
+        entry.request_metadata.request_id = 'new-' + entry.request_metadata.request_id;
+        entry.request_metadata.message_id = 'new-' + entry.request_metadata.message_id;
+      }
+    }
+    await new Promise((resolve, reject) => {
+      const db = new sqlite3.Database(DB_PATH, (err) => {
+        if (err) return reject(err);
+        db.run(
+          `UPDATE conversations_v2 SET conversation_id = ?, value = ?, updated_at = ? WHERE key = ?`,
+          [newConvId, JSON.stringify(convRaw), Date.now() + 50000, CWD],
+          (uerr) => {
+            db.close();
+            uerr ? reject(uerr) : resolve();
+          },
+        );
+      });
+    });
+
+    // 第二次 stop：新会话，应重新发射
+    bufferPostToolEvents();
+    runHook('stop', { hook_event_name: 'stop', cwd: CWD, assistant_response: 'done' });
+    const total = readJsonlRecords().length;
+    expect(total).toBeGreaterThan(firstCount);
   });
 
   test('preToolUse 缓冲后 tool.call 使用 preToolUse startTs 而非 step.startTimeMs', () => {
