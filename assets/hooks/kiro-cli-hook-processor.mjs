@@ -53,6 +53,7 @@ import {
   loadOffset, saveOffset,
   loadSessionOffset, saveSessionOffset,
   loadReportedSessions, markSessionReported,
+  loadEmittedSteps, saveEmittedSteps,
 } from './kiro-cli/state.mjs';
 import { resolveDbPath } from './kiro-cli/db-path.mjs';
 
@@ -209,11 +210,41 @@ async function cmdStop() {
     return;
   }
 
-  const records = buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, event);
+  // step-level idempotent dedup：交互式模式下 stop 可能多次触发，
+  // 若 SQLite updated_at 在两次 stop 之间变化，offset 机制无法阻止
+  // 全量重读。按 (conversationId + stepId) 过滤已发射的 step。
+  const currentConvId = transcript.conversationId || transcript.continuationId || 'unknown';
+  const emitted = loadEmittedSteps(cwd);
+  const seenIds = emitted.conversationId === currentConvId ? emitted.stepIds : new Set();
+
+  const originalHasFinalResponse = transcript.steps.some(
+    (s) => s.kind === 'NotToolUse' && s.assistantText,
+  );
+
+  const newSteps = transcript.steps.filter((s) => {
+    const sid = s.stepId || '';
+    if (!sid) return true;
+    return !seenIds.has(sid);
+  });
+
+  if (newSteps.length === 0) return;
+
+  const dedupedTranscript = { ...transcript, steps: newSteps };
+
+  const records = buildRecords(
+    dedupedTranscript, toolEvents, preToolEvents, cwd, userId, event,
+    { originalHasFinalResponse },
+  );
   if (records.length === 0) return;
 
   const cleaned = records.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
+
+  const allEmittedIds = new Set(seenIds);
+  for (const s of newSteps) {
+    if (s.stepId) allEmittedIds.add(s.stepId);
+  }
+  saveEmittedSteps(cwd, currentConvId, allEmittedIds);
 
   if (source === 'session_jsonl') {
     if (transcript.updatedMs) {
@@ -255,7 +286,7 @@ async function trySessionJsonl(cwd) {
 
 // ─── buildRecords — 整会话的 trace 记录构造 ───
 
-function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEvent) {
+function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEvent, opts = {}) {
   const records = [];
   const sessionId = transcript.conversationId || transcript.continuationId || 'unknown';
   const traceId = generateTraceId();
@@ -285,7 +316,8 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
   let stepRound = 0;
 
   const steps = transcript.steps;
-  let hasFinalResponse = steps.some((s) => s.kind === 'NotToolUse' && s.assistantText);
+  const hasFinalResponse = opts.originalHasFinalResponse
+    ?? steps.some((s) => s.kind === 'NotToolUse' && s.assistantText);
 
   for (const step of steps) {
     stepRound++;
