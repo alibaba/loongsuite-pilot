@@ -614,4 +614,30 @@ describe('kiro-cli-hook-processor session JSONL fallback（无 SQLite）', () =>
     expect(textPart.content).toContain('k57j05345.sqa.eu95');
     expect(finalResponse['gen_ai.response.finish_reasons']).toContain('stop');
   });
+
+  test('session JSONL 后续 step 的 input.messages_delta 含 role: "tool"', () => {
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: SESSION_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+    const records = readJsonlRecords();
+    const requests = records
+      .filter((x) => x['event.name'] === 'llm.request')
+      .sort((a, b) => Number(BigInt(a.time_unix_nano) - BigInt(b.time_unix_nano)));
+    expect(requests.length).toBe(2);
+
+    // 首步 delta 含 role: "user"（用户 prompt）
+    const firstDelta = requests[0]['gen_ai.input.messages_delta'];
+    expect(Array.isArray(firstDelta)).toBe(true);
+    expect(firstDelta[0].role).toBe('user');
+
+    // 后续步 delta 含 role: "tool"（ToolResults 构建）
+    const secondDelta = requests[1]['gen_ai.input.messages_delta'];
+    expect(Array.isArray(secondDelta)).toBe(true);
+    expect(secondDelta.length).toBeGreaterThan(0);
+    for (const msg of secondDelta) {
+      expect(msg.role).toBe('tool');
+    }
+  });
 });

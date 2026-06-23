@@ -187,6 +187,7 @@ export function parseSessionLines(lines, sidecar) {
           : [],
         assistantText: isToolUse ? '' : textContent,
         userPrompt: assistantIndex === 0 ? currentPrompt : '',
+        toolUseResults: [],
         creditIndex: assistantIndex < credits.length ? assistantIndex : -1,
       });
 
@@ -201,6 +202,25 @@ export function parseSessionLines(lines, sidecar) {
       }
       toolResultIndex++;
     }
+  }
+
+  // Map tool results onto subsequent steps as toolUseResults.
+  // For step N (N > 0), the tool results from step N-1's tools form the
+  // input messages (role: "tool") for step N — matching the transcript-parser
+  // behavior where each history entry's user.content.ToolUseResults provides
+  // the prior step's tool outputs.
+  for (let i = 1; i < steps.length; i++) {
+    const prevStep = steps[i - 1];
+    if (!prevStep.tools || prevStep.tools.length === 0) continue;
+    const results = [];
+    for (const tool of prevStep.tools) {
+      if (!tool.id) continue;
+      const result = toolResultMap.get(tool.id);
+      if (result !== undefined) {
+        results.push(result);
+      }
+    }
+    steps[i].toolUseResults = results;
   }
 
   return { steps, conversationId, continuationId, modelId, credits, toolResultMap };
