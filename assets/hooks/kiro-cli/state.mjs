@@ -234,13 +234,16 @@ export function markSessionReported(cwd, sessionId) {
   const reported = loadReportedSessions(cwd);
   reported.add(sessionId);
   const file = sessionReportedFile(cwd);
+  const dir = path.dirname(file);
+  const tmp = path.join(dir, `${safeKey(cwd)}.${process.pid}.tmp`);
   try {
-    fs.writeFileSync(
-      file,
-      JSON.stringify({ sessionIds: [...reported] }),
-      'utf-8',
-    );
+    fs.writeFileSync(tmp, JSON.stringify({ sessionIds: [...reported] }), 'utf-8');
+    fs.renameSync(tmp, file);
   } catch {
-    // ignore
+    try {
+      fs.writeFileSync(file, JSON.stringify({ sessionIds: [...reported] }), 'utf-8');
+    } catch {
+      // ignore
+    }
   }
 }

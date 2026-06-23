@@ -182,7 +182,7 @@ describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor 端到端（DB transcrip
     expect(fsReadResult['gen_ai.tool.call.result']).toBe('hello kiro round3');
     expect(fsReadResult['gen_ai.tool.call.id']).toBe('tooluse_9ZXIR6XBjCnWiGGEZrHWGQ');
     expect(fsReadResult['kiro.time_source']).toBe('processor_receive');
-    expect(fsReadResult['kiro.time_precision']).toBe('1s');
+    expect(fsReadResult['kiro.time_precision']).toBe('ms');
   });
 
   test('request_id ≠ message_id（step.id vs response.id 严格区分）', () => {
