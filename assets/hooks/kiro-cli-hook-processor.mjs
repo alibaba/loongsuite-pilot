@@ -52,7 +52,6 @@ import {
   appendPreToolEvent, drainPreToolEvents,
   loadOffset, saveOffset,
   loadSessionOffset, saveSessionOffset,
-  loadReportedSessions, markSessionReported,
   loadEmittedSteps, saveEmittedSteps,
 } from './kiro-cli/state.mjs';
 import { resolveDbPath } from './kiro-cli/db-path.mjs';
@@ -264,9 +263,6 @@ async function cmdStop() {
     if (transcript.updatedMs) {
       saveSessionOffset(cwd, transcript.updatedMs);
     }
-    if (transcript.sessionId) {
-      markSessionReported(cwd, transcript.sessionId);
-    }
   } else {
     if (transcript.updatedMs) {
       saveOffset(cwd, transcript.updatedMs);
@@ -280,11 +276,9 @@ async function cmdStop() {
  */
 async function trySessionJsonl(cwd) {
   const sessionSinceMs = loadSessionOffset(cwd);
-  const reported = loadReportedSessions(cwd);
   try {
     const session = await readSessionJsonl(cwd, {
       sinceUpdatedMs: sessionSinceMs,
-      reportedSessions: reported,
     });
     return session;
   } catch (err) {
