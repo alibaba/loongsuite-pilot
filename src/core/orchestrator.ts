@@ -503,16 +503,14 @@ export class Orchestrator extends EventEmitter {
         listenerCfg['qoder-trace']?.enabled ?? true,
       );
 
-    // --- Qoder (SQLite token usage polling) ---
-    // On Windows, Qoder IDE's agent backend does not fire user-defined hooks,
-    // so qoder-trace produces no IDE data. Allow qoder-sqlite as fallback.
+    // --- Qoder (SQLite token usage polling, fallback when trace is disabled) ---
     const qoderSqliteInput = new QoderSqliteInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(qoderSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderSqliteInput, {
         watchPaths: QoderSqliteInput.getWatchPaths(),
         isAvailable: QoderSqliteInput.checkAvailability,
-        enabled: () => (process.platform === 'win32' || !qoderTraceEnabled()) &&
+        enabled: () => !qoderTraceEnabled() &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-sqlite']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-sqlite',
@@ -550,15 +548,14 @@ export class Orchestrator extends EventEmitter {
         listenerCfg['qoder-cn-trace']?.enabled ?? true,
       );
 
-    // --- QoderCN (SQLite token usage polling) ---
-    // Same Windows fallback as qoder-sqlite above.
+    // --- QoderCN (SQLite token usage polling, fallback when trace is disabled) ---
     const qoderCnSqliteInput = new QoderCnSqliteInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(qoderCnSqliteInput);
     entries.push(
       this.inputManager.buildDetectionEntry(qoderCnSqliteInput, {
         watchPaths: QoderCnSqliteInput.getWatchPaths(),
         isAvailable: QoderCnSqliteInput.checkAvailability,
-        enabled: () => (process.platform === 'win32' || !qoderCnTraceEnabled()) &&
+        enabled: () => !qoderCnTraceEnabled() &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-cn-sqlite']) &&
           this.agentControlManager.resolveEnabled(
             'qoder-cn-sqlite',
