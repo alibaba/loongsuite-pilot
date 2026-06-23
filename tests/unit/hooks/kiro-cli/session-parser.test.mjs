@@ -83,6 +83,20 @@ describe('parseSessionLines', () => {
     expect(result.steps[1].userPrompt).toBe('');
   });
 
+  it('后续 step 的 toolUseResults 包含前一步 tool 的结果文本（role: "tool" 来源）', () => {
+    const result = parseSessionLines(lines, sidecar);
+    const step2 = result.steps[1];
+    expect(Array.isArray(step2.toolUseResults)).toBe(true);
+    expect(step2.toolUseResults.length).toBe(2);
+    expect(step2.toolUseResults[0]).toContain('k57j05345.sqa.eu95');
+    expect(step2.toolUseResults[1]).toContain('/usr/bin/bash');
+  });
+
+  it('首轮 step 的 toolUseResults 为空数组', () => {
+    const result = parseSessionLines(lines, sidecar);
+    expect(result.steps[0].toolUseResults).toEqual([]);
+  });
+
   it('时间均分：startTimeMs < endTimeMs，step 间不重叠', () => {
     const result = parseSessionLines(lines, sidecar);
     const [s1, s2] = result.steps;
