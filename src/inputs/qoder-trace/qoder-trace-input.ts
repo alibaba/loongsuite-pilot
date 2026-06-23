@@ -68,7 +68,7 @@ export class QoderTraceInput extends BaseInput {
       if (variant === 'qoder-cli' && sessionId) {
         const segments = await readSegmentTokensForSession(sessionId);
         enrichCliTurn(turnEntries, segments);
-      } else if (variant === 'qoder' && sessionId) {
+      } else if ((variant === 'qoder' || variant === 'qoder-idea') && sessionId) {
         const sessionEntries = ideSessionGroups.get(sessionId) ?? [];
         sessionEntries.push(...turnEntries);
         ideSessionGroups.set(sessionId, sessionEntries);
@@ -180,10 +180,11 @@ export class QoderTraceInput extends BaseInput {
     return groups;
   }
 
-  private inferTurnVariant(entries: AgentActivityEntry[]): 'qoder-cli' | 'qoder' {
+  private inferTurnVariant(entries: AgentActivityEntry[]): 'qoder-cli' | 'qoder' | 'qoder-idea' {
     for (const entry of entries) {
       const agentType = entry['gen_ai.agent.type'] as string;
       if (agentType === ClientType.QoderCli || agentType === 'qoder-cli') return 'qoder-cli';
+      if (agentType === ClientType.QoderIdea || agentType === 'qoder-idea') return 'qoder-idea';
       if (agentType === ClientType.Qoder || agentType === 'qoder') return 'qoder';
     }
     return 'qoder-cli';

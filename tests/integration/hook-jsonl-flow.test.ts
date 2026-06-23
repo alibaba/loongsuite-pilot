@@ -217,6 +217,10 @@ describe('Hook JSONL integration flow', () => {
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),
     );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/qoder-db-utils.mjs'),
+      path.join(sharedDir, 'qoder-db-utils.mjs'),
+    );
     await fs.chmod(hookScript, 0o755);
 
     const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
@@ -314,6 +318,10 @@ describe('Hook JSONL integration flow', () => {
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/qoder-db-utils.mjs'),
+      path.join(sharedDir, 'qoder-db-utils.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
 
@@ -561,6 +569,10 @@ describe('Hook JSONL integration flow', () => {
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/qoder-db-utils.mjs'),
+      path.join(sharedDir, 'qoder-db-utils.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
 

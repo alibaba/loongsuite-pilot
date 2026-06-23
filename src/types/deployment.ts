@@ -4,7 +4,7 @@
 
 // ─── Deploy Mode ───
 
-export type DeployMode = 'hook' | 'plugin-probe' | 'plugin-inject';
+export type DeployMode = 'hook' | 'plugin-probe' | 'plugin-inject' | 'detection-only';
 export type MountType = 'wrapper' | 'rc-inject' | 'env-inject';
 export type HookFormat = 'flat' | 'nested';
 export type PluginSourceType = 'oss' | 'tar';

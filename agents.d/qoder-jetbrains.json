@@ -1,0 +1,20 @@
+{
+  "id": "qoder-jetbrains",
+  "displayName": "Qoder for JetBrains",
+  "deployMode": "detection-only",
+  "detection": {
+    "paths": [
+      "~/Library/Application Support/JetBrains/IntelliJIdea*/plugins/qoder-jetbrains",
+      "~/Library/Application Support/JetBrains/IdeaIC*/plugins/qoder-jetbrains",
+      "~/Library/Application Support/JetBrains/PyCharm*/plugins/qoder-jetbrains",
+      "~/Library/Application Support/JetBrains/WebStorm*/plugins/qoder-jetbrains",
+      "~/Library/Application Support/JetBrains/GoLand*/plugins/qoder-jetbrains",
+      "~/.config/JetBrains/IntelliJIdea*/plugins/qoder-jetbrains",
+      "~/.config/JetBrains/IdeaIC*/plugins/qoder-jetbrains",
+      "~/.config/JetBrains/PyCharm*/plugins/qoder-jetbrains",
+      "~/.config/JetBrains/WebStorm*/plugins/qoder-jetbrains",
+      "~/.config/JetBrains/GoLand*/plugins/qoder-jetbrains"
+    ],
+    "commands": []
+  }
+}
