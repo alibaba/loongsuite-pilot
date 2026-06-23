@@ -28,9 +28,11 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | OpenCode | Plugin injection | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | Yes | Yes | Yes | Yes |
-| Qoder CLI | Hook / session polling | Yes | Yes | No | Yes |
-| Qoder Work | Hook / local data polling | Yes | Yes | No | Yes |
-| Qoder Work CN | Hook / local data polling | Yes | Yes | No | Yes |
+| Qoder CLI | Hook / session polling | Yes | Yes | Yes | Yes |
+| Qoder Work | Hook / local data polling | Yes | Yes | Yes | Yes |
+| Qoder Work CN | Hook / local data polling | Yes | Yes | Yes | Yes |
+| Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
+| Wukong | CLI API polling | Yes | Yes | Yes | Yes |
 
 ## Data Collected
 
