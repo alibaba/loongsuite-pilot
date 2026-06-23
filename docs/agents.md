@@ -20,6 +20,7 @@ Use these IDs in installer options, `agent-control.json`, and `config.json`.
 | Qoder Work | `qoder-work` | Hook and local data sources. |
 | Qoder Work CN | `qoder-work-cn` | Hook and local data sources. |
 | Qwen Code CLI | `qwen-code-cli` | Hook integration; parses qwen-code transcript JSONL on Stop. |
+| Wukong | `wukong` | CLI API polling via local `wukong-cli`. |
 
 ## Choose Agents During Installation
 
