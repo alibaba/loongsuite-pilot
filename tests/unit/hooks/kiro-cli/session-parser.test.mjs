@@ -168,17 +168,17 @@ describe('readSessionJsonl', () => {
     expect(result.source).toBe('session_jsonl');
   });
 
-  it('不匹配 cwd 返回 null', async () => {
-    const result = await readSessionJsonl('/some/other/dir', { sessionDir: tmpDir });
-    expect(result).toBeNull();
+  it('同一 session 多次调用不跳过（session-level dedup 已移除，依赖 step-level dedup）', async () => {
+    const result1 = await readSessionJsonl('/tmp/kiro_session_probe', { sessionDir: tmpDir });
+    expect(result1).not.toBeNull();
+    const result2 = await readSessionJsonl('/tmp/kiro_session_probe', { sessionDir: tmpDir });
+    expect(result2).not.toBeNull();
+    expect(result2.steps).toHaveLength(2);
+    expect(result2.sessionId).toBe(result1.sessionId);
   });
 
-  it('reportedSessions 跳过已上报 session', async () => {
-    const reported = new Set(['838a0f1b-1cfd-4421-972a-8807a1b20eb5']);
-    const result = await readSessionJsonl('/tmp/kiro_session_probe', {
-      sessionDir: tmpDir,
-      reportedSessions: reported,
-    });
+  it('不匹配 cwd 返回 null', async () => {
+    const result = await readSessionJsonl('/some/other/dir', { sessionDir: tmpDir });
     expect(result).toBeNull();
   });
 

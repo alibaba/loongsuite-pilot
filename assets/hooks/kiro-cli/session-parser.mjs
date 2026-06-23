@@ -231,14 +231,12 @@ export function parseSessionLines(lines, sidecar) {
  *
  * 匹配策略：
  *   1. 扫描 *.json sidecar，找 cwd 匹配的最新 session
- *   2. 跳过 already-reported sessions（dedup）
- *   3. 读对应 *.jsonl 解析 steps
+ *   2. 读对应 *.jsonl 解析 steps
  *
  * @param {string} cwd           hook cwd
  * @param {object} [opts]
  * @param {string} [opts.sessionDir]  显式 session 目录（默认 ~/.kiro/sessions/cli）
  * @param {number} [opts.sinceUpdatedMs]  仅取 updated_at > 此值
- * @param {Set<string>} [opts.reportedSessions]  已上报的 session_id 集合
  * @returns {Promise<import('./transcript-parser.mjs').TranscriptData|null>}
  */
 export async function readSessionJsonl(cwd, opts = {}) {
@@ -250,7 +248,6 @@ export async function readSessionJsonl(cwd, opts = {}) {
   if (!fs.existsSync(sessionDir)) return null;
 
   const since = typeof opts.sinceUpdatedMs === 'number' ? opts.sinceUpdatedMs : 0;
-  const reported = opts.reportedSessions || new Set();
 
   let sidecarFiles;
   try {
@@ -272,7 +269,7 @@ export async function readSessionJsonl(cwd, opts = {}) {
     }
     if (sidecar.cwd !== cwd) continue;
     const sid = sidecar.session_id;
-    if (!sid || reported.has(sid)) continue;
+    if (!sid) continue;
 
     const updatedAt = sidecar.updated_at ? Date.parse(sidecar.updated_at) : 0;
     if (since > 0 && updatedAt <= since) continue;
