@@ -183,13 +183,14 @@ function writeError(source, err) {
 // ---------------------------------------------------------------------------
 
 const sessions = new Map();
+const sessionTurnSeqs = new Map();
 
 function getSession(sessionID) {
   if (!sessionID) return null;
   let s = sessions.get(sessionID);
   if (!s) {
     s = {
-      turnSeq: 0,
+      turnSeq: sessionTurnSeqs.get(sessionID) || 0,
       currentTurn: null,
       systemPrompt: null,
       systemInstructionsParts: null,
@@ -211,6 +212,14 @@ function getSession(sessionID) {
 }
 
 function clearSession(sessionID) {
+  const s = sessions.get(sessionID);
+  if (s) {
+    sessionTurnSeqs.set(sessionID, s.turnSeq);
+    if (sessionTurnSeqs.size > MAX_SESSIONS) {
+      const oldest = sessionTurnSeqs.keys().next().value;
+      sessionTurnSeqs.delete(oldest);
+    }
+  }
   sessions.delete(sessionID);
 }
 
