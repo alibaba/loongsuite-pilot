@@ -16,6 +16,7 @@
 | OpenCode | `opencode` | 插件注入。 |
 | Qoder | `qoder` | Hook 集成。 |
 | Qoder CN | `qoder-cn` | Hook 集成。 |
+| Qoder for JetBrains | `qoder-jetbrains` | 自动检测；复用 Qoder 的 Hook/DB 管线。 |
 | Qoder CLI | `qoder` | 复用 Qoder Agent 定义，使用 Hook / session 数据源。 |
 | Qoder Work | `qoder-work` | Hook 和本地数据源。 |
 | Qoder Work CN | `qoder-work-cn` | Hook 和本地数据源。 |
