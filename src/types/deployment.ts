@@ -58,6 +58,21 @@ export interface AgentHookConfig {
    * where the quoted path in -File "..." would become literal characters.
    */
   rawCommand?: boolean;
+  /**
+   * Optional env block to merge into the agent's settings.json on deploy.
+   *
+   * Each value supports `$PILOT_DATA` token, which HookStrategy expands to
+   * the resolved pilot data directory at write time. The merge semantics:
+   *   - Regular keys: overwrite if present
+   *   - `BUN_OPTIONS` is treated as space-separated flags; if the existing
+   *     value already contains the same `--preload=<path>` we add, the
+   *     write is skipped to keep deploy idempotent and to coexist with
+   *     other preload scripts the user may have configured.
+   *
+   * Used by Claude Code to inject `BUN_OPTIONS=--preload=...` so the
+   * fetch-intercept script loads inside the Bun-compiled CLI process.
+   */
+  env?: Record<string, string>;
 }
 
 export interface PluginSourceConfig {

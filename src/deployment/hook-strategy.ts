@@ -88,6 +88,19 @@ export class HookStrategy implements DeployStrategy {
     try {
       await this.ensureSettingsFile(hookConfig.settingsPath);
 
+      if (hookConfig.env) {
+        try {
+          await this.applyEnvToSettings(hookConfig.settingsPath, hookConfig.env);
+        } catch (err) {
+          // env injection failure must not block hook deployment — pilot can still
+          // collect the basic transcript-based events without preload.
+          logger.warn('settings.env merge failed (non-blocking)', {
+            agentId: def.id,
+            error: String(err),
+          });
+        }
+      }
+
       const hookDefs = this.buildHookDefinitions(def);
       for (const hookDef of hookDefs) {
         const installed = await this.hookManager.isHookInstalled(hookDef);
@@ -273,6 +286,61 @@ export class HookStrategy implements DeployStrategy {
       useNestedFormat: hookConfig.format === 'nested',
       replaceHookCommands: hookConfig.replaceHookCommands,
     }));
+  }
+
+  /**
+   * Merge env entries from the agent hook config into the settings file's
+   * top-level `env` block. Supports `$PILOT_DATA` token expansion.
+   *
+   * Idempotency:
+   *   - Regular keys overwrite if already present.
+   *   - `BUN_OPTIONS` is treated as a space-separated flag list. If the
+   *     existing value already contains the same `--preload=<path>` we are
+   *     about to add, the write is skipped (allows coexistence with user's
+   *     own preload scripts).
+   *
+   * Failure here is non-fatal — caller in deploy() wraps in try/catch.
+   */
+  private async applyEnvToSettings(
+    settingsPath: string,
+    env: Record<string, string>,
+  ): Promise<void> {
+    const pilotData = resolveHome('~/.loongsuite-pilot');
+    const existing =
+      (await readJsonFile<Record<string, unknown>>(settingsPath)) ?? {};
+    const envBlock =
+      (existing.env as Record<string, string> | undefined) ?? {};
+    let changed = false;
+
+    for (const [key, rawValue] of Object.entries(env)) {
+      const expanded = rawValue.replace(/\$PILOT_DATA/g, pilotData);
+
+      if (key === 'BUN_OPTIONS') {
+        const current = envBlock[key];
+        if (typeof current === 'string' && current.length > 0) {
+          // Extract our --preload= token (anything after the first =) so we
+          // can probe substring presence rather than exact match.
+          const eqIdx = expanded.indexOf('=');
+          const ourToken = eqIdx >= 0 ? expanded.slice(eqIdx + 1) : expanded;
+          if (current.includes(ourToken)) {
+            continue; // already injected
+          }
+          envBlock[key] = `${current} ${expanded}`.trim();
+          changed = true;
+          continue;
+        }
+      }
+
+      if (envBlock[key] !== expanded) {
+        envBlock[key] = expanded;
+        changed = true;
+      }
+    }
+
+    if (!changed) return;
+    existing.env = envBlock;
+    await writeJsonFile(settingsPath, existing);
+    logger.info('settings.env merged', { settingsPath, keys: Object.keys(env) });
   }
 
   /**
