@@ -12,6 +12,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/kiro-cli-hook-processor.mjs');
 const FIXTURE_CONV = path.resolve(__dirname, 'fixtures/round3_conv_raw.json');
 const FIXTURE_HOOK_EVENTS = path.resolve(__dirname, 'fixtures/round3_hook_events.jsonl');
+const FIXTURE_BASH_FAILED = path.resolve(__dirname, 'fixtures/posttool_bash_failed.json');
 
 // node:sqlite 仅 Node ≥ 22.5 内置。无该 builtin 时 DB transcript 用例 skip 而非 error；
 // fail-open 用例（不触达 transcript 读取）始终跑。
@@ -638,6 +639,125 @@ describe('kiro-cli-hook-processor session JSONL fallback（无 SQLite）', () =>
     expect(secondDelta.length).toBeGreaterThan(0);
     for (const msg of secondDelta) {
       expect(msg.role).toBe('tool');
+    }
+  });
+});
+
+// ─── tool 失败路径（候选项 #2 修复） ───
+// fixture 来源: tester pilot-probe 抓取的真实 postToolUse payload（comment 3e69f850, kiro-cli v2.8.0）。
+// kiro-cli v2.8.0 命令失败时 success=true，退出码在 result[].exit_status（!= "0"），
+
+describe('kiro-cli-hook-processor tool 失败路径（success=true + exit_status!=0）', () => {
+  let fakeHome;
+
+  beforeEach(() => {
+    try { fs.unlinkSync(DB_PATH); } catch {}
+    fakeHome = setupSessionFixtures(DATA_DIR);
+  });
+
+  test('execute_bash 命令失败：status=error + error.type=ToolError + error.message 含退出码与错误文本', () => {
+    const failed = JSON.parse(fs.readFileSync(FIXTURE_BASH_FAILED, 'utf-8'));
+    // 匹配 session fixture 的 execute_bash（args {command:"which bash"}），
+    // tool_response 用 tester 报告里真实失败 payload（exit_status="1"）。
+    runHookWithSessionDir(
+      'postToolUse',
+      {
+        hook_event_name: 'postToolUse',
+        cwd: SESSION_CWD,
+        tool_name: 'execute_bash',
+        tool_input: { command: 'which bash' },
+        tool_response: failed.tool_response,
+      },
+      fakeHome,
+    );
+
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: SESSION_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+
+    const records = readJsonlRecords();
+    const bashResult = records.find(
+      (x) => x['event.name'] === 'tool.result' && x['gen_ai.tool.name'] === 'execute_bash',
+    );
+    expect(bashResult).toBeTruthy();
+    expect(bashResult['tool.result.status']).toBe('error');
+    expect(bashResult['error.type']).toBe('ToolError');
+    // error.message 必须携带真实退出码与错误文本，而非硬编码串
+    expect(bashResult['error.message']).toContain('exit_status 1');
+    expect(bashResult['error.message']).toContain('No such file or directory');
+    expect(bashResult['error.message']).not.toBe('tool execution reported failure');
+  });
+
+  test('execute_bash 成功（exit_status="0"）：status=success，无 error 字段', () => {
+    runHookWithSessionDir(
+      'postToolUse',
+      {
+        hook_event_name: 'postToolUse',
+        cwd: SESSION_CWD,
+        tool_name: 'execute_bash',
+        tool_input: { command: 'which bash' },
+        tool_response: {
+          success: true,
+          result: [{ exit_status: '0', stdout: '/usr/bin/bash\n', stderr: '' }],
+        },
+      },
+      fakeHome,
+    );
+
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: SESSION_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+
+    const records = readJsonlRecords();
+    const bashResult = records.find(
+      (x) => x['event.name'] === 'tool.result' && x['gen_ai.tool.name'] === 'execute_bash',
+    );
+    expect(bashResult).toBeTruthy();
+    expect(bashResult['tool.result.status']).toBe('success');
+    expect(bashResult['error.type']).toBeUndefined();
+    expect(bashResult['error.message']).toBeUndefined();
+  });
+});
+
+// ─── 0ms TOOL span（候选项 #6 修复） ───
+// 无 postToolUse hook 的 derived tool，tool.call.time == tool.result.time → 0ms span。
+
+describe('kiro-cli-hook-processor derived tool 非零时长（+1ms 偏移）', () => {
+  let fakeHome;
+
+  beforeEach(() => {
+    try { fs.unlinkSync(DB_PATH); } catch {}
+    fakeHome = setupSessionFixtures(DATA_DIR);
+  });
+
+  test('无 postToolUse 的 derived tool：tool.result 时间晚于 tool.call，非零时长', () => {
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: SESSION_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+
+    const records = readJsonlRecords();
+    // session fixture 有 execute_bash + fs_read；未缓冲 postToolUse → 全为 derived（transcript_derived）
+    const toolResults = records.filter(
+      (x) => x['event.name'] === 'tool.result' && x['kiro.time_source'] === 'transcript_derived',
+    );
+    expect(toolResults.length).toBeGreaterThan(0);
+
+    for (const tr of toolResults) {
+      const stepId = tr['gen_ai.step.id'];
+      const toolCallId = tr['gen_ai.tool.call.id'];
+      const toolCall = records.find(
+        (r) => r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === toolCallId &&
+          r['gen_ai.step.id'] === stepId,
+      );
+      expect(toolCall).toBeTruthy();
+      // result 时刻必须严格晚于 call 时刻（避免 validate-trace time.non_zero_duration ERROR）
+      expect(BigInt(tr.time_unix_nano)).toBeGreaterThan(BigInt(toolCall.time_unix_nano));
     }
   });
 });
