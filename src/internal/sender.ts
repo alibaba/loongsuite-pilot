@@ -1,10 +1,10 @@
-import { INTERNAL_BUILD } from '../core/build-constants.js';
+import { PROPRIETARY_BUILD } from '../core/build-constants.js';
 
 let _sendAlarm: (topic: string, data: Record<string, unknown>) => void;
 let _sendStatus: (topic: string, data: Record<string, unknown>) => void;
 let _sendRunningStatus: (data: Record<string, unknown>) => void;
 
-if (INTERNAL_BUILD) {
+if (PROPRIETARY_BUILD) {
   const m = await import('./alarm-sender.internal.js');
   _sendAlarm = m.sendAlarm;
   _sendStatus = m.sendStatus;

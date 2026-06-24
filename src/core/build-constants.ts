@@ -1,2 +1,2 @@
-declare const __INTERNAL_BUILD__: boolean;
-export const INTERNAL_BUILD = __INTERNAL_BUILD__;
+declare const __PROPRIETARY_BUILD__: boolean;
+export const PROPRIETARY_BUILD = __PROPRIETARY_BUILD__;
