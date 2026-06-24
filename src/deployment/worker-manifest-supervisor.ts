@@ -365,8 +365,6 @@ export class WorkerManifestSupervisor {
   ): string {
     return value
       .replace(/\$\{destDir\}/g, bundleRoot)
-      .replace(/\$\{runtimeRoot\}/g, env.runtimeRoot ?? env.LOCAL_WORKER_RUNTIME_ROOT ?? '')
-      .replace(/\$\{memberName\}/g, env.memberName ?? env.LOCAL_WORKER_MEMBER_NAME ?? '')
       .replace(/\$\{instance:([^}]+)\}/g, (_match, name: string) => this.expandInstanceValue(name, options))
       .replace(/\$\{secret:([^}]+)\}/g, (_match, name: string) => this.expandSecret(name, env));
   }
