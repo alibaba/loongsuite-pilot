@@ -50,6 +50,25 @@ function buildFixtureDb(convRawJson, cwd, updatedMs) {
   });
 }
 
+/**
+ * 第二轮 stop 前更新会话行：bump updated_at + 追加新 step（新 request_id），
+ * 模拟交互式新 turn。INSERT OR REPLACE 复用 beforeEach 已建表。
+ */
+function upsertConversationRow(convRawJson, updatedMs) {
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(DB_PATH, (err) => {
+      if (err) return reject(err);
+      db.serialize(() => {
+        db.run(
+          `INSERT OR REPLACE INTO conversations_v2 (key, conversation_id, value, created_at, updated_at) VALUES (?,?,?,?,?)`,
+          CWD, CONV_ID, JSON.stringify(convRawJson), updatedMs - 10000, updatedMs,
+          (e) => db.close((cerr) => (e || cerr ? reject(e || cerr) : resolve())),
+        );
+      });
+    });
+  });
+}
+
 function runHook(subcommand, payload) {
   return spawnSync('node', [PROCESSOR, subcommand], {
     input: JSON.stringify(payload),
@@ -759,5 +778,52 @@ describe('kiro-cli-hook-processor derived tool 非零时长（+1ms 偏移）', (
       // result 时刻必须严格晚于 call 时刻（避免 validate-trace time.non_zero_duration ERROR）
       expect(BigInt(tr.time_unix_nano)).toBeGreaterThan(BigInt(toolCall.time_unix_nano));
     }
+  });
+});
+
+// fixture 来源: round3_conv_raw.json（researcher round3 真实会话，conversation f66fecc5）
+describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor turn.id 每会话递增', () => {
+  test('同 session 多轮 stop — turn.id 互不相同（:t1 → :t2）', async () => {
+    const convRaw = JSON.parse(fs.readFileSync(FIXTURE_CONV, 'utf-8'));
+
+    // 第 1 轮 stop：原始 3-step 会话 → turn.id = :t1
+    bufferPostToolEvents();
+    const stop1 = runHook('stop', { hook_event_name: 'stop', cwd: CWD, assistant_response: 'round3 done' });
+    expect(stop1.status).toBe(0);
+    const recs1 = readJsonlRecords();
+    expect(recs1.length).toBeGreaterThan(0);
+    const turns1 = new Set(recs1.map((r) => r['gen_ai.turn.id']));
+    expect(turns1.size).toBe(1);
+    const turn1 = [...turns1][0];
+    expect(turn1).toBe(`${CONV_ID}:t1`);
+
+    // 第 2 轮 stop 前更新 DB：bump updated_at + 追加一个新 NotToolUse step（新 request_id）。
+    // offset 增量 + stepId 去重后只导出新增 step；turn 计数已按 cwd 持久化 → turn.id = :t2
+    const conv2 = JSON.parse(JSON.stringify(convRaw));
+    const last = conv2.history[conv2.history.length - 1];
+    const appended = JSON.parse(JSON.stringify(last));
+    appended.user = { content: { Prompt: { prompt: 'second turn user input' } } };
+    appended.assistant = { Response: { content: 'second turn final answer' } };
+    appended.request_metadata = {
+      ...appended.request_metadata,
+      request_id: 'turn2-req-00000000-0000-0000-0000-000000000001',
+      message_id: 'turn2-msg-00000000-0000-0000-0000-000000000001',
+      request_start_timestamp_ms: 1781686310000,
+      stream_end_timestamp_ms: 1781686312000,
+      chat_conversation_type: 'NotToolUse',
+      tool_use_ids_and_names: [],
+    };
+    conv2.history.push(appended);
+    await upsertConversationRow(conv2, Date.now() + 60000);
+
+    const stop2 = runHook('stop', { hook_event_name: 'stop', cwd: CWD, assistant_response: 'second turn done' });
+    expect(stop2.status).toBe(0);
+    const recs2 = readJsonlRecords().filter((r) => r['gen_ai.turn.id'] !== turn1);
+    expect(recs2.length).toBeGreaterThan(0);
+    const turns2 = new Set(recs2.map((r) => r['gen_ai.turn.id']));
+    expect(turns2.size).toBe(1);
+    const turn2 = [...turns2][0];
+    expect(turn2).toBe(`${CONV_ID}:t2`);
+    expect(turn2).not.toBe(turn1);
   });
 });
