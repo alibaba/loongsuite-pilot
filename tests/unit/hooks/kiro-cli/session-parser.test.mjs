@@ -182,13 +182,29 @@ describe('readSessionJsonl', () => {
     expect(result).toBeNull();
   });
 
-  it('sinceUpdatedMs 跳过旧 session', async () => {
-    const futureMs = Date.parse('2030-01-01T00:00:00Z');
+  // 回归：移除冗余 `updatedAt <= since` 过滤后，session_jsonl 兜底链路即使
+  // since >= updated_at 也不再跳过整条 session。修复交互式多轮采集「只有首个 turn
+  // 上报」的 bug——此前 since 等于 saveSessionOffset 存的 updated_at 时 `<=` 恒真，
+  // 整条 session 被 continue，永远到不了 step 级 dedup。
+  // fixture updated_at 来自真实 sidecar（session_sidecar.json）。
+  it('sinceUpdatedMs 等于 session updated_at 时返回全量（不再跳过）', async () => {
+    const updatedAt = Date.parse('2026-06-22T11:15:53.386817252Z');
     const result = await readSessionJsonl('/tmp/kiro_session_probe', {
       sessionDir: tmpDir,
-      sinceUpdatedMs: futureMs,
+      sinceUpdatedMs: updatedAt,
     });
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result.steps).toHaveLength(2);
+  });
+
+  it('sinceUpdatedMs 大于 session updated_at（原 `<=` 恒真边界）仍返回全量', async () => {
+    const updatedAt = Date.parse('2026-06-22T11:15:53.386817252Z');
+    const result = await readSessionJsonl('/tmp/kiro_session_probe', {
+      sessionDir: tmpDir,
+      sinceUpdatedMs: updatedAt + 1,
+    });
+    expect(result).not.toBeNull();
+    expect(result.steps).toHaveLength(2);
   });
 
   it('sessionId 在返回值中', async () => {
