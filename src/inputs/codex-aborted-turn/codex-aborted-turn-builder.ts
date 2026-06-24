@@ -328,7 +328,7 @@ function buildToolEntries(
   };
   if (completed && result.output !== undefined) resultEntry['gen_ai.tool.call.result'] = result.output;
   const duration = completed ? result.timestampMs - tool.timestampMs : undefined;
-  if (duration !== undefined && duration > 0) resultEntry['gen_ai.tool.call.duration'] = duration;
+  if (duration !== undefined && duration >= 0) resultEntry['gen_ai.tool.call.duration'] = duration;
   records.push(buildEntry(resultEntry));
   return records;
 }

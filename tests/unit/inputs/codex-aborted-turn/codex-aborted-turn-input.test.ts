@@ -430,6 +430,28 @@ describe('CodexAbortedTurnInput', () => {
     expect(pendingTool?.['gen_ai.tool.call.duration']).toBeUndefined();
   });
 
+  it('keeps a zero duration for a completed tool with matching timestamps', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-aborted-zero-duration-'));
+    tempDirs.push(root);
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const { input, entries, sessionDir } = await createInput(root, stateStore);
+    const fixture = await fs.readFile(FIXTURE, 'utf8');
+    await writeTranscript(sessionDir, fixture.replace(
+      '"timestamp":"2026-06-22T08:57:51.000Z"',
+      '"timestamp":"2026-06-22T08:57:50.000Z"',
+    ), 'rollout-zero-duration.jsonl');
+    await waitFor(() => entries.some(entry =>
+      entry['event.name'] === 'tool.result' && entry['gen_ai.tool.call.id'] === 'call-bash',
+    ));
+    await input.stop();
+
+    const toolResult = entries.find(entry =>
+      entry['event.name'] === 'tool.result' && entry['gen_ai.tool.call.id'] === 'call-bash',
+    );
+    expect(toolResult?.['gen_ai.tool.call.duration']).toBe(0);
+  });
+
   it('does not export transcript history that existed before the input starts', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-aborted-baseline-'));
     tempDirs.push(root);
