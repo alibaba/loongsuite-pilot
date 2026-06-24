@@ -48,11 +48,15 @@
 | Agent | ID | 部署模式 | 采集基类 | Input 实现 | 声明文件 |
 |-------|----|---------|---------|-----------|---------|
 | Qoder IDE | `qoder` | Hook | `BaseIdeInput` | `inputs/qoder/` | `agents.d/qoder.json` |
+| Qoder CN | `qoder-cn` | Hook | `BaseIdeInput` / `BaseSqliteInput` | `inputs/qoder-cn*/` | `agents.d/qoder-cn.json` |
 | Qoder Work | `qoder-work` | Hook | `BaseSqliteInput` / `BaseHookInput` | `inputs/qoder-work*/` | `agents.d/qoder-work.json` |
+| Qoder Work CN | `qoder-work-cn` | Hook | `BaseHookInput` / `BaseSessionInput` | `inputs/qoder-work*/` | `agents.d/qoder-work-cn.json` |
 | Qoder CLI | `qoder` | Hook | `BaseHookInput` / `BaseSessionInput` | `inputs/qoder-cli*/` | `agents.d/qoder.json` |
 | Cursor | `cursor` | Hook | `BaseHookInput` | `inputs/cursor-hook/` | `agents.d/cursor.json` |
 | Claude Code | `claude-code` | Plugin-Probe | `BaseHookInput` | `inputs/claude-code-log/` | `agents.d/claude-code.json` |
 | Codex | `codex` | Plugin-Probe | `BaseHookInput` | `inputs/codex-log/` | `agents.d/codex.json` |
+| OpenCode | `opencode` | Plugin-Probe | `BaseHookInput` | `inputs/opencode-log/` | `agents.d/opencode.json` |
+| Qwen Code CLI | `qwen-code-cli` | Hook | `BaseHookInput` | `inputs/qwen-code-cli-log/` | `agents.d/qwen-code-cli.json` |
 | Wukong | `wukong` | CLI API Polling | `BaseInput` | `inputs/wukong/` | N/A |
 
 ## 依赖关系

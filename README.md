@@ -160,6 +160,22 @@ npm test
 
 For packaging and service installation from a local build, see [Installation](docs/installation.md).
 
+## Community
+
+We are looking forward to your feedback and suggestions. Scan the QR code below to join the LoongSuite Pilot DingTalk group.
+
+| LoongSuite Pilot SIG |
+|----|
+| <img src="docs/_assets/img/loongsuite-pilot-sig-dingtalk.jpg" height="150"> |
+
+### Related Projects
+
+- [LoongCollector](https://github.com/alibaba/loongcollector) - Universal node agent for log, metric and eBPF-based collection
+- [LoongSuite JS Plugins](https://github.com/alibaba/loongsuite-js-plugins) - OpenTelemetry instrumentation plugins for JS-based AI coding agents
+- [LoongSuite Python Agent](https://github.com/alibaba/loongsuite-python-agent) - Process agent for Python applications
+- [LoongSuite Go Agent](https://github.com/alibaba/loongsuite-go-agent) - Process agent for Golang with compile-time instrumentation
+- [LoongSuite Java Agent](https://github.com/alibaba/loongsuite-java-agent) - Process agent for Java applications
+
 ## License
 
 Apache License 2.0 - see [LICENSE](LICENSE) for details.
