@@ -39,7 +39,7 @@ function runScenario({ url, sessionId, body, sseEvents, networkDelayMs = 0 }) {
     const { ReadableStream, TransformStream } = require('node:stream/web');
     globalThis.ReadableStream = ReadableStream;
     globalThis.TransformStream = TransformStream;
-    if (!globalThis.Response) globalThis.Response = require('undici').Response;
+    // globalThis.Response is native in Node 18.17+ / 20+ / 22+; no fallback needed.
 
     const chunks = ${chunksJson};
     const encoder = new TextEncoder();
@@ -233,7 +233,7 @@ describe('claude-code-fetch-intercept preload', () => {
       const { ReadableStream, TransformStream } = require('node:stream/web');
       globalThis.ReadableStream = ReadableStream;
       globalThis.TransformStream = TransformStream;
-      if (!globalThis.Response) globalThis.Response = require('undici').Response;
+      // globalThis.Response is native in Node 18.17+ / 20+ / 22+; no fallback needed.
       const chunks = ${chunksJson};
       const encoder = new TextEncoder();
       globalThis.fetch = async function () {
