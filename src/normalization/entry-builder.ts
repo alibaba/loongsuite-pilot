@@ -442,9 +442,18 @@ function applyLegacyToolStatus(
     : undefined;
   if (!status) return;
 
-  if (status === 'failure' || status === 'failed' || status === 'error') {
+  const normalizedStatus = normalizeToolResultStatus(status);
+  entry['tool.result.status'] = normalizedStatus;
+  if (normalizedStatus === 'failure') {
     entry['error.type'] = entry['error.type'] ?? '_OTHER';
   }
+}
+
+function normalizeToolResultStatus(status: string): 'success' | 'failure' | 'cancelled' | 'unknown' {
+  if (status === 'success' || status === 'completed') return 'success';
+  if (status === 'failure' || status === 'failed' || status === 'error') return 'failure';
+  if (status === 'cancelled' || status === 'canceled') return 'cancelled';
+  return 'unknown';
 }
 
 function flattenAttributes(

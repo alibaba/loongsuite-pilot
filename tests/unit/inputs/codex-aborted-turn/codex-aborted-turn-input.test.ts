@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -54,6 +54,95 @@ async function writeTranscript(sessionDir: string, content: string, name = 'roll
 }
 
 describe('CodexAbortedTurnInput', () => {
+  it('keeps turn_context fields when task_started follows the same turn context', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-aborted-context-first-'));
+    tempDirs.push(root);
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const { input, entries, sessionDir } = await createInput(root, stateStore);
+    const fixture = await fs.readFile(FIXTURE, 'utf8');
+    const lines = fixture.trimEnd().split('\n');
+    [lines[1], lines[2]] = [lines[2]!, lines[1]!];
+    await writeTranscript(sessionDir, lines.join('\n') + '\n', 'rollout-context-first.jsonl');
+    await waitFor(() => entries.some(entry =>
+      entry['gen_ai.response.finish_reasons']?.includes('cancelled'),
+    ));
+    await input.stop();
+
+    const response = entries.find(entry => entry['event.name'] === 'llm.response');
+    expect(response).toMatchObject({
+      'gen_ai.response.model': 'gpt-5.4-mini',
+      'agent.codex.cwd': '/tmp/project',
+    });
+  });
+
+  it('writes a diagnostic instead of silently losing an unrecoverable aborted turn', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-aborted-recovery-failure-'));
+    tempDirs.push(root);
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const diagnosticDir = path.join(root, 'diagnostics');
+    const { input, entries, sessionDir } = await createInput(root, stateStore);
+    const fixture = await fs.readFile(FIXTURE, 'utf8');
+    const malformedAbort = fixture.replace(
+      '"timestamp":"2026-06-22T08:57:54.000Z"',
+      '"timestamp":"not-a-timestamp"',
+    );
+    await writeTranscript(sessionDir, malformedAbort, 'rollout-malformed-abort.jsonl');
+    await waitFor(async () => {
+      try {
+        return (await fs.readdir(diagnosticDir)).some(file => file.startsWith('codex-aborted-turn-recovery-failed-'));
+      } catch {
+        return false;
+      }
+    });
+    await input.stop();
+
+    const files = await fs.readdir(diagnosticDir);
+    const file = files.find(name => name.startsWith('codex-aborted-turn-recovery-failed-'))!;
+    const diagnostic = JSON.parse(await fs.readFile(path.join(diagnosticDir, file), 'utf8')) as Record<string, unknown>;
+    expect(entries).toEqual([]);
+    expect(diagnostic).toMatchObject({
+      type: 'codex_aborted_turn_recovery_failed',
+      transcript_turn_id: 'turn-aborted',
+      reason: 'missing_or_invalid_abort_timestamp',
+    });
+  });
+
+  it('reads a preceding session_meta without allocating the full transcript tail', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-aborted-meta-buffer-'));
+    tempDirs.push(root);
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const sessionDir = path.join(root, 'sessions');
+    const transcript = await writeTranscript(sessionDir, [
+      JSON.stringify({ timestamp: '2026-06-23T06:00:00.000Z', type: 'session_meta', payload: { id: 'session-large', model_provider: 'openai' } }),
+      JSON.stringify({ timestamp: '2026-06-23T06:00:00.001Z', type: 'event_msg', payload: { type: 'ignored', message: 'x'.repeat(128 * 1024) } }),
+    ].join('\n') + '\n', 'rollout-large-history.jsonl');
+    const input = new CodexAbortedTurnInput({
+      stateStore,
+      sessionDir,
+      hookStateDir: path.join(root, 'hook-state'),
+      diagnosticDir: path.join(root, 'diagnostics'),
+      pollIntervalMs: 10,
+    });
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', batch => entries.push(...batch));
+    await input.start();
+
+    const alloc = vi.spyOn(Buffer, 'alloc');
+    await fs.appendFile(transcript, [
+      JSON.stringify({ timestamp: '2026-06-23T06:00:01.000Z', type: 'turn_context', payload: { turn_id: 'turn-large', model: 'gpt-5.4-mini' } }),
+      JSON.stringify({ timestamp: '2026-06-23T06:00:01.010Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-large' } }),
+      JSON.stringify({ timestamp: '2026-06-23T06:00:02.000Z', type: 'event_msg', payload: { type: 'turn_aborted', turn_id: 'turn-large', reason: 'interrupted' } }),
+    ].join('\n') + '\n', 'utf8');
+    await waitFor(() => entries.some(entry => entry['gen_ai.response.finish_reasons']?.includes('cancelled')));
+    await input.stop();
+
+    expect(Math.max(...alloc.mock.calls.map(([size]) => Number(size)))).toBeLessThanOrEqual(64 * 1024);
+    alloc.mockRestore();
+  });
+
   it('assigns messages after a completed web search to the cancelled follow-up step', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-aborted-interleaved-'));
     tempDirs.push(root);

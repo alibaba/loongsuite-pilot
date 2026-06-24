@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { serialiseLogEntry } from '../../../src/normalization/entry-builder.js';
+import { buildAgentActivityEntry, serialiseLogEntry } from '../../../src/normalization/entry-builder.js';
 import { ClientType } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 
@@ -60,6 +60,15 @@ describe('serialiseLogEntry', () => {
     const out = serialiseLogEntry(makeEntry({ 'tool.result.status': 'cancelled' }));
 
     expect(out['tool.result.status']).toBe('cancelled');
+  });
+
+  it('normalizes completed tool results before serializing the global status field', () => {
+    const entry = buildAgentActivityEntry({
+      ...makeEntry({ 'event.name': 'tool.result' }),
+      'tool.result.status': 'completed',
+    });
+
+    expect(serialiseLogEntry(entry)['tool.result.status']).toBe('success');
   });
 
   it('skips null and undefined values', () => {

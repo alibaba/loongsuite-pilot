@@ -16,6 +16,7 @@ import {
   MAX_PENDING_COMPLETED_TURNS,
   type CodexAbortedCheckpoint,
 } from './codex-aborted-turn-types.js';
+import { asRecord, stringValue, timestampMs } from './codex-aborted-turn-utils.js';
 
 const DEFAULT_SESSION_DIR = '~/.codex/sessions';
 const DEFAULT_HOOK_STATE_DIR = '~/.loongsuite-pilot/state/codex/sessions';
@@ -135,11 +136,11 @@ export class CodexAbortedTurnInput extends BaseInput {
 
       if (line.record.type === 'event_msg' && payload.type === 'task_started') {
         const turnId = stringValue(payload.turn_id);
-        if (turnId) {
+        if (turnId && (!checkpoint.activeTurn || checkpoint.activeTurn.turnId !== turnId)) {
           checkpoint.activeTurn = {
             turnId,
             startOffset: line.startOffset,
-            startedAtMs: timestampMs(line.record),
+            startedAtMs: timestampMs(line.record) ?? Date.now(),
           };
         }
         continue;
@@ -151,7 +152,7 @@ export class CodexAbortedTurnInput extends BaseInput {
           checkpoint.activeTurn = {
             turnId,
             startOffset: line.startOffset,
-            startedAtMs: timestampMs(line.record),
+            startedAtMs: timestampMs(line.record) ?? Date.now(),
           };
         }
         continue;
@@ -164,7 +165,7 @@ export class CodexAbortedTurnInput extends BaseInput {
           checkpoint.pendingCompletedTurns.push({
             turnId,
             sessionId: checkpoint.latestSessionId ?? sessionIdFromTranscriptPath(filePath),
-            completedAtMs: timestampMs(line.record),
+            completedAtMs: timestampMs(line.record) ?? Date.now(),
           });
           checkpoint.pendingCompletedTurns = checkpoint.pendingCompletedTurns
             .slice(-MAX_PENDING_COMPLETED_TURNS);
@@ -181,6 +182,8 @@ export class CodexAbortedTurnInput extends BaseInput {
           entries.push(...recovered);
           checkpoint.emittedAbortedTurnIds = [turnId, ...checkpoint.emittedAbortedTurnIds]
             .slice(0, MAX_EMITTED_ABORTED_TURNS);
+        } else {
+          await this.emitRecoveryFailureDiagnostic(filePath, turnId, line.record);
         }
       }
       checkpoint.activeTurn = null;
@@ -327,6 +330,35 @@ export class CodexAbortedTurnInput extends BaseInput {
     checkpoint.pendingCompletedTurns = pending;
   }
 
+  private async emitRecoveryFailureDiagnostic(
+    filePath: string,
+    turnId: string,
+    abortRecord: Record<string, unknown>,
+  ): Promise<void> {
+    const reason = timestampMs(abortRecord) === undefined
+      ? 'missing_or_invalid_abort_timestamp'
+      : 'no_entries_recovered';
+    try {
+      await fs.mkdir(this.diagnosticDir, { recursive: true });
+      const now = new Date();
+      const day = now.toISOString().slice(0, 10);
+      await fs.appendFile(path.join(this.diagnosticDir, `codex-aborted-turn-recovery-failed-${day}.jsonl`), JSON.stringify({
+        type: 'codex_aborted_turn_recovery_failed',
+        transcript_path: filePath,
+        transcript_turn_id: turnId,
+        reason,
+        detected_at: now.toISOString(),
+      }) + '\n', 'utf8');
+      this.logger.warn('Codex aborted turn recovery produced no entries', { filePath, turnId, reason });
+    } catch (error) {
+      this.logger.warn('failed to write Codex aborted turn recovery diagnostic', {
+        filePath,
+        turnId,
+        error: String(error),
+      });
+    }
+  }
+
   private async hasHookState(sessionId: string): Promise<boolean> {
     try {
       await fs.access(path.join(this.hookStateDir, `${sessionId}.json`));
@@ -393,18 +425,29 @@ async function readJsonLines(filePath: string, startOffset: number, endOffset: n
 
 async function readJsonLineAt(filePath: string, offset: number): Promise<Record<string, unknown> | null> {
   const stat = await fs.stat(filePath);
-  const lines = await readJsonLines(filePath, offset, stat.size);
-  return lines.items[0]?.record ?? null;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
+  const available = stat.size - offset;
+  if (available <= 0) return null;
+  const handle = await fs.open(filePath, 'r');
+  try {
+    let size = Math.min(64 * 1024, available);
+    while (size > 0) {
+      const buffer = Buffer.alloc(size);
+      const { bytesRead } = await handle.read(buffer, 0, size, offset);
+      const newline = buffer.subarray(0, bytesRead).indexOf(0x0a);
+      if (newline >= 0) {
+        try {
+          return asRecord(JSON.parse(buffer.subarray(0, newline).toString('utf8')));
+        } catch {
+          return null;
+        }
+      }
+      if (bytesRead < size || size === available) return null;
+      size = Math.min(size * 2, available);
+    }
+    return null;
+  } finally {
+    await handle.close();
+  }
 }
 
 function readCompletedTurns(value: unknown): CodexAbortedCheckpoint['pendingCompletedTurns'] {
@@ -418,10 +461,4 @@ function readCompletedTurns(value: unknown): CodexAbortedCheckpoint['pendingComp
       ? [{ turnId, sessionId, completedAtMs }]
       : [];
   }).slice(-MAX_PENDING_COMPLETED_TURNS);
-}
-
-function timestampMs(record: Record<string, unknown>): number {
-  const timestamp = stringValue(record.timestamp);
-  const parsed = timestamp ? Date.parse(timestamp) : Number.NaN;
-  return Number.isFinite(parsed) ? parsed : Date.now();
 }

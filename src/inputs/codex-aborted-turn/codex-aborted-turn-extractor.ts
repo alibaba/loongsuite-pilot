@@ -10,6 +10,7 @@ import type {
   CodexTimelineToolCall,
   CodexTimelineToolResult,
 } from './codex-aborted-turn-types.js';
+import { asRecord, stringValue, timestampMs } from './codex-aborted-turn-utils.js';
 
 type CodexTimelineEventInput =
   | Omit<CodexTimelineAssistantMessage, 'sequence'>
@@ -41,8 +42,8 @@ export function extractAbortedTurn(
   expectedTurnId: string,
 ): CodexExtractedAbortedTurn | null {
   let currentTurnId = '';
-  let startedAtMs = 0;
-  let abortedAtMs = 0;
+  let startedAtMs: number | undefined;
+  let abortedAtMs: number | undefined;
   let abortReason = 'interrupted';
   let model = 'unknown';
   let cwd: string | undefined;
@@ -86,13 +87,14 @@ export function extractAbortedTurn(
   for (const record of records) {
     const payload = asRecord(record.payload);
     if (!payload) continue;
-    const timestamp = timestampMs(record);
+    const parsedTimestamp = timestampMs(record);
+    const timestamp = parsedTimestamp ?? startedAtMs ?? Date.now();
 
     if (record.type === 'event_msg' && payload.type === 'task_started') {
       const turnId = stringValue(payload.turn_id);
       if (turnId === expectedTurnId) {
         currentTurnId = turnId;
-        startedAtMs = startedAtMs || timestamp;
+        startedAtMs ??= timestamp;
       }
       continue;
     }
@@ -101,7 +103,7 @@ export function extractAbortedTurn(
       const turnId = stringValue(payload.turn_id);
       if (turnId !== expectedTurnId) continue;
       currentTurnId = turnId;
-      startedAtMs = startedAtMs || timestamp;
+      startedAtMs ??= timestamp;
       model = stringValue(payload.model) ?? model;
       cwd = stringValue(payload.cwd) ?? cwd;
       developerInstructions = stringValue(payload.developer_instructions) ?? developerInstructions;
@@ -121,7 +123,7 @@ export function extractAbortedTurn(
           usageSamples.push({ timestampMs: timestamp, sequence: sequence++, usage });
         }
       } else if (payload.type === 'turn_aborted' && stringValue(payload.turn_id) === expectedTurnId) {
-        abortedAtMs = timestamp;
+        abortedAtMs = parsedTimestamp;
         abortReason = stringValue(payload.reason) ?? abortReason;
       }
       continue;
@@ -196,7 +198,7 @@ export function extractAbortedTurn(
     });
   }
 
-  if (!abortedAtMs) return null;
+  if (abortedAtMs === undefined) return null;
   return {
     sessionId: meta?.sessionId || fallbackSessionId,
     transcriptTurnId: expectedTurnId,
@@ -207,7 +209,7 @@ export function extractAbortedTurn(
     ...(developerInstructions ? { developerInstructions } : {}),
     ...(meta?.baseInstructions ? { baseInstructions: meta.baseInstructions } : {}),
     ...(meta?.toolDefinitions !== undefined ? { toolDefinitions: meta.toolDefinitions } : {}),
-    startedAtMs: startedAtMs || abortedAtMs,
+    startedAtMs: startedAtMs ?? abortedAtMs,
     abortedAtMs,
     reason: abortReason,
     timeline,
@@ -219,22 +221,6 @@ export function sessionIdFromTranscriptPath(filePath: string): string {
   const base = path.basename(filePath, '.jsonl');
   const match = base.match(/([0-9a-f]{8}-[0-9a-f-]{27,})$/i);
   return match?.[1] ?? base;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function timestampMs(record: Record<string, unknown>): number {
-  const value = stringValue(record.timestamp);
-  const parsed = value ? Date.parse(value) : Number.NaN;
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function readInstructionText(value: unknown): string | undefined {
