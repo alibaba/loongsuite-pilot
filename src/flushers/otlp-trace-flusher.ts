@@ -20,11 +20,10 @@ import { BaseFlusher } from './base-flusher.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
 import { createLogger } from '../utils/logger.js';
-import { appendLine, ensureDir, getTodayDateString } from '../utils/fs-utils.js';
+import { appendLine, ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { readFileSync } from 'node:fs';
 
 const logger = createLogger('otlp-trace-flusher');
 
@@ -68,17 +67,6 @@ function resolveEndpointUrl(raw: string): string {
   return url;
 }
 
-function getPilotVersion(): string {
-  try {
-    const pkg = JSON.parse(
-      readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'),
-    );
-    return pkg.version ?? 'unknown';
-  } catch {
-    return 'unknown';
-  }
-}
-
 const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
 
 function estimateSpanSize(span: ReadableSpan): number {
@@ -105,7 +93,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly agentConvertStates = new Map<string, AgentConvertState>();
   private readonly agentExportStates = new Map<string, AgentExportState>();
   private readonly instanceId = randomUUID();
-  private readonly pilotVersion = getPilotVersion();
+  private readonly pilotVersion: string;
   private readonly resolvedEndpointUrl: string;
   private readonly debugDir: string;
   private readonly failedDir: string;
@@ -130,9 +118,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
       throw new Error('[otlp-trace-flusher] config.serviceName is required when enabled');
     }
     this.cfg = cfg;
+    const dataDir = cfg.dataDir ?? os.homedir() + '/.loongsuite-pilot';
+    this.pilotVersion = readInstalledVersion(dataDir);
     this.resolvedEndpointUrl = resolveEndpointUrl(cfg.endpoint);
-    this.debugDir = path.join(os.homedir(), '.loongsuite-pilot', 'logs', 'otlp-debug');
-    this.failedDir = path.join(os.homedir(), '.loongsuite-pilot', 'logs', 'otlp-failed');
+    this.debugDir = path.join(dataDir, 'logs', 'otlp-debug');
+    this.failedDir = path.join(dataDir, 'logs', 'otlp-failed');
 
     if (cfg.captureMessageContent !== false) {
       process.env.OTEL_SEMCONV_STABILITY_OPT_IN ??= 'gen_ai_latest_experimental';

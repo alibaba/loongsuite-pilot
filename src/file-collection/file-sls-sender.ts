@@ -1,4 +1,3 @@
-import * as os from 'node:os';
 import type { FileSlsFlusherConfig } from './types.js';
 import {
   postWebtracking,
@@ -6,21 +5,9 @@ import {
   type SlsTransportConfig,
 } from '../flushers/sls-transport.js';
 import { createLogger } from '../utils/logger.js';
+import { LOCAL_IP, buildUserAgent } from '../utils/network-utils.js';
 
 const logger = createLogger('FileSlsSender');
-
-function getLocalIp(): string {
-  const interfaces = os.networkInterfaces();
-  for (const addrs of Object.values(interfaces)) {
-    if (!addrs) continue;
-    for (const addr of addrs) {
-      if (addr.family === 'IPv4' && !addr.internal) return addr.address;
-    }
-  }
-  return '127.0.0.1';
-}
-
-const LOCAL_IP = getLocalIp();
 
 const DEFAULT_FLUSH_INTERVAL_MS = 2000;
 const DEFAULT_BATCH_SIZE = 4000;
@@ -38,11 +25,13 @@ export class FileSlsSender {
   private flushing = false;
   private readonly flushIntervalMs: number;
   private readonly batchSize: number;
+  private readonly userAgent: string;
 
   constructor(
     flusherConfig: FileSlsFlusherConfig,
     configName: string,
     failedLogDir: string,
+    dataDir: string,
   ) {
     const endpoint = /^https?:\/\//.test(flusherConfig.Endpoint)
       ? flusherConfig.Endpoint
@@ -57,6 +46,7 @@ export class FileSlsSender {
     this.failedLogDir = failedLogDir;
     this.flushIntervalMs = DEFAULT_FLUSH_INTERVAL_MS;
     this.batchSize = DEFAULT_BATCH_SIZE;
+    this.userAgent = buildUserAgent(dataDir);
   }
 
   start(): void {
@@ -111,6 +101,7 @@ export class FileSlsSender {
                 topic: this.configName,
                 source: LOCAL_IP,
                 tags: { __path__: filePath },
+                userAgent: this.userAgent,
               }).then(() => ({ ok: true as const })),
             ),
           );

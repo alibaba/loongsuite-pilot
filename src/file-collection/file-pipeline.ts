@@ -56,6 +56,7 @@ export class FilePipeline {
       flusher,
       opts.config.configName,
       opts.failedLogDir,
+      opts.dataDir,
     );
 
     this.fileWatcher = new FileWatcher();

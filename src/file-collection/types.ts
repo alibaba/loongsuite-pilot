@@ -52,10 +52,12 @@ export interface FileCollectionManagerOptions {
   configDir: string;
   stateDir: string;
   failedLogDir: string;
+  dataDir: string;
 }
 
 export interface FilePipelineOptions {
   config: FileCollectionConfig;
   stateDir: string;
   failedLogDir: string;
+  dataDir: string;
 }

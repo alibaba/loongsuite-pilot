@@ -199,6 +199,7 @@ export class Orchestrator extends EventEmitter {
         configDir: path.join(this.dataDir, 'configs', 'local'),
         stateDir: path.join(this.dataDir, 'state', 'file-collection'),
         failedLogDir: path.join(this.dataDir, 'logs', 'file-collection-failed'),
+        dataDir: this.dataDir,
       });
       await this.fileCollectionManager.start();
     } else {
@@ -365,7 +366,7 @@ export class Orchestrator extends EventEmitter {
     if (otlpTraceCfg?.enabled) {
       try {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
-        const r = new OtlpTraceFlusher(otlpTraceCfg);
+        const r = new OtlpTraceFlusher({ ...otlpTraceCfg, dataDir: this.dataDir });
         flushers.push(r);
       } catch (err) {
         logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });

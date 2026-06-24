@@ -11,6 +11,7 @@ import { createLogger } from '../utils/logger.js';
 import { appendLine, ensureDir } from '../utils/fs-utils.js';
 import { formatTime } from '../utils/time-utils.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
+import { LOCAL_IP, buildUserAgent } from '../utils/network-utils.js';
 import * as path from 'node:path';
 import {
   HttpError,
@@ -24,18 +25,6 @@ import {
   RETRYABLE_STATUS_CODES,
 } from './sls-transport.js';
 
-function getLocalIp(): string {
-  const interfaces = os.networkInterfaces();
-  for (const addrs of Object.values(interfaces)) {
-    if (!addrs) continue;
-    for (const addr of addrs) {
-      if (addr.family === 'IPv4' && !addr.internal) return addr.address;
-    }
-  }
-  return '127.0.0.1';
-}
-
-const LOCAL_IP = getLocalIp();
 const HOSTNAME = os.hostname();
 
 const BATCH_MAX_SIZE = 20;
@@ -74,12 +63,14 @@ export class SlsFlusher extends BaseFlusher {
   private alarmManager: AlarmManager | null = null;
 
   private readonly serviceName: string;
+  private readonly userAgent: string;
 
   constructor(config: SlsFlusherConfig, dataDir: string) {
     super();
     this.config = config;
     this.failedLogDir = path.join(dataDir, 'sls-failed-logs');
     this.serviceName = config.serviceNamePrefix || '';
+    this.userAgent = buildUserAgent(dataDir);
     for (const ep of config.endpoints) {
       this.endpointCounters.set(ep.name, {
         inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0,
@@ -104,6 +95,7 @@ export class SlsFlusher extends BaseFlusher {
         accessKeyId: endpoint.accessKeyId ?? '',
         accessKeySecret: endpoint.accessKeySecret ?? '',
         endpoint: endpoint.endpoint,
+        userAgent: this.userAgent,
       } as any);
       this.akClients.set(endpoint.name, client);
     }
@@ -323,6 +315,7 @@ export class SlsFlusher extends BaseFlusher {
             'x-log-apiversion': '0.6.0',
             'x-log-bodyrawsize': String(Buffer.byteLength(raw)),
             'Content-Type': 'application/json',
+            'user-agent': this.userAgent,
           },
           body: raw,
           signal: AbortSignal.timeout(WEBTRACKING_TIMEOUT_MS),
@@ -430,6 +423,7 @@ export class SlsFlusher extends BaseFlusher {
               topic,
               source: LOCAL_IP,
               tags: { __hostname__: HOSTNAME },
+              userAgent: this.userAgent,
             },
           );
         }
