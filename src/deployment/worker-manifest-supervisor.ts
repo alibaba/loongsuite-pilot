@@ -254,21 +254,17 @@ export class WorkerManifestSupervisor {
     });
 
     try {
-      process.kill(-pid, 'SIGTERM');
+      this.signalProcessGroup(pid, 'SIGTERM');
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
-        logger.warn('failed to stop worker', { agentId, pid, error: String(err) });
-        return false;
-      }
+      logger.warn('failed to stop worker', { agentId, pid, error: String(err) });
+      return false;
     }
 
     await this.waitForExit(pid, 5000);
-    if (this.isAlive(pid)) {
-      try {
-        process.kill(-pid, 'SIGKILL');
-      } catch {
-        // Process may have exited between checks.
-      }
+    try {
+      this.signalProcessGroup(pid, 'SIGKILL');
+    } catch {
+      // Process group may have exited between checks.
     }
 
     await fs.rm(paths.pid, { force: true });
@@ -413,6 +409,16 @@ export class WorkerManifestSupervisor {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  private signalProcessGroup(pgid: number, signal: NodeJS.Signals): boolean {
+    try {
+      process.kill(-pgid, signal);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ESRCH') return false;
+      throw err;
     }
   }
 

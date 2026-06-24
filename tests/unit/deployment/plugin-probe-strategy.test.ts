@@ -556,6 +556,47 @@ describe('PluginProbeStrategy', () => {
       await expect(fs.stat(staleFile)).rejects.toThrow();
     });
 
+    it('restores old package files when package replacement fails', async () => {
+      const destDir = path.join(tmpDir, 'dest');
+      const tarball = path.join(tmpDir, 'plugin.tar.gz');
+      const oldFile = path.join(destDir, 'old.txt');
+
+      await fs.mkdir(destDir, { recursive: true });
+      await fs.writeFile(oldFile, 'old');
+
+      const srcDir = path.join(tmpDir, 'tar-src');
+      await fs.mkdir(srcDir, { recursive: true });
+      await fs.writeFile(path.join(srcDir, 'fresh.txt'), 'new');
+
+      const { execSync } = await import('node:child_process');
+      execSync(`tar -czf "${tarball}" -C "${srcDir}" .`, { stdio: 'ignore' });
+
+      const realRename = (strategy as any).renamePath.bind(strategy);
+      const renameSpy = vi.spyOn(strategy as any, 'renamePath').mockImplementation(async (from: string, to: string) => {
+        if (String(from).startsWith(path.join(tmpDir, '.dest.staging-')) && String(to) === destDir) {
+          const err = new Error('simulated rename failure') as NodeJS.ErrnoException;
+          err.code = 'EIO';
+          throw err;
+        }
+        return realRename(from, to);
+      });
+
+      try {
+        const result = await strategy.deploy(makeDef({
+          pluginProbe: {
+            source: { type: 'tar', tarball, destDir },
+            mountType: 'wrapper',
+          },
+        }));
+
+        expect(result.success).toBe(false);
+        await expect(fs.readFile(oldFile, 'utf-8')).resolves.toBe('old');
+        await expect(fs.stat(path.join(destDir, 'fresh.txt'))).rejects.toThrow();
+      } finally {
+        renameSpy.mockRestore();
+      }
+    });
+
     it('returns failure when tarball does not exist and no remote URL', async () => {
       const def = makeDef({
         pluginProbe: {
@@ -742,6 +783,75 @@ while true; do sleep 1; done
         await expect(fs.stat(pidPath)).rejects.toThrow();
       } finally {
         await strategy.stopWorker(def, { instance, runtimeOptions });
+      }
+    });
+
+    it('kills remaining worker process group children after graceful stop timeout', async () => {
+      const destDir = path.join(tmpDir, 'dest');
+      const tarball = path.join(tmpDir, 'plugin.tar.gz');
+      const bundleRoot = path.join(destDir, 'sample-local-runtime-0.1.0');
+      const childPidFile = path.join(tmpDir, 'child.pid');
+
+      const srcDir = path.join(tmpDir, 'tar-src', 'sample-local-runtime-0.1.0');
+      await fs.mkdir(path.join(srcDir, 'scripts'), { recursive: true });
+      await fs.writeFile(
+        path.join(srcDir, 'scripts', 'worker-entrypoint.sh'),
+        `#!/bin/bash
+sh -c 'trap "" TERM; while true; do sleep 1; done' &
+echo "$!" > "${childPidFile}"
+trap 'exit 0' TERM
+while true; do sleep 1; done
+`,
+      );
+      await fs.chmod(path.join(srcDir, 'scripts', 'worker-entrypoint.sh'), 0o755);
+      await fs.writeFile(
+        path.join(srcDir, 'worker.manifest.json'),
+        JSON.stringify({
+          name: 'sample-local-worker',
+          command: ['scripts/worker-entrypoint.sh'],
+          paths: {
+            pid: '.agent-worker/runtime/claude-code/worker.pid',
+            status: '.agent-worker/runtime/claude-code/supervisor-status.json',
+            log: '.agent-worker/runtime/claude-code/worker.log',
+          },
+        }),
+      );
+
+      const { execSync } = await import('node:child_process');
+      execSync(`tar -czf "${tarball}" -C "${path.join(tmpDir, 'tar-src')}" .`, { stdio: 'ignore' });
+
+      const def = makeDef({
+        pluginProbe: {
+          source: { type: 'tar', tarball, destDir },
+          mountType: 'wrapper',
+        },
+      });
+
+      let childPid: number | undefined;
+      try {
+        const result = await strategy.deploy(def);
+        expect(result.success).toBe(true);
+
+        await vi.waitFor(async () => {
+          childPid = Number.parseInt(await fs.readFile(childPidFile, 'utf-8'), 10);
+          expect(childPid).toBeGreaterThan(0);
+          process.kill(childPid!, 0);
+        }, { timeout: 3000 });
+
+        expect(await strategy.stopWorker(def)).toBe(true);
+        await vi.waitFor(() => {
+          expect(childPid).toBeDefined();
+          expect(() => process.kill(childPid!, 0)).toThrow();
+        });
+      } finally {
+        if (childPid) {
+          try {
+            process.kill(childPid, 'SIGKILL');
+          } catch {
+            // Process may already be gone.
+          }
+        }
+        await strategy.stopWorker(def);
       }
     });
 

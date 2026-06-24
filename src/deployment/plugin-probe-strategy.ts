@@ -355,20 +355,49 @@ export class PluginProbeStrategy implements DeployStrategy {
 
     await ensureDir(parentDir);
     const stagingDir = await fs.mkdtemp(stagingPrefix);
+    let backupDir: string | undefined;
+    let installed = false;
 
     try {
       const acquired = await this.acquirePackage({ ...source, destDir: stagingDir });
       if (!acquired) return false;
 
-      await fs.rm(source.destDir, { recursive: true, force: true });
-      await fs.rename(stagingDir, source.destDir);
+      backupDir = path.join(parentDir, `.${path.basename(source.destDir)}.backup-${Date.now()}-${crypto.randomUUID()}`);
+      try {
+        await this.renamePath(source.destDir, backupDir);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        backupDir = undefined;
+      }
+
+      await this.renamePath(stagingDir, source.destDir);
+      installed = true;
+      if (backupDir) {
+        await fs.rm(backupDir, { recursive: true, force: true }).catch(err => {
+          logger.warn('failed to remove package backup', { backupDir, error: String(err) });
+        });
+      }
       return true;
     } catch (err) {
+      if (backupDir && !installed) {
+        await fs.rm(source.destDir, { recursive: true, force: true }).catch(() => {});
+        await this.renamePath(backupDir, source.destDir).catch(restoreErr => {
+          logger.warn('failed to restore previous package', {
+            destDir: source.destDir,
+            backupDir,
+            error: String(restoreErr),
+          });
+        });
+      }
       logger.error('package acquire failed', { destDir: source.destDir, error: String(err) });
       return false;
     } finally {
       await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
     }
+  }
+
+  private async renamePath(source: string, target: string): Promise<void> {
+    await fs.rename(source, target);
   }
 
   private async acquireTar(
