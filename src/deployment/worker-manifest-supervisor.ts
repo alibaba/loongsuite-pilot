@@ -365,8 +365,7 @@ export class WorkerManifestSupervisor {
   ): string {
     return value
       .replace(/\$\{destDir\}/g, bundleRoot)
-      .replace(/\$\{instance:([^}]+)\}/g, (_match, name: string) => this.expandInstanceValue(name, options))
-      .replace(/\$\{secret:([^}]+)\}/g, (_match, name: string) => this.expandSecret(name, env));
+      .replace(/\$\{instance:([^}]+)\}/g, (_match, name: string) => this.expandInstanceValue(name, options));
   }
 
   private expandInstanceValue(name: string, options: WorkerManifestOptions): string {
@@ -379,11 +378,6 @@ export class WorkerManifestSupervisor {
     const kebab = camelToKebab(name);
     const runtimeValue = options.runtimeOptions?.[kebab];
     return runtimeValue !== undefined ? String(runtimeValue) : '';
-  }
-
-  private expandSecret(name: string, env: Record<string, string>): string {
-    const value = env[name] ?? process.env[name] ?? '';
-    return value;
   }
 
   private resolveCommand(bundleRoot: string, command: string): string {
