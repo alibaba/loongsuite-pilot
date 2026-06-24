@@ -4,7 +4,7 @@ import { copyFile, mkdir } from 'node:fs/promises';
 const isInternal = process.env.BUILD_TYPE === 'internal';
 
 const commonDefine = {
-  '__INTERNAL_BUILD__': String(isInternal),
+  '__PROPRIETARY_BUILD__': String(isInternal),
 };
 
 const internalStubPlugin = {
