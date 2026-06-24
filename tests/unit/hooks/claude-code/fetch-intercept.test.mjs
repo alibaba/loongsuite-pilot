@@ -66,7 +66,8 @@ function runScenario({ url, sessionId, body, sseEvents, networkDelayMs = 0 }) {
     process.env.LOONGSUITE_PILOT_DATA_DIR = ${JSON.stringify(DATA_DIR)};
 
     (async () => {
-      require(${JSON.stringify(PRELOAD)});
+      // Node 18 forbids require() of .mjs (ERR_REQUIRE_ESM); use dynamic import.
+      await import(${JSON.stringify('file://' + PRELOAD)});
 
       const res = await globalThis.fetch(${JSON.stringify(url)}, {
         method: 'POST',
@@ -247,7 +248,8 @@ describe('claude-code-fetch-intercept preload', () => {
       };
       process.env.LOONGSUITE_PILOT_DATA_DIR = ${JSON.stringify(DATA_DIR)};
       (async () => {
-        require(${JSON.stringify(PRELOAD)});
+        // Node 18 forbids require() of .mjs (ERR_REQUIRE_ESM); use dynamic import.
+      await import(${JSON.stringify('file://' + PRELOAD)});
         const res = await globalThis.fetch(${JSON.stringify(LLM_URL)}, {
           method: 'POST',
           headers: { 'x-claude-code-session-id': ${JSON.stringify(SESS)} },
