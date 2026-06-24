@@ -31,6 +31,7 @@ export interface PostWebtrackingOptions {
   topic?: string;
   source?: string;
   tags?: Record<string, string>;
+  userAgent?: string;
 }
 
 export function splitForWebtracking(
@@ -122,6 +123,7 @@ async function postWebtrackingChunk(
           'x-log-apiversion': '0.6.0',
           'x-log-bodyrawsize': String(Buffer.byteLength(raw)),
           'Content-Type': 'application/json',
+          ...(opts?.userAgent ? { 'user-agent': opts.userAgent } : {}),
         },
         body: raw,
         signal: AbortSignal.timeout(timeoutMs),

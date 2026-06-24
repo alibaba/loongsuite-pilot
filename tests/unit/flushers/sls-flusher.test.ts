@@ -19,6 +19,7 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
   appendLine: (...args: unknown[]) => mockAppendLine(...args),
   ensureDir: (...args: unknown[]) => mockEnsureDir(...args),
   getTodayDateString: () => '2026-04-27',
+  readInstalledVersion: () => '0.0.0-test',
 }));
 
 vi.mock('../../../src/utils/logger.js', () => ({

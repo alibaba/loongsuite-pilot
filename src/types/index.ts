@@ -98,6 +98,7 @@ export interface OtlpTraceFlusherConfig {
   turnIdleTimeoutMs?: number;
   maxExportBatchBytes?: number;
   compression?: 'none' | 'gzip';
+  dataDir?: string;
 }
 
 export type SlsMode = 'ak' | 'webtracking';

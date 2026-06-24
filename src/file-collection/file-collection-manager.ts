@@ -16,6 +16,7 @@ export class FileCollectionManager {
   private readonly configDir: string;
   private readonly stateDir: string;
   private readonly failedLogDir: string;
+  private readonly dataDir: string;
   private readonly pipelines: Map<string, FilePipeline> = new Map();
   private readonly configHashes: Map<string, string> = new Map();
   private watcher: fs.FSWatcher | null = null;
@@ -29,6 +30,7 @@ export class FileCollectionManager {
     this.configDir = opts.configDir;
     this.stateDir = opts.stateDir;
     this.failedLogDir = opts.failedLogDir;
+    this.dataDir = opts.dataDir;
   }
 
   async start(): Promise<void> {
@@ -251,6 +253,7 @@ export class FileCollectionManager {
         config,
         stateDir: this.stateDir,
         failedLogDir: this.failedLogDir,
+        dataDir: this.dataDir,
       });
       await pipeline.start();
       this.pipelines.set(config.configName, pipeline);
