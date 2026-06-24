@@ -153,6 +153,18 @@ npm test
 
 如需从本地构建包安装为后台服务，请参考 [安装指南](docs/zh-CN/installation.md)。
 
+## 社区
+
+欢迎反馈和建议，扫描下方二维码加入我们的钉钉交流群。
+
+| LoongSuite Pilot SIG | LoongSuite JS SIG | LoongCollector SIG |
+|----|----|----|
+| <img src="docs/_assets/img/loongsuite-pilot-sig-dingtalk.jpg" height="150"> | <img src="docs/_assets/img/loongsuite-js-sig-dingtalk.jpg" height="150"> | <img src="docs/_assets/img/loongcollector-sig-dingtalk.jpg" height="150"> |
+
+| LoongSuite Python SIG | LoongSuite Go SIG | LoongSuite Java SIG |
+|----|----|----|
+| <img src="docs/_assets/img/loongsuite-python-sig-dingtalk.jpg" height="150"> | <img src="docs/_assets/img/loongsuite-go-sig-dingtalk.png" height="150"> | <img src="docs/_assets/img/loongsuite-java-sig-dingtalk.jpg" height="150"> |
+
 ## 许可证
 
 Apache License 2.0 - 详见 [LICENSE](LICENSE)。

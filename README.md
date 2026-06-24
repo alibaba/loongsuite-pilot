@@ -160,6 +160,18 @@ npm test
 
 For packaging and service installation from a local build, see [Installation](docs/installation.md).
 
+## Community
+
+We are looking forward to your feedback and suggestions. Scan the QR code below to join our DingTalk groups.
+
+| LoongSuite Pilot SIG | LoongSuite JS SIG | LoongCollector SIG |
+|----|----|----|
+| <img src="docs/_assets/img/loongsuite-pilot-sig-dingtalk.jpg" height="150"> | <img src="docs/_assets/img/loongsuite-js-sig-dingtalk.jpg" height="150"> | <img src="docs/_assets/img/loongcollector-sig-dingtalk.jpg" height="150"> |
+
+| LoongSuite Python SIG | LoongSuite Go SIG | LoongSuite Java SIG |
+|----|----|----|
+| <img src="docs/_assets/img/loongsuite-python-sig-dingtalk.jpg" height="150"> | <img src="docs/_assets/img/loongsuite-go-sig-dingtalk.png" height="150"> | <img src="docs/_assets/img/loongsuite-java-sig-dingtalk.jpg" height="150"> |
+
 ## License
 
 Apache License 2.0 - see [LICENSE](LICENSE) for details.
