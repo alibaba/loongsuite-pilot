@@ -20,10 +20,7 @@
     "replaceHookCommands": [
       "otel-claude-hook",
       ".cache/opentelemetry.instrumentation.claude"
-    ],
-    "env": {
-      "BUN_OPTIONS": "--preload=$PILOT_DATA/hooks/claude-code-fetch-intercept.mjs"
-    }
+    ]
   },
   "input": {
     "type": "hook-jsonl",

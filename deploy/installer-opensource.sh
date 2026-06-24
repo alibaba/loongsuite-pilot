@@ -903,6 +903,65 @@ remove_qodercli_token_intercept() {
 }
 
 # ============================================================
+# Claude Code fetch intercept: inject/remove shell function
+#
+# Why a shell wrapper instead of ~/.claude/settings.json env:
+#   Claude Code is a Bun-compiled binary. Bun reads BUN_OPTIONS at runtime
+#   startup (before any JS executes), so settings.json env values are too
+#   late — they only affect Claude Code's child processes, not the Bun
+#   preload of the main process. A shell wrapper that sets BUN_OPTIONS
+#   before invoking `claude` is the only reliable injection point.
+#
+# The wrapper prepends our preload but preserves any existing BUN_OPTIONS
+# the user (or qodercli wrapper, or launchd setenv) may have set.
+# ============================================================
+inject_claude_code_fetch_intercept() {
+    if ! echo "$SELECTED_AGENTS" | grep -q 'claude-code'; then return 0; fi
+    if ! command -v claude >/dev/null 2>&1; then return 0; fi
+
+    local intercept_script="$DATA_DIR/hooks/claude-code-fetch-intercept.mjs"
+    if [ ! -f "$intercept_script" ]; then return 0; fi
+
+    msg "==> 配置 claude-code fetch 拦截..." "==> Configuring claude-code fetch intercept..."
+
+    _inject_to_rc() {
+        local file="$1"
+        if [ ! -f "$file" ]; then return 0; fi
+        if [ ! -w "$file" ]; then
+            msg "    ⚠️  $file 不可写，跳过" "    ⚠️  $file is not writable, skipping"
+            return 0
+        fi
+        if grep -q 'loongsuite-pilot BEGIN claude-code-intercept' "$file" 2>/dev/null; then return 0; fi
+        [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
+        cat >> "$file" << 'INTERCEPTBLOCK'
+
+# loongsuite-pilot BEGIN claude-code-intercept
+claude() { BUN_OPTIONS="--preload=$HOME/.loongsuite-pilot/hooks/claude-code-fetch-intercept.mjs ${BUN_OPTIONS}" command claude "$@"; }
+# loongsuite-pilot END claude-code-intercept
+INTERCEPTBLOCK
+        msg "    ✅ 已写入 $file (请执行 source $file 或打开新终端)" \
+            "    ✅ Written to $file (run: source $file or open a new terminal)"
+    }
+
+    case "${SHELL:-/bin/bash}" in
+        */zsh)  _inject_to_rc "$HOME/.zshrc" ;;
+        */bash) _inject_to_rc "$HOME/.bashrc" ;;
+        *)      _inject_to_rc "$HOME/.bashrc" ;;
+    esac
+    echo ""
+}
+
+remove_claude_code_fetch_intercept() {
+    for file in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+        if [ -f "$file" ] && grep -q 'loongsuite-pilot BEGIN claude-code-intercept' "$file" 2>/dev/null; then
+            _sed_inplace '/# loongsuite-pilot BEGIN claude-code-intercept/,/# loongsuite-pilot END claude-code-intercept/d' "$file"
+            msg "    已清理 claude-code fetch intercept ($file)" \
+                "    Cleaned up claude-code fetch intercept ($file)"
+        fi
+    done
+}
+
+# ============================================================
 # Common: read VERSION file fields
 # ============================================================
 get_installed_version() {
@@ -1267,6 +1326,7 @@ cmd_install() {
     write_config
     install_loongsuite_pilot_command
     inject_qodercli_token_intercept
+    inject_claude_code_fetch_intercept
 
     msg "==> 启动服务..." "==> Starting service..."
     local _start_args=""
@@ -1569,6 +1629,7 @@ cmd_uninstall() {
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     remove_hook_configs
     remove_qodercli_token_intercept
+    remove_claude_code_fetch_intercept
     echo ""
 
     # Remove OTel Claude plugin

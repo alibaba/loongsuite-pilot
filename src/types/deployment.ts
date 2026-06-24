@@ -69,8 +69,13 @@ export interface AgentHookConfig {
    *     write is skipped to keep deploy idempotent and to coexist with
    *     other preload scripts the user may have configured.
    *
-   * Used by Claude Code to inject `BUN_OPTIONS=--preload=...` so the
-   * fetch-intercept script loads inside the Bun-compiled CLI process.
+   * NOTE: settings.json env is read AFTER the agent's main process starts,
+   * so it can only affect child processes the agent spawns. It cannot
+   * influence runtime flags that the host process itself consumes at
+   * startup — most notably `BUN_OPTIONS` for Bun-compiled binaries, which
+   * Bun reads before any JS executes. For BUN_OPTIONS-style injections,
+   * use a shell-rc wrapper instead (see installer-opensource.sh
+   * inject_claude_code_fetch_intercept).
    */
   env?: Record<string, string>;
 }
