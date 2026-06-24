@@ -206,6 +206,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     serviceNamePrefix,
     cms: buildCmsConfig(file),
     otlpTrace: buildOtlpTraceRawConfig(file),
+    autoUpdate: buildAutoUpdateConfig(file),
 
     listeners: buildListenersConfig(file),
     flushers: buildFlushersConfig(file, dataDir, serviceNamePrefix, innerDataConfig),
