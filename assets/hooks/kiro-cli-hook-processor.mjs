@@ -52,6 +52,7 @@ import {
   appendPreToolEvent, drainPreToolEvents,
   loadOffset, saveOffset,
   loadEmittedSteps, saveEmittedSteps,
+  loadTurnCount, saveTurnCount,
 } from './kiro-cli/state.mjs';
 import { resolveDbPath } from './kiro-cli/db-path.mjs';
 
@@ -286,7 +287,10 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
   const traceId = generateTraceId();
   const entrySpanId = generateSpanId();
   const agentSpanId = generateSpanId();
-  const turnId = `${sessionId}:t1`; // 单次 stop 导出 = 一个 turn
+  // turn 计数按 cwd 持久化：每次 stop 导出一个新 turn，turn.id 跨轮递增（:t1 → :t2 …）。
+  const turnNumber = loadTurnCount(cwd) + 1;
+  saveTurnCount(cwd, turnNumber);
+  const turnId = `${sessionId}:t${turnNumber}`;
 
   const baseFields = {
     trace_id: traceId,

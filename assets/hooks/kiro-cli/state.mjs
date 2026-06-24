@@ -25,6 +25,7 @@ const PRE_TOOL_BUFFER_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'pre-
 const OFFSET_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'offsets');
 const SESSION_OFFSET_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'session-offsets');
 const EMITTED_STEPS_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'emitted-steps');
+const TURN_COUNT_DIR = path.join(pilotDataDir(), 'state', 'kiro-cli', 'turn-counts');
 
 function safeKey(cwd) {
   return Buffer.from(String(cwd || 'unknown')).toString('base64url');
@@ -259,6 +260,41 @@ export function saveEmittedSteps(cwd, conversationId, stepIds) {
   } catch {
     try {
       fs.writeFileSync(file, JSON.stringify(payload), 'utf-8');
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// ─── per-cwd turn 计数（跨 stop 递增，保证 gen_ai.turn.id 每轮不同）───
+
+function turnCountFile(cwd) {
+  return path.join(ensureDir(TURN_COUNT_DIR), `${safeKey(cwd)}.json`);
+}
+
+export function loadTurnCount(cwd) {
+  const file = turnCountFile(cwd);
+  try {
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      return typeof data?.count === 'number' ? data.count : 0;
+    }
+  } catch {
+    // ignore
+  }
+  return 0;
+}
+
+export function saveTurnCount(cwd, count) {
+  const file = turnCountFile(cwd);
+  const dir = path.dirname(file);
+  const tmp = path.join(dir, `${safeKey(cwd)}.${process.pid}.tmp`);
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({ count }), 'utf-8');
+    fs.renameSync(tmp, file);
+  } catch {
+    try {
+      fs.writeFileSync(file, JSON.stringify({ count }), 'utf-8');
     } catch {
       // ignore
     }
