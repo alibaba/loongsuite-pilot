@@ -464,7 +464,7 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
       });
 
       if (toolResult !== null && toolResult !== undefined) {
-        const isErr = matched?.toolResponse && matched.toolResponse.success === false;
+        const toolErr = detectToolError(matched?.toolResponse);
         const resultRecord = {
           time_unix_nano: toolTimeNs,
           'event.id': crypto.randomUUID(),
@@ -476,21 +476,27 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
           'gen_ai.tool.name': tool.name,
           'gen_ai.tool.call.id': tool.id,
           'gen_ai.tool.call.result': toJsonValue(extractToolResultText(toolResult)),
-          'tool.result.status': isErr ? 'error' : 'success',
+          'tool.result.status': toolErr ? 'error' : 'success',
           'kiro.time_source': matched ? 'processor_receive' : 'transcript_estimate',
           'kiro.time_precision': matched ? 'ms' : (isSessionJsonl ? 'turn_estimate' : 'ms'),
         };
-        if (isErr) {
+        if (toolErr) {
           resultRecord['error.type'] = 'ToolError';
-          resultRecord['error.message'] = 'tool execution reported failure';
+          resultRecord['error.message'] = toolErr.message;
         }
         records.push(resultRecord);
       } else {
         // 无对应 hook 事件（transcript-only）：发一条 derived 的 tool.result 兜底，
         // 用 transcript 的 ToolUseResults（history 下一 entry 的 user.content）。
+        // 结果文本仅纯文本，无 success/exit_status 等失败语义字段，
+        // 无法据此判定成功/失败（kiro 工具级失败如 fs_read 权限拒绝会在 harness 层崩溃、
+        // 不回吐 postToolUse，整个 session 无 pilot 数据，此分支不可达），故恒记 success。
         const derivedResult = deriveToolResultText(step, transcript, tool);
+        // 无 postToolUse hook 时 tool.call.time == step.endTimeMs（无真实起点），
+        // 若 result 也取同一时刻 → 0ms TOOL span（validate-trace time.non_zero_duration ERROR）。
+        // 与已合成的 NotToolUse step 一致：result 时刻至少 +1ms 偏移，保证非零时长。
         records.push({
-          time_unix_nano: msToUnixNanos(step.endTimeMs || step.startTimeMs),
+          time_unix_nano: msToUnixNanos((step.endTimeMs || step.startTimeMs) + 1),
           'event.id': crypto.randomUUID(),
           'event.name': 'tool.result',
           ...baseFields,
@@ -620,6 +626,50 @@ function extractToolResultText(toolResponse) {
   }
   if (typeof toolResponse.result === 'string') return toolResponse.result;
   return toolResponse;
+}
+
+/**
+ * 从 postToolUse tool_response 判定工具是否失败（kiro-cli v2.8.0 pilot-probe 实证语义）。
+ *
+ * 实测（pilot-probe 抓 kiro 原始 postToolUse payload）：
+ *   - execute_bash 命令失败: success=true，退出码在 result[].exit_status（!= "0"）
+ *     例: cat /nonexistent → {"success":true,"result":[{"exit_status":"1",...}]}
+ *   - success===false 的 postToolUse 在 v2.8.0 下未被观测到（保留判定以兼容未来版本）
+ *   - 工具级失败（如 fs_read 权限拒绝）→ kiro 在 harness 层崩溃、不回吐 postToolUse，
+ *     整个 session 无 pilot 数据，故该路径无 postToolUse 可检，不在此构造死代码。
+ *
+ * @returns {{ message: string } | null} 失败时携带真实错误信息（退出码 / 错误文本）
+ */
+function detectToolError(toolResponse) {
+  if (!toolResponse || typeof toolResponse !== 'object') return null;
+  if (toolResponse.success === false) {
+    return { message: extractToolErrorMessage(toolResponse) };
+  }
+  const items = Array.isArray(toolResponse.result) ? toolResponse.result : [];
+  for (const item of items) {
+    if (item && typeof item === 'object' &&
+      item.exit_status !== undefined && item.exit_status !== null &&
+      String(item.exit_status) !== '0') {
+      const detail = [item.stderr, item.error, item.output, item.stdout]
+        .find((v) => typeof v === 'string' && v.trim());
+      return {
+        message: detail
+          ? `exit_status ${item.exit_status}: ${detail.trim()}`
+          : `exit_status ${item.exit_status}`,
+      };
+    }
+  }
+  return null;
+}
+
+function extractToolErrorMessage(toolResponse) {
+  const m = toolResponse.error || toolResponse.message;
+  if (typeof m === 'string' && m.trim()) return m.trim();
+  try {
+    return JSON.stringify(toolResponse).slice(0, 200);
+  } catch {
+    return 'tool execution reported failure';
+  }
 }
 
 /**
