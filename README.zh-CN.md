@@ -155,15 +155,19 @@ npm test
 
 ## 社区
 
-欢迎反馈和建议，扫描下方二维码加入我们的钉钉交流群。
+欢迎反馈和建议，扫描下方二维码加入 LoongSuite Pilot 钉钉交流群。
 
-| LoongSuite Pilot SIG | LoongSuite JS SIG | LoongCollector SIG |
-|----|----|----|
-| <img src="docs/_assets/img/loongsuite-pilot-sig-dingtalk.jpg" height="150"> | <img src="docs/_assets/img/loongsuite-js-sig-dingtalk.jpg" height="150"> | <img src="docs/_assets/img/loongcollector-sig-dingtalk.jpg" height="150"> |
+| LoongSuite Pilot SIG |
+|----|
+| <img src="docs/_assets/img/loongsuite-pilot-sig-dingtalk.jpg" height="150"> |
 
-| LoongSuite Python SIG | LoongSuite Go SIG | LoongSuite Java SIG |
-|----|----|----|
-| <img src="docs/_assets/img/loongsuite-python-sig-dingtalk.jpg" height="150"> | <img src="docs/_assets/img/loongsuite-go-sig-dingtalk.png" height="150"> | <img src="docs/_assets/img/loongsuite-java-sig-dingtalk.jpg" height="150"> |
+### 相关项目
+
+- [LoongCollector](https://github.com/alibaba/loongcollector) - 通用节点 Agent，提供日志采集、Prometheus 指标采集和基于 eBPF 的网络/安全采集
+- [LoongSuite JS Plugins](https://github.com/alibaba/loongsuite-js-plugins) - 面向 JS 系 AI Coding Agent 的 OpenTelemetry 可观测插件
+- [LoongSuite Python Agent](https://github.com/alibaba/loongsuite-python-agent) - Python 应用进程 Agent
+- [LoongSuite Go Agent](https://github.com/alibaba/loongsuite-go-agent) - Golang 编译期注入进程 Agent
+- [LoongSuite Java Agent](https://github.com/alibaba/loongsuite-java-agent) - Java 应用进程 Agent
 
 ## 许可证
 
