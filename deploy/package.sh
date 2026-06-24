@@ -8,6 +8,8 @@
 
 set -euo pipefail
 
+export BUILD_MODE="${BUILD_MODE:-proprietary}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PACKAGE_NAME="loongsuite-pilot"

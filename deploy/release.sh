@@ -193,7 +193,7 @@ echo ""
 if [ "$DEPLOY_MODE" = "external" ]; then
     bash "$SCRIPT_DIR/package.sh" --external
 else
-    bash "$SCRIPT_DIR/package-inner.sh"
+    bash "$SCRIPT_DIR/package.sh"
 fi
 
 # ── Upload ──
