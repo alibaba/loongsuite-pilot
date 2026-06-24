@@ -670,6 +670,7 @@ describe('ConfigLoader', () => {
           endpoint: 'http://localhost:4318',
           headers: { Authorization: 'Bearer token' },
           resourceAttributes: { 'deployment.env': 'prod' },
+          resourceAttributeKeys: ['agentteams.worker.name'],
         },
       });
 
@@ -678,6 +679,7 @@ describe('ConfigLoader', () => {
         endpoint: 'http://localhost:4318',
         headers: { Authorization: 'Bearer token' },
         resourceAttributes: { 'deployment.env': 'prod' },
+        resourceAttributeKeys: ['agentteams.worker.name'],
       });
     });
 
@@ -711,6 +713,23 @@ describe('ConfigLoader', () => {
       expect(result!.serviceName).toBe('my-svc');
       expect(result!.debug).toBe(true);
       expect(result!.turnIdleTimeoutMs).toBe(5000);
+      expect(result!.resourceAttributeKeys).toEqual([]);
+    });
+
+    it('buildOtlpTraceConfig allows custom resource attribute keys', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          endpoint: 'http://jaeger:4318',
+          resourceAttributeKeys: ['agentteams.worker.name', 'agentteams.worker.name', 'custom.attr', ' '],
+        },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.resourceAttributeKeys).toEqual(['agentteams.worker.name', 'custom.attr']);
     });
 
     it('buildOtlpTraceConfig falls back to cms path when no otlpTrace', async () => {
@@ -730,6 +749,7 @@ describe('ConfigLoader', () => {
         'x-cms-workspace': 'ws1',
       });
       expect(result!.resourceAttributes).toEqual({ 'acs.arms.service.feature': 'genai_app' });
+      expect(result!.resourceAttributeKeys).toEqual([]);
     });
 
     it('buildOtlpTraceConfig prefers otlpTrace over cms', async () => {

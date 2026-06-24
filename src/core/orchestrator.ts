@@ -48,6 +48,7 @@ import { UpdaterWatchdog } from './updater-watchdog.js';
 import { FileCollectionManager } from '../file-collection/file-collection-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
 import { AlarmManager } from '../metrics/alarm-manager.js';
+import { LocalWorkerActivationService } from '../local-workers/local-worker-activation-service.js';
 import type { DataflowSnapshot } from '../metrics/metrics-collector.js';
 import { RuntimeWriter, MetricsSummaryWriter, StatusBarAppManager } from '../status-bar/index.js';
 import * as fs from 'node:fs';
@@ -106,6 +107,7 @@ export class Orchestrator extends EventEmitter {
   private hookWatchdog!: HookWatchdog;
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
+  private localWorkerActivationService: LocalWorkerActivationService | null = null;
   private fileCollectionManager: FileCollectionManager | null = null;
   private metricsWriter!: MetricsWriter;
   private alarmManager!: AlarmManager;
@@ -163,6 +165,13 @@ export class Orchestrator extends EventEmitter {
       pilotDir,
     });
     await this.deploymentManager.deployAll();
+
+    this.localWorkerActivationService = new LocalWorkerActivationService({
+      dataDir: this.dataDir,
+      pilotDir,
+      definitions: this.deploymentManager.getDefinitions(),
+    });
+    await this.localWorkerActivationService.start();
 
     // 6. Register inputs & build detection entries
     const detectionEntries = await this.registerAllInputs();
@@ -270,6 +279,8 @@ export class Orchestrator extends EventEmitter {
     this.updaterWatchdog = null;
     this.hookWatchdog?.stop();
     this.logRetentionService?.stop();
+    await this.localWorkerActivationService?.stop();
+    await this.deploymentManager?.stopWorkers();
     await this.agentDiscoveryService?.stop();
     await this.inputManager?.stopAll();
     await this.flusher?.shutdown();

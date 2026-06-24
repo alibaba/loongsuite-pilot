@@ -3,10 +3,15 @@ import { Orchestrator } from './core/orchestrator.js';
 import { loadConfig } from './core/config-loader.js';
 import { createLogger, initFileLogging } from './utils/logger.js';
 import { resolveHome } from './utils/fs-utils.js';
+import { handleWorkerCli } from './local-workers/worker-cli.js';
 
 const logger = createLogger('Main');
 
 async function main(): Promise<void> {
+  if (await handleWorkerCli(process.argv.slice(2))) {
+    return;
+  }
+
   const config = await loadConfig();
 
   const logDir = path.join(resolveHome(config.dataDir), 'logs');

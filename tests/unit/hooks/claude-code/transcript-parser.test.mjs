@@ -91,6 +91,48 @@ describe('parseClaudeTranscript', () => {
     expect(result.turns[1].llmCalls.length).toBe(1);
   });
 
+  test('resume meta user record 不作为真实 prompt 或 LLM 输入', () => {
+    const file = path.join(TMP, 't.jsonl');
+    writeJsonl(file, [
+      { type: 'user', timestamp: '2026-06-04T02:57:30.000Z', promptId: 'p1', isMeta: true, message: { content: [{ type: 'text', text: 'Continue from where you left off.' }] } },
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', promptId: 'p1', message: { content: [{ type: 'text', text: 'real user prompt' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:49.000Z', message: { id: 'msg_1', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 10, output_tokens: 5 }, stop_reason: 'end_turn' } },
+    ]);
+    const result = parseClaudeTranscript(file, 0);
+    const turn = result.turns[0];
+    expect(turn.prompt).toBe('real user prompt');
+    expect(JSON.stringify(turn.llmCalls[0].input_messages)).not.toContain('Continue from where you left off.');
+  });
+
+  test('resume meta-only turn 使用 meta 时间做边界但不暴露 prompt 文本', () => {
+    const file = path.join(TMP, 't.jsonl');
+    writeJsonl(file, [
+      { type: 'user', timestamp: '2026-06-04T02:57:30.000Z', promptId: 'p1', isMeta: true, message: { content: [{ type: 'text', text: 'Continue from where you left off.' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:49.000Z', message: { id: 'msg_1', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 10, output_tokens: 5 }, stop_reason: 'end_turn' } },
+    ]);
+    const result = parseClaudeTranscript(file, 0);
+    const turn = result.turns[0];
+    expect(turn.prompt).toBe('');
+    expect(turn.promptTimestamp).toBe('2026-06-04T02:57:30.000Z');
+    expect(turn.llmCalls[0].request_start_time).toBe('2026-06-04T02:57:30.000Z');
+  });
+
+  test('resume synthetic 占位不会生成 LLM 调用或影响后续真实 LLM 起点', () => {
+    const file = path.join(TMP, 't.jsonl');
+    writeJsonl(file, [
+      { type: 'user', timestamp: '2026-06-04T02:57:30.000Z', promptId: 'p1', isMeta: true, message: { content: [{ type: 'text', text: 'Continue from where you left off.' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:31.000Z', message: { id: 'synthetic_1', model: '<synthetic>', content: [{ type: 'text', text: 'No response requested.' }], usage: { input_tokens: 0, output_tokens: 0 }, stop_reason: 'end_turn' } },
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', promptId: 'p1', message: { content: [{ type: 'text', text: 'real prompt' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:40.000Z', message: { id: 'msg_1', model: 'qwen3.7-max', content: [{ type: 'text', text: 'real answer' }], usage: { input_tokens: 10, output_tokens: 5 }, stop_reason: 'end_turn' } },
+    ]);
+    const result = parseClaudeTranscript(file, 0);
+    const turn = result.turns[0];
+
+    expect(turn.llmCalls.length).toBe(1);
+    expect(turn.llmCalls[0].model).toBe('qwen3.7-max');
+    expect(turn.llmCalls[0].request_start_time).toBe('2026-06-04T02:57:32.000Z');
+  });
+
   test('同一 promptId 内 tool_result 不切分 turn', () => {
     const file = path.join(TMP, 't.jsonl');
     writeJsonl(file, [
@@ -102,6 +144,21 @@ describe('parseClaudeTranscript', () => {
     const result = parseClaudeTranscript(file, 0);
     expect(result.turns.length).toBe(1);
     expect(result.turns[0].llmCalls.length).toBe(2);
+  });
+
+  test('tool_result request_start_time 不跨 promptId 污染下一轮', () => {
+    const file = path.join(TMP, 't.jsonl');
+    writeJsonl(file, [
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', promptId: 'p1', message: { content: [{ type: 'text', text: 'first turn' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:49.000Z', message: { id: 'msg_1', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }], usage: { input_tokens: 100, output_tokens: 50 }, stop_reason: 'tool_use' } },
+      { type: 'user', timestamp: '2026-06-04T02:57:50.000Z', promptId: 'p1', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:55.000Z', message: { id: 'msg_2', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 200, output_tokens: 10 }, stop_reason: 'end_turn' } },
+      { type: 'user', timestamp: '2026-06-04T03:12:32.000Z', promptId: 'p2', message: { content: [{ type: 'text', text: 'second turn' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T03:12:40.000Z', message: { id: 'msg_3', content: [{ type: 'text', text: 'second done' }], usage: { input_tokens: 20, output_tokens: 5 }, stop_reason: 'end_turn' } },
+    ]);
+    const result = parseClaudeTranscript(file, 0);
+    expect(result.turns.length).toBe(2);
+    expect(result.turns[1].llmCalls[0].request_start_time).toBe('2026-06-04T03:12:32.000Z');
   });
 
   test('transcript record.timestamp 正确提取为 llm_call 时间戳', () => {
