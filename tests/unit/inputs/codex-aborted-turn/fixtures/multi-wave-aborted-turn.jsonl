@@ -1,0 +1,12 @@
+{"timestamp":"2026-06-23T03:00:00.000Z","type":"session_meta","payload":{"id":"session-multi-wave","model_provider":"openai","dynamic_tools":[]}}
+{"timestamp":"2026-06-23T03:00:00.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-multi-wave"}}
+{"timestamp":"2026-06-23T03:00:00.010Z","type":"turn_context","payload":{"turn_id":"turn-multi-wave","model":"gpt-5.4-mini"}}
+{"timestamp":"2026-06-23T03:00:00.020Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"complete two steps"}]}}
+{"timestamp":"2026-06-23T03:00:01.000Z","type":"event_msg","payload":{"type":"agent_message","message":"I will inspect the files first.","phase":"commentary"}}
+{"timestamp":"2026-06-23T03:00:02.000Z","type":"response_item","payload":{"type":"function_call","call_id":"call-first","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"}}
+{"timestamp":"2026-06-23T03:00:03.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-first","output":"{\"stdout\":\"/tmp/project\"}"}}
+{"timestamp":"2026-06-23T03:00:04.000Z","type":"event_msg","payload":{"type":"agent_message","message":"Now I will inspect the project files.","phase":"commentary"}}
+{"timestamp":"2026-06-23T03:00:05.000Z","type":"response_item","payload":{"type":"function_call","call_id":"call-second","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"}}
+{"timestamp":"2026-06-23T03:00:06.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-second","output":"{\"stdout\":\"src\"}"}}
+{"timestamp":"2026-06-23T03:00:07.000Z","type":"event_msg","payload":{"type":"agent_message","message":"I found the project structure.","phase":"commentary"}}
+{"timestamp":"2026-06-23T03:00:08.000Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-multi-wave","reason":"interrupted"}}

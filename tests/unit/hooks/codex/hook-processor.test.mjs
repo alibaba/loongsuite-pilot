@@ -456,6 +456,24 @@ describe('codex-hook-processor 端到端', () => {
     ]);
   });
 
+  test('turn_aborted 后即使收到 Stop 也不由正常 Hook 重复导出', () => {
+    writeFakeTranscript([
+      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
+      { timestamp: '2026-05-27T10:00:01Z', type: 'turn_context', payload: { turn_id: 'turn-aborted', model: 'gpt-5.5' }},
+      { timestamp: '2026-05-27T10:00:02Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-aborted' }},
+      { timestamp: '2026-05-27T10:00:03Z', type: 'event_msg', payload: { type: 'token_count', info: {
+        last_token_usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 15 },
+      }}},
+      { timestamp: '2026-05-27T10:00:04Z', type: 'event_msg', payload: { type: 'turn_aborted', turn_id: 'turn-aborted', reason: 'interrupted' }},
+    ]);
+
+    runHook('session-start', { session_id: 'cdx-aborted', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
+    runHook('user-prompt-submit', { session_id: 'cdx-aborted', prompt: 'stop me', turn_id: 'turn-aborted', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+    runHook('stop', { session_id: 'cdx-aborted', turn_id: 'turn-aborted', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+
+    expect(readJsonl()).toEqual([]);
+  });
+
   test('缺 session_id 不污染 state 目录', () => {
     runHook('post-tool-use', { tool_name: 'Bash' });
     const dir = path.join(DATA_DIR, 'state', 'codex', 'sessions');

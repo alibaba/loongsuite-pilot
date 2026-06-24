@@ -309,6 +309,7 @@ function buildListenersConfig(
     'cursor-hook': { enabled: true, pollInterval: 30_000 },
     'claude-code-log': { enabled: true, pollInterval: 30_000 },
     'codex-log': { enabled: true, pollInterval: 30_000 },
+    'codex-aborted-turn': { enabled: true, pollInterval: 30_000 },
   };
 
   const result = { ...defaults };

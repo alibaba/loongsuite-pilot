@@ -383,10 +383,12 @@ function resolveTurns(state, transcriptData) {
   // pre/post_tool_use 是子 agent 进程混入的事件（子 agent hook 使用父 session_id），
   // 应当过滤掉，避免干扰父 turn 的 step 构建和时间线。
   const parentCallIds = transcriptData?.parentToolCallIds;
+  const abortedTurnIds = transcriptData?.abortedTurnIds;
 
   const turns = [];
   for (let i = 0; i < boundaries.length; i++) {
     const boundary = boundaries[i];
+    if (abortedTurnIds?.has(boundary.turn_id)) continue;
     const nextBoundary = boundaries[i + 1];
     const startTime = boundary.timestamp;
     const endTime = nextBoundary ? nextBoundary.timestamp : (stopEvent?.timestamp ?? startTime);

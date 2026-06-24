@@ -28,6 +28,7 @@ import path from 'node:path';
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
+const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled']);
 
 interface TurnBuffer {
   key: string;
@@ -180,11 +181,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
     buf.records.push(entry);
     buf.lastActivityMs = Date.now();
 
-    // Signal A: 检测到 finish_reason=stop/end_turn，标记 turn 完成。
+    // Signal A: 检测到终态 finish_reason，标记 turn 完成。
     // 逐条模式下立即 flush；批量模式下（_deferSignalA=true）仅标记 completed，
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
-    const finishReasons = entry['gen_ai.response.finish_reasons'];
-    if (Array.isArray(finishReasons) && (finishReasons.includes('stop') || finishReasons.includes('end_turn'))) {
+    if (hasTerminalFinishReason(entry['gen_ai.response.finish_reasons'])) {
       buf.completed = true;
       if (!this._deferSignalA) {
         this.triggerFlush(buf);
@@ -517,4 +517,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
     }
   }
+}
+
+function hasTerminalFinishReason(finishReasons: unknown): boolean {
+  return Array.isArray(finishReasons)
+    && finishReasons.some(reason => typeof reason === 'string' && TERMINAL_FINISH_REASONS.has(reason));
 }

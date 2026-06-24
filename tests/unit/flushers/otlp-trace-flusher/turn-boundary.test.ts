@@ -61,6 +61,21 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     expect(records).toHaveLength(2);
   });
 
+  it('Signal A: finish_reason=cancelled triggers immediate flush', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    await flusher.send(makeEntry({ 'event.name': 'llm.request' }));
+    await flusher.send(makeEntry({
+      'gen_ai.response.finish_reasons': ['cancelled'],
+      'agent.codex.turn_status': 'interrupted',
+    }));
+
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
+  });
+
   it('Signal A: finish_reason=tool_calls does NOT end turn', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);

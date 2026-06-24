@@ -225,6 +225,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qoder-work'].enabled).toBe(true);
       expect(config.listeners['qoder-cli-session'].enabled).toBe(true);
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
+      expect(config.listeners['codex-aborted-turn']).toEqual({ enabled: true, pollInterval: 30_000 });
     });
 
     it('merges file-level listener overrides', async () => {
@@ -387,6 +388,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.agents.cursor.captureMessageContent).toBe(false);
       expect(config.agents.qoder.captureMessageContent).toBe(true);
+      expect(config.listeners['codex-aborted-turn']).toEqual({ enabled: true, pollInterval: 30_000 });
     });
 
     it('parses string boolean captureMessageContent values', async () => {

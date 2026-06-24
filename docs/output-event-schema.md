@@ -114,3 +114,4 @@ If none of the above values apply, use a lowercase dotted provider name such as 
 | `tool_calls` | The model triggered a tool call. |
 | `content_filter` | Content safety filtering stopped generation. |
 | `end_turn` | The model ended the turn. |
+| `cancelled` | The user interrupted generation; this is not a provider or agent error. |

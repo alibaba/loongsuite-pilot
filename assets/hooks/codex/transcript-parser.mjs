@@ -50,6 +50,7 @@ import fs from 'node:fs';
  * @property {Array<{type:string, name:string, description:string|null, parameters:any}>=} toolDefinitions
  * @property {ToolEvent[]} toolEvents 从 response_item 提取的工具调用事件
  * @property {Array<{turn_id:string, timestamp:number, message:string, phase:string}>} agentMessages 从 event_msg:agent_message 提取的推理/评论文本
+ * @property {Set<string>} abortedTurnIds 由 event_msg:turn_aborted 标记的 turn，不能走正常 Stop 导出
  * @property {number} nextOffset 增量读取的下一个字节偏移
  * @property {TokenUsage|null} lastEmittedUsage 跨调用心跳去重锚点
  */
@@ -147,6 +148,7 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
         modelProvider: 'openai',
         tokenEvents: [],
         tokenEventsByTurn: new Map(),
+        abortedTurnIds: new Set(),
         totalUsage: null,
         toolEvents: [],
         nextOffset: byteOffset,
@@ -210,6 +212,10 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
   // 子 agent 的工具调用在子 transcript 中。resolveTurns 用此集合过滤 state.events 中
   // 混入的子 agent pre/post_tool_use 事件。
   const parentToolCallIds = new Set();
+
+  // These turns are exported by the transcript recovery input instead of a
+  // normal Stop hook, preventing duplicate traces if Codex emits both.
+  const abortedTurnIds = new Set();
 
   // 子 agent 信息列表。从 spawn_agent 的 function_call_output 中提取。
   // 将来实现 subagent 嵌套时使用：通过 agent_id 定位子 transcript，
@@ -290,6 +296,10 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
       }
     } else if (entryType === 'event_msg') {
       const payloadType = payload.type;
+
+      if (payloadType === 'turn_aborted' && typeof payload.turn_id === 'string' && payload.turn_id) {
+        abortedTurnIds.add(payload.turn_id);
+      }
 
       // 提取用户输入文本，关联到当前 turn（turnBoundaries 最后一项）
       if (payloadType === 'user_message') {
@@ -542,6 +552,7 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
       tokenEvents: [],
       tokenEventsByTurn: new Map(),
       turnBoundaries,
+      abortedTurnIds,
       parentToolCallIds,
       childAgents,
       agentMessages: [],
@@ -562,6 +573,7 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
     toolDefinitions: toolDefs.length > 0 ? toolDefs : undefined,
     toolEvents,
     turnBoundaries,
+    abortedTurnIds,
     parentToolCallIds,
     childAgents,
     agentMessages,
