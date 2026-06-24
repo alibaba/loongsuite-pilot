@@ -366,18 +366,7 @@ function buildParentSteps(events, ctx) {
     // Compute delta for this step:
     //   s1: user prompt (if any) — already pre-seeded in cumulative.
     //   s2+: tool results from previous step — append to cumulative.
-    const deltaMessages = [];
-    if (isFirst && userPrompt) {
-      deltaMessages.push({
-        role: 'user',
-        parts: [{ type: 'text', content: userPrompt }],
-      });
-    }
-    if (previousToolResults && previousToolResults.length > 0) {
-      const toolMessage = toolResultsToMessage(previousToolResults);
-      deltaMessages.push(toolMessage);
-      cumulativeInputMessages.push(toolMessage);
-    }
+    const deltaMessages = buildDeltaMessages(isFirst, userPrompt, previousToolResults, cumulativeInputMessages);
 
     const { timestamp: reqTs, source: reqTsSource } = llmRequestStartTime(ev, lastStepEndTs);
     records.push(buildLlmRequestWithTs(
@@ -413,20 +402,11 @@ function buildParentSteps(events, ctx) {
         currentStepId = `${ctx.stepPrefix || ctx.turnId}:s${stepRound}`;
         stepToolCalls.set(currentStepId, []);
         const { timestamp: reqTs, source: reqTsSource } = llmRequestStartTime(ev, lastStepEndTs);
-        const deltaMessages = [];
-        if (stepRound === 1 && ctx.userPrompt) {
-          deltaMessages.push({
-            role: 'user',
-            parts: [{ type: 'text', content: ctx.userPrompt }],
-          });
-          // Note: cumulativeInputMessages already contains the user prompt
-          // (pre-seeded by buildParentSteps). Do not push again.
-        }
-        if (previousToolResults.length > 0) {
-          const toolMessage = toolResultsToMessage(previousToolResults);
-          deltaMessages.push(toolMessage);
-          cumulativeInputMessages.push(toolMessage);
-        }
+        // Ordering invariant: delta must be computed BEFORE flushPendingTools, because
+        // flushPendingTools populates previousToolResults with the current step's tools.
+        // s1's delta should only contain results from a prior step (empty for the first step).
+        const deltaMessages = buildDeltaMessages(stepRound === 1, ctx.userPrompt, previousToolResults, cumulativeInputMessages);
+        previousToolResults = [];
         records.push(buildLlmRequestWithTs(
           reqTs, { hook_event: 'implicit' }, ctx, currentStepId,
           deltaMessages, cumulativeInputMessages, reqTsSource,
@@ -526,18 +506,7 @@ function buildParentSteps(events, ctx) {
     stepToolCalls.set(currentStepId, []);
     const reqTs = lastStepEndTs || ctx.promptEventTs;
 
-    const deltaMessages = [];
-    if (isFirstStep && ctx.userPrompt) {
-      deltaMessages.push({
-        role: 'user',
-        parts: [{ type: 'text', content: ctx.userPrompt }],
-      });
-    }
-    if (previousToolResults.length > 0) {
-      const toolMessage = toolResultsToMessage(previousToolResults);
-      deltaMessages.push(toolMessage);
-      cumulativeInputMessages.push(toolMessage);
-    }
+    const deltaMessages = buildDeltaMessages(isFirstStep, ctx.userPrompt, previousToolResults, cumulativeInputMessages);
 
     records.push(buildLlmRequestWithTs(
       reqTs, { hook_event: 'implicit' }, ctx, currentStepId,
@@ -594,6 +563,31 @@ function toolResultsToMessage(toolResults) {
     response: tr.error || stringify(tr.result),
   }));
   return { role: 'tool', parts };
+}
+
+/**
+ * Build per-step delta messages and update cumulative input.
+ *
+ * - isFirst step: delta includes the user prompt (already pre-seeded in cumulative).
+ * - s2+ steps: delta includes a tool-role message from the previous step's results,
+ *   which is also appended to cumulativeInputMessages.
+ *
+ * Callers are responsible for resetting previousToolResults after this call.
+ */
+function buildDeltaMessages(isFirst, userPrompt, previousToolResults, cumulativeInputMessages) {
+  const deltaMessages = [];
+  if (isFirst && userPrompt) {
+    deltaMessages.push({
+      role: 'user',
+      parts: [{ type: 'text', content: userPrompt }],
+    });
+  }
+  if (previousToolResults.length > 0) {
+    const toolMessage = toolResultsToMessage(previousToolResults);
+    deltaMessages.push(toolMessage);
+    cumulativeInputMessages.push(toolMessage);
+  }
+  return deltaMessages;
 }
 
 function buildLlmResponse(ev, ctx, stepId, partType) {
