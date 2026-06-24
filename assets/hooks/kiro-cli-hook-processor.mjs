@@ -51,7 +51,6 @@ import {
   appendToolEvent, drainToolEvents,
   appendPreToolEvent, drainPreToolEvents,
   loadOffset, saveOffset,
-  loadSessionOffset, saveSessionOffset,
   loadEmittedSteps, saveEmittedSteps,
 } from './kiro-cli/state.mjs';
 import { resolveDbPath } from './kiro-cli/db-path.mjs';
@@ -174,7 +173,6 @@ async function cmdStop() {
   const sinceMs = loadOffset(cwd);
 
   let transcript;
-  let source = 'sqlite';
 
   // 优先 SQLite transcript
   const dbPath = resolveDbPath();
@@ -200,9 +198,6 @@ async function cmdStop() {
   // SQLite miss → session JSONL fallback
   if (!transcript || transcript.steps.length === 0) {
     transcript = await trySessionJsonl(cwd);
-    if (transcript) {
-      source = 'session_jsonl';
-    }
   }
 
   if (!transcript || transcript.steps.length === 0) {
@@ -259,14 +254,8 @@ async function cmdStop() {
   }
   saveEmittedSteps(cwd, currentConvId, allEmittedIds);
 
-  if (source === 'session_jsonl') {
-    if (transcript.updatedMs) {
-      saveSessionOffset(cwd, transcript.updatedMs);
-    }
-  } else {
-    if (transcript.updatedMs) {
-      saveOffset(cwd, transcript.updatedMs);
-    }
+  if (transcript.source !== 'session_jsonl' && transcript.updatedMs) {
+    saveOffset(cwd, transcript.updatedMs);
   }
 }
 
@@ -275,11 +264,8 @@ async function cmdStop() {
  * @returns {Promise<import('./kiro-cli/transcript-parser.mjs').TranscriptData|null>}
  */
 async function trySessionJsonl(cwd) {
-  const sessionSinceMs = loadSessionOffset(cwd);
   try {
-    const session = await readSessionJsonl(cwd, {
-      sinceUpdatedMs: sessionSinceMs,
-    });
+    const session = await readSessionJsonl(cwd);
     return session;
   } catch (err) {
     logHookError({

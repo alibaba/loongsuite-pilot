@@ -247,8 +247,6 @@ export async function readSessionJsonl(cwd, opts = {}) {
 
   if (!fs.existsSync(sessionDir)) return null;
 
-  const since = typeof opts.sinceUpdatedMs === 'number' ? opts.sinceUpdatedMs : 0;
-
   let sidecarFiles;
   try {
     sidecarFiles = fs
@@ -272,7 +270,6 @@ export async function readSessionJsonl(cwd, opts = {}) {
     if (!sid) continue;
 
     const updatedAt = sidecar.updated_at ? Date.parse(sidecar.updated_at) : 0;
-    if (since > 0 && updatedAt <= since) continue;
 
     candidates.push({ sidecar, sid, updatedAt, sidecarPath });
   }
