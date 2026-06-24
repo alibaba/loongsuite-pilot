@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import * as path from 'path';
 import { Orchestrator } from './core/orchestrator.js';
 import { loadConfig } from './core/config-loader.js';
@@ -7,6 +8,13 @@ import { resolveHome } from './utils/fs-utils.js';
 const logger = createLogger('Main');
 
 async function main(): Promise<void> {
+  const [command, ...args] = process.argv.slice(2);
+  if (command === 'token-usage' || command === 'tokens') {
+    const { runTokenUsageCommand } = await import('./cli/token-usage.js');
+    process.exitCode = await runTokenUsageCommand(args);
+    return;
+  }
+
   const config = await loadConfig();
 
   const logDir = path.join(resolveHome(config.dataDir), 'logs');
