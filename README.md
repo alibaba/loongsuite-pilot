@@ -166,7 +166,7 @@ We are looking forward to your feedback and suggestions. Scan the QR code below 
 
 | LoongSuite Pilot SIG |
 |----|
-| <img src="docs/_assets/img/loongsuite-pilot-sig-dingtalk.jpg" height="150"> |
+| <img src="docs/_assets/img/loongsuite-pilot-sig-dingtalk.jpg" alt="LoongSuite Pilot DingTalk group QR code" height="150"> |
 
 ### Related Projects
 

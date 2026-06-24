@@ -159,7 +159,7 @@ npm test
 
 | LoongSuite Pilot SIG |
 |----|
-| <img src="docs/_assets/img/loongsuite-pilot-sig-dingtalk.jpg" height="150"> |
+| <img src="docs/_assets/img/loongsuite-pilot-sig-dingtalk.jpg" alt="LoongSuite Pilot 钉钉交流群二维码" height="150"> |
 
 ### 相关项目
 
