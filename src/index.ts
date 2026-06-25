@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import * as path from 'path';
 import { Orchestrator } from './core/orchestrator.js';
 import { loadConfig } from './core/config-loader.js';
@@ -8,7 +9,15 @@ import { handleWorkerCli } from './local-workers/worker-cli.js';
 const logger = createLogger('Main');
 
 async function main(): Promise<void> {
-  if (await handleWorkerCli(process.argv.slice(2))) {
+  const argv = process.argv.slice(2);
+  if (await handleWorkerCli(argv)) {
+    return;
+  }
+
+  const [command, ...args] = argv;
+  if (command === 'token-usage' || command === 'tokens') {
+    const { runTokenUsageCommand } = await import('./cli/token-usage.js');
+    process.exitCode = await runTokenUsageCommand(args);
     return;
   }
 

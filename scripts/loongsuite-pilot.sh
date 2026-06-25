@@ -900,6 +900,46 @@ cmd_worker() {
     exec "$node_bin" "$entry" worker "$@"
 }
 
+cmd_token_usage() {
+    ensure_dirs
+
+    local repo_dir version_dir entry candidate node_bin
+    repo_dir="$(dirname "$SCRIPT_DIR")"
+    entry=""
+
+    if [ -f "$repo_dir/package.json" ] && [ -d "$repo_dir/src" ]; then
+        if [ -f "$repo_dir/dist/index.js" ]; then
+            entry="$repo_dir/dist/index.js"
+        else
+            echo "❌ local dist/index.js not found; run 'npm run build' first"
+            exit 1
+        fi
+    else
+        version_dir=$(resolve_current_version 2>/dev/null) || true
+        for candidate in \
+            "${version_dir:-}/dist/index.js" \
+            "$PACKAGE_DIR/dist/index.js"; do
+            if [ -f "$candidate" ]; then
+                entry="$candidate"
+                break
+            fi
+        done
+    fi
+
+    if [ -z "$entry" ]; then
+        echo "❌ loongsuite-pilot runtime entry not found"
+        exit 1
+    fi
+
+    node_bin=$(resolve_node) || {
+        echo "❌ node runtime not found" >&2
+        exit 1
+    }
+
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    exec "$node_bin" "$entry" token-usage "$@"
+}
+
 cmd_rollback() {
     if [ ! -f "$PREVIOUS_FILE" ]; then
         echo "❌ No previous version to roll back to"
@@ -1586,6 +1626,7 @@ cmd_help() {
     echo "  restart         Restart the collector service"
     echo "  status          Show service status (default)"
     echo "  info            Show version and config info"
+    echo "  token-usage     Show token usage TUI"
     echo "  monitor start   Start process resource monitor"
     echo "  monitor stop    Stop process resource monitor"
     echo "  worker ...      Manage local remote-controlled workers"
@@ -1615,6 +1656,8 @@ case "${1:-status}" in
     restart)     cmd_restart ;;
     status)      cmd_status ;;
     info)        cmd_info ;;
+    token-usage) shift; cmd_token_usage "$@" ;;
+    tokens)      shift; cmd_token_usage "$@" ;;
     monitor)             cmd_monitor "${2:-}" ;;
     worker)              shift; cmd_worker "$@" ;;
     rollback)            cmd_rollback ;;
