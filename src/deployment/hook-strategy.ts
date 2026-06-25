@@ -88,6 +88,19 @@ export class HookStrategy implements DeployStrategy {
     try {
       await this.ensureSettingsFile(hookConfig.settingsPath);
 
+      if (hookConfig.env) {
+        try {
+          await this.applyEnvToSettings(hookConfig.settingsPath, hookConfig.env);
+        } catch (err) {
+          // env injection failure must not block hook deployment — pilot can still
+          // collect the basic transcript-based events without preload.
+          logger.warn('settings.env merge failed (non-blocking)', {
+            agentId: def.id,
+            error: String(err),
+          });
+        }
+      }
+
       const hookDefs = this.buildHookDefinitions(def);
       for (const hookDef of hookDefs) {
         const installed = await this.hookManager.isHookInstalled(hookDef);
@@ -273,6 +286,62 @@ export class HookStrategy implements DeployStrategy {
       useNestedFormat: hookConfig.format === 'nested',
       replaceHookCommands: hookConfig.replaceHookCommands,
     }));
+  }
+
+  /**
+   * Merge env entries from the agent hook config into the settings file's
+   * top-level `env` block. Supports `$PILOT_DATA` token expansion.
+   *
+   * Idempotency:
+   *   - Regular keys overwrite if already present.
+   *   - `BUN_OPTIONS` is treated as a space-separated flag list. If the
+   *     existing value already contains the same `--preload=<path>` we are
+   *     about to add, the write is skipped (allows coexistence with user's
+   *     own preload scripts).
+   *
+   * Failure here is non-fatal — caller in deploy() wraps in try/catch.
+   */
+  private async applyEnvToSettings(
+    settingsPath: string,
+    env: Record<string, string>,
+  ): Promise<void> {
+    // NOTE: $PILOT_DATA tokens in `env` values are already resolved by
+    // AgentDefLoader.resolveVariables() before the config reaches here
+    // (see agent-def-loader.ts), so no further expansion is needed.
+    const existing =
+      (await readJsonFile<Record<string, unknown>>(settingsPath)) ?? {};
+    const envBlock =
+      (existing.env as Record<string, string> | undefined) ?? {};
+    let changed = false;
+
+    for (const [key, value] of Object.entries(env)) {
+      if (key === 'BUN_OPTIONS') {
+        const current = envBlock[key];
+        if (typeof current === 'string' && current.length > 0) {
+          // Match against full whitespace-delimited tokens to avoid a
+          // superstring false-positive (e.g., `...intercept.mjs-debug`
+          // would otherwise be treated as already containing our path).
+          const ourTokens = value.split(/\s+/).filter(Boolean);
+          const currentTokens = current.split(/\s+/).filter(Boolean);
+          if (ourTokens.every((t) => currentTokens.includes(t))) {
+            continue; // already injected (exact tokens present)
+          }
+          envBlock[key] = `${current} ${value}`.trim();
+          changed = true;
+          continue;
+        }
+      }
+
+      if (envBlock[key] !== value) {
+        envBlock[key] = value;
+        changed = true;
+      }
+    }
+
+    if (!changed) return;
+    existing.env = envBlock;
+    await writeJsonFile(settingsPath, existing);
+    logger.info('settings.env merged', { settingsPath, keys: Object.keys(env) });
   }
 
   /**

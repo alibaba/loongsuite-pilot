@@ -279,6 +279,156 @@ describe('HookStrategy', () => {
     });
   });
 
+  describe('env injection (settings.env merge)', () => {
+    // Helper: build a def whose hook block carries an env directive.
+    // Uses settings.json (not hooks.json) so ensureSettingsFile is a no-op
+    // and the only writeJsonFile we observe comes from applyEnvToSettings.
+    const envHookDef = (env: Record<string, string> | undefined) =>
+      makeDef({
+        hook: {
+          settingsPath: '/home/.test/settings.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/test.sh',
+          format: 'nested',
+          ...(env ? { env } : {}),
+        },
+      });
+
+    beforeEach(() => {
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+    });
+
+    it('hook config without env → no settings write', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue(null);
+
+      await strategy.deploy(envHookDef(undefined));
+
+      expect(writeJsonFile).not.toHaveBeenCalled();
+    });
+
+    // NOTE: applyEnvToSettings does NOT itself expand $PILOT_DATA — that's
+    // done upstream by AgentDefLoader.resolveVariables() at load time.
+    // These tests pass already-resolved paths to mirror real input shape.
+    const RESOLVED_PRELOAD = '--preload=/home/.loongsuite-pilot/hooks/intercept.mjs';
+
+    it('first-time injection: value written as-is into a fresh env block', async () => {
+      // No existing settings file
+      vi.mocked(readJsonFile).mockResolvedValue(null);
+
+      await strategy.deploy(envHookDef({
+        BUN_OPTIONS: RESOLVED_PRELOAD,
+      }));
+
+      expect(writeJsonFile).toHaveBeenCalledWith(
+        '/home/.test/settings.json',
+        { env: { BUN_OPTIONS: RESOLVED_PRELOAD } },
+      );
+    });
+
+    it('BUN_OPTIONS idempotency: existing value already contains our preload → skip write', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        env: { BUN_OPTIONS: RESOLVED_PRELOAD },
+      });
+
+      await strategy.deploy(envHookDef({ BUN_OPTIONS: RESOLVED_PRELOAD }));
+
+      expect(writeJsonFile).not.toHaveBeenCalled();
+    });
+
+    it('BUN_OPTIONS token-boundary match: superstring is NOT treated as already injected', async () => {
+      // Existing token is our preload path with a `-debug` suffix — must not
+      // false-positive as "already injected" (regression guard for substring
+      // match bug; comment 3 in code review).
+      vi.mocked(readJsonFile).mockResolvedValue({
+        env: { BUN_OPTIONS: '--preload=/home/.loongsuite-pilot/hooks/intercept.mjs-debug' },
+      });
+
+      await strategy.deploy(envHookDef({ BUN_OPTIONS: RESOLVED_PRELOAD }));
+
+      expect(writeJsonFile).toHaveBeenCalledWith(
+        '/home/.test/settings.json',
+        {
+          env: {
+            BUN_OPTIONS:
+              '--preload=/home/.loongsuite-pilot/hooks/intercept.mjs-debug ' + RESOLVED_PRELOAD,
+          },
+        },
+      );
+    });
+
+    it('BUN_OPTIONS coexistence: append our preload alongside user\'s own', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        env: { BUN_OPTIONS: '--preload=/user/own/script.js' },
+      });
+
+      await strategy.deploy(envHookDef({ BUN_OPTIONS: RESOLVED_PRELOAD }));
+
+      expect(writeJsonFile).toHaveBeenCalledWith(
+        '/home/.test/settings.json',
+        {
+          env: {
+            BUN_OPTIONS: '--preload=/user/own/script.js ' + RESOLVED_PRELOAD,
+          },
+        },
+      );
+    });
+
+    it('non-BUN_OPTIONS key overwrites existing value', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        env: { OTHER_KEY: 'old_value' },
+      });
+
+      await strategy.deploy(envHookDef({ OTHER_KEY: 'new_value' }));
+
+      expect(writeJsonFile).toHaveBeenCalledWith(
+        '/home/.test/settings.json',
+        { env: { OTHER_KEY: 'new_value' } },
+      );
+    });
+
+    it('preserves unrelated env keys and other top-level settings', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        env: { ANTHROPIC_AUTH_TOKEN: 'secret' },
+        otherTopLevel: 'preserved',
+      });
+
+      await strategy.deploy(envHookDef({ BUN_OPTIONS: RESOLVED_PRELOAD }));
+
+      expect(writeJsonFile).toHaveBeenCalledWith(
+        '/home/.test/settings.json',
+        {
+          env: {
+            ANTHROPIC_AUTH_TOKEN: 'secret',
+            BUN_OPTIONS: RESOLVED_PRELOAD,
+          },
+          otherTopLevel: 'preserved',
+        },
+      );
+    });
+
+    it('same value re-deploy → no write (general idempotency)', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        env: { CUSTOM_KEY: 'same_value' },
+      });
+
+      await strategy.deploy(envHookDef({ CUSTOM_KEY: 'same_value' }));
+
+      expect(writeJsonFile).not.toHaveBeenCalled();
+    });
+
+    it('env merge failure must not block hook deploy (returns success)', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({});
+      vi.mocked(writeJsonFile).mockRejectedValueOnce(new Error('disk full'));
+
+      const result = await strategy.deploy(envHookDef({ BUN_OPTIONS: RESOLVED_PRELOAD }));
+
+      expect(result.success).toBe(true);
+      // Hook installation still attempted normally
+      expect(mockHookManager.installHook).toHaveBeenCalled();
+    });
+  });
+
   describe('undeploy', () => {
     it('uninstalls all hooks', async () => {
       mockHookManager.uninstallHook.mockResolvedValue(true);
