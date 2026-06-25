@@ -18,13 +18,6 @@ const SELECTED_FIELDS = new Set([
   'hostname',
   'os_detail',
   'metric_json',
-  'init_type',
-  'rollback_available',
-  'canary_policy',
-  'version_count',
-  'updater_pid_alive',
-  'node_bin_valid',
-  'current_version_valid',
 ]);
 
 let callCount = 0;
