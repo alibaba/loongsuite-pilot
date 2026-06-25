@@ -167,6 +167,15 @@ export class PluginProbeStrategy implements DeployStrategy {
     });
   }
 
+  async isWorkerRunning(def: AgentDefinition, options: PluginProbeDeployOptions = {}): Promise<boolean> {
+    const config = def.pluginProbe;
+    if (!config) return false;
+    return this.workerSupervisor.isWorkerRunning(config.source.destDir, {
+      instance: options.instance,
+      runtimeOptions: options.runtimeOptions,
+    });
+  }
+
   async computeSourceHash(tarball?: string, url?: string): Promise<string | undefined> {
     if (tarball && await fileExists(tarball)) {
       return this.hashFile(tarball);
@@ -397,7 +406,13 @@ export class PluginProbeStrategy implements DeployStrategy {
   }
 
   private async renamePath(source: string, target: string): Promise<void> {
-    await fs.rename(source, target);
+    try {
+      await fs.rename(source, target);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
+      await fs.cp(source, target, { recursive: true });
+      await fs.rm(source, { recursive: true, force: true });
+    }
   }
 
   private async acquireTar(

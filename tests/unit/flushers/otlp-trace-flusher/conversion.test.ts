@@ -112,6 +112,19 @@ describe('OtlpTraceFlusher - conversion', () => {
     });
   });
 
+  it('evicts old per-resource convert states when resource attribute cardinality grows', () => {
+    for (let i = 0; i < 70; i += 1) {
+      (flusher as any).getOrCreateConvertState('claude-code', {
+        'agentteams.worker.name': `worker-${i}`,
+      });
+    }
+
+    const states = (flusher as any).agentConvertStates as Map<string, unknown>;
+    expect(states.size).toBeLessThanOrEqual(64);
+    expect(states.has('claude-code|{"agentteams.worker.name":"worker-0"}')).toBe(false);
+    expect(states.has('claude-code|{"agentteams.worker.name":"worker-69"}')).toBe(true);
+  });
+
   it('does not export when conversion produces zero spans', async () => {
     // forceFlush + getFinishedSpans returns empty
     const entry = {

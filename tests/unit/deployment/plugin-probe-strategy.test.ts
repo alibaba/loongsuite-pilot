@@ -933,6 +933,51 @@ while true; do sleep 1; done
       expect(status.error).toContain('worker process did not expose a pid');
     });
 
+    it('handles worker exit even when the process exits before pid and status writes finish', async () => {
+      const destDir = path.join(tmpDir, 'dest');
+      const tarball = path.join(tmpDir, 'plugin.tar.gz');
+      const bundleRoot = path.join(destDir, 'sample-local-runtime-0.1.0');
+
+      const srcDir = path.join(tmpDir, 'tar-src', 'sample-local-runtime-0.1.0');
+      await fs.mkdir(path.join(srcDir, 'scripts'), { recursive: true });
+      await fs.writeFile(path.join(srcDir, 'scripts', 'worker-entrypoint.sh'), '#!/bin/bash\nexit 7\n');
+      await fs.chmod(path.join(srcDir, 'scripts', 'worker-entrypoint.sh'), 0o755);
+      await fs.writeFile(
+        path.join(srcDir, 'worker.manifest.json'),
+        JSON.stringify({
+          name: 'sample-local-worker',
+          command: ['scripts/worker-entrypoint.sh'],
+          paths: {
+            pid: '.agent-worker/runtime/claude-code/worker.pid',
+            status: '.agent-worker/runtime/claude-code/supervisor-status.json',
+            log: '.agent-worker/runtime/claude-code/worker.log',
+          },
+          restartPolicy: { type: 'on-failure', maxRestarts: 0, backoffSeconds: 0 },
+        }),
+      );
+
+      const { execSync } = await import('node:child_process');
+      execSync(`tar -czf "${tarball}" -C "${path.join(tmpDir, 'tar-src')}" .`, { stdio: 'ignore' });
+
+      const result = await strategy.deploy(makeDef({
+        pluginProbe: {
+          source: { type: 'tar', tarball, destDir },
+          mountType: 'wrapper',
+        },
+      }));
+
+      expect(result.success).toBe(true);
+
+      const pidPath = path.join(bundleRoot, '.agent-worker/runtime/claude-code/worker.pid');
+      const statusPath = path.join(bundleRoot, '.agent-worker/runtime/claude-code/supervisor-status.json');
+      await vi.waitFor(async () => {
+        const status = JSON.parse(await fs.readFile(statusPath, 'utf-8')) as { state: string; exitCode: number };
+        expect(status.state).toBe('exited');
+        expect(status.exitCode).toBe(7);
+        await expect(fs.stat(pidPath)).rejects.toThrow();
+      });
+    });
+
     it('restarts worker when it exits from an unexpected signal', async () => {
       const destDir = path.join(tmpDir, 'dest');
       const tarball = path.join(tmpDir, 'plugin.tar.gz');

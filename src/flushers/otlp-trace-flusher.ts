@@ -44,6 +44,7 @@ interface AgentConvertState {
   provider: BasicTracerProvider;
   handler: ExtendedTelemetryHandler;
   inMem: InMemorySpanExporter;
+  active: number;
 }
 
 interface AgentExportState {
@@ -73,6 +74,7 @@ function resolveEndpointUrl(raw: string): string {
 }
 
 const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_CONVERT_STATES = 64;
 
 function estimateSpanSize(span: ReadableSpan): number {
   let size = 512;
@@ -349,33 +351,41 @@ export class OtlpTraceFlusher extends BaseFlusher {
   ): Promise<void> {
     const convertState = this.getOrCreateConvertState(agentType, projectedResourceAttributes, convertKey);
     const { handler, provider, inMem } = convertState;
+    convertState.active += 1;
 
     try {
-      const result = convertEventLogToTrace(
-        records as unknown as EventLogRecord[],
-        { handler, strict: false },
-      );
-      if (result.warnings.length > 0) {
-        logger.warn(`Conversion warnings for ${agentType}`, { warnings: result.warnings.join('; ') });
+      try {
+        const result = convertEventLogToTrace(
+          records as unknown as EventLogRecord[],
+          { handler, strict: false },
+        );
+        if (result.warnings.length > 0) {
+          logger.warn(`Conversion warnings for ${agentType}`, { warnings: result.warnings.join('; ') });
+        }
+      } catch (err) {
+        logger.error(`convertEventLogToTrace failed for ${agentType}`, { err: String(err) });
+        return;
       }
+
+      await provider.forceFlush();
+      const spans = inMem.getFinishedSpans();
+      inMem.reset();
+
+      if (spans.length === 0) return;
+
+      const exportState = this.getOrCreateExportState(agentType);
+
+      if (this.cfg.debug) {
+        await this.writeDebugLog(agentType, spans);
+      }
+
+      await this.exportInBatches(exportState, agentType, spans);
     } catch (err) {
-      logger.error(`convertEventLogToTrace failed for ${agentType}`, { err: String(err) });
-      return;
+      logger.error(`convert and export failed for ${agentType}`, { err: String(err) });
+    } finally {
+      convertState.active -= 1;
+      this.evictConvertStates();
     }
-
-    await provider.forceFlush();
-    const spans = inMem.getFinishedSpans();
-    inMem.reset();
-
-    if (spans.length === 0) return;
-
-    const exportState = this.getOrCreateExportState(agentType);
-
-    if (this.cfg.debug) {
-      await this.writeDebugLog(agentType, spans);
-    }
-
-    await this.exportInBatches(exportState, agentType, spans);
   }
 
   private async exportInBatches(
@@ -434,7 +444,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
     key = this.buildConvertStateKey(agentType, projectedResourceAttributes),
   ): AgentConvertState {
     let state = this.agentConvertStates.get(key);
-    if (state) return state;
+    if (state) {
+      this.agentConvertStates.delete(key);
+      this.agentConvertStates.set(key, state);
+      return state;
+    }
 
     const resource = this.buildResource(agentType, projectedResourceAttributes);
     const inMem = new InMemorySpanExporter();
@@ -444,9 +458,24 @@ export class OtlpTraceFlusher extends BaseFlusher {
     });
     const handler = new ExtendedTelemetryHandler({ tracerProvider: provider });
 
-    state = { provider, handler, inMem };
+    state = { provider, handler, inMem, active: 0 };
     this.agentConvertStates.set(key, state);
+    this.evictConvertStates();
     return state;
+  }
+
+  private evictConvertStates(): void {
+    while (this.agentConvertStates.size > MAX_CONVERT_STATES) {
+      const entry = [...this.agentConvertStates.entries()].find(([, state]) => state.active === 0);
+      if (!entry) return;
+
+      const [key, state] = entry;
+      this.agentConvertStates.delete(key);
+      this.convertLocks.delete(key);
+      state.provider.shutdown().catch(err => {
+        logger.warn('failed to shut down evicted convert state', { key, error: String(err) });
+      });
+    }
   }
 
   private buildConvertStateKey(

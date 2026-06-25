@@ -170,11 +170,14 @@ export class WorkerManifestSupervisor {
         detached: true,
       });
       let settled = false;
+      let startPersisted = false;
+      let earlyExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
       const failStart = async (err: unknown): Promise<void> => {
         if (settled) return;
         settled = true;
         log.end();
         await fs.rm(paths.pid, { force: true });
+        this.runtimes.delete(paths.pid);
         await this.writeStatus(paths.status, {
           state: 'failed',
           name: manifest.name,
@@ -190,6 +193,19 @@ export class WorkerManifestSupervisor {
       child.once('error', err => {
         void failStart(err);
       });
+      child.once('exit', (code, signal) => {
+        if (settled) return;
+        if (!startPersisted) {
+          earlyExit = { code, signal };
+          return;
+        }
+        settled = true;
+        log.end();
+        const activeRuntime = this.runtimes.get(paths.pid);
+        if (activeRuntime) {
+          void this.handleExit(agentId, bundleRoot, manifest, env, options, paths.pid, activeRuntime, code, signal);
+        }
+      });
 
       if (!child.pid) {
         await failStart(new Error('worker process did not expose a pid'));
@@ -197,7 +213,12 @@ export class WorkerManifestSupervisor {
       }
 
       child.unref();
+      if (settled) return false;
+
+      const activeRuntime = runtime ?? { restarts: 0, stopping: false };
+      this.runtimes.set(paths.pid, activeRuntime);
       await fs.writeFile(paths.pid, `${child.pid}\n`, 'utf-8');
+      if (settled) return false;
       await this.writeStatus(paths.status, {
         state: 'running',
         name: manifest.name,
@@ -206,15 +227,24 @@ export class WorkerManifestSupervisor {
         startedAt: new Date().toISOString(),
         restartCount: runtime?.restarts ?? 0,
       });
+      if (settled) return false;
+      startPersisted = true;
 
-      const activeRuntime = runtime ?? { restarts: 0, stopping: false };
-      this.runtimes.set(paths.pid, activeRuntime);
-      child.on('exit', (code, signal) => {
-        if (settled) return;
+      if (earlyExit) {
         settled = true;
         log.end();
-        void this.handleExit(agentId, bundleRoot, manifest, env, options, paths.pid, activeRuntime, code, signal);
-      });
+        void this.handleExit(
+          agentId,
+          bundleRoot,
+          manifest,
+          env,
+          options,
+          paths.pid,
+          activeRuntime,
+          earlyExit.code,
+          earlyExit.signal,
+        );
+      }
 
       logger.info('worker started', { agentId, pid: child.pid, manifest: manifest.name });
       return true;
@@ -414,6 +444,7 @@ export class WorkerManifestSupervisor {
 
   private signalProcessGroup(pgid: number, signal: NodeJS.Signals): boolean {
     try {
+      // start() uses detached=true, so the child becomes the process-group leader on Linux/macOS.
       process.kill(-pgid, signal);
       return true;
     } catch (err) {

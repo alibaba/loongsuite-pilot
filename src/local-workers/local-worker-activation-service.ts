@@ -1,5 +1,4 @@
 import * as crypto from 'node:crypto';
-import * as fs from 'node:fs/promises';
 import { watch, type FSWatcher } from 'node:fs';
 import * as path from 'node:path';
 import type { AgentDefinition } from '../types/index.js';
@@ -109,7 +108,7 @@ export class LocalWorkerActivationService {
     }
 
     const fingerprint = await this.fingerprint(instance, template);
-    if (this.activeFingerprints.get(instance.id) === fingerprint && await this.isInstanceWorkerAlive(instance)) return;
+    if (this.activeFingerprints.get(instance.id) === fingerprint && await this.isInstanceWorkerAlive(template, instance)) return;
 
     logger.info('reconciling local worker', { instanceId: instance.id, runtime: instance.runtime, trigger });
     await this.stopInstance(instance);
@@ -198,16 +197,12 @@ export class LocalWorkerActivationService {
     })).digest('hex');
   }
 
-  private async isInstanceWorkerAlive(instance: LocalWorkerInstance): Promise<boolean> {
-    try {
-      const raw = await fs.readFile(path.join(stateDir(this.dataDir, instance.id), 'worker.pid'), 'utf-8');
-      const pid = Number.parseInt(raw.trim(), 10);
-      if (!Number.isFinite(pid) || pid <= 0) return false;
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
+  private async isInstanceWorkerAlive(template: AgentDefinition, instance: LocalWorkerInstance): Promise<boolean> {
+    const def = this.buildDefinition(template, instance);
+    return this.strategy.isWorkerRunning(def, {
+      instance: this.buildManifestInstance(instance),
+      runtimeOptions: this.buildRuntimeOptions(instance),
+    });
   }
 
   private async writeSupervisorStatus(instance: LocalWorkerInstance, state: string, error: string): Promise<void> {

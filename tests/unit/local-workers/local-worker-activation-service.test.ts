@@ -52,6 +52,11 @@ trap 'exit 0' TERM
 while true; do sleep 1; done
 `,
     restartPolicy: Record<string, unknown> = { type: 'on-failure', maxRestarts: 1, backoffSeconds: 0 },
+    manifestPaths: Record<string, string> = {
+      pid: '${instance:stateDir}/worker.pid',
+      status: '${instance:stateDir}/supervisor-status.json',
+      log: '${instance:logDir}/worker.log',
+    },
   ): Promise<void> {
     const bundleRoot = path.join(tmpDir, 'bundle-src', 'sample-local-runtime-0.1.0');
     await fs.mkdir(path.join(bundleRoot, 'scripts'), { recursive: true });
@@ -90,11 +95,7 @@ while true; do sleep 1; done
           SAMPLE_PLUGIN_DIR: '${destDir}/sample-plugin',
           SAMPLE_STATE_DIR: '${instance:stateDir}',
         },
-        paths: {
-          pid: '${instance:stateDir}/worker.pid',
-          status: '${instance:stateDir}/supervisor-status.json',
-          log: '${instance:logDir}/worker.log',
-        },
+        paths: manifestPaths,
         restartPolicy,
       }),
       'utf-8',
@@ -277,6 +278,67 @@ while true; do sleep 1; done
       await service.refresh('token-rotation');
 
       expect((await fs.readFile(captureFile, 'utf-8')).trim().split('\n')).toEqual([token()]);
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it('does not restart a same-fingerprint worker whose pid path is defined by the manifest', async () => {
+    const tarball = path.join(tmpDir, 'sample-local-runtime-0.0.1.tar.gz');
+    const captureFile = path.join(tmpDir, 'worker-runs.txt');
+    const installMarker = path.join(tmpDir, 'install-ran');
+    const entrypoint = `#!/bin/bash
+printf 'run\\n' >> "${captureFile}"
+trap 'exit 0' TERM
+while true; do sleep 1; done
+`;
+    await makeBundle(
+      tarball,
+      captureFile,
+      installMarker,
+      entrypoint,
+      { type: 'on-failure', maxRestarts: 1, backoffSeconds: 0 },
+      {
+        pid: '.agent-worker/custom/worker.pid',
+        status: '${instance:stateDir}/supervisor-status.json',
+        log: '${instance:logDir}/worker.log',
+      },
+    );
+
+    await connectLocalWorker({
+      dataDir,
+      runtime: 'claude-code',
+      bootstrapToken: token(),
+      workDir: path.join(tmpDir, 'project'),
+    });
+
+    const template: AgentDefinition = {
+      id: 'sample-local-runtime-template',
+      displayName: 'Sample Local Runtime',
+      deployMode: 'plugin-probe',
+      localWorkerRuntime: 'claude-code',
+      detection: { paths: [], commands: [] },
+      pluginProbe: {
+        source: {
+          type: 'tar',
+          tarball,
+          destDir: path.join(tmpDir, 'unused-template-cache'),
+        },
+        mountType: 'wrapper',
+      },
+    };
+    const service = new LocalWorkerActivationService({ dataDir, pilotDir, definitions: [template] });
+
+    try {
+      await service.start();
+      await vi.waitFor(async () => {
+        expect((await fs.readFile(captureFile, 'utf-8')).trim().split('\n')).toEqual(['run']);
+      });
+
+      await service.refresh('same-fingerprint');
+      await new Promise(resolve => setTimeout(resolve, 250));
+
+      expect((await fs.readFile(captureFile, 'utf-8')).trim().split('\n')).toEqual(['run']);
     } finally {
       await service.stop();
     }
