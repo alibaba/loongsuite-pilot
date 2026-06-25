@@ -905,6 +905,42 @@ remove_qodercli_token_intercept() {
 }
 
 # ============================================================
+# QoderWork runtime wrapper: intercept token usage via QODER_WORKER_RUNTIME_PATH
+#
+# QoderWork runs its agent SDK in a Node.js worker_thread (not Bun), so the
+# qodercli BUN_OPTIONS --preload trick does not apply. The SDK honors
+# QODER_WORKER_RUNTIME_PATH as the worker entry; our wrapper installs a
+# JSON.parse hook then imports the real runtime. On macOS we set this via
+# launchctl setenv so the GUI-launched app inherits it. Linux/Windows are
+# skipped (Electron env injection there is tracked separately).
+# ============================================================
+inject_qoderwork_runtime_wrapper() {
+    if [ "$(uname)" != "Darwin" ]; then return 0; fi
+    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder-work'; then return 0; fi
+    if [ ! -d "/Applications/QoderWork.app" ]; then return 0; fi
+
+    local wrapper_script="$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs"
+    if [ ! -f "$wrapper_script" ]; then return 0; fi
+
+    msg "==> 配置 QoderWork token 采集..." "==> Configuring QoderWork token intercept..."
+    launchctl setenv QODER_WORKER_RUNTIME_PATH "$wrapper_script"
+    msg "    ✅ launchctl setenv QODER_WORKER_RUNTIME_PATH" \
+        "    ✅ launchctl setenv QODER_WORKER_RUNTIME_PATH"
+    msg "    ⚠️  请完全退出并重新打开 QoderWork 以生效" \
+        "    ⚠️  Please fully quit and restart QoderWork for changes to take effect"
+    echo ""
+}
+
+remove_qoderwork_runtime_wrapper() {
+    if [ "$(uname)" != "Darwin" ]; then return 0; fi
+    if launchctl getenv QODER_WORKER_RUNTIME_PATH 2>/dev/null | grep -q 'loongsuite-pilot'; then
+        launchctl unsetenv QODER_WORKER_RUNTIME_PATH
+        msg "    已清理 QODER_WORKER_RUNTIME_PATH" \
+            "    Cleaned up QODER_WORKER_RUNTIME_PATH"
+    fi
+}
+
+# ============================================================
 # Claude Code fetch intercept: inject/remove shell function
 #
 # Why a shell wrapper instead of ~/.claude/settings.json env:
@@ -1331,6 +1367,7 @@ cmd_install() {
     write_config
     install_loongsuite_pilot_command
     inject_qodercli_token_intercept
+    inject_qoderwork_runtime_wrapper
     inject_claude_code_fetch_intercept
 
     msg "==> 启动服务..." "==> Starting service..."
@@ -1634,6 +1671,7 @@ cmd_uninstall() {
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     remove_hook_configs
     remove_qodercli_token_intercept
+    remove_qoderwork_runtime_wrapper
     remove_claude_code_fetch_intercept
     echo ""
 

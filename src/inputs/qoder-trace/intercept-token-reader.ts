@@ -27,12 +27,17 @@ export interface InterceptData {
   systemPrompt: InterceptSystemPrompt | null;
 }
 
-function getInterceptFile(): string {
-  return resolveHome('~/.loongsuite-pilot/logs/qodercli-intercept.jsonl');
+// qodercli and QoderWork write separate intercept files to avoid ID namespace
+// confusion and concurrent-write interference between the CLI and the GUI worker.
+export function getInterceptFile(filename = 'qodercli-intercept.jsonl'): string {
+  return resolveHome(`~/.loongsuite-pilot/logs/${filename}`);
 }
 
-export async function readInterceptData(sinceTs?: number): Promise<InterceptData> {
-  const filePath = getInterceptFile();
+export async function readInterceptData(sinceTs?: number, filename?: string): Promise<InterceptData> {
+  return readInterceptFile(getInterceptFile(filename), sinceTs);
+}
+
+export async function readInterceptFile(filePath: string, sinceTs?: number): Promise<InterceptData> {
   const result: InterceptData = { tokens: [], systemPrompt: null };
 
   let content: string;
