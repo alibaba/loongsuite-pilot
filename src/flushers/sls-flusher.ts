@@ -41,6 +41,7 @@ const BACKPRESSURE_HIGH_WATERMARK_BYTES = 64 * 1024 * 1024;
 const BACKPRESSURE_LOW_WATERMARK_BYTES = 16 * 1024 * 1024;
 const MAX_QUEUED_BYTES = 256 * 1024 * 1024;
 const BACKPRESSURE_ALARM_THRESHOLD_MS = 20 * 60 * 1000;
+const BACKPRESSURE_STATE_CACHE_MS = 500;
 
 interface QueuedLog {
   content: Record<string, string>;
@@ -161,6 +162,8 @@ export class SlsFlusher extends BaseFlusher {
   private backpressureSince = 0;
   private backpressureReason = '';
   private backpressureAlarmRecorded = false;
+  private cachedBackpressureState: FlusherBackpressureState | null = null;
+  private cachedBackpressureStateAt = 0;
 
   private readonly serviceName: string;
   private readonly userAgent: string;
@@ -272,15 +275,16 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   override getBackpressureState(): FlusherBackpressureState {
-    this.syncDeliveryHealth();
-    const stats = this.calculateQueueStats();
-    return {
-      active: this.backpressureActive,
-      queuedEntries: stats.entries,
-      queuedBytes: stats.bytes,
-      retryAfterMs: this.getRetryAfterMs(Date.now()),
-      reason: this.backpressureReason || undefined,
-    };
+    const now = Date.now();
+    if (
+      this.cachedBackpressureState &&
+      now - this.cachedBackpressureStateAt < BACKPRESSURE_STATE_CACHE_MS
+    ) {
+      return { ...this.cachedBackpressureState };
+    }
+
+    this.syncDeliveryHealth(now);
+    return { ...(this.cachedBackpressureState ?? { active: false }) };
   }
 
   private async flushInternal(options: FlushOptions): Promise<void> {
@@ -768,8 +772,7 @@ export class SlsFlusher extends BaseFlusher {
     return { entries, bytes, oldestQueuedAt };
   }
 
-  private syncDeliveryHealth(): void {
-    const now = Date.now();
+  private syncDeliveryHealth(now = Date.now()): void {
     const total = this.calculateQueueStats();
     this.updateBackpressure(total, now);
 
@@ -804,6 +807,19 @@ export class SlsFlusher extends BaseFlusher {
         ? formatTime(new Date(retryState.nextRetryAt))
         : '';
     }
+
+    this.cachedBackpressureState = this.buildBackpressureState(total, now);
+    this.cachedBackpressureStateAt = now;
+  }
+
+  private buildBackpressureState(total: QueueStats, now: number): FlusherBackpressureState {
+    return {
+      active: this.backpressureActive,
+      queuedEntries: total.entries,
+      queuedBytes: total.bytes,
+      retryAfterMs: this.getRetryAfterMs(now),
+      reason: this.backpressureReason || undefined,
+    };
   }
 
   private updateBackpressure(total: QueueStats, now: number): void {
@@ -1034,24 +1050,32 @@ export class SlsFlusher extends BaseFlusher {
     while ((stats.entries > maxEntries || stats.bytes > maxBytes) && bucket.length > 0) {
       const overflow = bucket.pop();
       if (!overflow) break;
+      const causedByEndpoint = endpoint.name;
+      const droppedEndpoint = overflow.endpoint;
       await this.persistFailedLogs(
-        endpoint,
-        this.buildFailurePayload(endpoint, [overflow]),
+        droppedEndpoint,
+        this.buildFailurePayload(droppedEndpoint, [overflow]),
         new Error(`SLS queue overflow entries=${stats.entries} bytes=${stats.bytes}`),
       );
-      const counter = this.endpointCounters.get(endpoint.name);
+      const counter = this.endpointCounters.get(droppedEndpoint.name);
       if (counter) {
         counter.outFailed += 1;
         counter.queueOverflowEntriesTotal = (counter.queueOverflowEntriesTotal ?? 0) + 1;
       }
-      this.markError(endpoint.name, { retryable: false, type: 'queue_overflow' });
+      this.markError(droppedEndpoint.name, { retryable: false, type: 'queue_overflow' });
       this.alarmManager?.record(
         'FLUSH_SEND_ALARM', '2',
         `SLS queue overflow persisted 1 entry`,
-        { endpoint_name: endpoint.name },
+        { endpoint_name: droppedEndpoint.name },
       );
       logger.warn('SLS queue max exceeded', {
-        endpoint: endpoint.name,
+        causedByEndpoint,
+        droppedEndpoint: droppedEndpoint.name,
+        droppedProject: droppedEndpoint.project,
+        droppedLogstore: droppedEndpoint.logstore,
+        droppedAgentType: overflow.agentType,
+        droppedSizeBytes: overflow.sizeBytes,
+        remainingDroppedBucketEntries: bucket.length,
         queuedEntries: stats.entries,
         queuedBytes: stats.bytes,
         maxEntries,
