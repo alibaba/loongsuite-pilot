@@ -14,6 +14,7 @@ import {
   resolveQoderWorkRoot,
   type SdkEvent,
 } from '../qoder-work-log/qoder-work-log-input.js';
+import { QoderWorkModelNameCache } from './qoderwork-model-name-cache.js';
 
 const NANO_PER_MILLI = 1_000_000n;
 const SEGMENT_TIMING_TOLERANCE_MS = 5 * 60 * 1000;
@@ -62,12 +63,18 @@ export class QoderWorkTraceInput extends BaseInput {
   // The encoded workspace directory is a fast path; session-id lookup handles
   // writer encoding changes and non-POSIX workspace paths.
   private readonly segmentDirBySession: Map<string, CachedSegmentDir> = new Map();
+  // Display name sidecar — resolves modelKey → human-readable label by tail-reading
+  // qodercli.log. Decoupled from segment FIFO so it never affects timing matching.
+  private readonly modelNameCache: QoderWorkModelNameCache;
 
   constructor(opts: QoderWorkTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder-work/history');
     this.segmentsRoot = opts.segmentsRoot ?? resolveHome('~/.qoderwork/logs/sessions');
     this.sdkLogDir = opts.sdkLogDir ?? resolveQoderWorkSdkLogDir();
+    this.modelNameCache = new QoderWorkModelNameCache({
+      logFile: opts.qoderCliLogFile ?? resolveHome('~/.qoderwork/logs'),
+    });
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -90,6 +97,11 @@ export class QoderWorkTraceInput extends BaseInput {
       // Read legacy SDK logs only for token compatibility. Segment data remains
       // authoritative for LLM/tool timing and model attribution.
       await this.readSdkTokenState();
+      try {
+        await this.modelNameCache.refresh();
+      } catch (err) {
+        this.logger.warn('failed to refresh model name cache', { error: (err as Error)?.message });
+      }
 
       // 1. Hook JSONL — primary source of structure.
       const { entries: rawEntries, isFirstRun, turnCount } = await this.readHookJsonl();
@@ -458,12 +470,25 @@ export class QoderWorkTraceInput extends BaseInput {
         const response = stepEntries.find(e => e['event.name'] === 'llm.response');
         let hasSegmentUsage = false;
         if (request && response) {
-          const pair = this.takeSegmentPair(sessionId, turnId, request, response);
-          if (pair) {
+          const result = this.takeSegmentPair(sessionId, turnId, request, response);
+          if (result) {
+            const { pair, matchType } = result;
             (request as Record<string, unknown>)['time_unix_nano'] = pair.startNano;
             (response as Record<string, unknown>)['time_unix_nano'] = pair.endNano;
 
+            for (const e of stepEntries) {
+              (e as Record<string, unknown>)['agent.qoderwork.model_source'] = matchType;
+            }
+            if (matchType === 'segment_time_window') {
+              this.logger.warn('model resolved via time-window fallback', {
+                sessionId,
+                turnId,
+                pairTurnId: pair.turnId,
+              });
+            }
+
             if (pair.model) {
+              const displayName = this.modelNameCache.resolve(pair.model).displayName;
               for (const e of stepEntries) {
                 if (!e['gen_ai.request.model'] || e['gen_ai.request.model'] === 'auto') {
                   (e as Record<string, unknown>)['gen_ai.request.model'] = pair.model;
@@ -471,9 +496,16 @@ export class QoderWorkTraceInput extends BaseInput {
                 if (e['event.name'] === 'llm.response') {
                   (e as Record<string, unknown>)['gen_ai.response.model'] = pair.model;
                 }
+                if (displayName) {
+                  (e as Record<string, unknown>)['agent.qoderwork.model_display_name'] = displayName;
+                }
               }
             }
             hasSegmentUsage = this.applyUsage(response, pair.usage);
+          } else {
+            for (const e of stepEntries) {
+              (e as Record<string, unknown>)['agent.qoderwork.model_source'] = 'unresolved';
+            }
           }
           if (!hasSegmentUsage) this.applySdkTokenUsage(sessionId, request, response);
         }
@@ -684,19 +716,21 @@ export class QoderWorkTraceInput extends BaseInput {
     turnId: string | undefined,
     request: AgentActivityEntry,
     response: AgentActivityEntry,
-  ): SegmentLlmPair | undefined {
+  ): { pair: SegmentLlmPair; matchType: 'segment_turn' | 'segment_time_window' } | undefined {
     const buffer = this.segmentPairs.get(sessionId);
     if (!buffer?.length) return undefined;
 
+    let matchType: 'segment_turn' | 'segment_time_window' = 'segment_turn';
     let idx = turnId ? buffer.findIndex(pair => pair.turnId === turnId) : -1;
     if (idx < 0) {
       idx = buffer.findIndex(pair => this.isSegmentPairCompatible(pair, request, response));
+      matchType = 'segment_time_window';
     }
     if (idx < 0) return undefined;
 
     const [pair] = buffer.splice(idx, 1);
     if (buffer.length === 0) this.segmentPairs.delete(sessionId);
-    return pair;
+    return { pair, matchType };
   }
 
   private isSegmentPairCompatible(
@@ -787,6 +821,7 @@ export interface QoderWorkTraceInputOptions extends InputOptions {
   logDir?: string;
   segmentsRoot?: string;
   sdkLogDir?: string;
+  qoderCliLogFile?: string;
 }
 
 interface HookJsonlBatch {

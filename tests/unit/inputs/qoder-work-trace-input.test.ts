@@ -844,6 +844,170 @@ describe('QoderWorkTraceInput', () => {
     const tcOut = entries.find(e => e['event.id'] === 'tc')!;
     expect(tcOut.time_unix_nano).toBe('999999999999000000');
   });
+
+  it("tags step entries with agent.qoderwork.model_source='segment_turn' on precise turn match", async () => {
+    const sessionId = 'sess-source-precise';
+    const turnId = 'turn-source-precise';
+    const hookFile = path.join(hookLogDir, todayFileName());
+    const req = buildHookEntry({
+      'event.id': 'src-req',
+      'event.name': 'llm.request' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      time_unix_nano: nano('2026-06-16T10:00:00.000Z'),
+    });
+    const resp = buildHookEntry({
+      'event.id': 'src-resp',
+      'event.name': 'llm.response',
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      time_unix_nano: nano('2026-06-16T10:00:05.000Z'),
+    });
+    await fs.writeFile(hookFile, [req, resp].map(e => JSON.stringify(e)).join('\n') + '\n');
+    await writeSegments(sessionId, 'run1.jsonl', [
+      segTurnStarted(turnId, false),
+      segModelStart(turnId, 'r1', '2026-06-16T10:00:00.000Z'),
+      segModelEnd(turnId, 'r1', '2026-06-16T10:00:05.000Z'),
+    ]);
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    const reqOut = entries.find(e => e['event.id'] === 'src-req')!;
+    const respOut = entries.find(e => e['event.id'] === 'src-resp')!;
+    expect(reqOut['agent.qoderwork.model_source']).toBe('segment_turn');
+    expect(respOut['agent.qoderwork.model_source']).toBe('segment_turn');
+  });
+
+  it("tags step entries with agent.qoderwork.model_source='segment_time_window' on time-window fallback", async () => {
+    const sessionId = 'sess-source-window';
+    const hookTurnId = 'hook-turn-window';
+    const segTurnId = 'segment-turn-mismatch';
+    const hookFile = path.join(hookLogDir, todayFileName());
+    const req = buildHookEntry({
+      'event.id': 'win-req',
+      'event.name': 'llm.request' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': hookTurnId,
+      'gen_ai.step.id': `${hookTurnId}:s1`,
+      time_unix_nano: nano('2026-06-16T10:00:00.000Z'),
+    });
+    const resp = buildHookEntry({
+      'event.id': 'win-resp',
+      'event.name': 'llm.response',
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': hookTurnId,
+      'gen_ai.step.id': `${hookTurnId}:s1`,
+      time_unix_nano: nano('2026-06-16T10:00:05.000Z'),
+    });
+    await fs.writeFile(hookFile, [req, resp].map(e => JSON.stringify(e)).join('\n') + '\n');
+    // segment turn id mismatches the hook turn id, but timestamps line up with the
+    // request/response window so the time-window fallback should kick in.
+    await writeSegments(sessionId, 'run1.jsonl', [
+      segTurnStarted(segTurnId, false),
+      segModelStart(segTurnId, 'r1', '2026-06-16T10:00:00.000Z', 'qwork-window'),
+      segModelEnd(segTurnId, 'r1', '2026-06-16T10:00:05.000Z', 'qwork-window'),
+    ]);
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    const respOut = entries.find(e => e['event.id'] === 'win-resp')!;
+    expect(respOut['agent.qoderwork.model_source']).toBe('segment_time_window');
+    // model still rewritten by the fallback pair
+    expect(respOut['gen_ai.response.model']).toBe('qwork-window');
+  });
+
+  it("attaches agent.qoderwork.model_display_name resolved from qodercli.log on a precise turn match", async () => {
+    const sessionId = 'sess-display-name';
+    const turnId = 'turn-display-name';
+    const hookFile = path.join(hookLogDir, todayFileName());
+    const cliLog = path.join(tmpRoot, 'qodercli.log');
+    await fs.writeFile(
+      cliLog,
+      `[2026-06-16T09:00:00.000Z] [INFO] [QODERCLI] [QueryHandler] StreamResponse ${JSON.stringify({
+        modelKey: 'qwork-ultimate',
+        displayName: 'Premium',
+        isReasoning: true,
+      })}\n`,
+    );
+
+    const req = buildHookEntry({
+      'event.id': 'dn-req',
+      'event.name': 'llm.request' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      time_unix_nano: nano('2026-06-16T10:00:00.000Z'),
+    });
+    const resp = buildHookEntry({
+      'event.id': 'dn-resp',
+      'event.name': 'llm.response',
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      time_unix_nano: nano('2026-06-16T10:00:05.000Z'),
+    });
+    await fs.writeFile(hookFile, [req, resp].map(e => JSON.stringify(e)).join('\n') + '\n');
+    await writeSegments(sessionId, 'run1.jsonl', [
+      segTurnStarted(turnId, false),
+      segModelStart(turnId, 'r1', '2026-06-16T10:00:00.000Z', 'qwork-ultimate'),
+      segModelEnd(turnId, 'r1', '2026-06-16T10:00:05.000Z', 'qwork-ultimate'),
+    ]);
+
+    const input = new QoderWorkTraceInput({
+      stateStore: stateStore as any,
+      logDir: hookLogDir,
+      segmentsRoot,
+      sdkLogDir,
+      qoderCliLogFile: cliLog,
+    });
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    const respOut = entries.find(e => e['event.id'] === 'dn-resp')!;
+    expect(respOut['gen_ai.response.model']).toBe('qwork-ultimate');
+    expect(respOut['agent.qoderwork.model_display_name']).toBe('Premium');
+  });
+
+  it("tags step entries with agent.qoderwork.model_source='unresolved' when no segment pair exists", async () => {
+    const sessionId = 'sess-source-unresolved';
+    const turnId = 'turn-source-unresolved';
+    const hookFile = path.join(hookLogDir, todayFileName());
+    const req = buildHookEntry({
+      'event.id': 'unr-req',
+      'event.name': 'llm.request' as any,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      time_unix_nano: nano('2026-06-16T10:00:00.000Z'),
+    });
+    const resp = buildHookEntry({
+      'event.id': 'unr-resp',
+      'event.name': 'llm.response',
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      time_unix_nano: nano('2026-06-16T10:00:05.000Z'),
+    });
+    await fs.writeFile(hookFile, [req, resp].map(e => JSON.stringify(e)).join('\n') + '\n');
+    // No segments written for this session at all.
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    const reqOut = entries.find(e => e['event.id'] === 'unr-req')!;
+    const respOut = entries.find(e => e['event.id'] === 'unr-resp')!;
+    expect(reqOut['agent.qoderwork.model_source']).toBe('unresolved');
+    expect(respOut['agent.qoderwork.model_source']).toBe('unresolved');
+    // model stays at hook default ('auto'-style) since no pair was matched
+    expect(reqOut['gen_ai.request.model']).not.toBe('qwork-window');
+  });
 });
 
 async function startAndCollect(input: any): Promise<AgentActivityEntry[]> {

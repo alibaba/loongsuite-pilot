@@ -1,19 +1,41 @@
 #!/usr/bin/env node
 /**
- * Qoder Work hook transcript processor.
+ * Qoder Work hook transcript processor (assembler-driven rewrite).
  *
- * Parses transcript lines, groups assistant blocks by parentUuid
- * (= one LLM call), merges thinking+text+tool_use into unified
- * multi-part responses, assigns turn.id/step.id per spec.
+ * The original implementation was stateless: every Stop hook read the
+ * incremental transcript slice, called `splitIntoTurns()`, and emitted a
+ * full set of records for whatever was visible. That produced two well
+ * documented failure modes:
  *
- * Follows the same architectural pattern as qoder-hook-processor.mjs
- * but adapted for QoderWork's transcript format (no progress events,
- * parentUuid-based grouping).
+ *   1. A Stop fires after the user prompt but before the assistant rows
+ *      land (very common with QoderWork's wave-by-wave Stop). The slice
+ *      contains a user row only → an `llm.request` with no `llm.response`
+ *      ever surfaces in history.
+ *   2. A Stop fires with assistant rows but no preceding user prompt in
+ *      the slice (e.g. a brand-new daily log starting mid-turn). The
+ *      stateless splitter fell back to `crypto.randomUUID()` for the
+ *      turn id, so the turn would never line up with segment data.
+ *
+ * Both stem from missing cross-Hook state. This rewrite introduces a
+ * persistent assembler that owns:
+ *
+ *   - The pending turn (its promptId, accumulated wave rows, pending
+ *     tool calls, and the user input text)
+ *   - A wave finalization rule: emit `llm.request` and `llm.response`
+ *     atomically only when a wave has a non-empty payload
+ *   - A graceful TTL so a partially-consumed turn is eventually dropped
+ *     instead of hanging around forever
+ *
+ * The first event of every turn is emitted with `event.name='other'`
+ * (per EVENT_LOG_TO_TRACE_SPEC.md §5 / §做法 A) so the converter
+ * routes it straight into the ENTRY/AGENT span without spawning a
+ * spurious "user-hook" LLM span.
  */
 
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import {
   parseArgs,
@@ -34,6 +56,25 @@ import {
   sanitizeObject,
   getStringValue,
 } from './agent-event-normalizer.mjs';
+import {
+  ASSEMBLER_DEFAULTS,
+  appendAssistant,
+  bumpStepSeq,
+  clearWave,
+  closePending,
+  dropResolvedToolCalls,
+  evictColdTranscripts,
+  getTranscriptState,
+  isPendingExpired,
+  loadAssemblerState,
+  markUserTextEmitted,
+  openPending,
+  recordPendingToolCalls,
+  resolveNowMs,
+  saveAssemblerState,
+  waveEnded,
+  writeTranscriptState,
+} from './qoderwork-turn-assembler.mjs';
 
 async function main() {
   const { agentId, logPrefix } = parseArgs();
@@ -43,15 +84,43 @@ async function main() {
   const { transcriptPath, sessionId, cwd: rawCwd } = payload;
   const cwd = resolveQoderWorkProjectDir(rawCwd, agentId);
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
+  const nowMs = resolveNowMs();
+
+  // Always load assembler state, even when there are no new transcript
+  // lines: TTL eviction must still tick over.
+  const assemblerState = loadAssemblerState(agentId);
+  evictColdTranscripts(assemblerState, { nowMs });
+  let perTranscript = getTranscriptState(assemblerState, transcriptPath);
+
+  if (perTranscript.session_id && perTranscript.session_id !== sessionId) {
+    logDebug(agentId, `assembler: session changed (${perTranscript.session_id} → ${sessionId}); reset`);
+    perTranscript = { session_id: sessionId, consumed_line: 0, pending_turn: null, updated_at_ms: nowMs };
+  }
+  perTranscript.session_id = sessionId;
+
+  // TTL eviction for the pending turn — must happen even on empty hooks
+  // so a stale pending doesn't block forever.
+  if (perTranscript.pending_turn && isPendingExpired(perTranscript.pending_turn, { nowMs, ttlMs: ASSEMBLER_DEFAULTS.TTL_MS })) {
+    logDebug(agentId, `assembler: TTL-evicting pending turn ${perTranscript.pending_turn.promptId}`);
+    perTranscript.pending_turn = null;
+  }
 
   const range = getLineRange(agentId, transcriptPath, sessionId);
-  if (!range) return;
+  if (!range) {
+    // Persist any TTL eviction we just did even when there's nothing new.
+    writeTranscriptState(assemblerState, transcriptPath, perTranscript, { nowMs });
+    saveAssemblerState(agentId, assemblerState);
+    return;
+  }
 
   const [startLine, endLine] = range;
   const lines = readTranscriptLines(transcriptPath, startLine, endLine);
   logDebug(agentId, `Read ${lines.length} lines from ${transcriptPath} (range: ${startLine}-${endLine})`);
   if (!lines.length) {
     updateLineRecord(agentId, transcriptPath, sessionId, endLine);
+    perTranscript.consumed_line = endLine;
+    writeTranscriptState(assemblerState, transcriptPath, perTranscript, { nowMs });
+    saveAssemblerState(agentId, assemblerState);
     return;
   }
 
@@ -61,38 +130,57 @@ async function main() {
   }
   if (!parsed.length) {
     updateLineRecord(agentId, transcriptPath, sessionId, endLine);
+    perTranscript.consumed_line = endLine;
+    writeTranscriptState(assemblerState, transcriptPath, perTranscript, { nowMs });
+    saveAssemblerState(agentId, assemblerState);
     return;
   }
 
-  const records = processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd);
-  logDebug(agentId, `Produced ${records.length} events`);
-
-  const rowsToAppend = records.filter(Boolean).map(r => JSON.stringify(r));
-  const success = appendRowsToHistory(agentId, logPrefix, rowsToAppend);
-  if (success) {
-    logDebug(agentId, `Successfully appended ${rowsToAppend.length} rows`);
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-  }
-}
-
-function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd) {
-  const observedTs = timestampToUnixNanos(Date.now());
-  const records = [];
-
-  // Skip review-copy sessions: QoderWork forks a duplicate transcript with an
-  // appended automated review task. The original session already covers the
-  // user conversation, so processing the copy would produce duplicate traces.
   const isReviewCopy = parsed.some(row =>
     row.type === 'user' &&
     typeof row.message?.content?.[0]?.text === 'string' &&
-    row.message.content[0].text.startsWith('[SYSTEM: This is an automated background review task')
+    row.message.content[0].text.startsWith('[SYSTEM: This is an automated background review task'),
   );
   if (isReviewCopy) {
     logDebug(agentId, `Skipping review-copy session ${sessionId}`);
-    return records;
+    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
+    perTranscript.consumed_line = endLine;
+    writeTranscriptState(assemblerState, transcriptPath, perTranscript, { nowMs });
+    saveAssemblerState(agentId, assemblerState);
+    return;
   }
 
-  // Filter out non-content rows
+  const result = processIncremental({
+    parsed,
+    perTranscript,
+    sessionId,
+    agentId,
+    runtimeConfig,
+    cwd,
+    nowMs,
+  });
+
+  perTranscript = result.perTranscript;
+
+  const rowsToAppend = result.records.filter(Boolean).map(r => JSON.stringify(r));
+  const appendOk = appendRowsToHistory(agentId, logPrefix, rowsToAppend);
+  if (appendOk) {
+    logDebug(agentId, `Successfully appended ${rowsToAppend.length} rows`);
+    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
+    perTranscript.consumed_line = endLine;
+    writeTranscriptState(assemblerState, transcriptPath, perTranscript, { nowMs });
+    saveAssemblerState(agentId, assemblerState);
+  }
+}
+
+// ─── Incremental walker ────────────────────────────────────────────────────
+
+function processIncremental({ parsed, perTranscript, sessionId, agentId, runtimeConfig, cwd, nowMs }) {
+  const observedTs = timestampToUnixNanos(Date.now());
+  const records = [];
+
+  // Filter out non-content rows once. The walker still mutates pending state
+  // inside `state` and emits records into `records`.
   const contentRows = parsed.filter(row => {
     const type = row.type;
     if (!type || type === 'ai-title' || type === 'last-prompt' || type === 'session_meta' || type === 'progress') return false;
@@ -101,265 +189,323 @@ function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd) {
     return type === 'user' || type === 'assistant';
   });
 
-  if (!contentRows.length) return records;
+  if (contentRows.length === 0) return { perTranscript, records };
 
-  // Determine user info from first row
   const firstRow = contentRows[0];
   const userId = resolveUserId(firstRow, runtimeConfig);
   const providerName = inferProviderName({ 'gen_ai.agent.type': 'qoder-work' });
   const version = getStringValue(firstRow, 'version') || '';
 
-  // Split into turns: each user message (non tool_result) starts a new turn
-  const turns = splitIntoTurns(contentRows);
+  // `resolvedResults` carries tool_results that have been observed but not
+  // yet folded into the next wave's `gen_ai.input.messages`. These live in
+  // memory only — they always belong to the current pending turn and the
+  // turn is held in persisted state, so a Stop hook landing between
+  // tool_result and the next assistant row simply replays the resolution.
+  let pending = perTranscript.pending_turn;
+  let resolvedResults = []; // [{ id, name, resultText, resultTsNano, resultRow }]
 
-  for (const turn of turns) {
-    const turnId = getTurnIdForRows(turn);
-    const turnRecords = buildTurnEvents(turn, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd);
-    records.push(...turnRecords);
+  // Restore resolvedResults from any earlier hook persistence — kept on the
+  // pending turn so we don't lose them when Stop fires between the
+  // tool_result row and the next assistant row.
+  if (pending?.resolvedResults && Array.isArray(pending.resolvedResults)) {
+    resolvedResults = pending.resolvedResults.map((r) => ({ ...r }));
   }
 
-  return records;
-}
-
-function splitIntoTurns(contentRows) {
-  const turns = [];
-  let currentTurn = [];
+  const ctx = {
+    sessionId,
+    userId,
+    providerName,
+    version,
+    observedTs,
+    runtimeConfig,
+    cwd,
+  };
 
   for (const row of contentRows) {
     if (isPromptRow(row)) {
-      if (currentTurn.length > 0) {
-        turns.push(currentTurn);
-      }
-      currentTurn = [row];
-    } else {
-      currentTurn.push(row);
-    }
-  }
-  if (currentTurn.length > 0) turns.push(currentTurn);
-  return turns;
-}
-
-function isPromptRow(row) {
-  return row.type === 'user' && !isToolResult(row) && !isSystemInjection(row);
-}
-
-function getTurnIdForRows(turnRows) {
-  const promptRow = turnRows.find(isPromptRow);
-  return promptRow?.promptId || promptRow?.uuid || crypto.randomUUID();
-}
-
-function isSystemInjection(row) {
-  const text = extractText(row).trimStart();
-  if (text.startsWith('<command-message>') ||
-    text.startsWith('<command-name>') ||
-    text.startsWith('[Request interrupted') ||
-    text.startsWith('[SYSTEM: This is an automated background review task')) {
-    return true;
-  }
-  return isPureSystemReminder(text);
-}
-
-function isPureSystemReminder(text) {
-  return text.startsWith('<system-reminder>')
-    && text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim().length === 0;
-}
-
-function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd) {
-  const records = [];
-
-  // Find the user prompt
-  const userRow = turnRows.find(isPromptRow);
-  const promptId = userRow?.promptId || turnId;
-  const turnMetadata = promptId ? { 'agent.qoderwork.promptId': promptId } : {};
-
-  // User-hook event (no step.id, no model — per §5 of EVENT_LOG_TO_TRACE_SPEC)
-  if (userRow) {
-    const userText = extractText(userRow);
-    if (userText) {
-      records.push(buildRecord({
-        ...turnMetadata,
-        'event.name': 'llm.request',
-        'gen_ai.turn.id': turnId,
-        'gen_ai.session.id': sessionId,
-        'gen_ai.agent.type': 'qoder-work',
-        'gen_ai.provider.name': providerName,
-        'user.id': userId,
-        'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: userText }] }],
-        time_unix_nano: timestampToUnixNanos(userRow.timestamp),
-        observed_time_unix_nano: observedTs,
-        version,
-      }, turnRows[0], runtimeConfig, cwd));
-    }
-  }
-
-  // Group assistant rows by tool_result boundaries — each group = one LLM call.
-  // Reason: QoderWork sometimes splits one LLM response across multiple assistant
-  // rows with different parentUuids (e.g. thinking row + separate tool_use row).
-  // groupByParentUuid would wrongly split these into multiple "steps" and break
-  // timing (the second half would incorrectly inherit the tool_result's ts as
-  // llm.request time). Tool_result boundaries are the semantically correct split
-  // since the LLM only receives tool outputs and issues a new response at those points.
-  const assistantRows = turnRows.filter(r => r.type === 'assistant');
-  const toolResultRows = turnRows.filter(r => r.type === 'user' && isToolResult(r));
-  const toolResultsByUseId = new Map();
-  for (const row of toolResultRows) {
-    const content = Array.isArray(row.message?.content) ? row.message.content : [];
-    for (const block of content) {
-      if (block.type === 'tool_result' && block.tool_use_id && !toolResultsByUseId.has(block.tool_use_id)) {
-        toolResultsByUseId.set(block.tool_use_id, { row, block });
-      }
-    }
-  }
-
-  const llmGroups = groupAssistantRowsByToolResults(turnRows);
-
-  const userText = userRow ? extractText(userRow) : '';
-  const userTs = userRow ? timestampToUnixNanos(userRow.timestamp) : undefined;
-  let prevToolCalls = []; // tool_call ids from previous step, for building tool_result delta
-  let prevStepLastToolResultTs = undefined; // 上一个 step 最后一个 tool_result 的 nano ts，用于本 step llm.request 时间
-
-  let stepCounter = 0;
-  for (const group of llmGroups) {
-    stepCounter++;
-    const stepId = `${turnId}:s${stepCounter}`;
-
-    // Build input.messages_delta for this step's llm.request:
-    // - Step 1: user prompt
-    // - Step N>1: previous step's tool results
-    let inputDelta;
-    if (stepCounter === 1 && userText) {
-      inputDelta = [{ role: 'user', parts: [{ type: 'text', content: userText }] }];
-    } else if (prevToolCalls.length > 0) {
-      const toolParts = [];
-      for (const tc of prevToolCalls) {
-        const matchingResult = toolResultsByUseId.get(tc.id);
-        if (matchingResult) {
-          const resultBlock = matchingResult.block;
-          const resultText = typeof resultBlock?.content === 'string' ? resultBlock.content : JSON.stringify(resultBlock?.content);
-          toolParts.push({ type: 'tool_call_response', id: tc.id, response: resultText });
+      // Closing an old pending turn: emit any deferred wave first, then drop
+      // the pending state in favour of a fresh one.
+      if (pending) {
+        const flushed = flushPendingWave({
+          pending,
+          resolvedResults,
+          ctx,
+          waveAssistantRows: pending.currentWaveRows ?? [],
+          finalize: false,
+        });
+        records.push(...flushed.records);
+        pending = flushed.pending;
+        resolvedResults = flushed.resolvedResults;
+        // Whatever rows were in the wave but couldn't be paired are dropped
+        // here; the turn is being replaced by a new prompt.
+        if (pending?.currentWaveRows?.length) {
+          logDebug(agentId, `assembler: dropping ${pending.currentWaveRows.length} unpaired assistant row(s) on prompt change`);
         }
+        pending = closePending(pending, { reason: 'new_prompt', nowMs });
+        pending = null; // closePending returns a snapshot; pending turn is gone
+        resolvedResults = [];
       }
-      if (toolParts.length > 0) {
-        inputDelta = [{ role: 'tool', parts: toolParts }];
+
+      const promptId = row.promptId || row.uuid;
+      if (!promptId) {
+        logDebug(agentId, 'assembler: prompt row has no promptId/uuid; skipped');
+        continue;
       }
-    }
 
-    // llm.request time:
-    //   step 1 = user input ts (user message arrival, a reasonable proxy for LLM start)
-    //   step N>1 = 上一个 step 最后一个 tool_result ts (工具返回后模型立刻开始处理)
-    // 否则用 assistant 行写盘时间会导致 LLM span 退化为 0ms（thinking/tool_use 同毫秒批量 flush）
-    const llmRequestTs = stepCounter === 1 ? userTs : prevStepLastToolResultTs;
+      const userText = extractText(row);
+      const userTimestampNano = timestampToUnixNanos(row.timestamp);
+      pending = openPending({
+        promptId,
+        userText,
+        userTimestampNano,
+        nowMs,
+      });
+      // Cache the source row so subsequent waves can build records pinned to
+      // it (sidechain / userType metadata etc).
+      pending.userRow = sanitizeStoredRow(row);
 
-    const stepRecords = buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, stepCounter === llmGroups.length, inputDelta, cwd, llmRequestTs, turnMetadata);
-    records.push(...stepRecords);
-
-    // Collect this step's tool_calls for next step's input delta
-    prevToolCalls = [];
-    let lastToolResultTsInStep = undefined;
-    for (const row of group) {
-      const msg = row.message || {};
-      const content = Array.isArray(msg.content) ? msg.content : [];
-      for (const b of content) {
-        if (b.type === 'tool_use') {
-          prevToolCalls.push({ id: b.id, name: b.name });
-          // 找到本 step 该 tool_use 对应的 tool_result 行，记录 ts；多 tool 场景保留最后一个
-          const matchingResult = toolResultsByUseId.get(b.id);
-          if (matchingResult?.row.timestamp) {
-            const nano = timestampToUnixNanos(matchingResult.row.timestamp);
-            if (nano) lastToolResultTsInStep = nano;
-          }
-        }
+      if (userText) {
+        records.push(buildRecord({
+          'event.name': 'other',
+          'agent.qoderwork.event.kind': 'turn_input',
+          'agent.qoderwork.promptId': promptId,
+          'gen_ai.turn.id': pending.turnId,
+          'gen_ai.session.id': ctx.sessionId,
+          'gen_ai.agent.type': 'qoder-work',
+          'gen_ai.provider.name': ctx.providerName,
+          'user.id': ctx.userId,
+          'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: userText }] }],
+          time_unix_nano: userTimestampNano,
+          observed_time_unix_nano: ctx.observedTs,
+          version: ctx.version,
+        }, row, ctx.runtimeConfig, ctx.cwd));
+        pending = markUserTextEmitted(pending, { nowMs });
       }
+      continue;
     }
-    if (lastToolResultTsInStep) {
-      prevStepLastToolResultTs = lastToolResultTsInStep;
+
+    if (isToolResult(row)) {
+      if (!pending) {
+        logDebug(agentId, 'assembler: orphan tool_result without a pending turn; skipped');
+        continue;
+      }
+      const handled = handleToolResultRow({
+        row,
+        pending,
+        resolvedResults,
+        ctx,
+        nowMs,
+      });
+      records.push(...handled.records);
+      pending = handled.pending;
+      resolvedResults = handled.resolvedResults;
+      continue;
     }
-  }
 
-  return records;
-}
-
-function groupByParentUuid(assistantRows) {
-  const groups = [];
-  const grouped = new Map();
-  const order = [];
-
-  for (const row of assistantRows) {
-    // randomUUID fallback: rows without parentUuid/uuid are treated as individual LLM calls.
-    // In practice QoderWork always sets parentUuid; this is a defensive fallback only.
-    const parentUuid = row.parentUuid || row.uuid || crypto.randomUUID();
-    if (!grouped.has(parentUuid)) {
-      grouped.set(parentUuid, []);
-      order.push(parentUuid);
-    }
-    grouped.get(parentUuid).push(row);
-  }
-
-  for (const key of order) {
-    groups.push(grouped.get(key));
-  }
-  return groups;
-}
-
-/**
- * Group consecutive assistant rows between tool_result boundaries.
- *
- * Each group represents ONE LLM response. A tool_result row marks the
- * boundary because it delivers a tool's output back to the model — the
- * next assistant row is the start of the model's next response.
- *
- * Why not parentUuid: QoderWork occasionally emits a single LLM response
- * as multiple assistant rows with different parentUuids (e.g. a thinking
- * row + a separate tool_use row). Using parentUuid would incorrectly
- * split them into multiple "steps", and a "prev tool_result ts as
- * llm.request start" rule would then attribute the tool's execution time
- * to the second half's LLM time.
- */
-function groupAssistantRowsByToolResults(turnRows) {
-  const groups = [];
-  let current = [];
-
-  for (const row of turnRows) {
     if (row.type === 'assistant') {
-      current.push(row);
-    } else if (row.type === 'user' && isToolResult(row)) {
-      if (current.length > 0) {
-        groups.push(current);
-        current = [];
+      if (!pending) {
+        logDebug(agentId, 'assembler: orphan assistant row without a pending turn; skipped (no random uuid)');
+        continue;
       }
+      pending = appendAssistant(pending, row, { nowMs });
+      if (waveEnded(row)) {
+        const flushed = flushPendingWave({
+          pending,
+          resolvedResults,
+          ctx,
+          waveAssistantRows: pending.currentWaveRows ?? [],
+          finalize: true,
+          nowMs,
+        });
+        records.push(...flushed.records);
+        pending = flushed.pending;
+        resolvedResults = flushed.resolvedResults;
+      }
+      continue;
     }
-    // Non-assistant non-tool_result user rows (the prompt) are ignored here;
-    // they don't end an LLM-response group.
   }
-  if (current.length > 0) groups.push(current);
-  return groups;
+
+  if (pending) {
+    pending = { ...pending, resolvedResults, updatedAtMs: nowMs };
+    perTranscript.pending_turn = pending;
+  } else {
+    perTranscript.pending_turn = null;
+  }
+  return { perTranscript, records };
 }
 
-function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, isLastStep, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
-  const records = [];
-  const firstRow = group[0];
-  const lastRow = group[group.length - 1];
+// ─── Wave finalization ─────────────────────────────────────────────────────
 
-  // thinking 行的 ts 用作 llm.response 时间（模型完成输出的真实时刻）；
-  // 没有 thinking 时回退到 lastRow.timestamp（与现有行为一致）
-  const thinkingRow = group.find(r => {
+function flushPendingWave({ pending, resolvedResults, ctx, waveAssistantRows, finalize, nowMs }) {
+  if (!pending) return { pending, resolvedResults, records: [] };
+  if (!finalize) {
+    // Closing a pending turn at a prompt boundary: do not emit anything.
+    return { pending, resolvedResults, records: [] };
+  }
+
+  const records = [];
+  const stepSeq = pending.nextStepSeq ?? 1;
+  const stepId = `${pending.turnId}:s${stepSeq}`;
+
+  const { outputParts, toolCalls } = collectOutputParts(waveAssistantRows);
+  if (outputParts.length === 0) {
+    // Defensive: do not emit an unmatched llm.request without payload. Leave
+    // the rows in pending — next hook may bring real content.
+    return { pending, resolvedResults, records };
+  }
+
+  const firstRow = waveAssistantRows[0];
+  const lastRow = waveAssistantRows[waveAssistantRows.length - 1];
+
+  // llm.request for this step:
+  //   step 1 → user prompt timestamp (good proxy for LLM start)
+  //   step N>1 → latest tool_result timestamp from prior step (model
+  //              starts processing the moment its inputs land)
+  let llmRequestTs;
+  let inputDelta;
+  if (stepSeq === 1) {
+    if (pending.userText) {
+      inputDelta = [{ role: 'user', parts: [{ type: 'text', content: pending.userText }] }];
+    }
+    llmRequestTs = pending.userTimestampNano || timestampToUnixNanos(firstRow.timestamp);
+  } else if (resolvedResults.length > 0) {
+    const toolParts = resolvedResults.map((r) => ({
+      type: 'tool_call_response',
+      id: r.id,
+      response: r.resultText,
+    }));
+    inputDelta = [{ role: 'tool', parts: toolParts }];
+    const latestNano = resolvedResults
+      .map((r) => r.resultTsNano)
+      .filter(Boolean)
+      .sort()
+      .at(-1);
+    llmRequestTs = latestNano || timestampToUnixNanos(firstRow.timestamp);
+  } else {
+    llmRequestTs = timestampToUnixNanos(firstRow.timestamp);
+  }
+
+  // llm.response time uses the thinking row when available so the LLM span
+  // tracks the moment the model actually finished generating tokens.
+  const thinkingRow = waveAssistantRows.find((r) => {
     const content = Array.isArray(r.message?.content) ? r.message.content : [];
     const firstType = content[0]?.type;
     return firstType === 'thinking' || r.content_type === 'thinking';
   });
   const llmResponseTs = timestampToUnixNanos(thinkingRow ? thinkingRow.timestamp : lastRow.timestamp);
 
-  // Determine response.id from parentUuid
+  const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'end_turn';
   const responseId = firstRow.parentUuid || firstRow.uuid;
 
-  // Build merged output parts
+  const reqRecord = buildStepLlmRequest({
+    pending,
+    stepId,
+    inputDelta,
+    timeNano: llmRequestTs,
+    ctx,
+    sourceRow: firstRow,
+  });
+  const respRecord = buildStepLlmResponse({
+    pending,
+    stepId,
+    outputParts,
+    finishReason,
+    responseId,
+    timeNano: llmResponseTs,
+    ctx,
+    sourceRow: firstRow,
+  });
+
+  // request and response always emit together — never one without the other.
+  records.push(reqRecord, respRecord);
+
+  // tool.call events are emitted at wave finalization time using the
+  // assistant tool_use row's timestamp. The matching tool.result event is
+  // emitted later (when tool_result actually arrives) and reuses the same
+  // step.id so the converter nests both under the LLM call.
+  for (const tc of toolCalls) {
+    records.push(buildRecord({
+      'agent.qoderwork.promptId': pending.promptId,
+      'event.name': 'tool.call',
+      'gen_ai.step.id': stepId,
+      'gen_ai.turn.id': pending.turnId,
+      'gen_ai.session.id': ctx.sessionId,
+      'gen_ai.agent.type': 'qoder-work',
+      'gen_ai.tool.name': tc.name,
+      'gen_ai.tool.call.id': tc.id,
+      'gen_ai.tool.call.exec.id': tc.id,
+      'gen_ai.tool.call.arguments': typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input),
+      'user.id': ctx.userId,
+      time_unix_nano: timestampToUnixNanos(lastRow.timestamp),
+      observed_time_unix_nano: ctx.observedTs,
+      version: ctx.version,
+    }, firstRow, ctx.runtimeConfig, ctx.cwd));
+  }
+
+  // Move pending state forward.
+  let nextPending = clearWave(pending, { nowMs });
+  nextPending = bumpStepSeq(nextPending, { nowMs });
+  if (toolCalls.length > 0) {
+    nextPending = recordPendingToolCalls(nextPending, toolCalls.map((c) => ({
+      id: c.id,
+      name: c.name,
+      stepId,
+      requestedTsNano: timestampToUnixNanos(lastRow.timestamp),
+    })), { nowMs });
+  }
+
+  // Step N consumed any resolvedResults that fed its input — drop them.
+  let nextResolved = stepSeq === 1 ? resolvedResults : [];
+
+  return { pending: nextPending, resolvedResults: nextResolved, records };
+}
+
+function buildStepLlmRequest({ pending, stepId, inputDelta, timeNano, ctx, sourceRow }) {
+  const fields = {
+    'agent.qoderwork.promptId': pending.promptId,
+    'event.name': 'llm.request',
+    'gen_ai.step.id': stepId,
+    'gen_ai.turn.id': pending.turnId,
+    'gen_ai.session.id': ctx.sessionId,
+    'gen_ai.agent.type': 'qoder-work',
+    'gen_ai.provider.name': ctx.providerName,
+    'gen_ai.request.model': 'auto',
+    'user.id': ctx.userId,
+    time_unix_nano: timeNano,
+    observed_time_unix_nano: ctx.observedTs,
+    version: ctx.version,
+  };
+  if (inputDelta) fields['gen_ai.input.messages'] = inputDelta;
+  return buildRecord(fields, sourceRow, ctx.runtimeConfig, ctx.cwd);
+}
+
+function buildStepLlmResponse({ pending, stepId, outputParts, finishReason, responseId, timeNano, ctx, sourceRow }) {
+  return buildRecord({
+    'agent.qoderwork.promptId': pending.promptId,
+    'event.name': 'llm.response',
+    'gen_ai.step.id': stepId,
+    'gen_ai.turn.id': pending.turnId,
+    'gen_ai.session.id': ctx.sessionId,
+    'gen_ai.agent.type': 'qoder-work',
+    'gen_ai.provider.name': ctx.providerName,
+    'gen_ai.request.model': 'auto',
+    'gen_ai.response.model': 'auto',
+    'gen_ai.response.id': responseId,
+    'gen_ai.response.finish_reasons': [finishReason],
+    'user.id': ctx.userId,
+    'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts, finish_reason: finishReason }],
+    time_unix_nano: timeNano,
+    observed_time_unix_nano: ctx.observedTs,
+    version: ctx.version,
+  }, sourceRow, ctx.runtimeConfig, ctx.cwd);
+}
+
+function collectOutputParts(rows) {
   const outputParts = [];
   const toolCalls = [];
-
-  for (const row of group) {
+  for (const row of rows) {
     const msg = row.message || {};
     const content = Array.isArray(msg.content) ? msg.content : [];
-    // Derive content type from message.content[0].type (raw transcript has no content_type field)
     const contentType = row.content_type || (content[0]?.type) || '';
 
     if (contentType === 'thinking') {
@@ -377,128 +523,78 @@ function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, u
       toolCalls.push({ id: toolBlock.id, name: toolBlock.name, input: toolBlock.input });
     }
   }
+  return { outputParts, toolCalls };
+}
 
-  const finishReason = toolCalls.length > 0 ? 'tool_calls' : (isLastStep ? 'end_turn' : 'stop');
+// ─── tool_result handling ──────────────────────────────────────────────────
 
-  // llm.request for this step.
-  //
-  // Field choice: gen_ai.input.messages (NOT messages_delta).
-  //
-  // The converter (@loongsuite/otel-util-genai) treats messages_delta as a
-  // turn-level accumulator: when an LLM pair only has messages_delta, it
-  // concatenates ALL prior pairs' deltas to build the LLM span's input.
-  // For QoderWork that means tool_call_response would grow across steps
-  // (step 1: 0 results, step 2: 1, step 3: 2, ...) — wrong for an LLM
-  // span which should show what THIS llm call received.
-  //
-  // Writing to messages (treated as "full") makes the converter use the
-  // value directly without accumulation. We still emit per-step incremental
-  // content, matching Codex's pattern. ENTRY/AGENT spans collect input from
-  // the user-hook event (no step.id, still messages_delta) above, so this
-  // change does not affect the turn-level overview spans.
-  const llmRequestFields = {
-    ...turnMetadata,
-    'event.name': 'llm.request',
-    'gen_ai.step.id': stepId,
-    'gen_ai.turn.id': turnId,
-    'gen_ai.session.id': sessionId,
-    'gen_ai.agent.type': 'qoder-work',
-    'gen_ai.provider.name': providerName,
-    'gen_ai.request.model': 'auto',
-    'user.id': userId,
-    time_unix_nano: llmRequestTs || timestampToUnixNanos(firstRow.timestamp),
-    observed_time_unix_nano: observedTs,
-    version,
-  };
-  if (inputDelta) {
-    llmRequestFields['gen_ai.input.messages'] = inputDelta;
-  }
-  records.push(buildRecord(llmRequestFields, firstRow, runtimeConfig, cwd));
+function handleToolResultRow({ row, pending, resolvedResults, ctx, nowMs }) {
+  const records = [];
+  const content = Array.isArray(row.message?.content) ? row.message.content : [];
+  const resolved = new Set();
+  let nextPending = pending;
+  let nextResolvedResults = [...resolvedResults];
 
-  // llm.response (merged multi-parts)
-  if (outputParts.length > 0) {
+  for (const block of content) {
+    if (block?.type !== 'tool_result' || !block.tool_use_id) continue;
+    const tc = (pending.pendingToolCalls ?? []).find((c) => c.id === block.tool_use_id);
+    if (!tc) continue;
+    const resultText = typeof block.content === 'string' ? block.content : JSON.stringify(block.content);
+    const resultTsNano = timestampToUnixNanos(row.timestamp);
+
     records.push(buildRecord({
-      ...turnMetadata,
-      'event.name': 'llm.response',
-      'gen_ai.step.id': stepId,
-      'gen_ai.turn.id': turnId,
-      'gen_ai.session.id': sessionId,
-      'gen_ai.agent.type': 'qoder-work',
-      'gen_ai.provider.name': providerName,
-      'gen_ai.request.model': 'auto',
-      'gen_ai.response.model': 'auto',
-      'gen_ai.response.id': responseId,
-      'gen_ai.response.finish_reasons': [finishReason],
-      'user.id': userId,
-      'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts, finish_reason: finishReason }],
-      time_unix_nano: llmResponseTs,
-      observed_time_unix_nano: observedTs,
-      version,
-    }, firstRow, runtimeConfig, cwd));
-  }
-
-  // tool.call + tool.result events
-  for (const tc of toolCalls) {
-    records.push(buildRecord({
-      ...turnMetadata,
-      'event.name': 'tool.call',
-      'gen_ai.step.id': stepId,
-      'gen_ai.turn.id': turnId,
-      'gen_ai.session.id': sessionId,
+      'agent.qoderwork.promptId': pending.promptId,
+      'event.name': 'tool.result',
+      'gen_ai.step.id': tc.stepId,
+      'gen_ai.turn.id': pending.turnId,
+      'gen_ai.session.id': ctx.sessionId,
       'gen_ai.agent.type': 'qoder-work',
       'gen_ai.tool.name': tc.name,
       'gen_ai.tool.call.id': tc.id,
       'gen_ai.tool.call.exec.id': tc.id,
-      'gen_ai.tool.call.arguments': typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input),
-      'user.id': userId,
-      time_unix_nano: timestampToUnixNanos(lastRow.timestamp),
-      observed_time_unix_nano: observedTs,
-      version,
-    }, firstRow, runtimeConfig, cwd));
+      'gen_ai.tool.call.result': resultText,
+      'tool.result.status': block?.is_error ? 'failure' : 'success',
+      'user.id': ctx.userId,
+      time_unix_nano: resultTsNano,
+      observed_time_unix_nano: ctx.observedTs,
+      version: ctx.version,
+    }, row, ctx.runtimeConfig, ctx.cwd));
 
-    // Find matching tool_result
-    const matchingResult = toolResultsByUseId.get(tc.id);
-    if (matchingResult) {
-      const { row: resultRow, block: resultBlock } = matchingResult;
-      const resultText = typeof resultBlock?.content === 'string' ? resultBlock.content : JSON.stringify(resultBlock?.content);
-      records.push(buildRecord({
-        ...turnMetadata,
-        'event.name': 'tool.result',
-        'gen_ai.step.id': stepId,
-        'gen_ai.turn.id': turnId,
-        'gen_ai.session.id': sessionId,
-        'gen_ai.agent.type': 'qoder-work',
-        'gen_ai.tool.name': tc.name,
-        'gen_ai.tool.call.id': tc.id,
-        'gen_ai.tool.call.exec.id': tc.id,
-        'gen_ai.tool.call.result': resultText,
-        'tool.result.status': resultBlock?.is_error ? 'failure' : 'success',
-        'user.id': userId,
-        time_unix_nano: timestampToUnixNanos(resultRow.timestamp),
-        observed_time_unix_nano: observedTs,
-        version,
-      }, resultRow, runtimeConfig, cwd));
-    }
+    nextResolvedResults.push({
+      id: tc.id,
+      name: tc.name,
+      resultText,
+      resultTsNano,
+    });
+    resolved.add(tc.id);
   }
 
-  return records;
+  if (resolved.size > 0) {
+    nextPending = dropResolvedToolCalls(nextPending, resolved, { nowMs });
+  }
+  return { pending: nextPending, resolvedResults: nextResolvedResults, records };
 }
 
-function buildRecord(fields, sourceRow, runtimeConfig, cwd) {
-  const record = {
-    'event.id': crypto.randomUUID(),
-    'agent.source': 'qoder-transcript-hook',
-    'agent.qoderwork.variant': 'qoder-work',
-    ...fields,
-  };
-  if (cwd) record['agent.qoderwork.cwd'] = cwd;
-  if (sourceRow) {
-    if (sourceRow.isSidechain !== undefined) record['agent.qoderwork.isSidechain'] = String(sourceRow.isSidechain);
-    if (sourceRow.userType) record['agent.qoderwork.userType'] = sourceRow.userType;
-    if (sourceRow.version) record['agent.qoderwork.version'] = sourceRow.version;
-    if (sourceRow.agentId) record['agent.qoderwork.agentId'] = sourceRow.agentId;
+// ─── Helpers reused from the legacy implementation ─────────────────────────
+
+function isPromptRow(row) {
+  return row.type === 'user' && !isToolResult(row) && !isSystemInjection(row);
+}
+
+function isSystemInjection(row) {
+  const text = extractText(row).trimStart();
+  if (text.startsWith('<command-message>')
+    || text.startsWith('<command-name>')
+    || text.startsWith('[Request interrupted')
+    || text.startsWith('[SYSTEM: This is an automated background review task')) {
+    return true;
   }
-  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || null;
+  return isPureSystemReminder(text);
+}
+
+function isPureSystemReminder(text) {
+  return text.startsWith('<system-reminder>')
+    && text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim().length === 0;
 }
 
 function isToolResult(row) {
@@ -521,13 +617,49 @@ function extractText(row) {
   return '';
 }
 
+function buildRecord(fields, sourceRow, runtimeConfig, cwd) {
+  const record = {
+    'event.id': crypto.randomUUID(),
+    'agent.source': 'qoder-transcript-hook',
+    'agent.qoderwork.variant': 'qoder-work',
+    ...fields,
+  };
+  if (cwd) record['agent.qoderwork.cwd'] = cwd;
+  if (sourceRow) {
+    if (sourceRow.isSidechain !== undefined) record['agent.qoderwork.isSidechain'] = String(sourceRow.isSidechain);
+    if (sourceRow.userType) record['agent.qoderwork.userType'] = sourceRow.userType;
+    if (sourceRow.version) record['agent.qoderwork.version'] = sourceRow.version;
+    if (sourceRow.agentId) record['agent.qoderwork.agentId'] = sourceRow.agentId;
+  }
+  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || null;
+}
+
+function sanitizeStoredRow(row) {
+  if (!row) return null;
+  // Persisting a transcript row as-is is too heavy. Keep only the metadata
+  // we'll need for downstream record building if a wave gets buffered to
+  // disk between Stop hooks.
+  return {
+    type: row.type,
+    uuid: row.uuid,
+    parentUuid: row.parentUuid,
+    timestamp: row.timestamp,
+    promptId: row.promptId,
+    sessionId: row.sessionId,
+    userType: row.userType,
+    isSidechain: row.isSidechain,
+    isMeta: row.isMeta,
+    version: row.version,
+    agentId: row.agentId,
+  };
+}
+
 /**
  * Resolve QoderWork sandbox cwd to the real project directory.
  *
  * QoderWork stores the user's chosen project path in SQLite
  * (chats.additional_directories), but the hook payload only contains
  * the internal sandbox path (~/.qoderwork/workspace/<chatId>).
- * We query the DB to recover the real project path.
  */
 function resolveQoderWorkProjectDir(sandboxCwd, agentId) {
   if (!sandboxCwd) return undefined;
@@ -558,6 +690,39 @@ function resolveQoderWorkProjectDir(sandboxCwd, agentId) {
   return sandboxCwd;
 }
 
-export { extractText, getTurnIdForRows, isSystemInjection, isToolResult, splitIntoTurns };
+// ─── Legacy helper exports (kept for the qoderwork-hook-processor.test.mjs
+//     suite that pre-dates the assembler rewrite). The main path no longer
+//     uses these. `getTurnIdForRows` deliberately returns `null` instead of
+//     `crypto.randomUUID()` — the assembler-driven main path treats a
+//     missing prompt as drop-on-floor; the legacy test only inspects the
+//     happy path with a real promptId.
+function splitIntoTurns(contentRows) {
+  const turns = [];
+  let currentTurn = [];
+  for (const row of contentRows) {
+    if (isPromptRow(row)) {
+      if (currentTurn.length > 0) turns.push(currentTurn);
+      currentTurn = [row];
+    } else {
+      currentTurn.push(row);
+    }
+  }
+  if (currentTurn.length > 0) turns.push(currentTurn);
+  return turns;
+}
+
+function getTurnIdForRows(turnRows) {
+  const promptRow = turnRows.find(isPromptRow);
+  return promptRow?.promptId || promptRow?.uuid || null;
+}
+
+export {
+  extractText,
+  getTurnIdForRows,
+  isPromptRow,
+  isSystemInjection,
+  isToolResult,
+  splitIntoTurns,
+};
 
 main().catch(() => { /* fail-open */ });
