@@ -605,14 +605,11 @@ export class QoderWorkTraceInput extends BaseInput {
     target['gen_ai.usage.output_tokens'] = match.completionTokens;
     target['gen_ai.usage.total_tokens'] = match.totalTokens || (match.promptTokens + match.completionTokens);
     if (match.cachedTokens) target['gen_ai.usage.cache_read.input_tokens'] = match.cachedTokens;
-    if (match.reasoningTokens) target['gen_ai.usage.reasoning_tokens'] = match.reasoningTokens;
     return match.promptTokens > 0 || match.completionTokens > 0 || match.totalTokens > 0;
   }
 
-  // Segment log covers input/output/total but QoderWork segments do not carry
-  // reasoning_tokens and may omit cache_read when the wrapper is the only
-  // source. Overlay only these two fields so segment values stay authoritative
-  // for the rest.
+  // Segment log may omit cache_read when the wrapper is the only source.
+  // Overlay only cache_read so segment values stay authoritative for the rest.
   private applyInterceptCacheReasoning(
     response: AgentActivityEntry,
     interceptData: InterceptData,
@@ -624,9 +621,6 @@ export class QoderWorkTraceInput extends BaseInput {
     const target = response as Record<string, unknown>;
     if (match.cachedTokens && !target['gen_ai.usage.cache_read.input_tokens']) {
       target['gen_ai.usage.cache_read.input_tokens'] = match.cachedTokens;
-    }
-    if (match.reasoningTokens) {
-      target['gen_ai.usage.reasoning_tokens'] = match.reasoningTokens;
     }
   }
 
