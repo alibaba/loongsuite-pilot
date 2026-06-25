@@ -4,12 +4,12 @@ import * as path from 'node:path';
 import { formatTime } from '../utils/time-utils.js';
 import { resolveLocalIp } from '../utils/network-utils.js';
 import { isPidFileRunning } from '../utils/pid-utils.js';
-import type { AgentsConfig } from '../types/index.js';
+import { isUpdaterRunningOnWindowsSync } from '../utils/process-discovery.js';
+import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
 
 export interface L1Metrics {
   version: string;
   os_detail: string;
-  os: string;
   hostname: string;
   ip: string;
   instance_id: string;
@@ -19,8 +19,9 @@ export interface L1Metrics {
   mem: string;
   mem_heap: string;
   start_time: string;
-  agent_versions: string;
-  privacy_settings: string;
+  capture_message_disabled_agents: string;
+  project: string;
+  cms_workspace: string;
   metric_json: {
     input_count: string;
     active_input_count: string;
@@ -142,6 +143,8 @@ export class MetricsCollector {
   private readonly dataDir: string;
   private readonly canaryPolicy: string;
   private readonly agentsConfig: AgentsConfig;
+  private readonly slsEndpoints: SlsEndpoint[];
+  private readonly cmsWorkspace: string;
   private readonly startTime: string;
   private readonly startTimestamp: number;
   private readonly instanceId: string;
@@ -159,12 +162,14 @@ export class MetricsCollector {
   private updaterConsecutiveFailures = 0;
   private lastInfraHealth: InfraHealthSnapshot | null = null;
 
-  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig }) {
+  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string }) {
     this.version = opts.version;
     this.userId = opts.userId;
     this.dataDir = opts.dataDir;
     this.canaryPolicy = opts.canaryPolicy ?? '';
     this.agentsConfig = opts.agentsConfig ?? {};
+    this.slsEndpoints = opts.slsEndpoints ?? [];
+    this.cmsWorkspace = opts.cmsWorkspace ?? '';
     this.startTimestamp = Math.floor(Date.now() / 1000);
     this.startTime = formatTime(new Date());
     this.localIp = resolveLocalIp();
@@ -205,7 +210,6 @@ export class MetricsCollector {
     return {
       version: this.version,
       os_detail: `${os.type()}; ${os.release()}; ${os.arch()}`,
-      os: os.type(),
       hostname: os.hostname(),
       ip: this.localIp,
       instance_id: this.instanceId,
@@ -215,8 +219,9 @@ export class MetricsCollector {
       mem: String(Math.round(mem.rss / 1024 / 1024)),
       mem_heap: String(Math.round(mem.heapUsed / 1024 / 1024)),
       start_time: this.startTime,
-      agent_versions: JSON.stringify(snapshot.agentVersions),
-      privacy_settings: this.buildPrivacySettings(),
+      capture_message_disabled_agents: this.buildCaptureMessageDisabledAgents(),
+      project: this.buildProject(),
+      cms_workspace: this.buildCmsWorkspace(),
       metric_json: {
         input_count: String(snapshot.inputCount),
         active_input_count: String(snapshot.activeInputCount),
@@ -320,12 +325,25 @@ export class MetricsCollector {
     return results;
   }
 
-  private buildPrivacySettings(): string {
-    const settings: Record<string, { captureMessageContent: boolean }> = {};
-    for (const [agentType, config] of Object.entries(this.agentsConfig)) {
-      settings[agentType] = { captureMessageContent: config.captureMessageContent };
+  private buildCaptureMessageDisabledAgents(): string {
+    const disabled: string[] = [];
+    for (const [agentType, cfg] of Object.entries(this.agentsConfig)) {
+      if (cfg.captureMessageContent === false) disabled.push(agentType);
     }
-    return JSON.stringify(settings);
+    disabled.sort();
+    return disabled.join(' ');
+  }
+
+  private buildProject(): string {
+    const seen = new Set<string>();
+    for (const ep of this.slsEndpoints) {
+      if (ep.project) seen.add(ep.project);
+    }
+    return Array.from(seen).sort().join(' ');
+  }
+
+  private buildCmsWorkspace(): string {
+    return this.cmsWorkspace;
   }
 
   private collectInfraHealth(): InfraHealthSnapshot {
@@ -334,6 +352,9 @@ export class MetricsCollector {
     let updaterPidAlive = true;
     if (this.l1CycleCount > 2) {
       updaterPidAlive = isPidFileRunning(path.join(this.dataDir, 'loongsuite-pilot-updater.pid'));
+      if (!updaterPidAlive && process.platform === 'win32') {
+        updaterPidAlive = isUpdaterRunningOnWindowsSync();
+      }
       if (updaterPidAlive) {
         this.updaterConsecutiveFailures = 0;
       } else {

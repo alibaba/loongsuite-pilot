@@ -6,7 +6,7 @@ import { sendAlarm, sendRunningStatus, sendStatus } from '../internal/sender.js'
 import { MetricsCollector } from './metrics-collector.js';
 import type { DataflowSnapshot, L1Metrics } from './metrics-collector.js';
 import type { AlarmManager } from './alarm-manager.js';
-import type { AgentsConfig } from '../types/index.js';
+import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
 
 const logger = createLogger('MetricsWriter');
 
@@ -24,6 +24,8 @@ export interface MetricsWriterOptions {
   getSnapshot: () => DataflowSnapshot;
   alarmManager?: AlarmManager;
   agentsConfig?: AgentsConfig;
+  slsEndpoints?: SlsEndpoint[];
+  cmsWorkspace?: string;
 }
 
 export class MetricsWriter {
@@ -44,6 +46,8 @@ export class MetricsWriter {
       dataDir: opts.dataDir,
       agentsConfig: opts.agentsConfig,
       canaryPolicy: opts.canaryPolicy,
+      slsEndpoints: opts.slsEndpoints,
+      cmsWorkspace: opts.cmsWorkspace,
     });
     this.getSnapshot = opts.getSnapshot;
     this.alarmManager = opts.alarmManager ?? null;

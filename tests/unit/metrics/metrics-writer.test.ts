@@ -162,7 +162,7 @@ describe('MetricsWriter', () => {
     expect(fs.existsSync(flusherPath)).toBe(false);
   });
 
-  it('includes privacy_settings in L1 metrics', async () => {
+  it('includes capture_message_disabled_agents in L1 metrics', async () => {
     writer = new MetricsWriter({
       dataDir: tmpDir,
       version: '2.0.0',
@@ -181,10 +181,7 @@ describe('MetricsWriter', () => {
     const lines = fs.readFileSync(filePath, 'utf-8').trim().split('\n');
     const entry = JSON.parse(lines[0]);
 
-    expect(entry.privacy_settings).toBeDefined();
-    const settings = JSON.parse(entry.privacy_settings);
-    expect(settings.cursor.captureMessageContent).toBe(true);
-    expect(settings.qoder.captureMessageContent).toBe(false);
+    expect(entry.capture_message_disabled_agents).toBe('qoder');
   });
 
   it('includes user_id in L2 input and flusher metrics', async () => {
