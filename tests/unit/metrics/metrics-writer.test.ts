@@ -37,7 +37,6 @@ function buildSnapshot(): DataflowSnapshot {
     flushers: new Map([
       ['test-ep', { inEntries: 10, inBytes: 2048, outEntries: 9, outFailed: 1, totalDelayMs: 500, lastFlushTime: '2026-05-19 10:00:00', startTime: '2026-05-19 09:00:00', flusherName: 'sls', mode: 'webtracking', endpoint: 'https://cn-heyuan.log.aliyuncs.com', project: 'test-project', logstore: 'test-logstore' }],
     ]),
-    agentVersions: {},
     inputIdleMinutes: new Map(),
   };
 }
@@ -140,7 +139,6 @@ describe('MetricsWriter', () => {
       flusherRunner: { inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0, totalDelayMs: 0, lastFlushTime: '', startTime: '' },
       inputs: new Map(),
       flushers: new Map(),
-      agentVersions: {},
       inputIdleMinutes: new Map(),
     };
 
@@ -162,7 +160,7 @@ describe('MetricsWriter', () => {
     expect(fs.existsSync(flusherPath)).toBe(false);
   });
 
-  it('includes privacy_settings in L1 metrics', async () => {
+  it('includes capture_message_disabled_agents in L1 metrics', async () => {
     writer = new MetricsWriter({
       dataDir: tmpDir,
       version: '2.0.0',
@@ -181,10 +179,7 @@ describe('MetricsWriter', () => {
     const lines = fs.readFileSync(filePath, 'utf-8').trim().split('\n');
     const entry = JSON.parse(lines[0]);
 
-    expect(entry.privacy_settings).toBeDefined();
-    const settings = JSON.parse(entry.privacy_settings);
-    expect(settings.cursor.captureMessageContent).toBe(true);
-    expect(settings.qoder.captureMessageContent).toBe(false);
+    expect(entry.capture_message_disabled_agents).toBe('qoder');
   });
 
   it('includes user_id in L2 input and flusher metrics', async () => {
@@ -211,7 +206,7 @@ describe('MetricsWriter', () => {
   describe('DEGRADED_STARTUP_ALARM', () => {
     it('records alarm when init_type is nohup', async () => {
       fs.writeFileSync(path.join(tmpDir, 'init-type'), 'nohup');
-      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
       writer = new MetricsWriter({
         dataDir: tmpDir,
         version: '2.0.0',
@@ -231,7 +226,7 @@ describe('MetricsWriter', () => {
     });
 
     it('records alarm when init_type is unknown (file missing)', async () => {
-      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
       writer = new MetricsWriter({
         dataDir: tmpDir,
         version: '2.0.0',
@@ -251,7 +246,7 @@ describe('MetricsWriter', () => {
 
     it('does not record alarm when init_type is launchd', async () => {
       fs.writeFileSync(path.join(tmpDir, 'init-type'), 'launchd');
-      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
       writer = new MetricsWriter({
         dataDir: tmpDir,
         version: '2.0.0',
@@ -270,7 +265,7 @@ describe('MetricsWriter', () => {
 
     it('does not record alarm when init_type is systemd-user', async () => {
       fs.writeFileSync(path.join(tmpDir, 'init-type'), 'systemd-user');
-      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
       writer = new MetricsWriter({
         dataDir: tmpDir,
         version: '2.0.0',
@@ -290,7 +285,7 @@ describe('MetricsWriter', () => {
 
   describe('infra health alarms', () => {
     it('UPDATER_NOT_RUNNING_ALARM does not fire during grace period', async () => {
-      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
       writer = new MetricsWriter({
         dataDir: tmpDir,
         version: '2.0.0',
@@ -308,7 +303,7 @@ describe('MetricsWriter', () => {
     });
 
     it('UPDATER_NOT_RUNNING_ALARM fires after 2 consecutive failures post-grace', async () => {
-      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
       writer = new MetricsWriter({
         dataDir: tmpDir,
         version: '2.0.0',
@@ -333,7 +328,7 @@ describe('MetricsWriter', () => {
 
     it('BROKEN_VERSION_POINTER_ALARM fires when current points to missing dir', async () => {
       fs.writeFileSync(path.join(tmpDir, 'current'), 'nonexistent_version');
-      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
       writer = new MetricsWriter({
         dataDir: tmpDir,
         version: '2.0.0',
@@ -354,7 +349,7 @@ describe('MetricsWriter', () => {
     it('BROKEN_VERSION_POINTER_ALARM does not fire when current is valid', async () => {
       fs.mkdirSync(path.join(tmpDir, 'versions', '1.0.0_abc'), { recursive: true });
       fs.writeFileSync(path.join(tmpDir, 'current'), '1.0.0_abc');
-      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
       writer = new MetricsWriter({
         dataDir: tmpDir,
         version: '2.0.0',
@@ -373,7 +368,7 @@ describe('MetricsWriter', () => {
 
     it('INVALID_NODE_BIN_ALARM fires when node-bin is invalid', async () => {
       fs.writeFileSync(path.join(tmpDir, 'node-bin'), '/nonexistent/path/node');
-      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
       writer = new MetricsWriter({
         dataDir: tmpDir,
         version: '2.0.0',
@@ -393,7 +388,7 @@ describe('MetricsWriter', () => {
 
     it('INVALID_NODE_BIN_ALARM does not fire when node-bin is valid', async () => {
       fs.writeFileSync(path.join(tmpDir, 'node-bin'), process.execPath);
-      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0' });
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
       writer = new MetricsWriter({
         dataDir: tmpDir,
         version: '2.0.0',

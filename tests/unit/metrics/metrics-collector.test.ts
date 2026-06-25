@@ -17,7 +17,6 @@ function buildSnapshot(overrides: Partial<DataflowSnapshot> = {}): DataflowSnaps
     },
     inputs: new Map(),
     flushers: new Map(),
-    agentVersions: {},
     inputIdleMinutes: new Map(),
     ...overrides,
   };
@@ -55,7 +54,6 @@ describe('MetricsCollector', () => {
       expect(result.user_id).toBe('test-user');
       expect(result.hostname).toBe(require('os').hostname());
       expect(result.pid).toBe(process.pid);
-      expect(result.os).toBe(require('os').type());
       expect(result.os_detail).toContain(require('os').type());
       expect(result.os_detail).toContain(require('os').arch());
 
@@ -385,6 +383,77 @@ describe('MetricsCollector', () => {
       fs.writeFileSync(path.join(tmpDir, 'versions', '.DS_Store'), '');
       const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
       expect(col.collectL1(buildSnapshot()).version_count).toBe('2');
+    });
+  });
+
+  describe('capture_message_disabled_agents', () => {
+    it('returns empty string when no agents configured', () => {
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).capture_message_disabled_agents).toBe('');
+    });
+
+    it('lists only agents with captureMessageContent=false in sorted order', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        agentsConfig: {
+          cursor: { captureMessageContent: false },
+          'claude-code': { captureMessageContent: false },
+          codex: { captureMessageContent: true },
+        },
+      });
+      expect(col.collectL1(buildSnapshot()).capture_message_disabled_agents).toBe('claude-code cursor');
+    });
+
+    it('excludes agents whose captureMessageContent is true', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        agentsConfig: {
+          cursor: { captureMessageContent: true },
+        },
+      });
+      expect(col.collectL1(buildSnapshot()).capture_message_disabled_agents).toBe('');
+    });
+  });
+
+  describe('project', () => {
+    it('returns empty string when no SLS endpoints', () => {
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).project).toBe('');
+    });
+
+    it('joins unique projects with space in sorted order', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        slsEndpoints: [
+          { name: 'a', endpoint: 'https://x', project: 'bbb', logstore: 'l1', kind: 'agentActivity', mode: 'ak' },
+          { name: 'b', endpoint: 'https://x', project: 'aaa', logstore: 'l2', kind: 'agentActivity', mode: 'ak' },
+          { name: 'c', endpoint: 'https://x', project: 'aaa', logstore: 'l3', kind: 'agentActivity', mode: 'ak' },
+        ],
+      });
+      expect(col.collectL1(buildSnapshot()).project).toBe('aaa bbb');
+    });
+  });
+
+  describe('cms_workspace', () => {
+    it('returns empty string when not configured', () => {
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).cms_workspace).toBe('');
+    });
+
+    it('returns the configured workspace verbatim', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        cmsWorkspace: 'ws-abc',
+      });
+      expect(col.collectL1(buildSnapshot()).cms_workspace).toBe('ws-abc');
     });
   });
 });

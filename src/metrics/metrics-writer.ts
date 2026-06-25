@@ -6,7 +6,7 @@ import { sendAlarm, sendRunningStatus, sendStatus } from '../internal/sender.js'
 import { MetricsCollector } from './metrics-collector.js';
 import type { DataflowSnapshot, L1Metrics } from './metrics-collector.js';
 import type { AlarmManager } from './alarm-manager.js';
-import type { AgentsConfig } from '../types/index.js';
+import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
 
 const logger = createLogger('MetricsWriter');
 
@@ -15,6 +15,7 @@ const L2_INTERVAL_MS = 600_000;
 const ALARM_FLUSH_INTERVAL_MS = 30_000;
 const CPU_THRESHOLD_PERCENT = 80;
 const MEM_THRESHOLD_MB = 512;
+const INFRA_ALARM_COOLDOWN_MS = 3_600_000;
 
 export interface MetricsWriterOptions {
   dataDir: string;
@@ -24,6 +25,8 @@ export interface MetricsWriterOptions {
   getSnapshot: () => DataflowSnapshot;
   alarmManager?: AlarmManager;
   agentsConfig?: AgentsConfig;
+  slsEndpoints?: SlsEndpoint[];
+  cmsWorkspace?: string;
 }
 
 export class MetricsWriter {
@@ -35,6 +38,8 @@ export class MetricsWriter {
   private l2Timer: ReturnType<typeof setInterval> | null = null;
   private alarmTimer: ReturnType<typeof setInterval> | null = null;
   private userIdAlarmEmitted = false;
+  private startupAlarmEmitted = false;
+  private readonly lastInfraAlarmAt: Map<string, number> = new Map();
 
   constructor(opts: MetricsWriterOptions) {
     this.logsDir = path.join(opts.dataDir, 'logs', 'metric_alarm');
@@ -44,6 +49,8 @@ export class MetricsWriter {
       dataDir: opts.dataDir,
       agentsConfig: opts.agentsConfig,
       canaryPolicy: opts.canaryPolicy,
+      slsEndpoints: opts.slsEndpoints,
+      cmsWorkspace: opts.cmsWorkspace,
     });
     this.getSnapshot = opts.getSnapshot;
     this.alarmManager = opts.alarmManager ?? null;
@@ -136,15 +143,31 @@ export class MetricsWriter {
   }
 
   private checkStartupMode(metrics: L1Metrics): void {
-    if (!this.alarmManager) return;
+    if (!this.alarmManager || this.startupAlarmEmitted) return;
 
     const initType = metrics.init_type;
     if (initType === 'nohup' || initType === 'unknown') {
+      this.startupAlarmEmitted = true;
       this.alarmManager.record(
         'DEGRADED_STARTUP_ALARM', '2',
         `Service started without autostart registration (init_type=${initType}), will not survive reboot`,
       );
     }
+  }
+
+  // Persistent infra-failures can self-heal at runtime (operator fixes pointer, etc.),
+  // so re-arm them after a cooldown window instead of using a once-guard.
+  private recordInfraAlarm(
+    type: 'UPDATER_NOT_RUNNING_ALARM' | 'BROKEN_VERSION_POINTER_ALARM' | 'INVALID_NODE_BIN_ALARM',
+    level: '2' | '3',
+    message: string,
+  ): void {
+    if (!this.alarmManager) return;
+    const now = Date.now();
+    const last = this.lastInfraAlarmAt.get(type) ?? 0;
+    if (now - last < INFRA_ALARM_COOLDOWN_MS) return;
+    this.lastInfraAlarmAt.set(type, now);
+    this.alarmManager.record(type, level, message);
   }
 
   private checkInfraHealth(): void {
@@ -154,21 +177,21 @@ export class MetricsWriter {
     if (!health) return;
 
     if (health.updaterConsecutiveFailures >= 2) {
-      this.alarmManager.record(
+      this.recordInfraAlarm(
         'UPDATER_NOT_RUNNING_ALARM', '3',
         'Updater process is not running, automatic updates will not be applied',
       );
     }
 
     if (!health.currentVersionValid) {
-      this.alarmManager.record(
+      this.recordInfraAlarm(
         'BROKEN_VERSION_POINTER_ALARM', '2',
         'Version pointer (current) references a non-existent directory, service will fail on restart',
       );
     }
 
     if (!health.nodeBinValid) {
-      this.alarmManager.record(
+      this.recordInfraAlarm(
         'INVALID_NODE_BIN_ALARM', '2',
         'Node.js binary path (node-bin) is invalid or not executable, service will fail on restart',
       );
