@@ -91,6 +91,23 @@ describe('HookStrategy', () => {
       expect(mockHookManager.isHookInstalled).toHaveBeenCalledTimes(2);
     });
 
+    it('returns true when Codex hooks.json has a stale version field', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({ version: 1, hooks: {} });
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+
+      const result = await strategy.needsDeploy(makeDef({
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/test.sh',
+          format: 'nested',
+        },
+      }));
+
+      expect(result).toBe(true);
+      expect(mockHookManager.isHookInstalled).not.toHaveBeenCalled();
+    });
+
     it('builds correct hook definitions from agent config', async () => {
       mockHookManager.isHookInstalled.mockResolvedValue(true);
       const def = makeDef();
