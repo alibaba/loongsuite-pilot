@@ -59,7 +59,7 @@ async function writeHeartbeat(
 }
 
 function makeAlarmManager(): AlarmManager {
-  return new AlarmManager({ ip: '127.0.0.1', version: 'test' });
+  return new AlarmManager({ ip: '127.0.0.1', version: 'test', userId: 'test-user' });
 }
 
 describe('UpdaterWatchdog', () => {

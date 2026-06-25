@@ -34,7 +34,7 @@ describe('isUpdaterRunningOnWindowsSync', () => {
     expect(mockedExecFileSync).toHaveBeenCalledWith(
       'powershell.exe',
       expect.arrayContaining(['-NoProfile', '-WindowStyle', 'Hidden', '-Command']),
-      expect.objectContaining({ timeout: 8000, encoding: 'utf-8', windowsHide: true }),
+      expect.objectContaining({ timeout: 3000, encoding: 'utf-8', windowsHide: true }),
     );
     setPlatform(originalPlatform);
   });

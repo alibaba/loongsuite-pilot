@@ -1094,8 +1094,6 @@ export class Orchestrator extends EventEmitter {
       inputIdleMinutes.set(id, this.inputManager.getInputIdleMinutes(id));
     }
 
-    const agentVersions = this.inputManager.getAgentVersions();
-
     return {
       sendEntriesTotal,
       receivedBytesTotal,
@@ -1104,7 +1102,6 @@ export class Orchestrator extends EventEmitter {
       flusherRunner,
       inputs,
       flushers,
-      agentVersions,
       inputIdleMinutes,
     };
   }

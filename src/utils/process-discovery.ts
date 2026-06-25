@@ -10,7 +10,7 @@ export function isUpdaterRunningOnWindowsSync(): boolean {
     const out = execFileSync(
       'powershell.exe',
       ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', UPDATER_QUERY_SCRIPT],
-      { timeout: 8000, encoding: 'utf-8', windowsHide: true },
+      { timeout: 3000, encoding: 'utf-8', windowsHide: true },
     );
     return out.split(/\r?\n/).some(line => /^\d+$/.test(line.trim()));
   } catch {

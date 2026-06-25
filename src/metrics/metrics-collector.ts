@@ -123,7 +123,6 @@ export interface DataflowSnapshot {
   flusherRunner: FlusherStats;
   inputs: Map<string, InputStats & { type: string }>;
   flushers: Map<string, FlusherStats & { flusherName: string; mode: string; endpoint: string; project: string; logstore: string }>;
-  agentVersions: Record<string, string>;
   inputIdleMinutes: Map<string, number>;
 }
 
@@ -438,7 +437,7 @@ function checkVersionPointer(dataDir: string): boolean {
     const current = fs.readFileSync(path.join(dataDir, 'current'), 'utf-8').trim();
     if (!current) return false;
     const resolved = path.resolve(path.join(dataDir, 'versions', current));
-    if (!resolved.startsWith(path.join(dataDir, 'versions'))) return false;
+    if (!resolved.startsWith(path.join(dataDir, 'versions') + path.sep)) return false;
     return fs.existsSync(resolved);
   } catch {
     return false;
@@ -461,7 +460,7 @@ function checkRollbackAvailable(dataDir: string): boolean {
     const previous = fs.readFileSync(path.join(dataDir, 'previous'), 'utf-8').trim();
     if (!previous) return false;
     const resolved = path.resolve(path.join(dataDir, 'versions', previous));
-    if (!resolved.startsWith(path.join(dataDir, 'versions'))) return false;
+    if (!resolved.startsWith(path.join(dataDir, 'versions') + path.sep)) return false;
     return fs.existsSync(resolved);
   } catch {
     return false;

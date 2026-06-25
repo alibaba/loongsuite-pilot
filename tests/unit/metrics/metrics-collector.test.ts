@@ -17,7 +17,6 @@ function buildSnapshot(overrides: Partial<DataflowSnapshot> = {}): DataflowSnaps
     },
     inputs: new Map(),
     flushers: new Map(),
-    agentVersions: {},
     inputIdleMinutes: new Map(),
     ...overrides,
   };

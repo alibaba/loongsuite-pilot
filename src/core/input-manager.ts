@@ -140,15 +140,6 @@ export class InputManager extends EventEmitter {
     return Math.floor((Date.now() - counter.lastActiveTime) / 60_000);
   }
 
-  getAgentVersions(): Record<string, string> {
-    const versions: Record<string, string> = {};
-    for (const [id, input] of this.inputs) {
-      const version = input.getAgentVersion?.();
-      if (version) versions[id] = version;
-    }
-    return versions;
-  }
-
   /**
    * Build a AgentDetectionEntry for use with AgentDiscoveryService.
    */
