@@ -178,7 +178,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
     if (userText) {
       records.push(buildRecord({
         ...turnMetadata,
-        'event.name': 'llm.request',
+        'event.name': 'other',
         'gen_ai.turn.id': turnId,
         'gen_ai.session.id': sessionId,
         'gen_ai.agent.type': 'qoder-work',
