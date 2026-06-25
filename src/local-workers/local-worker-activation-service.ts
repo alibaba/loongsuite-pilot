@@ -61,6 +61,7 @@ export class LocalWorkerActivationService {
 
     const intervalMs = Number(process.env.LOONGSUITE_LOCAL_WORKER_SCAN_INTERVAL_MS) || DEFAULT_SCAN_INTERVAL_MS;
     this.timer = setInterval(() => void this.refresh('poll'), intervalMs);
+    this.timer.unref();
   }
 
   async stop(): Promise<void> {

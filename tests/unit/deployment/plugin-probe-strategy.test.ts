@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { PluginProbeStrategy } from '../../../src/deployment/plugin-probe-strategy.js';
 import type { AgentDefinition, DeployedAgentRecord } from '../../../src/types/index.js';
 
@@ -57,6 +58,10 @@ describe('PluginProbeStrategy', () => {
       },
       ...overrides,
     };
+  }
+
+  function createTarball(tarball: string, sourceDir: string): void {
+    execFileSync('tar', ['-czf', tarball, '-C', sourceDir, '.'], { stdio: 'ignore' });
   }
 
   describe('detect', () => {
@@ -419,8 +424,7 @@ describe('PluginProbeStrategy', () => {
       await fs.mkdir(path.join(destDir, 'scripts'), { recursive: true });
       await fs.writeFile(path.join(destDir, 'scripts', 'install.sh'), '#!/bin/bash\nexit 0');
 
-      const { execSync } = await import('node:child_process');
-      execSync(`tar -czf "${tarball}" -C "${destDir}" .`, { stdio: 'ignore' });
+      createTarball(tarball, destDir);
 
       const def = makeDef({
         pluginProbe: {
@@ -443,8 +447,7 @@ describe('PluginProbeStrategy', () => {
       await fs.mkdir(path.join(srcDir, 'scripts'), { recursive: true });
       await fs.writeFile(path.join(srcDir, 'scripts', 'install.sh'), '#!/bin/bash\nexit 1');
 
-      const { execSync } = await import('node:child_process');
-      execSync(`tar -czf "${tarball}" -C "${srcDir}" .`, { stdio: 'ignore' });
+      createTarball(tarball, srcDir);
 
       // Create pilot wrapper that succeeds
       const wrapperDir = path.join(pilotDir, 'scripts');
@@ -474,8 +477,7 @@ describe('PluginProbeStrategy', () => {
         `#!/bin/bash\necho "DATA=$PILOT_DATA_DIR LOG=$PILOT_LOG_DIR NODE=$PILOT_NODE_BIN" > "${envFile}"\nexit 0`,
       );
 
-      const { execSync } = await import('node:child_process');
-      execSync(`tar -czf "${tarball}" -C "${srcDir}" .`, { stdio: 'ignore' });
+      createTarball(tarball, srcDir);
 
       const def = makeDef({
         pluginProbe: {
@@ -509,8 +511,7 @@ describe('PluginProbeStrategy', () => {
       await fs.mkdir(path.join(srcDir, 'scripts'), { recursive: true });
       await fs.writeFile(path.join(srcDir, 'scripts', 'install.sh'), '#!/bin/bash\nexit 0');
 
-      const { execSync } = await import('node:child_process');
-      execSync(`tar -czf "${tarball}" -C "${srcDir}" .`, { stdio: 'ignore' });
+      createTarball(tarball, srcDir);
 
       const def = makeDef({
         pluginProbe: {
@@ -541,8 +542,7 @@ describe('PluginProbeStrategy', () => {
       await fs.writeFile(path.join(srcDir, 'scripts', 'install.sh'), '#!/bin/bash\nexit 0');
       await fs.writeFile(path.join(srcDir, 'fresh.txt'), 'new');
 
-      const { execSync } = await import('node:child_process');
-      execSync(`tar -czf "${tarball}" -C "${srcDir}" .`, { stdio: 'ignore' });
+      createTarball(tarball, srcDir);
 
       const result = await strategy.deploy(makeDef({
         pluginProbe: {
@@ -568,8 +568,7 @@ describe('PluginProbeStrategy', () => {
       await fs.mkdir(srcDir, { recursive: true });
       await fs.writeFile(path.join(srcDir, 'fresh.txt'), 'new');
 
-      const { execSync } = await import('node:child_process');
-      execSync(`tar -czf "${tarball}" -C "${srcDir}" .`, { stdio: 'ignore' });
+      createTarball(tarball, srcDir);
 
       const realRename = (strategy as any).renamePath.bind(strategy);
       const renameSpy = vi.spyOn(strategy as any, 'renamePath').mockImplementation(async (from: string, to: string) => {
@@ -621,8 +620,7 @@ describe('PluginProbeStrategy', () => {
       await fs.mkdir(srcDir, { recursive: true });
       await fs.writeFile(path.join(srcDir, 'data.txt'), 'test');
 
-      const { execSync } = await import('node:child_process');
-      execSync(`tar -czf "${tarball}" -C "${srcDir}" .`, { stdio: 'ignore' });
+      createTarball(tarball, srcDir);
 
       const def = makeDef({
         pluginProbe: {
@@ -643,8 +641,7 @@ describe('PluginProbeStrategy', () => {
       await fs.mkdir(path.join(srcDir, 'scripts'), { recursive: true });
       await fs.writeFile(path.join(srcDir, 'scripts', 'install.sh'), '#!/bin/bash\nexit 1');
 
-      const { execSync } = await import('node:child_process');
-      execSync(`tar -czf "${tarball}" -C "${srcDir}" .`, { stdio: 'ignore' });
+      createTarball(tarball, srcDir);
 
       const def = makeDef({
         pluginProbe: {
@@ -719,8 +716,7 @@ while true; do sleep 1; done
         }),
       );
 
-      const { execSync } = await import('node:child_process');
-      execSync(`tar -czf "${tarball}" -C "${path.join(tmpDir, 'tar-src')}" .`, { stdio: 'ignore' });
+      createTarball(tarball, path.join(tmpDir, 'tar-src'));
 
       const bootstrapTokenFile = path.join(tmpDir, 'credentials', 'bootstrap-token');
       await fs.mkdir(path.dirname(bootstrapTokenFile), { recursive: true });
@@ -817,8 +813,7 @@ while true; do sleep 1; done
         }),
       );
 
-      const { execSync } = await import('node:child_process');
-      execSync(`tar -czf "${tarball}" -C "${path.join(tmpDir, 'tar-src')}" .`, { stdio: 'ignore' });
+      createTarball(tarball, path.join(tmpDir, 'tar-src'));
 
       const def = makeDef({
         pluginProbe: {
@@ -877,8 +872,7 @@ while true; do sleep 1; done
         }),
       );
 
-      const { execSync } = await import('node:child_process');
-      execSync(`tar -czf "${tarball}" -C "${path.join(tmpDir, 'tar-src')}" .`, { stdio: 'ignore' });
+      createTarball(tarball, path.join(tmpDir, 'tar-src'));
 
       const result = await strategy.deploy(makeDef({
         localWorkerRuntime: 'claude-code',
@@ -914,8 +908,7 @@ while true; do sleep 1; done
         }),
       );
 
-      const { execSync } = await import('node:child_process');
-      execSync(`tar -czf "${tarball}" -C "${path.join(tmpDir, 'tar-src')}" .`, { stdio: 'ignore' });
+      createTarball(tarball, path.join(tmpDir, 'tar-src'));
 
       const result = await strategy.deploy(makeDef({
         pluginProbe: {
@@ -956,8 +949,7 @@ while true; do sleep 1; done
         }),
       );
 
-      const { execSync } = await import('node:child_process');
-      execSync(`tar -czf "${tarball}" -C "${path.join(tmpDir, 'tar-src')}" .`, { stdio: 'ignore' });
+      createTarball(tarball, path.join(tmpDir, 'tar-src'));
 
       const result = await strategy.deploy(makeDef({
         pluginProbe: {
@@ -1007,8 +999,7 @@ while true; do sleep 1; done
         }),
       );
 
-      const { execSync } = await import('node:child_process');
-      execSync(`tar -czf "${tarball}" -C "${path.join(tmpDir, 'tar-src')}" .`, { stdio: 'ignore' });
+      createTarball(tarball, path.join(tmpDir, 'tar-src'));
 
       const def = makeDef({
         pluginProbe: {
