@@ -365,6 +365,11 @@ export class HookStrategy implements DeployStrategy {
     } else if (needsVersion && existing.version === undefined) {
       existing.version = 1;
       await writeJsonFile(settingsPath, existing);
+    } else if (isHooksJson && settingsPath.includes('.codex') && existing.version !== undefined) {
+      // Clean up stale `version` field previously injected by older pilot versions.
+      // Codex uses #[serde(deny_unknown_fields)] and rejects any key other than `hooks`.
+      delete existing.version;
+      await writeJsonFile(settingsPath, existing);
     }
   }
 }

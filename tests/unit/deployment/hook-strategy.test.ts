@@ -209,6 +209,48 @@ describe('HookStrategy', () => {
       expect(writeJsonFile).not.toHaveBeenCalled();
     });
 
+    it('removes stale version field from Codex hooks.json', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({ version: 1, hooks: { Stop: [] } });
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      const def = makeDef({
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/test.sh',
+          format: 'nested',
+        },
+      });
+      await strategy.deploy(def);
+
+      expect(writeJsonFile).toHaveBeenCalledWith(
+        '/home/.codex/hooks.json',
+        { hooks: { Stop: [] } },
+      );
+    });
+
+    it('creates Codex hooks.json without version when file does not exist', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue(null);
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      const def = makeDef({
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/test.sh',
+          format: 'nested',
+        },
+      });
+      await strategy.deploy(def);
+
+      expect(writeJsonFile).toHaveBeenCalledWith(
+        '/home/.codex/hooks.json',
+        { hooks: {} },
+      );
+    });
+
     it('does not overwrite version on existing hooks.json that already has one', async () => {
       vi.mocked(readJsonFile).mockResolvedValue({ version: 2, hooks: {} });
       mockHookManager.isHookInstalled.mockResolvedValue(false);
