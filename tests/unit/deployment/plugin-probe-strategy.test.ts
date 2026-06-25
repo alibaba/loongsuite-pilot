@@ -894,7 +894,7 @@ while true; do sleep 1; done
       await expect(fs.stat('/worker.log')).rejects.toThrow();
     });
 
-    it('returns failure when worker manifest command cannot be spawned', async () => {
+    it('keeps deploy successful when worker manifest command cannot be spawned', async () => {
       const destDir = path.join(tmpDir, 'dest');
       const tarball = path.join(tmpDir, 'plugin.tar.gz');
       const bundleRoot = path.join(destDir, 'sample-local-runtime-0.1.0');
@@ -924,8 +924,8 @@ while true; do sleep 1; done
         },
       }));
 
-      expect(result.success).toBe(false);
-      expect(result.error).toBe('worker start failed');
+      expect(result.success).toBe(true);
+      expect(result.error).toBeUndefined();
 
       const statusPath = path.join(bundleRoot, '.agent-worker/runtime/claude-code/supervisor-status.json');
       const status = JSON.parse(await fs.readFile(statusPath, 'utf-8')) as { state: string; error: string };

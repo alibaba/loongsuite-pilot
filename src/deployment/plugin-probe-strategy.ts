@@ -127,7 +127,7 @@ export class PluginProbeStrategy implements DeployStrategy {
           },
         );
         if (!workerStarted) {
-          return { success: false, agentId: def.id, deployMode: 'plugin-probe', error: 'worker start failed' };
+          logger.warn('plugin deployed but worker failed to start', { agentId: def.id });
         }
       }
 
