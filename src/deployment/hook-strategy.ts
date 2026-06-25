@@ -305,34 +305,35 @@ export class HookStrategy implements DeployStrategy {
     settingsPath: string,
     env: Record<string, string>,
   ): Promise<void> {
-    const pilotData = resolveHome('~/.loongsuite-pilot');
+    // NOTE: $PILOT_DATA tokens in `env` values are already resolved by
+    // AgentDefLoader.resolveVariables() before the config reaches here
+    // (see agent-def-loader.ts), so no further expansion is needed.
     const existing =
       (await readJsonFile<Record<string, unknown>>(settingsPath)) ?? {};
     const envBlock =
       (existing.env as Record<string, string> | undefined) ?? {};
     let changed = false;
 
-    for (const [key, rawValue] of Object.entries(env)) {
-      const expanded = rawValue.replace(/\$PILOT_DATA/g, pilotData);
-
+    for (const [key, value] of Object.entries(env)) {
       if (key === 'BUN_OPTIONS') {
         const current = envBlock[key];
         if (typeof current === 'string' && current.length > 0) {
-          // Extract our --preload= token (anything after the first =) so we
-          // can probe substring presence rather than exact match.
-          const eqIdx = expanded.indexOf('=');
-          const ourToken = eqIdx >= 0 ? expanded.slice(eqIdx + 1) : expanded;
-          if (current.includes(ourToken)) {
-            continue; // already injected
+          // Match against full whitespace-delimited tokens to avoid a
+          // superstring false-positive (e.g., `...intercept.mjs-debug`
+          // would otherwise be treated as already containing our path).
+          const ourTokens = value.split(/\s+/).filter(Boolean);
+          const currentTokens = current.split(/\s+/).filter(Boolean);
+          if (ourTokens.every((t) => currentTokens.includes(t))) {
+            continue; // already injected (exact tokens present)
           }
-          envBlock[key] = `${current} ${expanded}`.trim();
+          envBlock[key] = `${current} ${value}`.trim();
           changed = true;
           continue;
         }
       }
 
-      if (envBlock[key] !== expanded) {
-        envBlock[key] = expanded;
+      if (envBlock[key] !== value) {
+        envBlock[key] = value;
         changed = true;
       }
     }

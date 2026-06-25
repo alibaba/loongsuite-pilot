@@ -307,36 +307,54 @@ describe('HookStrategy', () => {
       expect(writeJsonFile).not.toHaveBeenCalled();
     });
 
-    it('first-time injection: $PILOT_DATA expanded and env block created', async () => {
+    // NOTE: applyEnvToSettings does NOT itself expand $PILOT_DATA — that's
+    // done upstream by AgentDefLoader.resolveVariables() at load time.
+    // These tests pass already-resolved paths to mirror real input shape.
+    const RESOLVED_PRELOAD = '--preload=/home/.loongsuite-pilot/hooks/intercept.mjs';
+
+    it('first-time injection: value written as-is into a fresh env block', async () => {
       // No existing settings file
       vi.mocked(readJsonFile).mockResolvedValue(null);
 
       await strategy.deploy(envHookDef({
-        BUN_OPTIONS: '--preload=$PILOT_DATA/hooks/intercept.mjs',
+        BUN_OPTIONS: RESOLVED_PRELOAD,
       }));
 
       expect(writeJsonFile).toHaveBeenCalledWith(
         '/home/.test/settings.json',
-        {
-          env: {
-            BUN_OPTIONS: '--preload=~/.loongsuite-pilot/hooks/intercept.mjs',
-          },
-        },
+        { env: { BUN_OPTIONS: RESOLVED_PRELOAD } },
       );
     });
 
     it('BUN_OPTIONS idempotency: existing value already contains our preload → skip write', async () => {
       vi.mocked(readJsonFile).mockResolvedValue({
-        env: {
-          BUN_OPTIONS: '--preload=~/.loongsuite-pilot/hooks/intercept.mjs',
-        },
+        env: { BUN_OPTIONS: RESOLVED_PRELOAD },
       });
 
-      await strategy.deploy(envHookDef({
-        BUN_OPTIONS: '--preload=$PILOT_DATA/hooks/intercept.mjs',
-      }));
+      await strategy.deploy(envHookDef({ BUN_OPTIONS: RESOLVED_PRELOAD }));
 
       expect(writeJsonFile).not.toHaveBeenCalled();
+    });
+
+    it('BUN_OPTIONS token-boundary match: superstring is NOT treated as already injected', async () => {
+      // Existing token is our preload path with a `-debug` suffix — must not
+      // false-positive as "already injected" (regression guard for substring
+      // match bug; comment 3 in code review).
+      vi.mocked(readJsonFile).mockResolvedValue({
+        env: { BUN_OPTIONS: '--preload=/home/.loongsuite-pilot/hooks/intercept.mjs-debug' },
+      });
+
+      await strategy.deploy(envHookDef({ BUN_OPTIONS: RESOLVED_PRELOAD }));
+
+      expect(writeJsonFile).toHaveBeenCalledWith(
+        '/home/.test/settings.json',
+        {
+          env: {
+            BUN_OPTIONS:
+              '--preload=/home/.loongsuite-pilot/hooks/intercept.mjs-debug ' + RESOLVED_PRELOAD,
+          },
+        },
+      );
     });
 
     it('BUN_OPTIONS coexistence: append our preload alongside user\'s own', async () => {
@@ -344,16 +362,13 @@ describe('HookStrategy', () => {
         env: { BUN_OPTIONS: '--preload=/user/own/script.js' },
       });
 
-      await strategy.deploy(envHookDef({
-        BUN_OPTIONS: '--preload=$PILOT_DATA/hooks/intercept.mjs',
-      }));
+      await strategy.deploy(envHookDef({ BUN_OPTIONS: RESOLVED_PRELOAD }));
 
       expect(writeJsonFile).toHaveBeenCalledWith(
         '/home/.test/settings.json',
         {
           env: {
-            BUN_OPTIONS:
-              '--preload=/user/own/script.js --preload=~/.loongsuite-pilot/hooks/intercept.mjs',
+            BUN_OPTIONS: '--preload=/user/own/script.js ' + RESOLVED_PRELOAD,
           },
         },
       );
@@ -378,16 +393,14 @@ describe('HookStrategy', () => {
         otherTopLevel: 'preserved',
       });
 
-      await strategy.deploy(envHookDef({
-        BUN_OPTIONS: '--preload=$PILOT_DATA/hooks/intercept.mjs',
-      }));
+      await strategy.deploy(envHookDef({ BUN_OPTIONS: RESOLVED_PRELOAD }));
 
       expect(writeJsonFile).toHaveBeenCalledWith(
         '/home/.test/settings.json',
         {
           env: {
             ANTHROPIC_AUTH_TOKEN: 'secret',
-            BUN_OPTIONS: '--preload=~/.loongsuite-pilot/hooks/intercept.mjs',
+            BUN_OPTIONS: RESOLVED_PRELOAD,
           },
           otherTopLevel: 'preserved',
         },
@@ -408,9 +421,7 @@ describe('HookStrategy', () => {
       vi.mocked(readJsonFile).mockResolvedValue({});
       vi.mocked(writeJsonFile).mockRejectedValueOnce(new Error('disk full'));
 
-      const result = await strategy.deploy(envHookDef({
-        BUN_OPTIONS: '--preload=$PILOT_DATA/hooks/intercept.mjs',
-      }));
+      const result = await strategy.deploy(envHookDef({ BUN_OPTIONS: RESOLVED_PRELOAD }));
 
       expect(result.success).toBe(true);
       // Hook installation still attempted normally

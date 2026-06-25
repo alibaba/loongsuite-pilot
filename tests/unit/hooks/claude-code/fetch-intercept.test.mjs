@@ -32,9 +32,11 @@ afterEach(() => {
  *
  * The preload writes JSON files to <DATA_DIR>/intercept/claude-code/<sid>/...
  */
-function runScenario({ url, sessionId, body, sseEvents, networkDelayMs = 0 }) {
+function runScenario({ url, sessionId, body, rawBody, sseEvents, networkDelayMs = 0 }) {
   const chunksJson = JSON.stringify(sseEvents.map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`));
-  const bodyJson = JSON.stringify(body);
+  // rawBody (string) takes precedence — use it verbatim as fetch body so tests
+  // can exercise malformed/non-JSON bodies without going through JSON.stringify.
+  const bodyJson = rawBody !== undefined ? rawBody : JSON.stringify(body);
   const script = `
     const { ReadableStream, TransformStream } = require('node:stream/web');
     globalThis.ReadableStream = ReadableStream;
@@ -229,41 +231,13 @@ describe('claude-code-fetch-intercept preload', () => {
   test('malformed JSON body does not crash the host fetch', () => {
     // Send a string body that's not valid JSON. The preload's safe parse
     // should yield system_instructions = null and still complete the fetch.
-    const chunksJson = JSON.stringify(sseStream().map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`));
-    const script = `
-      const { ReadableStream, TransformStream } = require('node:stream/web');
-      globalThis.ReadableStream = ReadableStream;
-      globalThis.TransformStream = TransformStream;
-      // globalThis.Response is native in Node 18.17+ / 20+ / 22+; no fallback needed.
-      const chunks = ${chunksJson};
-      const encoder = new TextEncoder();
-      globalThis.fetch = async function () {
-        const stream = new ReadableStream({
-          start(controller) {
-            for (const c of chunks) controller.enqueue(encoder.encode(c));
-            controller.close();
-          }
-        });
-        return new Response(stream, { status: 200 });
-      };
-      process.env.LOONGSUITE_PILOT_DATA_DIR = ${JSON.stringify(DATA_DIR)};
-      (async () => {
-        // Node 18 forbids require() of .mjs (ERR_REQUIRE_ESM); use dynamic import.
-      await import(${JSON.stringify('file://' + PRELOAD)});
-        const res = await globalThis.fetch(${JSON.stringify(LLM_URL)}, {
-          method: 'POST',
-          headers: { 'x-claude-code-session-id': ${JSON.stringify(SESS)} },
-          body: '<not-json>',
-        });
-        const reader = res.body.getReader();
-        while (true) { const { done } = await reader.read(); if (done) break; }
-        await new Promise(r => setTimeout(r, 50));
-      })().then(() => process.exit(0), (e) => { console.error(String(e)); process.exit(1); });
-    `;
-    const r = spawnSync(process.execPath, ['-e', script], { encoding: 'utf-8', timeout: 10_000 });
+    const r = runScenario({
+      url: LLM_URL, sessionId: SESS,
+      rawBody: '<not-json>',
+      sseEvents: sseStream(),
+    });
     expect(r.status).toBe(0);
     const [{ record }] = readIntercept(SESS);
-    // Stream still parsed, response_id captured; system_instructions null
     expect(record.response_id).toBe(MSG_ID);
     expect(record.system_instructions).toBeNull();
   });

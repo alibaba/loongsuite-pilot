@@ -61,13 +61,16 @@ export interface AgentHookConfig {
   /**
    * Optional env block to merge into the agent's settings.json on deploy.
    *
-   * Each value supports `$PILOT_DATA` token, which HookStrategy expands to
-   * the resolved pilot data directory at write time. The merge semantics:
+   * Each value may contain the `$PILOT_DATA` token; AgentDefLoader resolves
+   * it (recursively, honoring `LOONGSUITE_PILOT_DATA_DIR`) when loading the
+   * agent definition, so HookStrategy receives already-expanded strings.
+   *
+   * Merge semantics:
    *   - Regular keys: overwrite if present
-   *   - `BUN_OPTIONS` is treated as space-separated flags; if the existing
-   *     value already contains the same `--preload=<path>` we add, the
-   *     write is skipped to keep deploy idempotent and to coexist with
-   *     other preload scripts the user may have configured.
+   *   - `BUN_OPTIONS` is treated as space-separated flags; if every token
+   *     we would add is already present, the write is skipped to keep
+   *     deploy idempotent and to coexist with other preload scripts the
+   *     user may have configured.
    *
    * NOTE: settings.json env is read AFTER the agent's main process starts,
    * so it can only affect child processes the agent spawns. It cannot

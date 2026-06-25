@@ -874,10 +874,12 @@ inject_qodercli_token_intercept() {
         fi
         if grep -q 'loongsuite-pilot BEGIN qodercli-intercept' "$file" 2>/dev/null; then return 0; fi
         [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
-        cat >> "$file" << 'INTERCEPTBLOCK'
+        # Double-quoted heredoc so $DATA_DIR expands at install time, honoring
+        # --data-dir overrides. $@ is escaped to defer expansion to runtime.
+        cat >> "$file" << INTERCEPTBLOCK
 
 # loongsuite-pilot BEGIN qodercli-intercept
-qodercli() { BUN_OPTIONS="--preload=$HOME/.loongsuite-pilot/hooks/qodercli-token-intercept.mjs" command qodercli "$@"; }
+qodercli() { BUN_OPTIONS="--preload=$DATA_DIR/hooks/qodercli-token-intercept.mjs" command qodercli "\$@"; }
 # loongsuite-pilot END qodercli-intercept
 INTERCEPTBLOCK
         msg "    ✅ 已写入 $file (请执行 source $file 或打开新终端)" \
@@ -933,10 +935,13 @@ inject_claude_code_fetch_intercept() {
         fi
         if grep -q 'loongsuite-pilot BEGIN claude-code-intercept' "$file" 2>/dev/null; then return 0; fi
         [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
-        cat >> "$file" << 'INTERCEPTBLOCK'
+        # Double-quoted heredoc so $DATA_DIR expands at install time, honoring
+        # --data-dir overrides. Other refs (${BUN_OPTIONS}, $@) are escaped to
+        # defer expansion until the wrapper actually runs in the user's shell.
+        cat >> "$file" << INTERCEPTBLOCK
 
 # loongsuite-pilot BEGIN claude-code-intercept
-claude() { BUN_OPTIONS="--preload=$HOME/.loongsuite-pilot/hooks/claude-code-fetch-intercept.mjs ${BUN_OPTIONS}" command claude "$@"; }
+claude() { BUN_OPTIONS="--preload=$DATA_DIR/hooks/claude-code-fetch-intercept.mjs \${BUN_OPTIONS}" command claude "\$@"; }
 # loongsuite-pilot END claude-code-intercept
 INTERCEPTBLOCK
         msg "    ✅ 已写入 $file (请执行 source $file 或打开新终端)" \
