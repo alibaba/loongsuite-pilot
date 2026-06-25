@@ -270,6 +270,7 @@ describe('HookStrategy', () => {
           hookCommand: '/opt/pilot/hooks/test.sh',
           format: 'flat',
           eventSubcommand: 'kebab-case',
+          replaceHookCommands: ['/old/codex-hook.sh'],
         },
       });
 
@@ -284,6 +285,9 @@ describe('HookStrategy', () => {
       expect(mockHookManager.uninstallHook.mock.calls[0]?.[0].hookCommand).toBe(
         '/opt/pilot/hooks/test.sh session-start',
       );
+      expect(mockHookManager.uninstallHook.mock.calls[0]?.[0].replaceHookCommands).toEqual([
+        '/old/codex-hook.sh',
+      ]);
     });
 
     it('returns failure if installHook returns false', async () => {

@@ -325,6 +325,7 @@ export class HookStrategy implements DeployStrategy {
         ),
         matcher: hookConfig.matcher,
         useNestedFormat: hookConfig.format === 'nested',
+        replaceHookCommands: hookConfig.replaceHookCommands,
       }));
   }
 

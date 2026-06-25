@@ -138,6 +138,7 @@ export class CodexTranscriptInput extends BaseInput {
     }
 
     const entries: AgentActivityEntry[] = recoveredPending;
+    let nextScanOffset = lines.nextOffset;
     for (const line of lines.items) {
       const payload = asRecord(line.record.payload);
       if (!payload) continue;
@@ -172,13 +173,14 @@ export class CodexTranscriptInput extends BaseInput {
             transcriptPath: filePath,
             turnId: terminalTurnId,
           });
+          nextScanOffset = line.endOffset;
           break;
         }
       }
       checkpoint.activeTurn = null;
     }
 
-    checkpoint.scanOffset = lines.nextOffset;
+    checkpoint.scanOffset = nextScanOffset;
     this.saveCheckpoint(key, checkpoint);
     return entries;
   }

@@ -146,9 +146,11 @@ export class HookManager {
       const lastKey = def.hookJsonPath[def.hookJsonPath.length - 1];
       if (!Array.isArray(target[lastKey])) return true;
 
-      target[lastKey] = (target[lastKey] as any[]).filter(
-        (h: any) => !this.entryMatchesCommand(h, def.hookCommand),
-      );
+      const commands = [def.hookCommand, ...(def.replaceHookCommands ?? [])];
+      target[lastKey] = this.removeCommands(target[lastKey] as any[], commands);
+      if ((target[lastKey] as any[]).length === 0) {
+        delete target[lastKey];
+      }
 
       await writeJsonFile(def.settingsPath, settings);
       logger.info('hook uninstalled', { agentId: def.agentId });
