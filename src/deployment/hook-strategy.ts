@@ -70,6 +70,10 @@ export class HookStrategy implements DeployStrategy {
   }
 
   async needsDeploy(def: AgentDefinition, _record?: DeployedAgentRecord): Promise<boolean> {
+    if (await this.needsSettingsRepairForCodex(def)) {
+      return true;
+    }
+
     const hookDefs = this.buildHookDefinitions(def);
     for (const hookDef of hookDefs) {
       if (!(await this.hookManager.isHookInstalled(hookDef))) {
@@ -77,6 +81,17 @@ export class HookStrategy implements DeployStrategy {
       }
     }
     return false;
+  }
+
+  private async needsSettingsRepairForCodex(def: AgentDefinition): Promise<boolean> {
+    const settingsPath = def.hook?.settingsPath;
+    if (!settingsPath) return false;
+
+    const isCodexHooksJson = settingsPath.endsWith('hooks.json') && settingsPath.includes('.codex');
+    if (!isCodexHooksJson) return false;
+
+    const existing = await readJsonFile<Record<string, unknown>>(settingsPath);
+    return existing?.version !== undefined;
   }
 
   async deploy(def: AgentDefinition): Promise<DeployResult> {
