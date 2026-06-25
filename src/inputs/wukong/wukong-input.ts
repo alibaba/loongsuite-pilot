@@ -25,7 +25,7 @@ const CLI_MAX_BUFFER = 10 * 1024 * 1024;
 
 interface WukongTask {
   id: string;
-  session_id: string;
+  session_id: string | null;
   name: string;
   status: string;
   agent_type: string;
@@ -1294,6 +1294,12 @@ export class WukongInput extends BaseInput {
         ['agent', 'data', 'list_tasks', '--json', JSON.stringify(params)],
         { timeout: CLI_TIMEOUT_MS, maxBuffer: CLI_MAX_BUFFER, signal: this._abortController.signal },
       );
+      if (!stdout || !stdout.trim()) {
+        this.logger.debug('wukong-cli list_tasks returned empty stdout', {
+          stderr: (stderr ?? '').slice(0, 256),
+        });
+        break;
+      }
       let parsed: unknown;
       try {
         parsed = JSON.parse(stdout);
@@ -1304,7 +1310,9 @@ export class WukongInput extends BaseInput {
         throw new Error('unexpected listTasks response structure');
       }
       const resp = parsed as ListTasksResponse;
-      allTasks.push(...resp.items);
+      for (const item of resp.items) {
+        if (item.session_id) allTasks.push(item);
+      }
       cursor = resp.hasMore ? resp.nextCursor : undefined;
       hasMore = !!resp.hasMore;
     } while (cursor && allTasks.length < MAX_TASKS);
@@ -1323,6 +1331,13 @@ export class WukongInput extends BaseInput {
       ['agent', 'data', 'get_spark_agui_messages', '--json', JSON.stringify({ conversationId })],
       { timeout: CLI_TIMEOUT_MS, maxBuffer: CLI_MAX_BUFFER, signal: this._abortController.signal },
     );
+    if (!stdout || !stdout.trim()) {
+      this.logger.debug('wukong-cli get_spark_agui_messages returned empty stdout, treating as no messages', {
+        conversationId,
+        stderr: (stderr ?? '').slice(0, 256),
+      });
+      return { messages: [] };
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(stdout);
