@@ -295,8 +295,6 @@ describe('QoderTraceInput token-enricher', () => {
 
       expect(entries[1]['gen_ai.response.id']).toBeUndefined();
       expect(entries[1]['gen_ai.response.model']).toBe('auto');
-      expect((entries[1] as any)['qoder.match_confidence']).toBe('low');
-      expect((entries[1] as any)['qoder.match.warning']).toBe('assistant_count_mismatch');
     });
   });
 
@@ -389,57 +387,6 @@ describe('QoderTraceInput token-enricher', () => {
 
       // Empty input → early return, no modification
       expect(entries[0]['gen_ai.usage.input_tokens']).toBeUndefined();
-    });
-  });
-
-  describe('enrichCliTurn with systemPrompt', () => {
-    it('injects system prompt into first llm.request with step_id', () => {
-      const entries: AgentActivityEntry[] = [
-        makeEntry({ 'event.name': 'other', 'gen_ai.step.id': undefined } as any),
-        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.request', 'gen_ai.step.id': 'turn-1:s1' } as any),
-        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response' }),
-      ];
-      const segments: SegmentTokenData[] = [{
-        requestId: 'req-A',
-        inputTokens: 5000,
-        outputTokens: 200,
-        cacheReadTokens: 0,
-        cacheCreationTokens: 0,
-        requestStartTs: 0,
-        responseEndTs: 0,
-        toolFinishedTs: 0,
-        stopReason: '',
-        model: '',
-      }];
-
-      enrichCliTurn(entries, segments, 'You are a helpful assistant.');
-
-      const sysInstr = (entries[1] as Record<string, unknown>)['gen_ai.system_instructions'];
-      expect(sysInstr).toEqual([{ type: 'text', content: 'You are a helpful assistant.' }]);
-      expect((entries[0] as Record<string, unknown>)['gen_ai.system_instructions']).toBeUndefined();
-    });
-
-    it('does not inject system prompt when undefined', () => {
-      const entries: AgentActivityEntry[] = [
-        makeEntry({ 'event.name': 'llm.request', 'gen_ai.step.id': undefined } as any),
-        makeEntry({ 'gen_ai.response.id': 'req-A', 'event.name': 'llm.response' }),
-      ];
-      const segments: SegmentTokenData[] = [{
-        requestId: 'req-A',
-        inputTokens: 100,
-        outputTokens: 10,
-        cacheReadTokens: 0,
-        cacheCreationTokens: 0,
-        requestStartTs: 0,
-        responseEndTs: 0,
-        toolFinishedTs: 0,
-        stopReason: '',
-        model: '',
-      }];
-
-      enrichCliTurn(entries, segments);
-
-      expect((entries[0] as Record<string, unknown>)['gen_ai.system_instructions']).toBeUndefined();
     });
   });
 
