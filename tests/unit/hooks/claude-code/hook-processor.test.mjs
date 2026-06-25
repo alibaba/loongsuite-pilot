@@ -247,3 +247,171 @@ describe('claude-code-hook-processor v2 端到端', () => {
     expect(readState('s-legacy')).toBeNull();
   });
 });
+
+// ─── intercept merge (from BUN_OPTIONS preload script) ───
+//
+// hook-processor reads ~/.loongsuite-pilot/intercept/claude-code/<sid>/<rid>.json
+// (written by claude-code-fetch-intercept.mjs) and merges:
+//   gen_ai.system_instructions → llm.request events
+//   gen_ai.response.time_to_first_token → llm.response events
+// joined by message_id == response_id == file basename.
+
+function writeInterceptFile(sessionId, responseId, payload, opts = {}) {
+  const dir = path.join(DATA_DIR, 'intercept', 'claude-code', sessionId);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${responseId}.json`);
+  fs.writeFileSync(file, JSON.stringify(payload));
+  if (opts.mtime) {
+    const t = opts.mtime / 1000;
+    fs.utimesSync(file, t, t);
+  }
+  return file;
+}
+
+describe('hook-processor merges intercept data into llm events', () => {
+  // Reuse the simple 2-LLM-call transcript shape from earlier tests.
+  function writeBasicTranscript(sessionId, msgId1 = 'msg_1', msgId2 = 'msg_2') {
+    return writeTranscript(sessionId, [
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: [{ type: 'text', text: 'list files' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:49.000Z', message: { id: msgId1, content: [{ type: 'tool_use', id: 'tu_1', name: 'Bash', input: { command: 'ls' } }], usage: { input_tokens: 100, output_tokens: 50 }, stop_reason: 'tool_use' } },
+      { type: 'user', timestamp: '2026-06-04T02:57:49.200Z', message: { content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'a.txt' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:52.000Z', message: { id: msgId2, content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 200, output_tokens: 20 }, stop_reason: 'end_turn' } },
+    ]);
+  }
+
+  const SAMPLE_SYS_INSTR = [
+    { type: 'text', content: 'You are a Claude agent.' },
+    { type: 'text', content: 'CLAUDE.md content here.' },
+  ];
+
+  test('full match: both llm.request and llm.response receive new fields, intercept files deleted', () => {
+    const sid = 'sid-merge-1';
+    const transcriptPath = writeBasicTranscript(sid, 'msg_full_a', 'msg_full_b');
+
+    const fileA = writeInterceptFile(sid, 'msg_full_a', {
+      session_id: sid,
+      response_id: 'msg_full_a',
+      ttft_ns: 1234567890,
+      system_instructions: SAMPLE_SYS_INSTR,
+    });
+    const fileB = writeInterceptFile(sid, 'msg_full_b', {
+      session_id: sid,
+      response_id: 'msg_full_b',
+      ttft_ns: 2222222222,
+      system_instructions: SAMPLE_SYS_INSTR,
+    });
+
+    const r = runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath });
+    expect(r.status).toBe(0);
+
+    const records = readJsonlRecords();
+
+    const llmRequests = records.filter((rec) => rec['event.name'] === 'llm.request');
+    const llmResponses = records.filter((rec) => rec['event.name'] === 'llm.response');
+    expect(llmRequests).toHaveLength(2);
+    expect(llmResponses).toHaveLength(2);
+
+    for (const req of llmRequests) {
+      expect(req['gen_ai.system_instructions']).toEqual(SAMPLE_SYS_INSTR);
+    }
+    const respByMsg = new Map(llmResponses.map((r) => [r['gen_ai.response.id'], r]));
+    expect(respByMsg.get('msg_full_a')['gen_ai.response.time_to_first_token']).toBe(1234567890);
+    expect(respByMsg.get('msg_full_b')['gen_ai.response.time_to_first_token']).toBe(2222222222);
+
+    // Files for matched response_ids must be deleted; the session dir
+    // itself may be removed (since it's empty after reaping).
+    expect(fs.existsSync(fileA)).toBe(false);
+    expect(fs.existsSync(fileB)).toBe(false);
+  });
+
+  test('no intercept directory: records emit without new fields (graceful)', () => {
+    const sid = 'sid-merge-2';
+    const transcriptPath = writeBasicTranscript(sid);
+
+    const r = runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath });
+    expect(r.status).toBe(0);
+
+    const records = readJsonlRecords();
+    for (const rec of records.filter((r) => r['event.name'] === 'llm.request')) {
+      expect(rec['gen_ai.system_instructions']).toBeUndefined();
+    }
+    for (const rec of records.filter((r) => r['event.name'] === 'llm.response')) {
+      expect(rec['gen_ai.response.time_to_first_token']).toBeUndefined();
+    }
+  });
+
+  test('partial match: only response_ids with intercept files get enriched', () => {
+    const sid = 'sid-merge-3';
+    const transcriptPath = writeBasicTranscript(sid, 'msg_partial_a', 'msg_partial_b');
+
+    // Only write intercept for msg_partial_a; b has none.
+    writeInterceptFile(sid, 'msg_partial_a', {
+      session_id: sid,
+      response_id: 'msg_partial_a',
+      ttft_ns: 999000000,
+      system_instructions: SAMPLE_SYS_INSTR,
+    });
+
+    runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath });
+    const records = readJsonlRecords();
+    const reqByMsg = new Map(
+      records.filter((r) => r['event.name'] === 'llm.request').map((r) => [r['gen_ai.response.id'], r]),
+    );
+    const respByMsg = new Map(
+      records.filter((r) => r['event.name'] === 'llm.response').map((r) => [r['gen_ai.response.id'], r]),
+    );
+
+    expect(reqByMsg.get('msg_partial_a')['gen_ai.system_instructions']).toEqual(SAMPLE_SYS_INSTR);
+    expect(reqByMsg.get('msg_partial_b')['gen_ai.system_instructions']).toBeUndefined();
+
+    expect(respByMsg.get('msg_partial_a')['gen_ai.response.time_to_first_token']).toBe(999000000);
+    expect(respByMsg.get('msg_partial_b')['gen_ai.response.time_to_first_token']).toBeUndefined();
+  });
+
+  test('stale orphan intercept file (mtime > 1h) is reaped on Stop', () => {
+    const sid = 'sid-merge-4';
+    const transcriptPath = writeBasicTranscript(sid);
+
+    // No transcript message_id matches this orphan; it will not be merged.
+    // Mark mtime as 2h old → reapStaleIntercept must delete it.
+    const orphanFile = writeInterceptFile(sid, 'msg_orphan', {
+      session_id: sid,
+      response_id: 'msg_orphan',
+      ttft_ns: 100,
+      system_instructions: [],
+    }, { mtime: Date.now() - 2 * 60 * 60 * 1000 });
+
+    runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath });
+    expect(fs.existsSync(orphanFile)).toBe(false);
+  });
+
+  test('fresh non-matching intercept file (mtime < 1h) is left alone', () => {
+    const sid = 'sid-merge-5';
+    const transcriptPath = writeBasicTranscript(sid);
+
+    // Recent, no match → should stay (might belong to a later turn we haven't seen yet).
+    const recentFile = writeInterceptFile(sid, 'msg_future', {
+      session_id: sid,
+      response_id: 'msg_future',
+      ttft_ns: 100,
+      system_instructions: [],
+    });
+
+    runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath });
+    expect(fs.existsSync(recentFile)).toBe(true);
+  });
+
+  test('malformed intercept JSON: hook still emits records (no crash)', () => {
+    const sid = 'sid-merge-6';
+    const transcriptPath = writeBasicTranscript(sid);
+    const dir = path.join(DATA_DIR, 'intercept', 'claude-code', sid);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'broken.json'), '{not json');
+
+    const r = runHook('stop', { session_id: sid, stop_reason: 'end_turn', transcript_path: transcriptPath });
+    expect(r.status).toBe(0);
+
+    const llmEvents = readJsonlRecords().filter((r) => r['event.name'] === 'llm.request' || r['event.name'] === 'llm.response');
+    expect(llmEvents.length).toBeGreaterThan(0);
+  });
+});
