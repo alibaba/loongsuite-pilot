@@ -27,10 +27,10 @@ function writeTranscript(sessionId, records) {
   return file;
 }
 
-function runHook(subcommand, payload) {
+function runHook(subcommand, payload, extraEnv = {}) {
   const r = spawnSync('node', [PROCESSOR, subcommand], {
     input: JSON.stringify(payload),
-    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR },
+    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR, ...extraEnv },
     encoding: 'utf-8',
     timeout: 10_000,
   });
@@ -60,6 +60,40 @@ function readState(sessionId) {
 }
 
 describe('claude-code-hook-processor v2 端到端', () => {
+  test('AgentTeams 环境变量会进入 hook record resourceAttributes', () => {
+    const transcriptPath = writeTranscript('sat1', [
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: [{ type: 'text', text: 'hello' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:35.000Z', message: { id: 'msg_1', content: [{ type: 'text', text: 'hi' }], usage: { input_tokens: 10, output_tokens: 5 }, stop_reason: 'end_turn' } },
+    ]);
+    const r = runHook('stop', { session_id: 'sat1', stop_reason: 'end_turn', transcript_path: transcriptPath }, {
+      AGENTTEAMS_REMOTE_MANAGED: '1',
+      AGENTTEAMS_RUNTIME: 'claude-code',
+      AGENTTEAMS_WORKER_NAME: 'local-worker',
+      AGENTTEAMS_INSTANCE_ID: 'example-instance',
+      AGENTTEAMS_TOKEN: 'should-not-leak',
+      AGENTTEAMS_TEAM_NAME: 'local-worker-test',
+      AGENTTEAMS_ROLE: 'worker',
+    });
+    expect(r.status).toBe(0);
+
+    const records = readJsonlRecords();
+    expect(records.length).toBeGreaterThan(0);
+    for (const rec of records) {
+      expect(rec['agentteams.remote.managed']).toBeUndefined();
+      expect(rec['agentteams.runtime']).toBeUndefined();
+      expect(rec['agentteams.worker.name']).toBeUndefined();
+      expect(rec['agentteams.instance.id']).toBeUndefined();
+      expect(rec.resourceAttributes).toEqual({
+        'agentteams.worker.name': 'local-worker',
+        'agentteams.instance.id': 'example-instance',
+      });
+      expect(rec['agentteams.token']).toBeUndefined();
+      expect(rec['agentteams.team.name']).toBeUndefined();
+      expect(rec['agentteams.role']).toBeUndefined();
+      expect(rec['gen_ai.agent.name']).toBe('local-worker');
+    }
+  });
+
   test('单 turn、单 LLM、单 tool — Stop 产出正确 JSONL', () => {
     const transcriptPath = writeTranscript('s1', [
       { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: [{ type: 'text', text: 'list files' }] } },
@@ -211,6 +245,21 @@ describe('claude-code-hook-processor v2 端到端', () => {
     runHook('stop', { session_id: 's-inc', stop_reason: 'end_turn', transcript_path: transcriptPath });
     const recordsAfter = readJsonlRecords().length;
     expect(recordsAfter).toBe(recordsBefore);
+  });
+
+  test('synthetic-only transcript 会推进 offset 但不产生日志', () => {
+    const transcriptPath = writeTranscript('s-synthetic-only', [
+      { type: 'user', timestamp: '2026-06-04T02:57:30.000Z', promptId: 'p1', isMeta: true, message: { content: [{ type: 'text', text: 'Continue from where you left off.' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:31.000Z', message: { id: 'synthetic_1', model: '<synthetic>', content: [{ type: 'text', text: 'No response requested.' }], usage: { input_tokens: 0, output_tokens: 0 }, stop_reason: 'end_turn' } },
+    ]);
+    runHook('stop', { session_id: 's-synthetic-only', stop_reason: 'end_turn', transcript_path: transcriptPath });
+
+    const state = readState('s-synthetic-only');
+    expect(state.transcript_offset).toBeGreaterThan(0);
+    expect(readJsonlRecords().length).toBe(0);
+
+    runHook('stop', { session_id: 's-synthetic-only', stop_reason: 'end_turn', transcript_path: transcriptPath });
+    expect(readJsonlRecords().length).toBe(0);
   });
 
   test('多 turn session — turn_count 递增', () => {

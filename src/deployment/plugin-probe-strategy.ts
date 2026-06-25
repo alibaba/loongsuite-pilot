@@ -1,5 +1,5 @@
 import * as fs from 'node:fs/promises';
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, type Dirent } from 'node:fs';
 import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -12,19 +12,27 @@ import type {
 import { directoryExists, ensureDir, fileExists } from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
+import { WorkerManifestSupervisor } from './worker-manifest-supervisor.js';
 
 const logger = createLogger('PluginProbeStrategy');
 
 const SCRIPT_TIMEOUT_MS = 120_000;
 const REMOTE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
+export interface PluginProbeDeployOptions {
+  instance?: Record<string, string>;
+  runtimeOptions?: Record<string, string | boolean>;
+}
+
 export class PluginProbeStrategy implements DeployStrategy {
   private readonly dataDir: string;
   private readonly pilotDir: string;
+  private readonly workerSupervisor: WorkerManifestSupervisor;
 
   constructor(dataDir: string, pilotDir: string) {
     this.dataDir = dataDir;
     this.pilotDir = pilotDir;
+    this.workerSupervisor = new WorkerManifestSupervisor();
   }
 
   async detect(def: AgentDefinition): Promise<boolean> {
@@ -42,6 +50,12 @@ export class PluginProbeStrategy implements DeployStrategy {
       return true;
     }
 
+    const shouldStartWorker = !def.localWorkerRuntime;
+    const hasWorkerManifest = await this.workerSupervisor.hasManifest(config.source.destDir);
+    if (shouldStartWorker && hasWorkerManifest && !await this.workerSupervisor.isWorkerRunning(config.source.destDir)) {
+      return true;
+    }
+
     if (this.isRemoteOnly(config.source) && !this.isRemoteCheckDue(record)) {
       logger.debug('remote check skipped, within interval', {
         agentId: def.id,
@@ -53,10 +67,12 @@ export class PluginProbeStrategy implements DeployStrategy {
     const currentHash = await this.computeSourceHash(config.source.tarball, config.source.url ?? config.source.remoteUrl);
     if (!currentHash) return true;
 
-    return currentHash !== record.sourceHash;
+    if (currentHash !== record.sourceHash) return true;
+
+    return false;
   }
 
-  async deploy(def: AgentDefinition): Promise<DeployResult> {
+  async deploy(def: AgentDefinition, options: PluginProbeDeployOptions = {}): Promise<DeployResult> {
     const config = def.pluginProbe;
     if (!config) {
       return { success: false, agentId: def.id, deployMode: 'plugin-probe', error: 'missing pluginProbe config' };
@@ -64,25 +80,55 @@ export class PluginProbeStrategy implements DeployStrategy {
 
     try {
       const destDir = config.source.destDir;
+      const existingRoot = await this.resolvePackageRoot(destDir);
 
-      if (await fileExists(path.join(destDir, 'scripts', 'uninstall.sh'))) {
+      await this.workerSupervisor.stopIfPresent(def.id, destDir, {
+        instance: options.instance,
+        runtimeOptions: options.runtimeOptions,
+      });
+
+      const existingUninstallScript = existingRoot ? path.join(existingRoot, 'scripts', 'uninstall.sh') : '';
+      if (existingUninstallScript && await fileExists(existingUninstallScript)) {
         logger.info('running uninstall script before update', { agentId: def.id });
-        await this.runScript(path.join(destDir, 'scripts', 'uninstall.sh'), destDir, def.id);
+        await this.runScript(existingUninstallScript, existingRoot!, def.id);
       }
 
-      const acquired = await this.acquirePackage(config.source);
+      const acquired = await this.acquirePackageIntoDest(config.source);
       if (!acquired) {
         return { success: false, agentId: def.id, deployMode: 'plugin-probe', error: 'failed to acquire package' };
       }
 
-      const installScript = await this.resolveInstallScript(def.id, destDir);
+      const packageRoot = await this.resolvePackageRoot(destDir);
+      const installCwd = packageRoot ?? destDir;
+      const installScript = await this.resolveInstallScript(def.id, installCwd);
       if (installScript) {
-        const ok = await this.runScript(installScript, destDir, def.id);
+        const ok = await this.runScript(installScript, installCwd, def.id);
         if (!ok) {
           return { success: false, agentId: def.id, deployMode: 'plugin-probe', error: 'install script failed' };
         }
       } else {
         logger.debug('no install script found, skipping', { agentId: def.id });
+      }
+
+      const shouldStartWorker = !def.localWorkerRuntime || !!options.instance;
+      if (!shouldStartWorker) {
+        logger.info('local worker runtime template installed; worker start skipped', {
+          agentId: def.id,
+          runtime: def.localWorkerRuntime,
+        });
+      } else {
+        const workerStarted = await this.workerSupervisor.startIfPresent(
+          def.id,
+          destDir,
+          this.buildScriptEnv(def.id),
+          {
+            instance: options.instance,
+            runtimeOptions: options.runtimeOptions,
+          },
+        );
+        if (!workerStarted) {
+          logger.warn('plugin deployed but worker failed to start', { agentId: def.id });
+        }
       }
 
       logger.info('plugin deployed', { agentId: def.id });
@@ -97,15 +143,37 @@ export class PluginProbeStrategy implements DeployStrategy {
     if (!config) return false;
 
     const destDir = config.source.destDir;
-    const uninstallScript = path.join(destDir, 'scripts', 'uninstall.sh');
+    await this.workerSupervisor.stopIfPresent(def.id, destDir);
+
+    const packageRoot = await this.resolvePackageRoot(destDir);
+    const uninstallRoot = packageRoot ?? destDir;
+    const uninstallScript = path.join(uninstallRoot, 'scripts', 'uninstall.sh');
 
     if (await fileExists(uninstallScript)) {
       logger.info('running uninstall script', { agentId: def.id });
-      return this.runScript(uninstallScript, destDir, def.id);
+      return this.runScript(uninstallScript, uninstallRoot, def.id);
     }
 
     logger.warn('no uninstall script found', { agentId: def.id });
     return false;
+  }
+
+  async stopWorker(def: AgentDefinition, options: PluginProbeDeployOptions = {}): Promise<boolean> {
+    const config = def.pluginProbe;
+    if (!config) return true;
+    return this.workerSupervisor.stopIfPresent(def.id, config.source.destDir, {
+      instance: options.instance,
+      runtimeOptions: options.runtimeOptions,
+    });
+  }
+
+  async isWorkerRunning(def: AgentDefinition, options: PluginProbeDeployOptions = {}): Promise<boolean> {
+    const config = def.pluginProbe;
+    if (!config) return false;
+    return this.workerSupervisor.isWorkerRunning(config.source.destDir, {
+      instance: options.instance,
+      runtimeOptions: options.runtimeOptions,
+    });
   }
 
   async computeSourceHash(tarball?: string, url?: string): Promise<string | undefined> {
@@ -166,6 +234,33 @@ export class PluginProbeStrategy implements DeployStrategy {
     const pluginScript = path.join(destDir, 'scripts', 'install.sh');
     if (await fileExists(pluginScript)) {
       return pluginScript;
+    }
+
+    return undefined;
+  }
+
+  private async resolvePackageRoot(destDir: string): Promise<string | undefined> {
+    if (await fileExists(path.join(destDir, 'scripts', 'install.sh'))
+      || await fileExists(path.join(destDir, 'scripts', 'uninstall.sh'))
+      || await fileExists(path.join(destDir, 'worker.manifest.json'))) {
+      return destDir;
+    }
+
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(destDir, { withFileTypes: true });
+    } catch {
+      return undefined;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const candidate = path.join(destDir, entry.name);
+      if (await fileExists(path.join(candidate, 'scripts', 'install.sh'))
+        || await fileExists(path.join(candidate, 'scripts', 'uninstall.sh'))
+        || await fileExists(path.join(candidate, 'worker.manifest.json'))) {
+        return candidate;
+      }
     }
 
     return undefined;
@@ -255,6 +350,69 @@ export class PluginProbeStrategy implements DeployStrategy {
 
     logger.error('unknown source type', { type: source.type });
     return false;
+  }
+
+  private async acquirePackageIntoDest(source: {
+    type: string;
+    tarball?: string;
+    url?: string;
+    destDir: string;
+    remoteUrl?: string;
+  }): Promise<boolean> {
+    const parentDir = path.dirname(source.destDir);
+    const stagingPrefix = path.join(parentDir, `.${path.basename(source.destDir)}.staging-`);
+
+    await ensureDir(parentDir);
+    const stagingDir = await fs.mkdtemp(stagingPrefix);
+    let backupDir: string | undefined;
+    let installed = false;
+
+    try {
+      const acquired = await this.acquirePackage({ ...source, destDir: stagingDir });
+      if (!acquired) return false;
+
+      backupDir = path.join(parentDir, `.${path.basename(source.destDir)}.backup-${Date.now()}-${crypto.randomUUID()}`);
+      try {
+        await this.renamePath(source.destDir, backupDir);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        backupDir = undefined;
+      }
+
+      await this.renamePath(stagingDir, source.destDir);
+      installed = true;
+      if (backupDir) {
+        await fs.rm(backupDir, { recursive: true, force: true }).catch(err => {
+          logger.warn('failed to remove package backup', { backupDir, error: String(err) });
+        });
+      }
+      return true;
+    } catch (err) {
+      if (backupDir && !installed) {
+        await fs.rm(source.destDir, { recursive: true, force: true }).catch(() => {});
+        await this.renamePath(backupDir, source.destDir).catch(restoreErr => {
+          logger.warn('failed to restore previous package', {
+            destDir: source.destDir,
+            backupDir,
+            error: String(restoreErr),
+          });
+        });
+      }
+      logger.error('package acquire failed', { destDir: source.destDir, error: String(err) });
+      return false;
+    } finally {
+      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  private async renamePath(source: string, target: string): Promise<void> {
+    try {
+      await fs.rename(source, target);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
+      await fs.cp(source, target, { recursive: true });
+      await fs.rm(source, { recursive: true, force: true });
+    }
   }
 
   private async acquireTar(

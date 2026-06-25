@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DATA_DIR="${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}"
-CACHE_DIR="$HOME/.loongsuite-pilot"
+CACHE_DIR="${LOONGSUITE_PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSIONS_DIR="$CACHE_DIR/versions"
 CURRENT_FILE="$CACHE_DIR/current"
@@ -880,6 +880,27 @@ cmd_info() {
     fi
 }
 
+cmd_worker() {
+    ensure_dirs
+    sync_bootstrap_scripts
+
+    local node_bin
+    node_bin=$(resolve_node) || {
+        echo "❌ node runtime not found" >&2
+        exit 1
+    }
+
+    local version_dir
+    version_dir=$(resolve_current_version) || {
+        echo "❌ No valid loongsuite-pilot version found" >&2
+        exit 1
+    }
+    local entry="$version_dir/dist/index.js"
+
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    exec "$node_bin" "$entry" worker "$@"
+}
+
 cmd_token_usage() {
     ensure_dirs
 
@@ -1597,6 +1618,7 @@ cmd_help() {
     echo "  token-usage     Show token usage TUI"
     echo "  monitor start   Start process resource monitor"
     echo "  monitor stop    Stop process resource monitor"
+    echo "  worker ...      Manage local remote-controlled workers"
     echo "  rollback        Roll back to the previous version"
     echo "  help            Show this help message"
     echo ""
@@ -1626,6 +1648,7 @@ case "${1:-status}" in
     token-usage) shift; cmd_token_usage "$@" ;;
     tokens)      shift; cmd_token_usage "$@" ;;
     monitor)             cmd_monitor "${2:-}" ;;
+    worker)              shift; cmd_worker "$@" ;;
     rollback)            cmd_rollback ;;
     restart-collector)   cmd_restart_collector ;;
     restart-updater)     cmd_restart_updater ;;

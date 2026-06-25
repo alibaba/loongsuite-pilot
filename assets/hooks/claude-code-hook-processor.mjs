@@ -54,8 +54,17 @@ import {
   convertOutputMessages,
   mapStopReason,
 } from './claude-code/message-converter.mjs';
+import {
+  agentBaseFieldPatch,
+  collectResourceAttributesFromEnv,
+} from './shared/resource-context.mjs';
 
 const AGENT_ID = 'claude-code';
+const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_ID });
+const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
+const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
+  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
+  : {};
 
 // ─── utilities ───
 
@@ -348,9 +357,9 @@ async function exportSession(state, stopReason) {
     await waitForTranscriptStable(transcriptPath, baseOffset);
   }
 
-  if (!parseResult || parseResult.turns.length === 0) return;
-
+  if (!parseResult) return;
   state._next_transcript_offset = parseResult.nextOffset;
+  if (parseResult.turns.length === 0) return;
 
   const userId = resolveUserId({}, runtimeConfig);
   const allRecords = [];
@@ -430,8 +439,10 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     'gen_ai.turn.id': turnId,
     'gen_ai.agent.type': AGENT_ID,
     'gen_ai.agent.id': sessionId,
+    ...RESOURCE_BASE_FIELD_PATCH,
     'user.id': userId,
     ...(cwd ? { 'agent.claude-code.cwd': cwd } : {}),
+    ...RESOURCE_ATTRIBUTE_FIELDS,
   };
 
   // 用户输入: 做法 A (EVENT_LOG_TO_TRACE_SPEC §5.1, 0.1.0-beta.3+)

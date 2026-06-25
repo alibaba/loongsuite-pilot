@@ -4,11 +4,17 @@ import { Orchestrator } from './core/orchestrator.js';
 import { loadConfig } from './core/config-loader.js';
 import { createLogger, initFileLogging } from './utils/logger.js';
 import { resolveHome } from './utils/fs-utils.js';
+import { handleWorkerCli } from './local-workers/worker-cli.js';
 
 const logger = createLogger('Main');
 
 async function main(): Promise<void> {
-  const [command, ...args] = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  if (await handleWorkerCli(argv)) {
+    return;
+  }
+
+  const [command, ...args] = argv;
   if (command === 'token-usage' || command === 'tokens') {
     const { runTokenUsageCommand } = await import('./cli/token-usage.js');
     process.exitCode = await runTokenUsageCommand(args);

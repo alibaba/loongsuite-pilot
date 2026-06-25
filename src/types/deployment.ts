@@ -120,6 +120,8 @@ export interface AgentDefinition {
   displayName: string;
   deployMode: DeployMode;
   detection: AgentDetectionConfig;
+  /** Runtime id used by local worker activation, e.g. "claude-code". */
+  localWorkerRuntime?: string;
   hook?: AgentHookConfig;
   pluginProbe?: PluginProbeConfig;
   pluginInject?: PluginInjectConfig;
