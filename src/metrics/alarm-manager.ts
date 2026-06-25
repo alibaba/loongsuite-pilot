@@ -7,6 +7,8 @@ export type AlarmLevel = '2' | '3';
 export type AlarmType =
   | 'FLUSH_SEND_ALARM'
   | 'FLUSH_QUOTA_ALARM'
+  | 'FLUSH_BACKPRESSURE_ALARM'
+  | 'FLUSH_RETRY_EXPIRED_ALARM'
   | 'HOOK_INSTALL_ALARM'
   | 'PROCESS_RESOURCE_ALARM'
   | 'DISPATCH_DROP_ALARM'

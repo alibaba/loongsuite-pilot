@@ -50,6 +50,9 @@ export class InputManager extends EventEmitter {
 
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;
+    for (const input of this.inputs.values()) {
+      input.setBackpressureProvider?.(() => flusher.getBackpressureState());
+    }
   }
 
   setAlarmManager(alarmManager: AlarmManager): void {
@@ -79,6 +82,9 @@ export class InputManager extends EventEmitter {
       return;
     }
     this.inputs.set(input.id, input);
+    if (this.flusher) {
+      input.setBackpressureProvider?.(() => this.flusher!.getBackpressureState());
+    }
     this.counters.set(input.id, {
       inEvents: 0,
       inBytes: 0,

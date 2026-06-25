@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ClientType, ActionType } from '../../../src/types/index.js';
-import type { SlsFlusherConfig, SlsEndpoint } from '../../../src/types/index.js';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { ClientType } from '../../../src/types/index.js';
+import type { SlsFlusherConfig } from '../../../src/types/index.js';
 import { buildTestEntry } from '../../helpers/fixture-builder.js';
 
 const mockPostLogStoreLogs = vi.fn().mockResolvedValue(undefined);
@@ -29,8 +32,22 @@ vi.mock('../../../src/utils/logger.js', () => ({
 }));
 
 import { SlsFlusher } from '../../../src/flushers/sls-flusher.js';
+import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 
-function makeConfig(overrides: Partial<SlsFlusherConfig> = {}): SlsFlusherConfig {
+type TestSlsConfig = SlsFlusherConfig & {
+  retryInitialDelayMs?: number;
+  retryMaxDelayMs?: number;
+  retryMaxAgeMs?: number;
+  shutdownDrainTimeoutMs?: number;
+  backpressureHighWatermarkEntries?: number;
+  backpressureLowWatermarkEntries?: number;
+  maxQueuedEntries?: number;
+  backpressureHighWatermarkBytes?: number;
+  backpressureLowWatermarkBytes?: number;
+  maxQueuedBytes?: number;
+};
+
+function makeConfig(overrides: Partial<TestSlsConfig> = {}): TestSlsConfig {
   return {
     enabled: true,
     accessKeyId: 'ak',
@@ -57,11 +74,21 @@ function makeConfig(overrides: Partial<SlsFlusherConfig> = {}): SlsFlusherConfig
   };
 }
 
+async function waitForRequestRetries(promise: Promise<void>): Promise<void> {
+  await vi.advanceTimersByTimeAsync(3_000);
+  await promise;
+}
+
 describe('SlsFlusher', () => {
   let flusher: SlsFlusher;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    mockPostLogStoreLogs.mockReset();
+    mockPostLogStoreLogs.mockResolvedValue(undefined);
+    mockAppendLine.mockReset();
+    mockAppendLine.mockResolvedValue(undefined);
+    mockEnsureDir.mockReset();
+    mockEnsureDir.mockResolvedValue(undefined);
     vi.useFakeTimers();
     flusher = new SlsFlusher(makeConfig(), '/tmp/data');
   });
@@ -178,6 +205,139 @@ describe('SlsFlusher', () => {
     });
   });
 
+  describe('retry queue retention and backpressure', () => {
+    it('keeps retryable failures queued after request-level retries are exhausted', async () => {
+      mockPostLogStoreLogs.mockRejectedValue(new Error('ETIMEDOUT socket timeout'));
+
+      await flusher.send(buildTestEntry());
+      const flushPromise = flusher.flush();
+      await waitForRequestRetries(flushPromise);
+
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(3);
+      expect(mockAppendLine).not.toHaveBeenCalled();
+      expect(flusher.getBackpressureState()).toMatchObject({
+        active: false,
+        queuedEntries: 1,
+      });
+      const counter = flusher.getEndpointCounters().get('activity')!;
+      expect(counter.consecutiveFailures).toBe(1);
+      expect(counter.lastErrorType).toBe('retryable_network');
+      expect(counter.nextRetryTime).not.toBe('');
+    });
+
+    it('removes a retained retryable batch after a later successful retry', async () => {
+      mockPostLogStoreLogs.mockRejectedValue(new Error('ETIMEDOUT socket timeout'));
+
+      await flusher.send(buildTestEntry());
+      await waitForRequestRetries(flusher.flush());
+
+      mockPostLogStoreLogs.mockReset();
+      mockPostLogStoreLogs.mockResolvedValue(undefined);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await flusher.flush();
+
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      expect(flusher.getBackpressureState().queuedEntries).toBe(0);
+      const counter = flusher.getEndpointCounters().get('activity')!;
+      expect(counter.outEntries).toBe(1);
+      expect(counter.consecutiveFailures).toBe(0);
+      expect(counter.nextRetryTime).toBe('');
+    });
+
+    it('expires retryable batches older than retryMaxAgeMs to failed logs', async () => {
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: 'test' });
+      flusher = new SlsFlusher(makeConfig({
+        retryMaxAgeMs: 1_000,
+        retryInitialDelayMs: 5_000,
+      }), '/tmp/data');
+      flusher.setAlarmManager(alarmManager);
+      mockPostLogStoreLogs.mockRejectedValue(new Error('ETIMEDOUT socket timeout'));
+
+      await flusher.send(buildTestEntry());
+      await waitForRequestRetries(flusher.flush());
+
+      await vi.advanceTimersByTimeAsync(1_001);
+      await flusher.flush();
+
+      expect(mockAppendLine).toHaveBeenCalledOnce();
+      expect(JSON.parse(mockAppendLine.mock.calls[0][1]).error).toContain('retry TTL expired');
+      expect(flusher.getBackpressureState().queuedEntries).toBe(0);
+      expect(flusher.getEndpointCounters().get('activity')?.retryExpiredEntriesTotal).toBe(1);
+      expect(alarmManager.serialize()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ alarm_type: 'FLUSH_RETRY_EXPIRED_ALARM' }),
+        ]),
+      );
+    });
+
+    it('activates and clears entry-count watermark backpressure with hysteresis', async () => {
+      flusher = new SlsFlusher(makeConfig({
+        batchMaxSize: 100,
+        backpressureHighWatermarkEntries: 2,
+        backpressureLowWatermarkEntries: 1,
+        backpressureHighWatermarkBytes: Number.MAX_SAFE_INTEGER,
+        backpressureLowWatermarkBytes: Number.MAX_SAFE_INTEGER,
+      }), '/tmp/data');
+
+      await flusher.send(buildTestEntry());
+      expect(flusher.getBackpressureState().active).toBe(false);
+
+      await flusher.send(buildTestEntry());
+      expect(flusher.getBackpressureState()).toMatchObject({
+        active: true,
+        queuedEntries: 2,
+        reason: 'entries_high_watermark',
+      });
+
+      await flusher.flush();
+      expect(flusher.getBackpressureState()).toMatchObject({
+        active: false,
+        queuedEntries: 0,
+      });
+    });
+
+    it('activates byte watermark backpressure for large queued messages', async () => {
+      flusher = new SlsFlusher(makeConfig({
+        batchMaxSize: 100,
+        backpressureHighWatermarkEntries: Number.MAX_SAFE_INTEGER,
+        backpressureLowWatermarkEntries: Number.MAX_SAFE_INTEGER,
+        backpressureHighWatermarkBytes: 1,
+        backpressureLowWatermarkBytes: 1,
+      }), '/tmp/data');
+
+      await flusher.send(buildTestEntry({ content: 'large-message' }));
+
+      expect(flusher.getBackpressureState()).toMatchObject({
+        active: true,
+        queuedEntries: 1,
+        reason: 'bytes_high_watermark',
+      });
+      expect(flusher.getEndpointCounters().get('activity')?.queuedBytes).toBeGreaterThan(1);
+    });
+
+    it('records sustained backpressure alarm after 20 minutes, not immediately', async () => {
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: 'test' });
+      flusher = new SlsFlusher(makeConfig({
+        batchMaxSize: 100,
+        backpressureHighWatermarkEntries: 1,
+        backpressureLowWatermarkEntries: 0,
+      }), '/tmp/data');
+      flusher.setAlarmManager(alarmManager);
+
+      await flusher.send(buildTestEntry());
+      expect(flusher.getBackpressureState().active).toBe(true);
+      expect(alarmManager.serialize()).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      expect(flusher.getBackpressureState().active).toBe(true);
+      expect(alarmManager.serialize()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ alarm_type: 'FLUSH_BACKPRESSURE_ALARM' }),
+        ]),
+      );
+    });
+  });
+
   describe('shutdown (T016)', () => {
     it('stops timer and executes final flush', async () => {
       await flusher.start();
@@ -186,6 +346,76 @@ describe('SlsFlusher', () => {
       await flusher.shutdown();
 
       expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+    });
+
+    it('drains queued batches when SLS succeeds before shutdown timeout', async () => {
+      const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sls-drain-'));
+      flusher = new SlsFlusher(makeConfig({ shutdownDrainTimeoutMs: 3_000 }), dataDir);
+
+      await flusher.send(buildTestEntry());
+      await flusher.shutdown();
+
+      expect(mockPostLogStoreLogs).toHaveBeenCalledOnce();
+      expect(flusher.getBackpressureState().queuedEntries).toBe(0);
+      await expect(fs.readdir(path.join(dataDir, 'sls-shutdown-pending'))).rejects.toThrow();
+    });
+
+    it('writes remaining queued batches to sls-shutdown-pending when shutdown drain times out', async () => {
+      const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sls-pending-'));
+      flusher = new SlsFlusher(makeConfig({ shutdownDrainTimeoutMs: 10 }), dataDir);
+      mockPostLogStoreLogs.mockImplementation(() => new Promise(() => {}));
+
+      await flusher.send(buildTestEntry());
+      const shutdownPromise = flusher.shutdown();
+      await vi.advanceTimersByTimeAsync(10);
+      await shutdownPromise;
+
+      expect(flusher.getBackpressureState().queuedEntries).toBe(0);
+      const pendingDir = path.join(dataDir, 'sls-shutdown-pending');
+      const files = await fs.readdir(pendingDir);
+      expect(files.filter(file => file.endsWith('.jsonl'))).toHaveLength(1);
+      const body = await fs.readFile(path.join(pendingDir, files[0]), 'utf8');
+      expect(JSON.parse(body.trim()).endpointName).toBe('activity');
+      expect(flusher.getEndpointCounters().get('activity')?.shutdownPendingWrittenEntriesTotal).toBe(1);
+    });
+
+    it('restores complete shutdown pending files on startup and deletes them', async () => {
+      const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sls-restore-'));
+      const pendingDir = path.join(dataDir, 'sls-shutdown-pending');
+      await fs.mkdir(pendingDir, { recursive: true });
+      const pendingPath = path.join(pendingDir, 'restore.jsonl');
+      await fs.writeFile(pendingPath, JSON.stringify({
+        version: 1,
+        createdAt: Date.now(),
+        endpointName: 'activity',
+        project: 'proj-a',
+        logstore: 'store-a',
+        kind: 'agentActivity',
+        mode: 'ak',
+        logs: [{ content: { message: 'pending' }, agentType: 'qoder' }],
+      }) + '\n');
+
+      flusher = new SlsFlusher(makeConfig({ batchMaxSize: 100 }), dataDir);
+      await flusher.start();
+
+      expect(flusher.getBackpressureState().queuedEntries).toBe(1);
+      expect(await fs.readdir(pendingDir)).toEqual([]);
+      expect(flusher.getEndpointCounters().get('activity')?.shutdownPendingRestoredEntriesTotal).toBe(1);
+      await flusher.shutdown();
+    });
+
+    it('ignores incomplete shutdown pending temp files on startup', async () => {
+      const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sls-tmp-'));
+      const pendingDir = path.join(dataDir, 'sls-shutdown-pending');
+      await fs.mkdir(pendingDir, { recursive: true });
+      await fs.writeFile(path.join(pendingDir, 'incomplete.jsonl.tmp'), 'partial');
+
+      flusher = new SlsFlusher(makeConfig({ batchMaxSize: 100 }), dataDir);
+      await flusher.start();
+
+      expect(flusher.getBackpressureState().queuedEntries).toBe(0);
+      expect(await fs.readdir(pendingDir)).toEqual(['incomplete.jsonl.tmp']);
+      await flusher.shutdown();
     });
   });
 

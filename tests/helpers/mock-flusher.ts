@@ -1,5 +1,5 @@
 import type { AgentActivityEntry } from '../../src/types/index.js';
-import { BaseFlusher } from '../../src/flushers/base-flusher.js';
+import { BaseFlusher, type FlusherBackpressureState } from '../../src/flushers/base-flusher.js';
 
 export class MockFlusher extends BaseFlusher {
   readonly name: string;
@@ -10,6 +10,7 @@ export class MockFlusher extends BaseFlusher {
   rawCalls: Array<{ topic: string; payload: Record<string, unknown> }> = [];
   shouldFail = false;
   failureError = new Error('mock flusher error');
+  backpressureState: FlusherBackpressureState = { active: false };
 
   constructor(name = 'mock') {
     super();
@@ -36,6 +37,10 @@ export class MockFlusher extends BaseFlusher {
     this.shutdownCount++;
   }
 
+  override getBackpressureState(): FlusherBackpressureState {
+    return this.backpressureState;
+  }
+
   override async sendRaw(topic: string, payload: Record<string, unknown>): Promise<void> {
     if (this.shouldFail) throw this.failureError;
     this.rawCalls.push({ topic, payload });
@@ -48,5 +53,6 @@ export class MockFlusher extends BaseFlusher {
     this.shutdownCount = 0;
     this.rawCalls = [];
     this.shouldFail = false;
+    this.backpressureState = { active: false };
   }
 }

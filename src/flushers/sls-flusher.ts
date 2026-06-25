@@ -1,6 +1,7 @@
 import ALY from '@alicloud/log';
 import * as os from 'node:os';
-import { BaseFlusher } from './base-flusher.js';
+import * as fs from 'node:fs/promises';
+import { BaseFlusher, type FlusherBackpressureState } from './base-flusher.js';
 import {
   serialiseLogEntry,
   redactCodeGenerationFields,
@@ -29,11 +30,84 @@ const HOSTNAME = os.hostname();
 
 const BATCH_MAX_SIZE = 20;
 const FLUSH_INTERVAL_MS = 2000;
+const RETRY_INITIAL_DELAY_MS = 5_000;
+const RETRY_MAX_DELAY_MS = 60_000;
+const RETRY_MAX_AGE_MS = 60 * 60 * 1000;
+const SHUTDOWN_DRAIN_TIMEOUT_MS = 3_000;
+const BACKPRESSURE_HIGH_WATERMARK_ENTRIES = 5_000;
+const BACKPRESSURE_LOW_WATERMARK_ENTRIES = 1_000;
+const MAX_QUEUED_ENTRIES = 20_000;
+const BACKPRESSURE_HIGH_WATERMARK_BYTES = 64 * 1024 * 1024;
+const BACKPRESSURE_LOW_WATERMARK_BYTES = 16 * 1024 * 1024;
+const MAX_QUEUED_BYTES = 256 * 1024 * 1024;
+const BACKPRESSURE_ALARM_THRESHOLD_MS = 20 * 60 * 1000;
 
 interface QueuedLog {
   content: Record<string, string>;
   endpoint: SlsEndpoint;
   agentType?: string;
+  sizeBytes: number;
+  enqueuedAt: number;
+  firstFailureAt?: number;
+}
+
+interface EndpointRetryState {
+  consecutiveFailures: number;
+  nextRetryAt: number;
+  lastAttemptAt: number;
+  lastSuccessAt: number;
+  lastErrorAt: number;
+  lastErrorType: string;
+  lastStatusCode?: number;
+}
+
+interface ErrorClassification {
+  retryable: boolean;
+  type: string;
+  statusCode?: number;
+}
+
+interface QueueStats {
+  entries: number;
+  bytes: number;
+  oldestQueuedAt: number;
+}
+
+interface FlushOptions {
+  ignoreCooldown?: boolean;
+  deadlineMs?: number;
+}
+
+interface SlsQueuePolicy {
+  retryInitialDelayMs: number;
+  retryMaxDelayMs: number;
+  retryMaxAgeMs: number;
+  shutdownDrainTimeoutMs: number;
+  backpressureHighWatermarkEntries: number;
+  backpressureLowWatermarkEntries: number;
+  maxQueuedEntries: number;
+  backpressureHighWatermarkBytes: number;
+  backpressureLowWatermarkBytes: number;
+  maxQueuedBytes: number;
+}
+
+type SlsQueuePolicyOverrides = Partial<SlsQueuePolicy>;
+
+interface ShutdownPendingRecord {
+  version: 1;
+  createdAt: number;
+  endpointName: string;
+  project: string;
+  logstore: string;
+  kind: SlsEndpoint['kind'];
+  mode: SlsEndpoint['mode'];
+  logs: Array<{
+    content: Record<string, string>;
+    agentType?: string;
+    sizeBytes?: number;
+    enqueuedAt?: number;
+    firstFailureAt?: number;
+  }>;
 }
 
 const logger = createLogger('SlsFlusher');
@@ -50,17 +124,43 @@ export interface EndpointCounter {
   endpoint: string;
   project: string;
   logstore: string;
+  queuedEntries?: number;
+  queuedBytes?: number;
+  oldestQueuedAgeMs?: number;
+  backpressureActive?: boolean;
+  backpressureReason?: string;
+  backpressureSince?: string;
+  consecutiveFailures?: number;
+  lastAttemptTime?: string;
+  lastSuccessTime?: string;
+  lastErrorTime?: string;
+  lastErrorType?: string;
+  lastStatusCode?: number;
+  nextRetryTime?: string;
+  retryExpiredEntriesTotal?: number;
+  queueOverflowEntriesTotal?: number;
+  nonRetryableFailedEntriesTotal?: number;
+  shutdownPendingWrittenEntriesTotal?: number;
+  shutdownPendingRestoredEntriesTotal?: number;
 }
 
 export class SlsFlusher extends BaseFlusher {
   readonly name = 'sls';
   private readonly config: SlsFlusherConfig;
+  private readonly policy: SlsQueuePolicy;
   private readonly queue: Map<string, QueuedLog[]> = new Map();
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private readonly failedLogDir: string;
+  private readonly shutdownPendingDir: string;
   private readonly akClients: Map<string, any> = new Map();
   private readonly endpointCounters: Map<string, EndpointCounter> = new Map();
+  private readonly retryStates: Map<string, EndpointRetryState> = new Map();
   private alarmManager: AlarmManager | null = null;
+  private flushPromise: Promise<void> | null = null;
+  private backpressureActive = false;
+  private backpressureSince = 0;
+  private backpressureReason = '';
+  private backpressureAlarmRecorded = false;
 
   private readonly serviceName: string;
   private readonly userAgent: string;
@@ -68,7 +168,25 @@ export class SlsFlusher extends BaseFlusher {
   constructor(config: SlsFlusherConfig, dataDir: string) {
     super();
     this.config = config;
+    const policyOverrides = config as SlsFlusherConfig & SlsQueuePolicyOverrides;
+    this.policy = {
+      retryInitialDelayMs: policyOverrides.retryInitialDelayMs ?? RETRY_INITIAL_DELAY_MS,
+      retryMaxDelayMs: policyOverrides.retryMaxDelayMs ?? RETRY_MAX_DELAY_MS,
+      retryMaxAgeMs: policyOverrides.retryMaxAgeMs ?? RETRY_MAX_AGE_MS,
+      shutdownDrainTimeoutMs: policyOverrides.shutdownDrainTimeoutMs ?? SHUTDOWN_DRAIN_TIMEOUT_MS,
+      backpressureHighWatermarkEntries:
+        policyOverrides.backpressureHighWatermarkEntries ?? BACKPRESSURE_HIGH_WATERMARK_ENTRIES,
+      backpressureLowWatermarkEntries:
+        policyOverrides.backpressureLowWatermarkEntries ?? BACKPRESSURE_LOW_WATERMARK_ENTRIES,
+      maxQueuedEntries: policyOverrides.maxQueuedEntries ?? MAX_QUEUED_ENTRIES,
+      backpressureHighWatermarkBytes:
+        policyOverrides.backpressureHighWatermarkBytes ?? BACKPRESSURE_HIGH_WATERMARK_BYTES,
+      backpressureLowWatermarkBytes:
+        policyOverrides.backpressureLowWatermarkBytes ?? BACKPRESSURE_LOW_WATERMARK_BYTES,
+      maxQueuedBytes: policyOverrides.maxQueuedBytes ?? MAX_QUEUED_BYTES,
+    };
     this.failedLogDir = path.join(dataDir, 'sls-failed-logs');
+    this.shutdownPendingDir = path.join(dataDir, 'sls-shutdown-pending');
     this.serviceName = config.serviceNamePrefix || '';
     this.userAgent = buildUserAgent(dataDir);
     for (const ep of config.endpoints) {
@@ -76,6 +194,21 @@ export class SlsFlusher extends BaseFlusher {
         inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0,
         totalDelayMs: 0, lastFlushTime: '', startTime: '',
         mode: ep.mode, endpoint: ep.endpoint, project: ep.project, logstore: ep.logstore,
+        queuedEntries: 0, queuedBytes: 0, oldestQueuedAgeMs: 0,
+        backpressureActive: false, backpressureReason: '', backpressureSince: '',
+        consecutiveFailures: 0, lastAttemptTime: '', lastSuccessTime: '',
+        lastErrorTime: '', lastErrorType: '', nextRetryTime: '',
+        retryExpiredEntriesTotal: 0, queueOverflowEntriesTotal: 0,
+        nonRetryableFailedEntriesTotal: 0, shutdownPendingWrittenEntriesTotal: 0,
+        shutdownPendingRestoredEntriesTotal: 0,
+      });
+      this.retryStates.set(ep.name, {
+        consecutiveFailures: 0,
+        nextRetryAt: 0,
+        lastAttemptAt: 0,
+        lastSuccessAt: 0,
+        lastErrorAt: 0,
+        lastErrorType: '',
       });
     }
   }
@@ -104,6 +237,8 @@ export class SlsFlusher extends BaseFlusher {
 
   async start(): Promise<void> {
     await ensureDir(this.failedLogDir);
+    await fs.mkdir(this.shutdownPendingDir, { recursive: true });
+    await this.restoreShutdownPending();
     this.flushTimer = setInterval(
       () => void this.flush(),
       this.config.flushIntervalMs || FLUSH_INTERVAL_MS,
@@ -118,7 +253,7 @@ export class SlsFlusher extends BaseFlusher {
       const content = endpoint.redact
         ? redactCodeGenerationFields(serialized)
         : serialized;
-      this.enqueue(endpoint, content, agentType);
+      await this.enqueue(endpoint, content, agentType);
     }
   }
 
@@ -128,44 +263,135 @@ export class SlsFlusher extends BaseFlusher {
     }
   }
 
-  async flush(): Promise<void> {
-    const batches = Array.from(this.queue.entries());
-    this.queue.clear();
+  async flush(options: FlushOptions = {}): Promise<void> {
+    if (this.flushPromise) return this.flushPromise;
+    this.flushPromise = this.flushInternal(options).finally(() => {
+      this.flushPromise = null;
+    });
+    return this.flushPromise;
+  }
 
-    if (batches.length > 0) {
-      logger.debug('flush dispatching', {
-        buckets: batches.length,
-        totalLogs: batches.reduce((sum, [, logs]) => sum + logs.length, 0),
-      });
-    }
+  override getBackpressureState(): FlusherBackpressureState {
+    this.syncDeliveryHealth();
+    const stats = this.calculateQueueStats();
+    return {
+      active: this.backpressureActive,
+      queuedEntries: stats.entries,
+      queuedBytes: stats.bytes,
+      retryAfterMs: this.getRetryAfterMs(Date.now()),
+      reason: this.backpressureReason || undefined,
+    };
+  }
 
-    const tasks = batches
-      .filter(([, logs]) => logs.length > 0)
-      .map(([, logs]) => {
-        const endpoint = logs[0].endpoint;
+  private async flushInternal(options: FlushOptions): Promise<void> {
+    const deadlineAt = options.deadlineMs ? Date.now() + options.deadlineMs : 0;
+    let madeProgress = false;
+
+    do {
+      madeProgress = false;
+      const buckets = Array.from(this.queue.entries());
+      if (buckets.length > 0) {
+        logger.debug('flush dispatching', {
+          buckets: buckets.length,
+          totalLogs: buckets.reduce((sum, [, logs]) => sum + logs.length, 0),
+        });
+      }
+
+      for (const [key, bucket] of buckets) {
+        if (deadlineAt > 0 && Date.now() >= deadlineAt) {
+          this.syncDeliveryHealth();
+          return;
+        }
+        if (bucket.length === 0) {
+          this.queue.delete(key);
+          continue;
+        }
+
+        const endpoint = bucket[0].endpoint;
+        const retryState = this.getRetryState(endpoint.name);
+        const now = Date.now();
+        const expired = this.takeExpiredRetryableLogs(bucket, now);
+        if (expired.length > 0) {
+          await this.expireRetryableLogs(endpoint, expired, now);
+          madeProgress = true;
+          if (bucket.length === 0) this.queue.delete(key);
+          continue;
+        }
+        if (!options.ignoreCooldown && retryState.nextRetryAt > now) {
+          continue;
+        }
+
+        const logs = this.buildSendSlice(endpoint, bucket);
+        if (logs.length === 0) continue;
+
         const counter = this.endpointCounters.get(endpoint.name);
         const startMs = Date.now();
-        const send = endpoint.mode === 'ak'
-          ? this.flushViaAk(endpoint, logs)
-          : this.flushViaWebtracking(endpoint, logs);
-        return send.then(() => {
+        this.markAttempt(endpoint.name, startMs);
+        try {
+          const send = endpoint.mode === 'ak'
+            ? this.flushViaAk(endpoint, logs)
+            : this.flushViaWebtracking(endpoint, logs);
+          await this.withDeadline(send, deadlineAt);
+
+          bucket.splice(0, logs.length);
+          if (bucket.length === 0) this.queue.delete(key);
           if (counter) {
             counter.outEntries += logs.length;
             counter.totalDelayMs += Date.now() - startMs;
             counter.lastFlushTime = formatTime(new Date());
           }
-        }).catch(err => {
+          this.markSuccess(endpoint.name);
+          madeProgress = true;
+        } catch (err) {
+          const classification = this.classifyError(err);
           if (counter) {
-            counter.outFailed += logs.length;
             counter.totalDelayMs += Date.now() - startMs;
           }
-          logger.error('SLS endpoint flush failed', {
+          this.markError(endpoint.name, classification);
+          if (classification.statusCode === 429) {
+            this.alarmManager?.record(
+              'FLUSH_QUOTA_ALARM', '2',
+              `SLS endpoint throttled (429)`,
+              { endpoint_name: endpoint.name },
+            );
+          }
+
+          if (classification.retryable) {
+            for (const log of logs) {
+              log.firstFailureAt ??= Date.now();
+            }
+            this.scheduleRetry(endpoint, classification, err);
+            continue;
+          }
+
+          await this.persistFailedLogs(endpoint, this.buildFailurePayload(endpoint, logs), err);
+          bucket.splice(0, logs.length);
+          if (bucket.length === 0) this.queue.delete(key);
+          if (counter) {
+            counter.outFailed += logs.length;
+            counter.nonRetryableFailedEntriesTotal =
+              (counter.nonRetryableFailedEntriesTotal ?? 0) + logs.length;
+          }
+          this.alarmManager?.record(
+            'FLUSH_SEND_ALARM', '2',
+            `SLS non-retryable send failed: ${String(err)}`,
+            { endpoint_name: endpoint.name },
+          );
+          logger.error('SLS endpoint non-retryable flush failed', {
             endpoint: endpoint.name,
+            errorType: classification.type,
+            statusCode: classification.statusCode,
+            count: logs.length,
             error: String(err),
           });
-        });
-      });
-    await Promise.all(tasks);
+          madeProgress = true;
+        } finally {
+          this.syncDeliveryHealth();
+        }
+      }
+    } while (madeProgress);
+
+    this.syncDeliveryHealth();
   }
 
   private resolveServiceName(agentType?: string): string {
@@ -242,19 +468,7 @@ export class SlsFlusher extends BaseFlusher {
       endpoint: endpoint.name,
       error: String(lastErr),
     });
-    this.alarmManager?.record(
-      'FLUSH_SEND_ALARM', '2',
-      `SLS ak send failed: ${String(lastErr)}`,
-      { endpoint_name: endpoint.name },
-    );
-    if (lastErr instanceof HttpError && lastErr.status === 429) {
-      this.alarmManager?.record(
-        'FLUSH_QUOTA_ALARM', '2',
-        `SLS endpoint throttled (429)`,
-        { endpoint_name: endpoint.name },
-      );
-    }
-    await this.persistFailedLogs(endpoint, logGroup, lastErr);
+    throw lastErr;
   }
 
   private async flushViaWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
@@ -356,19 +570,332 @@ export class SlsFlusher extends BaseFlusher {
       endpoint: endpoint.name,
       error: String(lastErr),
     });
+    throw lastErr;
+  }
+
+  private buildSendSlice(endpoint: SlsEndpoint, bucket: QueuedLog[]): QueuedLog[] {
+    const maxSize = this.config.batchMaxSize || BATCH_MAX_SIZE;
+    const candidate = bucket.slice(0, maxSize);
+    if (endpoint.mode !== 'webtracking') return candidate;
+    return this.splitForWebtracking(candidate)[0] ?? [];
+  }
+
+  private buildFailurePayload(endpoint: SlsEndpoint, logs: QueuedLog[]): unknown {
+    if (endpoint.mode === 'ak') {
+      const now = Math.floor(Date.now() / 1000);
+      const agentType = logs[0]?.agentType;
+      return {
+        logs: logs.map(l => ({ timestamp: now, content: l.content })),
+        source: LOCAL_IP,
+        topic: endpoint.kind,
+        tags: this.buildAkTags(agentType),
+      };
+    }
+
+    const agentType = logs[0]?.agentType;
+    return {
+      __topic__: endpoint.kind ?? '',
+      __source__: LOCAL_IP,
+      __logs__: logs.map(l => l.content),
+      __tags__: this.buildWebtrackingTags(agentType),
+    };
+  }
+
+  private classifyError(err: unknown): ErrorClassification {
+    const statusCode = this.extractStatusCode(err);
+    if (statusCode !== undefined) {
+      if (statusCode === 429) return { retryable: true, type: 'quota', statusCode };
+      if (RETRYABLE_STATUS_CODES.has(statusCode)) {
+        return { retryable: true, type: 'retryable_status', statusCode };
+      }
+      return { retryable: false, type: 'non_retryable_status', statusCode };
+    }
+    if (isRetryable(err)) return { retryable: true, type: 'retryable_network' };
+    return { retryable: false, type: 'non_retryable_error' };
+  }
+
+  private extractStatusCode(err: unknown): number | undefined {
+    if (err instanceof HttpError) return err.status;
+    if (!err || typeof err !== 'object') return undefined;
+    const record = err as Record<string, unknown>;
+    const raw = record.statusCode ?? record.status ?? record.httpStatusCode;
+    if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+    if (typeof raw === 'string') {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return undefined;
+  }
+
+  private getRetryState(endpointName: string): EndpointRetryState {
+    let state = this.retryStates.get(endpointName);
+    if (!state) {
+      state = {
+        consecutiveFailures: 0,
+        nextRetryAt: 0,
+        lastAttemptAt: 0,
+        lastSuccessAt: 0,
+        lastErrorAt: 0,
+        lastErrorType: '',
+      };
+      this.retryStates.set(endpointName, state);
+    }
+    return state;
+  }
+
+  private markAttempt(endpointName: string, now: number): void {
+    const state = this.getRetryState(endpointName);
+    state.lastAttemptAt = now;
+  }
+
+  private markError(endpointName: string, classification: ErrorClassification): void {
+    const state = this.getRetryState(endpointName);
+    state.lastErrorAt = Date.now();
+    state.lastErrorType = classification.type;
+    state.lastStatusCode = classification.statusCode;
+  }
+
+  private markSuccess(endpointName: string): void {
+    const state = this.getRetryState(endpointName);
+    if (state.consecutiveFailures > 0) {
+      logger.info('SLS endpoint recovered after retry failures', {
+        endpoint: endpointName,
+        consecutiveFailures: state.consecutiveFailures,
+        outageMs: state.lastErrorAt > 0 ? Date.now() - state.lastErrorAt : 0,
+      });
+    }
+    state.consecutiveFailures = 0;
+    state.nextRetryAt = 0;
+    state.lastSuccessAt = Date.now();
+  }
+
+  private scheduleRetry(
+    endpoint: SlsEndpoint,
+    classification: ErrorClassification,
+    err: unknown,
+  ): void {
+    const state = this.getRetryState(endpoint.name);
+    state.consecutiveFailures += 1;
+    const delayMs = this.computeRetryDelayMs(state.consecutiveFailures);
+    state.nextRetryAt = Date.now() + delayMs;
+
     this.alarmManager?.record(
       'FLUSH_SEND_ALARM', '2',
-      `SLS webtracking send failed: ${String(lastErr)}`,
+      `SLS retryable send failed: ${String(err)}`,
       { endpoint_name: endpoint.name },
     );
-    if (lastErr instanceof HttpError && lastErr.status === 429) {
-      this.alarmManager?.record(
-        'FLUSH_QUOTA_ALARM', '2',
-        `SLS endpoint throttled (429)`,
-        { endpoint_name: endpoint.name },
-      );
+    logger.warn('SLS retry cooldown scheduled', {
+      endpoint: endpoint.name,
+      errorType: classification.type,
+      statusCode: classification.statusCode,
+      consecutiveFailures: state.consecutiveFailures,
+      retryDelayMs: delayMs,
+      nextRetryTime: formatTime(new Date(state.nextRetryAt)),
+      error: String(err),
+    });
+  }
+
+  private computeRetryDelayMs(consecutiveFailures: number): number {
+    const initial = this.policy.retryInitialDelayMs;
+    const max = this.policy.retryMaxDelayMs;
+    return Math.min(max, initial * 2 ** Math.max(0, consecutiveFailures - 1));
+  }
+
+  private takeExpiredRetryableLogs(bucket: QueuedLog[], now: number): QueuedLog[] {
+    const retryMaxAgeMs = this.policy.retryMaxAgeMs;
+    const maxSize = this.config.batchMaxSize || BATCH_MAX_SIZE;
+    const expired: QueuedLog[] = [];
+    while (
+      expired.length < maxSize &&
+      bucket.length > 0 &&
+      bucket[0].firstFailureAt !== undefined &&
+      now - bucket[0].firstFailureAt >= retryMaxAgeMs
+    ) {
+      expired.push(bucket.shift()!);
     }
-    await this.persistFailedLogs(endpoint, body, lastErr);
+    return expired;
+  }
+
+  private async expireRetryableLogs(
+    endpoint: SlsEndpoint,
+    logs: QueuedLog[],
+    now: number,
+  ): Promise<void> {
+    const oldestFailureAt = logs.reduce(
+      (oldest, log) => Math.min(oldest, log.firstFailureAt ?? now),
+      now,
+    );
+    await this.persistFailedLogs(
+      endpoint,
+      this.buildFailurePayload(endpoint, logs),
+      new Error(`SLS retry TTL expired after ${now - oldestFailureAt}ms`),
+    );
+    const counter = this.endpointCounters.get(endpoint.name);
+    if (counter) {
+      counter.outFailed += logs.length;
+      counter.retryExpiredEntriesTotal =
+        (counter.retryExpiredEntriesTotal ?? 0) + logs.length;
+    }
+    this.markError(endpoint.name, { retryable: false, type: 'retry_expired' });
+    this.alarmManager?.record(
+      'FLUSH_RETRY_EXPIRED_ALARM', '2',
+      `SLS retry TTL expired for ${logs.length} entries`,
+      { endpoint_name: endpoint.name },
+    );
+    logger.warn('SLS retry TTL expired', {
+      endpoint: endpoint.name,
+      count: logs.length,
+      ageMs: now - oldestFailureAt,
+    });
+  }
+
+  private calculateQueueStats(endpointName?: string): QueueStats {
+    let entries = 0;
+    let bytes = 0;
+    let oldestQueuedAt = 0;
+
+    for (const logs of this.queue.values()) {
+      for (const log of logs) {
+        if (endpointName && log.endpoint.name !== endpointName) continue;
+        entries++;
+        bytes += log.sizeBytes;
+        if (!oldestQueuedAt || log.enqueuedAt < oldestQueuedAt) {
+          oldestQueuedAt = log.enqueuedAt;
+        }
+      }
+    }
+
+    return { entries, bytes, oldestQueuedAt };
+  }
+
+  private syncDeliveryHealth(): void {
+    const now = Date.now();
+    const total = this.calculateQueueStats();
+    this.updateBackpressure(total, now);
+
+    for (const [endpointName, counter] of this.endpointCounters) {
+      const stats = this.calculateQueueStats(endpointName);
+      const retryState = this.getRetryState(endpointName);
+      const endpointBackpressure = this.backpressureActive && stats.entries > 0;
+
+      counter.queuedEntries = stats.entries;
+      counter.queuedBytes = stats.bytes;
+      counter.oldestQueuedAgeMs = stats.oldestQueuedAt
+        ? Math.max(0, now - stats.oldestQueuedAt)
+        : 0;
+      counter.backpressureActive = endpointBackpressure;
+      counter.backpressureReason = endpointBackpressure ? this.backpressureReason : '';
+      counter.backpressureSince = endpointBackpressure && this.backpressureSince
+        ? formatTime(new Date(this.backpressureSince))
+        : '';
+      counter.consecutiveFailures = retryState.consecutiveFailures;
+      counter.lastAttemptTime = retryState.lastAttemptAt
+        ? formatTime(new Date(retryState.lastAttemptAt))
+        : '';
+      counter.lastSuccessTime = retryState.lastSuccessAt
+        ? formatTime(new Date(retryState.lastSuccessAt))
+        : '';
+      counter.lastErrorTime = retryState.lastErrorAt
+        ? formatTime(new Date(retryState.lastErrorAt))
+        : '';
+      counter.lastErrorType = retryState.lastErrorType;
+      counter.lastStatusCode = retryState.lastStatusCode;
+      counter.nextRetryTime = retryState.nextRetryAt > now
+        ? formatTime(new Date(retryState.nextRetryAt))
+        : '';
+    }
+  }
+
+  private updateBackpressure(total: QueueStats, now: number): void {
+    const reason = this.resolveBackpressureReason(total);
+    const shouldActivate = reason !== '';
+    const shouldClear =
+      total.entries < this.policy.backpressureLowWatermarkEntries &&
+      total.bytes < this.policy.backpressureLowWatermarkBytes;
+
+    if (!this.backpressureActive && shouldActivate) {
+      this.backpressureActive = true;
+      this.backpressureSince = now;
+      this.backpressureReason = reason;
+      this.backpressureAlarmRecorded = false;
+      logger.warn('SLS backpressure entered', {
+        queuedEntries: total.entries,
+        queuedBytes: total.bytes,
+        reason,
+      });
+    } else if (this.backpressureActive && shouldClear) {
+      logger.info('SLS backpressure exited', {
+        queuedEntries: total.entries,
+        queuedBytes: total.bytes,
+        reason: this.backpressureReason,
+        durationMs: now - this.backpressureSince,
+      });
+      this.backpressureActive = false;
+      this.backpressureSince = 0;
+      this.backpressureReason = '';
+      this.backpressureAlarmRecorded = false;
+    } else if (this.backpressureActive && shouldActivate) {
+      this.backpressureReason = reason;
+    }
+
+    if (
+      this.backpressureActive &&
+      !this.backpressureAlarmRecorded &&
+      now - this.backpressureSince >= BACKPRESSURE_ALARM_THRESHOLD_MS
+    ) {
+      this.alarmManager?.record(
+        'FLUSH_BACKPRESSURE_ALARM', '2',
+        `SLS backpressure sustained for at least 20 minutes`,
+        { endpoint_name: 'sls' },
+      );
+      this.backpressureAlarmRecorded = true;
+    }
+  }
+
+  private resolveBackpressureReason(total: QueueStats): string {
+    const maxEntries = this.policy.maxQueuedEntries;
+    const maxBytes = this.policy.maxQueuedBytes;
+    const highEntries = this.policy.backpressureHighWatermarkEntries;
+    const highBytes = this.policy.backpressureHighWatermarkBytes;
+
+    if (total.entries >= maxEntries || total.bytes >= maxBytes) return 'max_queue';
+    if (total.entries >= highEntries && total.bytes >= highBytes) {
+      return 'entries_and_bytes_high_watermark';
+    }
+    if (total.entries >= highEntries) return 'entries_high_watermark';
+    if (total.bytes >= highBytes) return 'bytes_high_watermark';
+    return '';
+  }
+
+  private getRetryAfterMs(now: number): number | undefined {
+    let retryAfterMs = 0;
+    for (const state of this.retryStates.values()) {
+      if (state.nextRetryAt > now) {
+        retryAfterMs = Math.max(retryAfterMs, state.nextRetryAt - now);
+      }
+    }
+    return retryAfterMs > 0 ? retryAfterMs : undefined;
+  }
+
+  private async withDeadline<T>(promise: Promise<T>, deadlineAt: number): Promise<T> {
+    if (!deadlineAt) return promise;
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) throw new Error('ETIMEDOUT SLS shutdown drain timeout');
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('ETIMEDOUT SLS shutdown drain timeout')),
+            remainingMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private async persistFailedLogs(endpoint: SlsEndpoint, logGroup: unknown, err: unknown): Promise<void> {
@@ -391,7 +918,28 @@ export class SlsFlusher extends BaseFlusher {
       clearInterval(this.flushTimer);
       this.flushTimer = null;
     }
-    await this.flush();
+    const before = this.calculateQueueStats();
+    logger.info('SLS shutdown drain started', {
+      queuedEntries: before.entries,
+      queuedBytes: before.bytes,
+      timeoutMs: this.policy.shutdownDrainTimeoutMs,
+    });
+    await this.flush({
+      ignoreCooldown: true,
+      deadlineMs: this.policy.shutdownDrainTimeoutMs,
+    });
+    const after = this.calculateQueueStats();
+    if (after.entries > 0) {
+      await this.persistShutdownPending();
+      this.queue.clear();
+    }
+    this.syncDeliveryHealth();
+    logger.info('SLS shutdown drain finished', {
+      queuedBeforeEntries: before.entries,
+      queuedBeforeBytes: before.bytes,
+      pendingEntries: after.entries,
+      pendingBytes: after.bytes,
+    });
   }
 
   override async sendRaw(topic: string, payload: Record<string, unknown>): Promise<void> {
@@ -433,7 +981,16 @@ export class SlsFlusher extends BaseFlusher {
     }
   }
 
-  private enqueue(endpoint: SlsEndpoint, content: Record<string, string>, agentType?: string): void {
+  private async enqueue(
+    endpoint: SlsEndpoint,
+    content: Record<string, string>,
+    agentType?: string,
+    restored?: {
+      firstFailureAt?: number;
+      enqueuedAt?: number;
+      sizeBytes?: number;
+    },
+  ): Promise<void> {
     const base = `${endpoint.name}/${endpoint.project}/${endpoint.logstore}`;
     const key = (this.serviceName && agentType)
       ? `${base}/${agentType}`
@@ -443,19 +1000,168 @@ export class SlsFlusher extends BaseFlusher {
       bucket = [];
       this.queue.set(key, bucket);
     }
-    bucket.push({ content, endpoint, agentType });
+    const sizeBytes = restored?.sizeBytes ?? Buffer.byteLength(JSON.stringify(content));
+    bucket.push({
+      content,
+      endpoint,
+      agentType,
+      sizeBytes,
+      enqueuedAt: restored?.enqueuedAt ?? Date.now(),
+      firstFailureAt: restored?.firstFailureAt,
+    });
 
     const counter = this.endpointCounters.get(endpoint.name);
     if (counter) {
       counter.inEntries++;
-      counter.inBytes += Buffer.byteLength(JSON.stringify(content));
+      counter.inBytes += sizeBytes;
       if (!counter.startTime) counter.startTime = formatTime(new Date());
     }
+
+    await this.enforceQueueLimits(endpoint, bucket);
+    this.syncDeliveryHealth();
 
     const maxSize = this.config.batchMaxSize || BATCH_MAX_SIZE;
     if (bucket.length >= maxSize) {
       void this.flush();
     }
+  }
+
+  private async enforceQueueLimits(endpoint: SlsEndpoint, bucket: QueuedLog[]): Promise<void> {
+    let stats = this.calculateQueueStats();
+    const maxEntries = this.policy.maxQueuedEntries;
+    const maxBytes = this.policy.maxQueuedBytes;
+
+    while ((stats.entries > maxEntries || stats.bytes > maxBytes) && bucket.length > 0) {
+      const overflow = bucket.pop();
+      if (!overflow) break;
+      await this.persistFailedLogs(
+        endpoint,
+        this.buildFailurePayload(endpoint, [overflow]),
+        new Error(`SLS queue overflow entries=${stats.entries} bytes=${stats.bytes}`),
+      );
+      const counter = this.endpointCounters.get(endpoint.name);
+      if (counter) {
+        counter.outFailed += 1;
+        counter.queueOverflowEntriesTotal = (counter.queueOverflowEntriesTotal ?? 0) + 1;
+      }
+      this.markError(endpoint.name, { retryable: false, type: 'queue_overflow' });
+      this.alarmManager?.record(
+        'FLUSH_SEND_ALARM', '2',
+        `SLS queue overflow persisted 1 entry`,
+        { endpoint_name: endpoint.name },
+      );
+      logger.warn('SLS queue max exceeded', {
+        endpoint: endpoint.name,
+        queuedEntries: stats.entries,
+        queuedBytes: stats.bytes,
+        maxEntries,
+        maxBytes,
+      });
+      stats = this.calculateQueueStats();
+    }
+  }
+
+  private async persistShutdownPending(): Promise<void> {
+    await fs.mkdir(this.shutdownPendingDir, { recursive: true });
+    const createdAt = Date.now();
+    const records: ShutdownPendingRecord[] = [];
+    for (const logs of this.queue.values()) {
+      if (logs.length === 0) continue;
+      const endpoint = logs[0].endpoint;
+      records.push({
+        version: 1,
+        createdAt,
+        endpointName: endpoint.name,
+        project: endpoint.project,
+        logstore: endpoint.logstore,
+        kind: endpoint.kind,
+        mode: endpoint.mode,
+        logs: logs.map(log => ({
+          content: log.content,
+          agentType: log.agentType,
+          sizeBytes: log.sizeBytes,
+          enqueuedAt: log.enqueuedAt,
+          firstFailureAt: log.firstFailureAt,
+        })),
+      });
+    }
+    if (records.length === 0) return;
+
+    const fileName = `${createdAt}-${process.pid}.jsonl`;
+    const finalPath = path.join(this.shutdownPendingDir, fileName);
+    const tmpPath = `${finalPath}.tmp`;
+    const body = `${records.map(record => JSON.stringify(record)).join('\n')}\n`;
+    await fs.writeFile(tmpPath, body, 'utf8');
+    await fs.rename(tmpPath, finalPath);
+
+    for (const record of records) {
+      const counter = this.endpointCounters.get(record.endpointName);
+      if (counter) {
+        counter.shutdownPendingWrittenEntriesTotal =
+          (counter.shutdownPendingWrittenEntriesTotal ?? 0) + record.logs.length;
+      }
+    }
+    logger.warn('SLS shutdown pending written', {
+      file: finalPath,
+      buckets: records.length,
+      entries: records.reduce((sum, record) => sum + record.logs.length, 0),
+    });
+  }
+
+  private async restoreShutdownPending(): Promise<void> {
+    let fileNames: string[];
+    try {
+      fileNames = await fs.readdir(this.shutdownPendingDir);
+    } catch (err) {
+      logger.warn('SLS shutdown pending restore skipped', { error: String(err) });
+      return;
+    }
+
+    const endpointByName = new Map(this.config.endpoints.map(endpoint => [endpoint.name, endpoint]));
+    for (const fileName of fileNames.sort()) {
+      if (!fileName.endsWith('.jsonl')) continue;
+      const filePath = path.join(this.shutdownPendingDir, fileName);
+      try {
+        const raw = await fs.readFile(filePath, 'utf8');
+        const lines = raw.split('\n').filter(line => line.trim().length > 0);
+        let restoredEntries = 0;
+        for (const line of lines) {
+          const record = JSON.parse(line) as ShutdownPendingRecord;
+          const endpoint = endpointByName.get(record.endpointName);
+          if (!endpoint) {
+            logger.warn('SLS shutdown pending endpoint no longer configured', {
+              endpoint: record.endpointName,
+              file: filePath,
+            });
+            continue;
+          }
+          for (const log of record.logs) {
+            await this.enqueue(endpoint, log.content, log.agentType, {
+              sizeBytes: log.sizeBytes,
+              enqueuedAt: log.enqueuedAt,
+              firstFailureAt: log.firstFailureAt,
+            });
+            restoredEntries++;
+          }
+          const counter = this.endpointCounters.get(endpoint.name);
+          if (counter) {
+            counter.shutdownPendingRestoredEntriesTotal =
+              (counter.shutdownPendingRestoredEntriesTotal ?? 0) + record.logs.length;
+          }
+        }
+        await fs.unlink(filePath);
+        logger.warn('SLS shutdown pending restored', {
+          file: filePath,
+          entries: restoredEntries,
+        });
+      } catch (err) {
+        logger.warn('SLS shutdown pending restore failed', {
+          file: filePath,
+          error: String(err),
+        });
+      }
+    }
+    this.syncDeliveryHealth();
   }
 
   private sleep(ms: number): Promise<void> {

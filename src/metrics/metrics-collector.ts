@@ -80,9 +80,48 @@ export interface FlusherMetrics {
   last_flush_time: string;
   start_time: string;
   __time__: number;
+  queued_entries?: string;
+  queued_bytes?: string;
+  oldest_queued_age_ms?: string;
+  backpressure_active?: string;
+  backpressure_reason?: string;
+  backpressure_since?: string;
+  consecutive_failures?: string;
+  last_attempt_time?: string;
+  last_success_time?: string;
+  last_error_time?: string;
+  last_error_type?: string;
+  last_status_code?: string;
+  next_retry_time?: string;
+  retry_expired_entries_total?: string;
+  queue_overflow_entries_total?: string;
+  non_retryable_failed_entries_total?: string;
+  shutdown_pending_written_entries_total?: string;
+  shutdown_pending_restored_entries_total?: string;
 }
 
-export interface FlusherStats {
+export interface FlusherDeliveryHealthStats {
+  queuedEntries?: number;
+  queuedBytes?: number;
+  oldestQueuedAgeMs?: number;
+  backpressureActive?: boolean;
+  backpressureReason?: string;
+  backpressureSince?: string;
+  consecutiveFailures?: number;
+  lastAttemptTime?: string;
+  lastSuccessTime?: string;
+  lastErrorTime?: string;
+  lastErrorType?: string;
+  lastStatusCode?: number;
+  nextRetryTime?: string;
+  retryExpiredEntriesTotal?: number;
+  queueOverflowEntriesTotal?: number;
+  nonRetryableFailedEntriesTotal?: number;
+  shutdownPendingWrittenEntriesTotal?: number;
+  shutdownPendingRestoredEntriesTotal?: number;
+}
+
+export interface FlusherStats extends FlusherDeliveryHealthStats {
   inEntries: number;
   inBytes: number;
   outEntries: number;
@@ -112,6 +151,30 @@ export interface DataflowSnapshot {
   agentVersions: Record<string, string>;
   inputIdleMinutes: Map<string, number>;
 }
+
+const FLUSHER_HEALTH_FIELD_NAMES: Array<[
+  keyof FlusherDeliveryHealthStats,
+  keyof FlusherMetrics,
+]> = [
+  ['queuedEntries', 'queued_entries'],
+  ['queuedBytes', 'queued_bytes'],
+  ['oldestQueuedAgeMs', 'oldest_queued_age_ms'],
+  ['backpressureActive', 'backpressure_active'],
+  ['backpressureReason', 'backpressure_reason'],
+  ['backpressureSince', 'backpressure_since'],
+  ['consecutiveFailures', 'consecutive_failures'],
+  ['lastAttemptTime', 'last_attempt_time'],
+  ['lastSuccessTime', 'last_success_time'],
+  ['lastErrorTime', 'last_error_time'],
+  ['lastErrorType', 'last_error_type'],
+  ['lastStatusCode', 'last_status_code'],
+  ['nextRetryTime', 'next_retry_time'],
+  ['retryExpiredEntriesTotal', 'retry_expired_entries_total'],
+  ['queueOverflowEntriesTotal', 'queue_overflow_entries_total'],
+  ['nonRetryableFailedEntriesTotal', 'non_retryable_failed_entries_total'],
+  ['shutdownPendingWrittenEntriesTotal', 'shutdown_pending_written_entries_total'],
+  ['shutdownPendingRestoredEntriesTotal', 'shutdown_pending_restored_entries_total'],
+];
 
 export class MetricsCollector {
   private readonly version: string;
@@ -225,7 +288,7 @@ export class MetricsCollector {
     const results: FlusherMetrics[] = [];
 
     for (const [epName, stats] of snapshot.flushers) {
-      results.push({
+      const metric: FlusherMetrics = {
         category: 'flusher',
         label: {
           flusher_name: stats.flusherName,
@@ -242,7 +305,14 @@ export class MetricsCollector {
         last_flush_time: stats.lastFlushTime,
         start_time: stats.startTime,
         __time__: now,
-      });
+      };
+      for (const [statKey, metricKey] of FLUSHER_HEALTH_FIELD_NAMES) {
+        const value = stats[statKey];
+        if (value !== undefined) {
+          Object.assign(metric, { [metricKey]: String(value) });
+        }
+      }
+      results.push(metric);
     }
     return results;
   }
@@ -309,4 +379,3 @@ function getOpenFdCount(): number {
   }
   return -1;
 }
-

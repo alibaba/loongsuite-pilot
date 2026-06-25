@@ -93,4 +93,29 @@ describe('MultiFlusher', () => {
       expect(f2.flushCount).toBe(1);
     });
   });
+
+  describe('backpressure aggregation', () => {
+    it('reports active backpressure when any child is active', () => {
+      f1.backpressureState = { active: false };
+      f2.backpressureState = {
+        active: true,
+        queuedEntries: 10,
+        queuedBytes: 2048,
+        retryAfterMs: 5000,
+        reason: 'entries_high_watermark',
+      };
+
+      expect(multi.getBackpressureState()).toEqual({
+        active: true,
+        queuedEntries: 10,
+        queuedBytes: 2048,
+        retryAfterMs: 5000,
+        reason: 'entries_high_watermark',
+      });
+    });
+
+    it('reports inactive backpressure when all children are inactive', () => {
+      expect(multi.getBackpressureState()).toEqual({ active: false });
+    });
+  });
 });

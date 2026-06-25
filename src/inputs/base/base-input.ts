@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { AgentActivityEntry, InputState } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
+import type { FlusherBackpressureState } from '../../flushers/base-flusher.js';
 import { type BoundLogger, createLogger } from '../../utils/logger.js';
 import type { StateStore } from '../../checkpoints/state-store.js';
 
@@ -25,6 +26,7 @@ export abstract class BaseInput extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   private cyclePromise: Promise<void> | null = null;
   private _running = false;
+  private backpressureProvider: (() => FlusherBackpressureState) | null = null;
 
   constructor(opts: InputOptions) {
     super();
@@ -65,6 +67,10 @@ export abstract class BaseInput extends EventEmitter {
 
   getAgentVersion?(): string;
 
+  setBackpressureProvider(provider: (() => FlusherBackpressureState) | null): void {
+    this.backpressureProvider = provider;
+  }
+
   /** Optional hook called once on start. */
   protected async onStart(): Promise<void> {}
   /** Optional hook called once on stop. */
@@ -80,6 +86,17 @@ export abstract class BaseInput extends EventEmitter {
 
   private async runCycleOnce(): Promise<void> {
     try {
+      const backpressure = this.backpressureProvider?.();
+      if (backpressure?.active) {
+        this.logger.warn('skipping collection cycle due to output backpressure', {
+          queuedEntries: backpressure.queuedEntries,
+          queuedBytes: backpressure.queuedBytes,
+          retryAfterMs: backpressure.retryAfterMs,
+          reason: backpressure.reason,
+        });
+        return;
+      }
+
       const entries = await this.collect();
       if (entries.length > 0) {
         this.emit('entries', entries);
