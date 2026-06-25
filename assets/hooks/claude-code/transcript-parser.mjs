@@ -70,6 +70,8 @@ function normalizeRequestStart(candidate, responseTs) {
   const candidateMs = parseTimestampMs(candidate);
   const responseMs = parseTimestampMs(responseTs);
   if (candidateMs !== null && responseMs !== null && candidateMs > responseMs) {
+    // Defense against transcript anomalies: a request start later than its own
+    // response is impossible and would produce a negative-duration OTLP span.
     return responseTs;
   }
   return candidate;

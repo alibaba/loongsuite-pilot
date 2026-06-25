@@ -60,6 +60,11 @@ import {
 } from './shared/resource-context.mjs';
 
 const AGENT_ID = 'claude-code';
+const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_ID });
+const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
+const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
+  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
+  : {};
 
 // ─── utilities ───
 
@@ -427,10 +432,6 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
   const traceId = generateTraceId();
   const entrySpanId = generateSpanId();
   const agentSpanId = generateSpanId();
-  const collectedResourceAttributes = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_ID });
-  const resourceAttributes = Object.keys(collectedResourceAttributes).length > 0
-    ? { resourceAttributes: collectedResourceAttributes }
-    : {};
 
   const baseFields = {
     trace_id: traceId,
@@ -438,10 +439,10 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     'gen_ai.turn.id': turnId,
     'gen_ai.agent.type': AGENT_ID,
     'gen_ai.agent.id': sessionId,
-    ...agentBaseFieldPatch(collectedResourceAttributes),
+    ...RESOURCE_BASE_FIELD_PATCH,
     'user.id': userId,
     ...(cwd ? { 'agent.claude-code.cwd': cwd } : {}),
-    ...resourceAttributes,
+    ...RESOURCE_ATTRIBUTE_FIELDS,
   };
 
   // 用户输入: 做法 A (EVENT_LOG_TO_TRACE_SPEC §5.1, 0.1.0-beta.3+)

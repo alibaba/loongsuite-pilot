@@ -63,7 +63,7 @@ const RESERVED_RESOURCE_KEYS = new Set([
 
 type ResourceProjectionValue = string | number | boolean;
 
-const SENSITIVE_RESOURCE_KEY_RE = /(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL|HEADER|COOKIE)/i;
+const SENSITIVE_RESOURCE_KEY_RE = /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE)([_.-]|$)|^(API_KEY|API_HEADER)$/i;
 
 function resolveEndpointUrl(raw: string): string {
   let url = raw.replace(/\/+$/, '');
@@ -467,7 +467,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private evictConvertStates(): void {
     while (this.agentConvertStates.size > MAX_CONVERT_STATES) {
       const entry = [...this.agentConvertStates.entries()].find(([, state]) => state.active === 0);
-      if (!entry) return;
+      if (!entry) {
+        // Prefer correctness over a hard cap: active providers may still receive
+        // spans, so allow a temporary overflow and retry when a conversion exits.
+        return;
+      }
 
       const [key, state] = entry;
       this.agentConvertStates.delete(key);
