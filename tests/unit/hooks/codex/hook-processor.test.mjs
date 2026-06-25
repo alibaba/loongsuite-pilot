@@ -40,6 +40,7 @@ describe('codex Stop wakeup hook', () => {
     });
 
     expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
     expect(JSON.parse(fs.readFileSync(markerPath('cdx-wakeup'), 'utf8'))).toMatchObject({
       session_id: 'cdx-wakeup',
       turn_id: 'turn-wakeup',
@@ -64,5 +65,25 @@ describe('codex Stop wakeup hook', () => {
 
     const markerDir = path.join(dataDir, 'state', 'codex', 'transcript-wakeups');
     expect(fs.existsSync(markerDir) ? fs.readdirSync(markerDir) : []).toEqual([]);
+  });
+
+  test('acknowledges ignored events on stdout', () => {
+    const result = runHook('pre-tool-use', { session_id: 'cdx-ignore', tool_name: 'Bash' });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+  });
+
+  test('logs wakeup write failures without failing the hook', () => {
+    fs.mkdirSync(path.join(dataDir, 'state', 'codex'), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'state', 'codex', 'transcript-wakeups'), 'not-a-directory');
+
+    const result = runHook('stop', { session_id: 'cdx-error', turn_id: 'turn-error' });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    const errorDir = path.join(dataDir, 'logs', 'codex', 'errors');
+    const errorFile = path.join(errorDir, fs.readdirSync(errorDir)[0]);
+    expect(fs.readFileSync(errorFile, 'utf8')).toContain('"stage":"wakeup_write"');
   });
 });

@@ -18,8 +18,10 @@ import {
   type CodexActiveTranscriptTurn,
   type CodexTranscriptCheckpoint,
 } from './codex-transcript-types.js';
+import { stringValue, timestampMs } from './codex-transcript-utils.js';
 
 const DEFAULT_SESSION_DIR = '~/.codex/sessions';
+const READ_CHUNK_SIZE = 1024 * 1024;
 
 interface JsonLine {
   startOffset: number;
@@ -39,7 +41,6 @@ export class CodexTranscriptInput extends BaseInput {
 
   private readonly sessionDir: string;
   private readonly wakeupDir: string;
-  private collecting: Promise<AgentActivityEntry[]> | null = null;
   private wakeupWatcher: FSWatcher | null = null;
 
   constructor(opts: CodexTranscriptInputOptions) {
@@ -83,14 +84,6 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   protected override async collect(): Promise<AgentActivityEntry[]> {
-    if (this.collecting) return this.collecting;
-    this.collecting = this.collectOnce().finally(() => {
-      this.collecting = null;
-    });
-    return this.collecting;
-  }
-
-  private async collectOnce(): Promise<AgentActivityEntry[]> {
     const entries: AgentActivityEntry[] = [];
     for (const filePath of await this.discoverSessionFiles()) {
       entries.push(...await this.processFile(filePath));
@@ -153,7 +146,7 @@ export class CodexTranscriptInput extends BaseInput {
           checkpoint.activeTurn = {
             turnId,
             startOffset: line.startOffset,
-            startedAtMs: timestampMs(line.record),
+            startedAtMs: timestampMs(line.record, Date.now()),
           };
         }
         continue;
@@ -262,7 +255,7 @@ export class CodexTranscriptInput extends BaseInput {
       }
       const turnId = turnIdForStart(line.record, payload);
       if (turnId && (!activeTurn || activeTurn.turnId !== turnId)) {
-        activeTurn = { turnId, startOffset: line.startOffset, startedAtMs: timestampMs(line.record) };
+        activeTurn = { turnId, startOffset: line.startOffset, startedAtMs: timestampMs(line.record, Date.now()) };
         continue;
       }
       if (terminalTurnIdFor(line.record, payload) === activeTurn?.turnId) activeTurn = null;
@@ -355,33 +348,51 @@ async function readJsonLines(filePath: string, startOffset: number, endOffset: n
   if (endOffset <= startOffset) return { items: [], nextOffset: startOffset };
   const handle = await fs.open(filePath, 'r');
   try {
-    const buffer = Buffer.alloc(endOffset - startOffset);
-    await handle.read(buffer, 0, buffer.length, startOffset);
-    const lastNewline = buffer.lastIndexOf(0x0a);
-    if (lastNewline < 0) return { items: [], nextOffset: startOffset };
     const items: JsonLine[] = [];
-    let cursor = 0;
-    while (cursor <= lastNewline) {
-      const newline = buffer.indexOf(0x0a, cursor);
-      if (newline < 0 || newline > lastNewline) break;
-      const text = buffer.subarray(cursor, newline).toString('utf8').trim();
-      if (text) {
-        try {
-          const record = JSON.parse(text);
-          if (record && typeof record === 'object' && !Array.isArray(record)) {
-            items.push({
-              startOffset: startOffset + cursor,
-              endOffset: startOffset + newline + 1,
-              record,
-            });
+    let nextOffset = startOffset;
+    let position = startOffset;
+    let pending = Buffer.alloc(0);
+    let pendingStartOffset = startOffset;
+
+    while (position < endOffset) {
+      const length = Math.min(READ_CHUNK_SIZE, endOffset - position);
+      const chunk = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(chunk, 0, length, position);
+      if (bytesRead <= 0) break;
+      position += bytesRead;
+
+      const data = pending.length > 0
+        ? Buffer.concat([pending, chunk.subarray(0, bytesRead)])
+        : chunk.subarray(0, bytesRead);
+      const dataStartOffset = pendingStartOffset;
+      let cursor = 0;
+      while (cursor < data.length) {
+        const newline = data.indexOf(0x0a, cursor);
+        if (newline < 0) break;
+        const text = data.subarray(cursor, newline).toString('utf8').trim();
+        if (text) {
+          try {
+            const record = JSON.parse(text);
+            if (record && typeof record === 'object' && !Array.isArray(record)) {
+              items.push({
+                startOffset: dataStartOffset + cursor,
+                endOffset: dataStartOffset + newline + 1,
+                record,
+              });
+            }
+          } catch {
+            // Invalid completed lines are ignored but their bytes are consumed.
           }
-        } catch {
-          // Invalid completed lines are ignored but their bytes are consumed.
         }
+        nextOffset = dataStartOffset + newline + 1;
+        cursor = newline + 1;
       }
-      cursor = newline + 1;
+
+      pending = cursor < data.length ? Buffer.from(data.subarray(cursor)) : Buffer.alloc(0);
+      pendingStartOffset = dataStartOffset + cursor;
     }
-    return { items, nextOffset: startOffset + lastNewline + 1 };
+
+    return { items, nextOffset };
   } finally {
     await handle.close();
   }
@@ -424,19 +435,10 @@ function terminalTurnIdFor(record: Record<string, unknown>, payload: Record<stri
   return stringValue(payload.turn_id) ?? null;
 }
 
-function timestampMs(record: Record<string, unknown>): number {
-  const parsed = typeof record.timestamp === 'string' ? Date.parse(record.timestamp) : Number.NaN;
-  return Number.isFinite(parsed) ? parsed : Date.now();
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 function defaultWakeupDir(): string {

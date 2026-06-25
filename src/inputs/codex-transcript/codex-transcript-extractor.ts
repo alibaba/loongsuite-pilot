@@ -8,6 +8,7 @@ import type {
   CodexTranscriptTool,
   CodexTranscriptUsage,
 } from './codex-transcript-types.js';
+import { timestampMs } from './codex-transcript-utils.js';
 
 export function extractCodexTranscriptMeta(record: Record<string, unknown>): CodexTranscriptMeta | null {
   if (record.type !== 'session_meta') return null;
@@ -92,7 +93,7 @@ export function extractCodexTerminalTurn(
   for (const record of records) {
     const payload = asRecord(record.payload);
     if (!payload) continue;
-    const timestamp = timestampMs(record);
+    const timestamp = timestampMs(record, Date.now());
 
     if (record.type === 'turn_context') {
       const turnId = stringValue(payload.turn_id);
@@ -391,12 +392,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function timestampMs(record: Record<string, unknown>): number {
-  const value = stringValue(record.timestamp);
-  const parsed = value ? Date.parse(value) : Number.NaN;
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function readInstructionText(value: unknown): string | undefined {

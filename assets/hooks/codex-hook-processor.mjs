@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { logHookError } from './shared/error-logger.mjs';
 
 function pilotDataDir() {
   return process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
@@ -24,7 +25,13 @@ function tryReadStdin() {
     if (!input) return {};
     const value = JSON.parse(input);
     return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-  } catch {
+  } catch (error) {
+    logHookError({
+      agentId: 'codex',
+      stage: 'stdin_parse',
+      errorType: 'STDIN_PARSE_ERROR',
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
     return {};
   }
 }
@@ -51,15 +58,31 @@ function writeWakeupMarker(input) {
     fs.mkdirSync(directory, { recursive: true });
     fs.writeFileSync(temporary, JSON.stringify(payload), 'utf8');
     fs.renameSync(temporary, marker);
-  } catch {
-    try { fs.unlinkSync(temporary); } catch {}
+  } catch (error) {
+    logHookError({
+      agentId: 'codex',
+      stage: 'wakeup_write',
+      errorType: 'WAKEUP_WRITE_ERROR',
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+    try { fs.unlinkSync(temporary); } catch (cleanupError) {
+      logHookError({
+        agentId: 'codex',
+        stage: 'wakeup_cleanup',
+        errorType: 'WAKEUP_CLEANUP_ERROR',
+        errorMessage: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+      });
+    }
   }
 }
 
 function main() {
   const subcommand = (process.argv[2] || '').trim();
-  if (subcommand !== 'stop') return;
-  writeWakeupMarker(tryReadStdin());
+  try {
+    if (subcommand === 'stop') writeWakeupMarker(tryReadStdin());
+  } finally {
+    process.stdout.write('{}\n');
+  }
 }
 
 main();

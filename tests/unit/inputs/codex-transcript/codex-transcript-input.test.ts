@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -42,12 +41,6 @@ function tokenUsage(input: number, output: number): Record<string, unknown> {
 
 function entryTimestampMs(entry: AgentActivityEntry): number {
   return Number(BigInt(String(entry.time_unix_nano)) / 1_000_000n);
-}
-
-function checkpointFor(stateFile: string, transcript: string): any {
-  if (!fsSync.existsSync(stateFile)) return null;
-  const state = JSON.parse(fsSync.readFileSync(stateFile, 'utf8'));
-  return state[`codex-transcript:${transcript}`]?.extra?.codexTranscript ?? null;
 }
 
 function completedTurn(): string {
@@ -312,10 +305,10 @@ describe('CodexTranscriptInput', () => {
     await input.stop();
   });
 
-  it('does not advance past a terminal turn that must be retried', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-pending-offset-'));
+  it('falls back malformed transcript timestamps without emitting Unix epoch spans', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-malformed-time-'));
     tempDirs.push(root);
-    const { input, sessionDir } = await createInput(root);
+    const { input, entries, sessionDir } = await createInput(root);
     const lines = [
       record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
       record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'turn-bad', model: 'gpt-5.5' }),
@@ -323,23 +316,13 @@ describe('CodexTranscriptInput', () => {
         type: 'message', role: 'user', content: [{ type: 'input_text', text: 'bad terminal' }],
       }),
       record('not-a-date', 'event_msg', { type: 'task_complete', turn_id: 'turn-bad' }),
-      record('2026-06-24T06:00:05.000Z', 'turn_context', { turn_id: 'turn-next', model: 'gpt-5.5' }),
-      record('2026-06-24T06:00:06.000Z', 'response_item', {
-        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next turn' }],
-      }),
-      record('2026-06-24T06:00:07.000Z', 'event_msg', { type: 'task_complete', turn_id: 'turn-next' }),
     ];
-    const transcript = await writeTranscript(sessionDir, lines.join('\n') + '\n');
-    const retryOffset = Buffer.byteLength(lines.slice(0, 4).join('\n') + '\n');
-    const stateFile = path.join(root, 'input-state.json');
+    await writeTranscript(sessionDir, lines.join('\n') + '\n');
 
-    await waitFor(() => checkpointFor(stateFile, transcript)?.pendingTerminal?.turnId === 'turn-bad');
+    await waitFor(() => entries.some(entry => entry['event.name'] === 'llm.response'));
     await input.stop();
 
-    expect(checkpointFor(stateFile, transcript)).toMatchObject({
-      scanOffset: retryOffset,
-      pendingTerminal: { turnId: 'turn-bad', terminalEndOffset: retryOffset },
-    });
+    expect(Math.min(...entries.map(entryTimestampMs))).toBeGreaterThan(Date.parse('2026-01-01T00:00:00.000Z'));
   });
 
   it('merges all user messages for the entry prompt while retaining raw input messages', async () => {
