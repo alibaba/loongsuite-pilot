@@ -27,11 +27,12 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 
-/** 全部 10 个 codex hook 事件 → snake_case label。本次 pilot 只用前 5 个,但全部留好 */
+/** 已知 Codex hook 事件 → snake_case label。 */
 const EVENT_KEY_MAP: Record<string, string> = {
   PreToolUse: 'pre_tool_use',
   PermissionRequest: 'permission_request',
   PostToolUse: 'post_tool_use',
+  PostToolUseFailure: 'post_tool_use_failure',
   PreCompact: 'pre_compact',
   PostCompact: 'post_compact',
   SessionStart: 'session_start',

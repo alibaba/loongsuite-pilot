@@ -38,6 +38,8 @@ export interface AgentHookConfig {
   format: HookFormat;
   matcher?: string;
   replaceHookCommands?: string[];
+  /** Events previously owned by this hook that must be removed during deploy. */
+  retiredEvents?: string[];
   /**
    * 可选的 trust TOML 配置。仅 Codex 等需要 trust hash 校验的 agent 填写。
    * 设置后，HookStrategy 在 deploy 时会调用 codex-trust-writer 写入对应 TOML 文件。

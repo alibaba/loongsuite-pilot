@@ -8,7 +8,8 @@
   },
   "hook": {
     "settingsPath": "~/.codex/hooks.json",
-    "events": ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"],
+    "events": ["Stop"],
+    "retiredEvents": ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure"],
     "hookCommand": "$PILOT_DATA/hooks/codex-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",
@@ -24,7 +25,6 @@
     }
   },
   "input": {
-    "type": "hook-jsonl",
-    "logDir": "$PILOT_DATA/logs/codex"
+    "type": "session-file-polling"
   }
 }
