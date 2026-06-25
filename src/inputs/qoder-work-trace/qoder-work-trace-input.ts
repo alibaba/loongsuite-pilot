@@ -489,6 +489,11 @@ export class QoderWorkTraceInput extends BaseInput {
             if (!this.applyInterceptUsage(response, interceptData)) {
               this.applySdkTokenUsage(sessionId, request, response);
             }
+          } else {
+            // Segment provided input/output/total but QoderWork segment log
+            // may omit cache_read and never carries reasoning. Overlay both
+            // from intercept when the wrapper captured them for this respId.
+            this.applyInterceptCacheReasoning(response, interceptData);
           }
         }
 
@@ -600,7 +605,29 @@ export class QoderWorkTraceInput extends BaseInput {
     target['gen_ai.usage.output_tokens'] = match.completionTokens;
     target['gen_ai.usage.total_tokens'] = match.totalTokens || (match.promptTokens + match.completionTokens);
     if (match.cachedTokens) target['gen_ai.usage.cache_read.input_tokens'] = match.cachedTokens;
+    if (match.reasoningTokens) target['gen_ai.usage.reasoning_tokens'] = match.reasoningTokens;
     return match.promptTokens > 0 || match.completionTokens > 0 || match.totalTokens > 0;
+  }
+
+  // Segment log covers input/output/total but QoderWork segments do not carry
+  // reasoning_tokens and may omit cache_read when the wrapper is the only
+  // source. Overlay only these two fields so segment values stay authoritative
+  // for the rest.
+  private applyInterceptCacheReasoning(
+    response: AgentActivityEntry,
+    interceptData: InterceptData,
+  ): void {
+    const respId = response['gen_ai.response.id'] as string | undefined;
+    if (!respId) return;
+    const match = interceptData.tokens.find(t => t.id === respId);
+    if (!match) return;
+    const target = response as Record<string, unknown>;
+    if (match.cachedTokens && !target['gen_ai.usage.cache_read.input_tokens']) {
+      target['gen_ai.usage.cache_read.input_tokens'] = match.cachedTokens;
+    }
+    if (match.reasoningTokens) {
+      target['gen_ai.usage.reasoning_tokens'] = match.reasoningTokens;
+    }
   }
 
   // ─── SDK token compatibility ─────────────────────────────────────────────

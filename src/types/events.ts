@@ -64,6 +64,7 @@ export interface AgentActivityEntry {
   'gen_ai.usage.output_tokens'?: number;
   'gen_ai.usage.cache_read.input_tokens'?: number;
   'gen_ai.usage.cache_creation.input_tokens'?: number;
+  'gen_ai.usage.reasoning_tokens'?: number;
   'gen_ai.usage.total_tokens'?: number;
   'gen_ai.usage.input_cost'?: number;
   'gen_ai.usage.output_cost'?: number;
