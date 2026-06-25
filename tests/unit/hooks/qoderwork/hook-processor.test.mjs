@@ -119,8 +119,9 @@ describe('qoderwork-hook-processor user prompt extraction', () => {
     const result = runHook('sess-system-first');
     expect(result.status).toBe(0);
 
+    // User-hook event is now 'other' (not 'llm.request'), so user text
+    // only appears in step 1's llm.request — no duplicate.
     expect(inputContents(readJsonlRecords())).toEqual([
-      '<system-reminder>\nUser environment\n</system-reminder>\n你先搜索力扣560题，然后在本地创建一个py文件解决这道题，只需解决这一题',
       '<system-reminder>\nUser environment\n</system-reminder>\n你先搜索力扣560题，然后在本地创建一个py文件解决这道题，只需解决这一题',
     ]);
   });
@@ -135,7 +136,6 @@ describe('qoderwork-hook-processor user prompt extraction', () => {
 
     expect(inputContents(readJsonlRecords())).toEqual([
       '<user-selected-text> Trace-Metrics 关联字段 </user-selected-text> 讲讲这个',
-      '<user-selected-text> Trace-Metrics 关联字段 </user-selected-text> 讲讲这个',
     ]);
   });
 
@@ -149,7 +149,6 @@ describe('qoderwork-hook-processor user prompt extraction', () => {
 
     expect(inputContents(readJsonlRecords())).toEqual([
       '帮我安装qodercli <system-reminder>User environment</system-reminder>',
-      '帮我安装qodercli <system-reminder>User environment</system-reminder>',
     ]);
   });
 
@@ -162,7 +161,6 @@ describe('qoderwork-hook-processor user prompt extraction', () => {
     expect(result.status).toBe(0);
 
     expect(inputContents(readJsonlRecords())).toEqual([
-      '<user-selected-text> sudo cp old new </user-selected-text> 这一步不是已经做了吗 <system-reminder>User environment</system-reminder>',
       '<user-selected-text> sudo cp old new </user-selected-text> 这一步不是已经做了吗 <system-reminder>User environment</system-reminder>',
     ]);
   });
