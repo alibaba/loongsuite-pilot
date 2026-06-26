@@ -17,13 +17,14 @@ vi.mock('../../../src/flushers/sls-transport.js', () => ({
   persistFailedLogs: (...args: unknown[]) => mockPersistFailedLogs(...args),
 }));
 
-import { FilePipeline, parseCheckpointKey } from '../../../src/file-collection/file-pipeline.js';
-import type { FileCollectionConfig } from '../../../src/file-collection/types.js';
+import { FilePipeline, parseCheckpointKey } from '../../../src/pipeline/input/file/file-pipeline.js';
+import type { PipelineConfig } from '../../../src/pipeline/types.js';
 
 let tmpDir: string;
 let logDir: string;
 let stateDir: string;
 let failedDir: string;
+let dataDir: string;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -31,16 +32,18 @@ beforeEach(() => {
   logDir = path.join(tmpDir, 'logs');
   stateDir = path.join(tmpDir, 'state');
   failedDir = path.join(tmpDir, 'failed');
+  dataDir = path.join(tmpDir, 'data');
   fs.mkdirSync(logDir, { recursive: true });
   fs.mkdirSync(stateDir, { recursive: true });
   fs.mkdirSync(failedDir, { recursive: true });
+  fs.mkdirSync(dataDir, { recursive: true });
 });
 
 afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-function makeConfig(): FileCollectionConfig {
+function makeConfig(): PipelineConfig {
   return {
     configName: 'test-pipeline',
     inputs: [{
@@ -82,6 +85,7 @@ describe('FilePipeline', () => {
       config: makeConfig(),
       stateDir,
       failedLogDir: failedDir,
+      dataDir,
     });
     await pipeline.start();
     await pipeline.stop();
@@ -94,6 +98,7 @@ describe('FilePipeline', () => {
       config: makeConfig(),
       stateDir,
       failedLogDir: failedDir,
+      dataDir,
     });
     await pipeline.start();
     await new Promise((r) => setTimeout(r, 3000));
@@ -117,6 +122,7 @@ describe('FilePipeline', () => {
       config: makeConfig(),
       stateDir,
       failedLogDir: failedDir,
+      dataDir,
     });
     await pipeline.start();
     await new Promise((r) => setTimeout(r, 2000));
@@ -144,6 +150,7 @@ describe('FilePipeline', () => {
       config: makeConfig(),
       stateDir,
       failedLogDir: failedDir,
+      dataDir,
     });
     await pipeline.start();
     await new Promise((r) => setTimeout(r, 2000));
@@ -177,6 +184,7 @@ describe('FilePipeline', () => {
       config: makeConfig(),
       stateDir,
       failedLogDir: failedDir,
+      dataDir,
     });
     await pipeline.start();
     await pipeline.stop();

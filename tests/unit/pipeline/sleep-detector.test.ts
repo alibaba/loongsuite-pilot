@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SleepDetector } from '../../../src/file-collection/sleep-detector.js';
+import { SleepDetector } from '../../../src/pipeline/sleep-detector.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({

@@ -1,11 +1,11 @@
-import type { FileSlsFlusherConfig } from './types.js';
+import type { PipelineSlsFlusherConfig } from '../../types.js';
 import {
   postWebtracking,
   persistFailedLogs,
   type SlsTransportConfig,
-} from '../flushers/sls-transport.js';
-import { createLogger } from '../utils/logger.js';
-import { LOCAL_IP, buildUserAgent } from '../utils/network-utils.js';
+} from '../../../flushers/sls-transport.js';
+import { createLogger } from '../../../utils/logger.js';
+import { LOCAL_IP, buildUserAgent } from '../../../utils/network-utils.js';
 
 const logger = createLogger('FileSlsSender');
 
@@ -28,7 +28,7 @@ export class FileSlsSender {
   private readonly userAgent: string;
 
   constructor(
-    flusherConfig: FileSlsFlusherConfig,
+    flusherConfig: PipelineSlsFlusherConfig,
     configName: string,
     failedLogDir: string,
     dataDir: string,

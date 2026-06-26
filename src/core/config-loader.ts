@@ -5,6 +5,7 @@ import type {
   AutoUpdateConfig,
   CmsConfig,
   FileCollectionToggle,
+  PipelineToggle,
   FlusherConfig,
   HookWatchdogConfig,
   LogRetentionConfig,
@@ -143,6 +144,12 @@ export interface ConfigFile {
     enabled?: boolean;
   };
 
+  pipeline?: {
+    enabled?: boolean;
+    file?: { enabled?: boolean };
+    qoderApi?: { enabled?: boolean };
+  };
+
   enableStatusBarApp?: boolean | string;
 
   installId?: string;
@@ -216,6 +223,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     mask: buildMaskConfig(file),
     hookWatchdog: buildHookWatchdogConfig(file),
     fileCollection: buildFileCollectionConfig(file),
+    pipeline: buildPipelineConfig(file),
     statusBar: buildStatusBarConfig(file),
   };
 }
@@ -375,6 +383,25 @@ function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
 function buildFileCollectionConfig(file: ConfigFile | null): FileCollectionToggle {
   return {
     enabled: envBool('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', file?.fileCollection?.enabled ?? false),
+    file: { enabled: true },
+    qoderApi: { enabled: true },
+  };
+}
+
+function buildPipelineConfig(file: ConfigFile | null): PipelineToggle {
+  const legacyEnabled = file?.fileCollection?.enabled;
+  const enabled = envBool(
+    'LOONGSUITE_PILOT_PIPELINE_ENABLED',
+    file?.pipeline?.enabled ?? legacyEnabled ?? false,
+  );
+  return {
+    enabled,
+    file: {
+      enabled: envBool('LOONGSUITE_PILOT_PIPELINE_FILE_ENABLED', file?.pipeline?.file?.enabled ?? true),
+    },
+    qoderApi: {
+      enabled: envBool('LOONGSUITE_PILOT_PIPELINE_QODER_API_ENABLED', file?.pipeline?.qoderApi?.enabled ?? true),
+    },
   };
 }
 

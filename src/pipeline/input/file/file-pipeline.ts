@@ -1,11 +1,11 @@
 import * as path from 'node:path';
-import type { FileCollectionConfig, FileCheckpoint, FilePipelineOptions } from './types.js';
+import type { PipelineConfig, FileCheckpoint, FilePipelineOptions, Pipeline, WakeEvent } from '../../types.js';
 import { FileTailer, globToRegex } from './file-tailer.js';
-import { FileSlsSender } from './file-sls-sender.js';
+import { FileSlsSender } from '../../flusher/file/file-sls-sender.js';
 import { FileWatcher, extractParentDirs } from './file-watcher.js';
-import { StateStore } from '../checkpoints/state-store.js';
-import { createLogger } from '../utils/logger.js';
-import { ensureDir } from '../utils/fs-utils.js';
+import { StateStore } from '../../../checkpoints/state-store.js';
+import { createLogger } from '../../../utils/logger.js';
+import { ensureDir } from '../../../utils/fs-utils.js';
 
 export function parseCheckpointKey(key: string): string | null {
   const lastStar = key.lastIndexOf('*');
@@ -20,8 +20,8 @@ const RESCAN_INTERVAL_MS = 30_000;
 const READ_TIME_SLICE_MS = 50;
 const SIGNATURE_BYTES = 1024;
 
-export class FilePipeline {
-  private readonly config: FileCollectionConfig;
+export class FilePipeline implements Pipeline {
+  private readonly config: PipelineConfig;
   private readonly tailer: FileTailer;
   private readonly sender: FileSlsSender;
   private readonly fileWatcher: FileWatcher;
@@ -40,6 +40,10 @@ export class FilePipeline {
     this.logger = createLogger(`FilePipeline:${opts.config.configName}`);
 
     const input = opts.config.inputs[0];
+    if (input.Type !== 'input_file') {
+      throw new Error(`FilePipeline expects input_file, got ${input.Type}`);
+    }
+
     this.tailer = new FileTailer({
       filePaths: input.FilePaths,
       encoding: input.FileEncoding,
@@ -74,6 +78,9 @@ export class FilePipeline {
     await this.loadCheckpoints();
 
     const input = this.config.inputs[0];
+    if (input.Type !== 'input_file') {
+      throw new Error(`FilePipeline expects input_file, got ${input.Type}`);
+    }
     const parentDirs = extractParentDirs(input.FilePaths);
     this.fileWatcher.watch(parentDirs);
 
@@ -87,7 +94,7 @@ export class FilePipeline {
     this.logger.info('started', { configName: this.config.configName });
   }
 
-  async handleWake(): Promise<void> {
+  async handleWake(event?: WakeEvent): Promise<void> {
     if (!this.running) return;
 
     try {
