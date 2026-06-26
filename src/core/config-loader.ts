@@ -381,11 +381,7 @@ function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
 }
 
 function buildFileCollectionConfig(file: ConfigFile | null): FileCollectionToggle {
-  return {
-    enabled: envBool('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', file?.fileCollection?.enabled ?? false),
-    file: { enabled: true },
-    qoderApi: { enabled: true },
-  };
+  return buildPipelineConfig(file);
 }
 
 function buildPipelineConfig(file: ConfigFile | null): PipelineToggle {

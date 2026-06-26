@@ -41,6 +41,7 @@ export class PipelineManager {
     this.running = true;
 
     await ensureDir(this.configDir);
+    await this.migrateStateDir();
     await ensureDir(this.stateDir);
     await ensureDir(this.failedLogDir);
 
@@ -113,6 +114,32 @@ export class PipelineManager {
     this.configHashes.clear();
 
     logger.info('stopped');
+  }
+
+  /**
+   * One-time migration: if the old state/file-collection/ directory exists and
+   * state/pipeline/ does not, rename it so existing file-pipeline checkpoints
+   * are preserved across the upgrade.
+   */
+  private async migrateStateDir(): Promise<void> {
+    const oldDir = this.stateDir.replace(/[/\\]pipeline$/, '/file-collection');
+    if (oldDir === this.stateDir) return;
+
+    try {
+      const oldExists = await fsPromises.access(oldDir).then(() => true).catch(() => false);
+      const newExists = await fsPromises.access(this.stateDir).then(() => true).catch(() => false);
+
+      if (oldExists && !newExists) {
+        await fsPromises.rename(oldDir, this.stateDir);
+        logger.info('migrated state directory', { from: oldDir, to: this.stateDir });
+      }
+    } catch (err) {
+      logger.warn('state directory migration failed', {
+        from: oldDir,
+        to: this.stateDir,
+        error: String(err),
+      });
+    }
   }
 
   private async handleWake(event: WakeEvent): Promise<void> {

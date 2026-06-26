@@ -9,6 +9,7 @@ import { QoderApiClient } from './qoder-api-client.js';
 import { QoderApiInput } from './qoder-api-input.js';
 import { QoderApiSlsSender } from '../../flusher/qoder-api/qoder-api-sls-sender.js';
 import { createLogger, type BoundLogger } from '../../../utils/logger.js';
+import { persistFailedLogs } from '../../../flushers/sls-transport.js';
 
 const DEFAULT_INTERVAL_SECONDS = 300;
 const DEFAULT_BACKFILL_DAYS = 7;
@@ -143,7 +144,7 @@ export class QoderApiPipeline implements Pipeline {
 
     this.polling = true;
     try {
-      // 2. Collect rows from input
+      // 2. Collect rows from input (window NOT yet advanced)
       const rows = await this.input.collect();
 
       if (rows.length === 0) return;
@@ -151,13 +152,26 @@ export class QoderApiPipeline implements Pipeline {
       // 3. Enqueue into sender
       const accepted = this.sender.enqueue(rows);
 
-      // 4. Log warning if buffer was full
-      if (!accepted) {
-        this.logger.warn('sender buffer full, rows dropped', {
+      if (accepted) {
+        // 4a. Delivery accepted — advance the collection window.
+        //     The sender may still flush asynchronously, but the buffer accepted
+        //     the rows so they won't be lost. event_id provides SLS-side dedup
+        //     if the same window is re-collected after a crash before flush.
+        await this.input.confirmCycle();
+      } else {
+        // 4b. Buffer full — do NOT advance the window so data is re-collected
+        //     next cycle. Persist the dropped rows to failed-log for manual recovery.
+        this.logger.warn('sender buffer full, persisting rows to failed-log', {
           configName: this.config.configName,
           droppedRows: rows.length,
           bufferSize: this.sender.bufferSize(),
         });
+        await persistFailedLogs(
+          this.failedLogDir,
+          this.config.configName,
+          { __logs__: rows },
+          new Error('sender buffer full, window not advanced'),
+        );
       }
     } catch (err) {
       this.logger.error('poll cycle failed', {

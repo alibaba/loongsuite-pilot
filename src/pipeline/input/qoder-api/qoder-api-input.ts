@@ -49,6 +49,7 @@ export class QoderApiInput {
   private stateLoaded = false;
   private fatalAuthError = false;
   private inFlight: Promise<Record<string, string>[]> | null = null;
+  private pendingWindowEnd: string | null = null;
 
   constructor(opts: QoderApiInputOptions) {
     this.client = opts.client;
@@ -80,6 +81,20 @@ export class QoderApiInput {
       return await this.inFlight;
     } finally {
       this.inFlight = null;
+    }
+  }
+
+  /**
+   * Called by the pipeline after rows have been successfully delivered to SLS.
+   * Advances the collection window so the next cycle starts from the new position.
+   * This ensures at-least-once semantics: if delivery fails, the window does not
+   * advance and the same data will be re-collected (deduped by event_id).
+   */
+  async confirmCycle(): Promise<void> {
+    if (this.pendingWindowEnd) {
+      this.setWindowState({ lastWindowEnd: this.pendingWindowEnd });
+      await this.stateStore.save();
+      this.pendingWindowEnd = null;
     }
   }
 
@@ -333,11 +348,9 @@ export class QoderApiInput {
 
     // 15. (Sending handled by pipeline, not here)
 
-    // 16. Advance window only if everything succeeded.
-    if (advanceWindow) {
-      this.setWindowState({ lastWindowEnd: endIso });
-      await this.stateStore.save();
-    }
+    // 16. Store pending window end — actual advancement happens in confirmCycle()
+    //     after the pipeline confirms SLS delivery.
+    this.pendingWindowEnd = advanceWindow ? endIso : null;
 
     this.logger.info('qoder-api cycle done', {
       windowStart: startIso,
