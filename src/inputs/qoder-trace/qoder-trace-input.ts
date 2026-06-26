@@ -8,7 +8,7 @@ import { getTodayDateString } from '../../utils/fs-utils.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSegmentTokensForSession } from './segment-token-reader.js';
-import { readSqliteTokensForSession } from './sqlite-token-reader.js';
+import { readSqliteTokensForSession, isIdeaDbPath } from './sqlite-token-reader.js';
 import { readInterceptData, type InterceptData } from './intercept-token-reader.js';
 import { enrichCliTurn, enrichIdeTurn, injectTraceId } from './token-enricher.js';
 
@@ -80,8 +80,19 @@ export class QoderTraceInput extends BaseInput {
     }
 
     for (const [sessionId, sessionEntries] of ideSessionGroups) {
-      const sqliteRows = await readSqliteTokensForSession(sessionId);
+      const { rows: sqliteRows, matchedDbPath } = await readSqliteTokensForSession(sessionId);
       enrichIdeTurn(sessionEntries, sqliteRows);
+
+      // Fix agent type when hook processor couldn't detect qoder-idea (Node < 22 fallback).
+      // If all entries are labeled 'qoder' but tokens came from the IntelliJ-specific DB, relabel.
+      const needsRelabel = sessionEntries.every(
+        e => (e['gen_ai.agent.type'] as string) === ClientType.Qoder,
+      );
+      if (needsRelabel && isIdeaDbPath(matchedDbPath)) {
+        for (const entry of sessionEntries) {
+          entry['gen_ai.agent.type'] = ClientType.QoderIdea;
+        }
+      }
     }
 
     // 4. Inject trace_id per turn

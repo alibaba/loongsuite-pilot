@@ -137,6 +137,17 @@ function timestampToUnixNanos(value) {
   return String(BigInt(Date.now()) * 1_000_000n);
 }
 
+function computeDurationMs(startNanos, endNanos) {
+  if (!startNanos || !endNanos || startNanos === endNanos) return 0;
+  try {
+    const diffNs = BigInt(endNanos) - BigInt(startNanos);
+    if (diffNs <= 0n) return 0;
+    return Number(diffNs / 1_000_000n);
+  } catch {
+    return 0;
+  }
+}
+
 // --- Main --------------------------------------------------------------------
 
 async function main() {
@@ -722,6 +733,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
         // Find PostToolUse timestamp for this tool
         const postToolTs = findPostToolUseTs(boundaries, i)
           || (BigInt(toolCallTs) + 1_000_000n).toString(); // +1ms fallback → tool span duration ≥ 1ms
+        const toolDurationMs = computeDurationMs(toolCallTs, postToolTs);
         records.push({
           'event.id': crypto.randomUUID(),
           'event.name': 'tool.result',
@@ -734,6 +746,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
           'gen_ai.tool.call.exec.id': tc.id,
           'gen_ai.tool.call.result': tr.result,
           'tool.result.status': 'success',
+          ...(toolDurationMs > 0 ? { 'gen_ai.tool.call.duration': toolDurationMs } : {}),
           'user.id': userId,
           'agent.source': 'qoder-transcript-hook',
           time_unix_nano: postToolTs,
