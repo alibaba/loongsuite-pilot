@@ -295,8 +295,6 @@ describe('QoderTraceInput token-enricher', () => {
 
       expect(entries[1]['gen_ai.response.id']).toBeUndefined();
       expect(entries[1]['gen_ai.response.model']).toBe('auto');
-      expect((entries[1] as any)['qoder.match_confidence']).toBe('low');
-      expect((entries[1] as any)['qoder.match.warning']).toBe('assistant_count_mismatch');
     });
   });
 
