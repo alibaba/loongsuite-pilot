@@ -80,6 +80,15 @@ struct ProviderShareItem: Identifiable {
     var formattedShare: String { Formatters.percent(share) }
 }
 
+struct ModelShareItem: Identifiable {
+    let model: String
+    let tokens: Int
+    let share: Double
+    var id: String { model }
+    var formattedTokens: String { Formatters.compactNumber(tokens) }
+    var formattedShare: String { Formatters.percent(share) }
+}
+
 struct RepoShareItem: Identifiable {
     let repo: String
     let sessions: Int
@@ -103,6 +112,7 @@ struct PilotMetricsSnapshot {
     var dailySessionCounts: [DailyMetricPoint]
     var agentStats: [AgentStatusItem]
     var providerShares: [ProviderShareItem]
+    var modelShares: [ModelShareItem]
     var repoShares: [RepoShareItem]
     var errorMessage: String?
 
@@ -112,7 +122,7 @@ struct PilotMetricsSnapshot {
             totalTokens: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
             totalEvents: 0, totalSessions: 0, totalRequests: 0, totalToolCalls: 0,
             dailyTokenUsage: [], dailySessionCounts: [],
-            agentStats: [], providerShares: [], repoShares: [],
+            agentStats: [], providerShares: [], modelShares: [], repoShares: [],
             errorMessage: nil
         )
     }
@@ -158,6 +168,7 @@ private struct RangeDataFile: Decodable {
     let totalEvents: Int?
     let agentShares: [AgentShareFile]?
     let providerShares: [ProviderShareFile]?
+    let modelShares: [ModelShareFile]?
     let repoShares: [RepoShareFile]?
 }
 
@@ -171,6 +182,12 @@ private struct AgentShareFile: Decodable {
 
 private struct ProviderShareFile: Decodable {
     let provider: String?
+    let totalTokens: Int?
+    let share: Double?
+}
+
+private struct ModelShareFile: Decodable {
+    let model: String?
     let totalTokens: Int?
     let share: Double?
 }
@@ -295,6 +312,14 @@ final class PilotMetricsStore: ObservableObject {
             )
         }
 
+        let modelShares = (rd?.modelShares ?? []).map { item in
+            ModelShareItem(
+                model: item.model ?? "unknown",
+                tokens: item.totalTokens ?? 0,
+                share: item.share ?? 0
+            )
+        }
+
         let repoShares = (rd?.repoShares ?? []).map { item in
             RepoShareItem(
                 repo: item.repo ?? "unknown",
@@ -317,6 +342,7 @@ final class PilotMetricsStore: ObservableObject {
             dailySessionCounts: dailySessions,
             agentStats: agentStats,
             providerShares: providerShares,
+            modelShares: modelShares,
             repoShares: repoShares,
             errorMessage: nil
         )
