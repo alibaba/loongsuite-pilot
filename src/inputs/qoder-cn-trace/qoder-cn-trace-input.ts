@@ -111,6 +111,14 @@ export class QoderCnTraceInput extends BaseInput {
     // Re-group after orphan merge since turn.id may have been mutated.
     const mergedGroups = this.groupByTurn(rawEntries);
 
+    // Deduplicate events within each turn BEFORE enrichment so that
+    // enrichIdeTurn only sees canonical events. When the hook processor
+    // writes the same turn multiple times (partial retry + complete Stop),
+    // dedup keeps only the last event per (step_id, event_name, tool_call_id).
+    for (const [, turnEntries] of mergedGroups) {
+      dedupeEventsInTurn(turnEntries);
+    }
+
     // Aggregate all turns in the same session so enrichIdeTurn can use
     // SQLite request ordering to match tokens correctly across turns.
     // Mirrors qoder-trace-input.ts ideSessionGroups pattern.
@@ -131,40 +139,27 @@ export class QoderCnTraceInput extends BaseInput {
       const sqliteRows = await readSqliteTokensForSession(sessionId);
       enrichIdeTurn(sessionEntries, sqliteRows);
       // Post-processing after enrichIdeTurn:
-      //   - expandContainerTimes: bumps llm.response to turn max so ENTRY/AGENT spans
-      //     get correct endTimes; skips 'other' to preserve user-boundary timestamp
-      //   - propagateModelToToolEvents: copies model/provider from llm.response to
-      //     tool.call/tool.result in the same step
-      //   - computeToolCallDurations: fills gen_ai.tool.call.duration on tool.result
-      //     events as (tool.result.time - tool.call.time) in milliseconds
-      //   - alignUserBoundaryToFirstLlmRequest: sets 'other' event's step.id and time
-      //     equal to step-1 llm.request, preventing the converter from generating a
-      //     0ms empty STEP
       expandContainerTimes(sessionEntries);
       propagateModelToToolEvents(sessionEntries);
       computeToolCallDurations(sessionEntries);
       alignUserBoundaryToFirstLlmRequest(sessionEntries);
     }
 
-    // Aggregate all session entries (no synthetic events added by post-processing now).
+    // Aggregate all session entries.
     const allSessionEntries: AgentActivityEntry[] = [];
     for (const sessionEntries of ideSessionGroups.values()) {
       allSessionEntries.push(...sessionEntries);
     }
 
-    // Deduplicate events within each turn: when the same turn appears multiple
-    // times in the history file (e.g., a partial turn from an earlier retry and
-    // a complete turn from the Stop retry), keep only the last event per
-    // (step_id, event_name, tool_call_id) group.
     const allTurnGroups = this.groupByTurn(allSessionEntries);
     for (const [, turnEntries] of allTurnGroups) {
-      dedupeEventsInTurn(turnEntries);
       injectTraceId(turnEntries);
     }
 
-    // No-session entries get their own trace_id injection.
+    // No-session entries also get dedup + trace_id injection.
     const noSessionTurnGroups = this.groupByTurn(noSessionEntries);
     for (const [, turnEntries] of noSessionTurnGroups) {
+      dedupeEventsInTurn(turnEntries);
       injectTraceId(turnEntries);
     }
 
