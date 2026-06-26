@@ -240,6 +240,8 @@ export class Orchestrator extends EventEmitter {
       getSnapshot: () => this.buildDataflowSnapshot(),
       alarmManager: this.alarmManager,
       agentsConfig: this.config.agents,
+      slsEndpoints: this.config.flushers.sls?.endpoints ?? [],
+      cmsWorkspace: this.config.cms?.workspace ?? '',
     });
     await this.metricsWriter.start();
 
@@ -1103,8 +1105,6 @@ export class Orchestrator extends EventEmitter {
       inputIdleMinutes.set(id, this.inputManager.getInputIdleMinutes(id));
     }
 
-    const agentVersions = this.inputManager.getAgentVersions();
-
     return {
       sendEntriesTotal,
       receivedBytesTotal,
@@ -1113,7 +1113,6 @@ export class Orchestrator extends EventEmitter {
       flusherRunner,
       inputs,
       flushers,
-      agentVersions,
       inputIdleMinutes,
     };
   }

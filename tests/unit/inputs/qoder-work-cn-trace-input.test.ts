@@ -80,7 +80,7 @@ describe('QoderWorkTraceInput (CN variant)', () => {
     // so the round-tripped ms value may differ from the original due to
     // timezone handling. Verify the nanos are 6 zeros + ms digits (BigInt format).
     const entryRequest = entries.find(
-      e => e['event.name'] === 'llm.request' && !e['gen_ai.step.id'],
+      e => e['event.name'] === 'other' && !e['gen_ai.step.id'],
     );
     expect(entryRequest).toBeDefined();
     const startNano = entryRequest!.time_unix_nano;
