@@ -388,7 +388,7 @@ function buildPipelineConfig(file: ConfigFile | null): PipelineToggle {
   const legacyEnabled = file?.fileCollection?.enabled;
   const enabled = envBool(
     'LOONGSUITE_PILOT_PIPELINE_ENABLED',
-    file?.pipeline?.enabled ?? legacyEnabled ?? false,
+    envBool('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', file?.pipeline?.enabled ?? legacyEnabled ?? false),
   );
   return {
     enabled,
