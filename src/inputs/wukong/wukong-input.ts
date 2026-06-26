@@ -41,6 +41,8 @@ interface WukongTask {
   };
 }
 
+type ValidWukongTask = WukongTask & { session_id: string };
+
 interface ListTasksResponse {
   hasMore: boolean;
   items: WukongTask[];
@@ -217,7 +219,7 @@ export class WukongInput extends BaseInput {
         ? { ...(state.extra.seenCounts as Record<string, number>) }
         : {};
 
-    let tasks: WukongTask[];
+    let tasks: ValidWukongTask[];
     try {
       tasks = await this.listAllTasks();
     } catch (err) {
@@ -304,7 +306,7 @@ export class WukongInput extends BaseInput {
   }
 
   private async processOneTask(
-    task: WukongTask,
+    task: ValidWukongTask,
     prevCount: number,
   ): Promise<{ entries: AgentActivityEntry[]; newSeenCount: number } | null> {
     const messagesResp = await this.getMessages(task.session_id);
@@ -324,7 +326,7 @@ export class WukongInput extends BaseInput {
     return { entries, newSeenCount: prevCount + processable.length };
   }
 
-  private transformMessages(task: WukongTask, messages: WukongMessage[]): AgentActivityEntry[] {
+  private transformMessages(task: ValidWukongTask, messages: WukongMessage[]): AgentActivityEntry[] {
     const entries: AgentActivityEntry[] = [];
     const sessionId = task.session_id;
     const meta = (task.metadata && typeof task.metadata === 'object')
@@ -403,7 +405,7 @@ export class WukongInput extends BaseInput {
   }
 
   private transformAssistantMessage(
-    task: WukongTask,
+    task: ValidWukongTask,
     msg: WukongMessage,
     events: AguiEvent[],
     model: string,
@@ -1099,7 +1101,7 @@ export class WukongInput extends BaseInput {
   }
 
   private buildToolCallEntry(
-    task: WukongTask,
+    task: ValidWukongTask,
     msg: WukongMessage,
     evt: AguiEvent,
     model: string,
@@ -1142,7 +1144,7 @@ export class WukongInput extends BaseInput {
   }
 
   private buildToolResultEntry(
-    task: WukongTask,
+    task: ValidWukongTask,
     msg: WukongMessage,
     evt: AguiEvent,
     model: string,
@@ -1186,7 +1188,7 @@ export class WukongInput extends BaseInput {
   }
 
   private transformActivitySnapshot(
-    task: WukongTask,
+    task: ValidWukongTask,
     msg: WukongMessage,
     evt: AguiEvent,
     model: string,
@@ -1282,8 +1284,8 @@ export class WukongInput extends BaseInput {
     return [toolCallEntry, toolResultEntry];
   }
 
-  private async listAllTasks(): Promise<WukongTask[]> {
-    const allTasks: WukongTask[] = [];
+  private async listAllTasks(): Promise<Array<WukongTask & { session_id: string }>> {
+    const allTasks: Array<WukongTask & { session_id: string }> = [];
     let cursor: string | undefined;
     let hasMore = false;
     do {
@@ -1294,7 +1296,7 @@ export class WukongInput extends BaseInput {
         ['agent', 'data', 'list_tasks', '--json', JSON.stringify(params)],
         { timeout: CLI_TIMEOUT_MS, maxBuffer: CLI_MAX_BUFFER, signal: this._abortController.signal },
       );
-      if (!stdout || !stdout.trim()) {
+      if (!stdout || !/\S/.test(stdout)) {
         this.logger.debug('wukong-cli list_tasks returned empty stdout', {
           stderr: (stderr ?? '').slice(0, 256),
         });
@@ -1311,7 +1313,7 @@ export class WukongInput extends BaseInput {
       }
       const resp = parsed as ListTasksResponse;
       for (const item of resp.items) {
-        if (item.session_id) allTasks.push(item);
+        if (item.session_id != null) allTasks.push(item as WukongTask & { session_id: string });
       }
       cursor = resp.hasMore ? resp.nextCursor : undefined;
       hasMore = !!resp.hasMore;
@@ -1331,10 +1333,12 @@ export class WukongInput extends BaseInput {
       ['agent', 'data', 'get_spark_agui_messages', '--json', JSON.stringify({ conversationId })],
       { timeout: CLI_TIMEOUT_MS, maxBuffer: CLI_MAX_BUFFER, signal: this._abortController.signal },
     );
-    if (!stdout || !stdout.trim()) {
-      this.logger.debug('wukong-cli get_spark_agui_messages returned empty stdout, treating as no messages', {
+    if (!stdout || !/\S/.test(stdout)) {
+      const stderrSnippet = (stderr ?? '').slice(0, 256);
+      const logLevel = stderrSnippet ? 'warn' : 'debug';
+      this.logger[logLevel]('wukong-cli get_spark_agui_messages returned empty stdout, treating as no messages', {
         conversationId,
-        stderr: (stderr ?? '').slice(0, 256),
+        stderr: stderrSnippet,
       });
       return { messages: [] };
     }

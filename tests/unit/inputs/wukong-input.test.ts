@@ -1278,12 +1278,31 @@ describe('WukongInput', () => {
 
   it('filters out tasks with null session_id from list_tasks', async () => {
     const taskWithNullSession = { ...SAMPLE_TASK, id: 'task-null', session_id: null as any, status: 'failed' };
-    mockExecFile.mockImplementation(makeExecFileImplByConversation(
-      JSON.stringify({ hasMore: false, items: [SAMPLE_TASK, taskWithNullSession] }),
-      {
-        'sess-1': JSON.stringify({ messages: SAMPLE_MESSAGES }),
-      },
-    ));
+    const getMessagesCalls: string[] = [];
+    mockExecFile.mockImplementation((...allArgs: unknown[]) => {
+      const cb = allArgs[allArgs.length - 1] as Function;
+      const args = allArgs[1] as string[];
+      const subcommand = args.join(' ');
+
+      if (subcommand.includes('list_tasks')) {
+        cb(null, {
+          stdout: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK, taskWithNullSession] }),
+          stderr: '',
+        });
+        return;
+      }
+      if (subcommand.includes('get_spark_agui_messages')) {
+        const jsonArg = args[args.length - 1]!;
+        const parsed = JSON.parse(jsonArg);
+        getMessagesCalls.push(parsed.conversationId);
+        cb(null, {
+          stdout: JSON.stringify({ messages: SAMPLE_MESSAGES }),
+          stderr: '',
+        });
+        return;
+      }
+      cb(new Error(`unexpected: ${subcommand}`), { stdout: '', stderr: '' });
+    });
 
     createInput();
     seedSeenCounts();
@@ -1295,8 +1314,8 @@ describe('WukongInput', () => {
     // Should only process the task with valid session_id
     const sessionIds = new Set(entries.map(e => e['gen_ai.session.id']));
     expect(sessionIds.has('sess-1')).toBe(true);
-    // The null-session task should never trigger a getMessages call
-    // (if it did, makeExecFileImplByConversation would error on the missing key)
+    // getMessages should only be called for sess-1, never for null
+    expect(getMessagesCalls).toEqual(['sess-1']);
   });
 
   it('handles empty stdout from get_spark_agui_messages gracefully', async () => {
