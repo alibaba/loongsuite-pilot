@@ -80,6 +80,11 @@ export class HookStrategy implements DeployStrategy {
         return true;
       }
     }
+    for (const retiredDef of this.buildRetiredHookDefinitions(def)) {
+      if (await this.hookManager.isHookInstalled(retiredDef)) {
+        return true;
+      }
+    }
     return false;
   }
 
@@ -102,6 +107,23 @@ export class HookStrategy implements DeployStrategy {
 
     try {
       await this.ensureSettingsFile(hookConfig.settingsPath);
+
+      const retiredHookDefs = this.buildRetiredHookDefinitions(def);
+      for (const retiredHookDef of retiredHookDefs) {
+        const removed = await this.hookManager.uninstallHook(retiredHookDef);
+        if (!removed) {
+          return { success: false, agentId: def.id, deployMode: 'hook', error: 'failed to remove retired hook event' };
+        }
+      }
+      if (hookConfig.trustToml && retiredHookDefs.length > 0) {
+        const trust = hookConfig.trustToml;
+        removeTrustBlock(
+          resolveHome(trust.configPath),
+          trust.marker,
+          path.resolve(resolveHome(hookConfig.settingsPath)),
+          retiredHookDefs.map(definition => definition.hookJsonPath.at(-1)!),
+        );
+      }
 
       if (hookConfig.env) {
         try {
@@ -301,6 +323,25 @@ export class HookStrategy implements DeployStrategy {
       useNestedFormat: hookConfig.format === 'nested',
       replaceHookCommands: hookConfig.replaceHookCommands,
     }));
+  }
+
+  private buildRetiredHookDefinitions(def: AgentDefinition): HookDefinition[] {
+    const hookConfig = def.hook;
+    if (!hookConfig?.retiredEvents?.length) return [];
+    const currentEvents = new Set(hookConfig.events);
+    return [...new Set(hookConfig.retiredEvents)]
+      .filter(event => !currentEvents.has(event))
+      .map(event => ({
+        agentId: def.id,
+        settingsPath: hookConfig.settingsPath,
+        hookJsonPath: ['hooks', event],
+        hookCommand: formatHookCommand(
+          hookConfig.hookCommand, event, hookConfig.eventSubcommand,
+        ),
+        matcher: hookConfig.matcher,
+        useNestedFormat: hookConfig.format === 'nested',
+        replaceHookCommands: hookConfig.replaceHookCommands,
+      }));
   }
 
   /**

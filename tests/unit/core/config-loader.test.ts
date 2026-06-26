@@ -225,7 +225,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qoder-work'].enabled).toBe(true);
       expect(config.listeners['qoder-cli-session'].enabled).toBe(true);
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
-      expect(config.listeners['codex-aborted-turn']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
     });
 
     it('merges file-level listener overrides', async () => {
@@ -238,6 +238,16 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.listeners.qoder.enabled).toBe(false);
       expect(config.listeners.qoder.pollInterval).toBe(120000);
+    });
+
+    it('migrates a legacy codex-log listener override to codex-transcript', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        listeners: { 'codex-log': { enabled: false, pollInterval: 45_000 } },
+      });
+
+      const config = await loadConfig();
+
+      expect(config.listeners['codex-transcript']).toEqual({ enabled: false, pollInterval: 45_000 });
     });
 
     it('applies Qoder poll interval env override to SQLite listener', async () => {
@@ -388,7 +398,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.agents.cursor.captureMessageContent).toBe(false);
       expect(config.agents.qoder.captureMessageContent).toBe(true);
-      expect(config.listeners['codex-aborted-turn']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
     });
 
     it('parses string boolean captureMessageContent values', async () => {

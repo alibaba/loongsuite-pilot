@@ -317,6 +317,38 @@ describe('HookStrategy', () => {
       expect(mockHookManager.installHook).toHaveBeenCalledTimes(1);
     });
 
+    it('removes retired hook events before installing the current definition', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({ version: 1, hooks: {} });
+      mockHookManager.uninstallHook.mockResolvedValue(true);
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      const def = makeDef({
+        hook: {
+          settingsPath: '/home/.test/hooks.json',
+          events: ['Stop'],
+          retiredEvents: ['SessionStart', 'PreToolUse'],
+          hookCommand: '/opt/pilot/hooks/test.sh',
+          format: 'flat',
+          eventSubcommand: 'kebab-case',
+          replaceHookCommands: ['/old/codex-hook.sh'],
+        },
+      });
+
+      const result = await strategy.deploy(def);
+
+      expect(result.success).toBe(true);
+      expect(mockHookManager.uninstallHook).toHaveBeenCalledTimes(2);
+      expect(mockHookManager.uninstallHook.mock.calls.map(([definition]) => definition.hookJsonPath)).toEqual([
+        ['hooks', 'SessionStart'],
+        ['hooks', 'PreToolUse'],
+      ]);
+      expect(mockHookManager.uninstallHook.mock.calls[0]?.[0].hookCommand).toBe(
+        '/opt/pilot/hooks/test.sh session-start',
+      );
+      expect(mockHookManager.uninstallHook.mock.calls[0]?.[0].replaceHookCommands).toEqual([
+        '/old/codex-hook.sh',
+      ]);
+    });
+
     it('returns failure if installHook returns false', async () => {
       vi.mocked(readJsonFile).mockResolvedValue({ version: 1, hooks: {} });
       mockHookManager.isHookInstalled.mockResolvedValue(false);

@@ -70,6 +70,11 @@ export abstract class BaseInput extends EventEmitter {
   /** Optional hook called once on stop. */
   protected async onStop(): Promise<void> {}
 
+  /** Request an immediate serialized collection cycle from an input-owned watcher. */
+  protected requestCollection(): void {
+    if (this._running) void this.runCycle();
+  }
+
   private runCycle(): Promise<void> {
     if (this.cyclePromise) return this.cyclePromise;
     this.cyclePromise = this.runCycleOnce().finally(() => {

@@ -36,8 +36,7 @@ import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-sess
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
-import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
-import { CodexAbortedTurnInput } from '../inputs/codex-aborted-turn/codex-aborted-turn-input.js';
+import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
@@ -89,8 +88,7 @@ export class Orchestrator extends EventEmitter {
     'qoder-cli-session': 'qoder',
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
-    'codex-log': 'codex',
-    'codex-aborted-turn': 'codex',
+    'codex-transcript': 'codex',
     'opencode-log': 'opencode',
     'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
@@ -868,41 +866,21 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Codex Log (OTel plugin JSONL) ---
-    const codexLogDir = this.resolveCodexLogDir();
-    const codexLogInput = new CodexLogInput({
-      stateStore: this.stateStore,
-      logDir: codexLogDir,
-    });
-    this.inputManager.registerInput(codexLogInput);
-    entries.push(
-      this.inputManager.buildDetectionEntry(codexLogInput, {
-        watchPaths: [codexLogDir],
-        isAvailable: async () => directoryExists(codexLogDir),
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codex-log']) &&
-          this.agentControlManager.resolveEnabled(
-            'codex-log',
-            listenerCfg['codex-log']?.enabled ?? true,
-          ),
-        pollIntervalMs: listenerCfg['codex-log']?.pollInterval,
-      }),
-    );
-
-    // --- Codex interrupted turns (transcript tailer) ---
-    const codexAbortedTurnInput = new CodexAbortedTurnInput({
+    // --- Codex rollout transcript (completed and interrupted turns) ---
+    const codexTranscriptInput = new CodexTranscriptInput({
       stateStore: this.stateStore,
     });
-    this.inputManager.registerInput(codexAbortedTurnInput);
+    this.inputManager.registerInput(codexTranscriptInput);
     entries.push(
-      this.inputManager.buildDetectionEntry(codexAbortedTurnInput, {
-        watchPaths: CodexAbortedTurnInput.getWatchPaths(),
-        isAvailable: CodexAbortedTurnInput.checkAvailability,
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codex-aborted-turn']) &&
+      this.inputManager.buildDetectionEntry(codexTranscriptInput, {
+        watchPaths: CodexTranscriptInput.getWatchPaths(),
+        isAvailable: CodexTranscriptInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codex-transcript']) &&
           this.agentControlManager.resolveEnabled(
-            'codex-aborted-turn',
-            listenerCfg['codex-aborted-turn']?.enabled ?? true,
+            'codex-transcript',
+            listenerCfg['codex-transcript']?.enabled ?? true,
           ),
-        pollIntervalMs: listenerCfg['codex-aborted-turn']?.pollInterval,
+        pollIntervalMs: listenerCfg['codex-transcript']?.pollInterval,
       }),
     );
 
@@ -970,22 +948,6 @@ export class Orchestrator extends EventEmitter {
     );
 
     return entries;
-  }
-
-  private resolveCodexLogDir(): string {
-    try {
-      const configPath = path.join(os.homedir(), '.codex', 'otel-config.json');
-      const raw = fs.readFileSync(configPath, 'utf-8');
-      const cfg = JSON.parse(raw);
-      if (cfg.log_dir && typeof cfg.log_dir === 'string') {
-        return cfg.log_dir.replace(/^~/, os.homedir());
-      }
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        logger.warn('failed to read codex otel-config.json', { error: String(err) });
-      }
-    }
-    return path.join(this.dataDir, 'logs', 'codex');
   }
 
   private resolveClaudeCodeLogDir(): string {
@@ -1131,4 +1093,3 @@ export class Orchestrator extends EventEmitter {
     return this.alarmManager;
   }
 }
-

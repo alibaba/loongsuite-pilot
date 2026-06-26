@@ -310,8 +310,7 @@ function buildListenersConfig(
     'qoder-cli-session': { enabled: true, pollInterval: 30_000 },
     'cursor-hook': { enabled: true, pollInterval: 30_000 },
     'claude-code-log': { enabled: true, pollInterval: 30_000 },
-    'codex-log': { enabled: true, pollInterval: 30_000 },
-    'codex-aborted-turn': { enabled: true, pollInterval: 30_000 },
+    'codex-transcript': { enabled: true, pollInterval: 30_000 },
   };
 
   const result = { ...defaults };
@@ -322,6 +321,18 @@ function buildListenersConfig(
       result[key] = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
         pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? 30_000,
+      };
+    }
+  }
+
+  // Completed and interrupted Codex turns now share one transcript collector.
+  // Keep legacy listener overrides effective until the new key is configured.
+  if (!file?.listeners?.['codex-transcript']) {
+    const legacy = file?.listeners?.['codex-log'] ?? file?.listeners?.['codex-aborted-turn'];
+    if (legacy) {
+      result['codex-transcript'] = {
+        enabled: legacy.enabled ?? defaults['codex-transcript'].enabled,
+        pollInterval: legacy.pollInterval ?? defaults['codex-transcript'].pollInterval,
       };
     }
   }
