@@ -34,6 +34,11 @@ final class MetricsSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.menuBarTitle, "0")
     }
 
+    func testMakeEmpty_hasEmptyModelShares() {
+        let snapshot = PilotMetricsSnapshot.makeEmpty(range: .today)
+        XCTAssertTrue(snapshot.modelShares.isEmpty)
+    }
+
     // MARK: - AgentStatusItem
 
     func testAgentStatusItem_formattedTokens() {
@@ -47,6 +52,98 @@ final class MetricsSnapshotTests: XCTestCase {
         let item = ProviderShareItem(provider: "anthropic", tokens: 6_200_000, share: 0.73)
         XCTAssertEqual(item.formattedShare, "73%")
         XCTAssertEqual(item.formattedTokens, "6.2M")
+    }
+
+    // MARK: - ModelShareItem
+
+    func testModelShareItem_formattedShare() {
+        let item = ModelShareItem(model: "claude-opus-4-7", tokens: 7_300_000, share: 0.73)
+        XCTAssertEqual(item.formattedShare, "73%")
+        XCTAssertEqual(item.formattedTokens, "7.3M")
+        XCTAssertEqual(item.id, "claude-opus-4-7")
+    }
+
+    func testModelShareItem_smallTokens() {
+        let item = ModelShareItem(model: "claude-haiku-4-5", tokens: 850, share: 0.0085)
+        XCTAssertEqual(item.formattedShare, "1%")
+        XCTAssertEqual(item.formattedTokens, "850")
+    }
+
+    // MARK: - buildSnapshot decodes modelShares
+
+    @MainActor
+    func testBuildSnapshot_decodesModelSharesInOrder() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metrics-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: tempDir.appendingPathComponent("logs"),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // fixture 来源: 仿照 tests/unit/status-bar/metrics-summary-writer.test.ts
+        // 已有的 claude-opus-4-6 / claude-sonnet-4-6 modelShares 结构
+        let json = #"""
+        {"version":1,"ranges":{"today":{"totalTokens":10000000,
+          "modelShares":[
+            {"model":"claude-opus-4-7","totalTokens":7300000,"inputTokens":5000000,"cacheReadTokens":2000000,"share":0.73},
+            {"model":"claude-sonnet-4-6","totalTokens":2700000,"inputTokens":1800000,"cacheReadTokens":400000,"share":0.27}
+          ]}}}
+        """#.data(using: .utf8)!
+        try json.write(to: tempDir.appendingPathComponent("logs/metrics-summary.json"))
+
+        setenv("LOONGSUITE_PILOT_DATA_DIR", tempDir.path, 1)
+        defer { unsetenv("LOONGSUITE_PILOT_DATA_DIR") }
+
+        let store = PilotMetricsStore()
+        store.refresh()
+
+        let expectation = XCTestExpectation(description: "snapshot loaded from temp file")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { expectation.fulfill() }
+        wait(for: [expectation], timeout: 2.0)
+
+        XCTAssertEqual(store.snapshot.totalTokens, 10_000_000)
+        XCTAssertEqual(store.snapshot.modelShares.count, 2)
+        XCTAssertEqual(store.snapshot.modelShares[0].model, "claude-opus-4-7")
+        XCTAssertEqual(store.snapshot.modelShares[0].tokens, 7_300_000)
+        XCTAssertEqual(store.snapshot.modelShares[0].share, 0.73, accuracy: 0.0001)
+        XCTAssertEqual(store.snapshot.modelShares[0].formattedShare, "73%")
+        XCTAssertEqual(store.snapshot.modelShares[0].formattedTokens, "7.3M")
+        XCTAssertEqual(store.snapshot.modelShares[1].model, "claude-sonnet-4-6")
+        XCTAssertEqual(store.snapshot.modelShares[1].tokens, 2_700_000)
+        XCTAssertEqual(store.snapshot.modelShares[1].share, 0.27, accuracy: 0.0001)
+        XCTAssertEqual(store.snapshot.modelShares[1].formattedShare, "27%")
+        XCTAssertEqual(store.snapshot.modelShares[1].formattedTokens, "2.7M")
+    }
+
+    @MainActor
+    func testBuildSnapshot_modelSharesMissing_yieldsEmptyArray() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metrics-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: tempDir.appendingPathComponent("logs"),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // 旧 metrics-summary.json 无 modelShares 字段 —— 向后兼容
+        let json = #"""
+        {"version":1,"ranges":{"today":{"totalTokens":1000}}}
+        """#.data(using: .utf8)!
+        try json.write(to: tempDir.appendingPathComponent("logs/metrics-summary.json"))
+
+        setenv("LOONGSUITE_PILOT_DATA_DIR", tempDir.path, 1)
+        defer { unsetenv("LOONGSUITE_PILOT_DATA_DIR") }
+
+        let store = PilotMetricsStore()
+        store.refresh()
+
+        let expectation = XCTestExpectation(description: "snapshot loaded without modelShares")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { expectation.fulfill() }
+        wait(for: [expectation], timeout: 2.0)
+
+        XCTAssertEqual(store.snapshot.totalTokens, 1000)
+        XCTAssertTrue(store.snapshot.modelShares.isEmpty)
     }
 
     // MARK: - MetricsAggregationRange
