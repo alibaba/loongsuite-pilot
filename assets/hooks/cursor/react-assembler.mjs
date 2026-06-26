@@ -269,6 +269,17 @@ function buildParentSteps(events, ctx) {
   // Track last event timestamp for computing next step's LLM start time
   let lastStepEndTs = ctx.promptEventTs; // first step starts at prompt time
 
+  // Cumulative input messages within this turn — represents the full user/tool
+  // message context sent to the LLM at each llm.request. Subagents have no
+  // user prompt seeded (ctx.userPrompt is null for child sessions).
+  const cumulativeInputMessages = [];
+  if (ctx.userPrompt) {
+    cumulativeInputMessages.push({
+      role: 'user',
+      parts: [{ type: 'text', content: ctx.userPrompt }],
+    });
+  }
+
   // Buffer for tools that arrive before any thought
   let pendingToolRecords = [];
   let pendingToolCalls = [];
@@ -351,9 +362,19 @@ function buildParentSteps(events, ctx) {
     currentStepId = `${ctx.stepPrefix || ctx.turnId}:s${stepRound}`;
     currentStepHasTools = false;
     stepToolCalls.set(currentStepId, []);
+
+    // Compute delta for this step:
+    //   s1: user prompt (if any) — already pre-seeded in cumulative.
+    //   s2+: tool results from previous step — append to cumulative.
+    const deltaMessages = buildDeltaMessages(isFirst, userPrompt, previousToolResults, cumulativeInputMessages);
+
     const { timestamp: reqTs, source: reqTsSource } = llmRequestStartTime(ev, lastStepEndTs);
-    records.push(buildLlmRequestWithTs(reqTs, ev, ctx, currentStepId,
-      isFirst ? userPrompt : null, previousToolResults, reqTsSource));
+    records.push(buildLlmRequestWithTs(
+      reqTs, ev, ctx, currentStepId,
+      deltaMessages,
+      cumulativeInputMessages,
+      reqTsSource,
+    ));
     previousToolResults = [];
   }
 
@@ -374,6 +395,29 @@ function buildParentSteps(events, ctx) {
     }
 
     else if (ev.hook_event === 'afterAgentResponse') {
+      // composer-2.5-fast path: no afterAgentThought, tools buffered, no step opened yet.
+      // First open s1 for the buffered tools (so afterAgentResponse can claim s2 below).
+      if (currentStepId === null && pendingToolRecords.length > 0) {
+        stepRound++;
+        currentStepId = `${ctx.stepPrefix || ctx.turnId}:s${stepRound}`;
+        stepToolCalls.set(currentStepId, []);
+        const { timestamp: reqTs, source: reqTsSource } = llmRequestStartTime(ev, lastStepEndTs);
+        // Ordering invariant: delta must be computed BEFORE flushPendingTools, because
+        // flushPendingTools populates previousToolResults with the current step's tools.
+        // s1's delta should only contain results from a prior step (empty for the first step).
+        const deltaMessages = buildDeltaMessages(stepRound === 1, ctx.userPrompt, previousToolResults, cumulativeInputMessages);
+        previousToolResults = [];
+        records.push(buildLlmRequestWithTs(
+          reqTs, { hook_event: 'implicit' }, ctx, currentStepId,
+          deltaMessages, cumulativeInputMessages, reqTsSource,
+        ));
+        currentLlmResponse = buildEmptyLlmResponse(
+          { _journal_ts: reqTs, hook_event: 'implicit' }, ctx, currentStepId,
+        );
+        flushPendingTools(currentStepId);
+        currentStepHasTools = true;
+      }
+
       if (currentStepId !== null && currentStepHasTools) {
         openNewStep(ev, false, null);
         currentLlmResponse = buildLlmResponseWithToken(ev, ctx, currentStepId, 'text');
@@ -456,11 +500,19 @@ function buildParentSteps(events, ctx) {
 
   // Buffered tools with no thought/response (entire turn was tools-only)
   if (pendingToolRecords.length > 0) {
+    const isFirstStep = stepRound === 0;
     stepRound++;
     currentStepId = `${ctx.stepPrefix || ctx.turnId}:s${stepRound}`;
     stepToolCalls.set(currentStepId, []);
     const reqTs = lastStepEndTs || ctx.promptEventTs;
-    records.push(buildLlmRequestWithTs(reqTs, { hook_event: 'implicit' }, ctx, currentStepId, ctx.userPrompt, previousToolResults));
+
+    const deltaMessages = buildDeltaMessages(isFirstStep, ctx.userPrompt, previousToolResults, cumulativeInputMessages);
+
+    records.push(buildLlmRequestWithTs(
+      reqTs, { hook_event: 'implicit' }, ctx, currentStepId,
+      deltaMessages,
+      cumulativeInputMessages,
+    ));
     currentLlmResponse = buildEmptyLlmResponse({ _journal_ts: reqTs, hook_event: 'implicit' }, ctx, currentStepId);
     flushPendingTools(currentStepId);
     currentStepHasTools = true;
@@ -476,20 +528,7 @@ function buildParentSteps(events, ctx) {
 
 // ─── Record Builders ───
 
-function buildLlmRequestWithTs(reqTs, ev, ctx, stepId, userPrompt, prevToolResults, timeSource) {
-  const inputMessages = [];
-  if (userPrompt && (!prevToolResults || prevToolResults.length === 0)) {
-    inputMessages.push({ role: 'user', parts: [{ type: 'text', content: userPrompt }] });
-  }
-  if (prevToolResults && prevToolResults.length > 0) {
-    const parts = prevToolResults.map(tr => ({
-      type: 'tool_call_response',
-      id: tr.toolUseId || null,
-      response: tr.error || stringify(tr.result),
-    }));
-    inputMessages.push({ role: 'tool', parts });
-  }
-
+function buildLlmRequestWithTs(reqTs, ev, ctx, stepId, deltaMessages, fullMessages, timeSource) {
   const ts = reqTs ? timestampToUnixNanos(reqTs) : eventTs(ev);
   return applyPolicy({
     time_unix_nano: ts,
@@ -500,10 +539,55 @@ function buildLlmRequestWithTs(reqTs, ev, ctx, stepId, userPrompt, prevToolResul
     'gen_ai.step.id': stepId,
     'gen_ai.provider.name': inferProvider(ev.model || ctx.model),
     'gen_ai.request.model': resolveModel(ev.model || ctx.model),
-    'gen_ai.input.messages': inputMessages.length > 0 ? inputMessages : undefined,
+    'gen_ai.input.messages_delta': deltaMessages && deltaMessages.length > 0
+      ? cloneMessages(deltaMessages)
+      : undefined,
+    'gen_ai.input.messages': fullMessages && fullMessages.length > 0
+      ? cloneMessages(fullMessages)
+      : undefined,
     'agent.cursor.hook_event_name': ev.hook_event,
     'agent.cursor.llm_request_time_source': timeSource,
   }, ctx.runtimeConfig);
+}
+
+/** Deep clone messages so later mutations to cumulative array don't affect emitted records. */
+function cloneMessages(messages) {
+  return JSON.parse(JSON.stringify(messages));
+}
+
+/** Build a tool-role message from collected tool results (used as delta input on s2+ steps). */
+function toolResultsToMessage(toolResults) {
+  const parts = toolResults.map(tr => ({
+    type: 'tool_call_response',
+    id: tr.toolUseId || null,
+    response: tr.error || stringify(tr.result),
+  }));
+  return { role: 'tool', parts };
+}
+
+/**
+ * Build per-step delta messages and update cumulative input.
+ *
+ * - isFirst step: delta includes the user prompt (already pre-seeded in cumulative).
+ * - s2+ steps: delta includes a tool-role message from the previous step's results,
+ *   which is also appended to cumulativeInputMessages.
+ *
+ * Callers are responsible for resetting previousToolResults after this call.
+ */
+function buildDeltaMessages(isFirst, userPrompt, previousToolResults, cumulativeInputMessages) {
+  const deltaMessages = [];
+  if (isFirst && userPrompt) {
+    deltaMessages.push({
+      role: 'user',
+      parts: [{ type: 'text', content: userPrompt }],
+    });
+  }
+  if (previousToolResults.length > 0) {
+    const toolMessage = toolResultsToMessage(previousToolResults);
+    deltaMessages.push(toolMessage);
+    cumulativeInputMessages.push(toolMessage);
+  }
+  return deltaMessages;
 }
 
 function buildLlmResponse(ev, ctx, stepId, partType) {

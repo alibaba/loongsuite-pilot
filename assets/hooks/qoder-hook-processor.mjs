@@ -31,7 +31,91 @@ import {
   buildQoderHookRecord,
   inferProviderName,
 } from './agent-event-normalizer.mjs';
-import { isQoderIdeaSession } from './shared/qoder-db-utils.mjs';
+
+// --- Retry lockfile (qoder-cn only) -----------------------------------------
+// QoderCN fires Stop hook multiple times per turn AND incomplete transcript
+// causes background retries — without coordination these can stack up and
+// produce duplicate records. We guard at two points:
+//   1. parent process: skip spawn if a live lock exists
+//   2. retry subprocess: refuse to enter processTranscript if a peer holds it
+// The lock file lives at <HOOKS_DIR>/.retry-locks/<sha1>.lock and contains
+// JSON `{ pid, sessionId, startedAt }`.
+
+export const RETRY_LOCK_DIR = path.join(HOOKS_DIR, '.retry-locks');
+export const RETRY_LOCK_MAX_AGE_MS = 60_000;
+
+export function retryLockPath(transcriptPath, dir = RETRY_LOCK_DIR) {
+  const hash = crypto.createHash('sha1').update(transcriptPath).digest('hex');
+  return path.join(dir, `${hash}.lock`);
+}
+
+export function pidAlive(pid) {
+  if (!pid || typeof pid !== 'number') return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e && e.code === 'EPERM';
+  }
+}
+
+export function readRetryLock(lockPath) {
+  try {
+    const raw = fs.readFileSync(lockPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') return parsed;
+  } catch { /* fall through */ }
+  return null;
+}
+
+export function isRetryLockStale(lock) {
+  if (!lock) return true;
+  const age = Date.now() - (Number(lock.startedAt) || 0);
+  if (age > RETRY_LOCK_MAX_AGE_MS) return true;
+  return !pidAlive(lock.pid);
+}
+
+export function tryAcquireRetryLock(transcriptPath, sessionId, dir = RETRY_LOCK_DIR) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const lockPath = retryLockPath(transcriptPath, dir);
+    const payload = JSON.stringify({ pid: process.pid, sessionId, startedAt: Date.now() });
+    try {
+      const handle = fs.openSync(lockPath, 'wx');
+      fs.writeSync(handle, payload);
+      fs.closeSync(handle);
+      return true;
+    } catch (err) {
+      if (err && err.code === 'EEXIST') {
+        const existing = readRetryLock(lockPath);
+        if (isRetryLockStale(existing)) {
+          try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
+          try {
+            const handle = fs.openSync(lockPath, 'wx');
+            fs.writeSync(handle, payload);
+            fs.closeSync(handle);
+            return true;
+          } catch { return false; }
+        }
+        return false;
+      }
+      return false;
+    }
+  } catch {
+    return false;
+  }
+}
+
+export function releaseRetryLock(transcriptPath, dir = RETRY_LOCK_DIR) {
+  try {
+    const lockPath = retryLockPath(transcriptPath, dir);
+    const existing = readRetryLock(lockPath);
+    // Only release if we own the lock (avoid wiping a peer's lock on crash recovery)
+    if (existing && existing.pid === process.pid) {
+      fs.unlinkSync(lockPath);
+    }
+  } catch { /* best-effort */ }
+}
 
 // --- Timestamp helpers -------------------------------------------------------
 
@@ -71,9 +155,32 @@ async function main() {
     if (!transcriptPath || !sessionId) return;
     logDebug(agentId, `Retry: processing ${transcriptPath} for session ${sessionId}`);
     const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
-    const range = getLineRange(agentId, transcriptPath, sessionId);
-    if (!range) return;
-    await processTranscript(agentId, logPrefix, transcriptPath, sessionId, range[0], range[1], runtimeConfig, cwd);
+
+    // qoder-cn only: serialize concurrent retries on the same transcript.
+    // We wait the HOOK_RETRY_DELAY first (so all queued Stop hooks have
+    // already advanced the offset via updateLineRecord), then acquire the
+    // lock. The losers see currentCount==lastCount in getLineRange and exit.
+    const retryDelay = parseInt(process.env.HOOK_RETRY_DELAY || '0', 10);
+    if (retryDelay > 0) {
+      await new Promise(r => setTimeout(r, retryDelay));
+    }
+
+    if (agentId === 'qoder-cn') {
+      if (!tryAcquireRetryLock(transcriptPath, sessionId)) {
+        logDebug(agentId, `Retry skipped: lock held by peer for ${transcriptPath}`);
+        return;
+      }
+    }
+    try {
+      const range = getLineRange(agentId, transcriptPath, sessionId);
+      if (!range) return;
+      await processTranscript(
+        agentId, logPrefix, transcriptPath, sessionId,
+        range[0], range[1], runtimeConfig, cwd, { delayApplied: true },
+      );
+    } finally {
+      if (agentId === 'qoder-cn') releaseRetryLock(transcriptPath);
+    }
     return;
   }
 
@@ -110,7 +217,34 @@ async function main() {
   const hasLastPrompt = parsed.some(p => p.type === 'last-prompt');
   if (parsed.length > 0 && !hasLastPrompt) {
     logDebug(agentId, `Transcript incomplete (${parsed.length} lines, no last-prompt marker). Spawning background retry in 5s.`);
-    spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd);
+    if (agentId === 'qoder-cn') {
+      // qoder-cn: QoderCN fires Stop multiple times per turn. The retry's
+      // child-side lock serializes actual processing, but skipping needless
+      // spawn calls here keeps process churn down.
+      const lockPath = retryLockPath(transcriptPath);
+      const existing = readRetryLock(lockPath);
+      if (existing && !isRetryLockStale(existing)) {
+        logDebug(agentId, `Skip spawn: live retry lock held by pid ${existing.pid}`);
+      } else {
+        if (existing) { try { fs.unlinkSync(lockPath); } catch { /* ignore */ } }
+        spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd);
+      }
+    } else {
+      spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd);
+    }
+    return;
+  }
+
+  if (agentId === 'qoder-cn') {
+    if (!tryAcquireRetryLock(transcriptPath, sessionId)) {
+      logDebug(agentId, `Stop skipped: peer retry/handler holds lock for ${transcriptPath}`);
+      return;
+    }
+    try {
+      await processTranscript(agentId, logPrefix, transcriptPath, sessionId, startLine, endLine, runtimeConfig, cwd);
+    } finally {
+      releaseRetryLock(transcriptPath);
+    }
     return;
   }
 
@@ -141,11 +275,14 @@ function spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd) {
   logDebug(agentId, `Spawned retry subprocess (PID ${child.pid})`);
 }
 
-async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, startLine, initialEndLine, runtimeConfig, cwd) {
+async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, startLine, initialEndLine, runtimeConfig, cwd, opts) {
   // Handle retry delay
-  const retryDelay = parseInt(process.env.HOOK_RETRY_DELAY || '0', 10);
-  if (retryDelay > 0) {
-    await new Promise(r => setTimeout(r, retryDelay));
+  const delayApplied = !!(opts && opts.delayApplied);
+  if (!delayApplied) {
+    const retryDelay = parseInt(process.env.HOOK_RETRY_DELAY || '0', 10);
+    if (retryDelay > 0) {
+      await new Promise(r => setTimeout(r, retryDelay));
+    }
   }
 
   // Re-read transcript (may have grown since initial read)
@@ -188,6 +325,50 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
       contentEvents.push(row);
     }
     // session_meta, other types: ignored
+  }
+
+  // --- Phase 2.5 (qoder-cn only): Skip processing if transcript hasn't reached Stop ---
+  // For qoder-cn, only process the transcript when the Stop progress event has been
+  // written. A PostToolUse retry (which runs before Stop is written) would see an
+  // incomplete ReAct chain and produce partial events. The Stop retry (fired after
+  // the final assistant text is written) sees the complete chain and can correctly
+  // generate all llm.request events with proper input.messages_delta (including
+  // tool_result as input delta for step 2).
+  if (agentId === 'qoder-cn') {
+    const hasStop = progressEvents.some(pe => pe.hookEvent === 'Stop');
+    if (!hasStop) {
+      logDebug(agentId, `Transcript not yet complete (no Stop event in progress). Skipping processing.`);
+      return;
+    }
+    // Stop detected — reprocess the entire transcript from the beginning so
+    // splitContentEventsIntoTurns sees the complete ReAct chain (user →
+    // assistant(text+tool_use) → user(tool_result) → assistant(text)) and
+    // generates one turn with all LLM calls and correct input.messages_delta.
+    startLine = 0;
+    lines = readTranscriptLines(transcriptPath, startLine, endLine);
+    logDebug(agentId, `Reprocessing full transcript from 0-${endLine} (${lines.length} lines)`);
+    // Re-parse since we reset startLine
+    parsed = [];
+    for (const line of lines) {
+      try { parsed.push(JSON.parse(line)); } catch { /* skip */ }
+    }
+    // Re-extract progress + content events from the full transcript
+    progressEvents.length = 0;
+    contentEvents.length = 0;
+    lastProgressHookEvent = '';
+    for (const row of parsed) {
+      const rowType = row.type;
+      if (rowType === 'progress') {
+        const data = row.data || {};
+        const hookEvent = data.hookEvent || '';
+        if (hookEvent && hookEvent !== lastProgressHookEvent) {
+          progressEvents.push({ hookEvent, ts: row.timestamp, hookName: data.hookName || '' });
+        }
+        if (hookEvent) lastProgressHookEvent = hookEvent;
+      } else if (rowType === 'user' || rowType === 'assistant') {
+        contentEvents.push(row);
+      }
+    }
   }
 
   // --- Phase 3: Split content events into turns by real user prompts ---
@@ -354,7 +535,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
   // Find user prompt
   const userRow = contentEvents.find(r => r.type === 'user' && !isToolResult(r));
   const userId = resolveUserId(userRow || contentEvents[0], runtimeConfig);
-  const agentType = inferVariant(userRow || contentEvents[0], agentId, sessionId);
+  const agentType = inferVariant(userRow || contentEvents[0], agentId);
   const providerName = inferProviderName({ 'gen_ai.agent.type': agentType });
 
   // User-hook event (ENTRY input)
@@ -539,7 +720,8 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
 
       if (tr) {
         // Find PostToolUse timestamp for this tool
-        const postToolTs = findPostToolUseTs(boundaries, i) || toolCallTs;
+        const postToolTs = findPostToolUseTs(boundaries, i)
+          || (BigInt(toolCallTs) + 1_000_000n).toString(); // +1ms fallback → tool span duration ≥ 1ms
         records.push({
           'event.id': crypto.randomUUID(),
           'event.name': 'tool.result',
@@ -651,19 +833,11 @@ function extractUserText(row) {
   return '';
 }
 
-function inferVariant(row, sourceAgentId, sessionId) {
+function inferVariant(row, sourceAgentId) {
   if (sourceAgentId === 'qoder-cn') return 'qoder-cn';
   if (!row) return sourceAgentId === 'qoder' ? 'qoder' : 'qoder-cli';
   if (row.entrypoint === 'cli' || row.promptId || row.permissionMode || row.userType) {
     return 'qoder-cli';
-  }
-  // DB-based detection: Qoder for JetBrains writes chat_session rows exclusively to
-  // ~/.qoder/shared_client/cache/db/local.db, while Qoder Desktop IDE writes to
-  // ~/Library/Application Support/Qoder/.../local.db.
-  if (sessionId) {
-    const found = isQoderIdeaSession(sessionId);
-    if (found === true) return 'qoder-idea';
-    if (found === false) return 'qoder';
   }
   return 'qoder';
 }
@@ -708,12 +882,26 @@ function buildLegacyEvents(contentEvents, turnId, sessionId, agentId, runtimeCon
 
 // --- Entry point -------------------------------------------------------------
 
-main().catch((e) => {
+function isDirectExec() {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  const here = fileURLToPath(import.meta.url);
+  if (path.resolve(argv1) === here) return true;
   try {
-    const agentId = process.argv.find((_, i) => process.argv[i - 1] === '--agent-id') || 'unknown';
-    const file = getErrorLogFile(agentId);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
-    fs.appendFileSync(file, `[${ts}] ${e.message}\n`, 'utf-8');
-  } catch { /* ignore */ }
-});
+    return fs.realpathSync(argv1) === fs.realpathSync(here);
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectExec()) {
+  main().catch((e) => {
+    try {
+      const agentId = process.argv.find((_, i) => process.argv[i - 1] === '--agent-id') || 'unknown';
+      const file = getErrorLogFile(agentId);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+      fs.appendFileSync(file, `[${ts}] ${e.message}\n`, 'utf-8');
+    } catch { /* ignore */ }
+  });
+}

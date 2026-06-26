@@ -1276,6 +1276,128 @@ describe('WukongInput', () => {
     expect(respS2['gen_ai.response.finish_reasons']).toEqual(['end_turn']);
   });
 
+  it('filters out tasks with null session_id from list_tasks', async () => {
+    const taskWithNullSession = { ...SAMPLE_TASK, id: 'task-null', session_id: null as any, status: 'failed' };
+    const getMessagesCalls: string[] = [];
+    mockExecFile.mockImplementation((...allArgs: unknown[]) => {
+      const cb = allArgs[allArgs.length - 1] as Function;
+      const args = allArgs[1] as string[];
+      const subcommand = args.join(' ');
+
+      if (subcommand.includes('list_tasks')) {
+        cb(null, {
+          stdout: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK, taskWithNullSession] }),
+          stderr: '',
+        });
+        return;
+      }
+      if (subcommand.includes('get_spark_agui_messages')) {
+        const jsonArg = args[args.length - 1]!;
+        const parsed = JSON.parse(jsonArg);
+        getMessagesCalls.push(parsed.conversationId);
+        cb(null, {
+          stdout: JSON.stringify({ messages: SAMPLE_MESSAGES }),
+          stderr: '',
+        });
+        return;
+      }
+      cb(new Error(`unexpected: ${subcommand}`), { stdout: '', stderr: '' });
+    });
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    // Should only process the task with valid session_id
+    const sessionIds = new Set(entries.map(e => e['gen_ai.session.id']));
+    expect(sessionIds.has('sess-1')).toBe(true);
+    // getMessages should only be called for sess-1, never for null
+    expect(getMessagesCalls).toEqual(['sess-1']);
+  });
+
+  it('handles empty stdout from get_spark_agui_messages gracefully', async () => {
+    mockExecFile.mockImplementation((...allArgs: unknown[]) => {
+      const cb = allArgs[allArgs.length - 1] as Function;
+      const args = allArgs[1] as string[];
+      const subcommand = args.join(' ');
+
+      if (subcommand.includes('list_tasks')) {
+        cb(null, {
+          stdout: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+          stderr: '',
+        });
+        return;
+      }
+      if (subcommand.includes('get_spark_agui_messages')) {
+        // Simulate the daemon gateway returning empty stdout
+        cb(null, { stdout: '', stderr: '' });
+        return;
+      }
+      cb(new Error(`unexpected: ${subcommand}`), { stdout: '', stderr: '' });
+    });
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    // Should not crash; should emit no entries (treated as empty messages)
+    expect(entries).toHaveLength(0);
+  });
+
+  it('handles whitespace-only stdout from get_spark_agui_messages gracefully', async () => {
+    mockExecFile.mockImplementation((...allArgs: unknown[]) => {
+      const cb = allArgs[allArgs.length - 1] as Function;
+      const args = allArgs[1] as string[];
+      const subcommand = args.join(' ');
+
+      if (subcommand.includes('list_tasks')) {
+        cb(null, {
+          stdout: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+          stderr: '',
+        });
+        return;
+      }
+      if (subcommand.includes('get_spark_agui_messages')) {
+        cb(null, { stdout: '  \n  ', stderr: '' });
+        return;
+      }
+      cb(new Error(`unexpected: ${subcommand}`), { stdout: '', stderr: '' });
+    });
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(0);
+  });
+
+  it('handles empty stdout from list_tasks gracefully', async () => {
+    mockExecFile.mockImplementation(
+      (_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+        // Simulate daemon gateway returning empty stdout for list_tasks
+        cb(null, { stdout: '', stderr: '' });
+      },
+    );
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(0);
+  });
+
   it('prunes seenCounts after STALE_PRUNE_THRESHOLD consecutive misses', async () => {
     mockExecFile.mockImplementation(makeExecFileImpl({
       list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),

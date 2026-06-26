@@ -117,6 +117,7 @@ loongsuite-pilot stop
 loongsuite-pilot restart
 loongsuite-pilot status
 loongsuite-pilot info
+loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 

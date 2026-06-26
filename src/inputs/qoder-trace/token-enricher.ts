@@ -187,13 +187,26 @@ export function enrichIdeTurn(
     // llm.response: use gmt_create as real response time
     respEntry.time_unix_nano = String(BigInt(gmtCreate) * 1_000_000n);
 
-    // Find the llm.request that immediately precedes this response in entries order
-    const respIdx = entries.indexOf(respEntry);
+    // Find the llm.request for this response's step (same step.id).
+    // Restrict to the same step to avoid cross-turn contamination in
+    // multi-turn sessions where allEntries contains entries from different
+    // turns. A backwards scan without a step.id check would find the
+    // previous turn's llm.request and overwrite its timestamp.
+    const respStepId = respEntry['gen_ai.step.id'];
     let req: AgentActivityEntry | undefined;
-    for (let j = respIdx - 1; j >= 0; j--) {
-      if (entries[j]['event.name'] === 'llm.request' && entries[j]['gen_ai.step.id']) {
-        req = entries[j];
-        break;
+    if (respStepId) {
+      req = entries.find(e => e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === respStepId);
+    }
+    if (!req) {
+      // Fallback: backwards scan limited to the same turn
+      const respTurnId = respEntry['gen_ai.turn.id'];
+      const respIdx = entries.indexOf(respEntry);
+      for (let j = respIdx - 1; j >= 0; j--) {
+        if (entries[j]['event.name'] === 'llm.request' && entries[j]['gen_ai.step.id'] &&
+            entries[j]['gen_ai.turn.id'] === respTurnId) {
+          req = entries[j];
+          break;
+        }
       }
     }
 
@@ -202,7 +215,12 @@ export function enrichIdeTurn(
         // Previous step's gmt_create + 1ms (accounts for tool.result buffer in prior step)
         req.time_unix_nano = String(BigInt(matchedPairs[i - 1].gmtCreate + 1) * 1_000_000n);
       } else if (userBoundary) {
-        req.time_unix_nano = String(userBoundary.time_unix_nano);
+        // Use userBoundary.time + 1ms so the LLM request starts strictly after
+        // the user prompt event. When both share the same timestamp the converter
+        // generates a duplicate empty STEP (0ms, no LLM children) because it
+        // sees two events at the same instant inside step s1.
+        const ubNs = BigInt(String(userBoundary.time_unix_nano));
+        req.time_unix_nano = String(ubNs + 1_000_000n); // +1ms
       }
     }
 
@@ -211,6 +229,7 @@ export function enrichIdeTurn(
     // to match, keeping steps non-overlapping.
     const toolCallTs = String(BigInt(gmtCreate) * 1_000_000n);
     const toolResultTs = String(BigInt(gmtCreate + 1) * 1_000_000n);
+    const respIdx = entries.indexOf(respEntry);
     const rightBound = i < matchedPairs.length - 1
       ? entries.indexOf(matchedPairs[i + 1].entry)
       : entries.length;
@@ -322,8 +341,6 @@ function applySqliteRowToIdeResponse(
   response['gen_ai.request.id'] = requestId;
   (response as Record<string, unknown>)['agent.request_id'] = requestId;
   response['gen_ai.response.id'] = row.messageId || requestId;
-  (response as Record<string, unknown>)['qoder.match_confidence'] = 'high';
-  (response as Record<string, unknown>)['qoder.match.strategy'] = 'sqlite_request_order';
 
   if (row.model && row.model !== 'unknown') {
     response['gen_ai.request.model'] = row.model;
@@ -334,8 +351,6 @@ function applySqliteRowToIdeResponse(
   if (request) {
     request['gen_ai.request.id'] = requestId;
     (request as Record<string, unknown>)['agent.request_id'] = requestId;
-    (request as Record<string, unknown>)['qoder.match_confidence'] = 'high';
-    (request as Record<string, unknown>)['qoder.match.strategy'] = 'sqlite_request_order';
     if (row.model && row.model !== 'unknown') request['gen_ai.request.model'] = row.model;
   }
 
@@ -353,12 +368,9 @@ function findStepRequest(entries: AgentActivityEntry[], response: AgentActivityE
   return entries.find(e => e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId);
 }
 
-function markLowConfidence(entries: AgentActivityEntry[], warning: string): void {
-  for (const entry of entries) {
-    if (entry['event.name'] !== 'llm.request' && entry['event.name'] !== 'llm.response') continue;
-    (entry as Record<string, unknown>)['qoder.match_confidence'] = 'low';
-    (entry as Record<string, unknown>)['qoder.match.warning'] = warning;
-  }
+function markLowConfidence(entries: AgentActivityEntry[], _warning: string): void {
+  // Low-confidence match: no additional fields written to avoid polluting output.
+  void entries;
 }
 
 function sqliteDedupeKey(row: SqliteTokenData): string {

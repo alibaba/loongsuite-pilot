@@ -14,10 +14,10 @@ const SELECTED_FIELDS = new Set([
   'mem',
   'version',
   'instance_id',
-  'os',
+  'ip',
+  'hostname',
   'os_detail',
   'metric_json',
-  'agent_versions',
 ]);
 
 let callCount = 0;

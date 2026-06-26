@@ -138,7 +138,7 @@ echo "    ✅ $ZIP_OUTPUT_PATH ($ZIP_SIZE)"
 # ── Summary ──
 echo ""
 echo "==> Contents:"
-tar -tzf "$OUTPUT_PATH" | head -20
+tar -tzf "$OUTPUT_PATH" | sed -n '1,20p'
 echo "    ... (truncated)"
 echo ""
 echo "Done."

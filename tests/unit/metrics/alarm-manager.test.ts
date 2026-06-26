@@ -5,7 +5,7 @@ describe('AlarmManager', () => {
   let manager: AlarmManager;
 
   beforeEach(() => {
-    manager = new AlarmManager({ ip: '10.0.0.1', version: '1.0.0' });
+    manager = new AlarmManager({ ip: '10.0.0.1', version: '1.0.0', userId: 'test-user' });
   });
 
   it('serialize returns empty when no alarms recorded', () => {
@@ -21,6 +21,7 @@ describe('AlarmManager', () => {
     expect(entries[0].alarm_level).toBe('2');
     expect(entries[0].alarm_message).toBe('send failed');
     expect(entries[0].alarm_count).toBe('1');
+    expect(entries[0].user_id).toBe('test-user');
     expect(entries[0].ip).toBe('10.0.0.1');
     expect(entries[0].ver).toBe('1.0.0');
     expect(entries[0].__time__).toBeGreaterThan(0);

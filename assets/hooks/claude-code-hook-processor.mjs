@@ -54,8 +54,17 @@ import {
   convertOutputMessages,
   mapStopReason,
 } from './claude-code/message-converter.mjs';
+import {
+  agentBaseFieldPatch,
+  collectResourceAttributesFromEnv,
+} from './shared/resource-context.mjs';
 
 const AGENT_ID = 'claude-code';
+const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_ID });
+const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
+const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
+  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
+  : {};
 
 // ─── utilities ───
 
@@ -69,6 +78,78 @@ function pilotDataDir() {
 
 function defaultLogDir() {
   return path.join(pilotDataDir(), 'logs', AGENT_ID);
+}
+
+// ─── intercept (BUN_OPTIONS preload) data integration ───
+
+const INTERCEPT_STALE_MS = 60 * 60 * 1000; // 1 hour
+
+function interceptSessionDir(sessionId) {
+  return path.join(pilotDataDir(), 'intercept', AGENT_ID, sessionId);
+}
+
+/**
+ * Read per-LLM-call intercept records dropped by claude-code-fetch-intercept.mjs.
+ * Returns Map<response_id, { ttft_ns, system_instructions, _file }>.
+ * Tracks `_file` so reapInterceptFiles can delete merged records after
+ * buildTurnRecords consumes them.
+ */
+function loadInterceptForSession(sessionId) {
+  const out = new Map();
+  const dir = interceptSessionDir(sessionId);
+  let entries;
+  try { entries = fs.readdirSync(dir); } catch { return out; }
+  for (const name of entries) {
+    if (!name.endsWith('.json')) continue;
+    const filePath = path.join(dir, name);
+    let raw;
+    try {
+      raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    } catch (_) {
+      // Corrupt record (preload crashed mid-write): leave the file in place
+      // so the stale reaper picks it up later, do not block merging.
+      continue;
+    }
+    if (raw && typeof raw.response_id === 'string' && raw.response_id.length > 0) {
+      out.set(raw.response_id, { ...raw, _file: filePath });
+    }
+  }
+  return out;
+}
+
+/**
+ * Delete intercept files corresponding to response_ids that buildTurnRecords
+ * actually merged into emitted events. Files whose response_id was not in
+ * the transcript stay on disk (they may belong to a future turn or be
+ * stragglers that reapStaleIntercept will clean up).
+ */
+function reapInterceptFiles(intercept, mergedResponseIds) {
+  for (const rid of mergedResponseIds) {
+    const data = intercept.get(rid);
+    if (!data?._file) continue;
+    try { fs.unlinkSync(data._file); } catch (_) {}
+  }
+}
+
+/**
+ * Opportunistic cleanup: drop files in this session's intercept dir whose
+ * mtime is older than STALE_MS (1h). Called once at the end of exportSession
+ * — handles orphans from prior turns whose response_ids never showed up in
+ * any subsequent transcript. Also rmdir if the dir is empty afterwards.
+ */
+function reapStaleIntercept(sessionId) {
+  const dir = interceptSessionDir(sessionId);
+  let entries;
+  try { entries = fs.readdirSync(dir); } catch { return; }
+  const now = Date.now();
+  for (const name of entries) {
+    const f = path.join(dir, name);
+    try {
+      const st = fs.statSync(f);
+      if (now - st.mtimeMs > INTERCEPT_STALE_MS) fs.unlinkSync(f);
+    } catch (_) {}
+  }
+  try { fs.rmdirSync(dir); } catch (_) {}
 }
 
 function tryReadStdin() {
@@ -276,9 +357,9 @@ async function exportSession(state, stopReason) {
     await waitForTranscriptStable(transcriptPath, baseOffset);
   }
 
-  if (!parseResult || parseResult.turns.length === 0) return;
-
+  if (!parseResult) return;
   state._next_transcript_offset = parseResult.nextOffset;
+  if (parseResult.turns.length === 0) return;
 
   const userId = resolveUserId({}, runtimeConfig);
   const allRecords = [];
@@ -296,11 +377,17 @@ async function exportSession(state, stopReason) {
 
   const cwd = state.cwd || undefined;
 
+  // Load per-session intercept data once; buildTurnRecords looks up by
+  // response_id (= Anthropic message_id). Empty Map when preload didn't
+  // produce any files — merge logic safely no-ops in that case.
+  const intercept = loadInterceptForSession(sessionId);
+  const mergedResponseIds = new Set();
+
   for (let i = 0; i < turnsToExport.length; i++) {
     const turn = turnsToExport[i];
     const isLast = i === turnsToExport.length - 1;
     const turnStopReason = isLast ? stopReason : 'end_turn';
-    const { records, hash } = buildTurnRecords(
+    const { records, hash, mergedResponseIds: turnMerged } = buildTurnRecords(
       turn,
       baseTurnCount + i,
       sessionId,
@@ -308,9 +395,13 @@ async function exportSession(state, stopReason) {
       userId,
       turnStopReason,
       cwd,
+      intercept,
     );
     allRecords.push(...records);
     logHash = hash;
+    if (turnMerged) {
+      for (const rid of turnMerged) mergedResponseIds.add(rid);
+    }
   }
 
   // turn_count 计入全部 turns(含跳过的历史), 确保 offset 正确推进不重复上报
@@ -318,16 +409,25 @@ async function exportSession(state, stopReason) {
 
   const cleaned = allRecords.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
+
+  // Cleanup intercept files: delete what we merged + drop stragglers from
+  // earlier turns. Failure is silent — host process must not be impacted.
+  reapInterceptFiles(intercept, mergedResponseIds);
+  reapStaleIntercept(sessionId);
 }
 
 // ─── buildTurnRecords — 单 turn 的 JSONL 记录构造 (v2: tool_use_id 归属) ───
 
-function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStopReason, cwd) {
+function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStopReason, cwd, intercept) {
   const records = [];
   const turnId = `${sessionId}:t${turnIndex + 1}`;
   let stepRound = 0;
   let runningHash = prevHash;
   let prevInputMsgs = [];
+  // response_ids whose intercept record we actually merged into emitted
+  // events. exportSession uses this set to delete the corresponding
+  // intercept files after JSONL is flushed.
+  const mergedResponseIds = new Set();
 
   const traceId = generateTraceId();
   const entrySpanId = generateSpanId();
@@ -339,8 +439,10 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     'gen_ai.turn.id': turnId,
     'gen_ai.agent.type': AGENT_ID,
     'gen_ai.agent.id': sessionId,
+    ...RESOURCE_BASE_FIELD_PATCH,
     'user.id': userId,
     ...(cwd ? { 'agent.claude-code.cwd': cwd } : {}),
+    ...RESOURCE_ATTRIBUTE_FIELDS,
   };
 
   // 用户输入: 做法 A (EVENT_LOG_TO_TRACE_SPEC §5.1, 0.1.0-beta.3+)
@@ -388,6 +490,13 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
       logFull = shouldLogFullMessages(runningHash, delta, currentFullHash);
     }
 
+    // Look up preload-captured data once per LLM call. ev.message_id matches
+    // the SSE message_start `message.id` the preload script extracted.
+    const interceptData = intercept && ev.message_id
+      ? intercept.get(ev.message_id)
+      : undefined;
+    if (interceptData) mergedResponseIds.add(ev.message_id);
+
     // llm.request
     const reqRecord = {
       time_unix_nano: isoToUnixNanos(ev.request_start_time),
@@ -405,6 +514,10 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     };
     if (logFull) {
       reqRecord['gen_ai.input.messages'] = inputMsgs;
+    }
+    if (interceptData && Array.isArray(interceptData.system_instructions)
+        && interceptData.system_instructions.length > 0) {
+      reqRecord['gen_ai.system_instructions'] = interceptData.system_instructions;
     }
     records.push(reqRecord);
 
@@ -437,6 +550,10 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
       'gen_ai.usage.total_tokens': totalTokens,
       'gen_ai.output.messages': convertOutputMessages(ev.output_content, ev.stop_reason),
     };
+    if (interceptData && typeof interceptData.ttft_ns === 'number'
+        && Number.isFinite(interceptData.ttft_ns) && interceptData.ttft_ns >= 0) {
+      respRecord['gen_ai.response.time_to_first_token'] = interceptData.ttft_ns;
+    }
     records.push(respRecord);
 
     runningHash = currentFullHash;
@@ -514,7 +631,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     return 0;
   });
 
-  return { records, hash: runningHash };
+  return { records, hash: runningHash, mergedResponseIds };
 }
 
 // ─── dispatcher ───

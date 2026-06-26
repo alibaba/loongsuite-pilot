@@ -18,6 +18,7 @@ const CANONICAL_KEYS = new Set([
   'parent_span_id',
   'span_id',
   'time_unix_nano',
+  'resourceAttributes',
   'tool.result.status',
   'trace_id',
   'user.id',

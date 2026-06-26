@@ -106,6 +106,8 @@ export interface AgentActivityEntry {
   'workspace.current_root'?: string;
   'error.type'?: string;
   'error.message'?: string;
+  /** Dynamic OTLP resource attributes emitted by hook processors. */
+  resourceAttributes?: { [key: string]: JsonValue };
 }
 
 /**

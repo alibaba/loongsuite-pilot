@@ -124,6 +124,7 @@ export interface ConfigFile {
     debug?: boolean;
     captureMessageContent?: boolean;
     turnIdleTimeoutMs?: number;
+    resourceAttributeKeys?: string[];
   };
 
   agents?: Record<string, {
@@ -449,6 +450,7 @@ function buildOtlpTraceConfigNew(
     captureMessageContent,
     debug: otlp?.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
+    resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     maxExportBatchBytes: otlp?.maxExportBatchBytes,
     compression: otlp?.compression,
   };
@@ -476,9 +478,24 @@ function buildOtlpTraceConfigLegacy(config: AnalyticsConfig): OtlpTraceFlusherCo
     captureMessageContent,
     debug: cms.debug ?? false,
     turnIdleTimeoutMs: 0,
+    resourceAttributeKeys: resolveResourceAttributeKeys(config.otlpTrace),
     maxExportBatchBytes: undefined,
     compression: undefined,
   };
+}
+
+function resolveResourceAttributeKeys(
+  otlp: AnalyticsConfig['otlpTrace'],
+): string[] {
+  const keys = Array.isArray(otlp?.resourceAttributeKeys)
+    ? otlp.resourceAttributeKeys
+    : [];
+  return [...new Set(
+    keys
+      .filter((key): key is string => typeof key === 'string')
+      .map(key => key.trim())
+      .filter(key => key.length > 0),
+  )];
 }
 
 function extractArmsProject(endpoint: string): string {
