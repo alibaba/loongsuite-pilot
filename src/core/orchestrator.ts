@@ -9,7 +9,7 @@ import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { detectAgent } from '../deployment/detect-utils.js';
 import { createLogger } from '../utils/logger.js';
-import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion } from '../utils/fs-utils.js';
+import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion, cleanStaleTmpFiles } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import * as fsSync from 'node:fs';
 
@@ -132,6 +132,7 @@ export class Orchestrator extends EventEmitter {
     // 1. Ensure data directories
     await ensureDir(this.dataDir);
     await ensureDir(path.join(this.dataDir, 'logs'));
+    await cleanStaleTmpFiles(path.join(this.dataDir, 'logs'));
 
     // 2. Load state & agent-control config
     this.stateStore = new StateStore(path.join(this.dataDir, 'logs', 'input-state.json'));
