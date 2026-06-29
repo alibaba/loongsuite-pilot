@@ -299,6 +299,10 @@ export async function readTranscriptForCwd(cwd, opts = {}) {
   const parsed = parseConversationValue(value);
   if (parsed.steps.length === 0) return null;
 
+  // NOTE on sinceUpdatedMs: row-level WHERE clause already discards stale
+  // rows, and upstream `emitted-steps` state dedups individual steps when
+  // conversations_v2 merges multiple runs into one row. We deliberately do
+  // NOT add a step.endTimeMs > since filter here to keep the parser pure.
   return {
     conversationId: parsed.conversationId,
     continuationId: parsed.continuationId,

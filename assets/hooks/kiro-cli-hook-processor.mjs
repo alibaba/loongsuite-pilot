@@ -51,8 +51,10 @@ import {
   appendToolEvent, drainToolEvents,
   appendPreToolEvent, drainPreToolEvents,
   loadOffset, saveOffset,
+  loadSessionOffset, saveSessionOffset,
   loadEmittedSteps, saveEmittedSteps,
   loadTurnCount, saveTurnCount,
+  enqueuePendingStop,
 } from './kiro-cli/state.mjs';
 import { resolveDbPath } from './kiro-cli/db-path.mjs';
 
@@ -144,16 +146,14 @@ function cmdNoop() {
 }
 
 /**
- * stop: 主导出。
- *  1. drain per-cwd PostToolUse 缓冲（tool_response）
- *  2. 读 transcript（sqlite），按 history[] 切 STEP
- *  3. SQLite miss → fallback 到 session JSONL（~/.kiro/sessions/cli/*.jsonl）
- *  4. join tool_response 到 step（按 tool_name + args 匹配）
- *  5. 发 llm.request / llm.response / tool.call / tool.result
- *  6. 若 history[] 缺最终 Response 步，用 stop.assistant_response 合成（兜底）
- *  7. 推进 per-cwd updated_at offset
+ * stop: 现在仅"投递"一条 pending 记录到队列，立即返回 {}。
+ *  - 不再调用 transcript / session 读取（避免 sidecar 异步写延迟阻塞 kiro-cli）
+ *  - 不再 drain 缓冲（postToolUse/preToolUse 缓冲文件由 delayedCollect 接管）
+ *  - 真正的采集由主服务侧的 KiroCliSessionInput 延迟 30s 触发 cmdDelayedCollect
+ *
+ * 入队字段：cwd / stop 时刻 / 两条 offset 快照 / assistant_response / userId。
  */
-async function cmdStop() {
+function cmdStop() {
   const event = tryReadStdin();
   const cwd = event && event.cwd;
   if (!cwd) {
@@ -169,9 +169,110 @@ async function cmdStop() {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   const userId = resolveUserId({}, runtimeConfig);
 
+  // offset 快照：把 stop 触发瞬间的位置传给延迟采集，避免 delayed scan 跟新 stop 抢同一段窗口
+  const sinceMs = loadOffset(cwd);
+  const sessionSinceMs = loadSessionOffset(cwd);
+
+  enqueuePendingStop({
+    cwd,
+    stopUnixMs: Date.now(),
+    sinceMs,
+    sessionSinceMs,
+    assistantResponse: typeof event?.assistant_response === 'string' ? event.assistant_response : null,
+    userId,
+  });
+}
+
+/**
+ * cmdDelayedCollect: 主服务侧 KiroCliSessionInput 在 pending 成熟后调起。
+ * argv: node kiro-cli-hook-processor.mjs delayedCollect <pending-file> [--allow-fallback]
+ *
+ * 读取 pending 记录中的快照 (cwd / sinceMs / sessionSinceMs / assistantResponse / userId)，
+ * 然后执行与原 cmdStop 等价的采集流程：
+ *   1. drain per-cwd PostToolUse / PreToolUse 缓冲
+ *   2. 读 SQLite transcript（带轮询）
+ *   3. SQLite miss → session JSONL fallback（同样带轮询，但因为已经延迟过，
+ *      正常情况下 sidecar 已就绪；--allow-fallback 时即便 timing 不完整也接受）
+ *   4. 去重 / 构造 records / 写 JSONL / 推进 offset
+ */
+async function cmdDelayedCollect() {
+  const pendingPath = process.argv[3];
+  const allowFallback = process.argv.includes('--allow-fallback');
+  if (!pendingPath) {
+    logHookError({
+      agentId: AGENT_ID,
+      stage: 'cmd_delayed_collect',
+      errorType: 'missing_argv',
+      errorMessage: 'delayedCollect missing pending file argv',
+    });
+    return;
+  }
+
+  let record;
+  try {
+    record = JSON.parse(fs.readFileSync(pendingPath, 'utf-8'));
+  } catch (err) {
+    logHookError({
+      agentId: AGENT_ID,
+      stage: 'cmd_delayed_collect',
+      errorType: 'pending_read_failed',
+      errorMessage: `${pendingPath}: ${err?.message || String(err)}`,
+    });
+    return;
+  }
+  const cwd = record?.cwd;
+  if (!cwd) {
+    logHookError({
+      agentId: AGENT_ID,
+      stage: 'cmd_delayed_collect',
+      errorType: 'missing_cwd',
+      errorMessage: `pending record at ${pendingPath} lacks cwd`,
+    });
+    return;
+  }
+  // userId 已由 stop hook 时刻 resolve（rendering 与原 cmdStop 等价）。
+  // assistantResponse 用作 history[] 缺最终 Response 步时的合成兜底。
+  const ctx = {
+    cwd,
+    sinceMs: typeof record.sinceMs === 'number' ? record.sinceMs : loadOffset(cwd),
+    sessionSinceMs: typeof record.sessionSinceMs === 'number' ? record.sessionSinceMs : loadSessionOffset(cwd),
+    assistantResponse: typeof record.assistantResponse === 'string' ? record.assistantResponse : null,
+    userId: typeof record.userId === 'string' && record.userId
+      ? record.userId
+      : resolveUserId({}, loadHookRuntimeConfig(pilotDataDir())),
+    allowFallback,
+  };
+
+  const status = await runCollect(ctx);
+  // 把状态打到 stdout，让 input 层据此决定 finish/release/log
+  // 'ok'              → 已成功落盘 records / 或确认无新 step（删除 pending）
+  // 'timing_pending'  → sidecar 仍不全 → 退回 ready/，下一轮再试
+  // 'no_data'         → transcript & session 都为空 → 删除 pending（kiro-cli 这次没产数据）
+  try {
+    process.stdout.write(JSON.stringify({ status }) + '\n');
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * 核心采集流程（原 cmdStop 主体）。
+ *
+ * @param {object} ctx
+ * @param {string}  ctx.cwd
+ * @param {number}  ctx.sinceMs            SQLite updated_at 游标
+ * @param {number}  ctx.sessionSinceMs     session JSONL updated_at 游标
+ * @param {string?} ctx.assistantResponse  stop 事件自带的合成兜底文本
+ * @param {string}  ctx.userId
+ * @param {boolean} ctx.allowFallback      true: timing 不全也强制 fallback emit
+ * @returns {Promise<'ok'|'timing_pending'|'no_data'>}
+ */
+async function runCollect(ctx) {
+  const { cwd, sinceMs, sessionSinceMs, assistantResponse, userId, allowFallback } = ctx;
+  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+
   const toolEvents = drainToolEvents(cwd);
   const preToolEvents = drainPreToolEvents(cwd);
-  const sinceMs = loadOffset(cwd);
 
   let transcript;
 
@@ -196,21 +297,19 @@ async function cmdStop() {
     }
   }
 
-  // SQLite miss → session JSONL fallback
+  // SQLite miss → session JSONL fallback (with retry + offset)
   if (!transcript || transcript.steps.length === 0) {
-    transcript = await trySessionJsonl(cwd);
+    transcript = await trySessionJsonl(cwd, sessionSinceMs, { allowFallback });
   }
 
   if (!transcript || transcript.steps.length === 0) {
-    return;
+    return 'no_data';
   }
 
-  // step-level idempotent dedup：交互式模式下 stop 可能多次触发，
-  // 若 SQLite updated_at 在两次 stop 之间变化，offset 机制无法阻止
-  // 全量重读。按 (conversationId + stepId) 过滤已发射的 step。
+  // step-level idempotent dedup
   const currentConvId = transcript.conversationId || transcript.continuationId || 'unknown';
-  const emitted = loadEmittedSteps(cwd);
-  const seenIds = emitted.conversationId === currentConvId ? emitted.stepIds : new Set();
+  const emittedMap = loadEmittedSteps(cwd);
+  const seenIds = emittedMap.get(currentConvId) || new Set();
 
   const originalHasFinalResponse = transcript.steps.some(
     (s) => s.kind === 'NotToolUse' && s.assistantText,
@@ -222,15 +321,25 @@ async function cmdStop() {
     return !seenIds.has(sid);
   });
 
-  if (newSteps.length === 0) return;
+  if (newSteps.length === 0) return 'ok';
+
+  // timing 完整性：fallback 模式即使不全也走；否则一旦有 0 → 退回 ready
+  const allTimingValid = newSteps.every((s) => s.startTimeMs > 0);
+  if (!allTimingValid && !allowFallback) {
+    return 'timing_pending';
+  }
 
   const dedupedTranscript = { ...transcript, steps: newSteps };
 
+  const stopEventLike = assistantResponse
+    ? { cwd, assistant_response: assistantResponse }
+    : { cwd };
+
   const records = buildRecords(
-    dedupedTranscript, toolEvents, preToolEvents, cwd, userId, event,
+    dedupedTranscript, toolEvents, preToolEvents, cwd, userId, stopEventLike,
     { originalHasFinalResponse },
   );
-  if (records.length === 0) return;
+  if (records.length === 0) return 'ok';
 
   const cleaned = records.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
 
@@ -247,36 +356,74 @@ async function cmdStop() {
     });
   }
 
-  if (!writeOk) return;
+  if (!writeOk) return 'timing_pending';
 
-  const allEmittedIds = new Set(seenIds);
-  for (const s of newSteps) {
-    if (s.stepId) allEmittedIds.add(s.stepId);
-  }
-  saveEmittedSteps(cwd, currentConvId, allEmittedIds);
-
-  if (transcript.source !== 'session_jsonl' && transcript.updatedMs) {
+  // timing valid 才推进去重 + offset；fallback 强发也同样推进（避免下次重复处理）
+  saveEmittedSteps(cwd, currentConvId, newSteps.map((s) => s.stepId));
+  if (transcript.source === 'session_jsonl' && transcript.updatedMs) {
+    saveSessionOffset(cwd, transcript.updatedMs);
+  } else if (transcript.source !== 'session_jsonl' && transcript.updatedMs) {
     saveOffset(cwd, transcript.updatedMs);
   }
+
+  return 'ok';
 }
 
 /**
  * session JSONL fallback：扫描 ~/.kiro/sessions/cli/ 找 cwd 匹配的最新 session。
+ * 带 3 次重试 + 指数退避（200ms, 400ms, 800ms），合计 ~1.4s。
+ * 因为本函数现在由 delayedCollect 在 30s 等待后调用，sidecar 通常已就绪；
+ * 这层重试仅吸收边界毛刺。
+ *
+ * @param {string} cwd
+ * @param {number} [sinceMs]            session offset，跳过已处理的旧 session
+ * @param {object} [opts]
+ * @param {boolean} [opts.allowFallback]  true: timing 不全也返回（让 caller emit fallback）
  * @returns {Promise<import('./kiro-cli/transcript-parser.mjs').TranscriptData|null>}
  */
-async function trySessionJsonl(cwd) {
-  try {
-    const session = await readSessionJsonl(cwd);
-    return session;
-  } catch (err) {
-    logHookError({
-      agentId: AGENT_ID,
-      stage: 'session_jsonl_read',
-      errorType: 'read_failed',
-      errorMessage: err?.message || String(err),
-    });
-    return null;
+async function trySessionJsonl(cwd, sinceMs = 0, opts = {}) {
+  const { allowFallback = false } = opts;
+  const MAX_ATTEMPTS = 3;
+  let lastSession = null;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      const session = await readSessionJsonl(cwd, { sinceUpdatedMs: sinceMs });
+      if (session && session.steps.length > 0) {
+        lastSession = session;
+        const timingValid = session.steps.every((s) => s.startTimeMs > 0);
+        if (timingValid) return session;
+        if (attempt === MAX_ATTEMPTS - 1) {
+          if (allowFallback) {
+            logHookError({
+              agentId: AGENT_ID,
+              stage: 'session_jsonl_read',
+              errorType: 'timing_incomplete_fallback',
+              errorMessage: `sidecar timing incomplete; falling back (${session.steps.length} steps)`,
+            });
+            return session;
+          }
+          logHookError({
+            agentId: AGENT_ID,
+            stage: 'session_jsonl_read',
+            errorType: 'timing_incomplete',
+            errorMessage: `sidecar turn metadata incomplete after ${MAX_ATTEMPTS} retries (${session.steps.length} steps with startTimeMs=0)`,
+          });
+          return null;
+        }
+      }
+    } catch (err) {
+      logHookError({
+        agentId: AGENT_ID,
+        stage: 'session_jsonl_read',
+        errorType: 'read_failed',
+        errorMessage: err?.message || String(err),
+      });
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 200 * (1 << attempt)));
   }
+  if (allowFallback && lastSession) return lastSession;
+  return null;
 }
 
 // ─── buildRecords — 整会话的 trace 记录构造 ───
@@ -284,18 +431,14 @@ async function trySessionJsonl(cwd) {
 function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEvent, opts = {}) {
   const records = [];
   const sessionId = transcript.conversationId || transcript.continuationId || 'unknown';
-  const traceId = generateTraceId();
-  const entrySpanId = generateSpanId();
-  const agentSpanId = generateSpanId();
   // turn 计数按 cwd 持久化：每次 stop 导出一个新 turn，turn.id 跨轮递增（:t1 → :t2 …）。
   const turnNumber = loadTurnCount(cwd) + 1;
   saveTurnCount(cwd, turnNumber);
-  const turnId = `${sessionId}:t${turnNumber}`;
+  const turnIdBase = `${sessionId}:t${turnNumber}`;
 
+  // 静态 baseFields（不含 trace_id / turn_id，这两个按 run 边界动态生成）
   const baseFields = {
-    trace_id: traceId,
     'gen_ai.session.id': sessionId,
-    'gen_ai.turn.id': turnId,
     'gen_ai.agent.type': AGENT_ID,
     'gen_ai.agent.id': sessionId,
     'gen_ai.conversation.id': transcript.conversationId || sessionId,
@@ -309,6 +452,16 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
       : {}),
   };
 
+  // ─── Run-boundary detection ───
+  // conversations_v2 将同 cwd 的多次 --no-interactive 运行合并为一个 conversation。
+  // 按 step 时间间隔 > RUN_GAP_MS 拆分运行边界，每个 run 独立 trace_id。
+  const RUN_GAP_MS = 30_000;
+  let currentTraceId = generateTraceId();
+  let currentTurnId = `${turnIdBase}:r0`;
+  let prevEndTimeMs = 0;
+  let runIndex = 0;
+  let runStepRound = 0;
+
   let runningHash = INITIAL_HASH;
   let prevInputMsgs = [];
   let stepRound = 0;
@@ -319,7 +472,34 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
 
   for (const step of steps) {
     stepRound++;
-    const currentStepId = step.stepId || `${turnId}:s${stepRound}`;
+
+    // ── Run-boundary detection: >30s gap = new run ──
+    if (prevEndTimeMs > 0 && step.startTimeMs > 0 &&
+        (step.startTimeMs - prevEndTimeMs) > RUN_GAP_MS) {
+      currentTraceId = generateTraceId();
+      runIndex++;
+      currentTurnId = `${turnIdBase}:r${runIndex}`;
+      runStepRound = 0;
+    }
+    // Only advance prevEndTimeMs when this step has valid timing; otherwise
+    // a 0-timing step would clobber the cursor and mask the next legitimate
+    // run boundary (allowFallback / partial-sidecar edge).
+    if (step.endTimeMs > 0 || step.startTimeMs > 0) {
+      prevEndTimeMs = step.endTimeMs || step.startTimeMs;
+    }
+    runStepRound++;
+
+    // Per-step fields: baseFields + dynamic trace_id / turn_id + react attributes
+    const stepFinishReason = step.kind === 'NotToolUse' ? 'stop' : 'tool_call';
+    const stepFields = {
+      ...baseFields,
+      trace_id: currentTraceId,
+      'gen_ai.turn.id': currentTurnId,
+      'gen_ai.react.round': runStepRound,
+      'gen_ai.react.finish_reason': stepFinishReason,
+    };
+
+    const currentStepId = step.stepId || `${currentTurnId}:s${stepRound}`;
     const currentStepSpanId = generateSpanId();
     const llmSpanId = generateSpanId();
     const responseId = step.responseId || `${currentStepId}:r`;
@@ -327,12 +507,11 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
 
     const finishReason = step.kind === 'NotToolUse' ? 'stop' : 'tool_call';
 
-    // input messages: 首步带首轮用户原始 prompt（transcript history[0].user.content.Prompt.prompt），
-    // 后续步从 ToolUseResults 构建 role: "tool" 消息（transcript history[i].user.content.ToolUseResults.tool_use_results[].content[].Text）。
+    // input messages: 每个 step 若有 userPrompt 则带用户输入（交互式每个 turn 都有独立 prompt）；
+    // 无 userPrompt 时从 ToolUseResults 构建 role: "tool" 消息（SQLite 后续步）。
     const inputMsgs = [];
-    if (stepRound === 1) {
-      const prompt = step.userPrompt || '';
-      inputMsgs.push({ role: 'user', parts: [{ type: 'text', content: prompt }] });
+    if (step.userPrompt) {
+      inputMsgs.push({ role: 'user', parts: [{ type: 'text', content: step.userPrompt }] });
     } else if (Array.isArray(step.toolUseResults) && step.toolUseResults.length > 0) {
       for (const resultText of step.toolUseResults) {
         inputMsgs.push({ role: 'tool', parts: [{ type: 'text', content: resultText }] });
@@ -357,7 +536,7 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
       time_unix_nano: msToUnixNanos(step.startTimeMs),
       'event.id': crypto.randomUUID(),
       'event.name': 'llm.request',
-      ...baseFields,
+      ...stepFields,
       span_id: llmSpanId,
       parent_span_id: currentStepSpanId,
       'gen_ai.step.id': currentStepId,
@@ -405,7 +584,7 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
       time_unix_nano: msToUnixNanos(step.endTimeMs || step.startTimeMs),
       'event.id': crypto.randomUUID(),
       'event.name': 'llm.response',
-      ...baseFields,
+      ...stepFields,
       span_id: llmSpanId,
       parent_span_id: currentStepSpanId,
       'gen_ai.step.id': currentStepId,
@@ -442,7 +621,7 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
         time_unix_nano: toolCallTimeNs,
         'event.id': crypto.randomUUID(),
         'event.name': 'tool.call',
-        ...baseFields,
+        ...stepFields,
         span_id: toolSpanId,
         parent_span_id: currentStepSpanId,
         'gen_ai.step.id': currentStepId,
@@ -459,7 +638,7 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
           time_unix_nano: toolTimeNs,
           'event.id': crypto.randomUUID(),
           'event.name': 'tool.result',
-          ...baseFields,
+          ...stepFields,
           span_id: toolSpanId,
           parent_span_id: currentStepSpanId,
           'gen_ai.step.id': currentStepId,
@@ -489,7 +668,7 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
           time_unix_nano: msToUnixNanos((step.endTimeMs || step.startTimeMs) + 1),
           'event.id': crypto.randomUUID(),
           'event.name': 'tool.result',
-          ...baseFields,
+          ...stepFields,
           span_id: toolSpanId,
           parent_span_id: currentStepSpanId,
           'gen_ai.step.id': currentStepId,
@@ -506,7 +685,8 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
   // 兜底：history[] 缺最终 Response 步 → 用 stop.assistant_response 合成一条 NotToolUse step。
   if (!hasFinalResponse && stopEvent && stopEvent.assistant_response) {
     stepRound++;
-    const synthStepId = `${turnId}:s${stepRound}`;
+    runStepRound++;
+    const synthStepId = `${currentTurnId}:s${stepRound}`;
     const synthStepSpanId = generateSpanId();
     const synthLlmSpanId = generateSpanId();
     const synthResponseId = crypto.randomUUID();
@@ -519,11 +699,19 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
     const inputMsgs = [];
     const currentFullHash = computeHash(runningHash, inputMsgs);
 
+    const synthFields = {
+      ...baseFields,
+      trace_id: currentTraceId,
+      'gen_ai.turn.id': currentTurnId,
+      'gen_ai.react.round': runStepRound,
+      'gen_ai.react.finish_reason': 'stop',
+    };
+
     records.push({
       time_unix_nano: synthReqNano,
       'event.id': crypto.randomUUID(),
       'event.name': 'llm.request',
-      ...baseFields,
+      ...synthFields,
       span_id: synthLlmSpanId,
       parent_span_id: synthStepSpanId,
       'gen_ai.step.id': synthStepId,
@@ -538,7 +726,7 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
       time_unix_nano: synthRespNano,
       'event.id': crypto.randomUUID(),
       'event.name': 'llm.response',
-      ...baseFields,
+      ...synthFields,
       span_id: synthLlmSpanId,
       parent_span_id: synthStepSpanId,
       'gen_ai.step.id': synthStepId,
@@ -683,6 +871,7 @@ const DISPATCH = {
   'postToolUse': cmdPostToolUse,
   'preToolUse': cmdPreToolUse,
   'userPromptSubmit': cmdNoop,
+  'delayedCollect': cmdDelayedCollect,
 };
 
 const sub = process.argv[2] || 'unknown';
