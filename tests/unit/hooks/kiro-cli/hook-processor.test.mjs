@@ -69,13 +69,67 @@ function upsertConversationRow(convRawJson, updatedMs) {
   });
 }
 
+function buildEnv(extra = {}) {
+  return {
+    ...process.env,
+    LOONGSUITE_PILOT_DATA_DIR: DATA_DIR,
+    KIRO_CLI_DB: DB_PATH,
+    ...extra,
+  };
+}
+
 function runHook(subcommand, payload) {
-  return spawnSync('node', [PROCESSOR, subcommand], {
+  const r = spawnSync('node', [PROCESSOR, subcommand], {
     input: JSON.stringify(payload),
-    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR, KIRO_CLI_DB: DB_PATH },
+    env: buildEnv(),
     encoding: 'utf-8',
     timeout: 15_000,
   });
+  if (subcommand === 'stop') {
+    return collectAfterStop(r, payload, buildEnv());
+  }
+  return r;
+}
+
+// 5ab0fcb 把 stop 重构为「投递 pending + 立即返回 {}」，真正的导出由 delayedCollect
+// 子命令在 sidecar 延迟 30s 后执行。测试中等不起 30s，故 stop 后立即在同一 DATA_DIR
+// 内查找该 cwd 的 pending 文件并调 delayedCollect，等价于主服务侧成熟后的采集。
+// fail-open（无 cwd）时 stop 不入队，没有 pending 文件 → 直接返回 stop 结果。
+function collectAfterStop(stopResult, payload, env) {
+  const cwd = payload && payload.cwd;
+  if (!cwd) return stopResult;
+  const pendingFile = findLatestPendingStop(cwd);
+  if (!pendingFile) return stopResult;
+  const args = [PROCESSOR, 'delayedCollect', pendingFile];
+  return spawnSync('node', args, {
+    env,
+    encoding: 'utf-8',
+    timeout: 15_000,
+  });
+}
+
+function findLatestPendingStop(cwd) {
+  const readyDir = path.join(DATA_DIR, 'state', 'kiro-cli', 'pending-stops', 'ready');
+  let names;
+  try {
+    names = fs.readdirSync(readyDir);
+  } catch {
+    return null;
+  }
+  const candidates = [];
+  for (const name of names) {
+    if (!name.endsWith('.json') || name.endsWith('.tmp')) continue;
+    const p = path.join(readyDir, name);
+    try {
+      const rec = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      if (rec.cwd === cwd) candidates.push({ path: p, enqueueMs: rec.enqueueMs || 0 });
+    } catch {
+      // ignore malformed
+    }
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => a.enqueueMs - b.enqueueMs);
+  return candidates[candidates.length - 1].path;
 }
 
 function readJsonlRecords() {
@@ -478,17 +532,17 @@ function setupSessionFixtures(dataDir) {
 }
 
 function runHookWithSessionDir(subcommand, payload, fakeHome) {
-  return spawnSync('node', [PROCESSOR, subcommand], {
+  const env = buildEnv({ HOME: fakeHome });
+  const r = spawnSync('node', [PROCESSOR, subcommand], {
     input: JSON.stringify(payload),
-    env: {
-      ...process.env,
-      LOONGSUITE_PILOT_DATA_DIR: DATA_DIR,
-      KIRO_CLI_DB: DB_PATH,
-      HOME: fakeHome,
-    },
+    env,
     encoding: 'utf-8',
     timeout: 15_000,
   });
+  if (subcommand === 'stop') {
+    return collectAfterStop(r, payload, env);
+  }
+  return r;
 }
 
 describe('kiro-cli-hook-processor session JSONL fallback（无 SQLite）', () => {
@@ -828,7 +882,9 @@ describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor turn.id 每会话递增'
   test('同 session 多轮 stop — turn.id 互不相同（:t1 → :t2）', async () => {
     const convRaw = JSON.parse(fs.readFileSync(FIXTURE_CONV, 'utf-8'));
 
-    // 第 1 轮 stop：原始 3-step 会话 → turn.id = :t1
+    // 第 1 轮 stop：原始 3-step 会话 → turn.id = :t1:r0
+    // （2ac04ee 的 run-boundary detection 给单 run 会话追加 :r${runIndex} 后缀；
+    //   turn 计数仍按 cwd 持久化递增，本测试关注 :t1 → :t2 的递增语义，run 后缀是附带的）
     bufferPostToolEvents();
     const stop1 = runHook('stop', { hook_event_name: 'stop', cwd: CWD, assistant_response: 'round3 done' });
     expect(stop1.status).toBe(0);
@@ -837,7 +893,7 @@ describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor turn.id 每会话递增'
     const turns1 = new Set(recs1.map((r) => r['gen_ai.turn.id']));
     expect(turns1.size).toBe(1);
     const turn1 = [...turns1][0];
-    expect(turn1).toBe(`${CONV_ID}:t1`);
+    expect(turn1).toBe(`${CONV_ID}:t1:r0`);
 
     // 第 2 轮 stop 前更新 DB：bump updated_at + 追加一个新 NotToolUse step（新 request_id）。
     // offset 增量 + stepId 去重后只导出新增 step；turn 计数已按 cwd 持久化 → turn.id = :t2
@@ -865,7 +921,7 @@ describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor turn.id 每会话递增'
     const turns2 = new Set(recs2.map((r) => r['gen_ai.turn.id']));
     expect(turns2.size).toBe(1);
     const turn2 = [...turns2][0];
-    expect(turn2).toBe(`${CONV_ID}:t2`);
+    expect(turn2).toBe(`${CONV_ID}:t2:r0`);
     expect(turn2).not.toBe(turn1);
   });
 });
