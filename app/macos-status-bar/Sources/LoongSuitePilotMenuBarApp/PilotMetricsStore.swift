@@ -78,6 +78,17 @@ struct ProviderShareItem: Identifiable {
     var id: String { provider }
     var formattedTokens: String { Formatters.compactNumber(tokens) }
     var formattedShare: String { Formatters.percent(share) }
+
+    init(provider: String, tokens: Int, share: Double) {
+        self.provider = provider
+        self.tokens = tokens
+        self.share = Self.clampedShare(share)
+    }
+
+    static func clampedShare(_ raw: Double) -> Double {
+        if raw.isNaN || raw.isInfinite { return 0 }
+        return min(max(raw, 0), 1)
+    }
 }
 
 struct ModelShareItem: Identifiable {
@@ -87,6 +98,17 @@ struct ModelShareItem: Identifiable {
     var id: String { model }
     var formattedTokens: String { Formatters.compactNumber(tokens) }
     var formattedShare: String { Formatters.percent(share) }
+
+    init(model: String, tokens: Int, share: Double) {
+        self.model = model
+        self.tokens = tokens
+        self.share = Self.clampedShare(share)
+    }
+
+    static func clampedShare(_ raw: Double) -> Double {
+        if raw.isNaN || raw.isInfinite { return 0 }
+        return min(max(raw, 0), 1)
+    }
 }
 
 struct RepoShareItem: Identifiable {
