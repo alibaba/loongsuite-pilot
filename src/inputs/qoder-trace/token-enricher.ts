@@ -87,8 +87,16 @@ export function enrichCliTurn(
       );
       const toolCallTs = String(BigInt(seg.responseEndTs) * 1_000_000n);
       const toolResultTs = String(BigInt(seg.toolFinishedTs) * 1_000_000n);
+      const toolDurationMs = seg.responseEndTs > 0
+        ? seg.toolFinishedTs - seg.responseEndTs
+        : 0;
       for (const tc of toolCalls) tc.time_unix_nano = toolCallTs;
-      for (const tr of toolResults) tr.time_unix_nano = toolResultTs;
+      for (const tr of toolResults) {
+        tr.time_unix_nano = toolResultTs;
+        if (toolDurationMs > 0) {
+          (tr as Record<string, unknown>)['gen_ai.tool.call.duration'] = toolDurationMs;
+        }
+      }
     }
   }
 }
