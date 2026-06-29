@@ -373,6 +373,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
       if (spans.length === 0) return;
 
+      // Post-process TOOL spans: genai lib only emits gen_ai.tool.call.result; ARMS GenAI
+      // 语义还要求 gen_ai.tool.call.status / gen_ai.tool.error / gen_ai.tool.output，
+      // 从事件日志 tool.result 记录回填（见 tester S1b 报告字段对比表）。
+      this.augmentToolSpans(records, spans);
+
       const exportState = this.getOrCreateExportState(agentType);
 
       if (this.cfg.debug) {
@@ -385,6 +390,50 @@ export class OtlpTraceFlusher extends BaseFlusher {
     } finally {
       convertState.active -= 1;
       this.evictConvertStates();
+    }
+  }
+
+  /**
+   * 回填 TOOL span 缺失字段。genai lib 仅写 gen_ai.tool.call.result；ARMS GenAI 语义
+   * 还要求 gen_ai.tool.call.status / gen_ai.tool.error / gen_ai.tool.output。
+   * 通过 gen_ai.tool.call.id 把事件日志 tool.result 记录匹配回 TOOL span。
+   */
+  private augmentToolSpans(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+    const toolResultByCallId = new Map<string, {
+      status?: string;
+      errorType?: string;
+      errorMessage?: string;
+    }>();
+    for (const rec of records) {
+      if ((rec['event.name'] as string | undefined) !== 'tool.result') continue;
+      const callId = rec['gen_ai.tool.call.id'] as string | undefined;
+      if (!callId) continue;
+      toolResultByCallId.set(callId, {
+        status: rec['tool.result.status'] as string | undefined,
+        errorType: rec['error.type'] as string | undefined,
+        errorMessage: rec['error.message'] as string | undefined,
+      });
+    }
+
+    for (const span of spans) {
+      const attrs = span.attributes as unknown as Record<string, unknown>;
+      if (attrs['gen_ai.operation.name'] !== 'execute_tool') continue;
+      const callId = attrs['gen_ai.tool.call.id'] as string | undefined;
+      if (!callId) continue;
+      const info = toolResultByCallId.get(callId);
+      const status = info?.status ?? 'success';
+      attrs['gen_ai.tool.call.status'] = status;
+      if (status === 'error') {
+        const errorObj = {
+          type: info?.errorType ?? 'ToolError',
+          message: info?.errorMessage ?? '',
+        };
+        attrs['gen_ai.tool.error'] = JSON.stringify(errorObj);
+        attrs['gen_ai.tool.output'] = info?.errorMessage ?? '';
+      } else {
+        const resultText = attrs['gen_ai.tool.call.result'];
+        attrs['gen_ai.tool.output'] = typeof resultText === 'string' ? resultText : '';
+      }
     }
   }
 

@@ -740,6 +740,48 @@ describe('kiro-cli-hook-processor tool 失败路径（success=true + exit_status
     expect(bashResult['error.type']).toBeUndefined();
     expect(bashResult['error.message']).toBeUndefined();
   });
+
+  // S1b 修复（tester 报告 P1）：execute_bash result 数组元素为对象时
+  // extractToolResultText 必须 JSON.stringify，否则 Array.join 产出 "[object Object]"，
+  // 下游 OTLP TOOL span 的 gen_ai.tool.call.result 显示 "[object Object]"。
+  test('execute_bash result 对象元素：gen_ai.tool.call.result 不再是 [object Object]', () => {
+    runHookWithSessionDir(
+      'postToolUse',
+      {
+        hook_event_name: 'postToolUse',
+        cwd: SESSION_CWD,
+        tool_name: 'execute_bash',
+        tool_input: { command: 'which bash' },
+        tool_response: {
+          success: true,
+          result: [
+            {
+              exit_status: '0',
+              stdout: '/usr/bin/bash\n',
+              stderr: '',
+            },
+          ],
+        },
+      },
+      fakeHome,
+    );
+
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: SESSION_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+
+    const records = readJsonlRecords();
+    const bashResult = records.find(
+      (x) => x['event.name'] === 'tool.result' && x['gen_ai.tool.name'] === 'execute_bash',
+    );
+    expect(bashResult).toBeTruthy();
+    // 修复前：'[object Object]'；修复后：对象被 JSON.stringify
+    expect(bashResult['gen_ai.tool.call.result']).not.toBe('[object Object]');
+    expect(bashResult['gen_ai.tool.call.result']).toContain('exit_status');
+    expect(bashResult['gen_ai.tool.call.result']).toContain('/usr/bin/bash');
+  });
 });
 
 // ─── 0ms TOOL span（候选项 #6 修复） ───
