@@ -133,6 +133,10 @@ export class QoderApiSlsSender {
           }
         }
 
+        // Note: splice runs after persistFailedLogs, so if persistFailedLogs throws,
+        // successfully-sent batches remain in the buffer and will be re-sent on the
+        // next flush cycle. This is safe because event_id dedup at SLS is load-bearing
+        // for correctness — it prevents duplicate delivery, not just an optimization.
         this.buffer.splice(0, sliceEnd);
         if (hasFailure) break;
 
@@ -161,13 +165,13 @@ export class QoderApiSlsSender {
       await new Promise((r) => setTimeout(r, 100));
     }
     if (this.flushing) {
-      logger.warn('shutdown: flush still in progress after timeout, proceeding', {
+      logger.warn('shutdown: flush still in progress after timeout, skipping drain retries', {
         configName: this.configName,
         timeoutMs: SHUTDOWN_WAIT_TIMEOUT_MS,
       });
     }
 
-    // Drain remaining buffer with retries.
+    // Drain remaining buffer with retries (only effective if in-flight flush completed).
     const maxAttempts = 3;
     for (let attempt = 0; attempt < maxAttempts && this.bufferSize() > 0; attempt++) {
       await this.flush();

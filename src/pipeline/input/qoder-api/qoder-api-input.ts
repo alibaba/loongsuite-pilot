@@ -397,6 +397,7 @@ export class QoderApiInput {
 
     // Usage events (paginated by nextCredits)
     let nextCredits: string | undefined;
+    let memberEventIndex = 0;
     for (let page = 0; page < MAX_OFFSET_PAGES; page++) {
       const resp: ListUsageEventsResponse = await this.client.listMemberUsageEvents(
         this.orgId,
@@ -410,7 +411,7 @@ export class QoderApiInput {
       );
       const usages = resp.usages ?? [];
       for (const u of usages) {
-        out.push(this.transformUsageEvent(u, member, startIso, endIso, reportTs));
+        out.push(this.transformUsageEvent(u, member, startIso, endIso, reportTs, memberEventIndex++));
       }
       nextCredits =
         resp.nextCredits && resp.nextCredits !== '' ? resp.nextCredits : undefined;
@@ -483,6 +484,7 @@ export class QoderApiInput {
   ): Promise<Record<string, string>[]> {
     const out: Record<string, string>[] = [];
     let nextToken: string | undefined;
+    let orgEventIndex = 0;
     for (let page = 0; page < MAX_OFFSET_PAGES; page++) {
       const resp = await this.client.listOrgUsageEvents(this.orgId, {
         startDate: startIso,
@@ -492,7 +494,7 @@ export class QoderApiInput {
       });
       const usages = resp.usages ?? [];
       for (const u of usages) {
-        out.push(this.transformOrgUsageEvent(u, startIso, endIso, reportTs));
+        out.push(this.transformOrgUsageEvent(u, startIso, endIso, reportTs, orgEventIndex++));
       }
       nextToken = resp.nextToken && resp.nextToken !== '' ? resp.nextToken : undefined;
       if (!nextToken) break;
@@ -572,6 +574,7 @@ export class QoderApiInput {
     startIso: string,
     endIso: string,
     reportTs: string,
+    index: number,
   ): Record<string, string> {
     const log: Record<string, string> = {
       kind: 'usage.member_event',
@@ -598,6 +601,7 @@ export class QoderApiInput {
       u.operation ?? '',
       u.modelTier ?? '',
       String(u.credits ?? ''),
+      String(index),
     ]);
     return log;
   }
@@ -635,7 +639,7 @@ export class QoderApiInput {
       'usage.member_quota',
       this.orgId,
       member.id ?? '',
-      reportTs,
+      endIso.slice(0, 10),
     ]);
     return log;
   }
@@ -732,6 +736,7 @@ export class QoderApiInput {
     startIso: string,
     endIso: string,
     reportTs: string,
+    index: number,
   ): Record<string, string> {
     const log: Record<string, string> = {
       kind: 'usage.org_event',
@@ -758,6 +763,7 @@ export class QoderApiInput {
       u.operation ?? '',
       u.modelTier ?? '',
       String(u.credits ?? ''),
+      String(index),
     ]);
     return log;
   }
@@ -790,7 +796,7 @@ export class QoderApiInput {
       total_credits: String(total.toFixed(4)),
       group_count: String(Object.keys(summary).length),
     };
-    log.event_id = sha256([kind, this.orgId, member.id ?? '', startIso, endIso]);
+    log.event_id = sha256([kind, this.orgId, member.id ?? '', endIso.slice(0, 10)]);
     return log;
   }
 
@@ -818,7 +824,7 @@ export class QoderApiInput {
       'usage.org_resource_package',
       this.orgId,
       String(p.id ?? ''),
-      reportTs,
+      reportTs.slice(0, 10),
     ]);
     return log;
   }
@@ -851,7 +857,7 @@ export class QoderApiInput {
       'usage.org_seat_month_batch',
       this.orgId,
       String(b.id ?? ''),
-      reportTs,
+      reportTs.slice(0, 10),
     ]);
     return log;
   }
@@ -880,8 +886,7 @@ export class QoderApiInput {
     log.event_id = sha256([
       'code.stats_overview',
       this.orgId,
-      startIso,
-      endIso,
+      endIso.slice(0, 10),
     ]);
     return log;
   }
@@ -993,8 +998,7 @@ export class QoderApiInput {
         'code.stats_member_ranking',
         this.orgId,
         String(it.userId ?? ''),
-        startIso,
-        endIso,
+        endIso.slice(0, 10),
       ]);
       out.push(log);
     }
@@ -1022,8 +1026,7 @@ export class QoderApiInput {
       'code.stats_repo',
       this.orgId,
       String(r.repoName ?? ''),
-      startIso,
-      endIso,
+      endIso.slice(0, 10),
     ]);
     return log;
   }
@@ -1052,8 +1055,7 @@ export class QoderApiInput {
         'code.stats_file_extension',
         this.orgId,
         String(e.extension ?? ''),
-        startIso,
-        endIso,
+        endIso.slice(0, 10),
       ]);
       out.push(log);
     }

@@ -42,6 +42,7 @@ export class PipelineManager {
 
     await ensureDir(this.configDir);
     await this.migrateStateDir();
+    await this.migrateFailedLogDir();
     await ensureDir(this.stateDir);
     await ensureDir(this.failedLogDir);
 
@@ -137,6 +138,32 @@ export class PipelineManager {
       logger.warn('state directory migration failed', {
         from: oldDir,
         to: this.stateDir,
+        error: String(err),
+      });
+    }
+  }
+
+  /**
+   * One-time migration: if the old logs/file-collection-failed/ directory exists
+   * and logs/pipeline-failed/ does not, rename it so existing failed logs are
+   * not orphaned after the upgrade.
+   */
+  private async migrateFailedLogDir(): Promise<void> {
+    const oldDir = this.failedLogDir.replace(/[/\\]pipeline-failed$/, '/file-collection-failed');
+    if (oldDir === this.failedLogDir) return;
+
+    try {
+      const oldExists = await fsPromises.access(oldDir).then(() => true).catch(() => false);
+      const newExists = await fsPromises.access(this.failedLogDir).then(() => true).catch(() => false);
+
+      if (oldExists && !newExists) {
+        await fsPromises.rename(oldDir, this.failedLogDir);
+        logger.info('migrated failed-log directory', { from: oldDir, to: this.failedLogDir });
+      }
+    } catch (err) {
+      logger.warn('failed-log directory migration failed', {
+        from: oldDir,
+        to: this.failedLogDir,
         error: String(err),
       });
     }
