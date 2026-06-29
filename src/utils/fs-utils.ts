@@ -55,18 +55,54 @@ export async function writeJsonFile(
     await fsp.writeFile(tmp, text, 'utf8');
     await fsp.rename(tmp, path);
   } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
     // Directory may vanish between ensureDir and write/rename (e.g. concurrent cleanup).
     // Retry once after re-creating the directory.
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+    if (code === 'ENOENT') {
       await fsp.unlink(tmp).catch(() => {});
       await ensureDir(dir);
       const tmp2 = `${path}.${process.pid}.${Date.now()}.tmp`;
-      await fsp.writeFile(tmp2, text, 'utf8');
-      await fsp.rename(tmp2, path);
+      try {
+        await fsp.writeFile(tmp2, text, 'utf8');
+        await fsp.rename(tmp2, path);
+      } catch (retryErr) {
+        await fsp.unlink(tmp2).catch(() => {});
+        throw retryErr;
+      }
+    } else if (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') {
+      // On Windows, rename can fail when the target is briefly locked by
+      // antivirus/indexer or concurrent I/O. Retry once after a short delay.
+      // If the error came from writeFile (tmp doesn't exist), skip the retry.
+      const tmpExists = await fsp.stat(tmp).then(() => true, () => false);
+      if (!tmpExists) throw err;
+      await new Promise(r => setTimeout(r, 50));
+      try {
+        await fsp.rename(tmp, path);
+      } catch {
+        await fsp.unlink(tmp).catch(() => {});
+        throw err;
+      }
     } else {
+      await fsp.unlink(tmp).catch(() => {});
       throw err;
     }
   }
+}
+
+/**
+ * Removes stale `.tmp` files left behind by interrupted atomic writes (e.g. process
+ * killed mid-rename). Call once at startup for directories that use writeJsonFile.
+ */
+export async function cleanStaleTmpFiles(dir: string): Promise<void> {
+  const currentPid = String(process.pid);
+  try {
+    const entries = await fsp.readdir(dir);
+    const tmpFiles = entries.filter(f => {
+      const m = f.match(/\.(\d+)\.\d+\.tmp$/);
+      return m != null && m[1] !== currentPid;
+    });
+    await Promise.all(tmpFiles.map(f => fsp.unlink(nodePath.join(dir, f)).catch(() => {})));
+  } catch {}
 }
 
 /**
