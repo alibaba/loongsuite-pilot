@@ -39,10 +39,12 @@ Pilot 主要帮助回答这些问题：
 | OpenCode | 插件注入 | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | Yes | Yes | Yes | Yes |
-| Qoder CLI | Hook / session polling | Yes | Yes | No | Yes |
-| Qoder Work | Hook / 本地数据轮询 | Yes | Yes | No | Yes |
-| Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | No | Yes |
+| Qoder for JetBrains | 自动检测 | Yes | Yes | Yes | Yes |
+| Qoder CLI | Hook / session polling | Yes | Yes | Yes | Yes |
+| Qoder Work | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
+| Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
+| Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 
 Agent 定义位于 `agents.d/`。如需接入新的 Agent，请参考 [新 Agent 接入](docs/zh-CN/agent-onboarding.md)。
 
