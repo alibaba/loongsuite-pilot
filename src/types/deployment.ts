@@ -65,7 +65,6 @@ export interface AgentHookConfig {
    */
   rawCommand?: boolean;
   /**
-  /**
    * Optional env block to merge into the agent's settings.json on deploy.
    *
    * Each value may contain the `$PILOT_DATA` token; AgentDefLoader resolves

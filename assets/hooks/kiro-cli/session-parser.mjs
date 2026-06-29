@@ -116,24 +116,41 @@ export function parseSessionLines(lines, sidecar) {
 
   const steps = [];
   let currentPrompt = '';
+  let currentTurnIndex = -1;  // incremented on each Prompt line; first Prompt → turn 0
   let assistantIndex = 0;
   let toolResultIndex = 0;
   const toolResultMap = new Map();
+  // Per-turn pending step refs (assigned timing on turn flush). Each step
+  // starts with placeholder 0/0 timing; flushTurn divides the turn's
+  // turn_duration evenly across its AssistantMessages so:
+  //   - steps within one turn have non-overlapping start/end
+  //   - steps across turns map to their own turn metadata
+  let pendingTurnSteps = [];
+  let pendingTurnIndex = -1;
 
-  const totalDurationMs = turnDurations.reduce(
-    (sum, d) => sum + d.secs * 1000 + d.nanos / 1e6,
-    0,
-  );
-  const totalRequests = lines.filter(
-    (l) => l?.kind === 'AssistantMessage',
-  ).length;
-
-  let baseTimeMs = 0;
-  if (turnEndTimestamps.length > 0 && turnEndTimestamps[0] > 0 && totalDurationMs > 0) {
-    baseTimeMs = turnEndTimestamps[0] - totalDurationMs;
+  function flushTurn() {
+    if (pendingTurnSteps.length === 0) return;
+    const idx = pendingTurnIndex;
+    if (idx < 0 || idx >= turnEndTimestamps.length) {
+      pendingTurnSteps = [];
+      pendingTurnIndex = -1;
+      return;
+    }
+    const dur = turnDurations[idx];
+    const durMs = (dur?.secs || 0) * 1000 + (dur?.nanos || 0) / 1e6;
+    const endTs = turnEndTimestamps[idx];
+    if (endTs > 0 && durMs > 0) {
+      const baseMs = endTs - durMs;
+      const slice = durMs / pendingTurnSteps.length;
+      for (let i = 0; i < pendingTurnSteps.length; i++) {
+        const step = pendingTurnSteps[i];
+        step.startTimeMs = baseMs + i * slice;
+        step.endTimeMs = step.startTimeMs + slice;
+      }
+    }
+    pendingTurnSteps = [];
+    pendingTurnIndex = -1;
   }
-
-  const timePerRequest = totalRequests > 0 ? totalDurationMs / totalRequests : 0;
 
   for (const line of lines) {
     if (!line || typeof line !== 'object') continue;
@@ -141,6 +158,10 @@ export function parseSessionLines(lines, sidecar) {
     const data = line.data || {};
 
     if (kind === 'Prompt') {
+      // New Prompt = turn boundary. Flush previous turn's steps first.
+      flushTurn();
+      currentTurnIndex++;
+      pendingTurnIndex = currentTurnIndex;
       const contentArr = Array.isArray(data.content) ? data.content : [];
       for (const c of contentArr) {
         if (c?.kind === 'text' && typeof c.data === 'string') {
@@ -171,26 +192,35 @@ export function parseSessionLines(lines, sidecar) {
       }
 
       const isToolUse = toolUses.length > 0;
-      const startTimeMs = baseTimeMs + assistantIndex * timePerRequest;
-      const endTimeMs = startTimeMs + timePerRequest;
 
-      steps.push({
+      // Timing assigned by flushTurn() once we know how many AssistantMessages
+      // belong to this turn. Initialize to 0/0 sentinel.
+      const step = {
         index: assistantIndex,
         stepId: messageId,
         responseId: messageId,
         kind: isToolUse ? 'ToolUse' : 'NotToolUse',
         modelId,
-        startTimeMs,
-        endTimeMs,
+        startTimeMs: 0,
+        endTimeMs: 0,
         tools: isToolUse
           ? toolUses.filter((t) => t.id)
           : [],
         assistantText: isToolUse ? '' : textContent,
-        userPrompt: assistantIndex === 0 ? currentPrompt : '',
+        userPrompt: currentPrompt,
         toolUseResults: [],
         creditIndex: assistantIndex < credits.length ? assistantIndex : -1,
-      });
+      };
+      steps.push(step);
+      pendingTurnSteps.push(step);
 
+      // Consume currentPrompt: only the first AssistantMessage after a Prompt
+      // carries the user input. Subsequent AssistantMessages in the same turn
+      // (tool-chain continuations after ToolResults) have no new user input —
+      // their inputMsgs come from toolUseResults instead. Without this clear,
+      // every step in a tool-chain duplicates role:user record → SLS shows
+      // s1==s2 / s3==s4 etc.
+      currentPrompt = '';
       assistantIndex++;
       continue;
     }
@@ -203,6 +233,9 @@ export function parseSessionLines(lines, sidecar) {
       toolResultIndex++;
     }
   }
+
+  // Flush the final turn (no trailing Prompt to trigger boundary).
+  flushTurn();
 
   // Map tool results onto subsequent steps as toolUseResults.
   // For step N (N > 0), the tool results from step N-1's tools form the
@@ -305,6 +338,11 @@ export async function readSessionJsonl(cwd, opts = {}) {
   const parsed = parseSessionLines(lines, best.sidecar);
   if (parsed.steps.length === 0) return null;
 
+  // NOTE on opts.sinceUpdatedMs: deliberately NOT used as a step filter.
+  // Step-level dedup happens upstream via `emitted-steps` state. A
+  // step-time-based filter would accidentally drop the whole transcript
+  // because step.endTimeMs typically <= session.updated_at (regression
+  // tested below: "sinceUpdatedMs >= updated_at" must still return full).
   return {
     conversationId: parsed.conversationId,
     continuationId: parsed.continuationId,
