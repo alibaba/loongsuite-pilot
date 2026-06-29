@@ -40,6 +40,7 @@ struct PanelContentView: View {
                         rangeSelector
                         agentsSection
                         providersSection
+                        modelsSection
                         reposSection
                         tokenTrendSection
                         sessionTrendSection
@@ -235,6 +236,47 @@ struct PanelContentView: View {
     }
 
     // MARK: - Repositories
+
+    private var modelsSection: some View {
+        section(title: "MODELS") {
+            if metricsStore.snapshot.modelShares.isEmpty {
+                emptyText("No model data")
+            } else {
+                VStack(spacing: 10) {
+                    ForEach(metricsStore.snapshot.modelShares) { item in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                Text(item.model)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(DT.text)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                Text(item.formattedShare)
+                                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(DT.accent)
+                                Text(item.formattedTokens)
+                                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                                    .foregroundStyle(DT.muted)
+                                    .frame(width: 50, alignment: .trailing)
+                            }
+
+                            GeometryReader { geo in
+                                ZStack(alignment: .leading) {
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .fill(DT.border)
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .fill(DT.accent.opacity(0.7))
+                                        .frame(width: max(4, geo.size.width * item.share))
+                                }
+                            }
+                            .frame(height: 4)
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     private var reposSection: some View {
         section(title: "REPOSITORIES") {
