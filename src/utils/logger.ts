@@ -46,8 +46,9 @@ export async function initFileLogging(logFilePath: string): Promise<void> {
     limit: { count: 10, removeOtherLogFiles: true },
   });
 
+  const useStdout = process.stdout.isTTY || process.env.LOONGSUITE_PILOT_STDOUT === '1';
   const streams: pino.StreamEntry[] = [{ stream: fileStream, level: LOG_LEVEL }];
-  if (process.stdout.isTTY) {
+  if (useStdout) {
     streams.unshift({ stream: process.stdout, level: LOG_LEVEL });
   } else {
     // Daemon mode: truncate the base file that launchd/service manager may

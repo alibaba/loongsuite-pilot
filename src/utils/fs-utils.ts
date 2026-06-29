@@ -72,6 +72,9 @@ export async function writeJsonFile(
     } else if (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') {
       // On Windows, rename can fail when the target is briefly locked by
       // antivirus/indexer or concurrent I/O. Retry once after a short delay.
+      // If the error came from writeFile (tmp doesn't exist), skip the retry.
+      const tmpExists = await fsp.stat(tmp).then(() => true, () => false);
+      if (!tmpExists) throw err;
       await new Promise(r => setTimeout(r, 50));
       try {
         await fsp.rename(tmp, path);
@@ -91,9 +94,13 @@ export async function writeJsonFile(
  * killed mid-rename). Call once at startup for directories that use writeJsonFile.
  */
 export async function cleanStaleTmpFiles(dir: string): Promise<void> {
+  const currentPid = String(process.pid);
   try {
     const entries = await fsp.readdir(dir);
-    const tmpFiles = entries.filter(f => /\.\d+\.\d+\.tmp$/.test(f));
+    const tmpFiles = entries.filter(f => {
+      const m = f.match(/\.(\d+)\.\d+\.tmp$/);
+      return m != null && m[1] !== currentPid;
+    });
     await Promise.all(tmpFiles.map(f => fsp.unlink(nodePath.join(dir, f)).catch(() => {})));
   } catch {}
 }
