@@ -796,14 +796,22 @@ function stripMetaKeys(obj) {
 
 /**
  * hook tool_response 结构: { success: bool, result: string[] } → 取 result 文本。
+ *
+ * result 数组元素可能是字符串（fs_read/fs_write 直接文本）或对象（execute_bash
+ * 携带 exit_status/stdout/stderr）。对象元素必须 JSON.stringify，否则
+ * Array.prototype.join 会调用 String(item) 产出 "[object Object]"，下游
+ * OTLP TOOL span 的 gen_ai.tool.call.result 会显示 "[object Object]"。
  */
 function extractToolResultText(toolResponse) {
   if (!toolResponse || typeof toolResponse !== 'object') return toolResponse;
   if (Array.isArray(toolResponse.result)) {
-    return toolResponse.result.join('\n');
+    return toolResponse.result
+      .map(item => (typeof item === 'string' ? item : JSON.stringify(item)))
+      .join('\n');
   }
   if (typeof toolResponse.result === 'string') return toolResponse.result;
-  return toolResponse;
+  // result 为对象或其他结构时整体 stringify，避免下游 String() 产出 [object Object]。
+  return JSON.stringify(toolResponse);
 }
 
 /**
