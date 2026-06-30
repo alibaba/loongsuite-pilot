@@ -48,6 +48,9 @@ async function main(): Promise<void> {
   const results: ProbeResult[] = [];
 
   for (const def of defs) {
+    if (def.detection.paths.length === 0 && def.detection.commands.length === 0) {
+      continue;
+    }
     const detected = await detectAgent(def.detection);
     const reason = detected ? await findDetectionReason(def.detection) : '';
     results.push({
