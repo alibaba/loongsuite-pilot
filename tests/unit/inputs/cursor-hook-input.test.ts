@@ -422,4 +422,87 @@ describe('CursorHookInput', () => {
     expect(entries[0]!['event.id']).toBe('new-1');
     expect(entries[0]!['gen_ai.session.id']).toBe('new-sess');
   });
+
+  it('date rollover: reads today records when lastFile points to yesterday', async () => {
+    // Simulate daemon running since yesterday — state has yesterday's file
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
+    stateStore.set('cursor-hook', { lastFile: `cursor-${yesterdayStr}.jsonl`, lastOffset: 500 });
+
+    const today = getTodayDateString();
+    const logFile = path.join(tmpDir, `cursor-${today}.jsonl`);
+
+    // Write today's records
+    const record = {
+      'event.id': 'today-1',
+      'event.name': 'tool.call',
+      'gen_ai.agent.type': ClientType.Cursor,
+      time_unix_nano: '1777628163513000000',
+      observed_time_unix_nano: '1777628163513000000',
+      'gen_ai.session.id': 'today-sess',
+      'gen_ai.tool.name': 'Shell',
+      'gen_ai.tool.call.id': 'today-tool',
+      'gen_ai.tool.call.arguments': { command: 'date' },
+      'agent.cursor.hook_event_name': 'preToolUse',
+    };
+    await fs.writeFile(logFile, `${JSON.stringify(record)}\n`);
+
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    // Today's records should be read (base class resets offset to 0 for new file)
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!['event.id']).toBe('today-1');
+    expect(entries[0]!['gen_ai.session.id']).toBe('today-sess');
+  });
+
+  it('first-run guard does not re-fire when file did not exist initially', async () => {
+    // Stop the default input and create one with a short poll interval
+    await input.stop();
+    const fastInput = new CursorHookInput({
+      stateStore: stateStore as any,
+      logDir: tmpDir,
+      logPrefix: 'cursor',
+      pollIntervalMs: 50,
+    });
+
+    // Reset state to simulate fresh daemon start
+    stateStore.set('cursor-hook', {});
+
+    // Do NOT create the log file — simulate daemon starting before Cursor writes
+    const today = getTodayDateString();
+    const logFile = path.join(tmpDir, `cursor-${today}.jsonl`);
+
+    const entries: AgentActivityEntry[] = [];
+    fastInput.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await fastInput.start();
+
+    // After first poll (guard fires, file doesn't exist, writes lastOffset=0),
+    // write a new record.
+    const record = {
+      'event.id': 'first-after-start',
+      'event.name': 'tool.call',
+      'gen_ai.agent.type': ClientType.Cursor,
+      time_unix_nano: '1777628163513000000',
+      observed_time_unix_nano: '1777628163513000000',
+      'gen_ai.session.id': 'sess-1',
+      'gen_ai.tool.name': 'Shell',
+      'gen_ai.tool.call.id': 'tool-1',
+      'gen_ai.tool.call.arguments': { command: 'echo hi' },
+      'agent.cursor.hook_event_name': 'preToolUse',
+    };
+    await fs.writeFile(logFile, `${JSON.stringify(record)}\n`);
+
+    // Wait for at least one more poll cycle
+    await new Promise(r => setTimeout(r, 150));
+
+    await fastInput.stop();
+
+    // The record should be collected — guard must not re-fire and skip it
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!['event.id']).toBe('first-after-start');
+  });
 });

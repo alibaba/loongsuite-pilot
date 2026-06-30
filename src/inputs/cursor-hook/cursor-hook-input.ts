@@ -83,7 +83,7 @@ export class CursorHookInput extends BaseHookInput {
     const today = getTodayDateString();
     const logFileName = `${this.logPrefix}-${today}.jsonl`;
 
-    if (!state.lastFile || state.lastFile !== logFileName) {
+    if (!state.lastFile) {
       const logFile = path.join(this.logDir, logFileName);
       try {
         const stat = await fs.stat(logFile);
@@ -93,9 +93,15 @@ export class CursorHookInput extends BaseHookInput {
             file: logFileName,
             skippedBytes: stat.size,
           });
+        } else {
+          // Empty file — mark guard as done, nothing to skip
+          this.setState({ lastFile: logFileName, lastOffset: 0 });
         }
       } catch {
-        // File doesn't exist yet — normal for first poll
+        // File doesn't exist yet — still mark guard as done so the next poll
+        // uses normal base-class collection (offset 0) instead of re-entering
+        // the guard and potentially skipping a freshly written record.
+        this.setState({ lastFile: logFileName, lastOffset: 0 });
       }
     }
 
