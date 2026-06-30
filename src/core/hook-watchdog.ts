@@ -425,7 +425,9 @@ export class HookWatchdog {
         check: async () => {
           try {
             const { stdout } = await execFileAsync('launchctl', ['getenv', 'QODER_WORKER_RUNTIME_PATH']);
-            return stdout.trim() === wrapperPath;
+            if (stdout.trim() !== wrapperPath) return false;
+            // Also verify plist exists — without it, env is lost on reboot.
+            return fileExists(plistPath);
           } catch {
             return false;
           }
@@ -454,6 +456,10 @@ export class HookWatchdog {
           ].join('\n');
           await fs.mkdir(path.dirname(plistPath), { recursive: true });
           await fs.writeFile(plistPath, plistContent);
+          // NOTE: launchctl load/unload is deprecated since macOS 10.11 in
+          // favour of `launchctl bootstrap/bootout gui/<uid>`. We keep
+          // load/unload for now because it still works reliably across all
+          // supported macOS versions and avoids the uid lookup complexity.
           await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
           await execFileAsync('launchctl', ['load', plistPath]).catch(() => {});
         },
@@ -461,23 +467,24 @@ export class HookWatchdog {
     }
 
     // ── Shell rc intercept targets (qodercli + claude-code) ──
-    const shell = process.env.SHELL || '/bin/bash';
-    const rcPath = shell.endsWith('/zsh')
-      ? path.join(home, '.zshrc')
-      : path.join(home, '.bashrc');
+    // Check BOTH .zshrc and .bashrc regardless of daemon's $SHELL — the
+    // daemon is launchd-started and its $SHELL may not match the user's
+    // interactive shell. Installer's remove function also scans all rc files.
+    const rcPaths = [
+      path.join(home, '.zshrc'),
+      path.join(home, '.bashrc'),
+    ];
 
     const rcTargets: Array<{
       id: string;
       marker: string;
       scriptName: string;
-      cliCommand: string;
       blockFn: (scriptPath: string) => string;
     }> = [
       {
         id: 'qodercli-rc',
         marker: 'loongsuite-pilot BEGIN qodercli-intercept',
         scriptName: 'qodercli-token-intercept.mjs',
-        cliCommand: 'qodercli',
         blockFn: (p) => [
           '',
           '# loongsuite-pilot BEGIN qodercli-intercept',
@@ -489,7 +496,6 @@ export class HookWatchdog {
         id: 'claude-code-rc',
         marker: 'loongsuite-pilot BEGIN claude-code-intercept',
         scriptName: 'claude-code-fetch-intercept.mjs',
-        cliCommand: 'claude',
         blockFn: (p) => [
           '',
           '# loongsuite-pilot BEGIN claude-code-intercept',
@@ -515,18 +521,28 @@ export class HookWatchdog {
           return fileExists(scriptPath);
         },
         check: async () => {
-          try {
-            const content = await fs.readFile(rcPath, 'utf-8');
-            return content.includes(rc.marker);
-          } catch {
-            return true; // rc file doesn't exist → nothing to repair
+          // Check ALL common rc files — marker must exist in at least one.
+          for (const rcPath of rcPaths) {
+            try {
+              const content = await fs.readFile(rcPath, 'utf-8');
+              if (content.includes(rc.marker)) return true;
+            } catch {
+              // file doesn't exist, check next
+            }
           }
+          // Not found in any existing rc file. If no rc files exist at all,
+          // there's nothing we can repair into, so treat as healthy.
+          const anyRcExists = (await Promise.all(rcPaths.map(p => fileExists(p)))).some(Boolean);
+          return !anyRcExists;
         },
         repair: async () => {
-          if (!await fileExists(rcPath)) return; // never create rc files
-          const content = await fs.readFile(rcPath, 'utf-8');
-          if (content.includes(rc.marker)) return; // re-check before write
-          await fs.appendFile(rcPath, rc.blockFn(scriptPath) + '\n');
+          // Append to ALL existing rc files that don't already have the marker.
+          for (const rcPath of rcPaths) {
+            if (!await fileExists(rcPath)) continue; // never create rc files
+            const content = await fs.readFile(rcPath, 'utf-8');
+            if (content.includes(rc.marker)) continue; // already present
+            await fs.appendFile(rcPath, rc.blockFn(scriptPath) + '\n');
+          }
         },
       });
     }

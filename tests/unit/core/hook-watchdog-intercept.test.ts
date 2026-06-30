@@ -120,6 +120,24 @@ describe('HookWatchdog intercept targets', () => {
     expect(disabled.check).not.toHaveBeenCalled();
   });
 
+  it('does not repair again once check returns healthy after prior repair', async () => {
+    const config = { ...defaultConfig, repairCooldownMs: 0 };
+    let healthy = false;
+    const target = makeTarget({
+      check: vi.fn(async () => healthy),
+      repair: vi.fn(async () => { healthy = true; }), // repair makes check pass
+    });
+    const wd = new HookWatchdog(config, [], [target]);
+
+    // First run: check false → repair → sets healthy=true
+    await wd.runCheck();
+    expect(target.repair).toHaveBeenCalledTimes(1);
+
+    // Second run: check now returns true → no repair
+    await wd.runCheck();
+    expect(target.repair).toHaveBeenCalledTimes(1); // still 1, not called again
+  });
+
   it('resets daily counter on date change', async () => {
     const config = { ...defaultConfig, repairCooldownMs: 0 };
     const target = makeTarget({ check: vi.fn().mockResolvedValue(false) });
