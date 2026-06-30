@@ -378,6 +378,30 @@ function buildParentSteps(events, ctx) {
     previousToolResults = [];
   }
 
+  /**
+   * Open an implicit step for buffered tools (no thought/response triggered it).
+   * Used by the composer-2.5-fast path and the buffered-tools-only fallback.
+   */
+  function openImplicitStep(reqTs, reqTsSource) {
+    const isFirstStep = stepRound === 0;
+    stepRound++;
+    currentStepId = `${ctx.stepPrefix || ctx.turnId}:s${stepRound}`;
+    stepToolCalls.set(currentStepId, []);
+
+    const deltaMessages = buildDeltaMessages(isFirstStep, ctx.userPrompt, previousToolResults, cumulativeInputMessages);
+    previousToolResults = [];
+
+    records.push(buildLlmRequestWithTs(
+      reqTs, { hook_event: 'implicit' }, ctx, currentStepId,
+      deltaMessages, cumulativeInputMessages, reqTsSource,
+    ));
+    currentLlmResponse = buildEmptyLlmResponse(
+      { _journal_ts: reqTs, hook_event: 'implicit' }, ctx, currentStepId,
+    );
+    flushPendingTools(currentStepId);
+    currentStepHasTools = true;
+  }
+
   for (const ev of stepEvents) {
 
     if (ev.hook_event === 'afterAgentThought') {
@@ -398,24 +422,8 @@ function buildParentSteps(events, ctx) {
       // composer-2.5-fast path: no afterAgentThought, tools buffered, no step opened yet.
       // First open s1 for the buffered tools (so afterAgentResponse can claim s2 below).
       if (currentStepId === null && pendingToolRecords.length > 0) {
-        stepRound++;
-        currentStepId = `${ctx.stepPrefix || ctx.turnId}:s${stepRound}`;
-        stepToolCalls.set(currentStepId, []);
         const { timestamp: reqTs, source: reqTsSource } = llmRequestStartTime(ev, lastStepEndTs);
-        // Ordering invariant: delta must be computed BEFORE flushPendingTools, because
-        // flushPendingTools populates previousToolResults with the current step's tools.
-        // s1's delta should only contain results from a prior step (empty for the first step).
-        const deltaMessages = buildDeltaMessages(stepRound === 1, ctx.userPrompt, previousToolResults, cumulativeInputMessages);
-        previousToolResults = [];
-        records.push(buildLlmRequestWithTs(
-          reqTs, { hook_event: 'implicit' }, ctx, currentStepId,
-          deltaMessages, cumulativeInputMessages, reqTsSource,
-        ));
-        currentLlmResponse = buildEmptyLlmResponse(
-          { _journal_ts: reqTs, hook_event: 'implicit' }, ctx, currentStepId,
-        );
-        flushPendingTools(currentStepId);
-        currentStepHasTools = true;
+        openImplicitStep(reqTs, reqTsSource);
       }
 
       if (currentStepId !== null && currentStepHasTools) {
@@ -500,22 +508,8 @@ function buildParentSteps(events, ctx) {
 
   // Buffered tools with no thought/response (entire turn was tools-only)
   if (pendingToolRecords.length > 0) {
-    const isFirstStep = stepRound === 0;
-    stepRound++;
-    currentStepId = `${ctx.stepPrefix || ctx.turnId}:s${stepRound}`;
-    stepToolCalls.set(currentStepId, []);
     const reqTs = lastStepEndTs || ctx.promptEventTs;
-
-    const deltaMessages = buildDeltaMessages(isFirstStep, ctx.userPrompt, previousToolResults, cumulativeInputMessages);
-
-    records.push(buildLlmRequestWithTs(
-      reqTs, { hook_event: 'implicit' }, ctx, currentStepId,
-      deltaMessages,
-      cumulativeInputMessages,
-    ));
-    currentLlmResponse = buildEmptyLlmResponse({ _journal_ts: reqTs, hook_event: 'implicit' }, ctx, currentStepId);
-    flushPendingTools(currentStepId);
-    currentStepHasTools = true;
+    openImplicitStep(reqTs);
   }
 
   // Flush last response
@@ -585,7 +579,7 @@ function buildDeltaMessages(isFirst, userPrompt, previousToolResults, cumulative
   if (previousToolResults.length > 0) {
     const toolMessage = toolResultsToMessage(previousToolResults);
     deltaMessages.push(toolMessage);
-    cumulativeInputMessages.push(toolMessage);
+    cumulativeInputMessages.push({ ...toolMessage, parts: [...toolMessage.parts] });
   }
   return deltaMessages;
 }
