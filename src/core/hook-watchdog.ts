@@ -1,13 +1,18 @@
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import type { HookWatchdogConfig } from '../types/index.js';
 import { directoryExists, fileExists, readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
+const execFileAsync = promisify(execFile);
 const logger = createLogger('HookWatchdog');
 
 const STARTUP_DELAY_MS = 30_000;
 const REPAIR_TIMEOUT_MS = 30_000;
+const MAX_INTERCEPT_REPAIRS_PER_DAY = 3;
 
 export interface PluginCheckTarget {
   agentId: string;
@@ -22,6 +27,13 @@ export interface PluginCheckTarget {
   installArgs?: string[];
   /** Direct repair function (for hook-type repair via HookManager). Takes precedence over binPath. */
   repairFn?: () => Promise<boolean>;
+}
+
+export interface InterceptCheckTarget {
+  id: string;
+  check: () => Promise<boolean>;
+  repair: () => Promise<void>;
+  precondition: () => Promise<boolean>;
 }
 
 export interface CheckResult {
@@ -51,13 +63,21 @@ export interface TargetResult {
 export class HookWatchdog {
   private readonly config: HookWatchdogConfig;
   private readonly targets: PluginCheckTarget[];
+  private readonly interceptTargets: InterceptCheckTarget[];
   private readonly lastRepairAt: Map<string, number> = new Map();
+  private readonly dailyRepairCount: Map<string, number> = new Map();
+  private dailyRepairResetDate = '';
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private intervalTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(config: HookWatchdogConfig, targets?: PluginCheckTarget[]) {
+  constructor(
+    config: HookWatchdogConfig,
+    targets?: PluginCheckTarget[],
+    interceptTargets?: InterceptCheckTarget[],
+  ) {
     this.config = config;
     this.targets = targets ?? HookWatchdog.defaultTargets();
+    this.interceptTargets = interceptTargets ?? [];
   }
 
   start(): void {
@@ -109,6 +129,8 @@ export class HookWatchdog {
         });
       }
     }
+
+    await this.checkInterceptTargets(summary);
 
     return summary;
   }
@@ -291,6 +313,62 @@ export class HookWatchdog {
     });
   }
 
+  // ─── Intercept self-healing ─────────────────────────────────────────────
+
+  private async checkInterceptTargets(summary: CheckResult): Promise<void> {
+    this.resetDailyCounterIfNeeded();
+
+    for (const target of this.interceptTargets) {
+      try {
+        const preOk = await target.precondition();
+        if (!preOk) {
+          logger.debug('intercept-watchdog.skipped', { id: target.id, reason: 'precondition' });
+          summary.skipped++;
+          continue;
+        }
+
+        const healthy = await target.check();
+        if (healthy) {
+          logger.debug('intercept-watchdog.healthy', { id: target.id });
+          summary.checked++;
+          continue;
+        }
+
+        const lastAt = this.lastRepairAt.get(target.id);
+        if (lastAt !== undefined && Date.now() - lastAt < this.config.repairCooldownMs) {
+          logger.debug('intercept-watchdog.cooldown', { id: target.id });
+          continue;
+        }
+
+        const dayKey = target.id;
+        const count = this.dailyRepairCount.get(dayKey) ?? 0;
+        if (count >= MAX_INTERCEPT_REPAIRS_PER_DAY) {
+          logger.warn('intercept-watchdog.daily-limit', { id: target.id, count });
+          continue;
+        }
+
+        logger.warn('intercept-watchdog.repairing', { id: target.id });
+        await target.repair();
+        this.lastRepairAt.set(target.id, Date.now());
+        this.dailyRepairCount.set(dayKey, count + 1);
+        summary.repaired++;
+        logger.info('intercept-watchdog.repaired', { id: target.id });
+      } catch (err) {
+        logger.warn('intercept-watchdog.repair-failed', { id: target.id, error: String(err) });
+      }
+    }
+  }
+
+  private resetDailyCounterIfNeeded(): void {
+    const today = new Date().toISOString().slice(0, 10);
+    if (today !== this.dailyRepairResetDate) {
+      this.dailyRepairCount.clear();
+      this.dailyRepairResetDate = today;
+    }
+  }
+
+  // ─── Default targets (hardcoded, matching existing style) ───────────────
+
   static defaultTargets(): PluginCheckTarget[] {
     return [
       {
@@ -324,5 +402,135 @@ export class HookWatchdog {
         markers: ['otel-codex-hook', 'opentelemetry.instrumentation.codex'],
       },
     ];
+  }
+
+  static defaultInterceptTargets(dataDir: string): InterceptCheckTarget[] {
+    const targets: InterceptCheckTarget[] = [];
+    const home = os.homedir();
+
+    // ── qoderwork-env: launchctl env + LaunchAgent plist (macOS only) ──
+    if (process.platform === 'darwin') {
+      const wrapperPath = path.join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs');
+      const plistPath = path.join(home, 'Library', 'LaunchAgents', 'com.loongsuite-pilot.qoderwork-env.plist');
+      const plistLabel = 'com.loongsuite-pilot.qoderwork-env';
+
+      targets.push({
+        id: 'qoderwork-env',
+        precondition: async () => {
+          if (!await fileExists(wrapperPath)) return false;
+          const sysApp = await directoryExists('/Applications/QoderWork.app');
+          const userApp = await directoryExists(path.join(home, 'Applications', 'QoderWork.app'));
+          return sysApp || userApp;
+        },
+        check: async () => {
+          try {
+            const { stdout } = await execFileAsync('launchctl', ['getenv', 'QODER_WORKER_RUNTIME_PATH']);
+            return stdout.trim() === wrapperPath;
+          } catch {
+            return false;
+          }
+        },
+        repair: async () => {
+          await execFileAsync('launchctl', ['setenv', 'QODER_WORKER_RUNTIME_PATH', wrapperPath]);
+          const plistContent = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+            '<plist version="1.0">',
+            '<dict>',
+            '    <key>Label</key>',
+            `    <string>${plistLabel}</string>`,
+            '    <key>ProgramArguments</key>',
+            '    <array>',
+            '        <string>/bin/launchctl</string>',
+            '        <string>setenv</string>',
+            '        <string>QODER_WORKER_RUNTIME_PATH</string>',
+            `        <string>${wrapperPath}</string>`,
+            '    </array>',
+            '    <key>RunAtLoad</key>',
+            '    <true/>',
+            '</dict>',
+            '</plist>',
+            '',
+          ].join('\n');
+          await fs.mkdir(path.dirname(plistPath), { recursive: true });
+          await fs.writeFile(plistPath, plistContent);
+          await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
+          await execFileAsync('launchctl', ['load', plistPath]).catch(() => {});
+        },
+      });
+    }
+
+    // ── Shell rc intercept targets (qodercli + claude-code) ──
+    const shell = process.env.SHELL || '/bin/bash';
+    const rcPath = shell.endsWith('/zsh')
+      ? path.join(home, '.zshrc')
+      : path.join(home, '.bashrc');
+
+    const rcTargets: Array<{
+      id: string;
+      marker: string;
+      scriptName: string;
+      cliCommand: string;
+      blockFn: (scriptPath: string) => string;
+    }> = [
+      {
+        id: 'qodercli-rc',
+        marker: 'loongsuite-pilot BEGIN qodercli-intercept',
+        scriptName: 'qodercli-token-intercept.mjs',
+        cliCommand: 'qodercli',
+        blockFn: (p) => [
+          '',
+          '# loongsuite-pilot BEGIN qodercli-intercept',
+          `qodercli() { BUN_OPTIONS="--preload=${p}" command qodercli "$@"; }`,
+          '# loongsuite-pilot END qodercli-intercept',
+        ].join('\n'),
+      },
+      {
+        id: 'claude-code-rc',
+        marker: 'loongsuite-pilot BEGIN claude-code-intercept',
+        scriptName: 'claude-code-fetch-intercept.mjs',
+        cliCommand: 'claude',
+        blockFn: (p) => [
+          '',
+          '# loongsuite-pilot BEGIN claude-code-intercept',
+          `claude() { BUN_OPTIONS="--preload=${p} \${BUN_OPTIONS}" command claude "$@"; }`,
+          '# loongsuite-pilot END claude-code-intercept',
+        ].join('\n'),
+      },
+    ];
+
+    for (const rc of rcTargets) {
+      const scriptPath = path.join(dataDir, 'hooks', rc.scriptName);
+
+      targets.push({
+        id: rc.id,
+        precondition: async () => {
+          // Only check if the hook script was deployed by the installer.
+          // We intentionally do NOT run `which <cli>` — the daemon process
+          // is launchd-started with a minimal PATH that likely doesn't
+          // include ~/.local/bin or npm global dirs, and shell wrapper
+          // functions (qodercli/claude) are invisible to /usr/bin/which
+          // in a non-interactive subprocess. Hook script existence is a
+          // sufficient signal that the installer set this agent up.
+          return fileExists(scriptPath);
+        },
+        check: async () => {
+          try {
+            const content = await fs.readFile(rcPath, 'utf-8');
+            return content.includes(rc.marker);
+          } catch {
+            return true; // rc file doesn't exist → nothing to repair
+          }
+        },
+        repair: async () => {
+          if (!await fileExists(rcPath)) return; // never create rc files
+          const content = await fs.readFile(rcPath, 'utf-8');
+          if (content.includes(rc.marker)) return; // re-check before write
+          await fs.appendFile(rcPath, rc.blockFn(scriptPath) + '\n');
+        },
+      });
+    }
+
+    return targets;
   }
 }
