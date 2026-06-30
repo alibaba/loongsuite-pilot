@@ -14,6 +14,7 @@ import {
   resolveQoderWorkRoot,
   type SdkEvent,
 } from '../qoder-work-log/qoder-work-log-input.js';
+import { readInterceptFile, getInterceptFile, type InterceptData, type InterceptTokenData } from '../qoder-trace/intercept-token-reader.js';
 
 const NANO_PER_MILLI = 1_000_000n;
 const SEGMENT_TIMING_TOLERANCE_MS = 5 * 60 * 1000;
@@ -43,6 +44,7 @@ export class QoderWorkTraceInput extends BaseInput {
   private readonly logDir: string;
   private readonly segmentsRoot: string;
   private readonly sdkLogDir: string;
+  private readonly interceptFile: string;
   private readonly logPrefix = 'qoder-work';
 
   // Per-session in-memory state for segment enrichment
@@ -68,6 +70,7 @@ export class QoderWorkTraceInput extends BaseInput {
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder-work/history');
     this.segmentsRoot = opts.segmentsRoot ?? resolveHome('~/.qoderwork/logs/sessions');
     this.sdkLogDir = opts.sdkLogDir ?? resolveQoderWorkSdkLogDir();
+    this.interceptFile = opts.interceptFile ?? getInterceptFile('qoderwork-intercept.jsonl');
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -120,9 +123,13 @@ export class QoderWorkTraceInput extends BaseInput {
 
       // 3. Group → enrich → emit.
       const turnGroups = this.groupByTurn(entries);
+      // Intercept data (QoderWork runtime wrapper) is the fallback token source
+      // when segment tokens are all 0. Loaded lazily once per non-empty cycle.
+      let interceptData: InterceptData | null = null;
       const allEntries: AgentActivityEntry[] = [];
       for (const [, turnEntries] of turnGroups) {
-        this.enrichTurn(turnEntries);
+        interceptData ??= await this.readInterceptData();
+        this.enrichTurn(turnEntries, interceptData);
         this.injectTraceId(turnEntries);
         for (const entry of turnEntries) {
           await enrichCanonicalEntryWithGit(
@@ -442,12 +449,18 @@ export class QoderWorkTraceInput extends BaseInput {
 
   // ─── Enrichment ─────────────────────────────────────────────────────────────
 
-  private enrichTurn(entries: AgentActivityEntry[]): void {
+  private enrichTurn(entries: AgentActivityEntry[], interceptData: InterceptData): void {
     const sessionId = entries.find(e => e['gen_ai.session.id'])?.['gen_ai.session.id'] as string | undefined;
     const turnId = entries.find(e => e['gen_ai.turn.id'])?.['gen_ai.turn.id'] as string | undefined;
 
     const steps = this.groupByStep(entries);
     const stepOrder = [...steps.keys()].filter((k): k is string => k !== undefined);
+
+    // Build a chatcmpl-id → token map once per turn so per-response lookups are
+    // O(1); avoids O(n*m) linear scans over intercept tokens in long sessions.
+    const interceptTokens = new Map<string, InterceptTokenData>(
+      interceptData.tokens.map(t => [t.id, t]),
+    );
 
     // Apply segment-derived timing + model to each step in transcript order.
     if (sessionId) {
@@ -475,10 +488,36 @@ export class QoderWorkTraceInput extends BaseInput {
             }
             hasSegmentUsage = this.applyUsage(response, pair.usage);
           }
-          if (!hasSegmentUsage) this.applySdkTokenUsage(sessionId, request, response);
+          // Segment tokens all 0 (or no segment pair) → fall back to intercept
+          // tokens matched by gen_ai.response.id (chatcmpl-xxx), then to the
+          // legacy SDK log as a last resort.
+          if (!hasSegmentUsage) {
+            if (!this.applyInterceptUsage(response, interceptTokens)) {
+              this.applySdkTokenUsage(sessionId, request, response);
+            }
+          } else {
+            // Segment provided input/output/total but the QoderWork segment log
+            // may omit cache_read. Overlay cache_read from intercept when the
+            // wrapper captured it for this respId; reasoning_tokens is not in
+            // the OTel GenAI spec and is intentionally not propagated.
+            this.applyInterceptCacheReadOverlay(response, interceptTokens);
+          }
         }
 
         this.applySegmentToolTiming(sessionId, stepEntries);
+      }
+    }
+
+    // System prompt captured by the QoderWork runtime wrapper (JSON.stringify hook).
+    // Mirror qoder-trace: attach to the first llm.request that owns a step id.
+    if (interceptData.systemPrompt) {
+      const firstReq = entries.find(e =>
+        e['event.name'] === 'llm.request' && !!e['gen_ai.step.id'],
+      );
+      if (firstReq) {
+        (firstReq as Record<string, unknown>)['gen_ai.system_instructions'] = [
+          { type: 'text', content: interceptData.systemPrompt.content },
+        ];
       }
     }
 
@@ -548,6 +587,58 @@ export class QoderWorkTraceInput extends BaseInput {
     const [pair] = pairs.splice(index, 1);
     if (pairs.length === 0) this.sdkTokenPairs.delete(sessionId);
     this.applyUsage(response, pair);
+  }
+
+  // ─── Intercept token compatibility ──────────────────────────────────────
+
+  private async readInterceptData(): Promise<InterceptData> {
+    try {
+      return await readInterceptFile(this.interceptFile);
+    } catch {
+      return { tokens: [], systemPrompt: null };
+    }
+  }
+
+  // Fall back to intercept-captured tokens when the segment log does not
+  // provide them. Adapts the InterceptTokenData to applyUsage so future field
+  // additions there stay in sync, then promotes the provider-reported total
+  // when intercept supplies one (provider total may include reasoning tokens,
+  // which we do not write to the span individually).
+  private applyInterceptUsage(
+    response: AgentActivityEntry,
+    tokensById: Map<string, InterceptTokenData>,
+  ): boolean {
+    const respId = response['gen_ai.response.id'] as string | undefined;
+    if (!respId) return false;
+    const match = tokensById.get(respId);
+    if (!match) return false;
+    const applied = this.applyUsage(response, {
+      inputTokens: match.promptTokens,
+      outputTokens: match.completionTokens,
+      cacheReadInputTokens: match.cachedTokens,
+      cacheCreationInputTokens: undefined,
+    });
+    if (applied && match.totalTokens) {
+      (response as Record<string, unknown>)['gen_ai.usage.total_tokens'] = match.totalTokens;
+    }
+    return applied;
+  }
+
+  // Segment log may omit cache_read when the wrapper is the only source.
+  // Overlay only cache_read so segment values stay authoritative for the rest.
+  // reasoning_tokens is not in the OTel GenAI spec and is intentionally skipped.
+  private applyInterceptCacheReadOverlay(
+    response: AgentActivityEntry,
+    tokensById: Map<string, InterceptTokenData>,
+  ): void {
+    const respId = response['gen_ai.response.id'] as string | undefined;
+    if (!respId) return;
+    const match = tokensById.get(respId);
+    if (!match) return;
+    const target = response as Record<string, unknown>;
+    if (match.cachedTokens && !target['gen_ai.usage.cache_read.input_tokens']) {
+      target['gen_ai.usage.cache_read.input_tokens'] = match.cachedTokens;
+    }
   }
 
   // ─── SDK token compatibility ─────────────────────────────────────────────
@@ -787,6 +878,7 @@ export interface QoderWorkTraceInputOptions extends InputOptions {
   logDir?: string;
   segmentsRoot?: string;
   sdkLogDir?: string;
+  interceptFile?: string;
 }
 
 interface HookJsonlBatch {
