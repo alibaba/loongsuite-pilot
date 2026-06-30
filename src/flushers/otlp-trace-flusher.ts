@@ -20,15 +20,15 @@ import { BaseFlusher } from './base-flusher.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
 import { createLogger } from '../utils/logger.js';
-import { appendLine, ensureDir, getTodayDateString } from '../utils/fs-utils.js';
+import { appendLine, ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { readFileSync } from 'node:fs';
 
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
+const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled']);
 
 interface TurnBuffer {
   key: string;
@@ -44,6 +44,7 @@ interface AgentConvertState {
   provider: BasicTracerProvider;
   handler: ExtendedTelemetryHandler;
   inMem: InMemorySpanExporter;
+  active: number;
 }
 
 interface AgentExportState {
@@ -60,6 +61,10 @@ const RESERVED_RESOURCE_KEYS = new Set([
   'gen_ai.agent.system',
 ]);
 
+type ResourceProjectionValue = string | number | boolean;
+
+const SENSITIVE_RESOURCE_KEY_RE = /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE)([_.-]|$)|^(API_KEY|API_HEADER)$/i;
+
 function resolveEndpointUrl(raw: string): string {
   let url = raw.replace(/\/+$/, '');
   if (!url.endsWith('/v1/traces')) {
@@ -68,18 +73,8 @@ function resolveEndpointUrl(raw: string): string {
   return url;
 }
 
-function getPilotVersion(): string {
-  try {
-    const pkg = JSON.parse(
-      readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'),
-    );
-    return pkg.version ?? 'unknown';
-  } catch {
-    return 'unknown';
-  }
-}
-
 const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_CONVERT_STATES = 64;
 
 function estimateSpanSize(span: ReadableSpan): number {
   let size = 512;
@@ -105,10 +100,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly agentConvertStates = new Map<string, AgentConvertState>();
   private readonly agentExportStates = new Map<string, AgentExportState>();
   private readonly instanceId = randomUUID();
-  private readonly pilotVersion = getPilotVersion();
+  private readonly pilotVersion: string;
   private readonly resolvedEndpointUrl: string;
   private readonly debugDir: string;
   private readonly failedDir: string;
+  private readonly resourceAttributeKeys: string[];
 
   private idleTimer?: ReturnType<typeof setInterval>;
   private inFlightExports = new Set<Promise<void>>();
@@ -130,9 +126,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
       throw new Error('[otlp-trace-flusher] config.serviceName is required when enabled');
     }
     this.cfg = cfg;
+    const dataDir = cfg.dataDir ?? os.homedir() + '/.loongsuite-pilot';
+    this.pilotVersion = readInstalledVersion(dataDir);
     this.resolvedEndpointUrl = resolveEndpointUrl(cfg.endpoint);
-    this.debugDir = path.join(os.homedir(), '.loongsuite-pilot', 'logs', 'otlp-debug');
-    this.failedDir = path.join(os.homedir(), '.loongsuite-pilot', 'logs', 'otlp-failed');
+    this.debugDir = path.join(dataDir, 'logs', 'otlp-debug');
+    this.failedDir = path.join(dataDir, 'logs', 'otlp-failed');
+    this.resourceAttributeKeys = (cfg.resourceAttributeKeys ?? [])
+      .map(key => key.trim())
+      .filter(key => key.length > 0);
 
     if (cfg.captureMessageContent !== false) {
       process.env.OTEL_SEMCONV_STABILITY_OPT_IN ??= 'gen_ai_latest_experimental';
@@ -190,11 +191,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
     buf.records.push(entry);
     buf.lastActivityMs = Date.now();
 
-    // Signal A: 检测到 finish_reason=stop/end_turn，标记 turn 完成。
+    // Signal A: 检测到终态 finish_reason，标记 turn 完成。
     // 逐条模式下立即 flush；批量模式下（_deferSignalA=true）仅标记 completed，
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
-    const finishReasons = entry['gen_ai.response.finish_reasons'];
-    if (Array.isArray(finishReasons) && (finishReasons.includes('stop') || finishReasons.includes('end_turn'))) {
+    if (hasTerminalFinishReason(entry['gen_ai.response.finish_reasons'])) {
       buf.completed = true;
       if (!this._deferSignalA) {
         this.triggerFlush(buf);
@@ -330,45 +330,62 @@ export class OtlpTraceFlusher extends BaseFlusher {
     records: AgentActivityEntry[],
   ): Promise<void> {
     if (records.length === 0) return;
-    const prev = this.convertLocks.get(agentType) ?? Promise.resolve();
-    const current = prev.then(() => this.doConvertAndExport(agentType, records));
-    this.convertLocks.set(agentType, current.catch(() => {}));
+    const projectedResourceAttributes = this.collectResourceAttributes(records);
+    const convertKey = this.buildConvertStateKey(agentType, projectedResourceAttributes);
+    const prev = this.convertLocks.get(convertKey) ?? Promise.resolve();
+    const current = prev.then(() => this.doConvertAndExport(
+      agentType,
+      records,
+      projectedResourceAttributes,
+      convertKey,
+    ));
+    this.convertLocks.set(convertKey, current.catch(() => {}));
     await current;
   }
 
   private async doConvertAndExport(
     agentType: string,
     records: AgentActivityEntry[],
+    projectedResourceAttributes: Record<string, ResourceProjectionValue>,
+    convertKey: string,
   ): Promise<void> {
-    const convertState = this.getOrCreateConvertState(agentType);
+    const convertState = this.getOrCreateConvertState(agentType, projectedResourceAttributes, convertKey);
     const { handler, provider, inMem } = convertState;
+    convertState.active += 1;
 
     try {
-      const result = convertEventLogToTrace(
-        records as unknown as EventLogRecord[],
-        { handler, strict: false },
-      );
-      if (result.warnings.length > 0) {
-        logger.warn(`Conversion warnings for ${agentType}`, { warnings: result.warnings.join('; ') });
+      try {
+        const result = convertEventLogToTrace(
+          records as unknown as EventLogRecord[],
+          { handler, strict: false },
+        );
+        if (result.warnings.length > 0) {
+          logger.warn(`Conversion warnings for ${agentType}`, { warnings: result.warnings.join('; ') });
+        }
+      } catch (err) {
+        logger.error(`convertEventLogToTrace failed for ${agentType}`, { err: String(err) });
+        return;
       }
+
+      await provider.forceFlush();
+      const spans = inMem.getFinishedSpans();
+      inMem.reset();
+
+      if (spans.length === 0) return;
+
+      const exportState = this.getOrCreateExportState(agentType);
+
+      if (this.cfg.debug) {
+        await this.writeDebugLog(agentType, spans);
+      }
+
+      await this.exportInBatches(exportState, agentType, spans);
     } catch (err) {
-      logger.error(`convertEventLogToTrace failed for ${agentType}`, { err: String(err) });
-      return;
+      logger.error(`convert and export failed for ${agentType}`, { err: String(err) });
+    } finally {
+      convertState.active -= 1;
+      this.evictConvertStates();
     }
-
-    await provider.forceFlush();
-    const spans = inMem.getFinishedSpans();
-    inMem.reset();
-
-    if (spans.length === 0) return;
-
-    const exportState = this.getOrCreateExportState(agentType);
-
-    if (this.cfg.debug) {
-      await this.writeDebugLog(agentType, spans);
-    }
-
-    await this.exportInBatches(exportState, agentType, spans);
   }
 
   private async exportInBatches(
@@ -421,11 +438,19 @@ export class OtlpTraceFlusher extends BaseFlusher {
     });
   }
 
-  private getOrCreateConvertState(agentType: string): AgentConvertState {
-    let state = this.agentConvertStates.get(agentType);
-    if (state) return state;
+  private getOrCreateConvertState(
+    agentType: string,
+    projectedResourceAttributes: Record<string, ResourceProjectionValue> = {},
+    key = this.buildConvertStateKey(agentType, projectedResourceAttributes),
+  ): AgentConvertState {
+    let state = this.agentConvertStates.get(key);
+    if (state) {
+      this.agentConvertStates.delete(key);
+      this.agentConvertStates.set(key, state);
+      return state;
+    }
 
-    const resource = this.buildResource(agentType);
+    const resource = this.buildResource(agentType, projectedResourceAttributes);
     const inMem = new InMemorySpanExporter();
     const provider = new BasicTracerProvider({
       resource,
@@ -433,9 +458,101 @@ export class OtlpTraceFlusher extends BaseFlusher {
     });
     const handler = new ExtendedTelemetryHandler({ tracerProvider: provider });
 
-    state = { provider, handler, inMem };
-    this.agentConvertStates.set(agentType, state);
+    state = { provider, handler, inMem, active: 0 };
+    this.agentConvertStates.set(key, state);
+    this.evictConvertStates();
     return state;
+  }
+
+  private evictConvertStates(): void {
+    while (this.agentConvertStates.size > MAX_CONVERT_STATES) {
+      const entry = [...this.agentConvertStates.entries()].find(([, state]) => state.active === 0);
+      if (!entry) {
+        // Prefer correctness over a hard cap: active providers may still receive
+        // spans, so allow a temporary overflow and retry when a conversion exits.
+        return;
+      }
+
+      const [key, state] = entry;
+      this.agentConvertStates.delete(key);
+      this.convertLocks.delete(key);
+      state.provider.shutdown().catch(err => {
+        logger.warn('failed to shut down evicted convert state', { key, error: String(err) });
+      });
+    }
+  }
+
+  private buildConvertStateKey(
+    agentType: string,
+    projectedResourceAttributes: Record<string, ResourceProjectionValue>,
+  ): string {
+    return `${agentType}|${this.stableJson(projectedResourceAttributes)}`;
+  }
+
+  private stableJson(value: Record<string, ResourceProjectionValue>): string {
+    const sorted: Record<string, ResourceProjectionValue> = {};
+    for (const key of Object.keys(value).sort()) {
+      sorted[key] = value[key];
+    }
+    return JSON.stringify(sorted);
+  }
+
+  private collectResourceAttributes(records: AgentActivityEntry[]): Record<string, ResourceProjectionValue> {
+    const allowed = new Set(this.resourceAttributeKeys);
+    const attributes: Record<string, ResourceProjectionValue> = {};
+
+    for (const record of records) {
+      this.collectResourceAttributeMap(attributes, record.resourceAttributes);
+      if (allowed.size === 0) continue;
+
+      for (const [key, rawValue] of Object.entries(record)) {
+        if (!allowed.has(key)) continue;
+        this.collectResourceAttribute(attributes, key, rawValue);
+      }
+    }
+
+    return attributes;
+  }
+
+  private collectResourceAttributeMap(
+    attributes: Record<string, ResourceProjectionValue>,
+    rawMap: unknown,
+  ): void {
+    if (!rawMap || typeof rawMap !== 'object' || Array.isArray(rawMap)) return;
+
+    for (const [key, rawValue] of Object.entries(rawMap as Record<string, unknown>)) {
+      this.collectResourceAttribute(attributes, key, rawValue);
+    }
+  }
+
+  private collectResourceAttribute(
+    attributes: Record<string, ResourceProjectionValue>,
+    key: string,
+    rawValue: unknown,
+  ): void {
+    if (SENSITIVE_RESOURCE_KEY_RE.test(key)) {
+      logger.warn(`resource attribute key "${key}" looks sensitive and will be ignored`);
+      return;
+    }
+
+    const value = this.normalizeResourceAttributeValue(rawValue);
+    if (value === undefined) return;
+
+    if (attributes[key] !== undefined && attributes[key] !== value) {
+      logger.warn(`resource attribute key "${key}" has conflicting values in one turn; keeping first value`);
+      return;
+    }
+    attributes[key] = value;
+  }
+
+  private normalizeResourceAttributeValue(value: unknown): ResourceProjectionValue | undefined {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? trimmed : undefined;
+    }
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    return undefined;
   }
 
   private getOrCreateExportState(agentType: string): AgentExportState {
@@ -455,7 +572,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
     return state;
   }
 
-  private buildResource(agentType: string): Resource {
+  private buildResource(
+    agentType: string,
+    projectedResourceAttributes: Record<string, ResourceProjectionValue> = {},
+  ): Resource {
     const userAttrs: Record<string, string> = {};
     if (this.cfg.resourceAttributes) {
       for (const [k, v] of Object.entries(this.cfg.resourceAttributes)) {
@@ -467,6 +587,22 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
     }
 
+    const projectedAttrs: Record<string, ResourceProjectionValue> = {};
+    for (const [k, v] of Object.entries(projectedResourceAttributes)) {
+      if (RESERVED_RESOURCE_KEYS.has(k)) {
+        logger.warn(`projected resource attribute key "${k}" is reserved and will be ignored`);
+        continue;
+      }
+      if (SENSITIVE_RESOURCE_KEY_RE.test(k)) {
+        logger.warn(`projected resource attribute key "${k}" looks sensitive and will be ignored`);
+        continue;
+      }
+      if (userAttrs[k] !== undefined && userAttrs[k] !== String(v)) {
+        logger.warn(`resourceAttributes key "${k}" is overridden by projected resource attribute`);
+      }
+      projectedAttrs[k] = v;
+    }
+
     return new Resource({
       'service.name': `${this.cfg.serviceName}-${agentType}`,
       'service.version': this.pilotVersion,
@@ -476,6 +612,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       'gen_ai.agent.type': agentType,
       'gen_ai.agent.system': resolveAgentSystem(agentType),
       ...userAttrs,
+      ...projectedAttrs,
     });
   }
 
@@ -527,4 +664,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
     }
   }
+}
+
+function hasTerminalFinishReason(finishReasons: unknown): boolean {
+  return Array.isArray(finishReasons)
+    && finishReasons.some(reason => typeof reason === 'string' && TERMINAL_FINISH_REASONS.has(reason));
 }

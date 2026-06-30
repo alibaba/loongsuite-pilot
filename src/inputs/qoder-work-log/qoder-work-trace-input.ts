@@ -592,7 +592,7 @@ export class QoderWorkTraceInput extends BaseSessionInput {
       'gen_ai.request.model': undefined,
       time_unix_nano: msToNanos(entryTime),
       'event.id': crypto.randomUUID(),
-      'event.name': 'llm.request',
+      'event.name': 'other',
       'gen_ai.input.messages_delta': dbData?.userPrompt
         ? [{ role: 'user', parts: [{ type: 'text', content: dbData.userPrompt }] }]
         : undefined,

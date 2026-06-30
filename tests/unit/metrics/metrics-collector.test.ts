@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { MetricsCollector } from '../../../src/metrics/metrics-collector.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
 
@@ -14,7 +17,6 @@ function buildSnapshot(overrides: Partial<DataflowSnapshot> = {}): DataflowSnaps
     },
     inputs: new Map(),
     flushers: new Map(),
-    agentVersions: {},
     inputIdleMinutes: new Map(),
     ...overrides,
   };
@@ -22,9 +24,15 @@ function buildSnapshot(overrides: Partial<DataflowSnapshot> = {}): DataflowSnaps
 
 describe('MetricsCollector', () => {
   let collector: MetricsCollector;
+  let tmpDir: string;
 
   beforeEach(() => {
-    collector = new MetricsCollector({ version: '1.0.0', userId: 'test-user' });
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metrics-collector-test-'));
+    collector = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   describe('collectL1', () => {
@@ -46,7 +54,6 @@ describe('MetricsCollector', () => {
       expect(result.user_id).toBe('test-user');
       expect(result.hostname).toBe(require('os').hostname());
       expect(result.pid).toBe(process.pid);
-      expect(result.os).toBe(require('os').type());
       expect(result.os_detail).toContain(require('os').type());
       expect(result.os_detail).toContain(require('os').arch());
 
@@ -209,7 +216,7 @@ describe('MetricsCollector', () => {
       let clock = 1_000_000;
       const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
 
-      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user' });
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
 
       // First collectL1 → calcCpuPercent seeds baseline, returns 0
       cpuSpy.mockReturnValueOnce({ user: 0, system: 0 });
@@ -258,6 +265,195 @@ describe('MetricsCollector', () => {
 
     it('returns empty when no inputs', () => {
       expect(collector.collectL2Alarms(buildSnapshot())).toEqual([]);
+    });
+  });
+
+  describe('init_type', () => {
+    it('reads launchd from init-type file', () => {
+      fs.writeFileSync(path.join(tmpDir, 'init-type'), 'launchd');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).init_type).toBe('launchd');
+    });
+
+    it('reads nohup from init-type file', () => {
+      fs.writeFileSync(path.join(tmpDir, 'init-type'), 'nohup');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).init_type).toBe('nohup');
+    });
+
+    it('defaults to unknown when init-type file does not exist', () => {
+      expect(collector.collectL1(buildSnapshot()).init_type).toBe('unknown');
+    });
+
+    it('defaults to unknown when init-type file is empty', () => {
+      fs.writeFileSync(path.join(tmpDir, 'init-type'), '');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).init_type).toBe('unknown');
+    });
+  });
+
+  describe('infra health (via collectL1)', () => {
+    it('reports updater_pid_alive=true during grace period even if PID file missing', () => {
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      const r1 = col.collectL1(buildSnapshot());
+      const r2 = col.collectL1(buildSnapshot());
+      expect(r1.updater_pid_alive).toBe('true');
+      expect(r2.updater_pid_alive).toBe('true');
+    });
+
+    it('reports updater_pid_alive=false after grace period when PID file missing', () => {
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      col.collectL1(buildSnapshot()); // cycle 1
+      col.collectL1(buildSnapshot()); // cycle 2
+      const r3 = col.collectL1(buildSnapshot()); // cycle 3 - past grace
+      expect(r3.updater_pid_alive).toBe('false');
+    });
+
+    it('reports updater_pid_alive=true when PID file contains current process PID', () => {
+      fs.writeFileSync(path.join(tmpDir, 'loongsuite-pilot-updater.pid'), String(process.pid));
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      col.collectL1(buildSnapshot()); // cycle 1
+      col.collectL1(buildSnapshot()); // cycle 2
+      const r3 = col.collectL1(buildSnapshot()); // cycle 3
+      expect(r3.updater_pid_alive).toBe('true');
+    });
+
+    it('reports updater_pid_alive=false when PID file contains malformed content', () => {
+      fs.writeFileSync(path.join(tmpDir, 'loongsuite-pilot-updater.pid'), 'abc\n');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      col.collectL1(buildSnapshot()); // grace 1
+      col.collectL1(buildSnapshot()); // grace 2
+      const r3 = col.collectL1(buildSnapshot()); // past grace
+      expect(r3.updater_pid_alive).toBe('false');
+    });
+
+    it('increments consecutive failures and resets on alive', () => {
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      col.collectL1(buildSnapshot()); // grace 1
+      col.collectL1(buildSnapshot()); // grace 2
+      col.collectL1(buildSnapshot()); // fail 1
+      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(1);
+      col.collectL1(buildSnapshot()); // fail 2
+      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(2);
+
+      fs.writeFileSync(path.join(tmpDir, 'loongsuite-pilot-updater.pid'), String(process.pid));
+      col.collectL1(buildSnapshot());
+      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(0);
+      expect(col.getLastInfraHealth()!.updaterPidAlive).toBe(true);
+    });
+
+    it('reports current_version_valid=true when current points to existing version dir', () => {
+      fs.mkdirSync(path.join(tmpDir, 'versions', '1.0.0_abc'), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, 'current'), '1.0.0_abc');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).current_version_valid).toBe('true');
+    });
+
+    it('reports current_version_valid=false when current points to non-existent dir', () => {
+      fs.writeFileSync(path.join(tmpDir, 'current'), 'missing_version');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).current_version_valid).toBe('false');
+    });
+
+    it('reports node_bin_valid=true when node-bin points to executable', () => {
+      fs.writeFileSync(path.join(tmpDir, 'node-bin'), process.execPath);
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).node_bin_valid).toBe('true');
+    });
+
+    it('reports node_bin_valid=false when node-bin points to non-existent path', () => {
+      fs.writeFileSync(path.join(tmpDir, 'node-bin'), '/nonexistent/path/node');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).node_bin_valid).toBe('false');
+    });
+
+    it('reports rollback_available based on previous file validity', () => {
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).rollback_available).toBe('false');
+
+      fs.mkdirSync(path.join(tmpDir, 'versions', '0.9.0_def'), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, 'previous'), '0.9.0_def');
+      const col2 = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col2.collectL1(buildSnapshot()).rollback_available).toBe('true');
+    });
+
+    it('reports correct version_count excluding dotfiles', () => {
+      fs.mkdirSync(path.join(tmpDir, 'versions', 'v1'), { recursive: true });
+      fs.mkdirSync(path.join(tmpDir, 'versions', 'v2'), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, 'versions', '.DS_Store'), '');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).version_count).toBe('2');
+    });
+  });
+
+  describe('capture_message_disabled_agents', () => {
+    it('returns empty string when no agents configured', () => {
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).capture_message_disabled_agents).toBe('');
+    });
+
+    it('lists only agents with captureMessageContent=false in sorted order', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        agentsConfig: {
+          cursor: { captureMessageContent: false },
+          'claude-code': { captureMessageContent: false },
+          codex: { captureMessageContent: true },
+        },
+      });
+      expect(col.collectL1(buildSnapshot()).capture_message_disabled_agents).toBe('claude-code cursor');
+    });
+
+    it('excludes agents whose captureMessageContent is true', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        agentsConfig: {
+          cursor: { captureMessageContent: true },
+        },
+      });
+      expect(col.collectL1(buildSnapshot()).capture_message_disabled_agents).toBe('');
+    });
+  });
+
+  describe('project', () => {
+    it('returns empty string when no SLS endpoints', () => {
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).project).toBe('');
+    });
+
+    it('joins unique projects with space in sorted order', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        slsEndpoints: [
+          { name: 'a', endpoint: 'https://x', project: 'bbb', logstore: 'l1', kind: 'agentActivity', mode: 'ak' },
+          { name: 'b', endpoint: 'https://x', project: 'aaa', logstore: 'l2', kind: 'agentActivity', mode: 'ak' },
+          { name: 'c', endpoint: 'https://x', project: 'aaa', logstore: 'l3', kind: 'agentActivity', mode: 'ak' },
+        ],
+      });
+      expect(col.collectL1(buildSnapshot()).project).toBe('aaa bbb');
+    });
+  });
+
+  describe('cms_workspace', () => {
+    it('returns empty string when not configured', () => {
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      expect(col.collectL1(buildSnapshot()).cms_workspace).toBe('');
+    });
+
+    it('returns the configured workspace verbatim', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        cmsWorkspace: 'ws-abc',
+      });
+      expect(col.collectL1(buildSnapshot()).cms_workspace).toBe('ws-abc');
     });
   });
 });

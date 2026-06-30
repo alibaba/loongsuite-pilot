@@ -23,6 +23,7 @@ export abstract class BaseInput extends EventEmitter {
   protected readonly stateStore: StateStore;
   protected pollIntervalMs: number;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private cyclePromise: Promise<void> | null = null;
   private _running = false;
 
   constructor(opts: InputOptions) {
@@ -54,6 +55,7 @@ export abstract class BaseInput extends EventEmitter {
       clearInterval(this.timer);
       this.timer = null;
     }
+    await this.cyclePromise;
     await this.onStop();
     this.logger.info('stopped');
   }
@@ -68,7 +70,20 @@ export abstract class BaseInput extends EventEmitter {
   /** Optional hook called once on stop. */
   protected async onStop(): Promise<void> {}
 
-  private async runCycle(): Promise<void> {
+  /** Request an immediate serialized collection cycle from an input-owned watcher. */
+  protected requestCollection(): void {
+    if (this._running) void this.runCycle();
+  }
+
+  private runCycle(): Promise<void> {
+    if (this.cyclePromise) return this.cyclePromise;
+    this.cyclePromise = this.runCycleOnce().finally(() => {
+      this.cyclePromise = null;
+    });
+    return this.cyclePromise;
+  }
+
+  private async runCycleOnce(): Promise<void> {
     try {
       const entries = await this.collect();
       if (entries.length > 0) {

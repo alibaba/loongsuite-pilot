@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DATA_DIR="${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}"
-CACHE_DIR="$HOME/.loongsuite-pilot"
+CACHE_DIR="${LOONGSUITE_PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSIONS_DIR="$CACHE_DIR/versions"
 CURRENT_FILE="$CACHE_DIR/current"
@@ -131,6 +131,24 @@ stop_pid_file() {
         fi
     fi
     rm -f "$pid_file"
+}
+
+updater_process_exists() {
+    if [ -f "$UPDATER_PID_FILE" ]; then
+        local pid
+        pid=$(cat "$UPDATER_PID_FILE" 2>/dev/null || true)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            local command_line
+            command_line=$(ps -p "$pid" -o command= 2>/dev/null || true)
+            case "$command_line" in
+                *updater-daemon.js*|*"/bin/updater-daemon"*|*"loongsuite-pilot run-updater"*|*"dist/updater/index.js"*)
+                    return 0
+                    ;;
+            esac
+        fi
+    fi
+
+    pgrep -f "loongsuite-pilot/bin/updater-daemon" >/dev/null 2>&1
 }
 
 _node_is_suitable() {
@@ -749,7 +767,7 @@ cmd_restart_updater() {
     # Verify the service manager actually started the updater process
     if [ "$_restarted" = true ]; then
         sleep 1
-        if ! pgrep -f "loongsuite-pilot/bin/updater-daemon" >/dev/null 2>&1; then
+        if ! updater_process_exists; then
             echo "⚠️  service manager reported success but updater process not found, falling back to nohup"
             _restarted=false
         fi
@@ -769,6 +787,11 @@ cmd_restart_updater() {
         nohup "$node_bin" "$entry" >> "$UPDATER_LOG_FILE" 2>&1 &
         echo "$!" > "$UPDATER_PID_FILE"
         echo "✅ updater restarted (PID $!)"
+    fi
+
+    if ! updater_process_exists; then
+        echo "❌ updater process not found after restart" >&2
+        return 1
     fi
 }
 
@@ -854,6 +877,67 @@ cmd_info() {
     if [ -f "$CONFIG_FILE" ]; then
         cat "$CONFIG_FILE"
     fi
+}
+
+cmd_worker() {
+    ensure_dirs
+    sync_bootstrap_scripts
+
+    local node_bin
+    node_bin=$(resolve_node) || {
+        echo "❌ node runtime not found" >&2
+        exit 1
+    }
+
+    local version_dir
+    version_dir=$(resolve_current_version) || {
+        echo "❌ No valid loongsuite-pilot version found" >&2
+        exit 1
+    }
+    local entry="$version_dir/dist/index.js"
+
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    exec "$node_bin" "$entry" worker "$@"
+}
+
+cmd_token_usage() {
+    ensure_dirs
+
+    local repo_dir version_dir entry candidate node_bin
+    repo_dir="$(dirname "$SCRIPT_DIR")"
+    entry=""
+
+    if [ -f "$repo_dir/package.json" ] && [ -d "$repo_dir/src" ]; then
+        if [ -f "$repo_dir/dist/index.js" ]; then
+            entry="$repo_dir/dist/index.js"
+        else
+            echo "❌ local dist/index.js not found; run 'npm run build' first"
+            exit 1
+        fi
+    else
+        version_dir=$(resolve_current_version 2>/dev/null) || true
+        for candidate in \
+            "${version_dir:-}/dist/index.js" \
+            "$PACKAGE_DIR/dist/index.js"; do
+            if [ -f "$candidate" ]; then
+                entry="$candidate"
+                break
+            fi
+        done
+    fi
+
+    if [ -z "$entry" ]; then
+        echo "❌ loongsuite-pilot runtime entry not found"
+        exit 1
+    fi
+
+    node_bin=$(resolve_node) || {
+        echo "❌ node runtime not found" >&2
+        exit 1
+    }
+
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    exec "$node_bin" "$entry" token-usage "$@"
 }
 
 cmd_rollback() {
@@ -1102,6 +1186,8 @@ _write_initd_script() {
     local log_file="$target_home/.loongsuite-pilot/logs/loongsuite-pilot-service.log"
     local config_file="$target_home/.loongsuite-pilot/config.json"
     local script_path="/etc/init.d/$daemon_name"
+    local daemon_group
+    daemon_group=$(id -gn "$target_user" 2>/dev/null || echo "$target_user")
 
     local tmp_script
     tmp_script=$(mktemp)
@@ -1119,6 +1205,7 @@ _write_initd_script() {
 # chkconfig: 2345 90 10
 
 DAEMON_USER="USER_PLACEHOLDER"
+DAEMON_GROUP="GROUP_PLACEHOLDER"
 DAEMON_HOME="HOME_PLACEHOLDER"
 DAEMON_BIN="BIN_PLACEHOLDER"
 DAEMON_NAME="DAEMON_NAME_PLACEHOLDER"
@@ -1145,6 +1232,7 @@ do_start() {
             --background --make-pidfile --pidfile "$PID_FILE" \
             --exec "$DAEMON_BIN" -- run \
             >>"$LOG_FILE" 2>&1
+        chown "$DAEMON_USER:$DAEMON_GROUP" "$LOG_FILE" "$PID_FILE"
     else
         su - "$DAEMON_USER" -c "
             export AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'
@@ -1206,6 +1294,7 @@ INITEOF
 
     sed -i.bak \
         -e "s|USER_PLACEHOLDER|${target_user}|g" \
+        -e "s|GROUP_PLACEHOLDER|${daemon_group}|g" \
         -e "s|HOME_PLACEHOLDER|${target_home}|g" \
         -e "s|BIN_PLACEHOLDER|${daemon_bin}|g" \
         -e "s|DAEMON_NAME_PLACEHOLDER|${daemon_name}|g" \
@@ -1229,6 +1318,8 @@ _write_initd_updater_script() {
     local log_file="$target_home/.loongsuite-pilot/logs/loongsuite-pilot-updater.log"
     local config_file="$target_home/.loongsuite-pilot/config.json"
     local script_path="/etc/init.d/$daemon_name"
+    local daemon_group
+    daemon_group=$(id -gn "$target_user" 2>/dev/null || echo "$target_user")
 
     local tmp_script
     tmp_script=$(mktemp)
@@ -1246,6 +1337,7 @@ _write_initd_updater_script() {
 # chkconfig: 2345 91 9
 
 DAEMON_USER="USER_PLACEHOLDER"
+DAEMON_GROUP="GROUP_PLACEHOLDER"
 DAEMON_HOME="HOME_PLACEHOLDER"
 DAEMON_BIN="BIN_PLACEHOLDER"
 DAEMON_NAME="DAEMON_NAME_PLACEHOLDER"
@@ -1272,6 +1364,7 @@ do_start() {
             --background --make-pidfile --pidfile "$PID_FILE" \
             --exec "$DAEMON_BIN" -- run-updater \
             >>"$LOG_FILE" 2>&1
+        chown "$DAEMON_USER:$DAEMON_GROUP" "$LOG_FILE" "$PID_FILE"
     else
         su - "$DAEMON_USER" -c "
             export AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'
@@ -1333,6 +1426,7 @@ INITEOF
 
     sed -i.bak \
         -e "s|USER_PLACEHOLDER|${target_user}|g" \
+        -e "s|GROUP_PLACEHOLDER|${daemon_group}|g" \
         -e "s|HOME_PLACEHOLDER|${target_home}|g" \
         -e "s|BIN_PLACEHOLDER|${daemon_bin}|g" \
         -e "s|DAEMON_NAME_PLACEHOLDER|${daemon_name}|g" \
@@ -1532,8 +1626,10 @@ cmd_help() {
     echo "  restart         Restart the collector service"
     echo "  status          Show service status (default)"
     echo "  info            Show version and config info"
+    echo "  token-usage     Show token usage TUI"
     echo "  monitor start   Start process resource monitor"
     echo "  monitor stop    Stop process resource monitor"
+    echo "  worker ...      Manage local remote-controlled workers"
     echo "  rollback        Roll back to the previous version"
     echo "  help            Show this help message"
     echo ""
@@ -1560,7 +1656,10 @@ case "${1:-status}" in
     restart)     cmd_restart ;;
     status)      cmd_status ;;
     info)        cmd_info ;;
+    token-usage) shift; cmd_token_usage "$@" ;;
+    tokens)      shift; cmd_token_usage "$@" ;;
     monitor)             cmd_monitor "${2:-}" ;;
+    worker)              shift; cmd_worker "$@" ;;
     rollback)            cmd_rollback ;;
     restart-collector)   cmd_restart_collector ;;
     restart-updater)     cmd_restart_updater ;;

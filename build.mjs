@@ -1,16 +1,16 @@
 import { build } from 'esbuild';
 import { copyFile, mkdir } from 'node:fs/promises';
 
-const isInternal = process.env.BUILD_TYPE === 'internal';
+const isProprietary = process.env.BUILD_MODE === 'proprietary';
 
 const commonDefine = {
-  '__INTERNAL_BUILD__': String(isInternal),
+  '__PROPRIETARY_BUILD__': String(isProprietary),
 };
 
 const internalStubPlugin = {
   name: 'internal-stub',
   setup(b) {
-    if (isInternal) return;
+    if (isProprietary) return;
     b.onResolve({ filter: /\.internal/ }, (args) => ({
       path: args.path,
       namespace: 'internal-stub',

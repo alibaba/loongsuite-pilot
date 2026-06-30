@@ -80,6 +80,7 @@ export interface AgentActivityEntry {
   'gen_ai.tool.call.arguments'?: JsonValue;
   'gen_ai.tool.call.result'?: JsonValue;
   'gen_ai.tool.call.duration'?: number;
+  'tool.result.status'?: string;
   'gen_ai.skill.name'?: string;
   /**
    * 模型的 system instructions（MessagePart[] 数组形式），数据源为 codex transcript 的
@@ -105,6 +106,8 @@ export interface AgentActivityEntry {
   'workspace.current_root'?: string;
   'error.type'?: string;
   'error.message'?: string;
+  /** Dynamic OTLP resource attributes emitted by hook processors. */
+  resourceAttributes?: { [key: string]: JsonValue };
 }
 
 /**

@@ -1,12 +1,26 @@
+#!/usr/bin/env node
 import * as path from 'path';
 import { Orchestrator } from './core/orchestrator.js';
 import { loadConfig } from './core/config-loader.js';
 import { createLogger, initFileLogging } from './utils/logger.js';
 import { resolveHome } from './utils/fs-utils.js';
+import { handleWorkerCli } from './local-workers/worker-cli.js';
 
 const logger = createLogger('Main');
 
 async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  if (await handleWorkerCli(argv)) {
+    return;
+  }
+
+  const [command, ...args] = argv;
+  if (command === 'token-usage' || command === 'tokens') {
+    const { runTokenUsageCommand } = await import('./cli/token-usage.js');
+    process.exitCode = await runTokenUsageCommand(args);
+    return;
+  }
+
   const config = await loadConfig();
 
   const logDir = path.join(resolveHome(config.dataDir), 'logs');
@@ -61,6 +75,8 @@ export { QoderCnSqliteInput } from './inputs/qoder-cn-sqlite/qoder-cn-sqlite-inp
 export { QoderCnInput } from './inputs/qoder-cn/qoder-cn-input.js';
 export { QoderCnTraceInput } from './inputs/qoder-cn-trace/qoder-cn-trace-input.js';
 export { QoderCliSessionInput } from './inputs/qoder-cli-session/qoder-cli-session-input.js';
+export { CodexTranscriptInput } from './inputs/codex-transcript/codex-transcript-input.js';
+export { CodexAbortedTurnInput } from './inputs/codex-aborted-turn/codex-aborted-turn-input.js';
 export { BaseFlusher } from './flushers/base-flusher.js';
 export { SlsFlusher } from './flushers/sls-flusher.js';
 export { JsonlFlusher } from './flushers/jsonl-flusher.js';

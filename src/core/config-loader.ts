@@ -124,6 +124,7 @@ export interface ConfigFile {
     debug?: boolean;
     captureMessageContent?: boolean;
     turnIdleTimeoutMs?: number;
+    resourceAttributeKeys?: string[];
   };
 
   agents?: Record<string, {
@@ -206,6 +207,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     serviceNamePrefix,
     cms: buildCmsConfig(file),
     otlpTrace: buildOtlpTraceRawConfig(file),
+    autoUpdate: buildAutoUpdateConfig(file),
 
     listeners: buildListenersConfig(file),
     flushers: buildFlushersConfig(file, dataDir, serviceNamePrefix, innerDataConfig),
@@ -308,7 +310,7 @@ function buildListenersConfig(
     'qoder-cli-session': { enabled: true, pollInterval: 30_000 },
     'cursor-hook': { enabled: true, pollInterval: 30_000 },
     'claude-code-log': { enabled: true, pollInterval: 30_000 },
-    'codex-log': { enabled: true, pollInterval: 30_000 },
+    'codex-transcript': { enabled: true, pollInterval: 30_000 },
   };
 
   const result = { ...defaults };
@@ -319,6 +321,18 @@ function buildListenersConfig(
       result[key] = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
         pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? 30_000,
+      };
+    }
+  }
+
+  // Completed and interrupted Codex turns now share one transcript collector.
+  // Keep legacy listener overrides effective until the new key is configured.
+  if (!file?.listeners?.['codex-transcript']) {
+    const legacy = file?.listeners?.['codex-log'] ?? file?.listeners?.['codex-aborted-turn'];
+    if (legacy) {
+      result['codex-transcript'] = {
+        enabled: legacy.enabled ?? defaults['codex-transcript'].enabled,
+        pollInterval: legacy.pollInterval ?? defaults['codex-transcript'].pollInterval,
       };
     }
   }
@@ -447,6 +461,7 @@ function buildOtlpTraceConfigNew(
     captureMessageContent,
     debug: otlp?.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
+    resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     maxExportBatchBytes: otlp?.maxExportBatchBytes,
     compression: otlp?.compression,
   };
@@ -474,9 +489,24 @@ function buildOtlpTraceConfigLegacy(config: AnalyticsConfig): OtlpTraceFlusherCo
     captureMessageContent,
     debug: cms.debug ?? false,
     turnIdleTimeoutMs: 0,
+    resourceAttributeKeys: resolveResourceAttributeKeys(config.otlpTrace),
     maxExportBatchBytes: undefined,
     compression: undefined,
   };
+}
+
+function resolveResourceAttributeKeys(
+  otlp: AnalyticsConfig['otlpTrace'],
+): string[] {
+  const keys = Array.isArray(otlp?.resourceAttributeKeys)
+    ? otlp.resourceAttributeKeys
+    : [];
+  return [...new Set(
+    keys
+      .filter((key): key is string => typeof key === 'string')
+      .map(key => key.trim())
+      .filter(key => key.length > 0),
+  )];
 }
 
 function extractArmsProject(endpoint: string): string {

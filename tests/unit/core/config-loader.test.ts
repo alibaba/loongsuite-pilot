@@ -225,6 +225,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qoder-work'].enabled).toBe(true);
       expect(config.listeners['qoder-cli-session'].enabled).toBe(true);
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
+      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
     });
 
     it('merges file-level listener overrides', async () => {
@@ -237,6 +238,16 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.listeners.qoder.enabled).toBe(false);
       expect(config.listeners.qoder.pollInterval).toBe(120000);
+    });
+
+    it('migrates a legacy codex-log listener override to codex-transcript', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        listeners: { 'codex-log': { enabled: false, pollInterval: 45_000 } },
+      });
+
+      const config = await loadConfig();
+
+      expect(config.listeners['codex-transcript']).toEqual({ enabled: false, pollInterval: 45_000 });
     });
 
     it('applies Qoder poll interval env override to SQLite listener', async () => {
@@ -387,6 +398,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.agents.cursor.captureMessageContent).toBe(false);
       expect(config.agents.qoder.captureMessageContent).toBe(true);
+      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
     });
 
     it('parses string boolean captureMessageContent values', async () => {
@@ -668,6 +680,7 @@ describe('ConfigLoader', () => {
           endpoint: 'http://localhost:4318',
           headers: { Authorization: 'Bearer token' },
           resourceAttributes: { 'deployment.env': 'prod' },
+          resourceAttributeKeys: ['agentteams.worker.name'],
         },
       });
 
@@ -676,6 +689,7 @@ describe('ConfigLoader', () => {
         endpoint: 'http://localhost:4318',
         headers: { Authorization: 'Bearer token' },
         resourceAttributes: { 'deployment.env': 'prod' },
+        resourceAttributeKeys: ['agentteams.worker.name'],
       });
     });
 
@@ -709,6 +723,23 @@ describe('ConfigLoader', () => {
       expect(result!.serviceName).toBe('my-svc');
       expect(result!.debug).toBe(true);
       expect(result!.turnIdleTimeoutMs).toBe(5000);
+      expect(result!.resourceAttributeKeys).toEqual([]);
+    });
+
+    it('buildOtlpTraceConfig allows custom resource attribute keys', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          endpoint: 'http://jaeger:4318',
+          resourceAttributeKeys: ['agentteams.worker.name', 'agentteams.worker.name', 'custom.attr', ' '],
+        },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.resourceAttributeKeys).toEqual(['agentteams.worker.name', 'custom.attr']);
     });
 
     it('buildOtlpTraceConfig falls back to cms path when no otlpTrace', async () => {
@@ -728,6 +759,7 @@ describe('ConfigLoader', () => {
         'x-cms-workspace': 'ws1',
       });
       expect(result!.resourceAttributes).toEqual({ 'acs.arms.service.feature': 'genai_app' });
+      expect(result!.resourceAttributeKeys).toEqual([]);
     });
 
     it('buildOtlpTraceConfig prefers otlpTrace over cms', async () => {

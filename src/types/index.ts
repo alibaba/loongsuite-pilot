@@ -48,6 +48,7 @@ export interface OtlpTraceRawConfig {
   debug?: boolean;
   captureMessageContent?: boolean;
   turnIdleTimeoutMs?: number;
+  resourceAttributeKeys?: string[];
   maxExportBatchBytes?: number;
   compression?: 'none' | 'gzip';
 }
@@ -96,8 +97,10 @@ export interface OtlpTraceFlusherConfig {
   captureMessageContent?: boolean;
   debug?: boolean;
   turnIdleTimeoutMs?: number;
+  resourceAttributeKeys?: string[];
   maxExportBatchBytes?: number;
   compression?: 'none' | 'gzip';
+  dataDir?: string;
 }
 
 export type SlsMode = 'ak' | 'webtracking';

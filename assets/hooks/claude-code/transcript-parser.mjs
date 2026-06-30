@@ -24,6 +24,58 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 
 export const MAX_TRANSCRIPT_BYTES = 50 * 1024 * 1024; // 50 MB safety limit
+const MISSING_PROMPT_ID = '__missing_prompt_id__';
+
+function isMetaRecord(record) {
+  return record?.isMeta === true || record?.isMeta === 'true';
+}
+
+function isSyntheticAssistantRecord(record) {
+  return record?.type === 'assistant' && record?.message?.model === '<synthetic>';
+}
+
+function promptMapKey(promptId) {
+  return promptId || MISSING_PROMPT_ID;
+}
+
+function isToolResultContent(content) {
+  return Array.isArray(content) &&
+    content.every((p) => p && p.type === 'tool_result');
+}
+
+function extractTextContent(content) {
+  return Array.isArray(content)
+    ? content.map((p) => (p && p.type === 'text' ? (p.text || p.content || '') : '')).join('')
+    : (typeof content === 'string' ? content : '');
+}
+
+function parseTimestampMs(ts) {
+  if (!ts) return null;
+  const ms = Date.parse(ts);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function laterTimestamp(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  const aMs = parseTimestampMs(a);
+  const bMs = parseTimestampMs(b);
+  if (aMs === null) return b;
+  if (bMs === null) return a;
+  return bMs > aMs ? b : a;
+}
+
+function normalizeRequestStart(candidate, responseTs) {
+  if (!candidate) return responseTs || null;
+  const candidateMs = parseTimestampMs(candidate);
+  const responseMs = parseTimestampMs(responseTs);
+  if (candidateMs !== null && responseMs !== null && candidateMs > responseMs) {
+    // Defense against transcript anomalies: a request start later than its own
+    // response is impossible and would produce a negative-duration OTLP span.
+    return responseTs;
+  }
+  return candidate;
+}
 
 /**
  * 解析 Claude Code transcript JSONL 文件。
@@ -106,6 +158,10 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
     if (!recordType) continue;
 
     if (recordType === 'assistant') {
+      if (isSyntheticAssistantRecord(record)) {
+        continue;
+      }
+
       const msg = record.message;
       if (!msg) continue;
 
@@ -147,6 +203,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
       if (!msg) continue;
       const recordTs = record.timestamp || null;
       const promptId = record.promptId || null;
+      const isMeta = isMetaRecord(record);
 
       // promptId 变化 = 新 turn 开始
       if (promptId) currentPromptId = promptId;
@@ -169,6 +226,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
         content: userContent,
         timestamp: recordTs,
         promptId: currentPromptId,
+        isMeta,
       });
     }
   }
@@ -187,18 +245,24 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
   const llmCalls = [];
   const conversationHistory = [];
   let prevCount = 0;
-  let lastToolResultTs = null;
+  const lastToolResultTsByPromptId = new Map();
+  const updateLastToolResultTs = (promptId, ts) => {
+    if (!ts) return;
+    const key = promptMapKey(promptId);
+    const prev = lastToolResultTsByPromptId.get(key);
+    if (!prev || ts > prev) lastToolResultTsByPromptId.set(key, ts);
+  };
 
   for (const rec of conversationRecords) {
     if (rec.type === 'user') {
-      conversationHistory.push({ role: 'user', content: rec.content });
-      if (Array.isArray(rec.content)) {
+      if (!rec.isMeta) {
+        conversationHistory.push({ role: 'user', content: rec.content });
+      }
+      if (!rec.isMeta && Array.isArray(rec.content)) {
         for (const part of rec.content) {
           if (part && part.type === 'tool_result' && part.tool_use_id) {
             const ts = toolResultTimestamps.get(part.tool_use_id);
-            if (ts && (!lastToolResultTs || ts > lastToolResultTs)) {
-              lastToolResultTs = ts;
-            }
+            updateLastToolResultTs(rec.promptId, ts);
           }
         }
       }
@@ -230,7 +294,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
         toolDetails.set(toolId, { call: callTs, result: resultTs, resultContent, isError });
       }
 
-      const requestStartTime = lastToolResultTs || null;
+      const requestStartTime = lastToolResultTsByPromptId.get(promptMapKey(group.promptId)) || null;
 
       llmCalls.push({
         type: 'llm_call',
@@ -260,9 +324,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
 
       for (const toolId of declaredToolIds) {
         const ts = toolResultTimestamps.get(toolId);
-        if (ts && (!lastToolResultTs || ts > lastToolResultTs)) {
-          lastToolResultTs = ts;
-        }
+        updateLastToolResultTs(group.promptId, ts);
       }
     }
   }
@@ -287,40 +349,27 @@ function splitIntoTurns(conversationRecords, llmCalls) {
   const promptIdOrder = [];
   const promptIdSet = new Set();
   const promptIdInfo = new Map(); // promptId → { promptText, promptTimestamp }
+  const promptIdBoundaryTs = new Map(); // promptId → 首条 user record 时间(含 meta)
 
   for (const rec of conversationRecords) {
     if (rec.type !== 'user' || !rec.promptId) continue;
     if (!promptIdSet.has(rec.promptId)) {
       promptIdSet.add(rec.promptId);
       promptIdOrder.push(rec.promptId);
+    }
 
-      // 每个 promptId 的首条 user record 决定 prompt 内容和时间
-      const isToolResult = Array.isArray(rec.content) &&
-        rec.content.every((p) => p && p.type === 'tool_result');
-      if (!isToolResult) {
-        const promptText = Array.isArray(rec.content)
-          ? rec.content.map((p) => (p && p.type === 'text' ? (p.text || p.content || '') : '')).join('')
-          : (typeof rec.content === 'string' ? rec.content : '');
-        promptIdInfo.set(rec.promptId, {
-          promptText,
-          promptTimestamp: rec.timestamp,
-        });
-      }
+    if (!promptIdBoundaryTs.has(rec.promptId) && rec.timestamp) {
+      promptIdBoundaryTs.set(rec.promptId, rec.timestamp);
     }
-    // 补充: 如果首条是 tool_result 但后续有 prompt,更新 info
-    if (!promptIdInfo.has(rec.promptId)) {
-      const isToolResult = Array.isArray(rec.content) &&
-        rec.content.every((p) => p && p.type === 'tool_result');
-      if (!isToolResult) {
-        const promptText = Array.isArray(rec.content)
-          ? rec.content.map((p) => (p && p.type === 'text' ? (p.text || p.content || '') : '')).join('')
-          : (typeof rec.content === 'string' ? rec.content : '');
-        promptIdInfo.set(rec.promptId, {
-          promptText,
-          promptTimestamp: rec.timestamp,
-        });
-      }
+
+    if (promptIdInfo.has(rec.promptId) || rec.isMeta || isToolResultContent(rec.content)) {
+      continue;
     }
+
+    promptIdInfo.set(rec.promptId, {
+      promptText: extractTextContent(rec.content),
+      promptTimestamp: rec.timestamp,
+    });
   }
 
   if (promptIdOrder.length === 0) {
@@ -340,15 +389,21 @@ function splitIntoTurns(conversationRecords, llmCalls) {
     if (turnLlmCalls.length === 0) continue;
 
     const info = promptIdInfo.get(pid) || {};
+    const promptTimestamp = info.promptTimestamp || promptIdBoundaryTs.get(pid) || turnLlmCalls[0]?.timestamp || null;
 
-    // request_start_time: 首个 llmCall 的 request_start_time 若为空,用 prompt 时间
-    if (turnLlmCalls[0] && !turnLlmCalls[0].request_start_time && info.promptTimestamp) {
-      turnLlmCalls[0].request_start_time = info.promptTimestamp;
+    // request_start_time: 每个 llmCall 都必须有有效起点。
+    // Claude Code resume 会在真实回答前插入 synthetic "No response requested" 调用,
+    // 不能只给第一个 llmCall 补时间,否则后续真实调用会落成 time_unix_nano=0。
+    let fallbackTs = promptTimestamp || turnLlmCalls[0]?.timestamp || null;
+    for (const call of turnLlmCalls) {
+      const candidate = call.request_start_time || fallbackTs || call.timestamp || null;
+      call.request_start_time = normalizeRequestStart(candidate, call.timestamp);
+      fallbackTs = laterTimestamp(fallbackTs, call.timestamp);
     }
 
     turns.push({
       prompt: info.promptText || '',
-      promptTimestamp: info.promptTimestamp || turnLlmCalls[0]?.timestamp || null,
+      promptTimestamp,
       llmCalls: turnLlmCalls,
     });
   }

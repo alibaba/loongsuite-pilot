@@ -176,8 +176,8 @@ describe('Updater', () => {
     it('schedules initial delayed check and interval on start', () => {
       const updater = new Updater(makeConfig(), tmpDir);
       updater.start();
-      // setTimeout (60s) + setInterval
-      expect(vi.getTimerCount()).toBe(2);
+      // setTimeout (60s) + check interval + heartbeat interval
+      expect(vi.getTimerCount()).toBe(3);
       updater.stop();
     });
 
@@ -295,9 +295,11 @@ describe('Updater', () => {
       mockFsAccess.mockImplementation((p: string) => {
         if (p.includes('package.json')) return Promise.resolve();
         if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
+        if (p.includes('scripts/collector-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/updater-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/loongsuite-pilot.sh')) return Promise.resolve();
         if (p.includes('postinstall.js')) return Promise.reject(new Error('ENOENT'));
-        if (p.includes('collector-daemon')) return Promise.reject(new Error('ENOENT'));
-        if (p.includes('updater-daemon')) return Promise.reject(new Error('ENOENT'));
         return Promise.reject(new Error('ENOENT'));
       });
       // copyFileAtomic reads source files via fs.readFile before copying
@@ -328,6 +330,7 @@ describe('Updater', () => {
       mockFsAccess.mockImplementation((p: string) => {
         if (p.includes('package.json')) return Promise.resolve();
         if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
         if (p.includes('postinstall.js')) return Promise.reject(new Error('ENOENT'));
         if (p.includes('collector-daemon.js')) return Promise.resolve();
         if (p.includes('updater-daemon.js')) return Promise.resolve();
@@ -373,6 +376,10 @@ describe('Updater', () => {
         if (p.includes('versions/1.0.1_aaa')) return Promise.resolve();
         if (p.includes('package.json')) return Promise.resolve();
         if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
+        if (p.includes('scripts/collector-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/updater-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/loongsuite-pilot.sh')) return Promise.resolve();
         if (p.includes('postinstall.js')) return Promise.reject(new Error('ENOENT'));
         return Promise.reject(new Error('ENOENT'));
       });
@@ -420,6 +427,10 @@ describe('Updater', () => {
         if (p.includes('versions/1.0.1_aaa')) return Promise.resolve();
         if (p.includes('package.json')) return Promise.resolve();
         if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
+        if (p.includes('scripts/collector-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/updater-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/loongsuite-pilot.sh')) return Promise.resolve();
         return Promise.reject(new Error('ENOENT'));
       });
 
@@ -499,6 +510,10 @@ describe('Updater', () => {
 
       // current pointer should NOT be updated
       expect(mockFsRename).not.toHaveBeenCalled();
+      expect(mockFsRm).toHaveBeenCalledWith(
+        expect.stringContaining('1.0.2_bbb.candidate'),
+        expect.objectContaining({ recursive: true, force: true }),
+      );
     });
 
     it('cleans up download-tmp even on failure', async () => {
@@ -620,7 +635,7 @@ describe('Updater', () => {
       expect((updater as any).consecutiveFailures).toBe(0);
     });
 
-    it('stops updater after MAX_CONSECUTIVE_FAILURES', async () => {
+    it('keeps updater alive in degraded retry after MAX_CONSECUTIVE_FAILURES', async () => {
       const updater = new Updater(makeConfig(), tmpDir);
 
       // Simulate 9 prior failures
@@ -635,7 +650,13 @@ describe('Updater', () => {
       updater.start();
       await updater.check();
 
-      expect((updater as any).timer).toBeNull(); // stopped
+      expect((updater as any).timer).not.toBeNull();
+      const heartbeatCall = mockWriteJsonFile.mock.calls.find(([, value]) => (
+        typeof value === 'object'
+        && value !== null
+        && (value as any).status === 'degraded'
+      ));
+      expect(heartbeatCall?.[0]).toEqual(expect.stringContaining('updater-runtime.json'));
     });
 
     it('backoff duration respects max cap (6 hours)', async () => {

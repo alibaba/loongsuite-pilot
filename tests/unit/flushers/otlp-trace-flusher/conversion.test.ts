@@ -82,6 +82,49 @@ describe('OtlpTraceFlusher - conversion', () => {
     expect(convertEventLogToTrace).toHaveBeenCalledTimes(1);
   });
 
+  it('projects hook resourceAttributes to OTLP resource attributes', () => {
+    const records = [
+      {
+        resourceAttributes: {
+          'agentteams.worker.name': ' local-worker ',
+          'agentteams.instance.id': 'example-instance',
+          'agentteams.token': 'should-not-leak',
+        },
+      },
+      {
+        resourceAttributes: {
+          'agentteams.worker.name': 'other-worker',
+        },
+      },
+    ] as unknown as AgentActivityEntry[];
+
+    const attrs = (flusher as any).collectResourceAttributes(records);
+    expect(attrs).toEqual({
+      'agentteams.worker.name': 'local-worker',
+      'agentteams.instance.id': 'example-instance',
+    });
+
+    const resource = (flusher as any).buildResource('claude-code', attrs);
+    expect(resource.attributes).toMatchObject({
+      'custom.attr': 'hello',
+      'agentteams.worker.name': 'local-worker',
+      'agentteams.instance.id': 'example-instance',
+    });
+  });
+
+  it('evicts old per-resource convert states when resource attribute cardinality grows', () => {
+    for (let i = 0; i < 70; i += 1) {
+      (flusher as any).getOrCreateConvertState('claude-code', {
+        'agentteams.worker.name': `worker-${i}`,
+      });
+    }
+
+    const states = (flusher as any).agentConvertStates as Map<string, unknown>;
+    expect(states.size).toBeLessThanOrEqual(64);
+    expect(states.has('claude-code|{"agentteams.worker.name":"worker-0"}')).toBe(false);
+    expect(states.has('claude-code|{"agentteams.worker.name":"worker-69"}')).toBe(true);
+  });
+
   it('does not export when conversion produces zero spans', async () => {
     // forceFlush + getFinishedSpans returns empty
     const entry = {

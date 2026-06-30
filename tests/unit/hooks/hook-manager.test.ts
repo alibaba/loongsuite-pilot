@@ -121,4 +121,51 @@ describe('HookManager', () => {
       useNestedFormat: true,
     })).resolves.toBe(false);
   });
+
+  it('removes replacement commands during uninstall', async () => {
+    const settingsPath = path.join(tmpDir, '.codex', 'hooks.json');
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.writeFile(settingsPath, JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: '*',
+            hooks: [
+              {
+                command: 'otel-codex-hook pre-tool-use',
+                type: 'command',
+              },
+            ],
+          },
+          {
+            matcher: '*',
+            hooks: [
+              {
+                command: '/opt/loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.sh pre-tool-use',
+                type: 'command',
+              },
+            ],
+          },
+        ],
+      },
+    }, null, 2));
+
+    const manager = new HookManager(
+      path.join(tmpDir, 'hooks'),
+      path.join(tmpDir, 'logs'),
+    );
+    const ok = await manager.uninstallHook({
+      agentId: 'codex',
+      settingsPath,
+      hookJsonPath: ['hooks', 'PreToolUse'],
+      hookCommand: '/opt/loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.sh pre-tool-use',
+      replaceHookCommands: ['otel-codex-hook pre-tool-use'],
+      matcher: '*',
+      useNestedFormat: true,
+    });
+
+    expect(ok).toBe(true);
+    const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+    expect(settings.hooks.PreToolUse).toBeUndefined();
+  });
 });

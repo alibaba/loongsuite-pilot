@@ -16,6 +16,7 @@ Use these IDs in installer options, `agent-control.json`, and `config.json`.
 | OpenCode | `opencode` | Plugin injection. |
 | Qoder | `qoder` | Hook integration. |
 | Qoder CN | `qoder-cn` | Hook integration. |
+| Qoder for JetBrains | `qoder-jetbrains` | Detection-only deploy ID. Agent gating uses `qoder` in `agent-control.json`; content policy uses `qoder-idea` in `config.json`. |
 | Qoder CLI | `qoder` | Shares the Qoder agent definition and uses hook/session sources. |
 | Qoder Work | `qoder-work` | Hook and local data sources. |
 | Qoder Work CN | `qoder-work-cn` | Hook and local data sources. |

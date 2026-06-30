@@ -2,7 +2,7 @@ import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('AlarmManager');
 
-export type AlarmLevel = '2' | '3';
+export type AlarmLevel = '1' | '2' | '3';
 
 export type AlarmType =
   | 'FLUSH_SEND_ALARM'
@@ -12,7 +12,12 @@ export type AlarmType =
   | 'DISPATCH_DROP_ALARM'
   | 'INPUT_STOP_ALARM'
   | 'SERVICE_NOT_RUNNING_ALARM'
-  | 'UPDATER_FAILURE_ALARM';
+  | 'UPDATER_FAILURE_ALARM'
+  | 'USER_ID_FORMAT_ALARM'
+  | 'DEGRADED_STARTUP_ALARM'
+  | 'UPDATER_NOT_RUNNING_ALARM'
+  | 'BROKEN_VERSION_POINTER_ALARM'
+  | 'INVALID_NODE_BIN_ALARM';
 
 export interface AlarmContext {
   input_name?: string;
@@ -24,6 +29,7 @@ export interface AlarmEntry {
   alarm_level: string;
   alarm_message: string;
   alarm_count: string;
+  user_id: string;
   ip: string;
   ver: string;
   input_name?: string;
@@ -43,10 +49,12 @@ export class AlarmManager {
   private readonly alarms: Map<string, AlarmItem> = new Map();
   private readonly ip: string;
   private readonly version: string;
+  private readonly userId: string;
 
-  constructor(opts: { ip: string; version: string }) {
+  constructor(opts: { ip: string; version: string; userId: string }) {
     this.ip = opts.ip;
     this.version = opts.version;
+    this.userId = opts.userId;
   }
 
   record(type: AlarmType, level: AlarmLevel, message: string, context?: AlarmContext): void {
@@ -73,6 +81,7 @@ export class AlarmManager {
         alarm_level: item.level,
         alarm_message: item.message,
         alarm_count: String(item.count),
+        user_id: this.userId,
         ip: this.ip,
         ver: this.version,
         __time__: now,

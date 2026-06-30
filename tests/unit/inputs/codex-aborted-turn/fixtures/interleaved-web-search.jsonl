@@ -1,0 +1,9 @@
+{"timestamp":"2026-06-23T02:42:19.582Z","type":"session_meta","payload":{"id":"session-interleaved","model_provider":"openai","base_instructions":{"text":"System instructions"},"dynamic_tools":[]}}
+{"timestamp":"2026-06-23T02:42:19.582Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-interleaved"}}
+{"timestamp":"2026-06-23T02:42:19.587Z","type":"turn_context","payload":{"turn_id":"turn-interleaved","cwd":"/tmp/project","model":"gpt-5.4-mini"}}
+{"timestamp":"2026-06-23T02:42:19.760Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"research the problem"}]}}
+{"timestamp":"2026-06-23T02:42:30.185Z","type":"event_msg","payload":{"type":"agent_message","message":"I will research the problem first.","phase":"commentary"}}
+{"timestamp":"2026-06-23T02:42:39.499Z","type":"response_item","payload":{"type":"web_search_call","id":"web-search-1","status":"completed","action":{"type":"search","query":"problem"}}}
+{"timestamp":"2026-06-23T02:42:48.845Z","type":"event_msg","payload":{"type":"agent_message","message":"The search confirms the problem name.","phase":"commentary"}}
+{"timestamp":"2026-06-23T02:42:51.036Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":80,"output_tokens":12,"reasoning_output_tokens":4,"total_tokens":132}}}}
+{"timestamp":"2026-06-23T02:42:51.047Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-interleaved","reason":"interrupted"}}

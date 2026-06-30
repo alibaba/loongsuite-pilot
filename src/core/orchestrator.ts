@@ -9,7 +9,7 @@ import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { detectAgent } from '../deployment/detect-utils.js';
 import { createLogger } from '../utils/logger.js';
-import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion } from '../utils/fs-utils.js';
+import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion, cleanStaleTmpFiles } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import * as fsSync from 'node:fs';
 
@@ -36,16 +36,18 @@ import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-sess
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
-import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
+import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { HookWatchdog, type PluginCheckTarget } from './hook-watchdog.js';
+import { UpdaterWatchdog } from './updater-watchdog.js';
 import { FileCollectionManager } from '../file-collection/file-collection-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
 import { AlarmManager } from '../metrics/alarm-manager.js';
+import { LocalWorkerActivationService } from '../local-workers/local-worker-activation-service.js';
 import type { DataflowSnapshot } from '../metrics/metrics-collector.js';
 import { RuntimeWriter, MetricsSummaryWriter, StatusBarAppManager } from '../status-bar/index.js';
 import * as fs from 'node:fs';
@@ -86,7 +88,7 @@ export class Orchestrator extends EventEmitter {
     'qoder-cli-session': 'qoder',
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
-    'codex-log': 'codex',
+    'codex-transcript': 'codex',
     'opencode-log': 'opencode',
     'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
@@ -101,7 +103,9 @@ export class Orchestrator extends EventEmitter {
   private flusher!: BaseFlusher;
   private logRetentionService!: LogRetentionService;
   private hookWatchdog!: HookWatchdog;
+  private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
+  private localWorkerActivationService: LocalWorkerActivationService | null = null;
   private fileCollectionManager: FileCollectionManager | null = null;
   private metricsWriter!: MetricsWriter;
   private alarmManager!: AlarmManager;
@@ -128,6 +132,7 @@ export class Orchestrator extends EventEmitter {
     // 1. Ensure data directories
     await ensureDir(this.dataDir);
     await ensureDir(path.join(this.dataDir, 'logs'));
+    await cleanStaleTmpFiles(path.join(this.dataDir, 'logs'));
 
     // 2. Load state & agent-control config
     this.stateStore = new StateStore(path.join(this.dataDir, 'logs', 'input-state.json'));
@@ -143,7 +148,7 @@ export class Orchestrator extends EventEmitter {
 
     // 4. Build InputManager & AlarmManager
     const version = readInstalledVersion(this.dataDir);
-    this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version });
+    this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version, userId: this.config.userId });
 
     this.inputManager = new InputManager();
     this.inputManager.setFlusher(this.flusher);
@@ -159,6 +164,13 @@ export class Orchestrator extends EventEmitter {
       pilotDir,
     });
     await this.deploymentManager.deployAll();
+
+    this.localWorkerActivationService = new LocalWorkerActivationService({
+      dataDir: this.dataDir,
+      pilotDir,
+      definitions: this.deploymentManager.getDefinitions(),
+    });
+    await this.localWorkerActivationService.start();
 
     // 6. Register inputs & build detection entries
     const detectionEntries = await this.registerAllInputs();
@@ -193,31 +205,46 @@ export class Orchestrator extends EventEmitter {
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets);
     this.hookWatchdog.start();
 
-    // 11. Start file collection pipelines (disabled by default)
+    // 11. Start updater watchdog only when resolved auto-update is enabled.
+    if (this.config.autoUpdate?.enabled) {
+      this.updaterWatchdog = new UpdaterWatchdog({
+        enabled: true,
+        dataDir: this.dataDir,
+        alarmManager: this.alarmManager,
+      });
+      this.updaterWatchdog.start();
+    }
+
+    // 12. Start file collection pipelines (disabled by default)
     if (this.config.fileCollection.enabled) {
       this.fileCollectionManager = new FileCollectionManager({
         configDir: path.join(this.dataDir, 'configs', 'local'),
         stateDir: path.join(this.dataDir, 'state', 'file-collection'),
         failedLogDir: path.join(this.dataDir, 'logs', 'file-collection-failed'),
+        dataDir: this.dataDir,
       });
       await this.fileCollectionManager.start();
     } else {
       logger.info('file collection disabled, skipping');
     }
 
-    // 12. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
+    // 13. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
     const slsFlusher = this.getSlsFlusher();
     if (slsFlusher) slsFlusher.setAlarmManager(this.alarmManager);
     this.metricsWriter = new MetricsWriter({
       dataDir: this.dataDir,
       version,
       userId: this.config.userId,
+      canaryPolicy: this.config.autoUpdate?.canaryPolicy ?? '',
       getSnapshot: () => this.buildDataflowSnapshot(),
       alarmManager: this.alarmManager,
+      agentsConfig: this.config.agents,
+      slsEndpoints: this.config.flushers.sls?.endpoints ?? [],
+      cmsWorkspace: this.config.cms?.workspace ?? '',
     });
     await this.metricsWriter.start();
 
-    // 12. Start status bar support (runtime.json + metrics summary + native app)
+    // 14. Start status bar support (runtime.json + metrics summary + native app)
     if (this.config.statusBar.enabled) {
       const packageVersion = this.readPackageVersion();
 
@@ -251,8 +278,12 @@ export class Orchestrator extends EventEmitter {
     await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(() => {});
     this.metricsSummaryWriter?.stop();
     this.runtimeWriter?.stop();
+    this.updaterWatchdog?.stop();
+    this.updaterWatchdog = null;
     this.hookWatchdog?.stop();
     this.logRetentionService?.stop();
+    await this.localWorkerActivationService?.stop();
+    await this.deploymentManager?.stopWorkers();
     await this.agentDiscoveryService?.stop();
     await this.inputManager?.stopAll();
     await this.flusher?.shutdown();
@@ -365,7 +396,7 @@ export class Orchestrator extends EventEmitter {
     if (otlpTraceCfg?.enabled) {
       try {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
-        const r = new OtlpTraceFlusher(otlpTraceCfg);
+        const r = new OtlpTraceFlusher({ ...otlpTraceCfg, dataDir: this.dataDir });
         flushers.push(r);
       } catch (err) {
         logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
@@ -836,23 +867,21 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Codex Log (OTel plugin JSONL) ---
-    const codexLogDir = this.resolveCodexLogDir();
-    const codexLogInput = new CodexLogInput({
+    // --- Codex rollout transcript (completed and interrupted turns) ---
+    const codexTranscriptInput = new CodexTranscriptInput({
       stateStore: this.stateStore,
-      logDir: codexLogDir,
     });
-    this.inputManager.registerInput(codexLogInput);
+    this.inputManager.registerInput(codexTranscriptInput);
     entries.push(
-      this.inputManager.buildDetectionEntry(codexLogInput, {
-        watchPaths: [codexLogDir],
-        isAvailable: async () => directoryExists(codexLogDir),
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codex-log']) &&
+      this.inputManager.buildDetectionEntry(codexTranscriptInput, {
+        watchPaths: CodexTranscriptInput.getWatchPaths(),
+        isAvailable: CodexTranscriptInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codex-transcript']) &&
           this.agentControlManager.resolveEnabled(
-            'codex-log',
-            listenerCfg['codex-log']?.enabled ?? true,
+            'codex-transcript',
+            listenerCfg['codex-transcript']?.enabled ?? true,
           ),
-        pollIntervalMs: listenerCfg['codex-log']?.pollInterval,
+        pollIntervalMs: listenerCfg['codex-transcript']?.pollInterval,
       }),
     );
 
@@ -920,22 +949,6 @@ export class Orchestrator extends EventEmitter {
     );
 
     return entries;
-  }
-
-  private resolveCodexLogDir(): string {
-    try {
-      const configPath = path.join(os.homedir(), '.codex', 'otel-config.json');
-      const raw = fs.readFileSync(configPath, 'utf-8');
-      const cfg = JSON.parse(raw);
-      if (cfg.log_dir && typeof cfg.log_dir === 'string') {
-        return cfg.log_dir.replace(/^~/, os.homedir());
-      }
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        logger.warn('failed to read codex otel-config.json', { error: String(err) });
-      }
-    }
-    return path.join(this.dataDir, 'logs', 'codex');
   }
 
   private resolveClaudeCodeLogDir(): string {
@@ -1055,8 +1068,6 @@ export class Orchestrator extends EventEmitter {
       inputIdleMinutes.set(id, this.inputManager.getInputIdleMinutes(id));
     }
 
-    const agentVersions = this.inputManager.getAgentVersions();
-
     return {
       sendEntriesTotal,
       receivedBytesTotal,
@@ -1065,7 +1076,6 @@ export class Orchestrator extends EventEmitter {
       flusherRunner,
       inputs,
       flushers,
-      agentVersions,
       inputIdleMinutes,
     };
   }
@@ -1084,5 +1094,3 @@ export class Orchestrator extends EventEmitter {
     return this.alarmManager;
   }
 }
-
-

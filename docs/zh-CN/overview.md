@@ -28,6 +28,7 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | OpenCode | 插件注入 | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | Yes | Yes | Yes | Yes |
+| Qoder for JetBrains | 自动检测 | Yes | Yes | Yes | Yes |
 | Qoder CLI | Hook / session polling | Yes | Yes | Yes | Yes |
 | Qoder Work | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |

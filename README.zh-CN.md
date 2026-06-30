@@ -39,10 +39,12 @@ Pilot 主要帮助回答这些问题：
 | OpenCode | 插件注入 | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | Yes | Yes | Yes | Yes |
-| Qoder CLI | Hook / session polling | Yes | Yes | No | Yes |
-| Qoder Work | Hook / 本地数据轮询 | Yes | Yes | No | Yes |
-| Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | No | Yes |
+| Qoder for JetBrains | 自动检测 | Yes | Yes | Yes | Yes |
+| Qoder CLI | Hook / session polling | Yes | Yes | Yes | Yes |
+| Qoder Work | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
+| Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
+| Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 
 Agent 定义位于 `agents.d/`。如需接入新的 Agent，请参考 [新 Agent 接入](docs/zh-CN/agent-onboarding.md)。
 
@@ -108,6 +110,7 @@ loongsuite-pilot stop
 loongsuite-pilot restart
 loongsuite-pilot status
 loongsuite-pilot info
+loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
@@ -152,6 +155,22 @@ npm test
 ```
 
 如需从本地构建包安装为后台服务，请参考 [安装指南](docs/zh-CN/installation.md)。
+
+## 社区
+
+欢迎反馈和建议，扫描下方二维码加入 LoongSuite Pilot 钉钉交流群。
+
+| LoongSuite Pilot SIG |
+|----|
+| <img src="docs/_assets/img/loongsuite-pilot-sig-dingtalk.jpg" height="150"> |
+
+### 相关项目
+
+- [LoongCollector](https://github.com/alibaba/loongcollector) - 通用节点 Agent，提供日志采集、Prometheus 指标采集和基于 eBPF 的网络/安全采集
+- [LoongSuite JS Plugins](https://github.com/alibaba/loongsuite-js-plugins) - 面向 JS 系 AI Coding Agent 的 OpenTelemetry 可观测插件
+- [LoongSuite Python Agent](https://github.com/alibaba/loongsuite-python-agent) - Python 应用进程 Agent
+- [LoongSuite Go Agent](https://github.com/alibaba/loongsuite-go-agent) - Golang 编译期注入进程 Agent
+- [LoongSuite Java Agent](https://github.com/alibaba/loongsuite-java-agent) - Java 应用进程 Agent
 
 ## 许可证
 

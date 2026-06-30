@@ -118,6 +118,51 @@ describe('BaseInput', () => {
       await vi.advanceTimersByTimeAsync(10_000);
       expect(collectSpy).toHaveBeenCalledTimes(1);
     });
+
+    it('does not start another cycle while a slow collection is still running', async () => {
+      await input.start();
+
+      let release: (() => void) | undefined;
+      const collectFn = vi.fn(() => new Promise<AgentActivityEntry[]>(resolve => {
+        release = () => resolve([]);
+      }));
+      input.collectFn = collectFn;
+
+      vi.advanceTimersByTime(5_000);
+      await Promise.resolve();
+      vi.advanceTimersByTime(10_000);
+      await Promise.resolve();
+
+      expect(collectFn).toHaveBeenCalledTimes(1);
+      release?.();
+      await Promise.resolve();
+    });
+
+    it('waits for an active collection before completing stop', async () => {
+      await input.start();
+
+      let release: (() => void) | undefined;
+      input.collectFn = () => new Promise<AgentActivityEntry[]>(resolve => {
+        release = () => resolve([]);
+      });
+      vi.advanceTimersByTime(5_000);
+      await Promise.resolve();
+
+      let stopped = false;
+      const onStop = vi.fn();
+      input.onStopFn = onStop;
+      const stopping = input.stop().then(() => {
+        stopped = true;
+      });
+      await Promise.resolve();
+      expect(stopped).toBe(false);
+      expect(onStop).not.toHaveBeenCalled();
+
+      release?.();
+      await stopping;
+      expect(stopped).toBe(true);
+      expect(onStop).toHaveBeenCalledOnce();
+    });
   });
 
   describe('entries event emission', () => {

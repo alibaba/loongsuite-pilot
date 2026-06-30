@@ -103,6 +103,17 @@ export class DeploymentManager {
     return this.definitions;
   }
 
+  async stopWorkers(): Promise<void> {
+    for (const def of this.definitions) {
+      if (def.deployMode !== 'plugin-probe' || !def.pluginProbe) continue;
+      try {
+        await this.pluginProbeStrategy.stopWorker(def);
+      } catch (err) {
+        logger.warn('worker stop failed', { agentId: def.id, error: String(err) });
+      }
+    }
+  }
+
   private async deployAgent(def: AgentDefinition): Promise<DeployResult> {
     const strategy = this.getStrategy(def);
 
