@@ -10,7 +10,7 @@
   "pluginProbe": {
     "source": {
       "type": "tar",
-      "tarball": "$PILOT_DATA/plugins/agentteams-openclaw-local-runtime-0.0.1.tar.gz",
+      "tarball": "$PILOT_DATA/plugins/agentteams-openclaw-local-runtime-0.0.2.tar.gz",
       "destDir": "$PILOT_DATA/local-worker-template-cache/agentteams-openclaw-local-runtime"
     },
     "mountType": "wrapper"
