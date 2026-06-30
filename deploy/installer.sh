@@ -815,13 +815,15 @@ if (selectedAgents) {
 }
 
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
-" -- "$PROBE_RESULT"
-    local write_rc=$?
-    if [ "$write_rc" -ne 0 ]; then
+" -- "$PROBE_RESULT" || {
+        # surface JS failures: under `set -e`, a bare `"$NODE_BIN" ...; local rc=$?`
+        # never reaches the rc assignment because the shell exits first. Use
+        # `|| var=$?` so the if-branch can run and emit the friendly message.
+        local write_rc=$?
         msg "    ❌ 配置写入失败 (exit $write_rc)，请检查上方 stderr" \
            "    ❌ Failed to write config (exit $write_rc); see stderr above"
         return 1
-    fi
+    }
     msg "    ✅ 配置已写入" "    ✅ Config written"
     echo ""
 }
