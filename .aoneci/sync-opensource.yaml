@@ -15,9 +15,32 @@ jobs:
       - id: fetch
         run: |
           set -e
+
           GITHUB_URL="https://github.com/alibaba/loongsuite-pilot.git"
           git remote set-url github "$GITHUB_URL" 2>/dev/null || git remote add github "$GITHUB_URL"
-          git fetch github main
+
+          MAX_RETRY=5
+          ATTEMPT=1
+
+          while [ "$ATTEMPT" -le "$MAX_RETRY" ]; do
+            echo "git fetch github main，第 $ATTEMPT/$MAX_RETRY 次尝试"
+
+            if git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch github main; then
+              echo "git fetch 成功"
+              exit 0
+            fi
+
+            if [ "$ATTEMPT" -eq "$MAX_RETRY" ]; then
+              echo "git fetch 失败，已达到最大重试次数 $MAX_RETRY"
+              exit 1
+            fi
+
+            SLEEP_SECONDS=$((ATTEMPT * 10))
+            echo "git fetch 失败，${SLEEP_SECONDS}s 后重试"
+            sleep "$SLEEP_SECONDS"
+
+            ATTEMPT=$((ATTEMPT + 1))
+          done
 
       - id: cherry-pick
         run: |
@@ -28,6 +51,9 @@ jobs:
 
           MARKER=".opensource-sync-state"
           BASELINE="46c56553e7f51f428ed413d58a3b65bb1a764549"
+          CONFLICT_DIR=".opensource-sync-conflict"
+
+          rm -rf "$CONFLICT_DIR"
 
           if [ -f "$MARKER" ]; then
             LAST_SHA=$(cat "$MARKER")
@@ -60,6 +86,7 @@ jobs:
           SKIPPED=0
           FAILED_SHA=""
           LAST_SUCCESS_GITHUB_SHA=""
+
           for SHA in $COMMITS; do
             COUNT=$((COUNT + 1))
             SUBJECT=$(git log -1 --format='%s' "$SHA")
@@ -74,18 +101,30 @@ jobs:
 
             if ! git cherry-pick $PICK_ARGS "$SHA"; then
               UNMERGED=$(git diff --name-only --diff-filter=U 2>/dev/null | wc -l | tr -d ' ')
+
               if [ "$UNMERGED" -gt 0 ]; then
                 FAILED_SHA="$SHA"
+
+                mkdir -p "$CONFLICT_DIR"
+                printf '%s\n' "$SHA" > "$CONFLICT_DIR/failed_sha"
+                git log -1 --format='%cI' "$SHA" > "$CONFLICT_DIR/commit_time"
+                git log -1 --format='%s' "$SHA" > "$CONFLICT_DIR/title"
+                git log -1 --format='%cn <%ce>' "$SHA" > "$CONFLICT_DIR/committer"
+                git log -1 --format='%an <%ae>' "$SHA" > "$CONFLICT_DIR/author"
+                git diff --name-only --diff-filter=U > "$CONFLICT_DIR/conflict_files"
+
                 echo "❌ cherry-pick 冲突 ($UNMERGED 个文件): ${SHA:0:7} $SUBJECT"
                 git cherry-pick --abort 2>/dev/null || true
                 break
               fi
+
               echo "⏭ 空 cherry-pick（改动已存在），跳过"
               git cherry-pick --skip
               SKIPPED=$((SKIPPED + 1))
               LAST_SUCCESS_GITHUB_SHA="$SHA"
               continue
             fi
+
             LAST_SUCCESS_GITHUB_SHA="$SHA"
           done
 
@@ -99,6 +138,7 @@ jobs:
           if [ -n "$FAILED_SHA" ]; then
             APPLIED=$((APPLIED - 1))
           fi
+
           echo "✅ 同步完成: $COUNT/$TOTAL 个 commit 已处理 ($APPLIED 个应用, $SKIPPED 个已存在被跳过)"
 
           if [ -n "$FAILED_SHA" ]; then
@@ -122,4 +162,91 @@ jobs:
       - id: notify-on-conflict
         if: failure()
         run: |
-          echo "同步冲突，需人工介入"
+          set -e
+
+          CONFLICT_DIR=".opensource-sync-conflict"
+
+          if [ ! -f "$CONFLICT_DIR/failed_sha" ]; then
+            echo "非 cherry-pick conflict 失败，跳过钉钉冲突通知"
+            exit 0
+          fi
+
+          WEBHOOK_TOKEN="${{secrets.webhook_token}}"
+
+          if [ -z "$WEBHOOK_TOKEN" ]; then
+            echo "缺少 secrets.webhook_token"
+            exit 1
+          fi
+
+          DINGTALK_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=${WEBHOOK_TOKEN}"
+
+          FAILED_SHA=$(cat "$CONFLICT_DIR/failed_sha")
+          COMMIT_TIME=$(cat "$CONFLICT_DIR/commit_time")
+          TITLE=$(cat "$CONFLICT_DIR/title")
+          COMMITTER=$(cat "$CONFLICT_DIR/committer")
+          AUTHOR=$(cat "$CONFLICT_DIR/author")
+          CONFLICT_FILE_COUNT=$(wc -l < "$CONFLICT_DIR/conflict_files" | tr -d ' ')
+
+          CONFLICT_FILES_MARKDOWN=$(awk '
+            NR <= 20 { print "- `" $0 "`" }
+            END {
+              if (NR > 20) {
+                print "- ... 还有 " (NR - 20) " 个文件"
+              }
+            }
+          ' "$CONFLICT_DIR/conflict_files")
+
+          CI_LINK="${AONE_CI_JOB_URL:-${AONE_PIPELINE_URL:-${BUILD_URL:-${CI_JOB_URL:-${CI_PIPELINE_URL:-}}}}}"
+
+          if [ -z "$CI_LINK" ] && [ -n "${GITHUB_SERVER_URL:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_RUN_ID:-}" ]; then
+            CI_LINK="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          fi
+
+          CI_LINK="${CI_LINK:-未获取到，请按实际 CI 环境变量补充}"
+
+          MESSAGE=$(cat <<EOF
+          ### Loongsuite 开源同步发生 Conflict
+
+          - Commit time: ${COMMIT_TIME}
+          - Title: ${TITLE}
+          - Hash: \`${FAILED_SHA}\`
+          - Committer: ${COMMITTER}
+          - Author: ${AUTHOR}
+          - 冲突文件数: ${CONFLICT_FILE_COUNT}
+          - CI链接: ${CI_LINK}
+
+          冲突文件：
+          ${CONFLICT_FILES_MARKDOWN}
+          EOF
+          )
+
+          json_escape() {
+            printf '%s' "$1" | sed \
+              -e 's/\\/\\\\/g' \
+              -e 's/"/\\"/g' \
+              -e ':a;N;$!ba;s/\n/\\n/g'
+          }
+
+          ESCAPED_MESSAGE=$(json_escape "$MESSAGE")
+
+          PAYLOAD=$(cat <<EOF
+          {
+            "msgtype": "markdown",
+            "markdown": {
+              "title": "Loongsuite 开源同步 Conflict",
+              "text": "$ESCAPED_MESSAGE"
+            }
+          }
+          EOF
+          )
+
+          RESPONSE=$(curl -sS -X POST "$DINGTALK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+
+          echo "DingTalk response: $RESPONSE"
+
+          if ! printf '%s' "$RESPONSE" | grep -q '"errcode"[[:space:]]*:[[:space:]]*0'; then
+            echo "钉钉通知发送失败"
+            exit 1
+          fi
