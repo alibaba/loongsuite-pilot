@@ -11,6 +11,8 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'cursor': 'cursor',
   'cursor-hook': 'cursor',
   'qwen-code-cli': 'qwen-code',
+  'opencode': 'opencode',
+  'wukong': 'wukong',
 };
 
 export function resolveAgentSystem(agentType: string): string {
