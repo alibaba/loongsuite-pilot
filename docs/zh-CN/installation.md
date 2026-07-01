@@ -9,8 +9,9 @@
 - Node.js 18 或更高版本
 - `npm`
 - `curl` 或 `wget`
+- Windows 下需要 PowerShell 5.1 或更高版本
 
-## 从公开包安装
+## 在 Linux 或 macOS 从公开包安装
 
 ```bash
 curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh -o /tmp/loongsuite-pilot-installer.sh && bash /tmp/loongsuite-pilot-installer.sh install
@@ -18,7 +19,23 @@ curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com
 
 安装器会检测支持的 Agent，让你选择要监控的 Agent，部署 Hook 或插件，写入本地配置，并启动后台服务。
 
+## 在 Windows 从公开包安装
+
+打开 PowerShell，执行：
+
+```powershell
+$installer = "$env:TEMP\loongsuite-pilot-installer.ps1"
+Invoke-WebRequest `
+  -Uri "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1" `
+  -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer install
+```
+
+Windows 安装器默认下载 `loongsuite-pilot.zip`。数据目录默认在 `%USERPROFILE%\.loongsuite-pilot`，命令入口安装到 `%USERPROFILE%\.local\bin`。如果安装后当前窗口里找不到 `loongsuite-pilot` 命令，重新打开一个 PowerShell 窗口即可。
+
 ## 带常用参数安装
+
+Linux/macOS：
 
 ```bash
 curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh -o /tmp/loongsuite-pilot-installer.sh && bash /tmp/loongsuite-pilot-installer.sh install \
@@ -30,7 +47,25 @@ curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com
   --mask-mode all
 ```
 
+Windows PowerShell：
+
+```powershell
+$installer = "$env:TEMP\loongsuite-pilot-installer.ps1"
+Invoke-WebRequest `
+  -Uri "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1" `
+  -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer install `
+  -Agents "claude-code,cursor,codex" `
+  -UserId "your-user-id" `
+  -SlsEndpoint "https://cn-hangzhou.log.aliyuncs.com" `
+  -SlsProject "my-project" `
+  -SlsLogstore "my-logstore" `
+  -MaskMode all
+```
+
 安装参数：
+
+Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器使用对应的 `-PascalCase` 参数，例如 `--version` 对应 `-Version`，`--data-dir` 对应 `-DataDir`。
 
 | 参数 | 说明 |
 |------|------|
@@ -68,6 +103,12 @@ loongsuite-pilot info
 ls ~/.loongsuite-pilot/logs/output
 ```
 
+Windows 下使用：
+
+```powershell
+Get-ChildItem "$env:USERPROFILE\.loongsuite-pilot\logs\output"
+```
+
 ## 服务管理
 
 ```bash
@@ -94,16 +135,36 @@ http://127.0.0.1:8765/
 
 ## 卸载
 
-保留数据：
+Linux/macOS 保留数据：
 
 ```bash
 curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh -o /tmp/loongsuite-pilot-installer.sh && bash /tmp/loongsuite-pilot-installer.sh uninstall
 ```
 
-移除安装文件和本地数据：
+Linux/macOS 移除安装文件和本地数据：
 
 ```bash
 curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh -o /tmp/loongsuite-pilot-installer.sh && bash /tmp/loongsuite-pilot-installer.sh uninstall --purge
+```
+
+Windows 保留数据：
+
+```powershell
+$installer = "$env:TEMP\loongsuite-pilot-installer.ps1"
+Invoke-WebRequest `
+  -Uri "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1" `
+  -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer uninstall
+```
+
+Windows 移除安装文件和本地数据：
+
+```powershell
+$installer = "$env:TEMP\loongsuite-pilot-installer.ps1"
+Invoke-WebRequest `
+  -Uri "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1" `
+  -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer uninstall -Purge
 ```
 
 ## 从源码构建并运行
@@ -122,7 +183,7 @@ node dist/index.js
 ## 将本地构建安装为服务
 
 ```bash
-bash deploy/package.sh --opensource
+bash deploy/package-opensource.sh
 bash deploy/installer-opensource.sh --package-url "file://$(pwd)/loongsuite-pilot.tar.gz"
 ```
 

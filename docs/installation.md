@@ -9,8 +9,9 @@ Use this guide to install, verify, uninstall, or run LoongSuite Pilot from sourc
 - Node.js 18 or later
 - `npm`
 - `curl` or `wget`
+- PowerShell 5.1 or later on Windows
 
-## Install From Public Package
+## Install From Public Package On Linux Or macOS
 
 ```bash
 curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh -o /tmp/loongsuite-pilot-installer.sh && bash /tmp/loongsuite-pilot-installer.sh install
@@ -18,7 +19,23 @@ curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com
 
 The installer detects supported agents, lets you choose which agents to monitor, deploys hooks/plugins, writes the local configuration, and starts the background service.
 
+## Install From Public Package On Windows
+
+Run PowerShell and install from the published Windows package:
+
+```powershell
+$installer = "$env:TEMP\loongsuite-pilot-installer.ps1"
+Invoke-WebRequest `
+  -Uri "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1" `
+  -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer install
+```
+
+The Windows installer downloads `loongsuite-pilot.zip` by default. It stores data under `%USERPROFILE%\.loongsuite-pilot` and installs the `loongsuite-pilot` command under `%USERPROFILE%\.local\bin`. Open a new PowerShell window if the command is not found immediately after installation.
+
 ## Install With Common Options
+
+Linux/macOS:
 
 ```bash
 curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh -o /tmp/loongsuite-pilot-installer.sh && bash /tmp/loongsuite-pilot-installer.sh install \
@@ -30,7 +47,25 @@ curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com
   --mask-mode all
 ```
 
+Windows PowerShell:
+
+```powershell
+$installer = "$env:TEMP\loongsuite-pilot-installer.ps1"
+Invoke-WebRequest `
+  -Uri "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1" `
+  -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer install `
+  -Agents "claude-code,cursor,codex" `
+  -UserId "your-user-id" `
+  -SlsEndpoint "https://cn-hangzhou.log.aliyuncs.com" `
+  -SlsProject "my-project" `
+  -SlsLogstore "my-logstore" `
+  -MaskMode all
+```
+
 Installer options:
+
+The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell installer uses the corresponding `-PascalCase` options, for example `--version` becomes `-Version` and `--data-dir` becomes `-DataDir`.
 
 | Parameter | Description |
 |-----------|-------------|
@@ -68,6 +103,12 @@ Local JSONL output is enabled by default:
 ls ~/.loongsuite-pilot/logs/output
 ```
 
+On Windows:
+
+```powershell
+Get-ChildItem "$env:USERPROFILE\.loongsuite-pilot\logs\output"
+```
+
 ## Service Management
 
 ```bash
@@ -94,16 +135,36 @@ http://127.0.0.1:8765/
 
 ## Uninstall
 
-Keep data:
+Keep data on Linux/macOS:
 
 ```bash
 curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh -o /tmp/loongsuite-pilot-installer.sh && bash /tmp/loongsuite-pilot-installer.sh uninstall
 ```
 
-Remove installed files and local data:
+Remove installed files and local data on Linux/macOS:
 
 ```bash
 curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh -o /tmp/loongsuite-pilot-installer.sh && bash /tmp/loongsuite-pilot-installer.sh uninstall --purge
+```
+
+Keep data on Windows:
+
+```powershell
+$installer = "$env:TEMP\loongsuite-pilot-installer.ps1"
+Invoke-WebRequest `
+  -Uri "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1" `
+  -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer uninstall
+```
+
+Remove installed files and local data on Windows:
+
+```powershell
+$installer = "$env:TEMP\loongsuite-pilot-installer.ps1"
+Invoke-WebRequest `
+  -Uri "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1" `
+  -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer uninstall -Purge
 ```
 
 ## Build And Run From Source
@@ -122,7 +183,7 @@ This starts the collector in the foreground. On startup, Pilot reads agent defin
 ## Install A Local Build As A Service
 
 ```bash
-bash deploy/package.sh --opensource
+bash deploy/package-opensource.sh
 bash deploy/installer-opensource.sh --package-url "file://$(pwd)/loongsuite-pilot.tar.gz"
 ```
 
