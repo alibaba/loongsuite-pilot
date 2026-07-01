@@ -122,7 +122,7 @@ This starts the collector in the foreground. On startup, Pilot reads agent defin
 ## Install A Local Build As A Service
 
 ```bash
-bash deploy/package.sh --opensource
+bash deploy/package-opensource.sh
 bash deploy/installer-opensource.sh --package-url "file://$(pwd)/loongsuite-pilot.tar.gz"
 ```
 

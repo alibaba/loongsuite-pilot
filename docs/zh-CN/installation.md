@@ -122,7 +122,7 @@ node dist/index.js
 ## 将本地构建安装为服务
 
 ```bash
-bash deploy/package.sh --opensource
+bash deploy/package-opensource.sh
 bash deploy/installer-opensource.sh --package-url "file://$(pwd)/loongsuite-pilot.tar.gz"
 ```
 

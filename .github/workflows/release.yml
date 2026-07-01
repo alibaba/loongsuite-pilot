@@ -22,7 +22,7 @@ jobs:
       - run: npm test
       - run: npm run build
       - name: Package
-        run: bash deploy/package.sh --opensource
+        run: bash deploy/package-opensource.sh --skip-build
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
