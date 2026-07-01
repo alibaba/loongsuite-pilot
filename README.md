@@ -59,11 +59,22 @@ Prerequisites:
 - Node.js 18 or later
 - `npm`
 - `curl` or `wget`
+- PowerShell 5.1 or later on Windows
 
-Install from the public package:
+Install from the public package on Linux or macOS:
 
 ```bash
 curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh -o /tmp/loongsuite-pilot-installer.sh && bash /tmp/loongsuite-pilot-installer.sh install
+```
+
+Install from the public package on Windows:
+
+```powershell
+$installer = "$env:TEMP\loongsuite-pilot-installer.ps1"
+Invoke-WebRequest `
+  -Uri "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1" `
+  -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer install
 ```
 
 Verify the service:
@@ -73,7 +84,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-Local JSONL output is enabled by default under `~/.loongsuite-pilot/logs/output/`.
+Local JSONL output is enabled by default under `~/.loongsuite-pilot/logs/output/` on Linux/macOS and `%USERPROFILE%\.loongsuite-pilot\logs\output\` on Windows.
 
 For installer options, uninstall commands, and source builds, see [Installation](docs/installation.md).
 
