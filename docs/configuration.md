@@ -49,6 +49,24 @@ Equivalent environment variables:
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | Override `serviceNamePrefix`. |
 | `LOG_LEVEL` | Runtime log level: `debug`, `info`, `warn`, `error`, or `silent`. |
 
+## SLS Secret Configuration
+
+SLS destinations may use WebTracking, AK/SK, or API Key mode. API Key mode stores the key in local `config.json`, so prefer filesystem permissions and avoid sharing the file.
+
+```json
+{
+  "sls": {
+    "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+    "project": "my-project",
+    "logstore": "my-logstore",
+    "mode": "apiKey",
+    "apiKey": "your-api-key"
+  }
+}
+```
+
+Do not put `apiKey` together with `accessKeyId` / `accessKeySecret` on the same SLS destination. Use [SLS Output](sls-output.md) for full mode examples.
+
 ## Configuration Topics
 
 | Task | Guide |

@@ -8,6 +8,11 @@
 #     -SlsLogstore "my-logstore" `
 #     -SlsAkId "your-ak-id" `
 #     -SlsAkSecret "your-ak-secret"
+#   .\installer-opensource.ps1 install `
+#     -SlsEndpoint "https://cn-hangzhou.log.aliyuncs.com" `
+#     -SlsProject "my-project" `
+#     -SlsLogstore "my-logstore" `
+#     -SlsApiKey "your-api-key"
 #
 # Install a specific version:
 #   .\installer-opensource.ps1 install -Version 1.2.0
@@ -30,6 +35,7 @@ param(
     [string]$SlsLogstore,
     [string]$SlsAkId,
     [string]$SlsAkSecret,
+    [string]$SlsApiKey,
     [string]$PackageUrl,
     [string]$DataDir,
     [string]$LogLevel,
@@ -83,6 +89,10 @@ if ($MaskMode -eq "custom" -and -not $MaskTypes) {
 }
 if ($MaskTypes -and $MaskMode -ne "custom") {
     Write-Error "-MaskTypes can only be used with -MaskMode custom"
+    exit 1
+}
+if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
+    Write-Error "-SlsApiKey cannot be used with -SlsAkId or -SlsAkSecret"
     exit 1
 }
 
@@ -411,10 +421,17 @@ function Confirm-ConfigOverwrite {
     $configFile = Join-Path $DataDir "config.json"
     if (-not (Test-Path $configFile)) { return }
 
+    $slsModeForDiff = ""
+    if ($SlsApiKey) {
+        $slsModeForDiff = "apiKey"
+    } elseif ($SlsAkId -and $SlsAkSecret) {
+        $slsModeForDiff = "ak"
+    }
     $jsonArg = @{
         slsEndpoint = $SlsEndpoint
         slsProject = $SlsProject
         slsLogstore = $SlsLogstore
+        slsMode = $slsModeForDiff
         cmsLicenseKey = $CmsLicenseKey
         cmsEndpoint = $CmsEndpoint
         cmsWorkspace = $CmsWorkspace
@@ -429,10 +446,18 @@ let old = {};
 try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
+const slsModeOf = sls => {
+  if (!sls) return '';
+  if (sls.mode) return sls.mode;
+  if (sls.apiKey) return 'apiKey';
+  if (sls.accessKeyId || sls.accessKeySecret) return 'ak';
+  return '';
+};
 const checks = [
   { label: 'sls.endpoint',      oldVal: (old.sls||{}).endpoint||'',      newVal: newVals.slsEndpoint },
   { label: 'sls.project',       oldVal: (old.sls||{}).project||'',       newVal: newVals.slsProject },
   { label: 'sls.logstore',      oldVal: (old.sls||{}).logstore||'',      newVal: newVals.slsLogstore },
+  { label: 'sls.mode',          oldVal: slsModeOf(old.sls),              newVal: newVals.slsMode },
   { label: 'cms.licenseKey',    oldVal: (old.cms||{}).licenseKey||'',    newVal: newVals.cmsLicenseKey },
   { label: 'cms.endpoint',      oldVal: (old.cms||{}).endpoint||'',      newVal: newVals.cmsEndpoint },
   { label: 'cms.workspace',     oldVal: (old.cms||{}).workspace||'',     newVal: newVals.cmsWorkspace },
@@ -599,6 +624,7 @@ function Write-Config {
         slsLogstore       = "$SlsLogstore"
         slsAkId           = "$SlsAkId"
         slsAkSecret       = "$SlsAkSecret"
+        slsApiKey         = "$SlsApiKey"
         logLevel          = "$LogLevel"
         userId            = "$($script:UserId)"
         collectLog        = "$CollectLog"
@@ -634,14 +660,25 @@ if (config.userId === undefined && config['user.id'] !== undefined) {
 }
 delete config['user.id'];
 
-if (opts.slsEndpoint || opts.slsProject || opts.slsLogstore) {
+if (opts.slsEndpoint || opts.slsProject || opts.slsLogstore || opts.slsApiKey) {
   config.sls = config.sls || {};
   delete config.sls.destinationOverride;
   if (opts.slsEndpoint) config.sls.endpoint = opts.slsEndpoint;
-  if (opts.slsAkId && opts.slsAkSecret) {
+  if (opts.slsApiKey) {
+    config.sls.mode = 'apiKey';
+    config.sls.apiKey = opts.slsApiKey;
+    delete config.sls.accessKeyId;
+    delete config.sls.accessKeySecret;
+  } else if (opts.slsAkId && opts.slsAkSecret) {
     config.sls.mode = 'ak';
     config.sls.accessKeyId = opts.slsAkId;
     config.sls.accessKeySecret = opts.slsAkSecret;
+    delete config.sls.apiKey;
+  } else if (opts.slsEndpoint || opts.slsProject || opts.slsLogstore) {
+    config.sls.mode = 'webtracking';
+    delete config.sls.apiKey;
+    delete config.sls.accessKeyId;
+    delete config.sls.accessKeySecret;
   }
   if (opts.slsProject && opts.slsLogstore) {
     config.sls.project = opts.slsProject;

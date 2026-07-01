@@ -20,6 +20,14 @@ AK 模式还需要传入：
 --sls-ak-secret "your-access-key-secret"
 ```
 
+API Key 模式传入：
+
+```bash
+--sls-api-key "your-api-key"
+```
+
+不要同时传 `--sls-api-key` 和 `--sls-ak-id` / `--sls-ak-secret`。
+
 ## WebTracking 模式
 
 当目标 logstore 支持 WebTracking 写入时使用该模式。
@@ -37,6 +45,32 @@ AK 模式还需要传入：
   }
 }
 ```
+
+## API Key 模式
+
+当目标 SLS 支持采集 API Key 鉴权时使用该模式。Pilot 会走 SLS 直写 protobuf 接口：
+
+- `POST /logstores/{logstore}/shards/lb`
+- `Authorization: Bearer <apiKey>`
+- `Content-Type: application/x-protobuf`
+- `Content-MD5` 为 protobuf body 的大写 hex MD5
+
+这个模式不是 WebTracking query 参数上报。
+
+```json
+{
+  "sls": {
+    "enabled": true,
+    "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+    "project": "my-project",
+    "logstore": "my-logstore",
+    "mode": "apiKey",
+    "apiKey": "your-api-key"
+  }
+}
+```
+
+同一个 SLS 目标里不要同时配置 `apiKey` 和 `accessKeyId` / `accessKeySecret`。
 
 ## AK 模式
 
@@ -71,6 +105,14 @@ AK 模式还需要传入：
       "mode": "webtracking"
     },
     {
+      "name": "api-key-sls",
+      "endpoint": "https://cn-beijing.log.aliyuncs.com",
+      "project": "api-key-project",
+      "logstore": "agent-activity",
+      "mode": "apiKey",
+      "apiKey": "your-api-key"
+    },
+    {
       "name": "secure-sls",
       "endpoint": "https://cn-shanghai.log.aliyuncs.com",
       "project": "secure-project",
@@ -90,7 +132,8 @@ AK 模式还需要传入：
 | `LOONGSUITE_SLS_ENDPOINT` | SLS endpoint。 |
 | `LOONGSUITE_SLS_PROJECT` | SLS project。 |
 | `LOONGSUITE_SLS_LOGSTORE` | SLS logstore。 |
-| `LOONGSUITE_SLS_MODE` | `webtracking` 或 `ak`。 |
+| `LOONGSUITE_SLS_MODE` | `webtracking`、`ak` 或 `apiKey`。 |
+| `LOONGSUITE_SLS_API_KEY` | API Key 模式的 API Key。 |
 | `LOONGSUITE_SLS_ACCESS_KEY_ID` | AK 模式的 Access Key ID。 |
 | `LOONGSUITE_SLS_ACCESS_KEY_SECRET` | AK 模式的 Access Key Secret。 |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | 设置为 `false` 或 `0` 可关闭 SLS 上报。 |

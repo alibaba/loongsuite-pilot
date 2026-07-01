@@ -16,6 +16,7 @@ import * as path from 'node:path';
 import {
   HttpError,
   postWebtracking,
+  postApiKeyLogStoreLogs,
   isRetryable,
   RETRY_MAX_ATTEMPTS,
   RETRY_BASE_DELAY_MS,
@@ -145,9 +146,7 @@ export class SlsFlusher extends BaseFlusher {
         const endpoint = logs[0].endpoint;
         const counter = this.endpointCounters.get(endpoint.name);
         const startMs = Date.now();
-        const send = endpoint.mode === 'ak'
-          ? this.flushViaAk(endpoint, logs)
-          : this.flushViaWebtracking(endpoint, logs);
+        const send = this.flushEndpoint(endpoint, logs);
         return send.then(() => {
           if (counter) {
             counter.outEntries += logs.length;
@@ -178,6 +177,12 @@ export class SlsFlusher extends BaseFlusher {
     const sn = this.resolveServiceName(agentType);
     if (sn) tags.push({ __service_name__: sn });
     return tags;
+  }
+
+  private flushEndpoint(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
+    if (endpoint.mode === 'ak') return this.flushViaAk(endpoint, logs);
+    if (endpoint.mode === 'apiKey') return this.flushViaApiKey(endpoint, logs);
+    return this.flushViaWebtracking(endpoint, logs);
   }
 
   private buildWebtrackingTags(agentType?: string): Record<string, string> {
@@ -262,6 +267,75 @@ export class SlsFlusher extends BaseFlusher {
     for (const chunk of chunks) {
       await this.postWebtracking(endpoint, chunk);
     }
+  }
+
+  private async flushViaApiKey(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
+    this.warnIfMixedAgentTypes(logs);
+    const now = Math.floor(Date.now() / 1000);
+    const agentType = logs[0]?.agentType;
+    const logGroup = {
+      logs: logs.map(l => ({
+        timestamp: now,
+        content: l.content,
+      })),
+      source: LOCAL_IP,
+      topic: endpoint.kind,
+      tags: this.buildAkTags(agentType),
+    };
+
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < RETRY_MAX_ATTEMPTS; attempt++) {
+      try {
+        await postApiKeyLogStoreLogs(
+          {
+            endpoint: endpoint.endpoint,
+            project: endpoint.project,
+            logstore: endpoint.logstore,
+            apiKey: endpoint.apiKey ?? '',
+            timeoutMs: WEBTRACKING_TIMEOUT_MS,
+            maxRetries: 1,
+          },
+          logGroup,
+          { userAgent: this.userAgent },
+        );
+        logger.debug('batch sent via apiKey', {
+          endpoint: endpoint.name,
+          project: endpoint.project,
+          logstore: endpoint.logstore,
+          count: logs.length,
+        });
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (!isRetryable(err) || attempt === RETRY_MAX_ATTEMPTS - 1) break;
+        const delay = RETRY_BASE_DELAY_MS * 2 ** attempt;
+        logger.warn('SLS apiKey send retrying', {
+          endpoint: endpoint.name,
+          attempt: attempt + 1,
+          delayMs: delay,
+          error: String(err),
+        });
+        await this.sleep(delay);
+      }
+    }
+
+    logger.error('SLS apiKey send failed after retries', {
+      endpoint: endpoint.name,
+      error: String(lastErr),
+    });
+    this.alarmManager?.record(
+      'FLUSH_SEND_ALARM', '2',
+      `SLS apiKey send failed: ${String(lastErr)}`,
+      { endpoint_name: endpoint.name },
+    );
+    if (lastErr instanceof HttpError && lastErr.status === 429) {
+      this.alarmManager?.record(
+        'FLUSH_QUOTA_ALARM', '2',
+        `SLS endpoint throttled (429)`,
+        { endpoint_name: endpoint.name },
+      );
+    }
+    await this.persistFailedLogs(endpoint, logGroup, lastErr);
   }
 
   private splitForWebtracking(logs: QueuedLog[]): QueuedLog[][] {
@@ -411,6 +485,24 @@ export class SlsFlusher extends BaseFlusher {
             topic,
             tags: this.buildAkTags(),
           });
+        } else if (endpoint.mode === 'apiKey') {
+          await postApiKeyLogStoreLogs(
+            {
+              endpoint: endpoint.endpoint,
+              project: endpoint.project,
+              logstore: endpoint.logstore,
+              apiKey: endpoint.apiKey ?? '',
+              timeoutMs: WEBTRACKING_TIMEOUT_MS,
+              maxRetries: 1,
+            },
+            {
+              logs: [{ timestamp: Math.floor(Date.now() / 1000), content }],
+              source: LOCAL_IP,
+              topic,
+              tags: this.buildAkTags(),
+            },
+            { userAgent: this.userAgent },
+          );
         } else {
           await postWebtracking(
             {

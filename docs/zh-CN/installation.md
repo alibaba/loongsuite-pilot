@@ -79,6 +79,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--sls-logstore <name>` | SLS logstore。 |
 | `--sls-ak-id <key>` | AK 模式的 Access Key ID。 |
 | `--sls-ak-secret <key>` | AK 模式的 Access Key Secret。 |
+| `--sls-api-key <key>` | API Key 模式的 SLS API Key，不能和 AK/SK 参数同时使用。 |
 | `--mask-mode <mode>` | 脱敏模式：`all`、`none` 或 `custom`。 |
 | `--mask-types <list>` | 逗号分隔的脱敏类型，`--mask-mode custom` 时必填。 |
 | `--collect-log <true\|false>` | 开启或关闭 SLS 日志上报。 |

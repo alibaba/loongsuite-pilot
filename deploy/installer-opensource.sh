@@ -9,6 +9,11 @@
 #     --sls-logstore "my-logstore" \
 #     --sls-ak-id "your-ak-id" \
 #     --sls-ak-secret "your-ak-secret"
+#   curl -fsSL <URL>/installer.sh | bash -s -- install \
+#     --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
+#     --sls-project "my-project" \
+#     --sls-logstore "my-logstore" \
+#     --sls-api-key "your-api-key"
 #
 # Install a specific version:
 #   curl -fsSL <URL>/installer.sh | bash -s -- install --version 1.2.0
@@ -43,6 +48,7 @@ SLS_PROJECT=""
 SLS_LOGSTORE=""
 SLS_AK_ID=""
 SLS_AK_SECRET=""
+SLS_API_KEY=""
 DATA_DIR="$DEFAULT_DATA_DIR"
 LOG_LEVEL=""
 USER_ID=""
@@ -85,6 +91,8 @@ while [[ $# -gt 0 ]]; do
         --sls-ak-id=*)        SLS_AK_ID="${1#*=}"; shift ;;
         --sls-ak-secret)      SLS_AK_SECRET="$2"; shift 2 ;;
         --sls-ak-secret=*)    SLS_AK_SECRET="${1#*=}"; shift ;;
+        --sls-api-key)        SLS_API_KEY="$2"; shift 2 ;;
+        --sls-api-key=*)      SLS_API_KEY="${1#*=}"; shift ;;
         --package-url)        PACKAGE_URL="$2"; shift 2 ;;
         --package-url=*)      PACKAGE_URL="${1#--package-url=}"; shift ;;
         --data-dir)           DATA_DIR="$2"; shift 2 ;;
@@ -137,6 +145,10 @@ if [ "$MASK_MODE" = "custom" ] && [ -z "$MASK_TYPES" ]; then
 fi
 if [ -n "$MASK_TYPES" ] && [ "$MASK_MODE" != "custom" ]; then
     echo "❌ --mask-types can only be used with --mask-mode custom" >&2
+    exit 1
+fi
+if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; }; then
+    echo "❌ --sls-api-key cannot be used with --sls-ak-id or --sls-ak-secret" >&2
     exit 1
 fi
 
@@ -504,10 +516,18 @@ try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { pro
 
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
+const slsModeOf = sls => {
+  if (!sls) return '';
+  if (sls.mode) return sls.mode;
+  if (sls.apiKey) return 'apiKey';
+  if (sls.accessKeyId || sls.accessKeySecret) return 'ak';
+  return '';
+};
 const checks = [
   { label: 'sls.endpoint',       oldVal: (old.sls||{}).endpoint||'',       newVal: newVals.slsEndpoint },
   { label: 'sls.project',        oldVal: (old.sls||{}).project||'',        newVal: newVals.slsProject },
   { label: 'sls.logstore',       oldVal: (old.sls||{}).logstore||'',       newVal: newVals.slsLogstore },
+  { label: 'sls.mode',           oldVal: slsModeOf(old.sls),               newVal: newVals.slsMode },
   { label: 'cms.licenseKey',     oldVal: (old.cms||{}).licenseKey||'',     newVal: newVals.cmsLicenseKey },
   { label: 'cms.endpoint',       oldVal: (old.cms||{}).endpoint||'',       newVal: newVals.cmsEndpoint },
   { label: 'cms.workspace',      oldVal: (old.cms||{}).workspace||'',      newVal: newVals.cmsWorkspace },
@@ -522,8 +542,8 @@ if (!changed.length) process.exit(0);
 for (const c of changed) {
   console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","maskMode":"%s","maskTypes":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$MASK_MODE" "$MASK_TYPES")" 2>/dev/null || true)
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","maskMode":"%s","maskTypes":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$MASK_MODE" "$MASK_TYPES")" 2>/dev/null || true)
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -674,7 +694,7 @@ write_config() {
         "==> Writing config to $config_file ..."
     mkdir -p "$DATA_DIR"
 
-    "$NODE_BIN" -e "
+    LP_SLS_API_KEY="$SLS_API_KEY" "$NODE_BIN" -e "
 const fs = require('fs');
 const path = '$config_file';
 
@@ -697,19 +717,31 @@ const slsProject  = '${SLS_PROJECT}';
 const slsLogstore = '${SLS_LOGSTORE}';
 const slsAkId     = '${SLS_AK_ID}';
 const slsAkSecret = '${SLS_AK_SECRET}';
+const slsApiKey   = process.env.LP_SLS_API_KEY || '';
 const logLevel    = '${LOG_LEVEL}';
 const userId      = '${USER_ID}';
 
-if (slsEndpoint || slsProject || slsLogstore) {
+if (slsEndpoint || slsProject || slsLogstore || slsApiKey) {
   config.sls = config.sls || {};
   delete config.sls.destinationOverride;
   if (slsEndpoint) {
     config.sls.endpoint = slsEndpoint;
   }
-  if (slsAkId && slsAkSecret) {
+  if (slsApiKey) {
+    config.sls.mode = 'apiKey';
+    config.sls.apiKey = slsApiKey;
+    delete config.sls.accessKeyId;
+    delete config.sls.accessKeySecret;
+  } else if (slsAkId && slsAkSecret) {
     config.sls.mode = 'ak';
     config.sls.accessKeyId = slsAkId;
     config.sls.accessKeySecret = slsAkSecret;
+    delete config.sls.apiKey;
+  } else if (slsEndpoint || slsProject || slsLogstore) {
+    config.sls.mode = 'webtracking';
+    delete config.sls.apiKey;
+    delete config.sls.accessKeyId;
+    delete config.sls.accessKeySecret;
   }
   if (slsProject && slsLogstore) {
     config.sls.project = slsProject;

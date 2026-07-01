@@ -24,6 +24,7 @@ function clearSlsEnv() {
   delete process.env.LOONGSUITE_SLS_MODE;
   delete process.env.LOONGSUITE_SLS_ACCESS_KEY_ID;
   delete process.env.LOONGSUITE_SLS_ACCESS_KEY_SECRET;
+  delete process.env.LOONGSUITE_SLS_API_KEY;
   delete process.env.LOONGSUITE_SLS_ENDPOINT;
   delete process.env.LOONGSUITE_SLS_PROJECT;
   delete process.env.LOONGSUITE_SLS_LOGSTORE;
@@ -102,6 +103,43 @@ describe('SLS resolver — config-driven', () => {
       expect(cfg.flushers.sls?.enabled).toBe(true);
     });
 
+    it('infers API Key mode when apiKey is present', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: {
+          endpoint: 'https://cn-beijing-stg-share.log.aliyuncs.com',
+          project: 'api-key-project',
+          logstore: 'shimu-test',
+          apiKey: 'sls-api-key',
+        },
+      });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints[0]).toMatchObject({
+        mode: 'apiKey',
+        apiKey: 'sls-api-key',
+      });
+      expect(cfg.flushers.sls?.apiKey).toBe('sls-api-key');
+      expect(cfg.flushers.sls?.enabled).toBe(true);
+    });
+
+    it('reads API Key from env over file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: {
+          endpoint: 'https://cn-beijing-stg-share.log.aliyuncs.com',
+          project: 'api-key-project',
+          logstore: 'shimu-test',
+          apiKey: 'file-api-key',
+        },
+      });
+      vi.stubEnv('LOONGSUITE_SLS_API_KEY', 'env-api-key');
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.endpoints[0]).toMatchObject({
+        mode: 'apiKey',
+        apiKey: 'env-api-key',
+      });
+    });
+
     it('reads user fields from env over file', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: { project: 'file-proj', logstore: 'file-store' },
@@ -176,6 +214,41 @@ describe('SLS resolver — config-driven', () => {
 
       const cfg = await loadConfig();
       expect(cfg.flushers.sls?.enabled).toBe(false);
+    });
+
+    it('disabled when API Key mode is missing apiKey', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: {
+          mode: 'apiKey',
+          endpoint: 'https://x.log.aliyuncs.com',
+          project: 'p',
+          logstore: 'l',
+        },
+      });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.enabled).toBe(false);
+    });
+
+    it('disabled when endpoint has both AK/SK and API Key credentials', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: {
+          endpoint: 'https://x.log.aliyuncs.com',
+          project: 'p',
+          logstore: 'l',
+          accessKeyId: 'ak-id',
+          accessKeySecret: 'ak-secret',
+          apiKey: 'api-key-secret',
+        },
+      });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.enabled).toBe(false);
+      expect(cfg.flushers.sls?.endpoints[0]).toMatchObject({
+        mode: 'ak',
+        accessKeyId: 'ak-id',
+        apiKey: 'api-key-secret',
+      });
     });
 
     it('respects explicit enabled=false', async () => {
@@ -256,6 +329,52 @@ describe('SLS resolver — config-driven', () => {
         mode: 'ak',
         accessKeyId: 'ak-id',
         accessKeySecret: 'ak-secret',
+      });
+    });
+
+    it('supports mixed API Key, AK, and webtracking endpoints in sls array', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: [
+          {
+            name: 'api-key-sls',
+            endpoint: 'https://cn-beijing-stg-share.log.aliyuncs.com',
+            project: 'api-key-project',
+            logstore: 'shimu-test',
+            apiKey: 'api-key-secret',
+          },
+          {
+            name: 'ak-sls',
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'ak-proj',
+            logstore: 'ak-store',
+            accessKeyId: 'ak-id',
+            accessKeySecret: 'ak-secret',
+          },
+          {
+            name: 'wt-sls',
+            endpoint: 'https://cn-heyuan.log.aliyuncs.com',
+            project: 'wt-proj',
+            logstore: 'wt-store',
+            mode: 'webtracking',
+          },
+        ],
+      });
+
+      const cfg = await loadConfig();
+      expect(cfg.flushers.sls?.enabled).toBe(true);
+      expect(cfg.flushers.sls?.endpoints).toHaveLength(3);
+      expect(cfg.flushers.sls?.endpoints[0]).toMatchObject({
+        name: 'api-key-sls',
+        mode: 'apiKey',
+        apiKey: 'api-key-secret',
+      });
+      expect(cfg.flushers.sls?.endpoints[1]).toMatchObject({
+        name: 'ak-sls',
+        mode: 'ak',
+      });
+      expect(cfg.flushers.sls?.endpoints[2]).toMatchObject({
+        name: 'wt-sls',
+        mode: 'webtracking',
       });
     });
 
