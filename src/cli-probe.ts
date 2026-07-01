@@ -23,8 +23,9 @@ async function findDetectionReason(detection: { paths: string[]; commands: strin
   }
   for (const cmd of detection.commands) {
     try {
+      const bin = process.platform === 'win32' ? 'where.exe' : 'which';
       const found = await new Promise<boolean>(resolve => {
-        execFile('which', [cmd], err => resolve(!err));
+        execFile(bin, [cmd], err => resolve(!err));
       });
       if (found) return `command: ${cmd}`;
     } catch { /* ignore */ }

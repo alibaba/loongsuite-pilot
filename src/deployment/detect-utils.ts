@@ -30,8 +30,9 @@ export async function detectAgent(detection: AgentDetectionConfig): Promise<bool
 }
 
 function commandExists(command: string): Promise<boolean> {
+  const bin = process.platform === 'win32' ? 'where.exe' : 'which';
   return new Promise(resolve => {
-    execFile('which', [command], err => {
+    execFile(bin, [command], err => {
       resolve(!err);
     });
   });
