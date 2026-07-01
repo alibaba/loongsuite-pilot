@@ -130,7 +130,141 @@ echo "    ✅ $OUTPUT_PATH ($PKG_SIZE)"
 
 # ── Create .zip (Windows) ──
 echo "==> Creating .zip package..."
-(cd "$STAGE_DIR" && zip -qr "$ZIP_OUTPUT_PATH" "$PACKAGE_NAME")
+if command -v zip >/dev/null 2>&1 && [ "${LOONGSUITE_PILOT_FORCE_NODE_ZIP:-0}" != "1" ]; then
+    (cd "$STAGE_DIR" && zip -qr "$ZIP_OUTPUT_PATH" "$PACKAGE_NAME")
+else
+    echo "    zip command not found; using Node.js zip fallback"
+    node - "$PKG_DIR" "$ZIP_OUTPUT_PATH" <<'NODEZIP'
+const fs = require('fs');
+const path = require('path');
+
+const root = process.argv[2];
+const output = process.argv[3];
+const base = path.dirname(root);
+
+const crcTable = new Uint32Array(256);
+for (let i = 0; i < 256; i += 1) {
+  let c = i;
+  for (let k = 0; k < 8; k += 1) {
+    c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+  }
+  crcTable[i] = c >>> 0;
+}
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function dosDateTime(date) {
+  const year = Math.max(1980, date.getFullYear());
+  return {
+    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
+    date: ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
+  };
+}
+
+function u16(value) {
+  const buffer = Buffer.alloc(2);
+  buffer.writeUInt16LE(value);
+  return buffer;
+}
+
+function u32(value) {
+  const buffer = Buffer.alloc(4);
+  buffer.writeUInt32LE(value >>> 0);
+  return buffer;
+}
+
+function walk(absPath, entries) {
+  const stat = fs.lstatSync(absPath);
+  const relPath = path.relative(base, absPath).split(path.sep).join('/');
+  if (stat.isDirectory()) {
+    entries.push({ absPath, relPath: `${relPath}/`, stat, data: Buffer.alloc(0), isDirectory: true });
+    for (const child of fs.readdirSync(absPath).sort()) {
+      walk(path.join(absPath, child), entries);
+    }
+    return;
+  }
+  if (stat.isFile()) {
+    entries.push({ absPath, relPath, stat, data: fs.readFileSync(absPath), isDirectory: false });
+  }
+}
+
+const entries = [];
+walk(root, entries);
+
+const chunks = [];
+const centralDirectory = [];
+let offset = 0;
+
+for (const entry of entries) {
+  const name = Buffer.from(entry.relPath, 'utf8');
+  const { time, date } = dosDateTime(entry.stat.mtime);
+  const crc = entry.isDirectory ? 0 : crc32(entry.data);
+  const size = entry.data.length;
+  const localOffset = offset;
+  const mode = ((entry.stat.mode & 0xffff) << 16) >>> 0;
+  const flags = 0x0800;
+
+  const localHeader = Buffer.concat([
+    u32(0x04034b50),
+    u16(10),
+    u16(flags),
+    u16(0),
+    u16(time),
+    u16(date),
+    u32(crc),
+    u32(size),
+    u32(size),
+    u16(name.length),
+    u16(0),
+    name,
+  ]);
+  chunks.push(localHeader, entry.data);
+  offset += localHeader.length + entry.data.length;
+
+  centralDirectory.push(Buffer.concat([
+    u32(0x02014b50),
+    u16(0x031e),
+    u16(10),
+    u16(flags),
+    u16(0),
+    u16(time),
+    u16(date),
+    u32(crc),
+    u32(size),
+    u32(size),
+    u16(name.length),
+    u16(0),
+    u16(0),
+    u16(0),
+    u16(0),
+    u32(mode),
+    u32(localOffset),
+    name,
+  ]));
+}
+
+const centralOffset = offset;
+const centralBuffer = Buffer.concat(centralDirectory);
+const end = Buffer.concat([
+  u32(0x06054b50),
+  u16(0),
+  u16(0),
+  u16(entries.length),
+  u16(entries.length),
+  u32(centralBuffer.length),
+  u32(centralOffset),
+  u16(0),
+]);
+
+fs.writeFileSync(output, Buffer.concat([...chunks, centralBuffer, end]));
+NODEZIP
+fi
 
 ZIP_SIZE=$(du -h "$ZIP_OUTPUT_PATH" | cut -f1)
 echo "    ✅ $ZIP_OUTPUT_PATH ($ZIP_SIZE)"
@@ -142,4 +276,3 @@ tar -tzf "$OUTPUT_PATH" | sed -n '1,20p'
 echo "    ... (truncated)"
 echo ""
 echo "Done."
-
