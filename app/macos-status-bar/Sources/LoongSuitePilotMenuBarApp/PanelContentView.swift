@@ -224,7 +224,7 @@ struct PanelContentView: View {
                                         .fill(DT.border)
                                     RoundedRectangle(cornerRadius: 2)
                                         .fill(DT.accent.opacity(0.7))
-                                        .frame(width: max(4, geo.size.width * item.share))
+                                        .frame(width: min(geo.size.width, max(4, geo.size.width * item.share)))
                                 }
                             }
                             .frame(height: 4)
@@ -267,7 +267,7 @@ struct PanelContentView: View {
                                         .fill(DT.border)
                                     RoundedRectangle(cornerRadius: 2)
                                         .fill(DT.accent.opacity(0.7))
-                                        .frame(width: max(4, geo.size.width * item.share))
+                                        .frame(width: min(geo.size.width, max(4, geo.size.width * item.share)))
                                 }
                             }
                             .frame(height: 4)
