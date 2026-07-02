@@ -271,3 +271,40 @@ describe('qoderwork-hook-processor user prompt extraction', () => {
     expect(inputContents(readJsonlRecords())).toEqual([]);
   });
 });
+
+describe('qoderwork-hook-processor response.id', () => {
+  test('uses message.id as gen_ai.response.id when present', () => {
+    // QoderWork 0.6.2 transcript assistant rows carry message.id = chatcmpl-xxx,
+    // which matches the id captured by qoderwork-runtime-wrapper. Preferring it
+    // enables direct token matching in qoder-work-trace-input.
+    const rows = baseRows([{ type: 'text', text: 'hi' }]).map((r) =>
+      r.type === 'assistant' ? { ...r, message: { ...r.message, id: 'chatcmpl-resp-1' } } : r,
+    );
+    writeTranscript(rows);
+
+    const result = runHook('sess-resp-id-msg');
+    expect(result.status).toBe(0);
+
+    const resp = readJsonlRecords().find((r) => r['event.name'] === 'llm.response');
+    expect(resp).toBeDefined();
+    expect(resp['gen_ai.response.id']).toBe('chatcmpl-resp-1');
+  });
+
+  test('falls back to parentUuid when message.id is absent', () => {
+    // Older QoderWork versions have no message.id — behavior must stay unchanged.
+    const rows = baseRows([{ type: 'text', text: 'hi' }]).map((r) =>
+      r.type === 'assistant'
+        ? { ...r, message: { role: r.message.role, content: r.message.content, stop_reason: r.message.stop_reason } }
+        : r,
+    );
+    writeTranscript(rows);
+
+    const result = runHook('sess-resp-id-parent');
+    expect(result.status).toBe(0);
+
+    const resp = readJsonlRecords().find((r) => r['event.name'] === 'llm.response');
+    expect(resp).toBeDefined();
+    // baseRows assistant row has parentUuid 'user-1'
+    expect(resp['gen_ai.response.id']).toBe('user-1');
+  });
+});

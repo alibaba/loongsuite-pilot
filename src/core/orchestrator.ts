@@ -202,7 +202,8 @@ export class Orchestrator extends EventEmitter {
       ...HookWatchdog.defaultTargets(),
       ...this.buildHookWatchdogTargets(),
     ];
-    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets);
+    const interceptTargets = HookWatchdog.defaultInterceptTargets(this.dataDir);
+    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
     this.hookWatchdog.start();
 
     // 11. Start updater watchdog only when resolved auto-update is enabled.
