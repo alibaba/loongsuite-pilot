@@ -123,6 +123,7 @@ Hook 示例：
 ```
 
 Source-specific 字段建议放在 `agent.<agent-id>.*` 下，避免污染公共稳定字段。
+这些字段可供归一化和上下文增强内部使用，但默认不会输出到 SLS 和本地 JSONL。
 
 ## 实现 Input
 

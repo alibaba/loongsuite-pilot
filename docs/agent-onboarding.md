@@ -123,6 +123,7 @@ Use canonical dotted fields whenever possible:
 ```
 
 Keep source-specific fields under `agent.<agent-id>.*` so public output fields stay stable.
+These fields may be used by normalization and enrichment, but SLS and local JSONL outputs drop them by default.
 
 ## Implement The Input
 

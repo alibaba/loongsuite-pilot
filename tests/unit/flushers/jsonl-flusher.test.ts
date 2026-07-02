@@ -51,6 +51,22 @@ describe('JsonlFlusher', () => {
       expect(parsed.data).toBeUndefined();
       expect(parsed['gen_ai.session.id']).toBeDefined();
     });
+
+    it('omits agent-scoped extension fields from output', async () => {
+      const entry = buildTestEntry({
+        agentType: ClientType.Qoder,
+        'agent.qoder.cwd': '/workspace/project',
+        'agent.cursor.hook_event_name': 'preToolUse',
+      });
+      await flusher.send(entry);
+
+      const line = mockAppendLine.mock.calls[0][1];
+      const parsed = JSON.parse(line);
+      expect(parsed).not.toHaveProperty('agent.qoder.cwd');
+      expect(parsed).not.toHaveProperty('agent.cursor.hook_event_name');
+      expect(parsed['agent.file_path']).toBe('/tmp/test/file.ts');
+      expect(parsed['gen_ai.agent.type']).toBe('qoder');
+    });
   });
 
   describe('resolveFilePath with rotateDaily (T009)', () => {

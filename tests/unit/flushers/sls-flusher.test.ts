@@ -98,6 +98,22 @@ describe('SlsFlusher', () => {
 
       expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(2);
     });
+
+    it('omits agent-scoped extension fields from SLS content', async () => {
+      const entry = buildTestEntry({
+        'agent.qoder.cwd': '/workspace/project',
+        'agent.cursor.hook_event_name': 'preToolUse',
+      });
+      await flusher.send(entry);
+      await flusher.flush();
+
+      const logGroup = mockPostLogStoreLogs.mock.calls[0][2];
+      const content = logGroup.logs[0].content;
+      expect(content).not.toHaveProperty('agent.qoder.cwd');
+      expect(content).not.toHaveProperty('agent.cursor.hook_event_name');
+      expect(content['agent.file_path']).toBe('/tmp/test/file.ts');
+      expect(content['gen_ai.agent.type']).toBe('qoder');
+    });
   });
 
   describe('redact logic (T013)', () => {
