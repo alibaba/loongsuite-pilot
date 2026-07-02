@@ -120,7 +120,7 @@ export async function postApiKeyLogStoreLogs(
     'Content-Type': 'application/x-protobuf',
     'Content-MD5': contentMd5Hex(body),
     'Content-Length': body.byteLength,
-    Date: new Date().toGMTString(),
+    Date: new Date().toUTCString(),
     'x-log-apiversion': '0.6.0',
     'x-log-bodyrawsize': String(body.byteLength),
     ...(opts?.userAgent ? { 'user-agent': opts.userAgent } : {}),
