@@ -72,11 +72,12 @@ description: 创建 CR 并执行 Code Review，发布评审意见到 CR
 
 2. **发布评审意见到 CR**
 
-   评审完成后，通过 `code` MCP 将结果发布到 CR：
+   评审完成后，code-review 技能的 Phase 6 会自动将结果发布到 CR（GitLab 平台）：
 
-   - **Inline Findings**：将可定位的问题逐条作为代码行内评论发布
-   - **CR 摘要评论**：将 Final Report 摘要发布到 CR 主评论
+   - **Inline Findings**：将 Critical/High/Medium 级别的可定位问题逐条作为代码行内评论发布（使用 `mcp__code__comment_merge_request_changed_file`）
+   - **CR 摘要评论**：将 Final Report 摘要发布到 CR 全局评论（使用 `mcp__code__comment_merge_request`）
      - 包含：Critical/High/Medium/Low 数量统计、Lifecycle PASS/FAIL 表格、总体结论、Highlights
+   - 发布结果记录到 `code-review/<target>/publish-result.json`
    - 若 `code` MCP 发布失败，输出失败原因并给出可复制的发布内容
 
 ---

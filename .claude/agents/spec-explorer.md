@@ -1,0 +1,1 @@
+../../.agents/agents/spec-explorer.md

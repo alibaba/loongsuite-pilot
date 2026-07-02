@@ -133,7 +133,7 @@ echo "    ✅ Package created: $OUTPUT_PATH ($PKG_SIZE)"
 # ── Summary ──
 echo ""
 echo "==> Contents:"
-tar -tzf "$OUTPUT_PATH" | head -20
+tar -tzf "$OUTPUT_PATH" 2>/dev/null | head -20 || true
 echo "    ... (truncated)"
 echo ""
 echo "Done. Upload with:  bash deploy/upload.sh"

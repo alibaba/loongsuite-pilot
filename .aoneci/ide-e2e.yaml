@@ -1,0 +1,263 @@
+name: "IDE E2E Test"
+
+triggers:
+  workflow_dispatch: {}
+  merge_request:
+    target-branches:
+    - "master"
+    types:
+    - "opened"
+    - "updated"
+
+# 远端 SSH 测试机 + OSS 路径是所有 MR 共享的，必须全局串行。
+# group 用固定值（非 git.ref），让任意分支/MR 的运行都进同一并发组。
+# cancel-in-progress=false + parallelism=1：新运行排队等待，不打断进行中的测试。
+strategy:
+  concurrency:
+    group: 'ide-e2e-remote'
+    cancel-in-progress: false
+    parallelism: 1
+
+jobs:
+  build-and-upload:
+    image: alios-8u
+    steps:
+      - name: checkout
+        uses: checkout
+
+      - name: setup node
+        uses: setup-env
+        inputs:
+          node-version: 20
+
+      - name: install dependencies
+        run: npm install --production=false
+
+      - name: build and package
+        run: |
+          set -e
+          bash deploy/package.sh
+          ls -lh loongsuite-pilot.tar.gz
+
+      - name: upload pilot package to oss
+        uses: upload-oss
+        inputs:
+          path: 'loongsuite-pilot.tar.gz'
+          storage-path: ${{vars.e2e_oss_path}}/
+          oss-bucket: ${{vars.e2e_oss_bucket}}
+          oss-endpoint: ${{vars.e2e_oss_endpoint}}
+          access-key-id: ${{secrets.e2e_oss_ak}}
+          access-key-secret: ${{secrets.e2e_oss_sk}}
+
+      - name: upload e2e scripts to oss
+        uses: upload-oss
+        inputs:
+          path: |-
+            scripts/e2e/ai-chat.sh
+            scripts/e2e/run-ide-e2e.sh
+            scripts/e2e/enable-cursor-cdp.sh
+            deploy/installer.sh
+            deploy/installer.ps1
+          storage-path: ${{vars.e2e_oss_path}}/
+          oss-bucket: ${{vars.e2e_oss_bucket}}
+          oss-endpoint: ${{vars.e2e_oss_endpoint}}
+          access-key-id: ${{secrets.e2e_oss_ak}}
+          access-key-secret: ${{secrets.e2e_oss_sk}}
+
+      - name: print upload result
+        run: |
+          echo "=== Upload complete ==="
+          echo "Pilot package and E2E scripts uploaded to OSS"
+          echo "OSS path: ${{vars.e2e_oss_path}}"
+
+  remote-e2e-test:
+    needs: build-and-upload
+    image: alios-8u
+    steps:
+      - name: run remote e2e
+        run: |
+          set -e
+
+          # 每个 step 是独立容器，系统级安装不跨 step 保留，必须在本 step 内装 sshpass。
+          if ! command -v sshpass >/dev/null 2>&1; then
+            yum install -y -q sshpass 2>/dev/null || \
+            { apt-get update -qq && apt-get install -y -qq sshpass >/dev/null 2>&1; } || true
+          fi
+          if ! command -v sshpass >/dev/null 2>&1; then
+            echo "FAIL: sshpass not available; cannot do password SSH in headless CI"
+            exit 1
+          fi
+          echo "sshpass: $(command -v sshpass)"
+
+          REMOTE_HOST="${{vars.e2e_remote_host}}"
+          REMOTE_PASS="${{secrets.e2e_remote_password}}"
+          REMOTE_PORT="${{vars.e2e_remote_port}}"
+          REMOTE_PORT="${REMOTE_PORT:-22}"
+          OSS_ENDPOINT="${{vars.e2e_oss_endpoint}}"
+          OSS_BUCKET="${{vars.e2e_oss_bucket}}"
+          OSS_PATH="${{vars.e2e_oss_path}}"
+          REMOTE_DIR="ide-e2e"
+
+          SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=30 -o PreferredAuthentications=password -o PubkeyAuthentication=no -p $REMOTE_PORT"
+
+          # 诊断：只打印长度/主机，不泄露密码内容。
+          echo "[e2e-ci] diag: host='${REMOTE_HOST}' port='${REMOTE_PORT}' pass-len=${#REMOTE_PASS} sshpass=$(command -v sshpass || echo none)"
+
+          # 用 SSHPASS 环境变量传密码，避免密码含特殊字符时被 shell 拆分/转义，
+          # 也不会把明文密码暴露在进程命令行里。
+          export SSHPASS="$REMOTE_PASS"
+          if [ -n "$REMOTE_PASS" ] && command -v sshpass >/dev/null 2>&1; then
+            SSH_CMD="sshpass -e ssh $SSH_OPTS"
+            echo "[e2e-ci] auth: using sshpass (password)"
+          else
+            SSH_CMD="ssh $SSH_OPTS"
+            echo "[e2e-ci] auth: NO sshpass/empty password -> plain ssh (will fail headless)"
+          fi
+
+          # 检测远端 OS
+          OS_RAW=$($SSH_CMD $REMOTE_HOST "uname -s 2>/dev/null || echo UNKNOWN" 2>/dev/null) || true
+          SHELL_PREFIX=""
+          PLATFORM="linux"
+
+          case "$OS_RAW" in
+            Darwin)   PLATFORM="macos" ;;
+            MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
+            *)
+              WIN_CHECK=$($SSH_CMD $REMOTE_HOST "echo %OS%" 2>/dev/null) || true
+              if echo "$WIN_CHECK" | grep -q "Windows"; then
+                PLATFORM="windows"
+              fi
+              ;;
+          esac
+
+          if [ "$PLATFORM" = "windows" ]; then
+            SHELL_PREFIX='"C:\Program Files\Git\bin\bash.exe" -l -s'
+          fi
+
+          echo "[e2e-ci] Remote: $REMOTE_HOST (OS: $PLATFORM)"
+
+          remote_exec() {
+            if [ -n "$SHELL_PREFIX" ]; then
+              echo "$1" | $SSH_CMD $REMOTE_HOST $SHELL_PREFIX
+            else
+              $SSH_CMD $REMOTE_HOST "$1"
+            fi
+          }
+
+          OSS_BASE_URL="https://${OSS_BUCKET}.${OSS_ENDPOINT#https://}/${OSS_PATH}"
+
+          # ── Step 1: 下载 pilot 包 + E2E 脚本 ──
+          echo "[e2e-ci] Downloading from OSS..."
+
+          DOWNLOAD_SCRIPT="
+          mkdir -p ~/$REMOTE_DIR && cd ~/$REMOTE_DIR
+
+          echo '  downloading loongsuite-pilot.tar.gz ...'
+          curl -sSfL '${OSS_BASE_URL}/loongsuite-pilot.tar.gz' -o loongsuite-pilot.tar.gz || { echo 'FAIL: download pilot package'; exit 1; }
+
+          for src in scripts/e2e/ai-chat.sh scripts/e2e/run-ide-e2e.sh scripts/e2e/enable-cursor-cdp.sh deploy/installer.sh deploy/installer.ps1; do
+            f=\$(basename \"\$src\")
+            echo \"  downloading \$f ...\"
+            curl -sSfL \"${OSS_BASE_URL}/\${src}\" -o \"\$f\" || { echo \"FAIL: download \$src\"; exit 1; }
+            chmod +x \"\$f\"
+          done
+          echo 'All files downloaded.'
+          ls -lh
+          "
+          remote_exec "$DOWNLOAD_SCRIPT"
+
+          # ── Step 2: 安装 pilot ──
+          echo "[e2e-ci] Installing pilot on remote..."
+
+          if [ "$PLATFORM" = "windows" ]; then
+            # 仅安装步骤走原生 PowerShell:SSH 直连 powershell(不经 Git Bash),
+            # 让 installer.ps1 拿到完整机器 PATH(含 System32\tar),解压才正常。
+            # 脚本经 stdin 传给 `powershell -Command -`,规避 cmd.exe 引号地狱。
+            # install 失败再单独跑 upgrade(两个独立进程,因 installer.ps1 内部会 exit)。
+            INSTALL_PS='
+            $ErrorActionPreference = "Stop"
+            Set-Location "$env:USERPROFILE\'"$REMOTE_DIR"'"
+            $pkg = "file:///" + ((Resolve-Path "loongsuite-pilot.tar.gz").Path -replace "\\","/")
+            Write-Host "Installing (PowerShell) from: $pkg"
+            & .\installer.ps1 install -PackageUrl $pkg
+            '
+            UPGRADE_PS='
+            $ErrorActionPreference = "Stop"
+            Set-Location "$env:USERPROFILE\'"$REMOTE_DIR"'"
+            $pkg = "file:///" + ((Resolve-Path "loongsuite-pilot.tar.gz").Path -replace "\\","/")
+            Write-Host "Upgrading (PowerShell) from: $pkg"
+            & .\installer.ps1 upgrade -PackageUrl $pkg
+            '
+            echo "$INSTALL_PS" | $SSH_CMD $REMOTE_HOST powershell -NoProfile -ExecutionPolicy Bypass -Command - \
+              || echo "$UPGRADE_PS" | $SSH_CMD $REMOTE_HOST powershell -NoProfile -ExecutionPolicy Bypass -Command -
+            echo "Pilot install done"
+          else
+            # Linux/macOS: 安装走 bash + installer.sh
+            INSTALL_SCRIPT='
+            cd ~/'"$REMOTE_DIR"'
+            PACKAGE_URL="file://$(pwd)/loongsuite-pilot.tar.gz"
+            echo "Installing from: $PACKAGE_URL"
+            bash installer.sh install --package-url "$PACKAGE_URL" || bash installer.sh upgrade --package-url "$PACKAGE_URL"
+            sleep 2
+            loongsuite-pilot status || true
+            echo "Pilot install done"
+            '
+            remote_exec "$INSTALL_SCRIPT"
+          fi
+
+          # ── Step 3: 依赖检查 & 确保 pilot 运行 ──
+          echo "[e2e-ci] Preflight check..."
+
+          PREFLIGHT_SCRIPT='
+          for p in \
+            "$HOME/AppData/Local/Programs/Python/Python312" \
+            "$HOME/AppData/Local/Programs/Python/Python311" \
+            "$HOME/AppData/Local/Programs/Python/Python310" \
+            "/usr/bin" "/usr/local/bin"; do
+            if [ -x "$p/python3" ] || [ -x "$p/python3.exe" ]; then
+              export PATH="$p:$p/Scripts:$PATH"
+              break
+            fi
+          done
+          echo "python3: $(python3 --version 2>&1 || echo MISSING)"
+          echo "node:    $(node --version 2>&1 || echo MISSING)"
+          echo "pilot:   $(loongsuite-pilot status 2>&1 | head -1 || echo MISSING)"
+
+          if ! loongsuite-pilot status >/dev/null 2>&1; then
+            echo "Starting pilot..."
+            loongsuite-pilot start >/dev/null 2>&1 || true
+            sleep 3
+            loongsuite-pilot status >/dev/null 2>&1 || { echo "FAIL: pilot not running"; exit 1; }
+          fi
+          echo "Preflight OK"
+          '
+          remote_exec "$PREFLIGHT_SCRIPT"
+
+          # ── Step 4: 执行 E2E 测试 ──
+          echo "[e2e-ci] Running E2E tests..."
+
+          ENV_EXPORTS=""
+          if [ "$PLATFORM" = "windows" ]; then
+            ENV_EXPORTS='
+          for p in \
+            "$HOME/AppData/Local/Programs/Python/Python312" \
+            "$HOME/AppData/Local/Programs/Python/Python311" \
+            "$HOME/AppData/Local/Programs/Python/Python310"; do
+            if [ -x "$p/python3" ] || [ -x "$p/python3.exe" ]; then
+              export PATH="$p:$p/Scripts:$PATH"
+              break
+            fi
+          done
+          export QODER_IDE_CDP=true
+          export CURSOR_CDP=true
+          '
+          fi
+
+          TEST_SCRIPT="
+          $ENV_EXPORTS
+          cd ~/$REMOTE_DIR
+          bash run-ide-e2e.sh
+          "
+
+          remote_exec "$TEST_SCRIPT"
+          echo "[e2e-ci] Remote E2E PASSED"
