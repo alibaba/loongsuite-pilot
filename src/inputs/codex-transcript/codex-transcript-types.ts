@@ -40,6 +40,7 @@ export interface CodexTranscriptUsage {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  cacheCreationTokens: number;
   reasoningOutputTokens?: number;
   totalTokens: number;
 }

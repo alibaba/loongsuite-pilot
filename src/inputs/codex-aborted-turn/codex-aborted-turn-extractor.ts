@@ -280,6 +280,7 @@ function extractLastTokenUsage(value: unknown): CodexTokenUsage | undefined {
   const inputTokens = numberValue(raw.input_tokens);
   const outputTokens = numberValue(raw.output_tokens);
   const cachedInputTokens = numberValue(raw.cached_input_tokens);
+  const cacheCreationTokens = numberValue(raw.cache_creation_input_tokens) ?? 0;
   const totalTokens = numberValue(raw.total_tokens);
   if (inputTokens === undefined || outputTokens === undefined) return undefined;
   const reasoningOutputTokens = numberValue(raw.reasoning_output_tokens);
@@ -287,6 +288,7 @@ function extractLastTokenUsage(value: unknown): CodexTokenUsage | undefined {
     inputTokens,
     outputTokens,
     cachedInputTokens: cachedInputTokens ?? 0,
+    cacheCreationTokens,
     totalTokens: totalTokens && totalTokens > 0 ? totalTokens : inputTokens + outputTokens,
     ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
   };
@@ -301,6 +303,7 @@ function sameUsage(left: CodexTokenUsage | undefined, right: CodexTokenUsage): b
     && left.inputTokens === right.inputTokens
     && left.outputTokens === right.outputTokens
     && left.cachedInputTokens === right.cachedInputTokens
+    && left.cacheCreationTokens === right.cacheCreationTokens
     && left.reasoningOutputTokens === right.reasoningOutputTokens
     && left.totalTokens === right.totalTokens;
 }

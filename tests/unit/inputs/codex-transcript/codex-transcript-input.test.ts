@@ -136,6 +136,7 @@ describe('CodexTranscriptInput', () => {
       'gen_ai.usage.input_tokens': 0,
       'gen_ai.usage.output_tokens': 0,
       'gen_ai.usage.cache_read.input_tokens': 0,
+      'gen_ai.usage.cache_creation.input_tokens': 0,
       'gen_ai.usage.total_tokens': 0,
     });
   });
