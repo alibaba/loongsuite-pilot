@@ -444,12 +444,14 @@ function extractLastTokenUsage(value: unknown): CodexTranscriptUsage | undefined
   const outputTokens = numberValue(raw.output_tokens);
   if (inputTokens === undefined || outputTokens === undefined) return undefined;
   const cachedInputTokens = numberValue(raw.cached_input_tokens) ?? 0;
+  const cacheCreationTokens = numberValue(raw.cache_creation_input_tokens) ?? 0;
   const totalTokens = numberValue(raw.total_tokens);
   const reasoningOutputTokens = numberValue(raw.reasoning_output_tokens);
   return {
     inputTokens,
     outputTokens,
     cachedInputTokens,
+    cacheCreationTokens,
     totalTokens: totalTokens && totalTokens > 0 ? totalTokens : inputTokens + outputTokens,
     ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
   };
@@ -464,6 +466,7 @@ function sameUsage(left: CodexTranscriptUsage | undefined, right: CodexTranscrip
     && left.inputTokens === right.inputTokens
     && left.outputTokens === right.outputTokens
     && left.cachedInputTokens === right.cachedInputTokens
+    && left.cacheCreationTokens === right.cacheCreationTokens
     && left.reasoningOutputTokens === right.reasoningOutputTokens
     && left.totalTokens === right.totalTokens;
 }

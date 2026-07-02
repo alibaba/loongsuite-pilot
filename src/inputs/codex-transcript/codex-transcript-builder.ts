@@ -237,12 +237,14 @@ function usageFields(usage: CodexTranscriptUsage | undefined): Record<string, Js
     inputTokens: 0,
     outputTokens: 0,
     cachedInputTokens: 0,
+    cacheCreationTokens: 0,
     totalTokens: 0,
   };
   return {
     'gen_ai.usage.input_tokens': resolved.inputTokens,
     'gen_ai.usage.output_tokens': resolved.outputTokens,
     'gen_ai.usage.cache_read.input_tokens': resolved.cachedInputTokens,
+    'gen_ai.usage.cache_creation.input_tokens': resolved.cacheCreationTokens,
     'gen_ai.usage.total_tokens': resolved.totalTokens,
     ...(resolved.reasoningOutputTokens !== undefined
       ? { 'gen_ai.usage.reasoning_output_tokens': resolved.reasoningOutputTokens }
