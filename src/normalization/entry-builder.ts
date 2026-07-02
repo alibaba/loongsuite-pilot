@@ -241,12 +241,22 @@ const LEGACY_ALIAS_FIELDS = new Set([
   'extra',
 ]);
 
-export function serialiseLogEntry(entry: AgentActivityEntry): SerializedLogEntry {
+export interface SerialiseLogEntryOptions {
+  dropAgentScopedFields?: boolean;
+}
+
+const AGENT_SCOPED_FIELD_RE = /^agent\.[^.]+\..+$/;
+
+export function serialiseLogEntry(
+  entry: AgentActivityEntry,
+  options: SerialiseLogEntryOptions = {},
+): SerializedLogEntry {
   const out: SerializedLogEntry = {};
 
   for (const [key, value] of Object.entries(entry)) {
     if (value === undefined || value === null) continue;
     if (LEGACY_ALIAS_FIELDS.has(key)) continue;
+    if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) continue;
     out[key] = serializeValue(value);
   }
 

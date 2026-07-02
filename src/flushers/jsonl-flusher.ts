@@ -23,7 +23,7 @@ export class JsonlFlusher extends BaseFlusher {
   async send(entry: AgentActivityEntry): Promise<void> {
     const agentType = entry['gen_ai.agent.type'] ?? entry['agent.type'] ?? 'unknown';
     const filePath = this.resolveFilePath(agentType);
-    const serialized = serialiseLogEntry(entry);
+    const serialized = serialiseLogEntry(entry, { dropAgentScopedFields: true });
     const line = JSON.stringify(serialized);
     await appendLine(filePath, line);
   }
