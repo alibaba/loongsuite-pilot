@@ -56,7 +56,7 @@ Agent definitions live in `agents.d/`. You can add new agents without changing t
 
 Prerequisites:
 
-- Node.js 22 or later
+- Node.js 20 or later
 - `npm`
 - `curl` or `wget`
 - PowerShell 5.1 or later on Windows

@@ -6,7 +6,7 @@
 
 ## 前置要求
 
-- Node.js 22 或更高版本
+- Node.js 20 或更高版本
 - `npm`
 - `curl` 或 `wget`
 - Windows 下需要 PowerShell 5.1 或更高版本
