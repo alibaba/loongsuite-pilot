@@ -28,6 +28,7 @@ This directory contains user-facing guides for installing, configuring, operatin
 | [Agent Configuration](agents.md) | Select agents and control message content capture. |
 | [Data Masking](masking.md) | Mask API keys, access keys, private keys, and database URLs before output. |
 | [Output Event Schema](output-event-schema.md) | Review normalized event names, fields, provider values, and finish reasons. |
+| [Self-Check & Notifications](self-check.md) | Detect broken collection and alert via DingTalk when an agent is used but not collected. |
 
 ## Extend Pilot
 

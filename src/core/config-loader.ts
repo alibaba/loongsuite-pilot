@@ -10,8 +10,10 @@ import type {
   LogRetentionConfig,
   MaskConfig,
   MaskType,
+  NotificationConfig,
   OtlpTraceFlusherConfig,
   OtlpTraceRawConfig,
+  SelfCheckConfig,
   SlsEndpoint,
   SlsMode,
   StatusBarConfig,
@@ -150,6 +152,22 @@ export interface ConfigFile {
     policy?: 'auto' | 'latest' | 'off';
     hotfix_version?: number;
   };
+
+  selfCheck?: {
+    enabled?: boolean;
+    intervalMs?: number;
+    dataGapThresholdMs?: number;
+    neverCollectedGraceMs?: number;
+    cooldownMs?: number;
+  };
+
+  notifications?: {
+    dingtalk?: {
+      enabled?: boolean;
+      webhookUrl?: string;
+      secret?: string;
+    };
+  };
 }
 
 function env(key: string): string | undefined {
@@ -217,6 +235,8 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     hookWatchdog: buildHookWatchdogConfig(file),
     fileCollection: buildFileCollectionConfig(file),
     statusBar: buildStatusBarConfig(file),
+    selfCheck: buildSelfCheckConfig(file),
+    notifications: buildNotificationConfig(file),
   };
 }
 
@@ -400,6 +420,34 @@ function buildStatusBarConfig(file: ConfigFile | null): StatusBarConfig {
     enabled: envBool('LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP', fallback),
     metricsSummaryIntervalMs: 60_000,
     runtimeRefreshIntervalMs: 30_000,
+  };
+}
+
+function buildSelfCheckConfig(file: ConfigFile | null): SelfCheckConfig {
+  return {
+    enabled: envBool('LOONGSUITE_PILOT_SELFCHECK_ENABLED', file?.selfCheck?.enabled ?? false),
+    intervalMs: envInt('LOONGSUITE_PILOT_SELFCHECK_INTERVAL_MS', file?.selfCheck?.intervalMs ?? 600_000),
+    dataGapThresholdMs: envInt(
+      'LOONGSUITE_PILOT_SELFCHECK_DATA_GAP_THRESHOLD_MS',
+      file?.selfCheck?.dataGapThresholdMs ?? 14_400_000,
+    ),
+    neverCollectedGraceMs: envInt(
+      'LOONGSUITE_PILOT_SELFCHECK_NEVER_COLLECTED_GRACE_MS',
+      file?.selfCheck?.neverCollectedGraceMs ?? 14_400_000,
+    ),
+    cooldownMs: envInt('LOONGSUITE_PILOT_SELFCHECK_COOLDOWN_MS', file?.selfCheck?.cooldownMs ?? 86_400_000),
+  };
+}
+
+function buildNotificationConfig(file: ConfigFile | null): NotificationConfig {
+  const webhookUrl = env('LOONGSUITE_PILOT_DINGTALK_WEBHOOK_URL') ?? file?.notifications?.dingtalk?.webhookUrl ?? '';
+  const secret = env('LOONGSUITE_PILOT_DINGTALK_SECRET') ?? file?.notifications?.dingtalk?.secret ?? '';
+  return {
+    dingtalk: {
+      enabled: envBool('LOONGSUITE_PILOT_DINGTALK_ENABLED', file?.notifications?.dingtalk?.enabled ?? !!(webhookUrl && secret)),
+      webhookUrl,
+      secret,
+    },
   };
 }
 

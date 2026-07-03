@@ -128,7 +128,16 @@ export interface AgentDefinition {
   pluginProbe?: PluginProbeConfig;
   pluginInject?: PluginInjectConfig;
   input?: AgentInputConfig;
+  activityIndicator?: string | null;
+  versionSource?: AgentVersionSource | null;
 }
+
+export type AgentVersionSource =
+  | { type: 'jsonFile'; file: string; key: string }
+  | { type: 'jsonlTail'; file: string; key: string }
+  | { type: 'newestJsonFile'; dir: string; key: string }
+  | { type: 'newestSubdirFile'; dir: string; file: string; key: string }
+  | { type: 'command'; command: string };
 
 // ─── Deploy Result ───
 

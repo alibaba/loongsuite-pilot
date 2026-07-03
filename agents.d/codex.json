@@ -3,13 +3,23 @@
   "displayName": "Codex",
   "deployMode": "hook",
   "detection": {
-    "paths": ["~/.codex"],
+    "paths": [
+      "~/.codex"
+    ],
     "commands": []
   },
   "hook": {
     "settingsPath": "~/.codex/hooks.json",
-    "events": ["Stop"],
-    "retiredEvents": ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure"],
+    "events": [
+      "Stop"
+    ],
+    "retiredEvents": [
+      "SessionStart",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "PostToolUseFailure"
+    ],
     "hookCommand": "$PILOT_DATA/hooks/codex-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",
@@ -26,5 +36,11 @@
   },
   "input": {
     "type": "session-file-polling"
+  },
+  "activityIndicator": "~/.codex/session_index.jsonl",
+  "versionSource": {
+    "type": "jsonFile",
+    "file": "~/.codex/version.json",
+    "key": "latest_version"
   }
 }

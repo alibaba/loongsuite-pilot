@@ -3,19 +3,35 @@
   "displayName": "Qoder",
   "deployMode": "hook",
   "detection": {
-    "paths": ["~/.qoder"],
-    "commands": ["qoder"]
+    "paths": [
+      "~/.qoder"
+    ],
+    "commands": [
+      "qoder"
+    ]
   },
   "hook": {
     "settingsPath": "~/.qoder/settings.json",
-    "events": ["Stop"],
+    "events": [
+      "Stop"
+    ],
     "hookCommand": "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",
-    "replaceHookCommands": ["$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli", "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder"]
+    "replaceHookCommands": [
+      "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli",
+      "$PILOT_DATA/hooks/qoder-loongsuite-pilot-hook.sh qoder"
+    ]
   },
   "input": {
     "type": "hook-jsonl",
     "logDir": "$PILOT_DATA/logs/qoder/history"
+  },
+  "activityIndicator": "~/.qoder/audit/audit.jsonl",
+  "versionSource": {
+    "type": "newestSubdirFile",
+    "dir": "~/.qoder/logs/runs",
+    "file": "manifest.json",
+    "key": "cli_version"
   }
 }

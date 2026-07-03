@@ -3,8 +3,12 @@
   "displayName": "OpenCode",
   "deployMode": "plugin-inject",
   "detection": {
-    "paths": ["~/.config/opencode"],
-    "commands": ["opencode"]
+    "paths": [
+      "~/.config/opencode"
+    ],
+    "commands": [
+      "opencode"
+    ]
   },
   "pluginInject": {
     "configPaths": [
@@ -22,5 +26,10 @@
   "input": {
     "type": "hook-jsonl",
     "logDir": "$PILOT_DATA/logs/opencode"
+  },
+  "activityIndicator": "~/.local/share/opencode/opencode.db-wal",
+  "versionSource": {
+    "type": "command",
+    "command": "opencode --version"
   }
 }

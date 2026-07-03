@@ -17,7 +17,9 @@ export type AlarmType =
   | 'DEGRADED_STARTUP_ALARM'
   | 'UPDATER_NOT_RUNNING_ALARM'
   | 'BROKEN_VERSION_POINTER_ALARM'
-  | 'INVALID_NODE_BIN_ALARM';
+  | 'INVALID_NODE_BIN_ALARM'
+  | 'SELF_CHECK_DATA_GAP_ALARM'
+  | 'SELF_CHECK_NEVER_COLLECTED_ALARM';
 
 export interface AlarmContext {
   input_name?: string;

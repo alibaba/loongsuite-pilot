@@ -72,6 +72,8 @@ export interface AnalyticsConfig {
   fileCollection: FileCollectionToggle;
   statusBar: StatusBarConfig;
   autoUpdate?: AutoUpdateConfig;
+  selfCheck: SelfCheckConfig;
+  notifications: NotificationConfig;
 }
 
 export interface AgentConfig {
@@ -189,6 +191,24 @@ export interface StatusBarConfig {
   enabled: boolean;
   metricsSummaryIntervalMs: number;
   runtimeRefreshIntervalMs: number;
+}
+
+export interface SelfCheckConfig {
+  enabled: boolean;
+  intervalMs: number;
+  dataGapThresholdMs: number;
+  neverCollectedGraceMs: number;
+  cooldownMs: number;
+}
+
+export interface DingTalkConfig {
+  enabled: boolean;
+  webhookUrl: string;
+  secret: string;
+}
+
+export interface NotificationConfig {
+  dingtalk?: DingTalkConfig;
 }
 
 export type AgentControlMode = 'on' | 'off' | 'auto';
