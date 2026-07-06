@@ -135,6 +135,8 @@ http://127.0.0.1:8765/
 
 ## 卸载
 
+卸载会停止服务、删除已安装文件，并清理写入各 agent 配置中的接入内容（Claude Code、Codex、Cursor、Qoder、Qwen 等的 hook 条目，以及注入到 OpenCode 配置里的插件 spec）。加 `--purge`（Windows 为 `-Purge`）可一并删除本地数据目录。
+
 Linux/macOS 保留数据：
 
 ```bash

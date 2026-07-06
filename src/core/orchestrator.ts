@@ -42,7 +42,7 @@ import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-l
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
-import { HookWatchdog, type PluginCheckTarget } from './hook-watchdog.js';
+import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
 import { FileCollectionManager } from '../file-collection/file-collection-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
@@ -202,7 +202,10 @@ export class Orchestrator extends EventEmitter {
       ...HookWatchdog.defaultTargets(),
       ...this.buildHookWatchdogTargets(),
     ];
-    const interceptTargets = HookWatchdog.defaultInterceptTargets(this.dataDir);
+    const interceptTargets = [
+      ...HookWatchdog.defaultInterceptTargets(this.dataDir),
+      ...this.buildPluginInjectInterceptTargets(),
+    ];
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
     this.hookWatchdog.start();
 
@@ -369,6 +372,60 @@ export class Orchestrator extends EventEmitter {
     }
 
     return targets;
+  }
+
+  /**
+   * Self-heal targets for plugin-inject agents (e.g. opencode, qwen-code-cli).
+   *
+   * Unlike hook agents, these write a plugin spec into the agent's own config
+   * file (not a shared settings.json), so they use the intercept mechanism:
+   * an arbitrary check/repair pair rather than the hook-array-shaped
+   * PluginCheckTarget. The intercept runner also gives us cooldown + a daily
+   * repair cap, which bounds config rewrites (relevant because re-injecting
+   * into a JSONC config strips comments).
+   */
+  private buildPluginInjectInterceptTargets(): InterceptCheckTarget[] {
+    const defs = this.deploymentManager.getDefinitions();
+    const targets: InterceptCheckTarget[] = [];
+
+    for (const def of defs) {
+      if (def.deployMode !== 'plugin-inject' || !def.pluginInject) continue;
+
+      const pluginFile = this.resolvePluginSpecPath(def.pluginInject.pluginSpec);
+
+      targets.push({
+        id: `plugin-inject:${def.id}`,
+        precondition: async () => {
+          // Only self-heal when the plugin asset is actually deployed AND the
+          // agent is present. Otherwise repair would inject a spec pointing at
+          // a missing file, or fail repeatedly when no config file exists.
+          if (pluginFile && !(await fileExists(pluginFile))) return false;
+          return detectAgent(def.detection);
+        },
+        check: async () => {
+          // Healthy == spec still present in the agent's config file.
+          return !(await this.deploymentManager.needsRedeploy(def));
+        },
+        repair: async () => {
+          const result = await this.deploymentManager.deploySingle(def);
+          if (!result.success) {
+            throw new Error(result.error ?? `re-inject failed for ${def.id}`);
+          }
+        },
+      });
+    }
+
+    return targets;
+  }
+
+  /**
+   * Resolve a plugin spec to a local file path for existence checks.
+   * Returns null for non-file specs (e.g. npm package names), which skips the
+   * plugin-file precondition gate.
+   */
+  private resolvePluginSpecPath(spec: string): string | null {
+    const resolved = spec.replace(/\$PILOT_DATA/g, this.dataDir);
+    return resolved.startsWith('file://') ? resolved.slice('file://'.length) : null;
   }
 
   private async buildFlusher(): Promise<BaseFlusher> {
