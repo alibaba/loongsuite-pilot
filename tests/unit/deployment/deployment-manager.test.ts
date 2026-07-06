@@ -192,6 +192,61 @@ describe('DeploymentManager', () => {
     });
   });
 
+  describe('needsRedeploy (plugin-inject self-heal check)', () => {
+    function makePluginInjectDef(configPath: string): AgentDefinition {
+      return {
+        id: 'opencode-test',
+        displayName: 'OpenCode Test',
+        deployMode: 'plugin-inject',
+        detection: { paths: [], commands: [] },
+        pluginInject: {
+          configPaths: [configPath],
+          pluginSpec: 'file://$PILOT_DATA/plugins/opencode/plugin.mjs',
+          pluginId: 'loongsuite-pilot-opencode',
+        },
+      };
+    }
+
+    it('returns false when the plugin spec is present in the config', async () => {
+      const configPath = path.join(tmpDir, 'opencode.json');
+      const resolvedSpec = `file://${path.join(dataDir, 'plugins', 'opencode', 'plugin.mjs')}`;
+      await fs.writeFile(configPath, JSON.stringify({ plugin: [resolvedSpec] }));
+
+      const mgr = makeManager();
+      const def = makePluginInjectDef(configPath);
+
+      expect(await mgr.needsRedeploy(def)).toBe(false);
+    });
+
+    it('returns true when the plugin spec was removed from the config', async () => {
+      const configPath = path.join(tmpDir, 'opencode.json');
+      await fs.writeFile(configPath, JSON.stringify({ plugin: ['some-other-plugin'] }));
+
+      const mgr = makeManager();
+      const def = makePluginInjectDef(configPath);
+
+      expect(await mgr.needsRedeploy(def)).toBe(true);
+    });
+
+    it('returns true when no config file exists', async () => {
+      const mgr = makeManager();
+      const def = makePluginInjectDef(path.join(tmpDir, 'does-not-exist.json'));
+
+      expect(await mgr.needsRedeploy(def)).toBe(true);
+    });
+
+    it('matches by pluginId even when the exact spec string differs', async () => {
+      const configPath = path.join(tmpDir, 'opencode.json');
+      // Entry contains the pluginId but not the exact resolved file path.
+      await fs.writeFile(configPath, JSON.stringify({ plugin: ['loongsuite-pilot-opencode@1.2.3'] }));
+
+      const mgr = makeManager();
+      const def = makePluginInjectDef(configPath);
+
+      expect(await mgr.needsRedeploy(def)).toBe(false);
+    });
+  });
+
   describe('getDefinitions', () => {
     it('returns loaded definitions after deployAll', async () => {
       const def: AgentDefinition = {

@@ -885,9 +885,12 @@ function Remove-HookConfigs {
     $configs = @(
         (Join-Path $env:USERPROFILE ".cursor\hooks.json"),
         (Join-Path $env:USERPROFILE ".qoder\settings.json"),
+        (Join-Path $env:USERPROFILE ".qoder-cn\settings.json"),
         (Join-Path $env:USERPROFILE ".qoderwork\settings.json"),
+        (Join-Path $env:USERPROFILE ".qoderworkcn\settings.json"),
         (Join-Path $env:USERPROFILE ".claude\settings.json"),
-        (Join-Path $env:USERPROFILE ".codex\hooks.json")
+        (Join-Path $env:USERPROFILE ".codex\hooks.json"),
+        (Join-Path $env:USERPROFILE ".qwen\settings.json")
     )
 
     foreach ($cfg in $configs) {
@@ -924,6 +927,62 @@ try {
             Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short"
         } catch {
             Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)"
+        }
+    }
+}
+
+# ============================================================
+# Remove plugin-inject specs (OpenCode)
+# ============================================================
+# OpenCode uses deployMode "plugin-inject": a spec is written into its own
+# config file's plugin array, not a shared settings.json. Remove-HookConfigs
+# does not cover it, so clean it here to avoid a dangling spec.
+function Remove-OpenCodePlugin {
+    $configs = @(
+        (Join-Path $env:USERPROFILE ".config\opencode\opencode.jsonc"),
+        (Join-Path $env:USERPROFILE ".config\opencode\opencode.json"),
+        (Join-Path $env:USERPROFILE ".config\opencode\config.json")
+    )
+
+    foreach ($cfg in $configs) {
+        if (-not (Test-Path $cfg)) { continue }
+        $short = $cfg -replace [regex]::Escape($env:USERPROFILE), "~"
+
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        }
+
+        $result = & $script:NODE_BIN -e @'
+const fs = require('fs');
+const f = process.argv[1];
+const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-opencode') || s.includes('plugins/opencode/plugin.mjs'));
+const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
+const stripJsonc = src => src
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^\s*\/\/.*$/gm, '')
+  .replace(/[ \t]+\/\/.*$/gm, '');
+try {
+  const raw = fs.readFileSync(f, 'utf-8');
+  let data, hadComments = false;
+  try { data = JSON.parse(raw); }
+  catch { data = JSON.parse(stripJsonc(raw)); hadComments = true; }
+  const key = Array.isArray(data.plugins) ? 'plugins' : (Array.isArray(data.plugin) ? 'plugin' : null);
+  if (!key) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data[key].length;
+  data[key] = data[key].filter(e => !isOurs(entryStr(e)));
+  if (data[key].length === before) { process.stdout.write('nochange'); process.exit(0); }
+  if (hadComments) fs.writeFileSync(f + '.bak', raw, 'utf-8');
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write(hadComments ? 'cleaned-bak' : 'cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+'@ $cfg 2>$null
+
+        switch ($result) {
+            "cleaned"     { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }
+            "cleaned-bak" { Msg "    ✅ 已清理: $short (含注释,原文件备份为 $short.bak)" "    ✅ Cleaned: $short (had comments, original backed up to $short.bak)" }
+            "nochange"    { }
+            default       { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
         }
     }
 }
@@ -1161,6 +1220,10 @@ function Cmd-Uninstall {
 
     Msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
     Remove-OtelPlugin
+    Write-Host ""
+
+    Msg "==> 清理 OpenCode 插件配置..." "==> Cleaning up OpenCode plugin config..."
+    Remove-OpenCodePlugin
     Write-Host ""
 
     if ($Purge) {
