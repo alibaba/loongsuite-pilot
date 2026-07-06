@@ -185,9 +185,9 @@ We are looking forward to your feedback and suggestions. Scan the QR code below 
 
 - [LoongCollector](https://github.com/alibaba/loongcollector) - Universal node agent for log, metric and eBPF-based collection
 - [LoongSuite JS Plugins](https://github.com/alibaba/loongsuite-js-plugins) - OpenTelemetry instrumentation plugins for JS-based AI coding agents
-- [LoongSuite Python Agent](https://github.com/alibaba/loongsuite-python-agent) - Process agent for Python applications
-- [LoongSuite Go Agent](https://github.com/alibaba/loongsuite-go-agent) - Process agent for Golang with compile-time instrumentation
-- [LoongSuite Java Agent](https://github.com/alibaba/loongsuite-java-agent) - Process agent for Java applications
+- [LoongSuite Python](https://github.com/alibaba/loongsuite-python) - Process agent for Python applications
+- [LoongSuite Go](https://github.com/alibaba/loongsuite-go) - Process agent for Golang with compile-time instrumentation
+- [LoongSuite Java](https://github.com/alibaba/loongsuite-java) - Process agent for Java applications
 
 ## License
 
