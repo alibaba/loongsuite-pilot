@@ -124,6 +124,11 @@ export interface ConfigFile {
     debug?: boolean;
     captureMessageContent?: boolean;
     turnIdleTimeoutMs?: number;
+    turnFlushDebounceMs?: number;
+    perAgentFlusherConfig?: Record<string, {
+      turnIdleTimeoutMs?: number;
+      turnFlushDebounceMs?: number;
+    }>;
     resourceAttributeKeys?: string[];
   };
 
@@ -461,6 +466,8 @@ function buildOtlpTraceConfigNew(
     captureMessageContent,
     debug: otlp?.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
+    turnFlushDebounceMs: otlp?.turnFlushDebounceMs ?? 0,
+    perAgentFlusherConfig: otlp?.perAgentFlusherConfig,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     maxExportBatchBytes: otlp?.maxExportBatchBytes,
     compression: otlp?.compression,
@@ -489,6 +496,7 @@ function buildOtlpTraceConfigLegacy(config: AnalyticsConfig): OtlpTraceFlusherCo
     captureMessageContent,
     debug: cms.debug ?? false,
     turnIdleTimeoutMs: 0,
+    turnFlushDebounceMs: 0,
     resourceAttributeKeys: resolveResourceAttributeKeys(config.otlpTrace),
     maxExportBatchBytes: undefined,
     compression: undefined,

@@ -401,7 +401,15 @@ export class Orchestrator extends EventEmitter {
     if (otlpTraceCfg?.enabled) {
       try {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
-        const r = new OtlpTraceFlusher({ ...otlpTraceCfg, dataDir: this.dataDir });
+        const perAgentFlusherConfig = await this.buildPerAgentFlusherConfig();
+        const r = new OtlpTraceFlusher({
+          ...otlpTraceCfg,
+          dataDir: this.dataDir,
+          perAgentFlusherConfig: {
+            ...otlpTraceCfg.perAgentFlusherConfig,
+            ...perAgentFlusherConfig,
+          },
+        });
         flushers.push(r);
       } catch (err) {
         logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
@@ -421,6 +429,43 @@ export class Orchestrator extends EventEmitter {
     }
 
     return flushers.length === 1 ? flushers[0] : new MultiFlusher(flushers);
+  }
+
+  /**
+   * Scan agents.d/*.json (builtin + local) and build a per-agentType flusher
+   * override map from each agent's `flusher` field (plan 2.1 + 2.2). Failures
+   * are non-blocking — the flusher falls back to global cfg for any agent
+   * not represented here.
+   */
+  private async buildPerAgentFlusherConfig(): Promise<Record<string, { turnIdleTimeoutMs?: number; turnFlushDebounceMs?: number }>> {
+    const out: Record<string, { turnIdleTimeoutMs?: number; turnFlushDebounceMs?: number }> = {};
+    try {
+      const pilotDir = this.resolvePilotDir();
+      const { AgentDefLoader } = await import('../deployment/agent-def-loader.js');
+      const loader = new AgentDefLoader({
+        builtinDir: path.join(pilotDir, 'agents.d'),
+        localDir: path.join(this.dataDir, 'agents.d.local'),
+        pilotDir,
+        dataDir: this.dataDir,
+      });
+      const defs = await loader.load();
+      for (const def of defs) {
+        if (!def.flusher) continue;
+        const entry: { turnIdleTimeoutMs?: number; turnFlushDebounceMs?: number } = {};
+        if (typeof def.flusher.turnIdleTimeoutMs === 'number') {
+          entry.turnIdleTimeoutMs = def.flusher.turnIdleTimeoutMs;
+        }
+        if (typeof def.flusher.turnFlushDebounceMs === 'number') {
+          entry.turnFlushDebounceMs = def.flusher.turnFlushDebounceMs;
+        }
+        if (Object.keys(entry).length > 0) {
+          out[def.id] = entry;
+        }
+      }
+    } catch (err) {
+      logger.warn('failed to load per-agent flusher config from agents.d', { error: String(err) });
+    }
+    return out;
   }
 
   /**

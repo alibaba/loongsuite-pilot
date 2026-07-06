@@ -21,7 +21,10 @@
  *     Stop 给最终响应,无法支撑 per-LLM 配对。这部分由 zcode-rollout input
  *     从 ~/.zcode/cli/rollout/model-io-sess_*.jsonl 补全(每条记录含完整
  *     request body + response text/toolCalls/usage + startedAt/completedAt)。
- *     Stop 事件改为发 "other" + end_turn finish_reason 触发 turn flush。
+ *     Stop 事件只发 "other" 标记 turn 元数据(agent.event.name=stop,
+ *     tool.call.count),不带 terminal finish_reason —— terminal signal 由
+ *     rollout input 的最后一条 llm.response(finish_reason=stop)提供,
+ *     turnIdleTimeoutMs 作为兜底。
  *   - traceId/turnId 来自 ZCode hook payload(字段 traceId/turnId),需去连字符
  *     转 32-hex(W3C);非 32-hex 会被 OTLP 转换器拒并重新分配 traceId。
  *   - spanId 自生成 16-hex(architect 约束:ZCode spanId 是 8-4-2 截断 UUID,非 W3C 16-hex)。
@@ -285,10 +288,19 @@ function cmdStop() {
   // zcode-rollout input 从 ~/.zcode/cli/rollout/model-io-sess_*.jsonl 补全，
   // 这里再发 llm.response 会与 rollout 的 per-LLM response 争抢 pairing，造成
   // orphan llm.request（duration=0ms + messages 缺失）。
-  // 改为发一个 "other" 事件标记 turn 结束，并带 end_turn finish_reason 触发
-  // OTLP flusher 的 Signal A 统一 flush（hasTerminalFinishReason 不限定 event.name，
-  // 但只识别 gen_ai.response.finish_reasons 前缀键，response.finish_reasons
-  // 会在 canonical-hook-record 归一化时被丢掉）。
+  //
+  // 也不带 end_turn finish_reason：Stop hook 在 ZCode 进程退出时立刻触发，但
+  // rollout 记录要等 zcode-rollout input 下一轮 poll（默认 30s）才能读到。
+  // 若 Stop 带 terminal finish_reason，会触发 OTLP flusher 的 Signal A 立即
+  // flush（sendBatch 末尾的 flushCompleted 不经 debounce），把只含 hook 工具
+  // 事件的 buffer flush 出去；之后 rollout 的 3 对 llm.request/llm.response
+  // 到达时被 late-arrival guard 当成 "already-flushed turn" 全部丢弃，造成
+  // trace 里只剩 1 个 LLM span（实际应 3 个）。
+  //
+  // 改为由 rollout input 的最后一条 llm.response（finish_reason=stop）作为
+  // 真正的 terminal signal；turnIdleTimeoutMs (120s) 作为 rollout 缺失时的
+  // 兜底 fallback。Stop 这里只发 "other" 标记 turn 元数据（agent.event.name
+  // = stop, tool.call.count）供下游分析使用。
   const record = {
     ...baseFields(event, userId, runtimeConfig),
     time_unix_nano: isoToUnixNanos(event.timestamp),
@@ -296,7 +308,6 @@ function cmdStop() {
     'event.name': 'other',
     'gen_ai.agent.event.name': 'stop',
     'gen_ai.agent.event.source': event.source || 'stop',
-    'gen_ai.response.finish_reasons': ['end_turn'],
     'gen_ai.tool.call.count': event.toolCallCount ?? 0,
   };
   const cleaned = applyHookContentPolicy(sanitizeObject(record) || record, runtimeConfig);

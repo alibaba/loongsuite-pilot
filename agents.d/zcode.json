@@ -28,5 +28,9 @@
   "input": {
     "type": "hook-jsonl",
     "logDir": "$PILOT_DATA/logs/zcode"
+  },
+  "flusher": {
+    "turnIdleTimeoutMs": 120000,
+    "turnFlushDebounceMs": 200
   }
 }

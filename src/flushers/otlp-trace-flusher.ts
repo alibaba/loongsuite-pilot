@@ -15,7 +15,7 @@ import {
 } from '@loongsuite/otel-util-genai';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 
-import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
+import type { AgentActivityEntry, OtlpTraceFlusherConfig, PerAgentFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
@@ -29,6 +29,118 @@ const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
 const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled']);
+// Lazy-loaded from assets/hooks/agent-event-normalizer.mjs (ESM). The resolver
+// backfills gen_ai.step.id on hook tool events after the matching rollout
+// llm.response arrives — see plan 1.2.
+//
+// To keep the flusher testable in vitest (where dynamic import of relative
+// .mjs paths from compiled TS is unreliable) AND to avoid a second
+// implementation, the canonical ZcodeStepResolver lives in
+// assets/hooks/agent-event-normalizer.mjs and is exercised by the .mjs test
+// suite. The flusher uses a thin inline wrapper below that mirrors the same
+// logic — kept in sync via agent-event-normalizer.test.mjs (covers the
+// canonical impl) and this flusher's debounce.test.ts (covers integration).
+
+const ZCODE_AGENT_TYPE = 'zcode';
+
+/**
+ * Extract tool_call.id values from a record's gen_ai.output.messages parts.
+ * Rollout llm.response carries one assistant message whose parts include
+ * {type:'tool_call', id, name, input} blocks.
+ */
+function extractToolCallIds(record: Record<string, any>): string[] {
+  const out: string[] = [];
+  const messages = record['gen_ai.output.messages'];
+  if (!Array.isArray(messages)) return out;
+  for (const msg of messages) {
+    const parts = (msg as Record<string, any>)?.parts;
+    if (!Array.isArray(parts)) continue;
+    for (const p of parts) {
+      const id = (p as Record<string, any>)?.id
+        ?? (p as Record<string, any>)?.tool_call_id
+        ?? (p as Record<string, any>)?.toolCallId;
+      if (typeof id === 'string' && id.length > 0) out.push(id);
+    }
+  }
+  return out;
+}
+
+/**
+ * ZcodeStepResolver — lazy step.id resolver for ZCode hook tool events.
+ * Mirrors assets/hooks/agent-event-normalizer.mjs ZcodeStepResolver; kept
+ * in sync. See plan 1.2 for the lazy-resolution flow diagram.
+ */
+class ZcodeStepResolver {
+  private stepIdByCallId = new Map<string, string>();
+  private pendingToolByCallId = new Map<string, { record: Record<string, any>; turnId: string }[]>();
+  private pendingByTurn = new Map<string, Set<string>>();
+
+  resolve(record: Record<string, any>): Record<string, any> {
+    if (!record || typeof record !== 'object') return record;
+    const agentType = record['gen_ai.agent.type'];
+    if (agentType !== ZCODE_AGENT_TYPE) return record;
+
+    const eventName = record['event.name'];
+    const turnId = record['gen_ai.turn.id'] || '';
+    const callId = record['gen_ai.tool.call.id'] || record['gen_ai.tool.call.exec.id'];
+    const stepId = record['gen_ai.step.id'];
+
+    if (eventName === 'llm.response' && stepId) {
+      const callIds = extractToolCallIds(record);
+      for (const id of callIds) {
+        this.stepIdByCallId.set(id, stepId);
+        const pending = this.pendingToolByCallId.get(id);
+        if (pending) {
+          for (const { record: pendingRec } of pending) {
+            if (!pendingRec['gen_ai.step.id']) pendingRec['gen_ai.step.id'] = stepId;
+          }
+          this.pendingToolByCallId.delete(id);
+        }
+      }
+      return record;
+    }
+
+    if ((eventName === 'tool.call' || eventName === 'tool.result') && !stepId && callId) {
+      const resolved = this.stepIdByCallId.get(callId);
+      if (resolved) {
+        record['gen_ai.step.id'] = resolved;
+      } else {
+        const pendingList = this.pendingToolByCallId.get(callId) ?? [];
+        pendingList.push({ record, turnId });
+        this.pendingToolByCallId.set(callId, pendingList);
+        if (turnId) {
+          const set = this.pendingByTurn.get(turnId) ?? new Set();
+          set.add(callId);
+          this.pendingByTurn.set(turnId, set);
+        }
+      }
+    }
+    return record;
+  }
+
+  flushTurn(turnId: string): string[] {
+    if (!turnId) return [];
+    const callIds = this.pendingByTurn.get(turnId);
+    if (!callIds) return [];
+    const unresolved: string[] = [];
+    for (const id of callIds) {
+      const pendingList = this.pendingToolByCallId.get(id);
+      if (!pendingList) continue;
+      const resolved = this.stepIdByCallId.get(id);
+      if (resolved) {
+        for (const { record } of pendingList) {
+          if (!record['gen_ai.step.id']) record['gen_ai.step.id'] = resolved;
+        }
+        this.pendingToolByCallId.delete(id);
+      } else {
+        unresolved.push(id);
+        this.pendingToolByCallId.delete(id);
+      }
+    }
+    this.pendingByTurn.delete(turnId);
+    return unresolved;
+  }
+}
 
 interface TurnBuffer {
   key: string;
@@ -111,6 +223,31 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private flushedTurnKeys = new Set<string>();
   private readonly convertLocks = new Map<string, Promise<void>>();
 
+  /**
+   * Per-agentType flusher config overrides (plan 2.1 + 2.2). Keyed by
+   * normalized agentType. Falls back to global cfg for missing fields.
+   * Built once at construction from cfg.perAgentFlusherConfig.
+   */
+  private readonly perAgentConfig: Map<string, PerAgentFlusherConfig>;
+
+  /**
+   * Debounce timers for turn flush (plan 2.2). When `turnFlushDebounceMs > 0`
+   * for an agentType, triggerFlush() schedules a setTimeout instead of
+   * flushing immediately; late-arriving entries for the same turn key
+   * appended during the debounce window are included in the single flush.
+   *
+   * Keyed by turn buffer key (same as turnBuffers/flushedTurnKeys).
+   */
+  private flushDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /**
+   * ZCode step.id lazy resolver instance. Lazily instantiated on first zcode
+   * entry. Single instance per flusher — state is process-scoped (in-memory),
+   * which is fine since both rollout llm.response and hook tool.call events
+   * for the same turn flow through this flusher.
+   */
+  private zcodeResolver: ZcodeStepResolver | undefined;
+
   // 批量模式标记：为 true 时 send() 中 Signal A（finish_reason=stop）只标记
   // completed 不立即 flush，由 sendBatch() 在所有 entries 处理完后统一 flush。
   // 解决的问题：Cursor subagent 的子 records 排在父 stop 之后，如果 Signal A
@@ -145,7 +282,56 @@ export class OtlpTraceFlusher extends BaseFlusher {
       this.idleTimer.unref();
     }
 
+    // Build per-agentType override map. Lookup key is normalized agentType
+    // (e.g. 'zcode'); missing fields fall back to global cfg inside the
+    // accessors (getTurnIdleTimeoutMs / getTurnFlushDebounceMs).
+    this.perAgentConfig = new Map();
+    const perAgentRaw = cfg.perAgentFlusherConfig ?? {};
+    for (const [agentType, override] of Object.entries(perAgentRaw)) {
+      if (override && typeof override === 'object') {
+        this.perAgentConfig.set(normalizeAgentType(agentType), override);
+      }
+    }
+    // Per-agent idle timeout may be set even when global is 0; spin up the
+    // ticker in that case too.
+    const hasPerAgentIdle = [...this.perAgentConfig.values()].some(
+      (o) => typeof o.turnIdleTimeoutMs === 'number' && (o.turnIdleTimeoutMs ?? 0) > 0,
+    );
+    if (hasPerAgentIdle && !this.idleTimer) {
+      this.idleTimer = setInterval(() => this.tickIdleTimeout(), 1000);
+      this.idleTimer.unref();
+    }
+
     logger.info(`OTLP trace flusher initialized → ${this.resolvedEndpointUrl}`);
+  }
+
+  /** Per-agent idle timeout, falling back to global cfg. */
+  private getTurnIdleTimeoutMs(agentType: string): number {
+    const override = this.perAgentConfig.get(agentType);
+    if (override && typeof override.turnIdleTimeoutMs === 'number') {
+      return override.turnIdleTimeoutMs;
+    }
+    return this.cfg.turnIdleTimeoutMs ?? 0;
+  }
+
+  /** Per-agent debounce, falling back to global cfg (default 0 = no debounce). */
+  private getTurnFlushDebounceMs(agentType: string): number {
+    const override = this.perAgentConfig.get(agentType);
+    if (override && typeof override.turnFlushDebounceMs === 'number') {
+      return override.turnFlushDebounceMs;
+    }
+    return this.cfg.turnFlushDebounceMs ?? 0;
+  }
+
+  /**
+   * Instantiate the ZCode step.id resolver on first zcode entry. The
+   * resolver is process-scoped (in-memory state). Non-zcode agents skip.
+   */
+  private ensureZcodeResolver(): ZcodeStepResolver {
+    if (!this.zcodeResolver) {
+      this.zcodeResolver = new ZcodeStepResolver();
+    }
+    return this.zcodeResolver;
   }
 
   // --- Public API (BaseFlusher) ---
@@ -156,13 +342,30 @@ export class OtlpTraceFlusher extends BaseFlusher {
       (entry['gen_ai.agent.type'] as string) ?? '',
     );
 
+    // ZCode step.id lazy backfill (plan 1.2): for zcode agent records only,
+    // run the entry through the resolver. Rollout llm.response populates
+    // call_id→step.id; hook tool.call/tool.result get backfilled. Late-
+    // arriving tool events that miss the rollout window stay pending until
+    // flushTurn() is called for the turn.
+    if (agentType === ZCODE_AGENT_TYPE) {
+      const resolver = this.ensureZcodeResolver();
+      resolver.resolve(entry);
+    }
+
     if (source === 'ephemeral') {
       await this.convertAndExport(agentType, [entry]);
       return;
     }
 
-    // Drop late arrivals for already-flushed turns
-    if (this.flushedTurnKeys.has(key)) {
+    // Late-arrival handling (plan 2.2): when debounce is active, a key that
+    // is in flushedTurnKeys BUT still has a live debounce timer means the
+    // turn hasn't actually flushed yet — we still accept the entry. The
+    // existing timer will fire and pick up the re-created buffer (the
+    // original buf was removed from turnBuffers in triggerFlush; send()'s
+    // append path below creates a fresh one to hold the late entry). Once
+    // the timer fires and runs the flush, the debounce timer is cleared and
+    // subsequent arrivals are dropped.
+    if (this.flushedTurnKeys.has(key) && !this.flushDebounceTimers.has(key)) {
       logger.debug(`Dropping late entry for already-flushed turn ${key}`);
       return;
     }
@@ -218,6 +421,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   async flush(): Promise<void> {
+    // Clear any pending debounce timers so their callbacks don't fire after
+    // the in-flight set has been awaited; their buffers are flushed below.
+    for (const timer of this.flushDebounceTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.flushDebounceTimers.clear();
+
     for (const buf of this.turnBuffers.values()) {
       buf.completed = true;
     }
@@ -234,6 +444,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
       clearInterval(this.idleTimer);
       this.idleTimer = undefined;
     }
+    for (const timer of this.flushDebounceTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.flushDebounceTimers.clear();
 
     await this.flush();
 
@@ -290,8 +504,49 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (markFlushed) {
       this.flushedTurnKeys.add(buf.key);
     }
+    const debounceMs = this.getTurnFlushDebounceMs(buf.agentType);
+    if (debounceMs > 0) {
+      // Debounce path (plan 2.2): keep buf in turnBuffers so late-arriving
+      // entries (passing the late-arrival guard in send()) append to its
+      // records array — they get included in the single flush when the
+      // timer fires. The buf is removed only when the timer actually runs.
+      const existing = this.flushDebounceTimers.get(buf.key);
+      if (existing) clearTimeout(existing);
+      const timer = setTimeout(() => {
+        this.flushDebounceTimers.delete(buf.key);
+        const liveBuf = this.turnBuffers.get(buf.key);
+        if (!liveBuf) return;
+        this.turnBuffers.delete(buf.key);
+        this.invokeFlushSingleTurn(liveBuf);
+      }, debounceMs);
+      timer.unref?.();
+      this.flushDebounceTimers.set(buf.key, timer);
+      return;
+    }
     this.turnBuffers.delete(buf.key);
-    const p = this.flushSingleTurn(buf).catch((err) => {
+    this.invokeFlushSingleTurn(buf);
+  }
+
+  /**
+   * Wraps flushSingleTurn with the resolver's flushTurn() pre-pass for zcode
+   * agent buffers. Non-zcode buffers skip the resolver. The in-flight
+   * promise is tracked for shutdown.
+   */
+  private invokeFlushSingleTurn(buf: TurnBuffer): void {
+    const p = (async () => {
+      if (buf.agentType === ZCODE_AGENT_TYPE) {
+        const resolver = this.ensureZcodeResolver();
+        if (buf.keySource === 'turn_id') {
+          const unresolved = resolver.flushTurn(buf.keyValue);
+          if (unresolved.length > 0) {
+            logger.warn(`zcode step.id unresolved for ${unresolved.length} tool calls in turn ${buf.keyValue}`, {
+              callIds: unresolved.slice(0, 10).join(','),
+            });
+          }
+        }
+      }
+      await this.flushSingleTurn(buf);
+    })().catch((err) => {
       logger.error(`Failed to flush turn ${buf.key}`, { err: String(err) });
     }).finally(() => {
       this.inFlightExports.delete(p);
@@ -654,11 +909,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   private tickIdleTimeout(): void {
-    const timeout = this.cfg.turnIdleTimeoutMs ?? 0;
-    if (timeout <= 0) return;
     const now = Date.now();
     for (const [, buf] of this.turnBuffers) {
-      if (!buf.completed && now - buf.lastActivityMs > timeout) {
+      if (buf.completed) continue;
+      const timeout = this.getTurnIdleTimeoutMs(buf.agentType);
+      // `>=` so the first tick at exactly TTL boundary flushes (rather than
+      // requiring one extra polling tick — easier to reason about in tests
+      // and aligns with "no activity for N ms" semantics).
+      if (timeout > 0 && now - buf.lastActivityMs >= timeout) {
         buf.completed = true;
         this.triggerFlush(buf);
       }

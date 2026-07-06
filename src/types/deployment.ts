@@ -155,6 +155,16 @@ export interface AgentDefinition {
   pluginProbe?: PluginProbeConfig;
   pluginInject?: PluginInjectConfig;
   input?: AgentInputConfig;
+  /**
+   * Per-agent flusher overrides (plan 2.1 + 2.2). Currently consumed by
+   * OtlpTraceFlusher to apply per-agentType turnIdleTimeoutMs /
+   * turnFlushDebounceMs without affecting other agents. Plumbed via
+   * orchestrator → OtlpTraceFlusherConfig.perAgentFlusherConfig.
+   */
+  flusher?: {
+    turnIdleTimeoutMs?: number;
+    turnFlushDebounceMs?: number;
+  };
 }
 
 // ─── Deploy Result ───

@@ -226,4 +226,207 @@ describe('ZcodeRolloutInput', () => {
   test('checkAvailability 在目录不存在时返回 false', async () => {
     expect(await ZcodeRolloutInput.checkAvailability()).toBe(false);
   });
+
+  // ─── plan 1.1: step.id allocation ───────────────────────────────────────
+  // fixture 来源: 同上 fixture (model-io-sess_ffe3655e...jsonl, researcher CP1 真实抓取)
+  // 用于断言 step.id = `${turnId}:s${idx+1}` 派生规则 + retry + 跨turn + 跨重启 + inode 变更
+
+  test('step.id 由 turnId 派生: 4 records (mock 多 turn) → stepId 形如 turn_x:s1~:s2', async () => {
+    const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+
+    // fixture 有 2 records 同 turnId; 改第 2 条的 turnId 模拟跨 turn 切换
+    const rec1 = JSON.parse(lines[0]);
+    const rec2 = JSON.parse(lines[1]);
+    const rec1Turn = rec1.turnId; // turn_f01bfd26-...
+    const rec2Turn = 'turn_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    rec2.turnId = rec2Turn;
+    rec2.requestId = 'req-2-different';
+
+    const e1 = await (input as any).processSessionLine(rec1, '/tmp/x.jsonl');
+    const e2 = await (input as any).processSessionLine(rec2, '/tmp/x.jsonl');
+
+    const req1 = e1.find((e: any) => e['event.name'] === 'llm.request');
+    const resp1 = e1.find((e: any) => e['event.name'] === 'llm.response');
+    const req2 = e2.find((e: any) => e['event.name'] === 'llm.request');
+    const resp2 = e2.find((e: any) => e['event.name'] === 'llm.response');
+
+    expect(req1['gen_ai.step.id']).toBe(`${rec1Turn}:s1`);
+    expect(resp1['gen_ai.step.id']).toBe(`${rec1Turn}:s1`);
+    expect(req2['gen_ai.step.id']).toBe(`${rec2Turn}:s1`);
+    expect(resp2['gen_ai.step.id']).toBe(`${rec2Turn}:s1`);
+  });
+
+  test('同 turnId + 同 requestId (retry) 共享 step.id', async () => {
+    const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+
+    // 模拟 attempt>1 retry: 同 turnId, 同 requestId, 不同 attempt
+    const rec1 = JSON.parse(lines[0]);
+    const rec2 = JSON.parse(lines[1]);
+    rec2.turnId = rec1.turnId;
+    rec2.requestId = rec1.requestId; // retry: same requestId → same step.id
+    rec2.attempt = 2;
+
+    const e1 = await (input as any).processSessionLine(rec1, '/tmp/x.jsonl');
+    const e2 = await (input as any).processSessionLine(rec2, '/tmp/x.jsonl');
+
+    const step1 = e1[0]['gen_ai.step.id'];
+    const step2 = e2[0]['gen_ai.step.id'];
+    expect(step1).toBe(`${rec1.turnId}:s1`);
+    expect(step2).toBe(`${rec1.turnId}:s1`); // retry 共享
+  });
+
+  test('同 turn 不同 requestId → 递增 stepIdx', async () => {
+    const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+
+    const rec1 = JSON.parse(lines[0]);
+    const rec2 = JSON.parse(lines[1]);
+    rec2.turnId = rec1.turnId; // 同 turn
+    rec2.requestId = 'req-different-from-rec1';
+
+    const e1 = await (input as any).processSessionLine(rec1, '/tmp/x.jsonl');
+    const e2 = await (input as any).processSessionLine(rec2, '/tmp/x.jsonl');
+
+    expect(e1[0]['gen_ai.step.id']).toBe(`${rec1.turnId}:s1`);
+    expect(e2[0]['gen_ai.step.id']).toBe(`${rec1.turnId}:s2`);
+  });
+
+  test('跨重启: stateStore 持久化 extra.zcodeRollout.turnStepMap,新 record 复用序号', async () => {
+    const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const filePath = '/tmp/model-io-sess_restart.jsonl';
+    const input1 = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+    const rec1 = JSON.parse(lines[0]);
+    const e1 = await (input1 as any).processSessionLine(rec1, filePath);
+    const turnId = rec1.turnId;
+    expect(e1[0]['gen_ai.step.id']).toBe(`${turnId}:s1`);
+
+    // 模拟重启: 新 input 实例,但复用同一 stateStore (state.json 已落盘)
+    const stateKey = `zcode-rollout:${filePath}`;
+    const persisted = stateStore.get(stateKey);
+    expect(persisted.extra?.zcodeRollout?.turnStepMap?.[turnId]).toBeDefined();
+    expect(persisted.extra.zcodeRollout.turnStepMap[turnId].nextStepIdx).toBe(1);
+
+    const input2 = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+    const rec2 = JSON.parse(lines[1]);
+    rec2.turnId = turnId;
+    rec2.requestId = 'req-after-restart';
+    const e2 = await (input2 as any).processSessionLine(rec2, filePath);
+    // 复用持久化的 nextStepIdx=1 → s2
+    expect(e2[0]['gen_ai.step.id']).toBe(`${turnId}:s2`);
+  });
+
+  test('文件 inode 变更 (轮转) → extra.zcodeRollout 清空,新 turnId 从 s1 重新开始', async () => {
+    const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const sessDir = path.join(TMPDIR, 'rollout');
+    const target = path.join(sessDir, 'model-io-sess_rotate.jsonl');
+    fs.copyFileSync(ROLLOUT_FIXTURE, target);
+
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: sessDir });
+    await (input as any).onStart();
+
+    const stateKey = `zcode-rollout:${target}`;
+    // Pre-populate stale turnStepMap with old turnId + high nextStepIdx to
+    // simulate long-running state from a previous session. If inode-change
+    // clearing works, this stale entry is gone after collect().
+    stateStore.update(stateKey, {
+      extra: {
+        zcodeRollout: {
+          inode: 999999, // mismatched inode forces rotation detection
+          turnStepMap: {
+            'turn_old-stale': { requestSet: ['old-req'], nextStepIdx: 99 },
+          },
+        },
+      },
+    });
+
+    // Rotate: delete + rewrite with one record (new inode)
+    fs.unlinkSync(target);
+    fs.writeFileSync(target, lines[0] + '\n');
+
+    await input.collect();
+    const after = stateStore.get(stateKey);
+    expect(after.extra?.zcodeRollout?.inode).toBe(fs.statSync(target).ino);
+    // Stale turn's counter must be gone — only the new turnId present.
+    expect(after.extra.zcodeRollout.turnStepMap['turn_old-stale']).toBeUndefined();
+    // New record allocated s1 (not continuing stale counter of 99+1=100).
+    const newTurn = JSON.parse(lines[0]).turnId;
+    expect(after.extra.zcodeRollout.turnStepMap[newTurn]).toBeDefined();
+    expect(after.extra.zcodeRollout.turnStepMap[newTurn].nextStepIdx).toBe(1);
+  });
+
+  test('onStart 初始化 extra.zcodeRollout.inode (避免首 poll 误判轮转)', async () => {
+    const sessDir = path.join(TMPDIR, 'rollout');
+    const target = path.join(sessDir, 'model-io-sess_init.jsonl');
+    fs.copyFileSync(ROLLOUT_FIXTURE, target);
+    const stat = fs.statSync(target);
+
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: sessDir });
+    await (input as any).onStart();
+
+    const stateKey = `zcode-rollout:${target}`;
+    const state = stateStore.get(stateKey);
+    expect(state.extra?.zcodeRollout?.inode).toBe(stat.ino);
+    expect(state.extra?.zcodeRollout?.turnStepMap).toEqual({});
+  });
+
+  test('缺 turnId 时返回 undefined step.id (不分配,validator 诊断)', async () => {
+    const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+    const rec = JSON.parse(lines[0]);
+    delete rec.turnId;
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    for (const entry of entries) {
+      expect(entry['gen_ai.step.id']).toBeUndefined();
+    }
+  });
+
+  // ─── CP5 fix: inode=0 sentinel must not trigger false rotation ──────────
+  // 场景: ZCode 在 pilot 启动后才创建 rollout 文件 (onStart 没见过此文件)。
+  // 修复前: 首次 collect() 时 prevRollout=undefined → allocateStepId 落盘
+  // {inode:0, turnStepMap:{...}}; 第二次 collect() 的 pre-pass 看到 inode=0
+  // !== stat.ino 误判轮转,清空 turnStepMap,导致 req2 重新从 s1 起步 (而非
+  // s2),造成 step.id 错位 s1/s1/s2。
+  // 修复后: pre-pass 在 prevRollout=undefined 或 inode=0 sentinel 时 seed
+  // inode=stat.ino 但保留 turnStepMap,req2 正确分配 s2。
+  test('inode=0 sentinel (file appeared after onStart): 后续 poll seed inode 不清 turnStepMap', async () => {
+    const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const sessDir = path.join(TMPDIR, 'rollout');
+    const target = path.join(sessDir, 'model-io-sess_late-appear.jsonl');
+    // 写入 1 条记录 (文件在 onStart 之后才出现)
+    fs.writeFileSync(target, lines[0] + '\n');
+
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: sessDir });
+    // 不调 onStart — 模拟文件在 onStart 之后才被 ZCode 创建
+
+    const stateKey = `zcode-rollout:${target}`;
+    // 第一次 collect: pre-pass seed inode (prevRollout=undefined 路径);
+    // super.collect() 读 1 条记录 → allocateStepId 落盘 turnStepMap
+    await input.collect();
+    const after1 = stateStore.get(stateKey);
+    const rec1 = JSON.parse(lines[0]);
+    const turnId = rec1.turnId;
+    expect(after1.extra?.zcodeRollout?.turnStepMap?.[turnId]?.requestSet).toEqual([rec1.requestId]);
+    expect(after1.extra?.zcodeRollout?.turnStepMap?.[turnId]?.nextStepIdx).toBe(1);
+    // 修复后 inode 在 pre-pass 已 seed 为真实 stat.ino (非 0 sentinel)
+    expect(after1.extra?.zcodeRollout?.inode).toBe(fs.statSync(target).ino);
+
+    // 追加第 2 条记录 (同 turn, 不同 requestId)
+    const rec2 = JSON.parse(lines[1]);
+    rec2.turnId = turnId;
+    rec2.requestId = 'req-2-different-from-req-1';
+    fs.appendFileSync(target, JSON.stringify(rec2) + '\n');
+
+    // 第二次 collect: pre-pass 看到 inode=stat.ino (一致) 不触发轮转;
+    // super.collect() 读第 2 条记录 → allocateStepId 复用 turnStepMap,
+    // req2 分配 s2 (而非 s1)。
+    await input.collect();
+    const after2 = stateStore.get(stateKey);
+    expect(after2.extra?.zcodeRollout?.inode).toBe(fs.statSync(target).ino);
+    // 关键断言: req1 仍在 requestSet 中 (没被清空),req2 追加进去
+    expect(after2.extra?.zcodeRollout?.turnStepMap?.[turnId]?.requestSet).toContain(rec1.requestId);
+    expect(after2.extra?.zcodeRollout?.turnStepMap?.[turnId]?.requestSet).toContain(rec2.requestId);
+    expect(after2.extra?.zcodeRollout?.turnStepMap?.[turnId]?.nextStepIdx).toBe(2);
+  });
 });

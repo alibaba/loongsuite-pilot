@@ -48,6 +48,8 @@ export interface OtlpTraceRawConfig {
   debug?: boolean;
   captureMessageContent?: boolean;
   turnIdleTimeoutMs?: number;
+  turnFlushDebounceMs?: number;
+  perAgentFlusherConfig?: Record<string, PerAgentFlusherConfig>;
   resourceAttributeKeys?: string[];
   maxExportBatchBytes?: number;
   compression?: 'none' | 'gzip';
@@ -97,10 +99,26 @@ export interface OtlpTraceFlusherConfig {
   captureMessageContent?: boolean;
   debug?: boolean;
   turnIdleTimeoutMs?: number;
+  /** Global default debounce (plan 2.2). 0 = no debounce (backward compat). */
+  turnFlushDebounceMs?: number;
+  /** Per-agentType flusher overrides, keyed by agentType (e.g. 'zcode'). */
+  perAgentFlusherConfig?: Record<string, PerAgentFlusherConfig>;
   resourceAttributeKeys?: string[];
   maxExportBatchBytes?: number;
   compression?: 'none' | 'gzip';
   dataDir?: string;
+}
+
+/**
+ * Per-agent flusher overrides (plan 2.1 + 2.2). Loaded from agents.d/*.json
+ * `flusher` field; plumbed to OtlpTraceFlusher via perAgentFlusherConfig.
+ * Missing fields fall back to global OtlpTraceFlusherConfig.
+ */
+export interface PerAgentFlusherConfig {
+  /** TTL-based flush fallback when cmdStop is missing (plan 2.1). */
+  turnIdleTimeoutMs?: number;
+  /** Debounce window for late-arriving entries within the same turn (plan 2.2). */
+  turnFlushDebounceMs?: number;
 }
 
 export type SlsMode = 'ak' | 'webtracking';

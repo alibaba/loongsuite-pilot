@@ -143,14 +143,17 @@ describe('zcode-hook-processor 端到端', () => {
     const records = readJsonlRecords();
     expect(records.length).toBe(1);
     const rec = records[0];
-    // Stop 改为发 "other" 事件标记 turn 结束 (gen_ai.agent.event.name=stop),
-    // 带 end_turn finish_reason 触发 OTLP flusher Signal A 统一 flush。
-    // per-LLM 的 llm.request/llm.response 由 zcode-rollout input 从
-    // ~/.zcode/cli/rollout/ 补全,Stop 这里再发 llm.response 会与 rollout 争抢
-    // pairing 造成 orphan llm.request (duration=0 + messages 缺失)。
+    // Stop 改为发 "other" 事件标记 turn 元数据 (gen_ai.agent.event.name=stop,
+    // tool.call.count), 不带 terminal finish_reason。terminal signal 由
+    // rollout input 的最后一条 llm.response (finish_reason=stop) 提供;
+    // turnIdleTimeoutMs 作为兜底。
+    // 原因: Stop hook 在 ZCode 退出时立刻触发, 但 rollout 记录要等下一轮
+    // poll (30s) 才能读到。若 Stop 带 end_turn, 会立即 flush 只含 hook
+    // 工具事件的 buffer, 之后 rollout 的 llm.request/response 全被
+    // late-arrival guard 丢弃, 造成 trace 丢 LLM span。
     expect(rec['event.name']).toBe('other');
     expect(rec['gen_ai.agent.event.name']).toBe('stop');
-    expect(rec['gen_ai.response.finish_reasons']).toEqual(['end_turn']);
+    expect(rec['gen_ai.response.finish_reasons']).toBeUndefined();
     expect(rec['gen_ai.output.messages']).toBeUndefined();
   });
 

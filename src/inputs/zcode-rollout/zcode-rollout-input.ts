@@ -13,6 +13,25 @@ const DEFAULT_SESSION_DIR = '~/.zcode/cli/rollout';
 const DEFAULT_FILE_PATTERN = 'model-io-sess_*.jsonl';
 const SOURCE = 'zcode-rollout';
 
+/**
+ * Per-file persistent state under `extra.zcodeRollout`. Mirrors the codex-
+ * transcript `extra.codexTranscript` pattern: BaseSessionInput's stateStore
+ * already does shallow-merge of `extra` per `${inputId}:${filePath}` key, so
+ * we keep our turnStepMap under a dedicated sub-key to survive across polls
+ * and restarts.
+ *
+ *   - inode: tracks file rotation; cleared alongside turnStepMap when the
+ *     rollout file is rotated (new session file = new turnIds).
+ *   - turnStepMap[turnId]: per-turn counter + requestId de-dup set. A retry
+ *     record sharing the same requestId as an earlier record in the same
+ *     turn reuses the same stepIdx (so attempt>1 records collapse into one
+ *     STEP span).
+ */
+interface ZcodeRolloutFileState {
+  inode: number;
+  turnStepMap: Record<string, { requestSet: string[]; nextStepIdx: number }>;
+}
+
 export interface ZcodeRolloutInputOptions extends Omit<SessionInputOptions, 'sessionDir' | 'filePattern'> {
   sessionDir?: string;
   filePattern?: string;
@@ -71,11 +90,76 @@ export class ZcodeRolloutInput extends BaseSessionInput {
         const stat = await fs.stat(filePath);
         const stateKey = this.stateKey(filePath);
         this.stateStore.setOffset(stateKey, stat.size);
-        this.stateStore.update(stateKey, { extra: { inode: (stat as any).ino } });
+        // Initialize extra.zcodeRollout.inode so the first poll after onStart
+        // doesn't false-trigger rotation clearing. turnStepMap stays empty —
+        // the first record seen for each turnId allocates stepIdx=0.
+        this.stateStore.update(stateKey, {
+          extra: {
+            zcodeRollout: {
+              inode: (stat as any).ino,
+              turnStepMap: {},
+            } as ZcodeRolloutFileState,
+          },
+        });
       } catch {
         // File may disappear while ZCode rotates session rollout data.
       }
     }
+  }
+
+  /**
+   * Pre-pass: detect file rotation by comparing stat.ino against
+   * extra.zcodeRollout.inode. When rotation is detected, clear turnStepMap
+   * (new session file = new turnIds; old counters are meaningless) before
+   * delegating to super.collect() which performs its own inode check and
+   * reads the new file from offset 0.
+   *
+   * BaseSessionInput.processFile is private and clears only `extra.inode`
+   * (shallow merge leaves extra.zcodeRollout untouched), so we front-run it
+   * here. See plan 1.1 "文件轮转" caveat.
+   *
+   * Inode seeding (CP5 fix): when prevRollout is missing (file appeared
+   * after onStart) or prevRollout.inode is the 0 sentinel left by
+   * allocateStepId's fresh-fileState path, we must seed inode to the real
+   * stat.ino WITHOUT clearing turnStepMap. Otherwise the next poll's pre-pass
+   * would see inode=0 !== stat.ino and falsely trigger rotation, wiping
+   * step.id state mid-turn — which caused step.id misalignment (s1/s1/s2
+   * instead of s1/s2/s3) when records arrived in separate polls.
+   */
+  protected override async collect(): Promise<AgentActivityEntry[]> {
+    const files = await this.discoverSessionFiles();
+    for (const filePath of files) {
+      try {
+        const stat = await fs.stat(filePath);
+        const currentIno = (stat as any).ino as number;
+        const stateKey = this.stateKey(filePath);
+        const prevState = this.stateStore.get(stateKey);
+        const prevRollout = prevState.extra?.zcodeRollout as
+          | ZcodeRolloutFileState
+          | undefined;
+        const prevInode = prevRollout?.inode;
+        const prevInodeValid =
+          typeof prevInode === 'number' && prevInode !== 0;
+        const rotated = prevInodeValid && prevInode !== currentIno;
+        // Seed inode on first sight (or after the 0-sentinel left by
+        // allocateStepId), preserving any turnStepMap state accumulated
+        // since the last valid inode. Only real rotation clears turnStepMap.
+        if (!prevRollout || !prevInodeValid || rotated) {
+          this.stateStore.update(stateKey, {
+            extra: {
+              zcodeRollout: {
+                inode: currentIno,
+                turnStepMap: rotated ? {} : (prevRollout?.turnStepMap ?? {}),
+              } as ZcodeRolloutFileState,
+            },
+          });
+        }
+      } catch {
+        // File may disappear between discoverSessionFiles and stat; base
+        // class will skip it. Non-blocking.
+      }
+    }
+    return super.collect();
   }
 
   protected async discoverSessionFiles(): Promise<string[]> {
@@ -115,6 +199,11 @@ export class ZcodeRolloutInput extends BaseSessionInput {
     const startMs = isoToMs(startedAt) || Date.now();
     const endMs = isoToMs(completedAt) || startMs;
 
+    // step.id allocation (plan 1.1): keyed by turnId, de-duped by requestId
+    // so retry records (attempt>1, same requestId) collapse into one STEP.
+    // Persisted in extra.zcodeRollout.turnStepMap so it survives restarts.
+    const stepId = this.allocateStepId(filePath, turnId, requestId);
+
     const baseAttrs: Record<string, JsonValue> = {
       source: SOURCE,
       'zcode.rollout.file': path.basename(filePath),
@@ -145,6 +234,7 @@ export class ZcodeRolloutInput extends BaseSessionInput {
       trace_id: traceId,
       'gen_ai.session.id': sessionId,
       'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': stepId,
       'gen_ai.request.id': requestId,
       'gen_ai.response.id': pairingId,
       'gen_ai.agent.type': ClientType.ZcodeHook,
@@ -165,6 +255,7 @@ export class ZcodeRolloutInput extends BaseSessionInput {
       trace_id: traceId,
       'gen_ai.session.id': sessionId,
       'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': stepId,
       'gen_ai.request.id': requestId,
       'gen_ai.response.id': pairingId,
       'gen_ai.agent.type': ClientType.ZcodeHook,
@@ -188,6 +279,53 @@ export class ZcodeRolloutInput extends BaseSessionInput {
 
   private stateKey(filePath: string): string {
     return `${this.id}:${filePath}`;
+  }
+
+  /**
+   * Allocate a stable step.id per (turnId, requestId). Same requestId within
+   * a turn reuses the same stepIdx (so attempt>1 retries collapse into one
+   * STEP). Persisted in extra.zcodeRollout.turnStepMap so it survives
+   * restarts and per-file inode rotation (cleared in collect() pre-pass).
+   *
+   * Returns `${turnId}:s${stepIdx+1}` when turnId is non-empty, otherwise
+   * undefined (no step.id - the entry floats outside any STEP, validator
+   * surfaces this as structure.step_has_one_llm for diagnosis).
+   */
+  private allocateStepId(filePath: string, turnId: string, requestId: string): string | undefined {
+    if (!turnId) return undefined;
+    const stateKey = this.stateKey(filePath);
+    const prevState = this.stateStore.get(stateKey);
+    const prevExtra = prevState.extra?.zcodeRollout as
+      | ZcodeRolloutFileState
+      | undefined;
+
+    const fileState: ZcodeRolloutFileState = prevExtra && typeof prevExtra === 'object'
+      ? prevExtra
+      : { inode: 0, turnStepMap: {} };
+
+    let turnState = fileState.turnStepMap[turnId];
+    if (!turnState) {
+      turnState = { requestSet: [], nextStepIdx: 0 };
+      fileState.turnStepMap[turnId] = turnState;
+    }
+
+    let stepIdx: number;
+    const reqIdx = turnState.requestSet.indexOf(requestId);
+    if (reqIdx >= 0) {
+      stepIdx = reqIdx;
+    } else {
+      stepIdx = turnState.nextStepIdx;
+      turnState.requestSet.push(requestId);
+      turnState.nextStepIdx++;
+    }
+
+    // Persist (shallow merge of extra replaces zcodeRollout wholesale, which
+    // is what we want — we already mutated turnStepMap in place).
+    this.stateStore.update(stateKey, {
+      extra: { zcodeRollout: fileState },
+    });
+
+    return `${turnId}:s${stepIdx + 1}`;
   }
 }
 
