@@ -741,7 +741,7 @@ describe('Updater', () => {
   // ─── GC ────────────────────────────────────────────────
 
   describe('gcOldVersions', () => {
-    it('preserves current and previous, removes others', async () => {
+    it('preserves current and previous while removing one stale version', async () => {
       mockFsReadFile.mockImplementation((p: string) => {
         if (p.endsWith('/current')) return Promise.resolve('1.0.2_bbb\n');
         if (p.endsWith('/previous')) return Promise.resolve('1.0.1_aaa\n');
@@ -765,6 +765,34 @@ describe('Updater', () => {
       );
       expect(rmCalls).toHaveLength(1);
       expect(rmCalls[0][0]).toContain('1.0.0_old');
+    });
+
+    it('removes only the oldest stale version per cleanup run', async () => {
+      mockFsReadFile.mockImplementation((p: string) => {
+        if (p.endsWith('/current')) return Promise.resolve('1.0.2_bbb\n');
+        if (p.endsWith('/previous')) return Promise.resolve('1.0.1_aaa\n');
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsReaddir.mockImplementation((dir: string) => {
+        if (dir.endsWith('/versions')) {
+          return Promise.resolve(['1.0.0_old', '0.9.9_older', '1.0.1_aaa', '1.0.2_bbb']);
+        }
+        return Promise.resolve([]);
+      });
+      mockFsStat.mockImplementation((p: string) => Promise.resolve({
+        isDirectory: () => true,
+        mtimeMs: p.includes('0.9.9_older') ? 10 : 20,
+      }));
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await (updater as any).gcOldVersions();
+
+      const rmCalls = mockFsRm.mock.calls.filter(
+        ([p]: [string]) => p.includes('versions/'),
+      );
+      expect(rmCalls).toHaveLength(1);
+      expect(rmCalls[0][0]).toContain('0.9.9_older');
+      expect(rmCalls[0][0]).not.toContain('1.0.0_old');
     });
 
     it('cleans stale versions during an already up-to-date check', async () => {
