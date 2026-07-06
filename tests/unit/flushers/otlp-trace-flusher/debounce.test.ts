@@ -179,4 +179,77 @@ describe('OtlpTraceFlusher - plan 2.1/2.2 (zcode TTL + debounce)', () => {
     // buffer 应包含 Stop "other" + llm.request + llm.response = 3 条
     expect(mockConvert.mock.calls[0][0]).toHaveLength(3);
   });
+  // AGE-675: sendBatch 路径走 triggerFlush (per-agent debounce).
+  // P0 回归护栏: flush()/shutdown 路径必须立即 flush, 不能让 debounce timer
+  // 在 exporter shutdown 后才 fire (zcode turn 数据丢失).
+  it('debounce=200: sendBatch triggers terminal then flush() -> immediate flush, no pending timer', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    flusher = new OtlpTraceFlusher(makeConfig({
+      perAgentFlusherConfig: { zcode: { turnFlushDebounceMs: 200 } },
+    }) as any);
+
+    await flusher.sendBatch([
+      makeZcodeEntry({ 'event.name': 'llm.request' }),
+      makeZcodeEntry({ 'gen_ai.response.finish_reasons': ['stop'] }),
+    ]);
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    await flusher.flush();
+
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
+    expect((flusher as any).flushDebounceTimers.size).toBe(0);
+  });
+
+  it('debounce=0 (default): sendBatch cross-batch -> second batch dropped by late-arrival guard', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    flusher = new OtlpTraceFlusher(makeConfig() as any);
+
+    await flusher.sendBatch([
+      makeZcodeEntry({ 'event.name': 'llm.request' }),
+      makeZcodeEntry({ 'event.name': 'llm.response', 'gen_ai.response.finish_reasons': ['stop'] }),
+    ]);
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
+
+    mockConvert.mockClear();
+    await flusher.sendBatch([
+      makeZcodeEntry({ 'event.name': 'tool.call' }),
+      makeZcodeEntry({ 'event.name': 'tool.result' }),
+    ]);
+    expect(mockConvert).not.toHaveBeenCalled();
+  });
+
+  it('debounce=200: sendBatch cross-batch timing -> second batch appended within window -> merged flush', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    flusher = new OtlpTraceFlusher(makeConfig({
+      perAgentFlusherConfig: { zcode: { turnFlushDebounceMs: 200 } },
+    }) as any);
+
+    await flusher.sendBatch([
+      makeZcodeEntry({ 'event.name': 'llm.request' }),
+      makeZcodeEntry({ 'event.name': 'llm.response', 'gen_ai.response.finish_reasons': ['stop'] }),
+    ]);
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    await new Promise((r) => setTimeout(r, 12));
+    await flusher.sendBatch([
+      makeZcodeEntry({ 'event.name': 'tool.call' }),
+      makeZcodeEntry({ 'event.name': 'tool.result' }),
+    ]);
+
+    await new Promise((r) => setTimeout(r, 350));
+
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(4);
+  });
 });

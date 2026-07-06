@@ -15,10 +15,11 @@ import {
 } from '@loongsuite/otel-util-genai';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 
-import type { AgentActivityEntry, OtlpTraceFlusherConfig, PerAgentFlusherConfig } from '../types/index.js';
+import type { AgentActivityEntry, JsonValue, OtlpTraceFlusherConfig, PerAgentFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
+import { buildAgentActivityEntry } from '../normalization/entry-builder.js';
 import { createLogger } from '../utils/logger.js';
 import { appendLine, ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
 import { randomUUID } from 'node:crypto';
@@ -28,7 +29,7 @@ import path from 'node:path';
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
-const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled']);
+const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'interrupted']);
 // Lazy-loaded from assets/hooks/agent-event-normalizer.mjs (ESM). The resolver
 // backfills gen_ai.step.id on hook tool events after the matching rollout
 // llm.response arrives — see plan 1.2.
@@ -150,6 +151,220 @@ interface TurnBuffer {
   records: AgentActivityEntry[];
   completed: boolean;
   lastActivityMs: number;
+}
+
+/**
+ * Synthesize records for orphan ZCode tool.call events.
+ *
+ * Two flavors of orphan are handled:
+ *
+ * A) Missing tool.result, step.id resolved: the tool.call was declared by a
+ *    real llm.response (so it carries a real gen_ai.step.id), but ZCode never
+ *    emitted the matching tool.result event. Without intervention the OTLP
+ *    converter's `pairTool()` falls back to "first unconsumed result" and
+ *    routes a sibling tool's result payload to this call's TOOL span (this
+ *    is the S2 failure path: Read TOOL span ends up carrying Bash's cat
+ *    stderr, while Bash's own TOOL span goes empty + 0ms). We synthesize an
+ *    error tool.result keyed by the same gen_ai.tool.call.id so `pairTool`
+ *    pairs it correctly, and the sibling result stays bound to its own call.
+ *
+ * B) Missing tool.result AND missing parent llm.response: the callId never
+ *    got resolved to a step.id (Signal A flushed before rollout poll caught
+ *    up). For this batch we additionally synthesize ONE llm.request +
+ *    llm.response pair whose gen_ai.output.messages parts list every orphan
+ *    tool_call (fixes `structure.step_has_one_llm` — the STEP now has 1 LLM).
+ *    The synthesized llm.response carries finish_reasons=['tool_calls']
+ *    (NOT terminal) so it cannot re-trigger Signal A. A synthetic step.id
+ *    is backfilled onto these tool.call records so they escape the
+ *    converter's `__no_step__` bucket.
+ *
+ * `unresolvedCallIds` (from the ZcodeStepResolver.flushTurn) distinguishes
+ * the two: callIds in this set are flavor B; all other tool.call records in
+ * buf that lack a matching tool.result are flavor A.
+ *
+ * Returns the synthesized records (NOT including the backfilled tool.call
+ * mutations — those are applied in place on buf.records). Caller appends the
+ * synthesized records to buf.records before conversion.
+ */
+function synthesizeOrphanZcodeToolRecords(
+  buf: TurnBuffer,
+  unresolvedCallIds: string[],
+): AgentActivityEntry[] {
+  if (buf.keySource !== 'turn_id') return [];
+
+  const unresolvedSet = new Set(unresolvedCallIds);
+
+  // Build set of callIds that already have a tool.result in buf — we don't
+  // synthesize results for those.
+  const existingResultCallIds = new Set<string>();
+  for (const rec of buf.records) {
+    if (rec['event.name'] === 'tool.result') {
+      const id = rec['gen_ai.tool.call.id'] as string | undefined;
+      if (id) existingResultCallIds.add(id);
+    }
+  }
+
+  // Collect orphan tool.call records — those lacking a matching tool.result
+  // (flavor A: resolved step.id but missing result event) OR whose callId is
+  // in `unresolved` (flavor B: no parent llm.response ever arrived, even if
+  // a tool.result does exist — the LLM pair still needs synthesis).
+  const orphanToolCalls: AgentActivityEntry[] = [];
+  for (const rec of buf.records) {
+    if (rec['event.name'] !== 'tool.call') continue;
+    const id = rec['gen_ai.tool.call.id'] as string | undefined;
+    if (!id) continue;
+    const hasResult = existingResultCallIds.has(id);
+    const isUnresolved = unresolvedSet.has(id);
+    if (!hasResult || isUnresolved) {
+      orphanToolCalls.push(rec);
+    }
+  }
+
+  if (orphanToolCalls.length === 0) return [];
+
+  // Pick a synthetic step.id that doesn't collide with existing step.ids in buf.
+  // Used only for flavor B orphans (no real step.id).
+  const existingStepIds = new Set<string>();
+  for (const rec of buf.records) {
+    const sid = rec['gen_ai.step.id'] as string | undefined;
+    if (sid) existingStepIds.add(sid);
+  }
+  let synthIdx = 0;
+  let stepId = `${buf.keyValue}:synthetic-${synthIdx}`;
+  while (existingStepIds.has(stepId)) {
+    synthIdx++;
+    stepId = `${buf.keyValue}:synthetic-${synthIdx}`;
+  }
+
+  // Find an LLM record to copy model/session/trace context from; fall back to
+  // values on the orphan tool.call itself.
+  const refLlm = buf.records.find(
+    (r) => r['event.name'] === 'llm.response' || r['event.name'] === 'llm.request',
+  );
+  const refRec = refLlm ?? orphanToolCalls[0];
+  const traceId = (refRec['trace_id'] as string) ?? '';
+  const sessionId = (refRec['gen_ai.session.id'] as string) ?? '';
+  const agentType = (refRec['gen_ai.agent.type'] as string) ?? ZCODE_AGENT_TYPE;
+  const model = (refLlm?.['gen_ai.request.model'] as string) ?? 'unknown';
+
+  const out: AgentActivityEntry[] = [];
+
+  // Synthesize tool.result for every orphan tool.call that lacks one
+  // (flavor A missing-result path; flavor B with existing result is skipped
+  // to avoid duplicate tool.result events). Keyed by the SAME
+  // gen_ai.tool.call.id so the OTLP converter's pairTool() matches it to
+  // this call instead of falling back to a sibling's result.
+  for (const tc of orphanToolCalls) {
+    const callId = tc['gen_ai.tool.call.id'] as string;
+    if (existingResultCallIds.has(callId)) continue;
+    const callTimeNs = String(tc['time_unix_nano'] ?? '0');
+    const callTimeMs = callTimeNs.length >= 16
+      ? Number(BigInt(callTimeNs) / 1_000_000n)
+      : Date.now();
+    const resultTimeMs = callTimeMs + 1;
+    const resultTimeNs = String(resultTimeMs) + '000000';
+    const tcStepId = (tc['gen_ai.step.id'] as string | undefined) ?? stepId;
+    out.push(buildAgentActivityEntry({
+      timestamp: resultTimeMs,
+      time_unix_nano: resultTimeNs,
+      'event.name': 'tool.result',
+      trace_id: traceId,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': buf.keyValue,
+      'gen_ai.step.id': tcStepId,
+      'gen_ai.agent.type': agentType,
+      'gen_ai.tool.name': tc['gen_ai.tool.name'] ?? '',
+      'gen_ai.tool.call.id': callId,
+      'gen_ai.tool.call.arguments': tc['gen_ai.tool.call.arguments'],
+      'gen_ai.tool.call.result': { status: 'error', error: 'orphaned' } as unknown as JsonValue,
+      'gen_ai.tool.call.status': 'error',
+      'tool.result.status': 'error',
+      'error.type': 'orphaned',
+      'error.message': 'ZCode did not emit tool.result for this call',
+    }));
+  }
+
+  // Flavor B only: tool.call records whose callId is in `unresolved` (no
+  // parent llm.response ever arrived). Backfill a synthetic step.id on them
+  // (so they escape __no_step__ bucket) and synthesize ONE llm.request +
+  // llm.response pair parenting all of them. Flavor A orphans already have a
+  // real step.id from a real llm.response — synthesizing an LLM pair for
+  // them would create a duplicate STEP and break `step_has_one_llm`.
+  const trueOrphans = orphanToolCalls.filter(
+    (tc) => unresolvedSet.has(tc['gen_ai.tool.call.id'] as string),
+  );
+  if (trueOrphans.length === 0) return out;
+
+  for (const rec of trueOrphans) {
+    if (!rec['gen_ai.step.id']) {
+      (rec as Record<string, unknown>)['gen_ai.step.id'] = stepId;
+    }
+  }
+
+  const firstCallMs = trueOrphans.reduce(
+    (min, tc) => {
+      const ns = String(tc['time_unix_nano'] ?? '0');
+      const ms = ns.length >= 16 ? Number(BigInt(ns) / 1_000_000n) : Date.now();
+      return Math.min(min, ms);
+    },
+    Date.now(),
+  );
+  const reqTimeMs = Math.max(0, firstCallMs - 1);
+  const lastCallMs = trueOrphans.reduce(
+    (max, tc) => {
+      const ns = String(tc['time_unix_nano'] ?? '0');
+      const ms = ns.length >= 16 ? Number(BigInt(ns) / 1_000_000n) : Date.now();
+      return Math.max(max, ms);
+    },
+    0,
+  );
+  const respTimeMs = lastCallMs + 1;
+
+  const pairingId = `synthetic-resp-${stepId}`;
+  const toolCallParts = trueOrphans.map((tc) => ({
+    type: 'tool_call',
+    id: (tc['gen_ai.tool.call.id'] as string) ?? '',
+    name: (tc['gen_ai.tool.name'] as string) ?? '',
+    input: tc['gen_ai.tool.call.arguments'],
+  }));
+
+  out.push(buildAgentActivityEntry({
+    timestamp: reqTimeMs,
+    time_unix_nano: String(reqTimeMs) + '000000',
+    'event.name': 'llm.request',
+    trace_id: traceId,
+    'gen_ai.session.id': sessionId,
+    'gen_ai.turn.id': buf.keyValue,
+    'gen_ai.step.id': stepId,
+    'gen_ai.request.id': `synthetic-req-${stepId}`,
+    'gen_ai.response.id': pairingId,
+    'gen_ai.agent.type': agentType,
+    'gen_ai.request.model': model,
+    'gen_ai.response.model': model,
+  }));
+
+  out.push(buildAgentActivityEntry({
+    timestamp: respTimeMs,
+    time_unix_nano: String(respTimeMs) + '000000',
+    'event.name': 'llm.response',
+    trace_id: traceId,
+    'gen_ai.session.id': sessionId,
+    'gen_ai.turn.id': buf.keyValue,
+    'gen_ai.step.id': stepId,
+    'gen_ai.request.id': `synthetic-req-${stepId}`,
+    'gen_ai.response.id': pairingId,
+    'gen_ai.agent.type': agentType,
+    'gen_ai.request.model': model,
+    'gen_ai.response.model': model,
+    'gen_ai.response.finish_reasons': ['tool_calls'],
+    'gen_ai.output.messages': [{
+      role: 'assistant',
+      parts: toolCallParts,
+      finish_reason: 'tool_calls',
+    }] as unknown as JsonValue,
+  }));
+
+  return out;
 }
 
 interface AgentConvertState {
@@ -416,8 +631,24 @@ export class OtlpTraceFlusher extends BaseFlusher {
     } finally {
       this._deferSignalA = false;
     }
-    // 统一 flush 所有在批量处理期间被 Signal A 标记为 completed 的 buffer
-    await this.flushCompleted();
+    // sendBatch 路径走 triggerFlush 以尊重 per-agent turnFlushDebounceMs（AGE-675）。
+    // flush()/shutdown 仍走原 flushCompleted 的立即 flush 语义（clearTimers + 三连），
+    // 不受此处改动影响——避免 debounce>0 agent 在 flush()/shutdown 路径重新 schedule
+    // timer 导致 exporter 已 shutdown 后才 fire、turn 数据丢失。
+    const completed: TurnBuffer[] = [];
+    for (const [, buf] of this.turnBuffers) {
+      if (buf.completed) completed.push(buf);
+    }
+    for (const buf of completed) {
+      this.triggerFlush(buf);
+    }
+    // debounce>0: triggerFlush 只 schedule timer，不入 inFlightExports；此循环对
+    // zcode 是 no-op，timer 在 shutdown() 路径由 clearTimers + flushCompleted 兜底。
+    // debounce=0: triggerFlush 立即 invokeFlushSingleTurn 入 inFlightExports，此循环等待。
+    while (this.inFlightExports.size > 0) {
+      const batch = [...this.inFlightExports];
+      await Promise.allSettled(batch);
+    }
   }
 
   async flush(): Promise<void> {
@@ -534,17 +765,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
    */
   private invokeFlushSingleTurn(buf: TurnBuffer): void {
     const p = (async () => {
-      if (buf.agentType === ZCODE_AGENT_TYPE) {
-        const resolver = this.ensureZcodeResolver();
-        if (buf.keySource === 'turn_id') {
-          const unresolved = resolver.flushTurn(buf.keyValue);
-          if (unresolved.length > 0) {
-            logger.warn(`zcode step.id unresolved for ${unresolved.length} tool calls in turn ${buf.keyValue}`, {
-              callIds: unresolved.slice(0, 10).join(','),
-            });
-          }
-        }
-      }
       await this.flushSingleTurn(buf);
     })().catch((err) => {
       logger.error(`Failed to flush turn ${buf.key}`, { err: String(err) });
@@ -575,6 +795,27 @@ export class OtlpTraceFlusher extends BaseFlusher {
         if (!record['gen_ai.turn.id']) {
           (record as Record<string, unknown>)['gen_ai.turn.id'] = buf.keyValue;
         }
+      }
+    }
+    // ZCode step.id lazy resolver flush pass + orphan synthesis. Runs in
+    // flushSingleTurn so ALL flush paths (Signal A immediate, sendBatch
+    // deferred, idle timeout, shutdown) benefit.
+    if (buf.agentType === ZCODE_AGENT_TYPE && buf.keySource === 'turn_id') {
+      const resolver = this.ensureZcodeResolver();
+      const unresolved = resolver.flushTurn(buf.keyValue);
+      if (unresolved.length > 0) {
+        logger.warn(`zcode step.id unresolved for ${unresolved.length} tool calls in turn ${buf.keyValue}`, {
+          callIds: unresolved.slice(0, 10).join(','),
+        });
+      }
+      // Always run synthesis — it covers both unresolved-step orphans AND
+      // tool.call records that have a real step.id but no matching
+      // tool.result event (S2 failure path: missing tool.result would
+      // otherwise let pairTool() route a sibling's result payload here).
+      const synthesized = synthesizeOrphanZcodeToolRecords(buf, unresolved);
+      if (synthesized.length > 0) {
+        buf.records.push(...synthesized);
+        logger.info(`zcode orphan synthesis for turn ${buf.keyValue}: +${synthesized.length} records`);
       }
     }
     await this.convertAndExport(buf.agentType, buf.records);
