@@ -530,6 +530,9 @@ function buildTurnRecords(turn, turnIndex, sessionId, cwd, prevHash, userId, sys
       } catch {
         toolInput = { _raw: tc.arguments };
       }
+      // toJsonValue({}) 返回 undefined 会被 sanitizeObject 抹掉，导致空参数工具
+      // （如 TaskList）丢失 gen_ai.tool.call.arguments 字段。回退为字符串 "{}" 保字段存在。
+      const toolArgumentsField = toJsonValue(toolInput) ?? '{}';
 
       records.push({
         time_unix_nano: unixFloatToNanos(tc.timestamp || step.stepBeginTs),
@@ -541,7 +544,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, cwd, prevHash, userId, sys
         'gen_ai.step.id': currentStepId,
         'gen_ai.tool.name': tc.name || 'unknown',
         'gen_ai.tool.call.id': toolCallId,
-        'gen_ai.tool.call.arguments': toJsonValue(toolInput),
+        'gen_ai.tool.call.arguments': toolArgumentsField,
       });
 
       const tr = toolResultMap.get(toolCallId);

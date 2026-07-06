@@ -16,6 +16,9 @@ const FIXTURE_DIR = path.resolve(__dirname, 'fixtures');
 // fixture 来源: researcher 调研报告 (kimi-cli v1.48.0, _echo provider, real hook events)
 const HOOK_EVENTS_FIXTURE = path.join(FIXTURE_DIR, 'hook-events-subagent-test.jsonl');
 const WIRE_FIXTURE = path.join(FIXTURE_DIR, 'wire-subagent-test.jsonl');
+// fixture 来源: 基于 wire-subagent-test.jsonl 的真实 ToolCall wire 格式派生，
+// 替换为 TaskList 工具 + arguments="{}"，复现 BUG-4 (trace 0a656408..., span 420bc1d19faeeace)
+const WIRE_EMPTY_ARGS_FIXTURE = path.join(FIXTURE_DIR, 'wire-empty-args.jsonl');
 
 let DATA_DIR;
 let HOME_DIR;
@@ -313,5 +316,27 @@ describe('kimi-cli-hook-processor 端到端', () => {
     const userMsg = inputMsgs.find((m) => m.role === 'user');
     expect(userMsg).toBeTruthy();
     expect(userMsg.parts.some((p) => p.type === 'text')).toBe(true);
+  });
+
+  // Regression BUG-4: 空参数工具调用（如 TaskList arguments="{}"）必须保留
+  // gen_ai.tool.call.arguments 字段。原实现 toJsonValue({}) 返回 undefined，
+  // 被 sanitizeObject 抹掉，导致 validate-trace 报 semantic.tool_has_arguments ERROR。
+  test('空参数工具调用（arguments="{}"）保留 gen_ai.tool.call.arguments="{}"', () => {
+    const sessionId = 'empty-args-sess';
+    const cwd = '/tmp/empty-args-cwd';
+    const wireContent = fs.readFileSync(WIRE_EMPTY_ARGS_FIXTURE, 'utf-8');
+    const wireEvents = wireContent.split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
+    writeWireAndContext(cwd, sessionId, wireEvents, null);
+
+    const r = runHook({ hook_event_name: 'Stop', session_id: sessionId, cwd, stop_hook_active: false });
+    expect(r.status).toBe(0);
+
+    const records = readJsonlRecords();
+    const toolCall = records.find((r) => r['event.name'] === 'tool.call');
+    expect(toolCall).toBeTruthy();
+    expect(toolCall['gen_ai.tool.name']).toBe('TaskList');
+    // 字段存在且等于字符串 "{}"
+    expect(toolCall['gen_ai.tool.call.arguments']).toBeDefined();
+    expect(toolCall['gen_ai.tool.call.arguments']).toBe('{}');
   });
 });
