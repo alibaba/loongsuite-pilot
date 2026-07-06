@@ -156,6 +156,8 @@ function baseFields(event, userId, runtimeConfig) {
     'gen_ai.turn.id': turnId,
     'gen_ai.agent.type': AGENT_ID,
     'gen_ai.agent.id': sessionId,
+    'gen_ai.agent.name': 'ZCode',
+    'gen_ai.agent.description': 'ZCode CLI coding agent probe (hook + rollout inputs)',
     'user.id': userId,
     ...(cwd ? { 'agent.zcode.cwd': cwd } : {}),
     ...RESOURCE_BASE_FIELD_PATCH,
@@ -204,7 +206,7 @@ function cmdUserPromptSubmit() {
     'event.id': generateEventId(),
     'event.name': 'other',
     'gen_ai.agent.event.name': 'user_prompt.submit',
-    'gen_ai.input.messages': [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+    'gen_ai.input.messages': [{ role: 'user', parts: [{ type: 'text', content: prompt }] }],
   };
   const cleaned = applyHookContentPolicy(sanitizeObject(record) || record, runtimeConfig);
   writeJsonlRecords(defaultLogDir(), AGENT_ID, [cleaned]);
@@ -301,6 +303,14 @@ function cmdStop() {
   // 真正的 terminal signal；turnIdleTimeoutMs (120s) 作为 rollout 缺失时的
   // 兜底 fallback。Stop 这里只发 "other" 标记 turn 元数据（agent.event.name
   // = stop, tool.call.count）供下游分析使用。
+  //
+  // 中断场景例外 (P1-4)：若 toolCallCount=0 且本 turn 没有任何 tool.call 事件
+  // 先于 Stop 到达（典型场景：用户 Ctrl+C / timeout 杀掉 ZCode 进程，模型
+  // 还没产出任何 tool_call），emit finish_reason=interrupted 触发 Signal A
+  // 立即 flush，确保至少产出 ENTRY+AGENT 骨架 span。否则要等 120s idle
+  // timeout 才有 trace。
+  const toolCallCount = event.toolCallCount ?? 0;
+  const isInterrupted = toolCallCount === 0;
   const record = {
     ...baseFields(event, userId, runtimeConfig),
     time_unix_nano: isoToUnixNanos(event.timestamp),
@@ -308,7 +318,8 @@ function cmdStop() {
     'event.name': 'other',
     'gen_ai.agent.event.name': 'stop',
     'gen_ai.agent.event.source': event.source || 'stop',
-    'gen_ai.tool.call.count': event.toolCallCount ?? 0,
+    'gen_ai.tool.call.count': toolCallCount,
+    ...(isInterrupted ? { 'gen_ai.response.finish_reasons': ['interrupted'] } : {}),
   };
   const cleaned = applyHookContentPolicy(sanitizeObject(record) || record, runtimeConfig);
   writeJsonlRecords(defaultLogDir(), AGENT_ID, [cleaned]);

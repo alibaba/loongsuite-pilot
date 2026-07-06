@@ -235,7 +235,8 @@ describe('zcode-hook-processor 端到端', () => {
     const msgs = rec['gen_ai.input.messages'];
     expect(msgs).toHaveLength(1);
     expect(msgs[0].role).toBe('user');
-    expect(msgs[0].content[0].text).toBe(user.prompt);
+    expect(msgs[0].parts[0].content).toBe(user.prompt);
+    expect(msgs[0].parts[0].type).toBe('text');
   });
 
   test('AgentTeams resource attributes 进入 record (与 claude-code 行为一致)', () => {

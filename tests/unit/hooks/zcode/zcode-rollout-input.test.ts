@@ -429,4 +429,63 @@ describe('ZcodeRolloutInput', () => {
     expect(after2.extra?.zcodeRollout?.turnStepMap?.[turnId]?.requestSet).toContain(rec2.requestId);
     expect(after2.extra?.zcodeRollout?.turnStepMap?.[turnId]?.nextStepIdx).toBe(2);
   });
+
+  // S3 中断路径 (Round 2 E2E): ZCode 被 `timeout 8` SIGTERM 截断,rollout
+  // 记录已写入 (completedAt 存在) 但 response.finishReason=null、
+  // response.usage=null、无 assistant output。修复前 LLM span 缺
+  // gen_ai.output.messages / finish_reasons=['interrupted'] / usage.*,
+  // 被 validate-trace + CLAUDE.md 高优铁律双重判 ERROR。修复后注入
+  // 占位字段满足 MUST 规则。
+  // fixture 来源: 基于 ROLLOUT_FIXTURE 改造,模拟 SIGTERM 中断 (response
+  // 字段清空,保留 completedAt)。
+  test('interrupted rollout (completedAt present, finishReason=null, no output): 注入 interrupted finish_reason + 占位 output + 0 usage', async () => {
+    const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+
+    const base = JSON.parse(lines[0]);
+    // 模拟中断:保留 startedAt/completedAt/requestId,清空 response 内容
+    const interrupted = {
+      ...base,
+      response: {
+        responseId: base.response.responseId,
+        modelId: base.response.modelId,
+        // finishReason 缺失
+        // usage 缺失
+        // text 缺失
+        // toolCalls 缺失
+      },
+    };
+
+    const entries = await (input as any).processSessionLine(interrupted, '/tmp/interrupted.jsonl');
+    expect(Array.isArray(entries)).toBe(true);
+    expect(entries).toHaveLength(2);
+
+    const resp = entries.find((e) => e['event.name'] === 'llm.response');
+    expect(resp).toBeDefined();
+    // 关键修复: finish_reasons = ['interrupted']
+    expect(resp['gen_ai.response.finish_reasons']).toEqual(['interrupted']);
+    // 关键修复: output.messages 非空 (CLAUDE.md 高优铁律)
+    expect(resp['gen_ai.output.messages']).toBeDefined();
+    expect(Array.isArray(resp['gen_ai.output.messages'])).toBe(true);
+    expect(resp['gen_ai.output.messages'].length).toBeGreaterThan(0);
+    expect(resp['gen_ai.output.messages'][0].role).toBe('assistant');
+    expect(resp['gen_ai.output.messages'][0].parts[0].type).toBe('text');
+    // 关键修复: usage.* = 0 (而不是 undefined/missing)
+    expect(resp['gen_ai.usage.input_tokens']).toBe(0);
+    expect(resp['gen_ai.usage.output_tokens']).toBe(0);
+  });
+
+  test('非中断路径 (finishReason 存在) 不注入 interrupted 占位字段', async () => {
+    const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+
+    const rec = JSON.parse(lines[0]);
+    const entries = await (input as any).processSessionLine(rec, '/tmp/normal.jsonl');
+    const resp = entries.find((e) => e['event.name'] === 'llm.response');
+    // 正常路径: finishReason 来自原 record (tool_calls),不是 interrupted
+    expect(resp['gen_ai.response.finish_reasons']).not.toContain('interrupted');
+    // usage 是真实值 (10/20),不是 0 占位
+    expect(resp['gen_ai.usage.input_tokens']).toBe(10);
+    expect(resp['gen_ai.usage.output_tokens']).toBe(20);
+  });
 });

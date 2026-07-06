@@ -213,13 +213,42 @@ export class ZcodeRolloutInput extends BaseSessionInput {
 
     // ZCode rollout 把 messages 放在 request.messages (与 request.body 并列),
     // 不是 request.body.messages。system 角色单独走 gen_ai.system_instructions
-    // (来自 request.body.system),其余角色进 gen_ai.input.messages。
+    // (来自 request.body.system + request.messages 中 role=system 的消息 +
+    //  user 消息里嵌入的 <system-reminder> 段),其余角色进 gen_ai.input.messages。
     const inputMessages = toGenAiInputMessages(request.messages);
-    const systemInstructions = toGenAiSystemInstructions(requestBody.system);
+    const systemInstructions = mergeSystemInstructions(
+      toGenAiSystemInstructions(requestBody.system),
+      extractSystemFromMessages(request.messages),
+    );
     const toolDefinitions = toJsonValue(requestBody.tools);
     const maxTokens = finiteNumber(requestBody.max_tokens);
     const outputMessages = toGenAiOutputMessages(response);
     const finishReasons = mapFinishReason(stringValue(response.finishReason));
+
+    // Interrupted-path detection: rollout record was finalized (completedAt
+    // present) but the model never returned a finishReason — typically SIGTERM
+    // / timeout mid-stream. Without intervention the synthesized LLM span
+    // would lack gen_ai.response.finish_reasons, gen_ai.output.messages, and
+    // gen_ai.usage.* (all gated on the response fields being present), failing
+    // validate-trace MUST rules and the CLAUDE.md input/output.messages
+    // non-empty high-priority invariant. Inject `interrupted` + placeholder
+    // output + zero usage so the span satisfies the schema.
+    const isInterrupted = !!completedAt && !stringValue(response.finishReason);
+    const effectiveFinishReasons = finishReasons
+      ?? (isInterrupted ? ['interrupted'] : undefined);
+    const effectiveOutputMessages = outputMessages
+      ?? (isInterrupted
+        ? ([{
+            role: 'assistant',
+            parts: [{ type: 'text', content: '' }],
+            finish_reason: 'interrupted',
+          }] as unknown as JsonValue)
+        : undefined);
+    const effectiveInputTokens = finiteNumber(usage.inputTokens) ?? (isInterrupted ? 0 : undefined);
+    const effectiveOutputTokens = finiteNumber(usage.outputTokens) ?? (isInterrupted ? 0 : undefined);
+    const effectiveCacheRead = finiteNumber(usage.cacheReadTokens) ?? (isInterrupted ? 0 : undefined);
+    const effectiveCacheWrite = finiteNumber(usage.cacheWriteTokens) ?? (isInterrupted ? 0 : undefined);
+    const effectiveTotalTokens = finiteNumber(usage.totalTokens) ?? (isInterrupted ? 0 : undefined);
 
     // Pairing key: OTLP converter pairLlm matches by gen_ai.response.id on
     // both request and response. Mirror responseId onto the request so the
@@ -261,13 +290,13 @@ export class ZcodeRolloutInput extends BaseSessionInput {
       'gen_ai.agent.type': ClientType.ZcodeHook,
       'gen_ai.request.model': modelId,
       'gen_ai.response.model': stringValue(response.modelId) ?? modelId,
-      ...(finishReasons ? { 'response.finish_reasons': finishReasons } : {}),
-      'gen_ai.usage.input_tokens': finiteNumber(usage.inputTokens),
-      'gen_ai.usage.output_tokens': finiteNumber(usage.outputTokens),
-      'gen_ai.usage.cache_read.input_tokens': finiteNumber(usage.cacheReadTokens),
-      'gen_ai.usage.cache_creation.input_tokens': finiteNumber(usage.cacheWriteTokens),
-      'gen_ai.usage.total_tokens': finiteNumber(usage.totalTokens),
-      ...(outputMessages ? { 'gen_ai.output.messages': outputMessages } : {}),
+      ...(effectiveFinishReasons ? { 'response.finish_reasons': effectiveFinishReasons } : {}),
+      'gen_ai.usage.input_tokens': effectiveInputTokens,
+      'gen_ai.usage.output_tokens': effectiveOutputTokens,
+      'gen_ai.usage.cache_read.input_tokens': effectiveCacheRead,
+      'gen_ai.usage.cache_creation.input_tokens': effectiveCacheWrite,
+      'gen_ai.usage.total_tokens': effectiveTotalTokens,
+      ...(effectiveOutputMessages ? { 'gen_ai.output.messages': effectiveOutputMessages } : {}),
       attributes: baseAttrs,
     });
 
@@ -461,6 +490,78 @@ function toGenAiSystemInstructions(raw: unknown): JsonValue | undefined {
     return parts.length > 0 ? (parts as unknown as JsonValue) : undefined;
   }
   return toJsonValue(raw);
+}
+
+/**
+ * Extract system instructions from request.messages:
+ *   - All messages with role='system' (ZCode puts 2-3 system messages here)
+ *   - <system-reminder>...</system-reminder> blocks embedded in user messages
+ *     (ZCode injects context like currentDate, available skills, etc.)
+ *
+ * Returns GenAI parts array [{type:'text', content}].
+ */
+function extractSystemFromMessages(raw: unknown): JsonValue | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const parts: unknown[] = [];
+  for (const m of raw) {
+    const rec = asRecord(m);
+    const role = stringValue(rec.role);
+    if (role === 'system') {
+      const content = rec.content;
+      if (typeof content === 'string' && content.length > 0) {
+        parts.push({ type: 'text', content });
+      } else if (Array.isArray(content)) {
+        for (const c of content) {
+          const cRec = asRecord(c);
+          const text = stringValue(cRec.text) ?? stringValue(cRec.content);
+          if (text !== undefined) parts.push({ type: 'text', content: text });
+        }
+      }
+    } else if (role === 'user') {
+      const content = rec.content;
+      if (typeof content === 'string') {
+        for (const block of extractSystemReminderBlocks(content)) {
+          parts.push({ type: 'text', content: block });
+        }
+      } else if (Array.isArray(content)) {
+        for (const c of content) {
+          const cRec = asRecord(c);
+          const text = stringValue(cRec.text) ?? stringValue(cRec.content);
+          if (text !== undefined) {
+            for (const block of extractSystemReminderBlocks(text)) {
+              parts.push({ type: 'text', content: block });
+            }
+          }
+        }
+      }
+    }
+  }
+  return parts.length > 0 ? (parts as unknown as JsonValue) : undefined;
+}
+
+const SYSTEM_REMINDER_RE = /<system-reminder>([\s\S]*?)<\/system-reminder>/g;
+
+function extractSystemReminderBlocks(text: string): string[] {
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  SYSTEM_REMINDER_RE.lastIndex = 0;
+  while ((m = SYSTEM_REMINDER_RE.exec(text)) !== null) {
+    const block = m[1].trim();
+    if (block.length > 0) out.push(block);
+  }
+  return out;
+}
+
+function mergeSystemInstructions(
+  a: JsonValue | undefined,
+  b: JsonValue | undefined,
+): JsonValue | undefined {
+  if (a === undefined && b === undefined) return undefined;
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  const aArr = Array.isArray(a) ? a : [a];
+  const bArr = Array.isArray(b) ? b : [b];
+  return [...aArr, ...bArr] as unknown as JsonValue;
 }
 
 function mapFinishReason(raw: string | undefined): string[] | undefined {
