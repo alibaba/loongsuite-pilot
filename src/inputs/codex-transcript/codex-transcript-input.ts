@@ -126,6 +126,7 @@ export class CodexTranscriptInput extends BaseInput {
       };
     } else if (checkpoint.inode !== stat.ino) {
       await this.baselineFile(filePath, key);
+      this.saveGlobalEmittedTurnIds();
       return [];
     }
 

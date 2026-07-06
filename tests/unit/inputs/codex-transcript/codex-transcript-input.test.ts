@@ -127,6 +127,7 @@ async function createInput(root: string): Promise<{
   entries: AgentActivityEntry[];
   sessionDir: string;
   wakeupDir: string;
+  stateStore: StateStore;
 }> {
   const stateStore = new StateStore(path.join(root, 'input-state.json'));
   await stateStore.load();
@@ -136,7 +137,7 @@ async function createInput(root: string): Promise<{
   const entries: AgentActivityEntry[] = [];
   input.on('entries', batch => entries.push(...batch));
   await input.start();
-  return { input, entries, sessionDir, wakeupDir };
+  return { input, entries, sessionDir, wakeupDir, stateStore };
 }
 
 async function writeTranscript(sessionDir: string, text: string): Promise<string> {
@@ -496,6 +497,133 @@ describe('CodexTranscriptInput', () => {
     expect(responsesForTurn(entries, 'turn-2')).toHaveLength(1);
     expect(responsesForTurn(entries, 'turn-1')[0]?.['gen_ai.usage.total_tokens']).toBe(110);
     expect(responsesForTurn(entries, 'turn-2')[0]?.['gen_ai.usage.total_tokens']).toBe(132);
+  });
+
+  it('keeps fork dedupe after restarting the Codex transcript input', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-fork-restart-'));
+    tempDirs.push(root);
+    const first = await createInput(root);
+
+    const originalTurn = simpleCompletedTurn(
+      'session-1',
+      'turn-1',
+      'fix it',
+      'fixed once',
+      100,
+      10,
+      '2026-06-24T06:00:00.000Z',
+    );
+    await writeTranscriptNamed(first.sessionDir, 'rollout-original.jsonl', originalTurn.join('\n') + '\n');
+
+    await waitFor(() => responsesForTurn(first.entries, 'turn-1').length === 1);
+    await first.input.stop();
+
+    const restarted = await createInput(root);
+    const forkedHistory = simpleCompletedTurn(
+      'session-1',
+      'turn-1',
+      'fix it',
+      'fixed once',
+      100,
+      10,
+      '2026-06-24T06:10:00.000Z',
+    );
+    const forkedNewTurn = simpleCompletedTurn(
+      'session-1',
+      'turn-2',
+      'continue from the fork',
+      'fixed twice',
+      120,
+      12,
+      '2026-06-24T06:11:00.000Z',
+    ).slice(1);
+    await writeTranscriptNamed(
+      restarted.sessionDir,
+      'rollout-fork.jsonl',
+      [...forkedHistory, ...forkedNewTurn].join('\n') + '\n',
+    );
+
+    await waitFor(() => responsesForTurn(restarted.entries, 'turn-2').length === 1);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await restarted.input.stop();
+
+    expect(responsesForTurn(restarted.entries, 'turn-1')).toHaveLength(0);
+    expect(responsesForTurn(restarted.entries, 'turn-2')).toHaveLength(1);
+    expect(responsesForTurn(restarted.entries, 'turn-2')[0]?.['gen_ai.usage.total_tokens']).toBe(132);
+  });
+
+  it('persists global fork dedupe after baselining an inode-changed transcript file', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-fork-inode-'));
+    tempDirs.push(root);
+    const first = await createInput(root);
+
+    const originalTurn = simpleCompletedTurn(
+      'session-1',
+      'turn-1',
+      'fix it',
+      'fixed once',
+      100,
+      10,
+      '2026-06-24T06:00:00.000Z',
+    );
+    const transcript = await writeTranscriptNamed(
+      first.sessionDir,
+      'rollout-original.jsonl',
+      originalTurn.join('\n') + '\n',
+    );
+    await waitFor(() => responsesForTurn(first.entries, 'turn-1').length === 1);
+
+    await fs.rm(transcript);
+    const replacementTurn = simpleCompletedTurn(
+      'session-1',
+      'turn-2',
+      'fix it again',
+      'fixed from replacement',
+      200,
+      20,
+      '2026-06-24T06:20:00.000Z',
+    );
+    await fs.writeFile(transcript, replacementTurn.join('\n') + '\n', 'utf8');
+    const replacementStat = await fs.stat(transcript);
+    const checkpointKey = `codex-transcript:${transcript}`;
+    await waitFor(() => {
+      const checkpoint = first.stateStore.get(checkpointKey).extra?.codexTranscript as { inode?: number } | undefined;
+      return checkpoint?.inode === replacementStat.ino;
+    });
+    await first.input.stop();
+
+    const restarted = await createInput(root);
+    const forkedHistory = simpleCompletedTurn(
+      'session-1',
+      'turn-2',
+      'fix it again',
+      'fixed from replacement',
+      200,
+      20,
+      '2026-06-24T06:30:00.000Z',
+    );
+    const forkedNewTurn = simpleCompletedTurn(
+      'session-1',
+      'turn-3',
+      'continue after inode change',
+      'fixed after inode change',
+      300,
+      30,
+      '2026-06-24T06:31:00.000Z',
+    ).slice(1);
+    await writeTranscriptNamed(
+      restarted.sessionDir,
+      'rollout-fork.jsonl',
+      [...forkedHistory, ...forkedNewTurn].join('\n') + '\n',
+    );
+
+    await waitFor(() => responsesForTurn(restarted.entries, 'turn-3').length === 1);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await restarted.input.stop();
+
+    expect(responsesForTurn(restarted.entries, 'turn-2')).toHaveLength(0);
+    expect(responsesForTurn(restarted.entries, 'turn-3')).toHaveLength(1);
+    expect(responsesForTurn(restarted.entries, 'turn-3')[0]?.['gen_ai.usage.total_tokens']).toBe(330);
   });
 
   it('waits for task_complete before exporting a Stop-triggered transcript', async () => {
