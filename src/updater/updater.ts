@@ -202,6 +202,7 @@ export class Updater {
         });
         this.consecutiveFailures = 0;
         this.nextCheckAt = 0;
+        await this.gcOldVersions();
         await this.writeHeartbeat();
         return;
       }
@@ -242,6 +243,7 @@ export class Updater {
       });
 
       await this.restartMonitorIfRunning();
+      await this.gcOldVersions();
       this.consecutiveFailures = 0;
       this.nextCheckAt = 0;
       await this.writeHeartbeat();
@@ -740,6 +742,10 @@ export class Updater {
     const { versionsDir, currentFile, previousFile } = this.paths;
     try {
       const currentName = await this.readPointerFile(currentFile);
+      if (!currentName) {
+        logger.debug('skipping version gc: current pointer missing');
+        return;
+      }
       const previousName = await this.readPointerFile(previousFile);
 
       let entries: string[];
