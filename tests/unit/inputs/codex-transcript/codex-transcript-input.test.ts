@@ -572,8 +572,8 @@ describe('CodexTranscriptInput', () => {
       originalTurn.join('\n') + '\n',
     );
     await waitFor(() => responsesForTurn(first.entries, 'turn-1').length === 1);
+    const originalStat = await fs.stat(transcript);
 
-    await fs.rm(transcript);
     const replacementTurn = simpleCompletedTurn(
       'session-1',
       'turn-2',
@@ -583,8 +583,11 @@ describe('CodexTranscriptInput', () => {
       20,
       '2026-06-24T06:20:00.000Z',
     );
-    await fs.writeFile(transcript, replacementTurn.join('\n') + '\n', 'utf8');
+    const replacementTranscript = `${transcript}.replacement`;
+    await fs.writeFile(replacementTranscript, replacementTurn.join('\n') + '\n', 'utf8');
+    await fs.rename(replacementTranscript, transcript);
     const replacementStat = await fs.stat(transcript);
+    expect(replacementStat.ino).not.toBe(originalStat.ino);
     const checkpointKey = `codex-transcript:${transcript}`;
     await waitFor(() => {
       const checkpoint = first.stateStore.get(checkpointKey).extra?.codexTranscript as { inode?: number } | undefined;
