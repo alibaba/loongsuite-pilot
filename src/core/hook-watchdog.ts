@@ -401,6 +401,20 @@ export class HookWatchdog {
         installArgs: ['install'],
         markers: ['otel-codex-hook', 'opentelemetry.instrumentation.codex'],
       },
+      {
+        agentId: 'zcode',
+        settingsPath: resolveHome('~/.zcode/cli/config.json'),
+        expectedHooks: [
+          'SessionStart',
+          'UserPromptSubmit',
+          'PreToolUse',
+          'PostToolUse',
+          'Stop',
+        ],
+        binPath: '',
+        installArgs: [],
+        markers: ['loongsuite-pilot BEGIN zcode-hook', 'zcode-loongsuite-pilot-hook'],
+      },
     ];
   }
 

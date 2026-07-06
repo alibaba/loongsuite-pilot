@@ -83,6 +83,33 @@ export interface AgentHookConfig {
    * inject_claude_code_fetch_intercept).
    */
   env?: Record<string, string>;
+  /**
+   * Path prefix inserted before the event name when constructing hookJsonPath
+   * for HookManager. Default ['hooks'] (writes to settings.hooks.<event>).
+   * ZCode uses ['hooks', 'events'] because its config schema nests event
+   * arrays under settings.hooks.events.<event>.
+   */
+  hookContainerPath?: string[];
+  /**
+   * Top-level settings fields to deep-merge into the agent's config file on
+   * deploy (shallow per-level merge; leaf values overwrite). Used for agents
+   * like ZCode that require a sibling flag (e.g. settings.hooks.enabled=true)
+   * for the registered hook entries to fire.
+   */
+  extraSettings?: Record<string, unknown>;
+  /**
+   * Hook executor type as configured in the agent's settings file
+   * (e.g. "command" vs "process"). Informational; recorded here per
+   * architect CP2 hard-constraint to make the chosen hook type explicit
+   * and auditable. HookStrategy does not branch on this value — the
+   * command/hookCommand is what gets written.
+   */
+  hookType?: 'command' | 'process';
+  /**
+   * Free-form rationale documenting why hookType was chosen. Paired with
+   * hookType for traceability.
+   */
+  hookTypeRationale?: string;
 }
 
 export interface PluginSourceConfig {

@@ -1,0 +1,22 @@
+{
+  "model": "bigmodel/glm-4.7",
+  "provider": {
+    "bigmodel": {
+      "kind": "anthropic",
+      "options": {
+        "baseURL": "http://127.0.0.1:8765",
+        "apiKey": "MOCK_KEY"
+      }
+    }
+  },
+  "hooks": {
+    "enabled": true,
+    "events": {
+      "SessionStart": [{"hooks":[{"type":"command","command":"/tmp/zcode-hooks/log-hook.sh"}]}],
+      "UserPromptSubmit": [{"hooks":[{"type":"command","command":"/tmp/zcode-hooks/log-hook.sh"}]}],
+      "PreToolUse": [{"hooks":[{"type":"command","command":"/tmp/zcode-hooks/log-hook.sh"}]}],
+      "PostToolUse": [{"hooks":[{"type":"command","command":"/tmp/zcode-hooks/log-hook.sh"}]}],
+      "Stop": [{"hooks":[{"type":"command","command":"/tmp/zcode-hooks/log-hook.sh"}]}]
+    }
+  }
+}

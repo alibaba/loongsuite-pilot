@@ -40,6 +40,8 @@ import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcrip
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
+import { ZcodeLogInput } from '../inputs/zcode-log/zcode-log-input.js';
+import { ZcodeRolloutInput } from '../inputs/zcode-rollout/zcode-rollout-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { HookWatchdog, type PluginCheckTarget } from './hook-watchdog.js';
@@ -92,6 +94,8 @@ export class Orchestrator extends EventEmitter {
     'opencode-log': 'opencode',
     'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
+    'zcode-log': 'zcode',
+    'zcode-rollout': 'zcode',
   };
 
   private readonly config: AnalyticsConfig;
@@ -946,6 +950,53 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['wukong']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['wukong']?.pollInterval,
+      }),
+    );
+
+    // --- ZCode Log (Shell Hook JSONL, main path) ---
+    // Hook-driven events from ZCode's built-in Claude-Code-compatible hook
+    // system (SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/Stop).
+    // Payloads carry rich fields (tool inputs, prompts, response text);
+    // processor writes daily-rotated JSONL, this input tails it.
+    const zcodeLogDir = path.join(this.dataDir, 'logs', 'zcode');
+    await ensureDir(zcodeLogDir);
+    const zcodeLogInput = new ZcodeLogInput({
+      stateStore: this.stateStore,
+      logDir: zcodeLogDir,
+    });
+    this.inputManager.registerInput(zcodeLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(zcodeLogInput, {
+        watchPaths: [zcodeLogDir],
+        isAvailable: async () => directoryExists(zcodeLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['zcode-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'zcode-log',
+            listenerCfg['zcode-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['zcode-log']?.pollInterval,
+      }),
+    );
+
+    // --- ZCode Rollout (per-session JSONL tail, LLM payload supplement) ---
+    // Independent Input class per architect CP2 hard-constraint: ZCode writes
+    // one model-io-sess_<sid>.jsonl per session in ~/.zcode/cli/rollout/, each
+    // record carrying full LLM request (messages/tools/system) + response
+    // (text/toolCalls/usage). BaseSessionInput provides per-file inode-aware
+    // offset tracking; BaseHookInput's daily-rotated single-file model can't
+    // carry this per-session naming.
+    const zcodeRolloutInput = new ZcodeRolloutInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(zcodeRolloutInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(zcodeRolloutInput, {
+        watchPaths: ZcodeRolloutInput.getWatchPaths(),
+        isAvailable: ZcodeRolloutInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['zcode-rollout']) &&
+          this.agentControlManager.resolveEnabled(
+            'zcode-rollout',
+            listenerCfg['zcode-rollout']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['zcode-rollout']?.pollInterval,
       }),
     );
 

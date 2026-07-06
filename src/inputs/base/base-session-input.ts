@@ -86,8 +86,14 @@ export abstract class BaseSessionInput extends BaseInput {
         if (!line.trim()) continue;
         try {
           const parsed = JSON.parse(line) as Record<string, unknown>;
-          const entry = await this.processSessionLine(parsed, filePath);
-          if (entry) entries.push(entry);
+          const result = await this.processSessionLine(parsed, filePath);
+          if (Array.isArray(result)) {
+            for (const e of result) {
+              if (e) entries.push(e);
+            }
+          } else if (result) {
+            entries.push(result);
+          }
         } catch (err) {
           this.logger.warn('invalid session line', { file: filePath, error: String(err) });
         }
@@ -101,9 +107,11 @@ export abstract class BaseSessionInput extends BaseInput {
   /** Discover session files to process. */
   protected abstract discoverSessionFiles(): Promise<string[]>;
 
-  /** Process a single parsed JSON line from a session file. Return null to skip. */
+  /** Process a single parsed JSON line from a session file. Return null to skip,
+   * a single entry, or an array of entries when one source line expands to
+   * multiple events (e.g. zcode-rollout emits llm.request + llm.response). */
   protected abstract processSessionLine(
     record: Record<string, unknown>,
     filePath: string,
-  ): Promise<AgentActivityEntry | null>;
+  ): Promise<AgentActivityEntry | AgentActivityEntry[] | null>;
 }

@@ -13,6 +13,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'qwen-code-cli': 'qwen-code',
   'opencode': 'opencode',
   'wukong': 'wukong',
+  'zcode': 'zcode',
 };
 
 export function resolveAgentSystem(agentType: string): string {
