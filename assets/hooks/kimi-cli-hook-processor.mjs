@@ -251,6 +251,26 @@ async function exportSession(event, sessionId, isStopFailure) {
   const userId = resolveUserId({}, runtimeConfig);
   const systemPrompt = parseResult.systemPrompt;
   const contextMessages = parseResult.contextMessages || [];
+  const defaultModel = parseResult.defaultModel || 'unknown';
+  const systemInstructions = systemPrompt
+    ? [{ type: 'text', content: systemPrompt }]
+    : [];
+
+  // 收集本 turn 内被调用的所有 tool name（去重），作为 gen_ai.tool_definitions。
+  // kimi wire.jsonl 不携带 tool schema，仅能从实际 ToolCall 事件提取 tool name。
+  const toolDefinitions = [];
+  const seenToolNames = new Set();
+  for (const t of turnsToExport) {
+    for (const s of t.steps) {
+      for (const tc of s.toolCalls) {
+        const name = tc.name;
+        if (name && !seenToolNames.has(name)) {
+          seenToolNames.add(name);
+          toolDefinitions.push({ type: 'function', name });
+        }
+      }
+    }
+  }
 
   const baseTurnCount = state.turn_count || 0;
   const allRecords = [];
@@ -277,6 +297,9 @@ async function exportSession(event, sessionId, isStopFailure) {
       turnStopReason,
       turnErrorContext,
       partial && isLast,
+      defaultModel,
+      systemInstructions,
+      toolDefinitions,
     );
     allRecords.push(...records);
     logHash = hash;
@@ -308,7 +331,7 @@ function saveState(statePath, state) {
 
 // ─── buildTurnRecords — 单 turn 的 JSONL 记录构造 ───
 
-function buildTurnRecords(turn, turnIndex, sessionId, cwd, prevHash, userId, systemPrompt, contextMessages, stopReason, errorContext, partial) {
+function buildTurnRecords(turn, turnIndex, sessionId, cwd, prevHash, userId, systemPrompt, contextMessages, stopReason, errorContext, partial, defaultModel, systemInstructions, toolDefinitions) {
   const records = [];
   const turnId = `${sessionId}:t${turnIndex + 1}`;
   const stepRound = { n: 0 };
@@ -426,6 +449,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, cwd, prevHash, userId, sys
     logFull = shouldLogFullMessages(INITIAL_HASH, delta, currentFullHash) || prevInputMsgs.length === 0;
 
     // llm.request
+    const requestModel = step.model || defaultModel || 'unknown';
     const reqRecord = {
       time_unix_nano: unixFloatToNanos(step.stepBeginTs),
       'event.id': crypto.randomUUID(),
@@ -436,12 +460,18 @@ function buildTurnRecords(turn, turnIndex, sessionId, cwd, prevHash, userId, sys
       'gen_ai.step.id': currentStepId,
       'gen_ai.response.id': responseId,
       'gen_ai.provider.name': 'kimi',
-      'gen_ai.request.model': step.model || 'unknown',
+      'gen_ai.request.model': requestModel,
       'gen_ai.input.messages_hash': currentFullHash,
       'gen_ai.input.messages_delta': convertInputMessages(delta),
     };
     if (logFull) {
       reqRecord['gen_ai.input.messages'] = convertInputMessages(inputMsgs);
+    }
+    if (systemInstructions && systemInstructions.length > 0) {
+      reqRecord['gen_ai.system_instructions'] = systemInstructions;
+    }
+    if (toolDefinitions && toolDefinitions.length > 0) {
+      reqRecord['gen_ai.tool.definitions'] = toolDefinitions;
     }
     records.push(reqRecord);
 
@@ -455,11 +485,13 @@ function buildTurnRecords(turn, turnIndex, sessionId, cwd, prevHash, userId, sys
     const totalTokens = inputTokens + outputTokens;
 
     // llm.response
+    // 时间戳优先用 statusUpdateTs（LLM 响应到达时刻），避免末位 step 0ms duration。
+    const responseTs = step.statusUpdateTs || step.stepEndTs || step.stepBeginTs;
     const finishReason = step.interrupted
       ? 'error'
       : (step.toolCalls.length > 0 ? 'tool_use' : 'stop');
     const respRecord = {
-      time_unix_nano: unixFloatToNanos(step.stepEndTs || step.stepBeginTs),
+      time_unix_nano: unixFloatToNanos(responseTs),
       'event.id': crypto.randomUUID(),
       'event.name': 'llm.response',
       ...baseFields,
@@ -468,8 +500,8 @@ function buildTurnRecords(turn, turnIndex, sessionId, cwd, prevHash, userId, sys
       'gen_ai.step.id': currentStepId,
       'gen_ai.response.id': responseId,
       'gen_ai.provider.name': 'kimi',
-      'gen_ai.request.model': step.model || 'unknown',
-      'gen_ai.response.model': step.model || 'unknown',
+      'gen_ai.request.model': requestModel,
+      'gen_ai.response.model': requestModel,
       'gen_ai.response.finish_reasons': [mapStopReason(finishReason)],
       'gen_ai.usage.input_tokens': inputTokens,
       'gen_ai.usage.output_tokens': outputTokens,

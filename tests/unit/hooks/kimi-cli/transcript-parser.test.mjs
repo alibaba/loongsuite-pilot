@@ -212,6 +212,33 @@ describe('parseKimiTranscript — 场景覆盖', () => {
     expect(r.turns[0].steps[0].toolCalls[0].arguments).toBe('{"cmd":"ls -la"}');
   });
 
+  // fixture 来源: 真实 kimi-cli v1.48.0 + bailian qwen-turbo wire.jsonl
+  // (session 849ecd67-3563-401c-bbba-4ba42a12c211, 2026-07-06)
+  // kimi 的 streaming ToolCallPart 使用 `arguments_part` 字段（非 `arguments`），
+  // 且无 id/name —— 需要回连到最近一个 arguments 为部分 JSON 的 ToolCall。
+  test('kimi 真实 streaming：ToolCallPart(arguments_part, 无 id) 合并到部分 ToolCall', () => {
+    const wire = path.join(TMP, 'wire.jsonl');
+    writeJsonl(wire, [
+      { type: 'metadata', protocol_version: '1.10' },
+      { timestamp: 1783323785.04, message: { type: 'TurnBegin', payload: { user_input: 'parallel read' } } },
+      { timestamp: 1783323785.044, message: { type: 'StepBegin', payload: { n: 1 } } },
+      { timestamp: 1783323785.0441, message: { type: 'ToolCall', payload: { type: 'function', id: 'call_A', function: { name: 'ReadFile', arguments: '{"path": "/etc/hosts", "line_offset": 1, "n_lines": 1000}' }, extras: null } } },
+      { timestamp: 1783323785.0542, message: { type: 'ToolCall', payload: { type: 'function', id: 'call_B', function: { name: 'ReadFile', arguments: '{"' }, extras: null } } },
+      { timestamp: 1783323785.0551, message: { type: 'ToolResult', payload: { tool_call_id: 'call_A', return_value: { is_error: false, output: 'hosts content' } } } },
+      { timestamp: 1783323785.2982, message: { type: 'ToolCallPart', payload: { arguments_part: 'path": "/etc/shells", "line_offset": 1, "n_lines": 1000}' } } },
+      { timestamp: 1783323785.3059, message: { type: 'ToolResult', payload: { tool_call_id: 'call_B', return_value: { is_error: false, output: 'shells content' } } } },
+      { timestamp: 1783323785.4, message: { type: 'TurnEnd', payload: {} } },
+    ]);
+    const r = parseKimiTranscript(wire, null, 0);
+    const step = r.turns[0].steps[0];
+    expect(step.toolCalls.length).toBe(2);
+    expect(step.toolCalls[0].id).toBe('call_A');
+    expect(step.toolCalls[0].arguments).toBe('{"path": "/etc/hosts", "line_offset": 1, "n_lines": 1000}');
+    expect(step.toolCalls[1].id).toBe('call_B');
+    // 关键断言：streaming chunk 已合并，arguments 为完整 JSON
+    expect(step.toolCalls[1].arguments).toBe('{"path": "/etc/shells", "line_offset": 1, "n_lines": 1000}');
+  });
+
   test('StatusUpdate 中 token_usage 与 message_id 被采集到 step', () => {
     const wire = path.join(TMP, 'wire.jsonl');
     writeJsonl(wire, [

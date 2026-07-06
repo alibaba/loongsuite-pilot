@@ -28,6 +28,8 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 export const MAX_WIRE_BYTES = 50 * 1024 * 1024;
 
@@ -178,6 +180,7 @@ export function parseKimiTranscript(wirePath, contextPath, byteOffset = 0) {
       n,
       stepBeginTs: ts,
       stepEndTs: null,
+      statusUpdateTs: null,
       interrupted: false,
       textParts: [],
       thinkParts: [],
@@ -191,7 +194,14 @@ export function parseKimiTranscript(wirePath, contextPath, byteOffset = 0) {
 
   const closeStep = (turn, ts, interrupted) => {
     if (!currentStep) return;
-    currentStep.stepEndTs = ts;
+    // 末位 step 无 tool_call 时，LLM 调用实际结束于 StatusUpdate；用其时间戳作为
+    // stepEndTs，避免回退到 stepBeginTs 导致 LLM/STEP span duration=0ms。
+    // 当 step 有 tool_call 时，step 实际延续到下一个 StepBegin/TurnEnd，沿用 ts。
+    if (currentStep.toolCalls.length === 0 && currentStep.statusUpdateTs) {
+      currentStep.stepEndTs = currentStep.statusUpdateTs;
+    } else {
+      currentStep.stepEndTs = ts;
+    }
     currentStep.interrupted = interrupted;
     turn.steps.push(currentStep);
     currentStep = null;
@@ -251,12 +261,15 @@ export function parseKimiTranscript(wirePath, contextPath, byteOffset = 0) {
       });
     } else if (type === 'ToolCallPart') {
       // ToolCallPart 是 streaming chunk 形式的 tool_call（部分 provider 使用）
+      // kimi 的 ToolCallPart 实际字段是 `arguments_part`（非 `arguments`），且首个 chunk
+      // 通常不带 id/name —— 需要回连到当前 step 内最近一个 arguments 为空/不完整的 ToolCall。
       if (!currentTurn || !currentStep) continue;
       const id = typeof payload.id === 'string' ? payload.id : '';
       const name = typeof payload.name === 'string' ? payload.name : '';
-      // 合并到 toolCalls：若 id 已存在则更新 name/arguments
-      let existing = currentStep.toolCalls.find((c) => c.id && c.id === id);
-      const argChunk = typeof payload.arguments === 'string' ? payload.arguments : '';
+      const argChunk = typeof payload.arguments === 'string'
+        ? payload.arguments
+        : (typeof payload.arguments_part === 'string' ? payload.arguments_part : '');
+      let existing = id ? currentStep.toolCalls.find((c) => c.id && c.id === id) : null;
       if (!existing && id) {
         existing = {
           id,
@@ -265,12 +278,32 @@ export function parseKimiTranscript(wirePath, contextPath, byteOffset = 0) {
           timestamp,
         };
         currentStep.toolCalls.push(existing);
+      } else if (!existing && !id) {
+        // 无 id 的 streaming chunk —— 回连到最近一个 arguments 为空或 JSON 不完整的 ToolCall。
+        for (let i = currentStep.toolCalls.length - 1; i >= 0; i--) {
+          const c = currentStep.toolCalls[i];
+          let isPartial = !c.arguments || c.arguments.trim() === '' || c._streaming;
+          if (!isPartial && c.arguments) {
+            try { JSON.parse(c.arguments); } catch { isPartial = true; }
+          }
+          if (isPartial) {
+            existing = c;
+            c._streaming = true;
+            break;
+          }
+        }
+        if (existing) {
+          if (name) existing.name = name;
+          if (argChunk) existing.arguments = (existing.arguments || '') + argChunk;
+        }
       } else if (existing) {
         if (name) existing.name = name;
         if (argChunk) existing.arguments = (existing.arguments || '') + argChunk;
       }
     } else if (type === 'StatusUpdate') {
       if (!currentTurn || !currentStep) continue;
+      // StatusUpdate 标记 LLM 响应到达；其时间戳是该 step 的 LLM call 真实结束时间。
+      currentStep.statusUpdateTs = timestamp;
       if (payload.token_usage && typeof payload.token_usage === 'object') {
         currentStep.tokenUsage = payload.token_usage;
       }
@@ -300,7 +333,14 @@ export function parseKimiTranscript(wirePath, contextPath, byteOffset = 0) {
 
   // 末尾未闭合的 turn（best-effort：partial=true 时常见）
   if (currentTurn) {
-    if (currentStep) closeStep(currentTurn, currentTurn.endTs || currentStep.stepBeginTs, false);
+    if (currentStep) {
+      // 末位 step 无 tool_call 时优先用 statusUpdateTs（LLM 响应到达时刻），否则用
+      // turn.endTs / stepBeginTs 兜底，避免 0ms duration。
+      const fallbackTs = currentStep.statusUpdateTs
+        || currentTurn.endTs
+        || currentStep.stepBeginTs;
+      closeStep(currentTurn, fallbackTs, false);
+    }
     if (!currentTurn.endTs) {
       // 用最后一个 wire event 的 timestamp 兜底
       const lastTs = wireEvents.length > 0 ? wireEvents[wireEvents.length - 1].timestamp : currentTurn.promptTs;
@@ -318,7 +358,26 @@ export function parseKimiTranscript(wirePath, contextPath, byteOffset = 0) {
     partial: false,
     systemPrompt,
     contextMessages,
+    defaultModel: readKimiDefaultModel(),
   };
+}
+
+/**
+ * 从 ~/.kimi/config.toml 提取 default_model。
+ * kimi wire.jsonl 不携带 model 信息，需要从配置文件读取以填充
+ * gen_ai.request.model / gen_ai.response.model。
+ */
+function readKimiDefaultModel() {
+  const home = os.homedir ? os.homedir() : (process.env.HOME || '/');
+  const configPath = path.join(home, '.kimi', 'config.toml');
+  let raw;
+  try {
+    raw = fs.readFileSync(configPath, 'utf-8');
+  } catch {
+    return null;
+  }
+  const m = raw.match(/^default_model\s*=\s*"([^"]+)"/m);
+  return m ? m[1] : null;
 }
 
 /**
