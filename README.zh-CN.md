@@ -6,6 +6,12 @@
 
 LoongSuite Pilot 是一个运行在开发者本机的 AI Coding Agent 遥测采集器。它可以发现本机已安装的支持 Agent，部署所需的 Hook 或插件，将不同 Agent 的活动数据归一化为统一的 GenAI 事件 Schema，并输出到本地日志、SLS、HTTP 或 Trace 后端。
 
+<p align="center">
+  <img src="docs/_assets/img/dashboard.png" alt="LoongSuite Pilot 本地 Dashboard" width="880">
+  <br>
+  <em>本地 Dashboard —— 一眼掌握多 Agent 采集状态、Token 用量与上报健康度。</em>
+</p>
+
 ## 为什么需要 LoongSuite Pilot？
 
 团队里常常会同时使用多个 AI Coding Agent，而每个 Agent 的本地数据格式、Hook 机制和日志结构都不一样。Pilot 提供一个统一的本机采集器，负责发现 Agent、采集活动、统一字段，并把数据送到适合分析、审计和可观测性的目标端。
@@ -121,6 +127,16 @@ loongsuite-pilot monitor start
 ```
 
 然后打开 `http://127.0.0.1:8765/`。
+
+macOS 菜单栏 App：
+
+在 macOS 上，Pilot 安装完成后会自动常驻菜单栏，无需额外命令。它实时展示 Token、会话、请求、工具调用数量，以及按 Agent 和 Provider 的分布，让你不用打开 Dashboard 也能随时掌握活动情况。
+
+<p align="center">
+  <img src="docs/_assets/img/menubar.jpg" alt="LoongSuite Pilot macOS 菜单栏 App" width="360">
+</p>
+
+如需关闭，设置环境变量 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false`，或在 `~/.loongsuite-pilot/config.json` 中加入 `"enableStatusBarApp": false`。
 
 ## 文档
 

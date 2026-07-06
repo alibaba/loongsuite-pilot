@@ -6,6 +6,12 @@ English | [简体中文](README.zh-CN.md)
 
 LoongSuite Pilot is a local telemetry collector for AI coding agents. It discovers supported agents on a developer machine, installs the required hooks or plugins, normalizes activity into a shared GenAI event schema, and exports logs or traces to your chosen backends.
 
+<p align="center">
+  <img src="docs/_assets/img/dashboard.png" alt="LoongSuite Pilot local dashboard" width="880">
+  <br>
+  <em>Local dashboard — multi-agent collection status, token usage, and reporting health at a glance.</em>
+</p>
+
 ## Why LoongSuite Pilot?
 
 Development teams often use more than one AI coding agent, and each agent records activity in a different local format. Pilot gives teams one local collector that can discover those agents, collect their activity, normalize the data, and send it to destinations that are useful for analysis, audit, and observability.
@@ -140,6 +146,16 @@ loongsuite-pilot monitor start
 ```
 
 Then open `http://127.0.0.1:8765/`.
+
+macOS menu bar app:
+
+On macOS, Pilot automatically runs a menu bar app after installation — no extra command needed. It shows live token, session, request, and tool counts, plus per-agent and per-provider breakdowns, so you can keep an eye on activity without opening the dashboard.
+
+<p align="center">
+  <img src="docs/_assets/img/menubar.jpg" alt="LoongSuite Pilot macOS menu bar app" width="360">
+</p>
+
+To disable it, set `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false` or add `"enableStatusBarApp": false` to `~/.loongsuite-pilot/config.json`.
 
 ## Documentation
 
