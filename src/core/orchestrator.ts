@@ -40,6 +40,7 @@ import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcrip
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
+import { KimiLogInput } from '../inputs/kimi-log/kimi-log-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { HookWatchdog, type PluginCheckTarget } from './hook-watchdog.js';
@@ -92,6 +93,7 @@ export class Orchestrator extends EventEmitter {
     'opencode-log': 'opencode',
     'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
+    'kimi-log': 'kimi',
   };
 
   private readonly config: AnalyticsConfig;
@@ -359,13 +361,18 @@ export class Orchestrator extends EventEmitter {
       if (def.deployMode !== 'hook' || !def.hook) continue;
 
       const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
-      targets.push({
+      const target: PluginCheckTarget = {
         agentId: def.id,
         settingsPath: def.hook.settingsPath,
         expectedHooks: def.hook.events,
         markers: [scriptName],
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
-      });
+      };
+      if (def.hook.settingsFormat === 'toml') {
+        target.settingsFormat = 'toml';
+        target.tomlHookCommand = def.hook.hookCommand;
+      }
+      targets.push(target);
     }
 
     return targets;
@@ -946,6 +953,27 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['wukong']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['wukong']?.pollInterval,
+      }),
+    );
+
+    // --- Kimi CLI Log (wire.jsonl-driven hook JSONL) ---
+    const kimiLogDir = path.join(this.dataDir, 'logs', 'kimi');
+    await ensureDir(kimiLogDir);
+    const kimiLogInput = new KimiLogInput({
+      stateStore: this.stateStore,
+      logDir: kimiLogDir,
+    });
+    this.inputManager.registerInput(kimiLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(kimiLogInput, {
+        watchPaths: [kimiLogDir],
+        isAvailable: async () => directoryExists(kimiLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['kimi-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'kimi-log',
+            listenerCfg['kimi-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['kimi-log']?.pollInterval,
       }),
     );
 

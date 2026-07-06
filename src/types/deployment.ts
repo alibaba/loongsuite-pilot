@@ -46,6 +46,13 @@ export interface AgentHookConfig {
    */
   trustToml?: TrustTomlConfig;
   /**
+   * Settings file format. Defaults to 'json' (Claude Code / Cursor / Codex
+   * hooks.json). Set to 'toml' for agents whose settings live in a TOML file
+   * (Kimi CLI ~/.kimi/config.toml) — HookStrategy dispatches to the
+   * kimi-config-writer instead of the JSON HookManager path.
+   */
+  settingsFormat?: 'json' | 'toml';
+  /**
    * 是否给每个 event 拼 subcommand 后缀（kebab-case）。默认 undefined（共享 command，
    * 适用 Cursor / Qoder 等 stdin 自带 hook_event_name 的 agent）。
    *

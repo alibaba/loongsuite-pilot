@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import type { HookWatchdogConfig } from '../types/index.js';
 import { directoryExists, fileExists, readJsonFile, resolveHome } from '../utils/fs-utils.js';
+import { listInstalledKimiEvents } from '../deployment/kimi-config-writer.js';
 import { createLogger } from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
@@ -20,6 +21,17 @@ export interface PluginCheckTarget {
   expectedHooks: string[];
   /** Substrings that identify our hook command in settings.json */
   markers: string[];
+  /**
+   * Settings file format. Defaults to 'json'. When 'toml', the watchdog uses
+   * kimi-config-writer to verify installed events instead of readJsonFile +
+   * settings.hooks[event] lookup (TOML files are not JSON-parseable).
+   */
+  settingsFormat?: 'json' | 'toml';
+  /**
+   * For TOML agents: the resolved pilot hook command used to identify our
+   * [[hooks]] entries in config.toml. Required when settingsFormat === 'toml'.
+   */
+  tomlHookCommand?: string;
 
   /** External command binary path (for plugin-type repair). Required if repairFn is not set. */
   binPath?: string;
@@ -156,8 +168,9 @@ export class HookWatchdog {
       }
     }
 
-    const settings = await readJsonFile<Record<string, unknown>>(target.settingsPath);
-    const missing = this.findMissingHooks(settings, target);
+    const missing = target.settingsFormat === 'toml'
+      ? await this.findMissingTomlHooks(target)
+      : this.findMissingHooks(await readJsonFile<Record<string, unknown>>(target.settingsPath), target);
     const found = target.expectedHooks.length - missing.length;
 
     if (missing.length === 0) {
@@ -224,6 +237,19 @@ export class HookWatchdog {
     }
 
     return missing;
+  }
+
+  /**
+   * TOML-format agent (Kimi CLI) 的 missing-hooks 检查。
+   * 用 kimi-config-writer.listInstalledKimiEvents 读 config.toml 的 [[hooks]] 段，
+   * 比对 expectedHooks 与已安装 events（command === tomlHookCommand）。
+   */
+  private async findMissingTomlHooks(target: PluginCheckTarget): Promise<string[]> {
+    if (!target.tomlHookCommand) return [...target.expectedHooks];
+    const installed = new Set(
+      await listInstalledKimiEvents(target.settingsPath, target.tomlHookCommand),
+    );
+    return target.expectedHooks.filter((event) => !installed.has(event));
   }
 
   private entryContainsMarker(entry: unknown, markers: string[]): boolean {
