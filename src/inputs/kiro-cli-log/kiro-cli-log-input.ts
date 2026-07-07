@@ -8,6 +8,12 @@ export class KiroCliLogInput extends BaseHookInput {
   readonly id = 'kiro-cli-log';
   readonly agentType = ClientType.KiroCli;
 
+  // Kiro's hook JSONL is written by the daemon's own delayedCollect subprocess,
+  // so no daemon ⇒ no records. A cold start (state wiped) therefore always
+  // means "restart with stale already-dispatched data" — safe to keep only the
+  // last turn and skip the replay.
+  protected coldStartKeepLastTurnOnly = true;
+
   constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
       stateStore: opts!.stateStore,
