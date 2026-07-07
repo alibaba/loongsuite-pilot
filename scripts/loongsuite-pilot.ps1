@@ -45,7 +45,11 @@ $INIT_TYPE_FILE = Join-Path $DATA_DIR "init-type"
 # user cannot delete or overwrite the first user's task (Access is denied), so it
 # would fail with "already exists" and drop to the background fallback. The shared
 # \LoongsuitePilot folder stays cross-user writable; only the task name is scoped.
-$USER_TAG = ($env:USERNAME -replace '[^A-Za-z0-9._-]', '_')
+# Tag from whoami (DOMAIN\user) -- the same identity used for the task principal --
+# not $env:USERNAME (bare SAM name): two same-named accounts from different domains
+# (CORP\alice vs DEV\alice) would otherwise share one task name and re-introduce the
+# cross-user "already exists" collision this scoping is meant to prevent.
+$USER_TAG = ((whoami) -replace '[^A-Za-z0-9._-]', '_')
 $TASK_NAME_COLLECTOR = "LoongsuitePilot-$USER_TAG"
 $TASK_NAME_UPDATER = "LoongsuitePilotUpdater-$USER_TAG"
 $TASK_FOLDER = "\LoongsuitePilot"
@@ -326,13 +330,25 @@ function Register-PilotTask {
 # avoid quoting issues across the Task Scheduler + wscript layers.
 function New-HiddenTaskAction {
     param([string]$vbsPath, [string]$nodeBin, [string]$entry)
+    # Double any embedded quote so a path with a " cannot terminate the VBScript
+    # string literal early (defensive: Windows paths cannot contain ", but
+    # $CONFIG_FILE/$CACHE_DIR derive from the user-settable LOONGSUITE_PILOT_DATA_DIR).
+    $cfgEsc   = $CONFIG_FILE -replace '"', '""'
+    $cwdEsc   = $CACHE_DIR   -replace '"', '""'
+    $nodeEsc  = $nodeBin     -replace '"', '""'
+    $entryEsc = $entry       -replace '"', '""'
     $vbs = @"
 Set sh = CreateObject("WScript.Shell")
-sh.Environment("PROCESS").Item("AGENT_DATA_COLLECTION_CONFIG") = "$CONFIG_FILE"
-sh.CurrentDirectory = "$CACHE_DIR"
-sh.Run """$nodeBin"" ""$entry""", 0, True
+sh.Environment("PROCESS").Item("AGENT_DATA_COLLECTION_CONFIG") = "$cfgEsc"
+sh.CurrentDirectory = "$cwdEsc"
+sh.Run """$nodeEsc"" ""$entryEsc""", 0, True
 "@
-    Set-Content -Path $vbsPath -Value $vbs -Encoding Default
+    # Unicode (UTF-16 LE + BOM): wscript reads a BOM-less .vbs as the system ANSI
+    # code page, while -Encoding Default is ANSI on Windows PowerShell 5.1 but UTF-8
+    # on PowerShell 7+. A non-ASCII path (e.g. a Chinese %USERPROFILE%) would then be
+    # mojibake and the daemon would fail to launch. A BOM is read correctly
+    # regardless of PowerShell version or system code page.
+    Set-Content -Path $vbsPath -Value $vbs -Encoding Unicode
     return (New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$vbsPath`"" -WorkingDirectory $CACHE_DIR)
 }
 
@@ -420,6 +436,11 @@ function Remove-AllTasks {
         }
         try { schtasks.exe /Delete /TN "$TASK_FOLDER\$name" /F 2>$null | Out-Null } catch {}
         try { schtasks.exe /Delete /TN "$name" /F 2>$null | Out-Null } catch {}
+    }
+    # Clean up the hidden VBScript launchers created by New-HiddenTaskAction so
+    # removing the tasks leaves no orphaned launcher scripts behind.
+    foreach ($vbs in @("collector-launch.vbs", "updater-launch.vbs")) {
+        Remove-Item (Join-Path $BOOTSTRAP_DIR $vbs) -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -515,12 +536,17 @@ function Cmd-Start {
                     return
                 }
             }
-            # Registered but never reached Running: surface the task's last result
-            # instead of silently dropping to the background fallback.
+            # Registered but never reached Running within 10s. The task is installed
+            # with a 5-min watchdog trigger, so do NOT drop to the background fallback:
+            # that would start a second collector alongside the task once the watchdog
+            # fires (duplicate collection). Surface the last result and let the
+            # watchdog keep retrying -- autostart is already configured.
             $t = Get-ScheduledTaskInfo -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
             $rc = if ($t) { "0x{0:X8}" -f $t.LastTaskResult } else { "unknown" }
             Write-Host "Task registered but not running after 10s (LastTaskResult=$rc)." -ForegroundColor Yellow
+            Write-Host "   Autostart is configured; the 5-min watchdog trigger will keep retrying." -ForegroundColor Yellow
             Write-Host "   Check the task in Task Scheduler and the log below." -ForegroundColor Yellow
+            return
         }
     } catch {
         $hr = ""
@@ -530,7 +556,12 @@ function Cmd-Start {
         Write-Host "Task Scheduler registration failed$hr : $($_.Exception.Message)" -ForegroundColor Yellow
     }
 
-    # Fallback: background process (like nohup on Linux)
+    # Fallback: background process (like nohup on Linux).
+    # Remove any task that may have been registered before we hit the error above
+    # (e.g. collector registered, then updater registration threw): leaving it in
+    # place would let its logon/watchdog trigger start a second collector alongside
+    # the background process below. Background mode owns the lifecycle from here.
+    Remove-AllTasks
     Write-Host "Using background process fallback." -ForegroundColor Yellow
     Write-Host "   Service will NOT auto-start on boot." -ForegroundColor Yellow
     Write-Host "   stdout log: $LOG_FILE" -ForegroundColor Yellow
