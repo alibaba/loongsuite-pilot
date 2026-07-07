@@ -681,12 +681,15 @@ describe('ZcodeRolloutInput', () => {
     // status 字段 (entry-builder 把 'error' 归一化为 'failure')
     expect(tr['gen_ai.tool.call.status']).toBe('error');
     expect(tr['tool.result.status']).toBe('failure');
-    // trace/session/turn/step 与同 record 的 LLM span 一致 (确保落入同一 STEP)
+    // trace/session/turn 与同 record 的 LLM span 一致; step.id 留空,
+    // 由 flusher 的 ZcodeStepResolver 按 callId 回填到原始 tool.call 所在
+    // STEP (即上一条 llm.response 声明该 tool_call 的 step), 避免落入
+    // 当前 STEP 导致 tool.call↔tool.result 跨 STEP 配对失败.
     const req = entries.find((e) => e['event.name'] === 'llm.request');
     expect(tr['trace_id']).toBe(req['trace_id']);
     expect(tr['gen_ai.session.id']).toBe(req['gen_ai.session.id']);
     expect(tr['gen_ai.turn.id']).toBe(req['gen_ai.turn.id']);
-    expect(tr['gen_ai.step.id']).toBe(req['gen_ai.step.id']);
+    expect(tr['gen_ai.step.id']).toBeUndefined();
   });
 
   test('G2 v0.15.0: 成功 role=tool 消息 (isError absent/false) 不被合成 tool.result (留给 hook PostToolUse)', async () => {

@@ -333,7 +333,6 @@ export class ZcodeRolloutInput extends BaseSessionInput {
       traceId,
       sessionId,
       turnId,
-      stepId,
       timestampMs: startMs,
       filePath,
       baseAttrs,
@@ -557,13 +556,22 @@ function extractToolDefinitions(record: Record<string, unknown>): JsonValue | un
  * Keyed by gen_ai.tool.call.id (matching the hook's tool.call) so the OTLP
  * converter's pairTool links result to call and orphan synthesis skips the
  * callId (existingResultCallIds contains it).
+ *
+ * STEP attribution: the synthetic tool.result is emitted from the LLM record
+ * that FOLLOWS the failed tool call — i.e. the next turn's request.messages
+ * carry the role=tool error. Attaching this record's stepId would place the
+ * result in the WRONG STEP (the next one), breaking tool.call↔tool.result
+ * pairing (each STEP would hold one end → two TOOL spans for one callId,
+ * half of them empty + 0ms). Instead we leave gen_ai.step.id unset and let
+ * the flusher's ZcodeStepResolver backfill it from the stepIdByCallId map,
+ * which was populated when the PREVIOUS llm.response declared the tool_call.
+ * This keeps the synthetic result in the SAME step as the original tool.call.
  */
 function synthesizeToolResultsFromRollout(args: {
   messages: unknown;
   traceId: string | undefined;
   sessionId: string;
   turnId: string;
-  stepId: string | undefined;
   timestampMs: number;
   filePath: string;
   baseAttrs: Record<string, JsonValue>;
@@ -580,9 +588,11 @@ function synthesizeToolResultsFromRollout(args: {
     const toolName = stringValue(rec.toolName) ?? stringValue(rec.tool_name) ?? '';
     // Timestamp: the role=tool message was ready before this LLM call started,
     // but after the hook's tool.call fired. Using startedAt places the result
-    // after the call (correct ordering) and before the llm.request (correct
-    // STEP containment). Subtract 1ms to keep it strictly before llm.request
-    // in case the OTLP converter sorts within a millisecond.
+    // after the call (correct ordering) and before the llm.request of this
+    // step. Subtract 1ms to keep it strictly before llm.request in case the
+    // OTLP converter sorts within a millisecond. This also gives the TOOL span
+    // a non-zero duration (tool.call time → resultMs), since ZCode's failed
+    // Read fires PreToolUse (start) but never PostToolUse (would-be end).
     const resultMs = Math.max(args.timestampMs - 1, 0);
     const entry = buildAgentActivityEntry({
       timestamp: resultMs,
@@ -592,7 +602,6 @@ function synthesizeToolResultsFromRollout(args: {
       trace_id: args.traceId,
       'gen_ai.session.id': args.sessionId,
       'gen_ai.turn.id': args.turnId,
-      ...(args.stepId ? { 'gen_ai.step.id': args.stepId } : {}),
       'gen_ai.agent.type': ClientType.ZcodeHook,
       'gen_ai.agent.name': 'ZCode',
       'gen_ai.tool.name': toolName,
