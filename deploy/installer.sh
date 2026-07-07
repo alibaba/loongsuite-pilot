@@ -816,6 +816,12 @@ if (selectedAgents) {
 
 fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
 " -- "$PROBE_RESULT"
+    local write_rc=$?
+    if [ "$write_rc" -ne 0 ]; then
+        msg "    ❌ 配置写入失败 (exit $write_rc)，请检查上方 stderr" \
+           "    ❌ Failed to write config (exit $write_rc); see stderr above"
+        return 1
+    fi
     msg "    ✅ 配置已写入" "    ✅ Config written"
     echo ""
 }
