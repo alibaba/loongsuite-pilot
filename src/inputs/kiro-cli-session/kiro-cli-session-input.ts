@@ -14,15 +14,21 @@
  * Strategy
  *   The stop hook no longer reads anything: it just enqueues a "pending stop"
  *   record (cwd + offsets + assistant_response + userId) into
- *   `$PILOT_DATA/state/kiro-cli/pending-stops/ready/`, then returns `{}`
- *   immediately so kiro-cli never blocks on us.
+ *   `$PILOT_DATA/state/kiro-cli/pending-stops/ready/`, then sends SIGUSR1 to
+ *   the daemon (PID read from `$PILOT_DATA/loongsuite-pilot.pid`) and returns
+ *   `{}` immediately so kiro-cli never blocks on us.
  *
- *   This input polls the queue every 30s and, for each pending record older
- *   than `MATURE_DELAY_MS` (default 30s), atomically claims it and spawns
+ *   On SIGUSR1, this input schedules a collect() after `MATURE_DELAY_MS`
+ *   (default 10s) — enough time for the sidecar's `user_turn_metadatas[]` to
+ *   be fully flushed. The collect cycle atomically claims each mature pending
+ *   record (rename ready/ → inflight/) and spawns
  *   `node kiro-cli-hook-processor.mjs delayedCollect <pending-file>`. The
  *   subprocess reads the (now-mature) sidecar, builds full timing-aware
- *   records, and appends them to the daily hook-jsonl. The records are then
- *   picked up by `KiroCliLogInput` via the standard hook-jsonl pipeline.
+ *   records, and appends them to the daily hook-jsonl, picked up by
+ *   KiroCliLogInput via the standard hook-jsonl pipeline.
+ *
+ *   A low-frequency poll (default 60s) runs as fallback in case the SIGUSR1
+ *   signal is lost (e.g. PID file stale, daemon restarted without updating it).
  *
  *   Records older than `MAX_AGE_MS` (default 5 min) are processed with
  *   `--allow-fallback`, accepting whatever timing is available rather than
@@ -44,7 +50,7 @@ import type { AgentActivityEntry } from '../../types/index.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 
-const DEFAULT_MATURE_DELAY_MS = 30_000;
+const DEFAULT_MATURE_DELAY_MS = 10_000;
 const DEFAULT_MAX_AGE_MS = 5 * 60 * 1000;
 const DEFAULT_SUBPROCESS_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_CONCURRENT_PROCESSES = 4;
@@ -54,7 +60,7 @@ export interface KiroCliSessionInputOptions extends InputOptions {
   hookProcessorPath: string;
   /** Root data directory (e.g. ~/.loongsuite-pilot). */
   dataDir: string;
-  /** ms a pending record must age before being processed (default 30s). */
+  /** ms a pending record must age before being processed (default 10s). */
   matureDelayMs?: number;
   /** ms after which we force --allow-fallback (default 5 min). */
   maxAgeMs?: number;
@@ -88,20 +94,24 @@ export class KiroCliSessionInput extends BaseInput {
   private readonly hookProcessorPath: string;
   private readonly readyDir: string;
   private readonly inflightDir: string;
+  private readonly pidFilePath: string;
   private readonly matureDelayMs: number;
   private readonly maxAgeMs: number;
   private readonly subprocessTimeoutMs: number;
   private readonly maxConcurrent: number;
+  private pendingCollectTimer: ReturnType<typeof setTimeout> | null = null;
+  private signalHandler: (() => void) | null = null;
 
   constructor(opts: KiroCliSessionInputOptions) {
     super({
       stateStore: opts.stateStore,
-      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts.pollIntervalMs ?? 60_000,
     });
     this.hookProcessorPath = opts.hookProcessorPath;
     const pendingRoot = path.join(opts.dataDir, 'state', 'kiro-cli', 'pending-stops');
     this.readyDir = path.join(pendingRoot, 'ready');
     this.inflightDir = path.join(pendingRoot, 'inflight');
+    this.pidFilePath = path.join(opts.dataDir, 'loongsuite-pilot.pid');
     this.matureDelayMs = opts.matureDelayMs ?? DEFAULT_MATURE_DELAY_MS;
     this.maxAgeMs = opts.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
     this.subprocessTimeoutMs = opts.subprocessTimeoutMs ?? DEFAULT_SUBPROCESS_TIMEOUT_MS;
@@ -129,6 +139,30 @@ export class KiroCliSessionInput extends BaseInput {
     const recovered = await this.recoverInflight();
     if (recovered > 0) {
       this.logger.info('recovered inflight pending-stops', { count: recovered });
+    }
+    // Register SIGUSR1 handler: stop hook sends this signal after enqueueing
+    // a pending record. We debounce with a single timer so rapid-fire signals
+    // don't stack multiple collect() calls.
+    this.signalHandler = () => {
+      if (this.pendingCollectTimer) clearTimeout(this.pendingCollectTimer);
+      this.pendingCollectTimer = setTimeout(() => {
+        this.pendingCollectTimer = null;
+        this.collect().catch((err) => {
+          this.logger.warn('SIGUSR1-triggered collect failed', { error: String(err) });
+        });
+      }, this.matureDelayMs);
+    };
+    process.on('SIGUSR1', this.signalHandler);
+  }
+
+  protected override async onStop(): Promise<void> {
+    if (this.signalHandler) {
+      process.off('SIGUSR1', this.signalHandler);
+      this.signalHandler = null;
+    }
+    if (this.pendingCollectTimer) {
+      clearTimeout(this.pendingCollectTimer);
+      this.pendingCollectTimer = null;
     }
   }
 
