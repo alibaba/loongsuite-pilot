@@ -1,7 +1,6 @@
 import * as path from 'node:path';
-import { execFile } from 'node:child_process';
 import { AgentDefLoader } from './deployment/agent-def-loader.js';
-import { detectAgent } from './deployment/detect-utils.js';
+import { detectAgent, commandExists } from './deployment/detect-utils.js';
 import { resolveHome, directoryExists, fileExists } from './utils/fs-utils.js';
 
 // This file is always bundled as CJS (build.mjs), so __dirname is guaranteed.
@@ -23,10 +22,7 @@ async function findDetectionReason(detection: { paths: string[]; commands: strin
   }
   for (const cmd of detection.commands) {
     try {
-      const found = await new Promise<boolean>(resolve => {
-        execFile('which', [cmd], err => resolve(!err));
-      });
-      if (found) return `command: ${cmd}`;
+      if (await commandExists(cmd)) return `command: ${cmd}`;
     } catch { /* ignore */ }
   }
   return '';
