@@ -146,6 +146,10 @@ export function parseSessionLines(lines, sidecar) {
         const step = pendingTurnSteps[i];
         step.startTimeMs = baseMs + i * slice;
         step.endTimeMs = step.startTimeMs + slice;
+        // 附加真实 turn 边界，供 buildRecords 用 hook 工具边界重算 LLM 时序。
+        // 无 hook 边界时 startTimeMs/endTimeMs 仍按 even-slice 兜底。
+        step.turnStartMs = baseMs;
+        step.turnEndMs = endTs;
       }
     }
     pendingTurnSteps = [];

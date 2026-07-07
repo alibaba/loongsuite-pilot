@@ -925,3 +925,132 @@ describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor turn.id 每会话递增'
     expect(turn2).not.toBe(turn1);
   });
 });
+
+// ─── MCP 工具匹配 + 真实工具边界重算 LLM 时序 ───
+// 回归 bug：hook 发 @filesystem/write_file，transcript 解析出 write_file（无 @namespace/），
+// 且 hook toolInput 是 snake_case、transcript 是 camelCase。旧 matchToolEvent 按
+// toolName=== && argsEqual 深比 → 全对不上 → tool.call/result 退化为 transcript_estimate，
+// 且 llm.request/response 用 flushTurn 均分假值。Phase 1+2 修复后应拿到真实时间戳。
+
+const MCP_CWD = '/tmp/kiro_mcp_probe';
+const MCP_SID = '11111111-2222-3333-4444-555555555555';
+// 固定时间戳便于确定性断言：turn [09:49:30, 09:50:00]，工具在 09:49:45~09:49:48
+const TS_TURN_START = '2026-07-07T09:49:30.000Z';
+const TS_PRE_START = '2026-07-07T09:49:45.000Z';   // preToolUse startTs = step1 LLM 响应结束
+const TS_POST_CAPTURE = '2026-07-07T09:49:48.000Z'; // postToolUse captureTs = 工具结束
+const TS_TURN_END = '2026-07-07T09:50:00.000Z';
+
+function setupMcpSessionFixtures(dataDir) {
+  const fakeHome = path.join(dataDir, 'fake-home-mcp');
+  const sessionDir = path.join(fakeHome, '.kiro', 'sessions', 'cli');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const sidecar = JSON.parse(
+    fs.readFileSync(path.join(__dirname, 'fixtures/session_mcp_sidecar.json'), 'utf-8'),
+  );
+  const jsonlRaw = fs.readFileSync(
+    path.join(__dirname, 'fixtures/session_mcp_interactive.jsonl'),
+    'utf-8',
+  );
+  fs.writeFileSync(path.join(sessionDir, `${MCP_SID}.json`), JSON.stringify(sidecar));
+  fs.writeFileSync(path.join(sessionDir, `${MCP_SID}.jsonl`), jsonlRaw);
+  return fakeHome;
+}
+
+/** 直接写缓冲文件，绕过 cmdPreToolUse 的 nowIso()，用固定时间戳做确定性验证。 */
+function writeMcpBuffers(dataDir) {
+  const preDir = path.join(dataDir, 'state', 'kiro-cli', 'pre-tool-buffers');
+  const postDir = path.join(dataDir, 'state', 'kiro-cli', 'buffers');
+  fs.mkdirSync(preDir, { recursive: true });
+  fs.mkdirSync(postDir, { recursive: true });
+  const key = Buffer.from(MCP_CWD).toString('base64url');
+  const toolInput = { path: '/tmp/kiro_mcp_probe/out.txt', content: 'hello world' };
+  fs.writeFileSync(
+    path.join(preDir, `${key}.jsonl`),
+    JSON.stringify({ toolName: '@filesystem/write_file', toolInput, startTs: TS_PRE_START }) + '\n',
+  );
+  fs.writeFileSync(
+    path.join(postDir, `${key}.jsonl`),
+    JSON.stringify({
+      toolName: '@filesystem/write_file',
+      toolInput,
+      toolResponse: {
+        success: true,
+        result: [{ content: [{ type: 'text', text: 'Successfully wrote to /tmp/kiro_mcp_probe/out.txt' }] }],
+      },
+      captureTs: TS_POST_CAPTURE,
+    }) + '\n',
+  );
+}
+
+describe('kiro-cli-hook-processor MCP 工具匹配 + 真实时序重算', () => {
+  let fakeHome;
+
+  beforeEach(() => {
+    try { fs.unlinkSync(DB_PATH); } catch {} // 强制 session JSONL 路径
+    fakeHome = setupMcpSessionFixtures(DATA_DIR);
+    writeMcpBuffers(DATA_DIR);
+  });
+
+  test('MCP @filesystem/write_file 匹配 transcript write_file → tool.call/result 为 processor_receive', () => {
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: MCP_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+    const records = readJsonlRecords();
+    const toolCall = records.find((r) => r['event.name'] === 'tool.call');
+    const toolResult = records.find((r) => r['event.name'] === 'tool.result');
+    expect(toolCall).toBeTruthy();
+    expect(toolResult).toBeTruthy();
+    expect(toolCall['gen_ai.tool.name']).toBe('write_file');
+    expect(toolCall['kiro.time_source']).toBe('processor_receive');
+    expect(toolResult['kiro.time_source']).toBe('processor_receive');
+    // tool.call 时间 = preToolUse startTs（真实），tool.result 时间 = postToolUse captureTs
+    expect(toolCall.time_unix_nano).toBe(String(Date.parse(TS_PRE_START)) + '000000');
+    expect(toolResult.time_unix_nano).toBe(String(Date.parse(TS_POST_CAPTURE)) + '000000');
+  });
+
+  test('LLM 时序用真实工具边界重算：step1 response=preStart，step2 request=postCapture', () => {
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: MCP_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+    const records = readJsonlRecords();
+    const nano = (iso) => String(Date.parse(iso)) + '000000';
+    // step1 = ToolUse (write_file)：stepId 为 AssistantMessage messageId
+    const step1Req = records.find((r) => r['event.name'] === 'llm.request' && r['gen_ai.step.id']?.startsWith('bbbbbbbb'));
+    const step1Resp = records.find((r) => r['event.name'] === 'llm.response' && r['gen_ai.step.id']?.startsWith('bbbbbbbb'));
+    const step2Req = records.find((r) => r['event.name'] === 'llm.request' && r['gen_ai.step.id']?.startsWith('dddddddd'));
+    const step2Resp = records.find((r) => r['event.name'] === 'llm.response' && r['gen_ai.step.id']?.startsWith('dddddddd'));
+    expect(step1Req).toBeTruthy();
+    expect(step1Resp).toBeTruthy();
+    expect(step2Req).toBeTruthy();
+    expect(step2Resp).toBeTruthy();
+    // step1: request=turnStart, response=preToolUse.startTs（LLM 响应结束=工具调用开始）
+    expect(step1Req.time_unix_nano).toBe(nano(TS_TURN_START));
+    expect(step1Resp.time_unix_nano).toBe(nano(TS_PRE_START));
+    // step2 (终步): request=postToolUse.captureTs, response=turnEnd
+    expect(step2Req.time_unix_nano).toBe(nano(TS_POST_CAPTURE));
+    expect(step2Resp.time_unix_nano).toBe(nano(TS_TURN_END));
+  });
+
+  test('两 step LLM 耗时不全等（非均分假值）', () => {
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: MCP_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+    const records = readJsonlRecords();
+    const durOf = (prefix) => {
+      const req = records.find((r) => r['event.name'] === 'llm.request' && r['gen_ai.step.id']?.startsWith(prefix));
+      const resp = records.find((r) => r['event.name'] === 'llm.response' && r['gen_ai.step.id']?.startsWith(prefix));
+      return BigInt(resp.time_unix_nano) - BigInt(req.time_unix_nano);
+    };
+    const d1 = durOf('bbbbbbbb'); // 15s
+    const d2 = durOf('dddddddd'); // 12s
+    expect(d1).toBe(BigInt(15_000) * BigInt(1_000_000));
+    expect(d2).toBe(BigInt(12_000) * BigInt(1_000_000));
+    expect(d1).not.toBe(d2); // 不全等 → 非均分
+  });
+});
