@@ -518,22 +518,24 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
 
     if (isSessionJsonl && step.turnStartMs && step.turnStartMs !== currentTurnStartMs) {
       currentTurnStartMs = step.turnStartMs;
-      lastToolResultEndMs = 0; // 新 turn：无前置工具，LLM 起点退回 turnStart
+      lastToolResultEndMs = 0; // 新 turn：无前置工具
     }
     if (isSessionJsonl && step.turnStartMs) {
-      const turnStart = step.turnStartMs;
       const turnEnd = step.turnEndMs || step.endTimeMs;
       const firstPre = toolMatches.find((m) => m.preMatch);
       if (firstPre && firstPre.preMatch) {
-        // ToolUse step：LLM 响应结束 = 工具调用开始（preToolUse startTs）
+        // ToolUse step：LLM 响应结束 = 工具调用开始（preToolUse startTs，真实边界）
         step.endTimeMs = isoToMs(firstPre.preMatch.startTs);
-        step.startTimeMs = lastToolResultEndMs || turnStart;
-      } else if (step.kind === 'NotToolUse') {
-        // 终步（无工具）：LLM 从上一个工具结果后开始，到 turn 结束
-        step.startTimeMs = lastToolResultEndMs || turnStart;
+        // startTimeMs 仅在有真实前置工具边界时覆盖；否则保留 even-slice，
+        // 避免多个无 preMatch 的 step 全塌缩到 turnStart 产生重复 llm.request。
+        if (lastToolResultEndMs > 0) step.startTimeMs = lastToolResultEndMs;
+      } else if (step.kind === 'NotToolUse' && lastToolResultEndMs > 0) {
+        // 终步：仅当存在真实前置工具边界时才重算（startTime=工具结果, endTime=turnEnd）。
+        // 无前置匹配时保留 even-slice（其末步 endTime 本就=turnEnd），避免塌缩到 turnStart。
+        step.startTimeMs = lastToolResultEndMs;
         step.endTimeMs = turnEnd;
       }
-      // else：无 preMatch 且非终步 → 保留 even-slice 兜底
+      // else：无 preMatch 且（非终步 或 无前置边界）→ 保留 even-slice 兜底
       const lastMatched = [...toolMatches].reverse().find((m) => m.matched);
       if (lastMatched && lastMatched.matched) {
         lastToolResultEndMs = isoToMs(lastMatched.matched.captureTs);

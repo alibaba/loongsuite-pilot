@@ -1053,4 +1053,32 @@ describe('kiro-cli-hook-processor MCP 工具匹配 + 真实时序重算', () => 
     expect(d2).toBe(BigInt(12_000) * BigInt(1_000_000));
     expect(d1).not.toBe(d2); // 不全等 → 非均分
   });
+
+  test('无 preToolUse 匹配时 step 不塌缩到 turnStart（无重复 llm.request）', () => {
+    // 清掉 beforeEach 写的缓冲 → 模拟无 preToolUse/postToolUse 匹配（全 transcript_estimate）。
+    // 旧 Phase 2 的 bug：NotToolUse step 的 startTimeMs = lastToolResultEndMs || turnStart，
+    // lastToolResultEndMs=0 时塌缩到 turnStart，和 step0 撞 → 重复 llm.request。
+    // 修复后：无匹配时保留 even-slice，两 step 的 llm.request 时间不同。
+    const preDir = path.join(DATA_DIR, 'state', 'kiro-cli', 'pre-tool-buffers');
+    const postDir = path.join(DATA_DIR, 'state', 'kiro-cli', 'buffers');
+    for (const d of [preDir, postDir]) {
+      try { for (const f of fs.readdirSync(d)) fs.unlinkSync(path.join(d, f)); } catch {}
+    }
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: MCP_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+    const records = readJsonlRecords();
+    const reqs = records.filter((r) => r['event.name'] === 'llm.request');
+    expect(reqs.length).toBeGreaterThanOrEqual(2);
+    // 所有 llm.request 的 time 应互不相同（无 turnStart 塌缩）
+    const times = new Set(reqs.map((r) => r.time_unix_nano));
+    expect(times.size).toBe(reqs.length);
+    // tool.call 应全为 transcript_estimate（无匹配）
+    const toolCalls = records.filter((r) => r['event.name'] === 'tool.call');
+    for (const tc of toolCalls) {
+      expect(tc['kiro.time_source']).toBe('transcript_estimate');
+    }
+  });
 });
