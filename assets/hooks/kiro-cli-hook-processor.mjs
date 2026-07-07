@@ -115,6 +115,13 @@ function isoToUnixNanos(iso) {
   return String(ms) + '000000';
 }
 
+/** ISO 字符串 → epoch ms。用于从 hook 事件 startTs/captureTs 重算 step 时间。 */
+function isoToMs(iso) {
+  if (!iso) return 0;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 // ─── cmd handlers ───
 
 /**
@@ -486,12 +493,52 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
   let prevInputMsgs = [];
   let stepRound = 0;
 
+  // session_jsonl 路径下用真实 hook 工具边界重算 step LLM 时序的游标：
+  //   currentTurnStartMs — 当前 turn 起点，跨 turn 变化时重置 lastToolResultEndMs
+  //   lastToolResultEndMs — 上一个 tool.result 的真实结束，作为下一个 LLM step 的起点
+  const isSessionJsonl = transcript.source === 'session_jsonl';
+  let currentTurnStartMs = NaN;
+  let lastToolResultEndMs = 0;
+
   const steps = transcript.steps;
   const hasFinalResponse = opts.originalHasFinalResponse
     ?? steps.some((s) => s.kind === 'NotToolUse' && s.assistantText);
 
   for (const step of steps) {
     stepRound++;
+
+    // ── 先匹配本 step 全部 tool（session_jsonl 才重算；SQLite 已有真实时序）──
+    // 匹配前置是为了：(1) tool.call/result 复用结果不重复 match；(2) 用真实工具边界
+    // 重算 step.startTimeMs/endTimeMs，让 llm.request/response 不再依赖 flushTurn 均分。
+    const toolMatches = step.tools.map((tool) => ({
+      tool,
+      preMatch: matchToolEvent(preToolEvents, tool),
+      matched: matchToolEvent(toolEvents, tool),
+    }));
+
+    if (isSessionJsonl && step.turnStartMs && step.turnStartMs !== currentTurnStartMs) {
+      currentTurnStartMs = step.turnStartMs;
+      lastToolResultEndMs = 0; // 新 turn：无前置工具，LLM 起点退回 turnStart
+    }
+    if (isSessionJsonl && step.turnStartMs) {
+      const turnStart = step.turnStartMs;
+      const turnEnd = step.turnEndMs || step.endTimeMs;
+      const firstPre = toolMatches.find((m) => m.preMatch);
+      if (firstPre && firstPre.preMatch) {
+        // ToolUse step：LLM 响应结束 = 工具调用开始（preToolUse startTs）
+        step.endTimeMs = isoToMs(firstPre.preMatch.startTs);
+        step.startTimeMs = lastToolResultEndMs || turnStart;
+      } else if (step.kind === 'NotToolUse') {
+        // 终步（无工具）：LLM 从上一个工具结果后开始，到 turn 结束
+        step.startTimeMs = lastToolResultEndMs || turnStart;
+        step.endTimeMs = turnEnd;
+      }
+      // else：无 preMatch 且非终步 → 保留 even-slice 兜底
+      const lastMatched = [...toolMatches].reverse().find((m) => m.matched);
+      if (lastMatched && lastMatched.matched) {
+        lastToolResultEndMs = isoToMs(lastMatched.matched.captureTs);
+      }
+    }
 
     // ── Run-boundary detection: >30s gap = new run ──
     if (prevEndTimeMs > 0 && step.startTimeMs > 0 &&
@@ -624,11 +671,9 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
     prevInputMsgs = inputMsgs;
 
     // tool.call + tool.result: preToolUse 提供 tool.call 真实起点，postToolUse 补 tool_response
-    const isSessionJsonl = transcript.source === 'session_jsonl';
-    for (const tool of step.tools) {
+    // 复用循环顶部已匹配的 toolMatches，不重复 match（重复 match 会因 splice 已消费而返回 null）
+    for (const { tool, preMatch, matched } of toolMatches) {
       const toolSpanId = generateSpanId();
-      const preMatch = matchToolEvent(preToolEvents, tool, 'toolName', 'toolInput');
-      const matched = matchToolEvent(toolEvents, tool, 'toolName', 'toolInput');
       const toolResult = matched ? matched.toolResponse : null;
       const toolTimeNs = matched ? isoToUnixNanos(matched.captureTs) : msToUnixNanos(step.endTimeMs || step.startTimeMs);
 
@@ -784,23 +829,27 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
 }
 
 /**
- * 通用 hook 事件 → tool_use 匹配（consume-on-match）。
- * 同名 + 同 args 确定性匹配；命中即 splice，解决同名同 args 并行工具串台。
+ * 规范化工具名：strip @namespace/ 前缀。
+ * hook 事件对 MCP 工具发 `@filesystem/write_file`，transcript 解析出 `write_file`；
+ * builtin 工具无前缀，不变。规范化后两侧对齐，解决 MCP 工具匹配不上导致
+ * tool.call/result 退化为 transcript_estimate 的问题。
  */
-function matchToolEvent(toolEvents, tool, nameKey = 'toolName', inputKey = 'toolInput') {
-  const idx = toolEvents.findIndex(
-    (e) => e[nameKey] === tool.name && argsEqual(e[inputKey], tool.args),
-  );
-  if (idx === -1) return null;
-  return toolEvents.splice(idx, 1)[0];
+function normalizeToolName(name) {
+  if (!name) return 'unknown';
+  return name.startsWith('@') ? name.slice(name.indexOf('/') + 1) : name;
 }
 
-function argsEqual(a, b) {
-  try {
-    return JSON.stringify(stripMetaKeys(a ?? {})) === JSON.stringify(stripMetaKeys(b ?? {}));
-  } catch {
-    return false;
-  }
+/**
+ * 通用 hook 事件 → tool_use 匹配（consume-on-match，按规范化名 + 顺序消费）。
+ * 命中即 splice，解决同名并行工具串台。
+ * 不再按 args 深比：hook(snake_case) 与 transcript(camelCase) 字段名永对不上，
+ * 且串行工具按顺序消费即可区分（splice first-match 本身就是顺序语义）。
+ */
+function matchToolEvent(toolEvents, tool, nameKey = 'toolName') {
+  const target = normalizeToolName(tool.name);
+  const idx = toolEvents.findIndex((e) => normalizeToolName(e[nameKey]) === target);
+  if (idx === -1) return null;
+  return toolEvents.splice(idx, 1)[0];
 }
 
 function stripMetaKeys(obj) {
