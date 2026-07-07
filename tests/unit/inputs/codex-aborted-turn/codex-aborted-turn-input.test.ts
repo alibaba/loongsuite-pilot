@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { CodexAbortedTurnInput } from '../../../../src/inputs/codex-aborted-turn/codex-aborted-turn-input.js';
+import { SYNTHETIC_ROOT_SPAN_ID } from '../../../../src/normalization/entry-builder.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
 import { CodexLogInput } from '../../../../src/inputs/codex-log/codex-log-input.js';
 import { getTodayDateString } from '../../../../src/utils/fs-utils.js';
@@ -542,6 +543,7 @@ describe('CodexAbortedTurnInput', () => {
         content: '<environment_context>cwd=/tmp/project</environment_context>\n\nsolve the task',
       }],
     }]);
+    expect(promptEntry?.['parent_span_id']).toBe(SYNTHETIC_ROOT_SPAN_ID);
   });
 
   it('recovers an active post-baseline turn after restart', async () => {

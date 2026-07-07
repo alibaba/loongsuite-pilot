@@ -14,6 +14,19 @@ import {
   normalizeInputMessagesDelta,
 } from './normalize-messages.js';
 
+/**
+ * Sentinel span id marking a span's parent as a synthetic external root.
+ *
+ * The OTLP converter (`@loongsuite/otel-util-genai`, `event-log/parent-context.js`
+ * `createTraceParentContext`) assigns exactly this id (`"0".repeat(15) + "1"`) as
+ * the `parentSpanId` of every synthesized ENTRY span. Builders that emit a
+ * top-level prompt span in the JSONL path (where no ENTRY span is synthesized)
+ * use this constant so the JSONL output stays consistent with the converter's
+ * convention: the value is not a real span id, and consumers following the
+ * convention do not attempt to look it up.
+ */
+export const SYNTHETIC_ROOT_SPAN_ID = '0'.repeat(15) + '1';
+
 export interface LegacyAgentActivityOptions {
   sessionId: string;
   userId: string;

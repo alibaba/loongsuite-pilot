@@ -1,5 +1,5 @@
 import * as crypto from 'node:crypto';
-import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalization/entry-builder.js';
+import { buildAgentActivityEntry, SYNTHETIC_ROOT_SPAN_ID, timestampToUnixNanos } from '../../normalization/entry-builder.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import type {
   CodexExtractedTranscriptTurn,
@@ -10,7 +10,6 @@ import type {
 
 export function buildCodexTranscriptEntries(turn: CodexExtractedTranscriptTurn): AgentActivityEntry[] {
   const traceId = hashId([turn.sessionId, turn.transcriptTurnId, 'trace'], 32);
-  const entrySpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'entry'], 16);
   const agentSpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'agent'], 16);
   const turnId = `${turn.sessionId}:${turn.transcriptTurnId}`;
   const model = turn.model || 'unknown';
@@ -34,7 +33,10 @@ export function buildCodexTranscriptEntries(turn: CodexExtractedTranscriptTurn):
       'event.id': hashId([turn.sessionId, turn.transcriptTurnId, 'other'], 32),
       'event.name': 'other',
       span_id: agentSpanId,
-      parent_span_id: entrySpanId,
+      // External synthetic root parent (see SYNTHETIC_ROOT_SPAN_ID). The ENTRY
+      // span it nominally points to is synthesized by the OTLP converter in the
+      // OTLP path and never emitted as a record in the JSONL path.
+      parent_span_id: SYNTHETIC_ROOT_SPAN_ID,
       'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: turn.prompt }] }],
     }));
   }

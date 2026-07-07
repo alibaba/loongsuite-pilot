@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { CodexTranscriptInput } from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
+import { SYNTHETIC_ROOT_SPAN_ID } from '../../../../src/normalization/entry-builder.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
 
 const tempDirs: string[] = [];
@@ -344,6 +345,8 @@ describe('CodexTranscriptInput', () => {
         parts: [{ type: 'text', content: 'fix it\nand run the tests' }],
       }],
     });
+    expect(entries.find(entry => entry['event.name'] === 'other')?.['parent_span_id'])
+      .toBe(SYNTHETIC_ROOT_SPAN_ID);
     expect(entries.find(entry => entry['event.name'] === 'llm.request')).toMatchObject({
       'gen_ai.input.messages_delta': [
         { role: 'user', parts: [{ type: 'text', content: 'fix it' }] },
