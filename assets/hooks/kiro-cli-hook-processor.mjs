@@ -65,6 +65,22 @@ function pilotDataDir() {
   return process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
 }
 
+/**
+ * Send SIGUSR1 to the daemon process so KiroCliSessionInput triggers a
+ * collect cycle after its mature delay, rather than waiting for the next
+ * 60s fallback poll. Failures are silently ignored — the poll fallback
+ * will pick up the pending record within a minute.
+ */
+function wakeDaemon(dataDir) {
+  try {
+    const pidFile = path.join(dataDir, 'loongsuite-pilot.pid');
+    const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+    if (pid > 0) process.kill(pid, 'SIGUSR1');
+  } catch {
+    // PID file missing, stale, or process gone — fallback poll will handle it.
+  }
+}
+
 function defaultLogDir() {
   return path.join(pilotDataDir(), 'logs', AGENT_ID);
 }
@@ -149,7 +165,7 @@ function cmdNoop() {
  * stop: 现在仅"投递"一条 pending 记录到队列，立即返回 {}。
  *  - 不再调用 transcript / session 读取（避免 sidecar 异步写延迟阻塞 kiro-cli）
  *  - 不再 drain 缓冲（postToolUse/preToolUse 缓冲文件由 delayedCollect 接管）
- *  - 真正的采集由主服务侧的 KiroCliSessionInput 延迟 30s 触发 cmdDelayedCollect
+ *  - 真正的采集由主服务侧的 KiroCliSessionInput 延迟触发（SIGUSR1 唤醒 + 10s 成熟延迟）
  *
  * 入队字段：cwd / stop 时刻 / 两条 offset 快照 / assistant_response / userId。
  */
@@ -181,6 +197,10 @@ function cmdStop() {
     assistantResponse: typeof event?.assistant_response === 'string' ? event.assistant_response : null,
     userId,
   });
+
+  // Wake the daemon so KiroCliSessionInput processes the pending record after
+  // its mature delay instead of waiting for the next 60s fallback poll.
+  wakeDaemon(pilotDataDir());
 }
 
 /**
