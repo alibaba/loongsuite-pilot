@@ -250,11 +250,60 @@ function cmdPostToolUse() {
   const toolName = event.tool_name || event.toolName || '';
   const toolInput = event.tool_input || event.toolInput || {};
   const toolCallId = event.tool_use_id || event.toolCallId || '';
-  const toolResultPreview = event.toolResultPreview || '';
+
+  // G2 fix: capture real error content when isError=true. ZCode's PostToolUse
+  // fires for both successful and failed tool calls; for failed calls the
+  // payload carries isError=true and the error text in toolResultPreview (or
+  // a sibling field like error/stderr/errorMessage). Without this extraction
+  // the result would be empty, and the flusher's orphan synthesis would later
+  // overwrite it with {"status":"error","error":"orphaned"} — losing the real
+  // "File does not exist" text the LLM/user needs to see.
+  const isError = event.isError === true || event.is_error === true;
+  const toolResultPreview = event.toolResultPreview
+    || event.tool_result_preview
+    || '';
 
   let parsedResult = toolResultPreview;
   if (typeof toolResultPreview === 'string' && toolResultPreview.length > 0) {
     try { parsedResult = JSON.parse(toolResultPreview); } catch { /* keep raw string */ }
+  }
+
+  // For error-path: if the preview is missing or unhelpful, fall back to other
+  // error-bearing fields ZCode may populate (stderr / error / errorMessage).
+  if (isError && (parsedResult === '' || parsedResult == null)) {
+    const fallback = event.error
+      || event.errorMessage
+      || event.error_message
+      || event.stderr
+      || event.toolError
+      || event.tool_error;
+    if (typeof fallback === 'string' && fallback.length > 0) {
+      parsedResult = { status: 'error', error: fallback };
+    } else if (fallback && typeof fallback === 'object') {
+      parsedResult = { status: 'error', error: fallback };
+    }
+  }
+
+  // Determine status: isError flag wins; otherwise infer from parsed payload.
+  let status;
+  if (isError) {
+    status = 'error';
+  } else if (parsedResult && typeof parsedResult === 'object') {
+    status = parsedResult.status
+      || (parsedResult.exitCode === 0 ? 'success' : 'error');
+  } else {
+    status = 'success';
+  }
+
+  // For error path with a non-object payload, wrap so gen_ai.tool.call.result
+  // carries the real error text rather than a bare string.
+  let resultPayload = parsedResult;
+  if (isError && parsedResult && typeof parsedResult !== 'object') {
+    resultPayload = { status: 'error', error: String(parsedResult) };
+  } else if (isError && parsedResult && typeof parsedResult === 'object'
+    && parsedResult.status !== 'error' && parsedResult.error === undefined) {
+    // Parsed payload is an object but lacks an error field; mark it.
+    resultPayload = { ...parsedResult, status: 'error' };
   }
 
   const record = {
@@ -265,11 +314,18 @@ function cmdPostToolUse() {
     'gen_ai.tool.name': toolName,
     'gen_ai.tool.call.id': toolCallId,
     'gen_ai.tool.call.arguments': toJsonValue(toolInput),
-    'gen_ai.tool.call.result': toJsonValue(parsedResult),
-    'tool.result.status': typeof parsedResult === 'object' && parsedResult
-      ? (parsedResult.status || (parsedResult.exitCode === 0 ? 'success' : 'error'))
-      : 'success',
+    'gen_ai.tool.call.result': toJsonValue(resultPayload),
+    'gen_ai.tool.call.status': status,
+    'tool.result.status': status,
   };
+  if (isError) {
+    record['error.type'] = 'tool_execution_error';
+    const errMsg = (resultPayload && typeof resultPayload === 'object'
+      && typeof resultPayload.error === 'string')
+      ? resultPayload.error
+      : (typeof resultPayload === 'string' ? resultPayload : 'tool execution failed');
+    record['error.message'] = errMsg;
+  }
   const cleaned = applyHookContentPolicy(sanitizeObject(record) || record, runtimeConfig);
   writeJsonlRecords(defaultLogDir(), AGENT_ID, [cleaned]);
 }

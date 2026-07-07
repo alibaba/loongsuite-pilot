@@ -130,6 +130,82 @@ describe('zcode-hook-processor 端到端', () => {
     expect(rec['tool.result.status']).toBe('completed');
   });
 
+  // G2 fix: PostToolUse with isError=true must capture the real error content
+  // (e.g. "File does not exist") into gen_ai.tool.call.result and mark status
+  // as 'error'. Without this fix the result would be empty and the flusher's
+  // orphan synthesis would later overwrite it with {"status":"error","error":"orphaned"},
+  // losing the real error text the LLM/user needs to see.
+  // fixture 来源: 基于 hook-events.jsonl PostToolUse 改造 (isError=true +
+  // toolResultPreview 含 file-not-found 错误文本, 模拟 T1: Read /nonexistent-xyz-123)
+  test('PostToolUse isError=true 透传真实 error 内容到 gen_ai.tool.call.result (G2 fix)', () => {
+    const events = readHookEvents();
+    const post = events.find((e) => e.hook_event_name === 'PostToolUse');
+    // 模拟失败 Read: toolName=Read, isError=true, toolResultPreview 含真实错误
+    const failedRead = {
+      ...post,
+      toolName: 'Read',
+      tool_name: 'Read',
+      toolInput: { file_path: '/nonexistent-xyz-123' },
+      tool_input: { file_path: '/nonexistent-xyz-123' },
+      isError: true,
+      toolResultPreview: '{"error":"File does not exist: /nonexistent-xyz-123","status":"error"}',
+    };
+    const r = runHook('post-tool-use', failedRead);
+    expect(r.status).toBe(0);
+    const rec = readJsonlRecords()[0];
+    // 真实错误文本必须透传 (非 "orphaned" 兜底)
+    expect(rec['gen_ai.tool.call.result']).toMatchObject({
+      error: 'File does not exist: /nonexistent-xyz-123',
+      status: 'error',
+    });
+    expect(rec['gen_ai.tool.call.result']).not.toMatchObject({ error: 'orphaned' });
+    expect(rec['gen_ai.tool.call.status']).toBe('error');
+    expect(rec['tool.result.status']).toBe('error');
+    expect(rec['error.type']).toBe('tool_execution_error');
+    expect(rec['error.message']).toContain('File does not exist');
+  });
+
+  // G2 fix: 当 toolResultPreview 缺失但 isError=true 时, 从 sibling 字段
+  // (error/errorMessage/stderr) 兜底取真实错误内容
+  test('PostToolUse isError=true 且 toolResultPreview 缺失时从 error 字段兜底 (G2 fix)', () => {
+    const events = readHookEvents();
+    const post = events.find((e) => e.hook_event_name === 'PostToolUse');
+    const failedNoPreview = {
+      ...post,
+      toolName: 'Read',
+      tool_name: 'Read',
+      toolInput: { file_path: '/nonexistent-xyz-123' },
+      tool_input: { file_path: '/nonexistent-xyz-123' },
+      isError: true,
+      // toolResultPreview 缺失 — ZCode 有时只发 error 字段
+      toolResultPreview: '',
+      errorMessage: 'ENOENT: no such file or directory',
+    };
+    const r = runHook('post-tool-use', failedNoPreview);
+    expect(r.status).toBe(0);
+    const rec = readJsonlRecords()[0];
+    expect(rec['gen_ai.tool.call.result']).toMatchObject({
+      status: 'error',
+      error: 'ENOENT: no such file or directory',
+    });
+    expect(rec['gen_ai.tool.call.result']).not.toMatchObject({ error: 'orphaned' });
+    expect(rec['tool.result.status']).toBe('error');
+  });
+
+  // G2 fix: 成功路径 (isError 缺失/false) 行为不变, 不误标 error
+  test('PostToolUse 成功路径不误标 error (isError=false)', () => {
+    const events = readHookEvents();
+    const post = events.find((e) => e.hook_event_name === 'PostToolUse');
+    const success = { ...post, isError: false };
+    const r = runHook('post-tool-use', success);
+    expect(r.status).toBe(0);
+    const rec = readJsonlRecords()[0];
+    expect(rec['gen_ai.tool.call.status']).toBe('completed');
+    expect(rec['tool.result.status']).toBe('completed');
+    expect(rec['error.type']).toBeUndefined();
+    expect(rec['error.message']).toBeUndefined();
+  });
+
   test('Stop 事件不再发 llm.response (由 zcode-rollout input 补 per-LLM response)', () => {
     const events = readHookEvents();
     const stop = events.find((e) => e.hook_event_name === 'Stop');

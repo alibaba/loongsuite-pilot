@@ -220,7 +220,13 @@ export class ZcodeRolloutInput extends BaseSessionInput {
       toGenAiSystemInstructions(requestBody.system),
       extractSystemFromMessages(request.messages),
     );
-    const toolDefinitions = toJsonValue(requestBody.tools);
+    // Tool definitions: try multiple paths to be robust against ZCode version
+    // differences. v3.2.3 fixture puts tools at request.body.tools; v0.15.0
+    // production rollout may relocate them. Normalize to ARMS GenAI
+    // FunctionToolDefinition schema ({type:'function', name, description?,
+    // parameters?}) so the OTLP converter's parseToolDefinitions accepts them
+    // and getToolDefinitionsForSpan emits gen_ai.tool.definitions on LLM spans.
+    const toolDefinitions = extractToolDefinitions(record);
     const maxTokens = finiteNumber(requestBody.max_tokens);
     const outputMessages = toGenAiOutputMessages(response);
     const finishReasons = mapFinishReason(stringValue(response.finishReason));
@@ -472,6 +478,70 @@ function toGenAiOutputMessages(response: Record<string, unknown>): JsonValue | u
   }
   if (parts.length === 0) return undefined;
   return [{ role: 'assistant', parts, finish_reason: mapFinishReasonSingle(finishReason) }] as unknown as JsonValue;
+}
+
+/**
+ * Extract tool definitions from a ZCode rollout record. Tries multiple paths
+ * to be robust against version differences in the rollout record structure.
+ *
+ * v3.2.3 fixture (researcher CP1): request.body.tools = [{name, description,
+ * input_schema}, ...]
+ * v0.15.0 production: tools may be at request.body.tools, request.tools, or
+ * request.body.function_definitions — try all candidates, return the first
+ * non-empty array.
+ */
+function extractToolDefinitions(record: Record<string, unknown>): JsonValue | undefined {
+  const request = asRecord(record.request);
+  const requestBody = asRecord(request.body);
+  const candidates: unknown[] = [
+    requestBody.tools,
+    request.tools,
+    requestBody.function_definitions,
+    request.function_definitions,
+    request.toolDefinitions,
+    requestBody.toolDefinitions,
+    record.tools,
+  ];
+  for (const c of candidates) {
+    if (Array.isArray(c) && c.length > 0) {
+      const normalized = normalizeToolDefinitions(c);
+      if (normalized && Array.isArray(normalized) && normalized.length > 0) {
+        return normalized as unknown as JsonValue;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Normalize ZCode tool definitions to ARMS GenAI FunctionToolDefinition schema
+ * (tests/schemas/gen-ai-tool-definitions.json):
+ *   {type:'function', name, description?, parameters?}
+ *
+ * ZCode tools carry {name, description, input_schema} — input_schema is the
+ * JSON Schema for parameters. Rename input_schema → parameters and inject
+ * type='function' so the OTLP converter's getToolDefinitionsForSpan emits
+ * gen_ai.tool.definitions on LLM spans.
+ */
+function normalizeToolDefinitions(tools: unknown): JsonValue | undefined {
+  if (!Array.isArray(tools)) return undefined;
+  const out: JsonValue[] = [];
+  for (const t of tools) {
+    const rec = asRecord(t);
+    const name = stringValue(rec.name);
+    if (!name) continue;
+    const def: Record<string, unknown> = {
+      type: stringValue(rec.type) ?? 'function',
+      name,
+    };
+    const desc = stringValue(rec.description);
+    if (desc) def.description = desc;
+    // ZCode uses input_schema; ARMS GenAI uses parameters
+    const params = rec.parameters ?? rec.input_schema ?? rec.inputSchema;
+    if (params !== undefined && params !== null) def.parameters = params;
+    out.push(def as unknown as JsonValue);
+  }
+  return out.length > 0 ? (out as unknown as JsonValue) : undefined;
 }
 
 function toGenAiSystemInstructions(raw: unknown): JsonValue | undefined {

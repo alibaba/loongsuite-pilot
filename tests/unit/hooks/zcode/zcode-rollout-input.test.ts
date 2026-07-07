@@ -531,4 +531,65 @@ describe('ZcodeRolloutInput', () => {
       expect(entry['gen_ai.agent.name']).toBe('ZCode');
     }
   });
+
+  // G1 fix: gen_ai.tool.definitions 必须出现在每个 LLM span 上 (Round 2 E2E
+  // 报告 0/57 LLM span 携带此字段). rollout input 现在从 request.body.tools
+  // 抽取并归一化为 ARMS GenAI FunctionToolDefinition schema
+  // ({type:'function', name, description?, parameters?}).
+  // fixture 来源: researcher CP1 真实抓取的 v3.2.3 rollout 记录, tools 在
+  // request.body.tools, 每项为 {name, description, input_schema}.
+  test('G1: gen_ai.tool.definitions 出现在 llm.request 上并归一化为 ARMS schema', async () => {
+    const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+    const rec = JSON.parse(lines[0]);
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    const req = entries.find((e) => e['event.name'] === 'llm.request');
+    expect(req['gen_ai.tool.definitions']).toBeDefined();
+    expect(Array.isArray(req['gen_ai.tool.definitions'])).toBe(true);
+    expect(req['gen_ai.tool.definitions'].length).toBeGreaterThan(0);
+    // 每项必须满足 ARMS FunctionToolDefinition schema: type='function' + name
+    for (const td of req['gen_ai.tool.definitions']) {
+      expect(td.type).toBe('function');
+      expect(typeof td.name).toBe('string');
+      expect(td.name.length).toBeGreaterThan(0);
+    }
+    // input_schema 应被归一化为 parameters
+    const firstTd = req['gen_ai.tool.definitions'][0];
+    expect(firstTd.parameters).toBeDefined();
+    expect(firstTd.input_schema).toBeUndefined();
+  });
+
+  // G1 fix: 鲁棒性 — 当 tools 字段位于 request.tools (而非 request.body.tools)
+  // 时仍能抽取. v0.15.0 production rollout record 结构可能与 v3.2.3 fixture
+  // 不同, extractToolDefinitions 尝试多条路径.
+  test('G1: tools 位于 request.tools (非 request.body.tools) 仍能抽取 (版本鲁棒)', async () => {
+    const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const rec = JSON.parse(lines[0]);
+    // 把 tools 从 request.body.tools 移到 request.tools (模拟 v0.15.0 结构差异)
+    const tools = rec.request.body.tools;
+    delete rec.request.body.tools;
+    rec.request.tools = tools;
+
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    const req = entries.find((e) => e['event.name'] === 'llm.request');
+    expect(req['gen_ai.tool.definitions']).toBeDefined();
+    expect(Array.isArray(req['gen_ai.tool.definitions'])).toBe(true);
+    expect(req['gen_ai.tool.definitions'].length).toBe(tools.length);
+    // 仍归一化为 ARMS schema
+    expect(req['gen_ai.tool.definitions'][0].type).toBe('function');
+    expect(req['gen_ai.tool.definitions'][0].parameters).toBeDefined();
+  });
+
+  // G1 fix: 当 tools 字段完全缺失时, gen_ai.tool.definitions 不出现 (不报错)
+  test('G1: tools 字段缺失时 gen_ai.tool.definitions 不出现 (fail-open)', async () => {
+    const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const rec = JSON.parse(lines[0]);
+    delete rec.request.body.tools;
+
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    const req = entries.find((e) => e['event.name'] === 'llm.request');
+    expect(req['gen_ai.tool.definitions']).toBeUndefined();
+  });
 });
