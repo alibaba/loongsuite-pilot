@@ -202,6 +202,7 @@ function usageFields(usage: CodexTokenUsage | undefined): Record<string, JsonVal
     'gen_ai.usage.input_tokens': usage.inputTokens,
     'gen_ai.usage.output_tokens': usage.outputTokens,
     'gen_ai.usage.cache_read.input_tokens': usage.cachedInputTokens,
+    'gen_ai.usage.cache_creation.input_tokens': usage.cacheCreationTokens,
     'gen_ai.usage.total_tokens': usage.totalTokens,
     ...(usage.reasoningOutputTokens !== undefined
       ? { 'gen_ai.usage.reasoning_output_tokens': usage.reasoningOutputTokens }
