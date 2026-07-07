@@ -102,6 +102,19 @@ is_running() {
     return 1
 }
 
+wait_for_collector_running() {
+    local attempts="${1:-5}"
+    local i=0
+    while [ "$i" -lt "$attempts" ]; do
+        if is_running; then
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    is_running
+}
+
 is_pid_file_running() {
     local pid_file="$1"
     if [ -f "$pid_file" ]; then
@@ -113,6 +126,19 @@ is_pid_file_running() {
         rm -f "$pid_file"
     fi
     return 1
+}
+
+wait_for_updater_running() {
+    local attempts="${1:-5}"
+    local i=0
+    while [ "$i" -lt "$attempts" ]; do
+        if updater_process_exists; then
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    updater_process_exists
 }
 
 stop_pid_file() {
@@ -285,6 +311,56 @@ is_managed_by_launchd() {
     [ -f "$LAUNCHD_PLIST" ] && launchctl list "$SERVICE_LABEL" &>/dev/null
 }
 
+launchd_domain() {
+    echo "gui/$(id -u)"
+}
+
+launchd_service_target() {
+    local label="$1"
+    echo "$(launchd_domain)/$label"
+}
+
+launchd_bootout_or_unload() {
+    local plist="$1"
+    local domain
+    domain=$(launchd_domain)
+    launchctl bootout "$domain" "$plist" 2>/dev/null \
+        || launchctl unload -w "$plist" 2>/dev/null \
+        || true
+}
+
+launchd_bootstrap_or_load() {
+    local plist="$1"
+    local domain
+    domain=$(launchd_domain)
+    launchctl bootstrap "$domain" "$plist" 2>/dev/null \
+        || launchctl load -w "$plist"
+}
+
+launchd_enable_or_true() {
+    local label="$1"
+    local target
+    target=$(launchd_service_target "$label")
+    launchctl enable "$target" 2>/dev/null || true
+}
+
+launchd_kickstart_or_start() {
+    local label="$1"
+    local target
+    target=$(launchd_service_target "$label")
+    launchctl kickstart -k "$target" 2>/dev/null \
+        || launchctl start "$label" 2>/dev/null
+}
+
+launchd_stop_or_stop() {
+    local label="$1"
+    local target
+    target=$(launchd_service_target "$label")
+    launchctl stop "$target" 2>/dev/null \
+        || launchctl stop "$label" 2>/dev/null \
+        || true
+}
+
 is_managed_by_systemd_user() {
     systemctl --user is-enabled loongsuite-pilot.service &>/dev/null
 }
@@ -404,22 +480,32 @@ cmd_start() {
     ensure_dirs
     sync_bootstrap_scripts
 
+    local service_manager_attempted=false
+    local detected_init
+    detected_init=$(detect_init_system "$system_service" 2>/dev/null || echo "none")
+    if [ "$detected_init" != "none" ]; then
+        service_manager_attempted=true
+    fi
+
     if autostart_install "$system_service" 2>/dev/null; then
-        sleep 2
-        if is_managed_by_launchd || is_managed_by_systemd_user || is_managed_by_systemd_system || is_managed_by_initd; then
-            echo "✅ loongsuite-pilot started ($(detect_init_system))"
+        if wait_for_collector_running 5; then
+            echo "✅ loongsuite-pilot started ($(detect_init_system), PID $(cat "$PID_FILE"))"
             return 0
         fi
     fi
 
     # Fallback to nohup
-    echo "⚠️  No service manager available — using nohup fallback." >&2
-    echo "   Service will NOT auto-start on boot or survive session logout." >&2
-    case "$(uname -s)" in
-        Linux)
-            echo "   To fix: use '--system-service' (requires sudo) or enable systemd user session." >&2
-            ;;
-    esac
+    if [ "$service_manager_attempted" = true ]; then
+        echo "⚠️  Service manager did not start collector — using nohup fallback." >&2
+    else
+        echo "⚠️  No service manager available — using nohup fallback." >&2
+        echo "   Service will NOT auto-start on boot or survive session logout." >&2
+        case "$(uname -s)" in
+            Linux)
+                echo "   To fix: use '--system-service' (requires sudo) or enable systemd user session." >&2
+                ;;
+        esac
+    fi
 
     local entry="$BOOTSTRAP_DIR/collector-daemon.js"
     if [ ! -f "$entry" ]; then
@@ -464,8 +550,8 @@ cmd_stop() {
 
     case "$(uname -s)" in
         Darwin)
-            launchctl stop "$SERVICE_LABEL" 2>/dev/null || true
-            launchctl stop "$UPDATER_LABEL" 2>/dev/null || true
+            launchd_stop_or_stop "$SERVICE_LABEL"
+            launchd_stop_or_stop "$UPDATER_LABEL"
             ;;
         Linux)
             case "$init_type" in
@@ -591,7 +677,7 @@ cmd_restart_collector() {
     # Stop collector only (leave updater running)
     case "$(uname -s)" in
         Darwin)
-            launchctl stop "$SERVICE_LABEL" 2>/dev/null || true
+            launchd_stop_or_stop "$SERVICE_LABEL"
             ;;
         Linux)
             case "$init_type" in
@@ -633,9 +719,9 @@ cmd_restart_collector() {
     case "$(uname -s)" in
         Darwin)
             if launchctl list "$SERVICE_LABEL" &>/dev/null; then
-                launchctl start "$SERVICE_LABEL" 2>/dev/null || true
-                echo "✅ collector restarted (launchd)"
-                _restarted=true
+                if launchd_kickstart_or_start "$SERVICE_LABEL"; then
+                    _restarted=true
+                fi
             fi
             ;;
         Linux)
@@ -643,27 +729,32 @@ cmd_restart_collector() {
                 systemd-user)
                     if systemctl --user is-enabled loongsuite-pilot.service &>/dev/null; then
                         systemctl --user start loongsuite-pilot.service &>/dev/null
-                        echo "✅ collector restarted (systemd user-level)"
                         _restarted=true
                     fi
                     ;;
                 systemd-system|systemd)
                     if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && sudo -n systemctl is-enabled "$sys_unit" &>/dev/null; then
                         sudo systemctl start "$sys_unit" &>/dev/null
-                        echo "✅ collector restarted (systemd system-level)"
                         _restarted=true
                     fi
                     ;;
                 initd)
                     if [ -f "$initd_script" ]; then
                         sudo "$initd_script" start &>/dev/null
-                        echo "✅ collector restarted (init.d)"
                         _restarted=true
                     fi
                     ;;
             esac
             ;;
     esac
+    if [ "$_restarted" = true ]; then
+        if wait_for_collector_running 5; then
+            echo "✅ collector restarted ($(detect_init_system), PID $(cat "$PID_FILE"))"
+        else
+            echo "⚠️  service manager reported success but collector process not found, falling back to nohup" >&2
+            _restarted=false
+        fi
+    fi
     if [ "$_restarted" = false ]; then
         local entry="$BOOTSTRAP_DIR/collector-daemon.js"
         if [ ! -f "$entry" ]; then
@@ -705,7 +796,7 @@ cmd_restart_updater() {
     # Stop updater via service manager
     case "$(uname -s)" in
         Darwin)
-            launchctl stop "$UPDATER_LABEL" 2>/dev/null || true
+            launchd_stop_or_stop "$UPDATER_LABEL"
             ;;
         Linux)
             case "$init_type" in
@@ -734,8 +825,9 @@ cmd_restart_updater() {
     case "$(uname -s)" in
         Darwin)
             if launchctl list "$UPDATER_LABEL" &>/dev/null; then
-                launchctl start "$UPDATER_LABEL" 2>/dev/null || true
-                _restarted=true
+                if launchd_kickstart_or_start "$UPDATER_LABEL"; then
+                    _restarted=true
+                fi
             fi
             ;;
         Linux)
@@ -743,21 +835,18 @@ cmd_restart_updater() {
                 systemd-user)
                     if systemctl --user is-enabled loongsuite-pilot-updater.service &>/dev/null; then
                         systemctl --user start loongsuite-pilot-updater.service &>/dev/null
-                        echo "✅ updater restarted (systemd user-level)"
                         _restarted=true
                     fi
                     ;;
                 systemd-system|systemd)
                     if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && sudo -n systemctl is-enabled "$sys_unit" &>/dev/null; then
                         sudo systemctl start "$sys_unit" &>/dev/null
-                        echo "✅ updater restarted (systemd system-level)"
                         _restarted=true
                     fi
                     ;;
                 initd)
                     if [ -f "$initd_script" ]; then
                         sudo "$initd_script" start &>/dev/null
-                        echo "✅ updater restarted (init.d)"
                         _restarted=true
                     fi
                     ;;
@@ -766,8 +855,9 @@ cmd_restart_updater() {
     esac
     # Verify the service manager actually started the updater process
     if [ "$_restarted" = true ]; then
-        sleep 1
-        if ! updater_process_exists; then
+        if wait_for_updater_running 5; then
+            echo "✅ updater restarted ($(detect_init_system), PID $(cat "$UPDATER_PID_FILE"))"
+        else
             echo "⚠️  service manager reported success but updater process not found, falling back to nohup"
             _restarted=false
         fi
@@ -1475,13 +1565,19 @@ autostart_install() {
 
     case "$init_system" in
         launchd)
-            launchctl unload -w "$LAUNCHD_PLIST" 2>/dev/null || true
-            _write_launchd_plist
-            launchctl load -w "$LAUNCHD_PLIST"
+            launchd_bootout_or_unload "$LAUNCHD_PLIST"
             if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
-                launchctl unload -w "$UPDATER_PLIST" 2>/dev/null || true
+                launchd_bootout_or_unload "$UPDATER_PLIST"
+            fi
+            _write_launchd_plist
+            launchd_bootstrap_or_load "$LAUNCHD_PLIST"
+            launchd_enable_or_true "$SERVICE_LABEL"
+            launchd_kickstart_or_start "$SERVICE_LABEL" || true
+            if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
                 _write_launchd_updater_plist
-                launchctl load -w "$UPDATER_PLIST"
+                launchd_bootstrap_or_load "$UPDATER_PLIST" || true
+                launchd_enable_or_true "$UPDATER_LABEL"
+                launchd_kickstart_or_start "$UPDATER_LABEL" || true
             fi
             echo "launchd" > "$INIT_TYPE_FILE"
             ;;
@@ -1535,9 +1631,9 @@ autostart_remove() {
 
     case "$init_system" in
         launchd)
-            launchctl unload -w "$UPDATER_PLIST" 2>/dev/null || true
+            launchd_bootout_or_unload "$UPDATER_PLIST"
             rm -f "$UPDATER_PLIST"
-            launchctl unload -w "$LAUNCHD_PLIST" 2>/dev/null || true
+            launchd_bootout_or_unload "$LAUNCHD_PLIST"
             rm -f "$LAUNCHD_PLIST"
             ;;
         systemd-user)
