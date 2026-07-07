@@ -31,6 +31,6 @@
   },
   "flusher": {
     "turnIdleTimeoutMs": 120000,
-    "turnFlushDebounceMs": 200
+    "turnFlushDebounceMs": 35000
   }
 }

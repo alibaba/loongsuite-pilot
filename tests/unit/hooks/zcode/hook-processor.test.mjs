@@ -144,17 +144,40 @@ describe('zcode-hook-processor 端到端', () => {
     expect(records.length).toBe(1);
     const rec = records[0];
     // Stop 改为发 "other" 事件标记 turn 元数据 (gen_ai.agent.event.name=stop,
-    // tool.call.count), 不带 terminal finish_reason。terminal signal 由
-    // rollout input 的最后一条 llm.response (finish_reason=stop) 提供;
-    // turnIdleTimeoutMs 作为兜底。
-    // 原因: Stop hook 在 ZCode 退出时立刻触发, 但 rollout 记录要等下一轮
-    // poll (30s) 才能读到。若 Stop 带 end_turn, 会立即 flush 只含 hook
-    // 工具事件的 buffer, 之后 rollout 的 llm.request/response 全被
-    // late-arrival guard 丢弃, 造成 trace 丢 LLM span。
+    // tool.call.count), 并带 terminal finish_reason 触发 Signal A flush。
+    //
+    // P0 race condition fix: rollout input 的 terminal llm.response 已在
+    // flusher send() 中抑制 (agent.source === 'zcode-rollout' 时不触发 Signal
+    // A), 改由 Stop 作为唯一 terminal signal。Stop 在所有 hook 工具事件写入
+    // JSONL 后触发, 配合 turnFlushDebounceMs (35s > rollout 30s poll) 给
+    // zcode-log (5s poll) 和 zcode-rollout (30s poll) 充足时间 dispatch。
+    //
+    // toolCallCount > 0 (正常): emit ['end_turn'] — LLM 已完成 turn, 工具结果齐全
+    // toolCallCount === 0 (中断): emit ['interrupted'] — ZCode 被 kill 前未产出 tool_call
     expect(rec['event.name']).toBe('other');
     expect(rec['gen_ai.agent.event.name']).toBe('stop');
-    expect(rec['gen_ai.response.finish_reasons']).toBeUndefined();
+    expect(stop.toolCallCount).toBe(1); // fixture 是正常路径 (toolCallCount=1)
+    expect(rec['gen_ai.response.finish_reasons']).toEqual(['end_turn']);
+    // Stop 不发 llm.response, 所以不带 output.messages
     expect(rec['gen_ai.output.messages']).toBeUndefined();
+  });
+
+  test('Stop 中断路径 (toolCallCount=0) emit finish_reason=interrupted', () => {
+    const events = readHookEvents();
+    const stop = events.find((e) => e.hook_event_name === 'Stop');
+    // 改为 toolCallCount=0 模拟中断场景 (ZCode 被 SIGTERM/SIGKILL 前未产出 tool_call)
+    stop.toolCallCount = 0;
+    const tmp = path.join(TMPDIR, 'transcript.jsonl');
+    fs.copyFileSync(STOP_TRANSCRIPT_PATH, tmp);
+    stop.transcript_path = tmp;
+    stop.transcriptPath = tmp;
+
+    const r = runHook('stop', stop);
+    expect(r.status).toBe(0);
+    const records = readJsonlRecords();
+    expect(records.length).toBe(1);
+    const rec = records[0];
+    expect(rec['gen_ai.response.finish_reasons']).toEqual(['interrupted']);
   });
 
   test('Stop 同步拷贝 transcript 到 pilot data dir (architect 硬约束)', () => {

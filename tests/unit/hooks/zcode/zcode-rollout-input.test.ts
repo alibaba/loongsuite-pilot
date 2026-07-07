@@ -488,4 +488,47 @@ describe('ZcodeRolloutInput', () => {
     expect(resp['gen_ai.usage.input_tokens']).toBe(10);
     expect(resp['gen_ai.usage.output_tokens']).toBe(20);
   });
+
+  // P1 fix: ARMS GenAI semconv VALID_PART_TYPES = ['text', 'tool_call',
+  // 'tool_call_response', 'reasoning']. 'tool_result' triggers schema WARN per
+  // LLM span. Rollout's messageToParts must emit 'tool_call_response' for tool
+  // role messages.
+  test('tool role message part type 为 tool_call_response (非 tool_result, P1 fix)', async () => {
+    const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+    // record 1 的 request.messages[7] 是 role=tool (含 toolCallId/toolName)
+    const rec2 = JSON.parse(lines[1]);
+    const entries = await (input as any).processSessionLine(rec2, '/tmp/x.jsonl');
+    const req = entries.find((e) => e['event.name'] === 'llm.request');
+    const inMsgs = req['gen_ai.input.messages'];
+    const toolResultPart = inMsgs
+      .flatMap((m: any) => m.parts)
+      .find((p: any) => p.type === 'tool_call_response');
+    expect(toolResultPart).toBeDefined();
+    expect(toolResultPart.id).toBe('toolu_976lh8d7b5p');
+    // 确认没有 tool_result 残留
+    const staleToolResult = inMsgs
+      .flatMap((m: any) => m.parts)
+      .find((p: any) => p.type === 'tool_result');
+    expect(staleToolResult).toBeUndefined();
+  });
+
+  // P1 fix: gen_ai.agent.name 大小写统一为 'ZCode'. 之前 rollout 路径未设置
+  // agent.name,converter fallback 用 gen_ai.agent.type='zcode' (小写) 推导,
+  // 与 hook 路径硬编码的 'ZCode' 冲突,同一 session 出现两个不同 agent.name。
+  test('gen_ai.agent.name 显式设为 ZCode (与 hook 侧一致, P1 fix)', async () => {
+    const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+    const rec = JSON.parse(lines[0]);
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    for (const entry of entries) {
+      expect(entry['gen_ai.agent.name']).toBe('ZCode');
+    }
+    // 第二条 record 也应一致
+    const rec2 = JSON.parse(lines[1]);
+    const entries2 = await (input as any).processSessionLine(rec2, '/tmp/x.jsonl');
+    for (const entry of entries2) {
+      expect(entry['gen_ai.agent.name']).toBe('ZCode');
+    }
+  });
 });

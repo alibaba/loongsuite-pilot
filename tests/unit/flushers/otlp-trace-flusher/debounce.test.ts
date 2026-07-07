@@ -150,34 +150,79 @@ describe('OtlpTraceFlusher - plan 2.1/2.2 (zcode TTL + debounce)', () => {
     expect(mockConvert.mock.calls[0][0]).toHaveLength(1);
   });
 
-  // CP5 fix: Stop hook "other" event 不带 terminal finish_reason。
-  // 场景: ZCode 退出时 Stop hook 立即触发 "other" 事件,但 rollout 记录要等
-  // 下一轮 poll (30s) 才能读到。若 Stop 带 end_turn,会立即 flush 只含
-  // hook 工具事件的 buffer,之后 rollout 的 llm.request/response 全被
-  // late-arrival guard 丢弃。修复后 Stop 不带 finish_reason,buffer 保持
-  // not-completed,等 rollout 的最后一条 llm.response(stop) 触发真正 flush。
-  it('Stop "other" 不带 finish_reason: 不触发 flush,等 rollout llm.response(stop) 一起 flush', async () => {
+  // P0 race condition fix: rollout input's terminal llm.response (with
+  // agent.source='zcode-rollout') must NOT trigger Signal A flush. Rollout
+  // polls every 30s; when it reads the final record, hook JSONL's tool events
+  // may not have been polled yet by zcode-log input (5s poll). If Signal A
+  // fires here, the debounce window starts, and hook events arriving after
+  // the window get dropped by the late-arrival guard.
+  //
+  // Fix: rollout's terminal llm.response is suppressed in send() when
+  // agent.source === 'zcode-rollout'. Stop hook's terminal finish_reason
+  // (end_turn) is the canonical Signal A trigger, fires after all hook events
+  // are in JSONL. turnFlushDebounceMs (35s > 30s rollout poll) gives rollout
+  // input time to dispatch records before the window closes.
+  it('P0 fix: rollout terminal (agent.source=zcode-rollout) suppressed; Stop end_turn triggers flush with all events merged', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);
     mockConvert.mockClear();
 
-    flusher = new OtlpTraceFlusher(makeConfig() as any);
+    flusher = new OtlpTraceFlusher(makeConfig({
+      perAgentFlusherConfig: { zcode: { turnFlushDebounceMs: 200 } },
+    }) as any);
 
-    // Stop hook 的 "other" 事件 (无 finish_reason) — 不应触发 flush
+    // Rollout's terminal llm.response — agent.source=zcode-rollout suppresses Signal A
+    await flusher.sendBatch([
+      makeZcodeEntry({ 'event.name': 'llm.request', 'gen_ai.request.id': 'req1', 'agent.source': 'zcode-rollout' }),
+      makeZcodeEntry({ 'event.name': 'llm.response', 'gen_ai.request.id': 'req1', 'gen_ai.response.finish_reasons': ['stop'], 'agent.source': 'zcode-rollout' }),
+    ]);
+    // No flush scheduled — buffer still active, not completed
+    expect(mockConvert).not.toHaveBeenCalled();
+    expect((flusher as any).flushDebounceTimers.size).toBe(0);
+
+    // Hook Stop event arrives (no agent.source = hook side) — triggers Signal A
     await flusher.send(makeZcodeEntry({
       'event.name': 'other',
       'gen_ai.agent.event.name': 'stop',
+      'gen_ai.response.finish_reasons': ['end_turn'],
     }));
+    // Debounce timer scheduled, no immediate flush
+    expect(mockConvert).not.toHaveBeenCalled();
+    expect((flusher as any).flushDebounceTimers.size).toBe(1);
+
+    // Late hook tool.call arrives within debounce window — merged
+    await flusher.send(makeZcodeEntry({ 'event.name': 'tool.call' }));
+
+    // Wait for debounce to fire (200ms + slack)
+    await new Promise((r) => setTimeout(r, 350));
+
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    const records = mockConvert.mock.calls[0][0];
+    // llm.request + llm.response (rollout) + Stop other (hook) + tool.call (hook) = 4
+    expect(records).toHaveLength(4);
+  });
+
+  it('P0 fix: rollout terminal suppressed — if Stop never fires, idle timeout flushes', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    flusher = new OtlpTraceFlusher(makeConfig({
+      perAgentFlusherConfig: { zcode: { turnIdleTimeoutMs: 100 } },
+    }) as any);
+
+    // Rollout terminal — suppressed, buffer stays not-completed
+    await flusher.sendBatch([
+      makeZcodeEntry({ 'event.name': 'llm.request', 'agent.source': 'zcode-rollout' }),
+      makeZcodeEntry({ 'gen_ai.response.finish_reasons': ['stop'], 'agent.source': 'zcode-rollout' }),
+    ]);
     expect(mockConvert).not.toHaveBeenCalled();
 
-    // 之后 rollout 的 llm.request/response 到达 — 最后一条带 stop 触发 flush
-    await flusher.sendBatch([
-      makeZcodeEntry({ 'event.name': 'llm.request', 'gen_ai.request.id': 'req1' }),
-      makeZcodeEntry({ 'event.name': 'llm.response', 'gen_ai.request.id': 'req1', 'gen_ai.response.finish_reasons': ['stop'] }),
-    ]);
+    // No Stop event — wait for idle timeout (100ms + ~1s tick)
+    await new Promise((r) => setTimeout(r, 1500));
+
     expect(mockConvert).toHaveBeenCalledTimes(1);
-    // buffer 应包含 Stop "other" + llm.request + llm.response = 3 条
-    expect(mockConvert.mock.calls[0][0]).toHaveLength(3);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
   });
   // AGE-675: sendBatch 路径走 triggerFlush (per-agent debounce).
   // P0 回归护栏: flush()/shutdown 路径必须立即 flush, 不能让 debounce timer

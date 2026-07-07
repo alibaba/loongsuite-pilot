@@ -291,24 +291,23 @@ function cmdStop() {
   // 这里再发 llm.response 会与 rollout 的 per-LLM response 争抢 pairing，造成
   // orphan llm.request（duration=0ms + messages 缺失）。
   //
-  // 也不带 end_turn finish_reason：Stop hook 在 ZCode 进程退出时立刻触发，但
-  // rollout 记录要等 zcode-rollout input 下一轮 poll（默认 30s）才能读到。
-  // 若 Stop 带 terminal finish_reason，会触发 OTLP flusher 的 Signal A 立即
-  // flush（sendBatch 末尾的 flushCompleted 不经 debounce），把只含 hook 工具
-  // 事件的 buffer flush 出去；之后 rollout 的 3 对 llm.request/llm.response
-  // 到达时被 late-arrival guard 当成 "already-flushed turn" 全部丢弃，造成
-  // trace 里只剩 1 个 LLM span（实际应 3 个）。
+  // P0 race condition fix: Stop emits terminal finish_reason to trigger Signal A
+  // flush. The rollout input's terminal llm.response (finish_reason=stop) is
+  // suppressed in the flusher (see otlp-trace-flusher.ts send()) to avoid
+  // starting the debounce window before hook tool events have been polled.
+  // Stop fires after all hook events (tool.call/tool.result) are in the hook
+  // JSONL, so Stop's Signal A + turnFlushDebounceMs (35s) gives zcode-log input
+  // (5s poll) and zcode-rollout input (30s poll) time to dispatch all events
+  // before the debounce window closes.
   //
-  // 改为由 rollout input 的最后一条 llm.response（finish_reason=stop）作为
-  // 真正的 terminal signal；turnIdleTimeoutMs (120s) 作为 rollout 缺失时的
-  // 兜底 fallback。Stop 这里只发 "other" 标记 turn 元数据（agent.event.name
-  // = stop, tool.call.count）供下游分析使用。
+  // - toolCallCount > 0 (normal case): emit ['end_turn'] — the LLM finished its
+  //   turn and all tool results are in hook JSONL.
+  // - toolCallCount === 0 (interrupted): emit ['interrupted'] — ZCode was
+  //   killed before the model produced any tool_call; flush immediately so
+  //   ENTRY+AGENT skeleton spans appear without waiting 120s idle timeout.
   //
-  // 中断场景例外 (P1-4)：若 toolCallCount=0 且本 turn 没有任何 tool.call 事件
-  // 先于 Stop 到达（典型场景：用户 Ctrl+C / timeout 杀掉 ZCode 进程，模型
-  // 还没产出任何 tool_call），emit finish_reason=interrupted 触发 Signal A
-  // 立即 flush，确保至少产出 ENTRY+AGENT 骨架 span。否则要等 120s idle
-  // timeout 才有 trace。
+  // If ZCode is SIGKILL'd and Stop never fires, the turn is flushed by
+  // turnIdleTimeoutMs (120s) as the ultimate fallback.
   const toolCallCount = event.toolCallCount ?? 0;
   const isInterrupted = toolCallCount === 0;
   const record = {
@@ -319,7 +318,7 @@ function cmdStop() {
     'gen_ai.agent.event.name': 'stop',
     'gen_ai.agent.event.source': event.source || 'stop',
     'gen_ai.tool.call.count': toolCallCount,
-    ...(isInterrupted ? { 'gen_ai.response.finish_reasons': ['interrupted'] } : {}),
+    'gen_ai.response.finish_reasons': [isInterrupted ? 'interrupted' : 'end_turn'],
   };
   const cleaned = applyHookContentPolicy(sanitizeObject(record) || record, runtimeConfig);
   writeJsonlRecords(defaultLogDir(), AGENT_ID, [cleaned]);

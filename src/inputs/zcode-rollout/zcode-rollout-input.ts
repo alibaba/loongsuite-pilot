@@ -267,6 +267,7 @@ export class ZcodeRolloutInput extends BaseSessionInput {
       'gen_ai.request.id': requestId,
       'gen_ai.response.id': pairingId,
       'gen_ai.agent.type': ClientType.ZcodeHook,
+      'gen_ai.agent.name': 'ZCode',
       'gen_ai.request.model': modelId,
       'gen_ai.response.model': stringValue(response.modelId) ?? modelId,
       ...(inputMessages ? { 'gen_ai.input.messages': inputMessages } : {}),
@@ -288,6 +289,7 @@ export class ZcodeRolloutInput extends BaseSessionInput {
       'gen_ai.request.id': requestId,
       'gen_ai.response.id': pairingId,
       'gen_ai.agent.type': ClientType.ZcodeHook,
+      'gen_ai.agent.name': 'ZCode',
       'gen_ai.request.model': modelId,
       'gen_ai.response.model': stringValue(response.modelId) ?? modelId,
       ...(effectiveFinishReasons ? { 'response.finish_reasons': effectiveFinishReasons } : {}),
@@ -429,11 +431,13 @@ function messageToParts(rec: Record<string, unknown>): unknown[] {
     }
   }
 
-  // Tool role message: toolCallId identifies which tool_call this result answers
+  // Tool role message: toolCallId identifies which tool_call this result answers.
+  // ARMS GenAI semconv VALID_PART_TYPES = ['text', 'tool_call', 'tool_call_response',
+  // 'reasoning'] — 'tool_result' is not recognized and triggers schema WARN per LLM span.
   const toolCallId = stringValue(rec.toolCallId);
   if (toolCallId) {
     const resultPart: Record<string, unknown> = {
-      type: 'tool_result',
+      type: 'tool_call_response',
       id: toolCallId,
       content,
     };

@@ -612,10 +612,28 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Signal A: 检测到终态 finish_reason，标记 turn 完成。
     // 逐条模式下立即 flush；批量模式下（_deferSignalA=true）仅标记 completed，
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
+    //
+    // P0 race condition fix: zcode-rollout source's terminal llm.response
+    // (finish_reason=stop/end_turn) must NOT trigger Signal A. Rollout input
+    // polls every 30s; when it reads the final record, hook JSONL's
+    // tool.call/tool.result events may not have been polled yet by zcode-log
+    // input (5s poll). If Signal A fires here, the debounce window starts, and
+    // hook events arriving after the window get dropped by the late-arrival
+    // guard ("Dropping late entry for already-flushed turn"). Instead, let
+    // hook Stop's terminal signal (or idle timeout) trigger the flush, giving
+    // hook input time to poll all tool events.
+    //
+    // The suppressed entry's finish_reasons are still on the record for the
+    // converter to put on the LLM span (gen_ai.response.finish_reasons); we
+    // only skip the flush trigger, not the field.
     if (hasTerminalFinishReason(entry['gen_ai.response.finish_reasons'])) {
-      buf.completed = true;
-      if (!this._deferSignalA) {
-        this.triggerFlush(buf);
+      const isZcodeRolloutTerminal = agentType === ZCODE_AGENT_TYPE
+        && entry['agent.source'] === 'zcode-rollout';
+      if (!isZcodeRolloutTerminal) {
+        buf.completed = true;
+        if (!this._deferSignalA) {
+          this.triggerFlush(buf);
+        }
       }
     }
   }
