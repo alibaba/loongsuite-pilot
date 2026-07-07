@@ -9,6 +9,13 @@ import { StateStore } from '../../../../src/checkpoints/state-store.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.resolve(__dirname, 'fixtures');
 const ROLLOUT_FIXTURE = path.join(FIXTURES, 'rollout', 'model-io-sess_ffe3655e-f152-4e05-bf1f-dfa560732218.jsonl');
+// fixture 来源: 容器 dind-harness-ab49e683 真实抓取的 zcode v0.15.0 production
+// rollout 记录 (sessionId sess_bff4423d / sess_18c4c0fc), slimmed (truncate 长
+// description / parameters / messages) 但保留关键字段原貌:
+//   - tools 为 OpenAI 嵌套形态 {type:'function', function:{name, description, parameters}}
+//   - role=tool message 含 isError=true + 真实 "File does not exist" content
+const V015_G1_FIXTURE = path.join(FIXTURES, 'rollout', 'model-io-sess_v015-g1-nested-tools.jsonl');
+const V015_G2_FIXTURE = path.join(FIXTURES, 'rollout', 'model-io-sess_v015-g2-tool-error.jsonl');
 
 // fixture 来源: researcher CP1 报告中真实抓取的 ZCode v3.2.3 rollout 记录
 // (~/.zcode/cli/rollout/model-io-sess_*.jsonl, 含完整 LLM request + response payload)
@@ -581,7 +588,7 @@ describe('ZcodeRolloutInput', () => {
     expect(req['gen_ai.tool.definitions'][0].parameters).toBeDefined();
   });
 
-  // G1 fix: 当 tools 字段完全缺失时, gen_ai.tool.definitions 不出现 (不报错)
+  // G1 fix: tools 字段完全缺失时, gen_ai.tool.definitions 不出现 (不报错)
   test('G1: tools 字段缺失时 gen_ai.tool.definitions 不出现 (fail-open)', async () => {
     const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
     const rec = JSON.parse(lines[0]);
@@ -591,5 +598,121 @@ describe('ZcodeRolloutInput', () => {
     const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
     const req = entries.find((e) => e['event.name'] === 'llm.request');
     expect(req['gen_ai.tool.definitions']).toBeUndefined();
+  });
+
+  // ─── Round 3 fix (real v0.15.0 production data form) ────────────────────
+  // tester-round3 报 FAIL: G1 normalizeToolDefinitions 只识别 flat 形态
+  // {name, description, input_schema}; v0.15.0 production rollout 是 OpenAI
+  // 嵌套形态 {type:'function', function:{name, description, parameters}}.
+  // rec.name 取到 undefined → continue → 返回空 → gen_ai.tool.definitions
+  // 不出现在 LLM span 上 (实测 3 个 trace 共 11 个 LLM span, 0 个携带).
+  // fixture 来源: 真实 v0.15.0 rollout (sess_bff4423d) slimmed 切片, 保留
+  // 嵌套形态原貌.
+
+  test('G1 v0.15.0: OpenAI 嵌套 tools 形态 {type, function:{name, description, parameters}} 正确归一化', async () => {
+    const lines = fs.readFileSync(V015_G1_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    expect(lines.length).toBeGreaterThanOrEqual(1);
+    const rec = JSON.parse(lines[0]);
+    // 确认 fixture 是嵌套形态
+    const tools = rec.request.body.tools;
+    expect(Array.isArray(tools)).toBe(true);
+    expect(tools.length).toBeGreaterThan(0);
+    expect(tools[0].function).toBeDefined();
+    expect(tools[0].function.name).toBeDefined();
+
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+    const entries = await (input as any).processSessionLine(rec, '/tmp/v015.jsonl');
+    const req = entries.find((e) => e['event.name'] === 'llm.request');
+    expect(req['gen_ai.tool.definitions']).toBeDefined();
+    expect(Array.isArray(req['gen_ai.tool.definitions'])).toBe(true);
+    expect(req['gen_ai.tool.definitions'].length).toBe(tools.length);
+    // 每项归一化为 ARMS FunctionToolDefinition: type='function' + name (顶层) + parameters
+    for (const td of req['gen_ai.tool.definitions']) {
+      expect(td.type).toBe('function');
+      expect(typeof td.name).toBe('string');
+      expect(td.name.length).toBeGreaterThan(0);
+      expect(td.parameters).toBeDefined();
+      // 不应残留 function 包装层
+      expect(td.function).toBeUndefined();
+    }
+    // 第一项 name 应来自 function.name (而非顶层 undefined)
+    expect(req['gen_ai.tool.definitions'][0].name).toBe(tools[0].function.name);
+  });
+
+  // G2 fix: tester-round3 报 FAIL — 失败 TOOL span 的 result 字段为
+  // {"status":"error","error":"orphaned"} 占位. 根因: cmdPostToolUse 仅在
+  // PostToolUse hook 事件到达时触发; 实测 zcode 在 Read 失败时不发射
+  // PostToolUse 事件 (G2 全程 4 条 hook 事件无 tool.result; G1b 6 个
+  // tool.call 只有 5 个 tool.result). 修复: rollout input 在构建 TOOL span
+  // 时, 从 request.messages[role=tool] 按 tool_call_id 取 content 并写真实
+  // 错误文本, 设 error.type='tool_execution_error'.
+  // fixture 来源: 真实 v0.15.0 rollout (sess_18c4c0fc) slimmed 切片, 第二条
+  // record 的 request.messages 含 role=tool isError=true content="File does
+  // not exist. Note: your current working directory is /tmp/zc-e2e-g2."
+  test('G2 v0.15.0: hook 缺失 tool.result 时, 从 rollout role=tool 消息合成真实错误文本 (非 orphaned)', async () => {
+    const lines = fs.readFileSync(V015_G2_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    expect(lines.length).toBe(2);
+
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+    // 第二条 record 的 request.messages 含 role=tool isError=true
+    const rec2 = JSON.parse(lines[1]);
+    const toolMsg = rec2.request.messages.find((m) => m.role === 'tool' && m.isError === true);
+    expect(toolMsg).toBeDefined();
+    expect(toolMsg.content).toContain('File does not exist');
+
+    const entries = await (input as any).processSessionLine(rec2, '/tmp/g2.jsonl');
+    expect(Array.isArray(entries)).toBe(true);
+    // 应包含 llm.request + llm.response + 至少 1 条 tool.result
+    const toolResults = entries.filter((e) => e['event.name'] === 'tool.result');
+    expect(toolResults.length).toBeGreaterThanOrEqual(1);
+
+    const tr = toolResults[0];
+    // 关键断言: 携带真实错误文本 (而非 {"status":"error","error":"orphaned"})
+    expect(tr['gen_ai.tool.call.id']).toBe(toolMsg.toolCallId);
+    expect(tr['gen_ai.tool.name']).toBe('Read');
+    const result = tr['gen_ai.tool.call.result'];
+    expect(result).toBeDefined();
+    expect(result.status).toBe('error');
+    expect(result.error).toContain('File does not exist');
+    expect(result.error).not.toBe('orphaned');
+    // 显式标 error.type='tool_execution_error' (而非 orphaned)
+    expect(tr['error.type']).toBe('tool_execution_error');
+    expect(tr['error.message']).toContain('File does not exist');
+    // status 字段 (entry-builder 把 'error' 归一化为 'failure')
+    expect(tr['gen_ai.tool.call.status']).toBe('error');
+    expect(tr['tool.result.status']).toBe('failure');
+    // trace/session/turn/step 与同 record 的 LLM span 一致 (确保落入同一 STEP)
+    const req = entries.find((e) => e['event.name'] === 'llm.request');
+    expect(tr['trace_id']).toBe(req['trace_id']);
+    expect(tr['gen_ai.session.id']).toBe(req['gen_ai.session.id']);
+    expect(tr['gen_ai.turn.id']).toBe(req['gen_ai.turn.id']);
+    expect(tr['gen_ai.step.id']).toBe(req['gen_ai.step.id']);
+  });
+
+  test('G2 v0.15.0: 成功 role=tool 消息 (isError absent/false) 不被合成 tool.result (留给 hook PostToolUse)', async () => {
+    const lines = fs.readFileSync(V015_G2_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const rec2 = JSON.parse(lines[1]);
+    // 把 role=tool 改为成功 (isError=false)
+    const toolMsg = rec2.request.messages.find((m) => m.role === 'tool');
+    toolMsg.isError = false;
+    toolMsg.content = 'success output';
+
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+    const entries = await (input as any).processSessionLine(rec2, '/tmp/g2-success.jsonl');
+    const toolResults = entries.filter((e) => e['event.name'] === 'tool.result');
+    expect(toolResults.length).toBe(0);
+  });
+
+  test('G2 v0.15.0: 缺 toolCallId 的 role=tool 消息被跳过 (不报错)', async () => {
+    const lines = fs.readFileSync(V015_G2_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
+    const rec2 = JSON.parse(lines[1]);
+    // 删掉 toolCallId
+    const toolMsg = rec2.request.messages.find((m) => m.role === 'tool');
+    delete toolMsg.toolCallId;
+
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+    const entries = await (input as any).processSessionLine(rec2, '/tmp/g2-no-callid.jsonl');
+    const toolResults = entries.filter((e) => e['event.name'] === 'tool.result');
+    expect(toolResults.length).toBe(0);
   });
 });

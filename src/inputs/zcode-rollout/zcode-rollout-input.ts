@@ -311,6 +311,35 @@ export class ZcodeRolloutInput extends BaseSessionInput {
     const out: AgentActivityEntry[] = [];
     if (requestEntry) out.push(requestEntry);
     if (responseEntry) out.push(responseEntry);
+
+    // G2 fix: ZCode does not fire PostToolUse hook on failed tool calls (Read
+    // of nonexistent file, binary file, etc.), so the hook side never emits a
+    // tool.result event for them — the flusher's orphan synthesis then writes
+    // a {"status":"error","error":"orphaned"} placeholder, losing the real
+    // "File does not exist" / "Unsupported or binary text encoding" text that
+    // the LLM received and that the rollout record preserves verbatim in the
+    // next record's request.messages[role=tool].
+    //
+    // Recovery path: scan this record's request.messages for role=tool entries
+    // with isError=true and emit a real tool.result event for each, keyed by
+    // the same gen_ai.tool.call.id the hook used for its tool.call. The orphan
+    // synthesis sees these callIds as already having a tool.result and skips
+    // the placeholder. Successful role=tool messages (isError absent/false)
+    // are left to the hook's PostToolUse path, which empirically always fires
+    // for successful tools — emitting here too would duplicate tool.result
+    // events for the same callId.
+    const toolResultEntries = synthesizeToolResultsFromRollout({
+      messages: request.messages,
+      traceId,
+      sessionId,
+      turnId,
+      stepId,
+      timestampMs: startMs,
+      filePath,
+      baseAttrs,
+    });
+    if (toolResultEntries) out.push(...toolResultEntries);
+
     return out.length > 0 ? out : null;
   }
 
@@ -486,9 +515,9 @@ function toGenAiOutputMessages(response: Record<string, unknown>): JsonValue | u
  *
  * v3.2.3 fixture (researcher CP1): request.body.tools = [{name, description,
  * input_schema}, ...]
- * v0.15.0 production: tools may be at request.body.tools, request.tools, or
- * request.body.function_definitions — try all candidates, return the first
- * non-empty array.
+ * v0.15.0 production: request.body.tools = [{type:'function', function:{name,
+ * description, parameters}}, ...] (OpenAI nested shape). Both shapes are
+ * normalized by normalizeToolDefinitions below.
  */
 function extractToolDefinitions(record: Record<string, unknown>): JsonValue | undefined {
   const request = asRecord(record.request);
@@ -514,20 +543,94 @@ function extractToolDefinitions(record: Record<string, unknown>): JsonValue | un
 }
 
 /**
+ * G2 recovery: scan request.messages for role=tool entries with isError=true
+ * and emit a real tool.result event for each. The hook side (cmdPostToolUse)
+ * never fires when ZCode's tool call fails — its 4-event stream for a failed
+ * Read is session.start / user_prompt.submit / pre-tool-use / stop, with no
+ * post-tool-use. Without these synthesized events the flusher's orphan
+ * synthesis writes {"status":"error","error":"orphaned"} as a placeholder,
+ * hiding the real "File does not exist" / "Unsupported or binary text
+ * encoding" text the rollout preserves verbatim in request.messages[role=tool].
+ *
+ * Emits only for isError=true entries; successful role=tool messages are left
+ * to the hook's PostToolUse path (which empirically always fires for success).
+ * Keyed by gen_ai.tool.call.id (matching the hook's tool.call) so the OTLP
+ * converter's pairTool links result to call and orphan synthesis skips the
+ * callId (existingResultCallIds contains it).
+ */
+function synthesizeToolResultsFromRollout(args: {
+  messages: unknown;
+  traceId: string | undefined;
+  sessionId: string;
+  turnId: string;
+  stepId: string | undefined;
+  timestampMs: number;
+  filePath: string;
+  baseAttrs: Record<string, JsonValue>;
+}): AgentActivityEntry[] | undefined {
+  if (!Array.isArray(args.messages)) return undefined;
+  const out: AgentActivityEntry[] = [];
+  for (const m of args.messages) {
+    const rec = asRecord(m);
+    if (stringValue(rec.role) !== 'tool') continue;
+    if (rec.isError !== true && rec.is_error !== true) continue;
+    const toolCallId = stringValue(rec.toolCallId) ?? stringValue(rec.tool_call_id);
+    if (!toolCallId) continue;
+    const content = typeof rec.content === 'string' ? rec.content : '';
+    const toolName = stringValue(rec.toolName) ?? stringValue(rec.tool_name) ?? '';
+    // Timestamp: the role=tool message was ready before this LLM call started,
+    // but after the hook's tool.call fired. Using startedAt places the result
+    // after the call (correct ordering) and before the llm.request (correct
+    // STEP containment). Subtract 1ms to keep it strictly before llm.request
+    // in case the OTLP converter sorts within a millisecond.
+    const resultMs = Math.max(args.timestampMs - 1, 0);
+    const entry = buildAgentActivityEntry({
+      timestamp: resultMs,
+      time_unix_nano: timestampToUnixNanos(resultMs),
+      'event.id': `${args.filePath}:toolresult:${toolCallId}`,
+      'event.name': 'tool.result',
+      trace_id: args.traceId,
+      'gen_ai.session.id': args.sessionId,
+      'gen_ai.turn.id': args.turnId,
+      ...(args.stepId ? { 'gen_ai.step.id': args.stepId } : {}),
+      'gen_ai.agent.type': ClientType.ZcodeHook,
+      'gen_ai.agent.name': 'ZCode',
+      'gen_ai.tool.name': toolName,
+      'gen_ai.tool.call.id': toolCallId,
+      'gen_ai.tool.call.result': {
+        status: 'error',
+        error: content || 'tool execution failed',
+      } as unknown as JsonValue,
+      'gen_ai.tool.call.status': 'error',
+      'tool.result.status': 'error',
+      'error.type': 'tool_execution_error',
+      'error.message': content || 'tool execution failed',
+      attributes: args.baseAttrs,
+    });
+    if (entry) out.push(entry);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
  * Normalize ZCode tool definitions to ARMS GenAI FunctionToolDefinition schema
  * (tests/schemas/gen-ai-tool-definitions.json):
  *   {type:'function', name, description?, parameters?}
  *
- * ZCode tools carry {name, description, input_schema} — input_schema is the
- * JSON Schema for parameters. Rename input_schema → parameters and inject
- * type='function' so the OTLP converter's getToolDefinitionsForSpan emits
- * gen_ai.tool.definitions on LLM spans.
+ * ZCode v3.2.3 fixture: flat shape {name, description, input_schema}.
+ * ZCode v0.15.0 production rollout: OpenAI nested shape
+ *   {type:'function', function:{name, description, parameters}}.
+ *
+ * `unwindFunctionWrapper` flattens the nested form before the field extraction
+ * so both shapes share one code path. input_schema is renamed to parameters
+ * and type='function' is injected so the OTLP converter's
+ * getToolDefinitionsForSpan emits gen_ai.tool.definitions on LLM spans.
  */
 function normalizeToolDefinitions(tools: unknown): JsonValue | undefined {
   if (!Array.isArray(tools)) return undefined;
   const out: JsonValue[] = [];
   for (const t of tools) {
-    const rec = asRecord(t);
+    const rec = unwindFunctionWrapper(asRecord(t));
     const name = stringValue(rec.name);
     if (!name) continue;
     const def: Record<string, unknown> = {
@@ -542,6 +645,25 @@ function normalizeToolDefinitions(tools: unknown): JsonValue | undefined {
     out.push(def as unknown as JsonValue);
   }
   return out.length > 0 ? (out as unknown as JsonValue) : undefined;
+}
+
+/**
+ * Flatten OpenAI's `{type:'function', function:{name, description, parameters}}`
+ * wrapper into the flat `{name, description, parameters, type}` form. v3.2.3
+ * flat shape passes through unchanged. Returns empty record on null/non-object.
+ */
+function unwindFunctionWrapper(rec: Record<string, unknown>): Record<string, unknown> {
+  const fn = rec.function;
+  if (fn && typeof fn === 'object' && !Array.isArray(fn)) {
+    const fnRec = fn as Record<string, unknown>;
+    return {
+      type: rec.type ?? 'function',
+      name: fnRec.name,
+      description: fnRec.description,
+      parameters: fnRec.parameters ?? fnRec.input_schema ?? fnRec.inputSchema,
+    };
+  }
+  return rec;
 }
 
 function toGenAiSystemInstructions(raw: unknown): JsonValue | undefined {
