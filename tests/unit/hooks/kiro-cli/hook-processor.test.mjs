@@ -1082,3 +1082,68 @@ describe('kiro-cli-hook-processor MCP 工具匹配 + 真实时序重算', () => 
     }
   });
 });
+
+// ─── 多 Prompt / 冷启动回放防护（P0-1 run-boundary 按 Prompt 切 + P0-2 冷启动只留最后 Prompt）───
+
+const TWO_PROMPT_CWD = '/tmp/kiro_2prompt_probe';
+const TWO_PROMPT_SID = '22222222-3333-4444-5555-666666666666';
+
+function setupTwoPromptSessionFixtures(dataDir) {
+  const fakeHome = path.join(dataDir, 'fake-home-2p');
+  const sessionDir = path.join(fakeHome, '.kiro', 'sessions', 'cli');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const sidecar = JSON.parse(
+    fs.readFileSync(path.join(__dirname, 'fixtures/session_2prompt_sidecar.json'), 'utf-8'),
+  );
+  const jsonlRaw = fs.readFileSync(
+    path.join(__dirname, 'fixtures/session_2prompt_interactive.jsonl'),
+    'utf-8',
+  );
+  fs.writeFileSync(path.join(sessionDir, `${TWO_PROMPT_SID}.json`), JSON.stringify(sidecar));
+  fs.writeFileSync(path.join(sessionDir, `${TWO_PROMPT_SID}.jsonl`), jsonlRaw);
+  return fakeHome;
+}
+
+describe('kiro-cli-hook-processor 多 Prompt / 冷启动回放防护', () => {
+  test('P0-2: 冷启动 (sessionSinceMs=0) 只采集最后一个 Prompt', () => {
+    try { fs.unlinkSync(DB_PATH); } catch {}
+    const fakeHome = setupTwoPromptSessionFixtures(DATA_DIR);
+    // 不写缓冲 → 全 transcript_estimate；冷启动应只保留 prompt2 的 steps
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: TWO_PROMPT_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+    const records = readJsonlRecords();
+    // 只应有 prompt2 的 4 条 step（a2 的 llm.request/response/tool.call/tool.result + a2f）
+    // prompt1 的 step 全被冷启动过滤掉
+    const prompt1Steps = records.filter((r) => r['gen_ai.step.id']?.startsWith('a1'));
+    const prompt2Steps = records.filter((r) => r['gen_ai.step.id']?.startsWith('a2'));
+    expect(prompt1Steps.length).toBe(0);
+    expect(prompt2Steps.length).toBeGreaterThan(0);
+  });
+
+  test('P0-1: 多 Prompt 各自一条 trace（按 Prompt 边界切，不按时间差）', () => {
+    try { fs.unlinkSync(DB_PATH); } catch {}
+    const fakeHome = setupTwoPromptSessionFixtures(DATA_DIR);
+    // 预置 session-offsets 让 sinceMs>0（非冷启动），保留两个 Prompt
+    const offsetDir = path.join(DATA_DIR, 'state', 'kiro-cli', 'session-offsets');
+    fs.mkdirSync(offsetDir, { recursive: true });
+    const key = Buffer.from(TWO_PROMPT_CWD).toString('base64url');
+    fs.writeFileSync(path.join(offsetDir, `${key}.json`), JSON.stringify({ updatedMs: 1 }));
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: TWO_PROMPT_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+    const records = readJsonlRecords();
+    // 两个 Prompt 都应被采（非冷启动）
+    const prompt1 = records.filter((r) => r['gen_ai.step.id']?.startsWith('a1'));
+    const prompt2 = records.filter((r) => r['gen_ai.step.id']?.startsWith('a2'));
+    expect(prompt1.length).toBeGreaterThan(0);
+    expect(prompt2.length).toBeGreaterThan(0);
+    // 两个 Prompt 的 turn.id 应不同 run（r0 / r1），按 Prompt 边界切
+    const turnIds = new Set(records.map((r) => r['gen_ai.turn.id']));
+    expect(turnIds.size).toBeGreaterThanOrEqual(2);
+  });
+});
