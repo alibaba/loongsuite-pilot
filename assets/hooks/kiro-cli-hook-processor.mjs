@@ -411,11 +411,29 @@ async function runCollect(ctx) {
 async function trySessionJsonl(cwd, sinceMs = 0, opts = {}) {
   const { allowFallback = false } = opts;
   const MAX_ATTEMPTS = 3;
+  // 冷启动时判定 session 是否为"重启前遗留的旧 session"的阈值：
+  // sinceMs===0（offset 丢失）且 session.updated_at 距今 > 此值 → 整个跳过，
+  // 不采（避免重启后旧 session 的最后 Prompt 被当新数据回放）。
+  // 5min 足以覆盖正常 matureDelay(10s)+poll(60s) 处理延迟，又 < 用户换 session 的间隔。
+  const COLD_START_STALE_SESSION_MS = 5 * 60 * 1000;
   let lastSession = null;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
       const session = await readSessionJsonl(cwd, { sinceUpdatedMs: sinceMs });
       if (session && session.steps.length > 0) {
+        // Cold-start stale-session skip: 重启后处理遗留的旧 pending 时，
+        // sinceMs===0 且 session 已陈旧（>5min）→ 这是旧 session 回放，整个跳过。
+        // 用户当前 session 是 recent（<5min），仍正常采。
+        if (sinceMs === 0 && session.updatedMs > 0 &&
+            (Date.now() - session.updatedMs) > COLD_START_STALE_SESSION_MS) {
+          logHookError({
+            agentId: AGENT_ID,
+            stage: 'session_jsonl_read',
+            errorType: 'cold_start_stale_session_skipped',
+            errorMessage: `cold start: session updated ${Math.round((Date.now() - session.updatedMs) / 1000)}s ago (>${COLD_START_STALE_SESSION_MS / 1000}s) — skipping stale replay`,
+          });
+          return null;
+        }
         // Cold-start replay protection: sinceMs===0 表示无 prior offset（如 daemon
         // 重启擦了 session-offsets），此时 session 文件被从头读，含多个已发过的
         // 历史 Prompt。重发会产重复 span + 多 Prompt 一次采集被 run-gap 切碎。

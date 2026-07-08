@@ -1088,13 +1088,16 @@ describe('kiro-cli-hook-processor MCP 工具匹配 + 真实时序重算', () => 
 const TWO_PROMPT_CWD = '/tmp/kiro_2prompt_probe';
 const TWO_PROMPT_SID = '22222222-3333-4444-5555-666666666666';
 
-function setupTwoPromptSessionFixtures(dataDir) {
+function setupTwoPromptSessionFixtures(dataDir, opts = {}) {
   const fakeHome = path.join(dataDir, 'fake-home-2p');
   const sessionDir = path.join(fakeHome, '.kiro', 'sessions', 'cli');
   fs.mkdirSync(sessionDir, { recursive: true });
   const sidecar = JSON.parse(
     fs.readFileSync(path.join(__dirname, 'fixtures/session_2prompt_sidecar.json'), 'utf-8'),
   );
+  // 动态设置 updated_at：默认 now（recent），opts.updatedAtOffsetMs 可调（负值=过去）
+  const updatedMs = Date.now() + (opts.updatedAtOffsetMs ?? 0);
+  sidecar.updated_at = new Date(updatedMs).toISOString();
   const jsonlRaw = fs.readFileSync(
     path.join(__dirname, 'fixtures/session_2prompt_interactive.jsonl'),
     'utf-8',
@@ -1107,7 +1110,7 @@ function setupTwoPromptSessionFixtures(dataDir) {
 describe('kiro-cli-hook-processor 多 Prompt / 冷启动回放防护', () => {
   test('P0-2: 冷启动 (sessionSinceMs=0) 只采集最后一个 Prompt', () => {
     try { fs.unlinkSync(DB_PATH); } catch {}
-    const fakeHome = setupTwoPromptSessionFixtures(DATA_DIR);
+    const fakeHome = setupTwoPromptSessionFixtures(DATA_DIR); // updated_at=now（recent）
     // 不写缓冲 → 全 transcript_estimate；冷启动应只保留 prompt2 的 steps
     runHookWithSessionDir(
       'stop',
@@ -1121,6 +1124,20 @@ describe('kiro-cli-hook-processor 多 Prompt / 冷启动回放防护', () => {
     const prompt2Steps = records.filter((r) => r['gen_ai.step.id']?.startsWith('a2'));
     expect(prompt1Steps.length).toBe(0);
     expect(prompt2Steps.length).toBeGreaterThan(0);
+  });
+
+  test('P0-2 stale: 冷启动 + 旧 session（>5min）→ 整个跳过，不采', () => {
+    try { fs.unlinkSync(DB_PATH); } catch {}
+    // updated_at = now - 10min（旧 session，模拟重启后遗留的旧 pending）
+    const fakeHome = setupTwoPromptSessionFixtures(DATA_DIR, { updatedAtOffsetMs: -10 * 60 * 1000 });
+    runHookWithSessionDir(
+      'stop',
+      { hook_event_name: 'stop', cwd: TWO_PROMPT_CWD, assistant_response: 'done' },
+      fakeHome,
+    );
+    const records = readJsonlRecords();
+    // 旧 session 冷启动应整个跳过 → 无任何记录
+    expect(records.length).toBe(0);
   });
 
   test('P0-1: 多 Prompt 各自一条 trace（按 Prompt 边界切，不按时间差）', () => {
