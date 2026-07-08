@@ -416,6 +416,23 @@ async function trySessionJsonl(cwd, sinceMs = 0, opts = {}) {
     try {
       const session = await readSessionJsonl(cwd, { sinceUpdatedMs: sinceMs });
       if (session && session.steps.length > 0) {
+        // Cold-start replay protection: sinceMs===0 表示无 prior offset（如 daemon
+        // 重启擦了 session-offsets），此时 session 文件被从头读，含多个已发过的
+        // 历史 Prompt。重发会产重复 span + 多 Prompt 一次采集被 run-gap 切碎。
+        // 只保留最后一个 Prompt（最后一个唯一 turnStartMs 的 steps）。
+        if (sinceMs === 0 && session.steps.length > 1) {
+          const lastTurnStart = session.steps[session.steps.length - 1].turnStartMs;
+          if (lastTurnStart) {
+            const before = session.steps.length;
+            session.steps = session.steps.filter((s) => s.turnStartMs === lastTurnStart);
+            logHookError({
+              agentId: AGENT_ID,
+              stage: 'session_jsonl_read',
+              errorType: 'cold_start_replay_filtered',
+              errorMessage: `cold start (sinceMs=0): kept last prompt only (${session.steps.length}/${before} steps)`,
+            });
+          }
+        }
         lastSession = session;
         const timingValid = session.steps.every((s) => s.startTimeMs > 0);
         if (timingValid) return session;
@@ -516,9 +533,11 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
       matched: matchToolEvent(toolEvents, tool),
     }));
 
+    let newPromptBoundary = false; // session_jsonl: 本 step 开启了新 Prompt（turnStartMs 变化）
     if (isSessionJsonl && step.turnStartMs && step.turnStartMs !== currentTurnStartMs) {
       currentTurnStartMs = step.turnStartMs;
       lastToolResultEndMs = 0; // 新 turn：无前置工具
+      newPromptBoundary = true;
     }
     if (isSessionJsonl && step.turnStartMs) {
       const turnEnd = step.turnEndMs || step.endTimeMs;
@@ -542,9 +561,20 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
       }
     }
 
-    // ── Run-boundary detection: >30s gap = new run ──
-    if (prevEndTimeMs > 0 && step.startTimeMs > 0 &&
-        (step.startTimeMs - prevEndTimeMs) > RUN_GAP_MS) {
+    // ── Run-boundary detection ──
+    // session_jsonl: 按 Prompt 边界切（turnStartMs 变化 = 新用户 turn = 新 run）。
+    //   旧逻辑用 >30s 时间差会误切——inter-Prompt 用户思考时间、工具执行时间都会
+    //   把一个 turn 切成 r0/r1/r2，且 daemon 重启后多 Prompt 一次采集时切得更碎。
+    // SQLite: 保持 >30s 时间差（无 turnStartMs；多 run 合并在一行靠时间差拆）。
+    let splitRun = false;
+    if (isSessionJsonl) {
+      // 跳过首个 step（stepRound==1 是第一条 run，不切）
+      if (newPromptBoundary && stepRound > 1) splitRun = true;
+    } else {
+      if (prevEndTimeMs > 0 && step.startTimeMs > 0 &&
+          (step.startTimeMs - prevEndTimeMs) > RUN_GAP_MS) splitRun = true;
+    }
+    if (splitRun) {
       currentTraceId = generateTraceId();
       runIndex++;
       currentTurnId = `${turnIdBase}:r${runIndex}`;
