@@ -193,7 +193,12 @@ function extractToolResultContentText(item) {
 function extractToolUseResults(entry) {
   const content = entry?.user?.content;
   if (!content || typeof content !== 'object') return [];
-  const tur = content.ToolUseResults;
+  // kiro-cli 把工具结果放两种 key 下：
+  //   - ToolUseResults（正常完成）
+  //   - CancelledToolUses（取消/中断，但仍有 tool_use_results + prompt）
+  // 两者结构相同（{tool_use_results:[{tool_use_id,content,status}]}），都要提取，
+  // 否则 CancelledToolUses 的 step toolUseResults 为空 → input.messages 丢失。
+  const tur = content.ToolUseResults || content.CancelledToolUses;
   if (!tur || typeof tur !== 'object') return [];
   const results = Array.isArray(tur.tool_use_results) ? tur.tool_use_results : [];
   const out = [];

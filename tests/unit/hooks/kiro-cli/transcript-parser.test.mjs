@@ -226,4 +226,22 @@ describe('kiro-cli transcript-parser toolUseResults 提取（Text + Json）', ()
     // 旧逻辑：Json 被跳过 → toolUseResults=[]。修复后：提取 Json.content[].text
     expect(parsed.steps[1].toolUseResults).toEqual(['Allowed directories:\n/Users/yunshen/Documents']);
   });
+
+  test('CancelledToolUses 也提取（kiro-cli 把取消的工具结果放这）', async () => {
+    const { parseConversationValue } = await import(PARSER);
+    const convRaw = {
+      conversation_id: 'c-cancel',
+      history: [
+        { user: { content: { Prompt: { prompt: 'p' } } },
+          assistant: { ToolUse: { message_id: 'm0', tool_uses: [{ id: 't0', name: 'shell', args: {} }] } },
+          request_metadata: { request_id: 'r0', message_id: 'm0', request_start_timestamp_ms: 1, stream_end_timestamp_ms: 2 } },
+        { user: { content: { CancelledToolUses: { prompt: 'p', tool_use_results: [{ tool_use_id: 't0', content: [{ Text: 'Tool use was cancelled by the user' }], status: 'cancelled' }] } } },
+          assistant: { Response: { message_id: 'm1', content: [{ kind: 'text', data: 'ok' }] } },
+          request_metadata: { request_id: 'r1', message_id: 'm1', request_start_timestamp_ms: 3, stream_end_timestamp_ms: 4 } },
+      ],
+    };
+    const parsed = parseConversationValue(convRaw);
+    // 旧逻辑：CancelledToolUses 不被读取 → toolUseResults=[]。修复后：提取
+    expect(parsed.steps[1].toolUseResults).toEqual(['Tool use was cancelled by the user']);
+  });
 });
