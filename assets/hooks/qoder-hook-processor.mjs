@@ -632,6 +632,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
     toolResultsForNextStep = [];
     let responseId = undefined;
     let lastAssistantTs = null;
+    let firstAssistantTs = null;
 
     for (const row of content) {
       if (row.type === 'assistant') {
@@ -639,6 +640,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
         const blocks = Array.isArray(msg.content) ? msg.content : [];
         if (msg.id && !responseId) responseId = msg.id;
         if (row.timestamp) lastAssistantTs = row.timestamp;
+        if (row.timestamp && !firstAssistantTs) firstAssistantTs = row.timestamp;
         for (const block of blocks) {
           if (block.type === 'thinking') {
             outputParts.push({ type: 'reasoning', content: block.thinking || '' });
@@ -701,6 +703,10 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
         'user.id': userId,
         'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts, finish_reason: finishReason }],
         'agent.source': 'qoder-transcript-hook',
+        // Accurate per-response timestamp from the transcript's first assistant record
+        // (≈ SQLite gmt_create). Used only for token-enricher matching; dropped from
+        // SLS/JSONL output as an agent-scoped field. Absent for CLI (no firstAssistantTs).
+        'agent.qoder.match_ts': firstAssistantTs ? Date.parse(firstAssistantTs) : undefined,
         time_unix_nano: responseEndNanos,
         observed_time_unix_nano: observedTs,
       });
