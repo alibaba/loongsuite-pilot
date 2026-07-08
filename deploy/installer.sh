@@ -1535,11 +1535,18 @@ cmd_uninstall() {
     msg "    ✅ 服务已停止" "    ✅ Service stopped"
     echo ""
 
-    # Remove package directory
-    msg "==> 删除安装目录..." "==> Removing installation..."
-    rm -rf "$HOME/.loongsuite-pilot"
-    msg "    ✅ 已删除 $HOME/.loongsuite-pilot" \
-        "    ✅ Removed $HOME/.loongsuite-pilot"
+    # Remove installation subdirectories only (not config.json / logs / state).
+    # Data directory is preserved unless --purge is given.
+    rm -rf "$HOME/.loongsuite-pilot/versions"
+    rm -rf "$HOME/.loongsuite-pilot/package"
+    rm -f "$HOME/.loongsuite-pilot/current"
+    rm -f "$HOME/.loongsuite-pilot/previous"
+    rm -rf "$HOME/.loongsuite-pilot/bin"
+    rm -rf "$HOME/.loongsuite-pilot/hooks"
+    rm -rf "$HOME/.loongsuite-pilot/node-bin"
+    rm -f "$HOME/.loongsuite-pilot/.refresh.lock"
+    msg "    ✅ 已删除安装文件" \
+        "    ✅ Installation files removed"
 
     # Remove loongsuite-pilot command
     msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."

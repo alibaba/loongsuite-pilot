@@ -143,13 +143,14 @@ export class KiroCliSessionInput extends BaseInput {
     // Register SIGUSR1 handler: stop hook sends this signal after enqueueing
     // a pending record. We debounce with a single timer so rapid-fire signals
     // don't stack multiple collect() calls.
+    // Use requestCollection() (not collect() directly) to go through runCycle
+    // serialization — ensures poll and signal don't run concurrently, and
+    // onStop()'s cyclePromise await covers signal-triggered cycles too.
     this.signalHandler = () => {
       if (this.pendingCollectTimer) clearTimeout(this.pendingCollectTimer);
       this.pendingCollectTimer = setTimeout(() => {
         this.pendingCollectTimer = null;
-        this.collect().catch((err) => {
-          this.logger.warn('SIGUSR1-triggered collect failed', { error: String(err) });
-        });
+        this.requestCollection();
       }, this.matureDelayMs);
     };
     process.on('SIGUSR1', this.signalHandler);
@@ -167,6 +168,10 @@ export class KiroCliSessionInput extends BaseInput {
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
+    // Guard against signal-triggered collect after stop() — requestCollection()
+    // checks this.running internally, but the timer callback could fire in the
+    // window between stop() clearing _running and the timer being cleared.
+    if (!this.running) return [];
     await this.ensureDirs();
     const items = await this.listReady();
     if (items.length === 0) return [];

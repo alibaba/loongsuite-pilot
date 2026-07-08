@@ -74,7 +74,7 @@ node_is_suitable() {
   return 0
 }
 
-NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
+NODE_PIN_FILE="${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}/node-bin"
 NODE_BIN=""
 
 if [[ -f "$NODE_PIN_FILE" ]]; then

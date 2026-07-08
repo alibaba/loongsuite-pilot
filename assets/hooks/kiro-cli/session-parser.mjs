@@ -22,6 +22,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 
 const TOOL_NAME_MAP = {
   read: 'fs_read',
@@ -302,7 +303,7 @@ export async function readSessionJsonl(cwd, opts = {}) {
   if (!cwd) return null;
 
   const sessionDir =
-    opts.sessionDir || path.join(process.env.HOME || '~', '.kiro', 'sessions', 'cli');
+    opts.sessionDir || path.join(os.homedir(), '.kiro', 'sessions', 'cli');
 
   if (!fs.existsSync(sessionDir)) return null;
 
