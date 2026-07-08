@@ -486,13 +486,16 @@ async function trySessionJsonl(cwd, sinceMs = 0, opts = {}) {
             });
             return session;
           }
+          // sidecar 异步刷盘，3 次退避（~1.4s）可能还没写完 turn_duration/end_timestamp。
+          // 返回 session（而非 null）让 runCollect 的 timing 检查走 'timing_pending' →
+          // 重新入队，下轮（60s poll / SIGUSR1）再采，那时 sidecar 已 flush。避免丢 turn。
           logHookError({
             agentId: AGENT_ID,
             stage: 'session_jsonl_read',
-            errorType: 'timing_incomplete',
-            errorMessage: `sidecar turn metadata incomplete after ${MAX_ATTEMPTS} retries (${session.steps.length} steps with startTimeMs=0)`,
+            errorType: 'timing_incomplete_requeue',
+            errorMessage: `sidecar timing incomplete after ${MAX_ATTEMPTS} retries (${session.steps.length} steps with startTimeMs=0) — returning for requeue`,
           });
-          return null;
+          return session;
         }
       }
     } catch (err) {
