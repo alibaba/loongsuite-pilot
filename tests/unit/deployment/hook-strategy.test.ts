@@ -19,6 +19,7 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
   readJsonFile: vi.fn(),
   writeJsonFile: vi.fn(),
   resolveHome: vi.fn((p: string) => p),
+  ensureDir: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { detectAgent } from '../../../src/deployment/detect-utils.js';
@@ -536,6 +537,49 @@ describe('HookStrategy', () => {
 
       const result = await strategy.undeploy(makeDef());
       expect(result).toBe(false);
+    });
+  });
+
+  describe('kiro agent default-agent config', () => {
+    const kiroDef = (overrides?: Partial<AgentDefinition>): AgentDefinition => makeDef({
+      id: 'kiro-cli',
+      hook: {
+        settingsPath: '/home/.kiro/agents/pilot-kiro.json',
+        events: ['userPromptSubmit', 'preToolUse', 'postToolUse', 'stop'],
+        hookCommand: '/opt/pilot/hooks/kiro.sh',
+        format: 'flat',
+        matcher: '*',
+        eventSubcommand: 'as-is',
+        kiroAgent: { name: 'pilot-kiro', tools: ['read', 'write', 'shell'] },
+        ...overrides,
+      },
+    });
+
+    it('sets chat.defaultAgent=pilot-kiro in cli.json when missing', async () => {
+      // pilot-kiro.json: empty; cli.json: no chat.defaultAgent
+      vi.mocked(readJsonFile).mockResolvedValue({} as any);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      await strategy.deploy(kiroDef());
+
+      // writeJsonFile should be called with cli.json containing chat.defaultAgent
+      const calls = vi.mocked(writeJsonFile).mock.calls;
+      const cliCall = calls.find((c: any) => String(c[0]).includes('settings/cli.json'));
+      expect(cliCall).toBeTruthy();
+      expect((cliCall![1] as any)['chat.defaultAgent']).toBe('pilot-kiro');
+    });
+
+    it('does not override an existing chat.defaultAgent', async () => {
+      // cli.json already has a different defaultAgent
+      vi.mocked(readJsonFile).mockResolvedValue({ 'chat.defaultAgent': 'my-custom-agent' } as any);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      await strategy.deploy(kiroDef());
+
+      const cliCall = vi.mocked(writeJsonFile).mock.calls
+        .find((c: any) => String(c[0]).includes('settings/cli.json'));
+      // Should not write cli.json (defaultAgent already set, respected)
+      expect(cliCall).toBeUndefined();
     });
   });
 });

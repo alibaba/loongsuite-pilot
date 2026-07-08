@@ -458,6 +458,30 @@ export class HookStrategy implements DeployStrategy {
 
     merged['hooks'] = hooks;
     await writeJsonFile(settingsPath, merged);
+
+    // Make pilot-kiro the default agent so users can run `kiro-cli` without
+    // `--agent pilot-kiro`. Only set when missing — don't override a user's
+    // explicit choice (they can still pass --agent for a one-off override).
+    await this.setKiroDefaultAgentIfMissing(agent.name);
+  }
+
+  /**
+   * Set `chat.defaultAgent = <agentName>` in ~/.kiro/settings/cli.json when not
+   * already set, so kiro-cli launches with the pilot agent by default.
+   */
+  private async setKiroDefaultAgentIfMissing(agentName: string): Promise<void> {
+    const cliSettingsPath = resolveHome('~/.kiro/settings/cli.json');
+    try {
+      await ensureDir(path.dirname(cliSettingsPath));
+      const cli = (await readJsonFile<Record<string, unknown>>(cliSettingsPath)) ?? {};
+      const cur = cli['chat.defaultAgent'];
+      if (typeof cur === 'string' && cur.length > 0) return; // respect existing choice
+      cli['chat.defaultAgent'] = agentName;
+      await writeJsonFile(cliSettingsPath, cli);
+      logger.info('kiro default agent set', { path: cliSettingsPath, agent: agentName });
+    } catch (err) {
+      logger.warn('failed to set kiro default agent', { error: String(err) });
+    }
   }
 
   private async kiroAgentNeedsDeploy(def: AgentDefinition): Promise<boolean> {
