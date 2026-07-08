@@ -62,31 +62,64 @@ export function appendToolEvent(cwd, entry) {
 }
 
 /**
+ * 回收上次 drain 崩溃遗留的 .drain.<pid> 文件。
+ * 进程在 rename→unlink 之间崩溃（或被 SIGKILL）会留下 .drain.* 文件，
+ * 内含的 tool 事件（tool_response / startTs）是 transcript 拿不到的唯一产出，
+ * 不回收则永久丢失。在每次 drain 前扫描同目录下的旧 .drain.*，读取并入本次结果。
+ */
+function recoverStaleDrainFiles(dir, baseFile) {
+  const out = [];
+  let entries;
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return out;
+  }
+  const baseName = path.basename(baseFile);
+  for (const f of entries) {
+    // 匹配 <baseFile>.drain.<pid> 格式
+    if (!f.startsWith(baseName + '.drain.')) continue;
+    const full = path.join(dir, f);
+    try {
+      const raw = fs.readFileSync(full, 'utf-8');
+      for (const line of raw.split('\n')) {
+        const t = line.trim();
+        if (!t) continue;
+        try { out.push(JSON.parse(t)); } catch { /* skip malformed */ }
+      }
+    } catch { /* read failed, skip */ }
+    try { fs.unlinkSync(full); } catch { /* ignore */ }
+  }
+  return out;
+}
+
+/**
  * 读出并清空 per-cwd 缓冲（rename-then-read 原子化，防并发 hook 丢事件）。
  * @returns {Array<{toolName:string, toolInput:object, toolResponse:any, captureTs:string}>}
  */
 export function drainToolEvents(cwd) {
   const file = bufferFile(cwd);
+  const dir = path.dirname(file);
+  // 先回收上次 drain 崩溃遗留的 .drain.* 文件
+  const out = recoverStaleDrainFiles(dir, file);
   const tmp = file + '.drain.' + process.pid;
   try {
     fs.renameSync(file, tmp);
   } catch {
-    return [];
+    return out;
   }
   let raw = '';
   try {
     raw = fs.readFileSync(tmp, 'utf-8');
   } catch {
-    // rename 成功但 read 失败，tmp 仍存在；尝试清理
     try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-    return [];
+    return out;
   }
   try {
     fs.unlinkSync(tmp);
   } catch {
     // ignore
   }
-  const out = [];
   for (const line of raw.split('\n')) {
     const t = line.trim();
     if (!t) continue;
@@ -117,33 +150,31 @@ export function appendPreToolEvent(cwd, entry) {
  */
 export function drainPreToolEvents(cwd) {
   const file = preToolBufferFile(cwd);
+  const dir = path.dirname(file);
+  // 先回收上次 drain 崩溃遗留的 .drain.* 文件
+  const out = recoverStaleDrainFiles(dir, file);
   const tmp = file + '.drain.' + process.pid;
   try {
     fs.renameSync(file, tmp);
   } catch {
-    return [];
+    return out;
   }
   let raw = '';
   try {
     raw = fs.readFileSync(tmp, 'utf-8');
   } catch {
     try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-    return [];
+    return out;
   }
   try {
     fs.unlinkSync(tmp);
   } catch {
     // ignore
   }
-  const out = [];
   for (const line of raw.split('\n')) {
     const t = line.trim();
     if (!t) continue;
-    try {
-      out.push(JSON.parse(t));
-    } catch {
-      // skip malformed
-    }
+    try { out.push(JSON.parse(t)); } catch { /* skip malformed */ }
   }
   return out;
 }
