@@ -26,6 +26,20 @@ export abstract class BaseHookInput extends BaseInput {
   protected readonly logDir: string;
   protected readonly logPrefix: string;
 
+  /**
+   * Cold-start replay protection. When true and the input has no prior state
+   * (`!lastFile`, e.g. after redeployment or state-store loss), only the last
+   * turn in the daily file is dispatched — the rest are assumed already-sent
+   * history from a previous daemon run.
+   *
+   * Only safe for inputs whose hook JSONL is written by the daemon's own
+   * subprocess (so no daemon ⇒ no records ⇒ cold start always means "restart
+   * with stale already-dispatched data"). Inputs whose hook JSONL is written
+   * by an independent hook script (cursor, claude-code, …) may have genuine
+   * never-dispatched records on first-ever start and MUST NOT enable this.
+   */
+  protected coldStartKeepLastTurnOnly = false;
+
   constructor(opts: HookInputOptions) {
     super(opts);
     this.logDir = opts.logDir;
@@ -50,6 +64,7 @@ export abstract class BaseHookInput extends BaseInput {
     }
 
     const state = this.getState();
+    const isColdStart = !state.lastFile;
     let offset = state.lastFile === logFileName ? (state.lastOffset ?? 0) : 0;
     // File truncation recovery: if file shrank below recorded offset (e.g.
     // daemon reinstall/rotation), reset to 0 to re-read the new file.
@@ -84,7 +99,26 @@ export abstract class BaseHookInput extends BaseInput {
     } finally {
       await handle.close();
     }
-    
+
+    // Cold-start replay protection: when state was wiped (e.g. redeployment or
+    // input-state.json lost during a crash), the daily file already contains
+    // records dispatched earlier today. Re-emitting them creates duplicate spans
+    // on SLS. On cold start, keep only the last turn — offset is already advanced
+    // to stat.size above, so subsequent reads resume from the end.
+    // Opt-in via coldStartKeepLastTurnOnly (see field docs for the safety caveat).
+    if (this.coldStartKeepLastTurnOnly && isColdStart && entries.length > 0) {
+      const turnIds = new Set(entries.map(e => (e['gen_ai.turn.id'] as string) || 'unknown'));
+      if (turnIds.size > 1) {
+        const lastTurnId = (entries[entries.length - 1]['gen_ai.turn.id'] as string) || 'unknown';
+        this.logger.info('cold start detected, skipping historical turns', {
+          skipped: turnIds.size - 1,
+          totalTurns: turnIds.size,
+          keepTurnId: lastTurnId,
+        });
+        return entries.filter(e => ((e['gen_ai.turn.id'] as string) || 'unknown') === lastTurnId);
+      }
+    }
+
     return entries;
   }
 

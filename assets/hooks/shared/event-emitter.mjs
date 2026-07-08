@@ -68,7 +68,7 @@ export function computeHash(prevHash, deltaMessages) {
 }
 
 export function shouldLogFullMessages(prevHash, delta, currentFullHash) {
-  return computeHash(prevHash, delta) !== currentFullHash;
+  return true;
 }
 
 // ─── JSONL 文件写入 ───

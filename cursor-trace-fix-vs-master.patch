@@ -1,0 +1,3808 @@
+diff --git a/.codex/config.toml b/.codex/config.toml
+new file mode 100644
+index 0000000..f067b7a
+--- /dev/null
++++ b/.codex/config.toml
+@@ -0,0 +1,2 @@
++[mcp_servers.code]
++url = "https://mcp.alibaba-inc.com/code/mcp"
+diff --git a/assets/hooks/codex-hook-processor.mjs b/assets/hooks/codex-hook-processor.mjs
+index a7bb236..5899473 100644
+--- a/assets/hooks/codex-hook-processor.mjs
++++ b/assets/hooks/codex-hook-processor.mjs
+@@ -280,7 +280,10 @@ async function writeSessionJsonl(state, transcriptData) {
+   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+   const userId = resolveUserId({}, runtimeConfig);
+   const sessionId = state.session_id || 'unknown';
+-  const turns = splitIntoTurns(state);
++
++  // 优先用 transcript 的 turnBoundaries 驱动 turn 切分（覆盖所有用户交互），
++  // fallback 到 state.events 的 user_prompt_submit（hook 可能漏报）。
++  const turns = resolveTurns(state, transcriptData);
+   if (turns.length === 0) return;
+ 
+   const provider = transcriptData?.modelProvider || 'openai';
+@@ -324,6 +327,84 @@ async function writeSessionJsonl(state, transcriptData) {
+   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
+ }
+ 
++// ─── Turn 切分：transcript 驱动 + state.events fallback ───
++
++function resolveTurns(state, transcriptData) {
++  const boundaries = transcriptData?.turnBoundaries;
++
++  // 无 transcript 数据时回退到原有的 splitIntoTurns（按 user_prompt_submit 切分）
++  if (!boundaries || boundaries.length === 0) {
++    return splitIntoTurns(state);
++  }
++
++  // 用 transcript turnBoundaries 作为权威 turn 边界。
++  // 每个 boundary 代表一次真实用户交互（turn_context 事件），
++  // 子 agent 的 turn_context 在子 transcript 中，不会出现在父 transcript 里。
++  const allEvents = state.events.filter(
++    (e) => e.type !== 'session_start',
++  );
++  const stopEvent = allEvents.find((e) => e.type === 'stop');
++
++  // 父 agent 工具调用的 call_id 白名单。state.events 中 tool_use_id 不在此集合中的
++  // pre/post_tool_use 是子 agent 进程混入的事件（子 agent hook 使用父 session_id），
++  // 应当过滤掉，避免干扰父 turn 的 step 构建和时间线。
++  const parentCallIds = transcriptData?.parentToolCallIds;
++
++  const turns = [];
++  for (let i = 0; i < boundaries.length; i++) {
++    const boundary = boundaries[i];
++    const nextBoundary = boundaries[i + 1];
++    const startTime = boundary.timestamp;
++    const endTime = nextBoundary ? nextBoundary.timestamp : (stopEvent?.timestamp ?? startTime);
++
++    // 找到 state.events 中对应这个 turn 时间范围内的事件。
++    // 1. 过滤掉子 agent 混入的 pre/post_tool_use（tool_use_id 不在父白名单中）
++    // 2. 对同一 tool_use_id 去重（hook 事件 + appendMissingTranscriptToolEvents
++    //    可能各产生一条，优先保留有 tool_input 的那条）
++    const seenToolIds = new Map();  // tool_use_id:type → event
++    const turnEvents = [];
++    for (const e of allEvents) {
++      if (e.type === 'stop' || e.type === 'user_prompt_submit') continue;
++      const ts = e.timestamp;
++      if (ts < startTime || (nextBoundary && ts >= nextBoundary.timestamp)) continue;
++
++      if (e.type === 'pre_tool_use' || e.type === 'post_tool_use') {
++        // 白名单过滤：不在父 transcript 中的 tool_use_id 是子 agent 事件
++        if (parentCallIds && e.tool_use_id && !parentCallIds.has(e.tool_use_id)) continue;
++        // 去重：同一 tool_use_id + type 只保留第一条（hook 事件在前，有 tool_input）
++        const dedup = `${e.type}:${e.tool_use_id || ''}`;
++        if (seenToolIds.has(dedup)) continue;
++        seenToolIds.set(dedup, true);
++      }
++
++      turnEvents.push(e);
++    }
++
++    // prompt 优先从 transcript 的 user_message 获取（覆盖所有交互），
++    // fallback 到 state.events 的 user_prompt_submit（hook 可能漏报）
++    const promptEvent = allEvents.find(
++      (e) => e.type === 'user_prompt_submit' && e.timestamp >= startTime
++        && (!nextBoundary || e.timestamp < nextBoundary.timestamp),
++    );
++
++    turns.push({
++      turn_id: boundary.turn_id,
++      prompt: boundary.prompt || promptEvent?.prompt || '',
++      model: promptEvent?.model || state.model || 'unknown',
++      start_time: startTime,
++      end_time: stopEvent && i === boundaries.length - 1
++        ? stopEvent.timestamp
++        : endTime,
++      events: turnEvents,
++      last_assistant_message: i === boundaries.length - 1
++        ? stopEvent?.last_assistant_message
++        : undefined,
++    });
++  }
++
++  return turns;
++}
++
+ // ─── buildTurnRecords — 单 turn 的 JSONL records 构造 ───
+ 
+ function buildTurnRecords({
+diff --git a/assets/hooks/codex/transcript-parser.mjs b/assets/hooks/codex/transcript-parser.mjs
+index 4faa9bf..0420dfc 100644
+--- a/assets/hooks/codex/transcript-parser.mjs
++++ b/assets/hooks/codex/transcript-parser.mjs
+@@ -174,6 +174,20 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
+   // 当前正在处理的 turn_id;由 task_started / turn_context 设置
+   let currentTurnId = null;
+ 
++  // turn 边界列表：记录 transcript 中每个 turn_context 的 turn_id 和时间戳，
++  // 用于在 writeSessionJsonl 中驱动 turn 切分（替代仅靠 user_prompt_submit hook）
++  const turnBoundaries = [];
++
++  // 父 agent 工具调用的 call_id 白名单。父 transcript 只包含父 agent 的 function_call，
++  // 子 agent 的工具调用在子 transcript 中。resolveTurns 用此集合过滤 state.events 中
++  // 混入的子 agent pre/post_tool_use 事件。
++  const parentToolCallIds = new Set();
++
++  // 子 agent 信息列表。从 spawn_agent 的 function_call_output 中提取。
++  // 将来实现 subagent 嵌套时使用：通过 agent_id 定位子 transcript，
++  // 通过 parent_call_id 关联到父 TOOL span。
++  const childAgents = [];
++
+   // 跨 turn 心跳去重锚点;由调用方从 state.transcript_last_token_usage 传入
+   let lastEmittedUsage = initialLastUsage;
+ 
+@@ -218,10 +232,24 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
+       }
+       if (typeof payload.turn_id === 'string' && payload.turn_id) {
+         currentTurnId = payload.turn_id;
++        turnBoundaries.push({
++          turn_id: payload.turn_id,
++          timestamp: entryTimestampSeconds(entry),
++          prompt: '',
++        });
+       }
+     } else if (entryType === 'event_msg') {
+       const payloadType = payload.type;
+ 
++      // 提取用户输入文本，关联到当前 turn（turnBoundaries 最后一项）
++      if (payloadType === 'user_message') {
++        const msg = typeof payload.message === 'string' ? payload.message : '';
++        if (msg && turnBoundaries.length > 0) {
++          const lastBoundary = turnBoundaries[turnBoundaries.length - 1];
++          if (!lastBoundary.prompt) lastBoundary.prompt = msg;
++        }
++      }
++
+       if (payloadType === 'task_started') {
+         if (typeof payload.turn_id === 'string' && payload.turn_id) {
+           currentTurnId = payload.turn_id;
+@@ -271,6 +299,9 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
+           };
+           pendingToolCalls.set(callId, evt);
+           toolEvents.push(evt);
++          // 父 transcript 中所有 function_call 的 call_id 都是父 agent 的工具调用。
++          // 子 agent 的工具调用在子 transcript 中，不会出现在这里。
++          parentToolCallIds.add(callId);
+         }
+       } else if (itemType === 'function_call_output') {
+         const callId = String(payload.call_id || payload.id || '');
+@@ -285,6 +316,25 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
+             tool_use_id: callId,
+           });
+           pendingToolCalls.delete(callId);
++
++          // spawn_agent 的结果包含子 agent 的 session_id（agent_id）和 call_id 的映射。
++          // 将来实现 subagent 嵌套时，可以用 agent_id 定位子 transcript，
++          // 用 call_id 关联到父 TOOL span（类似 Cursor 的 parent_tool_call.id 协议）。
++          if (pre?.tool_name === 'spawn_agent') {
++            let output = parseMaybeJsonValue(payload.output);
++            if (typeof output === 'string') {
++              try { output = JSON.parse(output); } catch {}
++            }
++            if (output && typeof output === 'object' && output.agent_id) {
++              childAgents.push({
++                agent_id: output.agent_id,
++                nickname: output.nickname || '',
++                parent_call_id: callId,
++                parent_turn_id: currentTurnId ?? '',
++                timestamp: entryTimestampSeconds(entry),
++              });
++            }
++          }
+         }
+       }
+     }
+@@ -325,6 +375,9 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
+       modelProvider,
+       tokenEvents: [],
+       tokenEventsByTurn: new Map(),
++      turnBoundaries,
++      parentToolCallIds,
++      childAgents,
+       totalUsage: null,
+       toolEvents: [],
+       nextOffset: fileSize,
+@@ -341,6 +394,9 @@ export function parseTranscript(transcriptPath, byteOffset = 0, initialLastUsage
+     systemInstruction: systemInstruction.length > 0 ? systemInstruction : undefined,
+     toolDefinitions: toolDefs.length > 0 ? toolDefs : undefined,
+     toolEvents,
++    turnBoundaries,
++    parentToolCallIds,
++    childAgents,
+     nextOffset: fileSize,
+     lastEmittedUsage,
+   };
+diff --git a/assets/hooks/cursor-hook-processor.mjs b/assets/hooks/cursor-hook-processor.mjs
+index 3915098..ea668fa 100644
+--- a/assets/hooks/cursor-hook-processor.mjs
++++ b/assets/hooks/cursor-hook-processor.mjs
+@@ -1,36 +1,33 @@
+ #!/usr/bin/env node
+ /**
+- * Lightweight Cursor hook processor for loongsuite-pilot.
++ * Cursor hook processor for loongsuite-pilot.
+  *
+- * Reads Cursor hook JSON from stdin, normalizes deterministic hook-time fields,
+- * and appends the standard-compatible hook record to:
+- *   ~/.loongsuite-pilot/logs/cursor/history/cursor-YYYY-MM-DD.jsonl
++ * Stateful processor: each hook event is appended to an event journal.
++ * On parent "stop", all journal events are assembled into canonical history
++ * records with proper step division, subagent nesting, and trace ids.
+  *
+- * CursorHookInput still performs final AgentActivityEntry building and legacy
+- * fallback handling. Keep this processor fail-open and dependency-light.
++ * History JSONL is the sole formal data source for CursorHookInput.
++ * Raw capture is behind LOONGSUITE_CURSOR_RAW_TRACE=1 env flag.
+  */
+ 
+ import fs from 'node:fs/promises';
+ import os from 'node:os';
+ import path from 'node:path';
+ import {
+-  buildCursorHookRecord,
+-  getSourceHookEvent,
+   hashJson,
+   loadHookRuntimeConfig,
+   sanitizeObject,
+ } from './agent-event-normalizer.mjs';
++import { toInternalEvent } from './cursor/source-event.mjs';
++import { appendEvent, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
++import { assembleTurn } from './cursor/react-assembler.mjs';
+ 
+ function resolveDataDir() {
+-  const configured = process.env.LOONGSUITE_PILOT_DATA_DIR || process.env.LOONGSUITE_PILOT_DATA_DIR;
++  const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
+   if (configured) return configured;
+   return path.join(os.homedir(), '.loongsuite-pilot');
+ }
+ 
+-function toIsoUtc(date) {
+-  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
+-}
+-
+ function localDateString(date) {
+   const year = date.getFullYear();
+   const month = String(date.getMonth() + 1).padStart(2, '0');
+@@ -38,19 +35,13 @@ function localDateString(date) {
+   return `${year}-${month}-${day}`;
+ }
+ 
+-
+-function normalizeHookEvent(payload) {
+-  const eventName = getSourceHookEvent(payload);
+-  return typeof eventName === 'string' && eventName.trim() ? eventName.trim() : 'unknown';
+-}
+-
+ async function appendErrorJsonl(dataDir, now, fields) {
+   const day = localDateString(now);
+   const record = sanitizeObject({
+-    time: toIsoUtc(now),
++    time: now.toISOString(),
+     clientType: 'CursorHook',
+     ...fields,
+-  }) || { time: toIsoUtc(now), clientType: 'CursorHook', stage: 'unknown' };
++  }) || { time: now.toISOString(), clientType: 'CursorHook', stage: 'unknown' };
+   const candidates = [
+     path.join(dataDir, 'logs', 'cursor', 'errors', `cursor-error-${day}.jsonl`),
+     path.join(os.tmpdir(), 'loongsuite-pilot', 'cursor', 'errors', `cursor-error-${day}.jsonl`),
+@@ -61,7 +52,7 @@ async function appendErrorJsonl(dataDir, now, fields) {
+       await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+       return;
+     } catch {
+-      // Error logging is best effort and must never affect Cursor.
++      // best-effort
+     }
+   }
+ }
+@@ -79,6 +70,12 @@ async function appendJsonl(filePath, record) {
+   await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+ }
+ 
++async function appendBatchJsonl(filePath, records) {
++  await fs.mkdir(path.dirname(filePath), { recursive: true });
++  const content = records.map(r => JSON.stringify(r)).join('\n') + '\n';
++  await fs.appendFile(filePath, content, 'utf-8');
++}
++
+ function writeEmptyResponse() {
+   process.stdout.write('{}\n');
+ }
+@@ -119,24 +116,71 @@ async function main() {
+     return;
+   }
+ 
+-  const day = localDateString(now);
+-  const logFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
++  // Convert to internal event and append to journal
++  const internalEvent = toInternalEvent(payload);
+   try {
+-    await appendJsonl(logFile, buildCursorHookRecord(payload, {
+-      now,
+-      runtimeConfig: loadHookRuntimeConfig(dataDir),
+-    }));
++    appendEvent(internalEvent);
+   } catch (err) {
+     await appendErrorJsonl(dataDir, now, {
+-      stage: 'append',
+-      'error.type': 'append_failed',
++      stage: 'journal_append',
++      'error.type': 'journal_failed',
+       'error.message': err instanceof Error ? err.message : String(err),
+-      hookEvent: normalizeHookEvent(payload),
+-      log_file: logFile,
++      hookEvent: internalEvent.hook_event,
+     });
+     writeEmptyResponse();
+     return;
+   }
++
++  if (process.env.LOONGSUITE_CURSOR_RAW_TRACE === '1') {
++    try {
++      const rawFile = path.join(dataDir, 'logs', 'cursor', 'raw', 'cursor-raw-trace.jsonl');
++      await appendJsonl(rawFile, { _captured_at: now.toISOString(), ...payload });
++    } catch {
++      // best-effort
++    }
++  }
++
++  // On stop: assemble turn and write history
++  if (internalEvent.hook_event === 'stop') {
++    try {
++      const allEvents = readAllEvents();
++      const runtimeConfig = loadHookRuntimeConfig(dataDir);
++      const { records, consumedConversationIds } = assembleTurn(allEvents, {
++        runtimeConfig,
++        stopConversationId: internalEvent.conversation_id,
++        transcriptPath: internalEvent.transcript_path,
++      });
++
++      if (records.length > 0) {
++        const day = localDateString(now);
++        const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
++        await appendBatchJsonl(historyFile, records);
++      }
++
++      // Rewrite journal: keep only events that belong to a pending user turn
++      // (has beforeSubmitPrompt but no stop yet). Drop everything else:
++      // consumed parent, child sessions, subagent meta, and orphan delayed events.
++      const pendingTurnConvIds = new Set();
++      const remaining = [];
++      for (const ev of allEvents) {
++        if (consumedConversationIds.has(ev.conversation_id)) continue;
++        if (ev.hook_event === 'beforeSubmitPrompt') pendingTurnConvIds.add(ev.conversation_id);
++      }
++      for (const ev of allEvents) {
++        if (consumedConversationIds.has(ev.conversation_id)) continue;
++        if (pendingTurnConvIds.has(ev.conversation_id)) remaining.push(ev);
++        // else: orphan child/delayed event without a pending parent turn → drop
++      }
++      rewriteJournal(remaining, allEvents);
++    } catch (err) {
++      await appendErrorJsonl(dataDir, now, {
++        stage: 'assemble',
++        'error.type': 'assemble_failed',
++        'error.message': err instanceof Error ? err.message : String(err),
++      });
++    }
++  }
++
+   writeEmptyResponse();
+ }
+ 
+diff --git a/assets/hooks/cursor/event-journal.mjs b/assets/hooks/cursor/event-journal.mjs
+new file mode 100644
+index 0000000..5a583c8
+--- /dev/null
++++ b/assets/hooks/cursor/event-journal.mjs
+@@ -0,0 +1,147 @@
++/**
++ * event-journal.mjs — Cursor append-only event journal.
++ *
++ * All Cursor hook events (parent + child sessions + subagent meta) are appended
++ * to a single JSONL file. On parent stop, the processor reads the full journal,
++ * assembles the turn, then rewrites the journal with only uncompleted events.
++ *
++ * Append-only writes are serialized with rewrite via a lock file so stop-time
++ * journal compaction cannot overwrite events appended by parallel hook processes.
++ */
++
++import fs from 'node:fs';
++import path from 'node:path';
++import os from 'node:os';
++
++function pilotDataDir() {
++  return process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
++}
++
++const JOURNAL_DIR = path.join(pilotDataDir(), 'state', 'cursor');
++const JOURNAL_FILE = path.join(JOURNAL_DIR, 'event-journal.jsonl');
++const JOURNAL_LOCK_FILE = path.join(JOURNAL_DIR, 'event-journal.lock');
++const JOURNAL_LOCK_TIMEOUT_MS = 5000;
++const JOURNAL_LOCK_STALE_MS = 30000;
++const JOURNAL_LOCK_RETRY_MS = 10;
++
++function ensureJournalDir() {
++  fs.mkdirSync(JOURNAL_DIR, { recursive: true });
++}
++
++export function appendEvent(event) {
++  ensureJournalDir();
++  withJournalLock(() => {
++    fs.appendFileSync(JOURNAL_FILE, JSON.stringify(event) + '\n', 'utf-8');
++  });
++}
++
++export function readAllEvents() {
++  if (!fs.existsSync(JOURNAL_FILE)) return [];
++  const content = fs.readFileSync(JOURNAL_FILE, 'utf-8');
++  return parseJournalContent(content);
++}
++
++export function rewriteJournal(remainingEvents, snapshotEvents = null) {
++  ensureJournalDir();
++  withJournalLock(() => {
++    const finalEvents = Array.isArray(snapshotEvents)
++      ? mergeConcurrentAppends(remainingEvents || [], snapshotEvents)
++      : (remainingEvents || []);
++
++    if (finalEvents.length === 0) {
++      try { fs.unlinkSync(JOURNAL_FILE); } catch {}
++      return;
++    }
++
++    const tmp = JOURNAL_FILE + `.${process.pid}.tmp`;
++    try {
++      const content = finalEvents.map(e => JSON.stringify(e)).join('\n') + '\n';
++      fs.writeFileSync(tmp, content, 'utf-8');
++      fs.renameSync(tmp, JOURNAL_FILE);
++    } catch (err) {
++      try { fs.unlinkSync(tmp); } catch {}
++      throw err;
++    }
++  });
++}
++
++function mergeConcurrentAppends(remainingEvents, snapshotEvents) {
++  if (!fs.existsSync(JOURNAL_FILE)) return remainingEvents;
++  const currentEvents = parseJournalContent(fs.readFileSync(JOURNAL_FILE, 'utf-8'));
++  const snapshotCounts = new Map();
++  for (const event of snapshotEvents) {
++    const key = JSON.stringify(event);
++    snapshotCounts.set(key, (snapshotCounts.get(key) || 0) + 1);
++  }
++
++  const appendedEvents = [];
++  for (const event of currentEvents) {
++    const key = JSON.stringify(event);
++    const count = snapshotCounts.get(key) || 0;
++    if (count > 0) {
++      snapshotCounts.set(key, count - 1);
++    } else {
++      appendedEvents.push(event);
++    }
++  }
++
++  return [...remainingEvents, ...appendedEvents];
++}
++
++function parseJournalContent(content) {
++  const events = [];
++  for (const line of content.split('\n')) {
++    const trimmed = line.trim();
++    if (!trimmed) continue;
++    try {
++      events.push(JSON.parse(trimmed));
++    } catch {
++      // skip corrupted lines
++    }
++  }
++  return events;
++}
++
++function withJournalLock(fn) {
++  const lockFd = acquireJournalLock();
++  try {
++    return fn();
++  } finally {
++    try { fs.closeSync(lockFd); } catch {}
++    try { fs.unlinkSync(JOURNAL_LOCK_FILE); } catch {}
++  }
++}
++
++function acquireJournalLock() {
++  const startedAt = Date.now();
++  while (true) {
++    try {
++      return fs.openSync(JOURNAL_LOCK_FILE, 'wx');
++    } catch (err) {
++      if (!err || err.code !== 'EEXIST') throw err;
++      removeStaleJournalLock();
++      if (Date.now() - startedAt >= JOURNAL_LOCK_TIMEOUT_MS) {
++        throw new Error(`Timed out waiting for Cursor event journal lock: ${JOURNAL_LOCK_FILE}`);
++      }
++      sleepSync(JOURNAL_LOCK_RETRY_MS);
++    }
++  }
++}
++
++function removeStaleJournalLock() {
++  try {
++    const stat = fs.statSync(JOURNAL_LOCK_FILE);
++    if (Date.now() - stat.mtimeMs >= JOURNAL_LOCK_STALE_MS) {
++      fs.unlinkSync(JOURNAL_LOCK_FILE);
++    }
++  } catch {}
++}
++
++function sleepSync(ms) {
++  const buffer = new SharedArrayBuffer(4);
++  const view = new Int32Array(buffer);
++  Atomics.wait(view, 0, 0, ms);
++}
++
++export const CURSOR_JOURNAL_DIR = JOURNAL_DIR;
++export const CURSOR_JOURNAL_FILE = JOURNAL_FILE;
+diff --git a/assets/hooks/cursor/react-assembler.mjs b/assets/hooks/cursor/react-assembler.mjs
+new file mode 100644
+index 0000000..405e873
+--- /dev/null
++++ b/assets/hooks/cursor/react-assembler.mjs
+@@ -0,0 +1,782 @@
++/**
++ * react-assembler.mjs — Cursor turn assembler with subagent nesting.
++ *
++ * Called by the processor on parent stop. Reads journal events, scans
++ * transcript subagents/ directory for child conversation_ids, builds
++ * parent ReAct steps and nested child agent steps.
++ */
++
++import crypto from 'node:crypto';
++import fs from 'node:fs';
++import path from 'node:path';
++import {
++  inferProviderName,
++  resolveUserId,
++  timestampToUnixNanos,
++  applyHookContentPolicy,
++  sanitizeObject,
++  toJsonValue,
++  parseMaybeJson,
++} from '../agent-event-normalizer.mjs';
++
++// ─── Public API ───
++
++/**
++ * @param {object[]} journalEvents - All events from the journal
++ * @param {object}   options       - { runtimeConfig }
++ * @returns {{ records: object[], consumedConversationIds: Set<string> }}
++ */
++export function assembleTurn(journalEvents, options = {}) {
++  const runtimeConfig = options.runtimeConfig || {};
++  const stopConversationId = options.stopConversationId;
++  const transcriptPath = options.transcriptPath;
++
++  // Find the prompt for THIS stop's conversation
++  const promptEvent = stopConversationId
++    ? journalEvents.find(e => e.hook_event === 'beforeSubmitPrompt' && e.conversation_id === stopConversationId)
++    : journalEvents.find(e => e.hook_event === 'beforeSubmitPrompt');
++  if (!promptEvent) {
++    return { records: [], consumedConversationIds: new Set() };
++  }
++
++  const parentConvId = promptEvent.conversation_id;
++  const turnId = promptEvent.generation_id || parentConvId;
++  const traceId = deriveTraceId(turnId);
++  const userId = resolveUserId({}, runtimeConfig);
++  const stopEvent = journalEvents.find(e =>
++    e.hook_event === 'stop' && e.conversation_id === parentConvId
++  );
++  const responseEvent = journalEvents.find(e =>
++    e.hook_event === 'afterAgentResponse' && e.conversation_id === parentConvId
++  );
++  const model = responseEvent?.model || promptEvent?.model || 'unknown';
++
++  // Filter to parent session events only (keep Subagent/Task tool calls + subagentStart/Stop)
++  const parentEvents = journalEvents
++    .filter(e => e.conversation_id === parentConvId)
++    .filter(e => e.hook_event !== 'sessionStart')
++    .sort((a, b) => tsMs(a) - tsMs(b));
++
++  const baseFields = {
++    trace_id: traceId,
++    'gen_ai.session.id': parentConvId,
++    'gen_ai.turn.id': turnId,
++    'gen_ai.agent.type': 'cursor',
++    'user.id': userId,
++  };
++
++  const records = [];
++
++  // User-hook llm.request (no step_id, no model → ENTRY input)
++  if (promptEvent.prompt) {
++    records.push(applyPolicy({
++      time_unix_nano: eventTs(promptEvent),
++      observed_time_unix_nano: eventTs(promptEvent),
++      'event.id': crypto.randomUUID(),
++      'event.name': 'llm.request',
++      ...baseFields,
++      'gen_ai.provider.name': inferProvider(model),
++      'gen_ai.input.messages_delta': [
++        { role: 'user', parts: [{ type: 'text', content: promptEvent.prompt }] },
++      ],
++      'agent.cursor.hook_event_name': 'beforeSubmitPrompt',
++      'agent.cursor.composer_mode': promptEvent.composer_mode,
++    }, runtimeConfig));
++  }
++
++  // ─── Phase 2: Child session nesting ───
++  // Scan transcript subagents/ directory for child conversation_ids
++  const childConvIds = scanSubagentDir(transcriptPath || stopEvent?.transcript_path);
++
++  // Build one-to-one mapping: parent Subagent call → child session
++  const parentSubagentCalls = parentEvents
++    .filter(e => e.hook_event === 'preToolUse' && isSubagentTool(e.tool_name))
++    .sort((a, b) => tsMs(a) - tsMs(b));
++
++  // Collect child sessions with events, sorted by first event time
++  const childSessions = [];
++  for (const childConvId of childConvIds) {
++    const childEvents = journalEvents
++      .filter(e => e.conversation_id === childConvId)
++      .filter(e => e.hook_event !== 'sessionStart')
++      .sort((a, b) => tsMs(a) - tsMs(b));
++    if (childEvents.length === 0) continue;
++    childSessions.push({ childConvId, childEvents });
++  }
++  childSessions.sort((a, b) => tsMs(a.childEvents[0]) - tsMs(b.childEvents[0]));
++
++  // One-to-one assignment by order (consume each parent call once)
++  const assignedCalls = new Set();
++  const childLinks = [];
++
++  for (const child of childSessions) {
++    const childFirstTs = tsMs(child.childEvents[0]);
++    let matched = null;
++    for (const sa of parentSubagentCalls) {
++      if (assignedCalls.has(sa.tool_use_id)) continue;
++      if (tsMs(sa) <= childFirstTs) {
++        matched = sa;
++      }
++    }
++    if (matched) {
++      assignedCalls.add(matched.tool_use_id);
++      childLinks.push({ ...child, parentToolCallId: matched.tool_use_id, parentCallEvent: matched });
++    } else {
++      childLinks.push({ ...child, parentToolCallId: null, parentCallEvent: null });
++    }
++  }
++
++  // Pre-collect subagent results: tool_use_id → { resultText, durationMs, endTs }
++  // This allows buildParentSteps to include Subagent result in next step's input
++  const subagentResults = new Map(); // tool_use_id → result info
++  for (const link of childLinks) {
++    if (!link.parentToolCallId) continue;
++    const { childEvents, parentToolCallId, parentCallEvent } = link;
++    const childLastEvent = childEvents[childEvents.length - 1];
++    const childLastResponse = findLastItem(childEvents, e =>
++      e.hook_event === 'afterAgentResponse' || e.hook_event === 'afterAgentThought'
++    );
++    const resultText = childLastResponse?.text || '';
++    const durationMs = tsMs(childLastEvent) - tsMs(childEvents[0]);
++    subagentResults.set(parentToolCallId, {
++      resultText,
++      durationMs,
++      endTs: childLastEvent._journal_ts,
++      toolName: parentCallEvent?.tool_name || 'Subagent',
++    });
++  }
++
++  // Build parent ReAct steps (with subagentResults for input enrichment)
++  const stepRecords = buildParentSteps(parentEvents, {
++    turnId, traceId, model, userId, baseFields, runtimeConfig,
++    userPrompt: promptEvent.prompt,
++    promptEventTs: promptEvent._journal_ts,
++    subagentResults,
++  });
++  records.push(...stepRecords);
++
++  // Build child steps
++  for (const link of childLinks) {
++    const { childConvId, childEvents, parentToolCallId } = link;
++    const childConvShort = childConvId.slice(0, 8);
++    const childBaseFields = {
++      ...baseFields,
++      'gen_ai.agent.scope': 'subagent',
++      'gen_ai.agent.depth': 1,
++      'gen_ai.agent.id': childConvId,
++      'gen_ai.agent.parent.id': parentConvId,
++      'gen_ai.subagent.parent_tool_call.id': parentToolCallId,
++      'agent.cursor.subagent.link_confidence': parentToolCallId ? 'transcript_dir' : 'orphan',
++    };
++
++    const childModel = childEvents[0]?.model || model;
++    const childStepRecords = buildParentSteps(childEvents, {
++      turnId, traceId, model: childModel, userId,
++      baseFields: childBaseFields, runtimeConfig,
++      userPrompt: null,
++      promptEventTs: childEvents[0]?._journal_ts,
++      stepPrefix: `${turnId}:sub:${childConvShort}`,
++    });
++    records.push(...childStepRecords);
++  }
++
++  // Consumed conversation ids: parent + all child sessions from transcript dir + time-based
++  const consumedConversationIds = new Set();
++  consumedConversationIds.add(parentConvId);
++  for (const cid of childConvIds) {
++    consumedConversationIds.add(cid);
++  }
++  // Also consume any other non-prompt conversations in the time window
++  const parentPromptTs = tsMs(promptEvent);
++  const parentStopTs = stopEvent ? tsMs(stopEvent) : Infinity;
++  const conversationIdsWithPrompt = new Set();
++  for (const ev of journalEvents) {
++    if (ev.conversation_id && ev.hook_event === 'beforeSubmitPrompt') {
++      conversationIdsWithPrompt.add(ev.conversation_id);
++    }
++  }
++  for (const ev of journalEvents) {
++    if (!ev.conversation_id || consumedConversationIds.has(ev.conversation_id)) continue;
++    const evTs = tsMs(ev);
++    if (evTs >= parentPromptTs && evTs <= parentStopTs) {
++      const hasOwnPrompt = conversationIdsWithPrompt.has(ev.conversation_id);
++      if (!hasOwnPrompt) {
++        consumedConversationIds.add(ev.conversation_id);
++      }
++    }
++  }
++
++  return { records, consumedConversationIds };
++}
++
++// ─── Transcript Directory Scanning ───
++
++function scanSubagentDir(transcriptPath) {
++  if (!transcriptPath || String(transcriptPath) === 'None') return [];
++  try {
++    const parentDir = path.dirname(transcriptPath);
++    const subagentDir = path.join(parentDir, 'subagents');
++    if (!fs.existsSync(subagentDir)) return [];
++    return fs.readdirSync(subagentDir)
++      .filter(f => f.endsWith('.jsonl'))
++      .map(f => f.replace('.jsonl', ''));
++  } catch {
++    return [];
++  }
++}
++
++// ─── Step Building ───
++
++function buildParentSteps(events, ctx) {
++  const records = [];
++  let stepRound = 0;
++  let currentStepId = null;
++  let currentStepHasTools = false;
++  let currentLlmResponse = null;
++  let previousToolResults = [];
++  // Track last event timestamp for computing next step's LLM start time
++  let lastStepEndTs = ctx.promptEventTs; // first step starts at prompt time
++
++  // Buffer for tools that arrive before any thought
++  let pendingToolRecords = [];
++  let pendingToolCalls = [];
++  let pendingToolResults = [];
++  const synthesizedSubagentIds = new Set();
++
++  const stepEvents = events.filter(e =>
++    e.hook_event === 'afterAgentThought' ||
++    e.hook_event === 'afterAgentResponse' ||
++    e.hook_event === 'preToolUse' ||
++    e.hook_event === 'postToolUse' ||
++    e.hook_event === 'postToolUseFailure'
++  );
++
++  const stepToolCalls = new Map();
++
++  function finalizeCurrentLlmResponse() {
++    if (!currentLlmResponse) return;
++    const toolCalls = stepToolCalls.get(currentStepId);
++    appendToolCallParts(currentLlmResponse, toolCalls);
++    applyToolCallResponseTiming(currentLlmResponse, toolCalls);
++
++    // Guard: if LLM request start >= response end (buffered-tool scenario),
++    // pull request start back to the earliest tool.call start - 1ms. This
++    // keeps the LLM span visible without pretending the response ended later.
++    const llmReq = findLastItem(records, r =>
++      r['event.name'] === 'llm.request' && r['gen_ai.step.id'] === currentStepId
++    );
++    if (llmReq) {
++      const reqNano = BigInt(llmReq.time_unix_nano || '0');
++      const respNano = BigInt(currentLlmResponse.time_unix_nano || '0');
++      let earliestToolNano = 0n;
++      for (const r of records) {
++        if (
++          r['event.name'] === 'tool.call' &&
++          r['gen_ai.step.id'] === currentStepId &&
++          r.time_unix_nano
++        ) {
++          const toolNano = BigInt(r.time_unix_nano);
++          if (earliestToolNano === 0n || toolNano < earliestToolNano) {
++            earliestToolNano = toolNano;
++          }
++        }
++      }
++      if (reqNano >= respNano || (earliestToolNano > 0n && reqNano >= earliestToolNano)) {
++        const fixedBaseNano = earliestToolNano > 0n ? earliestToolNano : respNano;
++        const fixedNano = String(fixedBaseNano > 1000000n ? fixedBaseNano - 1000000n : 0n);
++        llmReq.time_unix_nano = fixedNano;
++        llmReq.observed_time_unix_nano = fixedNano;
++        llmReq['agent.cursor.llm_request_time_guard'] = earliestToolNano > 0n
++          ? 'earliest_tool_call_start_minus_1ms'
++          : 'response_end_minus_1ms';
++      }
++    }
++
++    records.push(currentLlmResponse);
++    currentLlmResponse = null;
++  }
++
++  function flushPendingTools(stepId) {
++    for (const rec of pendingToolRecords) {
++      rec['gen_ai.step.id'] = stepId;
++      records.push(rec);
++    }
++    const calls = stepToolCalls.get(stepId) || [];
++    calls.push(...pendingToolCalls);
++    stepToolCalls.set(stepId, calls);
++    previousToolResults.push(...pendingToolResults);
++    const hadTools = pendingToolRecords.length > 0;
++    pendingToolRecords = [];
++    pendingToolCalls = [];
++    pendingToolResults = [];
++    return hadTools;
++  }
++
++  function openNewStep(ev, isFirst, userPrompt) {
++    // Flush previous response
++    finalizeCurrentLlmResponse();
++    stepRound++;
++    currentStepId = `${ctx.stepPrefix || ctx.turnId}:s${stepRound}`;
++    currentStepHasTools = false;
++    stepToolCalls.set(currentStepId, []);
++    const { timestamp: reqTs, source: reqTsSource } = llmRequestStartTime(ev, lastStepEndTs);
++    records.push(buildLlmRequestWithTs(reqTs, ev, ctx, currentStepId,
++      isFirst ? userPrompt : null, previousToolResults, reqTsSource));
++    previousToolResults = [];
++  }
++
++  for (const ev of stepEvents) {
++
++    if (ev.hook_event === 'afterAgentThought') {
++      if (currentStepId === null || currentStepHasTools) {
++        openNewStep(ev, stepRound === 0, ctx.userPrompt);
++        currentLlmResponse = buildLlmResponse(ev, ctx, currentStepId, 'reasoning');
++        if (flushPendingTools(currentStepId)) currentStepHasTools = true;
++      } else {
++        if (currentLlmResponse) {
++          appendPart(currentLlmResponse, 'reasoning', ev.text);
++        } else {
++          currentLlmResponse = buildLlmResponse(ev, ctx, currentStepId, 'reasoning');
++        }
++      }
++    }
++
++    else if (ev.hook_event === 'afterAgentResponse') {
++      if (currentStepId !== null && currentStepHasTools) {
++        // lastStepEndTs stays at previous tool's end time (already updated by postToolUse)
++        // Do NOT set it to afterAgentResponse's time — that would make req == resp → 0ms LLM
++        openNewStep(ev, false, null);
++        currentLlmResponse = buildLlmResponseWithToken(ev, ctx, currentStepId, 'text');
++        if (flushPendingTools(currentStepId)) currentStepHasTools = true;
++      } else if (currentStepId !== null) {
++        if (currentLlmResponse) {
++          appendPart(currentLlmResponse, 'text', ev.text);
++          mergeTokens(currentLlmResponse, ev);
++        } else {
++          currentLlmResponse = buildLlmResponseWithToken(ev, ctx, currentStepId, 'text');
++        }
++      } else {
++        openNewStep(ev, stepRound === 0, ctx.userPrompt);
++        currentLlmResponse = buildLlmResponseWithToken(ev, ctx, currentStepId, 'text');
++        if (flushPendingTools(currentStepId)) currentStepHasTools = true;
++      }
++    }
++
++    else if (ev.hook_event === 'preToolUse') {
++      if (!currentStepId) {
++        pendingToolRecords.push(buildToolCall(ev, ctx, '__pending__'));
++        pendingToolCalls.push({
++          toolName: ev.tool_name,
++          toolUseId: ev.tool_use_id,
++          toolInput: ev.tool_input,
++          observedAt: ev._journal_ts,
++        });
++        // If Subagent with known result, also buffer the synthesized tool.result
++        if (isSubagentTool(ev.tool_name) && ctx.subagentResults?.has(ev.tool_use_id)) {
++          const sr = ctx.subagentResults.get(ev.tool_use_id);
++          pendingToolRecords.push(buildSubagentResult(ev, sr, ctx, '__pending__'));
++          pendingToolResults.push({ toolName: ev.tool_name, toolUseId: ev.tool_use_id, result: sr.resultText });
++          if (ev.tool_use_id) synthesizedSubagentIds.add(ev.tool_use_id);
++        }
++      } else {
++        // For Subagent tools with known result, use child start time as tool.call time
++        let toolObservedAt = ev._journal_ts;
++        if (isSubagentTool(ev.tool_name) && ctx.subagentResults?.has(ev.tool_use_id)) {
++          const sr = ctx.subagentResults.get(ev.tool_use_id);
++          const childStartTs = sr.endTs && sr.durationMs != null
++            ? new Date(new Date(sr.endTs).getTime() - sr.durationMs).toISOString()
++            : ev._journal_ts;
++          toolObservedAt = childStartTs;
++          records.push(buildToolCallWithTs(childStartTs, ev, ctx, currentStepId));
++          records.push(buildSubagentResult(ev, sr, ctx, currentStepId));
++          previousToolResults.push({ toolName: ev.tool_name, toolUseId: ev.tool_use_id, result: sr.resultText });
++          lastStepEndTs = sr.endTs;
++          if (ev.tool_use_id) synthesizedSubagentIds.add(ev.tool_use_id);
++        } else {
++          records.push(buildToolCall(ev, ctx, currentStepId));
++        }
++        currentStepHasTools = true;
++        const calls = stepToolCalls.get(currentStepId) || [];
++        calls.push({
++          toolName: ev.tool_name,
++          toolUseId: ev.tool_use_id,
++          toolInput: ev.tool_input,
++          observedAt: toolObservedAt,
++        });
++        stepToolCalls.set(currentStepId, calls);
++      }
++    }
++
++    else if (ev.hook_event === 'postToolUse' || ev.hook_event === 'postToolUseFailure') {
++      if (synthesizedSubagentIds.has(ev.tool_use_id)) continue;
++
++      if (!currentStepId) {
++        pendingToolRecords.push(buildToolResult(ev, ctx, '__pending__'));
++        applyToolDurationToCall(pendingToolRecords, '__pending__', ev);
++        pendingToolResults.push({ toolName: ev.tool_name, toolUseId: ev.tool_use_id, result: ev.tool_output, error: ev.error_message });
++      } else {
++        applyToolDurationToCall(records, currentStepId, ev);
++        records.push(buildToolResult(ev, ctx, currentStepId));
++        previousToolResults.push({ toolName: ev.tool_name, toolUseId: ev.tool_use_id, result: ev.tool_output, error: ev.error_message });
++        // Track step end time
++        lastStepEndTs = ev._journal_ts;
++      }
++    }
++  }
++
++  // Buffered tools with no thought/response (entire turn was tools-only)
++  if (pendingToolRecords.length > 0) {
++    stepRound++;
++    currentStepId = `${ctx.stepPrefix || ctx.turnId}:s${stepRound}`;
++    stepToolCalls.set(currentStepId, []);
++    const reqTs = lastStepEndTs || ctx.promptEventTs;
++    records.push(buildLlmRequestWithTs(reqTs, { hook_event: 'implicit' }, ctx, currentStepId, ctx.userPrompt, previousToolResults));
++    currentLlmResponse = buildEmptyLlmResponse({ _journal_ts: reqTs, hook_event: 'implicit' }, ctx, currentStepId);
++    flushPendingTools(currentStepId);
++    currentStepHasTools = true;
++  }
++
++  // Flush last response
++  finalizeCurrentLlmResponse();
++
++  assignFinishReasons(records);
++
++  return records;
++}
++
++// ─── Record Builders ───
++
++function buildLlmRequestWithTs(reqTs, ev, ctx, stepId, userPrompt, prevToolResults, timeSource) {
++  const inputMessages = [];
++  if (userPrompt && (!prevToolResults || prevToolResults.length === 0)) {
++    inputMessages.push({ role: 'user', parts: [{ type: 'text', content: userPrompt }] });
++  }
++  if (prevToolResults && prevToolResults.length > 0) {
++    const parts = prevToolResults.map(tr => ({
++      type: 'tool_call_response',
++      id: tr.toolUseId || null,
++      response: tr.error || stringify(tr.result),
++    }));
++    inputMessages.push({ role: 'tool', parts });
++  }
++
++  const ts = reqTs ? timestampToUnixNanos(reqTs) : eventTs(ev);
++  return applyPolicy({
++    time_unix_nano: ts,
++    observed_time_unix_nano: ts,
++    'event.id': crypto.randomUUID(),
++    'event.name': 'llm.request',
++    ...ctx.baseFields,
++    'gen_ai.step.id': stepId,
++    'gen_ai.provider.name': inferProvider(ev.model || ctx.model),
++    'gen_ai.request.model': ev.model || ctx.model,
++    'gen_ai.input.messages': inputMessages.length > 0 ? inputMessages : undefined,
++    'agent.cursor.hook_event_name': ev.hook_event,
++    'agent.cursor.llm_request_time_source': timeSource,
++  }, ctx.runtimeConfig);
++}
++
++function buildLlmResponse(ev, ctx, stepId, partType) {
++  const rec = applyPolicy({
++    time_unix_nano: eventTs(ev),
++    observed_time_unix_nano: eventTs(ev),
++    'event.id': crypto.randomUUID(),
++    'event.name': 'llm.response',
++    ...ctx.baseFields,
++    'gen_ai.step.id': stepId,
++    'gen_ai.response.id': crypto.randomUUID(),
++    'gen_ai.provider.name': inferProvider(ev.model || ctx.model),
++    'gen_ai.request.model': ev.model || ctx.model,
++    'gen_ai.response.model': ev.model || ctx.model,
++    'gen_ai.output.messages': ev.text
++      ? [{ role: 'assistant', parts: [{ type: partType, content: ev.text }] }]
++      : [{ role: 'assistant', parts: [] }],
++    'agent.cursor.hook_event_name': ev.hook_event,
++    'agent.cursor.reasoning_observed_at': partType === 'reasoning' ? ev._journal_ts : undefined,
++    'agent.cursor.llm_response_time_source': ev.hook_event === 'afterAgentThought'
++      ? 'after_agent_thought'
++      : ev.hook_event === 'afterAgentResponse'
++        ? 'after_agent_response'
++        : undefined,
++  }, ctx.runtimeConfig);
++  return rec;
++}
++
++function buildEmptyLlmResponse(ev, ctx, stepId) {
++  return applyPolicy({
++    time_unix_nano: eventTs(ev),
++    observed_time_unix_nano: eventTs(ev),
++    'event.id': crypto.randomUUID(),
++    'event.name': 'llm.response',
++    ...ctx.baseFields,
++    'gen_ai.step.id': stepId,
++    'gen_ai.response.id': crypto.randomUUID(),
++    'gen_ai.provider.name': inferProvider(ev.model || ctx.model),
++    'gen_ai.request.model': ev.model || ctx.model,
++    'gen_ai.response.model': ev.model || ctx.model,
++    'gen_ai.output.messages': [{ role: 'assistant', parts: [] }],
++    'agent.cursor.hook_event_name': 'implicit',
++  }, ctx.runtimeConfig);
++}
++
++function buildLlmResponseWithToken(ev, ctx, stepId, partType) {
++  const rec = buildLlmResponse(ev, ctx, stepId, partType);
++  mergeTokens(rec, ev);
++  return rec;
++}
++
++function buildToolCall(ev, ctx, stepId) {
++  return applyPolicy({
++    time_unix_nano: eventTs(ev),
++    observed_time_unix_nano: eventTs(ev),
++    'event.id': crypto.randomUUID(),
++    'event.name': 'tool.call',
++    ...ctx.baseFields,
++    'gen_ai.step.id': stepId,
++    'gen_ai.tool.name': ev.tool_name,
++    'gen_ai.tool.call.id': ev.tool_use_id,
++    'gen_ai.tool.call.arguments': toJsonValue(parseMaybeJson(ev.tool_input)),
++    'agent.cursor.hook_event_name': ev.hook_event,
++  }, ctx.runtimeConfig);
++}
++
++function buildToolCallWithTs(ts, ev, ctx, stepId) {
++  const tsNano = timestampToUnixNanos(ts);
++  return applyPolicy({
++    time_unix_nano: tsNano,
++    observed_time_unix_nano: tsNano,
++    'event.id': crypto.randomUUID(),
++    'event.name': 'tool.call',
++    ...ctx.baseFields,
++    'gen_ai.step.id': stepId,
++    'gen_ai.tool.name': ev.tool_name,
++    'gen_ai.tool.call.id': ev.tool_use_id,
++    'gen_ai.tool.call.arguments': toJsonValue(parseMaybeJson(ev.tool_input)),
++    'agent.cursor.hook_event_name': ev.hook_event,
++  }, ctx.runtimeConfig);
++}
++
++function buildToolResult(ev, ctx, stepId) {
++  const isFailure = ev.hook_event === 'postToolUseFailure';
++  return applyPolicy({
++    time_unix_nano: eventTs(ev),
++    observed_time_unix_nano: eventTs(ev),
++    'event.id': crypto.randomUUID(),
++    'event.name': 'tool.result',
++    ...ctx.baseFields,
++    'gen_ai.step.id': stepId,
++    'gen_ai.tool.name': ev.tool_name,
++    'gen_ai.tool.call.id': ev.tool_use_id,
++    'gen_ai.tool.call.result': isFailure ? undefined : toJsonValue(parseMaybeJson(ev.tool_output)),
++    'gen_ai.tool.call.duration': ev.duration_ms,
++    'tool.result.status': isFailure ? 'failure' : undefined,
++    'error.type': isFailure ? (ev.failure_type || 'tool_use_failure') : undefined,
++    'error.message': isFailure ? ev.error_message : undefined,
++    'agent.cursor.hook_event_name': ev.hook_event,
++  }, ctx.runtimeConfig);
++}
++
++function buildSubagentResult(preToolUseEvent, subagentResult, ctx, stepId) {
++  const ts = subagentResult.endTs ? timestampToUnixNanos(subagentResult.endTs) : eventTs(preToolUseEvent);
++  return applyPolicy({
++    time_unix_nano: ts,
++    observed_time_unix_nano: ts,
++    'event.id': crypto.randomUUID(),
++    'event.name': 'tool.result',
++    ...ctx.baseFields,
++    'gen_ai.step.id': stepId,
++    'gen_ai.tool.name': subagentResult.toolName || preToolUseEvent.tool_name || 'Subagent',
++    'gen_ai.tool.call.id': preToolUseEvent.tool_use_id,
++    'gen_ai.tool.call.duration': subagentResult.durationMs,
++    'gen_ai.tool.call.result': subagentResult.resultText
++      ? { summary: subagentResult.resultText.slice(0, 500) }
++      : { status: 'completed' },
++    'tool.result.status': 'completed',
++    'agent.cursor.hook_event_name': 'subagent_result_synthesized',
++  }, ctx.runtimeConfig);
++}
++
++// ─── tool_call parts synthesis ───
++
++function appendToolCallParts(llmResponse, toolCalls) {
++  if (!toolCalls || toolCalls.length === 0) return;
++  const msgs = llmResponse['gen_ai.output.messages'];
++  if (!Array.isArray(msgs) || msgs.length === 0) return;
++  if (!msgs[0].parts) msgs[0].parts = [];
++  for (const tc of toolCalls) {
++    msgs[0].parts.push({
++      type: 'tool_call',
++      id: tc.toolUseId || null,
++      name: tc.toolName,
++      arguments: parseMaybeJson(tc.toolInput),
++    });
++  }
++}
++
++function applyToolCallResponseTiming(llmResponse, toolCalls) {
++  if (!toolCalls || toolCalls.length === 0) return;
++  const observedToolCalls = toolCalls
++    .map(tc => ({ ...tc, observedAtMs: Date.parse(tc.observedAt) }))
++    .filter(tc => Number.isFinite(tc.observedAtMs))
++    .sort((a, b) => a.observedAtMs - b.observedAtMs);
++  if (observedToolCalls.length === 0) return;
++
++  const firstToolCall = observedToolCalls[0];
++  const lastToolCall = observedToolCalls[observedToolCalls.length - 1];
++
++  const reasoningObservedAt = llmResponse['agent.cursor.reasoning_observed_at'];
++  const reasoningObservedAtMs = Date.parse(reasoningObservedAt);
++
++  // LLM end = first tool.call time, but only when tool arrived AFTER thought.
++  // Buffered scenario (tool before thought): keep afterAgentThought time as LLM end,
++  // because the LLM was still streaming when the tool hook fired.
++  const isBuffered = Number.isFinite(reasoningObservedAtMs) && firstToolCall.observedAtMs < reasoningObservedAtMs;
++  if (!isBuffered) {
++    llmResponse.time_unix_nano = timestampToUnixNanos(firstToolCall.observedAt);
++  }
++
++  llmResponse['agent.cursor.first_tool_call_observed_at'] = firstToolCall.observedAt;
++  llmResponse['agent.cursor.last_tool_call_observed_at'] = lastToolCall.observedAt;
++  llmResponse['agent.cursor.tool_call_count'] = toolCalls.length;
++
++  if (Number.isFinite(reasoningObservedAtMs)) {
++    llmResponse['agent.cursor.thought_to_first_tool_ms'] =
++      firstToolCall.observedAtMs - reasoningObservedAtMs;
++    llmResponse['agent.cursor.tool_call_emission_ms'] =
++      lastToolCall.observedAtMs - reasoningObservedAtMs;
++    if (firstToolCall.observedAtMs < reasoningObservedAtMs) {
++      llmResponse['agent.cursor.reasoning_observed_late'] = true;
++    }
++  }
++}
++
++function applyToolDurationToCall(records, stepId, resultEvent) {
++  const toolUseId = resultEvent.tool_use_id;
++  if (!toolUseId) return;
++  const call = findLastItem(records, r =>
++    r['event.name'] === 'tool.call' &&
++    r['gen_ai.step.id'] === stepId &&
++    r['gen_ai.tool.call.id'] === toolUseId
++  );
++  if (!call) return;
++
++  // Keep tool.call time as preToolUse._journal_ts (unchanged).
++  // Only record duration as metadata.
++  if (resultEvent.duration_ms != null) {
++    call['gen_ai.tool.call.duration'] = resultEvent.duration_ms;
++  }
++}
++
++// ─── finish_reasons ───
++
++function assignFinishReasons(records) {
++  const stepsWithTools = new Set();
++  for (const r of records) {
++    if (r['event.name'] === 'tool.call' || r['event.name'] === 'tool.result') {
++      const sid = r['gen_ai.step.id'];
++      if (sid) stepsWithTools.add(sid);
++    }
++  }
++
++  const llmResponses = records.filter(r => r['event.name'] === 'llm.response');
++  const finalLlmResponse = llmResponses[llmResponses.length - 1];
++  for (const r of records) {
++    if (r['event.name'] !== 'llm.response') continue;
++    const stepId = r['gen_ai.step.id'];
++    const fr = r === finalLlmResponse
++      ? ['stop']
++      : (stepsWithTools.has(stepId) ? ['tool_calls'] : ['stop']);
++    r['gen_ai.response.finish_reasons'] = fr;
++    const msgs = r['gen_ai.output.messages'];
++    if (Array.isArray(msgs) && msgs.length > 0) {
++      msgs[0].finish_reason = fr[0];
++    }
++  }
++}
++
++// ─── LLM Timing ───
++
++function llmRequestStartTime(ev, fallbackTs) {
++  if (ev?.hook_event === 'afterAgentThought' && ev.duration_ms != null) {
++    return {
++      timestamp: durationStartMs(ev),
++      source: 'thought_duration',
++    };
++  }
++  return {
++    timestamp: fallbackTs || ev?._journal_ts,
++    source: fallbackTs ? 'previous_step_end' : undefined,
++  };
++}
++
++function durationStartMs(ev) {
++  const endMs = tsMs(ev);
++  const durationMs = Number(ev?.duration_ms);
++  if (!Number.isFinite(durationMs) || durationMs < 0) return endMs;
++  return endMs - durationMs;
++}
++
++// ─── Helpers ───
++
++function appendPart(llmResponse, partType, text) {
++  const msgs = llmResponse['gen_ai.output.messages'];
++  if (Array.isArray(msgs) && msgs.length > 0 && text) {
++    if (!msgs[0].parts) msgs[0].parts = [];
++    msgs[0].parts.push({ type: partType, content: text });
++  }
++}
++
++function mergeTokens(rec, ev) {
++  if (ev.input_tokens != null) rec['gen_ai.usage.input_tokens'] = ev.input_tokens;
++  if (ev.output_tokens != null) rec['gen_ai.usage.output_tokens'] = ev.output_tokens;
++  if (ev.cache_read_tokens != null) rec['gen_ai.usage.cache_read.input_tokens'] = ev.cache_read_tokens;
++  if (ev.cache_write_tokens != null) rec['gen_ai.usage.cache_creation.input_tokens'] = ev.cache_write_tokens;
++  if (ev.input_tokens != null && ev.output_tokens != null) {
++    rec['gen_ai.usage.total_tokens'] = ev.input_tokens + ev.output_tokens;
++  }
++}
++
++function deriveTraceId(turnId) {
++  if (!turnId) return crypto.randomUUID().replace(/-/g, '');
++  return crypto.createHash('sha256').update(`cursor:${turnId}`).digest('hex').slice(0, 32);
++}
++
++function eventTs(ev) {
++  if (ev._journal_ts) return timestampToUnixNanos(ev._journal_ts);
++  return timestampToUnixNanos(new Date());
++}
++
++function tsMs(ev) {
++  if (ev._journal_ts) return new Date(ev._journal_ts).getTime();
++  return Date.now();
++}
++
++function findLastItem(items, predicate) {
++  for (let i = items.length - 1; i >= 0; i--) {
++    const item = items[i];
++    if (predicate(item, i)) return item;
++  }
++  return undefined;
++}
++
++function inferProvider(model) {
++  const provider = inferProviderName({ 'gen_ai.request.model': model, 'gen_ai.agent.type': 'cursor' });
++  if (provider === 'unknown' && /composer/i.test(model)) return 'openai';
++  return provider;
++}
++
++function applyPolicy(record, runtimeConfig) {
++  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
++}
++
++const SUBAGENT_TOOL_NAMES = new Set(['Subagent', 'Task']);
++
++function isSubagentTool(toolName) {
++  return SUBAGENT_TOOL_NAMES.has(toolName);
++}
++
++function stringify(val) {
++  if (val === undefined || val === null) return '';
++  if (typeof val === 'string') return val;
++  return JSON.stringify(val);
++}
+diff --git a/assets/hooks/cursor/source-event.mjs b/assets/hooks/cursor/source-event.mjs
+new file mode 100644
+index 0000000..575bd6f
+--- /dev/null
++++ b/assets/hooks/cursor/source-event.mjs
+@@ -0,0 +1,138 @@
++/**
++ * source-event.mjs — Convert Cursor hook stdin payload to internal event.
++ *
++ * Sanitizes tool_use_id (strips \n suffix), extracts fields by hook event type,
++ * and produces a flat internal event object for the event journal.
++ */
++
++export function sanitizeToolCallId(raw) {
++  if (typeof raw !== 'string' || raw.length === 0) return undefined;
++  const idx = raw.indexOf('\n');
++  return (idx >= 0 ? raw.slice(0, idx) : raw).trim() || undefined;
++}
++
++export function toInternalEvent(payload) {
++  const hookEvent = payload.hook_event_name || payload.hookEvent || payload.hookEventName || 'unknown';
++  const conversationId = payload.conversation_id || payload.session_id || '';
++  const sessionId = payload.session_id || payload.conversation_id || '';
++  const generationId = payload.generation_id || undefined;
++  const model = payload.model || undefined;
++
++  const event = {
++    _journal_ts: new Date().toISOString(),
++    hook_event: hookEvent,
++    conversation_id: conversationId,
++    session_id: sessionId,
++    generation_id: generationId,
++    model,
++  };
++
++  switch (hookEvent) {
++    case 'beforeSubmitPrompt':
++      event.prompt = payload.prompt || undefined;
++      event.composer_mode = payload.composer_mode || undefined;
++      event.attachments = payload.attachments || undefined;
++      break;
++
++    case 'afterAgentThought':
++      event.text = payload.text || undefined;
++      event.duration_ms = toFiniteNumber(payload.duration_ms);
++      break;
++
++    case 'afterAgentResponse':
++      event.text = payload.text || undefined;
++      event.input_tokens = toFiniteNumber(payload.input_tokens);
++      event.output_tokens = toFiniteNumber(payload.output_tokens);
++      event.cache_read_tokens = toFiniteNumber(payload.cache_read_tokens);
++      event.cache_write_tokens = toFiniteNumber(payload.cache_write_tokens);
++      break;
++
++    case 'preToolUse':
++      event.tool_name = payload.tool_name || undefined;
++      event.tool_use_id = sanitizeToolCallId(payload.tool_use_id);
++      event.tool_input = payload.tool_input || undefined;
++      event.cwd = payload.cwd || undefined;
++      break;
++
++    case 'postToolUse':
++      event.tool_name = payload.tool_name || undefined;
++      event.tool_use_id = sanitizeToolCallId(payload.tool_use_id);
++      event.tool_input = payload.tool_input || undefined;
++      event.tool_output = payload.tool_output || undefined;
++      event.duration_ms = toFiniteNumber(payload.duration_ms) ?? toFiniteNumber(payload.duration);
++      event.cwd = payload.cwd || undefined;
++      break;
++
++    case 'postToolUseFailure':
++      event.tool_name = payload.tool_name || undefined;
++      event.tool_use_id = sanitizeToolCallId(payload.tool_use_id);
++      event.tool_input = payload.tool_input || undefined;
++      event.error_message = payload.error_message || undefined;
++      event.failure_type = payload.failure_type || undefined;
++      event.is_interrupt = payload.is_interrupt || undefined;
++      event.duration_ms = toFiniteNumber(payload.duration_ms) ?? toFiniteNumber(payload.duration);
++      break;
++
++    case 'stop':
++      event.status = payload.status || undefined;
++      event.loop_count = toFiniteNumber(payload.loop_count);
++      event.input_tokens = toFiniteNumber(payload.input_tokens);
++      event.output_tokens = toFiniteNumber(payload.output_tokens);
++      event.cache_read_tokens = toFiniteNumber(payload.cache_read_tokens);
++      event.cache_write_tokens = toFiniteNumber(payload.cache_write_tokens);
++      break;
++
++    case 'subagentStart':
++      event.subagent_id = sanitizeToolCallId(payload.subagent_id);
++      event.subagent_type = payload.subagent_type || undefined;
++      event.parent_conversation_id = payload.parent_conversation_id || undefined;
++      event.tool_call_id = sanitizeToolCallId(payload.tool_call_id);
++      event.subagent_model = payload.subagent_model || undefined;
++      event.is_parallel_worker = payload.is_parallel_worker || undefined;
++      event.task = payload.task || undefined;
++      break;
++
++    case 'subagentStop':
++      event.subagent_id = sanitizeToolCallId(payload.subagent_id);
++      event.subagent_type = payload.subagent_type || undefined;
++      event.parent_conversation_id = payload.parent_conversation_id || undefined;
++      event.status = payload.status || undefined;
++      event.duration_ms = toFiniteNumber(payload.duration_ms);
++      event.message_count = toFiniteNumber(payload.message_count);
++      event.tool_call_count = toFiniteNumber(payload.tool_call_count);
++      event.loop_count = toFiniteNumber(payload.loop_count);
++      event.task = payload.task || undefined;
++      event.description = payload.description || undefined;
++      event.error_message = payload.error_message || undefined;
++      break;
++
++    case 'sessionStart':
++      event.is_background_agent = payload.is_background_agent;
++      event.composer_mode = payload.composer_mode || undefined;
++      break;
++
++    default:
++      break;
++  }
++
++  // common metadata
++  event.cursor_version = payload.cursor_version || undefined;
++  event.user_email = payload.user_email || undefined;
++  event.workspace_roots = payload.workspace_roots || undefined;
++  event.transcript_path = payload.transcript_path || undefined;
++
++  return stripUndefined(event);
++}
++
++function toFiniteNumber(val) {
++  if (typeof val === 'number' && Number.isFinite(val)) return val;
++  return undefined;
++}
++
++function stripUndefined(obj) {
++  const out = {};
++  for (const [key, val] of Object.entries(obj)) {
++    if (val !== undefined) out[key] = val;
++  }
++  return out;
++}
+diff --git a/docs/converter-subagent-nesting-patch.md b/docs/converter-subagent-nesting-patch.md
+new file mode 100644
+index 0000000..42211a3
+--- /dev/null
++++ b/docs/converter-subagent-nesting-patch.md
+@@ -0,0 +1,174 @@
++# Converter Subagent Nesting Patch
++
++> 针对 `@loongsuite/otel-util-genai@0.1.0-beta.3` 的本地补丁，待合入上游仓库后移除。
++
++## 修改文件
++
++`dist/event-log/converter.js`（编译产物，源码在 `loongsuite-js-plugins` 仓库）
++
++## 改动目的
++
++让 converter 支持 Subagent 嵌套——当父 agent 的 TOOL span 有关联的子 session records 时，在 TOOL span 下创建嵌套的 `AGENT → STEP → LLM/TOOL` 层级。
++
++改动前的 span 层级：
++```
++ENTRY → AGENT → STEP → LLM + TOOL(Subagent)
++```
++
++改动后的 span 层级：
++```
++ENTRY → AGENT → STEP → LLM + TOOL(Subagent)
++                                  └── AGENT(child) → STEP → LLM + TOOL
++```
++
++## 改动内容
++
++### 1. 父子 record 分离（convertTurn 函数）
++
++在 `convertTurn` 中，遍历 records 时按 `gen_ai.agent.scope === "subagent"` 将子 session records 分离出来，按 `gen_ai.subagent.parent_tool_call.id` 分组存入 `childRecordsByCallId` Map。
++
++剩余的 parentRecords 用于构建父 turn 的 ENTRY/AGENT/STEP/LLM 等 span，避免子 session 的 records 污染父级的 outputMessages、token 汇总等字段。
++
++```js
++const parentRecords = [];
++const childRecordsByCallId = new Map();
++for (const r of records) {
++    if (r["gen_ai.agent.scope"] === "subagent") {
++        const callId = r["gen_ai.subagent.parent_tool_call.id"];
++        if (callId) {
++            let list = childRecordsByCallId.get(callId);
++            if (!list) { list = []; childRecordsByCallId.set(callId, list); }
++            list.push(r);
++        }
++    } else {
++        parentRecords.push(r);
++    }
++}
++```
++
++原先所有用 `records` 的地方改为 `parentRecords`：
++- `resolveTurnAgentName / UserId / SessionId`
++- `buildEntryInvocation / buildInvokeAgentInvocation`
++- `readTurnSystemInstruction / readTurnToolDefinitions`
++- `buildTurnAccumulatedMessages / groupByStep`
++
++### 2. childRecordsByCallId 透传
++
++`childRecordsByCallId` 通过 `convertStep → convertToolPair` 逐层传递。函数签名增加参数：
++
++- `convertStep(step, handler, agentCtx, ..., childRecordsByCallId)`
++- `convertToolPair(pair, handler, parentCtx, common, childRecordsByCallId, warnings)`
++
++### 3. TOOL span 内嵌套子 AGENT（convertToolPair 函数）
++
++在 `convertToolPair` 中，当 `pair.call["gen_ai.tool.call.id"]` 在 `childRecordsByCallId` 中有匹配时，在 TOOL span 下创建嵌套结构：
++
++```js
++let startMs = pair.call
++    ? readNanoMs(pair.call["time_unix_nano"])
++    : readNanoMs(pair.result["time_unix_nano"]);
++// ... endMs 计算省略 ...
++const toolInv = buildExecuteToolInvocation(pair, common);
++
++const toolCallId = pair.call?.["gen_ai.tool.call.id"];
++const childRecords = childRecordsByCallId?.get(toolCallId);
++// Guard: if child records start earlier than TOOL (e.g. LLM request
++// time pushed back by duration_ms), pull TOOL start forward to match.
++if (childRecords && childRecords.length > 0) {
++    const childMinMs = minTime(childRecords);
++    if (childMinMs < startMs) startMs = childMinMs;
++}
++handler.startExecuteTool(toolInv, parentCtx, startMs);
++if (childRecords && childRecords.length > 0) {
++    const toolCtx = toolInv.contextToken ?? undefined;
++    const childCommon = {
++        agentName: resolveTurnAgentName(childRecords, []) ?? common.agentName,
++        userId: common.userId,
++        sessionId: common.sessionId,
++    };
++    const childAgentInv = buildInvokeAgentInvocation(childRecords, [], childCommon);
++    const childStartMs = minTime(childRecords);
++    const childEndMs = maxTime(childRecords);
++    handler.startInvokeAgent(childAgentInv, toolCtx, childStartMs);
++    const childAgentCtx = childAgentInv.contextToken ?? undefined;
++
++    const childAccumulatedMap = buildTurnAccumulatedMessages(childRecords);
++    const childSteps = groupByStep(childRecords);
++    for (const step of childSteps) {
++        convertStep(step, handler, childAgentCtx, null, null,
++            childAccumulatedMap, childCommon, warnings ?? [], false);
++    }
++    handler.stopInvokeAgent(childAgentInv, childEndMs);
++    if (childEndMs > endMs) endMs = childEndMs;
++}
++```
++
++要点：
++- TOOL span 开始时间兜底：如果 child records 的最早时间（可能被 LLM thought duration_ms 回推）早于 TOOL 原始 start，TOOL start 被拉前到 child 最早时间，保证容器 span 包裹住子级
++- `startExecuteTool` 在 child 时间检查之后调用（原始代码在之前），确保使用修正后的 startMs
++- 子 AGENT 的 `agentName` 通过 `resolveTurnAgentName(childRecords, [])` 解析，优先取 `gen_ai.agent.name` → `gen_ai.agent.type` → 继承父级
++- 子 AGENT 的 parentContext 是 TOOL span 的 context（`toolCtx`），确保 parentSpanId 指向 TOOL
++- 子 AGENT 的时间范围由子 records 的 min/max time 决定
++- 如果子 AGENT 结束时间晚于 TOOL result 时间，TOOL span 的 endTime 延伸到子 AGENT 结束时间
++- 子 step 的 `turnSysInstr` 和 `turnToolDefs` 传 null（子 session 没有独立的 system instruction）
++- spanCount 返回值包含嵌套的 span 数量
++
++## 上游 record 的协议要求
++
++assembler 产出的子 session records 需要携带以下字段，converter 才能正确识别和嵌套：
++
++| 字段 | 用途 |
++|------|------|
++| `gen_ai.agent.scope` = `"subagent"` | 标识为子 session record |
++| `gen_ai.subagent.parent_tool_call.id` | 关联到父 TOOL 的 `gen_ai.tool.call.id` |
++| `gen_ai.agent.id` | 子 session 标识（conversation_id） |
++| `gen_ai.step.id` | 子 session 内的 step 划分 |
++| `event.name` | 标准事件名（llm.request / llm.response / tool.call / tool.result） |
++
++## 对现有探针的影响
++
++converter 的改动是纯增量的——只在 records 包含 `gen_ai.agent.scope === "subagent"` 时才激活嵌套逻辑，不携带该字段的 records 走原有路径，行为不变。
++
++| 探针 | 子 agent 能力 | 影响 |
++|------|--------------|------|
++| **Cursor** | 已接入。`react-assembler.mjs` 产出带协议字段的 child records | converter 补丁直接生效 |
++| **Claude Code** | hook processor 已收集 `subagent_start` / `subagent_stop` 事件和 `_child_state`，但尚未在 records 中设置协议字段 | 无影响，需在 record 构建层补上协议字段后才能使用嵌套 |
++| **Codex** | hook 无子 agent 事件 | 无影响 |
++| **Qoder / QoderWork** | hook 无子 agent 事件 | 无影响 |
++
++## 其他探针接入 subagent 嵌套的步骤
++
++converter 侧不需要任何改动，只需要探针的 hook processor / assembler 在产出 records 时满足协议要求。以 Claude Code 为例：
++
++### 1. 识别子 agent 的 records 来源
++
++Claude Code 已经在 `cmdSubagentStop` 中通过 `readAndDeleteChildState(childSid)` 读取了子 session 的完整事件列表（`_child_state.events`）。这些事件等价于 Cursor 的 `childEvents`。
++
++### 2. 为 child records 设置协议字段
++
++在构建子 session 的 event log records 时（等价于 Cursor 的 `buildParentSteps(childEvents, ...)`），需要在每条 record 上注入：
++
++```js
++'gen_ai.agent.scope': 'subagent',                    // 必须：标识为子 session
++'gen_ai.subagent.parent_tool_call.id': toolCallId,    // 必须：关联父 TOOL span
++'gen_ai.agent.id': childSessionId,                    // 建议：子 session 标识
++'gen_ai.agent.depth': 1,                              // 建议：嵌套深度
++'gen_ai.agent.parent.id': parentSessionId,             // 建议：父 session 标识
++```
++
++其中 `toolCallId` 需要建立父级 tool.call 与子 session 的对应关系——哪个 tool.call 触发了哪个子 agent。
++
++### 3. 关联 parent tool.call 与 child session
++
++这是接入的核心难点。需要在父 session 的 `preToolUse`（或等价事件）中找到触发子 agent 的 tool call，将其 `tool_use_id` / `tool.call.id` 与子 session 的 `subagent_session_id` 建立映射。映射策略视 agent 而异：
++
++- **Cursor**：通过 transcript 目录下的 `subagents/*.jsonl` 文件名与 `preToolUse` 事件的时间顺序匹配
++- **Claude Code**：`subagentStop` 事件携带 `subagent_session_id`，需要关联到最近的未配对的 Agent/Task 类 tool call
++
++### 4. 将 child records 与 parent records 合并输出
++
++child records 和 parent records 放入同一个 records 数组发送给 converter。converter 会自动按 `gen_ai.agent.scope` 分离，按 `gen_ai.subagent.parent_tool_call.id` 匹配到对应的 TOOL span 下。
++
++## 部署注意
++
++此补丁在 `node_modules` 中，每次 `npm install` 会丢失。`scripts/local-reinstall.sh` 的 Step 6 负责将补丁从开发目录复制到部署版本的 `node_modules`。正式方案是将改动合入 `@loongsuite/otel-util-genai` 源码发布新版本。
+diff --git a/docs/cursor-trace-fix-experience.md b/docs/cursor-trace-fix-experience.md
+new file mode 100644
+index 0000000..9aa4e04
+--- /dev/null
++++ b/docs/cursor-trace-fix-experience.md
+@@ -0,0 +1,226 @@
++# Cursor 链路采集修复经验总结
++
++**时间**: 2026-06-02 ~ 2026-06-03
++**背景**: 对 loongsuite-pilot 的 Cursor Agent 链路采集质量进行分析和修复
++
++---
++
++## 一、改动成果
++
++### 成功的改动
++
++| 改动 | 效果 | 验证状态 |
++|------|------|---------|
++| **Step 拆分** (converter.js) | 从 1 个 STEP 拆分为 7~8 个，每个 STEP 包含 1 个 LLM + 对应工具 | 已验证，trace d14bc603 拆出 8 个 step |
++| **错误状态映射** (converter.js) | 中断/错误 turn 的 ENTRY/AGENT span 正确标记 status.code=2 | 已验证，aborted trace 正确标记 ERROR |
++| **工具失败标记** (converter.js) | postToolUseFailure 的 TOOL span 标记为 ERROR | 已修改 |
++| **tool_call_id 清洗** (normalizer) | 去除换行符，新 trace 0 个含换行 | 已验证 |
++| **孤立 LLM endTime** (converter.js) | 中断 turn 的 LLM span duration 从 0s 恢复为实际时长 | 已验证 |
++| **失败工具 result 补充** (field-mapping.js) | error.message 作为 result fallback | 已修改 |
++| **Flusher 辅助事件跳过** (dist/index.js) | sessionStart/End, subagentStart/Stop 不再产生空壳 trace | 部分验证 |
++| **Stop 事件 session 级广播** (dist/index.js) | stop 的 turn_id 与主 turn 不匹配时，广播到同 session 的 buffer | 部分验证 |
++
++### 引入的问题
++
++| 问题 | 原因 | 教训 |
++|------|------|------|
++| Codex trace 出现双重 ENTRY | 修改了 dist/index.js (OtlpTraceFlusher)，这是所有 agent 共用的 flusher | **不应在公共 flusher 中加 cursor 专属逻辑** |
++| 多进程同时运行导致数据重复 | 语法检查 `node -e "import(...)"` 意外启动了完整 daemon | **验证语法应用 `node --check` 而非 import** |
++| 残留进程未清理 | pkill 后未确认进程数，多次重启产生多个并行进程 | **每次重启后必须 `ps | grep` 确认只有 1 个进程** |
++
++---
++
++## 二、Step 拆分方案（核心成果）
++
++### 方案设计
++
++**问题**: Cursor 的多轮 ReAct 推理被压缩为单个 STEP，无法区分推理轮次。
++
++**调研结论**:
++- `generation_id` 不能用作 step_id（在整个 turn 内不变，已被用作 turn_id）
++- `afterAgentThought` hook 是**唯一可用的 step 分界信号**
++
++**事件序列**:
++```
++beforeSubmitPrompt  → step 0 开始
++afterAgentThought   → step 1 开始（中间推理完成）
++[tool.call/result]  → 工具执行，归属当前 step
++afterAgentThought   → step 2 开始
++[tool.call/result]  → 工具执行
++afterAgentResponse  → step N（最终回复）
++stop                → turn 结束
++```
++
++### 实现代码
++
++在 `converter.js` 的 `convertTurn` 中，`groupByStep(records)` 之前插入：
++
++```javascript
++assignCursorStepIds(records);
++```
++
++新增函数：
++
++```javascript
++function assignCursorStepIds(records) {
++    const agentType = records[0]?.["gen_ai.agent.type"];
++    if (agentType !== "cursor" && agentType !== "cursor-hook") return;
++    if (records.some(r => r["gen_ai.step.id"])) return;
++    const sorted = [...records].sort((a, b) =>
++        readNanoMs(a["time_unix_nano"]) - readNanoMs(b["time_unix_nano"]));
++    let stepRound = 0;
++    const turnId = records[0]?.["gen_ai.turn.id"] ?? "unknown";
++    let currentStepId = `${turnId}:s${stepRound}`;
++    for (const r of sorted) {
++        const hook = r["agent.cursor.hook_event_name"];
++        if (hook === "afterAgentThought" || hook === "afterAgentResponse") {
++            stepRound++;
++            currentStepId = `${turnId}:s${stepRound}`;
++        }
++        r["gen_ai.step.id"] = currentStepId;
++    }
++}
++```
++
++**关键设计点**:
++1. 第一行 `agentType !== "cursor"` 守卫，**不影响其他 agent**
++2. `records.some(r => r["gen_ai.step.id"])` 跳过已有 step_id 的数据
++3. 利用 converter 已有的 `groupByStep` 自动按 step_id 分组，无需改分组逻辑
++4. step_id 格式 `${turnId}:s${stepRound}`，与 Claude Code 的 `${turnId}:s${stepRound}` 一致
++
++### 验证结果
++
++trace d14bc603 (168s, 42 tools):
++```
++STEP s0 (0~41s):   LLM + 16 tools (初始推理 + Grep/Read)
++STEP s1 (42~50s):  LLM + 2 tools  (Shell + Read)
++STEP s2 (50~56s):  LLM + 5 tools  (Read x5)
++STEP s3 (64~77s):  LLM + 7 tools  (Shell + Read)
++STEP s4 (82~113s): LLM + 4 tools  (Shell + Read)
++STEP s5 (116~161s):LLM + 8 tools  (Shell + Read x7)
++STEP s6 (163s):    LLM only       (推理无工具)
++STEP s7 (167s):    LLM only       (最终回复)
++```
++
++---
++
++## 三、Cursor Hook 调研成果
++
++### 从 Cursor 3.5.38 源码提取的完整 Hook Payload
++
++**PreToolUseRequestQuery**:
++tool_name, tool_input, tool_use_id, cwd, conversation_id, generation_id, model, model_id, model_params
++
++**PostToolUseRequestQuery**:
++tool_name, tool_input, tool_output, duration_ms, tool_use_id, cwd, conversation_id, is_interrupt, generation_id, model, model_id, model_params
++
++**PostToolUseFailureRequestQuery**:
++tool_name, tool_input, error_message, failure_type, duration_ms, tool_use_id, is_interrupt, conversation_id, generation_id, model, model_id, model_params
++
++**afterAgentThought** (从源码 + 实际数据):
++conversation_id, generation_id, text, duration_ms, model
++
++**beforeSubmitPrompt** (从源码):
++conversation_id, generation_id, model, composer_mode, prompt, attachments
++
++**afterAgentResponse** (从源码):
++conversation_id, generation_id, model, text, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
++
++**stop** (从源码):
++conversation_id, generation_id, model, status, loop_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
++
++### 关键发现
++
++1. **generation_id 不是 step_id**: 在整个 turn 内保持不变，已被 normalizer 用作 gen_ai.turn.id
++2. **afterAgentThought 是 step 分界**: 每次中间推理完成后触发，携带 reasoning 文本
++3. **afterAgentThought 的 output type 是 "reasoning"**: 不是 "text"
++4. **LLM 的 tool_use 决策不通过 hook 暴露**: 只在 Cursor 内部 transcript 中，需从 preToolUse 反向合成
++5. **stop 事件携带独立 token**: 可用于中断 turn 的 token 补充
++6. **postToolUseFailure 不携带 tool_output**: 只有 error_message + failure_type
++7. **model 字段始终为 "default"**: model_id 字段可能有真实值，待验证
++8. **tool_use_id 有复合格式**: "call_xxx\nfc_xxx"，需要清洗
++
++### 未利用的字段
++
++- model_id: 可能含真实模型名
++- composer_mode: 可区分 Agent/Ask/Edit 模式
++- cwd: 工具执行的工作目录
++- is_interrupt: 工具是否被中断
++- stop 的 token 字段: 可为中断 turn 补充 token
++- attachments: 用户附件信息
++
++---
++
++## 四、与 Claude Code 的对比经验
++
++### Claude Code 的优势
++
++1. **双数据源**: hook stdin + transcript 解析，transcript 提供 model、token、message_id、output（含 tool_use）
++2. **每轮独立 token**: transcript 每个 llm_call 都有独立 usage
++3. **processor 生成 step_id**: 每个 llm_call 递增 stepRound，显式写入 gen_ai.step.id
++4. **processor 生成 trace_id/span_id**: 完全可控的拓扑结构
++
++### Cursor 的对标方案
++
++| Claude Code 方式 | Cursor 对标 |
++|-----------------|------------|
++| transcript llm_call 拆 step | afterAgentThought 拆 step |
++| transcript message.model | hook model_id (待验证) |
++| transcript usage (每轮) | afterAgentResponse token (仅 turn 级) |
++| transcript output (含 tool_use) | preToolUse 反向合成 (待实现) |
++
++---
++
++## 五、待解决问题
++
++### 优先级 1（源码层面实现）
++
++1. **Step 拆分**: 将 assignCursorStepIds 移入源码的 converter.ts
++2. **tool_call_id 清洗**: normalizer 中 sanitizeToolCallId
++3. **错误状态映射**: converter 中 resolveTurnError
++
++### 优先级 2
++
++4. **LLM output 合成 tool_use**: converter 中将 tool.call 事件合成到 LLM output.messages
++5. **中断 turn 补 token**: normalizer 保留 stop 事件的 token，converter 做 fallback
++6. **model_id 提取**: normalizer 提取 model_id 替代 "default"
++
++### 优先级 3
++
++7. **Flusher 辅助事件处理**: 需要在不影响其他 agent 的前提下解决 cursor 的 sessionStart/subagent 事件
++8. **Stop 事件 turn_id 不匹配**: Cursor 的 stop 可能用不同的 turn_id，需要 session 级关联
++
++---
++
++## 六、操作教训
++
++1. **不要在部署产物上改代码**: dist/index.js 和 node_modules 里的改动会被下次更新覆盖
++2. **不要用 `node -e "import(...)"` 验证语法**: 会启动完整 daemon，应用 `node --check` 或只检查语法
++3. **每次重启后确认只有 1 个进程**: `pkill -f collector-daemon && sleep 2 && ps aux | grep collector-daemon | grep -v grep | wc -l`
++4. **公共模块的改动需要 agent 隔离**: flusher 是所有 agent 共用的，cursor 专属逻辑不应放在 flusher 中
++5. **改动应该集中在 converter（按 agentType 守卫）或 normalizer（per-agent 函数）中**
++
++---
++
++## 七、文件改动清单（用于迁移到源码仓库）
++
++### @loongsuite/otel-util-genai (loongsuite-js-plugins repo)
++
++源码目录: `opentelemetry-util-genai/src/event-log/`
++
++| 文件 | 改动 | 对应源文件 |
++|------|------|----------|
++| converter.js | assignCursorStepIds 函数 | converter.ts |
++| converter.js | resolveTurnError 函数 + convertTurn 调用 | converter.ts |
++| converter.js | convertToolPair 工具失败检查 | converter.ts |
++| converter.js | convertLlmPair fallbackStartMs/EndMs | converter.ts |
++| field-mapping.js | toolCallResult error fallback | field-mapping.ts |
++
++### loongsuite-pilot (内部 repo)
++
++| 文件 | 改动 | 对应源文件 |
++|------|------|----------|
++| hooks/agent-event-normalizer.mjs | sanitizeToolCallId 函数 | assets/hooks/agent-event-normalizer.mjs |
++| dist/index.js (OtlpTraceFlusher) | 辅助事件跳过 + stop 广播 | src/flushers/otlp-trace-flusher.ts |
++
++**注意**: dist/index.js 的改动（辅助事件跳过、stop 广播）影响了 codex，**不建议直接迁移**，需要重新设计为 cursor 专属逻辑，放在 normalizer 或 cursor-specific 的处理层中。
+diff --git a/docs/superpowers/plans/2026-06-04-cursor-subagent-trace-fusion.md b/docs/superpowers/plans/2026-06-04-cursor-subagent-trace-fusion.md
+new file mode 100644
+index 0000000..926d1c8
+--- /dev/null
++++ b/docs/superpowers/plans/2026-06-04-cursor-subagent-trace-fusion.md
+@@ -0,0 +1,909 @@
++# Cursor Subagent Trace Fusion Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** Build Cursor parent/subagent trace fusion so a parent `Subagent` tool call contains nested subagent LLM/tool steps instead of leaking child sessions as fake top-level turns.
++
++**Architecture:** Keep the existing Cursor hook processor fail-open and mostly reusable: it continues writing raw JSONL and legacy history JSONL. Add a Cursor source-event adapter and ReAct assembler in the Input layer, because `CursorHookInput` is long-lived and can buffer complete turns, associate child conversations, and emit fused canonical records. Add converter/debug validation for nested agent metadata so the final trace can render `Parent STEP -> TOOL Subagent -> Subagent -> child STEP`.
++
++**Tech Stack:** TypeScript input pipeline, Node hook processor, Vitest unit tests, existing `AgentActivityEntry` schema, existing OTLP trace flusher/converter.
++
++---
++
++## Target Trace Shape
++
++```text
++ENTRY
++  AGENT
++    父 STEP 1
++      LLM
++        input: user prompt
++        output: reasoning/text + tool_call Subagent
++      TOOL Subagent
++        AGENT
++          子 STEP 1
++            LLM input/output
++            TOOL call/result
++          子 STEP 2
++            LLM input/output
++            TOOL call/result
++    父 STEP 2
++      LLM
++        input: Subagent final result/status
++        output: final summary
++```
++
++## Implementation Principles
++
++1. Do not throw away the current probe.
++   - `assets/hooks/cursor-hook-processor.mjs` already writes raw and history. Keep it lightweight.
++   - Old history records still carry enough fields to support fallback assembly.
++
++2. Raw source wins, history remains fallback.
++   - Prefer `~/.loongsuite-pilot/logs/cursor/raw/cursor-raw-trace.jsonl` when present.
++   - If raw is unavailable, assemble from `logs/cursor/history/cursor-YYYY-MM-DD.jsonl`.
++   - If records already contain valid `gen_ai.step.id` and no child-session leak, pass through.
++
++3. Top-level turns are only user turns.
++   - A top-level Cursor turn must start with `beforeSubmitPrompt`.
++   - A conversation that has no `beforeSubmitPrompt` and starts with `preToolUse` is a child/session-internal run, not a fake user turn.
++
++4. Subagent is dual-level.
++   - Parent view: `Subagent` is a tool call/result.
++   - Child view: the child conversation is a nested agent run under the `Subagent` tool span.
++
++5. Child association must be confidence-aware.
++   - Strong link: explicit `parent_conversation_id`, `tool_call_id`, `agent_transcript_path`, or future Cursor field.
++   - Medium link: child conversation appears inside `subagentStart`/`subagentStop` window.
++   - Weak but useful link: child conversation has no `beforeSubmitPrompt` and is the next unclaimed child conversation after a pending `preToolUse(Subagent)`.
++   - Ambiguous child sessions should remain marked `agent.cursor.subagent.link_confidence="orphan"` rather than corrupting parent trace.
++
++---
++
++## File Structure
++
++### Create
++
++- `src/inputs/cursor-hook/cursor-source-event.ts`
++  - Convert raw Cursor hook payloads and old history/canonical records into one internal `CursorSourceEvent`.
++  - Sanitize `tool_use_id` consistently.
++  - Preserve raw line/file/order metadata for deterministic grouping.
++
++- `src/inputs/cursor-hook/cursor-trace-assembler.ts`
++  - Segment parent turns.
++  - Detect child conversations.
++  - Link `preToolUse(Subagent)` with `subagentStart/subagentStop`.
++  - Build parent and nested child ReAct steps.
++  - Emit canonical `AgentActivityEntry` records with `trace_id`, `gen_ai.turn.id`, `gen_ai.step.id`, tool ids, and subagent attributes.
++
++- `tests/unit/inputs/cursor-trace-assembler.test.ts`
++  - Pure assembler tests using small synthetic payloads.
++  - Tests must not depend on polling or filesystem offsets.
++
++- `tests/fixtures/cursor-hook/raw-cursor-subagent-2026-06-04.redacted.jsonl`
++  - Redacted fixture based on the current raw shape.
++  - Keep event order, ids, timestamps, hook names, tool names, statuses.
++  - Replace prompts/text/tool contents/user email/absolute private content with short placeholders.
++
++### Modify
++
++- `src/inputs/cursor-hook/cursor-hook-input.ts`
++  - Add `rawLogDir` option.
++  - Override `collect()` for Cursor only.
++  - Use raw assembler when raw exists and has new bytes.
++  - Fall back to current per-record `transformRecord()` path for legacy/no-raw cases.
++
++- `tests/unit/inputs/cursor-hook-input.test.ts`
++  - Keep current tests.
++  - Add integration test proving raw subagent fixture emits one parent trace, not three top-level turns.
++
++- `docs/EVENT_LOG_TO_TRACE_SPEC.md`
++  - Document nested agent fields and subagent semantics.
++
++- `docs/cursor-trace-fix-experience.md`
++  - Replace “模式 B = Cursor 链路异常” language with “模式 B = child session leaked as top-level turn”.
++
++- `src/flushers/otlp-trace-flusher.ts`
++  - Only modify if verification shows the converter ignores nested parent fields.
++  - Expected change: preserve explicit nested `parent_span_id` / `gen_ai.agent.parent_tool_call.id` semantics, or add a preprocessing step that groups child agent spans under the parent Subagent tool span.
++
++---
++
++## Data Contract
++
++### CursorSourceEvent
++
++```ts
++export interface CursorSourceEvent {
++  order: number;
++  source: 'raw' | 'history';
++  capturedAtMs: number;
++  hookEvent: string;
++  conversationId: string;
++  sessionId: string;
++  generationId?: string;
++  model?: string;
++  prompt?: string;
++  text?: string;
++  toolName?: string;
++  toolUseId?: string;
++  toolInput?: unknown;
++  toolOutput?: unknown;
++  errorMessage?: string;
++  failureType?: string;
++  durationMs?: number;
++  status?: string;
++  subagentId?: string;
++  subagentType?: string;
++  parentConversationId?: string;
++  toolCallId?: string;
++  subagentModel?: string;
++  messageCount?: number;
++  toolCallCount?: number;
++  loopCount?: number;
++  raw: Record<string, unknown>;
++}
++```
++
++### Emitted Subagent Attributes
++
++Use stable fields for future queries and `agent.cursor.*` for Cursor-specific debug:
++
++```ts
++{
++  'gen_ai.agent.type': 'cursor',
++  'gen_ai.agent.id': '<conversation_id>',
++  'gen_ai.agent.parent.id': '<parent_conversation_id>',
++  'gen_ai.agent.depth': 1,
++  'gen_ai.agent.scope': 'subagent',
++  'gen_ai.subagent.id': '<subagent_id or tool_call_id>',
++  'gen_ai.subagent.parent_tool_call.id': '<parent Subagent tool_use_id>',
++  'agent.cursor.subagent.link_confidence': 'explicit' | 'time_window' | 'pending_order' | 'orphan'
++}
++```
++
++---
++
++## Task 1: Add Source Event Adapter
++
++**Files:**
++- Create: `src/inputs/cursor-hook/cursor-source-event.ts`
++- Test: `tests/unit/inputs/cursor-trace-assembler.test.ts`
++
++- [ ] **Step 1: Write adapter tests**
++
++Add tests for raw payload and legacy history payload:
++
++```ts
++import { describe, expect, it } from 'vitest';
++import { toCursorSourceEvent, sanitizeCursorToolId } from '../../../src/inputs/cursor-hook/cursor-source-event.js';
++
++describe('cursor source event adapter', () => {
++  it('normalizes raw preToolUse payload', () => {
++    const event = toCursorSourceEvent({
++      order: 1,
++      source: 'raw',
++      record: {
++        _captured_at: '2026-06-04T06:21:28.838Z',
++        hook_event_name: 'preToolUse',
++        conversation_id: 'parent-conv',
++        session_id: 'parent-conv',
++        generation_id: 'parent-gen',
++        tool_name: 'Subagent',
++        tool_use_id: 'call_parent\nfc_hidden',
++        tool_input: { description: 'Research', prompt: 'redacted' },
++      },
++    });
++
++    expect(event).toMatchObject({
++      order: 1,
++      source: 'raw',
++      hookEvent: 'preToolUse',
++      conversationId: 'parent-conv',
++      sessionId: 'parent-conv',
++      generationId: 'parent-gen',
++      toolName: 'Subagent',
++      toolUseId: 'call_parent',
++    });
++  });
++
++  it('normalizes canonical history tool.call payload', () => {
++    const event = toCursorSourceEvent({
++      order: 2,
++      source: 'history',
++      record: {
++        'event.name': 'tool.call',
++        'gen_ai.session.id': 'child-conv',
++        'gen_ai.turn.id': 'child-gen',
++        'gen_ai.tool.name': 'WebSearch',
++        'gen_ai.tool.call.id': 'call_web',
++        'agent.cursor.hook_event_name': 'preToolUse',
++        time_unix_nano: '1780554890000000000',
++      },
++    });
++
++    expect(event).toMatchObject({
++      hookEvent: 'preToolUse',
++      conversationId: 'child-conv',
++      generationId: 'child-gen',
++      toolName: 'WebSearch',
++      toolUseId: 'call_web',
++    });
++  });
++});
++```
++
++- [ ] **Step 2: Run failing test**
++
++Run:
++
++```bash
++npm test -- tests/unit/inputs/cursor-trace-assembler.test.ts
++```
++
++Expected: import/function missing.
++
++- [ ] **Step 3: Implement adapter**
++
++Implement:
++
++```ts
++export function sanitizeCursorToolId(value: unknown): string | undefined {
++  if (typeof value !== 'string' || value.length === 0) return undefined;
++  return value.split('\n')[0]!.trim() || undefined;
++}
++```
++
++Then implement `toCursorSourceEvent()` with these mappings:
++
++| Internal field | Raw source | History source |
++|---|---|---|
++| `hookEvent` | `hook_event_name` | `agent.cursor.hook_event_name` |
++| `conversationId` | `conversation_id/session_id` | `gen_ai.session.id` |
++| `generationId` | `generation_id` | `gen_ai.turn.id` |
++| `toolName` | `tool_name` | `gen_ai.tool.name` |
++| `toolUseId` | `tool_use_id` | `gen_ai.tool.call.id` |
++| `toolInput` | `tool_input` | `gen_ai.tool.call.arguments` |
++| `toolOutput` | `tool_output` | `gen_ai.tool.call.result` |
++| `prompt` | `prompt` | `gen_ai.input.messages_delta` first user text |
++| `text` | `text` | `gen_ai.output.messages` first text/reasoning part |
++
++- [ ] **Step 4: Run adapter test**
++
++Run:
++
++```bash
++npm test -- tests/unit/inputs/cursor-trace-assembler.test.ts
++```
++
++Expected: adapter tests pass.
++
++---
++
++## Task 2: Build Parent Turn Segmentation
++
++**Files:**
++- Create: `src/inputs/cursor-hook/cursor-trace-assembler.ts`
++- Test: `tests/unit/inputs/cursor-trace-assembler.test.ts`
++
++- [ ] **Step 1: Write segmentation test**
++
++Add:
++
++```ts
++import { assembleCursorTrace } from '../../../src/inputs/cursor-hook/cursor-trace-assembler.js';
++
++it('treats only beforeSubmitPrompt segments as top-level turns', () => {
++  const entries = assembleCursorTrace([
++    ev(1, 'beforeSubmitPrompt', 'parent', 'parent-gen', { prompt: 'user prompt' }),
++    ev(2, 'afterAgentThought', 'parent', 'parent-gen', { text: 'thinking' }),
++    ev(3, 'preToolUse', 'child', 'child-gen', { tool_name: 'WebSearch', tool_use_id: 'call_web' }),
++    ev(4, 'afterAgentThought', 'child', 'child-gen', { text: 'child thought' }),
++    ev(5, 'afterAgentResponse', 'parent', 'parent-gen', { text: 'done' }),
++    ev(6, 'stop', 'parent', 'stop-gen', { status: 'completed' }),
++  ]);
++
++  const topTurnIds = new Set(entries.map((e) => e['gen_ai.turn.id']));
++  expect([...topTurnIds]).toContain('parent-gen');
++  expect([...topTurnIds]).not.toContain('child-gen');
++});
++```
++
++Use a local `ev()` test helper that calls `toCursorSourceEvent()`.
++
++- [ ] **Step 2: Implement segmentation**
++
++Implement:
++
++```ts
++export function splitCursorParentTurns(events: CursorSourceEvent[]): CursorParentTurn[] {
++  const turns: CursorParentTurn[] = [];
++  let current: CursorParentTurn | null = null;
++
++  for (const event of events.sort((a, b) => a.order - b.order)) {
++    if (event.hookEvent === 'beforeSubmitPrompt') {
++      if (current) turns.push(current);
++      current = {
++        parentConversationId: event.conversationId,
++        turnId: event.generationId ?? `${event.conversationId}:turn:${event.order}`,
++        events: [event],
++        childEvents: [],
++        completed: false,
++      };
++      continue;
++    }
++
++    if (!current) continue;
++
++    if (event.conversationId === current.parentConversationId) {
++      current.events.push(event);
++      if (event.hookEvent === 'stop') {
++        current.completed = true;
++        turns.push(current);
++        current = null;
++      }
++    } else {
++      current.childEvents.push(event);
++    }
++  }
++
++  return turns;
++}
++```
++
++The actual implementation should include type definitions and should not emit incomplete parent turns until `stop` or idle timeout.
++
++- [ ] **Step 3: Run segmentation tests**
++
++Run:
++
++```bash
++npm test -- tests/unit/inputs/cursor-trace-assembler.test.ts
++```
++
++Expected: segmentation tests pass.
++
++---
++
++## Task 3: Link Parent Subagent Calls
++
++**Files:**
++- Modify: `src/inputs/cursor-hook/cursor-trace-assembler.ts`
++- Test: `tests/unit/inputs/cursor-trace-assembler.test.ts`
++
++- [ ] **Step 1: Write linking tests**
++
++Add tests for these exact cases:
++
++1. `preToolUse(Subagent)` + `subagentStart(tool_call_id)` + `subagentStop(subagent_id)` link by sanitized call id.
++2. `Subagent` has no `postToolUse(Subagent)` but still emits a parent `tool.result` synthesized from `subagentStop`.
++3. Child conversation with no `beforeSubmitPrompt` is linked to pending subagent by `pending_order` when no explicit child id exists.
++4. Ambiguous child conversation remains `orphan`.
++
++Expected assertions:
++
++```ts
++const subagentTool = entries.find((e) =>
++  e['event.name'] === 'tool.call' &&
++  e['gen_ai.tool.name'] === 'Subagent'
++);
++expect(subagentTool?.['gen_ai.tool.call.id']).toBe('call_parent');
++
++const subagentResult = entries.find((e) =>
++  e['event.name'] === 'tool.result' &&
++  e['gen_ai.tool.name'] === 'Subagent'
++);
++expect(subagentResult?.['tool.result.status']).toBe('completed');
++expect(subagentResult?.['gen_ai.subagent.id']).toBe('call_parent');
++```
++
++- [ ] **Step 2: Implement `buildSubagentLinks()`**
++
++Rules:
++
++```text
++preToolUse(Subagent) creates pending parent call.
++subagentStart links to pending call by tool_call_id/subagent_id.
++subagentStop updates same link by subagent_id.
++child conversations are grouped by conversationId.
++explicit child link wins if future fields exist.
++otherwise assign first unclaimed child conversation to first pending parent Subagent call after that call order.
++if multiple possible calls have overlapping order and no clear winner, keep child as orphan.
++```
++
++Store:
++
++```ts
++interface SubagentLink {
++  parentToolCallId: string;
++  parentPreEvent: CursorSourceEvent;
++  startEvent?: CursorSourceEvent;
++  stopEvent?: CursorSourceEvent;
++  childConversationId?: string;
++  childEvents: CursorSourceEvent[];
++  confidence: 'explicit' | 'time_window' | 'pending_order' | 'orphan';
++}
++```
++
++- [ ] **Step 3: Run linking tests**
++
++Run:
++
++```bash
++npm test -- tests/unit/inputs/cursor-trace-assembler.test.ts
++```
++
++Expected: all subagent linking tests pass.
++
++---
++
++## Task 4: Build Parent ReAct Steps
++
++**Files:**
++- Modify: `src/inputs/cursor-hook/cursor-trace-assembler.ts`
++- Test: `tests/unit/inputs/cursor-trace-assembler.test.ts`
++
++- [ ] **Step 1: Write parent step tests**
++
++Use this synthetic chain:
++
++```text
++beforeSubmitPrompt
++afterAgentThought
++preToolUse(Subagent)
++subagentStart
++subagentStop
++afterAgentThought
++afterAgentResponse
++stop
++```
++
++Assert:
++
++```ts
++const llmResponses = entries.filter((e) => e['event.name'] === 'llm.response');
++expect(llmResponses[0]?.['gen_ai.output.messages']).toEqual([
++  {
++    role: 'assistant',
++    parts: [
++      { type: 'reasoning', content: 'parent thought' },
++      {
++        type: 'tool_call',
++        id: 'call_parent',
++        name: 'Subagent',
++        arguments: { description: 'Research' },
++      },
++    ],
++  },
++]);
++
++const parentStepIds = new Set(entries
++  .filter((e) => e['gen_ai.agent.depth'] !== 1)
++  .map((e) => e['gen_ai.step.id'])
++  .filter(Boolean));
++expect([...parentStepIds]).toEqual(['parent-gen:s1', 'parent-gen:s2']);
++```
++
++- [ ] **Step 2: Implement parent step assembler**
++
++Rules:
++
++```text
++beforeSubmitPrompt is user input only; do not emit a real step LLM.
++afterAgentThought starts a parent step if no current LLM anchor exists.
++afterAgentResponse starts final parent step if previous step ended in tool/subagent result.
++tools after a thought belong to current parent step.
++Subagent tool_call part is added to current LLM output.
++Subagent result from subagentStop goes to next LLM input as tool_call_response.
++stop closes turn and does not emit token fields if afterAgentResponse already has them.
++```
++
++Use deterministic ids:
++
++```text
++trace_id = sha256('cursor:' + parent_turn_id)[:32]
++parent step id = `${turnId}:s${round}`
++response id = `${turnId}:r${round}`
++```
++
++- [ ] **Step 3: Run parent step tests**
++
++Run:
++
++```bash
++npm test -- tests/unit/inputs/cursor-trace-assembler.test.ts
++```
++
++Expected: parent step tests pass.
++
++---
++
++## Task 5: Build Child Subagent Steps
++
++**Files:**
++- Modify: `src/inputs/cursor-hook/cursor-trace-assembler.ts`
++- Test: `tests/unit/inputs/cursor-trace-assembler.test.ts`
++
++- [ ] **Step 1: Write child step tests**
++
++Use child events that start with a tool before first thought:
++
++```text
++child preToolUse(WebSearch)
++child postToolUse(WebSearch)
++child afterAgentThought
++child preToolUse(Read)
++child postToolUse(Read)
++```
++
++Assert:
++
++```ts
++const childEntries = entries.filter((e) => e['gen_ai.agent.depth'] === 1);
++expect(childEntries.length).toBeGreaterThan(0);
++expect(new Set(childEntries.map((e) => e['gen_ai.turn.id']))).toEqual(new Set(['parent-gen']));
++expect(childEntries.every((e) => e['gen_ai.subagent.parent_tool_call.id'] === 'call_parent')).toBe(true);
++expect(childEntries.some((e) => e['event.name'] === 'llm.response')).toBe(true);
++expect(childEntries.some((e) => e['event.name'] === 'tool.call' && e['gen_ai.tool.name'] === 'WebSearch')).toBe(true);
++```
++
++- [ ] **Step 2: Implement child step assembler**
++
++Rules:
++
++```text
++Child conversation does not need beforeSubmitPrompt.
++If child starts with preToolUse before first afterAgentThought:
++  synthesize child STEP 1 LLM output containing tool_call parts.
++If child later has afterAgentThought:
++  create next child step, input contains previous child tool_result.
++Child tool spans stay under the nested Subagent run.
++All child entries keep parent trace_id and parent gen_ai.turn.id.
++Child entries carry:
++  gen_ai.agent.scope = 'subagent'
++  gen_ai.agent.depth = 1
++  gen_ai.agent.id = child conversation id
++  gen_ai.agent.parent.id = parent conversation id
++  gen_ai.subagent.parent_tool_call.id = parent Subagent tool id
++```
++
++Important: child entries should not create a second top-level `gen_ai.turn.id`.
++
++- [ ] **Step 3: Run child step tests**
++
++Run:
++
++```bash
++npm test -- tests/unit/inputs/cursor-trace-assembler.test.ts
++```
++
++Expected: child step tests pass.
++
++---
++
++## Task 6: Integrate Assembler into CursorHookInput
++
++**Files:**
++- Modify: `src/inputs/cursor-hook/cursor-hook-input.ts`
++- Test: `tests/unit/inputs/cursor-hook-input.test.ts`
++
++- [ ] **Step 1: Add raw input constructor option**
++
++Add:
++
++```ts
++interface CursorHookInputOptions extends Partial<HookInputOptions> {
++  stateStore: HookInputOptions['stateStore'];
++  rawLogDir?: string;
++}
++```
++
++Default:
++
++```ts
++rawLogDir: resolveHome('~/.loongsuite-pilot/logs/cursor/raw')
++```
++
++- [ ] **Step 2: Override `collect()`**
++
++Read raw first:
++
++```text
++if raw file exists:
++  read new bytes from cursor-raw-trace.jsonl using state.extra.cursorRawOffset
++  adapt new records
++  merge with pending state.extra.cursorPendingRawEvents
++  assemble complete parent turns
++  persist remaining incomplete events
++  emit fused canonical entries
++else:
++  call current BaseHookInput collect fallback
++```
++
++Keep `transformRecord()` intact for fallback and existing tests.
++
++- [ ] **Step 3: Add integration test**
++
++Create temp raw log:
++
++```ts
++const input = new CursorHookInput({
++  stateStore: stateStore as any,
++  logDir: historyDir,
++  rawLogDir,
++  logPrefix: 'cursor',
++  pollIntervalMs: 60_000,
++});
++```
++
++Assert:
++
++```ts
++expect(entries.some((e) => e['gen_ai.tool.name'] === 'Subagent')).toBe(true);
++expect(entries.every((e) => e['gen_ai.turn.id'] !== 'child-gen')).toBe(true);
++expect(entries.some((e) => e['gen_ai.agent.scope'] === 'subagent')).toBe(true);
++```
++
++- [ ] **Step 4: Run Cursor input tests**
++
++Run:
++
++```bash
++npm test -- tests/unit/inputs/cursor-hook-input.test.ts tests/unit/inputs/cursor-trace-assembler.test.ts
++```
++
++Expected: all Cursor input tests pass.
++
++---
++
++## Task 7: Redacted Real Fixture
++
++**Files:**
++- Create: `tests/fixtures/cursor-hook/raw-cursor-subagent-2026-06-04.redacted.jsonl`
++- Test: `tests/unit/inputs/cursor-trace-assembler.test.ts`
++
++- [ ] **Step 1: Create redacted fixture**
++
++Use the current raw shape with these transformations:
++
++```text
++prompt/text/tool_output -> short placeholder text
++user_email -> redacted@example.com
++workspace_roots -> /workspace
++absolute file content -> content_length only
++ids/order/timestamps/hook names/tool names/status/duration stay intact
++```
++
++The fixture must preserve:
++
++```text
++parent conv 0d58979b
++child conv 77130c94
++child conv 3fa41b26
++preToolUse(Subagent) count = 4
++postToolUse(Subagent) count = 0
++child conversations have no beforeSubmitPrompt
++```
++
++- [ ] **Step 2: Add fixture regression test**
++
++Assert:
++
++```ts
++const entries = assembleCursorTrace(loadFixture(...));
++expect(entries.filter((e) => e['gen_ai.tool.name'] === 'Subagent' && e['event.name'] === 'tool.call')).toHaveLength(4);
++expect(entries.filter((e) => e['gen_ai.tool.name'] === 'Subagent' && e['event.name'] === 'tool.result')).toHaveLength(4);
++expect(new Set(entries.map((e) => e['gen_ai.turn.id']))).toEqual(new Set(['ba77160c-4a83-4b8c-8747-8f081405b28c']));
++expect(entries.some((e) => e['gen_ai.agent.scope'] === 'subagent')).toBe(true);
++```
++
++- [ ] **Step 3: Run fixture regression**
++
++Run:
++
++```bash
++npm test -- tests/unit/inputs/cursor-trace-assembler.test.ts
++```
++
++Expected: redacted real-shape fixture passes.
++
++---
++
++## Task 8: Converter/Nested Trace Verification
++
++**Files:**
++- Modify if needed: `src/flushers/otlp-trace-flusher.ts`
++- Test: add or extend OTLP trace flusher tests under `tests/unit/flushers/` if a test file exists; otherwise create `tests/unit/flushers/otlp-trace-flusher-nested-agent.test.ts`.
++
++- [ ] **Step 1: Verify existing converter behavior**
++
++Build a small event log with:
++
++```text
++parent LLM response
++parent Subagent tool.call/tool.result
++child subagent LLM response
++child subagent tool.call/tool.result
++```
++
++Run it through `OtlpTraceFlusher` with debug output enabled.
++
++Expected tree:
++
++```text
++Agent
++  STEP parent
++    LLM
++    TOOL Subagent
++      Subagent
++        STEP child
++```
++
++- [ ] **Step 2: If converter flattens child spans, add preprocessing**
++
++Add a local preprocessing function before `convertEventLogToTrace()`:
++
++```ts
++function prepareNestedAgentRecords(records: AgentActivityEntry[]): AgentActivityEntry[] {
++  return records.map((record) => {
++    if (record['gen_ai.agent.scope'] !== 'subagent') return record;
++    return {
++      ...record,
++      'gen_ai.trace.parent_tool_call.id': record['gen_ai.subagent.parent_tool_call.id'],
++    };
++  });
++}
++```
++
++Then update the converter call:
++
++```ts
++const prepared = prepareNestedAgentRecords(records);
++const result = convertEventLogToTrace(prepared as unknown as EventLogRecord[], {
++  handler,
++  strict: false,
++});
++```
++
++If the external converter still cannot nest, keep the event log fields correct and document the limitation in `docs/EVENT_LOG_TO_TRACE_SPEC.md`. Do not fake parentage by changing `gen_ai.turn.id` into child turn ids.
++
++- [ ] **Step 3: Run OTLP tests**
++
++Run:
++
++```bash
++npm test -- tests/unit/flushers
++```
++
++Expected: existing flusher tests pass; nested-agent test either passes or asserts documented flattening with correct metadata.
++
++---
++
++## Task 9: Documentation and Rollout Guardrails
++
++**Files:**
++- Modify: `docs/EVENT_LOG_TO_TRACE_SPEC.md`
++- Modify: `docs/cursor-trace-fix-experience.md`
++- Modify if useful: `docs/modules/inputs.md`
++
++- [ ] **Step 1: Document source-level finding**
++
++Add:
++
++```text
++Cursor main turn sequence remains PROMPT -> LLM -> TOOL -> LLM.
++Mode B appears when child subagent conversations without beforeSubmitPrompt are treated as top-level turns.
++```
++
++- [ ] **Step 2: Document Subagent semantics**
++
++Add:
++
++```text
++Subagent is a parent tool call and a nested agent run.
++Parent Subagent tool.result may be synthesized from subagentStop because Cursor does not emit postToolUse(Subagent).
++Child conversations without beforeSubmitPrompt must not become top-level user turns.
++```
++
++- [ ] **Step 3: Document legacy compatibility**
++
++Add:
++
++```text
++Raw Cursor hook JSONL is preferred.
++Legacy history JSONL is still accepted through CursorSourceEvent adapter.
++Already-step-tagged records are passed through unless child-session leakage is detected.
++```
++
++---
++
++## Task 10: End-to-End Validation
++
++**Files:**
++- No code files unless failures expose bugs.
++
++- [ ] **Step 1: Unit verification**
++
++Run:
++
++```bash
++npm test -- tests/unit/inputs/cursor-trace-assembler.test.ts tests/unit/inputs/cursor-hook-input.test.ts
++```
++
++Expected: all pass.
++
++- [ ] **Step 2: Build verification**
++
++Run:
++
++```bash
++npm run build
++```
++
++Expected: build succeeds.
++
++- [ ] **Step 3: Local reinstall smoke**
++
++Run:
++
++```bash
++bash scripts/local-reinstall.sh
++```
++
++Expected: build succeeds, hook files installed, config restored.
++
++- [ ] **Step 4: Manual Cursor raw trace**
++
++Prompt:
++
++```text
++请完成三件事：
++1. 创建两个小文件并统计行数；
++2. 同时启动一个子 Agent 做一次联网调研；
++3. 最后把主任务和子 Agent 结论汇总成一个文件。
++```
++
++Expected raw:
++
++```text
++parent beforeSubmitPrompt exists
++parent afterAgentThought before parent tools
++parent preToolUse(Subagent) exists
++no postToolUse(Subagent)
++subagentStart/subagentStop exist
++at least one child conversation has no beforeSubmitPrompt
++```
++
++Expected output:
++
++```text
++only parent gen_ai.turn.id is exported as top-level turn
++Subagent appears as parent tool.call/tool.result
++child entries carry gen_ai.agent.scope=subagent
++child entries carry gen_ai.subagent.parent_tool_call.id
++no child generation id appears as top-level turn
++```
++
++---
++
++## Risks and Decisions
++
++| Risk | Decision |
++|---|---|
++| Child conversation lacks explicit parent id | Use confidence-aware inference; do not corrupt trace on ambiguity |
++| `subagentStop` does not enclose child events | Do not rely only on start/stop window; use pending-order fallback |
++| Existing processor is stateless | Keep it stateless; move fusion to Input |
++| Old probes only have history | Adapter accepts history records |
++| Converter may not render nested agent yet | Preserve correct metadata first; add converter support only after verification |
++| Duplicate raw/history output | Raw source takes priority; history is fallback |
++| Stop has different generation_id | Parent turn id comes from `beforeSubmitPrompt.generation_id`, not stop |
++| Tokens duplicated on stop | Keep current behavior: strip stop token fields, use `afterAgentResponse` |
++
++## Completion Criteria
++
++- Mode B child sessions no longer create top-level fake turns.
++- Parent turn renders as ReAct steps with `Subagent` as a tool.
++- Child conversations are nested under the matching Subagent call when confidence is explicit/time-window/pending-order.
++- Ambiguous child conversations are marked as orphan, not silently attached to the wrong parent.
++- Existing Cursor legacy history tests still pass.
++- Raw capture remains best-effort and never blocks Cursor.
+diff --git a/package-lock.json b/package-lock.json
+index dd47bfd..5e6df4e 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,16 +1,16 @@
+ {
+   "name": "loongsuite-pilot",
+-  "version": "1.1.3",
++  "version": "1.0.35",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "loongsuite-pilot",
+-      "version": "1.1.3",
++      "version": "1.0.35",
+       "hasInstallScript": true,
+       "dependencies": {
+         "@alicloud/log": "^1.2.6",
+-        "@loongsuite/otel-util-genai": "^0.1.0-beta.4",
++        "@loongsuite/otel-util-genai": "^0.1.0-beta.5",
+         "@opentelemetry/api": "^1.9.0",
+         "@opentelemetry/exporter-trace-otlp-proto": "^0.57.0",
+         "@opentelemetry/otlp-transformer": "^0.57.0",
+@@ -22,8 +22,7 @@
+         "pino-roll": "^3.1.0",
+         "sqlite3": "^5.1.7",
+         "uuid": "^9.0.0",
+-        "zod": "^3.22.0",
+-        "zstd-napi": "^0.0.12"
++        "zod": "^3.22.0"
+       },
+       "bin": {
+         "loongsuite-pilot": "dist/index.js"
+@@ -657,9 +656,9 @@
+       }
+     },
+     "node_modules/@loongsuite/otel-util-genai": {
+-      "version": "0.1.0-beta.4",
+-      "resolved": "https://registry.npmjs.org/@loongsuite/otel-util-genai/-/otel-util-genai-0.1.0-beta.4.tgz",
+-      "integrity": "sha512-PnIHRbl/EyI1unO2JoWjL2PY2ZGwXw7/XNOIkp6LytbC5+ro/GscS7t2pxAh3S7PF/iru+yLmTmcxp+B2RQd8w==",
++      "version": "0.1.0-beta.3",
++      "resolved": "https://registry.npmmirror.com/@loongsuite/otel-util-genai/-/otel-util-genai-0.1.0-beta.3.tgz",
++      "integrity": "sha512-SzjI28ohrz1vGiu5dIirKxPQEtAZ6iE9GDnZKFyfxY3YyewSEB2LGNGAqsgLY7J27s6uv4nB0JoeuYWnufo0UQ==",
+       "license": "Apache-2.0",
+       "dependencies": {
+         "@opentelemetry/semantic-conventions": "^1.40.0"
+@@ -5851,21 +5850,6 @@
+       "funding": {
+         "url": "https://github.com/sponsors/colinhacks"
+       }
+-    },
+-    "node_modules/zstd-napi": {
+-      "version": "0.0.12",
+-      "resolved": "https://registry.npmmirror.com/zstd-napi/-/zstd-napi-0.0.12.tgz",
+-      "integrity": "sha512-W4qfyNIJAfu8zB1w4TkjKBuXLRvkWa+owH4o32AEep1hRbAzS/bHNErC4fSKN7ls5s15b77bV0yRXbr9h12Wkg==",
+-      "hasInstallScript": true,
+-      "license": "Apache-2.0",
+-      "dependencies": {
+-        "@types/node": "*",
+-        "node-addon-api": "^7.0.0",
+-        "prebuild-install": "^7.1.1"
+-      },
+-      "engines": {
+-        "node": "^12.22.0 || ^14.17.0 || ^15.12.0 || >=16"
+-      }
+     }
+   }
+ }
+diff --git a/package.json b/package.json
+index b0d53e9..3fd20cf 100644
+--- a/package.json
++++ b/package.json
+@@ -30,7 +30,7 @@
+   },
+   "dependencies": {
+     "@alicloud/log": "^1.2.6",
+-    "@loongsuite/otel-util-genai": "^0.1.0-beta.4",
++    "@loongsuite/otel-util-genai": "^0.1.0-beta.5",
+     "@opentelemetry/api": "^1.9.0",
+     "@opentelemetry/exporter-trace-otlp-proto": "^0.57.0",
+     "@opentelemetry/otlp-transformer": "^0.57.0",
+diff --git a/src/flushers/otlp-trace-flusher.ts b/src/flushers/otlp-trace-flusher.ts
+index 4b42538..143d68f 100644
+--- a/src/flushers/otlp-trace-flusher.ts
++++ b/src/flushers/otlp-trace-flusher.ts
+@@ -97,6 +97,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
+   private flushedTurnKeys = new Set<string>();
+   private readonly convertLocks = new Map<string, Promise<void>>();
+ 
++  // 批量模式标记：为 true 时 send() 中 Signal A（finish_reason=stop）只标记
++  // completed 不立即 flush，由 sendBatch() 在所有 entries 处理完后统一 flush。
++  // 解决的问题：Cursor subagent 的子 records 排在父 stop 之后，如果 Signal A
++  // 即时 flush 会把 key 加入 flushedTurnKeys，导致后续同 key 的子 records 被丢弃。
++  private _deferSignalA = false;
++
+   constructor(cfg: OtlpTraceFlusherConfig) {
+     super();
+     if (!cfg.endpoint) {
+@@ -170,18 +176,31 @@ export class OtlpTraceFlusher extends BaseFlusher {
+     buf.records.push(entry);
+     buf.lastActivityMs = Date.now();
+ 
+-    // Signal A: finish_reason=stop or end_turn
++    // Signal A: 检测到 finish_reason=stop/end_turn，标记 turn 完成。
++    // 逐条模式下立即 flush；批量模式下（_deferSignalA=true）仅标记 completed，
++    // 由 sendBatch() 在所有 entries append 完后统一 flush。
+     const finishReasons = entry['gen_ai.response.finish_reasons'];
+     if (Array.isArray(finishReasons) && (finishReasons.includes('stop') || finishReasons.includes('end_turn'))) {
+       buf.completed = true;
+-      this.triggerFlush(buf);
++      if (!this._deferSignalA) {
++        this.triggerFlush(buf);
++      }
+     }
+   }
+ 
+   async sendBatch(entries: AgentActivityEntry[]): Promise<void> {
+-    for (const entry of entries) {
+-      await this.send(entry);
++    // 批量模式：先 append 全部 entries，再统一 flush 已完成的 buffer。
++    // 避免 Signal A 即时 flush 导致同 batch 内排在 stop 之后的子 records 被丢弃。
++    this._deferSignalA = true;
++    try {
++      for (const entry of entries) {
++        await this.send(entry);
++      }
++    } finally {
++      this._deferSignalA = false;
+     }
++    // 统一 flush 所有在批量处理期间被 Signal A 标记为 completed 的 buffer
++    await this.flushCompleted();
+   }
+ 
+   async flush(): Promise<void> {
+diff --git a/tests/unit/flushers/otlp-trace-flusher/subagent-output.test.ts b/tests/unit/flushers/otlp-trace-flusher/subagent-output.test.ts
+new file mode 100644
+index 0000000..f8a3c24
+--- /dev/null
++++ b/tests/unit/flushers/otlp-trace-flusher/subagent-output.test.ts
+@@ -0,0 +1,111 @@
++import { describe, expect, it } from 'vitest';
++import {
++  convertEventLogToTrace,
++  ExtendedTelemetryHandler,
++  type EventLogRecord,
++} from '@loongsuite/otel-util-genai';
++import {
++  BasicTracerProvider,
++  InMemorySpanExporter,
++  SimpleSpanProcessor,
++} from '@opentelemetry/sdk-trace-base';
++
++function ns(ms: number): string {
++  return `${ms}000000`;
++}
++
++function outputMessages(parts: Array<{ type: string; content?: string }>) {
++  return [{ role: 'assistant', parts, finish_reason: parts[0]?.type === 'text' ? 'stop' : 'tool_calls' }];
++}
++
++describe('OTLP trace subagent output aggregation', () => {
++  it('uses the parent final response for ENTRY and AGENT output when child records follow it', async () => {
++    process.env.OTEL_SEMCONV_STABILITY_OPT_IN ??= 'gen_ai_latest_experimental';
++    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT ??= 'SPAN_ONLY';
++
++    const exporter = new InMemorySpanExporter();
++    const provider = new BasicTracerProvider({
++      spanProcessors: [new SimpleSpanProcessor(exporter)],
++    });
++    const handler = new ExtendedTelemetryHandler({ tracerProvider: provider });
++
++    const base = {
++      trace_id: '1234567890abcdef1234567890abcdef',
++      'gen_ai.session.id': 'parent-conv',
++      'gen_ai.turn.id': 'turn-1',
++      'gen_ai.agent.type': 'cursor',
++      'user.id': 'user-1',
++    };
++    const records: EventLogRecord[] = [
++      {
++        ...base,
++        'event.name': 'llm.request',
++        time_unix_nano: ns(0),
++        'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'prompt' }] }],
++      },
++      {
++        ...base,
++        'event.name': 'tool.call',
++        time_unix_nano: ns(10),
++        'gen_ai.step.id': 'turn-1:s1',
++        'gen_ai.tool.name': 'Subagent',
++        'gen_ai.tool.call.id': 'call-subagent',
++      },
++      {
++        ...base,
++        'event.name': 'llm.request',
++        time_unix_nano: ns(20),
++        'gen_ai.step.id': 'turn-1:s2',
++        'gen_ai.input.messages': [{ role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-subagent', response: 'done' }] }],
++      },
++      {
++        ...base,
++        'event.name': 'llm.response',
++        time_unix_nano: ns(30),
++        'gen_ai.step.id': 'turn-1:s2',
++        'gen_ai.response.finish_reasons': ['stop'],
++        'gen_ai.output.messages': outputMessages([{ type: 'text', content: 'parent final answer' }]),
++      },
++      {
++        ...base,
++        'event.name': 'llm.request',
++        time_unix_nano: ns(40),
++        'gen_ai.step.id': 'turn-1:sub:child:s1',
++        'gen_ai.agent.scope': 'subagent',
++        'gen_ai.agent.id': 'child-conv',
++        'gen_ai.subagent.parent_tool_call.id': 'call-subagent',
++      },
++      {
++        ...base,
++        'event.name': 'llm.response',
++        time_unix_nano: ns(50),
++        'gen_ai.step.id': 'turn-1:sub:child:s1',
++        'gen_ai.agent.scope': 'subagent',
++        'gen_ai.agent.id': 'child-conv',
++        'gen_ai.subagent.parent_tool_call.id': 'call-subagent',
++        'gen_ai.response.finish_reasons': ['stop'],
++        'gen_ai.output.messages': outputMessages([{ type: 'reasoning', content: 'child reasoning should not become parent overview' }]),
++      },
++    ] as EventLogRecord[];
++
++    convertEventLogToTrace(records, { handler, strict: false });
++    await provider.forceFlush();
++
++    const spans = exporter.getFinishedSpans();
++    const overviewSpans = spans.filter(span => {
++      const kind = span.attributes['gen_ai.span.kind'];
++      return kind === 'ENTRY' || kind === 'AGENT';
++    });
++
++    expect(overviewSpans.length).toBeGreaterThanOrEqual(2);
++    const parentOverviewSpans = overviewSpans.filter(span =>
++      span.name === 'invoke_agent cursor' ||
++      span.name === 'enter_ai_application_system'
++    );
++    expect(parentOverviewSpans.length).toBe(2);
++    for (const span of parentOverviewSpans) {
++      const output = JSON.parse(String(span.attributes['gen_ai.output.messages']));
++      expect(output[0].parts).toEqual([{ type: 'text', content: 'parent final answer' }]);
++    }
++  });
++});
+diff --git a/tests/unit/flushers/otlp-trace-flusher/turn-boundary.test.ts b/tests/unit/flushers/otlp-trace-flusher/turn-boundary.test.ts
+index 0f93efb..9e58422 100644
+--- a/tests/unit/flushers/otlp-trace-flusher/turn-boundary.test.ts
++++ b/tests/unit/flushers/otlp-trace-flusher/turn-boundary.test.ts
+@@ -125,6 +125,169 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
+     }
+   });
+ 
++  describe('sendBatch — regression vs master sequential send()', () => {
++    it('Codex-like step: tool_call response then tools in same batch does not early-flush', async () => {
++      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
++      const mockConvert = vi.mocked(convertEventLogToTrace);
++      mockConvert.mockClear();
++
++      const turnId = 'session-1:t1';
++      const base = {
++        'gen_ai.turn.id': turnId,
++        'gen_ai.agent.type': 'codex',
++        'trace_id': '4bf92f3577b34da6a3ce929d0e0e4736',
++      };
++
++      // Per-step order from codex-hook-processor: llm.response(tool_call) → tool.call → tool.result
++      await flusher.sendBatch([
++        makeEntry({ ...base, 'event.name': 'llm.request', 'gen_ai.step.id': `${turnId}:s1` }),
++        makeEntry({
++          ...base,
++          'event.name': 'llm.response',
++          'gen_ai.step.id': `${turnId}:s1`,
++          'gen_ai.response.finish_reasons': ['tool_call'],
++        }),
++        makeEntry({ ...base, 'event.name': 'tool.call', 'gen_ai.step.id': `${turnId}:s1` }),
++        makeEntry({ ...base, 'event.name': 'tool.result', 'gen_ai.step.id': `${turnId}:s1` }),
++        makeEntry({
++          ...base,
++          'event.name': 'llm.response',
++          'gen_ai.step.id': `${turnId}:s2`,
++          'gen_ai.response.finish_reasons': ['stop'],
++        }),
++      ]);
++
++      expect(mockConvert).toHaveBeenCalledTimes(1);
++      expect(mockConvert.mock.calls[0][0]).toHaveLength(5);
++    });
++
++    it('Claude-like batch: tools sorted before stop are all included in one flush', async () => {
++      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
++      const mockConvert = vi.mocked(convertEventLogToTrace);
++      mockConvert.mockClear();
++
++      const turnId = 'session-1:t1';
++      const base = {
++        'gen_ai.turn.id': turnId,
++        'gen_ai.agent.type': 'claude-code',
++        'trace_id': '4bf92f3577b34da6a3ce929d0e0e4736',
++      };
++
++      // claude-code-hook-processor sorts by time_unix_nano so tools precede stop
++      await flusher.sendBatch([
++        makeEntry({ ...base, 'event.name': 'llm.request' }),
++        makeEntry({ ...base, 'event.name': 'tool.call' }),
++        makeEntry({ ...base, 'event.name': 'tool.result' }),
++        makeEntry({
++          ...base,
++          'event.name': 'llm.response',
++          'gen_ai.response.finish_reasons': ['stop'],
++        }),
++      ]);
++
++      expect(mockConvert).toHaveBeenCalledTimes(1);
++      expect(mockConvert.mock.calls[0][0]).toHaveLength(4);
++    });
++
++    it('Cursor-like batch: records after stop in same batch are kept (differs from master send loop)', async () => {
++      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
++      const mockConvert = vi.mocked(convertEventLogToTrace);
++      mockConvert.mockClear();
++
++      const turnId = 'gen-abc';
++      const base = {
++        'gen_ai.turn.id': turnId,
++        'gen_ai.agent.type': 'cursor',
++        'trace_id': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
++      };
++
++      await flusher.sendBatch([
++        makeEntry({ ...base, 'event.name': 'llm.request' }),
++        makeEntry({
++          ...base,
++          'event.name': 'llm.response',
++          'gen_ai.response.finish_reasons': ['stop'],
++        }),
++        makeEntry({
++          ...base,
++          'event.name': 'llm.request',
++          'gen_ai.agent.scope': 'subagent',
++          'gen_ai.subagent.parent_tool_call.id': 'call-sub',
++        }),
++        makeEntry({
++          ...base,
++          'event.name': 'llm.response',
++          'gen_ai.agent.scope': 'subagent',
++          'gen_ai.subagent.parent_tool_call.id': 'call-sub',
++          'gen_ai.response.finish_reasons': ['stop'],
++        }),
++      ]);
++
++      expect(mockConvert).toHaveBeenCalledTimes(1);
++      expect(mockConvert.mock.calls[0][0]).toHaveLength(4);
++    });
++
++    it('multi-turn batch: each completed turn flushes once at batch end', async () => {
++      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
++      const mockConvert = vi.mocked(convertEventLogToTrace);
++      mockConvert.mockClear();
++
++      await flusher.sendBatch([
++        makeEntry({
++          'gen_ai.turn.id': 'session:t1',
++          'gen_ai.agent.type': 'codex',
++          'event.name': 'llm.response',
++          'gen_ai.response.finish_reasons': ['stop'],
++        }),
++        makeEntry({
++          'gen_ai.turn.id': 'session:t2',
++          'gen_ai.agent.type': 'codex',
++          'event.name': 'llm.request',
++        }),
++        makeEntry({
++          'gen_ai.turn.id': 'session:t2',
++          'gen_ai.agent.type': 'codex',
++          'event.name': 'llm.response',
++          'gen_ai.response.finish_reasons': ['stop'],
++        }),
++      ]);
++      // sendBatch defers triggerFlush; wait for in-flight exports before asserting
++      await flusher.flush();
++
++      expect(mockConvert).toHaveBeenCalledTimes(2);
++      expect(mockConvert.mock.calls[0][0]).toHaveLength(1);
++      expect(mockConvert.mock.calls[1][0]).toHaveLength(2);
++    });
++
++    it('cross-batch late entries after stop are still dropped (dual-root guard unchanged)', async () => {
++      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
++      const mockConvert = vi.mocked(convertEventLogToTrace);
++      mockConvert.mockClear();
++
++      const turnId = 'session-1:t1';
++      const base = {
++        'gen_ai.turn.id': turnId,
++        'gen_ai.agent.type': 'claude-code',
++      };
++
++      await flusher.sendBatch([
++        makeEntry({ ...base, 'event.name': 'llm.request' }),
++        makeEntry({
++          ...base,
++          'event.name': 'llm.response',
++          'gen_ai.response.finish_reasons': ['stop'],
++        }),
++      ]);
++      expect(mockConvert).toHaveBeenCalledTimes(1);
++
++      await flusher.sendBatch([
++        makeEntry({ ...base, 'event.name': 'tool.call' }),
++      ]);
++
++      expect(mockConvert).toHaveBeenCalledTimes(1);
++    });
++  });
++
+   it('drops late entries for already-flushed turns (prevents dual-root)', async () => {
+     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+     const mockConvert = vi.mocked(convertEventLogToTrace);
+diff --git a/tests/unit/hooks/cursor-event-journal.test.mjs b/tests/unit/hooks/cursor-event-journal.test.mjs
+new file mode 100644
+index 0000000..bf6196e
+--- /dev/null
++++ b/tests/unit/hooks/cursor-event-journal.test.mjs
+@@ -0,0 +1,57 @@
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
++
++let dataDir;
++let previousDataDir;
++let journal;
++
++async function importFreshJournal() {
++  vi.resetModules();
++  return import('../../../assets/hooks/cursor/event-journal.mjs');
++}
++
++describe('Cursor event journal', () => {
++  beforeEach(async () => {
++    previousDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR;
++    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-event-journal-'));
++    process.env.LOONGSUITE_PILOT_DATA_DIR = dataDir;
++    journal = await importFreshJournal();
++  });
++
++  afterEach(() => {
++    if (previousDataDir === undefined) {
++      delete process.env.LOONGSUITE_PILOT_DATA_DIR;
++    } else {
++      process.env.LOONGSUITE_PILOT_DATA_DIR = previousDataDir;
++    }
++    fs.rmSync(dataDir, { recursive: true, force: true });
++  });
++
++  test('rewrite preserves events appended after the read snapshot', () => {
++    const completedTurnEvent = {
++      _journal_ts: '2026-06-11T10:00:00.000Z',
++      hook_event: 'beforeSubmitPrompt',
++      conversation_id: 'completed-conv',
++      generation_id: 'completed-turn',
++      prompt: 'done',
++    };
++    const concurrentAppendEvent = {
++      _journal_ts: '2026-06-11T10:00:01.000Z',
++      hook_event: 'preToolUse',
++      conversation_id: 'next-conv',
++      generation_id: 'next-turn',
++      tool_name: 'Read',
++      tool_use_id: 'call-next-read',
++    };
++
++    journal.appendEvent(completedTurnEvent);
++    const snapshot = journal.readAllEvents();
++
++    journal.appendEvent(concurrentAppendEvent);
++    journal.rewriteJournal([], snapshot);
++
++    expect(journal.readAllEvents()).toEqual([concurrentAppendEvent]);
++  });
++});
+diff --git a/tests/unit/hooks/cursor-react-assembler.test.ts b/tests/unit/hooks/cursor-react-assembler.test.ts
+new file mode 100644
+index 0000000..c4f49c2
+--- /dev/null
++++ b/tests/unit/hooks/cursor-react-assembler.test.ts
+@@ -0,0 +1,473 @@
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import { describe, expect, it } from 'vitest';
++import { assembleTurn } from '../../../assets/hooks/cursor/react-assembler.mjs';
++
++function iso(ms: number): string {
++  return new Date(Date.UTC(2026, 5, 8, 10, 0, 0, ms)).toISOString();
++}
++
++function ns(ms: number): string {
++  return `${Date.UTC(2026, 5, 8, 10, 0, 0, ms)}000000`;
++}
++
++describe('Cursor react assembler', () => {
++  it('derives LLM and tool span timing from hook captured time and duration', () => {
++    const { records } = assembleTurn([
++      {
++        _journal_ts: iso(0),
++        hook_event: 'beforeSubmitPrompt',
++        conversation_id: 'conv-1',
++        generation_id: 'turn-1',
++        model: 'gpt-5.4',
++        prompt: 'inspect the workspace',
++      },
++      {
++        _journal_ts: iso(500),
++        hook_event: 'afterAgentThought',
++        conversation_id: 'conv-1',
++        generation_id: 'turn-1',
++        model: 'gpt-5.4',
++        text: 'I need to inspect a couple of files.',
++        duration_ms: 300,
++      },
++      {
++        _journal_ts: iso(600),
++        hook_event: 'preToolUse',
++        conversation_id: 'conv-1',
++        generation_id: 'turn-1',
++        tool_name: 'Read',
++        tool_use_id: 'call-read',
++        tool_input: { path: 'a.ts' },
++      },
++      {
++        _journal_ts: iso(700),
++        hook_event: 'preToolUse',
++        conversation_id: 'conv-1',
++        generation_id: 'turn-1',
++        tool_name: 'Grep',
++        tool_use_id: 'call-grep',
++        tool_input: { pattern: 'foo' },
++      },
++      {
++        _journal_ts: iso(900),
++        hook_event: 'postToolUse',
++        conversation_id: 'conv-1',
++        generation_id: 'turn-1',
++        tool_name: 'Read',
++        tool_use_id: 'call-read',
++        tool_output: 'read result',
++        duration_ms: 250,
++      },
++      {
++        _journal_ts: iso(1000),
++        hook_event: 'postToolUse',
++        conversation_id: 'conv-1',
++        generation_id: 'turn-1',
++        tool_name: 'Grep',
++        tool_use_id: 'call-grep',
++        tool_output: 'grep result',
++        duration_ms: 200,
++      },
++      {
++        _journal_ts: iso(1300),
++        hook_event: 'afterAgentThought',
++        conversation_id: 'conv-1',
++        generation_id: 'turn-1',
++        model: 'gpt-5.4',
++        text: 'Now I have enough context.',
++        duration_ms: 150,
++      },
++      {
++        _journal_ts: iso(1500),
++        hook_event: 'afterAgentResponse',
++        conversation_id: 'conv-1',
++        generation_id: 'turn-1',
++        model: 'gpt-5.4',
++        text: 'done',
++        input_tokens: 10,
++        output_tokens: 2,
++      },
++      {
++        _journal_ts: iso(1600),
++        hook_event: 'stop',
++        conversation_id: 'conv-1',
++        generation_id: 'turn-1',
++        status: 'completed',
++      },
++    ], { stopConversationId: 'conv-1' });
++
++    const firstStepRequest = records.find(record =>
++      record['event.name'] === 'llm.request' &&
++      record['gen_ai.step.id'] === 'turn-1:s1'
++    );
++    const firstStepResponse = records.find(record =>
++      record['event.name'] === 'llm.response' &&
++      record['gen_ai.step.id'] === 'turn-1:s1'
++    );
++    const readCall = records.find(record =>
++      record['event.name'] === 'tool.call' &&
++      record['gen_ai.tool.call.id'] === 'call-read'
++    );
++    const readResult = records.find(record =>
++      record['event.name'] === 'tool.result' &&
++      record['gen_ai.tool.call.id'] === 'call-read'
++    );
++    const grepCall = records.find(record =>
++      record['event.name'] === 'tool.call' &&
++      record['gen_ai.tool.call.id'] === 'call-grep'
++    );
++    const grepResult = records.find(record =>
++      record['event.name'] === 'tool.result' &&
++      record['gen_ai.tool.call.id'] === 'call-grep'
++    );
++
++    expect(firstStepRequest).toMatchObject({
++      time_unix_nano: ns(200),
++      observed_time_unix_nano: ns(200),
++      'agent.cursor.llm_request_time_source': 'thought_duration',
++    });
++    expect(firstStepResponse).toMatchObject({
++      time_unix_nano: ns(600),
++      observed_time_unix_nano: ns(500),
++      'agent.cursor.llm_response_time_source': 'after_agent_thought',
++      'agent.cursor.reasoning_observed_at': iso(500),
++      'agent.cursor.first_tool_call_observed_at': iso(600),
++      'agent.cursor.last_tool_call_observed_at': iso(700),
++      'agent.cursor.thought_to_first_tool_ms': 100,
++      'agent.cursor.tool_call_emission_ms': 200,
++      'agent.cursor.tool_call_count': 2,
++    });
++    expect(readCall).toMatchObject({
++      time_unix_nano: ns(600),
++      observed_time_unix_nano: ns(600),
++      'gen_ai.tool.call.duration': 250,
++    });
++    expect(readResult).toMatchObject({
++      time_unix_nano: ns(900),
++      observed_time_unix_nano: ns(900),
++    });
++    expect(grepCall).toMatchObject({
++      time_unix_nano: ns(700),
++      observed_time_unix_nano: ns(700),
++      'gen_ai.tool.call.duration': 200,
++    });
++    expect(grepResult).toMatchObject({
++      time_unix_nano: ns(1000),
++      observed_time_unix_nano: ns(1000),
++    });
++  });
++
++  it('guards LLM spans by moving start before the earliest buffered tool call', () => {
++    const { records } = assembleTurn([
++      {
++        _journal_ts: iso(0),
++        hook_event: 'beforeSubmitPrompt',
++        conversation_id: 'conv-buffered',
++        generation_id: 'turn-buffered',
++        model: 'gpt-5.4',
++        prompt: 'inspect with a delayed thought',
++      },
++      {
++        _journal_ts: iso(100),
++        hook_event: 'preToolUse',
++        conversation_id: 'conv-buffered',
++        generation_id: 'turn-buffered',
++        tool_name: 'Read',
++        tool_use_id: 'call-buffered-read',
++        tool_input: { path: 'a.ts' },
++      },
++      {
++        _journal_ts: iso(200),
++        hook_event: 'postToolUse',
++        conversation_id: 'conv-buffered',
++        generation_id: 'turn-buffered',
++        tool_name: 'Read',
++        tool_use_id: 'call-buffered-read',
++        tool_output: 'read result',
++        duration_ms: 50,
++      },
++      {
++        _journal_ts: iso(500),
++        hook_event: 'afterAgentThought',
++        conversation_id: 'conv-buffered',
++        generation_id: 'turn-buffered',
++        model: 'gpt-5.4',
++        text: 'The tool call was decided before the reasoning text arrived.',
++        duration_ms: 100,
++      },
++      {
++        _journal_ts: iso(600),
++        hook_event: 'stop',
++        conversation_id: 'conv-buffered',
++        generation_id: 'turn-buffered',
++        status: 'completed',
++      },
++    ], { stopConversationId: 'conv-buffered' });
++
++    const firstStepRequest = records.find(record =>
++      record['event.name'] === 'llm.request' &&
++      record['gen_ai.step.id'] === 'turn-buffered:s1'
++    );
++    const firstStepResponse = records.find(record =>
++      record['event.name'] === 'llm.response' &&
++      record['gen_ai.step.id'] === 'turn-buffered:s1'
++    );
++
++    expect(firstStepRequest).toMatchObject({
++      time_unix_nano: ns(99),
++      observed_time_unix_nano: ns(99),
++      'agent.cursor.llm_request_time_source': 'thought_duration',
++      'agent.cursor.llm_request_time_guard': 'earliest_tool_call_start_minus_1ms',
++    });
++    expect(firstStepResponse).toMatchObject({
++      time_unix_nano: ns(500),
++      observed_time_unix_nano: ns(500),
++    });
++  });
++
++  it('marks the final tool step response as stop when the turn ends without another LLM step', () => {
++    const { records } = assembleTurn([
++      {
++        _journal_ts: iso(0),
++        hook_event: 'beforeSubmitPrompt',
++        conversation_id: 'conv-final-tool',
++        generation_id: 'turn-final-tool',
++        model: 'gpt-5.4',
++        prompt: 'inspect and finish',
++      },
++      {
++        _journal_ts: iso(100),
++        hook_event: 'afterAgentThought',
++        conversation_id: 'conv-final-tool',
++        generation_id: 'turn-final-tool',
++        model: 'gpt-5.4',
++        text: 'I need one tool call.',
++        duration_ms: 80,
++      },
++      {
++        _journal_ts: iso(200),
++        hook_event: 'preToolUse',
++        conversation_id: 'conv-final-tool',
++        generation_id: 'turn-final-tool',
++        tool_name: 'Read',
++        tool_use_id: 'call-final-read',
++        tool_input: { path: 'a.ts' },
++      },
++      {
++        _journal_ts: iso(400),
++        hook_event: 'postToolUse',
++        conversation_id: 'conv-final-tool',
++        generation_id: 'turn-final-tool',
++        tool_name: 'Read',
++        tool_use_id: 'call-final-read',
++        tool_output: 'read result',
++        duration_ms: 200,
++      },
++      {
++        _journal_ts: iso(500),
++        hook_event: 'stop',
++        conversation_id: 'conv-final-tool',
++        generation_id: 'turn-final-tool',
++        status: 'completed',
++      },
++    ], { stopConversationId: 'conv-final-tool' });
++
++    const finalResponse = records.find(record =>
++      record['event.name'] === 'llm.response' &&
++      record['gen_ai.step.id'] === 'turn-final-tool:s1'
++    );
++
++    expect(finalResponse?.['gen_ai.response.finish_reasons']).toEqual(['stop']);
++    expect(finalResponse?.['gen_ai.output.messages']?.[0]?.finish_reason).toBe('stop');
++  });
++
++  it('prefers synthesized Subagent result over duplicate Cursor postToolUse result', () => {
++    const transcriptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-subagent-transcript-'));
++    try {
++      const parentTranscriptPath = path.join(transcriptDir, 'parent.jsonl');
++      const subagentDir = path.join(transcriptDir, 'subagents');
++      const childConvId = 'child-conv';
++      fs.mkdirSync(subagentDir, { recursive: true });
++      fs.writeFileSync(path.join(subagentDir, `${childConvId}.jsonl`), '', 'utf-8');
++
++      const { records } = assembleTurn([
++        {
++          _journal_ts: iso(0),
++          hook_event: 'beforeSubmitPrompt',
++          conversation_id: 'parent-conv',
++          generation_id: 'turn-subagent',
++          model: 'gpt-5.4',
++          prompt: 'delegate this',
++        },
++        {
++          _journal_ts: iso(100),
++          hook_event: 'afterAgentThought',
++          conversation_id: 'parent-conv',
++          generation_id: 'turn-subagent',
++          model: 'gpt-5.4',
++          text: 'I will delegate this to a subagent.',
++          duration_ms: 80,
++        },
++        {
++          _journal_ts: iso(200),
++          hook_event: 'preToolUse',
++          conversation_id: 'parent-conv',
++          generation_id: 'turn-subagent',
++          tool_name: 'Subagent',
++          tool_use_id: 'call-subagent',
++          tool_input: { prompt: 'inspect details' },
++        },
++        {
++          _journal_ts: iso(300),
++          hook_event: 'afterAgentThought',
++          conversation_id: childConvId,
++          generation_id: 'child-turn',
++          model: 'gpt-5.4',
++          text: 'Child is inspecting.',
++          duration_ms: 50,
++        },
++        {
++          _journal_ts: iso(500),
++          hook_event: 'afterAgentResponse',
++          conversation_id: childConvId,
++          generation_id: 'child-turn',
++          model: 'gpt-5.4',
++          text: 'child final result',
++        },
++        {
++          _journal_ts: iso(650),
++          hook_event: 'postToolUse',
++          conversation_id: 'parent-conv',
++          generation_id: 'turn-subagent',
++          tool_name: 'Subagent',
++          tool_use_id: 'call-subagent',
++          tool_output: 'cursor postToolUse result',
++          duration_ms: 450,
++        },
++        {
++          _journal_ts: iso(900),
++          hook_event: 'afterAgentThought',
++          conversation_id: 'parent-conv',
++          generation_id: 'turn-subagent',
++          model: 'gpt-5.4',
++          text: 'Now I can summarize.',
++          duration_ms: 120,
++        },
++        {
++          _journal_ts: iso(1000),
++          hook_event: 'stop',
++          conversation_id: 'parent-conv',
++          generation_id: 'turn-subagent',
++          transcript_path: parentTranscriptPath,
++          status: 'completed',
++        },
++      ], { stopConversationId: 'parent-conv', transcriptPath: parentTranscriptPath });
++
++      const parentSubagentResults = records.filter(record =>
++        record['event.name'] === 'tool.result' &&
++        record['gen_ai.tool.call.id'] === 'call-subagent' &&
++        record['gen_ai.agent.scope'] !== 'subagent'
++      );
++      const secondStepRequest = records.find(record =>
++        record['event.name'] === 'llm.request' &&
++        record['gen_ai.step.id'] === 'turn-subagent:s2'
++      );
++      const secondStepToolResponses = secondStepRequest?.['gen_ai.input.messages']?.[0]?.parts ?? [];
++
++      expect(parentSubagentResults).toHaveLength(1);
++      expect(parentSubagentResults[0]).toMatchObject({
++        'agent.cursor.hook_event_name': 'subagent_result_synthesized',
++        'gen_ai.tool.call.result': { summary: 'child final result' },
++      });
++      expect(secondStepToolResponses).toHaveLength(1);
++      expect(secondStepToolResponses[0]).toMatchObject({
++        type: 'tool_call_response',
++        id: 'call-subagent',
++        response: 'child final result',
++      });
++    } finally {
++      fs.rmSync(transcriptDir, { recursive: true, force: true });
++    }
++  });
++
++  it('uses Cursor postToolUse as Subagent result fallback when no child result exists', () => {
++    const { records } = assembleTurn([
++      {
++        _journal_ts: iso(0),
++        hook_event: 'beforeSubmitPrompt',
++        conversation_id: 'parent-fallback',
++        generation_id: 'turn-subagent-fallback',
++        model: 'gpt-5.4',
++        prompt: 'delegate without child transcript',
++      },
++      {
++        _journal_ts: iso(100),
++        hook_event: 'afterAgentThought',
++        conversation_id: 'parent-fallback',
++        generation_id: 'turn-subagent-fallback',
++        model: 'gpt-5.4',
++        text: 'I will delegate this.',
++        duration_ms: 80,
++      },
++      {
++        _journal_ts: iso(200),
++        hook_event: 'preToolUse',
++        conversation_id: 'parent-fallback',
++        generation_id: 'turn-subagent-fallback',
++        tool_name: 'Subagent',
++        tool_use_id: 'call-subagent-fallback',
++        tool_input: { prompt: 'inspect details' },
++      },
++      {
++        _journal_ts: iso(500),
++        hook_event: 'postToolUse',
++        conversation_id: 'parent-fallback',
++        generation_id: 'turn-subagent-fallback',
++        tool_name: 'Subagent',
++        tool_use_id: 'call-subagent-fallback',
++        tool_output: 'cursor fallback result',
++        duration_ms: 300,
++      },
++      {
++        _journal_ts: iso(900),
++        hook_event: 'afterAgentThought',
++        conversation_id: 'parent-fallback',
++        generation_id: 'turn-subagent-fallback',
++        model: 'gpt-5.4',
++        text: 'Now summarize.',
++        duration_ms: 120,
++      },
++      {
++        _journal_ts: iso(1000),
++        hook_event: 'stop',
++        conversation_id: 'parent-fallback',
++        generation_id: 'turn-subagent-fallback',
++        status: 'completed',
++      },
++    ], { stopConversationId: 'parent-fallback' });
++
++    const parentSubagentResults = records.filter(record =>
++      record['event.name'] === 'tool.result' &&
++      record['gen_ai.tool.call.id'] === 'call-subagent-fallback'
++    );
++    const secondStepRequest = records.find(record =>
++      record['event.name'] === 'llm.request' &&
++      record['gen_ai.step.id'] === 'turn-subagent-fallback:s2'
++    );
++    const secondStepToolResponses = secondStepRequest?.['gen_ai.input.messages']?.[0]?.parts ?? [];
++
++    expect(parentSubagentResults).toHaveLength(1);
++    expect(parentSubagentResults[0]).toMatchObject({
++      'agent.cursor.hook_event_name': 'postToolUse',
++      'gen_ai.tool.call.result': 'cursor fallback result',
++    });
++    expect(secondStepToolResponses).toHaveLength(1);
++    expect(secondStepToolResponses[0]).toMatchObject({
++      type: 'tool_call_response',
++      id: 'call-subagent-fallback',
++      response: 'cursor fallback result',
++    });
++  });
++});
+diff --git a/tests/unit/hooks/cursor-source-event.test.mjs b/tests/unit/hooks/cursor-source-event.test.mjs
+new file mode 100644
+index 0000000..21a8573
+--- /dev/null
++++ b/tests/unit/hooks/cursor-source-event.test.mjs
+@@ -0,0 +1,30 @@
++import { describe, expect, it } from 'vitest';
++import { toInternalEvent } from '../../../assets/hooks/cursor/source-event.mjs';
++
++describe('Cursor source event', () => {
++  it('preserves zero duration_ms on postToolUse instead of falling back to duration', () => {
++    const event = toInternalEvent({
++      hook_event_name: 'postToolUse',
++      conversation_id: 'conv-1',
++      tool_name: 'Read',
++      tool_use_id: 'call-1',
++      duration_ms: 0,
++      duration: 123,
++    });
++
++    expect(event.duration_ms).toBe(0);
++  });
++
++  it('preserves zero duration_ms on postToolUseFailure instead of falling back to duration', () => {
++    const event = toInternalEvent({
++      hook_event_name: 'postToolUseFailure',
++      conversation_id: 'conv-1',
++      tool_name: 'Read',
++      tool_use_id: 'call-1',
++      duration_ms: 0,
++      duration: 123,
++    });
++
++    expect(event.duration_ms).toBe(0);
++  });
++});
