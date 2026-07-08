@@ -73,12 +73,34 @@ function extractToolResultMap(toolResultsLine) {
       if (c?.kind === 'text' && typeof c.data === 'string') {
         texts.push(c.data);
       } else if (c?.kind === 'json' && c.data) {
-        texts.push(typeof c.data === 'string' ? c.data : JSON.stringify(c.data));
+        // MCP 工具（@filesystem 等）返回 json，data = {content:[{type:"text",text:"..."}], structuredContent:{...}}
+        // 旧逻辑 JSON.stringify 整个对象 → input.messages 里是 {"content":[...]} 串。
+        // 提取干净文本：content[].text → structuredContent.content → 兜底 stringify。
+        texts.push(extractMcpJsonText(c.data));
       }
     }
     map.set(toolUseId, texts.join('\n'));
   }
   return map;
+}
+
+/**
+ * 从 MCP 工具的 json 响应对象提取可读文本。
+ * 结构：{content:[{type:"text",text:"..."}], structuredContent:{content:"..."}}
+ */
+function extractMcpJsonText(data) {
+  if (typeof data === 'string') return data;
+  if (!data || typeof data !== 'object') return '';
+  if (Array.isArray(data.content)) {
+    const texts = data.content
+      .filter((c) => c && typeof c === 'object' && typeof c.text === 'string')
+      .map((c) => c.text);
+    if (texts.length > 0) return texts.join('\n');
+  }
+  if (data.structuredContent && typeof data.structuredContent.content === 'string') {
+    return data.structuredContent.content;
+  }
+  try { return JSON.stringify(data); } catch { return ''; }
 }
 
 export function parseSessionLines(lines, sidecar) {

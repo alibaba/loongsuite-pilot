@@ -97,6 +97,68 @@ describe('parseSessionLines', () => {
     expect(result.steps[0].toolUseResults).toEqual([]);
   });
 
+  it('json kind 工具结果提取干净文本（MCP @filesystem），不再 JSON.stringify', () => {
+    // 构造一个 ToolResults 行，content 用 json kind（MCP 工具返回）
+    const jsonLines = [
+      ...lines,
+      {
+        kind: 'Prompt',
+        data: {
+          message_id: 'p-json',
+          content: [{ kind: 'text', data: 'list dir' }],
+          meta: { timestamp: 1782126960 },
+        },
+      },
+      {
+        kind: 'AssistantMessage',
+        data: {
+          message_id: 'am-json',
+          content: [{ kind: 'toolUse', data: { toolUseId: 'tu-json', name: 'list_directory', input: { path: '/tmp' } } }],
+        },
+      },
+      {
+        kind: 'ToolResults',
+        data: {
+          message_id: 'tr-json',
+          content: [{
+            kind: 'toolResult',
+            data: {
+              toolUseId: 'tu-json',
+              content: [{
+                kind: 'json',
+                // MCP 工具 json 响应：{content:[{type:text,text:...}], structuredContent:{...}}
+                data: { content: [{ type: 'text', text: 'Allowed directories:\n/Users/tmp' }], structuredContent: { content: 'Allowed directories' } },
+              }],
+              status: 'success',
+            },
+          }],
+        },
+      },
+      {
+        kind: 'AssistantMessage',
+        data: { message_id: 'am-json2', content: [{ kind: 'text', data: 'done' }] },
+      },
+    ];
+    const jsonSidecar = JSON.parse(JSON.stringify(sidecar));
+    jsonSidecar.session_state.conversation_metadata.user_turn_metadatas.push({
+      loop_id: { agent_id: { name: 'kiro_default' }, rand: 3 },
+      result: { Ok: { id: 'am-json2', role: 'assistant', content: [{ kind: 'text', data: 'done' }] } },
+      message_ids: ['p-json', 'am-json', 'tr-json', 'am-json2'],
+      total_request_count: 1,
+      turn_duration: { secs: 5, nanos: 0 },
+      end_timestamp: '2026-06-22T11:16:00.000000Z',
+      metering_usage: [{ value: 0.01, unit: 'credit', unitPlural: 'credits' }],
+      user_prompt_length: 8,
+    });
+    const result = parseSessionLines(jsonLines, jsonSidecar);
+    // 找 toolUseId=tu-json 对应的后续 step（它的 toolUseResults 应含干净文本）
+    const stepWithResult = result.steps.find((s) => s.toolUseResults && s.toolUseResults.length > 0 && s.toolUseResults.some((t) => t.includes('Allowed')));
+    expect(stepWithResult).toBeTruthy();
+    // 干净文本，不是 {"content":[...]} JSON 串
+    expect(stepWithResult.toolUseResults[0]).toContain('Allowed directories:\n/Users/tmp');
+    expect(stepWithResult.toolUseResults[0]).not.toContain('"content"');
+  });
+
   it('时间均分：startTimeMs < endTimeMs，step 间不重叠', () => {
     const result = parseSessionLines(lines, sidecar);
     const [s1, s2] = result.steps;
