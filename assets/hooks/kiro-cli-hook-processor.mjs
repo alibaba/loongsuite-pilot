@@ -295,8 +295,16 @@ async function cmdDelayedCollect() {
  * @returns {Promise<'ok'|'timing_pending'|'no_data'>}
  */
 async function runCollect(ctx) {
-  const { cwd, sinceMs, sessionSinceMs, assistantResponse, userId, allowFallback } = ctx;
+  const { cwd, assistantResponse, userId, allowFallback } = ctx;
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+
+  // Offset：处理时现取当前持久化值（参考 codex/claude-code 模式），与 pending 快照取 max。
+  // pending 快照在 stop 时刻写入，若那时 daemon 已挂、state 丢失，快照=0；处理时若 state
+  // 已恢复（current>0），用 current 避免 cold-start 回放。两者都 0 才真 cold-start → 走 stale 检查。
+  const currentSinceMs = loadOffset(cwd);
+  const currentSessionSinceMs = loadSessionOffset(cwd);
+  const sinceMs = Math.max(typeof ctx.sinceMs === 'number' ? ctx.sinceMs : 0, currentSinceMs || 0);
+  const sessionSinceMs = Math.max(typeof ctx.sessionSinceMs === 'number' ? ctx.sessionSinceMs : 0, currentSessionSinceMs || 0);
 
   const toolEvents = drainToolEvents(cwd);
   const preToolEvents = drainPreToolEvents(cwd);
@@ -321,6 +329,20 @@ async function runCollect(ctx) {
         break;
       }
       await new Promise((r) => setTimeout(r, 200 * (1 << attempt)));
+    }
+    // Cold-start stale-session skip（SQLite 路径，与 session_jsonl 路径对齐）：
+    // sinceMs===0（offset 快照在 stop 时已丢）且 SQLite 行 updated_at 距今 >5min
+    // → 这是重启前遗留的旧 session 回放，整个跳过。
+    if (transcript && transcript.steps.length > 0 && sinceMs === 0 &&
+        transcript.updatedMs > 0 &&
+        (Date.now() - transcript.updatedMs) > 5 * 60 * 1000) {
+      logHookError({
+        agentId: AGENT_ID,
+        stage: 'transcript_read',
+        errorType: 'cold_start_stale_session_skipped',
+        errorMessage: `cold start (sqlite): row updated ${Math.round((Date.now() - transcript.updatedMs) / 1000)}s ago — skipping stale replay`,
+      });
+      transcript = null;
     }
   }
 
