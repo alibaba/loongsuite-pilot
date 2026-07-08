@@ -356,7 +356,7 @@ describe('QoderTraceInput token-enricher', () => {
       expect(entries[1]['gen_ai.response.model']).toBe('gm51model');
     });
 
-    it('does not match if timestamp difference exceeds 1000ms', () => {
+    it('does not match if timestamp difference exceeds the fallback window (5000ms)', () => {
       const entries: AgentActivityEntry[] = [
         makeEntry({
           'event.name': 'llm.response',
@@ -366,7 +366,7 @@ describe('QoderTraceInput token-enricher', () => {
       ];
       const sqliteRows: SqliteTokenData[] = [{
         requestId: 'sqlite-req-far',
-        gmtCreate: 1780000002000,
+        gmtCreate: 1780000006000, // 6000ms away → beyond the widened 5000ms window
         inputTokens: 9999,
         outputTokens: 99,
         cacheReadTokens: 0,
@@ -376,6 +376,27 @@ describe('QoderTraceInput token-enricher', () => {
 
       // Unmatched entries get 0 (not undefined) for consistent AGENT aggregation
       expect(entries[0]['gen_ai.usage.input_tokens']).toBe(0);
+    });
+
+    it('matches within the widened window (2000ms, previously rejected)', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.agent.type': 'qoder',
+          time_unix_nano: '1780000000000000000',
+        }),
+      ];
+      const sqliteRows: SqliteTokenData[] = [{
+        requestId: 'sqlite-req-near',
+        gmtCreate: 1780000002000, // 2000ms away → now within the 5000ms fallback
+        inputTokens: 777,
+        outputTokens: 9,
+        cacheReadTokens: 0,
+      }];
+
+      enrichIdeTurn(entries, sqliteRows);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(777);
     });
 
     it('handles empty SQLite data gracefully', () => {
