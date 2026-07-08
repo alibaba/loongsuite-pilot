@@ -521,6 +521,8 @@ function setupSessionFixtures(dataDir) {
   const sidecar = JSON.parse(
     fs.readFileSync(path.join(__dirname, 'fixtures/session_sidecar.json'), 'utf-8'),
   );
+  // updated_at 设为 now（recent），避免冷启动 stale-session 跳过。
+  sidecar.updated_at = new Date().toISOString();
   const jsonlRaw = fs.readFileSync(
     path.join(__dirname, 'fixtures/session_interactive.jsonl'),
     'utf-8',
@@ -947,6 +949,9 @@ function setupMcpSessionFixtures(dataDir) {
   const sidecar = JSON.parse(
     fs.readFileSync(path.join(__dirname, 'fixtures/session_mcp_sidecar.json'), 'utf-8'),
   );
+  // updated_at 设为 now（recent），避免冷启动 stale-session 跳过；
+  // turn 内时间戳（TS_TURN_START 等）保持固定用于断言。
+  sidecar.updated_at = new Date().toISOString();
   const jsonlRaw = fs.readFileSync(
     path.join(__dirname, 'fixtures/session_mcp_interactive.jsonl'),
     'utf-8',
