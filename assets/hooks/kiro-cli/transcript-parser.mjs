@@ -160,6 +160,36 @@ function str(value, fallback = '') {
  *   entry.user.content.ToolUseResults.tool_use_results[].content[].Text
  * @returns {string[]} 每条 tool_use_result 的拼接文本；非 ToolUseResults 型返回 []。
  */
+/**
+ * 从单个 ToolUseResult content 项提取可读文本。
+ * kiro-cli 的工具结果 content 有两种类型：
+ *   - {Text: "string"}                 builtin/简单结果
+ *   - {Json: {content:[{type:"text",text:"..."}], structuredContent:{...}}}
+ *                                       MCP 工具（@filesystem/list_directory 等）
+ * 旧逻辑只取 Text，Json 被跳过 → toolUseResults 为空 → input.messages 丢失。
+ */
+function extractToolResultContentText(item) {
+  if (!item || typeof item !== 'object') return '';
+  if (typeof item.Text === 'string') return item.Text;
+  const j = item.Json;
+  if (j && typeof j === 'object') {
+    // 优先取 MCP text 块：Json.content[].text
+    if (Array.isArray(j.content)) {
+      const texts = j.content
+        .filter((c) => c && typeof c === 'object' && typeof c.text === 'string')
+        .map((c) => c.text);
+      if (texts.length > 0) return texts.join('\n');
+    }
+    // 其次 structuredContent.content（字符串）
+    if (j.structuredContent && typeof j.structuredContent.content === 'string') {
+      return j.structuredContent.content;
+    }
+    // 兜底：整体 stringify（避免下游 [object Object]）
+    try { return JSON.stringify(j); } catch { return ''; }
+  }
+  return '';
+}
+
 function extractToolUseResults(entry) {
   const content = entry?.user?.content;
   if (!content || typeof content !== 'object') return [];
@@ -171,8 +201,8 @@ function extractToolUseResults(entry) {
     if (!r || typeof r !== 'object') continue;
     const contentArr = Array.isArray(r.content) ? r.content : [];
     const texts = contentArr
-      .filter((c) => c && typeof c === 'object' && typeof c.Text === 'string')
-      .map((c) => c.Text);
+      .map(extractToolResultContentText)
+      .filter((t) => typeof t === 'string' && t.length > 0);
     if (texts.length > 0) {
       out.push(texts.join('\n'));
     }

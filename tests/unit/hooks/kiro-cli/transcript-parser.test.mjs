@@ -189,3 +189,41 @@ describe.skipIf(!DB_AVAILABLE)('readTranscriptForCwd (sqlite, round3 fixture DB)
     expect(after).toBeNull();
   });
 });
+
+// ─── extractToolUseResults: Text + Json 两种 content 都提取（回归 MCP 工具 Json 结果丢失）───
+describe('kiro-cli transcript-parser toolUseResults 提取（Text + Json）', () => {
+  test('Text content 正常提取', async () => {
+    const { parseConversationValue } = await import(PARSER);
+    const convRaw = {
+      conversation_id: 'c-text',
+      history: [
+        { user: { content: { Prompt: { prompt: 'p' } } },
+          assistant: { ToolUse: { message_id: 'm0', tool_uses: [{ id: 't0', name: 'read', args: {} }] } },
+          request_metadata: { request_id: 'r0', message_id: 'm0', request_start_timestamp_ms: 1, stream_end_timestamp_ms: 2 } },
+        { user: { content: { ToolUseResults: { tool_use_results: [{ tool_use_id: 't0', content: [{ Text: 'hello text result' }] }] } } },
+          assistant: { Response: { message_id: 'm1', content: [{ kind: 'text', data: 'done' }] } },
+          request_metadata: { request_id: 'r1', message_id: 'm1', request_start_timestamp_ms: 3, stream_end_timestamp_ms: 4 } },
+      ],
+    };
+    const parsed = parseConversationValue(convRaw);
+    expect(parsed.steps[1].toolUseResults).toEqual(['hello text result']);
+  });
+
+  test('Json content（MCP 工具结果）也提取，不再丢', async () => {
+    const { parseConversationValue } = await import(PARSER);
+    const convRaw = {
+      conversation_id: 'c-json',
+      history: [
+        { user: { content: { Prompt: { prompt: 'p' } } },
+          assistant: { ToolUse: { message_id: 'm0', tool_uses: [{ id: 't0', name: 'list_directory', args: {} }] } },
+          request_metadata: { request_id: 'r0', message_id: 'm0', request_start_timestamp_ms: 1, stream_end_timestamp_ms: 2 } },
+        { user: { content: { ToolUseResults: { tool_use_results: [{ tool_use_id: 't0', content: [{ Json: { content: [{ type: 'text', text: 'Allowed directories:\n/Users/yunshen/Documents' }], structuredContent: { content: 'Allowed directories' } } }] }] } } },
+          assistant: { Response: { message_id: 'm1', content: [{ kind: 'text', data: 'done' }] } },
+          request_metadata: { request_id: 'r1', message_id: 'm1', request_start_timestamp_ms: 3, stream_end_timestamp_ms: 4 } },
+      ],
+    };
+    const parsed = parseConversationValue(convRaw);
+    // 旧逻辑：Json 被跳过 → toolUseResults=[]。修复后：提取 Json.content[].text
+    expect(parsed.steps[1].toolUseResults).toEqual(['Allowed directories:\n/Users/yunshen/Documents']);
+  });
+});
