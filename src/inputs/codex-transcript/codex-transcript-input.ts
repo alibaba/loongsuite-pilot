@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Dirent, FSWatcher } from 'node:fs';
 import { ClientType, CollectionMethod } from '../../types/index.js';
-import type { AgentActivityEntry } from '../../types/index.js';
+import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { buildCodexTranscriptEntries } from './codex-transcript-builder.js';
@@ -22,6 +22,10 @@ import { stringValue, timestampMs } from './codex-transcript-utils.js';
 
 const DEFAULT_SESSION_DIR = '~/.codex/sessions';
 const READ_CHUNK_SIZE = 1024 * 1024;
+const WAKEUP_RESOURCE_ATTRIBUTE_KEYS = [
+  'agentteams.worker.name',
+  'agentteams.instance.id',
+];
 
 interface JsonLine {
   startOffset: number;
@@ -233,7 +237,41 @@ export class CodexTranscriptInput extends BaseInput {
         lastUsage: turn.unmatchedTokenUsages.at(-1),
       });
     }
-    return turn ? buildCodexTranscriptEntries(turn) : [];
+    if (!turn) return [];
+    const entries = buildCodexTranscriptEntries(turn);
+    const resourceAttributes = await this.readWakeupResourceAttributes(turn.sessionId);
+    return resourceAttributes ? attachWakeupResourceAttributes(entries, resourceAttributes) : entries;
+  }
+
+  private async readWakeupResourceAttributes(sessionId: string): Promise<Record<string, JsonValue> | undefined> {
+    const marker = path.join(this.wakeupDir, `${safeWakeupSessionPart(sessionId)}.json`);
+    let raw: string;
+    try {
+      raw = await fs.readFile(marker, 'utf8');
+    } catch {
+      return undefined;
+    }
+
+    let markerRecord: Record<string, unknown> | null = null;
+    try {
+      const parsed = JSON.parse(raw);
+      markerRecord = asRecord(parsed);
+    } catch {
+      return undefined;
+    }
+
+    const markerAttributes = asRecord(markerRecord?.resourceAttributes);
+    if (!markerAttributes) return undefined;
+
+    const resourceAttributes: Record<string, JsonValue> = {};
+    for (const key of WAKEUP_RESOURCE_ATTRIBUTE_KEYS) {
+      const value = markerAttributes[key];
+      if (typeof value !== 'string') continue;
+      const trimmed = value.trim();
+      if (trimmed) resourceAttributes[key] = trimmed;
+    }
+
+    return Object.keys(resourceAttributes).length > 0 ? resourceAttributes : undefined;
   }
 
   private async baselineFile(filePath: string, key: string): Promise<void> {
@@ -439,6 +477,24 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function attachWakeupResourceAttributes(
+  entries: AgentActivityEntry[],
+  resourceAttributes: Record<string, JsonValue>,
+): AgentActivityEntry[] {
+  const workerName = resourceAttributes['agentteams.worker.name'];
+  for (const entry of entries) {
+    entry.resourceAttributes = resourceAttributes;
+    if (typeof workerName === 'string' && workerName.trim()) {
+      entry['gen_ai.agent.name'] = workerName.trim();
+    }
+  }
+  return entries;
+}
+
+function safeWakeupSessionPart(value: string): string {
+  return path.basename(String(value)).replace(/[^a-zA-Z0-9_-]/g, '_') || 'unknown';
 }
 
 function defaultWakeupDir(): string {
