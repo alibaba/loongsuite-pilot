@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -329,6 +329,51 @@ describe('CodexTranscriptInput', () => {
     }
     expect(JSON.stringify(entries)).not.toContain('should-not-leak');
     expect(JSON.stringify(entries)).not.toContain('ignored');
+  });
+
+  it('skips overlong AgentTeams resource values from the wakeup marker', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-agentteams-long-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, wakeupDir } = await createInput(root);
+    const longWorkerName = 'x'.repeat(513);
+    await writeWakeupMarker(wakeupDir, 'session-1', {
+      session_id: 'session-1',
+      resourceAttributes: {
+        'agentteams.worker.name': longWorkerName,
+        'agentteams.instance.id': 'lw-codex',
+      },
+    });
+    await writeTranscript(sessionDir, completedTurn());
+
+    await waitFor(() => entries.filter(entry => entry['event.name'] === 'llm.response').length === 3);
+    await input.stop();
+
+    for (const entry of entries) {
+      expect(entry['gen_ai.agent.name']).toBeUndefined();
+      expect(entry.resourceAttributes).toEqual({
+        'agentteams.instance.id': 'lw-codex',
+      });
+    }
+    expect(JSON.stringify(entries)).not.toContain(longWorkerName);
+  });
+
+  it('debug logs when an existing wakeup marker lacks resourceAttributes', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-agentteams-empty-marker-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, wakeupDir } = await createInput(root);
+    const debug = vi.fn();
+    (input as unknown as { logger: { debug: typeof debug } }).logger.debug = debug;
+    await writeWakeupMarker(wakeupDir, 'session-1', { session_id: 'session-1' });
+    await writeTranscript(sessionDir, completedTurn());
+
+    await waitFor(() => entries.filter(entry => entry['event.name'] === 'llm.response').length === 3);
+    await input.stop();
+
+    expect(entries.some(entry => entry.resourceAttributes)).toBe(false);
+    expect(debug).toHaveBeenCalledWith(
+      'Codex wakeup marker has no resourceAttributes; attribution skipped',
+      { marker: path.join(wakeupDir, 'session-1.json') },
+    );
   });
 
   it('waits for task_complete before exporting a Stop-triggered transcript', async () => {

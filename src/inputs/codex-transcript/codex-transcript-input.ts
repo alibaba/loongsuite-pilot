@@ -22,10 +22,13 @@ import { stringValue, timestampMs } from './codex-transcript-utils.js';
 
 const DEFAULT_SESSION_DIR = '~/.codex/sessions';
 const READ_CHUNK_SIZE = 1024 * 1024;
+// Values emitted by DEFAULT_RESOURCE_ENV_FIELD_MAP in assets/hooks/shared/resource-context.mjs.
+// Add new AgentTeams resource fields to both lists together.
 const WAKEUP_RESOURCE_ATTRIBUTE_KEYS = [
   'agentteams.worker.name',
   'agentteams.instance.id',
 ];
+const MAX_WAKEUP_RESOURCE_ATTRIBUTE_VALUE_LENGTH = 512;
 
 interface JsonLine {
   startOffset: number;
@@ -257,21 +260,37 @@ export class CodexTranscriptInput extends BaseInput {
       const parsed = JSON.parse(raw);
       markerRecord = asRecord(parsed);
     } catch {
+      this.logger.debug('Codex wakeup marker could not be parsed; resource attributes skipped', { marker });
       return undefined;
     }
 
     const markerAttributes = asRecord(markerRecord?.resourceAttributes);
-    if (!markerAttributes) return undefined;
+    if (!markerAttributes) {
+      this.logger.debug('Codex wakeup marker has no resourceAttributes; attribution skipped', { marker });
+      return undefined;
+    }
 
     const resourceAttributes: Record<string, JsonValue> = {};
     for (const key of WAKEUP_RESOURCE_ATTRIBUTE_KEYS) {
       const value = markerAttributes[key];
       if (typeof value !== 'string') continue;
       const trimmed = value.trim();
+      if (trimmed.length > MAX_WAKEUP_RESOURCE_ATTRIBUTE_VALUE_LENGTH) {
+        this.logger.debug('Codex wakeup resource attribute skipped because value is too long', {
+          marker,
+          key,
+          maxLength: MAX_WAKEUP_RESOURCE_ATTRIBUTE_VALUE_LENGTH,
+        });
+        continue;
+      }
       if (trimmed) resourceAttributes[key] = trimmed;
     }
 
-    return Object.keys(resourceAttributes).length > 0 ? resourceAttributes : undefined;
+    if (Object.keys(resourceAttributes).length === 0) {
+      this.logger.debug('Codex wakeup marker has no whitelisted resourceAttributes; attribution skipped', { marker });
+      return undefined;
+    }
+    return resourceAttributes;
   }
 
   private async baselineFile(filePath: string, key: string): Promise<void> {
