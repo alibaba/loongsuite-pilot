@@ -1,6 +1,6 @@
 {
   "name": "loongsuite-pilot",
-  "version": "1.1.12",
+  "version": "1.1.13",
   "type": "module",
   "description": "Multi-agent AI coding data collection platform",
   "main": "dist/index.js",
