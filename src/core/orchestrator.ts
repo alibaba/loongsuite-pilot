@@ -37,8 +37,6 @@ import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
 import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
-import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
-import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
@@ -91,8 +89,6 @@ export class Orchestrator extends EventEmitter {
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
     'codex-transcript': 'codex',
-    'kiro-cli-log': 'kiro-cli',
-    'kiro-cli-session': 'kiro-cli',
     'opencode-log': 'opencode',
     'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
@@ -929,58 +925,6 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Kiro CLI Log (sqlite transcript + hook JSONL) ---
-    const kiroCliLogDir = this.resolveKiroCliLogDir();
-    // Eagerly create the log dir so kiro-cli-log's availability check
-    // (directoryExists) passes on first boot. Without this, the input
-    // never starts because the dir is only created later by the
-    // delayedCollect subprocess — a chicken-egg problem.
-    ensureDir(kiroCliLogDir);
-    const kiroCliLogInput = new KiroCliLogInput({
-      stateStore: this.stateStore,
-      logDir: kiroCliLogDir,
-    });
-    this.inputManager.registerInput(kiroCliLogInput);
-    entries.push(
-      this.inputManager.buildDetectionEntry(kiroCliLogInput, {
-        watchPaths: [kiroCliLogDir],
-        isAvailable: async () => directoryExists(kiroCliLogDir),
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['kiro-cli-log']) &&
-          this.agentControlManager.resolveEnabled(
-            'kiro-cli-log',
-            listenerCfg['kiro-cli-log']?.enabled ?? true,
-          ),
-        pollIntervalMs: listenerCfg['kiro-cli-log']?.pollInterval,
-      }),
-    );
-
-    // --- Kiro CLI Session (delayed sidecar scan, runs hook processor delayedCollect) ---
-    const kiroCliHookProcessorPath = path.join(
-      this.dataDir,
-      'hooks',
-      'kiro-cli-hook-processor.mjs',
-    );
-    const kiroCliSessionWatchPaths = KiroCliSessionInput.getWatchPaths(this.dataDir);
-    const kiroCliSessionInput = new KiroCliSessionInput({
-      stateStore: this.stateStore,
-      hookProcessorPath: kiroCliHookProcessorPath,
-      dataDir: this.dataDir,
-      pollIntervalMs: listenerCfg['kiro-cli-session']?.pollInterval,
-    });
-    this.inputManager.registerInput(kiroCliSessionInput);
-    entries.push(
-      this.inputManager.buildDetectionEntry(kiroCliSessionInput, {
-        watchPaths: kiroCliSessionWatchPaths,
-        isAvailable: async () => KiroCliSessionInput.checkAvailability(kiroCliHookProcessorPath),
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['kiro-cli-session']) &&
-          this.agentControlManager.resolveEnabled(
-            'kiro-cli-session',
-            listenerCfg['kiro-cli-session']?.enabled ?? true,
-          ),
-        pollIntervalMs: listenerCfg['kiro-cli-session']?.pollInterval,
-      }),
-    );
-
     // --- Codex rollout transcript (completed and interrupted turns) ---
     const codexTranscriptInput = new CodexTranscriptInput({
       stateStore: this.stateStore,
@@ -1079,10 +1023,6 @@ export class Orchestrator extends EventEmitter {
       }
     }
     return path.join(this.dataDir, 'logs', 'claude-code');
-  }
-
-  private resolveKiroCliLogDir(): string {
-    return path.join(this.dataDir, 'logs', 'kiro-cli');
   }
 
   /**

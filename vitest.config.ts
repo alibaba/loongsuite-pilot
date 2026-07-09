@@ -30,11 +30,5 @@ export default defineConfig({
       reporter: ['text', 'lcov'],
     },
     testTimeout: 15_000,
-    server: {
-      deps: {
-        // node: builtins（如 node:sqlite）应直接透传，不进 vite transform
-        external: [/^node:/],
-      },
-    },
   },
 });
