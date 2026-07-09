@@ -31,6 +31,16 @@ import {
   buildQoderHookRecord,
   inferProviderName,
 } from './agent-event-normalizer.mjs';
+import {
+  agentBaseFieldPatch,
+  collectResourceAttributesFromEnv,
+} from './shared/resource-context.mjs';
+
+const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: 'qoder' });
+const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
+const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
+  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
+  : {};
 
 // --- Retry lockfile (qoder-cn only) -----------------------------------------
 // QoderCN fires Stop hook multiple times per turn AND incomplete transcript
@@ -576,8 +586,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
   // If no progress boundaries detected, fall back to legacy behavior
   if (boundaries.length === 0) {
     const legacyRecords = buildLegacyEvents(contentEvents, turnId, sessionId, agentId, runtimeConfig, records, observedTs);
-    if (cwd) for (const r of legacyRecords) r['agent.qoder.cwd'] = cwd;
-    return legacyRecords;
+    return finalizeRecords(legacyRecords, cwd);
   }
 
   // Assign content events to boundaries.
@@ -762,7 +771,14 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
     }
   }
 
-  if (cwd) for (const r of records) r['agent.qoder.cwd'] = cwd;
+  return finalizeRecords(records, cwd);
+}
+
+function finalizeRecords(records, cwd) {
+  for (const record of records) {
+    if (cwd) record['agent.qoder.cwd'] = cwd;
+    Object.assign(record, RESOURCE_BASE_FIELD_PATCH, RESOURCE_ATTRIBUTE_FIELDS);
+  }
   return records;
 }
 
