@@ -31,7 +31,7 @@ import { readStdinJson } from './shared/stdin-reader.mjs';
 import {
   INITIAL_HASH,
   computeHash,
-  shouldLogFullMessages,
+  shouldLogFullMessages,  // kept for reference; not called (kiro uses logFull=true directly)
   generateTraceId,
   generateSpanId,
   writeJsonlRecords,
@@ -666,7 +666,11 @@ function buildRecords(transcript, toolEvents, preToolEvents, cwd, userId, stopEv
     if (stepRound === 1) {
       currentFullHash = computeHash(INITIAL_HASH, inputMsgs);
       delta = inputMsgs;
-      logFull = shouldLogFullMessages(INITIAL_HASH, delta, currentFullHash);
+      // kiro-cli always logs full messages: step input is non-cumulative
+      // (only previous prompt or tool_result, not a running conversation).
+      // Don't use shared shouldLogFullMessages — that's for agents with
+      // cumulative context (Claude Code) where delta can reconstruct full.
+      logFull = true;
     } else {
       currentFullHash = computeHash(runningHash, inputMsgs);
       delta = inputMsgs;
