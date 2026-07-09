@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/resource-context.mjs';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { CodexTranscriptInput } from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
@@ -329,6 +330,27 @@ describe('CodexTranscriptInput', () => {
     }
     expect(JSON.stringify(entries)).not.toContain('should-not-leak');
     expect(JSON.stringify(entries)).not.toContain('ignored');
+  });
+
+  it('keeps Codex wakeup resource fields aligned with the shared hook env map', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-agentteams-map-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, wakeupDir } = await createInput(root);
+    const resourceAttributes = Object.fromEntries(
+      Object.values(DEFAULT_RESOURCE_ENV_FIELD_MAP).map((key, index) => [key, `value-${index}`]),
+    );
+    await writeWakeupMarker(wakeupDir, 'session-1', {
+      session_id: 'session-1',
+      resourceAttributes,
+    });
+    await writeTranscript(sessionDir, completedTurn());
+
+    await waitFor(() => entries.filter(entry => entry['event.name'] === 'llm.response').length === 3);
+    await input.stop();
+
+    for (const entry of entries) {
+      expect(entry.resourceAttributes).toEqual(resourceAttributes);
+    }
   });
 
   it('skips overlong AgentTeams resource values from the wakeup marker', async () => {
