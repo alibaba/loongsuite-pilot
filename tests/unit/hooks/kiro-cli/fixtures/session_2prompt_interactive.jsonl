@@ -1,8 +1,0 @@
-{"version":"v1","kind":"Prompt","data":{"message_id":"p1-0000-0000-0000-000000000001","content":[{"kind":"text","data":"写文件A"}],"meta":{"timestamp":1783476358,"additionalContext":""}}}
-{"version":"v1","kind":"AssistantMessage","data":{"message_id":"a1-0000-0000-0000-000000000002","content":[{"kind":"text","data":""},{"kind":"toolUse","data":{"toolUseId":"tooluse_p1_001","name":"write_file","input":{"path":"/tmp/kiro_test/a.txt","content":"A"}}}]}}
-{"version":"v1","kind":"ToolResults","data":{"message_id":"tr1-0000-0000-0000-000000000003","content":[{"kind":"toolResult","data":{"toolUseId":"tooluse_p1_001","content":[{"kind":"text","data":"ok"}],"status":"success"}}],"results":{}}}
-{"version":"v1","kind":"AssistantMessage","data":{"message_id":"a1f-0000-0000-0000-000000000004","content":[{"kind":"text","data":"A写好了"}]}}
-{"version":"v1","kind":"Prompt","data":{"message_id":"p2-0000-0000-0000-000000000005","content":[{"kind":"text","data":"写文件B"}],"meta":{"timestamp":1783476483,"additionalContext":""}}}
-{"version":"v1","kind":"AssistantMessage","data":{"message_id":"a2-0000-0000-0000-000000000006","content":[{"kind":"text","data":""},{"kind":"toolUse","data":{"toolUseId":"tooluse_p2_001","name":"write_file","input":{"path":"/tmp/kiro_test/b.txt","content":"B"}}}]}}
-{"version":"v1","kind":"ToolResults","data":{"message_id":"tr2-0000-0000-0000-000000000007","content":[{"kind":"toolResult","data":{"toolUseId":"tooluse_p2_001","content":[{"kind":"text","data":"ok"}],"status":"success"}}],"results":{}}}
-{"version":"v1","kind":"AssistantMessage","data":{"message_id":"a2f-0000-0000-0000-000000000008","content":[{"kind":"text","data":"B写好了"}]}}

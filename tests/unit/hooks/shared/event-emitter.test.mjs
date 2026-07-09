@@ -38,10 +38,10 @@ describe('event-emitter chain hash', () => {
     expect(shouldLogFullMessages(INITIAL_HASH, delta, 'fakehash')).toBe(true);
   });
 
-  it('shouldLogFullMessages always returns true', () => {
+  it('shouldLogFullMessages false when chain is consistent', () => {
     const delta = [{ role: 'user', content: 'x' }];
     const expected = computeHash(INITIAL_HASH, delta);
-    expect(shouldLogFullMessages(INITIAL_HASH, delta, expected)).toBe(true);
+    expect(shouldLogFullMessages(INITIAL_HASH, delta, expected)).toBe(false);
   });
 });
 

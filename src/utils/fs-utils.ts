@@ -92,26 +92,16 @@ export async function writeJsonFile(
 /**
  * Removes stale `.tmp` files left behind by interrupted atomic writes (e.g. process
  * killed mid-rename). Call once at startup for directories that use writeJsonFile.
- *
- * Cleanup is **age-based**, not pid-based: a fresh `.tmp` (any pid) may belong to a
- * concurrent live process — e.g. two daemon instances overlapping during a restart.
- * Deleting it would break that process's `rename(tmp, path)` with ENOENT, failing
- * the collection cycle. Only remove tmp files older than `maxAgeMs` (a tmp that old
- * is definitely not mid-rename, since rename is instantaneous).
  */
-export async function cleanStaleTmpFiles(dir: string, maxAgeMs = 60_000): Promise<void> {
-  const now = Date.now();
+export async function cleanStaleTmpFiles(dir: string): Promise<void> {
+  const currentPid = String(process.pid);
   try {
     const entries = await fsp.readdir(dir);
-    for (const f of entries) {
-      if (!/\.(\d+)\.\d+\.tmp$/.test(f)) continue;
-      const full = nodePath.join(dir, f);
-      try {
-        const st = await fsp.stat(full);
-        if (now - st.mtimeMs < maxAgeMs) continue;
-        await fsp.unlink(full).catch(() => {});
-      } catch {}
-    }
+    const tmpFiles = entries.filter(f => {
+      const m = f.match(/\.(\d+)\.\d+\.tmp$/);
+      return m != null && m[1] !== currentPid;
+    });
+    await Promise.all(tmpFiles.map(f => fsp.unlink(nodePath.join(dir, f)).catch(() => {})));
   } catch {}
 }
 
