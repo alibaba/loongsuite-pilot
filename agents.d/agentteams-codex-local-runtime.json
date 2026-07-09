@@ -1,0 +1,18 @@
+{
+  "id": "agentteams-codex-local-runtime",
+  "displayName": "AgentTeams Codex Local Runtime",
+  "deployMode": "plugin-probe",
+  "localWorkerRuntime": "codex",
+  "detection": {
+    "paths": [],
+    "commands": []
+  },
+  "pluginProbe": {
+    "source": {
+      "type": "tar",
+      "tarball": "$PILOT_DATA/plugins/agentteams-codex-local-runtime-0.0.1.tar.gz",
+      "destDir": "$PILOT_DATA/local-worker-template-cache/agentteams-codex-local-runtime"
+    },
+    "mountType": "wrapper"
+  }
+}
