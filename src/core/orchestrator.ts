@@ -935,7 +935,7 @@ export class Orchestrator extends EventEmitter {
     // (directoryExists) passes on first boot. Without this, the input
     // never starts because the dir is only created later by the
     // delayedCollect subprocess — a chicken-egg problem.
-    ensureDir(kiroCliLogDir);
+    await ensureDir(kiroCliLogDir);
     const kiroCliLogInput = new KiroCliLogInput({
       stateStore: this.stateStore,
       logDir: kiroCliLogDir,
