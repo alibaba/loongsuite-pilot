@@ -3,7 +3,18 @@ import type { AgentActivityEntry } from '../../types/index.js';
 import type { SegmentTokenData } from './segment-token-reader.js';
 import type { SqliteTokenData } from './sqlite-token-reader.js';
 
-const TIMESTAMP_THRESHOLD_MS = 1000;
+// Outer bound for the nearest-timestamp fallback (Pass B). Nearest match wins;
+// this is only the acceptance ceiling. Widened from 1000ms because the JSONL
+// llm.response time (hook progress clock) drifts from SQLite gmt_create by up to
+// ~1.4s; the accurate agent.qoder.match_ts (when present) matches within a few ms.
+const TIMESTAMP_THRESHOLD_MS = 5000;
+
+// Time-sanity guard for the order-based pass: reject a positional pair whose
+// response↔row time gap is implausibly large (guards against mis-alignment when a
+// row is missing in the middle). STRICT applies when the response carries the
+// accurate match_ts; LOOSE applies when only the drifted time_unix_nano is available.
+const ORDER_MATCH_STRICT_MS = 1000;
+const ORDER_MATCH_LOOSE_MS = 3000;
 
 export function enrichCliTurn(
   entries: AgentActivityEntry[],
@@ -122,12 +133,17 @@ export function enrichIdeTurn(
   // match by close timestamp only, preserving the previous behavior.
   for (const [requestId, group] of sortedGroups) {
     for (const row of group) {
+      // Skip rows already consumed by the order-based pass so Pass B only handles
+      // genuinely-leftover rows; otherwise an already-matched row could re-stamp a
+      // leftover response with the wrong id/model.
+      if (tokenWritten.has(sqliteDedupeKey(row))) continue;
+
       let bestEntry: AgentActivityEntry | null = null;
       let bestDiff = Infinity;
 
       for (const entry of responseEntries) {
         if (used.has(entry)) continue;
-        const diff = Math.abs(extractMs(entry) - row.gmtCreate);
+        const diff = Math.abs(matchMs(entry) - row.gmtCreate);
         if (diff < bestDiff) {
           bestDiff = diff;
           bestEntry = entry;
@@ -312,13 +328,31 @@ function matchIdeTurnsBySqliteOrder(
     const [requestId, sqliteRows] = candidateGroups[i];
     const responses = turnEntries.filter(e => e['event.name'] === 'llm.response');
 
-    if (responses.length !== sqliteRows.length) {
-      markLowConfidence(turnEntries, 'assistant_count_mismatch');
-      continue;
-    }
-
-    for (let j = 0; j < responses.length; j++) {
-      applySqliteRowToIdeResponse(entries, turnEntries, responses[j], sqliteRows[j], requestId, used, tokenWritten);
+    // Best-effort ordered matching. Counts often differ (sub-agent turns miss the
+    // final answer in the transcript; the latest row may not be persisted yet).
+    // Match the aligned prefix by order instead of abandoning the whole turn to the
+    // timestamp fallback. A time-sanity guard rejects positionally-aligned pairs
+    // whose times are implausibly far apart (mid-turn gap → order shifts by one →
+    // the shifted pair lands on a neighbouring call seconds away) so they fall
+    // through to the nearest-timestamp fallback (Pass B) instead of mis-attributing.
+    const n = Math.min(responses.length, sqliteRows.length);
+    // When counts match exactly, trust order fully (clock-independent) — this is the
+    // original, well-tested contract. The time-sanity guard applies only in the
+    // best-effort (unequal count) path, where a mid-turn gap would shift the pairing.
+    const countsMatch = responses.length === sqliteRows.length;
+    for (let j = 0; j < n; j++) {
+      const response = responses[j];
+      const row = sqliteRows[j];
+      if (!countsMatch) {
+        const threshold = accurateMatchMs(response) !== undefined
+          ? ORDER_MATCH_STRICT_MS
+          : ORDER_MATCH_LOOSE_MS;
+        if (Math.abs(matchMs(response) - row.gmtCreate) > threshold) {
+          markLowConfidence([response], 'order_time_gap');
+          continue;
+        }
+      }
+      applySqliteRowToIdeResponse(entries, turnEntries, response, row, requestId, used, tokenWritten);
     }
   }
 }
@@ -404,4 +438,23 @@ function extractMs(entry: AgentActivityEntry): number {
   const ts = (entry as Record<string, unknown>).timestamp;
   if (typeof ts === 'number') return ts;
   return 0;
+}
+
+// Accurate per-response match timestamp injected by the hook from the transcript's
+// assistant record (≈ SQLite gmt_create, within a few ms). Returns undefined when
+// absent (old JSONL / hook not yet updated).
+function accurateMatchMs(entry: AgentActivityEntry): number | undefined {
+  const raw = (entry as Record<string, unknown>)['agent.qoder.match_ts'];
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'string') {
+    const n = Number(raw);
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+// Timestamp used for matching against SQLite gmt_create: the accurate match_ts when
+// available, otherwise the drifted time_unix_nano.
+function matchMs(entry: AgentActivityEntry): number {
+  return accurateMatchMs(entry) ?? extractMs(entry);
 }

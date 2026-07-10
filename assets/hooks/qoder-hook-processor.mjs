@@ -31,6 +31,16 @@ import {
   buildQoderHookRecord,
   inferProviderName,
 } from './agent-event-normalizer.mjs';
+import {
+  agentBaseFieldPatch,
+  collectResourceAttributesFromEnv,
+} from './shared/resource-context.mjs';
+
+const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: 'qoder' });
+const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
+const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
+  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
+  : {};
 
 // --- Retry lockfile (qoder-cn only) -----------------------------------------
 // QoderCN fires Stop hook multiple times per turn AND incomplete transcript
@@ -576,8 +586,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
   // If no progress boundaries detected, fall back to legacy behavior
   if (boundaries.length === 0) {
     const legacyRecords = buildLegacyEvents(contentEvents, turnId, sessionId, agentId, runtimeConfig, records, observedTs);
-    if (cwd) for (const r of legacyRecords) r['agent.qoder.cwd'] = cwd;
-    return legacyRecords;
+    return finalizeRecords(legacyRecords, cwd);
   }
 
   // Assign content events to boundaries.
@@ -632,6 +641,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
     toolResultsForNextStep = [];
     let responseId = undefined;
     let lastAssistantTs = null;
+    let firstAssistantTs = null;
 
     for (const row of content) {
       if (row.type === 'assistant') {
@@ -639,6 +649,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
         const blocks = Array.isArray(msg.content) ? msg.content : [];
         if (msg.id && !responseId) responseId = msg.id;
         if (row.timestamp) lastAssistantTs = row.timestamp;
+        if (row.timestamp && !firstAssistantTs) firstAssistantTs = row.timestamp;
         for (const block of blocks) {
           if (block.type === 'thinking') {
             outputParts.push({ type: 'reasoning', content: block.thinking || '' });
@@ -701,6 +712,10 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
         'user.id': userId,
         'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts, finish_reason: finishReason }],
         'agent.source': 'qoder-transcript-hook',
+        // Accurate per-response timestamp from the transcript's first assistant record
+        // (≈ SQLite gmt_create). Used only for token-enricher matching; dropped from
+        // SLS/JSONL output as an agent-scoped field. Absent for CLI (no firstAssistantTs).
+        'agent.qoder.match_ts': firstAssistantTs ? Date.parse(firstAssistantTs) : undefined,
         time_unix_nano: responseEndNanos,
         observed_time_unix_nano: observedTs,
       });
@@ -756,7 +771,14 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
     }
   }
 
-  if (cwd) for (const r of records) r['agent.qoder.cwd'] = cwd;
+  return finalizeRecords(records, cwd);
+}
+
+function finalizeRecords(records, cwd) {
+  for (const record of records) {
+    if (cwd) record['agent.qoder.cwd'] = cwd;
+    Object.assign(record, RESOURCE_BASE_FIELD_PATCH, RESOURCE_ATTRIBUTE_FIELDS);
+  }
   return records;
 }
 

@@ -222,6 +222,10 @@ describe('Hook JSONL integration flow', () => {
       path.resolve(process.cwd(), 'assets/hooks/shared/qoder-db-utils.mjs'),
       path.join(sharedDir, 'qoder-db-utils.mjs'),
     );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/resource-context.mjs'),
+      path.join(sharedDir, 'resource-context.mjs'),
+    );
     await fs.chmod(hookScript, 0o755);
 
     const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
@@ -263,6 +267,9 @@ describe('Hook JSONL integration flow', () => {
       session_id: 'sess-hook',
     }), {
       LOONGSUITE_PILOT_DATA_DIR: dataDir,
+      AGENTTEAMS_WORKER_NAME: 'qoder-worker',
+      AGENTTEAMS_INSTANCE_ID: 'lw-qoder',
+      AGENTTEAMS_TOKEN: 'should-not-leak',
     });
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
@@ -276,6 +283,14 @@ describe('Hook JSONL integration flow', () => {
     expect(historyRecord.uuid).toBeUndefined();
     expect(historyRecord.sessionId).toBeUndefined();
     expect(historyRecord['event.name']).toBe('other');
+    expect(historyRecord['gen_ai.agent.name']).toBe('qoder-worker');
+    expect(historyRecord.resourceAttributes).toEqual({
+      'agentteams.worker.name': 'qoder-worker',
+      'agentteams.instance.id': 'lw-qoder',
+    });
+    expect(historyRecord['agentteams.worker.name']).toBeUndefined();
+    expect(historyRecord['agentteams.instance.id']).toBeUndefined();
+    expect(historyRecord['agentteams.token']).toBeUndefined();
 
     const input = new QoderCliInput({
       stateStore: stateStore as any,
@@ -297,6 +312,11 @@ describe('Hook JSONL integration flow', () => {
       'event.name': 'other',
       'gen_ai.agent.type': ClientType.QoderCli,
       'gen_ai.session.id': 'sess-hook',
+      'gen_ai.agent.name': 'qoder-worker',
+      resourceAttributes: {
+        'agentteams.worker.name': 'qoder-worker',
+        'agentteams.instance.id': 'lw-qoder',
+      },
     });
   });
 
@@ -323,6 +343,10 @@ describe('Hook JSONL integration flow', () => {
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/qoder-db-utils.mjs'),
       path.join(sharedDir, 'qoder-db-utils.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/resource-context.mjs'),
+      path.join(sharedDir, 'resource-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
 
@@ -574,6 +598,10 @@ describe('Hook JSONL integration flow', () => {
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/qoder-db-utils.mjs'),
       path.join(sharedDir, 'qoder-db-utils.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/resource-context.mjs'),
+      path.join(sharedDir, 'resource-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
 
