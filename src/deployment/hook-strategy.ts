@@ -486,7 +486,7 @@ export class HookStrategy implements DeployStrategy {
 
   private async kiroAgentNeedsDeploy(def: AgentDefinition): Promise<boolean> {
     const hookConfig = def.hook!;
-    const settings = await readJsonFile<Record<string, unknown>>(hookConfig.settingsPath);
+    const settings = await readJsonFile<Record<string, unknown>>(resolveHome(hookConfig.settingsPath));
     if (!settings) return true;
     const hooks = settings['hooks'] as Record<string, unknown> | undefined;
     if (!hooks || typeof hooks !== 'object') return true;
