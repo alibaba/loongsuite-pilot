@@ -26,7 +26,6 @@
     "test:e2e:docker": "npm run test:e2e:l2",
     "test:e2e:docker:down": "npm run test:e2e:l2:down",
     "test:e2e:remote": "npm run test:e2e:l2:remote",
-    "local-reinstall": "npm run build && node scripts/postinstall.js",
     "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {
