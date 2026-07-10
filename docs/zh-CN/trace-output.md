@@ -190,6 +190,37 @@ Pilot 会将 Trace 发送到 `http://localhost:3000/api/public/otel/v1/traces`�
 
 如果 Trace 数据可能包含密钥，也建议开启 [数据脱敏](masking.md)。
 
+## 自定义 Span 属性
+
+有两类额外属性可以附加到 **trace span** 上（**不会**写入 event log / SLS / JSONL）：
+
+**1. Git/工作区属性（自动）**：当 agent 上报了工作目录时，span 会自动带上 `git.repo`、`git.branch`、`git.domain`、`workspace.current_root`（由本地 git 仓库推断）。
+
+**2. 用户自定义属性**：从三个来源给每个 span 附加任意键值对，优先级 **config < env < 文件**：
+
+- `config.json` → `globalSpanAttributes`（启动时读一次）：
+
+  ```json
+  { "globalSpanAttributes": { "team": "infra", "deployment.env": "prod" } }
+  ```
+
+- 环境变量 `OTEL_SPAN_ATTRIBUTES`（OTel 格式，启动时读一次）：
+
+  ```bash
+  export OTEL_SPAN_ATTRIBUTES="team=infra,deployment.env=prod"
+  ```
+
+- 可变文件 `~/.loongsuite-pilot/span-attributes.json`（`{"key":"value"}`），改动后会被重新读取，无需重启：
+
+  ```json
+  { "release": "2026.07", "oncall": "alice" }
+  ```
+
+说明：
+- 值均为字符串。文件改动会在下一个处理周期生效（受采集轮询间隔约束，约 30s），并非即时。
+- key 会原样作为 span 属性名。**请避免以 `agent.` 开头**及其它保留前缀（`gen_ai.`、`git.`、`workspace.`、`event.`、`trace_`、`user.`、`cost_`）——这类 key 会被跳过。
+- 属性为 fill-only，绝不覆盖 span 已有属性。
+
 ## 验证 Trace 输出
 
 ```bash

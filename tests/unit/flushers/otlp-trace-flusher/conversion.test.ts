@@ -15,6 +15,7 @@ vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
 import { convertEventLogToTrace } from '@loongsuite/otel-util-genai';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
+import { GlobalAttributesProvider } from '../../../../src/normalization/global-attributes.js';
 
 function makeConfig() {
   return {
@@ -136,5 +137,75 @@ describe('OtlpTraceFlusher - conversion', () => {
 
     await flusher.send(entry);
     // No error thrown, graceful skip
+  });
+
+  it('always passes DEFAULT_GIT_PASSTHROUGH_KEYS even without a provider', async () => {
+    const entry = {
+      'event.name': 'llm.response',
+      'gen_ai.agent.type': 'claude-code',
+      'gen_ai.turn.id': 't5',
+      'gen_ai.response.finish_reasons': ['stop'],
+    } as unknown as AgentActivityEntry;
+
+    await flusher.send(entry);
+
+    const opts = vi.mocked(convertEventLogToTrace).mock.calls[0][1] as { passthroughKeys?: string[] };
+    expect(opts.passthroughKeys).toEqual(
+      expect.arrayContaining(['git.repo', 'git.branch', 'git.domain', 'workspace.current_root']),
+    );
+  });
+
+  describe('with GlobalAttributesProvider', () => {
+    let p: OtlpTraceFlusher;
+
+    afterEach(async () => {
+      await p.shutdown();
+    });
+
+    it('injects custom attrs onto record copies + passthroughKeys, without mutating originals', async () => {
+      const provider = new GlobalAttributesProvider({ team: 'infra' }, '/nonexistent-span-attrs.json');
+      p = new OtlpTraceFlusher(makeConfig(), provider);
+
+      const entry = {
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': 'claude-code',
+        'gen_ai.turn.id': 'tc1',
+        'gen_ai.response.finish_reasons': ['stop'],
+      } as unknown as AgentActivityEntry;
+
+      await p.send(entry);
+
+      const [records, opts] = vi.mocked(convertEventLogToTrace).mock.calls.at(-1) as [
+        Array<Record<string, unknown>>,
+        { passthroughKeys?: string[] },
+      ];
+      // custom key is in passthroughKeys (alongside git defaults)
+      expect(opts.passthroughKeys).toEqual(expect.arrayContaining(['team', 'git.repo']));
+      // custom value stamped onto the record copy fed to the converter
+      expect(records[0]['team']).toBe('infra');
+      // original entry NOT mutated -> custom attrs never reach the event log
+      expect((entry as Record<string, unknown>)['team']).toBeUndefined();
+    });
+
+    it('is fill-only: does not override a value already present on the record', async () => {
+      const provider = new GlobalAttributesProvider({ team: 'infra' }, '/nonexistent-span-attrs.json');
+      p = new OtlpTraceFlusher(makeConfig(), provider);
+
+      const entry = {
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': 'claude-code',
+        'gen_ai.turn.id': 'tc2',
+        'gen_ai.response.finish_reasons': ['stop'],
+        team: 'local',
+      } as unknown as AgentActivityEntry;
+
+      await p.send(entry);
+
+      const [records] = vi.mocked(convertEventLogToTrace).mock.calls.at(-1) as [
+        Array<Record<string, unknown>>,
+        unknown,
+      ];
+      expect(records[0]['team']).toBe('local');
+    });
   });
 });

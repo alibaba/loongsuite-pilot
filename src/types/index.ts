@@ -72,6 +72,8 @@ export interface AnalyticsConfig {
   fileCollection: FileCollectionToggle;
   statusBar: StatusBarConfig;
   autoUpdate?: AutoUpdateConfig;
+  /** User-defined attributes injected into trace spans only (config + env baseline). */
+  globalSpanAttributes?: Record<string, string>;
 }
 
 export interface AgentConfig {

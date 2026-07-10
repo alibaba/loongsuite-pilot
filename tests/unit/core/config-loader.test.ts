@@ -833,4 +833,36 @@ describe('ConfigLoader', () => {
       expect(result!.headers).toBeUndefined();
     });
   });
+
+  describe('globalSpanAttributes', () => {
+    afterEach(() => {
+      delete process.env.OTEL_SPAN_ATTRIBUTES;
+    });
+
+    it('reads from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ globalSpanAttributes: { team: 'infra', env: 'prod' } });
+      const config = await loadConfig();
+      expect(config.globalSpanAttributes).toEqual({ team: 'infra', env: 'prod' });
+    });
+
+    it('OTEL_SPAN_ATTRIBUTES env overrides config on collision', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ globalSpanAttributes: { team: 'infra', env: 'prod' } });
+      vi.stubEnv('OTEL_SPAN_ATTRIBUTES', 'env=staging,extra=v');
+      const config = await loadConfig();
+      expect(config.globalSpanAttributes).toEqual({ team: 'infra', env: 'staging', extra: 'v' });
+    });
+
+    it('drops reserved-prefix keys and non-strings from config', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        globalSpanAttributes: { team: 'infra', 'git.repo': 'x', num: 5, obj: { a: 1 } },
+      });
+      const config = await loadConfig();
+      expect(config.globalSpanAttributes).toEqual({ team: 'infra', num: '5' });
+    });
+
+    it('is empty when neither config nor env set', async () => {
+      const config = await loadConfig();
+      expect(config.globalSpanAttributes).toEqual({});
+    });
+  });
 });
