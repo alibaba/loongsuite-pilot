@@ -114,6 +114,23 @@ ls ~/.loongsuite-pilot/sls-failed-logs/
 tail -f ~/.loongsuite-pilot/logs/output/*.jsonl
 ```
 
+## 失败诊断
+
+SLS endpoint 在内置重试后仍失败时，Pilot 会保留既有 `FLUSH_SEND_ALARM` alarm_type，并附加结构化诊断字段：
+
+| 字段 | 说明 |
+|------|------|
+| `endpoint_name` | 配置中的 endpoint 名称。 |
+| `endpoint_host` | 从 endpoint URL 安全解析出的 hostname，不包含 path、query、userinfo 或完整 endpoint 字符串。 |
+| `mode` | `webtracking` 或 `ak`。 |
+| `project` / `logstore` | 目标 SLS project 和 logstore。 |
+| `failure_class` | 归一化失败类型，例如 `auth_failed`、`permission_denied`、`not_found`、`quota_throttle`、`network_timeout`、`network_refused`、`server_error`、`bad_request`、`payload_too_large`、`unknown`。 |
+| `status_code` | 可获得时记录 HTTP/SDK 状态码。 |
+| `retryable` | 是否属于 Pilot 的可重试错误集合。 |
+| `reason` | 已去敏、限长的失败摘要。 |
+
+同样的诊断字段会写入 `~/.loongsuite-pilot/sls-failed-logs/<endpoint-name>.jsonl`，并保留失败的 `logGroup` 便于排查。429 限流仍会同时产生 `FLUSH_QUOTA_ALARM`；重试次数、batch 大小、失败落盘路径和多 endpoint 隔离语义均不变。
+
 ## 隐私说明
 
 SLS 是远端输出目标。敏感环境中开启前，请先查看 [Agent 配置](agents.md) 的内容采集控制和 [数据脱敏](masking.md)。

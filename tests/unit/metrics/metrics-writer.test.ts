@@ -104,6 +104,54 @@ describe('MetricsWriter', () => {
     expect(call![1]).not.toHaveProperty('__topic__');
   });
 
+  it('writes and sends additive SLS alarm diagnostics', async () => {
+    fs.mkdirSync(path.join(tmpDir, 'logs', 'metric_alarm'), { recursive: true });
+    const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
+    alarmManager.record('FLUSH_SEND_ALARM', '2', 'SLS webtracking send failed: HTTP 403', {
+      endpoint_name: 'internal-sls',
+      endpoint_host: 'cn-hangzhou.log.aliyuncs.com',
+      mode: 'webtracking',
+      project: 'project-a',
+      logstore: 'store-a',
+      failure_class: 'permission_denied',
+      status_code: 403,
+      retryable: false,
+      reason: 'HTTP 403 forbidden',
+    });
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: buildSnapshot,
+      alarmManager,
+    });
+
+    await (writer as any).writeAlarms();
+
+    const alarmPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-alarms.jsonl');
+    const entry = JSON.parse(fs.readFileSync(alarmPath, 'utf-8').trim());
+    expect(entry).toMatchObject({
+      alarm_type: 'FLUSH_SEND_ALARM',
+      endpoint_name: 'internal-sls',
+      endpoint_host: 'cn-hangzhou.log.aliyuncs.com',
+      mode: 'webtracking',
+      project: 'project-a',
+      logstore: 'store-a',
+      failure_class: 'permission_denied',
+      status_code: '403',
+      retryable: 'false',
+      reason: 'HTTP 403 forbidden',
+    });
+
+    expect(mockSendAlarm).toHaveBeenCalledWith('pilot_alarm', expect.objectContaining({
+      failure_class: 'permission_denied',
+      status_code: '403',
+      retryable: 'false',
+      endpoint_host: 'cn-hangzhou.log.aliyuncs.com',
+    }));
+    expect(JSON.stringify(mockSendAlarm.mock.calls[0][1])).not.toContain('https://cn-hangzhou.log.aliyuncs.com');
+  });
+
   it('writes L2 input/flusher metrics on stop (final flush)', async () => {
     writer = new MetricsWriter({
       dataDir: tmpDir,

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ClientType, ActionType } from '../../../src/types/index.js';
 import type { SlsFlusherConfig, SlsEndpoint } from '../../../src/types/index.js';
 import { buildTestEntry } from '../../helpers/fixture-builder.js';
+import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 
 const mockPostLogStoreLogs = vi.fn().mockResolvedValue(undefined);
 const mockAppendLine = vi.fn().mockResolvedValue(undefined);
@@ -191,6 +192,105 @@ describe('SlsFlusher', () => {
       // The kind is preserved inside the JSON payload for debugging.
       expect(parsed.kind).toBe('agentActivity');
       expect(parsed.endpoint).toBe('activity');
+    });
+
+    it('adds sanitized AK failure diagnostics to alarm, failed log, and counters', async () => {
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '1.0.0', userId: 'u1' });
+      flusher.setAlarmManager(alarmManager);
+      const err = Object.assign(
+        new Error('accessKeySecret=plainsecret missing log:PostLogStoreLogs permission'),
+        { statusCode: 403, code: 'AccessDenied', name: 'SlsError' },
+      );
+      mockPostLogStoreLogs.mockRejectedValueOnce(err);
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      const alarms = alarmManager.serialize();
+      expect(alarms).toHaveLength(1);
+      expect(alarms[0]).toMatchObject({
+        alarm_type: 'FLUSH_SEND_ALARM',
+        endpoint_name: 'activity',
+        endpoint_host: 'cn-hangzhou.log.aliyuncs.com',
+        mode: 'ak',
+        project: 'proj-a',
+        logstore: 'store-a',
+        failure_class: 'permission_denied',
+        status_code: '403',
+        retryable: 'false',
+      });
+      expect(alarms[0].reason).not.toContain('plainsecret');
+      expect(JSON.stringify(alarms[0])).not.toContain('https://cn-hangzhou.log.aliyuncs.com');
+
+      expect(mockAppendLine).toHaveBeenCalledOnce();
+      const parsed = JSON.parse(mockAppendLine.mock.calls[0][1]);
+      expect(parsed).toMatchObject({
+        endpoint: 'activity',
+        endpoint_host: 'cn-hangzhou.log.aliyuncs.com',
+        mode: 'ak',
+        failure_class: 'permission_denied',
+        status_code: 403,
+        retryable: false,
+      });
+      expect(parsed.reason).not.toContain('plainsecret');
+      expect(parsed.error).toBe(parsed.reason);
+
+      const counter = flusher.getEndpointCounters().get('activity')!;
+      expect(counter.outEntries).toBe(0);
+      expect(counter.outFailed).toBe(1);
+      expect(counter.lastFailureClass).toBe('permission_denied');
+      expect(counter.lastFailureStatusCode).toBe('403');
+      expect(counter.lastFailureTime).not.toBe('');
+      expect(counter.consecutiveFailures).toBe(1);
+    });
+
+    it('keeps 429 quota alarm and records webtracking diagnostics', async () => {
+      const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '1.0.0', userId: 'u1' });
+      const fetchSpy = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        text: async () => `quota exceeded AccessKeyId=LTAI1234567890SECRET ${'x'.repeat(400)}`,
+      });
+      vi.stubGlobal('fetch', fetchSpy);
+
+      flusher = new SlsFlusher(makeConfig({
+        endpoints: [
+          {
+            name: 'wt',
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com/path?token=abc',
+            project: 'proj-a',
+            logstore: 'store-a',
+            kind: 'agentActivity',
+            mode: 'webtracking',
+          },
+        ],
+      }), '/tmp/data');
+      flusher.setAlarmManager(alarmManager);
+
+      await flusher.send(buildTestEntry());
+      const flushPromise = flusher.flush();
+      await vi.runAllTimersAsync();
+      await flushPromise;
+
+      const alarms = alarmManager.serialize();
+      const sendAlarm = alarms.find(a => a.alarm_type === 'FLUSH_SEND_ALARM')!;
+      const quotaAlarm = alarms.find(a => a.alarm_type === 'FLUSH_QUOTA_ALARM')!;
+      expect(sendAlarm).toBeDefined();
+      expect(quotaAlarm).toBeDefined();
+      expect(sendAlarm.failure_class).toBe('quota_throttle');
+      expect(sendAlarm.status_code).toBe('429');
+      expect(sendAlarm.retryable).toBe('true');
+      expect(sendAlarm.endpoint_host).toBe('cn-hangzhou.log.aliyuncs.com');
+      expect(sendAlarm.reason.length).toBeLessThanOrEqual(240);
+      expect(sendAlarm.reason).not.toContain('LTAI1234567890SECRET');
+      expect(JSON.stringify(sendAlarm)).not.toContain('/path?token=abc');
+
+      const parsed = JSON.parse(mockAppendLine.mock.calls[0][1]);
+      expect(parsed.failure_class).toBe('quota_throttle');
+      expect(parsed.status_code).toBe(429);
+      expect(parsed.reason).not.toContain('LTAI1234567890SECRET');
+
+      vi.unstubAllGlobals();
     });
   });
 

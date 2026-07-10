@@ -189,7 +189,33 @@ describe('MetricsCollector', () => {
       expect(ep.out_failed_entries_total).toBe('5');
       expect(ep.total_delay_ms).toBe('3500');
       expect(ep.last_flush_time).toBe('2026-05-19 10:05:00');
+      expect(ep.last_failure_class).toBe('');
+      expect(ep.last_failure_status_code).toBe('');
+      expect(ep.last_failure_time).toBe('');
+      expect(ep.consecutive_failures).toBe('0');
       expect(ep.start_time).toBe('2026-05-19 09:00:00');
+    });
+
+    it('includes additive SLS failure diagnostics in flusher metrics', () => {
+      const flushers = new Map<string, any>();
+      flushers.set('internal-default', {
+        inEntries: 200, inBytes: 50000, outEntries: 195, outFailed: 5,
+        totalDelayMs: 3500, lastFlushTime: '2026-05-19 10:05:00',
+        startTime: '2026-05-19 09:00:00', flusherName: 'sls', mode: 'webtracking',
+        endpoint: 'https://cn-heyuan.log.aliyuncs.com', project: 'my-project', logstore: 'my-logstore',
+        lastFailureClass: 'quota_throttle',
+        lastFailureStatusCode: '429',
+        lastFailureTime: '2026-05-19 10:06:00',
+        consecutiveFailures: 3,
+      });
+
+      const result = collector.collectL2Flushers(buildSnapshot({ flushers }));
+
+      expect(result).toHaveLength(1);
+      expect(result[0].last_failure_class).toBe('quota_throttle');
+      expect(result[0].last_failure_status_code).toBe('429');
+      expect(result[0].last_failure_time).toBe('2026-05-19 10:06:00');
+      expect(result[0].consecutive_failures).toBe('3');
     });
 
     it('returns empty array when no flushers', () => {

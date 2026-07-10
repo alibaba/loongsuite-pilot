@@ -92,6 +92,10 @@ export interface FlusherMetrics {
   out_failed_entries_total: string;
   total_delay_ms: string;
   last_flush_time: string;
+  last_failure_class: string;
+  last_failure_status_code: string;
+  last_failure_time: string;
+  consecutive_failures: string;
   start_time: string;
   __time__: number;
 }
@@ -104,6 +108,10 @@ export interface FlusherStats {
   totalDelayMs: number;
   lastFlushTime: string;
   startTime: string;
+  lastFailureClass?: string;
+  lastFailureStatusCode?: string;
+  lastFailureTime?: string;
+  consecutiveFailures?: number;
 }
 
 export interface InputStats {
@@ -293,6 +301,10 @@ export class MetricsCollector {
         out_failed_entries_total: String(stats.outFailed),
         total_delay_ms: String(stats.totalDelayMs),
         last_flush_time: stats.lastFlushTime,
+        last_failure_class: stats.lastFailureClass ?? '',
+        last_failure_status_code: stats.lastFailureStatusCode ?? '',
+        last_failure_time: stats.lastFailureTime ?? '',
+        consecutive_failures: String(stats.consecutiveFailures ?? 0),
         start_time: stats.startTime,
         __time__: now,
       });
@@ -474,4 +486,3 @@ function countVersions(dataDir: string): number {
     return 0;
   }
 }
-

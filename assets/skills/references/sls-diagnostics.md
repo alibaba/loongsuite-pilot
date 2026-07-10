@@ -19,6 +19,7 @@ SlsFlusher 按 endpoint 分别发送
     ↓
 发送失败（3 次重试后仍失败）
     → 写入 ~/.loongsuite-pilot/sls-failed-logs/{endpoint-name}.jsonl
+    → 记录 FLUSH_SEND_ALARM（含 failure_class / status_code / endpoint_host 等诊断字段）
 ```
 
 关键事实：
@@ -27,6 +28,7 @@ SlsFlusher 按 endpoint 分别发送
 - 失败自动重试 3 次（指数退避：1s → 2s → 4s），可重试的状态码：408、429、500、502、503、504
 - 最终失败的日志持久化到 `sls-failed-logs/` 目录（不会丢失）
 - 支持多 endpoint 同时发送（互不阻塞）
+- `FLUSH_SEND_ALARM` 保持原 alarm_type，同时附加结构化诊断字段；`endpoint_host` 只包含安全解析后的 hostname，不包含 path/query/userinfo；`reason` 已限长并去敏
 
 ---
 
@@ -156,17 +158,51 @@ tail -5 ~/.loongsuite-pilot/sls-failed-logs/*.jsonl 2>/dev/null
 {
   "ts": 1716000000000,        // 失败时间戳
   "endpoint": "internal-sls", // endpoint 名称
+  "endpoint_host": "...",     // 仅 hostname，不含完整 endpoint URL
+  "mode": "webtracking",      // webtracking 或 ak
   "kind": "agentActivity",    // 数据类型
   "project": "...",           // SLS project
   "logstore": "...",          // SLS logstore
+  "failure_class": "permission_denied",
+  "status_code": 403,
+  "retryable": false,
+  "reason": "HTTP 403 ...",   // 限长、去敏后的错误摘要
   "logGroup": { ... },        // 完整的日志内容（可用于手动重放）
-  "error": "..."              // 错误详情
+  "error": "..."              // 与 reason 一致的安全错误摘要
 }
 ```
 
 文件名按 endpoint 名称分隔：`{endpoint-name}.jsonl`，不同 endpoint 的失败互不干扰。
 
 ### 4.1 常见失败原因分析
+
+`FLUSH_SEND_ALARM` 和 failed-log 都包含以下诊断字段：
+
+| 字段 | 含义 |
+|------|------|
+| `endpoint_name` / `endpoint` | SLS endpoint 配置名，也是 failed-log 文件名来源 |
+| `endpoint_host` | 从 endpoint 安全解析出的 hostname，不透传完整 URL |
+| `mode` | `webtracking` 或 `ak` |
+| `project` / `logstore` | 目标 SLS project / logstore |
+| `failure_class` | 归一化失败类型 |
+| `status_code` | HTTP 或 SDK 返回的状态码；无状态码时为空 |
+| `retryable` | 该错误是否属于重试类错误 |
+| `reason` | 限长、去敏后的错误摘要 |
+
+`failure_class` 常见取值：
+
+| failure_class | 常见原因 | 建议处理 |
+|---|---|---|
+| `auth_failed` | 401、AK/SK 无效、签名错误 | 检查 AK/SK 是否正确、是否过期 |
+| `permission_denied` | 403、RAM 权限不足 | 确认具备 SLS 写入权限 |
+| `not_found` | 404、project/logstore 不存在 | 核对 project/logstore 拼写和地域 |
+| `quota_throttle` | 429、quota/throttle/server busy | 检查写入限额、QPS、SLS 侧限流 |
+| `network_timeout` | 408、AbortError、TimeoutError、ETIMEDOUT | 检查网络连通性、代理、防火墙 |
+| `network_refused` | ECONNREFUSED、ECONNRESET、socket hang up | 检查 endpoint 可达性和网络链路 |
+| `server_error` | 5xx、InternalServerError | 关注 SLS 服务状态，必要时重试观察 |
+| `payload_too_large` | 413、请求体过大 | 检查单批大小和单条日志体积 |
+| `bad_request` | 其他 4xx | 检查 endpoint/project/logstore 和请求格式 |
+| `unknown` | 未识别错误 | 结合服务日志和 failed-log 的 `reason` 排查 |
 
 ```bash
 # 提取失败原因统计
@@ -178,7 +214,8 @@ for f in glob.glob('$HOME/.loongsuite-pilot/sls-failed-logs/*.jsonl'):
     for line in open(f):
         try:
             r = json.loads(line)
-            errors[r.get('error','unknown')[:80]] += 1
+            key = f"{r.get('failure_class','unknown')} status={r.get('status_code','')}"
+            errors[key] += 1
         except: pass
 for err, cnt in errors.most_common(10):
     print(f'{cnt:5d}  {err}')

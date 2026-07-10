@@ -114,6 +114,23 @@ Local JSONL output can help confirm whether collection itself is working before 
 tail -f ~/.loongsuite-pilot/logs/output/*.jsonl
 ```
 
+## Failure Diagnostics
+
+When an SLS endpoint still fails after the built-in retries, Pilot keeps the existing `FLUSH_SEND_ALARM` alarm type and adds structured diagnostic fields:
+
+| Field | Description |
+|-------|-------------|
+| `endpoint_name` | Configured endpoint name. |
+| `endpoint_host` | Hostname safely parsed from the endpoint URL. It does not include path, query, userinfo, or the full endpoint string. |
+| `mode` | `webtracking` or `ak`. |
+| `project` / `logstore` | Target SLS project and logstore. |
+| `failure_class` | Normalized class such as `auth_failed`, `permission_denied`, `not_found`, `quota_throttle`, `network_timeout`, `network_refused`, `server_error`, `bad_request`, `payload_too_large`, or `unknown`. |
+| `status_code` | HTTP/SDK status code when available. |
+| `retryable` | Whether the failure matches Pilot's retryable set. |
+| `reason` | Redacted, length-limited failure summary. |
+
+The same diagnostic fields are written to `~/.loongsuite-pilot/sls-failed-logs/<endpoint-name>.jsonl` together with the failed `logGroup`. `FLUSH_QUOTA_ALARM` is still emitted for 429 throttling; retry count, batch size, failed-log path, and multi-endpoint isolation are unchanged.
+
 ## Privacy Notes
 
 SLS is a remote destination. Review [Agent Configuration](agents.md) for content capture controls and [Data Masking](masking.md) for secret masking before enabling SLS in sensitive environments.

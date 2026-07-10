@@ -22,6 +22,14 @@ export type AlarmType =
 export interface AlarmContext {
   input_name?: string;
   endpoint_name?: string;
+  mode?: string;
+  endpoint_host?: string;
+  project?: string;
+  logstore?: string;
+  failure_class?: string;
+  status_code?: string | number;
+  retryable?: string | boolean;
+  reason?: string;
 }
 
 export interface AlarmEntry {
@@ -34,6 +42,14 @@ export interface AlarmEntry {
   ver: string;
   input_name?: string;
   endpoint_name?: string;
+  mode?: string;
+  endpoint_host?: string;
+  project?: string;
+  logstore?: string;
+  failure_class?: string;
+  status_code?: string;
+  retryable?: string;
+  reason?: string;
   __time__: number;
 }
 
@@ -58,11 +74,18 @@ export class AlarmManager {
   }
 
   record(type: AlarmType, level: AlarmLevel, message: string, context?: AlarmContext): void {
-    const key = `${type}_${context?.input_name ?? ''}_${context?.endpoint_name ?? ''}`;
+    const key = [
+      type,
+      context?.input_name ?? '',
+      context?.endpoint_name ?? '',
+      context?.failure_class ?? '',
+      context?.status_code ?? '',
+    ].join('_');
     const existing = this.alarms.get(key);
     if (existing) {
       existing.count++;
       existing.message = message;
+      existing.context = context;
     } else {
       this.alarms.set(key, { alarmType: type, level, message, count: 1, context });
     }
@@ -86,12 +109,33 @@ export class AlarmManager {
         ver: this.version,
         __time__: now,
       };
-      if (item.context?.input_name) entry.input_name = item.context.input_name;
-      if (item.context?.endpoint_name) entry.endpoint_name = item.context.endpoint_name;
+      this.copyContext(entry, item.context);
       entries.push(entry);
     }
 
     this.alarms.clear();
     return entries;
+  }
+
+  private copyContext(entry: AlarmEntry, context?: AlarmContext): void {
+    if (!context) return;
+    const target = entry as unknown as Record<string, string | number>;
+    for (const key of [
+      'input_name',
+      'endpoint_name',
+      'mode',
+      'endpoint_host',
+      'project',
+      'logstore',
+      'failure_class',
+      'status_code',
+      'retryable',
+      'reason',
+    ] as const) {
+      const value = context[key];
+      if (value !== undefined && value !== '') {
+        target[key] = String(value);
+      }
+    }
   }
 }
