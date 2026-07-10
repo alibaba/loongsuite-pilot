@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { FileWatcher, extractParentDirs } from '../../../src/file-collection/file-watcher.js';
+import { FileWatcher, extractParentDirs } from '../../../src/pipeline/input/file/file-watcher.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({

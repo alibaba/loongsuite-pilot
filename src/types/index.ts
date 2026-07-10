@@ -70,6 +70,7 @@ export interface AnalyticsConfig {
   mask: MaskConfig;
   hookWatchdog: HookWatchdogConfig;
   fileCollection: FileCollectionToggle;
+  pipeline: PipelineToggle;
   statusBar: StatusBarConfig;
   autoUpdate?: AutoUpdateConfig;
 }
@@ -181,9 +182,14 @@ export interface HookWatchdogConfig {
   repairCooldownMs: number;
 }
 
-export interface FileCollectionToggle {
+export interface PipelineToggle {
   enabled: boolean;
+  file: { enabled: boolean };
+  qoderApi: { enabled: boolean };
 }
+
+/** @deprecated Use PipelineToggle instead */
+export type FileCollectionToggle = PipelineToggle;
 
 export interface StatusBarConfig {
   enabled: boolean;

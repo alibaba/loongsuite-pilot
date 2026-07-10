@@ -44,7 +44,7 @@ import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { LogRetentionService } from './log-retention-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
-import { FileCollectionManager } from '../file-collection/file-collection-manager.js';
+import { PipelineManager } from '../pipeline/pipeline-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
 import { AlarmManager } from '../metrics/alarm-manager.js';
 import { LocalWorkerActivationService } from '../local-workers/local-worker-activation-service.js';
@@ -106,7 +106,7 @@ export class Orchestrator extends EventEmitter {
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
   private localWorkerActivationService: LocalWorkerActivationService | null = null;
-  private fileCollectionManager: FileCollectionManager | null = null;
+  private pipelineManager: PipelineManager | null = null;
   private metricsWriter!: MetricsWriter;
   private alarmManager!: AlarmManager;
   private runtimeWriter: RuntimeWriter | null = null;
@@ -219,17 +219,18 @@ export class Orchestrator extends EventEmitter {
       this.updaterWatchdog.start();
     }
 
-    // 12. Start file collection pipelines (disabled by default)
-    if (this.config.fileCollection.enabled) {
-      this.fileCollectionManager = new FileCollectionManager({
+    // 12. Start pipeline subsystem (disabled by default)
+    if (this.config.pipeline.enabled) {
+      this.pipelineManager = new PipelineManager({
         configDir: path.join(this.dataDir, 'configs', 'local'),
-        stateDir: path.join(this.dataDir, 'state', 'file-collection'),
-        failedLogDir: path.join(this.dataDir, 'logs', 'file-collection-failed'),
+        stateDir: path.join(this.dataDir, 'state', 'pipeline'),
+        failedLogDir: path.join(this.dataDir, 'logs', 'pipeline-failed'),
         dataDir: this.dataDir,
+        pipelineConfig: this.config.pipeline,
       });
-      await this.fileCollectionManager.start();
+      await this.pipelineManager.start();
     } else {
-      logger.info('file collection disabled, skipping');
+      logger.info('pipeline subsystem disabled, skipping');
     }
 
     // 13. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
@@ -277,7 +278,7 @@ export class Orchestrator extends EventEmitter {
     if (!this.isRunning) return;
     logger.info('stopping orchestrator');
 
-    await this.fileCollectionManager?.stop();
+    await this.pipelineManager?.stop();
     await this.metricsWriter?.stop();
     await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(() => {});
     this.metricsSummaryWriter?.stop();
