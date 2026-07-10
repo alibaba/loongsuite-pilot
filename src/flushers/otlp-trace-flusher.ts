@@ -15,10 +15,11 @@ import {
 } from '@loongsuite/otel-util-genai';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 
-import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
+import type { AgentActivityEntry, JsonValue, OtlpTraceFlusherConfig, PerAgentFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
+import { buildAgentActivityEntry } from '../normalization/entry-builder.js';
 import { createLogger } from '../utils/logger.js';
 import { appendLine, ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
 import { randomUUID } from 'node:crypto';
@@ -28,7 +29,119 @@ import path from 'node:path';
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
-const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled']);
+const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'interrupted']);
+// Lazy-loaded from assets/hooks/agent-event-normalizer.mjs (ESM). The resolver
+// backfills gen_ai.step.id on hook tool events after the matching rollout
+// llm.response arrives — see plan 1.2.
+//
+// To keep the flusher testable in vitest (where dynamic import of relative
+// .mjs paths from compiled TS is unreliable) AND to avoid a second
+// implementation, the canonical ZcodeStepResolver lives in
+// assets/hooks/agent-event-normalizer.mjs and is exercised by the .mjs test
+// suite. The flusher uses a thin inline wrapper below that mirrors the same
+// logic — kept in sync via agent-event-normalizer.test.mjs (covers the
+// canonical impl) and this flusher's debounce.test.ts (covers integration).
+
+const ZCODE_AGENT_TYPE = 'zcode';
+
+/**
+ * Extract tool_call.id values from a record's gen_ai.output.messages parts.
+ * Rollout llm.response carries one assistant message whose parts include
+ * {type:'tool_call', id, name, input} blocks.
+ */
+function extractToolCallIds(record: Record<string, any>): string[] {
+  const out: string[] = [];
+  const messages = record['gen_ai.output.messages'];
+  if (!Array.isArray(messages)) return out;
+  for (const msg of messages) {
+    const parts = (msg as Record<string, any>)?.parts;
+    if (!Array.isArray(parts)) continue;
+    for (const p of parts) {
+      const id = (p as Record<string, any>)?.id
+        ?? (p as Record<string, any>)?.tool_call_id
+        ?? (p as Record<string, any>)?.toolCallId;
+      if (typeof id === 'string' && id.length > 0) out.push(id);
+    }
+  }
+  return out;
+}
+
+/**
+ * ZcodeStepResolver — lazy step.id resolver for ZCode hook tool events.
+ * Mirrors assets/hooks/agent-event-normalizer.mjs ZcodeStepResolver; kept
+ * in sync. See plan 1.2 for the lazy-resolution flow diagram.
+ */
+class ZcodeStepResolver {
+  private stepIdByCallId = new Map<string, string>();
+  private pendingToolByCallId = new Map<string, { record: Record<string, any>; turnId: string }[]>();
+  private pendingByTurn = new Map<string, Set<string>>();
+
+  resolve(record: Record<string, any>): Record<string, any> {
+    if (!record || typeof record !== 'object') return record;
+    const agentType = record['gen_ai.agent.type'];
+    if (agentType !== ZCODE_AGENT_TYPE) return record;
+
+    const eventName = record['event.name'];
+    const turnId = record['gen_ai.turn.id'] || '';
+    const callId = record['gen_ai.tool.call.id'] || record['gen_ai.tool.call.exec.id'];
+    const stepId = record['gen_ai.step.id'];
+
+    if (eventName === 'llm.response' && stepId) {
+      const callIds = extractToolCallIds(record);
+      for (const id of callIds) {
+        this.stepIdByCallId.set(id, stepId);
+        const pending = this.pendingToolByCallId.get(id);
+        if (pending) {
+          for (const { record: pendingRec } of pending) {
+            if (!pendingRec['gen_ai.step.id']) pendingRec['gen_ai.step.id'] = stepId;
+          }
+          this.pendingToolByCallId.delete(id);
+        }
+      }
+      return record;
+    }
+
+    if ((eventName === 'tool.call' || eventName === 'tool.result') && !stepId && callId) {
+      const resolved = this.stepIdByCallId.get(callId);
+      if (resolved) {
+        record['gen_ai.step.id'] = resolved;
+      } else {
+        const pendingList = this.pendingToolByCallId.get(callId) ?? [];
+        pendingList.push({ record, turnId });
+        this.pendingToolByCallId.set(callId, pendingList);
+        if (turnId) {
+          const set = this.pendingByTurn.get(turnId) ?? new Set();
+          set.add(callId);
+          this.pendingByTurn.set(turnId, set);
+        }
+      }
+    }
+    return record;
+  }
+
+  flushTurn(turnId: string): string[] {
+    if (!turnId) return [];
+    const callIds = this.pendingByTurn.get(turnId);
+    if (!callIds) return [];
+    const unresolved: string[] = [];
+    for (const id of callIds) {
+      const pendingList = this.pendingToolByCallId.get(id);
+      if (!pendingList) continue;
+      const resolved = this.stepIdByCallId.get(id);
+      if (resolved) {
+        for (const { record } of pendingList) {
+          if (!record['gen_ai.step.id']) record['gen_ai.step.id'] = resolved;
+        }
+        this.pendingToolByCallId.delete(id);
+      } else {
+        unresolved.push(id);
+        this.pendingToolByCallId.delete(id);
+      }
+    }
+    this.pendingByTurn.delete(turnId);
+    return unresolved;
+  }
+}
 
 interface TurnBuffer {
   key: string;
@@ -38,6 +151,220 @@ interface TurnBuffer {
   records: AgentActivityEntry[];
   completed: boolean;
   lastActivityMs: number;
+}
+
+/**
+ * Synthesize records for orphan ZCode tool.call events.
+ *
+ * Two flavors of orphan are handled:
+ *
+ * A) Missing tool.result, step.id resolved: the tool.call was declared by a
+ *    real llm.response (so it carries a real gen_ai.step.id), but ZCode never
+ *    emitted the matching tool.result event. Without intervention the OTLP
+ *    converter's `pairTool()` falls back to "first unconsumed result" and
+ *    routes a sibling tool's result payload to this call's TOOL span (this
+ *    is the S2 failure path: Read TOOL span ends up carrying Bash's cat
+ *    stderr, while Bash's own TOOL span goes empty + 0ms). We synthesize an
+ *    error tool.result keyed by the same gen_ai.tool.call.id so `pairTool`
+ *    pairs it correctly, and the sibling result stays bound to its own call.
+ *
+ * B) Missing tool.result AND missing parent llm.response: the callId never
+ *    got resolved to a step.id (Signal A flushed before rollout poll caught
+ *    up). For this batch we additionally synthesize ONE llm.request +
+ *    llm.response pair whose gen_ai.output.messages parts list every orphan
+ *    tool_call (fixes `structure.step_has_one_llm` — the STEP now has 1 LLM).
+ *    The synthesized llm.response carries finish_reasons=['tool_calls']
+ *    (NOT terminal) so it cannot re-trigger Signal A. A synthetic step.id
+ *    is backfilled onto these tool.call records so they escape the
+ *    converter's `__no_step__` bucket.
+ *
+ * `unresolvedCallIds` (from the ZcodeStepResolver.flushTurn) distinguishes
+ * the two: callIds in this set are flavor B; all other tool.call records in
+ * buf that lack a matching tool.result are flavor A.
+ *
+ * Returns the synthesized records (NOT including the backfilled tool.call
+ * mutations — those are applied in place on buf.records). Caller appends the
+ * synthesized records to buf.records before conversion.
+ */
+function synthesizeOrphanZcodeToolRecords(
+  buf: TurnBuffer,
+  unresolvedCallIds: string[],
+): AgentActivityEntry[] {
+  if (buf.keySource !== 'turn_id') return [];
+
+  const unresolvedSet = new Set(unresolvedCallIds);
+
+  // Build set of callIds that already have a tool.result in buf — we don't
+  // synthesize results for those.
+  const existingResultCallIds = new Set<string>();
+  for (const rec of buf.records) {
+    if (rec['event.name'] === 'tool.result') {
+      const id = rec['gen_ai.tool.call.id'] as string | undefined;
+      if (id) existingResultCallIds.add(id);
+    }
+  }
+
+  // Collect orphan tool.call records — those lacking a matching tool.result
+  // (flavor A: resolved step.id but missing result event) OR whose callId is
+  // in `unresolved` (flavor B: no parent llm.response ever arrived, even if
+  // a tool.result does exist — the LLM pair still needs synthesis).
+  const orphanToolCalls: AgentActivityEntry[] = [];
+  for (const rec of buf.records) {
+    if (rec['event.name'] !== 'tool.call') continue;
+    const id = rec['gen_ai.tool.call.id'] as string | undefined;
+    if (!id) continue;
+    const hasResult = existingResultCallIds.has(id);
+    const isUnresolved = unresolvedSet.has(id);
+    if (!hasResult || isUnresolved) {
+      orphanToolCalls.push(rec);
+    }
+  }
+
+  if (orphanToolCalls.length === 0) return [];
+
+  // Pick a synthetic step.id that doesn't collide with existing step.ids in buf.
+  // Used only for flavor B orphans (no real step.id).
+  const existingStepIds = new Set<string>();
+  for (const rec of buf.records) {
+    const sid = rec['gen_ai.step.id'] as string | undefined;
+    if (sid) existingStepIds.add(sid);
+  }
+  let synthIdx = 0;
+  let stepId = `${buf.keyValue}:synthetic-${synthIdx}`;
+  while (existingStepIds.has(stepId)) {
+    synthIdx++;
+    stepId = `${buf.keyValue}:synthetic-${synthIdx}`;
+  }
+
+  // Find an LLM record to copy model/session/trace context from; fall back to
+  // values on the orphan tool.call itself.
+  const refLlm = buf.records.find(
+    (r) => r['event.name'] === 'llm.response' || r['event.name'] === 'llm.request',
+  );
+  const refRec = refLlm ?? orphanToolCalls[0];
+  const traceId = (refRec['trace_id'] as string) ?? '';
+  const sessionId = (refRec['gen_ai.session.id'] as string) ?? '';
+  const agentType = (refRec['gen_ai.agent.type'] as string) ?? ZCODE_AGENT_TYPE;
+  const model = (refLlm?.['gen_ai.request.model'] as string) ?? 'unknown';
+
+  const out: AgentActivityEntry[] = [];
+
+  // Synthesize tool.result for every orphan tool.call that lacks one
+  // (flavor A missing-result path; flavor B with existing result is skipped
+  // to avoid duplicate tool.result events). Keyed by the SAME
+  // gen_ai.tool.call.id so the OTLP converter's pairTool() matches it to
+  // this call instead of falling back to a sibling's result.
+  for (const tc of orphanToolCalls) {
+    const callId = tc['gen_ai.tool.call.id'] as string;
+    if (existingResultCallIds.has(callId)) continue;
+    const callTimeNs = String(tc['time_unix_nano'] ?? '0');
+    const callTimeMs = callTimeNs.length >= 16
+      ? Number(BigInt(callTimeNs) / 1_000_000n)
+      : Date.now();
+    const resultTimeMs = callTimeMs + 1;
+    const resultTimeNs = String(resultTimeMs) + '000000';
+    const tcStepId = (tc['gen_ai.step.id'] as string | undefined) ?? stepId;
+    out.push(buildAgentActivityEntry({
+      timestamp: resultTimeMs,
+      time_unix_nano: resultTimeNs,
+      'event.name': 'tool.result',
+      trace_id: traceId,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.turn.id': buf.keyValue,
+      'gen_ai.step.id': tcStepId,
+      'gen_ai.agent.type': agentType,
+      'gen_ai.tool.name': tc['gen_ai.tool.name'] ?? '',
+      'gen_ai.tool.call.id': callId,
+      'gen_ai.tool.call.arguments': tc['gen_ai.tool.call.arguments'],
+      'gen_ai.tool.call.result': { status: 'error', error: 'orphaned' } as unknown as JsonValue,
+      'gen_ai.tool.call.status': 'error',
+      'tool.result.status': 'error',
+      'error.type': 'orphaned',
+      'error.message': 'ZCode did not emit tool.result for this call',
+    }));
+  }
+
+  // Flavor B only: tool.call records whose callId is in `unresolved` (no
+  // parent llm.response ever arrived). Backfill a synthetic step.id on them
+  // (so they escape __no_step__ bucket) and synthesize ONE llm.request +
+  // llm.response pair parenting all of them. Flavor A orphans already have a
+  // real step.id from a real llm.response — synthesizing an LLM pair for
+  // them would create a duplicate STEP and break `step_has_one_llm`.
+  const trueOrphans = orphanToolCalls.filter(
+    (tc) => unresolvedSet.has(tc['gen_ai.tool.call.id'] as string),
+  );
+  if (trueOrphans.length === 0) return out;
+
+  for (const rec of trueOrphans) {
+    if (!rec['gen_ai.step.id']) {
+      (rec as Record<string, unknown>)['gen_ai.step.id'] = stepId;
+    }
+  }
+
+  const firstCallMs = trueOrphans.reduce(
+    (min, tc) => {
+      const ns = String(tc['time_unix_nano'] ?? '0');
+      const ms = ns.length >= 16 ? Number(BigInt(ns) / 1_000_000n) : Date.now();
+      return Math.min(min, ms);
+    },
+    Date.now(),
+  );
+  const reqTimeMs = Math.max(0, firstCallMs - 1);
+  const lastCallMs = trueOrphans.reduce(
+    (max, tc) => {
+      const ns = String(tc['time_unix_nano'] ?? '0');
+      const ms = ns.length >= 16 ? Number(BigInt(ns) / 1_000_000n) : Date.now();
+      return Math.max(max, ms);
+    },
+    0,
+  );
+  const respTimeMs = lastCallMs + 1;
+
+  const pairingId = `synthetic-resp-${stepId}`;
+  const toolCallParts = trueOrphans.map((tc) => ({
+    type: 'tool_call',
+    id: (tc['gen_ai.tool.call.id'] as string) ?? '',
+    name: (tc['gen_ai.tool.name'] as string) ?? '',
+    input: tc['gen_ai.tool.call.arguments'],
+  }));
+
+  out.push(buildAgentActivityEntry({
+    timestamp: reqTimeMs,
+    time_unix_nano: String(reqTimeMs) + '000000',
+    'event.name': 'llm.request',
+    trace_id: traceId,
+    'gen_ai.session.id': sessionId,
+    'gen_ai.turn.id': buf.keyValue,
+    'gen_ai.step.id': stepId,
+    'gen_ai.request.id': `synthetic-req-${stepId}`,
+    'gen_ai.response.id': pairingId,
+    'gen_ai.agent.type': agentType,
+    'gen_ai.request.model': model,
+    'gen_ai.response.model': model,
+  }));
+
+  out.push(buildAgentActivityEntry({
+    timestamp: respTimeMs,
+    time_unix_nano: String(respTimeMs) + '000000',
+    'event.name': 'llm.response',
+    trace_id: traceId,
+    'gen_ai.session.id': sessionId,
+    'gen_ai.turn.id': buf.keyValue,
+    'gen_ai.step.id': stepId,
+    'gen_ai.request.id': `synthetic-req-${stepId}`,
+    'gen_ai.response.id': pairingId,
+    'gen_ai.agent.type': agentType,
+    'gen_ai.request.model': model,
+    'gen_ai.response.model': model,
+    'gen_ai.response.finish_reasons': ['tool_calls'],
+    'gen_ai.output.messages': [{
+      role: 'assistant',
+      parts: toolCallParts,
+      finish_reason: 'tool_calls',
+    }] as unknown as JsonValue,
+  }));
+
+  return out;
 }
 
 interface AgentConvertState {
@@ -111,6 +438,31 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private flushedTurnKeys = new Set<string>();
   private readonly convertLocks = new Map<string, Promise<void>>();
 
+  /**
+   * Per-agentType flusher config overrides (plan 2.1 + 2.2). Keyed by
+   * normalized agentType. Falls back to global cfg for missing fields.
+   * Built once at construction from cfg.perAgentFlusherConfig.
+   */
+  private readonly perAgentConfig: Map<string, PerAgentFlusherConfig>;
+
+  /**
+   * Debounce timers for turn flush (plan 2.2). When `turnFlushDebounceMs > 0`
+   * for an agentType, triggerFlush() schedules a setTimeout instead of
+   * flushing immediately; late-arriving entries for the same turn key
+   * appended during the debounce window are included in the single flush.
+   *
+   * Keyed by turn buffer key (same as turnBuffers/flushedTurnKeys).
+   */
+  private flushDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /**
+   * ZCode step.id lazy resolver instance. Lazily instantiated on first zcode
+   * entry. Single instance per flusher — state is process-scoped (in-memory),
+   * which is fine since both rollout llm.response and hook tool.call events
+   * for the same turn flow through this flusher.
+   */
+  private zcodeResolver: ZcodeStepResolver | undefined;
+
   // 批量模式标记：为 true 时 send() 中 Signal A（finish_reason=stop）只标记
   // completed 不立即 flush，由 sendBatch() 在所有 entries 处理完后统一 flush。
   // 解决的问题：Cursor subagent 的子 records 排在父 stop 之后，如果 Signal A
@@ -145,7 +497,56 @@ export class OtlpTraceFlusher extends BaseFlusher {
       this.idleTimer.unref();
     }
 
+    // Build per-agentType override map. Lookup key is normalized agentType
+    // (e.g. 'zcode'); missing fields fall back to global cfg inside the
+    // accessors (getTurnIdleTimeoutMs / getTurnFlushDebounceMs).
+    this.perAgentConfig = new Map();
+    const perAgentRaw = cfg.perAgentFlusherConfig ?? {};
+    for (const [agentType, override] of Object.entries(perAgentRaw)) {
+      if (override && typeof override === 'object') {
+        this.perAgentConfig.set(normalizeAgentType(agentType), override);
+      }
+    }
+    // Per-agent idle timeout may be set even when global is 0; spin up the
+    // ticker in that case too.
+    const hasPerAgentIdle = [...this.perAgentConfig.values()].some(
+      (o) => typeof o.turnIdleTimeoutMs === 'number' && (o.turnIdleTimeoutMs ?? 0) > 0,
+    );
+    if (hasPerAgentIdle && !this.idleTimer) {
+      this.idleTimer = setInterval(() => this.tickIdleTimeout(), 1000);
+      this.idleTimer.unref();
+    }
+
     logger.info(`OTLP trace flusher initialized → ${this.resolvedEndpointUrl}`);
+  }
+
+  /** Per-agent idle timeout, falling back to global cfg. */
+  private getTurnIdleTimeoutMs(agentType: string): number {
+    const override = this.perAgentConfig.get(agentType);
+    if (override && typeof override.turnIdleTimeoutMs === 'number') {
+      return override.turnIdleTimeoutMs;
+    }
+    return this.cfg.turnIdleTimeoutMs ?? 0;
+  }
+
+  /** Per-agent debounce, falling back to global cfg (default 0 = no debounce). */
+  private getTurnFlushDebounceMs(agentType: string): number {
+    const override = this.perAgentConfig.get(agentType);
+    if (override && typeof override.turnFlushDebounceMs === 'number') {
+      return override.turnFlushDebounceMs;
+    }
+    return this.cfg.turnFlushDebounceMs ?? 0;
+  }
+
+  /**
+   * Instantiate the ZCode step.id resolver on first zcode entry. The
+   * resolver is process-scoped (in-memory state). Non-zcode agents skip.
+   */
+  private ensureZcodeResolver(): ZcodeStepResolver {
+    if (!this.zcodeResolver) {
+      this.zcodeResolver = new ZcodeStepResolver();
+    }
+    return this.zcodeResolver;
   }
 
   // --- Public API (BaseFlusher) ---
@@ -156,13 +557,30 @@ export class OtlpTraceFlusher extends BaseFlusher {
       (entry['gen_ai.agent.type'] as string) ?? '',
     );
 
+    // ZCode step.id lazy backfill (plan 1.2): for zcode agent records only,
+    // run the entry through the resolver. Rollout llm.response populates
+    // call_id→step.id; hook tool.call/tool.result get backfilled. Late-
+    // arriving tool events that miss the rollout window stay pending until
+    // flushTurn() is called for the turn.
+    if (agentType === ZCODE_AGENT_TYPE) {
+      const resolver = this.ensureZcodeResolver();
+      resolver.resolve(entry);
+    }
+
     if (source === 'ephemeral') {
       await this.convertAndExport(agentType, [entry]);
       return;
     }
 
-    // Drop late arrivals for already-flushed turns
-    if (this.flushedTurnKeys.has(key)) {
+    // Late-arrival handling (plan 2.2): when debounce is active, a key that
+    // is in flushedTurnKeys BUT still has a live debounce timer means the
+    // turn hasn't actually flushed yet — we still accept the entry. The
+    // existing timer will fire and pick up the re-created buffer (the
+    // original buf was removed from turnBuffers in triggerFlush; send()'s
+    // append path below creates a fresh one to hold the late entry). Once
+    // the timer fires and runs the flush, the debounce timer is cleared and
+    // subsequent arrivals are dropped.
+    if (this.flushedTurnKeys.has(key) && !this.flushDebounceTimers.has(key)) {
       logger.debug(`Dropping late entry for already-flushed turn ${key}`);
       return;
     }
@@ -194,10 +612,28 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Signal A: 检测到终态 finish_reason，标记 turn 完成。
     // 逐条模式下立即 flush；批量模式下（_deferSignalA=true）仅标记 completed，
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
+    //
+    // P0 race condition fix: zcode-rollout source's terminal llm.response
+    // (finish_reason=stop/end_turn) must NOT trigger Signal A. Rollout input
+    // polls every 30s; when it reads the final record, hook JSONL's
+    // tool.call/tool.result events may not have been polled yet by zcode-log
+    // input (5s poll). If Signal A fires here, the debounce window starts, and
+    // hook events arriving after the window get dropped by the late-arrival
+    // guard ("Dropping late entry for already-flushed turn"). Instead, let
+    // hook Stop's terminal signal (or idle timeout) trigger the flush, giving
+    // hook input time to poll all tool events.
+    //
+    // The suppressed entry's finish_reasons are still on the record for the
+    // converter to put on the LLM span (gen_ai.response.finish_reasons); we
+    // only skip the flush trigger, not the field.
     if (hasTerminalFinishReason(entry['gen_ai.response.finish_reasons'])) {
-      buf.completed = true;
-      if (!this._deferSignalA) {
-        this.triggerFlush(buf);
+      const isZcodeRolloutTerminal = agentType === ZCODE_AGENT_TYPE
+        && entry['agent.source'] === 'zcode-rollout';
+      if (!isZcodeRolloutTerminal) {
+        buf.completed = true;
+        if (!this._deferSignalA) {
+          this.triggerFlush(buf);
+        }
       }
     }
   }
@@ -213,11 +649,34 @@ export class OtlpTraceFlusher extends BaseFlusher {
     } finally {
       this._deferSignalA = false;
     }
-    // 统一 flush 所有在批量处理期间被 Signal A 标记为 completed 的 buffer
-    await this.flushCompleted();
+    // sendBatch 路径走 triggerFlush 以尊重 per-agent turnFlushDebounceMs（AGE-675）。
+    // flush()/shutdown 仍走原 flushCompleted 的立即 flush 语义（clearTimers + 三连），
+    // 不受此处改动影响——避免 debounce>0 agent 在 flush()/shutdown 路径重新 schedule
+    // timer 导致 exporter 已 shutdown 后才 fire、turn 数据丢失。
+    const completed: TurnBuffer[] = [];
+    for (const [, buf] of this.turnBuffers) {
+      if (buf.completed) completed.push(buf);
+    }
+    for (const buf of completed) {
+      this.triggerFlush(buf);
+    }
+    // debounce>0: triggerFlush 只 schedule timer，不入 inFlightExports；此循环对
+    // zcode 是 no-op，timer 在 shutdown() 路径由 clearTimers + flushCompleted 兜底。
+    // debounce=0: triggerFlush 立即 invokeFlushSingleTurn 入 inFlightExports，此循环等待。
+    while (this.inFlightExports.size > 0) {
+      const batch = [...this.inFlightExports];
+      await Promise.allSettled(batch);
+    }
   }
 
   async flush(): Promise<void> {
+    // Clear any pending debounce timers so their callbacks don't fire after
+    // the in-flight set has been awaited; their buffers are flushed below.
+    for (const timer of this.flushDebounceTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.flushDebounceTimers.clear();
+
     for (const buf of this.turnBuffers.values()) {
       buf.completed = true;
     }
@@ -234,6 +693,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
       clearInterval(this.idleTimer);
       this.idleTimer = undefined;
     }
+    for (const timer of this.flushDebounceTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.flushDebounceTimers.clear();
 
     await this.flush();
 
@@ -290,8 +753,38 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (markFlushed) {
       this.flushedTurnKeys.add(buf.key);
     }
+    const debounceMs = this.getTurnFlushDebounceMs(buf.agentType);
+    if (debounceMs > 0) {
+      // Debounce path (plan 2.2): keep buf in turnBuffers so late-arriving
+      // entries (passing the late-arrival guard in send()) append to its
+      // records array — they get included in the single flush when the
+      // timer fires. The buf is removed only when the timer actually runs.
+      const existing = this.flushDebounceTimers.get(buf.key);
+      if (existing) clearTimeout(existing);
+      const timer = setTimeout(() => {
+        this.flushDebounceTimers.delete(buf.key);
+        const liveBuf = this.turnBuffers.get(buf.key);
+        if (!liveBuf) return;
+        this.turnBuffers.delete(buf.key);
+        this.invokeFlushSingleTurn(liveBuf);
+      }, debounceMs);
+      timer.unref?.();
+      this.flushDebounceTimers.set(buf.key, timer);
+      return;
+    }
     this.turnBuffers.delete(buf.key);
-    const p = this.flushSingleTurn(buf).catch((err) => {
+    this.invokeFlushSingleTurn(buf);
+  }
+
+  /**
+   * Wraps flushSingleTurn with the resolver's flushTurn() pre-pass for zcode
+   * agent buffers. Non-zcode buffers skip the resolver. The in-flight
+   * promise is tracked for shutdown.
+   */
+  private invokeFlushSingleTurn(buf: TurnBuffer): void {
+    const p = (async () => {
+      await this.flushSingleTurn(buf);
+    })().catch((err) => {
       logger.error(`Failed to flush turn ${buf.key}`, { err: String(err) });
     }).finally(() => {
       this.inFlightExports.delete(p);
@@ -320,6 +813,27 @@ export class OtlpTraceFlusher extends BaseFlusher {
         if (!record['gen_ai.turn.id']) {
           (record as Record<string, unknown>)['gen_ai.turn.id'] = buf.keyValue;
         }
+      }
+    }
+    // ZCode step.id lazy resolver flush pass + orphan synthesis. Runs in
+    // flushSingleTurn so ALL flush paths (Signal A immediate, sendBatch
+    // deferred, idle timeout, shutdown) benefit.
+    if (buf.agentType === ZCODE_AGENT_TYPE && buf.keySource === 'turn_id') {
+      const resolver = this.ensureZcodeResolver();
+      const unresolved = resolver.flushTurn(buf.keyValue);
+      if (unresolved.length > 0) {
+        logger.warn(`zcode step.id unresolved for ${unresolved.length} tool calls in turn ${buf.keyValue}`, {
+          callIds: unresolved.slice(0, 10).join(','),
+        });
+      }
+      // Always run synthesis — it covers both unresolved-step orphans AND
+      // tool.call records that have a real step.id but no matching
+      // tool.result event (S2 failure path: missing tool.result would
+      // otherwise let pairTool() route a sibling's result payload here).
+      const synthesized = synthesizeOrphanZcodeToolRecords(buf, unresolved);
+      if (synthesized.length > 0) {
+        buf.records.push(...synthesized);
+        logger.info(`zcode orphan synthesis for turn ${buf.keyValue}: +${synthesized.length} records`);
       }
     }
     await this.convertAndExport(buf.agentType, buf.records);
@@ -654,11 +1168,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   private tickIdleTimeout(): void {
-    const timeout = this.cfg.turnIdleTimeoutMs ?? 0;
-    if (timeout <= 0) return;
     const now = Date.now();
     for (const [, buf] of this.turnBuffers) {
-      if (!buf.completed && now - buf.lastActivityMs > timeout) {
+      if (buf.completed) continue;
+      const timeout = this.getTurnIdleTimeoutMs(buf.agentType);
+      // `>=` so the first tick at exactly TTL boundary flushes (rather than
+      // requiring one extra polling tick — easier to reason about in tests
+      // and aligns with "no activity for N ms" semantics).
+      if (timeout > 0 && now - buf.lastActivityMs >= timeout) {
         buf.completed = true;
         this.triggerFlush(buf);
       }

@@ -657,3 +657,150 @@ function inferQoderToolResultStatus(content) {
   if (content.is_error === false) return 'success';
   return undefined;
 }
+
+// ─── ZCode step.id lazy resolver (plan 1.2) ────────────────────────────────
+//
+// Why this exists: ZCode rollout JSONL has step.id (allocated per turn by
+// zcode-rollout-input from turnId+requestId), but the hook side (tool.call /
+// tool.result from zcode-hook-processor) has no step.id — and the hook fires
+// *before* the rollout record is written to disk. So at the moment a hook
+// tool.call event arrives at the collector, the rollout llm.response that
+// carries the matching tool_call.id (and thus the step.id) hasn't been read
+// yet. Lazy resolution: buffer the unmatched tool event, backfill step.id
+// once the rollout llm.response arrives.
+//
+// The resolver is process-scoped (in-memory, not persisted): if the pilot
+// daemon restarts mid-turn, pending tool events are lost — acceptable, since
+// the rollout input's own offset/state is persisted and the next poll will
+// re-emit the rollout llm.response with step.id intact; only the hook side
+// loses its (already-volatile) pending state.
+
+const ZCODE_AGENT_TYPE = 'zcode';
+
+/**
+ * Extract tool_call.id values from a record's gen_ai.output.messages parts.
+ * Rollout llm.response carries one assistant message whose parts include
+ * {type:'tool_call', id, name, input} blocks.
+ */
+function extractToolCallIds(record) {
+  const out = [];
+  const messages = record?.['gen_ai.output.messages'];
+  if (!Array.isArray(messages)) return out;
+  for (const msg of messages) {
+    const parts = msg?.parts;
+    if (!Array.isArray(parts)) continue;
+    for (const p of parts) {
+      const id = p?.id ?? p?.tool_call_id ?? p?.toolCallId;
+      if (typeof id === 'string' && id.length > 0) out.push(id);
+    }
+  }
+  return out;
+}
+
+/**
+ * ZcodeStepResolver — lazy step.id resolver for ZCode hook tool events.
+ *
+ * Caller contract:
+ *   - Feed every zcode agent record (from any source) through resolve().
+ *   - resolve() mutates and returns the record:
+ *     - llm.response with tool_call.id → registers call_id→step.id mapping,
+ *       no other mutation (step.id already set by rollout input).
+ *     - tool.call / tool.result without step.id → looks up by call_id;
+ *       HIT: backfills gen_ai.step.id; MISS: buffers in pending.
+ *   - Call flushTurn(turnId) before the flusher exports the turn's spans:
+ *     scans pending entries for that turn, backfills any now-resolved,
+ *     logs unresolved ones for diagnostics, then clears the turn's pending
+ *     set.
+ */
+export class ZcodeStepResolver {
+  constructor() {
+    /** @type {Map<string,string>} call_id → step_id (from rollout llm.response) */
+    this.stepIdByCallId = new Map();
+    /** @type {Map<string, {record: object, turnId: string}[]>} call_id → pending tool records */
+    this.pendingToolByCallId = new Map();
+    /** @type {Map<string, Set<string>>} turnId → set of call_ids awaiting resolution */
+    this.pendingByTurn = new Map();
+  }
+
+  resolve(record) {
+    if (!record || typeof record !== 'object') return record;
+    const agentType = record['gen_ai.agent.type'];
+    if (agentType !== ZCODE_AGENT_TYPE) return record;
+
+    const eventName = record['event.name'];
+    const turnId = record['gen_ai.turn.id'] || '';
+    const callId = record['gen_ai.tool.call.id'] || record['gen_ai.tool.call.exec.id'];
+    const stepId = record['gen_ai.step.id'];
+
+    // A. rollout llm.response: register call_id → step.id, then drain pending.
+    if (eventName === 'llm.response' && stepId) {
+      const callIds = extractToolCallIds(record);
+      for (const id of callIds) {
+        this.stepIdByCallId.set(id, stepId);
+        const pending = this.pendingToolByCallId.get(id);
+        if (pending) {
+          for (const { record: pendingRec } of pending) {
+            if (!pendingRec['gen_ai.step.id']) {
+              pendingRec['gen_ai.step.id'] = stepId;
+            }
+          }
+          this.pendingToolByCallId.delete(id);
+        }
+      }
+      return record;
+    }
+
+    // B. hook tool.call / tool.result: look up step.id by call_id, buffer if MISS.
+    if ((eventName === 'tool.call' || eventName === 'tool.result') && !stepId && callId) {
+      const resolved = this.stepIdByCallId.get(callId);
+      if (resolved) {
+        record['gen_ai.step.id'] = resolved;
+      } else {
+        // Buffer the record reference (mutated in place when step.id arrives).
+        const pendingList = this.pendingToolByCallId.get(callId) ?? [];
+        pendingList.push({ record, turnId });
+        this.pendingToolByCallId.set(callId, pendingList);
+        if (turnId) {
+          const set = this.pendingByTurn.get(turnId) ?? new Set();
+          set.add(callId);
+          this.pendingByTurn.set(turnId, set);
+        }
+      }
+    }
+    return record;
+  }
+
+  /**
+   * Called before the flusher exports a turn's spans. Backfills any
+   * resolved-but-still-pending tool records, logs unresolved ones for
+   * diagnostics, then clears the turn's pending set.
+   *
+   * Returns the list of unresolved call_ids for caller-side logging.
+   */
+  flushTurn(turnId) {
+    if (!turnId) return [];
+    const callIds = this.pendingByTurn.get(turnId);
+    if (!callIds) return [];
+    const unresolved = [];
+    for (const id of callIds) {
+      const pendingList = this.pendingToolByCallId.get(id);
+      if (!pendingList) continue;
+      const resolved = this.stepIdByCallId.get(id);
+      if (resolved) {
+        for (const { record } of pendingList) {
+          if (!record['gen_ai.step.id']) record['gen_ai.step.id'] = resolved;
+        }
+        this.pendingToolByCallId.delete(id);
+      } else {
+        // Drop the buffered records too: the turn's spans are about to be
+        // exported without step.id, and a late rollout arrival after export
+        // can no longer mutate the exported spans — so there's no point
+        // keeping the pending entry around (it would just leak).
+        unresolved.push(id);
+        this.pendingToolByCallId.delete(id);
+      }
+    }
+    this.pendingByTurn.delete(turnId);
+    return unresolved;
+  }
+}

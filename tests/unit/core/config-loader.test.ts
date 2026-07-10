@@ -758,7 +758,12 @@ describe('ConfigLoader', () => {
         'x-arms-project': 'arms',
         'x-cms-workspace': 'ws1',
       });
-      expect(result!.resourceAttributes).toEqual({ 'acs.arms.service.feature': 'genai_app' });
+      expect(result!.resourceAttributes).toEqual({
+        'acs.arms.service.feature': 'genai_app',
+        'acs.arms.service.id': 'arms',
+        'acs.cms.workspace': 'ws1',
+        'ali.trace.source': 'loongsuite-pilot',
+      });
       expect(result!.resourceAttributeKeys).toEqual([]);
     });
 

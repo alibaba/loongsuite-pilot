@@ -102,7 +102,7 @@ export class HookManager {
 
       const hookEntry = def.useNestedFormat
         ? {
-            matcher: def.matcher ?? '*',
+            ...(def.matcher ? { matcher: def.matcher } : {}),
             hooks: [{ command: def.hookCommand, type: 'command' }],
           }
         : {

@@ -124,6 +124,11 @@ export interface ConfigFile {
     debug?: boolean;
     captureMessageContent?: boolean;
     turnIdleTimeoutMs?: number;
+    turnFlushDebounceMs?: number;
+    perAgentFlusherConfig?: Record<string, {
+      turnIdleTimeoutMs?: number;
+      turnFlushDebounceMs?: number;
+    }>;
     resourceAttributeKeys?: string[];
   };
 
@@ -461,6 +466,8 @@ function buildOtlpTraceConfigNew(
     captureMessageContent,
     debug: otlp?.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
+    turnFlushDebounceMs: otlp?.turnFlushDebounceMs ?? 0,
+    perAgentFlusherConfig: otlp?.perAgentFlusherConfig,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     maxExportBatchBytes: otlp?.maxExportBatchBytes,
     compression: otlp?.compression,
@@ -479,16 +486,22 @@ function buildOtlpTraceConfigLegacy(config: AnalyticsConfig): OtlpTraceFlusherCo
 
   const captureMessageContent = resolveCaptureMessageContent(config.agents);
 
+  const resourceAttributes: Record<string, string> = { 'acs.arms.service.feature': 'genai_app' };
+  if (cms.workspace) resourceAttributes['acs.cms.workspace'] = cms.workspace;
+  if (armsProject) resourceAttributes['acs.arms.service.id'] = armsProject;
+  resourceAttributes['ali.trace.source'] = 'loongsuite-pilot';
+
   return {
     enabled: true,
     endpoint: cms.endpoint,
     protocol: 'http/protobuf',
     headers,
     serviceName: serviceNamePrefix || 'loongsuite-pilot',
-    resourceAttributes: { 'acs.arms.service.feature': 'genai_app' },
+    resourceAttributes,
     captureMessageContent,
     debug: cms.debug ?? false,
     turnIdleTimeoutMs: 0,
+    turnFlushDebounceMs: 0,
     resourceAttributeKeys: resolveResourceAttributeKeys(config.otlpTrace),
     maxExportBatchBytes: undefined,
     compression: undefined,
