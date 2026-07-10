@@ -17,6 +17,7 @@ UPDATER_LOG_FILE="$LOG_DIR/loongsuite-pilot-updater.log"
 MONITOR_LOG_FILE="$LOG_DIR/loongsuite-pilot-monitor-process.log"
 DASHBOARD_LOG_FILE="$LOG_DIR/loongsuite-pilot-dashboard.log"
 CONFIG_FILE="$DATA_DIR/config.json"
+SPAN_ATTR_FILE="$DATA_DIR/span-attributes.json"
 MONITOR_PID_FILE="$DATA_DIR/loongsuite-pilot-monitor.pid"
 DASHBOARD_PID_FILE="$DATA_DIR/loongsuite-pilot-dashboard.pid"
 MONITOR_DATA_DIR="$LOG_DIR/process-monitor"
@@ -1617,6 +1618,61 @@ autostart_status() {
     esac
 }
 
+# Manage ~/.loongsuite-pilot/span-attributes.json — user-defined attributes
+# injected into trace spans (not the event log). The collector re-reads the
+# file per turn, so changes take effect without a restart.
+_span_attr_run() {
+    local node_bin
+    node_bin=$(resolve_node) || { echo "[span-attr] node runtime not found" >&2; exit 1; }
+    "$node_bin" -e '
+const fs = require("fs");
+const file = process.argv[1], op = process.argv[2], key = process.argv[3], value = process.argv[4];
+const RESERVED = ["gen_ai.","git.","workspace.","event.","trace_","user.","cost_","agent.","time_unix_nano","observed_time_unix_nano"];
+const isReserved = k => RESERVED.some(p => k === p || k.indexOf(p) === 0);
+function read() { try { const o = JSON.parse(fs.readFileSync(file, "utf-8")); return (o && typeof o === "object" && !Array.isArray(o)) ? o : {}; } catch { return {}; } }
+function write(o) { fs.writeFileSync(file, JSON.stringify(o, null, 2) + "\n"); }
+if (op === "set") {
+  if (!key || value === undefined) { console.error("usage: span-attr set <key> <value>"); process.exit(1); }
+  if (isReserved(key)) { console.error("refused: \"" + key + "\" uses a reserved prefix (gen_ai./git./workspace./event./trace_/user./cost_/agent./...)"); process.exit(1); }
+  const o = read(); o[key] = String(value); write(o); console.log("set " + key + "=" + o[key]);
+} else if (op === "unset") {
+  if (!key) { console.error("usage: span-attr unset <key>"); process.exit(1); }
+  const o = read(); if (Object.prototype.hasOwnProperty.call(o, key)) { delete o[key]; write(o); console.log("unset " + key); } else { console.log("(no such key: " + key + ")"); }
+} else if (op === "list") {
+  const o = read(); const ks = Object.keys(o);
+  if (ks.length === 0) { console.log("(no custom span attributes)"); } else { for (const k of ks) console.log(k + "=" + o[k]); }
+}
+' "$SPAN_ATTR_FILE" "$@"
+}
+
+cmd_span_attr() {
+    local sub="${1:-}"
+    case "$sub" in
+        set)   shift; _span_attr_run set "$@" ;;
+        unset) shift; _span_attr_run unset "$@" ;;
+        list)  _span_attr_run list ;;
+        clear)
+            rm -f "$SPAN_ATTR_FILE"
+            echo "cleared custom span attributes ($SPAN_ATTR_FILE)"
+            ;;
+        ""|help|-h|--help)
+            echo "Usage: loongsuite-pilot span-attr <set|unset|list|clear>"
+            echo ""
+            echo "  set <key> <value>   Set a custom trace span attribute"
+            echo "  unset <key>         Remove a custom attribute"
+            echo "  list                Show current custom attributes"
+            echo "  clear               Remove all custom attributes"
+            echo ""
+            echo "Attributes are injected into trace spans only (not the event log)."
+            echo "Reserved-prefix keys (gen_ai./git./workspace./event./trace_/user./cost_/agent./...) are rejected."
+            echo "Changes take effect on the next turn — no restart needed." ;;
+        *)
+            echo "Unknown span-attr command: $sub" >&2
+            echo "Usage: loongsuite-pilot span-attr <set|unset|list|clear>" >&2
+            exit 1 ;;
+    esac
+}
+
 cmd_help() {
     echo "Usage: loongsuite-pilot <command> [options]"
     echo ""
@@ -1627,6 +1683,7 @@ cmd_help() {
     echo "  status          Show service status (default)"
     echo "  info            Show version and config info"
     echo "  token-usage     Show token usage TUI"
+    echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     echo "  monitor start   Start process resource monitor"
     echo "  monitor stop    Stop process resource monitor"
     echo "  worker ...      Manage local remote-controlled workers"
@@ -1658,6 +1715,7 @@ case "${1:-status}" in
     info)        cmd_info ;;
     token-usage) shift; cmd_token_usage "$@" ;;
     tokens)      shift; cmd_token_usage "$@" ;;
+    span-attr)   shift; cmd_span_attr "$@" ;;
     monitor)             cmd_monitor "${2:-}" ;;
     worker)              shift; cmd_worker "$@" ;;
     rollback)            cmd_rollback ;;

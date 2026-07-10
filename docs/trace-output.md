@@ -210,10 +210,14 @@ Two kinds of extra attributes can be attached to **trace spans** (they are NOT w
   export OTEL_SPAN_ATTRIBUTES="team=infra,deployment.env=prod"
   ```
 
-- A mutable file `~/.loongsuite-pilot/span-attributes.json` (`{"key":"value"}`), re-read on change so edits take effect without a restart:
+- A mutable file `~/.loongsuite-pilot/span-attributes.json` (`{"key":"value"}`), re-read on change so edits take effect without a restart. Manage it with the CLI (recommended) instead of editing by hand:
 
-  ```json
-  { "release": "2026.07", "oncall": "alice" }
+  ```bash
+  loongsuite-pilot span-attr set release 2026.07
+  loongsuite-pilot span-attr set oncall alice
+  loongsuite-pilot span-attr list
+  loongsuite-pilot span-attr unset oncall
+  loongsuite-pilot span-attr clear
   ```
 
 Notes:

@@ -210,10 +210,14 @@ Pilot 会将 Trace 发送到 `http://localhost:3000/api/public/otel/v1/traces`�
   export OTEL_SPAN_ATTRIBUTES="team=infra,deployment.env=prod"
   ```
 
-- 可变文件 `~/.loongsuite-pilot/span-attributes.json`（`{"key":"value"}`），改动后会被重新读取，无需重启：
+- 可变文件 `~/.loongsuite-pilot/span-attributes.json`（`{"key":"value"}`），改动后会被重新读取，无需重启。推荐用 CLI 管理（而非手动编辑）：
 
-  ```json
-  { "release": "2026.07", "oncall": "alice" }
+  ```bash
+  loongsuite-pilot span-attr set release 2026.07
+  loongsuite-pilot span-attr set oncall alice
+  loongsuite-pilot span-attr list
+  loongsuite-pilot span-attr unset oncall
+  loongsuite-pilot span-attr clear
   ```
 
 说明：
