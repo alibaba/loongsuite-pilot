@@ -21,6 +21,7 @@ import {
 import { stringValue, timestampMs } from './codex-transcript-utils.js';
 
 const DEFAULT_SESSION_DIR = '~/.codex/sessions';
+const DEFAULT_DIAGNOSTIC_DIR = '~/.loongsuite-pilot/logs/diagnostics';
 const READ_CHUNK_SIZE = 1024 * 1024;
 // Values emitted by DEFAULT_RESOURCE_ENV_FIELD_MAP in assets/hooks/shared/resource-context.mjs.
 // Add new AgentTeams resource fields to both lists together.
@@ -29,6 +30,8 @@ const WAKEUP_RESOURCE_ATTRIBUTE_KEYS = [
   'agentteams.instance.id',
 ];
 const MAX_WAKEUP_RESOURCE_ATTRIBUTE_VALUE_LENGTH = 512;
+const DEFAULT_MAX_BACKLOG_BYTES = 50 * 1024 * 1024;
+const DEFAULT_TAIL_RECOVERY_BYTES = 100 * 1024 * 1024;
 
 interface JsonLine {
   startOffset: number;
@@ -39,6 +42,9 @@ interface JsonLine {
 export interface CodexTranscriptInputOptions extends InputOptions {
   sessionDir?: string;
   wakeupDir?: string;
+  diagnosticDir?: string;
+  maxBacklogBytes?: number;
+  tailRecoveryBytes?: number;
 }
 
 export class CodexTranscriptInput extends BaseInput {
@@ -48,12 +54,18 @@ export class CodexTranscriptInput extends BaseInput {
 
   private readonly sessionDir: string;
   private readonly wakeupDir: string;
+  private readonly diagnosticDir: string;
+  private readonly maxBacklogBytes: number;
+  private readonly tailRecoveryBytes: number;
   private wakeupWatcher: FSWatcher | null = null;
 
   constructor(opts: CodexTranscriptInputOptions) {
     super({ stateStore: opts.stateStore, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
     this.sessionDir = opts.sessionDir ?? resolveHome(DEFAULT_SESSION_DIR);
     this.wakeupDir = opts.wakeupDir ?? defaultWakeupDir();
+    this.diagnosticDir = opts.diagnosticDir ?? resolveHome(DEFAULT_DIAGNOSTIC_DIR);
+    this.maxBacklogBytes = opts.maxBacklogBytes ?? DEFAULT_MAX_BACKLOG_BYTES;
+    this.tailRecoveryBytes = opts.tailRecoveryBytes ?? DEFAULT_TAIL_RECOVERY_BYTES;
   }
 
   static getWatchPaths(): string[] {
@@ -67,7 +79,10 @@ export class CodexTranscriptInput extends BaseInput {
   protected override async onStart(): Promise<void> {
     for (const filePath of await this.discoverSessionFiles()) {
       const key = this.stateKey(filePath);
-      if (!this.readCheckpoint(key)) await this.baselineFile(filePath, key);
+      if (!this.readCheckpoint(key)) {
+        const recovered = await this.baselineFile(filePath, key);
+        if (recovered.length > 0) this.emit('entries', recovered);
+      }
     }
     await fs.mkdir(this.wakeupDir, { recursive: true });
     try {
@@ -117,8 +132,19 @@ export class CodexTranscriptInput extends BaseInput {
         emittedTerminalTurnIds: [],
       };
     } else if (checkpoint.inode !== stat.ino) {
-      await this.baselineFile(filePath, key);
-      return [];
+      return this.baselineFile(filePath, key);
+    }
+
+    const backlogBytes = Math.max(0, stat.size - checkpoint.scanOffset);
+    if (backlogBytes > this.maxBacklogBytes) {
+      return this.recoverTailOrBaseline(
+        filePath,
+        key,
+        stat,
+        checkpoint,
+        backlogBytes,
+        'backlog_exceeds_budget',
+      );
     }
 
     const recoveredPending = await this.recoverPendingTerminal(filePath, checkpoint);
@@ -293,12 +319,29 @@ export class CodexTranscriptInput extends BaseInput {
     return resourceAttributes;
   }
 
-  private async baselineFile(filePath: string, key: string): Promise<void> {
+  private async baselineFile(filePath: string, key: string): Promise<AgentActivityEntry[]> {
     let stat;
     try {
       stat = await fs.stat(filePath);
     } catch {
-      return;
+      return [];
+    }
+    if (stat.size > this.maxBacklogBytes) {
+      return this.recoverTailOrBaseline(
+        filePath,
+        key,
+        stat,
+        {
+          inode: stat.ino,
+          scanOffset: 0,
+          activeTurn: null,
+          pendingTerminal: null,
+          latestSessionMetaOffset: null,
+          emittedTerminalTurnIds: [],
+        },
+        stat.size,
+        'initial_baseline_backlog_exceeds_budget',
+      );
     }
     const lines = await readJsonLines(filePath, 0, stat.size);
     let latestSessionMetaOffset: number | null = null;
@@ -325,6 +368,141 @@ export class CodexTranscriptInput extends BaseInput {
       latestSessionMetaOffset,
       emittedTerminalTurnIds: [],
     });
+    return [];
+  }
+
+  private async recoverTailOrBaseline(
+    filePath: string,
+    key: string,
+    stat: fsSync.Stats,
+    checkpoint: CodexTranscriptCheckpoint,
+    backlogBytes: number,
+    reason: string,
+  ): Promise<AgentActivityEntry[]> {
+    const previousOffset = checkpoint.scanOffset;
+    const recovered = await this.recoverLatestCompleteTurnFromTail(filePath, checkpoint, stat);
+
+    checkpoint.scanOffset = stat.size;
+    checkpoint.activeTurn = null;
+    checkpoint.pendingTerminal = null;
+    if (recovered?.latestSessionMetaOffset !== undefined) {
+      checkpoint.latestSessionMetaOffset = recovered.latestSessionMetaOffset;
+    }
+    if (recovered) {
+      checkpoint.emittedTerminalTurnIds = [recovered.turnId, ...checkpoint.emittedTerminalTurnIds]
+        .slice(0, MAX_EMITTED_TERMINAL_TURNS);
+    }
+    this.saveCheckpoint(key, checkpoint);
+
+    await this.emitBacklogDiagnostic({
+      type: recovered ? 'codex_transcript_tail_recovered' : 'codex_transcript_backlog_baselined',
+      transcript_path: filePath,
+      ...(recovered ? { transcript_turn_id: recovered.turnId } : {}),
+      reason: recovered ? reason : 'no_complete_turn_in_tail',
+      backlog_bytes: backlogBytes,
+      tail_bytes: recovered?.tailBytes ?? Math.min(this.tailRecoveryBytes, backlogBytes),
+      previous_offset: previousOffset,
+      next_offset: stat.size,
+      recovered_entries: recovered?.entries.length ?? 0,
+      possible_data_loss: true,
+    });
+
+    if (recovered) {
+      this.logger.warn('recovered latest Codex turn from oversized transcript backlog', {
+        transcriptPath: filePath,
+        turnId: recovered.turnId,
+        backlogBytes,
+        previousOffset,
+        nextOffset: stat.size,
+      });
+      return recovered.entries;
+    }
+
+    this.logger.warn('baselined oversized Codex transcript backlog without recovery', {
+      transcriptPath: filePath,
+      reason,
+      backlogBytes,
+      previousOffset,
+      nextOffset: stat.size,
+    });
+    return [];
+  }
+
+  private async recoverLatestCompleteTurnFromTail(
+    filePath: string,
+    checkpoint: CodexTranscriptCheckpoint,
+    stat: fsSync.Stats,
+  ): Promise<{
+    entries: AgentActivityEntry[];
+    turnId: string;
+    tailBytes: number;
+    latestSessionMetaOffset?: number | null;
+  } | null> {
+    const tailStart = Math.max(checkpoint.scanOffset, stat.size - this.tailRecoveryBytes, 0);
+    const tail = await readJsonLines(filePath, tailStart, stat.size);
+    if (tail.items.length === 0) return null;
+
+    for (let terminalIndex = tail.items.length - 1; terminalIndex >= 0; terminalIndex--) {
+      const terminalLine = tail.items[terminalIndex]!;
+      const terminalPayload = asRecord(terminalLine.record.payload);
+      if (!terminalPayload) continue;
+      const terminalTurnId = terminalTurnIdFor(terminalLine.record, terminalPayload);
+      if (!terminalTurnId) continue;
+
+      let startLine: JsonLine | undefined;
+      let latestSessionMetaOffset = checkpoint.latestSessionMetaOffset;
+      for (let index = 0; index <= terminalIndex; index++) {
+        const line = tail.items[index]!;
+        if (line.record.type === 'session_meta') {
+          latestSessionMetaOffset = line.startOffset;
+          continue;
+        }
+        const payload = asRecord(line.record.payload);
+        if (!payload) continue;
+        if (!startLine && turnIdForStart(line.record, payload) === terminalTurnId) {
+          startLine = line;
+        }
+      }
+      if (!startLine) continue;
+
+      const tempCheckpoint: CodexTranscriptCheckpoint = {
+        ...checkpoint,
+        activeTurn: {
+          turnId: terminalTurnId,
+          startOffset: startLine.startOffset,
+          startedAtMs: timestampMs(startLine.record, Date.now()),
+        },
+        latestSessionMetaOffset,
+      };
+      const entries = await this.recoverTurn(filePath, tempCheckpoint, terminalLine.endOffset);
+      if (entries.length === 0) continue;
+      return {
+        entries,
+        turnId: terminalTurnId,
+        tailBytes: stat.size - tailStart,
+        latestSessionMetaOffset,
+      };
+    }
+    return null;
+  }
+
+  private async emitBacklogDiagnostic(payload: Record<string, unknown>): Promise<void> {
+    try {
+      await fs.mkdir(this.diagnosticDir, { recursive: true });
+      const now = new Date();
+      const day = now.toISOString().slice(0, 10);
+      await fs.appendFile(
+        path.join(this.diagnosticDir, `codex-transcript-backlog-${day}.jsonl`),
+        JSON.stringify({ ...payload, detected_at: now.toISOString() }) + '\n',
+        'utf8',
+      );
+    } catch (error) {
+      this.logger.warn('failed to write Codex transcript backlog diagnostic', {
+        error: String(error),
+        type: payload.type,
+        transcriptPath: payload.transcript_path,
+      });
+    }
   }
 
   private async discoverSessionFiles(): Promise<string[]> {

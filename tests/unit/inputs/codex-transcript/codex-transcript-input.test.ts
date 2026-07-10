@@ -118,6 +118,144 @@ async function writeWakeupMarker(wakeupDir: string, sessionId: string, payload: 
 }
 
 describe('CodexTranscriptInput', () => {
+  it('recovers the last complete turn from the tail when backlog exceeds the safe read budget', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-tail-recovery-'));
+    tempDirs.push(root);
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const sessionDir = path.join(root, 'sessions');
+    const diagnosticDir = path.join(root, 'diagnostics');
+    const transcript = await writeTranscript(sessionDir, [
+      record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'old-turn', model: 'gpt-5.5' }),
+      record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'task_started', turn_id: 'old-turn' }),
+      record('2026-06-24T06:00:03.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'old prompt' }],
+      }),
+      record('2026-06-24T06:00:04.000Z', 'event_msg', { type: 'task_complete', turn_id: 'old-turn' }),
+      'x'.repeat(1_024),
+      record('2026-06-24T06:01:01.000Z', 'turn_context', { turn_id: 'tail-turn', model: 'gpt-5.5', cwd: '/tail' }),
+      record('2026-06-24T06:01:02.000Z', 'event_msg', { type: 'task_started', turn_id: 'tail-turn' }),
+      record('2026-06-24T06:01:03.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'recover me' }],
+      }),
+      record('2026-06-24T06:01:04.000Z', 'event_msg', { type: 'agent_message', message: 'recovered', phase: 'final' }),
+      record('2026-06-24T06:01:05.000Z', 'event_msg', { type: 'task_complete', turn_id: 'tail-turn', last_agent_message: 'recovered' }),
+    ].join('\n') + '\n');
+    const stat = await fs.stat(transcript);
+    stateStore.set(`codex-transcript:${transcript}`, {
+      lastOffset: 0,
+      extra: {
+        codexTranscript: {
+          inode: stat.ino,
+          scanOffset: 0,
+          activeTurn: null,
+          pendingTerminal: null,
+          latestSessionMetaOffset: null,
+          emittedTerminalTurnIds: [],
+        },
+      },
+    });
+
+    const input = new CodexTranscriptInput({
+      stateStore,
+      sessionDir,
+      diagnosticDir,
+      pollIntervalMs: 10,
+      maxBacklogBytes: 512,
+      tailRecoveryBytes: 2_048,
+    });
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', batch => entries.push(...batch));
+    await input.start();
+
+    await waitFor(() => entries.some(entry => entry['agent.codex.transcript_turn_id'] === 'tail-turn'));
+    await input.stop();
+
+    expect(entries.every(entry => entry['agent.codex.transcript_turn_id'] !== 'old-turn')).toBe(true);
+    expect(entries.find(entry => entry['event.name'] === 'other')).toMatchObject({
+      'agent.codex.transcript_turn_id': 'tail-turn',
+      'gen_ai.input.messages_delta': [{
+        role: 'user',
+        parts: [{ type: 'text', content: 'recover me' }],
+      }],
+    });
+    const checkpoint = stateStore.get(`codex-transcript:${transcript}`).extra?.codexTranscript as { scanOffset?: number };
+    expect(checkpoint.scanOffset).toBe(stat.size);
+    const diagnosticFiles = await fs.readdir(diagnosticDir);
+    expect(diagnosticFiles.some(file => file.startsWith('codex-transcript-backlog-'))).toBe(true);
+    const diagnostic = JSON.parse(await fs.readFile(path.join(diagnosticDir, diagnosticFiles[0]!), 'utf8')) as Record<string, unknown>;
+    expect(diagnostic).toMatchObject({
+      type: 'codex_transcript_tail_recovered',
+      transcript_path: transcript,
+      transcript_turn_id: 'tail-turn',
+      possible_data_loss: true,
+    });
+  });
+
+  it('baselines a huge backlog to EOF when the tail does not contain a complete turn', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-tail-baseline-'));
+    tempDirs.push(root);
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const sessionDir = path.join(root, 'sessions');
+    const diagnosticDir = path.join(root, 'diagnostics');
+    const transcript = await writeTranscript(sessionDir, [
+      record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'old-turn', model: 'gpt-5.5' }),
+      record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'task_started', turn_id: 'old-turn' }),
+      record('2026-06-24T06:00:03.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'old prompt' }],
+      }),
+      record('2026-06-24T06:00:04.000Z', 'event_msg', { type: 'task_complete', turn_id: 'old-turn' }),
+      'x'.repeat(1_024),
+      record('2026-06-24T06:01:03.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'orphan tail' }],
+      }),
+      record('2026-06-24T06:01:05.000Z', 'event_msg', { type: 'task_complete', turn_id: 'tail-turn' }),
+    ].join('\n') + '\n');
+    const stat = await fs.stat(transcript);
+    stateStore.set(`codex-transcript:${transcript}`, {
+      lastOffset: 0,
+      extra: {
+        codexTranscript: {
+          inode: stat.ino,
+          scanOffset: 0,
+          activeTurn: null,
+          pendingTerminal: null,
+          latestSessionMetaOffset: null,
+          emittedTerminalTurnIds: [],
+        },
+      },
+    });
+
+    const input = new CodexTranscriptInput({
+      stateStore,
+      sessionDir,
+      diagnosticDir,
+      pollIntervalMs: 10,
+      maxBacklogBytes: 512,
+      tailRecoveryBytes: 512,
+    });
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', batch => entries.push(...batch));
+    await input.start();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await input.stop();
+
+    expect(entries).toEqual([]);
+    const checkpoint = stateStore.get(`codex-transcript:${transcript}`).extra?.codexTranscript as { scanOffset?: number };
+    expect(checkpoint.scanOffset).toBe(stat.size);
+    const diagnosticFiles = await fs.readdir(diagnosticDir);
+    const diagnostic = JSON.parse(await fs.readFile(path.join(diagnosticDir, diagnosticFiles[0]!), 'utf8')) as Record<string, unknown>;
+    expect(diagnostic).toMatchObject({
+      type: 'codex_transcript_backlog_baselined',
+      transcript_path: transcript,
+      reason: 'no_complete_turn_in_tail',
+      possible_data_loss: true,
+    });
+  });
+
   it('emits a terminal LLM pair with zero usage for a completed turn without output', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-empty-completed-'));
     tempDirs.push(root);
