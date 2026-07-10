@@ -1,6 +1,7 @@
 import { createLogger } from '../utils/logger.js';
 import { appendLine, ensureDir } from '../utils/fs-utils.js';
 import * as path from 'node:path';
+import { constants as osConstants } from 'node:os';
 
 const logger = createLogger('SlsTransport');
 
@@ -12,6 +13,41 @@ export const RETRY_BASE_DELAY_MS = 1000;
 
 export const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const SLS_FAILURE_REASON_MAX_LENGTH = 240;
+const ERROR_SUMMARY_KEYS = [
+  'name',
+  'code',
+  'errno',
+  'syscall',
+  'address',
+  'port',
+  'statusCode',
+  'status',
+  'httpStatusCode',
+  'message',
+] as const;
+const MAX_ERROR_CAUSE_DEPTH = 6;
+const NETWORK_TIMEOUT_ERRNOS = new Set([
+  osConstants.errno.ETIMEDOUT,
+  -osConstants.errno.ETIMEDOUT,
+  60,
+  -60,
+  110,
+  -110,
+].map(String));
+const NETWORK_REFUSED_ERRNOS = new Set([
+  osConstants.errno.ECONNREFUSED,
+  -osConstants.errno.ECONNREFUSED,
+  osConstants.errno.ECONNRESET,
+  -osConstants.errno.ECONNRESET,
+  54,
+  -54,
+  61,
+  -61,
+  104,
+  -104,
+  111,
+  -111,
+].map(String));
 
 export type SlsFailureClass =
   | 'network_timeout'
@@ -135,9 +171,15 @@ export function sanitizeFailureReason(reason: string): string {
   return `${redacted.slice(0, SLS_FAILURE_REASON_MAX_LENGTH - 3)}...`;
 }
 
-function extractStatusCode(err: unknown): number | undefined {
+function extractStatusCode(
+  err: unknown,
+  seen: Set<object> = new Set(),
+): number | undefined {
   if (err instanceof HttpError) return err.status;
   if (!err || typeof err !== 'object') return undefined;
+
+  if (seen.has(err)) return undefined;
+  seen.add(err);
 
   const record = err as Record<string, unknown>;
   for (const key of ['statusCode', 'status', 'httpStatusCode']) {
@@ -145,6 +187,17 @@ function extractStatusCode(err: unknown): number | undefined {
     if (typeof raw === 'number') return raw;
     if (typeof raw === 'string' && /^\d+$/.test(raw)) return Number(raw);
   }
+
+  const causeStatus = extractStatusCode(record.cause, seen);
+  if (causeStatus !== undefined) return causeStatus;
+
+  if (Array.isArray(record.errors)) {
+    for (const nested of record.errors) {
+      const nestedStatus = extractStatusCode(nested, seen);
+      if (nestedStatus !== undefined) return nestedStatus;
+    }
+  }
+
   return undefined;
 }
 
@@ -154,16 +207,50 @@ function extractFailureText(err: unknown): string {
   }
   if (!err || typeof err !== 'object') return String(err);
 
-  const record = err as Record<string, unknown>;
-  const parts: string[] = [];
-  for (const key of ['name', 'code', 'statusCode', 'status', 'message']) {
-    const value = record[key];
-    if (value !== undefined && value !== null && value !== '') {
-      parts.push(`${key}=${String(value)}`);
-    }
-  }
+  const parts = collectErrorSummaryParts(err);
   if (parts.length > 0) return parts.join(' ');
   return String(err);
+}
+
+function collectErrorSummaryParts(
+  err: unknown,
+  seen: Set<object> = new Set(),
+  depth = 0,
+): string[] {
+  if (!err || typeof err !== 'object' || depth > MAX_ERROR_CAUSE_DEPTH) {
+    return [];
+  }
+
+  if (seen.has(err)) return [];
+  seen.add(err);
+
+  const record = err as Record<string, unknown>;
+  const parts: string[] = [];
+  const prefix = depth === 0 ? '' : `${'cause.'.repeat(depth)}`;
+
+  for (const key of ERROR_SUMMARY_KEYS) {
+    const value = record[key];
+    if (value !== undefined && value !== null && value !== '') {
+      parts.push(`${prefix}${key}=${String(value)}`);
+    }
+  }
+
+  const cause = record.cause;
+  if (cause !== undefined && cause !== null) {
+    if (typeof cause === 'object') {
+      parts.push(...collectErrorSummaryParts(cause, seen, depth + 1));
+    } else {
+      parts.push(`${prefix}cause=${String(cause)}`);
+    }
+  }
+
+  if (Array.isArray(record.errors)) {
+    for (const nested of record.errors.slice(0, 3)) {
+      parts.push(...collectErrorSummaryParts(nested, seen, depth + 1));
+    }
+  }
+
+  return parts;
 }
 
 function classifyByStatus(statusCode?: number): SlsFailureClass | undefined {
@@ -184,13 +271,15 @@ function classifyByText(lower: string): SlsFailureClass {
     lower.includes('aborterror') ||
     lower.includes('timeouterror') ||
     lower.includes('etimedout') ||
-    lower.includes('timeout')
+    lower.includes('timeout') ||
+    textHasErrno(lower, NETWORK_TIMEOUT_ERRNOS)
   ) return 'network_timeout';
   if (
     lower.includes('econnrefused') ||
     lower.includes('econnreset') ||
     lower.includes('socket hang up') ||
-    lower.includes('network')
+    lower.includes('network') ||
+    textHasErrno(lower, NETWORK_REFUSED_ERRNOS)
   ) return 'network_refused';
   if (
     lower.includes('throttl') ||
@@ -227,11 +316,15 @@ function classifyByText(lower: string): SlsFailureClass {
 }
 
 function isRetryableFailure(
-  _failureClass: SlsFailureClass,
+  failureClass: SlsFailureClass,
   statusCode: number | undefined,
   lower: string,
 ): boolean {
   if (statusCode !== undefined) return RETRYABLE_STATUS_CODES.has(statusCode);
+  if (
+    failureClass === 'network_timeout' ||
+    failureClass === 'network_refused'
+  ) return true;
   return (
     lower.includes('econnreset') ||
     lower.includes('etimedout') ||
@@ -239,9 +332,23 @@ function isRetryableFailure(
     lower.includes('socket hang up') ||
     lower.includes('network') ||
     lower.includes('timeouterror') ||
+    lower.includes('aborterror') ||
     lower.includes('internalservererror') ||
     lower.includes('serverbusy')
   );
+}
+
+function textHasErrno(text: string, errnoValues: Set<string>): boolean {
+  for (const errno of errnoValues) {
+    if (new RegExp(`\\berrno[:=]\\s*${escapeRegExp(errno)}\\b`).test(text)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 export async function postWebtracking(
