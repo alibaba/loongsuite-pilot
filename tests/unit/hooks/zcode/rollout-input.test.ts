@@ -135,7 +135,7 @@ describe('ZCodeRolloutInput: baseline skip (spec §1.5 #1)', () => {
 // ─── scenario #2: multi-attempt (streaming recovery → multiple STEPs) ───
 
 describe('ZCodeRolloutInput: multi-attempt (spec §1.5 #2)', () => {
-  test('same turn with attempts 1 and 2 produces 2 STEPs with step.id = <turnId>:s1 and :s2', async () => {
+  test('same turn with attempts 1 and 2 produces 2 STEPs with step.id = <turnId>:<requestId> (iter 6 stable per-line)', async () => {
     const sid = 'sess_multi_001';
     const turnId = 'turn_multi_001';
     writeLine(sid, baseModelIoLine({
@@ -167,8 +167,10 @@ describe('ZCodeRolloutInput: multi-attempt (spec §1.5 #2)', () => {
 
     const stepRecords = allEntries.filter((e) => e['gen_ai.span.kind'] === 'step');
     expect(stepRecords.length).toBe(2);
+    // iter 6 fix: step.id derives from <turnId>:<requestId> (stable per-line,
+    // no state-dependent counter). Two unique requestIds → two unique step.ids.
     const stepIds = stepRecords.map((e) => e['gen_ai.step.id']).sort();
-    expect(stepIds).toEqual([`${turnId}:s1`, `${turnId}:s2`]);
+    expect(stepIds).toEqual([`${turnId}:req-a1`, `${turnId}:req-a2`]);
 
     // Each STEP has its own span_id, parent_span_id pointing to AGENT envelope
     const expectedAgentSpanId = deriveSpanId('agent', sid, turnId);
@@ -364,11 +366,12 @@ describe('ZCodeRolloutInput: multi-line ReAct (spec §1.5 + CP5 rollback iter 2)
     for (const s of stepRecords) {
       expect(s.parent_span_id).toBe(agentParent);
     }
-    // step.ids are <turnId>:s1 / :s2 / :s3 (per-turn line index)
+    // iter 6 fix: step.ids derive from <turnId>:<requestId> (stable per-line).
+    // The 3 lines have unique requestIds → 3 unique step.ids.
+    const turnId = lines[0].turnId;
     const stepIds = stepRecords.map((r) => r['gen_ai.step.id']).sort();
-    expect(stepIds[0]).toMatch(/:s1$/);
-    expect(stepIds[1]).toMatch(/:s2$/);
-    expect(stepIds[2]).toMatch(/:s3$/);
+    expect(new Set(stepIds).size).toBe(3);
+    expect(stepIds.every((id) => id.startsWith(`${turnId}:`))).toBe(true);
 
     // #2 tool.result pairing: line 0 has 2 toolCalls, line 1 has 1 toolCall → 3 tool.call total.
     // Tool results for line 0's toolCalls live in line 1's request.messages[role=tool];
@@ -435,12 +438,12 @@ describe('ZCodeRolloutInput: cross-batch dispatch (CP5 iter 3 #4)', () => {
     expect(stepRecords.length).toBe(4);
     const stepSpanIds = stepRecords.map((r) => r.span_id);
     expect(new Set(stepSpanIds).size).toBe(4);
-    // step.ids are :s1/s2/s3/s4 (per-turn line index monotonic across batches)
+    // iter 6 fix: step.ids derive from <turnId>:<requestId> (stable per-line,
+    // no state-dependent counter) — robust across daemon restarts / batch splits.
+    const turnId = lines[0].turnId;
     const stepIds = stepRecords.map((r) => r['gen_ai.step.id']).sort();
-    expect(stepIds[0]).toMatch(/:s1$/);
-    expect(stepIds[1]).toMatch(/:s2$/);
-    expect(stepIds[2]).toMatch(/:s3$/);
-    expect(stepIds[3]).toMatch(/:s4$/);
+    expect(new Set(stepIds).size).toBe(4);
+    expect(stepIds.every((id) => id.startsWith(`${turnId}:`))).toBe(true);
 
     // All STEP parent_span_ids point to the same AGENT envelope (cross-source
     // stitching contract preserved).
@@ -488,10 +491,15 @@ describe('ZCodeRolloutInput: cross-batch dispatch (CP5 iter 3 #4)', () => {
       expect(resps.length).toBe(1);
     }
 
-    // #5: last STEP's LLM has no tool_call (finishReason=stop) — iter 2's
-    // last_step_no_tool_call ERROR was caused by step-merge putting line 3's
-    // LLM under line 0's STEP. With 4 unique STEPs, line 3's LLM is under :s4.
-    const lastStepId = stepIds[3];
+    // #5: last STEP's LLM has no tool_call (finishReason=stop). iter 6 fix:
+    // step.id is now <turnId>:<requestId>; alphabetical sort no longer matches
+    // chronological order. Pick chronologically last STEP by time_unix_nano.
+    const lastStep = [...stepRecords].sort((a: any, b: any) => {
+      const ta = BigInt(a.time_unix_nano || '0');
+      const tb = BigInt(b.time_unix_nano || '0');
+      return ta < tb ? -1 : ta > tb ? 1 : 0;
+    })[stepRecords.length - 1];
+    const lastStepId = lastStep['gen_ai.step.id'];
     const lastStepResp = llmResps.find(
       (r) => r['gen_ai.step.id'] === lastStepId,
     ) as any;
@@ -542,17 +550,18 @@ describe('ZCodeRolloutInput: multi-batch save/load regression (CP5 iter 3 #1/#2/
       await ss.save();
     }
 
-    // #1: turnIndex persisted across batches → 4 unique STEP span_ids
-    // (not 1 collapsed as iter 2's batch-local turnIndex would produce).
+    // #1: iter 6 fix — step.id derives from <turnId>:<requestId> (stable
+    // per-line, no state-persisted counter). 4 unique STEP span_ids regardless
+    // of batch split / save-load cycles (which previously caused collisions
+    // when the in-memory idx wasn't persisted before crash).
     const stepRecords = all.filter((r) => r['gen_ai.span.kind'] === 'step');
     expect(stepRecords.length).toBe(4);
     expect(new Set(stepRecords.map((r) => r.span_id)).size).toBe(4);
 
+    const turnId = lines[0].turnId;
     const stepIds = stepRecords.map((r) => r['gen_ai.step.id']).sort();
-    expect(stepIds[0]).toMatch(/:s1$/);
-    expect(stepIds[1]).toMatch(/:s2$/);
-    expect(stepIds[2]).toMatch(/:s3$/);
-    expect(stepIds[3]).toMatch(/:s4$/);
+    expect(new Set(stepIds).size).toBe(4);
+    expect(stepIds.every((id) => id.startsWith(`${turnId}:`))).toBe(true);
 
     // All STEP parent_span_ids point to the same AGENT envelope.
     const agentParent = stepRecords[0].parent_span_id;
@@ -598,10 +607,16 @@ describe('ZCodeRolloutInput: multi-batch save/load regression (CP5 iter 3 #1/#2/
       expect(result.span_id).toBe(call.span_id);
     }
 
-    // #5: last STEP's LLM has no tool_call (finishReason=stop) — iter 2's
-    // last_step_no_tool_call ERROR was caused by step-merge. With 4 unique
-    // STEPs, line 3's LLM is under :s4.
-    const lastStepId = stepIds[3];
+    // #5: last STEP's LLM has no tool_call (finishReason=stop). iter 6 fix:
+    // step.id is now <turnId>:<requestId> — alphabetical sort no longer
+    // matches chronological order. Pick the chronologically last STEP by
+    // time_unix_nano instead.
+    const lastStep = [...stepRecords].sort((a: any, b: any) => {
+      const ta = BigInt(a.time_unix_nano || '0');
+      const tb = BigInt(b.time_unix_nano || '0');
+      return ta < tb ? -1 : ta > tb ? 1 : 0;
+    })[stepRecords.length - 1];
+    const lastStepId = lastStep['gen_ai.step.id'];
     const lastStepResp = llmResps.find(
       (r) => r['gen_ai.step.id'] === lastStepId,
     ) as any;
@@ -687,14 +702,15 @@ describe('ZCodeRolloutInput: iter 4 tester-reported regression (CP5 iter 5 #1/#2
       await ss.save();
     }
 
-    // #1: 2 unique STEP span_ids (not 1 collapsed to :s1 as tester reported).
+    // #1: iter 6 fix — 2 unique STEP span_ids (requestId-derived, no state).
     const stepRecords = all.filter((r) => r['gen_ai.span.kind'] === 'step');
     expect(stepRecords.length).toBe(2);
     const stepSpanIds = stepRecords.map((r) => r.span_id);
     expect(new Set(stepSpanIds).size).toBe(2);
+    const turnId = lines[0].turnId;
     const stepIds = stepRecords.map((r) => r['gen_ai.step.id']).sort();
-    expect(stepIds[0]).toMatch(/:s1$/);
-    expect(stepIds[1]).toMatch(/:s2$/);
+    expect(new Set(stepIds).size).toBe(2);
+    expect(stepIds.every((id) => id.startsWith(`${turnId}:`))).toBe(true);
 
     // #2: 3 tool.call + 3 tool.result paired (NOT 0 tool.result as tester reported).
     const toolCalls = all.filter((r) => r['event.name'] === 'tool.call');
@@ -733,11 +749,202 @@ describe('ZCodeRolloutInput: iter 4 tester-reported regression (CP5 iter 5 #1/#2
       expect(resps.length).toBe(1);
     }
 
-    // #5: last STEP's LLM (line1 under :s2) has finishReason=stop, no tool_call.
-    const lastStepId = stepIds[1];
+    // #5: last STEP's LLM (line1) has finishReason=stop, no tool_call. iter 6:
+    // step.id is <turnId>:<requestId> — pick chronologically last STEP by
+    // time_unix_nano (alphabetical sort no longer matches chronological order).
+    const lastStep = [...stepRecords].sort((a: any, b: any) => {
+      const ta = BigInt(a.time_unix_nano || '0');
+      const tb = BigInt(b.time_unix_nano || '0');
+      return ta < tb ? -1 : ta > tb ? 1 : 0;
+    })[stepRecords.length - 1];
+    const lastStepId = lastStep['gen_ai.step.id'];
     const lastStepResp = llmResps.find(
       (r) => r['gen_ai.step.id'] === lastStepId,
     ) as any;
+    expect(lastStepResp['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    const outputMessages = lastStepResp['gen_ai.output.messages'] as any[];
+    const toolCallParts = outputMessages?.[0]?.parts?.filter((p: any) => p.type === 'tool_call') ?? [];
+    expect(toolCallParts.length).toBe(0);
+  });
+});
+
+// ─── scenario #13: iter6 regression — state-loss mid-cycle must not cause step.id collision ───
+// Validates the iter5→iter6 fix: previously, step.id derived from a state-
+// persisted counter (`zcode-rollout:turn-idx:<sid>+<tid> -> extra.idx`). If
+// the daemon was restarted mid-turn (in-memory idx lost before save()), the
+// next cycle reset idx to 1, colliding with earlier lines and merging STEPs
+// (validate-trace `structure.step_has_one_llm` ERROR: STEP has 2 LLM children).
+// iter6 fix: step.id derives from <turnId>:<requestId> (stable per-line, no
+// state dependency). This test simulates the worst case: new StateStore
+// instance per line (effectively a process restart between every cycle) —
+// the old code would have produced 5 STEPs collapsed to 3 with idx pattern
+// 1,2,1,2,3. The new code produces 5 unique STEPs regardless.
+
+describe('ZCodeRolloutInput: iter6 state-loss regression', () => {
+  test('each line processed with fresh StateStore (worst-case state loss) → 5 unique STEPs + 5 unique LLMs (no collapse)', async () => {
+    // Build a 5-line ReAct rollout file mirroring the failed iter5 trace:
+    // line0: LLM returns Bash tool_call; line1: LLM returns Bash, tool_msg for line0's Bash;
+    // line2: LLM returns Bash, tool_msg for line1's Bash; line3: LLM returns 3 Read tool_calls,
+    // tool_msg for line2's Bash; line4: LLM returns final answer (no tool_calls), tool_msgs for line3's Reads.
+    const sid = 'sess_iter6_001';
+    const turnId = 'turn_iter6_001';
+    const traceId = 'e294f5ce-30c2-4817-92be-d035412905a1';
+    const lines: Record<string, unknown>[] = [];
+    const baseTime = new Date('2026-07-13T07:44:28.000Z').getTime();
+    for (let i = 0; i < 5; i++) {
+      const startedAt = new Date(baseTime + i * 8000).toISOString();
+      const completedAt = new Date(baseTime + i * 8000 + 6000).toISOString();
+      const nextStartedAt = new Date(baseTime + (i + 1) * 8000).toISOString();
+      // tool_msgs: tool results for all PREVIOUS lines' tool_calls.
+      const toolMsgs: any[] = [];
+      for (let j = 0; j < i; j++) {
+        const prev = lines[j] as any;
+        const prevResp = prev.response;
+        const tcs = prevResp.toolCalls || [];
+        for (const tc of tcs) {
+          toolMsgs.push({ role: 'tool', toolCallId: tc.id, toolName: tc.name, content: `result_${tc.id}` });
+        }
+      }
+      // line3 issues 3 Read tool calls; line4 has no tool calls.
+      let toolCalls: any[] = [];
+      if (i < 3) {
+        toolCalls = [{ id: `call_bash_${i}`, name: 'Bash', args: { cmd: `echo ${i}` } }];
+      } else if (i === 3) {
+        toolCalls = [
+          { id: 'call_read_a', name: 'Read', args: { path: '/a' } },
+          { id: 'call_read_b', name: 'Read', args: { path: '/b' } },
+          { id: 'call_read_c', name: 'Read', args: { path: '/c' } },
+        ];
+      }
+      const finishReason = i === 4 ? 'stop' : 'tool-calls';
+      lines.push({
+        type: 'model_io',
+        querySource: 'main_turn',
+        sessionId: sid,
+        turnId,
+        traceId,
+        requestId: `req-iter6-${i}`,
+        attempt: 1, // ZCode always sets attempt=1 — this is what made the old counter fragile
+        startedAt,
+        completedAt,
+        durationMs: 6000,
+        model: { modelId: 'glm-5.2', providerId: 'dashscope', role: 'main', source: 'config' },
+        request: {
+          messages_sample_truncated: [
+            { role: 'system', content: 'You are ZCode.' },
+            { role: 'user', content: `prompt ${i}` },
+            ...toolMsgs,
+          ],
+          toolNames: ['Bash', 'Read'],
+          messageCount: 2 + toolMsgs.length,
+          messagesKind: 'full',
+        },
+        response: {
+          text: i === 4 ? 'final answer' : '',
+          finishReason,
+          responseId: `chatcmpl-iter6-${i}`,
+          modelId: 'glm-5.2',
+          toolCalls,
+          usage: { inputTokens: 100 + i, outputTokens: 5, totalTokens: 105 + i, cacheReadTokens: 0 },
+        },
+        // Custom field used to drive tool.result pairing via the next line's startedAt
+        _nextStartedAt: nextStartedAt,
+      });
+    }
+
+    // Write the 5 lines to a rollout file.
+    for (const line of lines) {
+      writeLine(sid, line);
+    }
+
+    const statePath = path.join(tmpRoot, 'iter6-state.json');
+    const all: any[] = [];
+
+    // Process each line as its own batch with a FRESH StateStore instance
+    // (simulates process restart between every cycle — worst case for state
+    // persistence). The old code would collapse STEPs because the per-turn idx
+    // wasn't persisted before the process "restarted".
+    for (let i = 0; i < lines.length; i++) {
+      const ss = new StateStore(statePath);
+      await ss.load();
+      const input = new ZCodeRolloutInput({ stateStore: ss, rolloutDir });
+      const buildable = input as unknown as {
+        buildEntriesFromRolloutLines: (lines: Record<string, unknown>[]) => any[];
+      };
+      // Process each line as its own batch with a FRESH StateStore instance
+      // (simulates process restart between every cycle — worst case for state
+      // persistence). The old code would collapse STEPs because the per-turn
+      // idx wasn't persisted before the process "restarted". With the iter6
+      // fix, each line still gets a unique STEP derived from
+      // <turnId>:<requestId>. Tool pairing happens via the pending-tool-calls
+      // state across batches.
+      const batch = buildable.buildEntriesFromRolloutLines([lines[i]]);
+      all.push(...batch);
+      await ss.save();
+    }
+
+    const stepRecords = all.filter((r) => r['gen_ai.span.kind'] === 'step');
+    // Even with state loss between every cycle, the new code produces 5 unique
+    // STEP span_ids (one per LLM call, derived from <turnId>:<requestId>).
+    expect(stepRecords.length).toBe(5);
+    expect(new Set(stepRecords.map((r) => r.span_id)).size).toBe(5);
+    expect(new Set(stepRecords.map((r) => r['gen_ai.step.id'])).size).toBe(5);
+
+    // STEP count == LLM count (spec invariant: STEP per LLM call).
+    const llmReqs = all.filter((r) => r['event.name'] === 'llm.request');
+    const llmResps = all.filter((r) => r['event.name'] === 'llm.response');
+    expect(llmReqs.length).toBe(5);
+    expect(llmResps.length).toBe(5);
+
+    // Each STEP has exactly 1 LLM (request+response pair sharing span_id).
+    for (const step of stepRecords) {
+      const reqs = llmReqs.filter((r) => r.parent_span_id === step.span_id);
+      const resps = llmResps.filter((r) => r.parent_span_id === step.span_id);
+      expect(reqs.length).toBe(1);
+      expect(resps.length).toBe(1);
+    }
+
+    // No STEP overlap: sort by start, ensure each STEP's max child end <= next start.
+    const stepChildren = new Map<string, any[]>();
+    for (const e of all) {
+      const parent = e.parent_span_id;
+      if (!parent) continue;
+      if (!stepChildren.has(parent)) stepChildren.set(parent, []);
+      stepChildren.get(parent)!.push(e);
+    }
+    const stepWindows = stepRecords.map((s) => {
+      const children = stepChildren.get(s.span_id) || [];
+      const times = children.map((c) => BigInt(c.time_unix_nano || '0'));
+      return {
+        start: times.length ? times.reduce((a, b) => (a < b ? a : b)) : BigInt(s.time_unix_nano),
+        end: times.length ? times.reduce((a, b) => (a > b ? a : b)) : BigInt(s.time_unix_nano),
+      };
+    });
+    stepWindows.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+    for (let i = 0; i + 1 < stepWindows.length; i++) {
+      expect(BigInt(stepWindows[i].end) <= BigInt(stepWindows[i + 1].start)).toBe(true);
+    }
+
+    // TOOL duration > 0 for every tool.call↔tool.result pair.
+    const toolCalls = all.filter((r) => r['event.name'] === 'tool.call');
+    const toolResults = all.filter((r) => r['event.name'] === 'tool.result');
+    expect(toolCalls.length).toBe(6);  // 3 Bash + 3 Read
+    expect(toolResults.length).toBe(6);
+    for (const call of toolCalls) {
+      const result = toolResults.find((r) => r.span_id === call.span_id);
+      expect(result).toBeDefined();
+      const callNs = BigInt(call.time_unix_nano);
+      const resultNs = BigInt(result.time_unix_nano);
+      expect(resultNs > callNs).toBe(true);
+    }
+
+    // Last STEP's LLM (chronologically last by time_unix_nano) has no tool_call.
+    const lastStep = [...stepRecords].sort((a, b) => {
+      const ta = BigInt(a.time_unix_nano || '0');
+      const tb = BigInt(b.time_unix_nano || '0');
+      return ta < tb ? -1 : ta > tb ? 1 : 0;
+    })[stepRecords.length - 1];
+    const lastStepResp = llmResps.find((r) => r.parent_span_id === lastStep.span_id);
     expect(lastStepResp['gen_ai.response.finish_reasons']).toEqual(['stop']);
     const outputMessages = lastStepResp['gen_ai.output.messages'] as any[];
     const toolCallParts = outputMessages?.[0]?.parts?.filter((p: any) => p.type === 'tool_call') ?? [];

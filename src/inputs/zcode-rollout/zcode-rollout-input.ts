@@ -171,22 +171,28 @@ export class ZCodeRolloutInput extends BaseInput {
   /**
    * Convert a batch of rollout `model_io` lines into AgentActivityEntry records.
    *
-   * Batch (not per-line) because two fixes require cross-batch state:
-   *   - per-LLM STEP: each line in the same turn gets a unique per-turn index
-   *     (the rollout `attempt` field is always 1 in observed data, so it can't
-   *     disambiguate; we synthesize an index by counting lines per turn, kept
-   *     in the state store so it monotonically increases across batches).
-   *   - tool.result pairing + non-zero TOOL duration: tool results for line N's
-   *     toolCalls live in line N+1's request.messages[role=tool]. When line N
-   *     is the last line of a batch (no nextRecord), the toolCalls are buffered
-   *     to state and paired when the next batch's first line arrives.
+   * Batch (not per-line) because tool.result pairing requires cross-batch state:
+   * tool results for line N's toolCalls live in line N+1's
+   * request.messages[role=tool]. When line N is the last line of a batch (no
+   * nextRecord), the toolCalls are buffered to state and paired when the next
+   * batch's first line arrives.
    *
-   * Cross-batch invariants (iter 3):
-   *   - turnIndex is persisted in stateStore keyed by `turn-idx:<sid>+<tid>`
-   *     so line N always gets the same attemptIndex regardless of batch split.
-   *   - Pending toolCalls are persisted in stateStore keyed by
-   *     `pending-tool-calls:<sid>+<tid>` so a toolCall emitted in batch K can
-   *     be paired with a tool result message arriving in batch K+1.
+   * STEP↔LLM 1:1 attribution (iter 6 fix):
+   *   - Each rollout line carries a unique `requestId` per LLM call within a
+   *     turn. We derive `gen_ai.step.id` = `<turnId>:<requestId>` and
+   *     `stepSpanId` = `deriveSpanId('step', sid, tid, requestId)` directly
+   *     from this stable per-line identifier — NO state-dependent counter.
+   *     The previous approach (synthesizing an attempt index via
+   *     `nextTurnIndex` persisted in stateStore) was fragile: if the daemon
+   *     was restarted between collect() cycles and the in-memory `extra.idx`
+   *     had not yet been persisted to disk, the next cycle reset to 1 and
+   *     collided with earlier lines, producing merged STEPs with 2+ LLM
+   *     children (validate-trace `structure.step_has_one_llm` ERROR).
+   *     Using `requestId` removes the state dependency entirely.
+   *
+   * Pending toolCalls are persisted in stateStore keyed by
+   * `pending-tool-calls:<sid>+<tid>` so a toolCall emitted in batch K can
+   * be paired with a tool result message arriving in batch K+1.
    */
   buildEntriesFromRolloutLines(lines: Record<string, unknown>[]): AgentActivityEntry[] {
     const allEntries: AgentActivityEntry[] = [];
@@ -208,7 +214,6 @@ export class ZCodeRolloutInput extends BaseInput {
       if (record.type !== 'model_io') continue;
       const sid = str(record.sessionId) ?? str(record.session_id) ?? '';
       const tid = str(record.turnId) ?? str(record.turn_id) ?? '';
-      const idx = this.nextTurnIndex(sid, tid);
       const isLastInBatch = i + 1 >= lines.length;
       const nextRecord = !isLastInBatch ? lines[i + 1] : undefined;
 
@@ -216,10 +221,10 @@ export class ZCodeRolloutInput extends BaseInput {
         // Last line of batch with toolCalls: emit STEP+LLM but buffer the
         // toolCalls to state — they'll be paired with the next batch's first
         // line (or emitted as placeholders if no next batch arrives).
-        allEntries.push(...this.buildEntriesFromRolloutLine(record, idx, undefined, { skipToolCalls: true }));
-        this.bufferPendingToolCalls(sid, tid, record, idx);
+        allEntries.push(...this.buildEntriesFromRolloutLine(record, undefined, { skipToolCalls: true }));
+        this.bufferPendingToolCalls(sid, tid, record);
       } else {
-        allEntries.push(...this.buildEntriesFromRolloutLine(record, idx, nextRecord));
+        allEntries.push(...this.buildEntriesFromRolloutLine(record, nextRecord));
       }
     }
     return allEntries;
@@ -231,19 +236,6 @@ export class ZCodeRolloutInput extends BaseInput {
   }
 
   /**
-   * Read+increment the per-turn line index from the state store. Keyed by
-   * `zcode-rollout:turn-idx:<sid>+<tid>` so the same line in the same turn
-   * always gets the same attemptIndex across batches.
-   */
-  private nextTurnIndex(sid: string, tid: string): number {
-    const key = `zcode-rollout:turn-idx:${sid}+${tid}`;
-    const prev = this.stateStore.get(key).extra?.idx as number | undefined;
-    const idx = (typeof prev === 'number' ? prev : 0) + 1;
-    this.stateStore.update(key, { extra: { idx } });
-    return idx;
-  }
-
-  /**
    * Buffer a line's toolCalls to state for cross-batch pairing. Stores enough
    * metadata to emit tool.call + tool.result records in a future batch without
    * re-reading the source line.
@@ -251,13 +243,12 @@ export class ZCodeRolloutInput extends BaseInput {
   private bufferPendingToolCalls(
     sid: string, tid: string,
     record: Record<string, unknown>,
-    attempt: number,
   ): void {
     const key = `zcode-rollout:pending-tool-calls:${sid}+${tid}`;
     const existing = (this.stateStore.get(key).extra?.pending as PendingToolCall[] | undefined) ?? [];
     const response = (record.response && typeof record.response === 'object' ? record.response : {}) as Record<string, unknown>;
     const toolCallsRaw = Array.isArray(response.toolCalls) ? response.toolCalls : [];
-    const requestId = str(record.requestId) ?? str(record.request_id);
+    const requestId = str(record.requestId) ?? str(record.request_id) ?? crypto.randomUUID();
     const responseId = str(response.responseId) ?? str(response.response_id) ?? requestId;
     const traceIdRaw = str(record.traceId) ?? str(record.trace_id) ?? '';
     const traceId = toW3CTraceId(traceIdRaw);
@@ -267,8 +258,8 @@ export class ZCodeRolloutInput extends BaseInput {
     const providerId = str(model.providerId) ?? str(model.provider_id) ?? 'unknown';
     const modelId = str(model.modelId) ?? str(model.model_id) ?? 'unknown';
     const responseModelId = str(response.modelId) ?? str(response.model_id) ?? modelId;
-    const stepId = `${tid}:s${attempt}`;
-    const stepSpanId = deriveSpanId('step', sid, tid, String(attempt));
+    const stepId = `${tid}:${requestId}`;
+    const stepSpanId = deriveSpanId('step', sid, tid, requestId);
     const stepParentSpanId = deriveSpanId('agent', sid, tid);
 
     const pending: PendingToolCall[] = [...existing];
@@ -280,7 +271,7 @@ export class ZCodeRolloutInput extends BaseInput {
       if (!callId || !toolName) continue;
       const args = r.args ?? r.arguments ?? r.input ?? null;
       pending.push({
-        sid, tid, traceId, requestId, responseId, attempt,
+        sid, tid, traceId, requestId, responseId,
         stepId, stepSpanId, stepParentSpanId,
         providerId, modelId, responseModelId,
         completedAtNs, callId, toolName, args,
@@ -308,16 +299,26 @@ export class ZCodeRolloutInput extends BaseInput {
     const nextStartedAtNs = timestampToUnixNanos(
       str(currentLine.startedAt) ?? str(currentLine.started_at) ?? '',
     );
+    const oneNs = 1n;
     const oneMsNs = 1_000_000n;
     const out: AgentActivityEntry[] = [];
 
     for (const p of pending) {
-      const toolSpanId = deriveSpanId('tool', p.sid, p.tid, String(p.attempt), p.callId);
+      const toolSpanId = deriveSpanId('tool', p.sid, p.tid, p.requestId ?? 'r', p.callId);
       const callTimeNs = p.completedAtNs;
       const result = toolResultsByCallId.get(p.callId);
-      const resultTimeNs = nextStartedAtNs
-        ? nextStartedAtNs
-        : (BigInt(callTimeNs) + oneMsNs).toString();
+      // tool.result time: pick a time strictly inside (callTime, nextStartedAt)
+      // so that the tool span has non-zero duration AND its STEP does not
+      // overlap the next STEP (which starts at nextStartedAt). When there is
+      // no next line (EOF), fall back to callTime + 1ms so the span is still
+      // non-zero. This fixes iter5 `time.non_zero_duration` (0ms TOOL) and
+      // `time.no_step_overlap` (STEP N end == STEP N+1 start) errors.
+      let resultTimeNs: string;
+      if (nextStartedAtNs && BigInt(nextStartedAtNs) > BigInt(callTimeNs) + oneNs) {
+        resultTimeNs = (BigInt(nextStartedAtNs) - oneNs).toString();
+      } else {
+        resultTimeNs = (BigInt(callTimeNs) + oneMsNs).toString();
+      }
 
       out.push(buildAgentActivityEntry({
         time_unix_nano: callTimeNs,
@@ -409,24 +410,24 @@ export class ZCodeRolloutInput extends BaseInput {
    * Convert one rollout `model_io` line into multiple AgentActivityEntry records:
    * STEP envelope + llm.request + llm.response + tool.call/result per toolCalls[].
    *
-   * `attemptIndex` is the per-turn 1-based line index (synthesized by the batch
-   * caller) — used for unique STEP span_id derivation when the rollout `attempt`
-   * field doesn't disambiguate within a turn. Defaults to record.attempt (for
-   * backward-compat with single-line test calls).
-   *
    * `nextRecord` is the next rollout line in the same file, used to pair
    * tool.call → tool.result (from next line's request.messages[role=tool]) and
-   * to derive non-zero TOOL span duration (end = next line startedAt).
+   * to derive non-zero TOOL span duration (end = next line startedAt - 1ns).
    *
    * `options.skipToolCalls = true` skips tool.call/tool.result emission entirely
    * — used by the batch caller when the line is the last of a batch and its
    * toolCalls need to be buffered for cross-batch pairing.
    *
+   * STEP↔LLM 1:1 attribution (iter 6 fix):
+   *   - `gen_ai.step.id` = `<turnId>:<requestId>` and `stepSpanId` =
+   *     `deriveSpanId('step', sessionId, turnId, requestId)`. `requestId` is
+   *     unique per LLM call within a turn in ZCode rollout data, so each LLM
+   *     call gets its own STEP without depending on a state-persisted counter.
+   *
    * Public so tests can drive it directly with fixture lines.
    */
   buildEntriesFromRolloutLine(
     record: Record<string, unknown>,
-    attemptIndex?: number,
     nextRecord?: Record<string, unknown>,
     options: { skipToolCalls?: boolean } = {},
   ): AgentActivityEntry[] {
@@ -435,8 +436,7 @@ export class ZCodeRolloutInput extends BaseInput {
     const sessionId = str(record.sessionId) ?? str(record.session_id);
     const turnId = str(record.turnId) ?? str(record.turn_id);
     const traceIdRaw = str(record.traceId) ?? str(record.trace_id);
-    const requestId = str(record.requestId) ?? str(record.request_id);
-    const attempt = attemptIndex ?? num(record.attempt) ?? 1;
+    const requestId = str(record.requestId) ?? str(record.request_id) ?? crypto.randomUUID();
     const startedAt = str(record.startedAt) ?? str(record.started_at);
     const completedAt = str(record.completedAt) ?? str(record.completed_at);
     const durationMs = num(record.durationMs) ?? num(record.duration_ms);
@@ -452,6 +452,39 @@ export class ZCodeRolloutInput extends BaseInput {
     const inputMessages = (rawInputMessages as unknown[])
       .map((m) => normalizeInputMessage(m))
       .filter(Boolean) as { role: string; content: string }[];
+
+    // P1 fix: extract system_instructions (role=="system" messages) and
+    // tool_definitions (request.toolNames — names only, no
+    // description/parameters; ZCode rollout does not log full tool schemas,
+    // so we emit name-only definitions and document the gap as P2 follow-up
+    // for downstream consumers needing full JSON schemas).
+    const systemInstructions: JsonValue[] = (rawInputMessages as unknown[])
+      .map((m) => normalizeInputMessage(m))
+      .filter(Boolean)
+      .filter((m) => m!.role === 'system')
+      .map((m) => ({ type: 'text', content: String(m!.content ?? '') })) as JsonValue[];
+    const toolNamesRaw = Array.isArray(request.toolNames) ? request.toolNames : [];
+    const toolDefinitions: JsonValue[] = (toolNamesRaw as unknown[])
+      .map((n) => (typeof n === 'string' ? { name: n } : null))
+      .filter(Boolean) as JsonValue[];
+
+    // P1 fix: detect first line of a turn (no assistant message in input →
+    // user prompt that triggered the turn is present). Emit a synthetic
+    // AGENT-level `other` event carrying gen_ai.input.messages_delta with
+    // the user-side messages so the ARMS UI / validator can attribute the
+    // turn's user input on the AGENT span (mirrors codex-transcript-builder
+    // lines 30-44). Filters out <system-reminder> wrapper blocks since those
+    // are agent-injected context, not the user's actual prompt.
+    const hasAssistantInInput = inputMessages.some((m) => m.role === 'assistant');
+    const userDeltaMessages = !hasAssistantInInput
+      ? inputMessages
+          .filter((m) => m.role === 'user')
+          .filter((m) => !String(m.content ?? '').startsWith('<system-reminder>'))
+      : [];
+    const userDeltaJsonValue: JsonValue[] = userDeltaMessages.map((m) => ({
+      role: 'user',
+      parts: [{ type: 'text', content: String(m.content ?? '') }],
+    }));
 
     const response = (record.response && typeof record.response === 'object' ? record.response : {}) as Record<string, unknown>;
     const responseText = str(response.text) ?? '';
@@ -484,13 +517,38 @@ export class ZCodeRolloutInput extends BaseInput {
     // in-process state; matching derived values is what makes the OTLP flusher
     // able to assemble the 5-layer tree.
     const stepParentSpanId = deriveSpanId('agent', sessionId, turnId);
-    const stepId = `${turnId}:s${attempt}`;
-    const stepSpanId = deriveSpanId('step', sessionId, turnId, String(attempt));
-    const llmSpanId = deriveSpanId('llm', sessionId, turnId, String(attempt), responseId || 'r');
+    const stepId = `${turnId}:${requestId}`;
+    const stepSpanId = deriveSpanId('step', sessionId, turnId, requestId);
+    const llmSpanId = deriveSpanId('llm', sessionId, turnId, requestId, responseId || 'r');
     const requestTimeNs = timestampToUnixNanos(startedAt || completedAt || Date.now());
     const responseTimeNs = timestampToUnixNanos(completedAt || startedAt || Date.now());
 
     const entries: AgentActivityEntry[] = [];
+
+    // P1 fix: synthetic AGENT-level `other` event carrying the user prompt
+    // as gen_ai.input.messages_delta. Emitted only on the first line of a
+    // turn (no assistant message in input → user prompt is present).
+    // Span_id matches the hook-processor's AGENT envelope span_id
+    // (deriveSpanId('agent', sessionId, turnId)) so the OTLP flusher merges
+    // this event into the same AGENT span. parent_span_id points to the
+    // ENTRY envelope (deriveSpanId('entry', sessionId)) for tree linkage.
+    if (userDeltaJsonValue.length > 0) {
+      entries.push(buildAgentActivityEntry({
+        time_unix_nano: requestTimeNs,
+        'event.id': crypto.randomUUID(),
+        'event.name': 'other',
+        'gen_ai.session.id': sessionId,
+        'gen_ai.turn.id': turnId,
+        'gen_ai.agent.type': ClientType.ZCode,
+        'gen_ai.agent.id': sessionId,
+        'gen_ai.provider.name': providerId,
+        'gen_ai.input.messages_delta': userDeltaJsonValue,
+        trace_id: traceId,
+        span_id: stepParentSpanId,
+        parent_span_id: deriveSpanId('entry', sessionId),
+        'gen_ai.span.kind': 'agent',
+      }));
+    }
 
     // STEP envelope — marks the per-attempt boundary. Carries parent_span_id
     // pointing to AGENT envelope (derived from same formula as the hook path's
@@ -529,6 +587,12 @@ export class ZCodeRolloutInput extends BaseInput {
         role: m.role,
         parts: [{ type: 'text', content: String(m.content ?? '') }],
       })) as JsonValue,
+      ...(systemInstructions.length > 0
+        ? { 'gen_ai.system_instructions': systemInstructions }
+        : {}),
+      ...(toolDefinitions.length > 0
+        ? { 'gen_ai.tool.definitions': toolDefinitions }
+        : {}),
       trace_id: traceId,
       span_id: llmSpanId,
       parent_span_id: stepSpanId,
@@ -570,7 +634,13 @@ export class ZCodeRolloutInput extends BaseInput {
       ...(totalTokens !== undefined ? { 'gen_ai.usage.total_tokens': totalTokens } : {}),
       'gen_ai.output.messages': outputMessages,
       ...(durationMs !== undefined ? { 'gen_ai.response.duration_ms': durationMs } : {}),
-      'gen_ai.response.attempt_index': attempt,
+      'gen_ai.response.attempt_index': num(record.attempt) ?? 1,
+      ...(systemInstructions.length > 0
+        ? { 'gen_ai.system_instructions': systemInstructions }
+        : {}),
+      ...(toolDefinitions.length > 0
+        ? { 'gen_ai.tool.definitions': toolDefinitions }
+        : {}),
       trace_id: traceId,
       span_id: llmSpanId,
       parent_span_id: stepSpanId,
@@ -601,12 +671,19 @@ export class ZCodeRolloutInput extends BaseInput {
     const nextStartedAtNs = nextRecord
       ? timestampToUnixNanos(str(nextRecord.startedAt) ?? str(nextRecord.started_at) ?? completedAt)
       : undefined;
+    const oneNs = 1n;
     const oneMsNs = 1_000_000n;
-    const toolResultTimeNs = nextStartedAtNs
-      ? nextStartedAtNs
+    // tool.result time: pick a time strictly inside (responseTime, nextStartedAt)
+    // so that the tool span has non-zero duration AND its STEP does not overlap
+    // the next STEP (which starts at nextStartedAt). When there is no next line
+    // (EOF), fall back to responseTime + 1ms so the span is still non-zero.
+    // This fixes iter5 `time.non_zero_duration` (0ms TOOL) and
+    // `time.no_step_overlap` (STEP N end == STEP N+1 start) errors.
+    const toolResultTimeNs = nextStartedAtNs && BigInt(nextStartedAtNs) > BigInt(responseTimeNs) + oneNs
+      ? (BigInt(nextStartedAtNs) - oneNs).toString()
       : (BigInt(responseTimeNs) + oneMsNs).toString();
     for (const tc of toolCalls) {
-      const toolSpanId = deriveSpanId('tool', sessionId, turnId, String(attempt), tc.id);
+      const toolSpanId = deriveSpanId('tool', sessionId, turnId, requestId, tc.id);
       entries.push(buildAgentActivityEntry({
         time_unix_nano: responseTimeNs,
         'event.id': crypto.randomUUID(),
@@ -755,7 +832,6 @@ interface PendingToolCall {
   traceId: string;
   requestId?: string;
   responseId?: string;
-  attempt: number;
   stepId: string;
   stepSpanId: string;
   stepParentSpanId: string;
