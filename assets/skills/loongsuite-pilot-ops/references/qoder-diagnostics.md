@@ -1,13 +1,13 @@
 # Qoder IDE / CLI 接入诊断排查指南
 
 本文档随 `loongsuite-pilot` 安装包一起分发，安装完成后自动写入
-`~/.loongsuite-pilot/skills/references/qoder-diagnostics.md`，随 pilot 升级自动更新。
+`~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/qoder-diagnostics.md`，随 pilot 升级自动更新。
 
 仅覆盖 **pilot 场景下的 Qoder 本地数据采集链路**，不包含 OTLP trace 远端导出排查。
 **本文档不覆盖 Qoder for JetBrains** —— JetBrains 插件使用 `qoder-idea` agentType 与共享 `qoder-trace` 链路，
-排查请阅读 `~/.loongsuite-pilot/skills/references/qoder-jetbrains-diagnostics.md`。
+排查请阅读 `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/qoder-jetbrains-diagnostics.md`。
 **本文档不覆盖 Qoder Work** —— Qoder Work 是独立产品，链路与 Qoder IDE/CLI 完全不同，
-排查请阅读 `~/.loongsuite-pilot/skills/references/qoderwork-diagnostics.md`。
+排查请阅读 `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/qoderwork-diagnostics.md`。
 
 ---
 
@@ -299,4 +299,4 @@ ls -la "${XDG_CONFIG_HOME:-$HOME/.config}/Qoder"
 | **Qoder / Qoder CLI 完全无数据** | **先和用户确认用的是桌面版 Qoder（独立应用）**，而不是 IntelliJ IDEA 里的 Qoder 插件 —— 后者暂不支持（仍在开发中），pilot 不会采到任何数据。确认是桌面版后再继续往下查 |
 | **Qoder CLI 完全无数据** | **首查 Qoder CLI 版本**。老版本不执行 `hooks.Stop`，也可能不写 session segments。升级到最新稳定版后 `loongsuite-pilot restart` |
 | **Qoder IDE 完全无数据** | **首查 Qoder IDE 版本**。老版本缺 `ai_tracker/` 目录或 `chat_message.token_info` 字段。升级 Qoder 后重启 IDE |
-| Qoder Work（`~/.qoderwork/`）用户问怎么排查 | Qoder Work 已独立支持，链路与本文档不同，直接阅读 `~/.loongsuite-pilot/skills/references/qoderwork-diagnostics.md` |
+| Qoder Work（`~/.qoderwork/`）用户问怎么排查 | Qoder Work 已独立支持，链路与本文档不同，直接阅读 `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/qoderwork-diagnostics.md` |

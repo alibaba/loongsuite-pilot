@@ -1,11 +1,11 @@
 # Qoder Work 接入诊断排查指南
 
 本文档随 `loongsuite-pilot` 安装包一起分发，安装完成后自动写入
-`~/.loongsuite-pilot/skills/references/qoderwork-diagnostics.md`，随 pilot 升级自动更新。
+`~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/qoderwork-diagnostics.md`，随 pilot 升级自动更新。
 
 仅覆盖 **pilot 场景下 Qoder Work 的本地数据采集链路**，不包含 Qoder Work 自身的功能问题。
 **本文档不覆盖 Qoder IDE / Qoder CLI** —— 那两个属于 Qoder 主产品，链路与 Qoder Work 完全不同，
-排查请阅读 `~/.loongsuite-pilot/skills/references/qoder-diagnostics.md`。
+排查请阅读 `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/qoder-diagnostics.md`。
 
 ---
 

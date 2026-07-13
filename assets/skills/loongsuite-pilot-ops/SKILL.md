@@ -7,7 +7,7 @@ description: >-
   pilot 部署、Node.js 前置条件、nvm 配置、Linux 7U glibc 补丁、SSH 远程安装、
   新增或追加 SLS flusher、自定义 SLS/WebTracking 上报配置时，
   务必使用本 Skill——即使用户只问“怎么装”也应触发。安装完成后可在
-  ~/.loongsuite-pilot/skills/references/ 目录下找到诊断排查与观测面板的详细参考文档。
+  ~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/ 目录下找到诊断排查与观测面板的详细参考文档。
 ---
 
 # LoongSuite Pilot — 安装 / 配置 / 卸载
@@ -15,8 +15,8 @@ description: >-
 LoongSuite Pilot 是面向研发团队的 AI Coding 数据采集与效能评估工具，支持
 Cursor、Qoder IDE/CLI、Claude Code、Codex 的数据自动采集与上报。
 
-> 诊断排查请查阅 `~/.loongsuite-pilot/skills/references/diagnostics.md`；
-> 观测面板与运维手册请查阅 `~/.loongsuite-pilot/skills/references/monitoring.md`。
+> 诊断排查请查阅 `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/diagnostics.md`；
+> 观测面板与运维手册请查阅 `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/monitoring.md`。
 > 以上两个文件在 pilot 安装完成后自动写入本地，可直接打开阅读。
 
 ## 重要说明
@@ -68,8 +68,8 @@ curl -fsSL https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliy
 ```bash
 ~/.local/bin/loongsuite-pilot status
 ~/.local/bin/loongsuite-pilot info
-# diagnostics 与 monitoring 参考文档已自动写入 references/
-ls -l references/
+# diagnostics 与 monitoring 参考文档已自动写入 loongsuite-pilot-ops/references/
+ls -l ~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/
 ```
 
 ---
@@ -340,7 +340,7 @@ curl -fsSL https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliy
   | bash -s -- uninstall --purge
 ```
 
-卸载脚本会自动清理 `references/` 下的符号链接；本 `SKILL.md` 由用户手动维护，不受卸载影响。
+卸载脚本会自动清理 `loongsuite-pilot-ops/references/` 下的符号链接；本 `SKILL.md` 由用户手动维护，不受卸载影响。
 
 ---
 
@@ -350,5 +350,5 @@ pilot 安装成功后，以下两个文档自动写入本地，可直接打开�
 
 | 文件 | 内容 |
 |------|------|
-| `~/.loongsuite-pilot/skills/references/diagnostics.md` | 5 步系统化诊断排查 + 常见问题速查 |
-| `~/.loongsuite-pilot/skills/references/monitoring.md` | 观测面板启停 + 全面健康检查 + 强制重启 + 版本回滚 |
+| `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/diagnostics.md` | 5 步系统化诊断排查 + 常见问题速查 |
+| `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/monitoring.md` | 观测面板启停 + 全面健康检查 + 强制重启 + 版本回滚 |

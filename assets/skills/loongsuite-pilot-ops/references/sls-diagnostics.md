@@ -1,7 +1,7 @@
 # SLS 上报链路诊断排查指南
 
 本文档随 `loongsuite-pilot` 安装包一起分发，安装完成后自动写入
-`~/.loongsuite-pilot/skills/references/sls-diagnostics.md`，随 pilot 升级自动更新。
+`~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/sls-diagnostics.md`，随 pilot 升级自动更新。
 
 覆盖 **pilot 向 SLS（Simple Log Service）上报数据的链路排查**——数据在本地正常采集但 SLS 查不到、上报失败、failed-logs 堆积等问题。
 不覆盖 agent 侧的 hook/JSONL 数据采集问题（那些请查阅对应的 agent 分诊文档）。

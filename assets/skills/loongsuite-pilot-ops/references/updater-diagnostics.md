@@ -1,7 +1,7 @@
 # 自动更新诊断排查指南
 
 本文档随 `loongsuite-pilot` 安装包一起分发，安装完成后自动写入
-`~/.loongsuite-pilot/skills/references/updater-diagnostics.md`，随 pilot 升级自动更新。
+`~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/updater-diagnostics.md`，随 pilot 升级自动更新。
 
 覆盖 **pilot 自动更新守护进程的排查**——版本不更新、更新失败、更新后服务异常、回滚等问题。
 

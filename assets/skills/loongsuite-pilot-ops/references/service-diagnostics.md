@@ -1,7 +1,7 @@
 # pilot 服务诊断排查指南
 
 本文档随 `loongsuite-pilot` 安装包一起分发，安装完成后自动写入
-`~/.loongsuite-pilot/skills/references/service-diagnostics.md`，随 pilot 升级自动更新。
+`~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/service-diagnostics.md`，随 pilot 升级自动更新。
 
 覆盖 **pilot 服务自身的运行状态排查**——服务启动失败、崩溃、Input 未注册、日志异常等问题。
 不覆盖单个 agent 的 hook/JSONL 链路问题（那些请查阅对应的 agent 分诊文档）。

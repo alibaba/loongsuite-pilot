@@ -1,7 +1,7 @@
 # SQLite 数据采集诊断排查指南
 
 本文档随 `loongsuite-pilot` 安装包一起分发，安装完成后自动写入
-`~/.loongsuite-pilot/skills/references/sqlite-diagnostics.md`，随 pilot 升级自动更新。
+`~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/sqlite-diagnostics.md`，随 pilot 升级自动更新。
 
 覆盖 **pilot 通过 SQLite 轮询采集数据的通用链路排查**。
 大多数 SQLite Input 共享 `BaseSqliteInput` 的 `rowid` 增量机制；Qoder Work / Qoder Work CN 使用 `updated_at` 时间游标，但 DB 可访问性、表结构、游标状态与服务消费排查流程一致。

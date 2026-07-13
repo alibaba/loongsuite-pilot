@@ -1,7 +1,7 @@
 # Wukong CLI API Polling 诊断排查指南
 
 本文档随 `loongsuite-pilot` 安装包一起分发，安装完成后自动写入
-`~/.loongsuite-pilot/skills/references/wukong-diagnostics.md`，随 pilot 升级自动更新。
+`~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/wukong-diagnostics.md`，随 pilot 升级自动更新。
 
 仅覆盖 **pilot 场景下 Wukong 的 CLI API 轮询采集链路**，不包含 Wukong 自身的功能问题。
 Wukong 与其它 agent 完全不同：**没有 hook、没有 JSONL 落盘、没有 SQLite**，pilot 直接通过

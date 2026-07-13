@@ -1,7 +1,7 @@
 # Qwen Code CLI Hook 接入诊断排查指南
 
 本文档随 `loongsuite-pilot` 安装包一起分发，安装完成后自动写入
-`~/.loongsuite-pilot/skills/references/qwen-code-cli-diagnostics.md`，随 pilot 升级自动更新。
+`~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/qwen-code-cli-diagnostics.md`，随 pilot 升级自动更新。
 
 仅覆盖 **pilot 场景下 Qwen Code CLI hook → transcript parser → JSONL → Input 消费链路**，不包含 Qwen Code CLI 自身功能问题。
 
