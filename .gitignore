@@ -23,6 +23,10 @@ Thumbs.db
 !.env.e2e.example
 !.env.e2e.l2.example
 
+# Python
+__pycache__/
+*.pyc
+
 # Build artifacts
 *.tsbuildinfo
 VERSION
@@ -67,3 +71,6 @@ docs/trace-validation-rules.json
 # Loop 运行时状态文件(每次运行变动,不入库)
 /STATE.md
 /loop-run-log.md
+
+# Alarm-triage skill runtime data (snapshots, analysis, drafts)
+.agents/skills/alarm-triage/data/
