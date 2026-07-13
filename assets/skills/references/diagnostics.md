@@ -3,8 +3,8 @@
 本文档随 `loongsuite-pilot` 安装包一起分发，安装完成后自动写入
 `~/.loongsuite-pilot/skills/references/diagnostics.md`，随 pilot 升级自动更新。
 
-# 重点！！必须遵守！
-**绝对**不要尝试读取用户的 ~/.loongsuite-pilot/config.json文件！
+本仓库中的源文件位于 `assets/skills/references/`；安装后对应路径为
+`~/.loongsuite-pilot/skills/references/`。
 
 ---
 
@@ -13,12 +13,20 @@
 | Agent | Token 使用量采集 | Chat / Tool call 详情采集 | 自测状态 | 默认开启 |
 |-------|:---:|:---:|---|:---:|
 | Cursor | ✅ | ✅ | 正常 | ✅ |
-| Qoder IDE / CLI | ✅ | ✅ | 正常 | ✅ |
-| Qoder Work | ✅ | ✅ | 正常 | ✅ |
+| Cursor CLI | ✅ | ✅ | 通过 Cursor hook payload 中的 `cursor_version` 自动识别 | ✅ |
+| Qoder IDE | ✅ | ✅ | 正常 | ✅ |
+| Qoder CLI | ✅ | ✅ | Hook / session polling / trace 多链路 | ✅ |
+| Qoder CN | ✅ | ✅ | Hook / SQLite / trace 多链路 | ✅ |
+| Qoder Work | ✅ | ✅ | Hook / local data polling / trace 多链路 | ✅ |
+| Qoder Work CN | ✅ | ✅ | Hook / local data polling / trace 多链路 | ✅ |
+| Qoder for JetBrains | ❌ | ❌ | 暂不支持数据采集（detection-only） | — |
 | Claude Code | ✅ | ✅ | 安装后需要 `source` 一下 shell rc | ✅ |
 | Codex | ✅ | ✅ | 正常 | ✅ |
+| OpenCode | ✅ | ✅ | 插件注入模式，需 OpenCode 启动过一次 | ✅ |
+| Qwen Code CLI | ✅ | ✅ | 正常 | ✅ |
+| Wukong | ✅ | ✅ | 需 `wukong-cli` 可用且本地守护进程存活 | ✅ |
 
-> **如果用户使用的工具不在上表中，或对应单元格为「❌ 暂不支持」，
+> **如果用户使用的是 Qoder for JetBrains，或后续矩阵中对应单元格为「❌ 暂不支持」，
 > 请直接告知用户：当前 `loongsuite-pilot` 暂未支持该工具的数据采集，无需进一步排查。**
 
 ---
@@ -26,17 +34,21 @@
 ## 按 Agent 分诊（请阅读对应的诊断文档）
 
 确认用户使用的是哪个 agent，然后**只**阅读对应的诊断文档，不要把所有 agent 的内容混合输出：
-重点：分诊的过程中，**绝对**不要尝试读取用户的 ~/.loongsuite-pilot/config.json文件！
 
 | 用户使用的工具 | 应阅读的诊断文档 |
 |----------------|------------------|
-| Cursor | `~/.loongsuite-pilot/skills/references/cursor-diagnostics.md` |
+| Cursor / Cursor CLI | `~/.loongsuite-pilot/skills/references/cursor-diagnostics.md` |
 | Qoder IDE / Qoder CLI | `~/.loongsuite-pilot/skills/references/qoder-diagnostics.md` |
+| Qoder CN | `~/.loongsuite-pilot/skills/references/qoder-cn-diagnostics.md` |
 | Qoder Work | `~/.loongsuite-pilot/skills/references/qoderwork-diagnostics.md` |
+| Qoder Work CN | `~/.loongsuite-pilot/skills/references/qoder-work-cn-diagnostics.md` |
 | Claude Code | `~/.loongsuite-pilot/skills/references/claude-code-diagnostics.md` |
 | Codex | `~/.loongsuite-pilot/skills/references/codex-diagnostics.md` |
+| OpenCode | `~/.loongsuite-pilot/skills/references/opencode-diagnostics.md` |
+| Qwen Code CLI | `~/.loongsuite-pilot/skills/references/qwen-code-cli-diagnostics.md` |
+| Wukong | `~/.loongsuite-pilot/skills/references/wukong-diagnostics.md` |
 
-每份分诊文档独立给出该 agent 的：服务状态检查、原始日志路径、Hook 配置位置、常见问题与修复步骤。
+每份分诊文档独立给出该 agent 的：服务状态检查、原始日志路径、Hook / Plugin / CLI 配置位置、常见问题与修复步骤。
 
 ---
 
@@ -50,7 +62,7 @@
 | pilot 服务异常（启动序列、Input 注册、Flusher、日志异常） | `~/.loongsuite-pilot/skills/references/service-diagnostics.md` |
 | 自动更新异常（版本不更新、更新后服务异常、回滚） | `~/.loongsuite-pilot/skills/references/updater-diagnostics.md` |
 | SLS 数据上报异常（数据采集正常但 SLS 查不到、上报失败、failed-logs 堆积） | `~/.loongsuite-pilot/skills/references/sls-diagnostics.md` |
-| SQLite 数据采集异常（Qoder IDE token 数据缺失） | `~/.loongsuite-pilot/skills/references/sqlite-diagnostics.md` |
+| SQLite 数据采集异常（Qoder / Qoder CN / Qoder Work token 或本地消息数据缺失） | `~/.loongsuite-pilot/skills/references/sqlite-diagnostics.md` |
 
 > **分诊提示**：如果用户同时遇到"某个 agent 没数据" + "pilot 服务异常"，先走平台子系统排查（确保 pilot 服务自身健康），再走 agent 分诊。
 

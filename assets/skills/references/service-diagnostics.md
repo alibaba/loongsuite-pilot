@@ -67,17 +67,31 @@ grep -E '"tag":"(Orchestrator|HookWatchdog|LogRetention)"' \
 
 ## 第 2 步：Input 注册与 agent 发现状态
 
-pilot 注册 7 个 Input，每个 Input 对应一条数据采集链路：
+pilot 当前注册 21 个 Input，每个 Input 对应一条数据采集链路。部分新链路为 trace 聚合链路，启用后会自动压制同 agent 的旧 hook / sqlite / log fallback：
 
 | Input ID | agentType | 数据源 | 触发条件 |
 |----------|-----------|-------|---------|
-| `qoder-sqlite` | `qoder` | Qoder IDE SQLite | Qoder DB 文件存在 |
-| `qoder-work-hook` | `qoder-work` | Qoder Work hook JSONL | `~/.qoderwork/` 目录存在 |
-| `qoder-cli-hook` | `qoder-cli` | Qoder CLI hook JSONL | `~/.qoder/` 目录存在 |
-| `qoder-cli-session` | `qoder-cli` | Qoder CLI session segments | `~/.qoder/logs/sessions/` 目录存在 |
-| `cursor-hook` | `cursor` | Cursor hook JSONL | `~/.loongsuite-pilot/logs/cursor/history/` 目录存在 |
-| `claude-code-log` | `claude-code` | Claude Code OTel JSONL | 日志目录存在 |
-| `codex-log` | `codex` | Codex OTel JSONL | 日志目录存在 |
+| `qoder-sqlite` | `qoder` | Qoder IDE SQLite token usage | Qoder DB 文件存在，且 `qoder-trace` 未启用 |
+| `qoder-trace` | `qoder` | Qoder hook / session / SQLite trace 聚合 | `~/.loongsuite-pilot/logs/qoder/history/` 或 Qoder 本地数据可用 |
+| `qoder-cli-hook` | `qoder-cli` | Qoder CLI hook JSONL | `~/.qoder/` 目录存在，且 `qoder-trace` 未启用 |
+| `qoder-cli-session` | `qoder-cli` | Qoder CLI session segments | `~/.qoder/logs/sessions/` 目录存在，且 `qoder-trace` 未启用 |
+| `qoder-cn` | `qoder-cn` | Qoder CN IDE history + ai_tracker | QoderCN 应用数据根目录存在，且 `qoder-cn-trace` 未启用 |
+| `qoder-cn-sqlite` | `qoder-cn` | Qoder CN SQLite token usage | QoderCN `SharedClientCache/cache/db/local.db` 存在，且 `qoder-cn-trace` 未启用 |
+| `qoder-cn-trace` | `qoder-cn` | Qoder CN hook / SQLite trace 聚合 | QoderCN history 或本地数据可用 |
+| `qoder-work-hook` | `qoder-work` | Qoder Work hook JSONL | `~/.qoderwork/` 目录存在，且 `qoder-work-trace` 未启用 |
+| `qoder-work-log` | `qoder-work` | Qoder Work SDK log tail | Qoder Work logs 目录存在，且 `qoder-work-trace` 未启用 |
+| `qoder-work-sqlite` | `qoder-work` | Qoder Work `data/agents.db` | Qoder Work `data/agents.db` 存在，且 `qoder-work-trace` 未启用 |
+| `qoder-work-trace` | `qoder-work` | Qoder Work SDK log + SQLite trace 聚合 | Qoder Work logs / data 可用 |
+| `qoder-work-cn-hook` | `qoder-work-cn` | Qoder Work CN hook JSONL | `~/.qoderworkcn/` 目录存在，且 `qoder-work-cn-trace` 未启用 |
+| `qoder-work-cn-log` | `qoder-work-cn` | Qoder Work CN SDK log tail | Qoder Work CN logs 目录存在，且 `qoder-work-cn-trace` 未启用 |
+| `qoder-work-cn-sqlite` | `qoder-work-cn` | Qoder Work CN `data/agents.db` | Qoder Work CN `data/agents.db` 存在，且 `qoder-work-cn-trace` 未启用 |
+| `qoder-work-cn-trace` | `qoder-work-cn` | Qoder Work CN SDK log + SQLite trace 聚合 | Qoder Work CN logs 目录存在 |
+| `cursor-hook` | `cursor` / `cursor-cli` | Cursor hook JSONL | `~/.loongsuite-pilot/logs/cursor/history/` 目录存在 |
+| `claude-code-log` | `claude-code` | Claude Code OTel JSONL | Claude Code log 目录存在 |
+| `codex-transcript` | `codex` | Codex transcript / aborted turn polling | `~/.codex/sessions/` 等 Codex 数据目录存在 |
+| `opencode-log` | `opencode` | OpenCode plugin JSONL | `~/.loongsuite-pilot/logs/opencode/` 目录存在 |
+| `qwen-code-cli-log` | `qwen-code-cli` | Qwen Code CLI hook JSONL | `~/.loongsuite-pilot/logs/qwen-code-cli/` 目录存在 |
+| `wukong` | `wukong` | `wukong-cli` CLI API polling | `~/.real/daemon.sock` 存在且 `wukong-cli service status` 为 running |
 
 AgentDiscoveryService 通过 fs.watch + 轮询检测 agent 是否可用，满足条件时自动启动对应 Input：
 

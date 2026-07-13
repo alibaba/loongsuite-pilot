@@ -4,7 +4,7 @@
 `~/.loongsuite-pilot/skills/references/sqlite-diagnostics.md`，随 pilot 升级自动更新。
 
 覆盖 **pilot 通过 SQLite 轮询采集数据的通用链路排查**。
-所有基于 `BaseSqliteInput` 的 Input 共享相同的采集机制，本文档提供统一的排查流程。
+大多数 SQLite Input 共享 `BaseSqliteInput` 的 `rowid` 增量机制；Qoder Work / Qoder Work CN 使用 `updated_at` 时间游标，但 DB 可访问性、表结构、游标状态与服务消费排查流程一致。
 
 ---
 
@@ -21,9 +21,10 @@ Flusher → SLS / JSONL / HTTP
 ```
 
 关键事实：
-- 以 SQLite 内置 `rowid` 为增量游标，只读新增行
+- Qoder / Qoder CN 以 SQLite 内置 `rowid` 为增量游标，只读新增行
+- Qoder Work / Qoder Work CN 以 `messages.updated_at` 为增量游标，只读新增消息
 - DB 以 `OPEN_READONLY` 打开，**不会影响**目标应用的正常读写
-- 首次启动时自动取当前 `MAX(rowid)` 作为基线，**只采启动后新产生的数据**
+- 首次启动时自动取当前最大游标作为基线，**只采启动后新产生的数据**
 - 每行独立处理——单行 transform 失败不影响其余行（跳过并 warn）
 - 游标持久化在 `~/.loongsuite-pilot/logs/input-state.json` 中，以 Input ID 为 key
 
@@ -36,8 +37,11 @@ Flusher → SLS / JSONL / HTTP
 | Input ID | agentType | 目标应用 | DB 路径（macOS） | DB 路径（Linux） | 目标表 | 关键列 | 过滤条件 |
 |----------|-----------|---------|-----------------|-----------------|-------|-------|---------|
 | `qoder-sqlite` | `qoder` | Qoder IDE | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` | `${XDG_CONFIG_HOME:-~/.config}/Qoder/SharedClientCache/cache/db/local.db` | `chat_message` | `token_info`（JSON） | `token_info IS NOT NULL AND token_info != '' AND json_valid(token_info)` |
+| `qoder-cn-sqlite` | `qoder-cn` | Qoder CN | `~/Library/Application Support/QoderCN/SharedClientCache/cache/db/local.db` | `${XDG_CONFIG_HOME:-~/.config}/QoderCN/SharedClientCache/cache/db/local.db` | `chat_message` | `token_info`（JSON） | `token_info IS NOT NULL AND token_info != '' AND json_valid(token_info)` |
+| `qoder-work-sqlite` | `qoder-work` | Qoder Work | `~/Library/Application Support/QoderWork/data/agents.db` | `${XDG_CONFIG_HOME:-~/.config}/QoderWork/data/agents.db` | `messages` + `sub_chats` | `updated_at` / `parts` | `m.updated_at > <cursor> AND m.parts IS NOT NULL AND m.parts != '' AND m.parts != '[]'` |
+| `qoder-work-cn-sqlite` | `qoder-work-cn` | Qoder Work CN | `~/Library/Application Support/QoderWork CN/data/agents.db` | `${XDG_CONFIG_HOME:-~/.config}/QoderWork CN/data/agents.db` | `messages` + `sub_chats` | `updated_at` / `parts` | `m.updated_at > <cursor> AND m.parts IS NOT NULL AND m.parts != '' AND m.parts != '[]'` |
 
-> 后续新增 SQLite Input 时，在此表追加一行即可，排查流程不变。
+> `qoder-work-sqlite` / `qoder-work-cn-sqlite` 使用 `input-state.json` 的 `extra.lastUpdatedAt` 作为时间游标，不使用 SQLite `rowid`。后续新增 SQLite Input 时，在此表追加一行即可，排查流程不变。
 
 ---
 
@@ -111,15 +115,15 @@ sqlite3 "$DB" "
 
 ## 第 3 步：游标状态检查
 
-每个 SQLite Input 在 `input-state.json` 中以 `lastRowId` 字段记录增量游标：
+SQLite Input 在 `input-state.json` 中记录增量游标：Qoder / Qoder CN 使用 `lastRowId`，Qoder Work / Qoder Work CN 使用 `extra.lastUpdatedAt`。
 
 ```bash
 # 将 <INPUT_ID> 替换为具体 Input ID
 python3 -m json.tool ~/.loongsuite-pilot/logs/input-state.json 2>/dev/null \
-  | grep -A 3 '"<INPUT_ID>"'
+  | grep -A 6 '"<INPUT_ID>"'
 ```
 
-预期：`lastRowId` 存在且值 > 0。
+预期：对应 Input 存在游标字段，且值大于 0。
 
 ### 3.1 首次启动基线
 
