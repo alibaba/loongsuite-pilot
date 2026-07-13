@@ -17,16 +17,16 @@
 | Qoder IDE | ✅ | ✅ | 正常 | ✅ |
 | Qoder CLI | ✅ | ✅ | Hook / session polling / trace 多链路 | ✅ |
 | Qoder CN | ✅ | ✅ | Hook / SQLite / trace 多链路 | ✅ |
+| Qoder for JetBrains | ✅ | ✅ | 自动检测，采集数据标记为 `qoder-idea` | ✅ |
 | Qoder Work | ✅ | ✅ | Hook / local data polling / trace 多链路 | ✅ |
 | Qoder Work CN | ✅ | ✅ | Hook / local data polling / trace 多链路 | ✅ |
-| Qoder for JetBrains | ❌ | ❌ | 暂不支持数据采集（detection-only） | — |
 | Claude Code | ✅ | ✅ | 安装后需要 `source` 一下 shell rc | ✅ |
 | Codex | ✅ | ✅ | 正常 | ✅ |
 | OpenCode | ✅ | ✅ | 插件注入模式，需 OpenCode 启动过一次 | ✅ |
 | Qwen Code CLI | ✅ | ✅ | 正常 | ✅ |
 | Wukong | ✅ | ✅ | 需 `wukong-cli` 可用且本地守护进程存活 | ✅ |
 
-> **如果用户使用的是 Qoder for JetBrains，或后续矩阵中对应单元格为「❌ 暂不支持」，
+> **如果用户使用的工具后续矩阵中对应单元格为「❌ 暂不支持」，
 > 请直接告知用户：当前 `loongsuite-pilot` 暂未支持该工具的数据采集，无需进一步排查。**
 
 ---
@@ -40,6 +40,7 @@
 | Cursor / Cursor CLI | `~/.loongsuite-pilot/skills/references/cursor-diagnostics.md` |
 | Qoder IDE / Qoder CLI | `~/.loongsuite-pilot/skills/references/qoder-diagnostics.md` |
 | Qoder CN | `~/.loongsuite-pilot/skills/references/qoder-cn-diagnostics.md` |
+| Qoder for JetBrains | `~/.loongsuite-pilot/skills/references/qoder-jetbrains-diagnostics.md` |
 | Qoder Work | `~/.loongsuite-pilot/skills/references/qoderwork-diagnostics.md` |
 | Qoder Work CN | `~/.loongsuite-pilot/skills/references/qoder-work-cn-diagnostics.md` |
 | Claude Code | `~/.loongsuite-pilot/skills/references/claude-code-diagnostics.md` |

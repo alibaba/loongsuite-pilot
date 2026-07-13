@@ -5,6 +5,7 @@
 
 覆盖 **pilot 通过 SQLite 轮询采集数据的通用链路排查**。
 大多数 SQLite Input 共享 `BaseSqliteInput` 的 `rowid` 增量机制；Qoder Work / Qoder Work CN 使用 `updated_at` 时间游标，但 DB 可访问性、表结构、游标状态与服务消费排查流程一致。
+Qoder for JetBrains 的 token 数据位于 `~/.qoder/shared_client/cache/db/local.db`，由 `qoder-trace` 读取并标记为 `qoder-idea`，不单独注册 `*-sqlite` Input。
 
 ---
 

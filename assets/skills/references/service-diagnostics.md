@@ -72,7 +72,7 @@ pilot 当前注册 21 个 Input，每个 Input 对应一条数据采集链路。
 | Input ID | agentType | 数据源 | 触发条件 |
 |----------|-----------|-------|---------|
 | `qoder-sqlite` | `qoder` | Qoder IDE SQLite token usage | Qoder DB 文件存在，且 `qoder-trace` 未启用 |
-| `qoder-trace` | `qoder` | Qoder hook / session / SQLite trace 聚合 | `~/.loongsuite-pilot/logs/qoder/history/` 或 Qoder 本地数据可用 |
+| `qoder-trace` | `qoder` / `qoder-cli` / `qoder-idea` | Qoder hook / session / SQLite trace 聚合 | `~/.loongsuite-pilot/logs/qoder/history/`、Qoder 本地数据或 `~/.qoder/shared_client/cache/db/local.db` 可用 |
 | `qoder-cli-hook` | `qoder-cli` | Qoder CLI hook JSONL | `~/.qoder/` 目录存在，且 `qoder-trace` 未启用 |
 | `qoder-cli-session` | `qoder-cli` | Qoder CLI session segments | `~/.qoder/logs/sessions/` 目录存在，且 `qoder-trace` 未启用 |
 | `qoder-cn` | `qoder-cn` | Qoder CN IDE history + ai_tracker | QoderCN 应用数据根目录存在，且 `qoder-cn-trace` 未启用 |

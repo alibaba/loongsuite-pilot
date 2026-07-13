@@ -4,6 +4,8 @@
 `~/.loongsuite-pilot/skills/references/qoder-diagnostics.md`，随 pilot 升级自动更新。
 
 仅覆盖 **pilot 场景下的 Qoder 本地数据采集链路**，不包含 OTLP trace 远端导出排查。
+**本文档不覆盖 Qoder for JetBrains** —— JetBrains 插件使用 `qoder-idea` agentType 与共享 `qoder-trace` 链路，
+排查请阅读 `~/.loongsuite-pilot/skills/references/qoder-jetbrains-diagnostics.md`。
 **本文档不覆盖 Qoder Work** —— Qoder Work 是独立产品，链路与 Qoder IDE/CLI 完全不同，
 排查请阅读 `~/.loongsuite-pilot/skills/references/qoderwork-diagnostics.md`。
 
