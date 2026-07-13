@@ -146,6 +146,12 @@ export class KiroCliSessionInput extends BaseInput {
     // Use requestCollection() (not collect() directly) to go through runCycle
     // serialization — ensures poll and signal don't run concurrently, and
     // onStop()'s cyclePromise await covers signal-triggered cycles too.
+    //
+    // Signal contract: SIGUSR1 is process-global — Node fires ALL registered
+    // listeners on every signal. We only register here (and detach on stop),
+    // so there's no contention today. If a future component also needs
+    // SIGUSR1, it will fire on every kiro stop event too; at that point
+    // switch to a targeted IPC channel (e.g. named pipe / file flag) instead.
     this.signalHandler = () => {
       if (this.pendingCollectTimer) clearTimeout(this.pendingCollectTimer);
       this.pendingCollectTimer = setTimeout(() => {

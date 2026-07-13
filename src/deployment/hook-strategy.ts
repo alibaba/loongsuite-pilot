@@ -117,6 +117,11 @@ export class HookStrategy implements DeployStrategy {
 
       // Kiro CLI: settingsPath 是整个 Agent 定义 JSON，需要顶层 name + tools +
       // hooks:<event>:[{command, matcher}]（flat，无 type 字段）。
+      // NOTE: this branch returns early — it does NOT run retiredEvents cleanup
+      // or env injection (applyEnvToSettings). kiro-cli.json currently declares
+      // neither field, so this is a no-op today; if retiredEvents/env are added
+      // later, deployKiroAgent must handle them explicitly (or route through the
+      // standard flow) — don't assume the shared path covers them.
       if (hookConfig.kiroAgent) {
         await this.deployKiroAgent(def);
         logger.info('hooks deployed', { agentId: def.id, events: hookConfig.events.length });
@@ -447,8 +452,8 @@ export class HookStrategy implements DeployStrategy {
       const arr = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
       // 移除旧的 pilot hook 条目（command 以 hookCommandBase 开头），保留第三方
       const filtered = arr.filter((e) => {
-        const cmd = (e as any)?.command;
-        return typeof cmd !== 'string' || !cmd.startsWith(hookCommandBase);
+        const existingCmd = (e as any)?.command;
+        return typeof existingCmd !== 'string' || !existingCmd.startsWith(hookCommandBase);
       });
       // 幂等：已存在则不重复 push
       const present = filtered.some((e) => (e as any)?.command === cmd);
@@ -470,6 +475,11 @@ export class HookStrategy implements DeployStrategy {
    * already set, so kiro-cli launches with the pilot agent by default.
    */
   private async setKiroDefaultAgentIfMissing(agentName: string): Promise<void> {
+    // NOTE: distinct from hookConfig.settingsPath (~/.kiro/agents/pilot-kiro.json).
+    // This is Kiro's CLI-level settings file — a different concern (default-agent
+    // selection, not the agent definition). Kiro fixes both paths; if the config
+    // root ever moves, update this literal alongside settingsPath rather than
+    // coupling them via a new config field (they're not 1:1 related).
     const cliSettingsPath = resolveHome('~/.kiro/settings/cli.json');
     try {
       await ensureDir(path.dirname(cliSettingsPath));
