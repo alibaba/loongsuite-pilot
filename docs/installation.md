@@ -6,7 +6,7 @@ Use this guide to install, verify, uninstall, or run LoongSuite Pilot from sourc
 
 ## Prerequisites
 
-- Node.js 18 or later
+- Node.js 20 or later
 - `npm`
 - `curl` or `wget`
 - PowerShell 5.1 or later on Windows

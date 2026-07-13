@@ -58,7 +58,7 @@ Agent 定义位于 `agents.d/`。如需接入新的 Agent，请参考 [新 Agent
 
 前置要求：
 
-- Node.js 18 或更高版本
+- Node.js 20 或更高版本
 - `npm`
 - `curl` 或 `wget`
 

@@ -263,7 +263,7 @@ ls -l ~/.loongsuite-pilot/plugins/otel-claude-hook/package/bin/otel-claude-hook
 | 最后一个 `tool.call` 排在最后一个 `llm.response` 之后 | PostToolUse hook 丢失（~30% 概率）导致排序错误。升级插件到 >= 0.2.0-beta（Issue 7 修复） |
 | Cursor 使用时 Claude Code 的 hook 数据混乱 | 插件自动检测 `cursor_version` 并跳过 Cursor 调用，正常不会混乱。若 Cursor 覆盖了 settings.json 的 hook 配置 → 重跑 install |
 | `CLAUDE_TELEMETRY_DEBUG` 不生效 | 确认环境变量名正确（不是 `CODEX_TELEMETRY_DEBUG`），且在启动 claude 前设置 |
-| `npm install` 失败导致插件不可用 | 检查 `/tmp/otel-plugin-npm-err.log`。常见原因：网络不通、Node.js 版本 < 18、npm registry 不可达 |
+| `npm install` 失败导致插件不可用 | 检查 `/tmp/otel-plugin-npm-err.log`。常见原因：网络不通、Node.js 版本 ≤ 20（需 > 20，即 20 或更高版本）、npm registry 不可达 |
 | `[otel-claude-hook] telemetry export failed` | Stop hook 导出异常但不影响 Claude Code。查看完整错误信息定位：OTLP endpoint 不可达 / log_dir 无写权限 / transcript 文件损坏 |
 | 重装 pilot 后 hook 不生效 | 确认 pilot 安装脚本调用了 `otel-claude-hook install`（不能因解压跳过而 early return）。当前版本已修复为每次都全新安装 |
 | 监控面板 `Last activity` 显示时间早于 JSONL 末尾时间（数据已采集但 dashboard 卡住） | dashboard 是按需懒索引，单次刷新最多吃 5 MiB / 2 万行。Claude Code 单行可达 100 KB，22 MiB 文件至少要刷 5 次才能追到尾。先 `grep '\[overview\] partial index' ~/.loongsuite-pilot/logs/loongsuite-pilot-dashboard.log` 确认；命中后多刷几次 dashboard（间隔 ≥5 秒）即可。详见 `monitoring.md` 的 "Dashboard Last activity 显示落后于真实时间" 章节 |
