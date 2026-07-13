@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { MetricsCollector } from '../../../src/metrics/metrics-collector.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
+import type { ProcessLiveness } from '../../../src/utils/pid-utils.js';
 
 function buildSnapshot(overrides: Partial<DataflowSnapshot> = {}): DataflowSnapshot {
   return {
@@ -293,50 +294,70 @@ describe('MetricsCollector', () => {
   });
 
   describe('infra health (via collectL1)', () => {
-    it('reports updater_pid_alive=true during grace period even if PID file missing', () => {
-      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+    it('reports updater_pid_alive=true during grace period even if updater liveness is down', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        updaterLiveness: () => down('pid file is missing'),
+      });
       const r1 = col.collectL1(buildSnapshot());
       const r2 = col.collectL1(buildSnapshot());
       expect(r1.updater_pid_alive).toBe('true');
       expect(r2.updater_pid_alive).toBe('true');
     });
 
-    it('reports updater_pid_alive=false after grace period when PID file missing', () => {
-      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
-      col.collectL1(buildSnapshot()); // cycle 1
-      col.collectL1(buildSnapshot()); // cycle 2
-      const r3 = col.collectL1(buildSnapshot()); // cycle 3 - past grace
+    it('reports updater_pid_alive=false after grace period when updater identity is absent', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        updaterLiveness: () => down('no matching updater command found'),
+      });
+      col.collectL1(buildSnapshot());
+      col.collectL1(buildSnapshot());
+      const r3 = col.collectL1(buildSnapshot());
       expect(r3.updater_pid_alive).toBe('false');
-    });
-
-    it('reports updater_pid_alive=true when PID file contains current process PID', () => {
-      fs.writeFileSync(path.join(tmpDir, 'loongsuite-pilot-updater.pid'), String(process.pid));
-      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
-      col.collectL1(buildSnapshot()); // cycle 1
-      col.collectL1(buildSnapshot()); // cycle 2
-      const r3 = col.collectL1(buildSnapshot()); // cycle 3
-      expect(r3.updater_pid_alive).toBe('true');
-    });
-
-    it('reports updater_pid_alive=false when PID file contains malformed content', () => {
-      fs.writeFileSync(path.join(tmpDir, 'loongsuite-pilot-updater.pid'), 'abc\n');
-      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
-      col.collectL1(buildSnapshot()); // grace 1
-      col.collectL1(buildSnapshot()); // grace 2
-      const r3 = col.collectL1(buildSnapshot()); // past grace
-      expect(r3.updater_pid_alive).toBe('false');
-    });
-
-    it('increments consecutive failures and resets on alive', () => {
-      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
-      col.collectL1(buildSnapshot()); // grace 1
-      col.collectL1(buildSnapshot()); // grace 2
-      col.collectL1(buildSnapshot()); // fail 1
       expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(1);
-      col.collectL1(buildSnapshot()); // fail 2
-      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(2);
+    });
 
-      fs.writeFileSync(path.join(tmpDir, 'loongsuite-pilot-updater.pid'), String(process.pid));
+    it('reports updater_pid_alive=true when stale PID is recovered by process identity scan', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        updaterLiveness: () => ({
+          running: true,
+          pid: 456,
+          source: 'process-scan',
+          reason: 'matching process command found; pid file points to stale or mismatched pid 123',
+          pidFileState: 'stale',
+        }),
+      });
+      col.collectL1(buildSnapshot());
+      col.collectL1(buildSnapshot());
+      const r3 = col.collectL1(buildSnapshot());
+      expect(r3.updater_pid_alive).toBe('true');
+      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(0);
+    });
+
+    it('increments consecutive failures and resets on identity match', () => {
+      const liveness = vi.fn<[], ProcessLiveness>()
+        .mockReturnValueOnce(down('no matching updater command found'))
+        .mockReturnValueOnce(down('no matching updater command found'))
+        .mockReturnValueOnce({ running: true, pid: 456, source: 'process-scan', reason: 'matching process command found' });
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        updaterLiveness: liveness,
+      });
+      col.collectL1(buildSnapshot());
+      col.collectL1(buildSnapshot());
+      col.collectL1(buildSnapshot());
+      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(1);
+      col.collectL1(buildSnapshot());
+      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(2);
       col.collectL1(buildSnapshot());
       expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(0);
       expect(col.getLastInfraHealth()!.updaterPidAlive).toBe(true);
@@ -457,3 +478,12 @@ describe('MetricsCollector', () => {
     });
   });
 });
+
+function down(reason: string): ProcessLiveness {
+  return {
+    running: false,
+    source: 'none',
+    reason,
+    pidFileState: 'missing',
+  };
+}
