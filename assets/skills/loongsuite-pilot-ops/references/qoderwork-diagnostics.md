@@ -9,30 +9,42 @@
 
 ---
 
-## 采集链路概览（Qoder Work 单链路）
+## 采集链路概览（Qoder Work 四链路，trace 默认接管）
 
-与 Qoder（4 条独立链路）不同，Qoder Work 只有 **一条 hook 链路**：
+Qoder Work 默认由 `qoder-work-trace` 聚合 Hook JSONL、session segments、SDK log 和 runtime wrapper intercept 数据；
+`qoder-work-hook` / `qoder-work-log` / `qoder-work-sqlite` 是 **显式关闭 `qoder-work-trace` 后的 fallback**，默认不会启动。
 
 ```
 Qoder Work
-  └─ Stop hook (~/.qoderwork/settings.json)
-       └─ qoderwork-loongsuite-pilot-hook.sh
-            └─ hook-processor.mjs --agent-id qoder-work
-                 └─ 增量 append 到 ~/.loongsuite-pilot/logs/qoder-work/history/qoder-work-YYYY-MM-DD.jsonl
-                      └─ pilot 的 QoderWorkInput (id=qoder-work-hook, agentType=qoder-work)
-                           └─ 规范化输出到 ~/.loongsuite-pilot/logs/output/qoder-work-YYYY-MM-DD.jsonl
+  ├─ Stop hook (~/.qoderwork/settings.json)
+  │    └─ qoderwork-loongsuite-pilot-hook.sh
+  │         └─ qoderwork-hook-processor.mjs --agent-id qoder-work
+  │              └─ ~/.loongsuite-pilot/logs/qoder-work/history/qoder-work-YYYY-MM-DD.jsonl
+  │                   └─ QoderWorkTraceInput (id=qoder-work-trace, 默认主链路)
+  ├─ Session segments
+  │    └─ ~/.qoderwork/logs/sessions/<session>/...
+  │         └─ qoder-work-trace 用于 LLM / tool timing 与 token enrichment
+  ├─ SDK log tail
+  │    └─ QoderWork 应用 logs 目录
+  │         └─ qoder-work-trace 兼容历史 token 数据；trace 关闭时 `qoder-work-log` fallback 才启动
+  └─ SQLite agents.db
+       └─ QoderWork data/agents.db
+            └─ trace 关闭时 `qoder-work-sqlite` fallback 才启动
 ```
 
-链路上任何一环断掉都会导致 Qoder Work 完全无数据。
+任一输入源缺失都可能导致字段不完整；默认生产路径下应先排查 `qoder-work-trace`，不要只看 `qoder-work-hook`。
 
 | 关键组件 | 路径 | 谁负责写 |
 |---|---|---|
 | Hook 注册 | `~/.qoderwork/settings.json` 的 `hooks.Stop`（nested 格式） | pilot 启动时检测到 `~/.qoderwork/` 存在自动注入 |
 | Hook 脚本 | `~/.loongsuite-pilot/hooks/qoderwork-loongsuite-pilot-hook.sh` | pilot 安装/升级时拷贝 |
-| 共享 processor | `~/.loongsuite-pilot/hooks/hook-processor.mjs` | pilot 安装/升级时拷贝；CLI 和 Work 共用 |
+| Hook processor | `~/.loongsuite-pilot/hooks/qoderwork-hook-processor.mjs` | pilot 安装/升级时拷贝 |
 | Processor 游标 | `~/.loongsuite-pilot/hooks/.line_records.qoder-work.json` | processor 每次成功 append 后更新 |
-| History JSONL | `~/.loongsuite-pilot/logs/qoder-work/history/qoder-work-YYYY-MM-DD.jsonl` | processor 增量 append |
-| Pilot 游标 | `~/.loongsuite-pilot/logs/input-state.json` 的 `qoder-work-hook` 条目 | QoderWorkInput 每次成功 flush 后更新 |
+| History JSONL | `~/.loongsuite-pilot/logs/qoder-work/history/qoder-work-YYYY-MM-DD.jsonl` | processor 增量 append，`qoder-work-trace` 默认读取 |
+| Session segments | `~/.qoderwork/logs/sessions/` | Qoder Work 应用自身写入，`qoder-work-trace` 用于 token/timing enrichment |
+| SDK log | Qoder Work 应用 logs 目录 | Qoder Work 应用自身写入，trace 关闭时 `qoder-work-log` fallback 才单独启动 |
+| SQLite DB | Qoder Work `data/agents.db` | Qoder Work 应用自身写入，trace 关闭时 `qoder-work-sqlite` fallback 才单独启动 |
+| Pilot 游标 | `~/.loongsuite-pilot/logs/input-state.json` 的 `qoder-work-trace` / fallback 条目 | 对应 Input 每次成功 flush 后更新 |
 | 规范化输出 | `~/.loongsuite-pilot/logs/output/qoder-work-YYYY-MM-DD.jsonl` | Flusher 写出 |
 
 ---
@@ -55,8 +67,8 @@ Qoder Work 数据未出现时，**按以下顺序逐步排查，勿跳步**—�
 
 ### 1.1 `~/.qoderwork/` 目录
 
-pilot 启动时通过检测 `~/.qoderwork/` 目录是否存在来判定是否要注册 Qoder Work 的 hook。
-若目录不存在，pilot 不会注入 hook，也不会启动 `qoder-work-hook` Input：
+pilot 启动时通过检测 `~/.qoderwork/` 目录是否存在来判定是否要注册 Qoder Work 的 hook 并启动相关采集链路。
+若目录不存在，pilot 不会注入 hook，也不会启动 `qoder-work-trace` 或 fallback Input：
 
 ```bash
 ls -la ~/.qoderwork/
@@ -98,14 +110,14 @@ python3 -m json.tool ~/.qoderwork/settings.json \
 若现存 hook 仍指向旧入口 `qoder-loongsuite-pilot-hook.sh qoder-work`（兼容旧版），
 restart 时会被自动替换为新的 `qoderwork-loongsuite-pilot-hook.sh`。
 
-> Qoder Work 只注入 `Stop` 一个事件，由 `hook-processor.mjs` 根据 `transcript_path`
+> Qoder Work 只注入 `Stop` 一个事件，由 `qoderwork-hook-processor.mjs` 根据 `transcript_path`
 > 增量拉取 transcript，**不需要**也**不会**像 Codex 那样注入 5 个事件。
 
 ---
 
 ## 第 2 步：检查原始 history JSONL（hook 是否被触发）
 
-Stop hook 触发后，`hook-processor.mjs` 把 Qoder Work 的 transcript 新增行增量
+Stop hook 触发后，`qoderwork-hook-processor.mjs` 把 Qoder Work 的 transcript 新增行增量
 append 到 history JSONL：
 
 ```bash
@@ -147,7 +159,7 @@ cat ~/.loongsuite-pilot/hooks/.line_records.qoder-work.json
 
 ```bash
 ls -l ~/.loongsuite-pilot/hooks/qoderwork-loongsuite-pilot-hook.sh   # 需要 x 权限
-ls -l ~/.loongsuite-pilot/hooks/hook-processor.mjs                   # CLI 和 Work 共用
+ls -l ~/.loongsuite-pilot/hooks/qoderwork-hook-processor.mjs                # Qoder Work 专用 processor
 ```
 
 若 hook 脚本无 x 权限 → `chmod +x ~/.loongsuite-pilot/hooks/qoderwork-loongsuite-pilot-hook.sh`，
@@ -205,7 +217,21 @@ launchctl getenv QODER_WORKER_RUNTIME_PATH
 
 ```bash
 ls -l ~/.loongsuite-pilot/logs/qoderwork-intercept.jsonl
-tail -5 ~/.loongsuite-pilot/logs/qoderwork-intercept.jsonl | python3 -m json.tool
+tail -20 ~/.loongsuite-pilot/logs/qoderwork-intercept.jsonl | python3 -c '
+import json, sys
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    print({
+        "type": r.get("type"),
+        "id": r.get("id"),
+        "model": r.get("model"),
+        "prompt_tokens": r.get("prompt_tokens"),
+        "completion_tokens": r.get("completion_tokens"),
+        "has_content": bool(r.get("content")),
+    })
+'
 ```
 
 预期能看到 `type: "token"` 或 `type: "system_prompt"` 记录。若文件不存在但 QoderWork 正常运行：
@@ -221,21 +247,33 @@ tail -50 ~/.loongsuite-pilot/logs/qoderwork-wrapper-error.log 2>/dev/null
 
 ## 第 4 步：pilot 是否成功消费
 
-QoderWorkInput（id 为 `qoder-work-hook`）按 `pollInterval`（默认 30s）轮询 history
-目录，把新增行规范化后交给 Flusher 写到 output：
+QoderWorkTraceInput（id 为 `qoder-work-trace`）按 `pollInterval`（默认 30s）轮询 history、session segments 与本地数据源，
+把新增行规范化后交给 Flusher 写到 output：
 
 ```bash
-# 4.1 input-state 中的 qoder-work-hook 游标
+# 4.1 input-state 中的 qoder-work-trace 游标（默认主链路）
 cat ~/.loongsuite-pilot/logs/input-state.json | python3 -m json.tool \
-  | grep -A 3 '"qoder-work-hook"'
+  | grep -A 5 '"qoder-work-trace"'
 
-# 4.2 pilot 输出
+# 4.2 如果显式关闭了 trace，再检查 fallback 游标
+cat ~/.loongsuite-pilot/logs/input-state.json | python3 -m json.tool \
+  | grep -E -A 3 '"qoder-work(-hook|-log|-sqlite)?"'
+
+# 4.3 pilot 输出（只投影元数据，避免打印 prompt/tool 内容）
 ls -la ~/.loongsuite-pilot/logs/output/ | grep qoder-work
-tail -2 ~/.loongsuite-pilot/logs/output/qoder-work-$(date -u +%Y-%m-%d).jsonl
+tail -20 ~/.loongsuite-pilot/logs/output/qoder-work-$(date -u +%Y-%m-%d).jsonl 2>/dev/null \
+  | python3 -c '
+import json, sys
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    print({"event.name": r.get("event.name"), "agent": r.get("gen_ai.agent.type"), "session": r.get("gen_ai.session.id")})
+'
 ```
 
 预期：
-- `input-state.json` 中存在 `qoder-work-hook` 条目，`lastFile` 指向当天的
+- 默认情况下 `input-state.json` 中存在 `qoder-work-trace` 条目，`lastFile` 指向当天的
   `qoder-work-YYYY-MM-DD.jsonl`，`lastOffset` 数值持续增大
 - output 目录产出 `qoder-work-YYYY-MM-DD.jsonl`，与第 2 步原始日志的记录数大致对齐
 - 每行 `gen_ai.agent.type` 为 `qoder-work`
@@ -243,8 +281,8 @@ tail -2 ~/.loongsuite-pilot/logs/output/qoder-work-$(date -u +%Y-%m-%d).jsonl
 `lastOffset` 不前进的可能原因：
 
 - pilot 服务未运行 → `~/.local/bin/loongsuite-pilot status`
-- `qoder-work-hook` Input 未注册 → `tail ~/.loongsuite-pilot/logs/loongsuite-pilot-service.log`，
-  搜 `qoder-work-hook` 关键字
+- `qoder-work-trace` Input 未注册 → `tail ~/.loongsuite-pilot/logs/loongsuite-pilot-service.log`，搜 `qoder-work-trace` 关键字
+- `qoder-work-trace` 被显式禁用 → 再检查 `qoder-work-hook` / `qoder-work-log` / `qoder-work-sqlite` fallback
 - 原始 history 确实没新增（第 2 步的源为空）→ 回第 2 步
 - 配置里关掉了 `qoder-work` → 见第 5 步配置检查
 
@@ -255,23 +293,28 @@ tail -2 ~/.loongsuite-pilot/logs/output/qoder-work-$(date -u +%Y-%m-%d).jsonl
 ### 5.1 pilot 的 listener 是否启用
 
 ```bash
-python3 -m json.tool ~/.loongsuite-pilot/config.json \
-  | grep -A 3 '"qoder-work"'
+python3 - <<'PY'
+import json
+import pathlib
+path = pathlib.Path.home() / '.loongsuite-pilot' / 'config.json'
+try:
+    cfg = json.loads(path.read_text())
+except Exception:
+    print('config.json 不存在或无法解析；使用默认 listener 配置')
+    raise SystemExit(0)
+listeners = cfg.get('listeners') or {}
+for key in ('qoder-work-trace', 'qoder-work', 'qoder-work-log', 'qoder-work-sqlite'):
+    item = listeners.get(key) or {}
+    print(key, {
+        'enabled': item.get('enabled', 'default'),
+        'pollInterval': item.get('pollInterval', 'default'),
+    })
+PY
 ```
 
-预期：
+预期：`qoder-work-trace.enabled` 未配置或为 `true`（默认主链路）。如果它显式为 `false`，再确认 fallback 中至少一个需要的 Input 未被禁用。
 
-```jsonc
-"listeners": {
-  "qoder-work": {
-    "enabled": true,
-    "pollInterval": 30000
-  }
-}
-```
-
-若 `enabled: false` 或不存在该字段（走默认）但用户明确想关掉，可通过 pilot 的
-agent 控制 API 临时启用：
+若相关 `enabled: false` 导致采集关闭，可通过 pilot 的 agent 控制 API 临时启用：
 
 ```bash
 ~/.local/bin/loongsuite-pilot agent enable qoder-work
@@ -312,13 +355,13 @@ env | grep LOONGSUITE_PILOT
 |---|---|
 | `~/.qoderwork/settings.json` | Qoder Work 的 hook 注册（`hooks.Stop`，nested 格式） |
 | `~/.loongsuite-pilot/hooks/qoderwork-loongsuite-pilot-hook.sh` | Qoder Work 专用的 shell 入口（pilot 维护） |
-| `~/.loongsuite-pilot/hooks/hook-processor.mjs` | 共享 transcript forwarder（从 stdin 拿 `transcript_path`，增量 append 到 history） |
+| `~/.loongsuite-pilot/hooks/qoderwork-hook-processor.mjs` | Qoder Work 专用 transcript forwarder（从 stdin 拿 `transcript_path`，增量 append 到 history） |
 | `~/.loongsuite-pilot/hooks/.line_records.qoder-work.json` | processor 的 per-transcript 增量行记录状态 |
-| `~/.loongsuite-pilot/logs/qoder-work/history/qoder-work-YYYY-MM-DD.jsonl` | transcript 转发后的 history（`qoder-work-hook` Input 源） |
+| `~/.loongsuite-pilot/logs/qoder-work/history/qoder-work-YYYY-MM-DD.jsonl` | transcript 转发后的 history（`qoder-work-trace` 默认读取；trace 关闭时 `qoder-work-hook` fallback 读取） |
 | `~/.loongsuite-pilot/logs/qoder-work/debug/qoder-work-debug-*.log` | processor 调试日志 |
 | `~/.loongsuite-pilot/logs/qoder-work/errors/qoder-work-error-*.log` | processor 错误日志（fail-open，不阻塞 Qoder Work） |
 | `~/.loongsuite-pilot/logs/output/qoder-work-YYYY-MM-DD.jsonl` | 规范化输出 |
-| `~/.loongsuite-pilot/logs/input-state.json` | 含 `qoder-work-hook` 的 `lastFile` + `lastOffset` 游标 |
+| `~/.loongsuite-pilot/logs/input-state.json` | 含 `qoder-work-trace` 及 fallback Input 的游标 |
 | `~/.loongsuite-pilot/node-bin` | Node runtime pin 文件（与 Qoder CLI / Cursor 共用） |
 | `~/.loongsuite-pilot/hooks/qoderwork-runtime-wrapper.mjs` | Qoder Work token fallback 运行时 wrapper（macOS 通过 `QODER_WORKER_RUNTIME_PATH` 注入） |
 | `~/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist` | 重启后自动恢复 `QODER_WORKER_RUNTIME_PATH` 的 LaunchAgent |
@@ -337,7 +380,7 @@ env | grep LOONGSUITE_PILOT
 | history 目录为空但 hook 已注入 | 用户在注入后还没结束过一次完整对话（Stop hook 未触发）。让用户在 Qoder Work 里发一句完整对话再看 |
 | debug 日志里只有 `No transcript_path or session_id` | Qoder Work 版本过老，Stop hook payload 里没有 `transcript_path`。让用户升级 Qoder Work |
 | debug 日志里反复 `Transcript file not found` | Qoder Work 写 transcript 的实际路径与 stdin 提供的 `transcript_path` 不一致；通常是 Qoder Work 自身的 bug，让用户升级 Qoder Work |
-| history 有数据但 output 没有 | 看 `input-state.json` 里 `qoder-work-hook` 的 `lastFile` / `lastOffset` 是否前进；不前进则查 `loongsuite-pilot-service.log` 中 `qoder-work-hook` 关键字 |
+| history 有数据但 output 没有 | 默认先看 `input-state.json` 里 `qoder-work-trace` 的 `lastFile` / `lastOffset` 是否前进；不前进则查 `loongsuite-pilot-service.log` 中 `qoder-work-trace` 关键字 |
 | `[loongsuite-pilot] node >= 18 not found` | 系统找不到合适的 Node。装一个 Node ≥ 18 并写入 `~/.loongsuite-pilot/node-bin` |
 | Qoder Work token 全 0 / cache_read 缺失，但 Chat / Tool call 正常 | macOS 上优先检查第 3 步 `QODER_WORKER_RUNTIME_PATH` 是否注入，修复后必须完全退出并重新打开 QoderWork |
 | `~/.loongsuite-pilot/logs/qoderwork-intercept.jsonl` 不存在 | wrapper 未注入、QoderWork 未重启继承 env，或真实 runtime 未找到；查看 `qoderwork-wrapper-error.log` |

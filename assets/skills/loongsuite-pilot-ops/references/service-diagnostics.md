@@ -106,21 +106,36 @@ grep 'agent detected and started\|agent stopped' \
 - `config.json` 的 `listeners` 中对应 Input 被 `enabled: false` 关闭
 
 ```bash
-# 检查 config.json 中是否有显式禁用的 listener
-python3 -m json.tool ~/.loongsuite-pilot/config.json 2>/dev/null | grep -A 2 '"enabled"'
+# 只列出显式禁用的 listener，不打印完整 config.json
+python3 - <<'PY'
+import json
+import pathlib
+
+path = pathlib.Path.home() / '.loongsuite-pilot' / 'config.json'
+try:
+    cfg = json.loads(path.read_text())
+except Exception:
+    print('config.json 不存在或无法解析')
+    raise SystemExit(0)
+
+listeners = cfg.get('listeners') or {}
+disabled = [k for k, v in listeners.items() if isinstance(v, dict) and v.get('enabled') is False]
+print('disabled listeners:', ', '.join(disabled) if disabled else '(none)')
+PY
 ```
 
 ---
 
 ## 第 3 步：Flusher 初始化状态
 
-pilot 支持 3 种 Flusher，可同时启用多个：
+pilot 支持 4 种 Flusher，可同时启用多个：
 
 | Flusher | 配置位置 | 默认状态 |
 |---------|---------|---------|
 | **SLS** | `config.json` → `sls` 段 | 有合法 endpoint 时自动启用 |
 | **JSONL** | `config.json` → `jsonl` 段 | 默认启用，输出到 `~/.loongsuite-pilot/logs/output/` |
 | **HTTP** | `config.json` → `http` 段 | 需显式配置 URL 才启用 |
+| **OTLP Trace** | `config.json` → `otlpTrace` / `cms` 段 | 需显式配置 endpoint 或 CMS trace 配置才启用 |
 
 若所有 Flusher 都未启用，pilot 会自动创建 JSONL fallback：
 
@@ -129,9 +144,9 @@ pilot 支持 3 种 Flusher，可同时启用多个：
 grep -i 'flusher\|no flushers' ~/.loongsuite-pilot/logs/loongsuite-pilot-service.log | tail -10
 ```
 
-预期：至少看到一个 flusher 的启动日志。若看到 `no flushers enabled, using JSONL fallback`，说明 SLS 和 HTTP 都未配置，数据仅写本地 JSONL。
+预期：至少看到一个 flusher 的启动日志。若看到 `no flushers enabled, using JSONL fallback`，说明 SLS、HTTP 和 OTLP Trace 都未配置，数据仅写本地 JSONL。
 
-SLS Flusher 的详细排查请阅读 `sls-diagnostics.md`。
+SLS Flusher 的详细排查请阅读 `sls-diagnostics.md`。OTLP Trace 导出异常时，优先检查 `otlpTrace` / `cms` 配置、`logs/otlp-debug/` 与 `logs/otlp-failed/`。
 
 ---
 

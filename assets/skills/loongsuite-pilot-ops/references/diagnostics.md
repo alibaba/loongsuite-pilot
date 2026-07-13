@@ -6,6 +6,10 @@
 本仓库中的源文件位于 `assets/skills/loongsuite-pilot-ops/references/`；安装后对应路径为
 `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/`。
 
+# 重点！！必须遵守！
+**不要读取、打印或让用户粘贴完整的 `~/.loongsuite-pilot/config.json`。**
+该文件可能包含 SLS AK/SK、HTTP token、用户标识等敏感信息。诊断时只允许读取必要字段，且必须用 `grep` / 小脚本做字段级筛选；涉及 `ak`、`secret`、`token`、`password`、`authorization` 等字段时只输出是否存在或脱敏后的前后 2 位。
+
 ---
 
 ## 支持的 AI 编程工具与功能矩阵

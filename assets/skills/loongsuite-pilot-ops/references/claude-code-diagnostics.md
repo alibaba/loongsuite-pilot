@@ -59,11 +59,27 @@ python3 -m json.tool ~/.claude/settings.json 2>/dev/null | grep -c "otel-claude-
 
 ## 第 2 步：检查原始 JSONL（hook 是否被触发）
 
-pilot 默认从 `~/.claude/otel-config.json` 读 `log_dir`，未配置时 fallback 到 `~/.loongcollector/data/`：
+pilot 默认从 `~/.claude/otel-config.json` 读 `log_dir`，未配置时 fallback 到 `~/.loongsuite-pilot/logs/claude-code/`：
 
 ```bash
 ls -la ~/.loongsuite-pilot/logs/claude-code/
-tail -2 ~/.loongsuite-pilot/logs/claude-code/claude-code-$(date +%Y-%m-%d).jsonl | python3 -m json.tool
+tail -20 ~/.loongsuite-pilot/logs/claude-code/claude-code-$(date +%Y-%m-%d).jsonl \
+  | python3 -c '
+import json, sys
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    print({
+        "event.name": r.get("event.name"),
+        "session.id": r.get("session.id") or r.get("gen_ai.session.id"),
+        "turn.id": r.get("turn.id") or r.get("gen_ai.turn.id"),
+        "agent": r.get("agent.type") or r.get("gen_ai.agent.type"),
+        "tool": r.get("gen_ai.tool.name"),
+        "has_input": "gen_ai.input.messages_delta" in r,
+        "has_output": "gen_ai.output.messages" in r,
+    })
+'
 ```
 
 预期：
@@ -153,7 +169,15 @@ cat ~/.loongsuite-pilot/logs/input-state.json | python3 -m json.tool | grep -A 2
 
 # 4.2 pilot 输出是否产出
 ls -la ~/.loongsuite-pilot/logs/output/claude-code/
-tail -2 ~/.loongsuite-pilot/logs/output/claude-code/*.jsonl
+tail -20 ~/.loongsuite-pilot/logs/output/claude-code/*.jsonl 2>/dev/null \
+  | python3 -c '
+import json, sys
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    print({"event.name": r.get("event.name"), "agent": r.get("gen_ai.agent.type"), "session": r.get("gen_ai.session.id")})
+'
 ```
 
 预期：

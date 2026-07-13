@@ -85,7 +85,18 @@ ls -la "${XDG_CONFIG_HOME:-$HOME/.config}/QoderWork CN/"
 ## 第 2 步：确认 trace 是否启用
 
 ```bash
-python3 -m json.tool ~/.loongsuite-pilot/config.json 2>/dev/null | grep -A 2 '"qoder-work-cn-trace"'
+python3 - <<'PY'
+import json
+import pathlib
+path = pathlib.Path.home() / '.loongsuite-pilot' / 'config.json'
+try:
+    cfg = json.loads(path.read_text())
+except Exception:
+    print('qoder-work-cn-trace.enabled: false (default)')
+    raise SystemExit(0)
+listener = (cfg.get('listeners') or {}).get('qoder-work-cn-trace') or {}
+print('qoder-work-cn-trace.enabled:', listener.get('enabled', 'false (default)'))
+PY
 ```
 
 - 若 `enabled: true` → trace 链路接管，`qoder-work-cn-hook` / `qoder-work-cn-log` / `qoder-work-cn-sqlite` 无游标前进属于预期

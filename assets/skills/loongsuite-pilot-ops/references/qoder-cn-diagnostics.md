@@ -28,8 +28,8 @@ Qoder CN
 
 三条链路都受 `qoder-cn-trace` 是否启用的互斥控制：
 
-- 若 `qoder-cn-trace`（`QoderCnTraceInput`）启用 → `qoder-cn-sqlite` 和 `qoder-cn` 自动禁用，trace 链路接管全部数据
-- 若 `qoder-cn-trace` 未启用（默认）→ `qoder-cn-sqlite`（token）和 `qoder-cn`（IDE snapshot）并行工作
+- 若 `qoder-cn-trace` 未配置或为 `true`（默认）→ `qoder-cn-sqlite` 和 `qoder-cn` 自动禁用，trace 链路接管全部数据
+- 只有显式设置 `qoder-cn-trace.enabled=false` 时 → `qoder-cn-sqlite`（token）和 `qoder-cn`（IDE snapshot）才作为 fallback 并行工作
 
 | 关键组件 | 路径 | 谁负责写 |
 |---|---|---|
@@ -76,11 +76,22 @@ ls -la "${XDG_CONFIG_HOME:-$HOME/.config}/QoderCN/"
 ### 1.2 确认 `qoder-cn-trace` 是否启用（决定走哪条链路排查）
 
 ```bash
-python3 -m json.tool ~/.loongsuite-pilot/config.json 2>/dev/null | grep -A 2 '"qoder-cn-trace"'
+python3 - <<'PY'
+import json
+import pathlib
+path = pathlib.Path.home() / '.loongsuite-pilot' / 'config.json'
+try:
+    cfg = json.loads(path.read_text())
+except Exception:
+    print('qoder-cn-trace.enabled: true (default)')
+    raise SystemExit(0)
+listener = (cfg.get('listeners') or {}).get('qoder-cn-trace') or {}
+print('qoder-cn-trace.enabled:', listener.get('enabled', 'true (default)'))
+PY
 ```
 
-- 若 `enabled` 为 `true` → 只需排查第 2 步（hook history），第 3/4 步的 SQLite / IDE snapshot Input 会被自动禁用（正常现象，不是 bug）
-- 若未配置或为 `false`（默认）→ 走第 3/4 步的 SQLite + IDE snapshot 双链路
+- 若未配置或为 `true`（默认）→ 只需排查第 2 步（hook history），第 3/4 步的 SQLite / IDE snapshot Input 会被自动禁用（正常现象，不是 bug）
+- 若显式 `false` → 走第 3/4 步的 SQLite + IDE snapshot 双链路
 
 ---
 

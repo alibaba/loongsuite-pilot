@@ -132,22 +132,28 @@ pilot 首次启动时，SQLite Input 会读取当前 `MAX(rowid)` 作为基线�
 - **首次启动前已有的历史数据不会被采集**（设计如此）
 - 只有启动后新产生的行才会被读取
 
-若需要重置基线（例如升级目标应用后想从新位置开始）：
+若需要重置基线（例如升级目标应用后想从新位置开始），先让用户确认可以短暂停服，然后备份并原子替换 state 文件：
 
 ```bash
-# 删掉对应 Input 的 state 条目，重启后会重新取基线
-python3 -c "
+~/.local/bin/loongsuite-pilot stop
+STATE="$HOME/.loongsuite-pilot/logs/input-state.json"
+cp "$STATE" "$STATE.bak.$(date +%Y%m%d-%H%M%S)"
+python3 - "$STATE" "<INPUT_ID>" <<'PY'
 import json
-f='$HOME/.loongsuite-pilot/logs/input-state.json'
-s=json.load(open(f))
-removed = s.pop('<INPUT_ID>', None)
-if removed:
-    json.dump(s, open(f,'w'), indent=2)
-    print('<INPUT_ID> state removed')
-else:
-    print('<INPUT_ID> not found in state, nothing to remove')
-"
-~/.local/bin/loongsuite-pilot restart
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+input_id = sys.argv[2]
+state = json.loads(path.read_text())
+removed = state.pop(input_id, None)
+tmp = path.with_suffix(path.suffix + '.tmp')
+tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n')
+os.replace(tmp, path)
+print(f'{input_id} state removed' if removed else f'{input_id} not found in state')
+PY
+~/.local/bin/loongsuite-pilot start
 ```
 
 ### 3.2 游标卡住不前进

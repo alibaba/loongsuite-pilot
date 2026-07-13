@@ -67,8 +67,20 @@ tail -30 ~/.loongsuite-pilot/logs/loongsuite-pilot-updater.log
 更新配置来自 `config.json` 的 `autoUpdate` 段 + 环境变量（环境变量优先）：
 
 ```bash
-# 查看 config.json 中的 autoUpdate 配置
-python3 -m json.tool ~/.loongsuite-pilot/config.json 2>/dev/null | grep -A 5 '"autoUpdate"'
+# 只输出 autoUpdate 相关字段，不打印完整 config.json
+python3 - <<'PY'
+import json
+import pathlib
+path = pathlib.Path.home() / '.loongsuite-pilot' / 'config.json'
+try:
+    cfg = json.loads(path.read_text())
+except Exception:
+    print('config.json 不存在或无法解析')
+    raise SystemExit(0)
+auto = cfg.get('autoUpdate') or {}
+for key in ('enabled', 'checkIntervalMs', 'manifestUrl', 'packageUrl'):
+    print(f'{key}:', auto.get(key, '(default)'))
+PY
 ```
 
 | 配置项 | 环境变量 | 默认值 | 说明 |

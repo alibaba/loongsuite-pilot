@@ -11,21 +11,23 @@
 
 ---
 
-## 采集链路概览（Qoder 有 4 条独立数据源）
+## 采集链路概览（默认 qoder-trace 聚合链路）
 
-与 Cursor / Claude Code / Codex 只有一条 hook 链路不同，Qoder 的数据分别来自 4 个 Input，任何一条掉链都会导致**部分**字段缺失：
+Qoder 默认由 `qoder-trace` 聚合 Hook JSONL、CLI session segments 和 SQLite token 数据；
+`qoder-cli-hook` / `qoder-cli-session` / `qoder-sqlite` 是 **显式关闭 `qoder-trace` 后的 fallback**，默认不会启动。
 
 | # | Input id | agentType | 数据源 | 作用 |
 |---|---------|-----------|-------|------|
-| 1 | `qoder-cli-hook` | `qoder-cli` / `qoder` | `~/.loongsuite-pilot/logs/qoder-cli/history/qoder-cli-*.jsonl`（由 hook 转发 transcript 而来） | Qoder CLI 的 Chat / Tool call 详情 |
-| 2 | `qoder-cli-session` | `qoder-cli` | `~/.qoder/logs/sessions/<cwd>/<session>/segments/*.jsonl` | Qoder CLI 的 token 使用量（llm.response） |
-| 3 | `qoder` | `qoder` | `~/Library/Application Support/Qoder/` (mac) / `~/.config/Qoder/` (linux) 下的 `User/History/` + `SharedClientCache/cache/ai_tracker/*.jsonl` | Qoder IDE 的文件编辑活动 |
-| 4 | `qoder-sqlite` | `qoder` | `SharedClientCache/cache/db/local.db` 的 `chat_message` 表 | Qoder IDE 的 token 使用量 |
+| 1 | `qoder-trace` | `qoder` / `qoder-cli` / `qoder-idea` | `~/.loongsuite-pilot/logs/qoder/history/qoder-*.jsonl` + `~/.qoder/logs/sessions/.../segments/*.jsonl` + Qoder SQLite DB | 默认主链路：Chat / Tool call 结构、CLI token fallback、IDE/JetBrains token enrichment |
+| 2 | `qoder-cli-hook` | `qoder-cli` | `~/.loongsuite-pilot/logs/qoder/history/qoder-*.jsonl` | 仅 `qoder-trace` 显式关闭时的 Hook JSONL fallback |
+| 3 | `qoder-cli-session` | `qoder-cli` | `~/.qoder/logs/sessions/<cwd>/<session>/segments/*.jsonl` | 仅 `qoder-trace` 显式关闭时的 CLI token fallback |
+| 4 | `qoder-sqlite` | `qoder` | Qoder DB `SharedClientCache/cache/db/local.db` 的 `chat_message` 表 | 仅 `qoder-trace` 显式关闭时的 IDE token fallback |
 
-> **排查前先确认用户使用的是 Qoder IDE 还是 Qoder CLI**，再挑对应的链路走，不要把 4 条全排一遍。
+> **排查前先确认用户使用的是 Qoder IDE、Qoder CLI 还是 Qoder for JetBrains**。
 >
-> - 用户问"CLI 为什么没数据"→ 只看第 1、2 条  
-> - 用户问"IDE 为什么没数据"→ 只看第 3、4 条
+> - 用户问 "CLI 为什么没数据" → 默认看 `qoder-trace` + CLI session + qodercli intercept
+> - 用户问 "IDE 为什么没数据" → 默认看 `qoder-trace` + Qoder SQLite
+> - 用户问 "JetBrains 为什么没数据" → 转 `qoder-jetbrains-diagnostics.md`
 
 ---
 
@@ -75,7 +77,7 @@ pilot 启动时检测到 `~/.qoder/` 目录存在，会把 hook 注入 `~/.qoder
 
 ```bash
 python3 -m json.tool ~/.qoder/settings.json \
-  | grep -c "qoder-loongsuite-pilot-hook.sh qoder-cli"
+  | grep -c "qoder-loongsuite-pilot-hook.sh"
 ```
 
 预期输出：**1**。对应的 settings.json 片段：
@@ -87,7 +89,7 @@ python3 -m json.tool ~/.qoder/settings.json \
       {
         "matcher": "*",
         "hooks": [
-          { "command": "/Users/<you>/.loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.sh qoder-cli", "type": "command" }
+          { "command": "/Users/<you>/.loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.sh", "type": "command" }
         ]
       }
     ]
@@ -97,7 +99,7 @@ python3 -m json.tool ~/.qoder/settings.json \
 
 若缺失 → `~/.local/bin/loongsuite-pilot restart`（注入幂等，不会重复写）。
 
-> Qoder CLI 只注入 `Stop` 一个事件，由 `hook-processor.mjs` 根据 `transcript_path` 增量拉取 transcript，**不需要**也**不会**像 Codex 那样注入 5 个事件。
+> Qoder CLI 只注入 `Stop` 一个事件，由 `qoder-hook-processor.mjs` 根据 `transcript_path` 增量拉取 transcript，**不需要**也**不会**像 Codex 那样注入 5 个事件。
 
 ### 2.A.2 原始 transcript + history
 
@@ -111,18 +113,18 @@ find ~/.qoder/logs/sessions -name '*.jsonl' -newer /tmp -mmin -60 | head -5
 
 如果 sessions 目录**不存在**或**全空** → Qoder CLI 自身没有写入 transcript，100% 是 **Qoder CLI 版本过低**，回第 1 步升级。
 
-Stop hook 触发后，`hook-processor.mjs` 会把 transcript 新增行增量 append 到：
+Stop hook 触发后，`qoder-hook-processor.mjs` 会把 transcript 新增行增量 append 到：
 
 ```bash
-ls -la ~/.loongsuite-pilot/logs/qoder-cli/history/
-tail -2 ~/.loongsuite-pilot/logs/qoder-cli/history/qoder-cli-$(date -u +%Y-%m-%d).jsonl \
+ls -la ~/.loongsuite-pilot/logs/qoder/history/
+tail -2 ~/.loongsuite-pilot/logs/qoder/history/qoder-$(date -u +%Y-%m-%d).jsonl \
   | python3 -m json.tool
 ```
 
 processor 的增量状态保存在：
 
 ```bash
-cat ~/.loongsuite-pilot/hooks/.line_records.qoder-cli.json
+cat ~/.loongsuite-pilot/hooks/.line_records.qoder.json
 # 每个 transcript_path → { session_id, last_line_count, updated_at }
 ```
 
@@ -130,8 +132,8 @@ cat ~/.loongsuite-pilot/hooks/.line_records.qoder-cli.json
 - hook 从未被触发 → 检查第 2.A.1 的 settings.json
 - hook 被触发但 transcript_path 或 session_id 缺失 → 看 debug 日志：
   ```bash
-  ls ~/.loongsuite-pilot/logs/qoder-cli/debug/
-  tail -50 ~/.loongsuite-pilot/logs/qoder-cli/debug/qoder-cli-debug-$(date -u +%Y-%m-%d).log
+  ls ~/.loongsuite-pilot/logs/qoder/debug/
+  tail -50 ~/.loongsuite-pilot/logs/qoder/debug/qoder-debug-$(date -u +%Y-%m-%d).log
   ```
   常见日志关键字：`No transcript_path or session_id`、`Transcript file not found`、`No new lines`
 
@@ -178,7 +180,21 @@ qodercli () { BUN_OPTIONS="--preload=/Users/<you>/.loongsuite-pilot/hooks/qoderc
 
 ```bash
 ls -l ~/.loongsuite-pilot/logs/qodercli-intercept.jsonl
-tail -5 ~/.loongsuite-pilot/logs/qodercli-intercept.jsonl | python3 -m json.tool
+tail -20 ~/.loongsuite-pilot/logs/qodercli-intercept.jsonl | python3 -c '
+import json, sys
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    print({
+        "type": r.get("type"),
+        "id": r.get("id"),
+        "model": r.get("model"),
+        "prompt_tokens": r.get("prompt_tokens"),
+        "completion_tokens": r.get("completion_tokens"),
+        "has_content": bool(r.get("content")),
+    })
+'
 ```
 
 预期能看到 `type: "token"` 或 `type: "system_prompt"` 记录。若文件不存在但 qodercli 对话正常，说明 preload 未生效；
@@ -199,23 +215,23 @@ ls -la "${XDG_CONFIG_HOME:-$HOME/.config}/Qoder"
 
 目录不存在 → Qoder IDE 从未启动过，或 IDE 版本老到不使用这个目录，回第 1 步升级。
 
-### 2.B.2 文件历史 + ai_tracker
+### 2.B.2 Hook history（Chat / Tool call 结构）
 
-`qoder` Input 从两个子目录采集：
+Qoder IDE 和 Qoder CLI 共用 `~/.qoder/settings.json` 的 Stop hook，processor 写入同一个 history 目录：
 
 ```bash
-# 1) VSCode-style 文件编辑历史（按 source 字段筛 AI 来源）
-ls "$HOME/Library/Application Support/Qoder/User/History/" | head
-
-# 2) AI tracker JSONL
-ls -la "$HOME/Library/Application Support/Qoder/SharedClientCache/cache/ai_tracker/"
+python3 -m json.tool ~/.qoder/settings.json 2>/dev/null | grep -A 8 '"Stop"'
+ls -la ~/.loongsuite-pilot/logs/qoder/history/
+tail -2 ~/.loongsuite-pilot/logs/qoder/history/qoder-$(date -u +%Y-%m-%d).jsonl \
+  | python3 -m json.tool
 ```
 
-若 `ai_tracker/` 目录不存在 → Qoder IDE 版本过低未启用追踪，升级即可。
+若 history 为空但 Qoder IDE 已产生对话：检查 `~/.qoder/settings.json` 的 Stop hook 是否指向
+`qoder-loongsuite-pilot-hook.sh`，以及 `~/.loongsuite-pilot/logs/qoder/debug/qoder-debug-*.log`。
 
 ### 2.B.3 SQLite token 数据
 
-`qoder-sqlite` Input 读这个 DB，提取 `chat_message.token_info`：
+`qoder-trace` 默认读取这个 DB，提取 `chat_message.token_info`；显式关闭 `qoder-trace` 后，`qoder-sqlite` 才作为 fallback 单独启动：
 
 ```bash
 DB="$HOME/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db"
@@ -227,13 +243,7 @@ sqlite3 "$DB" "SELECT COUNT(*) FROM chat_message WHERE token_info IS NOT NULL AN
 
 预期：计数 > 0。若为 0 且用户确实使用了 Qoder IDE：
 - **Qoder IDE 版本过低**，`chat_message.token_info` 没写入或列不存在
-- 首次启动 pilot 时，`qoder-sqlite` Input 会把 cursor 定位到当前最大 rowid（baseline），**只采集之后新产生的**行。若升级后仍无数据，可能是继续停留在老基线上，处理方法：
-  ```bash
-  # 删掉该 input 的 state 条目后 restart，注意这只会重新采 "之后新增"，无法补历史
-  jq 'del(.inputs."qoder-sqlite")' ~/.loongsuite-pilot/logs/input-state.json \
-    > /tmp/is.json && mv /tmp/is.json ~/.loongsuite-pilot/logs/input-state.json
-  ~/.local/bin/loongsuite-pilot restart
-  ```
+- `qoder-trace` 首次启动时会把 cursor 定位到当前最大行附近，**只采集之后新产生的**数据；升级或修复后需重新触发一次新对话验证
 
 ---
 
@@ -242,22 +252,30 @@ sqlite3 "$DB" "SELECT COUNT(*) FROM chat_message WHERE token_info IS NOT NULL AN
 ```bash
 # 3.1 input-state 中的四个游标
 cat ~/.loongsuite-pilot/logs/input-state.json | python3 -m json.tool \
-  | grep -E -A 3 '"qoder(|-cli-hook|-cli-session|-sqlite)"'
+  | grep -E -A 3 '"qoder(-trace|-cli-hook|-cli-session|-sqlite)?"'
 
-# 3.2 pilot 输出（按 agentType 前缀平铺）
+# 3.2 pilot 输出（只投影元数据，避免打印 prompt/tool 内容）
 ls -la ~/.loongsuite-pilot/logs/output/ | grep -E 'qoder(-cli)?'
-tail -2 ~/.loongsuite-pilot/logs/output/qoder-cli-$(date -u +%Y-%m-%d).jsonl
-tail -2 ~/.loongsuite-pilot/logs/output/qoder-$(date -u +%Y-%m-%d).jsonl
+for f in ~/.loongsuite-pilot/logs/output/qoder-cli-$(date -u +%Y-%m-%d).jsonl ~/.loongsuite-pilot/logs/output/qoder-$(date -u +%Y-%m-%d).jsonl; do
+  [ -f "$f" ] && tail -20 "$f" | python3 -c '
+import json, sys
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    print({"event.name": r.get("event.name"), "agent": r.get("gen_ai.agent.type"), "session": r.get("gen_ai.session.id")})
+'
+done
 ```
 
 每个 Input 对应的游标字段：
 
 | Input | 游标字段 | 含义 |
 |-------|---------|------|
-| `qoder-cli-hook` | `lastFile` + `lastOffset` | 当天 history JSONL 的字节偏移 |
-| `qoder-cli-session` | 每个 segment 文件的 `lastOffset` | 多文件独立字节偏移 |
-| `qoder` | `lastOffset`（per ai_tracker 文件） + SnapshotStore | 文件历史按时间戳+快照 dedup |
-| `qoder-sqlite` | `lastRowId` | `chat_message.rowid` 游标 |
+| `qoder-trace` | `lastFile` + `lastOffset` | 默认主链路读取 `logs/qoder/history/qoder-YYYY-MM-DD.jsonl` 的字节偏移 |
+| `qoder-cli-hook` | `lastFile` + `lastOffset` | `qoder-trace` 显式关闭时的 Hook JSONL fallback |
+| `qoder-cli-session` | 每个 segment 文件的 `lastOffset` | `qoder-trace` 显式关闭时的 CLI token fallback |
+| `qoder-sqlite` | `lastRowId` | `qoder-trace` 显式关闭时的 `chat_message.rowid` token fallback |
 
 游标不前进的通用排查：
 - pilot 服务未运行 → `~/.local/bin/loongsuite-pilot status`
@@ -274,7 +292,7 @@ tail -2 ~/.loongsuite-pilot/logs/output/qoder-$(date -u +%Y-%m-%d).jsonl
 python3 -m json.tool ~/.qoder/settings.json | grep -A 8 '"Stop"'
 ```
 
-预期：`hooks.Stop` 数组里至少有一项以 nested 格式（外层 `matcher` + 内层 `hooks[]`）指向 `qoder-loongsuite-pilot-hook.sh qoder-cli`。
+预期：`hooks.Stop` 数组里至少有一项以 nested 格式（外层 `matcher` + 内层 `hooks[]`）指向 `qoder-loongsuite-pilot-hook.sh`。
 
 > Qoder **nested 格式**与 Cursor **flat 格式**不同，不要混。
 
@@ -282,7 +300,7 @@ python3 -m json.tool ~/.qoder/settings.json | grep -A 8 '"Stop"'
 
 ```bash
 ls -l ~/.loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.sh   # 需要 x 权限
-ls -l ~/.loongsuite-pilot/hooks/hook-processor.mjs               # CLI 和 Work 共用
+ls -l ~/.loongsuite-pilot/hooks/qoder-hook-processor.mjs               # Qoder 专用（qoder-cn 共用同一份）
 ```
 
 #### 4.3 Node runtime pin
@@ -313,19 +331,20 @@ ls -la "${XDG_CONFIG_HOME:-$HOME/.config}/Qoder"
 
 | 文件 / 目录 | 作用 |
 |---|---|
-| `~/.qoder/settings.json` | Qoder CLI 的 hook 注册（`hooks.Stop`，nested 格式） |
-| `~/.qoder/logs/sessions/<cwd>/<session>/segments/*.jsonl` | Qoder CLI 原生 transcript + token 事件（`qoder-cli-session` Input 源） |
-| `~/.loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.sh` | Qoder CLI / Work 共用的 shell 入口 |
-| `~/.loongsuite-pilot/hooks/hook-processor.mjs` | 共享 transcript forwarder（从 stdin 拿 transcript_path，增量 append 到 history） |
-| `~/.loongsuite-pilot/hooks/.line_records.qoder-cli.json` | processor 的增量行记录状态 |
-| `~/.loongsuite-pilot/logs/qoder-cli/history/qoder-cli-YYYY-MM-DD.jsonl` | transcript 转发后的 history（`qoder-cli-hook` Input 源） |
-| `~/.loongsuite-pilot/logs/qoder-cli/debug/qoder-cli-debug-*.log` | processor 调试日志 |
-| `~/Library/Application Support/Qoder/User/History/` | IDE 文件编辑历史（`qoder` Input 源之一） |
-| `~/Library/Application Support/Qoder/SharedClientCache/cache/ai_tracker/*.jsonl` | AI 追踪 JSONL（`qoder` Input 源之二） |
-| `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` | IDE SQLite（`qoder-sqlite` Input 源） |
+| `~/.qoder/settings.json` | Qoder 的共享 Stop hook 注册（nested 格式） |
+| `~/.qoder/logs/sessions/<cwd>/<session>/segments/*.jsonl` | Qoder CLI 原生 transcript + token 事件（`qoder-trace` / `qoder-cli-session` 读取） |
+| `~/.loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.sh` | Qoder Hook shell 入口 |
+| `~/.loongsuite-pilot/hooks/qoder-hook-processor.mjs` | Qoder 专用 transcript forwarder（从 stdin 拿 transcript_path，增量 append 到 history） |
+| `~/.loongsuite-pilot/hooks/.line_records.qoder.json` | processor 的增量行记录状态 |
+| `~/.loongsuite-pilot/logs/qoder/history/qoder-YYYY-MM-DD.jsonl` | transcript 转发后的 history（`qoder-trace` / `qoder-cli-hook` 读取） |
+| `~/.loongsuite-pilot/logs/qoder/debug/qoder-debug-*.log` | processor 调试日志 |
+| `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` | Qoder IDE SQLite token 数据源 |
+| `~/.qoder/shared_client/cache/db/local.db` | Qoder for JetBrains SQLite token 数据源（输出标记为 `qoder-idea`） |
+| `~/.loongsuite-pilot/hooks/qodercli-token-intercept.mjs` | Qoder CLI token / system prompt preload 脚本 |
+| `~/.loongsuite-pilot/logs/qodercli-intercept.jsonl` | qodercli preload 捕获的 token / system prompt fallback 数据 |
 | `~/.loongsuite-pilot/logs/output/qoder-cli-YYYY-MM-DD.jsonl` | CLI 规范化输出 |
 | `~/.loongsuite-pilot/logs/output/qoder-YYYY-MM-DD.jsonl` | IDE 规范化输出 |
-| `~/.loongsuite-pilot/logs/input-state.json` | 4 个 Qoder Input 的游标 |
+| `~/.loongsuite-pilot/logs/input-state.json` | Qoder 相关 Input 的游标 |
 
 ---
 

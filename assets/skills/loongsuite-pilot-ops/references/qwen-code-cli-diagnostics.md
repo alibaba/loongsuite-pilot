@@ -88,8 +88,22 @@ python3 -m json.tool ~/.qwen/settings.json 2>/dev/null \
 
 ```bash
 ls -la ~/.loongsuite-pilot/logs/qwen-code-cli/
-tail -2 ~/.loongsuite-pilot/logs/qwen-code-cli/qwen-code-cli-$(date +%Y-%m-%d).jsonl \
-  | python3 -m json.tool
+tail -20 ~/.loongsuite-pilot/logs/qwen-code-cli/qwen-code-cli-$(date +%Y-%m-%d).jsonl \
+  | python3 -c '
+import json, sys
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    print({
+        "event.name": r.get("event.name"),
+        "gen_ai.session.id": r.get("gen_ai.session.id"),
+        "gen_ai.agent.type": r.get("gen_ai.agent.type"),
+        "gen_ai.tool.name": r.get("gen_ai.tool.name"),
+        "has_input": "gen_ai.input.messages_delta" in r,
+        "has_output": "gen_ai.output.messages" in r,
+    })
+'
 ```
 
 预期：每行包含 `event.name`、`gen_ai.session.id`、`gen_ai.agent.type: "qwen-code-cli"`，常见事件为：
@@ -117,7 +131,15 @@ python3 -m json.tool ~/.loongsuite-pilot/logs/input-state.json 2>/dev/null \
 
 # 4.2 输出是否产出
 ls -la ~/.loongsuite-pilot/logs/output/ | grep qwen-code-cli
-tail -2 ~/.loongsuite-pilot/logs/output/qwen-code-cli-$(date +%Y-%m-%d).jsonl 2>/dev/null
+tail -20 ~/.loongsuite-pilot/logs/output/qwen-code-cli-$(date +%Y-%m-%d).jsonl 2>/dev/null \
+  | python3 -c '
+import json, sys
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    print({"event.name": r.get("event.name"), "agent": r.get("gen_ai.agent.type"), "session": r.get("gen_ai.session.id")})
+'
 ```
 
 预期：`qwen-code-cli-log` 有 `lastOffset`，output 中存在 `gen_ai.agent.type = "qwen-code-cli"` 的记录。

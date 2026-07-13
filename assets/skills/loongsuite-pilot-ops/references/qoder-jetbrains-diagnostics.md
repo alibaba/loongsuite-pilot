@@ -19,8 +19,8 @@
 Qoder for JetBrains 插件（IntelliJ 系列）
   └─ 与 Qoder CLI/IDE 共享的 Stop hook (~/.qoder/settings.json)
        └─ qoder-loongsuite-pilot-hook.sh
-            └─ hook-processor.mjs
-                 └─ ~/.loongsuite-pilot/logs/qoder-cli/history/qoder-cli-YYYY-MM-DD.jsonl
+            └─ qoder-hook-processor.mjs
+                 └─ ~/.loongsuite-pilot/logs/qoder/history/qoder-YYYY-MM-DD.jsonl
                       └─ QoderTraceInput (id=qoder-trace)
                            ├─ 按 turn 分组，推断 variant（qoder-cli / qoder / qoder-idea）
                            ├─ IDE/JetBrains 类 turn → 按 session 匹配 SQLite token
@@ -43,7 +43,7 @@ Qoder for JetBrains 插件（IntelliJ 系列）
 |---|---|---|
 | Hook 注册 | `~/.qoder/settings.json` 的 `hooks.Stop`（与 Qoder CLI 共享，nested 格式） | pilot 检测到 Qoder CLI/IDE 或 JetBrains 插件目录后自动注入 |
 | JetBrains 插件检测路径 | `~/Library/Application Support/JetBrains/<产品>*/plugins/qoder-jetbrains`（macOS）/ `~/.config/JetBrains/<产品>*/plugins/qoder-jetbrains`（Linux） | Qoder for JetBrains 插件安装时写入 |
-| Hook History JSONL（共享） | `~/.loongsuite-pilot/logs/qoder-cli/history/qoder-cli-YYYY-MM-DD.jsonl` | hook-processor.mjs 增量 append |
+| Hook History JSONL（共享） | `~/.loongsuite-pilot/logs/qoder/history/qoder-YYYY-MM-DD.jsonl` | qoder-hook-processor.mjs 增量 append |
 | IntelliJ 专属 SQLite DB | `~/.qoder/shared_client/cache/db/local.db` | Qoder for JetBrains 插件写入 |
 | Pilot 游标 | `~/.loongsuite-pilot/logs/input-state.json` 的 `qoder-trace` 条目 | QoderTraceInput 写入 |
 | 规范化输出 | `~/.loongsuite-pilot/logs/output/` 中 `gen_ai.agent.type: "qoder-idea"` 的记录 | Flusher 写出 |
@@ -86,7 +86,18 @@ ls -la "$HOME/.config/JetBrains/IntelliJIdea"*/plugins/qoder-jetbrains 2>/dev/nu
 ### 1.2 确认 `qoder-trace` 是否启用（默认启用）
 
 ```bash
-python3 -m json.tool ~/.loongsuite-pilot/config.json 2>/dev/null | grep -A 2 '"qoder-trace"'
+python3 - <<'PY'
+import json
+import pathlib
+path = pathlib.Path.home() / '.loongsuite-pilot' / 'config.json'
+try:
+    cfg = json.loads(path.read_text())
+except Exception:
+    print('qoder-trace.enabled: true (default)')
+    raise SystemExit(0)
+listener = (cfg.get('listeners') or {}).get('qoder-trace') or {}
+print('qoder-trace.enabled:', listener.get('enabled', 'true (default)'))
+PY
 ```
 
 - 若未配置或为 `true`（默认）→ trace 链路生效，继续第 2/3 步
@@ -97,8 +108,8 @@ python3 -m json.tool ~/.loongsuite-pilot/config.json 2>/dev/null | grep -A 2 '"q
 ## 第 2 步：共享 Hook history 中是否有该 IDE 产生的 turn
 
 ```bash
-ls -la ~/.loongsuite-pilot/logs/qoder-cli/history/
-tail -20 ~/.loongsuite-pilot/logs/qoder-cli/history/qoder-cli-$(date -u +%Y-%m-%d).jsonl \
+ls -la ~/.loongsuite-pilot/logs/qoder/history/
+tail -20 ~/.loongsuite-pilot/logs/qoder/history/qoder-$(date -u +%Y-%m-%d).jsonl \
   | python3 -m json.tool
 ```
 
@@ -209,7 +220,7 @@ ls -la ~/.loongsuite-pilot/logs/output/ | grep -E 'qoder(-idea)?'
 | `~/.config/JetBrains/<产品>*/plugins/qoder-jetbrains`（Linux） | 插件检测路径 |
 | `~/.qoder/settings.json` | 共享 Stop hook 注册（与 Qoder CLI 共用） |
 | `~/.qoder/shared_client/cache/db/local.db` | IntelliJ 专属 token usage DB |
-| `~/.loongsuite-pilot/logs/qoder-cli/history/qoder-cli-YYYY-MM-DD.jsonl` | 共享 hook history |
+| `~/.loongsuite-pilot/logs/qoder/history/qoder-YYYY-MM-DD.jsonl` | 共享 hook history |
 | `~/.loongsuite-pilot/logs/input-state.json` | 含 `qoder-trace` 游标 |
 | `~/.loongsuite-pilot/logs/output/` | 规范化输出，relabel 后的记录 `gen_ai.agent.type: "qoder-idea"` |
 | `~/.loongsuite-pilot/agent-control.json` | 采集开关（用 `qoder` ID） |

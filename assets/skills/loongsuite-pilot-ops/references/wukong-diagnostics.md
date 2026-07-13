@@ -95,13 +95,29 @@ command -v wukong-cli || true
 
 ### 2.2 单个任务的消息
 
+默认不要打印完整 `content` / tool payload；只查看计数、ID、role、turnIndex 与 event 数量：
+
 ```bash
-"$WUKONG_CLI" agent data get_spark_agui_messages --json '{"conversationId":"<session_id>"}'
+"$WUKONG_CLI" agent data get_spark_agui_messages --json '{"conversationId":"<session_id>"}' \
+  | python3 -c '
+import json, sys
+m = json.load(sys.stdin).get("messages", [])
+print("message_count", len(m))
+for x in m[-5:]:
+    print({
+        "id": x.get("id"),
+        "role": x.get("role"),
+        "turnIndex": x.get("turnIndex"),
+        "createdAt": x.get("createdAt"),
+        "event_count": len(x.get("events") or []),
+        "has_content": bool(x.get("content")),
+    })
+'
 ```
 
-预期：`messages` 为数组，每条含 `id` / `role` / `content` / `events` / `createdAt` / `turnIndex`。
+预期：`message_count` > 0，最近消息含 `id` / `role` / `turnIndex`。若返回空但用户确实和该会话有交互，检查 `conversationId` 是否与 `list_tasks` 返回的 `session_id` 完全一致。
 
-若返回空 `messages` 但用户确实和该会话有交互，检查 `conversationId` 是否与 `list_tasks` 返回的 `session_id` 完全一致。
+只有在用户明确要求并确认可暴露内容时，才查看完整消息正文。
 
 ---
 
@@ -130,17 +146,29 @@ grep '"tag":"WukongInput"\|baseline complete' \
 
 ### 3.2 重置基线
 
-若需要重新采集某个 session（例如怀疑基线计数错误），可清空对应 state 后重启：
+若需要重新采集某个 session（例如怀疑基线计数错误），先让用户确认可以短暂停服，然后备份并原子替换 state 文件：
 
 ```bash
-python3 -c "
+~/.local/bin/loongsuite-pilot stop
+STATE="$HOME/.loongsuite-pilot/logs/input-state.json"
+cp "$STATE" "$STATE.bak.$(date +%Y%m%d-%H%M%S)"
+python3 - "$STATE" "<session_id>" <<'PY'
 import json
-f='$HOME/.loongsuite-pilot/logs/input-state.json'
-s=json.load(open(f))
-s.get('wukong', {}).get('extra', {}).get('seenCounts', {}).pop('<session_id>', None)
-json.dump(s, open(f,'w'), indent=2)
-"
-~/.local/bin/loongsuite-pilot restart
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+session_id = sys.argv[2]
+state = json.loads(path.read_text())
+seen = state.get('wukong', {}).get('extra', {}).get('seenCounts', {})
+if isinstance(seen, dict):
+    seen.pop(session_id, None)
+tmp = path.with_suffix(path.suffix + '.tmp')
+tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n')
+os.replace(tmp, path)
+PY
+~/.local/bin/loongsuite-pilot start
 ```
 
 ---
@@ -149,8 +177,15 @@ json.dump(s, open(f,'w'), indent=2)
 
 ```bash
 ls -la ~/.loongsuite-pilot/logs/output/ | grep wukong
-tail -3 ~/.loongsuite-pilot/logs/output/wukong-$(date -u +%Y-%m-%d).jsonl 2>/dev/null \
-  | python3 -m json.tool
+tail -20 ~/.loongsuite-pilot/logs/output/wukong-$(date -u +%Y-%m-%d).jsonl 2>/dev/null \
+  | python3 -c '
+import json, sys
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    print({"event.name": r.get("event.name"), "agent": r.get("gen_ai.agent.type") or r.get("service.name"), "session": r.get("gen_ai.session.id")})
+'
 ```
 
 预期：output 中存在 `service.name: "wukong"` 或 `gen_ai.agent.type: "wukong"` 的记录。
