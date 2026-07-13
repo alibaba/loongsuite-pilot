@@ -79,6 +79,7 @@ export class UpdaterWatchdog {
   private startedAt = Date.now();
   private lastTickAt = 0;
   private sleepWakeGraceUntil = 0;
+  private postRestartGraceUntil = 0;
   private lastRestartAt = 0;
 
   constructor(opts: UpdaterWatchdogOptions) {
@@ -129,40 +130,59 @@ export class UpdaterWatchdog {
     this.lastTickAt = now;
 
     const processState = await this.readUpdaterProcess();
+    const heartbeat = await readJsonFile<UpdaterRuntimeState>(updaterRuntimePath(this.dataDir));
     if (!processState.running) {
+      if (heartbeat && await this.heartbeatProcessLooksHealthy(heartbeat, now)) {
+        logger.warn('updater-watchdog pid file check failed but heartbeat process is healthy', {
+          reason: processState.reason,
+          heartbeatPid: heartbeat.pid,
+        });
+        return { status: 'healthy', reason: processState.reason };
+      }
       this.recordServiceAlarm(processState.reason);
       return this.restart('missing-process', processState.reason);
     }
 
     if (!processState.commandOk) {
-      const reason = `updater pid ${processState.pid} command mismatch`;
-      this.recordFailureAlarm(reason);
-      return this.restart('command-mismatch', reason);
+      if (heartbeat && await this.heartbeatProcessLooksHealthy(heartbeat, now)) {
+        logger.warn('updater-watchdog pid file command mismatch but heartbeat process is healthy', {
+          pidFilePid: processState.pid,
+          heartbeatPid: heartbeat.pid,
+          command: this.commandForAlarm(processState.command),
+        });
+        return { status: 'healthy', reason: processState.reason };
+      }
+      const reason = `updater pid ${processState.pid} command mismatch: ${this.commandForAlarm(processState.command)}`;
+      return this.restart('command-mismatch', reason, reason);
     }
 
-    const heartbeat = await readJsonFile<UpdaterRuntimeState>(updaterRuntimePath(this.dataDir));
     if (!heartbeat) {
       const reason = 'updater heartbeat is missing';
       if (this.inGraceWindow(now)) return { status: 'grace', reason };
-      this.recordFailureAlarm(reason);
-      return this.restart('missing-heartbeat', reason);
+      return this.restart('missing-heartbeat', reason, reason);
     }
 
     if (heartbeat.pid !== processState.pid && process.platform !== 'win32') {
       const reason = `updater heartbeat pid ${heartbeat.pid} does not match running pid ${processState.pid}`;
       if (this.inGraceWindow(now)) return { status: 'grace', reason };
-      this.recordFailureAlarm(reason);
-      return this.restart('pid-mismatch', reason);
+      if (await this.heartbeatProcessLooksHealthy(heartbeat, now)) {
+        logger.warn('updater-watchdog pid file differs from healthy heartbeat process', {
+          pidFilePid: processState.pid,
+          heartbeatPid: heartbeat.pid,
+        });
+        return { status: 'healthy', reason };
+      }
+      return this.restart('pid-mismatch', reason, reason);
     }
 
     const heartbeatAt = Date.parse(heartbeat.updatedAt);
     if (!Number.isFinite(heartbeatAt) || now - heartbeatAt > this.staleHeartbeatMs) {
       const reason = 'updater heartbeat is stale';
       if (this.inGraceWindow(now)) return { status: 'grace', reason };
-      this.recordFailureAlarm(reason);
-      return this.restart('stale-heartbeat', reason);
+      return this.restart('stale-heartbeat', reason, reason);
     }
 
+    if (this.postRestartGraceUntil > 0) this.postRestartGraceUntil = 0;
     return { status: 'healthy' };
   }
 
@@ -170,6 +190,7 @@ export class UpdaterWatchdog {
     running: boolean;
     pid?: number;
     commandOk?: boolean;
+    command?: string;
     reason: string;
   }> {
     const pidFile = path.join(this.dataDir, 'loongsuite-pilot-updater.pid');
@@ -206,6 +227,7 @@ export class UpdaterWatchdog {
       running: true,
       pid,
       commandOk,
+      command,
       reason: commandOk ? 'updater process is running' : `unexpected updater command: ${command || 'unknown'}`,
     };
   }
@@ -236,6 +258,7 @@ export class UpdaterWatchdog {
     running: boolean;
     pid?: number;
     commandOk?: boolean;
+    command?: string;
     reason: string;
   }> {
     try {
@@ -260,6 +283,7 @@ export class UpdaterWatchdog {
         running: true,
         pid,
         commandOk,
+        command,
         reason: commandOk ? 'updater process is running' : `unexpected updater command: ${command || 'unknown'}`,
       };
     } catch {
@@ -276,13 +300,44 @@ export class UpdaterWatchdog {
       || command.includes('dist/updater/index.js');
   }
 
+  private isFreshHeartbeat(heartbeat: UpdaterRuntimeState, now: number): boolean {
+    const heartbeatAt = Date.parse(heartbeat.updatedAt);
+    return Number.isFinite(heartbeatAt) && now - heartbeatAt <= this.staleHeartbeatMs;
+  }
+
+  private async heartbeatProcessLooksHealthy(heartbeat: UpdaterRuntimeState, now: number): Promise<boolean> {
+    if (!this.isFreshHeartbeat(heartbeat, now)) return false;
+    if (!Number.isInteger(heartbeat.pid) || heartbeat.pid <= 0) return false;
+
+    try {
+      process.kill(heartbeat.pid, 0);
+    } catch {
+      return false;
+    }
+
+    const command = await this.readProcessCommand(heartbeat.pid).catch(() => '');
+    return this.isUpdaterCommand(command);
+  }
+
+  private commandForAlarm(command: string | undefined): string {
+    const raw = (command ?? '').trim() || 'unknown';
+    const redacted = raw.replace(
+      /((?:token|key|secret|password|passwd|pwd)(?:=|\s+))\S+/gi,
+      '$1[redacted]',
+    );
+    return redacted.length > 500 ? `${redacted.slice(0, 497)}...` : redacted;
+  }
+
   private inGraceWindow(now: number): boolean {
-    return now - this.startedAt < this.startupGraceMs || now < this.sleepWakeGraceUntil;
+    return now - this.startedAt < this.startupGraceMs
+      || now < this.sleepWakeGraceUntil
+      || now < this.postRestartGraceUntil;
   }
 
   private async restart(
     status: Exclude<UpdaterWatchdogStatus, 'disabled' | 'healthy' | 'grace' | 'restart-rate-limited' | 'restart-attempted' | 'restart-failed'>,
     reason: string,
+    failureAlarmMessage?: string,
   ): Promise<UpdaterWatchdogResult> {
     const now = Date.now();
     if (this.lastRestartAt > 0 && now - this.lastRestartAt < this.restartCooldownMs) {
@@ -309,10 +364,12 @@ export class UpdaterWatchdog {
           timeout: COMMAND_TIMEOUT_MS,
         });
       }
+      if (failureAlarmMessage) this.recordFailureAlarm(failureAlarmMessage);
+      this.postRestartGraceUntil = Date.now() + this.staleHeartbeatMs;
       logger.warn('updater-watchdog requested updater restart', { status, reason });
       return { status: 'restart-attempted', reason, restarted: true };
     } catch (err) {
-      const message = `updater restart command failed: ${String(err)}`;
+      const message = `updater restart command failed after ${status} (${reason}): ${String(err)}`;
       this.recordFailureAlarm(message);
       logger.error('updater-watchdog restart failed', { reason, error: String(err) });
       return { status: 'restart-failed', reason: message, restarted: false };
