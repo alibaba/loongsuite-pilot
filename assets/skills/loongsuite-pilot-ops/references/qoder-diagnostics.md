@@ -33,7 +33,7 @@
 
 ```
 第 1 步 → Qoder 版本（低版本不支持 Stop hook / 产生不了 session segments / 表结构缺字段）
-第 2 步 → 根据用户场景选链路：CLI（hook + session）或 IDE（history + sqlite）
+第 2 步 → 根据用户场景选链路：CLI（hook + session + 依赖注入）或 IDE（history + sqlite）
 第 3 步 → pilot 是否成功消费（input-state 推进 + output 产出）
 第 4 步 → 配置文件对照检查
 ```
@@ -146,6 +146,43 @@ grep -h '"type":"model.response.completed"' \
 ```
 
 若为 0 → Qoder CLI 版本过低，不产生该事件类型，升级即可。
+
+### 2.A.4 依赖注入校验（qodercli token / system prompt preload）
+
+`qoder-trace` 会优先读取 session segments 中的 token；当 qodercli 某些版本 segment token 为 0 或缺少 system prompt 时，
+会回退读取 `qodercli-token-intercept.mjs` 写出的 `qodercli-intercept.jsonl`。这一步依赖 shell rc 中的
+`BUN_OPTIONS --preload` 包装函数，缺失时表现为 **Chat / Tool call 有数据，但 token 或 system prompt 缺失 / 全 0**。
+
+```bash
+# 1) preload 脚本必须存在
+ls -l ~/.loongsuite-pilot/hooks/qodercli-token-intercept.mjs
+
+# 2) shell rc 中必须有注入块（zsh/bash 至少一个命中）
+grep -n 'loongsuite-pilot BEGIN qodercli-intercept\|qodercli-token-intercept.mjs' \
+  ~/.zshrc ~/.bashrc 2>/dev/null
+
+# 3) 当前终端必须已经 source 过 rc，qodercli 应显示为 shell function
+type qodercli 2>/dev/null
+```
+
+预期 `type qodercli` 能看到类似：
+
+```bash
+qodercli is a function
+qodercli () { BUN_OPTIONS="--preload=/Users/<you>/.loongsuite-pilot/hooks/qodercli-token-intercept.mjs" command qodercli "$@"; }
+```
+
+若第 2 步有注入块但第 3 步仍不是 function → 用户需要执行 `source ~/.zshrc` / `source ~/.bashrc` 或打开新终端。
+
+完成一次 qodercli 对话后验证 intercept 文件：
+
+```bash
+ls -l ~/.loongsuite-pilot/logs/qodercli-intercept.jsonl
+tail -5 ~/.loongsuite-pilot/logs/qodercli-intercept.jsonl | python3 -m json.tool
+```
+
+预期能看到 `type: "token"` 或 `type: "system_prompt"` 记录。若文件不存在但 qodercli 对话正常，说明 preload 未生效；
+重跑安装或等待 HookWatchdog 自动修复 shell rc 注入块后，必须重新 source rc / 新开终端。
 
 ---
 
@@ -296,7 +333,10 @@ ls -la "${XDG_CONFIG_HOME:-$HOME/.config}/Qoder"
 
 | 现象 | 解决方法 |
 |------|---------|
-| **Qoder / Qoder CLI 完全无数据** | **先和用户确认用的是桌面版 Qoder（独立应用）**，而不是 IntelliJ IDEA 里的 Qoder 插件 —— 后者暂不支持（仍在开发中），pilot 不会采到任何数据。确认是桌面版后再继续往下查 |
+| **Qoder / Qoder CLI 完全无数据** | 先确认用户使用的是 Qoder 桌面版 / Qoder CLI，还是 IntelliJ IDEA 里的 Qoder for JetBrains 插件；JetBrains 场景直接阅读 `qoder-jetbrains-diagnostics.md`，桌面版/CLI 再继续本文档排查 |
 | **Qoder CLI 完全无数据** | **首查 Qoder CLI 版本**。老版本不执行 `hooks.Stop`，也可能不写 session segments。升级到最新稳定版后 `loongsuite-pilot restart` |
 | **Qoder IDE 完全无数据** | **首查 Qoder IDE 版本**。老版本缺 `ai_tracker/` 目录或 `chat_message.token_info` 字段。升级 Qoder 后重启 IDE |
 | Qoder Work（`~/.qoderwork/`）用户问怎么排查 | Qoder Work 已独立支持，链路与本文档不同，直接阅读 `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/qoderwork-diagnostics.md` |
+| **qodercli CLI token 全 0（session 有数据）** | `qodercli-token-intercept.mjs` 未注入或当前终端未 source rc，参考第 2.A.4 步 |
+| **qodercli CLI 无 system prompt** | 同上，preload 未生效导致 `system_prompt` 未写入 `qodercli-intercept.jsonl` |
+| `~/.loongsuite-pilot/logs/qodercli-intercept.jsonl` 不存在 | 注入块缺失或未 source rc；执行 `loongsuite-pilot restart` 修复后重新 source rc 或开新终端 |

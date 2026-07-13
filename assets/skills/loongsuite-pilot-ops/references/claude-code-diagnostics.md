@@ -14,9 +14,10 @@ Claude Code 数据未出现时，**按以下顺序逐步排查，勿跳步**—�
 ```
 第 1 步 → hook 注册状态（settings.json 是否写入）
 第 2 步 → 原始 JSONL 是否生成（hook 是否被触发）
-第 3 步 → pilot 是否成功消费（input-state 推进 + output 产出）
-第 4 步 → Cursor 冲突 + transcript 路径排查
-第 5 步 → 配置文件三件套对照检查
+第 3 步 → 依赖注入校验（BUN_OPTIONS fetch preload）
+第 4 步 → pilot 是否成功消费（input-state 推进 + output 产出）
+第 5 步 → Cursor 冲突 + transcript 路径排查
+第 6 步 → 配置文件三件套对照检查
 ```
 
 ---
@@ -83,7 +84,7 @@ cat /tmp/claude-debug.log
 ✅ Session logged | 1 turn(s) | X in, Y out | Z.Zs
 ```
 
-若 stderr 完全没有 `[otel-claude-hook]` 或 `✅` 输出 → 跳第 4/5 步排查配置。
+若 stderr 完全没有 `[otel-claude-hook]` 或 `✅` 输出 → 跳第 5/6 步排查配置。
 
 ### 2.1 hook-entry.sh 是否可执行
 
@@ -101,13 +102,56 @@ hook-entry.sh 内部解析路径的三级策略：
 
 ---
 
-## 第 3 步：pilot 是否成功消费
+## 第 3 步：依赖注入校验（BUN_OPTIONS fetch preload）
+
+Claude Code 的 hook 能解析 transcript 并写出 Chat / Tool call，但 `system_instructions` 与 `time_to_first_token` 依赖
+`claude-code-fetch-intercept.mjs` 通过 shell rc wrapper 在 Claude Code 主进程启动前注入 `BUN_OPTIONS --preload`。
+缺失时常见表现是 **JSONL 有 LLM/Tool 事件，但 `gen_ai.system_instructions` 或 `gen_ai.response.time_to_first_token` 缺失**。
 
 ```bash
-# 3.1 增量进度是否前进
+# 1) preload 脚本必须存在
+ls -l ~/.loongsuite-pilot/hooks/claude-code-fetch-intercept.mjs
+
+# 2) shell rc 中必须有注入块（zsh/bash 至少一个命中）
+grep -n 'loongsuite-pilot BEGIN claude-code-intercept\|claude-code-fetch-intercept.mjs' \
+  ~/.zshrc ~/.bashrc 2>/dev/null
+
+# 3) 当前终端必须已经 source 过 rc，claude 应显示为 shell function
+type claude 2>/dev/null
+```
+
+预期 `type claude` 能看到类似：
+
+```bash
+claude is a function
+claude () { BUN_OPTIONS="--preload=/Users/<you>/.loongsuite-pilot/hooks/claude-code-fetch-intercept.mjs ${BUN_OPTIONS}" command claude "$@"; }
+```
+
+若第 2 步有注入块但第 3 步仍不是 function → 用户需要执行 `source ~/.zshrc` / `source ~/.bashrc` 或打开新终端。
+
+完成一次 Claude Code 对话后验证合并结果：
+
+```bash
+# intercept 文件会在 hook processor 合并后被清理，因此优先看最终 JSONL 字段
+grep -E 'gen_ai.system_instructions|gen_ai.response.time_to_first_token' \
+  ~/.loongsuite-pilot/logs/claude-code/claude-code-$(date +%Y-%m-%d).jsonl | tail -5
+
+# 若刚触发完还未合并，可短暂看到 intercept 原始文件
+find ~/.loongsuite-pilot/intercept/claude-code -type f -name '*.json' -mmin -10 2>/dev/null | head
+```
+
+若 JSONL 无上述字段且 intercept 目录也没有新文件，说明 fetch preload 未生效；重跑安装或等待 HookWatchdog 自动修复 shell rc 注入块后，
+必须重新 source rc / 新开终端。
+
+---
+
+## 第 4 步：pilot 是否成功消费
+
+```bash
+# 4.1 增量进度是否前进
 cat ~/.loongsuite-pilot/logs/input-state.json | python3 -m json.tool | grep -A 2 '"claude-code-log"'
 
-# 3.2 pilot 输出是否产出
+# 4.2 pilot 输出是否产出
 ls -la ~/.loongsuite-pilot/logs/output/claude-code/
 tail -2 ~/.loongsuite-pilot/logs/output/claude-code/*.jsonl
 ```
@@ -119,13 +163,13 @@ tail -2 ~/.loongsuite-pilot/logs/output/claude-code/*.jsonl
 `lastOffset` 不前进的可能原因：
 - pilot 服务未运行 → `~/.local/bin/loongsuite-pilot status`
 - `claude-code-log` Input 未注册 → `tail ~/.loongsuite-pilot/logs/loongsuite-pilot-service.log`，搜 `claude-code-log`
-- `log_dir` 路径在 pilot 与插件之间不一致 → 见第 5 步
+- `log_dir` 路径在 pilot 与插件之间不一致 → 见第 6 步
 
 ---
 
-## 第 4 步：Cursor 冲突 + transcript 路径排查
+## 第 5 步：Cursor 冲突 + transcript 路径排查
 
-### 4.1 Cursor IDE 冲突
+### 5.1 Cursor IDE 冲突
 
 Cursor IDE 也使用 Claude Code 的 hook 机制。当 hook 事件的 stdin JSON 中包含 `cursor_version` 字段时，插件会**自动跳过处理**。
 
@@ -150,7 +194,7 @@ python3 -m json.tool ~/.claude/settings.json | grep "command"
 
 每个 command 应为 `bash /Users/.../.cache/opentelemetry.instrumentation.claude/hook-entry.sh <subcommand>` 格式。若被替换为其他命令 → 重跑 install。
 
-### 4.2 transcript 路径
+### 5.2 transcript 路径
 
 Claude Code 将对话记录写入 `~/.claude/projects/<hash>/<session-id>.jsonl`。插件在 `UserPromptSubmit` hook 中接收 `transcript_path` 并保存到 session state，在 `Stop` hook 中解析该文件提取 LLM 数据。
 
@@ -173,7 +217,7 @@ wc -l "$(cat ~/.cache/opentelemetry.instrumentation.claude/sessions/<session-id>
 
 ---
 
-## 第 5 步：配置文件三件套对照检查
+## 第 6 步：配置文件三件套对照检查
 
 #### `~/.claude/settings.json`
 
@@ -241,6 +285,8 @@ ls -l ~/.loongsuite-pilot/plugins/otel-claude-hook/package/bin/otel-claude-hook
 | `~/.cache/opentelemetry.instrumentation.claude/sessions/` | 运行时 session state（成功导出后清理事件；残留 = Stop hook 异常） |
 | `~/.claude/projects/<hash>/<session>.jsonl` | Claude Code 原生 transcript（插件解析 LLM 数据的来源） |
 | `~/.loongsuite-pilot/plugins/otel-claude-hook/` | pilot 解压目录 |
+| `~/.loongsuite-pilot/hooks/claude-code-fetch-intercept.mjs` | BUN_OPTIONS fetch preload 脚本（system_instructions + TTFT 采集） |
+| `~/.loongsuite-pilot/intercept/claude-code/` | fetch preload 写出的 per-LLM-call 中间文件（Stop hook 处理后自动清理） |
 | `~/.loongsuite-pilot/logs/claude-code/claude-code-YYYY-MM-DD.jsonl` | 插件输出原始 JSONL（默认目录） |
 | `~/.loongsuite-pilot/logs/output/claude-code/` | pilot 处理后的 JSONL |
 | `~/.loongsuite-pilot/logs/input-state.json` | 含 `claude-code-log` 增量游标 |
@@ -266,4 +312,6 @@ ls -l ~/.loongsuite-pilot/plugins/otel-claude-hook/package/bin/otel-claude-hook
 | `npm install` 失败导致插件不可用 | 检查 `/tmp/otel-plugin-npm-err.log`。常见原因：网络不通、Node.js 版本 < 18、npm registry 不可达 |
 | `[otel-claude-hook] telemetry export failed` | Stop hook 导出异常但不影响 Claude Code。查看完整错误信息定位：OTLP endpoint 不可达 / log_dir 无写权限 / transcript 文件损坏 |
 | 重装 pilot 后 hook 不生效 | 确认 pilot 安装脚本调用了 `otel-claude-hook install`（不能因解压跳过而 early return）。当前版本已修复为每次都全新安装 |
+| JSONL 有 LLM / Tool 但无 `gen_ai.system_instructions` 或 `gen_ai.response.time_to_first_token` | `claude-code-fetch-intercept.mjs` 的 BUN_OPTIONS preload 未注入或当前终端未 source rc，参考第 3 步 |
+| `~/.loongsuite-pilot/intercept/claude-code/` 没有新文件 | preload 未生效；检查 shell rc 注入块、`type claude`，修复后重新 source rc / 开新终端 |
 | 监控面板 `Last activity` 显示时间早于 JSONL 末尾时间（数据已采集但 dashboard 卡住） | dashboard 是按需懒索引，单次刷新最多吃 5 MiB / 2 万行。Claude Code 单行可达 100 KB，22 MiB 文件至少要刷 5 次才能追到尾。先 `grep '\[overview\] partial index' ~/.loongsuite-pilot/logs/loongsuite-pilot-dashboard.log` 确认；命中后多刷几次 dashboard（间隔 ≥5 秒）即可。详见 `monitoring.md` 的 "Dashboard Last activity 显示落后于真实时间" 章节 |
