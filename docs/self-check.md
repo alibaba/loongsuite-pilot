@@ -65,6 +65,17 @@ Self-check emits alerts through the standard alarm pipeline via `AlarmManager.re
 
 Alarms are serialized to `pilot-alarms.jsonl` and reported to SLS under the `pilot_alarm` topic (same mechanism as all other alarms). Each entry carries `alarm_type`, `alarm_level`, `alarm_message`, `input_name` (the agent id), `user_id`, `ip`, `ver` (Pilot version), and `__time__`. The resolved **agent version** and **Pilot version** are embedded in `alarm_message` to help pinpoint whether an agent upgrade caused the break.
 
+## Hook Watchdog Repair Alarm
+
+Self-check detects the data-collection gap; the separate **hook watchdog** handles hook-installation integrity, periodically re-installing our hook commands when another tool overwrites them. Each time the watchdog actually performs a repair (i.e. not skipped by its own cooldown), it emits a single `HOOK_REPAIR_ALARM` through the same alarm pipeline:
+
+| Outcome | `alarm_level` | `alarm_message` |
+|---------|---------------|-----------------|
+| Repair succeeded | `1` (warning) | `hook auto-repair succeeded for <agent>: restored hooks [...]` |
+| Repair failed | `2` (error) | `hook auto-repair failed for <agent>: missing hooks [...]` |
+
+`input_name` is the agent id. A recurring `HOOK_REPAIR_ALARM` (especially level `2`) means an agent keeps overwriting our hooks or the re-install keeps failing — worth investigating even though the watchdog will keep retrying.
+
 ## Per-Agent Configuration
 
 Self-check reads two optional fields from each agent definition in `agents.d/*.json`. Agents without an `activityIndicator` are skipped.
