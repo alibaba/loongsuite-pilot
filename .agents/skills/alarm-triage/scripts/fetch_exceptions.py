@@ -51,6 +51,7 @@ def query_sls(logstore: str, query: str, ts_from: int, ts_to: int) -> list[dict]
     cmd = [
         "aliyun", "sls", "GetLogs",
         "--project", PROJECT,
+        "--region", REGION,
         "--logstore", logstore,
         "--query", query,
         "--from", str(ts_from),
@@ -202,6 +203,7 @@ def main() -> None:
         "from": ts_from,
         "to": ts_to,
         "project": PROJECT,
+        "region": REGION,
         "sources": {
             "status": {"logstore": STATUS_LOGSTORE, "topic": STATUS_TOPIC},
             "alarm": {"logstore": ALARM_LOGSTORE, "topic": "pilot_alarm"},

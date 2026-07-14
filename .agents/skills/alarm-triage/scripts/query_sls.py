@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 PROJECT = "loongsuite-cn-shanghai-admin"
+REGION = "cn-shanghai"
 STATUS_LOGSTORE = "loongsuite_status"
 ALARM_LOGSTORE = "loongsuite_alarm"
 STATUS_TOPIC = "pilot_status"
@@ -27,10 +28,13 @@ def parse_window(window: str) -> tuple[int, int]:
     raise ValueError(f"unsupported window: {window}")
 
 
-def query_sls(logstore: str, query: str, ts_from: int, ts_to: int) -> list[dict]:
+def query_sls(logstore: str, query: str, ts_from: int, ts_to: int, region: str = REGION) -> list[dict]:
+    # --region must be explicit: relying on the local aliyun CLI's default
+    # profile region causes ProjectNotExist when it differs from cn-shanghai.
     cmd = [
         "aliyun", "sls", "GetLogs",
         "--project", PROJECT,
+        "--region", region,
         "--logstore", logstore,
         "--query", query,
         "--from", str(ts_from),
@@ -62,13 +66,14 @@ def main() -> None:
     parser.add_argument("--logstore", default="alarm", help="alarm|status|full logstore name")
     parser.add_argument("--query", required=True, help="SLS query (SQL after | allowed)")
     parser.add_argument("--window", default="-604800s")
+    parser.add_argument("--region", default=REGION, help=f"SLS region, default {REGION}")
     parser.add_argument("--out", default="", help="optional json output path")
     parser.add_argument("--pretty", action="store_true")
     args = parser.parse_args()
 
     logstore = resolve_logstore(args.logstore)
     ts_from, ts_to = parse_window(args.window)
-    rows = query_sls(logstore, args.query, ts_from, ts_to)
+    rows = query_sls(logstore, args.query, ts_from, ts_to, region=args.region)
     text = json.dumps(rows, ensure_ascii=False, indent=2 if args.pretty else None)
     if args.out:
         path = Path(args.out)
@@ -77,7 +82,7 @@ def main() -> None:
         print(f"wrote {path} rows={len(rows)}")
     else:
         print(text)
-    print(f"# rows={len(rows)} logstore={logstore} from={ts_from} to={ts_to}", flush=True)
+    print(f"# rows={len(rows)} logstore={logstore} region={args.region} from={ts_from} to={ts_to}", flush=True)
 
 
 if __name__ == "__main__":
