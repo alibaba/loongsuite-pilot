@@ -1,7 +1,7 @@
 # 观测面板与运维手册
 
 本文档随 `loongsuite-pilot` 安装包一起分发，安装完成后自动写入
-`~/.loongsuite-pilot/skills/references/monitoring.md`，随 pilot 升级自动更新。
+`~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/monitoring.md`，随 pilot 升级自动更新。
 
 ---
 
