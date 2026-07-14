@@ -1,10 +1,7 @@
-import * as os from 'node:os';
-import type { SelfCheckConfig, NotificationConfig, AgentsConfig } from '../types/index.js';
+import type { SelfCheckConfig, AgentsConfig } from '../types/index.js';
 import type { AgentDefinition } from '../types/deployment.js';
 import type { InputManager } from '../core/input-manager.js';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
-import type { SelfCheckAlert } from '../notifications/notifier.js';
-import { NotificationGateway } from '../notifications/notification-gateway.js';
 import { probeActivity } from './activity-probe.js';
 import { resolveAgentVersion } from './version-resolver.js';
 import { createLogger } from '../utils/logger.js';
@@ -13,13 +10,11 @@ const logger = createLogger('SelfCheckService');
 
 export interface SelfCheckServiceOptions {
   config: SelfCheckConfig;
-  notificationConfig: NotificationConfig;
   inputManager: InputManager;
   alarmManager: AlarmManager;
   agentsConfig: AgentsConfig;
   definitions: AgentDefinition[];
   inputToAgentMap: Record<string, string>;
-  userId: string;
   pilotVersion: string;
 }
 
@@ -29,9 +24,7 @@ export class SelfCheckService {
   private readonly alarmManager: AlarmManager;
   private readonly agentsConfig: AgentsConfig;
   private readonly definitions: AgentDefinition[];
-  private readonly userId: string;
   private readonly pilotVersion: string;
-  private readonly gateway: NotificationGateway;
   private readonly cooldowns = new Map<string, number>();
   private readonly agentToInputIds: Map<string, string[]>;
   private readonly startedAt = Date.now();
@@ -44,9 +37,7 @@ export class SelfCheckService {
     this.alarmManager = opts.alarmManager;
     this.agentsConfig = opts.agentsConfig;
     this.definitions = opts.definitions;
-    this.userId = opts.userId;
     this.pilotVersion = opts.pilotVersion;
-    this.gateway = new NotificationGateway(opts.notificationConfig);
     this.agentToInputIds = this.buildAgentToInputMapping(opts.inputToAgentMap);
   }
 
@@ -61,7 +52,6 @@ export class SelfCheckService {
       intervalMs: this.config.intervalMs,
       dataGapThresholdMs: this.config.dataGapThresholdMs,
       agents: checkableAgents,
-      hasNotifiers: this.gateway.hasNotifiers,
     });
 
     this.initialDelayTimer = setTimeout(() => {
@@ -81,7 +71,6 @@ export class SelfCheckService {
       clearInterval(this.timer);
       this.timer = null;
     }
-    await this.gateway.stop();
     logger.info('self-check service stopped');
   }
 
@@ -168,26 +157,16 @@ export class SelfCheckService {
     const alarmType = alertType === 'DATA_GAP'
       ? 'SELF_CHECK_DATA_GAP_ALARM' as const
       : 'SELF_CHECK_NEVER_COLLECTED_ALARM' as const;
-    this.alarmManager.record(alarmType, '2', message, { input_name: def.id });
 
     const agentVersion = def.versionSource
       ? await resolveAgentVersion(def.versionSource)
       : 'unknown';
 
-    const alert: SelfCheckAlert = {
-      alertType,
-      agentId: def.id,
-      agentDisplayName: def.displayName,
-      agentVersion,
-      pilotVersion: this.pilotVersion,
-      userId: this.userId,
-      hostname: os.hostname(),
-      message,
-      timestamp: new Date().toISOString(),
-    };
-    await this.gateway.send(alert);
+    const fullMessage =
+      `${message} (agent version: ${agentVersion}, pilot version: ${this.pilotVersion})`;
+    this.alarmManager.record(alarmType, '2', fullMessage, { input_name: def.id });
 
-    logger.warn('self-check alert emitted', { alertType, agentId: def.id });
+    logger.warn('self-check alert emitted', { alertType, agentId: def.id, agentVersion });
   }
 
   private buildAgentToInputMapping(inputToAgentMap: Record<string, string>): Map<string, string[]> {

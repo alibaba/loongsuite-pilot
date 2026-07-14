@@ -835,10 +835,10 @@ describe('ConfigLoader', () => {
   });
 
   describe('selfCheck config', () => {
-    it('defaults to disabled with default thresholds', async () => {
+    it('defaults to enabled with default thresholds', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       const config = await loadConfig();
-      expect(config.selfCheck.enabled).toBe(false);
+      expect(config.selfCheck.enabled).toBe(true);
       expect(config.selfCheck.intervalMs).toBe(600_000);
       expect(config.selfCheck.dataGapThresholdMs).toBe(14_400_000);
       expect(config.selfCheck.neverCollectedGraceMs).toBe(14_400_000);
@@ -864,60 +864,6 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.selfCheck.enabled).toBe(false);
       expect(config.selfCheck.intervalMs).toBe(120_000);
-    });
-  });
-
-  describe('notifications config', () => {
-    it('dingtalk disabled by default when no url/secret', async () => {
-      mockReadJsonFile.mockResolvedValueOnce(null);
-      const config = await loadConfig();
-      expect(config.notifications.dingtalk?.enabled).toBe(false);
-      expect(config.notifications.dingtalk?.webhookUrl).toBe('');
-      expect(config.notifications.dingtalk?.secret).toBe('');
-    });
-
-    it('dingtalk auto-enabled when webhookUrl and secret provided', async () => {
-      mockReadJsonFile.mockResolvedValueOnce({
-        notifications: {
-          dingtalk: {
-            webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=xxx',
-            secret: 'SECxxx',
-          },
-        },
-      });
-      const config = await loadConfig();
-      expect(config.notifications.dingtalk?.enabled).toBe(true);
-    });
-
-    it('dingtalk not auto-enabled when only webhookUrl provided (keyword mode)', async () => {
-      mockReadJsonFile.mockResolvedValueOnce({
-        notifications: {
-          dingtalk: { webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=xxx' },
-        },
-      });
-      const config = await loadConfig();
-      // no secret => auto-enable heuristic is false, but explicit enable still works
-      expect(config.notifications.dingtalk?.enabled).toBe(false);
-    });
-
-    it('explicit enabled flag works without secret (keyword-filter bots)', async () => {
-      mockReadJsonFile.mockResolvedValueOnce({
-        notifications: {
-          dingtalk: { enabled: true, webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=xxx' },
-        },
-      });
-      const config = await loadConfig();
-      expect(config.notifications.dingtalk?.enabled).toBe(true);
-    });
-
-    it('env vars override dingtalk config', async () => {
-      mockReadJsonFile.mockResolvedValueOnce(null);
-      vi.stubEnv('LOONGSUITE_PILOT_DINGTALK_WEBHOOK_URL', 'https://example.com/webhook');
-      vi.stubEnv('LOONGSUITE_PILOT_DINGTALK_SECRET', 'secret123');
-      const config = await loadConfig();
-      expect(config.notifications.dingtalk?.enabled).toBe(true);
-      expect(config.notifications.dingtalk?.webhookUrl).toBe('https://example.com/webhook');
-      expect(config.notifications.dingtalk?.secret).toBe('secret123');
     });
   });
 });

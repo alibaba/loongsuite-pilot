@@ -39,8 +39,7 @@
   },
   "activityIndicator": "~/.codex/session_index.jsonl",
   "versionSource": {
-    "type": "jsonFile",
-    "file": "~/.codex/version.json",
-    "key": "latest_version"
+    "type": "command",
+    "command": "codex --version"
   }
 }

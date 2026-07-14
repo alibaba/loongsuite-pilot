@@ -73,7 +73,6 @@ export interface AnalyticsConfig {
   statusBar: StatusBarConfig;
   autoUpdate?: AutoUpdateConfig;
   selfCheck: SelfCheckConfig;
-  notifications: NotificationConfig;
 }
 
 export interface AgentConfig {
@@ -199,16 +198,6 @@ export interface SelfCheckConfig {
   dataGapThresholdMs: number;
   neverCollectedGraceMs: number;
   cooldownMs: number;
-}
-
-export interface DingTalkConfig {
-  enabled: boolean;
-  webhookUrl: string;
-  secret: string;
-}
-
-export interface NotificationConfig {
-  dingtalk?: DingTalkConfig;
 }
 
 export type AgentControlMode = 'on' | 'off' | 'auto';

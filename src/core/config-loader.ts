@@ -10,7 +10,6 @@ import type {
   LogRetentionConfig,
   MaskConfig,
   MaskType,
-  NotificationConfig,
   OtlpTraceFlusherConfig,
   OtlpTraceRawConfig,
   SelfCheckConfig,
@@ -160,14 +159,6 @@ export interface ConfigFile {
     neverCollectedGraceMs?: number;
     cooldownMs?: number;
   };
-
-  notifications?: {
-    dingtalk?: {
-      enabled?: boolean;
-      webhookUrl?: string;
-      secret?: string;
-    };
-  };
 }
 
 function env(key: string): string | undefined {
@@ -236,7 +227,6 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     fileCollection: buildFileCollectionConfig(file),
     statusBar: buildStatusBarConfig(file),
     selfCheck: buildSelfCheckConfig(file),
-    notifications: buildNotificationConfig(file),
   };
 }
 
@@ -425,7 +415,7 @@ function buildStatusBarConfig(file: ConfigFile | null): StatusBarConfig {
 
 function buildSelfCheckConfig(file: ConfigFile | null): SelfCheckConfig {
   return {
-    enabled: envBool('LOONGSUITE_PILOT_SELFCHECK_ENABLED', file?.selfCheck?.enabled ?? false),
+    enabled: envBool('LOONGSUITE_PILOT_SELFCHECK_ENABLED', file?.selfCheck?.enabled ?? true),
     intervalMs: envInt('LOONGSUITE_PILOT_SELFCHECK_INTERVAL_MS', file?.selfCheck?.intervalMs ?? 600_000),
     dataGapThresholdMs: envInt(
       'LOONGSUITE_PILOT_SELFCHECK_DATA_GAP_THRESHOLD_MS',
@@ -436,18 +426,6 @@ function buildSelfCheckConfig(file: ConfigFile | null): SelfCheckConfig {
       file?.selfCheck?.neverCollectedGraceMs ?? 14_400_000,
     ),
     cooldownMs: envInt('LOONGSUITE_PILOT_SELFCHECK_COOLDOWN_MS', file?.selfCheck?.cooldownMs ?? 86_400_000),
-  };
-}
-
-function buildNotificationConfig(file: ConfigFile | null): NotificationConfig {
-  const webhookUrl = env('LOONGSUITE_PILOT_DINGTALK_WEBHOOK_URL') ?? file?.notifications?.dingtalk?.webhookUrl ?? '';
-  const secret = env('LOONGSUITE_PILOT_DINGTALK_SECRET') ?? file?.notifications?.dingtalk?.secret ?? '';
-  return {
-    dingtalk: {
-      enabled: envBool('LOONGSUITE_PILOT_DINGTALK_ENABLED', file?.notifications?.dingtalk?.enabled ?? !!(webhookUrl && secret)),
-      webhookUrl,
-      secret,
-    },
   };
 }
 

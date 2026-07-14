@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -13,16 +13,6 @@ vi.mock('../../../src/self-check/activity-probe.js', () => ({
 
 vi.mock('../../../src/self-check/version-resolver.js', () => ({
   resolveAgentVersion: vi.fn().mockResolvedValue('2.1.0-mock'),
-}));
-
-const mockGatewaySend = vi.fn().mockResolvedValue(undefined);
-const mockGatewayStop = vi.fn().mockResolvedValue(undefined);
-vi.mock('../../../src/notifications/notification-gateway.js', () => ({
-  NotificationGateway: vi.fn().mockImplementation(() => ({
-    send: mockGatewaySend,
-    stop: mockGatewayStop,
-    hasNotifiers: true,
-  })),
 }));
 
 import { SelfCheckService } from '../../../src/self-check/self-check-service.js';
@@ -49,7 +39,6 @@ function makeOpts(overrides?: Partial<SelfCheckServiceOptions>): SelfCheckServic
       neverCollectedGraceMs: 14_400_000,
       cooldownMs: 86_400_000,
     },
-    notificationConfig: {},
     inputManager: {
       getInputCounters: () => counters,
       getInputIdleMinutes: vi.fn(),
@@ -65,9 +54,9 @@ function makeOpts(overrides?: Partial<SelfCheckServiceOptions>): SelfCheckServic
       deployMode: 'hook' as const,
       detection: { paths: ['~/.claude'], commands: ['claude'] },
       activityIndicator: '~/.claude/history.jsonl',
+      versionSource: { type: 'newestJsonFile', dir: '~/.claude/sessions', key: 'version' },
     }],
     inputToAgentMap: { 'claude-code-log': 'claude-code' },
-    userId: 'test-user',
     pilotVersion: '1.0.0-test',
     ...overrides,
   };
@@ -90,7 +79,7 @@ describe('SelfCheckService', () => {
     const svc = new SelfCheckService(opts);
     mockProbeActivity.mockResolvedValue({ active: true, mtimeMs: Date.now() });
     await svc.runCheck();
-    expect(mockGatewaySend).not.toHaveBeenCalled();
+    expect(opts.alarmManager.record).not.toHaveBeenCalled();
   });
 
   it('skips agent without activityIndicator', async () => {
@@ -99,7 +88,7 @@ describe('SelfCheckService', () => {
     const svc = new SelfCheckService(opts);
     await svc.runCheck();
     expect(mockProbeActivity).not.toHaveBeenCalled();
-    expect(mockGatewaySend).not.toHaveBeenCalled();
+    expect(opts.alarmManager.record).not.toHaveBeenCalled();
   });
 
   it('skips agent when probe says not active', async () => {
@@ -107,7 +96,7 @@ describe('SelfCheckService', () => {
     const svc = new SelfCheckService(opts);
     mockProbeActivity.mockResolvedValue({ active: false, mtimeMs: 0 });
     await svc.runCheck();
-    expect(mockGatewaySend).not.toHaveBeenCalled();
+    expect(opts.alarmManager.record).not.toHaveBeenCalled();
   });
 
   it('emits DATA_GAP when lastActiveTime > 0 and idle exceeds threshold', async () => {
@@ -126,13 +115,33 @@ describe('SelfCheckService', () => {
 
     await svc.runCheck();
 
-    expect(mockGatewaySend).toHaveBeenCalledTimes(1);
-    expect(mockGatewaySend.mock.calls[0][0].alertType).toBe('DATA_GAP');
+    expect(opts.alarmManager.record).toHaveBeenCalledTimes(1);
     expect(opts.alarmManager.record).toHaveBeenCalledWith(
       'SELF_CHECK_DATA_GAP_ALARM', '2',
       expect.stringContaining('idle'),
       { input_name: 'claude-code' },
     );
+  });
+
+  it('embeds agent and pilot version in the alarm message', async () => {
+    const counters = new Map<string, InputCounter>();
+    counters.set('claude-code-log', makeCounter(Date.now() - 20_000_000));
+
+    const opts = makeOpts({
+      inputManager: {
+        getInputCounters: () => counters,
+        getInputIdleMinutes: vi.fn(),
+        getActiveInputIds: () => ['claude-code-log'],
+      } as any,
+    });
+    const svc = new SelfCheckService(opts);
+    mockProbeActivity.mockResolvedValue({ active: true, mtimeMs: Date.now() - 60_000 });
+
+    await svc.runCheck();
+
+    const message = (opts.alarmManager.record as any).mock.calls[0][2] as string;
+    expect(message).toContain('agent version: 2.1.0-mock');
+    expect(message).toContain('pilot version: 1.0.0-test');
   });
 
   it('does not emit DATA_GAP when idle is below threshold', async () => {
@@ -150,7 +159,7 @@ describe('SelfCheckService', () => {
     mockProbeActivity.mockResolvedValue({ active: true, mtimeMs: Date.now() });
 
     await svc.runCheck();
-    expect(mockGatewaySend).not.toHaveBeenCalled();
+    expect(opts.alarmManager.record).not.toHaveBeenCalled();
   });
 
   it('emits NEVER_COLLECTED after grace period', async () => {
@@ -169,8 +178,8 @@ describe('SelfCheckService', () => {
     vi.advanceTimersByTime(2_000);
     await svc.runCheck();
 
-    expect(mockGatewaySend).toHaveBeenCalledTimes(1);
-    expect(mockGatewaySend.mock.calls[0][0].alertType).toBe('NEVER_COLLECTED');
+    expect(opts.alarmManager.record).toHaveBeenCalledTimes(1);
+    expect((opts.alarmManager.record as any).mock.calls[0][0]).toBe('SELF_CHECK_NEVER_COLLECTED_ALARM');
   });
 
   it('does not emit NEVER_COLLECTED during grace period', async () => {
@@ -187,7 +196,7 @@ describe('SelfCheckService', () => {
     mockProbeActivity.mockResolvedValue({ active: true, mtimeMs: Date.now() });
 
     await svc.runCheck();
-    expect(mockGatewaySend).not.toHaveBeenCalled();
+    expect(opts.alarmManager.record).not.toHaveBeenCalled();
   });
 
   it('suppresses duplicate alert within cooldown window', async () => {
@@ -212,10 +221,10 @@ describe('SelfCheckService', () => {
     mockProbeActivity.mockResolvedValue({ active: true, mtimeMs: Date.now() });
 
     await svc.runCheck();
-    expect(mockGatewaySend).toHaveBeenCalledTimes(1);
+    expect(opts.alarmManager.record).toHaveBeenCalledTimes(1);
 
     await svc.runCheck();
-    expect(mockGatewaySend).toHaveBeenCalledTimes(1);
+    expect(opts.alarmManager.record).toHaveBeenCalledTimes(1);
   });
 
   it('allows alert after cooldown expires', async () => {
@@ -240,11 +249,11 @@ describe('SelfCheckService', () => {
     mockProbeActivity.mockResolvedValue({ active: true, mtimeMs: Date.now() });
 
     await svc.runCheck();
-    expect(mockGatewaySend).toHaveBeenCalledTimes(1);
+    expect(opts.alarmManager.record).toHaveBeenCalledTimes(1);
 
     vi.advanceTimersByTime(2_000);
     await svc.runCheck();
-    expect(mockGatewaySend).toHaveBeenCalledTimes(2);
+    expect(opts.alarmManager.record).toHaveBeenCalledTimes(2);
   });
 
   it('skips agent with no registered inputs', async () => {
@@ -252,6 +261,6 @@ describe('SelfCheckService', () => {
     const svc = new SelfCheckService(opts);
     mockProbeActivity.mockResolvedValue({ active: true, mtimeMs: Date.now() });
     await svc.runCheck();
-    expect(mockGatewaySend).not.toHaveBeenCalled();
+    expect(opts.alarmManager.record).not.toHaveBeenCalled();
   });
 });

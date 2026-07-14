@@ -1,8 +1,8 @@
-# Self-Check & Notifications
+# Self-Check
 
-Self-check periodically detects when an agent is actively being used but Pilot has stopped (or never started) collecting its data — a common symptom of an agent upgrade that silently breaks Pilot's hook or plugin. When this happens, Pilot sends an alert to a DingTalk group robot so developers are notified quickly.
+Self-check periodically detects when an agent is actively being used but Pilot has stopped (or never started) collecting its data — a common symptom of an agent upgrade that silently breaks Pilot's hook or plugin. When this happens, Pilot records a **structured alarm event** so it can be surfaced through the standard metrics/alarm pipeline.
 
-Self-check is **disabled by default** and must be explicitly enabled.
+Self-check is **enabled by default**; set `selfCheck.enabled` to `false` to turn it off.
 
 ## How It Works
 
@@ -18,13 +18,13 @@ It then raises one of two alerts:
 | `DATA_GAP` | Pilot collected data before, but has been idle beyond `dataGapThresholdMs` while the agent is active | Collection likely broke (e.g. after an agent upgrade) |
 | `NEVER_COLLECTED` | Pilot has never collected any data, the agent is active, and Pilot has been running longer than `neverCollectedGraceMs` | Hook/plugin was never functional |
 
-Each alert is suppressed for `cooldownMs` (default 24h) per agent per alert type to avoid repeated notifications.
+Each alert is suppressed for `cooldownMs` (default 24h) per agent per alert type to avoid repeated events.
 
 Hook installation integrity is already handled by the separate hook watchdog; self-check focuses only on the data-collection gap.
 
-## Enable Self-Check
+## Configuration
 
-Add to `~/.loongsuite-pilot/config.json`:
+Self-check runs with the defaults below. To tune it (or disable it), add to `~/.loongsuite-pilot/config.json`:
 
 ```json
 {
@@ -34,27 +34,17 @@ Add to `~/.loongsuite-pilot/config.json`:
     "dataGapThresholdMs": 14400000,
     "neverCollectedGraceMs": 14400000,
     "cooldownMs": 86400000
-  },
-  "notifications": {
-    "dingtalk": {
-      "enabled": true,
-      "webhookUrl": "https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN",
-      "secret": "YOUR_SIGN_SECRET"
-    }
   }
 }
 ```
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `selfCheck.enabled` | `false` | Enables self-check. |
+| `selfCheck.enabled` | `true` | Enables self-check. Set to `false` to disable. |
 | `selfCheck.intervalMs` | `600000` (10 min) | How often the check runs. |
 | `selfCheck.dataGapThresholdMs` | `14400000` (4h) | Idle time before a `DATA_GAP` alert; also the activity window. |
 | `selfCheck.neverCollectedGraceMs` | `14400000` (4h) | Grace period after startup before a `NEVER_COLLECTED` alert. |
 | `selfCheck.cooldownMs` | `86400000` (24h) | Suppression window per agent per alert type. |
-| `notifications.dingtalk.enabled` | auto | Enables DingTalk. Auto-enabled when both `webhookUrl` and `secret` are set; set explicitly to `true` for keyword-filter bots without a secret. |
-| `notifications.dingtalk.webhookUrl` | `""` | DingTalk custom robot webhook (includes `access_token`). |
-| `notifications.dingtalk.secret` | `""` | HMAC-SHA256 signing secret. Leave empty for keyword-filter bots. |
 
 Environment variables (override config file):
 
@@ -65,22 +55,15 @@ Environment variables (override config file):
 | `LOONGSUITE_PILOT_SELFCHECK_DATA_GAP_THRESHOLD_MS` | Data-gap threshold. |
 | `LOONGSUITE_PILOT_SELFCHECK_NEVER_COLLECTED_GRACE_MS` | Never-collected grace period. |
 | `LOONGSUITE_PILOT_SELFCHECK_COOLDOWN_MS` | Alert cooldown. |
-| `LOONGSUITE_PILOT_DINGTALK_ENABLED` | Enables DingTalk. |
-| `LOONGSUITE_PILOT_DINGTALK_WEBHOOK_URL` | Webhook URL. |
-| `LOONGSUITE_PILOT_DINGTALK_SECRET` | Signing secret. |
 
-## DingTalk Robot Setup
+## Alert Output
 
-Create a custom robot in your DingTalk group (Group Settings → Robots → Add → Custom). Choose one security mode:
+Self-check emits alerts through the standard alarm pipeline via `AlarmManager.record`, using two alarm types:
 
-- **Signing (recommended)**: copy the secret into `notifications.dingtalk.secret`.
-- **Keyword filter**: add the keyword `loongsuite-pilot`. Alert titles begin with `loongsuite-pilot self-check:` so they pass the filter. Leave `secret` empty and set `enabled: true`.
+- `SELF_CHECK_DATA_GAP_ALARM`
+- `SELF_CHECK_NEVER_COLLECTED_ALARM`
 
-Notifications never affect the main collection pipeline: any send failure is logged and swallowed. The gateway also rate-limits to at most one message every 3 seconds (well under DingTalk's 20/min cap).
-
-## Alert Content
-
-Each alert includes the agent id and display name, **agent version**, **Pilot version**, host, user, timestamp, and a description. Versions help pinpoint whether an agent upgrade caused the break.
+Alarms are serialized to `pilot-alarms.jsonl` and reported to SLS under the `pilot_alarm` topic (same mechanism as all other alarms). Each entry carries `alarm_type`, `alarm_level`, `alarm_message`, `input_name` (the agent id), `user_id`, `ip`, `ver` (Pilot version), and `__time__`. The resolved **agent version** and **Pilot version** are embedded in `alarm_message` to help pinpoint whether an agent upgrade caused the break.
 
 ## Per-Agent Configuration
 
@@ -99,7 +82,7 @@ Path to a native file whose modification time signals the agent is in use. `~` i
 How to resolve the agent's version. Supported types:
 
 ```json
-"versionSource": { "type": "jsonFile", "file": "~/.codex/version.json", "key": "latest_version" }
+"versionSource": { "type": "jsonFile", "file": "~/.qoderwork/.status.json", "key": "version" }
 "versionSource": { "type": "jsonlTail", "file": "~/.cursor/audit/audit.jsonl", "key": "cursor_version" }
 "versionSource": { "type": "newestJsonFile", "dir": "~/.claude/sessions", "key": "version" }
 "versionSource": { "type": "newestSubdirFile", "dir": "~/.qoder/logs/runs", "file": "manifest.json", "key": "cli_version" }
@@ -110,18 +93,18 @@ How to resolve the agent's version. Supported types:
 |------|----------|
 | `jsonFile` | Read `key` from a JSON file. |
 | `jsonlTail` | Read `key` from the last valid line of a JSONL file. |
-| `newestJsonFile` | Read `key` from the newest (last-sorted) `.json` file in `dir`. |
+| `newestJsonFile` | Read `key` from the most recently modified (by mtime) `.json` file in `dir`. |
 | `newestSubdirFile` | Read `key` from `file` inside the newest subdirectory of `dir`. |
 | `command` | Run `command` and use the first line of stdout. |
 
-If resolution fails, the version is reported as `unknown` and the alert is still sent.
+If resolution fails, the version is reported as `unknown` and the alert is still emitted.
 
 ### Built-in Agent Signals
 
 | Agent | activityIndicator | version source |
 |-------|-------------------|----------------|
 | Claude Code | `~/.claude/history.jsonl` | newest session json → `version` |
-| Codex | `~/.codex/session_index.jsonl` | `~/.codex/version.json` → `latest_version` |
+| Codex | `~/.codex/session_index.jsonl` | `codex --version` |
 | Cursor | `~/.cursor/audit/audit.jsonl` | audit tail → `cursor_version` |
 | Qoder | `~/.qoder/audit/audit.jsonl` | newest run `manifest.json` → `cli_version` |
 | QoderWork | `~/.qoderwork/audit/audit.jsonl` | `~/.qoderwork/.status.json` → `version` |

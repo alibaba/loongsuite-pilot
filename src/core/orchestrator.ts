@@ -204,7 +204,7 @@ export class Orchestrator extends EventEmitter {
       ...HookWatchdog.defaultTargets(),
       ...this.buildHookWatchdogTargets(),
     ];
-    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets);
+    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, this.alarmManager);
     this.hookWatchdog.start();
 
     // 11. Start updater watchdog only when resolved auto-update is enabled.
@@ -250,13 +250,11 @@ export class Orchestrator extends EventEmitter {
     if (this.config.selfCheck.enabled) {
       this.selfCheckService = new SelfCheckService({
         config: this.config.selfCheck,
-        notificationConfig: this.config.notifications,
         inputManager: this.inputManager,
         alarmManager: this.alarmManager,
         agentsConfig: this.config.agents,
         definitions: this.deploymentManager.getDefinitions(),
         inputToAgentMap: Orchestrator.LISTENER_AGENT_MAP,
-        userId: this.config.userId,
         pilotVersion: version,
       });
       await this.selfCheckService.start();

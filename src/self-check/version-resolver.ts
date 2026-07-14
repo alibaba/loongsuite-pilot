@@ -47,10 +47,21 @@ async function readJsonlTailKey(filePath: string, key: string): Promise<string> 
 
 async function readNewestFileKey(dir: string, key: string): Promise<string> {
   const entries = await fs.readdir(dir);
-  const jsonFiles = entries.filter(e => e.endsWith('.json')).sort();
+  const jsonFiles = entries.filter(e => e.endsWith('.json'));
   if (jsonFiles.length === 0) return 'unknown';
-  const newest = jsonFiles[jsonFiles.length - 1];
-  return await readJsonKey(path.join(dir, newest), key);
+  // Sort by mtime, not filename: session files are named by PID (not time),
+  // so lexical order does not reflect recency.
+  const stats = await Promise.all(jsonFiles.map(async name => {
+    const full = path.join(dir, name);
+    try {
+      return { full, mtimeMs: (await fs.stat(full)).mtimeMs };
+    } catch {
+      return { full, mtimeMs: 0 };
+    }
+  }));
+  stats.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  const newest = stats[stats.length - 1];
+  return await readJsonKey(newest.full, key);
 }
 
 async function readNewestSubdirFileKey(dir: string, fileName: string, key: string): Promise<string> {

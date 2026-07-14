@@ -79,9 +79,14 @@ describe('resolveAgentVersion', () => {
   });
 
   describe('newestJsonFile', () => {
-    it('reads the key from the newest (last-sorted) JSON file in a dir', async () => {
-      await fs.writeFile(path.join(tmpDir, '10000.json'), JSON.stringify({ version: '2.1.100' }));
-      await fs.writeFile(path.join(tmpDir, '91562.json'), JSON.stringify({ version: '2.1.119' }));
+    it('reads the key from the newest file by mtime, not by filename', async () => {
+      // Filenames are PIDs, so lexical order != recency. The lexically-largest
+      // name ('91562') is written first (older); the newest version lives in a
+      // lexically-smaller name ('10000') written later.
+      await fs.writeFile(path.join(tmpDir, '91562.json'), JSON.stringify({ version: '2.1.100' }));
+      const older = new Date(Date.now() - 60_000);
+      await fs.utimes(path.join(tmpDir, '91562.json'), older, older);
+      await fs.writeFile(path.join(tmpDir, '10000.json'), JSON.stringify({ version: '2.1.119' }));
       const v = await resolveAgentVersion({ type: 'newestJsonFile', dir: tmpDir, key: 'version' });
       expect(v).toBe('2.1.119');
     });
