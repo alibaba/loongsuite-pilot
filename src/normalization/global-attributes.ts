@@ -112,9 +112,18 @@ export class GlobalAttributesProvider {
 
     if (mtimeMs === this.cachedMtimeMs) return this.cachedMerged;
 
+    const result = this.readFileAttrs();
+    if (!result.ok) {
+      // Read/parse failed (e.g. a concurrent non-atomic write left the file
+      // half-written). Keep the last-good value and retry on the next call —
+      // do NOT commit the mtime, otherwise we'd be stuck on stale data until
+      // the file changes again.
+      return this.cachedMerged;
+    }
+
     this.cachedMtimeMs = mtimeMs;
-    this.cachedFileAttrs = this.readFileAttrs();
-    this.cachedMerged = { ...this.baseline, ...this.cachedFileAttrs };
+    this.cachedFileAttrs = result.attrs;
+    this.cachedMerged = { ...this.baseline, ...result.attrs };
     return this.cachedMerged;
   }
 
@@ -123,21 +132,33 @@ export class GlobalAttributesProvider {
     return Object.keys(this.resolve());
   }
 
-  private readFileAttrs(): Record<string, string> {
+  private readFileAttrs(): { ok: boolean; attrs: Record<string, string> } {
+    let raw: string;
     try {
-      const raw = fs.readFileSync(this.filePath, 'utf-8');
-      const parsed = JSON.parse(raw) as unknown;
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        logger.warn('span-attributes file is not a JSON object; ignoring', { filePath: this.filePath });
-        return {};
-      }
-      return sanitizeAttributes(parsed as Record<string, unknown>);
+      raw = fs.readFileSync(this.filePath, 'utf-8');
     } catch (err) {
-      logger.warn('failed to read span-attributes file; falling back to baseline', {
+      logger.warn('failed to read span-attributes file; will retry', {
         filePath: this.filePath,
         error: String(err),
       });
-      return {};
+      return { ok: false, attrs: {} };
     }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      // Malformed JSON — possibly a half-written file. Retry next time.
+      logger.warn('span-attributes file has invalid JSON; will retry', {
+        filePath: this.filePath,
+        error: String(err),
+      });
+      return { ok: false, attrs: {} };
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      // Parseable but wrong shape (not a transient write) — treat as empty.
+      logger.warn('span-attributes file is not a JSON object; ignoring', { filePath: this.filePath });
+      return { ok: true, attrs: {} };
+    }
+    return { ok: true, attrs: sanitizeAttributes(parsed as Record<string, unknown>) };
   }
 }

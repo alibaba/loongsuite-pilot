@@ -192,11 +192,11 @@ Pilot 会将 Trace 发送到 `http://localhost:3000/api/public/otel/v1/traces`�
 
 ## 自定义 Span 属性
 
-有两类额外属性可以附加到 **trace span** 上（**不会**写入 event log / SLS / JSONL）：
+有两类额外属性可以附加到 trace span 上：
 
-**1. Git/工作区属性（自动）**：当 agent 上报了工作目录时，span 会自动带上 `git.repo`、`git.branch`、`git.domain`、`workspace.current_root`（由本地 git 仓库推断）。
+**1. Git/工作区属性（自动）**：当 agent 上报了工作目录时，span 会自动带上 `git.repo`、`git.branch`、`git.domain`、`workspace.current_root`（由本地 git 仓库推断）。这几个字段**同时也会**出现在 event log（SLS / JSONL）中。
 
-**2. 用户自定义属性**：从三个来源给每个 span 附加任意键值对，优先级 **config < env < 文件**：
+**2. 用户自定义属性**：从三个来源给 span 附加任意键值对，优先级 **config < env < 文件**。与上面的 git 字段不同，这些**只写入 trace span**（不进 event log / SLS / JSONL）：
 
 - `config.json` → `globalSpanAttributes`（启动时读一次）：
 

@@ -192,11 +192,11 @@ Also enable [Data Masking](masking.md) when trace data may include secrets.
 
 ## Custom Span Attributes
 
-Two kinds of extra attributes can be attached to **trace spans** (they are NOT written to the event log / SLS / JSONL output):
+Two kinds of extra attributes can be attached to trace spans:
 
-**1. Git/workspace attributes (automatic).** When an agent reports its working directory, spans automatically carry `git.repo`, `git.branch`, `git.domain`, and `workspace.current_root`, inferred from the local git repository.
+**1. Git/workspace attributes (automatic).** When an agent reports its working directory, spans automatically carry `git.repo`, `git.branch`, `git.domain`, and `workspace.current_root`, inferred from the local git repository. These are also present in the event log (SLS / JSONL) output.
 
-**2. User-defined attributes.** Attach arbitrary key/value pairs to every span from three sources, merged with precedence **config < env < file**:
+**2. User-defined attributes.** Attach arbitrary key/value pairs from three sources, merged with precedence **config < env < file**. Unlike the git fields above, these are written to **trace spans only** (never the event log / SLS / JSONL):
 
 - `config.json` → `globalSpanAttributes` (read once at startup):
 

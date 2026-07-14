@@ -944,7 +944,7 @@ const file = process.argv[1], op = process.argv[2], key = process.argv[3], value
 const RESERVED = ["gen_ai.","git.","workspace.","event.","trace_","user.","cost_","agent.","time_unix_nano","observed_time_unix_nano"];
 const isReserved = k => RESERVED.some(p => k === p || k.indexOf(p) === 0);
 function read() { try { const o = JSON.parse(fs.readFileSync(file, "utf-8")); return (o && typeof o === "object" && !Array.isArray(o)) ? o : {}; } catch { return {}; } }
-function write(o) { fs.writeFileSync(file, JSON.stringify(o, null, 2) + "\n"); }
+function write(o) { const tmp = file + ".tmp"; fs.writeFileSync(tmp, JSON.stringify(o, null, 2) + "\n"); fs.renameSync(tmp, file); }
 if (op === "set") {
   if (!key || value === undefined) { console.error("usage: span-attr set <key> <value>"); process.exit(1); }
   if (isReserved(key)) { console.error("refused: \"" + key + "\" uses a reserved prefix (gen_ai./git./workspace./event./trace_/user./cost_/agent./...)"); process.exit(1); }

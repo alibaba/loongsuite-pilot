@@ -231,11 +231,11 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
  * config. Reserved-prefix keys and non-string values are dropped.
  */
 function resolveGlobalSpanAttributes(file: ConfigFile | null): Record<string, string> {
-  const fromConfig = sanitizeAttributes(
-    (file?.globalSpanAttributes as Record<string, unknown>) ?? {},
-  );
+  const fromConfig = (file?.globalSpanAttributes as Record<string, unknown>) ?? {};
   const fromEnv = parseKeyValueAttributes(env('OTEL_SPAN_ATTRIBUTES'));
-  return { ...fromConfig, ...fromEnv };
+  // Sanitize the merged result so config and env are treated consistently
+  // (drop reserved-prefix keys and non-string values from both).
+  return sanitizeAttributes({ ...fromConfig, ...fromEnv });
 }
 
 function buildOtlpTraceRawConfig(file: ConfigFile | null): OtlpTraceRawConfig | undefined {

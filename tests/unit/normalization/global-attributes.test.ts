@@ -100,6 +100,25 @@ describe('GlobalAttributesProvider', () => {
     expect(p.resolve()).toEqual({ team: 'infra' });
   });
 
+  it('keeps last-good and retries on bad JSON (does not drop to baseline or commit mtime)', () => {
+    fs.writeFileSync(filePath, JSON.stringify({ v: '1' }));
+    const p = new GlobalAttributesProvider({ team: 'infra' }, filePath);
+    expect(p.resolve()).toEqual({ team: 'infra', v: '1' });
+
+    // Simulate a concurrent/half write leaving malformed JSON (new mtime).
+    fs.writeFileSync(filePath, '{ half-written');
+    let future = Date.now() / 1000 + 5;
+    fs.utimesSync(filePath, future, future);
+    // Keeps last-good (v:1), NOT baseline — and did not commit the bad mtime.
+    expect(p.resolve()).toEqual({ team: 'infra', v: '1' });
+
+    // Once the file is valid again, the next read is picked up (retry worked).
+    fs.writeFileSync(filePath, JSON.stringify({ v: '2' }));
+    future = Date.now() / 1000 + 10;
+    fs.utimesSync(filePath, future, future);
+    expect(p.resolve()).toEqual({ team: 'infra', v: '2' });
+  });
+
   it('resets to baseline when file is deleted', () => {
     fs.writeFileSync(filePath, JSON.stringify({ v: '1' }));
     const p = new GlobalAttributesProvider({ team: 'infra' }, filePath);
