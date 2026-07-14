@@ -50,6 +50,47 @@ _detect_init_system() {
     esac
 }
 
+_launchd_domain() {
+    echo "gui/$(id -u)"
+}
+
+_launchd_service_target() {
+    local label="$1"
+    echo "$(_launchd_domain)/$label"
+}
+
+_launchd_bootout_or_unload() {
+    local plist="$1"
+    local domain
+    domain=$(_launchd_domain)
+    launchctl bootout "$domain" "$plist" 2>/dev/null \
+        || launchctl unload -w "$plist" 2>/dev/null \
+        || true
+}
+
+_launchd_bootstrap_or_load() {
+    local plist="$1"
+    local domain
+    domain=$(_launchd_domain)
+    launchctl bootstrap "$domain" "$plist" 2>/dev/null \
+        || launchctl load -w "$plist"
+}
+
+_launchd_enable_or_true() {
+    local label="$1"
+    local target
+    target=$(_launchd_service_target "$label")
+    launchctl enable "$target" 2>/dev/null || true
+}
+
+_launchd_kickstart_or_start() {
+    local label="$1"
+    local target
+    target=$(_launchd_service_target "$label")
+    launchctl kickstart -k "$target" 2>/dev/null \
+        || launchctl start "$label" 2>/dev/null
+}
+
 _write_launchd_plist() {
     mkdir -p "$(dirname "$_LOONGSUITE_PILOT_LAUNCHD_PLIST")"
     mkdir -p "$(dirname "$LOONGSUITE_PILOT_LOG_FILE")"
@@ -176,12 +217,16 @@ autostart_install() {
 
     case "$init_system" in
         launchd)
-            launchctl unload -w "$_LOONGSUITE_PILOT_LAUNCHD_PLIST" 2>/dev/null || true
-            launchctl unload -w "$_LOONGSUITE_PILOT_UPDATER_PLIST" 2>/dev/null || true
+            _launchd_bootout_or_unload "$_LOONGSUITE_PILOT_LAUNCHD_PLIST"
+            _launchd_bootout_or_unload "$_LOONGSUITE_PILOT_UPDATER_PLIST"
             _write_launchd_plist
             _write_launchd_updater_plist
-            launchctl load -w "$_LOONGSUITE_PILOT_LAUNCHD_PLIST"
-            launchctl load -w "$_LOONGSUITE_PILOT_UPDATER_PLIST"
+            _launchd_bootstrap_or_load "$_LOONGSUITE_PILOT_LAUNCHD_PLIST"
+            _launchd_bootstrap_or_load "$_LOONGSUITE_PILOT_UPDATER_PLIST" || true
+            _launchd_enable_or_true "$_LOONGSUITE_PILOT_SERVICE_LABEL"
+            _launchd_enable_or_true "$_LOONGSUITE_PILOT_UPDATER_LABEL"
+            _launchd_kickstart_or_start "$_LOONGSUITE_PILOT_SERVICE_LABEL" || true
+            _launchd_kickstart_or_start "$_LOONGSUITE_PILOT_UPDATER_LABEL" || true
             echo "✅ Autostart enabled (launchd)"
             echo "   Collector: $_LOONGSUITE_PILOT_LAUNCHD_PLIST"
             echo "   Updater:   $_LOONGSUITE_PILOT_UPDATER_PLIST"
@@ -217,9 +262,9 @@ autostart_remove() {
 
     case "$init_system" in
         launchd)
-            launchctl unload -w "$_LOONGSUITE_PILOT_UPDATER_PLIST" 2>/dev/null || true
+            _launchd_bootout_or_unload "$_LOONGSUITE_PILOT_UPDATER_PLIST"
             rm -f "$_LOONGSUITE_PILOT_UPDATER_PLIST"
-            launchctl unload -w "$_LOONGSUITE_PILOT_LAUNCHD_PLIST" 2>/dev/null || true
+            _launchd_bootout_or_unload "$_LOONGSUITE_PILOT_LAUNCHD_PLIST"
             rm -f "$_LOONGSUITE_PILOT_LAUNCHD_PLIST"
             echo "✅ Autostart disabled (launchd plists removed)"
             ;;
