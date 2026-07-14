@@ -17,12 +17,15 @@ import {
   HttpError,
   postWebtracking,
   isRetryable,
+  classifySlsFailure,
+  extractEndpointHost,
   RETRY_MAX_ATTEMPTS,
   RETRY_BASE_DELAY_MS,
   WEBTRACKING_TIMEOUT_MS,
   WEBTRACKING_MAX_BODY_BYTES,
   WEBTRACKING_MAX_LOGS,
   RETRYABLE_STATUS_CODES,
+  type SlsFailureDiagnostics,
 } from './sls-transport.js';
 
 const HOSTNAME = os.hostname();
@@ -34,6 +37,12 @@ interface QueuedLog {
   content: Record<string, string>;
   endpoint: SlsEndpoint;
   agentType?: string;
+}
+
+interface FlushResult {
+  sentEntries: number;
+  failedEntries: number;
+  lastFailure?: SlsFailureDiagnostics;
 }
 
 const logger = createLogger('SlsFlusher');
@@ -50,6 +59,10 @@ export interface EndpointCounter {
   endpoint: string;
   project: string;
   logstore: string;
+  lastFailureClass: string;
+  lastFailureStatusCode: string;
+  lastFailureTime: string;
+  consecutiveFailures: number;
 }
 
 export class SlsFlusher extends BaseFlusher {
@@ -76,6 +89,8 @@ export class SlsFlusher extends BaseFlusher {
         inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0,
         totalDelayMs: 0, lastFlushTime: '', startTime: '',
         mode: ep.mode, endpoint: ep.endpoint, project: ep.project, logstore: ep.logstore,
+        lastFailureClass: '', lastFailureStatusCode: '', lastFailureTime: '',
+        consecutiveFailures: 0,
       });
     }
   }
@@ -148,24 +163,45 @@ export class SlsFlusher extends BaseFlusher {
         const send = endpoint.mode === 'ak'
           ? this.flushViaAk(endpoint, logs)
           : this.flushViaWebtracking(endpoint, logs);
-        return send.then(() => {
+        return send.then((result) => {
           if (counter) {
-            counter.outEntries += logs.length;
+            counter.outEntries += result.sentEntries;
+            counter.outFailed += result.failedEntries;
             counter.totalDelayMs += Date.now() - startMs;
-            counter.lastFlushTime = formatTime(new Date());
+            if (result.sentEntries > 0) {
+              counter.lastFlushTime = formatTime(new Date());
+            }
+            if (result.failedEntries > 0 && result.lastFailure) {
+              this.recordCounterFailure(counter, result.lastFailure);
+            } else if (result.failedEntries === 0) {
+              counter.consecutiveFailures = 0;
+            }
           }
         }).catch(err => {
+          const diagnostics = classifySlsFailure(err);
           if (counter) {
             counter.outFailed += logs.length;
             counter.totalDelayMs += Date.now() - startMs;
+            this.recordCounterFailure(counter, diagnostics);
           }
           logger.error('SLS endpoint flush failed', {
             endpoint: endpoint.name,
-            error: String(err),
+            failureClass: diagnostics.failure_class,
+            statusCode: diagnostics.status_code,
+            error: diagnostics.reason,
           });
         });
       });
     await Promise.all(tasks);
+  }
+
+  private recordCounterFailure(counter: EndpointCounter, diagnostics: SlsFailureDiagnostics): void {
+    counter.lastFailureClass = diagnostics.failure_class;
+    counter.lastFailureStatusCode = diagnostics.status_code === undefined
+      ? ''
+      : String(diagnostics.status_code);
+    counter.lastFailureTime = formatTime(new Date());
+    counter.consecutiveFailures++;
   }
 
   private resolveServiceName(agentType?: string): string {
@@ -194,7 +230,7 @@ export class SlsFlusher extends BaseFlusher {
     }
   }
 
-  private async flushViaAk(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
+  private async flushViaAk(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<FlushResult> {
     this.warnIfMixedAgentTypes(logs);
     const now = Math.floor(Date.now() / 1000);
     const agentType = logs[0]?.agentType;
@@ -223,45 +259,57 @@ export class SlsFlusher extends BaseFlusher {
           logstore: endpoint.logstore,
           count: logs.length,
         });
-        return;
+        return { sentEntries: logs.length, failedEntries: 0 };
       } catch (err) {
         lastErr = err;
         if (!isRetryable(err) || attempt === RETRY_MAX_ATTEMPTS - 1) break;
+        const diagnostics = classifySlsFailure(err);
         const delay = RETRY_BASE_DELAY_MS * 2 ** attempt;
         logger.warn('SLS ak send retrying', {
           endpoint: endpoint.name,
           attempt: attempt + 1,
           delayMs: delay,
-          error: String(err),
+          failureClass: diagnostics.failure_class,
+          statusCode: diagnostics.status_code,
+          error: diagnostics.reason,
         });
         await this.sleep(delay);
       }
     }
 
+    const diagnostics = classifySlsFailure(lastErr);
     logger.error('SLS send failed after retries', {
       endpoint: endpoint.name,
-      error: String(lastErr),
+      failureClass: diagnostics.failure_class,
+      statusCode: diagnostics.status_code,
+      error: diagnostics.reason,
     });
     this.alarmManager?.record(
       'FLUSH_SEND_ALARM', '2',
-      `SLS ak send failed: ${String(lastErr)}`,
-      { endpoint_name: endpoint.name },
+      `SLS ak send failed: ${diagnostics.reason}`,
+      this.buildFailureContext(endpoint, diagnostics),
     );
-    if (lastErr instanceof HttpError && lastErr.status === 429) {
+    if (diagnostics.status_code === 429) {
       this.alarmManager?.record(
         'FLUSH_QUOTA_ALARM', '2',
         `SLS endpoint throttled (429)`,
-        { endpoint_name: endpoint.name },
+        this.buildFailureContext(endpoint, diagnostics),
       );
     }
-    await this.persistFailedLogs(endpoint, logGroup, lastErr);
+    await this.persistFailedLogs(endpoint, logGroup, diagnostics);
+    return { sentEntries: 0, failedEntries: logs.length, lastFailure: diagnostics };
   }
 
-  private async flushViaWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
+  private async flushViaWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<FlushResult> {
     const chunks = this.splitForWebtracking(logs);
+    const result: FlushResult = { sentEntries: 0, failedEntries: 0 };
     for (const chunk of chunks) {
-      await this.postWebtracking(endpoint, chunk);
+      const chunkResult = await this.postWebtracking(endpoint, chunk);
+      result.sentEntries += chunkResult.sentEntries;
+      result.failedEntries += chunkResult.failedEntries;
+      if (chunkResult.lastFailure) result.lastFailure = chunkResult.lastFailure;
     }
+    return result;
   }
 
   private splitForWebtracking(logs: QueuedLog[]): QueuedLog[][] {
@@ -290,7 +338,7 @@ export class SlsFlusher extends BaseFlusher {
     return chunks;
   }
 
-  private async postWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
+  private async postWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<FlushResult> {
     this.warnIfMixedAgentTypes(logs);
     const agentType = logs[0]?.agentType;
     const body = {
@@ -334,7 +382,7 @@ export class SlsFlusher extends BaseFlusher {
             logstore: endpoint.logstore,
             count: logs.length,
           });
-          return;
+          return { sentEntries: logs.length, failedEntries: 0 };
         }
       } catch (err) {
         lastErr = err;
@@ -342,46 +390,91 @@ export class SlsFlusher extends BaseFlusher {
         if (attempt === RETRY_MAX_ATTEMPTS - 1) break;
       }
 
+      const diagnostics = classifySlsFailure(lastErr);
       const delay = RETRY_BASE_DELAY_MS * 2 ** attempt;
       logger.warn('SLS webtracking retrying', {
         endpoint: endpoint.name,
         attempt: attempt + 1,
         delayMs: delay,
-        error: String(lastErr),
+        failureClass: diagnostics.failure_class,
+        statusCode: diagnostics.status_code,
+        error: diagnostics.reason,
       });
       await this.sleep(delay);
     }
 
+    const diagnostics = classifySlsFailure(lastErr);
     logger.error('SLS webtracking send failed after retries', {
       endpoint: endpoint.name,
-      error: String(lastErr),
+      failureClass: diagnostics.failure_class,
+      statusCode: diagnostics.status_code,
+      error: diagnostics.reason,
     });
     this.alarmManager?.record(
       'FLUSH_SEND_ALARM', '2',
-      `SLS webtracking send failed: ${String(lastErr)}`,
-      { endpoint_name: endpoint.name },
+      `SLS webtracking send failed: ${diagnostics.reason}`,
+      this.buildFailureContext(endpoint, diagnostics),
     );
-    if (lastErr instanceof HttpError && lastErr.status === 429) {
+    if (diagnostics.status_code === 429) {
       this.alarmManager?.record(
         'FLUSH_QUOTA_ALARM', '2',
         `SLS endpoint throttled (429)`,
-        { endpoint_name: endpoint.name },
+        this.buildFailureContext(endpoint, diagnostics),
       );
     }
-    await this.persistFailedLogs(endpoint, body, lastErr);
+    await this.persistFailedLogs(endpoint, body, diagnostics);
+    return { sentEntries: 0, failedEntries: logs.length, lastFailure: diagnostics };
   }
 
-  private async persistFailedLogs(endpoint: SlsEndpoint, logGroup: unknown, err: unknown): Promise<void> {
+  private buildFailureContext(endpoint: SlsEndpoint, diagnostics: SlsFailureDiagnostics): {
+    endpoint_name: string;
+    mode: string;
+    endpoint_host: string;
+    project: string;
+    logstore: string;
+    failure_class: string;
+    status_code?: string;
+    retryable: string;
+    reason: string;
+  } {
+    return {
+      endpoint_name: endpoint.name,
+      mode: endpoint.mode,
+      endpoint_host: extractEndpointHost(endpoint.endpoint),
+      project: endpoint.project,
+      logstore: endpoint.logstore,
+      failure_class: diagnostics.failure_class,
+      ...(diagnostics.status_code === undefined
+        ? {}
+        : { status_code: String(diagnostics.status_code) }),
+      retryable: String(diagnostics.retryable),
+      reason: diagnostics.reason,
+    };
+  }
+
+  private async persistFailedLogs(
+    endpoint: SlsEndpoint,
+    logGroup: unknown,
+    diagnostics: SlsFailureDiagnostics,
+  ): Promise<void> {
     await ensureDir(this.failedLogDir);
     const filePath = path.join(this.failedLogDir, `${endpoint.name}.jsonl`);
     const line = JSON.stringify({
       ts: Date.now(),
       endpoint: endpoint.name,
+      endpoint_host: extractEndpointHost(endpoint.endpoint),
+      mode: endpoint.mode,
       project: endpoint.project,
       logstore: endpoint.logstore,
       kind: endpoint.kind,
+      failure_class: diagnostics.failure_class,
+      ...(diagnostics.status_code === undefined
+        ? {}
+        : { status_code: diagnostics.status_code }),
+      retryable: diagnostics.retryable,
+      reason: diagnostics.reason,
       logGroup,
-      error: String(err),
+      error: diagnostics.reason,
     });
     await appendLine(filePath, line);
   }

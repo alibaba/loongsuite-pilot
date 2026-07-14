@@ -49,6 +49,48 @@ describe('AlarmManager', () => {
     expect(entries[1].endpoint_name).toBe('ep2');
   });
 
+  it('splits SLS send alarms by failure class and status code', () => {
+    manager.record('FLUSH_SEND_ALARM', '2', 'forbidden', {
+      endpoint_name: 'ep1',
+      failure_class: 'permission_denied',
+      status_code: 403,
+      endpoint_host: 'cn-hangzhou.log.aliyuncs.com',
+      mode: 'ak',
+      project: 'project-a',
+      logstore: 'store-a',
+      retryable: false,
+      reason: 'HTTP 403',
+    });
+    manager.record('FLUSH_SEND_ALARM', '2', 'server error', {
+      endpoint_name: 'ep1',
+      failure_class: 'server_error',
+      status_code: 500,
+      endpoint_host: 'cn-hangzhou.log.aliyuncs.com',
+      mode: 'ak',
+      project: 'project-a',
+      logstore: 'store-a',
+      retryable: true,
+      reason: 'HTTP 500',
+    });
+
+    const entries = manager.serialize();
+    expect(entries).toHaveLength(2);
+    expect(entries.map(e => e.failure_class).sort()).toEqual(['permission_denied', 'server_error']);
+    expect(entries.map(e => e.status_code).sort()).toEqual(['403', '500']);
+    expect(entries[0].endpoint_host).toBe('cn-hangzhou.log.aliyuncs.com');
+    expect(entries[0].retryable).toMatch(/^(true|false)$/);
+  });
+
+  it('keeps legacy aggregation when diagnostic fields are absent', () => {
+    manager.record('FLUSH_SEND_ALARM', '2', 'fail 1', { endpoint_name: 'ep1' });
+    manager.record('FLUSH_SEND_ALARM', '2', 'fail 2', { endpoint_name: 'ep1' });
+
+    const entries = manager.serialize();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].alarm_count).toBe('2');
+    expect(entries[0].alarm_message).toBe('fail 2');
+  });
+
   it('clears alarms after serialize', () => {
     manager.record('HOOK_INSTALL_ALARM', '2', 'install failed');
     manager.serialize();
