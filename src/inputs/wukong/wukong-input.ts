@@ -83,7 +83,9 @@ interface StepContext {
 const ACTIVITY_TYPE_TO_TOOL_NAME: Record<string, string> = {
   TERMINAL: 'terminal',
   FILE_WRITE: 'file_write',
+  FILE_READ: 'file_read',
   GREP_SEARCH: 'grep_search',
+  SEARCH: 'search',
   DIRECTORY_LIST: 'directory_list',
   SKILL: 'skill',
   ARTIFACT: 'artifact',
@@ -1221,17 +1223,48 @@ export class WukongInput extends BaseInput {
           args = content.command ? { command: content.command } : undefined;
           result = { output: content.output, exit_code: content.exit_code };
           break;
-        case 'FILE_WRITE':
-          args = content.path ? { path: content.path } : undefined;
+        case 'FILE_WRITE': {
+          const filePath = content.path ?? content.file_path;
+          args = filePath !== undefined ? { path: filePath } : undefined;
           result = { status: content.status ?? 'done' };
+          break;
+        }
+        case 'FILE_READ':
+          args = compactObject({ path: content.path, start_line: content.start_line });
+          result = compactObject({
+            content: content.content,
+            snippet: content.snippet,
+            total_lines: content.total_lines,
+            status: content.status,
+            error_message: content.error_message,
+          });
           break;
         case 'GREP_SEARCH':
           args = content.query ? { query: content.query } : undefined;
           result = content.matches ?? content.output;
           break;
+        case 'SEARCH':
+          args = compactObject({ queries: content.queries, search_type: content.search_type });
+          result = compactObject({ results: content.results, status: content.status });
+          break;
         case 'DIRECTORY_LIST':
           args = content.path ? { path: content.path } : undefined;
-          result = content.entries ?? content.output;
+          result = content.entries ?? content.output ?? compactObject({
+            files: content.files,
+            total_count: content.total_count,
+            status: content.status,
+          });
+          break;
+        case 'SKILL':
+          args = compactObject({ skill_name: content.skill_name, purpose: content.purpose, meta: content.meta });
+          result = compactObject({
+            output: content.output,
+            status: content.status,
+            error_message: content.error_message,
+          });
+          break;
+        case 'ARTIFACT':
+          result = compactObject({ artifactsMetadata: content.artifactsMetadata, generatedAt: content.generatedAt });
           break;
         default:
           args = content.input ?? undefined;
@@ -1364,6 +1397,11 @@ function hashId(parts: Array<string | number | undefined>): string {
 
 function numOr(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function compactObject(fields: Record<string, unknown>): Record<string, unknown> | undefined {
+  const entries = Object.entries(fields).filter(([, value]) => value !== undefined && value !== null);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 function resolveTurnId(sessionId: string, msg: WukongMessage): string {
