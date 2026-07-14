@@ -37,6 +37,7 @@ $LOG_DIR = Join-Path $DATA_DIR "logs"
 $LOG_FILE = Join-Path $LOG_DIR "loongsuite-pilot-service.log"
 $UPDATER_LOG_FILE = Join-Path $LOG_DIR "loongsuite-pilot-updater.log"
 $CONFIG_FILE = Join-Path $DATA_DIR "config.json"
+$SPAN_ATTR_FILE = Join-Path $DATA_DIR "span-attributes.json"
 $NODE_PIN_FILE = Join-Path $CACHE_DIR "node-bin"
 $INIT_TYPE_FILE = Join-Path $DATA_DIR "init-type"
 
@@ -922,6 +923,58 @@ function Cmd-Log {
 # ============================================================
 # CMD: help
 # ============================================================
+# Manage span-attributes.json — user-defined attributes injected into trace
+# spans (not the event log). The collector re-reads the file per turn, so
+# changes take effect without a restart.
+function Cmd-SpanAttr {
+    $sub = if ($SubArgs.Count -ge 1) { $SubArgs[0] } else { "" }
+
+    if ($sub -ieq "clear") {
+        if (Test-Path $SPAN_ATTR_FILE) { Remove-Item $SPAN_ATTR_FILE -Force }
+        Write-Host "cleared custom span attributes ($SPAN_ATTR_FILE)"
+        return
+    }
+
+    if ($sub.ToLower() -in @("set", "unset", "list")) {
+        $nodeBin = Resolve-Node
+        if (-not $nodeBin) { Write-Error "[span-attr] node runtime not found"; exit 1 }
+        $js = @'
+const fs = require("fs");
+const file = process.argv[1], op = process.argv[2], key = process.argv[3], value = process.argv[4];
+const RESERVED = ["gen_ai.","git.","workspace.","event.","trace_","user.","cost_","agent.","time_unix_nano","observed_time_unix_nano"];
+const isReserved = k => RESERVED.some(p => k === p || k.indexOf(p) === 0);
+function read() { try { const o = JSON.parse(fs.readFileSync(file, "utf-8")); return (o && typeof o === "object" && !Array.isArray(o)) ? o : {}; } catch { return {}; } }
+function write(o) { const tmp = file + ".tmp"; fs.writeFileSync(tmp, JSON.stringify(o, null, 2) + "\n"); fs.renameSync(tmp, file); }
+if (op === "set") {
+  if (!key || value === undefined) { console.error("usage: span-attr set <key> <value>"); process.exit(1); }
+  if (isReserved(key)) { console.error("refused: \"" + key + "\" uses a reserved prefix (gen_ai./git./workspace./event./trace_/user./cost_/agent./...)"); process.exit(1); }
+  const o = read(); o[key] = String(value); write(o); console.log("set " + key + "=" + o[key]);
+} else if (op === "unset") {
+  if (!key) { console.error("usage: span-attr unset <key>"); process.exit(1); }
+  const o = read(); if (Object.prototype.hasOwnProperty.call(o, key)) { delete o[key]; write(o); console.log("unset " + key); } else { console.log("(no such key: " + key + ")"); }
+} else if (op === "list") {
+  const o = read(); const ks = Object.keys(o);
+  if (ks.length === 0) { console.log("(no custom span attributes)"); } else { for (const k of ks) console.log(k + "=" + o[k]); }
+}
+'@
+        $rest = if ($SubArgs.Count -ge 2) { $SubArgs[1..($SubArgs.Count - 1)] } else { @() }
+        & $nodeBin -e $js $SPAN_ATTR_FILE $sub @rest
+        exit $LASTEXITCODE
+    }
+
+    Write-Host "Usage: loongsuite-pilot span-attr <set|unset|list|clear>"
+    Write-Host ""
+    Write-Host "  set <key> <value>   Set a custom trace span attribute"
+    Write-Host "  unset <key>         Remove a custom attribute"
+    Write-Host "  list                Show current custom attributes"
+    Write-Host "  clear               Remove all custom attributes"
+    Write-Host ""
+    Write-Host "Attributes are injected into trace spans only (not the event log)."
+    Write-Host "Reserved-prefix keys (gen_ai./git./workspace./event./trace_/user./cost_/agent./...) are rejected."
+    Write-Host "Changes take effect on the next turn - no restart needed."
+    if ($sub -ne "" -and $sub.ToLower() -notin @("help", "-h", "--help")) { exit 1 }
+}
+
 function Cmd-Help {
     Write-Host "Usage: loongsuite-pilot <command>"
     Write-Host ""
@@ -932,6 +985,7 @@ function Cmd-Help {
     Write-Host "  status          Show service status (default)"
     Write-Host "  info            Show version and config info"
     Write-Host "  log             Tail the service log"
+    Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     Write-Host "  rollback        Roll back to the previous version"
     Write-Host "  help            Show this help message"
 }
@@ -951,6 +1005,7 @@ switch ($Command.ToLower()) {
     "restart-updater"    { Cmd-RestartUpdater }
     "run"                { Cmd-Run }
     "run-updater"        { Cmd-RunUpdater }
+    "span-attr"          { Cmd-SpanAttr }
     { $_ -in "help","--help","-h" } { Cmd-Help }
     default {
         Write-Host "Unknown command: $Command"

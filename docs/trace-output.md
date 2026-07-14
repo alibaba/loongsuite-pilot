@@ -190,6 +190,41 @@ Trace spans can carry sensitive content if message capture is enabled. For sensi
 
 Also enable [Data Masking](masking.md) when trace data may include secrets.
 
+## Custom Span Attributes
+
+Two kinds of extra attributes can be attached to trace spans:
+
+**1. Git/workspace attributes (automatic).** When an agent reports its working directory, spans automatically carry `git.repo`, `git.branch`, `git.domain`, and `workspace.current_root`, inferred from the local git repository. These are also present in the event log (SLS / JSONL) output.
+
+**2. User-defined attributes.** Attach arbitrary key/value pairs from three sources, merged with precedence **config < env < file**. Unlike the git fields above, these are written to **trace spans only** (never the event log / SLS / JSONL):
+
+- `config.json` → `globalSpanAttributes` (read once at startup):
+
+  ```json
+  { "globalSpanAttributes": { "team": "infra", "deployment.env": "prod" } }
+  ```
+
+- Environment variable `OTEL_SPAN_ATTRIBUTES` in OTel format (read once at startup):
+
+  ```bash
+  export OTEL_SPAN_ATTRIBUTES="team=infra,deployment.env=prod"
+  ```
+
+- A mutable file `~/.loongsuite-pilot/span-attributes.json` (`{"key":"value"}`), re-read on change so edits take effect without a restart. Manage it with the CLI (recommended) instead of editing by hand:
+
+  ```bash
+  loongsuite-pilot span-attr set release 2026.07
+  loongsuite-pilot span-attr set oncall alice
+  loongsuite-pilot span-attr list
+  loongsuite-pilot span-attr unset oncall
+  loongsuite-pilot span-attr clear
+  ```
+
+Notes:
+- Values are strings. File edits are picked up on the next processing cycle (bounded by the input poll interval, ~30s), not instantly.
+- Keys are written verbatim as span attribute names. **Avoid keys starting with `agent.`** and other reserved prefixes (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`) — such keys are skipped.
+- Attributes never overwrite existing span attributes (fill-only).
+
 ## Verify Trace Output
 
 ```bash

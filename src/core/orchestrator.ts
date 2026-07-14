@@ -8,6 +8,7 @@ import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { detectAgent } from '../deployment/detect-utils.js';
+import { GlobalAttributesProvider } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion, cleanStaleTmpFiles } from '../utils/fs-utils.js';
 import * as path from 'node:path';
@@ -116,6 +117,7 @@ export class Orchestrator extends EventEmitter {
   private runtimeWriter: RuntimeWriter | null = null;
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
+  private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
 
   constructor(config: AnalyticsConfig) {
@@ -148,6 +150,10 @@ export class Orchestrator extends EventEmitter {
     await this.agentControlManager.load();
 
     // 3. Build flushers
+    this.globalAttributesProvider = new GlobalAttributesProvider(
+      this.config.globalSpanAttributes ?? {},
+      path.join(this.dataDir, 'span-attributes.json'),
+    );
     this.flusher = await this.buildFlusher();
 
     // 4. Build InputManager & AlarmManager
@@ -459,7 +465,10 @@ export class Orchestrator extends EventEmitter {
     if (otlpTraceCfg?.enabled) {
       try {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
-        const r = new OtlpTraceFlusher({ ...otlpTraceCfg, dataDir: this.dataDir });
+        const r = new OtlpTraceFlusher(
+          { ...otlpTraceCfg, dataDir: this.dataDir },
+          this.globalAttributesProvider,
+        );
         flushers.push(r);
       } catch (err) {
         logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });

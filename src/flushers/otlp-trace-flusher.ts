@@ -19,6 +19,10 @@ import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.
 import { BaseFlusher } from './base-flusher.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
+import {
+  DEFAULT_GIT_PASSTHROUGH_KEYS,
+  type GlobalAttributesProvider,
+} from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
 import { appendLine, ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
 import { randomUUID } from 'node:crypto';
@@ -105,6 +109,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly debugDir: string;
   private readonly failedDir: string;
   private readonly resourceAttributeKeys: string[];
+  private readonly globalAttributesProvider?: GlobalAttributesProvider;
 
   private idleTimer?: ReturnType<typeof setInterval>;
   private inFlightExports = new Set<Promise<void>>();
@@ -117,7 +122,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // 即时 flush 会把 key 加入 flushedTurnKeys，导致后续同 key 的子 records 被丢弃。
   private _deferSignalA = false;
 
-  constructor(cfg: OtlpTraceFlusherConfig) {
+  constructor(cfg: OtlpTraceFlusherConfig, globalAttributesProvider?: GlobalAttributesProvider) {
     super();
     if (!cfg.endpoint) {
       throw new Error('[otlp-trace-flusher] config.endpoint is required when enabled');
@@ -126,6 +131,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       throw new Error('[otlp-trace-flusher] config.serviceName is required when enabled');
     }
     this.cfg = cfg;
+    this.globalAttributesProvider = globalAttributesProvider;
     const dataDir = cfg.dataDir ?? os.homedir() + '/.loongsuite-pilot';
     this.pilotVersion = readInstalledVersion(dataDir);
     this.resolvedEndpointUrl = resolveEndpointUrl(cfg.endpoint);
@@ -355,9 +361,27 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     try {
       try {
+        // Inject user-defined custom attributes (config/env/file) into trace
+        // spans only — never the event log. Resolved per turn so the mutable
+        // file is picked up on change. Values are fill-only stamped onto record
+        // copies (originals untouched) so passthroughKeys can read them; git.*
+        // are already on the records and only need to be listed as keys.
+        const customAttrs = this.globalAttributesProvider?.resolve() ?? {};
+        const customKeys = Object.keys(customAttrs);
+        const passthroughKeys = [...new Set([...DEFAULT_GIT_PASSTHROUGH_KEYS, ...customKeys])];
+        const recordsForConversion = customKeys.length === 0
+          ? records
+          : records.map((r) => {
+              const copy: AgentActivityEntry = { ...r };
+              for (const [k, v] of Object.entries(customAttrs)) {
+                if (copy[k] === undefined) copy[k] = v;
+              }
+              return copy;
+            });
+
         const result = convertEventLogToTrace(
-          records as unknown as EventLogRecord[],
-          { handler, strict: false },
+          recordsForConversion as unknown as EventLogRecord[],
+          { handler, strict: false, passthroughKeys },
         );
         if (result.warnings.length > 0) {
           logger.warn(`Conversion warnings for ${agentType}`, { warnings: result.warnings.join('; ') });
