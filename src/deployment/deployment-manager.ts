@@ -103,6 +103,17 @@ export class DeploymentManager {
     return this.definitions;
   }
 
+  /**
+   * Whether the agent's integration is currently missing and needs to be
+   * (re)deployed. Used by the watchdog to detect specs overwritten by other
+   * tools. Returns true when the strategy reports the integration is absent.
+   */
+  async needsRedeploy(def: AgentDefinition): Promise<boolean> {
+    await this.loadState();
+    const strategy = this.getStrategy(def);
+    return strategy.needsDeploy(def, this.state[def.id]);
+  }
+
   async stopWorkers(): Promise<void> {
     for (const def of this.definitions) {
       if (def.deployMode !== 'plugin-probe' || !def.pluginProbe) continue;

@@ -111,7 +111,7 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   async send(entry: AgentActivityEntry): Promise<void> {
-    const serialized = serialiseLogEntry(entry);
+    const serialized = serialiseLogEntry(entry, { dropAgentScopedFields: true });
     const agentType = normalizeAgentType(String(entry['gen_ai.agent.type'] ?? 'unknown'));
 
     for (const endpoint of this.config.endpoints) {

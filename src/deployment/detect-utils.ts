@@ -5,6 +5,10 @@ import type { AgentDetectionConfig } from '../types/index.js';
 import { directoryExists, fileExists, resolveHome } from '../utils/fs-utils.js';
 
 export async function detectAgent(detection: AgentDetectionConfig): Promise<boolean> {
+  if (detection.paths.length === 0 && detection.commands.length === 0) {
+    return false;
+  }
+
   for (const p of detection.paths) {
     const resolved = resolveHome(p);
     if (hasGlob(resolved)) {
@@ -25,9 +29,10 @@ export async function detectAgent(detection: AgentDetectionConfig): Promise<bool
   return false;
 }
 
-function commandExists(command: string): Promise<boolean> {
+export function commandExists(command: string): Promise<boolean> {
+  const bin = process.platform === 'win32' ? 'where.exe' : 'which';
   return new Promise(resolve => {
-    execFile('which', [command], err => {
+    execFile(bin, [command], err => {
       resolve(!err);
     });
   });

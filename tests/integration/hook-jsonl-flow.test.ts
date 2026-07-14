@@ -7,6 +7,7 @@ import { ClientType } from '../../src/types/index.js';
 import type { AgentActivityEntry } from '../../src/types/index.js';
 import { QoderCliInput } from '../../src/inputs/qoder-cli/qoder-cli-input.js';
 import { QoderTraceInput } from '../../src/inputs/qoder-trace/qoder-trace-input.js';
+import { KiroCliLogInput } from '../../src/inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { StateStore } from '../../src/checkpoints/state-store.js';
 import { AgentActivityEntrySchema } from '../contract/agent-activity-schema.js';
 
@@ -221,6 +222,10 @@ describe('Hook JSONL integration flow', () => {
       path.resolve(process.cwd(), 'assets/hooks/shared/qoder-db-utils.mjs'),
       path.join(sharedDir, 'qoder-db-utils.mjs'),
     );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/resource-context.mjs'),
+      path.join(sharedDir, 'resource-context.mjs'),
+    );
     await fs.chmod(hookScript, 0o755);
 
     const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
@@ -262,6 +267,9 @@ describe('Hook JSONL integration flow', () => {
       session_id: 'sess-hook',
     }), {
       LOONGSUITE_PILOT_DATA_DIR: dataDir,
+      AGENTTEAMS_WORKER_NAME: 'qoder-worker',
+      AGENTTEAMS_INSTANCE_ID: 'lw-qoder',
+      AGENTTEAMS_TOKEN: 'should-not-leak',
     });
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
@@ -275,6 +283,14 @@ describe('Hook JSONL integration flow', () => {
     expect(historyRecord.uuid).toBeUndefined();
     expect(historyRecord.sessionId).toBeUndefined();
     expect(historyRecord['event.name']).toBe('other');
+    expect(historyRecord['gen_ai.agent.name']).toBe('qoder-worker');
+    expect(historyRecord.resourceAttributes).toEqual({
+      'agentteams.worker.name': 'qoder-worker',
+      'agentteams.instance.id': 'lw-qoder',
+    });
+    expect(historyRecord['agentteams.worker.name']).toBeUndefined();
+    expect(historyRecord['agentteams.instance.id']).toBeUndefined();
+    expect(historyRecord['agentteams.token']).toBeUndefined();
 
     const input = new QoderCliInput({
       stateStore: stateStore as any,
@@ -296,6 +312,11 @@ describe('Hook JSONL integration flow', () => {
       'event.name': 'other',
       'gen_ai.agent.type': ClientType.QoderCli,
       'gen_ai.session.id': 'sess-hook',
+      'gen_ai.agent.name': 'qoder-worker',
+      resourceAttributes: {
+        'agentteams.worker.name': 'qoder-worker',
+        'agentteams.instance.id': 'lw-qoder',
+      },
     });
   });
 
@@ -322,6 +343,10 @@ describe('Hook JSONL integration flow', () => {
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/qoder-db-utils.mjs'),
       path.join(sharedDir, 'qoder-db-utils.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/resource-context.mjs'),
+      path.join(sharedDir, 'resource-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
 
@@ -550,6 +575,63 @@ describe('Hook JSONL integration flow', () => {
     expect(newEntries).toHaveLength(0);
   });
 
+  it('KiroCliLogInput cold start: only reports last turn when state is empty', async () => {
+    const logDir = path.join(tmpDir, 'logs-kiro-cold');
+    await fs.mkdir(logDir, { recursive: true });
+
+    const today = getTodayDateString();
+    const logFile = path.join(logDir, `kiro-cli-${today}.jsonl`);
+
+    // 3 turns already in the daily file (written by previous daemon run's
+    // delayedCollect — i.e. already dispatched before state was wiped).
+    const turn = (id: string, ev: string, eid: string, t: string) => JSON.stringify({
+      'event.name': ev,
+      'event.id': eid,
+      'gen_ai.turn.id': id,
+      'gen_ai.session.id': 'sess-kiro',
+      'gen_ai.agent.type': 'kiro-cli',
+      'gen_ai.step.id': `${id}:s1`,
+      time_unix_nano: t,
+      observed_time_unix_nano: t,
+    });
+    const lines = [
+      turn('kiro-turn-1', 'llm.request', 'ke-1', '1780000000000000000'),
+      turn('kiro-turn-1', 'llm.response', 'ke-2', '1780000001000000000'),
+      turn('kiro-turn-2', 'llm.request', 'ke-3', '1780000010000000000'),
+      turn('kiro-turn-2', 'llm.response', 'ke-4', '1780000011000000000'),
+      turn('kiro-latest', 'llm.request', 'ke-5', '1780000020000000000'),
+      turn('kiro-latest', 'llm.response', 'ke-6', '1780000021000000000'),
+    ];
+    await fs.writeFile(logFile, lines.join('\n') + '\n');
+
+    // Fresh state store (simulates daemon restart with state lost)
+    const freshStore = new StateStore(path.join(tmpDir, 'kiro-cold-state.json'));
+    await freshStore.load();
+
+    const input = new KiroCliLogInput({ stateStore: freshStore as any, logDir, pollIntervalMs: 60_000 });
+    const allEntries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
+    await input.start();
+    await input.stop();
+
+    // Only the last turn should be reported (replay protection)
+    expect(allEntries.length).toBe(2);
+    expect(allEntries.every(e => e['gen_ai.turn.id'] === 'kiro-latest')).toBe(true);
+
+    // Offset advanced to end — subsequent run re-emits nothing
+    await freshStore.save();
+    const state = freshStore.get('kiro-cli-log');
+    expect(state.lastOffset).toBe((await fs.stat(logFile)).size);
+    expect(state.lastFile).toBe(`kiro-cli-${today}.jsonl`);
+
+    const input2 = new KiroCliLogInput({ stateStore: freshStore as any, logDir, pollIntervalMs: 60_000 });
+    const newEntries: AgentActivityEntry[] = [];
+    input2.on('entries', (e: AgentActivityEntry[]) => newEntries.push(...e));
+    await input2.start();
+    await input2.stop();
+    expect(newEntries).toHaveLength(0);
+  });
+
   it('should split multi-turn transcript into separate turns with correct user inputs', async () => {
     const hookDir = path.join(tmpDir, 'hooks-multi-turn');
     const dataDir = path.join(tmpDir, 'data-multi-turn');
@@ -573,6 +655,10 @@ describe('Hook JSONL integration flow', () => {
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/qoder-db-utils.mjs'),
       path.join(sharedDir, 'qoder-db-utils.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/resource-context.mjs'),
+      path.join(sharedDir, 'resource-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
 

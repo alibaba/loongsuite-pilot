@@ -1,41 +1,11 @@
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import { ClientType } from '../../types/index.js';
-import type { AgentActivityEntry, AgentEventName, JsonValue } from '../../types/index.js';
+import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
-import { buildAgentActivityEntry, normalizeFinishReasons } from '../../normalization/entry-builder.js';
-import {
-  collectAbsolutePathValues,
-  normalizeSourceContext,
-  pickFirstValue,
-  readRecordPath,
-  sourceFieldsFromContext,
-} from '../../normalization/source-context.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
-import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
-import { inferGitContext, BoundedTtlCache } from '../../utils/git-context.js';
+import { getTodayDateString, resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
-
-const UNKNOWN_MODEL = 'unknown';
-const DEFAULT_CURSOR_MODEL = 'composer-2.5';
-
-/** Coerce raw model string to a concrete model name. */
-function resolveCursorModel(rawModel: string): string {
-  if (!rawModel || rawModel === 'default' || rawModel === 'unknown') return DEFAULT_CURSOR_MODEL;
-  return rawModel;
-}
-
-/** Whether this event type carries user input messages (prompt). */
-function hasInputMessages(eventName: string): boolean {
-  return eventName === 'llm.request' || eventName === 'other';
-}
-
-const SESSION_CD_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
-
-interface SessionCdCacheEntry {
-  cdPath: string;
-  expiresAt: number;
-}
-
-const sessionCdCache = new BoundedTtlCache<SessionCdCacheEntry>();
 
 const CLI_VERSION_PATTERN = /^\d{4}\.\d{2}\.\d{2}/;
 
@@ -50,11 +20,6 @@ function inferCursorVariant(record: Record<string, unknown>): ClientType.Cursor 
 function getStringValue(data: Record<string, unknown>, key: string): string | undefined {
   const val = data[key];
   return typeof val === 'string' && val.length > 0 ? val : undefined;
-}
-
-function getNumberValue(data: Record<string, unknown>, key: string): number | undefined {
-  const val = data[key];
-  return typeof val === 'number' && Number.isFinite(val) ? val : undefined;
 }
 
 export class CursorHookInput extends BaseHookInput {
@@ -93,102 +58,54 @@ export class CursorHookInput extends BaseHookInput {
       ClientType.Cursor,
       buildAttributes(record, payload, hookEvent),
     );
-    if (canonicalEntry) {
-      const variant = inferCursorVariant(record);
-      if (variant === ClientType.CursorCli) {
-        canonicalEntry['gen_ai.agent.type'] = ClientType.CursorCli;
-      }
-      if (hookEvent.toLowerCase() === 'stop') {
-        stripTokenFields(canonicalEntry);
-      }
-      const gitNamespace = variant === ClientType.CursorCli ? 'cursor_cli' : 'cursor';
-      await enrichCanonicalEntryWithGit(canonicalEntry, record, gitNamespace);
-      return canonicalEntry;
-    }
+    if (!canonicalEntry) return null;
 
-    const isStopEvent = hookEvent.toLowerCase() === 'stop';
-    const eventName = inferEventName(hookEvent, payload);
-    const toolOutput = buildToolResultPayload(payload);
-    const toolArguments = buildToolArguments(payload);
-    const attributes = buildAttributes(record, payload, hookEvent);
-    const rawModel = getStringValue(payload, 'model') || UNKNOWN_MODEL;
-    const model = resolveCursorModel(rawModel);
     const variant = inferCursorVariant(record);
-    const sessionId = getStringValue(payload, 'session_id')
-      ?? getStringValue(payload, 'conversation_id')
-      ?? getStringValue(payload, 'session.id')
-      ?? '';
+    if (variant === ClientType.CursorCli) {
+      canonicalEntry['gen_ai.agent.type'] = ClientType.CursorCli;
+    }
+    if (hookEvent.toLowerCase() === 'stop') {
+      stripTokenFields(canonicalEntry);
+    }
+    const gitNamespace = variant === ClientType.CursorCli ? 'cursor_cli' : 'cursor';
+    await enrichCanonicalEntryWithGit(canonicalEntry, record, gitNamespace);
+    return canonicalEntry;
+  }
 
-    // Cache cd path from preToolUse command for fallback git probing
-    if (hookEvent.toLowerCase().includes('pretooluse')) {
-      const toolInput = parseMaybeJson(payload.tool_input) as Record<string, unknown> | undefined;
-      const command = getStringValue(toolInput ?? {}, 'command');
-      if (command) {
-        const cdPath = extractCdPathFromCommand(command);
-        if (cdPath) {
-          sessionCdCache.set(sessionId, {
-            cdPath,
-            expiresAt: Date.now() + SESSION_CD_CACHE_TTL_MS,
+  /**
+   * First-run guard: when the daemon starts with no prior offset state
+   * (fresh start or offset reset), skip all existing history and only
+   * read newly appended records. This prevents replaying historical
+   * turns from the JSONL file, which would produce duplicate traces.
+   */
+  protected override async collect(): Promise<AgentActivityEntry[]> {
+    const state = this.getState();
+    const today = getTodayDateString();
+    const logFileName = `${this.logPrefix}-${today}.jsonl`;
+
+    if (!state.lastFile) {
+      const logFile = path.join(this.logDir, logFileName);
+      try {
+        const stat = await fs.stat(logFile);
+        if (stat.size > 0) {
+          this.setState({ lastFile: logFileName, lastOffset: stat.size });
+          this.logger.info('first-run guard: skipping existing history', {
+            file: logFileName,
+            skippedBytes: stat.size,
           });
+        } else {
+          // Empty file — mark guard as done, nothing to skip
+          this.setState({ lastFile: logFileName, lastOffset: 0 });
         }
+      } catch {
+        // File doesn't exist yet — still mark guard as done so the next poll
+        // uses normal base-class collection (offset 0) instead of re-entering
+        // the guard and potentially skipping a freshly written record.
+        this.setState({ lastFile: logFileName, lastOffset: 0 });
       }
     }
 
-    const sourceFields = await buildSourceFields(payload, toolArguments, toolOutput, sessionId);
-
-    return buildAgentActivityEntry({
-      ...sourceFields,
-      time_unix_nano: getStringValue(payload, 'time_unix_nano')
-        ?? getStringValue(record, 'time_unix_nano')
-        ?? undefined,
-      observed_time_unix_nano: getStringValue(payload, 'observed_time_unix_nano')
-        ?? getStringValue(record, 'observed_time_unix_nano')
-        ?? undefined,
-      'event.id': getStringValue(payload, 'event.id')
-        ?? getStringValue(record, 'event.id')
-        ?? undefined,
-      'event.name': eventName,
-      'user.id': '',
-      'gen_ai.session.id': getStringValue(payload, 'gen_ai.session.id')
-        ?? getStringValue(payload, 'session_id')
-        ?? getStringValue(payload, 'conversation_id')
-        ?? getStringValue(payload, 'session.id')
-        ?? '',
-      'gen_ai.turn.id': getStringValue(payload, 'gen_ai.turn.id')
-        ?? getStringValue(payload, 'generation_id')
-        ?? getStringValue(payload, 'turn.id'),
-      'gen_ai.agent.type': variant,
-      'gen_ai.request.model': model,
-      'gen_ai.response.model': model,
-      'gen_ai.response.finish_reasons': normalizeFinishReasons(getStringValue(payload, 'response_finish_reasons')),
-      'gen_ai.usage.input_tokens': isStopEvent ? undefined : getNumberValue(payload, 'input_tokens'),
-      'gen_ai.usage.output_tokens': isStopEvent ? undefined : getNumberValue(payload, 'output_tokens'),
-      'gen_ai.usage.cache_read.input_tokens': isStopEvent ? undefined : getNumberValue(payload, 'cache_read_tokens'),
-      'gen_ai.usage.cache_creation.input_tokens': isStopEvent ? undefined : getNumberValue(payload, 'cache_write_tokens'),
-      'gen_ai.usage.total_tokens': isStopEvent ? undefined : (getNumberValue(payload, 'total_tokens') ?? sumTokens(
-        getNumberValue(payload, 'input_tokens'),
-        getNumberValue(payload, 'output_tokens'),
-      )),
-      'gen_ai.usage.input_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_input'),
-      'gen_ai.usage.output_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_output'),
-      'gen_ai.usage.cache_read.input_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_cache_read'),
-      'gen_ai.usage.cache_creation.input_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_cache_write'),
-      'gen_ai.usage.total_cost': isStopEvent ? undefined : getNumberValue(payload, 'cost_total'),
-      'gen_ai.input.messages_hash': getStringValue(payload, 'input_messages_hash'),
-      'gen_ai.input.messages_delta': hasInputMessages(eventName) ? buildInputMessagesDelta(payload) : undefined,
-      'gen_ai.input.messages': hasInputMessages(eventName) ? toJsonValue(parseMaybeJson(payload.input_messages)) : undefined,
-      'gen_ai.tool.name': getStringValue(payload, 'tool_name'),
-      'gen_ai.tool.call.id': getStringValue(payload, 'tool_use_id'),
-      'gen_ai.tool.call.exec.id': getStringValue(payload, 'tool_use_id'),
-      'gen_ai.tool.call.arguments': eventName === 'tool.call' ? toolArguments : undefined,
-      'gen_ai.tool.call.result': eventName === 'tool.result' ? toJsonValue(toolOutput) : undefined,
-      'tool.result.status': eventName === 'tool.result' ? inferToolStatus(toolOutput, hookEvent) : undefined,
-      'gen_ai.tool.call.duration': getDuration(payload),
-      'gen_ai.output.messages': eventName === 'llm.response' ? buildOutputMessages(payload, hookEvent) : undefined,
-      'error.type': inferErrorType(payload, hookEvent),
-      'error.message': inferErrorMessage(payload, hookEvent, toolOutput),
-      attributes,
-    });
+    return super.collect();
   }
 }
 
@@ -206,112 +123,6 @@ function getHookEvent(record: Record<string, unknown>, payload: Record<string, u
     ?? getStringValue(payload, 'hookEvent')
     ?? getStringValue(record, 'agent.cursor.hook_event_name')
     ?? 'unknown';
-}
-
-function inferEventName(hookEvent: string, payload: Record<string, unknown>): AgentEventName {
-  const event = hookEvent.toLowerCase();
-  if (
-    event.includes('agentresponse') ||
-    event.includes('agentthought')
-  ) {
-    return 'llm.response';
-  }
-  if (event.includes('beforesubmitprompt')) {
-    return 'other';
-  }
-  if (event.includes('pretooluse')) {
-    return 'tool.call';
-  }
-  if (
-    event.includes('posttooluse') ||
-    event.includes('posttoolusefailure')
-  ) {
-    return 'tool.result';
-  }
-  return 'other';
-}
-
-function buildToolArguments(payload: Record<string, unknown>): JsonValue | undefined {
-  const toolInput = parseMaybeJson(payload.tool_input);
-  if (toolInput !== undefined) return toJsonValue(toolInput);
-  return undefined;
-}
-
-function buildOutputMessages(
-  payload: Record<string, unknown>,
-  hookEvent: string,
-): JsonValue | undefined {
-  const text = getStringValue(payload, 'text');
-  if (!text) return undefined;
-  const type = hookEvent.toLowerCase().includes('thought') ? 'reasoning' : 'text';
-  return [{ type, content: text }];
-}
-
-function buildInputMessagesDelta(payload: Record<string, unknown>): JsonValue | undefined {
-  const delta = parseMaybeJson(payload.input_messages_delta);
-  if (delta !== undefined) return toJsonValue(delta);
-
-  const prompt = getStringValue(payload, 'prompt') ?? getStringValue(payload, 'text');
-  if (prompt) return [{ role: 'user', content: prompt }];
-  return undefined;
-}
-
-function buildToolResultPayload(payload: Record<string, unknown>): unknown {
-  if (payload.tool_output !== undefined || payload.result_json !== undefined || payload.tool_results !== undefined) {
-    return parseMaybeJson(payload.tool_output ?? payload.result_json ?? payload.tool_results);
-  }
-  return undefined;
-}
-
-function getDuration(payload: Record<string, unknown>): number | undefined {
-  const duration = payload.duration_ms ?? payload.duration;
-  return typeof duration === 'number' && Number.isFinite(duration) ? duration : undefined;
-}
-
-function inferToolStatus(toolOutput: unknown, hookEvent: string): string | undefined {
-  if (hookEvent.toLowerCase().includes('posttoolusefailure')) return 'failure';
-  if (!toolOutput || typeof toolOutput !== 'object' || Array.isArray(toolOutput)) return undefined;
-  const exitCode = (toolOutput as Record<string, unknown>).exitCode;
-  if (typeof exitCode === 'number') return exitCode === 0 ? 'success' : 'failure';
-  const status = (toolOutput as Record<string, unknown>).status;
-  return typeof status === 'string' ? status : undefined;
-}
-
-function inferIsError(toolOutput: unknown, hookEvent: string): boolean | undefined {
-  const status = inferToolStatus(toolOutput, hookEvent);
-  if (status === 'failure' || status === 'error') return true;
-  if (status === 'success') return false;
-  return undefined;
-}
-
-function inferErrorType(payload: Record<string, unknown>, hookEvent: string): string | undefined {
-  return getStringValue(payload, 'error_type')
-    ?? getStringValue(payload, 'failure_type')
-    ?? (hookEvent.toLowerCase().includes('posttoolusefailure') ? 'tool_use_failure' : undefined);
-}
-
-function inferErrorMessage(
-  payload: Record<string, unknown>,
-  hookEvent: string,
-  toolOutput: unknown,
-): string | undefined {
-  const hasExplicitError = payload.error_message !== undefined
-    || payload.error !== undefined
-    || payload.error_type !== undefined
-    || payload.failure_type !== undefined
-    || hookEvent.toLowerCase().includes('posttoolusefailure')
-    || inferIsError(toolOutput, hookEvent) === true;
-  if (!hasExplicitError) return undefined;
-
-  return getStringValue(payload, 'error_message')
-    ?? getStringValue(payload, 'error')
-    ?? getStringValue(payload, 'message');
-}
-
-function sumTokens(...values: Array<number | undefined>): number | undefined {
-  const numbers = values.filter((value): value is number => value !== undefined);
-  if (numbers.length === 0) return undefined;
-  return numbers.reduce((sum, value) => sum + value, 0);
 }
 
 function buildAttributes(
@@ -333,102 +144,6 @@ function buildAttributes(
     status: payload.status,
     loop_count: payload.loop_count,
   });
-}
-
-async function buildSourceFields(
-  payload: Record<string, unknown>,
-  toolArguments: JsonValue | undefined,
-  toolOutput: unknown,
-  sessionId: string,
-): Promise<Record<string, JsonValue>> {
-  const context = normalizeSourceContext({
-    repo: pickFirstValue(
-      payload['git.repo'],
-      payload.repo,
-      payload.repository,
-      payload.repo_path,
-      payload.repository_path,
-      payload.project_path,
-      readRecordPath(payload, 'git.repo'),
-    ),
-    branch: pickFirstValue(
-      payload['git.branch'],
-      payload.branch,
-      payload.git_branch,
-      payload.current_branch,
-      payload.currentBranch,
-      readRecordPath(payload, 'git.branch'),
-    ),
-    domain: pickFirstValue(
-      payload['git.domain'],
-      payload.domain,
-      readRecordPath(payload, 'git.domain'),
-    ),
-    cwd: pickFirstValue(
-      payload.cwd,
-      readRecordPath(toolArguments, 'cwd'),
-      readRecordPath(toolOutput, 'cwd'),
-    ),
-    workspaceRoots: payload.workspace_roots,
-    absolutePaths: [
-      ...collectAbsolutePathValues(toolArguments),
-      ...collectAbsolutePathValues(toolOutput),
-    ],
-  });
-
-  const gitProbeDir = pickFirstValue(
-    payload.cwd,
-    readRecordPath(toolArguments, 'cwd'),
-    readRecordPath(toolOutput, 'cwd'),
-    context.currentRoot,
-  );
-  if (!context.repo && !context.branch && !context.domain && typeof gitProbeDir === 'string' && gitProbeDir.trim().length > 0) {
-    const inferred = await inferGitContext(gitProbeDir);
-    if (!context.repo && inferred.repo) context.repo = inferred.repo;
-    if (!context.branch && inferred.branch) context.branch = inferred.branch;
-    if (!context.domain && inferred.domain) context.domain = inferred.domain;
-  }
-
-  // Fallback: use cached cd path from preToolUse command in the same session
-  if (!context.repo || !context.branch || !context.domain) {
-    const cachedCdPath = getCachedCdPath(sessionId);
-    if (cachedCdPath) {
-      const inferred = await inferGitContext(cachedCdPath);
-      if (!context.repo && inferred.repo) context.repo = inferred.repo;
-      if (!context.branch && inferred.branch) context.branch = inferred.branch;
-      if (!context.domain && inferred.domain) context.domain = inferred.domain;
-    }
-  }
-
-  return sourceFieldsFromContext(context);
-}
-
-function extractCdPathFromCommand(command: string): string | undefined {
-  const trimmed = command.trim();
-  // Match patterns like: cd /path, cd "/path", cd '/path' followed by separator or end
-  // Known limitation: env vars (e.g. $HOME) are not expanded.
-  const match = trimmed.match(/^\s*cd\s+["']?([^"';|&\n\r]+?)["']?(?:\s*[;|&]|$)/);
-  if (!match) return undefined;
-  const raw = match[1].trim();
-  if (raw.startsWith('~')) return resolveHome(raw);
-  return raw;
-}
-
-function getCachedCdPath(sessionId: string): string | undefined {
-  if (!sessionId) return undefined;
-  const cached = sessionCdCache.get(sessionId);
-  return cached?.cdPath;
-}
-
-function parseMaybeJson(value: unknown): unknown {
-  if (typeof value !== 'string') return value;
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return value;
-  }
 }
 
 const TOKEN_COST_KEYS = [

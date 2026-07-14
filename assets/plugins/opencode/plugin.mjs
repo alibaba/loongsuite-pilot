@@ -649,6 +649,17 @@ function handleMessageUpdated(props, userId) {
     finishReasons[0]
   );
 
+  // opencode's tokens.input has cache already subtracted out (a cost-bucketing
+  // convention: input/cache.read/cache.write are non-overlapping). Add cache
+  // back so gen_ai.usage.input_tokens is the TOTAL prompt tokens, matching the
+  // claude-code / qwen collectors where cache_read is a subset of input. This
+  // keeps cache_read <= input_tokens. cost_usd is left untouched (opencode
+  // already computed it correctly from the non-overlapping buckets).
+  const cacheRead = tokens.cache?.read || 0;
+  const cacheWrite = tokens.cache?.write || 0;
+  const outputTokens = tokens.output || 0;
+  const inputTotal = (tokens.input || 0) + cacheRead + cacheWrite;
+
   const record = {
     ...buildCommonFields(sessionID, session, userId),
     "event.name": "llm.response",
@@ -660,10 +671,11 @@ function handleMessageUpdated(props, userId) {
     "gen_ai.response.model": info.modelID || model?.modelID,
     "gen_ai.response.id": info.id,
     "gen_ai.response.finish_reasons": finishReasons,
-    "gen_ai.usage.input_tokens": tokens.input || 0,
-    "gen_ai.usage.output_tokens": tokens.output || 0,
-    "gen_ai.usage.cache_read.input_tokens": tokens.cache?.read || 0,
-    "gen_ai.usage.cache_creation.input_tokens": tokens.cache?.write || 0,
+    "gen_ai.usage.input_tokens": inputTotal,
+    "gen_ai.usage.output_tokens": outputTokens,
+    "gen_ai.usage.cache_read.input_tokens": cacheRead,
+    "gen_ai.usage.cache_creation.input_tokens": cacheWrite,
+    "gen_ai.usage.total_tokens": inputTotal + outputTokens,
   };
   if (tokens.reasoning) {
     record["gen_ai.usage.reasoning_tokens"] = tokens.reasoning;

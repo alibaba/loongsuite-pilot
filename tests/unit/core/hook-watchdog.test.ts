@@ -291,7 +291,7 @@ describe('HookWatchdog', () => {
       const alarmManager = { record: vi.fn() };
 
       spawnBehavior = 'success';
-      const wd = new HookWatchdog(makeConfig(), [target], alarmManager as any);
+      const wd = new HookWatchdog(makeConfig(), [target], [], alarmManager as any);
       await wd.runCheck();
 
       expect(alarmManager.record).toHaveBeenCalledTimes(1);
@@ -308,7 +308,7 @@ describe('HookWatchdog', () => {
       const alarmManager = { record: vi.fn() };
 
       spawnBehavior = 'fail';
-      const wd = new HookWatchdog(makeConfig(), [target], alarmManager as any);
+      const wd = new HookWatchdog(makeConfig(), [target], [], alarmManager as any);
       await wd.runCheck();
 
       expect(alarmManager.record).toHaveBeenCalledTimes(1);
@@ -325,7 +325,7 @@ describe('HookWatchdog', () => {
       await writeSettings(target.settingsPath, buildHealthySettings(target));
       const alarmManager = { record: vi.fn() };
 
-      const wd = new HookWatchdog(makeConfig(), [target], alarmManager as any);
+      const wd = new HookWatchdog(makeConfig(), [target], [], alarmManager as any);
       await wd.runCheck();
 
       expect(alarmManager.record).not.toHaveBeenCalled();

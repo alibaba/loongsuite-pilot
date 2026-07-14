@@ -22,6 +22,7 @@ const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const NPM_INSTALL_TIMEOUT_MS = 2 * 60_000;
 const MAX_BACKOFF_MS = 6 * 60 * 60_000; // 6 hours
 const MAX_CONSECUTIVE_FAILURES = 10;
+const MAX_VERSION_GC_REMOVALS_PER_CHECK = 1;
 
 /**
  * Build an env for child processes that ensures node/npm are on PATH.
@@ -202,6 +203,7 @@ export class Updater {
         });
         this.consecutiveFailures = 0;
         this.nextCheckAt = 0;
+        await this.gcOldVersions();
         await this.writeHeartbeat();
         return;
       }
@@ -242,6 +244,7 @@ export class Updater {
       });
 
       await this.restartMonitorIfRunning();
+      await this.gcOldVersions();
       this.consecutiveFailures = 0;
       this.nextCheckAt = 0;
       await this.writeHeartbeat();
@@ -740,6 +743,10 @@ export class Updater {
     const { versionsDir, currentFile, previousFile } = this.paths;
     try {
       const currentName = await this.readPointerFile(currentFile);
+      if (!currentName) {
+        logger.debug('skipping version gc: current pointer missing');
+        return;
+      }
       const previousName = await this.readPointerFile(previousFile);
 
       let entries: string[];
@@ -749,14 +756,23 @@ export class Updater {
         return;
       }
 
+      const staleVersions: Array<{ entry: string; fullPath: string; mtimeMs: number }> = [];
       for (const entry of entries) {
         if (entry === currentName || entry === previousName) continue;
         const fullPath = path.join(versionsDir, entry);
         const stat = await fs.stat(fullPath).catch(() => null);
         if (stat?.isDirectory()) {
-          logger.info('removing old version', { dir: entry });
-          await fs.rm(fullPath, { recursive: true, force: true });
+          staleVersions.push({ entry, fullPath, mtimeMs: stat.mtimeMs ?? Number.MAX_SAFE_INTEGER });
         }
+      }
+
+      staleVersions.sort((a, b) => a.mtimeMs - b.mtimeMs || a.entry.localeCompare(b.entry));
+      for (const version of staleVersions.slice(0, MAX_VERSION_GC_REMOVALS_PER_CHECK)) {
+        logger.info('removing old version', {
+          dir: version.entry,
+          remaining: staleVersions.length - 1,
+        });
+        await fs.rm(version.fullPath, { recursive: true, force: true });
       }
     } catch (err) {
       logger.debug('gc failed', { error: String(err) });

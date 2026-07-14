@@ -10,7 +10,6 @@ import type {
 
 export function buildCodexTranscriptEntries(turn: CodexExtractedTranscriptTurn): AgentActivityEntry[] {
   const traceId = hashId([turn.sessionId, turn.transcriptTurnId, 'trace'], 32);
-  const entrySpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'entry'], 16);
   const agentSpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'agent'], 16);
   const turnId = `${turn.sessionId}:${turn.transcriptTurnId}`;
   const model = turn.model || 'unknown';
@@ -34,7 +33,12 @@ export function buildCodexTranscriptEntries(turn: CodexExtractedTranscriptTurn):
       'event.id': hashId([turn.sessionId, turn.transcriptTurnId, 'other'], 32),
       'event.name': 'other',
       span_id: agentSpanId,
-      parent_span_id: entrySpanId,
+      // Synthetic root parent id — matches the sentinel used by the OTLP
+      // converter's createTraceParentContext (parent-context.js). The ENTRY
+      // span it nominally points to is synthesized by the converter in the
+      // OTLP path and never emitted as a record in the JSONL path; consumers
+      // treat this id as an external root and do not look it up.
+      parent_span_id: '0000000000000001',
       'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: turn.prompt }] }],
     }));
   }
@@ -237,12 +241,14 @@ function usageFields(usage: CodexTranscriptUsage | undefined): Record<string, Js
     inputTokens: 0,
     outputTokens: 0,
     cachedInputTokens: 0,
+    cacheCreationTokens: 0,
     totalTokens: 0,
   };
   return {
     'gen_ai.usage.input_tokens': resolved.inputTokens,
     'gen_ai.usage.output_tokens': resolved.outputTokens,
     'gen_ai.usage.cache_read.input_tokens': resolved.cachedInputTokens,
+    'gen_ai.usage.cache_creation.input_tokens': resolved.cacheCreationTokens,
     'gen_ai.usage.total_tokens': resolved.totalTokens,
     ...(resolved.reasoningOutputTokens !== undefined
       ? { 'gen_ai.usage.reasoning_output_tokens': resolved.reasoningOutputTokens }

@@ -14,6 +14,15 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { logHookError } from './shared/error-logger.mjs';
+import {
+  collectResourceAttributesFromEnv,
+} from './shared/resource-context.mjs';
+
+const AGENT_ID = 'codex';
+const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_ID });
+const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
+  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
+  : {};
 
 function pilotDataDir() {
   return process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
@@ -27,7 +36,7 @@ function tryReadStdin() {
     return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   } catch (error) {
     logHookError({
-      agentId: 'codex',
+      agentId: AGENT_ID,
       stage: 'stdin_parse',
       errorType: 'STDIN_PARSE_ERROR',
       errorMessage: error instanceof Error ? error.message : String(error),
@@ -52,6 +61,7 @@ function writeWakeupMarker(input) {
     ...(typeof input.transcript_path === 'string' && input.transcript_path
       ? { transcript_path: input.transcript_path }
       : {}),
+    ...RESOURCE_ATTRIBUTE_FIELDS,
     received_at: new Date().toISOString(),
   };
   try {
@@ -60,14 +70,14 @@ function writeWakeupMarker(input) {
     fs.renameSync(temporary, marker);
   } catch (error) {
     logHookError({
-      agentId: 'codex',
+      agentId: AGENT_ID,
       stage: 'wakeup_write',
       errorType: 'WAKEUP_WRITE_ERROR',
       errorMessage: error instanceof Error ? error.message : String(error),
     });
     try { fs.unlinkSync(temporary); } catch (cleanupError) {
       logHookError({
-        agentId: 'codex',
+        agentId: AGENT_ID,
         stage: 'wakeup_cleanup',
         errorType: 'WAKEUP_CLEANUP_ERROR',
         errorMessage: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),

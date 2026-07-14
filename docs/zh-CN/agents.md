@@ -16,6 +16,7 @@
 | OpenCode | `opencode` | 插件注入。 |
 | Qoder | `qoder` | Hook 集成。 |
 | Qoder CN | `qoder-cn` | Hook 集成。 |
+| Qoder for JetBrains | `qoder-jetbrains` | 部署/检测专用 ID。`agent-control.json` 中采集开关为 `qoder`；`config.json` 中内容策略为 `qoder-idea`。 |
 | Qoder CLI | `qoder` | 复用 Qoder Agent 定义，使用 Hook / session 数据源。 |
 | Qoder Work | `qoder-work` | Hook 和本地数据源。 |
 | Qoder Work CN | `qoder-work-cn` | Hook 和本地数据源。 |

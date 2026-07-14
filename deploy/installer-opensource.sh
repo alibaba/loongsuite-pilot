@@ -905,6 +905,98 @@ remove_qodercli_token_intercept() {
 }
 
 # ============================================================
+# QoderWork runtime wrapper: intercept token usage via QODER_WORKER_RUNTIME_PATH
+#
+# QoderWork runs its agent SDK in a Node.js worker_thread (not Bun), so the
+# qodercli BUN_OPTIONS --preload trick does not apply. The SDK honors
+# QODER_WORKER_RUNTIME_PATH as the worker entry; our wrapper installs a
+# JSON.parse hook then imports the real runtime. On macOS we set this via
+# launchctl setenv so the GUI-launched app inherits it. Linux/Windows are
+# skipped (Electron env injection there is tracked separately).
+# ============================================================
+inject_qoderwork_runtime_wrapper() {
+    if [ "$(uname)" != "Darwin" ]; then return 0; fi
+    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder-work'; then return 0; fi
+    # Cover system-wide (/Applications) and per-user (~/Applications) installs;
+    # the wrapper's RUNTIME_CANDIDATES handles both locations symmetrically.
+    if [ ! -d "/Applications/QoderWork.app" ] && [ ! -d "$HOME/Applications/QoderWork.app" ]; then return 0; fi
+
+    local wrapper_script="$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs"
+    if [ ! -f "$wrapper_script" ]; then return 0; fi
+
+    msg "==> 配置 QoderWork token 采集..." "==> Configuring QoderWork token intercept..."
+
+    # (1) Set immediately for the current launchd session so QoderWork can pick
+    # up the env without waiting for a re-login.
+    launchctl setenv QODER_WORKER_RUNTIME_PATH "$wrapper_script"
+
+    # (2) Persist across reboots via a LaunchAgent plist. launchctl setenv on
+    # its own is session-scoped — a macOS reboot would otherwise silently drop
+    # the env and the wrapper would stop being injected. The plist contains a
+    # one-shot RunAtLoad job that re-runs `launchctl setenv` on every user
+    # login (when launchd auto-loads agents from ~/Library/LaunchAgents).
+    local plist_dir="$HOME/Library/LaunchAgents"
+    local plist_path="$plist_dir/com.loongsuite-pilot.qoderwork-env.plist"
+    mkdir -p "$plist_dir"
+    cat > "$plist_path" << PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.loongsuite-pilot.qoderwork-env</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/launchctl</string>
+        <string>setenv</string>
+        <string>QODER_WORKER_RUNTIME_PATH</string>
+        <string>$wrapper_script</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+
+    # (3) Reload now so the plist (and any updated path) is registered
+    # idempotently. unload-before-load avoids "already loaded" errors when
+    # upgrading the path. Errors are non-fatal — current-session setenv above
+    # already covers the immediate use case.
+    launchctl unload "$plist_path" 2>/dev/null || true
+    launchctl load "$plist_path" 2>/dev/null || true
+
+    msg "    ✅ launchctl setenv QODER_WORKER_RUNTIME_PATH" \
+        "    ✅ launchctl setenv QODER_WORKER_RUNTIME_PATH"
+    msg "    ✅ LaunchAgent 已注册 (重启 macOS 后自动恢复 env)" \
+        "    ✅ LaunchAgent registered (auto-restores env after macOS reboot)"
+    msg "    ⚠️  请完全退出并重新打开 QoderWork 以生效" \
+        "    ⚠️  Please fully quit and restart QoderWork for changes to take effect"
+    echo ""
+}
+
+remove_qoderwork_runtime_wrapper() {
+    if [ "$(uname)" != "Darwin" ]; then return 0; fi
+
+    # Unload + remove the LaunchAgent plist so the env stops auto-restoring on
+    # next login.
+    local plist_path="$HOME/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist"
+    if [ -f "$plist_path" ]; then
+        launchctl unload "$plist_path" 2>/dev/null || true
+        rm -f "$plist_path"
+        msg "    已清理 LaunchAgent (qoderwork-env)" \
+            "    Cleaned up LaunchAgent (qoderwork-env)"
+    fi
+
+    # Drop the env from the current session too (conservative grep avoids
+    # touching env values the user set manually to a non-loongsuite path).
+    if launchctl getenv QODER_WORKER_RUNTIME_PATH 2>/dev/null | grep -q 'loongsuite-pilot'; then
+        launchctl unsetenv QODER_WORKER_RUNTIME_PATH
+        msg "    已清理 QODER_WORKER_RUNTIME_PATH" \
+            "    Cleaned up QODER_WORKER_RUNTIME_PATH"
+    fi
+}
+
+# ============================================================
 # Claude Code fetch intercept: inject/remove shell function
 #
 # Why a shell wrapper instead of ~/.claude/settings.json env:
@@ -1331,6 +1423,7 @@ cmd_install() {
     write_config
     install_loongsuite_pilot_command
     inject_qodercli_token_intercept
+    inject_qoderwork_runtime_wrapper
     inject_claude_code_fetch_intercept
 
     msg "==> 启动服务..." "==> Starting service..."
@@ -1489,9 +1582,12 @@ remove_hook_configs() {
     local configs=(
         "$HOME/.cursor/hooks.json"
         "$HOME/.qoder/settings.json"
+        "$HOME/.qoder-cn/settings.json"
         "$HOME/.qoderwork/settings.json"
+        "$HOME/.qoderworkcn/settings.json"
         "$HOME/.claude/settings.json"
         "$HOME/.codex/hooks.json"
+        "$HOME/.qwen/settings.json"
     )
 
     for cfg in "${configs[@]}"; do
@@ -1536,6 +1632,73 @@ try {
         else
             msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)"
         fi
+    done
+}
+
+# ============================================================
+# Remove plugin-inject specs (OpenCode)
+# ============================================================
+# OpenCode uses deployMode "plugin-inject": a spec is written into its own
+# config file's plugin array, not a shared settings.json. remove_hook_configs
+# does not cover it, so clean it here to avoid a dangling spec that points at
+# the (possibly purged) data dir.
+remove_opencode_plugin() {
+    local configs=(
+        "$HOME/.config/opencode/opencode.jsonc"
+        "$HOME/.config/opencode/opencode.json"
+        "$HOME/.config/opencode/config.json"
+    )
+
+    for cfg in "${configs[@]}"; do
+        [ -f "$cfg" ] || continue
+        local short="${cfg/#$HOME/\~}"
+
+        if ! command -v node &>/dev/null; then
+            msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        fi
+
+        local result
+        result=$(node -e "
+const fs = require('fs');
+const f = process.argv[1];
+// Our entries are identified by the pluginId or the plugin file path.
+const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-opencode') || s.includes('plugins/opencode/plugin.mjs'));
+const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
+// JSONC fallback: strip block comments, whole-line // comments, and trailing
+// // comments preceded by whitespace. URL values like file:/// are never
+// touched because their slashes are not preceded by whitespace.
+const stripJsonc = src => src
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^\s*\/\/.*\$/gm, '')
+  .replace(/[ \t]+\/\/.*\$/gm, '');
+try {
+  const raw = fs.readFileSync(f, 'utf-8');
+  let data, hadComments = false;
+  try { data = JSON.parse(raw); }
+  catch { data = JSON.parse(stripJsonc(raw)); hadComments = true; }
+  const key = Array.isArray(data.plugins) ? 'plugins' : (Array.isArray(data.plugin) ? 'plugin' : null);
+  if (!key) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data[key].length;
+  data[key] = data[key].filter(e => !isOurs(entryStr(e)));
+  if (data[key].length === before) { process.stdout.write('nochange'); process.exit(0); }
+  if (hadComments) fs.writeFileSync(f + '.bak', raw, 'utf-8');
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write(hadComments ? 'cleaned-bak' : 'cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$cfg" 2>/dev/null) || result="error"
+
+        case "$result" in
+            cleaned)
+                msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" ;;
+            cleaned-bak)
+                msg "    ✅ 已清理: $short (含注释,原文件备份为 $short.bak)" \
+                    "    ✅ Cleaned: $short (had comments, original backed up to $short.bak)" ;;
+            nochange)
+                : ;;
+            *)
+                msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
+        esac
     done
 }
 
@@ -1634,12 +1797,18 @@ cmd_uninstall() {
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     remove_hook_configs
     remove_qodercli_token_intercept
+    remove_qoderwork_runtime_wrapper
     remove_claude_code_fetch_intercept
     echo ""
 
     # Remove OTel Claude plugin
     msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
     remove_otel_plugin
+    echo ""
+
+    # Remove plugin-inject specs (OpenCode)
+    msg "==> 清理 OpenCode 插件配置..." "==> Cleaning up OpenCode plugin config..."
+    remove_opencode_plugin
     echo ""
 
     # Data directory

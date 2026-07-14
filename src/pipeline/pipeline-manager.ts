@@ -1,23 +1,25 @@
 import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
-import type { FileCollectionConfig, FileCollectionManagerOptions } from './types.js';
-import { FilePipeline } from './file-pipeline.js';
+import type { PipelineConfig, PipelineManagerOptions, PipelineToggle, Pipeline } from './types.js';
+import { FilePipeline } from './input/file/file-pipeline.js';
+import { QoderApiPipeline } from './input/qoder-api/qoder-api-pipeline.js';
 import { SleepDetector, type WakeEvent } from './sleep-detector.js';
 import { createLogger } from '../utils/logger.js';
 import { ensureDir } from '../utils/fs-utils.js';
 
-const logger = createLogger('FileCollectionManager');
+const logger = createLogger('PipelineManager');
 
 const RESCAN_INTERVAL_MS = 60_000;
 const VALID_CONFIG_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
-export class FileCollectionManager {
+export class PipelineManager {
   private readonly configDir: string;
   private readonly stateDir: string;
   private readonly failedLogDir: string;
   private readonly dataDir: string;
-  private readonly pipelines: Map<string, FilePipeline> = new Map();
+  private readonly pipelineConfig: PipelineToggle;
+  private readonly pipelines: Map<string, Pipeline> = new Map();
   private readonly configHashes: Map<string, string> = new Map();
   private watcher: fs.FSWatcher | null = null;
   private rescanTimer: ReturnType<typeof setInterval> | null = null;
@@ -26,11 +28,12 @@ export class FileCollectionManager {
   private rescanInProgress = false;
   private rescanQueued = false;
 
-  constructor(opts: FileCollectionManagerOptions) {
+  constructor(opts: PipelineManagerOptions) {
     this.configDir = opts.configDir;
     this.stateDir = opts.stateDir;
     this.failedLogDir = opts.failedLogDir;
     this.dataDir = opts.dataDir;
+    this.pipelineConfig = opts.pipelineConfig;
   }
 
   async start(): Promise<void> {
@@ -38,6 +41,8 @@ export class FileCollectionManager {
     this.running = true;
 
     await ensureDir(this.configDir);
+    await this.migrateStateDir();
+    await this.migrateFailedLogDir();
     await ensureDir(this.stateDir);
     await ensureDir(this.failedLogDir);
 
@@ -112,6 +117,58 @@ export class FileCollectionManager {
     logger.info('stopped');
   }
 
+  /**
+   * One-time migration: if the old state/file-collection/ directory exists and
+   * state/pipeline/ does not, rename it so existing file-pipeline checkpoints
+   * are preserved across the upgrade.
+   */
+  private async migrateStateDir(): Promise<void> {
+    const oldDir = this.stateDir.replace(/[/\\]pipeline$/, '/file-collection');
+    if (oldDir === this.stateDir) return;
+
+    try {
+      const oldExists = await fsPromises.access(oldDir).then(() => true).catch(() => false);
+      const newExists = await fsPromises.access(this.stateDir).then(() => true).catch(() => false);
+
+      if (oldExists && !newExists) {
+        await fsPromises.rename(oldDir, this.stateDir);
+        logger.info('migrated state directory', { from: oldDir, to: this.stateDir });
+      }
+    } catch (err) {
+      logger.warn('state directory migration failed', {
+        from: oldDir,
+        to: this.stateDir,
+        error: String(err),
+      });
+    }
+  }
+
+  /**
+   * One-time migration: if the old logs/file-collection-failed/ directory exists
+   * and logs/pipeline-failed/ does not, rename it so existing failed logs are
+   * not orphaned after the upgrade.
+   */
+  private async migrateFailedLogDir(): Promise<void> {
+    const oldDir = this.failedLogDir.replace(/[/\\]pipeline-failed$/, '/file-collection-failed');
+    if (oldDir === this.failedLogDir) return;
+
+    try {
+      const oldExists = await fsPromises.access(oldDir).then(() => true).catch(() => false);
+      const newExists = await fsPromises.access(this.failedLogDir).then(() => true).catch(() => false);
+
+      if (oldExists && !newExists) {
+        await fsPromises.rename(oldDir, this.failedLogDir);
+        logger.info('migrated failed-log directory', { from: oldDir, to: this.failedLogDir });
+      }
+    } catch (err) {
+      logger.warn('failed-log directory migration failed', {
+        from: oldDir,
+        to: this.failedLogDir,
+        error: String(err),
+      });
+    }
+  }
+
   private async handleWake(event: WakeEvent): Promise<void> {
     if (!this.running) return;
     logger.info('handling system wake, recovering pipelines', {
@@ -122,7 +179,7 @@ export class FileCollectionManager {
     const wakeTasks = Array.from(this.pipelines.entries()).map(
       async ([name, pipeline]) => {
         try {
-          await pipeline.handleWake();
+          await pipeline.handleWake?.(event);
         } catch (err) {
           logger.error('wake recovery failed for pipeline', {
             configName: name,
@@ -187,7 +244,7 @@ export class FileCollectionManager {
     }
   }
 
-  private async scanConfigDir(): Promise<FileCollectionConfig[]> {
+  private async scanConfigDir(): Promise<PipelineConfig[]> {
     let entries: string[];
     try {
       entries = await fsPromises.readdir(this.configDir);
@@ -195,13 +252,13 @@ export class FileCollectionManager {
       return [];
     }
 
-    const configs: FileCollectionConfig[] = [];
+    const configs: PipelineConfig[] = [];
     for (const entry of entries) {
       if (!entry.endsWith('.json')) continue;
       const filePath = path.join(this.configDir, entry);
       try {
         const raw = await fsPromises.readFile(filePath, 'utf-8');
-        const parsed = JSON.parse(raw) as FileCollectionConfig;
+        const parsed = JSON.parse(raw) as PipelineConfig;
         if (!this.validateConfig(parsed, entry)) continue;
         configs.push(parsed);
       } catch (err) {
@@ -214,7 +271,7 @@ export class FileCollectionManager {
     return configs;
   }
 
-  private validateConfig(config: FileCollectionConfig, fileName: string): boolean {
+  private validateConfig(config: PipelineConfig, fileName: string): boolean {
     if (!config.configName) {
       logger.warn('config missing configName', { file: fileName });
       return false;
@@ -234,30 +291,75 @@ export class FileCollectionManager {
       logger.warn('config missing flushers', { file: fileName });
       return false;
     }
+
     const input = config.inputs[0];
-    if (!input.FilePaths || input.FilePaths.length === 0) {
-      logger.warn('config input missing FilePaths', { file: fileName });
-      return false;
-    }
     const flusher = config.flushers[0];
     if (!flusher.Endpoint || !flusher.Project || !flusher.Logstore) {
       logger.warn('config flusher missing required fields', { file: fileName });
       return false;
     }
-    return true;
+
+    switch (input.Type) {
+      case 'input_file': {
+        if (!input.FilePaths || input.FilePaths.length === 0) {
+          logger.warn('config input missing FilePaths', { file: fileName });
+          return false;
+        }
+        return true;
+      }
+      case 'input_qoder_api': {
+        if (!input.ApiKey || !input.OrgId) {
+          logger.warn('config input missing ApiKey or OrgId', { file: fileName });
+          return false;
+        }
+        return true;
+      }
+      default:
+        logger.warn('unknown input type', { file: fileName, type: (input as Record<string, unknown>).Type });
+        return false;
+    }
   }
 
-  private async createPipeline(config: FileCollectionConfig): Promise<void> {
+  private async createPipeline(config: PipelineConfig): Promise<void> {
+    const inputType = config.inputs[0].Type;
+
+    // Check sub-switch
+    if (inputType === 'input_file' && !this.pipelineConfig.file.enabled) {
+      logger.info('file pipeline disabled, skipping', { configName: config.configName });
+      return;
+    }
+    if (inputType === 'input_qoder_api' && !this.pipelineConfig.qoderApi.enabled) {
+      logger.info('qoder-api pipeline disabled, skipping', { configName: config.configName });
+      return;
+    }
+
     try {
-      const pipeline = new FilePipeline({
+      let pipeline: Pipeline;
+      const opts = {
         config,
         stateDir: this.stateDir,
         failedLogDir: this.failedLogDir,
         dataDir: this.dataDir,
-      });
+      };
+
+      switch (inputType) {
+        case 'input_file':
+          pipeline = new FilePipeline(opts);
+          break;
+        case 'input_qoder_api':
+          pipeline = new QoderApiPipeline(opts);
+          break;
+        default:
+          logger.warn('unsupported input type, skipping', {
+            configName: config.configName,
+            type: inputType,
+          });
+          return;
+      }
+
       await pipeline.start();
       this.pipelines.set(config.configName, pipeline);
-      logger.info('pipeline created', { configName: config.configName });
+      logger.info('pipeline created', { configName: config.configName, type: inputType });
     } catch (err) {
       logger.error('failed to create pipeline', {
         configName: config.configName,

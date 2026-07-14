@@ -50,6 +50,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ============================================================
 # Constants
@@ -189,7 +190,9 @@ function Check-Deps {
         exit 1
     }
 
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $nodeMajor = & $script:NODE_BIN -e "process.stdout.write(String(process.versions.node.split('.')[0]))"
+    $ErrorActionPreference = $prevEAP
     if ([int]$nodeMajor -lt 18) {
         $nodeVer = & $script:NODE_BIN --version
         Msg "❌ 需要 Node.js >= 18，当前版本: $nodeVer" "❌ Requires Node.js >= 18, current: $nodeVer"
@@ -214,8 +217,10 @@ function Check-Deps {
         }
     }
 
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $nodeVer = & $script:NODE_BIN --version
     $npmVer = & $script:NPM_BIN --version
+    $ErrorActionPreference = $prevEAP
     Msg "    ✅ node $nodeVer  npm $npmVer" "    ✅ node $nodeVer  npm $npmVer"
     Msg "    node pinned: $($script:NODE_BIN)" "    node pinned: $($script:NODE_BIN)"
     Write-Host ""
@@ -280,16 +285,20 @@ $script:PROBE_RESULT = "[]"
 function Probe-Agents {
     Msg "==> 探测 AI Agent..." "==> Probing AI Agents..."
     $probeScript = Join-Path $script:INSTALL_SRC "dist\cli-probe.cjs"
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     if (Test-Path $probeScript) {
         try {
-            $script:PROBE_RESULT = & $script:NODE_BIN $probeScript 2>$null
-            if (-not $script:PROBE_RESULT) { $script:PROBE_RESULT = "[]" }
+            $raw = & $script:NODE_BIN $probeScript 2>$null
+            if ($raw) {
+                $script:PROBE_RESULT = if ($raw -is [array]) { $raw -join "" } else { $raw }
+            }
         } catch {
             Msg "    ⚠️  Agent 探测失败，将跳过选择" "    ⚠️  Agent probe failed, skipping selection"
             $script:PROBE_RESULT = "[]"
         }
     }
-    $count = & $script:NODE_BIN -e "const r=JSON.parse(process.argv[1]);process.stdout.write(String(r.length))" $script:PROBE_RESULT 2>$null
+    $count = $script:PROBE_RESULT | & $script:NODE_BIN -e "const r=JSON.parse(require('fs').readFileSync(0,'utf-8'));process.stdout.write(String(r.length))" 2>$null
+    $ErrorActionPreference = $prevEAP
     if (-not $count) { $count = "0" }
     Msg "    ✅ 探测到 ${count} 个 Agent 定义" "    ✅ Found ${count} agent definitions"
     Write-Host ""
@@ -307,17 +316,21 @@ function Select-Agents {
         return
     }
 
-    $agentCount = & $script:NODE_BIN -e "const r=JSON.parse(process.argv[1]);process.stdout.write(String(r.length))" $script:PROBE_RESULT 2>$null
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    $agentCount = $script:PROBE_RESULT | & $script:NODE_BIN -e "const r=JSON.parse(require('fs').readFileSync(0,'utf-8'));process.stdout.write(String(r.length))" 2>$null
+    $ErrorActionPreference = $prevEAP
     if (-not $agentCount -or $agentCount -eq "0") { return }
 
     # Non-interactive detection
     $isInteractive = [Environment]::UserInteractive -and $Host.UI.RawUI -ne $null
     if (-not $isInteractive) {
-        $script:SELECTED_AGENTS = & $script:NODE_BIN -e @'
-const r = JSON.parse(process.argv[1]);
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
+const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
 const detected = r.filter(a => a.detected).map(a => a.id);
 process.stdout.write(detected.join(','));
-'@ $script:PROBE_RESULT 2>$null
+'@ 2>$null
+        $ErrorActionPreference = $prevEAP
         Msg "    (非交互模式) 自动选择已检测到的 Agent: $($script:SELECTED_AGENTS)" `
             "    (non-interactive) Auto-selected detected agents: $($script:SELECTED_AGENTS)"
         Write-Host ""
@@ -325,9 +338,10 @@ process.stdout.write(detected.join(','));
     }
 
     # Interactive menu
-    & $script:NODE_BIN -e @'
-const r = JSON.parse(process.argv[1]);
-const lang = process.argv[2];
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    $script:PROBE_RESULT | & $script:NODE_BIN -e @'
+const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
+const lang = process.argv[1];
 const defaults = [];
 for (let i = 0; i < r.length; i++) {
   const a = r[i];
@@ -345,13 +359,15 @@ if (lang === 'zh') {
   console.log('    Default selection (detected): ' + defaults.join(','));
   console.log('    Enter numbers to enable (comma-separated), press Enter for default:');
 }
-'@ $script:PROBE_RESULT $LANG_MODE
+'@ $LANG_MODE
+    $ErrorActionPreference = $prevEAP
 
     $selectInput = Read-Host "    >"
 
-    $script:SELECTED_AGENTS = & $script:NODE_BIN -e @'
-const r = JSON.parse(process.argv[1]);
-const input = process.argv[2] || '';
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
+const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
+const input = process.argv[1] || '';
 let indices;
 if (!input.trim()) {
   indices = r.map((a, i) => a.detected ? i : -1).filter(i => i >= 0);
@@ -360,7 +376,8 @@ if (!input.trim()) {
 }
 const ids = indices.sort((a,b) => a-b).map(i => r[i].id);
 process.stdout.write(ids.join(','));
-'@ $script:PROBE_RESULT $selectInput 2>$null
+'@ $selectInput 2>$null
+    $ErrorActionPreference = $prevEAP
 
     if ($script:SELECTED_AGENTS) {
         Msg "    已选择: $($script:SELECTED_AGENTS)" "    Selected: $($script:SELECTED_AGENTS)"
@@ -382,9 +399,11 @@ function Prompt-UserId {
     $existingUid = ""
     if (Test-Path $configFile) {
         try {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
             $existingUid = & $script:NODE_BIN -e @'
 try { const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf-8')); process.stdout.write(c.userId||''); } catch {}
 '@ $configFile 2>$null
+            $ErrorActionPreference = $prevEAP
         } catch {}
     }
 
@@ -423,6 +442,7 @@ function Confirm-ConfigOverwrite {
         maskTypes = $MaskTypes
     } | ConvertTo-Json -Compress
 
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $diffs = & $script:NODE_BIN -e @'
 const fs = require('fs');
 let old = {};
@@ -444,6 +464,7 @@ const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal
 if (!changed.length) process.exit(0);
 for (const c of changed) { console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal); }
 '@ $configFile $jsonArg 2>$null
+    $ErrorActionPreference = $prevEAP
 
     if (-not $diffs) { return }
 
@@ -526,13 +547,22 @@ function Deploy-Package {
     Deploy-BootstrapScripts
 
     Msg "==> 安装依赖..." "==> Installing dependencies..."
+    $nodeDir = Split-Path $script:NODE_BIN
+    $savedPath = $env:PATH
+    if ($env:PATH -notlike "*$nodeDir*") { $env:PATH = "$nodeDir;$env:PATH" }
     Push-Location $script:PERMANENT_DIR
     try {
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-        & $script:NPM_BIN install --omit=dev --no-optional 2>&1 | Select-Object -Last 1
+        & $script:NPM_BIN install --omit=dev --omit=optional 2>&1 | Select-Object -Last 1
+        $npmExit = $LASTEXITCODE
         $ErrorActionPreference = $prevEAP
     } finally {
         Pop-Location
+        $env:PATH = $savedPath
+    }
+    if ($npmExit -ne 0) {
+        Msg "❌ 依赖安装失败 (exit=$npmExit)，请检查 npm 日志" "❌ Dependencies installation failed (exit=$npmExit), check npm logs"
+        exit 1
     }
     Msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     Write-Host ""
@@ -540,7 +570,9 @@ function Deploy-Package {
     Msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
     $postinstallScript = Join-Path $script:PERMANENT_DIR "scripts\postinstall.js"
     if (Test-Path $postinstallScript) {
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
         & $script:NODE_BIN $postinstallScript
+        $ErrorActionPreference = $prevEAP
     }
     Msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
     Write-Host ""
@@ -616,6 +648,7 @@ function Write-Config {
     $cfgTmp = Join-Path $env:TEMP "lp-config-args.json"
     [System.IO.File]::WriteAllText($cfgTmp, $cfgJson, [System.Text.UTF8Encoding]::new($false))
 
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     & $script:NODE_BIN -e @'
 const fs = require('fs');
 const opts = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8'));
@@ -679,6 +712,7 @@ if (opts.selectedAgents) {
 
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 '@ $cfgTmp
+    $ErrorActionPreference = $prevEAP
 
     Remove-Item $cfgTmp -Force -ErrorAction SilentlyContinue
 
@@ -885,9 +919,12 @@ function Remove-HookConfigs {
     $configs = @(
         (Join-Path $env:USERPROFILE ".cursor\hooks.json"),
         (Join-Path $env:USERPROFILE ".qoder\settings.json"),
+        (Join-Path $env:USERPROFILE ".qoder-cn\settings.json"),
         (Join-Path $env:USERPROFILE ".qoderwork\settings.json"),
+        (Join-Path $env:USERPROFILE ".qoderworkcn\settings.json"),
         (Join-Path $env:USERPROFILE ".claude\settings.json"),
-        (Join-Path $env:USERPROFILE ".codex\hooks.json")
+        (Join-Path $env:USERPROFILE ".codex\hooks.json"),
+        (Join-Path $env:USERPROFILE ".qwen\settings.json")
     )
 
     foreach ($cfg in $configs) {
@@ -895,6 +932,7 @@ function Remove-HookConfigs {
         $short = $cfg -replace [regex]::Escape($env:USERPROFILE), "~"
 
         try {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
             & $script:NODE_BIN -e @'
 const fs = require('fs');
 const cfg = process.argv[1];
@@ -921,9 +959,66 @@ try {
   }
 } catch(e) { process.stderr.write(e.message); process.exit(1); }
 '@ $cfg $HOOK_MARKER 2>$null
+            $ErrorActionPreference = $prevEAP
             Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short"
         } catch {
             Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)"
+        }
+    }
+}
+
+# ============================================================
+# Remove plugin-inject specs (OpenCode)
+# ============================================================
+# OpenCode uses deployMode "plugin-inject": a spec is written into its own
+# config file's plugin array, not a shared settings.json. Remove-HookConfigs
+# does not cover it, so clean it here to avoid a dangling spec.
+function Remove-OpenCodePlugin {
+    $configs = @(
+        (Join-Path $env:USERPROFILE ".config\opencode\opencode.jsonc"),
+        (Join-Path $env:USERPROFILE ".config\opencode\opencode.json"),
+        (Join-Path $env:USERPROFILE ".config\opencode\config.json")
+    )
+
+    foreach ($cfg in $configs) {
+        if (-not (Test-Path $cfg)) { continue }
+        $short = $cfg -replace [regex]::Escape($env:USERPROFILE), "~"
+
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        }
+
+        $result = & $script:NODE_BIN -e @'
+const fs = require('fs');
+const f = process.argv[1];
+const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-opencode') || s.includes('plugins/opencode/plugin.mjs'));
+const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
+const stripJsonc = src => src
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^\s*\/\/.*$/gm, '')
+  .replace(/[ \t]+\/\/.*$/gm, '');
+try {
+  const raw = fs.readFileSync(f, 'utf-8');
+  let data, hadComments = false;
+  try { data = JSON.parse(raw); }
+  catch { data = JSON.parse(stripJsonc(raw)); hadComments = true; }
+  const key = Array.isArray(data.plugins) ? 'plugins' : (Array.isArray(data.plugin) ? 'plugin' : null);
+  if (!key) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data[key].length;
+  data[key] = data[key].filter(e => !isOurs(entryStr(e)));
+  if (data[key].length === before) { process.stdout.write('nochange'); process.exit(0); }
+  if (hadComments) fs.writeFileSync(f + '.bak', raw, 'utf-8');
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write(hadComments ? 'cleaned-bak' : 'cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+'@ $cfg 2>$null
+
+        switch ($result) {
+            "cleaned"     { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }
+            "cleaned-bak" { Msg "    ✅ 已清理: $short (含注释,原文件备份为 $short.bak)" "    ✅ Cleaned: $short (had comments, original backed up to $short.bak)" }
+            "nochange"    { }
+            default       { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
         }
     }
 }
@@ -940,6 +1035,7 @@ function Remove-OtelPlugin {
     if ((Test-Path $claudeSettings) -and $script:NODE_BIN) {
         $content = Get-Content $claudeSettings -Raw -ErrorAction SilentlyContinue
         if ($content -match "otel-claude-hook|hook-entry") {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
             & $script:NODE_BIN -e @'
 const fs = require('fs');
 const f = process.argv[1];
@@ -961,6 +1057,7 @@ try {
   }
 } catch {}
 '@ $claudeSettings 2>$null
+            $ErrorActionPreference = $prevEAP
             Msg "    ✅ settings.json hooks 已清理" "    ✅ settings.json hooks cleaned"
         }
     }
@@ -1161,6 +1258,10 @@ function Cmd-Uninstall {
 
     Msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
     Remove-OtelPlugin
+    Write-Host ""
+
+    Msg "==> 清理 OpenCode 插件配置..." "==> Cleaning up OpenCode plugin config..."
+    Remove-OpenCodePlugin
     Write-Host ""
 
     if ($Purge) {

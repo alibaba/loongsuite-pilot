@@ -14,19 +14,21 @@ vi.mock('../../../src/flushers/sls-transport.js', () => ({
   persistFailedLogs: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { FileCollectionManager } from '../../../src/file-collection/file-collection-manager.js';
-import { SleepDetector } from '../../../src/file-collection/sleep-detector.js';
+import { PipelineManager } from '../../../src/pipeline/pipeline-manager.js';
+import { SleepDetector } from '../../../src/pipeline/sleep-detector.js';
 
 let tmpDir: string;
 let configDir: string;
 let stateDir: string;
 let failedDir: string;
+let dataDir: string;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fcm-test-'));
   configDir = path.join(tmpDir, 'config');
   stateDir = path.join(tmpDir, 'state');
   failedDir = path.join(tmpDir, 'failed');
+  dataDir = path.join(tmpDir, 'data');
   fs.mkdirSync(configDir, { recursive: true });
 });
 
@@ -56,12 +58,14 @@ function writeConfig(name: string, logDir = '/tmp/test') {
   );
 }
 
-describe('FileCollectionManager', () => {
+describe('PipelineManager', () => {
   it('starts and stops with no configs', async () => {
-    const manager = new FileCollectionManager({
+    const manager = new PipelineManager({
       configDir,
       stateDir,
       failedLogDir: failedDir,
+      dataDir,
+      pipelineConfig: { enabled: true, file: { enabled: true }, qoderApi: { enabled: true } },
     });
     await manager.start();
     await manager.stop();
@@ -71,10 +75,12 @@ describe('FileCollectionManager', () => {
     writeConfig('app-logs');
     writeConfig('nginx-logs');
 
-    const manager = new FileCollectionManager({
+    const manager = new PipelineManager({
       configDir,
       stateDir,
       failedLogDir: failedDir,
+      dataDir,
+      pipelineConfig: { enabled: true, file: { enabled: true }, qoderApi: { enabled: true } },
     });
     await manager.start();
     // Pipelines should have been created (no direct way to check count,
@@ -90,10 +96,12 @@ describe('FileCollectionManager', () => {
     );
     writeConfig('valid');
 
-    const manager = new FileCollectionManager({
+    const manager = new PipelineManager({
       configDir,
       stateDir,
       failedLogDir: failedDir,
+      dataDir,
+      pipelineConfig: { enabled: true, file: { enabled: true }, qoderApi: { enabled: true } },
     });
     await manager.start();
     await manager.stop();
@@ -103,20 +111,24 @@ describe('FileCollectionManager', () => {
     fs.writeFileSync(path.join(configDir, 'readme.txt'), 'hello');
     writeConfig('valid');
 
-    const manager = new FileCollectionManager({
+    const manager = new PipelineManager({
       configDir,
       stateDir,
       failedLogDir: failedDir,
+      dataDir,
+      pipelineConfig: { enabled: true, file: { enabled: true }, qoderApi: { enabled: true } },
     });
     await manager.start();
     await manager.stop();
   });
 
   it('stop is safe to call multiple times', async () => {
-    const manager = new FileCollectionManager({
+    const manager = new PipelineManager({
       configDir,
       stateDir,
       failedLogDir: failedDir,
+      dataDir,
+      pipelineConfig: { enabled: true, file: { enabled: true }, qoderApi: { enabled: true } },
     });
     await manager.start();
     await manager.stop();

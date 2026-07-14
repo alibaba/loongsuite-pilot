@@ -83,5 +83,5 @@ export { JsonlFlusher } from './flushers/jsonl-flusher.js';
 export { HttpFlusher } from './flushers/http-flusher.js';
 export { MultiFlusher } from './flushers/multi-flusher.js';
 export { HookManager } from './hooks/hook-manager.js';
-export { FileCollectionManager } from './file-collection/file-collection-manager.js';
+export { PipelineManager } from './pipeline/pipeline-manager.js';
 export * from './types/index.js';

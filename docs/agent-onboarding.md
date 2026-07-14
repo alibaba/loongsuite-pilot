@@ -96,6 +96,8 @@ Important fields:
 | `pluginInject` | Config paths and plugin spec. Required for plugin injection mode. |
 | `input` | Source type and source location for the collector input. |
 
+> When adding a `plugin-inject` agent, also register it in the uninstaller (`deploy/installer-opensource.sh` / `.ps1`) so its injected spec is removed on uninstall. Plugin-inject agents are additionally self-healed at runtime by the hook watchdog, which re-injects the spec if another tool overwrites the config.
+
 ## Emit Normalized Records Early
 
 For hook and plugin integrations, make the hook or plugin write newline-delimited JSON records to:
@@ -123,6 +125,7 @@ Use canonical dotted fields whenever possible:
 ```
 
 Keep source-specific fields under `agent.<agent-id>.*` so public output fields stay stable.
+These fields may be used by normalization and enrichment, but SLS and local JSONL outputs drop them by default.
 
 ## Implement The Input
 

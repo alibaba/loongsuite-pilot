@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/qoderwork-hook-processor.mjs');
@@ -93,6 +94,100 @@ function baseRows(userContent) {
 }
 
 describe('qoderwork-hook-processor user prompt extraction', () => {
+  test('emits per-step input deltas that the converter accumulates', async () => {
+    writeTranscript([
+      {
+        type: 'user',
+        uuid: 'user-1',
+        promptId: 'prompt-turn-1',
+        timestamp: '2026-06-18T01:35:54.477Z',
+        message: { role: 'user', content: [{ type: 'text', text: 'solve it' }] },
+        sessionId: 'sess-1',
+        userType: 'external',
+        isSidechain: false,
+      },
+      {
+        type: 'assistant',
+        uuid: 'assistant-1',
+        parentUuid: 'user-1',
+        timestamp: '2026-06-18T01:35:56.477Z',
+        message: {
+          role: 'assistant',
+          id: 'msg-1',
+          content: [{ type: 'tool_use', id: 'tool-1', name: 'shell', input: { command: 'pwd' } }],
+          stop_reason: 'tool_use',
+        },
+        sessionId: 'sess-1',
+        isSidechain: false,
+      },
+      {
+        type: 'user',
+        uuid: 'tool-result-1',
+        parentUuid: 'assistant-1',
+        timestamp: '2026-06-18T01:35:57.477Z',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: '/tmp/project' }],
+        },
+        sessionId: 'sess-1',
+        isSidechain: false,
+      },
+      {
+        type: 'assistant',
+        uuid: 'assistant-2',
+        parentUuid: 'tool-result-1',
+        timestamp: '2026-06-18T01:35:59.477Z',
+        message: {
+          role: 'assistant',
+          id: 'msg-2',
+          content: [{ type: 'text', text: 'done' }],
+          stop_reason: 'end_turn',
+        },
+        sessionId: 'sess-1',
+        isSidechain: false,
+      },
+    ]);
+
+    const result = runHook('sess-step-deltas');
+    expect(result.status).toBe(0);
+
+    const records = readJsonlRecords();
+    const requests = records.filter((record) => record['event.name'] === 'llm.request');
+    const promptDelta = [{ role: 'user', parts: [{ type: 'text', content: 'solve it' }] }];
+    const toolDelta = [{
+      role: 'tool',
+      parts: [{ type: 'tool_call_response', id: 'tool-1', response: '/tmp/project' }],
+    }];
+
+    expect(requests).toHaveLength(2);
+    expect(requests.map((request) => request['gen_ai.input.messages'])).toEqual([undefined, undefined]);
+    expect(requests.map((request) => request['gen_ai.input.messages_delta'])).toEqual([
+      promptDelta,
+      toolDelta,
+    ]);
+
+    const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
+    try {
+      const conversion = await convertEventLogToReadableSpans(records);
+      const convertedInputs = conversion.spans
+        .filter((span) => span.attributes['gen_ai.span.kind'] === 'LLM')
+        .map((span) => JSON.parse(span.attributes['gen_ai.input.messages']));
+
+      expect(convertedInputs).toEqual([
+        promptDelta,
+        [...promptDelta, ...toolDelta],
+      ]);
+    } finally {
+      if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;
+      if (previousCapture === undefined) delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      else process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = previousCapture;
+    }
+  });
+
   test('uses transcript promptId as the stable turn id', () => {
     writeTranscript(baseRows([
       { type: 'text', text: '你先搜索力扣565题' },
@@ -174,5 +269,42 @@ describe('qoderwork-hook-processor user prompt extraction', () => {
     expect(result.status).toBe(0);
 
     expect(inputContents(readJsonlRecords())).toEqual([]);
+  });
+});
+
+describe('qoderwork-hook-processor response.id', () => {
+  test('uses message.id as gen_ai.response.id when present', () => {
+    // QoderWork 0.6.2 transcript assistant rows carry message.id = chatcmpl-xxx,
+    // which matches the id captured by qoderwork-runtime-wrapper. Preferring it
+    // enables direct token matching in qoder-work-trace-input.
+    const rows = baseRows([{ type: 'text', text: 'hi' }]).map((r) =>
+      r.type === 'assistant' ? { ...r, message: { ...r.message, id: 'chatcmpl-resp-1' } } : r,
+    );
+    writeTranscript(rows);
+
+    const result = runHook('sess-resp-id-msg');
+    expect(result.status).toBe(0);
+
+    const resp = readJsonlRecords().find((r) => r['event.name'] === 'llm.response');
+    expect(resp).toBeDefined();
+    expect(resp['gen_ai.response.id']).toBe('chatcmpl-resp-1');
+  });
+
+  test('falls back to parentUuid when message.id is absent', () => {
+    // Older QoderWork versions have no message.id — behavior must stay unchanged.
+    const rows = baseRows([{ type: 'text', text: 'hi' }]).map((r) =>
+      r.type === 'assistant'
+        ? { ...r, message: { role: r.message.role, content: r.message.content, stop_reason: r.message.stop_reason } }
+        : r,
+    );
+    writeTranscript(rows);
+
+    const result = runHook('sess-resp-id-parent');
+    expect(result.status).toBe(0);
+
+    const resp = readJsonlRecords().find((r) => r['event.name'] === 'llm.response');
+    expect(resp).toBeDefined();
+    // baseRows assistant row has parentUuid 'user-1'
+    expect(resp['gen_ai.response.id']).toBe('user-1');
   });
 });

@@ -18,10 +18,10 @@ afterEach(() => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-function runHook(subcommand, payload) {
+function runHook(subcommand, payload, extraEnv = {}) {
   return spawnSync('node', [PROCESSOR, subcommand], {
     input: JSON.stringify(payload),
-    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir },
+    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, ...extraEnv },
     encoding: 'utf-8',
     timeout: 10_000,
   });
@@ -47,6 +47,26 @@ describe('codex Stop wakeup hook', () => {
       transcript_path: '/tmp/rollout-cdx-wakeup.jsonl',
     });
     expect(fs.existsSync(path.join(dataDir, 'logs', 'codex'))).toBe(false);
+  });
+
+  test('writes AgentTeams resource attributes into the wakeup marker', () => {
+    const result = runHook('stop', {
+      session_id: 'cdx-agentteams',
+      turn_id: 'turn-agentteams',
+      transcript_path: '/tmp/rollout-cdx-agentteams.jsonl',
+    }, {
+      AGENTTEAMS_WORKER_NAME: 'codex-worker',
+      AGENTTEAMS_INSTANCE_ID: 'lw-codex',
+      AGENTTEAMS_TOKEN: 'should-not-leak',
+    });
+
+    expect(result.status).toBe(0);
+    const marker = JSON.parse(fs.readFileSync(markerPath('cdx-agentteams'), 'utf8'));
+    expect(marker.resourceAttributes).toEqual({
+      'agentteams.worker.name': 'codex-worker',
+      'agentteams.instance.id': 'lw-codex',
+    });
+    expect(JSON.stringify(marker)).not.toContain('should-not-leak');
   });
 
   test('keeps only the latest wakeup for one session', () => {

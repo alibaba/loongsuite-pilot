@@ -37,14 +37,16 @@ import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
 import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
+import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
+import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
-import { HookWatchdog, type PluginCheckTarget } from './hook-watchdog.js';
+import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
-import { FileCollectionManager } from '../file-collection/file-collection-manager.js';
+import { PipelineManager } from '../pipeline/pipeline-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
 import { AlarmManager } from '../metrics/alarm-manager.js';
 import { LocalWorkerActivationService } from '../local-workers/local-worker-activation-service.js';
@@ -90,6 +92,8 @@ export class Orchestrator extends EventEmitter {
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
     'codex-transcript': 'codex',
+    'kiro-cli-log': 'kiro-cli',
+    'kiro-cli-session': 'kiro-cli',
     'opencode-log': 'opencode',
     'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
@@ -107,7 +111,7 @@ export class Orchestrator extends EventEmitter {
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
   private localWorkerActivationService: LocalWorkerActivationService | null = null;
-  private fileCollectionManager: FileCollectionManager | null = null;
+  private pipelineManager: PipelineManager | null = null;
   private metricsWriter!: MetricsWriter;
   private alarmManager!: AlarmManager;
   private runtimeWriter: RuntimeWriter | null = null;
@@ -204,7 +208,11 @@ export class Orchestrator extends EventEmitter {
       ...HookWatchdog.defaultTargets(),
       ...this.buildHookWatchdogTargets(),
     ];
-    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, this.alarmManager);
+    const interceptTargets = [
+      ...HookWatchdog.defaultInterceptTargets(this.dataDir),
+      ...this.buildPluginInjectInterceptTargets(),
+    ];
+    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets, this.alarmManager);
     this.hookWatchdog.start();
 
     // 11. Start updater watchdog only when resolved auto-update is enabled.
@@ -217,17 +225,18 @@ export class Orchestrator extends EventEmitter {
       this.updaterWatchdog.start();
     }
 
-    // 12. Start file collection pipelines (disabled by default)
-    if (this.config.fileCollection.enabled) {
-      this.fileCollectionManager = new FileCollectionManager({
+    // 12. Start pipeline subsystem (disabled by default)
+    if (this.config.pipeline.enabled) {
+      this.pipelineManager = new PipelineManager({
         configDir: path.join(this.dataDir, 'configs', 'local'),
-        stateDir: path.join(this.dataDir, 'state', 'file-collection'),
-        failedLogDir: path.join(this.dataDir, 'logs', 'file-collection-failed'),
+        stateDir: path.join(this.dataDir, 'state', 'pipeline'),
+        failedLogDir: path.join(this.dataDir, 'logs', 'pipeline-failed'),
         dataDir: this.dataDir,
+        pipelineConfig: this.config.pipeline,
       });
-      await this.fileCollectionManager.start();
+      await this.pipelineManager.start();
     } else {
-      logger.info('file collection disabled, skipping');
+      logger.info('pipeline subsystem disabled, skipping');
     }
 
     // 13. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
@@ -289,7 +298,7 @@ export class Orchestrator extends EventEmitter {
     if (!this.isRunning) return;
     logger.info('stopping orchestrator');
 
-    await this.fileCollectionManager?.stop();
+    await this.pipelineManager?.stop();
     await this.selfCheckService?.stop();
     this.selfCheckService = null;
     await this.metricsWriter?.stop();
@@ -386,6 +395,60 @@ export class Orchestrator extends EventEmitter {
     }
 
     return targets;
+  }
+
+  /**
+   * Self-heal targets for plugin-inject agents (e.g. opencode, qwen-code-cli).
+   *
+   * Unlike hook agents, these write a plugin spec into the agent's own config
+   * file (not a shared settings.json), so they use the intercept mechanism:
+   * an arbitrary check/repair pair rather than the hook-array-shaped
+   * PluginCheckTarget. The intercept runner also gives us cooldown + a daily
+   * repair cap, which bounds config rewrites (relevant because re-injecting
+   * into a JSONC config strips comments).
+   */
+  private buildPluginInjectInterceptTargets(): InterceptCheckTarget[] {
+    const defs = this.deploymentManager.getDefinitions();
+    const targets: InterceptCheckTarget[] = [];
+
+    for (const def of defs) {
+      if (def.deployMode !== 'plugin-inject' || !def.pluginInject) continue;
+
+      const pluginFile = this.resolvePluginSpecPath(def.pluginInject.pluginSpec);
+
+      targets.push({
+        id: `plugin-inject:${def.id}`,
+        precondition: async () => {
+          // Only self-heal when the plugin asset is actually deployed AND the
+          // agent is present. Otherwise repair would inject a spec pointing at
+          // a missing file, or fail repeatedly when no config file exists.
+          if (pluginFile && !(await fileExists(pluginFile))) return false;
+          return detectAgent(def.detection);
+        },
+        check: async () => {
+          // Healthy == spec still present in the agent's config file.
+          return !(await this.deploymentManager.needsRedeploy(def));
+        },
+        repair: async () => {
+          const result = await this.deploymentManager.deploySingle(def);
+          if (!result.success) {
+            throw new Error(result.error ?? `re-inject failed for ${def.id}`);
+          }
+        },
+      });
+    }
+
+    return targets;
+  }
+
+  /**
+   * Resolve a plugin spec to a local file path for existence checks.
+   * Returns null for non-file specs (e.g. npm package names), which skips the
+   * plugin-file precondition gate.
+   */
+  private resolvePluginSpecPath(spec: string): string | null {
+    const resolved = spec.replace(/\$PILOT_DATA/g, this.dataDir);
+    return resolved.startsWith('file://') ? resolved.slice('file://'.length) : null;
   }
 
   private async buildFlusher(): Promise<BaseFlusher> {
@@ -885,6 +948,58 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- Kiro CLI Log (sqlite transcript + hook JSONL) ---
+    const kiroCliLogDir = this.resolveKiroCliLogDir();
+    // Eagerly create the log dir so kiro-cli-log's availability check
+    // (directoryExists) passes on first boot. Without this, the input
+    // never starts because the dir is only created later by the
+    // delayedCollect subprocess — a chicken-egg problem.
+    await ensureDir(kiroCliLogDir);
+    const kiroCliLogInput = new KiroCliLogInput({
+      stateStore: this.stateStore,
+      logDir: kiroCliLogDir,
+    });
+    this.inputManager.registerInput(kiroCliLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(kiroCliLogInput, {
+        watchPaths: [kiroCliLogDir],
+        isAvailable: async () => directoryExists(kiroCliLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['kiro-cli-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'kiro-cli-log',
+            listenerCfg['kiro-cli-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['kiro-cli-log']?.pollInterval,
+      }),
+    );
+
+    // --- Kiro CLI Session (delayed sidecar scan, runs hook processor delayedCollect) ---
+    const kiroCliHookProcessorPath = path.join(
+      this.dataDir,
+      'hooks',
+      'kiro-cli-hook-processor.mjs',
+    );
+    const kiroCliSessionWatchPaths = KiroCliSessionInput.getWatchPaths(this.dataDir);
+    const kiroCliSessionInput = new KiroCliSessionInput({
+      stateStore: this.stateStore,
+      hookProcessorPath: kiroCliHookProcessorPath,
+      dataDir: this.dataDir,
+      pollIntervalMs: listenerCfg['kiro-cli-session']?.pollInterval,
+    });
+    this.inputManager.registerInput(kiroCliSessionInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(kiroCliSessionInput, {
+        watchPaths: kiroCliSessionWatchPaths,
+        isAvailable: async () => KiroCliSessionInput.checkAvailability(kiroCliHookProcessorPath),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['kiro-cli-session']) &&
+          this.agentControlManager.resolveEnabled(
+            'kiro-cli-session',
+            listenerCfg['kiro-cli-session']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['kiro-cli-session']?.pollInterval,
+      }),
+    );
+
     // --- Codex rollout transcript (completed and interrupted turns) ---
     const codexTranscriptInput = new CodexTranscriptInput({
       stateStore: this.stateStore,
@@ -983,6 +1098,10 @@ export class Orchestrator extends EventEmitter {
       }
     }
     return path.join(this.dataDir, 'logs', 'claude-code');
+  }
+
+  private resolveKiroCliLogDir(): string {
+    return path.join(this.dataDir, 'logs', 'kiro-cli');
   }
 
   /**

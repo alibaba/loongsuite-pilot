@@ -40,9 +40,22 @@ $CONFIG_FILE = Join-Path $DATA_DIR "config.json"
 $NODE_PIN_FILE = Join-Path $CACHE_DIR "node-bin"
 $INIT_TYPE_FILE = Join-Path $DATA_DIR "init-type"
 
-$TASK_NAME_COLLECTOR = "LoongsuitePilot"
-$TASK_NAME_UPDATER = "LoongsuitePilotUpdater"
+# Task names are per-user: multiple users can run on one machine, each with their
+# own data dir under %USERPROFILE%. A global task name would collide -- the second
+# user cannot delete or overwrite the first user's task (Access is denied), so it
+# would fail with "already exists" and drop to the background fallback. The shared
+# \LoongsuitePilot folder stays cross-user writable; only the task name is scoped.
+# Tag from whoami (DOMAIN\user) -- the same identity used for the task principal --
+# not $env:USERNAME (bare SAM name): two same-named accounts from different domains
+# (CORP\alice vs DEV\alice) would otherwise share one task name and re-introduce the
+# cross-user "already exists" collision this scoping is meant to prevent.
+$USER_TAG = ((whoami) -replace '[^A-Za-z0-9._-]', '_')
+$TASK_NAME_COLLECTOR = "LoongsuitePilot-$USER_TAG"
+$TASK_NAME_UPDATER = "LoongsuitePilotUpdater-$USER_TAG"
 $TASK_FOLDER = "\LoongsuitePilot"
+
+# Legacy global task names (pre per-user naming) -- cleaned up best-effort on start.
+$LEGACY_TASK_NAMES = @("LoongsuitePilot", "LoongsuitePilotUpdater")
 
 $LOONGSUITE_PILOT_BIN = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.cmd"
 
@@ -254,6 +267,91 @@ function Get-TaskRunning {
     return $task.State -eq "Running"
 }
 
+# Register a scheduled task, trying S4U first, then falling back to Interactive.
+# S4U runs under the user's identity in a non-interactive session (survives
+# RDP/SSH disconnect, no stored password) but requires the "Log on as a batch
+# job" right, which standard (non-admin) users lack -- so S4U registration throws
+# "Access is denied" (0x80070005) for them. Interactive needs no special right and
+# still auto-starts at logon, so it is the fallback before dropping to a plain
+# background process.
+function Register-PilotTask {
+    param(
+        [string]$taskName,
+        $action,
+        $triggers,
+        $settings,
+        [string]$description
+    )
+    $userId = whoami
+    $lastErr = $null
+    foreach ($logonType in @("S4U", "Interactive")) {
+        # Clear any task a previous attempt left behind. A failed S4U registration
+        # can still create the task entry before erroring on the principal, which
+        # would make the Interactive retry fail with "already exists".
+        try { schtasks.exe /Delete /TN "$TASK_FOLDER\$taskName" /F 2>$null | Out-Null } catch {}
+        try {
+            # On-disk location of the task definition (absolute filesystem path).
+            $diskPath = "$env:SystemRoot\System32\Tasks$TASK_FOLDER\$taskName"
+            Write-Host "   Registering '$taskName' (user=$userId, logon=$logonType, path=$diskPath)..."
+            $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType $logonType -RunLevel Limited
+            Register-ScheduledTask `
+                -TaskName $taskName `
+                -TaskPath "$TASK_FOLDER\" `
+                -Action $action `
+                -Trigger $triggers `
+                -Settings $settings `
+                -Principal $principal `
+                -Description $description `
+                -ErrorAction Stop | Out-Null
+            Write-Host "   Registered '$taskName' with logon type $logonType" -ForegroundColor Green
+            return $true
+        } catch {
+            $lastErr = $_
+            # Log every attempt (incl. HRESULT) so the failing logon type is
+            # visible, not just the last error thrown to the caller.
+            $hr = ""
+            if ($_.Exception -and $null -ne $_.Exception.HResult) {
+                $hr = " (HRESULT 0x{0:X8})" -f $_.Exception.HResult
+            }
+            Write-Host "   $logonType registration failed$hr : $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+    throw $lastErr
+}
+
+# Build a VBScript launcher that runs node fully hidden, and return a task action
+# that invokes it via wscript.exe. Interactive-principal tasks run in the user's
+# desktop session, where powershell.exe still pops a console window despite
+# -WindowStyle Hidden (the window the user sees). wscript.exe is a GUI-subsystem
+# host (no console of its own) and WshShell.Run(cmd, 0, True) launches node with a
+# hidden window and waits for it, so the task stays "Running" and the repeating
+# watchdog trigger keeps working -- but nothing is visible and there is no window
+# to accidentally close. Paths are baked into the .vbs (no argument passing) to
+# avoid quoting issues across the Task Scheduler + wscript layers.
+function New-HiddenTaskAction {
+    param([string]$vbsPath, [string]$nodeBin, [string]$entry)
+    # Double any embedded quote so a path with a " cannot terminate the VBScript
+    # string literal early (defensive: Windows paths cannot contain ", but
+    # $CONFIG_FILE/$CACHE_DIR derive from the user-settable LOONGSUITE_PILOT_DATA_DIR).
+    $cfgEsc   = $CONFIG_FILE -replace '"', '""'
+    $cwdEsc   = $CACHE_DIR   -replace '"', '""'
+    $nodeEsc  = $nodeBin     -replace '"', '""'
+    $entryEsc = $entry       -replace '"', '""'
+    $vbs = @"
+Set sh = CreateObject("WScript.Shell")
+sh.Environment("PROCESS").Item("AGENT_DATA_COLLECTION_CONFIG") = "$cfgEsc"
+sh.CurrentDirectory = "$cwdEsc"
+sh.Run """$nodeEsc"" ""$entryEsc""", 0, True
+"@
+    # Unicode (UTF-16 LE + BOM): wscript reads a BOM-less .vbs as the system ANSI
+    # code page, while -Encoding Default is ANSI on Windows PowerShell 5.1 but UTF-8
+    # on PowerShell 7+. A non-ASCII path (e.g. a Chinese %USERPROFILE%) would then be
+    # mojibake and the daemon would fail to launch. A BOM is read correctly
+    # regardless of PowerShell version or system code page.
+    Set-Content -Path $vbsPath -Value $vbs -Encoding Unicode
+    return (New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$vbsPath`"" -WorkingDirectory $CACHE_DIR)
+}
+
 function Install-CollectorTask {
     param([string]$nodeBin)
     $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
@@ -262,15 +360,15 @@ function Install-CollectorTask {
         return $false
     }
 
-    $action = New-ScheduledTaskAction `
-        -Execute "powershell.exe" `
-        -Argument "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry'`"" `
-        -WorkingDirectory $CACHE_DIR
+    $action = New-HiddenTaskAction (Join-Path $BOOTSTRAP_DIR "collector-launch.vbs") $nodeBin $entry
 
     # Two triggers: AtLogOn for initial start + repeating every 5 min as a watchdog.
     # If the process crashes or is killed, the repeating trigger re-launches it.
     # MultipleInstances=IgnoreNew ensures a second instance is never spawned while running.
-    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
+    # -User scopes the logon trigger to the current user; without it the trigger
+    # fires for ALL users, which requires admin rights and fails registration with
+    # "Access is denied" (0x80070005) for standard users.
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User (whoami)
     $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
         -RepetitionInterval (New-TimeSpan -Minutes 5)
 
@@ -283,26 +381,17 @@ function Install-CollectorTask {
         -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit ([TimeSpan]::Zero)
 
-    # S4U logon type: runs under the user's identity in a non-interactive session,
-    # so the process survives RDP/SSH disconnect without requiring a stored password.
-    $principal = New-ScheduledTaskPrincipal -UserId (whoami) -LogonType S4U -RunLevel Limited
-
     # Remove existing task first (schtasks is more reliable than Unregister-ScheduledTask)
     # Use try/catch because schtasks stderr + $ErrorActionPreference=Stop can throw
     try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
     try { schtasks.exe /Delete /TN "$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
 
-    Register-ScheduledTask `
-        -TaskName $TASK_NAME_COLLECTOR `
-        -TaskPath "$TASK_FOLDER\" `
-        -Action $action `
-        -Trigger @($triggerLogon, $triggerRepeat) `
-        -Settings $settings `
-        -Principal $principal `
-        -Description "LoongSuite Pilot data collector" `
-        -ErrorAction Stop | Out-Null
-
-    return $true
+    return (Register-PilotTask `
+        -taskName $TASK_NAME_COLLECTOR `
+        -action $action `
+        -triggers @($triggerLogon, $triggerRepeat) `
+        -settings $settings `
+        -description "LoongSuite Pilot data collector")
 }
 
 function Install-UpdaterTask {
@@ -310,12 +399,10 @@ function Install-UpdaterTask {
     $entry = Join-Path $BOOTSTRAP_DIR "updater-daemon.js"
     if (-not (Test-Path $entry)) { return $false }
 
-    $action = New-ScheduledTaskAction `
-        -Execute "powershell.exe" `
-        -Argument "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry'`"" `
-        -WorkingDirectory $CACHE_DIR
+    $action = New-HiddenTaskAction (Join-Path $BOOTSTRAP_DIR "updater-launch.vbs") $nodeBin $entry
 
-    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
+    # -User scopes the trigger to the current user (all-users trigger needs admin).
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User (whoami)
     $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
         -RepetitionInterval (New-TimeSpan -Minutes 5)
 
@@ -328,22 +415,15 @@ function Install-UpdaterTask {
         -RestartInterval (New-TimeSpan -Minutes 5) `
         -ExecutionTimeLimit ([TimeSpan]::Zero)
 
-    $principal = New-ScheduledTaskPrincipal -UserId (whoami) -LogonType S4U -RunLevel Limited
-
     try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_UPDATER" /F 2>$null | Out-Null } catch {}
     try { schtasks.exe /Delete /TN "$TASK_NAME_UPDATER" /F 2>$null | Out-Null } catch {}
 
-    Register-ScheduledTask `
-        -TaskName $TASK_NAME_UPDATER `
-        -TaskPath "$TASK_FOLDER\" `
-        -Action $action `
-        -Trigger @($triggerLogon, $triggerRepeat) `
-        -Settings $settings `
-        -Principal $principal `
-        -Description "LoongSuite Pilot auto-updater" `
-        -ErrorAction Stop | Out-Null
-
-    return $true
+    return (Register-PilotTask `
+        -taskName $TASK_NAME_UPDATER `
+        -action $action `
+        -triggers @($triggerLogon, $triggerRepeat) `
+        -settings $settings `
+        -description "LoongSuite Pilot auto-updater")
 }
 
 function Remove-AllTasks {
@@ -356,6 +436,11 @@ function Remove-AllTasks {
         }
         try { schtasks.exe /Delete /TN "$TASK_FOLDER\$name" /F 2>$null | Out-Null } catch {}
         try { schtasks.exe /Delete /TN "$name" /F 2>$null | Out-Null } catch {}
+    }
+    # Clean up the hidden VBScript launchers created by New-HiddenTaskAction so
+    # removing the tasks leaves no orphaned launcher scripts behind.
+    foreach ($vbs in @("collector-launch.vbs", "updater-launch.vbs")) {
+        Remove-Item (Join-Path $BOOTSTRAP_DIR $vbs) -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -422,6 +507,16 @@ function Cmd-Start {
         Write-Error "node runtime not found"
         exit 1
     }
+    Write-Host "   node: $nodeBin"
+    Write-Host "   bootstrap dir: $BOOTSTRAP_DIR"
+    Write-Host "   config: $CONFIG_FILE"
+
+    # Best-effort cleanup of legacy global-named tasks from older versions. If they
+    # are owned by another account (e.g. an earlier admin run) the delete is denied
+    # and simply left alone -- the per-user task name avoids colliding with them.
+    foreach ($legacy in $LEGACY_TASK_NAMES) {
+        try { schtasks.exe /Delete /TN "$TASK_FOLDER\$legacy" /F 2>$null | Out-Null } catch {}
+    }
 
     # Try Task Scheduler
     $taskInstalled = $false
@@ -441,14 +536,36 @@ function Cmd-Start {
                     return
                 }
             }
+            # Registered but never reached Running within 10s. The task is installed
+            # with a 5-min watchdog trigger, so do NOT drop to the background fallback:
+            # that would start a second collector alongside the task once the watchdog
+            # fires (duplicate collection). Surface the last result and let the
+            # watchdog keep retrying -- autostart is already configured.
+            $t = Get-ScheduledTaskInfo -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
+            $rc = if ($t) { "0x{0:X8}" -f $t.LastTaskResult } else { "unknown" }
+            Write-Host "Task registered but not running after 10s (LastTaskResult=$rc)." -ForegroundColor Yellow
+            Write-Host "   Autostart is configured; the 5-min watchdog trigger will keep retrying." -ForegroundColor Yellow
+            Write-Host "   Check the task in Task Scheduler and the log below." -ForegroundColor Yellow
+            return
         }
     } catch {
-        Write-Host "Task Scheduler registration failed: $_" -ForegroundColor Yellow
+        $hr = ""
+        if ($_.Exception -and $null -ne $_.Exception.HResult) {
+            $hr = " (HRESULT 0x{0:X8})" -f $_.Exception.HResult
+        }
+        Write-Host "Task Scheduler registration failed$hr : $($_.Exception.Message)" -ForegroundColor Yellow
     }
 
-    # Fallback: background process (like nohup on Linux)
+    # Fallback: background process (like nohup on Linux).
+    # Remove any task that may have been registered before we hit the error above
+    # (e.g. collector registered, then updater registration threw): leaving it in
+    # place would let its logon/watchdog trigger start a second collector alongside
+    # the background process below. Background mode owns the lifecycle from here.
+    Remove-AllTasks
     Write-Host "Using background process fallback." -ForegroundColor Yellow
     Write-Host "   Service will NOT auto-start on boot." -ForegroundColor Yellow
+    Write-Host "   stdout log: $LOG_FILE" -ForegroundColor Yellow
+    Write-Host "   stderr log: $(Join-Path $LOG_DIR 'loongsuite-pilot-service-err.log')" -ForegroundColor Yellow
 
     $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
     if (-not (Test-Path $entry)) {

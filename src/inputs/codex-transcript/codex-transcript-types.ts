@@ -1,6 +1,7 @@
 import type { JsonValue } from '../../types/index.js';
 
 export const MAX_EMITTED_TERMINAL_TURNS = 100;
+export const MAX_GLOBAL_EMITTED_TERMINAL_TURNS = 10_000;
 
 export type CodexTerminalStatus = 'completed' | 'interrupted';
 
@@ -29,6 +30,10 @@ export interface CodexTranscriptCheckpoint {
   emittedTerminalTurnIds: string[];
 }
 
+export interface CodexTranscriptGlobalState {
+  emittedTerminalTurnIds: string[];
+}
+
 export interface CodexTranscriptMeta {
   sessionId: string;
   provider: string;
@@ -40,6 +45,7 @@ export interface CodexTranscriptUsage {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  cacheCreationTokens: number;
   reasoningOutputTokens?: number;
   totalTokens: number;
 }

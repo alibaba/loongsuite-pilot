@@ -6,6 +6,12 @@ English | [简体中文](README.zh-CN.md)
 
 LoongSuite Pilot is a local telemetry collector for AI coding agents. It discovers supported agents on a developer machine, installs the required hooks or plugins, normalizes activity into a shared GenAI event schema, and exports logs or traces to your chosen backends.
 
+<p align="center">
+  <img src="docs/_assets/img/dashboard.png" alt="LoongSuite Pilot local dashboard" width="880">
+  <br>
+  <em>Local dashboard — multi-agent collection status, token usage, and reporting health at a glance.</em>
+</p>
+
 ## Why LoongSuite Pilot?
 
 Development teams often use more than one AI coding agent, and each agent records activity in a different local format. Pilot gives teams one local collector that can discover those agents, collect their activity, normalize the data, and send it to destinations that are useful for analysis, audit, and observability.
@@ -42,6 +48,7 @@ Pilot is designed to answer practical questions:
 | OpenCode      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
 | Qoder         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Qoder CN      | Hook                      | Yes          | Yes        | Yes         | Yes                       |
+| Qoder for JetBrains | Detection-only      | Yes          | Yes        | Yes         | Yes                       |
 | Qoder CLI     | Hook / session polling    | Yes          | Yes        | Yes         | Yes                       |
 | Qoder Work    | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
 | Qoder Work CN | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
@@ -58,11 +65,22 @@ Prerequisites:
 - Node.js 18 or later
 - `npm`
 - `curl` or `wget`
+- PowerShell 5.1 or later on Windows
 
-Install from the public package:
+Install from the public package on Linux or macOS:
 
 ```bash
 curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh -o /tmp/loongsuite-pilot-installer.sh && bash /tmp/loongsuite-pilot-installer.sh install
+```
+
+Install from the public package on Windows:
+
+```powershell
+$installer = "$env:TEMP\loongsuite-pilot-installer.ps1"
+Invoke-WebRequest `
+  -Uri "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1" `
+  -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer install
 ```
 
 Verify the service:
@@ -72,7 +90,7 @@ loongsuite-pilot status
 loongsuite-pilot info
 ```
 
-Local JSONL output is enabled by default under `~/.loongsuite-pilot/logs/output/`.
+Local JSONL output is enabled by default under `~/.loongsuite-pilot/logs/output/` on Linux/macOS and `%USERPROFILE%\.loongsuite-pilot\logs\output\` on Windows.
 
 For installer options, uninstall commands, and source builds, see [Installation](docs/installation.md).
 
@@ -130,6 +148,16 @@ loongsuite-pilot monitor start
 
 Then open `http://127.0.0.1:8765/`.
 
+macOS menu bar app:
+
+On macOS, Pilot automatically runs a menu bar app after installation — no extra command needed. It shows live token, session, request, and tool counts, plus per-agent and per-provider breakdowns, so you can keep an eye on activity without opening the dashboard.
+
+<p align="center">
+  <img src="docs/_assets/img/menubar.jpg" alt="LoongSuite Pilot macOS menu bar app" width="360">
+</p>
+
+To disable it, set `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false` or add `"enableStatusBarApp": false` to `~/.loongsuite-pilot/config.json`.
+
 ## Documentation
 
 [User Manual](docs/README.md) - Complete guide to installing, configuring, operating, and extending Pilot
@@ -173,10 +201,10 @@ We are looking forward to your feedback and suggestions. Scan the QR code below 
 ### Related Projects
 
 - [LoongCollector](https://github.com/alibaba/loongcollector) - Universal node agent for log, metric and eBPF-based collection
-- [LoongSuite JS Plugins](https://github.com/alibaba/loongsuite-js-plugins) - OpenTelemetry instrumentation plugins for JS-based AI coding agents
-- [LoongSuite Python Agent](https://github.com/alibaba/loongsuite-python-agent) - Process agent for Python applications
-- [LoongSuite Go Agent](https://github.com/alibaba/loongsuite-go-agent) - Process agent for Golang with compile-time instrumentation
-- [LoongSuite Java Agent](https://github.com/alibaba/loongsuite-java-agent) - Process agent for Java applications
+- [LoongSuite JS](https://github.com/alibaba/loongsuite-js) - OpenTelemetry instrumentation plugins for JS-based AI coding agents
+- [LoongSuite Python](https://github.com/alibaba/loongsuite-python) - Process agent for Python applications
+- [LoongSuite Go](https://github.com/alibaba/loongsuite-go) - Process agent for Golang with compile-time instrumentation
+- [LoongSuite Java](https://github.com/alibaba/loongsuite-java) - GenAI telemetry utility library for Java applications
 
 ## License
 

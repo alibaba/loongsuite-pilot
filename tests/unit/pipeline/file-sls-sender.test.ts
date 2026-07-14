@@ -14,7 +14,7 @@ vi.mock('../../../src/utils/logger.js', () => ({
   }),
 }));
 
-import { FileSlsSender } from '../../../src/file-collection/file-sls-sender.js';
+import { FileSlsSender } from '../../../src/pipeline/flusher/file/file-sls-sender.js';
 
 function makeSender(): FileSlsSender {
   return new FileSlsSender(

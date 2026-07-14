@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { FileTailer } from '../../../src/file-collection/file-tailer.js';
+import { FileTailer } from '../../../src/pipeline/input/file/file-tailer.js';
 
 let tmpDir: string;
 
