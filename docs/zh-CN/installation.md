@@ -87,7 +87,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--cms-endpoint <url>` | CMS 或 ARMS Trace endpoint。 |
 | `--cms-workspace <name>` | CMS workspace 值。 |
 | `--service-name-prefix <name>` | 上报后端使用的 service name 前缀。 |
-| `--system-service` | 注册为系统级服务，而不是用户级服务。 |
+| `--system-service` | **已废弃** — 忽略。Init 系统现在自动检测（systemd-user → systemd-system → init.d）。 |
 | `--lang <lang>` | 输出语言：`zh` 或 `en`。 |
 
 ## 验证安装
