@@ -1,11 +1,12 @@
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { appendLine, ensureDir } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { flattenToStrings } from '../utils/record-utils.js';
 import { sendAlarm, sendRunningStatus, sendStatus } from '../internal/sender.js';
 import { MetricsCollector } from './metrics-collector.js';
 import type { DataflowSnapshot, L1Metrics } from './metrics-collector.js';
-import type { AlarmManager } from './alarm-manager.js';
+import type { AlarmLevel, AlarmManager } from './alarm-manager.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
 
 const logger = createLogger('MetricsWriter');
@@ -14,8 +15,19 @@ const L1_INTERVAL_MS = 600_000;
 const L2_INTERVAL_MS = 600_000;
 const ALARM_FLUSH_INTERVAL_MS = 30_000;
 const CPU_THRESHOLD_PERCENT = 80;
-const MEM_THRESHOLD_MB = 512;
+const CPU_ALARM_CONSECUTIVE_SAMPLES = 3;
+const MEMORY_SOFT_THRESHOLD_MB = 512;
+const MEMORY_HARD_THRESHOLD_MB = 1024;
+const MEMORY_CRITICAL_THRESHOLD_MB = 2048;
+const MEMORY_SOFT_ALARM_CONSECUTIVE_SAMPLES = 3;
+const PROCESS_RESOURCE_ALARM_COOLDOWN_MS = 3_600_000;
 const INFRA_ALARM_COOLDOWN_MS = 3_600_000;
+
+type MemoryThresholdTier = {
+  name: 'soft' | 'hard' | 'critical';
+  thresholdMb: number;
+  level: AlarmLevel;
+};
 
 export interface MetricsWriterOptions {
   dataDir: string;
@@ -39,6 +51,9 @@ export class MetricsWriter {
   private alarmTimer: ReturnType<typeof setInterval> | null = null;
   private userIdAlarmEmitted = false;
   private startupAlarmEmitted = false;
+  private cpuHighSamples = 0;
+  private memoryHighSamples = 0;
+  private readonly lastProcessAlarmAt: Map<string, number> = new Map();
   private readonly lastInfraAlarmAt: Map<string, number> = new Map();
 
   constructor(opts: MetricsWriterOptions) {
@@ -114,20 +129,82 @@ export class MetricsWriter {
     if (!this.alarmManager) return;
 
     const cpuPercent = parseFloat(metrics.cpu);
-    if (cpuPercent > CPU_THRESHOLD_PERCENT) {
-      this.alarmManager.record(
-        'PROCESS_RESOURCE_ALARM', '2',
-        `CPU usage ${cpuPercent}% exceeds ${CPU_THRESHOLD_PERCENT}%`,
-      );
-    }
+    this.checkCpuThreshold(cpuPercent);
 
     const memMb = parseFloat(metrics.mem);
-    if (memMb > MEM_THRESHOLD_MB) {
-      this.alarmManager.record(
-        'PROCESS_RESOURCE_ALARM', '2',
-        `Memory usage ${memMb}MB exceeds ${MEM_THRESHOLD_MB}MB`,
-      );
+    this.checkMemoryThreshold(memMb);
+  }
+
+  private checkCpuThreshold(cpuPercent: number): void {
+    if (!Number.isFinite(cpuPercent)) {
+      this.cpuHighSamples = 0;
+      return;
     }
+
+    const cpuCoreCount = Math.max(os.cpus().length, 1);
+    const normalizedCpuPercent = Math.round((cpuPercent / cpuCoreCount) * 100) / 100;
+    if (normalizedCpuPercent <= CPU_THRESHOLD_PERCENT) {
+      this.cpuHighSamples = 0;
+      return;
+    }
+
+    this.cpuHighSamples++;
+    if (this.cpuHighSamples < CPU_ALARM_CONSECUTIVE_SAMPLES) return;
+
+    this.recordProcessAlarm(
+      'PROCESS_CPU_ALARM',
+      '2',
+      `CPU usage ${cpuPercent}% (${normalizedCpuPercent}% of ${cpuCoreCount} cores) exceeds ${CPU_THRESHOLD_PERCENT}% for ${this.cpuHighSamples} consecutive samples`,
+      'cpu',
+    );
+  }
+
+  private checkMemoryThreshold(memMb: number): void {
+    if (!Number.isFinite(memMb) || memMb <= MEMORY_SOFT_THRESHOLD_MB) {
+      this.memoryHighSamples = 0;
+      return;
+    }
+
+    this.memoryHighSamples++;
+    const tier = this.classifyMemoryThreshold(memMb);
+    if (!tier) return;
+    if (tier.name === 'soft' && this.memoryHighSamples < MEMORY_SOFT_ALARM_CONSECUTIVE_SAMPLES) {
+      return;
+    }
+
+    this.recordProcessAlarm(
+      'PROCESS_MEMORY_ALARM',
+      tier.level,
+      `Memory usage ${memMb}MB exceeds ${tier.name} threshold ${tier.thresholdMb}MB (${this.memoryHighSamples} consecutive samples above ${MEMORY_SOFT_THRESHOLD_MB}MB soft threshold)`,
+      `memory:${tier.name}`,
+    );
+  }
+
+  private classifyMemoryThreshold(memMb: number): MemoryThresholdTier | null {
+    if (memMb > MEMORY_CRITICAL_THRESHOLD_MB) {
+      return { name: 'critical', thresholdMb: MEMORY_CRITICAL_THRESHOLD_MB, level: '3' };
+    }
+    if (memMb > MEMORY_HARD_THRESHOLD_MB) {
+      return { name: 'hard', thresholdMb: MEMORY_HARD_THRESHOLD_MB, level: '2' };
+    }
+    if (memMb > MEMORY_SOFT_THRESHOLD_MB) {
+      return { name: 'soft', thresholdMb: MEMORY_SOFT_THRESHOLD_MB, level: '2' };
+    }
+    return null;
+  }
+
+  private recordProcessAlarm(
+    type: 'PROCESS_CPU_ALARM' | 'PROCESS_MEMORY_ALARM',
+    level: AlarmLevel,
+    message: string,
+    cooldownKey: string,
+  ): void {
+    if (!this.alarmManager) return;
+    const now = Date.now();
+    const last = this.lastProcessAlarmAt.get(cooldownKey);
+    if (last !== undefined && now - last < PROCESS_RESOURCE_ALARM_COOLDOWN_MS) return;
+    this.lastProcessAlarmAt.set(cooldownKey, now);
+    this.alarmManager.record(type, level, message);
   }
 
   private checkUserId(): void {

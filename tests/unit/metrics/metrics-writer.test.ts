@@ -41,6 +41,28 @@ function buildSnapshot(): DataflowSnapshot {
   };
 }
 
+function makeAlarmWriter(tmpDir: string): { writer: MetricsWriter; alarmManager: AlarmManager } {
+  const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
+  return {
+    alarmManager,
+    writer: new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: buildSnapshot,
+      alarmManager,
+    }),
+  };
+}
+
+function checkThresholdsForTest(writer: MetricsWriter, metrics: { cpu: string; mem: string }): void {
+  (writer as any).checkThresholds(metrics);
+}
+
+function cpuAboveNormalizedThreshold(): string {
+  return String(81 * Math.max(os.cpus().length, 1));
+}
+
 describe('MetricsWriter', () => {
   let tmpDir: string;
   let writer: MetricsWriter;
@@ -201,6 +223,101 @@ describe('MetricsWriter', () => {
     const flusherPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-flusher-metrics.jsonl');
     const flusherLine = JSON.parse(fs.readFileSync(flusherPath, 'utf-8').trim().split('\n')[0]);
     expect(flusherLine.user_id).toBe('u1');
+  });
+
+  describe('process resource thresholds', () => {
+    it('debounces soft memory alarms until 3 consecutive samples', () => {
+      const setup = makeAlarmWriter(tmpDir);
+      writer = setup.writer;
+      const { alarmManager } = setup;
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '600' });
+      checkThresholdsForTest(writer, { cpu: '0', mem: '620' });
+      expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeUndefined();
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '640' });
+      const alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM');
+
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_level).toBe('2');
+      expect(alarm!.alarm_message).toContain('soft threshold 512MB');
+      expect(alarm!.alarm_message).toContain('3 consecutive samples');
+    });
+
+    it('records hard and critical memory levels with threshold semantics', () => {
+      const setup = makeAlarmWriter(tmpDir);
+      writer = setup.writer;
+      const { alarmManager } = setup;
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '1200' });
+      let alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_level).toBe('2');
+      expect(alarm!.alarm_message).toContain('hard threshold 1024MB');
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '2300' });
+      alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_level).toBe('3');
+      expect(alarm!.alarm_message).toContain('critical threshold 2048MB');
+    });
+
+    it('suppresses transient CPU spikes until 3 consecutive normalized samples', () => {
+      const setup = makeAlarmWriter(tmpDir);
+      writer = setup.writer;
+      const { alarmManager } = setup;
+      const highCpu = cpuAboveNormalizedThreshold();
+
+      checkThresholdsForTest(writer, { cpu: highCpu, mem: '128' });
+      checkThresholdsForTest(writer, { cpu: highCpu, mem: '128' });
+      expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_CPU_ALARM')).toBeUndefined();
+
+      checkThresholdsForTest(writer, { cpu: highCpu, mem: '128' });
+      const alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_CPU_ALARM');
+
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_level).toBe('2');
+      expect(alarm!.alarm_message).toContain('3 consecutive samples');
+      expect(alarm!.alarm_message).toContain('of');
+      expect(alarm!.alarm_message).toContain('cores');
+    });
+
+    it('keeps CPU and memory alarms split in the same flush window', () => {
+      const setup = makeAlarmWriter(tmpDir);
+      writer = setup.writer;
+      const { alarmManager } = setup;
+      const highCpu = cpuAboveNormalizedThreshold();
+
+      checkThresholdsForTest(writer, { cpu: highCpu, mem: '128' });
+      checkThresholdsForTest(writer, { cpu: highCpu, mem: '128' });
+      checkThresholdsForTest(writer, { cpu: highCpu, mem: '1200' });
+
+      const entries = alarmManager.serialize();
+      expect(entries.map(e => e.alarm_type).sort()).toEqual([
+        'PROCESS_CPU_ALARM',
+        'PROCESS_MEMORY_ALARM',
+      ]);
+      expect(entries.find(e => e.alarm_type === 'PROCESS_CPU_ALARM')!.alarm_message).toContain('CPU usage');
+      expect(entries.find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')!.alarm_message).toContain('Memory usage');
+    });
+
+    it('cools down repeated process resource alarms', () => {
+      vi.setSystemTime(new Date('2026-07-15T00:00:00Z'));
+      const setup = makeAlarmWriter(tmpDir);
+      writer = setup.writer;
+      const { alarmManager } = setup;
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '1200' });
+      expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeDefined();
+
+      vi.setSystemTime(new Date('2026-07-15T00:30:00Z'));
+      checkThresholdsForTest(writer, { cpu: '0', mem: '1300' });
+      expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeUndefined();
+
+      vi.setSystemTime(new Date('2026-07-15T01:00:01Z'));
+      checkThresholdsForTest(writer, { cpu: '0', mem: '1300' });
+      expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeDefined();
+    });
   });
 
   describe('DEGRADED_STARTUP_ALARM', () => {
