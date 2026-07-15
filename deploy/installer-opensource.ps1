@@ -362,12 +362,12 @@ if (lang === 'zh') {
 '@ $LANG_MODE
     $ErrorActionPreference = $prevEAP
 
-    $selectInput = Read-Host "    >"
+    $selectInput = (Read-Host "    >").Trim() -replace '[，、；]', ','
 
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
 const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
-const input = process.argv[1] || '';
+const input = (process.argv[1] || '').replace(/[，、；]/g, ',');
 let indices;
 if (!input.trim()) {
   indices = r.map((a, i) => a.detected ? i : -1).filter(i => i >= 0);
