@@ -33,8 +33,33 @@ export function extractCodexTerminalTurn(
   fallbackSessionId: string,
   expectedTurnId: string,
 ): CodexExtractedTranscriptTurn | null {
-  let currentTurnId = '';
-  let startedAtMs = 0;
+  return extractCodexTurn(records, meta, fallbackSessionId, expectedTurnId, {
+    requireTerminal: true,
+  });
+}
+
+export function extractCodexPartialTurn(
+  records: Record<string, unknown>[],
+  meta: CodexTranscriptMeta | null,
+  fallbackSessionId: string,
+  expectedTurnId: string,
+  opts: { startedAtMs?: number } = {},
+): CodexExtractedTranscriptTurn | null {
+  return extractCodexTurn(records, meta, fallbackSessionId, expectedTurnId, {
+    requireTerminal: false,
+    startedAtMs: opts.startedAtMs,
+  });
+}
+
+function extractCodexTurn(
+  records: Record<string, unknown>[],
+  meta: CodexTranscriptMeta | null,
+  fallbackSessionId: string,
+  expectedTurnId: string,
+  opts: { requireTerminal: boolean; startedAtMs?: number },
+): CodexExtractedTranscriptTurn | null {
+  let currentTurnId = opts.requireTerminal ? '' : expectedTurnId;
+  let startedAtMs = opts.startedAtMs ?? 0;
   let terminalAtMs = 0;
   let status: CodexTerminalStatus | null = null;
   let finalText: string | undefined;
@@ -268,11 +293,15 @@ export function extractCodexTerminalTurn(
     markActivity(timestamp);
   }
 
-  if (!status || !terminalAtMs) return null;
+  if (opts.requireTerminal && (!status || !terminalAtMs)) return null;
 
   const finalActiveStep = activeStep();
   if (finalActiveStep && stepToolsComplete(finalActiveStep)) flushCurrentStep();
-  if (status === 'completed') {
+  if (!status && !opts.requireTerminal) {
+    if (steps.length === 0 && !prompt) return null;
+    terminalAtMs = lastActivityAtMs || startedAtMs || Date.now();
+    status = 'completed';
+  } else if (status === 'completed') {
     const hadActiveStep = activeStep() !== null;
     const step = activeStep() ?? beginStep(lastActivityAtMs || startedAtMs || terminalAtMs);
     if (!hadActiveStep) step.responseAtMs = terminalAtMs;
@@ -287,12 +316,13 @@ export function extractCodexTerminalTurn(
     flushCurrentStep();
   }
 
+  const resolvedStatus = status ?? 'completed';
   return {
     sessionId: meta?.sessionId || fallbackSessionId,
     transcriptTurnId: expectedTurnId,
     provider: meta?.provider ?? 'openai',
     model,
-    status,
+    status: resolvedStatus,
     startedAtMs: startedAtMs || terminalAtMs,
     terminalAtMs,
     ...(prompt ? { prompt } : {}),

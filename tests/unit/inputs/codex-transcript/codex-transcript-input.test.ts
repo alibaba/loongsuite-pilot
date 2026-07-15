@@ -88,6 +88,36 @@ function completedTurn(): string {
   ].join('\n') + '\n';
 }
 
+function completedTurnWithLargeToolOutput(toolOutput: string): string {
+  return [
+    record('2026-06-24T06:00:00.000Z', 'session_meta', {
+      id: 'session-1', model_provider: 'openai',
+    }),
+    record('2026-06-24T06:00:01.000Z', 'turn_context', {
+      turn_id: 'turn-1', model: 'gpt-5.5',
+    }),
+    record('2026-06-24T06:00:02.000Z', 'event_msg', {
+      type: 'task_started', turn_id: 'turn-1',
+    }),
+    record('2026-06-24T06:00:03.000Z', 'response_item', {
+      type: 'message', role: 'user', content: [{ type: 'input_text', text: 'inspect it' }],
+    }),
+    record('2026-06-24T06:00:04.000Z', 'response_item', {
+      type: 'function_call', id: 'fc-1', call_id: 'call-1', name: 'exec_command', arguments: JSON.stringify({ cmd: 'cat large.txt' }),
+    }),
+    record('2026-06-24T06:00:05.000Z', 'response_item', {
+      type: 'function_call_output', call_id: 'call-1', output: JSON.stringify(toolOutput),
+    }),
+    record('2026-06-24T06:00:06.000Z', 'event_msg', tokenUsage(100, 10)),
+    record('2026-06-24T06:00:07.000Z', 'response_item', {
+      type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }],
+    }),
+    record('2026-06-24T06:00:08.000Z', 'event_msg', {
+      type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'done',
+    }),
+  ].join('\n') + '\n';
+}
+
 async function createInput(root: string): Promise<{
   input: CodexTranscriptInput;
   entries: AgentActivityEntry[];
@@ -118,6 +148,37 @@ async function writeWakeupMarker(wakeupDir: string, sessionId: string, payload: 
 }
 
 describe('CodexTranscriptInput', () => {
+  it('baselines existing transcripts without replaying history and tracks the tail active turn', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-baseline-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const wakeupDir = path.join(root, 'wakeups');
+    const transcript = await writeTranscript(sessionDir, [
+      ...completedTurn().trimEnd().split('\n'),
+      record('2026-06-24T06:01:00.000Z', 'turn_context', { turn_id: 'turn-2', model: 'gpt-5.5' }),
+      record('2026-06-24T06:01:01.000Z', 'event_msg', { type: 'task_started', turn_id: 'turn-2' }),
+      record('2026-06-24T06:01:02.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'continue' }],
+      }),
+    ].join('\n') + '\n');
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    const input = new CodexTranscriptInput({ stateStore, sessionDir, wakeupDir, pollIntervalMs: 10 });
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', batch => entries.push(...batch));
+
+    await input.start();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await input.stop();
+
+    expect(entries).toEqual([]);
+    const state = stateStore.get(`codex-transcript:${transcript}`);
+    const checkpoint = state.extra?.codexTranscript as Record<string, unknown>;
+    expect(checkpoint.scanOffset).toBe((await fs.stat(transcript)).size);
+    expect(checkpoint.activeTurn).toMatchObject({ turnId: 'turn-2' });
+    expect(checkpoint.latestSessionMetaOffset).toEqual(expect.any(Number));
+  });
+
   it('emits a terminal LLM pair with zero usage for a completed turn without output', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-empty-completed-'));
     tempDirs.push(root);
@@ -299,6 +360,29 @@ describe('CodexTranscriptInput', () => {
     ]);
   });
 
+  it('falls back to input message delta when the reconstructed request context exceeds 1MB', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-large-input-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createInput(root);
+    const largeToolOutput = 'x'.repeat(1024 * 1024 + 1);
+    await writeTranscript(sessionDir, completedTurnWithLargeToolOutput(largeToolOutput));
+
+    await waitFor(() => entries.filter(entry => entry['event.name'] === 'llm.request').length === 2);
+    await input.stop();
+
+    const requests = entries.filter(entry => entry['event.name'] === 'llm.request');
+    const secondRequest = requests[1]!;
+    const expectedDelta = [
+      {
+        role: 'tool',
+        parts: [{ type: 'tool_call_response', id: 'call-1', response: largeToolOutput }],
+      },
+    ];
+    expect(secondRequest['gen_ai.input.messages_delta']).toEqual(expectedDelta);
+    expect(secondRequest['gen_ai.input.messages']).toEqual(expectedDelta);
+    expect(secondRequest['gen_ai.input.messages_hash']).toEqual(expect.any(String));
+  });
+
   it('projects AgentTeams resource context from the Stop wakeup marker', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-agentteams-'));
     tempDirs.push(root);
@@ -398,7 +482,7 @@ describe('CodexTranscriptInput', () => {
     );
   });
 
-  it('waits for task_complete before exporting a Stop-triggered transcript', async () => {
+  it('exports completed transcript waves before task_complete and flushes stop at terminal', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-pending-'));
     tempDirs.push(root);
     const { input, entries, sessionDir } = await createInput(root);
@@ -406,11 +490,45 @@ describe('CodexTranscriptInput', () => {
     const terminal = lines.pop()!;
     const transcript = await writeTranscript(sessionDir, lines.join('\n') + '\n');
 
-    await new Promise(resolve => setTimeout(resolve, 50));
-    expect(entries).toEqual([]);
+    await waitFor(() => entries.some(entry => entry['event.name'] === 'tool.result'));
+    expect(entries.some(entry => entry['gen_ai.response.finish_reasons']?.includes('stop'))).toBe(false);
     await fs.appendFile(transcript, terminal + '\n', 'utf8');
     await waitFor(() => entries.some(entry => entry['gen_ai.response.finish_reasons']?.includes('stop')));
     await input.stop();
+  });
+
+  it('keeps an incomplete tool wave recoverable across collection cycles', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-split-tool-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createInput(root);
+    const transcript = await writeTranscript(sessionDir, [
+      record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'turn-1', model: 'gpt-5.5' }),
+      record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'task_started', turn_id: 'turn-1' }),
+      record('2026-06-24T06:00:03.000Z', 'response_item', {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: 'inspect' }],
+      }),
+      record('2026-06-24T06:00:04.000Z', 'response_item', {
+        type: 'function_call', id: 'fc-1', call_id: 'call-1', name: 'exec_command', arguments: JSON.stringify({ cmd: 'pwd' }),
+      }),
+    ].join('\n') + '\n');
+
+    await waitFor(() => entries.some(entry => entry['event.name'] === 'other'));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(entries.some(entry => entry['event.name'] === 'tool.call')).toBe(false);
+
+    await fs.appendFile(transcript, [
+      record('2026-06-24T06:00:05.000Z', 'response_item', {
+        type: 'function_call_output', call_id: 'call-1', output: '"/tmp/project"',
+      }),
+      record('2026-06-24T06:00:05.000Z', 'event_msg', tokenUsage(100, 10)),
+    ].join('\n') + '\n', 'utf8');
+    await waitFor(() => entries.some(entry => entry['event.name'] === 'tool.result'));
+    await input.stop();
+
+    expect(entries.filter(entry => entry['event.name'] === 'other')).toHaveLength(1);
+    expect(entries.find(entry => entry['event.name'] === 'tool.call')?.['gen_ai.tool.call.id']).toBe('call-1');
+    expect(entries.find(entry => entry['event.name'] === 'tool.result')?.['gen_ai.tool.call.result']).toBe('/tmp/project');
   });
 
   it('falls back malformed transcript timestamps without emitting Unix epoch spans', async () => {

@@ -8,6 +8,12 @@ export interface CodexActiveTranscriptTurn {
   turnId: string;
   startOffset: number;
   startedAtMs: number;
+  emittedPrompt?: boolean;
+  emittedStepCount?: number;
+  emittedStepRequestIds?: string[];
+  emittedStepResponseIds?: string[];
+  emittedToolCallIds?: string[];
+  emittedToolResultIds?: string[];
 }
 
 /**
@@ -60,6 +66,7 @@ export interface CodexTranscriptStep {
   hasResponseEvidence: boolean;
   completedAtMs: number;
   responseId?: string;
+  inputMessages?: JsonValue[];
   reasoning: string[];
   tools: CodexTranscriptTool[];
   tokenUsage?: CodexTranscriptUsage;

@@ -8,7 +8,19 @@ import type {
   CodexTranscriptUsage,
 } from './codex-transcript-types.js';
 
-export function buildCodexTranscriptEntries(turn: CodexExtractedTranscriptTurn): AgentActivityEntry[] {
+const MAX_INPUT_MESSAGES_BYTES = 1024 * 1024;
+
+export interface CodexTranscriptBuildOptions {
+  includePrompt?: boolean;
+  startStepNumber?: number;
+}
+
+export function buildCodexTranscriptEntries(
+  turn: CodexExtractedTranscriptTurn,
+  opts: CodexTranscriptBuildOptions = {},
+): AgentActivityEntry[] {
+  const includePrompt = opts.includePrompt ?? true;
+  const startStepNumber = opts.startStepNumber ?? 1;
   const traceId = hashId([turn.sessionId, turn.transcriptTurnId, 'trace'], 32);
   const agentSpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'agent'], 16);
   const turnId = `${turn.sessionId}:${turn.transcriptTurnId}`;
@@ -26,7 +38,7 @@ export function buildCodexTranscriptEntries(turn: CodexExtractedTranscriptTurn):
   };
   const records: AgentActivityEntry[] = [];
 
-  if (turn.prompt) {
+  if (includePrompt && turn.prompt) {
     records.push(buildEntry({
       ...base,
       timestamp: turn.startedAtMs,
@@ -44,7 +56,7 @@ export function buildCodexTranscriptEntries(turn: CodexExtractedTranscriptTurn):
   }
 
   for (const [index, step] of turn.steps.entries()) {
-    const stepNumber = index + 1;
+    const stepNumber = startStepNumber + index;
     const stepId = `${turnId}:s${stepNumber}`;
     const stepSpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'step', String(stepNumber)], 16);
     const llmSpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'llm', String(stepNumber)], 16);
@@ -52,7 +64,13 @@ export function buildCodexTranscriptEntries(turn: CodexExtractedTranscriptTurn):
     const previousStep = turn.steps[index - 1];
     const inputMessages = stepInputMessages(index, turn, previousStep);
     const fullInputMessages = fullStepInputMessages(index, turn);
-    const fullInputHash = hashJsonValue(fullInputMessages);
+    const fullInputMessagesJson = JSON.stringify(fullInputMessages);
+    const fullInputHash = hashSerializedJson(fullInputMessagesJson);
+    const includeFullInputMessages = fullInputMessages.length > 0
+      && Buffer.byteLength(fullInputMessagesJson, 'utf8') <= MAX_INPUT_MESSAGES_BYTES;
+    const outputInputMessages = includeFullInputMessages
+      ? fullInputMessages
+      : inputMessages;
 
     records.push(buildEntry({
       ...base,
@@ -66,7 +84,7 @@ export function buildCodexTranscriptEntries(turn: CodexExtractedTranscriptTurn):
       'gen_ai.response.id': responseId,
       'gen_ai.input.messages_hash': fullInputHash,
       ...(inputMessages.length > 0 ? { 'gen_ai.input.messages_delta': inputMessages } : {}),
-      ...(fullInputMessages.length > 0 ? { 'gen_ai.input.messages': fullInputMessages } : {}),
+      ...(outputInputMessages.length > 0 ? { 'gen_ai.input.messages': outputInputMessages } : {}),
       ...sharedLlmFields(turn),
     }));
 
@@ -103,6 +121,8 @@ function stepInputMessages(
   turn: CodexExtractedTranscriptTurn,
   previousStep: CodexTranscriptStep | undefined,
 ): JsonValue[] {
+  const stepMessages = turn.steps[index]?.inputMessages;
+  if (stepMessages && stepMessages.length > 0) return stepMessages;
   if (index === 0) {
     if (turn.inputMessages.length > 0) return turn.inputMessages;
     return turn.prompt
@@ -115,6 +135,8 @@ function stepInputMessages(
 }
 
 function fullStepInputMessages(index: number, turn: CodexExtractedTranscriptTurn): JsonValue[] {
+  const stepMessages = turn.steps[index]?.inputMessages;
+  if (stepMessages && stepMessages.length > 0) return stepMessages;
   const messages: JsonValue[] = turn.inputMessages.length > 0
     ? [...turn.inputMessages]
     : turn.prompt
@@ -284,6 +306,6 @@ function hashId(parts: string[], length: number): string {
   return crypto.createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, length);
 }
 
-function hashJsonValue(value: JsonValue): string {
-  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function hashSerializedJson(value: string): string {
+  return crypto.createHash('sha256').update(value).digest('hex');
 }
