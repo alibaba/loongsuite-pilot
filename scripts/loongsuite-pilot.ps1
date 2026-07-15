@@ -557,46 +557,14 @@ function Cmd-Start {
         Write-Host "Task Scheduler registration failed$hr : $($_.Exception.Message)" -ForegroundColor Yellow
     }
 
-    # Fallback: background process (like nohup on Linux).
-    # Remove any task that may have been registered before we hit the error above
-    # (e.g. collector registered, then updater registration threw): leaving it in
-    # place would let its logon/watchdog trigger start a second collector alongside
-    # the background process below. Background mode owns the lifecycle from here.
+    # No background fallback — Task Scheduler registration is required.
     Remove-AllTasks
-    Write-Host "Using background process fallback." -ForegroundColor Yellow
-    Write-Host "   Service will NOT auto-start on boot." -ForegroundColor Yellow
-    Write-Host "   stdout log: $LOG_FILE" -ForegroundColor Yellow
-    Write-Host "   stderr log: $(Join-Path $LOG_DIR 'loongsuite-pilot-service-err.log')" -ForegroundColor Yellow
-
-    $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
-    if (-not (Test-Path $entry)) {
-        Write-Error "Bootstrap script missing"
-        exit 1
-    }
-
-    $errLog = Join-Path $LOG_DIR "loongsuite-pilot-service-err.log"
-    $proc = Start-Process -FilePath "powershell.exe" `
-        -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
-        -WorkingDirectory $CACHE_DIR `
-        -WindowStyle Hidden `
-        -PassThru
-
-    Set-Content -Path $PID_FILE -Value $proc.Id
-    Set-Content -Path $INIT_TYPE_FILE -Value "background"
-    Write-Host "loongsuite-pilot started (PID $($proc.Id), background)"
-
-    # Also start updater
-    $updaterEntry = Join-Path $BOOTSTRAP_DIR "updater-daemon.js"
-    if ((Test-Path $updaterEntry) -and -not (Test-PidRunning $UPDATER_PID_FILE)) {
-        $updaterErrLog = Join-Path $LOG_DIR "loongsuite-pilot-updater-err.log"
-        $uproc = Start-Process -FilePath "powershell.exe" `
-            -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$updaterEntry' >> '$UPDATER_LOG_FILE' 2>> '$updaterErrLog'`"" `
-            -WorkingDirectory $CACHE_DIR `
-            -WindowStyle Hidden `
-            -PassThru
-        Set-Content -Path $UPDATER_PID_FILE -Value $uproc.Id
-        Write-Host "loongsuite-pilot updater started (PID $($uproc.Id))"
-    }
+    Write-Error "Failed to register system service via Task Scheduler."
+    Write-Host "   Possible causes:" -ForegroundColor Yellow
+    Write-Host "     - 'Log on as a batch job' right not granted (S4U)" -ForegroundColor Yellow
+    Write-Host "     - Task Scheduler service not running" -ForegroundColor Yellow
+    Write-Host "     - Insufficient permissions for task registration" -ForegroundColor Yellow
+    exit 1
 }
 
 # ============================================================
@@ -671,23 +639,52 @@ function Cmd-RestartCollector {
             Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
             Write-Host "collector restarted (Task Scheduler)"
             $restarted = $true
-        } catch {}
+        } catch {
+            Write-Host "Task Scheduler restart failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
     }
 
     if (-not $restarted) {
-        $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
-        if (-not (Test-Path $entry)) {
-            Write-Error "Bootstrap script missing"
-            exit 1
+        # Self-healing: try to register Task Scheduler for degraded (background/unknown) installs
+        $initType = ""
+        if (Test-Path $INIT_TYPE_FILE) { $initType = (Get-Content $INIT_TYPE_FILE -ErrorAction SilentlyContinue).Trim() }
+        # "background" is a legacy init-type value from pre-Task-Scheduler installs (aligned with Linux nohup/unknown)
+        if ($initType -in @("background", "unknown", "")) {
+            try {
+                $ok = Install-CollectorTask $nodeBin
+                if ($ok) {
+                    Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+                    Start-Sleep -Seconds 1
+                    if (Get-TaskRunning $TASK_NAME_COLLECTOR) {
+                        Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                        Write-Host "collector self-healed: registered with Task Scheduler"
+                        $restarted = $true
+                    }
+                }
+            } catch {
+                Write-Host "Self-heal failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
         }
-        $errLog = Join-Path $LOG_DIR "loongsuite-pilot-service-err.log"
-        $proc = Start-Process -FilePath "powershell.exe" `
-            -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
-            -WorkingDirectory $CACHE_DIR `
-            -WindowStyle Hidden `
-            -PassThru
-        Set-Content -Path $PID_FILE -Value $proc.Id
-        Write-Host "collector restarted (PID $($proc.Id))"
+        if (-not $restarted) {
+            if ($initType -in @("background", "unknown", "")) {
+                $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
+                if (-not (Test-Path $entry)) {
+                    Write-Error "Bootstrap script missing"
+                    exit 1
+                }
+                $errLog = Join-Path $LOG_DIR "loongsuite-pilot-service-err.log"
+                $proc = Start-Process -FilePath "powershell.exe" `
+                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
+                    -WorkingDirectory $CACHE_DIR `
+                    -WindowStyle Hidden `
+                    -PassThru
+                Set-Content -Path $PID_FILE -Value $proc.Id
+                Write-Host "collector restarted (background fallback, self-heal failed)" -ForegroundColor Yellow
+            } else {
+                Write-Error "Service manager failed to restart collector (init_type=$initType)"
+                exit 1
+            }
+        }
     }
 
     # Schedule updater restart in background (equivalent to setsid on Linux)
@@ -739,23 +736,52 @@ function Cmd-RestartUpdater {
                 Write-Host "updater restarted (Task Scheduler)"
                 $restarted = $true
             }
-        } catch {}
+        } catch {
+            Write-Host "Task Scheduler restart failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
     }
 
     if (-not $restarted) {
-        $entry = Join-Path $BOOTSTRAP_DIR "updater-daemon.js"
-        if (-not (Test-Path $entry)) {
-            Write-Host "Updater bootstrap script missing"
-            return
+        # Self-healing: try to register Task Scheduler for degraded (background/unknown) installs
+        $initType = ""
+        if (Test-Path $INIT_TYPE_FILE) { $initType = (Get-Content $INIT_TYPE_FILE -ErrorAction SilentlyContinue).Trim() }
+        # "background" is a legacy init-type value from pre-Task-Scheduler installs (aligned with Linux nohup/unknown)
+        if ($initType -in @("background", "unknown", "")) {
+            try {
+                $ok = Install-UpdaterTask $nodeBin
+                if ($ok) {
+                    Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+                    Start-Sleep -Seconds 1
+                    if (Get-TaskRunning $TASK_NAME_UPDATER) {
+                        Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                        Write-Host "updater self-healed: registered with Task Scheduler"
+                        $restarted = $true
+                    }
+                }
+            } catch {
+                Write-Host "Self-heal failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
         }
-        $updaterErrLog = Join-Path $LOG_DIR "loongsuite-pilot-updater-err.log"
-        $proc = Start-Process -FilePath "powershell.exe" `
-            -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$UPDATER_LOG_FILE' 2>> '$updaterErrLog'`"" `
-            -WorkingDirectory $CACHE_DIR `
-            -WindowStyle Hidden `
-            -PassThru
-        Set-Content -Path $UPDATER_PID_FILE -Value $proc.Id
-        Write-Host "updater restarted (PID $($proc.Id))"
+        if (-not $restarted) {
+            if ($initType -in @("background", "unknown", "")) {
+                $entry = Join-Path $BOOTSTRAP_DIR "updater-daemon.js"
+                if (-not (Test-Path $entry)) {
+                    Write-Host "Updater bootstrap script missing"
+                    return
+                }
+                $updaterErrLog = Join-Path $LOG_DIR "loongsuite-pilot-updater-err.log"
+                $proc = Start-Process -FilePath "powershell.exe" `
+                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$UPDATER_LOG_FILE' 2>> '$updaterErrLog'`"" `
+                    -WorkingDirectory $CACHE_DIR `
+                    -WindowStyle Hidden `
+                    -PassThru
+                Set-Content -Path $UPDATER_PID_FILE -Value $proc.Id
+                Write-Host "updater restarted (background fallback, self-heal failed)" -ForegroundColor Yellow
+            } else {
+                Write-Error "Service manager failed to restart updater (init_type=$initType)"
+                return
+            }
+        }
     }
 }
 
