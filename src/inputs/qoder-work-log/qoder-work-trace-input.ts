@@ -24,6 +24,7 @@ import {
 const UNKNOWN_MODEL = 'unknown';
 const MAX_READ_BYTES = 16 * 1024 * 1024;
 const SESSION_TTL_MS = 30 * 60 * 1000;
+const PROMPT_MATCH_TOLERANCE_MS = 5 * 60 * 1000;
 const DB_REL_PATH = path.join('data', 'agents.db');
 
 function msToNanos(ms: number): string {
@@ -65,9 +66,30 @@ interface SessionState {
   turns: ActiveTurn[];
 }
 
+interface DbUserPrompt {
+  id: string;
+  text: string;
+  updatedAtMs: number;
+  sequence: number;
+}
+
 interface DbSessionData {
-  userPrompt: string;
+  userPrompts: DbUserPrompt[];
   toolResults: Array<{ toolCallId: string; result: string }>;
+}
+
+interface CompletedSessionWindow {
+  session: SessionState;
+  sessionId: string;
+  resultId?: string;
+  resultTimestamp?: number;
+}
+
+interface TurnIdentity {
+  turnId: string;
+  emitKey: string;
+  userPrompt?: DbUserPrompt;
+  fallbackCounter?: number;
 }
 
 // ─── main input ──────────────────────────────────────────────────────────────
@@ -80,7 +102,6 @@ export class QoderWorkTraceInput extends BaseSessionInput {
   private readonly activeTurns: Map<string, ActiveTurn> = new Map();
   private readonly fileModelPolicies: Map<string, { chat: string; compact: string; scene: string }> = new Map();
   private currentModelPolicy = { chat: '', compact: '', scene: '' };
-  private emittedSessionIds = new Set<string>();
   private sessionToolResults = new Map<string, Map<string, string>>();
   private sessionToolResultDirs = new Map<string, string>();
   private readonly dbPath: string;
@@ -166,7 +187,7 @@ export class QoderWorkTraceInput extends BaseSessionInput {
 
   protected override async collect(): Promise<AgentActivityEntry[]> {
     const files = await this.discoverSessionFiles();
-    const completedSessions: Array<{ session: SessionState; sessionId: string }> = [];
+    const completedSessions: CompletedSessionWindow[] = [];
 
     for (const filePath of files) {
       const completed = await this.processLogFile(filePath);
@@ -177,8 +198,8 @@ export class QoderWorkTraceInput extends BaseSessionInput {
     completedSessions.push(...evicted);
 
     const allEntries: AgentActivityEntry[] = [];
-    for (const { session, sessionId } of completedSessions) {
-      const entries = await this.emitSessionSpans(session, sessionId);
+    for (const completed of completedSessions) {
+      const entries = await this.emitSessionSpans(completed);
       allEntries.push(...entries);
     }
     return allEntries;
@@ -186,7 +207,7 @@ export class QoderWorkTraceInput extends BaseSessionInput {
 
   // ─── SDK log processing ────────────────────────────────────────────────────
 
-  private async processLogFile(filePath: string): Promise<Array<{ session: SessionState; sessionId: string }>> {
+  private async processLogFile(filePath: string): Promise<CompletedSessionWindow[]> {
     const stateKey = `${this.id}:${filePath}`;
     let stat;
     try { stat = await fs.stat(filePath); } catch { return []; }
@@ -231,7 +252,7 @@ export class QoderWorkTraceInput extends BaseSessionInput {
       await handle.close();
     }
 
-    const completed: Array<{ session: SessionState; sessionId: string }> = [];
+    const completed: CompletedSessionWindow[] = [];
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;
       const event = parseSdkLogLine(line);
@@ -258,7 +279,7 @@ export class QoderWorkTraceInput extends BaseSessionInput {
     return session;
   }
 
-  private handleEvent(event: SdkEvent): { session: SessionState; sessionId: string } | null {
+  private handleEvent(event: SdkEvent): CompletedSessionWindow | null {
     switch (event.kind) {
       case 'system_init': {
         const session = this.ensureSession(event.sessionId, event.ts);
@@ -365,7 +386,12 @@ export class QoderWorkTraceInput extends BaseSessionInput {
         if (!session) return null;
         this.sessions.delete(event.sessionId);
         this.activeTurns.delete(event.sessionId);
-        return { session, sessionId: event.sessionId };
+        return {
+          session,
+          sessionId: event.sessionId,
+          resultId: event.resultId,
+          resultTimestamp: event.ts,
+        };
       }
 
       case 'post_tool_use': {
@@ -412,9 +438,9 @@ export class QoderWorkTraceInput extends BaseSessionInput {
     return policy.chat || policy.scene || policy.compact || UNKNOWN_MODEL;
   }
 
-  private evictStaleSessions(): Array<{ session: SessionState; sessionId: string }> {
+  private evictStaleSessions(): CompletedSessionWindow[] {
     const now = Date.now();
-    const evicted: Array<{ session: SessionState; sessionId: string }> = [];
+    const evicted: CompletedSessionWindow[] = [];
     for (const [id, session] of this.sessions) {
       if (now - session.lastSeenMs > SESSION_TTL_MS) {
         this.finalizeTurn(id);
@@ -453,7 +479,7 @@ export class QoderWorkTraceInput extends BaseSessionInput {
     }
 
     try {
-      let userPrompt = '';
+      const userPrompts: DbUserPrompt[] = [];
       const toolResults: DbSessionData['toolResults'] = [];
 
       // Strategy 1: sub_chats.messages (standard QoderWork format)
@@ -468,53 +494,65 @@ export class QoderWorkTraceInput extends BaseSessionInput {
         try { messages = JSON.parse(row.messages); } catch { continue; }
         if (!Array.isArray(messages)) continue;
 
-        for (const msg of messages) {
+        for (let i = 0; i < messages.length; i++) {
+          const msg = messages[i];
           if (!msg || typeof msg !== 'object') continue;
           const m = msg as Record<string, unknown>;
 
           if (m.role === 'user') {
             const text = extractUserText(m);
-            if (text) userPrompt = text;
+            if (text) {
+              userPrompts.push({
+                id: stringFrom(m.id) || stringFrom(m.uuid) || `subchat-${i}`,
+                text,
+                updatedAtMs: millisFromUnknown(m.timestamp) ?? millisFromUnknown(m.created_at) ?? 0,
+                sequence: i,
+              });
+            }
           }
 
           if (m.role === 'assistant' && Array.isArray(m.parts)) {
-            for (const part of m.parts as Array<Record<string, unknown>>) {
-              const partType = typeof part.type === 'string' ? part.type : '';
-              if (!partType.startsWith('tool-') || partType === 'tool-Thinking') continue;
-              const callId = typeof part.toolCallId === 'string' ? part.toolCallId
-                : typeof part.tool_call_id === 'string' ? part.tool_call_id
-                : typeof part.id === 'string' ? part.id : '';
-              const result = typeof part.output === 'string' ? part.output
-                : typeof part.result === 'string' ? part.result
-                : part.output !== undefined ? JSON.stringify(part.output) : '';
-              if (callId && result) toolResults.push({ toolCallId: callId, result });
-            }
+            collectToolResultsFromParts(m.parts as Array<Record<string, unknown>>, toolResults);
           }
         }
       }
 
-      // Strategy 2 (CN fallback): messages table has separate rows per role
-      // CN sub_chats.messages is always [], but messages table stores the data.
-      if (!userPrompt) {
-        const msgRows = await queryReadonly<{ parts: string }>(
-          this.dbPath,
-          `SELECT m.parts FROM messages m
-           JOIN sub_chats sc ON m.sub_chat_id = sc.id
-           WHERE sc.session_id = ? AND m.role = 'user'
-           ORDER BY m.sequence ASC LIMIT 1`,
-          [sessionId],
-        );
-        if (msgRows.length > 0) {
-          let parsed: unknown;
-          try { parsed = JSON.parse(msgRows[0].parts); } catch { /* skip */ }
-          if (Array.isArray(parsed)) {
-            const text = extractUserText({ parts: parsed });
-            if (text) userPrompt = text;
+      // Strategy 2 (CN): messages table has separate rows per role.
+      const msgRows = await queryReadonly<{ id: string; role: string; parts: string; updatedAt: number; sequence: number }>(
+        this.dbPath,
+        `SELECT m.id AS id, m.role AS role, m.parts AS parts, m.updated_at AS updatedAt, m.sequence AS sequence
+         FROM messages m
+         JOIN sub_chats sc ON m.sub_chat_id = sc.id
+         WHERE sc.session_id = ?
+           AND m.parts IS NOT NULL
+           AND m.parts != ''
+           AND m.parts != '[]'
+         ORDER BY m.sequence ASC, m.updated_at ASC`,
+        [sessionId],
+      );
+
+      for (const row of msgRows) {
+        let parsed: unknown;
+        try { parsed = JSON.parse(row.parts); } catch { continue; }
+        if (!Array.isArray(parsed)) continue;
+
+        if (row.role === 'user') {
+          const text = extractUserText({ parts: parsed });
+          if (text) {
+            userPrompts.push({
+              id: row.id,
+              text,
+              updatedAtMs: row.updatedAt > 0 ? row.updatedAt * 1000 : 0,
+              sequence: row.sequence,
+            });
           }
+        } else if (row.role === 'assistant') {
+          collectToolResultsFromParts(parsed as Array<Record<string, unknown>>, toolResults);
         }
       }
 
-      return userPrompt || toolResults.length > 0 ? { userPrompt, toolResults } : null;
+      userPrompts.sort((a, b) => a.sequence - b.sequence || a.updatedAtMs - b.updatedAtMs);
+      return userPrompts.length > 0 || toolResults.length > 0 ? { userPrompts, toolResults } : null;
     } catch (err) {
       this.logger.warn('failed to read qoder-work sqlite for trace', { error: String(err) });
       return null;
@@ -523,17 +561,17 @@ export class QoderWorkTraceInput extends BaseSessionInput {
 
   // ─── Span tree emitter ─────────────────────────────────────────────────────
 
-  private async emitSessionSpans(session: SessionState, sessionId: string): Promise<AgentActivityEntry[]> {
+  private async emitSessionSpans(completed: CompletedSessionWindow): Promise<AgentActivityEntry[]> {
+    const { session, sessionId, resultId, resultTimestamp } = completed;
     if (session.turns.length === 0) return [];
 
-    if (this.emittedSessionIds.has(sessionId)) return [];
-    this.emittedSessionIds.add(sessionId);
-    if (this.emittedSessionIds.size > 100) {
-      const arr = [...this.emittedSessionIds];
-      this.emittedSessionIds = new Set(arr.slice(-50));
-    }
-
     const dbData = await this.readDbSessionData(sessionId);
+    const identity = this.resolveTurnIdentity(sessionId, session, dbData, resultId, resultTimestamp);
+    if (!identity || this.hasEmittedWindow(identity.emitKey)) {
+      this.sessionToolResults.delete(sessionId);
+      this.sessionToolResultDirs.delete(sessionId);
+      return [];
+    }
 
     const toolResultMap = new Map<string, string>();
     const sdkToolResults = this.sessionToolResults.get(sessionId);
@@ -570,7 +608,7 @@ export class QoderWorkTraceInput extends BaseSessionInput {
     const startTime = session.turns[0].startTimestamp;
     const model = session.turns[0].model || UNKNOWN_MODEL;
     const userId = this.configuredUserId || undefined;
-    const turnId = `${sessionId}:t1`;
+    const turnId = identity.turnId;
 
     const entries: AgentActivityEntry[] = [];
 
@@ -583,18 +621,21 @@ export class QoderWorkTraceInput extends BaseSessionInput {
       'user.id': userId,
     };
 
-    // ── User prompt (no step.id, no model) — converter treats as user-hook ──
-    // Must omit gen_ai.request.model so partitionUserHookRequests() identifies
-    // this as a user-hook event (merged into ENTRY, not a phantom STEP span).
-    const entryTime = session.startTime < startTime ? session.startTime : startTime - 100;
+    // ── User prompt (other event, attached to s1 so converter does not create an empty STEP) ──
+    const matchedPrompt = identity.userPrompt;
+    const firstStepId = `${turnId}:s1`;
+    const entryTime = matchedPrompt?.updatedAtMs && matchedPrompt.updatedAtMs > 0
+      ? matchedPrompt.updatedAtMs
+      : session.startTime < startTime ? session.startTime : startTime - 100;
     entries.push(buildAgentActivityEntry({
       ...baseFields,
       'gen_ai.request.model': undefined,
+      'gen_ai.step.id': firstStepId,
       time_unix_nano: msToNanos(entryTime),
       'event.id': crypto.randomUUID(),
       'event.name': 'other',
-      'gen_ai.input.messages_delta': dbData?.userPrompt
-        ? [{ role: 'user', parts: [{ type: 'text', content: dbData.userPrompt }] }]
+      'gen_ai.input.messages_delta': matchedPrompt?.text
+        ? [{ role: 'user', parts: [{ type: 'text', content: matchedPrompt.text }] }]
         : undefined,
       attributes: { source: this.source },
     }));
@@ -614,8 +655,8 @@ export class QoderWorkTraceInput extends BaseSessionInput {
 
       // Build input.messages_delta (step1=user prompt, stepN=prev tool results)
       let inputDelta: JsonValue | undefined;
-      if (round === 0 && dbData?.userPrompt) {
-        inputDelta = [{ role: 'user', parts: [{ type: 'text', content: dbData.userPrompt }] }];
+      if (round === 0 && matchedPrompt?.text) {
+        inputDelta = [{ role: 'user', parts: [{ type: 'text', content: matchedPrompt.text }] }];
       } else if (round > 0) {
         const prevTurn = session.turns[round - 1];
         if (prevTurn && prevTurn.toolCalls.length > 0) {
@@ -739,13 +780,169 @@ export class QoderWorkTraceInput extends BaseSessionInput {
       }
     }
 
+    this.markWindowEmitted(identity);
     this.sessionToolResults.delete(sessionId);
     this.sessionToolResultDirs.delete(sessionId);
     return entries;
   }
+
+  private resolveTurnIdentity(
+    sessionId: string,
+    session: SessionState,
+    dbData: DbSessionData | null,
+    resultId?: string,
+    resultTimestamp?: number,
+  ): TurnIdentity | null {
+    const prompt = this.matchUserPrompt(session, dbData, resultTimestamp);
+    const lastMessageId = [...session.turns].reverse().find(turn => turn.messageId)?.messageId;
+    const emitKey = prompt?.id
+      ? `${sessionId}:prompt:${prompt.id}`
+      : resultId
+        ? `${sessionId}:result:${resultId}`
+        : lastMessageId
+          ? `${sessionId}:last-message:${lastMessageId}`
+          : resultTimestamp
+            ? `${sessionId}:result-ts:${resultTimestamp}`
+            : `${sessionId}:window:${session.startTime}:${session.lastSeenMs}`;
+
+    if (this.hasEmittedWindow(emitKey)) return null;
+
+    if (prompt?.id) {
+      return {
+        turnId: `${sessionId}:${prompt.id}`,
+        emitKey,
+        userPrompt: prompt,
+      };
+    }
+
+    const fallbackCounter = this.nextFallbackTurnCounter(sessionId);
+    return {
+      turnId: `${sessionId}:t${fallbackCounter}`,
+      emitKey,
+      fallbackCounter,
+    };
+  }
+
+  private matchUserPrompt(
+    session: SessionState,
+    dbData: DbSessionData | null,
+    resultTimestamp?: number,
+  ): DbUserPrompt | undefined {
+    const prompts = dbData?.userPrompts ?? [];
+    if (prompts.length === 0) return undefined;
+
+    const consumed = new Set(this.getStringArrayState('consumedPromptIds'));
+    const unconsumed = prompts.filter(prompt => prompt.id && !consumed.has(prompt.id));
+    if (unconsumed.length === 0) return undefined;
+
+    const windowStart = session.turns[0]?.startTimestamp ?? session.startTime;
+    const resultTime = resultTimestamp ?? session.lastSeenMs;
+    const upperBound = Math.max(windowStart, resultTime) + 30_000;
+    const orderedCandidates = unconsumed
+      .filter(prompt => prompt.updatedAtMs === 0 || prompt.updatedAtMs <= upperBound)
+      .sort((a, b) => {
+        const da = a.updatedAtMs > 0 ? Math.abs(a.updatedAtMs - windowStart) : Number.MAX_SAFE_INTEGER;
+        const db = b.updatedAtMs > 0 ? Math.abs(b.updatedAtMs - windowStart) : Number.MAX_SAFE_INTEGER;
+        return da - db || a.sequence - b.sequence;
+      });
+    if (orderedCandidates.length > 0) return orderedCandidates[0];
+
+    const nearest = unconsumed
+      .filter(prompt => prompt.updatedAtMs > 0)
+      .map(prompt => ({ prompt, delta: Math.min(Math.abs(prompt.updatedAtMs - windowStart), Math.abs(prompt.updatedAtMs - resultTime)) }))
+      .filter(item => item.delta <= PROMPT_MATCH_TOLERANCE_MS)
+      .sort((a, b) => a.delta - b.delta || a.prompt.sequence - b.prompt.sequence)[0];
+    return nearest?.prompt;
+  }
+
+  private hasEmittedWindow(emitKey: string): boolean {
+    return this.getStringArrayState('emittedWindowKeys').includes(emitKey);
+  }
+
+  private markWindowEmitted(identity: TurnIdentity): void {
+    const state = this.getState();
+    const extra = toPlainObject(state.extra);
+    const emittedWindowKeys = capArray([...this.getStringArrayState('emittedWindowKeys'), identity.emitKey], 500);
+    const consumedPromptIds = identity.userPrompt?.id
+      ? capArray([...this.getStringArrayState('consumedPromptIds'), identity.userPrompt.id], 500)
+      : this.getStringArrayState('consumedPromptIds');
+    const turnCounters = toNumberRecord(extra.turnCounters);
+    if (identity.fallbackCounter !== undefined) {
+      const sessionId = identity.turnId.split(':t')[0];
+      turnCounters[sessionId] = Math.max(turnCounters[sessionId] ?? 0, identity.fallbackCounter);
+    }
+    this.setState({
+      extra: {
+        ...extra,
+        emittedWindowKeys,
+        consumedPromptIds,
+        turnCounters,
+      },
+    });
+  }
+
+  private nextFallbackTurnCounter(sessionId: string): number {
+    const extra = toPlainObject(this.getState().extra);
+    const turnCounters = toNumberRecord(extra.turnCounters);
+    return (turnCounters[sessionId] ?? 0) + 1;
+  }
+
+  private getStringArrayState(key: string): string[] {
+    const value = toPlainObject(this.getState().extra)[key];
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
+  }
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+function collectToolResultsFromParts(
+  parts: Array<Record<string, unknown>>,
+  toolResults: Array<{ toolCallId: string; result: string }>,
+): void {
+  for (const part of parts) {
+    const partType = typeof part.type === 'string' ? part.type : '';
+    if (!partType.startsWith('tool-') || partType === 'tool-Thinking') continue;
+    const callId = typeof part.toolCallId === 'string' ? part.toolCallId
+      : typeof part.tool_call_id === 'string' ? part.tool_call_id
+      : typeof part.id === 'string' ? part.id : '';
+    const result = typeof part.output === 'string' ? part.output
+      : typeof part.result === 'string' ? part.result
+      : part.output !== undefined ? JSON.stringify(part.output) : '';
+    if (callId && result) toolResults.push({ toolCallId: callId, result });
+  }
+}
+
+function stringFrom(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function millisFromUnknown(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value > 1e12 ? value : value * 1000;
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  const asNumber = Number(value);
+  if (Number.isFinite(asNumber)) return asNumber > 1e12 ? asNumber : asNumber * 1000;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+function capArray<T>(values: T[], max: number): T[] {
+  return values.length > max ? values.slice(values.length - max) : values;
+}
+
+function toPlainObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function toNumberRecord(value: unknown): Record<string, number> {
+  const input = toPlainObject(value);
+  const out: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(input)) {
+    if (typeof raw === 'number' && Number.isFinite(raw)) out[key] = raw;
+  }
+  return out;
+}
 
 function finiteNum(value: number | undefined): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;

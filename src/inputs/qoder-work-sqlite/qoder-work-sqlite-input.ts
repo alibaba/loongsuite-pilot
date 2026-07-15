@@ -91,8 +91,9 @@ export class QoderWorkSqliteInput extends BaseInput {
 
     try {
       const baseline = await readMaxUpdatedAt(this.dbPath);
+      const extra = toPlainObject(state.extra);
       this.stateStore.update(this.id, {
-        extra: { lastUpdatedAt: baseline },
+        extra: { ...extra, lastUpdatedAt: baseline },
       });
     } catch (err) {
       this.logger.warn('failed to baseline qoder-work sqlite cursor', { error: String(err) });
@@ -115,12 +116,13 @@ export class QoderWorkSqliteInput extends BaseInput {
     if (rows.length === 0) return [];
 
     const entries: AgentActivityEntry[] = [];
+    const emittedToolResultIds = new Set(getStringArray(state.extra, 'emittedToolResultIds'));
     let maxUpdate = cursor;
 
     for (const row of rows) {
       if (row.updatedAt > maxUpdate) maxUpdate = row.updatedAt;
       try {
-        const rowEntries = transformRow(row, this.agentType);
+        const rowEntries = transformRow(row, this.agentType, emittedToolResultIds);
         entries.push(...rowEntries);
       } catch (err) {
         this.logger.warn('row transform failed', {
@@ -130,14 +132,23 @@ export class QoderWorkSqliteInput extends BaseInput {
       }
     }
 
+    const extra = toPlainObject(state.extra);
     this.stateStore.update(this.id, {
-      extra: { lastUpdatedAt: maxUpdate },
+      extra: {
+        ...extra,
+        lastUpdatedAt: maxUpdate,
+        emittedToolResultIds: capArray([...emittedToolResultIds], 1000),
+      },
     });
     return entries;
   }
 }
 
-function transformRow(row: MessageRow, agentType: ClientType): AgentActivityEntry[] {
+function transformRow(
+  row: MessageRow,
+  agentType: ClientType,
+  emittedToolResultIds: Set<string> = new Set(),
+): AgentActivityEntry[] {
   const sessionId = row.sessionId ?? '';
   // QoderWork stores `updated_at` as unix seconds; normalise to milliseconds
   // so downstream timestamp serialisation matches the rest of the pipeline.
@@ -204,10 +215,14 @@ function transformRow(row: MessageRow, agentType: ClientType): AgentActivityEntr
       ? rawResult
       : toJsonValue(rawResult) ?? '';
 
+    const eventId = hashId([sessionId, row.id, 'tool_result', callId, String(i)]);
+    if (emittedToolResultIds.has(eventId)) continue;
+    emittedToolResultIds.add(eventId);
+
     out.push(
       buildAgentActivityEntry({
         timestamp: tsMs,
-        'event.id': hashId([sessionId, row.id, 'tool_result', callId, String(i)]),
+        'event.id': eventId,
         'event.name': 'tool.result',
         'gen_ai.session.id': sessionId,
         'gen_ai.agent.type': agentType,
@@ -304,6 +319,21 @@ function queryReadonly<T>(
   });
 }
 
+
+function getStringArray(extra: unknown, key: string): string[] {
+  const value = toPlainObject(extra)[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
+}
+
+function toPlainObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function capArray<T>(values: T[], max: number): T[] {
+  return values.length > max ? values.slice(values.length - max) : values;
+}
 
 function stringOr(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.length > 0 ? value : fallback;

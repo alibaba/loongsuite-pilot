@@ -174,6 +174,32 @@ describe('QoderWorkSqliteInput', () => {
     expect(second).toHaveLength(0);
   });
 
+  it('does not re-emit existing tool.result parts when an assistant row is updated', async () => {
+    stateStore.update('qoder-work-sqlite', { extra: { lastUpdatedAt: 0 } });
+
+    await insertSubChat(dbPath, { id: 'sc-tool-update', session_id: 'sess-tool-update' });
+    await insertMessage(dbPath, {
+      id: 'm-tool-update',
+      sub_chat_id: 'sc-tool-update',
+      sequence: 1,
+      role: 'assistant',
+      parts: JSON.stringify([
+        { type: 'tool-Bash', toolCallId: 'call-repeat', toolName: 'Bash', output: 'ok' },
+      ]),
+      updated_at: 1_777_000_020,
+    });
+
+    const first = await collectOnce(makeInput());
+    expect(first).toHaveLength(1);
+    expect(first[0]!['event.name']).toBe('tool.result');
+
+    await execSql(dbPath, `UPDATE messages SET updated_at = ? WHERE id = ?`, [1_777_000_021, 'm-tool-update']);
+
+    const second = await collectOnce(makeInput());
+    expect(second).toHaveLength(0);
+    expect(stateStore.get('qoder-work-sqlite').extra?.lastUpdatedAt).toBe(1_777_000_021);
+  });
+
   it('emits both user prompt and tool result across multiple messages rows', async () => {
     stateStore.update('qoder-work-sqlite', { extra: { lastUpdatedAt: 0 } });
 
