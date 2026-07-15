@@ -809,8 +809,13 @@ cmd_restart_updater() {
                 _new_init=$(detect_init_system "false")
                 if [ "$_new_init" != "none" ]; then
                     if autostart_install_updater_only "false" 2>>"$UPDATER_LOG_FILE"; then
-                        echo "✅ updater self-healed: registered as $_new_init"
-                        _restarted=true
+                        sleep 1
+                        if updater_process_exists; then
+                            echo "✅ updater self-healed: registered as $_new_init"
+                            _restarted=true
+                        else
+                            echo "⚠️  updater self-heal registered ($_new_init) but process not found" >&2
+                        fi
                     fi
                 fi
                 if [ "$_restarted" = false ]; then
