@@ -36,6 +36,16 @@ Each line is one normalized event.
 | `outputDir` | Directory where output files are written. |
 | `rotateDaily` | Rotates output by date. |
 
+## Retention And Disk Protection
+
+Local JSONL output follows the global retention policy in [Configuration Guide](configuration.md). By default, output logs are retained for 7 days.
+
+Pilot also has fixed disk-protection cleanup for unusually large local output:
+
+- Output files larger than 512 MiB can be removed after they are older than 2 days.
+- If `logs/output` exceeds 2 GiB, older dated output files are removed until the directory is back under the limit.
+- Today's output file is never removed by retention cleanup. Size-pressure cleanup also keeps yesterday's output files.
+
 Environment variables:
 
 | Variable | Description |
