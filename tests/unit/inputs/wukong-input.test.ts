@@ -1042,6 +1042,73 @@ describe('WukongInput', () => {
     expect(fileWriteCall!['gen_ai.tool.call.arguments']).toEqual({ path: '/repo/src/new-file.ts' });
   });
 
+  it('omits null activity arguments and marks failed activity snapshots consistently', async () => {
+    const activityMessages = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-activity-failure',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-act-failure', threadId: 'sess-1', timestamp: 1779240560000 },
+          {
+            type: 'ACTIVITY_SNAPSHOT', activityType: 'FILE_WRITE', timestamp: 1779240560100,
+            content: { file_path: null, status: 'done', start_time: 1779240560100, finish_time: 1779240560200 },
+          },
+          {
+            type: 'ACTIVITY_SNAPSHOT', activityType: 'FILE_READ', timestamp: 1779240560300,
+            content: {
+              path: '/missing.ts', status: 'failed', error_message: 'file not found',
+              start_time: 1779240560300, finish_time: 1779240560400,
+            },
+          },
+          {
+            type: 'ACTIVITY_SNAPSHOT', activityType: 'SKILL', timestamp: 1779240560500,
+            content: {
+              skill_name: 'missing_skill', status: 'error', error_message: 'skill failed',
+              start_time: 1779240560500, finish_time: 1779240560600,
+            },
+          },
+          { type: 'TEXT_MESSAGE_CONTENT', delta: 'Done.', messageId: 'text-3', timestamp: 1779240560700 },
+          { type: 'USAGE', prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, timestamp: 1779240560800 },
+          { type: 'RUN_FINISHED', runId: 'run-act-failure', threadId: 'sess-1', timestamp: 1779240560800 },
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: activityMessages }),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const toolCallByName = (name: string) => entries.find(e => e['event.name'] === 'tool.call' && e['gen_ai.tool.name'] === name);
+    const toolResultByName = (name: string) => entries.find(e => e['event.name'] === 'tool.result' && e['gen_ai.tool.name'] === name);
+
+    expect(toolCallByName('file_write')!['gen_ai.tool.call.arguments']).toBeUndefined();
+
+    const fileReadResult = toolResultByName('file_read');
+    expect(fileReadResult!['tool.result.status']).toBe('failure');
+    expect(fileReadResult!['error.type']).toBe('_OTHER');
+    expect(fileReadResult!['error.message']).toBe('file not found');
+    expect(fileReadResult!['gen_ai.tool.call.result']).toEqual({ status: 'failed', error_message: 'file not found' });
+
+    const skillResult = toolResultByName('skill');
+    expect(skillResult!['tool.result.status']).toBe('failure');
+    expect(skillResult!['error.type']).toBe('_OTHER');
+    expect(skillResult!['error.message']).toBe('skill failed');
+  });
+
   it('generates trace_id and span_id on all assistant-derived entries', async () => {
     const listResp = JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] });
     const msgsResp = JSON.stringify({ messages: SAMPLE_MESSAGES });
