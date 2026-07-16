@@ -77,6 +77,7 @@ export { QoderCnTraceInput } from './inputs/qoder-cn-trace/qoder-cn-trace-input.
 export { QoderCliSessionInput } from './inputs/qoder-cli-session/qoder-cli-session-input.js';
 export { CodexTranscriptInput } from './inputs/codex-transcript/codex-transcript-input.js';
 export { CodexAbortedTurnInput } from './inputs/codex-aborted-turn/codex-aborted-turn-input.js';
+export { PiCodingAgentLogInput } from './inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 export { BaseFlusher } from './flushers/base-flusher.js';
 export { SlsFlusher } from './flushers/sls-flusher.js';
 export { JsonlFlusher } from './flushers/jsonl-flusher.js';

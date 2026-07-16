@@ -43,6 +43,7 @@ Pilot 主要帮助回答这些问题：
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
 | OpenCode | 插件注入 | Yes | Yes | Yes | Yes |
+| Pi Coding Agent | Extension 注入 | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | Yes | Yes | Yes | Yes |
 | Qoder for JetBrains | 自动检测 | Yes | Yes | Yes | Yes |

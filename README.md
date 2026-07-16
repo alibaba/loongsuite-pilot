@@ -46,6 +46,7 @@ Pilot is designed to answer practical questions:
 | Codex         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | OpenCode      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
+| Pi Coding Agent | Extension injection     | Yes          | Yes        | Yes         | Yes                       |
 | Qoder         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Qoder CN      | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Qoder for JetBrains | Detection-only      | Yes          | Yes        | Yes         | Yes                       |

@@ -1024,6 +1024,44 @@ try {
 }
 
 # ============================================================
+# Remove Pi Coding Agent extension injection
+# ============================================================
+function Remove-PiCodingAgentExtension {
+    $cfg = Join-Path $env:USERPROFILE ".pi\agent\settings.json"
+    if (-not (Test-Path $cfg)) { return }
+    $short = $cfg -replace [regex]::Escape($env:USERPROFILE), "~"
+
+    if (-not $script:NODE_BIN) {
+        Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+        return
+    }
+
+    $result = & $script:NODE_BIN -e @'
+const fs = require('fs');
+const f = process.argv[1];
+const isOurs = s => typeof s === 'string' && (
+  s.includes('loongsuite-pilot-pi-coding-agent') ||
+  s.includes('plugins/pi-coding-agent/index.mjs')
+);
+try {
+  const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  if (!Array.isArray(data.extensions)) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data.extensions.length;
+  data.extensions = data.extensions.filter(entry => !isOurs(typeof entry === 'string' ? entry : ''));
+  if (data.extensions.length === before) { process.stdout.write('nochange'); process.exit(0); }
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write('cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+'@ $cfg 2>$null
+
+    switch ($result) {
+        "cleaned"  { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }
+        "nochange" { }
+        default    { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
+    }
+}
+
+# ============================================================
 # Remove OTel plugin (Claude/Codex)
 # ============================================================
 function Remove-OtelPlugin {
@@ -1262,6 +1300,10 @@ function Cmd-Uninstall {
 
     Msg "==> 清理 OpenCode 插件配置..." "==> Cleaning up OpenCode plugin config..."
     Remove-OpenCodePlugin
+    Write-Host ""
+
+    Msg "==> 清理 Pi Coding Agent Extension 配置..." "==> Cleaning up Pi Coding Agent extension config..."
+    Remove-PiCodingAgentExtension
     Write-Host ""
 
     if ($Purge) {

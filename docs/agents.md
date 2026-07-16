@@ -14,6 +14,7 @@ Use these IDs in installer options, `agent-control.json`, and `config.json`.
 | Codex | `codex` | Hook integration. |
 | Cursor | `cursor` | Hook integration. |
 | OpenCode | `opencode` | Plugin injection. |
+| Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. |
 | Qoder | `qoder` | Hook integration. |
 | Qoder CN | `qoder-cn` | Hook integration. |
 | Qoder for JetBrains | `qoder-jetbrains` | Detection-only deploy ID. Agent gating uses `qoder` in `agent-control.json`; content policy uses `qoder-idea` in `config.json`. |

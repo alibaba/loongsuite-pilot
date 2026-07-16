@@ -337,6 +337,7 @@ function buildListenersConfig(
     'cursor-hook': { enabled: true, pollInterval: 30_000 },
     'claude-code-log': { enabled: true, pollInterval: 30_000 },
     'codex-transcript': { enabled: true, pollInterval: 30_000 },
+    'pi-coding-agent-log': { enabled: true, pollInterval: 30_000 },
   };
 
   const result = { ...defaults };
