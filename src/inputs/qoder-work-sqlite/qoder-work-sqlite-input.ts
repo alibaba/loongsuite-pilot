@@ -12,6 +12,7 @@ const DB_REL_PATH = path.join('data', 'agents.db');
 const SOURCE = 'qoder-work-sqlite';
 const UNKNOWN_MODEL = 'unknown';
 const SQL_BATCH_LIMIT = 1000;
+const TOOL_RESULT_DEDUPE_LIMIT = 50_000;
 
 export interface QoderWorkSqliteInputOptions extends InputOptions {
   dbPath?: string;
@@ -137,7 +138,7 @@ export class QoderWorkSqliteInput extends BaseInput {
       extra: {
         ...extra,
         lastUpdatedAt: maxUpdate,
-        emittedToolResultIds: capArray([...emittedToolResultIds], 1000),
+        emittedToolResultIds: capArray([...emittedToolResultIds], TOOL_RESULT_DEDUPE_LIMIT),
       },
     });
     return entries;
@@ -215,7 +216,7 @@ function transformRow(
       ? rawResult
       : toJsonValue(rawResult) ?? '';
 
-    const eventId = hashId([sessionId, row.id, 'tool_result', callId, String(i)]);
+    const eventId = hashId([sessionId, row.id, 'tool_result', callId, toolName, hashJson(resultPayload)]);
     if (emittedToolResultIds.has(eventId)) continue;
     emittedToolResultIds.add(eventId);
 
@@ -337,6 +338,19 @@ function capArray<T>(values: T[], max: number): T[] {
 
 function stringOr(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.length > 0 ? value : fallback;
+}
+
+function hashJson(value: JsonValue): string {
+  return crypto
+    .createHash('sha256')
+    .update(stableStringify(value))
+    .digest('hex');
+}
+
+function stableStringify(value: JsonValue): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
 }
 
 function hashId(parts: Array<string | number | undefined>): string {

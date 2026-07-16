@@ -25,6 +25,9 @@ const UNKNOWN_MODEL = 'unknown';
 const MAX_READ_BYTES = 16 * 1024 * 1024;
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const PROMPT_MATCH_TOLERANCE_MS = 5 * 60 * 1000;
+const WINDOW_STATE_LIMIT = 500;
+const TURN_COUNTER_STATE_LIMIT = 500;
+const DB_MESSAGE_LIMIT = 2000;
 const DB_REL_PATH = path.join('data', 'agents.db');
 
 function msToNanos(ms: number): string {
@@ -86,6 +89,7 @@ interface CompletedSessionWindow {
 }
 
 interface TurnIdentity {
+  sessionId: string;
   turnId: string;
   emitKey: string;
   userPrompt?: DbUserPrompt;
@@ -396,6 +400,7 @@ export class QoderWorkTraceInput extends BaseSessionInput {
 
       case 'post_tool_use': {
         if (!event.sessionId || !event.toolUseId) return null;
+        this.ensureSession(event.sessionId, event.ts);
         let map = this.sessionToolResults.get(event.sessionId);
         if (!map) { map = new Map(); this.sessionToolResults.set(event.sessionId, map); }
         map.set(event.toolUseId, event.toolResponse);
@@ -449,6 +454,7 @@ export class QoderWorkTraceInput extends BaseSessionInput {
         }
         this.sessions.delete(id);
         this.activeTurns.delete(id);
+        this.cleanupSessionCaches(id);
       }
     }
     return evicted;
@@ -517,37 +523,39 @@ export class QoderWorkTraceInput extends BaseSessionInput {
         }
       }
 
-      // Strategy 2 (CN): messages table has separate rows per role.
-      const msgRows = await queryReadonly<{ id: string; role: string; parts: string; updatedAt: number; sequence: number }>(
-        this.dbPath,
-        `SELECT m.id AS id, m.role AS role, m.parts AS parts, m.updated_at AS updatedAt, m.sequence AS sequence
-         FROM messages m
-         JOIN sub_chats sc ON m.sub_chat_id = sc.id
-         WHERE sc.session_id = ?
-           AND m.parts IS NOT NULL
-           AND m.parts != ''
-           AND m.parts != '[]'
-         ORDER BY m.sequence ASC, m.updated_at ASC`,
-        [sessionId],
-      );
+      if (userPrompts.length === 0 && toolResults.length === 0) {
+        const msgRows = await queryReadonly<{ id: string; role: string; parts: string; updatedAt: number; sequence: number }>(
+          this.dbPath,
+          `SELECT m.id AS id, m.role AS role, m.parts AS parts, m.updated_at AS updatedAt, m.sequence AS sequence
+           FROM messages m
+           JOIN sub_chats sc ON m.sub_chat_id = sc.id
+           WHERE sc.session_id = ?
+             AND m.parts IS NOT NULL
+             AND m.parts != ''
+             AND m.parts != '[]'
+           ORDER BY m.sequence ASC, m.updated_at ASC
+           LIMIT ${DB_MESSAGE_LIMIT}`,
+          [sessionId],
+        );
 
-      for (const row of msgRows) {
-        let parsed: unknown;
-        try { parsed = JSON.parse(row.parts); } catch { continue; }
-        if (!Array.isArray(parsed)) continue;
+        for (const row of msgRows) {
+          let parsed: unknown;
+          try { parsed = JSON.parse(row.parts); } catch { continue; }
+          if (!Array.isArray(parsed)) continue;
 
-        if (row.role === 'user') {
-          const text = extractUserText({ parts: parsed });
-          if (text) {
-            userPrompts.push({
-              id: row.id,
-              text,
-              updatedAtMs: row.updatedAt > 0 ? row.updatedAt * 1000 : 0,
-              sequence: row.sequence,
-            });
+          if (row.role === 'user') {
+            const text = extractUserText({ parts: parsed });
+            if (text) {
+              userPrompts.push({
+                id: row.id,
+                text,
+                updatedAtMs: row.updatedAt > 0 ? row.updatedAt * 1000 : 0,
+                sequence: row.sequence,
+              });
+            }
+          } else if (row.role === 'assistant') {
+            collectToolResultsFromParts(parsed as Array<Record<string, unknown>>, toolResults);
           }
-        } else if (row.role === 'assistant') {
-          collectToolResultsFromParts(parsed as Array<Record<string, unknown>>, toolResults);
         }
       }
 
@@ -563,13 +571,21 @@ export class QoderWorkTraceInput extends BaseSessionInput {
 
   private async emitSessionSpans(completed: CompletedSessionWindow): Promise<AgentActivityEntry[]> {
     const { session, sessionId, resultId, resultTimestamp } = completed;
-    if (session.turns.length === 0) return [];
+    if (session.turns.length === 0) {
+      this.cleanupSessionCaches(sessionId);
+      return [];
+    }
+
+    const physicalEmitKey = this.resolvePhysicalEmitKey(sessionId, session, resultId, resultTimestamp);
+    if (this.hasEmittedWindow(physicalEmitKey)) {
+      this.cleanupSessionCaches(sessionId);
+      return [];
+    }
 
     const dbData = await this.readDbSessionData(sessionId);
-    const identity = this.resolveTurnIdentity(sessionId, session, dbData, resultId, resultTimestamp);
+    const identity = this.resolveTurnIdentity(sessionId, session, physicalEmitKey, dbData, resultTimestamp);
     if (!identity || this.hasEmittedWindow(identity.emitKey)) {
-      this.sessionToolResults.delete(sessionId);
-      this.sessionToolResultDirs.delete(sessionId);
+      this.cleanupSessionCaches(sessionId);
       return [];
     }
 
@@ -781,46 +797,49 @@ export class QoderWorkTraceInput extends BaseSessionInput {
     }
 
     this.markWindowEmitted(identity);
-    this.sessionToolResults.delete(sessionId);
-    this.sessionToolResultDirs.delete(sessionId);
+    this.cleanupSessionCaches(sessionId);
     return entries;
   }
 
   private resolveTurnIdentity(
     sessionId: string,
     session: SessionState,
+    physicalEmitKey: string,
     dbData: DbSessionData | null,
-    resultId?: string,
     resultTimestamp?: number,
   ): TurnIdentity | null {
     const prompt = this.matchUserPrompt(session, dbData, resultTimestamp);
-    const lastMessageId = [...session.turns].reverse().find(turn => turn.messageId)?.messageId;
-    const emitKey = prompt?.id
-      ? `${sessionId}:prompt:${prompt.id}`
-      : resultId
-        ? `${sessionId}:result:${resultId}`
-        : lastMessageId
-          ? `${sessionId}:last-message:${lastMessageId}`
-          : resultTimestamp
-            ? `${sessionId}:result-ts:${resultTimestamp}`
-            : `${sessionId}:window:${session.startTime}:${session.lastSeenMs}`;
-
-    if (this.hasEmittedWindow(emitKey)) return null;
+    if (this.hasEmittedWindow(physicalEmitKey)) return null;
 
     if (prompt?.id) {
       return {
+        sessionId,
         turnId: `${sessionId}:${prompt.id}`,
-        emitKey,
+        emitKey: physicalEmitKey,
         userPrompt: prompt,
       };
     }
 
     const fallbackCounter = this.nextFallbackTurnCounter(sessionId);
     return {
+      sessionId,
       turnId: `${sessionId}:t${fallbackCounter}`,
-      emitKey,
+      emitKey: physicalEmitKey,
       fallbackCounter,
     };
+  }
+
+  private resolvePhysicalEmitKey(
+    sessionId: string,
+    session: SessionState,
+    resultId?: string,
+    resultTimestamp?: number,
+  ): string {
+    const lastMessageId = [...session.turns].reverse().find(turn => turn.messageId)?.messageId;
+    if (resultId) return `${sessionId}:result:${resultId}`;
+    if (lastMessageId) return `${sessionId}:last-message:${lastMessageId}`;
+    if (resultTimestamp) return `${sessionId}:result-ts:${resultTimestamp}`;
+    return `${sessionId}:window:${session.startTime}:${session.lastSeenMs}`;
   }
 
   private matchUserPrompt(
@@ -862,21 +881,20 @@ export class QoderWorkTraceInput extends BaseSessionInput {
   private markWindowEmitted(identity: TurnIdentity): void {
     const state = this.getState();
     const extra = toPlainObject(state.extra);
-    const emittedWindowKeys = capArray([...this.getStringArrayState('emittedWindowKeys'), identity.emitKey], 500);
+    const emittedWindowKeys = capArray([...this.getStringArrayState('emittedWindowKeys'), identity.emitKey], WINDOW_STATE_LIMIT);
     const consumedPromptIds = identity.userPrompt?.id
-      ? capArray([...this.getStringArrayState('consumedPromptIds'), identity.userPrompt.id], 500)
+      ? capArray([...this.getStringArrayState('consumedPromptIds'), identity.userPrompt.id], WINDOW_STATE_LIMIT)
       : this.getStringArrayState('consumedPromptIds');
     const turnCounters = toNumberRecord(extra.turnCounters);
     if (identity.fallbackCounter !== undefined) {
-      const sessionId = identity.turnId.split(':t')[0];
-      turnCounters[sessionId] = Math.max(turnCounters[sessionId] ?? 0, identity.fallbackCounter);
+      turnCounters[identity.sessionId] = Math.max(turnCounters[identity.sessionId] ?? 0, identity.fallbackCounter);
     }
     this.setState({
       extra: {
         ...extra,
         emittedWindowKeys,
         consumedPromptIds,
-        turnCounters,
+        turnCounters: capNumberRecord(turnCounters, TURN_COUNTER_STATE_LIMIT),
       },
     });
   }
@@ -890,6 +908,11 @@ export class QoderWorkTraceInput extends BaseSessionInput {
   private getStringArrayState(key: string): string[] {
     const value = toPlainObject(this.getState().extra)[key];
     return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
+  }
+
+  private cleanupSessionCaches(sessionId: string): void {
+    this.sessionToolResults.delete(sessionId);
+    this.sessionToolResultDirs.delete(sessionId);
   }
 }
 
@@ -933,6 +956,11 @@ function toPlainObject(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function capNumberRecord(values: Record<string, number>, max: number): Record<string, number> {
+  const entries = Object.entries(values);
+  return Object.fromEntries(entries.length > max ? entries.slice(entries.length - max) : entries);
 }
 
 function toNumberRecord(value: unknown): Record<string, number> {

@@ -200,6 +200,44 @@ describe('QoderWorkSqliteInput', () => {
     expect(stateStore.get('qoder-work-sqlite').extra?.lastUpdatedAt).toBe(1_777_000_021);
   });
 
+  it('emits only newly appended tool.result parts when an assistant row grows', async () => {
+    stateStore.update('qoder-work-sqlite', { extra: { lastUpdatedAt: 0 } });
+
+    await insertSubChat(dbPath, { id: 'sc-tool-grow', session_id: 'sess-tool-grow' });
+    await insertMessage(dbPath, {
+      id: 'm-tool-grow',
+      sub_chat_id: 'sc-tool-grow',
+      sequence: 1,
+      role: 'assistant',
+      parts: JSON.stringify([
+        { type: 'tool-Bash', toolCallId: 'call-old', toolName: 'Bash', output: 'old' },
+      ]),
+      updated_at: 1_777_000_022,
+    });
+
+    const first = await collectOnce(makeInput());
+    expect(first).toHaveLength(1);
+    expect(first[0]!['gen_ai.tool.call.id']).toBe('call-old');
+
+    await execSql(
+      dbPath,
+      `UPDATE messages SET parts = ?, updated_at = ? WHERE id = ?`,
+      [
+        JSON.stringify([
+          { type: 'tool-Bash', toolCallId: 'call-old', toolName: 'Bash', output: 'old' },
+          { type: 'tool-Read', toolCallId: 'call-new', toolName: 'Read', output: 'new' },
+        ]),
+        1_777_000_023,
+        'm-tool-grow',
+      ],
+    );
+
+    const second = await collectOnce(makeInput());
+    expect(second).toHaveLength(1);
+    expect(second[0]!['gen_ai.tool.call.id']).toBe('call-new');
+    expect(second[0]!['gen_ai.tool.call.result']).toBe('new');
+  });
+
   it('emits both user prompt and tool result across multiple messages rows', async () => {
     stateStore.update('qoder-work-sqlite', { extra: { lastUpdatedAt: 0 } });
 
