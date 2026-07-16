@@ -21,6 +21,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
   if (previousDataDir === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
   else process.env.LOONGSUITE_PILOT_DATA_DIR = previousDataDir;
@@ -181,6 +182,121 @@ describe('Pi Coding Agent extension', () => {
     }
   });
 
+  it('serializes tool result responses as strings without embedding image payloads', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+
+    await runtime.emit('context', {
+      messages: [
+        {
+          role: 'toolResult',
+          toolCallId: 'call-1',
+          toolName: 'read',
+          isError: false,
+          content: [{ type: 'text', text: '# README' }],
+        },
+        {
+          role: 'toolResult',
+          toolCallId: 'call-2',
+          toolName: 'image',
+          isError: false,
+          content: [
+            { type: 'text', text: 'screenshot' },
+            { type: 'image', mimeType: 'image/png', data: 'sensitive-base64-payload' },
+          ],
+        },
+      ],
+    });
+
+    const messages = readRecords()[0]['gen_ai.input.messages'];
+    expect(messages[0].parts[0].response).toBe('# README');
+    const mixedResponse = messages[1].parts[0].response;
+    expect(typeof mixedResponse).toBe('string');
+    expect(mixedResponse).toContain('screenshot');
+    expect(mixedResponse).toContain('image/png');
+    expect(mixedResponse).not.toContain('sensitive-base64-payload');
+  });
+
+  it('tightens an existing log directory before writing sensitive records', async () => {
+    if (process.platform === 'win32') return;
+
+    const logDir = path.join(tmpDir, 'logs', 'pi-coding-agent');
+    fs.mkdirSync(logDir, { recursive: true, mode: 0o755 });
+    fs.chmodSync(logDir, 0o755);
+
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+    await runtime.emit('context', { messages: [] });
+
+    expect(fs.statSync(logDir).mode & 0o777).toBe(0o700);
+  });
+
+  it('creates the log directory only once across multiple event writes', async () => {
+    const mkdirSpy = vi.spyOn(fs, 'mkdirSync');
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+
+    await runtime.emit('context', { messages: [] });
+    await runtime.emit('message_end', {
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'done' }],
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-5',
+        stopReason: 'stop',
+        timestamp: Date.now(),
+        usage: {},
+      },
+    });
+    await runtime.emit('tool_execution_start', {
+      toolCallId: 'call-1',
+      toolName: 'read',
+      args: { path: 'README.md' },
+    });
+    await runtime.emit('tool_execution_end', {
+      toolCallId: 'call-1',
+      toolName: 'read',
+      result: { content: 'ok' },
+      isError: false,
+    });
+
+    expect(mkdirSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('recreates the cached log directory when it is removed at runtime', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+    await runtime.emit('context', { messages: [] });
+
+    const logDir = path.join(tmpDir, 'logs', 'pi-coding-agent');
+    fs.rmSync(logDir, { recursive: true, force: true });
+    await runtime.emit('tool_execution_start', {
+      toolCallId: 'call-recovered',
+      toolName: 'read',
+      args: { path: 'README.md' },
+    });
+
+    expect(readRecords()).toEqual([
+      expect.objectContaining({
+        'event.name': 'tool.call',
+        'gen_ai.tool.call.id': 'call-recovered',
+      }),
+    ]);
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(logDir).mode & 0o777).toBe(0o700);
+    }
+  });
+
+  it('keeps fallback turn and step identifiers correlated', async () => {
+    const runtime = await createRuntime();
+    await runtime.emit('session_start', { reason: 'startup' });
+    await runtime.emit('turn_start', { turnIndex: 0, timestamp: Date.now() });
+    await runtime.emit('context', { messages: [] });
+
+    const request = readRecords()[0];
+    expect(request['gen_ai.step.id']).toBe(`${request['gen_ai.turn.id']}:s1`);
+  });
+
   it('omits sensitive message and tool payloads when content capture is disabled', async () => {
     const runtime = await createRuntime({
       agents: { 'pi-coding-agent': { captureMessageContent: false } },
@@ -195,7 +311,8 @@ describe('Pi Coding Agent extension', () => {
         content: [{ type: 'text', text: 'secret response' }],
         provider: 'openai',
         model: 'gpt-5',
-        stopReason: 'stop',
+        stopReason: 'error',
+        errorMessage: 'provider echoed secret prompt',
         timestamp: Date.now(),
         usage: {
           input: 10,
@@ -224,8 +341,33 @@ describe('Pi Coding Agent extension', () => {
     expect(records[0]).not.toHaveProperty('gen_ai.system_instructions');
     expect(records[0]).not.toHaveProperty('gen_ai.tool.definitions');
     expect(records[1]).not.toHaveProperty('gen_ai.output.messages');
+    expect(records[1]['error.type']).toBe('llm_error');
+    expect(records[1]).not.toHaveProperty('error.message');
     expect(records[2]).not.toHaveProperty('gen_ai.tool.call.arguments');
     expect(records[3]).not.toHaveProperty('gen_ai.tool.call.result');
+  });
+
+  it('keeps LLM error diagnostics when content capture is enabled', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+    await runtime.emit('message_end', {
+      message: {
+        role: 'assistant',
+        content: [],
+        provider: 'openai',
+        model: 'gpt-5',
+        stopReason: 'error',
+        errorMessage: 'rate limit exceeded',
+        timestamp: Date.now(),
+        usage: {},
+      },
+    });
+
+    expect(readRecords()[0]).toMatchObject({
+      'event.name': 'llm.response',
+      'error.type': 'llm_error',
+      'error.message': 'rate limit exceeded',
+    });
   });
 
   it('writes errors to a side log without rejecting Pi event handlers', async () => {
@@ -241,7 +383,6 @@ describe('Pi Coding Agent extension', () => {
     await expect(startTurn(runtime)).resolves.toBeUndefined();
     await expect(runtime.emit('context', { messages: [] })).resolves.toBeUndefined();
 
-    vi.restoreAllMocks();
     const errorDir = path.join(tmpDir, 'logs', 'pi-coding-agent');
     expect(fs.readdirSync(errorDir).some(name => name.includes('-error-'))).toBe(true);
   });

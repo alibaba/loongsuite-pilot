@@ -22,6 +22,7 @@ const MAX_OBJECT_KEYS = 100;
 const MAX_DEPTH = 8;
 
 const pluginDir = path.dirname(fileURLToPath(import.meta.url));
+// Installed layout: $PILOT_DATA/plugins/pi-coding-agent/index.mjs.
 const installedDataDir = path.resolve(pluginDir, '..', '..');
 
 function resolveDataDir() {
@@ -93,18 +94,40 @@ function safeStringify(value) {
   return JSON.stringify(toSerializable(value));
 }
 
+let logDirReady = false;
+
 function ensureLogDir() {
-  fs.mkdirSync(resolveLogDir(), { recursive: true, mode: 0o700 });
+  if (logDirReady) return;
+  const dir = resolveLogDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') fs.chmodSync(dir, 0o700);
+  logDirReady = true;
+}
+
+function appendLogFile(fileName, content) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      ensureLogDir();
+      fs.appendFileSync(path.join(resolveLogDir(), fileName), content, {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+      return;
+    } catch (error) {
+      if (attempt === 0 && error?.code === 'ENOENT') {
+        logDirReady = false;
+        continue;
+      }
+      throw error;
+    }
+  }
 }
 
 function writeError(source, error) {
   try {
-    ensureLogDir();
-    const file = path.join(resolveLogDir(), `${AGENT_TYPE}-error-${todayStamp()}.log`);
-    fs.appendFileSync(
-      file,
+    appendLogFile(
+      `${AGENT_TYPE}-error-${todayStamp()}.log`,
       `${new Date().toISOString()} [${source}] ${error?.stack || error}\n`,
-      { encoding: 'utf8', mode: 0o600 },
     );
   } catch {
     // Telemetry errors are intentionally ignored.
@@ -113,9 +136,7 @@ function writeError(source, error) {
 
 function writeRecord(record) {
   try {
-    ensureLogDir();
-    const file = path.join(resolveLogDir(), `${AGENT_TYPE}-${todayStamp()}.jsonl`);
-    fs.appendFileSync(file, `${safeStringify(record)}\n`, { encoding: 'utf8', mode: 0o600 });
+    appendLogFile(`${AGENT_TYPE}-${todayStamp()}.jsonl`, `${safeStringify(record)}\n`);
   } catch (error) {
     writeError('writeRecord', error);
   }
@@ -204,6 +225,15 @@ function contentParts(content) {
   return parts;
 }
 
+function toolResultResponse(content) {
+  if (typeof content === 'string') return truncate(content);
+  const parts = contentParts(content);
+  if (parts.every(part => part.type === 'text')) {
+    return truncate(parts.map(part => part.content).join('\n'));
+  }
+  return truncate(safeStringify(parts));
+}
+
 function canonicalMessage(message) {
   if (!message || typeof message !== 'object') return null;
 
@@ -213,7 +243,7 @@ function canonicalMessage(message) {
       parts: [{
         type: 'tool_call_response',
         id: message.toolCallId || null,
-        response: contentParts(message.content),
+        response: toolResultResponse(message.content),
         name: message.toolName || 'unknown',
         is_error: message.isError === true,
       }],
@@ -337,7 +367,8 @@ export default function loongSuitePilotPiCodingAgent(pi) {
   }));
 
   pi.on('turn_start', safeHandler('turn_start', async (event) => {
-    state.stepId = `${state.turnId || crypto.randomUUID()}:s${event.turnIndex + 1}`;
+    state.turnId ||= crypto.randomUUID();
+    state.stepId = `${state.turnId}:s${event.turnIndex + 1}`;
     state.stepStartedAt = event.timestamp || Date.now();
     state.requestEmitted = false;
   }));
@@ -399,7 +430,9 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     }
     if (message.stopReason === 'error') {
       record['error.type'] = 'llm_error';
-      if (message.errorMessage) record['error.message'] = truncate(message.errorMessage, 8 * 1024);
+      if (state.captureContent && message.errorMessage) {
+        record['error.message'] = truncate(message.errorMessage, 8 * 1024);
+      }
     }
     writeRecord(record);
   }));

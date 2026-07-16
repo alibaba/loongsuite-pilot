@@ -95,4 +95,18 @@ describe('PiCodingAgentLogInput', () => {
     await second.stop();
     expect(secondEntries).toHaveLength(0);
   });
+
+  it('tightens an existing log directory when the input starts', async () => {
+    if (process.platform === 'win32') return;
+    await fs.chmod(tmpDir, 0o755);
+
+    const input = new PiCodingAgentLogInput({
+      stateStore: stateStore as never,
+      logDir: tmpDir,
+    });
+    await input.start();
+    await input.stop();
+
+    expect((await fs.stat(tmpDir)).mode & 0o777).toBe(0o700);
+  });
 });

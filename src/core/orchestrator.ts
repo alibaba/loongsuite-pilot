@@ -41,7 +41,7 @@ import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcrip
 import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
-import { PiCodingAgentLogInput } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
+import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
@@ -1039,7 +1039,7 @@ export class Orchestrator extends EventEmitter {
 
     // --- Pi Coding Agent Log (Pi extension JSONL) ---
     const piCodingAgentLogDir = path.join(this.dataDir, 'logs', 'pi-coding-agent');
-    await ensureDir(piCodingAgentLogDir);
+    await ensurePiCodingAgentLogDir(piCodingAgentLogDir);
     const piCodingAgentLogInput = new PiCodingAgentLogInput({
       stateStore: this.stateStore,
       logDir: piCodingAgentLogDir,
