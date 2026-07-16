@@ -680,6 +680,68 @@ describe('CodexTranscriptInput', () => {
     );
   });
 
+  it('keeps collecting normal turns after a control abort in a rollout created while running', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-live-control-abort-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createInput(root);
+    const debug = vi.fn();
+    (input as unknown as { logger: { debug: typeof debug } }).logger.debug = debug;
+
+    const beforeTurnIds = ['turn-before-1', 'turn-before-2', 'turn-before-3'];
+    const controlTurnId = 'turn-control';
+    const afterTurnId = 'turn-after';
+    const transcriptLines = [
+      ...simpleCompletedTurn(
+        'session-1', beforeTurnIds[0]!, 'first request', 'first response', 100, 10,
+        '2026-06-24T06:00:00.000Z',
+      ),
+      ...simpleCompletedTurn(
+        'session-1', beforeTurnIds[1]!, 'second request', 'second response', 110, 11,
+        '2026-06-24T06:01:00.000Z',
+      ).slice(1),
+      ...simpleCompletedTurn(
+        'session-1', beforeTurnIds[2]!, 'third request', 'third response', 120, 12,
+        '2026-06-24T06:02:00.000Z',
+      ).slice(1),
+      ...controlOnlyAbortedTurn('session-1', controlTurnId, '2026-06-24T06:03:00.000Z'),
+      ...simpleCompletedTurn(
+        'session-1', afterTurnId, 'request after abort', 'response after abort', 130, 13,
+        '2026-06-24T06:04:00.000Z',
+      ).slice(1),
+    ];
+    const transcript = await writeTranscript(sessionDir, transcriptLines.join('\n') + '\n');
+
+    await waitFor(() => responsesForTurn(entries, afterTurnId).length === 1);
+    await input.stop();
+
+    const normalTurnIds = [...beforeTurnIds, afterTurnId];
+    expect(normalTurnIds.map(turnId => responsesForTurn(entries, turnId).length)).toEqual([1, 1, 1, 1]);
+    expect(entries.filter(entry => entry['agent.codex.transcript_turn_id'] === controlTurnId)).toHaveLength(0);
+    expect(entries.filter(entry => entry['event.name'] === 'llm.response')
+      .map(entry => entry['gen_ai.usage.total_tokens'])).toEqual([110, 121, 132, 143]);
+    expect(new Set(entries.map(entry => entry['event.id'])).size).toBe(entries.length);
+
+    const checkpoint = transcriptCheckpoint(stateStore, transcript) as {
+      scanOffset?: number;
+      activeTurn?: unknown;
+      pendingTerminal?: unknown;
+      emittedTerminalTurnIds?: string[];
+    };
+    expect(checkpoint.scanOffset).toBe((await fs.stat(transcript)).size);
+    expect(checkpoint.activeTurn).toBeNull();
+    expect(checkpoint.pendingTerminal).toBeNull();
+    expect(checkpoint.emittedTerminalTurnIds).toEqual(
+      expect.arrayContaining([...normalTurnIds, controlTurnId]),
+    );
+    expect(globalProcessedTurnIds(stateStore)).toEqual(
+      expect.arrayContaining([...normalTurnIds, controlTurnId]),
+    );
+    expect(debug).toHaveBeenCalledWith(
+      'processed terminal Codex turn without observable entries',
+      expect.objectContaining({ turnId: controlTurnId, terminalStatus: 'interrupted' }),
+    );
+  });
+
   it('limits terminal recovery per file cycle and resumes from the saved offset', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-terminal-budget-'));
     tempDirs.push(root);
