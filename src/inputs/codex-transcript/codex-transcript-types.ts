@@ -5,10 +5,35 @@ export const MAX_GLOBAL_EMITTED_TERMINAL_TURNS = 10_000;
 
 export type CodexTerminalStatus = 'completed' | 'interrupted';
 
+export interface CodexTranscriptInputContext {
+  /** Chain hash for the complete request context represented by this state. */
+  hash: string;
+  /** Incremental messages required by the next LLM request. */
+  delta?: JsonValue[];
+  /** Full context is retained only while it remains below the configured limit. */
+  fullMessages?: JsonValue[];
+  /** Transcript range used to rebuild an oversized delta without bloating input-state.json. */
+  deltaRange?: {
+    startOffset: number;
+    endOffset: number;
+  };
+}
+
 export interface CodexActiveTranscriptTurn {
   turnId: string;
   startOffset: number;
   startedAtMs: number;
+  /** Turn-scoped context is needed after incremental recovery advances past turn_context. */
+  model?: string;
+  cwd?: string;
+  developerInstructions?: string;
+  emittedPrompt?: boolean;
+  emittedStepCount?: number;
+  emittedStepRequestIds?: string[];
+  emittedStepResponseIds?: string[];
+  emittedToolCallIds?: string[];
+  emittedToolResultIds?: string[];
+  inputContext?: CodexTranscriptInputContext;
 }
 
 /**
@@ -65,6 +90,7 @@ export interface CodexTranscriptStep {
   hasResponseEvidence: boolean;
   completedAtMs: number;
   responseId?: string;
+  inputMessages?: JsonValue[];
   reasoning: string[];
   tools: CodexTranscriptTool[];
   tokenUsage?: CodexTranscriptUsage;

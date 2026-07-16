@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/resource-context.mjs';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { CodexTranscriptInput } from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
-import type { AgentActivityEntry } from '../../../../src/types/index.js';
+import type { AgentActivityEntry, JsonValue } from '../../../../src/types/index.js';
 
 const tempDirs: string[] = [];
 
@@ -50,7 +50,10 @@ function completedTurn(): string {
       id: 'session-1', model_provider: 'openai',
     }),
     record('2026-06-24T06:00:01.000Z', 'turn_context', {
-      turn_id: 'turn-1', model: 'gpt-5.5', cwd: '/tmp/project',
+      turn_id: 'turn-1',
+      model: 'gpt-5.5',
+      cwd: '/tmp/project',
+      developer_instructions: 'Follow the project conventions.',
     }),
     record('2026-06-24T06:00:02.000Z', 'event_msg', {
       type: 'task_started', turn_id: 'turn-1',
@@ -86,6 +89,88 @@ function completedTurn(): string {
       type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'fixed', completed_at: 1_719_208_011,
     }),
   ].join('\n') + '\n';
+}
+
+function completedTurnWithLargeToolOutput(toolOutput: string): string {
+  return [
+    record('2026-06-24T06:00:00.000Z', 'session_meta', {
+      id: 'session-1', model_provider: 'openai',
+    }),
+    record('2026-06-24T06:00:01.000Z', 'turn_context', {
+      turn_id: 'turn-1', model: 'gpt-5.5',
+    }),
+    record('2026-06-24T06:00:02.000Z', 'event_msg', {
+      type: 'task_started', turn_id: 'turn-1',
+    }),
+    record('2026-06-24T06:00:03.000Z', 'response_item', {
+      type: 'message', role: 'user', content: [{ type: 'input_text', text: 'inspect it' }],
+    }),
+    record('2026-06-24T06:00:04.000Z', 'response_item', {
+      type: 'function_call', id: 'fc-1', call_id: 'call-1', name: 'exec_command', arguments: JSON.stringify({ cmd: 'cat large.txt' }),
+    }),
+    record('2026-06-24T06:00:05.000Z', 'response_item', {
+      type: 'function_call_output', call_id: 'call-1', output: JSON.stringify(toolOutput),
+    }),
+    record('2026-06-24T06:00:06.000Z', 'event_msg', tokenUsage(100, 10)),
+    record('2026-06-24T06:00:07.000Z', 'response_item', {
+      type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }],
+    }),
+    record('2026-06-24T06:00:08.000Z', 'event_msg', {
+      type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'done',
+    }),
+  ].join('\n') + '\n';
+}
+
+function completedTurnWithManyToolWaves(count: number): string {
+  const baseMs = Date.parse('2026-06-24T06:00:00.000Z');
+  const ts = (seconds: number): string => new Date(baseMs + seconds * 1_000).toISOString();
+  const lines = [
+    record('2026-06-24T06:00:00.000Z', 'session_meta', {
+      id: 'session-1', model_provider: 'openai',
+    }),
+    record('2026-06-24T06:00:01.000Z', 'turn_context', {
+      turn_id: 'turn-1', model: 'gpt-5.5',
+    }),
+    record('2026-06-24T06:00:02.000Z', 'event_msg', {
+      type: 'task_started', turn_id: 'turn-1',
+    }),
+    record('2026-06-24T06:00:03.000Z', 'response_item', {
+      type: 'message', role: 'user', content: [{ type: 'input_text', text: 'run many checks' }],
+    }),
+  ];
+
+  for (let index = 0; index < count; index++) {
+    const second = 4 + index * 3;
+    lines.push(
+      record(ts(second), 'event_msg', {
+        type: 'agent_message', message: `checking ${index}`, phase: 'commentary',
+      }),
+      record(ts(second + 1), 'response_item', {
+        type: 'function_call',
+        id: `fc-${index}`,
+        call_id: `call-${index}`,
+        name: 'exec_command',
+        arguments: JSON.stringify({ cmd: `echo ${index}` }),
+      }),
+      record(ts(second + 2), 'response_item', {
+        type: 'function_call_output',
+        call_id: `call-${index}`,
+        output: JSON.stringify(String(index)),
+      }),
+      record(new Date(baseMs + (second + 2) * 1_000 + 100).toISOString(), 'event_msg', tokenUsage(100 + index, 10)),
+    );
+  }
+
+  lines.push(
+    record('2026-06-24T06:10:00.000Z', 'event_msg', {
+      type: 'agent_message', message: 'done', phase: 'final',
+    }),
+    record('2026-06-24T06:10:00.100Z', 'event_msg', tokenUsage(1_000, 20)),
+    record('2026-06-24T06:10:01.000Z', 'event_msg', {
+      type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'done',
+    }),
+  );
+  return lines.join('\n') + '\n';
 }
 
 function simpleCompletedTurn(
@@ -125,6 +210,7 @@ function simpleCompletedTurn(
 async function createInput(root: string): Promise<{
   input: CodexTranscriptInput;
   entries: AgentActivityEntry[];
+  batches: AgentActivityEntry[][];
   sessionDir: string;
   wakeupDir: string;
   stateStore: StateStore;
@@ -135,9 +221,13 @@ async function createInput(root: string): Promise<{
   const wakeupDir = path.join(root, 'wakeups');
   const input = new CodexTranscriptInput({ stateStore, sessionDir, wakeupDir, pollIntervalMs: 10 });
   const entries: AgentActivityEntry[] = [];
-  input.on('entries', batch => entries.push(...batch));
+  const batches: AgentActivityEntry[][] = [];
+  input.on('entries', batch => {
+    batches.push([...batch]);
+    entries.push(...batch);
+  });
   await input.start();
-  return { input, entries, sessionDir, wakeupDir, stateStore };
+  return { input, entries, batches, sessionDir, wakeupDir, stateStore };
 }
 
 async function writeTranscript(sessionDir: string, text: string): Promise<string> {
@@ -346,6 +436,49 @@ describe('CodexTranscriptInput', () => {
     expect(tools.map(entry => entry['gen_ai.step.id'])).toEqual([
       'session-1:turn-1:s1', 'session-1:turn-1:s2',
     ]);
+  });
+
+  it('falls back to input message delta when the reconstructed request context exceeds 1MB', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-large-input-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createInput(root);
+    const largeToolOutput = 'x'.repeat(1024 * 1024 + 1);
+    await writeTranscript(sessionDir, completedTurnWithLargeToolOutput(largeToolOutput));
+
+    await waitFor(() => entries.filter(entry => entry['event.name'] === 'llm.request').length === 2);
+    await input.stop();
+
+    const requests = entries.filter(entry => entry['event.name'] === 'llm.request');
+    const secondRequest = requests[1]!;
+    const expectedDelta = [
+      {
+        role: 'assistant',
+        parts: [{
+          type: 'tool_call', id: 'call-1', name: 'exec_command', arguments: { command: 'cat large.txt' },
+        }],
+      },
+      {
+        role: 'tool',
+        parts: [{ type: 'tool_call_response', id: 'call-1', response: largeToolOutput }],
+      },
+    ];
+    expect(secondRequest['gen_ai.input.messages_delta']).toEqual(expectedDelta);
+    expect(secondRequest['gen_ai.input.messages']).toEqual(expectedDelta);
+    expect(secondRequest['gen_ai.input.messages_hash']).toEqual(expect.any(String));
+  });
+
+  it('emits long transcript turns in bounded batches', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-batches-'));
+    tempDirs.push(root);
+    const { input, entries, batches, sessionDir } = await createInput(root);
+    await writeTranscript(sessionDir, completedTurnWithManyToolWaves(80));
+
+    await waitFor(() => entries.filter(entry => entry['event.name'] === 'tool.result').length === 80);
+    await input.stop();
+
+    expect(entries.length).toBeGreaterThan(256);
+    expect(batches.length).toBeGreaterThan(1);
+    expect(Math.max(...batches.map(batch => batch.length))).toBeLessThanOrEqual(256);
   });
 
   it('projects AgentTeams resource context from the Stop wakeup marker', async () => {
@@ -629,7 +762,7 @@ describe('CodexTranscriptInput', () => {
     expect(responsesForTurn(restarted.entries, 'turn-3')[0]?.['gen_ai.usage.total_tokens']).toBe(330);
   });
 
-  it('waits for task_complete before exporting a Stop-triggered transcript', async () => {
+  it('exports completed transcript waves before task_complete and flushes stop at terminal', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-pending-'));
     tempDirs.push(root);
     const { input, entries, sessionDir } = await createInput(root);
@@ -637,11 +770,96 @@ describe('CodexTranscriptInput', () => {
     const terminal = lines.pop()!;
     const transcript = await writeTranscript(sessionDir, lines.join('\n') + '\n');
 
-    await new Promise(resolve => setTimeout(resolve, 50));
-    expect(entries).toEqual([]);
+    await waitFor(() => entries.some(entry => entry['event.name'] === 'tool.result'));
+    expect(entries.some(entry => entry['gen_ai.response.finish_reasons']?.includes('stop'))).toBe(false);
     await fs.appendFile(transcript, terminal + '\n', 'utf8');
     await waitFor(() => entries.some(entry => entry['gen_ai.response.finish_reasons']?.includes('stop')));
     await input.stop();
+  });
+
+  it('retains an incomplete suffix after a closed wave and recovers it after restart', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-partial-suffix-'));
+    tempDirs.push(root);
+    const first = await createInput(root);
+    const lines = completedTurn().trimEnd().split('\n');
+    const call2Index = lines.findIndex(line => line.includes('"call_id":"call-2"'));
+    const transcript = await writeTranscript(first.sessionDir, lines.slice(0, call2Index + 1).join('\n') + '\n');
+
+    await waitFor(() => first.entries.filter(entry => entry['event.name'] === 'llm.response').length === 1);
+    await first.input.stop();
+
+    await fs.appendFile(transcript, lines.slice(call2Index + 1).join('\n') + '\n', 'utf8');
+    const restarted = await createInput(root);
+    await waitFor(() => restarted.entries.some(entry => entry['gen_ai.response.finish_reasons']?.includes('stop')));
+    await restarted.input.stop();
+
+    const responses = [...first.entries, ...restarted.entries]
+      .filter(entry => entry['event.name'] === 'llm.response');
+    expect(responses.map(entry => entry['gen_ai.step.id'])).toEqual([
+      'session-1:turn-1:s1',
+      'session-1:turn-1:s2',
+      'session-1:turn-1:s3',
+    ]);
+    expect(responses.map(entry => entry['gen_ai.usage.total_tokens'])).toEqual([110, 132, 143]);
+    expect([...first.entries, ...restarted.entries]
+      .filter(entry => entry['event.name'] === 'tool.call')
+      .map(entry => entry['gen_ai.tool.call.id'])).toEqual(['call-1', 'call-2']);
+
+    const secondRequest = restarted.entries.find(entry => entry['gen_ai.step.id'] === 'session-1:turn-1:s2'
+      && entry['event.name'] === 'llm.request')!;
+    expect(secondRequest['gen_ai.input.messages_delta']).toEqual([
+      {
+        role: 'assistant',
+        parts: [{
+          type: 'tool_call', id: 'call-1', name: 'exec_command', arguments: { command: 'pwd' },
+        }],
+      },
+      {
+        role: 'tool',
+        parts: [{ type: 'tool_call_response', id: 'call-1', response: '/tmp/project' }],
+      },
+    ]);
+    expect(secondRequest['gen_ai.input.messages']).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'fix it' }] },
+      ...(secondRequest['gen_ai.input.messages_delta'] as JsonValue[]),
+    ]);
+    expect(secondRequest).toMatchObject({
+      'gen_ai.request.model': 'gpt-5.5',
+      'agent.codex.cwd': '/tmp/project',
+      'gen_ai.system_instructions': [{ type: 'text', content: 'Follow the project conventions.' }],
+    });
+    expect(restarted.entries.find(entry => entry['gen_ai.step.id'] === 'session-1:turn-1:s2'
+      && entry['event.name'] === 'llm.response')).toMatchObject({
+      'gen_ai.response.model': 'gpt-5.5',
+      'agent.codex.cwd': '/tmp/project',
+      'gen_ai.system_instructions': [{ type: 'text', content: 'Follow the project conventions.' }],
+    });
+  });
+
+  it('rebuilds an oversized persisted delta from transcript offsets', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-large-persisted-delta-'));
+    tempDirs.push(root);
+    const first = await createInput(root);
+    const largeToolOutput = 'x'.repeat(1024 * 1024 + 1);
+    const lines = completedTurnWithLargeToolOutput(largeToolOutput).trimEnd().split('\n');
+    const firstTokenIndex = lines.findIndex(line => line.includes('"type":"token_count"'));
+    const transcript = await writeTranscript(first.sessionDir, lines.slice(0, firstTokenIndex + 1).join('\n') + '\n');
+
+    await waitFor(() => first.entries.some(entry => entry['event.name'] === 'llm.response'));
+    await first.input.stop();
+    const stateStat = await fs.stat(path.join(root, 'input-state.json'));
+    expect(stateStat.size).toBeLessThan(128 * 1024);
+
+    await fs.appendFile(transcript, lines.slice(firstTokenIndex + 1).join('\n') + '\n', 'utf8');
+    const restarted = await createInput(root);
+    await waitFor(() => restarted.entries.some(entry => entry['gen_ai.response.finish_reasons']?.includes('stop')));
+    await restarted.input.stop();
+
+    const request = restarted.entries.find(entry => entry['event.name'] === 'llm.request')!;
+    const delta = request['gen_ai.input.messages_delta'] as Array<Record<string, unknown>>;
+    expect(delta.map(message => message.role)).toEqual(['assistant', 'tool']);
+    expect(JSON.stringify(delta)).toContain(largeToolOutput);
+    expect(request['gen_ai.input.messages']).toEqual(delta);
   });
 
   it('falls back malformed transcript timestamps without emitting Unix epoch spans', async () => {

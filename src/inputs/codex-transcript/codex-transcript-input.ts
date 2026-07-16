@@ -7,9 +7,12 @@ import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
-import { buildCodexTranscriptEntries } from './codex-transcript-builder.js';
 import {
-  extractCodexTerminalTurn,
+  buildCodexTranscriptSegment,
+  nextInputMessagesForStep,
+} from './codex-transcript-builder.js';
+import {
+  extractCodexPartialTurn,
   extractCodexTranscriptMeta,
   sessionIdFromTranscriptPath,
 } from './codex-transcript-extractor.js';
@@ -17,13 +20,18 @@ import {
   MAX_EMITTED_TERMINAL_TURNS,
   MAX_GLOBAL_EMITTED_TERMINAL_TURNS,
   type CodexActiveTranscriptTurn,
+  type CodexTranscriptInputContext,
   type CodexTranscriptCheckpoint,
   type CodexTranscriptGlobalState,
+  type CodexTranscriptStep,
 } from './codex-transcript-types.js';
 import { stringValue, timestampMs } from './codex-transcript-utils.js';
 
 const DEFAULT_SESSION_DIR = '~/.codex/sessions';
 const READ_CHUNK_SIZE = 1024 * 1024;
+const MAX_EMIT_BATCH_ENTRIES = 256;
+const MAX_EMIT_BATCH_BYTES = 1024 * 1024;
+const MAX_PERSISTED_INPUT_CONTEXT_BYTES = 1024 * 1024;
 // Values emitted by DEFAULT_RESOURCE_ENV_FIELD_MAP in assets/hooks/shared/resource-context.mjs.
 // Add new AgentTeams resource fields to both lists together.
 const WAKEUP_RESOURCE_ATTRIBUTE_KEYS = [
@@ -36,6 +44,16 @@ interface JsonLine {
   startOffset: number;
   endOffset: number;
   record: Record<string, unknown>;
+}
+
+interface ClosedWaveRange {
+  startOffset: number;
+  endOffset: number;
+}
+
+interface SegmentRecoveryResult {
+  entries: AgentActivityEntry[];
+  consumedEndOffset: number;
 }
 
 export interface CodexTranscriptInputOptions extends InputOptions {
@@ -99,19 +117,50 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   protected override async collect(): Promise<AgentActivityEntry[]> {
-    const entries: AgentActivityEntry[] = [];
+    let emittedCount = 0;
     for (const filePath of await this.discoverSessionFiles()) {
-      entries.push(...await this.processFile(filePath));
+      emittedCount += await this.processFile(filePath);
     }
-    return entries;
+    if (emittedCount > 0) {
+      this.logger.debug('cycle produced entries', { count: emittedCount });
+    }
+    return [];
   }
 
-  private async processFile(filePath: string): Promise<AgentActivityEntry[]> {
+  private emitEntryBatches(entries: AgentActivityEntry[]): number {
+    let emittedCount = 0;
+    let batch: AgentActivityEntry[] = [];
+    let batchBytes = 0;
+
+    const flush = (): void => {
+      if (batch.length === 0) return;
+      this.emit('entries', batch);
+      emittedCount += batch.length;
+      batch = [];
+      batchBytes = 0;
+    };
+
+    for (const entry of entries) {
+      const entryBytes = serializedEntryBytes(entry);
+      if (
+        batch.length > 0
+        && (batch.length >= MAX_EMIT_BATCH_ENTRIES || batchBytes + entryBytes > MAX_EMIT_BATCH_BYTES)
+      ) {
+        flush();
+      }
+      batch.push(entry);
+      batchBytes += entryBytes;
+    }
+    flush();
+    return emittedCount;
+  }
+
+  private async processFile(filePath: string): Promise<number> {
     let stat;
     try {
       stat = await fs.stat(filePath);
     } catch {
-      return [];
+      return 0;
     }
     const key = this.stateKey(filePath);
     let checkpoint = this.readCheckpoint(key);
@@ -127,7 +176,7 @@ export class CodexTranscriptInput extends BaseInput {
     } else if (checkpoint.inode !== stat.ino) {
       await this.baselineFile(filePath, key);
       this.saveGlobalEmittedTurnIds();
-      return [];
+      return 0;
     }
 
     const hadPendingTerminal = checkpoint.pendingTerminal !== null;
@@ -135,74 +184,85 @@ export class CodexTranscriptInput extends BaseInput {
     if (recoveredPending === null) {
       this.saveCheckpoint(key, checkpoint);
       this.saveGlobalEmittedTurnIds();
-      return [];
+      return 0;
     }
+    let emittedCount = this.emitEntryBatches(recoveredPending);
     const checkpointChangedByPending = hadPendingTerminal;
 
     if (stat.size <= checkpoint.scanOffset) {
       if (checkpointChangedByPending || recoveredPending.length > 0) this.saveCheckpoint(key, checkpoint);
       this.saveGlobalEmittedTurnIds();
-      return recoveredPending;
+      return emittedCount;
     }
-    const lines = await readJsonLines(filePath, checkpoint.scanOffset, stat.size);
-    if (lines.nextOffset === checkpoint.scanOffset) {
-      if (checkpointChangedByPending || recoveredPending.length > 0) this.saveCheckpoint(key, checkpoint);
-      this.saveGlobalEmittedTurnIds();
-      return recoveredPending;
-    }
-
-    const entries: AgentActivityEntry[] = recoveredPending;
-    let nextScanOffset = lines.nextOffset;
-    for (const line of lines.items) {
+    let terminalTurnId: string | null = null;
+    let terminalEndOffset: number | null = null;
+    const scan = await scanJsonLines(filePath, checkpoint.scanOffset, stat.size, line => {
       const payload = asRecord(line.record.payload);
-      if (!payload) continue;
+      if (!payload) return;
       if (line.record.type === 'session_meta') {
         checkpoint.latestSessionMetaOffset = line.startOffset;
-        continue;
+        return;
       }
 
       const turnId = turnIdForStart(line.record, payload);
       if (turnId) {
         if (!checkpoint.activeTurn || checkpoint.activeTurn.turnId !== turnId) {
-          checkpoint.activeTurn = {
-            turnId,
-            startOffset: line.startOffset,
-            startedAtMs: timestampMs(line.record, Date.now()),
-          };
+          checkpoint.activeTurn = createActiveTurn(turnId, line.startOffset, timestampMs(line.record, Date.now()));
         }
-        continue;
+        updateActiveTurnMetadata(checkpoint.activeTurn, line.record, payload);
+        return;
       }
 
-      const terminalTurnId = terminalTurnIdFor(line.record, payload);
-      if (!terminalTurnId || checkpoint.activeTurn?.turnId !== terminalTurnId) continue;
-      if (!checkpoint.emittedTerminalTurnIds.includes(terminalTurnId)) {
-        if (this.isGloballyEmittedTurn(terminalTurnId)) {
-          this.rememberCheckpointTurnId(checkpoint, terminalTurnId);
-          checkpoint.activeTurn = null;
-        } else {
-          const recovered = await this.recoverTurn(filePath, checkpoint, line.endOffset);
-          if (recovered.length > 0) {
-            entries.push(...recovered);
+      const terminal = terminalTurnIdFor(line.record, payload);
+      if (!terminal || checkpoint.activeTurn?.turnId !== terminal) return;
+      terminalTurnId = terminal;
+      terminalEndOffset = line.endOffset;
+      return false;
+    });
+    if (scan.nextOffset === checkpoint.scanOffset) {
+      if (checkpointChangedByPending || recoveredPending.length > 0) this.saveCheckpoint(key, checkpoint);
+      this.saveGlobalEmittedTurnIds();
+      return emittedCount;
+    }
+
+    const nextScanOffset = terminalEndOffset ?? scan.nextOffset;
+    if (checkpoint.activeTurn && nextScanOffset > checkpoint.activeTurn.startOffset) {
+      if (terminalTurnId && checkpoint.emittedTerminalTurnIds.includes(terminalTurnId)) {
+        checkpoint.activeTurn = null;
+      } else if (terminalTurnId && this.isGloballyEmittedTurn(terminalTurnId)) {
+        this.rememberCheckpointTurnId(checkpoint, terminalTurnId);
+        checkpoint.activeTurn = null;
+      } else {
+        const recovered = await this.recoverTurnSegment(
+          filePath,
+          checkpoint,
+          nextScanOffset,
+          terminalTurnId !== null,
+        );
+        emittedCount += this.emitEntryBatches(recovered.entries);
+        if (recovered.consumedEndOffset > checkpoint.activeTurn.startOffset) {
+          checkpoint.activeTurn.startOffset = recovered.consumedEndOffset;
+        }
+        if (terminalTurnId && checkpoint.activeTurn.turnId === terminalTurnId) {
+          if (recovered.entries.length > 0) {
             this.rememberCheckpointTurnId(checkpoint, terminalTurnId);
             this.rememberGlobalEmittedTurnId(terminalTurnId);
+            checkpoint.activeTurn = null;
           } else {
-            checkpoint.pendingTerminal = { turnId: terminalTurnId, terminalEndOffset: line.endOffset };
+            checkpoint.pendingTerminal = { turnId: terminalTurnId, terminalEndOffset: nextScanOffset };
             this.logger.warn('terminal Codex turn could not be reconstructed; retaining it for the next scan', {
               transcriptPath: filePath,
               turnId: terminalTurnId,
             });
-            nextScanOffset = line.endOffset;
-            break;
           }
         }
       }
-      checkpoint.activeTurn = null;
     }
 
     checkpoint.scanOffset = nextScanOffset;
     this.saveCheckpoint(key, checkpoint);
     this.saveGlobalEmittedTurnIds();
-    return entries;
+    return emittedCount;
   }
 
   /**
@@ -225,8 +285,8 @@ export class CodexTranscriptInput extends BaseInput {
       checkpoint.pendingTerminal = null;
       return [];
     }
-    const recovered = await this.recoverTurn(filePath, checkpoint, pending.terminalEndOffset);
-    if (recovered.length === 0) {
+    const recovered = await this.recoverTurnSegment(filePath, checkpoint, pending.terminalEndOffset, true);
+    if (recovered.entries.length === 0) {
       this.logger.warn('pending Codex terminal turn still could not be reconstructed; will retry', {
         transcriptPath: filePath,
         turnId: pending.turnId,
@@ -237,28 +297,32 @@ export class CodexTranscriptInput extends BaseInput {
     this.rememberGlobalEmittedTurnId(pending.turnId);
     checkpoint.activeTurn = null;
     checkpoint.pendingTerminal = null;
-    return recovered;
+    return recovered.entries;
   }
 
-  private async recoverTurn(
+  private async recoverTurnSegment(
     filePath: string,
     checkpoint: CodexTranscriptCheckpoint,
-    terminalEndOffset: number,
-  ): Promise<AgentActivityEntry[]> {
+    endOffset: number,
+    terminal: boolean,
+  ): Promise<SegmentRecoveryResult> {
     const activeTurn = checkpoint.activeTurn;
-    if (!activeTurn) return [];
-    const records = await readJsonLines(filePath, activeTurn.startOffset, terminalEndOffset);
+    if (!activeTurn) return { entries: [], consumedEndOffset: endOffset };
+    const records = await readJsonLines(filePath, activeTurn.startOffset, endOffset);
     const metaRecord = checkpoint.latestSessionMetaOffset === null
       ? null
       : await readJsonLineAt(filePath, checkpoint.latestSessionMetaOffset);
     const meta = metaRecord ? extractCodexTranscriptMeta(metaRecord) : null;
-    const turn = extractCodexTerminalTurn(
+    const turn = extractCodexPartialTurn(
       records.items.map(item => item.record),
       meta,
       sessionIdFromTranscriptPath(filePath),
       activeTurn.turnId,
+      partialTurnOptions(activeTurn),
     );
-    if (turn && turn.unmatchedTokenUsages.length > 0) {
+    if (!turn) return { entries: [], consumedEndOffset: activeTurn.startOffset };
+    updateActiveTurnFromExtractedTurn(activeTurn, turn);
+    if (turn.unmatchedTokenUsages.length > 0) {
       this.logger.warn('Codex transcript token samples could not be assigned to a response wave', {
         transcriptPath: filePath,
         turnId: activeTurn.turnId,
@@ -266,10 +330,134 @@ export class CodexTranscriptInput extends BaseInput {
         lastUsage: turn.unmatchedTokenUsages.at(-1),
       });
     }
-    if (!turn) return [];
-    const entries = buildCodexTranscriptEntries(turn);
+
+    const stepStart = (activeTurn.emittedStepCount ?? 0) + 1;
+    const closedStepCount = terminal
+      ? turn.steps.length
+      : countLeadingClosedSteps(turn.steps);
+    const inputContext = await this.resolveInputContext(filePath, activeTurn, meta);
+    const built = buildCodexTranscriptSegment(turn, {
+      includePrompt: activeTurn.emittedPrompt !== true,
+      startStepNumber: stepStart,
+      ...(inputContext ? { inputContext } : {}),
+      contextStepCount: closedStepCount,
+    });
+    const closedStepIds = new Set(
+      Array.from({ length: closedStepCount }, (_, index) => (
+        `${turn.sessionId}:${turn.transcriptTurnId}:s${stepStart + index}`
+      )),
+    );
+    const readyEntries = built.entries.filter(entry => {
+      const eventName = entry['event.name'];
+      if (eventName !== 'llm.request' && eventName !== 'llm.response') return true;
+      return closedStepIds.has(String(entry['gen_ai.step.id'] ?? ''));
+    });
+    const entries = this.filterNewSegmentEntries(readyEntries, activeTurn);
+
+    if (turn.prompt) activeTurn.emittedPrompt = true;
+    activeTurn.emittedStepCount = (activeTurn.emittedStepCount ?? 0) + closedStepCount;
+
+    const closedWaveRanges = findClosedWaveRanges(records.items);
+    const lastClosedRange = closedStepCount > 0
+      ? closedWaveRanges[Math.min(closedStepCount, closedWaveRanges.length) - 1]
+      : undefined;
+    if (closedStepCount > 0) {
+      activeTurn.inputContext = persistedInputContext(built.nextInputContext, lastClosedRange);
+    }
+
+    const consumedEndOffset = terminal
+      ? endOffset
+      : lastClosedRange?.endOffset ?? activeTurn.startOffset;
+
     const resourceAttributes = await this.readWakeupResourceAttributes(turn.sessionId);
-    return resourceAttributes ? attachWakeupResourceAttributes(entries, resourceAttributes) : entries;
+    return {
+      entries: resourceAttributes ? attachWakeupResourceAttributes(entries, resourceAttributes) : entries,
+      consumedEndOffset,
+    };
+  }
+
+  private async resolveInputContext(
+    filePath: string,
+    activeTurn: CodexActiveTranscriptTurn,
+    meta: ReturnType<typeof extractCodexTranscriptMeta>,
+  ): Promise<CodexTranscriptInputContext | undefined> {
+    const context = activeTurn.inputContext;
+    if (!context || context.delta) return context;
+    const range = context.deltaRange;
+    if (!range) return context;
+
+    const records = await readJsonLines(filePath, range.startOffset, range.endOffset);
+    const previous = extractCodexPartialTurn(
+      records.items.map(item => item.record),
+      meta,
+      sessionIdFromTranscriptPath(filePath),
+      activeTurn.turnId,
+      partialTurnOptions(activeTurn),
+    );
+    const lastStep = previous?.steps.at(-1);
+    if (!lastStep) {
+      this.logger.warn('could not rebuild oversized Codex input delta from transcript range', {
+        transcriptPath: filePath,
+        turnId: activeTurn.turnId,
+        range,
+      });
+      return context;
+    }
+    return { ...context, delta: nextInputMessagesForStep(lastStep) };
+  }
+
+  private filterNewSegmentEntries(
+    entries: AgentActivityEntry[],
+    activeTurn: NonNullable<CodexTranscriptCheckpoint['activeTurn']>,
+  ): AgentActivityEntry[] {
+    const out: AgentActivityEntry[] = [];
+    activeTurn.emittedStepRequestIds ??= [];
+    activeTurn.emittedStepResponseIds ??= [];
+    activeTurn.emittedToolCallIds ??= [];
+    activeTurn.emittedToolResultIds ??= [];
+
+    const stepRequests = new Set(activeTurn.emittedStepRequestIds);
+    const stepResponses = new Set(activeTurn.emittedStepResponseIds);
+    const toolCalls = new Set(activeTurn.emittedToolCallIds);
+    const toolResults = new Set(activeTurn.emittedToolResultIds);
+
+    for (const entry of entries) {
+      const eventName = entry['event.name'];
+      if (eventName === 'other') {
+        if (activeTurn.emittedPrompt) continue;
+        activeTurn.emittedPrompt = true;
+        out.push(entry);
+        continue;
+      }
+
+      const stepId = typeof entry['gen_ai.step.id'] === 'string' ? entry['gen_ai.step.id'] : '';
+      const toolCallId = typeof entry['gen_ai.tool.call.id'] === 'string' ? entry['gen_ai.tool.call.id'] : '';
+      if (eventName === 'llm.request') {
+        if (!stepId || stepRequests.has(stepId)) continue;
+        stepRequests.add(stepId);
+        out.push(entry);
+      } else if (eventName === 'llm.response') {
+        if (!stepId || stepResponses.has(stepId)) continue;
+        stepResponses.add(stepId);
+        out.push(entry);
+      } else if (eventName === 'tool.call') {
+        if (!toolCallId || toolCalls.has(toolCallId)) continue;
+        toolCalls.add(toolCallId);
+        out.push(entry);
+      } else if (eventName === 'tool.result') {
+        if (!toolCallId || toolResults.has(toolCallId)) continue;
+        toolResults.add(toolCallId);
+        out.push(entry);
+      } else {
+        out.push(entry);
+      }
+    }
+
+    activeTurn.emittedStepRequestIds = [...stepRequests];
+    activeTurn.emittedStepResponseIds = [...stepResponses];
+    activeTurn.emittedToolCallIds = [...toolCalls];
+    activeTurn.emittedToolResultIds = [...toolResults];
+    return out;
   }
 
   private async readWakeupResourceAttributes(sessionId: string): Promise<Record<string, JsonValue> | undefined> {
@@ -326,32 +514,38 @@ export class CodexTranscriptInput extends BaseInput {
     } catch {
       return;
     }
-    const lines = await readJsonLines(filePath, 0, stat.size);
     let latestSessionMetaOffset: number | null = null;
     let activeTurn: CodexActiveTranscriptTurn | null = null;
     const completedTurnIds: string[] = [];
-    for (const line of lines.items) {
+    const { nextOffset } = await scanJsonLines(filePath, 0, stat.size, line => {
       const payload = asRecord(line.record.payload);
-      if (!payload) continue;
+      if (!payload) return;
       if (line.record.type === 'session_meta') {
         latestSessionMetaOffset = line.startOffset;
-        continue;
+        return;
       }
       const turnId = turnIdForStart(line.record, payload);
       if (turnId && (!activeTurn || activeTurn.turnId !== turnId)) {
-        activeTurn = { turnId, startOffset: line.startOffset, startedAtMs: timestampMs(line.record, Date.now()) };
-        continue;
+        activeTurn = createActiveTurn(turnId, line.startOffset, timestampMs(line.record, Date.now()), true);
+      }
+      if (turnId && activeTurn?.turnId === turnId) {
+        updateActiveTurnMetadata(activeTurn, line.record, payload);
+        return;
       }
       const terminalTurnId = terminalTurnIdFor(line.record, payload);
       if (terminalTurnId === activeTurn?.turnId) {
         completedTurnIds.push(terminalTurnId);
         activeTurn = null;
       }
+    });
+    const baselineActiveTurn = activeTurn as CodexActiveTranscriptTurn | null;
+    if (baselineActiveTurn) {
+      baselineActiveTurn.startOffset = nextOffset;
     }
     for (const turnId of completedTurnIds) this.rememberGlobalEmittedTurnId(turnId);
     this.saveCheckpoint(key, {
       inode: stat.ino,
-      scanOffset: lines.nextOffset,
+      scanOffset: nextOffset,
       activeTurn,
       pendingTerminal: null,
       latestSessionMetaOffset,
@@ -374,11 +568,28 @@ export class CodexTranscriptInput extends BaseInput {
     const value = asRecord(raw);
     if (!value || typeof value.inode !== 'number' || typeof value.scanOffset !== 'number') return null;
     const active = asRecord(value.activeTurn);
+    const model = stringValue(active?.model);
+    const cwd = stringValue(active?.cwd);
+    const developerInstructions = stringValue(active?.developerInstructions);
     const activeTurn = active
       && typeof active.turnId === 'string'
       && typeof active.startOffset === 'number'
       && typeof active.startedAtMs === 'number'
-      ? { turnId: active.turnId, startOffset: active.startOffset, startedAtMs: active.startedAtMs }
+      ? {
+          turnId: active.turnId,
+          startOffset: active.startOffset,
+          startedAtMs: active.startedAtMs,
+          ...(model ? { model } : {}),
+          ...(cwd ? { cwd } : {}),
+          ...(developerInstructions ? { developerInstructions } : {}),
+          emittedPrompt: active.emittedPrompt === true,
+          emittedStepCount: typeof active.emittedStepCount === 'number' ? active.emittedStepCount : 0,
+          emittedStepRequestIds: stringArray(active.emittedStepRequestIds),
+          emittedStepResponseIds: stringArray(active.emittedStepResponseIds),
+          emittedToolCallIds: stringArray(active.emittedToolCallIds),
+          emittedToolResultIds: stringArray(active.emittedToolResultIds),
+          inputContext: parseInputContext(active.inputContext),
+        }
       : null;
     const pending = asRecord(value.pendingTerminal);
     const pendingTerminal = pending
@@ -509,9 +720,22 @@ async function readJsonLines(filePath: string, startOffset: number, endOffset: n
   nextOffset: number;
 }> {
   if (endOffset <= startOffset) return { items: [], nextOffset: startOffset };
+  const items: JsonLine[] = [];
+  const { nextOffset } = await scanJsonLines(filePath, startOffset, endOffset, line => {
+    items.push(line);
+  });
+  return { items, nextOffset };
+}
+
+async function scanJsonLines(
+  filePath: string,
+  startOffset: number,
+  endOffset: number,
+  onLine: (line: JsonLine) => void | false | Promise<void | false>,
+): Promise<{ nextOffset: number }> {
+  if (endOffset <= startOffset) return { nextOffset: startOffset };
   const handle = await fs.open(filePath, 'r');
   try {
-    const items: JsonLine[] = [];
     let nextOffset = startOffset;
     let position = startOffset;
     let pending = Buffer.alloc(0);
@@ -537,11 +761,15 @@ async function readJsonLines(filePath: string, startOffset: number, endOffset: n
           try {
             const record = JSON.parse(text);
             if (record && typeof record === 'object' && !Array.isArray(record)) {
-              items.push({
+              const keepGoing = await onLine({
                 startOffset: dataStartOffset + cursor,
                 endOffset: dataStartOffset + newline + 1,
                 record,
               });
+              if (keepGoing === false) {
+                nextOffset = dataStartOffset + newline + 1;
+                return { nextOffset };
+              }
             }
           } catch {
             // Invalid completed lines are ignored but their bytes are consumed.
@@ -555,7 +783,7 @@ async function readJsonLines(filePath: string, startOffset: number, endOffset: n
       pendingStartOffset = dataStartOffset + cursor;
     }
 
-    return { items, nextOffset };
+    return { nextOffset };
   } finally {
     await handle.close();
   }
@@ -593,6 +821,62 @@ function turnIdForStart(record: Record<string, unknown>, payload: Record<string,
   return stringValue(payload.turn_id) ?? null;
 }
 
+function createActiveTurn(
+  turnId: string,
+  startOffset: number,
+  startedAtMs: number,
+  emittedPrompt = false,
+): CodexActiveTranscriptTurn {
+  return {
+    turnId,
+    startOffset,
+    startedAtMs,
+    emittedPrompt,
+    emittedStepCount: 0,
+    emittedStepRequestIds: [],
+    emittedStepResponseIds: [],
+    emittedToolCallIds: [],
+    emittedToolResultIds: [],
+  };
+}
+
+function updateActiveTurnMetadata(
+  activeTurn: CodexActiveTranscriptTurn,
+  record: Record<string, unknown>,
+  payload: Record<string, unknown>,
+): void {
+  if (record.type !== 'turn_context') return;
+  const model = stringValue(payload.model);
+  const cwd = stringValue(payload.cwd);
+  const developerInstructions = stringValue(payload.developer_instructions);
+  if (model) activeTurn.model = model;
+  if (cwd) activeTurn.cwd = cwd;
+  if (developerInstructions) activeTurn.developerInstructions = developerInstructions;
+}
+
+function partialTurnOptions(activeTurn: CodexActiveTranscriptTurn): {
+  startedAtMs: number;
+  model?: string;
+  cwd?: string;
+  developerInstructions?: string;
+} {
+  return {
+    startedAtMs: activeTurn.startedAtMs,
+    ...(activeTurn.model ? { model: activeTurn.model } : {}),
+    ...(activeTurn.cwd ? { cwd: activeTurn.cwd } : {}),
+    ...(activeTurn.developerInstructions ? { developerInstructions: activeTurn.developerInstructions } : {}),
+  };
+}
+
+function updateActiveTurnFromExtractedTurn(
+  activeTurn: CodexActiveTranscriptTurn,
+  turn: { model: string; cwd?: string; developerInstructions?: string },
+): void {
+  if (turn.model && turn.model !== 'unknown') activeTurn.model = turn.model;
+  if (turn.cwd) activeTurn.cwd = turn.cwd;
+  if (turn.developerInstructions) activeTurn.developerInstructions = turn.developerInstructions;
+}
+
 function terminalTurnIdFor(record: Record<string, unknown>, payload: Record<string, unknown>): string | null {
   if (record.type !== 'event_msg' || (payload.type !== 'task_complete' && payload.type !== 'turn_aborted')) return null;
   return stringValue(payload.turn_id) ?? null;
@@ -602,6 +886,20 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+function serializedEntryBytes(entry: AgentActivityEntry): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(entry), 'utf8');
+  } catch {
+    return MAX_EMIT_BATCH_BYTES;
+  }
 }
 
 function attachWakeupResourceAttributes(
@@ -616,6 +914,95 @@ function attachWakeupResourceAttributes(
     }
   }
   return entries;
+}
+
+function countLeadingClosedSteps(steps: CodexTranscriptStep[]): number {
+  let count = 0;
+  for (const step of steps) {
+    if (!step.tokenUsage) break;
+    count++;
+  }
+  return count;
+}
+
+function findClosedWaveRanges(items: JsonLine[]): ClosedWaveRange[] {
+  const ranges: ClosedWaveRange[] = [];
+  const pendingToolCalls = new Set<string>();
+  let waveStartOffset = items[0]?.startOffset ?? 0;
+  let hasResponseEvidence = false;
+
+  for (const line of items) {
+    const payload = asRecord(line.record.payload);
+    if (!payload) continue;
+
+    if (line.record.type === 'event_msg') {
+      if (payload.type === 'agent_message' || payload.type === 'web_search_start') {
+        hasResponseEvidence = true;
+      }
+      if (payload.type === 'token_count'
+        && hasResponseEvidence
+        && pendingToolCalls.size === 0
+        && asRecord(asRecord(payload.info)?.last_token_usage)) {
+        ranges.push({ startOffset: waveStartOffset, endOffset: line.endOffset });
+        waveStartOffset = line.endOffset;
+        hasResponseEvidence = false;
+      }
+      continue;
+    }
+
+    if (line.record.type !== 'response_item') continue;
+    const itemType = stringValue(payload.type);
+    if (itemType === 'message' && stringValue(payload.role) === 'assistant') {
+      hasResponseEvidence = true;
+      continue;
+    }
+    if (itemType === 'reasoning' || itemType === 'web_search_call') {
+      hasResponseEvidence = true;
+      continue;
+    }
+    if (itemType === 'function_call' || itemType === 'custom_tool_call' || itemType === 'tool_search_call') {
+      const callId = stringValue(payload.call_id) ?? stringValue(payload.id);
+      if (callId) pendingToolCalls.add(callId);
+      hasResponseEvidence = true;
+      continue;
+    }
+    if (itemType === 'function_call_output'
+      || itemType === 'custom_tool_call_output'
+      || itemType === 'tool_search_output') {
+      const callId = stringValue(payload.call_id) ?? stringValue(payload.id);
+      if (callId) pendingToolCalls.delete(callId);
+    }
+  }
+  return ranges;
+}
+
+function persistedInputContext(
+  context: CodexTranscriptInputContext,
+  sourceRange: ClosedWaveRange | undefined,
+): CodexTranscriptInputContext {
+  const delta = context.delta ?? [];
+  const deltaBytes = Buffer.byteLength(JSON.stringify(delta), 'utf8');
+  return {
+    hash: context.hash,
+    ...(context.fullMessages ? { fullMessages: context.fullMessages } : {}),
+    ...(deltaBytes <= MAX_PERSISTED_INPUT_CONTEXT_BYTES || !sourceRange
+      ? { delta }
+      : { deltaRange: sourceRange }),
+  };
+}
+
+function parseInputContext(value: unknown): CodexTranscriptInputContext | undefined {
+  const context = asRecord(value);
+  if (!context || typeof context.hash !== 'string') return undefined;
+  const range = asRecord(context.deltaRange);
+  return {
+    hash: context.hash,
+    ...(Array.isArray(context.delta) ? { delta: context.delta as JsonValue[] } : {}),
+    ...(Array.isArray(context.fullMessages) ? { fullMessages: context.fullMessages as JsonValue[] } : {}),
+    ...(range && typeof range.startOffset === 'number' && typeof range.endOffset === 'number'
+      ? { deltaRange: { startOffset: range.startOffset, endOffset: range.endOffset } }
+      : {}),
+  };
 }
 
 function safeWakeupSessionPart(value: string): string {
