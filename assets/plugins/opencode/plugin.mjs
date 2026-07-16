@@ -151,6 +151,12 @@ function resolveUserId(cfg) {
 
 let _logDirReady = false;
 
+// Working directory of the OpenCode instance, captured once at server init.
+// One OpenCode server instance maps to one project directory, so this is stable
+// for the process lifetime. Emitted as agent.opencode.cwd so the pilot pipeline
+// can enrich git.repo / workspace.current_root downstream.
+let agentCwd;
+
 function writeRecord(record) {
   try {
     if (!_logDirReady) {
@@ -240,6 +246,7 @@ function buildCommonFields(sessionID, session, userId) {
     "gen_ai.agent.type": AGENT_TYPE,
     "gen_ai.agent.name": AGENT_TYPE,
     "gen_ai.agent.id": session.agentMeta?.name || undefined,
+    ...(agentCwd ? { [`agent.${AGENT_TYPE}.cwd`]: agentCwd } : {}),
   };
 }
 
@@ -828,6 +835,14 @@ export default {
 
   server: async (input, _options) => {
     ensureDir(logDir());
+
+    // OpenCode passes the instance context here; `directory` is the working
+    // directory. Fall back to process.cwd() (the plugin runs inside the
+    // OpenCode process, whose cwd is the same directory).
+    agentCwd =
+      (typeof input?.directory === "string" && input.directory) ||
+      process.cwd() ||
+      undefined;
 
     const cfg = loadPilotConfig();
     const userId = resolveUserId(cfg);

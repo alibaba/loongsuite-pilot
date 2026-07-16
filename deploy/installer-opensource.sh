@@ -57,7 +57,6 @@ MASK_MODE=""
 MASK_TYPES=""
 HAS_SUDO=0
 PURGE=0
-SYSTEM_SERVICE=0
 
 # First arg is sub-command (or option -> default to install)
 if [[ $# -gt 0 ]]; then
@@ -116,7 +115,9 @@ while [[ $# -gt 0 ]]; do
         --mask-types)         MASK_TYPES="$2"; shift 2 ;;
         --mask-types=*)       MASK_TYPES="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
-        --system-service)     SYSTEM_SERVICE=1; shift ;;
+        --system-service)
+            echo "⚠️  --system-service is deprecated and ignored. Auto-detection is now the default." >&2
+            shift ;;
         *)
             echo "Unknown option: $1" >&2
             exit 1 ;;
@@ -148,27 +149,11 @@ validate_install_user() {
             current_user=$(whoami)
             if [ "$(id -u)" -eq 0 ]; then
                 HAS_SUDO=1
-                SYSTEM_SERVICE=1
                 msg "   ✅ 以 root 身份安装（自动使用系统级服务）" \
                     "   ✅ Installing as root (auto system-level service)"
-            elif [ "$SYSTEM_SERVICE" -eq 1 ]; then
-                if sudo -n true 2>/dev/null; then
-                    HAS_SUDO=1
-                    msg "   ✅ sudo 权限校验通过 (user: $current_user)" \
-                        "   ✅ sudo access verified (user: $current_user)"
-                elif sudo -v 2>/dev/null; then
-                    HAS_SUDO=1
-                    msg "   ✅ sudo 权限校验通过 (user: $current_user)" \
-                        "   ✅ sudo access verified (user: $current_user)"
-                else
-                    HAS_SUDO=0
-                    SYSTEM_SERVICE=0
-                    msg "⚠️  无 sudo 权限 — 无法注册系统级服务。将使用用户态 systemd 服务。" \
-                        "⚠️  No sudo access — cannot register system-level service. Using user-level systemd."
-                fi
             else
-                msg "   Install user: $current_user（服务类型将在启动时检测）" \
-                    "   Install user: $current_user (service type determined at start)"
+                msg "   Install user: $current_user（服务类型将在启动时自动检测）" \
+                    "   Install user: $current_user (service type auto-detected at start)"
             fi
             ;;
     esac
@@ -427,14 +412,27 @@ if (lang === 'zh') {
 }
 " "$PROBE_RESULT" "$LANG_MODE"
 
-    # Read user input
+    # Read user input (Node readline handles UTF-8 editing; normalize Chinese punctuation).
+    # Prompt must go to stderr so it is visible and not captured by $().
     local select_input
-    read -r select_input
+    select_input=$("$NODE_BIN" -e "
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+rl.question('    > ', (answer) => {
+  const normalized = answer.replace(/[，、；]/g, ',').trim();
+  process.stdout.write(normalized);
+  rl.close();
+});
+") || {
+        printf "    > " >&2
+        read -r select_input
+        select_input=$(printf '%s' "$select_input" | sed 's/，/,/g; s/、/,/g; s/；/,/g')
+    }
 
     # Compute final selection: empty input = detected agents, otherwise use exact input
     SELECTED_AGENTS=$("$NODE_BIN" -e "
 const r = JSON.parse(process.argv[1]);
-const input = process.argv[2] || '';
+const input = (process.argv[2] || '').replace(/[，、；]/g, ',');
 let indices;
 if (!input.trim()) {
   indices = r.map((a, i) => a.detected ? i : -1).filter(i => i >= 0);
@@ -1427,11 +1425,7 @@ cmd_install() {
     inject_claude_code_fetch_intercept
 
     msg "==> 启动服务..." "==> Starting service..."
-    local _start_args=""
-    if [ "$SYSTEM_SERVICE" -eq 1 ]; then
-        _start_args="--system-service"
-    fi
-    if loongsuite-pilot start $_start_args; then
+    if loongsuite-pilot start; then
         sleep 2
         local _status_out
         _status_out="$(loongsuite-pilot status 2>/dev/null || true)"

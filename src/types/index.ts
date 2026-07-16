@@ -74,6 +74,8 @@ export interface AnalyticsConfig {
   statusBar: StatusBarConfig;
   autoUpdate?: AutoUpdateConfig;
   selfCheck: SelfCheckConfig;
+  /** User-defined attributes injected into trace spans only (config + env baseline). */
+  globalSpanAttributes?: Record<string, string>;
 }
 
 export interface AgentConfig {

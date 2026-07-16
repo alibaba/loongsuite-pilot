@@ -20,6 +20,7 @@ import type {
 } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
+import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
 
 const logger = createLogger('ConfigLoader');
 
@@ -153,6 +154,9 @@ export interface ConfigFile {
 
   enableStatusBarApp?: boolean | string;
 
+  /** User-defined attributes injected into trace spans (merged with OTEL_SPAN_ATTRIBUTES env). */
+  globalSpanAttributes?: Record<string, unknown>;
+
   installId?: string;
   canary?: {
     policy?: 'auto' | 'latest' | 'off';
@@ -235,7 +239,21 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     pipeline: buildPipelineConfig(file),
     statusBar: buildStatusBarConfig(file),
     selfCheck: buildSelfCheckConfig(file),
+    globalSpanAttributes: resolveGlobalSpanAttributes(file),
   };
+}
+
+/**
+ * User-defined global span attributes: config.json `globalSpanAttributes` merged
+ * with the `OTEL_SPAN_ATTRIBUTES` env (key1=value1,key2=value2). Env wins over
+ * config. Reserved-prefix keys and non-string values are dropped.
+ */
+function resolveGlobalSpanAttributes(file: ConfigFile | null): Record<string, string> {
+  const fromConfig = (file?.globalSpanAttributes as Record<string, unknown>) ?? {};
+  const fromEnv = parseKeyValueAttributes(env('OTEL_SPAN_ATTRIBUTES'));
+  // Sanitize the merged result so config and env are treated consistently
+  // (drop reserved-prefix keys and non-string values from both).
+  return sanitizeAttributes({ ...fromConfig, ...fromEnv });
 }
 
 function buildOtlpTraceRawConfig(file: ConfigFile | null): OtlpTraceRawConfig | undefined {

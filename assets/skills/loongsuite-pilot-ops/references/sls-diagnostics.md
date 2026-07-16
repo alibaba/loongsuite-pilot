@@ -1,7 +1,7 @@
 # SLS 上报链路诊断排查指南
 
 本文档随 `loongsuite-pilot` 安装包一起分发，安装完成后自动写入
-`~/.loongsuite-pilot/skills/references/sls-diagnostics.md`，随 pilot 升级自动更新。
+`~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/sls-diagnostics.md`，随 pilot 升级自动更新。
 
 覆盖 **pilot 向 SLS（Simple Log Service）上报数据的链路排查**——数据在本地正常采集但 SLS 查不到、上报失败、failed-logs 堆积等问题。
 不覆盖 agent 侧的 hook/JSONL 数据采集问题（那些请查阅对应的 agent 分诊文档）。
@@ -48,14 +48,38 @@ SLS 上报异常时，**按以下顺序逐步排查**：
 SLS Flusher 启用条件：每个 endpoint 的 `mode` 所需凭证齐全时自动启用，也可在 `config.json` 中显式控制。
 
 ```bash
-# 查看 config.json 中的 SLS 配置
-python3 -m json.tool ~/.loongsuite-pilot/config.json 2>/dev/null \
-  | python3 -c "
-import json,sys
-c=json.load(sys.stdin)
-sls=c.get('sls',{})
-print(json.dumps(sls, indent=2, ensure_ascii=False))
-" 2>/dev/null || echo "config.json 不存在或无 sls 段"
+# 只输出 SLS 配置摘要；AK/SK/token 等敏感字段只显示是否存在
+python3 - <<'PY'
+import json
+import pathlib
+
+path = pathlib.Path.home() / '.loongsuite-pilot' / 'config.json'
+try:
+    cfg = json.loads(path.read_text())
+except Exception:
+    print('config.json 不存在或无法解析')
+    raise SystemExit(0)
+
+sls = cfg.get('sls')
+items = sls if isinstance(sls, list) else ([] if not sls else [sls])
+if not items:
+    print('无 sls 段')
+    raise SystemExit(0)
+
+sensitive = ('ak', 'secret', 'token', 'password', 'authorization', 'key')
+for i, item in enumerate(items):
+    if not isinstance(item, dict):
+        print(f'[{i}] unsupported sls item type: {type(item).__name__}')
+        continue
+    out = {}
+    for k, v in item.items():
+        lk = k.lower()
+        if any(s in lk for s in sensitive):
+            out[k] = '<present>' if v else '<empty>'
+        else:
+            out[k] = v
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+PY
 ```
 
 配置优先级（从高到低）：
@@ -66,8 +90,16 @@ print(json.dumps(sls, indent=2, ensure_ascii=False))
 | 2（最低） | `config.json` → `sls` 段 | `sls.endpoint`、`sls.project`、`sls.logstore`、`sls.mode` |
 
 ```bash
-# 检查是否有 SLS 相关环境变量
-env | grep -E '^LOONGSUITE_SLS_' 2>/dev/null || echo "无 LOONGSUITE_SLS_ 环境变量"
+# 检查是否有 SLS 相关环境变量；敏感值只显示是否存在
+python3 - <<'PY'
+import os
+for k in sorted(x for x in os.environ if x.startswith('LOONGSUITE_SLS_')):
+    lk = k.lower()
+    if any(s in lk for s in ('ak', 'secret', 'token', 'password', 'authorization', 'key')):
+        print(f'{k}=<present>' if os.environ.get(k) else f'{k}=<empty>')
+    else:
+        print(f'{k}={os.environ.get(k, "")}')
+PY
 ```
 
 若 SLS 被禁用（`config.json` 的 `sls.enabled = false`），服务日志中不会有任何 SLS 发送日志。
