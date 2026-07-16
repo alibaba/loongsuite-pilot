@@ -20,6 +20,7 @@ import {
   MAX_EMITTED_TERMINAL_TURNS,
   MAX_GLOBAL_EMITTED_TERMINAL_TURNS,
   type CodexActiveTranscriptTurn,
+  type CodexPendingTerminalTurn,
   type CodexTranscriptInputContext,
   type CodexTranscriptCheckpoint,
   type CodexTranscriptGlobalState,
@@ -32,6 +33,8 @@ const READ_CHUNK_SIZE = 1024 * 1024;
 const MAX_EMIT_BATCH_ENTRIES = 256;
 const MAX_EMIT_BATCH_BYTES = 1024 * 1024;
 const MAX_PERSISTED_INPUT_CONTEXT_BYTES = 1024 * 1024;
+const MAX_TERMINALS_PER_FILE_CYCLE = 100;
+const MAX_SCAN_BYTES_PER_FILE_CYCLE = 16 * 1024 * 1024;
 // Values emitted by DEFAULT_RESOURCE_ENV_FIELD_MAP in assets/hooks/shared/resource-context.mjs.
 // Add new AgentTeams resource fields to both lists together.
 const WAKEUP_RESOURCE_ATTRIBUTE_KEYS = [
@@ -51,9 +54,36 @@ interface ClosedWaveRange {
   endOffset: number;
 }
 
-interface SegmentRecoveryResult {
+interface SegmentRecoveryDiagnostics {
+  sourceRecordCount: number;
+  stepCount: number;
+  toolCount: number;
+  tokenUsageCount: number;
+  unmatchedTokenUsageCount: number;
+  builtEntryCount: number;
+  readyEntryCount: number;
+  deduplicatedEntryCount: number;
+  emittedEntryCount: number;
+  previouslyEmittedStepCount: number;
+}
+
+type SegmentRecoveryResult = {
+  kind: 'unparseable';
+  entries: [];
+  consumedEndOffset: number;
+  diagnostics: SegmentRecoveryDiagnostics;
+} | {
+  kind: 'processed-empty' | 'processed-emitted';
   entries: AgentActivityEntry[];
   consumedEndOffset: number;
+  terminalStatus: 'completed' | 'interrupted';
+  diagnostics: SegmentRecoveryDiagnostics;
+};
+
+interface PendingRecoveryResult {
+  blocked: boolean;
+  emittedCount: number;
+  processedTerminalCount: number;
 }
 
 export interface CodexTranscriptInputOptions extends InputOptions {
@@ -69,10 +99,10 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly sessionDir: string;
   private readonly wakeupDir: string;
   private wakeupWatcher: FSWatcher | null = null;
-  private emittedTurnIdsLoaded = false;
-  private emittedTurnIdsDirty = false;
-  private emittedTurnIds = new Set<string>();
-  private emittedTurnIdOrder: string[] = [];
+  private processedTerminalTurnIdsLoaded = false;
+  private processedTerminalTurnIdsDirty = false;
+  private processedTerminalTurnIds = new Set<string>();
+  private processedTerminalTurnIdOrder: string[] = [];
 
   constructor(opts: CodexTranscriptInputOptions) {
     super({ stateStore: opts.stateStore, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
@@ -89,12 +119,12 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   protected override async onStart(): Promise<void> {
-    this.loadGlobalEmittedTurnIds();
+    this.loadGlobalProcessedTerminalTurnIds();
     for (const filePath of await this.discoverSessionFiles()) {
       const key = this.stateKey(filePath);
       if (!this.readCheckpoint(key)) await this.baselineFile(filePath, key);
     }
-    this.saveGlobalEmittedTurnIds();
+    this.saveGlobalProcessedTerminalTurnIds();
     await fs.mkdir(this.wakeupDir, { recursive: true });
     try {
       this.wakeupWatcher = fsSync.watch(this.wakeupDir, { persistent: false }, () => {
@@ -164,6 +194,7 @@ export class CodexTranscriptInput extends BaseInput {
     }
     const key = this.stateKey(filePath);
     let checkpoint = this.readCheckpoint(key);
+    let checkpointChanged = false;
     if (!checkpoint) {
       checkpoint = {
         inode: stat.ino,
@@ -173,95 +204,137 @@ export class CodexTranscriptInput extends BaseInput {
         latestSessionMetaOffset: null,
         emittedTerminalTurnIds: [],
       };
+      checkpointChanged = true;
     } else if (checkpoint.inode !== stat.ino) {
       await this.baselineFile(filePath, key);
-      this.saveGlobalEmittedTurnIds();
+      this.saveGlobalProcessedTerminalTurnIds();
       return 0;
     }
+
+    let emittedCount = 0;
+    let processedTerminalCount = 0;
+    let scannedBytes = 0;
 
     const hadPendingTerminal = checkpoint.pendingTerminal !== null;
-    const recoveredPending = await this.recoverPendingTerminal(filePath, checkpoint);
-    if (recoveredPending === null) {
-      this.saveCheckpoint(key, checkpoint);
-      this.saveGlobalEmittedTurnIds();
-      return 0;
-    }
-    let emittedCount = this.emitEntryBatches(recoveredPending);
-    const checkpointChangedByPending = hadPendingTerminal;
-
-    if (stat.size <= checkpoint.scanOffset) {
-      if (checkpointChangedByPending || recoveredPending.length > 0) this.saveCheckpoint(key, checkpoint);
-      this.saveGlobalEmittedTurnIds();
-      return emittedCount;
-    }
-    let terminalTurnId: string | null = null;
-    let terminalEndOffset: number | null = null;
-    const scan = await scanJsonLines(filePath, checkpoint.scanOffset, stat.size, line => {
-      const payload = asRecord(line.record.payload);
-      if (!payload) return;
-      if (line.record.type === 'session_meta') {
-        checkpoint.latestSessionMetaOffset = line.startOffset;
-        return;
-      }
-
-      const turnId = turnIdForStart(line.record, payload);
-      if (turnId) {
-        if (!checkpoint.activeTurn || checkpoint.activeTurn.turnId !== turnId) {
-          checkpoint.activeTurn = createActiveTurn(turnId, line.startOffset, timestampMs(line.record, Date.now()));
-        }
-        updateActiveTurnMetadata(checkpoint.activeTurn, line.record, payload);
-        return;
-      }
-
-      const terminal = terminalTurnIdFor(line.record, payload);
-      if (!terminal || checkpoint.activeTurn?.turnId !== terminal) return;
-      terminalTurnId = terminal;
-      terminalEndOffset = line.endOffset;
-      return false;
-    });
-    if (scan.nextOffset === checkpoint.scanOffset) {
-      if (checkpointChangedByPending || recoveredPending.length > 0) this.saveCheckpoint(key, checkpoint);
-      this.saveGlobalEmittedTurnIds();
+    const pendingResult = await this.recoverPendingTerminal(filePath, checkpoint);
+    checkpointChanged ||= hadPendingTerminal;
+    emittedCount += pendingResult.emittedCount;
+    processedTerminalCount += pendingResult.processedTerminalCount;
+    if (pendingResult.blocked) {
+      if (checkpointChanged) this.saveCheckpoint(key, checkpoint);
+      this.saveGlobalProcessedTerminalTurnIds();
       return emittedCount;
     }
 
-    const nextScanOffset = terminalEndOffset ?? scan.nextOffset;
-    if (checkpoint.activeTurn && nextScanOffset > checkpoint.activeTurn.startOffset) {
-      if (terminalTurnId && checkpoint.emittedTerminalTurnIds.includes(terminalTurnId)) {
-        checkpoint.activeTurn = null;
-      } else if (terminalTurnId && this.isGloballyEmittedTurn(terminalTurnId)) {
-        this.rememberCheckpointTurnId(checkpoint, terminalTurnId);
-        checkpoint.activeTurn = null;
-      } else {
-        const recovered = await this.recoverTurnSegment(
-          filePath,
-          checkpoint,
-          nextScanOffset,
-          terminalTurnId !== null,
-        );
-        emittedCount += this.emitEntryBatches(recovered.entries);
-        if (recovered.consumedEndOffset > checkpoint.activeTurn.startOffset) {
-          checkpoint.activeTurn.startOffset = recovered.consumedEndOffset;
+    while (
+      checkpoint.scanOffset < stat.size
+      && processedTerminalCount < MAX_TERMINALS_PER_FILE_CYCLE
+      && scannedBytes < MAX_SCAN_BYTES_PER_FILE_CYCLE
+    ) {
+      const scanStartOffset = checkpoint.scanOffset;
+      const scanEndOffset = Math.min(
+        stat.size,
+        scanStartOffset + (MAX_SCAN_BYTES_PER_FILE_CYCLE - scannedBytes),
+      );
+      let terminalTurnId: string | null = null;
+      let terminalEndOffset: number | null = null;
+      const processScannedLine = (line: JsonLine): void | false => {
+        const payload = asRecord(line.record.payload);
+        if (!payload) return;
+        if (line.record.type === 'session_meta') {
+          checkpoint.latestSessionMetaOffset = line.startOffset;
+          return;
         }
-        if (terminalTurnId && checkpoint.activeTurn.turnId === terminalTurnId) {
-          if (recovered.entries.length > 0) {
-            this.rememberCheckpointTurnId(checkpoint, terminalTurnId);
-            this.rememberGlobalEmittedTurnId(terminalTurnId);
-            checkpoint.activeTurn = null;
-          } else {
-            checkpoint.pendingTerminal = { turnId: terminalTurnId, terminalEndOffset: nextScanOffset };
-            this.logger.warn('terminal Codex turn could not be reconstructed; retaining it for the next scan', {
-              transcriptPath: filePath,
-              turnId: terminalTurnId,
-            });
+
+        const turnId = turnIdForStart(line.record, payload);
+        if (turnId) {
+          if (!checkpoint.activeTurn || checkpoint.activeTurn.turnId !== turnId) {
+            checkpoint.activeTurn = createActiveTurn(turnId, line.startOffset, timestampMs(line.record, Date.now()));
+          }
+          updateActiveTurnMetadata(checkpoint.activeTurn, line.record, payload);
+          return;
+        }
+
+        const terminal = terminalTurnIdFor(line.record, payload);
+        if (!terminal || checkpoint.activeTurn?.turnId !== terminal) return;
+        terminalTurnId = terminal;
+        terminalEndOffset = line.endOffset;
+        return false;
+      };
+      let scan = await scanJsonLines(filePath, scanStartOffset, scanEndOffset, processScannedLine);
+
+      // A single JSONL record may exceed the byte budget. Read far enough to
+      // consume one complete line so this file can make forward progress.
+      if (scan.nextOffset === scanStartOffset && scanEndOffset < stat.size) {
+        scan = await scanJsonLines(filePath, scanStartOffset, stat.size, line => {
+          processScannedLine(line);
+          return false;
+        });
+      }
+      if (scan.nextOffset === scanStartOffset) break;
+      checkpointChanged = true;
+
+      const nextScanOffset = terminalEndOffset ?? scan.nextOffset;
+      scannedBytes += nextScanOffset - scanStartOffset;
+      let blocked = false;
+
+      if (checkpoint.activeTurn && nextScanOffset > checkpoint.activeTurn.startOffset) {
+        if (terminalTurnId && checkpoint.emittedTerminalTurnIds.includes(terminalTurnId)) {
+          checkpoint.activeTurn = null;
+          checkpoint.pendingTerminal = null;
+          processedTerminalCount++;
+        } else if (terminalTurnId && this.isGloballyProcessedTerminalTurn(terminalTurnId)) {
+          this.rememberProcessedTerminalTurnId(checkpoint, terminalTurnId);
+          checkpoint.activeTurn = null;
+          checkpoint.pendingTerminal = null;
+          processedTerminalCount++;
+        } else {
+          const recovered = await this.recoverTurnSegment(
+            filePath,
+            checkpoint,
+            nextScanOffset,
+            terminalTurnId !== null,
+          );
+          emittedCount += this.emitEntryBatches(recovered.entries);
+          if (
+            recovered.kind !== 'unparseable'
+            && recovered.consumedEndOffset > checkpoint.activeTurn.startOffset
+          ) {
+            checkpoint.activeTurn.startOffset = recovered.consumedEndOffset;
+          }
+
+          if (terminalTurnId && checkpoint.activeTurn.turnId === terminalTurnId) {
+            if (recovered.kind === 'unparseable') {
+              checkpoint.pendingTerminal = newPendingTerminal(
+                terminalTurnId,
+                nextScanOffset,
+                recovered.diagnostics.sourceRecordCount,
+              );
+              this.logger.warn('terminal Codex turn could not be parsed; retaining it for the next scan', {
+                transcriptPath: filePath,
+                turnId: terminalTurnId,
+                range: { startOffset: checkpoint.activeTurn.startOffset, endOffset: nextScanOffset },
+                retryCount: checkpoint.pendingTerminal.retryCount,
+                sourceRecordCount: recovered.diagnostics.sourceRecordCount,
+              });
+              blocked = true;
+            } else {
+              this.rememberProcessedTerminalTurnId(checkpoint, terminalTurnId);
+              this.rememberGlobalProcessedTerminalTurnId(terminalTurnId);
+              checkpoint.activeTurn = null;
+              checkpoint.pendingTerminal = null;
+              processedTerminalCount++;
+            }
           }
         }
       }
+
+      checkpoint.scanOffset = nextScanOffset;
+      if (blocked || terminalTurnId === null) break;
     }
 
-    checkpoint.scanOffset = nextScanOffset;
-    this.saveCheckpoint(key, checkpoint);
-    this.saveGlobalEmittedTurnIds();
+    if (checkpointChanged) this.saveCheckpoint(key, checkpoint);
+    this.saveGlobalProcessedTerminalTurnIds();
     return emittedCount;
   }
 
@@ -272,32 +345,46 @@ export class CodexTranscriptInput extends BaseInput {
   private async recoverPendingTerminal(
     filePath: string,
     checkpoint: CodexTranscriptCheckpoint,
-  ): Promise<AgentActivityEntry[] | null> {
+  ): Promise<PendingRecoveryResult> {
     const pending = checkpoint.pendingTerminal;
-    if (!pending) return [];
+    if (!pending) return { blocked: false, emittedCount: 0, processedTerminalCount: 0 };
     if (checkpoint.activeTurn?.turnId !== pending.turnId) {
       checkpoint.pendingTerminal = null;
-      return [];
+      return { blocked: false, emittedCount: 0, processedTerminalCount: 0 };
     }
-    if (this.isGloballyEmittedTurn(pending.turnId)) {
-      this.rememberCheckpointTurnId(checkpoint, pending.turnId);
+    if (this.isGloballyProcessedTerminalTurn(pending.turnId)) {
+      this.rememberProcessedTerminalTurnId(checkpoint, pending.turnId);
       checkpoint.activeTurn = null;
       checkpoint.pendingTerminal = null;
-      return [];
+      return { blocked: false, emittedCount: 0, processedTerminalCount: 1 };
     }
     const recovered = await this.recoverTurnSegment(filePath, checkpoint, pending.terminalEndOffset, true);
-    if (recovered.entries.length === 0) {
-      this.logger.warn('pending Codex terminal turn still could not be reconstructed; will retry', {
+    if (recovered.kind === 'unparseable') {
+      const now = Date.now();
+      checkpoint.pendingTerminal = {
+        ...pending,
+        retryCount: (pending.retryCount ?? 0) + 1,
+        firstPendingAtMs: pending.firstPendingAtMs ?? now,
+        lastAttemptAtMs: now,
+        sourceRecordCount: recovered.diagnostics.sourceRecordCount,
+      };
+      this.logger.warn('pending Codex terminal turn still could not be parsed; will retry', {
         transcriptPath: filePath,
         turnId: pending.turnId,
+        range: { startOffset: checkpoint.activeTurn.startOffset, endOffset: pending.terminalEndOffset },
+        retryCount: checkpoint.pendingTerminal.retryCount,
+        firstPendingAtMs: checkpoint.pendingTerminal.firstPendingAtMs,
+        sourceRecordCount: recovered.diagnostics.sourceRecordCount,
       });
-      return null;
+      return { blocked: true, emittedCount: 0, processedTerminalCount: 0 };
     }
-    this.rememberCheckpointTurnId(checkpoint, pending.turnId);
-    this.rememberGlobalEmittedTurnId(pending.turnId);
+
+    const emittedCount = this.emitEntryBatches(recovered.entries);
+    this.rememberProcessedTerminalTurnId(checkpoint, pending.turnId);
+    this.rememberGlobalProcessedTerminalTurnId(pending.turnId);
     checkpoint.activeTurn = null;
     checkpoint.pendingTerminal = null;
-    return recovered.entries;
+    return { blocked: false, emittedCount, processedTerminalCount: 1 };
   }
 
   private async recoverTurnSegment(
@@ -307,7 +394,14 @@ export class CodexTranscriptInput extends BaseInput {
     terminal: boolean,
   ): Promise<SegmentRecoveryResult> {
     const activeTurn = checkpoint.activeTurn;
-    if (!activeTurn) return { entries: [], consumedEndOffset: endOffset };
+    if (!activeTurn) {
+      return {
+        kind: 'unparseable',
+        entries: [],
+        consumedEndOffset: endOffset,
+        diagnostics: emptySegmentRecoveryDiagnostics(),
+      };
+    }
     const records = await readJsonLines(filePath, activeTurn.startOffset, endOffset);
     const metaRecord = checkpoint.latestSessionMetaOffset === null
       ? null
@@ -320,7 +414,15 @@ export class CodexTranscriptInput extends BaseInput {
       activeTurn.turnId,
       partialTurnOptions(activeTurn),
     );
-    if (!turn) return { entries: [], consumedEndOffset: activeTurn.startOffset };
+    const previouslyEmittedStepCount = activeTurn.emittedStepCount ?? 0;
+    if (!turn) {
+      return {
+        kind: 'unparseable',
+        entries: [],
+        consumedEndOffset: activeTurn.startOffset,
+        diagnostics: emptySegmentRecoveryDiagnostics(records.items.length, previouslyEmittedStepCount),
+      };
+    }
     updateActiveTurnFromExtractedTurn(activeTurn, turn);
     if (turn.unmatchedTokenUsages.length > 0) {
       this.logger.warn('Codex transcript token samples could not be assigned to a response wave', {
@@ -353,6 +455,43 @@ export class CodexTranscriptInput extends BaseInput {
       return closedStepIds.has(String(entry['gen_ai.step.id'] ?? ''));
     });
     const entries = this.filterNewSegmentEntries(readyEntries, activeTurn);
+    const diagnostics: SegmentRecoveryDiagnostics = {
+      sourceRecordCount: records.items.length,
+      stepCount: turn.steps.length,
+      toolCount: turn.steps.reduce((count, step) => count + step.tools.length, 0),
+      tokenUsageCount: turn.steps.filter(step => step.tokenUsage !== undefined).length,
+      unmatchedTokenUsageCount: turn.unmatchedTokenUsages.length,
+      builtEntryCount: built.entries.length,
+      readyEntryCount: readyEntries.length,
+      deduplicatedEntryCount: readyEntries.length - entries.length,
+      emittedEntryCount: entries.length,
+      previouslyEmittedStepCount,
+    };
+
+    if (terminal && entries.length === 0) {
+      if (built.entries.length === 0) {
+        this.logger.debug('processed terminal Codex turn without observable entries', {
+          transcriptPath: filePath,
+          turnId: activeTurn.turnId,
+          terminalStatus: turn.status,
+          diagnostics,
+        });
+      } else if (readyEntries.length > 0 && diagnostics.deduplicatedEntryCount === readyEntries.length) {
+        this.logger.debug('terminal Codex turn entries were already emitted incrementally', {
+          transcriptPath: filePath,
+          turnId: activeTurn.turnId,
+          terminalStatus: turn.status,
+          diagnostics,
+        });
+      } else {
+        this.logger.warn('processed terminal Codex turn produced no explainable new entries', {
+          transcriptPath: filePath,
+          turnId: activeTurn.turnId,
+          terminalStatus: turn.status,
+          diagnostics,
+        });
+      }
+    }
 
     if (turn.prompt) activeTurn.emittedPrompt = true;
     activeTurn.emittedStepCount = (activeTurn.emittedStepCount ?? 0) + closedStepCount;
@@ -370,9 +509,13 @@ export class CodexTranscriptInput extends BaseInput {
       : lastClosedRange?.endOffset ?? activeTurn.startOffset;
 
     const resourceAttributes = await this.readWakeupResourceAttributes(turn.sessionId);
+    const outputEntries = resourceAttributes ? attachWakeupResourceAttributes(entries, resourceAttributes) : entries;
     return {
-      entries: resourceAttributes ? attachWakeupResourceAttributes(entries, resourceAttributes) : entries,
+      kind: outputEntries.length > 0 ? 'processed-emitted' : 'processed-empty',
+      entries: outputEntries,
       consumedEndOffset,
+      terminalStatus: turn.status,
+      diagnostics,
     };
   }
 
@@ -542,7 +685,7 @@ export class CodexTranscriptInput extends BaseInput {
     if (baselineActiveTurn) {
       baselineActiveTurn.startOffset = nextOffset;
     }
-    for (const turnId of completedTurnIds) this.rememberGlobalEmittedTurnId(turnId);
+    for (const turnId of completedTurnIds) this.rememberGlobalProcessedTerminalTurnId(turnId);
     this.saveCheckpoint(key, {
       inode: stat.ino,
       scanOffset: nextOffset,
@@ -595,7 +738,14 @@ export class CodexTranscriptInput extends BaseInput {
     const pendingTerminal = pending
       && typeof pending.turnId === 'string'
       && typeof pending.terminalEndOffset === 'number'
-      ? { turnId: pending.turnId, terminalEndOffset: pending.terminalEndOffset }
+      ? {
+          turnId: pending.turnId,
+          terminalEndOffset: pending.terminalEndOffset,
+          ...(typeof pending.retryCount === 'number' ? { retryCount: pending.retryCount } : {}),
+          ...(typeof pending.firstPendingAtMs === 'number' ? { firstPendingAtMs: pending.firstPendingAtMs } : {}),
+          ...(typeof pending.lastAttemptAtMs === 'number' ? { lastAttemptAtMs: pending.lastAttemptAtMs } : {}),
+          ...(typeof pending.sourceRecordCount === 'number' ? { sourceRecordCount: pending.sourceRecordCount } : {}),
+        }
       : null;
     return {
       inode: value.inode,
@@ -623,16 +773,16 @@ export class CodexTranscriptInput extends BaseInput {
     });
   }
 
-  private loadGlobalEmittedTurnIds(): void {
-    if (this.emittedTurnIdsLoaded) return;
-    this.emittedTurnIdsLoaded = true;
+  private loadGlobalProcessedTerminalTurnIds(): void {
+    if (this.processedTerminalTurnIdsLoaded) return;
+    this.processedTerminalTurnIdsLoaded = true;
 
     const global = this.readGlobalState();
     const hasPersistedGlobalState = global.emittedTerminalTurnIds.length > 0;
     for (const turnId of global.emittedTerminalTurnIds) {
-      if (this.emittedTurnIds.has(turnId)) continue;
-      this.emittedTurnIds.add(turnId);
-      this.emittedTurnIdOrder.push(turnId);
+      if (this.processedTerminalTurnIds.has(turnId)) continue;
+      this.processedTerminalTurnIds.add(turnId);
+      this.processedTerminalTurnIdOrder.push(turnId);
     }
 
     if (hasPersistedGlobalState) return;
@@ -644,7 +794,7 @@ export class CodexTranscriptInput extends BaseInput {
         ? value.emittedTerminalTurnIds
         : [];
       for (const turnId of emittedTerminalTurnIds) {
-        if (typeof turnId === 'string') this.rememberGlobalEmittedTurnId(turnId);
+        if (typeof turnId === 'string') this.rememberGlobalProcessedTerminalTurnId(turnId);
       }
     }
   }
@@ -661,40 +811,40 @@ export class CodexTranscriptInput extends BaseInput {
     };
   }
 
-  private saveGlobalEmittedTurnIds(): void {
-    if (!this.emittedTurnIdsDirty) return;
+  private saveGlobalProcessedTerminalTurnIds(): void {
+    if (!this.processedTerminalTurnIdsDirty) return;
     const current = this.stateStore.get(this.id);
     this.stateStore.update(this.id, {
-      lastOffset: this.emittedTurnIdOrder.length,
+      lastOffset: this.processedTerminalTurnIdOrder.length,
       extra: {
         ...(current.extra ?? {}),
         codexTranscriptGlobal: {
-          emittedTerminalTurnIds: this.emittedTurnIdOrder,
+          emittedTerminalTurnIds: this.processedTerminalTurnIdOrder,
         },
       },
     });
-    this.emittedTurnIdsDirty = false;
+    this.processedTerminalTurnIdsDirty = false;
   }
 
-  private isGloballyEmittedTurn(turnId: string): boolean {
-    this.loadGlobalEmittedTurnIds();
-    return this.emittedTurnIds.has(turnId);
+  private isGloballyProcessedTerminalTurn(turnId: string): boolean {
+    this.loadGlobalProcessedTerminalTurnIds();
+    return this.processedTerminalTurnIds.has(turnId);
   }
 
-  private rememberCheckpointTurnId(checkpoint: CodexTranscriptCheckpoint, turnId: string): void {
+  private rememberProcessedTerminalTurnId(checkpoint: CodexTranscriptCheckpoint, turnId: string): void {
     checkpoint.emittedTerminalTurnIds = [turnId, ...checkpoint.emittedTerminalTurnIds.filter(id => id !== turnId)]
       .slice(0, MAX_EMITTED_TERMINAL_TURNS);
   }
 
-  private rememberGlobalEmittedTurnId(turnId: string, markDirty = true): void {
-    if (this.emittedTurnIds.has(turnId)) return;
-    this.emittedTurnIds.add(turnId);
-    this.emittedTurnIdOrder.unshift(turnId);
-    while (this.emittedTurnIdOrder.length > MAX_GLOBAL_EMITTED_TERMINAL_TURNS) {
-      const removed = this.emittedTurnIdOrder.pop();
-      if (removed) this.emittedTurnIds.delete(removed);
+  private rememberGlobalProcessedTerminalTurnId(turnId: string, markDirty = true): void {
+    if (this.processedTerminalTurnIds.has(turnId)) return;
+    this.processedTerminalTurnIds.add(turnId);
+    this.processedTerminalTurnIdOrder.unshift(turnId);
+    while (this.processedTerminalTurnIdOrder.length > MAX_GLOBAL_EMITTED_TERMINAL_TURNS) {
+      const removed = this.processedTerminalTurnIdOrder.pop();
+      if (removed) this.processedTerminalTurnIds.delete(removed);
     }
-    if (markDirty) this.emittedTurnIdsDirty = true;
+    if (markDirty) this.processedTerminalTurnIdsDirty = true;
   }
 }
 
@@ -900,6 +1050,40 @@ function serializedEntryBytes(entry: AgentActivityEntry): number {
   } catch {
     return MAX_EMIT_BATCH_BYTES;
   }
+}
+
+function newPendingTerminal(
+  turnId: string,
+  terminalEndOffset: number,
+  sourceRecordCount: number,
+): CodexPendingTerminalTurn {
+  const now = Date.now();
+  return {
+    turnId,
+    terminalEndOffset,
+    retryCount: 1,
+    firstPendingAtMs: now,
+    lastAttemptAtMs: now,
+    sourceRecordCount,
+  };
+}
+
+function emptySegmentRecoveryDiagnostics(
+  sourceRecordCount = 0,
+  previouslyEmittedStepCount = 0,
+): SegmentRecoveryDiagnostics {
+  return {
+    sourceRecordCount,
+    stepCount: 0,
+    toolCount: 0,
+    tokenUsageCount: 0,
+    unmatchedTokenUsageCount: 0,
+    builtEntryCount: 0,
+    readyEntryCount: 0,
+    deduplicatedEntryCount: 0,
+    emittedEntryCount: 0,
+    previouslyEmittedStepCount,
+  };
 }
 
 function attachWakeupResourceAttributes(

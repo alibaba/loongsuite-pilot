@@ -44,6 +44,10 @@ export interface CodexActiveTranscriptTurn {
 export interface CodexPendingTerminalTurn {
   turnId: string;
   terminalEndOffset: number;
+  retryCount?: number;
+  firstPendingAtMs?: number;
+  lastAttemptAtMs?: number;
+  sourceRecordCount?: number;
 }
 
 export interface CodexTranscriptCheckpoint {
@@ -52,10 +56,12 @@ export interface CodexTranscriptCheckpoint {
   activeTurn: CodexActiveTranscriptTurn | null;
   pendingTerminal: CodexPendingTerminalTurn | null;
   latestSessionMetaOffset: number | null;
+  /** Terminal turns already processed by this transcript, including empty control turns. */
   emittedTerminalTurnIds: string[];
 }
 
 export interface CodexTranscriptGlobalState {
+  /** Bounded cross-transcript registry; the persisted name is retained for compatibility. */
   emittedTerminalTurnIds: string[];
 }
 

@@ -207,7 +207,23 @@ function simpleCompletedTurn(
   ];
 }
 
-async function createInput(root: string): Promise<{
+function controlOnlyAbortedTurn(sessionId: string, turnId: string, start: string): string[] {
+  const baseMs = Date.parse(start);
+  const at = (offsetMs: number) => new Date(baseMs + offsetMs).toISOString();
+  return [
+    record(at(0), 'event_msg', { type: 'task_started', turn_id: turnId }),
+    record(at(1_000), 'turn_context', { turn_id: turnId, model: 'gpt-5.5' }),
+    record(at(2_000), 'session_meta', { id: sessionId, model_provider: 'openai' }),
+    record(at(3_000), 'response_item', {
+      type: 'message',
+      role: 'developer',
+      content: [{ type: 'input_text', text: '<turn_aborted> previous turn interrupted' }],
+    }),
+    record(at(4_000), 'event_msg', { type: 'turn_aborted', turn_id: turnId }),
+  ];
+}
+
+async function createInput(root: string, pollIntervalMs = 10): Promise<{
   input: CodexTranscriptInput;
   entries: AgentActivityEntry[];
   batches: AgentActivityEntry[][];
@@ -219,7 +235,7 @@ async function createInput(root: string): Promise<{
   await stateStore.load();
   const sessionDir = path.join(root, 'sessions');
   const wakeupDir = path.join(root, 'wakeups');
-  const input = new CodexTranscriptInput({ stateStore, sessionDir, wakeupDir, pollIntervalMs: 10 });
+  const input = new CodexTranscriptInput({ stateStore, sessionDir, wakeupDir, pollIntervalMs });
   const entries: AgentActivityEntry[] = [];
   const batches: AgentActivityEntry[][] = [];
   input.on('entries', batch => {
@@ -227,6 +243,28 @@ async function createInput(root: string): Promise<{
     entries.push(...batch);
   });
   await input.start();
+  return { input, entries, batches, sessionDir, wakeupDir, stateStore };
+}
+
+async function createDormantInput(root: string): Promise<{
+  input: CodexTranscriptInput;
+  entries: AgentActivityEntry[];
+  batches: AgentActivityEntry[][];
+  sessionDir: string;
+  wakeupDir: string;
+  stateStore: StateStore;
+}> {
+  const stateStore = new StateStore(path.join(root, 'input-state.json'));
+  await stateStore.load();
+  const sessionDir = path.join(root, 'sessions');
+  const wakeupDir = path.join(root, 'wakeups');
+  const input = new CodexTranscriptInput({ stateStore, sessionDir, wakeupDir, pollIntervalMs: 60_000 });
+  const entries: AgentActivityEntry[] = [];
+  const batches: AgentActivityEntry[][] = [];
+  input.on('entries', batch => {
+    batches.push([...batch]);
+    entries.push(...batch);
+  });
   return { input, entries, batches, sessionDir, wakeupDir, stateStore };
 }
 
@@ -254,6 +292,24 @@ function responsesForTurn(entries: AgentActivityEntry[], turnId: string): AgentA
     entry['event.name'] === 'llm.response'
     && entry['agent.codex.transcript_turn_id'] === turnId,
   );
+}
+
+async function processTranscriptOnce(input: CodexTranscriptInput, transcript: string): Promise<number> {
+  return (input as unknown as { processFile(filePath: string): Promise<number> }).processFile(transcript);
+}
+
+function transcriptCheckpoint(
+  stateStore: StateStore,
+  transcript: string,
+): Record<string, unknown> {
+  return stateStore.get(`codex-transcript:${transcript}`).extra?.codexTranscript as Record<string, unknown>;
+}
+
+function globalProcessedTurnIds(stateStore: StateStore): string[] {
+  const global = stateStore.get('codex-transcript').extra?.codexTranscriptGlobal as {
+    emittedTerminalTurnIds?: string[];
+  } | undefined;
+  return global?.emittedTerminalTurnIds ?? [];
 }
 
 describe('CodexTranscriptInput', () => {
@@ -577,6 +633,289 @@ describe('CodexTranscriptInput', () => {
     expect(debug).toHaveBeenCalledWith(
       'Codex wakeup marker has no resourceAttributes; attribution skipped',
       { marker: path.join(wakeupDir, 'session-1.json') },
+    );
+  });
+
+  it('consumes a control-only aborted turn and emits later normal work in the same cycle', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-control-abort-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const debug = vi.fn();
+    const warn = vi.fn();
+    (input as unknown as { logger: { debug: typeof debug; warn: typeof warn } }).logger.debug = debug;
+    (input as unknown as { logger: { debug: typeof debug; warn: typeof warn } }).logger.warn = warn;
+    const controlTurnId = 'turn-control';
+    const normalTurnId = 'turn-normal';
+    const transcript = await writeTranscript(
+      sessionDir,
+      [
+        ...controlOnlyAbortedTurn('session-1', controlTurnId, '2026-06-24T06:00:00.000Z'),
+        ...simpleCompletedTurn(
+          'session-1', normalTurnId, 'continue work', 'work completed', 120, 12,
+          '2026-06-24T06:01:00.000Z',
+        ).slice(1),
+      ].join('\n') + '\n',
+    );
+
+    await processTranscriptOnce(input, transcript);
+
+    expect(entries.filter(entry => entry['agent.codex.transcript_turn_id'] === controlTurnId)).toHaveLength(0);
+    expect(responsesForTurn(entries, normalTurnId)).toHaveLength(1);
+    const checkpoint = transcriptCheckpoint(stateStore, transcript) as {
+      activeTurn?: unknown;
+      pendingTerminal?: unknown;
+      emittedTerminalTurnIds?: string[];
+    };
+    expect(checkpoint.activeTurn).toBeNull();
+    expect(checkpoint.pendingTerminal).toBeNull();
+    expect(checkpoint.emittedTerminalTurnIds).toEqual(expect.arrayContaining([controlTurnId, normalTurnId]));
+    expect(globalProcessedTurnIds(stateStore)).toEqual(expect.arrayContaining([controlTurnId, normalTurnId]));
+    expect(debug).toHaveBeenCalledWith(
+      'processed terminal Codex turn without observable entries',
+      expect.objectContaining({ turnId: controlTurnId, terminalStatus: 'interrupted' }),
+    );
+    expect(warn).not.toHaveBeenCalledWith(
+      'processed terminal Codex turn produced no explainable new entries',
+      expect.anything(),
+    );
+  });
+
+  it('limits terminal recovery per file cycle and resumes from the saved offset', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-terminal-budget-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const lines: string[] = [];
+    for (let index = 0; index < 101; index++) {
+      const turn = simpleCompletedTurn(
+        'session-1', `turn-${index}`, `prompt ${index}`, `response ${index}`, 100 + index, 10,
+        new Date(Date.parse('2026-06-24T06:00:00.000Z') + index * 10_000).toISOString(),
+      );
+      lines.push(...(index === 0 ? turn : turn.slice(1)));
+    }
+    const transcript = await writeTranscript(sessionDir, lines.join('\n') + '\n');
+    const transcriptSize = (await fs.stat(transcript)).size;
+
+    await processTranscriptOnce(input, transcript);
+    expect(entries.filter(entry => entry['event.name'] === 'llm.response')).toHaveLength(100);
+    expect((transcriptCheckpoint(stateStore, transcript) as { scanOffset?: number }).scanOffset)
+      .toBeLessThan(transcriptSize);
+
+    await processTranscriptOnce(input, transcript);
+    expect(entries.filter(entry => entry['event.name'] === 'llm.response')).toHaveLength(101);
+    expect((transcriptCheckpoint(stateStore, transcript) as { scanOffset?: number }).scanOffset)
+      .toBe(transcriptSize);
+  });
+
+  it('skips copied history, consumes a control abort, and emits new fork work in one cycle', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-fork-control-abort-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const historyTurnId = 'turn-history';
+    const controlTurnId = 'turn-control';
+    const forkTurnId = 'turn-fork-new';
+    const history = simpleCompletedTurn(
+      'session-parent', historyTurnId, 'parent work', 'parent done', 100, 10,
+      '2026-06-24T06:00:00.000Z',
+    );
+    const parent = await writeTranscriptNamed(sessionDir, 'rollout-parent.jsonl', history.join('\n') + '\n');
+    await processTranscriptOnce(input, parent);
+
+    const fork = await writeTranscriptNamed(
+      sessionDir,
+      'rollout-fork.jsonl',
+      [
+        record('2026-06-24T06:10:00.000Z', 'session_meta', {
+          id: 'session-fork', model_provider: 'openai', forked_from_id: 'session-parent',
+        }),
+        ...history.slice(1),
+        ...controlOnlyAbortedTurn('session-fork', controlTurnId, '2026-06-24T06:11:00.000Z'),
+        ...simpleCompletedTurn(
+          'session-fork', forkTurnId, 'continue fork work', 'fork work completed', 130, 13,
+          '2026-06-24T06:12:00.000Z',
+        ).slice(1),
+      ].join('\n') + '\n',
+    );
+    await processTranscriptOnce(input, fork);
+
+    expect(responsesForTurn(entries, historyTurnId)).toHaveLength(1);
+    expect(entries.filter(entry => entry['agent.codex.transcript_turn_id'] === controlTurnId)).toHaveLength(0);
+    expect(responsesForTurn(entries, forkTurnId)).toHaveLength(1);
+    const checkpoint = transcriptCheckpoint(stateStore, fork) as {
+      activeTurn?: unknown;
+      pendingTerminal?: unknown;
+      emittedTerminalTurnIds?: string[];
+    };
+    expect(checkpoint.activeTurn).toBeNull();
+    expect(checkpoint.pendingTerminal).toBeNull();
+    expect(checkpoint.emittedTerminalTurnIds).toEqual(
+      expect.arrayContaining([historyTurnId, controlTurnId, forkTurnId]),
+    );
+    expect(globalProcessedTurnIds(stateStore)).toContain(controlTurnId);
+
+    await stateStore.save();
+    const restarted = await createDormantInput(root);
+    const debug = vi.fn();
+    (restarted.input as unknown as { logger: { debug: typeof debug } }).logger.debug = debug;
+    const restartedTurnId = 'turn-fork-after-restart';
+    const secondFork = await writeTranscriptNamed(
+      restarted.sessionDir,
+      'rollout-fork-after-restart.jsonl',
+      [
+        record('2026-06-24T06:20:00.000Z', 'session_meta', {
+          id: 'session-fork-2', model_provider: 'openai', forked_from_id: 'session-fork',
+        }),
+        ...controlOnlyAbortedTurn('session-fork-2', controlTurnId, '2026-06-24T06:21:00.000Z'),
+        ...simpleCompletedTurn(
+          'session-fork-2', restartedTurnId, 'continue after restart', 'restart work completed', 140, 14,
+          '2026-06-24T06:22:00.000Z',
+        ).slice(1),
+      ].join('\n') + '\n',
+    );
+    await processTranscriptOnce(restarted.input, secondFork);
+
+    expect(responsesForTurn(restarted.entries, restartedTurnId)).toHaveLength(1);
+    expect((transcriptCheckpoint(restarted.stateStore, secondFork) as {
+      emittedTerminalTurnIds?: string[];
+    }).emittedTerminalTurnIds).toContain(controlTurnId);
+    expect(debug).not.toHaveBeenCalledWith(
+      'processed terminal Codex turn without observable entries',
+      expect.objectContaining({ turnId: controlTurnId }),
+    );
+  });
+
+  it('clears a legacy empty pending terminal and emits later work during startup collection', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-legacy-empty-pending-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const controlTurnId = 'turn-control';
+    const normalTurnId = 'turn-normal';
+    const controlLines = controlOnlyAbortedTurn('session-1', controlTurnId, '2026-06-24T06:00:00.000Z');
+    const controlText = controlLines.join('\n') + '\n';
+    const transcript = await writeTranscriptNamed(
+      sessionDir,
+      'rollout-session-1.jsonl',
+      controlText + simpleCompletedTurn(
+        'session-1', normalTurnId, 'continue work', 'work completed', 120, 12,
+        '2026-06-24T06:01:00.000Z',
+      ).slice(1).join('\n') + '\n',
+    );
+    const stat = await fs.stat(transcript);
+    const terminalEndOffset = Buffer.byteLength(controlText);
+    const sessionMetaOffset = Buffer.byteLength(controlLines.slice(0, 2).join('\n') + '\n');
+    const persistedState = new StateStore(path.join(root, 'input-state.json'));
+    await persistedState.load();
+    persistedState.update(`codex-transcript:${transcript}`, {
+      lastOffset: terminalEndOffset,
+      extra: {
+        codexTranscript: {
+          inode: stat.ino,
+          scanOffset: terminalEndOffset,
+          activeTurn: {
+            turnId: controlTurnId,
+            startOffset: 0,
+            startedAtMs: Date.parse('2026-06-24T06:00:00.000Z'),
+            model: 'gpt-5.5',
+          },
+          pendingTerminal: { turnId: controlTurnId, terminalEndOffset },
+          latestSessionMetaOffset: sessionMetaOffset,
+          emittedTerminalTurnIds: [],
+        },
+      },
+    });
+    await persistedState.save();
+
+    const recovered = await createInput(root, 60_000);
+    await recovered.input.stop();
+
+    expect(recovered.entries.filter(entry => entry['agent.codex.transcript_turn_id'] === controlTurnId)).toHaveLength(0);
+    expect(responsesForTurn(recovered.entries, normalTurnId)).toHaveLength(1);
+    const checkpoint = transcriptCheckpoint(recovered.stateStore, transcript) as {
+      activeTurn?: unknown;
+      pendingTerminal?: unknown;
+      emittedTerminalTurnIds?: string[];
+    };
+    expect(checkpoint.activeTurn).toBeNull();
+    expect(checkpoint.pendingTerminal).toBeNull();
+    expect(checkpoint.emittedTerminalTurnIds).toEqual(expect.arrayContaining([controlTurnId, normalTurnId]));
+    expect(globalProcessedTurnIds(recovered.stateStore)).toEqual(
+      expect.arrayContaining([controlTurnId, normalTurnId]),
+    );
+  });
+
+  it('retains a truly unparseable pending range and does not scan later work', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-unparseable-pending-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const pendingTurnId = 'turn-unparseable';
+    const normalTurnId = 'turn-normal';
+    const pendingText = record('2026-06-24T06:00:00.000Z', 'event_msg', {
+      type: 'task_started', turn_id: pendingTurnId,
+    }) + '\n';
+    const transcript = await writeTranscriptNamed(
+      sessionDir,
+      'rollout-session-1.jsonl',
+      pendingText + simpleCompletedTurn(
+        'session-1', normalTurnId, 'later work', 'later work completed', 120, 12,
+        '2026-06-24T06:01:00.000Z',
+      ).join('\n') + '\n',
+    );
+    const stat = await fs.stat(transcript);
+    const terminalEndOffset = Buffer.byteLength(pendingText);
+    const stateStore = new StateStore(path.join(root, 'input-state.json'));
+    await stateStore.load();
+    stateStore.update(`codex-transcript:${transcript}`, {
+      lastOffset: terminalEndOffset,
+      extra: {
+        codexTranscript: {
+          inode: stat.ino,
+          scanOffset: terminalEndOffset,
+          activeTurn: {
+            turnId: pendingTurnId,
+            startOffset: 0,
+            startedAtMs: Date.parse('2026-06-24T06:00:00.000Z'),
+          },
+          pendingTerminal: { turnId: pendingTurnId, terminalEndOffset },
+          latestSessionMetaOffset: null,
+          emittedTerminalTurnIds: [],
+        },
+      },
+    });
+    await stateStore.save();
+
+    const loadedState = new StateStore(path.join(root, 'input-state.json'));
+    await loadedState.load();
+    const input = new CodexTranscriptInput({
+      stateStore: loadedState,
+      sessionDir,
+      wakeupDir: path.join(root, 'wakeups'),
+      pollIntervalMs: 60_000,
+    });
+    const entries: AgentActivityEntry[] = [];
+    const warn = vi.fn();
+    input.on('entries', batch => entries.push(...batch));
+    (input as unknown as { logger: { warn: typeof warn } }).logger.warn = warn;
+    await input.start();
+    await input.stop();
+
+    expect(responsesForTurn(entries, normalTurnId)).toHaveLength(0);
+    const checkpoint = transcriptCheckpoint(loadedState, transcript) as {
+      scanOffset?: number;
+      pendingTerminal?: { turnId?: string; retryCount?: number; sourceRecordCount?: number };
+    };
+    expect(checkpoint.scanOffset).toBe(terminalEndOffset);
+    expect(checkpoint.pendingTerminal).toMatchObject({
+      turnId: pendingTurnId,
+      retryCount: 1,
+      sourceRecordCount: 1,
+    });
+    expect(warn).toHaveBeenCalledWith(
+      'pending Codex terminal turn still could not be parsed; will retry',
+      expect.objectContaining({
+        transcriptPath: transcript,
+        turnId: pendingTurnId,
+        retryCount: 1,
+        sourceRecordCount: 1,
+      }),
     );
   });
 
