@@ -217,6 +217,118 @@ describe('Pi Coding Agent extension', () => {
     expect(mixedResponse).not.toContain('sensitive-base64-payload');
   });
 
+  it('converts bash execution and custom messages into canonical input messages', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+
+    await runtime.emit('context', {
+      messages: [
+        {
+          role: 'bashExecution',
+          command: 'cat missing.txt',
+          output: 'No such file or directory',
+          exitCode: 1,
+        },
+        {
+          role: 'custom',
+          customType: 'extension-note',
+          content: [{ type: 'text', text: 'Injected context' }],
+          display: false,
+        },
+      ],
+    });
+
+    expect(readRecords()[0]['gen_ai.input.messages']).toEqual([
+      {
+        role: 'tool',
+        parts: [{
+          type: 'tool_call_response',
+          id: null,
+          response: 'No such file or directory',
+          name: 'bash',
+          is_error: true,
+        }],
+      },
+      {
+        role: 'user',
+        parts: [{ type: 'text', content: 'Injected context' }],
+      },
+    ]);
+  });
+
+  it('emits at most one LLM request per step and resets on the next turn', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+
+    await runtime.emit('context', {
+      messages: [{ role: 'user', content: 'first snapshot' }],
+    });
+    await runtime.emit('context', {
+      messages: [{ role: 'user', content: 'duplicate snapshot' }],
+    });
+    await runtime.emit('turn_start', { turnIndex: 1, timestamp: Date.now() });
+    await runtime.emit('context', {
+      messages: [{ role: 'user', content: 'second turn' }],
+    });
+
+    const requests = readRecords();
+    expect(requests).toHaveLength(2);
+    expect(requests.map(record => record['gen_ai.step.id'])).toEqual([
+      expect.stringMatching(/:s1$/),
+      expect.stringMatching(/:s2$/),
+    ]);
+    expect(requests[0]['gen_ai.input.messages'][0].parts[0].content).toBe('first snapshot');
+    expect(requests[1]['gen_ai.input.messages'][0].parts[0].content).toBe('second turn');
+  });
+
+  it('records tool failures with status, error type, result, and duration', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+
+    vi.setSystemTime(new Date('2026-07-16T08:00:01.000Z'));
+    await runtime.emit('tool_execution_start', {
+      toolCallId: 'call-failed',
+      toolName: 'read',
+      args: { path: 'missing.txt' },
+    });
+    vi.setSystemTime(new Date('2026-07-16T08:00:01.400Z'));
+    await runtime.emit('tool_execution_end', {
+      toolCallId: 'call-failed',
+      toolName: 'read',
+      result: { content: 'permission denied' },
+      isError: true,
+    });
+
+    expect(readRecords()[1]).toMatchObject({
+      'event.name': 'tool.result',
+      'gen_ai.tool.call.id': 'call-failed',
+      'gen_ai.tool.call.duration': 400,
+      'gen_ai.tool.call.result': { content: 'permission denied' },
+      'tool.result.status': 'error',
+      'error.type': 'tool_error',
+    });
+  });
+
+  it('omits tool duration when no matching execution start was observed', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+
+    await runtime.emit('tool_execution_end', {
+      toolCallId: 'call-unmatched',
+      toolName: 'read',
+      result: { content: 'completed elsewhere' },
+      isError: false,
+    });
+
+    const result = readRecords()[0];
+    expect(result).toMatchObject({
+      'event.name': 'tool.result',
+      'gen_ai.tool.call.id': 'call-unmatched',
+      'tool.result.status': 'success',
+    });
+    expect(result).not.toHaveProperty('gen_ai.tool.call.duration');
+  });
+
   it('tightens an existing log directory before writing sensitive records', async () => {
     if (process.platform === 'win32') return;
 
