@@ -27,10 +27,88 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
-            --generate-notes \
-            loongsuite-pilot.tar.gz \
-            loongsuite-pilot.zip \
-            deploy/installer-opensource.sh#installer.sh \
-            deploy/installer-opensource.ps1#installer.ps1
+          node <<'NODE'
+          const fs = require('fs');
+
+          const token = process.env.GH_TOKEN;
+          const repo = process.env.GITHUB_REPOSITORY;
+          const tag = process.env.GITHUB_REF_NAME;
+          const apiBase = 'https://api.github.com/repos/' + repo;
+          const headers = {
+            Accept: 'application/vnd.github+json',
+            Authorization: `Bearer ${token}`,
+            'X-GitHub-Api-Version': '2022-11-28',
+          };
+
+          async function request(url, options = {}) {
+            const response = await fetch(url, { ...options, headers: { ...headers, ...options.headers } });
+            const text = await response.text();
+            let body = null;
+            if (text) {
+              try {
+                body = JSON.parse(text);
+              } catch {
+                body = text;
+              }
+            }
+            if (!response.ok) {
+              const message = typeof body === 'string' ? body : JSON.stringify(body);
+              const error = new Error(`${response.status} ${response.statusText}: ${message}`);
+              error.status = response.status;
+              throw error;
+            }
+            return body;
+          }
+
+          async function getOrCreateRelease() {
+            try {
+              return await request(`${apiBase}/releases`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  tag_name: tag,
+                  name: tag,
+                  generate_release_notes: true,
+                }),
+              });
+            } catch (error) {
+              if (error.status !== 422) throw error;
+              return request(`${apiBase}/releases/tags/${encodeURIComponent(tag)}`);
+            }
+          }
+
+          async function uploadAsset(release, filePath, assetName, contentType) {
+            const assets = await request(release.assets_url);
+            for (const asset of assets) {
+              if (asset.name === assetName) {
+                await request(`${apiBase}/releases/assets/${asset.id}`, { method: 'DELETE' });
+              }
+            }
+
+            const uploadBase = release.upload_url.replace(/\{\?name,label\}$/, '');
+            const data = fs.readFileSync(filePath);
+            await request(`${uploadBase}?name=${encodeURIComponent(assetName)}`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': contentType,
+                'Content-Length': String(data.length),
+              },
+              body: data,
+            });
+            console.log(`uploaded ${assetName}`);
+          }
+
+          async function main() {
+            const release = await getOrCreateRelease();
+            await uploadAsset(release, 'loongsuite-pilot.tar.gz', 'loongsuite-pilot.tar.gz', 'application/gzip');
+            await uploadAsset(release, 'loongsuite-pilot.zip', 'loongsuite-pilot.zip', 'application/zip');
+            await uploadAsset(release, 'deploy/installer-opensource.sh', 'installer.sh', 'application/x-sh');
+            await uploadAsset(release, 'deploy/installer-opensource.ps1', 'installer.ps1', 'text/plain');
+            console.log(`release ${release.html_url}`);
+          }
+
+          main().catch((error) => {
+            console.error(error);
+            process.exit(1);
+          });
+          NODE
