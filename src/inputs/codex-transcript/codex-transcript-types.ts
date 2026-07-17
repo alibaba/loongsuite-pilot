@@ -5,10 +5,35 @@ export const MAX_GLOBAL_EMITTED_TERMINAL_TURNS = 10_000;
 
 export type CodexTerminalStatus = 'completed' | 'interrupted';
 
+export interface CodexTranscriptInputContext {
+  /** Chain hash for the complete request context represented by this state. */
+  hash: string;
+  /** Incremental messages required by the next LLM request. */
+  delta?: JsonValue[];
+  /** Full context is retained only while it remains below the configured limit. */
+  fullMessages?: JsonValue[];
+  /** Transcript range used to rebuild an oversized delta without bloating input-state.json. */
+  deltaRange?: {
+    startOffset: number;
+    endOffset: number;
+  };
+}
+
 export interface CodexActiveTranscriptTurn {
   turnId: string;
   startOffset: number;
   startedAtMs: number;
+  /** Turn-scoped context is needed after incremental recovery advances past turn_context. */
+  model?: string;
+  cwd?: string;
+  developerInstructions?: string;
+  emittedPrompt?: boolean;
+  emittedStepCount?: number;
+  emittedStepRequestIds?: string[];
+  emittedStepResponseIds?: string[];
+  emittedToolCallIds?: string[];
+  emittedToolResultIds?: string[];
+  inputContext?: CodexTranscriptInputContext;
 }
 
 /**
@@ -19,6 +44,10 @@ export interface CodexActiveTranscriptTurn {
 export interface CodexPendingTerminalTurn {
   turnId: string;
   terminalEndOffset: number;
+  retryCount?: number;
+  firstPendingAtMs?: number;
+  lastAttemptAtMs?: number;
+  sourceRecordCount?: number;
 }
 
 export interface CodexTranscriptCheckpoint {
@@ -27,10 +56,12 @@ export interface CodexTranscriptCheckpoint {
   activeTurn: CodexActiveTranscriptTurn | null;
   pendingTerminal: CodexPendingTerminalTurn | null;
   latestSessionMetaOffset: number | null;
+  /** Terminal turns already processed by this transcript, including empty control turns. */
   emittedTerminalTurnIds: string[];
 }
 
 export interface CodexTranscriptGlobalState {
+  /** Bounded cross-transcript registry; the persisted name is retained for compatibility. */
   emittedTerminalTurnIds: string[];
 }
 
@@ -65,10 +96,34 @@ export interface CodexTranscriptStep {
   hasResponseEvidence: boolean;
   completedAtMs: number;
   responseId?: string;
+  inputMessages?: JsonValue[];
   reasoning: string[];
   tools: CodexTranscriptTool[];
   tokenUsage?: CodexTranscriptUsage;
   finalText?: string;
+}
+
+export interface CodexTranscriptSourceRecord {
+  startOffset: number;
+  endOffset: number;
+  record: Record<string, unknown>;
+}
+
+export interface CodexTranscriptSourceRange {
+  startOffset: number;
+  endOffset: number;
+}
+
+/**
+ * Partial extraction keeps semantic LLM-wave boundaries and byte-consumption
+ * boundaries together so the input cannot advance by a different unit than it
+ * emits.
+ */
+export interface CodexPartialTurnExtraction {
+  turn: CodexExtractedTranscriptTurn;
+  committedStepCount: number;
+  committedStepRanges: CodexTranscriptSourceRange[];
+  consumedEndOffset: number;
 }
 
 export interface CodexExtractedTranscriptTurn {

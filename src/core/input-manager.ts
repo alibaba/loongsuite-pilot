@@ -40,6 +40,7 @@ export interface InputCounter {
 export class InputManager extends EventEmitter {
   private readonly inputs: Map<string, BaseInput> = new Map();
   private readonly counters: Map<string, InputCounter> = new Map();
+  private readonly entryQueues: Map<string, Promise<void>> = new Map();
   private flusher: BaseFlusher | null = null;
   private alarmManager: AlarmManager | null = null;
   private userId: string = '';
@@ -90,7 +91,17 @@ export class InputManager extends EventEmitter {
       lastActiveTime: 0,
     });
     input.on('entries', (entries: AgentActivityEntry[]) => {
-      void this.handleEntries(input.id, entries);
+      const previous = this.entryQueues.get(input.id) ?? Promise.resolve();
+      const next = previous
+        .catch(() => undefined)
+        .then(() => this.handleEntries(input.id, entries))
+        .catch(err => {
+          logger.error('entry handling failed', { inputId: input.id, error: String(err) });
+        });
+      this.entryQueues.set(input.id, next);
+      void next.finally(() => {
+        if (this.entryQueues.get(input.id) === next) this.entryQueues.delete(input.id);
+      });
     });
     logger.info('input registered', { id: input.id });
   }
@@ -109,6 +120,7 @@ export class InputManager extends EventEmitter {
     const input = this.inputs.get(id);
     if (!input) return;
     await input.stop();
+    await this.drainInputQueue(id);
     logger.info('input stopped', { id });
   }
 
@@ -117,6 +129,25 @@ export class InputManager extends EventEmitter {
       if (input.running) {
         await input.stop();
       }
+    }
+    await this.drainAllEntryQueues();
+  }
+
+  private async drainInputQueue(id: string): Promise<void> {
+    while (true) {
+      const queue = this.entryQueues.get(id);
+      if (!queue) return;
+      await queue;
+      if (this.entryQueues.get(id) === queue) {
+        this.entryQueues.delete(id);
+        return;
+      }
+    }
+  }
+
+  private async drainAllEntryQueues(): Promise<void> {
+    while (this.entryQueues.size > 0) {
+      await Promise.all([...this.entryQueues.keys()].map(id => this.drainInputQueue(id)));
     }
   }
 
