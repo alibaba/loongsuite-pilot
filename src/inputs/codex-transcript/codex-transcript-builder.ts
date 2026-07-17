@@ -117,7 +117,6 @@ export function buildCodexTranscriptSegment(
         ? { 'gen_ai.output.messages': responseMessages(turn, step, terminalStep) }
         : {}),
       ...usageFields(step.tokenUsage),
-      ...sharedLlmFields(turn),
     }));
 
     for (const [toolIndex, tool] of step.tools.entries()) {

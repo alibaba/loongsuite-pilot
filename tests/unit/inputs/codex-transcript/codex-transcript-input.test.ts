@@ -48,6 +48,7 @@ function completedTurn(): string {
   return [
     record('2026-06-24T06:00:00.000Z', 'session_meta', {
       id: 'session-1', model_provider: 'openai',
+      dynamic_tools: [{ name: 'exec_command', description: 'Run a command' }],
     }),
     record('2026-06-24T06:00:01.000Z', 'turn_context', {
       turn_id: 'turn-1',
@@ -1371,13 +1372,16 @@ describe('CodexTranscriptInput', () => {
       'gen_ai.request.model': 'gpt-5.5',
       'agent.codex.cwd': '/tmp/project',
       'gen_ai.system_instructions': [{ type: 'text', content: 'Follow the project conventions.' }],
+      'gen_ai.tool.definitions': [{ name: 'exec_command', description: 'Run a command' }],
     });
-    expect(restarted.entries.find(entry => entry['gen_ai.step.id'] === 'session-1:turn-1:s2'
-      && entry['event.name'] === 'llm.response')).toMatchObject({
+    const secondResponse = restarted.entries.find(entry => entry['gen_ai.step.id'] === 'session-1:turn-1:s2'
+      && entry['event.name'] === 'llm.response');
+    expect(secondResponse).toMatchObject({
       'gen_ai.response.model': 'gpt-5.5',
       'agent.codex.cwd': '/tmp/project',
-      'gen_ai.system_instructions': [{ type: 'text', content: 'Follow the project conventions.' }],
     });
+    expect(secondResponse?.['gen_ai.system_instructions']).toBeUndefined();
+    expect(secondResponse?.['gen_ai.tool.definitions']).toBeUndefined();
   });
 
   it('rebuilds an oversized persisted delta from transcript offsets', async () => {
