@@ -1,0 +1,4 @@
+{"type":"system","content":"You are Grok released by xAI."}
+{"type":"user","content":[{"type":"text","text":"<user_info>\nOS Version: linux\n</user_info>"}]}
+{"type":"user","content":[{"type":"text","text":"<user_query>\nsay hi\n</user_query>"}],"prompt_index":0,"timestamp":"2026-07-16T06:51:00.910Z"}
+{"type":"assistant","content":[{"type":"text","text":"hi"}],"model":"grok-3","usage":{"input_tokens":10,"output_tokens":2},"stop_reason":"end_turn","timestamp":"2026-07-16T06:51:01.500Z"}

@@ -144,6 +144,87 @@ describe('HookStrategy', () => {
       expect(call.useNestedFormat).toBe(true);
       expect(call.replaceHookCommands).toEqual(['/old/hook.sh']);
     });
+
+    it('converts event key to snake_case when eventKeyCase is "snake" (grok-build)', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      const def = makeDef({
+        id: 'grok-build',
+        hook: {
+          settingsPath: '/home/.grok/hooks/loongsuite-pilot.json',
+          events: ['Stop', 'SubagentStart', 'SubagentStop'],
+          retiredEvents: ['SessionStart', 'UserPromptSubmit'],
+          hookCommand: '/opt/pilot/hooks/grok-build-loongsuite-pilot-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          eventKeyCase: 'snake',
+        },
+      });
+
+      await strategy.needsDeploy(def);
+
+      const installedPaths = mockHookManager.isHookInstalled.mock.calls.map(
+        ([definition]) => definition.hookJsonPath,
+      );
+      // snake_case keys (not PascalCase) — settings JSON field name dimension.
+      // needsDeploy probes active events first (3), then retired events.
+      // With isHookInstalled mocked true, the first retired event (session_start)
+      // triggers early-return, so only one retired entry appears here.
+      expect(installedPaths).toEqual([
+        ['hooks', 'stop'],
+        ['hooks', 'subagent_start'],
+        ['hooks', 'subagent_stop'],
+        ['hooks', 'session_start'],
+      ]);
+
+      // argv subcommand stays kebab-case (orthogonal to settings key case)
+      const cmds = mockHookManager.isHookInstalled.mock.calls.map(
+        ([definition]) => definition.hookCommand,
+      );
+      expect(cmds[0]).toBe('/opt/pilot/hooks/grok-build-loongsuite-pilot-hook.sh stop');
+      expect(cmds[1]).toBe('/opt/pilot/hooks/grok-build-loongsuite-pilot-hook.sh subagent-start');
+      expect(cmds[2]).toBe('/opt/pilot/hooks/grok-build-loongsuite-pilot-hook.sh subagent-stop');
+
+      // retired events also use snake keys so uninstall lookup matches deploy write path
+      mockHookManager.uninstallHook.mockResolvedValue(true);
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+      vi.mocked(readJsonFile).mockResolvedValue({ hooks: {} });
+      await strategy.deploy(def);
+      const retiredFromDeploy = mockHookManager.uninstallHook.mock.calls.map(
+        ([definition]) => definition.hookJsonPath,
+      );
+      expect(retiredFromDeploy).toEqual([
+        ['hooks', 'session_start'],
+        ['hooks', 'user_prompt_submit'],
+      ]);
+    });
+
+    it('keeps PascalCase event key when eventKeyCase is unset (claude-code baseline)', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      const def = makeDef({
+        hook: {
+          settingsPath: '/home/.claude/hooks.json',
+          events: ['Stop', 'SubagentStart'],
+          retiredEvents: ['SessionStart'],
+          hookCommand: '/opt/pilot/hooks/claude-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          // eventKeyCase intentionally unset — backward-compat path
+        },
+      });
+
+      await strategy.needsDeploy(def);
+      const installedPaths = mockHookManager.isHookInstalled.mock.calls.map(
+        ([definition]) => definition.hookJsonPath,
+      );
+      // PascalCase preserved (backward-compat with Claude Code / Codex / Cursor).
+      // needsDeploy also probes retired events, so SessionStart appears here too.
+      expect(installedPaths).toEqual([
+        ['hooks', 'Stop'],
+        ['hooks', 'SubagentStart'],
+        ['hooks', 'SessionStart'],
+      ]);
+    });
   });
 
   describe('deploy', () => {
