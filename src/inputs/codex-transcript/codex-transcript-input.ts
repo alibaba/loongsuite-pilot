@@ -13,6 +13,7 @@ import {
 } from './codex-transcript-builder.js';
 import {
   extractCodexPartialTurn,
+  extractCodexPartialTurnWithBoundaries,
   extractCodexTranscriptMeta,
   sessionIdFromTranscriptPath,
 } from './codex-transcript-extractor.js';
@@ -24,7 +25,7 @@ import {
   type CodexTranscriptInputContext,
   type CodexTranscriptCheckpoint,
   type CodexTranscriptGlobalState,
-  type CodexTranscriptStep,
+  type CodexTranscriptSourceRange,
 } from './codex-transcript-types.js';
 import { stringValue, timestampMs } from './codex-transcript-utils.js';
 
@@ -47,11 +48,6 @@ interface JsonLine {
   startOffset: number;
   endOffset: number;
   record: Record<string, unknown>;
-}
-
-interface ClosedWaveRange {
-  startOffset: number;
-  endOffset: number;
 }
 
 interface SegmentRecoveryDiagnostics {
@@ -407,15 +403,15 @@ export class CodexTranscriptInput extends BaseInput {
       ? null
       : await readJsonLineAt(filePath, checkpoint.latestSessionMetaOffset);
     const meta = metaRecord ? extractCodexTranscriptMeta(metaRecord) : null;
-    const turn = extractCodexPartialTurn(
-      records.items.map(item => item.record),
+    const extraction = extractCodexPartialTurnWithBoundaries(
+      records.items,
       meta,
       sessionIdFromTranscriptPath(filePath),
       activeTurn.turnId,
       partialTurnOptions(activeTurn),
     );
     const previouslyEmittedStepCount = activeTurn.emittedStepCount ?? 0;
-    if (!turn) {
+    if (!extraction) {
       return {
         kind: 'unparseable',
         entries: [],
@@ -423,6 +419,7 @@ export class CodexTranscriptInput extends BaseInput {
         diagnostics: emptySegmentRecoveryDiagnostics(records.items.length, previouslyEmittedStepCount),
       };
     }
+    const turn = extraction.turn;
     updateActiveTurnFromExtractedTurn(activeTurn, turn);
     if (turn.unmatchedTokenUsages.length > 0) {
       this.logger.warn('Codex transcript token samples could not be assigned to a response wave', {
@@ -436,24 +433,18 @@ export class CodexTranscriptInput extends BaseInput {
     const stepStart = (activeTurn.emittedStepCount ?? 0) + 1;
     const closedStepCount = terminal
       ? turn.steps.length
-      : countLeadingClosedSteps(turn.steps);
+      : extraction.committedStepCount;
+    const committedTurn = closedStepCount === turn.steps.length
+      ? turn
+      : { ...turn, steps: turn.steps.slice(0, closedStepCount) };
     const inputContext = await this.resolveInputContext(filePath, activeTurn, meta);
-    const built = buildCodexTranscriptSegment(turn, {
+    const built = buildCodexTranscriptSegment(committedTurn, {
       includePrompt: activeTurn.emittedPrompt !== true,
       startStepNumber: stepStart,
       ...(inputContext ? { inputContext } : {}),
-      contextStepCount: closedStepCount,
+      contextStepCount: committedTurn.steps.length,
     });
-    const closedStepIds = new Set(
-      Array.from({ length: closedStepCount }, (_, index) => (
-        `${turn.sessionId}:${turn.transcriptTurnId}:s${stepStart + index}`
-      )),
-    );
-    const readyEntries = built.entries.filter(entry => {
-      const eventName = entry['event.name'];
-      if (eventName !== 'llm.request' && eventName !== 'llm.response') return true;
-      return closedStepIds.has(String(entry['gen_ai.step.id'] ?? ''));
-    });
+    const readyEntries = built.entries;
     const entries = this.filterNewSegmentEntries(readyEntries, activeTurn);
     const diagnostics: SegmentRecoveryDiagnostics = {
       sourceRecordCount: records.items.length,
@@ -496,9 +487,8 @@ export class CodexTranscriptInput extends BaseInput {
     if (turn.prompt) activeTurn.emittedPrompt = true;
     activeTurn.emittedStepCount = (activeTurn.emittedStepCount ?? 0) + closedStepCount;
 
-    const closedWaveRanges = findClosedWaveRanges(records.items);
     const lastClosedRange = closedStepCount > 0
-      ? closedWaveRanges[Math.min(closedStepCount, closedWaveRanges.length) - 1]
+      ? extraction.committedStepRanges[closedStepCount - 1]
       : undefined;
     if (closedStepCount > 0) {
       activeTurn.inputContext = persistedInputContext(built.nextInputContext, lastClosedRange);
@@ -506,7 +496,7 @@ export class CodexTranscriptInput extends BaseInput {
 
     const consumedEndOffset = terminal
       ? endOffset
-      : lastClosedRange?.endOffset ?? activeTurn.startOffset;
+      : extraction.consumedEndOffset;
 
     const resourceAttributes = await this.readWakeupResourceAttributes(turn.sessionId);
     const outputEntries = resourceAttributes ? attachWakeupResourceAttributes(entries, resourceAttributes) : entries;
@@ -1100,69 +1090,9 @@ function attachWakeupResourceAttributes(
   return entries;
 }
 
-function countLeadingClosedSteps(steps: CodexTranscriptStep[]): number {
-  let count = 0;
-  for (const step of steps) {
-    if (!step.tokenUsage) break;
-    count++;
-  }
-  return count;
-}
-
-function findClosedWaveRanges(items: JsonLine[]): ClosedWaveRange[] {
-  const ranges: ClosedWaveRange[] = [];
-  const pendingToolCalls = new Set<string>();
-  let waveStartOffset = items[0]?.startOffset ?? 0;
-  let hasResponseEvidence = false;
-
-  for (const line of items) {
-    const payload = asRecord(line.record.payload);
-    if (!payload) continue;
-
-    if (line.record.type === 'event_msg') {
-      if (payload.type === 'agent_message' || payload.type === 'web_search_start') {
-        hasResponseEvidence = true;
-      }
-      if (payload.type === 'token_count'
-        && hasResponseEvidence
-        && pendingToolCalls.size === 0
-        && asRecord(asRecord(payload.info)?.last_token_usage)) {
-        ranges.push({ startOffset: waveStartOffset, endOffset: line.endOffset });
-        waveStartOffset = line.endOffset;
-        hasResponseEvidence = false;
-      }
-      continue;
-    }
-
-    if (line.record.type !== 'response_item') continue;
-    const itemType = stringValue(payload.type);
-    if (itemType === 'message' && stringValue(payload.role) === 'assistant') {
-      hasResponseEvidence = true;
-      continue;
-    }
-    if (itemType === 'reasoning' || itemType === 'web_search_call') {
-      hasResponseEvidence = true;
-      continue;
-    }
-    if (itemType === 'function_call' || itemType === 'custom_tool_call' || itemType === 'tool_search_call') {
-      const callId = stringValue(payload.call_id) ?? stringValue(payload.id);
-      if (callId) pendingToolCalls.add(callId);
-      hasResponseEvidence = true;
-      continue;
-    }
-    if (itemType === 'function_call_output'
-      || itemType === 'custom_tool_call_output'
-      || itemType === 'tool_search_output') {
-      const callId = stringValue(payload.call_id) ?? stringValue(payload.id);
-      if (callId) pendingToolCalls.delete(callId);
-    }
-  }
-  return ranges;
-}
-
 function persistedInputContext(
   context: CodexTranscriptInputContext,
-  sourceRange: ClosedWaveRange | undefined,
+  sourceRange: CodexTranscriptSourceRange | undefined,
 ): CodexTranscriptInputContext {
   const delta = context.delta ?? [];
   const deltaBytes = Buffer.byteLength(JSON.stringify(delta), 'utf8');

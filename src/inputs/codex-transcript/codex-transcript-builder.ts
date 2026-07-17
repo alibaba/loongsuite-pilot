@@ -213,7 +213,7 @@ function finishReasons(
 ): JsonValue {
   if (terminalStep && turn.status === 'interrupted') return ['cancelled'];
   if (step.tools.length > 0) return ['tool_call'];
-  if (terminalStep && turn.status === 'completed') return ['stop'];
+  if (step.tokenUsage || (terminalStep && turn.status === 'completed')) return ['stop'];
   return [];
 }
 

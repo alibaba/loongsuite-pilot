@@ -103,6 +103,29 @@ export interface CodexTranscriptStep {
   finalText?: string;
 }
 
+export interface CodexTranscriptSourceRecord {
+  startOffset: number;
+  endOffset: number;
+  record: Record<string, unknown>;
+}
+
+export interface CodexTranscriptSourceRange {
+  startOffset: number;
+  endOffset: number;
+}
+
+/**
+ * Partial extraction keeps semantic LLM-wave boundaries and byte-consumption
+ * boundaries together so the input cannot advance by a different unit than it
+ * emits.
+ */
+export interface CodexPartialTurnExtraction {
+  turn: CodexExtractedTranscriptTurn;
+  committedStepCount: number;
+  committedStepRanges: CodexTranscriptSourceRange[];
+  consumedEndOffset: number;
+}
+
 export interface CodexExtractedTranscriptTurn {
   sessionId: string;
   transcriptTurnId: string;
