@@ -235,7 +235,13 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
       const recordTs = record.timestamp || null;
       let toolId = record.tool_call_id || record.tool_use_id || '';
       if (!toolId) {
-        toolId = pendingEmptyToolCallIds.shift() || `_orphan_${crypto.randomUUID()}`;
+        // LIFO: grok 0.2.x fixture emits 1 tool_result per multi-tool assistant,
+        // and the recorded result corresponds to the LAST declared tool_call
+        // (e.g., [todo_write, grep] → only grep's output is recorded). Popping
+        // from the end attributes the result to the right tool; FIFO would
+        // misattribute it to the first tool_call's synthetic id, leaving the
+        // real tool orphaned.
+        toolId = pendingEmptyToolCallIds.pop() || `_orphan_${crypto.randomUUID()}`;
       }
       const resultContent = record.content ?? record.output ?? record.result ?? '';
       if (recordTs) toolResultTimestamps.set(toolId, recordTs);
@@ -280,7 +286,7 @@ function extractToolUseTimestamps(content, fallbackTs) {
 // Grok 0.2.x fixture emits tool_call.id as empty string → synthesize a stable id
 // (`name_<assistantSeq>_<idxInAssistant>`) and push to pendingEmptyToolCallIds so
 // subsequent top-level tool_result records with empty tool_call_id can be matched
-// in FIFO order.
+// LIFO (last declared tool_call consumes the next empty-id result).
 function buildAssistantContentBlocks(record, assistantSeq, pendingEmptyToolCallIds) {
   if (Array.isArray(record.content) && record.content.length > 0) {
     return record.content;

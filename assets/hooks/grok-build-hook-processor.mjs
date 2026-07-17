@@ -60,6 +60,7 @@ import {
 
 const AGENT_ID = 'grok-build';
 const PROVIDER_NAME = 'x_ai';
+const FRAMEWORK_NAME = 'grok-build';
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_ID });
 const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
 const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
@@ -399,6 +400,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     'gen_ai.turn.id': turnId,
     'gen_ai.agent.type': AGENT_ID,
     'gen_ai.agent.id': sessionId,
+    'gen_ai.framework': FRAMEWORK_NAME,
     ...RESOURCE_BASE_FIELD_PATCH,
     'user.id': userId,
     ...(cwd ? { 'agent.grok-build.cwd': cwd } : {}),
@@ -479,6 +481,8 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     const outputTokens = ev.output_tokens || 0;
     const totalTokens = inputTokens + outputTokens;
 
+    const finishReason = mapStopReason(ev.stop_reason || 'stop');
+
     const respRecord = {
       time_unix_nano: resolveTime(ev.timestamp),
       'event.id': crypto.randomUUID(),
@@ -491,7 +495,9 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
       'gen_ai.provider.name': PROVIDER_NAME,
       'gen_ai.request.model': ev.model || 'grok',
       'gen_ai.response.model': ev.model || 'grok',
-      'gen_ai.response.finish_reasons': [mapStopReason(ev.stop_reason || 'stop')],
+      'gen_ai.response.finish_reasons': [finishReason],
+      'gen_ai.output.finish_reason': finishReason,
+      'gen_ai.react.finish_reason': finishReason,
       'gen_ai.usage.input_tokens': inputTokens,
       'gen_ai.usage.output_tokens': outputTokens,
       'gen_ai.usage.cache_read.input_tokens': cacheRead,
@@ -524,6 +530,8 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
         ? timestamps.resultContent.length > 0
         : timestamps.resultContent != null);
 
+      const toolArgs = toJsonValue(toolBlock.input) ?? {};
+
       records.push({
         time_unix_nano: resolveTime(timestamps.call || ev.timestamp),
         'event.id': crypto.randomUUID(),
@@ -534,31 +542,58 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
         'gen_ai.step.id': currentStepId,
         'gen_ai.tool.name': toolName,
         'gen_ai.tool.call.id': toolId,
-        'gen_ai.tool.call.arguments': toJsonValue(toolBlock.input || {}),
+        'gen_ai.tool.call.arguments': toolArgs,
       });
 
+      // F2/F7: grok fixture may not record a tool_result for every tool_call
+      // (e.g., todo_write often has no recorded result in multi-tool turns).
+      // Emit a synthetic tool.result so the converter's pairTool logic doesn't
+      // flag the tool.call as orphan, and the TOOL span gets a non-zero duration
+      // in the synthetic timeline (resolveTime ticks forward per call).
+      const resultTs = timestamps.result || timestamps.call || ev.timestamp;
+      let resultPayload;
+      let isSynthetic = false;
       if (hasResult) {
-        const resultRecord = {
-          time_unix_nano: resolveTime(timestamps.result || timestamps.call || ev.timestamp),
-          'event.id': crypto.randomUUID(),
-          'event.name': 'tool.result',
-          ...baseFields,
-          span_id: toolSpanId,
-          parent_span_id: currentStepSpanId,
-          'gen_ai.step.id': currentStepId,
-          'gen_ai.tool.name': toolName,
-          'gen_ai.tool.call.id': toolId,
-          'gen_ai.tool.call.result': toJsonValue(timestamps.resultContent || ''),
-          'tool.result.status': timestamps.isError ? 'error' : 'success',
-        };
-        if (timestamps.isError) {
-          resultRecord['error.type'] = 'ToolError';
-          resultRecord['error.message'] = typeof timestamps.resultContent === 'string'
-            ? timestamps.resultContent.slice(0, 500)
-            : 'tool execution failed';
-        }
-        records.push(resultRecord);
+        resultPayload = timestamps.resultContent ?? '';
+      } else {
+        resultPayload = '[grok transcript: no tool_result recorded for this tool_call]';
+        isSynthetic = true;
       }
+
+      // F6: wrap result in spec message structure
+      // [{role:"tool",parts:[{type:"tool_call_response",id,response}]}]
+      const structuredResult = [{
+        role: 'tool',
+        parts: [{
+          type: 'tool_call_response',
+          id: toolId,
+          name: toolName,
+          response: resultPayload,
+        }],
+      }];
+
+      const resultRecord = {
+        time_unix_nano: resolveTime(resultTs),
+        'event.id': crypto.randomUUID(),
+        'event.name': 'tool.result',
+        ...baseFields,
+        span_id: toolSpanId,
+        parent_span_id: currentStepSpanId,
+        'gen_ai.step.id': currentStepId,
+        'gen_ai.tool.name': toolName,
+        'gen_ai.tool.call.id': toolId,
+        'gen_ai.tool.call.result': toJsonValue(structuredResult) ?? structuredResult,
+        'tool.result.status': isSynthetic
+          ? 'unknown'
+          : (timestamps.isError ? 'error' : 'success'),
+      };
+      if (timestamps.isError) {
+        resultRecord['error.type'] = 'ToolError';
+        resultRecord['error.message'] = typeof timestamps.resultContent === 'string'
+          ? timestamps.resultContent.slice(0, 500)
+          : 'tool execution failed';
+      }
+      records.push(resultRecord);
     }
   }
 

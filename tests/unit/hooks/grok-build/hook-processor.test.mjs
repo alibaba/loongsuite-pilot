@@ -410,8 +410,10 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
     expect(llmResps.length).toBe(3);
     expect(toolCalls.length).toBe(3);
 
-    // 2 tool_result records in fixture → 2 tool.result spans
-    expect(toolResults.length).toBe(2);
+    // 2 tool_result records in fixture + 1 synthetic for the orphan tool_call
+    // (read_file_1_1 has no recorded result; F2 fix emits synthetic tool.result
+    // so the converter's pairTool doesn't flag it as orphan).
+    expect(toolResults.length).toBe(3);
 
     // 每个 tool.call 必有 parent_span_id 指向所属 step span(5 层 span 树准出)
     for (const tc of toolCalls) {
@@ -562,5 +564,118 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
     const finalOut = JSON.stringify(finalResp['gen_ai.output.messages']);
     expect(finalOut).toContain('FINAL-ANSWER');
     expect(finalOut).not.toContain('tool_call');
+  });
+
+  // F2/F4/F6/F8 regressions: real long-conversation fixture from tester 881b782a
+  // container /tmp/exc-long-conversation/ (chat_history.jsonl with 41 assistants,
+  // 72 tool_calls, 32 multi-tool turns). Each multi-tool turn is [todo_write, X]
+  // where only X's result is recorded; the FIFO parser bug previously attributed
+  // the result to todo_write's synthetic id, leaving X orphaned + 0ms TOOL span.
+  describe('F2/F4/F6/F8 regression — long-conversation fixture', () => {
+    // Fixture is copied into the workspace under tests/unit/hooks/grok-build/fixtures
+    // from tester container /tmp/exc-long-conversation/chat_history.jsonl
+    // (session 019f6f59-a85d-7900-bef7-cd1f5404d51f, 41 turns, 72 tool_calls).
+    const LONG_CONV_FIXTURE = 'chat_history.long-conversation.jsonl';
+
+    test('F2: every tool.call has a paired tool.result (no orphans) — LIFO matching', () => {
+      const transcriptPath = copyFixture(LONG_CONV_FIXTURE);
+      const r = runHook('stop', {
+        session_id: '019f6f59-a85d-7900-bef7-cd1f5404d51f',
+        stop_reason: 'end_turn',
+        transcript_path: transcriptPath,
+        timestamp: '2026-07-17T09:14:00.000Z',
+        cwd: '/tmp',
+      });
+      expect(r.status).toBe(0);
+
+      const records = readJsonlRecords();
+      const toolCalls = records.filter((rec) => rec['event.name'] === 'tool.call');
+      const toolResults = records.filter((rec) => rec['event.name'] === 'tool.result');
+      expect(toolCalls.length).toBe(72);
+      // F2准出: orphan count == 0 → every tool.call.id has a matching tool.result.id
+      expect(toolResults.length).toBe(toolCalls.length);
+      const callIds = new Set(toolCalls.map((tc) => tc['gen_ai.tool.call.id']));
+      const resultIds = new Set(toolResults.map((tr) => tr['gen_ai.tool.call.id']));
+      for (const id of callIds) {
+        expect(resultIds.has(id)).toBe(true);
+      }
+    });
+
+    test('F2 LIFO: 2nd tool of multi-tool turn gets the recorded result content', () => {
+      const transcriptPath = copyFixture(LONG_CONV_FIXTURE);
+      runHook('stop', {
+        session_id: '019f6f59-lifo-check',
+        stop_reason: 'end_turn',
+        transcript_path: transcriptPath,
+        timestamp: '2026-07-17T09:14:00.000Z',
+        cwd: '/tmp',
+      });
+      const records = readJsonlRecords();
+      // Asst #3 (assistantSeq=3) declares [todo_write, grep]; grok records 1
+      // tool_result with grep's content ("<workspace_result ... Found 6 matches").
+      // After LIFO, the result must be on grep_3_2 (not todo_write_3_1).
+      const grepResult = records.find((r) =>
+        r['event.name'] === 'tool.result'
+        && r['gen_ai.tool.call.id'] === 'grep_3_2');
+      expect(grepResult).toBeDefined();
+      const resultPayload = grepResult['gen_ai.tool.call.result'];
+      const response = JSON.parse(typeof resultPayload === 'string'
+        ? resultPayload
+        : JSON.stringify(resultPayload))[0].parts[0].response;
+      expect(response).toContain('Found 6 matching');
+      // todo_write_3_1 has no recorded result → synthetic tool.result emitted
+      const todoSynthetic = records.find((r) =>
+        r['event.name'] === 'tool.result'
+        && r['gen_ai.tool.call.id'] === 'todo_write_3_1');
+      expect(todoSynthetic).toBeDefined();
+      expect(todoSynthetic['tool.result.status']).toBe('unknown');
+    });
+
+    test('F4/F8: llm.response carries singular finish_reason + react.finish_reason + framework', () => {
+      const transcriptPath = copyFixture(LONG_CONV_FIXTURE);
+      runHook('stop', {
+        session_id: '019f6f59-f4-check',
+        stop_reason: 'end_turn',
+        transcript_path: transcriptPath,
+        timestamp: '2026-07-17T09:14:00.000Z',
+        cwd: '/tmp',
+      });
+      const records = readJsonlRecords();
+      const llmResps = records.filter((r) => r['event.name'] === 'llm.response');
+      expect(llmResps.length).toBeGreaterThan(0);
+      for (const resp of llmResps) {
+        expect(resp['gen_ai.response.finish_reasons']).toEqual(['stop']);
+        expect(resp['gen_ai.output.finish_reason']).toBe('stop');
+        expect(resp['gen_ai.react.finish_reason']).toBe('stop');
+      }
+      // F8: every emitted record carries gen_ai.framework
+      for (const rec of records) {
+        expect(rec['gen_ai.framework']).toBe('grok-build');
+      }
+    });
+
+    test('F6: tool.call.result wrapped in spec message structure', () => {
+      const transcriptPath = copyFixture(LONG_CONV_FIXTURE);
+      runHook('stop', {
+        session_id: '019f6f59-f6-check',
+        stop_reason: 'end_turn',
+        transcript_path: transcriptPath,
+        timestamp: '2026-07-17T09:14:00.000Z',
+        cwd: '/tmp',
+      });
+      const records = readJsonlRecords();
+      const realResult = records.find((r) =>
+        r['event.name'] === 'tool.result'
+        && r['gen_ai.tool.call.id'] === 'run_terminal_command_2_1');
+      expect(realResult).toBeDefined();
+      const payload = realResult['gen_ai.tool.call.result'];
+      const parsed = typeof payload === 'string' ? JSON.parse(payload) : payload;
+      expect(Array.isArray(parsed)).toBe(true);
+      expect(parsed[0].role).toBe('tool');
+      expect(parsed[0].parts[0].type).toBe('tool_call_response');
+      expect(parsed[0].parts[0].id).toBe('run_terminal_command_2_1');
+      expect(parsed[0].parts[0].name).toBe('run_terminal_command');
+      expect(typeof parsed[0].parts[0].response).toBe('string');
+    });
   });
 });
