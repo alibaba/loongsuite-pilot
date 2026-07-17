@@ -474,35 +474,48 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (batches.length > 1) {
       logger.info(`Exporting ${spans.length} spans in ${batches.length} batches`, { agentType, maxBytes });
     }
+
+    // Fan out per-endpoint in parallel: each backend drains its own batches
+    // sequentially, but backends run concurrently — so a slow/hung backend
+    // only delays itself, not the healthy ones (no head-of-line blocking).
+    await Promise.allSettled(
+      exportState.exporters.map(({ name, exporter }) =>
+        this.exportBatchesToEndpoint(exporter, name, agentType, batches),
+      ),
+    );
+  }
+
+  private async exportBatchesToEndpoint(
+    exporter: TraceExporterLike,
+    endpointName: string,
+    agentType: string,
+    batches: ReadableSpan[][],
+  ): Promise<void> {
     for (const batch of batches) {
-      await this.doExport(exportState, agentType, batch);
+      await this.doExport(exporter, endpointName, agentType, batch);
     }
   }
 
-  private async doExport(
-    exportState: AgentExportState,
+  private doExport(
+    exporter: TraceExporterLike,
+    endpointName: string,
     agentType: string,
     spans: ReadableSpan[],
   ): Promise<void> {
-    // Fan out the same spans to every backend; one failing backend must not
-    // block or fail the others (each failure is isolated + persisted).
-    await Promise.allSettled(
-      exportState.exporters.map(({ name, exporter }) =>
-        new Promise<void>((resolve) => {
-          exporter.export(spans, (result) => {
-            if (result.code !== ExportResultCode.SUCCESS) {
-              const errMsg = result.error?.message ?? 'unknown export error';
-              logger.warn(`Export failed for ${agentType} → ${name}: ${errMsg}`);
-              this.writeFailedLog(agentType, name, spans, {
-                code: result.code,
-                message: errMsg,
-              }).catch(() => undefined);
-            }
-            resolve();
-          });
-        }),
-      ),
-    );
+    // Never rejects: a failing backend is isolated + persisted, not propagated.
+    return new Promise<void>((resolve) => {
+      exporter.export(spans, (result) => {
+        if (result.code !== ExportResultCode.SUCCESS) {
+          const errMsg = result.error?.message ?? 'unknown export error';
+          logger.warn(`Export failed for ${agentType} → ${endpointName}: ${errMsg}`);
+          this.writeFailedLog(agentType, endpointName, spans, {
+            code: result.code,
+            message: errMsg,
+          }).catch(() => undefined);
+        }
+        resolve();
+      });
+    });
   }
 
   private getOrCreateConvertState(
@@ -708,7 +721,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
     error: { code: number; message: string },
   ): Promise<void> {
     try {
-      const svcName = `${this.cfg.serviceName}-${agentType}__${endpointName}`;
+      // Sanitize endpointName (comes from managed config `name`) so it cannot
+      // escape failedDir via path traversal or create unintended subdirs.
+      const safeEndpoint = endpointName.replace(/[^A-Za-z0-9._-]/g, '_');
+      const svcName = `${this.cfg.serviceName}-${agentType}__${safeEndpoint}`;
       const dir = this.failedDir;
       await ensureDir(dir);
       const filepath = path.join(dir, `${svcName}.jsonl`);

@@ -832,6 +832,43 @@ describe('ConfigLoader', () => {
       expect(result!.endpoints.map(e => e.name)).toEqual(['user-cms', 'other-tenant']);
     });
 
+    it('buildOtlpTraceConfig keeps same-url/license/project backends that differ only by workspace', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        cms: { licenseKey: 'lk', endpoint: 'https://a.arms.aliyuncs.com', workspace: 'w1' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        cms: [
+          // same url + same license + same project, only workspace differs -> kept
+          { name: 'other-workspace', endpoint: 'https://a.arms.aliyuncs.com', licenseKey: 'lk', workspace: 'w2' },
+        ],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-cms', 'other-workspace']);
+    });
+
+    it('buildOtlpTraceConfig ignores malformed (non-array) inner otlp/cms without throwing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://tempo:4318' },
+      });
+      // control-plane serialization error: otlp/cms are objects, not arrays
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlp: { endpoint: 'http://oops:4318' },
+        cms: 'not-an-array',
+      });
+
+      const config = await loadConfig();
+      // must not throw — a bad managed push cannot brick flusher construction
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-otlp']);
+    });
+
     it('buildOtlpTraceConfig returns undefined when collectTrace is false', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: false,

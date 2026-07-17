@@ -490,7 +490,8 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     let headers: Record<string, string> | undefined;
     const envHeaders = env('LOONGSUITE_PILOT_OTLP_HEADERS');
     if (envHeaders) {
-      try { headers = JSON.parse(envHeaders); } catch { logger.warn('LOONGSUITE_PILOT_OTLP_HEADERS is not valid JSON, ignoring', { raw: envHeaders }); }
+      // Do NOT log the raw value — it carries auth headers (license key / token).
+      try { headers = JSON.parse(envHeaders); } catch { logger.warn('LOONGSUITE_PILOT_OTLP_HEADERS is not valid JSON, ignoring', { length: envHeaders.length }); }
     } else {
       headers = config.otlpTrace?.headers;
     }
@@ -512,7 +513,11 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   }
 
   // 3. Inner managed generic OTLP backends.
-  (config.innerTrace?.otlp ?? []).forEach((ep, i) => {
+  // Guard with Array.isArray: managed data_config.json is control-plane pushed,
+  // so a non-array (object/string) serialization must not throw here — mirrors
+  // buildSlsConfig's guard and keeps a bad push from bricking all flushers.
+  const innerOtlp = Array.isArray(config.innerTrace?.otlp) ? config.innerTrace!.otlp : [];
+  innerOtlp.forEach((ep, i) => {
     if (!ep.endpoint) return;
     endpoints.push({
       name: ep.name ?? `inner-otlp-${i}`,
@@ -523,7 +528,8 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   });
 
   // 4. Inner managed CMS/ARMS shorthand backends.
-  (config.innerTrace?.cms ?? []).forEach((ep, i) => {
+  const innerCms = Array.isArray(config.innerTrace?.cms) ? config.innerTrace!.cms : [];
+  innerCms.forEach((ep, i) => {
     if (!ep.endpoint) return;
     endpoints.push(cmsEntryToOtlpEndpoint(ep.name ?? `inner-cms-${i}`, ep, armsResourceAttributes));
   });
@@ -565,14 +571,27 @@ function cmsEntryToOtlpEndpoint(
   return { name, endpoint: cms.endpoint, headers };
 }
 
-/** Dedup by normalized URL + x-arms-license-key + x-arms-project (first wins). */
+/** Stable serialization of headers (sorted keys) for dedup keying. */
+function stableHeaderKey(headers?: Record<string, string>): string {
+  if (!headers) return '';
+  return Object.keys(headers)
+    .sort()
+    .map(k => `${k}=${headers[k]}`)
+    .join('&');
+}
+
+/**
+ * Dedup by normalized URL + full headers. Because the CMS shorthand encodes
+ * license-key / project / workspace as headers, this subsumes those fields and
+ * also distinguishes generic OTLP backends that share a URL but differ in auth
+ * headers — so a managed backend is never silently folded into a user endpoint.
+ * First occurrence wins.
+ */
 function dedupOtlpEndpoints(endpoints: OtlpEndpoint[]): OtlpEndpoint[] {
   const seen = new Set<string>();
   const result: OtlpEndpoint[] = [];
   for (const ep of endpoints) {
-    const licenseKey = ep.headers?.['x-arms-license-key'] ?? '';
-    const project = ep.headers?.['x-arms-project'] ?? '';
-    const key = `${normalizeEndpointUrl(ep.endpoint)}|${licenseKey}|${project}`;
+    const key = `${normalizeEndpointUrl(ep.endpoint)}|${stableHeaderKey(ep.headers)}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(ep);

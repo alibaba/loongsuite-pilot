@@ -70,6 +70,65 @@ Pilot 也支持 CMS 风格的 Trace 配置：
 | `LOONGSUITE_PILOT_CMS_ENDPOINT` | CMS 或 ARMS Trace endpoint。 |
 | `LOONGSUITE_PILOT_CMS_WORKSPACE` | workspace header 值。 |
 
+## 多 Trace 后端
+
+Trace 导出会把**同一批**转换后的 span **同时**发往**所有**已配置的后端(转换一次,导出时扇出)。后端来自以下配置的并集:
+
+- `otlpTrace`(通用 OTLP,用户配置)
+- `cms`(ARMS/CMS 简写,用户配置)
+- `innerTrace.otlp[]` 与 `innerTrace.cms[]`(托管后端,见下)
+
+> **行为变更提示:** `otlpTrace` 与 `cms` 现在是**叠加(并集)**关系,不再互斥。旧版本中同时配置两者只会使用 `otlpTrace`;升级后 span 会**同时**投递到两者——如不希望重复投递,请检查配置。
+
+后端会按"规范化 URL + 完整请求 headers"**去重**,因此把同一个后端列两遍(例如既作为用户后端又作为托管后端)只会导出一次;URL 相同但鉴权 header / workspace / license 不同的两个后端会被视为不同后端各自保留。
+
+共享 vs 单后端设置(因为 span 只转换一次):
+
+- **所有后端共享:** `serviceName`、`resourceAttributes`、`captureMessageContent`、`resourceAttributeKeys`、`maxExportBatchBytes`、`turnIdleTimeoutMs`。
+- **每后端独立:** endpoint URL、headers、compression。
+
+某个后端失败会被隔离——不会阻塞健康后端,其失败 span 会单独落盘到 `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<后端名>.jsonl`。
+
+### 托管后端(`configs/inner/data_config.json`)
+
+托管/受管部署可通过 `~/.loongsuite-pilot/configs/inner/data_config.json`(与托管 SLS endpoint 复用同一文件)下发额外的 trace 后端。这些后端会**追加**到用户在 `config.json` 中配置的后端之上:
+
+```json
+{
+  "sls": [ /* 托管 SLS endpoint(不变) */ ],
+  "otlp": [
+    {
+      "name": "team-collector",
+      "endpoint": "https://collector.internal:4318",
+      "headers": { "x-token": "..." },
+      "compression": "gzip"
+    }
+  ],
+  "cms": [
+    {
+      "name": "managed-arms",
+      "endpoint": "https://proj-xxx.../apm/trace/opentelemetry",
+      "licenseKey": "...",
+      "workspace": "...",
+      "project": "..."
+    }
+  ]
+}
+```
+
+| 字段 | 适用 | 说明 |
+|------|------|------|
+| `otlp[].name` / `cms[].name` | 两者 | 用于日志与失败日志文件名的标签。可选(默认 `inner-otlp-<i>` / `inner-cms-<i>`)。 |
+| `otlp[].endpoint` | otlp | OTLP HTTP 基础 URL(自动补 `/v1/traces`)。 |
+| `otlp[].headers` | otlp | 请求 header(如鉴权 token)。 |
+| `otlp[].compression` | otlp | `gzip`(默认)或 `none`。 |
+| `cms[].endpoint` | cms | ARMS/CMS trace endpoint。 |
+| `cms[].licenseKey` | cms | 作为 `x-arms-license-key` 发送。 |
+| `cms[].project` | cms | 作为 `x-arms-project` 发送。省略时从 endpoint 域名提取。 |
+| `cms[].workspace` | cms | 作为 `x-cms-workspace` 发送。 |
+
+每个 `cms[]` 条目会展开为一个带 `x-arms-*` / `x-cms-*` header 的 OTLP 后端;只要存在 CMS 后端,就会附加 `acs.arms.service.feature=genai_app` 资源属性(如上所述为共享)。托管配置格式错误(例如 `otlp`/`cms` 写成非数组)会被忽略,而不会导致采集失败。
+
 ## 后端接入示例
 
 ### Jaeger

@@ -253,4 +253,35 @@ describe('OtlpTraceFlusher - multi-backend fan-out', () => {
     expect(failedCalls.every((c) => (c[0] as string).includes('__backend-b'))).toBe(true);
     expect(failedCalls.some((c) => (c[0] as string).includes('__backend-a'))).toBe(false);
   });
+
+  it('sanitizes a malicious endpoint name in the failed-log path', async () => {
+    const factory = () => ({
+      export: (_spans: any, cb: (r: { code: number; error?: Error }) => void) =>
+        cb({ code: ExportResultCode.FAILED, error: new Error('boom') }),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const cfg = {
+      enabled: true,
+      endpoints: [{ name: '../../../../tmp/pwn', endpoint: 'http://evil:4318' }],
+      protocol: 'http/protobuf' as const,
+      serviceName: 'test-pilot',
+    };
+    const flusher = new OtlpTraceFlusher(cfg, undefined, factory as any);
+    await flusher.exportSpansForAgent('claude-code', [makeMockSpan()] as any);
+    await flusher.shutdown();
+
+    const failedCalls = vi.mocked(fsUtils.appendLine).mock.calls.filter(
+      (c) => (c[0] as string).includes('otlp-failed'),
+    );
+    expect(failedCalls.length).toBeGreaterThan(0);
+    // separators are replaced so the name stays a single file inside otlp-failed
+    // (embedded dots are harmless without separators — no directory traversal)
+    for (const c of failedCalls) {
+      const p = c[0] as string;
+      expect(p).toContain('otlp-failed');
+      expect(p).not.toContain('/tmp/pwn');
+      expect(p).toContain('.._.._.._.._tmp_pwn'); // slashes → '_', dots kept
+    }
+  });
 });

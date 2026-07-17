@@ -70,6 +70,65 @@ Environment variables:
 | `LOONGSUITE_PILOT_CMS_ENDPOINT` | CMS or ARMS trace endpoint. |
 | `LOONGSUITE_PILOT_CMS_WORKSPACE` | Workspace header value. |
 
+## Multiple Trace Backends
+
+Trace export sends the **same** converted spans to **every** configured backend at once (convert once, fan out at export). The backends come from the union of:
+
+- `otlpTrace` (generic OTLP, user config)
+- `cms` (ARMS/CMS shorthand, user config)
+- `innerTrace.otlp[]` and `innerTrace.cms[]` (managed backends, see below)
+
+> **Behavior note:** `otlpTrace` and `cms` are now **additive**, not mutually exclusive. In earlier versions, configuring both meant only `otlpTrace` was used. After upgrading, spans are delivered to **both** — review your config if you don't want duplicate delivery.
+
+Backends are **deduplicated** by normalized endpoint URL + full request headers, so listing the same backend twice (e.g. once as a user backend and once as a managed backend) results in a single export. Two backends that share a URL but differ in auth headers / workspace / license are kept as distinct.
+
+Shared vs. per-backend settings (because spans are converted once):
+
+- **Shared across all backends:** `serviceName`, `resourceAttributes`, `captureMessageContent`, `resourceAttributeKeys`, `maxExportBatchBytes`, `turnIdleTimeoutMs`.
+- **Per-backend:** endpoint URL, headers, compression.
+
+A failing backend is isolated — it does not block the healthy backends, and its failed spans are persisted separately under `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<backend-name>.jsonl`.
+
+### Managed backends (`configs/inner/data_config.json`)
+
+Managed/hosted deployments can push extra trace backends via `~/.loongsuite-pilot/configs/inner/data_config.json` (the same file already used for managed SLS endpoints). These are **added** to whatever the user configured in `config.json`:
+
+```json
+{
+  "sls": [ /* managed SLS endpoints (unchanged) */ ],
+  "otlp": [
+    {
+      "name": "team-collector",
+      "endpoint": "https://collector.internal:4318",
+      "headers": { "x-token": "..." },
+      "compression": "gzip"
+    }
+  ],
+  "cms": [
+    {
+      "name": "managed-arms",
+      "endpoint": "https://proj-xxx.../apm/trace/opentelemetry",
+      "licenseKey": "...",
+      "workspace": "...",
+      "project": "..."
+    }
+  ]
+}
+```
+
+| Field | Applies to | Description |
+|-------|-----------|-------------|
+| `otlp[].name` / `cms[].name` | both | Label used in logs and in the per-backend failed-log filename. Optional (defaults to `inner-otlp-<i>` / `inner-cms-<i>`). |
+| `otlp[].endpoint` | otlp | OTLP HTTP base URL (`/v1/traces` auto-appended). |
+| `otlp[].headers` | otlp | Request headers (e.g. auth token). |
+| `otlp[].compression` | otlp | `gzip` (default) or `none`. |
+| `cms[].endpoint` | cms | ARMS/CMS trace endpoint. |
+| `cms[].licenseKey` | cms | Sent as `x-arms-license-key`. |
+| `cms[].project` | cms | Sent as `x-arms-project`. Extracted from the endpoint hostname if omitted. |
+| `cms[].workspace` | cms | Sent as `x-cms-workspace`. |
+
+Each `cms[]` entry is expanded into an OTLP endpoint with the corresponding `x-arms-*` / `x-cms-*` headers, and any CMS backend adds the `acs.arms.service.feature=genai_app` resource attribute (shared, as noted above). Malformed managed config (e.g. `otlp`/`cms` written as a non-array) is ignored rather than failing collection.
+
 ## Backend Examples
 
 ### Jaeger
