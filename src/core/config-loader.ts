@@ -11,6 +11,9 @@ import type {
   LogRetentionConfig,
   MaskConfig,
   MaskType,
+  OtlpEndpoint,
+  OtlpEndpointEntry,
+  CmsEndpointEntry,
   OtlpTraceFlusherConfig,
   OtlpTraceRawConfig,
   SlsEndpoint,
@@ -51,6 +54,8 @@ export interface SlsSingleConfig {
 
 export interface InnerDataConfig {
   sls?: SlsEndpointEntry[];
+  otlp?: OtlpEndpointEntry[];
+  cms?: CmsEndpointEntry[];
 }
 
 /**
@@ -218,6 +223,9 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     serviceNamePrefix,
     cms: buildCmsConfig(file),
     otlpTrace: buildOtlpTraceRawConfig(file),
+    innerTrace: innerDataConfig
+      ? { otlp: innerDataConfig.otlp, cms: innerDataConfig.cms }
+      : undefined,
     autoUpdate: buildAutoUpdateConfig(file),
 
     listeners: buildListenersConfig(file),
@@ -462,82 +470,137 @@ function buildFlushersConfig(
 }
 
 /**
- * Build OtlpTraceFlusherConfig with two paths:
- *   1. New path: config.otlpTrace (generic OTLP, headers passthrough)
- *   2. Fallback: config.cms (ARMS-specific, auto-assembles x-arms-* headers)
+ * Build OtlpTraceFlusherConfig by taking the UNION of all configured trace
+ * backends and exporting the same spans to each:
+ *   - user config.otlpTrace (generic OTLP, endpoint from env or config)
+ *   - user config.cms (ARMS shorthand, auto-assembles x-arms-* headers)
+ *   - inner config.innerTrace.otlp[]  (managed generic OTLP backends)
+ *   - inner config.innerTrace.cms[]   (managed ARMS shorthand backends)
  *
- * Both paths require collectTrace=true.
+ * Endpoints are deduped by normalized URL + license-key + project. Conversion
+ * happens once; serviceName / resourceAttributes / captureMessageContent are
+ * therefore shared across all backends. Requires collectTrace=true.
  */
 export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherConfig | undefined {
   if (!config.collectTrace) return undefined;
 
-  const otlpEndpoint = env('LOONGSUITE_PILOT_OTLP_ENDPOINT') ?? config.otlpTrace?.endpoint;
-  if (otlpEndpoint) {
-    return buildOtlpTraceConfigNew(otlpEndpoint, config);
+  const endpoints: OtlpEndpoint[] = [];
+  // Collected from any ARMS/CMS backend; merged into the shared resource.
+  const armsResourceAttributes: Record<string, string> = {};
+
+  // 1. User generic OTLP (endpoint via env or config).
+  const userOtlpEndpoint = env('LOONGSUITE_PILOT_OTLP_ENDPOINT') ?? config.otlpTrace?.endpoint;
+  if (userOtlpEndpoint) {
+    let headers: Record<string, string> | undefined;
+    const envHeaders = env('LOONGSUITE_PILOT_OTLP_HEADERS');
+    if (envHeaders) {
+      // Do NOT log the raw value — it carries auth headers (license key / token).
+      try { headers = JSON.parse(envHeaders); } catch { logger.warn('LOONGSUITE_PILOT_OTLP_HEADERS is not valid JSON, ignoring', { length: envHeaders.length }); }
+    } else {
+      headers = config.otlpTrace?.headers;
+    }
+    endpoints.push({
+      name: 'user-otlp',
+      endpoint: userOtlpEndpoint,
+      headers,
+      compression: config.otlpTrace?.compression,
+    });
   }
 
-  return buildOtlpTraceConfigLegacy(config);
-}
+  // 2. User CMS/ARMS shorthand (legacy path — now additive, not exclusive).
+  if (config.cms.enabled && config.cms.endpoint) {
+    endpoints.push(cmsEntryToOtlpEndpoint('user-cms', {
+      endpoint: config.cms.endpoint,
+      licenseKey: config.cms.licenseKey,
+      workspace: config.cms.workspace,
+    }, armsResourceAttributes));
+  }
 
-function buildOtlpTraceConfigNew(
-  endpoint: string,
-  config: AnalyticsConfig,
-): OtlpTraceFlusherConfig {
+  // 3. Inner managed generic OTLP backends.
+  // Guard with Array.isArray: managed data_config.json is control-plane pushed,
+  // so a non-array (object/string) serialization must not throw here — mirrors
+  // buildSlsConfig's guard and keeps a bad push from bricking all flushers.
+  const innerOtlp = Array.isArray(config.innerTrace?.otlp) ? config.innerTrace!.otlp : [];
+  innerOtlp.forEach((ep, i) => {
+    if (!ep.endpoint) return;
+    endpoints.push({
+      name: ep.name ?? `inner-otlp-${i}`,
+      endpoint: ep.endpoint,
+      headers: ep.headers,
+      compression: ep.compression,
+    });
+  });
+
+  // 4. Inner managed CMS/ARMS shorthand backends.
+  const innerCms = Array.isArray(config.innerTrace?.cms) ? config.innerTrace!.cms : [];
+  innerCms.forEach((ep, i) => {
+    if (!ep.endpoint) return;
+    endpoints.push(cmsEntryToOtlpEndpoint(ep.name ?? `inner-cms-${i}`, ep, armsResourceAttributes));
+  });
+
+  const deduped = dedupOtlpEndpoints(endpoints);
+  if (deduped.length === 0) return undefined;
+
   const otlp = config.otlpTrace;
-
-  let headers: Record<string, string> | undefined;
-  const envHeaders = env('LOONGSUITE_PILOT_OTLP_HEADERS');
-  if (envHeaders) {
-    try { headers = JSON.parse(envHeaders); } catch { logger.warn('LOONGSUITE_PILOT_OTLP_HEADERS is not valid JSON, ignoring', { raw: envHeaders }); }
-  } else {
-    headers = otlp?.headers;
-  }
-
   const captureMessageContent = otlp?.captureMessageContent ?? resolveCaptureMessageContent(config.agents);
   const serviceName = otlp?.serviceName ?? (config.serviceNamePrefix || 'loongsuite-pilot');
+  const resourceAttributes = { ...(otlp?.resourceAttributes ?? {}), ...armsResourceAttributes };
 
   return {
     enabled: true,
-    endpoint,
+    endpoints: deduped,
     protocol: 'http/protobuf',
-    headers,
     serviceName,
-    resourceAttributes: otlp?.resourceAttributes,
+    resourceAttributes: Object.keys(resourceAttributes).length > 0 ? resourceAttributes : undefined,
     captureMessageContent,
-    debug: otlp?.debug ?? false,
+    debug: otlp?.debug ?? config.cms.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     maxExportBatchBytes: otlp?.maxExportBatchBytes,
-    compression: otlp?.compression,
   };
 }
 
-function buildOtlpTraceConfigLegacy(config: AnalyticsConfig): OtlpTraceFlusherConfig | undefined {
-  const { cms, serviceNamePrefix } = config;
-  if (!cms.enabled || !cms.endpoint) return undefined;
-
-  const armsProject = extractArmsProject(cms.endpoint);
+/** Expand an ARMS/CMS shorthand entry into an OTLP endpoint with x-arms-* headers. */
+function cmsEntryToOtlpEndpoint(
+  name: string,
+  cms: { endpoint: string; licenseKey?: string; workspace?: string; project?: string },
+  armsResourceAttributes: Record<string, string>,
+): OtlpEndpoint {
   const headers: Record<string, string> = {};
+  const armsProject = cms.project || extractArmsProject(cms.endpoint);
   if (cms.licenseKey) headers['x-arms-license-key'] = cms.licenseKey;
   if (armsProject) headers['x-arms-project'] = armsProject;
   if (cms.workspace) headers['x-cms-workspace'] = cms.workspace;
+  armsResourceAttributes['acs.arms.service.feature'] = 'genai_app';
+  return { name, endpoint: cms.endpoint, headers };
+}
 
-  const captureMessageContent = resolveCaptureMessageContent(config.agents);
+/** Stable serialization of headers (sorted keys) for dedup keying. */
+function stableHeaderKey(headers?: Record<string, string>): string {
+  if (!headers) return '';
+  return Object.keys(headers)
+    .sort()
+    .map(k => `${k}=${headers[k]}`)
+    .join('&');
+}
 
-  return {
-    enabled: true,
-    endpoint: cms.endpoint,
-    protocol: 'http/protobuf',
-    headers,
-    serviceName: serviceNamePrefix || 'loongsuite-pilot',
-    resourceAttributes: { 'acs.arms.service.feature': 'genai_app' },
-    captureMessageContent,
-    debug: cms.debug ?? false,
-    turnIdleTimeoutMs: 0,
-    resourceAttributeKeys: resolveResourceAttributeKeys(config.otlpTrace),
-    maxExportBatchBytes: undefined,
-    compression: undefined,
-  };
+/**
+ * Dedup by normalized URL + full headers. Because the CMS shorthand encodes
+ * license-key / project / workspace as headers, this subsumes those fields and
+ * also distinguishes generic OTLP backends that share a URL but differ in auth
+ * headers — so a managed backend is never silently folded into a user endpoint.
+ * First occurrence wins.
+ */
+function dedupOtlpEndpoints(endpoints: OtlpEndpoint[]): OtlpEndpoint[] {
+  const seen = new Set<string>();
+  const result: OtlpEndpoint[] = [];
+  for (const ep of endpoints) {
+    const key = `${normalizeEndpointUrl(ep.endpoint)}|${stableHeaderKey(ep.headers)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(ep);
+  }
+  return result;
 }
 
 function resolveResourceAttributeKeys(

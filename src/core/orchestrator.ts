@@ -461,18 +461,19 @@ export class Orchestrator extends EventEmitter {
       flushers.push(r);
     }
 
-    const otlpTraceCfg = buildOtlpTraceConfig(this.config);
-    if (otlpTraceCfg?.enabled) {
-      try {
+    try {
+      const otlpTraceCfg = buildOtlpTraceConfig(this.config);
+      if (otlpTraceCfg?.enabled && otlpTraceCfg.endpoints.length > 0) {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
         const r = new OtlpTraceFlusher(
           { ...otlpTraceCfg, dataDir: this.dataDir },
           this.globalAttributesProvider,
         );
         flushers.push(r);
-      } catch (err) {
-        logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
       }
+    } catch (err) {
+      // Never let a malformed trace config take down the other flushers.
+      logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
     }
 
     if (flushers.length === 0) {

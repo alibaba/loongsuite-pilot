@@ -17,9 +17,8 @@ vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
 function makeConfig() {
   return {
     enabled: true,
-    endpoint: 'http://localhost:4318',
+    endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318', headers: { 'x-test': '1' } }],
     protocol: 'http/protobuf' as const,
-    headers: { 'x-test': '1' },
     serviceName: 'test-pilot',
   };
 }
