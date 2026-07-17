@@ -19,10 +19,6 @@ import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.
 import { BaseFlusher } from './base-flusher.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
-import {
-  DEFAULT_GIT_PASSTHROUGH_KEYS,
-  type GlobalAttributesProvider,
-} from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
 import { appendLine, ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
 import { randomUUID } from 'node:crypto';
@@ -80,6 +76,43 @@ function resolveEndpointUrl(raw: string): string {
 const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
 const MAX_CONVERT_STATES = 64;
 
+// Wraps ExtendedTelemetryHandler to inject AGENT-span aggregation attributes
+// the upstream library does not pull from event-log records (gen_ai.agent.description,
+// gen_ai.data_source.id, and gen_ai.usage.cache_creation.input_tokens when the sum
+// across llm.response records is 0 — the library returns null in that case, causing
+// validate-trace SHOULD WARNs). The flusher scans the turn's records and seeds
+// currentExtraAttrs before each convertEventLogToTrace call; the override runs
+// before super.stopInvokeAgent so applyInvokeAgentFinishAttributes sees non-null
+// values and emits them on the span.
+class AgentSpanEnrichingHandler extends ExtendedTelemetryHandler {
+  currentExtraAttrs: Record<string, string | number> = {};
+
+  constructor(opts: { tracerProvider: BasicTracerProvider }) {
+    super(opts);
+  }
+
+  stopInvokeAgent(invocation: any, endTime?: number): any {
+    const a = this.currentExtraAttrs;
+    if (a && invocation && typeof invocation === 'object') {
+      const desc = a['gen_ai.agent.description'];
+      if (typeof desc === 'string' && desc && invocation.agentDescription == null) {
+        invocation.agentDescription = desc;
+      }
+      const dsId = a['gen_ai.data_source.id'];
+      if (typeof dsId === 'string' && dsId && invocation.dataSourceId == null) {
+        invocation.dataSourceId = dsId;
+      }
+      const cc = a['gen_ai.usage.cache_creation.input_tokens'];
+      if (typeof cc === 'number' && Number.isFinite(cc) && invocation.usageCacheCreationInputTokens == null) {
+        invocation.usageCacheCreationInputTokens = cc;
+      }
+    }
+    return super.stopInvokeAgent(invocation, endTime);
+  }
+}
+
+export { AgentSpanEnrichingHandler };
+
 function estimateSpanSize(span: ReadableSpan): number {
   let size = 512;
   for (const val of Object.values(span.attributes)) {
@@ -109,7 +142,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly debugDir: string;
   private readonly failedDir: string;
   private readonly resourceAttributeKeys: string[];
-  private readonly globalAttributesProvider?: GlobalAttributesProvider;
 
   private idleTimer?: ReturnType<typeof setInterval>;
   private inFlightExports = new Set<Promise<void>>();
@@ -122,7 +154,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // 即时 flush 会把 key 加入 flushedTurnKeys，导致后续同 key 的子 records 被丢弃。
   private _deferSignalA = false;
 
-  constructor(cfg: OtlpTraceFlusherConfig, globalAttributesProvider?: GlobalAttributesProvider) {
+  constructor(cfg: OtlpTraceFlusherConfig) {
     super();
     if (!cfg.endpoint) {
       throw new Error('[otlp-trace-flusher] config.endpoint is required when enabled');
@@ -131,7 +163,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
       throw new Error('[otlp-trace-flusher] config.serviceName is required when enabled');
     }
     this.cfg = cfg;
-    this.globalAttributesProvider = globalAttributesProvider;
     const dataDir = cfg.dataDir ?? os.homedir() + '/.loongsuite-pilot';
     this.pilotVersion = readInstalledVersion(dataDir);
     this.resolvedEndpointUrl = resolveEndpointUrl(cfg.endpoint);
@@ -361,28 +392,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     try {
       try {
-        // Inject user-defined custom attributes (config/env/file) into trace
-        // spans only — never the event log. Resolved per turn so the mutable
-        // file is picked up on change. Values are fill-only stamped onto record
-        // copies (originals untouched) so passthroughKeys can read them; git.*
-        // are already on the records and only need to be listed as keys.
-        const customAttrs = this.globalAttributesProvider?.resolve() ?? {};
-        const customKeys = Object.keys(customAttrs);
-        const passthroughKeys = [...new Set([...DEFAULT_GIT_PASSTHROUGH_KEYS, ...customKeys])];
-        const recordsForConversion = customKeys.length === 0
-          ? records
-          : records.map((r) => {
-              const copy: AgentActivityEntry = { ...r };
-              for (const [k, v] of Object.entries(customAttrs)) {
-                if (copy[k] === undefined) copy[k] = v;
-              }
-              return copy;
-            });
-
+        const agentSpanAttrs = this.collectAgentSpanAttributes(records);
+        if (handler instanceof AgentSpanEnrichingHandler) {
+          handler.currentExtraAttrs = agentSpanAttrs;
+        }
         const result = convertEventLogToTrace(
-          recordsForConversion as unknown as EventLogRecord[],
-          { handler, strict: false, passthroughKeys },
+          records as unknown as EventLogRecord[],
+          { handler, strict: false },
         );
+        if (handler instanceof AgentSpanEnrichingHandler) {
+          handler.currentExtraAttrs = {};
+        }
         if (result.warnings.length > 0) {
           logger.warn(`Conversion warnings for ${agentType}`, { warnings: result.warnings.join('; ') });
         }
@@ -480,7 +500,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       resource,
       spanProcessors: [new SimpleSpanProcessor(inMem)],
     });
-    const handler = new ExtendedTelemetryHandler({ tracerProvider: provider });
+    const handler = new AgentSpanEnrichingHandler({ tracerProvider: provider });
 
     state = { provider, handler, inMem, active: 0 };
     this.agentConvertStates.set(key, state);
@@ -567,6 +587,45 @@ export class OtlpTraceFlusher extends BaseFlusher {
       return;
     }
     attributes[key] = value;
+  }
+
+  // Scan a turn's records for AGENT-span aggregation fields the upstream
+  // @loongsuite/otel-util-genai library does NOT read from records itself:
+  //   - gen_ai.agent.description (string, first non-empty wins)
+  //   - gen_ai.data_source.id (string, first non-empty wins)
+  //   - gen_ai.usage.cache_creation.input_tokens (sum across llm.response)
+  // These are injected onto the AGENT invocation via AgentSpanEnrichingHandler
+  // before the library's stopInvokeAgent applies attributes, so they propagate
+  // to the AGENT span even though the library's buildInvokeAgentInvocation
+  // ignores them. Without this, the AGENT span would WARN on these SHOULD
+  // fields because the library only sets cache_creation when sum > 0 (null
+  // otherwise) and never sets agent.description/data_source.id.
+  private collectAgentSpanAttributes(records: AgentActivityEntry[]): Record<string, string | number> {
+    const attrs: Record<string, string | number> = {};
+    let cacheCreateSum = 0;
+    let sawCacheCreation = false;
+    for (const r of records) {
+      if (!r || typeof r !== 'object') continue;
+      const desc = r['gen_ai.agent.description'];
+      if (typeof desc === 'string' && desc && attrs['gen_ai.agent.description'] === undefined) {
+        attrs['gen_ai.agent.description'] = desc;
+      }
+      const dsId = r['gen_ai.data_source.id'];
+      if (typeof dsId === 'string' && dsId && attrs['gen_ai.data_source.id'] === undefined) {
+        attrs['gen_ai.data_source.id'] = dsId;
+      }
+      if (r['event.name'] === 'llm.response') {
+        const cc = r['gen_ai.usage.cache_creation.input_tokens'];
+        if (typeof cc === 'number' && Number.isFinite(cc)) {
+          cacheCreateSum += cc;
+          sawCacheCreation = true;
+        }
+      }
+    }
+    if (sawCacheCreation) {
+      attrs['gen_ai.usage.cache_creation.input_tokens'] = cacheCreateSum;
+    }
+    return attrs;
   }
 
   private normalizeResourceAttributeValue(value: unknown): ResourceProjectionValue | undefined {

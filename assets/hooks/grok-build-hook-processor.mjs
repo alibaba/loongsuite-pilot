@@ -61,6 +61,8 @@ import {
 const AGENT_ID = 'grok-build';
 const PROVIDER_NAME = 'x_ai';
 const FRAMEWORK_NAME = 'grok-build';
+const AGENT_DESCRIPTION = 'Grok Build coding agent';
+const DATA_SOURCE_ID = 'grok-build';
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_ID });
 const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
 const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
@@ -90,10 +92,14 @@ function resolveUnifiedLogPath() {
   return path.join(os.homedir(), '.grok', 'logs', 'unified.jsonl');
 }
 
-// F1: read ~/.grok/logs/unified.jsonl, filter by sid + msg=='shell.turn.inference_done',
-// drop retry rows where ctx.prompt_tokens == null (R1). Returns an array ordered by
-// ts then loop_index, one entry per non-null inference_done. Caller pops sequentially
-// to enrich each LLM call in the session.
+// F1: read ~/.grok/logs/unified.jsonl, filter by sid + msg=='shell.turn.inference_done'.
+// This filter only drops inference_done rows whose ctx.prompt_tokens is null — a
+// defensive guard against malformed inference_done events. It does NOT consume grok
+// 0.2.101's real retry path, which emits `shell.turn.inference_retry` (a separate
+// msg) rather than inference_done with null prompt_tokens. Retry consumption is
+// left to a dedicated inference_retry consumer (not yet implemented; Round 3+).
+// Returns an array ordered by ts then loop_index, one entry per non-null
+// inference_done. Caller pops sequentially to enrich each LLM call in the session.
 function loadUsageBySession(sessionId) {
   if (!sessionId) return [];
   const logPath = resolveUnifiedLogPath();
@@ -135,14 +141,19 @@ function loadUsageBySession(sessionId) {
     if (rec.msg !== 'shell.turn.inference_done') continue;
     if (rec.sid !== sessionId) continue;
     const ctx = rec.ctx || {};
-    // R1: retry/aborted inferences emit prompt_tokens=null. Skip so the next
-    // non-null inference aligns with the next assistant record in chat_history.
+    // Defensive guard: skip malformed inference_done rows where prompt_tokens is null.
+    // NOTE: grok 0.2.101's real retry path emits `shell.turn.inference_retry` (a
+    // separate msg), not inference_done with null prompt_tokens — so this filter
+    // never triggers on real retry. It only catches anomalous inference_done rows.
+    // Retry consumption via inference_retry is left to a dedicated consumer (Round 3+).
     if (ctx.prompt_tokens == null) continue;
     out.push({
       ts: rec.ts || null,
       loop_index: typeof ctx.loop_index === 'number' ? ctx.loop_index : null,
       prompt_tokens: ctx.prompt_tokens || 0,
       cached_prompt_tokens: ctx.cached_prompt_tokens || 0,
+      cache_creation_input_tokens: typeof ctx.cache_creation_input_tokens === 'number'
+        ? ctx.cache_creation_input_tokens : 0,
       completion_tokens: ctx.completion_tokens || 0,
       reasoning_tokens: ctx.reasoning_tokens || 0,
     });
@@ -533,7 +544,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
   const resolveTime = makeTimeResolver(hasRealTimestamps, fallbackTs);
 
   if (turn.prompt) {
-    records.push({
+    const promptRecord = {
       time_unix_nano: resolveTime(turn.promptTimestamp),
       'event.id': crypto.randomUUID(),
       'event.name': 'other',
@@ -541,7 +552,16 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
       'gen_ai.input.messages_delta': [
         { role: 'user', parts: [{ type: 'text', content: turn.prompt }] },
       ],
-    });
+    };
+    // AGENT span aggregation fields: emit once on the first turn's "other"
+    // record so the flusher can inject them onto the AGENT span (the library's
+    // buildInvokeAgentInvocation doesn't read these from records — the flusher
+    // scans the turn records and mutates the invocation before stopInvokeAgent).
+    if (isAgentSpanTurn) {
+      promptRecord['gen_ai.agent.description'] = AGENT_DESCRIPTION;
+      promptRecord['gen_ai.data_source.id'] = DATA_SOURCE_ID;
+    }
+    records.push(promptRecord);
   }
 
   const toolIdToStep = new Map();
@@ -614,7 +634,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     if (injectedUsage) {
       apiInputTokens = injectedUsage.prompt_tokens || 0;
       cacheRead = injectedUsage.cached_prompt_tokens || 0;
-      cacheCreation = 0;
+      cacheCreation = injectedUsage.cache_creation_input_tokens || 0;
       outputTokens = injectedUsage.completion_tokens || 0;
     } else {
       apiInputTokens = ev.input_tokens || 0;

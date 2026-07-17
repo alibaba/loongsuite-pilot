@@ -1,6 +1,10 @@
 // F1: usage injection — loadUsageBySession reads ~/.grok/logs/unified.jsonl,
-// filters msg=shell.turn.inference_done + sid=<session> + ctx.prompt_tokens!=null
-// (R1: retry/aborted inferences emit prompt_tokens=null and must be skipped),
+// filters msg=shell.turn.inference_done + sid=<session> + ctx.prompt_tokens!=null.
+// The null-prompt_tokens filter is a defensive guard against malformed inference_done
+// rows only — it does NOT consume grok 0.2.101's real retry path, which emits
+// `shell.turn.inference_retry` (a separate msg) rather than inference_done with null
+// prompt_tokens. Retry consumption via inference_retry is left to a dedicated
+// consumer (Round 3+, not yet implemented).
 // and feeds the resulting non-null events sequentially to each LLM call in the
 // session. Aligns with researcher CP1 fixture (comment 47a8af1f, 2026-07-17,
 // attachment f1-inference-done-sample.json — single inference_done event with
