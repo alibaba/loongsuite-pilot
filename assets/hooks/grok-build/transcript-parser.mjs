@@ -24,7 +24,7 @@
  *     按到达顺序回填到下一个未匹配的合成 id。
  *
  * 增量约定:
- *   parseGrokTranscript(path, byteOffset) 返回 { turns, nextOffset }
+ *   parseGrokTranscript(path, byteOffset) 返回 { turns, nextOffset, systemPrompt }
  */
 
 import fs from 'node:fs';
@@ -99,11 +99,11 @@ function shouldSkipUserRecord(record) {
 /**
  * @param {string} transcriptPath chat_history.jsonl 路径
  * @param {number} byteOffset 增量读取起点(字节偏移)
- * @returns {{ turns: Array, nextOffset: number }}
+ * @returns {{ turns: Array, nextOffset: number, systemPrompt: string|null }}
  */
 export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-    return { turns: [], nextOffset: byteOffset };
+    return { turns: [], nextOffset: byteOffset, systemPrompt: null };
   }
 
   let content;
@@ -112,7 +112,7 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
     const stat = fs.statSync(transcriptPath);
     fileSize = stat.size;
     if (byteOffset >= fileSize) {
-      return { turns: [], nextOffset: byteOffset };
+      return { turns: [], nextOffset: byteOffset, systemPrompt: null };
     }
 
     const readFrom = Math.max(byteOffset, 0);
@@ -147,7 +147,7 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
       content = fs.readFileSync(transcriptPath, 'utf-8');
     }
   } catch {
-    return { turns: [], nextOffset: byteOffset };
+    return { turns: [], nextOffset: byteOffset, systemPrompt: null };
   }
 
   const conversationRecords = [];
@@ -157,6 +157,7 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
   const pendingEmptyToolCallIds = [];
   let currentPromptIndex = null;
   let assistantSeq = 0;
+  let systemPrompt = null;
 
   let assistantSeen = false;
   for (const line of content.split('\n')) {
@@ -174,9 +175,11 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
     if (!recordType) continue;
 
     if (recordType === 'system') {
+      const sysContent = typeof record.content === 'string' ? record.content : extractTextContent(record.content);
+      if (sysContent && !systemPrompt) systemPrompt = sysContent;
       conversationRecords.push({
         type: 'system',
-        content: typeof record.content === 'string' ? record.content : extractTextContent(record.content),
+        content: sysContent,
         timestamp: record.timestamp || null,
       });
       continue;
@@ -261,12 +264,12 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
   }
 
   if (!assistantSeen) {
-    return { turns: [], nextOffset: fileSize };
+    return { turns: [], nextOffset: fileSize, systemPrompt };
   }
 
   const llmCalls = buildLlmCalls(conversationRecords, toolResultTimestamps, toolResultContents, toolResultErrors);
   const turns = splitIntoTurns(conversationRecords, llmCalls);
-  return { turns, nextOffset: fileSize };
+  return { turns, nextOffset: fileSize, systemPrompt };
 }
 
 function extractToolUseTimestamps(content, fallbackTs) {

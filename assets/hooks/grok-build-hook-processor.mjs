@@ -79,6 +79,87 @@ function defaultLogDir() {
   return path.join(pilotDataDir(), 'logs', AGENT_ID);
 }
 
+// R2: unified.jsonl is shared across sessions and grows monotonically (observed
+// 324KB / 21 sessions in researcher fixture). Tail-read at most MAX_UNIFIED_BYTES
+// to bound memory; sessions whose events were rotated past the tail are simply
+// not enriched (acceptable: usage is best-effort, falls back to transcript usage).
+export const MAX_UNIFIED_BYTES = 50 * 1024 * 1024;
+
+function resolveUnifiedLogPath() {
+  if (process.env.GROK_UNIFIED_LOG_PATH) return process.env.GROK_UNIFIED_LOG_PATH;
+  return path.join(os.homedir(), '.grok', 'logs', 'unified.jsonl');
+}
+
+// F1: read ~/.grok/logs/unified.jsonl, filter by sid + msg=='shell.turn.inference_done',
+// drop retry rows where ctx.prompt_tokens == null (R1). Returns an array ordered by
+// ts then loop_index, one entry per non-null inference_done. Caller pops sequentially
+// to enrich each LLM call in the session.
+function loadUsageBySession(sessionId) {
+  if (!sessionId) return [];
+  const logPath = resolveUnifiedLogPath();
+  let fileSize;
+  try {
+    fileSize = fs.statSync(logPath).size;
+  } catch {
+    return [];
+  }
+  if (fileSize <= 0) return [];
+
+  let content;
+  try {
+    if (fileSize > MAX_UNIFIED_BYTES) {
+      const fd = fs.openSync(logPath, 'r');
+      try {
+        const tailOffset = fileSize - MAX_UNIFIED_BYTES;
+        const buf = Buffer.alloc(MAX_UNIFIED_BYTES);
+        fs.readSync(fd, buf, 0, MAX_UNIFIED_BYTES, tailOffset);
+        content = buf.toString('utf-8');
+        const firstNewline = content.indexOf('\n');
+        if (firstNewline >= 0) content = content.slice(firstNewline + 1);
+      } finally {
+        fs.closeSync(fd);
+      }
+    } else {
+      content = fs.readFileSync(logPath, 'utf-8');
+    }
+  } catch {
+    return [];
+  }
+
+  const out = [];
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let rec;
+    try { rec = JSON.parse(trimmed); } catch { continue; }
+    if (rec.msg !== 'shell.turn.inference_done') continue;
+    if (rec.sid !== sessionId) continue;
+    const ctx = rec.ctx || {};
+    // R1: retry/aborted inferences emit prompt_tokens=null. Skip so the next
+    // non-null inference aligns with the next assistant record in chat_history.
+    if (ctx.prompt_tokens == null) continue;
+    out.push({
+      ts: rec.ts || null,
+      loop_index: typeof ctx.loop_index === 'number' ? ctx.loop_index : null,
+      prompt_tokens: ctx.prompt_tokens || 0,
+      cached_prompt_tokens: ctx.cached_prompt_tokens || 0,
+      completion_tokens: ctx.completion_tokens || 0,
+      reasoning_tokens: ctx.reasoning_tokens || 0,
+    });
+  }
+  out.sort((a, b) => {
+    if (a.ts && b.ts) {
+      const c = a.ts.localeCompare(b.ts);
+      if (c !== 0) return c;
+    }
+    if (a.loop_index != null && b.loop_index != null) {
+      return a.loop_index - b.loop_index;
+    }
+    return 0;
+  });
+  return out;
+}
+
 function tryReadStdin() {
   try {
     return normalizeEnvelope(readStdinJson());
@@ -257,7 +338,8 @@ async function cmdStop() {
   saveState(sessionId, state);
 
   try {
-    await exportSession(state, event.stop_reason || 'end_turn', event.timestamp);
+    const usageEvents = loadUsageBySession(sessionId);
+    await exportSession(state, event.stop_reason || 'end_turn', event.timestamp, usageEvents);
     if (typeof state._next_transcript_offset === 'number') {
       state.transcript_offset = state._next_transcript_offset;
       delete state._next_transcript_offset;
@@ -300,7 +382,7 @@ async function waitForTranscriptStable(transcriptPath, minSize = 0) {
   }
 }
 
-async function exportSession(state, stopReason, fallbackTs) {
+async function exportSession(state, stopReason, fallbackTs, usageEvents = []) {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   const sessionId = state.session_id || 'unknown';
 
@@ -358,12 +440,34 @@ async function exportSession(state, stopReason, fallbackTs) {
     turnsToExport = parseResult.turns.slice(-1);
   }
 
+  // F3a: system_prompt is captured at chat_history offset 0 (the `type:system` record).
+  // On incremental parses (offset > 0) the system record is behind us, so persist
+  // it in state and reuse for the first AGENT span of every cmdStop batch where
+  // baseTurnCount === 0 (i.e. the first turn the session emits).
+  if (parseResult.systemPrompt && typeof parseResult.systemPrompt === 'string') {
+    state.system_prompt = parseResult.systemPrompt;
+  }
+  const systemPrompt = state.system_prompt || null;
+
   const cwd = state.cwd || undefined;
+
+  // F1: session-level cursor over filtered inference_done events. Each LLM call
+  // across the whole session (across cmdStop batches) pops the next event. Cursor
+  // advances here are not persisted — if a cmdStop batch consumes N events and the
+  // next batch arrives, we re-scan unified.jsonl (cheap, sid-filtered, tail-bounded)
+  // and skip past the already-emitted N by indexing baseTurnCount's worth of LLM
+  // calls. Simpler: just pop sequentially within this batch since usageEvents is
+  // rebuilt fresh each cmdStop and aligns head-of-list with the next unenriched LLM
+  // call only if previous batches also advanced. To stay correct across batches,
+  // track a counter in state of how many inference_done events have been consumed.
+  const consumedSoFar = state.usage_events_consumed || 0;
+  const usageState = { events: usageEvents, idx: consumedSoFar };
 
   for (let i = 0; i < turnsToExport.length; i++) {
     const turn = turnsToExport[i];
     const isLast = i === turnsToExport.length - 1;
     const turnStopReason = isLast ? stopReason : 'end_turn';
+    const isAgentSpanTurn = (baseTurnCount + i) === 0;
     const { records, hash } = buildTurnRecords(
       turn,
       baseTurnCount + i,
@@ -373,18 +477,22 @@ async function exportSession(state, stopReason, fallbackTs) {
       turnStopReason,
       cwd,
       fallbackTs,
+      systemPrompt,
+      isAgentSpanTurn,
+      usageState,
     );
     allRecords.push(...records);
     logHash = hash;
   }
 
+  state.usage_events_consumed = usageState.idx;
   state.turn_count = baseTurnCount + parseResult.turns.length;
 
   const cleaned = allRecords.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
 }
 
-function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStopReason, cwd, fallbackTs) {
+function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStopReason, cwd, fallbackTs, systemPrompt, isAgentSpanTurn, usageState) {
   const records = [];
   const turnId = `${sessionId}:t${turnIndex + 1}`;
   let stepRound = 0;
@@ -406,6 +514,14 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     ...(cwd ? { 'agent.grok-build.cwd': cwd } : {}),
     ...RESOURCE_ATTRIBUTE_FIELDS,
   };
+
+  // F3a: emit gen_ai.system_instructions as a spec-compliant array of
+  // {type:'text', content} blocks on the first AGENT span of the session only.
+  // Sources: chat_history record 0 (type:system) — captured by parser and
+  // persisted in state.system_prompt so incremental cmdStop batches still see it.
+  if (isAgentSpanTurn && systemPrompt) {
+    baseFields['gen_ai.system_instructions'] = [{ type: 'text', content: systemPrompt }];
+  }
 
   const llmCalls = turn.llmCalls || [];
 
@@ -474,11 +590,43 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     }
     records.push(reqRecord);
 
-    const apiInputTokens = ev.input_tokens || 0;
-    const cacheRead = ev.cache_read_input_tokens || 0;
-    const cacheCreation = ev.cache_creation_input_tokens || 0;
-    const inputTokens = apiInputTokens + cacheRead + cacheCreation;
-    const outputTokens = ev.output_tokens || 0;
+    // F1: pop the next non-null inference_done event for this LLM call. Session
+    // cursor (usageState.idx) advances across turns and across cmdStop batches
+    // (state.usage_events_consumed persisted). When the unified log is empty or
+    // the session has more LLM calls than recorded inferences, fall back to the
+    // transcript's assistant.usage (typically 0 in grok 0.2.x → token=0 known gap).
+    //
+    // grok's `prompt_tokens` is OpenAI-style (total input, including cached);
+    // `cached_prompt_tokens` is a subset, NOT additive. So when injected we set
+    // input_tokens = prompt_tokens and cache_read = cached_prompt_tokens as a
+    // separate breakdown (no double-count). When falling back to transcript
+    // (anthropic-style usage) we keep the additive convention input + cache.
+    let injectedUsage = null;
+    if (usageState && usageState.events && usageState.idx < usageState.events.length) {
+      injectedUsage = usageState.events[usageState.idx];
+      usageState.idx += 1;
+    }
+
+    let apiInputTokens;
+    let cacheRead;
+    let cacheCreation;
+    let outputTokens;
+    if (injectedUsage) {
+      apiInputTokens = injectedUsage.prompt_tokens || 0;
+      cacheRead = injectedUsage.cached_prompt_tokens || 0;
+      cacheCreation = 0;
+      outputTokens = injectedUsage.completion_tokens || 0;
+    } else {
+      apiInputTokens = ev.input_tokens || 0;
+      cacheRead = ev.cache_read_input_tokens || 0;
+      cacheCreation = ev.cache_creation_input_tokens || 0;
+      outputTokens = ev.output_tokens || 0;
+    }
+    const inputTokens = injectedUsage
+      ? apiInputTokens
+      : apiInputTokens + cacheRead + cacheCreation;
+    // For injected usage, grok's prompt_tokens is the total input (OpenAI-style);
+    // for the transcript fallback (Anthropic-style usage) we sum api + cache.
     const totalTokens = inputTokens + outputTokens;
 
     const finishReason = mapStopReason(ev.stop_reason || 'stop');
