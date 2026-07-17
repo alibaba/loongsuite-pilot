@@ -462,7 +462,7 @@ export class Orchestrator extends EventEmitter {
     }
 
     const otlpTraceCfg = buildOtlpTraceConfig(this.config);
-    if (otlpTraceCfg?.enabled) {
+    if (otlpTraceCfg?.enabled && otlpTraceCfg.endpoints.length > 0) {
       try {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
         const r = new OtlpTraceFlusher(

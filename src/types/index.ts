@@ -53,6 +53,29 @@ export interface OtlpTraceRawConfig {
   compression?: 'none' | 'gzip';
 }
 
+/** A single OTLP trace backend (managed inner or user), export-time only. */
+export interface OtlpEndpointEntry {
+  name?: string;
+  endpoint: string;
+  headers?: Record<string, string>;
+  compression?: 'none' | 'gzip';
+}
+
+/** ARMS/CMS shorthand; expanded into an OtlpEndpoint with x-arms-* headers. */
+export interface CmsEndpointEntry {
+  name?: string;
+  endpoint: string;
+  licenseKey?: string;
+  workspace?: string;
+  project?: string;
+}
+
+/** Managed trace backends loaded from configs/inner/data_config.json. */
+export interface InnerTraceConfig {
+  otlp?: OtlpEndpointEntry[];
+  cms?: CmsEndpointEntry[];
+}
+
 export interface AnalyticsConfig {
   enabled: boolean;
   autoStart: boolean;
@@ -63,6 +86,8 @@ export interface AnalyticsConfig {
   serviceNamePrefix: string;
   cms: CmsConfig;
   otlpTrace?: OtlpTraceRawConfig;
+  /** Managed trace backends from configs/inner/data_config.json (added to user backends). */
+  innerTrace?: InnerTraceConfig;
   listeners: Record<string, ListenerConfig>;
   flushers: FlusherConfig;
   retention: LogRetentionConfig;
@@ -90,11 +115,20 @@ export interface FlusherConfig {
   http?: HttpFlusherConfig;
 }
 
+/** A resolved OTLP backend the flusher exports to (name required for logging). */
+export interface OtlpEndpoint {
+  name: string;
+  endpoint: string;
+  headers?: Record<string, string>;
+  compression?: 'none' | 'gzip';
+}
+
 export interface OtlpTraceFlusherConfig {
   enabled: boolean;
-  endpoint: string;
+  /** One or more backends; the same converted spans are exported to each. */
+  endpoints: OtlpEndpoint[];
   protocol: 'http/protobuf';
-  headers?: Record<string, string>;
+  // The following are shared across all backends (spans are converted once):
   serviceName: string;
   resourceAttributes?: Record<string, string>;
   captureMessageContent?: boolean;
@@ -102,7 +136,6 @@ export interface OtlpTraceFlusherConfig {
   turnIdleTimeoutMs?: number;
   resourceAttributeKeys?: string[];
   maxExportBatchBytes?: number;
-  compression?: 'none' | 'gzip';
   dataDir?: string;
 }
 

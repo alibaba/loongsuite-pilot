@@ -29,9 +29,8 @@ import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
     enabled: true,
-    endpoint: 'http://localhost:4318',
+    endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318', headers: { 'x-key': 'val' } }],
     protocol: 'http/protobuf' as const,
-    headers: { 'x-key': 'val' },
     serviceName: 'test-pilot',
     ...overrides,
   };
@@ -190,5 +189,68 @@ describe('OtlpTraceFlusher - export', () => {
     const failedCalls = allCalls.filter((c) => (c[0] as string).includes('otlp-failed'));
     expect(debugCalls.length).toBeGreaterThan(0);
     expect(failedCalls.length).toBeGreaterThan(0);
+  });
+});
+
+describe('OtlpTraceFlusher - multi-backend fan-out', () => {
+  beforeEach(() => {
+    vi.mocked(fsUtils.appendLine).mockClear();
+    vi.mocked(fsUtils.ensureDir).mockClear();
+  });
+
+  function twoEndpointConfig(overrides: Record<string, unknown> = {}) {
+    return {
+      enabled: true,
+      endpoints: [
+        { name: 'backend-a', endpoint: 'http://a:4318' },
+        { name: 'backend-b', endpoint: 'http://b:4318' },
+      ],
+      protocol: 'http/protobuf' as const,
+      serviceName: 'test-pilot',
+      ...overrides,
+    };
+  }
+
+  it('exports the same spans to every backend once', async () => {
+    const calls: Record<string, number> = {};
+    const factory = (opts: { name: string }) => ({
+      export: (_spans: any, cb: (r: { code: number }) => void) => {
+        calls[opts.name] = (calls[opts.name] ?? 0) + 1;
+        cb({ code: ExportResultCode.SUCCESS });
+      },
+      shutdown: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const flusher = new OtlpTraceFlusher(twoEndpointConfig(), undefined, factory as any);
+    await flusher.exportSpansForAgent('claude-code', [makeMockSpan()] as any);
+    await flusher.shutdown();
+
+    expect(calls['backend-a']).toBe(1);
+    expect(calls['backend-b']).toBe(1);
+  });
+
+  it('isolates a failing backend and still exports to the healthy one', async () => {
+    const factory = (opts: { name: string }) => ({
+      export: (_spans: any, cb: (r: { code: number; error?: Error }) => void) => {
+        if (opts.name === 'backend-b') {
+          cb({ code: ExportResultCode.FAILED, error: new Error('503 from b') });
+        } else {
+          cb({ code: ExportResultCode.SUCCESS });
+        }
+      },
+      shutdown: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const flusher = new OtlpTraceFlusher(twoEndpointConfig(), undefined, factory as any);
+    await flusher.exportSpansForAgent('claude-code', [makeMockSpan()] as any);
+    await flusher.shutdown();
+
+    const failedCalls = vi.mocked(fsUtils.appendLine).mock.calls.filter(
+      (c) => (c[0] as string).includes('otlp-failed'),
+    );
+    // only backend-b failed → exactly its endpoint-tagged file is written
+    expect(failedCalls.length).toBeGreaterThan(0);
+    expect(failedCalls.every((c) => (c[0] as string).includes('__backend-b'))).toBe(true);
+    expect(failedCalls.some((c) => (c[0] as string).includes('__backend-a'))).toBe(false);
   });
 });

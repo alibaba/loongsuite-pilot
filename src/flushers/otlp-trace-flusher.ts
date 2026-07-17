@@ -1,4 +1,4 @@
-import { ExportResultCode } from '@opentelemetry/core';
+import { ExportResultCode, type ExportResult } from '@opentelemetry/core';
 import { Resource } from '@opentelemetry/resources';
 import {
   BasicTracerProvider,
@@ -51,8 +51,29 @@ interface AgentConvertState {
   active: number;
 }
 
+/** Minimal exporter surface used by the flusher; lets tests inject fakes. */
+export interface TraceExporterLike {
+  export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void;
+  shutdown(): Promise<void>;
+}
+
+/** Factory for exporters, injectable for testing. */
+export type OtlpExporterFactory = (opts: {
+  url: string;
+  headers: Record<string, string>;
+  compression: CompressionAlgorithm;
+  name: string;
+}) => TraceExporterLike;
+
+interface ResolvedOtlpEndpoint {
+  name: string;
+  url: string;
+  headers: Record<string, string>;
+  compression: CompressionAlgorithm;
+}
+
 interface AgentExportState {
-  exporter: OTLPTraceExporter;
+  exporters: Array<{ name: string; exporter: TraceExporterLike }>;
 }
 
 const RESERVED_RESOURCE_KEYS = new Set([
@@ -76,6 +97,9 @@ function resolveEndpointUrl(raw: string): string {
   }
   return url;
 }
+
+const defaultExporterFactory: OtlpExporterFactory = ({ url, headers, compression }) =>
+  new OTLPTraceExporter({ url, headers, compression });
 
 const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
 const MAX_CONVERT_STATES = 64;
@@ -105,7 +129,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly agentExportStates = new Map<string, AgentExportState>();
   private readonly instanceId = randomUUID();
   private readonly pilotVersion: string;
-  private readonly resolvedEndpointUrl: string;
+  private readonly endpoints: ResolvedOtlpEndpoint[];
+  private readonly exporterFactory: OtlpExporterFactory;
   private readonly debugDir: string;
   private readonly failedDir: string;
   private readonly resourceAttributeKeys: string[];
@@ -122,19 +147,29 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // 即时 flush 会把 key 加入 flushedTurnKeys，导致后续同 key 的子 records 被丢弃。
   private _deferSignalA = false;
 
-  constructor(cfg: OtlpTraceFlusherConfig, globalAttributesProvider?: GlobalAttributesProvider) {
+  constructor(
+    cfg: OtlpTraceFlusherConfig,
+    globalAttributesProvider?: GlobalAttributesProvider,
+    exporterFactory?: OtlpExporterFactory,
+  ) {
     super();
-    if (!cfg.endpoint) {
-      throw new Error('[otlp-trace-flusher] config.endpoint is required when enabled');
+    if (!cfg.endpoints || cfg.endpoints.length === 0) {
+      throw new Error('[otlp-trace-flusher] config.endpoints must be non-empty when enabled');
     }
     if (!cfg.serviceName) {
       throw new Error('[otlp-trace-flusher] config.serviceName is required when enabled');
     }
     this.cfg = cfg;
     this.globalAttributesProvider = globalAttributesProvider;
+    this.exporterFactory = exporterFactory ?? defaultExporterFactory;
+    this.endpoints = cfg.endpoints.map((ep, i) => ({
+      name: ep.name || `otlp-${i}`,
+      url: resolveEndpointUrl(ep.endpoint),
+      headers: ep.headers ?? {},
+      compression: ep.compression === 'none' ? CompressionAlgorithm.NONE : CompressionAlgorithm.GZIP,
+    }));
     const dataDir = cfg.dataDir ?? os.homedir() + '/.loongsuite-pilot';
     this.pilotVersion = readInstalledVersion(dataDir);
-    this.resolvedEndpointUrl = resolveEndpointUrl(cfg.endpoint);
     this.debugDir = path.join(dataDir, 'logs', 'otlp-debug');
     this.failedDir = path.join(dataDir, 'logs', 'otlp-failed');
     this.resourceAttributeKeys = (cfg.resourceAttributeKeys ?? [])
@@ -151,7 +186,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
       this.idleTimer.unref();
     }
 
-    logger.info(`OTLP trace flusher initialized → ${this.resolvedEndpointUrl}`);
+    logger.info(
+      `OTLP trace flusher initialized → ${this.endpoints.map(e => `${e.name}(${e.url})`).join(', ')}`,
+    );
   }
 
   // --- Public API (BaseFlusher) ---
@@ -243,8 +280,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     await this.flush();
 
-    const exportShutdowns = [...this.agentExportStates.values()].map(
-      (s) => s.exporter.shutdown(),
+    const exportShutdowns = [...this.agentExportStates.values()].flatMap(
+      (s) => s.exporters.map((e) => e.exporter.shutdown()),
     );
     const providerShutdowns = [...this.agentConvertStates.values()].map(
       (s) => s.provider.shutdown(),
@@ -442,24 +479,30 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
   }
 
-  private doExport(
+  private async doExport(
     exportState: AgentExportState,
     agentType: string,
     spans: ReadableSpan[],
   ): Promise<void> {
-    return new Promise<void>((resolve) => {
-      exportState.exporter.export(spans, (result) => {
-        if (result.code !== ExportResultCode.SUCCESS) {
-          const errMsg = result.error?.message ?? 'unknown export error';
-          logger.warn(`Export failed for ${agentType}: ${errMsg}`);
-          this.writeFailedLog(agentType, spans, {
-            code: result.code,
-            message: errMsg,
-          }).catch(() => undefined);
-        }
-        resolve();
-      });
-    });
+    // Fan out the same spans to every backend; one failing backend must not
+    // block or fail the others (each failure is isolated + persisted).
+    await Promise.allSettled(
+      exportState.exporters.map(({ name, exporter }) =>
+        new Promise<void>((resolve) => {
+          exporter.export(spans, (result) => {
+            if (result.code !== ExportResultCode.SUCCESS) {
+              const errMsg = result.error?.message ?? 'unknown export error';
+              logger.warn(`Export failed for ${agentType} → ${name}: ${errMsg}`);
+              this.writeFailedLog(agentType, name, spans, {
+                code: result.code,
+                message: errMsg,
+              }).catch(() => undefined);
+            }
+            resolve();
+          });
+        }),
+      ),
+    );
   }
 
   private getOrCreateConvertState(
@@ -583,15 +626,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
     let state = this.agentExportStates.get(agentType);
     if (state) return state;
 
-    const exporter = new OTLPTraceExporter({
-      url: this.resolvedEndpointUrl,
-      headers: this.cfg.headers ?? {},
-      compression: this.cfg.compression === 'none'
-        ? CompressionAlgorithm.NONE
-        : CompressionAlgorithm.GZIP,
-    });
+    const exporters = this.endpoints.map((ep) => ({
+      name: ep.name,
+      exporter: this.exporterFactory({
+        url: ep.url,
+        headers: ep.headers,
+        compression: ep.compression,
+        name: ep.name,
+      }),
+    }));
 
-    state = { exporter };
+    state = { exporters };
     this.agentExportStates.set(agentType, state);
     return state;
   }
@@ -658,11 +703,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   private async writeFailedLog(
     agentType: string,
+    endpointName: string,
     spans: ReadableSpan[],
     error: { code: number; message: string },
   ): Promise<void> {
     try {
-      const svcName = `${this.cfg.serviceName}-${agentType}`;
+      const svcName = `${this.cfg.serviceName}-${agentType}__${endpointName}`;
       const dir = this.failedDir;
       await ensureDir(dir);
       const filepath = path.join(dir, `${svcName}.jsonl`);
