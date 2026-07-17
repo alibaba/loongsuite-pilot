@@ -42,6 +42,7 @@ Pilot 主要帮助回答这些问题：
 | Claude Code | Hook | Yes | Yes | Yes | Yes |
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
+| Kiro CLI | Hook / session 轮询 | Yes | Yes | No | Yes |
 | OpenCode | 插件注入 | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | Yes | Yes | Yes | Yes |
