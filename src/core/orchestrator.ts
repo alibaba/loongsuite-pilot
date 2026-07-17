@@ -772,7 +772,7 @@ export class Orchestrator extends EventEmitter {
       this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-cn-trace']) &&
       this.agentControlManager.resolveEnabled(
         'qoder-work-cn-trace',
-        listenerCfg['qoder-work-cn-trace']?.enabled ?? false,
+        listenerCfg['qoder-work-cn-trace']?.enabled ?? true,
       );
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkCNTraceInput, {
