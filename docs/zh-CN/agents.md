@@ -13,6 +13,7 @@
 | Claude Code | `claude-code` | Hook 集成。 |
 | Codex | `codex` | Hook 集成。 |
 | Cursor | `cursor` | Hook 集成。 |
+| Kiro CLI | `kiro-cli` | Hook 集成，并延迟采集本地 SQLite/session 数据；源端暂不提供 Token 用量。 |
 | OpenCode | `opencode` | 插件注入。 |
 | Qoder | `qoder` | Hook 集成。 |
 | Qoder CN | `qoder-cn` | Hook 集成。 |

@@ -25,6 +25,7 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Claude Code | Hook | Yes | Yes | Yes | Yes |
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
+| Kiro CLI | Hook / 本地 session 轮询 | Yes | Yes | No | Yes |
 | OpenCode | 插件注入 | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | Yes | Yes | Yes | Yes |
