@@ -56,6 +56,7 @@ export interface InnerDataConfig {
   sls?: SlsEndpointEntry[];
   otlp?: OtlpEndpointEntry[];
   cms?: CmsEndpointEntry[];
+  serviceNamePrefix?: string;
 }
 
 /**
@@ -224,7 +225,11 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     cms: buildCmsConfig(file),
     otlpTrace: buildOtlpTraceRawConfig(file),
     innerTrace: innerDataConfig
-      ? { otlp: innerDataConfig.otlp, cms: innerDataConfig.cms }
+      ? {
+          otlp: innerDataConfig.otlp,
+          cms: innerDataConfig.cms,
+          serviceNamePrefix: innerDataConfig.serviceNamePrefix,
+        }
       : undefined,
     autoUpdate: buildAutoUpdateConfig(file),
 
@@ -487,6 +492,13 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   const endpoints: OtlpEndpoint[] = [];
   // Collected from any ARMS/CMS backend; merged into the shared resource.
   const armsResourceAttributes: Record<string, string> = {};
+  // User backends use the top-level (shared) serviceName. Managed backends may
+  // override it via inner serviceNamePrefix; only tag them when it actually
+  // differs, so the default case keeps user/inner backends dedup-identical and
+  // leaves the flusher on its single-conversion path.
+  const userServiceName = config.otlpTrace?.serviceName ?? (config.serviceNamePrefix || 'loongsuite-pilot');
+  const innerPrefix = config.innerTrace?.serviceNamePrefix;
+  const innerServiceName = innerPrefix && innerPrefix !== userServiceName ? innerPrefix : undefined;
 
   // 1. User generic OTLP (endpoint via env or config).
   const userOtlpEndpoint = env('LOONGSUITE_PILOT_OTLP_ENDPOINT') ?? config.otlpTrace?.endpoint;
@@ -528,6 +540,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
       endpoint: ep.endpoint,
       headers: ep.headers,
       compression: ep.compression,
+      serviceName: innerServiceName,
     });
   });
 
@@ -535,7 +548,9 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   const innerCms = Array.isArray(config.innerTrace?.cms) ? config.innerTrace!.cms : [];
   innerCms.forEach((ep, i) => {
     if (!ep.endpoint) return;
-    endpoints.push(cmsEntryToOtlpEndpoint(ep.name ?? `inner-cms-${i}`, ep, armsResourceAttributes));
+    endpoints.push(
+      cmsEntryToOtlpEndpoint(ep.name ?? `inner-cms-${i}`, ep, armsResourceAttributes, innerServiceName),
+    );
   });
 
   const deduped = dedupOtlpEndpoints(endpoints);
@@ -543,7 +558,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
 
   const otlp = config.otlpTrace;
   const captureMessageContent = otlp?.captureMessageContent ?? resolveCaptureMessageContent(config.agents);
-  const serviceName = otlp?.serviceName ?? (config.serviceNamePrefix || 'loongsuite-pilot');
+  const serviceName = userServiceName;
   const resourceAttributes = { ...(otlp?.resourceAttributes ?? {}), ...armsResourceAttributes };
 
   return {
@@ -565,6 +580,7 @@ function cmsEntryToOtlpEndpoint(
   name: string,
   cms: { endpoint: string; licenseKey?: string; workspace?: string; project?: string },
   armsResourceAttributes: Record<string, string>,
+  serviceName?: string,
 ): OtlpEndpoint {
   const headers: Record<string, string> = {};
   const armsProject = cms.project || extractArmsProject(cms.endpoint);
@@ -572,7 +588,7 @@ function cmsEntryToOtlpEndpoint(
   if (armsProject) headers['x-arms-project'] = armsProject;
   if (cms.workspace) headers['x-cms-workspace'] = cms.workspace;
   armsResourceAttributes['acs.arms.service.feature'] = 'genai_app';
-  return { name, endpoint: cms.endpoint, headers };
+  return { name, endpoint: cms.endpoint, headers, serviceName };
 }
 
 /** Stable serialization of headers (sorted keys) for dedup keying. */
@@ -585,17 +601,18 @@ function stableHeaderKey(headers?: Record<string, string>): string {
 }
 
 /**
- * Dedup by normalized URL + full headers. Because the CMS shorthand encodes
- * license-key / project / workspace as headers, this subsumes those fields and
- * also distinguishes generic OTLP backends that share a URL but differ in auth
+ * Dedup by normalized URL + full headers + serviceName. Because the CMS shorthand
+ * encodes license-key / project / workspace as headers, this subsumes those fields
+ * and also distinguishes generic OTLP backends that share a URL but differ in auth
  * headers — so a managed backend is never silently folded into a user endpoint.
- * First occurrence wins.
+ * serviceName is included so the same URL under two service names is kept as two
+ * distinct backends. First occurrence wins.
  */
 function dedupOtlpEndpoints(endpoints: OtlpEndpoint[]): OtlpEndpoint[] {
   const seen = new Set<string>();
   const result: OtlpEndpoint[] = [];
   for (const ep of endpoints) {
-    const key = `${normalizeEndpointUrl(ep.endpoint)}|${stableHeaderKey(ep.headers)}`;
+    const key = `${normalizeEndpointUrl(ep.endpoint)}|${stableHeaderKey(ep.headers)}|${ep.serviceName ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(ep);
@@ -696,9 +713,16 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
   }
 
   if (innerDataConfig?.sls && Array.isArray(innerDataConfig.sls)) {
+    // Managed endpoints get their own __service_name__; only tag them when the
+    // inner prefix differs, so the default case stays byte-identical to before.
+    const innerPrefix = innerDataConfig.serviceNamePrefix;
+    const innerServiceName = innerPrefix && innerPrefix !== serviceNamePrefix ? innerPrefix : undefined;
     const innerEndpoints = innerDataConfig.sls
       .filter(ep => ep.endpoint && ep.logstore)
-      .map((ep, i) => parseSlsEndpointEntry(ep, i));
+      .map((ep, i) => {
+        const parsed = parseSlsEndpointEntry(ep, i);
+        return innerServiceName ? { ...parsed, serviceName: innerServiceName } : parsed;
+      });
     endpoints = [...endpoints, ...innerEndpoints];
   }
 
@@ -788,7 +812,7 @@ function dedupSlsEndpoints(endpoints: SlsEndpoint[]): SlsEndpoint[] {
   const seen = new Set<string>();
   const result: SlsEndpoint[] = [];
   for (const ep of endpoints) {
-    const key = `${normalizeEndpointUrl(ep.endpoint)}|${ep.project}|${ep.logstore}`;
+    const key = `${normalizeEndpointUrl(ep.endpoint)}|${ep.project}|${ep.logstore}|${ep.serviceName ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(ep);

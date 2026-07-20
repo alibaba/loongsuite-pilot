@@ -229,6 +229,46 @@ describe('OtlpTraceFlusher - multi-backend fan-out', () => {
     expect(calls['backend-b']).toBe(1);
   });
 
+  it('fans out to backends split across two serviceNames (once each)', async () => {
+    const calls: Record<string, number> = {};
+    const factory = (opts: { name: string }) => ({
+      export: (_spans: any, cb: (r: { code: number }) => void) => {
+        calls[opts.name] = (calls[opts.name] ?? 0) + 1;
+        cb({ code: ExportResultCode.SUCCESS });
+      },
+      shutdown: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const cfg = twoEndpointConfig({
+      endpoints: [
+        { name: 'user', endpoint: 'http://a:4318' },
+        { name: 'inner', endpoint: 'http://b:4318', serviceName: 'managed-svc' },
+      ],
+    });
+    const flusher = new OtlpTraceFlusher(cfg, undefined, factory as any);
+    await flusher.exportSpansForAgent('claude-code', [makeMockSpan()] as any);
+    await flusher.shutdown();
+
+    // each backend belongs to a distinct serviceName group, still exactly once
+    expect(calls['user']).toBe(1);
+    expect(calls['inner']).toBe(1);
+  });
+
+  it('builds a distinct service.name resource per endpoint serviceName group', () => {
+    const cfg = twoEndpointConfig({
+      endpoints: [
+        { name: 'user', endpoint: 'http://a:4318' },
+        { name: 'inner', endpoint: 'http://b:4318', serviceName: 'managed-svc' },
+      ],
+    });
+    const flusher = new OtlpTraceFlusher(cfg) as any;
+    // default group uses cfg.serviceName; inner group uses its override
+    const userRes = flusher.buildResource('claude-code', 'test-pilot');
+    const innerRes = flusher.buildResource('claude-code', 'managed-svc');
+    expect(userRes.attributes['service.name']).toBe('test-pilot-claude-code');
+    expect(innerRes.attributes['service.name']).toBe('managed-svc-claude-code');
+  });
+
   it('isolates a failing backend and still exports to the healthy one', async () => {
     const factory = (opts: { name: string }) => ({
       export: (_spans: any, cb: (r: { code: number; error?: Error }) => void) => {

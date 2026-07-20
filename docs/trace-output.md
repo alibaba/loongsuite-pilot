@@ -82,10 +82,10 @@ Trace export sends the **same** converted spans to **every** configured backend 
 
 Backends are **deduplicated** by normalized endpoint URL + full request headers, so listing the same backend twice (e.g. once as a user backend and once as a managed backend) results in a single export. Two backends that share a URL but differ in auth headers / workspace / license are kept as distinct.
 
-Shared vs. per-backend settings (because spans are converted once):
+Shared vs. per-backend settings (spans are converted once per distinct `service.name`):
 
-- **Shared across all backends:** `serviceName`, `resourceAttributes`, `captureMessageContent`, `resourceAttributeKeys`, `maxExportBatchBytes`, `turnIdleTimeoutMs`.
-- **Per-backend:** endpoint URL, headers, compression.
+- **Shared across all backends:** `resourceAttributes`, `captureMessageContent`, `resourceAttributeKeys`, `maxExportBatchBytes`, `turnIdleTimeoutMs`.
+- **Per-backend:** endpoint URL, headers, compression, and `service.name` (see below — user vs. managed backends can differ).
 
 A failing backend is isolated — it does not block the healthy backends, and its failed spans are persisted separately under `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<backend-name>.jsonl`.
 
@@ -96,6 +96,7 @@ Managed/hosted deployments can push extra trace backends via `~/.loongsuite-pilo
 ```json
 {
   "sls": [ /* managed SLS endpoints (unchanged) */ ],
+  "serviceNamePrefix": "managed-service",
   "otlp": [
     {
       "name": "team-collector",
@@ -118,6 +119,7 @@ Managed/hosted deployments can push extra trace backends via `~/.loongsuite-pilo
 
 | Field | Applies to | Description |
 |-------|-----------|-------------|
+| `serviceNamePrefix` | top-level | Service-name prefix for **all** managed backends — trace (`otlp[]`/`cms[]`, as `service.name`) and log (`sls[]`, as the `__service_name__` tag) — keeping them distinct from user backends. Optional; falls back to the user `serviceNamePrefix` when omitted (no differentiation). |
 | `otlp[].name` / `cms[].name` | both | Label used in logs and in the per-backend failed-log filename. Optional (defaults to `inner-otlp-<i>` / `inner-cms-<i>`). |
 | `otlp[].endpoint` | otlp | OTLP HTTP base URL (`/v1/traces` auto-appended). |
 | `otlp[].headers` | otlp | Request headers (e.g. auth token). |
@@ -127,7 +129,7 @@ Managed/hosted deployments can push extra trace backends via `~/.loongsuite-pilo
 | `cms[].project` | cms | Sent as `x-arms-project`. Extracted from the endpoint hostname if omitted. |
 | `cms[].workspace` | cms | Sent as `x-cms-workspace`. |
 
-Each `cms[]` entry is expanded into an OTLP endpoint with the corresponding `x-arms-*` / `x-cms-*` headers, and any CMS backend adds the `acs.arms.service.feature=genai_app` resource attribute (shared, as noted above). Malformed managed config (e.g. `otlp`/`cms` written as a non-array) is ignored rather than failing collection.
+Each `cms[]` entry is expanded into an OTLP endpoint with the corresponding `x-arms-*` / `x-cms-*` headers, and any CMS backend adds the `acs.arms.service.feature=genai_app` resource attribute (shared, as noted above). When `serviceNamePrefix` is set here, managed backends report under `<serviceNamePrefix>-<agent>` while user backends keep the user prefix; spans are then converted once per distinct `service.name` (typically twice — user and managed). Malformed managed config (e.g. `otlp`/`cms` written as a non-array) is ignored rather than failing collection.
 
 ## Backend Examples
 

@@ -130,6 +130,41 @@ describe('ConfigLoader', () => {
       expect(config.flushers.sls?.enabled).toBe(true);
     });
 
+    it('tags inner SLS endpoints with inner serviceNamePrefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'user-svc',
+        sls: { endpoint: 'https://user.log.aliyuncs.com', project: 'up', logstore: 'ul' },
+      });
+      // second read = configs/inner/data_config.json
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'managed-svc',
+        sls: [{ name: 'inner', endpoint: 'https://inner.log.aliyuncs.com', project: 'ip', logstore: 'il' }],
+      });
+
+      const config = await loadConfig();
+      const eps = config.flushers.sls!.endpoints;
+      const user = eps.find(e => e.project === 'up')!;
+      const inner = eps.find(e => e.project === 'ip')!;
+      // user backend inherits the shared prefix (no override); inner carries its own
+      expect(user.serviceName).toBeUndefined();
+      expect(inner.serviceName).toBe('managed-svc');
+    });
+
+    it('leaves inner SLS serviceName unset when inner prefix equals the user prefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'same-svc',
+        sls: { endpoint: 'https://user.log.aliyuncs.com', project: 'up', logstore: 'ul' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'same-svc',
+        sls: [{ name: 'inner', endpoint: 'https://inner.log.aliyuncs.com', project: 'ip', logstore: 'il' }],
+      });
+
+      const config = await loadConfig();
+      const inner = config.flushers.sls!.endpoints.find(e => e.project === 'ip')!;
+      expect(inner.serviceName).toBeUndefined();
+    });
+
     it('uses env SLS destination over file values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
@@ -813,6 +848,68 @@ describe('ConfigLoader', () => {
         'x-arms-project': 'proj',
         'x-cms-workspace': 'wksp',
       });
+    });
+
+    it('buildOtlpTraceConfig tags inner backends with inner serviceNamePrefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        serviceNamePrefix: 'user-svc',
+        otlpTrace: { endpoint: 'http://tempo:4318' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'managed-svc',
+        otlp: [{ name: 'managed-otlp', endpoint: 'http://collector.internal:4318' }],
+        cms: [{ name: 'managed-arms', endpoint: 'https://managed.arms.aliyuncs.com', licenseKey: 'lk' }],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      // top-level serviceName stays the user prefix
+      expect(result!.serviceName).toBe('user-svc');
+      // user backend leaves serviceName unset (inherits top-level)
+      expect(result!.endpoints.find(e => e.name === 'user-otlp')!.serviceName).toBeUndefined();
+      // both inner backends carry the managed serviceName
+      expect(result!.endpoints.find(e => e.name === 'managed-otlp')!.serviceName).toBe('managed-svc');
+      expect(result!.endpoints.find(e => e.name === 'managed-arms')!.serviceName).toBe('managed-svc');
+    });
+
+    it('buildOtlpTraceConfig leaves inner serviceName unset when it equals the user prefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        serviceNamePrefix: 'same-svc',
+        otlpTrace: { endpoint: 'http://tempo:4318' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'same-svc',
+        otlp: [{ name: 'managed-otlp', endpoint: 'http://collector.internal:4318' }],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      // no differentiation needed -> inner endpoint inherits the top-level name
+      expect(result!.endpoints.find(e => e.name === 'managed-otlp')!.serviceName).toBeUndefined();
+    });
+
+    it('buildOtlpTraceConfig keeps same-url backends split by inner serviceName', async () => {
+      // user + inner point at the same ARMS url with the same license, but the
+      // inner backend has a distinct serviceName -> both must be kept.
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        serviceNamePrefix: 'user-svc',
+        cms: { licenseKey: 'lk', endpoint: 'https://a.arms.aliyuncs.com', workspace: 'w' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'managed-svc',
+        cms: [{ name: 'managed-dup', endpoint: 'https://a.arms.aliyuncs.com', licenseKey: 'lk', workspace: 'w' }],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-cms', 'managed-dup']);
+      expect(result!.endpoints.find(e => e.name === 'managed-dup')!.serviceName).toBe('managed-svc');
     });
 
     it('buildOtlpTraceConfig dedups by url + license-key + project', async () => {

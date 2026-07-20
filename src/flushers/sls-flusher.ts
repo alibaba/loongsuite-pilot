@@ -171,27 +171,33 @@ export class SlsFlusher extends BaseFlusher {
     await Promise.all(tasks);
   }
 
-  private resolveServiceName(agentType?: string): string {
-    if (!this.serviceName) return '';
-    return agentType ? `${this.serviceName}-${agentType}` : this.serviceName;
+  /** Per-endpoint service name: managed endpoints may override the shared prefix. */
+  private effectiveServiceName(endpoint?: SlsEndpoint): string {
+    return endpoint?.serviceName || this.serviceName;
   }
 
-  private buildAkTags(agentType?: string): Record<string, string>[] {
+  private resolveServiceName(endpoint?: SlsEndpoint, agentType?: string): string {
+    const base = this.effectiveServiceName(endpoint);
+    if (!base) return '';
+    return agentType ? `${base}-${agentType}` : base;
+  }
+
+  private buildAkTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string>[] {
     const tags: Record<string, string>[] = [{ __hostname__: HOSTNAME }];
-    const sn = this.resolveServiceName(agentType);
+    const sn = this.resolveServiceName(endpoint, agentType);
     if (sn) tags.push({ __service_name__: sn });
     return tags;
   }
 
-  private buildWebtrackingTags(agentType?: string): Record<string, string> {
+  private buildWebtrackingTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string> {
     const tags: Record<string, string> = { __hostname__: HOSTNAME };
-    const sn = this.resolveServiceName(agentType);
+    const sn = this.resolveServiceName(endpoint, agentType);
     if (sn) tags['__service_name__'] = sn;
     return tags;
   }
 
   private warnIfMixedAgentTypes(logs: QueuedLog[]): void {
-    if (this.serviceName) {
+    if (this.effectiveServiceName(logs[0]?.endpoint)) {
       const types = new Set(logs.map(l => l.agentType));
       if (types.size > 1) logger.warn('mixed agentTypes in batch', { types: [...types] });
     }
@@ -208,7 +214,7 @@ export class SlsFlusher extends BaseFlusher {
       })),
       source: LOCAL_IP,
       topic: endpoint.kind,
-      tags: this.buildAkTags(agentType),
+      tags: this.buildAkTags(endpoint, agentType),
     };
 
     const client = this.getAkClient(endpoint);
@@ -305,7 +311,7 @@ export class SlsFlusher extends BaseFlusher {
       __topic__: endpoint.kind ?? '',
       __source__: LOCAL_IP,
       __logs__: logs.map(l => l.content),
-      __tags__: this.buildWebtrackingTags(agentType),
+      __tags__: this.buildWebtrackingTags(endpoint, agentType),
     };
 
     const raw = JSON.stringify(body);
@@ -420,7 +426,7 @@ export class SlsFlusher extends BaseFlusher {
             logs: [{ timestamp: Math.floor(Date.now() / 1000), content }],
             source: LOCAL_IP,
             topic,
-            tags: this.buildAkTags(),
+            tags: this.buildAkTags(endpoint),
           });
         } else {
           await postWebtracking(
@@ -446,7 +452,7 @@ export class SlsFlusher extends BaseFlusher {
 
   private enqueue(endpoint: SlsEndpoint, content: Record<string, string>, agentType?: string): void {
     const base = `${endpoint.name}/${endpoint.project}/${endpoint.logstore}`;
-    const key = (this.serviceName && agentType)
+    const key = (this.effectiveServiceName(endpoint) && agentType)
       ? `${base}/${agentType}`
       : base;
     let bucket = this.queue.get(key);
