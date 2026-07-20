@@ -16,6 +16,7 @@ import type {
   SlsEndpoint,
   SlsMode,
   StatusBarConfig,
+  UpstreamLinkConfig,
 } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
@@ -104,6 +105,11 @@ export interface ConfigFile {
   collectLog?: boolean;
   collectTrace?: boolean;
   serviceNamePrefix?: string;
+
+  upstreamLink?: {
+    enabled?: boolean;
+    ttlMs?: number;
+  };
 
   mask?: {
     mode?: string;
@@ -225,6 +231,14 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     fileCollection: buildFileCollectionConfig(file),
     pipeline: buildPipelineConfig(file),
     statusBar: buildStatusBarConfig(file),
+    upstreamLink: buildUpstreamLinkConfig(file),
+  };
+}
+
+function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
+  return {
+    enabled: envBool('LOONGSUITE_PILOT_UPSTREAM_LINK', file?.upstreamLink?.enabled ?? false),
+    ttlMs: envInt('LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS', file?.upstreamLink?.ttlMs ?? 86_400_000), // 24h
   };
 }
 

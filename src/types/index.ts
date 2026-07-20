@@ -73,6 +73,18 @@ export interface AnalyticsConfig {
   pipeline: PipelineToggle;
   statusBar: StatusBarConfig;
   autoUpdate?: AutoUpdateConfig;
+  upstreamLink: UpstreamLinkConfig;
+}
+
+/**
+ * Upstream trace linking: stamp collected records with an upstream trace_id /
+ * parent_span_id resolved from the acp-correlate store so agent spans reparent
+ * under the upstream span. Disabled by default.
+ */
+export interface UpstreamLinkConfig {
+  enabled: boolean;
+  /** TTL (ms) after which acp-correlate files/locks are cleaned up. */
+  ttlMs: number;
 }
 
 export interface AgentConfig {

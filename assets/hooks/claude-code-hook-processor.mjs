@@ -33,6 +33,7 @@ import {
   writeJsonlRecords,
 } from './shared/event-emitter.mjs';
 import { logHookError } from './shared/error-logger.mjs';
+import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
 import {
   sanitizeObject,
   toJsonValue,
@@ -259,6 +260,9 @@ async function cmdStop() {
   if (isCursorCaller(event)) return;
   const sessionId = requireSessionId(event, 'cmd');
   if (!sessionId) return;
+
+  // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
+  recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
 
   const state = loadState(sessionId);
   if (!state.transcript_path && event.transcript_path) {

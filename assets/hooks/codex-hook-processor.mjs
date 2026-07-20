@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { logHookError } from './shared/error-logger.mjs';
+import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
 import {
   collectResourceAttributesFromEnv,
 } from './shared/resource-context.mjs';
@@ -52,6 +53,10 @@ function safePathPart(value) {
 function writeWakeupMarker(input) {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   if (!sessionId) return;
+
+  // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
+  recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+
   const directory = path.join(pilotDataDir(), 'state', 'codex', 'transcript-wakeups');
   const marker = path.join(directory, `${safePathPart(sessionId)}.json`);
   const temporary = path.join(directory, `.${safePathPart(sessionId)}.${process.pid}.${crypto.randomUUID()}.tmp`);

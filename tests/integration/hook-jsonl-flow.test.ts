@@ -226,6 +226,10 @@ describe('Hook JSONL integration flow', () => {
       path.resolve(process.cwd(), 'assets/hooks/shared/resource-context.mjs'),
       path.join(sharedDir, 'resource-context.mjs'),
     );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/upstream-context.mjs'),
+      path.join(sharedDir, 'upstream-context.mjs'),
+    );
     await fs.chmod(hookScript, 0o755);
 
     const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
@@ -347,6 +351,10 @@ describe('Hook JSONL integration flow', () => {
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/resource-context.mjs'),
       path.join(sharedDir, 'resource-context.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/upstream-context.mjs'),
+      path.join(sharedDir, 'upstream-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
 
@@ -659,6 +667,10 @@ describe('Hook JSONL integration flow', () => {
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/resource-context.mjs'),
       path.join(sharedDir, 'resource-context.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/upstream-context.mjs'),
+      path.join(sharedDir, 'upstream-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
 

@@ -44,6 +44,9 @@ import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-l
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
+import { CorrelationStore } from './upstream-link/correlation-store.js';
+import { TraceLinker } from './upstream-link/trace-linker.js';
+import { AcpCorrelateRetentionService } from './upstream-link/acp-correlate-retention-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
 import { PipelineManager } from '../pipeline/pipeline-manager.js';
@@ -106,6 +109,7 @@ export class Orchestrator extends EventEmitter {
   private stateStore!: StateStore;
   private flusher!: BaseFlusher;
   private logRetentionService!: LogRetentionService;
+  private acpCorrelateRetentionService?: AcpCorrelateRetentionService;
   private hookWatchdog!: HookWatchdog;
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
@@ -160,6 +164,17 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setAgentsConfig(this.config.agents);
     this.inputManager.setAlarmManager(this.alarmManager);
     this.inputManager.setMaskConfig(this.config.mask ?? { mode: 'none', types: [] });
+
+    // Upstream trace linking (opt-in): stamp trace_id/parent_span_id from the
+    // acp-correlate store so agent spans reparent under the upstream span.
+    if (this.config.upstreamLink?.enabled) {
+      const correlateDir = path.join(this.dataDir, 'acp-correlate');
+      await ensureDir(correlateDir);
+      const store = new CorrelationStore(correlateDir);
+      this.inputManager.setTraceLinker(new TraceLinker(store));
+      this.acpCorrelateRetentionService = new AcpCorrelateRetentionService(this.dataDir, this.config.upstreamLink);
+      this.acpCorrelateRetentionService.start();
+    }
 
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
     const pilotDir = this.resolvePilotDir();
@@ -291,6 +306,7 @@ export class Orchestrator extends EventEmitter {
     this.updaterWatchdog = null;
     this.hookWatchdog?.stop();
     this.logRetentionService?.stop();
+    this.acpCorrelateRetentionService?.stop();
     await this.localWorkerActivationService?.stop();
     await this.deploymentManager?.stopWorkers();
     await this.agentDiscoveryService?.stop();

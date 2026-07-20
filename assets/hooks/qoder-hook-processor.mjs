@@ -35,6 +35,7 @@ import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
 } from './shared/resource-context.mjs';
+import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
 
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: 'qoder' });
 const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
@@ -211,6 +212,12 @@ async function main() {
   if (!payload) return;
 
   const { transcriptPath, sessionId, cwd } = payload;
+
+  // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
+  if (sessionId) {
+    recordUpstreamContextOnce({ agentId, sessionId, dataDir: path.dirname(LOONGSUITE_PILOT_LOGS_BASE_DIR) });
+  }
+
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
 
   const range = getLineRange(agentId, transcriptPath, sessionId);
