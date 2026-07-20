@@ -3,12 +3,41 @@ import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalizati
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import type {
   CodexExtractedTranscriptTurn,
+  CodexTranscriptInputContext,
   CodexTranscriptStep,
   CodexTranscriptTool,
   CodexTranscriptUsage,
 } from './codex-transcript-types.js';
 
-export function buildCodexTranscriptEntries(turn: CodexExtractedTranscriptTurn): AgentActivityEntry[] {
+const MAX_INPUT_MESSAGES_BYTES = 1024 * 1024;
+const INITIAL_INPUT_HASH = crypto.createHash('sha256').update('').digest('hex').slice(0, 32);
+
+export interface CodexTranscriptBuildOptions {
+  includePrompt?: boolean;
+  startStepNumber?: number;
+  inputContext?: CodexTranscriptInputContext;
+  /** Number of leading steps whose output should be committed into returned context. */
+  contextStepCount?: number;
+}
+
+export interface CodexTranscriptBuildResult {
+  entries: AgentActivityEntry[];
+  nextInputContext: CodexTranscriptInputContext;
+}
+
+export function buildCodexTranscriptEntries(
+  turn: CodexExtractedTranscriptTurn,
+  opts: CodexTranscriptBuildOptions = {},
+): AgentActivityEntry[] {
+  return buildCodexTranscriptSegment(turn, opts).entries;
+}
+
+export function buildCodexTranscriptSegment(
+  turn: CodexExtractedTranscriptTurn,
+  opts: CodexTranscriptBuildOptions = {},
+): CodexTranscriptBuildResult {
+  const includePrompt = opts.includePrompt ?? true;
+  const startStepNumber = opts.startStepNumber ?? 1;
   const traceId = hashId([turn.sessionId, turn.transcriptTurnId, 'trace'], 32);
   const agentSpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'agent'], 16);
   const turnId = `${turn.sessionId}:${turn.transcriptTurnId}`;
@@ -25,8 +54,11 @@ export function buildCodexTranscriptEntries(turn: CodexExtractedTranscriptTurn):
     ...(turn.cwd ? { 'agent.codex.cwd': turn.cwd } : {}),
   };
   const records: AgentActivityEntry[] = [];
+  let inputContext = opts.inputContext ?? initialInputContext(turn);
+  const contextStepCount = opts.contextStepCount ?? turn.steps.length;
+  let nextInputContext = inputContext;
 
-  if (turn.prompt) {
+  if (includePrompt && turn.prompt) {
     records.push(buildEntry({
       ...base,
       timestamp: turn.startedAtMs,
@@ -44,15 +76,13 @@ export function buildCodexTranscriptEntries(turn: CodexExtractedTranscriptTurn):
   }
 
   for (const [index, step] of turn.steps.entries()) {
-    const stepNumber = index + 1;
+    const stepNumber = startStepNumber + index;
     const stepId = `${turnId}:s${stepNumber}`;
     const stepSpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'step', String(stepNumber)], 16);
     const llmSpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'llm', String(stepNumber)], 16);
     const responseId = step.responseId ?? `${turnId}:r${stepNumber}`;
-    const previousStep = turn.steps[index - 1];
-    const inputMessages = stepInputMessages(index, turn, previousStep);
-    const fullInputMessages = fullStepInputMessages(index, turn);
-    const fullInputHash = hashJsonValue(fullInputMessages);
+    const inputMessages = inputContext.delta ?? [];
+    const outputInputMessages = inputContext.fullMessages ?? inputMessages;
 
     records.push(buildEntry({
       ...base,
@@ -64,9 +94,9 @@ export function buildCodexTranscriptEntries(turn: CodexExtractedTranscriptTurn):
       'gen_ai.step.id': stepId,
       'gen_ai.request.model': model,
       'gen_ai.response.id': responseId,
-      'gen_ai.input.messages_hash': fullInputHash,
+      'gen_ai.input.messages_hash': inputContext.hash,
       ...(inputMessages.length > 0 ? { 'gen_ai.input.messages_delta': inputMessages } : {}),
-      ...(fullInputMessages.length > 0 ? { 'gen_ai.input.messages': fullInputMessages } : {}),
+      ...(outputInputMessages.length > 0 ? { 'gen_ai.input.messages': outputInputMessages } : {}),
       ...sharedLlmFields(turn),
     }));
 
@@ -87,46 +117,62 @@ export function buildCodexTranscriptEntries(turn: CodexExtractedTranscriptTurn):
         ? { 'gen_ai.output.messages': responseMessages(turn, step, terminalStep) }
         : {}),
       ...usageFields(step.tokenUsage),
-      ...sharedLlmFields(turn),
     }));
 
     for (const [toolIndex, tool] of step.tools.entries()) {
       records.push(...buildToolEntries(turn, tool, toolIndex, base, stepId, stepSpanId));
     }
+
+    inputContext = advanceInputContext(inputContext, step);
+    if (index + 1 === contextStepCount) nextInputContext = inputContext;
   }
 
-  return records;
+  return { entries: records, nextInputContext };
 }
 
-function stepInputMessages(
-  index: number,
-  turn: CodexExtractedTranscriptTurn,
-  previousStep: CodexTranscriptStep | undefined,
-): JsonValue[] {
-  if (index === 0) {
-    if (turn.inputMessages.length > 0) return turn.inputMessages;
-    return turn.prompt
-      ? [{ role: 'user', parts: [{ type: 'text', content: turn.prompt }] }]
-      : [];
-  }
-  const completedTools = previousStep?.tools.filter(tool => tool.completedAtMs !== undefined) ?? [];
+function initialInputContext(turn: CodexExtractedTranscriptTurn): CodexTranscriptInputContext {
+  const delta = turn.steps[0]?.inputMessages?.length
+    ? turn.steps[0].inputMessages
+    : turn.inputMessages.length > 0
+      ? turn.inputMessages
+      : turn.prompt
+        ? [{ role: 'user', parts: [{ type: 'text', content: turn.prompt }] }]
+        : [];
+  return contextFromMessages(INITIAL_INPUT_HASH, [], delta);
+}
+
+function advanceInputContext(
+  context: CodexTranscriptInputContext,
+  step: CodexTranscriptStep,
+): CodexTranscriptInputContext {
+  const delta = nextInputMessagesForStep(step);
+  return contextFromMessages(context.hash, context.fullMessages, delta);
+}
+
+function contextFromMessages(
+  previousHash: string,
+  previousFullMessages: JsonValue[] | undefined,
+  delta: JsonValue[],
+): CodexTranscriptInputContext {
+  const fullMessages = previousFullMessages === undefined
+    ? undefined
+    : [...previousFullMessages, ...delta];
+  const retainFullMessages = fullMessages !== undefined
+    && Buffer.byteLength(JSON.stringify(fullMessages), 'utf8') <= MAX_INPUT_MESSAGES_BYTES;
+  return {
+    hash: hashInputMessages(previousHash, delta),
+    delta,
+    ...(retainFullMessages ? { fullMessages } : {}),
+  };
+}
+
+export function nextInputMessagesForStep(step: CodexTranscriptStep): JsonValue[] {
+  const completedTools = step.tools.filter(tool => tool.completedAtMs !== undefined);
+  const messages: JsonValue[] = [];
+  const toolCallMessage = assistantToolCallMessage(completedTools);
+  if (toolCallMessage) messages.push(toolCallMessage);
   const toolMessage = toolResponseMessage(completedTools);
-  return toolMessage ? [toolMessage] : [];
-}
-
-function fullStepInputMessages(index: number, turn: CodexExtractedTranscriptTurn): JsonValue[] {
-  const messages: JsonValue[] = turn.inputMessages.length > 0
-    ? [...turn.inputMessages]
-    : turn.prompt
-      ? [{ role: 'user', parts: [{ type: 'text', content: turn.prompt }] }]
-      : [];
-  for (const previousStep of turn.steps.slice(0, index)) {
-    const completedTools = previousStep.tools.filter(tool => tool.completedAtMs !== undefined);
-    const toolCallMessage = assistantToolCallMessage(completedTools);
-    if (toolCallMessage) messages.push(toolCallMessage);
-    const toolMessage = toolResponseMessage(completedTools);
-    if (toolMessage) messages.push(toolMessage);
-  }
+  if (toolMessage) messages.push(toolMessage);
   return messages;
 }
 
@@ -166,7 +212,7 @@ function finishReasons(
 ): JsonValue {
   if (terminalStep && turn.status === 'interrupted') return ['cancelled'];
   if (step.tools.length > 0) return ['tool_call'];
-  if (terminalStep && turn.status === 'completed') return ['stop'];
+  if (step.tokenUsage || (terminalStep && turn.status === 'completed')) return ['stop'];
   return [];
 }
 
@@ -284,6 +330,23 @@ function hashId(parts: string[], length: number): string {
   return crypto.createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, length);
 }
 
-function hashJsonValue(value: JsonValue): string {
-  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function hashInputMessages(previousHash: string, messages: JsonValue[]): string {
+  let hash = previousHash;
+  for (const message of messages) {
+    hash = crypto.createHash('sha256')
+      .update(hash)
+      .update(stableSerialize(message))
+      .digest('hex')
+      .slice(0, 32);
+  }
+  return hash;
+}
+
+function stableSerialize(value: JsonValue): string {
+  if (value === null) return 'null';
+  if (typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`;
+  return `{${Object.keys(value).sort()
+    .map(key => `${JSON.stringify(key)}:${stableSerialize(value[key]!)}`)
+    .join(',')}}`;
 }

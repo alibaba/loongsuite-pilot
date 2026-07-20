@@ -2,7 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createTempDir, cleanupTempDir } from '../../helpers/fixture-builder.js';
-import { LogRetentionService, extractDate } from '../../../src/core/log-retention-service.js';
+import {
+  LogRetentionService,
+  OUTPUT_RETENTION_LARGE_FILE_THRESHOLD_BYTES,
+  OUTPUT_RETENTION_MAX_TOTAL_BYTES,
+  SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES,
+  extractDate,
+} from '../../../src/core/log-retention-service.js';
 import type { LogRetentionConfig } from '../../../src/types/index.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -32,6 +38,11 @@ function daysAgo(n: number): string {
 
 function today(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+async function writeSizedFile(filePath: string, size: number): Promise<void> {
+  await fs.writeFile(filePath, '');
+  await fs.truncate(filePath, size);
 }
 
 describe('LogRetentionService', () => {
@@ -129,6 +140,55 @@ describe('LogRetentionService', () => {
       expect(remaining).toHaveLength(1);
     });
 
+    it('deletes oversized output files earlier than normal output retention', async () => {
+      const outputDir = path.join(tmpDir, 'logs', 'output');
+      await fs.mkdir(outputDir, { recursive: true });
+
+      const largeOld = path.join(outputDir, `cursor-${daysAgo(3)}.jsonl`);
+      const smallOld = path.join(outputDir, `qoder-${daysAgo(3)}.jsonl`);
+      const largeRecent = path.join(outputDir, `codex-${daysAgo(1)}.jsonl`);
+      await writeSizedFile(largeOld, OUTPUT_RETENTION_LARGE_FILE_THRESHOLD_BYTES + 1);
+      await writeSizedFile(smallOld, 1024);
+      await writeSizedFile(largeRecent, OUTPUT_RETENTION_LARGE_FILE_THRESHOLD_BYTES + 1);
+
+      const service = new LogRetentionService(tmpDir, makeConfig({ outputDays: 7 }));
+      const result = await service.runCleanup();
+
+      expect(result.deleted).toBe(1);
+      const remaining = await fs.readdir(outputDir);
+      expect(remaining).not.toContain(path.basename(largeOld));
+      expect(remaining).toContain(path.basename(smallOld));
+      expect(remaining).toContain(path.basename(largeRecent));
+    });
+
+    it('deletes oldest output files when total output size exceeds the hard limit', async () => {
+      const outputDir = path.join(tmpDir, 'logs', 'output');
+      await fs.mkdir(outputDir, { recursive: true });
+
+      const fileSize = Math.floor(OUTPUT_RETENTION_MAX_TOTAL_BYTES / 5);
+      const oldest = path.join(outputDir, `cursor-${daysAgo(6)}.jsonl`);
+      const older = path.join(outputDir, `qoder-${daysAgo(5)}.jsonl`);
+      const middle = path.join(outputDir, `codex-${daysAgo(4)}.jsonl`);
+      const recent = path.join(outputDir, `claude-code-${daysAgo(1)}.jsonl`);
+      const todayFile = path.join(outputDir, `opencode-${today()}.jsonl`);
+
+      for (const file of [oldest, older, middle, recent, todayFile]) {
+        await writeSizedFile(file, fileSize);
+      }
+      await writeSizedFile(path.join(outputDir, `wukong-${daysAgo(3)}.jsonl`), fileSize);
+
+      const service = new LogRetentionService(tmpDir, makeConfig({ outputDays: 7 }));
+      const result = await service.runCleanup();
+
+      expect(result.deleted).toBe(1);
+      const remaining = await fs.readdir(outputDir);
+      expect(remaining).not.toContain(path.basename(oldest));
+      expect(remaining).toContain(path.basename(older));
+      expect(remaining).toContain(path.basename(middle));
+      expect(remaining).toContain(path.basename(recent));
+      expect(remaining).toContain(path.basename(todayFile));
+    });
+
     it('cleans sls-failed-logs directory', async () => {
       const slsDir = path.join(tmpDir, 'logs', 'sls-failed-logs');
       await fs.mkdir(slsDir, { recursive: true });
@@ -140,6 +200,26 @@ describe('LogRetentionService', () => {
       const result = await service.runCleanup();
 
       expect(result.deleted).toBe(1);
+    });
+
+    it('enforces the SLS failure total limit while preserving the active segment', async () => {
+      const slsDir = path.join(tmpDir, 'logs', 'sls-failed-logs');
+      await fs.mkdir(slsDir, { recursive: true });
+      const segmentSize = Math.floor(SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES / 3);
+      const sealed0 = path.join(slsDir, `activity-deadbeef00-0000-${today()}.jsonl`);
+      const sealed1 = path.join(slsDir, `activity-deadbeef00-0001-${today()}.jsonl`);
+      const active = path.join(slsDir, `activity-deadbeef00-0002-${today()}.jsonl`);
+      await writeSizedFile(sealed0, segmentSize);
+      await writeSizedFile(sealed1, segmentSize);
+      await writeSizedFile(active, segmentSize + 3);
+
+      const service = new LogRetentionService(tmpDir, makeConfig());
+      const result = await service.runCleanup();
+
+      expect(result.deleted).toBe(1);
+      expect(await fs.access(sealed0).then(() => true, () => false)).toBe(false);
+      expect(await fs.access(sealed1).then(() => true, () => false)).toBe(true);
+      expect(await fs.access(active).then(() => true, () => false)).toBe(true);
     });
 
     it('skips unrecognized subdirectories', async () => {

@@ -7,6 +7,7 @@ import { MetricsCollector } from './metrics-collector.js';
 import type { DataflowSnapshot, L1Metrics } from './metrics-collector.js';
 import type { AlarmManager } from './alarm-manager.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
+import type { ProcessLiveness } from '../utils/pid-utils.js';
 
 const logger = createLogger('MetricsWriter');
 
@@ -27,6 +28,7 @@ export interface MetricsWriterOptions {
   agentsConfig?: AgentsConfig;
   slsEndpoints?: SlsEndpoint[];
   cmsWorkspace?: string;
+  updaterLiveness?: (pidFile: string) => ProcessLiveness;
 }
 
 export class MetricsWriter {
@@ -51,6 +53,7 @@ export class MetricsWriter {
       canaryPolicy: opts.canaryPolicy,
       slsEndpoints: opts.slsEndpoints,
       cmsWorkspace: opts.cmsWorkspace,
+      updaterLiveness: opts.updaterLiveness,
     });
     this.getSnapshot = opts.getSnapshot;
     this.alarmManager = opts.alarmManager ?? null;

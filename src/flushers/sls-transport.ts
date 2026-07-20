@@ -1,6 +1,8 @@
 import { createLogger } from '../utils/logger.js';
-import { appendLine, ensureDir } from '../utils/fs-utils.js';
-import * as path from 'node:path';
+import {
+  SlsFailureLogWriter,
+  type SlsFailureLogInput,
+} from './sls-failure-log-writer.js';
 
 const logger = createLogger('SlsTransport');
 
@@ -33,6 +35,10 @@ export interface PostWebtrackingOptions {
   tags?: Record<string, string>;
   userAgent?: string;
 }
+
+export type PersistFailedLogContext = Omit<SlsFailureLogInput, 'endpoint' | 'error'>;
+
+const failedLogWriters = new Map<string, SlsFailureLogWriter>();
 
 export function splitForWebtracking(
   logs: Record<string, string>[],
@@ -169,19 +175,19 @@ async function postWebtrackingChunk(
 export async function persistFailedLogs(
   failedLogDir: string,
   name: string,
-  logGroup: unknown,
+  context: PersistFailedLogContext,
   err: unknown,
 ): Promise<void> {
-  await ensureDir(failedLogDir);
-  const fileName = `${name}.jsonl`;
-  const filePath = path.join(failedLogDir, fileName);
-  const line = JSON.stringify({
-    ts: Date.now(),
-    name,
-    logGroup,
-    error: String(err),
+  let writer = failedLogWriters.get(failedLogDir);
+  if (!writer) {
+    writer = new SlsFailureLogWriter(failedLogDir);
+    failedLogWriters.set(failedLogDir, writer);
+  }
+  await writer.write({
+    ...context,
+    endpoint: name,
+    error: err,
   });
-  await appendLine(filePath, line);
 }
 
 function sleep(ms: number): Promise<void> {

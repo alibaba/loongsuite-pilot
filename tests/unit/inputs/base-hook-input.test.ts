@@ -152,6 +152,127 @@ describe('BaseHookInput', () => {
       expect(entries).toHaveLength(1);
       expect(entries[0]!.filePath).toBe('/short.ts');
     });
+
+    it('should drain the stored previous-day file before reading today', async () => {
+      const today = getTodayDateString();
+      const previousDay = addDays(today, -1);
+      const previousFileName = `test-hook-${previousDay}.jsonl`;
+      const todayFileName = `test-hook-${today}.jsonl`;
+      const previousFile = path.join(tmpDir, previousFileName);
+      const todayFile = path.join(tmpDir, todayFileName);
+      const consumedLine = JSON.stringify({ file_path: '/already-read.ts' }) + '\n';
+      await fs.writeFile(previousFile, consumedLine + JSON.stringify({ file_path: '/late-previous.ts' }) + '\n');
+      await fs.writeFile(todayFile, JSON.stringify({ file_path: '/today.ts' }) + '\n');
+      stateStore.set('test-hook', {
+        lastFile: previousFileName,
+        lastOffset: Buffer.byteLength(consumedLine),
+      });
+
+      const entries: AgentActivityEntry[] = [];
+      input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+
+      await input.start();
+      await input.stop();
+
+      expect(entries.map(e => e.filePath)).toEqual(['/late-previous.ts', '/today.ts']);
+      const state = stateStore.get('test-hook');
+      expect(state.lastFile).toBe(todayFileName);
+      expect(state.extra?.hookLogOffsets).toEqual({
+        [previousFileName]: (await fs.stat(previousFile)).size,
+        [todayFileName]: (await fs.stat(todayFile)).size,
+      });
+    });
+
+    it('should not re-ingest history on cold start when only a previous-day file exists', async () => {
+      // Collector freshly installed (no prior state), the agent last ran
+      // "yesterday", and today's file does not exist yet because the
+      // collector's local date still lags the hook writer. Seeding the newest
+      // non-today file to 0 here would re-ingest a whole day of already-sent
+      // history — the cold-start seed must skip it instead.
+      const today = getTodayDateString();
+      const previousDay = addDays(today, -1);
+      const previousFileName = `test-hook-${previousDay}.jsonl`;
+      const previousFile = path.join(tmpDir, previousFileName);
+      await fs.writeFile(
+        previousFile,
+        JSON.stringify({ file_path: '/old-a.ts' }) + '\n' +
+        JSON.stringify({ file_path: '/old-b.ts' }) + '\n',
+      );
+
+      const entries: AgentActivityEntry[] = [];
+      input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+
+      await input.start();
+      await input.stop();
+
+      expect(entries).toHaveLength(0);
+      expect(stateStore.get('test-hook').extra?.hookLogOffsets).toEqual({
+        [previousFileName]: (await fs.stat(previousFile)).size,
+      });
+    });
+
+    it('should prune offsets for daily files that no longer exist on disk', async () => {
+      // A stale entry for a rotated-away file must not accumulate in state.
+      const today = getTodayDateString();
+      const stalePrevious = addDays(today, -30);
+      const staleFileName = `test-hook-${stalePrevious}.jsonl`;
+      const todayFileName = `test-hook-${today}.jsonl`;
+      const todayFile = path.join(tmpDir, todayFileName);
+      await fs.writeFile(todayFile, JSON.stringify({ file_path: '/today.ts' }) + '\n');
+      stateStore.set('test-hook', {
+        lastFile: todayFileName,
+        lastOffset: 0,
+        extra: {
+          hookLogOffsets: {
+            [staleFileName]: 999,
+            [todayFileName]: 0,
+          },
+        },
+      });
+
+      input.on('entries', () => {});
+      await input.start();
+      await input.stop();
+
+      const offsets = stateStore.get('test-hook').extra?.hookLogOffsets as Record<string, number>;
+      expect(offsets[staleFileName]).toBeUndefined();
+      expect(offsets[todayFileName]).toBe((await fs.stat(todayFile)).size);
+    });
+
+    it('should keep reading a recent timezone-lagged file after lastFile advances to today', async () => {
+      const today = getTodayDateString();
+      const previousDay = addDays(today, -1);
+      const previousFileName = `test-hook-${previousDay}.jsonl`;
+      const todayFileName = `test-hook-${today}.jsonl`;
+      const previousFile = path.join(tmpDir, previousFileName);
+      const todayFile = path.join(tmpDir, todayFileName);
+      const previousConsumed = JSON.stringify({ file_path: '/previous-consumed.ts' }) + '\n';
+      const todayConsumed = JSON.stringify({ file_path: '/today-consumed.ts' }) + '\n';
+      await fs.writeFile(previousFile, previousConsumed + JSON.stringify({ file_path: '/late-previous.ts' }) + '\n');
+      await fs.writeFile(todayFile, todayConsumed);
+      stateStore.set('test-hook', {
+        lastFile: todayFileName,
+        lastOffset: Buffer.byteLength(todayConsumed),
+        extra: {
+          hookLogOffsets: {
+            [previousFileName]: Buffer.byteLength(previousConsumed),
+            [todayFileName]: Buffer.byteLength(todayConsumed),
+          },
+        },
+      });
+
+      const entries: AgentActivityEntry[] = [];
+      input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+
+      await input.start();
+      await input.stop();
+
+      expect(entries.map(e => e.filePath)).toEqual(['/late-previous.ts']);
+      expect(stateStore.get('test-hook').extra?.hookLogOffsets).toEqual({
+        [previousFileName]: (await fs.stat(previousFile)).size,
+        [todayFileName]: (await fs.stat(todayFile)).size,
+      });
+    });
   });
 
   describe('transformRecord delegation', () => {
@@ -226,4 +347,10 @@ function getTodayDateString(): string {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+function addDays(dateString: string, days: number): string {
+  const d = new Date(`${dateString}T12:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
 }

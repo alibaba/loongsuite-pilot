@@ -1,7 +1,7 @@
 # 自动更新诊断排查指南
 
 本文档随 `loongsuite-pilot` 安装包一起分发，安装完成后自动写入
-`~/.loongsuite-pilot/skills/references/updater-diagnostics.md`，随 pilot 升级自动更新。
+`~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/updater-diagnostics.md`，随 pilot 升级自动更新。
 
 覆盖 **pilot 自动更新守护进程的排查**——版本不更新、更新失败、更新后服务异常、回滚等问题。
 
@@ -67,8 +67,20 @@ tail -30 ~/.loongsuite-pilot/logs/loongsuite-pilot-updater.log
 更新配置来自 `config.json` 的 `autoUpdate` 段 + 环境变量（环境变量优先）：
 
 ```bash
-# 查看 config.json 中的 autoUpdate 配置
-python3 -m json.tool ~/.loongsuite-pilot/config.json 2>/dev/null | grep -A 5 '"autoUpdate"'
+# 只输出 autoUpdate 相关字段，不打印完整 config.json
+python3 - <<'PY'
+import json
+import pathlib
+path = pathlib.Path.home() / '.loongsuite-pilot' / 'config.json'
+try:
+    cfg = json.loads(path.read_text())
+except Exception:
+    print('config.json 不存在或无法解析')
+    raise SystemExit(0)
+auto = cfg.get('autoUpdate') or {}
+for key in ('enabled', 'checkIntervalMs', 'manifestUrl', 'packageUrl'):
+    print(f'{key}:', auto.get(key, '(default)'))
+PY
 ```
 
 | 配置项 | 环境变量 | 默认值 | 说明 |

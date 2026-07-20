@@ -10,6 +10,7 @@ import { QoderApiInput } from './qoder-api-input.js';
 import { QoderApiSlsSender } from '../../flusher/qoder-api/qoder-api-sls-sender.js';
 import { createLogger, type BoundLogger } from '../../../utils/logger.js';
 import { persistFailedLogs } from '../../../flushers/sls-transport.js';
+import { estimateStringRecordBytes } from '../../../flushers/sls-failure-log-writer.js';
 
 const DEFAULT_INTERVAL_SECONDS = 300;
 const DEFAULT_BACKFILL_DAYS = 7;
@@ -160,16 +161,24 @@ export class QoderApiPipeline implements Pipeline {
         await this.input.confirmCycle();
       } else {
         // 4b. Buffer full — do NOT advance the window so data is re-collected
-        //     next cycle. Persist the dropped rows to failed-log for manual recovery.
+        //     next cycle. Persist only bounded failure metadata for diagnosis.
         this.logger.warn('sender buffer full, persisting rows to failed-log', {
           configName: this.config.configName,
           droppedRows: rows.length,
           bufferSize: this.sender.bufferSize(),
         });
+        const flusherConfig = this.config.flushers[0];
         await persistFailedLogs(
           this.failedLogDir,
           this.config.configName,
-          { __logs__: rows },
+          {
+            mode: 'webtracking',
+            project: flusherConfig.Project,
+            logstore: flusherConfig.Logstore,
+            kind: this.config.configName,
+            batchCount: rows.length,
+            batchBytes: estimateStringRecordBytes(rows),
+          },
           new Error('sender buffer full, window not advanced'),
         );
       }

@@ -514,6 +514,13 @@ export class Updater {
         shell: process.platform === 'win32',
       });
 
+      logger.info('checking sqlite3 runtime');
+      await execFileAsync(process.execPath, ['-e', "require('sqlite3')"], {
+        cwd: stagingDir,
+        env: childEnv,
+        timeout: 30_000,
+      });
+
       const postinstallScript = path.join(stagingDir, 'scripts', 'postinstall.js');
       if (await fs.access(postinstallScript).then(() => true).catch(() => false)) {
         try {
@@ -686,16 +693,25 @@ export class Updater {
     logger.info('restarting collector service');
     try {
       const bin = this.paths.loongsuitePilotBin;
+      let result: { stdout: string; stderr: string };
       if (process.platform === 'win32') {
-        await execFileAsync('powershell.exe', [
+        result = await execFileAsync('powershell.exe', [
           '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, 'restart-collector',
         ], { timeout: 30_000 });
       } else {
-        await execFileAsync(bin, ['restart-collector'], { timeout: 30_000 });
+        result = await execFileAsync(bin, ['restart-collector'], { timeout: 30_000 });
       }
+      const output = (result.stdout || '').trim();
+      if (output) logger.info('restart-collector output', { output });
       logger.info('collector restarted');
-    } catch (err) {
-      logger.warn('collector restart failed', { error: String(err) });
+    } catch (err: any) {
+      const stderr = err?.stderr?.trim?.() || '';
+      const stdout = err?.stdout?.trim?.() || '';
+      logger.warn('collector restart failed', {
+        error: String(err?.message || err),
+        stdout: stdout || undefined,
+        stderr: stderr || undefined,
+      });
     }
   }
 

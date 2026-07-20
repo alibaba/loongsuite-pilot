@@ -1,7 +1,7 @@
 # pilot 服务诊断排查指南
 
 本文档随 `loongsuite-pilot` 安装包一起分发，安装完成后自动写入
-`~/.loongsuite-pilot/skills/references/service-diagnostics.md`，随 pilot 升级自动更新。
+`~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/service-diagnostics.md`，随 pilot 升级自动更新。
 
 覆盖 **pilot 服务自身的运行状态排查**——服务启动失败、崩溃、Input 未注册、日志异常等问题。
 不覆盖单个 agent 的 hook/JSONL 链路问题（那些请查阅对应的 agent 分诊文档）。
@@ -67,17 +67,31 @@ grep -E '"tag":"(Orchestrator|HookWatchdog|LogRetention)"' \
 
 ## 第 2 步：Input 注册与 agent 发现状态
 
-pilot 注册 7 个 Input，每个 Input 对应一条数据采集链路：
+pilot 当前注册 21 个 Input，每个 Input 对应一条数据采集链路。部分新链路为 trace 聚合链路，启用后会自动压制同 agent 的旧 hook / sqlite / log fallback：
 
 | Input ID | agentType | 数据源 | 触发条件 |
 |----------|-----------|-------|---------|
-| `qoder-sqlite` | `qoder` | Qoder IDE SQLite | Qoder DB 文件存在 |
-| `qoder-work-hook` | `qoder-work` | Qoder Work hook JSONL | `~/.qoderwork/` 目录存在 |
-| `qoder-cli-hook` | `qoder-cli` | Qoder CLI hook JSONL | `~/.qoder/` 目录存在 |
-| `qoder-cli-session` | `qoder-cli` | Qoder CLI session segments | `~/.qoder/logs/sessions/` 目录存在 |
-| `cursor-hook` | `cursor` | Cursor hook JSONL | `~/.loongsuite-pilot/logs/cursor/history/` 目录存在 |
-| `claude-code-log` | `claude-code` | Claude Code OTel JSONL | 日志目录存在 |
-| `codex-log` | `codex` | Codex OTel JSONL | 日志目录存在 |
+| `qoder-sqlite` | `qoder` | Qoder IDE SQLite token usage | Qoder DB 文件存在，且 `qoder-trace` 未启用 |
+| `qoder-trace` | `qoder` / `qoder-cli` / `qoder-idea` | Qoder hook / session / SQLite trace 聚合 | `~/.loongsuite-pilot/logs/qoder/history/`、Qoder 本地数据或 `~/.qoder/shared_client/cache/db/local.db` 可用 |
+| `qoder-cli-hook` | `qoder-cli` | Qoder CLI hook JSONL | `~/.qoder/` 目录存在，且 `qoder-trace` 未启用 |
+| `qoder-cli-session` | `qoder-cli` | Qoder CLI session segments | `~/.qoder/logs/sessions/` 目录存在，且 `qoder-trace` 未启用 |
+| `qoder-cn` | `qoder-cn` | Qoder CN IDE history + ai_tracker | QoderCN 应用数据根目录存在，且 `qoder-cn-trace` 未启用 |
+| `qoder-cn-sqlite` | `qoder-cn` | Qoder CN SQLite token usage | QoderCN `SharedClientCache/cache/db/local.db` 存在，且 `qoder-cn-trace` 未启用 |
+| `qoder-cn-trace` | `qoder-cn` | Qoder CN hook / SQLite trace 聚合 | QoderCN history 或本地数据可用 |
+| `qoder-work-hook` | `qoder-work` | Qoder Work hook JSONL | `~/.qoderwork/` 目录存在，且 `qoder-work-trace` 未启用 |
+| `qoder-work-log` | `qoder-work` | Qoder Work SDK log tail | Qoder Work logs 目录存在，且 `qoder-work-trace` 未启用 |
+| `qoder-work-sqlite` | `qoder-work` | Qoder Work `data/agents.db` | Qoder Work `data/agents.db` 存在，且 `qoder-work-trace` 未启用 |
+| `qoder-work-trace` | `qoder-work` | Qoder Work SDK log + SQLite trace 聚合 | Qoder Work logs / data 可用 |
+| `qoder-work-cn-hook` | `qoder-work-cn` | Qoder Work CN hook JSONL | `~/.qoderworkcn/` 目录存在，且 `qoder-work-cn-trace` 未启用 |
+| `qoder-work-cn-log` | `qoder-work-cn` | Qoder Work CN SDK log tail | Qoder Work CN logs 目录存在，且 `qoder-work-cn-trace` 未启用 |
+| `qoder-work-cn-sqlite` | `qoder-work-cn` | Qoder Work CN `data/agents.db` | Qoder Work CN `data/agents.db` 存在，且 `qoder-work-cn-trace` 未启用 |
+| `qoder-work-cn-trace` | `qoder-work-cn` | Qoder Work CN SDK log + SQLite trace 聚合 | Qoder Work CN logs 目录存在 |
+| `cursor-hook` | `cursor` / `cursor-cli` | Cursor hook JSONL | `~/.loongsuite-pilot/logs/cursor/history/` 目录存在 |
+| `claude-code-log` | `claude-code` | Claude Code OTel JSONL | Claude Code log 目录存在 |
+| `codex-transcript` | `codex` | Codex transcript / aborted turn polling | `~/.codex/sessions/` 等 Codex 数据目录存在 |
+| `opencode-log` | `opencode` | OpenCode plugin JSONL | `~/.loongsuite-pilot/logs/opencode/` 目录存在 |
+| `qwen-code-cli-log` | `qwen-code-cli` | Qwen Code CLI hook JSONL | `~/.loongsuite-pilot/logs/qwen-code-cli/` 目录存在 |
+| `wukong` | `wukong` | `wukong-cli` CLI API polling | `~/.real/daemon.sock` 存在且 `wukong-cli service status` 为 running |
 
 AgentDiscoveryService 通过 fs.watch + 轮询检测 agent 是否可用，满足条件时自动启动对应 Input：
 
@@ -92,21 +106,36 @@ grep 'agent detected and started\|agent stopped' \
 - `config.json` 的 `listeners` 中对应 Input 被 `enabled: false` 关闭
 
 ```bash
-# 检查 config.json 中是否有显式禁用的 listener
-python3 -m json.tool ~/.loongsuite-pilot/config.json 2>/dev/null | grep -A 2 '"enabled"'
+# 只列出显式禁用的 listener，不打印完整 config.json
+python3 - <<'PY'
+import json
+import pathlib
+
+path = pathlib.Path.home() / '.loongsuite-pilot' / 'config.json'
+try:
+    cfg = json.loads(path.read_text())
+except Exception:
+    print('config.json 不存在或无法解析')
+    raise SystemExit(0)
+
+listeners = cfg.get('listeners') or {}
+disabled = [k for k, v in listeners.items() if isinstance(v, dict) and v.get('enabled') is False]
+print('disabled listeners:', ', '.join(disabled) if disabled else '(none)')
+PY
 ```
 
 ---
 
 ## 第 3 步：Flusher 初始化状态
 
-pilot 支持 3 种 Flusher，可同时启用多个：
+pilot 支持 4 种 Flusher，可同时启用多个：
 
 | Flusher | 配置位置 | 默认状态 |
 |---------|---------|---------|
 | **SLS** | `config.json` → `sls` 段 | 有合法 endpoint 时自动启用 |
 | **JSONL** | `config.json` → `jsonl` 段 | 默认启用，输出到 `~/.loongsuite-pilot/logs/output/` |
 | **HTTP** | `config.json` → `http` 段 | 需显式配置 URL 才启用 |
+| **OTLP Trace** | `config.json` → `otlpTrace` / `cms` 段 | 需显式配置 endpoint 或 CMS trace 配置才启用 |
 
 若所有 Flusher 都未启用，pilot 会自动创建 JSONL fallback：
 
@@ -115,9 +144,9 @@ pilot 支持 3 种 Flusher，可同时启用多个：
 grep -i 'flusher\|no flushers' ~/.loongsuite-pilot/logs/loongsuite-pilot-service.log | tail -10
 ```
 
-预期：至少看到一个 flusher 的启动日志。若看到 `no flushers enabled, using JSONL fallback`，说明 SLS 和 HTTP 都未配置，数据仅写本地 JSONL。
+预期：至少看到一个 flusher 的启动日志。若看到 `no flushers enabled, using JSONL fallback`，说明 SLS、HTTP 和 OTLP Trace 都未配置，数据仅写本地 JSONL。
 
-SLS Flusher 的详细排查请阅读 `sls-diagnostics.md`。
+SLS Flusher 的详细排查请阅读 `sls-diagnostics.md`。OTLP Trace 导出异常时，优先检查 `otlpTrace` / `cms` 配置、`logs/otlp-debug/` 与 `logs/otlp-failed/`。
 
 ---
 

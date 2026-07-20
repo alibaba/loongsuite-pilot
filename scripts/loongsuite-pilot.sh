@@ -17,6 +17,7 @@ UPDATER_LOG_FILE="$LOG_DIR/loongsuite-pilot-updater.log"
 MONITOR_LOG_FILE="$LOG_DIR/loongsuite-pilot-monitor-process.log"
 DASHBOARD_LOG_FILE="$LOG_DIR/loongsuite-pilot-dashboard.log"
 CONFIG_FILE="$DATA_DIR/config.json"
+SPAN_ATTR_FILE="$DATA_DIR/span-attributes.json"
 MONITOR_PID_FILE="$DATA_DIR/loongsuite-pilot-monitor.pid"
 DASHBOARD_PID_FILE="$DATA_DIR/loongsuite-pilot-dashboard.pid"
 MONITOR_DATA_DIR="$LOG_DIR/process-monitor"
@@ -33,17 +34,20 @@ validate_current_user() {
     whoami
 }
 
-check_sudo_access() {
+has_sudo_interactive() {
     [ "$(id -u)" -eq 0 ] && return 0
     if sudo -n true 2>/dev/null; then
         return 0
     elif sudo -v 2>/dev/null; then
         return 0
     else
-        echo "⚠️  No sudo access — cannot register system-level service." >&2
-        echo "   Falling back to user-level systemd service." >&2
         return 1
     fi
+}
+
+has_sudo_noninteractive() {
+    [ "$(id -u)" -eq 0 ] && return 0
+    sudo -n true 2>/dev/null
 }
 
 resolve_user_home() {
@@ -229,35 +233,41 @@ resolve_node() {
     return 1
 }
 
+_detect_system_level_init() {
+    if [ -d /run/systemd/system ] && command -v systemctl &>/dev/null; then
+        echo "systemd-system"
+    elif [ -d /etc/init.d ]; then
+        echo "initd"
+    else
+        echo "none"
+    fi
+}
+
 detect_init_system() {
-    local system_service="${1:-false}"
+    local interactive="${1:-true}"
 
     if [ -f "$INIT_TYPE_FILE" ]; then
         local saved
         saved=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
-        if [ -n "$saved" ]; then
-            echo "$saved"
-            return
-        fi
+        case "$saved" in
+            launchd|systemd-user|systemd-system|initd)
+                echo "$saved"
+                return
+                ;;
+        esac
     fi
     case "$(uname -s)" in
         Darwin) echo "launchd" ;;
         Linux)
-            if [ "$system_service" = "true" ]; then
-                if [ "$(id -u)" -ne 0 ] && ! check_sudo_access; then
-                    echo "systemd-user"
-                    return
-                fi
-                if [ -d /run/systemd/system ] && command -v systemctl &>/dev/null; then
-                    echo "systemd-system"
-                elif [ -d /etc/init.d ]; then
-                    echo "initd"
-                else
-                    echo "systemd-user"
-                fi
+            if [ "$(id -u)" -eq 0 ]; then
+                _detect_system_level_init
             else
                 if command -v systemctl &>/dev/null && systemctl --user show-environment &>/dev/null 2>&1; then
                     echo "systemd-user"
+                elif [ "$interactive" = "true" ] && has_sudo_interactive; then
+                    _detect_system_level_init
+                elif [ "$interactive" = "false" ] && has_sudo_noninteractive; then
+                    _detect_system_level_init
                 else
                     echo "none"
                 fi
@@ -276,7 +286,7 @@ enable_linger() {
     else
         echo "⚠️  Cannot enable linger (requires polkit policy or root privilege)." >&2
         echo "   Service may stop when you log out." >&2
-        echo "   To fix: run 'sudo loginctl enable-linger $user' or use --system-service." >&2
+        echo "   To fix: run 'sudo loginctl enable-linger $user'." >&2
         return 1
     fi
 }
@@ -389,10 +399,11 @@ cmd_run_updater() {
 # ---- User-facing commands ----
 
 cmd_start() {
-    local system_service="false"
     for arg in "$@"; do
         case "$arg" in
-            --system-service) system_service="true" ;;
+            --system-service)
+                echo "⚠️  --system-service is deprecated and ignored. Auto-detection is now the default." >&2
+                ;;
         esac
     done
 
@@ -404,51 +415,33 @@ cmd_start() {
     ensure_dirs
     sync_bootstrap_scripts
 
-    if autostart_install "$system_service" 2>/dev/null; then
+    if autostart_install "true"; then
         sleep 2
-        if is_managed_by_launchd || is_managed_by_systemd_user || is_managed_by_systemd_system || is_managed_by_initd; then
-            echo "✅ loongsuite-pilot started ($(detect_init_system))"
+        if is_running; then
+            local init_type
+            init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
+            echo "✅ loongsuite-pilot started ($init_type)"
             return 0
         fi
+        local init_type
+        init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
+        echo "⚠️  Service registered (${init_type:-unknown}) but collector process not found after 2s. Check logs: $LOG_FILE" >&2
+        echo "   Autostart is configured; the service manager will keep retrying." >&2
+        return 0
     fi
 
-    # Fallback to nohup
-    echo "⚠️  No service manager available — using nohup fallback." >&2
-    echo "   Service will NOT auto-start on boot or survive session logout." >&2
+    echo "❌ Failed to register system service." >&2
+    echo "   No supported init system could be configured." >&2
     case "$(uname -s)" in
         Linux)
-            echo "   To fix: use '--system-service' (requires sudo) or enable systemd user session." >&2
+            echo "   Tried: systemd-user, systemd-system, init.d" >&2
+            echo "   Possible causes:" >&2
+            echo "     - No systemd user session (XDG_RUNTIME_DIR not set)" >&2
+            echo "     - No sudo access for system-level service" >&2
+            echo "     - Container without init system or /etc/init.d" >&2
             ;;
     esac
-
-    local entry="$BOOTSTRAP_DIR/collector-daemon.js"
-    if [ ! -f "$entry" ]; then
-        echo "❌ Bootstrap script missing"
-        exit 1
-    fi
-
-    local node_bin
-    node_bin=$(resolve_node) || {
-        echo "❌ node runtime not found" >&2
-        exit 1
-    }
-
-    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-    nohup "$node_bin" "$entry" >> "$LOG_FILE" 2>&1 &
-    local pid=$!
-    echo "$pid" > "$PID_FILE"
-    echo "nohup" > "$INIT_TYPE_FILE"
-    echo "✅ loongsuite-pilot started (PID $pid, nohup)"
-
-    # Also start the updater daemon if available
-    local updater_entry="$BOOTSTRAP_DIR/updater-daemon.js"
-    if [ -f "$updater_entry" ]; then
-        if ! is_pid_file_running "$UPDATER_PID_FILE"; then
-            nohup "$node_bin" "$updater_entry" >> "$UPDATER_LOG_FILE" 2>&1 &
-            echo "$!" > "$UPDATER_PID_FILE"
-            echo "✅ loongsuite-pilot updater started (PID $!)"
-        fi
-    fi
+    exit 1
 }
 
 cmd_stop() {
@@ -664,21 +657,57 @@ cmd_restart_collector() {
             esac
             ;;
     esac
-    if [ "$_restarted" = false ]; then
-        local entry="$BOOTSTRAP_DIR/collector-daemon.js"
-        if [ ! -f "$entry" ]; then
-            echo "❌ Bootstrap script missing"
-            exit 1
+    if [ "$_restarted" = true ]; then
+        sleep 1
+        if ! is_running; then
+            echo "⚠️  service manager reported success but collector process not found"
+            _restarted=false
         fi
-        local node_bin
-        node_bin=$(resolve_node) || {
-            echo "❌ node runtime not found" >&2
-            exit 1
-        }
-        export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-        nohup "$node_bin" "$entry" >> "$LOG_FILE" 2>&1 &
-        echo "$!" > "$PID_FILE"
-        echo "✅ collector restarted (PID $!)"
+    fi
+    if [ "$_restarted" = false ]; then
+        # Self-healing: try to register a proper service for degraded (nohup/unknown) installs
+        case "$init_type" in
+            nohup|unknown|"")
+                local _new_init
+                _new_init=$(detect_init_system "false")
+                if [ "$_new_init" != "none" ]; then
+                    if autostart_install_collector_only "false" 2>>"$LOG_FILE"; then
+                        sleep 1
+                        if is_running; then
+                            echo "✅ collector self-healed: registered as $_new_init"
+                            _restarted=true
+                        else
+                            echo "⚠️  collector self-heal registered ($_new_init) but process not found" >&2
+                        fi
+                    fi
+                fi
+                if [ "$_restarted" = false ]; then
+                    local entry="$BOOTSTRAP_DIR/collector-daemon.js"
+                    if [ ! -f "$entry" ]; then
+                        echo "❌ Bootstrap script missing"
+                        exit 1
+                    fi
+                    local node_bin
+                    node_bin=$(resolve_node) || {
+                        echo "❌ node runtime not found" >&2
+                        exit 1
+                    }
+                    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+                    nohup "$node_bin" "$entry" >> "$LOG_FILE" 2>&1 &
+                    echo "$!" > "$PID_FILE"
+                    echo "⚠️  collector restarted (nohup fallback, self-heal failed)"
+                fi
+                ;;
+            *)
+                echo "❌ Service manager failed to restart collector (init_type=$init_type)" >&2
+                exit 1
+                ;;
+        esac
+    fi
+
+    if ! is_running; then
+        echo "❌ collector process not found after restart" >&2
+        exit 1
     fi
 
     # Schedule updater restart in a NEW process group so that
@@ -768,25 +797,49 @@ cmd_restart_updater() {
     if [ "$_restarted" = true ]; then
         sleep 1
         if ! updater_process_exists; then
-            echo "⚠️  service manager reported success but updater process not found, falling back to nohup"
+            echo "⚠️  service manager reported success but updater process not found"
             _restarted=false
         fi
     fi
     if [ "$_restarted" = false ]; then
-        local entry="$BOOTSTRAP_DIR/updater-daemon.js"
-        if [ ! -f "$entry" ]; then
-            echo "❌ Updater bootstrap script missing"
-            return 1
-        fi
-        local node_bin
-        node_bin=$(resolve_node) || {
-            echo "❌ node runtime not found" >&2
-            return 1
-        }
-        export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-        nohup "$node_bin" "$entry" >> "$UPDATER_LOG_FILE" 2>&1 &
-        echo "$!" > "$UPDATER_PID_FILE"
-        echo "✅ updater restarted (PID $!)"
+        # Self-healing: try to register a proper service for degraded installs
+        case "$init_type" in
+            nohup|unknown|"")
+                local _new_init
+                _new_init=$(detect_init_system "false")
+                if [ "$_new_init" != "none" ]; then
+                    if autostart_install_updater_only "false" 2>>"$UPDATER_LOG_FILE"; then
+                        sleep 1
+                        if updater_process_exists; then
+                            echo "✅ updater self-healed: registered as $_new_init"
+                            _restarted=true
+                        else
+                            echo "⚠️  updater self-heal registered ($_new_init) but process not found" >&2
+                        fi
+                    fi
+                fi
+                if [ "$_restarted" = false ]; then
+                    local entry="$BOOTSTRAP_DIR/updater-daemon.js"
+                    if [ ! -f "$entry" ]; then
+                        echo "❌ Updater bootstrap script missing"
+                        return 1
+                    fi
+                    local node_bin
+                    node_bin=$(resolve_node) || {
+                        echo "❌ node runtime not found" >&2
+                        return 1
+                    }
+                    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+                    nohup "$node_bin" "$entry" >> "$UPDATER_LOG_FILE" 2>&1 &
+                    echo "$!" > "$UPDATER_PID_FILE"
+                    echo "⚠️  updater restarted (nohup fallback, self-heal failed)"
+                fi
+                ;;
+            *)
+                echo "❌ Service manager failed to restart updater (init_type=$init_type)" >&2
+                return 1
+                ;;
+        esac
     fi
 
     if ! updater_process_exists; then
@@ -1460,16 +1513,91 @@ _unregister_initd_boot() {
     fi
 }
 
-autostart_install() {
-    local system_service="${1:-false}"
-
-    # Root users have no user session — auto-escalate to system-level
-    if [ "$(id -u)" -eq 0 ]; then
-        system_service="true"
-    fi
+autostart_install_collector_only() {
+    local interactive="${1:-true}"
 
     local init_system
-    init_system=$(detect_init_system "$system_service")
+    init_system=$(detect_init_system "$interactive")
+    local target_user
+    target_user=$(whoami)
+
+    case "$init_system" in
+        launchd)
+            launchctl unload -w "$LAUNCHD_PLIST" 2>/dev/null || true
+            _write_launchd_plist
+            launchctl load -w "$LAUNCHD_PLIST"
+            echo "launchd" > "$INIT_TYPE_FILE"
+            ;;
+        systemd-user)
+            _write_systemd_user_unit
+            systemctl --user daemon-reload &>/dev/null
+            systemctl --user enable --now loongsuite-pilot.service &>/dev/null
+            enable_linger || true
+            echo "systemd-user" > "$INIT_TYPE_FILE"
+            ;;
+        systemd-system)
+            _write_systemd_system_unit "$target_user"
+            sudo systemctl daemon-reload &>/dev/null
+            sudo systemctl enable --now "loongsuite-pilot-${target_user}.service" &>/dev/null
+            echo "systemd-system" > "$INIT_TYPE_FILE"
+            ;;
+        initd)
+            _write_initd_script "$target_user"
+            _register_initd_boot "loongsuite-pilot-${target_user}"
+            sudo "/etc/init.d/loongsuite-pilot-${target_user}" start &>/dev/null || true
+            echo "initd" > "$INIT_TYPE_FILE"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+autostart_install_updater_only() {
+    local interactive="${1:-true}"
+
+    local init_system
+    init_system=$(detect_init_system "$interactive")
+    local target_user
+    target_user=$(whoami)
+
+    case "$init_system" in
+        launchd)
+            launchctl unload -w "$UPDATER_PLIST" 2>/dev/null || true
+            _write_launchd_updater_plist
+            launchctl load -w "$UPDATER_PLIST"
+            echo "launchd" > "$INIT_TYPE_FILE"
+            ;;
+        systemd-user)
+            _write_systemd_user_updater_unit
+            systemctl --user daemon-reload &>/dev/null
+            systemctl --user enable --now loongsuite-pilot-updater.service &>/dev/null
+            enable_linger || true
+            echo "systemd-user" > "$INIT_TYPE_FILE"
+            ;;
+        systemd-system)
+            _write_systemd_system_updater_unit "$target_user"
+            sudo systemctl daemon-reload &>/dev/null
+            sudo systemctl enable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null
+            echo "systemd-system" > "$INIT_TYPE_FILE"
+            ;;
+        initd)
+            _write_initd_updater_script "$target_user"
+            _register_initd_boot "loongsuite-pilot-updater-${target_user}"
+            sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" start &>/dev/null || true
+            echo "initd" > "$INIT_TYPE_FILE"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+autostart_install() {
+    local interactive="${1:-true}"
+
+    local init_system
+    init_system=$(detect_init_system "$interactive")
     local target_user
     target_user=$(whoami)
 
@@ -1529,7 +1657,7 @@ autostart_install() {
 
 autostart_remove() {
     local init_system
-    init_system=$(detect_init_system)
+    init_system=$(detect_init_system "false")
     local target_user
     target_user=$(whoami)
 
@@ -1608,12 +1736,67 @@ autostart_status() {
                 echo "   autostart: disabled"
             fi
             ;;
-        nohup)
-            echo "   autostart: disabled (nohup fallback, no service manager)"
+        none)
+            echo "   autostart: not available"
             ;;
         *)
             echo "   autostart: not available"
             ;;
+    esac
+}
+
+# Manage ~/.loongsuite-pilot/span-attributes.json — user-defined attributes
+# injected into trace spans (not the event log). The collector re-reads the
+# file per turn, so changes take effect without a restart.
+_span_attr_run() {
+    local node_bin
+    node_bin=$(resolve_node) || { echo "[span-attr] node runtime not found" >&2; exit 1; }
+    "$node_bin" -e '
+const fs = require("fs");
+const file = process.argv[1], op = process.argv[2], key = process.argv[3], value = process.argv[4];
+const RESERVED = ["gen_ai.","git.","workspace.","event.","trace_","user.","cost_","agent.","time_unix_nano","observed_time_unix_nano"];
+const isReserved = k => RESERVED.some(p => k === p || k.indexOf(p) === 0);
+function read() { try { const o = JSON.parse(fs.readFileSync(file, "utf-8")); return (o && typeof o === "object" && !Array.isArray(o)) ? o : {}; } catch { return {}; } }
+function write(o) { const tmp = file + ".tmp"; fs.writeFileSync(tmp, JSON.stringify(o, null, 2) + "\n"); fs.renameSync(tmp, file); }
+if (op === "set") {
+  if (!key || value === undefined) { console.error("usage: span-attr set <key> <value>"); process.exit(1); }
+  if (isReserved(key)) { console.error("refused: \"" + key + "\" uses a reserved prefix (gen_ai./git./workspace./event./trace_/user./cost_/agent./...)"); process.exit(1); }
+  const o = read(); o[key] = String(value); write(o); console.log("set " + key + "=" + o[key]);
+} else if (op === "unset") {
+  if (!key) { console.error("usage: span-attr unset <key>"); process.exit(1); }
+  const o = read(); if (Object.prototype.hasOwnProperty.call(o, key)) { delete o[key]; write(o); console.log("unset " + key); } else { console.log("(no such key: " + key + ")"); }
+} else if (op === "list") {
+  const o = read(); const ks = Object.keys(o);
+  if (ks.length === 0) { console.log("(no custom span attributes)"); } else { for (const k of ks) console.log(k + "=" + o[k]); }
+}
+' "$SPAN_ATTR_FILE" "$@"
+}
+
+cmd_span_attr() {
+    local sub="${1:-}"
+    case "$sub" in
+        set)   shift; _span_attr_run set "$@" ;;
+        unset) shift; _span_attr_run unset "$@" ;;
+        list)  _span_attr_run list ;;
+        clear)
+            rm -f "$SPAN_ATTR_FILE"
+            echo "cleared custom span attributes ($SPAN_ATTR_FILE)"
+            ;;
+        ""|help|-h|--help)
+            echo "Usage: loongsuite-pilot span-attr <set|unset|list|clear>"
+            echo ""
+            echo "  set <key> <value>   Set a custom trace span attribute"
+            echo "  unset <key>         Remove a custom attribute"
+            echo "  list                Show current custom attributes"
+            echo "  clear               Remove all custom attributes"
+            echo ""
+            echo "Attributes are injected into trace spans only (not the event log)."
+            echo "Reserved-prefix keys (gen_ai./git./workspace./event./trace_/user./cost_/agent./...) are rejected."
+            echo "Changes take effect on the next turn — no restart needed." ;;
+        *)
+            echo "Unknown span-attr command: $sub" >&2
+            echo "Usage: loongsuite-pilot span-attr <set|unset|list|clear>" >&2
+            exit 1 ;;
     esac
 }
 
@@ -1627,14 +1810,12 @@ cmd_help() {
     echo "  status          Show service status (default)"
     echo "  info            Show version and config info"
     echo "  token-usage     Show token usage TUI"
+    echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     echo "  monitor start   Start process resource monitor"
     echo "  monitor stop    Stop process resource monitor"
     echo "  worker ...      Manage local remote-controlled workers"
     echo "  rollback        Roll back to the previous version"
     echo "  help            Show this help message"
-    echo ""
-    echo "Options:"
-    echo "  --system-service  Use system-level service registration (requires sudo)"
 }
 
 cmd_monitor() {
@@ -1658,6 +1839,7 @@ case "${1:-status}" in
     info)        cmd_info ;;
     token-usage) shift; cmd_token_usage "$@" ;;
     tokens)      shift; cmd_token_usage "$@" ;;
+    span-attr)   shift; cmd_span_attr "$@" ;;
     monitor)             cmd_monitor "${2:-}" ;;
     worker)              shift; cmd_worker "$@" ;;
     rollback)            cmd_rollback ;;

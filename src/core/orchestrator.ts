@@ -8,6 +8,7 @@ import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { detectAgent } from '../deployment/detect-utils.js';
+import { GlobalAttributesProvider } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion, cleanStaleTmpFiles } from '../utils/fs-utils.js';
 import * as path from 'node:path';
@@ -47,6 +48,7 @@ import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
 import { TraceLinker } from './upstream-link/trace-linker.js';
 import { AcpCorrelateRetentionService } from './upstream-link/acp-correlate-retention-service.js';
+import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
 import { PipelineManager } from '../pipeline/pipeline-manager.js';
@@ -110,6 +112,7 @@ export class Orchestrator extends EventEmitter {
   private flusher!: BaseFlusher;
   private logRetentionService!: LogRetentionService;
   private acpCorrelateRetentionService?: AcpCorrelateRetentionService;
+  private legacySlsFailedLogCleanupService: LegacySlsFailedLogCleanupService | null = null;
   private hookWatchdog!: HookWatchdog;
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
@@ -120,6 +123,7 @@ export class Orchestrator extends EventEmitter {
   private runtimeWriter: RuntimeWriter | null = null;
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
+  private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
 
   constructor(config: AnalyticsConfig) {
@@ -152,6 +156,10 @@ export class Orchestrator extends EventEmitter {
     await this.agentControlManager.load();
 
     // 3. Build flushers
+    this.globalAttributesProvider = new GlobalAttributesProvider(
+      this.config.globalSpanAttributes ?? {},
+      path.join(this.dataDir, 'span-attributes.json'),
+    );
     this.flusher = await this.buildFlusher();
 
     // 4. Build InputManager & AlarmManager
@@ -291,6 +299,9 @@ export class Orchestrator extends EventEmitter {
     logger.info('orchestrator started', {
       inputs: detectionEntries.length,
     });
+
+    this.legacySlsFailedLogCleanupService = new LegacySlsFailedLogCleanupService(this.dataDir);
+    this.legacySlsFailedLogCleanupService.start();
   }
 
   async stop(): Promise<void> {
@@ -305,6 +316,8 @@ export class Orchestrator extends EventEmitter {
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
     this.hookWatchdog?.stop();
+    this.legacySlsFailedLogCleanupService?.stop();
+    this.legacySlsFailedLogCleanupService = null;
     this.logRetentionService?.stop();
     this.acpCorrelateRetentionService?.stop();
     await this.localWorkerActivationService?.stop();
@@ -471,15 +484,19 @@ export class Orchestrator extends EventEmitter {
       flushers.push(r);
     }
 
-    const otlpTraceCfg = buildOtlpTraceConfig(this.config);
-    if (otlpTraceCfg?.enabled) {
-      try {
+    try {
+      const otlpTraceCfg = buildOtlpTraceConfig(this.config);
+      if (otlpTraceCfg?.enabled && otlpTraceCfg.endpoints.length > 0) {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
-        const r = new OtlpTraceFlusher({ ...otlpTraceCfg, dataDir: this.dataDir });
+        const r = new OtlpTraceFlusher(
+          { ...otlpTraceCfg, dataDir: this.dataDir },
+          this.globalAttributesProvider,
+        );
         flushers.push(r);
-      } catch (err) {
-        logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
       }
+    } catch (err) {
+      // Never let a malformed trace config take down the other flushers.
+      logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
     }
 
     if (flushers.length === 0) {
@@ -779,7 +796,7 @@ export class Orchestrator extends EventEmitter {
       this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-cn-trace']) &&
       this.agentControlManager.resolveEnabled(
         'qoder-work-cn-trace',
-        listenerCfg['qoder-work-cn-trace']?.enabled ?? false,
+        listenerCfg['qoder-work-cn-trace']?.enabled ?? true,
       );
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkCNTraceInput, {

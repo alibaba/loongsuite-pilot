@@ -96,7 +96,8 @@ describe('applyL1Defaults', () => {
     expect(env.E2E_CODEX_MODEL).toBe('qwen3.6-plus');
     expect(env.E2E_PROPAGATE_SLS_INSTALL).toBe('1');
     expect(env.E2E_JSONL_VALIDATE).toBe('1');
-    expect(env.E2E_REQUIRED_JSONL_AGENTS).toBe('claude-code,codex,qoder');
+    expect(env.E2E_REQUIRED_DEPLOY_AGENTS).toBe('claude-code,codex,qoder,cursor,qwen-code-cli,opencode');
+    expect(env.E2E_REQUIRED_JSONL_AGENTS).toBe('claude-code,codex,qoder-cli,qwen-code-cli,opencode');
     expect(env.E2E_SLS_ENDPOINT).toBe('cn-hangzhou.log.aliyuncs.com');
   });
 
@@ -120,10 +121,13 @@ describe('applyL1Defaults', () => {
     expect(env.E2E_CLAUDE_BAILIAN_MODEL).toBe('qwen2.5-plus');
   });
 
-  it('sets E2E_PROBE_SKIP_AGENTS=cursor by default (L1 skips cursor probe)', () => {
+  it('does not skip cursor by default (cursor is still deployed/probed for detection + auth, even though cursor-cli is excluded from JSONL coverage)', () => {
     const env = { E2E_USER_ID: 'emp-1', E2E_ANTHROPIC_API_KEY: 'sk' };
     applyL1Defaults(env);
-    expect(env.E2E_PROBE_SKIP_AGENTS).toBe('cursor');
+    expect(env.E2E_PROBE_SKIP_AGENTS).toBeUndefined();
+    // cursor-cli intentionally NOT required for JSONL: headless `cursor-agent -p` doesn't fire the
+    // beforeSubmitPrompt/afterAgentResponse/stop hooks the assembler needs.
+    expect(env.E2E_REQUIRED_JSONL_AGENTS).not.toContain('cursor-cli');
   });
 
   it('respects user-set E2E_PROBE_SKIP_AGENTS', () => {

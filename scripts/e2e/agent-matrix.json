@@ -1,0 +1,81 @@
+{
+  "description": "Remote/L1 E2E CLI agent matrix. L1 treats qoder-cli as the CLI identity; qoder is reserved for IDE-side coverage. npmPackage is used by E2E_SCENARIO=version-matrix. Cursor has platform-specific install/skip behavior. Qwen/OpenCode default probes are best-effort and can be overridden with E2E_QWEN_PROBE_CMD / E2E_OPENCODE_PROBE_CMD.",
+  "agents": [
+    {
+      "id": "codex-cli-latest",
+      "name": "Codex CLI",
+      "binary": "codex",
+      "versionArg": "--version",
+      "slsAgentTypeHint": "codex",
+      "notes": "OpenAI Codex CLI; hooks from loongsuite-pilot installer. Ensure command is built in agent-matrix.mjs from E2E_CODEX_NPM_SPEC (default @openai/codex). E2E_CODEX_FORCE_ENSURE=1 reinstalls even if codex exists. Config: E2E_WRITE_REMOTE_CODEX_CONFIG=1 + E2E_CODEX_OPENAI_API_KEY; run-remote-e2e writes ~/.codex/config.toml then runs ensure then probe.",
+      "npmPackage": "@openai/codex",
+      "representativeVersions": ["latest", "rolling"],
+      "ensureInstallSh": "npm install -g @openai/codex || echo '[e2e-ensure] npm install @openai/codex failed'",
+      "defaultProbeSh": "command -v codex >/dev/null && codex exec \"你好\" --skip-git-repo-check < /dev/null || true",
+      "installHint": "Use E2E_USE_MATRIX_PROBE=1; codex exec must use < /dev/null."
+    },
+    {
+      "id": "claude-code-cli",
+      "name": "Claude Code",
+      "binary": "claude",
+      "versionArg": "--version",
+      "slsAgentTypeHint": "claude-code",
+      "npmPackage": "@anthropic-ai/claude-code",
+      "representativeVersions": ["latest"],
+      "ensureInstallSh": "npm install -g @anthropic-ai/claude-code || echo '[e2e-ensure] npm install claude-code failed'",
+      "defaultProbeSh": "command -v claude >/dev/null && claude -p \"你好\" --dangerously-skip-permissions || true",
+      "installHint": "Headless: E2E_WRITE_REMOTE_CLAUDE_ONBOARDING_SKIP=1 + E2E_CLAUDE_BAILIAN=1 + E2E_CLAUDE_BAILIAN_API_KEY (…/apps/anthropic). Optional: E2E_WRITE_REMOTE_CLAUDE_PROXY_CONFIG + E2E_CLAUDE_PROXY_API_KEY for claude-code-proxy. Legacy: E2E_ANTHROPIC_API_KEY."
+    },
+    {
+      "id": "cursor-cli",
+      "name": "Cursor CLI",
+      "binary": "cursor",
+      "versionArg": "--version",
+      "slsAgentTypeHint": "cursor-cli",
+      "notes": "Default ensure: official cursor.com/install (Agent CLI). E2E_CURSOR_INSTALL_STRATEGY=watzon for watzon AppImage extract. Probe runs --version on AppImage / PATH cursor / cursor-agent / agent; if the binary fails with GLIBC_/not found, it emits '[e2e-probe] cursor skipped: host glibc too old' and exits 0 when E2E_CURSOR_SKIP_IF_INCOMPAT=1 (default), or exit 78 when =0.",
+      "representativeVersions": ["latest"],
+      "ensureInstallSh": "",
+      "defaultProbeSh": "set +e\n_SKIP=\"${_E2E_CURSOR_SKIP_IF_INCOMPAT:-1}\"\n_FAIL_CODE=78\n_BIN=\"\"\nfor _c in cursor cursor-agent agent; do\n  if command -v \"$_c\" >/dev/null 2>&1; then _BIN=\"$(command -v \"$_c\")\"; break; fi\ndone\n[ -z \"$_BIN\" ] && { echo \"[e2e-probe] no cursor/agent on PATH\"; exit 0; }\n_out=$(\"$_BIN\" --version </dev/null 2>&1); _rc=$?\nif [ \"$_rc\" -ne 0 ]; then\n  case \"$_out\" in *GLIBC_*|*\"not found\"*|*\"cannot execute\"*) echo \"[e2e-probe] cursor skipped: host glibc too old\"; [ \"$_SKIP\" = \"1\" ] && exit 0 || exit $_FAIL_CODE;; esac\n  echo \"[e2e-probe] cursor --version failed: $_out\"; [ \"$_SKIP\" = \"1\" ] && exit 0 || exit $_FAIL_CODE\nfi\necho \"[e2e-probe] cursor version: $_out\"\nif [ -z \"${CURSOR_API_KEY:-}\" ]; then\n  echo \"[e2e-probe] CURSOR_API_KEY unset — skipping conversation probe\"\n  exit 0\nfi\necho \"[e2e-probe] cursor conversation probe:\"\n\"$_BIN\" -p \"你好\" --trust </dev/null || true",
+      "installHint": "Default: official Agent installer (cursor.com/install). Full IDE AppImage: E2E_CURSOR_INSTALL_STRATEGY=watzon or E2E_CURSOR_ENSURE_INSTALL_SH. On old-glibc hosts, ensure/probe auto-skip with E2E_CURSOR_SKIP_IF_INCOMPAT=1 (default) or fail loudly with =0."
+    },
+    {
+      "id": "qoder-cli",
+      "name": "Qoder CLI",
+      "binary": "qoder",
+      "versionArg": "--version",
+      "slsAgentTypeHint": "qoder-cli",
+      "notes": "L1 CLI identity is qoder-cli. Hook input watches ~/.loongsuite-pilot/logs/qoder/history and qoder-cli-session reads ~/.qoder/logs/sessions. Print probe uses qodercli/qoder (needs E2E_QODER_PERSONAL_ACCESS_TOKEN).",
+      "npmPackage": "@qoder-ai/qodercli",
+      "representativeVersions": ["latest"],
+      "ensureInstallSh": "npm install -g @qoder-ai/qodercli && mkdir -p \"$HOME/.local/bin\" && ( command -v qoder >/dev/null || ( command -v qodercli >/dev/null && ln -sf \"$(command -v qodercli)\" \"$HOME/.local/bin/qoder\" ) ) || echo '[e2e-ensure] qoder npm/symlink failed'",
+      "defaultProbeSh": "Q=\"$(command -v qodercli 2>/dev/null || command -v qoder 2>/dev/null)\"\n[ -z \"$Q\" ] && exit 0\nmkdir -p \"$HOME/.qoder\"\nif [ -z \"${QODER_PERSONAL_ACCESS_TOKEN:-}\" ]; then\n  echo \"[e2e-probe] QODER_PERSONAL_ACCESS_TOKEN unset — set E2E_QODER_PERSONAL_ACCESS_TOKEN on local env to inject for qodercli\"\n  exit 0\nfi\n_VER_RAW=\"$(\"$Q\" --version 2>&1 | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -1)\"\n_MAJ=\"${_VER_RAW%%.*}\"\n_REST=\"${_VER_RAW#*.}\"\n_MIN=\"${_REST%%.*}\"\n_PATCH=\"${_REST##*.}\"\n_IS_NEW=0\nif [ \"${_MAJ:-0}\" -gt 0 ] 2>/dev/null; then _IS_NEW=1\nelif [ \"${_MAJ:-0}\" = \"0\" ] && [ \"${_MIN:-0}\" -gt 2 ] 2>/dev/null; then _IS_NEW=1\nelif [ \"${_MAJ:-0}\" = \"0\" ] && [ \"${_MIN:-0}\" = \"2\" ] && [ \"${_PATCH:-0}\" -ge 12 ] 2>/dev/null; then _IS_NEW=1\nfi\nif [ \"$_IS_NEW\" = \"1\" ]; then\n  \"$Q\" --print --yolo --cwd \"$HOME\" \"你好\" </dev/null || true\nelse\n  \"$Q\" -p \"你好\" --max-turns 1 --yolo -w \"$HOME\" </dev/null || true\nfi",
+      "installHint": "Logstore needs a real model turn. Use PAT via E2E_QODER_PERSONAL_ACCESS_TOKEN."
+    },
+    {
+      "id": "qwen-code-cli",
+      "name": "Qwen Code CLI",
+      "binary": "qwen",
+      "versionArg": "--version",
+      "slsAgentTypeHint": "qwen-code-cli",
+      "notes": "Hook integration via ~/.qwen/settings.json. Default package can be overridden with E2E_QWEN_NPM_SPEC. Conversation probe can be overridden with E2E_QWEN_PROBE_CMD.",
+      "npmPackage": "@qwen-code/qwen-code",
+      "representativeVersions": ["latest"],
+      "ensureInstallSh": "npm install -g \"${E2E_QWEN_NPM_SPEC:-@qwen-code/qwen-code}\" || echo '[e2e-ensure] npm install qwen-code-cli failed; set E2E_QWEN_NPM_SPEC or E2E_EXTRA_ENSURE_BASH'",
+      "defaultProbeSh": "set +e\nif ! command -v qwen >/dev/null 2>&1; then echo '[e2e-probe] qwen missing'; exit 0; fi\nqwen --version </dev/null || true\nif [ -n \"${E2E_QWEN_PROBE_CMD:-}\" ]; then echo '[e2e-probe] qwen custom probe'; eval \"$E2E_QWEN_PROBE_CMD\" || true; exit 0; fi\n_KEY=\"${QWEN_API_KEY:-${DASHSCOPE_API_KEY:-${OPENAI_API_KEY:-}}}\"\n_BASE=\"${QWEN_BASE_URL:-${OPENAI_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}}\"\n_MODEL=\"${E2E_QWEN_MODEL:-qwen3-coder-plus}\"\nif [ -z \"$_KEY\" ]; then echo '[e2e-probe] QWEN_API_KEY/DASHSCOPE_API_KEY/OPENAI_API_KEY unset — skipping qwen conversation probe'; exit 0; fi\nexport OPENAI_API_KEY=\"$_KEY\"; qwen --auth-type openai --openai-api-key \"$_KEY\" --openai-base-url \"$_BASE\" -m \"$_MODEL\" -p \"你好\" </dev/null || true",
+      "installHint": "Set E2E_QWEN_API_KEY or E2E_DASHSCOPE_API_KEY for a real model turn; override command with E2E_QWEN_PROBE_CMD if this CLI version uses different flags."
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "binary": "opencode",
+      "versionArg": "--version",
+      "slsAgentTypeHint": "opencode",
+      "notes": "Plugin-inject integration. Default package can be overridden with E2E_OPENCODE_NPM_SPEC. Conversation probe can be overridden with E2E_OPENCODE_PROBE_CMD.",
+      "npmPackage": "opencode-ai",
+      "representativeVersions": ["latest"],
+      "ensureInstallSh": "npm install -g \"${E2E_OPENCODE_NPM_SPEC:-opencode-ai}\" || echo '[e2e-ensure] npm install opencode failed; set E2E_OPENCODE_NPM_SPEC or E2E_EXTRA_ENSURE_BASH'",
+      "defaultProbeSh": "set +e\nif ! command -v opencode >/dev/null 2>&1; then echo '[e2e-probe] opencode missing'; exit 0; fi\nopencode --version </dev/null || true\nif [ -n \"${E2E_OPENCODE_PROBE_CMD:-}\" ]; then echo '[e2e-probe] opencode custom probe'; eval \"$E2E_OPENCODE_PROBE_CMD\" || true; exit 0; fi\nif [ -z \"${OPENCODE_API_KEY:-}\" ]; then echo '[e2e-probe] OPENCODE_API_KEY unset — skipping opencode conversation probe (set E2E_OPENCODE_API_KEY; do NOT reuse the 百炼 key)'; exit 0; fi\n# Prevent the globally-injected 百炼 ANTHROPIC_* (for Claude Code) from hijacking OpenCode's provider.\nunset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_MODEL\nif [ -n \"${E2E_OPENCODE_MODEL:-}\" ]; then opencode run -m \"$E2E_OPENCODE_MODEL\" \"你好\" </dev/null || opencode run \"你好\" </dev/null || true; else opencode run \"你好\" </dev/null || opencode \"你好\" </dev/null || true; fi",
+      "installHint": "OpenCode uses an OpenCode Zen key (E2E_OPENCODE_API_KEY, from opencode.ai/workspace; NOT the 百炼/Dashscope key). Zen resolves its gateway endpoint from models.dev — no base URL needed. Model = opencode/<model> via E2E_OPENCODE_MODEL (default opencode/big-pickle, free). Override the whole command with E2E_OPENCODE_PROBE_CMD if the installed OpenCode version differs."
+    }
+  ]
+}

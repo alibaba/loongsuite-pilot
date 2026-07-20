@@ -1,11 +1,12 @@
 import { execFile } from 'node:child_process';
-import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { readJsonFile } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
+import { checkProcessLiveness, UPDATER_PROCESS_PATTERNS } from '../utils/pid-utils.js';
+import type { ProcessLiveness } from '../utils/pid-utils.js';
 import { updaterRuntimePath, type UpdaterRuntimeState } from '../updater/runtime-state.js';
 
 const execFileAsync = promisify(execFile);
@@ -56,6 +57,7 @@ export interface UpdaterWatchdogOptions {
   sleepWakeGraceMs?: number;
   restartCooldownMs?: number;
   alarmManager?: AlarmManager;
+  updaterLiveness?: (pidFile: string) => ProcessLiveness;
 }
 
 /**
@@ -75,6 +77,7 @@ export class UpdaterWatchdog {
   private readonly sleepWakeGraceMs: number;
   private readonly restartCooldownMs: number;
   private readonly alarmManager: AlarmManager | null;
+  private readonly updaterLiveness: (pidFile: string) => ProcessLiveness;
   private timer: ReturnType<typeof setInterval> | null = null;
   private startedAt = Date.now();
   private lastTickAt = 0;
@@ -91,6 +94,8 @@ export class UpdaterWatchdog {
     this.sleepWakeGraceMs = opts.sleepWakeGraceMs ?? DEFAULT_SLEEP_WAKE_GRACE_MS;
     this.restartCooldownMs = opts.restartCooldownMs ?? DEFAULT_RESTART_COOLDOWN_MS;
     this.alarmManager = opts.alarmManager ?? null;
+    this.updaterLiveness = opts.updaterLiveness
+      ?? ((pidFile: string) => checkProcessLiveness(pidFile, UPDATER_PROCESS_PATTERNS));
   }
 
   start(): void {
@@ -148,7 +153,7 @@ export class UpdaterWatchdog {
       return this.restart('missing-heartbeat', reason);
     }
 
-    if (heartbeat.pid !== processState.pid && process.platform !== 'win32') {
+    if (processState.pid !== undefined && heartbeat.pid !== processState.pid && process.platform !== 'win32') {
       const reason = `updater heartbeat pid ${heartbeat.pid} does not match running pid ${processState.pid}`;
       if (this.inGraceWindow(now)) return { status: 'grace', reason };
       this.recordFailureAlarm(reason);
@@ -173,107 +178,25 @@ export class UpdaterWatchdog {
     reason: string;
   }> {
     const pidFile = path.join(this.dataDir, 'loongsuite-pilot-updater.pid');
-    let pid: number;
-    try {
-      const raw = await fs.readFile(pidFile, 'utf-8');
-      pid = Number(raw.trim());
-    } catch {
-      if (process.platform === 'win32') {
-        return this.findWindowsUpdaterProcess('updater pid file is missing');
+    const liveness = this.updaterLiveness(pidFile);
+    if (!liveness.running) {
+      if (liveness.pid !== undefined && liveness.pidFileProcessAlive && liveness.pidFileCommandMatched === false) {
+        return {
+          running: true,
+          pid: liveness.pid,
+          commandOk: false,
+          reason: `unexpected updater command: ${liveness.pidFileCommand || 'unknown'}`,
+        };
       }
-      return { running: false, reason: 'updater pid file is missing' };
+      return { running: false, pid: liveness.pid, reason: liveness.reason };
     }
 
-    if (!Number.isInteger(pid) || pid <= 0) {
-      if (process.platform === 'win32') {
-        return this.findWindowsUpdaterProcess('updater pid file is invalid');
-      }
-      return { running: false, reason: 'updater pid file is invalid' };
-    }
-
-    try {
-      process.kill(pid, 0);
-    } catch {
-      if (process.platform === 'win32') {
-        return this.findWindowsUpdaterProcess(`updater process ${pid} is not running`);
-      }
-      return { running: false, pid, reason: `updater process ${pid} is not running` };
-    }
-
-    const command = await this.readProcessCommand(pid).catch(() => '');
-    const commandOk = this.isUpdaterCommand(command);
     return {
       running: true,
-      pid,
-      commandOk,
-      reason: commandOk ? 'updater process is running' : `unexpected updater command: ${command || 'unknown'}`,
+      pid: liveness.pid,
+      commandOk: true,
+      reason: liveness.reason,
     };
-  }
-
-  private async readProcessCommand(pid: number): Promise<string> {
-    if (process.platform === 'win32') {
-      const script = `Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" | Select-Object -ExpandProperty CommandLine`;
-      const { stdout } = await execFileAsync('powershell.exe', [
-        '-NoProfile',
-        '-WindowStyle',
-        'Hidden',
-        '-Command',
-        script,
-      ], {
-        timeout: 5_000,
-        windowsHide: true,
-      });
-      return String(stdout).trim();
-    }
-
-    const { stdout } = await execFileAsync('ps', ['-p', String(pid), '-o', 'command='], {
-      timeout: 5_000,
-    });
-    return String(stdout).trim();
-  }
-
-  private async findWindowsUpdaterProcess(fallbackReason: string): Promise<{
-    running: boolean;
-    pid?: number;
-    commandOk?: boolean;
-    reason: string;
-  }> {
-    try {
-      const script = '$p = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*updater-daemon*" } | Select-Object -First 1; if ($p) { "$($p.ProcessId)`t$($p.CommandLine)" }';
-      const { stdout } = await execFileAsync('powershell.exe', [
-        '-NoProfile',
-        '-WindowStyle',
-        'Hidden',
-        '-Command',
-        script,
-      ], {
-        timeout: 8_000,
-        windowsHide: true,
-      });
-      const [pidRaw, command = ''] = String(stdout).trim().split(/\t/, 2);
-      const pid = Number(pidRaw);
-      if (!Number.isInteger(pid) || pid <= 0) {
-        return { running: false, reason: fallbackReason };
-      }
-      const commandOk = this.isUpdaterCommand(command);
-      return {
-        running: true,
-        pid,
-        commandOk,
-        reason: commandOk ? 'updater process is running' : `unexpected updater command: ${command || 'unknown'}`,
-      };
-    } catch {
-      return { running: false, reason: fallbackReason };
-    }
-  }
-
-  private isUpdaterCommand(command: string): boolean {
-    return command.includes('updater-daemon.js')
-      || command.includes('/bin/updater-daemon')
-      || command.includes('\\bin\\updater-daemon')
-      || command.includes('loongsuite-pilot run-updater')
-      || command.includes('loongsuite-pilot.ps1')
-      || command.includes('dist/updater/index.js');
   }
 
   private inGraceWindow(now: number): boolean {

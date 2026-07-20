@@ -25,6 +25,7 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Claude Code | Hook | Yes | Yes | Yes | Yes |
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
+| Kiro CLI | Hook / local session polling | Yes | Yes | No | Yes |
 | OpenCode | Plugin injection | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | Yes | Yes | Yes | Yes |
@@ -82,7 +83,7 @@ Important files and directories:
 | `plugins/` | Installed plugin assets. |
 | `logs/output/` | Local normalized JSONL output. |
 | `logs/input-state.json` | Input offsets and checkpoints. |
-| `sls-failed-logs/` | SLS upload failures persisted for diagnosis. |
+| `logs/sls-failed-logs/` | Bounded SLS failure metadata for diagnosis; no failed payloads. |
 | `versions/` and `current` | Versioned runtime layout used for updates and rollback. |
 
 ## Where To Go Next

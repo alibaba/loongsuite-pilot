@@ -934,6 +934,181 @@ describe('WukongInput', () => {
     expect(toolResult!['gen_ai.tool.call.duration']).toBe(200);
   });
 
+  it('maps FILE_READ, SEARCH, DIRECTORY_LIST, SKILL, ARTIFACT, and FILE_WRITE activity snapshots to canonical fields', async () => {
+    const activityMessages = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-activity-2',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-act-2', threadId: 'sess-1', timestamp: 1779240560000 },
+          {
+            type: 'ACTIVITY_SNAPSHOT', activityType: 'FILE_READ', timestamp: 1779240560100,
+            content: {
+              path: '/repo/src/index.ts', content: 'export const a = 1;', snippet: 'export const a = 1;',
+              total_lines: 1, status: 'success', start_time: 1779240560100, finish_time: 1779240560200,
+            },
+          },
+          {
+            type: 'ACTIVITY_SNAPSHOT', activityType: 'SEARCH', timestamp: 1779240560300,
+            content: {
+              queries: ['loongsuite pilot'], search_type: 'web', results: [{ title: 'result-1' }],
+              status: 'success', start_time: 1779240560300, finish_time: 1779240560400,
+            },
+          },
+          {
+            type: 'ACTIVITY_SNAPSHOT', activityType: 'DIRECTORY_LIST', timestamp: 1779240560500,
+            content: {
+              path: '/repo/src', files: ['index.ts', 'utils.ts'], total_count: 2,
+              status: 'success', start_time: 1779240560500, finish_time: 1779240560600,
+            },
+          },
+          {
+            type: 'ACTIVITY_SNAPSHOT', activityType: 'SKILL', timestamp: 1779240560700,
+            content: {
+              skill_name: 'search_skills', purpose: 'find relevant skill', output: 'skill-output',
+              status: 'success', start_time: 1779240560700, finish_time: 1779240560800,
+            },
+          },
+          {
+            type: 'ACTIVITY_SNAPSHOT', activityType: 'ARTIFACT', timestamp: 1779240560900,
+            content: {
+              artifactsMetadata: [{ id: 'artifact-1', name: 'report.md' }], generatedAt: 1779240560900,
+              start_time: 1779240560900, finish_time: 1779240561000,
+            },
+          },
+          {
+            type: 'ACTIVITY_SNAPSHOT', activityType: 'FILE_WRITE', timestamp: 1779240561100,
+            content: {
+              file_path: '/repo/src/new-file.ts', status: 'done',
+              start_time: 1779240561100, finish_time: 1779240561200,
+            },
+          },
+          { type: 'TEXT_MESSAGE_CONTENT', delta: 'Done.', messageId: 'text-2', timestamp: 1779240561300 },
+          { type: 'USAGE', prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, timestamp: 1779240561400 },
+          { type: 'RUN_FINISHED', runId: 'run-act-2', threadId: 'sess-1', timestamp: 1779240561400 },
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: activityMessages }),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const toolCallByName = (name: string) => entries.find(e => e['event.name'] === 'tool.call' && e['gen_ai.tool.name'] === name);
+    const toolResultByName = (name: string) => entries.find(e => e['event.name'] === 'tool.result' && e['gen_ai.tool.name'] === name);
+
+    const fileReadCall = toolCallByName('file_read');
+    expect(fileReadCall!['gen_ai.tool.call.arguments']).toEqual({ path: '/repo/src/index.ts' });
+    const fileReadResult = toolResultByName('file_read');
+    expect(fileReadResult!['gen_ai.tool.call.result']).toEqual({
+      content: 'export const a = 1;', snippet: 'export const a = 1;', total_lines: 1, status: 'success',
+    });
+
+    const searchCall = toolCallByName('search');
+    expect(searchCall!['gen_ai.tool.call.arguments']).toEqual({ queries: ['loongsuite pilot'], search_type: 'web' });
+    const searchResult = toolResultByName('search');
+    expect(searchResult!['gen_ai.tool.call.result']).toEqual({ results: [{ title: 'result-1' }], status: 'success' });
+
+    const dirListResult = toolResultByName('directory_list');
+    expect(dirListResult!['gen_ai.tool.call.result']).toEqual({ files: ['index.ts', 'utils.ts'], total_count: 2, status: 'success' });
+
+    const skillCall = toolCallByName('skill');
+    expect(skillCall!['gen_ai.tool.call.arguments']).toEqual({ skill_name: 'search_skills', purpose: 'find relevant skill' });
+    const skillResult = toolResultByName('skill');
+    expect(skillResult!['gen_ai.tool.call.result']).toEqual({ output: 'skill-output', status: 'success' });
+
+    const artifactCall = toolCallByName('artifact');
+    expect(artifactCall!['gen_ai.tool.call.arguments']).toBeUndefined();
+    const artifactResult = toolResultByName('artifact');
+    expect(artifactResult!['gen_ai.tool.call.result']).toEqual({
+      artifactsMetadata: [{ id: 'artifact-1', name: 'report.md' }], generatedAt: 1779240560900,
+    });
+
+    const fileWriteCall = toolCallByName('file_write');
+    expect(fileWriteCall!['gen_ai.tool.call.arguments']).toEqual({ path: '/repo/src/new-file.ts' });
+  });
+
+  it('omits null activity arguments and marks failed activity snapshots consistently', async () => {
+    const activityMessages = [
+      SAMPLE_MESSAGES[0],
+      {
+        id: 'msg-activity-failure',
+        conversationId: 'sess-1',
+        role: 'assistant' as const,
+        content: null,
+        events: [
+          { type: 'RUN_STARTED', runId: 'run-act-failure', threadId: 'sess-1', timestamp: 1779240560000 },
+          {
+            type: 'ACTIVITY_SNAPSHOT', activityType: 'FILE_WRITE', timestamp: 1779240560100,
+            content: { file_path: null, status: 'done', start_time: 1779240560100, finish_time: 1779240560200 },
+          },
+          {
+            type: 'ACTIVITY_SNAPSHOT', activityType: 'FILE_READ', timestamp: 1779240560300,
+            content: {
+              path: '/missing.ts', status: 'failed', error_message: 'file not found',
+              start_time: 1779240560300, finish_time: 1779240560400,
+            },
+          },
+          {
+            type: 'ACTIVITY_SNAPSHOT', activityType: 'SKILL', timestamp: 1779240560500,
+            content: {
+              skill_name: 'missing_skill', status: 'error', error_message: 'skill failed',
+              start_time: 1779240560500, finish_time: 1779240560600,
+            },
+          },
+          { type: 'TEXT_MESSAGE_CONTENT', delta: 'Done.', messageId: 'text-3', timestamp: 1779240560700 },
+          { type: 'USAGE', prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, timestamp: 1779240560800 },
+          { type: 'RUN_FINISHED', runId: 'run-act-failure', threadId: 'sess-1', timestamp: 1779240560800 },
+        ],
+        createdAt: 1779240560000,
+        timestamp: 1779240560000,
+        turnIndex: 1,
+      },
+    ];
+
+    mockExecFile.mockImplementation(makeExecFileImpl({
+      list_tasks: JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] }),
+      get_spark_agui_messages: JSON.stringify({ messages: activityMessages }),
+    }));
+
+    createInput();
+    seedSeenCounts();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (e: AgentActivityEntry[]) => entries.push(...e));
+    await input.start();
+    await input.stop();
+
+    const toolCallByName = (name: string) => entries.find(e => e['event.name'] === 'tool.call' && e['gen_ai.tool.name'] === name);
+    const toolResultByName = (name: string) => entries.find(e => e['event.name'] === 'tool.result' && e['gen_ai.tool.name'] === name);
+
+    expect(toolCallByName('file_write')!['gen_ai.tool.call.arguments']).toBeUndefined();
+
+    const fileReadResult = toolResultByName('file_read');
+    expect(fileReadResult!['tool.result.status']).toBe('failure');
+    expect(fileReadResult!['error.type']).toBe('_OTHER');
+    expect(fileReadResult!['error.message']).toBe('file not found');
+    expect(fileReadResult!['gen_ai.tool.call.result']).toEqual({ status: 'failed', error_message: 'file not found' });
+
+    const skillResult = toolResultByName('skill');
+    expect(skillResult!['tool.result.status']).toBe('failure');
+    expect(skillResult!['error.type']).toBe('_OTHER');
+    expect(skillResult!['error.message']).toBe('skill failed');
+  });
+
   it('generates trace_id and span_id on all assistant-derived entries', async () => {
     const listResp = JSON.stringify({ hasMore: false, items: [SAMPLE_TASK] });
     const msgsResp = JSON.stringify({ messages: SAMPLE_MESSAGES });

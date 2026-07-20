@@ -6,6 +6,7 @@ import {
 } from '../../../flushers/sls-transport.js';
 import { createLogger } from '../../../utils/logger.js';
 import { LOCAL_IP, buildUserAgent } from '../../../utils/network-utils.js';
+import { estimateStringRecordBytes } from '../../../flushers/sls-failure-log-writer.js';
 
 const logger = createLogger('FileSlsSender');
 
@@ -124,7 +125,14 @@ export class FileSlsSender {
               await persistFailedLogs(
                 this.failedLogDir,
                 this.configName,
-                { __logs__: tasks[i].batch },
+                {
+                  mode: 'webtracking',
+                  project: this.transportConfig.project,
+                  logstore: this.transportConfig.logstore,
+                  kind: this.configName,
+                  batchCount: tasks[i].batch.length,
+                  batchBytes: estimateStringRecordBytes(tasks[i].batch),
+                },
                 err,
               );
             }
@@ -181,7 +189,14 @@ export class FileSlsSender {
       await persistFailedLogs(
         this.failedLogDir,
         this.configName,
-        { __logs__: remaining },
+        {
+          mode: 'webtracking',
+          project: this.transportConfig.project,
+          logstore: this.transportConfig.logstore,
+          kind: this.configName,
+          batchCount: remaining.length,
+          batchBytes: estimateStringRecordBytes(remaining),
+        },
         new Error('shutdown drain incomplete'),
       );
     }
