@@ -21,6 +21,7 @@ import {
   uninstallScript,
   buildJsonlAgentCoverageCheck,
   buildAgentConfigSetupScript,
+  buildAgentEnsureOnlyScript,
   buildAgentProbeOnlyScript,
   buildProbeEnvInjections,
 } from './lib/e2e-scenarios.mjs';
@@ -173,7 +174,7 @@ async function main() {
 
   // Agent probe phase for install-smoke
   if (scenario === 'install-smoke') {
-    const probeBody = buildAgentProbeOnlyScript(env);
+    const probeBody = buildAgentProbeOnlyScript({ ...env, E2E_ENSURE_AGENT_CLIS: '0' });
     if (probeBody) {
       // Step 1: Write agent configs IMMEDIATELY so pilot can discover agents on next poll.
       // This creates ~/.codex/ (for codex discovery), ~/.claude.json, proxy config, etc.
@@ -187,16 +188,34 @@ async function main() {
         });
       }
 
-      // Step 2: Wait for ALL required agents to be deployed by pilot.
-      // Pilot discovers agents when their config dirs exist, then deploys plugins.
-      const requiredAgents = ['claude-code', 'codex', 'qoder'];
+      const ensureScript = buildAgentEnsureOnlyScript(env);
+      if (ensureScript) {
+        console.log('[e2e-docker] Ensuring CLI agents before deployment wait...');
+        const ensure = await runLocalScript({
+          script: `${buildProbeEnvInjections(env)}${ensureScript}`,
+          artifactDir: ARTIFACT_DIR,
+          artifactLabel: 'agent-ensure',
+        });
+        if (ensure.code !== 0) {
+          console.error(ensure.stderr || ensure.stdout);
+          await keepAliveOnFailure(ensure.code ?? 1);
+        }
+      }
+
+      // Step 2: Wait for required deploy definitions to be deployed by pilot.
+      // qoder-cli uses the qoder deploy definition; JSONL coverage checks qoder-cli later.
+      const requiredAgents = (env.E2E_REQUIRED_DEPLOY_AGENTS ?? 'claude-code,codex,qoder,cursor,qwen-code-cli,opencode')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
       console.log(`[e2e-docker] Waiting for pilot to deploy all agents: ${requiredAgents.join(', ')}...`);
+      const requiredAgentsSh = requiredAgents.join(' ');
       const waitScript = [
         'set -euo pipefail',
         'LOG="$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log"',
         'TIMEOUT=180',
         'ELAPSED=0',
-        'REQUIRED="claude-code codex qoder"',
+        `REQUIRED="${requiredAgentsSh}"`,
         '',
         'while [ $ELAPSED -lt $TIMEOUT ]; do',
         '  ALL_FOUND=1',
@@ -288,7 +307,7 @@ ls -la "$HOME/.loongsuite-pilot/logs/claude/" 2>/dev/null || echo "logs/claude d
       }
 
       // Agent coverage check: require all expected agents to produce JSONL data
-      const requiredJsonlAgents = (env.E2E_REQUIRED_JSONL_AGENTS ?? 'claude-code,codex,qoder').trim();
+      const requiredJsonlAgents = (env.E2E_REQUIRED_JSONL_AGENTS ?? 'claude-code,codex,qoder-cli,cursor-cli,qwen-code-cli,opencode').trim();
       if (requiredJsonlAgents) {
         console.log(`[e2e-docker] Checking JSONL agent coverage: ${requiredJsonlAgents}`);
         const coverageScript = buildJsonlAgentCoverageCheck(requiredJsonlAgents);

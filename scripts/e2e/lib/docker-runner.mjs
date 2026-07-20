@@ -85,6 +85,16 @@ echo "[e2e-docker] Simulated reboot complete (processes killed + service restart
   return runLocalScript({ script: killScript, artifactLabel: 'simulate-reboot' });
 }
 
+function redactSensitive(text) {
+  let redacted = String(text ?? '');
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!value || value.length < 4) continue;
+    if (!/(SECRET|TOKEN|KEY|PASS|PAT|AK|SK)/i.test(key)) continue;
+    redacted = redacted.split(value).join('<redacted>');
+  }
+  return redacted;
+}
+
 async function writeArtifact(dir, label, payload) {
   await fs.mkdir(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -96,11 +106,11 @@ async function writeArtifact(dir, label, payload) {
   const text = [
     `exit_code: ${payload.code}`,
     '--- script ---',
-    cmd,
+    redactSensitive(cmd),
     '--- stdout ---',
-    payload.stdout,
+    redactSensitive(payload.stdout),
     '--- stderr ---',
-    payload.stderr,
+    redactSensitive(payload.stderr),
     '',
   ].join('\n');
   await fs.writeFile(file, text, 'utf8');

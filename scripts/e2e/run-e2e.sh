@@ -4,13 +4,16 @@
 # Usage:
 #   ./scripts/e2e/run-e2e.sh                  # default scenario: install-smoke
 #   ./scripts/e2e/run-e2e.sh preflight        # validate container only
-#   ./scripts/e2e/run-e2e.sh install-smoke    # install + 4-agent probe + JSONL/SLS check
+#   ./scripts/e2e/run-e2e.sh install-smoke    # install + CLI-agent probe + JSONL/SLS check
 #   ./scripts/e2e/run-e2e.sh uninstall        # install + uninstall + residue check
 #
 # Required env (in .env.e2e):
 #   E2E_USER_ID
-#   E2E_CODEX_OPENAI_API_KEY / E2E_ANTHROPIC_API_KEY / E2E_CURSOR_API_KEY / E2E_QODER_PERSONAL_ACCESS_TOKEN
+#   E2E_CODEX_OPENAI_API_KEY / E2E_ANTHROPIC_API_KEY / E2E_QODER_PERSONAL_ACCESS_TOKEN
 #   E2E_SLS_PROJECT / E2E_SLS_LOGSTORE / E2E_SLS_ACCESS_KEY_ID / E2E_SLS_ACCESS_KEY_SECRET
+# Optional for full CLI coverage:
+#   E2E_CURSOR_API_KEY / E2E_QWEN_API_KEY / E2E_OPENCODE_API_KEY
+#   E2E_QWEN_PROBE_CMD / E2E_OPENCODE_PROBE_CMD
 # Optional: E2E_SLS_ENDPOINT (default cn-hangzhou.log.aliyuncs.com)
 # Debug:    E2E_KEEP_ALIVE=1 (keep container on failure for docker exec)
 #

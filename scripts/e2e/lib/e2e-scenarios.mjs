@@ -746,7 +746,7 @@ const path = require('path');
 const LOG_DIR = process.env._JV_LOG_DIR || (process.env.HOME + '/.loongsuite-pilot/logs/output');
 const SINCE_SECONDS = parseInt(process.env.E2E_JSONL_SINCE_SECONDS || '0', 10);
 const STRICT = (process.env.E2E_JSONL_STRICT || '0') === '1';
-const DEFAULT_AGENT_FILTER = 'claude,codex,qoder';
+const DEFAULT_AGENT_FILTER = 'claude-code,codex,qoder-cli,cursor-cli,qwen-code-cli,opencode';
 const _RAW_FILTER = process.env.E2E_JSONL_AGENT_FILTER;
 const _FILTER_SRC = (_RAW_FILTER === undefined || _RAW_FILTER === '') ? DEFAULT_AGENT_FILTER : _RAW_FILTER;
 const AGENT_FILTER = (_FILTER_SRC.trim().toLowerCase() === 'all' || _FILTER_SRC.trim() === '*')
@@ -877,7 +877,7 @@ process.exit(0);
  *   E2E_JSONL_VALIDATE=0         禁用
  *   E2E_JSONL_STRICT=1           有任何缺失/枚举错即 exit 1
  *   E2E_JSONL_SINCE_SECONDS=600  仅统计最近 N 秒的条目
- *   E2E_JSONL_AGENT_FILTER=claude,codex,qoder  仅校验 agent 前缀匹配的文件（默认）；设为 all 或 * 关闭过滤
+ *   E2E_JSONL_AGENT_FILTER=claude-code,codex,qoder-cli,cursor-cli,qwen-code-cli,opencode  仅校验 agent 前缀匹配的文件（默认）；设为 all 或 * 关闭过滤
  *   E2E_JSONL_LOG_DIR=/path      覆盖默认 ~/.loongsuite-pilot/logs/output
  * @param {NodeJS.ProcessEnv} env
  * @returns {string}
@@ -950,9 +950,16 @@ loongsuite-pilot start 2>/dev/null || true
 sleep 5
 
 FC_CONFIG_DIR="$HOME/.loongsuite-pilot/configs/local"
-FC_STATE_DIR="$HOME/.loongsuite-pilot/state/file-collection"
+FC_STATE_DIR="$HOME/.loongsuite-pilot/state/pipeline"
+FC_LEGACY_STATE_DIR="$HOME/.loongsuite-pilot/state/file-collection"
+FC_SERVICE_LOG_GLOB="$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log*"
 FC_TEST_LOG_DIR="$HOME/.loongsuite-pilot/e2e-test-logs"
 FC_CONFIG_NAME="e2e-file-test"
+fc_state_file() {
+  if [ -f "$FC_STATE_DIR/$FC_CONFIG_NAME.json" ]; then echo "$FC_STATE_DIR/$FC_CONFIG_NAME.json"; return; fi
+  if [ -f "$FC_LEGACY_STATE_DIR/$FC_CONFIG_NAME.json" ]; then echo "$FC_LEGACY_STATE_DIR/$FC_CONFIG_NAME.json"; return; fi
+  echo "$FC_STATE_DIR/$FC_CONFIG_NAME.json"
+}
 
 # Step 1: Create test log directory and write test data
 echo "[file-collection-e2e] Step 1: Creating test log files..."
@@ -1001,8 +1008,8 @@ echo "[file-collection-e2e] Step 3: Waiting for pilot to process config (up to 9
 TIMEOUT=90
 ELAPSED=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
-  if [ -f "$FC_STATE_DIR/$FC_CONFIG_NAME.json" ]; then
-    STATE_SIZE=$(wc -c < "$FC_STATE_DIR/$FC_CONFIG_NAME.json" | tr -d ' ')
+  if [ -f "$(fc_state_file)" ]; then
+    STATE_SIZE=$(wc -c < "$(fc_state_file)" | tr -d ' ')
     if [ "$STATE_SIZE" -gt 2 ]; then
       echo "[file-collection-e2e] state file detected after \${ELAPSED}s (size=\${STATE_SIZE}B)"
       break
@@ -1017,8 +1024,8 @@ echo "[file-collection-e2e] Step 4: Validating results..."
 FC_FAIL=0
 
 # Check state file exists and is non-empty
-if [ -f "$FC_STATE_DIR/$FC_CONFIG_NAME.json" ]; then
-  STATE_CONTENT=$(cat "$FC_STATE_DIR/$FC_CONFIG_NAME.json")
+if [ -f "$(fc_state_file)" ]; then
+  STATE_CONTENT=$(cat "$(fc_state_file)")
   STATE_SIZE=$(echo -n "$STATE_CONTENT" | wc -c | tr -d ' ')
   if [ "$STATE_SIZE" -gt 2 ]; then
     echo "[file-collection-e2e] OK: state file exists and has content (\${STATE_SIZE}B)"
@@ -1036,20 +1043,20 @@ if [ -f "$FC_STATE_DIR/$FC_CONFIG_NAME.json" ]; then
     FC_FAIL=1
   fi
 else
-  echo "[file-collection-e2e] FAIL: state file not found at $FC_STATE_DIR/$FC_CONFIG_NAME.json"
+  echo "[file-collection-e2e] FAIL: state file not found at $(fc_state_file)"
   echo "[file-collection-e2e] pilot service log (last 20 lines with FileCollection):"
-  grep -iE "FileCollection|file-collection|FilePipeline|FileTailer" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null | tail -20 || echo "(no file-collection log lines found)"
+  grep -iE "FileCollection|file-collection|FilePipeline|FileTailer" $FC_SERVICE_LOG_GLOB 2>/dev/null | tail -20 || echo "(no file-collection log lines found)"
   FC_FAIL=1
 fi
 
 # Check service log for file-collection activity
-if grep -q "FileCollectionManager.*started" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+if grep -q "FileCollectionManager.*started" $FC_SERVICE_LOG_GLOB 2>/dev/null; then
   echo "[file-collection-e2e] OK: FileCollectionManager started in service log"
 else
   echo "[file-collection-e2e] WARN: FileCollectionManager start not found in service log"
 fi
 
-if grep -q "FilePipeline.*started" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+if grep -q "FilePipeline.*started" $FC_SERVICE_LOG_GLOB 2>/dev/null; then
   echo "[file-collection-e2e] OK: FilePipeline started in service log"
 else
   echo "[file-collection-e2e] WARN: FilePipeline start not found in service log"
@@ -1059,8 +1066,8 @@ fi
 echo ""
 echo "[file-collection-e2e] Step 5: Testing incremental read..."
 OFFSET_BEFORE=""
-if [ -f "$FC_STATE_DIR/$FC_CONFIG_NAME.json" ]; then
-  OFFSET_BEFORE=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+if [ -f "$(fc_state_file)" ]; then
+  OFFSET_BEFORE=$(node -e "try{const s=require('$(fc_state_file)');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
 fi
 echo "[file-collection-e2e] offset before append: $OFFSET_BEFORE"
 
@@ -1073,8 +1080,8 @@ echo "[file-collection-e2e] appended 10 more lines"
 sleep 15
 
 OFFSET_AFTER=""
-if [ -f "$FC_STATE_DIR/$FC_CONFIG_NAME.json" ]; then
-  OFFSET_AFTER=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+if [ -f "$(fc_state_file)" ]; then
+  OFFSET_AFTER=$(node -e "try{const s=require('$(fc_state_file)');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
 fi
 echo "[file-collection-e2e] offset after append: $OFFSET_AFTER"
 
@@ -1091,8 +1098,8 @@ echo ""
 echo "[file-collection-e2e] Step 6: Testing RENAME rotation..."
 
 # 6a. Record current state (offset + inode) before rotation
-INODE_BEFORE=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
-OFFSET_BEFORE=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+INODE_BEFORE=$(node -e "try{const s=require('$(fc_state_file)');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+OFFSET_BEFORE=$(node -e "try{const s=require('$(fc_state_file)');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
 echo "[file-collection-e2e] before rename: inode=$INODE_BEFORE offset=$OFFSET_BEFORE"
 
 # 6b. Append lines that haven't been collected yet (simulate unread tail)
@@ -1111,8 +1118,8 @@ echo "[file-collection-e2e] renamed app.log -> app.log.1, created new app.log wi
 # 6d. Wait for poll cycle to detect rotation and drain
 sleep 15
 
-INODE_AFTER=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
-OFFSET_AFTER=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+INODE_AFTER=$(node -e "try{const s=require('$(fc_state_file)');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+OFFSET_AFTER=$(node -e "try{const s=require('$(fc_state_file)');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
 echo "[file-collection-e2e] after rename: inode=$INODE_AFTER offset=$OFFSET_AFTER"
 
 if [ "$INODE_AFTER" != "$INODE_BEFORE" ] && [ "$INODE_AFTER" != "0" ]; then
@@ -1130,7 +1137,7 @@ else
 fi
 
 # 6e. Verify old file drain via service log
-if grep -q "drained old file after rotation" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+if grep -q "drained old file after rotation" $FC_SERVICE_LOG_GLOB 2>/dev/null; then
   echo "[file-collection-e2e] OK: old file drain logged (unread lines from app.log.1 collected)"
 else
   echo "[file-collection-e2e] WARN: old file drain not found in service log (may have been fully read before rotation)"
@@ -1144,8 +1151,8 @@ echo "[file-collection-e2e] Step 7: Testing COPYTRUNCATE rotation..."
 
 # 7a. Wait for current data to be collected
 sleep 15
-OFFSET_BEFORE_CT=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
-INODE_BEFORE_CT=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+OFFSET_BEFORE_CT=$(node -e "try{const s=require('$(fc_state_file)');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+INODE_BEFORE_CT=$(node -e "try{const s=require('$(fc_state_file)');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
 echo "[file-collection-e2e] before copytruncate: inode=$INODE_BEFORE_CT offset=$OFFSET_BEFORE_CT"
 
 # 7b. Simulate copytruncate: cp app.log -> app.log.2, truncate app.log, write new data
@@ -1159,8 +1166,8 @@ echo "[file-collection-e2e] copytruncate done: truncated app.log, wrote 5 new li
 # 7c. Wait for poll cycle
 sleep 15
 
-INODE_AFTER_CT=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
-OFFSET_AFTER_CT=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+INODE_AFTER_CT=$(node -e "try{const s=require('$(fc_state_file)');const k=Object.keys(s)[0];const e=s[k]?.extra||{};console.log(e.inode||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+OFFSET_AFTER_CT=$(node -e "try{const s=require('$(fc_state_file)');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
 echo "[file-collection-e2e] after copytruncate: inode=$INODE_AFTER_CT offset=$OFFSET_AFTER_CT"
 
 if [ "$INODE_AFTER_CT" = "$INODE_BEFORE_CT" ]; then
@@ -1177,7 +1184,7 @@ else
 fi
 
 # Verify truncation detection in service log
-if grep -q "copytruncate rotation" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+if grep -q "copytruncate rotation" $FC_SERVICE_LOG_GLOB 2>/dev/null; then
   echo "[file-collection-e2e] OK: copytruncate rotation detected in service log"
 else
   echo "[file-collection-e2e] WARN: copytruncate detection not found in service log"
@@ -1187,7 +1194,7 @@ fi
 echo ""
 echo "[file-collection-e2e] Step 7b: Testing copytruncate with new data exceeding old offset..."
 sleep 15
-OFFSET_BEFORE_SIG=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+OFFSET_BEFORE_SIG=$(node -e "try{const s=require('$(fc_state_file)');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
 echo "[file-collection-e2e] current offset: $OFFSET_BEFORE_SIG"
 
 # Simulate: cp + truncate + write MORE data than old file size
@@ -1201,12 +1208,12 @@ echo "[file-collection-e2e] truncated + wrote 50 lines ($NEW_SIZE bytes, old off
 
 sleep 15
 
-OFFSET_AFTER_SIG=$(node -e "try{const s=require('$FC_STATE_DIR/$FC_CONFIG_NAME.json');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
+OFFSET_AFTER_SIG=$(node -e "try{const s=require('$(fc_state_file)');const k=Object.keys(s)[0];console.log(s[k]?.lastOffset||0)}catch{console.log(0)}" 2>/dev/null || echo "0")
 echo "[file-collection-e2e] after signature-based copytruncate: offset=$OFFSET_AFTER_SIG"
 
-if grep -q "signature changed.*copytruncate rotation.*content replaced" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+if grep -q "signature changed.*copytruncate rotation.*content replaced" $FC_SERVICE_LOG_GLOB 2>/dev/null; then
   echo "[file-collection-e2e] OK: signature-based copytruncate detected (file head content changed)"
-elif grep -q "copytruncate rotation.*size < offset" "$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log" 2>/dev/null; then
+elif grep -q "copytruncate rotation.*size < offset" $FC_SERVICE_LOG_GLOB 2>/dev/null; then
   echo "[file-collection-e2e] OK: size-based copytruncate detected (fallback, new data didn't exceed old offset)"
 else
   echo "[file-collection-e2e] WARN: copytruncate detection not found for overflow case (may need more time)"
@@ -1230,7 +1237,11 @@ ls -la "$FC_TEST_LOG_DIR"/ 2>/dev/null
 echo ""
 echo "[file-collection-e2e] Step 9: Verifying data delivery..."
 
-FC_FAILED_LOG="$HOME/.loongsuite-pilot/logs/file-collection-failed/$FC_CONFIG_NAME.jsonl"
+FC_FAILED_LOG="$HOME/.loongsuite-pilot/logs/pipeline-failed/$FC_CONFIG_NAME.jsonl"
+FC_LEGACY_FAILED_LOG="$HOME/.loongsuite-pilot/logs/file-collection-failed/$FC_CONFIG_NAME.jsonl"
+if [ ! -f "$FC_FAILED_LOG" ] && [ -f "$FC_LEGACY_FAILED_LOG" ]; then
+  FC_FAILED_LOG="$FC_LEGACY_FAILED_LOG"
+fi
 if [ -f "$FC_FAILED_LOG" ]; then
   FC_FAILED_LINES=$(wc -l < "$FC_FAILED_LOG" | tr -d ' ')
   echo "[file-collection-e2e] WARN: failed-log has $FC_FAILED_LINES entries (some data failed to deliver to SLS)"
@@ -1271,7 +1282,7 @@ command -v node && node -v || echo "node missing"
 echo "=== npm ==="
 command -v npm && npm -v || echo "npm missing"
 echo "=== agents ==="
-for b in codex claude cursor agent qoder qodercli; do
+for b in codex claude cursor cursor-agent agent qoder qodercli qwen opencode; do
   if command -v "$b" >/dev/null 2>&1; then
     echo "have $b: $("$b" --version 2>/dev/null || echo 'version unknown')"
   else
@@ -1331,8 +1342,25 @@ command -v loongsuite-pilot >/dev/null || {
   command -v loongsuite-pilot >/dev/null || exit 1
 }
 
-echo "[installer-e2e] config.json:"
-cat "$HOME/.loongsuite-pilot/config.json" 2>/dev/null || echo "(no config found)"
+echo "[installer-e2e] config.json (redacted):"
+node - <<'NODE' 2>/dev/null || echo "(no config found or redaction failed)"
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const p = path.join(os.homedir(), '.loongsuite-pilot', 'config.json');
+const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
+function redact(value, key = '') {
+  if (Array.isArray(value)) return value.map(v => redact(v));
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = redact(v, k);
+    return out;
+  }
+  if (typeof value === 'string' && /(secret|token|password|accessKey|apiKey|ak|sk)/i.test(key)) return '<redacted>';
+  return value;
+}
+console.log(JSON.stringify(redact(cfg), null, 2));
+NODE
 
 echo "[installer-e2e] service status:"
 loongsuite-pilot status || true
@@ -1345,7 +1373,8 @@ echo "[installer-e2e] installer flow complete"
  * Runs the probe independently and asserts expected agents are detected
  * (cursor via ~/.cursor path, CLI agents via command lookup).
  */
-export function buildProbeDetectionValidationScript() {
+export function buildProbeDetectionValidationScript(requiredAgentsCsv = 'claude-code,codex,qoder,cursor,qwen-code-cli,opencode') {
+  const requiredAgents = requiredAgentsCsv.split(',').map(s => s.trim()).filter(Boolean).join(' ');
   return `
 set -euo pipefail
 echo "[probe-validate] Running cli-probe.cjs detection validation..."
@@ -1363,25 +1392,8 @@ PROBE_OUTPUT=$(node "$PROBE_CJS" 2>/dev/null) || {
 
 echo "[probe-validate] probe output: $PROBE_OUTPUT"
 
-CURSOR_DETECTED=$(node -e "
-const r = JSON.parse(process.argv[1]);
-const cursor = r.find(a => a.id === 'cursor');
-if (!cursor) { console.log('missing'); process.exit(0); }
-console.log(cursor.detected ? 'yes' : 'no');
-" "$PROBE_OUTPUT")
-
-if [ "$CURSOR_DETECTED" = "yes" ]; then
-  echo "[probe-validate] OK: cursor detected (via ~/.cursor)"
-elif [ "$CURSOR_DETECTED" = "missing" ]; then
-  echo "[probe-validate] WARN: cursor not in agent definitions"
-else
-  echo "[probe-validate] FAIL: cursor NOT detected despite ~/.cursor existing"
-  ls -la "$HOME/.cursor" 2>/dev/null || echo "(~/.cursor does not exist!)"
-  exit 1
-fi
-
 FAIL=0
-for AGENT_ID in claude-code codex qoder; do
+for AGENT_ID in ${requiredAgents}; do
   DETECTED=$(node -e "
 const r = JSON.parse(process.argv[1]);
 const a = r.find(x => x.id === process.argv[2]);
@@ -1478,6 +1490,14 @@ function shouldEnsureAgentClis(env, useMatrixProbe) {
   if (v === '0' || v === 'false' || v === 'no') return false;
   if (v === '1' || v === 'true' || v === 'yes') return true;
   return useMatrixProbe;
+}
+
+export function buildAgentEnsureOnlyScript(env) {
+  const useMatrix = env.E2E_USE_MATRIX_PROBE?.trim() === '1';
+  if (!shouldEnsureAgentClis(env, useMatrix)) return '';
+  const matrix = loadAgentMatrix(env);
+  console.log('[e2e-docker] Ensuring agent-matrix CLIs');
+  return buildEnsureAgentClisScript(matrix, env);
 }
 
 /**

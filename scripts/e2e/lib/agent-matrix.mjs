@@ -80,6 +80,46 @@ function buildCodexEnsureInstallSh(bin, env) {
   return `npm install -g ${shellSingleQuoteBash(spec)} || echo '[e2e-ensure] npm install codex failed'`;
 }
 
+function buildEnsureSummaryScript(matrix) {
+  const lines = [
+    'echo "[e2e-ensure] summary:"',
+  ];
+  const seen = new Set();
+  for (const a of matrix.agents ?? []) {
+    const bin = String(a.binary ?? '').trim();
+    if (!bin || seen.has(bin)) continue;
+    seen.add(bin);
+    const label = String(a.id ?? a.name ?? bin).replace(/'/g, `'\''`);
+    if (bin === 'cursor') {
+      lines.push(
+        `if [ "$_e2e_cursor_incompat" -eq 1 ] && [ "\${_e2e_have_cf:-0}" -ne 1 ]; then`,
+        `  echo "[e2e-ensure] ${label}: cursor incompatible (glibc too old; skipped)"`,
+        `elif [ "\${_e2e_have_cf:-0}" -eq 1 ]; then`,
+        `  echo "[e2e-ensure] ${label}: have cursor"`,
+        `elif command -v agent >/dev/null 2>&1 || command -v cursor-agent >/dev/null 2>&1; then`,
+        `  echo "[e2e-ensure] ${label}: have cursor (via agent/cursor-agent CLI)"`,
+        `elif command -v cursor-installer >/dev/null 2>&1; then`,
+        `  echo "[e2e-ensure] ${label}: have cursor (cursor-installer on PATH; run cursor-installer --update if needed)"`,
+        `else`,
+        `  echo "[e2e-ensure] ${label}: missing cursor"`,
+        `fi`,
+      );
+      continue;
+    }
+    if (bin === 'qoder') {
+      lines.push(
+        `if command -v qoder >/dev/null 2>&1 || command -v qodercli >/dev/null 2>&1; then echo "[e2e-ensure] ${label}: have qoder/qodercli"; else echo "[e2e-ensure] ${label}: missing qoder/qodercli"; fi`,
+      );
+      continue;
+    }
+    const binEsc = bin.replace(/'/g, `'\''`);
+    lines.push(
+      `if command -v '${binEsc}' >/dev/null 2>&1; then echo "[e2e-ensure] ${label}: have ${binEsc}"; else echo "[e2e-ensure] ${label}: missing ${binEsc}"; fi`,
+    );
+  }
+  return lines;
+}
+
 /** 生成远端 ensure 脚本：npm 安装缺失 CLI，cursor 改用 --version 真实探测。 */
 export function buildEnsureAgentClisScript(matrix, env = process.env) {
   const cursorStrat = resolveE2eCursorInstallStrategy(env);
@@ -262,26 +302,7 @@ export function buildEnsureAgentClisScript(matrix, env = process.env) {
     'fi',
   );
 
-  lines.push(
-    'echo "[e2e-ensure] summary:"',
-    'for _b in codex claude cursor qoder; do',
-    '  if [ "$_b" = cursor ]; then',
-    '    if [ "$_e2e_cursor_incompat" -eq 1 ] && [ "${_e2e_have_cf:-0}" -ne 1 ]; then',
-    '      echo "[e2e-ensure] cursor incompatible (glibc too old; skipped)"',
-    '    elif [ "${_e2e_have_cf:-0}" -eq 1 ]; then',
-    '      echo "[e2e-ensure] have cursor"',
-    '    elif command -v agent >/dev/null 2>&1 || command -v cursor-agent >/dev/null 2>&1; then',
-    '      echo "[e2e-ensure] have cursor (via agent/cursor-agent CLI)"',
-    '    elif command -v cursor-installer >/dev/null 2>&1; then',
-    '      echo "[e2e-ensure] have cursor (cursor-installer on PATH; run cursor-installer --update if needed)"',
-    '    else',
-    '      echo "[e2e-ensure] missing cursor"',
-    '    fi',
-    '    continue',
-    '  fi',
-    '  if command -v "$_b" >/dev/null 2>&1; then echo "[e2e-ensure] have $_b"; else echo "[e2e-ensure] missing $_b"; fi',
-    'done',
-  );
+  lines.push(...buildEnsureSummaryScript(matrix));
   return `${lines.join('\n')}\n`;
 }
 

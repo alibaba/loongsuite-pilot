@@ -60,10 +60,10 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
   });
 
   it('passes cleanly on valid entries', () => {
-    writeJsonl('claude-2026-05-11.jsonl', [goodEntry(), goodEntry({ 'event.id': 'evt-2' })]);
+    writeJsonl('claude-code-2026-05-11.jsonl', [goodEntry(), goodEntry({ 'event.id': 'evt-2' })]);
     const r = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
     expect(r.code).toBe(0);
-    expect(r.out).toContain('OK claude-2026-05-11.jsonl');
+    expect(r.out).toContain('OK claude-code-2026-05-11.jsonl');
     expect(r.out).toContain('missing_required=0');
   });
 
@@ -92,7 +92,7 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
   });
 
   it('reports bad event.name enum values', () => {
-    writeJsonl('claude-2026-05-11.jsonl', [goodEntry({ 'event.name': 'not.a.real.event' })]);
+    writeJsonl('claude-code-2026-05-11.jsonl', [goodEntry({ 'event.name': 'not.a.real.event' })]);
     const r = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
     expect(r.code).toBe(1);
     expect(r.out).toContain('bad_event_name=1');
@@ -104,17 +104,23 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
     expect(r.out).toContain('no .jsonl files');
   });
 
-  it('default filter covers claude/codex/qoder and excludes others', () => {
-    writeJsonl('claude-2026-05-11.jsonl', [goodEntry()]);
+  it('default filter covers the L1 CLI coverage set and excludes IDE-only agents', () => {
+    writeJsonl('claude-code-2026-05-11.jsonl', [goodEntry()]);
     writeJsonl('codex-2026-05-11.jsonl', [goodEntry()]);
+    writeJsonl('qoder-cli-2026-05-11.jsonl', [goodEntry({ 'gen_ai.agent.type': 'qoder-cli' })]);
+    writeJsonl('cursor-cli-2026-05-11.jsonl', [goodEntry({ 'gen_ai.agent.type': 'cursor-cli' })]);
+    writeJsonl('qwen-code-cli-2026-05-11.jsonl', [goodEntry({ 'gen_ai.agent.type': 'qwen-code-cli' })]);
+    writeJsonl('opencode-2026-05-11.jsonl', [goodEntry({ 'gen_ai.agent.type': 'opencode' })]);
     writeJsonl('qoder-2026-05-11.jsonl', [goodEntry()]);
-    writeJsonl('cursor-2026-05-11.jsonl', [goodEntry()]);
     const r = runValidator({ _JV_LOG_DIR: tmpDir, E2E_JSONL_STRICT: '1' });
     expect(r.code).toBe(0);
-    expect(r.out).toContain('claude-2026-05-11.jsonl');
+    expect(r.out).toContain('claude-code-2026-05-11.jsonl');
     expect(r.out).toContain('codex-2026-05-11.jsonl');
-    expect(r.out).toContain('qoder-2026-05-11.jsonl');
-    expect(r.out).not.toContain('cursor-2026-05-11.jsonl');
+    expect(r.out).toContain('qoder-cli-2026-05-11.jsonl');
+    expect(r.out).toContain('cursor-cli-2026-05-11.jsonl');
+    expect(r.out).toContain('qwen-code-cli-2026-05-11.jsonl');
+    expect(r.out).toContain('opencode-2026-05-11.jsonl');
+    expect(r.out).not.toContain('qoder-2026-05-11.jsonl');
   });
 
   it('E2E_JSONL_AGENT_FILTER=all disables filtering', () => {

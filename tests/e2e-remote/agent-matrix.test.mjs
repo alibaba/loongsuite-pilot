@@ -10,16 +10,32 @@ import {
 describe('agent-matrix', () => {
   it('loads agents with ensure + probe fields', () => {
     const { agents } = loadAgentMatrix(process.env);
+    expect(agents.map(a => a.id)).toEqual([
+      'codex-cli-latest',
+      'claude-code-cli',
+      'cursor-cli',
+      'qoder-cli',
+      'qwen-code-cli',
+      'opencode',
+    ]);
     const codex = agents.find(a => a.binary === 'codex');
     expect(codex?.ensureInstallSh).toContain('@openai/codex');
     expect(codex?.defaultProbeSh).toContain('codex exec');
-    const qoder = agents.find(a => a.binary === 'qoder');
+    const qoder = agents.find(a => a.id === 'qoder-cli');
+    expect(qoder?.binary).toBe('qoder');
+    expect(qoder?.slsAgentTypeHint).toBe('qoder-cli');
     expect(qoder?.ensureInstallSh).toContain('@qoder-ai/qodercli');
     expect(qoder?.defaultProbeSh).toContain('_IS_NEW=');
     expect(qoder?.defaultProbeSh).toContain('--print --yolo --cwd');
     expect(qoder?.defaultProbeSh).toContain('--max-turns 1');
-    const cur = agents.find(a => a.binary === 'cursor');
+    const cur = agents.find(a => a.id === 'cursor-cli');
     expect(cur?.defaultProbeSh).toContain('for _c in cursor cursor-agent agent');
+    const qwen = agents.find(a => a.id === 'qwen-code-cli');
+    expect(qwen?.binary).toBe('qwen');
+    expect(qwen?.defaultProbeSh).toContain('--auth-type openai');
+    expect(qwen?.defaultProbeSh).toContain('--openai-api-key');
+    expect(qwen?.defaultProbeSh).toContain('--openai-base-url');
+    expect(agents.find(a => a.id === 'opencode')?.binary).toBe('opencode');
   });
 
   it('resolveE2eCursorInstallStrategy: official by default, watzon for linux-7u', () => {
@@ -59,6 +75,10 @@ describe('agent-matrix', () => {
     expect(def).toContain('@openai/codex');
     expect(def).toContain('@anthropic-ai/claude-code');
     expect(def).toContain('@qoder-ai/qodercli');
+    expect(def).toContain('${E2E_QWEN_NPM_SPEC:-@qwen-code/qwen-code}');
+    expect(def).toContain('${E2E_OPENCODE_NPM_SPEC:-opencode-ai}');
+    expect(def).toContain('qwen-code-cli:');
+    expect(def).toContain('opencode:');
     expect(def).toContain('https://cursor.com/install');
     expect(def).toContain('compat symlink');
     expect(def).not.toContain('cdn.jsdelivr.net/gh/watzon/cursor-linux-installer');

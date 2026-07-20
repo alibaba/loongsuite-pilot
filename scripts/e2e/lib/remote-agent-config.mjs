@@ -80,6 +80,41 @@ export function buildRemoteSecretExportsSh(env = process.env) {
     console.log('[e2e] Injecting CURSOR_API_KEY into remote script (E2E_CURSOR_API_KEY)');
     lines.push(`export CURSOR_API_KEY=${shellSingleQuoteBash(cursorKey)}`);
   }
+
+  const qwenKey = env.E2E_QWEN_API_KEY?.trim() || env.E2E_DASHSCOPE_API_KEY?.trim() || codexOpenai;
+  if (qwenKey) {
+    const qwenBaseUrl = env.E2E_QWEN_BASE_URL?.trim() || env.E2E_CODEX_BASE_URL?.trim() || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+    const qwenModel = env.E2E_QWEN_MODEL?.trim() || env.E2E_CODEX_MODEL?.trim() || 'qwen3-coder-plus';
+    console.log('[e2e] Injecting QWEN_API_KEY / DASHSCOPE_API_KEY for Qwen Code CLI probe');
+    lines.push(`export QWEN_API_KEY=${shellSingleQuoteBash(qwenKey)}`);
+    lines.push(`export DASHSCOPE_API_KEY=${shellSingleQuoteBash(qwenKey)}`);
+    lines.push(`export QWEN_BASE_URL=${shellSingleQuoteBash(qwenBaseUrl)}`);
+    lines.push(`export E2E_QWEN_MODEL=${shellSingleQuoteBash(qwenModel)}`);
+  }
+
+  // OpenCode uses an OpenCode Zen key (from https://opencode.ai/workspace) via OPENCODE_API_KEY.
+  // Zen is its own provider (model = opencode/<model>); OpenCode resolves the gateway endpoint from
+  // models.dev, so NO OPENAI_BASE_URL is needed. Never reuse the 百炼/Dashscope key — Zen rejects it.
+  const opencodeKey = env.E2E_OPENCODE_API_KEY?.trim();
+  if (opencodeKey) {
+    const opencodeModel = env.E2E_OPENCODE_MODEL?.trim() || 'opencode/big-pickle';
+    console.log(`[e2e] Injecting OPENCODE_API_KEY (OpenCode Zen) for OpenCode probe (model=${opencodeModel})`);
+    lines.push(`export OPENCODE_API_KEY=${shellSingleQuoteBash(opencodeKey)}`);
+    lines.push(`export E2E_OPENCODE_MODEL=${shellSingleQuoteBash(opencodeModel)}`);
+  } else {
+    console.log('[e2e] E2E_OPENCODE_API_KEY unset — OpenCode conversation probe will skip (get a key from opencode.ai/workspace; do NOT reuse the 百炼 key)');
+  }
+
+  for (const [source, target] of [
+    ['E2E_QWEN_PROBE_CMD', 'E2E_QWEN_PROBE_CMD'],
+    ['E2E_OPENCODE_PROBE_CMD', 'E2E_OPENCODE_PROBE_CMD'],
+    ['E2E_QWEN_NPM_SPEC', 'E2E_QWEN_NPM_SPEC'],
+    ['E2E_OPENCODE_NPM_SPEC', 'E2E_OPENCODE_NPM_SPEC'],
+  ]) {
+    const value = env[source]?.trim();
+    if (value) lines.push(`export ${target}=${shellSingleQuoteBash(value)}`);
+  }
+
   if (!lines.length) return '';
   return `${lines.join('\n')}\n`;
 }
