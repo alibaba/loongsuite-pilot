@@ -3,8 +3,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { formatTime } from '../utils/time-utils.js';
 import { resolveLocalIp } from '../utils/network-utils.js';
-import { isPidFileRunning } from '../utils/pid-utils.js';
-import { isUpdaterRunningOnWindowsSync } from '../utils/process-discovery.js';
+import { checkProcessLiveness, UPDATER_PROCESS_PATTERNS } from '../utils/pid-utils.js';
+import type { ProcessLiveness } from '../utils/pid-utils.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
 
 export interface L1Metrics {
@@ -144,6 +144,7 @@ export class MetricsCollector {
   private readonly agentsConfig: AgentsConfig;
   private readonly slsEndpoints: SlsEndpoint[];
   private readonly cmsWorkspace: string;
+  private readonly updaterLiveness: (pidFile: string) => ProcessLiveness;
   private readonly startTime: string;
   private readonly startTimestamp: number;
   private readonly instanceId: string;
@@ -161,7 +162,7 @@ export class MetricsCollector {
   private updaterConsecutiveFailures = 0;
   private lastInfraHealth: InfraHealthSnapshot | null = null;
 
-  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string }) {
+  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; updaterLiveness?: (pidFile: string) => ProcessLiveness }) {
     this.version = opts.version;
     this.userId = opts.userId;
     this.dataDir = opts.dataDir;
@@ -169,6 +170,8 @@ export class MetricsCollector {
     this.agentsConfig = opts.agentsConfig ?? {};
     this.slsEndpoints = opts.slsEndpoints ?? [];
     this.cmsWorkspace = opts.cmsWorkspace ?? '';
+    this.updaterLiveness = opts.updaterLiveness
+      ?? ((pidFile: string) => checkProcessLiveness(pidFile, UPDATER_PROCESS_PATTERNS));
     this.startTimestamp = Math.floor(Date.now() / 1000);
     this.startTime = formatTime(new Date());
     this.localIp = resolveLocalIp();
@@ -350,10 +353,9 @@ export class MetricsCollector {
 
     let updaterPidAlive = true;
     if (this.l1CycleCount > 2) {
-      updaterPidAlive = isPidFileRunning(path.join(this.dataDir, 'loongsuite-pilot-updater.pid'));
-      if (!updaterPidAlive && process.platform === 'win32') {
-        updaterPidAlive = isUpdaterRunningOnWindowsSync();
-      }
+      updaterPidAlive = this.updaterLiveness(
+        path.join(this.dataDir, 'loongsuite-pilot-updater.pid'),
+      ).running;
       if (updaterPidAlive) {
         this.updaterConsecutiveFailures = 0;
       } else {
