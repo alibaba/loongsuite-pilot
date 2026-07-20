@@ -160,6 +160,7 @@ describe('UpdaterWatchdog', () => {
     expect(alarms.serialize()[0]).toMatchObject({
       alarm_type: 'UPDATER_FAILURE_ALARM',
       input_name: 'updater',
+      alarm_message: expect.stringContaining('node /tmp/other.js'),
     });
   });
 
@@ -226,6 +227,89 @@ describe('UpdaterWatchdog', () => {
     const result = await wd.runCheck();
 
     expect(result.status).toBe('grace');
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith('/bin/loongsuite-pilot', ['restart-updater'], expect.anything());
+  });
+
+  it('uses post-restart grace before restarting for stale heartbeat', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-16T00:00:00Z'));
+    await writePid(tmpDir);
+    await writeHeartbeat(tmpDir, {
+      pid: 99999,
+      updatedAt: new Date('2026-06-15T23:59:50Z').toISOString(),
+    });
+
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      staleHeartbeatMs: 1_000,
+      startupGraceMs: 0,
+      alarmManager: alarms,
+    });
+
+    expect((await wd.runCheck()).status).toBe('restart-attempted');
+    expect(alarms.serialize()).toHaveLength(1);
+    vi.setSystemTime(new Date('2026-06-16T00:00:00.500Z'));
+
+    const result = await wd.runCheck();
+
+    expect(result.status).toBe('grace');
+    expect(alarms.serialize()).toEqual([]);
+    const restartCalls = mockExecFileAsync.mock.calls.filter(([cmd]) => cmd === '/bin/loongsuite-pilot');
+    expect(restartCalls).toHaveLength(1);
+  });
+
+  it('does not repeat updater failure alarms while restart is rate limited', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-16T00:00:00Z'));
+    await writePid(tmpDir);
+    await writeHeartbeat(tmpDir, { updatedAt: new Date('2026-06-15T23:59:50Z').toISOString() });
+
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      staleHeartbeatMs: 1_000,
+      startupGraceMs: 0,
+      restartCooldownMs: 60_000,
+      alarmManager: alarms,
+    });
+
+    expect((await wd.runCheck()).status).toBe('restart-attempted');
+    expect(alarms.serialize()).toHaveLength(1);
+    vi.setSystemTime(new Date('2026-06-16T00:00:02Z'));
+
+    const result = await wd.runCheck();
+
+    expect(result.status).toBe('restart-rate-limited');
+    expect(alarms.serialize()).toEqual([]);
+  });
+
+  it('treats a fresh heartbeat process as healthy when the pid file is stale', async () => {
+    const heartbeatPid = 67890;
+    await writePid(tmpDir, UPDATER_PID);
+    await writeHeartbeat(tmpDir, { pid: heartbeatPid });
+    killSpy.mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
+      if ((pid === UPDATER_PID || pid === heartbeatPid) && signal === 0) return true;
+      throw new Error('not running');
+    }) as typeof process.kill);
+
+    const alarms = makeAlarmManager();
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      alarmManager: alarms,
+    });
+
+    const result = await wd.runCheck();
+
+    expect(result.status).toBe('healthy');
+    expect(alarms.serialize()).toEqual([]);
     expect(mockExecFileAsync).not.toHaveBeenCalledWith('/bin/loongsuite-pilot', ['restart-updater'], expect.anything());
   });
 
