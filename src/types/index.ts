@@ -98,6 +98,7 @@ export interface AnalyticsConfig {
   pipeline: PipelineToggle;
   statusBar: StatusBarConfig;
   autoUpdate?: AutoUpdateConfig;
+  selfCheck: SelfCheckConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
   globalSpanAttributes?: Record<string, string>;
 }
@@ -230,6 +231,14 @@ export interface StatusBarConfig {
   enabled: boolean;
   metricsSummaryIntervalMs: number;
   runtimeRefreshIntervalMs: number;
+}
+
+export interface SelfCheckConfig {
+  enabled: boolean;
+  intervalMs: number;
+  dataGapThresholdMs: number;
+  neverCollectedGraceMs: number;
+  cooldownMs: number;
 }
 
 export type AgentControlMode = 'on' | 'off' | 'auto';

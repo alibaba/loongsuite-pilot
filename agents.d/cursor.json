@@ -3,7 +3,9 @@
   "displayName": "Cursor",
   "deployMode": "hook",
   "detection": {
-    "paths": ["~/.cursor"],
+    "paths": [
+      "~/.cursor"
+    ],
     "commands": []
   },
   "hook": {
@@ -28,5 +30,11 @@
   "input": {
     "type": "hook-jsonl",
     "logDir": "$PILOT_DATA/logs/cursor/history"
+  },
+  "activityIndicator": "~/.cursor/audit/audit.jsonl",
+  "versionSource": {
+    "type": "jsonlTail",
+    "file": "~/.cursor/audit/audit.jsonl",
+    "key": "cursor_version"
   }
 }

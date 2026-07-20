@@ -136,6 +136,58 @@ describe('AgentDefLoader', () => {
     expect(defs[0].detection.paths[0]).toBe(path.join(os.homedir(), '.cursor'));
   });
 
+  it('loads activityIndicator and expands ~', async () => {
+    const def = {
+      id: 'ai-test',
+      displayName: 'AI Test',
+      deployMode: 'hook',
+      detection: { paths: ['~/.claude'], commands: [] },
+      activityIndicator: '~/.claude/history.jsonl',
+    };
+    await fs.writeFile(path.join(builtinDir, 'ai.json'), JSON.stringify(def));
+
+    const defs = await makeLoader().load();
+
+    expect(defs[0].activityIndicator).toBe(path.join(os.homedir(), '.claude/history.jsonl'));
+  });
+
+  it('loads versionSource of type jsonFile with ~ expansion', async () => {
+    const def = {
+      id: 'vs-file-test',
+      displayName: 'VS File Test',
+      deployMode: 'hook',
+      detection: { paths: ['~/.codex'], commands: [] },
+      versionSource: { type: 'jsonFile', file: '~/.codex/version.json', key: 'latest_version' },
+    };
+    await fs.writeFile(path.join(builtinDir, 'vsfile.json'), JSON.stringify(def));
+
+    const defs = await makeLoader().load();
+    const vs = defs[0].versionSource;
+
+    expect(vs).toBeDefined();
+    expect(vs && 'type' in vs ? vs.type : undefined).toBe('jsonFile');
+    expect(vs && vs.type === 'jsonFile' ? vs.file : undefined).toBe(
+      path.join(os.homedir(), '.codex/version.json'),
+    );
+    expect(vs && vs.type === 'jsonFile' ? vs.key : undefined).toBe('latest_version');
+  });
+
+  it('loads versionSource of type command unchanged', async () => {
+    const def = {
+      id: 'vs-cmd-test',
+      displayName: 'VS Cmd Test',
+      deployMode: 'plugin-inject',
+      detection: { paths: ['~/.config/opencode'], commands: [] },
+      versionSource: { type: 'command', command: 'opencode --version' },
+    };
+    await fs.writeFile(path.join(builtinDir, 'vscmd.json'), JSON.stringify(def));
+
+    const defs = await makeLoader().load();
+    const vs = defs[0].versionSource;
+
+    expect(vs && vs.type === 'command' ? vs.command : undefined).toBe('opencode --version');
+  });
+
   it('handles missing directories gracefully', async () => {
     const loader = new AgentDefLoader({
       builtinDir: path.join(tmpDir, 'nonexistent'),

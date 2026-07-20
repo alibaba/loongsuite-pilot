@@ -53,6 +53,7 @@ import { AlarmManager } from '../metrics/alarm-manager.js';
 import { LocalWorkerActivationService } from '../local-workers/local-worker-activation-service.js';
 import type { DataflowSnapshot } from '../metrics/metrics-collector.js';
 import { RuntimeWriter, MetricsSummaryWriter, StatusBarAppManager } from '../status-bar/index.js';
+import { SelfCheckService } from '../self-check/self-check-service.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import { resolveLocalIp } from '../utils/network-utils.js';
@@ -117,6 +118,7 @@ export class Orchestrator extends EventEmitter {
   private runtimeWriter: RuntimeWriter | null = null;
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
+  private selfCheckService: SelfCheckService | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
 
@@ -216,7 +218,7 @@ export class Orchestrator extends EventEmitter {
       ...HookWatchdog.defaultInterceptTargets(this.dataDir),
       ...this.buildPluginInjectInterceptTargets(),
     ];
-    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
+    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets, this.alarmManager);
     this.hookWatchdog.start();
 
     // 11. Start updater watchdog only when resolved auto-update is enabled.
@@ -259,6 +261,20 @@ export class Orchestrator extends EventEmitter {
     });
     await this.metricsWriter.start();
 
+    // 13.5. Start self-check service (optional)
+    if (this.config.selfCheck.enabled) {
+      this.selfCheckService = new SelfCheckService({
+        config: this.config.selfCheck,
+        inputManager: this.inputManager,
+        alarmManager: this.alarmManager,
+        agentsConfig: this.config.agents,
+        definitions: this.deploymentManager.getDefinitions(),
+        inputToAgentMap: Orchestrator.LISTENER_AGENT_MAP,
+        pilotVersion: version,
+      });
+      await this.selfCheckService.start();
+    }
+
     // 14. Start status bar support (runtime.json + metrics summary + native app)
     if (this.config.statusBar.enabled) {
       const packageVersion = this.readPackageVersion();
@@ -289,6 +305,8 @@ export class Orchestrator extends EventEmitter {
     logger.info('stopping orchestrator');
 
     await this.pipelineManager?.stop();
+    await this.selfCheckService?.stop();
+    this.selfCheckService = null;
     await this.metricsWriter?.stop();
     await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(() => {});
     this.metricsSummaryWriter?.stop();

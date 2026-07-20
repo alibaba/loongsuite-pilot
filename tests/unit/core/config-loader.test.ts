@@ -929,6 +929,39 @@ describe('ConfigLoader', () => {
     });
   });
 
+  describe('selfCheck config', () => {
+    it('defaults to enabled with default thresholds', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      const config = await loadConfig();
+      expect(config.selfCheck.enabled).toBe(true);
+      expect(config.selfCheck.intervalMs).toBe(600_000);
+      expect(config.selfCheck.dataGapThresholdMs).toBe(14_400_000);
+      expect(config.selfCheck.neverCollectedGraceMs).toBe(14_400_000);
+      expect(config.selfCheck.cooldownMs).toBe(86_400_000);
+    });
+
+    it('reads values from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        selfCheck: { enabled: true, intervalMs: 300_000, dataGapThresholdMs: 3_600_000 },
+      });
+      const config = await loadConfig();
+      expect(config.selfCheck.enabled).toBe(true);
+      expect(config.selfCheck.intervalMs).toBe(300_000);
+      expect(config.selfCheck.dataGapThresholdMs).toBe(3_600_000);
+    });
+
+    it('env vars override file values', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        selfCheck: { enabled: true, intervalMs: 300_000 },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_SELFCHECK_INTERVAL_MS', '120000');
+      vi.stubEnv('LOONGSUITE_PILOT_SELFCHECK_ENABLED', 'false');
+      const config = await loadConfig();
+      expect(config.selfCheck.enabled).toBe(false);
+      expect(config.selfCheck.intervalMs).toBe(120_000);
+    });
+  });
+
   describe('globalSpanAttributes', () => {
     afterEach(() => {
       delete process.env.OTEL_SPAN_ATTRIBUTES;

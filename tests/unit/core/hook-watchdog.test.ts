@@ -272,6 +272,66 @@ describe('HookWatchdog', () => {
     });
   });
 
+  describe('repair alarm', () => {
+    function brokenTarget(): PluginCheckTarget {
+      const target = makeClaudeTarget(tmpDir);
+      return target;
+    }
+
+    async function setupBroken(target: PluginCheckTarget): Promise<void> {
+      await makeBin(target.binPath!);
+      const settings = buildHealthySettings(target);
+      delete (settings.hooks as Record<string, unknown>).Stop;
+      await writeSettings(target.settingsPath, settings);
+    }
+
+    it('records HOOK_REPAIR_ALARM level 1 on successful repair', async () => {
+      const target = brokenTarget();
+      await setupBroken(target);
+      const alarmManager = { record: vi.fn() };
+
+      spawnBehavior = 'success';
+      const wd = new HookWatchdog(makeConfig(), [target], [], alarmManager as any);
+      await wd.runCheck();
+
+      expect(alarmManager.record).toHaveBeenCalledTimes(1);
+      expect(alarmManager.record).toHaveBeenCalledWith(
+        'HOOK_REPAIR_ALARM', '1',
+        expect.stringContaining('succeeded for claude-code'),
+        { input_name: 'claude-code' },
+      );
+    });
+
+    it('records HOOK_REPAIR_ALARM level 2 on failed repair', async () => {
+      const target = brokenTarget();
+      await setupBroken(target);
+      const alarmManager = { record: vi.fn() };
+
+      spawnBehavior = 'fail';
+      const wd = new HookWatchdog(makeConfig(), [target], [], alarmManager as any);
+      await wd.runCheck();
+
+      expect(alarmManager.record).toHaveBeenCalledTimes(1);
+      expect(alarmManager.record).toHaveBeenCalledWith(
+        'HOOK_REPAIR_ALARM', '2',
+        expect.stringContaining('failed for claude-code'),
+        { input_name: 'claude-code' },
+      );
+    });
+
+    it('records no alarm when target is healthy', async () => {
+      const target = makeClaudeTarget(tmpDir);
+      await makeBin(target.binPath!);
+      await writeSettings(target.settingsPath, buildHealthySettings(target));
+      const alarmManager = { record: vi.fn() };
+
+      const wd = new HookWatchdog(makeConfig(), [target], [], alarmManager as any);
+      await wd.runCheck();
+
+      expect(alarmManager.record).not.toHaveBeenCalled();
+    });
+  });
+
   describe('start/stop', () => {
     it('does not arm timer when disabled', () => {
       vi.useFakeTimers();

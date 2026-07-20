@@ -110,6 +110,7 @@ Start with the guide that matches what you want to change:
 | Report OTLP traces                               | [Trace Output](docs/trace-output.md)             |
 | POST events to HTTP                              | [HTTP Output](docs/http-output.md)               |
 | Mask secrets before output                       | [Data Masking](docs/masking.md)                  |
+| Alert when collection breaks                     | [Self-Check](docs/self-check.md)                 |
 | See global config loading and retention settings | [Configuration Guide](docs/configuration.md)     |
 
 

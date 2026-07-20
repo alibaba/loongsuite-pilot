@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import type { HookWatchdogConfig } from '../types/index.js';
+import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { directoryExists, fileExists, readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -64,6 +65,7 @@ export class HookWatchdog {
   private readonly config: HookWatchdogConfig;
   private readonly targets: PluginCheckTarget[];
   private readonly interceptTargets: InterceptCheckTarget[];
+  private readonly alarmManager: AlarmManager | null;
   private readonly lastRepairAt: Map<string, number> = new Map();
   private readonly dailyRepairCount: Map<string, number> = new Map();
   private dailyRepairResetDate = '';
@@ -74,10 +76,12 @@ export class HookWatchdog {
     config: HookWatchdogConfig,
     targets?: PluginCheckTarget[],
     interceptTargets?: InterceptCheckTarget[],
+    alarmManager?: AlarmManager,
   ) {
     this.config = config;
     this.targets = targets ?? HookWatchdog.defaultTargets();
     this.interceptTargets = interceptTargets ?? [];
+    this.alarmManager = alarmManager ?? null;
   }
 
   start(): void {
@@ -200,9 +204,16 @@ export class HookWatchdog {
     const ok = await this.repairTarget(target);
     this.lastRepairAt.set(target.agentId, Date.now());
 
+    const missingList = missing.join(', ');
     if (!ok) {
+      this.alarmManager?.record('HOOK_REPAIR_ALARM', '2',
+        `hook auto-repair failed for ${target.agentId}: missing hooks [${missingList}]`,
+        { input_name: target.agentId });
       return { agentId: target.agentId, status: 'repair-failed', missing };
     }
+    this.alarmManager?.record('HOOK_REPAIR_ALARM', '1',
+      `hook auto-repair succeeded for ${target.agentId}: restored hooks [${missingList}]`,
+      { input_name: target.agentId });
     return { agentId: target.agentId, status: 'repaired', missing };
   }
 

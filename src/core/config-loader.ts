@@ -16,6 +16,7 @@ import type {
   CmsEndpointEntry,
   OtlpTraceFlusherConfig,
   OtlpTraceRawConfig,
+  SelfCheckConfig,
   SlsEndpoint,
   SlsMode,
   StatusBarConfig,
@@ -166,6 +167,14 @@ export interface ConfigFile {
     policy?: 'auto' | 'latest' | 'off';
     hotfix_version?: number;
   };
+
+  selfCheck?: {
+    enabled?: boolean;
+    intervalMs?: number;
+    dataGapThresholdMs?: number;
+    neverCollectedGraceMs?: number;
+    cooldownMs?: number;
+  };
 }
 
 function env(key: string): string | undefined {
@@ -237,6 +246,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     fileCollection: buildFileCollectionConfig(file),
     pipeline: buildPipelineConfig(file),
     statusBar: buildStatusBarConfig(file),
+    selfCheck: buildSelfCheckConfig(file),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
   };
 }
@@ -453,6 +463,22 @@ function buildStatusBarConfig(file: ConfigFile | null): StatusBarConfig {
     enabled: envBool('LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP', fallback),
     metricsSummaryIntervalMs: 60_000,
     runtimeRefreshIntervalMs: 30_000,
+  };
+}
+
+function buildSelfCheckConfig(file: ConfigFile | null): SelfCheckConfig {
+  return {
+    enabled: envBool('LOONGSUITE_PILOT_SELFCHECK_ENABLED', file?.selfCheck?.enabled ?? true),
+    intervalMs: envInt('LOONGSUITE_PILOT_SELFCHECK_INTERVAL_MS', file?.selfCheck?.intervalMs ?? 600_000),
+    dataGapThresholdMs: envInt(
+      'LOONGSUITE_PILOT_SELFCHECK_DATA_GAP_THRESHOLD_MS',
+      file?.selfCheck?.dataGapThresholdMs ?? 14_400_000,
+    ),
+    neverCollectedGraceMs: envInt(
+      'LOONGSUITE_PILOT_SELFCHECK_NEVER_COLLECTED_GRACE_MS',
+      file?.selfCheck?.neverCollectedGraceMs ?? 14_400_000,
+    ),
+    cooldownMs: envInt('LOONGSUITE_PILOT_SELFCHECK_COOLDOWN_MS', file?.selfCheck?.cooldownMs ?? 86_400_000),
   };
 }
 
