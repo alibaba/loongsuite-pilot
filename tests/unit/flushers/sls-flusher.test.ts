@@ -292,6 +292,53 @@ describe('SlsFlusher', () => {
       expect(logGroup.tags).toContainEqual({ __service_name__: 'loongsuite-pilot-claude-code' });
     });
 
+    it('uses per-endpoint serviceName override for its own __service_name__', async () => {
+      const config = makeConfig({
+        serviceNamePrefix: 'user-svc',
+        endpoints: [
+          { name: 'user', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p1', logstore: 'l1', kind: 'agentActivity', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+          { name: 'inner', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p2', logstore: 'l2', kind: 'agentActivity', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk', serviceName: 'managed-svc' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry({ agentType: ClientType.ClaudeCliHook }));
+      await flusher.flush();
+
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(2);
+      const byProject = new Map(
+        mockPostLogStoreLogs.mock.calls.map((c) => [c[0], c[2]]),
+      );
+      const nameOf = (g: any) =>
+        g.tags.find((t: Record<string, string>) => '__service_name__' in t)?.__service_name__;
+      // user endpoint inherits the shared prefix; inner endpoint uses its override
+      expect(nameOf(byProject.get('p1'))).toBe('user-svc-claude-code');
+      expect(nameOf(byProject.get('p2'))).toBe('managed-svc-claude-code');
+    });
+
+    it('per-endpoint serviceName works even when the shared prefix is empty', async () => {
+      const config = makeConfig({
+        serviceNamePrefix: '',
+        endpoints: [
+          { name: 'user', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p1', logstore: 'l1', kind: 'agentActivity', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk' },
+          { name: 'inner', endpoint: 'https://cn-hangzhou.log.aliyuncs.com', project: 'p2', logstore: 'l2', kind: 'agentActivity', mode: 'ak', accessKeyId: 'ak', accessKeySecret: 'sk', serviceName: 'managed-svc' },
+        ],
+      });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry({ agentType: ClientType.ClaudeCliHook }));
+      await flusher.flush();
+
+      const byProject = new Map(
+        mockPostLogStoreLogs.mock.calls.map((c) => [c[0], c[2]]),
+      );
+      const hasServiceName = (g: any) =>
+        g.tags.some((t: Record<string, string>) => '__service_name__' in t);
+      // user endpoint (no override, empty prefix) omits the tag; inner still tags
+      expect(hasServiceName(byProject.get('p1'))).toBe(false);
+      expect(byProject.get('p2').tags).toContainEqual({ __service_name__: 'managed-svc-claude-code' });
+    });
+
     it('omits __service_name__ tag when serviceNamePrefix is empty', async () => {
       const config = makeConfig({ serviceNamePrefix: '' });
       flusher = new SlsFlusher(config, '/tmp/data');

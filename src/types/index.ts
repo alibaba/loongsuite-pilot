@@ -74,6 +74,8 @@ export interface CmsEndpointEntry {
 export interface InnerTraceConfig {
   otlp?: OtlpEndpointEntry[];
   cms?: CmsEndpointEntry[];
+  /** service.name prefix for managed backends; falls back to the user prefix. */
+  serviceNamePrefix?: string;
 }
 
 export interface AnalyticsConfig {
@@ -121,6 +123,8 @@ export interface OtlpEndpoint {
   endpoint: string;
   headers?: Record<string, string>;
   compression?: 'none' | 'gzip';
+  /** Overrides the shared config.serviceName for this backend's spans. */
+  serviceName?: string;
 }
 
 export interface OtlpTraceFlusherConfig {
@@ -128,7 +132,7 @@ export interface OtlpTraceFlusherConfig {
   /** One or more backends; the same converted spans are exported to each. */
   endpoints: OtlpEndpoint[];
   protocol: 'http/protobuf';
-  // The following are shared across all backends (spans are converted once):
+  // Shared across backends unless an endpoint overrides it (see OtlpEndpoint.serviceName).
   serviceName: string;
   resourceAttributes?: Record<string, string>;
   captureMessageContent?: boolean;
@@ -168,6 +172,8 @@ export interface SlsEndpoint {
   accessKeyId?: string;
   accessKeySecret?: string;
   redact?: boolean;
+  /** Overrides the shared serviceNamePrefix for this endpoint's __service_name__ tag. */
+  serviceName?: string;
 }
 
 export interface JsonlFlusherConfig {
