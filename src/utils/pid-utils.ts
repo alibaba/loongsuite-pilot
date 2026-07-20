@@ -20,14 +20,14 @@ export const COLLECTOR_PROCESS_PATTERNS: readonly ProcessCommandPattern[] = [
   'collector-daemon.js',
   '/bin/collector-daemon',
   '\\bin\\collector-daemon',
-  /(?:^|\s)loongsuite-pilot(?:\.ps1)?\s+run(?:\s|$)/,
+  /(?:^|[\s/\\])loongsuite-pilot(?:\.ps1)?\s+run(?:\s|$)/,
 ];
 
 export const UPDATER_PROCESS_PATTERNS: readonly ProcessCommandPattern[] = [
   'updater-daemon.js',
   '/bin/updater-daemon',
   '\\bin\\updater-daemon',
-  /(?:^|\s)loongsuite-pilot(?:\.ps1)?\s+run-updater(?:\s|$)/,
+  /(?:^|[\s/\\])loongsuite-pilot(?:\.ps1)?\s+run-updater(?:\s|$)/,
   'dist/updater/index.js',
 ];
 
@@ -73,19 +73,19 @@ export function checkProcessLiveness(pidFile: string, patterns: readonly Process
   const pidFileStateWhenMissing: PidFileState = fs.existsSync(pidFile) ? 'invalid' : 'missing';
   let pidFileProcessAlive = false;
   let pidFileCommand = '';
-  let pidFileCommandMatched = false;
+  let pidFileCommandMatched: boolean | undefined;
 
   if (pid !== null) {
     pidFileProcessAlive = isProcessAlive(pid);
     if (pidFileProcessAlive) {
       pidFileCommand = readProcessCommand(pid);
-      pidFileCommandMatched = !pidFileCommand || isCommandMatch(pidFileCommand, patterns);
-      if (pidFileCommandMatched) {
+      pidFileCommandMatched = pidFileCommand ? isCommandMatch(pidFileCommand, patterns) : undefined;
+      if (pidFileCommandMatched === true) {
         return {
           running: true,
           pid,
           source: 'pid-file',
-          reason: pidFileCommand ? 'process is running with matching command' : 'process is running; command unavailable',
+          reason: 'process is running with matching command',
           pidFileState: 'matched',
           pidFileProcessAlive,
           pidFileCommand,

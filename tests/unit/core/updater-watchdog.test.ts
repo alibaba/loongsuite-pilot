@@ -14,8 +14,10 @@ vi.mock('../../../src/utils/logger.js', () => ({
 }));
 
 const mockExecFileAsync = vi.fn();
+const mockExecFileSync = vi.fn();
 vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
+  execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
 }));
 vi.mock('node:util', () => ({
   promisify: () => (...args: unknown[]) => mockExecFileAsync(...args),
@@ -68,6 +70,16 @@ describe('UpdaterWatchdog', () => {
 
   beforeEach(async () => {
     tmpDir = await createTempDir('updater-watchdog-test-');
+    mockExecFileSync.mockReset();
+    mockExecFileSync.mockImplementation((cmd: string, args: string[] = []) => {
+      if (cmd === 'ps' && args.includes('-p')) {
+        return 'node /home/test/.loongsuite-pilot/bin/updater-daemon.js\n';
+      }
+      if (cmd === 'powershell.exe' && args.includes('-Command')) {
+        return 'node C:\\Users\\test\\.loongsuite-pilot\\bin\\updater-daemon.js\n';
+      }
+      return '';
+    });
     mockExecFileAsync.mockReset();
     mockExecFileAsync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === 'ps') {

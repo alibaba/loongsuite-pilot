@@ -60,7 +60,7 @@ export class UpdaterMetrics {
   private eventQueue: UpdaterEvent[] = [];
   private alarmQueue: AlarmEntry[] = [];
   private userIdAlarmEmitted = false;
-  private readonly startedAt = Date.now();
+  private startedAt = 0;
   private collectorConsecutiveFailures = 0;
   private lastCollectorAlarmAt = 0;
 
@@ -75,6 +75,7 @@ export class UpdaterMetrics {
   }
 
   async start(): Promise<void> {
+    this.startedAt = Date.now();
     await ensureDir(this.logsDir);
     this.healthTimer = setInterval(
       () => void this.checkCollectorHealth(),

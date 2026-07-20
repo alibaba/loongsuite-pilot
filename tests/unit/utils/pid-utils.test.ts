@@ -67,6 +67,42 @@ describe('pid-utils identity-first liveness', () => {
     });
   });
 
+  it('falls through to process scan when pid file command is unreadable', () => {
+    readFileSyncMock.mockReturnValueOnce('123\n');
+    vi.spyOn(process, 'kill').mockReturnValue(true);
+    execFileSyncMock.mockReturnValueOnce('');
+    execFileSyncMock.mockReturnValueOnce('456 /usr/bin/node /tmp/collector-daemon.js\n');
+
+    const result = checkProcessLiveness('/tmp/pilot.pid', COLLECTOR_PROCESS_PATTERNS);
+
+    expect(result).toMatchObject({
+      running: true,
+      pid: 456,
+      source: 'process-scan',
+      pidFileState: 'stale',
+      pidFileProcessAlive: true,
+      pidFileCommandMatched: undefined,
+    });
+  });
+
+  it('reports unhealthy when pid file command is unreadable and scan finds nothing', () => {
+    readFileSyncMock.mockReturnValueOnce('123\n');
+    vi.spyOn(process, 'kill').mockReturnValue(true);
+    execFileSyncMock.mockReturnValueOnce('');
+    execFileSyncMock.mockReturnValueOnce('456 /usr/bin/node unrelated.js\n');
+
+    const result = checkProcessLiveness('/tmp/pilot.pid', COLLECTOR_PROCESS_PATTERNS);
+
+    expect(result).toMatchObject({
+      running: false,
+      pid: 123,
+      source: 'none',
+      pidFileState: 'stale',
+      pidFileProcessAlive: true,
+      pidFileCommandMatched: undefined,
+    });
+  });
+
   it('does not report down when pid changed but command identity is present', () => {
     readFileSyncMock.mockReturnValueOnce('123\n');
     vi.spyOn(process, 'kill').mockImplementation(() => {
