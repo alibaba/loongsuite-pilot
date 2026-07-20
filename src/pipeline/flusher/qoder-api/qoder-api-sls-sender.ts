@@ -7,6 +7,7 @@ import {
 } from '../../../flushers/sls-transport.js';
 import { LOCAL_IP, buildUserAgent } from '../../../utils/network-utils.js';
 import { createLogger } from '../../../utils/logger.js';
+import { estimateStringRecordBytes } from '../../../flushers/sls-failure-log-writer.js';
 
 const logger = createLogger('QoderApiSlsSender');
 
@@ -29,7 +30,7 @@ export interface QoderApiSlsSenderOptions {
  *
  * Buffers flat-string log rows in a single array (no per-file buckets) and
  * flushes them to SLS via webtracking on a 2-second interval. On send failure
- * the batch is persisted to a local failed-log directory for later inspection.
+ * bounded diagnostic metadata is persisted to a local failed-log directory.
  */
 export class QoderApiSlsSender {
   private readonly transportConfig: SlsTransportConfig;
@@ -127,16 +128,22 @@ export class QoderApiSlsSender {
             await persistFailedLogs(
               this.failedLogDir,
               this.configName,
-              { __logs__: tasks[i].batch },
+              {
+                mode: 'webtracking',
+                project: this.transportConfig.project,
+                logstore: this.transportConfig.logstore,
+                kind: this.configName,
+                batchCount: tasks[i].batch.length,
+                batchBytes: estimateStringRecordBytes(tasks[i].batch),
+              },
               err,
             );
           }
         }
 
-        // Note: splice runs after persistFailedLogs, so if persistFailedLogs throws,
-        // successfully-sent batches remain in the buffer and will be re-sent on the
-        // next flush cycle. This is safe because event_id dedup at SLS is load-bearing
-        // for correctness — it prevents duplicate delivery, not just an optimization.
+        // Failed payloads are not retained locally. The lightweight failed-log only
+        // records bounded diagnostic metadata; event_id still protects any retry path
+        // from duplicate delivery.
         this.buffer.splice(0, sliceEnd);
         if (hasFailure) break;
 
@@ -187,7 +194,14 @@ export class QoderApiSlsSender {
       await persistFailedLogs(
         this.failedLogDir,
         this.configName,
-        { __logs__: remaining },
+        {
+          mode: 'webtracking',
+          project: this.transportConfig.project,
+          logstore: this.transportConfig.logstore,
+          kind: this.configName,
+          batchCount: remaining.length,
+          batchBytes: estimateStringRecordBytes(remaining),
+        },
         new Error('shutdown drain incomplete'),
       );
     }

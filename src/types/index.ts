@@ -156,7 +156,7 @@ export interface SlsFlusherConfig {
 }
 
 export interface SlsEndpoint {
-  /** Unique identifier for this destination. Drives the failed-log filename `<name>.jsonl`. */
+  /** Unique identifier for this destination. Used in bounded failure-metadata filenames. */
   name: string;
   /** Per-endpoint base URL, e.g. "https://cn-hangzhou.log.aliyuncs.com". */
   endpoint: string;

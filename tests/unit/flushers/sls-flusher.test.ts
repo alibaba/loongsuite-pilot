@@ -4,8 +4,9 @@ import type { SlsFlusherConfig, SlsEndpoint } from '../../../src/types/index.js'
 import { buildTestEntry } from '../../helpers/fixture-builder.js';
 
 const mockPostLogStoreLogs = vi.fn().mockResolvedValue(undefined);
-const mockAppendLine = vi.fn().mockResolvedValue(undefined);
-const mockEnsureDir = vi.fn().mockResolvedValue(undefined);
+const mockFailureWrite = vi.fn().mockResolvedValue(true);
+const mockFailureStart = vi.fn().mockResolvedValue(undefined);
+const failureWriterDirectories: string[] = [];
 
 vi.mock('@alicloud/log', () => {
   return {
@@ -16,10 +17,18 @@ vi.mock('@alicloud/log', () => {
 });
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
-  appendLine: (...args: unknown[]) => mockAppendLine(...args),
-  ensureDir: (...args: unknown[]) => mockEnsureDir(...args),
   getTodayDateString: () => '2026-04-27',
   readInstalledVersion: () => '0.0.0-test',
+}));
+
+vi.mock('../../../src/flushers/sls-failure-log-writer.js', () => ({
+  SlsFailureLogWriter: vi.fn().mockImplementation((directory: string) => {
+    failureWriterDirectories.push(directory);
+    return {
+      start: mockFailureStart,
+      write: mockFailureWrite,
+    };
+  }),
 }));
 
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -62,6 +71,7 @@ describe('SlsFlusher', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    failureWriterDirectories.length = 0;
     vi.useFakeTimers();
     flusher = new SlsFlusher(makeConfig(), '/tmp/data');
   });
@@ -174,23 +184,54 @@ describe('SlsFlusher', () => {
   });
 
   describe('failure persistence (T015)', () => {
-    it('persists failed log group to sls-failed-logs/<endpoint.name>.jsonl', async () => {
+    it('persists bounded metadata without the failed payload', async () => {
       mockPostLogStoreLogs.mockRejectedValueOnce(new Error('invalid request'));
 
       await flusher.send(buildTestEntry());
       await flusher.flush();
 
-      expect(mockAppendLine).toHaveBeenCalledOnce();
-      const [filePath, line] = mockAppendLine.mock.calls[0];
-      expect(filePath).toContain('sls-failed-logs');
-      // Filename is keyed on endpoint.name (the makeConfig fixture uses name='activity').
-      expect(filePath).toContain('activity.jsonl');
-      const parsed = JSON.parse(line);
-      expect(parsed.error).toContain('invalid request');
-      expect(parsed.project).toBe('proj-a');
-      // The kind is preserved inside the JSON payload for debugging.
-      expect(parsed.kind).toBe('agentActivity');
-      expect(parsed.endpoint).toBe('activity');
+      expect(mockFailureWrite).toHaveBeenCalledOnce();
+      const metadata = mockFailureWrite.mock.calls[0][0];
+      expect(String(metadata.error)).toContain('invalid request');
+      expect(metadata.project).toBe('proj-a');
+      expect(metadata.kind).toBe('agentActivity');
+      expect(metadata.endpoint).toBe('activity');
+      expect(metadata.mode).toBe('ak');
+      expect(metadata.batchCount).toBe(1);
+      expect(metadata.batchBytes).toBeGreaterThan(0);
+      expect(metadata).not.toHaveProperty('logGroup');
+      expect(metadata).not.toHaveProperty('__logs__');
+      expect(failureWriterDirectories).toEqual(['/tmp/data/logs/sls-failed-logs']);
+    });
+
+    it('uses the same lightweight metadata format for webtracking failures', async () => {
+      const fetchSpy = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: async () => 'invalid payload',
+      });
+      vi.stubGlobal('fetch', fetchSpy);
+      flusher = new SlsFlusher(makeConfig({
+        endpoints: [{
+          name: 'web-endpoint',
+          endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+          project: 'web-project',
+          logstore: 'web-logstore',
+          kind: 'agentActivity',
+          mode: 'webtracking',
+        }],
+      }), '/tmp/data');
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      expect(mockFailureWrite).toHaveBeenCalledOnce();
+      const metadata = mockFailureWrite.mock.calls[0][0];
+      expect(metadata.mode).toBe('webtracking');
+      expect(metadata.batchCount).toBe(1);
+      expect(metadata.batchBytes).toBeGreaterThan(0);
+      expect(metadata).not.toHaveProperty('__logs__');
+      vi.unstubAllGlobals();
     });
   });
 
