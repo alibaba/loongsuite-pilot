@@ -1,0 +1,9 @@
+{
+  "id": "kiro",
+  "displayName": "Kiro Desktop",
+  "deployMode": "detection-only",
+  "detection": {
+    "paths": ["~/.kiro"],
+    "commands": []
+  }
+}

@@ -434,6 +434,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
       if (spans.length === 0) return;
 
+      // Post-conversion enrichment: stamp ARMS common attributes
+      // (gen_ai.session.id / gen_ai.user.id / gen_ai.agent.name) onto spans
+      // when the converter could not derive them. This happens for inputs
+      // like Kiro Desktop that emit every session event as event.name='other'
+      // without gen_ai.input.messages — the converter filters those records
+      // out of parentRecords, so resolveTurnAgentName/UserId/SessionId return
+      // null and applyCommonGenAiAttributes skips the assignment. The records
+      // themselves still carry the fields (set by the input or auto-filled by
+      // input-manager), so we resolve them here and fill-only onto spans.
+      this.enrichCommonAttributes(spans, records);
+
       const exportState = this.getOrCreateExportState(agentType);
 
       if (this.cfg.debug) {
@@ -698,6 +709,49 @@ export class OtlpTraceFlusher extends BaseFlusher {
     });
   }
 
+  /**
+   * Fill-only stamp ARMS GenAI common attributes (gen_ai.session.id /
+   * gen_ai.user.id / gen_ai.agent.name) onto converted spans. Runs after
+   * convertEventLogToTrace, when the converter could not derive them — e.g.
+   * Kiro Desktop emits every session event as event.name='other' without
+   * gen_ai.input.messages, so the converter filters them out of parentRecords
+   * and resolveTurnAgentName/UserId/SessionId return null.
+   *
+   * The records themselves carry the fields (input sets gen_ai.session.id /
+   * gen_ai.agent.name / gen_ai.agent.type; input-manager auto-fills user.id
+   * from os.hostname()). Resolve first non-empty value across records, then
+   * write onto each span only if the attribute is absent (fill-only, never
+   * clobber converter-produced values).
+   */
+  private enrichCommonAttributes(
+    spans: ReadableSpan[],
+    records: AgentActivityEntry[],
+  ): void {
+    if (spans.length === 0 || records.length === 0) return;
+
+    const sessionId = firstNonEmpty(records, 'gen_ai.session.id');
+    const userId = firstNonEmpty(records, 'user.id');
+    const agentName = firstNonEmpty(records, 'gen_ai.agent.name')
+      ?? firstNonEmpty(records, 'gen_ai.agent.type');
+
+    if (sessionId === undefined && userId === undefined && agentName === undefined) {
+      return;
+    }
+
+    for (const span of spans) {
+      const attrs = span.attributes as Record<string, unknown>;
+      if (sessionId !== undefined && attrs['gen_ai.session.id'] === undefined) {
+        attrs['gen_ai.session.id'] = sessionId;
+      }
+      if (userId !== undefined && attrs['gen_ai.user.id'] === undefined) {
+        attrs['gen_ai.user.id'] = userId;
+      }
+      if (agentName !== undefined && attrs['gen_ai.agent.name'] === undefined) {
+        attrs['gen_ai.agent.name'] = agentName;
+      }
+    }
+  }
+
   private async writeDebugLog(agentType: string, spans: ReadableSpan[]): Promise<void> {
     try {
       const svcName = `${this.cfg.serviceName}-${agentType}`;
@@ -755,4 +809,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
 function hasTerminalFinishReason(finishReasons: unknown): boolean {
   return Array.isArray(finishReasons)
     && finishReasons.some(reason => typeof reason === 'string' && TERMINAL_FINISH_REASONS.has(reason));
+}
+
+function firstNonEmpty(
+  records: AgentActivityEntry[],
+  key: string,
+): string | undefined {
+  for (const r of records) {
+    const v = r[key as keyof AgentActivityEntry];
+    if (typeof v === 'string' && v.length > 0) return v;
+  }
+  return undefined;
 }
