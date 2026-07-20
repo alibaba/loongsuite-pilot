@@ -83,7 +83,7 @@ Pilot 可以将同一份规范化事件流输出到多个目标：
 | `plugins/` | 已安装的插件资产。 |
 | `logs/output/` | 本地规范化 JSONL 输出。 |
 | `logs/input-state.json` | 输入源偏移和 checkpoint。 |
-| `sls-failed-logs/` | SLS 上报失败的本地持久化记录。 |
+| `logs/sls-failed-logs/` | 有容量上限的 SLS 失败诊断元数据，不包含失败 payload。 |
 | `versions/` 和 `current` | 用于升级和回滚的版本目录与指针。 |
 
 ## 下一步

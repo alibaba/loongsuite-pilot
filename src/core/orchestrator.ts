@@ -45,6 +45,7 @@ import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-l
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
+import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
 import { PipelineManager } from '../pipeline/pipeline-manager.js';
@@ -107,6 +108,7 @@ export class Orchestrator extends EventEmitter {
   private stateStore!: StateStore;
   private flusher!: BaseFlusher;
   private logRetentionService!: LogRetentionService;
+  private legacySlsFailedLogCleanupService: LegacySlsFailedLogCleanupService | null = null;
   private hookWatchdog!: HookWatchdog;
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
@@ -282,6 +284,9 @@ export class Orchestrator extends EventEmitter {
     logger.info('orchestrator started', {
       inputs: detectionEntries.length,
     });
+
+    this.legacySlsFailedLogCleanupService = new LegacySlsFailedLogCleanupService(this.dataDir);
+    this.legacySlsFailedLogCleanupService.start();
   }
 
   async stop(): Promise<void> {
@@ -296,6 +301,8 @@ export class Orchestrator extends EventEmitter {
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
     this.hookWatchdog?.stop();
+    this.legacySlsFailedLogCleanupService?.stop();
+    this.legacySlsFailedLogCleanupService = null;
     this.logRetentionService?.stop();
     await this.localWorkerActivationService?.stop();
     await this.deploymentManager?.stopWorkers();

@@ -8,11 +8,11 @@ import {
 import type { AgentActivityEntry, SlsFlusherConfig, SlsEndpoint } from '../types/index.js';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
-import { appendLine, ensureDir } from '../utils/fs-utils.js';
 import { formatTime } from '../utils/time-utils.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { LOCAL_IP, buildUserAgent } from '../utils/network-utils.js';
 import * as path from 'node:path';
+import { SlsFailureLogWriter } from './sls-failure-log-writer.js';
 import {
   HttpError,
   postWebtracking,
@@ -34,6 +34,7 @@ interface QueuedLog {
   content: Record<string, string>;
   endpoint: SlsEndpoint;
   agentType?: string;
+  byteSize: number;
 }
 
 const logger = createLogger('SlsFlusher');
@@ -57,7 +58,7 @@ export class SlsFlusher extends BaseFlusher {
   private readonly config: SlsFlusherConfig;
   private readonly queue: Map<string, QueuedLog[]> = new Map();
   private flushTimer: ReturnType<typeof setInterval> | null = null;
-  private readonly failedLogDir: string;
+  private readonly failedLogWriter: SlsFailureLogWriter;
   private readonly akClients: Map<string, any> = new Map();
   private readonly endpointCounters: Map<string, EndpointCounter> = new Map();
   private alarmManager: AlarmManager | null = null;
@@ -68,7 +69,9 @@ export class SlsFlusher extends BaseFlusher {
   constructor(config: SlsFlusherConfig, dataDir: string) {
     super();
     this.config = config;
-    this.failedLogDir = path.join(dataDir, 'sls-failed-logs');
+    this.failedLogWriter = new SlsFailureLogWriter(
+      path.join(dataDir, 'logs', 'sls-failed-logs'),
+    );
     this.serviceName = config.serviceNamePrefix || '';
     this.userAgent = buildUserAgent(dataDir);
     for (const ep of config.endpoints) {
@@ -103,7 +106,7 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   async start(): Promise<void> {
-    await ensureDir(this.failedLogDir);
+    await this.failedLogWriter.start();
     this.flushTimer = setInterval(
       () => void this.flush(),
       this.config.flushIntervalMs || FLUSH_INTERVAL_MS,
@@ -254,7 +257,12 @@ export class SlsFlusher extends BaseFlusher {
         { endpoint_name: endpoint.name },
       );
     }
-    await this.persistFailedLogs(endpoint, logGroup, lastErr);
+    await this.persistFailedLogs(
+      endpoint,
+      logs.length,
+      logs.reduce((sum, log) => sum + log.byteSize, 0),
+      lastErr,
+    );
   }
 
   private async flushViaWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
@@ -368,22 +376,25 @@ export class SlsFlusher extends BaseFlusher {
         { endpoint_name: endpoint.name },
       );
     }
-    await this.persistFailedLogs(endpoint, body, lastErr);
+    await this.persistFailedLogs(endpoint, logs.length, Buffer.byteLength(raw), lastErr);
   }
 
-  private async persistFailedLogs(endpoint: SlsEndpoint, logGroup: unknown, err: unknown): Promise<void> {
-    await ensureDir(this.failedLogDir);
-    const filePath = path.join(this.failedLogDir, `${endpoint.name}.jsonl`);
-    const line = JSON.stringify({
-      ts: Date.now(),
+  private async persistFailedLogs(
+    endpoint: SlsEndpoint,
+    batchCount: number,
+    batchBytes: number,
+    err: unknown,
+  ): Promise<void> {
+    await this.failedLogWriter.write({
       endpoint: endpoint.name,
+      mode: endpoint.mode,
       project: endpoint.project,
       logstore: endpoint.logstore,
       kind: endpoint.kind,
-      logGroup,
-      error: String(err),
+      batchCount,
+      batchBytes,
+      error: err,
     });
-    await appendLine(filePath, line);
   }
 
   async shutdown(): Promise<void> {
@@ -443,12 +454,13 @@ export class SlsFlusher extends BaseFlusher {
       bucket = [];
       this.queue.set(key, bucket);
     }
-    bucket.push({ content, endpoint, agentType });
+    const byteSize = Buffer.byteLength(JSON.stringify(content));
+    bucket.push({ content, endpoint, agentType, byteSize });
 
     const counter = this.endpointCounters.get(endpoint.name);
     if (counter) {
       counter.inEntries++;
-      counter.inBytes += Buffer.byteLength(JSON.stringify(content));
+      counter.inBytes += byteSize;
       if (!counter.startTime) counter.startTime = formatTime(new Date());
     }
 

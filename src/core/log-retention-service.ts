@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { LogRetentionConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
+import { SLS_FAILURE_LOG_MAX_TOTAL_BYTES } from '../flushers/sls-failure-log-writer.js';
 
 const logger = createLogger('LogRetention');
 
@@ -13,6 +14,7 @@ export const OUTPUT_RETENTION_MAX_TOTAL_BYTES = 2 * 1024 * MEBIBYTE;
 export const OUTPUT_RETENTION_LARGE_FILE_THRESHOLD_BYTES = 512 * MEBIBYTE;
 export const OUTPUT_RETENTION_LARGE_FILE_DAYS = 2;
 export const OUTPUT_RETENTION_PRESSURE_MIN_KEEP_DAYS = 1;
+export const SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES = SLS_FAILURE_LOG_MAX_TOTAL_BYTES;
 
 type Category = 'history' | 'errors' | 'debug' | 'output' | 'sls-failed-logs';
 
@@ -58,6 +60,7 @@ export class LogRetentionService {
       outputLargeFileThresholdBytes: OUTPUT_RETENTION_LARGE_FILE_THRESHOLD_BYTES,
       outputLargeFileDays: OUTPUT_RETENTION_LARGE_FILE_DAYS,
       outputPressureMinKeepDays: OUTPUT_RETENTION_PRESSURE_MIN_KEEP_DAYS,
+      slsFailedMaxTotalBytes: SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES,
     });
 
     this.startupTimer = setTimeout(() => {
@@ -79,7 +82,7 @@ export class LogRetentionService {
   }
 
   async runCleanup(): Promise<{ deleted: number; errors: number }> {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDateString(new Date());
     let deleted = 0;
     let errors = 0;
 
@@ -150,6 +153,9 @@ export class LogRetentionService {
     if (category === 'output') {
       return this.cleanOutputDirectory(dir, files, today);
     }
+    if (category === 'sls-failed-logs') {
+      return this.cleanSlsFailedDirectory(dir, files, today);
+    }
 
     const retentionDays = this.getRetentionDays(category);
     const cutoff = dateCutoff(retentionDays);
@@ -161,6 +167,48 @@ export class LogRetentionService {
 
       if (await this.deleteFile(path.join(dir, file))) {
         deleted++;
+      } else {
+        errors++;
+      }
+    }
+
+    return { deleted, errors };
+  }
+
+  private async cleanSlsFailedDirectory(
+    dir: string,
+    files: string[],
+    today: string,
+  ): Promise<{ deleted: number; errors: number }> {
+    let deleted = 0;
+    let errors = 0;
+    let remaining = await this.collectDatedOutputFiles(dir, files);
+
+    const cutoff = dateCutoff(this.config.slsFailedDays);
+    const expiredResult = await this.deleteDatedFiles(
+      remaining,
+      file => file.dateStr !== today && file.dateStr < cutoff,
+    );
+    deleted += expiredResult.deleted;
+    errors += expiredResult.errors;
+
+    remaining = await this.collectDatedOutputFiles(dir, await readdir(dir));
+    let totalBytes = remaining.reduce((sum, file) => sum + file.size, 0);
+    if (totalBytes <= SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES) {
+      return { deleted, errors };
+    }
+
+    const activePaths = findActiveSlsFailureSegments(remaining, today);
+    const candidates = remaining
+      .filter(file => !activePaths.has(file.fullPath))
+      .sort((a, b) => a.dateStr.localeCompare(b.dateStr)
+        || a.file.localeCompare(b.file));
+
+    for (const file of candidates) {
+      if (totalBytes <= SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES) break;
+      if (await this.deleteFile(file.fullPath)) {
+        deleted++;
+        totalBytes -= file.size;
       } else {
         errors++;
       }
@@ -314,7 +362,14 @@ export function extractDate(filename: string): string | null {
 function dateCutoff(retentionDays: number): string {
   const d = new Date();
   d.setDate(d.getDate() - retentionDays);
-  return d.toISOString().slice(0, 10);
+  return localDateString(d);
+}
+
+function localDateString(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 async function readdir(dir: string): Promise<string[]> {
@@ -331,4 +386,19 @@ async function safeStat(p: string) {
   } catch {
     return null;
   }
+}
+
+function findActiveSlsFailureSegments(files: DatedLogFile[], today: string): Set<string> {
+  const latestByEndpoint = new Map<string, { segment: number; path: string }>();
+  for (const file of files) {
+    if (file.dateStr !== today) continue;
+    const match = /^(.*)-(\d+)-(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(file.file);
+    if (!match || match[3] !== today) continue;
+    const segment = Number(match[2]);
+    const current = latestByEndpoint.get(match[1]);
+    if (!current || segment > current.segment) {
+      latestByEndpoint.set(match[1], { segment, path: file.fullPath });
+    }
+  }
+  return new Set([...latestByEndpoint.values()].map(value => value.path));
 }

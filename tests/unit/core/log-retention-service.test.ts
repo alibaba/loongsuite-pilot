@@ -6,6 +6,7 @@ import {
   LogRetentionService,
   OUTPUT_RETENTION_LARGE_FILE_THRESHOLD_BYTES,
   OUTPUT_RETENTION_MAX_TOTAL_BYTES,
+  SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES,
   extractDate,
 } from '../../../src/core/log-retention-service.js';
 import type { LogRetentionConfig } from '../../../src/types/index.js';
@@ -199,6 +200,26 @@ describe('LogRetentionService', () => {
       const result = await service.runCleanup();
 
       expect(result.deleted).toBe(1);
+    });
+
+    it('enforces the SLS failure total limit while preserving the active segment', async () => {
+      const slsDir = path.join(tmpDir, 'logs', 'sls-failed-logs');
+      await fs.mkdir(slsDir, { recursive: true });
+      const segmentSize = Math.floor(SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES / 3);
+      const sealed0 = path.join(slsDir, `activity-deadbeef00-0000-${today()}.jsonl`);
+      const sealed1 = path.join(slsDir, `activity-deadbeef00-0001-${today()}.jsonl`);
+      const active = path.join(slsDir, `activity-deadbeef00-0002-${today()}.jsonl`);
+      await writeSizedFile(sealed0, segmentSize);
+      await writeSizedFile(sealed1, segmentSize);
+      await writeSizedFile(active, segmentSize + 3);
+
+      const service = new LogRetentionService(tmpDir, makeConfig());
+      const result = await service.runCleanup();
+
+      expect(result.deleted).toBe(1);
+      expect(await fs.access(sealed0).then(() => true, () => false)).toBe(false);
+      expect(await fs.access(sealed1).then(() => true, () => false)).toBe(true);
+      expect(await fs.access(active).then(() => true, () => false)).toBe(true);
     });
 
     it('skips unrecognized subdirectories', async () => {
