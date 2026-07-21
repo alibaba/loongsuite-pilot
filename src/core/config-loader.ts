@@ -133,6 +133,7 @@ export interface ConfigFile {
     captureMessageContent?: boolean;
     turnIdleTimeoutMs?: number;
     resourceAttributeKeys?: string[];
+    spanAttributePassthroughPrefixes?: string[];
   };
 
   agents?: Record<string, {
@@ -571,6 +572,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     debug: otlp?.debug ?? config.cms.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
+    spanAttributePassthroughPrefixes: resolveSpanAttributePassthroughPrefixes(otlp),
     maxExportBatchBytes: otlp?.maxExportBatchBytes,
   };
 }
@@ -631,6 +633,20 @@ function resolveResourceAttributeKeys(
       .filter((key): key is string => typeof key === 'string')
       .map(key => key.trim())
       .filter(key => key.length > 0),
+  )];
+}
+
+function resolveSpanAttributePassthroughPrefixes(
+  otlp: AnalyticsConfig['otlpTrace'],
+): string[] {
+  const prefixes = Array.isArray(otlp?.spanAttributePassthroughPrefixes)
+    ? otlp.spanAttributePassthroughPrefixes
+    : [];
+  return [...new Set(
+    prefixes
+      .filter((prefix): prefix is string => typeof prefix === 'string')
+      .map(prefix => prefix.trim())
+      .filter(prefix => prefix.length > 0),
   )];
 }
 

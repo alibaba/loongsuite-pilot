@@ -57,6 +57,7 @@ import {
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
+  parseSpanAttributesFromEnv,
 } from './shared/resource-context.mjs';
 
 const AGENT_ID = 'claude-code';
@@ -65,6 +66,9 @@ const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
 const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
   ? { resourceAttributes: RESOURCE_ATTRIBUTES }
   : {};
+// Caller-supplied span attributes (e.g. multica.*) stamped as top-level record
+// fields so the trace flusher can pass matching keys through to span attributes.
+const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, { agentId: AGENT_ID });
 
 // ─── utilities ───
 
@@ -443,6 +447,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     'user.id': userId,
     ...(cwd ? { 'agent.claude-code.cwd': cwd } : {}),
     ...RESOURCE_ATTRIBUTE_FIELDS,
+    ...SPAN_ATTRIBUTES,
   };
 
   // 用户输入: 做法 A (EVENT_LOG_TO_TRACE_SPEC §5.1, 0.1.0-beta.3+)

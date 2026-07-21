@@ -84,7 +84,7 @@ Trace 导出会把**同一批**转换后的 span **同时**发往**所有**已�
 
 共享 vs 单后端设置(span 按不同 `service.name` 各转换一次):
 
-- **所有后端共享:** `resourceAttributes`、`captureMessageContent`、`resourceAttributeKeys`、`maxExportBatchBytes`、`turnIdleTimeoutMs`。
+- **所有后端共享:** `resourceAttributes`、`captureMessageContent`、`resourceAttributeKeys`、`spanAttributePassthroughPrefixes`、`maxExportBatchBytes`、`turnIdleTimeoutMs`。
 - **每后端独立:** endpoint URL、headers、compression,以及 `service.name`(见下文——用户后端与托管后端可不同)。
 
 某个后端失败会被隔离——不会阻塞健康后端,其失败 span 会单独落盘到 `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<后端名>.jsonl`。
@@ -285,6 +285,26 @@ Pilot 会将 Trace 发送到 `http://localhost:3000/api/public/otel/v1/traces`�
 - 值均为字符串。文件改动会在下一个处理周期生效（受采集轮询间隔约束，约 30s），并非即时。
 - key 会原样作为 span 属性名。**请避免以 `agent.` 开头**及其它保留前缀（`gen_ai.`、`git.`、`workspace.`、`event.`、`trace_`、`user.`、`cost_`）——这类 key 会被跳过。
 - 属性为 fill-only，绝不覆盖 span 已有属性。
+
+**3. 按次调用的透传属性。** 上述三个来源都是进程级全局的（一台机器一个共享 pilot daemon），无法按每次 agent 调用区分。若要对单次调用做归因（如哪个用户 / issue 触发了本次运行），由调用方在被拉起的 agent 子进程上设置**按次**环境变量，daemon 再把匹配前缀的 key 透传到该次调用的 span 上。
+
+- 宿主进程在 agent 子进程上设置 `LOONGSUITE_PILOT_SPAN_ATTRIBUTES`（同样是 `key=value,key=value` 格式）。agent 的 hook/plugin 在启动时解析它，并把这些键值对作为顶层字段写入它产出的每条 record，因此每次调用都带上各自的值。
+
+  ```bash
+  # 由启动器在每次 agent 调用时设置
+  export LOONGSUITE_PILOT_SPAN_ATTRIBUTES="multica.issue.id=AGE-992,multica.user.id=staff"
+  ```
+
+- `config.json` → `otlpTrace.spanAttributePassthroughPrefixes` 列出 daemon 需要透传到 span 的 key 前缀：
+
+  ```json
+  { "otlpTrace": { "spanAttributePassthroughPrefixes": ["multica."] } }
+  ```
+
+说明：
+- 与来源 #2（仅 span）不同，透传属性是普通的顶层 record 字段，因此会**同时**出现在 event log（SLS / JSONL）和 trace span 上——与 git 字段行为一致。
+- 保留前缀 key（`gen_ai.`、`git.`、`workspace.`、`event.`、`trace_`、`user.`、`cost_`、`agent.`）以及敏感命名（token/secret/password/…）会被 hook 丢弃。请使用 `multica.*` 等专用命名空间。
+- 仅匹配所配置前缀的 key 会被透传，其它顶层字段不受影响。支持在进程内构建 record 的 agent（claude-code、qoder、opencode）。
 
 ## 验证 Trace 输出
 

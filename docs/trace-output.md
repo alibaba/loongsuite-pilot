@@ -84,7 +84,7 @@ Backends are **deduplicated** by normalized endpoint URL + full request headers,
 
 Shared vs. per-backend settings (spans are converted once per distinct `service.name`):
 
-- **Shared across all backends:** `resourceAttributes`, `captureMessageContent`, `resourceAttributeKeys`, `maxExportBatchBytes`, `turnIdleTimeoutMs`.
+- **Shared across all backends:** `resourceAttributes`, `captureMessageContent`, `resourceAttributeKeys`, `spanAttributePassthroughPrefixes`, `maxExportBatchBytes`, `turnIdleTimeoutMs`.
 - **Per-backend:** endpoint URL, headers, compression, and `service.name` (see below — user vs. managed backends can differ).
 
 A failing backend is isolated — it does not block the healthy backends, and its failed spans are persisted separately under `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<backend-name>.jsonl`.
@@ -285,6 +285,26 @@ Notes:
 - Values are strings. File edits are picked up on the next processing cycle (bounded by the input poll interval, ~30s), not instantly.
 - Keys are written verbatim as span attribute names. **Avoid keys starting with `agent.`** and other reserved prefixes (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`) — such keys are skipped.
 - Attributes never overwrite existing span attributes (fill-only).
+
+**3. Per-invocation passthrough attributes.** The three sources above are process-global (one shared pilot daemon), so they cannot vary per agent call. To attribute individual calls (e.g. which user / issue triggered a run), the calling process sets a **per-invocation** env var on the spawned agent, and the daemon passes matching keys through onto that call's spans.
+
+- The host process sets `LOONGSUITE_PILOT_SPAN_ATTRIBUTES` (same `key=value,key=value` format) on the agent subprocess. The agent's hook/plugin parses it at startup and stamps the pairs as top-level fields on every record it emits, so each call carries its own values.
+
+  ```bash
+  # set by the launcher per agent invocation
+  export LOONGSUITE_PILOT_SPAN_ATTRIBUTES="multica.issue.id=AGE-992,multica.user.id=staff"
+  ```
+
+- `config.json` → `otlpTrace.spanAttributePassthroughPrefixes` lists the key prefixes the daemon should surface onto spans:
+
+  ```json
+  { "otlpTrace": { "spanAttributePassthroughPrefixes": ["multica."] } }
+  ```
+
+Notes:
+- Unlike source #2 (spans only), passthrough attributes are ordinary top-level record fields, so they appear in **both** the event log (SLS / JSONL) and the trace spans — same behavior as the git fields.
+- Reserved-prefix keys (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`, `agent.`) and sensitive names (token/secret/password/…) are dropped by the hook. Use a dedicated namespace such as `multica.*`.
+- Only keys matching a configured prefix are passed through; all other top-level fields are unaffected. Supported for agents whose records are built in-process (claude-code, qoder, opencode).
 
 ## Verify Trace Output
 
