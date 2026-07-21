@@ -28,6 +28,27 @@ function eventToSubcommand(event: string): string {
 }
 
 /**
+ * 把 event 名转换为 settings JSON hook config 的最后一段 key。
+ *
+ * `style === 'snake'` 时 PascalCase → snake_case(`Stop` → `stop`、
+ * `SubagentStart` → `subagent_start`),用于 grok-build 等对 hook key
+ * case-sensitive 的 agent。其他情况原样返回(默认 PascalCase,对齐
+ * Claude Code / Codex / Cursor / Qoder)。
+ *
+ * 与 `eventToSubcommand` 独立:subcommand 是 argv 后缀,这里是 settings
+ * JSON 字段名,两条维度互不影响。
+ */
+function eventToKey(
+  event: string,
+  style: AgentHookConfig['eventKeyCase'],
+): string {
+  if (style === 'snake') {
+    return event.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase();
+  }
+  return event;
+}
+
+/**
  * On Windows, .ps1 scripts must be invoked via `powershell -File` for stdin
  * piping to work correctly.  Bare `.ps1` paths fail to receive stdin when
  * spawned through cmd.exe / child_process.
@@ -302,7 +323,7 @@ export class HookStrategy implements DeployStrategy {
       }
 
       for (const event of def.hook!.events) {
-        const arr = hooks[event];
+        const arr = hooks[eventToKey(event, def.hook!.eventKeyCase)];
         if (!Array.isArray(arr)) continue;
         const cmd = formatHookCommand(hookCommand, event, def.hook!.eventSubcommand);
         for (let i = 0; i < arr.length; i++) {
@@ -335,7 +356,7 @@ export class HookStrategy implements DeployStrategy {
     return hookConfig.events.map(event => ({
       agentId: def.id,
       settingsPath: hookConfig.settingsPath,
-      hookJsonPath: ['hooks', event],
+      hookJsonPath: ['hooks', eventToKey(event, hookConfig.eventKeyCase)],
       hookCommand: formatHookCommand(
         hookConfig.hookCommand, event, hookConfig.eventSubcommand,
       ),
@@ -354,7 +375,7 @@ export class HookStrategy implements DeployStrategy {
       .map(event => ({
         agentId: def.id,
         settingsPath: hookConfig.settingsPath,
-        hookJsonPath: ['hooks', event],
+        hookJsonPath: ['hooks', eventToKey(event, hookConfig.eventKeyCase)],
         hookCommand: formatHookCommand(
           hookConfig.hookCommand, event, hookConfig.eventSubcommand,
         ),

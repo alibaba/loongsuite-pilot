@@ -1,9 +1,12 @@
 import * as path from 'node:path';
 import type { JsonValue } from '../../types/index.js';
 import type {
+  CodexPartialTurnExtraction,
   CodexExtractedTranscriptTurn,
   CodexTerminalStatus,
   CodexTranscriptMeta,
+  CodexTranscriptSourceRecord,
+  CodexTranscriptSourceRange,
   CodexTranscriptStep,
   CodexTranscriptTool,
   CodexTranscriptUsage,
@@ -33,38 +36,121 @@ export function extractCodexTerminalTurn(
   fallbackSessionId: string,
   expectedTurnId: string,
 ): CodexExtractedTranscriptTurn | null {
-  let currentTurnId = '';
-  let startedAtMs = 0;
+  return extractCodexTurn(toSourceRecords(records), meta, fallbackSessionId, expectedTurnId, {
+    requireTerminal: true,
+  })?.turn ?? null;
+}
+
+export function extractCodexPartialTurn(
+  records: Record<string, unknown>[],
+  meta: CodexTranscriptMeta | null,
+  fallbackSessionId: string,
+  expectedTurnId: string,
+  opts: {
+    startedAtMs?: number;
+    model?: string;
+    cwd?: string;
+    developerInstructions?: string;
+  } = {},
+): CodexExtractedTranscriptTurn | null {
+  return extractCodexTurn(toSourceRecords(records), meta, fallbackSessionId, expectedTurnId, {
+    requireTerminal: false,
+    startedAtMs: opts.startedAtMs,
+    model: opts.model,
+    cwd: opts.cwd,
+    developerInstructions: opts.developerInstructions,
+  })?.turn ?? null;
+}
+
+export function extractCodexPartialTurnWithBoundaries(
+  records: CodexTranscriptSourceRecord[],
+  meta: CodexTranscriptMeta | null,
+  fallbackSessionId: string,
+  expectedTurnId: string,
+  opts: {
+    startedAtMs?: number;
+    model?: string;
+    cwd?: string;
+    developerInstructions?: string;
+  } = {},
+): CodexPartialTurnExtraction | null {
+  return extractCodexTurn(records, meta, fallbackSessionId, expectedTurnId, {
+    requireTerminal: false,
+    startedAtMs: opts.startedAtMs,
+    model: opts.model,
+    cwd: opts.cwd,
+    developerInstructions: opts.developerInstructions,
+  });
+}
+
+interface StepEnvelope {
+  step: CodexTranscriptStep;
+  sourceRange: CodexTranscriptSourceRange;
+  llmClosed: boolean;
+  followedByAnotherWave: boolean;
+}
+
+function extractCodexTurn(
+  records: CodexTranscriptSourceRecord[],
+  meta: CodexTranscriptMeta | null,
+  fallbackSessionId: string,
+  expectedTurnId: string,
+  opts: {
+    requireTerminal: boolean;
+    startedAtMs?: number;
+    model?: string;
+    cwd?: string;
+    developerInstructions?: string;
+  },
+): CodexPartialTurnExtraction | null {
+  let currentTurnId = opts.requireTerminal ? '' : expectedTurnId;
+  let startedAtMs = opts.startedAtMs ?? 0;
   let terminalAtMs = 0;
   let status: CodexTerminalStatus | null = null;
+  let sawTerminal = false;
   let finalText: string | undefined;
-  let model = 'unknown';
-  let cwd: string | undefined;
-  let developerInstructions: string | undefined;
+  let model = opts.model ?? 'unknown';
+  let cwd = opts.cwd;
+  let developerInstructions = opts.developerInstructions;
   let prompt: string | undefined;
   const promptParts: string[] = [];
   const inputMessages: JsonValue[] = [];
-  const steps: CodexTranscriptStep[] = [];
+  const stepEnvelopes: StepEnvelope[] = [];
   const unmatchedTokenUsages: CodexTranscriptUsage[] = [];
-  const toolSteps = new Map<string, CodexTranscriptStep>();
+  const toolSteps = new Map<string, StepEnvelope>();
   const webSearchStarts = new Map<string, number>();
   const webSearchEnds = new Map<string, number>();
-  let currentStep: CodexTranscriptStep | null = null;
+  let currentStep: StepEnvelope | null = null;
   let lastUsage: CodexTranscriptUsage | undefined;
   let lastActivityAtMs = 0;
 
-  const beginStep = (timestamp: number): CodexTranscriptStep => {
+  const beginStep = (timestamp: number, source: CodexTranscriptSourceRecord): StepEnvelope => {
     if (!currentStep) {
+      const previous = stepEnvelopes.at(-1);
+      if (previous?.llmClosed) previous.followedByAnotherWave = true;
       currentStep = {
-        startedAtMs: timestamp,
-        responseAtMs: timestamp,
-        hasResponseEvidence: false,
-        completedAtMs: timestamp,
-        reasoning: [],
-        tools: [],
+        step: {
+          startedAtMs: timestamp,
+          responseAtMs: timestamp,
+          hasResponseEvidence: false,
+          completedAtMs: timestamp,
+          reasoning: [],
+          tools: [],
+        },
+        sourceRange: {
+          startOffset: source.startOffset,
+          endOffset: source.endOffset,
+        },
+        llmClosed: false,
+        followedByAnotherWave: false,
       };
     }
     return currentStep;
+  };
+
+  const touchStep = (envelope: StepEnvelope, source: CodexTranscriptSourceRecord): void => {
+    envelope.sourceRange.startOffset = Math.min(envelope.sourceRange.startOffset, source.startOffset);
+    envelope.sourceRange.endOffset = Math.max(envelope.sourceRange.endOffset, source.endOffset);
   };
 
   const stepToolsComplete = (step: CodexTranscriptStep): boolean => (
@@ -73,14 +159,15 @@ export function extractCodexTerminalTurn(
 
   const flushCurrentStep = (force = false): void => {
     if (!currentStep) return;
-    if (force || currentStep.reasoning.length > 0 || currentStep.tools.length > 0 || currentStep.finalText) {
-      steps.push(currentStep);
+    const step = currentStep.step;
+    if (force || step.reasoning.length > 0 || step.tools.length > 0 || step.finalText) {
+      stepEnvelopes.push(currentStep);
     }
     currentStep = null;
   };
   // TypeScript cannot infer mutations made by beginStep/flushCurrentStep through
   // their closures, so read the mutable step through an explicitly typed getter.
-  const activeStep = (): CodexTranscriptStep | null => currentStep;
+  const activeStep = (): StepEnvelope | null => currentStep;
   const appendPrompt = (value: string | undefined): void => {
     if (!value || promptParts.includes(value)) return;
     promptParts.push(value);
@@ -90,7 +177,8 @@ export function extractCodexTerminalTurn(
     if (timestamp > 0) lastActivityAtMs = timestamp;
   };
 
-  for (const record of records) {
+  for (const source of records) {
+    const record = source.record;
     const payload = asRecord(record.payload);
     if (!payload) continue;
     const timestamp = timestampMs(record, Date.now());
@@ -126,11 +214,13 @@ export function extractCodexTerminalTurn(
         continue;
       }
       if (payload.type === 'agent_message') {
-        const step = activeStep();
-        if (step && stepToolsComplete(step)) flushCurrentStep();
+        const active = activeStep();
+        if (active && stepToolsComplete(active.step)) flushCurrentStep();
         const message = stringValue(payload.message);
         if (message) {
-          const nextStep = beginStep(lastActivityAtMs || timestamp);
+          const next = beginStep(lastActivityAtMs || timestamp, source);
+          touchStep(next, source);
+          const nextStep = next.step;
           nextStep.responseAtMs = timestamp;
           nextStep.hasResponseEvidence = true;
           if (nextStep.reasoning[nextStep.reasoning.length - 1] !== message) {
@@ -143,9 +233,11 @@ export function extractCodexTerminalTurn(
       if (payload.type === 'web_search_start') {
         const callId = stringValue(payload.call_id);
         if (callId) webSearchStarts.set(callId, timestamp);
-        const step = activeStep();
-        if (step && stepToolsComplete(step)) flushCurrentStep();
-        const nextStep = beginStep(lastActivityAtMs || timestamp);
+        const active = activeStep();
+        if (active && stepToolsComplete(active.step)) flushCurrentStep();
+        const next = beginStep(lastActivityAtMs || timestamp, source);
+        touchStep(next, source);
+        const nextStep = next.step;
         nextStep.responseAtMs = timestamp;
         nextStep.hasResponseEvidence = true;
         markActivity(timestamp);
@@ -155,37 +247,46 @@ export function extractCodexTerminalTurn(
         const callId = stringValue(payload.call_id);
         if (callId) {
           webSearchEnds.set(callId, timestamp);
-          const step = toolSteps.get(callId);
+          const envelope = toolSteps.get(callId);
+          const step = envelope?.step;
           const tool = step?.tools.find(candidate => candidate.callId === callId);
           if (tool) {
             tool.completedAtMs = timestamp;
             step!.completedAtMs = Math.max(step!.completedAtMs, timestamp);
+            touchStep(envelope!, source);
           }
         }
         continue;
       }
       if (payload.type === 'token_count') {
         const usage = extractLastTokenUsage(payload.info);
-        if (!usage || sameUsage(lastUsage, usage)) continue;
-        lastUsage = usage;
-        const step = activeStep();
-        if (step && (step.tools.length === 0 || stepToolsComplete(step))) {
-          step.tokenUsage = usage;
-          if (step.tools.length > 0) flushCurrentStep();
-        } else {
+        if (!usage) continue;
+        const envelope = activeStep();
+        if (envelope?.step.hasResponseEvidence) {
+          envelope.step.tokenUsage = usage;
+          envelope.step.completedAtMs = Math.max(envelope.step.completedAtMs, timestamp);
+          envelope.llmClosed = true;
+          touchStep(envelope, source);
+          lastUsage = usage;
+          markActivity(timestamp);
+          flushCurrentStep();
+        } else if (!sameUsage(lastUsage, usage)) {
           // Do not shift an unanchored sample onto a later response wave.
           unmatchedTokenUsages.push(usage);
+          lastUsage = usage;
         }
         continue;
       }
       if (payload.type === 'task_complete' && stringValue(payload.turn_id) === expectedTurnId) {
         status = 'completed';
+        sawTerminal = true;
         terminalAtMs = timestamp;
         finalText = stringValue(payload.last_agent_message);
         break;
       }
       if (payload.type === 'turn_aborted' && stringValue(payload.turn_id) === expectedTurnId) {
         status = 'interrupted';
+        sawTerminal = true;
         terminalAtMs = timestamp;
         break;
       }
@@ -198,8 +299,10 @@ export function extractCodexTerminalTurn(
       const role = stringValue(payload.role);
       if (role === 'assistant') {
         const active = activeStep();
-        if (active && stepToolsComplete(active)) flushCurrentStep();
-        const step = beginStep(lastActivityAtMs || timestamp);
+        if (active && stepToolsComplete(active.step)) flushCurrentStep();
+        const envelope = beginStep(lastActivityAtMs || timestamp, source);
+        touchStep(envelope, source);
+        const step = envelope.step;
         step.responseId ??= stringValue(payload.id);
         step.responseAtMs = timestamp;
         step.hasResponseEvidence = true;
@@ -220,8 +323,10 @@ export function extractCodexTerminalTurn(
 
     if (itemType === 'reasoning') {
       const active = activeStep();
-      if (active && stepToolsComplete(active)) flushCurrentStep();
-      const step = beginStep(lastActivityAtMs || timestamp);
+      if (active && stepToolsComplete(active.step)) flushCurrentStep();
+      const envelope = beginStep(lastActivityAtMs || timestamp, source);
+      touchStep(envelope, source);
+      const step = envelope.step;
       step.responseId ??= stringValue(payload.id);
       step.responseAtMs = timestamp;
       step.hasResponseEvidence = true;
@@ -232,12 +337,14 @@ export function extractCodexTerminalTurn(
     const call = transcriptToolCall(itemType, payload, timestamp);
     if (call) {
       const active = activeStep();
-      if (active && stepToolsComplete(active)) flushCurrentStep();
+      if (active && stepToolsComplete(active.step)) flushCurrentStep();
       if (call.name === 'web_search') {
         call.startedAtMs = webSearchStarts.get(call.callId) ?? (lastActivityAtMs || timestamp);
         call.completedAtMs = webSearchEnds.get(call.callId) ?? timestamp;
       }
-      const step = beginStep(lastActivityAtMs || call.startedAtMs);
+      const envelope = beginStep(lastActivityAtMs || call.startedAtMs, source);
+      touchStep(envelope, source);
+      const step = envelope.step;
       step.responseId ??= stringValue(payload.id);
       if (call.name !== 'web_search') {
         step.responseAtMs = step.tools.length === 0
@@ -251,48 +358,66 @@ export function extractCodexTerminalTurn(
         step.hasResponseEvidence = true;
       }
       step.tools.push(call);
-      toolSteps.set(call.callId, step);
+      toolSteps.set(call.callId, envelope);
       markActivity(call.completedAtMs ?? timestamp);
       continue;
     }
 
     const toolOutput = transcriptToolOutput(itemType, payload);
     if (!toolOutput) continue;
-    const step = toolSteps.get(toolOutput.callId);
-    if (!step) continue;
-    const tool = step?.tools.find(candidate => candidate.callId === toolOutput.callId);
+    const envelope = toolSteps.get(toolOutput.callId);
+    if (!envelope) continue;
+    const step = envelope.step;
+    const tool = step.tools.find(candidate => candidate.callId === toolOutput.callId);
     if (!tool) continue;
     tool.completedAtMs = timestamp;
     tool.output = toolOutput.output;
     step.completedAtMs = Math.max(step.completedAtMs, timestamp);
+    touchStep(envelope, source);
     markActivity(timestamp);
   }
 
-  if (!status || !terminalAtMs) return null;
+  if (opts.requireTerminal && (!status || !terminalAtMs)) return null;
 
   const finalActiveStep = activeStep();
-  if (finalActiveStep && stepToolsComplete(finalActiveStep)) flushCurrentStep();
-  if (status === 'completed') {
-    const hadActiveStep = activeStep() !== null;
-    const step = activeStep() ?? beginStep(lastActivityAtMs || startedAtMs || terminalAtMs);
-    if (!hadActiveStep) step.responseAtMs = terminalAtMs;
-    if (finalText) {
-      if (step.reasoning[step.reasoning.length - 1] === finalText) step.reasoning.pop();
-      step.finalText = finalText;
+  if (finalActiveStep && stepToolsComplete(finalActiveStep.step)) flushCurrentStep();
+  if (!status && !opts.requireTerminal) {
+    if (stepEnvelopes.length === 0 && !prompt) return null;
+    terminalAtMs = lastActivityAtMs || startedAtMs || Date.now();
+    status = 'completed';
+  } else if (status === 'completed') {
+    let terminalEnvelope = activeStep() ?? stepEnvelopes.at(-1) ?? null;
+    if (!terminalEnvelope) {
+      const terminalSource = records.at(-1) ?? {
+        startOffset: 0,
+        endOffset: 0,
+        record: {},
+      };
+      terminalEnvelope = beginStep(lastActivityAtMs || startedAtMs || terminalAtMs, terminalSource);
+      terminalEnvelope.step.responseAtMs = terminalAtMs;
     }
-    step.completedAtMs = terminalAtMs;
-    flushCurrentStep(true);
+    if (terminalEnvelope) {
+      const step = terminalEnvelope.step;
+      if (finalText) {
+        if (step.reasoning[step.reasoning.length - 1] === finalText) step.reasoning.pop();
+        step.finalText = finalText;
+      }
+      step.completedAtMs = terminalAtMs;
+      if (terminalEnvelope === activeStep()) flushCurrentStep(true);
+    }
   } else if (activeStep()) {
-    activeStep()!.completedAtMs = terminalAtMs;
+    activeStep()!.step.completedAtMs = terminalAtMs;
     flushCurrentStep();
   }
 
-  return {
+  const resolvedStatus = status ?? 'completed';
+  const steps = stepEnvelopes.map(envelope => envelope.step);
+  const turn: CodexExtractedTranscriptTurn = {
     sessionId: meta?.sessionId || fallbackSessionId,
     transcriptTurnId: expectedTurnId,
     provider: meta?.provider ?? 'openai',
     model,
-    status,
+    status: resolvedStatus,
     startedAtMs: startedAtMs || terminalAtMs,
     terminalAtMs,
     ...(prompt ? { prompt } : {}),
@@ -304,6 +429,35 @@ export function extractCodexTerminalTurn(
     steps,
     unmatchedTokenUsages,
   };
+  const committedEnvelopes = sawTerminal
+    ? stepEnvelopes
+    : leadingIncrementallyCommittableSteps(stepEnvelopes);
+  return {
+    turn,
+    committedStepCount: committedEnvelopes.length,
+    committedStepRanges: committedEnvelopes.map(envelope => ({ ...envelope.sourceRange })),
+    consumedEndOffset: committedEnvelopes.at(-1)?.sourceRange.endOffset ?? records[0]?.startOffset ?? 0,
+  };
+}
+
+function leadingIncrementallyCommittableSteps(envelopes: StepEnvelope[]): StepEnvelope[] {
+  const committed: StepEnvelope[] = [];
+  for (const envelope of envelopes) {
+    if (!envelope.llmClosed) break;
+    const toolsComplete = envelope.step.tools.length > 0
+      && envelope.step.tools.every(tool => tool.completedAtMs !== undefined);
+    if (!toolsComplete && !envelope.followedByAnotherWave) break;
+    committed.push(envelope);
+  }
+  return committed;
+}
+
+function toSourceRecords(records: Record<string, unknown>[]): CodexTranscriptSourceRecord[] {
+  return records.map((record, index) => ({
+    startOffset: index,
+    endOffset: index + 1,
+    record,
+  }));
 }
 
 export function sessionIdFromTranscriptPath(filePath: string): string {

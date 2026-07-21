@@ -1,0 +1,8 @@
+{"type":"system","content":"You are Grok released by xAI."}
+{"type":"user","content":[{"type":"text","text":"<user_info>\nOS Version: linux\n</user_info>"}]}
+{"type":"user","content":[{"type":"text","text":"<user_query>\nWhat is 2+2?\n</user_query>"}],"prompt_index":0,"timestamp":"2026-07-16T08:00:00.000Z"}
+{"type":"assistant","content":[{"type":"text","text":"4"}],"model":"grok-3","usage":{"input_tokens":100,"output_tokens":5},"stop_reason":"end_turn","timestamp":"2026-07-16T08:00:02.000Z"}
+{"type":"user","content":[{"type":"text","text":"<user_query>\nAnd 3+3?\n</user_query>"}],"prompt_index":1,"timestamp":"2026-07-16T08:01:00.000Z"}
+{"type":"assistant","content":[{"type":"text","text":"6"}],"model":"grok-3","usage":{"input_tokens":150,"output_tokens":5},"stop_reason":"end_turn","timestamp":"2026-07-16T08:01:02.000Z"}
+{"type":"user","content":[{"type":"text","text":"<user_query>\nAnd 4+4?\n</user_query>"}],"prompt_index":2,"timestamp":"2026-07-16T08:02:00.000Z"}
+{"type":"assistant","content":[{"type":"text","text":"8"}],"model":"grok-3","usage":{"input_tokens":200,"output_tokens":5},"stop_reason":"end_turn","timestamp":"2026-07-16T08:02:02.000Z"}

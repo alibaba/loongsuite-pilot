@@ -13,6 +13,7 @@ Use these IDs in installer options, `agent-control.json`, and `config.json`.
 | Claude Code | `claude-code` | Hook integration. |
 | Codex | `codex` | Hook integration. |
 | Cursor | `cursor` | Hook integration. |
+| Kiro CLI | `kiro-cli` | Hook integration with delayed local SQLite/session collection. Token usage is not exposed by the source. |
 | OpenCode | `opencode` | Plugin injection. |
 | Qoder | `qoder` | Hook integration. |
 | Qoder CN | `qoder-cn` | Hook integration. |

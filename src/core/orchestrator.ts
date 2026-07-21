@@ -37,6 +37,7 @@ import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-sess
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
+import { GrokBuildLogInput } from '../inputs/grok-build-log/grok-build-log-input.js';
 import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
 import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
@@ -91,6 +92,7 @@ export class Orchestrator extends EventEmitter {
     'qoder-cli-session': 'qoder',
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
+    'grok-build-log': 'grok-build',
     'codex-transcript': 'codex',
     'kiro-cli-log': 'kiro-cli',
     'kiro-cli-session': 'kiro-cli',
@@ -772,7 +774,7 @@ export class Orchestrator extends EventEmitter {
       this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-cn-trace']) &&
       this.agentControlManager.resolveEnabled(
         'qoder-work-cn-trace',
-        listenerCfg['qoder-work-cn-trace']?.enabled ?? false,
+        listenerCfg['qoder-work-cn-trace']?.enabled ?? true,
       );
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkCNTraceInput, {
@@ -988,6 +990,27 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['kiro-cli-session']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['kiro-cli-session']?.pollInterval,
+      }),
+    );
+
+    // --- Grok Build Log (Shell Hook JSONL) ---
+    const grokBuildLogDir = path.join(this.dataDir, 'logs', 'grok-build');
+    await ensureDir(grokBuildLogDir);
+    const grokBuildLogInput = new GrokBuildLogInput({
+      stateStore: this.stateStore,
+      logDir: grokBuildLogDir,
+    });
+    this.inputManager.registerInput(grokBuildLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(grokBuildLogInput, {
+        watchPaths: [grokBuildLogDir],
+        isAvailable: async () => directoryExists(grokBuildLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['grok-build-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'grok-build-log',
+            listenerCfg['grok-build-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['grok-build-log']?.pollInterval,
       }),
     );
 

@@ -106,7 +106,7 @@ function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd) {
   // Determine user info from first row
   const firstRow = contentRows[0];
   const userId = resolveUserId(firstRow, runtimeConfig);
-  const providerName = inferProviderName({ 'gen_ai.agent.type': 'qoder-work' });
+  const providerName = inferProviderName({ 'gen_ai.agent.type': agentId });
   const version = getStringValue(firstRow, 'version') || '';
 
   // Split into turns: each user message (non tool_result) starts a new turn
@@ -114,7 +114,7 @@ function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd) {
 
   for (const turn of turns) {
     const turnId = getTurnIdForRows(turn);
-    const turnRecords = buildTurnEvents(turn, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd);
+    const turnRecords = buildTurnEvents(turn, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd, agentId);
     records.push(...turnRecords);
   }
 
@@ -164,7 +164,7 @@ function isPureSystemReminder(text) {
     && text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim().length === 0;
 }
 
-function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd) {
+function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd, agentId) {
   const records = [];
 
   // Find the user prompt
@@ -181,7 +181,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
         'event.name': 'other',
         'gen_ai.turn.id': turnId,
         'gen_ai.session.id': sessionId,
-        'gen_ai.agent.type': 'qoder-work',
+        'gen_ai.agent.type': agentId,
         'gen_ai.provider.name': providerName,
         'user.id': userId,
         'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: userText }] }],
@@ -250,7 +250,7 @@ function buildTurnEvents(turnRows, turnId, sessionId, userId, providerName, vers
     // 否则用 assistant 行写盘时间会导致 LLM span 退化为 0ms（thinking/tool_use 同毫秒批量 flush）
     const llmRequestTs = stepCounter === 1 ? userTs : prevStepLastToolResultTs;
 
-    const stepRecords = buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, stepCounter === llmGroups.length, inputDelta, cwd, llmRequestTs, turnMetadata);
+    const stepRecords = buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, stepCounter === llmGroups.length, inputDelta, cwd, llmRequestTs, turnMetadata);
     records.push(...stepRecords);
 
     // Collect this step's tool_calls for next step's input delta
@@ -335,7 +335,7 @@ function groupAssistantRowsByToolResults(turnRows) {
   return groups;
 }
 
-function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, isLastStep, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
+function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, agentId, isLastStep, inputDelta, cwd, llmRequestTs, turnMetadata = {}) {
   const records = [];
   const firstRow = group[0];
   const lastRow = group[group.length - 1];
@@ -397,7 +397,7 @@ function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, u
     'gen_ai.step.id': stepId,
     'gen_ai.turn.id': turnId,
     'gen_ai.session.id': sessionId,
-    'gen_ai.agent.type': 'qoder-work',
+    'gen_ai.agent.type': agentId,
     'gen_ai.provider.name': providerName,
     'gen_ai.request.model': 'auto',
     'user.id': userId,
@@ -418,7 +418,7 @@ function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, u
       'gen_ai.step.id': stepId,
       'gen_ai.turn.id': turnId,
       'gen_ai.session.id': sessionId,
-      'gen_ai.agent.type': 'qoder-work',
+      'gen_ai.agent.type': agentId,
       'gen_ai.provider.name': providerName,
       'gen_ai.request.model': 'auto',
       'gen_ai.response.model': 'auto',
@@ -440,7 +440,7 @@ function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, u
       'gen_ai.step.id': stepId,
       'gen_ai.turn.id': turnId,
       'gen_ai.session.id': sessionId,
-      'gen_ai.agent.type': 'qoder-work',
+      'gen_ai.agent.type': agentId,
       'gen_ai.tool.name': tc.name,
       'gen_ai.tool.call.id': tc.id,
       'gen_ai.tool.call.exec.id': tc.id,
@@ -462,7 +462,7 @@ function buildStepEvents(group, toolResultsByUseId, stepId, turnId, sessionId, u
         'gen_ai.step.id': stepId,
         'gen_ai.turn.id': turnId,
         'gen_ai.session.id': sessionId,
-        'gen_ai.agent.type': 'qoder-work',
+        'gen_ai.agent.type': agentId,
         'gen_ai.tool.name': tc.name,
         'gen_ai.tool.call.id': tc.id,
         'gen_ai.tool.call.exec.id': tc.id,
@@ -483,7 +483,7 @@ function buildRecord(fields, sourceRow, runtimeConfig, cwd) {
   const record = {
     'event.id': crypto.randomUUID(),
     'agent.source': 'qoder-transcript-hook',
-    'agent.qoderwork.variant': 'qoder-work',
+    'agent.qoderwork.variant': fields['gen_ai.agent.type'] || 'qoder-work',
     ...fields,
   };
   if (cwd) record['agent.qoderwork.cwd'] = cwd;
@@ -526,16 +526,19 @@ function extractText(row) {
  */
 function resolveQoderWorkProjectDir(sandboxCwd, agentId) {
   if (!sandboxCwd) return undefined;
-  const qwWorkspacePrefix = path.join(os.homedir(), '.qoderwork', 'workspace') + path.sep;
+  const isCn = agentId === 'qoder-work-cn';
+  const homeDirName = isCn ? '.qoderworkcn' : '.qoderwork';
+  const appDirName = isCn ? 'QoderWork CN' : 'QoderWork';
+  const qwWorkspacePrefix = path.join(os.homedir(), homeDirName, 'workspace') + path.sep;
   if (!sandboxCwd.startsWith(qwWorkspacePrefix)) return sandboxCwd;
 
   const relative = sandboxCwd.slice(qwWorkspacePrefix.length);
   const chatId = relative.split(path.sep)[0];
-  if (!chatId || !/^[a-f0-9-]{1,64}$/i.test(chatId)) return sandboxCwd;
+  if (!chatId || !/^[a-z0-9-]{1,64}$/i.test(chatId)) return sandboxCwd;
 
   const dbPath = process.platform === 'darwin'
-    ? path.join(os.homedir(), 'Library', 'Application Support', 'QoderWork', 'data', 'agents.db')
-    : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'QoderWork', 'data', 'agents.db');
+    ? path.join(os.homedir(), 'Library', 'Application Support', appDirName, 'data', 'agents.db')
+    : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), appDirName, 'data', 'agents.db');
 
   try {
     const sql = `SELECT additional_directories FROM chats WHERE id = '${chatId.replace(/'/g, "''")}'`;

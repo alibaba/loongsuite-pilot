@@ -1,0 +1,8 @@
+{"type":"system","content":"You are Grok released by xAI."}
+{"type":"user","content":[{"type":"text","text":"<user_info>\nOS Version: linux\n</user_info>"}]}
+{"type":"user","content":[{"type":"text","text":"<user_query>\nRead files /a, /b, /c at once.\n</user_query>"}],"prompt_index":0,"timestamp":"2026-07-16T07:00:00.000Z"}
+{"type":"assistant","content":[{"type":"tool_use","id":"tu_par_1","name":"read_file","input":{"path":"/a"}},{"type":"tool_use","id":"tu_par_2","name":"read_file","input":{"path":"/b"}},{"type":"tool_use","id":"tu_par_3","name":"read_file","input":{"path":"/c"}}],"model":"grok-3","usage":{"input_tokens":2000,"output_tokens":100},"stop_reason":"tool_use","timestamp":"2026-07-16T07:00:02.000Z"}
+{"type":"user","content":[{"type":"tool_result","tool_use_id":"tu_par_1","content":"aaa"}],"prompt_index":0,"timestamp":"2026-07-16T07:00:02.500Z"}
+{"type":"user","content":[{"type":"tool_result","tool_use_id":"tu_par_2","content":"bbb"}],"prompt_index":0,"timestamp":"2026-07-16T07:00:02.700Z"}
+{"type":"user","content":[{"type":"tool_result","tool_use_id":"tu_par_3","content":"ccc"}],"prompt_index":0,"timestamp":"2026-07-16T07:00:02.900Z"}
+{"type":"assistant","content":[{"type":"text","text":"Read 3 files in parallel."}],"model":"grok-3","usage":{"input_tokens":2500,"output_tokens":30},"stop_reason":"end_turn","timestamp":"2026-07-16T07:00:05.000Z"}

@@ -55,6 +55,8 @@ export interface AgentActivityEntry {
   'gen_ai.agent.type': string;
   'gen_ai.agent.id'?: string;
   'gen_ai.agent.name'?: string;
+  'gen_ai.agent.description'?: string;
+  'gen_ai.data_source.id'?: string;
   'gen_ai.provider.name': string;
   'gen_ai.request.id'?: string;
   'gen_ai.request.model'?: string;

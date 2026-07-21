@@ -59,6 +59,27 @@ export interface AgentHookConfig {
    */
   eventSubcommand?: 'kebab-case' | 'as-is';
   /**
+   * Optional transform applied to the event name when building the LAST
+   * segment of `hookJsonPath` (the settings JSON field that holds the hook
+   * entries for that event).
+   *
+   * - `'snake'`: PascalCase event names (`Stop`, `SubagentStart`) are
+   *   converted to snake_case (`stop`, `subagent_start`) before being used
+   *   as the settings JSON key. Required by agents whose hook loader is
+   *   case-sensitive on snake_case keys (e.g. grok-build's
+   *   `~/.grok/hooks/*.json`).
+   * - `undefined` (default): event name is used as-is (PascalCase), which is
+   *   the convention for Claude Code / Codex / Cursor / Qoder.
+   *
+   * Boundary: this field ONLY affects the settings JSON hook config key. It
+   * does NOT touch argv subcommand (controlled by `eventSubcommand`), env
+   * var names, or the hook envelope wire format — those remain in their
+   * agent-native case.
+   *
+   * Reserved for grok-build; other agents should not set this field.
+   */
+  eventKeyCase?: 'snake';
+  /**
    * If true, omit quotes around the -File path on Windows.
    * Use for agents whose hook executor does direct spawn (not shell),
    * where the quoted path in -File "..." would become literal characters.

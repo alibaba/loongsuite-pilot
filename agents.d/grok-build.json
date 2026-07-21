@@ -1,0 +1,19 @@
+{
+  "id": "grok-build",
+  "displayName": "Grok Build",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.grok"],
+    "commands": []
+  },
+  "hook": {
+    "settingsPath": "~/.grok/hooks/loongsuite-pilot.json",
+    "events": ["Stop", "SubagentStart", "SubagentStop"],
+    "retiredEvents": ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "SessionEnd"],
+    "hookCommand": "$PILOT_DATA/hooks/grok-build-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "matcher": "",
+    "eventSubcommand": "kebab-case",
+    "eventKeyCase": "snake"
+  }
+}
