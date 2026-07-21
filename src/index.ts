@@ -4,13 +4,10 @@ import { Orchestrator } from './core/orchestrator.js';
 import { loadConfig } from './core/config-loader.js';
 import { createLogger, initFileLogging } from './utils/logger.js';
 import { resolveHome, readInstalledVersion } from './utils/fs-utils.js';
-import { writeStartupCrash, clearStartupCrash } from './utils/crash-breadcrumb.js';
+import { writeStartupCrash, clearStartupCrash, resolveBreadcrumbDataDir } from './utils/crash-breadcrumb.js';
 import { handleWorkerCli } from './local-workers/worker-cli.js';
 
 const logger = createLogger('Main');
-
-// Captured once config is loaded so the module-level catch can locate the data dir.
-let resolvedDataDir: string | null = null;
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -28,11 +25,13 @@ async function main(): Promise<void> {
   const config = await loadConfig();
 
   const dataDir = resolveHome(config.dataDir);
-  resolvedDataDir = dataDir;
   const logDir = path.join(dataDir, 'logs');
   await initFileLogging(path.join(logDir, 'loongsuite-pilot-service.log'));
 
   if (!config.enabled) {
+    // A deliberate, non-crash exit: drop any stale breadcrumb so it is not later
+    // misread as this run's failure cause.
+    clearStartupCrash(resolveBreadcrumbDataDir());
     logger.info('analytics disabled via config or LOONGSUITE_PILOT_ENABLED=false');
     return;
   }
@@ -50,8 +49,9 @@ async function main(): Promise<void> {
   await orchestrator.start();
 
   // Reached a healthy running state: clear any stale crash breadcrumb so a lingering
-  // one always reflects the most recent *failed* startup attempt.
-  clearStartupCrash(dataDir);
+  // one always reflects the most recent *failed* startup attempt. The breadcrumb dir
+  // must match the daemon writer and the updater reader (env-or-default), not config.dataDir.
+  clearStartupCrash(resolveBreadcrumbDataDir());
 
   logger.info('AI Agent Input is running', {
     dataDir: config.dataDir,
@@ -63,9 +63,13 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   logger.error('fatal startup error', { error: String(err) });
-  const dataDir = resolvedDataDir
-    ?? resolveHome(process.env.LOONGSUITE_PILOT_DATA_DIR ?? '~/.loongsuite-pilot');
-  writeStartupCrash({ dataDir, phase: 'startup', version: readInstalledVersion(dataDir), error: err });
+  const breadcrumbDir = resolveBreadcrumbDataDir();
+  writeStartupCrash({
+    dataDir: breadcrumbDir,
+    phase: 'startup',
+    version: readInstalledVersion(breadcrumbDir),
+    error: err,
+  });
   process.exit(1);
 });
 

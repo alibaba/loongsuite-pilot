@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { resolveHome } from './fs-utils.js';
 
 export type StartupCrashPhase = 'module_load' | 'startup' | 'runtime';
 
@@ -19,6 +20,18 @@ const STACK_HEAD_MAX_CHARS = 4000;
 
 export function startupCrashPath(dataDir: string): string {
   return path.join(dataDir, 'logs', FILE_NAME);
+}
+
+/**
+ * The single data dir the breadcrumb lives in. It MUST match where the updater (the
+ * reader, src/updater/index.ts) and the bootstrap (scripts/collector-daemon.js, the
+ * earliest writer) look — both use env-or-default, NOT config.dataDir. Aligning the
+ * writer, clearer and reader on this one directory is what makes the "lingering
+ * breadcrumb = most recent failed startup" invariant hold even when config.json
+ * overrides dataDir.
+ */
+export function resolveBreadcrumbDataDir(): string {
+  return resolveHome(process.env.LOONGSUITE_PILOT_DATA_DIR ?? '~/.loongsuite-pilot');
 }
 
 function truncateStackHead(stack: string | undefined): string {
