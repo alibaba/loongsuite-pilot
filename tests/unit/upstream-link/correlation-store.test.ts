@@ -75,4 +75,32 @@ describe('CorrelationStore', () => {
     const store = new CorrelationStore(dir);
     expect(store.resolveTurn(SID, 'valid')).toBe(TP1);
   });
+
+  it('exact contentHash takes precedence over a prefix match', () => {
+    // recordA matches "analyze" as a prefix; recordB is the exact hash of the
+    // collected text. The exact record must win (and be the one consumed).
+    write([turnRec('analyze', TP1, 7), turnRec('analyze this', TP2)]);
+    const store = new CorrelationStore(dir);
+    expect(store.resolveTurn(SID, 'analyze this')).toBe(TP2); // exact B, not prefix A
+    expect(store.resolveTurn(SID, 'analyze xyz')).toBe(TP1); // A still available for a prefix hit
+  });
+
+  it('hasSession reflects file presence', () => {
+    write([turnRec('x', TP1)]);
+    const store = new CorrelationStore(dir);
+    expect(store.hasSession(SID)).toBe(true);
+    expect(store.hasSession('ses_missing')).toBe(false);
+  });
+
+  it('pruneIdle evicts sessions not accessed since the cutoff', () => {
+    write([turnRec('OK', TP1)]);
+    const store = new CorrelationStore(dir);
+    expect(store.resolveTurn(SID, 'OK')).toBe(TP1); // consumes + records access
+    // Nothing older than a past cutoff -> keep; record stays consumed.
+    expect(store.pruneIdle(Date.now() - 60_000)).toBe(0);
+    expect(store.resolveTurn(SID, 'OK')).toBeNull();
+    // Evict everything older than the future -> state dropped, cursor resets.
+    expect(store.pruneIdle(Date.now() + 1000)).toBe(1);
+    expect(store.resolveTurn(SID, 'OK')).toBe(TP1);
+  });
 });

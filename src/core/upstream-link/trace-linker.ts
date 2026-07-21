@@ -69,6 +69,7 @@ export class TraceLinker {
   private readonly retryDelayMs: number;
   private readonly cache = new Map<string, ResolveState>();
   private readonly firstTurnBySession = new Map<string, string>();
+  private readonly sessionLastAccess = new Map<string, number>();
 
   constructor(store: CorrelationStore, opts: TraceLinkerOptions = {}) {
     this.store = store;
@@ -91,6 +92,7 @@ export class TraceLinker {
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
     if (!sessionId || !turnId) return;
 
+    this.sessionLastAccess.set(sessionId, Date.now());
     if (!this.firstTurnBySession.has(sessionId)) {
       this.firstTurnBySession.set(sessionId, turnId);
     }
@@ -124,15 +126,43 @@ export class TraceLinker {
   }
 
   private async resolveWithRetry(sessionId: string, text: string, isFirstTurn: boolean): Promise<string | null> {
-    // Turn-level record keeps priority through all retries (record may be slightly late).
-    for (let attempt = 0; attempt <= this.retries; attempt += 1) {
-      const turnTp = text ? this.store.resolveTurn(sessionId, text) : null;
-      if (turnTp) return turnTp;
-      if (attempt < this.retries) await sleep(this.retryDelayMs);
+    // No correlation file for this session → nothing was written for it, so there
+    // is nothing to wait for. Short-circuit to avoid burning the retry budget
+    // (retries × retryDelayMs) on the hot path — the common case when linking is
+    // enabled but the adapter/env has not produced records.
+    if (!this.store.hasSession(sessionId)) return null;
+
+    // Only retry when there is content to match; an empty `other` cannot match a
+    // turn record, so skip straight to the session-level fallback.
+    if (text) {
+      // Turn-level record keeps priority through all retries (record may be slightly late).
+      for (let attempt = 0; attempt <= this.retries; attempt += 1) {
+        const turnTp = this.store.resolveTurn(sessionId, text);
+        if (turnTp) return turnTp;
+        if (attempt < this.retries) await sleep(this.retryDelayMs);
+      }
     }
     // Session-level (env) is the final fallback, first turn only.
     if (isFirstTurn) return this.store.resolveSessionFirst(sessionId);
     return null;
+  }
+
+  /**
+   * Drop cached state for sessions not touched since `cutoffMs`, keeping the
+   * per-session/per-turn maps bounded in a long-running daemon. Also prunes the
+   * underlying store. Called on the retention cadence with the same TTL.
+   */
+  pruneIdle(cutoffMs: number): void {
+    for (const [sessionId, last] of this.sessionLastAccess) {
+      if (last >= cutoffMs) continue;
+      this.sessionLastAccess.delete(sessionId);
+      this.firstTurnBySession.delete(sessionId);
+      const prefix = `${sessionId}|`;
+      for (const key of this.cache.keys()) {
+        if (key.startsWith(prefix)) this.cache.delete(key);
+      }
+    }
+    this.store.pruneIdle(cutoffMs);
   }
 
   private apply(entry: AgentActivityEntry, state: ResolveState): void {

@@ -128,4 +128,49 @@ describe('TraceLinker', () => {
     const bad = { 'event.name': 'other' } as unknown as AgentActivityEntry;
     await expect(linker().stamp([bad])).resolves.toBeUndefined();
   });
+
+  it('does not burn the retry budget when the session has no correlation file', async () => {
+    // No file written for SID. With retries=3 x 50ms the old code slept ~150ms.
+    const tl = new TraceLinker(new CorrelationStore(dir), { retries: 3, retryDelayMs: 50 });
+    const other = otherEvent('t1', 'anything', 'origtrace00000000000000000000000a');
+    const start = performance.now();
+    await tl.stamp([other]);
+    const ms = performance.now() - start;
+    expect(other.trace_id).toBe('origtrace00000000000000000000000a'); // unchanged
+    expect(ms).toBeLessThan(40); // short-circuited, well under one retry delay
+  });
+
+  it('does not retry-sleep for an empty other event even when a file exists', async () => {
+    writeTurn('something', TP); // file exists, but the other event has no text
+    const tl = new TraceLinker(new CorrelationStore(dir), { retries: 3, retryDelayMs: 50 });
+    const empty = otherEvent('t1', '', 'origtrace00000000000000000000000a');
+    const start = performance.now();
+    await tl.stamp([empty]);
+    const ms = performance.now() - start;
+    expect(empty.trace_id).toBe('origtrace00000000000000000000000a'); // no turn match, no session record
+    expect(ms).toBeLessThan(40);
+  });
+
+  it('pruneIdle evicts cached state for sessions idle past the cutoff', async () => {
+    writeTurn('do X', TP);
+    const store = new CorrelationStore(dir);
+    const tl = new TraceLinker(store, { retries: 0 });
+    const other = otherEvent('t1', 'do X');
+    await tl.stamp([other]);
+    // A future cutoff means "everything older than now+1s" -> evict all.
+    tl.pruneIdle(Date.now() + 1000);
+    // After eviction the store re-reads the file; the consumed record is gone
+    // from memory, so the same text resolves again (consume cursor reset).
+    expect(store.resolveTurn(SID, 'do X')).toBe(TP);
+  });
+
+  it('pruneIdle keeps sessions accessed within the cutoff', async () => {
+    writeTurn('do X', TP);
+    const store = new CorrelationStore(dir);
+    const tl = new TraceLinker(store, { retries: 0 });
+    await tl.stamp([otherEvent('t1', 'do X')]);
+    tl.pruneIdle(Date.now() - 60_000); // cutoff in the past -> nothing evicted
+    // Store state retained: the record stays consumed, so it does not resolve again.
+    expect(store.resolveTurn(SID, 'do X')).toBeNull();
+  });
 });

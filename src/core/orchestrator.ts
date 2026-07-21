@@ -179,9 +179,14 @@ export class Orchestrator extends EventEmitter {
       const correlateDir = path.join(this.dataDir, 'acp-correlate');
       await ensureDir(correlateDir);
       const store = new CorrelationStore(correlateDir);
-      this.inputManager.setTraceLinker(new TraceLinker(store));
-      this.acpCorrelateRetentionService = new AcpCorrelateRetentionService(this.dataDir, this.config.upstreamLink);
+      const traceLinker = new TraceLinker(store);
+      this.inputManager.setTraceLinker(traceLinker);
+      this.acpCorrelateRetentionService = new AcpCorrelateRetentionService(this.dataDir, this.config.upstreamLink, traceLinker);
       this.acpCorrelateRetentionService.start();
+      // Adapters/env hooks must write records under this exact path; a custom
+      // config.json dataDir that diverges from where they write silently yields
+      // no linking, so surface the resolved dir for diagnosis.
+      logger.info('upstream trace linking enabled', { correlateDir, ttlMs: this.config.upstreamLink.ttlMs });
     }
 
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)

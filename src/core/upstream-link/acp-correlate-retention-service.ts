@@ -8,20 +8,29 @@ const logger = createLogger('AcpCorrelateRetention');
 const STARTUP_DELAY_MS = 30_000;
 const INTERVAL_MS = 21_600_000; // 6h scan cadence
 
+/** In-memory state that should be evicted on the same TTL as the disk files. */
+export interface IdlePrunable {
+  pruneIdle(cutoffMs: number): void;
+}
+
 /**
  * Cleans up stale correlation files/locks under `${dataDir}/acp-correlate/`.
- * Files older than `config.ttlMs` (by mtime) are removed. Runs periodically
- * with an unref'd timer so it never keeps the process alive.
+ * Files older than `config.ttlMs` (by mtime) are removed. If a prunable is
+ * given (the TraceLinker), its idle in-memory state is evicted on the same
+ * cadence/TTL so the per-session maps stay bounded. Runs periodically with an
+ * unref'd timer so it never keeps the process alive.
  */
 export class AcpCorrelateRetentionService {
   private readonly dir: string;
   private readonly ttlMs: number;
+  private readonly prunable?: IdlePrunable;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private intervalTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(dataDir: string, config: UpstreamLinkConfig) {
+  constructor(dataDir: string, config: UpstreamLinkConfig, prunable?: IdlePrunable) {
     this.dir = path.join(dataDir, 'acp-correlate');
     this.ttlMs = config.ttlMs;
+    this.prunable = prunable;
   }
 
   start(): void {
@@ -50,6 +59,13 @@ export class AcpCorrelateRetentionService {
     const cutoff = Date.now() - this.ttlMs;
     let deleted = 0;
     let errors = 0;
+
+    // Evict idle in-memory state on the same TTL (independent of file presence).
+    try {
+      this.prunable?.pruneIdle(cutoff);
+    } catch (err) {
+      logger.warn('failed to prune idle upstream-link state', { error: String(err) });
+    }
 
     let files: string[];
     try {

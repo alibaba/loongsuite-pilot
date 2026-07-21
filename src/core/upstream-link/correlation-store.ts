@@ -28,6 +28,8 @@ interface SessionState {
   hashIndex: Map<string, number[]>;
   /** contentHash -> next bucket position to consider (skips consumed prefix). */
   hashCursor: Map<string, number>;
+  /** Wall-clock of the last access; used to evict idle sessions. */
+  lastAccessMs: number;
 }
 
 function buildHashIndex(turns: TurnRecord[]): Map<string, number[]> {
@@ -73,7 +75,10 @@ export class CorrelationStore {
     }
 
     const existing = this.states.get(sessionId);
-    if (existing && existing.mtimeMs === stat.mtimeMs) return existing;
+    if (existing && existing.mtimeMs === stat.mtimeMs) {
+      existing.lastAccessMs = Date.now();
+      return existing;
+    }
 
     const turns: TurnRecord[] = [];
     const sessions: SessionRecord[] = [];
@@ -114,6 +119,7 @@ export class CorrelationStore {
       // cursors re-derive from consumedTurns on first use, so a reset is safe.
       hashIndex: buildHashIndex(turns),
       hashCursor: new Map<string, number>(),
+      lastAccessMs: Date.now(),
     };
     this.states.set(sessionId, state);
     return state;
@@ -172,5 +178,36 @@ export class CorrelationStore {
     if (!state || state.sessions.length === 0 || state.sessionConsumed) return null;
     state.sessionConsumed = true;
     return state.sessions[0].traceparent;
+  }
+
+  /**
+   * Whether a correlation file currently exists for the session. Callers use
+   * this to avoid waiting/retrying for records that were never written (the
+   * common case when linking is enabled but no adapter/env produced records) —
+   * the adapter writes the record when it sends the prompt, so by collection
+   * time the file exists if it ever will.
+   */
+  hasSession(sessionId: string): boolean {
+    try {
+      return fs.statSync(path.join(this.dir, `${safeName(sessionId)}.jsonl`)).isFile();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Drop in-memory state for sessions not accessed since `cutoffMs`. Called
+   * periodically (same cadence/TTL as file cleanup) so the per-session maps do
+   * not grow unbounded in a long-running daemon. Returns the number evicted.
+   */
+  pruneIdle(cutoffMs: number): number {
+    let evicted = 0;
+    for (const [sessionId, state] of this.states) {
+      if (state.lastAccessMs < cutoffMs) {
+        this.states.delete(sessionId);
+        evicted += 1;
+      }
+    }
+    return evicted;
   }
 }
