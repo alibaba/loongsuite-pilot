@@ -58,6 +58,7 @@ import {
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
+  parseSpanAttributesFromEnv,
 } from './shared/resource-context.mjs';
 
 const AGENT_ID = 'claude-code';
@@ -66,6 +67,9 @@ const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
 const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
   ? { resourceAttributes: RESOURCE_ATTRIBUTES }
   : {};
+// Caller-supplied span attributes (e.g. multica.*) stamped as top-level record
+// fields so the trace flusher can pass matching keys through to span attributes.
+const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, { agentId: AGENT_ID });
 
 // ─── utilities ───
 
@@ -446,6 +450,9 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     ...RESOURCE_BASE_FIELD_PATCH,
     'user.id': userId,
     ...(cwd ? { 'agent.claude-code.cwd': cwd } : {}),
+    // SPAN_ATTRIBUTES first so structural/pipeline fields (e.g. resourceAttributes)
+    // win over caller-supplied attributes; aligns with qoder's Object.assign order.
+    ...SPAN_ATTRIBUTES,
     ...RESOURCE_ATTRIBUTE_FIELDS,
   };
 

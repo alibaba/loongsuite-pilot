@@ -34,6 +34,7 @@ import {
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
+  parseSpanAttributesFromEnv,
 } from './shared/resource-context.mjs';
 import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
 
@@ -42,6 +43,9 @@ const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
 const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
   ? { resourceAttributes: RESOURCE_ATTRIBUTES }
   : {};
+// Caller-supplied span attributes (e.g. multica.*) stamped as top-level record
+// fields so the trace flusher can pass matching keys through to span attributes.
+const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, { agentId: 'qoder' });
 
 // --- Retry lockfile (qoder-cn only) -----------------------------------------
 // QoderCN fires Stop hook multiple times per turn AND incomplete transcript
@@ -784,7 +788,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
 function finalizeRecords(records, cwd) {
   for (const record of records) {
     if (cwd) record['agent.qoder.cwd'] = cwd;
-    Object.assign(record, RESOURCE_BASE_FIELD_PATCH, RESOURCE_ATTRIBUTE_FIELDS);
+    Object.assign(record, SPAN_ATTRIBUTES, RESOURCE_BASE_FIELD_PATCH, RESOURCE_ATTRIBUTE_FIELDS);
   }
   return records;
 }

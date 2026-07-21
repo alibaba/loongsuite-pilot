@@ -786,6 +786,33 @@ describe('ConfigLoader', () => {
       expect(result!.resourceAttributeKeys).toEqual(['agentteams.worker.name', 'custom.attr']);
     });
 
+    it('buildOtlpTraceConfig defaults spanAttributePassthroughPrefixes to []', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://jaeger:4318' },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.spanAttributePassthroughPrefixes).toEqual([]);
+    });
+
+    it('buildOtlpTraceConfig trims and de-dups spanAttributePassthroughPrefixes', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          endpoint: 'http://jaeger:4318',
+          spanAttributePassthroughPrefixes: ['multica.', 'multica.', ' custom. ', ' '],
+        },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.spanAttributePassthroughPrefixes).toEqual(['multica.', 'custom.']);
+    });
+
     it('buildOtlpTraceConfig expands cms into an arms endpoint', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: true,

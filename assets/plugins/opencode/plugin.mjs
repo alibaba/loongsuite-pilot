@@ -28,6 +28,50 @@ const MAX_SESSIONS = 100;
 const MAX_CONTENT_SIZE = 64 * 1024;
 
 // ---------------------------------------------------------------------------
+// Caller-supplied span attributes
+// ---------------------------------------------------------------------------
+// The host process (e.g. multica daemon) sets LOONGSUITE_PILOT_SPAN_ATTRIBUTES
+// as `key=value,key=value` per agent invocation. Parsed once at init and stamped
+// onto every record as top-level fields so the trace flusher can pass matching
+// keys through to span attributes. Inlined (no import) — plugins ship standalone.
+// Mirrors parseSpanAttributesFromEnv in assets/hooks/shared/resource-context.mjs.
+const SPAN_ATTR_RESERVED_PREFIXES = [
+  "gen_ai.",
+  "git.",
+  "workspace.",
+  "event.",
+  "trace_",
+  "user.",
+  "cost_",
+  "agent.",
+  "time_unix_nano",
+  "observed_time_unix_nano",
+];
+const SPAN_ATTR_MAX_VALUE_LENGTH = 512;
+const SPAN_ATTR_SENSITIVE_RE =
+  /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE)([_.-]|$)|^(API_KEY|API_HEADER)$/i;
+
+function parseSpanAttributesFromEnv(env = process.env) {
+  const out = {};
+  const raw = env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  if (typeof raw !== "string" || raw.length === 0) return out;
+  for (const pair of raw.split(",")) {
+    const idx = pair.indexOf("=");
+    if (idx <= 0) continue;
+    const key = pair.slice(0, idx).trim();
+    const value = pair.slice(idx + 1).trim();
+    if (!key || !value) continue;
+    if (SPAN_ATTR_RESERVED_PREFIXES.some((p) => key === p || key.startsWith(p))) continue;
+    if (SPAN_ATTR_SENSITIVE_RE.test(key)) continue;
+    if (value.length > SPAN_ATTR_MAX_VALUE_LENGTH) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env);
+
+// ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
 
@@ -247,6 +291,7 @@ function buildCommonFields(sessionID, session, userId) {
     "gen_ai.agent.name": AGENT_TYPE,
     "gen_ai.agent.id": session.agentMeta?.name || undefined,
     ...(agentCwd ? { [`agent.${AGENT_TYPE}.cwd`]: agentCwd } : {}),
+    ...SPAN_ATTRIBUTES,
   };
 }
 

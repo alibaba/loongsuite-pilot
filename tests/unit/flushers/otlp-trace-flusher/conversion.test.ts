@@ -207,4 +207,67 @@ describe('OtlpTraceFlusher - conversion', () => {
       expect(records[0]['team']).toBe('local');
     });
   });
+
+  describe('spanAttributePassthroughPrefixes', () => {
+    let p: OtlpTraceFlusher;
+
+    afterEach(async () => {
+      await p.shutdown();
+    });
+
+    it('passes through top-level record keys matching a configured prefix', async () => {
+      p = new OtlpTraceFlusher({ ...makeConfig(), spanAttributePassthroughPrefixes: ['multica.'] });
+
+      const entry = {
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': 'claude-code',
+        'gen_ai.turn.id': 'tp1',
+        'gen_ai.response.finish_reasons': ['stop'],
+        'multica.issue.id': 'AGE-992',
+        'multica.user.id': 'staff',
+        'other.key': 'ignored',
+      } as unknown as AgentActivityEntry;
+
+      await p.send(entry);
+
+      const opts = vi.mocked(convertEventLogToTrace).mock.calls.at(-1)![1] as { passthroughKeys?: string[] };
+      expect(opts.passthroughKeys).toEqual(
+        expect.arrayContaining(['multica.issue.id', 'multica.user.id', 'git.repo']),
+      );
+      expect(opts.passthroughKeys).not.toContain('other.key');
+    });
+
+    it('does not pass through any prefix key when none is configured', async () => {
+      p = new OtlpTraceFlusher(makeConfig());
+
+      const entry = {
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': 'claude-code',
+        'gen_ai.turn.id': 'tp2',
+        'gen_ai.response.finish_reasons': ['stop'],
+        'multica.issue.id': 'AGE-992',
+      } as unknown as AgentActivityEntry;
+
+      await p.send(entry);
+
+      const opts = vi.mocked(convertEventLogToTrace).mock.calls.at(-1)![1] as { passthroughKeys?: string[] };
+      expect(opts.passthroughKeys).not.toContain('multica.issue.id');
+    });
+
+    it('never passes through reserved keys even if a misconfigured prefix matches', async () => {
+      p = new OtlpTraceFlusher({ ...makeConfig(), spanAttributePassthroughPrefixes: ['gen_ai.'] });
+
+      const entry = {
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': 'claude-code',
+        'gen_ai.turn.id': 'tp3',
+        'gen_ai.response.finish_reasons': ['stop'],
+      } as unknown as AgentActivityEntry;
+
+      await p.send(entry);
+
+      const opts = vi.mocked(convertEventLogToTrace).mock.calls.at(-1)![1] as { passthroughKeys?: string[] };
+      expect(opts.passthroughKeys?.some((k) => k.startsWith('gen_ai.'))).toBe(false);
+    });
+  });
 });
