@@ -42,9 +42,20 @@ function todayStamp() {
   ].join('-');
 }
 
+function timestampMillis(timestamp = Date.now()) {
+  return Number.isFinite(timestamp) ? Math.trunc(timestamp) : Date.now();
+}
+
 function timestampNanos(timestamp = Date.now()) {
-  const millis = Number.isFinite(timestamp) ? Math.trunc(timestamp) : Date.now();
+  const millis = timestampMillis(timestamp);
   return String(BigInt(millis) * 1_000_000n);
+}
+
+function timestampStrictlyAfter(timestamp, startedAt) {
+  const millis = timestampMillis(timestamp);
+  // The downstream OTel converter consumes numeric timestamps in milliseconds,
+  // so a 1ns adjustment would be truncated back to a zero-duration span.
+  return Number.isFinite(startedAt) ? Math.max(millis, Math.trunc(startedAt) + 1) : millis;
 }
 
 function traceId() {
@@ -307,12 +318,14 @@ function activeToolDefinitions(pi) {
 function commonFields(ctx, state, timestamp = Date.now()) {
   const sessionId = ctx.sessionManager.getSessionId();
   const model = ctx.model;
+  const eventTime = timestampMillis(timestamp);
+  const observedTime = Math.max(Date.now(), eventTime);
   state.traceId ||= traceId();
   state.turnId ||= crypto.randomUUID();
   state.stepId ||= `${state.turnId}:s1`;
   return {
-    time_unix_nano: timestampNanos(timestamp),
-    observed_time_unix_nano: timestampNanos(),
+    time_unix_nano: timestampNanos(eventTime),
+    observed_time_unix_nano: timestampNanos(observedTime),
     'event.id': crypto.randomUUID(),
     trace_id: state.traceId,
     span_id: spanId(),
@@ -337,6 +350,7 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     stepId: null,
     stepStartedAt: 0,
     requestEmitted: false,
+    requestStartedAt: 0,
     systemPrompt: null,
     toolStarts: new Map(),
   };
@@ -352,7 +366,9 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     state.traceId = null;
     state.turnId = null;
     state.stepId = null;
+    state.stepStartedAt = 0;
     state.requestEmitted = false;
+    state.requestStartedAt = 0;
     state.toolStarts.clear();
   }));
 
@@ -361,7 +377,9 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     state.traceId = traceId();
     state.turnId = crypto.randomUUID();
     state.stepId = null;
+    state.stepStartedAt = 0;
     state.requestEmitted = false;
+    state.requestStartedAt = 0;
     state.systemPrompt = event.systemPrompt;
     state.toolStarts.clear();
   }));
@@ -369,16 +387,18 @@ export default function loongSuitePilotPiCodingAgent(pi) {
   pi.on('turn_start', safeHandler('turn_start', async (event) => {
     state.turnId ||= crypto.randomUUID();
     state.stepId = `${state.turnId}:s${event.turnIndex + 1}`;
-    state.stepStartedAt = event.timestamp || Date.now();
+    state.stepStartedAt = timestampMillis(event.timestamp);
     state.requestEmitted = false;
+    state.requestStartedAt = 0;
   }));
 
-  pi.on('context', safeHandler('context', async (event, ctx) => {
+  const emitLlmRequest = (event, ctx) => {
     if (state.requestEmitted) return;
     state.requestEmitted = true;
+    state.requestStartedAt = timestampMillis(state.stepStartedAt || Date.now());
 
     const record = {
-      ...commonFields(ctx, state, state.stepStartedAt || Date.now()),
+      ...commonFields(ctx, state, state.requestStartedAt),
       'event.name': 'llm.request',
     };
     if (state.captureContent) {
@@ -393,11 +413,22 @@ export default function loongSuitePilotPiCodingAgent(pi) {
       if (tools.length > 0) record['gen_ai.tool.definitions'] = tools;
     }
     writeRecord(record);
+  };
+
+  pi.on('context', safeHandler('context', async (event, ctx) => {
+    emitLlmRequest(event, ctx);
   }));
 
   pi.on('message_end', safeHandler('message_end', async (event, ctx) => {
     const message = event.message;
     if (!message || message.role !== 'assistant') return;
+
+    // A response without a preceding context event would otherwise be
+    // converted into a zero-duration response-only LLM span downstream.
+    emitLlmRequest({ messages: [] }, ctx);
+    // Pi assigns AssistantMessage.timestamp when provider streaming starts;
+    // handler receipt time is the closest available response-completion time.
+    const responseAt = timestampStrictlyAfter(Date.now(), state.requestStartedAt);
 
     const usage = message.usage || {};
     const cacheRead = Number(usage.cacheRead) || 0;
@@ -406,7 +437,7 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     const outputTokens = Number(usage.output) || 0;
     const cost = usage.cost || {};
     const record = {
-      ...commonFields(ctx, state, message.timestamp || Date.now()),
+      ...commonFields(ctx, state, responseAt),
       'event.name': 'llm.response',
       'gen_ai.provider.name': normalizeProvider(message.provider || ctx.model?.provider),
       'gen_ai.request.model': message.model || ctx.model?.id || 'unknown',
@@ -438,7 +469,7 @@ export default function loongSuitePilotPiCodingAgent(pi) {
   }));
 
   pi.on('tool_execution_start', safeHandler('tool_execution_start', async (event, ctx) => {
-    const startedAt = Date.now();
+    const startedAt = timestampMillis();
     state.toolStarts.set(event.toolCallId, startedAt);
     const record = {
       ...commonFields(ctx, state, startedAt),
@@ -453,8 +484,8 @@ export default function loongSuitePilotPiCodingAgent(pi) {
   }));
 
   pi.on('tool_execution_end', safeHandler('tool_execution_end', async (event, ctx) => {
-    const endedAt = Date.now();
     const startedAt = state.toolStarts.get(event.toolCallId);
+    const endedAt = timestampStrictlyAfter(Date.now(), startedAt);
     state.toolStarts.delete(event.toolCallId);
     const record = {
       ...commonFields(ctx, state, endedAt),
@@ -464,7 +495,7 @@ export default function loongSuitePilotPiCodingAgent(pi) {
       'tool.result.status': event.isError ? 'error' : 'success',
     };
     if (startedAt !== undefined) {
-      record['gen_ai.tool.call.duration'] = Math.max(0, endedAt - startedAt);
+      record['gen_ai.tool.call.duration'] = endedAt - startedAt;
     }
     if (state.captureContent) {
       record['gen_ai.tool.call.result'] = toSerializable(event.result);

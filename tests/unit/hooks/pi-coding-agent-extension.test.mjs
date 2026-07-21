@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 
 const EXTENSION_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -73,6 +74,12 @@ function readRecords() {
     .flatMap(name => fs.readFileSync(path.join(dir, name), 'utf8').trim().split('\n'))
     .filter(Boolean)
     .map(line => JSON.parse(line));
+}
+
+function spanDurationNanos(span) {
+  const start = BigInt(span.startTime[0]) * 1_000_000_000n + BigInt(span.startTime[1]);
+  const end = BigInt(span.endTime[0]) * 1_000_000_000n + BigInt(span.endTime[1]);
+  return end - start;
 }
 
 async function startTurn(runtime) {
@@ -281,6 +288,96 @@ describe('Pi Coding Agent extension', () => {
     expect(requests[1]['gen_ai.input.messages'][0].parts[0].content).toBe('second turn');
   });
 
+  it('keeps an LLM response strictly later than a request in the same millisecond', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+
+    await runtime.emit('context', { messages: [] });
+    await runtime.emit('message_end', {
+      message: {
+        role: 'assistant',
+        content: [],
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-5',
+        stopReason: 'stop',
+        timestamp: Date.now(),
+        usage: {},
+      },
+    });
+
+    const [request, response] = readRecords();
+    expect(request['event.name']).toBe('llm.request');
+    expect(response['event.name']).toBe('llm.response');
+    expect(
+      BigInt(response.time_unix_nano) - BigInt(request.time_unix_nano) >= 1_000_000n,
+    ).toBe(true);
+    expect(
+      BigInt(response.observed_time_unix_nano) >= BigInt(response.time_unix_nano),
+    ).toBe(true);
+
+    const conversion = await convertEventLogToReadableSpans([request, response]);
+    const llmSpan = conversion.spans.find(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llmSpan).toBeDefined();
+    expect(spanDurationNanos(llmSpan) >= 1_000_000n).toBe(true);
+  });
+
+  it('uses message_end receipt time as the LLM response completion time', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+    await runtime.emit('context', { messages: [] });
+
+    const providerStartedAt = Date.now();
+    vi.setSystemTime(new Date('2026-07-16T08:00:04.000Z'));
+    await runtime.emit('message_end', {
+      message: {
+        role: 'assistant',
+        content: [],
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-5',
+        stopReason: 'stop',
+        timestamp: providerStartedAt,
+        usage: {},
+      },
+    });
+
+    const [request, response] = readRecords();
+    expect(BigInt(response.time_unix_nano) - BigInt(request.time_unix_nano)).toBe(
+      4_000_000_000n,
+    );
+  });
+
+  it('emits a fallback LLM request when a response arrives without context', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+
+    await runtime.emit('message_end', {
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'done' }],
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-5',
+        stopReason: 'stop',
+        timestamp: Date.now(),
+        usage: {},
+      },
+    });
+
+    const records = readRecords();
+    expect(records.map(record => record['event.name'])).toEqual([
+      'llm.request',
+      'llm.response',
+    ]);
+    expect(
+      BigInt(records[1].time_unix_nano) - BigInt(records[0].time_unix_nano) >= 1_000_000n,
+    ).toBe(true);
+
+    const conversion = await convertEventLogToReadableSpans(records);
+    const llmSpan = conversion.spans.find(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llmSpan).toBeDefined();
+    expect(spanDurationNanos(llmSpan) >= 1_000_000n).toBe(true);
+    expect(conversion.warnings.some(warning => /orphan/i.test(warning))).toBe(false);
+  });
+
   it('records tool failures with status, error type, result, and duration', async () => {
     const runtime = await createRuntime();
     await startTurn(runtime);
@@ -327,6 +424,36 @@ describe('Pi Coding Agent extension', () => {
       'tool.result.status': 'success',
     });
     expect(result).not.toHaveProperty('gen_ai.tool.call.duration');
+  });
+
+  it('keeps a tool result strictly later than a call in the same millisecond', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+
+    await runtime.emit('tool_execution_start', {
+      toolCallId: 'call-fast',
+      toolName: 'read',
+      args: { path: 'README.md' },
+    });
+    await runtime.emit('tool_execution_end', {
+      toolCallId: 'call-fast',
+      toolName: 'read',
+      result: { content: 'ok' },
+      isError: false,
+    });
+
+    const [call, result] = readRecords();
+    expect(call['event.name']).toBe('tool.call');
+    expect(result['event.name']).toBe('tool.result');
+    expect(
+      BigInt(result.time_unix_nano) - BigInt(call.time_unix_nano) >= 1_000_000n,
+    ).toBe(true);
+    expect(result['gen_ai.tool.call.duration']).toBe(1);
+
+    const conversion = await convertEventLogToReadableSpans([call, result]);
+    const toolSpan = conversion.spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL');
+    expect(toolSpan).toBeDefined();
+    expect(spanDurationNanos(toolSpan) >= 1_000_000n).toBe(true);
   });
 
   it('tightens an existing log directory before writing sensitive records', async () => {
@@ -475,7 +602,7 @@ describe('Pi Coding Agent extension', () => {
       },
     });
 
-    expect(readRecords()[0]).toMatchObject({
+    expect(readRecords().find(record => record['event.name'] === 'llm.response')).toMatchObject({
       'event.name': 'llm.response',
       'error.type': 'llm_error',
       'error.message': 'rate limit exceeded',
