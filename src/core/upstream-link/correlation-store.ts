@@ -24,6 +24,22 @@ interface SessionState {
   /** Indices already consumed (consume-once), preserved across file re-reads. */
   consumedTurns: Set<number>;
   sessionConsumed: boolean;
+  /** contentHash -> ascending turn indices, for O(1) exact-match lookup. */
+  hashIndex: Map<string, number[]>;
+  /** contentHash -> next bucket position to consider (skips consumed prefix). */
+  hashCursor: Map<string, number>;
+}
+
+function buildHashIndex(turns: TurnRecord[]): Map<string, number[]> {
+  const index = new Map<string, number[]>();
+  for (let i = 0; i < turns.length; i += 1) {
+    const h = turns[i].contentHash;
+    if (h === undefined) continue;
+    const bucket = index.get(h);
+    if (bucket) bucket.push(i);
+    else index.set(h, [i]);
+  }
+  return index;
 }
 
 function safeName(value: string): string {
@@ -94,6 +110,10 @@ export class CorrelationStore {
       sessions,
       consumedTurns: existing?.consumedTurns ?? new Set<number>(),
       sessionConsumed: existing?.sessionConsumed ?? false,
+      // Rebuilt on every (re)read; indices are stable (append-only file), and
+      // cursors re-derive from consumedTurns on first use, so a reset is safe.
+      hashIndex: buildHashIndex(turns),
+      hashCursor: new Map<string, number>(),
     };
     this.states.set(sessionId, state);
     return state;
@@ -101,24 +121,41 @@ export class CorrelationStore {
 
   /**
    * Resolve a per-turn upstream traceparent by matching the collected user text
-   * against turn records (exact contentHash first, then contentPrefix). Returns
-   * the first unconsumed match and marks it consumed. Null if no match.
+   * against turn records. Exact `contentHash` matches take precedence and are
+   * looked up via a per-hash index (O(1) amortized, so a session with many
+   * turns stays linear overall instead of O(turns^2)); `contentPrefix` is a
+   * fallback used only when no exact record matches (covers agents that rewrite
+   * the prompt, e.g. appending `@file`). Both consume the lowest unconsumed
+   * matching record in file order. Null if no match.
    */
   resolveTurn(sessionId: string, collectedText: string): string | null {
     const state = this.load(sessionId);
     if (!state || state.turns.length === 0) return null;
 
+    // Exact path: advance the hash bucket cursor past already-consumed entries
+    // (a bucket entry may have been consumed via the prefix fallback), then take
+    // the first unconsumed index.
     const hash = contentHash(collectedText);
+    const bucket = state.hashIndex.get(hash);
+    if (bucket) {
+      let c = state.hashCursor.get(hash) ?? 0;
+      while (c < bucket.length && state.consumedTurns.has(bucket[c])) c += 1;
+      if (c < bucket.length) {
+        const idx = bucket[c];
+        state.consumedTurns.add(idx);
+        state.hashCursor.set(hash, c + 1);
+        return state.turns[idx].traceparent;
+      }
+      state.hashCursor.set(hash, c);
+    }
+
+    // Prefix fallback: lowest unconsumed turn whose contentPrefix the collected
+    // text starts with. Linear in turns, but only reached when the exact lookup
+    // misses (prompt-rewrite turns are the minority).
     for (let i = 0; i < state.turns.length; i += 1) {
       if (state.consumedTurns.has(i)) continue;
       const t = state.turns[i];
-      const exact = t.contentHash !== undefined && t.contentHash === hash;
-      const prefix =
-        !exact &&
-        t.contentPrefix !== undefined &&
-        t.contentPrefix.length > 0 &&
-        collectedText.startsWith(t.contentPrefix);
-      if (exact || prefix) {
+      if (t.contentPrefix !== undefined && t.contentPrefix.length > 0 && collectedText.startsWith(t.contentPrefix)) {
         state.consumedTurns.add(i);
         return t.traceparent;
       }
