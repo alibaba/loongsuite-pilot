@@ -446,8 +446,10 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     ...RESOURCE_BASE_FIELD_PATCH,
     'user.id': userId,
     ...(cwd ? { 'agent.claude-code.cwd': cwd } : {}),
-    ...RESOURCE_ATTRIBUTE_FIELDS,
+    // SPAN_ATTRIBUTES first so structural/pipeline fields (e.g. resourceAttributes)
+    // win over caller-supplied attributes; aligns with qoder's Object.assign order.
     ...SPAN_ATTRIBUTES,
+    ...RESOURCE_ATTRIBUTE_FIELDS,
   };
 
   // 用户输入: 做法 A (EVENT_LOG_TO_TRACE_SPEC §5.1, 0.1.0-beta.3+)

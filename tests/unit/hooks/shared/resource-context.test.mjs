@@ -1,10 +1,23 @@
 import { describe, expect, test, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
   parseSpanAttributesFromEnv,
 } from '../../../../assets/hooks/shared/resource-context.mjs';
+
+const ROOT = path.resolve(fileURLToPath(import.meta.url), '../../../../..');
+
+/** Extract the string entries of a `NAME = [ ... ]` array literal from a source file. */
+function extractPrefixArray(relPath, constName) {
+  const src = fs.readFileSync(path.join(ROOT, relPath), 'utf8');
+  const m = new RegExp(`${constName}\\s*=\\s*\\[([\\s\\S]*?)\\]`).exec(src);
+  if (!m) throw new Error(`${constName} not found in ${relPath}`);
+  return [...m[1].matchAll(/['"]([^'"]+)['"]/g)].map((x) => x[1]).sort();
+}
 
 describe('hook resource context helper', () => {
   test('collects only default fixed non-sensitive resource marker fields', () => {
@@ -88,5 +101,20 @@ describe('parseSpanAttributesFromEnv', () => {
       { envName: 'CUSTOM_ENV' },
     );
     expect(attrs).toEqual({ 'multica.issue.id': 'AGE-1' });
+  });
+});
+
+describe('reserved-prefix list stays in sync across copies', () => {
+  // The reserved-prefix list is intentionally duplicated in three places
+  // (shared hook util, standalone opencode plugin, and the TS normalizer).
+  // This guards against silent drift between them.
+  test('shared mjs, opencode plugin, and global-attributes.ts agree', () => {
+    const canonical = extractPrefixArray('src/normalization/global-attributes.ts', 'RESERVED_PREFIXES');
+    const sharedHook = extractPrefixArray('assets/hooks/shared/resource-context.mjs', 'SPAN_ATTR_RESERVED_PREFIXES');
+    const opencode = extractPrefixArray('assets/plugins/opencode/plugin.mjs', 'SPAN_ATTR_RESERVED_PREFIXES');
+
+    expect(canonical.length).toBeGreaterThan(0);
+    expect(sharedHook).toEqual(canonical);
+    expect(opencode).toEqual(canonical);
   });
 });

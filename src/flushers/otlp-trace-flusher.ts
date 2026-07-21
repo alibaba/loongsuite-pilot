@@ -21,6 +21,7 @@ import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
 import {
   DEFAULT_GIT_PASSTHROUGH_KEYS,
+  isReservedKey,
   type GlobalAttributesProvider,
 } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
@@ -435,6 +436,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
           : [...new Set(
               records.flatMap(r =>
                 Object.keys(r).filter(k =>
+                  // Defense-in-depth: never surface reserved/pipeline keys even if a
+                  // misconfigured prefix (e.g. "gen_ai.") happens to match them.
+                  !isReservedKey(k) &&
                   this.spanAttributePassthroughPrefixes.some(p => k.startsWith(p)),
                 ),
               ),

@@ -304,6 +304,7 @@ Notes:
 Notes:
 - Unlike source #2 (spans only), passthrough attributes are ordinary top-level record fields, so they appear in **both** the event log (SLS / JSONL) and the trace spans — same behavior as the git fields.
 - Reserved-prefix keys (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`, `agent.`) and sensitive names (token/secret/password/…) are dropped by the hook. Use a dedicated namespace such as `multica.*`.
+- Values must not contain a comma `,` (it is the pair separator); a value is also capped at 512 chars.
 - Only keys matching a configured prefix are passed through; all other top-level fields are unaffected. Supported for agents whose records are built in-process (claude-code, qoder, opencode).
 
 ## Verify Trace Output

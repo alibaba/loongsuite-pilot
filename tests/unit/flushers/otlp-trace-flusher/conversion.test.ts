@@ -253,5 +253,21 @@ describe('OtlpTraceFlusher - conversion', () => {
       const opts = vi.mocked(convertEventLogToTrace).mock.calls.at(-1)![1] as { passthroughKeys?: string[] };
       expect(opts.passthroughKeys).not.toContain('multica.issue.id');
     });
+
+    it('never passes through reserved keys even if a misconfigured prefix matches', async () => {
+      p = new OtlpTraceFlusher({ ...makeConfig(), spanAttributePassthroughPrefixes: ['gen_ai.'] });
+
+      const entry = {
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': 'claude-code',
+        'gen_ai.turn.id': 'tp3',
+        'gen_ai.response.finish_reasons': ['stop'],
+      } as unknown as AgentActivityEntry;
+
+      await p.send(entry);
+
+      const opts = vi.mocked(convertEventLogToTrace).mock.calls.at(-1)![1] as { passthroughKeys?: string[] };
+      expect(opts.passthroughKeys?.some((k) => k.startsWith('gen_ai.'))).toBe(false);
+    });
   });
 });
