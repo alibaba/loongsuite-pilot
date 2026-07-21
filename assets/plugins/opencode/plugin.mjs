@@ -372,6 +372,30 @@ function buildOutputMessages(pendingParts, finishReason) {
 // Event handlers
 // ---------------------------------------------------------------------------
 
+// 方案1(env):首个 turn 读 process.env.TRACEPARENT,写 session 级关联记录到
+// acp-correlate/<sessionId>.jsonl,每 session 只写一次(O_CREAT|O_EXCL 锁)。fail-open。
+const UPSTREAM_TP_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i;
+function recordUpstreamEnvOnce(sessionID) {
+  try {
+    const tp = (process.env.TRACEPARENT || "").trim();
+    const m = UPSTREAM_TP_RE.exec(tp);
+    if (!m || m[1].toLowerCase() === "0".repeat(32) || m[2].toLowerCase() === "0".repeat(16)) return;
+    const dir = path.join(resolveDataDir(), "acp-correlate");
+    fs.mkdirSync(dir, { recursive: true });
+    const base = path.basename(String(sessionID)).replace(/[^a-zA-Z0-9_-]/g, "_") || "unknown";
+    try {
+      fs.closeSync(fs.openSync(path.join(dir, `${base}.env.lock`), "wx"));
+    } catch (e) {
+      if (e && e.code === "EEXIST") return; // 已写过, 正常返回
+      throw e;
+    }
+    const rec = { type: "session", sessionId: sessionID, traceparent: tp, ts: new Date().toISOString() };
+    fs.appendFileSync(path.join(dir, `${base}.jsonl`), JSON.stringify(rec) + "\n", "utf-8");
+  } catch {
+    // fail-open: 绝不影响 opencode
+  }
+}
+
 function handleChatMessage(inp, out, userId) {
   const sessionID = inp.sessionID;
   if (!sessionID) return;
@@ -379,6 +403,7 @@ function handleChatMessage(inp, out, userId) {
   const session = getSession(sessionID);
 
   session.turnSeq += 1;
+  if (session.turnSeq === 1) recordUpstreamEnvOnce(sessionID);
   const turnId = `${sessionID}:t${session.turnSeq}`;
   const traceId = generateTraceId();
 

@@ -45,6 +45,9 @@ import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-l
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
+import { CorrelationStore } from './upstream-link/correlation-store.js';
+import { TraceLinker } from './upstream-link/trace-linker.js';
+import { AcpCorrelateRetentionService } from './upstream-link/acp-correlate-retention-service.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
@@ -108,6 +111,7 @@ export class Orchestrator extends EventEmitter {
   private stateStore!: StateStore;
   private flusher!: BaseFlusher;
   private logRetentionService!: LogRetentionService;
+  private acpCorrelateRetentionService?: AcpCorrelateRetentionService;
   private legacySlsFailedLogCleanupService: LegacySlsFailedLogCleanupService | null = null;
   private hookWatchdog!: HookWatchdog;
   private updaterWatchdog: UpdaterWatchdog | null = null;
@@ -168,6 +172,22 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setAgentsConfig(this.config.agents);
     this.inputManager.setAlarmManager(this.alarmManager);
     this.inputManager.setMaskConfig(this.config.mask ?? { mode: 'none', types: [] });
+
+    // Upstream trace linking (opt-in): stamp trace_id/parent_span_id from the
+    // acp-correlate store so agent spans reparent under the upstream span.
+    if (this.config.upstreamLink?.enabled) {
+      const correlateDir = path.join(this.dataDir, 'acp-correlate');
+      await ensureDir(correlateDir);
+      const store = new CorrelationStore(correlateDir);
+      const traceLinker = new TraceLinker(store);
+      this.inputManager.setTraceLinker(traceLinker);
+      this.acpCorrelateRetentionService = new AcpCorrelateRetentionService(this.dataDir, this.config.upstreamLink, traceLinker);
+      this.acpCorrelateRetentionService.start();
+      // Adapters/env hooks must write records under this exact path; a custom
+      // config.json dataDir that diverges from where they write silently yields
+      // no linking, so surface the resolved dir for diagnosis.
+      logger.info('upstream trace linking enabled', { correlateDir, ttlMs: this.config.upstreamLink.ttlMs });
+    }
 
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
     const pilotDir = this.resolvePilotDir();
@@ -304,6 +324,7 @@ export class Orchestrator extends EventEmitter {
     this.legacySlsFailedLogCleanupService?.stop();
     this.legacySlsFailedLogCleanupService = null;
     this.logRetentionService?.stop();
+    this.acpCorrelateRetentionService?.stop();
     await this.localWorkerActivationService?.stop();
     await this.deploymentManager?.stopWorkers();
     await this.agentDiscoveryService?.stop();

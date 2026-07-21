@@ -96,6 +96,20 @@ loongsuite-pilot info
 | 输出前进行密钥脱敏 | [数据脱敏](docs/zh-CN/masking.md) |
 | 查看全局配置加载顺序和保留策略 | [配置总览](docs/zh-CN/configuration.md) |
 
+### 上游 Trace 串联(可选)
+
+把采集到的 agent span 挂到**上游** trace 下,使每一轮的 span 树重挂到上游 span。默认关闭,且全程 fail-open(绝不影响正常采集/上报)。
+
+| 配置项 | 取值 | 默认 |
+| ------ | ---- | ---- |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK`(环境变量)· `upstreamLink.enabled`(config.json) | `true` / `1` 开启;不设、`false` 或 `0` 关闭 | 关闭 |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS`(环境变量)· `upstreamLink.ttlMs`(config.json) | `acp-correlate` 文件清理 TTL(毫秒) | `86400000`(24 小时) |
+
+开启后,上游 `traceparent` 经以下两种方案之一到达 Pilot,并在采集时 stamp 到记录(turn 打 `trace_id`、用户输入事件打 `parent_span_id`):
+
+- **关联文件**(per-turn):调用方在发送 prompt 时,把 `{sessionId, contentHash, contentPrefix, traceparent}` 写入 `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl`。串联与协议无关——唯一要求是 `sessionId` 等于 Pilot 采集该 turn 时的 `gen_ai.session.id`,且内容(hash 或前缀)能匹配采集到的用户文本。ACP client 天然满足(`session/new` 的 id 会贯穿采集),故 ACP 是主要场景。
+- **环境变量**(agent 进程上的 `TRACEPARENT`):经 agent 的 hook 作用于该会话的第一个 turn。适用于调用方无法预先拿到 per-turn `sessionId` 的情况。
+
 ## 输出数据
 
 | 后端 | 用途 |

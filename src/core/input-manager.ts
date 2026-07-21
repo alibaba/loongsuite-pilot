@@ -14,6 +14,7 @@ import { applyAgentContentPolicy } from '../normalization/agent-content-policy.j
 import { maskAgentActivityEntry } from '../mask/entry-masker.js';
 import { loadEnabledRules } from '../mask/rule-loader.js';
 import type { CompiledMaskRule } from '../mask/types.js';
+import type { TraceLinker } from './upstream-link/trace-linker.js';
 
 const logger = createLogger('InputManager');
 
@@ -48,6 +49,7 @@ export class InputManager extends EventEmitter {
   private agentsConfig: AgentsConfig = {};
   private maskConfig: MaskConfig = { mode: 'none', types: [] };
   private maskRules: CompiledMaskRule[] = [];
+  private traceLinker: TraceLinker | null = null;
 
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;
@@ -72,6 +74,10 @@ export class InputManager extends EventEmitter {
   setMaskConfig(config: MaskConfig): void {
     this.maskConfig = config;
     this.maskRules = loadEnabledRules(config);
+  }
+
+  setTraceLinker(linker: TraceLinker): void {
+    this.traceLinker = linker;
   }
 
   registerInput(input: BaseInput): void {
@@ -220,6 +226,16 @@ export class InputManager extends EventEmitter {
         entry['user.id'] = this.configuredUserId;
       } else if (!entry['user.id'] && this.userId) {
         entry['user.id'] = this.userId;
+      }
+    }
+
+    // Upstream trace linking: stamp trace_id / parent_span_id from correlation
+    // store so agent spans reparent under the upstream span. Fully fail-open.
+    if (this.traceLinker) {
+      try {
+        await this.traceLinker.stamp(entries);
+      } catch (err) {
+        logger.warn('trace linker stamp failed (skipped)', { inputId, error: String(err) });
       }
     }
 

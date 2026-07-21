@@ -19,6 +19,7 @@ import type {
   SlsEndpoint,
   SlsMode,
   StatusBarConfig,
+  UpstreamLinkConfig,
 } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
@@ -112,6 +113,11 @@ export interface ConfigFile {
   collectTrace?: boolean;
   serviceNamePrefix?: string;
 
+  upstreamLink?: {
+    enabled?: boolean;
+    ttlMs?: number;
+  };
+
   mask?: {
     mode?: string;
     types?: string[];
@@ -176,7 +182,7 @@ function env(key: string): string | undefined {
 
 function envBool(key: string, fallback: boolean): boolean {
   const v = env(key);
-  if (v === undefined) return fallback;
+  if (v === undefined || v.trim() === '') return fallback; // empty string == unset, not "true"
   return v !== 'false' && v !== '0';
 }
 
@@ -242,7 +248,18 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     fileCollection: buildFileCollectionConfig(file),
     pipeline: buildPipelineConfig(file),
     statusBar: buildStatusBarConfig(file),
+    upstreamLink: buildUpstreamLinkConfig(file),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
+  };
+}
+
+function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
+  const ttlMs = envInt('LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS', file?.upstreamLink?.ttlMs ?? 86_400_000); // 24h
+  return {
+    enabled: envBool('LOONGSUITE_PILOT_UPSTREAM_LINK', file?.upstreamLink?.enabled ?? false),
+    // Clamp: ttlMs <= 0 would make the retention cutoff Date.now() (or the future),
+    // deleting all freshly-written correlation files and silently breaking linking.
+    ttlMs: ttlMs > 0 ? ttlMs : 86_400_000,
   };
 }
 

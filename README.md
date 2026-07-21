@@ -113,6 +113,21 @@ Start with the guide that matches what you want to change:
 | See global config loading and retention settings | [Configuration Guide](docs/configuration.md)     |
 
 
+### Upstream Trace Linking (optional)
+
+Link collected agent spans to an **upstream** trace so each turn's span tree reparents under the upstream span. Disabled by default, and fully fail-open (never affects normal collection/reporting).
+
+| Setting | Values | Default |
+| ------- | ------ | ------- |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK` (env) · `upstreamLink.enabled` (config.json) | `true` / `1` to enable; unset, `false`, or `0` to disable | disabled |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS` (env) · `upstreamLink.ttlMs` (config.json) | cleanup TTL in ms for `acp-correlate` files | `86400000` (24h) |
+
+When enabled, the upstream `traceparent` reaches Pilot via one of two schemes and is stamped onto collected records (`trace_id` on the turn, `parent_span_id` on the user-input event):
+
+- **Correlation file** (per-turn): the caller writes `{sessionId, contentHash, contentPrefix, traceparent}` to `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl` when it sends a prompt. Linking is protocol-agnostic — the only requirement is that `sessionId` matches the `gen_ai.session.id` Pilot collects for that turn, and the content (hash or prefix) matches the collected user text. ACP clients satisfy this naturally (the `session/new` id flows into collection), so ACP is the primary case.
+- **Environment** (`TRACEPARENT` on the agent process): applied to the session's first turn, via the agent's hook. Use this when the caller cannot obtain a per-turn `sessionId` up front.
+
+
 ## Output Data
 
 
