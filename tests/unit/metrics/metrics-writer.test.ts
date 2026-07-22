@@ -59,8 +59,8 @@ function checkThresholdsForTest(writer: MetricsWriter, metrics: { cpu: string; m
   (writer as any).checkThresholds(metrics);
 }
 
-function cpuAboveNormalizedThreshold(): string {
-  return String(81 * Math.max(os.cpus().length, 1));
+function cpuAboveProcessThreshold(): string {
+  return '81';
 }
 
 describe('MetricsWriter', () => {
@@ -262,11 +262,11 @@ describe('MetricsWriter', () => {
       expect(alarm!.alarm_message).toContain('critical threshold 2048MB');
     });
 
-    it('suppresses transient CPU spikes until 3 consecutive normalized samples', () => {
+    it('suppresses transient CPU spikes until 3 consecutive process CPU samples', () => {
       const setup = makeAlarmWriter(tmpDir);
       writer = setup.writer;
       const { alarmManager } = setup;
-      const highCpu = cpuAboveNormalizedThreshold();
+      const highCpu = cpuAboveProcessThreshold();
 
       checkThresholdsForTest(writer, { cpu: highCpu, mem: '128' });
       checkThresholdsForTest(writer, { cpu: highCpu, mem: '128' });
@@ -278,15 +278,29 @@ describe('MetricsWriter', () => {
       expect(alarm).toBeDefined();
       expect(alarm!.alarm_level).toBe('2');
       expect(alarm!.alarm_message).toContain('3 consecutive samples');
-      expect(alarm!.alarm_message).toContain('of');
-      expect(alarm!.alarm_message).toContain('cores');
+      expect(alarm!.alarm_message).toContain('CPU usage 81% exceeds 80%');
+      expect(alarm!.alarm_message).not.toContain('cores');
+    });
+
+    it('compares CPU threshold against raw process percent instead of host-core-normalized percent', () => {
+      const setup = makeAlarmWriter(tmpDir);
+      writer = setup.writer;
+      const { alarmManager } = setup;
+
+      checkThresholdsForTest(writer, { cpu: '81', mem: '128' });
+      checkThresholdsForTest(writer, { cpu: '81', mem: '128' });
+      checkThresholdsForTest(writer, { cpu: '81', mem: '128' });
+
+      const alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_CPU_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_message).toContain('CPU usage 81% exceeds 80%');
     });
 
     it('keeps CPU and memory alarms split in the same flush window', () => {
       const setup = makeAlarmWriter(tmpDir);
       writer = setup.writer;
       const { alarmManager } = setup;
-      const highCpu = cpuAboveNormalizedThreshold();
+      const highCpu = cpuAboveProcessThreshold();
 
       checkThresholdsForTest(writer, { cpu: highCpu, mem: '128' });
       checkThresholdsForTest(writer, { cpu: highCpu, mem: '128' });

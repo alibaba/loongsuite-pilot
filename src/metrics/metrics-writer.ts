@@ -1,5 +1,4 @@
 import * as path from 'node:path';
-import * as os from 'node:os';
 import { appendLine, ensureDir } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { flattenToStrings } from '../utils/record-utils.js';
@@ -141,9 +140,7 @@ export class MetricsWriter {
       return;
     }
 
-    const cpuCoreCount = Math.max(os.cpus().length, 1);
-    const normalizedCpuPercent = Math.round((cpuPercent / cpuCoreCount) * 100) / 100;
-    if (normalizedCpuPercent <= CPU_THRESHOLD_PERCENT) {
+    if (cpuPercent <= CPU_THRESHOLD_PERCENT) {
       this.cpuHighSamples = 0;
       return;
     }
@@ -154,7 +151,7 @@ export class MetricsWriter {
     this.recordProcessAlarm(
       'PROCESS_CPU_ALARM',
       '2',
-      `CPU usage ${cpuPercent}% (${normalizedCpuPercent}% of ${cpuCoreCount} cores) exceeds ${CPU_THRESHOLD_PERCENT}% for ${this.cpuHighSamples} consecutive samples`,
+      `CPU usage ${cpuPercent}% exceeds ${CPU_THRESHOLD_PERCENT}% for ${this.cpuHighSamples} consecutive samples`,
       'cpu',
     );
   }
