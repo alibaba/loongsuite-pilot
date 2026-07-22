@@ -319,6 +319,7 @@ async function main() {
       const runtimeConfig = loadHookRuntimeConfig(dataDir);
       let records;
       let consumedConversationIds;
+      let assembledFromTranscript = false;
 
       // On Windows: use transcript as source of truth for text content.
       // This bypasses GB18030 codepage corruption of hook payload text.
@@ -331,6 +332,7 @@ async function main() {
         if (transcriptRecords && transcriptRecords.length > 0) {
           records = transcriptRecords;
           consumedConversationIds = new Set([convId]);
+          assembledFromTranscript = true;
         }
       }
 
@@ -355,7 +357,9 @@ async function main() {
         if (transcriptPathForSkill && promptForSkill?.prompt && records.length > 0) {
           const { detectSkillFromTranscript } = await import('./cursor/skill-detector.mjs');
           const detectedSkills = detectSkillFromTranscript(transcriptPathForSkill, promptForSkill.prompt);
-          if (detectedSkills && detectedSkills.length > 0) {
+          // The Windows transcript assembler already materializes transcript
+          // tool_use entries. Only compensate paths assembled from hook events.
+          if (detectedSkills && detectedSkills.length > 0 && !assembledFromTranscript) {
             injectSkillRecords(records, detectedSkills);
           }
         }
