@@ -10,6 +10,7 @@
  * Raw capture is behind LOONGSUITE_CURSOR_RAW_TRACE=1 env flag.
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -104,6 +105,80 @@ function compactJournal(allEvents, consumedConversationIds) {
     if (pendingTurnConvIds.has(ev.conversation_id)) remaining.push(ev);
   }
   rewriteJournal(remaining, allEvents);
+}
+
+function injectSkillRecords(records, skills, promptEvent) {
+  // Find first LLM span (llm.request or llm.response) to annotate with skill name
+  const firstLlmIdx = records.findIndex(r =>
+    r['event.name'] === 'llm.request' || r['event.name'] === 'llm.response'
+  );
+
+  if (firstLlmIdx < 0) return; // no LLM span found
+
+  // Append Read tool_use entries to the first LLM span's output messages
+  const llmRecord = records[firstLlmIdx];
+  const outputMsgs = Array.isArray(llmRecord['gen_ai.output.messages'])
+    ? llmRecord['gen_ai.output.messages']
+    : [];
+
+  let assistantMsg = outputMsgs.find(m => m.role === 'assistant');
+  if (!assistantMsg) {
+    assistantMsg = { role: 'assistant', parts: [] };
+    outputMsgs.push(assistantMsg);
+  }
+  if (!Array.isArray(assistantMsg.parts)) assistantMsg.parts = [];
+
+  for (const skill of skills) {
+    assistantMsg.parts.push({
+      type: 'tool_use',
+      name: 'Read',
+      tool_use_id: crypto.randomUUID(),
+      input: { path: skill.skillPath },
+    });
+  }
+  llmRecord['gen_ai.output.messages'] = outputMsgs;
+
+  // Create tool.call + tool.result record pairs for each skill read
+  const insertRecords = [];
+  for (const skill of skills) {
+    const toolCallId = crypto.randomUUID();
+    const baseFields = {
+      time_unix_nano: String(BigInt(records[firstLlmIdx].time_unix_nano) + 1000000n),
+      observed_time_unix_nano: String(BigInt(records[firstLlmIdx].observed_time_unix_nano) + 1000000n),
+      trace_id: records[firstLlmIdx].trace_id,
+      'gen_ai.session.id': records[firstLlmIdx]['gen_ai.session.id'],
+      'gen_ai.turn.id': records[firstLlmIdx]['gen_ai.turn.id'],
+      'gen_ai.step.id': records[firstLlmIdx]['gen_ai.step.id'] || 'step_1',
+      'gen_ai.agent.type': records[firstLlmIdx]['gen_ai.agent.type'],
+      'user.id': records[firstLlmIdx]['user.id'],
+    };
+
+    // tool.call
+    insertRecords.push({
+      ...baseFields,
+      'event.id': crypto.randomUUID(),
+      'event.name': 'tool.call',
+      'gen_ai.tool.name': 'Read',
+      'gen_ai.tool.call.id': toolCallId,
+      'gen_ai.tool.call.arguments': JSON.stringify({ path: skill.skillPath }),
+      'gen_ai.skill.name': skill.skillName,
+      'agent.cursor.skill_detection_source': 'transcript_post_assembly',
+    });
+
+    // tool.result
+    insertRecords.push({
+      ...baseFields,
+      'event.id': crypto.randomUUID(),
+      'event.name': 'tool.result',
+      'gen_ai.tool.name': 'Read',
+      'gen_ai.tool.call.id': toolCallId,
+      'gen_ai.skill.name': skill.skillName,
+      'agent.cursor.skill_detection_source': 'transcript_post_assembly',
+    });
+  }
+
+  // Insert after the first LLM span
+  records.splice(firstLlmIdx + 1, 0, ...insertRecords);
 }
 
 async function main() {
@@ -256,6 +331,21 @@ async function main() {
         records = result.records;
         consumedConversationIds = result.consumedConversationIds;
       }
+
+      // ─── Post-assembly: Skill Usage Detection from Transcript ───
+      try {
+        const transcriptPathForSkill = internalEvent.transcript_path;
+        const promptForSkill = allEvents.find(e =>
+          e.hook_event === 'beforeSubmitPrompt' && e.conversation_id === convId
+        );
+        if (transcriptPathForSkill && promptForSkill?.prompt && records.length > 0) {
+          const { detectSkillFromTranscript } = await import('./cursor/skill-detector.mjs');
+          const detectedSkills = detectSkillFromTranscript(transcriptPathForSkill, promptForSkill.prompt);
+          if (detectedSkills && detectedSkills.length > 0) {
+            injectSkillRecords(records, detectedSkills, promptForSkill);
+          }
+        }
+      } catch { /* best-effort skill detection — never block output */ }
 
       if (records.length > 0) {
         const day = localDateString(now);
