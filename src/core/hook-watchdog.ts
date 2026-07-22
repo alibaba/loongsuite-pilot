@@ -34,6 +34,13 @@ export interface InterceptCheckTarget {
   check: () => Promise<boolean>;
   repair: () => Promise<void>;
   precondition: () => Promise<boolean>;
+  /**
+   * Whether the owning agent is enabled by the user's selection
+   * (config.agents[<id>].enabled). When this returns false the target is
+   * skipped entirely — no check, no repair — so a deselected agent's intercept
+   * is never (re)injected. Omitted → treated as enabled (backward compatible).
+   */
+  enabled?: () => boolean | Promise<boolean>;
 }
 
 export interface CheckResult {
@@ -320,6 +327,15 @@ export class HookWatchdog {
 
     for (const target of this.interceptTargets) {
       try {
+        // User-selection gate: skip disabled agents before any check/repair, so
+        // a deselected agent's intercept is never (re)injected and does not
+        // consume the repair cooldown / daily-limit budget.
+        if (target.enabled && !(await target.enabled())) {
+          logger.debug('intercept-watchdog.disabled', { id: target.id });
+          summary.skipped++;
+          continue;
+        }
+
         const preOk = await target.precondition();
         if (!preOk) {
           logger.debug('intercept-watchdog.skipped', { id: target.id, reason: 'precondition' });
@@ -404,7 +420,63 @@ export class HookWatchdog {
     ];
   }
 
-  static defaultInterceptTargets(dataDir: string): InterceptCheckTarget[] {
+  /**
+   * Shell-rc intercept block definitions (qodercli + claude-code).
+   *
+   * blockFn must stay byte-identical to the block written by the installer
+   * (deploy/installer-opensource.sh inject_*), so the marker-based idempotency
+   * checks agree. The `if ! alias ... eval '...'` shape guards against
+   * clobbering a user's own alias/function AND avoids a parse error: a bare
+   * `<cli>()` token would fail to parse under an active alias because
+   * interactive shells expand aliases at parse time (before the guard runs), so
+   * the definition is deferred behind eval.
+   *
+   * Exposed as a pure, static seam so tests can render the exact block for any
+   * path without touching HOME/fs (see hook-watchdog-intercept-shell.test.ts).
+   */
+  static interceptRcBlockDefs(): Array<{
+    id: string;
+    agentId: string;
+    marker: string;
+    scriptName: string;
+    blockFn: (scriptPath: string) => string;
+  }> {
+    return [
+      {
+        id: 'qodercli-rc',
+        agentId: 'qoder',
+        marker: 'loongsuite-pilot BEGIN qodercli-intercept',
+        scriptName: 'qodercli-token-intercept.mjs',
+        blockFn: (p) => [
+          '',
+          '# loongsuite-pilot BEGIN qodercli-intercept',
+          'if ! alias qodercli >/dev/null 2>&1 && ! typeset -f qodercli >/dev/null 2>&1; then',
+          `  eval 'qodercli() { BUN_OPTIONS="--preload=${p}" command qodercli "$@"; }'`,
+          'fi',
+          '# loongsuite-pilot END qodercli-intercept',
+        ].join('\n'),
+      },
+      {
+        id: 'claude-code-rc',
+        agentId: 'claude-code',
+        marker: 'loongsuite-pilot BEGIN claude-code-intercept',
+        scriptName: 'claude-code-fetch-intercept.mjs',
+        blockFn: (p) => [
+          '',
+          '# loongsuite-pilot BEGIN claude-code-intercept',
+          'if ! alias claude >/dev/null 2>&1 && ! typeset -f claude >/dev/null 2>&1; then',
+          `  eval 'claude() { BUN_OPTIONS="--preload=${p} \${BUN_OPTIONS}" command claude "$@"; }'`,
+          'fi',
+          '# loongsuite-pilot END claude-code-intercept',
+        ].join('\n'),
+      },
+    ];
+  }
+
+  static defaultInterceptTargets(
+    dataDir: string,
+    isAgentEnabled: (agentId: string) => boolean = () => true,
+  ): InterceptCheckTarget[] {
     const targets: InterceptCheckTarget[] = [];
     const home = os.homedir();
 
@@ -416,6 +488,7 @@ export class HookWatchdog {
 
       targets.push({
         id: 'qoderwork-env',
+        enabled: () => isAgentEnabled('qoder-work'),
         precondition: async () => {
           if (!await fileExists(wrapperPath)) return false;
           const sysApp = await directoryExists('/Applications/QoderWork.app');
@@ -475,41 +548,12 @@ export class HookWatchdog {
       path.join(home, '.bashrc'),
     ];
 
-    const rcTargets: Array<{
-      id: string;
-      marker: string;
-      scriptName: string;
-      blockFn: (scriptPath: string) => string;
-    }> = [
-      {
-        id: 'qodercli-rc',
-        marker: 'loongsuite-pilot BEGIN qodercli-intercept',
-        scriptName: 'qodercli-token-intercept.mjs',
-        blockFn: (p) => [
-          '',
-          '# loongsuite-pilot BEGIN qodercli-intercept',
-          `qodercli() { BUN_OPTIONS="--preload=${p}" command qodercli "$@"; }`,
-          '# loongsuite-pilot END qodercli-intercept',
-        ].join('\n'),
-      },
-      {
-        id: 'claude-code-rc',
-        marker: 'loongsuite-pilot BEGIN claude-code-intercept',
-        scriptName: 'claude-code-fetch-intercept.mjs',
-        blockFn: (p) => [
-          '',
-          '# loongsuite-pilot BEGIN claude-code-intercept',
-          `claude() { BUN_OPTIONS="--preload=${p} \${BUN_OPTIONS}" command claude "$@"; }`,
-          '# loongsuite-pilot END claude-code-intercept',
-        ].join('\n'),
-      },
-    ];
-
-    for (const rc of rcTargets) {
+    for (const rc of HookWatchdog.interceptRcBlockDefs()) {
       const scriptPath = path.join(dataDir, 'hooks', rc.scriptName);
 
       targets.push({
         id: rc.id,
+        enabled: () => isAgentEnabled(rc.agentId),
         precondition: async () => {
           // Only check if the hook script was deployed by the installer.
           // We intentionally do NOT run `which <cli>` — the daemon process
