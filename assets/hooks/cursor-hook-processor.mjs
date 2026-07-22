@@ -107,16 +107,22 @@ function compactJournal(allEvents, consumedConversationIds) {
   rewriteJournal(remaining, allEvents);
 }
 
-function injectSkillRecords(records, skills, promptEvent) {
-  // Find first LLM span (llm.request or llm.response) to annotate with skill name
-  const firstLlmIdx = records.findIndex(r =>
-    r['event.name'] === 'llm.request' || r['event.name'] === 'llm.response'
-  );
+function injectSkillRecords(records, skills) {
+  // Skill-to-step alignment is best-effort: attach detected reads to the first
+  // assembled LLM response. Cursor's assemblers synthesize a response even for
+  // thought-only and implicit tool steps, so never attach output to a request.
+  const targetLlmIdx = records.findIndex(r => r['event.name'] === 'llm.response');
+  if (targetLlmIdx < 0) return;
 
-  if (firstLlmIdx < 0) return; // no LLM span found
+  // Generate each call ID once so the LLM output, tool.call, and tool.result
+  // records all describe the same synthetic tool invocation.
+  const skillEntries = skills.map(skill => ({
+    skill,
+    toolCallId: crypto.randomUUID(),
+  }));
 
-  // Append Read tool_use entries to the first LLM span's output messages
-  const llmRecord = records[firstLlmIdx];
+  // Append canonical Read tool_call entries to the first LLM response.
+  const llmRecord = records[targetLlmIdx];
   const outputMsgs = Array.isArray(llmRecord['gen_ai.output.messages'])
     ? llmRecord['gen_ai.output.messages']
     : [];
@@ -128,39 +134,45 @@ function injectSkillRecords(records, skills, promptEvent) {
   }
   if (!Array.isArray(assistantMsg.parts)) assistantMsg.parts = [];
 
-  for (const skill of skills) {
+  for (const { skill, toolCallId } of skillEntries) {
     assistantMsg.parts.push({
-      type: 'tool_use',
+      type: 'tool_call',
+      id: toolCallId,
       name: 'Read',
-      tool_use_id: crypto.randomUUID(),
-      input: { path: skill.skillPath },
+      arguments: { path: skill.skillPath },
     });
   }
   llmRecord['gen_ai.output.messages'] = outputMsgs;
 
   // Create tool.call + tool.result record pairs for each skill read
   const insertRecords = [];
-  for (const skill of skills) {
-    const toolCallId = crypto.randomUUID();
+  const baseTime = BigInt(llmRecord.time_unix_nano);
+  const baseObservedTime = BigInt(
+    llmRecord.observed_time_unix_nano ?? llmRecord.time_unix_nano
+  );
+  for (let index = 0; index < skillEntries.length; index++) {
+    const { skill, toolCallId } = skillEntries[index];
+    const callOffset = BigInt(index * 2 + 1);
+    const resultOffset = callOffset + 1n;
     const baseFields = {
-      time_unix_nano: String(BigInt(records[firstLlmIdx].time_unix_nano) + 1000000n),
-      observed_time_unix_nano: String(BigInt(records[firstLlmIdx].observed_time_unix_nano) + 1000000n),
-      trace_id: records[firstLlmIdx].trace_id,
-      'gen_ai.session.id': records[firstLlmIdx]['gen_ai.session.id'],
-      'gen_ai.turn.id': records[firstLlmIdx]['gen_ai.turn.id'],
-      'gen_ai.step.id': records[firstLlmIdx]['gen_ai.step.id'] || 'step_1',
-      'gen_ai.agent.type': records[firstLlmIdx]['gen_ai.agent.type'],
-      'user.id': records[firstLlmIdx]['user.id'],
+      trace_id: llmRecord.trace_id,
+      'gen_ai.session.id': llmRecord['gen_ai.session.id'],
+      'gen_ai.turn.id': llmRecord['gen_ai.turn.id'],
+      'gen_ai.step.id': llmRecord['gen_ai.step.id'] || 'step_1',
+      'gen_ai.agent.type': llmRecord['gen_ai.agent.type'],
+      'user.id': llmRecord['user.id'],
     };
 
     // tool.call
     insertRecords.push({
       ...baseFields,
+      time_unix_nano: String(baseTime + callOffset),
+      observed_time_unix_nano: String(baseObservedTime + callOffset),
       'event.id': crypto.randomUUID(),
       'event.name': 'tool.call',
       'gen_ai.tool.name': 'Read',
       'gen_ai.tool.call.id': toolCallId,
-      'gen_ai.tool.call.arguments': JSON.stringify({ path: skill.skillPath }),
+      'gen_ai.tool.call.arguments': { path: skill.skillPath },
       'gen_ai.skill.name': skill.skillName,
       'agent.cursor.skill_detection_source': 'transcript_post_assembly',
     });
@@ -168,6 +180,8 @@ function injectSkillRecords(records, skills, promptEvent) {
     // tool.result
     insertRecords.push({
       ...baseFields,
+      time_unix_nano: String(baseTime + resultOffset),
+      observed_time_unix_nano: String(baseObservedTime + resultOffset),
       'event.id': crypto.randomUUID(),
       'event.name': 'tool.result',
       'gen_ai.tool.name': 'Read',
@@ -177,8 +191,8 @@ function injectSkillRecords(records, skills, promptEvent) {
     });
   }
 
-  // Insert after the first LLM span
-  records.splice(firstLlmIdx + 1, 0, ...insertRecords);
+  // Insert after the first LLM response.
+  records.splice(targetLlmIdx + 1, 0, ...insertRecords);
 }
 
 async function main() {
@@ -342,7 +356,7 @@ async function main() {
           const { detectSkillFromTranscript } = await import('./cursor/skill-detector.mjs');
           const detectedSkills = detectSkillFromTranscript(transcriptPathForSkill, promptForSkill.prompt);
           if (detectedSkills && detectedSkills.length > 0) {
-            injectSkillRecords(records, detectedSkills, promptForSkill);
+            injectSkillRecords(records, detectedSkills);
           }
         }
       } catch { /* best-effort skill detection — never block output */ }
