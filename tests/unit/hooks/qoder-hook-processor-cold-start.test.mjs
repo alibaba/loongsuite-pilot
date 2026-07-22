@@ -50,10 +50,10 @@ function lastPrompt(index) {
   return { type: 'last-prompt', sessionId: 'session-old', lastPrompt: `prompt ${index}` };
 }
 
-function runProcessor() {
+function runProcessor(sessionId = 'session-old') {
   return spawnSync('node', [PROCESSOR, '--agent-id', 'qoder', '--log-prefix', 'qoder'], {
     input: JSON.stringify({
-      session_id: 'session-old',
+      session_id: sessionId,
       transcript_path: transcriptPath,
       cwd: '/tmp/qoder-project',
     }),
@@ -98,8 +98,8 @@ describe('qoder-hook-processor cold-start recovery', () => {
       new Set(['missing-cursor']),
     );
 
-    const cursorFile = path.join(dataDir, 'state', 'hooks', 'qoder-line-records.json');
-    expect(fs.existsSync(cursorFile)).toBe(true);
+    const cursorDir = path.join(dataDir, 'state', 'hooks', 'qoder-line-records');
+    expect(fs.readdirSync(cursorDir).filter(file => file.endsWith('.json'))).toHaveLength(1);
 
     const before = bootstrapRecords.length;
     fs.appendFileSync(transcriptPath, [
@@ -126,7 +126,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
       lastPrompt(5),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
 
-    const third = runProcessor();
+    const third = runProcessor('session-second-old');
     expect(third.status).toBe(0);
     const secondSessionRecords = readHistory().slice(beforeSecondSession);
     expect(userBoundaryPrompts(secondSessionRecords)).toEqual([
@@ -134,6 +134,14 @@ describe('qoder-hook-processor cold-start recovery', () => {
     ]);
     expect(new Set(secondSessionRecords.map(r => r['agent.transcript.cursor_mode']))).toEqual(
       new Set(['bootstrap']),
+    );
+    const cursorFiles = fs.readdirSync(cursorDir).filter(file => file.endsWith('.json'));
+    expect(cursorFiles).toHaveLength(2);
+    const persistedSessionIds = cursorFiles.map(file =>
+      JSON.parse(fs.readFileSync(path.join(cursorDir, file), 'utf-8')).session_id
+    );
+    expect(new Set(persistedSessionIds)).toEqual(
+      new Set(['session-old', 'session-second-old']),
     );
   });
 });

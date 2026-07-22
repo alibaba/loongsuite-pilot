@@ -140,13 +140,21 @@ describe('qoderwork-hook-processor cursor recovery', () => {
     );
     expect(new Set(bootstrapRecords.map(r => r['agent.transcript.cursor_batch_id'])).size).toBe(1);
 
-    const persistentCursor = path.join(
+    const persistentCursorDir = path.join(
       DATA_DIR,
       'state',
       'hooks',
-      `${AGENT_ID}-line-records.json`,
+      `${AGENT_ID}-line-records`,
     );
-    expect(fs.existsSync(persistentCursor)).toBe(true);
+    const cursorFiles = fs.readdirSync(persistentCursorDir).filter(file => file.endsWith('.json'));
+    expect(cursorFiles).toHaveLength(1);
+    const persistentCursor = JSON.parse(
+      fs.readFileSync(path.join(persistentCursorDir, cursorFiles[0]), 'utf-8'),
+    );
+    expect(persistentCursor).toMatchObject({
+      session_id: 'sess-recovery',
+      transcript_path: TRANSCRIPT,
+    });
 
     const before = bootstrapRecords.length;
     fs.appendFileSync(

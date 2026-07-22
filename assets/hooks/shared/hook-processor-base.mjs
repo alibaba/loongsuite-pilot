@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   buildQoderHookRecord,
@@ -69,44 +70,43 @@ export function logDebug(agentId, message) {
   } catch { /* best-effort */ }
 }
 
-// --- Line record persistence (per agent-id) ---------------------------------
+// --- Line record persistence (per agent-id and session) ---------------------
 
-function lineRecordFile(agentId) {
+function aggregateLineRecordFile(agentId) {
   return path.join(LOONGSUITE_PILOT_DATA_DIR, 'state', 'hooks', `${agentId}-line-records.json`);
 }
 
-function legacyLineRecordFile(agentId) {
+function deployedLegacyLineRecordFile(agentId) {
   return path.join(HOOKS_DIR, `.line_records.${agentId}.json`);
 }
 
-export function loadLineRecords(agentId) {
-  try {
-    const f = lineRecordFile(agentId);
-    if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf-8'));
+function sessionLineRecordDir(agentId) {
+  return path.join(LOONGSUITE_PILOT_DATA_DIR, 'state', 'hooks', `${agentId}-line-records`);
+}
 
-    // Before v1.0 the cursor lived beside the deployed hook scripts. That
-    // directory can be replaced during deployment, so migrate it lazily into
-    // the persistent data directory while old installations still have it.
-    const legacy = legacyLineRecordFile(agentId);
-    if (!fs.existsSync(legacy)) return {};
-    const records = JSON.parse(fs.readFileSync(legacy, 'utf-8'));
-    if (saveLineRecords(agentId, records)) {
-      try { fs.unlinkSync(legacy); } catch { /* best-effort migration cleanup */ }
-    }
-    return records;
+function sessionLineRecordFile(agentId, sessionId) {
+  const sessionHash = crypto.createHash('sha256').update(sessionId).digest('hex');
+  return path.join(sessionLineRecordDir(agentId), `${sessionHash}.json`);
+}
+
+function readJsonObject(file) {
+  try {
+    if (!fs.existsSync(file)) return null;
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
   } catch {
-    return {};
+    return null;
   }
 }
 
-export function saveLineRecords(agentId, records) {
+function saveSessionLineRecord(agentId, sessionId, record) {
+  const file = sessionLineRecordFile(agentId, sessionId);
   let tmp = '';
   try {
-    const f = lineRecordFile(agentId);
-    fs.mkdirSync(path.dirname(f), { recursive: true });
-    tmp = `${f}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(records, null, 2), 'utf-8');
-    fs.renameSync(tmp, f);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(record, null, 2), 'utf-8');
+    fs.renameSync(tmp, file);
     return true;
   } catch {
     if (tmp) {
@@ -116,14 +116,66 @@ export function saveLineRecords(agentId, records) {
   }
 }
 
+function migrateAggregateLineRecords(agentId) {
+  const sources = [
+    aggregateLineRecordFile(agentId),
+    deployedLegacyLineRecordFile(agentId),
+  ];
+
+  for (const source of sources) {
+    const records = readJsonObject(source);
+    if (!records) continue;
+
+    let migratedAll = true;
+    for (const [transcriptPath, value] of Object.entries(records)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        migratedAll = false;
+        continue;
+      }
+      const sessionId = typeof value.session_id === 'string' ? value.session_id : '';
+      if (!sessionId) {
+        migratedAll = false;
+        continue;
+      }
+
+      const target = sessionLineRecordFile(agentId, sessionId);
+      if (fs.existsSync(target)) continue;
+      const migrated = saveSessionLineRecord(agentId, sessionId, {
+        ...value,
+        session_id: sessionId,
+        transcript_path: transcriptPath,
+      });
+      if (!migrated) migratedAll = false;
+    }
+
+    if (migratedAll) {
+      try { fs.unlinkSync(source); } catch { /* best-effort migration cleanup */ }
+    }
+  }
+}
+
+export function loadLineRecord(agentId, sessionId) {
+  if (!sessionId) return {};
+  const file = sessionLineRecordFile(agentId, sessionId);
+  const persisted = readJsonObject(file);
+  if (persisted) return persisted;
+
+  // Older releases stored every transcript in one per-agent JSON object,
+  // either in the persistent state directory or beside the deployed hooks.
+  // Split those maps lazily into independent session files so concurrent Stop
+  // hooks for different sessions never overwrite each other's cursor.
+  migrateAggregateLineRecords(agentId);
+  return readJsonObject(file) || {};
+}
+
 export function updateLineRecord(agentId, transcriptPath, sessionId, endLine) {
-  const records = loadLineRecords(agentId);
-  records[transcriptPath] = {
+  const record = {
     session_id: sessionId,
+    transcript_path: transcriptPath,
     last_line_count: endLine,
     updated_at: new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, ''),
   };
-  const ok = saveLineRecords(agentId, records);
+  const ok = saveSessionLineRecord(agentId, sessionId, record);
   if (ok) logDebug(agentId, `Updated record: ${transcriptPath} -> ${endLine} lines`);
   else logDebug(agentId, 'Warning: Failed to save line records');
   return ok;
@@ -147,12 +199,12 @@ export function getTranscriptLineCount(transcriptPath) {
 }
 
 export function getLineRangeInfo(agentId, transcriptPath, sessionId) {
-  const records = loadLineRecords(agentId);
-  const record = records[transcriptPath] || {};
+  const record = loadLineRecord(agentId, sessionId);
   const hasRecordedOffset = Number.isFinite(record.last_line_count)
     && record.last_line_count >= 0;
   let lastCount = hasRecordedOffset ? record.last_line_count : 0;
   const recordedSession = record.session_id || '';
+  const recordedTranscript = record.transcript_path || '';
   let reason = hasRecordedOffset ? 'incremental' : 'missing-cursor';
 
   const currentCount = getTranscriptLineCount(transcriptPath);
@@ -161,6 +213,11 @@ export function getLineRangeInfo(agentId, transcriptPath, sessionId) {
     logDebug(agentId, `Session changed: ${recordedSession} -> ${sessionId}, reset to 0`);
     lastCount = 0;
     reason = 'session-changed';
+  }
+  if (recordedTranscript && recordedTranscript !== transcriptPath) {
+    logDebug(agentId, `Transcript changed for session ${sessionId}, reset to 0`);
+    lastCount = 0;
+    reason = 'transcript-changed';
   }
   if (currentCount === 0) {
     logDebug(agentId, 'Transcript is empty');
