@@ -274,6 +274,33 @@ describe('UpdaterMetrics', () => {
       await m.stop();
     });
 
+    it('enriches SERVICE_NOT_RUNNING_ALARM with the startup-crash cause when a breadcrumb exists', async () => {
+      mockReadFileSync.mockImplementation((p: string) => {
+        if (p.includes('last-startup-crash.json')) {
+          return JSON.stringify({
+            schema: 1, ts: 1, phase: 'module_load', version: '9.9.9', pid: 1,
+            error_message: 'Cannot open sqlite3 binding',
+            error_stack_head: 'Error: Cannot open sqlite3 binding',
+          });
+        }
+        return '12345\n';
+      });
+      const m = createMetrics('test-user', () => down('no matching collector command found'));
+
+      await m.start();
+      await vi.advanceTimersByTimeAsync(3 * 60_000 + 60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      expect(alarmLines).toHaveLength(1);
+      const parsed = JSON.parse(alarmLines[0].line);
+      expect(parsed.alarm_type).toBe('SERVICE_NOT_RUNNING_ALARM');
+      expect(parsed.alarm_message).toContain('cause=native_module_missing');
+      expect(parsed.alarm_message).toContain('version=9.9.9');
+      expect(parsed.alarm_message).toContain('no matching collector command found');
+      await m.stop();
+    });
+
     it('does not alarm when collector PID changes but command identity is found', async () => {
       const m = createMetrics('test-user', () => ({
         running: true,
