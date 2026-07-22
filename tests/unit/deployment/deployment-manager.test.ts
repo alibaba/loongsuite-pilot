@@ -208,6 +208,41 @@ describe('DeploymentManager', () => {
       const results = await mgr.deployAll();
       expect(results).toHaveLength(0);
     });
+
+    it('routes directory-plugin definitions to the managed directory strategy', async () => {
+      const sourceDir = path.join(dataDir, 'plugins', 'hermes-agent', 'loongsuite-pilot');
+      const targetDir = path.join(tmpDir, 'hermes-home', 'plugins', 'loongsuite-pilot');
+      await fs.mkdir(sourceDir, { recursive: true });
+      await fs.writeFile(path.join(sourceDir, 'plugin.yaml'), 'name: loongsuite-pilot\n');
+      const def: AgentDefinition = {
+        id: 'hermes-agent',
+        displayName: 'Hermes Agent',
+        deployMode: 'directory-plugin',
+        detection: { paths: [path.dirname(targetDir)], commands: ['hermes'] },
+        directoryPlugin: { sourceDir, targetDir },
+      };
+      await writeAgentDef(def);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const [result] = await makeManager().deployAll();
+
+      expect(result).toMatchObject({
+        success: true,
+        agentId: 'hermes-agent',
+        deployMode: 'directory-plugin',
+      });
+      expect(JSON.parse(await fs.readFile(
+        path.join(targetDir, '.loongsuite-pilot-managed.json'),
+        'utf8',
+      ))).toMatchObject({ owner: 'loongsuite-pilot', agentId: 'hermes-agent' });
+      expect(JSON.parse(await fs.readFile(
+        path.join(dataDir, 'deployed-agents.json'),
+        'utf8',
+      ))['hermes-agent']).toMatchObject({
+        deployMode: 'directory-plugin',
+        targetDir: path.resolve(targetDir),
+      });
+    });
   });
 
   describe('deploySingle', () => {

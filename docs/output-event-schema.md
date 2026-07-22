@@ -84,6 +84,9 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.tool.call.result` | json | Opt-In | Tool result payload. May contain sensitive content. |
 | `gen_ai.tool.call.duration` | int | Recommended | Positive tool execution duration in milliseconds, computed from the matched result boundary minus the call boundary. Omit it when either boundary is unavailable or the difference is not positive. |
 | `gen_ai.skill.name` | string | Conditionally Required for `skill.use` | Skill or extension capability name. |
+| `gen_ai.skill.id` | string | Recommended when skill identity is available | Stable skill identifier. |
+| `gen_ai.skill.description` | string | Recommended when skill metadata is available | Human-readable skill description. |
+| `gen_ai.skill.version` | string | Recommended when skill metadata is available | Skill version. |
 | `error.type` | string | Conditionally Required when the operation ends with an error | Low-cardinality error type, error code, exception class, or HTTP status. |
 | `error.message` | string | Recommended when `error.type` exists | Human-readable error detail. |
 | `agent.channel` | string | Recommended | Request source channel, such as `ide_plugin`, `web`, or `api`. |

@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 
 const sh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf-8');
 const ps1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf-8');
+const runtimeSh = readFileSync(resolve('scripts', 'loongsuite-pilot.sh'), 'utf-8');
+const runtimePs1 = readFileSync(resolve('scripts', 'loongsuite-pilot.ps1'), 'utf-8');
 
 // Hook-mode agents whose settings files must be cleaned on uninstall. Kept in
 // sync with agents.d/*.json (deployMode: hook). A missing entry means the
@@ -257,5 +259,44 @@ describe('uninstall cleans the MiMo Code plugin-inject spec', () => {
     expect(sh).toContain('plugins/mimo-code/plugin.mjs');
     expect(ps1).toContain('loongsuite-pilot-mimo-code');
     expect(ps1).toContain('plugins/mimo-code/plugin.mjs');
+  });
+});
+
+describe('uninstall only cleans the managed Hermes directory plugin', () => {
+  it('defines and calls marker-aware cleanup in the shell installer', () => {
+    expect(sh).toMatch(/remove_hermes_plugin\(\)\s*\{/);
+    expect(sh.slice(sh.indexOf('cmd_uninstall()'))).toContain('remove_hermes_plugin');
+    expect(sh).toContain('.loongsuite-pilot-managed.json');
+    expect(sh).toContain("meta.owner !== 'loongsuite-pilot'");
+    expect(sh).toContain("meta.agentId !== 'hermes-agent'");
+    expect(sh).toContain("state?.['hermes-agent']?.targetDir");
+    expect(sh).toContain('plugins disable loongsuite-pilot');
+    const uninstall = sh.slice(sh.indexOf('cmd_uninstall()'));
+    expect(uninstall.indexOf('remove_hermes_plugin'))
+      .toBeLessThan(uninstall.indexOf('rm -rf "$HOME/.loongsuite-pilot"'));
+  });
+
+  it('defines and calls marker-aware cleanup in the PowerShell installer', () => {
+    expect(ps1).toMatch(/function Remove-HermesPlugin\s*\{/);
+    expect(ps1.slice(ps1.indexOf('function Cmd-Uninstall'))).toContain('Remove-HermesPlugin');
+    expect(ps1).toContain('.loongsuite-pilot-managed.json');
+    expect(ps1).toContain('$meta.owner -ne "loongsuite-pilot"');
+    expect(ps1).toContain('$meta.agentId -ne "hermes-agent"');
+    expect(ps1).toContain("$state.'hermes-agent'.targetDir");
+    expect(ps1).toContain('plugins disable loongsuite-pilot');
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(uninstall.indexOf('Remove-HermesPlugin'))
+      .toBeLessThan(uninstall.indexOf('Remove-Item $installDir -Recurse -Force'));
+  });
+
+  it('removes Hermes on rollback only when the target version lacks support', () => {
+    expect(runtimeSh).toMatch(/cleanup_hermes_for_rollback\(\)\s*\{/);
+    expect(runtimeSh).toContain('agents.d/hermes-agent.json');
+    expect(runtimeSh.slice(runtimeSh.indexOf('cmd_rollback()')))
+      .toContain('cleanup_hermes_for_rollback');
+    expect(runtimePs1).toMatch(/function Remove-HermesPluginForRollback\s*\{/);
+    expect(runtimePs1).toContain('agents.d\\hermes-agent.json');
+    expect(runtimePs1.slice(runtimePs1.indexOf('function Cmd-Rollback')))
+      .toContain('Remove-HermesPluginForRollback');
   });
 });

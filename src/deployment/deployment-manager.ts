@@ -10,6 +10,7 @@ import { AgentDefLoader, type AgentDefLoaderOptions } from './agent-def-loader.j
 import { HookStrategy } from './hook-strategy.js';
 import { PluginProbeStrategy } from './plugin-probe-strategy.js';
 import { PluginInjectStrategy } from './plugin-inject-strategy.js';
+import { DirectoryPluginStrategy } from './directory-plugin-strategy.js';
 import { DetectionOnlyStrategy } from './detection-only-strategy.js';
 import { writeDeployNotification } from './deploy-notification.js';
 import { runPluginMigration } from './plugin-migration.js';
@@ -31,6 +32,7 @@ export class DeploymentManager {
   private readonly hookStrategy: HookStrategy;
   private readonly pluginProbeStrategy: PluginProbeStrategy;
   private readonly pluginInjectStrategy: PluginInjectStrategy;
+  private readonly directoryPluginStrategy: DirectoryPluginStrategy;
   private readonly detectionOnlyStrategy: DetectionOnlyStrategy;
   private readonly loader: AgentDefLoader;
   private readonly stateFilePath: string;
@@ -49,6 +51,7 @@ export class DeploymentManager {
     this.hookStrategy = new HookStrategy(hookManager);
     this.pluginProbeStrategy = new PluginProbeStrategy(opts.dataDir, opts.pilotDir);
     this.pluginInjectStrategy = new PluginInjectStrategy(opts.dataDir, opts.pilotDir);
+    this.directoryPluginStrategy = new DirectoryPluginStrategy(opts.dataDir);
     this.detectionOnlyStrategy = new DetectionOnlyStrategy();
 
     const loaderOpts: AgentDefLoaderOptions = {
@@ -198,6 +201,10 @@ export class DeploymentManager {
         await writeDeployNotification(this.dataDir, def.displayName, def.pluginProbe.mountType);
       }
 
+      if (def.deployMode === 'directory-plugin' && def.directoryPlugin) {
+        newRecord.targetDir = path.resolve(def.directoryPlugin.targetDir);
+      }
+
       this.state[def.id] = newRecord;
     }
 
@@ -212,6 +219,8 @@ export class DeploymentManager {
         return this.pluginProbeStrategy;
       case 'plugin-inject':
         return this.pluginInjectStrategy;
+      case 'directory-plugin':
+        return this.directoryPluginStrategy;
       case 'detection-only':
         return this.detectionOnlyStrategy;
       default:
