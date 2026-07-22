@@ -456,6 +456,18 @@ export class WukongInput extends BaseInput {
       return ts === e.timestamp ? e : { ...e, timestamp: ts };
     });
 
+    // Skip metadata-only messages (e.g. an invisible session_context_stats message
+    // carrying only CUSTOM/FIRST_TOKEN). They mark themselves complete but hold no
+    // run/text/tool content, so they must not emit a spurious empty LLM pair.
+    const MEANINGFUL_EVENTS = new Set([
+      'RUN_STARTED', 'RUN_FINISHED', 'RUN_ERROR', 'STEP_STARTED', 'STEP_FINISHED',
+      'TEXT_MESSAGE_START', 'TEXT_MESSAGE_CONTENT', 'TEXT_MESSAGE_END',
+      'REASONING_START', 'REASONING_MESSAGE_CHUNK', 'REASONING_END',
+      'TOOL_CALL_START', 'TOOL_CALL_ARGS', 'TOOL_CALL_END', 'TOOL_CALL_RESULT',
+      'ACTIVITY_SNAPSHOT', 'USAGE',
+    ]);
+    if (!evs.some(e => MEANINGFUL_EVENTS.has(e.type))) return [];
+
     // Run-level scan: these apply to the whole turn, not a single step.
     let runId: string | undefined;
     let runStartedTs: number | undefined;
@@ -477,6 +489,9 @@ export class WukongInput extends BaseInput {
     }
 
     // Step segmentation state.
+    // wukong sometimes emits explicit STEP_STARTED/STEP_FINISHED boundaries; when
+    // present they are authoritative. Otherwise segment heuristically.
+    const hasStepEvents = evs.some(e => e.type === 'STEP_STARTED');
     const steps: StepAcc[] = [];
     let stepIndex = 0;
     let cur: StepAcc | null = null;
@@ -495,11 +510,21 @@ export class WukongInput extends BaseInput {
       cur = s;
       return s;
     };
-    // A new assistant utterance opens a fresh step only if the current step has
-    // already produced tools (i.e. it was a distinct earlier decision). Consecutive
-    // text/reasoning with no intervening tool stays in the same step.
+    // An assistant utterance (text/reasoning). With STEP_STARTED boundaries it just
+    // attaches to the current step. Without them, a new utterance after the current
+    // step already produced tools starts a fresh step (one LLM decision per step).
     const stepForUtterance = (ts: number): StepAcc => {
-      if (!cur || cur.hasTools) return openStep(ts);
+      if (!cur) return openStep(ts);
+      if (!hasStepEvents && cur.hasTools) return openStep(ts);
+      return cur;
+    };
+    // A tool/activity. With STEP_STARTED boundaries it attaches to the current step.
+    // Without them, a tool that starts at/after the current step's last tool finished
+    // is a sequential (post-observation) LLM round → new step; an overlapping tool is
+    // treated as parallel and stays in the same step (spec §2.3).
+    const stepForTool = (startTs: number): StepAcc => {
+      if (!cur) return openStep(startTs);
+      if (!hasStepEvents && cur.hasTools && startTs >= (cur.lastToolTs ?? startTs)) return openStep(startTs);
       return cur;
     };
     const markTool = (s: StepAcc, startTs: number, endTs: number): void => {
@@ -519,6 +544,16 @@ export class WukongInput extends BaseInput {
 
     for (const evt of evs) {
       switch (evt.type) {
+        case 'STEP_STARTED': {
+          const s = openStep(evt.timestamp);
+          if (!s.responseId && typeof evt.messageId === 'string') s.responseId = evt.messageId;
+          break;
+        }
+
+        case 'STEP_FINISHED':
+          // Authoritative boundary marker; the next STEP_STARTED opens the next step.
+          break;
+
         case 'REASONING_START': {
           const s = stepForUtterance(evt.timestamp);
           if (!s.responseId && typeof evt.messageId === 'string') s.responseId = evt.messageId;
@@ -565,21 +600,31 @@ export class WukongInput extends BaseInput {
           const output = numOr(evt.completion_tokens) ?? 0;
           const cache = numOr(evt.cached_tokens) ?? 0;
           const total = numOr(evt.total_tokens) ?? (input + output);
-          const u = { input, output, cache, total };
           const last = steps[steps.length - 1];
-          if (last) last.usage = u;
-          else pendingUsage = u;
+          if (last) {
+            // Accumulate rather than overwrite: a step may receive more than one
+            // USAGE (multiple LLM calls billed within the same step boundary).
+            last.usage = last.usage
+              ? {
+                  input: last.usage.input + input,
+                  output: last.usage.output + output,
+                  cache: last.usage.cache + cache,
+                  total: last.usage.total + total,
+                }
+              : { input, output, cache, total };
+          } else {
+            pendingUsage = { input, output, cache, total };
+          }
           break;
         }
 
         case 'TOOL_CALL_START': {
-          const s = cur ?? openStep(evt.timestamp);
+          // Only record start time + name; the step decision and emission happen at
+          // TOOL_CALL_END so a sequential-tool boundary is evaluated exactly once.
           const tcId = (evt.toolCallId as string | undefined) ?? `idx-${toolStartCount}`;
           toolStartTimestamps.set(tcId, evt.timestamp);
           const toolName = (evt.toolName as string | undefined) ?? (evt.name as string | undefined) ?? '';
           toolNames.set(tcId, toolName);
-          s.toolCallParts.push({ type: 'tool_call', id: tcId, name: toolName });
-          markTool(s, evt.timestamp, evt.timestamp);
           toolStartCount++;
           break;
         }
@@ -592,7 +637,6 @@ export class WukongInput extends BaseInput {
         }
 
         case 'TOOL_CALL_END': {
-          const s = cur ?? openStep(evt.timestamp);
           const tcId = (evt.toolCallId as string | undefined) ?? `idx-${toolStartCount - 1}`;
           const startTs = toolStartTimestamps.get(tcId);
           const startEvtTimestamp = startTs ?? evt.timestamp;
@@ -601,6 +645,8 @@ export class WukongInput extends BaseInput {
           const duration = startTs ? adjustedEndTs - startTs : undefined;
           const toolName = toolNames.get(tcId) ?? (evt.toolName as string | undefined) ?? (evt.name as string | undefined) ?? '';
           const args = toolArgsAccumulator.get(tcId);
+          const s = stepForTool(startEvtTimestamp);
+          s.toolCallParts.push({ type: 'tool_call', id: tcId, name: toolName });
 
           const syntheticStartEvt = { ...evt, timestamp: startEvtTimestamp, toolCallId: evt.toolCallId, toolName };
           entries.push(this.buildToolCallEntry(
@@ -633,14 +679,16 @@ export class WukongInput extends BaseInput {
 
         case 'ACTIVITY_SNAPSHOT': {
           const activityType = evt.activityType as string | undefined;
-          if (!activityType || activityType === 'TASK_LINE_PLAN') break;
-          const s = cur ?? openStep(evt.timestamp);
+          // TASK_LINE_PLAN is a planning note; PERMISSION is a HITL approval prompt.
+          // Neither is a tool execution, so skip both.
+          if (!activityType || activityType === 'TASK_LINE_PLAN' || activityType === 'PERMISSION') break;
           const actToolName = ACTIVITY_TYPE_TO_TOOL_NAME[activityType] ?? activityType.toLowerCase();
-          const actToolCallId = `activity-${msg.id}-${toolIdx}`;
-          s.toolCallParts.push({ type: 'tool_call', id: actToolCallId, name: actToolName });
           const content = evt.content as Record<string, unknown> | undefined;
           const actStartTs = numOr(content?.start_time) ?? evt.timestamp;
           const actEndTs = numOr(content?.finish_time) ?? evt.timestamp;
+          const s = stepForTool(actStartTs);
+          const actToolCallId = `activity-${msg.id}-${toolIdx}`;
+          s.toolCallParts.push({ type: 'tool_call', id: actToolCallId, name: actToolName });
           const activityEntries = this.transformActivitySnapshot(
             task, msg, evt, model, turnId, toolIdx, common,
             s.ctx, traceId, agentSpanId,
@@ -653,8 +701,16 @@ export class WukongInput extends BaseInput {
       }
     }
 
-    // Guarantee at least one step (e.g. RUN_ERROR-only or content-less run).
-    if (steps.length === 0) openStep(runStartedTs ?? msg.createdAt);
+    // Emit a step only when there was a real run or an error. A message with no
+    // run and no content (e.g. an auxiliary PERMISSION-only message once PERMISSION
+    // is skipped) emits nothing rather than a spurious empty LLM pair.
+    if (steps.length === 0) {
+      if (runError !== undefined || runStartedTs !== undefined) {
+        openStep(runStartedTs ?? msg.createdAt);
+      } else {
+        return [];
+      }
+    }
 
     const finalIdx = steps.length - 1;
     // A USAGE seen before any step opened is attributed to the final step.
@@ -908,16 +964,45 @@ export class WukongInput extends BaseInput {
           result = { output: content.output, exit_code: content.exit_code };
           break;
         case 'FILE_WRITE':
-          args = content.path ? { path: content.path } : undefined;
+          args = compactObject({ path: content.path ?? content.file_path });
           result = { status: content.status ?? 'done' };
+          break;
+        case 'FILE_READ':
+          args = compactObject({ path: content.path, start_line: content.start_line });
+          result = compactObject({
+            content: content.content,
+            snippet: content.snippet,
+            total_lines: content.total_lines,
+            status: content.status,
+            error_message: content.error_message,
+          });
           break;
         case 'GREP_SEARCH':
           args = content.query ? { query: content.query } : undefined;
           result = content.matches ?? content.output;
           break;
+        case 'SEARCH':
+          args = compactObject({ queries: content.queries, search_type: content.search_type });
+          result = compactObject({ results: content.results, status: content.status });
+          break;
         case 'DIRECTORY_LIST':
           args = content.path ? { path: content.path } : undefined;
-          result = content.entries ?? content.output;
+          result = content.entries ?? content.output ?? compactObject({
+            files: content.files,
+            total_count: content.total_count,
+            status: content.status,
+          });
+          break;
+        case 'SKILL':
+          args = compactObject({ skill_name: content.skill_name, purpose: content.purpose, meta: content.meta });
+          result = compactObject({
+            output: content.output,
+            status: content.status,
+            error_message: content.error_message,
+          });
+          break;
+        case 'ARTIFACT':
+          result = compactObject({ artifactsMetadata: content.artifactsMetadata, generatedAt: content.generatedAt });
           break;
         default:
           args = content.input ?? undefined;
@@ -946,7 +1031,10 @@ export class WukongInput extends BaseInput {
       'parent_span_id': parentSpanId,
     });
 
-    const hasError = content?.exit_code !== undefined && content.exit_code !== 0;
+    const toolResultStatus = resolveActivityResultStatus(content);
+    const errorMessage = typeof content?.error_message === 'string' && content.error_message.length > 0
+      ? content.error_message
+      : undefined;
     const toolResultEntry = buildAgentActivityEntry({
       timestamp: finishTime,
       'event.id': hashId([task.session_id, msg.id, 'activity_result', toolCallId, String(toolIdx + 1)]),
@@ -959,7 +1047,8 @@ export class WukongInput extends BaseInput {
       'gen_ai.tool.call.id': toolCallId,
       ...(result !== undefined ? { 'gen_ai.tool.call.result': toJsonValue(result) } : {}),
       ...(duration !== undefined ? { 'gen_ai.tool.call.duration': duration } : {}),
-      'tool.result.status': hasError ? 'failure' : 'success',
+      'tool.result.status': toolResultStatus,
+      ...(errorMessage !== undefined ? { 'error.message': errorMessage } : {}),
       'trace_id': traceId,
       'span_id': resultSpanId,
       'parent_span_id': parentSpanId,
@@ -1050,6 +1139,25 @@ function numOr(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+/** Drop undefined/null fields; return undefined if nothing remains. */
+function compactObject(fields: Record<string, unknown>): Record<string, unknown> | undefined {
+  const entries = Object.entries(fields).filter(([, value]) => value !== undefined && value !== null);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+/** Derive an activity's result status from exit_code / error_message / status. */
+function resolveActivityResultStatus(content: Record<string, unknown> | undefined): 'success' | 'failure' | 'cancelled' {
+  if (!content) return 'success';
+  if (content.exit_code !== undefined && content.exit_code !== 0) return 'failure';
+  if (typeof content.error_message === 'string' && content.error_message.length > 0) return 'failure';
+  if (typeof content.status !== 'string') return 'success';
+
+  const status = content.status.toLowerCase();
+  if (status === 'error' || status === 'failed' || status === 'failure') return 'failure';
+  if (status === 'cancelled' || status === 'canceled') return 'cancelled';
+  return 'success';
+}
+
 function resolveTurnId(sessionId: string, msg: WukongMessage): string {
   if (msg.turnIndex >= 0) return `${sessionId}:t${msg.turnIndex}`;
   return `${sessionId}:${msg.id}`;
@@ -1074,41 +1182,24 @@ function minOf(arr: ReadonlyArray<number>): number {
 }
 
 /**
- * A message is safe to emit only when it has fully settled. This prevents
- * capturing a mid-stream snapshot (truncated answer / 0 tokens) and then
- * advancing the cursor past it. Settled means:
- *   - isComplete flag (when present) is 1, AND
- *   - a terminal RUN_FINISHED (or RUN_ERROR) is present, AND
- *   - a USAGE event is present (RUN_ERROR turns may legitimately lack one), AND
- *   - the last TEXT_MESSAGE_START is closed by a TEXT_MESSAGE_END.
+ * Whether a message has settled and is safe to emit (and to advance the cursor past).
+ *
+ * The API's `isComplete` flag is authoritative: when present it decides the answer,
+ * so a message the API marked complete is never withheld (which could otherwise
+ * permanently block the whole session from that message onward). Only when the flag
+ * is absent (older payloads) do we fall back to the run-terminal heuristic.
  */
 function isMessageComplete(msg: WukongMessage): boolean {
   if (msg.role !== 'assistant') return true;
   const events = msg.events;
   if (!events || events.length === 0) return true;
 
-  // Explicit flag from the API takes precedence when present.
-  if (msg.isComplete !== undefined && msg.isComplete !== 1) return false;
+  // Authoritative API flag wins when present.
+  if (msg.isComplete === 1) return true;
+  if (msg.isComplete === 0) return false;
 
-  const hasRunError = events.some(e => e.type === 'RUN_ERROR');
-  if (hasRunError) return true; // error is a terminal state; tolerate missing USAGE/text
-
-  const hasRunFinished = events.some(e => e.type === 'RUN_FINISHED');
-  if (!hasRunFinished) return false;
-
-  const hasUsage = events.some(e => e.type === 'USAGE');
-  if (!hasUsage) return false;
-
-  // The last opened text message must be closed (not still streaming).
-  let lastTextStart = -1;
-  let lastTextEnd = -1;
-  for (let i = 0; i < events.length; i++) {
-    if (events[i].type === 'TEXT_MESSAGE_START') lastTextStart = i;
-    else if (events[i].type === 'TEXT_MESSAGE_END') lastTextEnd = i;
-  }
-  if (lastTextStart >= 0 && lastTextEnd < lastTextStart) return false;
-
-  return true;
+  // Older payloads without the flag: a terminal RUN event marks completion.
+  return events.some(e => e.type === 'RUN_FINISHED' || e.type === 'RUN_ERROR');
 }
 
 function findLastCompleteIndex(messages: WukongMessage[]): number {
