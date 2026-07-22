@@ -15,9 +15,10 @@ import {
 
 const ENABLE_LOGGING = true;
 export const HOOKS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+export const LOONGSUITE_PILOT_DATA_DIR = process.env.LOONGSUITE_PILOT_DATA_DIR
+  || path.join(os.homedir(), '.loongsuite-pilot');
 export const LOONGSUITE_PILOT_LOGS_BASE_DIR = (() => {
-  const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
-  return path.join(configured || path.join(os.homedir(), '.loongsuite-pilot'), 'logs');
+  return path.join(LOONGSUITE_PILOT_DATA_DIR, 'logs');
 })();
 
 // --- CLI argument parsing ---------------------------------------------------
@@ -71,26 +72,46 @@ export function logDebug(agentId, message) {
 // --- Line record persistence (per agent-id) ---------------------------------
 
 function lineRecordFile(agentId) {
+  return path.join(LOONGSUITE_PILOT_DATA_DIR, 'state', 'hooks', `${agentId}-line-records.json`);
+}
+
+function legacyLineRecordFile(agentId) {
   return path.join(HOOKS_DIR, `.line_records.${agentId}.json`);
 }
 
 export function loadLineRecords(agentId) {
   try {
     const f = lineRecordFile(agentId);
-    if (!fs.existsSync(f)) return {};
-    return JSON.parse(fs.readFileSync(f, 'utf-8'));
+    if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf-8'));
+
+    // Before v1.0 the cursor lived beside the deployed hook scripts. That
+    // directory can be replaced during deployment, so migrate it lazily into
+    // the persistent data directory while old installations still have it.
+    const legacy = legacyLineRecordFile(agentId);
+    if (!fs.existsSync(legacy)) return {};
+    const records = JSON.parse(fs.readFileSync(legacy, 'utf-8'));
+    if (saveLineRecords(agentId, records)) {
+      try { fs.unlinkSync(legacy); } catch { /* best-effort migration cleanup */ }
+    }
+    return records;
   } catch {
     return {};
   }
 }
 
 export function saveLineRecords(agentId, records) {
+  let tmp = '';
   try {
     const f = lineRecordFile(agentId);
     fs.mkdirSync(path.dirname(f), { recursive: true });
-    fs.writeFileSync(f, JSON.stringify(records, null, 2), 'utf-8');
+    tmp = `${f}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(records, null, 2), 'utf-8');
+    fs.renameSync(tmp, f);
     return true;
   } catch {
+    if (tmp) {
+      try { fs.unlinkSync(tmp); } catch { /* best-effort temp cleanup */ }
+    }
     return false;
   }
 }
@@ -125,17 +146,21 @@ export function getTranscriptLineCount(transcriptPath) {
   }
 }
 
-export function getLineRange(agentId, transcriptPath, sessionId) {
+export function getLineRangeInfo(agentId, transcriptPath, sessionId) {
   const records = loadLineRecords(agentId);
   const record = records[transcriptPath] || {};
-  let lastCount = record.last_line_count || 0;
+  const hasRecordedOffset = Number.isFinite(record.last_line_count)
+    && record.last_line_count >= 0;
+  let lastCount = hasRecordedOffset ? record.last_line_count : 0;
   const recordedSession = record.session_id || '';
+  let reason = hasRecordedOffset ? 'incremental' : 'missing-cursor';
 
   const currentCount = getTranscriptLineCount(transcriptPath);
 
   if (recordedSession && recordedSession !== sessionId) {
     logDebug(agentId, `Session changed: ${recordedSession} -> ${sessionId}, reset to 0`);
     lastCount = 0;
+    reason = 'session-changed';
   }
   if (currentCount === 0) {
     logDebug(agentId, 'Transcript is empty');
@@ -148,10 +173,20 @@ export function getLineRange(agentId, transcriptPath, sessionId) {
   if (currentCount < lastCount) {
     logDebug(agentId, `File truncated (${lastCount} -> ${currentCount}), sending all`);
     lastCount = 0;
+    reason = 'truncated';
   }
 
-  logDebug(agentId, `Range: ${lastCount} -> ${currentCount}`);
-  return [lastCount, currentCount];
+  logDebug(agentId, `Range: ${lastCount} -> ${currentCount} (${reason})`);
+  return { startLine: lastCount, endLine: currentCount, reason };
+}
+
+/**
+ * Backward-compatible tuple API used by hook processors that do not need to
+ * distinguish a normal incremental read from cursor recovery.
+ */
+export function getLineRange(agentId, transcriptPath, sessionId) {
+  const info = getLineRangeInfo(agentId, transcriptPath, sessionId);
+  return info ? [info.startLine, info.endLine] : null;
 }
 
 export function readTranscriptLines(transcriptPath, startLine, endLine) {

@@ -676,7 +676,7 @@ describe('Hook JSONL integration flow', () => {
 
     const transcriptPath = path.join(tmpDir, 'multi-turn-transcript.jsonl');
     await fs.writeFile(transcriptPath, [
-      // Turn 1: hello
+      // Turn 1: first hook invocation establishes the per-transcript cursor.
       JSON.stringify({
         type: 'user',
         timestamp: '2026-06-18T08:00:00.000Z',
@@ -689,7 +689,25 @@ describe('Hook JSONL integration flow', () => {
         sessionId: 'sess-multi',
         message: { role: 'assistant', content: [{ type: 'text', text: 'Hi there.' }] },
       }),
-      // Turn 2: leetcode
+      JSON.stringify({
+        type: 'last-prompt',
+        sessionId: 'sess-multi',
+        lastPrompt: 'hello',
+      }),
+    ].join('\n') + '\n');
+
+    const firstResult = runQoderHook(hookScript, JSON.stringify({
+      hook_event_name: 'Stop',
+      transcript_path: transcriptPath,
+      session_id: 'sess-multi',
+    }), {
+      LOONGSUITE_PILOT_DATA_DIR: dataDir,
+    });
+    expect(firstResult.status).toBe(0);
+
+    // Turn 2 arrives after a valid cursor exists, so the processor must retain
+    // normal incremental multi-turn behavior rather than treating it as replay.
+    await fs.appendFile(transcriptPath, [
       JSON.stringify({
         type: 'user',
         timestamp: '2026-06-18T08:01:00.000Z',
@@ -714,14 +732,14 @@ describe('Hook JSONL integration flow', () => {
       }),
     ].join('\n') + '\n');
 
-    const result = runQoderHook(hookScript, JSON.stringify({
+    const secondResult = runQoderHook(hookScript, JSON.stringify({
       hook_event_name: 'Stop',
       transcript_path: transcriptPath,
       session_id: 'sess-multi',
     }), {
       LOONGSUITE_PILOT_DATA_DIR: dataDir,
     });
-    expect(result.status).toBe(0);
+    expect(secondResult.status).toBe(0);
 
     const historyFile = path.join(dataDir, 'logs', 'qoder', 'history', `qoder-${getTodayDateString()}.jsonl`);
     const records = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n').map(line => JSON.parse(line));

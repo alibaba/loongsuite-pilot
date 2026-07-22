@@ -6,6 +6,7 @@ import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
+import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSqliteTokensForSession } from './sqlite-token-reader.js';
 import { enrichIdeTurn, injectTraceId } from '../qoder-trace/token-enricher.js';
@@ -223,7 +224,7 @@ export class QoderCnTraceInput extends BaseInput {
       await handle.close();
     }
 
-    return entries;
+    return filterBootstrapHistoryTurns(entries);
   }
 
   // ─── Record transformation ──────────────────────────────────────────────────
@@ -438,5 +439,4 @@ function expandContainerTimes(entries: AgentActivityEntry[]): void {
     }
   }
 }
-
 

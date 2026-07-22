@@ -228,6 +228,44 @@ describe('QoderWorkTraceInput', () => {
     expect(stateStore.get('qoder-work-trace').extra).toMatchObject({ qoderWorkTurnCount: 1 });
   });
 
+  it('filters every later bootstrap batch independently after input state is initialized', async () => {
+    const hookFile = path.join(hookLogDir, todayFileName());
+    const bootstrap = (id: string, turnId: string, batchId: string) => buildHookEntry({
+      'event.id': id,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      'agent.transcript.cursor_mode': 'bootstrap',
+      'agent.transcript.cursor_batch_id': batchId,
+    } as Partial<AgentActivityEntry>);
+    const records = [
+      bootstrap('session-a-old', 'session-a-turn-old', 'session-a-bootstrap'),
+      bootstrap('session-a-latest', 'session-a-turn-latest', 'session-a-bootstrap'),
+      bootstrap('session-b-old', 'session-b-turn-old', 'session-b-bootstrap'),
+      bootstrap('session-b-latest', 'session-b-turn-latest', 'session-b-bootstrap'),
+      buildHookEntry({
+        'event.id': 'normal-incremental',
+        'gen_ai.turn.id': 'normal-turn',
+        'gen_ai.step.id': 'normal-turn:s1',
+        'agent.transcript.cursor_mode': 'incremental',
+        'agent.transcript.cursor_batch_id': 'normal-batch',
+      } as Partial<AgentActivityEntry>),
+    ];
+    await fs.writeFile(hookFile, records.map(record => JSON.stringify(record)).join('\n') + '\n');
+    // Simulate a running collector whose global history-file bootstrap already
+    // happened before these two old sessions were opened.
+    stateStore.set('qoder-work-trace', { extra: { qoderWorkTurnCount: 1 } });
+
+    const input = makeInput();
+    const entries = await startAndCollect(input);
+    await input.stop();
+
+    expect(entries.map(entry => entry['event.id'])).toEqual([
+      'session-a-latest',
+      'session-b-latest',
+      'normal-incremental',
+    ]);
+  });
+
   it('streams a large first-run history and exports only its last turn', async () => {
     const hookFile = path.join(hookLogDir, todayFileName());
     const oldEntry = {

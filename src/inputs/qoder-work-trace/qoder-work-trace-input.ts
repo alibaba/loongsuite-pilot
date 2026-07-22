@@ -6,6 +6,7 @@ import { createInterface } from 'node:readline';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
+import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
@@ -98,11 +99,13 @@ export class QoderWorkTraceInput extends BaseInput {
       const { entries: rawEntries, isFirstRun, turnCount } = await this.readHookJsonl();
       if (rawEntries.length === 0) return [];
 
+      const bootstrapFilteredEntries = filterBootstrapHistoryTurns(rawEntries);
+
       // A fresh collector must not replay a whole pre-existing daily hook log.
-      const allTurnGroups = this.groupByTurn(rawEntries);
+      const allTurnGroups = this.groupByTurn(bootstrapFilteredEntries);
       const entries = isFirstRun
         ? [...allTurnGroups.values()].at(-1) ?? []
-        : rawEntries;
+        : bootstrapFilteredEntries;
       if (isFirstRun) {
         const state = this.getState();
         const extra = state.extra && typeof state.extra === 'object'

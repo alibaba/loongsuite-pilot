@@ -6,6 +6,7 @@ import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
+import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSegmentTokensForSession } from './segment-token-reader.js';
 import { readSqliteTokensForSession, isIdeaDbPath } from './sqlite-token-reader.js';
@@ -153,6 +154,8 @@ export class QoderTraceInput extends BaseInput {
     } finally {
       await handle.close();
     }
+
+    entries = filterBootstrapHistoryTurns(entries);
 
     // On cold start with multiple turns already in the file, only report the last turn
     // to avoid replaying full history after a redeployment wipes the state store.
