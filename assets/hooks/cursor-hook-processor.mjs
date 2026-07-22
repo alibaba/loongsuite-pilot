@@ -430,3 +430,5 @@ main().catch(async err => {
   });
   writeEmptyResponse();
 });
+
+export { injectSkillRecords };
