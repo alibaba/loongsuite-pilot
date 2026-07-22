@@ -79,7 +79,8 @@ Required levels follow OpenTelemetry wording:
 | `git.domain` | string | Recommended | Git hosting domain for the active workspace. |
 | `git.repo` | string | Recommended | Git repository name or URL for the active workspace. |
 | `git.branch` | string | Recommended | Active Git branch. |
-| `workspace.current_root` | string | Recommended | Current workspace root path. |
+| `workspace.current_root` | string | Recommended | Git top-level directory, inferred when the working directory is a git repository. |
+| `workspace.path` | string | Recommended | Absolute working directory the agent ran in (process cwd), independent of git. Present even when the directory is not a git repository. |
 | `agent.*` | json | Opt-In | Agent-specific extension attributes. Stable high-query dimensions should become structured fields over time. |
 
 ## Provider Names
