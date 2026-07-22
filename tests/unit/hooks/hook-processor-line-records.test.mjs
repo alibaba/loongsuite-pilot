@@ -80,6 +80,14 @@ describe('hook processor per-session line records', () => {
         last_line_count: record.endLine,
       }));
     }
+    const rollbackShadow = JSON.parse(fs.readFileSync(
+      path.join(dataDir, 'state', 'hooks', 'qoder-work-line-records.json'),
+      'utf-8',
+    ));
+    expect(Object.keys(rollbackShadow)).toHaveLength(expected.length);
+    expect(fs.existsSync(
+      path.join(dataDir, 'state', 'hooks', 'qoder-work-line-records.json.lock'),
+    )).toBe(false);
   }, 30_000);
 
   it('lazily splits the previous aggregate state into session files', async () => {
@@ -121,10 +129,59 @@ describe('hook processor per-session line records', () => {
         last_line_count: 20,
       }),
     ]);
-    expect(fs.existsSync(aggregateFile)).toBe(false);
+    // Keep the aggregate as a locked compatibility shadow so the immediately
+    // previous Pilot version can still resume if an upgrade is rolled back.
+    expect(fs.existsSync(aggregateFile)).toBe(true);
     expect(
       fs.readdirSync(path.join(stateDir, 'qoder-work-line-records'))
         .filter(file => file.endsWith('.json')),
     ).toHaveLength(2);
+  });
+
+  it('reconciles cursor advances written by an old version during rollback', async () => {
+    const stateDir = path.join(dataDir, 'state', 'hooks');
+    fs.mkdirSync(stateDir, { recursive: true });
+    const aggregateFile = path.join(stateDir, 'qoder-work-line-records.json');
+    const transcriptPath = '/tmp/transcript-rollback.jsonl';
+    fs.writeFileSync(aggregateFile, JSON.stringify({
+      [transcriptPath]: {
+        session_id: 'session-rollback',
+        last_line_count: 10,
+        updated_at: '2026-07-22 10:00:00',
+      },
+    }));
+
+    const worker = `
+      import { loadLineRecord } from ${JSON.stringify(BASE_MODULE)};
+      process.stdout.write(JSON.stringify(loadLineRecord('qoder-work', 'session-rollback')));
+    `;
+    expect(JSON.parse(await runWorker(worker))).toMatchObject({ last_line_count: 10 });
+
+    // Simulate the previous version running after rollback and advancing its
+    // aggregate cursor format, which does not know about per-session files.
+    fs.writeFileSync(aggregateFile, JSON.stringify({
+      [transcriptPath]: {
+        session_id: 'session-rollback',
+        last_line_count: 30,
+        updated_at: '2026-07-22 10:05:00',
+      },
+    }));
+
+    expect(JSON.parse(await runWorker(worker))).toMatchObject({
+      session_id: 'session-rollback',
+      transcript_path: transcriptPath,
+      last_line_count: 30,
+    });
+
+    // A stale old-version writer can finish later and carry a newer timestamp.
+    // The forward version must still keep line progress monotonic.
+    fs.writeFileSync(aggregateFile, JSON.stringify({
+      [transcriptPath]: {
+        session_id: 'session-rollback',
+        last_line_count: 20,
+        updated_at: '2026-07-22 10:10:00',
+      },
+    }));
+    expect(JSON.parse(await runWorker(worker))).toMatchObject({ last_line_count: 30 });
   });
 });

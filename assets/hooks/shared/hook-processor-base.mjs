@@ -99,13 +99,12 @@ function readJsonObject(file) {
   }
 }
 
-function saveSessionLineRecord(agentId, sessionId, record) {
-  const file = sessionLineRecordFile(agentId, sessionId);
+function saveJsonObject(file, value) {
   let tmp = '';
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(record, null, 2), 'utf-8');
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf-8');
     fs.renameSync(tmp, file);
     return true;
   } catch {
@@ -116,7 +115,11 @@ function saveSessionLineRecord(agentId, sessionId, record) {
   }
 }
 
-function migrateAggregateLineRecords(agentId) {
+function saveSessionLineRecord(agentId, sessionId, record) {
+  return saveJsonObject(sessionLineRecordFile(agentId, sessionId), record);
+}
+
+function reconcileAggregateLineRecord(agentId, requestedSessionId) {
   const sources = [
     aggregateLineRecordFile(agentId),
     deployedLegacyLineRecordFile(agentId),
@@ -126,45 +129,104 @@ function migrateAggregateLineRecords(agentId) {
     const records = readJsonObject(source);
     if (!records) continue;
 
-    let migratedAll = true;
     for (const [transcriptPath, value] of Object.entries(records)) {
-      if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        migratedAll = false;
-        continue;
-      }
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
       const sessionId = typeof value.session_id === 'string' ? value.session_id : '';
-      if (!sessionId) {
-        migratedAll = false;
-        continue;
-      }
+      if (!sessionId || sessionId !== requestedSessionId) continue;
 
       const target = sessionLineRecordFile(agentId, sessionId);
-      if (fs.existsSync(target)) continue;
-      const migrated = saveSessionLineRecord(agentId, sessionId, {
+      const existing = readJsonObject(target);
+      const candidate = {
         ...value,
         session_id: sessionId,
         transcript_path: transcriptPath,
-      });
-      if (!migrated) migratedAll = false;
-    }
-
-    if (migratedAll) {
-      try { fs.unlinkSync(source); } catch { /* best-effort migration cleanup */ }
+      };
+      if (!existing || isLineRecordNewer(candidate, existing)) {
+        saveSessionLineRecord(agentId, sessionId, candidate);
+      }
     }
   }
+}
+
+function isLineRecordNewer(candidate, existing) {
+  if (candidate.transcript_path === existing.transcript_path) {
+    // Cursor progress for one transcript is monotonic. An older implementation
+    // may write a later timestamp with a stale line count after a concurrent
+    // read-modify-write, but that must never rewind the per-session primary.
+    return Number(candidate.last_line_count) > Number(existing.last_line_count);
+  }
+
+  const candidateUpdated = typeof candidate.updated_at === 'string' ? candidate.updated_at : '';
+  const existingUpdated = typeof existing.updated_at === 'string' ? existing.updated_at : '';
+  return Boolean(candidateUpdated)
+    && (!existingUpdated || candidateUpdated > existingUpdated);
+}
+
+const LOCK_WAIT_ARRAY = new Int32Array(new SharedArrayBuffer(4));
+
+function updateAggregateShadow(file, transcriptPath, record) {
+  const lockFile = `${file}.lock`;
+  const deadline = Date.now() + 1_000;
+  let acquired = false;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    while (!acquired) {
+      try {
+        const fd = fs.openSync(lockFile, 'wx');
+        fs.closeSync(fd);
+        acquired = true;
+      } catch (err) {
+        if (err?.code !== 'EEXIST') return false;
+        try {
+          const stat = fs.statSync(lockFile);
+          if (Date.now() - stat.mtimeMs > 30_000) {
+            fs.unlinkSync(lockFile);
+            continue;
+          }
+        } catch { /* retry acquisition */ }
+        if (Date.now() >= deadline) return false;
+        Atomics.wait(LOCK_WAIT_ARRAY, 0, 0, 10);
+      }
+    }
+
+    const records = readJsonObject(file) || {};
+    const existing = records[transcriptPath];
+    if (existing?.session_id === record.session_id
+      && Number(existing.last_line_count) > Number(record.last_line_count)) {
+      return true;
+    }
+    records[transcriptPath] = {
+      session_id: record.session_id,
+      last_line_count: record.last_line_count,
+      updated_at: record.updated_at,
+    };
+    return saveJsonObject(file, records);
+  } finally {
+    if (acquired) {
+      try { fs.unlinkSync(lockFile); } catch { /* best-effort lock cleanup */ }
+    }
+  }
+}
+
+function rollbackShadowFiles(agentId) {
+  const files = [aggregateLineRecordFile(agentId)];
+  const deployedHooksDir = path.join(LOONGSUITE_PILOT_DATA_DIR, 'hooks');
+  if (path.resolve(HOOKS_DIR) === path.resolve(deployedHooksDir)) {
+    files.push(deployedLegacyLineRecordFile(agentId));
+  }
+  return files;
 }
 
 export function loadLineRecord(agentId, sessionId) {
   if (!sessionId) return {};
   const file = sessionLineRecordFile(agentId, sessionId);
-  const persisted = readJsonObject(file);
-  if (persisted) return persisted;
 
   // Older releases stored every transcript in one per-agent JSON object,
   // either in the persistent state directory or beside the deployed hooks.
-  // Split those maps lazily into independent session files so concurrent Stop
-  // hooks for different sessions never overwrite each other's cursor.
-  migrateAggregateLineRecords(agentId);
+  // Reconcile the requested session lazily. The aggregate files remain as
+  // locked rollback shadows, so a forward upgrade after an old-version rollback
+  // can recover any cursor advances made while that version was active.
+  reconcileAggregateLineRecord(agentId, sessionId);
   return readJsonObject(file) || {};
 }
 
@@ -176,8 +238,16 @@ export function updateLineRecord(agentId, transcriptPath, sessionId, endLine) {
     updated_at: new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, ''),
   };
   const ok = saveSessionLineRecord(agentId, sessionId, record);
-  if (ok) logDebug(agentId, `Updated record: ${transcriptPath} -> ${endLine} lines`);
-  else logDebug(agentId, 'Warning: Failed to save line records');
+  if (ok) {
+    logDebug(agentId, `Updated record: ${transcriptPath} -> ${endLine} lines`);
+    for (const shadow of rollbackShadowFiles(agentId)) {
+      if (!updateAggregateShadow(shadow, transcriptPath, record)) {
+        logDebug(agentId, `Warning: Failed to update rollback cursor shadow ${shadow}`);
+      }
+    }
+  } else {
+    logDebug(agentId, 'Warning: Failed to save line records');
+  }
   return ok;
 }
 

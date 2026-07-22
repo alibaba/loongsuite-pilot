@@ -469,7 +469,7 @@ describe('Hook JSONL integration flow', () => {
     ]);
   });
 
-  it('QoderTraceInput cold start: only reports last turn when state is empty', async () => {
+  it('QoderTraceInput missing checkpoint: baselines existing history and reads later appends', async () => {
     const logDir = path.join(tmpDir, 'logs-cold');
     await fs.mkdir(logDir, { recursive: true });
 
@@ -520,7 +520,7 @@ describe('Hook JSONL integration flow', () => {
         time_unix_nano: '1780000011000000000',
         observed_time_unix_nano: '1780000011000000000',
       }),
-      // Turn 3 (latest — should be reported)
+      // Turn 3 (also historical — must not be guessed as the only new turn)
       JSON.stringify({
         'event.name': 'other',
         'event.id': 'e-5',
@@ -560,9 +560,9 @@ describe('Hook JSONL integration flow', () => {
     await input.start();
     await input.stop();
 
-    // Only the last turn should be reported
-    expect(allEntries.length).toBe(2);
-    expect(allEntries.every(e => e['gen_ai.turn.id'] === 'turn-latest')).toBe(true);
+    // Existing bytes are an ambiguous recovery case. The no-replay policy
+    // baselines the complete file instead of guessing one global latest turn.
+    expect(allEntries).toHaveLength(0);
 
     // Offset should be at end of file
     await freshStore.save();
@@ -570,7 +570,32 @@ describe('Hook JSONL integration flow', () => {
     expect(state.lastOffset).toBe((await fs.stat(logFile)).size);
     expect(state.lastFile).toBe(`qoder-${today}.jsonl`);
 
-    // Subsequent run should not re-emit anything
+    const afterBaseline = [
+      JSON.stringify({
+        'event.name': 'llm.request',
+        'event.id': 'e-new-request',
+        'gen_ai.turn.id': 'turn-after-baseline',
+        'gen_ai.session.id': 'sess-new',
+        'gen_ai.agent.type': 'qoder-cli',
+        'gen_ai.step.id': 'turn-after-baseline:s1',
+        time_unix_nano: '1780000030000000000',
+        observed_time_unix_nano: '1780000030000000000',
+      }),
+      JSON.stringify({
+        'event.name': 'llm.response',
+        'event.id': 'e-new-response',
+        'gen_ai.turn.id': 'turn-after-baseline',
+        'gen_ai.session.id': 'sess-new',
+        'gen_ai.agent.type': 'qoder-cli',
+        'gen_ai.step.id': 'turn-after-baseline:s1',
+        time_unix_nano: '1780000031000000000',
+        observed_time_unix_nano: '1780000031000000000',
+      }),
+    ];
+    await fs.appendFile(logFile, afterBaseline.join('\n') + '\n');
+
+    // A later run resumes from the deterministic boundary and consumes all new
+    // records, rather than applying another process-global cold-start filter.
     const input2 = new QoderTraceInput({
       stateStore: freshStore as any,
       logDir,
@@ -580,7 +605,10 @@ describe('Hook JSONL integration flow', () => {
     input2.on('entries', (e: AgentActivityEntry[]) => newEntries.push(...e));
     await input2.start();
     await input2.stop();
-    expect(newEntries).toHaveLength(0);
+    expect(newEntries.map(entry => entry['event.id'])).toEqual([
+      'e-new-request',
+      'e-new-response',
+    ]);
   });
 
   it('KiroCliLogInput cold start: only reports last turn when state is empty', async () => {

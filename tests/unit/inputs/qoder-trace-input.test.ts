@@ -503,6 +503,53 @@ describe('QoderTraceInput token-enricher', () => {
 });
 
 describe('QoderTraceInput bootstrap history filtering', () => {
+  it('consumes every session batch created after startup with an empty history', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-empty-start-'));
+    try {
+      const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+      const logFile = path.join(tmpDir, logFileName);
+      const record = (id: string, turnId: string, batchId: string) => ({
+        'event.id': id,
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': 'qoder',
+        'gen_ai.session.id': batchId,
+        'gen_ai.turn.id': turnId,
+        'agent.transcript.cursor_mode': 'bootstrap',
+        'agent.transcript.cursor_batch_id': batchId,
+        time_unix_nano: '1780000000000000000',
+      });
+      const stateStore = new MockStateStore();
+      const input = new QoderTraceInput({
+        stateStore: stateStore as any,
+        logDir: tmpDir,
+        pollIntervalMs: 60_000,
+      });
+
+      await input.start();
+      expect(stateStore.get('qoder-trace')).toMatchObject({
+        lastFile: logFileName,
+        lastOffset: 0,
+        extra: { hookHistoryInitialized: true },
+      });
+
+      await fs.writeFile(logFile, [
+        record('session-a-old', 'session-a-old-turn', 'session-a-batch'),
+        record('session-a-latest', 'session-a-latest-turn', 'session-a-batch'),
+        record('session-b-old', 'session-b-old-turn', 'session-b-batch'),
+        record('session-b-latest', 'session-b-latest-turn', 'session-b-batch'),
+      ].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+
+      const entries = await (input as any).collect() as AgentActivityEntry[];
+      await input.stop();
+      expect(entries.map(entry => entry['event.id'])).toEqual([
+        'session-a-latest',
+        'session-b-latest',
+      ]);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('protects every later old-session batch after the global file state is initialized', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-bootstrap-'));
     try {
