@@ -20,7 +20,7 @@ import { SlsFlusher } from '../flushers/sls-flusher.js';
 import { JsonlFlusher } from '../flushers/jsonl-flusher.js';
 import { HttpFlusher } from '../flushers/http-flusher.js';
 import { MultiFlusher } from '../flushers/multi-flusher.js';
-import { buildOtlpTraceConfig } from './config-loader.js';
+import { buildOtlpTraceConfig, createUserIdProvider } from './config-loader.js';
 
 // Concrete inputs
 import { QoderSqliteInput } from '../inputs/qoder-sqlite/qoder-sqlite-input.js';
@@ -164,7 +164,11 @@ export class Orchestrator extends EventEmitter {
 
     // 4. Build InputManager & AlarmManager
     const version = readInstalledVersion(this.dataDir);
-    this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version, userId: this.config.userId });
+    // Refreshable userId source: re-reads config.json (24h) so an operator can
+    // correct a wrong/missing userId without restarting the service. Shared by
+    // alarms and metrics so self-monitoring output stays consistent.
+    const userIdProvider = createUserIdProvider({ initialUserId: this.config.userId });
+    this.alarmManager = new AlarmManager({ ip: resolveLocalIp(), version, userIdProvider });
 
     this.inputManager = new InputManager();
     this.inputManager.setFlusher(this.flusher);
@@ -272,6 +276,7 @@ export class Orchestrator extends EventEmitter {
       dataDir: this.dataDir,
       version,
       userId: this.config.userId,
+      userIdProvider,
       canaryPolicy: this.config.autoUpdate?.canaryPolicy ?? '',
       getSnapshot: () => this.buildDataflowSnapshot(),
       alarmManager: this.alarmManager,

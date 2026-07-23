@@ -90,6 +90,16 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.userId).toBe('from-file');
     });
+
+    it('treats an empty/whitespace userId as unset and falls back to hostname', async () => {
+      const os = await import('node:os');
+      mockReadJsonFile.mockResolvedValueOnce({
+        userId: '   ',
+      });
+
+      const config = await loadConfig();
+      expect(config.userId).toBe(os.hostname());
+    });
   });
 
   describe('missing config file fallback (T026)', () => {
