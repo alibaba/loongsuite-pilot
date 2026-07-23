@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { HookWatchdog } from '../../../src/core/hook-watchdog.js';
+import { HookWatchdog, stripMarkerBlock } from '../../../src/core/hook-watchdog.js';
 
 // Real-shell regression guard for the rc intercept block.
 //
@@ -111,6 +111,45 @@ describe('rc intercept block sources safely in real shells', () => {
       );
       expect(out).toContain('SRC_OK');
       expect(out).toContain('qodercli --foo'); // user alias preserved
+    });
+  });
+
+  // The reported bug's real-world path: a user who installed an OLD release
+  // already has a bare `claude() {...}` block (same marker) in their rc AND a
+  // claude alias — so their rc parse-errors today. Simulate repair()'s
+  // migration (stripMarkerBlock + append current block) and prove the result
+  // sources cleanly, with the old bare block gone.
+  describe.skipIf(!HAS_BASH)('migration of an old bare-function block (bash)', () => {
+    const def = HookWatchdog.interceptRcBlockDefs().find(d => d.id === 'claude-code-rc')!;
+    const OLD_BARE_BLOCK = [
+      '# loongsuite-pilot BEGIN claude-code-intercept',
+      'claude() { BUN_OPTIONS="--preload=/old/path ${BUN_OPTIONS}" command claude "$@"; }',
+      '# loongsuite-pilot END claude-code-intercept',
+    ].join('\n');
+
+    it('old bare block under an alias fails to source (documents the bug)', () => {
+      let errored = false;
+      try {
+        sourceInBash(`${CLAUDE_ALIAS}\n${OLD_BARE_BLOCK}\necho SHOULD_NOT_REACH`);
+      } catch {
+        errored = true; // non-zero exit → parse error
+      }
+      expect(errored).toBe(true);
+    });
+
+    it('after migration the rc sources cleanly and the bare block is gone', () => {
+      const rc = `${CLAUDE_ALIAS}\n\n${OLD_BARE_BLOCK}\n`;
+      // What repair() does for a stale block:
+      const migrated =
+        stripMarkerBlock(rc, def.marker, def.endMarker).replace(/\n+$/, '\n') +
+        def.blockFn('/tmp/pilot-hooks/claude-code-fetch-intercept.mjs') + '\n';
+
+      expect(migrated).not.toMatch(/^claude\(\) \{/m); // old bare block removed
+      expect(migrated).toContain(def.signature);       // new guarded block present
+
+      const out = sourceInBash(`${migrated}\necho SRC_OK\nalias claude`);
+      expect(out).toContain('SRC_OK');                 // no syntax error
+      expect(out).toContain('dangerously-skip-permissions'); // user alias preserved
     });
   });
 });

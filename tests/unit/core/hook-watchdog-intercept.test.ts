@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   HookWatchdog,
+  stripMarkerBlock,
   type InterceptCheckTarget,
 } from '../../../src/core/hook-watchdog.js';
 import type { HookWatchdogConfig } from '../../../src/types/index.js';
@@ -182,6 +183,41 @@ describe('HookWatchdog intercept targets', () => {
     expect(result.repaired).toBe(1);
   });
 
+  it('runs cleanup() (not check/repair) when disabled', async () => {
+    const cleanup = vi.fn<[], Promise<void>>().mockResolvedValue(undefined);
+    const target = makeTarget({
+      enabled: vi.fn<[], boolean>().mockReturnValue(false),
+      cleanup,
+      check: vi.fn().mockResolvedValue(false),
+    });
+    const wd = new HookWatchdog(defaultConfig, [], [target]);
+    const result = await wd.runCheck();
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(target.precondition).not.toHaveBeenCalled();
+    expect(target.check).not.toHaveBeenCalled();
+    expect(target.repair).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(1);
+  });
+
+  it('does not crash when cleanup() throws while disabled', async () => {
+    const target = makeTarget({
+      enabled: vi.fn<[], boolean>().mockReturnValue(false),
+      cleanup: vi.fn<[], Promise<void>>().mockRejectedValue(new Error('rc read-only')),
+    });
+    const wd = new HookWatchdog(defaultConfig, [], [target]);
+    const result = await wd.runCheck();
+    expect(result.skipped).toBe(1);
+  });
+
+  it('skips cleanly when disabled and no cleanup() is provided', async () => {
+    const target = makeTarget({ enabled: vi.fn<[], boolean>().mockReturnValue(false) });
+    const wd = new HookWatchdog(defaultConfig, [], [target]);
+    const result = await wd.runCheck();
+    expect(target.check).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(1);
+  });
+
   it('does not interfere with plugin check targets', async () => {
     // Plugin target with repairFn
     const pluginRepair = vi.fn().mockResolvedValue(true);
@@ -288,6 +324,66 @@ describe('intercept rc block is parse-safe and non-clobbering', () => {
     } finally {
       process.env.HOME = prevHome;
       fs.rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('stripMarkerBlock', () => {
+  const BEGIN = 'loongsuite-pilot BEGIN claude-code-intercept';
+  const END = 'loongsuite-pilot END claude-code-intercept';
+
+  it('removes the marker-delimited block inclusive of the marker lines', () => {
+    const content = [
+      'export PATH=/x:$PATH',
+      '# loongsuite-pilot BEGIN claude-code-intercept',
+      'claude() { echo old; }',
+      '# loongsuite-pilot END claude-code-intercept',
+      'alias ll=ls',
+    ].join('\n');
+    const out = stripMarkerBlock(content, BEGIN, END);
+    expect(out).not.toContain('claude() { echo old; }');
+    expect(out).not.toContain(BEGIN);
+    expect(out).not.toContain(END);
+    expect(out).toContain('export PATH=/x:$PATH');
+    expect(out).toContain('alias ll=ls');
+  });
+
+  it('is a no-op when the markers are absent', () => {
+    const content = 'export A=1\nalias ll=ls\n';
+    expect(stripMarkerBlock(content, BEGIN, END)).toBe(content);
+  });
+
+  it('handles a multi-line (new-shape) block', () => {
+    const content = [
+      'before',
+      '# loongsuite-pilot BEGIN claude-code-intercept',
+      'if ! alias claude >/dev/null 2>&1 && ! typeset -f claude >/dev/null 2>&1; then',
+      "  eval 'claude() { :; }'",
+      'fi',
+      '# loongsuite-pilot END claude-code-intercept',
+      'after',
+    ].join('\n');
+    const out = stripMarkerBlock(content, BEGIN, END);
+    expect(out.split('\n')).toEqual(['before', 'after']);
+  });
+});
+
+describe('interceptRcBlockDefs migration metadata', () => {
+  it('exposes signature + endMarker matching the block body', () => {
+    for (const def of HookWatchdog.interceptRcBlockDefs()) {
+      const block = def.blockFn(`/tmp/hooks/${def.scriptName}`);
+      expect(block).toContain(def.marker);       // BEGIN marker present
+      expect(block).toContain(def.endMarker);    // END marker present
+      expect(block).toContain(def.signature);    // guard signature present
+      // signature must be the guard line, which the old bare block never had
+      expect(def.signature).toMatch(/^if ! alias \S+ >\/dev\/null 2>&1$/);
+    }
+  });
+
+  it('exposes cleanup() on every default intercept target', () => {
+    const targets = HookWatchdog.defaultInterceptTargets('/tmp/test-pilot');
+    for (const t of targets) {
+      expect(typeof t.cleanup).toBe('function');
     }
   });
 });

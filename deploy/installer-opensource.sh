@@ -871,7 +871,15 @@ inject_qodercli_token_intercept() {
             msg "    ⚠️  $file 不可写，跳过" "    ⚠️  $file is not writable, skipping"
             return 0
         fi
-        if grep -q 'loongsuite-pilot BEGIN qodercli-intercept' "$file" 2>/dev/null; then return 0; fi
+        # Migrate-or-skip: our block may already be present. If it is the current
+        # guard shape (signature line present) we're done; otherwise it is an
+        # older released bare-function block sharing the same marker — remove it
+        # so the new guarded block below replaces it (the old bare block
+        # parse-errors under a user alias, which is exactly what we're fixing).
+        if grep -q 'loongsuite-pilot BEGIN qodercli-intercept' "$file" 2>/dev/null; then
+            if grep -qF 'if ! alias qodercli >/dev/null 2>&1' "$file"; then return 0; fi
+            _sed_inplace '/# loongsuite-pilot BEGIN qodercli-intercept/,/# loongsuite-pilot END qodercli-intercept/d' "$file"
+        fi
         [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
         # Double-quoted heredoc so $DATA_DIR expands at install time, honoring
         # --data-dir overrides. $@ is escaped to defer expansion to runtime.
@@ -1066,7 +1074,15 @@ inject_claude_code_fetch_intercept() {
             msg "    ⚠️  $file 不可写，跳过" "    ⚠️  $file is not writable, skipping"
             return 0
         fi
-        if grep -q 'loongsuite-pilot BEGIN claude-code-intercept' "$file" 2>/dev/null; then return 0; fi
+        # Migrate-or-skip: our block may already be present. If it is the current
+        # guard shape (signature line present) we're done; otherwise it is an
+        # older released bare-function block sharing the same marker — remove it
+        # so the new guarded block below replaces it (the old bare block
+        # parse-errors under a user alias, which is exactly what we're fixing).
+        if grep -q 'loongsuite-pilot BEGIN claude-code-intercept' "$file" 2>/dev/null; then
+            if grep -qF 'if ! alias claude >/dev/null 2>&1' "$file"; then return 0; fi
+            _sed_inplace '/# loongsuite-pilot BEGIN claude-code-intercept/,/# loongsuite-pilot END claude-code-intercept/d' "$file"
+        fi
         [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
         # Double-quoted heredoc so $DATA_DIR expands at install time, honoring
         # --data-dir overrides. Other refs (${BUN_OPTIONS}, $@) are escaped to
