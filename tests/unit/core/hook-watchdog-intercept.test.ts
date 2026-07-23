@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   HookWatchdog,
   stripMarkerBlock,
@@ -282,49 +282,114 @@ describe('HookWatchdog.defaultInterceptTargets', () => {
   });
 });
 
-describe('intercept rc block is parse-safe and non-clobbering', () => {
-  // Render the rc block the way repair() would, into a temp rc file, without
-  // touching the real HOME. defaultInterceptTargets(dataDir) uses os.homedir()
-  // for rcPaths, which is awkward to stub across the ESM boundary; instead we
-  // point HOME at a temp dir up-front and assert the block via a fresh
-  // fs-backed write driven by the same rcTargets definitions the watchdog uses.
+describe('intercept rc target check/repair/cleanup against a temp rc (real closures)', () => {
+  // rcPaths is injected (3rd arg) so these exercise the ACTUAL closures the
+  // daemon runs — reading/writing real files in a temp dir, no HOME stubbing.
   const fs = require('node:fs') as typeof import('node:fs');
+  const os = require('node:os') as typeof import('node:os');
   const path = require('node:path') as typeof import('node:path');
 
-  it('claude-code-rc / qodercli-rc repair writes a guarded, eval-deferred block', async () => {
-    const tmpHome = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'pilot-rc-'));
-    const prevHome = process.env.HOME;
-    process.env.HOME = tmpHome;
-    try {
-      fs.mkdirSync(path.join(tmpHome, 'hooks'), { recursive: true });
-      fs.writeFileSync(path.join(tmpHome, 'hooks', 'claude-code-fetch-intercept.mjs'), '// stub\n');
-      fs.writeFileSync(path.join(tmpHome, 'hooks', 'qodercli-token-intercept.mjs'), '// stub\n');
-      fs.writeFileSync(path.join(tmpHome, '.zshrc'), '# pre-existing\n');
+  const SCRIPT = 'claude-code-fetch-intercept.mjs';
+  const SIG = 'if ! alias claude >/dev/null 2>&1';
+  const OLD_BARE_BLOCK = [
+    '# loongsuite-pilot BEGIN claude-code-intercept',
+    'claude() { BUN_OPTIONS="--preload=/old ${BUN_OPTIONS}" command claude "$@"; }',
+    '# loongsuite-pilot END claude-code-intercept',
+  ].join('\n');
 
-      const targets = HookWatchdog.defaultInterceptTargets(tmpHome);
-      const homeMatches = require('node:os').homedir() === tmpHome;
-      // Only meaningful when os.homedir() honors HOME (POSIX). Skip on platforms
-      // where it doesn't, rather than risk writing to the real rc.
-      if (!homeMatches) return;
+  let tmp: string;
+  let zshrc: string;
+  let bashrc: string;
 
-      for (const id of ['claude-code-rc', 'qodercli-rc']) {
-        const target = targets.find(t => t.id === id)!;
-        if (await target.check()) continue; // marker somehow already present
-        await target.repair();
-      }
-      const rc = fs.readFileSync(path.join(tmpHome, '.zshrc'), 'utf-8');
+  function claudeTarget(enabled = true) {
+    const isEnabled = (id: string) => (id === 'claude-code' ? enabled : true);
+    return HookWatchdog
+      .defaultInterceptTargets(tmp, isEnabled, [zshrc, bashrc])
+      .find(t => t.id === 'claude-code-rc')!;
+  }
 
-      expect(rc).toContain('if ! alias claude >/dev/null 2>&1 && ! typeset -f claude >/dev/null 2>&1; then');
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-rc-real-'));
+    fs.mkdirSync(path.join(tmp, 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'hooks', SCRIPT), '// stub\n');
+    zshrc = path.join(tmp, '.zshrc');
+    bashrc = path.join(tmp, '.bashrc');
+  });
+
+  afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  it('repair() appends a guarded, eval-deferred block when none exists', async () => {
+    fs.writeFileSync(zshrc, '# pre-existing\n');
+    fs.writeFileSync(bashrc, '# pre-existing\n');
+    const t = claudeTarget();
+    expect(await t.check()).toBe(false); // no block yet → needs repair
+    await t.repair();
+
+    for (const rcFile of [zshrc, bashrc]) {
+      const rc = fs.readFileSync(rcFile, 'utf-8');
+      expect(rc).toContain(SIG);
       expect(rc).toContain(`eval 'claude() { BUN_OPTIONS="--preload=`);
-      expect(rc).toContain('${BUN_OPTIONS}'); // preserve user's existing BUN_OPTIONS at call time
-      expect(rc).not.toMatch(/^\s*claude\(\)/m); // no bare, unguarded def token
-      expect(rc).toContain('if ! alias qodercli >/dev/null 2>&1 && ! typeset -f qodercli >/dev/null 2>&1; then');
-      expect(rc).toContain(`eval 'qodercli() { BUN_OPTIONS="--preload=`);
-      expect(rc).not.toMatch(/^\s*qodercli\(\)/m);
-    } finally {
-      process.env.HOME = prevHome;
-      fs.rmSync(tmpHome, { recursive: true, force: true });
+      expect(rc).toContain('${BUN_OPTIONS}');
+      expect(rc).not.toMatch(/^\s*claude\(\)/m); // no bare def token
     }
+    expect(await t.check()).toBe(true); // healthy after repair
+  });
+
+  it('check() flags an OLD bare block as stale and repair() migrates it', async () => {
+    fs.writeFileSync(zshrc, `# top\n\n${OLD_BARE_BLOCK}\n`);
+    const t = claudeTarget();
+    expect(await t.check()).toBe(false); // marker present but old shape → stale
+
+    await t.repair();
+    const rc = fs.readFileSync(zshrc, 'utf-8');
+    expect(rc).not.toContain('claude() { BUN_OPTIONS="--preload=/old'); // old bare gone
+    expect(rc).not.toMatch(/^\s*claude\(\)/m);
+    expect(rc).toContain(SIG);                       // migrated to guarded block
+    expect(rc.match(/BEGIN claude-code-intercept/g)!.length).toBe(1); // exactly one block
+    expect(rc).toContain('# top');                   // surrounding content preserved
+    expect(await t.check()).toBe(true);
+  });
+
+  it('repair() is idempotent — current block is not duplicated', async () => {
+    fs.writeFileSync(zshrc, '');
+    const t = claudeTarget();
+    await t.repair();
+    await t.repair();
+    const rc = fs.readFileSync(zshrc, 'utf-8');
+    expect(rc.match(/BEGIN claude-code-intercept/g)!.length).toBe(1);
+  });
+
+  it('cleanup() removes our block (disabled agent) and leaves other content', async () => {
+    fs.writeFileSync(zshrc, '# keep-me\n');
+    const enabled = claudeTarget(true);
+    await enabled.repair(); // install first
+    expect(fs.readFileSync(zshrc, 'utf-8')).toContain(SIG);
+
+    const disabled = claudeTarget(false);
+    await disabled.cleanup!();
+    const rc = fs.readFileSync(zshrc, 'utf-8');
+    expect(rc).not.toContain('loongsuite-pilot BEGIN claude-code-intercept');
+    expect(rc).not.toContain(SIG);
+    expect(rc).toContain('# keep-me'); // unrelated content untouched
+  });
+
+  it('cleanup() also removes an OLD bare block', async () => {
+    fs.writeFileSync(zshrc, `# keep\n${OLD_BARE_BLOCK}\n`);
+    await claudeTarget(false).cleanup!();
+    const rc = fs.readFileSync(zshrc, 'utf-8');
+    expect(rc).not.toContain('loongsuite-pilot BEGIN claude-code-intercept');
+    expect(rc).toContain('# keep');
+  });
+
+  it('disabled target: runCheck() runs cleanup() and does not re-inject', async () => {
+    fs.writeFileSync(zshrc, '');
+    await claudeTarget(true).repair(); // block present
+    expect(fs.readFileSync(zshrc, 'utf-8')).toContain(SIG);
+
+    const wd = new HookWatchdog(defaultConfig, [], [claudeTarget(false)]);
+    const result = await wd.runCheck();
+    expect(result.skipped).toBe(1);
+    expect(fs.readFileSync(zshrc, 'utf-8')).not.toContain(SIG); // cleaned, not re-injected
   });
 });
 

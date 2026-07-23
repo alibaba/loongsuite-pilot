@@ -524,6 +524,10 @@ export class HookWatchdog {
   static defaultInterceptTargets(
     dataDir: string,
     isAgentEnabled: (agentId: string) => boolean = () => true,
+    // rcPaths is injectable so tests can exercise the real check()/repair()/
+    // cleanup() closures against a temp dir instead of the developer's real rc
+    // files. Production omits it and uses ~/.zshrc + ~/.bashrc.
+    rcPathsOverride?: string[],
   ): InterceptCheckTarget[] {
     const targets: InterceptCheckTarget[] = [];
     const home = os.homedir();
@@ -607,7 +611,7 @@ export class HookWatchdog {
     // Check BOTH .zshrc and .bashrc regardless of daemon's $SHELL — the
     // daemon is launchd-started and its $SHELL may not match the user's
     // interactive shell. Installer's remove function also scans all rc files.
-    const rcPaths = [
+    const rcPaths = rcPathsOverride ?? [
       path.join(home, '.zshrc'),
       path.join(home, '.bashrc'),
     ];
