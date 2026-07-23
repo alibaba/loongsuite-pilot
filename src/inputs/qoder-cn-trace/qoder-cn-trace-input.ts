@@ -6,6 +6,8 @@ import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
+import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
+import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSqliteTokensForSession } from './sqlite-token-reader.js';
 import { enrichIdeTurn, injectTraceId } from '../qoder-trace/token-enricher.js';
@@ -54,6 +56,20 @@ export class QoderCnTraceInput extends BaseInput {
 
   protected override async onStart(): Promise<void> {
     await ensureDir(this.logDir);
+    const checkpoint = await createHookHistoryStartupCheckpoint(
+      this.getState(),
+      this.logDir,
+      this.logPrefix,
+    );
+    if (!checkpoint) return;
+    this.setState(checkpoint.state);
+    if (checkpoint.skippedExistingBytes > 0) {
+      this.logger.warn('history checkpoint missing, baselining existing file without replay', {
+        skippedBytes: checkpoint.skippedExistingBytes,
+      });
+    } else {
+      this.logger.info('history checkpoint initialized before first hook record');
+    }
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
@@ -223,7 +239,7 @@ export class QoderCnTraceInput extends BaseInput {
       await handle.close();
     }
 
-    return entries;
+    return filterBootstrapHistoryTurns(entries);
   }
 
   // ─── Record transformation ──────────────────────────────────────────────────
@@ -438,5 +454,3 @@ function expandContainerTimes(entries: AgentActivityEntry[]): void {
     }
   }
 }
-
-

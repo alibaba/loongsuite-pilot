@@ -38,6 +38,12 @@ beforeEach(async () => {
   await createSchema(dbPath);
 
   stateStore = new MockStateStore();
+  // Most tests exercise ordinary incremental collection. Seed the byte cursor
+  // explicitly so they do not accidentally depend on cold-start semantics.
+  stateStore.set('qoder-cn-trace', {
+    lastFile: `qoder-cn-${getTodayDateString()}.jsonl`,
+    lastOffset: 0,
+  });
 });
 
 afterEach(async () => {
@@ -45,6 +51,53 @@ afterEach(async () => {
 });
 
 describe('QoderCnTraceInput.collect (session-level enrich)', () => {
+  it('baselines existing incremental history when the input checkpoint is missing', async () => {
+    const oldEntries = [
+      buildEntry({ event: 'llm.response', turn: 'historical-turn-1', step: 'historical-turn-1:s1', session: '', ts: 1_780_000_000_000 }),
+      buildEntry({ event: 'llm.response', turn: 'historical-turn-2', step: 'historical-turn-2:s1', session: '', ts: 1_780_000_001_000 }),
+    ];
+    for (const entry of oldEntries) {
+      entry['agent.transcript.cursor_mode'] = 'incremental';
+    }
+    await writeHookJsonl(logDir, oldEntries);
+
+    // Reproduce a redeploy/state-loss boundary while the daily history remains.
+    stateStore = new MockStateStore();
+    const input = new QoderCnTraceInput({
+      stateStore: stateStore as any,
+      logDir,
+      pollIntervalMs: 60_000,
+    });
+    const collected: AgentActivityEntry[] = [];
+    input.on('entries', (batch: AgentActivityEntry[]) => collected.push(...batch));
+
+    await input.start();
+    expect(collected).toEqual([]);
+
+    const logFileName = `qoder-cn-${getTodayDateString()}.jsonl`;
+    const logFile = path.join(logDir, logFileName);
+    const baselineSize = (await fs.stat(logFile)).size;
+    expect(stateStore.get('qoder-cn-trace')).toMatchObject({
+      lastFile: logFileName,
+      lastOffset: baselineSize,
+      extra: { hookHistoryInitialized: true },
+    });
+
+    const nextEntry = buildEntry({
+      event: 'llm.response',
+      turn: 'turn-after-baseline',
+      step: 'turn-after-baseline:s1',
+      session: '',
+      ts: 1_780_000_002_000,
+    });
+    nextEntry['agent.transcript.cursor_mode'] = 'incremental';
+    await fs.appendFile(logFile, `${JSON.stringify(nextEntry)}\n`, 'utf-8');
+
+    const appended = await (input as any).collect() as AgentActivityEntry[];
+    await input.stop();
+    expect(appended.map(entry => entry['gen_ai.turn.id'])).toEqual(['turn-after-baseline']);
+  });
+
   it('aggregates multiple turns in the same session into one enrich pass', async () => {
     // SQLite has 2 assistant rows (one per LLM call); hook JSONL has 2 turns
     // referencing those calls. With session-level aggregation matchIdeTurnsBySqliteOrder

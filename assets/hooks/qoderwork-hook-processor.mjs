@@ -19,7 +19,7 @@ import {
   parseArgs,
   parseStdinPayload,
   logDebug,
-  getLineRange,
+  getLineRangeInfo,
   readTranscriptLines,
   appendRowsToHistory,
   updateLineRecord,
@@ -44,10 +44,10 @@ async function main() {
   const cwd = resolveQoderWorkProjectDir(rawCwd, agentId);
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
 
-  const range = getLineRange(agentId, transcriptPath, sessionId);
+  const range = getLineRangeInfo(agentId, transcriptPath, sessionId);
   if (!range) return;
 
-  const [startLine, endLine] = range;
+  const { startLine, endLine, reason: rangeReason } = range;
   const lines = readTranscriptLines(transcriptPath, startLine, endLine);
   logDebug(agentId, `Read ${lines.length} lines from ${transcriptPath} (range: ${startLine}-${endLine})`);
   if (!lines.length) {
@@ -64,7 +64,9 @@ async function main() {
     return;
   }
 
-  const records = processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd);
+  const records = processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, {
+    rangeReason,
+  });
   logDebug(agentId, `Produced ${records.length} events`);
 
   const rowsToAppend = records.filter(Boolean).map(r => JSON.stringify(r));
@@ -75,7 +77,7 @@ async function main() {
   }
 }
 
-function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd) {
+function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, opts = {}) {
   const observedTs = timestampToUnixNanos(Date.now());
   const records = [];
 
@@ -103,19 +105,35 @@ function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd) {
 
   if (!contentRows.length) return records;
 
-  // Determine user info from first row
-  const firstRow = contentRows[0];
+  // Split into turns: each user message (non tool_result) starts a new turn
+  const allTurns = splitIntoTurns(contentRows);
+  const rangeReason = opts.rangeReason || 'incremental';
+  const isBootstrap = rangeReason !== 'incremental';
+  const turns = isBootstrap ? allTurns.slice(-1) : allTurns;
+  if (isBootstrap && allTurns.length > turns.length) {
+    logDebug(agentId, `Cursor recovery (${rangeReason}): skipped ${allTurns.length - turns.length} historical turn(s), kept latest turn`);
+  }
+
+  // Bootstrap recovery may discard earlier turns, so metadata must come from
+  // the selected turn rather than the beginning of the full transcript.
+  const firstRow = turns[0]?.[0] || contentRows[0];
   const userId = resolveUserId(firstRow, runtimeConfig);
   const providerName = inferProviderName({ 'gen_ai.agent.type': agentId });
   const version = getStringValue(firstRow, 'version') || '';
-
-  // Split into turns: each user message (non tool_result) starts a new turn
-  const turns = splitIntoTurns(contentRows);
 
   for (const turn of turns) {
     const turnId = getTurnIdForRows(turn);
     const turnRecords = buildTurnEvents(turn, turnId, sessionId, userId, providerName, version, observedTs, runtimeConfig, cwd, agentId);
     records.push(...turnRecords);
+  }
+
+  const cursorMode = isBootstrap ? 'bootstrap' : 'incremental';
+  const cursorBatchId = crypto.randomUUID();
+  for (const record of records) {
+    if (!record) continue;
+    record['agent.transcript.cursor_mode'] = cursorMode;
+    record['agent.transcript.cursor_reason'] = rangeReason;
+    record['agent.transcript.cursor_batch_id'] = cursorBatchId;
   }
 
   return records;

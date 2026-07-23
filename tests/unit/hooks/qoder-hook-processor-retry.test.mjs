@@ -7,6 +7,7 @@ import {
   readRetryLock,
   releaseRetryLock,
   retryLockPath,
+  selectTurnSegmentsForCollection,
   tryAcquireRetryLock,
 } from '../../../assets/hooks/qoder-hook-processor.mjs';
 
@@ -106,5 +107,28 @@ describe('isRetryLockStale', () => {
 
   it('returns true for fresh lock with dead pid', () => {
     expect(isRetryLockStale({ pid: 999999, startedAt: Date.now() })).toBe(true);
+  });
+});
+
+describe('selectTurnSegmentsForCollection', () => {
+  const turns = [['turn-1'], ['turn-2'], ['turn-3']];
+
+  it('keeps all normal Qoder incremental turns', () => {
+    expect(selectTurnSegmentsForCollection(turns, 'incremental', 'qoder')).toEqual(turns);
+  });
+
+  it('keeps only the latest turn when any Qoder-family cursor is recovered', () => {
+    expect(selectTurnSegmentsForCollection(turns, 'missing-cursor', 'qoder')).toEqual([
+      ['turn-3'],
+    ]);
+    expect(selectTurnSegmentsForCollection(turns, 'truncated', 'qoder-cn')).toEqual([
+      ['turn-3'],
+    ]);
+  });
+
+  it('keeps only the latest QoderCN turn after its intentional full reparse', () => {
+    expect(selectTurnSegmentsForCollection(turns, 'incremental', 'qoder-cn')).toEqual([
+      ['turn-3'],
+    ]);
   });
 });

@@ -10,7 +10,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/qoderwork-hook-processor.mjs');
 const AGENT_ID = 'qoder-work-test';
 const LOG_PREFIX = 'qoder-work';
-const LINE_RECORD = path.resolve(__dirname, '../../../../assets/hooks/.line_records.qoder-work-test.json');
 
 let DATA_DIR;
 let TRANSCRIPT;
@@ -18,12 +17,10 @@ let TRANSCRIPT;
 beforeEach(() => {
   DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qoderwork-hook-test-'));
   TRANSCRIPT = path.join(DATA_DIR, 'transcript.jsonl');
-  try { fs.rmSync(LINE_RECORD, { force: true }); } catch {}
 });
 
 afterEach(() => {
   try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch {}
-  try { fs.rmSync(LINE_RECORD, { force: true }); } catch {}
 });
 
 function writeTranscript(records) {
@@ -39,7 +36,7 @@ function runHook(sessionId) {
     }),
     env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR },
     encoding: 'utf-8',
-    timeout: 10_000,
+    timeout: 30_000,
   });
 }
 
@@ -92,6 +89,92 @@ function baseRows(userContent) {
     },
   ];
 }
+
+function turnRows(index, text) {
+  const second = String(50 + index * 2).padStart(2, '0');
+  return [
+    {
+      type: 'user',
+      uuid: `user-${index}`,
+      promptId: `prompt-${index}`,
+      timestamp: `2026-06-18T01:35:${second}.477Z`,
+      message: { role: 'user', content: [{ type: 'text', text }] },
+      sessionId: 'sess-recovery',
+      userType: 'external',
+      isSidechain: false,
+    },
+    {
+      type: 'assistant',
+      uuid: `assistant-${index}`,
+      parentUuid: `user-${index}`,
+      timestamp: `2026-06-18T01:35:${second}.977Z`,
+      message: {
+        role: 'assistant',
+        id: `msg-${index}`,
+        content: [{ type: 'text', text: `answer ${index}` }],
+        stop_reason: 'end_turn',
+      },
+      sessionId: 'sess-recovery',
+      isSidechain: false,
+    },
+  ];
+}
+
+describe('qoderwork-hook-processor cursor recovery', () => {
+  test('bootstraps only the latest old turn, persists cursor outside hooks, then resumes incrementally', () => {
+    writeTranscript([
+      ...turnRows(1, 'historical prompt 1'),
+      ...turnRows(2, 'historical prompt 2'),
+    ]);
+
+    const first = runHook('sess-recovery');
+    expect(first.status).toBe(0);
+
+    const bootstrapRecords = readJsonlRecords();
+    expect(inputContents(bootstrapRecords)).toEqual(['historical prompt 2']);
+    expect(new Set(bootstrapRecords.map(r => r['agent.transcript.cursor_mode']))).toEqual(
+      new Set(['bootstrap']),
+    );
+    expect(new Set(bootstrapRecords.map(r => r['agent.transcript.cursor_reason']))).toEqual(
+      new Set(['missing-cursor']),
+    );
+    expect(new Set(bootstrapRecords.map(r => r['agent.transcript.cursor_batch_id'])).size).toBe(1);
+
+    const persistentCursorDir = path.join(
+      DATA_DIR,
+      'state',
+      'hooks',
+      `${AGENT_ID}-line-records`,
+    );
+    const cursorFiles = fs.readdirSync(persistentCursorDir).filter(file => file.endsWith('.json'));
+    expect(cursorFiles).toHaveLength(1);
+    const persistentCursor = JSON.parse(
+      fs.readFileSync(path.join(persistentCursorDir, cursorFiles[0]), 'utf-8'),
+    );
+    expect(persistentCursor).toMatchObject({
+      session_id: 'sess-recovery',
+      transcript_path: TRANSCRIPT,
+    });
+
+    const before = bootstrapRecords.length;
+    fs.appendFileSync(
+      TRANSCRIPT,
+      turnRows(3, 'new prompt 3').map(row => JSON.stringify(row)).join('\n') + '\n',
+      'utf-8',
+    );
+    const second = runHook('sess-recovery');
+    expect(second.status).toBe(0);
+
+    const incrementalRecords = readJsonlRecords().slice(before);
+    expect(inputContents(incrementalRecords)).toEqual(['new prompt 3']);
+    expect(new Set(incrementalRecords.map(r => r['agent.transcript.cursor_mode']))).toEqual(
+      new Set(['incremental']),
+    );
+    expect(new Set(incrementalRecords.map(r => r['agent.transcript.cursor_reason']))).toEqual(
+      new Set(['incremental']),
+    );
+  });
+});
 
 describe('qoderwork-hook-processor user prompt extraction', () => {
   test('emits per-step input deltas that the converter accumulates', async () => {

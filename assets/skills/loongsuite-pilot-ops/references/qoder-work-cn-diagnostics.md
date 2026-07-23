@@ -216,7 +216,8 @@ ls -la ~/.loongsuite-pilot/logs/output/ | grep qoder-work-cn
 | `~/.qoderworkcn/settings.json` | Qoder Work CN 的 Stop hook 注册（nested 格式） |
 | `~/.loongsuite-pilot/hooks/qoderworkcn-loongsuite-pilot-hook.sh` | Qoder Work CN 专用 shell 入口 |
 | `~/.loongsuite-pilot/hooks/qoderwork-hook-processor.mjs` | 共享 transcript forwarder |
-| `~/.loongsuite-pilot/hooks/.line_records.qoder-work-cn.json` | processor 的 per-transcript 增量行记录状态 |
+| `~/.loongsuite-pilot/state/hooks/qoder-work-cn-line-records/*.json` | processor 的 per-session 增量行记录状态（持久目录，部署升级不会覆盖） |
+| `~/.loongsuite-pilot/state/hooks/qoder-work-cn-line-records.json` | 旧版本回滚兼容影子（加锁更新，非当前主状态） |
 | `~/.loongsuite-pilot/logs/qoder-work-cn/history/qoder-work-cn-YYYY-MM-DD.jsonl` | Hook 转发后的 history |
 | `~/Library/Application Support/QoderWork CN/logs/` | SDK log tail 数据源（macOS） |
 | `~/Library/Application Support/QoderWork CN/data/agents.db` | SQLite fallback 数据源（macOS） |

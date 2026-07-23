@@ -124,9 +124,13 @@ tail -2 ~/.loongsuite-pilot/logs/qoder/history/qoder-$(date -u +%Y-%m-%d).jsonl 
 processor 的增量状态保存在：
 
 ```bash
-cat ~/.loongsuite-pilot/hooks/.line_records.qoder.json
-# 每个 transcript_path → { session_id, last_line_count, updated_at }
+ls -la ~/.loongsuite-pilot/state/hooks/qoder-line-records/
+cat ~/.loongsuite-pilot/state/hooks/qoder-line-records/*.json
+# 每个文件对应一个 session，内容含 session_id、transcript_path、last_line_count、updated_at
 ```
+
+同目录下的 `qoder-line-records.json` 是加锁维护的旧版本回滚兼容影子；当前版本以
+`qoder-line-records/*.json` 为主状态。
 
 若 history 为空但 sessions 有数据：
 - hook 从未被触发 → 检查第 2.A.1 的 settings.json
@@ -335,7 +339,8 @@ ls -la "${XDG_CONFIG_HOME:-$HOME/.config}/Qoder"
 | `~/.qoder/logs/sessions/<cwd>/<session>/segments/*.jsonl` | Qoder CLI 原生 transcript + token 事件（`qoder-trace` / `qoder-cli-session` 读取） |
 | `~/.loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.sh` | Qoder Hook shell 入口 |
 | `~/.loongsuite-pilot/hooks/qoder-hook-processor.mjs` | Qoder 专用 transcript forwarder（从 stdin 拿 transcript_path，增量 append 到 history） |
-| `~/.loongsuite-pilot/hooks/.line_records.qoder.json` | processor 的增量行记录状态 |
+| `~/.loongsuite-pilot/state/hooks/qoder-line-records/*.json` | processor 的 per-session 增量行记录状态（持久目录，部署升级不会覆盖） |
+| `~/.loongsuite-pilot/state/hooks/qoder-line-records.json` | 旧版本回滚兼容影子（加锁更新，非当前主状态） |
 | `~/.loongsuite-pilot/logs/qoder/history/qoder-YYYY-MM-DD.jsonl` | transcript 转发后的 history（`qoder-trace` / `qoder-cli-hook` 读取） |
 | `~/.loongsuite-pilot/logs/qoder/debug/qoder-debug-*.log` | processor 调试日志 |
 | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` | Qoder IDE SQLite token 数据源 |

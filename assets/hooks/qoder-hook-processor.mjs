@@ -17,7 +17,7 @@ import {
   parseArgs,
   parseStdinPayload,
   logDebug,
-  getLineRange,
+  getLineRangeInfo,
   getTranscriptLineCount,
   readTranscriptLines,
   appendRowsToHistory,
@@ -185,7 +185,7 @@ async function main() {
     // qoder-cn only: serialize concurrent retries on the same transcript.
     // We wait the HOOK_RETRY_DELAY first (so all queued Stop hooks have
     // already advanced the offset via updateLineRecord), then acquire the
-    // lock. The losers see currentCount==lastCount in getLineRange and exit.
+    // lock. The losers see currentCount==lastCount in getLineRangeInfo and exit.
     const retryDelay = parseInt(process.env.HOOK_RETRY_DELAY || '0', 10);
     if (retryDelay > 0) {
       await new Promise(r => setTimeout(r, retryDelay));
@@ -198,11 +198,12 @@ async function main() {
       }
     }
     try {
-      const range = getLineRange(agentId, transcriptPath, sessionId);
+      const range = getLineRangeInfo(agentId, transcriptPath, sessionId);
       if (!range) return;
       await processTranscript(
         agentId, logPrefix, transcriptPath, sessionId,
-        range[0], range[1], runtimeConfig, cwd, { delayApplied: true },
+        range.startLine, range.endLine, runtimeConfig, cwd,
+        { delayApplied: true, rangeReason: range.reason },
       );
     } finally {
       if (agentId === 'qoder-cn') releaseRetryLock(transcriptPath);
@@ -224,11 +225,11 @@ async function main() {
 
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
 
-  const range = getLineRange(agentId, transcriptPath, sessionId);
+  const range = getLineRangeInfo(agentId, transcriptPath, sessionId);
   if (!range) return;
 
-  const [startLine] = range;
-  const endLine = range[1];
+  const startLine = range.startLine;
+  const endLine = range.endLine;
   const lines = readTranscriptLines(transcriptPath, startLine, endLine);
   logDebug(agentId, `Read ${lines.length} lines (range: ${startLine}-${endLine})`);
   if (!lines.length) {
@@ -273,19 +274,25 @@ async function main() {
       return;
     }
     try {
-      await processTranscript(agentId, logPrefix, transcriptPath, sessionId, startLine, endLine, runtimeConfig, cwd);
+      await processTranscript(
+        agentId, logPrefix, transcriptPath, sessionId, startLine, endLine,
+        runtimeConfig, cwd, { rangeReason: range.reason },
+      );
     } finally {
       releaseRetryLock(transcriptPath);
     }
     return;
   }
 
-  await processTranscript(agentId, logPrefix, transcriptPath, sessionId, startLine, endLine, runtimeConfig, cwd);
+  await processTranscript(
+    agentId, logPrefix, transcriptPath, sessionId, startLine, endLine,
+    runtimeConfig, cwd, { rangeReason: range.reason },
+  );
 }
 
 // NOTE: Retry subprocess won't race with normal hook because non-interactive mode (--print)
 // only fires Stop once per session (process exits after hook returns). The offset check in
-// getLineRange prevents double-processing if another hook invocation somehow occurs.
+// getLineRangeInfo prevents double-processing if another hook invocation somehow occurs.
 function spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd) {
   const nodebin = process.argv[0];
   const script = fileURLToPath(import.meta.url);
@@ -407,7 +414,21 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
   // Each real user prompt starts a new turn. Tool results stay attached to the
   // preceding turn. This ensures each turn gets its own user input instead of
   // inheriting the first prompt of the whole transcript segment.
-  const turnSegments = splitContentEventsIntoTurns(contentEvents);
+  const allTurnSegments = splitContentEventsIntoTurns(contentEvents);
+  const rangeReason = opts?.rangeReason || 'incremental';
+  // Cursor recovery always reads the full transcript to re-establish a safe
+  // checkpoint, but only the latest logical turn is new. QoderCN also rebuilds
+  // from line 0 on every completed Stop so its full ReAct chain is available;
+  // it must therefore emit only the latest logical turn even with a valid
+  // incremental cursor.
+  const turnSegments = selectTurnSegmentsForCollection(allTurnSegments, rangeReason, agentId);
+  const keepLatestTurnOnly = turnSegments.length < allTurnSegments.length;
+  if (keepLatestTurnOnly && allTurnSegments.length > turnSegments.length) {
+    const recoverySource = agentId === 'qoder-cn' && rangeReason === 'incremental'
+      ? 'QoderCN full reparse'
+      : `cursor recovery (${rangeReason})`;
+    logDebug(agentId, `${recoverySource}: skipped ${allTurnSegments.length - turnSegments.length} historical turn(s), kept latest turn`);
+  }
   logDebug(agentId, `Split transcript segment into ${turnSegments.length} turn(s)`);
 
   // --- Phase 4: Build events per turn ---
@@ -428,6 +449,14 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
     logDebug(agentId, `Turn ${turnIdx + 1}: produced ${turnRecords.length} events, turn_id=${turnId}`);
   }
 
+  const cursorMode = rangeReason === 'incremental' ? 'incremental' : 'bootstrap';
+  const cursorBatchId = crypto.randomUUID();
+  for (const record of records) {
+    record['agent.transcript.cursor_mode'] = cursorMode;
+    record['agent.transcript.cursor_reason'] = rangeReason;
+    record['agent.transcript.cursor_batch_id'] = cursorBatchId;
+  }
+
   // --- Phase 5: Write to history ---
   const rowsToAppend = records.map(r => JSON.stringify(r));
   const success = appendRowsToHistory(agentId, logPrefix, rowsToAppend);
@@ -435,6 +464,16 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
     logDebug(agentId, `Appended ${rowsToAppend.length} rows`);
     updateLineRecord(agentId, transcriptPath, sessionId, endLine);
   }
+}
+
+export function selectTurnSegmentsForCollection(turnSegments, rangeReason, agentId) {
+  // QoderCN intentionally reparses the complete transcript on every Stop to
+  // rebuild its ReAct chain. Other variants only do that during cursor
+  // recovery. In both cases, only the latest logical turn may be emitted.
+  if (rangeReason !== 'incremental' || agentId === 'qoder-cn') {
+    return turnSegments.slice(-1);
+  }
+  return turnSegments;
 }
 
 // --- LLM Boundary Detection --------------------------------------------------

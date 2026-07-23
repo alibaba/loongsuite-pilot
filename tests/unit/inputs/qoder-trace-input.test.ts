@@ -1,8 +1,14 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { enrichCliTurn, enrichIdeTurn, injectTraceId } from '../../../src/inputs/qoder-trace/token-enricher.js';
+import { QoderTraceInput } from '../../../src/inputs/qoder-trace/qoder-trace-input.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import type { SegmentTokenData } from '../../../src/inputs/qoder-trace/segment-token-reader.js';
 import type { SqliteTokenData } from '../../../src/inputs/qoder-trace/sqlite-token-reader.js';
+import { getTodayDateString } from '../../../src/utils/fs-utils.js';
+import { MockStateStore } from '../../helpers/mock-state-store.js';
 
 function makeEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEntry {
   return {
@@ -493,5 +499,98 @@ describe('QoderTraceInput token-enricher', () => {
     it('does nothing for empty array', () => {
       expect(() => injectTraceId([])).not.toThrow();
     });
+  });
+});
+
+describe('QoderTraceInput bootstrap history filtering', () => {
+  it('consumes every session batch created after startup with an empty history', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-empty-start-'));
+    try {
+      const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+      const logFile = path.join(tmpDir, logFileName);
+      const record = (id: string, turnId: string, batchId: string) => ({
+        'event.id': id,
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': 'qoder',
+        'gen_ai.session.id': batchId,
+        'gen_ai.turn.id': turnId,
+        'agent.transcript.cursor_mode': 'bootstrap',
+        'agent.transcript.cursor_batch_id': batchId,
+        time_unix_nano: '1780000000000000000',
+      });
+      const stateStore = new MockStateStore();
+      const input = new QoderTraceInput({
+        stateStore: stateStore as any,
+        logDir: tmpDir,
+        pollIntervalMs: 60_000,
+      });
+
+      await input.start();
+      expect(stateStore.get('qoder-trace')).toMatchObject({
+        lastFile: logFileName,
+        lastOffset: 0,
+        extra: { hookHistoryInitialized: true },
+      });
+
+      await fs.writeFile(logFile, [
+        record('session-a-old', 'session-a-old-turn', 'session-a-batch'),
+        record('session-a-latest', 'session-a-latest-turn', 'session-a-batch'),
+        record('session-b-old', 'session-b-old-turn', 'session-b-batch'),
+        record('session-b-latest', 'session-b-latest-turn', 'session-b-batch'),
+      ].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+
+      const entries = await (input as any).collect() as AgentActivityEntry[];
+      await input.stop();
+      expect(entries.map(entry => entry['event.id'])).toEqual([
+        'session-a-latest',
+        'session-b-latest',
+      ]);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('protects every later old-session batch after the global file state is initialized', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-bootstrap-'));
+    try {
+      const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+      const logFile = path.join(tmpDir, logFileName);
+      const record = (id: string, turnId: string, batchId: string) => ({
+        'event.id': id,
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': 'qoder',
+        'gen_ai.turn.id': turnId,
+        'agent.transcript.cursor_mode': 'bootstrap',
+        'agent.transcript.cursor_batch_id': batchId,
+        time_unix_nano: '1780000000000000000',
+      });
+      await fs.writeFile(logFile, [
+        record('session-a-old', 'session-a-old-turn', 'session-a-batch'),
+        record('session-a-latest', 'session-a-latest-turn', 'session-a-batch'),
+        record('session-b-old', 'session-b-old-turn', 'session-b-batch'),
+        record('session-b-latest', 'session-b-latest-turn', 'session-b-batch'),
+      ].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+
+      const stateStore = new MockStateStore();
+      // lastFile proves the process-level cold start already occurred before
+      // these old sessions first appeared.
+      stateStore.set('qoder-trace', { lastFile: logFileName, lastOffset: 0 });
+      const input = new QoderTraceInput({
+        stateStore: stateStore as any,
+        logDir: tmpDir,
+        pollIntervalMs: 60_000,
+      });
+      const entries: AgentActivityEntry[] = [];
+      input.on('entries', batch => entries.push(...batch));
+      await input.start();
+      await input.stop();
+
+      expect(entries.map(entry => entry['event.id'])).toEqual([
+        'session-a-latest',
+        'session-b-latest',
+      ]);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   });
 });

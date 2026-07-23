@@ -39,7 +39,7 @@ Qoder Work
 | Hook 注册 | `~/.qoderwork/settings.json` 的 `hooks.Stop`（nested 格式） | pilot 启动时检测到 `~/.qoderwork/` 存在自动注入 |
 | Hook 脚本 | `~/.loongsuite-pilot/hooks/qoderwork-loongsuite-pilot-hook.sh` | pilot 安装/升级时拷贝 |
 | Hook processor | `~/.loongsuite-pilot/hooks/qoderwork-hook-processor.mjs` | pilot 安装/升级时拷贝 |
-| Processor 游标 | `~/.loongsuite-pilot/hooks/.line_records.qoder-work.json` | processor 每次成功 append 后更新 |
+| Processor 游标 | `~/.loongsuite-pilot/state/hooks/qoder-work-line-records/*.json` | 每个 session 一个状态文件；processor 成功 append 后更新，部署升级不会覆盖 |
 | History JSONL | `~/.loongsuite-pilot/logs/qoder-work/history/qoder-work-YYYY-MM-DD.jsonl` | processor 增量 append，`qoder-work-trace` 默认读取 |
 | Session segments | `~/.qoderwork/logs/sessions/` | Qoder Work 应用自身写入，`qoder-work-trace` 用于 token/timing enrichment |
 | SDK log | Qoder Work 应用 logs 目录 | Qoder Work 应用自身写入，trace 关闭时 `qoder-work-log` fallback 才单独启动 |
@@ -136,9 +136,13 @@ tail -2 ~/.loongsuite-pilot/logs/qoder-work/history/qoder-work-$(date -u +%Y-%m-
 processor 的增量状态保存在：
 
 ```bash
-cat ~/.loongsuite-pilot/hooks/.line_records.qoder-work.json
-# 每个 transcript_path → { session_id, last_line_count, updated_at }
+ls -la ~/.loongsuite-pilot/state/hooks/qoder-work-line-records/
+cat ~/.loongsuite-pilot/state/hooks/qoder-work-line-records/*.json
+# 每个文件对应一个 session，内容含 session_id、transcript_path、last_line_count、updated_at
 ```
+
+同目录下的 `qoder-work-line-records.json` 是加锁维护的旧版本回滚兼容影子；当前版本以
+`qoder-work-line-records/*.json` 为主状态，排障时不要把两者混为同一个游标文件。
 
 若 history 目录**不存在**或**完全为空**：
 
@@ -356,7 +360,8 @@ env | grep LOONGSUITE_PILOT
 | `~/.qoderwork/settings.json` | Qoder Work 的 hook 注册（`hooks.Stop`，nested 格式） |
 | `~/.loongsuite-pilot/hooks/qoderwork-loongsuite-pilot-hook.sh` | Qoder Work 专用的 shell 入口（pilot 维护） |
 | `~/.loongsuite-pilot/hooks/qoderwork-hook-processor.mjs` | Qoder Work 专用 transcript forwarder（从 stdin 拿 `transcript_path`，增量 append 到 history） |
-| `~/.loongsuite-pilot/hooks/.line_records.qoder-work.json` | processor 的 per-transcript 增量行记录状态 |
+| `~/.loongsuite-pilot/state/hooks/qoder-work-line-records/*.json` | processor 的 per-session 增量行记录状态（持久目录） |
+| `~/.loongsuite-pilot/state/hooks/qoder-work-line-records.json` | 旧版本回滚兼容影子（加锁更新，非当前主状态） |
 | `~/.loongsuite-pilot/logs/qoder-work/history/qoder-work-YYYY-MM-DD.jsonl` | transcript 转发后的 history（`qoder-work-trace` 默认读取；trace 关闭时 `qoder-work-hook` fallback 读取） |
 | `~/.loongsuite-pilot/logs/qoder-work/debug/qoder-work-debug-*.log` | processor 调试日志 |
 | `~/.loongsuite-pilot/logs/qoder-work/errors/qoder-work-error-*.log` | processor 错误日志（fail-open，不阻塞 Qoder Work） |
