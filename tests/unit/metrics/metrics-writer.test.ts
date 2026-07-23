@@ -241,10 +241,10 @@ describe('MetricsWriter', () => {
       expect(alarm).toBeDefined();
       expect(alarm!.alarm_level).toBe('2');
       expect(alarm!.alarm_message).toContain('soft threshold 512MB');
-      expect(alarm!.alarm_message).toContain('3 consecutive samples');
+      expect(alarm!.alarm_message).toContain('3 consecutive soft samples');
     });
 
-    it('records hard and critical memory levels with threshold semantics', () => {
+    it('alerts hard and critical memory tiers immediately', () => {
       const setup = makeAlarmWriter(tmpDir);
       writer = setup.writer;
       const { alarmManager } = setup;
@@ -254,12 +254,67 @@ describe('MetricsWriter', () => {
       expect(alarm).toBeDefined();
       expect(alarm!.alarm_level).toBe('2');
       expect(alarm!.alarm_message).toContain('hard threshold 1024MB');
+      expect(alarm!.alarm_message).toContain('1 consecutive hard sample');
 
       checkThresholdsForTest(writer, { cpu: '0', mem: '2300' });
       alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM');
       expect(alarm).toBeDefined();
       expect(alarm!.alarm_level).toBe('3');
       expect(alarm!.alarm_message).toContain('critical threshold 2048MB');
+      expect(alarm!.alarm_message).toContain('1 consecutive critical sample');
+    });
+
+    it('does not reuse hard or critical samples after falling back to soft memory tier', () => {
+      for (const initialMem of ['1200', '2300']) {
+        vi.setSystemTime(new Date('2026-07-15T00:00:00Z'));
+        const setup = makeAlarmWriter(tmpDir);
+        writer = setup.writer;
+        const { alarmManager } = setup;
+
+        checkThresholdsForTest(writer, { cpu: '0', mem: initialMem });
+        expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeDefined();
+
+        vi.setSystemTime(new Date('2026-07-15T01:00:01Z'));
+        checkThresholdsForTest(writer, { cpu: '0', mem: '600' });
+        expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeUndefined();
+
+        checkThresholdsForTest(writer, { cpu: '0', mem: '620' });
+        expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeUndefined();
+
+        checkThresholdsForTest(writer, { cpu: '0', mem: '640' });
+        const softAlarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM');
+        expect(softAlarm).toBeDefined();
+        expect(softAlarm!.alarm_message).toContain('soft threshold 512MB');
+        expect(softAlarm!.alarm_message).toContain('3 consecutive soft samples');
+      }
+    });
+
+    it('uses one memory cooldown for same or lower tiers and lets higher tiers escalate', () => {
+      vi.setSystemTime(new Date('2026-07-15T00:00:00Z'));
+      const setup = makeAlarmWriter(tmpDir);
+      writer = setup.writer;
+      const { alarmManager } = setup;
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '600' });
+      checkThresholdsForTest(writer, { cpu: '0', mem: '620' });
+      checkThresholdsForTest(writer, { cpu: '0', mem: '640' });
+      let alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_message).toContain('soft threshold 512MB');
+
+      vi.setSystemTime(new Date('2026-07-15T00:30:00Z'));
+      checkThresholdsForTest(writer, { cpu: '0', mem: '650' });
+      expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeUndefined();
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '1200' });
+      alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_message).toContain('hard threshold 1024MB');
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '700' });
+      checkThresholdsForTest(writer, { cpu: '0', mem: '710' });
+      checkThresholdsForTest(writer, { cpu: '0', mem: '720' });
+      expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeUndefined();
     });
 
     it('suppresses transient CPU spikes until 3 consecutive process CPU samples', () => {
@@ -282,7 +337,7 @@ describe('MetricsWriter', () => {
       expect(alarm!.alarm_message).not.toContain('cores');
     });
 
-    it('compares CPU threshold against raw process percent instead of host-core-normalized percent', () => {
+    it('compares CPU threshold against raw process percent', () => {
       const setup = makeAlarmWriter(tmpDir);
       writer = setup.writer;
       const { alarmManager } = setup;

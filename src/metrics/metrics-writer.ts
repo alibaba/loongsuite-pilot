@@ -26,6 +26,7 @@ type MemoryThresholdTier = {
   name: 'soft' | 'hard' | 'critical';
   thresholdMb: number;
   level: AlarmLevel;
+  rank: number;
 };
 
 export interface MetricsWriterOptions {
@@ -52,6 +53,8 @@ export class MetricsWriter {
   private startupAlarmEmitted = false;
   private cpuHighSamples = 0;
   private memoryHighSamples = 0;
+  private memoryHighSamplesTier: MemoryThresholdTier['name'] | null = null;
+  private lastMemoryAlarm: { at: number; tierRank: number } | null = null;
   private readonly lastProcessAlarmAt: Map<string, number> = new Map();
   private readonly lastInfraAlarmAt: Map<string, number> = new Map();
 
@@ -157,35 +160,71 @@ export class MetricsWriter {
   }
 
   private checkMemoryThreshold(memMb: number): void {
-    if (!Number.isFinite(memMb) || memMb <= MEMORY_SOFT_THRESHOLD_MB) {
-      this.memoryHighSamples = 0;
+    const tier = Number.isFinite(memMb) ? this.classifyMemoryThreshold(memMb) : null;
+    if (!tier) {
+      this.resetMemoryHighSamples();
       return;
     }
 
+    this.recordMemoryHighSample(tier);
+    if (!this.hasEnoughMemorySamplesForAlarm(tier)) {
+      return;
+    }
+
+    this.recordMemoryAlarm(tier, memMb);
+  }
+
+  private resetMemoryHighSamples(): void {
+    this.memoryHighSamples = 0;
+    this.memoryHighSamplesTier = null;
+  }
+
+  private recordMemoryHighSample(tier: MemoryThresholdTier): void {
+    if (this.memoryHighSamplesTier !== tier.name) {
+      this.memoryHighSamplesTier = tier.name;
+      this.memoryHighSamples = 1;
+      return;
+    }
     this.memoryHighSamples++;
-    const tier = this.classifyMemoryThreshold(memMb);
-    if (!tier) return;
-    if (tier.name === 'soft' && this.memoryHighSamples < MEMORY_SOFT_ALARM_CONSECUTIVE_SAMPLES) {
+  }
+
+  private hasEnoughMemorySamplesForAlarm(tier: MemoryThresholdTier): boolean {
+    if (tier.name === 'soft') {
+      return this.memoryHighSamples >= MEMORY_SOFT_ALARM_CONSECUTIVE_SAMPLES;
+    }
+    // Hard/critical tiers are well above the noisy 512MB boundary, so report immediately.
+    return true;
+  }
+
+  private recordMemoryAlarm(tier: MemoryThresholdTier, memMb: number): void {
+    if (!this.alarmManager) return;
+    const now = Date.now();
+    if (
+      this.lastMemoryAlarm
+      && now - this.lastMemoryAlarm.at < PROCESS_RESOURCE_ALARM_COOLDOWN_MS
+      && tier.rank <= this.lastMemoryAlarm.tierRank
+    ) {
       return;
     }
 
-    this.recordProcessAlarm(
+    this.lastMemoryAlarm = { at: now, tierRank: tier.rank };
+    const sampleWord = this.memoryHighSamples === 1 ? 'sample' : 'samples';
+    this.alarmManager.record(
       'PROCESS_MEMORY_ALARM',
       tier.level,
-      `Memory usage ${memMb}MB exceeds ${tier.name} threshold ${tier.thresholdMb}MB (${this.memoryHighSamples} consecutive samples above ${MEMORY_SOFT_THRESHOLD_MB}MB soft threshold)`,
-      `memory:${tier.name}`,
+      `Memory usage ${memMb}MB exceeds ${tier.name} threshold ${tier.thresholdMb}MB (${this.memoryHighSamples} consecutive ${tier.name} ${sampleWord})`,
     );
   }
 
   private classifyMemoryThreshold(memMb: number): MemoryThresholdTier | null {
     if (memMb > MEMORY_CRITICAL_THRESHOLD_MB) {
-      return { name: 'critical', thresholdMb: MEMORY_CRITICAL_THRESHOLD_MB, level: '3' };
+      return { name: 'critical', thresholdMb: MEMORY_CRITICAL_THRESHOLD_MB, level: '3', rank: 3 };
     }
     if (memMb > MEMORY_HARD_THRESHOLD_MB) {
-      return { name: 'hard', thresholdMb: MEMORY_HARD_THRESHOLD_MB, level: '2' };
+      return { name: 'hard', thresholdMb: MEMORY_HARD_THRESHOLD_MB, level: '2', rank: 2 };
     }
     if (memMb > MEMORY_SOFT_THRESHOLD_MB) {
-      return { name: 'soft', thresholdMb: MEMORY_SOFT_THRESHOLD_MB, level: '2' };
+      return { name: 'soft', thresholdMb: MEMORY_SOFT_THRESHOLD_MB, level: '2', rank: 1 };
     }
     return null;
   }
