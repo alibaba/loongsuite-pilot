@@ -548,6 +548,7 @@ function handleMessagePartUpdated(props, userId) {
     session.pendingParts = [];
     turn.stepSeq += 1;
     turn.currentStepId = `${turn.turnId}:s${turn.stepSeq}`;
+    turn.currentMessageId = part.messageID;
     session.stepStartTimeMs = props.time || Date.now();
 
     const model = session.modelInfo;
@@ -834,6 +835,7 @@ function handleToolExecuteBefore(inp, out, userId) {
     "gen_ai.tool.call.arguments": argsStr
       ? truncateContent(argsStr)
       : undefined,
+    "opencode.message.id": turn.currentMessageId,
   });
 }
 
@@ -888,6 +890,7 @@ function handleToolExecuteAfter(inp, out, userId) {
         : safeStringify(resultPayload)
     ),
     "tool.result.status": out?.error ? "error" : "success",
+    "opencode.message.id": turn.currentMessageId,
   };
   if (matchingPart?.startTimeMs) {
     const endMs = Date.now();
