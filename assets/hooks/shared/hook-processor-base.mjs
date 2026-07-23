@@ -308,8 +308,9 @@ export function getLineRangeInfo(agentId, transcriptPath, sessionId) {
 }
 
 /**
- * Backward-compatible tuple API used by hook processors that do not need to
- * distinguish a normal incremental read from cursor recovery.
+ * Compatibility API for a transient mixed-version deployment: the shared
+ * module may be replaced before an older deployed processor that still imports
+ * the tuple form. Current in-tree processors use getLineRangeInfo().
  */
 export function getLineRange(agentId, transcriptPath, sessionId) {
   const info = getLineRangeInfo(agentId, transcriptPath, sessionId);
