@@ -82,6 +82,11 @@ function spanDurationNanos(span) {
   return end - start;
 }
 
+function spanInputMessages(span) {
+  const value = span?.attributes?.['gen_ai.input.messages'];
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
 async function startTurn(runtime) {
   await runtime.emit('session_start', { reason: 'startup' });
   await runtime.emit('before_agent_start', {
@@ -146,20 +151,21 @@ describe('Pi Coding Agent extension', () => {
 
     const records = readRecords();
     expect(records.map(record => record['event.name'])).toEqual([
+      'other',
       'llm.request',
       'llm.response',
       'tool.call',
       'tool.result',
     ]);
 
-    const request = records[0];
+    const request = records.find(record => record['event.name'] === 'llm.request');
     expect(request['gen_ai.session.id']).toBe('pi-session-1');
     expect(request['gen_ai.agent.type']).toBe('pi-coding-agent');
     expect(request['agent.pi-coding-agent.cwd']).toBe('/workspace/example');
     expect(request['gen_ai.input.messages'][0].parts[0].content).toBe('Inspect the repository');
     expect(request['gen_ai.tool.definitions'].map(tool => tool.name)).toEqual(['read', 'bash']);
 
-    const response = records[1];
+    const response = records.find(record => record['event.name'] === 'llm.response');
     expect(response['gen_ai.usage.input_tokens']).toBe(1_300);
     expect(response['gen_ai.usage.cache_read.input_tokens']).toBe(1_000);
     expect(response['gen_ai.usage.cache_creation.input_tokens']).toBe(200);
@@ -175,10 +181,12 @@ describe('Pi Coding Agent extension', () => {
       expect.objectContaining({ type: 'tool_call', id: 'call-1' }),
     ]));
 
-    expect(records[2]['gen_ai.tool.call.arguments']).toEqual({ path: 'README.md' });
-    expect(records[3]['tool.result.status']).toBe('success');
-    expect(records[3]['gen_ai.tool.call.duration']).toBe(250);
-    expect(records[3]['gen_ai.tool.call.result']).toEqual({
+    const toolCall = records.find(record => record['event.name'] === 'tool.call');
+    const toolResult = records.find(record => record['event.name'] === 'tool.result');
+    expect(toolCall['gen_ai.tool.call.arguments']).toEqual({ path: 'README.md' });
+    expect(toolResult['tool.result.status']).toBe('success');
+    expect(toolResult['gen_ai.tool.call.duration']).toBe(250);
+    expect(toolResult['gen_ai.tool.call.result']).toEqual({
       content: [{ type: 'text', text: '# README' }],
     });
     if (process.platform !== 'win32') {
@@ -186,6 +194,69 @@ describe('Pi Coding Agent extension', () => {
       const logFile = path.join(logDir, 'pi-coding-agent-2026-07-16.jsonl');
       expect(fs.statSync(logDir).mode & 0o777).toBe(0o700);
       expect(fs.statSync(logFile).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('emits one turn-level input delta that populates ENTRY and AGENT spans', async () => {
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+
+    const currentInput = [
+      { role: 'user', parts: [{ type: 'text', content: 'Inspect the repository' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'Injected context' }] },
+    ];
+    await runtime.emit('context', {
+      messages: [
+        { role: 'user', content: 'old prompt' },
+        { role: 'assistant', content: [{ type: 'text', text: 'old response' }] },
+        { role: 'user', content: [{ type: 'text', text: 'Inspect the repository' }] },
+        {
+          role: 'custom',
+          customType: 'extension-note',
+          content: [{ type: 'text', text: 'Injected context' }],
+          display: false,
+        },
+      ],
+    });
+    // Pi can emit context more than once before one provider request. The
+    // turn-level user input must still be emitted exactly once.
+    await runtime.emit('context', {
+      messages: [{ role: 'user', content: 'duplicate snapshot' }],
+    });
+    await runtime.emit('message_end', {
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'I will inspect it.' }],
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-5',
+        stopReason: 'stop',
+        timestamp: Date.now(),
+        usage: {},
+      },
+    });
+
+    const records = readRecords();
+    const userInputRecords = records.filter(record => record['event.name'] === 'other');
+    expect(userInputRecords).toHaveLength(1);
+    expect(userInputRecords[0]['gen_ai.input.messages_delta']).toEqual(currentInput);
+    expect(userInputRecords[0]).not.toHaveProperty('gen_ai.step.id');
+    expect(userInputRecords[0]).not.toHaveProperty('gen_ai.request.model');
+
+    const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
+    try {
+      const conversion = await convertEventLogToReadableSpans(records);
+      const entry = conversion.spans.find(span => span.attributes['gen_ai.span.kind'] === 'ENTRY');
+      const agent = conversion.spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT');
+      expect(spanInputMessages(entry)).toEqual(currentInput);
+      expect(spanInputMessages(agent)).toEqual(currentInput);
+    } finally {
+      if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;
+      if (previousCapture === undefined) delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      else process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = previousCapture;
     }
   });
 
@@ -215,7 +286,8 @@ describe('Pi Coding Agent extension', () => {
       ],
     });
 
-    const messages = readRecords()[0]['gen_ai.input.messages'];
+    const messages = readRecords()
+      .find(record => record['event.name'] === 'llm.request')['gen_ai.input.messages'];
     expect(messages[0].parts[0].response).toBe('# README');
     const mixedResponse = messages[1].parts[0].response;
     expect(typeof mixedResponse).toBe('string');
@@ -245,7 +317,8 @@ describe('Pi Coding Agent extension', () => {
       ],
     });
 
-    expect(readRecords()[0]['gen_ai.input.messages']).toEqual([
+    const request = readRecords().find(record => record['event.name'] === 'llm.request');
+    expect(request['gen_ai.input.messages']).toEqual([
       {
         role: 'tool',
         parts: [{
@@ -278,8 +351,15 @@ describe('Pi Coding Agent extension', () => {
       messages: [{ role: 'user', content: 'second turn' }],
     });
 
-    const requests = readRecords();
+    const records = readRecords();
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+    const userInputs = records.filter(record => record['event.name'] === 'other');
     expect(requests).toHaveLength(2);
+    expect(userInputs).toHaveLength(2);
+    expect(userInputs.map(record => record['gen_ai.input.messages_delta'][0].parts[0].content)).toEqual([
+      'first snapshot',
+      'second turn',
+    ]);
     expect(requests.map(record => record['gen_ai.step.id'])).toEqual([
       expect.stringMatching(/:s1$/),
       expect.stringMatching(/:s2$/),
@@ -305,7 +385,9 @@ describe('Pi Coding Agent extension', () => {
       },
     });
 
-    const [request, response] = readRecords();
+    const records = readRecords();
+    const request = records.find(record => record['event.name'] === 'llm.request');
+    const response = records.find(record => record['event.name'] === 'llm.response');
     expect(request['event.name']).toBe('llm.request');
     expect(response['event.name']).toBe('llm.response');
     expect(
@@ -340,7 +422,9 @@ describe('Pi Coding Agent extension', () => {
       },
     });
 
-    const [request, response] = readRecords();
+    const records = readRecords();
+    const request = records.find(record => record['event.name'] === 'llm.request');
+    const response = records.find(record => record['event.name'] === 'llm.response');
     expect(BigInt(response.time_unix_nano) - BigInt(request.time_unix_nano)).toBe(
       4_000_000_000n,
     );
@@ -364,11 +448,17 @@ describe('Pi Coding Agent extension', () => {
 
     const records = readRecords();
     expect(records.map(record => record['event.name'])).toEqual([
+      'other',
       'llm.request',
       'llm.response',
     ]);
+    expect(records[0]['gen_ai.input.messages_delta']).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'Inspect the repository' }] },
+    ]);
+    const request = records.find(record => record['event.name'] === 'llm.request');
+    const response = records.find(record => record['event.name'] === 'llm.response');
     expect(
-      BigInt(records[1].time_unix_nano) - BigInt(records[0].time_unix_nano) >= 1_000_000n,
+      BigInt(response.time_unix_nano) - BigInt(request.time_unix_nano) >= 1_000_000n,
     ).toBe(true);
 
     const conversion = await convertEventLogToReadableSpans(records);
@@ -468,6 +558,74 @@ describe('Pi Coding Agent extension', () => {
     await runtime.emit('context', { messages: [] });
 
     expect(fs.statSync(logDir).mode & 0o777).toBe(0o700);
+  });
+
+  it('tightens an existing JSONL file before appending sensitive records', async () => {
+    if (process.platform === 'win32') return;
+
+    const logDir = path.join(tmpDir, 'logs', 'pi-coding-agent');
+    const logFile = path.join(logDir, 'pi-coding-agent-2026-07-16.jsonl');
+    fs.mkdirSync(logDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(logFile, '', { mode: 0o644 });
+    fs.chmodSync(logFile, 0o644);
+
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+    await runtime.emit('context', { messages: [] });
+
+    expect(fs.statSync(logFile).mode & 0o777).toBe(0o600);
+  });
+
+  it('retightens a cached log path after the file is replaced at runtime', async () => {
+    if (process.platform === 'win32') return;
+
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+    await runtime.emit('context', { messages: [] });
+
+    const logFile = path.join(
+      tmpDir,
+      'logs',
+      'pi-coding-agent',
+      'pi-coding-agent-2026-07-16.jsonl',
+    );
+    fs.rmSync(logFile);
+    fs.writeFileSync(logFile, '', { mode: 0o644 });
+    fs.chmodSync(logFile, 0o644);
+
+    await runtime.emit('tool_execution_start', {
+      toolCallId: 'call-after-rotation',
+      toolName: 'read',
+      args: { path: 'README.md' },
+    });
+
+    expect(fs.statSync(logFile).mode & 0o777).toBe(0o600);
+  });
+
+  it('tightens an existing error log before appending diagnostics', async () => {
+    if (process.platform === 'win32') return;
+
+    const logDir = path.join(tmpDir, 'logs', 'pi-coding-agent');
+    const errorFile = path.join(logDir, 'pi-coding-agent-error-2026-07-16.log');
+    fs.mkdirSync(logDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(errorFile, 'previous error\n', { mode: 0o644 });
+    fs.chmodSync(errorFile, 0o644);
+
+    const runtime = await createRuntime();
+    const originalWrite = fs.writeFileSync;
+    let failRecordWrite = true;
+    vi.spyOn(fs, 'writeFileSync').mockImplementation((file, ...args) => {
+      if (failRecordWrite) {
+        failRecordWrite = false;
+        throw new Error('disk unavailable');
+      }
+      return originalWrite(file, ...args);
+    });
+
+    await startTurn(runtime);
+    await runtime.emit('context', { messages: [] });
+
+    expect(fs.statSync(errorFile).mode & 0o777).toBe(0o600);
   });
 
   it('creates the log directory only once across multiple event writes', async () => {
@@ -576,6 +734,7 @@ describe('Pi Coding Agent extension', () => {
     });
 
     const records = readRecords();
+    expect(records.some(record => record['event.name'] === 'other')).toBe(false);
     expect(records[0]).not.toHaveProperty('gen_ai.input.messages');
     expect(records[0]).not.toHaveProperty('gen_ai.system_instructions');
     expect(records[0]).not.toHaveProperty('gen_ai.tool.definitions');
@@ -611,12 +770,12 @@ describe('Pi Coding Agent extension', () => {
 
   it('writes errors to a side log without rejecting Pi event handlers', async () => {
     const runtime = await createRuntime();
-    const originalAppend = fs.appendFileSync;
+    const originalWrite = fs.writeFileSync;
     let calls = 0;
-    vi.spyOn(fs, 'appendFileSync').mockImplementation((...args) => {
+    vi.spyOn(fs, 'writeFileSync').mockImplementation((...args) => {
       calls += 1;
       if (calls === 1) throw new Error('disk unavailable');
-      return originalAppend(...args);
+      return originalWrite(...args);
     });
 
     await expect(startTurn(runtime)).resolves.toBeUndefined();

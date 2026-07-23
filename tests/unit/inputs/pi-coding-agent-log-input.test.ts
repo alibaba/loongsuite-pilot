@@ -10,14 +10,52 @@ import { MockStateStore } from '../../helpers/mock-state-store.js';
 describe('PiCodingAgentLogInput', () => {
   let tmpDir: string;
   let stateStore: MockStateStore;
+  let previousDataDir: string | undefined;
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-coding-agent-input-'));
     stateStore = new MockStateStore();
+    previousDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR;
   });
 
   afterEach(async () => {
+    if (previousDataDir === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
+    else process.env.LOONGSUITE_PILOT_DATA_DIR = previousDataDir;
     await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('reports a clear contract error when stateStore is missing', () => {
+    expect(() => Reflect.construct(PiCodingAgentLogInput, [])).toThrow(
+      'PiCodingAgentLogInput requires a stateStore',
+    );
+  });
+
+  it('resolves standalone defaults from the Pilot data directory', async () => {
+    const dataDir = path.join(tmpDir, 'pilot-data');
+    const expectedLogDir = path.join(dataDir, 'logs', 'pi-coding-agent');
+    process.env.LOONGSUITE_PILOT_DATA_DIR = dataDir;
+    await fs.mkdir(expectedLogDir, { recursive: true });
+
+    const input = new PiCodingAgentLogInput({ stateStore: stateStore as never });
+
+    expect((input as unknown as { logDir: string }).logDir).toBe(expectedLogDir);
+    expect(PiCodingAgentLogInput.getWatchPaths()).toEqual([expectedLogDir]);
+    expect(await PiCodingAgentLogInput.checkAvailability()).toBe(true);
+  });
+
+  it('accepts an explicit dataDir for standalone construction and detection', async () => {
+    const dataDir = path.join(tmpDir, 'explicit-data');
+    const expectedLogDir = path.join(dataDir, 'logs', 'pi-coding-agent');
+    await fs.mkdir(expectedLogDir, { recursive: true });
+
+    const input = new PiCodingAgentLogInput({
+      stateStore: stateStore as never,
+      dataDir,
+    });
+
+    expect((input as unknown as { logDir: string }).logDir).toBe(expectedLogDir);
+    expect(PiCodingAgentLogInput.getWatchPaths(dataDir)).toEqual([expectedLogDir]);
+    expect(await PiCodingAgentLogInput.checkAvailability(dataDir)).toBe(true);
   });
 
   it('reads extension JSONL and normalizes canonical fields', async () => {

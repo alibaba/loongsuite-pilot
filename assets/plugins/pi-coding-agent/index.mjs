@@ -116,13 +116,17 @@ function ensureLogDir() {
 }
 
 function appendLogFile(fileName, content) {
+  const filePath = path.join(resolveLogDir(), fileName);
   for (let attempt = 0; attempt < 2; attempt++) {
+    let fd;
     try {
       ensureLogDir();
-      fs.appendFileSync(path.join(resolveLogDir(), fileName), content, {
-        encoding: 'utf8',
-        mode: 0o600,
-      });
+      fd = fs.openSync(filePath, 'a', 0o600);
+      // `mode` only applies when creating a file. Tighten the actual opened
+      // inode before every append so log rotation/replacement cannot leave a
+      // permissive file receiving sensitive telemetry.
+      if (process.platform !== 'win32') fs.fchmodSync(fd, 0o600);
+      fs.writeFileSync(fd, content, { encoding: 'utf8' });
       return;
     } catch (error) {
       if (attempt === 0 && error?.code === 'ENOENT') {
@@ -130,6 +134,8 @@ function appendLogFile(fileName, content) {
         continue;
       }
       throw error;
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
     }
   }
 }
@@ -315,14 +321,12 @@ function activeToolDefinitions(pi) {
     }));
 }
 
-function commonFields(ctx, state, timestamp = Date.now()) {
+function turnFields(ctx, state, timestamp = Date.now()) {
   const sessionId = ctx.sessionManager.getSessionId();
-  const model = ctx.model;
   const eventTime = timestampMillis(timestamp);
   const observedTime = Math.max(Date.now(), eventTime);
   state.traceId ||= traceId();
   state.turnId ||= crypto.randomUUID();
-  state.stepId ||= `${state.turnId}:s1`;
   return {
     time_unix_nano: timestampNanos(eventTime),
     observed_time_unix_nano: timestampNanos(observedTime),
@@ -332,13 +336,45 @@ function commonFields(ctx, state, timestamp = Date.now()) {
     'user.id': state.userId,
     'gen_ai.session.id': sessionId,
     'gen_ai.turn.id': state.turnId,
-    'gen_ai.step.id': state.stepId,
     'gen_ai.agent.type': AGENT_TYPE,
     'gen_ai.agent.name': 'Pi Coding Agent',
-    'gen_ai.provider.name': normalizeProvider(model?.provider),
-    'gen_ai.request.model': model?.id || 'unknown',
     [`agent.${AGENT_TYPE}.cwd`]: ctx.cwd,
   };
+}
+
+function commonFields(ctx, state, timestamp = Date.now()) {
+  const model = ctx.model;
+  state.turnId ||= crypto.randomUUID();
+  state.stepId ||= `${state.turnId}:s1`;
+  return {
+    ...turnFields(ctx, state, timestamp),
+    'gen_ai.step.id': state.stepId,
+    'gen_ai.provider.name': normalizeProvider(model?.provider),
+    'gen_ai.request.model': model?.id || 'unknown',
+  };
+}
+
+function promptInputMessages(event) {
+  const content = [];
+  if (typeof event?.prompt === 'string' && event.prompt.length > 0) {
+    content.push({ type: 'text', text: event.prompt });
+  }
+  if (Array.isArray(event?.images)) content.push(...event.images);
+  const message = canonicalMessage({ role: 'user', content });
+  return message?.parts?.length > 0 ? [message] : [];
+}
+
+function trailingUserInputMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  const out = [];
+  const recent = messages.slice(-MAX_MESSAGES);
+  for (let index = recent.length - 1; index >= 0; index--) {
+    const message = recent[index];
+    if (message?.role !== 'user' && message?.role !== 'custom') break;
+    const canonical = canonicalMessage(message);
+    if (canonical?.parts?.length > 0) out.unshift(canonical);
+  }
+  return out;
 }
 
 export default function loongSuitePilotPiCodingAgent(pi) {
@@ -352,6 +388,8 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     requestEmitted: false,
     requestStartedAt: 0,
     systemPrompt: null,
+    pendingUserInput: [],
+    userInputEmitted: false,
     toolStarts: new Map(),
   };
 
@@ -369,6 +407,8 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     state.stepStartedAt = 0;
     state.requestEmitted = false;
     state.requestStartedAt = 0;
+    state.pendingUserInput = [];
+    state.userInputEmitted = false;
     state.toolStarts.clear();
   }));
 
@@ -381,6 +421,8 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     state.requestEmitted = false;
     state.requestStartedAt = 0;
     state.systemPrompt = event.systemPrompt;
+    state.pendingUserInput = promptInputMessages(event);
+    state.userInputEmitted = false;
     state.toolStarts.clear();
   }));
 
@@ -390,7 +432,22 @@ export default function loongSuitePilotPiCodingAgent(pi) {
     state.stepStartedAt = timestampMillis(event.timestamp);
     state.requestEmitted = false;
     state.requestStartedAt = 0;
+    state.userInputEmitted = false;
   }));
+
+  const emitUserInput = (event, ctx) => {
+    if (state.userInputEmitted || !state.captureContent) return;
+    const messages = trailingUserInputMessages(event.messages);
+    const inputDelta = messages.length > 0 ? messages : state.pendingUserInput;
+    if (inputDelta.length === 0) return;
+    state.userInputEmitted = true;
+    state.pendingUserInput = [];
+    writeRecord({
+      ...turnFields(ctx, state, state.stepStartedAt || Date.now()),
+      'event.name': 'other',
+      'gen_ai.input.messages_delta': inputDelta,
+    });
+  };
 
   const emitLlmRequest = (event, ctx) => {
     if (state.requestEmitted) return;
@@ -416,6 +473,7 @@ export default function loongSuitePilotPiCodingAgent(pi) {
   };
 
   pi.on('context', safeHandler('context', async (event, ctx) => {
+    emitUserInput(event, ctx);
     emitLlmRequest(event, ctx);
   }));
 
@@ -425,6 +483,7 @@ export default function loongSuitePilotPiCodingAgent(pi) {
 
     // A response without a preceding context event would otherwise be
     // converted into a zero-duration response-only LLM span downstream.
+    emitUserInput({ messages: [] }, ctx);
     emitLlmRequest({ messages: [] }, ctx);
     // Pi assigns AssistantMessage.timestamp when provider streaming starts;
     // handler receipt time is the closest available response-completion time.
@@ -505,6 +564,7 @@ export default function loongSuitePilotPiCodingAgent(pi) {
   }));
 
   pi.on('session_shutdown', safeHandler('session_shutdown', async () => {
+    state.pendingUserInput = [];
     state.toolStarts.clear();
   }));
 }
