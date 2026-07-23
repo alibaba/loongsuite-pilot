@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { injectSkillRecords } from '../../../../assets/hooks/cursor-hook-processor.mjs';
+
+const PROCESSOR_URL = new URL('../../../../assets/hooks/cursor-hook-processor.mjs', import.meta.url);
 
 /**
  * Helper: create a minimal llm.response record.
@@ -207,5 +211,53 @@ describe('injectSkillRecords', () => {
     // When observed_time_unix_nano is missing, fallback to time_unix_nano
     expect(toolCall.observed_time_unix_nano).toBe(String(BigInt(baseTime) + 1n));
     expect(toolResult.observed_time_unix_nano).toBe(String(BigInt(baseTime) + 2n));
+  });
+
+  it('should apply captureMessageContent=false to injected response and tool records', () => {
+    const skillPath = '/Users/alice/.cursor/skills/private-skill/SKILL.md';
+    const records = [makeLlmResponse()];
+    const runtimeConfig = {
+      agents: {
+        cursor: { captureMessageContent: false },
+      },
+    };
+
+    injectSkillRecords(
+      records,
+      [makeSkill('private-skill', skillPath)],
+      runtimeConfig,
+    );
+
+    expect(records[0]['gen_ai.output.messages']).toBeUndefined();
+    expect(records[1]['gen_ai.tool.call.arguments']).toBeUndefined();
+    expect(records[1]['gen_ai.skill.name']).toBe('private-skill');
+    expect(records[2]['gen_ai.skill.name']).toBe('private-skill');
+    expect(JSON.stringify(records)).not.toContain(skillPath);
+  });
+
+  it('should not execute main when imported', () => {
+    const imported = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '--eval',
+        `await import(${JSON.stringify(PROCESSOR_URL.href)})`,
+      ],
+      { encoding: 'utf-8' },
+    );
+
+    expect(imported.status).toBe(0);
+    expect(imported.stdout).toBe('');
+  });
+
+  it('should still execute main when invoked directly', () => {
+    const invoked = spawnSync(
+      process.execPath,
+      [fileURLToPath(PROCESSOR_URL)],
+      { input: '', encoding: 'utf-8' },
+    );
+
+    expect(invoked.status).toBe(0);
+    expect(invoked.stdout).toBe('{}\n');
   });
 });

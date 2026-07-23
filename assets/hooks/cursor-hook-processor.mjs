@@ -14,7 +14,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
+  applyHookContentPolicy,
   hashJson,
   loadHookRuntimeConfig,
   sanitizeObject,
@@ -107,7 +109,11 @@ function compactJournal(allEvents, consumedConversationIds) {
   rewriteJournal(remaining, allEvents);
 }
 
-function injectSkillRecords(records, skills) {
+function applyPolicy(record, runtimeConfig) {
+  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
+}
+
+function injectSkillRecords(records, skills, runtimeConfig = {}) {
   // Skill-to-step alignment is best-effort: attach detected reads to the first
   // assembled LLM response. Cursor's assemblers synthesize a response even for
   // thought-only and implicit tool steps, so never attach output to a request.
@@ -143,6 +149,7 @@ function injectSkillRecords(records, skills) {
     });
   }
   llmRecord['gen_ai.output.messages'] = outputMsgs;
+  records[targetLlmIdx] = applyPolicy(llmRecord, runtimeConfig);
 
   // Create tool.call + tool.result record pairs for each skill read
   const insertRecords = [];
@@ -164,7 +171,7 @@ function injectSkillRecords(records, skills) {
     };
 
     // tool.call
-    insertRecords.push({
+    insertRecords.push(applyPolicy({
       ...baseFields,
       time_unix_nano: String(baseTime + callOffset),
       observed_time_unix_nano: String(baseObservedTime + callOffset),
@@ -175,10 +182,10 @@ function injectSkillRecords(records, skills) {
       'gen_ai.tool.call.arguments': { path: skill.skillPath },
       'gen_ai.skill.name': skill.skillName,
       'agent.cursor.skill_detection_source': 'transcript_post_assembly',
-    });
+    }, runtimeConfig));
 
     // tool.result
-    insertRecords.push({
+    insertRecords.push(applyPolicy({
       ...baseFields,
       time_unix_nano: String(baseTime + resultOffset),
       observed_time_unix_nano: String(baseObservedTime + resultOffset),
@@ -188,7 +195,7 @@ function injectSkillRecords(records, skills) {
       'gen_ai.tool.call.id': toolCallId,
       'gen_ai.skill.name': skill.skillName,
       'agent.cursor.skill_detection_source': 'transcript_post_assembly',
-    });
+    }, runtimeConfig));
   }
 
   // Insert after the first LLM response.
@@ -360,7 +367,7 @@ async function main() {
           // The Windows transcript assembler already materializes transcript
           // tool_use entries. Only compensate paths assembled from hook events.
           if (detectedSkills && detectedSkills.length > 0 && !assembledFromTranscript) {
-            injectSkillRecords(records, detectedSkills);
+            injectSkillRecords(records, detectedSkills, runtimeConfig);
           }
         }
       } catch { /* best-effort skill detection — never block output */ }
@@ -422,13 +429,18 @@ async function main() {
   writeEmptyResponse();
 }
 
-main().catch(async err => {
-  await appendErrorJsonl(resolveDataDir(), new Date(), {
-    stage: 'runtime',
-    'error.type': 'unhandled_exception',
-    'error.message': err instanceof Error ? err.message : String(err),
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href
+) {
+  main().catch(async err => {
+    await appendErrorJsonl(resolveDataDir(), new Date(), {
+      stage: 'runtime',
+      'error.type': 'unhandled_exception',
+      'error.message': err instanceof Error ? err.message : String(err),
+    });
+    writeEmptyResponse();
   });
-  writeEmptyResponse();
-});
+}
 
 export { injectSkillRecords };
