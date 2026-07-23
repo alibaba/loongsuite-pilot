@@ -548,6 +548,7 @@ function handleMessagePartUpdated(props, userId) {
     session.pendingParts = [];
     turn.stepSeq += 1;
     turn.currentStepId = `${turn.turnId}:s${turn.stepSeq}`;
+    turn.currentMessageId = part.messageID;
     session.stepStartTimeMs = props.time || Date.now();
 
     const model = session.modelInfo;
@@ -557,6 +558,7 @@ function handleMessagePartUpdated(props, userId) {
       "gen_ai.step.id": turn.currentStepId,
       "gen_ai.provider.name": inferProviderName(model?.providerID),
       "gen_ai.request.model": model?.modelID,
+      "opencode.message.id": part.messageID,
     };
     record.time_unix_nano = msToNanos(session.stepStartTimeMs) || nowNanos();
 
@@ -647,6 +649,7 @@ function handleMessagePartUpdated(props, userId) {
         "gen_ai.tool.call.arguments": argsStr
           ? truncateContent(argsStr)
           : undefined,
+        "opencode.message.id": part.messageID,
       };
       if (state.time?.start) {
         toolCallRecord.time_unix_nano = msToNanos(state.time.start);
@@ -682,6 +685,7 @@ function handleMessagePartUpdated(props, userId) {
             : safeStringify(resultPayload)
         ),
         "tool.result.status": state?.status === "error" ? "error" : "success",
+        "opencode.message.id": part.messageID,
       };
       if (state.time?.end) {
         toolResultRecord.time_unix_nano = msToNanos(state.time.end);
@@ -741,6 +745,7 @@ function handleMessageUpdated(props, userId) {
     ...buildCommonFields(sessionID, session, userId),
     "event.name": "llm.response",
     "gen_ai.step.id": turn.currentStepId,
+    "opencode.message.id": info.id,
     "gen_ai.provider.name": inferProviderName(
       info.providerID || model?.providerID
     ),
@@ -830,6 +835,7 @@ function handleToolExecuteBefore(inp, out, userId) {
     "gen_ai.tool.call.arguments": argsStr
       ? truncateContent(argsStr)
       : undefined,
+    "opencode.message.id": turn.currentMessageId,
   });
 }
 
@@ -846,6 +852,18 @@ function handleToolExecuteAfter(inp, out, userId) {
   if (!callID || session.emittedToolCalls.has(`result:${callID}`)) return;
 
   const resultPayload = out?.output ?? out?.result ?? "";
+
+  // MCP tools: opencode does not pass the result through this after-hook
+  // (out.output / out.result are empty), yet it DOES populate part.state.output,
+  // which the message.part.updated path reads. If there is no content and no
+  // error here, bail out WITHOUT marking result:<callID> consumed, so the part
+  // path can own the result. Otherwise we would emit an empty tool.result and
+  // block the path that actually carries the MCP output.
+  const hasResultContent = typeof resultPayload === "string"
+    ? resultPayload.length > 0
+    : resultPayload != null;
+  if (!hasResultContent && !out?.error) return;
+
   const matchingPart = session.pendingParts.find(
     (pp) => pp.kind === "tool_call" && pp.callID === callID
   );
@@ -872,6 +890,7 @@ function handleToolExecuteAfter(inp, out, userId) {
         : safeStringify(resultPayload)
     ),
     "tool.result.status": out?.error ? "error" : "success",
+    "opencode.message.id": turn.currentMessageId,
   };
   if (matchingPart?.startTimeMs) {
     const endMs = Date.now();
