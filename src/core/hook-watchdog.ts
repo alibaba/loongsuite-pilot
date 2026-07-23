@@ -34,6 +34,38 @@ export interface InterceptCheckTarget {
   check: () => Promise<boolean>;
   repair: () => Promise<void>;
   precondition: () => Promise<boolean>;
+  /**
+   * Whether the owning agent is enabled by the user's selection
+   * (config.agents[<id>].enabled). When this returns false the target is not
+   * (re)injected — instead cleanup() runs (if provided) so the intercept is
+   * removed rather than merely left in place. Omitted → treated as enabled
+   * (backward compatible).
+   */
+  enabled?: () => boolean | Promise<boolean>;
+  /**
+   * Idempotent removal of an already-installed intercept, invoked when
+   * enabled() is false. Lets "config disable" actually stop collection (not
+   * just stop self-healing) — otherwise a wrapper written on a prior run would
+   * keep intercepting for an agent the user has since turned off. Omitted →
+   * disabled targets are simply skipped.
+   */
+  cleanup?: () => Promise<void>;
+}
+
+/**
+ * Remove a marker-delimited block (inclusive of the BEGIN/END marker lines)
+ * from rc-file content. Any line containing `begin` starts the cut and any
+ * line containing `end` ends it; non-block lines are preserved verbatim.
+ */
+export function stripMarkerBlock(content: string, begin: string, end: string): string {
+  const out: string[] = [];
+  let inBlock = false;
+  for (const line of content.split('\n')) {
+    if (!inBlock && line.includes(begin)) { inBlock = true; continue; }
+    if (inBlock && line.includes(end)) { inBlock = false; continue; }
+    if (!inBlock) out.push(line);
+  }
+  return out.join('\n');
 }
 
 export interface CheckResult {
@@ -320,6 +352,26 @@ export class HookWatchdog {
 
     for (const target of this.interceptTargets) {
       try {
+        // User-selection gate, checked before any check/repair so a disabled
+        // agent never (re)injects and does not consume the cooldown / daily
+        // budget. When disabled we also run cleanup() (idempotent) so an
+        // intercept written on a prior run is removed — "config disable" stops
+        // collection, not just self-healing.
+        if (target.enabled && !(await target.enabled())) {
+          if (target.cleanup) {
+            try {
+              await target.cleanup();
+              logger.info('intercept-watchdog.disabled-cleanup', { id: target.id });
+            } catch (err) {
+              logger.warn('intercept-watchdog.cleanup-failed', { id: target.id, error: String(err) });
+            }
+          } else {
+            logger.debug('intercept-watchdog.disabled', { id: target.id });
+          }
+          summary.skipped++;
+          continue;
+        }
+
         const preOk = await target.precondition();
         if (!preOk) {
           logger.debug('intercept-watchdog.skipped', { id: target.id, reason: 'precondition' });
@@ -404,7 +456,79 @@ export class HookWatchdog {
     ];
   }
 
-  static defaultInterceptTargets(dataDir: string): InterceptCheckTarget[] {
+  /**
+   * Shell-rc intercept block definitions (qodercli + claude-code).
+   *
+   * blockFn must stay byte-identical to the block written by the installer
+   * (deploy/installer-opensource.sh inject_*), so the marker-based idempotency
+   * checks agree. The `if ! alias ... eval '...'` shape guards against
+   * clobbering a user's own alias/function AND avoids a parse error: a bare
+   * `<cli>()` token would fail to parse under an active alias because
+   * interactive shells expand aliases at parse time (before the guard runs), so
+   * the definition is deferred behind eval.
+   *
+   * Exposed as a pure, static seam so tests can render the exact block for any
+   * path without touching HOME/fs (see hook-watchdog-intercept-shell.test.ts).
+   *
+   * `signature` is a substring unique to the CURRENT block shape (the guard
+   * line). check()/repair() use it — not just `marker` — to detect and migrate
+   * an older block that shares the same marker (e.g. the released bare
+   * `<cli>() {...}` form). Keep it byte-identical to the installer's grep.
+   * `endMarker` bounds the block for removal/migration.
+   */
+  static interceptRcBlockDefs(): Array<{
+    id: string;
+    agentId: string;
+    marker: string;
+    endMarker: string;
+    signature: string;
+    scriptName: string;
+    blockFn: (scriptPath: string) => string;
+  }> {
+    return [
+      {
+        id: 'qodercli-rc',
+        agentId: 'qoder',
+        marker: 'loongsuite-pilot BEGIN qodercli-intercept',
+        endMarker: 'loongsuite-pilot END qodercli-intercept',
+        signature: 'if ! alias qodercli >/dev/null 2>&1',
+        scriptName: 'qodercli-token-intercept.mjs',
+        blockFn: (p) => [
+          '',
+          '# loongsuite-pilot BEGIN qodercli-intercept',
+          'if ! alias qodercli >/dev/null 2>&1 && ! typeset -f qodercli >/dev/null 2>&1; then',
+          `  eval 'qodercli() { BUN_OPTIONS="--preload=${p}" command qodercli "$@"; }'`,
+          'fi',
+          '# loongsuite-pilot END qodercli-intercept',
+        ].join('\n'),
+      },
+      {
+        id: 'claude-code-rc',
+        agentId: 'claude-code',
+        marker: 'loongsuite-pilot BEGIN claude-code-intercept',
+        endMarker: 'loongsuite-pilot END claude-code-intercept',
+        signature: 'if ! alias claude >/dev/null 2>&1',
+        scriptName: 'claude-code-fetch-intercept.mjs',
+        blockFn: (p) => [
+          '',
+          '# loongsuite-pilot BEGIN claude-code-intercept',
+          'if ! alias claude >/dev/null 2>&1 && ! typeset -f claude >/dev/null 2>&1; then',
+          `  eval 'claude() { BUN_OPTIONS="--preload=${p} \${BUN_OPTIONS}" command claude "$@"; }'`,
+          'fi',
+          '# loongsuite-pilot END claude-code-intercept',
+        ].join('\n'),
+      },
+    ];
+  }
+
+  static defaultInterceptTargets(
+    dataDir: string,
+    isAgentEnabled: (agentId: string) => boolean = () => true,
+    // rcPaths is injectable so tests can exercise the real check()/repair()/
+    // cleanup() closures against a temp dir instead of the developer's real rc
+    // files. Production omits it and uses ~/.zshrc + ~/.bashrc.
+    rcPathsOverride?: string[],
+  ): InterceptCheckTarget[] {
     const targets: InterceptCheckTarget[] = [];
     const home = os.homedir();
 
@@ -416,6 +540,7 @@ export class HookWatchdog {
 
       targets.push({
         id: 'qoderwork-env',
+        enabled: () => isAgentEnabled('qoder-work'),
         precondition: async () => {
           if (!await fileExists(wrapperPath)) return false;
           const sysApp = await directoryExists('/Applications/QoderWork.app');
@@ -463,6 +588,22 @@ export class HookWatchdog {
           await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
           await execFileAsync('launchctl', ['load', plistPath]).catch(() => {});
         },
+        cleanup: async () => {
+          // Mirror installer remove_qoderwork_runtime_wrapper: drop the env only
+          // if it still points at our wrapper, and remove the LaunchAgent plist.
+          try {
+            const { stdout } = await execFileAsync('launchctl', ['getenv', 'QODER_WORKER_RUNTIME_PATH']);
+            if (stdout.trim() === wrapperPath) {
+              await execFileAsync('launchctl', ['unsetenv', 'QODER_WORKER_RUNTIME_PATH']).catch(() => {});
+            }
+          } catch {
+            // getenv fails when unset — nothing to drop.
+          }
+          if (await fileExists(plistPath)) {
+            await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
+            await fs.rm(plistPath, { force: true }).catch(() => {});
+          }
+        },
       });
     }
 
@@ -470,46 +611,17 @@ export class HookWatchdog {
     // Check BOTH .zshrc and .bashrc regardless of daemon's $SHELL — the
     // daemon is launchd-started and its $SHELL may not match the user's
     // interactive shell. Installer's remove function also scans all rc files.
-    const rcPaths = [
+    const rcPaths = rcPathsOverride ?? [
       path.join(home, '.zshrc'),
       path.join(home, '.bashrc'),
     ];
 
-    const rcTargets: Array<{
-      id: string;
-      marker: string;
-      scriptName: string;
-      blockFn: (scriptPath: string) => string;
-    }> = [
-      {
-        id: 'qodercli-rc',
-        marker: 'loongsuite-pilot BEGIN qodercli-intercept',
-        scriptName: 'qodercli-token-intercept.mjs',
-        blockFn: (p) => [
-          '',
-          '# loongsuite-pilot BEGIN qodercli-intercept',
-          `qodercli() { BUN_OPTIONS="--preload=${p}" command qodercli "$@"; }`,
-          '# loongsuite-pilot END qodercli-intercept',
-        ].join('\n'),
-      },
-      {
-        id: 'claude-code-rc',
-        marker: 'loongsuite-pilot BEGIN claude-code-intercept',
-        scriptName: 'claude-code-fetch-intercept.mjs',
-        blockFn: (p) => [
-          '',
-          '# loongsuite-pilot BEGIN claude-code-intercept',
-          `claude() { BUN_OPTIONS="--preload=${p} \${BUN_OPTIONS}" command claude "$@"; }`,
-          '# loongsuite-pilot END claude-code-intercept',
-        ].join('\n'),
-      },
-    ];
-
-    for (const rc of rcTargets) {
+    for (const rc of HookWatchdog.interceptRcBlockDefs()) {
       const scriptPath = path.join(dataDir, 'hooks', rc.scriptName);
 
       targets.push({
         id: rc.id,
+        enabled: () => isAgentEnabled(rc.agentId),
         precondition: async () => {
           // Only check if the hook script was deployed by the installer.
           // We intentionally do NOT run `which <cli>` — the daemon process
@@ -521,27 +633,47 @@ export class HookWatchdog {
           return fileExists(scriptPath);
         },
         check: async () => {
-          // Check ALL common rc files — marker must exist in at least one.
+          // Health is keyed on block CONTENT, not just the marker: an older
+          // released block shares the same marker but lacks `signature`, and
+          // must be migrated. A stale block anywhere → unhealthy (repair).
+          let anyCurrent = false;
+          let anyRcExists = false;
           for (const rcPath of rcPaths) {
-            try {
-              const content = await fs.readFile(rcPath, 'utf-8');
-              if (content.includes(rc.marker)) return true;
-            } catch {
-              // file doesn't exist, check next
+            if (!await fileExists(rcPath)) continue;
+            anyRcExists = true;
+            const content = await fs.readFile(rcPath, 'utf-8');
+            if (content.includes(rc.marker)) {
+              if (content.includes(rc.signature)) anyCurrent = true;
+              else return false; // marker present but old shape → migrate
             }
           }
-          // Not found in any existing rc file. If no rc files exist at all,
-          // there's nothing we can repair into, so treat as healthy.
-          const anyRcExists = (await Promise.all(rcPaths.map(p => fileExists(p)))).some(Boolean);
+          if (anyCurrent) return true;
+          // No block present anywhere. If no rc files exist, nothing to repair
+          // into → healthy; otherwise repair() will append.
           return !anyRcExists;
         },
         repair: async () => {
-          // Append to ALL existing rc files that don't already have the marker.
           for (const rcPath of rcPaths) {
             if (!await fileExists(rcPath)) continue; // never create rc files
             const content = await fs.readFile(rcPath, 'utf-8');
-            if (content.includes(rc.marker)) continue; // already present
-            await fs.appendFile(rcPath, rc.blockFn(scriptPath) + '\n');
+            if (content.includes(rc.marker)) {
+              if (content.includes(rc.signature)) continue; // already current
+              // Stale block: strip the old marker region, then append fresh.
+              const stripped = stripMarkerBlock(content, rc.marker, rc.endMarker).replace(/\n+$/, '\n');
+              await fs.writeFile(rcPath, stripped + rc.blockFn(scriptPath) + '\n');
+            } else {
+              await fs.appendFile(rcPath, rc.blockFn(scriptPath) + '\n');
+            }
+          }
+        },
+        cleanup: async () => {
+          // Disabled agent: remove our block from every rc file (idempotent).
+          for (const rcPath of rcPaths) {
+            if (!await fileExists(rcPath)) continue;
+            const content = await fs.readFile(rcPath, 'utf-8');
+            if (!content.includes(rc.marker)) continue;
+            const stripped = stripMarkerBlock(content, rc.marker, rc.endMarker).replace(/\n{3,}$/, '\n\n');
+            await fs.writeFile(rcPath, stripped);
           }
         },
       });

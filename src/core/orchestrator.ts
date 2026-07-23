@@ -235,7 +235,7 @@ export class Orchestrator extends EventEmitter {
       ...this.buildHookWatchdogTargets(),
     ];
     const interceptTargets = [
-      ...HookWatchdog.defaultInterceptTargets(this.dataDir),
+      ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
       ...this.buildPluginInjectInterceptTargets(),
     ];
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
@@ -434,6 +434,7 @@ export class Orchestrator extends EventEmitter {
 
       targets.push({
         id: `plugin-inject:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
         precondition: async () => {
           // Only self-heal when the plugin asset is actually deployed AND the
           // agent is present. Otherwise repair would inject a spec pointing at
