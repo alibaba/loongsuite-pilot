@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { ClientType } from '../types/index.js';
 import type { AnalyticsConfig, AgentDetectionEntry } from '../types/index.js';
 import { AgentControlManager } from './agent-control-manager.js';
+import { PROPRIETARY_BUILD } from './build-constants.js';
 import { AgentDiscoveryService } from './agent-discovery-service.js';
 import { InputManager } from './input-manager.js';
 import { StateStore } from '../checkpoints/state-store.js';
@@ -276,6 +277,7 @@ export class Orchestrator extends EventEmitter {
       getSnapshot: () => this.buildDataflowSnapshot(),
       alarmManager: this.alarmManager,
       agentsConfig: this.config.agents,
+      tokenUsageEnabled: this.isCodexTokenUsageEnabled(),
       slsEndpoints: this.config.flushers.sls?.endpoints ?? [],
       cmsWorkspace: this.config.cms?.workspace ?? '',
     });
@@ -1134,6 +1136,17 @@ export class Orchestrator extends EventEmitter {
     const agents = this.config.agents;
     if (!agents || Object.keys(agents).length === 0) return true;
     return agents[agentId]?.enabled !== false;
+  }
+
+  private isCodexTokenUsageEnabled(): boolean {
+    const listenerId = 'codex-transcript';
+    const agentId = Orchestrator.LISTENER_AGENT_MAP[listenerId];
+    return PROPRIETARY_BUILD
+      && this.isAgentGatedEnabled(agentId)
+      && this.agentControlManager.resolveEnabled(
+        agentId,
+        this.config.listeners[listenerId]?.enabled ?? true,
+      );
   }
 
   /**

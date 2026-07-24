@@ -7,6 +7,8 @@ import { MetricsCollector } from './metrics-collector.js';
 import type { DataflowSnapshot, L1Metrics } from './metrics-collector.js';
 import type { AlarmManager } from './alarm-manager.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
+import { collectCodexDailyUsage } from './token-usage/codex-token-usage.js';
+import { TokenUsageStateStore } from './token-usage/token-usage-state.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
 
 const logger = createLogger('MetricsWriter');
@@ -26,6 +28,7 @@ export interface MetricsWriterOptions {
   getSnapshot: () => DataflowSnapshot;
   alarmManager?: AlarmManager;
   agentsConfig?: AgentsConfig;
+  tokenUsageEnabled?: boolean;
   slsEndpoints?: SlsEndpoint[];
   cmsWorkspace?: string;
   updaterLiveness?: (pidFile: string) => ProcessLiveness;
@@ -36,6 +39,11 @@ export class MetricsWriter {
   private readonly collector: MetricsCollector;
   private readonly getSnapshot: () => DataflowSnapshot;
   private readonly alarmManager: AlarmManager | null;
+  private readonly userId: string;
+  private readonly tokenUsageEnabled: boolean;
+  private readonly tokenUsageState: TokenUsageStateStore;
+  private l2WritePromise: Promise<void> | null = null;
+  private tokenUsageWritePromise: Promise<void> | null = null;
   private l1Timer: ReturnType<typeof setInterval> | null = null;
   private l2Timer: ReturnType<typeof setInterval> | null = null;
   private alarmTimer: ReturnType<typeof setInterval> | null = null;
@@ -57,6 +65,9 @@ export class MetricsWriter {
     });
     this.getSnapshot = opts.getSnapshot;
     this.alarmManager = opts.alarmManager ?? null;
+    this.userId = opts.userId;
+    this.tokenUsageEnabled = opts.tokenUsageEnabled ?? true;
+    this.tokenUsageState = new TokenUsageStateStore(opts.dataDir);
   }
 
   async start(): Promise<void> {
@@ -73,6 +84,7 @@ export class MetricsWriter {
     }
 
     await this.writeL1();
+    void this.writeTokenUsageMetrics();
     logger.info('metrics-writer started');
   }
 
@@ -201,7 +213,17 @@ export class MetricsWriter {
     }
   }
 
-  private async writeL2(): Promise<void> {
+  private writeL2(): Promise<void> {
+    if (this.l2WritePromise) return this.l2WritePromise;
+
+    this.l2WritePromise = this.collectAndWriteL2()
+      .finally(() => {
+        this.l2WritePromise = null;
+      });
+    return this.l2WritePromise;
+  }
+
+  private async collectAndWriteL2(): Promise<void> {
     try {
       const snapshot = this.getSnapshot();
 
@@ -237,8 +259,31 @@ export class MetricsWriter {
           sendStatus('pilot_alarm_metric', flattenToStrings(m));
         }
       }
+
+      await this.writeTokenUsageMetrics();
     } catch (err) {
       logger.warn('L2 metrics write failed', { error: String(err) });
+    }
+  }
+
+  private async writeTokenUsageMetrics(): Promise<void> {
+    if (!this.tokenUsageEnabled) return;
+    if (this.tokenUsageWritePromise) return this.tokenUsageWritePromise;
+
+    this.tokenUsageWritePromise = this.collectAndWriteTokenUsageMetrics()
+      .finally(() => {
+        this.tokenUsageWritePromise = null;
+      });
+    return this.tokenUsageWritePromise;
+  }
+
+  private async collectAndWriteTokenUsageMetrics(): Promise<void> {
+    try {
+      const usage = await collectCodexDailyUsage();
+      const row = await this.tokenUsageState.buildStatusRow('codex', this.userId, usage);
+      sendStatus('pilot_token_usage', flattenToStrings(row));
+    } catch (err) {
+      logger.warn('token usage metrics write failed', { error: String(err) });
     }
   }
 

@@ -15,10 +15,14 @@ vi.mock('../../../src/utils/logger.js', () => ({
 const mockSendAlarm = vi.fn();
 const mockSendStatus = vi.fn();
 const mockSendRunningStatus = vi.fn();
+const mockCollectCodexDailyUsage = vi.hoisted(() => vi.fn());
 vi.mock('../../../src/internal/sender.js', () => ({
   sendAlarm: (...args: unknown[]) => mockSendAlarm(...args),
   sendStatus: (...args: unknown[]) => mockSendStatus(...args),
   sendRunningStatus: (...args: unknown[]) => mockSendRunningStatus(...args),
+}));
+vi.mock('../../../src/metrics/token-usage/codex-token-usage.js', () => ({
+  collectCodexDailyUsage: (...args: unknown[]) => mockCollectCodexDailyUsage(...args),
 }));
 
 function buildSnapshot(): DataflowSnapshot {
@@ -52,6 +56,20 @@ describe('MetricsWriter', () => {
     mockSendAlarm.mockClear();
     mockSendStatus.mockClear();
     mockSendRunningStatus.mockClear();
+    mockCollectCodexDailyUsage.mockReset();
+    mockCollectCodexDailyUsage.mockResolvedValue({
+      date: '2026-06-18',
+      codex_home: '/tmp/codex',
+      calls: 2,
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_read_tokens: 20,
+      reasoning_tokens: 1,
+      estimated_calls: 0,
+      files_scanned: 1,
+      files_with_usage: 1,
+      total_tokens: 34,
+    });
   });
 
   afterEach(async () => {
@@ -201,6 +219,91 @@ describe('MetricsWriter', () => {
     const flusherPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-flusher-metrics.jsonl');
     const flusherLine = JSON.parse(fs.readFileSync(flusherPath, 'utf-8').trim().split('\n')[0]);
     expect(flusherLine.user_id).toBe('u1');
+  });
+
+  it('emits token usage status rows on L2 flush without writing token JSONL', async () => {
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u-token',
+      getSnapshot: buildSnapshot,
+    });
+
+    vi.useRealTimers();
+    await writer.start();
+    await writer.stop();
+
+    const call = mockSendStatus.mock.calls.find(
+      (c: unknown[]) => c[0] === 'pilot_token_usage',
+    );
+    expect(call).toBeDefined();
+    expect(call![1]).toMatchObject({
+      category: 'token_usage',
+      agent: 'codex',
+      user_id: 'u-token',
+      date: '2026-06-18',
+      calls_total: '2',
+      total_tokens_total: '34',
+    });
+
+    const statePath = path.join(tmpDir, 'logs', 'metric_alarm', 'token-usage-state.json');
+    const jsonlPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-token-usage-metrics.jsonl');
+    expect(fs.existsSync(statePath)).toBe(true);
+    expect(fs.existsSync(jsonlPath)).toBe(false);
+  });
+
+  it('coalesces overlapping L2 writes into one token scan', async () => {
+    let resolveUsage!: (value: Awaited<ReturnType<typeof mockCollectCodexDailyUsage>>) => void;
+    const deferredUsage = new Promise<Awaited<ReturnType<typeof mockCollectCodexDailyUsage>>>((resolve) => {
+      resolveUsage = resolve;
+    });
+    mockCollectCodexDailyUsage.mockReturnValue(deferredUsage);
+
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u-token',
+      getSnapshot: buildSnapshot,
+    });
+
+    const first = (writer as any).writeL2() as Promise<void>;
+    const second = (writer as any).writeL2() as Promise<void>;
+    expect(second).toBe(first);
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(mockCollectCodexDailyUsage).toHaveBeenCalledTimes(1));
+
+    resolveUsage({
+      date: '2026-06-18',
+      codex_home: '/tmp/codex',
+      calls: 2,
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_read_tokens: 20,
+      reasoning_tokens: 1,
+      estimated_calls: 0,
+      files_scanned: 1,
+      files_with_usage: 1,
+      total_tokens: 34,
+    });
+    await first;
+  });
+
+  it('does not scan or report token usage when disabled by agent gates', async () => {
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u-token',
+      getSnapshot: buildSnapshot,
+      tokenUsageEnabled: false,
+    });
+
+    vi.useRealTimers();
+    await writer.start();
+    await writer.stop();
+
+    expect(mockCollectCodexDailyUsage).not.toHaveBeenCalled();
+    expect(mockSendStatus.mock.calls.some((call) => call[0] === 'pilot_token_usage')).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, 'logs', 'metric_alarm', 'token-usage-state.json'))).toBe(false);
   });
 
   describe('DEGRADED_STARTUP_ALARM', () => {
