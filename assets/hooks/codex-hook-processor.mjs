@@ -72,7 +72,15 @@ function writeWakeupMarker(input) {
   try {
     fs.mkdirSync(directory, { recursive: true });
     fs.writeFileSync(temporary, JSON.stringify(payload), 'utf8');
-    fs.renameSync(temporary, marker);
+    try {
+      fs.renameSync(temporary, marker);
+    } catch (renameError) {
+      // Windows rename does not replace an existing destination. Stop may fire
+      // repeatedly for one session, so remove the stale marker and retry.
+      if (!['EEXIST', 'EPERM'].includes(renameError?.code)) throw renameError;
+      fs.rmSync(marker, { force: true });
+      fs.renameSync(temporary, marker);
+    }
   } catch (error) {
     logHookError({
       agentId: AGENT_ID,

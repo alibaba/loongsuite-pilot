@@ -127,6 +127,65 @@ describe('HookStrategy', () => {
       expect(secondCall.hookJsonPath).toEqual(['hooks', 'PostToolUse']);
     });
 
+    it('quotes only Codex PowerShell hook paths and removes the previous Windows command', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      try {
+        vi.mocked(readJsonFile).mockResolvedValue({ hooks: {} });
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const script = 'C:/Users/Test User/.loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.ps1';
+        const def = makeDef({
+          id: 'codex',
+          hook: {
+            settingsPath: 'C:/Users/Test User/.codex/hooks.json',
+            events: ['Stop'],
+            hookCommand: script,
+            format: 'nested',
+            matcher: '*',
+            eventSubcommand: 'kebab-case',
+          },
+        });
+
+        await strategy.needsDeploy(def);
+
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0]).toMatchObject({
+          hookCommand: 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass '
+            + `-File "${script}" stop`,
+          replaceHookCommands: [`${script} stop`],
+        });
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
+    it('preserves the existing Windows command format for non-Codex hook agents', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      try {
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const def = makeDef({
+          id: 'claude-code',
+          hook: {
+            settingsPath: 'C:/Users/test/.claude/settings.json',
+            events: ['Stop'],
+            hookCommand: 'C:/Users/test/.loongsuite-pilot/hooks/claude-code-hook.ps1',
+            format: 'nested',
+            eventSubcommand: 'kebab-case',
+          },
+        });
+
+        await strategy.needsDeploy(def);
+
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0]).toMatchObject({
+          hookCommand: 'powershell -NoProfile -ExecutionPolicy Bypass '
+            + '-File C:/Users/test/.loongsuite-pilot/hooks/claude-code-hook.ps1 stop',
+          replaceHookCommands: [],
+        });
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
     it('passes replaceHookCommands to hook definitions', async () => {
       mockHookManager.isHookInstalled.mockResolvedValue(true);
       const def = makeDef({
