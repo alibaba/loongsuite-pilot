@@ -1222,6 +1222,47 @@ function Cmd-Upgrade {
 # ============================================================
 # CMD: uninstall
 # ============================================================
+function Remove-PilotScheduledTasks {
+    $taskFolder = "\LoongsuitePilot"
+    # Keep this identity-to-tag conversion exactly aligned with
+    # scripts/loongsuite-pilot.ps1. Task names are scoped by DOMAIN\user so an
+    # uninstall never removes another user's collector or updater.
+    $currentIdentity = (whoami).Trim()
+    $userTag = ($currentIdentity -replace '[^A-Za-z0-9._-]', '_')
+    $currentUserTasks = @(
+        "LoongsuitePilot-$userTag",
+        "LoongsuitePilotUpdater-$userTag"
+    )
+    $legacyTasks = @("LoongsuitePilot", "LoongsuitePilotUpdater")
+
+    foreach ($taskName in @($currentUserTasks + $legacyTasks)) {
+        $isLegacy = $taskName -in $legacyTasks
+        $task = Get-ScheduledTask `
+            -TaskName $taskName `
+            -TaskPath "$taskFolder\" `
+            -ErrorAction SilentlyContinue
+        if ($isLegacy) {
+            # A legacy global name may belong to another signed-in user. Only
+            # remove it when Task Scheduler confirms that this user owns it.
+            if (-not $task) { continue }
+            $taskOwner = [string]$task.Principal.UserId
+            if ($taskOwner -and $taskOwner -ine $currentIdentity) { continue }
+        }
+        if ($task -and $task.State -eq "Running") {
+            Stop-ScheduledTask `
+                -TaskName $taskName `
+                -TaskPath "$taskFolder\" `
+                -ErrorAction SilentlyContinue
+        }
+
+        # schtasks is more reliable than Unregister-ScheduledTask for tasks
+        # whose registration was partially replaced during an upgrade.
+        try { schtasks.exe /Delete /TN "$taskFolder\$taskName" /F 2>$null | Out-Null } catch {}
+        # Also clean the pre-folder layout used by older Windows packages.
+        try { schtasks.exe /Delete /TN "$taskName" /F 2>$null | Out-Null } catch {}
+    }
+}
+
 function Cmd-Uninstall {
     Msg "🗑️  开始卸载 $PACKAGE_NAME ..." "🗑️  Uninstalling $PACKAGE_NAME ..."
     Write-Host ""
@@ -1231,17 +1272,7 @@ function Cmd-Uninstall {
     Msg "    ✅ 服务已停止" "    ✅ Service stopped"
     Write-Host ""
 
-    # Remove Task Scheduler tasks
-    $taskFolder = "\LoongsuitePilot"
-    foreach ($taskName in @("LoongsuitePilot")) {
-        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
-        if ($task) {
-            if ($task.State -eq "Running") {
-                Stop-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
-            }
-            Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -Confirm:$false -ErrorAction SilentlyContinue
-        }
-    }
+    Remove-PilotScheduledTasks
     Msg "    ✅ 已移除计划任务" "    ✅ Removed scheduled tasks"
 
     Msg "==> 删除安装目录..." "==> Removing installation..."
