@@ -65,3 +65,26 @@ describe('uninstall cleans the OpenCode plugin-inject spec', () => {
     expect(ps1).toContain('plugins/opencode/plugin.mjs');
   });
 });
+
+describe('uninstall cleans the Pi Coding Agent extension injection', () => {
+  it('sh defines and calls remove_pi_coding_agent_extension', () => {
+    expect(sh).toMatch(/remove_pi_coding_agent_extension\(\)\s*\{/);
+    const uninstall = sh.slice(sh.indexOf('cmd_uninstall()'));
+    expect(uninstall).toContain('remove_pi_coding_agent_extension');
+  });
+
+  it('ps1 defines and calls Remove-PiCodingAgentExtension', () => {
+    expect(ps1).toMatch(/function Remove-PiCodingAgentExtension\s*\{/);
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(uninstall).toContain('Remove-PiCodingAgentExtension');
+  });
+
+  it('targets Pi settings and matches only the Pilot extension', () => {
+    expect(sh).toContain('.pi/agent/settings.json');
+    expect(ps1).toContain('.pi\\agent\\settings.json');
+    expect(sh).toContain('loongsuite-pilot-pi-coding-agent');
+    expect(sh).toContain('plugins/pi-coding-agent/index.mjs');
+    expect(ps1).toContain('loongsuite-pilot-pi-coding-agent');
+    expect(ps1).toContain('plugins/pi-coding-agent/index.mjs');
+  });
+});

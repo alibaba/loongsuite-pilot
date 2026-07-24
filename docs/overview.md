@@ -27,6 +27,7 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Cursor | Hook | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / local session polling | Yes | Yes | No | Yes |
 | OpenCode | Plugin injection | Yes | Yes | Yes | Yes |
+| Pi Coding Agent | Extension injection | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | Yes | Yes | Yes | Yes |
 | Qoder for JetBrains | Detection-only | Yes | Yes | Yes | Yes |

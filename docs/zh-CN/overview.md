@@ -27,6 +27,7 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Cursor | Hook | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / 本地 session 轮询 | Yes | Yes | No | Yes |
 | OpenCode | 插件注入 | Yes | Yes | Yes | Yes |
+| Pi Coding Agent | Extension 注入 | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | Yes | Yes | Yes | Yes |
 | Qoder for JetBrains | 自动检测 | Yes | Yes | Yes | Yes |

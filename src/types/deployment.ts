@@ -128,6 +128,10 @@ export interface PluginInjectConfig {
   pluginSpec: string;
   pluginId: string;
   replaceSpecs?: string[];
+  /** Target array field. Defaults to auto-detected `plugins` / `plugin`. */
+  configKey?: string;
+  /** Create the first config path with an empty object when none exists. */
+  createIfMissing?: boolean;
 }
 
 export interface AgentRuntimeConfig {
