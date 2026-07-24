@@ -37,6 +37,21 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 
+### Windows Agent 明确支持情况
+
+总体支持表描述的是 Pilot 的接入能力，不能直接作为操作系统兼容性矩阵。目前文档明确说明支持 Windows 的 Agent 如下：
+
+| Agent | Windows 集成方式 | Trace 上报 | 日志上报 | Token 用量 | 对话 / 工具调用 | 使用条件 |
+|-------|------------------|------------|----------|------------|-----------------|----------|
+| Claude Code | Hook | 支持 | 支持 | 支持 | 支持 | — |
+| Cursor | Hook | 支持 | 支持 | 支持 | 支持 | — |
+| Qoder Work | Hook / 本地数据源 | 支持 | 支持 | 不支持 | 支持 | User 版本 |
+| Qoder CLI | Hook | 支持 | 支持 | 不支持 | 支持 | — |
+| Qoder IDE | Hook / 本地数据源 | 支持 | 支持 | 支持 | 支持 | Qoder 1.10.0 及以上 User 版本 |
+| OpenCode | 插件注入 | 支持 | 支持 | 支持 | 支持 | — |
+
+未列入此表的 Agent，表示当前没有明确的 Windows 支持声明，并不一定代表无法在 Windows 上运行。该矩阵参考[阿里云 AI Coding Agent 接入文档](https://help.aliyun.com/zh/cms/cloudmonitor-2-0/ai-application-access-ai-coding-agent/)。Windows 环境要求与安装方法见[安装指南](installation.md)。
+
 ## 采集的数据
 
 Pilot 关注对使用分析、审计和链路追踪有价值的活动：
