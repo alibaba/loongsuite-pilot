@@ -7,7 +7,26 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$dataDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+$defaultPilotDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+$installedLayoutPath = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-layout.json"
+$installedLayout = $null
+if (Test-Path -LiteralPath $installedLayoutPath) {
+    try { $installedLayout = Get-Content -LiteralPath $installedLayoutPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
+}
+$dataDir = if ($env:LOONGSUITE_PILOT_DATA_DIR) {
+    $env:LOONGSUITE_PILOT_DATA_DIR
+} elseif ($installedLayout -and $installedLayout.dataDir) {
+    [string]$installedLayout.dataDir
+} else {
+    $defaultPilotDir
+}
+$cacheDir = if ($env:LOONGSUITE_PILOT_CACHE_DIR) {
+    $env:LOONGSUITE_PILOT_CACHE_DIR
+} elseif ($installedLayout -and $installedLayout.cacheDir) {
+    [string]$installedLayout.cacheDir
+} else {
+    $defaultPilotDir
+}
 $configPath = Join-Path $dataDir "config.json"
 $windowsCli = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
 $installer = Join-Path $projectRoot "deploy\installer-opensource.ps1"
@@ -48,11 +67,11 @@ function Invoke-Checked {
 function Resolve-InstalledServiceScript {
     if (Test-Path -LiteralPath $windowsCli) { return $windowsCli }
 
-    $currentFile = Join-Path $dataDir "current"
+    $currentFile = Join-Path $cacheDir "current"
     if (Test-Path -LiteralPath $currentFile) {
         $current = (Get-Content -LiteralPath $currentFile -Raw).Trim()
         if ($current) {
-            $candidate = Join-Path $dataDir "versions\$current\scripts\loongsuite-pilot.ps1"
+            $candidate = Join-Path $cacheDir "versions\$current\scripts\loongsuite-pilot.ps1"
             if (Test-Path -LiteralPath $candidate) { return $candidate }
         }
     }
@@ -62,17 +81,20 @@ function Resolve-InstalledServiceScript {
 function Restore-CollectorLauncher {
     param([Parameter(Mandatory = $true)][string]$NodeDirectory)
 
-    $vbsPath = Join-Path $dataDir "bin\collector-launch.vbs"
+    $vbsPath = Join-Path $cacheDir "bin\collector-launch.vbs"
     $nodePath = Join-Path $NodeDirectory "node.exe"
-    $entryPath = Join-Path $dataDir "bin\collector-daemon.js"
+    $entryPath = Join-Path $cacheDir "bin\collector-daemon.js"
     $configEscaped = $configPath -replace '"', '""'
+    $cacheDirEscaped = $cacheDir -replace '"', '""'
     $dataDirEscaped = $dataDir -replace '"', '""'
     $nodeEscaped = $nodePath -replace '"', '""'
     $entryEscaped = $entryPath -replace '"', '""'
     $vbs = @"
 Set sh = CreateObject("WScript.Shell")
 sh.Environment("PROCESS").Item("AGENT_DATA_COLLECTION_CONFIG") = "$configEscaped"
-sh.CurrentDirectory = "$dataDirEscaped"
+sh.Environment("PROCESS").Item("LOONGSUITE_PILOT_DATA_DIR") = "$dataDirEscaped"
+sh.Environment("PROCESS").Item("LOONGSUITE_PILOT_CACHE_DIR") = "$cacheDirEscaped"
+sh.CurrentDirectory = "$cacheDirEscaped"
 sh.Run """$nodeEscaped"" ""$entryEscaped""", 0, True
 "@
     Set-Content -LiteralPath $vbsPath -Value $vbs -Encoding Unicode

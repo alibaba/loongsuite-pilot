@@ -93,6 +93,10 @@ loongsuite-pilot info
 
 Local JSONL output is enabled by default under `~/.loongsuite-pilot/logs/output/` on Linux/macOS and `%USERPROFILE%\.loongsuite-pilot\logs\output\` on Windows.
 
+All platforms support `LOONGSUITE_PILOT_DATA_DIR` for durable configuration,
+checkpoints, and logs, and `LOONGSUITE_PILOT_CACHE_DIR` for installed versions
+and bootstrap files.
+
 For installer options, uninstall commands, and source builds, see [Installation](docs/installation.md).
 
 ## Configure Pilot
@@ -154,14 +158,6 @@ loongsuite-pilot info
 loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
-
-Optional local dashboard:
-
-```bash
-loongsuite-pilot monitor start
-```
-
-Then open `http://127.0.0.1:8765/`.
 
 macOS menu bar app:
 

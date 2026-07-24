@@ -24,8 +24,26 @@ $ErrorActionPreference = "Stop"
 # ============================================================
 # Constants & Paths
 # ============================================================
-$CACHE_DIR = Join-Path $env:USERPROFILE ".loongsuite-pilot"
-$DATA_DIR = if ($env:LOONGSUITE_PILOT_DATA_DIR) { $env:LOONGSUITE_PILOT_DATA_DIR } else { $CACHE_DIR }
+$DEFAULT_PILOT_DIR = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+$LAYOUT_FILE = Join-Path $PSScriptRoot "loongsuite-pilot-layout.json"
+$INSTALL_LAYOUT = $null
+if (Test-Path -LiteralPath $LAYOUT_FILE) {
+    try { $INSTALL_LAYOUT = Get-Content -LiteralPath $LAYOUT_FILE -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
+}
+$CACHE_DIR = if ($env:LOONGSUITE_PILOT_CACHE_DIR) {
+    $env:LOONGSUITE_PILOT_CACHE_DIR
+} elseif ($INSTALL_LAYOUT -and $INSTALL_LAYOUT.cacheDir) {
+    [string]$INSTALL_LAYOUT.cacheDir
+} else {
+    $DEFAULT_PILOT_DIR
+}
+$DATA_DIR = if ($env:LOONGSUITE_PILOT_DATA_DIR) {
+    $env:LOONGSUITE_PILOT_DATA_DIR
+} elseif ($INSTALL_LAYOUT -and $INSTALL_LAYOUT.dataDir) {
+    [string]$INSTALL_LAYOUT.dataDir
+} else {
+    $DEFAULT_PILOT_DIR
+}
 $VERSIONS_DIR = Join-Path $CACHE_DIR "versions"
 $CURRENT_FILE = Join-Path $CACHE_DIR "current"
 $PREVIOUS_FILE = Join-Path $CACHE_DIR "previous"
@@ -66,6 +84,7 @@ $TASK_FOLDER = "\LoongsuitePilot"
 $LEGACY_TASK_NAMES = @("LoongsuitePilot", "LoongsuitePilotUpdater")
 
 $LOONGSUITE_PILOT_BIN = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.cmd"
+$LOONGSUITE_PILOT_PS1 = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
 
 # ============================================================
 # Helpers
@@ -150,17 +169,21 @@ function Sync-BootstrapScripts {
 function Sync-InstalledScriptsFromVersion {
     param([string]$versionDir)
     $srcDir = Join-Path $versionDir "scripts"
-    $required = @("collector-daemon.js", "updater-daemon.js")
+    $required = @("collector-daemon.js", "loongsuite-pilot.ps1")
     foreach ($f in $required) {
         if (-not (Test-Path (Join-Path $srcDir $f))) { return $false }
     }
 
     if (-not (Test-Path $BOOTSTRAP_DIR)) { New-Item -ItemType Directory -Path $BOOTSTRAP_DIR -Force | Out-Null }
-    foreach ($f in $required) {
+    foreach ($f in @("collector-daemon.js", "updater-daemon.js")) {
+        if (-not (Test-Path (Join-Path $srcDir $f))) { continue }
         $tmp = Join-Path $BOOTSTRAP_DIR "$f.tmp"
         Copy-Item (Join-Path $srcDir $f) $tmp -Force
         Move-Item $tmp (Join-Path $BOOTSTRAP_DIR $f) -Force
     }
+    $cliTmp = "$LOONGSUITE_PILOT_PS1.tmp"
+    Copy-Item (Join-Path $srcDir "loongsuite-pilot.ps1") $cliTmp -Force
+    Move-Item $cliTmp $LOONGSUITE_PILOT_PS1 -Force
     return $true
 }
 
@@ -400,14 +423,18 @@ function New-HiddenTaskAction {
     param([string]$vbsPath, [string]$nodeBin, [string]$entry)
     # Double any embedded quote so a path with a " cannot terminate the VBScript
     # string literal early (defensive: Windows paths cannot contain ", but
-    # $CONFIG_FILE/$CACHE_DIR derive from the user-settable LOONGSUITE_PILOT_DATA_DIR).
+    # $CONFIG_FILE/$CACHE_DIR derive from user-settable data/cache directories).
     $cfgEsc   = $CONFIG_FILE -replace '"', '""'
+    $dataEsc  = $DATA_DIR    -replace '"', '""'
+    $cacheEsc = $CACHE_DIR   -replace '"', '""'
     $cwdEsc   = $CACHE_DIR   -replace '"', '""'
     $nodeEsc  = $nodeBin     -replace '"', '""'
     $entryEsc = $entry       -replace '"', '""'
     $vbs = @"
 Set sh = CreateObject("WScript.Shell")
 sh.Environment("PROCESS").Item("AGENT_DATA_COLLECTION_CONFIG") = "$cfgEsc"
+sh.Environment("PROCESS").Item("LOONGSUITE_PILOT_DATA_DIR") = "$dataEsc"
+sh.Environment("PROCESS").Item("LOONGSUITE_PILOT_CACHE_DIR") = "$cacheEsc"
 sh.CurrentDirectory = "$cwdEsc"
 sh.Run """$nodeEsc"" ""$entryEsc""", 0, True
 "@

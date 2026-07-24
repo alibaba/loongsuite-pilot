@@ -109,6 +109,13 @@ Windows 下使用：
 Get-ChildItem "$env:USERPROFILE\.loongsuite-pilot\logs\output"
 ```
 
+Linux、macOS 和 Windows 都支持将持久数据与版本缓存分开：
+
+- `LOONGSUITE_PILOT_DATA_DIR`：配置、checkpoint、状态和输出日志。
+- `LOONGSUITE_PILOT_CACHE_DIR`：版本包、bootstrap 和 current/previous 指针。
+
+Windows 安装器会记录最终目录布局，因此之后启动 CLI 时不要求再次设置这两个环境变量。
+
 ## 服务管理
 
 ```bash
@@ -121,21 +128,20 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-可选本地 Dashboard：
+## 升级与回滚
 
 ```bash
-loongsuite-pilot monitor start
+loongsuite-pilot upgrade
+loongsuite-pilot rollback
 ```
 
-然后打开：
-
-```text
-http://127.0.0.1:8765/
-```
+升级会保留配置、日志和 transcript checkpoint。新版本启动失败时会自动切回 previous 版本；`rollback` 可手动切换 current/previous 并重启。
 
 ## 卸载
 
-卸载会停止服务、删除已安装文件，并清理写入各 agent 配置中的接入内容（Claude Code、Codex、Cursor、Qoder、Qwen 等的 hook 条目，以及注入到 OpenCode 配置里的插件 spec）。加 `--purge`（Windows 为 `-Purge`）可一并删除本地数据目录。
+卸载会停止服务、删除已安装文件，并清理写入各 agent 配置中的接入内容。Windows 会删除当前用户的 collector 和 updater 计划任务。Codex Hook 和 Pilot 写入的 trust 块会被清理，但不会删除 `~/.codex/sessions`。
+
+普通卸载保留配置、日志和 checkpoint；加 `--purge`（Windows 为 `-Purge`）才会删除 Pilot 数据目录。
 
 Linux/macOS 保留数据：
 

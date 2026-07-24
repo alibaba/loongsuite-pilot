@@ -146,6 +146,9 @@ else
     (cd "$STAGE_DIR" && tar -a -c -f "$ZIP_OUTPUT_PATH" "$PACKAGE_NAME")
 fi
 
+echo "==> Verifying Windows release package..."
+node "$PROJECT_ROOT/scripts/verify-windows-release.mjs" "$ZIP_OUTPUT_PATH"
+
 ZIP_SIZE=$(du -h "$ZIP_OUTPUT_PATH" | cut -f1)
 echo "    ✅ $ZIP_OUTPUT_PATH ($ZIP_SIZE)"
 

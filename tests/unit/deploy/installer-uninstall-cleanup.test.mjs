@@ -86,7 +86,7 @@ describe('Windows uninstall removes scheduled tasks for the current user', () =>
   it('calls scheduled-task cleanup before deleting the installation', () => {
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
     const taskCleanup = uninstall.indexOf('Remove-PilotScheduledTasks');
-    const installRemoval = uninstall.indexOf('Remove-Item $installDir');
+    const installRemoval = uninstall.indexOf('Remove-PilotInstallationFiles');
 
     expect(taskCleanup).toBeGreaterThanOrEqual(0);
     expect(installRemoval).toBeGreaterThan(taskCleanup);

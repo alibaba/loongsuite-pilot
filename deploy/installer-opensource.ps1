@@ -56,15 +56,29 @@ $ErrorActionPreference = "Stop"
 # Constants
 # ============================================================
 $PACKAGE_NAME = "loongsuite-pilot"
-$DEFAULT_DATA_DIR = Join-Path $env:USERPROFILE ".loongsuite-pilot"
-$PERMANENT_DIR = Join-Path $DEFAULT_DATA_DIR "package"
+$DEFAULT_PILOT_DIR = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+$CACHE_DIR = if ($env:LOONGSUITE_PILOT_CACHE_DIR) {
+    $env:LOONGSUITE_PILOT_CACHE_DIR
+} else {
+    $DEFAULT_PILOT_DIR
+}
+$PERMANENT_DIR = Join-Path $CACHE_DIR "package"
 
 $_OSS_BASE_URL = "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot"
 
 # ============================================================
 # Defaults
 # ============================================================
-if (-not $DataDir) { $DataDir = $DEFAULT_DATA_DIR }
+if (-not $DataDir) {
+    $DataDir = if ($env:LOONGSUITE_PILOT_DATA_DIR) {
+        $env:LOONGSUITE_PILOT_DATA_DIR
+    } else {
+        $DEFAULT_PILOT_DIR
+    }
+}
+$env:LOONGSUITE_PILOT_DATA_DIR = $DataDir
+$env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
+$env:AGENT_DATA_COLLECTION_CONFIG = Join-Path $DataDir "config.json"
 if (-not $PackageUrl -and $env:LOONGSUITE_PILOT_PACKAGE_URL) {
     $PackageUrl = $env:LOONGSUITE_PILOT_PACKAGE_URL
 }
@@ -498,7 +512,7 @@ for (const c of changed) { console.log(c.label + ': ' + c.oldVal + ' -> ' + c.ne
 # ============================================================
 function Deploy-BootstrapScripts {
     $srcDir = Join-Path $script:PERMANENT_DIR "scripts"
-    $bootDir = Join-Path $env:USERPROFILE ".loongsuite-pilot\bin"
+    $bootDir = Join-Path $CACHE_DIR "bin"
     if (-not (Test-Path $bootDir)) { New-Item -ItemType Directory -Path $bootDir -Force | Out-Null }
     Copy-Item (Join-Path $srcDir "collector-daemon.js") $bootDir -Force
 }
@@ -508,7 +522,7 @@ function Deploy-BootstrapScripts {
 # ============================================================
 function Deploy-Package {
     param([string]$src)
-    $cacheDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+    $cacheDir = $CACHE_DIR
     $versionsDir = Join-Path $cacheDir "versions"
     $currentFile = Join-Path $cacheDir "current"
     $previousFile = Join-Path $cacheDir "previous"
@@ -589,7 +603,7 @@ function Deploy-Package {
 # Migrate legacy layout
 # ============================================================
 function Migrate-LegacyLayout {
-    $cacheDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+    $cacheDir = $CACHE_DIR
     $currentFile = Join-Path $cacheDir "current"
     $legacyDir = Join-Path $cacheDir "package"
     $versionsDir = Join-Path $cacheDir "versions"
@@ -741,6 +755,16 @@ function Install-Command {
     if (Test-Path $ps1Src) {
         Copy-Item $ps1Src $ps1File -Force
     }
+    $layoutFile = Join-Path $binDir "loongsuite-pilot-layout.json"
+    $layout = [ordered]@{
+        dataDir = $DataDir
+        cacheDir = $CACHE_DIR
+    } | ConvertTo-Json
+    [System.IO.File]::WriteAllText(
+        $layoutFile,
+        "$layout$([Environment]::NewLine)",
+        (New-Object System.Text.UTF8Encoding($false))
+    )
 
     # Create a .cmd shim that forwards to the PowerShell script
     $cmdFile = Join-Path $binDir "loongsuite-pilot.cmd"
@@ -765,7 +789,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0loongsuite-pilot.p
 # Version helpers
 # ============================================================
 function Get-InstalledVersion {
-    $cacheDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+    $cacheDir = $CACHE_DIR
     $currentFile = Join-Path $cacheDir "current"
     $versionsDir = Join-Path $cacheDir "versions"
 
@@ -900,7 +924,7 @@ function Stop-PilotService {
 # GC old versions
 # ============================================================
 function GC-OldVersions {
-    $cacheDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+    $cacheDir = $CACHE_DIR
     $versionsDir = Join-Path $cacheDir "versions"
     $currentFile = Join-Path $cacheDir "current"
     $previousFile = Join-Path $cacheDir "previous"
@@ -1028,6 +1052,24 @@ try {
             default       { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
         }
     }
+}
+
+function Remove-CodexTrustState {
+    $configPath = Join-Path $env:USERPROFILE ".codex\config.toml"
+    if (-not (Test-Path -LiteralPath $configPath)) { return }
+
+    $content = Get-Content -LiteralPath $configPath -Raw
+    $pattern = '(?ms)^[ \t]*# BEGIN otel-codex-hook trust[ \t]*\r?\n.*?^[ \t]*# END otel-codex-hook trust[ \t]*(?:\r?\n)?'
+    $updated = [regex]::Replace($content, $pattern, "")
+    if ($updated -eq $content) { return }
+
+    $updated = [regex]::Replace($updated, '(\r?\n){3,}', "$([Environment]::NewLine)$([Environment]::NewLine)")
+    [System.IO.File]::WriteAllText(
+        $configPath,
+        $updated,
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+    Msg "    ✅ Codex trust 状态已清理" "    ✅ Codex trust state cleaned"
 }
 
 # ============================================================
@@ -1263,6 +1305,64 @@ function Remove-PilotScheduledTasks {
     }
 }
 
+function Assert-SafePilotDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Purpose
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $rootPath = [System.IO.Path]::GetPathRoot($fullPath).TrimEnd('\')
+    $profilePath = [System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\')
+    if (-not $fullPath -or $fullPath -ieq $rootPath -or $fullPath -ieq $profilePath) {
+        throw "Refusing to use unsafe $Purpose directory: $Path"
+    }
+    return $fullPath
+}
+
+function Remove-PilotInstallationFiles {
+    $cachePath = Assert-SafePilotDirectory -Path $CACHE_DIR -Purpose "cache"
+    $dataPath = Assert-SafePilotDirectory -Path $DataDir -Purpose "data"
+    $cachePrefix = $cachePath + [System.IO.Path]::DirectorySeparatorChar
+    $cacheContainsData = $dataPath.StartsWith(
+        $cachePrefix,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+
+    if ($cachePath -ine $dataPath -and -not $cacheContainsData) {
+        if (Test-Path -LiteralPath $cachePath) {
+            Remove-Item -LiteralPath $cachePath -Recurse -Force
+        }
+    } else {
+        # The default layout co-locates cache and durable data. Remove only
+        # version/bootstrap artifacts so config, logs, checkpoints, and output
+        # survive a normal uninstall.
+        foreach ($relativePath in @(
+            "versions",
+            "bin",
+            "package",
+            "current",
+            "previous",
+            "node-bin"
+        )) {
+            $target = Join-Path $cachePath $relativePath
+            if (Test-Path -LiteralPath $target) {
+                Remove-Item -LiteralPath $target -Recurse -Force
+            }
+        }
+    }
+
+    # These are deployed package assets, not durable telemetry/state.
+    foreach ($relativePath in @("hooks", "skills", "plugins")) {
+        $target = Join-Path $dataPath $relativePath
+        if (Test-Path -LiteralPath $target) {
+            Remove-Item -LiteralPath $target -Recurse -Force
+        }
+    }
+}
+
 function Cmd-Uninstall {
     Msg "🗑️  开始卸载 $PACKAGE_NAME ..." "🗑️  Uninstalling $PACKAGE_NAME ..."
     Write-Host ""
@@ -1276,22 +1376,22 @@ function Cmd-Uninstall {
     Msg "    ✅ 已移除计划任务" "    ✅ Removed scheduled tasks"
 
     Msg "==> 删除安装目录..." "==> Removing installation..."
-    $installDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
-    if (Test-Path $installDir) {
-        Remove-Item $installDir -Recurse -Force
-    }
-    Msg "    ✅ 已删除 $installDir" "    ✅ Removed $installDir"
+    Remove-PilotInstallationFiles
+    Msg "    ✅ 已删除安装文件" "    ✅ Removed installation files"
 
     Msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
     $cmdFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.cmd"
     $ps1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
+    $layoutFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-layout.json"
     if (Test-Path $cmdFile) { Remove-Item $cmdFile -Force }
     if (Test-Path $ps1File) { Remove-Item $ps1File -Force }
+    if (Test-Path $layoutFile) { Remove-Item $layoutFile -Force }
     Msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
     Write-Host ""
 
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     Remove-HookConfigs
+    Remove-CodexTrustState
     Write-Host ""
 
     Msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
@@ -1304,7 +1404,10 @@ function Cmd-Uninstall {
 
     if ($Purge) {
         Msg "==> 删除数据目录 (-Purge)..." "==> Removing data directory (-Purge)..."
-        if (Test-Path $DataDir) { Remove-Item $DataDir -Recurse -Force }
+        $safeDataDir = Assert-SafePilotDirectory -Path $DataDir -Purpose "data"
+        if (Test-Path -LiteralPath $safeDataDir) {
+            Remove-Item -LiteralPath $safeDataDir -Recurse -Force
+        }
         Msg "    ✅ 已删除 $DataDir" "    ✅ Removed $DataDir"
     } else {
         Msg "📁 数据目录已保留: $DataDir" "📁 Data directory preserved: $DataDir"

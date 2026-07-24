@@ -33,6 +33,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer install
 
 The Windows installer downloads `loongsuite-pilot.zip` by default. It stores data under `%USERPROFILE%\.loongsuite-pilot` and installs the `loongsuite-pilot` command under `%USERPROFILE%\.local\bin`. Open a new PowerShell window if the command is not found immediately after installation.
 
+To separate durable data from downloaded versions and bootstrap files on any
+platform, set these environment variables before installation:
+
+- `LOONGSUITE_PILOT_DATA_DIR`: configuration, checkpoints, logs, and JSONL output.
+- `LOONGSUITE_PILOT_CACHE_DIR`: versions, the `current`/`previous` pointers, bootstrap scripts, and the pinned Node path.
+
+Windows records the selected layout next to the installed CLI, so subsequent
+`start`, `upgrade`, `rollback`, and `uninstall` commands keep using the same
+directories even from a new PowerShell session. Explicit environment variables
+still take precedence over the recorded layout.
+
 ## Install With Common Options
 
 Linux/macOS:
@@ -121,21 +132,30 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-Optional local dashboard:
+## Upgrade And Roll Back
+
+Linux/macOS:
 
 ```bash
-loongsuite-pilot monitor start
+bash /tmp/loongsuite-pilot-installer.sh upgrade
+loongsuite-pilot rollback
 ```
 
-Then open:
+Windows:
 
-```text
-http://127.0.0.1:8765/
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer upgrade
+loongsuite-pilot rollback
 ```
+
+Upgrade preserves `config.json`, local logs, and input checkpoints. If the new
+Windows service does not start, the installer invokes rollback automatically.
+Manual rollback swaps the `current` and `previous` version pointers, restores
+the previous bootstrap and CLI scripts, and restarts Pilot.
 
 ## Uninstall
 
-Uninstall stops the service, removes installed files, and cleans the integrations written into agent configs (hook entries for Claude Code, Codex, Cursor, Qoder, Qwen, etc., and the injected plugin spec in OpenCode's config). Add `--purge` (`-Purge` on Windows) to also delete the local data directory.
+Uninstall stops the service, removes installed files, and cleans the integrations written into agent configs (hook entries for Claude Code, Codex, Cursor, Qoder, Qwen, etc., Codex trust state, and the injected plugin spec in OpenCode's config). A normal uninstall preserves `config.json`, logs, JSONL output, and checkpoints. Add `--purge` (`-Purge` on Windows) to also delete the local data directory. Codex rollout transcripts under `~/.codex/sessions` are never deleted.
 
 Keep data on Linux/macOS:
 
