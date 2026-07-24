@@ -127,6 +127,20 @@ function decodeTomlBasicString(value: string): string | null {
   }
 }
 
+function tomlKeyCandidates(value: string): string[] {
+  const candidates: string[] = [];
+  const decoded = decodeTomlBasicString(value);
+  if (decoded !== null) candidates.push(decoded);
+
+  // Older Windows builds interpolated C:\... directly into a TOML basic
+  // string. Keep the raw body as a cleanup-only candidate so a subsequent
+  // deployment can remove that invalid section and repair config.toml.
+  if (value.startsWith('"') && value.endsWith('"')) {
+    candidates.push(value.slice(1, -1));
+  }
+  return [...new Set(candidates)];
+}
+
 interface ParsedTrustHash {
   key: string;     // 完整 hook state key,如 "/abs/hooks.json:session_start:0:0"
   hash: string;    // sha256:xxx
@@ -204,8 +218,7 @@ function removeStaleTrustState(
   for (const line of lines) {
     const headerMatch = line.match(sectionHeader);
     if (headerMatch) {
-      const key = decodeTomlBasicString(headerMatch[1]!);
-      skipping = key !== null && isOwnedKey(key);
+      skipping = tomlKeyCandidates(headerMatch[1]!).some(isOwnedKey);
       if (skipping) continue;
       out.push(line);
       continue;
