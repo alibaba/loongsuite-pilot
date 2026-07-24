@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import type {
   AgentDefinition,
   DeployResult,
@@ -84,13 +85,13 @@ export class PluginInjectStrategy implements DeployStrategy {
     const config = def.pluginInject;
     if (!config) return true;
 
-    const configPath = await this.findConfigFile(config);
+    const configPath = await this.findConfigFile(config, false);
     if (!configPath) return true;
 
     try {
       const raw = await fs.readFile(configPath, 'utf-8');
       const json = JSON.parse(stripJsoncComments(raw));
-      const pluginKey = this.resolvePluginKey(json);
+      const pluginKey = this.resolvePluginKey(json, config);
       const plugins: unknown[] = json[pluginKey] ?? [];
       if (!Array.isArray(plugins)) return true;
 
@@ -109,7 +110,7 @@ export class PluginInjectStrategy implements DeployStrategy {
     }
 
     try {
-      const configPath = await this.findConfigFile(config);
+      const configPath = await this.findConfigFile(config, config.createIfMissing === true);
       if (!configPath) {
         return {
           success: false,
@@ -121,7 +122,7 @@ export class PluginInjectStrategy implements DeployStrategy {
 
       const raw = await fs.readFile(configPath, 'utf-8');
       const json = JSON.parse(stripJsoncComments(raw));
-      const pluginKey = this.resolvePluginKey(json);
+      const pluginKey = this.resolvePluginKey(json, config);
 
       if (!Array.isArray(json[pluginKey])) {
         json[pluginKey] = [];
@@ -165,12 +166,12 @@ export class PluginInjectStrategy implements DeployStrategy {
     if (!config) return false;
 
     try {
-      const configPath = await this.findConfigFile(config);
+      const configPath = await this.findConfigFile(config, false);
       if (!configPath) return false;
 
       const raw = await fs.readFile(configPath, 'utf-8');
       const json = JSON.parse(stripJsoncComments(raw));
-      const pluginKey = this.resolvePluginKey(json);
+      const pluginKey = this.resolvePluginKey(json, config);
 
       if (!Array.isArray(json[pluginKey])) return true;
 
@@ -197,15 +198,35 @@ export class PluginInjectStrategy implements DeployStrategy {
     }
   }
 
-  private async findConfigFile(config: PluginInjectConfig): Promise<string | null> {
+  private async findConfigFile(
+    config: PluginInjectConfig,
+    createIfMissing: boolean,
+  ): Promise<string | null> {
     for (const p of config.configPaths) {
       const resolved = resolveHome(p);
       if (await fileExists(resolved)) return resolved;
     }
+
+    if (createIfMissing && config.configPaths.length > 0) {
+      const resolved = resolveHome(config.configPaths[0]);
+      await fs.mkdir(path.dirname(resolved), { recursive: true });
+      await fs.writeFile(resolved, '{}\n', {
+        encoding: 'utf-8',
+        flag: 'wx',
+        mode: 0o600,
+      }).catch(async err => {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      });
+      return resolved;
+    }
     return null;
   }
 
-  private resolvePluginKey(json: Record<string, unknown>): string {
+  private resolvePluginKey(
+    json: Record<string, unknown>,
+    config: PluginInjectConfig,
+  ): string {
+    if (config.configKey) return config.configKey;
     if (Array.isArray(json.plugins)) return 'plugins';
     return 'plugin';
   }

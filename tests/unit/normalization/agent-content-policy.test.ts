@@ -19,6 +19,8 @@ function makeEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEn
     'gen_ai.output.messages': [{ type: 'text', content: 'secret response' }],
     'gen_ai.tool.call.arguments': { command: 'cat secret.txt' },
     'gen_ai.tool.call.result': { output: 'secret output' },
+    'gen_ai.system_instructions': [{ type: 'text', content: 'secret system prompt' }],
+    'gen_ai.tool.definitions': [{ type: 'function', name: 'internal_tool' }],
     content: 'legacy secret',
     inlineDiffMessage: 'legacy diff',
     'agent.content': 'agent secret',
@@ -52,6 +54,8 @@ describe('applyAgentContentPolicy', () => {
     expect(result).not.toHaveProperty('gen_ai.output.messages');
     expect(result).not.toHaveProperty('gen_ai.tool.call.arguments');
     expect(result).not.toHaveProperty('gen_ai.tool.call.result');
+    expect(result).not.toHaveProperty('gen_ai.system_instructions');
+    expect(result).not.toHaveProperty('gen_ai.tool.definitions');
     expect(result).not.toHaveProperty('content');
     expect(result).not.toHaveProperty('inlineDiffMessage');
     expect(result).not.toHaveProperty('agent.content');

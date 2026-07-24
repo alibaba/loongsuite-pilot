@@ -1776,6 +1776,48 @@ try {
 }
 
 # ============================================================
+# Remove Pi Coding Agent extension injection
+# ============================================================
+remove_pi_coding_agent_extension() {
+    local cfg="$HOME/.pi/agent/settings.json"
+    [ -f "$cfg" ] || return 0
+
+    local short="${cfg/#$HOME/\~}"
+    if ! command -v node &>/dev/null; then
+        msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+        return 0
+    fi
+
+    local result
+    result=$(node -e "
+const fs = require('fs');
+const f = process.argv[1];
+const isOurs = s => typeof s === 'string' && (
+  s.includes('loongsuite-pilot-pi-coding-agent') ||
+  s.includes('plugins/pi-coding-agent/index.mjs')
+);
+try {
+  const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  if (!Array.isArray(data.extensions)) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data.extensions.length;
+  data.extensions = data.extensions.filter(entry => !isOurs(typeof entry === 'string' ? entry : ''));
+  if (data.extensions.length === before) { process.stdout.write('nochange'); process.exit(0); }
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write('cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$cfg" 2>/dev/null) || result="error"
+
+    case "$result" in
+        cleaned)
+            msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" ;;
+        nochange)
+            : ;;
+        *)
+            msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
+    esac
+}
+
+# ============================================================
 # CMD: uninstall
 # ============================================================
 cmd_uninstall() {
@@ -1882,6 +1924,10 @@ cmd_uninstall() {
     # Remove plugin-inject specs (OpenCode)
     msg "==> 清理 OpenCode 插件配置..." "==> Cleaning up OpenCode plugin config..."
     remove_opencode_plugin
+    echo ""
+
+    msg "==> 清理 Pi Coding Agent Extension 配置..." "==> Cleaning up Pi Coding Agent extension config..."
+    remove_pi_coding_agent_extension
     echo ""
 
     # Data directory

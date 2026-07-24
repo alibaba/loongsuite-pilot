@@ -96,6 +96,11 @@ Important fields:
 | `pluginInject` | Config paths and plugin spec. Required for plugin injection mode. |
 | `input` | Source type and source location for the collector input. |
 
+`pluginInject.configKey` can target an array field other than the default
+`plugin` / `plugins` fields (for example Pi Coding Agent uses `extensions`). Set
+`pluginInject.createIfMissing` to create the first configured JSON file when
+the agent supports an empty settings file.
+
 > When adding a `plugin-inject` agent, also register it in the uninstaller (`deploy/installer-opensource.sh` / `.ps1`) so its injected spec is removed on uninstall. Plugin-inject agents are additionally self-healed at runtime by the hook watchdog, which re-injects the spec if another tool overwrites the config.
 
 ## Emit Normalized Records Early
