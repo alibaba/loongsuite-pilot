@@ -127,6 +127,29 @@ describe('HookStrategy', () => {
       expect(secondCall.hookJsonPath).toEqual(['hooks', 'PostToolUse']);
     });
 
+    it.runIf(process.platform === 'win32')('quotes a Windows Codex PowerShell hook path with spaces', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({ hooks: {} });
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      const def = makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: 'C:/Users/Test User/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: 'C:/Users/Test User/.loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.ps1',
+          format: 'nested',
+          matcher: '*',
+          eventSubcommand: 'kebab-case',
+        },
+      });
+
+      await strategy.needsDeploy(def);
+
+      expect(mockHookManager.isHookInstalled.mock.calls[0][0].hookCommand).toBe(
+        'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass '
+        + '-File "C:/Users/Test User/.loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.ps1" stop',
+      );
+    });
+
     it('passes replaceHookCommands to hook definitions', async () => {
       mockHookManager.isHookInstalled.mockResolvedValue(true);
       const def = makeDef({

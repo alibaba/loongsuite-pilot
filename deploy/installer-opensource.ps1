@@ -241,8 +241,15 @@ function Download-AndExtract {
     Msg "==> 下载安装包: $PackageUrl" "==> Downloading: $PackageUrl"
 
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $PackageUrl -OutFile $archivePath -UseBasicParsing
+        if (Test-Path -LiteralPath $PackageUrl) {
+            Copy-Item -LiteralPath $PackageUrl -Destination $archivePath -Force
+        } elseif ($PackageUrl -match '^file://') {
+            $localPackagePath = ([Uri]$PackageUrl).LocalPath
+            Copy-Item -LiteralPath $localPackagePath -Destination $archivePath -Force
+        } else {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri $PackageUrl -OutFile $archivePath -UseBasicParsing
+        }
     } catch {
         Msg "❌ 下载失败: $_" "❌ Download failed: $_"
         exit 1

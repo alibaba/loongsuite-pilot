@@ -96,6 +96,35 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
     expect(content).toContain('# END otel-codex-hook trust');
   });
 
+  test('escapes Windows paths in TOML trust keys and verifies the decoded key', () => {
+    const windowsHooksPath = String.raw`C:\Users\测试 User\.codex\hooks.json`;
+    const eventToCommand = {
+      Stop: String.raw`powershell.exe -File "C:\Users\测试 User\.loongsuite-pilot\hooks\codex-hook.ps1" stop`,
+    };
+    const opts = {
+      configPath,
+      hooksJsonAbsPath: windowsHooksPath,
+      hookEvents: ['Stop'],
+      eventToCommand,
+      eventToGroupIndex: { Stop: 0 },
+      marker: 'otel-codex-hook',
+    } as const;
+
+    writeTrustedHashes(opts);
+
+    const content = fs.readFileSync(configPath, 'utf-8');
+    expect(content).toContain(
+      String.raw`[hooks.state."C:\\Users\\测试 User\\.codex\\hooks.json:stop:0:0"]`,
+    );
+    expect(content).not.toContain(
+      String.raw`[hooks.state."C:\Users\测试 User\.codex\hooks.json:stop:0:0"]`,
+    );
+    expect(verifyTrustHashes(opts)).toEqual({ valid: true, mismatches: [] });
+
+    writeTrustedHashes(opts);
+    expect((fs.readFileSync(configPath, 'utf-8').match(/\[hooks\.state\./g) || []).length).toBe(1);
+  });
+
   test('forceBypass=true 时写入 bypass_hook_trust = true', () => {
     writeTrustedHashes({
       configPath,

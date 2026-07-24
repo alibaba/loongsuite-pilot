@@ -70,6 +70,14 @@ describe('JsonlFlusher', () => {
   });
 
   describe('resolveFilePath with rotateDaily (T009)', () => {
+    it('writes Codex transcript entries to codex-{date}.jsonl', async () => {
+      const entry = buildTestEntry({ agentType: ClientType.CodexCliHook });
+      await flusher.send(entry);
+
+      const filePath = mockAppendLine.mock.calls[0][0];
+      expect(filePath).toContain('codex-2026-04-27.jsonl');
+    });
+
     it('uses date in filename when rotateDaily=true', async () => {
       const entry = buildTestEntry({ agentType: ClientType.Qoder });
       await flusher.send(entry);

@@ -314,6 +314,101 @@ function globalProcessedTurnIds(stateStore: StateStore): string[] {
 }
 
 describe('CodexTranscriptInput', () => {
+  it('discovers a Windows-style rollout under Unicode and spaced directories', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'Codex 用户 With Space-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createInput(root);
+    const windowsCwd = 'C:\\Users\\测试 User\\项目 空格';
+    const lines = simpleCompletedTurn(
+      'windows-session',
+      'windows-turn',
+      '检查 Windows 路径',
+      '路径正常',
+      40,
+      5,
+      '2026-07-23T12:00:00.000Z',
+    );
+    lines[1] = record('2026-07-23T12:00:01.000Z', 'turn_context', {
+      turn_id: 'windows-turn',
+      model: 'gpt-5.5',
+      cwd: windowsCwd,
+    });
+    await writeTranscriptNamed(
+      sessionDir,
+      'rollout-2026-07-23T20-00-00-windows-session.jsonl',
+      lines.join('\n') + '\n',
+    );
+
+    await waitFor(() => responsesForTurn(entries, 'windows-turn').length === 1);
+    await input.stop();
+
+    expect(entries.find(entry => entry['event.name'] === 'other')).toMatchObject({
+      'agent.codex.cwd': windowsCwd,
+      'gen_ai.input.messages_delta': [{
+        role: 'user',
+        parts: [{ type: 'text', content: '检查 Windows 路径' }],
+      }],
+    });
+    expect(responsesForTurn(entries, 'windows-turn')[0]).toMatchObject({
+      'agent.codex.cwd': windowsCwd,
+      'gen_ai.usage.total_tokens': 45,
+    });
+  });
+
+  it('ignores compacted replacement history as telemetry and continues with the next turn', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-compacted-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir } = await createInput(root);
+    const firstTurn = simpleCompletedTurn(
+      'session-1',
+      'turn-before-compact',
+      'first prompt',
+      'first response',
+      10,
+      2,
+      '2026-07-23T12:00:00.000Z',
+    );
+    const compacted = record('2026-07-23T12:01:00.000Z', 'compacted', {
+      message: 'summary of prior context',
+      replacement_history: [
+        {
+          type: 'function_call',
+          call_id: 'historical-call',
+          name: 'exec_command',
+          arguments: '{"cmd":"must-not-be-emitted"}',
+        },
+        {
+          type: 'function_call_output',
+          call_id: 'historical-call',
+          output: 'historical output',
+        },
+      ],
+      window_number: 2,
+      window_id: 'window-2',
+    });
+    const secondTurn = simpleCompletedTurn(
+      'session-1',
+      'turn-after-compact',
+      'second prompt',
+      'second response',
+      20,
+      3,
+      '2026-07-23T12:02:00.000Z',
+    ).slice(1);
+    await writeTranscript(
+      sessionDir,
+      [...firstTurn, compacted, ...secondTurn].join('\n') + '\n',
+    );
+
+    await waitFor(() => responsesForTurn(entries, 'turn-after-compact').length === 1);
+    await input.stop();
+
+    expect(responsesForTurn(entries, 'turn-before-compact')).toHaveLength(1);
+    expect(responsesForTurn(entries, 'turn-after-compact')).toHaveLength(1);
+    expect(entries.some(entry => entry['gen_ai.tool.call.id'] === 'historical-call')).toBe(false);
+    expect(responsesForTurn(entries, 'turn-after-compact')[0]?.['gen_ai.usage.total_tokens']).toBe(23);
+  });
+
   it('emits a terminal LLM pair with zero usage for a completed turn without output', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-empty-completed-'));
     tempDirs.push(root);

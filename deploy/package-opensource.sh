@@ -58,7 +58,7 @@ mkdir -p "$PKG_DIR"
 
 echo "==> Generating VERSION file..."
 PKG_VERSION=$(node -e "process.stdout.write(require('./package.json').version)")
-GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+GIT_COMMIT="${LOONGSUITE_PILOT_BUILD_ID:-$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")}"
 GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
@@ -130,7 +130,21 @@ echo "    ✅ $OUTPUT_PATH ($PKG_SIZE)"
 
 # ── Create .zip (Windows) ──
 echo "==> Creating .zip package..."
-(cd "$STAGE_DIR" && zip -qr "$ZIP_OUTPUT_PATH" "$PACKAGE_NAME")
+if command -v zip >/dev/null 2>&1; then
+    (cd "$STAGE_DIR" && zip -qr "$ZIP_OUTPUT_PATH" "$PACKAGE_NAME")
+elif command -v powershell.exe >/dev/null 2>&1; then
+    # Windows bsdtar may ignore `-a` when invoked through Git Bash and produce
+    # an uncompressed TAR with a .zip suffix. Use Compress-Archive so the
+    # output is guaranteed to be a real ZIP (PK header + central directory).
+    STAGE_PACKAGE_WIN="$(cygpath -w "$STAGE_DIR/$PACKAGE_NAME")"
+    ZIP_OUTPUT_WIN="$(cygpath -w "$ZIP_OUTPUT_PATH")"
+    PILOT_STAGE_PACKAGE="$STAGE_PACKAGE_WIN" PILOT_ZIP_OUTPUT="$ZIP_OUTPUT_WIN" \
+        powershell.exe -NoProfile -NonInteractive -Command \
+        'Compress-Archive -LiteralPath $env:PILOT_STAGE_PACKAGE -DestinationPath $env:PILOT_ZIP_OUTPUT -Force'
+else
+    # BSD tar supports archive selection by output extension on Unix.
+    (cd "$STAGE_DIR" && tar -a -c -f "$ZIP_OUTPUT_PATH" "$PACKAGE_NAME")
+fi
 
 ZIP_SIZE=$(du -h "$ZIP_OUTPUT_PATH" | cut -f1)
 echo "    ✅ $ZIP_OUTPUT_PATH ($ZIP_SIZE)"
@@ -142,4 +156,3 @@ tar -tzf "$OUTPUT_PATH" | sed -n '1,20p'
 echo "    ... (truncated)"
 echo ""
 echo "Done."
-

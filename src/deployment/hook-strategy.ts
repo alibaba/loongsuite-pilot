@@ -34,11 +34,11 @@ function eventToSubcommand(event: string): string {
  */
 function wrapPs1Command(cmd: string): string {
   if (process.platform !== 'win32') return cmd;
-  const parts = cmd.split(' ');
-  const script = parts[0];
-  if (!script.endsWith('.ps1')) return cmd;
-  const args = parts.slice(1).join(' ');
-  const wrapped = `powershell -NoProfile -ExecutionPolicy Bypass -File ${script}`;
+  const match = cmd.match(/^(.*?\.ps1)(?:\s+(.*))?$/i);
+  if (!match) return cmd;
+  const script = match[1];
+  const args = match[2] ?? '';
+  const wrapped = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${script}"`;
   return args ? `${wrapped} ${args}` : wrapped;
 }
 

@@ -268,13 +268,12 @@ function Get-TaskRunning {
     return $task.State -eq "Running"
 }
 
-# Register a scheduled task, trying S4U first, then falling back to Interactive.
-# S4U runs under the user's identity in a non-interactive session (survives
-# RDP/SSH disconnect, no stored password) but requires the "Log on as a batch
-# job" right, which standard (non-admin) users lack -- so S4U registration throws
-# "Access is denied" (0x80070005) for them. Interactive needs no special right and
-# still auto-starts at logon, so it is the fallback before dropping to a plain
-# background process.
+# Register a scheduled task, preferring Interactive and falling back to S4U.
+# The hidden wscript launcher prevents a visible console in the desktop session.
+# Interactive also keeps the collector manageable by the same user: an S4U task
+# runs in Session 0 and can leave a node child that a normal PowerShell cannot
+# terminate during reinstall. S4U remains a fallback for environments that
+# explicitly support and prefer non-interactive task execution.
 function Register-PilotTask {
     param(
         [string]$taskName,
@@ -285,10 +284,10 @@ function Register-PilotTask {
     )
     $userId = whoami
     $lastErr = $null
-    foreach ($logonType in @("S4U", "Interactive")) {
-        # Clear any task a previous attempt left behind. A failed S4U registration
+    foreach ($logonType in @("Interactive", "S4U")) {
+        # Clear any task a previous attempt left behind. A failed registration
         # can still create the task entry before erroring on the principal, which
-        # would make the Interactive retry fail with "already exists".
+        # would make the fallback attempt fail with "already exists".
         try { schtasks.exe /Delete /TN "$TASK_FOLDER\$taskName" /F 2>$null | Out-Null } catch {}
         try {
             # On-disk location of the task definition (absolute filesystem path).

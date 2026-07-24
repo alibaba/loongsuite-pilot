@@ -30,12 +30,12 @@ describe('AgentDefLoader', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  function makeLoader() {
+  function makeLoader(overrides?: { pilotDir?: string; dataDir?: string }) {
     return new AgentDefLoader({
       builtinDir,
       localDir,
-      pilotDir: '/opt/pilot',
-      dataDir: '/home/user/.loongsuite-pilot',
+      pilotDir: overrides?.pilotDir ?? '/opt/pilot',
+      dataDir: overrides?.dataDir ?? '/home/user/.loongsuite-pilot',
     });
   }
 
@@ -118,7 +118,11 @@ describe('AgentDefLoader', () => {
     const defs = await loader.load();
 
     expect(defs[0].detection.paths[0]).toBe('/home/user/.loongsuite-pilot/logs');
-    expect(defs[0].hook!.hookCommand).toBe('/opt/pilot/hooks/test.sh');
+    expect(defs[0].hook!.hookCommand).toBe(
+      process.platform === 'win32'
+        ? '/opt/pilot/hooks/test.ps1'
+        : '/opt/pilot/hooks/test.sh',
+    );
   });
 
   it('expands ~ to home directory', async () => {
@@ -133,7 +137,38 @@ describe('AgentDefLoader', () => {
     const loader = makeLoader();
     const defs = await loader.load();
 
-    expect(defs[0].detection.paths[0]).toBe(path.join(os.homedir(), '.cursor'));
+    expect(defs[0].detection.paths[0]).toBe(
+      path.join(os.homedir(), '.cursor').replaceAll('\\', '/'),
+    );
+  });
+
+  it.runIf(process.platform === 'win32')('resolves the Codex hook to a PowerShell script under a spaced data path', async () => {
+    const def = {
+      id: 'codex',
+      displayName: 'Codex',
+      deployMode: 'hook',
+      detection: { paths: ['~/.codex'], commands: [] },
+      hook: {
+        settingsPath: '~/.codex/hooks.json',
+        events: ['Stop'],
+        hookCommand: '$PILOT_DATA/hooks/codex-loongsuite-pilot-hook.sh',
+        format: 'nested',
+        eventSubcommand: 'kebab-case',
+      },
+    };
+    await fs.writeFile(path.join(builtinDir, 'codex.json'), JSON.stringify(def));
+
+    const loader = makeLoader({
+      dataDir: 'C:\\Users\\Test User\\.loongsuite-pilot',
+    });
+    const defs = await loader.load();
+
+    expect(defs[0].hook!.hookCommand).toBe(
+      'C:/Users/Test User/.loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.ps1',
+    );
+    expect(defs[0].hook!.settingsPath).toBe(
+      path.join(os.homedir(), '.codex', 'hooks.json').replaceAll('\\', '/'),
+    );
   });
 
   it('handles missing directories gracefully', async () => {

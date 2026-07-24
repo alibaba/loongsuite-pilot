@@ -1,145 +1,200 @@
-# Codex hook entrypoint (Windows) — delegates to codex-hook-processor.mjs.
+# Codex Stop hook entrypoint for Windows.
 #
-# Usage (registered in ~/.codex/hooks.json by pilot HookStrategy):
-#   powershell -File $PILOT_DATA/hooks/codex-loongsuite-pilot-hook.ps1 <subcommand>
+# Registered command:
+#   powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+#     -File "<pilot-data>\hooks\codex-loongsuite-pilot-hook.ps1" stop
 #
-# Fail-open: any error outputs "{}" and exits 0.
+# The hook is fail-open: it always acknowledges Codex with one JSON object and
+# exits zero. Telemetry is recovered only by CodexTranscriptInput.
 
-$ErrorActionPreference = "Continue"
+param(
+    [Parameter(Position = 0)]
+    [string]$Subcommand = "unknown"
+)
+
+$ErrorActionPreference = "Stop"
 $EMPTY_RESULT = '{}'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Processor = Join-Path $ScriptDir "codex-hook-processor.mjs"
-$Subcommand = if ($args.Count -gt 0) { $args[0] } else { "unknown" }
 
 function Log-Error {
     param([string]$Stage, [string]$Message)
     try {
-        $dataDir = if ($env:LOONGSUITE_PILOT_DATA_DIR) { $env:LOONGSUITE_PILOT_DATA_DIR }
-                   else { Join-Path $env:USERPROFILE ".loongsuite-pilot" }
-        $day = (Get-Date -Format "yyyy-MM-dd")
+        $dataDir = if ($env:LOONGSUITE_PILOT_DATA_DIR) {
+            $env:LOONGSUITE_PILOT_DATA_DIR
+        } else {
+            Join-Path $env:USERPROFILE ".loongsuite-pilot"
+        }
+        $day = Get-Date -Format "yyyy-MM-dd"
         $dir = Join-Path $dataDir "logs\codex\errors"
-        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
         $file = Join-Path $dir "codex-error-$day.jsonl"
-        $time = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
-        $escapedMsg = $Message -replace '\\', '\\\\' -replace '"', '\"'
-        $line = "{`"time`":`"$time`",`"gen_ai.agent.type`":`"codex`",`"stage`":`"$Stage`",`"error.type`":`"ps1_$Stage`",`"error.message`":`"$escapedMsg`"}"
-        Add-Content -Path $file -Value $line
+        $record = [ordered]@{
+            time = (Get-Date).ToUniversalTime().ToString("o")
+            "gen_ai.agent.type" = "codex"
+            stage = $Stage
+            "error.type" = "ps1_$Stage"
+            "error.message" = $Message
+        }
+        Add-Content -LiteralPath $file -Value ($record | ConvertTo-Json -Compress)
     } catch {}
 }
 
-if (-not [Console]::IsInputRedirected) {
-    Write-Output $EMPTY_RESULT
-    exit 0
+function Write-EmptyResult {
+    [Console]::Out.WriteLine($EMPTY_RESULT)
 }
 
-if (-not (Test-Path $Processor)) {
-    Write-Error "[codex-hook] processor not found: $Processor"
-    Log-Error "missing_processor" "hook processor not found: $Processor"
-    Write-Output $EMPTY_RESULT
-    exit 0
+function Convert-NodePath {
+    param([string]$PathValue)
+    if (-not $PathValue) { return $PathValue }
+
+    $candidate = $PathValue.Trim().Trim('"')
+    if ($candidate -match '^/([A-Za-z])/(.*)$') {
+        $candidate = "$($Matches[1]):\$($Matches[2] -replace '/', '\')"
+    }
+    if (-not [System.IO.Path]::HasExtension($candidate) -and (Test-Path -LiteralPath "$candidate.exe")) {
+        $candidate = "$candidate.exe"
+    }
+    return $candidate
 }
 
 $MIN_NODE_MAJOR = 18
 
 function Test-NodeSuitable {
-    param([string]$bin)
-    if (-not (Test-Path $bin)) { return $false }
+    param([string]$Bin)
+    $resolved = Convert-NodePath $Bin
+    if (-not $resolved -or -not (Test-Path -LiteralPath $resolved)) { return $false }
     try {
-        $ver = & $bin --version 2>$null
-        if (-not $ver) { return $false }
-        $major = [int]($ver -replace '^v','').Split('.')[0]
+        $version = & $resolved --version 2>$null
+        if (-not $version) { return $false }
+        $major = [int](($version -replace '^v', '').Split('.')[0])
         return $major -ge $MIN_NODE_MAJOR
-    } catch { return $false }
+    } catch {
+        return $false
+    }
 }
 
 function Resolve-NodeBin {
-    $pinFile = Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
-    if (Test-Path $pinFile) {
-        $pinned = (Get-Content $pinFile -ErrorAction SilentlyContinue).Trim()
-        if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
+    $dataDir = if ($env:LOONGSUITE_PILOT_DATA_DIR) {
+        $env:LOONGSUITE_PILOT_DATA_DIR
+    } else {
+        Join-Path $env:USERPROFILE ".loongsuite-pilot"
     }
+    $pinFile = Join-Path $dataDir "node-bin"
+    if (Test-Path -LiteralPath $pinFile) {
+        $pinned = Convert-NodePath ((Get-Content -LiteralPath $pinFile -ErrorAction SilentlyContinue).Trim())
+        if (Test-NodeSuitable $pinned) { return $pinned }
+    }
+
     $candidates = @()
-    $nvmHome = $env:NVM_HOME
-    if ($nvmHome -and (Test-Path $nvmHome)) {
-        $nvmDirs = Get-ChildItem $nvmHome -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
-        foreach ($d in $nvmDirs) { $candidates += Join-Path $d.FullName "node.exe" }
+    if ($env:NVM_HOME -and (Test-Path -LiteralPath $env:NVM_HOME)) {
+        $nvmDirs = Get-ChildItem -LiteralPath $env:NVM_HOME -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending
+        foreach ($dir in $nvmDirs) {
+            $candidates += Join-Path $dir.FullName "node.exe"
+        }
     }
+
     $fnmDir = Join-Path $env:USERPROFILE ".fnm\node-versions"
-    if (Test-Path $fnmDir) {
-        $fnmDirs = Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
-        foreach ($d in $fnmDirs) { $candidates += Join-Path $d.FullName "installation\node.exe" }
+    if (Test-Path -LiteralPath $fnmDir) {
+        $fnmDirs = Get-ChildItem -LiteralPath $fnmDir -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending
+        foreach ($dir in $fnmDirs) {
+            $candidates += Join-Path $dir.FullName "installation\node.exe"
+        }
     }
+
     $candidates += Join-Path $env:USERPROFILE ".volta\bin\node.exe"
     $candidates += "C:\Program Files\nodejs\node.exe"
     $candidates += "C:\Program Files (x86)\nodejs\node.exe"
     $pathNode = Get-Command node -ErrorAction SilentlyContinue
     if ($pathNode) { $candidates += $pathNode.Source }
-    foreach ($c in $candidates) {
-        if (Test-NodeSuitable $c) { return $c }
+
+    foreach ($candidate in $candidates) {
+        $resolved = Convert-NodePath $candidate
+        if (Test-NodeSuitable $resolved) { return $resolved }
     }
     return $null
 }
 
+if (-not [Console]::IsInputRedirected) {
+    Write-EmptyResult
+    exit 0
+}
+
+if (-not (Test-Path -LiteralPath $Processor)) {
+    Log-Error "missing_processor" "hook processor not found: $Processor"
+    Write-EmptyResult
+    exit 0
+}
+
 $nodeBin = Resolve-NodeBin
 if (-not $nodeBin) {
-    Write-Error "[codex-hook] node >= $MIN_NODE_MAJOR not found"
     Log-Error "missing_node" "node >= $MIN_NODE_MAJOR not found"
-    Write-Output $EMPTY_RESULT
+    Write-EmptyResult
     exit 0
 }
 
 try {
-    # Read stdin as raw bytes to avoid PowerShell encoding issues (GB2312/ASCII mangles UTF-8)
+    # Preserve Codex's UTF-8 JSON exactly; PowerShell 5.1 text pipelines can
+    # otherwise reinterpret non-ASCII prompts using a legacy code page.
     $stdinStream = [Console]::OpenStandardInput()
-    $ms = New-Object System.IO.MemoryStream
-    $stdinStream.CopyTo($ms)
-    $rawBytes = $ms.ToArray()
-    $ms.Dispose()
+    $memory = New-Object System.IO.MemoryStream
+    $stdinStream.CopyTo($memory)
+    [byte[]]$rawBytes = $memory.ToArray()
+    $memory.Dispose()
 
-    # Strip UTF-8 BOM (EF BB BF) before any encoding fixup
-    if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
-        $rawBytes = $rawBytes[3..($rawBytes.Length - 1)]
-    }
-
-    # Fix Cursor's UTF-8→GBK double-encoding on Chinese Windows.
-    if ($rawBytes.Length -gt 2) {
-        try {
-            $utf8    = [System.Text.Encoding]::UTF8
-            $gbk     = [System.Text.Encoding]::GetEncoding(936)
-            $garbled = $utf8.GetString($rawBytes)
-            $recovered = $gbk.GetBytes($garbled)
-
-            $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
-            [void]$strictUtf8.GetString($recovered)
-
-            $rawBytes = $recovered
-        } catch {}
+    if (
+        $rawBytes.Length -ge 3 -and
+        $rawBytes[0] -eq 0xEF -and
+        $rawBytes[1] -eq 0xBB -and
+        $rawBytes[2] -eq 0xBF
+    ) {
+        if ($rawBytes.Length -eq 3) {
+            $rawBytes = [byte[]]@()
+        } else {
+            $rawBytes = $rawBytes[3..($rawBytes.Length - 1)]
+        }
     }
 
     if ($rawBytes.Length -eq 0) {
         $result = & $nodeBin $Processor $Subcommand 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            throw "processor exited with code $LASTEXITCODE"
+        }
+        $result = $result -join [Environment]::NewLine
     } else {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $nodeBin
-        $psi.Arguments = "`"$Processor`" $Subcommand"
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardInput = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $false
-        $psi.CreateNoWindow = $true
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $nodeBin
+        $startInfo.Arguments = "`"$Processor`" `"$Subcommand`""
+        $startInfo.UseShellExecute = $false
+        $startInfo.RedirectStandardInput = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.CreateNoWindow = $true
 
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        $proc.StandardInput.BaseStream.Write($rawBytes, 0, $rawBytes.Length)
-        $proc.StandardInput.Close()
-        $result = $proc.StandardOutput.ReadToEnd()
-        $proc.WaitForExit()
+        $process = [System.Diagnostics.Process]::Start($startInfo)
+        $process.StandardInput.BaseStream.Write($rawBytes, 0, $rawBytes.Length)
+        $process.StandardInput.Close()
+        $result = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            throw "processor exited with code $($process.ExitCode): $stderr"
+        }
     }
-    if ($result) { Write-Output $result } else { Write-Output $EMPTY_RESULT }
+
+    if ($result -and $result.Trim()) {
+        [Console]::Out.WriteLine($result.Trim())
+    } else {
+        Write-EmptyResult
+    }
 } catch {
-    Write-Error "[codex-hook] processor failed (subcommand=$Subcommand)"
-    Log-Error "processor_failed" "hook processor exited non-zero (subcommand=$Subcommand)"
-    Write-Output $EMPTY_RESULT
+    Log-Error "processor_failed" $_.Exception.Message
+    Write-EmptyResult
 }
 
 exit 0

@@ -311,7 +311,11 @@ download_and_extract() {
     msg "==> 下载安装包: $PACKAGE_URL" \
         "==> Downloading: $PACKAGE_URL"
 
-    if command -v curl &>/dev/null; then
+    if [[ "$PACKAGE_URL" == file://* ]]; then
+        # curl on Git for Windows does not reliably resolve MSYS file URLs.
+        LOCAL_PACKAGE_PATH="${PACKAGE_URL#file://}"
+        cp "$LOCAL_PACKAGE_PATH" "$TMP_DIR/package.tar.gz"
+    elif command -v curl &>/dev/null; then
         curl -fsSL "$PACKAGE_URL" -o "$TMP_DIR/package.tar.gz"
     else
         wget -q "$PACKAGE_URL" -O "$TMP_DIR/package.tar.gz"
@@ -668,13 +672,21 @@ migrate_legacy_layout() {
 # ============================================================
 write_config() {
     local config_file="$DATA_DIR/config.json"
+    local config_file_native="$config_file"
+    local data_dir_native="$DATA_DIR"
+    if command -v cygpath >/dev/null 2>&1; then
+        config_file_native="$(cygpath -w "$config_file")"
+        data_dir_native="$(cygpath -w "$DATA_DIR")"
+    fi
+    local config_file_js="${config_file_native//\\/\\\\}"
+    local data_dir_js="${data_dir_native//\\/\\\\}"
     msg "==> 写入配置文件 $config_file ..." \
         "==> Writing config to $config_file ..."
     mkdir -p "$DATA_DIR"
 
     "$NODE_BIN" -e "
 const fs = require('fs');
-const path = '$config_file';
+const path = '$config_file_js';
 
 let existing = {};
 try { existing = JSON.parse(fs.readFileSync(path, 'utf-8')); } catch {}
@@ -682,7 +694,7 @@ try { existing = JSON.parse(fs.readFileSync(path, 'utf-8')); } catch {}
 const config = {
   ...existing,
   enabled: true,
-  dataDir: '$DATA_DIR',
+  dataDir: '$data_dir_js',
 };
 delete config.internal;
 if (config.userId === undefined && config['user.id'] !== undefined) {
