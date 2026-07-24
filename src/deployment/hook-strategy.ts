@@ -128,6 +128,9 @@ export class HookStrategy implements DeployStrategy {
         return true;
       }
     }
+    if (await this.needsTrustRepairForCodex(def)) {
+      return true;
+    }
     return false;
   }
 
@@ -140,6 +143,28 @@ export class HookStrategy implements DeployStrategy {
 
     const existing = await readJsonFile<Record<string, unknown>>(settingsPath);
     return existing?.version !== undefined;
+  }
+
+  private async needsTrustRepairForCodex(def: AgentDefinition): Promise<boolean> {
+    const cfg = def.hook?.trustToml;
+    if (!cfg || !def.hook) return false;
+
+    const hookCommand = resolveHome(def.hook.hookCommand);
+    const eventToCommand: Record<string, string> = {};
+    for (const event of def.hook.events) {
+      eventToCommand[event] = formatHookCommand(
+        hookCommand, event, def.hook.eventSubcommand, def.id,
+      );
+    }
+    const eventToGroupIndex = await this.resolveGroupIndices(def);
+    return !verifyTrustHashes({
+      configPath: resolveHome(cfg.configPath),
+      hooksJsonAbsPath: path.resolve(resolveHome(def.hook.settingsPath)),
+      hookEvents: def.hook.events,
+      eventToCommand,
+      eventToGroupIndex,
+      marker: cfg.marker,
+    }).valid;
   }
 
   async deploy(def: AgentDefinition): Promise<DeployResult> {

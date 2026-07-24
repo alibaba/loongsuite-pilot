@@ -22,8 +22,15 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
   ensureDir: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('../../../src/deployment/codex-trust-writer.js', () => ({
+  writeTrustedHashes: vi.fn(),
+  removeTrustBlock: vi.fn(),
+  verifyTrustHashes: vi.fn(() => ({ valid: true, mismatches: [] })),
+}));
+
 import { detectAgent } from '../../../src/deployment/detect-utils.js';
 import { readJsonFile, writeJsonFile } from '../../../src/utils/fs-utils.js';
+import { verifyTrustHashes } from '../../../src/deployment/codex-trust-writer.js';
 
 function makeDef(overrides?: Partial<AgentDefinition>): AgentDefinition {
   return {
@@ -107,6 +114,34 @@ describe('HookStrategy', () => {
 
       expect(result).toBe(true);
       expect(mockHookManager.isHookInstalled).not.toHaveBeenCalled();
+    });
+
+    it('returns true when Codex hook exists but its trust state is invalid', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({ hooks: {} });
+      vi.mocked(verifyTrustHashes).mockReturnValue({
+        valid: false,
+        mismatches: ['missing trust state'],
+      });
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+
+      const result = await strategy.needsDeploy(makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          trustToml: {
+            configPath: '/home/.codex/config.toml',
+            trustAlgo: 'v1',
+            marker: 'otel-codex-hook',
+          },
+        },
+      }));
+
+      expect(result).toBe(true);
+      expect(verifyTrustHashes).toHaveBeenCalledOnce();
     });
 
     it('builds correct hook definitions from agent config', async () => {
