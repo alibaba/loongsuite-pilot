@@ -36,6 +36,13 @@ $UPDATER_PID_FILE = Join-Path $DATA_DIR "loongsuite-pilot-updater.pid"
 $LOG_DIR = Join-Path $DATA_DIR "logs"
 $LOG_FILE = Join-Path $LOG_DIR "loongsuite-pilot-service.log"
 $UPDATER_LOG_FILE = Join-Path $LOG_DIR "loongsuite-pilot-updater.log"
+$MONITOR_LOG_FILE = Join-Path $LOG_DIR "loongsuite-pilot-monitor-process.log"
+$MONITOR_ERROR_LOG_FILE = Join-Path $LOG_DIR "loongsuite-pilot-monitor-process.error.log"
+$DASHBOARD_LOG_FILE = Join-Path $LOG_DIR "loongsuite-pilot-monitor-dashboard.log"
+$DASHBOARD_ERROR_LOG_FILE = Join-Path $LOG_DIR "loongsuite-pilot-monitor-dashboard.error.log"
+$MONITOR_PID_FILE = Join-Path $DATA_DIR "loongsuite-pilot-monitor.pid"
+$DASHBOARD_PID_FILE = Join-Path $DATA_DIR "loongsuite-pilot-monitor-dashboard.pid"
+$MONITOR_DATA_DIR = Join-Path $LOG_DIR "process-monitor"
 $CONFIG_FILE = Join-Path $DATA_DIR "config.json"
 $SPAN_ATTR_FILE = Join-Path $DATA_DIR "span-attributes.json"
 $NODE_PIN_FILE = Join-Path $CACHE_DIR "node-bin"
@@ -178,6 +185,67 @@ function Resolve-PreviousVersion {
         if ($dir -and (Test-Path $path)) { return $path }
     }
     return $null
+}
+
+function Resolve-SupportScript {
+    param([string]$name)
+
+    $repoRoot = Split-Path -Parent $PSScriptRoot
+    $versionDir = Resolve-CurrentVersion
+    $candidates = @(
+        (Join-Path $PSScriptRoot $name),
+        (Join-Path $repoRoot "scripts\$name")
+    )
+    if ($versionDir) { $candidates += Join-Path $versionDir "scripts\$name" }
+    $candidates += Join-Path $PACKAGE_DIR "scripts\$name"
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    return $null
+}
+
+function Resolve-RuntimeEntry {
+    $repoRoot = Split-Path -Parent $PSScriptRoot
+    $localPackage = Join-Path $repoRoot "package.json"
+    $localSrc = Join-Path $repoRoot "src"
+    $localEntry = Join-Path $repoRoot "dist\index.js"
+    if ((Test-Path $localPackage) -and (Test-Path $localSrc)) {
+        if (Test-Path $localEntry) { return $localEntry }
+        return $null
+    }
+
+    $versionDir = Resolve-CurrentVersion
+    $candidates = @()
+    if ($versionDir) { $candidates += Join-Path $versionDir "dist\index.js" }
+    $candidates += Join-Path $PACKAGE_DIR "dist\index.js"
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    return $null
+}
+
+function Invoke-RuntimeCli {
+    param(
+        [string]$runtimeCommand,
+        [string[]]$arguments = @()
+    )
+
+    Ensure-Dirs
+    Sync-BootstrapScripts
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) { Write-Error "node runtime not found"; exit 1 }
+    $entry = Resolve-RuntimeEntry
+    if (-not $entry) { Write-Error "loongsuite-pilot runtime entry not found; run 'npm run build' first"; exit 1 }
+
+    $previousConfig = $env:AGENT_DATA_COLLECTION_CONFIG
+    $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
+    try {
+        & $nodeBin $entry $runtimeCommand @arguments
+        exit $LASTEXITCODE
+    } finally {
+        $env:AGENT_DATA_COLLECTION_CONFIG = $previousConfig
+    }
 }
 
 function Get-VersionInfo {
@@ -570,6 +638,10 @@ function Cmd-Start {
 # CMD: stop
 # ============================================================
 function Cmd-Stop {
+    # Keep parity with the Unix CLI: stopping Pilot also stops monitor helpers.
+    Stop-PidFile $DASHBOARD_PID_FILE
+    Stop-PidFile $MONITOR_PID_FILE
+
     # Stop Task Scheduler tasks
     foreach ($name in @($TASK_NAME_UPDATER, $TASK_NAME_COLLECTOR)) {
         $task = Get-ScheduledTask -TaskName $name -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
@@ -821,6 +893,16 @@ function Cmd-Status {
         Write-Host "   updater: stopped"
     }
 
+    $monitorRunning = Test-PidRunning $MONITOR_PID_FILE
+    $dashboardRunning = Test-PidRunning $DASHBOARD_PID_FILE
+    if ($monitorRunning -and $dashboardRunning) {
+        Write-Host "   monitor: running"
+    } elseif ($monitorRunning -or $dashboardRunning) {
+        Write-Host "   monitor: partially running"
+    } else {
+        Write-Host "   monitor: stopped"
+    }
+
     # Autostart status
     if (Get-TaskExists $TASK_NAME_COLLECTOR) {
         $task = Get-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\"
@@ -935,6 +1017,99 @@ function Cmd-Rollback {
 }
 
 # ============================================================
+# CMD: token-usage / worker
+# ============================================================
+function Cmd-TokenUsage {
+    Invoke-RuntimeCli "token-usage" $SubArgs
+}
+
+function Cmd-Worker {
+    Invoke-RuntimeCli "worker" $SubArgs
+}
+
+# ============================================================
+# CMD: monitor
+# ============================================================
+function Start-MonitorProcess {
+    if (Test-PidRunning $MONITOR_PID_FILE) {
+        $pidVal = (Get-Content -LiteralPath $MONITOR_PID_FILE).Trim()
+        Write-Host "loongsuite-pilot process monitor is already running (PID $pidVal)"
+        return
+    }
+
+    $script = Resolve-SupportScript "monitor-loongsuite-pilot.ps1"
+    if (-not $script) { Write-Error "monitor script missing"; exit 1 }
+    Ensure-Dirs
+    if (-not (Test-Path -LiteralPath $MONITOR_DATA_DIR)) {
+        New-Item -ItemType Directory -Path $MONITOR_DATA_DIR -Force | Out-Null
+    }
+
+    $process = Start-Process -FilePath "powershell.exe" `
+        -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "`"$script`"") `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $MONITOR_LOG_FILE `
+        -RedirectStandardError $MONITOR_ERROR_LOG_FILE `
+        -PassThru
+    Set-Content -LiteralPath $MONITOR_PID_FILE -Value $process.Id
+    Write-Host "loongsuite-pilot process monitor started (PID $($process.Id))"
+}
+
+function Stop-MonitorProcess {
+    Stop-PidFile $MONITOR_PID_FILE
+    Write-Host "loongsuite-pilot process monitor stopped"
+}
+
+function Start-MonitorDashboard {
+    if (Test-PidRunning $DASHBOARD_PID_FILE) {
+        $pidVal = (Get-Content -LiteralPath $DASHBOARD_PID_FILE).Trim()
+        Write-Host "loongsuite-pilot dashboard is already running (PID $pidVal)"
+        return
+    }
+
+    $script = Resolve-SupportScript "serve-loongsuite-pilot-monitor.mjs"
+    if (-not $script) { Write-Error "dashboard script missing"; exit 1 }
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) { Write-Error "node runtime not found"; exit 1 }
+    Ensure-Dirs
+
+    $process = Start-Process -FilePath $nodeBin `
+        -ArgumentList @("`"$script`"") `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $DASHBOARD_LOG_FILE `
+        -RedirectStandardError $DASHBOARD_ERROR_LOG_FILE `
+        -PassThru
+    Set-Content -LiteralPath $DASHBOARD_PID_FILE -Value $process.Id
+    Write-Host "loongsuite-pilot dashboard started (PID $($process.Id))"
+    $port = if ($env:LOONGSUITE_PILOT_MONITOR_PORT) { $env:LOONGSUITE_PILOT_MONITOR_PORT } else { "8765" }
+    Write-Host "   open http://127.0.0.1:$port/"
+}
+
+function Stop-MonitorDashboard {
+    Stop-PidFile $DASHBOARD_PID_FILE
+    Write-Host "loongsuite-pilot dashboard stopped"
+}
+
+function Cmd-Monitor {
+    $sub = if ($SubArgs.Count -ge 1) { $SubArgs[0].ToLower() } else { "" }
+    switch ($sub) {
+        "start" {
+            Start-MonitorProcess
+            Start-MonitorDashboard
+            Write-Host "loongsuite-pilot monitor is running"
+        }
+        "stop" {
+            Stop-MonitorDashboard
+            Stop-MonitorProcess
+            Write-Host "loongsuite-pilot monitor stopped"
+        }
+        default {
+            Write-Host "Usage: loongsuite-pilot monitor <start|stop>"
+            if ($sub -notin @("", "help", "-h", "--help")) { exit 1 }
+        }
+    }
+}
+
+# ============================================================
 # CMD: log (tail service log)
 # ============================================================
 function Cmd-Log {
@@ -1001,7 +1176,7 @@ if (op === "set") {
 }
 
 function Cmd-Help {
-    Write-Host "Usage: loongsuite-pilot <command>"
+    Write-Host "Usage: loongsuite-pilot <command> [options]"
     Write-Host ""
     Write-Host "Commands:"
     Write-Host "  start           Start the collector service"
@@ -1010,6 +1185,11 @@ function Cmd-Help {
     Write-Host "  status          Show service status (default)"
     Write-Host "  info            Show version and config info"
     Write-Host "  log             Tail the service log"
+    Write-Host "  token-usage     Show token usage TUI"
+    Write-Host "  tokens          Alias for token-usage"
+    Write-Host "  monitor start   Start process monitor and dashboard"
+    Write-Host "  monitor stop    Stop process monitor and dashboard"
+    Write-Host "  worker ...      Manage local remote-controlled workers"
     Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     Write-Host "  rollback        Roll back to the previous version"
     Write-Host "  help            Show this help message"
@@ -1025,6 +1205,10 @@ switch ($Command.ToLower()) {
     "status"             { Cmd-Status }
     "info"               { Cmd-Info }
     "log"                { Cmd-Log }
+    "token-usage"        { Cmd-TokenUsage }
+    "tokens"             { Cmd-TokenUsage }
+    "monitor"            { Cmd-Monitor }
+    "worker"             { Cmd-Worker }
     "rollback"           { Cmd-Rollback }
     "restart-collector"  { Cmd-RestartCollector }
     "restart-updater"    { Cmd-RestartUpdater }
