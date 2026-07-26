@@ -130,6 +130,45 @@ describe('WorkBuddy audit-event builder', () => {
     expect(entries.filter(entry => entry['event.name'] === 'tool.result')
       .every(entry => entry['tool.result.status'] === undefined)).toBe(true);
   });
+
+  it('keeps generated tool IDs correlated and omits malformed structured payloads', async () => {
+    const records = fixtureRecords().map(record => {
+      if (record.type === 'function_call' && record.callId === 'call-synthetic-a') {
+        return { ...record, callId: undefined, arguments: '  {"broken":' };
+      }
+      if (record.type === 'function_call' && record.callId === 'call-synthetic-b') {
+        return { ...record, arguments: 'plain synthetic argument' };
+      }
+      if (record.type === 'function_call_result' && record.callId === 'call-synthetic-a') {
+        return { ...record, output: '  [broken' };
+      }
+      return record;
+    });
+    const entries = (await buildWorkBuddyEvents(records, { sessionId: 'session-1' }))
+      .map(item => item.entry);
+    const firstResponse = entries.find(entry =>
+      entry['event.name'] === 'llm.response'
+      && entry['gen_ai.response.finish_reasons']?.includes('tool_call'));
+    const toolParts = ((firstResponse?.['gen_ai.output.messages'] as any)?.[0]?.parts ?? [])
+      .filter((part: any) => part.type === 'tool_call');
+    const toolCalls = entries.filter(entry => entry['event.name'] === 'tool.call');
+    const toolResults = entries.filter(entry => entry['event.name'] === 'tool.result');
+
+    expect(toolParts.map((part: any) => part.id))
+      .toEqual(toolCalls.map(entry => entry['gen_ai.tool.call.id']));
+    expect(new Set(toolParts.map((part: any) => part.id)).size).toBe(2);
+    expect(toolParts[0]).not.toHaveProperty('arguments');
+    expect(toolCalls[0]['gen_ai.tool.call.arguments']).toBeUndefined();
+    expect(toolParts[1].arguments).toBe('plain synthetic argument');
+    expect(toolCalls[1]['gen_ai.tool.call.arguments']).toBe('plain synthetic argument');
+    expect(toolResults[0]['gen_ai.tool.call.result']).toBeUndefined();
+
+    const nextRequest = entries.find(entry =>
+      entry['event.name'] === 'llm.request'
+      && entry['gen_ai.step.id'] === 'request-synthetic-1:s2');
+    expect((nextRequest?.['gen_ai.input.messages_delta'] as any)?.[0]?.parts?.[0])
+      .not.toHaveProperty('result');
+  });
 });
 
 class TestWorkBuddyInput extends WorkBuddyInput {
@@ -144,6 +183,10 @@ describe('WorkBuddyInput checkpoints', () => {
     await mkdir(projects, { recursive: true });
     await mkdir(hookLogDir, { recursive: true });
     const transcript = path.join(projects, 'session-1.jsonl');
+    const outsideTranscript = path.join(
+      path.dirname(root),
+      `${path.basename(root)}-outside.jsonl`,
+    );
     const records = fixtureRecords();
     const initialUser = records.find(record => record.type === 'message' && record.role === 'user')!;
     const initialAssistant = records.find(
@@ -152,7 +195,15 @@ describe('WorkBuddyInput checkpoints', () => {
     )!;
     await writeFile(
       transcript,
+      `${JSON.stringify(initialUser)}\r\n${JSON.stringify(initialAssistant)}\r\n`,
+    );
+    await writeFile(
+      outsideTranscript,
       `${JSON.stringify(initialUser)}\n${JSON.stringify(initialAssistant)}\n`,
+    );
+    await writeFile(
+      path.join(hookLogDir, 'wakeup-2026-07-26.jsonl'),
+      `${JSON.stringify({ transcript_path: outsideTranscript })}\n`,
     );
     const stateStore = new StateStore(path.join(root, 'state.json'));
     await stateStore.load();
@@ -168,7 +219,7 @@ describe('WorkBuddyInput checkpoints', () => {
         ...initialAssistant,
         id: 'response-synthetic-3',
         parentId: 'turn-synthetic-2',
-        timestamp: 2_500,
+        timestamp: 2_000,
         providerData: {
           ...initialAssistant.providerData,
           conversationRequestId: 'request-synthetic-2',
@@ -176,10 +227,12 @@ describe('WorkBuddyInput checkpoints', () => {
         },
       },
     ];
-    await appendFile(transcript, secondTurn.map(record => JSON.stringify(record)).join('\n') + '\n');
+    await appendFile(transcript, secondTurn.map(record => JSON.stringify(record)).join('\r\n') + '\r\n');
+    await appendFile(outsideTranscript, secondTurn.map(record => JSON.stringify(record)).join('\n') + '\n');
 
     const entries = await input.collectNow();
     expect(entries).toHaveLength(2);
+    expect(entries.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
     expect(entries.every(entry => entry['gen_ai.turn.id'] === 'turn-synthetic-2')).toBe(true);
     await stateStore.save();
     expect(await input.collectNow()).toEqual([]);

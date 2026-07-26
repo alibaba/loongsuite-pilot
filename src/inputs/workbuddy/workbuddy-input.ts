@@ -64,7 +64,7 @@ export class WorkBuddyInput extends BaseInput {
     const offsets = normalizeOffsetMap(state.extra?.[OFFSET_MAP_KEY]);
     const hookPaths = await this.readHookTranscriptPaths();
     const scannedPaths = await this.scanTranscriptFiles();
-    const transcriptPaths = [...new Set([...hookPaths, ...scannedPaths])].sort();
+    const transcriptPaths = await this.resolveTranscriptPaths([...hookPaths, ...scannedPaths]);
     const nextOffsets: Record<string, number> = {};
     const entries: AgentActivityEntry[] = [];
 
@@ -89,7 +89,7 @@ export class WorkBuddyInput extends BaseInput {
         [OFFSET_MAP_KEY]: nextOffsets,
       },
     });
-    return entries.sort((a, b) => Number(BigInt(a.time_unix_nano) - BigInt(b.time_unix_nano)));
+    return entries.sort(compareEntriesByTime);
   }
 
   private watchDirectory(dir: string): void {
@@ -136,12 +136,34 @@ export class WorkBuddyInput extends BaseInput {
     }
     return paths;
   }
+
+  private async resolveTranscriptPaths(candidates: string[]): Promise<string[]> {
+    let realRoot: string;
+    try {
+      realRoot = await fs.realpath(this.root);
+    } catch {
+      return [];
+    }
+
+    const resolved = new Set<string>();
+    for (const candidate of candidates) {
+      if (!path.isAbsolute(candidate) || !candidate.endsWith('.jsonl')) continue;
+      let realCandidate: string;
+      try {
+        realCandidate = await fs.realpath(candidate);
+      } catch {
+        continue;
+      }
+      if (isPathWithin(realRoot, realCandidate)) resolved.add(realCandidate);
+    }
+    return [...resolved].sort();
+  }
 }
 
 async function readCompleteJsonl(filePath: string): Promise<{ records: WorkBuddyRecord[] } | null> {
   let text: string;
   try { text = await fs.readFile(filePath, 'utf8'); } catch { return null; }
-  const lines = text.split('\n');
+  const lines = text.split(/\r?\n/);
   if (!text.endsWith('\n')) lines.pop();
   const records: WorkBuddyRecord[] = [];
   for (const line of lines) {
@@ -149,6 +171,23 @@ async function readCompleteJsonl(filePath: string): Promise<{ records: WorkBuddy
     try { records.push(JSON.parse(line) as WorkBuddyRecord); } catch { /* fail-open */ }
   }
   return { records };
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative !== ''
+    && relative !== '..'
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative);
+}
+
+function compareEntriesByTime(a: AgentActivityEntry, b: AgentActivityEntry): number {
+  const left = BigInt(a.time_unix_nano);
+  const right = BigInt(b.time_unix_nano);
+  if (left < right) return -1;
+  if (left > right) return 1;
+  // Supported Node.js versions provide a stable sort; preserve semantic builder order on ties.
+  return 0;
 }
 
 function normalizeOffsetMap(value: unknown): Record<string, number> {

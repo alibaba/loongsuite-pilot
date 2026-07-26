@@ -59,10 +59,15 @@ export async function buildWorkBuddyEvents(
   ) => {
     stepOrdinal++;
     const step = stepContext(responseSource, opts.sessionId, turnId, stepOrdinal);
+    const normalizedCalls = calls.map(({ record, index }) => ({
+      record,
+      callId: stringValue(record.callId)
+        ?? stableId(opts.sessionId, `call:${sourceId(record)}:${index}`),
+    }));
     const outputParts = [
       ...reasoningParts,
       ...assistantParts,
-      ...calls.map(({ record: call }) => toToolCallPart(call)),
+      ...normalizedCalls.map(({ record: call, callId }) => toToolCallPart(call, callId)),
     ];
     const request = baseEntry(
       'llm.request',
@@ -91,12 +96,11 @@ export async function buildWorkBuddyEvents(
       parts: outputParts,
       finish_reason: 'tool_call',
     }];
-    applyUsage(response, calls[calls.length - 1].record);
+    applyUsage(response, normalizedCalls[normalizedCalls.length - 1].record);
 
     await push(request, terminalIndex, responseSource);
     await push(response, terminalIndex, responseSource);
-    for (const { record: call } of calls) {
-      const callId = stringValue(call.callId) ?? stableId(opts.sessionId, `call:${sourceId(call)}`);
+    for (const { record: call, callId } of normalizedCalls) {
       tools.set(callId, { step, callTimestamp: timestampMs(call) });
       const toolCall = baseEntry(
         'tool.call',
@@ -155,7 +159,7 @@ export async function buildWorkBuddyEvents(
       const toolName = stringValue(record.name);
       if (toolName) result['gen_ai.tool.name'] = toolName;
       result['gen_ai.tool.call.id'] = callId;
-      const output = toJsonValue(record.output);
+      const output = parseJsonValue(record.output);
       if (output !== undefined) result['gen_ai.tool.call.result'] = output;
       const status = normalizeToolStatus(record.status);
       if (status) result['tool.result.status'] = status;
@@ -165,9 +169,14 @@ export async function buildWorkBuddyEvents(
       }
       if (status === 'failure') result['error.type'] = 'tool_execution_failed';
       await push(result, index, record);
+      const resultPart: Record<string, JsonValue> = {
+        type: 'tool_call_response',
+        id: callId,
+      };
+      if (output !== undefined) resultPart.result = output;
       pendingDelta.push({
         role: 'tool',
-        parts: [{ type: 'tool_call_response', id: callId, result: output ?? null }],
+        parts: [resultPart],
       });
       continue;
     }
@@ -278,14 +287,15 @@ function toReasoningParts(record: WorkBuddyRecord): Array<Record<string, JsonVal
   });
 }
 
-function toToolCallPart(record: WorkBuddyRecord): Record<string, JsonValue> {
+function toToolCallPart(record: WorkBuddyRecord, callId: string): Record<string, JsonValue> {
   const part: Record<string, JsonValue> = {
     type: 'tool_call',
-    id: stringValue(record.callId) ?? stableId('workbuddy', `call:${sourceId(record)}`),
-    arguments: parseJsonValue(record.arguments) ?? null,
+    id: callId,
   };
   const name = stringValue(record.name);
   if (name) part.name = name;
+  const args = parseJsonValue(record.arguments);
+  if (args !== undefined) part.arguments = args;
   return part;
 }
 
@@ -402,7 +412,11 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
 
 function parseJsonValue(value: unknown): JsonValue | undefined {
   if (typeof value !== 'string') return toJsonValue(value);
-  try { return toJsonValue(JSON.parse(value)); } catch { return value; }
+  try {
+    return toJsonValue(JSON.parse(value));
+  } catch {
+    return /^\s*[\[{]/.test(value) ? undefined : value;
+  }
 }
 
 function toJsonValue(value: unknown): JsonValue | undefined {
