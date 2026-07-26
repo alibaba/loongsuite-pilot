@@ -17,6 +17,7 @@ const HOOK_CONFIG_FILES = [
   '.claude/settings.json',
   '.codex/hooks.json',
   '.qwen/settings.json',
+  '.workbuddy/settings.json',
 ];
 
 describe('uninstall cleans hook configs for all hook agents', () => {

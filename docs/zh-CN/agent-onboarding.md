@@ -164,28 +164,51 @@ Input 应该：
 
 如果新集成符合已有 Hook 或插件记录格式，可以复用已有 base input 和 `transformHookRecord`，减少代码变化。但 input 仍然需要在 collector 启动路径中注册。
 
-## 隐私检查清单
+## 质量验收门禁
 
-标记集成为 ready 前，请确认：
+只有通过以下全部适用门禁，Agent 集成才能标记为 ready。
 
-- 对 Prompt、Completion、工具参数和工具结果支持 `captureMessageContent: false`，前提是源 Agent 暴露这些字段。
+### 字段质量
+
+- [输出事件 Schema](output-event-schema.md) 中的 Required 字段填充率必须为 100%；条件成立时，Conditionally Required 字段填充率必须为 100%。
+- Recommended 字段按 `event.name` 分别报告填充率。源端不提供字段时应记录实证，不能用 `unknown`、零 token、零 duration 或其他看似有效的默认值凑完整率。
+- JSONL 必须保留原生 JSON 类型：数字和布尔值保持标量，消息、工具参数和工具结果按 schema 保持数组或对象。
+- 验证 Unix 纳秒时间戳、trace/span 标识、非负 token 和正数毫秒 duration；源端无法证明正耗时时必须省略 duration。
+
+### 事件拓扑与恢复
+
+- 每个模型 step 都有配对的 `llm.request` 和 `llm.response`。
+- 使用 `gen_ai.tool.call.id` 关联每个 `tool.call` 和 `tool.result`；并行工具调用不得碰撞。
+- session、turn、step 标识必须一致；如果输出 `gen_ai.turn.start/end`，每个 turn 各最多出现一次。
+- `event.id` 在本轮内唯一，同一源记录重放时保持确定性。
+- checkpoint 在重启后继续生效，只输出追加数据，能容忍半行，且不会无边界重放历史。
+
+### 隐私与 fixture
+
+- 源 Agent 提供相关字段时，Prompt、Completion、reasoning、工具参数和工具结果必须支持 `captureMessageContent: false`。
 - 除非必须并可被脱敏，否则不要将密钥放入 source-specific 扩展字段。
-- 验证 `mask.mode: all` 能在输出中脱敏 API Key、AccessKey、私钥和数据库 URL。见 [数据脱敏](masking.md)。
-- Hook 或插件必须 fail open，遥测失败不能阻塞原 Agent。
+- 验证 `mask.mode: all` 能脱敏 API Key、AccessKey、私钥和数据库 URL。见 [数据脱敏](masking.md)。
+- Hook 或插件必须 fail open，遥测失败不能阻塞源 Agent。
+- 只提交完全合成的 fixture，不得包含真实 prompt、transcript、用户名、home 路径、仓库路径、session ID 或凭证。
+- 使用最少测试覆盖不同语义分支，不为增加测试数量添加重复用例。
 
-## 测试清单
+### 必测场景
 
-至少添加测试或 fixture 覆盖：
+覆盖检测/部署、Hook 或插件记录、checkpoint、关闭内容采集和开启脱敏，并至少验证：
 
-- Agent 检测和部署定义解析。
-- Hook 或插件记录生成。
-- Input checkpoint 和增量读取。
-- 规范化 `event.name`。
-- LLM request / response 字段。
-- Tool call / result 关联。
-- 源 Agent 暴露 usage 时的 token 字段。
-- 内容采集关闭模式。
-- 脱敏开启模式。
+- 纯文本 turn；
+- 单次工具调用；
+- 并行工具调用及其结果；
+- 明确失败或取消；
+- 重启重放与增量追加。
+
+### 安装产物最终验收
+
+- 运行 typecheck、完整单元/集成测试、build 和安装包安装。
+- 在 probe 前记录目标 JSONL 行数，只分析新交互追加的记录。
+- 操作真实 Agent：CLI Agent 使用真实 CLI，GUI Agent 使用 Computer Use。
+- 验收报告必须包含事件数量、逐事件字段填充率、关联检查、原生类型检查、隐私检查和有实证的已知缺口。
+- 使用 `E2E_JSONL_STRICT=1` 运行 JSONL validator。Strict 是唯一自动质量门禁，不增加 Agent-specific 绕过模式。
 
 ## 用户文档清单
 

@@ -16,6 +16,7 @@ export enum ClientType {
   Lingma = 'lingma',
   LingmaVscode = 'lingma-vscode',
   Wukong = 'wukong',
+  WorkBuddy = 'workbuddy',
 
   // CLI tools
   GeminiCli = 'gemini-cli',

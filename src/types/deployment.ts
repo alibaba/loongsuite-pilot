@@ -37,6 +37,8 @@ export interface AgentHookConfig {
   hookCommand: string;
   format: HookFormat;
   matcher?: string;
+  /** Optional matcher override keyed by hook event name. */
+  eventMatchers?: Record<string, string>;
   replaceHookCommands?: string[];
   /** Events previously owned by this hook that must be removed during deploy. */
   retiredEvents?: string[];

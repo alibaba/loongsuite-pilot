@@ -1661,6 +1661,7 @@ remove_hook_configs() {
         "$HOME/.claude/settings.json"
         "$HOME/.codex/hooks.json"
         "$HOME/.qwen/settings.json"
+        "$HOME/.workbuddy/settings.json"
     )
 
     for cfg in "${configs[@]}"; do

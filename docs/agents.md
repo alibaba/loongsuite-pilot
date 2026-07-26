@@ -24,6 +24,7 @@ Use these IDs in installer options, `agent-control.json`, and `config.json`.
 | Qoder Work CN | `qoder-work-cn` | Hook and local data sources. |
 | Qwen Code CLI | `qwen-code-cli` | Hook integration; parses qwen-code transcript JSONL on Stop. |
 | Wukong | `wukong` | CLI API polling via local `wukong-cli`. |
+| WorkBuddy | `workbuddy` | Structural Hook wakeups and transcript-driven audit events. Verified on WorkBuddy Desktop 5.2.6 for macOS. |
 
 ## Choose Agents During Installation
 

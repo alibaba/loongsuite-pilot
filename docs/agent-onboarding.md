@@ -165,28 +165,51 @@ When a custom input class is needed:
 
 If your integration follows an existing hook or plugin record shape, keep the code change smaller by reusing the existing base input and `transformHookRecord`. The input still needs to be registered in the collector startup path.
 
-## Privacy Checklist
+## Quality Acceptance Gates
 
-Before marking an integration ready:
+An integration is ready only after all applicable gates below pass.
 
-- Support `captureMessageContent: false` for prompts, completions, tool arguments, and tool results when the agent exposes those fields.
+### Field quality
+
+- Fields marked Required in the [Output Event Schema](output-event-schema.md) must have 100% coverage. Conditionally Required fields must have 100% coverage whenever their condition applies.
+- Report Recommended-field coverage separately for each `event.name`. When the source does not expose a field, record that evidence instead of inventing `unknown`, zero tokens, zero duration, or another plausible-looking default.
+- Preserve native JSON types in JSONL: numbers and booleans remain scalars, while messages, tool arguments, and tool results remain arrays or objects as defined by the schema.
+- Validate Unix-nanosecond timestamps, trace/span identifiers, non-negative token values, and positive tool duration in milliseconds. Omit duration when the source cannot establish a positive elapsed time.
+
+### Event topology and recovery
+
+- Every model step has a paired `llm.request` and `llm.response`.
+- Match each `tool.call` and `tool.result` by `gen_ai.tool.call.id`; parallel tool calls must not collide.
+- Keep session, turn, and step identifiers consistent, with at most one `gen_ai.turn.start` and one `gen_ai.turn.end` per turn when those markers are emitted.
+- Event IDs are unique within a run and deterministic when the same source record is replayed.
+- Checkpoints survive restart, emit only appended data, tolerate partial records, and do not replay unbounded history.
+
+### Privacy and fixtures
+
+- Support `captureMessageContent: false` for prompts, completions, reasoning, tool arguments, and tool results when the agent exposes those fields.
 - Keep secrets out of source-specific extension fields unless they are required and subject to masking.
-- Verify `mask.mode: all` masks API keys, access keys, private keys, and database URLs in emitted output. See [Data Masking](masking.md).
-- Fail open in hook/plugin code so the agent is never blocked by telemetry collection.
+- Verify `mask.mode: all` masks API keys, access keys, private keys, and database URLs. See [Data Masking](masking.md).
+- Hook and plugin code must fail open so telemetry cannot block the source agent.
+- Commit only synthetic fixtures. They must not contain real prompts, transcripts, user names, home paths, repository paths, session IDs, or credentials.
+- Prefer the smallest set of tests that covers distinct semantic branches; do not add duplicate tests solely to increase test count.
 
-## Test Checklist
+### Required scenarios
 
-At minimum, add tests or fixtures for:
+Cover detection/deployment, hook or plugin record generation, checkpointing, content capture disabled, and masking. Exercise at least:
 
-- Agent detection and deployment definition parsing.
-- Hook or plugin record generation.
-- Input checkpointing and incremental reads.
-- Normalized `event.name` values.
-- LLM request/response fields.
-- Tool call/result correlation.
-- Token fields when the source exposes usage.
-- Content capture disabled mode.
-- Masking enabled mode.
+- a text-only turn;
+- one tool call;
+- parallel tool calls and their results;
+- an explicit failure or cancellation;
+- restart/replay and incremental append.
+
+### Final installed-product acceptance
+
+- Run typecheck, the full unit/integration suite, build, and package installation.
+- Record the target JSONL line count before the probe and analyze only rows appended by the new interaction.
+- Exercise the real agent: use its CLI for CLI agents and Computer Use for GUI agents.
+- Report event counts, per-event field coverage, correlation checks, native-type checks, privacy checks, and any evidence-backed gaps.
+- Run the JSONL validator with `E2E_JSONL_STRICT=1`. Strict mode is the single automated quality gate; do not add agent-specific bypass modes.
 
 ## User Documentation Checklist
 

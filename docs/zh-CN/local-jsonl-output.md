@@ -18,6 +18,10 @@
 
 每一行是一条规范化事件。
 
+JSONL 会保留原生 JSON 类型：token 数量保持 number，标志位保持 boolean，
+消息和工具载荷保持 array/object。宽表日志等只接受字符串列的后端，应只在各自
+输出边界完成序列化，不能影响本地 JSONL。
+
 ## 开启或关闭 JSONL
 
 ```json

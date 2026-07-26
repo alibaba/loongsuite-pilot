@@ -144,6 +144,21 @@ describe('HookStrategy', () => {
       expect(call.useNestedFormat).toBe(true);
       expect(call.replaceHookCommands).toEqual(['/old/hook.sh']);
     });
+
+    it('uses per-event matchers when configured', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      await strategy.needsDeploy(makeDef({
+        hook: {
+          settingsPath: '/home/.workbuddy/settings.json',
+          events: ['SessionStart', 'PreToolUse'],
+          hookCommand: '/opt/pilot/hooks/workbuddy.sh',
+          format: 'nested',
+          eventMatchers: { PreToolUse: '.*' },
+        },
+      }));
+      expect(mockHookManager.isHookInstalled.mock.calls[0][0].matcher).toBeUndefined();
+      expect(mockHookManager.isHookInstalled.mock.calls[1][0].matcher).toBe('.*');
+    });
   });
 
   describe('deploy', () => {

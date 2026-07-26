@@ -44,6 +44,7 @@ import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
+import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
@@ -103,6 +104,7 @@ export class Orchestrator extends EventEmitter {
     'pi-coding-agent-log': 'pi-coding-agent',
     'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
+    'workbuddy': 'workbuddy',
   };
 
   private readonly config: AnalyticsConfig;
@@ -197,7 +199,7 @@ export class Orchestrator extends EventEmitter {
       dataDir: this.dataDir,
       pilotDir,
     });
-    await this.deploymentManager.deployAll();
+    await this.deploymentManager.deployAll(def => this.isAgentGatedEnabled(def.id));
 
     this.localWorkerActivationService = new LocalWorkerActivationService({
       dataDir: this.dataDir,
@@ -401,6 +403,7 @@ export class Orchestrator extends EventEmitter {
 
     for (const def of defs) {
       if (def.deployMode !== 'hook' || !def.hook) continue;
+      if (!this.isAgentGatedEnabled(def.id)) continue;
 
       const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
       targets.push({
@@ -1123,6 +1126,26 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['wukong']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['wukong']?.pollInterval,
+      }),
+    );
+
+    // --- WorkBuddy (Hook wakeups + transcript assembly) ---
+    const workBuddyInput = new WorkBuddyInput({
+      stateStore: this.stateStore,
+      hookLogDir: path.join(this.dataDir, 'logs', 'workbuddy'),
+      pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
+    });
+    this.inputManager.registerInput(workBuddyInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(workBuddyInput, {
+        watchPaths: WorkBuddyInput.getWatchPaths(),
+        isAvailable: WorkBuddyInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP.workbuddy) &&
+          this.agentControlManager.resolveEnabled(
+            'workbuddy',
+            listenerCfg.workbuddy?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
       }),
     );
 

@@ -2,9 +2,11 @@
 
 English | [简体中文](zh-CN/output-event-schema.md)
 
-LoongSuite Pilot normalizes collected activity into GenAI telemetry events. Sensitive content fields are opt-in and can be masked before output.
+This document is the authoritative wire contract for events emitted by LoongSuite Pilot. Sensitive content fields are opt-in and can be masked before output.
 
-The types below describe the normalized event values. Log-style outputs such as JSONL and SLS may serialize values as strings for backend compatibility.
+The types below describe normalized semantic values. JSONL preserves native JSON
+types; string-only backends such as SLS may serialize values at their own output
+boundary.
 
 ## Event Names
 
@@ -17,6 +19,13 @@ The types below describe the normalized event values. Log-style outputs such as 
 | `skill.use` | A skill, extension, or agent capability invocation. |
 | `tool.approve` | A user approval event for a tool or action. |
 | `other` | Other events that cannot be classified into the above event names. |
+
+The vendored GenAI audit-event conventions are design guidance, not a second
+Pilot wire format. Exporters targeting those conventions can map
+`llm.request` → `gen_ai.model.request`, `llm.response` →
+`gen_ai.model.response`, `tool.call` → `gen_ai.tool.call`, and `tool.result` →
+`gen_ai.tool.result`. Pilot records tool duration in milliseconds; such an
+exporter converts it to seconds at its own boundary.
 
 ## Field Reference
 

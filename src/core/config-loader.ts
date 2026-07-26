@@ -373,6 +373,7 @@ function buildListenersConfig(
     'claude-code-log': { enabled: true, pollInterval: 30_000 },
     'codex-transcript': { enabled: true, pollInterval: 30_000 },
     'pi-coding-agent-log': { enabled: true, pollInterval: 30_000 },
+    workbuddy: { enabled: true, pollInterval: 5_000 },
   };
 
   const result = { ...defaults };

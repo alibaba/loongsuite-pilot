@@ -58,6 +58,7 @@
 | OpenCode | `opencode` | Plugin-Probe | `BaseHookInput` | `inputs/opencode-log/` | `agents.d/opencode.json` |
 | Pi Coding Agent | `pi-coding-agent` | Extension Inject | `BaseHookInput` | `inputs/pi-coding-agent-log/` | `agents.d/pi-coding-agent.json` |
 | Qwen Code CLI | `qwen-code-cli` | Hook | `BaseHookInput` | `inputs/qwen-code-cli-log/` | `agents.d/qwen-code-cli.json` |
+| WorkBuddy | `workbuddy` | Hook | `BaseInput`（Hook 唤醒 + transcript） | `inputs/workbuddy/` | `agents.d/workbuddy.json` |
 | Wukong | `wukong` | CLI API Polling | `BaseInput` | `inputs/wukong/` | N/A |
 
 ## 依赖关系

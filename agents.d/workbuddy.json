@@ -1,0 +1,30 @@
+{
+  "id": "workbuddy",
+  "displayName": "WorkBuddy",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.workbuddy"],
+    "commands": []
+  },
+  "hook": {
+    "settingsPath": "~/.workbuddy/settings.json",
+    "events": [
+      "SessionStart",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "Stop"
+    ],
+    "hookCommand": "$PILOT_DATA/hooks/workbuddy-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "eventSubcommand": "kebab-case",
+    "eventMatchers": {
+      "PreToolUse": ".*",
+      "PostToolUse": ".*"
+    }
+  },
+  "input": {
+    "type": "workbuddy-transcript",
+    "logDir": "$PILOT_DATA/logs/workbuddy"
+  }
+}
