@@ -24,7 +24,7 @@
 | Qoder Work CN | `qoder-work-cn` | Hook 和本地数据源。 |
 | Qwen Code CLI | `qwen-code-cli` | Hook 集成；Stop 时解析 qwen-code transcript JSONL。 |
 | Wukong | `wukong` | 通过本地 `wukong-cli` 进行 CLI API 轮询。 |
-| WorkBuddy | `workbuddy` | Hook 只做结构化唤醒，transcript 生成审计事件；已在 macOS WorkBuddy Desktop 5.2.6 验证。 |
+| WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 验证。 |
 
 ## 安装时选择 Agent
 

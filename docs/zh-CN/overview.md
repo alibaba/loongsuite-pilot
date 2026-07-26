@@ -36,7 +36,7 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
-| WorkBuddy | Hook 唤醒 / transcript | Yes | Yes | Yes | Yes |
+| WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
 
 ### Windows Agent 明确支持情况
 

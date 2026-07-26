@@ -2,7 +2,7 @@
 
 [English](../output-event-schema.md) | 简体中文
 
-本文档是 LoongSuite Pilot 实际输出事件的权威 wire contract。敏感内容字段是 opt-in 字段，可在输出前进行脱敏。
+LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot 当前输出格式是 GenAI audit-event 的一个变体。敏感内容字段是 opt-in 字段，可在输出前进行脱敏。
 
 下面的类型描述的是规范化事件的语义值。JSONL 保留原生 JSON 类型；SLS 等只接受字符串列的后端可在各自输出边界进行序列化。
 
@@ -18,7 +18,14 @@
 | `tool.approve` | 用户批准工具或动作执行的事件。 |
 | `other` | 无法归类到上述类型的其他事件。 |
 
-仓库 vendored 的 GenAI audit-event 规范是设计指导，不是第二套 Pilot wire format。面向该规范的 exporter 可在自身边界完成如下映射：`llm.request` → `gen_ai.model.request`、`llm.response` → `gen_ai.model.response`、`tool.call` → `gen_ai.tool.call`、`tool.result` → `gen_ai.tool.result`。Pilot 的工具耗时使用毫秒，exporter 映射时再换算为秒。
+四类核心事件的 `event.name` 与 GenAI audit-event 对应关系如下：
+
+| Pilot `event.name` | GenAI audit-event `event.name` |
+|--------------------|--------------------------------|
+| `llm.request` | `gen_ai.model.request` |
+| `llm.response` | `gen_ai.model.response` |
+| `tool.call` | `gen_ai.tool.call` |
+| `tool.result` | `gen_ai.tool.result` |
 
 ## 字段说明
 
