@@ -1733,11 +1733,46 @@ try {
 } catch(e) { process.stderr.write(e.message); process.exit(1); }
 " "$cfg" "$HOOK_MARKER" && ok=1
         else
-            # sed fallback: remove lines containing the marker
+            # awk fallback: remove JSON objects/lines containing the marker
             if grep -q "$HOOK_MARKER" "$cfg" 2>/dev/null; then
                 local tmp_file
                 tmp_file=$(mktemp)
-                grep -v "$HOOK_MARKER" "$cfg" > "$tmp_file" 2>/dev/null || true
+                awk -v marker="$HOOK_MARKER" '
+                BEGIN { depth = 0; in_block = 0; block = ""; block_depth = 0; buf = ""; has_buf = 0 }
+                function emit(line) {
+                    if (line ~ /^[ \t]*[\]}]/ && has_buf) {
+                        sub(/,[ \t]*$/, "", buf)
+                    }
+                    if (has_buf) print buf
+                    buf = line; has_buf = 1
+                }
+                {
+                    line = $0
+                    lsd = depth
+                    tmp = line; opens = gsub(/{/, "{", tmp)
+                    tmp = line; closes = gsub(/}/, "}", tmp)
+
+                    if (!in_block) {
+                        if (index(line, marker) > 0) { depth += opens - closes; next }
+                        if (opens > 0 && closes == 0 && lsd >= 2) {
+                            in_block = 1; block_depth = lsd; block = line
+                            depth += opens - closes
+                            next
+                        }
+                        emit(line)
+                        depth += opens - closes
+                    } else {
+                        block = block "\n" line
+                        if (closes > 0 && lsd - closes <= block_depth) {
+                            if (index(block, marker) == 0) emit(block)
+                            in_block = 0; block = ""
+                        }
+                        depth += opens - closes
+                    }
+                    next
+                }
+                END { if (in_block && index(block, marker) == 0) emit(block); if (has_buf) print buf }
+                ' "$cfg" > "$tmp_file" 2>/dev/null
                 mv "$tmp_file" "$cfg"
                 ok=1
             else
