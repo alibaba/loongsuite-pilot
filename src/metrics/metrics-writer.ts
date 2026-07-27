@@ -206,10 +206,19 @@ export class MetricsWriter {
     }
 
     if (!health.nodeBinValid) {
-      this.recordInfraAlarm(
-        'INVALID_NODE_BIN_ALARM', '2',
-        'Node.js binary path (node-bin) is invalid or not executable, service will fail on restart',
-      );
+      const d = health.nodeBinDiagnostic;
+      let detail = 'Node.js binary path (node-bin) is invalid or not executable, service will fail on restart';
+      if (d) {
+        const reason = !d.originalPath
+          ? 'file is empty or missing'
+          : !d.pathExists
+            ? `path does not exist: ${d.originalPath}`
+            : !d.pathExecutable
+              ? `path exists but is not executable: ${d.originalPath}`
+              : `unknown: ${d.originalPath}`;
+        detail += ` (${reason})`;
+      }
+      this.recordInfraAlarm('INVALID_NODE_BIN_ALARM', '2', detail);
     }
   }
 

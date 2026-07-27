@@ -6,6 +6,21 @@ import { MetricsWriter } from '../../../src/metrics/metrics-writer.js';
 import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
 
+const fsMockState = { blockAccessSync: false };
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    accessSync: (p: fs.PathLike, mode?: number) => {
+      if (fsMockState.blockAccessSync && mode === actual.constants.X_OK) {
+        throw new Error(`EACCES: permission denied, access '${p}'`);
+      }
+      return actual.accessSync(p as any, mode);
+    },
+  };
+});
+
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
     info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
@@ -475,7 +490,7 @@ describe('MetricsWriter', () => {
       expect(alarm).toBeUndefined();
     });
 
-    it('INVALID_NODE_BIN_ALARM fires when node-bin is invalid', async () => {
+    it('INVALID_NODE_BIN_ALARM fires when node-bin is invalid and self-heal fails', async () => {
       fs.writeFileSync(path.join(tmpDir, 'node-bin'), '/nonexistent/path/node');
       const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
       writer = new MetricsWriter({
@@ -486,13 +501,25 @@ describe('MetricsWriter', () => {
         alarmManager,
       });
 
-      vi.useRealTimers();
-      await writer.start();
+      const execPathSpy = vi.spyOn(process, 'execPath', 'get').mockReturnValue('/also/broken/node');
+      const origPath = process.env.PATH;
+      process.env.PATH = '/no_such_dir';
+      fsMockState.blockAccessSync = true;
 
-      const entries = alarmManager.serialize();
-      const alarm = entries.find(e => e.alarm_type === 'INVALID_NODE_BIN_ALARM');
-      expect(alarm).toBeDefined();
-      expect(alarm!.alarm_level).toBe('2');
+      try {
+        vi.useRealTimers();
+        await writer.start();
+
+        const entries = alarmManager.serialize();
+        const alarm = entries.find(e => e.alarm_type === 'INVALID_NODE_BIN_ALARM');
+        expect(alarm).toBeDefined();
+        expect(alarm!.alarm_level).toBe('2');
+        expect(alarm!.alarm_message).toContain('path does not exist');
+      } finally {
+        fsMockState.blockAccessSync = false;
+        process.env.PATH = origPath;
+        execPathSpy.mockRestore();
+      }
     });
 
     it('INVALID_NODE_BIN_ALARM does not fire when node-bin is valid', async () => {
