@@ -4,11 +4,8 @@ import * as path from 'node:path';
 import { formatTime } from '../utils/time-utils.js';
 import { resolveLocalIp } from '../utils/network-utils.js';
 import { checkProcessLiveness, UPDATER_PROCESS_PATTERNS } from '../utils/pid-utils.js';
-import { createLogger } from '../utils/logger.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
-
-const logger = createLogger('MetricsCollector');
 
 export interface L1Metrics {
   version: string;
@@ -494,16 +491,12 @@ function isExecutable(p: string): boolean {
 
 function healNodeBin(nodeBinFile: string): boolean {
   const candidate = findNodeCandidate();
-  if (!candidate) {
-    logger.warn('node-bin self-heal failed, no valid Node.js candidate found');
-    return false;
-  }
+  if (!candidate) return false;
   try {
     const dir = path.dirname(nodeBinFile);
     const tmpFile = path.join(dir, `.node-bin.${process.pid}.tmp`);
     fs.writeFileSync(tmpFile, candidate + '\n', 'utf-8');
     fs.renameSync(tmpFile, nodeBinFile);
-    logger.info('node-bin self-healed', { newPath: candidate });
     return true;
   } catch {
     return false;
