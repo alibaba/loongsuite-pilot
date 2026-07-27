@@ -16,6 +16,7 @@ vi.mock('../../../src/deployment/detect-utils.js', () => ({
 }));
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
+  fileExists: vi.fn(),
   readJsonFile: vi.fn(),
   writeJsonFile: vi.fn(),
   resolveHome: vi.fn((p: string) => p),
@@ -23,7 +24,7 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
 }));
 
 import { detectAgent } from '../../../src/deployment/detect-utils.js';
-import { readJsonFile, writeJsonFile } from '../../../src/utils/fs-utils.js';
+import { fileExists, readJsonFile, writeJsonFile } from '../../../src/utils/fs-utils.js';
 
 function makeDef(overrides?: Partial<AgentDefinition>): AgentDefinition {
   return {
@@ -51,6 +52,7 @@ describe('HookStrategy', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(fileExists).mockResolvedValue(false);
     mockHookManager = {
       isHookInstalled: vi.fn(),
       installHook: vi.fn(),
@@ -143,6 +145,28 @@ describe('HookStrategy', () => {
       const call = mockHookManager.isHookInstalled.mock.calls[0][0];
       expect(call.useNestedFormat).toBe(true);
       expect(call.replaceHookCommands).toEqual(['/old/hook.sh']);
+    });
+
+    it('passes JSONC settings syntax to Qwen hook definitions', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      const def = makeDef({
+        id: 'qwen-code-cli',
+        hook: {
+          settingsPath: '/home/.qwen/settings.json',
+          settingsSyntax: 'jsonc',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/qwen.sh',
+          format: 'nested',
+        },
+      });
+
+      await strategy.needsDeploy(def);
+
+      expect(mockHookManager.isHookInstalled.mock.calls[0][0]).toMatchObject({
+        agentId: 'qwen-code-cli',
+        settingsSyntax: 'jsonc',
+        settingsPath: '/home/.qwen/settings.json',
+      });
     });
   });
 
@@ -303,6 +327,18 @@ describe('HookStrategy', () => {
       await strategy.deploy(def);
 
       expect(writeJsonFile).not.toHaveBeenCalled();
+    });
+
+    it('does not replace an existing invalid strict hooks.json file', async () => {
+      vi.mocked(fileExists).mockResolvedValue(true);
+      vi.mocked(readJsonFile).mockResolvedValue(null);
+
+      const result = await strategy.deploy(makeDef());
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('refusing to overwrite invalid settings');
+      expect(writeJsonFile).not.toHaveBeenCalled();
+      expect(mockHookManager.installHook).not.toHaveBeenCalled();
     });
 
     it('installs only hooks not already installed', async () => {

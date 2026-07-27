@@ -4,7 +4,8 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import type { HookWatchdogConfig } from '../types/index.js';
-import { directoryExists, fileExists, readJsonFile, resolveHome } from '../utils/fs-utils.js';
+import { directoryExists, fileExists, resolveHome } from '../utils/fs-utils.js';
+import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
 import { createLogger } from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
@@ -17,6 +18,8 @@ const MAX_INTERCEPT_REPAIRS_PER_DAY = 3;
 export interface PluginCheckTarget {
   agentId: string;
   settingsPath: string;
+  /** File syntax. Defaults to strict JSON. */
+  settingsSyntax?: JsonSyntax;
   expectedHooks: string[];
   /** Substrings that identify our hook command in settings.json */
   markers: string[];
@@ -76,7 +79,7 @@ export interface CheckResult {
 
 export interface TargetResult {
   agentId: string;
-  status: 'healthy' | 'repaired' | 'cooldown' | 'unavailable' | 'repair-failed';
+  status: 'healthy' | 'repaired' | 'cooldown' | 'unavailable' | 'invalid-config' | 'repair-failed';
   expected?: number;
   found?: number;
   missing?: string[];
@@ -147,7 +150,7 @@ export class HookWatchdog {
     for (const target of this.targets) {
       try {
         const result = await this.checkTarget(target);
-        if (result.status === 'unavailable') {
+        if (result.status === 'unavailable' || result.status === 'invalid-config') {
           summary.skipped++;
         } else if (result.status === 'repaired') {
           summary.repaired++;
@@ -188,7 +191,30 @@ export class HookWatchdog {
       }
     }
 
-    const settings = await readJsonFile<Record<string, unknown>>(target.settingsPath);
+    const document = await readJsonDocument<Record<string, unknown>>(
+      target.settingsPath,
+      target.settingsSyntax ?? 'json',
+    );
+    if (document.status === 'error') {
+      logger.error('hook-watchdog.invalid-config', {
+        agent: target.agentId,
+        settingsPath: target.settingsPath,
+        error: document.error.message,
+      });
+      return { agentId: target.agentId, status: 'invalid-config' };
+    }
+    if (
+      document.status === 'ok'
+      && (!document.data || typeof document.data !== 'object' || Array.isArray(document.data))
+    ) {
+      logger.error('hook-watchdog.invalid-config', {
+        agent: target.agentId,
+        settingsPath: target.settingsPath,
+        error: 'settings root must be a JSON object',
+      });
+      return { agentId: target.agentId, status: 'invalid-config' };
+    }
+    const settings = document.status === 'ok' ? document.data : null;
     const missing = this.findMissingHooks(settings, target);
     const found = target.expectedHooks.length - missing.length;
 

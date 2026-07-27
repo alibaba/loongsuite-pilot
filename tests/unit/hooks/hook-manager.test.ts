@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
 import { HookManager } from '../../../src/hooks/hook-manager.js';
 
 describe('HookManager', () => {
@@ -167,5 +168,166 @@ describe('HookManager', () => {
     expect(ok).toBe(true);
     const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
     expect(settings.hooks.PreToolUse).toBeUndefined();
+  });
+
+  it('installs a Qwen hook without removing JSONC comments or user settings', async () => {
+    const settingsPath = path.join(tmpDir, '.qwen', 'settings.json');
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    const original = `{
+  // Keep the user's selected model.
+  "model": "qwen-max",
+  "mcpServers": {
+    "work": {
+      "command": "node"
+    }
+  },
+  "permissions": {
+    // This comment must survive hook installation.
+    "allow": ["read"]
+  },
+  "hooks": {
+    "Stop": [
+      // Keep a third-party hook and its comment.
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "command": "/opt/other-hook.sh",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}
+`;
+    await fs.writeFile(settingsPath, original, 'utf-8');
+
+    const manager = new HookManager(
+      path.join(tmpDir, 'hooks'),
+      path.join(tmpDir, 'logs'),
+    );
+    const ok = await manager.installHook({
+      agentId: 'qwen-code-cli',
+      settingsPath,
+      settingsSyntax: 'jsonc',
+      hookJsonPath: ['hooks', 'Stop'],
+      hookCommand: '/opt/qwen-loongsuite-pilot-hook.sh stop',
+      matcher: '*',
+      useNestedFormat: true,
+    });
+
+    expect(ok).toBe(true);
+    const updated = await fs.readFile(settingsPath, 'utf-8');
+    expect(updated).toContain("// Keep the user's selected model.");
+    expect(updated).toContain('// This comment must survive hook installation.');
+    expect(updated).toContain('// Keep a third-party hook and its comment.');
+    expect(updated).toContain('/opt/qwen-loongsuite-pilot-hook.sh stop');
+
+    const errors: ParseError[] = [];
+    const parsed = parseJsonc(updated, errors, { allowTrailingComma: true });
+    expect(errors).toEqual([]);
+    expect(parsed.model).toBe('qwen-max');
+    expect(parsed.mcpServers.work.command).toBe('node');
+    expect(parsed.permissions.allow).toEqual(['read']);
+    expect(parsed.hooks.Stop).toHaveLength(2);
+    await expect(
+      fs.readFile(`${settingsPath}.loongsuite-pilot.bak`, 'utf-8'),
+    ).resolves.toBe(original);
+  });
+
+  it('uninstalls a Qwen hook with path-level JSONC edits', async () => {
+    const settingsPath = path.join(tmpDir, '.qwen', 'settings.json');
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    const pilotCommand = '/opt/qwen-loongsuite-pilot-hook.sh stop';
+    await fs.writeFile(settingsPath, `{
+  // Keep the model comment.
+  "model": "qwen-max",
+  "hooks": {
+    "Stop": [
+      // Keep this third-party hook comment.
+      {
+        "matcher": "*",
+        "hooks": [{ "command": "/opt/other-hook.sh", "type": "command" }]
+      },
+      {
+        "matcher": "*",
+        "hooks": [{ "command": "${pilotCommand}", "type": "command" }]
+      }
+    ]
+  }
+}
+`, 'utf-8');
+
+    const manager = new HookManager(
+      path.join(tmpDir, 'hooks'),
+      path.join(tmpDir, 'logs'),
+    );
+    const ok = await manager.uninstallHook({
+      agentId: 'qwen-code-cli',
+      settingsPath,
+      settingsSyntax: 'jsonc',
+      hookJsonPath: ['hooks', 'Stop'],
+      hookCommand: pilotCommand,
+      matcher: '*',
+      useNestedFormat: true,
+    });
+
+    expect(ok).toBe(true);
+    const updated = await fs.readFile(settingsPath, 'utf-8');
+    expect(updated).toContain('// Keep the model comment.');
+    expect(updated).toContain('// Keep this third-party hook comment.');
+    expect(updated).toContain('/opt/other-hook.sh');
+    expect(updated).not.toContain(pilotCommand);
+  });
+
+  it('does not overwrite an existing invalid JSONC settings file', async () => {
+    const settingsPath = path.join(tmpDir, '.qwen', 'settings.json');
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    const invalid = `{
+  // The file exists but is incomplete.
+  "model": "qwen-max",
+`;
+    await fs.writeFile(settingsPath, invalid, 'utf-8');
+
+    const manager = new HookManager(
+      path.join(tmpDir, 'hooks'),
+      path.join(tmpDir, 'logs'),
+    );
+    const ok = await manager.installHook({
+      agentId: 'qwen-code-cli',
+      settingsPath,
+      settingsSyntax: 'jsonc',
+      hookJsonPath: ['hooks', 'Stop'],
+      hookCommand: '/opt/qwen-loongsuite-pilot-hook.sh stop',
+      useNestedFormat: true,
+    });
+
+    expect(ok).toBe(false);
+    await expect(fs.readFile(settingsPath, 'utf-8')).resolves.toBe(invalid);
+    await expect(fs.stat(`${settingsPath}.loongsuite-pilot.bak`)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('does not treat strict JSON parse failures as empty settings', async () => {
+    const settingsPath = path.join(tmpDir, '.cursor', 'hooks.json');
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    const invalid = '{ "version": 1, "hooks": ';
+    await fs.writeFile(settingsPath, invalid, 'utf-8');
+
+    const manager = new HookManager(
+      path.join(tmpDir, 'hooks'),
+      path.join(tmpDir, 'logs'),
+    );
+    const ok = await manager.installHook({
+      agentId: 'cursor',
+      settingsPath,
+      hookJsonPath: ['hooks', 'stop'],
+      hookCommand: '/opt/cursor-loongsuite-pilot-hook.sh',
+    });
+
+    expect(ok).toBe(false);
+    await expect(fs.readFile(settingsPath, 'utf-8')).resolves.toBe(invalid);
   });
 });

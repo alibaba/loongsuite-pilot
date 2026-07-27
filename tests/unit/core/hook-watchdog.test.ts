@@ -126,6 +126,43 @@ describe('HookWatchdog', () => {
       expect(summary.repaired).toBe(0);
       expect(spawnCalls).toHaveLength(0);
     });
+
+    it('parses JSONC settings for Qwen without triggering repair', async () => {
+      const repairFn = vi.fn(async () => true);
+      const target: PluginCheckTarget = {
+        agentId: 'qwen-code-cli',
+        settingsPath: path.join(tmpDir, '.qwen', 'settings.json'),
+        settingsSyntax: 'jsonc',
+        expectedHooks: ['Stop'],
+        markers: ['qwen-code-cli-loongsuite-pilot-hook.sh'],
+        repairFn,
+      };
+      await fs.mkdir(path.dirname(target.settingsPath), { recursive: true });
+      await fs.writeFile(target.settingsPath, `{
+  // Qwen officially accepts JSONC settings.
+  "model": "qwen-max",
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/qwen-code-cli-loongsuite-pilot-hook.sh stop"
+          }
+        ]
+      }
+    ]
+  }
+}
+`, 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary).toEqual({ checked: 1, repaired: 0, skipped: 0 });
+      expect(repairFn).not.toHaveBeenCalled();
+    });
   });
 
   describe('checkTarget — missing', () => {
@@ -269,6 +306,30 @@ describe('HookWatchdog', () => {
       spawnBehavior = 'error';
       const wd = new HookWatchdog(makeConfig(), [target]);
       await expect(wd.runCheck()).resolves.toBeDefined();
+    });
+
+    it('does not repair an invalid existing JSONC settings file', async () => {
+      const repairFn = vi.fn(async () => true);
+      const target: PluginCheckTarget = {
+        agentId: 'qwen-code-cli',
+        settingsPath: path.join(tmpDir, '.qwen', 'settings.json'),
+        settingsSyntax: 'jsonc',
+        expectedHooks: ['Stop'],
+        markers: ['qwen-code-cli-loongsuite-pilot-hook.sh'],
+        repairFn,
+      };
+      await fs.mkdir(path.dirname(target.settingsPath), { recursive: true });
+      await fs.writeFile(
+        target.settingsPath,
+        '{ // incomplete JSONC\n  "model": "qwen-max",\n',
+        'utf-8',
+      );
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary).toEqual({ checked: 0, repaired: 0, skipped: 1 });
+      expect(repairFn).not.toHaveBeenCalled();
     });
   });
 
