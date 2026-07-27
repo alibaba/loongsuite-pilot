@@ -85,7 +85,8 @@ function Resolve-NodeBin {
     }
     $pinFile = Join-Path $dataDir "node-bin"
     if (Test-Path -LiteralPath $pinFile) {
-        $pinned = Convert-NodePath ((Get-Content -LiteralPath $pinFile -ErrorAction SilentlyContinue).Trim())
+        $pinContent = Get-Content -LiteralPath $pinFile -Raw -ErrorAction SilentlyContinue
+        $pinned = Convert-NodePath ([string]$pinContent)
         if (Test-NodeSuitable $pinned) { return $pinned }
     }
 
@@ -131,14 +132,14 @@ if (-not (Test-Path -LiteralPath $Processor)) {
     exit 0
 }
 
-$nodeBin = Resolve-NodeBin
-if (-not $nodeBin) {
-    Log-Error "missing_node" "node >= $MIN_NODE_MAJOR not found"
-    Write-EmptyResult
-    exit 0
-}
-
 try {
+    $nodeBin = Resolve-NodeBin
+    if (-not $nodeBin) {
+        Log-Error "missing_node" "node >= $MIN_NODE_MAJOR not found"
+        Write-EmptyResult
+        exit 0
+    }
+
     # Preserve Codex's UTF-8 JSON exactly; PowerShell 5.1 text pipelines can
     # otherwise reinterpret non-ASCII prompts using a legacy code page.
     $stdinStream = [Console]::OpenStandardInput()

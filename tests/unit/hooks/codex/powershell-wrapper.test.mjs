@@ -65,4 +65,46 @@ describe.runIf(process.platform === 'win32')('Codex PowerShell hook wrapper', ()
     );
     expect(JSON.parse(fs.readFileSync(marker, 'utf8'))).toMatchObject(payload);
   });
+
+  test('remains fail-open when node-bin is empty', () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'Pilot Empty Pin-'));
+    tempDirs.push(dataDir);
+    fs.writeFileSync(path.join(dataDir, 'node-bin'), '', 'utf8');
+
+    const result = spawnSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        WRAPPER,
+        'stop',
+      ],
+      {
+        input: Buffer.from(JSON.stringify({ session_id: 'windows-empty-pin' }), 'utf8'),
+        env: {
+          ...process.env,
+          LOONGSUITE_PILOT_DATA_DIR: dataDir,
+          PATH: `${path.dirname(process.execPath)};${process.env.PATH ?? ''}`,
+        },
+        encoding: 'utf8',
+        timeout: 15_000,
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    expect(JSON.parse(fs.readFileSync(
+      path.join(
+        dataDir,
+        'state',
+        'codex',
+        'transcript-wakeups',
+        'windows-empty-pin.json',
+      ),
+      'utf8',
+    ))).toMatchObject({ session_id: 'windows-empty-pin' });
+  });
 });

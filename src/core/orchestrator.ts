@@ -283,13 +283,15 @@ export class Orchestrator extends EventEmitter {
     });
     await this.metricsWriter.start();
 
-    // 14. Start status bar support (runtime.json + metrics summary + native app)
+    // 14. Always publish runtime health for service managers. The status bar UI
+    // may be disabled, but Windows Task Scheduler still needs runtime.json to
+    // distinguish a healthy collector from a task whose child process died.
+    const packageVersion = this.readPackageVersion();
+    this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
+    this.runtimeWriter.start();
+
+    // Status bar metrics/native UI remain optional.
     if (this.config.statusBar.enabled) {
-      const packageVersion = this.readPackageVersion();
-
-      this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
-      this.runtimeWriter.start();
-
       this.metricsSummaryWriter = new MetricsSummaryWriter(this.dataDir, this.config.statusBar);
       this.metricsSummaryWriter.start();
 
