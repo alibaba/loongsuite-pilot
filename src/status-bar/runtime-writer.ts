@@ -27,11 +27,6 @@ export class RuntimeWriter {
   }
 
   start(): void {
-    if (!this.config.enabled) {
-      logger.info('runtime writer disabled');
-      return;
-    }
-
     void this.write();
 
     this.intervalTimer = setInterval(
