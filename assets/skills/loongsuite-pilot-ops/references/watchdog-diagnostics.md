@@ -34,7 +34,9 @@ targets 来源有两种：
 | `qodercli-rc` | macOS + Linux | `~/.zshrc` 或 `~/.bashrc`（按 `$SHELL` 判断）是否含 `# loongsuite-pilot BEGIN qodercli-intercept` marker | 向 rc 文件末尾 append wrapper function block |
 | `claude-code-rc` | macOS + Linux | 同上，marker 为 `# loongsuite-pilot BEGIN claude-code-intercept` | 同上 |
 
-前置条件（precondition）：对应的 hook 脚本文件必须存在（如 `~/.loongsuite-pilot/hooks/qodercli-token-intercept.mjs`）。对 `qoderwork-env` 还要求 macOS 平台且 QoderWork.app 已安装。前置条件不满足时静默 skip，不算修复失败。
+前置条件（precondition）：对应的 hook 脚本文件必须存在（`qodercli-rc` 对应
+`~/.loongsuite-pilot/hooks/qodercli-runtime-wrapper.sh`）。对 `qoderwork-env` 还要求
+macOS 平台且 QoderWork.app 已安装。前置条件不满足时静默 skip，不算修复失败。
 
 ## 安全护栏
 

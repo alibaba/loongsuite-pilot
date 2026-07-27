@@ -439,9 +439,14 @@ describe('interceptRcBlockDefs migration metadata', () => {
       const block = def.blockFn(`/tmp/hooks/${def.scriptName}`);
       expect(block).toContain(def.marker);       // BEGIN marker present
       expect(block).toContain(def.endMarker);    // END marker present
-      expect(block).toContain(def.signature);    // guard signature present
-      // signature must be the guard line, which the old bare block never had
-      expect(def.signature).toMatch(/^if ! alias \S+ >\/dev\/null 2>&1$/);
+      expect(block).toContain(def.signature);    // current-shape signature present
+      // qodercli uses the runtime wrapper name so the previous Bun-only guarded
+      // block is migrated; other intercepts still key on their guard line.
+      if (def.id === 'qodercli-rc') {
+        expect(def.signature).toBe('qodercli-runtime-wrapper.sh');
+      } else {
+        expect(def.signature).toMatch(/^if ! alias \S+ >\/dev\/null 2>&1$/);
+      }
     }
   });
 
