@@ -235,6 +235,45 @@ describe('injectSkillRecords', () => {
     expect(JSON.stringify(records)).not.toContain(skillPath);
   });
 
+  it('should synthesize Read records for a manually attached skill path', () => {
+    const records = [makeLlmResponse()];
+    const skills = [{
+      ...makeSkill(
+        'count-if-statements',
+        '/Users/test/.cursor/skills/count-if-statements/SKILL.md',
+      ),
+      detectionSource: 'manual_attachment',
+      detectionSources: ['manual_attachment'],
+    }];
+
+    injectSkillRecords(records, skills);
+
+    const assistantMsg = records[0]['gen_ai.output.messages']
+      .find(message => message.role === 'assistant');
+    expect(assistantMsg.parts).toContainEqual(expect.objectContaining({
+      type: 'tool_call',
+      name: 'Read',
+      arguments: {
+        path: '/Users/test/.cursor/skills/count-if-statements/SKILL.md',
+      },
+    }));
+    expect(records[1]).toMatchObject({
+      'event.name': 'tool.call',
+      'gen_ai.tool.name': 'Read',
+      'gen_ai.tool.call.arguments': {
+        path: '/Users/test/.cursor/skills/count-if-statements/SKILL.md',
+      },
+      'gen_ai.skill.name': 'count-if-statements',
+      'agent.cursor.skill_detection_source': 'manual_attachment',
+    });
+    expect(records[2]).toMatchObject({
+      'event.name': 'tool.result',
+      'gen_ai.tool.name': 'Read',
+      'gen_ai.skill.name': 'count-if-statements',
+      'agent.cursor.skill_detection_source': 'manual_attachment',
+    });
+  });
+
   it('should not execute main when imported', () => {
     const imported = spawnSync(
       process.execPath,

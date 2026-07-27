@@ -181,7 +181,8 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
       'gen_ai.tool.call.id': toolCallId,
       'gen_ai.tool.call.arguments': { path: skill.skillPath },
       'gen_ai.skill.name': skill.skillName,
-      'agent.cursor.skill_detection_source': 'transcript_post_assembly',
+      'agent.cursor.skill_detection_source':
+        skill.detectionSource || 'transcript_post_assembly',
     }, runtimeConfig));
 
     // tool.result
@@ -194,7 +195,8 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
       'gen_ai.tool.name': 'Read',
       'gen_ai.tool.call.id': toolCallId,
       'gen_ai.skill.name': skill.skillName,
-      'agent.cursor.skill_detection_source': 'transcript_post_assembly',
+      'agent.cursor.skill_detection_source':
+        skill.detectionSource || 'transcript_post_assembly',
     }, runtimeConfig));
   }
 
@@ -364,10 +366,19 @@ async function main() {
         if (transcriptPathForSkill && promptForSkill?.prompt && records.length > 0) {
           const { detectSkillFromTranscript } = await import('./cursor/skill-detector.mjs');
           const detectedSkills = detectSkillFromTranscript(transcriptPathForSkill, promptForSkill.prompt);
-          // The Windows transcript assembler already materializes transcript
-          // tool_use entries. Only compensate paths assembled from hook events.
-          if (detectedSkills && detectedSkills.length > 0 && !assembledFromTranscript) {
-            injectSkillRecords(records, detectedSkills, runtimeConfig);
+          if (detectedSkills && detectedSkills.length > 0) {
+            // The Windows transcript assembler already materializes transcript
+            // Read tool_use entries. Always synthesize Read for explicit manual
+            // attachments; compensate actual transcript reads only on hook-event
+            // assembly paths so Windows does not emit duplicate Read records.
+            const readSkills = detectedSkills.filter(skill =>
+              skill.detectionSources?.includes('manual_attachment') ||
+              (!assembledFromTranscript &&
+                skill.detectionSources?.includes('transcript_read'))
+            );
+            if (readSkills.length > 0) {
+              injectSkillRecords(records, readSkills, runtimeConfig);
+            }
           }
         }
       } catch { /* best-effort skill detection — never block output */ }
