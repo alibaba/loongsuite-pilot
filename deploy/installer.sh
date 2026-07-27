@@ -628,7 +628,10 @@ deploy_package() {
         msg "==> 部署到 $target ..." "==> Deploying to $target ..."
         mkdir -p "$versions_dir"
         rm -rf "$target"
-        cp -r "$src" "$target"
+        if ! cp -r "$src" "$target"; then
+            msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
+            return 1
+        fi
 
         echo "$dir_name" > "$current_file.tmp"
         mv -f "$current_file.tmp" "$current_file"
@@ -639,7 +642,10 @@ deploy_package() {
             "==> Deploying to $PERMANENT_DIR ..."
         mkdir -p "$(dirname "$PERMANENT_DIR")"
         rm -rf "$PERMANENT_DIR"
-        cp -r "$src" "$PERMANENT_DIR"
+        if ! cp -r "$src" "$PERMANENT_DIR"; then
+            msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
+            return 1
+        fi
     fi
     msg "    ✅ 部署完成" "    ✅ Deployed"
     echo ""
@@ -647,13 +653,19 @@ deploy_package() {
     deploy_bootstrap_scripts
 
     msg "==> 安装依赖..." "==> Installing dependencies..."
-    (cd "$PERMANENT_DIR" && "$NPM_BIN" install --production --no-optional 2>&1 | tail -1)
+    if ! (cd "$PERMANENT_DIR" && "$NPM_BIN" install --production --no-optional 2>&1 | tail -1); then
+        msg "    ❌ 依赖安装失败" "    ❌ Dependency installation failed"
+        return 1
+    fi
     msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     echo ""
 
     msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
     if [ -f scripts/postinstall.js ]; then
-        "$NODE_BIN" scripts/postinstall.js
+        "$NODE_BIN" scripts/postinstall.js || {
+            msg "    ❌ Hook 脚本部署失败" "    ❌ Hook script deployment failed"
+            return 1
+        }
     fi
     msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
     msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
@@ -1315,7 +1327,21 @@ cmd_upgrade() {
 
     # Deploy new version to versions/<ver>_<commit>/
     # Old version stays untouched; deploy_package writes current/previous pointers
-    deploy_package "$INSTALL_SRC"
+    if ! deploy_package "$INSTALL_SRC"; then
+        echo ""
+        msg "⚠️  部署失败，正在回滚到旧版本..." \
+            "⚠️  Deployment failed, rolling back to old version..."
+        if command -v loongsuite-pilot &>/dev/null; then
+            loongsuite-pilot rollback 2>/dev/null || true
+            loongsuite-pilot start 2>/dev/null || true
+        elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
+            "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || true
+            "$HOME/.local/bin/loongsuite-pilot" start 2>/dev/null || true
+        fi
+        msg "❌ 升级失败（部署/依赖安装出错），已回滚到 v${old_ver:-unknown} 并重启服务" \
+            "❌ Upgrade failed (deploy/dependency error), rolled back to v${old_ver:-unknown} and restarted"
+        exit 1
+    fi
     install_loongsuite_pilot_command
 
     # Start the new version
@@ -1401,6 +1427,11 @@ remove_hook_configs() {
     local _node_bin=""
     _node_bin=$(resolve_node 2>/dev/null) || true
 
+    if [ -z "$_node_bin" ]; then
+        msg "    ⚠️  未找到 Node.js，将使用 sed 回退方式清理 hook" \
+            "    ⚠️  Node.js not found, using sed fallback for hook cleanup"
+    fi
+
     for cfg in "${configs[@]}"; do
         [ -f "$cfg" ] || continue
         local short="${cfg/#$HOME/\~}"
@@ -1436,6 +1467,17 @@ try {
   }
 } catch(e) { process.stderr.write(e.message); process.exit(1); }
 " "$cfg" "$HOOK_MARKER" && ok=1
+        else
+            # sed fallback: remove lines containing the marker
+            if grep -q "$HOOK_MARKER" "$cfg" 2>/dev/null; then
+                local tmp_file
+                tmp_file=$(mktemp)
+                grep -v "$HOOK_MARKER" "$cfg" > "$tmp_file" 2>/dev/null || true
+                mv "$tmp_file" "$cfg"
+                ok=1
+            else
+                ok=1
+            fi
         fi
 
         if [ "$ok" -eq 1 ]; then
@@ -1533,11 +1575,16 @@ cmd_uninstall() {
     remove_otel_plugin
     echo ""
 
-    # Remove package directory
+    # Remove installation artifacts
     msg "==> 删除安装目录..." "==> Removing installation..."
-    rm -rf "$HOME/.loongsuite-pilot"
-    msg "    ✅ 已删除 $HOME/.loongsuite-pilot" \
-        "    ✅ Removed $HOME/.loongsuite-pilot"
+    local _cache_dir="$HOME/.loongsuite-pilot"
+    rm -rf "${_cache_dir:?}/versions"
+    rm -rf "${_cache_dir:?}/bin"
+    rm -rf "${_cache_dir:?}/package"
+    rm -f "${_cache_dir:?}/current"
+    rm -f "${_cache_dir:?}/previous"
+    rm -f "${_cache_dir:?}/node-bin"
+    msg "    ✅ 已删除安装文件" "    ✅ Installation files removed"
 
     # Remove loongsuite-pilot command
     msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
