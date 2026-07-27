@@ -21,6 +21,12 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
+vi.mock('../../../src/utils/logger.js', () => ({
+  createLogger: () => ({
+    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
+  }),
+}));
+
 function buildSnapshot(overrides: Partial<DataflowSnapshot> = {}): DataflowSnapshot {
   return {
     sendEntriesTotal: 0,
