@@ -10,6 +10,11 @@ const WRAPPER = path.resolve(
   __dirname,
   '../../../../assets/hooks/codex-loongsuite-pilot-hook.ps1',
 );
+const PROCESSOR = path.resolve(
+  __dirname,
+  '../../../../assets/hooks/codex-hook-processor.mjs',
+);
+const SHARED_HOOK_ASSETS = path.resolve(__dirname, '../../../../assets/hooks/shared');
 const tempDirs = [];
 
 afterEach(() => {
@@ -106,5 +111,62 @@ describe.runIf(process.platform === 'win32')('Codex PowerShell hook wrapper', ()
       ),
       'utf8',
     ))).toMatchObject({ session_id: 'windows-empty-pin' });
+  });
+
+  test('derives the shared Pilot data directory while publishing a custom CODEX_HOME', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'Pilot Shared Root-'));
+    tempDirs.push(tempRoot);
+    const pilotRoot = path.join(tempRoot, 'shared-pilot');
+    const hookDir = path.join(pilotRoot, 'hooks');
+    const taskHome = path.join(tempRoot, 'task-home');
+    const codexHome = path.join(tempRoot, 'task-codex-home');
+    fs.mkdirSync(hookDir, { recursive: true });
+    fs.mkdirSync(taskHome, { recursive: true });
+    fs.writeFileSync(path.join(pilotRoot, 'node-bin'), process.execPath, 'utf8');
+    fs.copyFileSync(WRAPPER, path.join(hookDir, 'codex-loongsuite-pilot-hook.ps1'));
+    fs.copyFileSync(PROCESSOR, path.join(hookDir, 'codex-hook-processor.mjs'));
+    fs.cpSync(SHARED_HOOK_ASSETS, path.join(hookDir, 'shared'), { recursive: true });
+
+    const env = {
+      ...process.env,
+      USERPROFILE: taskHome,
+      HOME: taskHome,
+      CODEX_HOME: codexHome,
+    };
+    delete env.LOONGSUITE_PILOT_DATA_DIR;
+    const result = spawnSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        path.join(hookDir, 'codex-loongsuite-pilot-hook.ps1'),
+        'session-start',
+      ],
+      {
+        input: Buffer.from(JSON.stringify({ session_id: 'windows-custom-codex-home' }), 'utf8'),
+        env,
+        encoding: 'utf8',
+        timeout: 15_000,
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    const marker = path.join(
+      pilotRoot,
+      'state',
+      'codex',
+      'transcript-wakeups',
+      'windows-custom-codex-home.json',
+    );
+    expect(JSON.parse(fs.readFileSync(marker, 'utf8'))).toMatchObject({
+      session_id: 'windows-custom-codex-home',
+      codex_home: codexHome,
+      session_dir: path.join(codexHome, 'sessions'),
+    });
+    expect(fs.existsSync(path.join(taskHome, '.loongsuite-pilot'))).toBe(false);
   });
 });

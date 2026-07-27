@@ -57,6 +57,21 @@ Pilot is designed to answer practical questions:
 | Qwen Code CLI | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       |
 
+### Documented Windows Agent Support
+
+The table above describes Pilot's general integration capabilities; it does not imply that every agent is supported on every operating system. The following agents are currently explicitly documented as supported on Windows:
+
+| Agent | Windows Integration | Trace Export | Log Export | Token Usage | Conversation / Tool Calls | Requirement |
+|-------|---------------------|--------------|------------|-------------|---------------------------|-------------|
+| Claude Code | Hook | Yes | Yes | Yes | Yes | — |
+| Cursor | Hook | Yes | Yes | Yes | Yes | — |
+| Qoder Work | Hook / local data source | Yes | Yes | No | Yes | User edition |
+| Qoder CLI | Hook | Yes | Yes | No | Yes | — |
+| Qoder IDE | Hook / local data source | Yes | Yes | Yes | Yes | Qoder 1.10.0 or later, User edition |
+| OpenCode | Plugin injection | Yes | Yes | Yes | Yes | — |
+
+Agents omitted from this Windows table do not currently have an explicit Windows support statement; omission does not necessarily mean that the agent cannot run on Windows. See the [Alibaba Cloud AI Coding Agent access guide](https://help.aliyun.com/zh/cms/cloudmonitor-2-0/ai-application-access-ai-coding-agent/) for the source support matrix and [Installation](docs/installation.md) for Windows prerequisites and setup.
+
 
 Agent definitions live in `agents.d/`. You can add new agents without changing the deployment framework; see [Agent Onboarding](docs/agent-onboarding.md).
 

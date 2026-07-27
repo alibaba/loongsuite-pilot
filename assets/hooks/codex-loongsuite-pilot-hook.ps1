@@ -1,8 +1,8 @@
-# Codex Stop hook entrypoint for Windows.
+# Codex transcript discovery hook entrypoint for Windows.
 #
 # Registered command:
 #   powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-#     -File "<pilot-data>\hooks\codex-loongsuite-pilot-hook.ps1" stop
+#     -File "<pilot-data>\hooks\codex-loongsuite-pilot-hook.ps1" <subcommand>
 #
 # The hook is fail-open: it always acknowledges Codex with one JSON object and
 # exits zero. Telemetry is recovered only by CodexTranscriptInput.
@@ -17,6 +17,10 @@ $EMPTY_RESULT = '{}'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Processor = Join-Path $ScriptDir "codex-hook-processor.mjs"
+$PilotDataDir = Split-Path -Parent $ScriptDir
+if (-not $env:LOONGSUITE_PILOT_DATA_DIR) {
+    $env:LOONGSUITE_PILOT_DATA_DIR = $PilotDataDir
+}
 
 function Log-Error {
     param([string]$Stage, [string]$Message)

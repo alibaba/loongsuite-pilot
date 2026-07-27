@@ -54,6 +54,21 @@ Pilot 主要帮助回答这些问题：
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 
+### Windows Agent 明确支持情况
+
+上表描述 Pilot 的总体接入能力，不代表每个 Agent 在所有操作系统上均受支持。目前文档明确说明支持 Windows 的 Agent 如下：
+
+| Agent | Windows 集成方式 | Trace 上报 | 日志上报 | Token 用量 | 对话 / 工具调用 | 使用条件 |
+|-------|------------------|------------|----------|------------|-----------------|----------|
+| Claude Code | Hook | 支持 | 支持 | 支持 | 支持 | — |
+| Cursor | Hook | 支持 | 支持 | 支持 | 支持 | — |
+| Qoder Work | Hook / 本地数据源 | 支持 | 支持 | 不支持 | 支持 | User 版本 |
+| Qoder CLI | Hook | 支持 | 支持 | 不支持 | 支持 | — |
+| Qoder IDE | Hook / 本地数据源 | 支持 | 支持 | 支持 | 支持 | Qoder 1.10.0 及以上 User 版本 |
+| OpenCode | 插件注入 | 支持 | 支持 | 支持 | 支持 | — |
+
+未列入 Windows 表格的 Agent，表示当前没有明确的 Windows 支持声明，并不一定代表无法在 Windows 上运行。支持矩阵参考[阿里云 AI Coding Agent 接入文档](https://help.aliyun.com/zh/cms/cloudmonitor-2-0/ai-application-access-ai-coding-agent/)，Windows 环境要求与安装方法见[安装指南](docs/zh-CN/installation.md)。
+
 Agent 定义位于 `agents.d/`。如需接入新的 Agent，请参考 [新 Agent 接入](docs/zh-CN/agent-onboarding.md)。
 
 ## 快速开始
