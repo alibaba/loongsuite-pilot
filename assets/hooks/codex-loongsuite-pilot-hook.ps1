@@ -10,6 +10,10 @@ $EMPTY_RESULT = '{}'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Processor = Join-Path $ScriptDir "codex-hook-processor.mjs"
+$PilotDataDir = Split-Path -Parent $ScriptDir
+if (-not $env:LOONGSUITE_PILOT_DATA_DIR) {
+    $env:LOONGSUITE_PILOT_DATA_DIR = $PilotDataDir
+}
 $Subcommand = if ($args.Count -gt 0) { $args[0] } else { "unknown" }
 
 function Log-Error {
@@ -54,7 +58,7 @@ function Test-NodeSuitable {
 }
 
 function Resolve-NodeBin {
-    $pinFile = Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
+    $pinFile = Join-Path $env:LOONGSUITE_PILOT_DATA_DIR "node-bin"
     if (Test-Path $pinFile) {
         $pinned = (Get-Content $pinFile -ErrorAction SilentlyContinue).Trim()
         if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }

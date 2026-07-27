@@ -637,6 +637,115 @@ describe('CodexTranscriptInput', () => {
     );
   });
 
+  it('discovers and ingests a task-scoped CODEX_HOME before a Stop hook', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-dynamic-home-'));
+    tempDirs.push(root);
+    const { input, entries, wakeupDir, stateStore } = await createDormantInput(root);
+    const codexHome = path.join(root, 'multica-task', 'codex-home');
+    const dynamicSessionDir = path.join(codexHome, 'sessions');
+    const transcriptText = completedTurn().replace('"type":"task_complete"', '"type":"turn_aborted"');
+    const transcript = await writeTranscript(dynamicSessionDir, transcriptText);
+    await writeWakeupMarker(wakeupDir, 'session-1', {
+      session_id: 'session-1',
+      turn_id: 'turn-1',
+      codex_home: codexHome,
+      received_at: new Date().toISOString(),
+    });
+
+    await input.start();
+    await waitFor(() => entries.some(entry => entry['event.name'] === 'tool.result'));
+    await input.stop();
+
+    const canonicalTranscript = await fs.realpath(transcript);
+    expect(entries.some(entry => entry['event.name'] === 'llm.response')).toBe(true);
+    expect(entries.some(entry => entry['agent.codex.transcript_turn_id'] === 'turn-1')).toBe(true);
+    expect(transcriptCheckpoint(stateStore, canonicalTranscript).scanOffset)
+      .toBe(Buffer.byteLength(transcriptText));
+  });
+
+  it('selects the newest discovery marker when more than 256 markers exist', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-many-markers-'));
+    tempDirs.push(root);
+    const { input, entries, wakeupDir } = await createDormantInput(root);
+    const dynamicSessionDir = path.join(root, 'newest-codex-home', 'sessions');
+    await writeTranscript(dynamicSessionDir, completedTurn());
+    await fs.mkdir(wakeupDir, { recursive: true });
+    const receivedAt = new Date().toISOString();
+    await Promise.all(Array.from({ length: 256 }, (_, index) => (
+      fs.writeFile(
+        path.join(wakeupDir, `old-${String(index).padStart(3, '0')}.json`),
+        JSON.stringify({ session_id: `old-${index}`, received_at: receivedAt }),
+        'utf8',
+      )
+    )));
+    await fs.writeFile(path.join(wakeupDir, 'zzzz-newest.json'), JSON.stringify({
+      session_id: 'session-1',
+      session_dir: dynamicSessionDir,
+      received_at: receivedAt,
+    }), 'utf8');
+
+    await input.start();
+    await waitFor(() => entries.some(entry => entry['event.name'] === 'tool.result'));
+    await input.stop();
+
+    expect(entries.some(entry => entry['gen_ai.session.id'] === 'session-1')).toBe(true);
+  });
+
+  it('ignores expired dynamic CODEX_HOME discovery markers', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-stale-marker-'));
+    tempDirs.push(root);
+    const { input, entries, wakeupDir, stateStore } = await createDormantInput(root);
+    const dynamicSessionDir = path.join(root, 'stale-codex-home', 'sessions');
+    const transcript = await writeTranscript(dynamicSessionDir, completedTurn());
+    await writeWakeupMarker(wakeupDir, 'session-1', {
+      session_id: 'session-1',
+      session_dir: dynamicSessionDir,
+      received_at: new Date(Date.now() - 49 * 60 * 60 * 1_000).toISOString(),
+    });
+
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(0);
+    expect(stateStore.get(`codex-transcript:${await fs.realpath(transcript)}`).lastOffset).toBeUndefined();
+  });
+
+  it('ignores inactive rollout files under a freshly discovered CODEX_HOME', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-inactive-rollout-'));
+    tempDirs.push(root);
+    const { input, entries, wakeupDir, stateStore } = await createDormantInput(root);
+    const dynamicSessionDir = path.join(root, 'inactive-codex-home', 'sessions');
+    const transcript = await writeTranscript(dynamicSessionDir, completedTurn());
+    const inactiveAt = new Date(Date.now() - 16 * 60 * 1_000);
+    await fs.utimes(transcript, inactiveAt, inactiveAt);
+    await writeWakeupMarker(wakeupDir, 'session-1', {
+      session_id: 'session-1',
+      session_dir: dynamicSessionDir,
+      received_at: new Date().toISOString(),
+    });
+
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(0);
+    expect(stateStore.get(`codex-transcript:${await fs.realpath(transcript)}`).lastOffset).toBeUndefined();
+  });
+
+  it('continues to baseline transcripts already present in the default session directory', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-default-baseline-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const transcriptText = completedTurn();
+    const transcript = await writeTranscript(sessionDir, transcriptText);
+
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(0);
+    expect(transcriptCheckpoint(stateStore, transcript).scanOffset)
+      .toBe(Buffer.byteLength(transcriptText));
+  });
+
   it('consumes a control-only aborted turn and emits later normal work in the same cycle', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-control-abort-'));
     tempDirs.push(root);
