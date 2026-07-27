@@ -663,6 +663,85 @@ describe('CodexTranscriptInput', () => {
       .toBe(Buffer.byteLength(transcriptText));
   });
 
+  it('does not let the default session root consume the dynamic rollout budget', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-dynamic-budget-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, wakeupDir } = await createDormantInput(root);
+    await Promise.all(Array.from({ length: 64 }, (_, index) => (
+      writeTranscriptNamed(sessionDir, `rollout-default-${index}.jsonl`, '')
+    )));
+
+    const codexHome = path.join(root, 'multica-task', 'codex-home');
+    const dynamicSessionDir = path.join(codexHome, 'sessions');
+    await writeTranscript(dynamicSessionDir, completedTurn());
+    const receivedAt = new Date().toISOString();
+    await writeWakeupMarker(wakeupDir, 'zzzz-default', {
+      session_id: 'default-session',
+      session_dir: sessionDir,
+      received_at: receivedAt,
+    });
+    await writeWakeupMarker(wakeupDir, 'aaaa-dynamic', {
+      session_id: 'session-1',
+      codex_home: codexHome,
+      session_dir: dynamicSessionDir,
+      received_at: receivedAt,
+    });
+
+    await input.start();
+    await waitFor(() => entries.some(entry => entry['event.name'] === 'tool.result'));
+    await input.stop();
+
+    expect(entries.some(entry => entry['gen_ai.session.id'] === 'session-1')).toBe(true);
+  });
+
+  it('does not recurse outside the bounded Codex YYYY/MM/DD session layout', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-dynamic-layout-'));
+    tempDirs.push(root);
+    const { input, entries, wakeupDir, stateStore } = await createDormantInput(root);
+    const dynamicSessionDir = path.join(root, 'dynamic-codex-home', 'sessions');
+    const transcript = path.join(
+      dynamicSessionDir,
+      'unrelated',
+      'deep',
+      'tree',
+      'rollout-session-1.jsonl',
+    );
+    await fs.mkdir(path.dirname(transcript), { recursive: true });
+    await fs.writeFile(transcript, completedTurn(), 'utf8');
+    await writeWakeupMarker(wakeupDir, 'session-1', {
+      session_id: 'session-1',
+      session_dir: dynamicSessionDir,
+      received_at: new Date().toISOString(),
+    });
+
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(0);
+    expect(stateStore.get(`codex-transcript:${transcript}`).lastOffset).toBeUndefined();
+  });
+
+  it('rejects a marker whose session_dir does not match codex_home', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-marker-mismatch-'));
+    tempDirs.push(root);
+    const { input, entries, wakeupDir, stateStore } = await createDormantInput(root);
+    const codexHome = path.join(root, 'expected-codex-home');
+    const mismatchedSessionDir = path.join(root, 'unexpected-codex-home', 'sessions');
+    const transcript = await writeTranscript(mismatchedSessionDir, completedTurn());
+    await writeWakeupMarker(wakeupDir, 'session-1', {
+      session_id: 'session-1',
+      codex_home: codexHome,
+      session_dir: mismatchedSessionDir,
+      received_at: new Date().toISOString(),
+    });
+
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(0);
+    expect(stateStore.get(`codex-transcript:${transcript}`).lastOffset).toBeUndefined();
+  });
+
   it('selects the newest discovery marker when more than 256 markers exist', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-many-markers-'));
     tempDirs.push(root);
@@ -708,6 +787,7 @@ describe('CodexTranscriptInput', () => {
 
     expect(entries).toHaveLength(0);
     expect(stateStore.get(`codex-transcript:${await fs.realpath(transcript)}`).lastOffset).toBeUndefined();
+    await expect(fs.access(path.join(wakeupDir, 'session-1.json'))).rejects.toThrow();
   });
 
   it('ignores inactive rollout files under a freshly discovered CODEX_HOME', async () => {
@@ -1397,7 +1477,9 @@ describe('CodexTranscriptInput', () => {
   it('does not commit a tool wave until an output written after token_count is present', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-token-before-tool-output-'));
     tempDirs.push(root);
-    const { input, entries, sessionDir } = await createInput(root, 60_000);
+    // This test drives processFile directly, so keep the normal watcher/poll
+    // cycle dormant to avoid racing a second collection of the same append.
+    const { input, entries, sessionDir } = await createDormantInput(root);
     const initial = [
       record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
       record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'turn-1', model: 'gpt-5.5' }),
@@ -1420,7 +1502,6 @@ describe('CodexTranscriptInput', () => {
       type: 'function_call_output', call_id: 'call-1', output: '"/tmp"',
     }) + '\n', 'utf8');
     await processTranscriptOnce(input, transcript);
-    await input.stop();
 
     expect(entries.filter(entry => entry['event.name'] === 'llm.response')).toHaveLength(1);
     expect(entries.filter(entry => entry['event.name'] === 'tool.call')).toHaveLength(1);
