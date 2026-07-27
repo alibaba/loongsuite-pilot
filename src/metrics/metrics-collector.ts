@@ -126,10 +126,17 @@ export interface DataflowSnapshot {
   inputIdleMinutes: Map<string, number>;
 }
 
+export interface NodeBinDiagnostic {
+  originalPath: string;
+  pathExists: boolean;
+  pathExecutable: boolean;
+}
+
 export interface InfraHealthSnapshot {
   updaterPidAlive: boolean;
   currentVersionValid: boolean;
   nodeBinValid: boolean;
+  nodeBinDiagnostic?: NodeBinDiagnostic;
   rollbackAvailable: boolean;
   versionCount: number;
   canaryPolicy: string;
@@ -364,14 +371,15 @@ export class MetricsCollector {
     }
 
     const currentVersionValid = checkVersionPointer(this.dataDir);
-    const nodeBinValid = checkNodeBin(this.dataDir);
+    const nodeBinResult = checkNodeBin(this.dataDir);
     const rollbackAvailable = checkRollbackAvailable(this.dataDir);
     const versionCount = countVersions(this.dataDir);
 
     this.lastInfraHealth = {
       updaterPidAlive,
       currentVersionValid,
-      nodeBinValid,
+      nodeBinValid: nodeBinResult.valid,
+      nodeBinDiagnostic: nodeBinResult.diagnostic,
       rollbackAvailable,
       versionCount,
       canaryPolicy: this.canaryPolicy,
@@ -446,15 +454,94 @@ function checkVersionPointer(dataDir: string): boolean {
   }
 }
 
-function checkNodeBin(dataDir: string): boolean {
+function checkNodeBin(dataDir: string): { valid: boolean; diagnostic?: NodeBinDiagnostic } {
+  const nodeBinFile = path.join(dataDir, 'node-bin');
+  let originalPath = '';
   try {
-    const nodePath = fs.readFileSync(path.join(dataDir, 'node-bin'), 'utf-8').trim();
-    if (!nodePath) return false;
-    fs.accessSync(nodePath, fs.constants.X_OK);
+    originalPath = fs.readFileSync(nodeBinFile, 'utf-8').trim();
+  } catch {
+    return { valid: false, diagnostic: { originalPath: '', pathExists: false, pathExecutable: false } };
+  }
+
+  if (originalPath && isExecutable(originalPath)) {
+    return { valid: true };
+  }
+
+  const healed = healNodeBin(nodeBinFile);
+  if (healed) return { valid: true };
+
+  return {
+    valid: false,
+    diagnostic: {
+      originalPath,
+      pathExists: originalPath ? fs.existsSync(originalPath) : false,
+      pathExecutable: originalPath ? isExecutable(originalPath) : false,
+    },
+  };
+}
+
+function isExecutable(p: string): boolean {
+  try {
+    fs.accessSync(p, fs.constants.X_OK);
     return true;
   } catch {
     return false;
   }
+}
+
+function healNodeBin(nodeBinFile: string): boolean {
+  const candidate = findNodeCandidate();
+  if (!candidate) return false;
+  try {
+    const dir = path.dirname(nodeBinFile);
+    const tmpFile = path.join(dir, `.node-bin.${process.pid}.tmp`);
+    fs.writeFileSync(tmpFile, candidate + '\n', 'utf-8');
+    fs.renameSync(tmpFile, nodeBinFile);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function findNodeCandidate(): string | null {
+  if (process.execPath && isExecutable(process.execPath)) {
+    return fs.realpathSync(process.execPath);
+  }
+
+  const home = os.homedir();
+  const candidates: string[] = [];
+
+  try {
+    const nvmDir = path.join(home, '.nvm', 'versions', 'node');
+    const versions = fs.readdirSync(nvmDir).sort().reverse();
+    for (const v of versions) {
+      candidates.push(path.join(nvmDir, v, 'bin', 'node'));
+    }
+  } catch { /* nvm not installed */ }
+
+  candidates.push(
+    path.join(home, '.fnm', 'aliases', 'default', 'bin', 'node'),
+    path.join(home, '.volta', 'bin', 'node'),
+    '/opt/homebrew/bin/node',
+    '/usr/local/bin/node',
+    path.join(home, '.local', 'bin', 'node'),
+  );
+
+  const pathDirs = (process.env.PATH || '').split(path.delimiter);
+  for (const dir of pathDirs) {
+    if (dir) candidates.push(path.join(dir, 'node'));
+  }
+
+  for (const c of candidates) {
+    if (isExecutable(c)) {
+      try {
+        return fs.realpathSync(c);
+      } catch {
+        return c;
+      }
+    }
+  }
+  return null;
 }
 
 function checkRollbackAvailable(dataDir: string): boolean {
