@@ -25,6 +25,12 @@ Use these IDs in installer options, `agent-control.json`, and `config.json`.
 | Qwen Code CLI | `qwen-code-cli` | Hook integration; parses qwen-code transcript JSONL on Stop. |
 | Wukong | `wukong` | CLI API polling via local `wukong-cli`. |
 
+Codex collection is transcript-backed. Pilot uses the lightweight
+`SessionStart` and `UserPromptSubmit` hooks to discover the effective
+`CODEX_HOME`, including task-scoped homes created by orchestrators, and tails
+recent rollout files from that session root. `Stop` is retained as a
+best-effort wakeup and is not required for directory discovery.
+
 ## Choose Agents During Installation
 
 Use `--agents` to skip the interactive selection step:
