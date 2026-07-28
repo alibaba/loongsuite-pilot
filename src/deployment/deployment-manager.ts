@@ -75,7 +75,7 @@ export class DeploymentManager {
 
     for (const def of this.definitions) {
       if (enabled && !enabled(def)) {
-        logger.debug('agent disabled by config, skipping deployment', { agentId: def.id });
+        logger.debug('agent excluded from deployment', { agentId: def.id });
         results.push({
           success: true,
           agentId: def.id,

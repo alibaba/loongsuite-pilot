@@ -25,7 +25,7 @@ function fixtureRecords(): WorkBuddyRecord[] {
 describe('WorkBuddy audit-event builder', () => {
   it('merges a multi-tool response wave into stable, uniquely identified audit events', async () => {
     const built = await buildWorkBuddyEvents(fixtureRecords(), { sessionId: 'session-1' });
-    const entries = built.map(item => item.entry);
+    const entries = built;
     expect(entries.map(entry => entry['event.name'])).toEqual([
       'llm.request',
       'llm.response',
@@ -57,6 +57,11 @@ describe('WorkBuddy audit-event builder', () => {
     expect((responses[0]['gen_ai.output.messages'] as any)[0].parts.map((part: any) => part.type))
       .toEqual(['reasoning', 'text', 'tool_call', 'tool_call']);
     expect(requests[1]['gen_ai.input.messages_delta']).toHaveLength(2);
+    expect((requests[1]['gen_ai.input.messages_delta'] as any[]).map(message => message.role))
+      .toEqual(['tool', 'tool']);
+    expect((requests[1]['gen_ai.input.messages_delta'] as any[])
+      .map(message => message.parts[0].id))
+      .toEqual(['call-synthetic-a', 'call-synthetic-b']);
 
     const toolCalls = entries.filter(entry => entry['event.name'] === 'tool.call');
     const toolResults = entries.filter(entry => entry['event.name'] === 'tool.result');
@@ -72,12 +77,12 @@ describe('WorkBuddy audit-event builder', () => {
     expect(new Set(eventIds).size).toBe(entries.length);
     expect(entries.every(entry => entry['workspace.path'] === '/workspace/example')).toBe(true);
     expect((await buildWorkBuddyEvents(fixtureRecords(), { sessionId: 'session-1' }))
-      .map(item => item.entry['event.id'])).toEqual(eventIds);
+      .map(entry => entry['event.id'])).toEqual(eventIds);
   });
 
   it('lets the shared content policy remove all WorkBuddy message and tool content', async () => {
     const entries = (await buildWorkBuddyEvents(fixtureRecords(), { sessionId: 'session-1' }))
-      .map(item => applyAgentContentPolicy(item.entry, { workbuddy: { captureMessageContent: false } }));
+      .map(entry => applyAgentContentPolicy(entry, { workbuddy: { captureMessageContent: false } }));
     for (const entry of entries) {
       expect(entry['gen_ai.input.messages_delta']).toBeUndefined();
       expect(entry['gen_ai.output.messages']).toBeUndefined();
@@ -93,8 +98,7 @@ describe('WorkBuddy audit-event builder', () => {
         ? { ...record.providerData, traceId: '00000000000000000000000000000000' }
         : undefined,
     }));
-    const entries = (await buildWorkBuddyEvents(records, { sessionId: 'session-1' }))
-      .map(item => item.entry);
+    const entries = await buildWorkBuddyEvents(records, { sessionId: 'session-1' });
     const traceIds = [...new Set(entries.map(entry => entry.trace_id))];
 
     expect(traceIds).toHaveLength(1);
@@ -117,8 +121,7 @@ describe('WorkBuddy audit-event builder', () => {
         providerData,
       };
     });
-    const entries = (await buildWorkBuddyEvents(records, { sessionId: 'session-1' }))
-      .map(item => item.entry);
+    const entries = await buildWorkBuddyEvents(records, { sessionId: 'session-1' });
 
     expect(entries.every(entry => !Object.values(entry).includes('unknown'))).toBe(true);
     expect(entries.filter(entry => entry['event.name'] === 'llm.request')
@@ -144,8 +147,7 @@ describe('WorkBuddy audit-event builder', () => {
       }
       return record;
     });
-    const entries = (await buildWorkBuddyEvents(records, { sessionId: 'session-1' }))
-      .map(item => item.entry);
+    const entries = await buildWorkBuddyEvents(records, { sessionId: 'session-1' });
     const firstResponse = entries.find(entry =>
       entry['event.name'] === 'llm.response'
       && entry['gen_ai.response.finish_reasons']?.includes('tool_call'));
@@ -169,10 +171,27 @@ describe('WorkBuddy audit-event builder', () => {
     expect((nextRequest?.['gen_ai.input.messages_delta'] as any)?.[0]?.parts?.[0])
       .not.toHaveProperty('result');
   });
+
+  it('does not infer model finish semantics from assistant status', async () => {
+    const records = fixtureRecords().map(record =>
+      record.type === 'message' && record.role === 'assistant'
+        ? { ...record, status: 'failed' }
+        : record);
+    const responses = (await buildWorkBuddyEvents(records, { sessionId: 'session-1' }))
+      .filter(entry => entry['event.name'] === 'llm.response');
+
+    expect(responses.map(entry => entry['gen_ai.response.finish_reasons']))
+      .toEqual([['tool_call'], ['stop']]);
+    expect(responses[1]['gen_ai.turn.end']).toBe(true);
+    expect(responses[1]['error.type']).toBeUndefined();
+  });
+
 });
 
 class TestWorkBuddyInput extends WorkBuddyInput {
-  public collectNow() { return this.collect(); }
+  public collectNow() {
+    return this.collect();
+  }
 }
 
 describe('WorkBuddyInput checkpoints', () => {
@@ -203,11 +222,14 @@ describe('WorkBuddyInput checkpoints', () => {
     );
     await writeFile(
       path.join(hookLogDir, 'wakeup-2026-07-26.jsonl'),
-      `${JSON.stringify({ transcript_path: outsideTranscript })}\n`,
+      `${JSON.stringify({ transcript_path: outsideTranscript })}\n${JSON.stringify({
+        observed_at_ms: 1_000,
+        hook_event_name: 'UserPromptSubmit',
+        transcript_path: transcript,
+      })}\n`,
     );
     const stateStore = new StateStore(path.join(root, 'state.json'));
     await stateStore.load();
-    stateStore.update('workbuddy', { extra: { workbuddySqliteCursor: [1, 'legacy-session'] } });
     const input = new TestWorkBuddyInput({ stateStore, workBuddyRoot: root, hookLogDir });
 
     expect(WorkBuddyInput.getWatchPaths(root)).toEqual([root, path.join(root, 'projects')]);
@@ -230,6 +252,16 @@ describe('WorkBuddyInput checkpoints', () => {
     await appendFile(transcript, secondTurn.map(record => JSON.stringify(record)).join('\r\n') + '\r\n');
     await appendFile(outsideTranscript, secondTurn.map(record => JSON.stringify(record)).join('\n') + '\n');
 
+    expect(await input.collectNow()).toEqual([]);
+    await appendFile(
+      path.join(hookLogDir, 'wakeup-2026-07-26.jsonl'),
+      `${JSON.stringify({
+        observed_at_ms: 2_000,
+        hook_event_name: 'Stop',
+        transcript_path: transcript,
+      })}\n`,
+    );
+    expect(await input.collectNow()).toEqual([]);
     const entries = await input.collectNow();
     expect(entries).toHaveLength(2);
     expect(entries.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
@@ -238,6 +270,119 @@ describe('WorkBuddyInput checkpoints', () => {
     expect(await input.collectNow()).toEqual([]);
     const persistedState = JSON.parse(await readFile(path.join(root, 'state.json'), 'utf8')).workbuddy;
     expect(persistedState).toBeDefined();
-    expect(persistedState.extra.workbuddySqliteCursor).toBeUndefined();
+    expect(Object.values(persistedState.extra.workbuddyTranscriptBytes))
+      .toEqual([Buffer.byteLength(await readFile(transcript, 'utf8'))]);
   });
+
+  it('waits for Stop before processing a turn written in several chunks', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-input-race-'));
+    const projects = path.join(root, 'projects', 'safe-project');
+    const hookLogDir = path.join(root, 'pilot-logs');
+    await mkdir(projects, { recursive: true });
+    await mkdir(hookLogDir, { recursive: true });
+    const transcript = path.join(projects, 'session-race.jsonl');
+    const journal = path.join(hookLogDir, 'wakeup-2026-07-28.jsonl');
+    const records = fixtureRecords();
+    await writeFile(transcript, `${JSON.stringify(records[0])}\n`);
+    await writeFile(journal, `${JSON.stringify({
+      observed_at_ms: 1_000,
+      hook_event_name: 'UserPromptSubmit',
+      transcript_path: transcript,
+    })}\n`);
+
+    const stateStore = new StateStore(path.join(root, 'state.json'));
+    await stateStore.load();
+    const input = new TestWorkBuddyInput({ stateStore, workBuddyRoot: root, hookLogDir });
+    expect(await input.collectNow()).toEqual([]);
+
+    await appendFile(
+      transcript,
+      `${JSON.stringify(records[1])}\n${JSON.stringify(records[2])}\n`,
+    );
+    expect(await input.collectNow()).toEqual([]);
+    expect(await input.collectNow()).toEqual([]);
+
+    await appendFile(
+      transcript,
+      `${records.slice(3).map(record => JSON.stringify(record)).join('\n')}\n`,
+    );
+    expect(await input.collectNow()).toEqual([]);
+    expect(await input.collectNow()).toEqual([]);
+
+    await appendFile(journal, `${JSON.stringify({
+      observed_at_ms: 2_000,
+      hook_event_name: 'Stop',
+      transcript_path: transcript,
+    })}\n`);
+    expect(await input.collectNow()).toEqual([]);
+    const entries = await input.collectNow();
+    expect(entries.map(entry => entry['event.name'])).toEqual([
+      'llm.request',
+      'llm.response',
+      'tool.call',
+      'tool.call',
+      'tool.result',
+      'tool.result',
+      'llm.request',
+      'llm.response',
+    ]);
+    const responses = entries.filter(entry => entry['event.name'] === 'llm.response');
+    expect(responses.map(entry => entry['gen_ai.response.finish_reasons']))
+      .toEqual([['tool_call'], ['stop']]);
+    expect(entries.filter(entry => entry['gen_ai.turn.end'] === true)).toHaveLength(1);
+    expect(new Set(entries.map(entry => entry['event.id'])).size).toBe(entries.length);
+    expect(await input.collectNow()).toEqual([]);
+  });
+
+  it('requires a stable Stop boundary for a hook-backed transcript', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-input-stop-'));
+    const projects = path.join(root, 'projects', 'safe-project');
+    const hookLogDir = path.join(root, 'pilot-logs');
+    await mkdir(projects, { recursive: true });
+    await mkdir(hookLogDir, { recursive: true });
+    const transcript = path.join(projects, 'session-stop.jsonl');
+    const journal = path.join(hookLogDir, 'wakeup-2026-07-28.jsonl');
+    const records = fixtureRecords();
+    const user = records[0];
+    const assistant = records.find(record =>
+      record.type === 'message'
+      && record.role === 'assistant'
+      && record.id === 'response-synthetic-2')!;
+    await writeFile(transcript, `${JSON.stringify(user)}\n`);
+    await writeFile(journal, `${JSON.stringify({
+      observed_at_ms: 1_000,
+      hook_event_name: 'UserPromptSubmit',
+      transcript_path: transcript,
+    })}\n`);
+
+    const stateStore = new StateStore(path.join(root, 'state.json'));
+    await stateStore.load();
+    const input = new TestWorkBuddyInput({ stateStore, workBuddyRoot: root, hookLogDir });
+    expect(await input.collectNow()).toEqual([]);
+
+    await appendFile(transcript, `${JSON.stringify(assistant)}\n`);
+    expect(await input.collectNow()).toEqual([]);
+    expect(await input.collectNow()).toEqual([]);
+    await stateStore.save();
+
+    const restartedStore = new StateStore(path.join(root, 'state.json'));
+    await restartedStore.load();
+    const restartedInput = new TestWorkBuddyInput({
+      stateStore: restartedStore,
+      workBuddyRoot: root,
+      hookLogDir,
+    });
+
+    await appendFile(journal, `${JSON.stringify({
+      observed_at_ms: 2_000,
+      hook_event_name: 'Stop',
+      transcript_path: transcript,
+    })}\n`);
+    expect(await restartedInput.collectNow()).toEqual([]);
+    const sealed = await restartedInput.collectNow();
+    expect(sealed.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(sealed[1]['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    expect(sealed[1]['gen_ai.turn.end']).toBe(true);
+  });
+
 });

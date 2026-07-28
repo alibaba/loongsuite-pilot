@@ -17,12 +17,6 @@ export interface WorkBuddyRecord {
   providerData?: Record<string, unknown>;
 }
 
-export interface BuiltWorkBuddyEvent {
-  terminalIndex: number;
-  entry: import('../../types/index.js').AgentActivityEntry;
-}
-
 export interface WorkBuddyBuildOptions {
   sessionId: string;
-  minTerminalIndex?: number;
 }

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { ClientType } from '../../types/index.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
-import type { BuiltWorkBuddyEvent, WorkBuddyBuildOptions, WorkBuddyRecord } from './workbuddy-types.js';
+import type { WorkBuddyBuildOptions, WorkBuddyRecord } from './workbuddy-types.js';
 
 type Message = { role: string; parts: Array<Record<string, JsonValue>> };
 
@@ -30,8 +30,8 @@ interface IndexedWorkBuddyRecord {
 export async function buildWorkBuddyEvents(
   records: WorkBuddyRecord[],
   opts: WorkBuddyBuildOptions,
-): Promise<BuiltWorkBuddyEvent[]> {
-  const built: BuiltWorkBuddyEvent[] = [];
+): Promise<AgentActivityEntry[]> {
+  const built: AgentActivityEntry[] = [];
   const tools = new Map<string, ToolContext>();
   let turnId = stableId(opts.sessionId, 'turn:unknown');
   let turnOrdinal = 0;
@@ -41,20 +41,18 @@ export async function buildWorkBuddyEvents(
   let reasoningParts: Array<Record<string, JsonValue>> = [];
   let cwd: string | undefined;
 
-  const push = async (entry: AgentActivityEntry, terminalIndex: number, source: WorkBuddyRecord) => {
-    if (terminalIndex < (opts.minTerminalIndex ?? 0)) return;
+  const push = async (entry: AgentActivityEntry, source: WorkBuddyRecord) => {
     if (cwd) {
       entry['workspace.path'] = cwd;
       await enrichCanonicalEntryWithGit(entry, { 'agent.workbuddy.cwd': cwd }, 'workbuddy');
     }
     if (source.type) entry['agent.workbuddy.source_type'] = source.type;
-    built.push({ terminalIndex, entry });
+    built.push(entry);
   };
 
   const emitToolWave = async (
     responseSource: WorkBuddyRecord,
     calls: IndexedWorkBuddyRecord[],
-    terminalIndex: number,
     assistantParts: Array<Record<string, JsonValue>> = [],
   ) => {
     stepOrdinal++;
@@ -98,8 +96,8 @@ export async function buildWorkBuddyEvents(
     }];
     applyUsage(response, normalizedCalls[normalizedCalls.length - 1].record);
 
-    await push(request, terminalIndex, responseSource);
-    await push(response, terminalIndex, responseSource);
+    await push(request, responseSource);
+    await push(response, responseSource);
     for (const { record: call, callId } of normalizedCalls) {
       tools.set(callId, { step, callTimestamp: timestampMs(call) });
       const toolCall = baseEntry(
@@ -114,7 +112,7 @@ export async function buildWorkBuddyEvents(
       toolCall['gen_ai.tool.call.id'] = callId;
       const args = parseJsonValue(call.arguments);
       if (args !== undefined) toolCall['gen_ai.tool.call.arguments'] = args;
-      await push(toolCall, terminalIndex, call);
+      await push(toolCall, call);
     }
 
     pendingDelta = [];
@@ -146,7 +144,7 @@ export async function buildWorkBuddyEvents(
     if (record.type === 'function_call') {
       const wave = collectFunctionCallWave(records, index, record);
       if (!wave.complete) break;
-      await emitToolWave(record, wave.calls, wave.cursor);
+      await emitToolWave(record, wave.calls);
       index = wave.calls[wave.calls.length - 1].index;
       continue;
     }
@@ -168,7 +166,7 @@ export async function buildWorkBuddyEvents(
         result['gen_ai.tool.call.duration'] = durationMs;
       }
       if (status === 'failure') result['error.type'] = 'tool_execution_failed';
-      await push(result, index, record);
+      await push(result, record);
       const resultPart: Record<string, JsonValue> = {
         type: 'tool_call_response',
         id: callId,
@@ -185,7 +183,7 @@ export async function buildWorkBuddyEvents(
       const wave = collectFunctionCallWave(records, index + 1, record);
       if (wave.calls.length > 0) {
         if (!wave.complete) break;
-        await emitToolWave(record, wave.calls, wave.cursor, toMessage(record, 'assistant').parts);
+        await emitToolWave(record, wave.calls, toMessage(record, 'assistant').parts);
         index = wave.calls[wave.calls.length - 1].index;
         continue;
       }
@@ -193,7 +191,6 @@ export async function buildWorkBuddyEvents(
       stepOrdinal++;
       const step = stepContext(record, opts.sessionId, turnId, stepOrdinal);
       const message = toMessage(record, 'assistant');
-      const finishReason = isFailureStatus(record.status) ? 'error' : 'stop';
       const request = baseEntry('llm.request', record, opts.sessionId, step, `request:${step.stepId}`);
       request['gen_ai.request.id'] = step.requestId;
       if (step.requestModel) request['gen_ai.request.model'] = step.requestModel;
@@ -203,15 +200,14 @@ export async function buildWorkBuddyEvents(
       const response = baseEntry('llm.response', record, opts.sessionId, step, `response:${sourceId(record)}`);
       response['gen_ai.response.id'] = providerString(record, 'messageId') ?? stringValue(record.id);
       if (step.responseModel) response['gen_ai.response.model'] = step.responseModel;
-      response['gen_ai.response.finish_reasons'] = [finishReason];
+      response['gen_ai.response.finish_reasons'] = ['stop'];
       response['gen_ai.turn.end'] = true;
       const parts = [...reasoningParts, ...message.parts];
-      if (parts.length > 0) response['gen_ai.output.messages'] = [{ role: 'assistant', parts, finish_reason: finishReason }];
-      if (finishReason === 'error') response['error.type'] = 'model_response_failed';
+      if (parts.length > 0) response['gen_ai.output.messages'] = [{ role: 'assistant', parts, finish_reason: 'stop' }];
       applyUsage(response, record);
 
-      await push(request, index, record);
-      await push(response, index, record);
+      await push(request, record);
+      await push(response, record);
       pendingDelta = [];
       reasoningParts = [];
       firstStep = false;
@@ -345,10 +341,6 @@ function normalizeToolStatus(status: unknown): string | undefined {
   if (status === 'failed' || status === 'failure' || status === 'error') return 'failure';
   if (status === 'cancelled' || status === 'canceled') return 'cancelled';
   return undefined;
-}
-
-function isFailureStatus(status: unknown): boolean {
-  return typeof status === 'string' && !['completed', 'success'].includes(status);
 }
 
 function timestampMs(record: WorkBuddyRecord): number {
