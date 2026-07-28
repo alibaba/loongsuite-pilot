@@ -1,0 +1,4 @@
+interface:
+  display_name: "LoongSuite Pilot 灰度观察"
+  short_description: "只读验证 LoongSuite Pilot 商业版灰度阶段健康状态与证据"
+  default_prompt: "Use $release-observation to evaluate the current LoongSuite Pilot external rollout stage without changing release state."

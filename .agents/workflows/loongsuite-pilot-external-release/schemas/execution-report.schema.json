@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "execution-report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "report_type",
+    "mode",
+    "requested_action",
+    "outcome",
+    "target",
+    "target_version",
+    "executed_stage",
+    "plan_id",
+    "evidence_url",
+    "error"
+  ],
+  "properties": {
+    "report_type": { "const": "execution-report" },
+    "mode": { "enum": ["PLAN", "EXECUTE"] },
+    "requested_action": {
+      "enum": [
+        "EXTERNAL_0",
+        "EXTERNAL_5",
+        "EXTERNAL_15",
+        "EXTERNAL_40",
+        "EXTERNAL_60",
+        "PROMOTE",
+        "GITHUB_RELEASE"
+      ]
+    },
+    "outcome": {
+      "enum": ["PLAN_READY", "SUCCEEDED", "FAILED", "NOT_EXECUTED"]
+    },
+    "target": { "const": "external" },
+    "target_version": { "type": "string", "minLength": 1 },
+    "executed_stage": { "type": "string" },
+    "plan_id": { "type": "string" },
+    "evidence_url": { "type": "string", "minLength": 1 },
+    "error": { "type": "string" }
+  }
+}

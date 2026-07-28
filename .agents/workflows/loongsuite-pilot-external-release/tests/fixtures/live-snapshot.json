@@ -1,0 +1,38 @@
+{
+  "squad:f6f44a15-0128-4f4d-a6ef-ce41729cb96e": {
+    "id": "f6f44a15-0128-4f4d-a6ef-ce41729cb96e",
+    "instructions": "legacy squad instructions"
+  },
+  "agent:d7ae93b9-185d-4035-87e3-008a0a0077c7": {
+    "id": "d7ae93b9-185d-4035-87e3-008a0a0077c7",
+    "instructions": "legacy coordinator instructions"
+  },
+  "agent:ba669c50-2c4a-405e-a6ec-e7e59c6ed6d1": {
+    "id": "ba669c50-2c4a-405e-a6ec-e7e59c6ed6d1",
+    "instructions": "legacy executor instructions"
+  },
+  "agent:fc37492b-4282-4efd-9062-8293defc1fae": {
+    "id": "fc37492b-4282-4efd-9062-8293defc1fae",
+    "instructions": "legacy observer instructions"
+  },
+  "agent:22cd9dea-b238-4955-9917-b50a5556c5fa": {
+    "id": "22cd9dea-b238-4955-9917-b50a5556c5fa",
+    "instructions": "legacy release note instructions"
+  },
+  "autopilot:3fa6bdf6-f59d-4a33-9c37-86617e49ad3c": {
+    "id": "3fa6bdf6-f59d-4a33-9c37-86617e49ad3c",
+    "description": "legacy candidate autopilot"
+  },
+  "autopilot:6001feb4-0bb1-4f09-8baa-dc58e9cdd99a": {
+    "id": "6001feb4-0bb1-4f09-8baa-dc58e9cdd99a",
+    "description": "legacy watchdog"
+  },
+  "skill:dd0e2e45-5d1a-4e74-9570-b867d8eed87d": {
+    "id": "dd0e2e45-5d1a-4e74-9570-b867d8eed87d",
+    "content": "legacy observation skill"
+  },
+  "skill:00a1ae84-3628-49f9-a81e-e310773e8a48": {
+    "id": "00a1ae84-3628-49f9-a81e-e310773e8a48",
+    "content": "legacy release skill"
+  }
+}

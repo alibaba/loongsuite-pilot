@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "observation-report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "report_type",
+    "target",
+    "target_version",
+    "stable_version",
+    "observed_stage",
+    "observe_since",
+    "observe_until",
+    "minimum_window_satisfied",
+    "sample",
+    "summary",
+    "risk_level",
+    "key_errors",
+    "limitations",
+    "evidence_url",
+    "recommendation",
+    "next_check_at"
+  ],
+  "properties": {
+    "report_type": { "const": "observation-report" },
+    "target": { "const": "external" },
+    "target_version": { "type": "string", "minLength": 1 },
+    "stable_version": { "type": "string", "minLength": 1 },
+    "observed_stage": {
+      "enum": [
+        "EXTERNAL_0",
+        "EXTERNAL_5",
+        "EXTERNAL_15",
+        "EXTERNAL_40",
+        "EXTERNAL_60"
+      ]
+    },
+    "observe_since": { "type": "string", "minLength": 1 },
+    "observe_until": { "type": "string", "minLength": 1 },
+    "minimum_window_satisfied": { "type": "boolean" },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_active_instances",
+        "stable_active_instances",
+        "target_error_count",
+        "stable_error_count"
+      ],
+      "properties": {
+        "target_active_instances": { "type": "number", "minimum": 0 },
+        "stable_active_instances": { "type": "number", "minimum": 0 },
+        "target_error_count": { "type": "number", "minimum": 0 },
+        "stable_error_count": { "type": "number", "minimum": 0 }
+      }
+    },
+    "summary": { "type": "string" },
+    "risk_level": { "enum": ["LOW", "MEDIUM", "HIGH", "UNKNOWN"] },
+    "key_errors": { "type": "array", "items": { "type": "string" } },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "evidence_url": { "type": "string", "minLength": 1 },
+    "recommendation": {
+      "enum": [
+        "CONTINUE_REVIEW_READY",
+        "PAUSE_RECOMMENDED",
+        "KEEP_OBSERVING"
+      ]
+    },
+    "next_check_at": { "type": "string" }
+  }
+}

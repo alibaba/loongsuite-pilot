@@ -1,0 +1,4 @@
+interface:
+  display_name: "LoongSuite Pilot 发布协调"
+  short_description: "验证并协调 LoongSuite Pilot 商业版灰度发布状态机与人工门禁"
+  default_prompt: "Use $loongsuite-pilot-release-coordinator to inspect a LoongSuite Pilot external release issue and return the single allowed next action."

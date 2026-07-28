@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "workflow_version": "1.0.0-validation",
+  "validation_only": true,
+  "target": "external",
+  "github_after_promote": true,
+  "stage_ladder": [
+    "EXTERNAL_0",
+    "EXTERNAL_5",
+    "EXTERNAL_15",
+    "EXTERNAL_40",
+    "EXTERNAL_60",
+    "PROMOTE"
+  ],
+  "observation_minutes": 30,
+  "no_release_hold_hours": 24,
+  "resources": [
+    {
+      "kind": "squad",
+      "id": "f6f44a15-0128-4f4d-a6ef-ce41729cb96e",
+      "name": "LoongSuite Pilot 自动发布小队",
+      "field": "instructions",
+      "path": "squad.instructions.md"
+    },
+    {
+      "kind": "agent",
+      "id": "d7ae93b9-185d-4035-87e3-008a0a0077c7",
+      "name": "Pilot 发布协调 Agent",
+      "field": "instructions",
+      "path": "agents/coordinator.instructions.md"
+    },
+    {
+      "kind": "agent",
+      "id": "ba669c50-2c4a-405e-a6ec-e7e59c6ed6d1",
+      "name": "Pilot 发布执行 Agent",
+      "field": "instructions",
+      "path": "agents/release-executor.instructions.md"
+    },
+    {
+      "kind": "agent",
+      "id": "fc37492b-4282-4efd-9062-8293defc1fae",
+      "name": "Pilot 灰度观察 Agent",
+      "field": "instructions",
+      "path": "agents/observer.instructions.md"
+    },
+    {
+      "kind": "agent",
+      "id": "22cd9dea-b238-4955-9917-b50a5556c5fa",
+      "name": "Pilot 发布说明 Agent",
+      "field": "instructions",
+      "path": "agents/release-notes.instructions.md"
+    },
+    {
+      "kind": "autopilot",
+      "id": "3fa6bdf6-f59d-4a33-9c37-86617e49ad3c",
+      "name": "LoongSuite Pilot 发布定时任务",
+      "field": "description",
+      "path": "autopilots/candidate-check.md"
+    },
+    {
+      "kind": "autopilot",
+      "id": "6001feb4-0bb1-4f09-8baa-dc58e9cdd99a",
+      "name": "LoongSuite Pilot 发布状态推进检查",
+      "field": "description",
+      "path": "autopilots/release-watchdog.md"
+    },
+    {
+      "kind": "skill",
+      "id": null,
+      "name": "loongsuite-pilot-release-coordinator",
+      "field": "content",
+      "path": "../../skills/loongsuite-pilot-release-coordinator/SKILL.md"
+    },
+    {
+      "kind": "skill",
+      "id": "dd0e2e45-5d1a-4e74-9570-b867d8eed87d",
+      "name": "release-observation",
+      "field": "content",
+      "path": "../../skills/release-observation/SKILL.md"
+    },
+    {
+      "kind": "skill",
+      "id": "00a1ae84-3628-49f9-a81e-e310773e8a48",
+      "name": "loongsuite-pilot-release",
+      "field": "content",
+      "path": "../../skills/loongsuite-pilot-release/SKILL.md"
+    }
+  ]
+}

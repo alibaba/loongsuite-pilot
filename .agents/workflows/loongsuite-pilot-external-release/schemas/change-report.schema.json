@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "change-report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "report_type",
+    "decision",
+    "recommended_bump",
+    "previous_version",
+    "suggested_version",
+    "features",
+    "bugfixes",
+    "risks",
+    "blockers",
+    "no_release_reason",
+    "evidence_url",
+    "notification_copy"
+  ],
+  "properties": {
+    "report_type": { "const": "change-report" },
+    "decision": {
+      "enum": ["RELEASE", "NO_RELEASE", "NEED_HUMAN_REVIEW"]
+    },
+    "recommended_bump": {
+      "type": ["string", "null"],
+      "enum": ["patch", "minor", "major", null]
+    },
+    "previous_version": { "type": "string", "minLength": 1 },
+    "suggested_version": { "type": ["string", "null"] },
+    "features": {
+      "type": "array",
+      "maxItems": 5,
+      "items": { "type": "string" }
+    },
+    "bugfixes": {
+      "type": "array",
+      "maxItems": 5,
+      "items": { "type": "string" }
+    },
+    "risks": { "type": "array", "items": { "type": "string" } },
+    "blockers": { "type": "array", "items": { "type": "string" } },
+    "no_release_reason": { "type": "string" },
+    "evidence_url": { "type": "string", "minLength": 1 },
+    "notification_copy": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "decision": { "const": "RELEASE" } },
+        "required": ["decision"]
+      },
+      "then": {
+        "properties": {
+          "recommended_bump": { "enum": ["patch", "minor", "major"] },
+          "suggested_version": { "type": "string", "minLength": 1 }
+        }
+      },
+      "else": {
+        "properties": {
+          "no_release_reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  ]
+}

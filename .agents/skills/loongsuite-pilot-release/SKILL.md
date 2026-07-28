@@ -601,6 +601,43 @@ rollout 示例消息：
 
 ---
 
+## Multica external 工作流契约
+
+当任务明确携带 `workflow_version=1` 和 `release_target=external` 时，本节覆盖通用目标选择：
+
+- 目标固定为 external（商业版），所有预计发布命令都必须包含 `--external`。
+- internal 请求返回 `INVALID_TARGET`，不得回退到脚本默认值。
+- 固定顺序为 `0 → 5 → 15 → 40 → 60 → promote`，禁止跳档和 `rollout 100`。
+- 每次只处理协调 Agent 已授权的一步，不决定后续动作。
+
+当 `VALIDATION_MODE=true` 时：
+
+- 不运行 `deploy/release.sh`、`deploy/rollout.sh`、通知脚本或 GitHub 写命令，包括 dry-run。
+- 不执行 git fetch、分支、Tag、OSS、CR、GitHub 或 Multica 写操作。
+- 只校验命令构造、目标、版本、人工批准和报告字段。
+- 输入不是 external 或缺少最新人工批准时返回 `NOT_EXECUTED`。
+
+向协调 Agent 输出：
+
+```json
+{
+  "report_type": "execution-report",
+  "mode": "PLAN",
+  "requested_action": "EXTERNAL_0",
+  "outcome": "PLAN_READY",
+  "target": "external",
+  "target_version": "vX.Y.Z",
+  "executed_stage": "",
+  "plan_id": "fixture-plan-id",
+  "evidence_url": "fixture://plan",
+  "error": ""
+}
+```
+
+不得输出具有流程决策含义的 `next_action`。
+
+---
+
 ## 护栏规则
 
 - 不要自动 stash 或丢弃用户改动。
