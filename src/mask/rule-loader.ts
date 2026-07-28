@@ -3,7 +3,9 @@ import type { MaskConfig, MaskType } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import type {
   CompiledMaskRule,
+  MaskPlan,
   MaskRuleKind,
+  PiiMaskType,
   SensitiveRuleDefinition,
   SensitiveRulesManifest,
 } from './types.js';
@@ -11,11 +13,29 @@ import type {
 const RULES_URL = new URL('./sensitive-rules.json', import.meta.url);
 const logger = createLogger('MaskRuleLoader');
 const SUPPORTED_RULE_KINDS = new Set<MaskRuleKind>(['regex', 'block', 'urlWithPassword']);
+const MANIFEST_MASK_TYPES = new Set<MaskType>([
+  'cloudAccessKey',
+  'apiKey',
+  'privateKey',
+  'databaseUrl',
+]);
 const SUPPORTED_MASK_TYPES = new Set<MaskType>([
   'cloudAccessKey',
   'apiKey',
   'privateKey',
   'databaseUrl',
+  'idCard',
+  'phone',
+  'email',
+  'ipAddress',
+  'bankCard',
+]);
+const PII_MASK_TYPES = new Set<PiiMaskType>([
+  'idCard',
+  'phone',
+  'email',
+  'ipAddress',
+  'bankCard',
 ]);
 
 let cachedRules: CompiledMaskRule[] | undefined;
@@ -26,7 +46,9 @@ export function loadSensitiveRules(): CompiledMaskRule[] {
       const raw = readFileSync(RULES_URL, 'utf8');
       cachedRules = compileSensitiveRules(JSON.parse(raw) as SensitiveRulesManifest);
     } catch (err) {
-      logger.error('failed to load sensitive rules, mask disabled', { error: String(err) });
+      logger.error('failed to load sensitive rule manifest, manifest rules disabled', {
+        error: String(err),
+      });
       cachedRules = [];
     }
   }
@@ -35,8 +57,26 @@ export function loadSensitiveRules(): CompiledMaskRule[] {
 
 export function loadEnabledRules(config: MaskConfig): CompiledMaskRule[] {
   const enabledTypes = resolveEnabledMaskTypes(config);
-  if (enabledTypes.size === 0) return [];
+  if (![...enabledTypes].some(type => MANIFEST_MASK_TYPES.has(type))) return [];
   return loadSensitiveRules().filter(rule => enabledTypes.has(rule.type));
+}
+
+export function loadMaskPlan(config: MaskConfig): MaskPlan {
+  const enabledTypes = resolveEnabledMaskTypes(config);
+  if (enabledTypes.size === 0) {
+    return { rules: [], piiTypes: new Set() };
+  }
+
+  return {
+    rules: [...enabledTypes].some(type => MANIFEST_MASK_TYPES.has(type))
+      ? loadSensitiveRules().filter(rule => enabledTypes.has(rule.type))
+      : [],
+    piiTypes: new Set(
+      [...enabledTypes].filter((type): type is PiiMaskType =>
+        PII_MASK_TYPES.has(type as PiiMaskType),
+      ),
+    ),
+  };
 }
 
 export function filterRulesByConfig(

@@ -12,8 +12,8 @@ import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
 import { applyAgentContentPolicy } from '../normalization/agent-content-policy.js';
 import { maskAgentActivityEntry } from '../mask/entry-masker.js';
-import { loadEnabledRules } from '../mask/rule-loader.js';
-import type { CompiledMaskRule } from '../mask/types.js';
+import { loadMaskPlan } from '../mask/rule-loader.js';
+import type { MaskPlan } from '../mask/types.js';
 import type { TraceLinker } from './upstream-link/trace-linker.js';
 
 const logger = createLogger('InputManager');
@@ -48,7 +48,7 @@ export class InputManager extends EventEmitter {
   private configuredUserId: string = '';
   private agentsConfig: AgentsConfig = {};
   private maskConfig: MaskConfig = { mode: 'none', types: [] };
-  private maskRules: CompiledMaskRule[] = [];
+  private maskPlan: MaskPlan = { rules: [], piiTypes: new Set() };
   private traceLinker: TraceLinker | null = null;
 
   setFlusher(flusher: BaseFlusher): void {
@@ -73,7 +73,7 @@ export class InputManager extends EventEmitter {
 
   setMaskConfig(config: MaskConfig): void {
     this.maskConfig = config;
-    this.maskRules = loadEnabledRules(config);
+    this.maskPlan = loadMaskPlan(config);
   }
 
   setTraceLinker(linker: TraceLinker): void {
@@ -243,11 +243,12 @@ export class InputManager extends EventEmitter {
       applyAgentContentPolicy(entry, this.agentsConfig),
     );
 
-    const maskedEntries = this.maskRules.length === 0
-      ? policyAppliedEntries
-      : policyAppliedEntries.map(entry =>
-          maskAgentActivityEntry(entry, this.maskConfig, this.maskRules),
-        );
+    const maskedEntries =
+      this.maskPlan.rules.length === 0 && this.maskPlan.piiTypes.size === 0
+        ? policyAppliedEntries
+        : policyAppliedEntries.map(entry =>
+            maskAgentActivityEntry(entry, this.maskConfig, this.maskPlan),
+          );
 
     logger.info('dispatching entries', { inputId, count: maskedEntries.length });
     await this.dispatchEntries(inputId, maskedEntries, batchBytes);

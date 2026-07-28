@@ -33,7 +33,16 @@ export interface CmsConfig {
 
 export type MaskMode = 'none' | 'all' | 'custom';
 
-export type MaskType = 'cloudAccessKey' | 'apiKey' | 'privateKey' | 'databaseUrl';
+export type MaskType =
+  | 'cloudAccessKey'
+  | 'apiKey'
+  | 'privateKey'
+  | 'databaseUrl'
+  | 'idCard'
+  | 'phone'
+  | 'email'
+  | 'ipAddress'
+  | 'bankCard';
 
 export interface MaskConfig {
   mode: MaskMode;

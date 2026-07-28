@@ -26,7 +26,7 @@
 | 文档 | 用途 |
 |------|------|
 | [Agent 配置](agents.md) | 选择采集哪些 Agent，并控制消息内容采集。 |
-| [数据脱敏](masking.md) | 输出前脱敏 API Key、AccessKey、私钥和数据库 URL。 |
+| [数据脱敏](masking.md) | 输出前脱敏密钥和个人敏感信息。 |
 | [输出事件 Schema](output-event-schema.md) | 查看规范化事件名称、字段、Provider 和结束原因。 |
 
 ## 扩展 Pilot

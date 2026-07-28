@@ -324,6 +324,11 @@ const SUPPORTED_MASK_TYPES: readonly MaskType[] = [
   'apiKey',
   'privateKey',
   'databaseUrl',
+  'idCard',
+  'phone',
+  'email',
+  'ipAddress',
+  'bankCard',
 ];
 
 const SUPPORTED_MASK_TYPE_SET = new Set<string>(SUPPORTED_MASK_TYPES);

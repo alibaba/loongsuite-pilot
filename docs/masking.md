@@ -2,7 +2,7 @@
 
 English | [简体中文](zh-CN/masking.md)
 
-LoongSuite Pilot can mask common secrets before normalized events are sent to output backends. Use this when prompts, completions, tool arguments, or tool results may contain credentials.
+LoongSuite Pilot can mask common secrets and personal sensitive data before normalized events are sent to output backends. Use this when prompts, completions, tool arguments, or tool results may contain credentials, ID cards, phone numbers, email addresses, IPv4 addresses, or bank card numbers.
 
 Masking is separate from message content capture:
 
@@ -54,6 +54,11 @@ loongsuite-pilot restart
 | `apiKey`         | OpenAI-compatible and GitHub-style API keys.          |
 | `privateKey`     | PEM or OpenSSH private key blocks.                    |
 | `databaseUrl`    | Database URLs with embedded passwords.                |
+| `idCard`         | 18-digit mainland China ID cards with strict validation. |
+| `phone`          | Mainland China mobile and landline phone numbers.     |
+| `email`          | Common ASCII email addresses.                         |
+| `ipAddress`      | IPv4 addresses, including public and private ranges.  |
+| `bankCard`       | High-confidence card numbers validated by issuer and Luhn. |
 
 
 Custom mode example:
@@ -62,7 +67,7 @@ Custom mode example:
 {
   "mask": {
     "mode": "custom",
-    "types": ["apiKey", "databaseUrl"]
+    "types": ["apiKey", "idCard", "phone", "email", "ipAddress", "bankCard"]
   }
 }
 ```
@@ -71,7 +76,7 @@ Equivalent environment variables:
 
 ```bash
 export LOONGSUITE_PILOT_MASK_MODE=custom
-export LOONGSUITE_PILOT_MASK_TYPES=apiKey,databaseUrl
+export LOONGSUITE_PILOT_MASK_TYPES=apiKey,idCard,phone,email,ipAddress,bankCard
 ```
 
 ## Replacement Values
@@ -85,6 +90,11 @@ When a rule matches, Pilot replaces the secret with a fixed marker:
 | `apiKey`         | `[APIKEY_MASKED]`      |
 | `privateKey`     | `[PRIVATEKEY_MASKED]`  |
 | `databaseUrl`    | `[DATABASEURL_MASKED]` |
+| `idCard`         | `[IDCARD_MASKED]`      |
+| `phone`          | `[PHONE_MASKED]`       |
+| `email`          | `[EMAIL_MASKED]`       |
+| `ipAddress`      | `[IPADDRESS_MASKED]`   |
+| `bankCard`       | `[BANKCARD_MASKED]`    |
 
 
 The original value is not preserved in the emitted event.
@@ -101,6 +111,15 @@ Pilot focuses masking on fields that may contain user or tool content, such as:
 - Known agent-specific content fields, such as `agent.content`, `agent.inline_diff_message`, and selected compact content fields.
 
 Stable metadata such as model names, token counts, durations, Git branch, and workspace path is not intended to be scanned as secret-bearing content.
+
+## Phase-one Detection Boundaries
+
+- ID cards cover only 18-digit mainland China IDs.
+- Phone numbers cover only mainland China mobile and landline formats, excluding extensions, 400/800 numbers, and overseas numbers.
+- Email covers common ASCII addresses, excluding internationalized addresses and dotless internal domains.
+- IP covers IPv4 only. Version-shaped text such as `1.2.3.4` is also masked as IPv4.
+- Bank cards cover high-confidence UnionPay, Visa, Mastercard, AmEx, and Discover prefixes and must pass Luhn validation.
+- License plates, addresses, company names, job titles, custom key/value rules, and Secret Keys are outside this phase.
 
 ## Verify Masking
 

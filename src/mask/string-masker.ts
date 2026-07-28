@@ -1,5 +1,6 @@
 import type {
   CompiledMaskRule,
+  MaskPlan,
   MaskRange,
   ResolvedStringMaskOptions,
   StringMaskOptions,
@@ -8,8 +9,10 @@ import {
   DEFAULT_STRING_MASK_OPTIONS,
   MASKED_TOKEN_PATTERN,
 } from './types.js';
+import { collectPiiRanges } from './pii-detectors.js';
 
 const URL_CANDIDATE_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[A-Za-z0-9._~:/?#\[\]@!$&()*+,;=%-]+/gi;
+const EMPTY_PII_TYPES: MaskPlan['piiTypes'] = new Set();
 
 export function isLargeString(value: string, thresholdBytes: number): boolean {
   return Buffer.byteLength(value, 'utf8') > thresholdBytes;
@@ -17,22 +20,46 @@ export function isLargeString(value: string, thresholdBytes: number): boolean {
 
 export function maskString(
   value: string,
-  rules: readonly CompiledMaskRule[],
+  planOrRules: MaskPlan | readonly CompiledMaskRule[],
   options: StringMaskOptions = {},
 ): string {
-  if (value.length === 0 || rules.length === 0 || MASKED_TOKEN_PATTERN.test(value)) {
+  const plan = resolveMaskPlan(planOrRules);
+  if (
+    value.length === 0 ||
+    (plan.rules.length === 0 && plan.piiTypes.size === 0) ||
+    MASKED_TOKEN_PATTERN.test(value)
+  ) {
     return value;
   }
 
   const resolvedOptions = resolveStringMaskOptions(options);
-  const normalizedValue = value.toLowerCase();
-  if (!hasAnyPrefilter(normalizedValue, rules)) return value;
+  const ranges: MaskRange[] = [];
 
-  const ranges = isLargeString(value, resolvedOptions.largeStringThresholdBytes)
-    ? collectLargeStringRanges(value, normalizedValue, rules, resolvedOptions)
-    : collectRangesForSegment(value, normalizedValue, 0, rules, resolvedOptions);
+  if (plan.rules.length > 0) {
+    const normalizedValue = value.toLowerCase();
+    if (hasAnyPrefilter(normalizedValue, plan.rules)) {
+      ranges.push(
+        ...(isLargeString(value, resolvedOptions.largeStringThresholdBytes)
+          ? collectLargeStringRanges(value, normalizedValue, plan.rules, resolvedOptions)
+          : collectRangesForSegment(value, normalizedValue, 0, plan.rules, resolvedOptions)),
+      );
+    }
+  }
+  if (plan.piiTypes.size > 0) {
+    ranges.push(...collectPiiRanges(value, plan.piiTypes));
+  }
 
   return applyMaskRanges(value, ranges);
+}
+
+function resolveMaskPlan(planOrRules: MaskPlan | readonly CompiledMaskRule[]): MaskPlan {
+  if (Array.isArray(planOrRules)) {
+    return {
+      rules: planOrRules,
+      piiTypes: EMPTY_PII_TYPES,
+    };
+  }
+  return planOrRules as MaskPlan;
 }
 
 function resolveStringMaskOptions(options: StringMaskOptions): ResolvedStringMaskOptions {
@@ -234,12 +261,15 @@ export function applyMaskRanges(value: string, ranges: readonly MaskRange[]): st
   const normalizedRanges = normalizeMaskRanges(value.length, ranges);
   if (normalizedRanges.length === 0) return value;
 
-  let result = value;
-  for (let i = normalizedRanges.length - 1; i >= 0; i--) {
-    const range = normalizedRanges[i];
-    result = `${result.slice(0, range.start)}${range.replacement}${result.slice(range.end)}`;
+  // Build the output once so many matches do not repeatedly copy the whole string.
+  const chunks: string[] = [];
+  let cursor = 0;
+  for (const range of normalizedRanges) {
+    chunks.push(value.slice(cursor, range.start), range.replacement);
+    cursor = range.end;
   }
-  return result;
+  chunks.push(value.slice(cursor));
+  return chunks.join('');
 }
 
 function normalizeMaskRanges(
@@ -248,14 +278,40 @@ function normalizeMaskRanges(
 ): MaskRange[] {
   const sorted = ranges
     .filter(range => range.start >= 0 && range.end > range.start && range.end <= valueLength)
-    .sort((a, b) => a.start - b.start || b.end - a.end);
+    .sort(
+      (a, b) =>
+        a.start - b.start ||
+        getMaskRangePriority(b) - getMaskRangePriority(a) ||
+        b.end - b.start - (a.end - a.start) ||
+        a.ruleId.localeCompare(b.ruleId),
+    );
 
   const result: MaskRange[] = [];
-  let lastEnd = -1;
-  for (const range of sorted) {
-    if (range.start < lastEnd) continue;
-    result.push(range);
-    lastEnd = range.end;
+  for (const candidate of sorted) {
+    const previous = result[result.length - 1];
+    if (!previous || candidate.start >= previous.end) {
+      result.push(candidate);
+      continue;
+    }
+    if (getMaskRangePriority(candidate) > getMaskRangePriority(previous)) {
+      result[result.length - 1] = candidate;
+    }
   }
   return result;
+}
+
+function getMaskRangePriority(range: MaskRange): number {
+  switch (range.type) {
+    case 'idCard':
+      return 30;
+    case 'bankCard':
+      return 20;
+    case 'phone':
+      return 10;
+    case 'email':
+    case 'ipAddress':
+      return 5;
+    default:
+      return 100;
+  }
 }

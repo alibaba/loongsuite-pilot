@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { loadEnabledRules } from '../../../src/mask/rule-loader.js';
-import { isLargeString, maskString } from '../../../src/mask/string-masker.js';
+import {
+  applyMaskRanges,
+  isLargeString,
+  maskString,
+} from '../../../src/mask/string-masker.js';
 import type { MaskConfig } from '../../../src/types/index.js';
 
 describe('mask string masker', () => {
@@ -168,6 +172,27 @@ describe('mask string masker', () => {
     const masked = maskString(input, allRules);
 
     expect(masked).toBe('[APIKEY_MASKED] [APIKEY_MASKED]');
+  });
+
+  it('applies multiple unsorted ranges without changing untouched text', () => {
+    const masked = applyMaskRanges('0123456789', [
+      {
+        start: 7,
+        end: 9,
+        replacement: '[SECOND]',
+        ruleId: 'test.second',
+        type: 'apiKey',
+      },
+      {
+        start: 1,
+        end: 3,
+        replacement: '[FIRST]',
+        ruleId: 'test.first',
+        type: 'apiKey',
+      },
+    ]);
+
+    expect(masked).toBe('0[FIRST]3456[SECOND]9');
   });
 
   it('masks secrets in large strings through keyword windows', () => {

@@ -2,7 +2,7 @@
 
 [English](../masking.md) | 简体中文
 
-LoongSuite Pilot 可以在规范化事件发送到输出后端前，对常见密钥进行脱敏。适用于 Prompt、Completion、工具参数或工具结果中可能出现凭证的场景。
+LoongSuite Pilot 可以在规范化事件发送到输出后端前，对常见密钥和个人敏感信息进行脱敏。适用于 Prompt、Completion、工具参数或工具结果中可能出现凭证、身份证、电话、邮箱、IPv4 或银行卡的场景。
 
 脱敏和消息内容采集是两层不同控制：
 
@@ -22,7 +22,7 @@ bash /tmp/loongsuite-pilot-installer.sh install --mask-mode all
 自定义模式安装参数：
 
 ```bash
-bash /tmp/loongsuite-pilot-installer.sh install --mask-mode custom --mask-types apiKey,databaseUrl
+bash /tmp/loongsuite-pilot-installer.sh install --mask-mode custom --mask-types apiKey,idCard,phone,email,ipAddress,bankCard
 ```
 
 配置文件：
@@ -63,6 +63,11 @@ loongsuite-pilot restart
 | `apiKey` | OpenAI-compatible 和 GitHub 风格 API Key。 |
 | `privateKey` | PEM 或 OpenSSH 私钥块。 |
 | `databaseUrl` | 包含密码的数据库 URL。 |
+| `idCard` | 中国大陆 18 位身份证，校验行政区、出生日期和校验位。 |
+| `phone` | 中国大陆手机号和固定电话。 |
+| `email` | 常规 ASCII 邮箱地址。 |
+| `ipAddress` | IPv4 地址，包括公网、私网、回环和链路本地地址。 |
+| `bankCard` | 通过卡组织前缀、长度和 Luhn 校验的银行卡号。 |
 
 自定义模式示例：
 
@@ -70,7 +75,7 @@ loongsuite-pilot restart
 {
   "mask": {
     "mode": "custom",
-    "types": ["apiKey", "databaseUrl"]
+    "types": ["apiKey", "idCard", "phone", "email", "ipAddress", "bankCard"]
   }
 }
 ```
@@ -79,7 +84,7 @@ loongsuite-pilot restart
 
 ```bash
 export LOONGSUITE_PILOT_MASK_MODE=custom
-export LOONGSUITE_PILOT_MASK_TYPES=apiKey,databaseUrl
+export LOONGSUITE_PILOT_MASK_TYPES=apiKey,idCard,phone,email,ipAddress,bankCard
 ```
 
 ## 替换标记
@@ -92,6 +97,11 @@ export LOONGSUITE_PILOT_MASK_TYPES=apiKey,databaseUrl
 | `apiKey` | `[APIKEY_MASKED]` |
 | `privateKey` | `[PRIVATEKEY_MASKED]` |
 | `databaseUrl` | `[DATABASEURL_MASKED]` |
+| `idCard` | `[IDCARD_MASKED]` |
+| `phone` | `[PHONE_MASKED]` |
+| `email` | `[EMAIL_MASKED]` |
+| `ipAddress` | `[IPADDRESS_MASKED]` |
+| `bankCard` | `[BANKCARD_MASKED]` |
 
 输出事件中不会保留原始值。
 
@@ -107,6 +117,15 @@ Pilot 重点扫描可能包含用户或工具内容的字段，例如：
 - 已知 Agent 内容字段，例如 `agent.content`、`agent.inline_diff_message` 和部分 compact 内容字段。
 
 模型名、token 数、耗时、Git 分支、workspace 路径等稳定元数据不作为密钥内容字段扫描。
+
+## 一期识别边界
+
+- 身份证只支持中国大陆 18 位证件。
+- 电话只支持中国大陆手机号和固定电话，不支持分机、400/800 和海外号码。
+- 邮箱只支持常规 ASCII 格式，不支持中文邮箱地址和无点内部域名。
+- IP 只支持 IPv4；形如 `1.2.3.4` 的版本号也会按 IPv4 脱敏。
+- 银行卡只覆盖银联、Visa、Mastercard、AmEx、Discover 的高置信前缀，并要求通过 Luhn 校验。
+- 车牌、地址、公司名、职称、自定义键值和 Secret Key 不在本期范围。
 
 ## 推荐隐私配置
 

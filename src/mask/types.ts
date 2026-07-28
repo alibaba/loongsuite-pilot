@@ -35,6 +35,13 @@ export interface MaskRange {
   type: MaskType;
 }
 
+export type PiiMaskType = 'idCard' | 'phone' | 'email' | 'ipAddress' | 'bankCard';
+
+export interface MaskPlan {
+  rules: readonly CompiledMaskRule[];
+  piiTypes: ReadonlySet<PiiMaskType>;
+}
+
 export interface StringMaskOptions {
   largeStringThresholdBytes?: number;
   keywordContextWindow?: number;
@@ -54,4 +61,4 @@ export const DEFAULT_STRING_MASK_OPTIONS: ResolvedStringMaskOptions = {
 };
 
 export const MASKED_TOKEN_PATTERN =
-  /^\[(?:ACCESSKEY|APIKEY|PRIVATEKEY|DATABASEURL)_MASKED\]$/;
+  /^\[(?:ACCESSKEY|APIKEY|PRIVATEKEY|DATABASEURL|IDCARD|PHONE|EMAIL|IPADDRESS|BANKCARD)_MASKED\]$/;
