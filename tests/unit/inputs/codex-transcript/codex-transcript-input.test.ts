@@ -230,13 +230,21 @@ async function createInput(root: string, pollIntervalMs = 10): Promise<{
   batches: AgentActivityEntry[][];
   sessionDir: string;
   wakeupDir: string;
+  spanContextDir: string;
   stateStore: StateStore;
 }> {
   const stateStore = new StateStore(path.join(root, 'input-state.json'));
   await stateStore.load();
   const sessionDir = path.join(root, 'sessions');
   const wakeupDir = path.join(root, 'wakeups');
-  const input = new CodexTranscriptInput({ stateStore, sessionDir, wakeupDir, pollIntervalMs });
+  const spanContextDir = path.join(root, 'span-contexts');
+  const input = new CodexTranscriptInput({
+    stateStore,
+    sessionDir,
+    wakeupDir,
+    spanContextDir,
+    pollIntervalMs,
+  });
   const entries: AgentActivityEntry[] = [];
   const batches: AgentActivityEntry[][] = [];
   input.on('entries', batch => {
@@ -244,7 +252,7 @@ async function createInput(root: string, pollIntervalMs = 10): Promise<{
     entries.push(...batch);
   });
   await input.start();
-  return { input, entries, batches, sessionDir, wakeupDir, stateStore };
+  return { input, entries, batches, sessionDir, wakeupDir, spanContextDir, stateStore };
 }
 
 async function createDormantInput(root: string): Promise<{
@@ -253,20 +261,28 @@ async function createDormantInput(root: string): Promise<{
   batches: AgentActivityEntry[][];
   sessionDir: string;
   wakeupDir: string;
+  spanContextDir: string;
   stateStore: StateStore;
 }> {
   const stateStore = new StateStore(path.join(root, 'input-state.json'));
   await stateStore.load();
   const sessionDir = path.join(root, 'sessions');
   const wakeupDir = path.join(root, 'wakeups');
-  const input = new CodexTranscriptInput({ stateStore, sessionDir, wakeupDir, pollIntervalMs: 60_000 });
+  const spanContextDir = path.join(root, 'span-contexts');
+  const input = new CodexTranscriptInput({
+    stateStore,
+    sessionDir,
+    wakeupDir,
+    spanContextDir,
+    pollIntervalMs: 60_000,
+  });
   const entries: AgentActivityEntry[] = [];
   const batches: AgentActivityEntry[][] = [];
   input.on('entries', batch => {
     batches.push([...batch]);
     entries.push(...batch);
   });
-  return { input, entries, batches, sessionDir, wakeupDir, stateStore };
+  return { input, entries, batches, sessionDir, wakeupDir, spanContextDir, stateStore };
 }
 
 async function writeTranscript(sessionDir: string, text: string): Promise<string> {
@@ -279,6 +295,18 @@ async function writeTranscript(sessionDir: string, text: string): Promise<string
 async function writeWakeupMarker(wakeupDir: string, sessionId: string, payload: Record<string, unknown>): Promise<void> {
   await fs.mkdir(wakeupDir, { recursive: true });
   await fs.writeFile(path.join(wakeupDir, `${sessionId}.json`), JSON.stringify(payload), 'utf8');
+}
+
+async function writeSpanContext(
+  spanContextDir: string,
+  sessionId: string,
+  turnId: string,
+  payload: Record<string, unknown>,
+): Promise<string> {
+  await fs.mkdir(spanContextDir, { recursive: true });
+  const marker = path.join(spanContextDir, `${sessionId}--${turnId}.json`);
+  await fs.writeFile(marker, JSON.stringify(payload), 'utf8');
+  return marker;
 }
 
 async function writeTranscriptNamed(sessionDir: string, name: string, text: string): Promise<string> {
@@ -616,6 +644,152 @@ describe('CodexTranscriptInput', () => {
       });
     }
     expect(JSON.stringify(entries)).not.toContain(longWorkerName);
+  });
+
+  it('projects turn-scoped invocation attributes onto every Codex record', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-span-context-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, spanContextDir } = await createInput(root);
+    await writeSpanContext(spanContextDir, 'session-1', 'turn-1', {
+      session_id: 'session-1',
+      turn_id: 'turn-1',
+      spanAttributes: {
+        'multica.issue.id': 'issue-1',
+        'multica.agent.name': 'codex-agent',
+        'multica.runtime.name': 'codex',
+      },
+      received_at: new Date().toISOString(),
+    });
+    await writeTranscript(sessionDir, completedTurn());
+
+    await waitFor(() => entries.filter(entry => entry['event.name'] === 'llm.response').length === 3);
+    await input.stop();
+
+    expect(new Set(entries.map(entry => entry['event.name']))).toEqual(new Set([
+      'other',
+      'llm.request',
+      'llm.response',
+      'tool.call',
+      'tool.result',
+    ]));
+    for (const entry of entries) {
+      expect(entry['multica.issue.id']).toBe('issue-1');
+      expect(entry['multica.agent.name']).toBe('codex-agent');
+      expect(entry['multica.runtime.name']).toBe('codex');
+    }
+  });
+
+  it('keeps invocation attributes isolated by turn within one Codex session', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-span-isolation-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, spanContextDir } = await createInput(root);
+    await writeSpanContext(spanContextDir, 'session-1', 'turn-1', {
+      session_id: 'session-1',
+      turn_id: 'turn-1',
+      spanAttributes: { 'multica.issue.id': 'issue-1' },
+      received_at: new Date().toISOString(),
+    });
+    await writeSpanContext(spanContextDir, 'session-1', 'turn-2', {
+      session_id: 'session-1',
+      turn_id: 'turn-2',
+      spanAttributes: { 'multica.issue.id': 'issue-2' },
+      received_at: new Date().toISOString(),
+    });
+    await writeTranscriptNamed(
+      sessionDir,
+      'rollout-session-1.jsonl',
+      [
+        ...simpleCompletedTurn(
+          'session-1', 'turn-1', 'first issue', 'first completed', 100, 10,
+          '2026-06-24T06:00:00.000Z',
+        ),
+        ...simpleCompletedTurn(
+          'session-1', 'turn-2', 'second issue', 'second completed', 120, 12,
+          '2026-06-24T06:01:00.000Z',
+        ).slice(1),
+      ].join('\n') + '\n',
+    );
+
+    await waitFor(() => responsesForTurn(entries, 'turn-2').length === 1);
+    await input.stop();
+
+    const firstTurnEntries = entries.filter(entry =>
+      entry['agent.codex.transcript_turn_id'] === 'turn-1');
+    const secondTurnEntries = entries.filter(entry =>
+      entry['agent.codex.transcript_turn_id'] === 'turn-2');
+    expect(firstTurnEntries.length).toBeGreaterThan(0);
+    expect(secondTurnEntries.length).toBeGreaterThan(0);
+    expect(new Set(firstTurnEntries.map(entry => entry['multica.issue.id']))).toEqual(new Set(['issue-1']));
+    expect(new Set(secondTurnEntries.map(entry => entry['multica.issue.id']))).toEqual(new Set(['issue-2']));
+  });
+
+  it('defensively filters invalid invocation attributes from span contexts', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-span-filter-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, spanContextDir } = await createInput(root);
+    const longValue = 'x'.repeat(513);
+    await writeSpanContext(spanContextDir, 'session-1', 'turn-1', {
+      session_id: 'session-1',
+      turn_id: 'turn-1',
+      spanAttributes: {
+        'multica.issue.id': ' issue-1 ',
+        'gen_ai.agent.name': 'must-not-overwrite',
+        'multica.api_token': 'must-not-leak',
+        'multica.long': longValue,
+        'multica.number': 42,
+      },
+      received_at: new Date().toISOString(),
+    });
+    await writeTranscript(sessionDir, completedTurn());
+
+    await waitFor(() => entries.filter(entry => entry['event.name'] === 'llm.response').length === 3);
+    await input.stop();
+
+    for (const entry of entries) {
+      expect(entry['multica.issue.id']).toBe('issue-1');
+      expect(entry['gen_ai.agent.name']).not.toBe('must-not-overwrite');
+      expect(entry['multica.api_token']).toBeUndefined();
+      expect(entry['multica.long']).toBeUndefined();
+      expect(entry['multica.number']).toBeUndefined();
+    }
+    expect(JSON.stringify(entries)).not.toContain('must-not-leak');
+    expect(JSON.stringify(entries)).not.toContain(longValue);
+  });
+
+  it('rejects a span context whose payload identifiers do not match its file name', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-span-mismatch-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, spanContextDir } = await createInput(root);
+    await writeSpanContext(spanContextDir, 'session-1', 'turn-1', {
+      session_id: 'different-session',
+      turn_id: 'turn-1',
+      spanAttributes: { 'multica.issue.id': 'wrong-issue' },
+      received_at: new Date().toISOString(),
+    });
+    await writeTranscript(sessionDir, completedTurn());
+
+    await waitFor(() => entries.filter(entry => entry['event.name'] === 'llm.response').length === 3);
+    await input.stop();
+
+    expect(entries.every(entry => entry['multica.issue.id'] === undefined)).toBe(true);
+  });
+
+  it('removes expired turn span contexts with bounded cleanup', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-span-cleanup-'));
+    tempDirs.push(root);
+    const { input, spanContextDir } = await createDormantInput(root);
+    const marker = await writeSpanContext(spanContextDir, 'session-1', 'turn-1', {
+      session_id: 'session-1',
+      turn_id: 'turn-1',
+      spanAttributes: { 'multica.issue.id': 'expired-issue' },
+      received_at: new Date(Date.now() - 49 * 60 * 60 * 1_000).toISOString(),
+    });
+
+    await (input as unknown as {
+      cleanupExpiredSpanContexts(now: number): Promise<void>;
+    }).cleanupExpiredSpanContexts(Date.now());
+
+    await expect(fs.access(marker)).rejects.toThrow();
   });
 
   it('debug logs when an existing wakeup marker lacks resourceAttributes', async () => {
@@ -1140,6 +1314,7 @@ describe('CodexTranscriptInput', () => {
       stateStore: loadedState,
       sessionDir,
       wakeupDir: path.join(root, 'wakeups'),
+      spanContextDir: path.join(root, 'span-contexts'),
       pollIntervalMs: 60_000,
     });
     const entries: AgentActivityEntry[] = [];
@@ -1371,7 +1546,9 @@ describe('CodexTranscriptInput', () => {
   it('keeps token-delimited message waves as separate steps across collection cycles', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-message-waves-'));
     tempDirs.push(root);
-    const { input, entries, sessionDir, stateStore } = await createInput(root, 60_000);
+    // This test drives processFile directly; keep the background poller dormant
+    // so it cannot race the explicit collection cycles below.
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
     const firstWave = [
       record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
       record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'turn-1', model: 'gpt-5.5' }),
