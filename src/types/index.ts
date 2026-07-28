@@ -221,6 +221,8 @@ export interface AgentDetectionEntry {
   stop: () => Promise<void>;
   pollIntervalMs: number;
   runOnActive?: boolean;
+  /** Consecutive unavailable checks required before stopping a running entry (default 1). */
+  unavailableThreshold?: number;
 }
 
 export interface LogRetentionConfig {
@@ -271,6 +273,13 @@ export interface InputState {
   lastTimestamp?: number;
   highWatermark?: number;
   extra?: Record<string, unknown>;
+}
+
+export type AgentStopReason = 'unavailable' | 'disabled' | 'shutdown' | 'unexpected';
+
+export interface AgentStoppedPayload {
+  id: string;
+  reason: AgentStopReason;
 }
 
 export type EntryState = 'idle' | 'starting' | 'running' | 'stopping';
