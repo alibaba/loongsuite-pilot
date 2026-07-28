@@ -26,6 +26,25 @@ import crypto from 'node:crypto';
 export const MAX_TRANSCRIPT_BYTES = 50 * 1024 * 1024; // 50 MB safety limit
 const MISSING_PROMPT_ID = '__missing_prompt_id__';
 
+// Claude Code 显式 /skill 调用后,会以 isMeta user 记录注入 SKILL.md 内容,
+// 首行形如 "Base directory for this skill: <绝对路径>"。根 SKILL.md 的路径
+// 只在此注入里出现(Skill tool_use 本身不含路径),靠 sourceToolUseID 关联。
+const SKILL_BASE_DIR_PREFIX = 'Base directory for this skill:';
+
+/**
+ * 从 isMeta 注入文本首行提取 skill 根目录,拼出根 SKILL.md 路径。
+ * 只做原样拼接,不做归一化(归一化留给下游按 client+turnId 去重时统一处理)。
+ * @returns {string|null} `<baseDir>/SKILL.md` 或 null(非 skill 注入)
+ */
+function extractSkillRootPath(text) {
+  if (typeof text !== 'string' || !text.startsWith(SKILL_BASE_DIR_PREFIX)) return null;
+  const nl = text.indexOf('\n');
+  const firstLine = nl >= 0 ? text.slice(0, nl) : text;
+  const baseDir = firstLine.slice(SKILL_BASE_DIR_PREFIX.length).trim();
+  if (!baseDir) return null;
+  return baseDir.replace(/\/+$/, '') + '/SKILL.md';
+}
+
 function isMetaRecord(record) {
   return record?.isMeta === true || record?.isMeta === 'true';
 }
@@ -141,6 +160,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
   const toolResultTimestamps = new Map(); // tool_use_id → ISO8601 timestamp
   const toolResultContents = new Map(); // tool_use_id → result content
   const toolResultErrors = new Map(); // tool_use_id → boolean (is_error)
+  const skillRootByToolId = new Map(); // Skill tool_use_id → 根 SKILL.md 路径(来自 isMeta 注入)
   let currentPromptId = null; // 当前 turn 的 promptId(从 user record 提取)
 
   for (const line of content.split('\n')) {
@@ -208,8 +228,16 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
       // promptId 变化 = 新 turn 开始
       if (promptId) currentPromptId = promptId;
 
-      // 提取 tool_result 的时间戳和内容
       const userContent = msg.content;
+
+      // 显式 /skill 注入: 捕获 sourceToolUseID → 根 SKILL.md 路径。
+      // 仅额外捕获此映射,不改变 isMeta 其余记录被丢弃的行为。
+      if (isMeta && record.sourceToolUseID) {
+        const rootPath = extractSkillRootPath(extractTextContent(userContent));
+        if (rootPath) skillRootByToolId.set(record.sourceToolUseID, rootPath);
+      }
+
+      // 提取 tool_result 的时间戳和内容
       if (Array.isArray(userContent)) {
         for (const part of userContent) {
           if (part && part.type === 'tool_result' && part.tool_use_id) {
@@ -330,7 +358,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
   }
 
   // Phase 4: 按 promptId 切分 turns
-  const turns = splitIntoTurns(conversationRecords, llmCalls);
+  const turns = splitIntoTurns(conversationRecords, llmCalls, skillRootByToolId);
 
   return { turns, nextOffset: fileSize };
 }
@@ -342,7 +370,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
  * 同一 turn 内所有 user record 共享同一 promptId。
  * promptId 变化 = 新 turn 开始。
  */
-function splitIntoTurns(conversationRecords, llmCalls) {
+function splitIntoTurns(conversationRecords, llmCalls, skillRootByToolId = new Map()) {
   if (llmCalls.length === 0) return [];
 
   // 收集所有出现的 promptId(按首次出现顺序)
@@ -379,6 +407,7 @@ function splitIntoTurns(conversationRecords, llmCalls) {
       prompt: '',
       promptTimestamp: firstTs,
       llmCalls,
+      skillRootByToolId,
     }];
   }
 
@@ -405,6 +434,7 @@ function splitIntoTurns(conversationRecords, llmCalls) {
       prompt: info.promptText || '',
       promptTimestamp,
       llmCalls: turnLlmCalls,
+      skillRootByToolId,
     });
   }
 
@@ -419,6 +449,7 @@ function splitIntoTurns(conversationRecords, llmCalls) {
         prompt: '',
         promptTimestamp: orphanCalls[0]?.timestamp || null,
         llmCalls: orphanCalls,
+        skillRootByToolId,
       });
     }
   }
