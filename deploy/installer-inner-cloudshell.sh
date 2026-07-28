@@ -40,7 +40,7 @@ _TEST_BASE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai
 
 # Pilot version — used to construct the default download URL and to compare
 # against the installed version during cmd_install.
-PILOT_VERSION="1.1.20-agentshell"
+PILOT_VERSION="1.1.19-agentshell"
 
 # Default package URL for internal (集团) builds — used when --package-url is not
 # specified and LOONGSUITE_PILOT_PACKAGE_URL env var is unset.
@@ -693,14 +693,6 @@ const INTERNAL_SLS = {
   mode: 'webtracking',
 };
 
-const INTERNAL_SLS_HEYUAN = {
-  name: 'internal-sls-heyuan',
-  endpoint: 'https://cn-heyuan.log.aliyuncs.com',
-  project: 'ai-coding-devops',
-  logstore: 'loongsuite_pilot_for_ai_coding',
-  mode: 'webtracking',
-};
-
 const INTERNAL_CMS = {
   name: 'internal-cms',
   endpoint: 'https://proj-xtrace-5296111baa2ee4c6e0909efc7411aa39-cn-zhangjiakou.cn-zhangjiakou.log.aliyuncs.com/apm/trace/opentelemetry',
@@ -729,9 +721,9 @@ if (slsProject && slsLogstore) {
     userEp.accessKeySecret = slsAkSecret;
   }
   config.sls = [userEp];
+} else {
+  delete config.sls;
 }
-// No --sls-* flags: keep the user's existing config.sls untouched
-// (preserved via the ...existing spread), same as cms.
 
 if (logLevel) {
   config.logLevel = logLevel;
@@ -745,7 +737,7 @@ if (userId) {
 
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
 
-const innerDataConfig = { sls: [INTERNAL_SLS, INTERNAL_SLS_HEYUAN], cms: [INTERNAL_CMS], serviceNamePrefix: 'agentshell' };
+const innerDataConfig = { sls: [INTERNAL_SLS], cms: [INTERNAL_CMS], serviceNamePrefix: 'agentshell' };
 fs.writeFileSync(innerDataConfigPath, JSON.stringify(innerDataConfig, null, 2) + '\n');
 "
     msg "    ✅ 配置已写入" "    ✅ Config written"
@@ -1130,35 +1122,6 @@ version_compare() {
 }
 
 # ============================================================
-# Migration: tear down a legacy (non-agentshell) service
-# ============================================================
-# A legacy install runs under the com.loongsuite-pilot* launchd labels, which
-# the agentshell service (com.agentshell) does not manage. If left loaded its
-# KeepAlive respawns a second, orphaned collector after we install. Unload and
-# remove those plists, then sweep the daemons (safe now that KeepAlive is gone).
-# com.agentshell itself is the target service and is (re)registered by the
-# normal install flow, so it is intentionally left alone here.
-cleanup_legacy_launchd_service() {
-    if [ "$(uname -s)" = "Darwin" ]; then
-        local legacy_plists=(
-            "$HOME/Library/LaunchAgents/com.loongsuite-pilot.plist"
-            "$HOME/Library/LaunchAgents/com.loongsuite-pilot.updater.plist"
-        )
-        local p
-        for p in "${legacy_plists[@]}"; do
-            [ -f "$p" ] || continue
-            launchctl unload -w "$p" >/dev/null 2>&1 || true
-            rm -f "$p"
-        done
-    fi
-    # Final sweep once KeepAlive is defeated by the unloads above.
-    # Kill the updater first: it can respawn the collector, so taking it out
-    # before the collector avoids leaving an orphaned collector behind.
-    pkill -f "loongsuite-pilot/bin/updater-daemon" >/dev/null 2>&1 || true
-    pkill -f "loongsuite-pilot/bin/collector-daemon" >/dev/null 2>&1 || true
-}
-
-# ============================================================
 # CMD: install
 # ============================================================
 cmd_install() {
@@ -1213,13 +1176,10 @@ cmd_install() {
                     ;;
             esac
         else
-            # Non-agentshell (legacy) version → migrate instead of skipping.
-            # Tear down the legacy com.loongsuite-pilot* service first so it
-            # does not leave an orphaned collector after we install; the shared
-            # pre-stop below only covers what the old CLI's `stop` knows.
-            msg "⚠️  检测到非 agentshell 版本 v${cur_ver}，执行迁移覆盖安装" \
-                "⚠️  Non-agentshell v${cur_ver} detected, migrating with overwrite"
-            cleanup_legacy_launchd_service
+            # Non-agentshell version → skip, do not overwrite
+            msg "✅ 检测到已安装版本 v${cur_ver}（非 agentshell 版本），跳过安装" \
+                "✅ Existing installation v${cur_ver} (non-agentshell), skipping"
+            return 0
         fi
         echo ""
     fi
