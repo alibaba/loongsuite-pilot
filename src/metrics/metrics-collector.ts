@@ -1,11 +1,17 @@
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { formatTime } from '../utils/time-utils.js';
 import { resolveLocalIp } from '../utils/network-utils.js';
 import { checkProcessLiveness, UPDATER_PROCESS_PATTERNS } from '../utils/pid-utils.js';
+import { createLogger } from '../utils/logger.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
+
+const logger = createLogger('MetricsCollector');
+
+const MIN_NODE_MAJOR = 18;
 
 export interface L1Metrics {
   version: string;
@@ -491,20 +497,35 @@ function isExecutable(p: string): boolean {
 
 function healNodeBin(nodeBinFile: string): boolean {
   const candidate = findNodeCandidate();
-  if (!candidate) return false;
+  if (!candidate) {
+    logger.warn(`node-bin self-heal failed, no valid Node.js candidate found (version >= ${MIN_NODE_MAJOR} required)`);
+    return false;
+  }
   try {
     const dir = path.dirname(nodeBinFile);
     const tmpFile = path.join(dir, `.node-bin.${process.pid}.tmp`);
     fs.writeFileSync(tmpFile, candidate + '\n', 'utf-8');
     fs.renameSync(tmpFile, nodeBinFile);
+    logger.info('node-bin self-healed', { newPath: candidate });
     return true;
   } catch {
     return false;
   }
 }
 
+function hasSuitableVersion(p: string): boolean {
+  try {
+    const out = execFileSync(p, ['--version'], { timeout: 3000, encoding: 'utf-8' });
+    const m = /^v(\d+)\./.exec(out.trim());
+    if (!m) return false;
+    return Number(m[1]) >= MIN_NODE_MAJOR;
+  } catch {
+    return false;
+  }
+}
+
 function findNodeCandidate(): string | null {
-  if (process.execPath && isExecutable(process.execPath)) {
+  if (process.execPath && isExecutable(process.execPath) && hasSuitableVersion(process.execPath)) {
     return fs.realpathSync(process.execPath);
   }
 
@@ -533,7 +554,7 @@ function findNodeCandidate(): string | null {
   }
 
   for (const c of candidates) {
-    if (isExecutable(c)) {
+    if (isExecutable(c) && hasSuitableVersion(c)) {
       try {
         return fs.realpathSync(c);
       } catch {
