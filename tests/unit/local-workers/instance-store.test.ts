@@ -54,6 +54,10 @@ describe('local worker instance store', () => {
     expect(raw).not.toContain(token());
     expect(raw).not.toContain(workerUuid);
     expect(await fs.readFile(bootstrapTokenPath(dataDir, instance), 'utf-8')).toBe(token());
+    if (process.platform !== 'win32') {
+      const stat = await fs.stat(instanceDir(dataDir, instance.id));
+      expect(stat.mode & 0o777).toBe(0o700);
+    }
   });
 
   it('treats bootstrap token as opaque local worker data', async () => {
@@ -199,6 +203,39 @@ describe('local worker instance store', () => {
 
     expect(views).toHaveLength(1);
     expect(views[0].state).toBe('degraded');
+  });
+
+  it('surfaces a live worker Waiting phase and its recoverable reason', async () => {
+    const instance = await connectLocalWorker({
+      dataDir,
+      runtime: 'claude-code',
+      bootstrapToken: token(),
+      workDir: path.join(tmpDir, 'project'),
+    });
+    const sDir = stateDir(dataDir, instance.id);
+    await fs.writeFile(
+      path.join(sDir, 'supervisor-status.json'),
+      JSON.stringify({ state: 'running', pid: process.pid }),
+      'utf-8',
+    );
+    await fs.writeFile(
+      path.join(sDir, 'status.json'),
+      JSON.stringify({
+        phase: 'Waiting',
+        reason: 'RuntimeCommandNotFound',
+        message: 'runtime command is not installed',
+        updatedAt: new Date().toISOString(),
+      }),
+      'utf-8',
+    );
+
+    const views = await listLocalWorkerViews(dataDir);
+
+    expect(views[0]).toMatchObject({
+      state: 'waiting',
+      reason: 'RuntimeCommandNotFound',
+      message: 'runtime command is not installed',
+    });
   });
 
   it('fills list display fields from worker status and runtime snapshots', async () => {

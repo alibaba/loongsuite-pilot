@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import { createWriteStream, type Dirent } from 'node:fs';
 import * as path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createLogger } from '../utils/logger.js';
 import { ensureDir, fileExists } from '../utils/fs-utils.js';
 
@@ -41,8 +41,30 @@ export interface WorkerManifestOptions {
   runtimeOptions?: Record<string, string | boolean>;
 }
 
+export interface WorkerManifestSupervisorOptions {
+  platform?: NodeJS.Platform;
+  nodeExecutable?: string;
+}
+
+class WorkerManifestContractError extends Error {
+  constructor(
+    readonly reason: string,
+    message: string,
+    readonly detail: Record<string, unknown> = {},
+  ) {
+    super(message);
+  }
+}
+
 export class WorkerManifestSupervisor {
   private readonly runtimes = new Map<string, WorkerRuntime>();
+  private readonly platform: NodeJS.Platform;
+  private readonly nodeExecutable: string;
+
+  constructor(options: WorkerManifestSupervisorOptions = {}) {
+    this.platform = options.platform ?? process.platform;
+    this.nodeExecutable = options.nodeExecutable ?? process.execPath;
+  }
 
   async startIfPresent(
     agentId: string,
@@ -144,14 +166,41 @@ export class WorkerManifestSupervisor {
     await ensureDir(path.dirname(paths.status));
     await ensureDir(path.dirname(paths.log));
 
-    const command = manifest.command.map(part => this.expand(part, bundleRoot, env, options));
-    const executable = this.resolveCommand(bundleRoot, command[0]);
-    const args = command.slice(1);
     const cwd = this.resolvePath(bundleRoot, this.expand(manifest.cwd ?? '.', bundleRoot, env, options));
     const workerEnv = {
       ...env,
       ...this.expandEnv(manifest.env ?? {}, bundleRoot, env, options),
     };
+    if (this.platform === 'win32' && !workerEnv.HOME && workerEnv.USERPROFILE) {
+      workerEnv.HOME = workerEnv.USERPROFILE;
+    }
+
+    let executable: string;
+    let args: string[];
+    try {
+      const resolved = await this.resolveManifestCommand(bundleRoot, cwd, manifest, env, options);
+      executable = resolved.executable;
+      args = resolved.args;
+    } catch (err) {
+      const contractError = err instanceof WorkerManifestContractError ? err : undefined;
+      await this.writeStatus(paths.status, {
+        state: 'failed',
+        name: manifest.name,
+        agentId,
+        reason: contractError?.reason ?? 'WorkerManifestInvalid',
+        error: err instanceof Error ? err.message : String(err),
+        ...contractError?.detail,
+        updatedAt: new Date().toISOString(),
+      });
+      logger.error('worker manifest rejected', {
+        agentId,
+        manifest: manifest.name,
+        reason: contractError?.reason ?? 'WorkerManifestInvalid',
+        ...contractError?.detail,
+      });
+      return false;
+    }
+
     const log = createWriteStream(paths.log, { flags: 'a' });
 
     await this.writeStatus(paths.status, {
@@ -168,6 +217,7 @@ export class WorkerManifestSupervisor {
         env: workerEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: true,
+        windowsHide: this.platform === 'win32',
       });
       let settled = false;
       let startPersisted = false;
@@ -283,18 +333,52 @@ export class WorkerManifestSupervisor {
       updatedAt: new Date().toISOString(),
     });
 
-    try {
-      this.signalProcessGroup(pid, 'SIGTERM');
-    } catch (err) {
-      logger.warn('failed to stop worker', { agentId, pid, error: String(err) });
-      return false;
+    logger.info('worker process tree stop requested', {
+      agentId,
+      pid,
+      platform: this.platform,
+    });
+
+    let remainingPids: number[] = [];
+    if (this.platform === 'win32') {
+      remainingPids = await this.stopWindowsProcessTree(agentId, pid);
+    } else {
+      try {
+        this.signalProcessGroup(pid, 'SIGTERM');
+      } catch (err) {
+        logger.warn('failed to request worker process group stop', { agentId, pid, error: String(err) });
+        return false;
+      }
+
+      await this.waitForExit(pid, 5000);
+      try {
+        // Kill the process group even if its leader exited, because descendants may remain.
+        this.signalProcessGroup(pid, 'SIGKILL');
+        logger.info('worker process group force cleanup requested', { agentId, pid });
+      } catch {
+        // Process group may have exited between checks.
+      }
     }
 
     await this.waitForExit(pid, 5000);
-    try {
-      this.signalProcessGroup(pid, 'SIGKILL');
-    } catch {
-      // Process group may have exited between checks.
+    if (this.isAlive(pid) || remainingPids.length > 0) {
+      await this.writeStatus(paths.status, {
+        state: 'failed',
+        name: manifest.name,
+        agentId,
+        pid,
+        reason: 'WorkerProcessTreeStopFailed',
+        error: 'worker process remained alive after process tree cleanup',
+        remainingPids,
+        updatedAt: new Date().toISOString(),
+      });
+      logger.error('worker process tree stop failed', {
+        agentId,
+        pid,
+        platform: this.platform,
+        remainingPids,
+      });
+      return false;
     }
 
     await fs.rm(paths.pid, { force: true });
@@ -307,6 +391,255 @@ export class WorkerManifestSupervisor {
     });
     logger.info('worker stopped', { agentId, pid });
     return true;
+  }
+
+  private async resolveManifestCommand(
+    bundleRoot: string,
+    cwd: string,
+    manifest: WorkerManifest,
+    env: Record<string, string>,
+    options: WorkerManifestOptions,
+  ): Promise<{ executable: string; args: string[] }> {
+    this.validatePilotPlaceholders(manifest);
+    const command = manifest.command.map(part => this.expand(part, bundleRoot, env, options));
+    let executable: string;
+
+    if (manifest.command[0] === '${pilot:node}') {
+      executable = await this.resolvePilotNode();
+      logger.info('worker manifest command resolved', {
+        manifest: manifest.name,
+        commandSource: 'pilot-node',
+        nodeVersion: process.version,
+        executableName: path.basename(executable),
+      });
+    } else {
+      executable = this.resolveCommand(bundleRoot, command[0]);
+    }
+
+    const args = command.slice(1);
+    await this.validatePlatformEntrypoint(bundleRoot, cwd, manifest, executable, args);
+    return { executable, args };
+  }
+
+  private validatePilotPlaceholders(manifest: WorkerManifest): void {
+    const fields = [
+      ...manifest.command.map((value, index) => ({ value, location: `command[${index}]` })),
+      { value: manifest.cwd, location: 'cwd' },
+      ...Object.entries(manifest.env ?? {}).map(([name, value]) => ({ value, location: `env.${name}` })),
+      ...Object.entries(manifest.paths ?? {}).map(([name, value]) => ({ value, location: `paths.${name}` })),
+    ];
+
+    for (const field of fields) {
+      if (!field.value?.includes('${pilot:')) continue;
+      if (field.location === 'command[0]' && field.value === '${pilot:node}') continue;
+      throw new WorkerManifestContractError(
+        'WorkerManifestPlaceholderInvalid',
+        `unsupported Pilot placeholder in ${field.location}`,
+        { placeholderLocation: field.location },
+      );
+    }
+  }
+
+  private async resolvePilotNode(): Promise<string> {
+    if (!path.isAbsolute(this.nodeExecutable)) {
+      throw new WorkerManifestContractError(
+        'WorkerManifestPlaceholderInvalid',
+        'Pilot Node executable must be an absolute path',
+      );
+    }
+    try {
+      const stat = await fs.stat(this.nodeExecutable);
+      if (!stat.isFile()) throw new Error('not a regular file');
+    } catch (err) {
+      throw new WorkerManifestContractError(
+        'WorkerManifestPlaceholderInvalid',
+        `Pilot Node executable is unavailable: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return this.nodeExecutable;
+  }
+
+  private async validatePlatformEntrypoint(
+    bundleRoot: string,
+    cwd: string,
+    manifest: WorkerManifest,
+    executable: string,
+    args: string[],
+  ): Promise<void> {
+    if (this.platform !== 'win32') return;
+
+    const usesPilotNode = manifest.command[0] === '${pilot:node}';
+    const entry = usesPilotNode ? args[0] : executable;
+    if (!entry) {
+      throw new WorkerManifestContractError(
+        'WorkerManifestPlaceholderInvalid',
+        'Pilot Node manifest command requires an entrypoint argument',
+      );
+    }
+
+    const entryPath = this.resolveEntrypointPath(bundleRoot, cwd, entry);
+    const entryType = await this.classifyEntrypoint(entry, entryPath);
+    if (entryType !== 'unix-shell') return;
+
+    throw new WorkerManifestContractError(
+      'RuntimeBundlePlatformUnsupported',
+      'runtime bundle uses a Unix shell entrypoint that is not supported on native Windows',
+      {
+        bundleName: manifest.name,
+        bundleVersion: manifest.version ?? 'unknown',
+        platform: this.platform,
+        entryType,
+        action: 'upgrade to a Runtime Bundle with a Node .mjs/.js entrypoint',
+      },
+    );
+  }
+
+  private resolveEntrypointPath(bundleRoot: string, cwd: string, entry: string): string {
+    if (path.isAbsolute(entry)) return entry;
+    if (entry.includes('/') || entry.includes('\\') || entry.startsWith('.')) {
+      return path.resolve(cwd || bundleRoot, entry);
+    }
+    return entry;
+  }
+
+  private async classifyEntrypoint(rawEntry: string, resolvedEntry: string): Promise<'unix-shell' | 'native'> {
+    const basename = path.basename(rawEntry).toLowerCase();
+    if (path.extname(basename).toLowerCase() === '.sh'
+      || ['bash', 'bash.exe', 'sh', 'sh.exe', 'zsh', 'zsh.exe', 'dash', 'dash.exe', 'ksh', 'ksh.exe']
+        .includes(basename)) {
+      return 'unix-shell';
+    }
+
+    if (!await fileExists(resolvedEntry)) return 'native';
+    try {
+      const handle = await fs.open(resolvedEntry, 'r');
+      try {
+        const buffer = Buffer.alloc(256);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        const firstLine = buffer.subarray(0, bytesRead).toString('utf-8').split(/\r?\n/, 1)[0];
+        if (/^#!.*(?:^|[/\s])(?:ba|z|da|k)?sh(?:\s|$)/i.test(firstLine)) return 'unix-shell';
+      } finally {
+        await handle.close();
+      }
+    } catch {
+      // spawn() will report unreadable or missing entrypoints through the existing failure path.
+    }
+    return 'native';
+  }
+
+  private async stopWindowsProcessTree(agentId: string, pid: number): Promise<number[]> {
+    let descendants: number[] = [];
+    try {
+      descendants = await this.listWindowsDescendantPids(pid);
+    } catch (err) {
+      logger.warn('worker process tree discovery failed', { agentId, pid, error: String(err) });
+    }
+
+    const trackedPids = [pid, ...descendants];
+    try {
+      await this.runTaskkill(pid, false);
+      logger.info('worker process tree graceful stop requested', {
+        agentId,
+        pid,
+        platform: this.platform,
+        descendantCount: descendants.length,
+      });
+    } catch (err) {
+      if (this.isAlive(pid)) {
+        logger.warn('worker process tree graceful stop failed', { agentId, pid, error: String(err) });
+      }
+    }
+
+    await this.waitForPidsExit(trackedPids, 5000);
+    const remaining = trackedPids.filter(candidate => this.isAlive(candidate));
+    if (remaining.length === 0) return [];
+
+    for (const candidate of remaining) {
+      try {
+        await this.runTaskkill(candidate, true);
+      } catch (err) {
+        if (this.isAlive(candidate)) {
+          logger.warn('worker process tree force cleanup failed', {
+            agentId,
+            pid,
+            candidatePid: candidate,
+            error: String(err),
+          });
+        }
+      }
+    }
+    logger.info('worker process tree force cleanup requested', {
+      agentId,
+      pid,
+      platform: this.platform,
+      targetPids: remaining,
+    });
+
+    await this.waitForPidsExit(remaining, 5000);
+    return remaining.filter(candidate => this.isAlive(candidate));
+  }
+
+  private listWindowsDescendantPids(rootPid: number): Promise<number[]> {
+    if (!Number.isSafeInteger(rootPid) || rootPid <= 0) {
+      return Promise.reject(new Error('worker pid must be a positive integer'));
+    }
+    const script = `
+$rootPid = [uint32]$env:LOONGSUITE_WORKER_ROOT_PID
+$processes = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId)
+$pending = @($rootPid)
+$result = @()
+while ($pending.Count -gt 0) {
+  $parentPid = $pending[0]
+  $pending = @($pending | Select-Object -Skip 1)
+  $children = @($processes | Where-Object { $_.ParentProcessId -eq $parentPid })
+  foreach ($child in $children) {
+    $childPid = [uint32]$child.ProcessId
+    if ($result -notcontains $childPid) {
+      $result += $childPid
+      $pending += $childPid
+    }
+  }
+}
+[Console]::Out.Write(($result -join ","))
+`;
+    return new Promise((resolve, reject) => {
+      execFile('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        script,
+      ], {
+        env: {
+          ...process.env,
+          LOONGSUITE_WORKER_ROOT_PID: String(rootPid),
+        },
+        windowsHide: true,
+      }, (err, stdout) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        const pids = String(stdout)
+          .split(',')
+          .map(value => Number.parseInt(value.trim(), 10))
+          .filter(value => Number.isSafeInteger(value) && value > 0);
+        resolve([...new Set(pids)]);
+      });
+    });
+  }
+
+  private runTaskkill(pid: number, force: boolean): Promise<void> {
+    if (!Number.isSafeInteger(pid) || pid <= 0) {
+      return Promise.reject(new Error('worker pid must be a positive integer'));
+    }
+    const args = ['/PID', String(pid), '/T'];
+    if (force) args.push('/F');
+    return new Promise((resolve, reject) => {
+      execFile('taskkill.exe', args, { windowsHide: true }, err => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
   }
 
   private async handleExit(
@@ -408,8 +741,8 @@ export class WorkerManifestSupervisor {
 
   private resolveCommand(bundleRoot: string, command: string): string {
     if (path.isAbsolute(command)) return command;
-    if (command.includes(path.sep) || command.startsWith('.')) {
-      return path.join(bundleRoot, command);
+    if (command.includes('/') || command.includes('\\') || command.startsWith('.')) {
+      return path.resolve(bundleRoot, command);
     }
     return command;
   }
@@ -457,6 +790,14 @@ export class WorkerManifestSupervisor {
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
       if (!this.isAlive(pid)) return;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+
+  private async waitForPidsExit(pids: number[], timeoutMs: number): Promise<void> {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (pids.every(pid => !this.isAlive(pid))) return;
       await new Promise(resolve => setTimeout(resolve, 100));
     }
   }

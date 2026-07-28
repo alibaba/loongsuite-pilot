@@ -438,6 +438,33 @@ describe('PluginProbeStrategy', () => {
       expect(result.agentId).toBe('test-plugin');
     });
 
+    it('uses the existing external tar extractor for local worker bundles', async () => {
+      const destDir = path.join(tmpDir, 'local-worker-dest');
+      const tarball = path.join(tmpDir, 'local-worker.tar.gz');
+      const sourceDir = path.join(tmpDir, 'local-worker-source');
+      await fs.mkdir(path.join(sourceDir, 'bundle'), { recursive: true });
+      await fs.writeFile(
+        path.join(sourceDir, 'bundle', 'worker.manifest.json'),
+        JSON.stringify({
+          name: 'fake-worker',
+          command: ['missing-entrypoint'],
+        }),
+        'utf-8',
+      );
+      createTarball(tarball, sourceDir);
+
+      const result = await strategy.deploy(makeDef({
+        localWorkerRuntime: 'fake-runtime',
+        pluginProbe: {
+          source: { type: 'tar', tarball, destDir },
+          mountType: 'wrapper',
+        },
+      }));
+
+      expect(result.success).toBe(true);
+      await expect(fs.stat(path.join(destDir, 'bundle', 'worker.manifest.json'))).resolves.toBeDefined();
+    });
+
     it('prefers pilot wrapper script over plugin install.sh', async () => {
       const destDir = path.join(tmpDir, 'dest');
       const tarball = path.join(tmpDir, 'plugin.tar.gz');

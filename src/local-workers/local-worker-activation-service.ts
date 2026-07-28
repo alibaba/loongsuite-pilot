@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import type { AgentDefinition } from '../types/index.js';
 import { PluginProbeStrategy } from '../deployment/plugin-probe-strategy.js';
 import { createLogger } from '../utils/logger.js';
-import { ensureDir, writeJsonFile } from '../utils/fs-utils.js';
+import { ensureDir, readJsonFile, writeJsonFile } from '../utils/fs-utils.js';
 import {
   bootstrapTokenPath,
   bundleDir,
@@ -121,7 +121,14 @@ export class LocalWorkerActivationService {
     });
 
     if (!result.success) {
-      await this.writeSupervisorStatus(instance, 'failed', result.error ?? 'local worker deploy failed');
+      if (!await this.hasManifestContractFailure(instance)) {
+        await this.writeSupervisorStatus(
+          instance,
+          'failed',
+          result.error ?? 'local worker deploy failed',
+          'LocalWorkerDeployFailed',
+        );
+      }
       logger.warn('local worker deploy failed', { instanceId: instance.id, error: result.error });
       return;
     }
@@ -206,12 +213,27 @@ export class LocalWorkerActivationService {
     });
   }
 
-  private async writeSupervisorStatus(instance: LocalWorkerInstance, state: string, error: string): Promise<void> {
+  private async hasManifestContractFailure(instance: LocalWorkerInstance): Promise<boolean> {
+    const status = await readJsonFile<Record<string, unknown>>(
+      path.join(stateDir(this.dataDir, instance.id), 'supervisor-status.json'),
+    );
+    return status?.state === 'failed'
+      && ['WorkerManifestPlaceholderInvalid', 'RuntimeBundlePlatformUnsupported']
+        .includes(String(status.reason ?? ''));
+  }
+
+  private async writeSupervisorStatus(
+    instance: LocalWorkerInstance,
+    state: string,
+    error: string,
+    reason = 'LocalWorkerRuntimeTemplateMissing',
+  ): Promise<void> {
     const statusPath = path.join(stateDir(this.dataDir, instance.id), 'supervisor-status.json');
     await writeJsonFile(statusPath, {
       state,
       name: instance.runtime,
       agentId: `local-worker:${instance.id}`,
+      reason,
       error,
       updatedAt: new Date().toISOString(),
     });

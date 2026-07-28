@@ -3,7 +3,11 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { handleWorkerCli } from '../../../src/local-workers/worker-cli.js';
-import { bootstrapTokenPath, readLocalWorkerInstance } from '../../../src/local-workers/instance-store.js';
+import {
+  bootstrapTokenPath,
+  readLocalWorkerInstance,
+  stateDir,
+} from '../../../src/local-workers/instance-store.js';
 
 describe('local worker CLI', () => {
   let tmpDir: string;
@@ -135,5 +139,41 @@ describe('local worker CLI', () => {
     await handleWorkerCli(['worker', 'list', '--', '--model-config-mode', 'managed-global']);
 
     expect(process.exitCode).toBe(1);
+  });
+
+  it('prints the effective Waiting reason reported by a live runtime adapter', async () => {
+    await handleWorkerCli([
+      'worker',
+      'connect',
+      '--runtime',
+      'claude-code',
+      '--bootstrap-token',
+      token(),
+    ]);
+    const instanceId = String(logSpy.mock.calls[0]?.[0] ?? '').replace(/^connected\s+/, '');
+    const sDir = stateDir(dataDir, instanceId);
+    await fs.writeFile(
+      path.join(sDir, 'supervisor-status.json'),
+      JSON.stringify({ state: 'running', pid: process.pid }),
+      'utf-8',
+    );
+    await fs.writeFile(
+      path.join(sDir, 'status.json'),
+      JSON.stringify({
+        phase: 'Waiting',
+        reason: 'RuntimeCommandNotFound',
+        message: 'runtime command is not installed',
+      }),
+      'utf-8',
+    );
+    logSpy.mockClear();
+
+    await handleWorkerCli(['worker', 'status', instanceId]);
+
+    expect(logSpy.mock.calls.map(call => call[0])).toEqual(expect.arrayContaining([
+      'State:       waiting',
+      'Reason:      RuntimeCommandNotFound',
+      'Message:     runtime command is not installed',
+    ]));
   });
 });
