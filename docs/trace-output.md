@@ -70,6 +70,67 @@ Environment variables:
 | `LOONGSUITE_PILOT_CMS_ENDPOINT` | CMS or ARMS trace endpoint. |
 | `LOONGSUITE_PILOT_CMS_WORKSPACE` | Workspace header value. |
 
+## Multiple Trace Backends
+
+Trace export sends the **same** converted spans to **every** configured backend at once (convert once, fan out at export). The backends come from the union of:
+
+- `otlpTrace` (generic OTLP, user config)
+- `cms` (ARMS/CMS shorthand, user config)
+- `innerTrace.otlp[]` and `innerTrace.cms[]` (managed backends, see below)
+
+> **Behavior note:** `otlpTrace` and `cms` are now **additive**, not mutually exclusive. In earlier versions, configuring both meant only `otlpTrace` was used. After upgrading, spans are delivered to **both** — review your config if you don't want duplicate delivery.
+
+Backends are **deduplicated** by normalized endpoint URL + full request headers, so listing the same backend twice (e.g. once as a user backend and once as a managed backend) results in a single export. Two backends that share a URL but differ in auth headers / workspace / license are kept as distinct.
+
+Shared vs. per-backend settings (spans are converted once per distinct `service.name`):
+
+- **Shared across all backends:** `resourceAttributes`, `captureMessageContent`, `resourceAttributeKeys`, `spanAttributePassthroughPrefixes`, `maxExportBatchBytes`, `turnIdleTimeoutMs`.
+- **Per-backend:** endpoint URL, headers, compression, and `service.name` (see below — user vs. managed backends can differ).
+
+A failing backend is isolated — it does not block the healthy backends, and its failed spans are persisted separately under `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<backend-name>.jsonl`.
+
+### Managed backends (`configs/inner/data_config.json`)
+
+Managed/hosted deployments can push extra trace backends via `~/.loongsuite-pilot/configs/inner/data_config.json` (the same file already used for managed SLS endpoints). These are **added** to whatever the user configured in `config.json`:
+
+```json
+{
+  "sls": [ /* managed SLS endpoints (unchanged) */ ],
+  "serviceNamePrefix": "managed-service",
+  "otlp": [
+    {
+      "name": "team-collector",
+      "endpoint": "https://collector.internal:4318",
+      "headers": { "x-token": "..." },
+      "compression": "gzip"
+    }
+  ],
+  "cms": [
+    {
+      "name": "managed-arms",
+      "endpoint": "https://proj-xxx.../apm/trace/opentelemetry",
+      "licenseKey": "...",
+      "workspace": "...",
+      "project": "..."
+    }
+  ]
+}
+```
+
+| Field | Applies to | Description |
+|-------|-----------|-------------|
+| `serviceNamePrefix` | top-level | Service-name prefix for **all** managed backends — trace (`otlp[]`/`cms[]`, as `service.name`) and log (`sls[]`, as the `__service_name__` tag) — keeping them distinct from user backends. Optional; falls back to the user `serviceNamePrefix` when omitted (no differentiation). |
+| `otlp[].name` / `cms[].name` | both | Label used in logs and in the per-backend failed-log filename. Optional (defaults to `inner-otlp-<i>` / `inner-cms-<i>`). |
+| `otlp[].endpoint` | otlp | OTLP HTTP base URL (`/v1/traces` auto-appended). |
+| `otlp[].headers` | otlp | Request headers (e.g. auth token). |
+| `otlp[].compression` | otlp | `gzip` (default) or `none`. |
+| `cms[].endpoint` | cms | ARMS/CMS trace endpoint. |
+| `cms[].licenseKey` | cms | Sent as `x-arms-license-key`. |
+| `cms[].project` | cms | Sent as `x-arms-project`. Extracted from the endpoint hostname if omitted. |
+| `cms[].workspace` | cms | Sent as `x-cms-workspace`. |
+
+Each `cms[]` entry is expanded into an OTLP endpoint with the corresponding `x-arms-*` / `x-cms-*` headers, and any CMS backend adds the `acs.arms.service.feature=genai_app` resource attribute (shared, as noted above). When `serviceNamePrefix` is set here, managed backends report under `<serviceNamePrefix>-<agent>` while user backends keep the user prefix; spans are then converted once per distinct `service.name` (typically twice — user and managed). Malformed managed config (e.g. `otlp`/`cms` written as a non-array) is ignored rather than failing collection.
+
 ## Backend Examples
 
 ### Jaeger
@@ -194,7 +255,7 @@ Also enable [Data Masking](masking.md) when trace data may include secrets.
 
 Two kinds of extra attributes can be attached to trace spans:
 
-**1. Git/workspace attributes (automatic).** When an agent reports its working directory, spans automatically carry `git.repo`, `git.branch`, `git.domain`, and `workspace.current_root`, inferred from the local git repository. These are also present in the event log (SLS / JSONL) output.
+**1. Git/workspace attributes (automatic).** When an agent reports its working directory, spans automatically carry `workspace.path` (the absolute working directory / process cwd), plus `git.repo`, `git.branch`, `git.domain`, and `workspace.current_root` inferred from the local git repository. `workspace.path` is present regardless of git; the `git.*` and `workspace.current_root` fields require the directory to be a git repository. These are also present in the event log (SLS / JSONL) output.
 
 **2. User-defined attributes.** Attach arbitrary key/value pairs from three sources, merged with precedence **config < env < file**. Unlike the git fields above, these are written to **trace spans only** (never the event log / SLS / JSONL):
 
@@ -224,6 +285,33 @@ Notes:
 - Values are strings. File edits are picked up on the next processing cycle (bounded by the input poll interval, ~30s), not instantly.
 - Keys are written verbatim as span attribute names. **Avoid keys starting with `agent.`** and other reserved prefixes (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`) — such keys are skipped.
 - Attributes never overwrite existing span attributes (fill-only).
+
+**3. Per-invocation passthrough attributes.** The three sources above are process-global (one shared pilot daemon), so they cannot vary per agent call. To attribute individual calls (e.g. which user / issue triggered a run), the calling process sets a **per-invocation** env var on the spawned agent, and the daemon passes matching keys through onto that call's spans.
+
+- The host process sets `LOONGSUITE_PILOT_SPAN_ATTRIBUTES` (same `key=value,key=value` format) on the agent subprocess. The agent's hook/plugin parses it at startup and stamps the pairs as top-level fields on every record it emits, so each call carries its own values.
+
+  ```bash
+  # set by the launcher per agent invocation
+  export LOONGSUITE_PILOT_SPAN_ATTRIBUTES="multica.issue.id=AGE-992,multica.user.id=staff"
+  ```
+
+- `config.json` → `otlpTrace.spanAttributePassthroughPrefixes` lists the key prefixes the daemon should surface onto spans:
+
+  ```json
+  { "otlpTrace": { "spanAttributePassthroughPrefixes": ["multica."] } }
+  ```
+
+**Built-in OpenCode attribute (`opencode.message.id`).** The OpenCode plugin always stamps `opencode.message.id` (the opencode assistant-message id) on its `llm.request`, `llm.response`, `tool.call` and `tool.result` records — no launcher env var required. To surface it on spans, just list the `opencode.` prefix; it then appears on ENTRY / AGENT / STEP / LLM / TOOL spans (LLM and TOOL take the value from their own records; ENTRY / AGENT / STEP take the turn-level value):
+
+  ```json
+  { "otlpTrace": { "spanAttributePassthroughPrefixes": ["opencode."] } }
+  ```
+
+Notes:
+- Unlike source #2 (spans only), passthrough attributes are ordinary top-level record fields, so they appear in **both** the event log (SLS / JSONL) and the trace spans — same behavior as the git fields.
+- Reserved-prefix keys (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`, `agent.`) and sensitive names (token/secret/password/…) are dropped by the hook. Use a dedicated namespace such as `multica.*`.
+- Values must not contain a comma `,` (it is the pair separator); a value is also capped at 512 chars.
+- Only keys matching a configured prefix are passed through; all other top-level fields are unaffected. Supported for agents whose records are built in-process (claude-code, qoder, opencode).
 
 ## Verify Trace Output
 

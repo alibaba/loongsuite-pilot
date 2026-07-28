@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto';
 import type { AgentActivityEntry } from '../../types/index.js';
+import type { InterceptTokenData } from './intercept-token-reader.js';
 import type { SegmentTokenData } from './segment-token-reader.js';
 import type { SqliteTokenData } from './sqlite-token-reader.js';
 
@@ -20,6 +21,7 @@ export function enrichCliTurn(
   entries: AgentActivityEntry[],
   segments: SegmentTokenData[],
   systemPrompt?: string,
+  interceptTokens: InterceptTokenData[] = [],
 ): void {
   if (systemPrompt) {
     const firstReq = entries.find(e =>
@@ -32,8 +34,6 @@ export function enrichCliTurn(
     }
   }
 
-  if (segments.length === 0) return;
-
   for (const seg of segments) {
     const matches = entries.filter(e =>
       e['gen_ai.response.id'] === seg.requestId && e['event.name'] === 'llm.response',
@@ -41,22 +41,27 @@ export function enrichCliTurn(
 
     if (matches.length === 0) continue;
 
-    matches[0]['gen_ai.usage.input_tokens'] = seg.inputTokens;
-    matches[0]['gen_ai.usage.output_tokens'] = seg.outputTokens;
-    matches[0]['gen_ai.usage.total_tokens'] = seg.inputTokens + seg.outputTokens;
-    matches[0]['gen_ai.usage.cache_read.input_tokens'] = seg.cacheReadTokens;
-    matches[0]['gen_ai.usage.cache_creation.input_tokens'] = seg.cacheCreationTokens;
+    // Segment usage is a compatibility fallback only. New qodercli releases
+    // emit zero token fields in segments, while intercept observes the actual
+    // provider usage. Preserve any native usage already present on the entry.
+    const shouldUseSegmentTokens =
+      !hasPositiveEntryUsage(matches[0]) &&
+      (seg.inputTokens > 0 || seg.outputTokens > 0);
+
+    if (shouldUseSegmentTokens) {
+      matches[0]['gen_ai.usage.input_tokens'] = seg.inputTokens;
+      matches[0]['gen_ai.usage.output_tokens'] = seg.outputTokens;
+      matches[0]['gen_ai.usage.total_tokens'] = seg.inputTokens + seg.outputTokens;
+      matches[0]['gen_ai.usage.cache_read.input_tokens'] = seg.cacheReadTokens;
+      matches[0]['gen_ai.usage.cache_creation.input_tokens'] = seg.cacheCreationTokens;
+
+      for (let i = 1; i < matches.length; i++) {
+        zeroUsage(matches[i]);
+      }
+    }
 
     if (seg.stopReason && !matches[0]['gen_ai.response.finish_reasons']) {
       matches[0]['gen_ai.response.finish_reasons'] = [seg.stopReason];
-    }
-
-    for (let i = 1; i < matches.length; i++) {
-      matches[i]['gen_ai.usage.input_tokens'] = 0;
-      matches[i]['gen_ai.usage.output_tokens'] = 0;
-      matches[i]['gen_ai.usage.total_tokens'] = 0;
-      matches[i]['gen_ai.usage.cache_read.input_tokens'] = 0;
-      matches[i]['gen_ai.usage.cache_creation.input_tokens'] = 0;
     }
 
     // Inject segment-derived timestamps and model for the entire step (unified clock source)
@@ -110,6 +115,75 @@ export function enrichCliTurn(
       }
     }
   }
+
+  // Intercept is the authoritative qodercli token source. Apply it last so an
+  // exact response-id match overrides native/legacy segment usage, but never
+  // guesses by order or timestamp when ids differ.
+  applyInterceptUsage(entries, interceptTokens);
+}
+
+function applyInterceptUsage(
+  entries: AgentActivityEntry[],
+  interceptTokens: InterceptTokenData[],
+): void {
+  if (interceptTokens.length === 0) return;
+
+  // Intercept may observe an incremental and then a final usage object for the
+  // same response. Keep the newest valid record for each globally-unique id.
+  const latestByResponseId = new Map<string, InterceptTokenData>();
+  for (const token of interceptTokens) {
+    if (!token.id || !hasPositiveInterceptUsage(token)) continue;
+    const previous = latestByResponseId.get(token.id);
+    if (!previous || token.ts >= previous.ts) {
+      latestByResponseId.set(token.id, token);
+    }
+  }
+
+  for (const [responseId, usage] of latestByResponseId) {
+    const matches = entries.filter(entry =>
+      entry['event.name'] === 'llm.response' &&
+      entry['gen_ai.response.id'] === responseId,
+    );
+    if (matches.length === 0) continue;
+
+    const total = usage.totalTokens > 0
+      ? usage.totalTokens
+      : usage.promptTokens + usage.completionTokens;
+    matches[0]['gen_ai.usage.input_tokens'] = usage.promptTokens;
+    matches[0]['gen_ai.usage.output_tokens'] = usage.completionTokens;
+    matches[0]['gen_ai.usage.total_tokens'] = total;
+    matches[0]['gen_ai.usage.cache_read.input_tokens'] = usage.cachedTokens;
+    // Intercept does not expose cache_creation. Leave a native/segment value
+    // intact instead of replacing it with a fabricated zero.
+
+    // A response id may be represented by separate thinking/text entries.
+    // Attribute provider usage once to avoid double counting.
+    for (let i = 1; i < matches.length; i++) {
+      zeroUsage(matches[i]);
+    }
+  }
+}
+
+function hasPositiveInterceptUsage(usage: InterceptTokenData): boolean {
+  return usage.promptTokens > 0 || usage.completionTokens > 0 || usage.totalTokens > 0;
+}
+
+function hasPositiveEntryUsage(entry: AgentActivityEntry): boolean {
+  return positiveNumber(entry['gen_ai.usage.input_tokens']) ||
+    positiveNumber(entry['gen_ai.usage.output_tokens']) ||
+    positiveNumber(entry['gen_ai.usage.total_tokens']);
+}
+
+function positiveNumber(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+function zeroUsage(entry: AgentActivityEntry): void {
+  entry['gen_ai.usage.input_tokens'] = 0;
+  entry['gen_ai.usage.output_tokens'] = 0;
+  entry['gen_ai.usage.total_tokens'] = 0;
+  entry['gen_ai.usage.cache_read.input_tokens'] = 0;
+  entry['gen_ai.usage.cache_creation.input_tokens'] = 0;
 }
 
 export function enrichIdeTurn(

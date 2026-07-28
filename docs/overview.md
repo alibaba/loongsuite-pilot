@@ -27,6 +27,7 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Cursor | Hook | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / local session polling | Yes | Yes | No | Yes |
 | OpenCode | Plugin injection | Yes | Yes | Yes | Yes |
+| Pi Coding Agent | Extension injection | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | Yes | Yes | Yes | Yes |
 | Qoder for JetBrains | Detection-only | Yes | Yes | Yes | Yes |
@@ -35,6 +36,21 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Qoder Work CN | Hook / local data polling | Yes | Yes | Yes | Yes |
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
 | Wukong | CLI API polling | Yes | Yes | Yes | Yes |
+
+### Documented Windows Agent Support
+
+The general support table describes integration capabilities across Pilot and must not be interpreted as an operating-system compatibility matrix. The following agents are currently explicitly documented as supported on Windows:
+
+| Agent | Windows Integration | Trace Export | Log Export | Token Usage | Conversation / Tool Calls | Requirement |
+|-------|---------------------|--------------|------------|-------------|---------------------------|-------------|
+| Claude Code | Hook | Yes | Yes | Yes | Yes | — |
+| Cursor | Hook | Yes | Yes | Yes | Yes | — |
+| Qoder Work | Hook / local data source | Yes | Yes | No | Yes | User edition |
+| Qoder CLI | Hook | Yes | Yes | No | Yes | — |
+| Qoder IDE | Hook / local data source | Yes | Yes | Yes | Yes | Qoder 1.10.0 or later, User edition |
+| OpenCode | Plugin injection | Yes | Yes | Yes | Yes | — |
+
+Agents omitted from this table do not currently have an explicit Windows support statement; omission does not necessarily mean that the agent cannot run on Windows. This matrix follows the [Alibaba Cloud AI Coding Agent access guide](https://help.aliyun.com/zh/cms/cloudmonitor-2-0/ai-application-access-ai-coding-agent/). See [Installation](installation.md) for Windows prerequisites and setup.
 
 ## Data Collected
 
@@ -83,7 +99,7 @@ Important files and directories:
 | `plugins/` | Installed plugin assets. |
 | `logs/output/` | Local normalized JSONL output. |
 | `logs/input-state.json` | Input offsets and checkpoints. |
-| `sls-failed-logs/` | SLS upload failures persisted for diagnosis. |
+| `logs/sls-failed-logs/` | Bounded SLS failure metadata for diagnosis; no failed payloads. |
 | `versions/` and `current` | Versioned runtime layout used for updates and rollback. |
 
 ## Where To Go Next

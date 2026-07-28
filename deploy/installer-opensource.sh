@@ -855,11 +855,13 @@ _sed_inplace() {
 }
 
 inject_qodercli_token_intercept() {
-    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder'; then return 0; fi
+    # Not selected: clean up any stale block from a prior install, then bail.
+    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder'; then remove_qodercli_token_intercept; return 0; fi
     if ! command -v qodercli >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/qodercli-token-intercept.mjs"
-    if [ ! -f "$intercept_script" ]; then return 0; fi
+    local runtime_wrapper="$DATA_DIR/hooks/qodercli-runtime-wrapper.sh"
+    if [ ! -f "$intercept_script" ] || [ ! -f "$runtime_wrapper" ]; then return 0; fi
 
     msg "==> 配置 qodercli token 采集..." "==> Configuring qodercli token intercept..."
 
@@ -870,14 +872,30 @@ inject_qodercli_token_intercept() {
             msg "    ⚠️  $file 不可写，跳过" "    ⚠️  $file is not writable, skipping"
             return 0
         fi
-        if grep -q 'loongsuite-pilot BEGIN qodercli-intercept' "$file" 2>/dev/null; then return 0; fi
+        # Migrate-or-skip: our block may already be present. If it is the current
+        # guard shape (signature line present) we're done; otherwise it is an
+        # older released bare-function block sharing the same marker — remove it
+        # so the new guarded block below replaces it (the old bare block
+        # parse-errors under a user alias, which is exactly what we're fixing).
+        if grep -q 'loongsuite-pilot BEGIN qodercli-intercept' "$file" 2>/dev/null; then
+            if grep -qF 'qodercli-runtime-wrapper.sh' "$file"; then return 0; fi
+            _sed_inplace '/# loongsuite-pilot BEGIN qodercli-intercept/,/# loongsuite-pilot END qodercli-intercept/d' "$file"
+        fi
         [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
         # Double-quoted heredoc so $DATA_DIR expands at install time, honoring
         # --data-dir overrides. $@ is escaped to defer expansion to runtime.
+        # The `if ! alias ... eval '...'` shape guards against clobbering a
+        # user's own qodercli alias/function AND avoids a parse error: a bare
+        # qodercli() token would fail to parse under an active alias (interactive
+        # shells expand aliases at parse time, before the guard runs), so the
+        # definition is deferred behind eval. Keep byte-identical to the
+        # watchdog's blockFn (src/core/hook-watchdog.ts).
         cat >> "$file" << INTERCEPTBLOCK
 
 # loongsuite-pilot BEGIN qodercli-intercept
-qodercli() { BUN_OPTIONS="--preload=$DATA_DIR/hooks/qodercli-token-intercept.mjs" command qodercli "\$@"; }
+if ! alias qodercli >/dev/null 2>&1 && ! typeset -f qodercli >/dev/null 2>&1; then
+  eval 'qodercli() { "$DATA_DIR/hooks/qodercli-runtime-wrapper.sh" "\$@"; }'
+fi
 # loongsuite-pilot END qodercli-intercept
 INTERCEPTBLOCK
         msg "    ✅ 已写入 $file (请执行 source $file 或打开新终端)" \
@@ -889,6 +907,18 @@ INTERCEPTBLOCK
         */bash) _inject_to_rc "$HOME/.bashrc" ;;
         *)      _inject_to_rc "$HOME/.bashrc" ;;
     esac
+
+    # If the user already defines their own `qodercli`, our guard skipped the
+    # wrapper (to avoid clobbering it), so collection won't run. Tell them how
+    # to opt in, since there is otherwise no signal explaining the silence.
+    if _rc_user_override_present qodercli \
+        'loongsuite-pilot BEGIN qodercli-intercept' \
+        'loongsuite-pilot END qodercli-intercept'; then
+        msg "    ⚠️  检测到你已自定义 qodercli(alias/function)，为避免覆盖，采集未启用。" \
+            "    ⚠️  Detected your own 'qodercli' (alias/function); collection is disabled to avoid clobbering it."
+        msg "        如需启用采集，请让你的定义调用： $runtime_wrapper" \
+            "        To enable collection, have your definition call: $runtime_wrapper"
+    fi
     echo ""
 }
 
@@ -914,7 +944,8 @@ remove_qodercli_token_intercept() {
 # ============================================================
 inject_qoderwork_runtime_wrapper() {
     if [ "$(uname)" != "Darwin" ]; then return 0; fi
-    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder-work'; then return 0; fi
+    # Not selected: clean up any stale env/plist from a prior install, then bail.
+    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder-work'; then remove_qoderwork_runtime_wrapper; return 0; fi
     # Cover system-wide (/Applications) and per-user (~/Applications) installs;
     # the wrapper's RUNTIME_CANDIDATES handles both locations symmetrically.
     if [ ! -d "/Applications/QoderWork.app" ] && [ ! -d "$HOME/Applications/QoderWork.app" ]; then return 0; fi
@@ -1007,8 +1038,29 @@ remove_qoderwork_runtime_wrapper() {
 # The wrapper prepends our preload but preserves any existing BUN_OPTIONS
 # the user (or qodercli wrapper, or launchd setenv) may have set.
 # ============================================================
+# Detect a user-defined <cli> alias/function OUTSIDE our managed block.
+#   $1=cli name  $2=BEGIN marker substring  $3=END marker substring
+# Returns 0 (true) when found. Our injected wrapper's `if ! alias ...` guard
+# intentionally skips such users to avoid clobbering their setup — which means
+# collection is silently off for them. This lets the installer surface a
+# one-time, actionable hint at install time (rc is sourced too often to warn on
+# every shell). Heuristic: scans common rc files with our block stripped; misses
+# aliases defined in files those rc's source.
+_rc_user_override_present() {
+    local cli="$1" begin="$2" end="$3" file
+    for file in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+        [ -f "$file" ] || continue
+        if sed "/$begin/,/$end/d" "$file" 2>/dev/null \
+           | grep -Eq "^[[:space:]]*(alias[[:space:]]+$cli=|(function[[:space:]]+)?$cli[[:space:]]*\(\)|function[[:space:]]+$cli([[:space:]]|\{|\$))"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 inject_claude_code_fetch_intercept() {
-    if ! echo "$SELECTED_AGENTS" | grep -q 'claude-code'; then return 0; fi
+    # Not selected: clean up any stale block from a prior install, then bail.
+    if ! echo "$SELECTED_AGENTS" | grep -q 'claude-code'; then remove_claude_code_fetch_intercept; return 0; fi
     if ! command -v claude >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/claude-code-fetch-intercept.mjs"
@@ -1023,15 +1075,31 @@ inject_claude_code_fetch_intercept() {
             msg "    ⚠️  $file 不可写，跳过" "    ⚠️  $file is not writable, skipping"
             return 0
         fi
-        if grep -q 'loongsuite-pilot BEGIN claude-code-intercept' "$file" 2>/dev/null; then return 0; fi
+        # Migrate-or-skip: our block may already be present. If it is the current
+        # guard shape (signature line present) we're done; otherwise it is an
+        # older released bare-function block sharing the same marker — remove it
+        # so the new guarded block below replaces it (the old bare block
+        # parse-errors under a user alias, which is exactly what we're fixing).
+        if grep -q 'loongsuite-pilot BEGIN claude-code-intercept' "$file" 2>/dev/null; then
+            if grep -qF 'if ! alias claude >/dev/null 2>&1' "$file"; then return 0; fi
+            _sed_inplace '/# loongsuite-pilot BEGIN claude-code-intercept/,/# loongsuite-pilot END claude-code-intercept/d' "$file"
+        fi
         [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
         # Double-quoted heredoc so $DATA_DIR expands at install time, honoring
         # --data-dir overrides. Other refs (${BUN_OPTIONS}, $@) are escaped to
         # defer expansion until the wrapper actually runs in the user's shell.
+        # The `if ! alias ... eval '...'` shape guards against clobbering a
+        # user's own claude alias/function (e.g. a proxy+flags alias) AND avoids
+        # a parse error: a bare claude() token would fail to parse under an
+        # active alias (interactive shells expand aliases at parse time, before
+        # the guard runs), so the definition is deferred behind eval. Keep
+        # byte-identical to the watchdog's blockFn (src/core/hook-watchdog.ts).
         cat >> "$file" << INTERCEPTBLOCK
 
 # loongsuite-pilot BEGIN claude-code-intercept
-claude() { BUN_OPTIONS="--preload=$DATA_DIR/hooks/claude-code-fetch-intercept.mjs \${BUN_OPTIONS}" command claude "\$@"; }
+if ! alias claude >/dev/null 2>&1 && ! typeset -f claude >/dev/null 2>&1; then
+  eval 'claude() { BUN_OPTIONS="--preload=$DATA_DIR/hooks/claude-code-fetch-intercept.mjs \${BUN_OPTIONS}" command claude "\$@"; }'
+fi
 # loongsuite-pilot END claude-code-intercept
 INTERCEPTBLOCK
         msg "    ✅ 已写入 $file (请执行 source $file 或打开新终端)" \
@@ -1043,6 +1111,18 @@ INTERCEPTBLOCK
         */bash) _inject_to_rc "$HOME/.bashrc" ;;
         *)      _inject_to_rc "$HOME/.bashrc" ;;
     esac
+
+    # If the user already defines their own `claude`, our guard skipped the
+    # wrapper (to avoid clobbering it), so collection won't run. Tell them how
+    # to opt in, since there is otherwise no signal explaining the silence.
+    if _rc_user_override_present claude \
+        'loongsuite-pilot BEGIN claude-code-intercept' \
+        'loongsuite-pilot END claude-code-intercept'; then
+        msg "    ⚠️  检测到你已自定义 claude(alias/function)，为避免覆盖，采集未启用。" \
+            "    ⚠️  Detected your own 'claude' (alias/function); collection is disabled to avoid clobbering it."
+        msg "        如需启用采集，请在你的 claude 定义中加入： BUN_OPTIONS=\"--preload=$DATA_DIR/hooks/claude-code-fetch-intercept.mjs \${BUN_OPTIONS}\"" \
+            "        To enable collection, add to your claude definition: BUN_OPTIONS=\"--preload=$DATA_DIR/hooks/claude-code-fetch-intercept.mjs \${BUN_OPTIONS}\""
+    fi
     echo ""
 }
 
@@ -1697,6 +1777,48 @@ try {
 }
 
 # ============================================================
+# Remove Pi Coding Agent extension injection
+# ============================================================
+remove_pi_coding_agent_extension() {
+    local cfg="$HOME/.pi/agent/settings.json"
+    [ -f "$cfg" ] || return 0
+
+    local short="${cfg/#$HOME/\~}"
+    if ! command -v node &>/dev/null; then
+        msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+        return 0
+    fi
+
+    local result
+    result=$(node -e "
+const fs = require('fs');
+const f = process.argv[1];
+const isOurs = s => typeof s === 'string' && (
+  s.includes('loongsuite-pilot-pi-coding-agent') ||
+  s.includes('plugins/pi-coding-agent/index.mjs')
+);
+try {
+  const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  if (!Array.isArray(data.extensions)) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data.extensions.length;
+  data.extensions = data.extensions.filter(entry => !isOurs(typeof entry === 'string' ? entry : ''));
+  if (data.extensions.length === before) { process.stdout.write('nochange'); process.exit(0); }
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write('cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$cfg" 2>/dev/null) || result="error"
+
+    case "$result" in
+        cleaned)
+            msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" ;;
+        nochange)
+            : ;;
+        *)
+            msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
+    esac
+}
+
+# ============================================================
 # CMD: uninstall
 # ============================================================
 cmd_uninstall() {
@@ -1803,6 +1925,10 @@ cmd_uninstall() {
     # Remove plugin-inject specs (OpenCode)
     msg "==> 清理 OpenCode 插件配置..." "==> Cleaning up OpenCode plugin config..."
     remove_opencode_plugin
+    echo ""
+
+    msg "==> 清理 Pi Coding Agent Extension 配置..." "==> Cleaning up Pi Coding Agent extension config..."
+    remove_pi_coding_agent_extension
     echo ""
 
     # Data directory

@@ -310,6 +310,12 @@ describe('MetricsWriter', () => {
         userId: 'u1',
         getSnapshot: buildSnapshot,
         alarmManager,
+        updaterLiveness: () => ({
+          running: false,
+          source: 'none',
+          reason: 'no matching updater command found',
+          pidFileState: 'missing',
+        }),
       });
 
       vi.useRealTimers();

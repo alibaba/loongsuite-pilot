@@ -7,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/codex-hook-processor.mjs');
+const SHELL_WRAPPER = path.resolve(__dirname, '../../../../assets/hooks/codex-loongsuite-pilot-hook.sh');
+const SHARED_HOOK_ASSETS = path.resolve(__dirname, '../../../../assets/hooks/shared');
+const AGENT_DEFINITION = path.resolve(__dirname, '../../../../agents.d/codex.json');
 
 let dataDir;
 
@@ -31,12 +34,26 @@ function markerPath(sessionId) {
   return path.join(dataDir, 'state', 'codex', 'transcript-wakeups', `${sessionId}.json`);
 }
 
-describe('codex Stop wakeup hook', () => {
-  test('writes an atomic wakeup marker without telemetry JSONL', () => {
+describe('codex transcript discovery hook', () => {
+  test('deploys early discovery hooks while retiring telemetry-heavy hooks', () => {
+    const definition = JSON.parse(fs.readFileSync(AGENT_DEFINITION, 'utf8'));
+
+    expect(definition.hook.events).toEqual(['SessionStart', 'UserPromptSubmit', 'Stop']);
+    expect(definition.hook.retiredEvents).toEqual([
+      'PreToolUse',
+      'PostToolUse',
+      'PostToolUseFailure',
+    ]);
+  });
+
+  test('writes an atomic wakeup marker with the effective CODEX_HOME', () => {
+    const codexHome = path.join(dataDir, 'task-codex-home');
     const result = runHook('stop', {
       session_id: 'cdx-wakeup',
       turn_id: 'turn-wakeup',
       transcript_path: '/tmp/rollout-cdx-wakeup.jsonl',
+    }, {
+      CODEX_HOME: codexHome,
     });
 
     expect(result.status).toBe(0);
@@ -45,9 +62,31 @@ describe('codex Stop wakeup hook', () => {
       session_id: 'cdx-wakeup',
       turn_id: 'turn-wakeup',
       transcript_path: '/tmp/rollout-cdx-wakeup.jsonl',
+      codex_home: codexHome,
+      session_dir: path.join(codexHome, 'sessions'),
     });
     expect(fs.existsSync(path.join(dataDir, 'logs', 'codex'))).toBe(false);
   });
+
+  test.each(['session-start', 'user-prompt-submit', 'stop'])(
+    'writes the discovery marker for %s',
+    subcommand => {
+      const codexHome = path.join(dataDir, `${subcommand}-codex-home`);
+      const result = runHook(subcommand, {
+        session_id: `cdx-${subcommand}`,
+        turn_id: `turn-${subcommand}`,
+      }, {
+        CODEX_HOME: codexHome,
+      });
+
+      expect(result.status).toBe(0);
+      expect(JSON.parse(fs.readFileSync(markerPath(`cdx-${subcommand}`), 'utf8'))).toMatchObject({
+        session_id: `cdx-${subcommand}`,
+        codex_home: codexHome,
+        session_dir: path.join(codexHome, 'sessions'),
+      });
+    },
+  );
 
   test('writes AgentTeams resource attributes into the wakeup marker', () => {
     const result = runHook('stop', {
@@ -79,7 +118,7 @@ describe('codex Stop wakeup hook', () => {
     });
   });
 
-  test('ignores non-Stop events and malformed session identifiers', () => {
+  test('ignores non-discovery events and malformed session identifiers', () => {
     runHook('pre-tool-use', { session_id: 'cdx-ignore', tool_name: 'Bash' });
     runHook('stop', { turn_id: 'turn-missing-session' });
 
@@ -105,5 +144,50 @@ describe('codex Stop wakeup hook', () => {
     const errorDir = path.join(dataDir, 'logs', 'codex', 'errors');
     const errorFile = path.join(errorDir, fs.readdirSync(errorDir)[0]);
     expect(fs.readFileSync(errorFile, 'utf8')).toContain('"stage":"wakeup_write"');
+  });
+
+  test('derives the shared Pilot data directory from the installed shell wrapper', () => {
+    if (process.platform === 'win32') return;
+    const pilotRoot = path.join(dataDir, 'shared-pilot');
+    const hookDir = path.join(pilotRoot, 'hooks');
+    const taskHome = path.join(dataDir, 'task-home');
+    const codexHome = path.join(dataDir, 'task-codex-home');
+    fs.mkdirSync(hookDir, { recursive: true });
+    fs.mkdirSync(taskHome, { recursive: true });
+    fs.copyFileSync(PROCESSOR, path.join(hookDir, 'codex-hook-processor.mjs'));
+    fs.copyFileSync(SHELL_WRAPPER, path.join(hookDir, 'codex-loongsuite-pilot-hook.sh'));
+    fs.cpSync(SHARED_HOOK_ASSETS, path.join(hookDir, 'shared'), { recursive: true });
+    fs.chmodSync(path.join(hookDir, 'codex-loongsuite-pilot-hook.sh'), 0o755);
+
+    const env = {
+      ...process.env,
+      HOME: taskHome,
+      CODEX_HOME: codexHome,
+    };
+    delete env.LOONGSUITE_PILOT_DATA_DIR;
+    const result = spawnSync('bash', [
+      path.join(hookDir, 'codex-loongsuite-pilot-hook.sh'),
+      'session-start',
+    ], {
+      input: JSON.stringify({ session_id: 'cdx-wrapper' }),
+      env,
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+
+    expect(result.status).toBe(0);
+    const marker = path.join(
+      pilotRoot,
+      'state',
+      'codex',
+      'transcript-wakeups',
+      'cdx-wrapper.json',
+    );
+    expect(JSON.parse(fs.readFileSync(marker, 'utf8'))).toMatchObject({
+      session_id: 'cdx-wrapper',
+      codex_home: codexHome,
+      session_dir: path.join(codexHome, 'sessions'),
+    });
+    expect(fs.existsSync(path.join(taskHome, '.loongsuite-pilot'))).toBe(false);
   });
 });

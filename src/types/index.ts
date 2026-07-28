@@ -49,8 +49,35 @@ export interface OtlpTraceRawConfig {
   captureMessageContent?: boolean;
   turnIdleTimeoutMs?: number;
   resourceAttributeKeys?: string[];
+  /** Top-level record-key prefixes (e.g. "multica.") whose fields are passed through to span attributes. */
+  spanAttributePassthroughPrefixes?: string[];
   maxExportBatchBytes?: number;
   compression?: 'none' | 'gzip';
+}
+
+/** A single OTLP trace backend (managed inner or user), export-time only. */
+export interface OtlpEndpointEntry {
+  name?: string;
+  endpoint: string;
+  headers?: Record<string, string>;
+  compression?: 'none' | 'gzip';
+}
+
+/** ARMS/CMS shorthand; expanded into an OtlpEndpoint with x-arms-* headers. */
+export interface CmsEndpointEntry {
+  name?: string;
+  endpoint: string;
+  licenseKey?: string;
+  workspace?: string;
+  project?: string;
+}
+
+/** Managed trace backends loaded from configs/inner/data_config.json. */
+export interface InnerTraceConfig {
+  otlp?: OtlpEndpointEntry[];
+  cms?: CmsEndpointEntry[];
+  /** service.name prefix for managed backends; falls back to the user prefix. */
+  serviceNamePrefix?: string;
 }
 
 export interface AnalyticsConfig {
@@ -63,6 +90,8 @@ export interface AnalyticsConfig {
   serviceNamePrefix: string;
   cms: CmsConfig;
   otlpTrace?: OtlpTraceRawConfig;
+  /** Managed trace backends from configs/inner/data_config.json (added to user backends). */
+  innerTrace?: InnerTraceConfig;
   listeners: Record<string, ListenerConfig>;
   flushers: FlusherConfig;
   retention: LogRetentionConfig;
@@ -73,8 +102,20 @@ export interface AnalyticsConfig {
   pipeline: PipelineToggle;
   statusBar: StatusBarConfig;
   autoUpdate?: AutoUpdateConfig;
+  upstreamLink: UpstreamLinkConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
   globalSpanAttributes?: Record<string, string>;
+}
+
+/**
+ * Upstream trace linking: stamp collected records with an upstream trace_id /
+ * parent_span_id resolved from the acp-correlate store so agent spans reparent
+ * under the upstream span. Disabled by default.
+ */
+export interface UpstreamLinkConfig {
+  enabled: boolean;
+  /** TTL (ms) after which acp-correlate files/locks are cleaned up. */
+  ttlMs: number;
 }
 
 export interface AgentConfig {
@@ -90,19 +131,31 @@ export interface FlusherConfig {
   http?: HttpFlusherConfig;
 }
 
+/** A resolved OTLP backend the flusher exports to (name required for logging). */
+export interface OtlpEndpoint {
+  name: string;
+  endpoint: string;
+  headers?: Record<string, string>;
+  compression?: 'none' | 'gzip';
+  /** Overrides the shared config.serviceName for this backend's spans. */
+  serviceName?: string;
+}
+
 export interface OtlpTraceFlusherConfig {
   enabled: boolean;
-  endpoint: string;
+  /** One or more backends; the same converted spans are exported to each. */
+  endpoints: OtlpEndpoint[];
   protocol: 'http/protobuf';
-  headers?: Record<string, string>;
+  // Shared across backends unless an endpoint overrides it (see OtlpEndpoint.serviceName).
   serviceName: string;
   resourceAttributes?: Record<string, string>;
   captureMessageContent?: boolean;
   debug?: boolean;
   turnIdleTimeoutMs?: number;
   resourceAttributeKeys?: string[];
+  /** Top-level record-key prefixes (e.g. "multica.") whose fields are passed through to span attributes. */
+  spanAttributePassthroughPrefixes?: string[];
   maxExportBatchBytes?: number;
-  compression?: 'none' | 'gzip';
   dataDir?: string;
 }
 
@@ -123,7 +176,7 @@ export interface SlsFlusherConfig {
 }
 
 export interface SlsEndpoint {
-  /** Unique identifier for this destination. Drives the failed-log filename `<name>.jsonl`. */
+  /** Unique identifier for this destination. Used in bounded failure-metadata filenames. */
   name: string;
   /** Per-endpoint base URL, e.g. "https://cn-hangzhou.log.aliyuncs.com". */
   endpoint: string;
@@ -135,6 +188,8 @@ export interface SlsEndpoint {
   accessKeyId?: string;
   accessKeySecret?: string;
   redact?: boolean;
+  /** Overrides the shared serviceNamePrefix for this endpoint's __service_name__ tag. */
+  serviceName?: string;
 }
 
 export interface JsonlFlusherConfig {

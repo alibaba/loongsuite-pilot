@@ -18,7 +18,7 @@ Qoder 默认由 `qoder-trace` 聚合 Hook JSONL、CLI session segments 和 SQLit
 
 | # | Input id | agentType | 数据源 | 作用 |
 |---|---------|-----------|-------|------|
-| 1 | `qoder-trace` | `qoder` / `qoder-cli` / `qoder-idea` | `~/.loongsuite-pilot/logs/qoder/history/qoder-*.jsonl` + `~/.qoder/logs/sessions/.../segments/*.jsonl` + Qoder SQLite DB | 默认主链路：Chat / Tool call 结构、CLI token fallback、IDE/JetBrains token enrichment |
+| 1 | `qoder-trace` | `qoder` / `qoder-cli` / `qoder-idea` | Hook history + qodercli intercept + CLI segments + Qoder SQLite DB | 默认主链路：Chat / Tool call 结构、CLI intercept token、segment 元数据/旧版 token fallback、IDE/JetBrains token enrichment |
 | 2 | `qoder-cli-hook` | `qoder-cli` | `~/.loongsuite-pilot/logs/qoder/history/qoder-*.jsonl` | 仅 `qoder-trace` 显式关闭时的 Hook JSONL fallback |
 | 3 | `qoder-cli-session` | `qoder-cli` | `~/.qoder/logs/sessions/<cwd>/<session>/segments/*.jsonl` | 仅 `qoder-trace` 显式关闭时的 CLI token fallback |
 | 4 | `qoder-sqlite` | `qoder` | Qoder DB `SharedClientCache/cache/db/local.db` 的 `chat_message` 表 | 仅 `qoder-trace` 显式关闭时的 IDE token fallback |
@@ -124,9 +124,13 @@ tail -2 ~/.loongsuite-pilot/logs/qoder/history/qoder-$(date -u +%Y-%m-%d).jsonl 
 processor 的增量状态保存在：
 
 ```bash
-cat ~/.loongsuite-pilot/hooks/.line_records.qoder.json
-# 每个 transcript_path → { session_id, last_line_count, updated_at }
+ls -la ~/.loongsuite-pilot/state/hooks/qoder-line-records/
+cat ~/.loongsuite-pilot/state/hooks/qoder-line-records/*.json
+# 每个文件对应一个 session，内容含 session_id、transcript_path、last_line_count、updated_at
 ```
+
+同目录下的 `qoder-line-records.json` 是加锁维护的旧版本回滚兼容影子；当前版本以
+`qoder-line-records/*.json` 为主状态。
 
 若 history 为空但 sessions 有数据：
 - hook 从未被触发 → 检查第 2.A.1 的 settings.json
@@ -137,9 +141,11 @@ cat ~/.loongsuite-pilot/hooks/.line_records.qoder.json
   ```
   常见日志关键字：`No transcript_path or session_id`、`Transcript file not found`、`No new lines`
 
-### 2.A.3 Session segments（token 使用量独立链路）
+### 2.A.3 Session segments（时序元数据 / 旧版 token fallback）
 
-`qoder-cli-session` Input 不依赖 hook，直接扫描 segment 文件。即使 hook 未注入，只要 Qoder CLI 能写 segments，token 数据就能采到：
+`qoder-cli-session` Input 不依赖 hook，直接扫描 segment 文件。新版 Qoder CLI 的 segment
+可能仍有 request/response 时间、model、stop reason 等元数据，但 token 字段恒为 0；
+只有仍写入非零 token 的旧版本才能把 segment 作为 token fallback：
 
 ```bash
 # 确认 segment 里有 model.response.completed 事件
@@ -147,20 +153,26 @@ grep -h '"type":"model.response.completed"' \
   ~/.qoder/logs/sessions/*/*/segments/*.jsonl 2>/dev/null | wc -l
 ```
 
-若为 0 → Qoder CLI 版本过低，不产生该事件类型，升级即可。
+若事件数为 0 → Qoder CLI 未产生 segment completion 事件；继续检查版本和 session 目录。
+若事件存在但 token 为 0 → 属于新版已知行为，Token 应从下一节的 intercept 获取。
 
 ### 2.A.4 依赖注入校验（qodercli token / system prompt preload）
 
-`qoder-trace` 会优先读取 session segments 中的 token；当 qodercli 某些版本 segment token 为 0 或缺少 system prompt 时，
-会回退读取 `qodercli-token-intercept.mjs` 写出的 `qodercli-intercept.jsonl`。这一步依赖 shell rc 中的
-`BUN_OPTIONS --preload` 包装函数，缺失时表现为 **Chat / Tool call 有数据，但 token 或 system prompt 缺失 / 全 0**。
+`qoder-trace` 以 `qodercli-token-intercept.mjs` 写出的 `qodercli-intercept.jsonl` 作为
+CLI Token 的最高优先级数据源，通过 `intercept.id == gen_ai.response.id` 精确关联；
+仅在 intercept 不可用时才回退到旧版 segment 的非零 token。
+
+`qodercli-runtime-wrapper.sh` 会按发行形态选择注入方式：npm/Node 入口使用
+`NODE_OPTIONS --import`，原生 Bun 可执行文件使用 `BUN_OPTIONS --preload`。缺失时表现为
+**Chat / Tool call 有数据，但 token 或 system prompt 缺失 / 全 0**。
 
 ```bash
-# 1) preload 脚本必须存在
-ls -l ~/.loongsuite-pilot/hooks/qodercli-token-intercept.mjs
+# 1) preload 和 runtime wrapper 必须存在
+ls -l ~/.loongsuite-pilot/hooks/qodercli-token-intercept.mjs \
+      ~/.loongsuite-pilot/hooks/qodercli-runtime-wrapper.sh
 
 # 2) shell rc 中必须有注入块（zsh/bash 至少一个命中）
-grep -n 'loongsuite-pilot BEGIN qodercli-intercept\|qodercli-token-intercept.mjs' \
+grep -n 'loongsuite-pilot BEGIN qodercli-intercept\|qodercli-runtime-wrapper.sh' \
   ~/.zshrc ~/.bashrc 2>/dev/null
 
 # 3) 当前终端必须已经 source 过 rc，qodercli 应显示为 shell function
@@ -171,10 +183,14 @@ type qodercli 2>/dev/null
 
 ```bash
 qodercli is a function
-qodercli () { BUN_OPTIONS="--preload=/Users/<you>/.loongsuite-pilot/hooks/qodercli-token-intercept.mjs" command qodercli "$@"; }
+qodercli () { "/Users/<you>/.loongsuite-pilot/hooks/qodercli-runtime-wrapper.sh" "$@"; }
 ```
 
 若第 2 步有注入块但第 3 步仍不是 function → 用户需要执行 `source ~/.zshrc` / `source ~/.bashrc` 或打开新终端。
+
+非交互式容器服务通常不会 source shell rc，启动命令必须显式调用
+`~/.loongsuite-pilot/hooks/qodercli-runtime-wrapper.sh`。不要给整个 Pod 全局设置
+`NODE_OPTIONS`，否则其它 Node 进程也会加载 intercept。
 
 完成一次 qodercli 对话后验证 intercept 文件：
 
@@ -335,13 +351,15 @@ ls -la "${XDG_CONFIG_HOME:-$HOME/.config}/Qoder"
 | `~/.qoder/logs/sessions/<cwd>/<session>/segments/*.jsonl` | Qoder CLI 原生 transcript + token 事件（`qoder-trace` / `qoder-cli-session` 读取） |
 | `~/.loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.sh` | Qoder Hook shell 入口 |
 | `~/.loongsuite-pilot/hooks/qoder-hook-processor.mjs` | Qoder 专用 transcript forwarder（从 stdin 拿 transcript_path，增量 append 到 history） |
-| `~/.loongsuite-pilot/hooks/.line_records.qoder.json` | processor 的增量行记录状态 |
+| `~/.loongsuite-pilot/state/hooks/qoder-line-records/*.json` | processor 的 per-session 增量行记录状态（持久目录，部署升级不会覆盖） |
+| `~/.loongsuite-pilot/state/hooks/qoder-line-records.json` | 旧版本回滚兼容影子（加锁更新，非当前主状态） |
 | `~/.loongsuite-pilot/logs/qoder/history/qoder-YYYY-MM-DD.jsonl` | transcript 转发后的 history（`qoder-trace` / `qoder-cli-hook` 读取） |
 | `~/.loongsuite-pilot/logs/qoder/debug/qoder-debug-*.log` | processor 调试日志 |
 | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` | Qoder IDE SQLite token 数据源 |
 | `~/.qoder/shared_client/cache/db/local.db` | Qoder for JetBrains SQLite token 数据源（输出标记为 `qoder-idea`） |
 | `~/.loongsuite-pilot/hooks/qodercli-token-intercept.mjs` | Qoder CLI token / system prompt preload 脚本 |
-| `~/.loongsuite-pilot/logs/qodercli-intercept.jsonl` | qodercli preload 捕获的 token / system prompt fallback 数据 |
+| `~/.loongsuite-pilot/hooks/qodercli-runtime-wrapper.sh` | 按 Node/Bun 运行时选择 preload 方式的进程级启动包装器 |
+| `~/.loongsuite-pilot/logs/qodercli-intercept.jsonl` | qodercli preload 捕获的最高优先级 token / system prompt 数据 |
 | `~/.loongsuite-pilot/logs/output/qoder-cli-YYYY-MM-DD.jsonl` | CLI 规范化输出 |
 | `~/.loongsuite-pilot/logs/output/qoder-YYYY-MM-DD.jsonl` | IDE 规范化输出 |
 | `~/.loongsuite-pilot/logs/input-state.json` | Qoder 相关 Input 的游标 |
@@ -356,6 +374,6 @@ ls -la "${XDG_CONFIG_HOME:-$HOME/.config}/Qoder"
 | **Qoder CLI 完全无数据** | **首查 Qoder CLI 版本**。老版本不执行 `hooks.Stop`，也可能不写 session segments。升级到最新稳定版后 `loongsuite-pilot restart` |
 | **Qoder IDE 完全无数据** | **首查 Qoder IDE 版本**。老版本缺 `ai_tracker/` 目录或 `chat_message.token_info` 字段。升级 Qoder 后重启 IDE |
 | Qoder Work（`~/.qoderwork/`）用户问怎么排查 | Qoder Work 已独立支持，链路与本文档不同，直接阅读 `~/.loongsuite-pilot/skills/loongsuite-pilot-ops/references/qoderwork-diagnostics.md` |
-| **qodercli CLI token 全 0（session 有数据）** | `qodercli-token-intercept.mjs` 未注入或当前终端未 source rc，参考第 2.A.4 步 |
+| **qodercli CLI token 全 0（session 有数据）** | `qodercli-token-intercept.mjs` 未注入；交互终端检查是否 source rc，非交互容器检查服务是否显式调用 runtime wrapper，参考第 2.A.4 步 |
 | **qodercli CLI 无 system prompt** | 同上，preload 未生效导致 `system_prompt` 未写入 `qodercli-intercept.jsonl` |
-| `~/.loongsuite-pilot/logs/qodercli-intercept.jsonl` 不存在 | 注入块缺失或未 source rc；执行 `loongsuite-pilot restart` 修复后重新 source rc 或开新终端 |
+| `~/.loongsuite-pilot/logs/qodercli-intercept.jsonl` 不存在 | 注入块缺失、未 source rc，或容器服务绕过 runtime wrapper；执行 `loongsuite-pilot restart` 修复交互 shell，非交互服务需修改启动命令 |

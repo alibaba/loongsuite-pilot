@@ -226,6 +226,10 @@ describe('Hook JSONL integration flow', () => {
       path.resolve(process.cwd(), 'assets/hooks/shared/resource-context.mjs'),
       path.join(sharedDir, 'resource-context.mjs'),
     );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/upstream-context.mjs'),
+      path.join(sharedDir, 'upstream-context.mjs'),
+    );
     await fs.chmod(hookScript, 0o755);
 
     const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
@@ -348,6 +352,10 @@ describe('Hook JSONL integration flow', () => {
       path.resolve(process.cwd(), 'assets/hooks/shared/resource-context.mjs'),
       path.join(sharedDir, 'resource-context.mjs'),
     );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/upstream-context.mjs'),
+      path.join(sharedDir, 'upstream-context.mjs'),
+    );
     await fs.chmod(hookScript, 0o755);
 
     const transcriptPath = path.join(tmpDir, 'delayed-ide-transcript.jsonl');
@@ -461,7 +469,7 @@ describe('Hook JSONL integration flow', () => {
     ]);
   });
 
-  it('QoderTraceInput cold start: only reports last turn when state is empty', async () => {
+  it('QoderTraceInput missing checkpoint: baselines existing history and reads later appends', async () => {
     const logDir = path.join(tmpDir, 'logs-cold');
     await fs.mkdir(logDir, { recursive: true });
 
@@ -512,7 +520,7 @@ describe('Hook JSONL integration flow', () => {
         time_unix_nano: '1780000011000000000',
         observed_time_unix_nano: '1780000011000000000',
       }),
-      // Turn 3 (latest — should be reported)
+      // Turn 3 (also historical — must not be guessed as the only new turn)
       JSON.stringify({
         'event.name': 'other',
         'event.id': 'e-5',
@@ -552,9 +560,9 @@ describe('Hook JSONL integration flow', () => {
     await input.start();
     await input.stop();
 
-    // Only the last turn should be reported
-    expect(allEntries.length).toBe(2);
-    expect(allEntries.every(e => e['gen_ai.turn.id'] === 'turn-latest')).toBe(true);
+    // Existing bytes are an ambiguous recovery case. The no-replay policy
+    // baselines the complete file instead of guessing one global latest turn.
+    expect(allEntries).toHaveLength(0);
 
     // Offset should be at end of file
     await freshStore.save();
@@ -562,7 +570,32 @@ describe('Hook JSONL integration flow', () => {
     expect(state.lastOffset).toBe((await fs.stat(logFile)).size);
     expect(state.lastFile).toBe(`qoder-${today}.jsonl`);
 
-    // Subsequent run should not re-emit anything
+    const afterBaseline = [
+      JSON.stringify({
+        'event.name': 'llm.request',
+        'event.id': 'e-new-request',
+        'gen_ai.turn.id': 'turn-after-baseline',
+        'gen_ai.session.id': 'sess-new',
+        'gen_ai.agent.type': 'qoder-cli',
+        'gen_ai.step.id': 'turn-after-baseline:s1',
+        time_unix_nano: '1780000030000000000',
+        observed_time_unix_nano: '1780000030000000000',
+      }),
+      JSON.stringify({
+        'event.name': 'llm.response',
+        'event.id': 'e-new-response',
+        'gen_ai.turn.id': 'turn-after-baseline',
+        'gen_ai.session.id': 'sess-new',
+        'gen_ai.agent.type': 'qoder-cli',
+        'gen_ai.step.id': 'turn-after-baseline:s1',
+        time_unix_nano: '1780000031000000000',
+        observed_time_unix_nano: '1780000031000000000',
+      }),
+    ];
+    await fs.appendFile(logFile, afterBaseline.join('\n') + '\n');
+
+    // A later run resumes from the deterministic boundary and consumes all new
+    // records, rather than applying another process-global cold-start filter.
     const input2 = new QoderTraceInput({
       stateStore: freshStore as any,
       logDir,
@@ -572,7 +605,10 @@ describe('Hook JSONL integration flow', () => {
     input2.on('entries', (e: AgentActivityEntry[]) => newEntries.push(...e));
     await input2.start();
     await input2.stop();
-    expect(newEntries).toHaveLength(0);
+    expect(newEntries.map(entry => entry['event.id'])).toEqual([
+      'e-new-request',
+      'e-new-response',
+    ]);
   });
 
   it('KiroCliLogInput cold start: only reports last turn when state is empty', async () => {
@@ -660,11 +696,15 @@ describe('Hook JSONL integration flow', () => {
       path.resolve(process.cwd(), 'assets/hooks/shared/resource-context.mjs'),
       path.join(sharedDir, 'resource-context.mjs'),
     );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/upstream-context.mjs'),
+      path.join(sharedDir, 'upstream-context.mjs'),
+    );
     await fs.chmod(hookScript, 0o755);
 
     const transcriptPath = path.join(tmpDir, 'multi-turn-transcript.jsonl');
     await fs.writeFile(transcriptPath, [
-      // Turn 1: hello
+      // Turn 1: first hook invocation establishes the per-transcript cursor.
       JSON.stringify({
         type: 'user',
         timestamp: '2026-06-18T08:00:00.000Z',
@@ -677,7 +717,25 @@ describe('Hook JSONL integration flow', () => {
         sessionId: 'sess-multi',
         message: { role: 'assistant', content: [{ type: 'text', text: 'Hi there.' }] },
       }),
-      // Turn 2: leetcode
+      JSON.stringify({
+        type: 'last-prompt',
+        sessionId: 'sess-multi',
+        lastPrompt: 'hello',
+      }),
+    ].join('\n') + '\n');
+
+    const firstResult = runQoderHook(hookScript, JSON.stringify({
+      hook_event_name: 'Stop',
+      transcript_path: transcriptPath,
+      session_id: 'sess-multi',
+    }), {
+      LOONGSUITE_PILOT_DATA_DIR: dataDir,
+    });
+    expect(firstResult.status).toBe(0);
+
+    // Turn 2 arrives after a valid cursor exists, so the processor must retain
+    // normal incremental multi-turn behavior rather than treating it as replay.
+    await fs.appendFile(transcriptPath, [
       JSON.stringify({
         type: 'user',
         timestamp: '2026-06-18T08:01:00.000Z',
@@ -702,14 +760,14 @@ describe('Hook JSONL integration flow', () => {
       }),
     ].join('\n') + '\n');
 
-    const result = runQoderHook(hookScript, JSON.stringify({
+    const secondResult = runQoderHook(hookScript, JSON.stringify({
       hook_event_name: 'Stop',
       transcript_path: transcriptPath,
       session_id: 'sess-multi',
     }), {
       LOONGSUITE_PILOT_DATA_DIR: dataDir,
     });
-    expect(result.status).toBe(0);
+    expect(secondResult.status).toBe(0);
 
     const historyFile = path.join(dataDir, 'logs', 'qoder', 'history', `qoder-${getTodayDateString()}.jsonl`);
     const records = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n').map(line => JSON.parse(line));

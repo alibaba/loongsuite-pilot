@@ -22,11 +22,14 @@ vi.mock('../../../src/internal/sender.js', () => ({
 }));
 
 const mockReadFileSync = vi.fn<[string, string], string>();
+const mockExistsSync = vi.fn<[string], boolean>();
 vi.mock('node:fs', () => ({
   readFileSync: (...args: [string, string]) => mockReadFileSync(...args),
+  existsSync: (...args: [string]) => mockExistsSync(...args),
 }));
 
 import { UpdaterMetrics } from '../../../src/updater/updater-metrics.js';
+import type { ProcessLiveness } from '../../../src/utils/pid-utils.js';
 
 describe('UpdaterMetrics', () => {
   let killSpy: ReturnType<typeof vi.spyOn> | null = null;
@@ -38,6 +41,7 @@ describe('UpdaterMetrics', () => {
     mockSendAlarm.mockClear();
     mockSendStatus.mockClear();
     mockReadFileSync.mockReturnValue('12345\n');
+    mockExistsSync.mockReturnValue(true);
     killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: number) => {
       if (signal === 0) return true;
       throw new Error('not supported');
@@ -50,12 +54,13 @@ describe('UpdaterMetrics', () => {
     vi.useRealTimers();
   });
 
-  function createMetrics(userId = 'test-user') {
+  function createMetrics(userId = 'test-user', collectorLiveness?: () => ProcessLiveness) {
     return new UpdaterMetrics({
       dataDir: '/tmp/test-data',
       version: '1.0.0',
       collectorPidFile: '/tmp/test-data/loongsuite-pilot.pid',
       userId,
+      collectorLiveness,
     });
   }
 
@@ -244,58 +249,114 @@ describe('UpdaterMetrics', () => {
   });
 
   describe('collector health check', () => {
-    it('writes SERVICE_NOT_RUNNING_ALARM when collector PID file is missing', async () => {
-      mockReadFileSync.mockImplementation(() => {
-        throw new Error('ENOENT');
-      });
+    it('suppresses SERVICE_NOT_RUNNING_ALARM during startup grace', async () => {
+      const m = createMetrics('test-user', () => down('pid file is missing'));
 
-      const m = createMetrics();
-      await m.start();
-      await m.stop();
-
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
-      expect(alarmLines.length).toBeGreaterThanOrEqual(1);
-      const parsed = JSON.parse(alarmLines[0].line);
-      expect(parsed.alarm_type).toBe('SERVICE_NOT_RUNNING_ALARM');
-      expect(parsed.alarm_level).toBe('3');
-    });
-
-    it('does NOT write alarm when collector process is running', async () => {
-      mockReadFileSync.mockReturnValue('12345\n');
-      const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: number) => {
-        if (signal === 0) return true;
-        throw new Error('not supported');
-      }) as typeof process.kill);
-
-      const m = createMetrics();
       await m.start();
       await m.stop();
 
       const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
       expect(alarmLines).toHaveLength(0);
-
-      killSpy.mockRestore();
     });
 
-    it('fires health check every 60 seconds', async () => {
-      mockReadFileSync.mockImplementation(() => {
-        throw new Error('ENOENT');
-      });
+    it('requires two consecutive misses after startup grace before alarming', async () => {
+      const m = createMetrics('test-user', () => down('no matching collector command found'));
 
-      const m = createMetrics();
       await m.start();
+      await vi.advanceTimersByTimeAsync(3 * 60_000 + 60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
 
-      await vi.advanceTimersByTimeAsync(30_000);
-      await vi.advanceTimersByTimeAsync(0);
-      const before = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl')).length;
+      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      expect(alarmLines).toHaveLength(1);
+      const parsed = JSON.parse(alarmLines[0].line);
+      expect(parsed.alarm_type).toBe('SERVICE_NOT_RUNNING_ALARM');
+      expect(parsed.alarm_message).toContain('no matching collector command found');
+      await m.stop();
+    });
 
-      await vi.advanceTimersByTimeAsync(30_000);
-      await vi.advanceTimersByTimeAsync(0);
+    it('enriches SERVICE_NOT_RUNNING_ALARM with the startup-crash cause when a breadcrumb exists', async () => {
+      mockReadFileSync.mockImplementation((p: string) => {
+        if (p.includes('last-startup-crash.json')) {
+          return JSON.stringify({
+            schema: 1, ts: 1, phase: 'module_load', version: '9.9.9', pid: 1,
+            error_message: 'Cannot open sqlite3 binding',
+            error_stack_head: 'Error: Cannot open sqlite3 binding',
+          });
+        }
+        return '12345\n';
+      });
+      const m = createMetrics('test-user', () => down('no matching collector command found'));
 
-      const after = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl')).length;
-      expect(after).toBeGreaterThan(before);
+      await m.start();
+      await vi.advanceTimersByTimeAsync(3 * 60_000 + 60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
 
+      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      expect(alarmLines).toHaveLength(1);
+      const parsed = JSON.parse(alarmLines[0].line);
+      expect(parsed.alarm_type).toBe('SERVICE_NOT_RUNNING_ALARM');
+      expect(parsed.alarm_message).toContain('cause=native_module_missing');
+      expect(parsed.alarm_message).toContain('version=9.9.9');
+      expect(parsed.alarm_message).toContain('no matching collector command found');
+      await m.stop();
+    });
+
+    it('does not alarm when collector PID changes but command identity is found', async () => {
+      const m = createMetrics('test-user', () => ({
+        running: true,
+        pid: 456,
+        source: 'process-scan',
+        reason: 'matching process command found; pid file points to stale or mismatched pid 123',
+        pidFileState: 'stale',
+      }));
+
+      await m.start();
+      await vi.advanceTimersByTimeAsync(3 * 60_000 + 60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await m.stop();
+
+      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      expect(alarmLines).toHaveLength(0);
+    });
+
+    it('resets collector failures after process identity recovery', async () => {
+      let call = 0;
+      const liveness = vi.fn<[], ProcessLiveness>().mockImplementation(() => {
+        call++;
+        if (call <= 4) return down('no matching collector command found');
+        return { running: true, pid: 456, source: 'process-scan', reason: 'matching process command found' };
+      });
+      const m = createMetrics('test-user', liveness);
+
+      await m.start();
+      await vi.advanceTimersByTimeAsync(3 * 60_000 + 60_000);
+      await m.stop();
+
+      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      expect(alarmLines).toHaveLength(0);
+    });
+
+    it('respects service alarm cooldown for persistent misses', async () => {
+      const m = createMetrics('test-user', () => down('no matching collector command found'));
+
+      await m.start();
+      await vi.advanceTimersByTimeAsync(3 * 60_000 + 60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      expect(alarmLines).toHaveLength(1);
       await m.stop();
     });
   });
 });
+
+function down(reason: string): ProcessLiveness {
+  return {
+    running: false,
+    source: 'none',
+    reason,
+    pidFileState: 'missing',
+  };
+}
+

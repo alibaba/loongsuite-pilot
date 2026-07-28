@@ -102,11 +102,13 @@ loongsuite-pilot restart
 loongsuite-pilot status
 ```
 
-如果 SLS 上传失败，失败批次会持久化到本地：
+如果 SLS 上传在重试后仍然失败，Pilot 会在本地保存有容量上限的诊断元数据：
 
 ```bash
-ls ~/.loongsuite-pilot/sls-failed-logs/
+ls ~/.loongsuite-pilot/logs/sls-failed-logs/
 ```
+
+这些 JSONL 记录只包含 endpoint、错误摘要、batch 条数和 batch 字节数估算，不包含失败 batch payload、消息正文、请求 headers 或凭证，因此不能用于重放失败数据。日志按本地日期和单文件 10MiB 轮转，目录总量限制为 50MiB，同时遵循 `retention.slsFailedDays`（默认 7 天）。
 
 调试 SLS 前，可以先通过本地 JSONL 确认采集本身是否正常：
 

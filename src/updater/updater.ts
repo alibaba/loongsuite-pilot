@@ -514,6 +514,13 @@ export class Updater {
         shell: process.platform === 'win32',
       });
 
+      logger.info('checking sqlite3 runtime');
+      await execFileAsync(process.execPath, ['-e', "require('sqlite3')"], {
+        cwd: stagingDir,
+        env: childEnv,
+        timeout: 30_000,
+      });
+
       const postinstallScript = path.join(stagingDir, 'scripts', 'postinstall.js');
       if (await fs.access(postinstallScript).then(() => true).catch(() => false)) {
         try {

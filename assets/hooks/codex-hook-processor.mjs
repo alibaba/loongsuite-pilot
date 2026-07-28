@@ -4,9 +4,11 @@
 /**
  * Codex Hook entry point.
  *
- * Codex rollout transcripts are the single telemetry source of truth. Stop is
- * retained only to wake the transcript tailer promptly; this process never
- * parses a transcript, accumulates Hook events, or writes telemetry JSONL.
+ * Codex rollout transcripts are the single telemetry source of truth. Early
+ * lifecycle hooks publish the effective CODEX_HOME so the transcript tailer
+ * can discover task-scoped session roots; Stop remains a best-effort wakeup.
+ * This process never parses a transcript, accumulates Hook events, or writes
+ * telemetry JSONL.
  */
 
 import fs from 'node:fs';
@@ -14,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { logHookError } from './shared/error-logger.mjs';
+import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
 import {
   collectResourceAttributesFromEnv,
 } from './shared/resource-context.mjs';
@@ -52,6 +55,14 @@ function safePathPart(value) {
 function writeWakeupMarker(input) {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
   if (!sessionId) return;
+  const configuredCodexHome = typeof process.env.CODEX_HOME === 'string'
+    ? process.env.CODEX_HOME.trim()
+    : '';
+  const codexHome = path.resolve(configuredCodexHome || path.join(os.homedir(), '.codex'));
+
+  // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
+  recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+
   const directory = path.join(pilotDataDir(), 'state', 'codex', 'transcript-wakeups');
   const marker = path.join(directory, `${safePathPart(sessionId)}.json`);
   const temporary = path.join(directory, `.${safePathPart(sessionId)}.${process.pid}.${crypto.randomUUID()}.tmp`);
@@ -61,13 +72,23 @@ function writeWakeupMarker(input) {
     ...(typeof input.transcript_path === 'string' && input.transcript_path
       ? { transcript_path: input.transcript_path }
       : {}),
+    codex_home: codexHome,
+    session_dir: path.join(codexHome, 'sessions'),
     ...RESOURCE_ATTRIBUTE_FIELDS,
     received_at: new Date().toISOString(),
   };
   try {
     fs.mkdirSync(directory, { recursive: true });
     fs.writeFileSync(temporary, JSON.stringify(payload), 'utf8');
-    fs.renameSync(temporary, marker);
+    try {
+      fs.renameSync(temporary, marker);
+    } catch (renameError) {
+      // Windows rename does not replace an existing destination. Stop may fire
+      // repeatedly for one session, so remove the stale marker and retry.
+      if (!['EEXIST', 'EPERM'].includes(renameError?.code)) throw renameError;
+      fs.rmSync(marker, { force: true });
+      fs.renameSync(temporary, marker);
+    }
   } catch (error) {
     logHookError({
       agentId: AGENT_ID,
@@ -89,7 +110,13 @@ function writeWakeupMarker(input) {
 function main() {
   const subcommand = (process.argv[2] || '').trim();
   try {
-    if (subcommand === 'stop') writeWakeupMarker(tryReadStdin());
+    if (
+      subcommand === 'session-start'
+      || subcommand === 'user-prompt-submit'
+      || subcommand === 'stop'
+    ) {
+      writeWakeupMarker(tryReadStdin());
+    }
   } finally {
     process.stdout.write('{}\n');
   }

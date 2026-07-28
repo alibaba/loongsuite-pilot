@@ -8,11 +8,11 @@ import {
 import type { AgentActivityEntry, SlsFlusherConfig, SlsEndpoint } from '../types/index.js';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
-import { appendLine, ensureDir } from '../utils/fs-utils.js';
 import { formatTime } from '../utils/time-utils.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { LOCAL_IP, buildUserAgent } from '../utils/network-utils.js';
 import * as path from 'node:path';
+import { SlsFailureLogWriter } from './sls-failure-log-writer.js';
 import {
   HttpError,
   postWebtracking,
@@ -34,6 +34,7 @@ interface QueuedLog {
   content: Record<string, string>;
   endpoint: SlsEndpoint;
   agentType?: string;
+  byteSize: number;
 }
 
 const logger = createLogger('SlsFlusher');
@@ -57,7 +58,7 @@ export class SlsFlusher extends BaseFlusher {
   private readonly config: SlsFlusherConfig;
   private readonly queue: Map<string, QueuedLog[]> = new Map();
   private flushTimer: ReturnType<typeof setInterval> | null = null;
-  private readonly failedLogDir: string;
+  private readonly failedLogWriter: SlsFailureLogWriter;
   private readonly akClients: Map<string, any> = new Map();
   private readonly endpointCounters: Map<string, EndpointCounter> = new Map();
   private alarmManager: AlarmManager | null = null;
@@ -68,7 +69,9 @@ export class SlsFlusher extends BaseFlusher {
   constructor(config: SlsFlusherConfig, dataDir: string) {
     super();
     this.config = config;
-    this.failedLogDir = path.join(dataDir, 'sls-failed-logs');
+    this.failedLogWriter = new SlsFailureLogWriter(
+      path.join(dataDir, 'logs', 'sls-failed-logs'),
+    );
     this.serviceName = config.serviceNamePrefix || '';
     this.userAgent = buildUserAgent(dataDir);
     for (const ep of config.endpoints) {
@@ -103,7 +106,7 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   async start(): Promise<void> {
-    await ensureDir(this.failedLogDir);
+    await this.failedLogWriter.start();
     this.flushTimer = setInterval(
       () => void this.flush(),
       this.config.flushIntervalMs || FLUSH_INTERVAL_MS,
@@ -168,27 +171,33 @@ export class SlsFlusher extends BaseFlusher {
     await Promise.all(tasks);
   }
 
-  private resolveServiceName(agentType?: string): string {
-    if (!this.serviceName) return '';
-    return agentType ? `${this.serviceName}-${agentType}` : this.serviceName;
+  /** Per-endpoint service name: managed endpoints may override the shared prefix. */
+  private effectiveServiceName(endpoint?: SlsEndpoint): string {
+    return endpoint?.serviceName || this.serviceName;
   }
 
-  private buildAkTags(agentType?: string): Record<string, string>[] {
+  private resolveServiceName(endpoint?: SlsEndpoint, agentType?: string): string {
+    const base = this.effectiveServiceName(endpoint);
+    if (!base) return '';
+    return agentType ? `${base}-${agentType}` : base;
+  }
+
+  private buildAkTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string>[] {
     const tags: Record<string, string>[] = [{ __hostname__: HOSTNAME }];
-    const sn = this.resolveServiceName(agentType);
+    const sn = this.resolveServiceName(endpoint, agentType);
     if (sn) tags.push({ __service_name__: sn });
     return tags;
   }
 
-  private buildWebtrackingTags(agentType?: string): Record<string, string> {
+  private buildWebtrackingTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string> {
     const tags: Record<string, string> = { __hostname__: HOSTNAME };
-    const sn = this.resolveServiceName(agentType);
+    const sn = this.resolveServiceName(endpoint, agentType);
     if (sn) tags['__service_name__'] = sn;
     return tags;
   }
 
   private warnIfMixedAgentTypes(logs: QueuedLog[]): void {
-    if (this.serviceName) {
+    if (this.effectiveServiceName(logs[0]?.endpoint)) {
       const types = new Set(logs.map(l => l.agentType));
       if (types.size > 1) logger.warn('mixed agentTypes in batch', { types: [...types] });
     }
@@ -205,7 +214,7 @@ export class SlsFlusher extends BaseFlusher {
       })),
       source: LOCAL_IP,
       topic: endpoint.kind,
-      tags: this.buildAkTags(agentType),
+      tags: this.buildAkTags(endpoint, agentType),
     };
 
     const client = this.getAkClient(endpoint);
@@ -254,7 +263,12 @@ export class SlsFlusher extends BaseFlusher {
         { endpoint_name: endpoint.name },
       );
     }
-    await this.persistFailedLogs(endpoint, logGroup, lastErr);
+    await this.persistFailedLogs(
+      endpoint,
+      logs.length,
+      logs.reduce((sum, log) => sum + log.byteSize, 0),
+      lastErr,
+    );
   }
 
   private async flushViaWebtracking(endpoint: SlsEndpoint, logs: QueuedLog[]): Promise<void> {
@@ -297,7 +311,7 @@ export class SlsFlusher extends BaseFlusher {
       __topic__: endpoint.kind ?? '',
       __source__: LOCAL_IP,
       __logs__: logs.map(l => l.content),
-      __tags__: this.buildWebtrackingTags(agentType),
+      __tags__: this.buildWebtrackingTags(endpoint, agentType),
     };
 
     const raw = JSON.stringify(body);
@@ -368,22 +382,25 @@ export class SlsFlusher extends BaseFlusher {
         { endpoint_name: endpoint.name },
       );
     }
-    await this.persistFailedLogs(endpoint, body, lastErr);
+    await this.persistFailedLogs(endpoint, logs.length, Buffer.byteLength(raw), lastErr);
   }
 
-  private async persistFailedLogs(endpoint: SlsEndpoint, logGroup: unknown, err: unknown): Promise<void> {
-    await ensureDir(this.failedLogDir);
-    const filePath = path.join(this.failedLogDir, `${endpoint.name}.jsonl`);
-    const line = JSON.stringify({
-      ts: Date.now(),
+  private async persistFailedLogs(
+    endpoint: SlsEndpoint,
+    batchCount: number,
+    batchBytes: number,
+    err: unknown,
+  ): Promise<void> {
+    await this.failedLogWriter.write({
       endpoint: endpoint.name,
+      mode: endpoint.mode,
       project: endpoint.project,
       logstore: endpoint.logstore,
       kind: endpoint.kind,
-      logGroup,
-      error: String(err),
+      batchCount,
+      batchBytes,
+      error: err,
     });
-    await appendLine(filePath, line);
   }
 
   async shutdown(): Promise<void> {
@@ -409,7 +426,7 @@ export class SlsFlusher extends BaseFlusher {
             logs: [{ timestamp: Math.floor(Date.now() / 1000), content }],
             source: LOCAL_IP,
             topic,
-            tags: this.buildAkTags(),
+            tags: this.buildAkTags(endpoint),
           });
         } else {
           await postWebtracking(
@@ -435,7 +452,7 @@ export class SlsFlusher extends BaseFlusher {
 
   private enqueue(endpoint: SlsEndpoint, content: Record<string, string>, agentType?: string): void {
     const base = `${endpoint.name}/${endpoint.project}/${endpoint.logstore}`;
-    const key = (this.serviceName && agentType)
+    const key = (this.effectiveServiceName(endpoint) && agentType)
       ? `${base}/${agentType}`
       : base;
     let bucket = this.queue.get(key);
@@ -443,12 +460,13 @@ export class SlsFlusher extends BaseFlusher {
       bucket = [];
       this.queue.set(key, bucket);
     }
-    bucket.push({ content, endpoint, agentType });
+    const byteSize = Buffer.byteLength(JSON.stringify(content));
+    bucket.push({ content, endpoint, agentType, byteSize });
 
     const counter = this.endpointCounters.get(endpoint.name);
     if (counter) {
       counter.inEntries++;
-      counter.inBytes += Buffer.byteLength(JSON.stringify(content));
+      counter.inBytes += byteSize;
       if (!counter.startTime) counter.startTime = formatTime(new Date());
     }
 

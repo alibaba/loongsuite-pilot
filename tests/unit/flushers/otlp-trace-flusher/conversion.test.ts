@@ -20,9 +20,8 @@ import { GlobalAttributesProvider } from '../../../../src/normalization/global-a
 function makeConfig() {
   return {
     enabled: true,
-    endpoint: 'http://localhost:4318',
+    endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318', headers: { 'x-key': 'val' } }],
     protocol: 'http/protobuf' as const,
-    headers: { 'x-key': 'val' },
     serviceName: 'test-pilot',
     resourceAttributes: { 'custom.attr': 'hello' },
   };
@@ -105,7 +104,7 @@ describe('OtlpTraceFlusher - conversion', () => {
       'agentteams.instance.id': 'example-instance',
     });
 
-    const resource = (flusher as any).buildResource('claude-code', attrs);
+    const resource = (flusher as any).buildResource('claude-code', 'test-pilot', attrs);
     expect(resource.attributes).toMatchObject({
       'custom.attr': 'hello',
       'agentteams.worker.name': 'local-worker',
@@ -115,15 +114,15 @@ describe('OtlpTraceFlusher - conversion', () => {
 
   it('evicts old per-resource convert states when resource attribute cardinality grows', () => {
     for (let i = 0; i < 70; i += 1) {
-      (flusher as any).getOrCreateConvertState('claude-code', {
+      (flusher as any).getOrCreateConvertState('claude-code', 'test-pilot', {
         'agentteams.worker.name': `worker-${i}`,
       });
     }
 
     const states = (flusher as any).agentConvertStates as Map<string, unknown>;
     expect(states.size).toBeLessThanOrEqual(64);
-    expect(states.has('claude-code|{"agentteams.worker.name":"worker-0"}')).toBe(false);
-    expect(states.has('claude-code|{"agentteams.worker.name":"worker-69"}')).toBe(true);
+    expect(states.has('claude-code|test-pilot|{"agentteams.worker.name":"worker-0"}')).toBe(false);
+    expect(states.has('claude-code|test-pilot|{"agentteams.worker.name":"worker-69"}')).toBe(true);
   });
 
   it('does not export when conversion produces zero spans', async () => {
@@ -206,6 +205,69 @@ describe('OtlpTraceFlusher - conversion', () => {
         unknown,
       ];
       expect(records[0]['team']).toBe('local');
+    });
+  });
+
+  describe('spanAttributePassthroughPrefixes', () => {
+    let p: OtlpTraceFlusher;
+
+    afterEach(async () => {
+      await p.shutdown();
+    });
+
+    it('passes through top-level record keys matching a configured prefix', async () => {
+      p = new OtlpTraceFlusher({ ...makeConfig(), spanAttributePassthroughPrefixes: ['multica.'] });
+
+      const entry = {
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': 'claude-code',
+        'gen_ai.turn.id': 'tp1',
+        'gen_ai.response.finish_reasons': ['stop'],
+        'multica.issue.id': 'AGE-992',
+        'multica.user.id': 'staff',
+        'other.key': 'ignored',
+      } as unknown as AgentActivityEntry;
+
+      await p.send(entry);
+
+      const opts = vi.mocked(convertEventLogToTrace).mock.calls.at(-1)![1] as { passthroughKeys?: string[] };
+      expect(opts.passthroughKeys).toEqual(
+        expect.arrayContaining(['multica.issue.id', 'multica.user.id', 'git.repo']),
+      );
+      expect(opts.passthroughKeys).not.toContain('other.key');
+    });
+
+    it('does not pass through any prefix key when none is configured', async () => {
+      p = new OtlpTraceFlusher(makeConfig());
+
+      const entry = {
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': 'claude-code',
+        'gen_ai.turn.id': 'tp2',
+        'gen_ai.response.finish_reasons': ['stop'],
+        'multica.issue.id': 'AGE-992',
+      } as unknown as AgentActivityEntry;
+
+      await p.send(entry);
+
+      const opts = vi.mocked(convertEventLogToTrace).mock.calls.at(-1)![1] as { passthroughKeys?: string[] };
+      expect(opts.passthroughKeys).not.toContain('multica.issue.id');
+    });
+
+    it('never passes through reserved keys even if a misconfigured prefix matches', async () => {
+      p = new OtlpTraceFlusher({ ...makeConfig(), spanAttributePassthroughPrefixes: ['gen_ai.'] });
+
+      const entry = {
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': 'claude-code',
+        'gen_ai.turn.id': 'tp3',
+        'gen_ai.response.finish_reasons': ['stop'],
+      } as unknown as AgentActivityEntry;
+
+      await p.send(entry);
+
+      const opts = vi.mocked(convertEventLogToTrace).mock.calls.at(-1)![1] as { passthroughKeys?: string[] };
+      expect(opts.passthroughKeys?.some((k) => k.startsWith('gen_ai.'))).toBe(false);
     });
   });
 });

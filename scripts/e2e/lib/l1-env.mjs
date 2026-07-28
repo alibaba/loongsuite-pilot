@@ -3,9 +3,8 @@
  * Everything else gets a hardcoded default applied at runtime, hiding the
  * legacy SSH-era flags from L1 users.
  *
- * Cursor is skipped by default (E2E_PROBE_SKIP_AGENTS=cursor) — its probe
- * is unreliable in headless containers and its data is not required for
- * JSONL coverage.
+ * L1 is the CLI/headless layer. Qoder CLI is reported as qoder-cli; qoder is
+ * still used as the deploy id because the CLI hook shares agents.d/qoder.json.
  */
 
 const COMMON_REQUIRED = [
@@ -51,9 +50,11 @@ const DEFAULTS = {
   E2E_CODEX_MODEL: 'qwen3.6-plus',
   E2E_PROPAGATE_SLS_INSTALL: '1',
   E2E_JSONL_VALIDATE: '1',
-  E2E_REQUIRED_JSONL_AGENTS: 'claude-code,codex,qoder',
+  E2E_REQUIRED_DEPLOY_AGENTS: 'claude-code,codex,qoder,cursor,qwen-code-cli,opencode',
+  // cursor-cli excluded: headless `cursor-agent -p` only fires sessionStart/afterAgentThought/sessionEnd
+  // (no beforeSubmitPrompt/afterAgentResponse/stop), so the hook assembler produces no JSONL turn record.
+  E2E_REQUIRED_JSONL_AGENTS: 'claude-code,codex,qoder-cli,qwen-code-cli,opencode',
   E2E_SLS_ENDPOINT: 'cn-hangzhou.log.aliyuncs.com',
-  E2E_PROBE_SKIP_AGENTS: 'cursor',
   E2E_EXPAND_MOCK_PORT_BASE: '19100',
 };
 

@@ -33,7 +33,17 @@ describe('QoderWorkTraceInput', () => {
     await fs.rm(tmpRoot, { recursive: true, force: true });
   });
 
-  function makeInput(opts: { interceptFile?: string } = {}) {
+  function makeInput(opts: { interceptFile?: string; initializeHistory?: boolean } = {}) {
+    if (opts.initializeHistory !== false) {
+      const current = stateStore.get('qoder-work-trace');
+      if (!current.lastFile) {
+        stateStore.set('qoder-work-trace', {
+          ...current,
+          lastFile: todayFileName(),
+          lastOffset: 0,
+        });
+      }
+    }
     return new QoderWorkTraceInput({
       stateStore: stateStore as any,
       logDir: hookLogDir,
@@ -159,7 +169,7 @@ describe('QoderWorkTraceInput', () => {
     await input.stop();
   });
 
-  it('on first run emits only the last historical turn and checkpoints the whole file', async () => {
+  it('baselines an existing history when the checkpoint is missing, then reads new appends', async () => {
     const hookFile = path.join(hookLogDir, todayFileName());
     const oldRequest = buildHookEntry({
       'event.id': 'old-request',
@@ -188,15 +198,14 @@ describe('QoderWorkTraceInput', () => {
       .join('\n') + '\n';
     await fs.writeFile(hookFile, initialText);
 
-    const input = makeInput();
+    const input = makeInput({ initializeHistory: false });
     const initialEntries = await startAndCollect(input);
 
-    expect(initialEntries.map(entry => entry['event.id'])).toEqual([
-      'latest-request',
-      'latest-response',
-    ]);
+    expect(initialEntries).toEqual([]);
     expect(stateStore.get('qoder-work-trace').lastOffset).toBe(Buffer.byteLength(initialText));
-    expect(stateStore.get('qoder-work-trace').extra).toMatchObject({ qoderWorkTurnCount: 2 });
+    expect(stateStore.get('qoder-work-trace').extra).toMatchObject({
+      hookHistoryInitialized: true,
+    });
 
     const nextResponse = buildHookEntry({
       'event.id': 'next-response',
@@ -211,24 +220,65 @@ describe('QoderWorkTraceInput', () => {
     expect(nextEntries.map(entry => entry['event.id'])).toEqual(['next-response']);
   });
 
-  it('on first run emits the only turn', async () => {
+  it('initializes offset zero before a lazily-created history and consumes its first turn', async () => {
     const hookFile = path.join(hookLogDir, todayFileName());
     const onlyEntry = buildHookEntry({
       'event.id': 'only-response',
       'gen_ai.turn.id': 'turn-only',
       'gen_ai.step.id': 'turn-only:s1',
     });
-    await fs.writeFile(hookFile, JSON.stringify(onlyEntry) + '\n');
+    const input = makeInput({ initializeHistory: false });
+    const initialEntries = await startAndCollect(input);
+    expect(initialEntries).toEqual([]);
+    expect(stateStore.get('qoder-work-trace')).toMatchObject({
+      lastFile: todayFileName(),
+      lastOffset: 0,
+      extra: { hookHistoryInitialized: true },
+    });
 
-    const input = makeInput();
-    const entries = await startAndCollect(input);
+    await fs.writeFile(hookFile, JSON.stringify(onlyEntry) + '\n');
+    const entries = await triggerCycle(input);
     await input.stop();
 
     expect(entries.map(entry => entry['event.id'])).toEqual(['only-response']);
-    expect(stateStore.get('qoder-work-trace').extra).toMatchObject({ qoderWorkTurnCount: 1 });
   });
 
-  it('streams a large first-run history and exports only its last turn', async () => {
+  it('reports every bootstrap session written before the first poll after empty startup', async () => {
+    const hookFile = path.join(hookLogDir, todayFileName());
+    const bootstrap = (id: string, turnId: string, batchId: string) => buildHookEntry({
+      'event.id': id,
+      'gen_ai.turn.id': turnId,
+      'gen_ai.step.id': `${turnId}:s1`,
+      'agent.transcript.cursor_mode': 'bootstrap',
+      'agent.transcript.cursor_batch_id': batchId,
+    } as Partial<AgentActivityEntry>);
+    const records = [
+      bootstrap('session-a-old', 'session-a-turn-old', 'session-a-bootstrap'),
+      bootstrap('session-a-latest', 'session-a-turn-latest', 'session-a-bootstrap'),
+      bootstrap('session-b-old', 'session-b-turn-old', 'session-b-bootstrap'),
+      bootstrap('session-b-latest', 'session-b-turn-latest', 'session-b-bootstrap'),
+      buildHookEntry({
+        'event.id': 'normal-incremental',
+        'gen_ai.turn.id': 'normal-turn',
+        'gen_ai.step.id': 'normal-turn:s1',
+        'agent.transcript.cursor_mode': 'incremental',
+        'agent.transcript.cursor_batch_id': 'normal-batch',
+      } as Partial<AgentActivityEntry>),
+    ];
+    const input = makeInput({ initializeHistory: false });
+    expect(await startAndCollect(input)).toEqual([]);
+    await fs.writeFile(hookFile, records.map(record => JSON.stringify(record)).join('\n') + '\n');
+    const entries = await triggerCycle(input);
+    await input.stop();
+
+    expect(entries.map(entry => entry['event.id'])).toEqual([
+      'session-a-latest',
+      'session-b-latest',
+      'normal-incremental',
+    ]);
+  });
+
+  it('baselines a large existing history without loading or replaying it', async () => {
     const hookFile = path.join(hookLogDir, todayFileName());
     const oldEntry = {
       ...buildHookEntry({ 'event.id': 'large-old', 'gen_ai.turn.id': 'turn-old' }),
@@ -238,11 +288,11 @@ describe('QoderWorkTraceInput', () => {
     const text = `${JSON.stringify(oldEntry)}\n${JSON.stringify(latestEntry)}\n`;
     await fs.writeFile(hookFile, text);
 
-    const input = makeInput();
+    const input = makeInput({ initializeHistory: false });
     const entries = await startAndCollect(input);
     await input.stop();
 
-    expect(entries.map(entry => entry['event.id'])).toEqual(['large-latest']);
+    expect(entries).toEqual([]);
     expect(stateStore.get('qoder-work-trace').lastOffset).toBe(Buffer.byteLength(text));
   });
 
@@ -321,8 +371,6 @@ describe('QoderWorkTraceInput', () => {
     const e2 = buildHookEntry({ 'event.id': 'e2', 'gen_ai.turn.id': 'turn-A' });
     const e3 = buildHookEntry({ 'event.id': 'e3', 'gen_ai.turn.id': 'turn-B' });
     await fs.writeFile(hookFile, [JSON.stringify(e1), JSON.stringify(e2), JSON.stringify(e3)].join('\n') + '\n');
-    stateStore.set('qoder-work-trace', { extra: { qoderWorkTurnCount: 1 } });
-
     const input = makeInput();
     const entries = await startAndCollect(input);
     await input.stop();

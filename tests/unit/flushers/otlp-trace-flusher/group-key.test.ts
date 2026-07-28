@@ -5,9 +5,8 @@ import type { AgentActivityEntry } from '../../../../src/types/index.js';
 function makeConfig() {
   return {
     enabled: true,
-    endpoint: 'http://localhost:4318/v1/traces',
+    endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318/v1/traces', headers: { 'x-test': '1' } }],
     protocol: 'http/protobuf' as const,
-    headers: { 'x-test': '1' },
     serviceName: 'test-pilot',
   };
 }
