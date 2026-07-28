@@ -277,9 +277,4 @@ export interface InputState {
 
 export type AgentStopReason = 'unavailable' | 'disabled' | 'shutdown' | 'unexpected';
 
-export interface AgentStoppedPayload {
-  id: string;
-  reason: AgentStopReason;
-}
-
 export type EntryState = 'idle' | 'starting' | 'running' | 'stopping';

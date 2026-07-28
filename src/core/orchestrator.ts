@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { ClientType } from '../types/index.js';
-import type { AnalyticsConfig, AgentDetectionEntry } from '../types/index.js';
+import type { AnalyticsConfig, AgentDetectionEntry, AgentStopReason } from '../types/index.js';
 import { AgentControlManager } from './agent-control-manager.js';
 import { AgentDiscoveryService } from './agent-discovery-service.js';
 import { InputManager } from './input-manager.js';
@@ -217,7 +217,7 @@ export class Orchestrator extends EventEmitter {
     this.agentDiscoveryService.on('agent:started', (id: string) => {
       logger.info('agent detected and started', { id });
     });
-    this.agentDiscoveryService.on('agent:stopped', (id: string, reason: string) => {
+    this.agentDiscoveryService.on('agent:stopped', (id: string, reason: AgentStopReason) => {
       if (reason === 'unexpected') {
         logger.warn('agent stopped unexpectedly', { id });
         this.alarmManager.record(

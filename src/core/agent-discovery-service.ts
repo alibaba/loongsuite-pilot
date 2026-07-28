@@ -133,7 +133,7 @@ export class AgentDiscoveryService extends EventEmitter {
       }
     } catch (err) {
       logger.error('processEntry failed', { id: entry.id, error: String(err) });
-      const wasRunning = rt.state === 'running' || rt.state === 'starting';
+      const wasRunning = rt.state === 'running';
       rt.state = 'idle';
       if (wasRunning) {
         this.emit('agent:stopped', rt.entry.id, 'unexpected' satisfies AgentStopReason);
