@@ -496,8 +496,8 @@ export class HookWatchdog {
    * Exposed as a pure, static seam so tests can render the exact block for any
    * path without touching HOME/fs (see hook-watchdog-intercept-shell.test.ts).
    *
-   * `signature` is a substring unique to the CURRENT block shape (the guard
-   * line). check()/repair() use it — not just `marker` — to detect and migrate
+   * `signature` is a substring unique to the CURRENT block shape. check()/
+   * repair() use it — not just `marker` — to detect and migrate
    * an older block that shares the same marker (e.g. the released bare
    * `<cli>() {...}` form). Keep it byte-identical to the installer's grep.
    * `endMarker` bounds the block for removal/migration.
@@ -517,13 +517,13 @@ export class HookWatchdog {
         agentId: 'qoder',
         marker: 'loongsuite-pilot BEGIN qodercli-intercept',
         endMarker: 'loongsuite-pilot END qodercli-intercept',
-        signature: 'if ! alias qodercli >/dev/null 2>&1',
-        scriptName: 'qodercli-token-intercept.mjs',
+        signature: 'qodercli-runtime-wrapper.sh',
+        scriptName: 'qodercli-runtime-wrapper.sh',
         blockFn: (p) => [
           '',
           '# loongsuite-pilot BEGIN qodercli-intercept',
           'if ! alias qodercli >/dev/null 2>&1 && ! typeset -f qodercli >/dev/null 2>&1; then',
-          `  eval 'qodercli() { BUN_OPTIONS="--preload=${p}" command qodercli "$@"; }'`,
+          `  eval 'qodercli() { "${p}" "$@"; }'`,
           'fi',
           '# loongsuite-pilot END qodercli-intercept',
         ].join('\n'),

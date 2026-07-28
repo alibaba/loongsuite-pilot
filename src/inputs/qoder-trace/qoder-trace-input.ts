@@ -87,7 +87,12 @@ export class QoderTraceInput extends BaseInput {
       if (variant === 'qoder-cli' && sessionId) {
         interceptData ??= await readInterceptData();
         const segments = await readSegmentTokensForSession(sessionId);
-        enrichCliTurn(turnEntries, segments, interceptData.systemPrompt?.content);
+        enrichCliTurn(
+          turnEntries,
+          segments,
+          interceptData.systemPrompt?.content,
+          interceptData.tokens,
+        );
       } else if ((variant === 'qoder' || variant === 'qoder-idea') && sessionId) {
         const sessionEntries = ideSessionGroups.get(sessionId) ?? [];
         sessionEntries.push(...turnEntries);

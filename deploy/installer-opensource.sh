@@ -860,7 +860,8 @@ inject_qodercli_token_intercept() {
     if ! command -v qodercli >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/qodercli-token-intercept.mjs"
-    if [ ! -f "$intercept_script" ]; then return 0; fi
+    local runtime_wrapper="$DATA_DIR/hooks/qodercli-runtime-wrapper.sh"
+    if [ ! -f "$intercept_script" ] || [ ! -f "$runtime_wrapper" ]; then return 0; fi
 
     msg "==> 配置 qodercli token 采集..." "==> Configuring qodercli token intercept..."
 
@@ -877,7 +878,7 @@ inject_qodercli_token_intercept() {
         # so the new guarded block below replaces it (the old bare block
         # parse-errors under a user alias, which is exactly what we're fixing).
         if grep -q 'loongsuite-pilot BEGIN qodercli-intercept' "$file" 2>/dev/null; then
-            if grep -qF 'if ! alias qodercli >/dev/null 2>&1' "$file"; then return 0; fi
+            if grep -qF 'qodercli-runtime-wrapper.sh' "$file"; then return 0; fi
             _sed_inplace '/# loongsuite-pilot BEGIN qodercli-intercept/,/# loongsuite-pilot END qodercli-intercept/d' "$file"
         fi
         [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
@@ -893,7 +894,7 @@ inject_qodercli_token_intercept() {
 
 # loongsuite-pilot BEGIN qodercli-intercept
 if ! alias qodercli >/dev/null 2>&1 && ! typeset -f qodercli >/dev/null 2>&1; then
-  eval 'qodercli() { BUN_OPTIONS="--preload=$DATA_DIR/hooks/qodercli-token-intercept.mjs" command qodercli "\$@"; }'
+  eval 'qodercli() { "$DATA_DIR/hooks/qodercli-runtime-wrapper.sh" "\$@"; }'
 fi
 # loongsuite-pilot END qodercli-intercept
 INTERCEPTBLOCK
@@ -915,8 +916,8 @@ INTERCEPTBLOCK
         'loongsuite-pilot END qodercli-intercept'; then
         msg "    ⚠️  检测到你已自定义 qodercli(alias/function)，为避免覆盖，采集未启用。" \
             "    ⚠️  Detected your own 'qodercli' (alias/function); collection is disabled to avoid clobbering it."
-        msg "        如需启用采集，请在你的 qodercli 定义中加入： BUN_OPTIONS=\"--preload=$DATA_DIR/hooks/qodercli-token-intercept.mjs\"" \
-            "        To enable collection, add to your qodercli definition: BUN_OPTIONS=\"--preload=$DATA_DIR/hooks/qodercli-token-intercept.mjs\""
+        msg "        如需启用采集，请让你的定义调用： $runtime_wrapper" \
+            "        To enable collection, have your definition call: $runtime_wrapper"
     fi
     echo ""
 }
