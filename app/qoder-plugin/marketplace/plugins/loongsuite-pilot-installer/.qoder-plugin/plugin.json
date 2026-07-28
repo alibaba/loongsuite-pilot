@@ -1,0 +1,8 @@
+{
+  "name": "loongsuite-pilot-installer",
+  "version": "0.1.0",
+  "description": "安装本插件后自动检测并安装 loongsuite-pilot（含 node>=22 环境代装）",
+  "author": { "name": "loongsuite" },
+  "license": "MIT",
+  "keywords": ["loongsuite-pilot", "installer", "observability"]
+}

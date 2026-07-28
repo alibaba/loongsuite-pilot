@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "async": true,
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${QODER_PLUGIN_ROOT}\"/scripts/ensure-pilot.sh",
+            "timeout": 900
+          }
+        ]
+      }
+    ]
+  }
+}

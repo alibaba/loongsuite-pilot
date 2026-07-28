@@ -1,0 +1,16 @@
+{
+  "name": "loongsuite-test-sensen",
+  "owner": { "name": "sensen" },
+  "metadata": {
+    "description": "LoongSuite Pilot 测试插件市场",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "loongsuite-pilot-installer",
+      "source": "./plugins/loongsuite-pilot-installer",
+      "description": "安装本插件后自动检测并安装 loongsuite-pilot（含 node>=22 环境代装）",
+      "version": "0.1.0"
+    }
+  ]
+}
