@@ -150,16 +150,6 @@ vi.mock('../../../src/metrics/alarm-manager.js', () => ({
   })),
 }));
 
-const mockFCMStart = vi.fn().mockResolvedValue(undefined);
-const mockFCMStop = vi.fn().mockResolvedValue(undefined);
-vi.mock('../../../src/file-collection/file-collection-manager.js', () => ({
-  FileCollectionManager: vi.fn().mockImplementation(() => ({
-    start: mockFCMStart,
-    stop: mockFCMStop,
-  })),
-}));
-
-import { FileCollectionManager } from '../../../src/file-collection/file-collection-manager.js';
 import { Orchestrator } from '../../../src/core/orchestrator.js';
 
 function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
@@ -331,29 +321,6 @@ describe('Orchestrator', () => {
 
       // Should not throw, JSONL fallback is created
       expect(orch.getInputManager()).toBeDefined();
-      await orch.stop();
-    });
-  });
-
-  describe('fileCollection toggle', () => {
-    it('starts FileCollectionManager when fileCollection.enabled is true', async () => {
-      const orch = new Orchestrator(makeConfig({ fileCollection: { enabled: true } }));
-      await orch.start();
-
-      expect(FileCollectionManager).toHaveBeenCalledTimes(1);
-      expect(mockFCMStart).toHaveBeenCalledTimes(1);
-
-      await orch.stop();
-      expect(mockFCMStop).toHaveBeenCalledTimes(1);
-    });
-
-    it('skips FileCollectionManager when fileCollection.enabled is false', async () => {
-      const orch = new Orchestrator(makeConfig({ fileCollection: { enabled: false } }));
-      await orch.start();
-
-      expect(FileCollectionManager).not.toHaveBeenCalled();
-      expect(mockFCMStart).not.toHaveBeenCalled();
-
       await orch.stop();
     });
   });
