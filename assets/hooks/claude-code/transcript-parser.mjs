@@ -23,8 +23,11 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 
+import { logHookError } from '../shared/error-logger.mjs';
+
 export const MAX_TRANSCRIPT_BYTES = 50 * 1024 * 1024; // 50 MB safety limit
 const MISSING_PROMPT_ID = '__missing_prompt_id__';
+const PARSER_AGENT_ID = 'claude-code';
 
 // Claude Code 显式 /skill 调用后,会以 isMeta user 记录注入 SKILL.md 内容,
 // 首行形如 "Base directory for this skill: <绝对路径>"。根 SKILL.md 的路径
@@ -161,6 +164,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
   const toolResultContents = new Map(); // tool_use_id → result content
   const toolResultErrors = new Map(); // tool_use_id → boolean (is_error)
   const skillRootByToolId = new Map(); // Skill tool_use_id → 根 SKILL.md 路径(来自 isMeta 注入)
+  const skillToolUseIdSet = new Set(); // #1: 本次 window 内 name==='Skill' 的 tool_use id(结构信号)
   let currentPromptId = null; // 当前 turn 的 promptId(从 user record 提取)
 
   for (const line of content.split('\n')) {
@@ -213,6 +217,10 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
           if (block.type === 'tool_use' && block.id && recordTs) {
             group.toolUseTimestamps.set(block.id, recordTs);
           }
+          // #1: 顺带收集 Skill tool_use id,供 isMeta 注入做「结构确认」(与前缀解耦)。
+          if (block.type === 'tool_use' && block.name === 'Skill' && block.id) {
+            skillToolUseIdSet.add(block.id);
+          }
         }
       }
       if (msg.usage) group.usage = msg.usage;
@@ -232,9 +240,23 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
 
       // 显式 /skill 注入: 捕获 sourceToolUseID → 根 SKILL.md 路径。
       // 仅额外捕获此映射,不改变 isMeta 其余记录被丢弃的行为。
+      // #1: 路径提取仍「前缀优先」不变(跨 parse-window 边界时 Skill 块可能已在上一
+      // window 消费,此处仍能靠前缀拿到路径,绝不比现状更窄)。
       if (isMeta && record.sourceToolUseID) {
         const rootPath = extractSkillRootPath(extractTextContent(userContent));
-        if (rootPath) skillRootByToolId.set(record.sourceToolUseID, rootPath);
+        if (rootPath) {
+          skillRootByToolId.set(record.sourceToolUseID, rootPath);
+        } else if (skillToolUseIdSet.has(record.sourceToolUseID)) {
+          // #2 漂移可观测: 仅当「结构确认为 skill 注入(sourceToolUseID 指向本 window
+          // 的 Skill tool_use)但路径提取失败」时打点——把前缀漂移导致的静默回归变成
+          // 可检测信号。结构 gate 确保不对「非 skill 的 isMeta+sourceToolUseID」误报。
+          logHookError({
+            agentId: PARSER_AGENT_ID,
+            stage: 'skill_root_parse',
+            errorType: 'skill_root_parse_miss',
+            errorMessage: `sourceToolUseID=${record.sourceToolUseID} resolves to a Skill tool_use but SKILL.md root path extraction failed (prefix mismatch)`,
+          });
+        }
       }
 
       // 提取 tool_result 的时间戳和内容

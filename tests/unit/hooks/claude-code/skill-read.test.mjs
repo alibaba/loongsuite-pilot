@@ -144,6 +144,28 @@ function readJsonlRecords() {
   return records;
 }
 
+function readErrorRecords() {
+  const dir = path.join(DATA_DIR, 'logs', 'claude-code', 'errors');
+  if (!fs.existsSync(dir)) return [];
+  const records = [];
+  for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.jsonl'))) {
+    for (const line of fs.readFileSync(path.join(dir, f), 'utf-8').split('\n')) {
+      const t = line.trim();
+      if (t) records.push(JSON.parse(t));
+    }
+  }
+  return records;
+}
+
+function parseMissCount(records) {
+  return records.filter((r) => r['error.type'] === 'skill_root_parse_miss').length;
+}
+
+// isMeta 注入,但 text 为任意内容(用于模拟前缀漂移/非 skill 注入)。
+function rawMetaInjection(sourceToolUseID, text, ts) {
+  return { type: 'user', isMeta: true, sourceToolUseID, timestamp: ts, message: { role: 'user', content: text } };
+}
+
 function toolCalls(records, name) {
   return records.filter((r) => r['event.name'] === 'tool.call' && r['gen_ai.tool.name'] === name);
 }
@@ -214,6 +236,72 @@ describe('transcript-parser: skillRootByToolId 捕获', () => {
     ]);
     const { turns } = parseClaudeTranscript(file, 0);
     expect(turns[0].skillRootByToolId.size).toBe(0);
+  });
+});
+
+// ─── Step C 加固 #1(识别与解析解耦)+ #2(漂移可观测 skill_root_parse_miss) ───
+
+describe('transcript-parser: skill 识别加固 + 漂移可观测', () => {
+  // 在临时 DATA_DIR 下直调 parser(logHookError 走 LOONGSUITE_PILOT_DATA_DIR)。
+  function withDataDir(fn) {
+    const prev = process.env.LOONGSUITE_PILOT_DATA_DIR;
+    process.env.LOONGSUITE_PILOT_DATA_DIR = DATA_DIR;
+    try { return fn(); } finally {
+      if (prev === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
+      else process.env.LOONGSUITE_PILOT_DATA_DIR = prev;
+    }
+  }
+
+  test('跨 parse-window: Skill 块在上一 window 已消费、isMeta 在本 window → 仍靠前缀捕获路径,不漏配、不误报 miss', () => {
+    const file = writeTranscript('win', [
+      userPrompt('p1', '/e2e-build-push', '2026-07-27T02:00:00.000Z'),
+      skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-27T02:00:01.000Z', 'msg_skill'),
+      skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-27T02:00:02.000Z'),
+    ]);
+    const w1 = withDataDir(() => parseClaudeTranscript(file, 0));
+    expect(w1.turns.length).toBeGreaterThan(0);
+
+    // window2: Skill 块已越过 offset,本 window 的 assistantGroups 无 Skill tool_use
+    appendTranscript(file, [
+      skillMetaInjection('toolu_skill', BASE_DIR, '2026-07-27T02:00:03.000Z'),
+      finalAnswer('msg_final', 'done', '2026-07-27T02:00:04.000Z'),
+    ]);
+    const w2 = withDataDir(() => parseClaudeTranscript(file, w1.nextOffset));
+    // 前缀优先仍生效 → 路径被捕获(行为不比现状更窄)
+    expect(w2.turns[0].skillRootByToolId.get('toolu_skill')).toBe(ROOT_SKILL);
+    // 结构未确认(Skill 块不在本 window)但前缀命中 → 不是 miss
+    expect(parseMissCount(readErrorRecords())).toBe(0);
+  });
+
+  test('非 skill 的 isMeta+sourceToolUseID(指向非 Skill 工具、无前缀)→ 不误报 skill_root_parse_miss', () => {
+    const file = writeTranscript('nonskill', [
+      userPrompt('p1', 'read a file', '2026-07-27T02:00:00.000Z'),
+      readToolUse('toolu_read', '/abs/workdir/foo.txt', '2026-07-27T02:00:01.000Z', 'msg_r'),
+      readToolResult('toolu_read', '2026-07-27T02:00:01.500Z'),
+      rawMetaInjection('toolu_read', 'System reminder: unrelated injected content, no skill prefix', '2026-07-27T02:00:02.000Z'),
+      finalAnswer('msg_final', 'done', '2026-07-27T02:00:03.000Z'),
+    ]);
+    const { turns } = withDataDir(() => parseClaudeTranscript(file, 0));
+    expect(turns[0].skillRootByToolId.size).toBe(0);
+    expect(parseMissCount(readErrorRecords())).toBe(0);
+  });
+
+  test('结构确认为 skill 注入(sourceToolUseID→Skill)但前缀失配 → 正确计数 skill_root_parse_miss', () => {
+    const file = writeTranscript('drift', [
+      userPrompt('p1', '/e2e-build-push', '2026-07-27T02:00:00.000Z'),
+      skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-27T02:00:01.000Z', 'msg_skill'),
+      skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-27T02:00:02.000Z'),
+      // 前缀漂移: text 不以 "Base directory for this skill:" 开头
+      rawMetaInjection('toolu_skill', `Skill base dir (v-next wording): ${BASE_DIR}\n\n# Title`, '2026-07-27T02:00:02.500Z'),
+      finalAnswer('msg_final', 'done', '2026-07-27T02:00:03.000Z'),
+    ]);
+    const { turns } = withDataDir(() => parseClaudeTranscript(file, 0));
+    // 路径提取失败 → 不进 map(合成侧维持现状,不改变行为)
+    expect(turns[0].skillRootByToolId.size).toBe(0);
+    // 结构确认 → 打点 miss
+    const errs = readErrorRecords();
+    expect(parseMissCount(errs)).toBe(1);
+    expect(errs.find((r) => r['error.type'] === 'skill_root_parse_miss').stage).toBe('skill_root_parse');
   });
 });
 
