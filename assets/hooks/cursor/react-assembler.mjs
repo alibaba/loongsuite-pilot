@@ -301,6 +301,31 @@ function buildParentSteps(events, ctx) {
     return `${ev.tool_use_id || ''}\u0000${ev.tool_name || ''}`;
   }
 
+  function parseSyncToolKey(key) {
+    const separatorIndex = key.indexOf('\u0000');
+    return {
+      toolUseId: separatorIndex >= 0 ? key.slice(0, separatorIndex) : key,
+      toolName: separatorIndex >= 0 ? key.slice(separatorIndex + 1) : '',
+    };
+  }
+
+  function drainActiveSyncTool(key) {
+    const count = activeSyncToolCalls.get(key) || 0;
+    if (count <= 1) activeSyncToolCalls.delete(key);
+    else activeSyncToolCalls.set(key, count - 1);
+  }
+
+  function syncToolCompletionMatches(key, ev) {
+    const active = parseSyncToolKey(key);
+    const resultToolUseId = ev.tool_use_id || '';
+    const resultToolName = ev.tool_name || '';
+    if (active.toolName !== resultToolName) return false;
+    if (active.toolUseId && resultToolUseId) {
+      return active.toolUseId === resultToolUseId;
+    }
+    return true;
+  }
+
   function markSyncToolStarted(ev) {
     if (isSubagentTool(ev.tool_name)) return;
     const key = syncToolKey(ev);
@@ -310,15 +335,52 @@ function buildParentSteps(events, ctx) {
   function markSyncToolFinished(ev) {
     if (isSubagentTool(ev.tool_name)) return;
     const key = syncToolKey(ev);
-    const count = activeSyncToolCalls.get(key) || 0;
-    if (count <= 1) activeSyncToolCalls.delete(key);
-    else activeSyncToolCalls.set(key, count - 1);
+    if (activeSyncToolCalls.has(key)) {
+      drainActiveSyncTool(key);
+      return;
+    }
+
+    // Cursor occasionally omits tool_use_id on one side of the hook pair.
+    // Fall back to tool name only when it identifies exactly one active call.
+    const fallbackKeys = [...activeSyncToolCalls.keys()]
+      .filter(activeKey => syncToolCompletionMatches(activeKey, ev));
+    if (fallbackKeys.length === 1) {
+      drainActiveSyncTool(fallbackKeys[0]);
+    }
   }
 
-  function canOpenStepAfterTools(ev) {
+  function recoverLeakedSyncTools(eventIndex) {
+    let recovered = false;
+    for (const [key, activeCount] of activeSyncToolCalls) {
+      let remainingCompletions = 0;
+      for (let i = eventIndex + 1; i < stepEvents.length; i++) {
+        const futureEvent = stepEvents[i];
+        if (
+          (futureEvent.hook_event === 'postToolUse' ||
+            futureEvent.hook_event === 'postToolUseFailure') &&
+          !isSubagentTool(futureEvent.tool_name) &&
+          syncToolCompletionMatches(key, futureEvent)
+        ) {
+          remainingCompletions++;
+        }
+      }
+
+      if (remainingCompletions === 0) {
+        activeSyncToolCalls.delete(key);
+        recovered = true;
+      } else if (remainingCompletions < activeCount) {
+        activeSyncToolCalls.set(key, remainingCompletions);
+        recovered = true;
+      }
+    }
+    return recovered;
+  }
+
+  function canOpenStepAfterTools(ev, eventIndex) {
     if (!currentStepHasTools) return false;
+    const recoveredLeakedTool = recoverLeakedSyncTools(eventIndex);
     if (activeSyncToolCalls.size > 0) return false;
-    if (previousToolResults.length === 0) return false;
+    if (previousToolResults.length === 0) return recoveredLeakedTool;
 
     const latestResultEndTs = latestToolResultEndTs(previousToolResults);
     return latestResultEndTs == null || tsMs(ev) >= timestampMs(latestResultEndTs);
@@ -435,10 +497,11 @@ function buildParentSteps(events, ctx) {
     currentStepHasTools = true;
   }
 
-  for (const ev of stepEvents) {
+  for (let eventIndex = 0; eventIndex < stepEvents.length; eventIndex++) {
+    const ev = stepEvents[eventIndex];
 
     if (ev.hook_event === 'afterAgentThought') {
-      if (currentStepId === null || canOpenStepAfterTools(ev)) {
+      if (currentStepId === null || canOpenStepAfterTools(ev, eventIndex)) {
         openNewStep(ev, stepRound === 0, ctx.userPrompt);
         currentLlmResponse = buildLlmResponse(ev, ctx, currentStepId, 'reasoning');
         if (flushPendingTools(currentStepId)) currentStepHasTools = true;
@@ -459,7 +522,7 @@ function buildParentSteps(events, ctx) {
         openImplicitStep(reqTs, reqTsSource);
       }
 
-      if (currentStepId !== null && canOpenStepAfterTools(ev)) {
+      if (currentStepId !== null && canOpenStepAfterTools(ev, eventIndex)) {
         openNewStep(ev, false, null);
         currentLlmResponse = buildLlmResponseWithToken(ev, ctx, currentStepId, 'text');
         if (flushPendingTools(currentStepId)) currentStepHasTools = true;

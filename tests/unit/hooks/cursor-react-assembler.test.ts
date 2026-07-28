@@ -386,6 +386,240 @@ describe('Cursor react assembler', () => {
     expect(secondRequest?.['gen_ai.input.messages_delta']?.[0]?.parts).toHaveLength(1);
   });
 
+  it('recovers the next step when a synchronous tool completion hook is missing', () => {
+    const { records } = assembleTurn([
+      {
+        _journal_ts: iso(0),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        model: 'gpt-5.4',
+        prompt: 'inspect and continue',
+      },
+      {
+        _journal_ts: iso(100),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        model: 'gpt-5.4',
+        text: 'I will inspect the file.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(200),
+        hook_event: 'preToolUse',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        tool_name: 'Read',
+        tool_use_id: 'call-result-never-arrives',
+        tool_input: { path: 'missing.ts' },
+      },
+      {
+        _journal_ts: iso(400),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        model: 'gpt-5.4',
+        text: 'I can continue despite the missing completion hook.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(500),
+        hook_event: 'preToolUse',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        tool_name: 'Shell',
+        tool_use_id: 'call-normal-shell',
+        tool_input: { command: 'echo ok' },
+      },
+      {
+        _journal_ts: iso(600),
+        hook_event: 'postToolUse',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        tool_name: 'Shell',
+        tool_use_id: 'call-normal-shell',
+        tool_output: 'ok',
+      },
+      {
+        _journal_ts: iso(800),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        model: 'gpt-5.4',
+        text: 'The normal tool completed.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(900),
+        hook_event: 'afterAgentResponse',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        model: 'gpt-5.4',
+        text: 'done',
+      },
+      {
+        _journal_ts: iso(1000),
+        hook_event: 'stop',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        status: 'completed',
+      },
+    ], { stopConversationId: 'conv-missing-tool-result' });
+
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+    const responses = records.filter(record => record['event.name'] === 'llm.response');
+    const secondRequest = requests.find(record =>
+      record['gen_ai.step.id'] === 'turn-missing-tool-result:s2'
+    );
+    const thirdRequest = requests.find(record =>
+      record['gen_ai.step.id'] === 'turn-missing-tool-result:s3'
+    );
+
+    expect(requests).toHaveLength(3);
+    expect(responses).toHaveLength(3);
+    expect(secondRequest?.['gen_ai.input.messages_delta']).toBeUndefined();
+    expect(thirdRequest?.['gen_ai.input.messages_delta']?.[0]?.parts).toEqual([
+      {
+        type: 'tool_call_response',
+        id: 'call-normal-shell',
+        response: 'ok',
+      },
+    ]);
+  });
+
+  it('drains active synchronous tools on postToolUseFailure', () => {
+    const { records } = assembleTurn([
+      {
+        _journal_ts: iso(0),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-tool-failure',
+        generation_id: 'turn-tool-failure',
+        model: 'gpt-5.4',
+        prompt: 'read a missing file',
+      },
+      {
+        _journal_ts: iso(100),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-tool-failure',
+        generation_id: 'turn-tool-failure',
+        model: 'gpt-5.4',
+        text: 'I will read it.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(200),
+        hook_event: 'preToolUse',
+        conversation_id: 'conv-tool-failure',
+        generation_id: 'turn-tool-failure',
+        tool_name: 'Read',
+        tool_use_id: 'call-failing-read',
+        tool_input: { path: 'missing.ts' },
+      },
+      {
+        _journal_ts: iso(300),
+        hook_event: 'postToolUseFailure',
+        conversation_id: 'conv-tool-failure',
+        generation_id: 'turn-tool-failure',
+        tool_name: 'Read',
+        tool_use_id: 'call-failing-read',
+        error_message: 'File not found',
+      },
+      {
+        _journal_ts: iso(500),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-tool-failure',
+        generation_id: 'turn-tool-failure',
+        model: 'gpt-5.4',
+        text: 'The read failed, so I will recover.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(600),
+        hook_event: 'afterAgentResponse',
+        conversation_id: 'conv-tool-failure',
+        generation_id: 'turn-tool-failure',
+        model: 'gpt-5.4',
+        text: 'done',
+      },
+      {
+        _journal_ts: iso(700),
+        hook_event: 'stop',
+        conversation_id: 'conv-tool-failure',
+        generation_id: 'turn-tool-failure',
+        status: 'completed',
+      },
+    ], { stopConversationId: 'conv-tool-failure' });
+
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.['gen_ai.input.messages_delta']?.[0]?.parts).toEqual([
+      {
+        type: 'tool_call_response',
+        id: 'call-failing-read',
+        response: 'File not found',
+      },
+    ]);
+  });
+
+  it('falls back to tool name when a completion hook omits tool_use_id', () => {
+    const { records } = assembleTurn([
+      {
+        _journal_ts: iso(0),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-result-without-id',
+        generation_id: 'turn-result-without-id',
+        model: 'gpt-5.4',
+        prompt: 'read a file',
+      },
+      {
+        _journal_ts: iso(100),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-result-without-id',
+        generation_id: 'turn-result-without-id',
+        model: 'gpt-5.4',
+        text: 'I will read it.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(200),
+        hook_event: 'preToolUse',
+        conversation_id: 'conv-result-without-id',
+        generation_id: 'turn-result-without-id',
+        tool_name: 'Read',
+        tool_use_id: 'call-read-with-id',
+        tool_input: { path: 'a.ts' },
+      },
+      {
+        _journal_ts: iso(300),
+        hook_event: 'postToolUseFailure',
+        conversation_id: 'conv-result-without-id',
+        generation_id: 'turn-result-without-id',
+        tool_name: 'Read',
+        error_message: 'File not found',
+      },
+      {
+        _journal_ts: iso(500),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-result-without-id',
+        generation_id: 'turn-result-without-id',
+        model: 'gpt-5.4',
+        text: 'The completion omitted its id, but the next step must recover.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(600),
+        hook_event: 'stop',
+        conversation_id: 'conv-result-without-id',
+        generation_id: 'turn-result-without-id',
+        status: 'completed',
+      },
+    ], { stopConversationId: 'conv-result-without-id' });
+
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(2);
+  });
+
   it('guards LLM spans by moving start before the earliest buffered tool call', () => {
     const { records } = assembleTurn([
       {
