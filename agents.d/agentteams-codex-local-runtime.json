@@ -10,7 +10,7 @@
   "pluginProbe": {
     "source": {
       "type": "tar",
-      "tarball": "$PILOT_DATA/plugins/agentteams-codex-local-runtime-0.0.3.tar.gz",
+      "tarball": "$PILOT_DATA/plugins/agentteams-codex-local-runtime-0.0.4.tar.gz",
       "destDir": "$PILOT_DATA/local-worker-template-cache/agentteams-codex-local-runtime"
     },
     "mountType": "wrapper"
