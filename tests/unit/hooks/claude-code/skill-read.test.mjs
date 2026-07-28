@@ -23,6 +23,7 @@ import { parseClaudeTranscript } from '../../../../assets/hooks/claude-code/tran
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/claude-code-hook-processor.mjs');
+const SHELL_HOOK = path.resolve(__dirname, '../../../../assets/hooks/claude-code-loongsuite-pilot-hook.sh');
 
 let DATA_DIR;
 let TRANSCRIPT_DIR;
@@ -502,5 +503,68 @@ describe('claude-code hook: /skill 根 SKILL.md Read span', () => {
     expect(realLate).toBeDefined();
     // 已知边界: 合成 Read 与延迟真实 Read 落在不同 turn(无法跨 build 去重)
     expect(realLate['gen_ai.turn.id']).not.toBe(synthTurn);
+  });
+});
+
+// ─── 不变量: Skill 与其 isMeta 注入必落同一 parse 窗口(跨窗口切分不可达) ───
+//
+// 前提(源码 + 真实 transcript 实证):
+//   1. 只注册 Stop 类 hook(Stop / SubagentStart / SubagentStop)——无 PreToolUse/PostToolUse。
+//   2. transcript_offset 仅在 cmdStop 导出成功后推进;两个 subagent handler 不解析 transcript、不动 offset。
+//      → 每个解析窗口 = 一次 Stop = [上次 offset, EOF],边界恒对齐 turn 末尾。
+//   3. Skill tool_use 与其 sourceToolUseID 注入是同一 turn 内连续记录(真实数据 meta 恒在 2–5 条内)。
+//   ⇒ 二者必落同窗,"一半在 window1、一半在 window2"在现状模型下构造不出来。
+//
+// 本 describe = test-only 不变量护栏:不改生产/合成逻辑。一旦未来误加 mid-turn hook 让
+// 该场景变可达(扩 DISPATCH / .sh 白名单、在 stop 之外解析 transcript),下列静态断言立即变红,
+// 把"静默丢 Read"的回归风险暴露出来,而不是悄悄回退到"缺失根 Read"。
+describe('不变量: 同窗 Skill+注入 / offset 仅 Stop 推进 / 无 mid-turn hook', () => {
+  test('① 一个完整 turn(Skill tool_use + 紧随 isMeta 注入)在单窗内被解析、命中并正常合成', () => {
+    const t = writeTranscript('inv1', [
+      userPrompt('p1', '/e2e-build-push', '2026-07-28T02:00:00.000Z'),
+      skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-28T02:00:01.000Z', 'msg_skill'),
+      skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-28T02:00:02.000Z'),
+      skillMetaInjection('toolu_skill', BASE_DIR, '2026-07-28T02:00:02.500Z'),
+      finalAnswer('msg_final', 'done', '2026-07-28T02:00:03.000Z'),
+    ]);
+
+    // 单次 parse 窗口 [0, EOF] 即涵盖整个 turn:Skill 块与注入同窗,skillRootByToolId 命中。
+    const { turns, nextOffset } = parseClaudeTranscript(t, 0);
+    expect(turns.length).toBe(1);
+    expect(turns[0].skillRootByToolId.get('toolu_skill')).toBe(ROOT_SKILL);
+    expect(nextOffset).toBe(fs.statSync(t).size); // 窗口对齐到 EOF(= turn 末尾)
+
+    // 同窗 → 合成正常:根 Read=1(确定性 id、call/result 成对)+ owner LLM 输出侧背书 tool_call。
+    const r = runHook('stop', { session_id: 'inv1', stop_reason: 'end_turn', transcript_path: t, cwd: '/abs/workdir' });
+    expect(r.status).toBe(0);
+    const recs = readJsonlRecords();
+    const reads = toolCalls(recs, 'Read');
+    expect(reads.length).toBe(1);
+    const callId = reads[0]['gen_ai.tool.call.id'];
+    expect(callId.startsWith(SYNTH_PREFIX)).toBe(true);
+    expect(toolResults(recs, 'Read').map((x) => x['gen_ai.tool.call.id'])).toEqual([callId]);
+    const ownerResp = llmResponseForStep(recs, reads[0]['gen_ai.step.id']);
+    expect(outputToolCalls(ownerResp).some((p) => p.id === callId && p.name === 'Read')).toBe(true);
+  });
+
+  test('② 静态钉死: 仅 Stop 类 hook、offset 仅 Stop 推进、transcript 仅 Stop 解析', () => {
+    const src = fs.readFileSync(PROCESSOR, 'utf-8');
+
+    // 无 mid-turn hook:源码不出现 PreToolUse/PostToolUse
+    expect(src).not.toMatch(/PreToolUse|PostToolUse/);
+
+    // DISPATCH 只认三个 Stop 类 subcommand
+    const dispatchBlock = src.match(/const DISPATCH = \{([\s\S]*?)\};/)[1];
+    const keys = [...dispatchBlock.matchAll(/'([^']+)':/g)].map((m) => m[1]).sort();
+    expect(keys).toEqual(['stop', 'subagent-start', 'subagent-stop']);
+
+    // transcript 仅在(cmdStop 调用的)exportSession 里解析一次;offset 提升仅一处。
+    expect((src.match(/parseClaudeTranscript\(/g) || []).length).toBe(1);
+    expect((src.match(/state\.transcript_offset\s*=/g) || []).length).toBe(1);
+
+    // shell 入口白名单同样只放行三个 Stop 类 subcommand
+    const sh = fs.readFileSync(SHELL_HOOK, 'utf-8');
+    expect(sh).toMatch(/stop\|subagent-start\|subagent-stop\)/);
+    expect(sh).not.toMatch(/PreToolUse|PostToolUse/);
   });
 });
