@@ -597,9 +597,6 @@ deploy_package() {
             return 1
         fi
 
-        echo "$dir_name" > "$current_file.tmp"
-        mv -f "$current_file.tmp" "$current_file"
-
         PERMANENT_DIR="$target"
     else
         msg "==> 部署到 $PERMANENT_DIR ..." \
@@ -635,6 +632,12 @@ deploy_package() {
     msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
         "    If using Codex desktop app, please manually trust hooks on first launch"
     echo ""
+
+    # Write current pointer only after all deploy steps succeed
+    if [ -n "$ver" ] && [ -n "$commit" ]; then
+        echo "$dir_name" > "$current_file.tmp"
+        mv -f "$current_file.tmp" "$current_file"
+    fi
 }
 
 # ============================================================
@@ -1593,15 +1596,28 @@ cmd_upgrade() {
         echo ""
         msg "⚠️  部署失败，正在回滚到旧版本..." \
             "⚠️  Deployment failed, rolling back to old version..."
+        local _rollback_ok=1
         if command -v loongsuite-pilot &>/dev/null; then
-            loongsuite-pilot rollback 2>/dev/null || true
-            loongsuite-pilot start 2>/dev/null || true
+            loongsuite-pilot rollback 2>/dev/null || _rollback_ok=0
         elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
-            "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || true
-            "$HOME/.local/bin/loongsuite-pilot" start 2>/dev/null || true
+            "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || _rollback_ok=0
         fi
-        msg "❌ 升级失败（部署/依赖安装出错），已回滚到 v${old_ver:-unknown} 并重启服务" \
-            "❌ Upgrade failed (deploy/dependency error), rolled back to v${old_ver:-unknown} and restarted"
+        if [ "$_rollback_ok" -eq 1 ]; then
+            if command -v loongsuite-pilot &>/dev/null; then
+                loongsuite-pilot start 2>/dev/null || _rollback_ok=0
+            elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
+                "$HOME/.local/bin/loongsuite-pilot" start 2>/dev/null || _rollback_ok=0
+            fi
+        fi
+        if [ "$_rollback_ok" -eq 1 ]; then
+            msg "❌ 升级失败（部署/依赖安装出错），已回滚到 v${old_ver:-unknown} 并重启服务" \
+                "❌ Upgrade failed (deploy/dependency error), rolled back to v${old_ver:-unknown} and restarted"
+        else
+            msg "❌ 升级失败且自动回滚未成功，请手动恢复:" \
+                "❌ Upgrade failed and auto-rollback did not succeed. Manual recovery:"
+            msg "   loongsuite-pilot rollback && loongsuite-pilot start" \
+                "   loongsuite-pilot rollback && loongsuite-pilot start"
+        fi
         exit 1
     fi
     install_loongsuite_pilot_command
@@ -1631,15 +1647,23 @@ cmd_upgrade() {
 
     loongsuite-pilot stop 2>/dev/null || true
 
+    local _rb_ok=1
     if command -v loongsuite-pilot &>/dev/null; then
-        loongsuite-pilot rollback 2>/dev/null || true
+        loongsuite-pilot rollback 2>/dev/null || _rb_ok=0
     else
-        "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || true
+        "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || _rb_ok=0
     fi
 
-    msg "❌ 升级失败，已回滚到 v${old_ver:-unknown}" \
-        "❌ Upgrade failed, rolled back to v${old_ver:-unknown}"
-    msg "   请检查日志: loongsuite-pilot log" "   Check logs: loongsuite-pilot log"
+    if [ "$_rb_ok" -eq 1 ]; then
+        msg "❌ 升级失败，已回滚到 v${old_ver:-unknown}" \
+            "❌ Upgrade failed, rolled back to v${old_ver:-unknown}"
+        msg "   请检查日志: loongsuite-pilot log" "   Check logs: loongsuite-pilot log"
+    else
+        msg "❌ 升级失败且回滚未成功，请手动恢复:" \
+            "❌ Upgrade failed and rollback did not succeed. Manual recovery:"
+        msg "   loongsuite-pilot rollback && loongsuite-pilot start" \
+            "   loongsuite-pilot rollback && loongsuite-pilot start"
+    fi
     exit 1
 }
 
@@ -1693,8 +1717,8 @@ remove_hook_configs() {
     if command -v node &>/dev/null; then
         _has_node=1
     else
-        msg "    ⚠️  未找到 Node.js，将使用 sed 回退方式清理 hook" \
-            "    ⚠️  Node.js not found, using sed fallback for hook cleanup"
+        msg "    ⚠️  未找到 Node.js，含 hook 的配置文件将跳过自动清理" \
+            "    ⚠️  Node.js not found, config files with hooks will skip auto-cleanup"
     fi
 
     for cfg in "${configs[@]}"; do
@@ -1733,48 +1757,10 @@ try {
 } catch(e) { process.stderr.write(e.message); process.exit(1); }
 " "$cfg" "$HOOK_MARKER" && ok=1
         else
-            # awk fallback: remove JSON objects/lines containing the marker
+            # Node unavailable: skip auto-cleanup to avoid over-deletion
             if grep -q "$HOOK_MARKER" "$cfg" 2>/dev/null; then
-                local tmp_file
-                tmp_file=$(mktemp)
-                awk -v marker="$HOOK_MARKER" '
-                BEGIN { depth = 0; in_block = 0; block = ""; block_depth = 0; buf = ""; has_buf = 0 }
-                function emit(line) {
-                    if (line ~ /^[ \t]*[\]}]/ && has_buf) {
-                        sub(/,[ \t]*$/, "", buf)
-                    }
-                    if (has_buf) print buf
-                    buf = line; has_buf = 1
-                }
-                {
-                    line = $0
-                    lsd = depth
-                    tmp = line; opens = gsub(/{/, "{", tmp)
-                    tmp = line; closes = gsub(/}/, "}", tmp)
-
-                    if (!in_block) {
-                        if (index(line, marker) > 0) { depth += opens - closes; next }
-                        if (opens > 0 && closes == 0 && lsd >= 2) {
-                            in_block = 1; block_depth = lsd; block = line
-                            depth += opens - closes
-                            next
-                        }
-                        emit(line)
-                        depth += opens - closes
-                    } else {
-                        block = block "\n" line
-                        if (closes > 0 && lsd - closes <= block_depth) {
-                            if (index(block, marker) == 0) emit(block)
-                            in_block = 0; block = ""
-                        }
-                        depth += opens - closes
-                    }
-                    next
-                }
-                END { if (in_block && index(block, marker) == 0) emit(block); if (has_buf) print buf }
-                ' "$cfg" > "$tmp_file" 2>/dev/null
-                mv "$tmp_file" "$cfg"
-                ok=1
+                msg "    ⚠️  跳过: $short (无 Node.js，请手动删除含 $HOOK_MARKER 的 hook 条目)" \
+                    "    ⚠️  Skipped: $short (no Node.js, manually remove hook entries containing $HOOK_MARKER)"
             else
                 ok=1
             fi
