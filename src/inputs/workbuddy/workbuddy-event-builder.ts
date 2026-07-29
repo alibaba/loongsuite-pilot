@@ -403,10 +403,10 @@ function baseEntry(
   eventSeed: string,
   timestamp: number,
 ): AgentActivityEntry {
-  const time = String(timestamp * 1_000_000);
+  const time = millisecondsToNanoseconds(timestamp);
   return {
     time_unix_nano: time,
-    observed_time_unix_nano: String(Date.now() * 1_000_000),
+    observed_time_unix_nano: millisecondsToNanoseconds(Date.now()),
     'event.id': stableId(sessionId, eventSeed),
     'event.name': eventName,
     'user.id': '',
@@ -420,6 +420,17 @@ function baseEntry(
     'agent.workbuddy.conversation_request.id': providerString(source, 'conversationRequestId'),
     'agent.workbuddy.runtime': providerString(source, 'agent'),
   };
+}
+
+function millisecondsToNanoseconds(timestamp: number): string {
+  const wholeMilliseconds = Math.trunc(timestamp);
+  const fractionalNanoseconds = Math.round(
+    (timestamp - wholeMilliseconds) * 1_000_000,
+  );
+  return (
+    BigInt(wholeMilliseconds) * 1_000_000n
+    + BigInt(fractionalNanoseconds)
+  ).toString();
 }
 
 function stepContext(record: WorkBuddyRecord, sessionId: string, turnId: string, ordinal: number): StepContext {

@@ -144,6 +144,26 @@ describe('WorkBuddy audit-event builder', () => {
       .map(entry => entry['event.id'])).toEqual(eventIds);
   });
 
+  it('serializes safe millisecond timestamps as exact decimal nanoseconds', async () => {
+    const user = fixtureRecords()[0];
+    const assistant = fixtureRecords().find(record =>
+      record.type === 'message'
+      && record.role === 'assistant'
+      && record.id === 'response-synthetic-2')!;
+    const userTimestamp = 8_639_999_999_999_998;
+    const assistantTimestamp = userTimestamp + 1;
+    const entries = await buildWorkBuddyEvents([
+      { ...user, timestamp: userTimestamp },
+      { ...assistant, timestamp: assistantTimestamp },
+    ], { sessionId: 'session-1' });
+
+    expect(entries.map(entry => entry.time_unix_nano)).toEqual([
+      (BigInt(userTimestamp) * 1_000_000n).toString(),
+      (BigInt(assistantTimestamp) * 1_000_000n).toString(),
+    ]);
+    expect(entries.every(entry => /^\d+$/.test(entry.observed_time_unix_nano))).toBe(true);
+  });
+
   it('lets the shared content policy remove all WorkBuddy message and tool content', async () => {
     const entries = (await buildWorkBuddyEvents(fixtureRecords(), { sessionId: 'session-1' }))
       .map(entry => applyAgentContentPolicy(entry, { workbuddy: { captureMessageContent: false } }));
