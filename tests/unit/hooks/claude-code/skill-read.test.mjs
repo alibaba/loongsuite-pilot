@@ -40,6 +40,12 @@ afterEach(() => {
 
 // ─── transcript 记录构造器(结构对齐 skill_fixture.json) ───
 
+// XJK 路径 user-typed slash /skill: prompt 内嵌 <command-name>q</command-name>
+// + <skill-format>true</skill-format>。q 无前导 '/'。
+function xjkSkillPrompt(skillName) {
+  return `<command-name>${skillName}</command-name><skill-format>true</skill-format>`;
+}
+
 function userPrompt(promptId, text, ts) {
   return { type: 'user', promptId, timestamp: ts, message: { role: 'user', content: [{ type: 'text', text }] } };
 }
@@ -255,7 +261,7 @@ describe('transcript-parser: skill 识别加固 + 漂移可观测', () => {
 
   test('跨 parse-window: Skill 块在上一 window 已消费、isMeta 在本 window → 仍靠前缀捕获路径,不漏配、不误报 miss', () => {
     const file = writeTranscript('win', [
-      userPrompt('p1', '/e2e-build-push', '2026-07-27T02:00:00.000Z'),
+      userPrompt('p1', xjkSkillPrompt('e2e-build-push'), '2026-07-27T02:00:00.000Z'),
       skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-27T02:00:01.000Z', 'msg_skill'),
       skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-27T02:00:02.000Z'),
     ]);
@@ -289,7 +295,7 @@ describe('transcript-parser: skill 识别加固 + 漂移可观测', () => {
 
   test('结构确认为 skill 注入(sourceToolUseID→Skill)但前缀失配 → 正确计数 skill_root_parse_miss', () => {
     const file = writeTranscript('drift', [
-      userPrompt('p1', '/e2e-build-push', '2026-07-27T02:00:00.000Z'),
+      userPrompt('p1', xjkSkillPrompt('e2e-build-push'), '2026-07-27T02:00:00.000Z'),
       skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-27T02:00:01.000Z', 'msg_skill'),
       skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-27T02:00:02.000Z'),
       // 前缀漂移: text 不以 "Base directory for this skill:" 开头
@@ -311,7 +317,7 @@ describe('transcript-parser: skill 识别加固 + 漂移可观测', () => {
 describe('claude-code hook: /skill 根 SKILL.md Read span', () => {
   test('场景1: /skill + 一个原生根 Read → 不合成,仅保留真实 Read', () => {
     const t = writeTranscript('s1', [
-      userPrompt('p1', '/e2e-build-push', '2026-07-27T03:00:00.000Z'),
+      userPrompt('p1', xjkSkillPrompt('e2e-build-push'), '2026-07-27T03:00:00.000Z'),
       skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-27T03:00:01.000Z', 'msg_skill'),
       skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-27T03:00:02.000Z'),
       skillMetaInjection('toolu_skill', BASE_DIR, '2026-07-27T03:00:02.500Z'),
@@ -337,7 +343,7 @@ describe('claude-code hook: /skill 根 SKILL.md Read span', () => {
 
   test('场景2: /skill + 多个不同 ID 的重复根 Read → 全保留,不合成', () => {
     const t = writeTranscript('s2', [
-      userPrompt('p1', '/e2e-build-push', '2026-07-27T03:00:00.000Z'),
+      userPrompt('p1', xjkSkillPrompt('e2e-build-push'), '2026-07-27T03:00:00.000Z'),
       skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-27T03:00:01.000Z', 'msg_skill'),
       skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-27T03:00:02.000Z'),
       skillMetaInjection('toolu_skill', BASE_DIR, '2026-07-27T03:00:02.500Z'),
@@ -359,7 +365,7 @@ describe('claude-code hook: /skill 根 SKILL.md Read span', () => {
 
   test('场景3: /skill 无原生 Read → 兜底合成一条,call/result 同 id,挂 Skill owner step', () => {
     const t = writeTranscript('s3', [
-      userPrompt('p1', '/e2e-build-push', '2026-07-27T03:00:00.000Z'),
+      userPrompt('p1', xjkSkillPrompt('e2e-build-push'), '2026-07-27T03:00:00.000Z'),
       skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-27T03:00:01.000Z', 'msg_skill'),
       skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-27T03:00:02.000Z'),
       skillMetaInjection('toolu_skill', BASE_DIR, '2026-07-27T03:00:02.500Z'),
@@ -395,7 +401,7 @@ describe('claude-code hook: /skill 根 SKILL.md Read span', () => {
 
   test('场景3b: 合成 call id 确定性(相同 client+turnId+rootPath 两次运行 id 相同)', () => {
     const records = [
-      userPrompt('p1', '/e2e-build-push', '2026-07-27T03:00:00.000Z'),
+      userPrompt('p1', xjkSkillPrompt('e2e-build-push'), '2026-07-27T03:00:00.000Z'),
       skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-27T03:00:01.000Z', 'msg_skill'),
       skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-27T03:00:02.000Z'),
       skillMetaInjection('toolu_skill', BASE_DIR, '2026-07-27T03:00:02.500Z'),
@@ -423,7 +429,7 @@ describe('claude-code hook: /skill 根 SKILL.md Read span', () => {
   test('场景4: 根 SKILL.md + references 同读 → references 保留,不重复合成', () => {
     const refPath = `${BASE_DIR}/references/guide.md`;
     const t = writeTranscript('s4', [
-      userPrompt('p1', '/e2e-build-push', '2026-07-27T03:00:00.000Z'),
+      userPrompt('p1', xjkSkillPrompt('e2e-build-push'), '2026-07-27T03:00:00.000Z'),
       skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-27T03:00:01.000Z', 'msg_skill'),
       skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-27T03:00:02.000Z'),
       skillMetaInjection('toolu_skill', BASE_DIR, '2026-07-27T03:00:02.500Z'),
@@ -476,7 +482,7 @@ describe('claude-code hook: /skill 根 SKILL.md Read span', () => {
   // client+turnId+rootPath 不同 → 无法跨 build 抑制。此为已知边界(architect 定为非 P0)。
   test('场景7: 跨 hook-run 延迟真实 Read — 记录当前边界行为', () => {
     const t = writeTranscript('s7', [
-      userPrompt('p1', '/e2e-build-push', '2026-07-27T03:00:00.000Z'),
+      userPrompt('p1', xjkSkillPrompt('e2e-build-push'), '2026-07-27T03:00:00.000Z'),
       skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-27T03:00:01.000Z', 'msg_skill'),
       skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-27T03:00:02.000Z'),
       skillMetaInjection('toolu_skill', BASE_DIR, '2026-07-27T03:00:02.500Z'),
@@ -521,7 +527,7 @@ describe('claude-code hook: /skill 根 SKILL.md Read span', () => {
 describe('不变量: 同窗 Skill+注入 / offset 仅 Stop 推进 / 无 mid-turn hook', () => {
   test('① 一个完整 turn(Skill tool_use + 紧随 isMeta 注入)在单窗内被解析、命中并正常合成', () => {
     const t = writeTranscript('inv1', [
-      userPrompt('p1', '/e2e-build-push', '2026-07-28T02:00:00.000Z'),
+      userPrompt('p1', xjkSkillPrompt('e2e-build-push'), '2026-07-28T02:00:00.000Z'),
       skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-28T02:00:01.000Z', 'msg_skill'),
       skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-28T02:00:02.000Z'),
       skillMetaInjection('toolu_skill', BASE_DIR, '2026-07-28T02:00:02.500Z'),
@@ -566,5 +572,104 @@ describe('不变量: 同窗 Skill+注入 / offset 仅 Stop 推进 / 无 mid-turn
     const sh = fs.readFileSync(SHELL_HOOK, 'utf-8');
     expect(sh).toMatch(/stop\|subagent-start\|subagent-stop\)/);
     expect(sh).not.toMatch(/PreToolUse|PostToolUse/);
+  });
+});
+
+// ─── origin gate: 仅 user-typed slash /skill (XJK 路径) 才合成 ───
+//
+// XJK 路径 prompt 含 <command-name>q</command-name> + <skill-format>true</skill-format>,
+// q 无前导 '/' 且须与 Skill tool_use 的 input.skill 精确相等才合成。
+// 模型自主调 Skill (无 markup) 不合成 —— Multica 托管 SDK-CLI 模式下永不触发,属预期。
+
+describe('origin gate: 仅 user-typed slash /skill 才合成', () => {
+  test('① user-typed /skill (markup + input.skill == q) → 合成根 Read span', () => {
+    const t = writeTranscript('og1', [
+      userPrompt('p1', xjkSkillPrompt('e2e-build-push'), '2026-07-28T03:00:00.000Z'),
+      skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-28T03:00:01.000Z', 'msg_skill'),
+      skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-28T03:00:02.000Z'),
+      skillMetaInjection('toolu_skill', BASE_DIR, '2026-07-28T03:00:02.500Z'),
+      finalAnswer('msg_final', 'done', '2026-07-28T03:00:05.000Z'),
+    ]);
+    const r = runHook('stop', { session_id: 'og1', stop_reason: 'end_turn', transcript_path: t, cwd: '/abs/workdir' });
+    expect(r.status).toBe(0);
+    const recs = readJsonlRecords();
+    const readCalls = toolCalls(recs, 'Read');
+    expect(readCalls.length).toBe(1);
+    expect(readCalls[0]['gen_ai.tool.call.id'].startsWith(SYNTH_PREFIX)).toBe(true);
+    const ownerResp = llmResponseForStep(recs, readCalls[0]['gen_ai.step.id']);
+    expect(outputToolCalls(ownerResp).some((p) => p.id === readCalls[0]['gen_ai.tool.call.id'] && p.name === 'Read')).toBe(true);
+  });
+
+  test('② 模型自主调 Skill (自然语言 prompt、无 markup) → 不合成根 Read', () => {
+    const t = writeTranscript('og2', [
+      // 自然语言 prompt,无 <command-name>/<skill-format> markup → 非用户 slash /skill
+      userPrompt('p1', 'please run the e2e-build-push skill now', '2026-07-28T03:00:00.000Z'),
+      skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-28T03:00:01.000Z', 'msg_skill'),
+      skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-28T03:00:02.000Z'),
+      skillMetaInjection('toolu_skill', BASE_DIR, '2026-07-28T03:00:02.500Z'),
+      finalAnswer('msg_final', 'done', '2026-07-28T03:00:05.000Z'),
+    ]);
+    const r = runHook('stop', { session_id: 'og2', stop_reason: 'end_turn', transcript_path: t, cwd: '/abs/workdir' });
+    expect(r.status).toBe(0);
+    const recs = readJsonlRecords();
+    // 模型自主 Skill 调用:Skill span 本身仍照常输出,但根 Read 不合成、不背书
+    expect(toolCalls(recs, 'Skill').length).toBe(1);
+    expect(toolCalls(recs, 'Read').length).toBe(0);
+    const allInjected = recs
+      .filter((x) => x['event.name'] === 'llm.response')
+      .flatMap((r2) => outputToolCalls(r2))
+      .filter((p) => (p.id || '').startsWith(SYNTH_PREFIX));
+    expect(allInjected.length).toBe(0);
+  });
+
+  test('③ per-skill-call 边界: 同 turn 内 user-typed q=A + 模型自主 skill=B → 仅 A 合成、B 不合成', () => {
+    const BASE_B = '/abs/workdir/.claude/skills/another-skill';
+    const ROOT_B = `${BASE_B}/SKILL.md`;
+    // prompt markup 只声明 A → q='e2e-build-push'; B 未在 markup 中
+    const t = writeTranscript('og3', [
+      userPrompt('p1', xjkSkillPrompt('e2e-build-push'), '2026-07-28T03:00:00.000Z'),
+      // 第一个 Skill: input.skill = A = 'e2e-build-push' == q → 合成
+      skillToolUse('toolu_a', 'e2e-build-push', '2026-07-28T03:00:01.000Z', 'msg_a'),
+      skillToolResult('toolu_a', 'e2e-build-push', '2026-07-28T03:00:02.000Z'),
+      skillMetaInjection('toolu_a', BASE_DIR, '2026-07-28T03:00:02.500Z'),
+      // 第二个 Skill: input.skill = B = 'another-skill' != q → 不合成
+      skillToolUse('toolu_b', 'another-skill', '2026-07-28T03:00:03.000Z', 'msg_b'),
+      skillToolResult('toolu_b', 'another-skill', '2026-07-28T03:00:04.000Z'),
+      skillMetaInjection('toolu_b', BASE_B, '2026-07-28T03:00:04.500Z'),
+      finalAnswer('msg_final', 'done', '2026-07-28T03:00:07.000Z'),
+    ]);
+    const r = runHook('stop', { session_id: 'og3', stop_reason: 'end_turn', transcript_path: t, cwd: '/abs/workdir' });
+    expect(r.status).toBe(0);
+    const recs = readJsonlRecords();
+    const readCalls = toolCalls(recs, 'Read');
+    // 仅 A 合成(1 条),B 不合成
+    expect(readCalls.length).toBe(1);
+    expect(readCalls[0]['gen_ai.tool.call.id'].startsWith(SYNTH_PREFIX)).toBe(true);
+    // 合成的 Read 参数是 A 的根路径,B 的根路径未出现
+    expect(readCalls[0]['gen_ai.tool.call.arguments']).toEqual({ file_path: ROOT_SKILL });
+    expect(readCalls.some((x) => x['gen_ai.tool.call.arguments']?.file_path === ROOT_B)).toBe(false);
+    // 两个 Skill span 都照常输出
+    expect(toolCalls(recs, 'Skill').length).toBe(2);
+  });
+
+  test('④ 防误判: prompt 字面讨论 <skill-format>true</skill-format> 但无 <command-name> → 不合成', () => {
+    const t = writeTranscript('og4', [
+      // prompt 含 <skill-format>true</skill-format> 字面但无 <command-name> → gate 不通过
+      userPrompt('p1', 'note: <skill-format>true</skill-format> is the skill trigger token, but no command name given', '2026-07-28T03:00:00.000Z'),
+      skillToolUse('toolu_skill', 'e2e-build-push', '2026-07-28T03:00:01.000Z', 'msg_skill'),
+      skillToolResult('toolu_skill', 'e2e-build-push', '2026-07-28T03:00:02.000Z'),
+      skillMetaInjection('toolu_skill', BASE_DIR, '2026-07-28T03:00:02.500Z'),
+      finalAnswer('msg_final', 'done', '2026-07-28T03:00:05.000Z'),
+    ]);
+    const r = runHook('stop', { session_id: 'og4', stop_reason: 'end_turn', transcript_path: t, cwd: '/abs/workdir' });
+    expect(r.status).toBe(0);
+    const recs = readJsonlRecords();
+    expect(toolCalls(recs, 'Skill').length).toBe(1);
+    expect(toolCalls(recs, 'Read').length).toBe(0);
+    const allInjected = recs
+      .filter((x) => x['event.name'] === 'llm.response')
+      .flatMap((r2) => outputToolCalls(r2))
+      .filter((p) => (p.id || '').startsWith(SYNTH_PREFIX));
+    expect(allInjected.length).toBe(0);
   });
 });
