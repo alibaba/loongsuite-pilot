@@ -375,4 +375,69 @@ describe('MiMo Code plugin — interrupted turn synthesis', () => {
     const llmResps = records.filter((r) => r['event.name'] === 'llm.response');
     expect(llmResps.length).toBe(5);
   });
+
+  it('synthetic llm.response timestamp is strictly after llm.request (no zero-duration LLM span)', async () => {
+    // Regression for the zero-duration span reported 2026-07-16: when
+    // session.idle fires in the SAME millisecond as the step-start event
+    // (e.g. MiMo aborts mid-LLM-call), the synthetic llm.response's
+    // nowNanos() would equal the llm.request's stepStartTimeMs, producing
+    // an LLM span with duration=0. The plugin now bumps the response
+    // timestamp to request_time + 1ms when needed.
+    const capture4 = [];
+    const plugin4 = await loadPlugin(capture4);
+    process.env.LOONGSUITE_USER_ID = 'test-user';
+    const hooks4 = await plugin4.server({ sessionID: 'test', cwd: os.tmpdir() }, {});
+
+    // Pin both step-start and session.idle to the same millisecond so the
+    // edge case is exercised deterministically.
+    const T = 1784101240874;
+    vi.useFakeTimers();
+    vi.setSystemTime(T);
+
+    await hooks4.event({
+      event: {
+        type: 'message.updated',
+        properties: {
+          sessionID: 'ses_zero_dur',
+          info: {
+            id: 'msg_user_zd',
+            role: 'user',
+            sessionID: 'ses_zero_dur',
+            time: { created: T },
+            agent: 'build',
+            model: { providerID: 'mimo', modelID: 'mimo-auto' },
+          },
+        },
+      },
+    });
+    // step-start: plugin sets stepStartTimeMs = props.time = T
+    await hooks4.event({
+      event: {
+        type: 'message.part.updated',
+        properties: {
+          sessionID: 'ses_zero_dur',
+          part: { type: 'step-start', messageID: 'msg_user_zd' },
+          time: T,
+        },
+      },
+    });
+    // session.idle at the SAME millisecond → triggers flushPendingPartsAsTerminal
+    await hooks4.event({
+      event: { type: 'session.idle', properties: { sessionID: 'ses_zero_dur' } },
+    });
+
+    vi.useRealTimers();
+
+    const records = capture4.map((c) => parseRecord(c.data));
+    const llmReq = records.find((r) => r['event.name'] === 'llm.request');
+    const llmResp = records.find((r) => r['event.name'] === 'llm.response');
+    expect(llmReq).toBeDefined();
+    expect(llmResp).toBeDefined();
+
+    const reqMs = Number(BigInt(llmReq.time_unix_nano) / 1000000n);
+    const respMs = Number(BigInt(llmResp.time_unix_nano) / 1000000n);
+    // Response must be strictly after the request so the converter produces
+    // a non-zero-duration LLM span.
+    expect(respMs).toBeGreaterThan(reqMs);
+  });
 });

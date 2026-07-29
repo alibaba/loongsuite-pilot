@@ -987,6 +987,15 @@ function flushPendingPartsAsTerminal(session, sessionID, userId, reason) {
     : ["stop"];
   const outputMessages = buildOutputMessages(session.pendingParts, finishReasons[0]);
 
+  // Ensure the synthetic llm.response timestamp is strictly later than the
+  // step's llm.request timestamp. The converter computes LLM span duration as
+  // readNanoMs(response.time) - readNanoMs(request.time) with millisecond
+  // precision; if step-start and session.idle land in the same millisecond
+  // (observed when MiMo aborts mid-LLM-call), the LLM/STEP spans come out as
+  // duration=0. Bump the response time to request_time + 1ms when needed.
+  const requestTimeMs = session.stepStartTimeMs ?? Date.now();
+  const responseTimeMs = Math.max(Date.now(), requestTimeMs + 1);
+
   const llmResponseRecord = {
     ...buildCommonFields(sessionID, session, userId),
     "event.name": "llm.response",
@@ -1002,6 +1011,7 @@ function flushPendingPartsAsTerminal(session, sessionID, userId, reason) {
     "error.type": reason === "session.error" ? "session_error" : "session_idle",
     "error.message": `turn closed by ${reason} before info.time.completed`,
   };
+  llmResponseRecord.time_unix_nano = msToNanos(responseTimeMs);
   if (outputMessages) {
     llmResponseRecord["gen_ai.output.messages"] = truncateContent(outputMessages);
   }

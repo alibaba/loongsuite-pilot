@@ -220,24 +220,33 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     // Signal B: check if there's an active buffer for same agentType with different key.
     // Only flush buffers whose turn looks "complete enough" (i.e., has at least
-    // one llm.response event). An open turn with only llm.request / tool.call
-    // events is still in progress — flushing it on a sibling turn's arrival
-    // would split the turn's records across buffers and produce duplicate
-    // ENTRY/AGENT spans in the same trace (observed with mimo-code when the
-    // auto-triggered distill agent starts while the build turn is still
-    // streaming records). Incomplete buffers stay open and are eventually
-    // flushed by Signal A, idle timeout, or shutdown.
+    // one llm.response event) AND that belong to the SAME session as the incoming
+    // record. An open turn with only llm.request / tool.call events is still in
+    // progress, and a turn in a DIFFERENT session is a concurrent subagent
+    // (e.g. mimo-code's checkpoint-writer / distill) whose parent turn is still
+    // streaming — flushing either on a sibling turn's arrival would split the
+    // turn's records across buffers and produce duplicate ENTRY/AGENT spans in
+    // the same trace_id (observed 2026-07-16 with concurrent subagent spawns).
+    // Incomplete same-session buffers stay open and are eventually flushed by
+    // Signal A, idle timeout, or shutdown. Different-session buffers stay open
+    // until their own Signal A / idle / shutdown fires.
+    const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) ?? '';
     for (const [bufKey, buf] of this.turnBuffers) {
-      if (buf.agentType === agentType && bufKey !== key && !buf.completed) {
-        const hasLlmResponse = buf.records.some(
-          (r) => r['event.name'] === 'llm.response',
-        );
-        if (!hasLlmResponse) {
-          continue;
-        }
-        buf.completed = true;
-        this.triggerFlush(buf, false);
+      if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
+      const hasLlmResponse = buf.records.some(
+        (r) => r['event.name'] === 'llm.response',
+      );
+      if (!hasLlmResponse) continue;
+      const bufSessionId = (buf.records[0]?.['gen_ai.session.id'] as string | undefined) ?? '';
+      // Same session → sequential user flow, preempt is safe (user moved on).
+      // Missing session info on either side → fall back to preempt (preserves
+      // the original heuristic for records that don't carry gen_ai.session.id).
+      // Different non-empty sessions → concurrent subagent, never preempt.
+      if (incomingSessionId && bufSessionId && incomingSessionId !== bufSessionId) {
+        continue;
       }
+      buf.completed = true;
+      this.triggerFlush(buf, false);
     }
 
     let buf = this.turnBuffers.get(key);
