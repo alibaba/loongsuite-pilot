@@ -36,6 +36,7 @@ export enum ClientType {
   QoderCnHook = 'qoder-cn-hook',
 
   CodexCliHook = 'codex',
+  KimiCliHook = 'kimi',
   ClineHook = 'cline-hook',
   GithubCopilotHook = 'github-copilot-hook',
   AoneCopilotHook = 'aone-copilot-hook',
