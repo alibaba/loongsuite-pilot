@@ -261,8 +261,8 @@ export async function buildWorkBuddyEvents(
       pendingDelta = message.parts.length > 0 ? [message] : [];
       reasoningParts = [];
       reasoningStartMs = undefined;
-      const hook = hookEvents.takeBoundary('UserPromptSubmit');
-      requestStartMs = timestampMs(record) ?? hook?.observedAtMs;
+      requestStartMs = timestampMs(record)
+        ?? hookEvents.takeBoundary('UserPromptSubmit')?.observedAtMs;
       continue;
     }
 
@@ -341,12 +341,12 @@ export async function buildWorkBuddyEvents(
       stepOrdinal++;
       const step = stepContext(record, opts.sessionId, turnId, stepOrdinal);
       const message = toMessage(record, 'assistant');
-      const stopHook = hookEvents.takeBoundary('Stop');
       const transcriptResponseTimestamp = earliestTimestamp(
         reasoningStartMs,
         timestampMs(record),
       );
-      const responseTimestamp = transcriptResponseTimestamp ?? stopHook?.observedAtMs;
+      const responseTimestamp = transcriptResponseTimestamp
+        ?? hookEvents.takeBoundary('Stop')?.observedAtMs;
       if (responseTimestamp === undefined) continue;
       const requestTimestamp = requestStartMs ?? responseTimestamp;
       const request = baseEntry(

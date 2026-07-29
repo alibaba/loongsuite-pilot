@@ -378,6 +378,42 @@ describe('WorkBuddy audit-event builder', () => {
       .toEqual(['1000000000', '1500000000']);
   });
 
+  it('preserves Hook fallback boundaries for later records that lack transcript timestamps', async () => {
+    const user = fixtureRecords()[0];
+    const assistant = fixtureRecords().find(record =>
+      record.type === 'message'
+      && record.role === 'assistant'
+      && record.id === 'response-synthetic-2')!;
+    const entries = await buildWorkBuddyEvents([
+      user,
+      assistant,
+      {
+        ...user,
+        id: 'turn-hook-fallback',
+        timestamp: undefined,
+      },
+      {
+        ...assistant,
+        id: 'response-hook-fallback',
+        timestamp: undefined,
+        providerData: {
+          ...assistant.providerData,
+          conversationRequestId: 'request-hook-fallback',
+          messageId: 'response-hook-fallback',
+        },
+      },
+    ], {
+      sessionId: 'session-1',
+      hookEvents: [
+        { eventName: 'UserPromptSubmit', observedAtMs: 2_000 },
+        { eventName: 'Stop', observedAtMs: 2_500 },
+      ],
+    });
+
+    expect(entries.map(entry => entry.time_unix_nano))
+      .toEqual(['1000000000', '1500000000', '2000000000', '2500000000']);
+  });
+
   it('drops tool events when neither transcript nor Hook provides a call timestamp', async () => {
     const records = fixtureRecords().map(record =>
       record.type === 'function_call'
@@ -892,6 +928,31 @@ describe('WorkBuddyInput checkpoints', () => {
     await writeFile(transcript, `${JSON.stringify(fixtureRecords()[0])}\n`);
     expect(await input.collectNow()).toEqual([]);
     expect(await readFile(eventFile, 'utf8')).toContain('session-creating');
+  });
+
+  it('removes an orphan Hook session when its observation time is missing', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-input-orphan-'));
+    const projects = path.join(root, 'projects', 'safe-project');
+    const hookEventDir = path.join(root, 'pilot-events');
+    await mkdir(projects, { recursive: true });
+    await mkdir(hookEventDir, { recursive: true });
+    const transcript = path.join(projects, 'session-orphan.jsonl');
+    await writeHookEvent(hookEventDir, {
+      hook_event_name: 'UserPromptSubmit',
+      session_id: 'session-orphan',
+      transcript_path: transcript,
+    });
+
+    const stateStore = new StateStore(path.join(root, 'state.json'));
+    await stateStore.load();
+    const input = new TestWorkBuddyInput({
+      stateStore,
+      workBuddyRoot: root,
+      hookEventDir,
+    });
+
+    expect(await input.collectNow()).toEqual([]);
+    expect(await listHookEventFiles(hookEventDir)).toEqual([]);
   });
 
   it('requires a stable Stop boundary for a hook-backed transcript', async () => {

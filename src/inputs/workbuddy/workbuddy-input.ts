@@ -372,9 +372,12 @@ export class WorkBuddyInput extends BaseInput {
         transcriptPaths.some(transcriptPath =>
           path.resolve(checkpointPath) === path.resolve(transcriptPath))
         || sessionIds.has(path.basename(checkpointPath, '.jsonl')));
-      const latestObservedAtMs = Math.max(
-        ...sessionHints.map(hint => hint.observedAtMs ?? Number.POSITIVE_INFINITY),
-      );
+      const observedTimes = sessionHints
+        .map(hint => hint.observedAtMs)
+        .filter((value): value is number => value !== undefined);
+      const latestObservedAtMs = observedTimes.length > 0
+        ? Math.max(...observedTimes)
+        : Number.NEGATIVE_INFINITY;
       if (!previouslyObserved && Date.now() - latestObservedAtMs <= HOOK_ORPHAN_GRACE_MS) {
         // WorkBuddy may invoke the Hook just before it creates the transcript.
         continue;
