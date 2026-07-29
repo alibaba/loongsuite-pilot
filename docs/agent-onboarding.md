@@ -319,7 +319,7 @@ An integration is ready only after all applicable gates below pass.
 
 - Support `captureMessageContent: false` for prompts, completions, reasoning, tool arguments, and tool results when the agent exposes those fields.
 - Keep secrets out of source-specific extension fields unless they are required and subject to masking.
-- Verify `mask.mode: all` masks API keys, access keys, private keys, and database URLs. See [Data Masking](masking.md).
+- Verify `mask.mode: all` masks supported secrets and personal sensitive data in emitted output. See [Data Masking](masking.md).
 - Hook and plugin code must fail open so telemetry cannot block the source agent.
 - Commit only synthetic fixtures. They must not contain real prompts, transcripts, user names, home paths, repository paths, session IDs, or credentials.
 - Prefer the smallest set of tests that covers distinct semantic branches; do not add duplicate tests solely to increase test count.

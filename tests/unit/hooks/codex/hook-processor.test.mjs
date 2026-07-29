@@ -22,9 +22,13 @@ afterEach(() => {
 });
 
 function runHook(subcommand, payload, extraEnv = {}) {
+  const env = { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, ...extraEnv };
+  if (!Object.hasOwn(extraEnv, 'LOONGSUITE_PILOT_SPAN_ATTRIBUTES')) {
+    delete env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  }
   return spawnSync('node', [PROCESSOR, subcommand], {
     input: JSON.stringify(payload),
-    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, ...extraEnv },
+    env,
     encoding: 'utf-8',
     timeout: 10_000,
   });
@@ -32,6 +36,16 @@ function runHook(subcommand, payload, extraEnv = {}) {
 
 function markerPath(sessionId) {
   return path.join(dataDir, 'state', 'codex', 'transcript-wakeups', `${sessionId}.json`);
+}
+
+function spanContextPath(sessionId, turnId) {
+  return path.join(
+    dataDir,
+    'state',
+    'codex',
+    'transcript-span-contexts',
+    `${sessionId}--${turnId}.json`,
+  );
 }
 
 describe('codex transcript discovery hook', () => {
@@ -108,6 +122,84 @@ describe('codex transcript discovery hook', () => {
     expect(JSON.stringify(marker)).not.toContain('should-not-leak');
   });
 
+  test.each(['user-prompt-submit', 'stop'])(
+    'writes filtered invocation span attributes for %s',
+    subcommand => {
+      const longValue = 'x'.repeat(513);
+      const result = runHook(subcommand, {
+        session_id: 'cdx-span-context',
+        turn_id: 'turn-span-context',
+      }, {
+        LOONGSUITE_PILOT_SPAN_ATTRIBUTES: [
+          'multica.issue.id=issue-1',
+          'multica.agent.name=codex',
+          'gen_ai.agent.name=must-not-overwrite',
+          'multica.secret=must-not-leak',
+          `multica.long=${longValue}`,
+          'malformed',
+        ].join(','),
+      });
+
+      expect(result.status).toBe(0);
+      expect(JSON.parse(fs.readFileSync(
+        spanContextPath('cdx-span-context', 'turn-span-context'),
+        'utf8',
+      ))).toMatchObject({
+        session_id: 'cdx-span-context',
+        turn_id: 'turn-span-context',
+        spanAttributes: {
+          'multica.issue.id': 'issue-1',
+          'multica.agent.name': 'codex',
+        },
+        received_at: expect.any(String),
+      });
+      const serialized = fs.readFileSync(
+        spanContextPath('cdx-span-context', 'turn-span-context'),
+        'utf8',
+      );
+      expect(serialized).not.toContain('must-not-overwrite');
+      expect(serialized).not.toContain('must-not-leak');
+      expect(serialized).not.toContain(longValue);
+    },
+  );
+
+  test('does not persist invocation span attributes for SessionStart', () => {
+    const result = runHook('session-start', {
+      session_id: 'cdx-session-start',
+      turn_id: 'turn-session-start',
+    }, {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES: 'multica.issue.id=issue-session-start',
+    });
+
+    expect(result.status).toBe(0);
+    expect(fs.existsSync(spanContextPath('cdx-session-start', 'turn-session-start'))).toBe(false);
+    expect(fs.existsSync(markerPath('cdx-session-start'))).toBe(true);
+  });
+
+  test('keeps invocation span attributes isolated by turn within one session', () => {
+    runHook('user-prompt-submit', {
+      session_id: 'cdx-shared-session',
+      turn_id: 'turn-1',
+    }, {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES: 'multica.issue.id=issue-1',
+    });
+    runHook('user-prompt-submit', {
+      session_id: 'cdx-shared-session',
+      turn_id: 'turn-2',
+    }, {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES: 'multica.issue.id=issue-2',
+    });
+
+    expect(JSON.parse(fs.readFileSync(
+      spanContextPath('cdx-shared-session', 'turn-1'),
+      'utf8',
+    )).spanAttributes).toEqual({ 'multica.issue.id': 'issue-1' });
+    expect(JSON.parse(fs.readFileSync(
+      spanContextPath('cdx-shared-session', 'turn-2'),
+      'utf8',
+    )).spanAttributes).toEqual({ 'multica.issue.id': 'issue-2' });
+  });
+
   test('keeps only the latest wakeup for one session', () => {
     runHook('stop', { session_id: 'cdx-overwrite', turn_id: 'turn-1' });
     runHook('stop', { session_id: 'cdx-overwrite', turn_id: 'turn-2' });
@@ -144,6 +236,30 @@ describe('codex transcript discovery hook', () => {
     const errorDir = path.join(dataDir, 'logs', 'codex', 'errors');
     const errorFile = path.join(errorDir, fs.readdirSync(errorDir)[0]);
     expect(fs.readFileSync(errorFile, 'utf8')).toContain('"stage":"wakeup_write"');
+  });
+
+  test('logs span context write failures without blocking the wakeup marker', () => {
+    fs.mkdirSync(path.join(dataDir, 'state', 'codex'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dataDir, 'state', 'codex', 'transcript-span-contexts'),
+      'not-a-directory',
+    );
+
+    const result = runHook('user-prompt-submit', {
+      session_id: 'cdx-span-error',
+      turn_id: 'turn-span-error',
+    }, {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES: 'multica.issue.id=issue-error',
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    expect(fs.existsSync(markerPath('cdx-span-error'))).toBe(true);
+    const errorDir = path.join(dataDir, 'logs', 'codex', 'errors');
+    const errorFiles = fs.readdirSync(errorDir);
+    expect(errorFiles.some(file => (
+      fs.readFileSync(path.join(errorDir, file), 'utf8').includes('"stage":"span_context_write"')
+    ))).toBe(true);
   });
 
   test('derives the shared Pilot data directory from the installed shell wrapper', () => {

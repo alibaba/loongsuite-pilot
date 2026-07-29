@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import type { MaskConfig } from '../../../src/types/index.js';
+import { PII_MASK_TYPES, SUPPORTED_MASK_TYPES } from '../../../src/types/index.js';
 import {
   compileSensitiveRules,
   loadEnabledRules,
+  loadMaskPlan,
   loadSensitiveRules,
+  resolveEnabledMaskTypes,
 } from '../../../src/mask/rule-loader.js';
 
 describe('mask rule loader', () => {
@@ -42,6 +45,27 @@ describe('mask rule loader', () => {
     const enabledRules = loadEnabledRules({ mode: 'none', types: [] });
 
     expect(enabledRules).toHaveLength(0);
+  });
+
+  it('builds a mask plan with all five PII detectors in all mode', () => {
+    const plan = loadMaskPlan(allConfig);
+
+    expect([...plan.piiTypes]).toEqual(PII_MASK_TYPES);
+    expect(plan.rules).toHaveLength(loadSensitiveRules().length);
+  });
+
+  it('enables every type from the canonical supported-type list in all mode', () => {
+    expect([...resolveEnabledMaskTypes(allConfig)]).toEqual(SUPPORTED_MASK_TYPES);
+  });
+
+  it('builds a custom mask plan with only selected PII types', () => {
+    const plan = loadMaskPlan({
+      mode: 'custom',
+      types: ['email', 'bankCard'],
+    });
+
+    expect([...plan.piiTypes]).toEqual(['email', 'bankCard']);
+    expect(plan.rules).toHaveLength(0);
   });
 
   it('keeps database URL prefilters aligned with supported database schemes', () => {

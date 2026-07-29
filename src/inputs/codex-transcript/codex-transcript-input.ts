@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import type { Dirent, FSWatcher } from 'node:fs';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
+import { isReservedKey } from '../../normalization/global-attributes.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import {
@@ -40,12 +41,15 @@ const MAX_SCAN_BYTES_PER_FILE_CYCLE = 16 * 1024 * 1024;
 // stale task homes cannot turn every polling cycle into an unbounded walk.
 const MAX_WAKEUP_MARKERS_FOR_DISCOVERY = 256;
 const MAX_WAKEUP_MARKERS_PER_CLEANUP = 1_024;
+const MAX_SPAN_CONTEXTS_PER_CLEANUP = 1_024;
 const MAX_DYNAMIC_SESSION_DIRS = 64;
 const MAX_DYNAMIC_SESSION_FILES = 64;
 const MAX_DYNAMIC_DIRECTORIES_PER_ROOT = 8;
 const MAX_DYNAMIC_ROLLOUT_FILES_PER_ROOT = 256;
 const WAKEUP_MARKER_DISCOVERY_TTL_MS = 48 * 60 * 60 * 1_000;
 const WAKEUP_MARKER_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
+const SPAN_CONTEXT_TTL_MS = 48 * 60 * 60 * 1_000;
+const SPAN_CONTEXT_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
 const DYNAMIC_SESSION_FILE_MAX_IDLE_MS = 15 * 60 * 1_000;
 // Values emitted by DEFAULT_RESOURCE_ENV_FIELD_MAP in assets/hooks/shared/resource-context.mjs.
 // Add new AgentTeams resource fields to both lists together.
@@ -54,6 +58,9 @@ const WAKEUP_RESOURCE_ATTRIBUTE_KEYS = [
   'agentteams.instance.id',
 ];
 const MAX_WAKEUP_RESOURCE_ATTRIBUTE_VALUE_LENGTH = 512;
+const MAX_SPAN_ATTRIBUTE_VALUE_LENGTH = 512;
+const SENSITIVE_SPAN_ATTRIBUTE_NAME_RE =
+  /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE)([_.-]|$)|^(API_KEY|API_HEADER)$/i;
 
 interface JsonLine {
   startOffset: number;
@@ -106,6 +113,7 @@ interface DynamicDirectoryWalkBudget {
 export interface CodexTranscriptInputOptions extends InputOptions {
   sessionDir?: string;
   wakeupDir?: string;
+  spanContextDir?: string;
 }
 
 export class CodexTranscriptInput extends BaseInput {
@@ -115,17 +123,20 @@ export class CodexTranscriptInput extends BaseInput {
 
   private readonly sessionDir: string;
   private readonly wakeupDir: string;
+  private readonly spanContextDir: string;
   private wakeupWatcher: FSWatcher | null = null;
   private processedTerminalTurnIdsLoaded = false;
   private processedTerminalTurnIdsDirty = false;
   private processedTerminalTurnIds = new Set<string>();
   private processedTerminalTurnIdOrder: string[] = [];
   private lastWakeupMarkerCleanupAtMs = 0;
+  private lastSpanContextCleanupAtMs = 0;
 
   constructor(opts: CodexTranscriptInputOptions) {
     super({ stateStore: opts.stateStore, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
     this.sessionDir = opts.sessionDir ?? resolveHome(DEFAULT_SESSION_DIR);
     this.wakeupDir = opts.wakeupDir ?? defaultWakeupDir();
+    this.spanContextDir = opts.spanContextDir ?? defaultSpanContextDir();
   }
 
   static getWatchPaths(): string[] {
@@ -143,7 +154,10 @@ export class CodexTranscriptInput extends BaseInput {
       if (baselineOnStart && !this.readCheckpoint(key)) await this.baselineFile(filePath, key);
     }
     this.saveGlobalProcessedTerminalTurnIds();
-    await fs.mkdir(this.wakeupDir, { recursive: true });
+    await Promise.all([
+      fs.mkdir(this.wakeupDir, { recursive: true }),
+      fs.mkdir(this.spanContextDir, { recursive: true }),
+    ]);
     try {
       this.wakeupWatcher = fsSync.watch(this.wakeupDir, { persistent: false }, () => {
         this.requestCollection();
@@ -165,6 +179,7 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   protected override async collect(): Promise<AgentActivityEntry[]> {
+    await this.cleanupExpiredSpanContexts(Date.now());
     let emittedCount = 0;
     for (const { filePath } of await this.discoverSessionFiles()) {
       emittedCount += await this.processFile(filePath);
@@ -520,8 +535,16 @@ export class CodexTranscriptInput extends BaseInput {
       ? endOffset
       : extraction.consumedEndOffset;
 
-    const resourceAttributes = await this.readWakeupResourceAttributes(turn.sessionId);
-    const outputEntries = resourceAttributes ? attachWakeupResourceAttributes(entries, resourceAttributes) : entries;
+    const [resourceAttributes, spanAttributes] = await Promise.all([
+      this.readWakeupResourceAttributes(turn.sessionId),
+      this.readTurnSpanAttributes(turn.sessionId, activeTurn.turnId),
+    ]);
+    let outputEntries = resourceAttributes
+      ? attachWakeupResourceAttributes(entries, resourceAttributes)
+      : entries;
+    if (spanAttributes) {
+      outputEntries = attachTurnSpanAttributes(outputEntries, spanAttributes);
+    }
     return {
       kind: outputEntries.length > 0 ? 'processed-emitted' : 'processed-empty',
       entries: outputEntries,
@@ -660,6 +683,68 @@ export class CodexTranscriptInput extends BaseInput {
       return undefined;
     }
     return resourceAttributes;
+  }
+
+  private async readTurnSpanAttributes(
+    sessionId: string,
+    turnId: string,
+  ): Promise<Record<string, string> | undefined> {
+    const marker = path.join(this.spanContextDir, spanContextMarkerName(sessionId, turnId));
+    let raw: string;
+    try {
+      raw = await fs.readFile(marker, 'utf8');
+    } catch {
+      return undefined;
+    }
+
+    let markerRecord: Record<string, unknown> | null = null;
+    try {
+      markerRecord = asRecord(JSON.parse(raw));
+    } catch {
+      this.logger.debug('Codex span context could not be parsed; invocation attributes skipped', { marker });
+      return undefined;
+    }
+
+    if (
+      !markerRecord
+      || stringValue(markerRecord.session_id) !== sessionId
+      || stringValue(markerRecord.turn_id) !== turnId
+    ) {
+      this.logger.debug('Codex span context identifiers do not match the transcript turn', {
+        marker,
+        sessionId,
+        turnId,
+      });
+      return undefined;
+    }
+
+    const receivedAt = stringValue(markerRecord.received_at);
+    const receivedAtMs = receivedAt ? Date.parse(receivedAt) : Number.NaN;
+    if (Number.isFinite(receivedAtMs) && Date.now() - receivedAtMs > SPAN_CONTEXT_TTL_MS) {
+      this.logger.debug('Codex span context is expired; invocation attributes skipped', { marker });
+      return undefined;
+    }
+
+    const markerAttributes = asRecord(markerRecord.spanAttributes);
+    if (!markerAttributes) return undefined;
+
+    const spanAttributes: Record<string, string> = {};
+    for (const [rawKey, rawValue] of Object.entries(markerAttributes)) {
+      const key = rawKey.trim();
+      if (
+        !key
+        || isReservedKey(key)
+        || SENSITIVE_SPAN_ATTRIBUTE_NAME_RE.test(key)
+        || typeof rawValue !== 'string'
+      ) {
+        continue;
+      }
+      const value = rawValue.trim();
+      if (!value || value.length > MAX_SPAN_ATTRIBUTE_VALUE_LENGTH) continue;
+      spanAttributes[key] = value;
+    }
+
+    return Object.keys(spanAttributes).length > 0 ? spanAttributes : undefined;
   }
 
   private async baselineFile(filePath: string, key: string): Promise<void> {
@@ -840,6 +925,49 @@ export class CodexTranscriptInput extends BaseInput {
         await fs.unlink(markerPath);
       } catch {
         // Another process or cleanup cycle may have removed the marker first.
+      }
+    }
+  }
+
+  private async cleanupExpiredSpanContexts(now: number): Promise<void> {
+    if (now - this.lastSpanContextCleanupAtMs < SPAN_CONTEXT_CLEANUP_INTERVAL_MS) return;
+    this.lastSpanContextCleanupAtMs = now;
+
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(this.spanContextDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    const candidates = entries
+      .filter(entry => entry.isFile() && entry.name.endsWith('.json'))
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .slice(0, MAX_SPAN_CONTEXTS_PER_CLEANUP);
+    for (const entry of candidates) {
+      const markerPath = path.join(this.spanContextDir, entry.name);
+      let expired = false;
+      try {
+        const marker = asRecord(JSON.parse(await fs.readFile(markerPath, 'utf8')));
+        const receivedAt = stringValue(marker?.received_at);
+        const receivedAtMs = receivedAt ? Date.parse(receivedAt) : Number.NaN;
+        if (Number.isFinite(receivedAtMs)) {
+          expired = now - receivedAtMs > SPAN_CONTEXT_TTL_MS;
+        } else {
+          expired = now - (await fs.stat(markerPath)).mtimeMs > SPAN_CONTEXT_TTL_MS;
+        }
+      } catch {
+        try {
+          expired = now - (await fs.stat(markerPath)).mtimeMs > SPAN_CONTEXT_TTL_MS;
+        } catch {
+          continue;
+        }
+      }
+      if (!expired) continue;
+      try {
+        await fs.unlink(markerPath);
+      } catch {
+        // Another process or cleanup cycle may have removed the context first.
       }
     }
   }
@@ -1301,6 +1429,18 @@ function attachWakeupResourceAttributes(
   return entries;
 }
 
+function attachTurnSpanAttributes(
+  entries: AgentActivityEntry[],
+  spanAttributes: Record<string, string>,
+): AgentActivityEntry[] {
+  for (const entry of entries) {
+    for (const [key, value] of Object.entries(spanAttributes)) {
+      if (entry[key] === undefined) entry[key] = value;
+    }
+  }
+  return entries;
+}
+
 function persistedInputContext(
   context: CodexTranscriptInputContext,
   sourceRange: CodexTranscriptSourceRange | undefined,
@@ -1334,7 +1474,16 @@ function safeWakeupSessionPart(value: string): string {
   return path.basename(String(value)).replace(/[^a-zA-Z0-9_-]/g, '_') || 'unknown';
 }
 
+function spanContextMarkerName(sessionId: string, turnId: string): string {
+  return `${safeWakeupSessionPart(sessionId)}--${safeWakeupSessionPart(turnId)}.json`;
+}
+
 function defaultWakeupDir(): string {
   const dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
   return path.join(dataDir, 'state', 'codex', 'transcript-wakeups');
+}
+
+function defaultSpanContextDir(): string {
+  const dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
+  return path.join(dataDir, 'state', 'codex', 'transcript-span-contexts');
 }

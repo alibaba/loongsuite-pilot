@@ -288,7 +288,7 @@ per-session spool：
 
 - 源 Agent 提供相关字段时，Prompt、Completion、reasoning、工具参数和工具结果必须支持 `captureMessageContent: false`。
 - 除非必须并可被脱敏，否则不要将密钥放入 source-specific 扩展字段。
-- 验证 `mask.mode: all` 能脱敏 API Key、AccessKey、私钥和数据库 URL。见 [数据脱敏](masking.md)。
+- 验证 `mask.mode: all` 能在输出中脱敏已支持的密钥和个人敏感信息。见 [数据脱敏](masking.md)。
 - Hook 或插件必须 fail open，遥测失败不能阻塞源 Agent。
 - 只提交完全合成的 fixture，不得包含真实 prompt、transcript、用户名、home 路径、仓库路径、session ID 或凭证。
 - 使用最少测试覆盖不同语义分支，不为增加测试数量添加重复用例。
