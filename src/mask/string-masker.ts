@@ -290,11 +290,22 @@ function normalizeMaskRanges(
   for (const candidate of sorted) {
     const previous = result[result.length - 1];
     if (!previous || candidate.start >= previous.end) {
-      result.push(candidate);
+      result.push({ ...candidate });
       continue;
     }
+
+    const mergedEnd = Math.max(previous.end, candidate.end);
     if (getMaskRangePriority(candidate) > getMaskRangePriority(previous)) {
-      result[result.length - 1] = candidate;
+      result[result.length - 1] = {
+        ...candidate,
+        start: previous.start,
+        end: mergedEnd,
+      };
+    } else if (mergedEnd !== previous.end) {
+      result[result.length - 1] = {
+        ...previous,
+        end: mergedEnd,
+      };
     }
   }
   return result;

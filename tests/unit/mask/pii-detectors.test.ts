@@ -3,15 +3,10 @@ import { describe, expect, it } from 'vitest';
 import { loadMaskPlan } from '../../../src/mask/rule-loader.js';
 import { applyMaskRanges, maskString } from '../../../src/mask/string-masker.js';
 import type { PiiMaskType } from '../../../src/mask/types.js';
+import { PII_MASK_TYPES } from '../../../src/types/index.js';
 import type { MaskType } from '../../../src/types/index.js';
 
-const ALL_PII_TYPES: PiiMaskType[] = [
-  'idCard',
-  'phone',
-  'email',
-  'ipAddress',
-  'bankCard',
-];
+const ALL_PII_TYPES: PiiMaskType[] = [...PII_MASK_TYPES];
 
 function mask(value: string, types: MaskType[] = ALL_PII_TYPES): string {
   return maskString(
@@ -80,6 +75,16 @@ describe('PII mask detectors', () => {
   it('masks adjacent phone candidates separated only by whitespace', () => {
     expect(mask('13800138000 13900139000', ['phone'])).toBe(
       '[PHONE_MASKED] [PHONE_MASKED]',
+    );
+  });
+
+  it('masks valid phones in numeric sequences longer than one candidate window', () => {
+    const phones = Array.from({ length: 12 }, (_, index) =>
+      index % 2 === 0 ? '13800138000' : '13900139000',
+    );
+
+    expect(mask(phones.join(' '), ['phone'])).toBe(
+      phones.map(() => '[PHONE_MASKED]').join(' '),
     );
   });
 
@@ -202,6 +207,15 @@ describe('PII mask detectors', () => {
     ]);
 
     expect(masked).toBe('[IDCARD_MASKED]');
+  });
+
+  it('fully masks emails that contain higher-priority numeric PII', () => {
+    expect(
+      mask(
+        'user.13800138000@example.com|11010519491231002X@example.com',
+        ['phone', 'idCard', 'email'],
+      ),
+    ).toBe('[PHONE_MASKED]|[IDCARD_MASKED]');
   });
 
   it('keeps existing broad secret rules ahead of nested PII matches', () => {

@@ -56,4 +56,19 @@ describe('mask string masker performance smoke', () => {
 
     expect(elapsedMs).toBeLessThan(2000);
   });
+
+  it('keeps fragmented numeric input bounded without dropping valid phones', () => {
+    const plan = loadMaskPlan({ mode: 'all', types: [] });
+    const fragmented = `${Array.from({ length: 64 }, () => '1').join(' ')}|`.repeat(512);
+    const validPhone = '13800138000';
+    const input = `${fragmented}${validPhone}`;
+
+    const startedAt = performance.now();
+    const masked = maskString(input, plan);
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(masked.slice(0, fragmented.length)).toBe(fragmented);
+    expect(masked.slice(fragmented.length)).toBe('[PHONE_MASKED]');
+    expect(elapsedMs).toBeLessThan(50);
+  });
 });

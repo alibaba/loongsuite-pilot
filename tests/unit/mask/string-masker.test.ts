@@ -195,6 +195,34 @@ describe('mask string masker', () => {
     expect(masked).toBe('0[FIRST]3456[SECOND]9');
   });
 
+  it('keeps the full union covered across chained overlapping ranges', () => {
+    const masked = applyMaskRanges('0123456789', [
+      {
+        start: 0,
+        end: 5,
+        replacement: '[EMAIL_MASKED]',
+        ruleId: 'pii.email',
+        type: 'email',
+      },
+      {
+        start: 3,
+        end: 8,
+        replacement: '[PHONE_MASKED]',
+        ruleId: 'pii.phone',
+        type: 'phone',
+      },
+      {
+        start: 7,
+        end: 10,
+        replacement: '[IDCARD_MASKED]',
+        ruleId: 'pii.idCard',
+        type: 'idCard',
+      },
+    ]);
+
+    expect(masked).toBe('[IDCARD_MASKED]');
+  });
+
   it('masks secrets in large strings through keyword windows', () => {
     const input = [
       'x'.repeat(120),

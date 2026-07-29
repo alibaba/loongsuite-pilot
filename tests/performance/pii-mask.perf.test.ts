@@ -73,6 +73,8 @@ describe('PII masking performance benchmark', () => {
     const plain = 'ordinary collector output without sensitive values\n'.repeat(1_500);
     const numericNoise =
       'event=12345 duration_ms=678 token_count=901 model_version=v5\n'.repeat(1_200);
+    const fragmentedNumeric =
+      `${Array.from({ length: 64 }, () => '1').join(' ')}|`.repeat(512);
     const mixed = [
       plain.slice(0, Math.floor(plain.length / 2)),
       'id=11010519491231002X',
@@ -98,6 +100,9 @@ describe('PII masking performance benchmark', () => {
       benchmark('all-rules:numeric-noise', numericNoise, 100, value =>
         maskString(value, allPlan),
       ),
+      benchmark('all-rules:fragmented-numeric', fragmentedNumeric, 20, value =>
+        maskString(value, allPlan),
+      ),
       benchmark('phone-only:mixed', mixed, 100, value =>
         maskString(value, phoneOnlyPlan),
       ),
@@ -115,7 +120,8 @@ describe('PII masking performance benchmark', () => {
     expect(results[2].p95Ms).toBeLessThan(50);
     expect(results[3].p95Ms).toBeLessThan(50);
     expect(results[4].p95Ms).toBeLessThan(50);
-    expect(results[5].p95Ms).toBeLessThan(100);
+    expect(results[5].p95Ms).toBeLessThan(50);
+    expect(results[6].p95Ms).toBeLessThan(100);
     expect(maskString(mixed, allPlan)).not.toContain('11010519491231002X');
     expect(maskString(mixed, allPlan)).not.toContain('13800138000');
     expect(maskString(mixed, allPlan)).not.toContain('user@example.com');

@@ -21,6 +21,7 @@ import type {
   StatusBarConfig,
   UpstreamLinkConfig,
 } from '../types/index.js';
+import { SUPPORTED_MASK_TYPES } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
@@ -318,18 +319,6 @@ function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
 
   return result;
 }
-
-const SUPPORTED_MASK_TYPES: readonly MaskType[] = [
-  'cloudAccessKey',
-  'apiKey',
-  'privateKey',
-  'databaseUrl',
-  'idCard',
-  'phone',
-  'email',
-  'ipAddress',
-  'bankCard',
-];
 
 const SUPPORTED_MASK_TYPE_SET = new Set<string>(SUPPORTED_MASK_TYPES);
 

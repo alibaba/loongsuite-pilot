@@ -1,7 +1,7 @@
 import type { MaskRange, PiiMaskType } from './types.js';
 
-const MAX_NUMERIC_SEQUENCE_LENGTH = 128;
 const MAX_PHONE_CANDIDATE_LENGTH = 18;
+const MAX_BANK_CARD_CANDIDATE_LENGTH = 37;
 const MAX_EMAIL_LENGTH = 254;
 const MAX_EMAIL_LOCAL_LENGTH = 64;
 const MAX_EMAIL_DOMAIN_LABEL_LENGTH = 63;
@@ -64,8 +64,8 @@ function collectNumericRanges(
   enabled: { idCard: boolean; phone: boolean; bankCard: boolean },
 ): void {
   let candidateStart = -1;
-  let candidateOverflow = false;
   const currentDateNumber = enabled.idCard ? getCurrentDateNumber() : 0;
+  const detectFormattedNumeric = enabled.phone || enabled.bankCard;
 
   for (let index = 0; index <= value.length; index += 1) {
     const code = index < value.length ? value.charCodeAt(index) : -1;
@@ -81,18 +81,11 @@ function collectNumericRanges(
     if (index < value.length && isNumericCandidateChar(code)) {
       if (candidateStart === -1 && isNumericCandidateStart(code)) {
         candidateStart = index;
-        candidateOverflow = false;
-      }
-      if (
-        candidateStart !== -1 &&
-        index - candidateStart + 1 > MAX_NUMERIC_SEQUENCE_LENGTH
-      ) {
-        candidateOverflow = true;
       }
       continue;
     }
 
-    if (candidateStart !== -1 && !candidateOverflow) {
+    if (candidateStart !== -1 && detectFormattedNumeric) {
       collectFormattedNumericCandidate(
         value,
         candidateStart,
@@ -103,7 +96,6 @@ function collectNumericRanges(
       );
     }
     candidateStart = -1;
-    candidateOverflow = false;
   }
 }
 
@@ -179,44 +171,104 @@ function collectFormattedNumericCandidate(
   detectBankCard: boolean,
 ): void {
   const end = trimNumericCandidateEnd(value, rawStart, rawEnd);
-  if (collectValidatedNumericRange(
-    value,
-    rawStart,
-    end,
-    ranges,
-    detectPhone,
-    detectBankCard,
-  )) {
+  const firstCode = value.charCodeAt(rawStart);
+  const initialPhoneCandidate = detectPhone && isPotentialPhoneStart(firstCode);
+  const initialBankCardCandidate =
+    detectBankCard && isPotentialBankCardStart(firstCode);
+  const maxCandidateLength = initialBankCardCandidate
+    ? MAX_BANK_CARD_CANDIDATE_LENGTH
+    : MAX_PHONE_CANDIDATE_LENGTH;
+  const fullCandidateWithinLimit = end - rawStart <= maxCandidateLength;
+  if (
+    (initialPhoneCandidate || initialBankCardCandidate) &&
+    fullCandidateWithinLimit &&
+    collectValidatedNumericRange(
+      value,
+      rawStart,
+      end,
+      ranges,
+      initialPhoneCandidate,
+      initialBankCardCandidate,
+    )
+  ) {
     return;
   }
 
-  const starts = [rawStart];
-  const ends: number[] = [];
-  for (let index = rawStart; index < end; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code !== 32) continue;
-    if (index > rawStart && isNumericCandidateStart(value.charCodeAt(index - 1))) {
-      ends.push(index);
-    }
-    if (index + 1 < end && isNumericCandidateStart(value.charCodeAt(index + 1))) {
-      starts.push(index + 1);
-    }
-  }
-  ends.push(end);
+  let start = rawStart;
+  while (start < end) {
+    const startCode = value.charCodeAt(start);
+    const possiblePhone = detectPhone && isPotentialPhoneStart(startCode);
+    const possibleBankCard =
+      detectBankCard && isPotentialBankCardStart(startCode);
+    const boundedEnd = Math.min(
+      end,
+      start + (
+        possibleBankCard
+          ? MAX_BANK_CARD_CANDIDATE_LENGTH
+          : MAX_PHONE_CANDIDATE_LENGTH
+      ),
+    );
+    let digitCount = 0;
+    for (let subEnd = start + 1; subEnd <= boundedEnd; subEnd += 1) {
+      if (isAsciiDigit(value.charCodeAt(subEnd - 1))) {
+        digitCount += 1;
+      }
+      const isCandidateEnd =
+        subEnd === end ||
+        (
+          value.charCodeAt(subEnd) === 32 &&
+          isNumericCandidateStart(value.charCodeAt(subEnd - 1))
+        );
+      if (
+        !isCandidateEnd ||
+        (fullCandidateWithinLimit && start === rawStart && subEnd === end)
+      ) {
+        continue;
+      }
+      const validatePhone =
+        possiblePhone && isPotentialPhoneDigitCount(startCode, digitCount);
+      const validateBankCard =
+        possibleBankCard && digitCount >= 15 && digitCount <= 19;
+      if (!validatePhone && !validateBankCard) continue;
 
-  for (const start of starts) {
-    for (const subEnd of ends) {
-      if (subEnd <= start) continue;
       collectValidatedNumericRange(
         value,
         start,
         subEnd,
         ranges,
-        detectPhone,
-        detectBankCard,
+        validatePhone,
+        validateBankCard,
       );
     }
+
+    let separator = value.indexOf(' ', start);
+    while (
+      separator !== -1 &&
+      separator + 1 < end &&
+      !isNumericCandidateStart(value.charCodeAt(separator + 1))
+    ) {
+      separator = value.indexOf(' ', separator + 1);
+    }
+    if (separator === -1 || separator + 1 >= end) break;
+    start = separator + 1;
   }
+}
+
+function isPotentialPhoneStart(code: number): boolean {
+  return code === 40 || code === 43 || code === 48 || code === 49;
+}
+
+function isPotentialPhoneDigitCount(startCode: number, digitCount: number): boolean {
+  if (startCode === 43) return digitCount === 13;
+  if (startCode === 49) return digitCount === 11;
+  if (startCode === 48) {
+    return (digitCount >= 10 && digitCount <= 12) || digitCount === 15;
+  }
+  return startCode === 40 && digitCount >= 10 && digitCount <= 12;
+}
+
+function isPotentialBankCardStart(code: number): boolean {
+  return code >= 50 && code <= 54;
 }
 
 function collectValidatedNumericRange(

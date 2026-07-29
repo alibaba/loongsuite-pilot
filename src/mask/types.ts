@@ -1,4 +1,6 @@
-import type { MaskType } from '../types/index.js';
+import type { MaskType, PiiMaskType } from '../types/index.js';
+
+export type { PiiMaskType } from '../types/index.js';
 
 export type MaskRuleKind = 'regex' | 'block' | 'urlWithPassword';
 
@@ -34,8 +36,6 @@ export interface MaskRange {
   ruleId: string;
   type: MaskType;
 }
-
-export type PiiMaskType = 'idCard' | 'phone' | 'email' | 'ipAddress' | 'bankCard';
 
 export interface MaskPlan {
   rules: readonly CompiledMaskRule[];

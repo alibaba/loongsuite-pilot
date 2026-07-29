@@ -1,4 +1,8 @@
 import { readFileSync } from 'node:fs';
+import {
+  PII_MASK_TYPES,
+  SUPPORTED_MASK_TYPES,
+} from '../types/index.js';
 import type { MaskConfig, MaskType } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import type {
@@ -13,30 +17,11 @@ import type {
 const RULES_URL = new URL('./sensitive-rules.json', import.meta.url);
 const logger = createLogger('MaskRuleLoader');
 const SUPPORTED_RULE_KINDS = new Set<MaskRuleKind>(['regex', 'block', 'urlWithPassword']);
-const MANIFEST_MASK_TYPES = new Set<MaskType>([
-  'cloudAccessKey',
-  'apiKey',
-  'privateKey',
-  'databaseUrl',
-]);
-const SUPPORTED_MASK_TYPES = new Set<MaskType>([
-  'cloudAccessKey',
-  'apiKey',
-  'privateKey',
-  'databaseUrl',
-  'idCard',
-  'phone',
-  'email',
-  'ipAddress',
-  'bankCard',
-]);
-const PII_MASK_TYPES = new Set<PiiMaskType>([
-  'idCard',
-  'phone',
-  'email',
-  'ipAddress',
-  'bankCard',
-]);
+const PII_MASK_TYPE_SET = new Set<MaskType>(PII_MASK_TYPES);
+const MANIFEST_MASK_TYPES = new Set<MaskType>(
+  SUPPORTED_MASK_TYPES.filter(type => !PII_MASK_TYPE_SET.has(type)),
+);
+const SUPPORTED_MASK_TYPE_SET = new Set<MaskType>(SUPPORTED_MASK_TYPES);
 
 let cachedRules: CompiledMaskRule[] | undefined;
 
@@ -73,7 +58,7 @@ export function loadMaskPlan(config: MaskConfig): MaskPlan {
       : [],
     piiTypes: new Set(
       [...enabledTypes].filter((type): type is PiiMaskType =>
-        PII_MASK_TYPES.has(type as PiiMaskType),
+        PII_MASK_TYPE_SET.has(type),
       ),
     ),
   };
@@ -91,7 +76,7 @@ export function filterRulesByConfig(
 export function resolveEnabledMaskTypes(config: MaskConfig): Set<MaskType> {
   if (config.mode === 'none') return new Set();
   if (config.mode === 'all') return new Set(SUPPORTED_MASK_TYPES);
-  return new Set(config.types.filter(type => SUPPORTED_MASK_TYPES.has(type)));
+  return new Set(config.types.filter(type => SUPPORTED_MASK_TYPE_SET.has(type)));
 }
 
 export function compileSensitiveRules(manifest: SensitiveRulesManifest): CompiledMaskRule[] {
@@ -153,7 +138,7 @@ function validateBaseRule(rule: SensitiveRuleDefinition): void {
   if (!rule.id || typeof rule.id !== 'string') {
     throw new Error('mask rule missing id');
   }
-  if (!SUPPORTED_MASK_TYPES.has(rule.type)) {
+  if (!SUPPORTED_MASK_TYPE_SET.has(rule.type)) {
     throw new Error(`mask rule ${rule.id} has unsupported type`);
   }
   if (!SUPPORTED_RULE_KINDS.has(rule.kind)) {

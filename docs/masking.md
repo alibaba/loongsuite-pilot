@@ -119,6 +119,7 @@ Stable metadata such as model names, token counts, durations, Git branch, and wo
 - Email covers common ASCII addresses, excluding internationalized addresses and dotless internal domains.
 - IP covers IPv4 only. Version-shaped text such as `1.2.3.4` is also masked as IPv4.
 - Bank cards cover high-confidence UnionPay, Visa, Mastercard, AmEx, and Discover prefixes and must pass Luhn validation.
+- Phone and bank-card detection is format-based. An 11-digit numeric ID with the same shape, or a 15-19 digit business identifier that matches an issuer prefix and passes Luhn, can also be masked. For logs with many numeric business IDs, prefer `custom` mode and enable only the required types.
 - License plates, addresses, company names, job titles, custom key/value rules, and Secret Keys are outside this phase.
 
 ## Verify Masking
