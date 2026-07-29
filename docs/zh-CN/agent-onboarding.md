@@ -208,7 +208,10 @@ Input 应该：
 - 在 probe 前记录目标 JSONL 行数，只分析新交互追加的记录。
 - 操作真实 Agent：CLI Agent 使用真实 CLI，GUI Agent 使用 Computer Use。
 - 验收报告必须包含事件数量、逐事件字段填充率、关联检查、原生类型检查、隐私检查和有实证的已知缺口。
-- 使用 `E2E_JSONL_STRICT=1` 运行 JSONL validator。Strict 是唯一自动质量门禁，不增加 Agent-specific 绕过模式。
+- 使用 `E2E_JSONL_STRICT=1` 运行 JSONL validator；如果待测 Agent 不在默认
+  headless L1 集合中，必须同时用 `E2E_JSONL_AGENT_FILTER=<agent-id>` 明确选择。
+  例如 WorkBuddy GUI 验收必须设置 `E2E_JSONL_AGENT_FILTER=workbuddy`。Strict
+  是唯一自动质量门禁，不增加 Agent-specific 绕过模式。
 
 ## 用户文档清单
 

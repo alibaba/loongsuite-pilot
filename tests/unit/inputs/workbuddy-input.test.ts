@@ -1,9 +1,10 @@
-import { mkdtemp, mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, appendFile, rename } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { applyAgentContentPolicy } from '../../../src/normalization/agent-content-policy.js';
 import { buildWorkBuddyEvents } from '../../../src/inputs/workbuddy/workbuddy-event-builder.js';
@@ -20,6 +21,15 @@ function fixtureRecords(): WorkBuddyRecord[] {
     .trim()
     .split('\n')
     .map(line => JSON.parse(line) as WorkBuddyRecord);
+}
+
+function spanDurationNanos(span: {
+  startTime: [number, number];
+  endTime: [number, number];
+}): bigint {
+  const start = BigInt(span.startTime[0]) * 1_000_000_000n + BigInt(span.startTime[1]);
+  const end = BigInt(span.endTime[0]) * 1_000_000_000n + BigInt(span.endTime[1]);
+  return end - start;
 }
 
 describe('WorkBuddy audit-event builder', () => {
@@ -51,7 +61,7 @@ describe('WorkBuddy audit-event builder', () => {
     expect(responses[1]['gen_ai.response.finish_reasons']).toEqual(['stop']);
     expect(responses[0]['gen_ai.turn.end']).toBeUndefined();
     expect(responses[1]['gen_ai.turn.end']).toBe(true);
-    expect(responses[0]['gen_ai.provider.name']).toBe('zhipu');
+    expect(responses[0]['gen_ai.provider.name']).toBe('workbuddy');
     expect(responses[0]['gen_ai.usage.cache_read.input_tokens']).toBe(4);
     expect(responses[0]['agent.workbuddy.usage.credit']).toBe(0.5);
     expect((responses[0]['gen_ai.output.messages'] as any)[0].parts.map((part: any) => part.type))
@@ -72,6 +82,10 @@ describe('WorkBuddy audit-event builder', () => {
     expect(toolResults[0]['gen_ai.tool.call.result'])
       .toEqual({ ok: true, value: 'SYNTHETIC_RESULT_A' });
     expect(toolResults.map(entry => entry['gen_ai.tool.call.duration'])).toEqual([100, undefined]);
+    expect(requests.map(entry => entry.time_unix_nano))
+      .toEqual(['1000000000', '1300000000']);
+    expect(responses.map(entry => entry.time_unix_nano))
+      .toEqual(['1100000000', '1400000000']);
 
     const eventIds = entries.map(entry => entry['event.id']);
     expect(new Set(eventIds).size).toBe(entries.length);
@@ -106,7 +120,29 @@ describe('WorkBuddy audit-event builder', () => {
     expect(traceIds[0]).not.toBe('00000000000000000000000000000000');
   });
 
-  it('omits unavailable source facts instead of inventing placeholder values', async () => {
+  it.each([
+    'deepseek-v4-flash',
+    'kimi-k2.6',
+    'minimax-m3',
+    'glm-5v-turbo',
+  ])('uses WorkBuddy as provider when %s has no explicit upstream provider', async model => {
+    const records = fixtureRecords().map(record => ({
+      ...record,
+      providerData: record.providerData
+        ? {
+            ...record.providerData,
+            model,
+            requestModelId: model,
+          }
+        : undefined,
+    }));
+    const entries = await buildWorkBuddyEvents(records, { sessionId: 'session-1' });
+
+    expect(new Set(entries.map(entry => entry['gen_ai.provider.name'])))
+      .toEqual(new Set(['workbuddy']));
+  });
+
+  it('omits unavailable source facts and drops tool events without a reliable name', async () => {
     const records = fixtureRecords().map(record => {
       const providerData = record.providerData
         ? Object.fromEntries(Object.entries(record.providerData)
@@ -128,13 +164,16 @@ describe('WorkBuddy audit-event builder', () => {
       .every(entry => entry['gen_ai.request.model'] === undefined)).toBe(true);
     expect(entries.filter(entry => entry['event.name'] === 'llm.response')
       .every(entry => entry['gen_ai.response.model'] === undefined)).toBe(true);
-    expect(entries.filter(entry => entry['event.name'] === 'tool.call' || entry['event.name'] === 'tool.result')
-      .every(entry => entry['gen_ai.tool.name'] === undefined)).toBe(true);
-    expect(entries.filter(entry => entry['event.name'] === 'tool.result')
-      .every(entry => entry['tool.result.status'] === undefined)).toBe(true);
+    expect(entries.some(entry =>
+      entry['event.name'] === 'tool.call' || entry['event.name'] === 'tool.result')).toBe(false);
+    const toolParts = entries
+      .filter(entry => entry['event.name'] === 'llm.response')
+      .flatMap(entry => ((entry['gen_ai.output.messages'] as any)?.[0]?.parts ?? []))
+      .filter((part: any) => part.type === 'tool_call');
+    expect(toolParts).toEqual([]);
   });
 
-  it('keeps generated tool IDs correlated and omits malformed structured payloads', async () => {
+  it('drops tools without a reliable ID and omits malformed structured payloads', async () => {
     const records = fixtureRecords().map(record => {
       if (record.type === 'function_call' && record.callId === 'call-synthetic-a') {
         return { ...record, callId: undefined, arguments: '  {"broken":' };
@@ -158,18 +197,166 @@ describe('WorkBuddy audit-event builder', () => {
 
     expect(toolParts.map((part: any) => part.id))
       .toEqual(toolCalls.map(entry => entry['gen_ai.tool.call.id']));
-    expect(new Set(toolParts.map((part: any) => part.id)).size).toBe(2);
-    expect(toolParts[0]).not.toHaveProperty('arguments');
-    expect(toolCalls[0]['gen_ai.tool.call.arguments']).toBeUndefined();
-    expect(toolParts[1].arguments).toBe('plain synthetic argument');
-    expect(toolCalls[1]['gen_ai.tool.call.arguments']).toBe('plain synthetic argument');
-    expect(toolResults[0]['gen_ai.tool.call.result']).toBeUndefined();
+    expect(new Set(toolParts.map((part: any) => part.id)).size).toBe(1);
+    expect(toolParts[0].id).toBe('call-synthetic-b');
+    expect(toolParts[0].arguments).toBe('plain synthetic argument');
+    expect(toolCalls[0]['gen_ai.tool.call.arguments']).toBe('plain synthetic argument');
+    expect(toolResults.map(entry => entry['gen_ai.tool.call.id']))
+      .toEqual(['call-synthetic-b']);
 
     const nextRequest = entries.find(entry =>
       entry['event.name'] === 'llm.request'
       && entry['gen_ai.step.id'] === 'request-synthetic-1:s2');
-    expect((nextRequest?.['gen_ai.input.messages_delta'] as any)?.[0]?.parts?.[0])
-      .not.toHaveProperty('result');
+    expect((nextRequest?.['gen_ai.input.messages_delta'] as any[]))
+      .toHaveLength(1);
+  });
+
+  it('uses structural Hook data to repair missing transcript tool identity and timestamps', async () => {
+    const records = fixtureRecords().map(record => {
+      if (record.type === 'function_call' && record.callId === 'call-synthetic-a') {
+        return { ...record, callId: undefined, timestamp: undefined };
+      }
+      if (record.type === 'function_call_result' && record.callId === 'call-synthetic-a') {
+        return { ...record, callId: undefined, name: undefined, timestamp: undefined };
+      }
+      return record;
+    });
+    const entries = await buildWorkBuddyEvents(records, {
+      sessionId: 'session-1',
+      hookEvents: [
+        {
+          eventName: 'PreToolUse',
+          observedAtMs: 1_210,
+          toolName: 'SyntheticRead',
+          toolCallId: 'hook-call-a',
+        },
+        {
+          eventName: 'PostToolUse',
+          observedAtMs: 1_330,
+          toolName: 'SyntheticRead',
+          toolCallId: 'hook-call-a',
+        },
+      ],
+    });
+    const hookCall = entries.find(entry =>
+      entry['event.name'] === 'tool.call'
+      && entry['gen_ai.tool.call.id'] === 'hook-call-a');
+    const hookResult = entries.find(entry =>
+      entry['event.name'] === 'tool.result'
+      && entry['gen_ai.tool.call.id'] === 'hook-call-a');
+
+    expect(hookCall?.['gen_ai.tool.name']).toBe('SyntheticRead');
+    expect(hookCall?.time_unix_nano).toBe('1210000000');
+    expect(hookResult?.['gen_ai.tool.name']).toBe('SyntheticRead');
+    expect(hookResult?.time_unix_nano).toBe('1330000000');
+    expect(hookResult?.['gen_ai.tool.call.duration']).toBe(120);
+  });
+
+  it('does not guess between ambiguous parallel Hook tool identities', async () => {
+    const records = fixtureRecords().map(record =>
+      record.type === 'function_call' || record.type === 'function_call_result'
+        ? { ...record, callId: undefined }
+        : record);
+    const hookEvents = [
+      {
+        eventName: 'PreToolUse',
+        observedAtMs: 1_210,
+        toolName: 'SyntheticRead',
+        toolCallId: 'hook-call-a',
+      },
+      {
+        eventName: 'PreToolUse',
+        observedAtMs: 1_220,
+        toolName: 'SyntheticRead',
+        toolCallId: 'hook-call-b',
+      },
+      {
+        eventName: 'PostToolUse',
+        observedAtMs: 1_310,
+        toolName: 'SyntheticRead',
+        toolCallId: 'hook-call-a',
+      },
+      {
+        eventName: 'PostToolUse',
+        observedAtMs: 1_320,
+        toolName: 'SyntheticRead',
+        toolCallId: 'hook-call-b',
+      },
+    ];
+    const entries = await buildWorkBuddyEvents(records, { sessionId: 'session-1', hookEvents });
+
+    expect(entries.some(entry =>
+      entry['event.name'] === 'tool.call' || entry['event.name'] === 'tool.result')).toBe(false);
+  });
+
+  it('uses prompt and Stop Hook times only when LLM transcript timestamps are missing', async () => {
+    const user = fixtureRecords()[0];
+    const assistant = fixtureRecords().find(record =>
+      record.type === 'message'
+      && record.role === 'assistant'
+      && record.id === 'response-synthetic-2')!;
+    const entries = await buildWorkBuddyEvents([
+      { ...user, timestamp: undefined },
+      { ...assistant, timestamp: undefined },
+    ], {
+      sessionId: 'session-1',
+      hookEvents: [
+        { eventName: 'UserPromptSubmit', observedAtMs: 2_000 },
+        { eventName: 'Stop', observedAtMs: 2_500 },
+      ],
+    });
+
+    expect(entries.map(entry => entry.time_unix_nano))
+      .toEqual(['2000000000', '2500000000']);
+  });
+
+  it('prefers transcript response time over an earlier Stop Hook observation', async () => {
+    const user = fixtureRecords()[0];
+    const assistant = fixtureRecords().find(record =>
+      record.type === 'message'
+      && record.role === 'assistant'
+      && record.id === 'response-synthetic-2')!;
+    const entries = await buildWorkBuddyEvents([user, assistant], {
+      sessionId: 'session-1',
+      hookEvents: [
+        { eventName: 'UserPromptSubmit', observedAtMs: 900 },
+        { eventName: 'Stop', observedAtMs: 1_300 },
+      ],
+    });
+
+    expect(entries.map(entry => entry.time_unix_nano))
+      .toEqual(['1000000000', '1500000000']);
+  });
+
+  it('drops tool events when neither transcript nor Hook provides a call timestamp', async () => {
+    const records = fixtureRecords().map(record =>
+      record.type === 'function_call'
+        ? { ...record, timestamp: undefined }
+        : record);
+    const entries = await buildWorkBuddyEvents(records, { sessionId: 'session-1' });
+
+    expect(entries.some(entry => entry['event.name'] === 'tool.call')).toBe(false);
+    expect(entries.some(entry => entry['event.name'] === 'tool.result')).toBe(false);
+  });
+
+  it('produces positive LLM and TOOL spans with transcript-derived boundaries', async () => {
+    const entries = await buildWorkBuddyEvents(fixtureRecords(), { sessionId: 'session-1' });
+    const conversion = await convertEventLogToReadableSpans(entries);
+    expect(conversion.warnings).toEqual([]);
+
+    const llmDurations = conversion.spans
+      .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')
+      .map(span => spanDurationNanos(span));
+    const toolDurations = conversion.spans
+      .filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL')
+      .map(span => spanDurationNanos(span));
+    const stepDurations = conversion.spans
+      .filter(span => span.attributes['gen_ai.span.kind'] === 'STEP')
+      .map(span => spanDurationNanos(span));
+
+    expect(llmDurations).toEqual([100_000_000n, 100_000_000n]);
+    expect(toolDurations).toEqual([100_000_000n, 0n]);
+    expect(stepDurations.every(duration => duration > 0n)).toBe(true);
   });
 
   it('does not infer model finish semantics from assistant status', async () => {
@@ -332,6 +519,145 @@ describe('WorkBuddyInput checkpoints', () => {
     expect(entries.filter(entry => entry['gen_ai.turn.end'] === true)).toHaveLength(1);
     expect(new Set(entries.map(entry => entry['event.id'])).size).toBe(entries.length);
     expect(await input.collectNow()).toEqual([]);
+  });
+
+  it('passes uniquely matched structural Hook identity through to the builder', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-input-hook-repair-'));
+    const projects = path.join(root, 'projects', 'safe-project');
+    const hookLogDir = path.join(root, 'pilot-logs');
+    await mkdir(projects, { recursive: true });
+    await mkdir(hookLogDir, { recursive: true });
+    const transcript = path.join(projects, 'session-hook-repair.jsonl');
+    const journal = path.join(hookLogDir, 'wakeup-2026-07-28.jsonl');
+    await writeFile(transcript, '');
+    await writeFile(journal, '');
+
+    const stateStore = new StateStore(path.join(root, 'state.json'));
+    await stateStore.load();
+    const input = new TestWorkBuddyInput({ stateStore, workBuddyRoot: root, hookLogDir });
+    expect(await input.collectNow()).toEqual([]);
+
+    const source = fixtureRecords();
+    const records = [source[0], source[1], source[2], source[3], source[5], source[7], source[8]]
+      .map(record => {
+        if (record.type === 'function_call') {
+          return { ...record, callId: undefined, name: undefined, timestamp: undefined };
+        }
+        if (record.type === 'function_call_result') {
+          return { ...record, callId: undefined, name: undefined, timestamp: undefined };
+        }
+        return record;
+      });
+    await appendFile(transcript, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
+    await appendFile(journal, [
+      {
+        observed_at_ms: 900,
+        hook_event_name: 'UserPromptSubmit',
+        session_id: 'session-hook-repair',
+        transcript_path: transcript,
+      },
+      {
+        observed_at_ms: 1_210,
+        hook_event_name: 'PreToolUse',
+        session_id: 'session-hook-repair',
+        transcript_path: transcript,
+        tool_name: 'SyntheticRead',
+        tool_call_id: 'hook-call-a',
+      },
+      {
+        observed_at_ms: 1_330,
+        hook_event_name: 'PostToolUse',
+        session_id: 'session-hook-repair',
+        transcript_path: transcript,
+        tool_name: 'SyntheticRead',
+        tool_call_id: 'hook-call-a',
+      },
+      {
+        observed_at_ms: 1_600,
+        hook_event_name: 'Stop',
+        session_id: 'session-hook-repair',
+        transcript_path: transcript,
+      },
+    ].map(record => JSON.stringify(record)).join('\n') + '\n');
+
+    expect(await input.collectNow()).toEqual([]);
+    const entries = await input.collectNow();
+    const toolEntries = entries.filter(entry =>
+      entry['event.name'] === 'tool.call' || entry['event.name'] === 'tool.result');
+
+    expect(toolEntries.map(entry => entry['gen_ai.tool.call.id']))
+      .toEqual(['hook-call-a', 'hook-call-a']);
+    expect(toolEntries.map(entry => entry['gen_ai.tool.name']))
+      .toEqual(['SyntheticRead', 'SyntheticRead']);
+    expect(toolEntries.map(entry => entry.time_unix_nano))
+      .toEqual(['1210000000', '1330000000']);
+    expect(toolEntries[1]['gen_ai.tool.call.duration']).toBe(120);
+  });
+
+  it('preserves checkpoints while the projects directory is temporarily unavailable', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-input-unavailable-'));
+    const projectsRoot = path.join(root, 'projects');
+    const projects = path.join(projectsRoot, 'safe-project');
+    const hiddenProjects = path.join(root, 'projects-temporarily-hidden');
+    const hookLogDir = path.join(root, 'pilot-logs');
+    await mkdir(projects, { recursive: true });
+    await mkdir(hookLogDir, { recursive: true });
+    const transcript = path.join(projects, 'session-unavailable.jsonl');
+    const journal = path.join(hookLogDir, 'wakeup-2026-07-28.jsonl');
+    const records = fixtureRecords();
+    await writeFile(transcript, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
+    await writeFile(journal, '');
+
+    const statePath = path.join(root, 'state.json');
+    const stateStore = new StateStore(statePath);
+    await stateStore.load();
+    const input = new TestWorkBuddyInput({ stateStore, workBuddyRoot: root, hookLogDir });
+    expect(await input.collectNow()).toEqual([]);
+    await stateStore.save();
+    const before = JSON.parse(await readFile(statePath, 'utf8')).workbuddy
+      .extra.workbuddyTranscriptBytes;
+
+    await rename(projectsRoot, hiddenProjects);
+    expect(await input.collectNow()).toEqual([]);
+    await stateStore.save();
+    const unavailable = JSON.parse(await readFile(statePath, 'utf8')).workbuddy
+      .extra.workbuddyTranscriptBytes;
+    expect(unavailable).toEqual(before);
+
+    await rename(hiddenProjects, projectsRoot);
+    const restoredTranscript = path.join(projectsRoot, 'safe-project', 'session-unavailable.jsonl');
+    const finalAssistant = records.find(record =>
+      record.type === 'message'
+      && record.role === 'assistant'
+      && record.id === 'response-synthetic-2')!;
+    const appended = [
+      { ...records[0], id: 'turn-after-recovery', timestamp: 2_000 },
+      {
+        ...finalAssistant,
+        id: 'response-after-recovery',
+        timestamp: 2_500,
+        providerData: {
+          ...finalAssistant.providerData,
+          conversationRequestId: 'request-after-recovery',
+          messageId: 'response-after-recovery',
+        },
+      },
+    ];
+    await appendFile(
+      restoredTranscript,
+      `${appended.map(record => JSON.stringify(record)).join('\n')}\n`,
+    );
+    await appendFile(journal, `${JSON.stringify({
+      observed_at_ms: 3_000,
+      hook_event_name: 'Stop',
+      session_id: 'session-unavailable',
+      transcript_path: restoredTranscript,
+    })}\n`);
+
+    expect(await input.collectNow()).toEqual([]);
+    const recovered = await input.collectNow();
+    expect(recovered.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
+    expect(recovered.every(entry => entry['gen_ai.turn.id'] === 'turn-after-recovery')).toBe(true);
   });
 
   it('requires a stable Stop boundary for a hook-backed transcript', async () => {

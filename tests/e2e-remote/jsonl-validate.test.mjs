@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { buildJsonlValidationSh, JSONL_VALIDATOR_JS } from '../../scripts/e2e/lib/e2e-scenarios.mjs';
+import { buildWorkBuddyEvents } from '../../src/inputs/workbuddy/workbuddy-event-builder.ts';
+import { projectLogEntry } from '../../src/normalization/entry-builder.ts';
 
 /** Run the embedded validator by piping its source into `node -` (mirrors how the remote bash runs it). */
 function runValidator(envOverrides = {}) {
@@ -150,6 +152,31 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
     expect(r.out).toContain('gen_ai.tool.call.id=2 (100.0%)');
   });
 
+  it('accepts projected WorkBuddy builder output after tools with no reliable name are dropped', async () => {
+    const fixture = fs.readFileSync(
+      new URL('../fixtures/workbuddy/multi-tool-wave.jsonl', import.meta.url),
+      'utf8',
+    ).trim().split(/\r?\n/).map(line => JSON.parse(line));
+    const records = fixture.map(record =>
+      record.type === 'function_call' || record.type === 'function_call_result'
+        ? { ...record, name: undefined }
+        : record);
+    const built = await buildWorkBuddyEvents(records, { sessionId: 'session-synthetic-1' });
+    expect(built.some(entry =>
+      entry['event.name'] === 'tool.call' || entry['event.name'] === 'tool.result')).toBe(false);
+
+    const projected = built.map(entry => projectLogEntry({
+      ...entry,
+      'user.id': 'synthetic-user',
+    }, { dropAgentScopedFields: true }));
+    writeJsonl('workbuddy-2026-05-11.jsonl', projected);
+
+    const r = runWorkBuddyValidator();
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('missing_required=0');
+    expect(r.out).toContain('tool_pair_error=0');
+  });
+
   it('detects missing required fields and exits 1 under STRICT', () => {
     writeJsonl('codex-2026-05-11.jsonl', [
       goodEntry(),
@@ -239,6 +266,26 @@ describe('JSONL_VALIDATOR_JS (integration)', () => {
     const r = runValidator({ _JV_LOG_DIR: tmpDir });
     expect(r.code).toBe(0);
     expect(r.out).toContain('no .jsonl files');
+  });
+
+  it('fails strict validation when the requested time window contains no rows', () => {
+    writeJsonl('workbuddy-2026-05-11.jsonl', [
+      goodEntry({
+        time_unix_nano: String(BigInt(Date.now() - 60_000) * 1_000_000n),
+        'gen_ai.agent.type': 'workbuddy',
+        'gen_ai.provider.name': 'workbuddy',
+      }),
+    ]);
+    const r = runValidator({
+      _JV_LOG_DIR: tmpDir,
+      E2E_JSONL_AGENT_FILTER: 'workbuddy',
+      E2E_JSONL_SINCE_SECONDS: '1',
+      E2E_JSONL_STRICT: '1',
+    });
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('windowed=0');
+    expect(r.out).toContain('empty_window=1');
   });
 
   it('default filter covers the L1 CLI coverage set and excludes IDE-only agents', () => {

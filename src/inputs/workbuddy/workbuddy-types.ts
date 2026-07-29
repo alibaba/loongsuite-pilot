@@ -17,6 +17,15 @@ export interface WorkBuddyRecord {
   providerData?: Record<string, unknown>;
 }
 
+export interface WorkBuddyHookEvent {
+  eventName: string;
+  observedAtMs: number;
+  sessionId?: string;
+  toolName?: string;
+  toolCallId?: string;
+}
+
 export interface WorkBuddyBuildOptions {
   sessionId: string;
+  hookEvents?: WorkBuddyHookEvent[];
 }

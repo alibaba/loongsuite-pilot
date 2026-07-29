@@ -209,7 +209,11 @@ Cover detection/deployment, hook or plugin record generation, checkpointing, con
 - Record the target JSONL line count before the probe and analyze only rows appended by the new interaction.
 - Exercise the real agent: use its CLI for CLI agents and Computer Use for GUI agents.
 - Report event counts, per-event field coverage, correlation checks, native-type checks, privacy checks, and any evidence-backed gaps.
-- Run the JSONL validator with `E2E_JSONL_STRICT=1`. Strict mode is the single automated quality gate; do not add agent-specific bypass modes.
+- Run the JSONL validator with `E2E_JSONL_STRICT=1` and explicitly select the
+  agent under test with `E2E_JSONL_AGENT_FILTER=<agent-id>` when it is outside
+  the default headless L1 set. For example, WorkBuddy GUI acceptance must use
+  `E2E_JSONL_AGENT_FILTER=workbuddy`. Strict mode is the single automated
+  quality gate; do not add agent-specific bypass modes.
 
 ## User Documentation Checklist
 

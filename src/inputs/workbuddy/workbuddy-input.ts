@@ -7,7 +7,7 @@ import type { AgentActivityEntry } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { buildWorkBuddyEvents } from './workbuddy-event-builder.js';
-import type { WorkBuddyRecord } from './workbuddy-types.js';
+import type { WorkBuddyHookEvent, WorkBuddyRecord } from './workbuddy-types.js';
 
 const OFFSET_MAP_KEY = 'workbuddyTranscriptBytes';
 const FILE_META_MAP_KEY = 'workbuddyTranscriptFiles';
@@ -18,6 +18,9 @@ interface HookTranscriptHint {
   transcriptPath: string;
   eventName?: string;
   observedAtMs?: number;
+  sessionId?: string;
+  toolName?: string;
+  toolCallId?: string;
 }
 
 interface TranscriptFileMeta {
@@ -89,8 +92,10 @@ export class WorkBuddyInput extends BaseInput {
       ...scannedPaths,
     ]);
     const stopHints = await this.resolveStopHints(hookHints);
-    const nextOffsets: Record<string, number> = {};
-    const nextFileMeta: Record<string, TranscriptFileMeta> = {};
+    // Preserve checkpoints for paths that are temporarily unavailable. A scan
+    // or read failure is not proof that a transcript was permanently deleted.
+    const nextOffsets: Record<string, number> = { ...offsets };
+    const nextFileMeta: Record<string, TranscriptFileMeta> = { ...fileMeta };
     const entries: AgentActivityEntry[] = [];
 
     for (const transcriptPath of transcriptPaths) {
@@ -129,7 +134,14 @@ export class WorkBuddyInput extends BaseInput {
         const parsed = await readJsonlRange(transcriptPath, committedOffset, stat.size);
         if (parsed && parsed.nextOffset === stat.size) {
           const sessionId = path.basename(transcriptPath, '.jsonl');
-          const built = await buildWorkBuddyEvents(parsed.records, { sessionId });
+          const hookEvents = await this.resolveHookEvents(
+            hookHints,
+            transcriptPath,
+            sessionId,
+            priorMeta?.handledStopAtMs ?? 0,
+            latestStopAtMs,
+          );
+          const built = await buildWorkBuddyEvents(parsed.records, { sessionId, hookEvents });
           entries.push(...built);
           nextOffsets[transcriptPath] = parsed.nextOffset;
           handledStopAtMs = latestStopAtMs;
@@ -212,6 +224,11 @@ export class WorkBuddyInput extends BaseInput {
                 && Number.isFinite(record.observed_at_ms)
                 ? record.observed_at_ms
                 : undefined,
+              sessionId: typeof record.session_id === 'string' ? record.session_id : undefined,
+              toolName: typeof record.tool_name === 'string' ? record.tool_name : undefined,
+              toolCallId: typeof record.tool_call_id === 'string'
+                ? record.tool_call_id
+                : undefined,
             });
           }
         } catch { /* structural hint only */ }
@@ -264,6 +281,39 @@ export class WorkBuddyInput extends BaseInput {
       stops.set(realCandidate, Math.max(stops.get(realCandidate) ?? 0, hint.observedAtMs));
     }
     return stops;
+  }
+
+  private async resolveHookEvents(
+    hints: HookTranscriptHint[],
+    transcriptPath: string,
+    sessionId: string,
+    afterMs: number,
+    throughMs: number,
+  ): Promise<WorkBuddyHookEvent[]> {
+    const events: WorkBuddyHookEvent[] = [];
+    for (const hint of hints) {
+      if (!hint.eventName || hint.observedAtMs === undefined) continue;
+      if (!['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop'].includes(hint.eventName)) {
+        continue;
+      }
+      if (hint.observedAtMs <= afterMs || hint.observedAtMs > throughMs) continue;
+      if (hint.sessionId && hint.sessionId !== sessionId) continue;
+      let realCandidate: string;
+      try {
+        realCandidate = await fs.realpath(hint.transcriptPath);
+      } catch {
+        continue;
+      }
+      if (realCandidate !== transcriptPath) continue;
+      events.push({
+        eventName: hint.eventName,
+        observedAtMs: hint.observedAtMs,
+        sessionId: hint.sessionId,
+        toolName: hint.toolName,
+        toolCallId: hint.toolCallId,
+      });
+    }
+    return events;
   }
 }
 

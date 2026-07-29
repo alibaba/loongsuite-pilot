@@ -1022,6 +1022,10 @@ for (const row of rows) {
   }
 }
 
+if (SINCE_SECONDS > 0 && totalWindowed === 0) {
+  addIssue(path.basename(files[0]), 'empty_window');
+}
+
 for (const [base, stat] of fileStats) {
   const tag = stat.issues ? 'FAIL' : 'OK';
   const summary = Object.entries(stat.eventName).map(([k, v]) => k + '=' + v).join(', ') || '<none>';
@@ -1034,6 +1038,7 @@ console.log('  files=' + files.length + ' entries=' + totalEntries + ' windowed=
 for (const category of [
   'missing_required', 'bad_event_name', 'parse_error', 'type_error',
   'duplicate_event_id', 'model_pair_error', 'tool_pair_error', 'turn_boundary_error',
+  'empty_window',
 ]) {
   console.log('  ' + category + '=' + (issueCounts[category] || 0));
 }

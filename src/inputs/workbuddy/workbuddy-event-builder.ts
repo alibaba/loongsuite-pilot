@@ -2,7 +2,11 @@ import { createHash } from 'node:crypto';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { ClientType } from '../../types/index.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
-import type { WorkBuddyBuildOptions, WorkBuddyRecord } from './workbuddy-types.js';
+import type {
+  WorkBuddyBuildOptions,
+  WorkBuddyHookEvent,
+  WorkBuddyRecord,
+} from './workbuddy-types.js';
 
 type Message = { role: string; parts: Array<Record<string, JsonValue>> };
 
@@ -14,17 +18,57 @@ interface StepContext {
   provider: string;
   requestModel?: string;
   responseModel?: string;
-  ordinal: number;
 }
 
 interface ToolContext {
   step: StepContext;
   callTimestamp: number;
+  toolName: string;
 }
 
 interface IndexedWorkBuddyRecord {
   record: WorkBuddyRecord;
   index: number;
+}
+
+interface ResolvedToolCall {
+  record: WorkBuddyRecord;
+  callId: string;
+  toolName: string;
+  callTimestamp: number;
+}
+
+class HookEventResolver {
+  private readonly events: Array<WorkBuddyHookEvent & { consumed: boolean }>;
+
+  constructor(events: WorkBuddyHookEvent[] = []) {
+    this.events = events
+      .filter(event => Number.isFinite(event.observedAtMs))
+      .sort((a, b) => a.observedAtMs - b.observedAtMs)
+      .map(event => ({ ...event, consumed: false }));
+  }
+
+  takeBoundary(eventName: string): WorkBuddyHookEvent | undefined {
+    const match = this.events.find(event => !event.consumed && event.eventName === eventName);
+    if (!match) return undefined;
+    match.consumed = true;
+    return match;
+  }
+
+  takeTool(
+    eventName: 'PreToolUse' | 'PostToolUse',
+    callId?: string,
+    toolName?: string,
+  ): WorkBuddyHookEvent | undefined {
+    const candidates = this.events.filter(event =>
+      !event.consumed
+      && event.eventName === eventName
+      && (callId ? event.toolCallId === callId : true)
+      && (toolName ? event.toolName === toolName : true));
+    if (candidates.length !== 1) return undefined;
+    candidates[0].consumed = true;
+    return candidates[0];
+  }
 }
 
 export async function buildWorkBuddyEvents(
@@ -33,12 +77,22 @@ export async function buildWorkBuddyEvents(
 ): Promise<AgentActivityEntry[]> {
   const built: AgentActivityEntry[] = [];
   const tools = new Map<string, ToolContext>();
+  const hookEvents = new HookEventResolver(opts.hookEvents);
+  const resultNamesByCallId = new Map<string, string>();
+  for (const record of records) {
+    if (record.type !== 'function_call_result') continue;
+    const callId = stringValue(record.callId);
+    const toolName = stringValue(record.name);
+    if (callId && toolName) resultNamesByCallId.set(callId, toolName);
+  }
   let turnId = stableId(opts.sessionId, 'turn:unknown');
   let turnOrdinal = 0;
   let stepOrdinal = 0;
   let firstStep = true;
   let pendingDelta: Message[] = [];
   let reasoningParts: Array<Record<string, JsonValue>> = [];
+  let reasoningStartMs: number | undefined;
+  let requestStartMs: number | undefined;
   let cwd: string | undefined;
 
   const push = async (entry: AgentActivityEntry, source: WorkBuddyRecord) => {
@@ -57,15 +111,39 @@ export async function buildWorkBuddyEvents(
   ) => {
     stepOrdinal++;
     const step = stepContext(responseSource, opts.sessionId, turnId, stepOrdinal);
-    const normalizedCalls = calls.map(({ record, index }) => ({
-      record,
-      callId: stringValue(record.callId)
-        ?? stableId(opts.sessionId, `call:${sourceId(record)}:${index}`),
-    }));
+    const normalizedCalls: ResolvedToolCall[] = [];
+    for (const indexed of calls) {
+      const nativeCallId = stringValue(indexed.record.callId);
+      const nativeToolName = stringValue(indexed.record.name);
+      const hook = nativeCallId
+        ? hookEvents.takeTool('PreToolUse', nativeCallId)
+        : hookEvents.takeTool('PreToolUse', undefined, nativeToolName);
+      const callId = nativeCallId ?? hook?.toolCallId;
+      const toolName = nativeToolName
+        ?? (callId ? resultNamesByCallId.get(callId) : undefined)
+        ?? hook?.toolName;
+      if (!callId || !toolName) continue;
+      const callTimestamp = timestampMs(indexed.record)
+        ?? hook?.observedAtMs;
+      if (callTimestamp === undefined) continue;
+      normalizedCalls.push({
+        record: indexed.record,
+        callId,
+        toolName,
+        callTimestamp,
+      });
+    }
+    const responseTimestamp = earliestTimestamp(
+      reasoningStartMs,
+      timestampMs(responseSource),
+      ...normalizedCalls.map(call => call.callTimestamp),
+    );
+    if (responseTimestamp === undefined) return;
+    const requestTimestamp = requestStartMs ?? responseTimestamp;
     const outputParts = [
       ...reasoningParts,
       ...assistantParts,
-      ...normalizedCalls.map(({ record: call, callId }) => toToolCallPart(call, callId)),
+      ...normalizedCalls.map(call => toToolCallPart(call.record, call.callId, call.toolName)),
     ];
     const request = baseEntry(
       'llm.request',
@@ -73,6 +151,7 @@ export async function buildWorkBuddyEvents(
       opts.sessionId,
       step,
       `request:${step.stepId}`,
+      requestTimestamp,
     );
     request['gen_ai.request.id'] = step.requestId;
     if (step.requestModel) request['gen_ai.request.model'] = step.requestModel;
@@ -85,6 +164,7 @@ export async function buildWorkBuddyEvents(
       opts.sessionId,
       step,
       `response:${responseSourceId(responseSource)}:tool-wave`,
+      responseTimestamp,
     );
     response['gen_ai.response.id'] = responseSourceId(responseSource);
     if (step.responseModel) response['gen_ai.response.model'] = step.responseModel;
@@ -94,29 +174,35 @@ export async function buildWorkBuddyEvents(
       parts: outputParts,
       finish_reason: 'tool_call',
     }];
-    applyUsage(response, normalizedCalls[normalizedCalls.length - 1].record);
+    applyUsage(response, calls[calls.length - 1].record);
 
     await push(request, responseSource);
     await push(response, responseSource);
-    for (const { record: call, callId } of normalizedCalls) {
-      tools.set(callId, { step, callTimestamp: timestampMs(call) });
+    for (const call of normalizedCalls) {
+      tools.set(call.callId, {
+        step,
+        callTimestamp: call.callTimestamp,
+        toolName: call.toolName,
+      });
       const toolCall = baseEntry(
         'tool.call',
-        call,
+        call.record,
         opts.sessionId,
         step,
-        `tool-call:${callId}`,
+        `tool-call:${call.callId}`,
+        call.callTimestamp,
       );
-      const toolName = stringValue(call.name);
-      if (toolName) toolCall['gen_ai.tool.name'] = toolName;
-      toolCall['gen_ai.tool.call.id'] = callId;
-      const args = parseJsonValue(call.arguments);
+      toolCall['gen_ai.tool.name'] = call.toolName;
+      toolCall['gen_ai.tool.call.id'] = call.callId;
+      const args = parseJsonValue(call.record.arguments);
       if (args !== undefined) toolCall['gen_ai.tool.call.arguments'] = args;
-      await push(toolCall, call);
+      await push(toolCall, call.record);
     }
 
     pendingDelta = [];
     reasoningParts = [];
+    reasoningStartMs = undefined;
+    requestStartMs = responseTimestamp;
     firstStep = false;
   };
 
@@ -133,11 +219,15 @@ export async function buildWorkBuddyEvents(
       const message = toMessage(record, 'user');
       pendingDelta = message.parts.length > 0 ? [message] : [];
       reasoningParts = [];
+      reasoningStartMs = undefined;
+      const hook = hookEvents.takeBoundary('UserPromptSubmit');
+      requestStartMs = timestampMs(record) ?? hook?.observedAtMs;
       continue;
     }
 
     if (record.type === 'reasoning') {
       reasoningParts.push(...toReasoningParts(record));
+      reasoningStartMs = earliestTimestamp(reasoningStartMs, timestampMs(record));
       continue;
     }
 
@@ -150,23 +240,38 @@ export async function buildWorkBuddyEvents(
     }
 
     if (record.type === 'function_call_result') {
-      const callId = stringValue(record.callId) ?? stableId(opts.sessionId, `call:${sourceId(record)}`);
+      const nativeCallId = stringValue(record.callId);
+      const nativeToolName = stringValue(record.name);
+      const hook = nativeCallId
+        ? hookEvents.takeTool('PostToolUse', nativeCallId)
+        : hookEvents.takeTool('PostToolUse', undefined, nativeToolName);
+      const callId = nativeCallId ?? hook?.toolCallId;
+      const resultTimestamp = timestampMs(record) ?? hook?.observedAtMs;
+      requestStartMs = latestTimestamp(requestStartMs, resultTimestamp);
+      if (!callId) continue;
       const tool = tools.get(callId);
-      const step = tool?.step ?? stepContext(record, opts.sessionId, turnId, Math.max(stepOrdinal, 1));
-      const result = baseEntry('tool.result', record, opts.sessionId, step, `tool-result:${callId}`);
-      const toolName = stringValue(record.name);
-      if (toolName) result['gen_ai.tool.name'] = toolName;
+      if (!tool || resultTimestamp === undefined) continue;
+      const result = baseEntry(
+        'tool.result',
+        record,
+        opts.sessionId,
+        tool.step,
+        `tool-result:${callId}`,
+        resultTimestamp,
+      );
+      result['gen_ai.tool.name'] = tool.toolName;
       result['gen_ai.tool.call.id'] = callId;
       const output = parseJsonValue(record.output);
       if (output !== undefined) result['gen_ai.tool.call.result'] = output;
       const status = normalizeToolStatus(record.status);
       if (status) result['tool.result.status'] = status;
-      const durationMs = tool ? timestampMs(record) - tool.callTimestamp : undefined;
-      if (durationMs !== undefined && durationMs > 0) {
+      const durationMs = resultTimestamp - tool.callTimestamp;
+      if (durationMs > 0) {
         result['gen_ai.tool.call.duration'] = durationMs;
       }
       if (status === 'failure') result['error.type'] = 'tool_execution_failed';
       await push(result, record);
+      tools.delete(callId);
       const resultPart: Record<string, JsonValue> = {
         type: 'tool_call_response',
         id: callId,
@@ -191,15 +296,39 @@ export async function buildWorkBuddyEvents(
       stepOrdinal++;
       const step = stepContext(record, opts.sessionId, turnId, stepOrdinal);
       const message = toMessage(record, 'assistant');
-      const request = baseEntry('llm.request', record, opts.sessionId, step, `request:${step.stepId}`);
+      const stopHook = hookEvents.takeBoundary('Stop');
+      const transcriptResponseTimestamp = earliestTimestamp(
+        reasoningStartMs,
+        timestampMs(record),
+      );
+      const responseTimestamp = transcriptResponseTimestamp ?? stopHook?.observedAtMs;
+      if (responseTimestamp === undefined) continue;
+      const requestTimestamp = requestStartMs ?? responseTimestamp;
+      const request = baseEntry(
+        'llm.request',
+        record,
+        opts.sessionId,
+        step,
+        `request:${step.stepId}`,
+        requestTimestamp,
+      );
       request['gen_ai.request.id'] = step.requestId;
       if (step.requestModel) request['gen_ai.request.model'] = step.requestModel;
       if (firstStep) request['gen_ai.turn.start'] = true;
       if (pendingDelta.length > 0) request['gen_ai.input.messages_delta'] = pendingDelta;
 
-      const response = baseEntry('llm.response', record, opts.sessionId, step, `response:${sourceId(record)}`);
+      const response = baseEntry(
+        'llm.response',
+        record,
+        opts.sessionId,
+        step,
+        `response:${sourceId(record)}`,
+        responseTimestamp,
+      );
       response['gen_ai.response.id'] = providerString(record, 'messageId') ?? stringValue(record.id);
       if (step.responseModel) response['gen_ai.response.model'] = step.responseModel;
+      // A stable Stop Hook seals this assistant record. WorkBuddy's assistant
+      // `status=completed` is not a model finish/error signal and is intentionally ignored.
       response['gen_ai.response.finish_reasons'] = ['stop'];
       response['gen_ai.turn.end'] = true;
       const parts = [...reasoningParts, ...message.parts];
@@ -210,6 +339,8 @@ export async function buildWorkBuddyEvents(
       await push(response, record);
       pendingDelta = [];
       reasoningParts = [];
+      reasoningStartMs = undefined;
+      requestStartMs = responseTimestamp;
       firstStep = false;
     }
   }
@@ -223,8 +354,9 @@ function baseEntry(
   sessionId: string,
   step: StepContext,
   eventSeed: string,
+  timestamp: number,
 ): AgentActivityEntry {
-  const time = String(timestampMs(source) * 1_000_000);
+  const time = String(timestamp * 1_000_000);
   return {
     time_unix_nano: time,
     observed_time_unix_nano: String(Date.now() * 1_000_000),
@@ -256,10 +388,9 @@ function stepContext(record: WorkBuddyRecord, sessionId: string, turnId: string,
     requestId: stepId,
     turnId,
     traceId: isValidTraceId(rawTraceId) ? rawTraceId.toLowerCase() : stableHex(`${sessionId}:${turnId}`, 32),
-    provider: inferProvider(responseModel),
+    provider: 'workbuddy',
     requestModel: requested,
     responseModel,
-    ordinal,
   };
 }
 
@@ -283,13 +414,16 @@ function toReasoningParts(record: WorkBuddyRecord): Array<Record<string, JsonVal
   });
 }
 
-function toToolCallPart(record: WorkBuddyRecord, callId: string): Record<string, JsonValue> {
+function toToolCallPart(
+  record: WorkBuddyRecord,
+  callId: string,
+  toolName: string,
+): Record<string, JsonValue> {
   const part: Record<string, JsonValue> = {
     type: 'tool_call',
     id: callId,
+    name: toolName,
   };
-  const name = stringValue(record.name);
-  if (name) part.name = name;
   const args = parseJsonValue(record.arguments);
   if (args !== undefined) part.arguments = args;
   return part;
@@ -322,15 +456,6 @@ function applyUsage(entry: AgentActivityEntry, record: WorkBuddyRecord): void {
   if (credit !== undefined) entry['agent.workbuddy.usage.credit'] = credit;
 }
 
-function inferProvider(model: string | undefined): string {
-  if (!model) return 'workbuddy';
-  if (/^(glm|chatglm)/i.test(model)) return 'zhipu';
-  if (/^(hy\d|hunyuan)/i.test(model)) return 'tencent.hunyuan';
-  if (/^(gpt|o\d|chatgpt)/i.test(model)) return 'openai';
-  if (/^(claude)/i.test(model)) return 'anthropic';
-  return 'workbuddy';
-}
-
 function isInternalRecord(record: WorkBuddyRecord): boolean {
   const provider = record.providerData ?? {};
   return provider.isCompactInternal === true || provider.skipRun === true || provider.agent === 'compact';
@@ -343,8 +468,20 @@ function normalizeToolStatus(status: unknown): string | undefined {
   return undefined;
 }
 
-function timestampMs(record: WorkBuddyRecord): number {
-  return typeof record.timestamp === 'number' && Number.isFinite(record.timestamp) ? Math.trunc(record.timestamp) : Date.now();
+function timestampMs(record: WorkBuddyRecord): number | undefined {
+  return typeof record.timestamp === 'number' && Number.isFinite(record.timestamp)
+    ? Math.trunc(record.timestamp)
+    : undefined;
+}
+
+function earliestTimestamp(...values: Array<number | undefined>): number | undefined {
+  const timestamps = values.filter((value): value is number => value !== undefined);
+  return timestamps.length > 0 ? Math.min(...timestamps) : undefined;
+}
+
+function latestTimestamp(...values: Array<number | undefined>): number | undefined {
+  const timestamps = values.filter((value): value is number => value !== undefined);
+  return timestamps.length > 0 ? Math.max(...timestamps) : undefined;
 }
 
 function sourceId(record: WorkBuddyRecord): string {
@@ -359,7 +496,7 @@ function collectFunctionCallWave(
   records: WorkBuddyRecord[],
   startIndex: number,
   responseSource: WorkBuddyRecord,
-): { calls: IndexedWorkBuddyRecord[]; cursor: number; complete: boolean } {
+): { calls: IndexedWorkBuddyRecord[]; complete: boolean } {
   const calls: IndexedWorkBuddyRecord[] = [];
   let cursor = startIndex;
   while (cursor < records.length) {
@@ -368,7 +505,7 @@ function collectFunctionCallWave(
     calls.push({ record: candidate, index: cursor });
     cursor++;
   }
-  return { calls, cursor, complete: cursor < records.length };
+  return { calls, complete: cursor < records.length };
 }
 
 function isSameResponseWave(left: WorkBuddyRecord, right: WorkBuddyRecord): boolean {
