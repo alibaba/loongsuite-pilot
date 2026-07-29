@@ -13,6 +13,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROCESSOR="$SCRIPT_DIR/codex-hook-processor.mjs"
+PILOT_DATA_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+export LOONGSUITE_PILOT_DATA_DIR="${LOONGSUITE_PILOT_DATA_DIR:-$PILOT_DATA_DIR}"
 EMPTY_RESULT='{}'
 SUBCOMMAND="${1:-unknown}"
 
@@ -71,7 +73,7 @@ node_is_suitable() {
   return 0
 }
 
-NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
+NODE_PIN_FILE="$LOONGSUITE_PILOT_DATA_DIR/node-bin"
 NODE_BIN=""
 
 if [[ -f "$NODE_PIN_FILE" ]]; then

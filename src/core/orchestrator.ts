@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { ClientType } from '../types/index.js';
-import type { AnalyticsConfig, AgentDetectionEntry } from '../types/index.js';
+import type { AnalyticsConfig, AgentDetectionEntry, AgentStopReason } from '../types/index.js';
 import { AgentControlManager } from './agent-control-manager.js';
 import { AgentDiscoveryService } from './agent-discovery-service.js';
 import { InputManager } from './input-manager.js';
@@ -219,13 +219,17 @@ export class Orchestrator extends EventEmitter {
     this.agentDiscoveryService.on('agent:started', (id: string) => {
       logger.info('agent detected and started', { id });
     });
-    this.agentDiscoveryService.on('agent:stopped', (id: string) => {
-      logger.info('agent stopped', { id });
-      this.alarmManager.record(
-        'INPUT_STOP_ALARM', '3',
-        `input ${id} stopped unexpectedly`,
-        { input_name: id },
-      );
+    this.agentDiscoveryService.on('agent:stopped', (id: string, reason: AgentStopReason) => {
+      if (reason === 'unexpected') {
+        logger.warn('agent stopped unexpectedly', { id });
+        this.alarmManager.record(
+          'INPUT_STOP_ALARM', '3',
+          `input ${id} stopped unexpectedly (reason=unexpected)`,
+          { input_name: id },
+        );
+      } else {
+        logger.debug('agent stopped', { id, reason });
+      }
     });
     await this.agentDiscoveryService.start();
 
@@ -285,13 +289,15 @@ export class Orchestrator extends EventEmitter {
     });
     await this.metricsWriter.start();
 
-    // 14. Start status bar support (runtime.json + metrics summary + native app)
+    // 14. Always publish runtime health for service managers. The status bar UI
+    // may be disabled, but Windows Task Scheduler still needs runtime.json to
+    // distinguish a healthy collector from a task whose child process died.
+    const packageVersion = this.readPackageVersion();
+    this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
+    this.runtimeWriter.start();
+
+    // Status bar metrics/native UI remain optional.
     if (this.config.statusBar.enabled) {
-      const packageVersion = this.readPackageVersion();
-
-      this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
-      this.runtimeWriter.start();
-
       this.metricsSummaryWriter = new MetricsSummaryWriter(this.dataDir, this.config.statusBar);
       this.metricsSummaryWriter.start();
 
@@ -1126,6 +1132,7 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['wukong']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['wukong']?.pollInterval,
+        unavailableThreshold: 3,
       }),
     );
 

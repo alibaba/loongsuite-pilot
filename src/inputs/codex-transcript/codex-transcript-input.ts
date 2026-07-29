@@ -36,6 +36,17 @@ const MAX_EMIT_BATCH_BYTES = 1024 * 1024;
 const MAX_PERSISTED_INPUT_CONTEXT_BYTES = 1024 * 1024;
 const MAX_TERMINALS_PER_FILE_CYCLE = 100;
 const MAX_SCAN_BYTES_PER_FILE_CYCLE = 16 * 1024 * 1024;
+// Dynamic roots come from user-local Hook markers. Keep discovery bounded so
+// stale task homes cannot turn every polling cycle into an unbounded walk.
+const MAX_WAKEUP_MARKERS_FOR_DISCOVERY = 256;
+const MAX_WAKEUP_MARKERS_PER_CLEANUP = 1_024;
+const MAX_DYNAMIC_SESSION_DIRS = 64;
+const MAX_DYNAMIC_SESSION_FILES = 64;
+const MAX_DYNAMIC_DIRECTORIES_PER_ROOT = 8;
+const MAX_DYNAMIC_ROLLOUT_FILES_PER_ROOT = 256;
+const WAKEUP_MARKER_DISCOVERY_TTL_MS = 48 * 60 * 60 * 1_000;
+const WAKEUP_MARKER_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
+const DYNAMIC_SESSION_FILE_MAX_IDLE_MS = 15 * 60 * 1_000;
 // Values emitted by DEFAULT_RESOURCE_ENV_FIELD_MAP in assets/hooks/shared/resource-context.mjs.
 // Add new AgentTeams resource fields to both lists together.
 const WAKEUP_RESOURCE_ATTRIBUTE_KEYS = [
@@ -82,6 +93,16 @@ interface PendingRecoveryResult {
   processedTerminalCount: number;
 }
 
+interface DiscoveredSessionFile {
+  filePath: string;
+  baselineOnStart: boolean;
+}
+
+interface DynamicDirectoryWalkBudget {
+  remainingDirectories: number;
+  remainingRolloutFiles: number;
+}
+
 export interface CodexTranscriptInputOptions extends InputOptions {
   sessionDir?: string;
   wakeupDir?: string;
@@ -99,6 +120,7 @@ export class CodexTranscriptInput extends BaseInput {
   private processedTerminalTurnIdsDirty = false;
   private processedTerminalTurnIds = new Set<string>();
   private processedTerminalTurnIdOrder: string[] = [];
+  private lastWakeupMarkerCleanupAtMs = 0;
 
   constructor(opts: CodexTranscriptInputOptions) {
     super({ stateStore: opts.stateStore, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
@@ -116,9 +138,9 @@ export class CodexTranscriptInput extends BaseInput {
 
   protected override async onStart(): Promise<void> {
     this.loadGlobalProcessedTerminalTurnIds();
-    for (const filePath of await this.discoverSessionFiles()) {
+    for (const { filePath, baselineOnStart } of await this.discoverSessionFiles()) {
       const key = this.stateKey(filePath);
-      if (!this.readCheckpoint(key)) await this.baselineFile(filePath, key);
+      if (baselineOnStart && !this.readCheckpoint(key)) await this.baselineFile(filePath, key);
     }
     this.saveGlobalProcessedTerminalTurnIds();
     await fs.mkdir(this.wakeupDir, { recursive: true });
@@ -144,7 +166,7 @@ export class CodexTranscriptInput extends BaseInput {
 
   protected override async collect(): Promise<AgentActivityEntry[]> {
     let emittedCount = 0;
-    for (const filePath of await this.discoverSessionFiles()) {
+    for (const { filePath } of await this.discoverSessionFiles()) {
       emittedCount += await this.processFile(filePath);
     }
     if (emittedCount > 0) {
@@ -686,10 +708,140 @@ export class CodexTranscriptInput extends BaseInput {
     });
   }
 
-  private async discoverSessionFiles(): Promise<string[]> {
-    const files: string[] = [];
-    await collectRolloutFiles(this.sessionDir, files);
-    return files.sort();
+  private async discoverSessionFiles(): Promise<DiscoveredSessionFile[]> {
+    const discovered = new Map<string, DiscoveredSessionFile>();
+    const canonicalDefaultSessionDir = await canonicalDirectoryPath(this.sessionDir);
+    const defaultFiles: string[] = [];
+    await collectRolloutFiles(this.sessionDir, defaultFiles);
+    for (const filePath of defaultFiles) {
+      const canonicalPath = path.join(
+        canonicalDefaultSessionDir,
+        path.relative(this.sessionDir, filePath),
+      );
+      // Keep the configured/default path as the checkpoint key for backwards
+      // compatibility. Canonicalizing the root once avoids a realpath syscall
+      // for every historical rollout on every collection cycle.
+      discovered.set(canonicalPath, { filePath, baselineOnStart: true });
+    }
+
+    let remainingDynamicFiles = MAX_DYNAMIC_SESSION_FILES;
+    for (const sessionDir of await this.discoverDynamicSessionDirs(canonicalDefaultSessionDir)) {
+      if (remainingDynamicFiles <= 0) break;
+      const files: string[] = [];
+      await collectRecentRolloutFiles(
+        sessionDir,
+        files,
+        Date.now() - DYNAMIC_SESSION_FILE_MAX_IDLE_MS,
+        remainingDynamicFiles,
+        {
+          remainingDirectories: MAX_DYNAMIC_DIRECTORIES_PER_ROOT,
+          remainingRolloutFiles: MAX_DYNAMIC_ROLLOUT_FILES_PER_ROOT,
+        },
+      );
+      for (const filePath of files) {
+        if (discovered.has(filePath)) continue;
+        discovered.set(filePath, { filePath, baselineOnStart: false });
+        remainingDynamicFiles--;
+        if (remainingDynamicFiles <= 0) break;
+      }
+    }
+
+    return [...discovered.values()].sort((left, right) => left.filePath.localeCompare(right.filePath));
+  }
+
+  private async discoverDynamicSessionDirs(canonicalDefaultSessionDir: string): Promise<string[]> {
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(this.wakeupDir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+
+    const allMarkerEntries = entries
+      .filter(entry => entry.isFile() && entry.name.endsWith('.json'));
+    const now = Date.now();
+    await this.cleanupExpiredWakeupMarkers(allMarkerEntries, now);
+    const markerEntries = allMarkerEntries
+      // Marker names are Codex UUIDv7 session IDs, so descending lexical order
+      // keeps the newest task markers inside the bounded discovery window.
+      .sort((left, right) => right.name.localeCompare(left.name))
+      .slice(0, MAX_WAKEUP_MARKERS_FOR_DISCOVERY);
+    const sessionDirs = new Set<string>();
+
+    for (const entry of markerEntries) {
+      let marker: Record<string, unknown> | null = null;
+      try {
+        marker = asRecord(JSON.parse(await fs.readFile(path.join(this.wakeupDir, entry.name), 'utf8')));
+      } catch {
+        continue;
+      }
+      if (!marker) continue;
+
+      const receivedAt = stringValue(marker.received_at);
+      const receivedAtMs = receivedAt ? Date.parse(receivedAt) : Number.NaN;
+      if (!Number.isFinite(receivedAtMs) || now - receivedAtMs > WAKEUP_MARKER_DISCOVERY_TTL_MS) continue;
+
+      const configuredSessionDir = stringValue(marker.session_dir);
+      const configuredCodexHome = stringValue(marker.codex_home);
+      if (configuredSessionDir && !path.isAbsolute(configuredSessionDir)) continue;
+      if (configuredCodexHome && !path.isAbsolute(configuredCodexHome)) continue;
+
+      let sessionDir = configuredSessionDir;
+      if (configuredCodexHome) {
+        const codexHomeSessionDir = path.resolve(configuredCodexHome, 'sessions');
+        if (configuredSessionDir && path.resolve(configuredSessionDir) !== codexHomeSessionDir) continue;
+        sessionDir = codexHomeSessionDir;
+      }
+      if (!sessionDir || !path.isAbsolute(sessionDir)) continue;
+
+      let canonicalSessionDir: string;
+      try {
+        canonicalSessionDir = await fs.realpath(sessionDir);
+        if (!(await fs.stat(canonicalSessionDir)).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      if (canonicalSessionDir === canonicalDefaultSessionDir) continue;
+      sessionDirs.add(canonicalSessionDir);
+      if (sessionDirs.size >= MAX_DYNAMIC_SESSION_DIRS) break;
+    }
+
+    return [...sessionDirs];
+  }
+
+  private async cleanupExpiredWakeupMarkers(entries: Dirent[], now: number): Promise<void> {
+    if (now - this.lastWakeupMarkerCleanupAtMs < WAKEUP_MARKER_CLEANUP_INTERVAL_MS) return;
+    this.lastWakeupMarkerCleanupAtMs = now;
+
+    const candidates = [...entries]
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .slice(0, MAX_WAKEUP_MARKERS_PER_CLEANUP);
+    for (const entry of candidates) {
+      const markerPath = path.join(this.wakeupDir, entry.name);
+      let expired = false;
+      try {
+        const marker = asRecord(JSON.parse(await fs.readFile(markerPath, 'utf8')));
+        const receivedAt = stringValue(marker?.received_at);
+        const receivedAtMs = receivedAt ? Date.parse(receivedAt) : Number.NaN;
+        if (Number.isFinite(receivedAtMs)) {
+          expired = now - receivedAtMs > WAKEUP_MARKER_DISCOVERY_TTL_MS;
+        } else {
+          expired = now - (await fs.stat(markerPath)).mtimeMs > WAKEUP_MARKER_DISCOVERY_TTL_MS;
+        }
+      } catch {
+        try {
+          expired = now - (await fs.stat(markerPath)).mtimeMs > WAKEUP_MARKER_DISCOVERY_TTL_MS;
+        } catch {
+          continue;
+        }
+      }
+      if (!expired) continue;
+      try {
+        await fs.unlink(markerPath);
+      } catch {
+        // Another process or cleanup cycle may have removed the marker first.
+      }
+    }
   }
 
   private stateKey(filePath: string): string {
@@ -852,6 +1004,65 @@ async function collectRolloutFiles(dir: string, files: string[]): Promise<void> 
     } else if (entry.isFile() && entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')) {
       files.push(entryPath);
     }
+  }
+}
+
+async function collectRecentRolloutFiles(
+  dir: string,
+  files: string[],
+  modifiedAfterMs: number,
+  maxFiles: number,
+  budget: DynamicDirectoryWalkBudget,
+  depth = 0,
+): Promise<void> {
+  if (files.length >= maxFiles || budget.remainingDirectories <= 0) return;
+  budget.remainingDirectories--;
+  let entries: Dirent[];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  entries.sort((left, right) => right.name.localeCompare(left.name));
+  for (const entry of entries) {
+    if (files.length >= maxFiles) return;
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (!isCodexSessionDateDirectory(entry.name, depth)) continue;
+      await collectRecentRolloutFiles(entryPath, files, modifiedAfterMs, maxFiles, budget, depth + 1);
+      continue;
+    }
+    if (
+      depth !== 3
+      || !entry.isFile()
+      || !entry.name.startsWith('rollout-')
+      || !entry.name.endsWith('.jsonl')
+    ) {
+      continue;
+    }
+    if (budget.remainingRolloutFiles <= 0) return;
+    budget.remainingRolloutFiles--;
+    try {
+      if ((await fs.stat(entryPath)).mtimeMs >= modifiedAfterMs) files.push(entryPath);
+    } catch {
+      // The transcript may disappear while a short-lived task directory is being cleaned up.
+    }
+  }
+}
+
+function isCodexSessionDateDirectory(name: string, depth: number): boolean {
+  if (depth === 0) return /^\d{4}$/.test(name);
+  if (depth === 1) return /^(0[1-9]|1[0-2])$/.test(name);
+  if (depth === 2) return /^(0[1-9]|[12]\d|3[01])$/.test(name);
+  return false;
+}
+
+async function canonicalDirectoryPath(directoryPath: string): Promise<string> {
+  try {
+    return await fs.realpath(directoryPath);
+  } catch {
+    return path.resolve(directoryPath);
   }
 }
 

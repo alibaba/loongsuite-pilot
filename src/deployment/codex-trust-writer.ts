@@ -111,6 +111,36 @@ export function hookStateKey(
   return `${hooksJsonAbsPath}:${eventKey}:${groupIndex}:0`;
 }
 
+function encodeTomlBasicString(value: string): string {
+  // JSON escaping is compatible with TOML basic strings for absolute paths.
+  // Windows backslashes must be doubled or `\u` in `C:\Users\...` is parsed
+  // as the beginning of a TOML Unicode escape.
+  return JSON.stringify(value);
+}
+
+function decodeTomlBasicString(value: string): string | null {
+  try {
+    const decoded: unknown = JSON.parse(value);
+    return typeof decoded === 'string' ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
+function tomlKeyCandidates(value: string): string[] {
+  const candidates: string[] = [];
+  const decoded = decodeTomlBasicString(value);
+  if (decoded !== null) candidates.push(decoded);
+
+  // Older Windows builds interpolated C:\... directly into a TOML basic
+  // string. Keep the raw body as a cleanup-only candidate so a subsequent
+  // deployment can remove that invalid section and repair config.toml.
+  if (value.startsWith('"') && value.endsWith('"')) {
+    candidates.push(value.slice(1, -1));
+  }
+  return [...new Set(candidates)];
+}
+
 interface ParsedTrustHash {
   key: string;     // 完整 hook state key,如 "/abs/hooks.json:session_start:0:0"
   hash: string;    // sha256:xxx
@@ -129,10 +159,11 @@ function parseTrustBlock(content: string, marker: string): ParsedTrustHash[] {
 
   const block = content.slice(beginIdx, endIdx);
   const out: ParsedTrustHash[] = [];
-  const sectionRe = /\[hooks\.state\."([^"]+)"\]\s*\n\s*trusted_hash\s*=\s*"([^"]+)"/g;
+  const sectionRe = /\[hooks\.state\.("(?:\\.|[^"\\])*")\]\s*\n\s*trusted_hash\s*=\s*"([^"]+)"/g;
   let m: RegExpExecArray | null;
   while ((m = sectionRe.exec(block)) !== null) {
-    out.push({ key: m[1]!, hash: m[2]! });
+    const key = decodeTomlBasicString(m[1]!);
+    if (key !== null) out.push({ key, hash: m[2]! });
   }
   return out;
 }
@@ -159,7 +190,7 @@ function removeStaleTrustState(
   const out: string[] = [];
   let skipping = false;
 
-  const sectionHeader = /^\s*\[hooks\.state\."([^"]+)"\]\s*$/;
+  const sectionHeader = /^\s*\[hooks\.state\.("(?:\\.|[^"\\])*")\]\s*$/;
   const anyHeader = /^\s*\[/;
 
   const isOwnedKey = (key: string): boolean => {
@@ -187,7 +218,7 @@ function removeStaleTrustState(
   for (const line of lines) {
     const headerMatch = line.match(sectionHeader);
     if (headerMatch) {
-      skipping = isOwnedKey(headerMatch[1]!);
+      skipping = tomlKeyCandidates(headerMatch[1]!).some(isOwnedKey);
       if (skipping) continue;
       out.push(line);
       continue;
@@ -271,7 +302,7 @@ export function writeTrustedHashes(opts: WriteTrustedHashesOpts): void {
     const groupIndex = eventToGroupIndex[event] ?? 0;
     const hash = computeHookTrustHash(event, command);
     const key = hookStateKey(hooksJsonAbsPath, event, groupIndex);
-    lines.push(`[hooks.state."${key}"]`);
+    lines.push(`[hooks.state.${encodeTomlBasicString(key)}]`);
     lines.push(`trusted_hash = "${hash}"`);
     lines.push('');
   }

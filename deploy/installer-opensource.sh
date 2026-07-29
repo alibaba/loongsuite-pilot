@@ -592,10 +592,10 @@ deploy_package() {
         msg "==> 部署到 $target ..." "==> Deploying to $target ..."
         mkdir -p "$versions_dir"
         rm -rf "$target"
-        cp -r "$src" "$target"
-
-        echo "$dir_name" > "$current_file.tmp"
-        mv -f "$current_file.tmp" "$current_file"
+        if ! cp -r "$src" "$target"; then
+            msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
+            return 1
+        fi
 
         PERMANENT_DIR="$target"
     else
@@ -603,7 +603,10 @@ deploy_package() {
             "==> Deploying to $PERMANENT_DIR ..."
         mkdir -p "$(dirname "$PERMANENT_DIR")"
         rm -rf "$PERMANENT_DIR"
-        cp -r "$src" "$PERMANENT_DIR"
+        if ! cp -r "$src" "$PERMANENT_DIR"; then
+            msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
+            return 1
+        fi
     fi
     msg "    ✅ 部署完成" "    ✅ Deployed"
     echo ""
@@ -611,18 +614,30 @@ deploy_package() {
     deploy_bootstrap_scripts
 
     msg "==> 安装依赖..." "==> Installing dependencies..."
-    (cd "$PERMANENT_DIR" && "$NPM_BIN" install --production --no-optional 2>&1 | tail -1)
+    if ! (cd "$PERMANENT_DIR" && "$NPM_BIN" install --production --no-optional 2>&1 | tail -1); then
+        msg "    ❌ 依赖安装失败" "    ❌ Dependency installation failed"
+        return 1
+    fi
     msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     echo ""
 
     msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
     if [ -f scripts/postinstall.js ]; then
-        "$NODE_BIN" scripts/postinstall.js
+        "$NODE_BIN" scripts/postinstall.js || {
+            msg "    ❌ Hook 脚本部署失败" "    ❌ Hook script deployment failed"
+            return 1
+        }
     fi
     msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
     msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
         "    If using Codex desktop app, please manually trust hooks on first launch"
     echo ""
+
+    # Write current pointer only after all deploy steps succeed
+    if [ -n "$ver" ] && [ -n "$commit" ]; then
+        echo "$dir_name" > "$current_file.tmp"
+        mv -f "$current_file.tmp" "$current_file"
+    fi
 }
 
 # ============================================================
@@ -860,7 +875,8 @@ inject_qodercli_token_intercept() {
     if ! command -v qodercli >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/qodercli-token-intercept.mjs"
-    if [ ! -f "$intercept_script" ]; then return 0; fi
+    local runtime_wrapper="$DATA_DIR/hooks/qodercli-runtime-wrapper.sh"
+    if [ ! -f "$intercept_script" ] || [ ! -f "$runtime_wrapper" ]; then return 0; fi
 
     msg "==> 配置 qodercli token 采集..." "==> Configuring qodercli token intercept..."
 
@@ -877,7 +893,7 @@ inject_qodercli_token_intercept() {
         # so the new guarded block below replaces it (the old bare block
         # parse-errors under a user alias, which is exactly what we're fixing).
         if grep -q 'loongsuite-pilot BEGIN qodercli-intercept' "$file" 2>/dev/null; then
-            if grep -qF 'if ! alias qodercli >/dev/null 2>&1' "$file"; then return 0; fi
+            if grep -qF 'qodercli-runtime-wrapper.sh' "$file"; then return 0; fi
             _sed_inplace '/# loongsuite-pilot BEGIN qodercli-intercept/,/# loongsuite-pilot END qodercli-intercept/d' "$file"
         fi
         [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
@@ -893,7 +909,7 @@ inject_qodercli_token_intercept() {
 
 # loongsuite-pilot BEGIN qodercli-intercept
 if ! alias qodercli >/dev/null 2>&1 && ! typeset -f qodercli >/dev/null 2>&1; then
-  eval 'qodercli() { BUN_OPTIONS="--preload=$DATA_DIR/hooks/qodercli-token-intercept.mjs" command qodercli "\$@"; }'
+  eval 'qodercli() { "$DATA_DIR/hooks/qodercli-runtime-wrapper.sh" "\$@"; }'
 fi
 # loongsuite-pilot END qodercli-intercept
 INTERCEPTBLOCK
@@ -915,8 +931,8 @@ INTERCEPTBLOCK
         'loongsuite-pilot END qodercli-intercept'; then
         msg "    ⚠️  检测到你已自定义 qodercli(alias/function)，为避免覆盖，采集未启用。" \
             "    ⚠️  Detected your own 'qodercli' (alias/function); collection is disabled to avoid clobbering it."
-        msg "        如需启用采集，请在你的 qodercli 定义中加入： BUN_OPTIONS=\"--preload=$DATA_DIR/hooks/qodercli-token-intercept.mjs\"" \
-            "        To enable collection, add to your qodercli definition: BUN_OPTIONS=\"--preload=$DATA_DIR/hooks/qodercli-token-intercept.mjs\""
+        msg "        如需启用采集，请让你的定义调用： $runtime_wrapper" \
+            "        To enable collection, have your definition call: $runtime_wrapper"
     fi
     echo ""
 }
@@ -1577,7 +1593,34 @@ cmd_upgrade() {
 
     # Deploy new version to versions/<ver>_<commit>/
     # Old version stays untouched; deploy_package writes current/previous pointers
-    deploy_package "$INSTALL_SRC"
+    if ! deploy_package "$INSTALL_SRC"; then
+        echo ""
+        msg "⚠️  部署失败，正在回滚到旧版本..." \
+            "⚠️  Deployment failed, rolling back to old version..."
+        local _rollback_ok=1
+        if command -v loongsuite-pilot &>/dev/null; then
+            loongsuite-pilot rollback 2>/dev/null || _rollback_ok=0
+        elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
+            "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || _rollback_ok=0
+        fi
+        if [ "$_rollback_ok" -eq 1 ]; then
+            if command -v loongsuite-pilot &>/dev/null; then
+                loongsuite-pilot start 2>/dev/null || _rollback_ok=0
+            elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
+                "$HOME/.local/bin/loongsuite-pilot" start 2>/dev/null || _rollback_ok=0
+            fi
+        fi
+        if [ "$_rollback_ok" -eq 1 ]; then
+            msg "❌ 升级失败（部署/依赖安装出错），已回滚到 v${old_ver:-unknown} 并重启服务" \
+                "❌ Upgrade failed (deploy/dependency error), rolled back to v${old_ver:-unknown} and restarted"
+        else
+            msg "❌ 升级失败且自动回滚未成功，请手动恢复:" \
+                "❌ Upgrade failed and auto-rollback did not succeed. Manual recovery:"
+            msg "   loongsuite-pilot rollback && loongsuite-pilot start" \
+                "   loongsuite-pilot rollback && loongsuite-pilot start"
+        fi
+        exit 1
+    fi
     install_loongsuite_pilot_command
 
     # Start the new version
@@ -1605,15 +1648,23 @@ cmd_upgrade() {
 
     loongsuite-pilot stop 2>/dev/null || true
 
+    local _rb_ok=1
     if command -v loongsuite-pilot &>/dev/null; then
-        loongsuite-pilot rollback 2>/dev/null || true
+        loongsuite-pilot rollback 2>/dev/null || _rb_ok=0
     else
-        "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || true
+        "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || _rb_ok=0
     fi
 
-    msg "❌ 升级失败，已回滚到 v${old_ver:-unknown}" \
-        "❌ Upgrade failed, rolled back to v${old_ver:-unknown}"
-    msg "   请检查日志: loongsuite-pilot log" "   Check logs: loongsuite-pilot log"
+    if [ "$_rb_ok" -eq 1 ]; then
+        msg "❌ 升级失败，已回滚到 v${old_ver:-unknown}" \
+            "❌ Upgrade failed, rolled back to v${old_ver:-unknown}"
+        msg "   请检查日志: loongsuite-pilot log" "   Check logs: loongsuite-pilot log"
+    else
+        msg "❌ 升级失败且回滚未成功，请手动恢复:" \
+            "❌ Upgrade failed and rollback did not succeed. Manual recovery:"
+        msg "   loongsuite-pilot rollback && loongsuite-pilot start" \
+            "   loongsuite-pilot rollback && loongsuite-pilot start"
+    fi
     exit 1
 }
 
@@ -1664,12 +1715,20 @@ remove_hook_configs() {
         "$HOME/.workbuddy/settings.json"
     )
 
+    local _has_node=0
+    if command -v node &>/dev/null; then
+        _has_node=1
+    else
+        msg "    ⚠️  未找到 Node.js，含 hook 的配置文件将跳过自动清理" \
+            "    ⚠️  Node.js not found, config files with hooks will skip auto-cleanup"
+    fi
+
     for cfg in "${configs[@]}"; do
         [ -f "$cfg" ] || continue
         local short="${cfg/#$HOME/\~}"
 
         local ok=0
-        if command -v node &>/dev/null; then
+        if [ "$_has_node" -eq 1 ]; then
             node -e "
 const fs = require('fs');
 const cfg = process.argv[1];
@@ -1699,6 +1758,14 @@ try {
   }
 } catch(e) { process.stderr.write(e.message); process.exit(1); }
 " "$cfg" "$HOOK_MARKER" && ok=1
+        else
+            # Node unavailable: skip auto-cleanup to avoid over-deletion
+            if grep -q "$HOOK_MARKER" "$cfg" 2>/dev/null; then
+                msg "    ⚠️  跳过: $short (无 Node.js，请手动删除含 $HOOK_MARKER 的 hook 条目)" \
+                    "    ⚠️  Skipped: $short (no Node.js, manually remove hook entries containing $HOOK_MARKER)"
+            else
+                ok=1
+            fi
         fi
 
         if [ "$ok" -eq 1 ]; then
@@ -1896,20 +1963,7 @@ cmd_uninstall() {
     msg "    ✅ 服务已停止" "    ✅ Service stopped"
     echo ""
 
-    # Remove package directory
-    msg "==> 删除安装目录..." "==> Removing installation..."
-    rm -rf "$HOME/.loongsuite-pilot"
-    msg "    ✅ 已删除 $HOME/.loongsuite-pilot" \
-        "    ✅ Removed $HOME/.loongsuite-pilot"
-
-    # Remove loongsuite-pilot command
-    msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
-    rm -f "$HOME/.local/bin/loongsuite-pilot"
-    rm -f /usr/local/bin/loongsuite-pilot 2>/dev/null || true
-    msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
-    echo ""
-
-    # Remove hook entries from tool configs
+    # Remove hook entries from tool configs BEFORE removing install dir
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     remove_hook_configs
     remove_qodercli_token_intercept
@@ -1929,6 +1983,24 @@ cmd_uninstall() {
 
     msg "==> 清理 Pi Coding Agent Extension 配置..." "==> Cleaning up Pi Coding Agent extension config..."
     remove_pi_coding_agent_extension
+    echo ""
+
+    # Remove installation artifacts
+    msg "==> 删除安装目录..." "==> Removing installation..."
+    local _cache_dir="$HOME/.loongsuite-pilot"
+    rm -rf "${_cache_dir:?}/versions"
+    rm -rf "${_cache_dir:?}/bin"
+    rm -rf "${_cache_dir:?}/package"
+    rm -f "${_cache_dir:?}/current"
+    rm -f "${_cache_dir:?}/previous"
+    rm -f "${_cache_dir:?}/node-bin"
+    msg "    ✅ 已删除安装文件" "    ✅ Installation files removed"
+
+    # Remove loongsuite-pilot command
+    msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
+    rm -f "$HOME/.local/bin/loongsuite-pilot"
+    rm -f /usr/local/bin/loongsuite-pilot 2>/dev/null || true
+    msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
     echo ""
 
     # Data directory

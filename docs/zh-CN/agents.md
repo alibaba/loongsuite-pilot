@@ -26,6 +26,12 @@
 | Wukong | `wukong` | 通过本地 `wukong-cli` 进行 CLI API 轮询。 |
 | WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 验证。 |
 
+Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
+`SessionStart` 和 `UserPromptSubmit` Hook 发现当前实际生效的
+`CODEX_HOME`（包括编排器为单个任务创建的独立目录），并采集该 session
+根目录下最近活跃的 rollout 文件。`Stop` 仅作为尽力而为的唤醒信号，
+目录发现不依赖它。
+
 ## 安装时选择 Agent
 
 使用 `--agents` 跳过交互选择：

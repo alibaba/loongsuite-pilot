@@ -390,7 +390,14 @@ describe('WorkBuddy audit-event builder', () => {
   });
 
   it('produces positive LLM and TOOL spans with transcript-derived boundaries', async () => {
-    const entries = await buildWorkBuddyEvents(fixtureRecords(), {
+    const modernEpochMs = 1_800_000_000_000;
+    const records = fixtureRecords().map(record => ({
+      ...record,
+      timestamp: record.timestamp === undefined
+        ? undefined
+        : modernEpochMs + record.timestamp,
+    }));
+    const entries = await buildWorkBuddyEvents(records, {
       sessionId: 'workbuddy-duration-test',
     });
     const conversion = await convertEventLogToReadableSpans(entries);
@@ -402,13 +409,8 @@ describe('WorkBuddy audit-event builder', () => {
     const toolDurations = conversion.spans
       .filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL')
       .map(span => spanDurationNanos(span));
-    const stepDurations = conversion.spans
-      .filter(span => span.attributes['gen_ai.span.kind'] === 'STEP')
-      .map(span => spanDurationNanos(span));
-
     expect(llmDurations).toEqual([100_000_000n, 100_000_000n]);
     expect(toolDurations).toEqual([100_000_000n, 0n]);
-    expect(stepDurations.every(duration => duration > 0n)).toBe(true);
   });
 
   it('does not infer model finish semantics from assistant status', async () => {

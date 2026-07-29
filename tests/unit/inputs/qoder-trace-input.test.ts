@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { enrichCliTurn, enrichIdeTurn, injectTraceId } from '../../../src/inputs/qoder-trace/token-enricher.js';
 import { QoderTraceInput } from '../../../src/inputs/qoder-trace/qoder-trace-input.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
+import type { InterceptTokenData } from '../../../src/inputs/qoder-trace/intercept-token-reader.js';
 import type { SegmentTokenData } from '../../../src/inputs/qoder-trace/segment-token-reader.js';
 import type { SqliteTokenData } from '../../../src/inputs/qoder-trace/sqlite-token-reader.js';
 import { getTodayDateString } from '../../../src/utils/fs-utils.js';
@@ -21,6 +22,19 @@ function makeEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEn
     time_unix_nano: '1780000001000000000',
     ...overrides,
   } as AgentActivityEntry;
+}
+
+function makeIntercept(overrides: Partial<InterceptTokenData> = {}): InterceptTokenData {
+  return {
+    id: 'chatcmpl-A',
+    ts: 1780000002000,
+    promptTokens: 1200,
+    completionTokens: 80,
+    cachedTokens: 900,
+    reasoningTokens: 0,
+    totalTokens: 1280,
+    ...overrides,
+  };
 }
 
 describe('QoderTraceInput token-enricher', () => {
@@ -166,6 +180,106 @@ describe('QoderTraceInput token-enricher', () => {
       enrichCliTurn(entries, []);
 
       expect(entries[0]['gen_ai.usage.input_tokens']).toBeUndefined();
+    });
+
+    it('uses intercept by response id when the segment request id is different', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({ 'gen_ai.response.id': 'chatcmpl-A' }),
+      ];
+      const segments: SegmentTokenData[] = [{
+        requestId: 'segment-uuid-A',
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        requestStartTs: 1780000000000,
+        responseEndTs: 1780000002000,
+        toolFinishedTs: 0,
+        stopReason: 'end_turn',
+        model: 'auto',
+      }];
+
+      enrichCliTurn(entries, segments, undefined, [makeIntercept()]);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(1200);
+      expect(entries[0]['gen_ai.usage.output_tokens']).toBe(80);
+      expect(entries[0]['gen_ai.usage.cache_read.input_tokens']).toBe(900);
+      expect(entries[0]['gen_ai.usage.total_tokens']).toBe(1280);
+    });
+
+    it('gives intercept usage priority over non-zero segment and existing usage', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'chatcmpl-A',
+          'gen_ai.usage.input_tokens': 10,
+          'gen_ai.usage.output_tokens': 1,
+          'gen_ai.usage.total_tokens': 11,
+        }),
+      ];
+      const segments: SegmentTokenData[] = [{
+        requestId: 'chatcmpl-A',
+        inputTokens: 5000,
+        outputTokens: 200,
+        cacheReadTokens: 3000,
+        cacheCreationTokens: 100,
+        requestStartTs: 0,
+        responseEndTs: 0,
+        toolFinishedTs: 0,
+        stopReason: '',
+        model: '',
+      }];
+
+      enrichCliTurn(entries, segments, undefined, [makeIntercept()]);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(1200);
+      expect(entries[0]['gen_ai.usage.output_tokens']).toBe(80);
+      expect(entries[0]['gen_ai.usage.cache_read.input_tokens']).toBe(900);
+      expect(entries[0]['gen_ai.usage.total_tokens']).toBe(1280);
+    });
+
+    it('uses segment only as fallback and does not replace existing positive usage', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'req-A',
+          'gen_ai.usage.input_tokens': 700,
+          'gen_ai.usage.output_tokens': 30,
+          'gen_ai.usage.total_tokens': 730,
+        }),
+      ];
+      const segments: SegmentTokenData[] = [{
+        requestId: 'req-A',
+        inputTokens: 5000,
+        outputTokens: 200,
+        cacheReadTokens: 3000,
+        cacheCreationTokens: 0,
+        requestStartTs: 0,
+        responseEndTs: 0,
+        toolFinishedTs: 0,
+        stopReason: '',
+        model: '',
+      }];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(700);
+      expect(entries[0]['gen_ai.usage.output_tokens']).toBe(30);
+      expect(entries[0]['gen_ai.usage.total_tokens']).toBe(730);
+    });
+
+    it('uses the newest valid intercept record and derives total when absent', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({ 'gen_ai.response.id': 'chatcmpl-A' }),
+      ];
+      const intercepts = [
+        makeIntercept({ ts: 100, promptTokens: 100, completionTokens: 10, totalTokens: 110 }),
+        makeIntercept({ ts: 200, promptTokens: 150, completionTokens: 20, totalTokens: 0 }),
+      ];
+
+      enrichCliTurn(entries, [], undefined, intercepts);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(150);
+      expect(entries[0]['gen_ai.usage.output_tokens']).toBe(20);
+      expect(entries[0]['gen_ai.usage.total_tokens']).toBe(170);
     });
   });
 

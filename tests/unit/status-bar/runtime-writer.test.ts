@@ -63,14 +63,18 @@ describe('RuntimeWriter', () => {
     expect(exists).toBe(false);
   });
 
-  it('does nothing when disabled', async () => {
+  it('writes runtime health when the status bar UI is disabled', async () => {
     const writer = new RuntimeWriter(tmpDir, makeConfig({ enabled: false }), '1.0.0');
     writer.start();
     await new Promise(r => setTimeout(r, 100));
 
     const filePath = path.join(tmpDir, 'logs', 'runtime.json');
-    const exists = await fs.access(filePath).then(() => true, () => false);
-    expect(exists).toBe(false);
+    const content = JSON.parse(await fs.readFile(filePath, 'utf8'));
+    expect(content).toMatchObject({
+      status: 'active',
+      packageVersion: '1.0.0',
+      pid: process.pid,
+    });
 
     writer.stop();
   });
