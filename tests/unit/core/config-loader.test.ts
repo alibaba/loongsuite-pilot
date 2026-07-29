@@ -540,14 +540,33 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {
           mode: 'custom',
-          types: ['apiKey', 'cloudAccessKey', 'pii', 'databaseUrl'],
+          types: [
+            'apiKey',
+            'cloudAccessKey',
+            'pii',
+            'databaseUrl',
+            'idCard',
+            'phone',
+            'email',
+            'ipAddress',
+            'bankCard',
+          ],
         },
       });
 
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        types: ['apiKey', 'cloudAccessKey', 'databaseUrl'],
+        types: [
+          'apiKey',
+          'cloudAccessKey',
+          'databaseUrl',
+          'idCard',
+          'phone',
+          'email',
+          'ipAddress',
+          'bankCard',
+        ],
       });
     });
 
@@ -592,12 +611,23 @@ describe('ConfigLoader', () => {
           types: ['apiKey'],
         },
       });
-      vi.stubEnv('LOONGSUITE_PILOT_MASK_TYPES', 'cloudAccessKey,pii,databaseUrl');
+      vi.stubEnv(
+        'LOONGSUITE_PILOT_MASK_TYPES',
+        'cloudAccessKey,pii,databaseUrl,idCard,phone,email,ipAddress,bankCard',
+      );
 
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        types: ['cloudAccessKey', 'databaseUrl'],
+        types: [
+          'cloudAccessKey',
+          'databaseUrl',
+          'idCard',
+          'phone',
+          'email',
+          'ipAddress',
+          'bankCard',
+        ],
       });
     });
   });
