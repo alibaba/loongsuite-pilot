@@ -164,6 +164,12 @@ export class SlsFlusher extends BaseFlusher {
   private backpressureAlarmRecorded = false;
   private cachedBackpressureState: FlusherBackpressureState | null = null;
   private cachedBackpressureStateAt = 0;
+  private readonly totalQueueStats: QueueStats = {
+    entries: 0,
+    bytes: 0,
+    oldestQueuedAt: 0,
+  };
+  private readonly endpointQueueStats: Map<string, QueueStats> = new Map();
 
   private readonly serviceName: string;
   private readonly userAgent: string;
@@ -193,6 +199,11 @@ export class SlsFlusher extends BaseFlusher {
     this.serviceName = config.serviceNamePrefix || '';
     this.userAgent = buildUserAgent(dataDir);
     for (const ep of config.endpoints) {
+      this.endpointQueueStats.set(ep.name, {
+        entries: 0,
+        bytes: 0,
+        oldestQueuedAt: 0,
+      });
       this.endpointCounters.set(ep.name, {
         inEntries: 0, inBytes: 0, outEntries: 0, outFailed: 0,
         totalDelayMs: 0, lastFlushTime: '', startTime: '',
@@ -338,6 +349,7 @@ export class SlsFlusher extends BaseFlusher {
           await this.withDeadline(send, deadlineAt);
 
           bucket.splice(0, logs.length);
+          this.trackDequeuedLogs(logs);
           if (bucket.length === 0) this.queue.delete(key);
           if (counter) {
             counter.outEntries += logs.length;
@@ -370,6 +382,7 @@ export class SlsFlusher extends BaseFlusher {
 
           await this.persistFailedLogs(endpoint, this.buildFailurePayload(endpoint, logs), err);
           bucket.splice(0, logs.length);
+          this.trackDequeuedLogs(logs);
           if (bucket.length === 0) this.queue.delete(key);
           if (counter) {
             counter.outFailed += logs.length;
@@ -717,6 +730,7 @@ export class SlsFlusher extends BaseFlusher {
     ) {
       expired.push(bucket.shift()!);
     }
+    this.trackDequeuedLogs(expired);
     return expired;
   }
 
@@ -754,22 +768,95 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   private calculateQueueStats(endpointName?: string): QueueStats {
-    let entries = 0;
-    let bytes = 0;
-    let oldestQueuedAt = 0;
+    const stats = endpointName
+      ? this.endpointQueueStats.get(endpointName)
+      : this.totalQueueStats;
+    return stats
+      ? { ...stats }
+      : { entries: 0, bytes: 0, oldestQueuedAt: 0 };
+  }
 
-    for (const logs of this.queue.values()) {
-      for (const log of logs) {
-        if (endpointName && log.endpoint.name !== endpointName) continue;
-        entries++;
-        bytes += log.sizeBytes;
-        if (!oldestQueuedAt || log.enqueuedAt < oldestQueuedAt) {
-          oldestQueuedAt = log.enqueuedAt;
-        }
-      }
+  private trackEnqueuedLog(log: QueuedLog): void {
+    this.totalQueueStats.entries++;
+    this.totalQueueStats.bytes += log.sizeBytes;
+    if (
+      !this.totalQueueStats.oldestQueuedAt ||
+      log.enqueuedAt < this.totalQueueStats.oldestQueuedAt
+    ) {
+      this.totalQueueStats.oldestQueuedAt = log.enqueuedAt;
     }
 
-    return { entries, bytes, oldestQueuedAt };
+    let endpointStats = this.endpointQueueStats.get(log.endpoint.name);
+    if (!endpointStats) {
+      endpointStats = { entries: 0, bytes: 0, oldestQueuedAt: 0 };
+      this.endpointQueueStats.set(log.endpoint.name, endpointStats);
+    }
+    endpointStats.entries++;
+    endpointStats.bytes += log.sizeBytes;
+    if (!endpointStats.oldestQueuedAt || log.enqueuedAt < endpointStats.oldestQueuedAt) {
+      endpointStats.oldestQueuedAt = log.enqueuedAt;
+    }
+  }
+
+  private trackDequeuedLogs(logs: QueuedLog[]): void {
+    if (logs.length === 0) return;
+
+    let globalOldestRemoved = false;
+    const endpointOldestRemoved = new Set<string>();
+    for (const log of logs) {
+      if (log.enqueuedAt === this.totalQueueStats.oldestQueuedAt) {
+        globalOldestRemoved = true;
+      }
+      this.totalQueueStats.entries = Math.max(0, this.totalQueueStats.entries - 1);
+      this.totalQueueStats.bytes = Math.max(0, this.totalQueueStats.bytes - log.sizeBytes);
+
+      const endpointStats = this.endpointQueueStats.get(log.endpoint.name);
+      if (!endpointStats) continue;
+      if (log.enqueuedAt === endpointStats.oldestQueuedAt) {
+        endpointOldestRemoved.add(log.endpoint.name);
+      }
+      endpointStats.entries = Math.max(0, endpointStats.entries - 1);
+      endpointStats.bytes = Math.max(0, endpointStats.bytes - log.sizeBytes);
+    }
+
+    if (this.totalQueueStats.entries === 0) {
+      this.totalQueueStats.oldestQueuedAt = 0;
+    } else if (globalOldestRemoved) {
+      this.totalQueueStats.oldestQueuedAt = this.findOldestQueuedAt();
+    }
+
+    for (const endpointName of endpointOldestRemoved) {
+      const endpointStats = this.endpointQueueStats.get(endpointName);
+      if (!endpointStats) continue;
+      endpointStats.oldestQueuedAt = endpointStats.entries === 0
+        ? 0
+        : this.findOldestQueuedAt(endpointName);
+    }
+  }
+
+  private findOldestQueuedAt(endpointName?: string): number {
+    let oldestQueuedAt = 0;
+    // Buckets are FIFO, so only each bucket head can be the oldest remaining log.
+    for (const bucket of this.queue.values()) {
+      const first = bucket[0];
+      if (!first || (endpointName && first.endpoint.name !== endpointName)) continue;
+      if (!oldestQueuedAt || first.enqueuedAt < oldestQueuedAt) {
+        oldestQueuedAt = first.enqueuedAt;
+      }
+    }
+    return oldestQueuedAt;
+  }
+
+  private clearQueue(): void {
+    this.queue.clear();
+    this.totalQueueStats.entries = 0;
+    this.totalQueueStats.bytes = 0;
+    this.totalQueueStats.oldestQueuedAt = 0;
+    for (const stats of this.endpointQueueStats.values()) {
+      stats.entries = 0;
+      stats.bytes = 0;
+      stats.oldestQueuedAt = 0;
+    }
   }
 
   private syncDeliveryHealth(now = Date.now()): void {
@@ -947,7 +1034,7 @@ export class SlsFlusher extends BaseFlusher {
     const after = this.calculateQueueStats();
     if (after.entries > 0) {
       await this.persistShutdownPending();
-      this.queue.clear();
+      this.clearQueue();
     }
     this.syncDeliveryHealth();
     logger.info('SLS shutdown drain finished', {
@@ -1017,14 +1104,16 @@ export class SlsFlusher extends BaseFlusher {
       this.queue.set(key, bucket);
     }
     const sizeBytes = restored?.sizeBytes ?? Buffer.byteLength(JSON.stringify(content));
-    bucket.push({
+    const queuedLog: QueuedLog = {
       content,
       endpoint,
       agentType,
       sizeBytes,
       enqueuedAt: restored?.enqueuedAt ?? Date.now(),
       firstFailureAt: restored?.firstFailureAt,
-    });
+    };
+    bucket.push(queuedLog);
+    this.trackEnqueuedLog(queuedLog);
 
     const counter = this.endpointCounters.get(endpoint.name);
     if (counter) {
@@ -1033,7 +1122,7 @@ export class SlsFlusher extends BaseFlusher {
       if (!counter.startTime) counter.startTime = formatTime(new Date());
     }
 
-    await this.enforceQueueLimits(endpoint, bucket);
+    await this.enforceQueueLimits(endpoint);
     this.syncDeliveryHealth();
 
     const maxSize = this.config.batchMaxSize || BATCH_MAX_SIZE;
@@ -1042,14 +1131,18 @@ export class SlsFlusher extends BaseFlusher {
     }
   }
 
-  private async enforceQueueLimits(endpoint: SlsEndpoint, bucket: QueuedLog[]): Promise<void> {
-    let stats = this.calculateQueueStats();
+  private async enforceQueueLimits(endpoint: SlsEndpoint): Promise<void> {
     const maxEntries = this.policy.maxQueuedEntries;
     const maxBytes = this.policy.maxQueuedBytes;
 
-    while ((stats.entries > maxEntries || stats.bytes > maxBytes) && bucket.length > 0) {
-      const overflow = bucket.pop();
-      if (!overflow) break;
+    while (
+      this.totalQueueStats.entries > maxEntries ||
+      this.totalQueueStats.bytes > maxBytes
+    ) {
+      const stats = this.calculateQueueStats();
+      const victim = this.takeOldestQueuedLog();
+      if (!victim) break;
+      const overflow = victim.log;
       const causedByEndpoint = endpoint.name;
       const droppedEndpoint = overflow.endpoint;
       await this.persistFailedLogs(
@@ -1075,14 +1168,39 @@ export class SlsFlusher extends BaseFlusher {
         droppedLogstore: droppedEndpoint.logstore,
         droppedAgentType: overflow.agentType,
         droppedSizeBytes: overflow.sizeBytes,
-        remainingDroppedBucketEntries: bucket.length,
+        remainingDroppedBucketEntries: victim.remainingBucketEntries,
         queuedEntries: stats.entries,
         queuedBytes: stats.bytes,
+        remainingQueuedEntries: this.totalQueueStats.entries,
+        remainingQueuedBytes: this.totalQueueStats.bytes,
         maxEntries,
         maxBytes,
       });
-      stats = this.calculateQueueStats();
     }
+  }
+
+  private takeOldestQueuedLog(): {
+    log: QueuedLog;
+    remainingBucketEntries: number;
+  } | null {
+    let victimKey: string | undefined;
+    let victimBucket: QueuedLog[] | undefined;
+    let oldestQueuedAt = Number.POSITIVE_INFINITY;
+
+    for (const [key, bucket] of this.queue) {
+      const first = bucket[0];
+      if (!first || first.enqueuedAt >= oldestQueuedAt) continue;
+      victimKey = key;
+      victimBucket = bucket;
+      oldestQueuedAt = first.enqueuedAt;
+    }
+
+    if (!victimKey || !victimBucket) return null;
+    const log = victimBucket.shift();
+    if (!log) return null;
+    this.trackDequeuedLogs([log]);
+    if (victimBucket.length === 0) this.queue.delete(victimKey);
+    return { log, remainingBucketEntries: victimBucket.length };
   }
 
   private async persistShutdownPending(): Promise<void> {
@@ -1145,17 +1263,39 @@ export class SlsFlusher extends BaseFlusher {
     for (const fileName of fileNames.sort()) {
       if (!fileName.endsWith('.jsonl')) continue;
       const filePath = path.join(this.shutdownPendingDir, fileName);
+      let records: ShutdownPendingRecord[];
       try {
         const raw = await fs.readFile(filePath, 'utf8');
-        const lines = raw.split('\n').filter(line => line.trim().length > 0);
+        records = this.parseShutdownPendingRecords(raw);
+      } catch (err) {
+        const quarantinedPath = await this.moveShutdownPendingAside(filePath, 'corrupt');
+        logger.warn('SLS shutdown pending file quarantined', {
+          file: filePath,
+          quarantinedFile: quarantinedPath,
+          error: String(err),
+        });
+        continue;
+      }
+
+      const claimedPath = `${filePath}.${process.pid}.restoring`;
+      try {
+        await fs.rename(filePath, claimedPath);
+      } catch (err) {
+        logger.warn('SLS shutdown pending claim failed', {
+          file: filePath,
+          error: String(err),
+        });
+        continue;
+      }
+
+      try {
         let restoredEntries = 0;
-        for (const line of lines) {
-          const record = JSON.parse(line) as ShutdownPendingRecord;
+        for (const record of records) {
           const endpoint = endpointByName.get(record.endpointName);
           if (!endpoint) {
             logger.warn('SLS shutdown pending endpoint no longer configured', {
               endpoint: record.endpointName,
-              file: filePath,
+              file: claimedPath,
             });
             continue;
           }
@@ -1173,19 +1313,91 @@ export class SlsFlusher extends BaseFlusher {
               (counter.shutdownPendingRestoredEntriesTotal ?? 0) + record.logs.length;
           }
         }
-        await fs.unlink(filePath);
+        await fs.unlink(claimedPath);
         logger.warn('SLS shutdown pending restored', {
           file: filePath,
           entries: restoredEntries,
         });
       } catch (err) {
+        const failedPath = await this.moveShutdownPendingAside(claimedPath, 'failed');
         logger.warn('SLS shutdown pending restore failed', {
-          file: filePath,
+          file: claimedPath,
+          failedFile: failedPath,
           error: String(err),
         });
       }
     }
     this.syncDeliveryHealth();
+  }
+
+  private parseShutdownPendingRecords(raw: string): ShutdownPendingRecord[] {
+    const lines = raw.split('\n').filter(line => line.trim().length > 0);
+    if (lines.length === 0) {
+      throw new Error('SLS shutdown pending file is empty');
+    }
+
+    return lines.map((line, index) => {
+      const parsed = JSON.parse(line) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error(`invalid shutdown pending record at line ${index + 1}`);
+      }
+      const record = parsed as Partial<ShutdownPendingRecord>;
+      if (
+        record.version !== 1 ||
+        typeof record.createdAt !== 'number' ||
+        typeof record.endpointName !== 'string' ||
+        typeof record.project !== 'string' ||
+        typeof record.logstore !== 'string' ||
+        typeof record.kind !== 'string' ||
+        (record.mode !== 'ak' && record.mode !== 'webtracking') ||
+        !Array.isArray(record.logs)
+      ) {
+        throw new Error(`invalid shutdown pending record shape at line ${index + 1}`);
+      }
+
+      for (const [logIndex, log] of record.logs.entries()) {
+        if (
+          !log ||
+          typeof log !== 'object' ||
+          Array.isArray(log) ||
+          !log.content ||
+          typeof log.content !== 'object' ||
+          Array.isArray(log.content) ||
+          Object.values(log.content).some(value => typeof value !== 'string') ||
+          (log.agentType !== undefined && typeof log.agentType !== 'string') ||
+          (log.sizeBytes !== undefined &&
+            (typeof log.sizeBytes !== 'number' || !Number.isFinite(log.sizeBytes) || log.sizeBytes < 0)) ||
+          (log.enqueuedAt !== undefined &&
+            (typeof log.enqueuedAt !== 'number' || !Number.isFinite(log.enqueuedAt))) ||
+          (log.firstFailureAt !== undefined &&
+            (typeof log.firstFailureAt !== 'number' || !Number.isFinite(log.firstFailureAt)))
+        ) {
+          throw new Error(
+            `invalid shutdown pending log at line ${index + 1}, index ${logIndex}`,
+          );
+        }
+      }
+
+      return record as ShutdownPendingRecord;
+    });
+  }
+
+  private async moveShutdownPendingAside(
+    filePath: string,
+    suffix: 'corrupt' | 'failed',
+  ): Promise<string> {
+    const targetPath = `${filePath}.${Date.now()}-${process.pid}.${suffix}`;
+    try {
+      await fs.rename(filePath, targetPath);
+      return targetPath;
+    } catch (err) {
+      logger.warn('SLS shutdown pending quarantine failed', {
+        file: filePath,
+        targetFile: targetPath,
+        error: String(err),
+      });
+      return filePath;
+    }
   }
 
   private sleep(ms: number): Promise<void> {

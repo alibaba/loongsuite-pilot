@@ -315,6 +315,45 @@ describe('SlsFlusher', () => {
       expect(flusher.getEndpointCounters().get('activity')?.queuedBytes).toBeGreaterThan(1);
     });
 
+    it('evicts the globally oldest log across buckets and keeps queue stats accurate', async () => {
+      flusher = new SlsFlusher(makeConfig({
+        batchMaxSize: 100,
+        serviceNamePrefix: 'pilot',
+        maxQueuedEntries: 2,
+        maxQueuedBytes: Number.MAX_SAFE_INTEGER,
+      }), '/tmp/data');
+
+      await flusher.send(buildTestEntry({
+        agentType: ClientType.Qoder,
+        'agent.content': 'oldest',
+      }));
+      await vi.advanceTimersByTimeAsync(1);
+      await flusher.send(buildTestEntry({
+        agentType: ClientType.Cursor,
+        'agent.content': 'middle',
+      }));
+      await vi.advanceTimersByTimeAsync(1);
+      await flusher.send(buildTestEntry({
+        agentType: ClientType.ClaudeCliHook,
+        'agent.content': 'newest',
+      }));
+
+      expect(mockAppendLine).toHaveBeenCalledOnce();
+      const persisted = JSON.parse(mockAppendLine.mock.calls[0][1]);
+      expect(persisted.logGroup.logs[0].content['agent.content']).toBe('oldest');
+      expect(flusher.getBackpressureState()).toMatchObject({
+        queuedEntries: 2,
+      });
+
+      await flusher.flush();
+
+      expect(mockPostLogStoreLogs).toHaveBeenCalledTimes(2);
+      expect(flusher.getBackpressureState()).toMatchObject({
+        queuedEntries: 0,
+        queuedBytes: 0,
+      });
+    });
+
     it('records sustained backpressure alarm after 20 minutes, not immediately', async () => {
       const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: 'test' });
       flusher = new SlsFlusher(makeConfig({
@@ -401,6 +440,59 @@ describe('SlsFlusher', () => {
       expect(flusher.getBackpressureState().queuedEntries).toBe(1);
       expect(await fs.readdir(pendingDir)).toEqual([]);
       expect(flusher.getEndpointCounters().get('activity')?.shutdownPendingRestoredEntriesTotal).toBe(1);
+      await flusher.shutdown();
+    });
+
+    it('quarantines corrupt shutdown pending files instead of retrying them every startup', async () => {
+      const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sls-corrupt-'));
+      const pendingDir = path.join(dataDir, 'sls-shutdown-pending');
+      await fs.mkdir(pendingDir, { recursive: true });
+      await fs.writeFile(path.join(pendingDir, 'corrupt.jsonl'), '{"invalid":\n');
+
+      flusher = new SlsFlusher(makeConfig({ batchMaxSize: 100 }), dataDir);
+      await flusher.start();
+
+      const quarantinedFiles = await fs.readdir(pendingDir);
+      expect(quarantinedFiles).toHaveLength(1);
+      expect(quarantinedFiles[0]).toMatch(/^corrupt\.jsonl\..+\.corrupt$/);
+      expect(flusher.getBackpressureState().queuedEntries).toBe(0);
+      await flusher.shutdown();
+
+      flusher = new SlsFlusher(makeConfig({ batchMaxSize: 100 }), dataDir);
+      await flusher.start();
+      expect(await fs.readdir(pendingDir)).toEqual(quarantinedFiles);
+      expect(flusher.getBackpressureState().queuedEntries).toBe(0);
+      await flusher.shutdown();
+    });
+
+    it('moves a claimed pending file aside when re-enqueue fails', async () => {
+      const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sls-restore-failed-'));
+      const pendingDir = path.join(dataDir, 'sls-shutdown-pending');
+      await fs.mkdir(pendingDir, { recursive: true });
+      await fs.writeFile(path.join(pendingDir, 'restore.jsonl'), JSON.stringify({
+        version: 1,
+        createdAt: Date.now(),
+        endpointName: 'activity',
+        project: 'proj-a',
+        logstore: 'store-a',
+        kind: 'agentActivity',
+        mode: 'ak',
+        logs: [{ content: { message: 'pending' }, agentType: 'qoder' }],
+      }) + '\n');
+      mockAppendLine.mockRejectedValueOnce(new Error('disk full'));
+
+      flusher = new SlsFlusher(makeConfig({
+        batchMaxSize: 100,
+        maxQueuedEntries: 0,
+        maxQueuedBytes: Number.MAX_SAFE_INTEGER,
+      }), dataDir);
+      await flusher.start();
+
+      const failedFiles = await fs.readdir(pendingDir);
+      expect(failedFiles).toHaveLength(1);
+      expect(failedFiles[0]).toMatch(/^restore\.jsonl\..+\.restoring\..+\.failed$/);
+      expect(failedFiles.some(file => file.endsWith('.jsonl'))).toBe(false);
+      expect(flusher.getBackpressureState().queuedEntries).toBe(0);
       await flusher.shutdown();
     });
 
