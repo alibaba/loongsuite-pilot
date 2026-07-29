@@ -558,8 +558,7 @@ describe('不变量: 同窗 Skill+注入 / offset 仅 Stop 推进 / 无 mid-turn
     const keys = [...dispatchBlock.matchAll(/'([^']+)':/g)].map((m) => m[1]).sort();
     expect(keys).toEqual(['stop', 'subagent-start', 'subagent-stop']);
 
-    // transcript 仅在(cmdStop 调用的)exportSession 里解析一次;offset 提升仅一处。
-    expect((src.match(/parseClaudeTranscript\(/g) || []).length).toBe(1);
+    // offset 提升仍仅允许一处。
     expect((src.match(/state\.transcript_offset\s*=/g) || []).length).toBe(1);
 
     // shell 入口白名单同样只放行三个 Stop 类 subcommand

@@ -85,6 +85,43 @@ function defaultLogDir() {
   return path.join(pilotDataDir(), 'logs', AGENT_ID);
 }
 
+function isAgentTool(toolName) {
+  return toolName === 'Agent' || toolName === 'agent';
+}
+
+function resolveSubagentTranscriptPath(parentTranscriptPath, agentId) {
+  const safeAgentId = path.basename(String(agentId || '')).replace(/\.jsonl$/, '');
+  if (!safeAgentId || safeAgentId === '.' || safeAgentId === '..') return null;
+
+  const parentSessionId = path.basename(parentTranscriptPath, path.extname(parentTranscriptPath));
+  const filename = safeAgentId.startsWith('agent-')
+    ? `${safeAgentId}.jsonl`
+    : `agent-${safeAgentId}.jsonl`;
+  return path.join(
+    path.dirname(parentTranscriptPath),
+    parentSessionId,
+    'subagents',
+    filename,
+  );
+}
+
+function collectSubagentLinks(turn) {
+  const links = [];
+  for (const llmCall of (turn.llmCalls || [])) {
+    for (const block of (llmCall.output_content || [])) {
+      if (!block?.id || !isAgentTool(block.name)) continue;
+      const detail = llmCall.toolDetails?.get(block.id);
+      if (!detail?.agentId) continue;
+      links.push({
+        agentId: detail.agentId,
+        agentName: detail.agentType || block.input?.subagent_type || 'Subagent',
+        parentToolCallId: block.id,
+      });
+    }
+  }
+  return links;
+}
+
 // ─── intercept (BUN_OPTIONS preload) data integration ───
 
 const INTERCEPT_STALE_MS = 60 * 60 * 1000; // 1 hour
@@ -455,11 +492,65 @@ async function exportSession(state, stopReason) {
       cwd,
       intercept,
     );
-    allRecords.push(...records);
     logHash = hash;
     if (turnMerged) {
       for (const rid of turnMerged) mergedResponseIds.add(rid);
     }
+
+    const turnRecords = [...records];
+    const parentRecord = records[0];
+    if (parentRecord) {
+      // 只展开主会话的直接子 Agent。子 transcript 内再次调用 Agent 时，
+      // buildTurnRecords 会保留 TOOL span，但不会递归读取孙级 transcript。
+      for (const link of collectSubagentLinks(turn)) {
+        const childTranscriptPath = resolveSubagentTranscriptPath(transcriptPath, link.agentId);
+        if (!childTranscriptPath || !fs.existsSync(childTranscriptPath)) continue;
+
+        const childParseResult = parseClaudeTranscript(childTranscriptPath, 0);
+        let childHash = INITIAL_HASH;
+        for (let childTurnIndex = 0; childTurnIndex < childParseResult.turns.length; childTurnIndex++) {
+          const childBuild = buildTurnRecords(
+            childParseResult.turns[childTurnIndex],
+            childTurnIndex,
+            link.agentId,
+            childHash,
+            userId,
+            'end_turn',
+            cwd,
+            intercept,
+          );
+          childHash = childBuild.hash;
+          for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
+
+          for (const childRecord of childBuild.records) {
+            // `other` 会被转换器当成父 ENTRY 输入；子 prompt 已包含在首个
+            // llm.request.messages_delta 中，无需重复上报。
+            if (childRecord['event.name'] === 'other') continue;
+            turnRecords.push({
+              ...childRecord,
+              trace_id: parentRecord.trace_id,
+              'gen_ai.session.id': sessionId,
+              'gen_ai.turn.id': parentRecord['gen_ai.turn.id'],
+              'gen_ai.agent.scope': 'subagent',
+              'gen_ai.agent.depth': 1,
+              'gen_ai.agent.id': link.agentId,
+              'gen_ai.agent.name': link.agentName,
+              'gen_ai.agent.parent.id': sessionId,
+              'gen_ai.subagent.parent_tool_call.id': link.parentToolCallId,
+            });
+          }
+        }
+      }
+    }
+
+    turnRecords.sort((a, b) => {
+      const ta = BigInt(a.time_unix_nano || '0');
+      const tb = BigInt(b.time_unix_nano || '0');
+      if (ta < tb) return -1;
+      if (ta > tb) return 1;
+      return 0;
+    });
+    allRecords.push(...turnRecords);
   }
 
   // turn_count 计入全部 turns(含跳过的历史), 确保 offset 正确推进不重复上报
@@ -654,7 +745,6 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
       if (!toolBlock) continue;
 
       const toolName = toolBlock.name || 'unknown';
-      if (toolName === 'Agent' || toolName === 'agent') continue;
 
       const toolSpanId = generateSpanId();
 
