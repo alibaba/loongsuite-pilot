@@ -26,7 +26,7 @@ This directory contains user-facing guides for installing, configuring, operatin
 | Document | Use It For |
 |----------|------------|
 | [Agent Configuration](agents.md) | Select agents and control message content capture. |
-| [Data Masking](masking.md) | Mask API keys, access keys, private keys, and database URLs before output. |
+| [Data Masking](masking.md) | Mask secrets and personal sensitive data before output. |
 | [Output Event Schema](output-event-schema.md) | Review normalized event names, fields, provider values, and finish reasons. |
 
 ## Extend Pilot
