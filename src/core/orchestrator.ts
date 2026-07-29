@@ -1132,7 +1132,7 @@ export class Orchestrator extends EventEmitter {
     // --- WorkBuddy (Hook/file wakeups + local transcript polling fallback) ---
     const workBuddyInput = new WorkBuddyInput({
       stateStore: this.stateStore,
-      hookLogDir: path.join(this.dataDir, 'logs', 'workbuddy'),
+      hookEventDir: path.join(this.dataDir, 'state', 'workbuddy', 'hook-events'),
       pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
     });
     this.inputManager.registerInput(workBuddyInput);

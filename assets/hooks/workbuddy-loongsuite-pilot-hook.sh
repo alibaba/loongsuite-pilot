@@ -2,7 +2,7 @@
 set +e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-PROCESSOR="$SCRIPT_DIR/workbuddy-hook-journal.mjs"
+PROCESSOR="$SCRIPT_DIR/workbuddy-hook-event-writer.mjs"
 SUBCOMMAND="${1:-unknown}"
 NODE_BIN=""
 

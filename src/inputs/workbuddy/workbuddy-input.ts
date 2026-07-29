@@ -2,7 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
-import type { FSWatcher } from 'node:fs';
+import type { Dirent, FSWatcher } from 'node:fs';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
@@ -13,9 +13,12 @@ const OFFSET_MAP_KEY = 'workbuddyTranscriptBytes';
 const FILE_META_MAP_KEY = 'workbuddyTranscriptFiles';
 const INITIALIZED_KEY = 'workbuddyInitialized';
 const STABILITY_RETRY_MS = 5_000;
+const HOOK_ORPHAN_GRACE_MS = 60 * 60 * 1_000;
 
 interface HookTranscriptHint {
   transcriptPath: string;
+  eventFile: string;
+  sessionDir: string;
   eventName?: string;
   observedAtMs?: number;
   sessionId?: string;
@@ -33,7 +36,7 @@ interface TranscriptFileMeta {
 
 export interface WorkBuddyInputOptions extends InputOptions {
   workBuddyRoot?: string;
-  hookLogDir?: string;
+  hookEventDir?: string;
 }
 
 export class WorkBuddyInput extends BaseInput {
@@ -43,7 +46,7 @@ export class WorkBuddyInput extends BaseInput {
 
   private readonly root: string;
   private readonly projectsDir: string;
-  private readonly hookLogDir: string;
+  private readonly hookEventDir: string;
   private watchers: FSWatcher[] = [];
   private stabilityRetry: ReturnType<typeof setTimeout> | null = null;
 
@@ -51,7 +54,8 @@ export class WorkBuddyInput extends BaseInput {
     super(opts);
     this.root = opts.workBuddyRoot ?? path.join(homedir(), '.workbuddy');
     this.projectsDir = path.join(this.root, 'projects');
-    this.hookLogDir = opts.hookLogDir ?? path.join(homedir(), '.loongsuite-pilot', 'logs', 'workbuddy');
+    this.hookEventDir = opts.hookEventDir
+      ?? path.join(homedir(), '.loongsuite-pilot', 'state', 'workbuddy', 'hook-events');
   }
 
   static getWatchPaths(root = path.join(homedir(), '.workbuddy')): string[] {
@@ -67,8 +71,9 @@ export class WorkBuddyInput extends BaseInput {
   }
 
   protected override async onStart(): Promise<void> {
+    await fs.mkdir(this.hookEventDir, { recursive: true });
     this.watchDirectory(this.projectsDir);
-    this.watchDirectory(this.hookLogDir);
+    this.watchDirectory(this.hookEventDir);
   }
 
   protected override async onStop(): Promise<void> {
@@ -85,17 +90,28 @@ export class WorkBuddyInput extends BaseInput {
     const initialized = state.extra?.[INITIALIZED_KEY] === true;
     const offsets = normalizeOffsetMap(state.extra?.[OFFSET_MAP_KEY]);
     const fileMeta = normalizeFileMetaMap(state.extra?.[FILE_META_MAP_KEY]);
-    const hookHints = await this.readHookTranscriptHints();
-    const scannedPaths = await this.scanTranscriptFiles();
+    const nextOffsets: Record<string, number> = { ...offsets };
+    const nextFileMeta: Record<string, TranscriptFileMeta> = { ...fileMeta };
+    const scan = await this.scanTranscriptFiles();
+    let hookHints = await this.readHookTranscriptHints();
+    hookHints = await this.removeCommittedHookEvents(hookHints, fileMeta);
+    hookHints = await this.removeDeletedTranscriptSessions(
+      hookHints,
+      scan.complete,
+      nextFileMeta,
+    );
+    await this.removeDeletedTranscriptCheckpoints(
+      scan.complete,
+      nextOffsets,
+      nextFileMeta,
+    );
     const transcriptPaths = await this.resolveTranscriptPaths([
       ...hookHints.map(hint => hint.transcriptPath),
-      ...scannedPaths,
+      ...scan.files,
     ]);
     const stopHints = await this.resolveStopHints(hookHints);
     // Preserve checkpoints for paths that are temporarily unavailable. A scan
     // or read failure is not proof that a transcript was permanently deleted.
-    const nextOffsets: Record<string, number> = { ...offsets };
-    const nextFileMeta: Record<string, TranscriptFileMeta> = { ...fileMeta };
     const entries: AgentActivityEntry[] = [];
 
     for (const transcriptPath of transcriptPaths) {
@@ -188,35 +204,74 @@ export class WorkBuddyInput extends BaseInput {
     }, STABILITY_RETRY_MS);
   }
 
-  private async scanTranscriptFiles(): Promise<string[]> {
-    let projectDirs: string[];
-    try { projectDirs = await fs.readdir(this.projectsDir); } catch { return []; }
+  private async scanTranscriptFiles(): Promise<{ files: string[]; complete: boolean }> {
+    let projectEntries: Dirent[];
+    try {
+      projectEntries = await fs.readdir(this.projectsDir, { withFileTypes: true });
+    } catch {
+      return { files: [], complete: false };
+    }
     const files: string[] = [];
-    for (const projectDir of projectDirs) {
-      const fullDir = path.join(this.projectsDir, projectDir);
+    let complete = true;
+    for (const projectEntry of projectEntries) {
+      if (!projectEntry.isDirectory()) continue;
+      const fullDir = path.join(this.projectsDir, projectEntry.name);
       let names: string[];
-      try { names = await fs.readdir(fullDir); } catch { continue; }
+      try {
+        names = await fs.readdir(fullDir);
+      } catch {
+        complete = false;
+        continue;
+      }
       for (const name of names) {
         if (name.endsWith('.jsonl')) files.push(path.join(fullDir, name));
       }
     }
-    return files;
+    return { files, complete };
   }
 
   private async readHookTranscriptHints(): Promise<HookTranscriptHint[]> {
-    let names: string[];
-    try { names = await fs.readdir(this.hookLogDir); } catch { return []; }
+    let sessionEntries: Dirent[];
+    try {
+      sessionEntries = await fs.readdir(this.hookEventDir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
     const hints: HookTranscriptHint[] = [];
-    for (const name of names.filter(name => /^wakeup-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)).sort().slice(-3)) {
-      let text: string;
-      try { text = await fs.readFile(path.join(this.hookLogDir, name), 'utf8'); } catch { continue; }
-      for (const line of text.split(/\r?\n/)) {
-        if (!line.trim()) continue;
+    for (const sessionEntry of sessionEntries) {
+      if (!sessionEntry.isDirectory()) continue;
+      const sessionDir = path.join(this.hookEventDir, sessionEntry.name);
+      let eventFiles: string[];
+      try {
+        eventFiles = (await fs.readdir(sessionDir)).sort();
+      } catch {
+        continue;
+      }
+      for (const name of eventFiles) {
+        const eventFile = path.join(sessionDir, name);
+        if (name.startsWith('.') && name.endsWith('.tmp')) {
+          try {
+            const stat = await fs.stat(eventFile);
+            if (Date.now() - stat.mtimeMs > HOOK_ORPHAN_GRACE_MS) await fs.unlink(eventFile);
+          } catch {
+            // A concurrent writer or another collector may have removed it.
+          }
+          continue;
+        }
+        if (!name.endsWith('.json')) continue;
+        let text: string;
         try {
-          const record = JSON.parse(line) as Record<string, unknown>;
+          text = await fs.readFile(eventFile, 'utf8');
+        } catch {
+          continue;
+        }
+        try {
+          const record = JSON.parse(text) as Record<string, unknown>;
           if (typeof record.transcript_path === 'string' && record.transcript_path.endsWith('.jsonl')) {
             hints.push({
               transcriptPath: record.transcript_path,
+              eventFile,
+              sessionDir,
               eventName: typeof record.hook_event_name === 'string'
                 ? record.hook_event_name
                 : undefined,
@@ -230,11 +285,140 @@ export class WorkBuddyInput extends BaseInput {
                 ? record.tool_call_id
                 : undefined,
             });
+          } else {
+            await fs.unlink(eventFile).catch(() => undefined);
           }
-        } catch { /* structural hint only */ }
+        } catch {
+          // Published files are immutable and become visible only after rename,
+          // so invalid JSON cannot become valid later.
+          await fs.unlink(eventFile).catch(() => undefined);
+        }
       }
+      await fs.rmdir(sessionDir).catch(() => undefined);
     }
     return hints;
+  }
+
+  private async removeCommittedHookEvents(
+    hints: HookTranscriptHint[],
+    fileMeta: Record<string, TranscriptFileMeta>,
+  ): Promise<HookTranscriptHint[]> {
+    const retained: HookTranscriptHint[] = [];
+    const touchedSessionDirs = new Set<string>();
+    for (const hint of hints) {
+      let canonicalTranscriptPath = path.resolve(hint.transcriptPath);
+      try {
+        canonicalTranscriptPath = await fs.realpath(hint.transcriptPath);
+      } catch {
+        // A missing transcript is handled by removeDeletedTranscriptSessions.
+      }
+      const meta = fileMeta[hint.transcriptPath]
+        ?? fileMeta[canonicalTranscriptPath];
+      const committed = hint.observedAtMs !== undefined
+        && meta !== undefined
+        && hint.observedAtMs <= meta.handledStopAtMs;
+      if (!committed) {
+        retained.push(hint);
+        continue;
+      }
+      try {
+        await fs.unlink(hint.eventFile);
+        touchedSessionDirs.add(hint.sessionDir);
+      } catch {
+        retained.push(hint);
+      }
+    }
+    await this.removeEmptySessionDirs(touchedSessionDirs);
+    return retained;
+  }
+
+  private async removeDeletedTranscriptSessions(
+    hints: HookTranscriptHint[],
+    transcriptScanComplete: boolean,
+    fileMeta: Record<string, TranscriptFileMeta>,
+  ): Promise<HookTranscriptHint[]> {
+    if (!transcriptScanComplete) return hints;
+
+    const hintsBySessionDir = new Map<string, HookTranscriptHint[]>();
+    for (const hint of hints) {
+      const grouped = hintsBySessionDir.get(hint.sessionDir) ?? [];
+      grouped.push(hint);
+      hintsBySessionDir.set(hint.sessionDir, grouped);
+    }
+
+    const removedSessionDirs = new Set<string>();
+    for (const [sessionDir, sessionHints] of hintsBySessionDir) {
+      const transcriptPaths = [...new Set(sessionHints.map(hint => hint.transcriptPath))];
+      const sessionIds = new Set(
+        sessionHints
+          .map(hint => hint.sessionId)
+          .filter((sessionId): sessionId is string => Boolean(sessionId)),
+      );
+      let allMissing = transcriptPaths.length > 0;
+      for (const transcriptPath of transcriptPaths) {
+        try {
+          await fs.stat(transcriptPath);
+          allMissing = false;
+          break;
+        } catch (error) {
+          if (!isNotFoundError(error)) {
+            allMissing = false;
+            break;
+          }
+        }
+      }
+      if (!allMissing) continue;
+      const previouslyObserved = Object.keys(fileMeta).some(checkpointPath =>
+        transcriptPaths.some(transcriptPath =>
+          path.resolve(checkpointPath) === path.resolve(transcriptPath))
+        || sessionIds.has(path.basename(checkpointPath, '.jsonl')));
+      const latestObservedAtMs = Math.max(
+        ...sessionHints.map(hint => hint.observedAtMs ?? Number.POSITIVE_INFINITY),
+      );
+      if (!previouslyObserved && Date.now() - latestObservedAtMs <= HOOK_ORPHAN_GRACE_MS) {
+        // WorkBuddy may invoke the Hook just before it creates the transcript.
+        continue;
+      }
+
+      try {
+        await fs.rm(sessionDir, { recursive: true, force: true });
+        removedSessionDirs.add(sessionDir);
+      } catch {
+        continue;
+      }
+    }
+
+    return hints.filter(hint => !removedSessionDirs.has(hint.sessionDir));
+  }
+
+  private async removeDeletedTranscriptCheckpoints(
+    transcriptScanComplete: boolean,
+    offsets: Record<string, number>,
+    fileMeta: Record<string, TranscriptFileMeta>,
+  ): Promise<void> {
+    if (!transcriptScanComplete) return;
+    for (const transcriptPath of new Set([
+      ...Object.keys(offsets),
+      ...Object.keys(fileMeta),
+    ])) {
+      try {
+        await fs.stat(transcriptPath);
+      } catch (error) {
+        if (!isNotFoundError(error)) continue;
+        delete offsets[transcriptPath];
+        delete fileMeta[transcriptPath];
+      }
+    }
+  }
+
+  private async removeEmptySessionDirs(sessionDirs: Set<string>): Promise<void> {
+    for (const sessionDir of sessionDirs) {
+      try {
+        await fs.rmdir(sessionDir);
+      } catch {
+        // The directory still contains uncommitted events or became unavailable.
+      }
+    }
   }
 
   private async resolveTranscriptPaths(candidates: string[]): Promise<string[]> {
@@ -380,6 +564,12 @@ function compareEntriesByTime(a: AgentActivityEntry, b: AgentActivityEntry): num
   if (left > right) return 1;
   // Supported Node.js versions provide a stable sort; preserve semantic builder order on ties.
   return 0;
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return error instanceof Error
+    && 'code' in error
+    && (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
 function normalizeOffsetMap(value: unknown): Record<string, number> {

@@ -25,6 +25,6 @@
   },
   "input": {
     "type": "workbuddy-transcript",
-    "logDir": "$PILOT_DATA/logs/workbuddy"
+    "eventDir": "$PILOT_DATA/state/workbuddy/hook-events"
   }
 }

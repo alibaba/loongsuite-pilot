@@ -1,4 +1,13 @@
-import { mkdtemp, mkdir, readFile, writeFile, appendFile, rename } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  writeFile,
+  appendFile,
+  rename,
+  readdir,
+  rm,
+} from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -21,6 +30,47 @@ function fixtureRecords(): WorkBuddyRecord[] {
     .trim()
     .split('\n')
     .map(line => JSON.parse(line) as WorkBuddyRecord);
+}
+
+let hookEventSequence = 0;
+
+async function writeHookEvent(
+  hookEventDir: string,
+  record: Record<string, unknown>,
+): Promise<string> {
+  const transcriptPath = String(record.transcript_path ?? '');
+  const sessionId = String(
+    record.session_id
+      ?? path.basename(transcriptPath, path.extname(transcriptPath))
+      ?? 'test-session',
+  );
+  const sessionDir = path.join(hookEventDir, sessionId);
+  await mkdir(sessionDir, { recursive: true });
+  const observedAtMs = Number(record.observed_at_ms ?? 0);
+  const eventFile = path.join(
+    sessionDir,
+    `${String(observedAtMs).padStart(16, '0')}-${hookEventSequence++}.json`,
+  );
+  await writeFile(eventFile, JSON.stringify({ ...record, session_id: sessionId }));
+  return eventFile;
+}
+
+async function listHookEventFiles(hookEventDir: string): Promise<string[]> {
+  let sessionDirs;
+  try {
+    sessionDirs = await readdir(hookEventDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const files: string[] = [];
+  for (const sessionDir of sessionDirs) {
+    if (!sessionDir.isDirectory()) continue;
+    const fullDir = path.join(hookEventDir, sessionDir.name);
+    for (const name of await readdir(fullDir)) {
+      if (name.endsWith('.json')) files.push(path.join(fullDir, name));
+    }
+  }
+  return files.sort();
 }
 
 function spanDurationNanos(span: {
@@ -340,7 +390,9 @@ describe('WorkBuddy audit-event builder', () => {
   });
 
   it('produces positive LLM and TOOL spans with transcript-derived boundaries', async () => {
-    const entries = await buildWorkBuddyEvents(fixtureRecords(), { sessionId: 'session-1' });
+    const entries = await buildWorkBuddyEvents(fixtureRecords(), {
+      sessionId: 'workbuddy-duration-test',
+    });
     const conversion = await convertEventLogToReadableSpans(entries);
     expect(conversion.warnings).toEqual([]);
 
@@ -385,9 +437,9 @@ describe('WorkBuddyInput checkpoints', () => {
   it('baselines existing transcripts and emits only newly appended turns', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-input-'));
     const projects = path.join(root, 'projects', 'safe-project');
-    const hookLogDir = path.join(root, 'pilot-logs');
+    const hookEventDir = path.join(root, 'pilot-events');
     await mkdir(projects, { recursive: true });
-    await mkdir(hookLogDir, { recursive: true });
+    await mkdir(hookEventDir, { recursive: true });
     const transcript = path.join(projects, 'session-1.jsonl');
     const outsideTranscript = path.join(
       path.dirname(root),
@@ -407,17 +459,23 @@ describe('WorkBuddyInput checkpoints', () => {
       outsideTranscript,
       `${JSON.stringify(initialUser)}\n${JSON.stringify(initialAssistant)}\n`,
     );
-    await writeFile(
-      path.join(hookLogDir, 'wakeup-2026-07-26.jsonl'),
-      `${JSON.stringify({ transcript_path: outsideTranscript })}\n${JSON.stringify({
-        observed_at_ms: 1_000,
-        hook_event_name: 'UserPromptSubmit',
-        transcript_path: transcript,
-      })}\n`,
-    );
+    await writeHookEvent(hookEventDir, {
+      observed_at_ms: 900,
+      hook_event_name: 'UserPromptSubmit',
+      transcript_path: outsideTranscript,
+    });
+    await writeHookEvent(hookEventDir, {
+      observed_at_ms: 1_000,
+      hook_event_name: 'UserPromptSubmit',
+      transcript_path: transcript,
+    });
     const stateStore = new StateStore(path.join(root, 'state.json'));
     await stateStore.load();
-    const input = new TestWorkBuddyInput({ stateStore, workBuddyRoot: root, hookLogDir });
+    const input = new TestWorkBuddyInput({
+      stateStore,
+      workBuddyRoot: root,
+      hookEventDir,
+    });
 
     expect(WorkBuddyInput.getWatchPaths(root)).toEqual([root, path.join(root, 'projects')]);
     expect(await input.collectNow()).toEqual([]);
@@ -440,14 +498,11 @@ describe('WorkBuddyInput checkpoints', () => {
     await appendFile(outsideTranscript, secondTurn.map(record => JSON.stringify(record)).join('\n') + '\n');
 
     expect(await input.collectNow()).toEqual([]);
-    await appendFile(
-      path.join(hookLogDir, 'wakeup-2026-07-26.jsonl'),
-      `${JSON.stringify({
-        observed_at_ms: 2_000,
-        hook_event_name: 'Stop',
-        transcript_path: transcript,
-      })}\n`,
-    );
+    await writeHookEvent(hookEventDir, {
+      observed_at_ms: 2_000,
+      hook_event_name: 'Stop',
+      transcript_path: transcript,
+    });
     expect(await input.collectNow()).toEqual([]);
     const entries = await input.collectNow();
     expect(entries).toHaveLength(2);
@@ -455,6 +510,8 @@ describe('WorkBuddyInput checkpoints', () => {
     expect(entries.every(entry => entry['gen_ai.turn.id'] === 'turn-synthetic-2')).toBe(true);
     await stateStore.save();
     expect(await input.collectNow()).toEqual([]);
+    expect((await listHookEventFiles(hookEventDir))
+      .every(file => !file.includes(`${path.sep}session-1${path.sep}`))).toBe(true);
     const persistedState = JSON.parse(await readFile(path.join(root, 'state.json'), 'utf8')).workbuddy;
     expect(persistedState).toBeDefined();
     expect(Object.values(persistedState.extra.workbuddyTranscriptBytes))
@@ -464,22 +521,25 @@ describe('WorkBuddyInput checkpoints', () => {
   it('waits for Stop before processing a turn written in several chunks', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-input-race-'));
     const projects = path.join(root, 'projects', 'safe-project');
-    const hookLogDir = path.join(root, 'pilot-logs');
+    const hookEventDir = path.join(root, 'pilot-events');
     await mkdir(projects, { recursive: true });
-    await mkdir(hookLogDir, { recursive: true });
+    await mkdir(hookEventDir, { recursive: true });
     const transcript = path.join(projects, 'session-race.jsonl');
-    const journal = path.join(hookLogDir, 'wakeup-2026-07-28.jsonl');
     const records = fixtureRecords();
     await writeFile(transcript, `${JSON.stringify(records[0])}\n`);
-    await writeFile(journal, `${JSON.stringify({
+    await writeHookEvent(hookEventDir, {
       observed_at_ms: 1_000,
       hook_event_name: 'UserPromptSubmit',
       transcript_path: transcript,
-    })}\n`);
+    });
 
     const stateStore = new StateStore(path.join(root, 'state.json'));
     await stateStore.load();
-    const input = new TestWorkBuddyInput({ stateStore, workBuddyRoot: root, hookLogDir });
+    const input = new TestWorkBuddyInput({
+      stateStore,
+      workBuddyRoot: root,
+      hookEventDir,
+    });
     expect(await input.collectNow()).toEqual([]);
 
     await appendFile(
@@ -496,11 +556,11 @@ describe('WorkBuddyInput checkpoints', () => {
     expect(await input.collectNow()).toEqual([]);
     expect(await input.collectNow()).toEqual([]);
 
-    await appendFile(journal, `${JSON.stringify({
+    await writeHookEvent(hookEventDir, {
       observed_at_ms: 2_000,
       hook_event_name: 'Stop',
       transcript_path: transcript,
-    })}\n`);
+    });
     expect(await input.collectNow()).toEqual([]);
     const entries = await input.collectNow();
     expect(entries.map(entry => entry['event.name'])).toEqual([
@@ -524,17 +584,19 @@ describe('WorkBuddyInput checkpoints', () => {
   it('passes uniquely matched structural Hook identity through to the builder', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-input-hook-repair-'));
     const projects = path.join(root, 'projects', 'safe-project');
-    const hookLogDir = path.join(root, 'pilot-logs');
+    const hookEventDir = path.join(root, 'pilot-events');
     await mkdir(projects, { recursive: true });
-    await mkdir(hookLogDir, { recursive: true });
+    await mkdir(hookEventDir, { recursive: true });
     const transcript = path.join(projects, 'session-hook-repair.jsonl');
-    const journal = path.join(hookLogDir, 'wakeup-2026-07-28.jsonl');
     await writeFile(transcript, '');
-    await writeFile(journal, '');
 
     const stateStore = new StateStore(path.join(root, 'state.json'));
     await stateStore.load();
-    const input = new TestWorkBuddyInput({ stateStore, workBuddyRoot: root, hookLogDir });
+    const input = new TestWorkBuddyInput({
+      stateStore,
+      workBuddyRoot: root,
+      hookEventDir,
+    });
     expect(await input.collectNow()).toEqual([]);
 
     const source = fixtureRecords();
@@ -549,7 +611,7 @@ describe('WorkBuddyInput checkpoints', () => {
         return record;
       });
     await appendFile(transcript, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
-    await appendFile(journal, [
+    for (const hookEvent of [
       {
         observed_at_ms: 900,
         hook_event_name: 'UserPromptSubmit',
@@ -578,7 +640,9 @@ describe('WorkBuddyInput checkpoints', () => {
         session_id: 'session-hook-repair',
         transcript_path: transcript,
       },
-    ].map(record => JSON.stringify(record)).join('\n') + '\n');
+    ]) {
+      await writeHookEvent(hookEventDir, hookEvent);
+    }
 
     expect(await input.collectNow()).toEqual([]);
     const entries = await input.collectNow();
@@ -599,19 +663,27 @@ describe('WorkBuddyInput checkpoints', () => {
     const projectsRoot = path.join(root, 'projects');
     const projects = path.join(projectsRoot, 'safe-project');
     const hiddenProjects = path.join(root, 'projects-temporarily-hidden');
-    const hookLogDir = path.join(root, 'pilot-logs');
+    const hookEventDir = path.join(root, 'pilot-events');
     await mkdir(projects, { recursive: true });
-    await mkdir(hookLogDir, { recursive: true });
+    await mkdir(hookEventDir, { recursive: true });
     const transcript = path.join(projects, 'session-unavailable.jsonl');
-    const journal = path.join(hookLogDir, 'wakeup-2026-07-28.jsonl');
     const records = fixtureRecords();
     await writeFile(transcript, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
-    await writeFile(journal, '');
+    const pendingHookEvent = await writeHookEvent(hookEventDir, {
+      observed_at_ms: 1_000,
+      hook_event_name: 'UserPromptSubmit',
+      session_id: 'session-unavailable',
+      transcript_path: transcript,
+    });
 
     const statePath = path.join(root, 'state.json');
     const stateStore = new StateStore(statePath);
     await stateStore.load();
-    const input = new TestWorkBuddyInput({ stateStore, workBuddyRoot: root, hookLogDir });
+    const input = new TestWorkBuddyInput({
+      stateStore,
+      workBuddyRoot: root,
+      hookEventDir,
+    });
     expect(await input.collectNow()).toEqual([]);
     await stateStore.save();
     const before = JSON.parse(await readFile(statePath, 'utf8')).workbuddy
@@ -623,6 +695,7 @@ describe('WorkBuddyInput checkpoints', () => {
     const unavailable = JSON.parse(await readFile(statePath, 'utf8')).workbuddy
       .extra.workbuddyTranscriptBytes;
     expect(unavailable).toEqual(before);
+    expect(await readFile(pendingHookEvent, 'utf8')).toContain('session-unavailable');
 
     await rename(hiddenProjects, projectsRoot);
     const restoredTranscript = path.join(projectsRoot, 'safe-project', 'session-unavailable.jsonl');
@@ -647,12 +720,12 @@ describe('WorkBuddyInput checkpoints', () => {
       restoredTranscript,
       `${appended.map(record => JSON.stringify(record)).join('\n')}\n`,
     );
-    await appendFile(journal, `${JSON.stringify({
+    await writeHookEvent(hookEventDir, {
       observed_at_ms: 3_000,
       hook_event_name: 'Stop',
       session_id: 'session-unavailable',
       transcript_path: restoredTranscript,
-    })}\n`);
+    });
 
     expect(await input.collectNow()).toEqual([]);
     const recovered = await input.collectNow();
@@ -660,14 +733,83 @@ describe('WorkBuddyInput checkpoints', () => {
     expect(recovered.every(entry => entry['gen_ai.turn.id'] === 'turn-after-recovery')).toBe(true);
   });
 
+  it('removes per-session Hook events and checkpoints after transcript deletion', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-input-deleted-'));
+    const projects = path.join(root, 'projects', 'safe-project');
+    const hookEventDir = path.join(root, 'pilot-events');
+    await mkdir(projects, { recursive: true });
+    await mkdir(hookEventDir, { recursive: true });
+    await writeFile(path.join(root, 'projects', '.DS_Store'), 'not a project directory');
+    const transcript = path.join(projects, 'session-deleted.jsonl');
+    await writeFile(
+      transcript,
+      `${fixtureRecords().map(record => JSON.stringify(record)).join('\n')}\n`,
+    );
+    await writeHookEvent(hookEventDir, {
+      observed_at_ms: 1_000,
+      hook_event_name: 'UserPromptSubmit',
+      session_id: 'session-deleted',
+      transcript_path: transcript,
+    });
+
+    const statePath = path.join(root, 'state.json');
+    const stateStore = new StateStore(statePath);
+    await stateStore.load();
+    const input = new TestWorkBuddyInput({
+      stateStore,
+      workBuddyRoot: root,
+      hookEventDir,
+    });
+    expect(await input.collectNow()).toEqual([]);
+    await stateStore.save();
+    expect(await listHookEventFiles(hookEventDir)).toHaveLength(1);
+
+    await rm(transcript);
+    expect(await input.collectNow()).toEqual([]);
+    await stateStore.save();
+
+    expect(await listHookEventFiles(hookEventDir)).toEqual([]);
+    const persisted = JSON.parse(await readFile(statePath, 'utf8')).workbuddy.extra;
+    expect(persisted.workbuddyTranscriptBytes).toEqual({});
+    expect(persisted.workbuddyTranscriptFiles).toEqual({});
+  });
+
+  it('does not treat a newly announced transcript as deleted before it is created', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-input-creating-'));
+    const projects = path.join(root, 'projects', 'safe-project');
+    const hookEventDir = path.join(root, 'pilot-events');
+    await mkdir(projects, { recursive: true });
+    await mkdir(hookEventDir, { recursive: true });
+    const transcript = path.join(projects, 'session-creating.jsonl');
+    const eventFile = await writeHookEvent(hookEventDir, {
+      observed_at_ms: Date.now(),
+      hook_event_name: 'UserPromptSubmit',
+      session_id: 'session-creating',
+      transcript_path: transcript,
+    });
+
+    const stateStore = new StateStore(path.join(root, 'state.json'));
+    await stateStore.load();
+    const input = new TestWorkBuddyInput({
+      stateStore,
+      workBuddyRoot: root,
+      hookEventDir,
+    });
+
+    expect(await input.collectNow()).toEqual([]);
+    expect(await readFile(eventFile, 'utf8')).toContain('session-creating');
+    await writeFile(transcript, `${JSON.stringify(fixtureRecords()[0])}\n`);
+    expect(await input.collectNow()).toEqual([]);
+    expect(await readFile(eventFile, 'utf8')).toContain('session-creating');
+  });
+
   it('requires a stable Stop boundary for a hook-backed transcript', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-input-stop-'));
     const projects = path.join(root, 'projects', 'safe-project');
-    const hookLogDir = path.join(root, 'pilot-logs');
+    const hookEventDir = path.join(root, 'pilot-events');
     await mkdir(projects, { recursive: true });
-    await mkdir(hookLogDir, { recursive: true });
+    await mkdir(hookEventDir, { recursive: true });
     const transcript = path.join(projects, 'session-stop.jsonl');
-    const journal = path.join(hookLogDir, 'wakeup-2026-07-28.jsonl');
     const records = fixtureRecords();
     const user = records[0];
     const assistant = records.find(record =>
@@ -675,15 +817,19 @@ describe('WorkBuddyInput checkpoints', () => {
       && record.role === 'assistant'
       && record.id === 'response-synthetic-2')!;
     await writeFile(transcript, `${JSON.stringify(user)}\n`);
-    await writeFile(journal, `${JSON.stringify({
+    await writeHookEvent(hookEventDir, {
       observed_at_ms: 1_000,
       hook_event_name: 'UserPromptSubmit',
       transcript_path: transcript,
-    })}\n`);
+    });
 
     const stateStore = new StateStore(path.join(root, 'state.json'));
     await stateStore.load();
-    const input = new TestWorkBuddyInput({ stateStore, workBuddyRoot: root, hookLogDir });
+    const input = new TestWorkBuddyInput({
+      stateStore,
+      workBuddyRoot: root,
+      hookEventDir,
+    });
     expect(await input.collectNow()).toEqual([]);
 
     await appendFile(transcript, `${JSON.stringify(assistant)}\n`);
@@ -696,14 +842,14 @@ describe('WorkBuddyInput checkpoints', () => {
     const restartedInput = new TestWorkBuddyInput({
       stateStore: restartedStore,
       workBuddyRoot: root,
-      hookLogDir,
+      hookEventDir,
     });
 
-    await appendFile(journal, `${JSON.stringify({
+    await writeHookEvent(hookEventDir, {
       observed_at_ms: 2_000,
       hook_event_name: 'Stop',
       transcript_path: transcript,
-    })}\n`);
+    });
     expect(await restartedInput.collectNow()).toEqual([]);
     const sealed = await restartedInput.collectNow();
     expect(sealed.map(entry => entry['event.name'])).toEqual(['llm.request', 'llm.response']);
