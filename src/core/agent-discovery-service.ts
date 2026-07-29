@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import { EventEmitter } from 'node:events';
-import type { AgentDetectionEntry, EntryState } from '../types/index.js';
+import type { AgentDetectionEntry, AgentStopReason, EntryState } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('AgentDiscoveryService');
@@ -13,6 +13,7 @@ interface EntryRuntime {
   state: EntryState;
   watcher: fs.FSWatcher | null;
   pollTimer: ReturnType<typeof setInterval> | null;
+  consecutiveUnavailable: number;
 }
 
 /**
@@ -33,6 +34,7 @@ export class AgentDiscoveryService extends EventEmitter {
         state: 'idle',
         watcher: null,
         pollTimer: null,
+        consecutiveUnavailable: 0,
       });
     }
   }
@@ -63,7 +65,7 @@ export class AgentDiscoveryService extends EventEmitter {
         rt.pollTimer = null;
       }
       if (rt.state === 'running' || rt.state === 'starting') {
-        await this.stopEntry(rt);
+        await this.stopEntry(rt, 'shutdown');
       }
     }
   }
@@ -99,23 +101,47 @@ export class AgentDiscoveryService extends EventEmitter {
       }
 
       if (shouldRun && rt.state !== 'running') {
+        rt.consecutiveUnavailable = 0;
         rt.state = 'starting';
         logger.info('starting agent', { id: entry.id });
         await entry.start();
         rt.state = 'running';
         this.emit('agent:started', entry.id);
       } else if (!shouldRun && (rt.state === 'running' || rt.state === 'starting')) {
-        await this.stopEntry(rt);
+        if (!enabled) {
+          rt.consecutiveUnavailable = 0;
+          await this.stopEntry(rt, 'disabled');
+        } else {
+          rt.consecutiveUnavailable++;
+          const threshold = entry.unavailableThreshold ?? 1;
+          if (rt.consecutiveUnavailable >= threshold) {
+            rt.consecutiveUnavailable = 0;
+            await this.stopEntry(rt, 'unavailable');
+          } else {
+            logger.debug('agent unavailable, debouncing', {
+              id: entry.id,
+              consecutiveUnavailable: rt.consecutiveUnavailable,
+              threshold,
+            });
+          }
+        }
       } else if (shouldRun && rt.state === 'running' && entry.runOnActive) {
+        rt.consecutiveUnavailable = 0;
         await entry.start();
+      } else if (shouldRun && rt.state === 'running') {
+        rt.consecutiveUnavailable = 0;
       }
     } catch (err) {
       logger.error('processEntry failed', { id: entry.id, error: String(err) });
+      const wasRunning = rt.state === 'running';
       rt.state = 'idle';
+      if (wasRunning) {
+        this.emit('agent:stopped', rt.entry.id, 'unexpected' satisfies AgentStopReason);
+      }
     }
   }
 
-  private async stopEntry(rt: EntryRuntime): Promise<void> {
+  private async stopEntry(rt: EntryRuntime, reason: AgentStopReason): Promise<void> {
     rt.state = 'stopping';
     try {
       await rt.entry.stop();
@@ -123,7 +149,7 @@ export class AgentDiscoveryService extends EventEmitter {
       logger.warn('entry stop failed', { id: rt.entry.id, error: String(err) });
     }
     rt.state = 'idle';
-    this.emit('agent:stopped', rt.entry.id);
+    this.emit('agent:stopped', rt.entry.id, reason);
   }
 
   private setupWatcher(rt: EntryRuntime): void {
