@@ -90,19 +90,35 @@ function isAgentTool(toolName) {
 }
 
 function resolveSubagentTranscriptPath(parentTranscriptPath, agentId) {
-  const safeAgentId = path.basename(String(agentId || '')).replace(/\.jsonl$/, '');
+  const rawAgentId = String(agentId || '').trim();
+  if (
+    !rawAgentId
+    || rawAgentId.includes('/')
+    || rawAgentId.includes('\\')
+    || rawAgentId.includes('\0')
+  ) return null;
+
+  const safeAgentId = path.basename(rawAgentId).replace(/\.jsonl$/, '');
   if (!safeAgentId || safeAgentId === '.' || safeAgentId === '..') return null;
 
   const parentSessionId = path.basename(parentTranscriptPath, path.extname(parentTranscriptPath));
   const filename = safeAgentId.startsWith('agent-')
     ? `${safeAgentId}.jsonl`
     : `agent-${safeAgentId}.jsonl`;
-  return path.join(
+  const subagentDir = path.resolve(
     path.dirname(parentTranscriptPath),
     parentSessionId,
     'subagents',
-    filename,
   );
+  const transcriptPath = path.resolve(subagentDir, filename);
+  const relativePath = path.relative(subagentDir, transcriptPath);
+  if (
+    !relativePath
+    || relativePath === '..'
+    || relativePath.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relativePath)
+  ) return null;
+  return transcriptPath;
 }
 
 function collectSubagentLinks(turn) {
@@ -506,7 +522,18 @@ async function exportSession(state, stopReason) {
         const childTranscriptPath = resolveSubagentTranscriptPath(transcriptPath, link.agentId);
         if (!childTranscriptPath || !fs.existsSync(childTranscriptPath)) continue;
 
-        const childParseResult = parseClaudeTranscript(childTranscriptPath, 0);
+        let childParseResult;
+        try {
+          childParseResult = parseClaudeTranscript(childTranscriptPath, 0);
+        } catch (err) {
+          logHookError({
+            agentId: AGENT_ID,
+            stage: 'subagent_transcript_parse',
+            errorType: 'parse_failed',
+            errorMessage: err?.message || String(err),
+          });
+          continue;
+        }
         let childHash = INITIAL_HASH;
         for (let childTurnIndex = 0; childTurnIndex < childParseResult.turns.length; childTurnIndex++) {
           const childBuild = buildTurnRecords(

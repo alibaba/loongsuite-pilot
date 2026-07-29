@@ -27,6 +27,14 @@ function writeTranscript(sessionId, records) {
   return file;
 }
 
+function writeSubagentTranscript(parentSessionId, agentId, records) {
+  const dir = path.join(TRANSCRIPT_DIR, parentSessionId, 'subagents');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `agent-${agentId}.jsonl`);
+  fs.writeFileSync(file, records.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf-8');
+  return file;
+}
+
 function runHook(subcommand, payload, extraEnv = {}) {
   const r = spawnSync('node', [PROCESSOR, subcommand], {
     input: JSON.stringify(payload),
@@ -57,6 +65,64 @@ function readState(sessionId) {
   const f = path.join(DATA_DIR, 'state', 'claude-code', 'sessions', `${sessionId}.json`);
   if (!fs.existsSync(f)) return null;
   return JSON.parse(fs.readFileSync(f, 'utf-8'));
+}
+
+function readErrorRecords() {
+  const dir = path.join(DATA_DIR, 'logs', 'claude-code', 'errors');
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter((f) => f.endsWith('.jsonl'))
+    .flatMap((f) => fs.readFileSync(path.join(dir, f), 'utf-8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line)));
+}
+
+function parentTranscriptWithAgent(sessionId, agentId, agentType = 'general-purpose') {
+  return writeTranscript(sessionId, [
+    {
+      type: 'user',
+      timestamp: '2026-06-04T02:57:32.000Z',
+      message: { content: [{ type: 'text', text: 'delegate this task' }] },
+    },
+    {
+      type: 'assistant',
+      timestamp: '2026-06-04T02:57:35.000Z',
+      message: {
+        id: 'msg_parent_1',
+        content: [{
+          type: 'tool_use',
+          id: 'agent_call_1',
+          name: 'Agent',
+          input: { subagent_type: agentType },
+        }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: 'tool_use',
+      },
+    },
+    {
+      type: 'user',
+      timestamp: '2026-06-04T02:57:36.000Z',
+      toolUseResult: { agentId, agentType },
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'agent_call_1',
+          content: 'delegated task completed',
+        }],
+      },
+    },
+    {
+      type: 'assistant',
+      timestamp: '2026-06-04T02:57:40.000Z',
+      message: {
+        id: 'msg_parent_2',
+        content: [{ type: 'text', text: 'done' }],
+        usage: { input_tokens: 20, output_tokens: 10 },
+        stop_reason: 'end_turn',
+      },
+    },
+  ]);
 }
 
 describe('claude-code-hook-processor v2 端到端', () => {
@@ -294,6 +360,160 @@ describe('claude-code-hook-processor v2 端到端', () => {
     const r = runHook('user-prompt-submit', { session_id: 's-legacy', prompt: 'hi' });
     expect(r.status).toBe(0);
     expect(readState('s-legacy')).toBeNull();
+  });
+});
+
+describe('claude-code 一级子 Agent 上报', () => {
+  test('子 transcript 记录继承父 turn 链路并挂到 Agent tool call', () => {
+    const sessionId = 's-subagent';
+    const agentId = 'child-1';
+    const transcriptPath = parentTranscriptWithAgent(sessionId, agentId);
+    writeSubagentTranscript(sessionId, agentId, [
+      {
+        type: 'user',
+        timestamp: '2026-06-04T02:57:35.100Z',
+        message: { content: [{ type: 'text', text: 'child prompt' }] },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T02:57:35.900Z',
+        message: {
+          id: 'msg_child_1',
+          content: [{ type: 'text', text: 'child answer' }],
+          usage: { input_tokens: 7, output_tokens: 3 },
+          stop_reason: 'end_turn',
+        },
+      },
+    ]);
+
+    const r = runHook('stop', {
+      session_id: sessionId,
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    });
+    expect(r.status).toBe(0);
+
+    const records = readJsonlRecords();
+    const parentAgentTool = records.find((record) =>
+      record['event.name'] === 'tool.call'
+      && record['gen_ai.tool.call.id'] === 'agent_call_1');
+    const childRecords = records.filter((record) =>
+      record['gen_ai.agent.scope'] === 'subagent');
+
+    expect(parentAgentTool?.['gen_ai.tool.name']).toBe('Agent');
+    expect(childRecords.length).toBeGreaterThan(0);
+    for (const record of childRecords) {
+      expect(record.trace_id).toBe(parentAgentTool.trace_id);
+      expect(record['gen_ai.session.id']).toBe(sessionId);
+      expect(record['gen_ai.turn.id']).toBe(parentAgentTool['gen_ai.turn.id']);
+      expect(record['gen_ai.agent.depth']).toBe(1);
+      expect(record['gen_ai.agent.id']).toBe(agentId);
+      expect(record['gen_ai.agent.name']).toBe('general-purpose');
+      expect(record['gen_ai.subagent.parent_tool_call.id']).toBe('agent_call_1');
+    }
+  });
+
+  test('损坏的子 transcript 不会中断父会话导出', () => {
+    const sessionId = 's-subagent-malformed';
+    const agentId = 'broken-child';
+    const transcriptPath = parentTranscriptWithAgent(sessionId, agentId);
+    writeSubagentTranscript(sessionId, agentId, [
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T02:57:35.100Z',
+        message: { id: 'msg_broken', content: [null] },
+      },
+    ]);
+
+    const r = runHook('stop', {
+      session_id: sessionId,
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    });
+    expect(r.status).toBe(0);
+
+    const records = readJsonlRecords();
+    expect(records.some((record) =>
+      record['event.name'] === 'tool.call'
+      && record['gen_ai.tool.call.id'] === 'agent_call_1')).toBe(true);
+    expect(records.some((record) =>
+      record['gen_ai.agent.scope'] === 'subagent')).toBe(false);
+    expect(readErrorRecords()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        stage: 'subagent_transcript_parse',
+        'error.type': 'parse_failed',
+      }),
+    ]));
+  });
+
+  test('路径穿越形式的 agentId 不会读取子目录外的 transcript', () => {
+    const sessionId = 's-subagent-traversal';
+    const transcriptPath = parentTranscriptWithAgent(sessionId, '../../../outside');
+    const outsidePath = path.join(TRANSCRIPT_DIR, sessionId, 'outside.jsonl');
+    fs.mkdirSync(path.dirname(outsidePath), { recursive: true });
+    fs.writeFileSync(outsidePath, [
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T02:57:35.100Z',
+        message: {
+          id: 'msg_outside',
+          content: [{ type: 'text', text: 'must not be read' }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+          stop_reason: 'end_turn',
+        },
+      },
+    ].map((record) => JSON.stringify(record)).join('\n') + '\n');
+
+    runHook('stop', {
+      session_id: sessionId,
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    });
+
+    expect(readJsonlRecords().some((record) =>
+      record['gen_ai.agent.scope'] === 'subagent')).toBe(false);
+  });
+
+  test('空 agentId 不会生成子 Agent 记录', () => {
+    const sessionId = 's-subagent-empty-id';
+    const transcriptPath = parentTranscriptWithAgent(sessionId, '');
+
+    runHook('stop', {
+      session_id: sessionId,
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    });
+
+    expect(readJsonlRecords().some((record) =>
+      record['gen_ai.agent.scope'] === 'subagent')).toBe(false);
+  });
+
+  test('Unicode agentId 可以定位合法子 transcript', () => {
+    const sessionId = 's-subagent-unicode';
+    const agentId = '分析者';
+    const transcriptPath = parentTranscriptWithAgent(sessionId, agentId);
+    writeSubagentTranscript(sessionId, agentId, [
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T02:57:35.100Z',
+        message: {
+          id: 'msg_unicode',
+          content: [{ type: 'text', text: '完成' }],
+          usage: { input_tokens: 2, output_tokens: 1 },
+          stop_reason: 'end_turn',
+        },
+      },
+    ]);
+
+    runHook('stop', {
+      session_id: sessionId,
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    });
+
+    expect(readJsonlRecords().some((record) =>
+      record['gen_ai.agent.scope'] === 'subagent'
+      && record['gen_ai.agent.id'] === agentId)).toBe(true);
   });
 });
 
