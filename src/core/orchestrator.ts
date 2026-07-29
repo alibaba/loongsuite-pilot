@@ -414,6 +414,7 @@ export class Orchestrator extends EventEmitter {
       targets.push({
         agentId: def.id,
         settingsPath: def.hook.settingsPath,
+        settingsSyntax: def.hook.settingsSyntax,
         expectedHooks: def.hook.events,
         markers: [scriptName],
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
@@ -424,7 +425,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   /**
-   * Self-heal targets for plugin-inject agents (e.g. opencode, qwen-code-cli).
+   * Self-heal targets for plugin-inject agents (currently OpenCode).
    *
    * Unlike hook agents, these write a plugin spec into the agent's own config
    * file (not a shared settings.json), so they use the intercept mechanism:
