@@ -1,0 +1,27 @@
+{
+  "platform": "github|gitlab",
+  "target_type": "pr|branch",
+  "target_id": "<pr-number or branch-name>",
+  "published_at": "<ISO-8601 UTC timestamp>",
+  "summary_comment": {
+    "status": "success|failed|skipped",
+    "comment_url": "<platform comment URL, null if failed>",
+    "error": "<failure reason, null if success>"
+  },
+  "inline_comments": [
+    {
+      "path": "<file path>",
+      "line": 0,
+      "severity": "Critical|High|Medium",
+      "status": "success|failed",
+      "comment_url": "<platform comment URL, null if failed>",
+      "error": "<failure reason, null if success>"
+    }
+  ],
+  "stats": {
+    "total_findings": 0,
+    "published": 0,
+    "failed": 0,
+    "skipped": 0
+  }
+}
