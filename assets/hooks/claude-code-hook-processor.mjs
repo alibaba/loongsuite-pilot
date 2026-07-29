@@ -699,11 +699,22 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
       // 显式 /skill: 保证本 turn 根 SKILL.md 恰好展示一次 Read span。
       // 去重键 = client + turnId + 归一化根路径。若本 turn 已有真实根 Read 则不合成
       // (真实事件优先);否则合成一条同 call-id 的 Read tool.call+tool.result,挂 Skill owner step。
-      if (toolName === 'Skill' && skillRootByToolId) {
+      //
+      // origin gate: 仅对 user-typed slash /skill (XJK 路径, prompt 同时含
+      // <skill-format>true</skill-format> 与 <command-name>q</command-name>) 激活合成;
+      // 模型自主调 Skill (无 markup) 不合成。Multica 托管 SDK-CLI 模式下永不触发, 属预期。
+      // per-skill-call: 仅当 user-typed q 与本 Skill tool_use 的 input.skill 精确相等才合成,
+      // 同 turn 内其它模型自主 Skill 调用 (input.skill !== q) 不合成。
+      const promptText = turn?.prompt || '';
+      const cmdNameMatch = promptText.match(/<command-name>([^<]+)<\/command-name>/);
+      const isUserTypedSkill = cmdNameMatch !== null
+        && /<skill-format>true<\/skill-format>/.test(promptText);
+      if (toolName === 'Skill' && skillRootByToolId && isUserTypedSkill) {
         const rootRaw = skillRootByToolId.get(toolId);
         const normRoot = normalizeSkillPath(cwd, rootRaw);
         if (
           normRoot &&
+          toolBlock.input?.skill === cmdNameMatch[1] &&
           !realReadPaths.has(normRoot) &&
           !synthesizedSkillRoots.has(normRoot)
         ) {
