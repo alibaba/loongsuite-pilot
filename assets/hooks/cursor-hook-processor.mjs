@@ -204,6 +204,23 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
   records.splice(targetLlmIdx + 1, 0, ...insertRecords);
 }
 
+function filterSkillsForReadInjection(skills, assembledFromTranscript) {
+  return skills.filter(skill => {
+    const sources = skill.detectionSources || [];
+
+    if (!assembledFromTranscript) {
+      return sources.includes('manual_attachment') ||
+        sources.includes('transcript_read');
+    }
+
+    // The transcript assembler already materializes real Read tool_use entries.
+    // Only synthesize a Read when manual attachment is the sole evidence. A skill
+    // with both sources already has its real transcript Read in the assembled step.
+    return sources.includes('manual_attachment') &&
+      !sources.includes('transcript_read');
+  });
+}
+
 async function main() {
   const dataDir = resolveDataDir();
   const raw = await readStdin();
@@ -368,13 +385,11 @@ async function main() {
           const detectedSkills = detectSkillFromTranscript(transcriptPathForSkill, promptForSkill.prompt);
           if (detectedSkills && detectedSkills.length > 0) {
             // The Windows transcript assembler already materializes transcript
-            // Read tool_use entries. Always synthesize Read for explicit manual
-            // attachments; compensate actual transcript reads only on hook-event
-            // assembly paths so Windows does not emit duplicate Read records.
-            const readSkills = detectedSkills.filter(skill =>
-              skill.detectionSources?.includes('manual_attachment') ||
-              (!assembledFromTranscript &&
-                skill.detectionSources?.includes('transcript_read'))
+            // Read tool_use entries. Synthesize only pure manual attachments on
+            // that path; hook-event assembly still needs both evidence sources.
+            const readSkills = filterSkillsForReadInjection(
+              detectedSkills,
+              assembledFromTranscript,
             );
             if (readSkills.length > 0) {
               injectSkillRecords(records, readSkills, runtimeConfig);
@@ -454,4 +469,4 @@ if (
   });
 }
 
-export { injectSkillRecords };
+export { filterSkillsForReadInjection, injectSkillRecords };
