@@ -34,6 +34,12 @@ const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
 const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled']);
+// Hard cap on simultaneously-open turn buffers. Above this, the oldest
+// incomplete buffers are force-flushed to bound memory in pathological
+// cases (e.g. an agent that never emits a terminal llm.response AND never
+// sends a same-session successor AND turnIdleTimeoutMs=0). Normal load
+// stays well under this; the cap is defense-in-depth, not a tuned limit.
+const MAX_TURN_BUFFERS = 64;
 
 interface TurnBuffer {
   key: string;
@@ -219,34 +225,47 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
 
     // Signal B: check if there's an active buffer for same agentType with different key.
-    // Only flush buffers whose turn looks "complete enough" (i.e., has at least
-    // one llm.response event) AND that belong to the SAME session as the incoming
-    // record. An open turn with only llm.request / tool.call events is still in
-    // progress, and a turn in a DIFFERENT session is a concurrent subagent
-    // (e.g. mimo-code's checkpoint-writer / distill) whose parent turn is still
-    // streaming — flushing either on a sibling turn's arrival would split the
-    // turn's records across buffers and produce duplicate ENTRY/AGENT spans in
-    // the same trace_id (observed 2026-07-16 with concurrent subagent spawns).
-    // Incomplete same-session buffers stay open and are eventually flushed by
-    // Signal A, idle timeout, or shutdown. Different-session buffers stay open
-    // until their own Signal A / idle / shutdown fires.
+    // Same session (or one side missing session info): treat as sequential user flow —
+    // preempt the older buffer so it converts and frees. This includes abandoned
+    // turns that never emit a terminal llm.response (e.g. MiMo crashed mid-stream,
+    // user moved on, turnIdleTimeoutMs=0). For same-session buffers we preempt
+    // even without llm.response; for missing-session-info buffers we keep the
+    // original hasLlmResponse safety check to avoid splitting in-progress turns
+    // on every sibling arrival.
+    // Different non-empty sessions → concurrent subagent (e.g. mimo-code's
+    // checkpoint-writer / distill), never preempt — flushing mid-stream would
+    // split the parent turn's records and produce duplicate ENTRY/AGENT spans
+    // in the same trace_id (observed 2026-07-16 with concurrent subagent spawns).
     const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) ?? '';
     for (const [bufKey, buf] of this.turnBuffers) {
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
-      const hasLlmResponse = buf.records.some(
-        (r) => r['event.name'] === 'llm.response',
-      );
-      if (!hasLlmResponse) continue;
       const bufSessionId = (buf.records[0]?.['gen_ai.session.id'] as string | undefined) ?? '';
-      // Same session → sequential user flow, preempt is safe (user moved on).
-      // Missing session info on either side → fall back to preempt (preserves
-      // the original heuristic for records that don't carry gen_ai.session.id).
-      // Different non-empty sessions → concurrent subagent, never preempt.
-      if (incomingSessionId && bufSessionId && incomingSessionId !== bufSessionId) {
-        continue;
+      const differentSessions = !!incomingSessionId && !!bufSessionId && incomingSessionId !== bufSessionId;
+      if (differentSessions) continue;
+      const sameSessionConfirmed = !!incomingSessionId && !!bufSessionId && incomingSessionId === bufSessionId;
+      if (!sameSessionConfirmed) {
+        const hasLlmResponse = buf.records.some(
+          (r) => r['event.name'] === 'llm.response',
+        );
+        if (!hasLlmResponse) continue;
       }
       buf.completed = true;
       this.triggerFlush(buf, false);
+    }
+
+    // Bounded cleanup: if buffers have accumulated past the hard cap (pathological
+    // case where neither Signal A, same-session successor, nor idle timeout ever
+    // fires for many turns), flush oldest incomplete buffers to bound memory.
+    if (this.turnBuffers.size > MAX_TURN_BUFFERS) {
+      const overflow = this.turnBuffers.size - MAX_TURN_BUFFERS;
+      const candidates = [...this.turnBuffers.values()]
+        .filter((b) => !b.completed)
+        .sort((a, b) => a.lastActivityMs - b.lastActivityMs)
+        .slice(0, overflow);
+      for (const b of candidates) {
+        b.completed = true;
+        this.triggerFlush(b, false);
+      }
     }
 
     let buf = this.turnBuffers.get(key);

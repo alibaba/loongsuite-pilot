@@ -17,9 +17,8 @@ vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
 function makeConfig() {
   return {
     enabled: true,
-    endpoint: 'http://localhost:4318',
+    endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318', headers: { 'x-test': '1' } }],
     protocol: 'http/protobuf' as const,
-    headers: { 'x-test': '1' },
     serviceName: 'test-pilot',
   };
 }
@@ -155,5 +154,107 @@ describe('OtlpTraceFlusher - concurrent subagent regression', () => {
       expect((r as Record<string, unknown>)['gen_ai.turn.id']).toBe(mainTurnId);
       expect((r as Record<string, unknown>)['trace_id']).toBe(mainTraceId);
     }
+  });
+
+  it('preempts an abandoned same-session buffer with no llm.response when a new same-session turn arrives', async () => {
+    // PR #115 review issue 3: an abandoned same-session turn that only has
+    // llm.request / tool.call records (the user moved on or MiMo crashed
+    // mid-stream) must be flushed when a new same-session turn arrives —
+    // otherwise it accumulates forever (turnIdleTimeoutMs defaults to 0).
+    // Same-session signals "user moved on" so the hasLlmResponse guard is
+    // dropped for this case. Different-session (concurrent subagent) is
+    // still covered by the test above.
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    const trace1 = '11112f3577b34da6a3ce929d0e0e4736';
+    const trace2 = '22222f3577b34da6a3ce929d0e0e4736';
+
+    // Abandoned turn in session "s1" — only an `other` event (no llm.request/
+    // llm.response pair, no tool pair). The orphan-pair dropper passes
+    // `other` records through unchanged, so we can assert the preempt
+    // forwarded this exact record.
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': 's1:t1',
+      'gen_ai.session.id': 's1',
+      'trace_id': trace1,
+      'event.name': 'other',
+    }));
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    // New same-session turn arrives — the abandoned buffer must be preempted
+    // even though it never emitted llm.response.
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': 's1:t2',
+      'gen_ai.session.id': 's1',
+      'trace_id': trace2,
+      'event.name': 'other',
+    }));
+    await flusher.flush();
+    // The first call is the preempt of the abandoned s1:t1 buffer (the
+    // second is the shutdown flush of the s1:t2 buffer that arrived last).
+    expect(mockConvert.mock.calls.length).toBeGreaterThanOrEqual(1);
+    const abandonedRecords = mockConvert.mock.calls[0][0];
+    expect(abandonedRecords).toHaveLength(1);
+    expect((abandonedRecords[0] as Record<string, unknown>)['gen_ai.turn.id']).toBe('s1:t1');
+  });
+
+  it('does NOT preempt an abandoned buffer with no llm.response when session info is missing', async () => {
+    // When gen_ai.session.id is missing on either side, we can't tell
+    // same-session (sequential, safe to preempt) from different-session
+    // (concurrent subagent, must not preempt). Fall back to the original
+    // hasLlmResponse safety check so an in-progress turn isn't split on
+    // every sibling arrival.
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    const trace1 = '33332f3577b34da6a3ce929d0e0e4736';
+    const trace2 = '44442f3577b34da6a3ce929d0e0e4736';
+
+    // Abandoned turn, NO gen_ai.session.id on any record — only an other event.
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': 'no-ses:t1',
+      'trace_id': trace1,
+      'event.name': 'other',
+    }));
+    // New turn arrives, also without gen_ai.session.id — must NOT preempt
+    // (hasLlmResponse guard still applies when session info is missing).
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': 'no-ses:t2',
+      'trace_id': trace2,
+      'event.name': 'other',
+    }));
+    // No preemption should have fired before shutdown flush.
+    expect(mockConvert).not.toHaveBeenCalled();
+  });
+
+  it('force-flushes oldest incomplete buffers when MAX_TURN_BUFFERS is exceeded', async () => {
+    // Bounded cleanup: if buffers accumulate past the hard cap (neither
+    // Signal A, same-session successor, nor idle timeout ever fires for
+    // many turns), the oldest incomplete buffers must be force-flushed to
+    // bound memory. Each turn is in its own session and never emits
+    // llm.response, so neither Signal A nor same-session preempt applies.
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    // Push 70 distinct abandoned buffers (all different sessions, only an
+    // `other` event so they survive orphan-dropping and we can count calls).
+    for (let i = 0; i < 70; i++) {
+      const hex = i.toString(16).padStart(8, '0').slice(-8);
+      const trace = (hex + '2f3577b34da6a3ce929d0e0e4736').slice(0, 32);
+      await flusher.send(makeEntry({
+        'gen_ai.turn.id': `s${i}:t1`,
+        'gen_ai.session.id': `s${i}`,
+        'trace_id': trace,
+        'event.name': 'other',
+      }));
+    }
+    await flusher.flush();
+    // At least the overflow (70 - 64 = 6) oldest buffers must have been
+    // force-flushed to stay under the cap.
+    expect(mockConvert.mock.calls.length).toBeGreaterThanOrEqual(6);
   });
 });

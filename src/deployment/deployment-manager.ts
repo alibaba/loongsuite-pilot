@@ -99,6 +99,26 @@ export class DeploymentManager {
     return result;
   }
 
+  /**
+   * Remove a plugin-inject agent's spec from its config file (e.g. MiMo
+   * Code's mimocode.jsonc, OpenCode's opencode.jsonc). Called by the
+   * uninstaller path so the agent's config doesn't keep a dangling spec
+   * pointing at a (possibly purged) plugin.mjs.
+   */
+  async undeployAgent(def: AgentDefinition): Promise<boolean> {
+    await this.loadState();
+    const strategy = this.getStrategy(def);
+    if (!('undeploy' in strategy) || typeof (strategy as { undeploy?: unknown }).undeploy !== 'function') {
+      return false;
+    }
+    const ok = await (strategy as { undeploy: (def: AgentDefinition) => Promise<boolean> }).undeploy(def);
+    if (ok && this.state[def.id]) {
+      delete this.state[def.id];
+      await this.saveState();
+    }
+    return ok;
+  }
+
   getDefinitions(): AgentDefinition[] {
     return this.definitions;
   }

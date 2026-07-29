@@ -311,5 +311,4 @@ describe('OtlpTraceFlusher - conversion', () => {
     // All 4 records kept — pairs are complete.
     expect(sanitized).toHaveLength(4);
   });
-  });
 });

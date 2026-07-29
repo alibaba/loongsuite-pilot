@@ -350,10 +350,13 @@ describe('MiMo Code plugin — interrupted turn synthesis', () => {
     const resultIds = toolResults.map((r) => r['gen_ai.tool.call.id']).sort();
     expect(resultIds).toEqual(callIds);
 
-    // Synthetic llm.response has finish_reason and step.id matching the open step
+    // Synthetic llm.response has finish_reason and step.id matching the open step.
+    // finish_reason="cancelled" (terminal) so the OTLP flusher's Signal A marks
+    // the turn completed immediately — "tool_call" was non-terminal and left
+    // abandoned turns unexported when turnIdleTimeoutMs=0 (PR #115 review).
     const synthResp = byName['llm.response'][0];
     expect(synthResp['gen_ai.step.id']).toBe(byName['llm.request'][0]['gen_ai.step.id']);
-    expect(synthResp['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
+    expect(synthResp['gen_ai.response.finish_reasons']).toEqual(['cancelled']);
     expect(synthResp['gen_ai.tool.description']).toBeUndefined();
     expect(synthResp['error.type']).toBe('session_idle');
     expect(synthResp['gen_ai.framework']).toBe('mimo-code');

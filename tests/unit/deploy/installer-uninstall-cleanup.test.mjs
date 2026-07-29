@@ -142,3 +142,39 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
       .toBeLessThan(uninstall.indexOf('Remove-CodexTrustState'));
   });
 });
+
+describe('uninstall cleans the MiMo Code plugin-inject spec', () => {
+  it('sh defines remove_mimocode_plugin', () => {
+    expect(sh).toMatch(/remove_mimocode_plugin\(\)\s*\{/);
+  });
+
+  it('sh calls remove_mimocode_plugin inside cmd_uninstall', () => {
+    const uninstall = sh.slice(sh.indexOf('cmd_uninstall()'));
+    expect(uninstall).toContain('remove_mimocode_plugin');
+  });
+
+  it('ps1 defines Remove-MimoCodePlugin', () => {
+    expect(ps1).toMatch(/function Remove-MimoCodePlugin\s*\{/);
+  });
+
+  it('ps1 calls Remove-MimoCodePlugin inside Cmd-Uninstall', () => {
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(uninstall).toContain('Remove-MimoCodePlugin');
+  });
+
+  for (const cfg of ['mimocode.jsonc', 'mimocode.json']) {
+    it(`sh cleans ~/.config/mimocode/${cfg}`, () => {
+      expect(sh).toContain(`.config/mimocode/${cfg}`);
+    });
+    it(`ps1 cleans .config\\mimocode\\${cfg}`, () => {
+      expect(ps1).toContain(`.config\\mimocode\\${cfg}`);
+    });
+  }
+
+  it('matches our entries by pluginId or plugin file path', () => {
+    expect(sh).toContain('loongsuite-pilot-mimo-code');
+    expect(sh).toContain('plugins/mimo-code/plugin.mjs');
+    expect(ps1).toContain('loongsuite-pilot-mimo-code');
+    expect(ps1).toContain('plugins/mimo-code/plugin.mjs');
+  });
+});

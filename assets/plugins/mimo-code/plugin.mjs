@@ -255,7 +255,7 @@ function buildCommonFields(sessionID, session, userId) {
     "user.id": userId,
     "gen_ai.agent.type": AGENT_TYPE,
     "gen_ai.agent.name": session.agentMeta?.name || AGENT_TYPE,
-    "gen_ai.agent.id": session.agentMeta?.name || undefined,
+    "gen_ai.agent.id": session.agentMeta?.id || undefined,
     // ARMS GenAI semconv: every span should carry gen_ai.framework so CMS can
     // route the trace to the right pipeline. The OTLP trace flusher also sets
     // it as a resource attribute, but mirroring it here on every record keeps
@@ -982,9 +982,15 @@ function flushPendingPartsAsTerminal(session, sessionID, userId, reason) {
   // llm.response (the turn completed normally — no need to synthesize).
   if (!turn.currentStepId || session.stepEmittedResponse) return;
 
-  const finishReasons = session.pendingParts?.some((p) => p.kind === "tool_call")
-    ? ["tool_call"]
-    : ["stop"];
+  // Always emit "cancelled" as the synthetic finish_reason. The OTLP trace
+  // flusher only treats stop/end_turn/cancelled as terminal, so using
+  // "tool_call" (the original choice when pendingParts had a tool_call) would
+  // leave the turn's buffer open until the next turn / non-zero idle timeout /
+  // shutdown — and turnIdleTimeoutMs defaults to 0, so the interrupted turn
+  // would never export. "cancelled" closes the turn immediately via Signal A.
+  // The synthesized tool.result records (status=error) already capture that a
+  // tool call was pending; the finish_reason only needs to be terminal here.
+  const finishReasons = ["cancelled"];
   const outputMessages = buildOutputMessages(session.pendingParts, finishReasons[0]);
 
   // Ensure the synthetic llm.response timestamp is strictly later than the
