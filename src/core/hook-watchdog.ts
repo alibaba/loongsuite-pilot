@@ -4,7 +4,8 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import type { HookWatchdogConfig } from '../types/index.js';
-import { directoryExists, fileExists, readJsonFile, resolveHome } from '../utils/fs-utils.js';
+import { directoryExists, fileExists, resolveHome } from '../utils/fs-utils.js';
+import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
 import { createLogger } from '../utils/logger.js';
 
 const execFileAsync = promisify(execFile);
@@ -17,6 +18,8 @@ const MAX_INTERCEPT_REPAIRS_PER_DAY = 3;
 export interface PluginCheckTarget {
   agentId: string;
   settingsPath: string;
+  /** File syntax. Defaults to strict JSON. */
+  settingsSyntax?: JsonSyntax;
   expectedHooks: string[];
   /** Substrings that identify our hook command in settings.json */
   markers: string[];
@@ -76,7 +79,7 @@ export interface CheckResult {
 
 export interface TargetResult {
   agentId: string;
-  status: 'healthy' | 'repaired' | 'cooldown' | 'unavailable' | 'repair-failed';
+  status: 'healthy' | 'repaired' | 'cooldown' | 'unavailable' | 'invalid-config' | 'repair-failed';
   expected?: number;
   found?: number;
   missing?: string[];
@@ -97,6 +100,7 @@ export class HookWatchdog {
   private readonly targets: PluginCheckTarget[];
   private readonly interceptTargets: InterceptCheckTarget[];
   private readonly lastRepairAt: Map<string, number> = new Map();
+  private readonly lastInvalidConfigByTarget: Map<string, string> = new Map();
   private readonly dailyRepairCount: Map<string, number> = new Map();
   private dailyRepairResetDate = '';
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
@@ -147,7 +151,7 @@ export class HookWatchdog {
     for (const target of this.targets) {
       try {
         const result = await this.checkTarget(target);
-        if (result.status === 'unavailable') {
+        if (result.status === 'unavailable' || result.status === 'invalid-config') {
           summary.skipped++;
         } else if (result.status === 'repaired') {
           summary.repaired++;
@@ -188,7 +192,21 @@ export class HookWatchdog {
       }
     }
 
-    const settings = await readJsonFile<Record<string, unknown>>(target.settingsPath);
+    const document = await readJsonDocument<Record<string, unknown>>(
+      target.settingsPath,
+      target.settingsSyntax ?? 'json',
+    );
+    if (document.status === 'error') {
+      return this.reportInvalidConfig(target, document.error.message);
+    }
+    if (
+      document.status === 'ok'
+      && (!document.data || typeof document.data !== 'object' || Array.isArray(document.data))
+    ) {
+      return this.reportInvalidConfig(target, 'settings root must be a JSON object');
+    }
+    this.lastInvalidConfigByTarget.delete(this.invalidConfigTargetKey(target));
+    const settings = document.status === 'ok' ? document.data : null;
     const missing = this.findMissingHooks(settings, target);
     const found = target.expectedHooks.length - missing.length;
 
@@ -236,6 +254,29 @@ export class HookWatchdog {
       return { agentId: target.agentId, status: 'repair-failed', missing };
     }
     return { agentId: target.agentId, status: 'repaired', missing };
+  }
+
+  private reportInvalidConfig(target: PluginCheckTarget, error: string): TargetResult {
+    const targetKey = this.invalidConfigTargetKey(target);
+    const previous = this.lastInvalidConfigByTarget.get(targetKey);
+    if (previous !== error) {
+      logger.error('hook-watchdog.invalid-config', {
+        agent: target.agentId,
+        settingsPath: target.settingsPath,
+        error,
+      });
+      this.lastInvalidConfigByTarget.set(targetKey, error);
+    } else {
+      logger.debug('hook-watchdog.invalid-config-suppressed', {
+        agent: target.agentId,
+        settingsPath: target.settingsPath,
+      });
+    }
+    return { agentId: target.agentId, status: 'invalid-config' };
+  }
+
+  private invalidConfigTargetKey(target: PluginCheckTarget): string {
+    return `${target.agentId}\0${target.settingsPath}`;
   }
 
   private findMissingHooks(

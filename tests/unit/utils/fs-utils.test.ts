@@ -2,7 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { cleanStaleTmpFiles } from '../../../src/utils/fs-utils.js';
+import {
+  cleanStaleTmpFiles,
+  writeTextFileAtomic,
+} from '../../../src/utils/fs-utils.js';
 
 // cleanStaleTmpFiles must be age-based, not pid-based: a fresh .tmp (any pid)
 // may belong to a concurrent live process (e.g. two daemon instances overlapping
@@ -51,5 +54,18 @@ describe('cleanStaleTmpFiles', () => {
 
   it('does not throw when dir is missing', async () => {
     await expect(cleanStaleTmpFiles(path.join(dir, 'nope'))).resolves.toBeUndefined();
+  });
+
+  it('rejects a guarded write when the observed file content has changed', async () => {
+    const target = path.join(dir, 'settings.json');
+    await fs.writeFile(target, '{"model":"new"}\n', 'utf8');
+
+    await expect(writeTextFileAtomic(
+      target,
+      '{"model":"pilot"}\n',
+      { expected: { exists: true, content: '{"model":"old"}\n' } },
+    )).rejects.toThrow('file changed before write');
+
+    await expect(fs.readFile(target, 'utf8')).resolves.toBe('{"model":"new"}\n');
   });
 });
