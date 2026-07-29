@@ -163,8 +163,11 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
   const toolResultTimestamps = new Map(); // tool_use_id → ISO8601 timestamp
   const toolResultContents = new Map(); // tool_use_id → result content
   const toolResultErrors = new Map(); // tool_use_id → boolean (is_error)
-  const skillRootByToolId = new Map(); // Skill tool_use_id → 根 SKILL.md 路径(来自 isMeta 注入)
+  const skillRootByToolId = new Map(); // Skill tool_use_id → 根 SKILL.md 路径(来自 isMeta 注入,model-auto 路径)
   const skillToolUseIdSet = new Set(); // #1: 本次 window 内 name==='Skill' 的 tool_use id(结构信号)
+  // user-typed /skill 路径: CC UI 直接以 isMeta=True + sourceToolUseID 缺席注入 SKILL.md 内容。
+  // 按 promptId 键、Set<rootPath> 值(防同 turn 多 user-typed skill 后写覆盖)。
+  const userTypedSkillRootByPromptId = new Map(); // promptMapKey(promptId) → Set<rootPath>
   let currentPromptId = null; // 当前 turn 的 promptId(从 user record 提取)
 
   for (const line of content.split('\n')) {
@@ -238,23 +241,32 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
 
       const userContent = msg.content;
 
-      // 显式 /skill 注入: 捕获 sourceToolUseID → 根 SKILL.md 路径。
-      // 仅额外捕获此映射,不改变 isMeta 其余记录被丢弃的行为。
+      // 显式 /skill 注入: 双分支捕获根 SKILL.md 路径。
+      //   - model-auto (sourceToolUseID present): 回链 Skill tool_use,写 skillRootByToolId
+      //   - user-typed (sourceToolUseID 缺席): CC UI 直接注入,写 userTypedSkillRootByPromptId
+      // 仅额外捕获映射,不改变 isMeta 其余记录被丢弃的行为。
       // #1: 路径提取仍「前缀优先」不变(跨 parse-window 边界时 Skill 块可能已在上一
       // window 消费,此处仍能靠前缀拿到路径,绝不比现状更窄)。
-      if (isMeta && record.sourceToolUseID) {
+      if (isMeta) {
         const rootPath = extractSkillRootPath(extractTextContent(userContent));
         if (rootPath) {
-          skillRootByToolId.set(record.sourceToolUseID, rootPath);
-        } else if (skillToolUseIdSet.has(record.sourceToolUseID)) {
-          // #2 漂移可观测: 仅当「结构确认为 skill 注入(sourceToolUseID 指向本 window
-          // 的 Skill tool_use)但路径提取失败」时打点——把前缀漂移导致的静默回归变成
-          // 可检测信号。结构 gate 确保不对「非 skill 的 isMeta+sourceToolUseID」误报。
+          if (record.sourceToolUseID) {
+            skillRootByToolId.set(record.sourceToolUseID, rootPath);
+          } else {
+            const pkey = promptMapKey(currentPromptId);
+            if (!userTypedSkillRootByPromptId.has(pkey)) {
+              userTypedSkillRootByPromptId.set(pkey, new Set());
+            }
+            userTypedSkillRootByPromptId.get(pkey).add(rootPath);
+          }
+        } else if (record.sourceToolUseID && skillToolUseIdSet.has(record.sourceToolUseID)) {
+          // #2 漂移可观测: 仅 model-auto 分支(sourceToolUseID present + 结构确认 Skill +
+          // 前缀失配)打点。user-typed 分支无「结构确认」锚点(无 sourceToolUseID),不打 parse_miss。
           logHookError({
             agentId: PARSER_AGENT_ID,
             stage: 'skill_root_parse',
             errorType: 'skill_root_parse_miss',
-            errorMessage: `sourceToolUseID=${record.sourceToolUseID} resolves to a Skill tool_use but SKILL.md root path extraction failed (prefix mismatch)`,
+            errorMessage: `sourceToolUseID=${record.sourceToolUseID} resolves to a Skill tool use but SKILL.md root path extraction failed (prefix mismatch)`,
           });
         }
       }
@@ -380,7 +392,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
   }
 
   // Phase 4: 按 promptId 切分 turns
-  const turns = splitIntoTurns(conversationRecords, llmCalls, skillRootByToolId);
+  const turns = splitIntoTurns(conversationRecords, llmCalls, skillRootByToolId, userTypedSkillRootByPromptId);
 
   return { turns, nextOffset: fileSize };
 }
@@ -392,8 +404,12 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
  * 同一 turn 内所有 user record 共享同一 promptId。
  * promptId 变化 = 新 turn 开始。
  */
-function splitIntoTurns(conversationRecords, llmCalls, skillRootByToolId = new Map()) {
+function splitIntoTurns(conversationRecords, llmCalls, skillRootByToolId = new Map(), userTypedSkillRootByPromptId = new Map()) {
   if (llmCalls.length === 0) return [];
+
+  // user-typed /skill 根路径按 promptId 分桶(已在 parser 主循环捕获)。
+  // fallback turn(promptId 全缺)用 promptMapKey(null) 查桶。
+  const userTypedRootsFor = (pid) => userTypedSkillRootByPromptId.get(promptMapKey(pid)) || new Set();
 
   // 收集所有出现的 promptId(按首次出现顺序)
   const promptIdOrder = [];
@@ -430,6 +446,7 @@ function splitIntoTurns(conversationRecords, llmCalls, skillRootByToolId = new M
       promptTimestamp: firstTs,
       llmCalls,
       skillRootByToolId,
+      userTypedSkillRoots: userTypedRootsFor(null),
     }];
   }
 
@@ -457,6 +474,7 @@ function splitIntoTurns(conversationRecords, llmCalls, skillRootByToolId = new M
       promptTimestamp,
       llmCalls: turnLlmCalls,
       skillRootByToolId,
+      userTypedSkillRoots: userTypedRootsFor(pid),
     });
   }
 
@@ -472,6 +490,7 @@ function splitIntoTurns(conversationRecords, llmCalls, skillRootByToolId = new M
         promptTimestamp: orphanCalls[0]?.timestamp || null,
         llmCalls: orphanCalls,
         skillRootByToolId,
+        userTypedSkillRoots: userTypedRootsFor(null),
       });
     }
   }

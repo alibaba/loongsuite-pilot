@@ -523,11 +523,20 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
   // Phase 1: 为每个 llm_call 创建 step + 生成 LLM 事件
   const toolIdToStep = new Map(); // tool_use_id → { stepId, stepSpanId }
   const llmCalls = turn.llmCalls || [];
+  // user-typed /skill 合成挂 owner step = turn 首个 LLM step;result ts 取首个 LLM response。
+  let firstStepId = null;
+  let firstStepSpanId = null;
+  let firstLlmResponseTs = null;
 
   for (const ev of llmCalls) {
     stepRound++;
     const currentStepId = `${turnId}:s${stepRound}`;
     const currentStepSpanId = generateSpanId();
+    if (firstStepId === null) {
+      firstStepId = currentStepId;
+      firstStepSpanId = currentStepSpanId;
+      firstLlmResponseTs = ev.timestamp || null;
+    }
     const llmSpanId = generateSpanId();
     const responseId = ev.message_id || `${currentStepId}:r`;
 
@@ -625,8 +634,10 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
   // transcript/Hook 真实 Read > 兜底合成),以及已合成过的根路径(同 turn 幂等去重)。
   // 只用于「根 SKILL.md 是否已有真实 Read」判定,普通文件 Read 全程不触碰、不做全局去重。
   const skillRootByToolId = turn.skillRootByToolId;
+  const userTypedSkillRoots = turn.userTypedSkillRoots;
+  const hasUserTypedRoots = !!(userTypedSkillRoots && userTypedSkillRoots.size > 0);
   const realReadPaths = new Set();
-  if (skillRootByToolId && skillRootByToolId.size > 0) {
+  if ((skillRootByToolId && skillRootByToolId.size > 0) || hasUserTypedRoots) {
     for (const ev of llmCalls) {
       for (const block of (ev.output_content || [])) {
         if (block && block.type === 'tool_use' && block.name === 'Read') {
@@ -637,6 +648,61 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     }
   }
   const synthesizedSkillRoots = new Set();
+
+  // user-typed /skill 兜底合成 (turn 级入口):
+  // CC UI 直接以 isMeta + sourceToolUseID 缺席注入 SKILL.md 内容时,本 turn 无 Skill
+  // tool_use 可挂(参见下方 :702 no-op),故在此合成根 Read span,挂 owner step = turn 首个 LLM step。
+  // 去重键 = client + turnId + 归一化根路径,复用 deterministicSkillReadId / synthesizedSkillRoots。
+  if (hasUserTypedRoots && firstStepId) {
+    // P0 时间戳: call/result 必须不同,防 validate-trace time.non_zero_duration ERROR。
+    // call ts = 用户敲 /skill 时刻 (promptTimestamp);
+    // result ts = 本 turn 首个 LLM response (读完成于模型开始回应前),取不到 → promptTs + 1ns 兜底。
+    const callNs = isoToUnixNanos(turn.promptTimestamp);
+    const firstRespNs = isoToUnixNanos(firstLlmResponseTs);
+    let resultNs = (!firstRespNs || firstRespNs === '0' || firstRespNs === callNs)
+      ? (() => { try { return String(BigInt(callNs) + 1n); } catch { return callNs; } })()
+      : firstRespNs;
+    for (const rootRaw of userTypedSkillRoots) {
+      const normRoot = normalizeSkillPath(cwd, rootRaw);
+      if (!normRoot) continue;
+      if (realReadPaths.has(normRoot) || synthesizedSkillRoots.has(normRoot)) continue;
+      synthesizedSkillRoots.add(normRoot);
+      const readCallId = deterministicSkillReadId(AGENT_ID, turnId, normRoot);
+      const readSpanId = generateSpanId();
+      records.push({
+        time_unix_nano: callNs,
+        'event.id': crypto.randomUUID(),
+        'event.name': 'tool.call',
+        ...baseFields,
+        span_id: readSpanId,
+        parent_span_id: firstStepSpanId,
+        'gen_ai.step.id': firstStepId,
+        'gen_ai.tool.name': 'Read',
+        'gen_ai.tool.call.id': readCallId,
+        'gen_ai.tool.call.arguments': toJsonValue({ file_path: normRoot }),
+      });
+      records.push({
+        time_unix_nano: resultNs,
+        'event.id': crypto.randomUUID(),
+        'event.name': 'tool.result',
+        ...baseFields,
+        span_id: readSpanId,
+        parent_span_id: firstStepSpanId,
+        'gen_ai.step.id': firstStepId,
+        'gen_ai.tool.name': 'Read',
+        'gen_ai.tool.call.id': readCallId,
+        'gen_ai.tool.call.result': toJsonValue(''),
+        'tool.result.status': 'success',
+      });
+      // 参照 cursor PR #193: owner step 的 LLM span output.messages 挂同 id/name=Read 的 tool_call,
+      // 使合成 Read span 满足 ARMS semantic.tool_matches_llm_output。
+      injectSynthesizedToolCall(records, firstStepId, {
+        id: readCallId,
+        name: 'Read',
+        arguments: toJsonValue({ file_path: normRoot }),
+      });
+    }
+  }
 
   // Phase 2: 为每个 tool 生成 tool.call + tool.result，归属到声明方 LLM 的 step
   for (const ev of llmCalls) {
@@ -696,68 +762,10 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
         records.push(resultRecord);
       }
 
-      // 显式 /skill: 保证本 turn 根 SKILL.md 恰好展示一次 Read span。
-      // 去重键 = client + turnId + 归一化根路径。若本 turn 已有真实根 Read 则不合成
-      // (真实事件优先);否则合成一条同 call-id 的 Read tool.call+tool.result,挂 Skill owner step。
-      //
-      // origin gate: 仅对 user-typed slash /skill (XJK 路径, prompt 同时含
-      // <skill-format>true</skill-format> 与 <command-name>q</command-name>) 激活合成;
-      // 模型自主调 Skill (无 markup) 不合成。Multica 托管 SDK-CLI 模式下永不触发, 属预期。
-      // per-skill-call: 仅当 user-typed q 与本 Skill tool_use 的 input.skill 精确相等才合成,
-      // 同 turn 内其它模型自主 Skill 调用 (input.skill !== q) 不合成。
-      const promptText = turn?.prompt || '';
-      const cmdNameMatch = promptText.match(/<command-name>([^<]+)<\/command-name>/);
-      const isUserTypedSkill = cmdNameMatch !== null
-        && /<skill-format>true<\/skill-format>/.test(promptText);
-      if (toolName === 'Skill' && skillRootByToolId && isUserTypedSkill) {
-        const rootRaw = skillRootByToolId.get(toolId);
-        const normRoot = normalizeSkillPath(cwd, rootRaw);
-        if (
-          normRoot &&
-          toolBlock.input?.skill === cmdNameMatch[1] &&
-          !realReadPaths.has(normRoot) &&
-          !synthesizedSkillRoots.has(normRoot)
-        ) {
-          synthesizedSkillRoots.add(normRoot);
-          const readCallId = deterministicSkillReadId(AGENT_ID, turnId, normRoot);
-          const readSpanId = generateSpanId();
-          const readResultTs = timestamps.result || timestamps.call;
-          records.push({
-            time_unix_nano: isoToUnixNanos(timestamps.call),
-            'event.id': crypto.randomUUID(),
-            'event.name': 'tool.call',
-            ...baseFields,
-            span_id: readSpanId,
-            parent_span_id: owner.stepSpanId,
-            'gen_ai.step.id': owner.stepId,
-            'gen_ai.tool.name': 'Read',
-            'gen_ai.tool.call.id': readCallId,
-            'gen_ai.tool.call.arguments': toJsonValue({ file_path: normRoot }),
-          });
-          records.push({
-            time_unix_nano: isoToUnixNanos(readResultTs),
-            'event.id': crypto.randomUUID(),
-            'event.name': 'tool.result',
-            ...baseFields,
-            span_id: readSpanId,
-            parent_span_id: owner.stepSpanId,
-            'gen_ai.step.id': owner.stepId,
-            'gen_ai.tool.name': 'Read',
-            'gen_ai.tool.call.id': readCallId,
-            'gen_ai.tool.call.result': toJsonValue(''),
-            'tool.result.status': 'success',
-          });
-
-          // 参照 cursor PR #193: 在 owner step 的 LLM span output.messages 挂上
-          // 同 call id / name=Read 的 tool_call,使合成 Read span 满足 ARMS
-          // semantic.tool_matches_llm_output(工具 span 必须对应 LLM 输出侧的 tool_call)。
-          injectSynthesizedToolCall(records, owner.stepId, {
-            id: readCallId,
-            name: 'Read',
-            arguments: toJsonValue({ file_path: normRoot }),
-          });
-        }
-      }
+      // model-auto Skill 不再合成根 Read (用户边界: 仅 user-typed slash /skill 合成)。
+      // user-typed 合成在上方 turn 级入口 (hasUserTypedRoots 分支),此处 model-auto 路径 no-op。
+      // 未来若需 model-auto 合成可从 git 历史恢复本块。
+      if (toolName === 'Skill' && skillRootByToolId) { /* no-op */ }
     }
   }
 
