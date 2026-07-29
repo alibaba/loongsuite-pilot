@@ -310,7 +310,8 @@ Pilot 会将 Trace 发送到 `http://localhost:3000/api/public/otel/v1/traces`�
 说明：
 - 与来源 #2（仅 span）不同，透传属性是普通的顶层 record 字段，因此会**同时**出现在 event log（SLS / JSONL）和 trace span 上——与 git 字段行为一致。
 - 保留前缀 key（`gen_ai.`、`git.`、`workspace.`、`event.`、`trace_`、`user.`、`cost_`、`agent.`）以及敏感命名（token/secret/password/…）会被 hook 丢弃。请使用 `multica.*` 等专用命名空间。
-- 仅匹配所配置前缀的 key 会被透传，其它顶层字段不受影响。支持在进程内构建 record 的 agent（claude-code、qoder、opencode）。
+- 仅匹配所配置前缀的 key 会被透传，其它顶层字段不受影响。目前支持 claude-code、codex、qoder 和 opencode。
+- Codex 会在 `UserPromptSubmit` 时保存这些进程级属性（以 `Stop` 作为 fail-open 兜底），并按 session 与 turn 关联到 transcript 记录，避免同一个 session 被不同调用恢复时沿用上一次调用的属性。
 - value 不能包含逗号 `,`（逗号是键值对分隔符）；单个 value 长度上限 512 字符。
 
 ## 验证 Trace 输出
