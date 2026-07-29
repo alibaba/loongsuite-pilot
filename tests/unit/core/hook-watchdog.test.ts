@@ -9,14 +9,16 @@ import {
 } from '../../../src/core/hook-watchdog.js';
 import type { HookWatchdogConfig } from '../../../src/types/index.js';
 
+const mockLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  debug: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
 // Mock logger to silence output and allow assertions
 vi.mock('../../../src/utils/logger.js', () => ({
-  createLogger: () => ({
-    info: vi.fn(),
-    debug: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  }),
+  createLogger: () => mockLogger,
 }));
 
 // Mock child_process.spawn so tests don't actually run external commands.
@@ -104,6 +106,7 @@ describe('HookWatchdog', () => {
   let tmpDir: string;
 
   beforeEach(async () => {
+    vi.clearAllMocks();
     tmpDir = await createTempDir('hook-watchdog-test-');
     spawnCalls = [];
     spawnBehavior = 'success';
@@ -330,6 +333,74 @@ describe('HookWatchdog', () => {
 
       expect(summary).toEqual({ checked: 0, repaired: 0, skipped: 1 });
       expect(repairFn).not.toHaveBeenCalled();
+    });
+
+    it('repairs an existing whitespace-only settings file', async () => {
+      const repairFn = vi.fn(async () => true);
+      const target: PluginCheckTarget = {
+        agentId: 'qwen-code-cli',
+        settingsPath: path.join(tmpDir, '.qwen', 'settings.json'),
+        settingsSyntax: 'jsonc',
+        expectedHooks: ['Stop'],
+        markers: ['qwen-code-cli-loongsuite-pilot-hook.sh'],
+        repairFn,
+      };
+      await fs.mkdir(path.dirname(target.settingsPath), { recursive: true });
+      await fs.writeFile(target.settingsPath, '  \n', 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary).toEqual({ checked: 0, repaired: 1, skipped: 0 });
+      expect(repairFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('logs a continuous invalid-config error once and logs again after recovery', async () => {
+      const repairFn = vi.fn(async () => true);
+      const target: PluginCheckTarget = {
+        agentId: 'qwen-code-cli',
+        settingsPath: path.join(tmpDir, '.qwen', 'settings.json'),
+        settingsSyntax: 'jsonc',
+        expectedHooks: ['Stop'],
+        markers: ['qwen-code-cli-loongsuite-pilot-hook.sh'],
+        repairFn,
+      };
+      await fs.mkdir(path.dirname(target.settingsPath), { recursive: true });
+      const invalid = '{ // incomplete JSONC\n  "model": "qwen-max",\n';
+      await fs.writeFile(target.settingsPath, invalid, 'utf-8');
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      await wd.runCheck();
+      await wd.runCheck();
+
+      expect(
+        mockLogger.error.mock.calls.filter(([message]) =>
+          message === 'hook-watchdog.invalid-config'
+        ),
+      ).toHaveLength(1);
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        'hook-watchdog.invalid-config-suppressed',
+        expect.objectContaining({ agent: 'qwen-code-cli' }),
+      );
+
+      await fs.writeFile(target.settingsPath, JSON.stringify({
+        hooks: {
+          Stop: [{
+            hooks: [{
+              command: '/opt/qwen-code-cli-loongsuite-pilot-hook.sh stop',
+            }],
+          }],
+        },
+      }), 'utf-8');
+      await wd.runCheck();
+      await fs.writeFile(target.settingsPath, invalid, 'utf-8');
+      await wd.runCheck();
+
+      expect(
+        mockLogger.error.mock.calls.filter(([message]) =>
+          message === 'hook-watchdog.invalid-config'
+        ),
+      ).toHaveLength(2);
     });
   });
 

@@ -100,6 +100,7 @@ export class HookWatchdog {
   private readonly targets: PluginCheckTarget[];
   private readonly interceptTargets: InterceptCheckTarget[];
   private readonly lastRepairAt: Map<string, number> = new Map();
+  private readonly lastInvalidConfigByTarget: Map<string, string> = new Map();
   private readonly dailyRepairCount: Map<string, number> = new Map();
   private dailyRepairResetDate = '';
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
@@ -196,24 +197,15 @@ export class HookWatchdog {
       target.settingsSyntax ?? 'json',
     );
     if (document.status === 'error') {
-      logger.error('hook-watchdog.invalid-config', {
-        agent: target.agentId,
-        settingsPath: target.settingsPath,
-        error: document.error.message,
-      });
-      return { agentId: target.agentId, status: 'invalid-config' };
+      return this.reportInvalidConfig(target, document.error.message);
     }
     if (
       document.status === 'ok'
       && (!document.data || typeof document.data !== 'object' || Array.isArray(document.data))
     ) {
-      logger.error('hook-watchdog.invalid-config', {
-        agent: target.agentId,
-        settingsPath: target.settingsPath,
-        error: 'settings root must be a JSON object',
-      });
-      return { agentId: target.agentId, status: 'invalid-config' };
+      return this.reportInvalidConfig(target, 'settings root must be a JSON object');
     }
+    this.lastInvalidConfigByTarget.delete(this.invalidConfigTargetKey(target));
     const settings = document.status === 'ok' ? document.data : null;
     const missing = this.findMissingHooks(settings, target);
     const found = target.expectedHooks.length - missing.length;
@@ -262,6 +254,29 @@ export class HookWatchdog {
       return { agentId: target.agentId, status: 'repair-failed', missing };
     }
     return { agentId: target.agentId, status: 'repaired', missing };
+  }
+
+  private reportInvalidConfig(target: PluginCheckTarget, error: string): TargetResult {
+    const targetKey = this.invalidConfigTargetKey(target);
+    const previous = this.lastInvalidConfigByTarget.get(targetKey);
+    if (previous !== error) {
+      logger.error('hook-watchdog.invalid-config', {
+        agent: target.agentId,
+        settingsPath: target.settingsPath,
+        error,
+      });
+      this.lastInvalidConfigByTarget.set(targetKey, error);
+    } else {
+      logger.debug('hook-watchdog.invalid-config-suppressed', {
+        agent: target.agentId,
+        settingsPath: target.settingsPath,
+      });
+    }
+    return { agentId: target.agentId, status: 'invalid-config' };
+  }
+
+  private invalidConfigTargetKey(target: PluginCheckTarget): string {
+    return `${target.agentId}\0${target.settingsPath}`;
   }
 
   private findMissingHooks(

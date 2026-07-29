@@ -84,7 +84,7 @@ export class HookManager {
       if (document.status === 'error') {
         throw new Error(`refusing to overwrite invalid settings: ${document.error.message}`);
       }
-      const settings = document.status === 'missing'
+      const settings = document.status === 'missing' || document.status === 'empty'
         ? {}
         : this.requireSettingsObject(document.data);
 
@@ -159,7 +159,7 @@ export class HookManager {
         def.settingsPath,
         'json',
       );
-      if (document.status === 'missing') return true;
+      if (document.status === 'missing' || document.status === 'empty') return true;
       if (document.status === 'error') {
         throw new Error(`refusing to overwrite invalid settings: ${document.error.message}`);
       }
@@ -234,8 +234,10 @@ export class HookManager {
     const expected = document.status === 'missing'
       ? { exists: false as const }
       : { exists: true as const, content: document.raw };
-    let raw = document.status === 'missing' ? '{}\n' : document.raw;
-    const settings = document.status === 'missing'
+    let raw = document.status === 'missing' || document.status === 'empty'
+      ? '{}\n'
+      : document.raw;
+    const settings = document.status === 'missing' || document.status === 'empty'
       ? {}
       : this.requireSettingsObject(document.data);
     const existingValue = this.valueAtPath(settings, def.hookJsonPath);
@@ -282,9 +284,9 @@ export class HookManager {
 
     await writeTextFileAtomic(def.settingsPath, raw, {
       expected,
-      backupPath: document.status === 'ok'
-        ? `${def.settingsPath}.loongsuite-pilot.bak`
-        : undefined,
+      backupPath: document.status === 'missing'
+        ? undefined
+        : `${def.settingsPath}.loongsuite-pilot.bak`,
     });
     await ensureDir(def.historyDir ?? path.join(this.logBaseDir, def.agentId, 'history'));
     logger.info('hook installed', { agentId: def.agentId });
@@ -296,7 +298,7 @@ export class HookManager {
       def.settingsPath,
       'jsonc',
     );
-    if (document.status === 'missing') return true;
+    if (document.status === 'missing' || document.status === 'empty') return true;
     if (document.status === 'error') {
       throw new Error(`refusing to overwrite invalid settings: ${document.error.message}`);
     }

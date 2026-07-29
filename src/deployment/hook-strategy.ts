@@ -1,3 +1,4 @@
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type {
   AgentDefinition,
@@ -7,7 +8,14 @@ import type {
   DeployedAgentRecord,
 } from '../types/index.js';
 import { HookManager, type HookDefinition } from '../hooks/hook-manager.js';
-import { fileExists, readJsonFile, writeJsonFile, resolveHome, ensureDir } from '../utils/fs-utils.js';
+import {
+  fileExists,
+  readJsonFile,
+  writeJsonFile,
+  writeTextFileAtomic,
+  resolveHome,
+  ensureDir,
+} from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 import {
@@ -597,7 +605,21 @@ export class HookStrategy implements DeployStrategy {
     const existed = await fileExists(settingsPath);
     const existing = await readJsonFile<Record<string, unknown>>(settingsPath);
     if (existed && !existing) {
-      throw new Error(`refusing to overwrite invalid settings: ${settingsPath}`);
+      const raw = await fs.readFile(settingsPath, 'utf8');
+      if (raw.trim() !== '') {
+        throw new Error(`refusing to overwrite invalid settings: ${settingsPath}`);
+      }
+
+      const initial: Record<string, unknown> = { hooks: {} };
+      if (needsVersion) {
+        initial.version = 1;
+      }
+      await writeTextFileAtomic(
+        settingsPath,
+        `${JSON.stringify(initial, null, 2)}\n`,
+        { expected: { exists: true, content: raw } },
+      );
+      return;
     }
     if (!existing) {
       const initial: Record<string, unknown> = { hooks: {} };

@@ -13,6 +13,7 @@ export type JsonSyntax = 'json' | 'jsonc';
 
 export type JsonDocumentReadResult<T> =
   | { status: 'ok'; data: T; raw: string }
+  | { status: 'empty'; raw: string }
   | { status: 'missing' }
   | { status: 'error'; error: Error };
 
@@ -58,8 +59,9 @@ export function parseJsonDocument<T>(
 }
 
 /**
- * Keep missing files distinct from unreadable or invalid files. Callers may
- * create a missing file, but must never treat a parse failure as an empty one.
+ * Keep missing, empty, and unreadable/invalid files distinct. Callers may
+ * initialize a missing or empty settings file, but must never treat a parse
+ * failure as an empty one.
  */
 export async function readJsonDocument<T>(
   filePath: string,
@@ -76,6 +78,14 @@ export async function readJsonDocument<T>(
       status: 'error',
       error: err instanceof Error ? err : new Error(String(err)),
     };
+  }
+
+  // A zero-byte or whitespace-only settings file historically behaved like an
+  // empty object. Keep it distinct from a missing file by retaining `raw`, so
+  // callers can still guard writes against concurrent changes to the existing
+  // file.
+  if (raw.trim() === '') {
+    return { status: 'empty', raw };
   }
 
   const parsed = parseJsonDocument<T>(raw, syntax);

@@ -123,6 +123,34 @@ describe('HookManager', () => {
     })).resolves.toBe(false);
   });
 
+  it.each(['', '  \n'])(
+    'initializes an existing blank strict-JSON settings file',
+    async (original) => {
+      const settingsPath = path.join(tmpDir, '.qoder', 'settings.json');
+      await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+      await fs.writeFile(settingsPath, original, 'utf-8');
+
+      const manager = new HookManager(
+        path.join(tmpDir, 'hooks'),
+        path.join(tmpDir, 'logs'),
+      );
+      const ok = await manager.installHook({
+        agentId: 'qoder',
+        settingsPath,
+        hookJsonPath: ['hooks', 'Stop'],
+        hookCommand: '/opt/qoder-loongsuite-pilot-hook.sh',
+        matcher: '*',
+        useNestedFormat: true,
+      });
+
+      expect(ok).toBe(true);
+      const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+      expect(settings.hooks.Stop[0].hooks[0].command).toBe(
+        '/opt/qoder-loongsuite-pilot-hook.sh',
+      );
+    },
+  );
+
   it('removes replacement commands during uninstall', async () => {
     const settingsPath = path.join(tmpDir, '.codex', 'hooks.json');
     await fs.mkdir(path.dirname(settingsPath), { recursive: true });
@@ -235,6 +263,41 @@ describe('HookManager', () => {
       fs.readFile(`${settingsPath}.loongsuite-pilot.bak`, 'utf-8'),
     ).resolves.toBe(original);
   });
+
+  it.each(['', '  \n'])(
+    'initializes an existing blank JSONC settings file without losing write guards',
+    async (original) => {
+      const settingsPath = path.join(tmpDir, '.qwen', 'settings.json');
+      await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+      await fs.writeFile(settingsPath, original, 'utf-8');
+
+      const manager = new HookManager(
+        path.join(tmpDir, 'hooks'),
+        path.join(tmpDir, 'logs'),
+      );
+      const ok = await manager.installHook({
+        agentId: 'qwen-code-cli',
+        settingsPath,
+        settingsSyntax: 'jsonc',
+        hookJsonPath: ['hooks', 'Stop'],
+        hookCommand: '/opt/qwen-loongsuite-pilot-hook.sh stop',
+        matcher: '*',
+        useNestedFormat: true,
+      });
+
+      expect(ok).toBe(true);
+      const updated = await fs.readFile(settingsPath, 'utf-8');
+      const errors: ParseError[] = [];
+      const parsed = parseJsonc(updated, errors, { allowTrailingComma: true });
+      expect(errors).toEqual([]);
+      expect(parsed.hooks.Stop[0].hooks[0].command).toBe(
+        '/opt/qwen-loongsuite-pilot-hook.sh stop',
+      );
+      await expect(
+        fs.readFile(`${settingsPath}.loongsuite-pilot.bak`, 'utf-8'),
+      ).resolves.toBe(original);
+    },
+  );
 
   it('uninstalls a Qwen hook with path-level JSONC edits', async () => {
     const settingsPath = path.join(tmpDir, '.qwen', 'settings.json');
