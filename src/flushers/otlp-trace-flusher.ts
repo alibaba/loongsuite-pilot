@@ -33,7 +33,19 @@ import path from 'node:path';
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
-const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled']);
+const TERMINAL_FINISH_REASONS = new Set([
+  'stop',
+  'end_turn',
+  'cancelled',
+  'error',
+  'length',
+  'content_filter',
+]);
+
+const GROK_RECONSTRUCTION_PASSTHROUGH_KEYS = [
+  'loongsuite.grok.match.strategy',
+  'loongsuite.grok.timing.source',
+] as const;
 
 interface TurnBuffer {
   key: string;
@@ -50,6 +62,11 @@ interface AgentConvertState {
   handler: ExtendedTelemetryHandler;
   inMem: InMemorySpanExporter;
   active: number;
+}
+
+interface ToolOutcome {
+  status: 'failure' | 'cancelled';
+  errorType: string;
 }
 
 /** Minimal exporter surface used by the flusher; lets tests inject fakes. */
@@ -116,6 +133,7 @@ const MAX_CONVERT_STATES = 64;
 // values and emits them on the span.
 class AgentSpanEnrichingHandler extends ExtendedTelemetryHandler {
   currentExtraAttrs: Record<string, string | number> = {};
+  currentToolOutcomes = new Map<string, ToolOutcome>();
 
   constructor(opts: { tracerProvider: BasicTracerProvider }) {
     super(opts);
@@ -138,6 +156,22 @@ class AgentSpanEnrichingHandler extends ExtendedTelemetryHandler {
       }
     }
     return super.stopInvokeAgent(invocation, endTime);
+  }
+
+  stopExecuteTool(invocation: any, endTime?: number): any {
+    const toolCallId = typeof invocation?.toolCallId === 'string'
+      ? invocation.toolCallId
+      : '';
+    const outcome = toolCallId ? this.currentToolOutcomes.get(toolCallId) : undefined;
+    if (outcome) {
+      return super.failExecuteTool(invocation, {
+        type: outcome.errorType,
+        message: outcome.status === 'cancelled'
+          ? 'tool execution cancelled'
+          : 'tool execution failed',
+      }, endTime);
+    }
+    return super.stopExecuteTool(invocation, endTime);
   }
 }
 
@@ -461,6 +495,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         const agentSpanAttrs = this.collectAgentSpanAttributes(records);
         if (handler instanceof AgentSpanEnrichingHandler) {
           handler.currentExtraAttrs = agentSpanAttrs;
+          handler.currentToolOutcomes = this.collectToolOutcomes(records);
         }
 
         // Inject user-defined custom attributes (config/env/file) into trace
@@ -485,7 +520,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
                 ),
               ),
             )];
-        const passthroughKeys = [...new Set([...DEFAULT_GIT_PASSTHROUGH_KEYS, ...customKeys, ...prefixKeys])];
+        const agentSpecificKeys = agentType === 'grok-build'
+          ? GROK_RECONSTRUCTION_PASSTHROUGH_KEYS
+          : [];
+        const passthroughKeys = [
+          ...new Set([
+            ...DEFAULT_GIT_PASSTHROUGH_KEYS,
+            ...agentSpecificKeys,
+            ...customKeys,
+            ...prefixKeys,
+          ]),
+        ];
         const recordsForConversion = customKeys.length === 0
           ? records
           : records.map((r) => {
@@ -505,6 +550,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           } finally {
             if (handler instanceof AgentSpanEnrichingHandler) {
               handler.currentExtraAttrs = {};
+              handler.currentToolOutcomes.clear();
             }
           }
         })();
@@ -535,6 +581,22 @@ export class OtlpTraceFlusher extends BaseFlusher {
       convertState.active -= 1;
       this.evictConvertStates();
     }
+  }
+
+  private collectToolOutcomes(records: AgentActivityEntry[]): Map<string, ToolOutcome> {
+    const outcomes = new Map<string, ToolOutcome>();
+    for (const record of records) {
+      if (record['event.name'] !== 'tool.result') continue;
+      const toolCallId = record['gen_ai.tool.call.id'];
+      const status = record['tool.result.status'];
+      if (typeof toolCallId !== 'string' || !toolCallId) continue;
+      if (status !== 'failure' && status !== 'cancelled') continue;
+      const errorType = typeof record['error.type'] === 'string' && record['error.type']
+        ? record['error.type']
+        : (status === 'cancelled' ? 'ToolCancelled' : 'ToolError');
+      outcomes.set(toolCallId, { status, errorType });
+    }
+    return outcomes;
   }
 
   private async exportInBatches(

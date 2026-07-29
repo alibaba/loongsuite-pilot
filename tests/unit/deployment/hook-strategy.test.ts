@@ -245,8 +245,8 @@ describe('HookStrategy', () => {
         id: 'grok-build',
         hook: {
           settingsPath: '/home/.grok/hooks/loongsuite-pilot.json',
-          events: ['Stop', 'SubagentStart', 'SubagentStop'],
-          retiredEvents: ['SessionStart', 'UserPromptSubmit'],
+          events: ['Stop', 'StopFailure', 'UserPromptSubmit', 'SessionEnd'],
+          retiredEvents: ['SessionStart', 'SubagentStart', 'SubagentStop'],
           hookCommand: '/opt/pilot/hooks/grok-build-loongsuite-pilot-hook.sh',
           format: 'nested',
           eventSubcommand: 'kebab-case',
@@ -260,13 +260,14 @@ describe('HookStrategy', () => {
         ([definition]) => definition.hookJsonPath,
       );
       // snake_case keys (not PascalCase) — settings JSON field name dimension.
-      // needsDeploy probes active events first (3), then retired events.
+      // needsDeploy probes active events first, then retired events.
       // With isHookInstalled mocked true, the first retired event (session_start)
       // triggers early-return, so only one retired entry appears here.
       expect(installedPaths).toEqual([
         ['hooks', 'stop'],
-        ['hooks', 'subagent_start'],
-        ['hooks', 'subagent_stop'],
+        ['hooks', 'stop_failure'],
+        ['hooks', 'user_prompt_submit'],
+        ['hooks', 'session_end'],
         ['hooks', 'session_start'],
       ]);
 
@@ -275,8 +276,9 @@ describe('HookStrategy', () => {
         ([definition]) => definition.hookCommand,
       );
       expect(cmds[0]).toBe('/opt/pilot/hooks/grok-build-loongsuite-pilot-hook.sh stop');
-      expect(cmds[1]).toBe('/opt/pilot/hooks/grok-build-loongsuite-pilot-hook.sh subagent-start');
-      expect(cmds[2]).toBe('/opt/pilot/hooks/grok-build-loongsuite-pilot-hook.sh subagent-stop');
+      expect(cmds[1]).toBe('/opt/pilot/hooks/grok-build-loongsuite-pilot-hook.sh stop-failure');
+      expect(cmds[2]).toBe('/opt/pilot/hooks/grok-build-loongsuite-pilot-hook.sh user-prompt-submit');
+      expect(cmds[3]).toBe('/opt/pilot/hooks/grok-build-loongsuite-pilot-hook.sh session-end');
 
       // retired events also use snake keys so uninstall lookup matches deploy write path
       mockHookManager.uninstallHook.mockResolvedValue(true);
@@ -289,7 +291,8 @@ describe('HookStrategy', () => {
       );
       expect(retiredFromDeploy).toEqual([
         ['hooks', 'session_start'],
-        ['hooks', 'user_prompt_submit'],
+        ['hooks', 'subagent_start'],
+        ['hooks', 'subagent_stop'],
       ]);
     });
 

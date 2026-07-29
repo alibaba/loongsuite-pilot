@@ -99,7 +99,7 @@ describe('grok-build AGENT span aggregation fields — processor side', () => {
     expect(otherFirst['gen_ai.data_source.id']).toBe('grok-build');
   });
 
-  test('second turn "other" record does NOT carry AGENT span attrs (session-level, first turn only)', () => {
+  test('every turn carries AGENT span attrs', () => {
     // First stop: emit turn 1 (AGENT attrs present on the "other" record)
     const transcriptPath = copyFixture('chat_history.three-turns.jsonl');
     // Pre-truncate to first turn only to control turn count
@@ -140,9 +140,9 @@ describe('grok-build AGENT span aggregation fields — processor side', () => {
     // First turn's "other" record has AGENT span attrs
     expect(otherRecs[0]['gen_ai.agent.description']).toBe('Grok Build coding agent');
     expect(otherRecs[0]['gen_ai.data_source.id']).toBe('grok-build');
-    // Second turn's "other" record does NOT (AGENT span is per-session, not per-turn)
-    expect(otherRecs[1]['gen_ai.agent.description']).toBeUndefined();
-    expect(otherRecs[1]['gen_ai.data_source.id']).toBeUndefined();
+    // Each turn becomes an independent trace with its own AGENT span.
+    expect(otherRecs[1]['gen_ai.agent.description']).toBe('Grok Build coding agent');
+    expect(otherRecs[1]['gen_ai.data_source.id']).toBe('grok-build');
   });
 });
 

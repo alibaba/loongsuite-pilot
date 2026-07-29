@@ -83,6 +83,10 @@ export interface AgentActivityEntry {
   'gen_ai.tool.call.result'?: JsonValue;
   'gen_ai.tool.call.duration'?: number;
   'tool.result.status'?: string;
+  /** Grok evidence used to associate a tool call with its execution result. */
+  'loongsuite.grok.match.strategy'?: 'id' | 'name_order' | 'unmatched';
+  /** Grok clock selected for the event after three-source fusion. */
+  'loongsuite.grok.timing.source'?: 'unified' | 'updates' | 'hook';
   'gen_ai.skill.name'?: string;
   /**
    * 模型的 system instructions（MessagePart[] 数组形式），数据源为 codex transcript 的

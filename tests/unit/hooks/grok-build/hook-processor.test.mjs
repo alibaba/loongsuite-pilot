@@ -112,9 +112,10 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
     expect(llmResp['gen_ai.response.finish_reasons']).toEqual(['stop']);
 
     const state = readState('s1');
+    expect(state.version).toBe(2);
     expect(state.turn_count).toBe(1);
-    expect(state.transcript_offset).toBeGreaterThan(0);
-    expect(state.events).toEqual([]);
+    expect(state.chat_checkpoint.offset).toBeGreaterThan(0);
+    expect(state).not.toHaveProperty('events');
   });
 
   test('单 turn、多 LLM、每 LLM 1 tool — STEP 数 == LLM 数, gen_ai.input.messages 非空', () => {
@@ -241,7 +242,7 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
     expect(turnIds.length).toBe(3);
   });
 
-  test('transcript_offset 增量持久化 — 重复 stop 不重复上报', () => {
+  test('v2 checkpoint 增量持久化 — 重复 stop 不重复上报', () => {
     const transcriptPath = copyFixture('chat_history.single-llm-single-tool.jsonl');
     runHook('stop', {
       session_id: 's-inc',
@@ -251,8 +252,8 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
     });
 
     const state = readState('s-inc');
-    expect(state.transcript_offset).toBeGreaterThan(0);
-    expect(state.events).toEqual([]);
+    expect(state.chat_checkpoint.offset).toBeGreaterThan(0);
+    expect(state).not.toHaveProperty('events');
 
     const recordsBefore = readJsonlRecords().length;
     runHook('stop', {
@@ -410,15 +411,14 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
     expect(llmResps.length).toBe(3);
     expect(toolCalls.length).toBe(3);
 
-    // 2 tool_result records in fixture + 1 synthetic for the orphan tool_call
-    // (read_file_1_1 has no recorded result; F2 fix emits synthetic tool.result
-    // so the converter's pairTool doesn't flag it as orphan).
+    // Every real call still gets a closing result marker, but no result content
+    // is fabricated when the empty chat result ID cannot be attributed.
     expect(toolResults.length).toBe(3);
 
     // 每个 tool.call 必有 parent_span_id 指向所属 step span(5 层 span 树准出)
     for (const tc of toolCalls) {
       expect(tc['gen_ai.tool.name']).toBeTruthy();
-      expect(tc['gen_ai.tool.call.id']).toMatch(/_\d+_\d+$/);
+      expect(tc['gen_ai.tool.call.id']).toMatch(/:l\d+:t\d+$/);
       expect(tc.parent_span_id).toMatch(/^[0-9a-f]{16}$/);
       const ownerLlm = llmReqs.find((r) => r.parent_span_id === tc.parent_span_id);
       expect(ownerLlm).toBeDefined();
@@ -445,12 +445,7 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
     }
   });
 
-  // Regression: grok 0.2.x chat_history.jsonl carries no per-record timestamp, so the
-  // stop envelope fallback ts was being assigned to every event → all spans collapsed
-  // to 0ms duration (validate-trace time.non_zero_duration ERROR × 8). After the fix,
-  // processor synthesizes a monotonic timeline anchored at the fallback ts; each span
-  // group must have min(time) < max(time).
-  test('timestampless chat_history (grok 0.2.x) → 每 span 至少两个不同 time, 非 0ms', () => {
+  test('timestampless chat_history without unified keeps truthful zero-duration fallback', () => {
     const transcriptPath = copyFixture('chat_history.openai-style-real.jsonl');
     runHook('stop', {
       session_id: 's-dur',
@@ -463,45 +458,9 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
     const records = readJsonlRecords();
     expect(records.length).toBeGreaterThan(0);
 
-    // Sanity: not all events share the same time_unix_nano (would indicate fallback
-    // collapse regression).
     const allTimes = new Set(records.map((r) => r.time_unix_nano));
-    expect(allTimes.size).toBeGreaterThan(1);
-
-    // Per-span-group check: group events by span_id, ensure min < max for each group
-    // that has 2+ events (LLM span: llm.request+llm.response; tool span: tool.call+tool.result).
-    const bySpan = new Map();
-    for (const r of records) {
-      if (!r.span_id) continue;
-      if (!bySpan.has(r.span_id)) bySpan.set(r.span_id, []);
-      bySpan.get(r.span_id).push(BigInt(r.time_unix_nano));
-    }
-    let checkedSpans = 0;
-    for (const [spanId, times] of bySpan.entries()) {
-      if (times.length < 2) continue;
-      const min = times.reduce((a, b) => (a < b ? a : b));
-      const max = times.reduce((a, b) => (a > b ? a : b));
-      expect(max).toBeGreaterThan(min);
-      checkedSpans++;
-    }
-    // At least the LLM span + 1 tool span were checked
-    expect(checkedSpans).toBeGreaterThanOrEqual(1);
-
-    // Ordering invariants within each LLM call: request < response, tool.call < tool.result
-    const llmReqs = records.filter((r) => r['event.name'] === 'llm.request');
-    const llmResps = records.filter((r) => r['event.name'] === 'llm.response');
-    for (const req of llmReqs) {
-      const resp = llmResps.find((r) => r.span_id === req.span_id);
-      expect(resp).toBeDefined();
-      expect(BigInt(resp.time_unix_nano)).toBeGreaterThan(BigInt(req.time_unix_nano));
-    }
-    const toolCalls = records.filter((r) => r['event.name'] === 'tool.call');
-    const toolResults = records.filter((r) => r['event.name'] === 'tool.result');
-    for (const tc of toolCalls) {
-      const tr = toolResults.find((r) => r.span_id === tc.span_id);
-      if (!tr) continue;
-      expect(BigInt(tr.time_unix_nano)).toBeGreaterThan(BigInt(tc.time_unix_nano));
-    }
+    expect(allTimes.size).toBe(1);
+    expect(records.some((r) => r['loongsuite.grok.timing.source'] === 'hook')).toBe(true);
   });
 
   // Fixture source: tester CP5 verdict=FAIL capture (comment 5434a548, 2026-07-17,
@@ -577,7 +536,7 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
     // (session 019f6f59-a85d-7900-bef7-cd1f5404d51f, 41 turns, 72 tool_calls).
     const LONG_CONV_FIXTURE = 'chat_history.long-conversation.jsonl';
 
-    test('F2: every tool.call has a paired tool.result (no orphans) — LIFO matching', () => {
+    test('F2: every tool.call has a closing result marker without fabricated content', () => {
       const transcriptPath = copyFixture(LONG_CONV_FIXTURE);
       const r = runHook('stop', {
         session_id: '019f6f59-a85d-7900-bef7-cd1f5404d51f',
@@ -601,7 +560,7 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
       }
     });
 
-    test('F2 LIFO: 2nd tool of multi-tool turn gets the recorded result content', () => {
+    test('F2: empty result IDs stay unknown instead of being guessed by LIFO', () => {
       const transcriptPath = copyFixture(LONG_CONV_FIXTURE);
       runHook('stop', {
         session_id: '019f6f59-lifo-check',
@@ -611,24 +570,13 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
         cwd: '/tmp',
       });
       const records = readJsonlRecords();
-      // Asst #3 (assistantSeq=3) declares [todo_write, grep]; grok records 1
-      // tool_result with grep's content ("<workspace_result ... Found 6 matches").
-      // After LIFO, the result must be on grep_3_2 (not todo_write_3_1).
-      const grepResult = records.find((r) =>
+      const unknownResults = records.filter((r) =>
         r['event.name'] === 'tool.result'
-        && r['gen_ai.tool.call.id'] === 'grep_3_2');
-      expect(grepResult).toBeDefined();
-      const resultPayload = grepResult['gen_ai.tool.call.result'];
-      const response = JSON.parse(typeof resultPayload === 'string'
-        ? resultPayload
-        : JSON.stringify(resultPayload))[0].parts[0].response;
-      expect(response).toContain('Found 6 matching');
-      // todo_write_3_1 has no recorded result → synthetic tool.result emitted
-      const todoSynthetic = records.find((r) =>
-        r['event.name'] === 'tool.result'
-        && r['gen_ai.tool.call.id'] === 'todo_write_3_1');
-      expect(todoSynthetic).toBeDefined();
-      expect(todoSynthetic['tool.result.status']).toBe('unknown');
+        && r['tool.result.status'] === 'unknown');
+      expect(unknownResults.length).toBeGreaterThan(0);
+      for (const result of unknownResults) {
+        expect(result).not.toHaveProperty('gen_ai.tool.call.result');
+      }
     });
 
     test('F4/F8: llm.response carries singular finish_reason + react.finish_reason + framework', () => {
@@ -643,18 +591,16 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
       const records = readJsonlRecords();
       const llmResps = records.filter((r) => r['event.name'] === 'llm.response');
       expect(llmResps.length).toBeGreaterThan(0);
-      for (const resp of llmResps) {
-        expect(resp['gen_ai.response.finish_reasons']).toEqual(['stop']);
-        expect(resp['gen_ai.output.finish_reason']).toBe('stop');
-        expect(resp['gen_ai.react.finish_reason']).toBe('stop');
-      }
+      expect(llmResps.some((resp) =>
+        resp['gen_ai.response.finish_reasons']?.[0] === 'tool_call')).toBe(true);
+      expect(llmResps.at(-1)['gen_ai.response.finish_reasons']).toEqual(['stop']);
       // F8: every emitted record carries gen_ai.framework
       for (const rec of records) {
         expect(rec['gen_ai.framework']).toBe('grok-build');
       }
     });
 
-    test('F6: tool.call.result wrapped in spec message structure', () => {
+    test('F6: no placeholder tool.call.result is emitted without attributable evidence', () => {
       const transcriptPath = copyFixture(LONG_CONV_FIXTURE);
       runHook('stop', {
         session_id: '019f6f59-f6-check',
@@ -664,18 +610,11 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
         cwd: '/tmp',
       });
       const records = readJsonlRecords();
-      const realResult = records.find((r) =>
-        r['event.name'] === 'tool.result'
-        && r['gen_ai.tool.call.id'] === 'run_terminal_command_2_1');
-      expect(realResult).toBeDefined();
-      const payload = realResult['gen_ai.tool.call.result'];
-      const parsed = typeof payload === 'string' ? JSON.parse(payload) : payload;
-      expect(Array.isArray(parsed)).toBe(true);
-      expect(parsed[0].role).toBe('tool');
-      expect(parsed[0].parts[0].type).toBe('tool_call_response');
-      expect(parsed[0].parts[0].id).toBe('run_terminal_command_2_1');
-      expect(parsed[0].parts[0].name).toBe('run_terminal_command');
-      expect(typeof parsed[0].parts[0].response).toBe('string');
+      const results = records.filter((r) => r['event.name'] === 'tool.result');
+      expect(results.length).toBeGreaterThan(0);
+      expect(results.every((result) =>
+        result['gen_ai.tool.call.result'] === undefined)).toBe(true);
+      expect(JSON.stringify(results)).not.toContain('no tool_result recorded');
     });
   });
 });

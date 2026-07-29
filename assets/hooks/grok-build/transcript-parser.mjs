@@ -19,17 +19,14 @@
  *     无 prompt_index 的 user record 视为系统注入(synthetic_reason != null 或 user_info/system-reminder)。
  *   - LLM 调用分组: grok chat_history 不携带 message.id;每条 assistant record 视为一次 LLM 调用。
  *   - tool_use_id 归属: 通过 tool_use.id 从声明方 assistant record 匹配到 step。
- *   - 空 id 兜底: grok 0.2.x 真实 fixture 中 tool_call.id 与 tool_result.tool_call_id 均为空串,
- *     生成合成 id (`name_<assistantSeq>_<idxInAssistant>`),通过 FIFO 队列把空 id 的 tool_result
- *     按到达顺序回填到下一个未匹配的合成 id。
+ *   - 空 id 兜底: tool call 使用确定性本地 id；空 id 的 tool result 保持为 orphan，
+ *     留给 updates + unified 融合层依据真实执行证据关联，不在 chat parser 中猜测。
  *
  * 增量约定:
  *   parseGrokTranscript(path, byteOffset) 返回 { turns, nextOffset, systemPrompt }
  */
 
 import fs from 'node:fs';
-import crypto from 'node:crypto';
-
 export const MAX_TRANSCRIPT_BYTES = 50 * 1024 * 1024;
 const MISSING_PROMPT_INDEX = '__missing_prompt_index__';
 
@@ -108,6 +105,8 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
 
   let content;
   let fileSize;
+  let contentStartOffset;
+  let nextOffset;
   try {
     const stat = fs.statSync(transcriptPath);
     fileSize = stat.size;
@@ -117,6 +116,7 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
 
     const readFrom = Math.max(byteOffset, 0);
     const readLen = fileSize - readFrom;
+    contentStartOffset = readFrom;
 
     if (readLen > MAX_TRANSCRIPT_BYTES) {
       const fd = fs.openSync(transcriptPath, 'r');
@@ -127,9 +127,14 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
         const buf = Buffer.alloc(actualLen);
         fs.readSync(fd, buf, 0, actualLen, actualOffset);
         content = buf.toString('utf-8');
+        contentStartOffset = actualOffset;
         if (actualOffset > readFrom) {
           const firstNewline = content.indexOf('\n');
-          if (firstNewline >= 0) content = content.slice(firstNewline + 1);
+          if (firstNewline >= 0) {
+            const skipped = content.slice(0, firstNewline + 1);
+            contentStartOffset += Buffer.byteLength(skipped, 'utf-8');
+            content = content.slice(firstNewline + 1);
+          }
         }
       } finally {
         fs.closeSync(fd);
@@ -150,11 +155,20 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
     return { turns: [], nextOffset: byteOffset, systemPrompt: null };
   }
 
+  // Never consume a torn final JSONL record. The next hook retries it after the
+  // writer appends the terminating newline.
+  const lastNewline = content.lastIndexOf('\n');
+  if (lastNewline < 0) {
+    return { turns: [], nextOffset: byteOffset, systemPrompt: null };
+  }
+  const completeContent = content.slice(0, lastNewline + 1);
+  nextOffset = contentStartOffset + Buffer.byteLength(completeContent, 'utf-8');
+  content = completeContent;
+
   const conversationRecords = [];
   const toolResultTimestamps = new Map();
   const toolResultContents = new Map();
   const toolResultErrors = new Map();
-  const pendingEmptyToolCallIds = [];
   let currentPromptIndex = null;
   let assistantSeq = 0;
   let systemPrompt = null;
@@ -216,9 +230,9 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
     if (recordType === 'assistant') {
       assistantSeen = true;
       assistantSeq++;
-      const msgId = record.message_id || record.id || `_syn_${crypto.randomUUID()}`;
+      const msgId = record.message_id || record.id || `_syn_assistant_${assistantSeq}`;
       const recordTs = record.timestamp || null;
-      const contentBlocks = buildAssistantContentBlocks(record, assistantSeq, pendingEmptyToolCallIds);
+      const contentBlocks = buildAssistantContentBlocks(record, assistantSeq);
 
       conversationRecords.push({
         type: 'assistant',
@@ -238,13 +252,10 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
       const recordTs = record.timestamp || null;
       let toolId = record.tool_call_id || record.tool_use_id || '';
       if (!toolId) {
-        // LIFO: grok 0.2.x fixture emits 1 tool_result per multi-tool assistant,
-        // and the recorded result corresponds to the LAST declared tool_call
-        // (e.g., [todo_write, grep] → only grep's output is recorded). Popping
-        // from the end attributes the result to the right tool; FIFO would
-        // misattribute it to the first tool_call's synthetic id, leaving the
-        // real tool orphaned.
-        toolId = pendingEmptyToolCallIds.pop() || `_orphan_${crypto.randomUUID()}`;
+        // Empty result IDs cannot be attributed truthfully from chat_history.
+        // Keep them as deterministic orphans; the fusion layer may later match
+        // the corresponding call from updates + unified evidence.
+        toolId = `_orphan_result_${conversationRecords.length + 1}`;
       }
       const resultContent = record.content ?? record.output ?? record.result ?? '';
       if (recordTs) toolResultTimestamps.set(toolId, recordTs);
@@ -264,12 +275,12 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
   }
 
   if (!assistantSeen) {
-    return { turns: [], nextOffset: fileSize, systemPrompt };
+    return { turns: [], nextOffset, systemPrompt };
   }
 
   const llmCalls = buildLlmCalls(conversationRecords, toolResultTimestamps, toolResultContents, toolResultErrors);
   const turns = splitIntoTurns(conversationRecords, llmCalls);
-  return { turns, nextOffset: fileSize, systemPrompt };
+  return { turns, nextOffset, systemPrompt };
 }
 
 function extractToolUseTimestamps(content, fallbackTs) {
@@ -286,13 +297,19 @@ function extractToolUseTimestamps(content, fallbackTs) {
 // Build content blocks for an assistant record, supporting both Anthropic-style
 // (record.content as array of blocks) and OpenAI-style (record.content as string +
 // record.tool_calls as [{id,name,arguments}] where arguments is a JSON string).
-// Grok 0.2.x fixture emits tool_call.id as empty string → synthesize a stable id
-// (`name_<assistantSeq>_<idxInAssistant>`) and push to pendingEmptyToolCallIds so
-// subsequent top-level tool_result records with empty tool_call_id can be matched
-// LIFO (last declared tool_call consumes the next empty-id result).
-function buildAssistantContentBlocks(record, assistantSeq, pendingEmptyToolCallIds) {
+// Grok 0.2.x may emit an empty tool_call.id. Synthesize a stable declaration ID
+// (`name_<assistantSeq>_<idxInAssistant>`) but deliberately leave empty-id result
+// records orphaned; the fusion layer associates them using updates + unified
+// execution evidence instead of guessing here.
+function buildAssistantContentBlocks(record, assistantSeq) {
   if (Array.isArray(record.content) && record.content.length > 0) {
-    return record.content;
+    return record.content.map((block) => {
+      if (!block || block.type !== 'tool_use') return block;
+      return {
+        ...block,
+        source_id: typeof block.id === 'string' && block.id ? block.id : null,
+      };
+    });
   }
 
   const blocks = [];
@@ -308,12 +325,12 @@ function buildAssistantContentBlocks(record, assistantSeq, pendingEmptyToolCallI
       if (!toolId) {
         const name = tc.name || 'tool';
         toolId = `${name}_${assistantSeq}_${idx + 1}`;
-        pendingEmptyToolCallIds.push(toolId);
       }
       const input = parseToolCallArguments(tc.arguments ?? tc.input);
       blocks.push({
         type: 'tool_use',
         id: toolId,
+        source_id: typeof tc.id === 'string' && tc.id ? tc.id : null,
         name: tc.name || 'unknown',
         input,
       });
@@ -390,13 +407,18 @@ function buildLlmCalls(conversationRecords, toolResultTimestamps, toolResultCont
       const toolDetails = new Map();
       for (const toolId of declaredToolIds) {
         const callTs = rec.toolUseTimestamps.get(toolId) || rec.timestamp;
+        const hasResult = toolResultContents.has(toolId);
         const resultTsRaw = toolResultTimestamps.get(toolId) || null;
-        const resultContent = toolResultContents.get(toolId) || '';
-        // grok 0.2.x fixture: tool_result often lacks timestamp; fall back to call/assistant ts
-        // so a tool.result span still emits (truthy guard in buildTurnRecords).
-        const resultTs = resultTsRaw || callTs || rec.timestamp || null;
+        const resultContent = hasResult ? toolResultContents.get(toolId) : undefined;
+        const resultTs = resultTsRaw || null;
         const isError = toolResultErrors.get(toolId) || false;
-        toolDetails.set(toolId, { call: callTs, result: resultTs, resultContent, isError });
+        toolDetails.set(toolId, {
+          call: callTs,
+          result: resultTs,
+          resultContent,
+          hasResult,
+          isError,
+        });
       }
 
       const requestStartTime = lastToolResultTsByPromptIndex.get(rec.promptIndex || MISSING_PROMPT_INDEX) || null;
@@ -485,6 +507,7 @@ function splitIntoTurns(conversationRecords, llmCalls) {
     }
 
     turns.push({
+      promptIndex: pid,
       prompt: info.promptText || '',
       promptTimestamp,
       llmCalls: turnLlmCalls,
@@ -497,6 +520,7 @@ function splitIntoTurns(conversationRecords, llmCalls) {
       turns[turns.length - 1].llmCalls.push(...orphanCalls);
     } else {
       turns.push({
+        promptIndex: null,
         prompt: '',
         promptTimestamp: orphanCalls[0]?.timestamp || null,
         llmCalls: orphanCalls,

@@ -1,25 +1,17 @@
-// F3a: gen_ai.system_instructions — AGENT span baseFields emits a spec-compliant
-// array of {type:'text', content} blocks (per architect revision comment e9f78ef4,
-// 2026-07-17; P0 fix from comment ac02d400 NEEDS_REVISION). Source: chat_history
-// record 0 (type:system) — captured by parseGrokTranscript and persisted in
-// state.system_prompt so incremental cmdStop batches still emit on the first
-// AGENT span of the session.
+// gen_ai.system_instructions is read from chat_history on demand and emitted
+// once on the first llm.request of each trace. It is never persisted in state.
 //
 // Fixture: tests/unit/hooks/grok-build/fixtures/f3-system-prompt.txt — copied
 // from researcher CP1 attachment research-fixtures.tar.gz:f3-system-prompt.txt
 // (comment 47a8af1f, 2026-07-17; real grok 0.2.101 system_prompt.txt 5077B).
-//
-// Architect APPROVED scope (comment 1f3fb94f): array shape, AGENT span only,
-// first turn of session only.
 //
 // Test coverage:
 //   - Array.isArray(system_instructions)
 //   - length === 1
 //   - [0].type === 'text'
 //   - [0].content === <full 5077B system prompt from fixture>
-//   - Only on the first turn's AGENT span (records of turn 1 carry it; turn 2+ don't)
-//   - Multi-turn cmdStop: system_prompt persisted in state, first turn of new batch
-//     still gets it (since baseTurnCount === 0 only for session's first emitted turn)
+//   - Exactly one copy per trace, on the first llm.request
+//   - No prompt content in state
 import { describe, expect, test, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -122,7 +114,8 @@ describe('grok-build F3a — gen_ai.system_instructions array on first AGENT spa
 
     const records = readJsonlRecords();
     const withSys = records.filter((rec) => Array.isArray(rec['gen_ai.system_instructions']));
-    expect(withSys.length).toBeGreaterThan(0);
+    expect(withSys.length).toBe(1);
+    expect(withSys[0]['event.name']).toBe('llm.request');
 
     // Every record in the first turn's AGENT span (all records share baseFields for turn 1)
     // carries the array — assert shape and content.
@@ -139,12 +132,11 @@ describe('grok-build F3a — gen_ai.system_instructions array on first AGENT spa
     expect(first['gen_ai.system_instructions'][0].content).toBe(systemPrompt);
     expect(first['gen_ai.system_instructions'][0].content.length).toBe(systemPrompt.length);
 
-    // state.system_prompt persisted for incremental batches
     const state = readState('s-sys-single');
-    expect(state.system_prompt).toBe(systemPrompt);
+    expect(state).not.toHaveProperty('system_prompt');
   });
 
-  test('multi-turn session — system_instructions emitted on turn 1 only (turn 2+ omitted) across cmdStop batches', () => {
+  test('multi-turn session — system_instructions emitted once per trace', () => {
     const systemPrompt = readSystemPromptFixture();
     const chatPath = path.join(SESSION_DIR, 'chat_history.jsonl');
     const transcriptPath = path.join(SESSION_DIR, 'updates.jsonl');
@@ -178,10 +170,12 @@ describe('grok-build F3a — gen_ai.system_instructions array on first AGENT spa
     expect(r.status).toBe(0);
 
     const recordsBatch1 = readJsonlRecords();
-    const turn1 = recordsBatch1.filter((rec) => (rec['gen_ai.turn.id'] || '').endsWith(':t1'));
+    const turn1 = recordsBatch1.filter((rec) =>
+      (rec['gen_ai.turn.id'] || '').endsWith(':turn:1'));
     expect(turn1.length).toBeGreaterThan(0);
     const t1WithSys = turn1.filter((rec) => Array.isArray(rec['gen_ai.system_instructions']));
-    expect(t1WithSys.length).toBe(turn1.length);
+    expect(t1WithSys.length).toBe(1);
+    expect(t1WithSys[0]['event.name']).toBe('llm.request');
     for (const rec of t1WithSys) {
       const si = rec['gen_ai.system_instructions'];
       expect(Array.isArray(si)).toBe(true);
@@ -217,14 +211,16 @@ describe('grok-build F3a — gen_ai.system_instructions array on first AGENT spa
     r = runHook({ ...basePayload, timestamp: '2026-07-17T11:00:02.500Z' });
     expect(r.status).toBe(0);
     const recordsBatch2 = readJsonlRecords();
-    const turn2 = recordsBatch2.filter((rec) => (rec['gen_ai.turn.id'] || '').endsWith(':t2'));
+    const turn2 = recordsBatch2.filter((rec) =>
+      (rec['gen_ai.turn.id'] || '').endsWith(':turn:2'));
     expect(turn2.length).toBeGreaterThan(0);
-    // Turn 2 of the session must NOT carry system_instructions
+    // Turn 2 is a separate trace and carries one copy.
     const t2WithSys = turn2.filter((rec) => Array.isArray(rec['gen_ai.system_instructions']));
-    expect(t2WithSys.length).toBe(0);
+    expect(t2WithSys.length).toBe(1);
+    expect(t2WithSys[0]['event.name']).toBe('llm.request');
   });
 
-  test('incremental cmdStop — system_prompt persisted; 2nd batch does not re-emit (turn_count > 0)', () => {
+  test('incremental cmdStop — state excludes prompt content and each trace gets one copy', () => {
     const systemPrompt = readSystemPromptFixture();
     const transcriptPath = writeChatHistory(systemPrompt, { numTurns: 1 });
     const basePayload = {
@@ -239,13 +235,13 @@ describe('grok-build F3a — gen_ai.system_instructions array on first AGENT spa
     expect(r.status).toBe(0);
     const state1 = readState('s-sys-incr');
     expect(state1.turn_count).toBe(1);
-    expect(state1.system_prompt).toBe(systemPrompt);
+    expect(state1).not.toHaveProperty('system_prompt');
 
     const records1 = readJsonlRecords();
     const t1WithSys1 = records1.filter((rec) =>
-      (rec['gen_ai.turn.id'] || '').endsWith(':t1')
+      (rec['gen_ai.turn.id'] || '').endsWith(':turn:1')
       && Array.isArray(rec['gen_ai.system_instructions']));
-    expect(t1WithSys1.length).toBeGreaterThan(0);
+    expect(t1WithSys1.length).toBe(1);
 
     // Append turn 2 to chat_history
     const chatPath = path.join(SESSION_DIR, 'chat_history.jsonl');
@@ -279,11 +275,13 @@ describe('grok-build F3a — gen_ai.system_instructions array on first AGENT spa
     expect(state2.turn_count).toBe(2);
 
     const records2 = readJsonlRecords();
-    const t2 = records2.filter((rec) => (rec['gen_ai.turn.id'] || '').endsWith(':t2'));
+    const t2 = records2.filter((rec) =>
+      (rec['gen_ai.turn.id'] || '').endsWith(':turn:2'));
     expect(t2.length).toBeGreaterThan(0);
-    // 2nd batch turn is NOT the first turn of the session — system_instructions must be absent
+    // The second batch is another trace and gets one copy on its first request.
     const t2WithSys = t2.filter((rec) => Array.isArray(rec['gen_ai.system_instructions']));
-    expect(t2WithSys.length).toBe(0);
+    expect(t2WithSys.length).toBe(1);
+    expect(t2WithSys[0]['event.name']).toBe('llm.request');
   });
 
   test('chat_history without system record — system_instructions absent, no crash', () => {

@@ -16,7 +16,7 @@
 //   - retry null-token rows are skipped (the 2nd non-null aligns with LLM #2, not LLM #1+2)
 //   - records from another sid and non-inference_done messages are filtered out
 //   - empty/missing unified.jsonl → transcript usage fallback (no crash, no injection)
-//   - session cursor (state.usage_events_consumed) persists across cmdStop batches
+//   - no absolute unified cursor is persisted; current turn is selected by time window
 import { describe, expect, test, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -206,9 +206,9 @@ describe('grok-build F1 — loadUsageBySession usage injection', () => {
     expect(r2['gen_ai.usage.total_tokens']).toBe(2000 + 80);
     expect(r3['gen_ai.usage.total_tokens']).toBe(3000 + 120);
 
-    // Cursor persisted so the next cmdStop batch (if any) won't re-pop events
+    // No absolute cursor is persisted; unified may be trimmed/replaced safely.
     const state = readState(SID);
-    expect(state.usage_events_consumed).toBe(3);
+    expect(state).not.toHaveProperty('usage_events_consumed');
   });
 
   test('missing unified.jsonl → graceful fallback to transcript usage (no crash, token=0)', () => {
@@ -231,7 +231,7 @@ describe('grok-build F1 — loadUsageBySession usage injection', () => {
       expect(resp['gen_ai.usage.output_tokens']).toBe(0);
     }
     const state = readState(SID);
-    expect(state.usage_events_consumed).toBe(0);
+    expect(state).not.toHaveProperty('usage_events_consumed');
   });
 
   test('no matching sid in unified.jsonl → no injection, transcript fallback', () => {
@@ -258,7 +258,7 @@ describe('grok-build F1 — loadUsageBySession usage injection', () => {
     }
   });
 
-  test('session cursor persists across cmdStop batches — second batch does not re-pop consumed events', () => {
+  test('turn time window selects new inference after unified grows', () => {
     const transcriptPath = writeChatHistory();
     writeUnifiedJsonl();
 
@@ -272,7 +272,7 @@ describe('grok-build F1 — loadUsageBySession usage injection', () => {
     });
     const state1 = readState(SID);
     expect(state1.turn_count).toBe(1);
-    expect(state1.usage_events_consumed).toBe(3);
+    expect(state1).not.toHaveProperty('usage_events_consumed');
 
     // Append a 2nd turn with 2 more LLM calls
     const chatPath = path.join(SESSION_DIR, 'chat_history.jsonl');
@@ -299,8 +299,7 @@ describe('grok-build F1 — loadUsageBySession usage injection', () => {
       JSON.stringify({ ts: '2026-07-17T10:01:02.000Z', src: 'shell', sid: SID, msg: 'shell.turn.inference_done', ctx: { loop_index: 1, prompt_tokens: 7777, completion_tokens: 42 } }) + '\n',
     );
 
-    // Second cmdStop: loadUsageBySession returns 4 non-null events (3 old + 1 new).
-    // Cursor persisted at 3 → the new LLM call pops event #4 (7777/42).
+    // Second cmdStop selects the new event by the turn's timestamp window.
     const r2 = runHook({
       session_id: SID,
       stop_reason: 'end_turn',
@@ -312,13 +311,15 @@ describe('grok-build F1 — loadUsageBySession usage injection', () => {
 
     const records = readJsonlRecords();
     // 2nd turn's single LLM response is the one whose step.id ends with :s1 of t2
-    const turn2Resps = records.filter((rec) => (rec['gen_ai.turn.id'] || '').endsWith(':t2') && rec['event.name'] === 'llm.response');
+    const turn2Resps = records.filter((rec) =>
+      (rec['gen_ai.turn.id'] || '').endsWith(':turn:2')
+      && rec['event.name'] === 'llm.response');
     expect(turn2Resps.length).toBe(1);
     expect(turn2Resps[0]['gen_ai.usage.input_tokens']).toBe(7777);
     expect(turn2Resps[0]['gen_ai.usage.output_tokens']).toBe(42);
 
     const state2 = readState(SID);
     expect(state2.turn_count).toBe(2);
-    expect(state2.usage_events_consumed).toBe(4);
+    expect(state2).not.toHaveProperty('usage_events_consumed');
   });
 });

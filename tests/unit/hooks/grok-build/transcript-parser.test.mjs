@@ -110,6 +110,34 @@ describe('grok-build parseGrokTranscript — fixtures 真实 chat_history 格式
       fs.rmSync(path.dirname(fp), { recursive: true, force: true });
     }
   });
+
+  test('末行未写完时不推进该行 offset，补全后下次可重试', () => {
+    const dir = fs.mkdtempSync(path.join(process.cwd(), '.tmp-grok-parser-torn-'));
+    const fp = path.join(dir, 'chat_history.jsonl');
+    const complete = [
+      { type: 'system', content: 'sys' },
+      {
+        type: 'user',
+        content: [{ type: 'text', text: '<user_query>\nhi\n</user_query>' }],
+        prompt_index: 0,
+      },
+      { type: 'assistant', content: 'hello', model_id: 'grok' },
+    ].map((record) => `${JSON.stringify(record)}\n`).join('');
+    const torn = '{"type":"assistant","content":"later"';
+    try {
+      fs.writeFileSync(fp, complete + torn, 'utf-8');
+      const first = parseGrokTranscript(fp);
+      expect(first.turns[0].llmCalls).toHaveLength(1);
+      expect(first.nextOffset).toBe(Buffer.byteLength(complete));
+
+      fs.appendFileSync(fp, ',"model_id":"grok"}\n', 'utf-8');
+      const second = parseGrokTranscript(fp, first.nextOffset);
+      expect(second.turns[0].llmCalls).toHaveLength(1);
+      expect(second.nextOffset).toBe(fs.statSync(fp).size);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('grok-build parseGrokTranscript — OpenAI-style tool_calls(真实 grok 0.2.x fixture)', () => {
@@ -118,7 +146,7 @@ describe('grok-build parseGrokTranscript — OpenAI-style tool_calls(真实 grok
   // tool_result 为顶层 record {tool_call_id:"",content}; reasoning record 跳过。
   const FIXTURE = readFixture('chat_history.openai-style-real.jsonl');
 
-  test('解析 OpenAI-style tool_calls 为合成 tool_use 块 + tool.result 配对', () => {
+  test('解析 OpenAI-style tool_calls；空 result id 保持不可归属', () => {
     const data = parseGrokTranscript(FIXTURE);
     expect(data.turns.length).toBe(1);
     const turn = data.turns[0];
@@ -132,13 +160,12 @@ describe('grok-build parseGrokTranscript — OpenAI-style tool_calls(真实 grok
     // 合成 id 形如 `<name>_<assistantSeq>_<idx>`
     expect(allDeclared.every((id) => /_\d+_\d+$/.test(id))).toBe(true);
 
-    // 2 个 tool_result record 对应 2 个 tool.result(其中一个 tool_call 无 result 也不报错)
-    const withResult = turn.llmCalls.flatMap((c) => Array.from(c.toolDetails.values())).filter((d) => d.resultContent);
-    expect(withResult.length).toBe(2);
-    // 每个 toolDetails 含 call + resultContent(真实 grok fixture 无 timestamp,result 可能 fallback 到 null)
-    for (const d of withResult) {
-      expect(d.resultContent).toBeTruthy();
-    }
+    // Empty tool_result IDs cannot be attributed truthfully in chat_history.
+    // The three-source fusion layer may recover them from updates + unified.
+    const withResult = turn.llmCalls
+      .flatMap((c) => Array.from(c.toolDetails.values()))
+      .filter((d) => d.hasResult);
+    expect(withResult.length).toBe(0);
   });
 
   test('tool_call.arguments(JSON 字符串)被解析为对象 input', () => {

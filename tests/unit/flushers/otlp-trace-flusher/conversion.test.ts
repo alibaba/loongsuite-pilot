@@ -154,6 +154,37 @@ describe('OtlpTraceFlusher - conversion', () => {
     );
   });
 
+  it.each(['error', 'length', 'content_filter'])(
+    'passes Grok reconstruction provenance and flushes %s terminal immediately',
+    async (finishReason) => {
+    const entry = {
+      'event.name': 'llm.response',
+      'gen_ai.agent.type': 'grok-build',
+      'gen_ai.turn.id': `grok-${finishReason}`,
+      'gen_ai.response.finish_reasons': [finishReason],
+      'loongsuite.grok.match.strategy': 'name_order',
+      'loongsuite.grok.timing.source': 'unified',
+    } as unknown as AgentActivityEntry;
+
+    await flusher.send(entry);
+
+    expect(convertEventLogToTrace).toHaveBeenCalledTimes(1);
+    const opts = vi.mocked(convertEventLogToTrace).mock.calls[0][1] as {
+      passthroughKeys?: string[];
+    };
+    expect(opts.passthroughKeys).toEqual(expect.arrayContaining([
+      'loongsuite.grok.match.strategy',
+      'loongsuite.grok.timing.source',
+    ]));
+    },
+  );
+
+  it('maps grok-build to gen_ai.agent.system=grok on the OTLP resource', () => {
+    const resource = (flusher as any).buildResource('grok-build', 'test-pilot', {});
+    expect(resource.attributes['gen_ai.agent.system']).toBe('grok');
+    expect(resource.attributes['gen_ai.agent.type']).toBe('grok-build');
+  });
+
   describe('with GlobalAttributesProvider', () => {
     let p: OtlpTraceFlusher;
 

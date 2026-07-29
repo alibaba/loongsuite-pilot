@@ -13,6 +13,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'qwen-code-cli': 'qwen-code',
   'opencode': 'opencode',
   'pi-coding-agent': 'pi',
+  'grok-build': 'grok',
   'wukong': 'wukong',
 };
 

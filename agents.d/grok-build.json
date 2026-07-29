@@ -8,8 +8,8 @@
   },
   "hook": {
     "settingsPath": "~/.grok/hooks/loongsuite-pilot.json",
-    "events": ["Stop", "SubagentStart", "SubagentStop"],
-    "retiredEvents": ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "SessionEnd"],
+    "events": ["Stop", "StopFailure", "UserPromptSubmit", "SessionEnd"],
+    "retiredEvents": ["SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart", "SubagentStop", "SubagentEnd"],
     "hookCommand": "$PILOT_DATA/hooks/grok-build-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "",

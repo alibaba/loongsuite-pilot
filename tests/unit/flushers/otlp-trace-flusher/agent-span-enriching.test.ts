@@ -100,6 +100,113 @@ describe('AgentSpanEnrichingHandler — AGENT span attribute injection', () => {
     return spans.find((s) => s.attributes['gen_ai.span.kind'] === 'AGENT');
   }
 
+  function makeToolTurnRecords(status: 'success' | 'failure' | 'cancelled'): AgentActivityEntry[] {
+    return [
+      {
+        'time_unix_nano': '1700000000000000000',
+        'event.id': 'evt-user',
+        'event.name': 'other',
+        'gen_ai.session.id': 's-tool',
+        'gen_ai.turn.id': 't-tool',
+        'gen_ai.agent.type': 'grok-build',
+        'gen_ai.agent.name': 'grok-build',
+        'user.id': 'u-test',
+      },
+      {
+        'time_unix_nano': '1700000000001000000',
+        'event.id': 'evt-request',
+        'event.name': 'llm.request',
+        'gen_ai.session.id': 's-tool',
+        'gen_ai.turn.id': 't-tool',
+        'gen_ai.step.id': 'step-1',
+        'gen_ai.agent.type': 'grok-build',
+        'gen_ai.agent.name': 'grok-build',
+        'gen_ai.provider.name': 'x_ai',
+        'gen_ai.request.model': 'grok-3',
+        'gen_ai.response.id': 'response-1',
+        'user.id': 'u-test',
+      },
+      {
+        'time_unix_nano': '1700000000002000000',
+        'event.id': 'evt-response',
+        'event.name': 'llm.response',
+        'gen_ai.session.id': 's-tool',
+        'gen_ai.turn.id': 't-tool',
+        'gen_ai.step.id': 'step-1',
+        'gen_ai.agent.type': 'grok-build',
+        'gen_ai.agent.name': 'grok-build',
+        'gen_ai.provider.name': 'x_ai',
+        'gen_ai.request.model': 'grok-3',
+        'gen_ai.response.model': 'grok-3',
+        'gen_ai.response.id': 'response-1',
+        'gen_ai.response.finish_reasons': ['tool_call'],
+        'user.id': 'u-test',
+      },
+      {
+        'time_unix_nano': '1700000000003000000',
+        'event.id': 'evt-tool-call',
+        'event.name': 'tool.call',
+        'gen_ai.session.id': 's-tool',
+        'gen_ai.turn.id': 't-tool',
+        'gen_ai.step.id': 'step-1',
+        'gen_ai.agent.type': 'grok-build',
+        'gen_ai.agent.name': 'grok-build',
+        'gen_ai.tool.name': 'read_file',
+        'gen_ai.tool.call.id': 'tool-1',
+        'loongsuite.grok.match.strategy': 'id',
+        'loongsuite.grok.timing.source': 'unified',
+        'user.id': 'u-test',
+      },
+      {
+        'time_unix_nano': '1700000000004000000',
+        'event.id': 'evt-tool-result',
+        'event.name': 'tool.result',
+        'gen_ai.session.id': 's-tool',
+        'gen_ai.turn.id': 't-tool',
+        'gen_ai.step.id': 'step-1',
+        'gen_ai.agent.type': 'grok-build',
+        'gen_ai.agent.name': 'grok-build',
+        'gen_ai.tool.name': 'read_file',
+        'gen_ai.tool.call.id': 'tool-1',
+        'tool.result.status': status,
+        ...(status === 'failure' ? { 'error.type': 'ToolError' } : {}),
+        'loongsuite.grok.match.strategy': 'id',
+        'loongsuite.grok.timing.source': 'unified',
+        'user.id': 'u-test',
+      },
+      {
+        'time_unix_nano': '1700000000005000000',
+        'event.id': 'evt-final-request',
+        'event.name': 'llm.request',
+        'gen_ai.session.id': 's-tool',
+        'gen_ai.turn.id': 't-tool',
+        'gen_ai.step.id': 'step-2',
+        'gen_ai.agent.type': 'grok-build',
+        'gen_ai.agent.name': 'grok-build',
+        'gen_ai.provider.name': 'x_ai',
+        'gen_ai.request.model': 'grok-3',
+        'gen_ai.response.id': 'response-2',
+        'user.id': 'u-test',
+      },
+      {
+        'time_unix_nano': '1700000000006000000',
+        'event.id': 'evt-final-response',
+        'event.name': 'llm.response',
+        'gen_ai.session.id': 's-tool',
+        'gen_ai.turn.id': 't-tool',
+        'gen_ai.step.id': 'step-2',
+        'gen_ai.agent.type': 'grok-build',
+        'gen_ai.agent.name': 'grok-build',
+        'gen_ai.provider.name': 'x_ai',
+        'gen_ai.request.model': 'grok-3',
+        'gen_ai.response.model': 'grok-3',
+        'gen_ai.response.id': 'response-2',
+        'gen_ai.response.finish_reasons': ['stop'],
+        'user.id': 'u-test',
+      },
+    ] as unknown as AgentActivityEntry[];
+  }
+
   it('injects gen_ai.agent.description + gen_ai.data_source.id from records', () => {
     const records = makeTurnRecords({
       agentDescription: 'Grok Build coding agent',
@@ -147,5 +254,40 @@ describe('AgentSpanEnrichingHandler — AGENT span attribute injection', () => {
     expect(agentSpan!.attributes['gen_ai.agent.description']).toBeUndefined();
     expect(agentSpan!.attributes['gen_ai.data_source.id']).toBeUndefined();
     expect(agentSpan!.attributes['gen_ai.usage.cache_creation.input_tokens']).toBeUndefined();
+  });
+
+  it.each([
+    ['failure', 'ToolError'],
+    ['cancelled', 'ToolCancelled'],
+  ] as const)('maps %s tool results to an OTLP error TOOL span', (status, errorType) => {
+    handler.currentToolOutcomes = new Map([
+      ['tool-1', { status, errorType }],
+    ]);
+    convertEventLogToTrace(makeToolTurnRecords(status) as any, {
+      handler,
+      strict: false,
+      passthroughKeys: [
+        'loongsuite.grok.match.strategy',
+        'loongsuite.grok.timing.source',
+      ],
+    });
+
+    const toolSpan = inMem.getFinishedSpans()
+      .find((span) => span.attributes['gen_ai.span.kind'] === 'TOOL');
+    expect(toolSpan).toBeDefined();
+    expect(toolSpan!.status.code).toBe(2);
+    expect(toolSpan!.attributes['error.type']).toBe(errorType);
+    expect(toolSpan!.attributes['loongsuite.grok.match.strategy']).toBe('id');
+    expect(toolSpan!.attributes['loongsuite.grok.timing.source']).toBe('unified');
+  });
+
+  it('keeps successful tool spans non-error', () => {
+    convertEventLogToTrace(makeToolTurnRecords('success') as any, { handler, strict: false });
+
+    const toolSpan = inMem.getFinishedSpans()
+      .find((span) => span.attributes['gen_ai.span.kind'] === 'TOOL');
+    expect(toolSpan).toBeDefined();
+    expect(toolSpan!.status.code).not.toBe(2);
+    expect(toolSpan!.attributes['error.type']).toBeUndefined();
   });
 });

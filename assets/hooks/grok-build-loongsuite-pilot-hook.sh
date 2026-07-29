@@ -6,8 +6,8 @@ set -euo pipefail
 # Usage (registered in ~/.grok/hooks/loongsuite-pilot.json by pilot HookStrategy):
 #   $PILOT_DATA/hooks/grok-build-loongsuite-pilot-hook.sh <subcommand>
 #
-# Subcommand (v2: 只处理 3 个,对标 claude-code):
-#   stop / subagent-start / subagent-stop
+# Subcommands:
+#   stop / stop-failure / user-prompt-submit / session-end
 #
 # Fail-open 原则: 任何错误都输出 "{}" 并 exit 0,不阻塞宿主 agent。
 
@@ -17,13 +17,21 @@ EMPTY_RESULT='{}'
 SUBCOMMAND="${1:-unknown}"
 
 case "$SUBCOMMAND" in
-  stop|subagent-start|subagent-stop)
+  stop|stop-failure|user-prompt-submit|session-end)
     ;;
   *)
     printf '%s\n' "$EMPTY_RESULT"
     exit 0
     ;;
 esac
+
+# The installed hook lives at $PILOT_DATA/hooks. Derive the data root from the
+# actual script location so custom installations do not silently fall back to
+# ~/.loongsuite-pilot.
+if [[ -z "${LOONGSUITE_PILOT_DATA_DIR:-}" ]]; then
+  LOONGSUITE_PILOT_DATA_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+  export LOONGSUITE_PILOT_DATA_DIR
+fi
 
 log_error() {
   local stage="$1"
@@ -80,7 +88,7 @@ node_is_suitable() {
   return 0
 }
 
-NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
+NODE_PIN_FILE="$LOONGSUITE_PILOT_DATA_DIR/node-bin"
 NODE_BIN=""
 
 if [[ -f "$NODE_PIN_FILE" ]]; then
