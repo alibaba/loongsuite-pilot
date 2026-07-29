@@ -33,7 +33,7 @@ import path from 'node:path';
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
-const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled']);
+const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
 // Hard cap on simultaneously-open turn buffers. Above this, the oldest
 // incomplete buffers are force-flushed to bound memory in pathological
 // cases (e.g. an agent that never emits a terminal llm.response AND never

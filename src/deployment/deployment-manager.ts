@@ -38,6 +38,7 @@ export class DeploymentManager {
   private readonly stateFilePath: string;
   private state: DeployedAgentsState = {};
   private definitions: AgentDefinition[] = [];
+  private operationTail: Promise<void> = Promise.resolve();
 
   constructor(opts: DeploymentManagerOptions) {
     this.dataDir = opts.dataDir;
@@ -63,7 +64,11 @@ export class DeploymentManager {
     this.loader = new AgentDefLoader(loaderOpts);
   }
 
-  async deployAll(enabled?: (def: AgentDefinition) => boolean): Promise<DeployResult[]> {
+  deployAll(enabled?: (def: AgentDefinition) => boolean): Promise<DeployResult[]> {
+    return this.runExclusive(() => this.deployAllUnlocked(enabled));
+  }
+
+  private async deployAllUnlocked(enabled?: (def: AgentDefinition) => boolean): Promise<DeployResult[]> {
     // ── Phase 0: migrate from old plugins (fail-open) ──
     try {
       await runPluginMigration();
@@ -105,11 +110,13 @@ export class DeploymentManager {
     return results;
   }
 
-  async deploySingle(def: AgentDefinition): Promise<DeployResult> {
-    await this.loadState();
-    const result = await this.deployAgent(def);
-    await this.saveState();
-    return result;
+  deploySingle(def: AgentDefinition): Promise<DeployResult> {
+    return this.runExclusive(async () => {
+      await this.loadState();
+      const result = await this.deployAgent(def);
+      await this.saveState();
+      return result;
+    });
   }
 
   /**
@@ -141,10 +148,12 @@ export class DeploymentManager {
    * (re)deployed. Used by the watchdog to detect specs overwritten by other
    * tools. Returns true when the strategy reports the integration is absent.
    */
-  async needsRedeploy(def: AgentDefinition): Promise<boolean> {
-    await this.loadState();
-    const strategy = this.getStrategy(def);
-    return strategy.needsDeploy(def, this.state[def.id]);
+  needsRedeploy(def: AgentDefinition): Promise<boolean> {
+    return this.runExclusive(async () => {
+      await this.loadState();
+      const strategy = this.getStrategy(def);
+      return strategy.needsDeploy(def, this.state[def.id]);
+    });
   }
 
   async stopWorkers(): Promise<void> {
@@ -234,5 +243,14 @@ export class DeploymentManager {
 
   private async saveState(): Promise<void> {
     await writeJsonFile(this.stateFilePath, this.state);
+  }
+
+  private runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.operationTail.then(operation, operation);
+    this.operationTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 }

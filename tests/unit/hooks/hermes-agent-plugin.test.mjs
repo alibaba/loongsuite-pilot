@@ -171,6 +171,43 @@ function failedApiTurn() {
   ];
 }
 
+function failedThenRetryTurn() {
+  const prompt = 'Retry this request after the provider error.';
+  const finalText = 'The retried request succeeded.';
+  const failed = {
+    ...apiPayload(TURN_ONE, 1),
+    api_request_id: 'api-request-error-1',
+    status_code: 429,
+    retryable: true,
+    retry_count: 1,
+    reason: 'provider_error',
+    error: { type: 'RateLimitError', message: 'Too many requests' },
+  };
+  const retry = {
+    ...apiPayload(TURN_ONE, 2),
+    api_request_id: 'api-request-success-2',
+  };
+  return [
+    { hook: 'on_session_start', payload: { session_id: SESSION_ID, model: 'qwen3-coder-plus', platform: 'cli' } },
+    { hook: 'pre_llm_call', payload: { session_id: SESSION_ID, user_message: prompt, conversation_history: [{ role: 'user', content: prompt }], model: 'qwen3-coder-plus', platform: 'cli' } },
+    { hook: 'pre_api_request', payload: failed },
+    { hook: 'api_request_error', payload: failed },
+    { hook: 'pre_api_request', payload: retry },
+    { hook: 'post_api_request', payload: { ...retry, finish_reason: 'stop', usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 } } },
+    { hook: 'post_llm_call', payload: {
+      session_id: SESSION_ID,
+      user_message: prompt,
+      assistant_response: finalText,
+      conversation_history: [
+        { role: 'user', content: prompt },
+        { role: 'assistant', content: finalText, finish_reason: 'stop' },
+      ],
+      model: 'qwen3-coder-plus',
+      platform: 'cli',
+    } },
+  ];
+}
+
 function skillViewTurn() {
   const prompt = 'Load the loongsuite-pr-review skill.';
   const callId = 'call_skill_view_1';
@@ -416,6 +453,26 @@ describe('Hermes Agent native plugin', () => {
     expect(response['error.type']).toBe('RateLimitError');
     expect(response['error.message']).toBe('provider request failed');
     expect(raw).not.toContain('Too many requests');
+  });
+
+  it('does not consume the successful assistant response for a failed API retry', () => {
+    const { records } = replay(failedThenRetryTurn());
+    const responses = records.filter(record => record['event.name'] === 'llm.response');
+
+    expect(records.map(record => record['event.name'])).toEqual([
+      'llm.request', 'llm.response', 'llm.request', 'llm.response',
+    ]);
+    expect(responses[0]['gen_ai.request.id']).toBe('api-request-error-1');
+    expect(responses[0]['gen_ai.response.finish_reasons']).toEqual(['error']);
+    expect(responses[0]['error.type']).toBe('RateLimitError');
+    expect(JSON.stringify(responses[0]['gen_ai.output.messages']))
+      .not.toContain('The retried request succeeded.');
+
+    expect(responses[1]['gen_ai.request.id']).toBe('api-request-success-2');
+    expect(responses[1]['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    expect(responses[1]).not.toHaveProperty('error.type');
+    expect(JSON.stringify(responses[1]['gen_ai.output.messages']))
+      .toContain('The retried request succeeded.');
   });
 
   it('adds skill metadata to skill_view even when message content capture is disabled', () => {

@@ -525,18 +525,38 @@ def _build_records(
     tool_step: Dict[str, int] = {}
 
     previous_assistant_position: Optional[int] = None
+    assistant_cursor = 0
     for index, api in enumerate(apis):
         step_number = index + 1
         step_id = "%s:s%s" % (turn_id, step_number)
         span_id = _new_span_id()
         response_id = "%s:r" % step_id
-        assistant_position = assistant_positions[index] if index < len(assistant_positions) else None
+        post = api.get("post") or {}
+        is_error = bool(post.get("error_type"))
+        assistant_position: Optional[int] = None
+        if not is_error and assistant_cursor < len(assistant_positions):
+            assistant_position = assistant_positions[assistant_cursor]
+            assistant_cursor += 1
 
-        if assistant_position is None:
+        if is_error:
+            input_end = (
+                assistant_positions[assistant_cursor]
+                if assistant_cursor < len(assistant_positions)
+                else len(current_messages)
+            )
+            assistant_message = {
+                "role": "assistant",
+                "content": "",
+                "finish_reason": post.get("finish_reason") or "error",
+            }
+            input_source = current_messages[:input_end]
+            delta_start = 0 if previous_assistant_position is None else previous_assistant_position
+            delta_source = current_messages[delta_start:input_end]
+        elif assistant_position is None:
             assistant_message: Dict[str, Any] = {
                 "role": "assistant",
                 "content": payload.get("assistant_response", "") if index == len(apis) - 1 else "",
-                "finish_reason": api.get("post", {}).get("finish_reason") or "stop",
+                "finish_reason": post.get("finish_reason") or "stop",
             }
             input_source = current_messages if index == 0 else []
             delta_source = input_source
@@ -556,7 +576,6 @@ def _build_records(
         input_delta = _messages(delta_source, capture)
         output_message = _message(assistant_message, capture)
         pre = api.get("pre") or {}
-        post = api.get("post") or {}
         provider = _provider_name(post.get("provider") or pre.get("provider"))
         request_model = str(pre.get("model") or post.get("model") or session_state.get("model") or "unknown")
         response_model = str(post.get("response_model") or post.get("model") or request_model)

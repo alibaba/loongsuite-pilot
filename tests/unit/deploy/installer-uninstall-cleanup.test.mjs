@@ -273,7 +273,7 @@ describe('uninstall only cleans the managed Hermes directory plugin', () => {
     expect(sh).toContain('plugins disable loongsuite-pilot');
     const uninstall = sh.slice(sh.indexOf('cmd_uninstall()'));
     expect(uninstall.indexOf('remove_hermes_plugin'))
-      .toBeLessThan(uninstall.indexOf('rm -rf "$HOME/.loongsuite-pilot"'));
+      .toBeLessThan(uninstall.indexOf('local _cache_dir="$HOME/.loongsuite-pilot"'));
   });
 
   it('defines and calls marker-aware cleanup in the PowerShell installer', () => {
@@ -286,7 +286,7 @@ describe('uninstall only cleans the managed Hermes directory plugin', () => {
     expect(ps1).toContain('plugins disable loongsuite-pilot');
     const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
     expect(uninstall.indexOf('Remove-HermesPlugin'))
-      .toBeLessThan(uninstall.indexOf('Remove-Item $installDir -Recurse -Force'));
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
   });
 
   it('removes Hermes on rollback only when the target version lacks support', () => {
