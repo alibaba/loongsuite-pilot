@@ -94,6 +94,7 @@ export async function buildWorkBuddyEvents(
   let reasoningStartMs: number | undefined;
   let requestStartMs: number | undefined;
   let cwd: string | undefined;
+  let lastResponse: AgentActivityEntry | undefined;
 
   const push = async (entry: AgentActivityEntry, source: WorkBuddyRecord) => {
     if (cwd) {
@@ -102,6 +103,42 @@ export async function buildWorkBuddyEvents(
     }
     if (source.type) entry['agent.workbuddy.source_type'] = source.type;
     built.push(entry);
+  };
+
+  const closeInterruptedTurn = async (boundarySource: WorkBuddyRecord): Promise<boolean> => {
+    const boundaryTimestamp = timestampMs(boundarySource);
+    if (firstStep || !lastResponse || boundaryTimestamp === undefined) return false;
+
+    lastResponse['gen_ai.response.finish_reasons'] = ['cancelled'];
+    lastResponse['gen_ai.turn.end'] = true;
+    const messages = lastResponse['gen_ai.output.messages'];
+    if (Array.isArray(messages)) {
+      for (const message of messages) {
+        if (message && typeof message === 'object' && !Array.isArray(message)) {
+          message.finish_reason = 'cancelled';
+        }
+      }
+    }
+
+    for (const [callId, tool] of tools) {
+      if (tool.step.turnId !== turnId) continue;
+      const result = baseEntry(
+        'tool.result',
+        boundarySource,
+        opts.sessionId,
+        tool.step,
+        `tool-result:${callId}`,
+        boundaryTimestamp,
+      );
+      result['gen_ai.tool.name'] = tool.toolName;
+      result['gen_ai.tool.call.id'] = callId;
+      result['tool.result.status'] = 'cancelled';
+      const durationMs = boundaryTimestamp - tool.callTimestamp;
+      if (durationMs > 0) result['gen_ai.tool.call.duration'] = durationMs;
+      await push(result, boundarySource);
+      tools.delete(callId);
+    }
+    return true;
   };
 
   const emitToolWave = async (
@@ -178,6 +215,7 @@ export async function buildWorkBuddyEvents(
 
     await push(request, responseSource);
     await push(response, responseSource);
+    lastResponse = response;
     for (const call of normalizedCalls) {
       tools.set(call.callId, {
         step,
@@ -212,10 +250,13 @@ export async function buildWorkBuddyEvents(
     if (typeof record.cwd === 'string' && record.cwd.length > 0) cwd = record.cwd;
 
     if (record.type === 'message' && record.role === 'user') {
+      await closeInterruptedTurn(record);
+      tools.clear();
       turnOrdinal++;
       stepOrdinal = 0;
       firstStep = true;
       turnId = stringValue(record.id) ?? stableId(opts.sessionId, `turn:${turnOrdinal}:${record.timestamp ?? index}`);
+      lastResponse = undefined;
       const message = toMessage(record, 'user');
       pendingDelta = message.parts.length > 0 ? [message] : [];
       reasoningParts = [];
@@ -285,6 +326,10 @@ export async function buildWorkBuddyEvents(
     }
 
     if (record.type === 'message' && record.role === 'assistant') {
+      if (record.status === 'incomplete') {
+        await closeInterruptedTurn(record);
+        continue;
+      }
       const wave = collectFunctionCallWave(records, index + 1, record);
       if (wave.calls.length > 0) {
         if (!wave.complete) break;
@@ -337,6 +382,8 @@ export async function buildWorkBuddyEvents(
 
       await push(request, record);
       await push(response, record);
+      lastResponse = undefined;
+      tools.clear();
       pendingDelta = [];
       reasoningParts = [];
       reasoningStartMs = undefined;

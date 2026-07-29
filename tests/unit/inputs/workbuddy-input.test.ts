@@ -427,6 +427,95 @@ describe('WorkBuddy audit-event builder', () => {
     expect(responses[1]['error.type']).toBeUndefined();
   });
 
+  it('closes an interrupted turn and cancels its pending tool before the next user turn', async () => {
+    const sharedProvider = {
+      traceId: '0123456789abcdef0123456789abcdef',
+      conversationRequestId: 'request-interrupted',
+      messageId: 'response-interrupted',
+      model: 'model-synthetic',
+    };
+    const records: WorkBuddyRecord[] = [
+      {
+        type: 'message',
+        role: 'user',
+        id: 'turn-interrupted',
+        timestamp: 1_000,
+        content: [{ type: 'input_text', text: 'start work' }],
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        status: 'completed',
+        id: 'response-interrupted',
+        timestamp: 1_100,
+        content: [{ type: 'output_text', text: 'running a command' }],
+        providerData: sharedProvider,
+      },
+      {
+        type: 'function_call',
+        id: 'response-interrupted',
+        callId: 'call-pending',
+        name: 'PowerShell',
+        arguments: '{"command":"Start-Sleep -Seconds 30"}',
+        timestamp: 1_100,
+        providerData: sharedProvider,
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        status: 'incomplete',
+        id: 'response-incomplete',
+        parentId: 'response-interrupted',
+        content: [{ type: 'output_text', text: 'interrupted' }],
+      },
+      {
+        type: 'message',
+        role: 'user',
+        id: 'turn-next',
+        timestamp: 1_300,
+        content: [{ type: 'input_text', text: 'continue with something else' }],
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        status: 'completed',
+        id: 'response-next',
+        timestamp: 1_400,
+        content: [{ type: 'output_text', text: 'done' }],
+        providerData: {
+          ...sharedProvider,
+          conversationRequestId: 'request-next',
+          messageId: 'response-next',
+        },
+      },
+    ];
+
+    const entries = await buildWorkBuddyEvents(records, { sessionId: 'session-interrupted' });
+    const interruptedResponse = entries.find(entry =>
+      entry['event.name'] === 'llm.response'
+      && entry['gen_ai.turn.id'] === 'turn-interrupted');
+    const cancelledTool = entries.find(entry =>
+      entry['event.name'] === 'tool.result'
+      && entry['gen_ai.tool.call.id'] === 'call-pending');
+    const nextResponse = entries.find(entry =>
+      entry['event.name'] === 'llm.response'
+      && entry['gen_ai.turn.id'] === 'turn-next');
+
+    expect(interruptedResponse).toMatchObject({
+      'gen_ai.response.finish_reasons': ['cancelled'],
+      'gen_ai.turn.end': true,
+    });
+    expect(cancelledTool).toMatchObject({
+      'gen_ai.tool.name': 'PowerShell',
+      'tool.result.status': 'cancelled',
+      'gen_ai.tool.call.duration': 200,
+    });
+    expect(nextResponse).toMatchObject({
+      'gen_ai.response.finish_reasons': ['stop'],
+      'gen_ai.turn.end': true,
+    });
+  });
+
 });
 
 class TestWorkBuddyInput extends WorkBuddyInput {

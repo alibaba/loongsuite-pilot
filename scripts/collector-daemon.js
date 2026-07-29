@@ -4,10 +4,18 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 
 const HOME = process.env.HOME || process.env.USERPROFILE || '';
-const CACHE_DIR = path.join(HOME, '.loongsuite-pilot');
+const CACHE_DIR = resolveCacheDir();
 const CURRENT_FILE = path.join(CACHE_DIR, 'current');
 const PREVIOUS_FILE = path.join(CACHE_DIR, 'previous');
 const VERSIONS_DIR = path.join(CACHE_DIR, 'versions');
+
+function resolveCacheDir() {
+  const raw = process.env.LOONGSUITE_PILOT_CACHE_DIR;
+  if (!raw) return path.join(HOME, '.loongsuite-pilot');
+  if (raw === '~') return HOME;
+  if (raw.startsWith('~/') || raw.startsWith('~\\')) return path.join(HOME, raw.slice(2));
+  return raw;
+}
 
 function loadVersion(pointerFile) {
   try {

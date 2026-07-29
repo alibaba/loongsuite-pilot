@@ -28,6 +28,15 @@ describe('uninstall cleans hook configs for all hook agents', () => {
       expect(ps1).toContain(f.replace(/\//g, '\\'));
     });
   }
+
+  it('ps1 removes the empty hooks object after the last Pilot hook', () => {
+    const cleanup = ps1.slice(
+      ps1.indexOf('function Remove-HookConfigs'),
+      ps1.indexOf('function Remove-OpenCodePlugin'),
+    );
+    expect(cleanup).toContain('if (Object.keys(hooks).length === 0)');
+    expect(cleanup).toContain('delete data.hooks');
+  });
 });
 
 describe('uninstall cleans the OpenCode plugin-inject spec', () => {
@@ -109,6 +118,37 @@ describe('Windows uninstall verifies scheduled task removal', () => {
     expect(cleanup).toContain('"LoongsuitePilot-$userTag"');
     expect(cleanup).toContain('"LoongsuitePilotUpdater-$userTag"');
     expect(cleanup).toContain('Remove-OnePilotScheduledTask');
+  });
+});
+
+describe('Windows uninstall removes deep installation trees', () => {
+  it('uses the extended-length path API instead of recursive Remove-Item', () => {
+    const cleanup = ps1.slice(
+      ps1.indexOf('function ConvertTo-ExtendedLengthPath'),
+      ps1.indexOf('function Cmd-Uninstall'),
+    );
+    expect(cleanup).toContain('function Remove-PilotPath');
+    expect(cleanup).toContain('return "\\\\?\\$fullPath"');
+    expect(cleanup).toContain('[System.IO.Directory]::Delete($extendedPath, $true)');
+    expect(cleanup).not.toContain('Remove-Item -LiteralPath $target -Recurse -Force');
+  });
+});
+
+describe('Windows uninstall reuses the installer-pinned Node runtime', () => {
+  it('resolves node-bin before PATH-based candidates and before removing installation files', () => {
+    const resolver = ps1.slice(
+      ps1.indexOf('function Resolve-Node'),
+      ps1.indexOf('function Check-Deps'),
+    );
+    expect(resolver).toContain('(Join-Path $DataDir "node-bin")');
+    expect(resolver.indexOf('(Join-Path $DataDir "node-bin")'))
+      .toBeLessThan(resolver.indexOf('# nvm-windows'));
+
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(uninstall).toContain('$script:NODE_BIN = Resolve-Node');
+    expect(uninstall.indexOf('$script:NODE_BIN = Resolve-Node'))
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+    expect(uninstall).toContain('Remove-PilotPath -Path $safeDataDir');
   });
 });
 

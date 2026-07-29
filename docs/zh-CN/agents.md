@@ -24,7 +24,10 @@
 | Qoder Work CN | `qoder-work-cn` | Hook 和本地数据源。 |
 | Qwen Code CLI | `qwen-code-cli` | Hook 集成；Stop 时解析 qwen-code transcript JSONL。 |
 | Wukong | `wukong` | 通过本地 `wukong-cli` 进行 CLI API 轮询。 |
-| WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 验证。 |
+| WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 和 Windows 11 WorkBuddy Desktop 5.3.5.0 验证。 |
+
+Windows 验证使用安装后的 Pilot 产物，在 `PATH` 中没有 Node 的情况下从安装器固定的
+`node-bin` 解析 Node，并用真实 WorkBuddy transcript 通过严格 JSONL 校验。
 
 Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 `SessionStart` 和 `UserPromptSubmit` Hook 发现当前实际生效的
