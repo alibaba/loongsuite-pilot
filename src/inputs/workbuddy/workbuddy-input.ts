@@ -528,7 +528,9 @@ async function readJsonlRange(
   let nextOffset = startOffset;
   for (let index = 0; index < content.length; index++) {
     if (content[index] !== 0x0a) continue;
-    parseJsonlLine(content.subarray(lineStart, index), records);
+    if (!parseJsonlLine(content.subarray(lineStart, index), records)) {
+      return { records, nextOffset };
+    }
     lineStart = index + 1;
     nextOffset = startOffset + lineStart;
   }

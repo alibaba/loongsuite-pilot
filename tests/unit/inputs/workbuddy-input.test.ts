@@ -728,6 +728,54 @@ describe('WorkBuddyInput checkpoints', () => {
     expect(await input.collectNow()).toEqual([]);
   });
 
+  it('does not checkpoint past a failed newline-delimited record', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-input-malformed-'));
+    const projects = path.join(root, 'projects', 'safe-project');
+    const hookEventDir = path.join(root, 'pilot-events');
+    await mkdir(projects, { recursive: true });
+    await mkdir(hookEventDir, { recursive: true });
+    const transcript = path.join(projects, 'session-malformed.jsonl');
+    await writeFile(transcript, '');
+
+    const stateStore = new StateStore(path.join(root, 'state.json'));
+    await stateStore.load();
+    const input = new TestWorkBuddyInput({
+      stateStore,
+      workBuddyRoot: root,
+      hookEventDir,
+    });
+    expect(await input.collectNow()).toEqual([]);
+
+    const records = fixtureRecords();
+    const user = records[0];
+    const assistant = records.find(record =>
+      record.type === 'message'
+      && record.role === 'assistant'
+      && record.id === 'response-synthetic-2')!;
+    await writeFile(transcript, `{ "type": "message"\n${JSON.stringify(assistant)}\n`);
+    await writeHookEvent(hookEventDir, {
+      observed_at_ms: 3_000,
+      hook_event_name: 'Stop',
+      session_id: 'session-malformed',
+      transcript_path: transcript,
+    });
+
+    expect(await input.collectNow()).toEqual([]);
+    expect(await input.collectNow()).toEqual([]);
+
+    await writeFile(
+      transcript,
+      `${JSON.stringify(user)}\n${JSON.stringify(assistant)}\n`,
+    );
+    expect(await input.collectNow()).toEqual([]);
+    const entries = await input.collectNow();
+    expect(entries.map(entry => entry['event.name'])).toEqual([
+      'llm.request',
+      'llm.response',
+    ]);
+    expect(entries.every(entry => entry['gen_ai.turn.id'] === user.id)).toBe(true);
+  });
+
   it('passes uniquely matched structural Hook identity through to the builder', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'workbuddy-input-hook-repair-'));
     const projects = path.join(root, 'projects', 'safe-project');
