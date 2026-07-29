@@ -63,6 +63,46 @@ describe('uninstall cleans the OpenCode plugin-inject spec', () => {
     expect(ps1).toContain('loongsuite-pilot-opencode');
     expect(ps1).toContain('plugins/opencode/plugin.mjs');
   });
+
+  // Regression for the 2026-07-29 bug where a rebase resolution dropped the
+  // opening `$configs = @(` line of Remove-OpenCodePlugin, leaving the
+  // foreach loop referencing an undefined $configs and breaking PowerShell
+  // parsing of the whole uninstall flow.
+  it('ps1 Remove-OpenCodePlugin body opens with $configs = @(', () => {
+    const fn = ps1.slice(
+      ps1.indexOf('function Remove-OpenCodePlugin'),
+      ps1.indexOf('function Remove-PiCodingAgentExtension'),
+    );
+    expect(fn).toMatch(/function Remove-OpenCodePlugin\s*\{\s*\n\s*\$configs\s*=\s*@\(/);
+  });
+});
+
+// Regression for the 2026-07-29 bug where two orphan `}` survived after
+// Remove-MimoCodePlugin's closing brace (rebase artifact), throwing the
+// whole .ps1 brace balance off and breaking PowerShell parsing. The brace
+// counts must match across the entire file — PowerShell is whitespace- and
+// brace-sensitive, so even one orphan brace aborts the uninstall flow.
+describe('installer-opensource.ps1 brace balance', () => {
+  it('open { count equals close } count across the whole file', () => {
+    const open = (ps1.match(/\{/g) || []).length;
+    const close = (ps1.match(/\}/g) || []).length;
+    expect(open).toBe(close);
+  });
+
+  it('Remove-MimoCodePlugin is followed by exactly one closing brace', () => {
+    // Find the function, then check that immediately after its closing
+    // `}` (which we locate by scanning to the next `# ===` banner) there
+    // is no orphan `}`.
+    const start = ps1.indexOf('function Remove-MimoCodePlugin');
+    expect(start).toBeGreaterThan(-1);
+    const end = ps1.indexOf('# ====', start);
+    expect(end).toBeGreaterThan(start);
+    const body = ps1.slice(start, end);
+    // The function body must be brace-balanced on its own.
+    const open = (body.match(/\{/g) || []).length;
+    const close = (body.match(/\}/g) || []).length;
+    expect(open).toBe(close);
+  });
 });
 
 describe('uninstall cleans the Pi Coding Agent extension injection', () => {

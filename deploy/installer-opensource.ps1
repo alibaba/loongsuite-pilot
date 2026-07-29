@@ -1042,6 +1042,7 @@ try {
 # config file's plugin array, not a shared settings.json. Remove-HookConfigs
 # does not cover it, so clean it here to avoid a dangling spec.
 function Remove-OpenCodePlugin {
+    $configs = @(
         (Join-Path $env:USERPROFILE ".config\opencode\opencode.jsonc"),
         (Join-Path $env:USERPROFILE ".config\opencode\opencode.json"),
         (Join-Path $env:USERPROFILE ".config\opencode\config.json")
@@ -1181,8 +1182,6 @@ try {
             "nochange"    { }
             default       { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
         }
-    }
-}
     }
 }
 

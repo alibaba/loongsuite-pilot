@@ -444,3 +444,149 @@ describe('MiMo Code plugin — interrupted turn synthesis', () => {
     expect(respMs).toBeGreaterThan(reqMs);
   });
 });
+
+// Regression for the 2026-07-29 bug where gen_ai.agent.id was always
+// undefined on the chat.message hook path. MiMo Code's chat.message hook
+// delivers `out.message.agent` as a STRING (e.g. "build"), not as an object
+// with `.id`. The previous code did `msg.agent?.id` which is undefined for
+// strings. Worse: chat.message normally fires BEFORE the
+// message.updated(role=user) fallback, so the early-return dedup in
+// handleChatMessage prevented the fallback from overwriting agentMeta —
+// leaving the whole turn's gen_ai.agent.id undefined. The OTLP trace
+// converter then drops the attribute from every span in the turn.
+describe('MiMo Code plugin — chat.message hook sets gen_ai.agent.id', () => {
+  let plugin;
+  let capture;
+  let hooks;
+
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    capture = [];
+    plugin = await loadPlugin(capture);
+    process.env.LOONGSUITE_USER_ID = 'test-user';
+    hooks = await plugin.server(
+      { sessionID: 'test', cwd: os.tmpdir() },
+      {},
+    );
+  });
+
+  it('sets gen_ai.agent.id from string msg.agent when no agentID field is present', async () => {
+    // MiMo chat.message hook payload shape: agent is a bare string.
+    const inp = { sessionID: 'ses_chatmsg_str' };
+    const out = {
+      message: {
+        id: 'msg_chatmsg_str',
+        agent: 'build',
+        model: { providerID: 'mimo', modelID: 'mimo-v2.5' },
+      },
+    };
+    await hooks['chat.message'](inp, out);
+
+    // Emit any subsequent event to flush a record carrying agentMeta.
+    await hooks.event({
+      event: {
+        type: 'message.updated',
+        properties: {
+          sessionID: 'ses_chatmsg_str',
+          info: {
+            id: 'msg_chatmsg_str',
+            role: 'user',
+            sessionID: 'ses_chatmsg_str',
+            agent: 'build',
+            time: { created: Date.now() },
+          },
+        },
+      },
+    });
+
+    const records = capture.map((c) => parseRecord(c.data));
+    expect(records.length).toBeGreaterThan(0);
+    for (const r of records) {
+      expect(r['gen_ai.agent.id']).toBe('build');
+      expect(r['gen_ai.agent.name']).toBe('build');
+    }
+  });
+
+  it('prefers msg.agentID when both agent (string) and agentID are present', async () => {
+    // Same shape as message.updated(role=user) in the fixture: agent="build"
+    // and agentID="main" — agentID is the canonical id field.
+    const inp = { sessionID: 'ses_chatmsg_id' };
+    const out = {
+      message: {
+        id: 'msg_chatmsg_id',
+        agent: 'build',
+        agentID: 'main',
+        model: { providerID: 'mimo', modelID: 'mimo-v2.5' },
+      },
+    };
+    await hooks['chat.message'](inp, out);
+
+    await hooks.event({
+      event: {
+        type: 'message.updated',
+        properties: {
+          sessionID: 'ses_chatmsg_id',
+          info: {
+            id: 'msg_chatmsg_id',
+            role: 'user',
+            sessionID: 'ses_chatmsg_id',
+            agent: 'build',
+            time: { created: Date.now() },
+          },
+        },
+      },
+    });
+
+    const records = capture.map((c) => parseRecord(c.data));
+    expect(records.length).toBeGreaterThan(0);
+    for (const r of records) {
+      expect(r['gen_ai.agent.id']).toBe('main');
+      expect(r['gen_ai.agent.name']).toBe('build');
+    }
+  });
+
+  it('does not leave gen_ai.agent.id undefined when chat.message fires before message.updated(role=user)', async () => {
+    // The core regression: chat.message sets agentMeta, then the
+    // message.updated(role=user) dedup early-returns without overwriting
+    // agentMeta. Without the fix, agentMeta.id stays undefined for the
+    // entire turn.
+    const sessionID = 'ses_chatmsg_dedup';
+    const userMsgID = 'msg_chatmsg_dedup';
+
+    // 1. chat.message hook fires first (the normal case)
+    await hooks['chat.message'](
+      { sessionID },
+      {
+        message: {
+          id: userMsgID,
+          agent: 'build',
+          model: { providerID: 'mimo', modelID: 'mimo-v2.5' },
+        },
+      },
+    );
+
+    // 2. message.updated(role=user) fires second — dedup early-returns
+    //    but must NOT clobber or leave agentMeta.id undefined.
+    await hooks.event({
+      event: {
+        type: 'message.updated',
+        properties: {
+          sessionID,
+          info: {
+            id: userMsgID,
+            role: 'user',
+            sessionID,
+            agent: 'build',
+            time: { created: Date.now() },
+          },
+        },
+      },
+    });
+
+    const records = capture.map((c) => parseRecord(c.data));
+    expect(records.length).toBeGreaterThan(0);
+    for (const r of records) {
+      expect(r['gen_ai.agent.id']).toBe('build');
+    }
+  });
+});

@@ -457,7 +457,11 @@ function handleChatMessage(inp, out, userId) {
         (typeof msg.agent === "string" ? msg.agent : msg.agent?.name) ||
         (typeof inp.agent === "string" ? inp.agent : inp.agent?.name) ||
         AGENT_TYPE,
-      id: msg.agent?.id || inp.agent?.id,
+      id:
+        msg.agentID ||
+        inp.agentID ||
+        (typeof msg.agent === "string" ? msg.agent : msg.agent?.id) ||
+        (typeof inp.agent === "string" ? inp.agent : inp.agent?.id),
     };
     if (msg.model) {
       session.modelInfo = {
@@ -471,7 +475,9 @@ function handleChatMessage(inp, out, userId) {
         name:
           (typeof inp.agent === "string" ? inp.agent : inp.agent?.name) ||
           AGENT_TYPE,
-        id: inp.agent?.id,
+        id:
+          inp.agentID ||
+          (typeof inp.agent === "string" ? inp.agent : inp.agent?.id),
       };
     }
     if (inp.model) {
