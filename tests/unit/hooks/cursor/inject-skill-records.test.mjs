@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { injectSkillRecords } from '../../../../assets/hooks/cursor-hook-processor.mjs';
+import {
+  filterSkillsForReadInjection,
+  injectSkillRecords,
+} from '../../../../assets/hooks/cursor-hook-processor.mjs';
 
 const PROCESSOR_URL = new URL('../../../../assets/hooks/cursor-hook-processor.mjs', import.meta.url);
 
@@ -43,6 +46,35 @@ function makeLlmRequest(overrides = {}) {
 function makeSkill(name = 'my-skill', skillPath = '/Users/test/.cursor/skills/my-skill/SKILL.md') {
   return { skillName: name, skillPath };
 }
+
+describe('filterSkillsForReadInjection', () => {
+  const skillWithSources = (...detectionSources) => ({
+    ...makeSkill(),
+    detectionSources,
+  });
+
+  it('should synthesize pure manual attachments after transcript assembly', () => {
+    const skills = [skillWithSources('manual_attachment')];
+
+    expect(filterSkillsForReadInjection(skills, true)).toEqual(skills);
+  });
+
+  it('should not synthesize transcript reads after transcript assembly', () => {
+    const transcriptOnly = skillWithSources('transcript_read');
+    const dualSource = skillWithSources('manual_attachment', 'transcript_read');
+
+    expect(filterSkillsForReadInjection([transcriptOnly, dualSource], true)).toEqual([]);
+  });
+
+  it('should synthesize manual attachments and transcript reads on hook-event assembly paths', () => {
+    const manualOnly = skillWithSources('manual_attachment');
+    const transcriptOnly = skillWithSources('transcript_read');
+    const dualSource = skillWithSources('manual_attachment', 'transcript_read');
+    const skills = [manualOnly, transcriptOnly, dualSource];
+
+    expect(filterSkillsForReadInjection(skills, false)).toEqual(skills);
+  });
+});
 
 describe('injectSkillRecords', () => {
   it('should inject tool_call part into llm.response output.messages', () => {
@@ -233,6 +265,45 @@ describe('injectSkillRecords', () => {
     expect(records[1]['gen_ai.skill.name']).toBe('private-skill');
     expect(records[2]['gen_ai.skill.name']).toBe('private-skill');
     expect(JSON.stringify(records)).not.toContain(skillPath);
+  });
+
+  it('should synthesize Read records for a manually attached skill path', () => {
+    const records = [makeLlmResponse()];
+    const skills = [{
+      ...makeSkill(
+        'count-if-statements',
+        '/Users/test/.cursor/skills/count-if-statements/SKILL.md',
+      ),
+      detectionSource: 'manual_attachment',
+      detectionSources: ['manual_attachment'],
+    }];
+
+    injectSkillRecords(records, skills);
+
+    const assistantMsg = records[0]['gen_ai.output.messages']
+      .find(message => message.role === 'assistant');
+    expect(assistantMsg.parts).toContainEqual(expect.objectContaining({
+      type: 'tool_call',
+      name: 'Read',
+      arguments: {
+        path: '/Users/test/.cursor/skills/count-if-statements/SKILL.md',
+      },
+    }));
+    expect(records[1]).toMatchObject({
+      'event.name': 'tool.call',
+      'gen_ai.tool.name': 'Read',
+      'gen_ai.tool.call.arguments': {
+        path: '/Users/test/.cursor/skills/count-if-statements/SKILL.md',
+      },
+      'gen_ai.skill.name': 'count-if-statements',
+      'agent.cursor.skill_detection_source': 'manual_attachment',
+    });
+    expect(records[2]).toMatchObject({
+      'event.name': 'tool.result',
+      'gen_ai.tool.name': 'Read',
+      'gen_ai.skill.name': 'count-if-statements',
+      'agent.cursor.skill_detection_source': 'manual_attachment',
+    });
   });
 
   it('should not execute main when imported', () => {

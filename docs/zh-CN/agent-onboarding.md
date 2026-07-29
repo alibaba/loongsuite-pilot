@@ -170,7 +170,7 @@ Input 应该：
 
 - 对 Prompt、Completion、工具参数和工具结果支持 `captureMessageContent: false`，前提是源 Agent 暴露这些字段。
 - 除非必须并可被脱敏，否则不要将密钥放入 source-specific 扩展字段。
-- 验证 `mask.mode: all` 能在输出中脱敏 API Key、AccessKey、私钥和数据库 URL。见 [数据脱敏](masking.md)。
+- 验证 `mask.mode: all` 能在输出中脱敏已支持的密钥和个人敏感信息。见 [数据脱敏](masking.md)。
 - Hook 或插件必须 fail open，遥测失败不能阻塞原 Agent。
 
 ## 测试清单

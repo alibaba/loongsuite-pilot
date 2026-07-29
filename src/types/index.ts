@@ -33,7 +33,25 @@ export interface CmsConfig {
 
 export type MaskMode = 'none' | 'all' | 'custom';
 
-export type MaskType = 'cloudAccessKey' | 'apiKey' | 'privateKey' | 'databaseUrl';
+export const PII_MASK_TYPES = [
+  'idCard',
+  'phone',
+  'email',
+  'ipAddress',
+  'bankCard',
+] as const;
+
+export type PiiMaskType = (typeof PII_MASK_TYPES)[number];
+
+export const SUPPORTED_MASK_TYPES = [
+  'cloudAccessKey',
+  'apiKey',
+  'privateKey',
+  'databaseUrl',
+  ...PII_MASK_TYPES,
+] as const;
+
+export type MaskType = (typeof SUPPORTED_MASK_TYPES)[number];
 
 export interface MaskConfig {
   mode: MaskMode;
@@ -221,6 +239,8 @@ export interface AgentDetectionEntry {
   stop: () => Promise<void>;
   pollIntervalMs: number;
   runOnActive?: boolean;
+  /** Consecutive unavailable checks required before stopping a running entry (default 1). */
+  unavailableThreshold?: number;
 }
 
 export interface LogRetentionConfig {
@@ -272,5 +292,7 @@ export interface InputState {
   highWatermark?: number;
   extra?: Record<string, unknown>;
 }
+
+export type AgentStopReason = 'unavailable' | 'disabled' | 'shutdown' | 'unexpected';
 
 export type EntryState = 'idle' | 'starting' | 'running' | 'stopping';

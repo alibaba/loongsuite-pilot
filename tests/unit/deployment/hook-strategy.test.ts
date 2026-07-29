@@ -2,6 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { HookStrategy } from '../../../src/deployment/hook-strategy.js';
 import type { AgentDefinition, DeployedAgentRecord } from '../../../src/types/index.js';
 
+vi.mock('node:fs/promises', async () => {
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  return {
+    ...actual,
+    readFile: vi.fn(),
+  };
+});
+
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
     info: vi.fn(),
@@ -16,8 +24,10 @@ vi.mock('../../../src/deployment/detect-utils.js', () => ({
 }));
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
+  fileExists: vi.fn(),
   readJsonFile: vi.fn(),
   writeJsonFile: vi.fn(),
+  writeTextFileAtomic: vi.fn(),
   resolveHome: vi.fn((p: string) => p),
   ensureDir: vi.fn().mockResolvedValue(undefined),
 }));
@@ -29,7 +39,13 @@ vi.mock('../../../src/deployment/codex-trust-writer.js', () => ({
 }));
 
 import { detectAgent } from '../../../src/deployment/detect-utils.js';
-import { readJsonFile, writeJsonFile } from '../../../src/utils/fs-utils.js';
+import * as fs from 'node:fs/promises';
+import {
+  fileExists,
+  readJsonFile,
+  writeJsonFile,
+  writeTextFileAtomic,
+} from '../../../src/utils/fs-utils.js';
 import { verifyTrustHashes } from '../../../src/deployment/codex-trust-writer.js';
 
 function makeDef(overrides?: Partial<AgentDefinition>): AgentDefinition {
@@ -58,6 +74,7 @@ describe('HookStrategy', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(fileExists).mockResolvedValue(false);
     mockHookManager = {
       isHookInstalled: vi.fn(),
       installHook: vi.fn(),
@@ -238,6 +255,28 @@ describe('HookStrategy', () => {
       expect(call.useNestedFormat).toBe(true);
       expect(call.replaceHookCommands).toEqual(['/old/hook.sh']);
     });
+
+    it('passes JSONC settings syntax to Qwen hook definitions', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      const def = makeDef({
+        id: 'qwen-code-cli',
+        hook: {
+          settingsPath: '/home/.qwen/settings.json',
+          settingsSyntax: 'jsonc',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/qwen.sh',
+          format: 'nested',
+        },
+      });
+
+      await strategy.needsDeploy(def);
+
+      expect(mockHookManager.isHookInstalled.mock.calls[0][0]).toMatchObject({
+        agentId: 'qwen-code-cli',
+        settingsSyntax: 'jsonc',
+        settingsPath: '/home/.qwen/settings.json',
+      });
+    });
   });
 
   describe('deploy', () => {
@@ -397,6 +436,46 @@ describe('HookStrategy', () => {
       await strategy.deploy(def);
 
       expect(writeJsonFile).not.toHaveBeenCalled();
+    });
+
+    it('does not replace an existing invalid strict hooks.json file', async () => {
+      vi.mocked(fileExists).mockResolvedValue(true);
+      vi.mocked(readJsonFile).mockResolvedValue(null);
+      vi.mocked(fs.readFile).mockResolvedValue('{ "hooks": ');
+
+      const result = await strategy.deploy(makeDef());
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('refusing to overwrite invalid settings');
+      expect(writeJsonFile).not.toHaveBeenCalled();
+      expect(mockHookManager.installHook).not.toHaveBeenCalled();
+    });
+
+    it('initializes an existing whitespace-only Cursor hooks.json safely', async () => {
+      vi.mocked(fileExists).mockResolvedValue(true);
+      vi.mocked(readJsonFile).mockResolvedValue(null);
+      vi.mocked(fs.readFile).mockResolvedValue('  \n');
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      const def = makeDef({
+        hook: {
+          settingsPath: '/home/.cursor/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/test.sh',
+          format: 'flat',
+        },
+      });
+      const result = await strategy.deploy(def);
+
+      expect(result.success).toBe(true);
+      expect(writeTextFileAtomic).toHaveBeenCalledWith(
+        '/home/.cursor/hooks.json',
+        '{\n  "hooks": {},\n  "version": 1\n}\n',
+        { expected: { exists: true, content: '  \n' } },
+      );
+      expect(writeJsonFile).not.toHaveBeenCalled();
+      expect(mockHookManager.installHook).toHaveBeenCalled();
     });
 
     it('installs only hooks not already installed', async () => {

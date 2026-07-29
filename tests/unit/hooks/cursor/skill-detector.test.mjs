@@ -44,6 +44,155 @@ describe('detectSkillFromTranscript', () => {
     expect(result).toHaveLength(1);
     expect(result[0].skillName).toBe('leetcode-solver');
     expect(result[0].skillPath).toBe('/Users/yunshen/.cursor/skills/leetcode-solver/SKILL.md');
+    expect(result[0].detectionSource).toBe('transcript_read');
+    expect(result[0].detectionSources).toEqual(['transcript_read']);
+  });
+
+  it('should detect a manually attached skill without a Read tool call', () => {
+    const lines = [
+      { role: 'user', message: { content: [{ type: 'text', text: [
+        '<manually_attached_skills>',
+        'The user has manually attached the following skills to their message.',
+        '',
+        'Skill Name: count-if-statements',
+        'Path: /Users/test/.cursor/skills/count-if-statements/SKILL.md',
+        'SKILL.md content:',
+        '# Count If Statements',
+        '',
+        'The full content is inlined but must not be emitted.',
+        '</manually_attached_skills>',
+        '<timestamp>Friday, Jul 24, 2026, 4:23 PM (UTC+8)</timestamp>',
+        '<user_query>',
+        '/count-if-statements 统计leetcode_334的if数量',
+        '</user_query>',
+      ].join('\n') }] } },
+      { role: 'assistant', message: { content: [
+        { type: 'tool_use', name: 'Shell', input: {
+          command: 'python3 ~/.cursor/skills/count-if-statements/scripts/count_if.py leetcode_334.py',
+        } },
+      ] } },
+      { type: 'turn_ended' },
+    ];
+
+    ({ dir: tempDir, filePath: transcriptPath } = createTempTranscript(lines));
+
+    const result = detectSkillFromTranscript(
+      transcriptPath,
+      '/count-if-statements 统计leetcode_334的if数量',
+    );
+    expect(result).toEqual([{
+      skillName: 'count-if-statements',
+      skillPath: '/Users/test/.cursor/skills/count-if-statements/SKILL.md',
+      detectionSource: 'manual_attachment',
+      detectionSources: ['manual_attachment'],
+    }]);
+  });
+
+  it('should prefer the explicit user_query when inlined skill content contains another prompt', () => {
+    const lines = [
+      { role: 'user', message: { content: [{ type: 'text', text: [
+        '<manually_attached_skills>',
+        'Skill Name: prompt-helper',
+        'Path: /Users/test/.cursor/skills/prompt-helper/SKILL.md',
+        'SKILL.md content:',
+        'fix the bug',
+        '</manually_attached_skills>',
+        '<user_query>',
+        'run the attached helper',
+        '</user_query>',
+      ].join('\n') }] } },
+      { type: 'turn_ended' },
+    ];
+
+    ({ dir: tempDir, filePath: transcriptPath } = createTempTranscript(lines));
+
+    expect(detectSkillFromTranscript(transcriptPath, 'fix the bug')).toBeNull();
+    expect(detectSkillFromTranscript(transcriptPath, 'run the attached helper')).toHaveLength(1);
+  });
+
+  it('should deduplicate manual attachment and Read evidence for the same skill', () => {
+    const lines = [
+      { role: 'user', message: { content: [{ type: 'text', text: [
+        '<manually_attached_skills>',
+        'Skill Name: my-skill',
+        'Path: /Users/test/.cursor/skills/my-skill/SKILL.md',
+        'SKILL.md content:',
+        '# My Skill',
+        '</manually_attached_skills>',
+        '<user_query>',
+        'use my skill',
+        '</user_query>',
+      ].join('\n') }] } },
+      { role: 'assistant', message: { content: [
+        { type: 'tool_use', name: 'Read', input: {
+          path: '/Users/test/.cursor/skills/my-skill/SKILL.md',
+        } },
+      ] } },
+      { type: 'turn_ended' },
+    ];
+
+    ({ dir: tempDir, filePath: transcriptPath } = createTempTranscript(lines));
+
+    const result = detectSkillFromTranscript(transcriptPath, 'use my skill');
+    expect(result).toHaveLength(1);
+    expect(result[0].detectionSource).toBe('manual_attachment');
+    expect(result[0].detectionSources).toEqual(['manual_attachment', 'transcript_read']);
+  });
+
+  it('should detect multiple manually attached skills in one turn', () => {
+    const lines = [
+      { role: 'user', message: { content: [{ type: 'text', text: [
+        '<manually_attached_skills>',
+        'Skill Name: skill-a',
+        'Path: /Users/test/.cursor/skills/skill-a/SKILL.md',
+        'SKILL.md content:',
+        '# Skill A',
+        '',
+        'Skill Name: skill-b',
+        'Path: /Users/test/.cursor/skills/skill-b/SKILL.md',
+        'SKILL.md content:',
+        '# Skill B',
+        '</manually_attached_skills>',
+        '<user_query>',
+        'use both attached skills',
+        '</user_query>',
+      ].join('\n') }] } },
+      { type: 'turn_ended' },
+    ];
+
+    ({ dir: tempDir, filePath: transcriptPath } = createTempTranscript(lines));
+
+    const result = detectSkillFromTranscript(transcriptPath, 'use both attached skills');
+    expect(result.map(skill => skill.skillName)).toEqual(['skill-a', 'skill-b']);
+    expect(result.every(skill => skill.detectionSource === 'manual_attachment')).toBe(true);
+  });
+
+  it('should choose the latest turn when identical prompts are repeated', () => {
+    const makeUser = skillName => ({
+      role: 'user',
+      message: { content: [{ type: 'text', text: [
+        '<manually_attached_skills>',
+        `Skill Name: ${skillName}`,
+        `Path: /Users/test/.cursor/skills/${skillName}/SKILL.md`,
+        'SKILL.md content:',
+        `# ${skillName}`,
+        '</manually_attached_skills>',
+        '<user_query>',
+        'repeat this prompt',
+        '</user_query>',
+      ].join('\n') }] },
+    });
+    const lines = [
+      makeUser('old-skill'),
+      { type: 'turn_ended' },
+      makeUser('new-skill'),
+      { type: 'turn_ended' },
+    ];
+
+    ({ dir: tempDir, filePath: transcriptPath } = createTempTranscript(lines));
+
+    const result = detectSkillFromTranscript(transcriptPath, 'repeat this prompt');
+    expect(result.map(skill => skill.skillName)).toEqual(['new-skill']);
   });
 
   it('should return null when transcript has no skill reads', () => {

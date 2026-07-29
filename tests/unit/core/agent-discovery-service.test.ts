@@ -97,6 +97,7 @@ function makeEntry(overrides: Partial<AgentDetectionEntry> = {}): AgentDetection
     stop: overrides.stop ?? vi.fn().mockResolvedValue(undefined),
     pollIntervalMs: overrides.pollIntervalMs ?? 300_000,
     runOnActive: overrides.runOnActive,
+    unavailableThreshold: overrides.unavailableThreshold,
   };
 }
 
@@ -259,6 +260,129 @@ describe('AgentDiscoveryService', () => {
       await svc.start();
 
       expect(svc.getStates()['test-agent']).toBe('idle');
+      await svc.stop();
+    });
+  });
+
+  describe('stop reason classification', () => {
+    it('emits disabled reason when enabled becomes false', async () => {
+      const enabledFn = vi.fn().mockReturnValue(true);
+      const entry = makeEntry({ enabled: enabledFn });
+      const svc = new AgentDiscoveryService([entry]);
+      const stopped: Array<{ id: string; reason: string }> = [];
+      svc.on('agent:stopped', (id: string, reason: string) => stopped.push({ id, reason }));
+
+      await svc.start();
+      expect(svc.getStates()['test-agent']).toBe('running');
+
+      enabledFn.mockReturnValue(false);
+      await svc.refresh('test');
+
+      expect(stopped).toEqual([{ id: 'test-agent', reason: 'disabled' }]);
+      await svc.stop();
+    });
+
+    it('emits unavailable reason when available becomes false', async () => {
+      const availableFn = vi.fn().mockResolvedValue(true);
+      const entry = makeEntry({ isAvailable: availableFn });
+      const svc = new AgentDiscoveryService([entry]);
+      const stopped: Array<{ id: string; reason: string }> = [];
+      svc.on('agent:stopped', (id: string, reason: string) => stopped.push({ id, reason }));
+
+      await svc.start();
+      expect(svc.getStates()['test-agent']).toBe('running');
+
+      availableFn.mockResolvedValue(false);
+      await svc.refresh('test');
+
+      expect(stopped).toEqual([{ id: 'test-agent', reason: 'unavailable' }]);
+      await svc.stop();
+    });
+
+    it('emits shutdown reason on service stop', async () => {
+      const entry = makeEntry();
+      const svc = new AgentDiscoveryService([entry]);
+      const stopped: Array<{ id: string; reason: string }> = [];
+      svc.on('agent:stopped', (id: string, reason: string) => stopped.push({ id, reason }));
+
+      await svc.start();
+      await svc.stop();
+
+      expect(stopped).toEqual([{ id: 'test-agent', reason: 'shutdown' }]);
+    });
+
+    it('emits unexpected reason when running entry throws during refresh', async () => {
+      const availableFn = vi.fn().mockResolvedValue(true);
+      const entry = makeEntry({ isAvailable: availableFn });
+      const svc = new AgentDiscoveryService([entry]);
+      const stopped: Array<{ id: string; reason: string }> = [];
+      svc.on('agent:stopped', (id: string, reason: string) => stopped.push({ id, reason }));
+
+      await svc.start();
+      expect(svc.getStates()['test-agent']).toBe('running');
+
+      availableFn.mockRejectedValue(new Error('crash'));
+      await svc.refresh('test');
+
+      expect(svc.getStates()['test-agent']).toBe('idle');
+      expect(stopped).toEqual([{ id: 'test-agent', reason: 'unexpected' }]);
+      await svc.stop();
+    });
+  });
+
+  describe('unavailable debounce', () => {
+    it('does not stop on single unavailable when threshold is 3', async () => {
+      const availableFn = vi.fn().mockResolvedValue(true);
+      const entry = makeEntry({ isAvailable: availableFn, unavailableThreshold: 3 });
+      const svc = new AgentDiscoveryService([entry]);
+      const stopped: Array<{ id: string; reason: string }> = [];
+      svc.on('agent:stopped', (id: string, reason: string) => stopped.push({ id, reason }));
+
+      await svc.start();
+      expect(svc.getStates()['test-agent']).toBe('running');
+
+      availableFn.mockResolvedValue(false);
+      await svc.refresh('poll-1');
+      expect(svc.getStates()['test-agent']).toBe('running');
+      expect(stopped).toHaveLength(0);
+
+      await svc.refresh('poll-2');
+      expect(svc.getStates()['test-agent']).toBe('running');
+      expect(stopped).toHaveLength(0);
+
+      await svc.refresh('poll-3');
+      expect(svc.getStates()['test-agent']).toBe('idle');
+      expect(stopped).toEqual([{ id: 'test-agent', reason: 'unavailable' }]);
+
+      await svc.stop();
+    });
+
+    it('resets counter when availability recovers', async () => {
+      const availableFn = vi.fn().mockResolvedValue(true);
+      const entry = makeEntry({ isAvailable: availableFn, unavailableThreshold: 3 });
+      const svc = new AgentDiscoveryService([entry]);
+      const stopped: Array<{ id: string; reason: string }> = [];
+      svc.on('agent:stopped', (id: string, reason: string) => stopped.push({ id, reason }));
+
+      await svc.start();
+
+      availableFn.mockResolvedValue(false);
+      await svc.refresh('poll-1');
+      await svc.refresh('poll-2');
+      expect(stopped).toHaveLength(0);
+
+      availableFn.mockResolvedValue(true);
+      await svc.refresh('poll-recover');
+      expect(svc.getStates()['test-agent']).toBe('running');
+
+      availableFn.mockResolvedValue(false);
+      await svc.refresh('poll-a');
+      await svc.refresh('poll-b');
+      expect(stopped).toHaveLength(0);
+
+      await svc.refresh('poll-c');
+      expect(stopped).toEqual([{ id: 'test-agent', reason: 'unavailable' }]);
+
       await svc.stop();
     });
   });

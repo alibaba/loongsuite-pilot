@@ -265,6 +265,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qoder-cli-session'].enabled).toBe(true);
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
       expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 30_000 });
     });
 
@@ -272,12 +273,14 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce({
         listeners: {
           qoder: { enabled: false, pollInterval: 120000 },
+          'opencode-log': { pollInterval: 1000 },
         },
       });
 
       const config = await loadConfig();
       expect(config.listeners.qoder.enabled).toBe(false);
       expect(config.listeners.qoder.pollInterval).toBe(120000);
+      expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 1000 });
     });
 
     it('migrates a legacy codex-log listener override to codex-transcript', async () => {
@@ -537,14 +540,33 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {
           mode: 'custom',
-          types: ['apiKey', 'cloudAccessKey', 'pii', 'databaseUrl'],
+          types: [
+            'apiKey',
+            'cloudAccessKey',
+            'pii',
+            'databaseUrl',
+            'idCard',
+            'phone',
+            'email',
+            'ipAddress',
+            'bankCard',
+          ],
         },
       });
 
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        types: ['apiKey', 'cloudAccessKey', 'databaseUrl'],
+        types: [
+          'apiKey',
+          'cloudAccessKey',
+          'databaseUrl',
+          'idCard',
+          'phone',
+          'email',
+          'ipAddress',
+          'bankCard',
+        ],
       });
     });
 
@@ -589,12 +611,23 @@ describe('ConfigLoader', () => {
           types: ['apiKey'],
         },
       });
-      vi.stubEnv('LOONGSUITE_PILOT_MASK_TYPES', 'cloudAccessKey,pii,databaseUrl');
+      vi.stubEnv(
+        'LOONGSUITE_PILOT_MASK_TYPES',
+        'cloudAccessKey,pii,databaseUrl,idCard,phone,email,ipAddress,bankCard',
+      );
 
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        types: ['cloudAccessKey', 'databaseUrl'],
+        types: [
+          'cloudAccessKey',
+          'databaseUrl',
+          'idCard',
+          'phone',
+          'email',
+          'ipAddress',
+          'bankCard',
+        ],
       });
     });
   });
