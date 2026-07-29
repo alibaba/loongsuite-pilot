@@ -275,4 +275,104 @@ describe('MiMo Code plugin — end-to-end fixture replay', () => {
       expect(r['tool.result.status']).toBe('success');
     }
   });
+
+  it('stamps gen_ai.framework=mimo-code on every emitted record', async () => {
+    for (const e of events) {
+      await hooks.event({ event: e });
+    }
+    const records = capture.map((c) => parseRecord(c.data));
+    expect(records.length).toBeGreaterThan(0);
+    for (const r of records) {
+      expect(r['gen_ai.framework']).toBe('mimo-code');
+    }
+  });
+
+  it('stamps gen_ai.tool.description on every tool.call record', async () => {
+    for (const e of events) {
+      await hooks.event({ event: e });
+    }
+    const records = capture.map((c) => parseRecord(c.data));
+    const toolCalls = records.filter((r) => r['event.name'] === 'tool.call');
+    expect(toolCalls.length).toBeGreaterThan(0);
+    for (const r of toolCalls) {
+      expect(r['gen_ai.tool.description']).toBe(r['gen_ai.tool.name']);
+    }
+  });
+});
+
+// fixture 来源: 为验证「turn 被打断（无 llm.response / 无 tool.result）」场景
+// 而构造的事件序列。事件结构对照 researcher 调研报告 (MiMo Code v0.1.5) 中的
+// message.updated(role=user) → message.part.updated(step-start) →
+// message.part.updated(tool,running) → session.idle 流程，与 2026-07-15 真实
+// 测试中 build agent 被 distill 抢占前的 4 条事件序列同构。
+describe('MiMo Code plugin — interrupted turn synthesis', () => {
+  const INTERRUPTED_FIXTURE = path.resolve(
+    __dirname_test,
+    './fixtures/interrupted_turn_events.jsonl',
+  );
+
+  function loadInterruptedEvents() {
+    const raw = fs.readFileSync(INTERRUPTED_FIXTURE, 'utf-8');
+    return raw.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
+  }
+
+  it('emits synthetic tool.result + llm.response on session.idle for pending parts', async () => {
+    const capture2 = [];
+    const plugin2 = await loadPlugin(capture2);
+    process.env.LOONGSUITE_USER_ID = 'test-user';
+    const hooks2 = await plugin2.server({ sessionID: 'test', cwd: os.tmpdir() }, {});
+    const interrupted = loadInterruptedEvents();
+    for (const e of interrupted) {
+      await hooks2.event({ event: e });
+    }
+
+    const records = capture2.map((c) => parseRecord(c.data));
+
+    // Pre-idle: plugin emits 1 other (chat.message) + 1 llm.request (step-start)
+    //           + 2 tool.call (running). session.idle then synthesizes
+    //           2 tool.result (one per pending tool_call) + 1 llm.response.
+    const byName = records.reduce((acc, r) => {
+      (acc[r['event.name']] ??= []).push(r);
+      return acc;
+    }, {});
+    expect(byName['other']?.length).toBe(1);
+    expect(byName['llm.request']?.length).toBe(1);
+    expect(byName['tool.call']?.length).toBe(2);
+    expect(byName['tool.result']?.length).toBe(2);
+    expect(byName['llm.response']?.length).toBe(1);
+
+    // Synthetic tool.results carry status=error (turn was interrupted)
+    const toolResults = byName['tool.result'];
+    expect(toolResults.every((r) => r['tool.result.status'] === 'error')).toBe(true);
+
+    // Synthetic tool.results pair by callID with the original tool.calls
+    const callIds = (byName['tool.call'] ?? []).map((r) => r['gen_ai.tool.call.id']).sort();
+    const resultIds = toolResults.map((r) => r['gen_ai.tool.call.id']).sort();
+    expect(resultIds).toEqual(callIds);
+
+    // Synthetic llm.response has finish_reason and step.id matching the open step
+    const synthResp = byName['llm.response'][0];
+    expect(synthResp['gen_ai.step.id']).toBe(byName['llm.request'][0]['gen_ai.step.id']);
+    expect(synthResp['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
+    expect(synthResp['gen_ai.tool.description']).toBeUndefined();
+    expect(synthResp['error.type']).toBe('session_idle');
+    expect(synthResp['gen_ai.framework']).toBe('mimo-code');
+  });
+
+  it('does not synthesize llm.response when the turn already completed normally', async () => {
+    // Replay the original (complete) fixture: 5 llm.response events emitted
+    // during the conversation. session.idle at the end should NOT add a 6th
+    // synthetic llm.response because stepEmittedResponse is true.
+    const capture3 = [];
+    const plugin3 = await loadPlugin(capture3);
+    process.env.LOONGSUITE_USER_ID = 'test-user';
+    const hooks3 = await plugin3.server({ sessionID: 'test', cwd: os.tmpdir() }, {});
+    const complete = loadFixtureEvents();
+    for (const e of complete) {
+      await hooks3.event({ event: e });
+    }
+    const records = capture3.map((c) => parseRecord(c.data));
+    const llmResps = records.filter((r) => r['event.name'] === 'llm.response');
+    expect(llmResps.length).toBe(5);
+  });
 });

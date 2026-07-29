@@ -86,6 +86,7 @@ const RESERVED_RESOURCE_KEYS = new Set([
   'host.name',
   'gen_ai.agent.type',
   'gen_ai.agent.system',
+  'gen_ai.framework',
 ]);
 
 type ResourceProjectionValue = string | number | boolean;
@@ -217,9 +218,23 @@ export class OtlpTraceFlusher extends BaseFlusher {
       return;
     }
 
-    // Signal B: check if there's an active buffer for same agentType with different key
+    // Signal B: check if there's an active buffer for same agentType with different key.
+    // Only flush buffers whose turn looks "complete enough" (i.e., has at least
+    // one llm.response event). An open turn with only llm.request / tool.call
+    // events is still in progress — flushing it on a sibling turn's arrival
+    // would split the turn's records across buffers and produce duplicate
+    // ENTRY/AGENT spans in the same trace (observed with mimo-code when the
+    // auto-triggered distill agent starts while the build turn is still
+    // streaming records). Incomplete buffers stay open and are eventually
+    // flushed by Signal A, idle timeout, or shutdown.
     for (const [bufKey, buf] of this.turnBuffers) {
       if (buf.agentType === agentType && bufKey !== key && !buf.completed) {
+        const hasLlmResponse = buf.records.some(
+          (r) => r['event.name'] === 'llm.response',
+        );
+        if (!hasLlmResponse) {
+          continue;
+        }
         buf.completed = true;
         this.triggerFlush(buf, false);
       }
@@ -454,8 +469,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
               return copy;
             });
 
+        // Drop orphan llm.request / tool.call events before conversion so the
+        // converter doesn't emit empty LLM/TOOL spans with duration=0 and
+        // missing output.messages / tool.call.result. This happens when a
+        // turn is interrupted before llm.response / tool.result arrive (e.g.
+        // user Ctrl+C, agent errored mid-step). The converter library would
+        // otherwise still emit a span for the orphan request/call.
+        const sanitized = dropOrphanPairs(recordsForConversion);
         const result = convertEventLogToTrace(
-          recordsForConversion as unknown as EventLogRecord[],
+          sanitized as unknown as EventLogRecord[],
           { handler, strict: false, passthroughKeys },
         );
         if (result.warnings.length > 0) {
@@ -737,6 +759,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
       'host.name': os.hostname(),
       'gen_ai.agent.type': agentType,
       'gen_ai.agent.system': resolveAgentSystem(agentType),
+      // ARMS GenAI semconv recommends gen_ai.framework on every span. The
+      // converter library doesn't set it on span attributes, so we set it on
+      // the Resource — OTel resources propagate to all spans of the trace,
+      // which CMS reads the same way as span-level gen_ai.framework.
+      'gen_ai.framework': agentType,
       ...userAttrs,
       ...projectedAttrs,
     });
@@ -799,4 +826,49 @@ export class OtlpTraceFlusher extends BaseFlusher {
 function hasTerminalFinishReason(finishReasons: unknown): boolean {
   return Array.isArray(finishReasons)
     && finishReasons.some(reason => typeof reason === 'string' && TERMINAL_FINISH_REASONS.has(reason));
+}
+
+/**
+ * Drop orphan llm.request and tool.call events that have no matching
+ * llm.response / tool.result in the same turn buffer. Without this, the
+ * converter library still emits an LLM/TOOL span for the orphan event with
+ * duration=0 (endMs=startMs) and missing output.messages / tool.call.result.
+ *
+ * Pairing scope:
+ *   - llm.request ↔ llm.response: by gen_ai.step.id (a step is "complete"
+ *     if it has at least one llm.response).
+ *   - tool.call ↔ tool.result: by gen_ai.tool.call.id (a tool call is
+ *     "complete" if a tool.result with the same call.id exists).
+ *
+ * Records whose pairing mate is missing are dropped. Records without
+ * step.id (user-hook prompts / "other" events / llm.response-only) and
+ * tool.result-only records are always kept — they don't produce orphan
+ * spans downstream.
+ */
+function dropOrphanPairs(records: AgentActivityEntry[]): AgentActivityEntry[] {
+  const stepsWithResponse = new Set<string>();
+  const completedToolCallIds = new Set<string>();
+  for (const r of records) {
+    if (r['event.name'] === 'llm.response') {
+      const stepId = (r['gen_ai.step.id'] as string | undefined) ?? '__no_step__';
+      stepsWithResponse.add(stepId);
+    }
+    if (r['event.name'] === 'tool.result') {
+      const callId = r['gen_ai.tool.call.id'] as string | undefined;
+      if (callId) completedToolCallIds.add(callId);
+    }
+  }
+  return records.filter((r) => {
+    const name = r['event.name'];
+    if (name === 'llm.request') {
+      const stepId = (r['gen_ai.step.id'] as string | undefined) ?? '__no_step__';
+      return stepsWithResponse.has(stepId);
+    }
+    if (name === 'tool.call') {
+      const callId = r['gen_ai.tool.call.id'] as string | undefined;
+      // Keep tool.call only if it has no call.id (rare) or a matching result.
+      return !callId || completedToolCallIds.has(callId);
+    }
+    return true;
+  });
 }

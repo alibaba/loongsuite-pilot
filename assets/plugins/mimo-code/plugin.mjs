@@ -216,6 +216,7 @@ function getSession(sessionID) {
       emittedToolCalls: new Set(),
       stepStartTimeMs: null,
       stepFinishData: null,
+      stepEmittedResponse: false,
     };
     sessions.set(sessionID, s);
     if (sessions.size > MAX_SESSIONS) {
@@ -255,6 +256,11 @@ function buildCommonFields(sessionID, session, userId) {
     "gen_ai.agent.type": AGENT_TYPE,
     "gen_ai.agent.name": session.agentMeta?.name || AGENT_TYPE,
     "gen_ai.agent.id": session.agentMeta?.name || undefined,
+    // ARMS GenAI semconv: every span should carry gen_ai.framework so CMS can
+    // route the trace to the right pipeline. The OTLP trace flusher also sets
+    // it as a resource attribute, but mirroring it here on every record keeps
+    // the event log self-describing for downstream tooling.
+    "gen_ai.framework": AGENT_TYPE,
   };
 }
 
@@ -545,6 +551,7 @@ function handleMessagePartUpdated(props, userId) {
     turn.stepSeq += 1;
     turn.currentStepId = `${turn.turnId}:s${turn.stepSeq}`;
     session.stepStartTimeMs = props.time || Date.now();
+    session.stepEmittedResponse = false;
 
     const model = session.modelInfo;
     const record = {
@@ -651,6 +658,11 @@ function handleMessagePartUpdated(props, userId) {
         "event.name": "tool.call",
         "gen_ai.step.id": turn.currentStepId,
         "gen_ai.tool.name": toolName,
+        // ARMS GenAI semconv: tool spans should carry gen_ai.tool.description.
+        // MiMo Code SDK doesn't expose a per-call description, so we fall back
+        // to the tool name (matches what CMS expects when no description is
+        // available).
+        "gen_ai.tool.description": toolName,
         "gen_ai.tool.call.id": callID,
         "gen_ai.tool.call.arguments": argsStr
           ? truncateContent(argsStr)
@@ -811,6 +823,7 @@ function handleMessageUpdated(props, userId) {
   }
 
   writeRecord(record);
+  session.stepEmittedResponse = true;
 
   session.lastStepOutputParts = [...session.pendingParts];
   session.pendingParts = [];
@@ -861,6 +874,7 @@ function handleToolExecuteBefore(inp, out, userId) {
     "event.name": "tool.call",
     "gen_ai.step.id": turn.currentStepId,
     "gen_ai.tool.name": toolName,
+    "gen_ai.tool.description": toolName,
     "gen_ai.tool.call.id": callID,
     "gen_ai.tool.call.arguments": argsStr
       ? truncateContent(argsStr)
@@ -918,6 +932,83 @@ function handleToolExecuteAfter(inp, out, userId) {
 }
 
 // ---------------------------------------------------------------------------
+// Synthetic terminal-event emitter for interrupted turns
+// ---------------------------------------------------------------------------
+
+// Called on session.idle / session.error to close out a turn that has pending
+// parts but never received info.time.completed. Emits:
+//   - tool.result(success=false) for each pending tool_call part
+//   - llm.response(finish_reason=stop) for the current step
+// This gives the OTLP trace converter complete request/response + call/result
+// pairs so spans have non-zero duration, output.messages, and tool.call.result.
+function flushPendingPartsAsTerminal(session, sessionID, userId, reason) {
+  const turn = session.currentTurn;
+  if (!turn) return;
+
+  const emittedToolCallIds = new Set();
+  for (const p of session.pendingParts || []) {
+    if (p.kind !== "tool_call") continue;
+    if (!p.callID || emittedToolCallIds.has(p.callID)) continue;
+    emittedToolCallIds.add(p.callID);
+
+    if (session.emittedToolCalls.has(`result:${p.callID}`)) continue;
+
+    session.emittedToolCalls.add(`result:${p.callID}`);
+    const toolResultRecord = {
+      ...buildCommonFields(sessionID, session, userId),
+      "event.name": "tool.result",
+      "gen_ai.step.id": turn.currentStepId,
+      "gen_ai.tool.name": p.toolName,
+      "gen_ai.tool.description": p.toolName,
+      "gen_ai.tool.call.id": p.callID,
+      "gen_ai.tool.call.result": "",
+      "tool.result.status": "error",
+    };
+    if (p.startTimeMs) {
+      const endMs = Date.now();
+      toolResultRecord.time_unix_nano = msToNanos(endMs);
+      toolResultRecord["gen_ai.tool.call.duration"] = Math.max(
+        0,
+        Math.round(endMs - p.startTimeMs)
+      );
+    }
+    writeRecord(toolResultRecord);
+  }
+
+  // Emit a synthetic llm.response for the open step so the converter pairs it
+  // with the step's llm.request. Skip if the step never had an llm.request
+  // (currentStepId is null when only the user-message chat.message hook fired
+  // and no step-start followed), OR if the step already emitted a real
+  // llm.response (the turn completed normally — no need to synthesize).
+  if (!turn.currentStepId || session.stepEmittedResponse) return;
+
+  const finishReasons = session.pendingParts?.some((p) => p.kind === "tool_call")
+    ? ["tool_call"]
+    : ["stop"];
+  const outputMessages = buildOutputMessages(session.pendingParts, finishReasons[0]);
+
+  const llmResponseRecord = {
+    ...buildCommonFields(sessionID, session, userId),
+    "event.name": "llm.response",
+    "gen_ai.step.id": turn.currentStepId,
+    "gen_ai.provider.name": inferProviderName(session.modelInfo?.providerID),
+    "gen_ai.request.model": session.modelInfo?.modelID,
+    "gen_ai.response.model": session.modelInfo?.modelID,
+    "gen_ai.response.finish_reasons": finishReasons,
+    "gen_ai.usage.input_tokens": 0,
+    "gen_ai.usage.output_tokens": 0,
+    "gen_ai.usage.cache_read.input_tokens": 0,
+    "gen_ai.usage.cache_creation.input_tokens": 0,
+    "error.type": reason === "session.error" ? "session_error" : "session_idle",
+    "error.message": `turn closed by ${reason} before info.time.completed`,
+  };
+  if (outputMessages) {
+    llmResponseRecord["gen_ai.output.messages"] = truncateContent(outputMessages);
+  }
+  writeRecord(llmResponseRecord);
+}
+
+// ---------------------------------------------------------------------------
 // Safe wrapper
 // ---------------------------------------------------------------------------
 
@@ -960,10 +1051,19 @@ export default {
           case "session.error": {
             if (props.sessionID) {
               const s = sessions.get(props.sessionID);
-              if (s && s.pendingParts && s.pendingParts.length > 0) {
-                writeError("session-cleanup", `session ${type}: discarding ${s.pendingParts.length} unflushed pending part(s) [${s.pendingParts.map(p => p.kind || "unknown").join(",")}]`);
+              if (s) {
+                // Close out an open turn that never saw info.time.completed
+                // (interrupted / errored / SDK-skipped message.updated). Without
+                // this synthetic terminal event, the OTLP trace flusher keeps
+                // the turn's buffer open until idle timeout, and the converter
+                // would emit orphan LLM/TOOL spans with duration=0 and no
+                // output.messages / tool.call.result. Emitting a synthetic
+                // llm.response(finish_reason=stop) and tool.result events for
+                // any pending tool_call parts lets the flusher's Signal A
+                // close the buffer cleanly with proper pairing.
+                flushPendingPartsAsTerminal(s, props.sessionID, userId, type);
+                clearSession(props.sessionID);
               }
-              clearSession(props.sessionID);
             }
             break;
           }
