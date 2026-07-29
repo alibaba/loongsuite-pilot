@@ -1061,6 +1061,7 @@ export class Orchestrator extends EventEmitter {
     const opencodeLogInput = new OpenCodeLogInput({
       stateStore: this.stateStore,
       logDir: opencodeLogDir,
+      pollIntervalMs: listenerCfg['opencode-log']?.pollInterval,
     });
     this.inputManager.registerInput(opencodeLogInput);
     entries.push(

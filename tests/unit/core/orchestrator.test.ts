@@ -250,6 +250,20 @@ describe('Orchestrator', () => {
       expect(events).toEqual(['starting', 'started']);
       await orch.stop();
     });
+
+    it('passes the configured OpenCode log poll interval to the input', async () => {
+      const config = makeConfig();
+      config.listeners['opencode-log'] = { enabled: true, pollInterval: 1000 };
+
+      const orch = new Orchestrator(config);
+      await orch.start();
+
+      const input = (orch as any).inputManager.getInput('opencode-log');
+      expect(input).toBeDefined();
+      expect(input.pollIntervalMs).toBe(1000);
+
+      await orch.stop();
+    });
   });
 
   describe('stop sequence (T039)', () => {
