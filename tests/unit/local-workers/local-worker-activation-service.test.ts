@@ -397,4 +397,29 @@ while true; do sleep 1; done
       await service.stop();
     }
   });
+
+  it.each([
+    'WorkerProcessIdentityMissing',
+    'WorkerProcessIdentityCheckFailed',
+    'WorkerProcessTreeStopFailed',
+    'WorkerProcessIdentityUnavailable',
+  ])('preserves the supervisor failure reason %s', async reason => {
+    const instance = await connectLocalWorker({
+      dataDir,
+      runtime: 'claude-code',
+      bootstrapToken: token(),
+      workDir: path.join(tmpDir, 'project'),
+    });
+    await fs.writeFile(
+      path.join(stateDir(dataDir, instance.id), 'supervisor-status.json'),
+      JSON.stringify({ state: 'failed', reason }),
+      'utf-8',
+    );
+    const service = new LocalWorkerActivationService({ dataDir, pilotDir, definitions: [] });
+    const internals = service as unknown as {
+      hasSupervisorFailureToPreserve(instance: typeof instance): Promise<boolean>;
+    };
+
+    await expect(internals.hasSupervisorFailureToPreserve(instance)).resolves.toBe(true);
+  });
 });

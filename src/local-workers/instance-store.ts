@@ -235,16 +235,19 @@ export async function readLocalWorkerView(
   const runtimeMember = readRecord(runtimeSnapshot?.member);
   const pid = readNumber(supervisor?.pid);
   const alive = pid ? isAlive(pid) : false;
+  const supervisorFailed = String(supervisor?.state ?? '') === 'failed';
   const heartbeatAt = readTimestampMs(worker?.updatedAt ?? worker?.lastHeartbeatAt ?? worker?.heartbeatAt);
   const workerPhase = String(worker?.phase ?? worker?.state ?? '').toLowerCase();
   const degraded = isWorkerDegraded(worker)
     || (alive && heartbeatAt !== undefined && Date.now() - heartbeatAt > LOCAL_WORKER_HEARTBEAT_STALE_MS);
 
   let state = 'pending';
-  if (!instance.enabled) {
-    state = 'disabled';
-  } else if (String(supervisor?.state ?? '') === 'failed') {
+  if (supervisorFailed) {
     state = 'failed';
+  } else if (!instance.enabled && alive) {
+    state = 'stopping';
+  } else if (!instance.enabled) {
+    state = 'disabled';
   } else if (alive && workerPhase === 'waiting') {
     state = 'waiting';
   } else if (degraded) {
@@ -263,10 +266,12 @@ export async function readLocalWorkerView(
     workDir: instance.workDir,
     enabled: instance.enabled,
     state,
-    reason: readString(worker?.reason) ?? readString(supervisor?.reason),
-    message: readString(worker?.message)
-      ?? readString(worker?.error)
-      ?? readString(supervisor?.error),
+    reason: supervisorFailed
+      ? readString(supervisor?.reason) ?? readString(worker?.reason)
+      : readString(worker?.reason) ?? readString(supervisor?.reason),
+    message: supervisorFailed
+      ? readString(supervisor?.error) ?? readString(worker?.message) ?? readString(worker?.error)
+      : readString(worker?.message) ?? readString(worker?.error) ?? readString(supervisor?.error),
     pid,
     workerName: readString(worker?.workerName)
       ?? readString(worker?.runtimeName)

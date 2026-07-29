@@ -116,6 +116,52 @@ describe('local worker instance store', () => {
     expect(views[0].state).toBe('disabled');
   });
 
+  it('does not report a live or failed disconnect as disabled', async () => {
+    const instance = await connectLocalWorker({
+      dataDir,
+      runtime: 'claude-code',
+      bootstrapToken: token(),
+      workDir: path.join(tmpDir, 'project'),
+    });
+    await setLocalWorkerEnabled(dataDir, instance.id, false);
+    const sDir = stateDir(dataDir, instance.id);
+    await fs.writeFile(
+      path.join(sDir, 'supervisor-status.json'),
+      JSON.stringify({ state: 'running', pid: process.pid }),
+      'utf-8',
+    );
+
+    let views = await listLocalWorkerViews(dataDir);
+    expect(views[0].state).toBe('stopping');
+
+    await fs.writeFile(
+      path.join(sDir, 'supervisor-status.json'),
+      JSON.stringify({
+        state: 'failed',
+        pid: process.pid,
+        reason: 'WorkerProcessTreeStopFailed',
+        error: 'worker process remained alive',
+      }),
+      'utf-8',
+    );
+    await fs.writeFile(
+      path.join(sDir, 'status.json'),
+      JSON.stringify({
+        phase: 'Waiting',
+        reason: 'RuntimeCommandNotFound',
+        message: 'stale worker status',
+      }),
+      'utf-8',
+    );
+
+    views = await listLocalWorkerViews(dataDir);
+    expect(views[0]).toMatchObject({
+      state: 'failed',
+      reason: 'WorkerProcessTreeStopFailed',
+      message: 'worker process remained alive',
+    });
+  });
+
   it('reconnects a disconnected instance with the same id', async () => {
     const instance = await connectLocalWorker({
       dataDir,

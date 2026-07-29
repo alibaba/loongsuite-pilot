@@ -36,6 +36,17 @@ interface WorkerRuntime {
   stopping: boolean;
 }
 
+interface WindowsProcessIdentity {
+  pid: number;
+  creationTime: string;
+  executablePath: string;
+}
+
+interface TrackedWindowsProcess {
+  pid: number;
+  identity?: WindowsProcessIdentity;
+}
+
 export interface WorkerManifestOptions {
   instance?: Record<string, string>;
   runtimeOptions?: Record<string, string | boolean>;
@@ -56,6 +67,8 @@ class WorkerManifestContractError extends Error {
   }
 }
 
+class WorkerProcessIdentityError extends Error {}
+
 export class WorkerManifestSupervisor {
   private readonly runtimes = new Map<string, WorkerRuntime>();
   private readonly platform: NodeJS.Platform;
@@ -75,7 +88,8 @@ export class WorkerManifestSupervisor {
     const location = await this.findManifest(installDir);
     if (!location) return true;
 
-    await this.stopIfPresent(agentId, installDir, options);
+    const stopped = await this.stopIfPresent(agentId, installDir, options);
+    if (!stopped && this.platform === 'win32') return false;
 
     const manifest = await this.readManifest(location.manifestPath);
     if (!manifest) return false;
@@ -227,11 +241,15 @@ export class WorkerManifestSupervisor {
         settled = true;
         log.end();
         await fs.rm(paths.pid, { force: true });
+        await fs.rm(this.processIdentityPath(paths.pid), { force: true });
         this.runtimes.delete(paths.pid);
         await this.writeStatus(paths.status, {
           state: 'failed',
           name: manifest.name,
           agentId,
+          reason: err instanceof WorkerProcessIdentityError
+            ? 'WorkerProcessIdentityUnavailable'
+            : undefined,
           error: String(err),
           updatedAt: new Date().toISOString(),
         });
@@ -262,22 +280,66 @@ export class WorkerManifestSupervisor {
         return false;
       }
 
+      let processIdentity: WindowsProcessIdentity | undefined;
+      if (this.shouldVerifyWindowsProcessIdentity()) {
+        try {
+          processIdentity = await this.readWindowsProcessIdentity(child.pid);
+        } catch (err) {
+          if (earlyExit) {
+            processIdentity = undefined;
+          } else {
+            try {
+              child.kill('SIGKILL');
+            } catch {
+              // The child may have exited while its identity was queried.
+            }
+            await failStart(new WorkerProcessIdentityError(String(err)));
+            return false;
+          }
+        }
+        if (!processIdentity && !earlyExit) {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            // The child may have exited before its identity could be recorded.
+          }
+          await failStart(new WorkerProcessIdentityError('worker process identity was not found'));
+          return false;
+        }
+      }
+
       child.unref();
       if (settled) return false;
 
       const activeRuntime = runtime ?? { restarts: 0, stopping: false };
-      this.runtimes.set(paths.pid, activeRuntime);
-      await fs.writeFile(paths.pid, `${child.pid}\n`, 'utf-8');
-      if (settled) return false;
-      await this.writeStatus(paths.status, {
-        state: 'running',
-        name: manifest.name,
-        agentId,
-        pid: child.pid,
-        startedAt: new Date().toISOString(),
-        restartCount: runtime?.restarts ?? 0,
-      });
-      if (settled) return false;
+      try {
+        if (processIdentity) {
+          await this.writeStatus(this.processIdentityPath(paths.pid), { ...processIdentity });
+          if (settled) return false;
+        }
+        await fs.writeFile(paths.pid, `${child.pid}\n`, 'utf-8');
+        if (settled) return false;
+        this.runtimes.set(paths.pid, activeRuntime);
+        await this.writeStatus(paths.status, {
+          state: 'running',
+          name: manifest.name,
+          agentId,
+          pid: child.pid,
+          startedAt: new Date().toISOString(),
+          restartCount: runtime?.restarts ?? 0,
+          processIdentity,
+        });
+        if (settled) return false;
+      } catch (err) {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // The child may have exited while its start state was persisted.
+        }
+        await failStart(err);
+        return false;
+      }
+
       startPersisted = true;
 
       if (earlyExit) {
@@ -325,11 +387,97 @@ export class WorkerManifestSupervisor {
     const pid = await this.readPid(paths.pid);
     if (!pid) return true;
 
+    let processIdentity: WindowsProcessIdentity | undefined;
+    if (this.shouldVerifyWindowsProcessIdentity()) {
+      processIdentity = await this.readStoredWindowsProcessIdentity(this.processIdentityPath(paths.pid), pid);
+      if (!processIdentity) {
+        await this.writeStatus(paths.status, {
+          state: 'failed',
+          name: manifest.name,
+          agentId,
+          pid,
+          reason: 'WorkerProcessIdentityMissing',
+          error: 'worker pid exists without a recorded Windows process identity',
+          updatedAt: new Date().toISOString(),
+        });
+        logger.error('worker process identity missing; refusing to stop pid', { agentId, pid });
+        return false;
+      }
+
+      let actualIdentity: WindowsProcessIdentity | undefined;
+      try {
+        actualIdentity = await this.readWindowsProcessIdentity(pid);
+      } catch (err) {
+        await this.writeStatus(paths.status, {
+          state: 'failed',
+          name: manifest.name,
+          agentId,
+          pid,
+          reason: 'WorkerProcessIdentityCheckFailed',
+          error: String(err),
+          processIdentity,
+          updatedAt: new Date().toISOString(),
+        });
+        logger.error('worker process identity check failed; refusing to stop pid', {
+          agentId,
+          pid,
+          error: String(err),
+        });
+        return false;
+      }
+
+      if (!actualIdentity) {
+        await fs.rm(paths.pid, { force: true });
+        await fs.rm(this.processIdentityPath(paths.pid), { force: true });
+        this.runtimes.delete(paths.pid);
+        await this.writeStatus(paths.status, {
+          state: 'stopped',
+          name: manifest.name,
+          agentId,
+          pid,
+          reason: 'WorkerProcessNotFound',
+          stoppedAt: new Date().toISOString(),
+        });
+        logger.info('stale worker pid removed because the process no longer exists', { agentId, pid });
+        return true;
+      }
+
+      if (!this.isSameWindowsProcess(processIdentity, actualIdentity)) {
+        await fs.rm(paths.pid, { force: true });
+        await fs.rm(this.processIdentityPath(paths.pid), { force: true });
+        this.runtimes.delete(paths.pid);
+        await this.writeStatus(paths.status, {
+          state: 'stopped',
+          name: manifest.name,
+          agentId,
+          pid,
+          reason: 'WorkerPidIdentityMismatch',
+          stoppedAt: new Date().toISOString(),
+        });
+        logger.warn('stale worker pid ignored because the Windows process identity changed', {
+          agentId,
+          pid,
+          expectedCreationTime: processIdentity.creationTime,
+          actualCreationTime: actualIdentity.creationTime,
+          actualExecutableName: path.win32.basename(actualIdentity.executablePath),
+        });
+        return true;
+      }
+
+      logger.info('worker process identity matched', {
+        agentId,
+        pid,
+        creationTime: processIdentity.creationTime,
+        executableName: path.win32.basename(processIdentity.executablePath),
+      });
+    }
+
     await this.writeStatus(paths.status, {
       state: 'stopping',
       name: manifest.name,
       agentId,
       pid,
+      processIdentity,
       updatedAt: new Date().toISOString(),
     });
 
@@ -341,7 +489,7 @@ export class WorkerManifestSupervisor {
 
     let remainingPids: number[] = [];
     if (this.platform === 'win32') {
-      remainingPids = await this.stopWindowsProcessTree(agentId, pid);
+      remainingPids = await this.stopWindowsProcessTree(agentId, pid, processIdentity);
     } else {
       try {
         this.signalProcessGroup(pid, 'SIGTERM');
@@ -361,7 +509,7 @@ export class WorkerManifestSupervisor {
     }
 
     await this.waitForExit(pid, 5000);
-    if (this.isAlive(pid) || remainingPids.length > 0) {
+    if ((this.platform !== 'win32' && this.isAlive(pid)) || remainingPids.length > 0) {
       await this.writeStatus(paths.status, {
         state: 'failed',
         name: manifest.name,
@@ -382,6 +530,7 @@ export class WorkerManifestSupervisor {
     }
 
     await fs.rm(paths.pid, { force: true });
+    await fs.rm(this.processIdentityPath(paths.pid), { force: true });
     await this.writeStatus(paths.status, {
       state: 'stopped',
       name: manifest.name,
@@ -527,15 +676,20 @@ export class WorkerManifestSupervisor {
     return 'native';
   }
 
-  private async stopWindowsProcessTree(agentId: string, pid: number): Promise<number[]> {
-    let descendants: number[] = [];
+  private async stopWindowsProcessTree(
+    agentId: string,
+    pid: number,
+    rootIdentity?: WindowsProcessIdentity,
+  ): Promise<number[]> {
+    let descendants: TrackedWindowsProcess[] = [];
     try {
-      descendants = await this.listWindowsDescendantPids(pid);
+      descendants = await this.listWindowsDescendantProcesses(pid);
     } catch (err) {
       logger.warn('worker process tree discovery failed', { agentId, pid, error: String(err) });
     }
 
-    const trackedPids = [pid, ...descendants];
+    const trackedProcesses = [{ pid, identity: rootIdentity }, ...descendants];
+    const trackedPids = trackedProcesses.map(processInfo => processInfo.pid);
     try {
       await this.runTaskkill(pid, false);
       logger.info('worker process tree graceful stop requested', {
@@ -551,18 +705,30 @@ export class WorkerManifestSupervisor {
     }
 
     await this.waitForPidsExit(trackedPids, 5000);
-    const remaining = trackedPids.filter(candidate => this.isAlive(candidate));
+    const remaining = trackedProcesses.filter(processInfo => this.isAlive(processInfo.pid));
     if (remaining.length === 0) return [];
 
-    for (const candidate of remaining) {
+    const forceTargets: number[] = [];
+    for (const processInfo of remaining) {
+      const identityState = await this.readTrackedWindowsProcessState(agentId, processInfo);
+      if (identityState !== 'same') {
+        logger.warn('worker process force cleanup skipped because identity is not confirmed', {
+          agentId,
+          pid,
+          candidatePid: processInfo.pid,
+          identityState,
+        });
+        continue;
+      }
       try {
-        await this.runTaskkill(candidate, true);
+        await this.runTaskkill(processInfo.pid, true);
+        forceTargets.push(processInfo.pid);
       } catch (err) {
-        if (this.isAlive(candidate)) {
+        if (this.isAlive(processInfo.pid)) {
           logger.warn('worker process tree force cleanup failed', {
             agentId,
             pid,
-            candidatePid: candidate,
+            candidatePid: processInfo.pid,
             error: String(err),
           });
         }
@@ -572,35 +738,53 @@ export class WorkerManifestSupervisor {
       agentId,
       pid,
       platform: this.platform,
-      targetPids: remaining,
+      targetPids: forceTargets,
     });
 
-    await this.waitForPidsExit(remaining, 5000);
-    return remaining.filter(candidate => this.isAlive(candidate));
+    await this.waitForPidsExit(remaining.map(processInfo => processInfo.pid), 5000);
+    const finalRemaining: number[] = [];
+    for (const processInfo of remaining) {
+      const identityState = await this.readTrackedWindowsProcessState(agentId, processInfo);
+      if (identityState === 'same' || identityState === 'unknown') {
+        finalRemaining.push(processInfo.pid);
+      }
+    }
+    return finalRemaining;
   }
 
-  private listWindowsDescendantPids(rootPid: number): Promise<number[]> {
+  private listWindowsDescendantProcesses(rootPid: number): Promise<TrackedWindowsProcess[]> {
     if (!Number.isSafeInteger(rootPid) || rootPid <= 0) {
       return Promise.reject(new Error('worker pid must be a positive integer'));
     }
     const script = `
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $rootPid = [uint32]$env:LOONGSUITE_WORKER_ROOT_PID
-$processes = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId)
+$processes = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, CreationDate, ExecutablePath)
 $pending = @($rootPid)
 $result = @()
+$seen = @()
 while ($pending.Count -gt 0) {
   $parentPid = $pending[0]
   $pending = @($pending | Select-Object -Skip 1)
   $children = @($processes | Where-Object { $_.ParentProcessId -eq $parentPid })
   foreach ($child in $children) {
     $childPid = [uint32]$child.ProcessId
-    if ($result -notcontains $childPid) {
-      $result += $childPid
+    if ($seen -notcontains $childPid) {
+      $seen += $childPid
+      $result += [ordered]@{
+        pid = $childPid
+        creationTime = if ($null -ne $child.CreationDate) {
+          $child.CreationDate.ToUniversalTime().ToString("O")
+        } else {
+          ""
+        }
+        executablePath = [string]$child.ExecutablePath
+      }
       $pending += $childPid
     }
   }
 }
-[Console]::Out.Write(($result -join ","))
+[Console]::Out.Write((ConvertTo-Json -InputObject $result -Compress))
 `;
     return new Promise((resolve, reject) => {
       execFile('powershell.exe', [
@@ -619,13 +803,154 @@ while ($pending.Count -gt 0) {
           reject(err);
           return;
         }
-        const pids = String(stdout)
-          .split(',')
-          .map(value => Number.parseInt(value.trim(), 10))
-          .filter(value => Number.isSafeInteger(value) && value > 0);
-        resolve([...new Set(pids)]);
+        const output = String(stdout).trim();
+        if (!output) {
+          resolve([]);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(output) as unknown;
+          const values = Array.isArray(parsed) ? parsed : [parsed];
+          const seen = new Set<number>();
+          const processes: TrackedWindowsProcess[] = [];
+          for (const value of values) {
+            if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+            const pid = Number((value as Record<string, unknown>).pid);
+            if (!Number.isSafeInteger(pid) || pid <= 0 || seen.has(pid)) continue;
+            seen.add(pid);
+            const identity = this.parseWindowsProcessIdentity(value);
+            processes.push({
+              pid,
+              identity: identity?.pid === pid ? identity : undefined,
+            });
+          }
+          resolve(processes);
+        } catch (parseErr) {
+          reject(parseErr);
+        }
       });
     });
+  }
+
+  private async readTrackedWindowsProcessState(
+    agentId: string,
+    processInfo: TrackedWindowsProcess,
+  ): Promise<'same' | 'gone' | 'changed' | 'unknown'> {
+    if (!processInfo.identity) {
+      return this.isAlive(processInfo.pid) ? 'unknown' : 'gone';
+    }
+
+    try {
+      const actualIdentity = await this.readWindowsProcessIdentity(processInfo.pid);
+      if (!actualIdentity) return 'gone';
+      return this.isSameWindowsProcess(processInfo.identity, actualIdentity) ? 'same' : 'changed';
+    } catch (err) {
+      logger.warn('worker process identity recheck failed', {
+        agentId,
+        pid: processInfo.pid,
+        error: String(err),
+      });
+      return 'unknown';
+    }
+  }
+
+  private readWindowsProcessIdentity(pid: number): Promise<WindowsProcessIdentity | undefined> {
+    if (!Number.isSafeInteger(pid) || pid <= 0) {
+      return Promise.reject(new Error('worker pid must be a positive integer'));
+    }
+    const script = `
+$ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$targetPid = [uint32]$env:LOONGSUITE_WORKER_PID
+$process = Get-CimInstance Win32_Process -Filter "ProcessId = $targetPid"
+if ($null -ne $process) {
+  $identity = [ordered]@{
+    pid = [uint32]$process.ProcessId
+    creationTime = $process.CreationDate.ToUniversalTime().ToString("O")
+    executablePath = [string]$process.ExecutablePath
+  }
+  [Console]::Out.Write((ConvertTo-Json -InputObject $identity -Compress))
+}
+`;
+    return new Promise((resolve, reject) => {
+      execFile('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        script,
+      ], {
+        env: {
+          ...process.env,
+          LOONGSUITE_WORKER_PID: String(pid),
+        },
+        windowsHide: true,
+        timeout: 5000,
+      }, (err, stdout) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        const output = String(stdout).trim();
+        if (!output) {
+          resolve(undefined);
+          return;
+        }
+        try {
+          resolve(this.parseWindowsProcessIdentity(JSON.parse(output)));
+        } catch (parseErr) {
+          reject(parseErr);
+        }
+      });
+    });
+  }
+
+  private async readStoredWindowsProcessIdentity(
+    identityPath: string,
+    pid: number,
+  ): Promise<WindowsProcessIdentity | undefined> {
+    try {
+      const identity = this.parseWindowsProcessIdentity(
+        JSON.parse(await fs.readFile(identityPath, 'utf-8')),
+      );
+      return identity?.pid === pid ? identity : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private parseWindowsProcessIdentity(value: unknown): WindowsProcessIdentity | undefined {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    const pid = Number(record.pid);
+    const creationTime = typeof record.creationTime === 'string' ? record.creationTime : '';
+    const executablePath = typeof record.executablePath === 'string' ? record.executablePath : '';
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !creationTime) return undefined;
+    return {
+      pid,
+      creationTime,
+      executablePath,
+    };
+  }
+
+  private isSameWindowsProcess(
+    expected: WindowsProcessIdentity,
+    actual: WindowsProcessIdentity,
+  ): boolean {
+    if (expected.pid !== actual.pid || expected.creationTime !== actual.creationTime) return false;
+    if (!expected.executablePath) return true;
+    return this.normalizeWindowsPath(expected.executablePath) === this.normalizeWindowsPath(actual.executablePath);
+  }
+
+  private normalizeWindowsPath(value: string): string {
+    return path.win32.normalize(value).toLowerCase();
+  }
+
+  private shouldVerifyWindowsProcessIdentity(): boolean {
+    return this.platform === 'win32' && process.platform === 'win32';
+  }
+
+  private processIdentityPath(pidPath: string): string {
+    return `${pidPath}.identity.json`;
   }
 
   private runTaskkill(pid: number, force: boolean): Promise<void> {
@@ -655,6 +980,7 @@ while ($pending.Count -gt 0) {
   ): Promise<void> {
     const paths = this.resolvePaths(bundleRoot, manifest, options);
     await fs.rm(paths.pid, { force: true });
+    await fs.rm(this.processIdentityPath(paths.pid), { force: true });
 
     const failed = code !== 0 || signal !== null;
     const policy = manifest.restartPolicy ?? {};

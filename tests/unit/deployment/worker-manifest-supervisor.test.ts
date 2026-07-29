@@ -198,10 +198,110 @@ describe('WorkerManifestSupervisor', () => {
       expect(childPid).toBeGreaterThan(0);
       process.kill(childPid, 0);
     });
+    await expect(readStatus()).resolves.toMatchObject({
+      state: 'running',
+      processIdentity: {
+        pid: expect.any(Number),
+        creationTime: expect.any(String),
+        executablePath: expect.any(String),
+      },
+    });
 
     expect(await supervisor.stopIfPresent('local-worker:test', bundleRoot, options())).toBe(true);
     await vi.waitFor(() => {
       expect(() => process.kill(childPid, 0)).toThrow();
     });
+  });
+
+  it.runIf(process.platform === 'win32')('does not stop a reused Windows pid with a different creation time', async () => {
+    const entry = path.join(bundleRoot, 'worker-entrypoint.mjs');
+    await fs.writeFile(entry, 'setInterval(() => {}, 1000);', 'utf-8');
+    await writeManifest(['${pilot:node}', entry]);
+
+    const supervisor = new WorkerManifestSupervisor();
+    expect(await supervisor.startIfPresent('local-worker:test', bundleRoot, {}, options())).toBe(true);
+
+    let workerPid = 0;
+    try {
+      const running = await readStatus();
+      workerPid = Number(running.pid);
+      expect(workerPid).toBeGreaterThan(0);
+      expect(running.processIdentity).toMatchObject({
+        pid: workerPid,
+        creationTime: expect.any(String),
+      });
+
+      await fs.writeFile(
+        path.join(stateDir, 'worker.pid.identity.json'),
+        JSON.stringify({
+          ...(running.processIdentity as Record<string, unknown>),
+          creationTime: '2000-01-01T00:00:00.0000000Z',
+        }),
+        'utf-8',
+      );
+
+      expect(await supervisor.stopIfPresent('local-worker:test', bundleRoot, options())).toBe(true);
+      expect(() => process.kill(workerPid, 0)).not.toThrow();
+      await expect(readStatus()).resolves.toMatchObject({
+        state: 'stopped',
+        reason: 'WorkerPidIdentityMismatch',
+        pid: workerPid,
+      });
+    } finally {
+      if (workerPid > 0) {
+        try {
+          process.kill(workerPid, 'SIGKILL');
+        } catch {
+          // The test process may already have exited.
+        }
+        await vi.waitFor(() => {
+          expect(() => process.kill(workerPid, 0)).toThrow();
+        });
+      }
+    }
+  });
+
+  it('does not force-kill a Windows pid whose identity changes during graceful stop', async () => {
+    const supervisor = new WorkerManifestSupervisor({ platform: 'win32' });
+    const internals = supervisor as unknown as {
+      stopWindowsProcessTree(
+        agentId: string,
+        pid: number,
+        rootIdentity: { pid: number; creationTime: string; executablePath: string },
+      ): Promise<number[]>;
+      listWindowsDescendantProcesses(pid: number): Promise<Array<{
+        pid: number;
+        identity?: { pid: number; creationTime: string; executablePath: string };
+      }>>;
+      readWindowsProcessIdentity(pid: number): Promise<{
+        pid: number;
+        creationTime: string;
+        executablePath: string;
+      } | undefined>;
+      runTaskkill(pid: number, force: boolean): Promise<void>;
+      waitForPidsExit(pids: number[], timeoutMs: number): Promise<void>;
+      isAlive(pid: number): boolean;
+    };
+    const expectedIdentity = {
+      pid: 4242,
+      creationTime: '2026-07-29T01:00:00.0000000Z',
+      executablePath: 'C:\\Program Files\\nodejs\\node.exe',
+    };
+    vi.spyOn(internals, 'listWindowsDescendantProcesses').mockResolvedValue([]);
+    vi.spyOn(internals, 'waitForPidsExit').mockResolvedValue();
+    vi.spyOn(internals, 'isAlive').mockReturnValue(true);
+    vi.spyOn(internals, 'readWindowsProcessIdentity').mockResolvedValue({
+      ...expectedIdentity,
+      creationTime: '2026-07-29T01:01:00.0000000Z',
+    });
+    const taskkill = vi.spyOn(internals, 'runTaskkill').mockResolvedValue();
+
+    await expect(internals.stopWindowsProcessTree(
+      'local-worker:test',
+      expectedIdentity.pid,
+      expectedIdentity,
+    )).resolves.toEqual([]);
+    expect(taskkill).toHaveBeenCalledTimes(1);
+    expect(taskkill).toHaveBeenCalledWith(expectedIdentity.pid, false);
   });
 });

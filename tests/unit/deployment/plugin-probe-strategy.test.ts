@@ -416,6 +416,40 @@ describe('PluginProbeStrategy', () => {
       expect(result.error).toBe('missing pluginProbe config');
     });
 
+    it('keeps the existing local worker bundle when the worker cannot be stopped', async () => {
+      const destDir = path.join(tmpDir, 'local-worker-dest');
+      const tarball = path.join(tmpDir, 'local-worker.tar.gz');
+      const oldMarker = path.join(destDir, 'old.txt');
+
+      await fs.mkdir(destDir, { recursive: true });
+      await fs.writeFile(path.join(destDir, 'worker.manifest.json'), '{invalid-json', 'utf-8');
+      await fs.writeFile(oldMarker, 'old', 'utf-8');
+
+      const sourceDir = path.join(tmpDir, 'local-worker-source');
+      await fs.mkdir(sourceDir, { recursive: true });
+      await fs.writeFile(path.join(sourceDir, 'new.txt'), 'new', 'utf-8');
+      createTarball(tarball, sourceDir);
+
+      const result = await strategy.deploy(makeDef({
+        localWorkerRuntime: 'fake-runtime',
+        pluginProbe: {
+          source: { type: 'tar', tarball, destDir },
+          mountType: 'wrapper',
+        },
+      }), {
+        instance: {
+          id: 'lw_testinstance001',
+          stateDir: path.join(tmpDir, 'state'),
+          logDir: path.join(tmpDir, 'logs'),
+        },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('local worker stop failed; bundle replacement aborted');
+      await expect(fs.readFile(oldMarker, 'utf-8')).resolves.toBe('old');
+      await expect(fs.stat(path.join(destDir, 'new.txt'))).rejects.toThrow();
+    });
+
     it('extracts tarball and runs convention install script', async () => {
       const destDir = path.join(tmpDir, 'dest');
       const tarball = path.join(tmpDir, 'plugin.tar.gz');

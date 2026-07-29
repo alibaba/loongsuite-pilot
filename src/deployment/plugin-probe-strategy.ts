@@ -88,10 +88,23 @@ export class PluginProbeStrategy implements DeployStrategy {
       const destDir = config.source.destDir;
       const existingRoot = await this.resolvePackageRoot(destDir);
 
-      await this.workerSupervisor.stopIfPresent(def.id, destDir, {
+      const stopped = await this.workerSupervisor.stopIfPresent(def.id, destDir, {
         instance: options.instance,
         runtimeOptions: options.runtimeOptions,
       });
+      if (!stopped && def.localWorkerRuntime && options.instance) {
+        logger.error('local worker stop failed; bundle replacement aborted', {
+          agentId: def.id,
+          instanceId: options.instance.id,
+          destDir,
+        });
+        return {
+          success: false,
+          agentId: def.id,
+          deployMode: 'plugin-probe',
+          error: 'local worker stop failed; bundle replacement aborted',
+        };
+      }
 
       const existingUninstallScript = existingRoot ? path.join(existingRoot, 'scripts', 'uninstall.sh') : '';
       if (existingUninstallScript && await fileExists(existingUninstallScript)) {

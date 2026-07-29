@@ -121,7 +121,7 @@ export class LocalWorkerActivationService {
     });
 
     if (!result.success) {
-      if (!await this.hasManifestContractFailure(instance)) {
+      if (!await this.hasSupervisorFailureToPreserve(instance)) {
         await this.writeSupervisorStatus(
           instance,
           'failed',
@@ -213,12 +213,19 @@ export class LocalWorkerActivationService {
     });
   }
 
-  private async hasManifestContractFailure(instance: LocalWorkerInstance): Promise<boolean> {
+  private async hasSupervisorFailureToPreserve(instance: LocalWorkerInstance): Promise<boolean> {
     const status = await readJsonFile<Record<string, unknown>>(
       path.join(stateDir(this.dataDir, instance.id), 'supervisor-status.json'),
     );
     return status?.state === 'failed'
-      && ['WorkerManifestPlaceholderInvalid', 'RuntimeBundlePlatformUnsupported']
+      && [
+        'WorkerManifestPlaceholderInvalid',
+        'RuntimeBundlePlatformUnsupported',
+        'WorkerProcessIdentityMissing',
+        'WorkerProcessIdentityCheckFailed',
+        'WorkerProcessTreeStopFailed',
+        'WorkerProcessIdentityUnavailable',
+      ]
         .includes(String(status.reason ?? ''));
   }
 
