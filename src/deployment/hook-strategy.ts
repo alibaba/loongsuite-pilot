@@ -393,10 +393,18 @@ export class HookStrategy implements DeployStrategy {
     const hookConfig = def.hook;
     if (!hookConfig) return [];
 
+    // eventsRoot lets agents with strict schemas (zcode.cjs hkn) place hook
+    // entries under `hooks.events.<event>` instead of the default
+    // `hooks.<event>`. Default behavior unchanged for all other agents.
+    const eventsRoot = hookConfig.eventsRoot;
+    const hookJsonPath = eventsRoot
+      ? (event: string) => ['hooks', eventsRoot, event]
+      : (event: string) => ['hooks', event];
+
     return hookConfig.events.map(event => ({
       agentId: def.id,
       settingsPath: hookConfig.settingsPath,
-      hookJsonPath: ['hooks', event],
+      hookJsonPath: hookJsonPath(event),
       hookCommand: formatHookCommand(
         hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
       ),
@@ -415,12 +423,16 @@ export class HookStrategy implements DeployStrategy {
     const hookConfig = def.hook;
     if (!hookConfig?.retiredEvents?.length) return [];
     const currentEvents = new Set(hookConfig.events);
+    const eventsRoot = hookConfig.eventsRoot;
+    const hookJsonPath = eventsRoot
+      ? (event: string) => ['hooks', eventsRoot, event]
+      : (event: string) => ['hooks', event];
     return [...new Set(hookConfig.retiredEvents)]
       .filter(event => !currentEvents.has(event))
       .map(event => ({
         agentId: def.id,
         settingsPath: hookConfig.settingsPath,
-        hookJsonPath: ['hooks', event],
+        hookJsonPath: hookJsonPath(event),
         hookCommand: formatHookCommand(
           hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
         ),

@@ -1,0 +1,25 @@
+{
+  "id": "zcode",
+  "displayName": "ZCode",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.zcode"],
+    "commands": ["zcode"]
+  },
+  "hook": {
+    "settingsPath": "~/.zcode/cli/config.json",
+    "events": [
+      "Stop"
+    ],
+    "hookCommand": "$PILOT_DATA/hooks/zcode-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "eventsRoot": "events",
+    "matcher": ".*",
+    "eventSubcommand": "kebab-case",
+    "replaceHookCommands": []
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/zcode"
+  }
+}
