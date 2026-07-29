@@ -92,4 +92,22 @@ describe('intercept-token-reader', () => {
     expect(result.tokens).toHaveLength(1);
     expect(result.tokens[0].id).toBe('good');
   });
+
+  it('reads a custom filename so qodercli and qoderwork intercept files stay separate', async () => {
+    const now = Date.now();
+    const qoderworkFile = path.join(TEST_DIR, 'qoderwork-intercept.jsonl');
+    await fs.writeFile(qoderworkFile, [
+      JSON.stringify({ type: 'token', ts: now, id: 'chatcmpl-qw-1', prompt_tokens: 300, cached_tokens: 0, completion_tokens: 20, reasoning_tokens: 0, total_tokens: 320 }),
+    ].join('\n') + '\n');
+
+    // Default filename (qodercli) must not pick up the qoderwork file.
+    const cliResult = await readInterceptData(now - 1000);
+    expect(cliResult.tokens).toEqual([]);
+
+    // Explicit qoderwork filename reads the right file.
+    const qwResult = await readInterceptData(now - 1000, 'qoderwork-intercept.jsonl');
+    expect(qwResult.tokens).toHaveLength(1);
+    expect(qwResult.tokens[0].id).toBe('chatcmpl-qw-1');
+    expect(qwResult.tokens[0].promptTokens).toBe(300);
+  });
 });

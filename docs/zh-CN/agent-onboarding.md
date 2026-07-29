@@ -96,6 +96,12 @@ Hook 示例：
 | `pluginInject` | 配置路径和插件 spec。插件注入模式必填。 |
 | `input` | collector input 使用的数据源类型和位置。 |
 
+`pluginInject.configKey` 可指定默认 `plugin` / `plugins` 之外的数组字段，
+例如 Pi Coding Agent 使用 `extensions`。目标 Agent 支持空设置文件时，可设置
+`pluginInject.createIfMissing`，在配置不存在时自动创建第一个候选 JSON 文件。
+
+> 新增 `plugin-inject` 类型 agent 时，请同时在卸载脚本（`deploy/installer-opensource.sh` / `.ps1`）中登记，确保卸载时移除其注入的 spec。此外 plugin-inject agent 在运行时会由 hook watchdog 自愈：若配置被其它工具覆盖，会自动重新注入 spec。
+
 ## 尽早输出规范化记录
 
 对于 Hook 和插件集成，建议让 Hook 或插件写 newline-delimited JSON 到：
@@ -123,6 +129,7 @@ Hook 示例：
 ```
 
 Source-specific 字段建议放在 `agent.<agent-id>.*` 下，避免污染公共稳定字段。
+这些字段可供归一化和上下文增强内部使用，但默认不会输出到 SLS 和本地 JSONL。
 
 ## 实现 Input
 

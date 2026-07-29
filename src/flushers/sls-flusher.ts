@@ -9,11 +9,11 @@ import {
 import type { AgentActivityEntry, SlsFlusherConfig, SlsEndpoint } from '../types/index.js';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
-import { appendLine, ensureDir } from '../utils/fs-utils.js';
 import { formatTime } from '../utils/time-utils.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { LOCAL_IP, buildUserAgent } from '../utils/network-utils.js';
 import * as path from 'node:path';
+import { SlsFailureLogWriter } from './sls-failure-log-writer.js';
 import {
   HttpError,
   postWebtracking,
@@ -151,8 +151,8 @@ export class SlsFlusher extends BaseFlusher {
   private readonly policy: SlsQueuePolicy;
   private readonly queue: Map<string, QueuedLog[]> = new Map();
   private flushTimer: ReturnType<typeof setInterval> | null = null;
-  private readonly failedLogDir: string;
   private readonly shutdownPendingDir: string;
+  private readonly failedLogWriter: SlsFailureLogWriter;
   private readonly akClients: Map<string, any> = new Map();
   private readonly endpointCounters: Map<string, EndpointCounter> = new Map();
   private readonly retryStates: Map<string, EndpointRetryState> = new Map();
@@ -194,8 +194,10 @@ export class SlsFlusher extends BaseFlusher {
         policyOverrides.backpressureLowWatermarkBytes ?? BACKPRESSURE_LOW_WATERMARK_BYTES,
       maxQueuedBytes: policyOverrides.maxQueuedBytes ?? MAX_QUEUED_BYTES,
     };
-    this.failedLogDir = path.join(dataDir, 'sls-failed-logs');
     this.shutdownPendingDir = path.join(dataDir, 'sls-shutdown-pending');
+    this.failedLogWriter = new SlsFailureLogWriter(
+      path.join(dataDir, 'logs', 'sls-failed-logs'),
+    );
     this.serviceName = config.serviceNamePrefix || '';
     this.userAgent = buildUserAgent(dataDir);
     for (const ep of config.endpoints) {
@@ -250,7 +252,7 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   async start(): Promise<void> {
-    await ensureDir(this.failedLogDir);
+    await this.failedLogWriter.start();
     await fs.mkdir(this.shutdownPendingDir, { recursive: true });
     await this.restoreShutdownPending();
     this.flushTimer = setInterval(
@@ -260,7 +262,7 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   async send(entry: AgentActivityEntry): Promise<void> {
-    const serialized = serialiseLogEntry(entry);
+    const serialized = serialiseLogEntry(entry, { dropAgentScopedFields: true });
     const agentType = normalizeAgentType(String(entry['gen_ai.agent.type'] ?? 'unknown'));
 
     for (const endpoint of this.config.endpoints) {
@@ -380,7 +382,7 @@ export class SlsFlusher extends BaseFlusher {
             continue;
           }
 
-          await this.persistFailedLogs(endpoint, this.buildFailurePayload(endpoint, logs), err);
+          await this.persistFailedLogs(endpoint, logs, err);
           bucket.splice(0, logs.length);
           this.trackDequeuedLogs(logs);
           if (bucket.length === 0) this.queue.delete(key);
@@ -411,27 +413,33 @@ export class SlsFlusher extends BaseFlusher {
     this.syncDeliveryHealth();
   }
 
-  private resolveServiceName(agentType?: string): string {
-    if (!this.serviceName) return '';
-    return agentType ? `${this.serviceName}-${agentType}` : this.serviceName;
+  /** Per-endpoint service name: managed endpoints may override the shared prefix. */
+  private effectiveServiceName(endpoint?: SlsEndpoint): string {
+    return endpoint?.serviceName || this.serviceName;
   }
 
-  private buildAkTags(agentType?: string): Record<string, string>[] {
+  private resolveServiceName(endpoint?: SlsEndpoint, agentType?: string): string {
+    const base = this.effectiveServiceName(endpoint);
+    if (!base) return '';
+    return agentType ? `${base}-${agentType}` : base;
+  }
+
+  private buildAkTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string>[] {
     const tags: Record<string, string>[] = [{ __hostname__: HOSTNAME }];
-    const sn = this.resolveServiceName(agentType);
+    const sn = this.resolveServiceName(endpoint, agentType);
     if (sn) tags.push({ __service_name__: sn });
     return tags;
   }
 
-  private buildWebtrackingTags(agentType?: string): Record<string, string> {
+  private buildWebtrackingTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string> {
     const tags: Record<string, string> = { __hostname__: HOSTNAME };
-    const sn = this.resolveServiceName(agentType);
+    const sn = this.resolveServiceName(endpoint, agentType);
     if (sn) tags['__service_name__'] = sn;
     return tags;
   }
 
   private warnIfMixedAgentTypes(logs: QueuedLog[]): void {
-    if (this.serviceName) {
+    if (this.effectiveServiceName(logs[0]?.endpoint)) {
       const types = new Set(logs.map(l => l.agentType));
       if (types.size > 1) logger.warn('mixed agentTypes in batch', { types: [...types] });
     }
@@ -448,7 +456,7 @@ export class SlsFlusher extends BaseFlusher {
       })),
       source: LOCAL_IP,
       topic: endpoint.kind,
-      tags: this.buildAkTags(agentType),
+      tags: this.buildAkTags(endpoint, agentType),
     };
 
     const client = this.getAkClient(endpoint);
@@ -528,7 +536,7 @@ export class SlsFlusher extends BaseFlusher {
       __topic__: endpoint.kind ?? '',
       __source__: LOCAL_IP,
       __logs__: logs.map(l => l.content),
-      __tags__: this.buildWebtrackingTags(agentType),
+      __tags__: this.buildWebtrackingTags(endpoint, agentType),
     };
 
     const raw = JSON.stringify(body);
@@ -595,27 +603,6 @@ export class SlsFlusher extends BaseFlusher {
     const candidate = bucket.slice(0, maxSize);
     if (endpoint.mode !== 'webtracking') return candidate;
     return this.splitForWebtracking(candidate)[0] ?? [];
-  }
-
-  private buildFailurePayload(endpoint: SlsEndpoint, logs: QueuedLog[]): unknown {
-    if (endpoint.mode === 'ak') {
-      const now = Math.floor(Date.now() / 1000);
-      const agentType = logs[0]?.agentType;
-      return {
-        logs: logs.map(l => ({ timestamp: now, content: l.content })),
-        source: LOCAL_IP,
-        topic: endpoint.kind,
-        tags: this.buildAkTags(agentType),
-      };
-    }
-
-    const agentType = logs[0]?.agentType;
-    return {
-      __topic__: endpoint.kind ?? '',
-      __source__: LOCAL_IP,
-      __logs__: logs.map(l => l.content),
-      __tags__: this.buildWebtrackingTags(agentType),
-    };
   }
 
   private classifyError(err: unknown): ErrorClassification {
@@ -745,7 +732,7 @@ export class SlsFlusher extends BaseFlusher {
     );
     await this.persistFailedLogs(
       endpoint,
-      this.buildFailurePayload(endpoint, logs),
+      logs,
       new Error(`SLS retry TTL expired after ${now - oldestFailureAt}ms`),
     );
     const counter = this.endpointCounters.get(endpoint.name);
@@ -1001,19 +988,21 @@ export class SlsFlusher extends BaseFlusher {
     }
   }
 
-  private async persistFailedLogs(endpoint: SlsEndpoint, logGroup: unknown, err: unknown): Promise<void> {
-    await ensureDir(this.failedLogDir);
-    const filePath = path.join(this.failedLogDir, `${endpoint.name}.jsonl`);
-    const line = JSON.stringify({
-      ts: Date.now(),
+  private async persistFailedLogs(
+    endpoint: SlsEndpoint,
+    logs: QueuedLog[],
+    err: unknown,
+  ): Promise<void> {
+    await this.failedLogWriter.write({
       endpoint: endpoint.name,
+      mode: endpoint.mode,
       project: endpoint.project,
       logstore: endpoint.logstore,
       kind: endpoint.kind,
-      logGroup,
-      error: String(err),
+      batchCount: logs.length,
+      batchBytes: logs.reduce((sum, log) => sum + log.sizeBytes, 0),
+      error: err,
     });
-    await appendLine(filePath, line);
   }
 
   async shutdown(): Promise<void> {
@@ -1060,7 +1049,7 @@ export class SlsFlusher extends BaseFlusher {
             logs: [{ timestamp: Math.floor(Date.now() / 1000), content }],
             source: LOCAL_IP,
             topic,
-            tags: this.buildAkTags(),
+            tags: this.buildAkTags(endpoint),
           });
         } else {
           await postWebtracking(
@@ -1095,7 +1084,7 @@ export class SlsFlusher extends BaseFlusher {
     },
   ): Promise<void> {
     const base = `${endpoint.name}/${endpoint.project}/${endpoint.logstore}`;
-    const key = (this.serviceName && agentType)
+    const key = (this.effectiveServiceName(endpoint) && agentType)
       ? `${base}/${agentType}`
       : base;
     let bucket = this.queue.get(key);
@@ -1147,7 +1136,7 @@ export class SlsFlusher extends BaseFlusher {
       const droppedEndpoint = overflow.endpoint;
       await this.persistFailedLogs(
         droppedEndpoint,
-        this.buildFailurePayload(droppedEndpoint, [overflow]),
+        [overflow],
         new Error(`SLS queue overflow entries=${stats.entries} bytes=${stats.bytes}`),
       );
       const counter = this.endpointCounters.get(droppedEndpoint.name);

@@ -1,13 +1,16 @@
-import * as fs from 'node:fs/promises';
-import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import {
-  readJsonFile,
   writeJsonFile,
+  writeTextFileAtomic,
   ensureDir,
   resolveHome,
-  fileExists,
 } from '../utils/fs-utils.js';
+import {
+  editJsonc,
+  parseJsonDocument,
+  readJsonDocument,
+  type JsonSyntax,
+} from '../utils/json-document.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('HookManager');
@@ -25,6 +28,8 @@ export interface HookDefinition {
   agentId: string;
   /** Path to the agent's settings file (e.g. ~/.qoder/settings.json). */
   settingsPath: string;
+  /** File syntax. Defaults to strict JSON. */
+  settingsSyntax?: JsonSyntax;
   /** JSON path to inject hooks into (e.g. ["hooks", "PostToolUse"]). */
   hookJsonPath: string[];
   /** The hook command to inject. */
@@ -68,7 +73,20 @@ export class HookManager {
   async installHook(def: HookDefinition): Promise<boolean> {
     try {
       await ensureDir(path.dirname(def.settingsPath));
-      const settings = (await readJsonFile<Record<string, unknown>>(def.settingsPath)) ?? {};
+      if (def.settingsSyntax === 'jsonc') {
+        return await this.installJsoncHook(def);
+      }
+
+      const document = await readJsonDocument<Record<string, unknown>>(
+        def.settingsPath,
+        'json',
+      );
+      if (document.status === 'error') {
+        throw new Error(`refusing to overwrite invalid settings: ${document.error.message}`);
+      }
+      const settings = document.status === 'missing' || document.status === 'empty'
+        ? {}
+        : this.requireSettingsObject(document.data);
 
       let target: any = settings;
       for (let i = 0; i < def.hookJsonPath.length - 1; i++) {
@@ -133,8 +151,19 @@ export class HookManager {
    */
   async uninstallHook(def: HookDefinition): Promise<boolean> {
     try {
-      const settings = await readJsonFile<Record<string, unknown>>(def.settingsPath);
-      if (!settings) return true;
+      if (def.settingsSyntax === 'jsonc') {
+        return await this.uninstallJsoncHook(def);
+      }
+
+      const document = await readJsonDocument<Record<string, unknown>>(
+        def.settingsPath,
+        'json',
+      );
+      if (document.status === 'missing' || document.status === 'empty') return true;
+      if (document.status === 'error') {
+        throw new Error(`refusing to overwrite invalid settings: ${document.error.message}`);
+      }
+      const settings = this.requireSettingsObject(document.data);
 
       let target: any = settings;
       for (let i = 0; i < def.hookJsonPath.length - 1; i++) {
@@ -146,9 +175,11 @@ export class HookManager {
       const lastKey = def.hookJsonPath[def.hookJsonPath.length - 1];
       if (!Array.isArray(target[lastKey])) return true;
 
-      target[lastKey] = (target[lastKey] as any[]).filter(
-        (h: any) => !this.entryMatchesCommand(h, def.hookCommand),
-      );
+      const commands = [def.hookCommand, ...(def.replaceHookCommands ?? [])];
+      target[lastKey] = this.removeCommands(target[lastKey] as any[], commands);
+      if ((target[lastKey] as any[]).length === 0) {
+        delete target[lastKey];
+      }
 
       await writeJsonFile(def.settingsPath, settings);
       logger.info('hook uninstalled', { agentId: def.agentId });
@@ -164,8 +195,12 @@ export class HookManager {
    */
   async isHookInstalled(def: HookDefinition): Promise<boolean> {
     try {
-      const settings = await readJsonFile<Record<string, unknown>>(def.settingsPath);
-      if (!settings) return false;
+      const document = await readJsonDocument<Record<string, unknown>>(
+        def.settingsPath,
+        def.settingsSyntax ?? 'json',
+      );
+      if (document.status !== 'ok') return false;
+      const settings = this.requireSettingsObject(document.data);
 
       let target: any = settings;
       for (const key of def.hookJsonPath.slice(0, -1)) {
@@ -185,6 +220,174 @@ export class HookManager {
     } catch {
       return false;
     }
+  }
+
+  private async installJsoncHook(def: HookDefinition): Promise<boolean> {
+    const document = await readJsonDocument<Record<string, unknown>>(
+      def.settingsPath,
+      'jsonc',
+    );
+    if (document.status === 'error') {
+      throw new Error(`refusing to overwrite invalid settings: ${document.error.message}`);
+    }
+
+    const expected = document.status === 'missing'
+      ? { exists: false as const }
+      : { exists: true as const, content: document.raw };
+    let raw = document.status === 'missing' || document.status === 'empty'
+      ? '{}\n'
+      : document.raw;
+    const settings = document.status === 'missing' || document.status === 'empty'
+      ? {}
+      : this.requireSettingsObject(document.data);
+    const existingValue = this.valueAtPath(settings, def.hookJsonPath);
+    if (existingValue !== undefined && !Array.isArray(existingValue)) {
+      throw new Error(`hook path is not an array: ${def.hookJsonPath.join('.')}`);
+    }
+
+    if (def.replaceHookCommands?.length && Array.isArray(existingValue)) {
+      raw = this.removeCommandsFromJsonc(
+        raw,
+        def.hookJsonPath,
+        existingValue,
+        def.replaceHookCommands,
+      );
+    }
+
+    const reparsed = parseJsonDocument<Record<string, unknown>>(raw, 'jsonc');
+    if (!reparsed.ok) throw reparsed.error;
+    const currentValue = this.valueAtPath(
+      this.requireSettingsObject(reparsed.data),
+      def.hookJsonPath,
+    );
+    if (currentValue !== undefined && !Array.isArray(currentValue)) {
+      throw new Error(`hook path is not an array: ${def.hookJsonPath.join('.')}`);
+    }
+    const hooks = currentValue ?? [];
+
+    if (!this.isCommandPresent(hooks, def.hookCommand)) {
+      const hookEntry = this.buildHookEntry(def);
+      raw = currentValue === undefined
+        ? editJsonc(raw, def.hookJsonPath, [hookEntry])
+        : editJsonc(
+            raw,
+            [...def.hookJsonPath, hooks.length],
+            hookEntry,
+            { isArrayInsertion: true },
+          );
+    }
+
+    if (document.status === 'ok' && raw === document.raw) {
+      logger.debug('hook already installed', { agentId: def.agentId });
+      return true;
+    }
+
+    await writeTextFileAtomic(def.settingsPath, raw, {
+      expected,
+      backupPath: document.status === 'missing'
+        ? undefined
+        : `${def.settingsPath}.loongsuite-pilot.bak`,
+    });
+    await ensureDir(def.historyDir ?? path.join(this.logBaseDir, def.agentId, 'history'));
+    logger.info('hook installed', { agentId: def.agentId });
+    return true;
+  }
+
+  private async uninstallJsoncHook(def: HookDefinition): Promise<boolean> {
+    const document = await readJsonDocument<Record<string, unknown>>(
+      def.settingsPath,
+      'jsonc',
+    );
+    if (document.status === 'missing' || document.status === 'empty') return true;
+    if (document.status === 'error') {
+      throw new Error(`refusing to overwrite invalid settings: ${document.error.message}`);
+    }
+
+    const settings = this.requireSettingsObject(document.data);
+    const existingValue = this.valueAtPath(settings, def.hookJsonPath);
+    if (existingValue === undefined) return true;
+    if (!Array.isArray(existingValue)) {
+      throw new Error(`hook path is not an array: ${def.hookJsonPath.join('.')}`);
+    }
+
+    const commands = [def.hookCommand, ...(def.replaceHookCommands ?? [])];
+    const raw = this.removeCommandsFromJsonc(
+      document.raw,
+      def.hookJsonPath,
+      existingValue,
+      commands,
+    );
+    if (raw === document.raw) return true;
+
+    await writeTextFileAtomic(def.settingsPath, raw, {
+      expected: { exists: true, content: document.raw },
+      backupPath: `${def.settingsPath}.loongsuite-pilot.bak`,
+    });
+    logger.info('hook uninstalled', { agentId: def.agentId });
+    return true;
+  }
+
+  private removeCommandsFromJsonc(
+    source: string,
+    hookPath: string[],
+    entries: unknown[],
+    commands: string[],
+  ): string {
+    let raw = source;
+    for (let entryIndex = entries.length - 1; entryIndex >= 0; entryIndex--) {
+      const entry = entries[entryIndex] as any;
+      if (commands.includes(entry?.command)) {
+        raw = editJsonc(raw, [...hookPath, entryIndex], undefined);
+        continue;
+      }
+      if (!Array.isArray(entry?.hooks)) continue;
+
+      const matching: number[] = [];
+      for (let hookIndex = entry.hooks.length - 1; hookIndex >= 0; hookIndex--) {
+        if (commands.includes(entry.hooks[hookIndex]?.command)) {
+          matching.push(hookIndex);
+        }
+      }
+      if (matching.length === entry.hooks.length && matching.length > 0) {
+        raw = editJsonc(raw, [...hookPath, entryIndex], undefined);
+        continue;
+      }
+      for (const hookIndex of matching) {
+        raw = editJsonc(raw, [...hookPath, entryIndex, 'hooks', hookIndex], undefined);
+      }
+    }
+    return raw;
+  }
+
+  private buildHookEntry(def: HookDefinition): Record<string, unknown> {
+    return def.useNestedFormat
+      ? {
+          matcher: def.matcher ?? '*',
+          hooks: [{ command: def.hookCommand, type: 'command' }],
+        }
+      : {
+          type: 'command',
+          command: def.hookCommand,
+          ...(def.matcher ? { matcher: def.matcher } : {}),
+        };
+  }
+
+  private valueAtPath(root: Record<string, unknown>, jsonPath: string[]): unknown {
+    let current: unknown = root;
+    for (const key of jsonPath) {
+      if (!current || typeof current !== 'object' || Array.isArray(current)) {
+        return undefined;
+      }
+      current = (current as Record<string, unknown>)[key];
+    }
+    return current;
+  }
+
+  private requireSettingsObject(value: unknown): Record<string, unknown> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('settings root must be a JSON object');
+    }
+    return value as Record<string, unknown>;
   }
 
   /**

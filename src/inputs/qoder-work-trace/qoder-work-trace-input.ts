@@ -1,11 +1,11 @@
 import * as crypto from 'node:crypto';
-import { createReadStream } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { createInterface } from 'node:readline';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
+import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
+import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
@@ -14,6 +14,7 @@ import {
   resolveQoderWorkRoot,
   type SdkEvent,
 } from '../qoder-work-log/qoder-work-log-input.js';
+import { readInterceptFile, getInterceptFile, type InterceptData, type InterceptTokenData } from '../qoder-trace/intercept-token-reader.js';
 
 const NANO_PER_MILLI = 1_000_000n;
 const SEGMENT_TIMING_TOLERANCE_MS = 5 * 60 * 1000;
@@ -43,6 +44,7 @@ export class QoderWorkTraceInput extends BaseInput {
   private readonly logDir: string;
   private readonly segmentsRoot: string;
   private readonly sdkLogDir: string;
+  private readonly interceptFile: string;
   private readonly logPrefix = 'qoder-work';
 
   // Per-session in-memory state for segment enrichment
@@ -68,6 +70,7 @@ export class QoderWorkTraceInput extends BaseInput {
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder-work/history');
     this.segmentsRoot = opts.segmentsRoot ?? resolveHome('~/.qoderwork/logs/sessions');
     this.sdkLogDir = opts.sdkLogDir ?? resolveQoderWorkSdkLogDir();
+    this.interceptFile = opts.interceptFile ?? getInterceptFile('qoderwork-intercept.jsonl');
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -83,6 +86,20 @@ export class QoderWorkTraceInput extends BaseInput {
 
   protected override async onStart(): Promise<void> {
     await ensureDir(this.logDir);
+    const checkpoint = await createHookHistoryStartupCheckpoint(
+      this.getState(),
+      this.logDir,
+      this.logPrefix,
+    );
+    if (!checkpoint) return;
+    this.setState(checkpoint.state);
+    if (checkpoint.skippedExistingBytes > 0) {
+      this.logger.warn('history checkpoint missing, baselining existing file without replay', {
+        skippedBytes: checkpoint.skippedExistingBytes,
+      });
+    } else {
+      this.logger.info('history checkpoint initialized before first hook record');
+    }
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
@@ -92,23 +109,10 @@ export class QoderWorkTraceInput extends BaseInput {
       await this.readSdkTokenState();
 
       // 1. Hook JSONL — primary source of structure.
-      const { entries: rawEntries, isFirstRun, turnCount } = await this.readHookJsonl();
+      const rawEntries = await this.readHookJsonl();
       if (rawEntries.length === 0) return [];
 
-      // A fresh collector must not replay a whole pre-existing daily hook log.
-      const allTurnGroups = this.groupByTurn(rawEntries);
-      const entries = isFirstRun
-        ? [...allTurnGroups.values()].at(-1) ?? []
-        : rawEntries;
-      if (isFirstRun) {
-        const state = this.getState();
-        const extra = state.extra && typeof state.extra === 'object'
-          ? state.extra as Record<string, unknown>
-          : {};
-        this.setState({
-          extra: { ...extra, qoderWorkTurnCount: turnCount ?? allTurnGroups.size },
-        });
-      }
+      const entries = filterBootstrapHistoryTurns(rawEntries);
 
       // 2. Discover the (sessionId, cwd) pairs we have entries for, then read
       //    fresh segments for each. Lazily — sessions absent from hook batch
@@ -120,9 +124,13 @@ export class QoderWorkTraceInput extends BaseInput {
 
       // 3. Group → enrich → emit.
       const turnGroups = this.groupByTurn(entries);
+      // Intercept data (QoderWork runtime wrapper) is the fallback token source
+      // when segment tokens are all 0. Loaded lazily once per non-empty cycle.
+      let interceptData: InterceptData | null = null;
       const allEntries: AgentActivityEntry[] = [];
       for (const [, turnEntries] of turnGroups) {
-        this.enrichTurn(turnEntries);
+        interceptData ??= await this.readInterceptData();
+        this.enrichTurn(turnEntries, interceptData);
         this.injectTraceId(turnEntries);
         for (const entry of turnEntries) {
           await enrichCanonicalEntryWithGit(
@@ -141,7 +149,7 @@ export class QoderWorkTraceInput extends BaseInput {
 
   // ─── Hook JSONL reading ────────────────────────────────────────────────────
 
-  private async readHookJsonl(): Promise<HookJsonlBatch> {
+  private async readHookJsonl(): Promise<AgentActivityEntry[]> {
     const today = getTodayDateString();
     const logFileName = `${this.logPrefix}-${today}.jsonl`;
     const logFile = path.join(this.logDir, logFileName);
@@ -150,7 +158,7 @@ export class QoderWorkTraceInput extends BaseInput {
     try {
       stat = await fs.stat(logFile);
     } catch {
-      return { entries: [], isFirstRun: false };
+      return [];
     }
 
     const state = this.getState();
@@ -160,16 +168,7 @@ export class QoderWorkTraceInput extends BaseInput {
       this.logger.info('file truncated, resetting offset', { file: logFile });
       offset = 0;
     }
-    if (stat.size <= offset) return { entries: [], isFirstRun: false };
-
-    const hasFirstRunMarker = state.extra
-      && typeof state.extra === 'object'
-      && Object.hasOwn(state.extra, 'qoderWorkTurnCount');
-    const isFirstRun = offset === 0 && !hasFirstRunMarker;
-
-    if (isFirstRun) {
-      return this.readFirstRunHookBaseline(logFile, logFileName, stat.size);
-    }
+    if (stat.size <= offset) return [];
 
     const handle = await fs.open(logFile, 'r');
     const entries: AgentActivityEntry[] = [];
@@ -199,41 +198,7 @@ export class QoderWorkTraceInput extends BaseInput {
       await handle.close();
     }
 
-    return { entries, isFirstRun };
-  }
-
-  private async readFirstRunHookBaseline(
-    logFile: string,
-    logFileName: string,
-    fileSize: number,
-  ): Promise<HookJsonlBatch> {
-    let latestTurnId: string | undefined;
-    let latestTurnEntries: AgentActivityEntry[] = [];
-    let turnCount = 0;
-    const reader = createInterface({
-      input: createReadStream(logFile, { encoding: 'utf-8' }),
-      crlfDelay: Infinity,
-    });
-
-    for await (const line of reader) {
-      if (!line.trim()) continue;
-      try {
-        const record = JSON.parse(line) as AgentActivityEntry;
-        if (!record['event.name']) continue;
-        const turnId = String(record['gen_ai.turn.id'] ?? 'unknown');
-        if (turnId !== latestTurnId) {
-          latestTurnId = turnId;
-          latestTurnEntries = [];
-          turnCount++;
-        }
-        latestTurnEntries.push(record);
-      } catch {
-        this.logger.warn('invalid JSONL line');
-      }
-    }
-
-    this.setState({ lastFile: logFileName, lastOffset: fileSize });
-    return { entries: latestTurnEntries, isFirstRun: true, turnCount };
+    return entries;
   }
 
   // ─── Segments reading ──────────────────────────────────────────────────────
@@ -442,12 +407,18 @@ export class QoderWorkTraceInput extends BaseInput {
 
   // ─── Enrichment ─────────────────────────────────────────────────────────────
 
-  private enrichTurn(entries: AgentActivityEntry[]): void {
+  private enrichTurn(entries: AgentActivityEntry[], interceptData: InterceptData): void {
     const sessionId = entries.find(e => e['gen_ai.session.id'])?.['gen_ai.session.id'] as string | undefined;
     const turnId = entries.find(e => e['gen_ai.turn.id'])?.['gen_ai.turn.id'] as string | undefined;
 
     const steps = this.groupByStep(entries);
     const stepOrder = [...steps.keys()].filter((k): k is string => k !== undefined);
+
+    // Build a chatcmpl-id → token map once per turn so per-response lookups are
+    // O(1); avoids O(n*m) linear scans over intercept tokens in long sessions.
+    const interceptTokens = new Map<string, InterceptTokenData>(
+      interceptData.tokens.map(t => [t.id, t]),
+    );
 
     // Apply segment-derived timing + model to each step in transcript order.
     if (sessionId) {
@@ -475,10 +446,36 @@ export class QoderWorkTraceInput extends BaseInput {
             }
             hasSegmentUsage = this.applyUsage(response, pair.usage);
           }
-          if (!hasSegmentUsage) this.applySdkTokenUsage(sessionId, request, response);
+          // Segment tokens all 0 (or no segment pair) → fall back to intercept
+          // tokens matched by gen_ai.response.id (chatcmpl-xxx), then to the
+          // legacy SDK log as a last resort.
+          if (!hasSegmentUsage) {
+            if (!this.applyInterceptUsage(response, interceptTokens)) {
+              this.applySdkTokenUsage(sessionId, request, response);
+            }
+          } else {
+            // Segment provided input/output/total but the QoderWork segment log
+            // may omit cache_read. Overlay cache_read from intercept when the
+            // wrapper captured it for this respId; reasoning_tokens is not in
+            // the OTel GenAI spec and is intentionally not propagated.
+            this.applyInterceptCacheReadOverlay(response, interceptTokens);
+          }
         }
 
         this.applySegmentToolTiming(sessionId, stepEntries);
+      }
+    }
+
+    // System prompt captured by the QoderWork runtime wrapper (JSON.stringify hook).
+    // Mirror qoder-trace: attach to the first llm.request that owns a step id.
+    if (interceptData.systemPrompt) {
+      const firstReq = entries.find(e =>
+        e['event.name'] === 'llm.request' && !!e['gen_ai.step.id'],
+      );
+      if (firstReq) {
+        (firstReq as Record<string, unknown>)['gen_ai.system_instructions'] = [
+          { type: 'text', content: interceptData.systemPrompt.content },
+        ];
       }
     }
 
@@ -548,6 +545,58 @@ export class QoderWorkTraceInput extends BaseInput {
     const [pair] = pairs.splice(index, 1);
     if (pairs.length === 0) this.sdkTokenPairs.delete(sessionId);
     this.applyUsage(response, pair);
+  }
+
+  // ─── Intercept token compatibility ──────────────────────────────────────
+
+  private async readInterceptData(): Promise<InterceptData> {
+    try {
+      return await readInterceptFile(this.interceptFile);
+    } catch {
+      return { tokens: [], systemPrompt: null };
+    }
+  }
+
+  // Fall back to intercept-captured tokens when the segment log does not
+  // provide them. Adapts the InterceptTokenData to applyUsage so future field
+  // additions there stay in sync, then promotes the provider-reported total
+  // when intercept supplies one (provider total may include reasoning tokens,
+  // which we do not write to the span individually).
+  private applyInterceptUsage(
+    response: AgentActivityEntry,
+    tokensById: Map<string, InterceptTokenData>,
+  ): boolean {
+    const respId = response['gen_ai.response.id'] as string | undefined;
+    if (!respId) return false;
+    const match = tokensById.get(respId);
+    if (!match) return false;
+    const applied = this.applyUsage(response, {
+      inputTokens: match.promptTokens,
+      outputTokens: match.completionTokens,
+      cacheReadInputTokens: match.cachedTokens,
+      cacheCreationInputTokens: undefined,
+    });
+    if (applied && match.totalTokens) {
+      (response as Record<string, unknown>)['gen_ai.usage.total_tokens'] = match.totalTokens;
+    }
+    return applied;
+  }
+
+  // Segment log may omit cache_read when the wrapper is the only source.
+  // Overlay only cache_read so segment values stay authoritative for the rest.
+  // reasoning_tokens is not in the OTel GenAI spec and is intentionally skipped.
+  private applyInterceptCacheReadOverlay(
+    response: AgentActivityEntry,
+    tokensById: Map<string, InterceptTokenData>,
+  ): void {
+    const respId = response['gen_ai.response.id'] as string | undefined;
+    if (!respId) return;
+    const match = tokensById.get(respId);
+    if (!match) return;
+    const target = response as Record<string, unknown>;
+    if (match.cachedTokens && !target['gen_ai.usage.cache_read.input_tokens']) {
+      target['gen_ai.usage.cache_read.input_tokens'] = match.cachedTokens;
+    }
   }
 
   // ─── SDK token compatibility ─────────────────────────────────────────────
@@ -787,12 +836,7 @@ export interface QoderWorkTraceInputOptions extends InputOptions {
   logDir?: string;
   segmentsRoot?: string;
   sdkLogDir?: string;
-}
-
-interface HookJsonlBatch {
-  entries: AgentActivityEntry[];
-  isFirstRun: boolean;
-  turnCount?: number;
+  interceptFile?: string;
 }
 
 interface SegmentEvent {

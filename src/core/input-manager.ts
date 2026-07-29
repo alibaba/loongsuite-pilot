@@ -14,6 +14,7 @@ import { applyAgentContentPolicy } from '../normalization/agent-content-policy.j
 import { maskAgentActivityEntry } from '../mask/entry-masker.js';
 import { loadEnabledRules } from '../mask/rule-loader.js';
 import type { CompiledMaskRule } from '../mask/types.js';
+import type { TraceLinker } from './upstream-link/trace-linker.js';
 
 const logger = createLogger('InputManager');
 
@@ -40,6 +41,7 @@ export interface InputCounter {
 export class InputManager extends EventEmitter {
   private readonly inputs: Map<string, BaseInput> = new Map();
   private readonly counters: Map<string, InputCounter> = new Map();
+  private readonly entryQueues: Map<string, Promise<void>> = new Map();
   private flusher: BaseFlusher | null = null;
   private alarmManager: AlarmManager | null = null;
   private userId: string = '';
@@ -47,6 +49,7 @@ export class InputManager extends EventEmitter {
   private agentsConfig: AgentsConfig = {};
   private maskConfig: MaskConfig = { mode: 'none', types: [] };
   private maskRules: CompiledMaskRule[] = [];
+  private traceLinker: TraceLinker | null = null;
 
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;
@@ -76,6 +79,10 @@ export class InputManager extends EventEmitter {
     this.maskRules = loadEnabledRules(config);
   }
 
+  setTraceLinker(linker: TraceLinker): void {
+    this.traceLinker = linker;
+  }
+
   registerInput(input: BaseInput): void {
     if (this.inputs.has(input.id)) {
       logger.warn('input already registered', { id: input.id });
@@ -96,7 +103,17 @@ export class InputManager extends EventEmitter {
       lastActiveTime: 0,
     });
     input.on('entries', (entries: AgentActivityEntry[]) => {
-      void this.handleEntries(input.id, entries);
+      const previous = this.entryQueues.get(input.id) ?? Promise.resolve();
+      const next = previous
+        .catch(() => undefined)
+        .then(() => this.handleEntries(input.id, entries))
+        .catch(err => {
+          logger.error('entry handling failed', { inputId: input.id, error: String(err) });
+        });
+      this.entryQueues.set(input.id, next);
+      void next.finally(() => {
+        if (this.entryQueues.get(input.id) === next) this.entryQueues.delete(input.id);
+      });
     });
     logger.info('input registered', { id: input.id });
   }
@@ -115,6 +132,7 @@ export class InputManager extends EventEmitter {
     const input = this.inputs.get(id);
     if (!input) return;
     await input.stop();
+    await this.drainInputQueue(id);
     logger.info('input stopped', { id });
   }
 
@@ -123,6 +141,25 @@ export class InputManager extends EventEmitter {
       if (input.running) {
         await input.stop();
       }
+    }
+    await this.drainAllEntryQueues();
+  }
+
+  private async drainInputQueue(id: string): Promise<void> {
+    while (true) {
+      const queue = this.entryQueues.get(id);
+      if (!queue) return;
+      await queue;
+      if (this.entryQueues.get(id) === queue) {
+        this.entryQueues.delete(id);
+        return;
+      }
+    }
+  }
+
+  private async drainAllEntryQueues(): Promise<void> {
+    while (this.entryQueues.size > 0) {
+      await Promise.all([...this.entryQueues.keys()].map(id => this.drainInputQueue(id)));
     }
   }
 
@@ -156,6 +193,7 @@ export class InputManager extends EventEmitter {
       isAvailable: () => Promise<boolean>;
       enabled: () => boolean;
       pollIntervalMs?: number;
+      unavailableThreshold?: number;
     },
   ): AgentDetectionEntry {
     return {
@@ -167,6 +205,7 @@ export class InputManager extends EventEmitter {
       start: () => this.startInput(input.id),
       stop: () => this.stopInput(input.id),
       pollIntervalMs: opts.pollIntervalMs ?? 300_000,
+      ...(opts.unavailableThreshold != null ? { unavailableThreshold: opts.unavailableThreshold } : {}),
     };
   }
 
@@ -195,6 +234,16 @@ export class InputManager extends EventEmitter {
         entry['user.id'] = this.configuredUserId;
       } else if (!entry['user.id'] && this.userId) {
         entry['user.id'] = this.userId;
+      }
+    }
+
+    // Upstream trace linking: stamp trace_id / parent_span_id from correlation
+    // store so agent spans reparent under the upstream span. Fully fail-open.
+    if (this.traceLinker) {
+      try {
+        await this.traceLinker.stamp(entries);
+      } catch (err) {
+        logger.warn('trace linker stamp failed (skipped)', { inputId, error: String(err) });
       }
     }
 

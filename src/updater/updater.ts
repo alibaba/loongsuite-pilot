@@ -22,6 +22,7 @@ const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const NPM_INSTALL_TIMEOUT_MS = 2 * 60_000;
 const MAX_BACKOFF_MS = 6 * 60 * 60_000; // 6 hours
 const MAX_CONSECUTIVE_FAILURES = 10;
+const MAX_VERSION_GC_REMOVALS_PER_CHECK = 1;
 
 /**
  * Build an env for child processes that ensures node/npm are on PATH.
@@ -202,6 +203,7 @@ export class Updater {
         });
         this.consecutiveFailures = 0;
         this.nextCheckAt = 0;
+        await this.gcOldVersions();
         await this.writeHeartbeat();
         return;
       }
@@ -242,6 +244,7 @@ export class Updater {
       });
 
       await this.restartMonitorIfRunning();
+      await this.gcOldVersions();
       this.consecutiveFailures = 0;
       this.nextCheckAt = 0;
       await this.writeHeartbeat();
@@ -511,6 +514,13 @@ export class Updater {
         shell: process.platform === 'win32',
       });
 
+      logger.info('checking sqlite3 runtime');
+      await execFileAsync(process.execPath, ['-e', "require('sqlite3')"], {
+        cwd: stagingDir,
+        env: childEnv,
+        timeout: 30_000,
+      });
+
       const postinstallScript = path.join(stagingDir, 'scripts', 'postinstall.js');
       if (await fs.access(postinstallScript).then(() => true).catch(() => false)) {
         try {
@@ -683,16 +693,25 @@ export class Updater {
     logger.info('restarting collector service');
     try {
       const bin = this.paths.loongsuitePilotBin;
+      let result: { stdout: string; stderr: string };
       if (process.platform === 'win32') {
-        await execFileAsync('powershell.exe', [
+        result = await execFileAsync('powershell.exe', [
           '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, 'restart-collector',
         ], { timeout: 30_000 });
       } else {
-        await execFileAsync(bin, ['restart-collector'], { timeout: 30_000 });
+        result = await execFileAsync(bin, ['restart-collector'], { timeout: 30_000 });
       }
+      const output = (result.stdout || '').trim();
+      if (output) logger.info('restart-collector output', { output });
       logger.info('collector restarted');
-    } catch (err) {
-      logger.warn('collector restart failed', { error: String(err) });
+    } catch (err: any) {
+      const stderr = err?.stderr?.trim?.() || '';
+      const stdout = err?.stdout?.trim?.() || '';
+      logger.warn('collector restart failed', {
+        error: String(err?.message || err),
+        stdout: stdout || undefined,
+        stderr: stderr || undefined,
+      });
     }
   }
 
@@ -740,6 +759,10 @@ export class Updater {
     const { versionsDir, currentFile, previousFile } = this.paths;
     try {
       const currentName = await this.readPointerFile(currentFile);
+      if (!currentName) {
+        logger.debug('skipping version gc: current pointer missing');
+        return;
+      }
       const previousName = await this.readPointerFile(previousFile);
 
       let entries: string[];
@@ -749,14 +772,23 @@ export class Updater {
         return;
       }
 
+      const staleVersions: Array<{ entry: string; fullPath: string; mtimeMs: number }> = [];
       for (const entry of entries) {
         if (entry === currentName || entry === previousName) continue;
         const fullPath = path.join(versionsDir, entry);
         const stat = await fs.stat(fullPath).catch(() => null);
         if (stat?.isDirectory()) {
-          logger.info('removing old version', { dir: entry });
-          await fs.rm(fullPath, { recursive: true, force: true });
+          staleVersions.push({ entry, fullPath, mtimeMs: stat.mtimeMs ?? Number.MAX_SAFE_INTEGER });
         }
+      }
+
+      staleVersions.sort((a, b) => a.mtimeMs - b.mtimeMs || a.entry.localeCompare(b.entry));
+      for (const version of staleVersions.slice(0, MAX_VERSION_GC_REMOVALS_PER_CHECK)) {
+        logger.info('removing old version', {
+          dir: version.entry,
+          remaining: staleVersions.length - 1,
+        });
+        await fs.rm(version.fullPath, { recursive: true, force: true });
       }
     } catch (err) {
       logger.debug('gc failed', { error: String(err) });

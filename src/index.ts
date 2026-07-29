@@ -3,7 +3,8 @@ import * as path from 'path';
 import { Orchestrator } from './core/orchestrator.js';
 import { loadConfig } from './core/config-loader.js';
 import { createLogger, initFileLogging } from './utils/logger.js';
-import { resolveHome } from './utils/fs-utils.js';
+import { resolveHome, readInstalledVersion } from './utils/fs-utils.js';
+import { writeStartupCrash, clearStartupCrash, resolveBreadcrumbDataDir } from './utils/crash-breadcrumb.js';
 import { handleWorkerCli } from './local-workers/worker-cli.js';
 
 const logger = createLogger('Main');
@@ -23,10 +24,14 @@ async function main(): Promise<void> {
 
   const config = await loadConfig();
 
-  const logDir = path.join(resolveHome(config.dataDir), 'logs');
+  const dataDir = resolveHome(config.dataDir);
+  const logDir = path.join(dataDir, 'logs');
   await initFileLogging(path.join(logDir, 'loongsuite-pilot-service.log'));
 
   if (!config.enabled) {
+    // A deliberate, non-crash exit: drop any stale breadcrumb so it is not later
+    // misread as this run's failure cause.
+    clearStartupCrash(resolveBreadcrumbDataDir());
     logger.info('analytics disabled via config or LOONGSUITE_PILOT_ENABLED=false');
     return;
   }
@@ -43,6 +48,11 @@ async function main(): Promise<void> {
 
   await orchestrator.start();
 
+  // Reached a healthy running state: clear any stale crash breadcrumb so a lingering
+  // one always reflects the most recent *failed* startup attempt. The breadcrumb dir
+  // must match the daemon writer and the updater reader (env-or-default), not config.dataDir.
+  clearStartupCrash(resolveBreadcrumbDataDir());
+
   logger.info('AI Agent Input is running', {
     dataDir: config.dataDir,
     flushers: Object.entries(config.flushers)
@@ -53,6 +63,13 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   logger.error('fatal startup error', { error: String(err) });
+  const breadcrumbDir = resolveBreadcrumbDataDir();
+  writeStartupCrash({
+    dataDir: breadcrumbDir,
+    phase: 'startup',
+    version: readInstalledVersion(breadcrumbDir),
+    error: err,
+  });
   process.exit(1);
 });
 
@@ -75,12 +92,14 @@ export { QoderCnSqliteInput } from './inputs/qoder-cn-sqlite/qoder-cn-sqlite-inp
 export { QoderCnInput } from './inputs/qoder-cn/qoder-cn-input.js';
 export { QoderCnTraceInput } from './inputs/qoder-cn-trace/qoder-cn-trace-input.js';
 export { QoderCliSessionInput } from './inputs/qoder-cli-session/qoder-cli-session-input.js';
+export { CodexTranscriptInput } from './inputs/codex-transcript/codex-transcript-input.js';
 export { CodexAbortedTurnInput } from './inputs/codex-aborted-turn/codex-aborted-turn-input.js';
+export { PiCodingAgentLogInput } from './inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 export { BaseFlusher } from './flushers/base-flusher.js';
 export { SlsFlusher } from './flushers/sls-flusher.js';
 export { JsonlFlusher } from './flushers/jsonl-flusher.js';
 export { HttpFlusher } from './flushers/http-flusher.js';
 export { MultiFlusher } from './flushers/multi-flusher.js';
 export { HookManager } from './hooks/hook-manager.js';
-export { FileCollectionManager } from './file-collection/file-collection-manager.js';
+export { PipelineManager } from './pipeline/pipeline-manager.js';
 export * from './types/index.js';

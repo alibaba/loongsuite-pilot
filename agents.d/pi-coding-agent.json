@@ -1,0 +1,20 @@
+{
+  "id": "pi-coding-agent",
+  "displayName": "Pi Coding Agent",
+  "deployMode": "plugin-inject",
+  "detection": {
+    "paths": ["~/.pi/agent"],
+    "commands": ["pi"]
+  },
+  "pluginInject": {
+    "configPaths": ["~/.pi/agent/settings.json"],
+    "pluginSpec": "$PILOT_DATA/plugins/pi-coding-agent/index.mjs",
+    "pluginId": "loongsuite-pilot-pi-coding-agent",
+    "configKey": "extensions",
+    "createIfMissing": true
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/pi-coding-agent"
+  }
+}

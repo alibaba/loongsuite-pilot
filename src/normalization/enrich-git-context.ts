@@ -5,9 +5,10 @@ export async function enrichCanonicalEntryWithGit(
   record: Record<string, unknown>,
   namespace: string,
 ): Promise<void> {
-  if (entry['git.repo'] && entry['git.branch']) return;
-
   const probeDir = extractProbeDir(entry, record, namespace);
+  if (probeDir && !entry['workspace.path']) entry['workspace.path'] = probeDir;
+
+  if (entry['git.repo'] && entry['git.branch']) return;
   if (!probeDir) return;
 
   const inferred = await inferGitContext(probeDir);

@@ -7,6 +7,7 @@
 export type DeployMode = 'hook' | 'plugin-probe' | 'plugin-inject' | 'detection-only';
 export type MountType = 'wrapper' | 'rc-inject' | 'env-inject';
 export type HookFormat = 'flat' | 'nested';
+export type SettingsSyntax = 'json' | 'jsonc';
 export type PluginSourceType = 'oss' | 'tar';
 
 // ─── Agent Definition (loaded from agents.d/*.json) ───
@@ -33,11 +34,19 @@ export interface TrustTomlConfig {
 
 export interface AgentHookConfig {
   settingsPath: string;
+  /**
+   * Syntax accepted by the owning agent's settings file. Defaults to strict
+   * JSON. JSONC files are edited in place so comments and unrelated formatting
+   * survive hook installation.
+   */
+  settingsSyntax?: SettingsSyntax;
   events: string[];
   hookCommand: string;
   format: HookFormat;
   matcher?: string;
   replaceHookCommands?: string[];
+  /** Events previously owned by this hook that must be removed during deploy. */
+  retiredEvents?: string[];
   /**
    * 可选的 trust TOML 配置。仅 Codex 等需要 trust hash 校验的 agent 填写。
    * 设置后，HookStrategy 在 deploy 时会调用 codex-trust-writer 写入对应 TOML 文件。
@@ -50,8 +59,12 @@ export interface AgentHookConfig {
    * Claude / Codex 的 mjs handler 通过 argv 区分事件，设为 'kebab-case' 后，
    * buildHookDefinitions 会把 hookCommand 转成 `${hookCommand} ${kebabEvent}`，
    * trust hash 也用同样字符串，保证一致性。
+   *
+   * Kiro CLI 的 hook trigger 是 camelCase（userPromptSubmit/postToolUse/...），
+   * 设为 'as-is' 后，buildHookDefinitions 会把 hookCommand 转成
+   * `${hookCommand} ${event}`（事件名原样追加）。
    */
-  eventSubcommand?: 'kebab-case';
+  eventSubcommand?: 'kebab-case' | 'as-is';
   /**
    * If true, omit quotes around the -File path on Windows.
    * Use for agents whose hook executor does direct spawn (not shell),
@@ -81,6 +94,15 @@ export interface AgentHookConfig {
    * inject_claude_code_fetch_intercept).
    */
   env?: Record<string, string>;
+  /**
+   * Kiro CLI 专用：settingsPath 指向的是一整个 Agent 定义 JSON
+   * （~/.kiro/agents/<name>.json），需要顶层 name + tools 字段。
+   * HookStrategy 在 ensureSettingsFile 时若文件缺失会用此模板 seed。
+   */
+  kiroAgent?: {
+    name: string;
+    tools: string[];
+  };
 }
 
 export interface PluginSourceConfig {
@@ -113,6 +135,19 @@ export interface PluginInjectConfig {
   pluginSpec: string;
   pluginId: string;
   replaceSpecs?: string[];
+  /** Target array field. Defaults to auto-detected `plugins` / `plugin`. */
+  configKey?: string;
+  /** Create the first config path with an empty object when none exists. */
+  createIfMissing?: boolean;
+}
+
+export interface AgentRuntimeConfig {
+  /** 运行时依赖的简述，如 "required-for-transcript" */
+  nodeSqlite?: string;
+  /** 该 builtin 首次可用的 Node 版本 */
+  nodeSqliteSince?: string;
+  /** 无该 builtin 时的 fallback 行为说明 */
+  fallback?: string;
 }
 
 export interface AgentDefinition {
@@ -126,6 +161,8 @@ export interface AgentDefinition {
   pluginProbe?: PluginProbeConfig;
   pluginInject?: PluginInjectConfig;
   input?: AgentInputConfig;
+  /** 运行时要求（如 node:sqlite）与无该依赖时的 fallback 声明 */
+  runtime?: AgentRuntimeConfig;
 }
 
 // ─── Deploy Result ───

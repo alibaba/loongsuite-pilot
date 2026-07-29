@@ -13,14 +13,23 @@ Use these IDs in installer options, `agent-control.json`, and `config.json`.
 | Claude Code | `claude-code` | Hook integration. |
 | Codex | `codex` | Hook integration. |
 | Cursor | `cursor` | Hook integration. |
+| Kiro CLI | `kiro-cli` | Hook integration with delayed local SQLite/session collection. Token usage is not exposed by the source. |
 | OpenCode | `opencode` | Plugin injection. |
+| Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. |
 | Qoder | `qoder` | Hook integration. |
 | Qoder CN | `qoder-cn` | Hook integration. |
+| Qoder for JetBrains | `qoder-jetbrains` | Detection-only deploy ID. Agent gating uses `qoder` in `agent-control.json`; content policy uses `qoder-idea` in `config.json`. |
 | Qoder CLI | `qoder` | Shares the Qoder agent definition and uses hook/session sources. |
 | Qoder Work | `qoder-work` | Hook and local data sources. |
 | Qoder Work CN | `qoder-work-cn` | Hook and local data sources. |
 | Qwen Code CLI | `qwen-code-cli` | Hook integration; parses qwen-code transcript JSONL on Stop. |
 | Wukong | `wukong` | CLI API polling via local `wukong-cli`. |
+
+Codex collection is transcript-backed. Pilot uses the lightweight
+`SessionStart` and `UserPromptSubmit` hooks to discover the effective
+`CODEX_HOME`, including task-scoped homes created by orchestrators, and tails
+recent rollout files from that session root. `Stop` is retained as a
+best-effort wakeup and is not required for directory discovery.
 
 ## Choose Agents During Installation
 

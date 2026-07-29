@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, afterEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -7,476 +7,303 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/codex-hook-processor.mjs');
+const SHELL_WRAPPER = path.resolve(__dirname, '../../../../assets/hooks/codex-loongsuite-pilot-hook.sh');
+const SHARED_HOOK_ASSETS = path.resolve(__dirname, '../../../../assets/hooks/shared');
+const AGENT_DEFINITION = path.resolve(__dirname, '../../../../agents.d/codex.json');
 
-let DATA_DIR;
-let TRANSCRIPT;
+let dataDir;
 
 beforeEach(() => {
-  DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-hook-test-'));
-  TRANSCRIPT = path.join(DATA_DIR, 'rollout.jsonl');
+  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-hook-test-'));
 });
 
 afterEach(() => {
-  try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch {}
+  fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-function runHook(subcommand, payload) {
+function runHook(subcommand, payload, extraEnv = {}) {
+  const env = { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, ...extraEnv };
+  if (!Object.hasOwn(extraEnv, 'LOONGSUITE_PILOT_SPAN_ATTRIBUTES')) {
+    delete env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  }
   return spawnSync('node', [PROCESSOR, subcommand], {
     input: JSON.stringify(payload),
-    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR },
+    env,
     encoding: 'utf-8',
     timeout: 10_000,
   });
 }
 
-function readJsonl() {
-  const dir = path.join(DATA_DIR, 'logs', 'codex');
-  if (!fs.existsSync(dir)) return [];
-  const out = [];
-  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.jsonl'))) {
-    for (const line of fs.readFileSync(path.join(dir, f), 'utf-8').split('\n')) {
-      if (line.trim()) out.push(JSON.parse(line));
-    }
-  }
-  return out;
+function markerPath(sessionId) {
+  return path.join(dataDir, 'state', 'codex', 'transcript-wakeups', `${sessionId}.json`);
 }
 
-function readState(sid) {
-  const f = path.join(DATA_DIR, 'state', 'codex', 'sessions', `${sid}.json`);
-  return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf-8')) : null;
+function spanContextPath(sessionId, turnId) {
+  return path.join(
+    dataDir,
+    'state',
+    'codex',
+    'transcript-span-contexts',
+    `${sessionId}--${turnId}.json`,
+  );
 }
 
-function writeFakeTranscript(records) {
-  fs.writeFileSync(TRANSCRIPT, records.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf-8');
-}
+describe('codex transcript discovery hook', () => {
+  test('deploys early discovery hooks while retiring telemetry-heavy hooks', () => {
+    const definition = JSON.parse(fs.readFileSync(AGENT_DEFINITION, 'utf8'));
 
-describe('codex-hook-processor 端到端', () => {
-  test('SessionStart → UserPromptSubmit → Stop 输出 system_instructions/tool.definitions', () => {
-    writeFakeTranscript([
-      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: {
-        model_provider: 'openai',
-        base_instructions: { text: 'Codex base' },
-        dynamic_tools: [{ namespace: 'app', name: 'auto_x', description: 'd', inputSchema: { type: 'object' } }],
-      }},
-      { timestamp: '2026-05-27T10:00:01Z', type: 'turn_context', payload: {
-        turn_id: 'turn-1', model: 'gpt-5.5', developer_instructions: 'dev ctx',
-      }},
-      { timestamp: '2026-05-27T10:00:02Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-1' }},
-      { timestamp: '2026-05-27T10:00:03Z', type: 'event_msg', payload: { type: 'token_count', info: {
-        last_token_usage: { input_tokens: 100, output_tokens: 50, cached_input_tokens: 80, reasoning_output_tokens: 0, total_tokens: 150 },
-      }}},
+    expect(definition.hook.events).toEqual(['SessionStart', 'UserPromptSubmit', 'Stop']);
+    expect(definition.hook.retiredEvents).toEqual([
+      'PreToolUse',
+      'PostToolUse',
+      'PostToolUseFailure',
     ]);
-
-    runHook('session-start', { session_id: 'cdx', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
-    runHook('user-prompt-submit', { session_id: 'cdx', prompt: 'hi', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
-    runHook('stop', { session_id: 'cdx', turn_id: 'turn-1', last_assistant_message: 'hello back', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
-
-    const records = readJsonl();
-    expect(records.length).toBeGreaterThanOrEqual(2);
-
-    // 字段命名 gen_ai.*
-    for (const rec of records) {
-      expect(rec['gen_ai.session.id']).toBe('cdx');
-      expect(rec['gen_ai.agent.type']).toBe('codex');
-      expect(rec.trace_id).toMatch(/^[0-9a-f]{32}$/);
-    }
-
-    // system_instructions / tool.definitions 在 LLM step records 上出现 (9.6)
-    const llmRecords = records.filter((r) =>
-      (r['event.name'] === 'llm.request' || r['event.name'] === 'llm.response') && r['gen_ai.step.id']);
-    expect(llmRecords.length).toBeGreaterThan(0);
-    for (const rec of llmRecords) {
-      expect(Array.isArray(rec['gen_ai.system_instructions'])).toBe(true);
-      expect(rec['gen_ai.system_instructions'].length).toBe(2); // base + developer
-      expect(Array.isArray(rec['gen_ai.tool.definitions'])).toBe(true);
-      expect(rec['gen_ai.tool.definitions'][0].name).toBe('app/auto_x');
-    }
-
-    // token 字段正确 (9.9 total_tokens 用源值)
-    const resp = records.find((r) => r['event.name'] === 'llm.response');
-    expect(resp['gen_ai.usage.input_tokens']).toBe(100);
-    expect(resp['gen_ai.usage.total_tokens']).toBe(150); // 源值,而非 input+output
-    expect(Array.isArray(resp['gen_ai.response.finish_reasons'])).toBe(true);
   });
 
-  test('Stop 后不 clearState,events 清空 + transcript_offset/lastUsage 持久化 (9.9)', () => {
-    writeFakeTranscript([
-      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
-      { timestamp: '2026-05-27T10:00:01Z', type: 'turn_context', payload: { turn_id: 'turn-1', model: 'gpt-5.5' }},
-      { timestamp: '2026-05-27T10:00:02Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-1' }},
-      { timestamp: '2026-05-27T10:00:03Z', type: 'event_msg', payload: { type: 'token_count', info: {
-        last_token_usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 2 },
-      }}},
-    ]);
+  test('writes an atomic wakeup marker with the effective CODEX_HOME', () => {
+    const codexHome = path.join(dataDir, 'task-codex-home');
+    const result = runHook('stop', {
+      session_id: 'cdx-wakeup',
+      turn_id: 'turn-wakeup',
+      transcript_path: '/tmp/rollout-cdx-wakeup.jsonl',
+    }, {
+      CODEX_HOME: codexHome,
+    });
 
-    runHook('session-start', { session_id: 'cdx2', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
-    runHook('user-prompt-submit', { session_id: 'cdx2', prompt: 'q', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
-    runHook('stop', { session_id: 'cdx2', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
-
-    const state = readState('cdx2');
-    expect(state).not.toBeNull();
-    expect(state.events).toEqual([]);
-    expect(state.transcript_offset).toBeGreaterThan(0);
-    expect(state.transcript_last_token_usage?.inputTokens).toBe(1);
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    expect(JSON.parse(fs.readFileSync(markerPath('cdx-wakeup'), 'utf8'))).toMatchObject({
+      session_id: 'cdx-wakeup',
+      turn_id: 'turn-wakeup',
+      transcript_path: '/tmp/rollout-cdx-wakeup.jsonl',
+      codex_home: codexHome,
+      session_dir: path.join(codexHome, 'sessions'),
+    });
+    expect(fs.existsSync(path.join(dataDir, 'logs', 'codex'))).toBe(false);
   });
 
-  test('首次接管多 turn transcript 时只导出最后一个 turn 并推进完整进度', () => {
-    writeFakeTranscript([
-      { timestamp: '2026-06-11T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
-      { timestamp: '2026-06-11T10:00:01Z', type: 'turn_context', payload: { turn_id: 'old-turn', model: 'gpt-5.5' }},
-      { timestamp: '2026-06-11T10:00:02Z', type: 'event_msg', payload: { type: 'user_message', message: 'old prompt' }},
-      { timestamp: '2026-06-11T10:00:03Z', type: 'event_msg', payload: { type: 'token_count', info: {
-        last_token_usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 15 },
-      }}},
-      { timestamp: '2026-06-17T10:00:01Z', type: 'turn_context', payload: { turn_id: 'new-turn', model: 'gpt-5.5' }},
-      { timestamp: '2026-06-17T10:00:02Z', type: 'event_msg', payload: { type: 'user_message', message: 'new prompt' }},
-      { timestamp: '2026-06-17T10:00:03Z', type: 'event_msg', payload: { type: 'token_count', info: {
-        last_token_usage: { input_tokens: 20, output_tokens: 6, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 26 },
-      }}},
-    ]);
+  test.each(['session-start', 'user-prompt-submit', 'stop'])(
+    'writes the discovery marker for %s',
+    subcommand => {
+      const codexHome = path.join(dataDir, `${subcommand}-codex-home`);
+      const result = runHook(subcommand, {
+        session_id: `cdx-${subcommand}`,
+        turn_id: `turn-${subcommand}`,
+      }, {
+        CODEX_HOME: codexHome,
+      });
 
-    runHook('session-start', { session_id: 'cdx-old-session', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
-    runHook('stop', { session_id: 'cdx-old-session', turn_id: 'new-turn', last_assistant_message: 'new answer', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+      expect(result.status).toBe(0);
+      expect(JSON.parse(fs.readFileSync(markerPath(`cdx-${subcommand}`), 'utf8'))).toMatchObject({
+        session_id: `cdx-${subcommand}`,
+        codex_home: codexHome,
+        session_dir: path.join(codexHome, 'sessions'),
+      });
+    },
+  );
 
-    const records = readJsonl();
-    const promptContents = records
-      .filter((r) => r['event.name'] === 'other')
-      .map((r) => r['gen_ai.input.messages_delta']?.[0]?.parts?.[0]?.content);
-    expect(promptContents).toEqual(['new prompt']);
+  test('writes AgentTeams resource attributes into the wakeup marker', () => {
+    const result = runHook('stop', {
+      session_id: 'cdx-agentteams',
+      turn_id: 'turn-agentteams',
+      transcript_path: '/tmp/rollout-cdx-agentteams.jsonl',
+    }, {
+      AGENTTEAMS_WORKER_NAME: 'codex-worker',
+      AGENTTEAMS_INSTANCE_ID: 'lw-codex',
+      AGENTTEAMS_TOKEN: 'should-not-leak',
+    });
 
-    const llmResponses = records.filter((r) => r['event.name'] === 'llm.response');
-    expect(llmResponses).toHaveLength(1);
-    expect(llmResponses[0]?.['gen_ai.usage.total_tokens']).toBe(26);
-
-    const state = readState('cdx-old-session');
-    expect(state.turn_count).toBe(2);
-    expect(state.transcript_offset).toBe(fs.statSync(TRANSCRIPT).size);
-
-    const recordsBefore = readJsonl().length;
-    runHook('stop', { session_id: 'cdx-old-session', turn_id: 'new-turn', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
-    expect(readJsonl()).toHaveLength(recordsBefore);
+    expect(result.status).toBe(0);
+    const marker = JSON.parse(fs.readFileSync(markerPath('cdx-agentteams'), 'utf8'));
+    expect(marker.resourceAttributes).toEqual({
+      'agentteams.worker.name': 'codex-worker',
+      'agentteams.instance.id': 'lw-codex',
+    });
+    expect(JSON.stringify(marker)).not.toContain('should-not-leak');
   });
 
-  test('UserPromptSubmit 输出 other 事件,不作为缺少 step/model 的 llm.request', () => {
-    writeFakeTranscript([
-      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
-      { timestamp: '2026-05-27T10:00:01Z', type: 'turn_context', payload: { turn_id: 'turn-1', model: 'gpt-5.5' }},
-      { timestamp: '2026-05-27T10:00:02Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-1' }},
-      { timestamp: '2026-05-27T10:00:03Z', type: 'event_msg', payload: { type: 'token_count', info: {
-        last_token_usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 2 },
-      }}},
-    ]);
+  test.each(['user-prompt-submit', 'stop'])(
+    'writes filtered invocation span attributes for %s',
+    subcommand => {
+      const longValue = 'x'.repeat(513);
+      const result = runHook(subcommand, {
+        session_id: 'cdx-span-context',
+        turn_id: 'turn-span-context',
+      }, {
+        LOONGSUITE_PILOT_SPAN_ATTRIBUTES: [
+          'multica.issue.id=issue-1',
+          'multica.agent.name=codex',
+          'gen_ai.agent.name=must-not-overwrite',
+          'multica.secret=must-not-leak',
+          `multica.long=${longValue}`,
+          'malformed',
+        ].join(','),
+      });
 
-    runHook('session-start', { session_id: 'cdx-user', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
-    runHook('user-prompt-submit', { session_id: 'cdx-user', prompt: 'hello', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
-    runHook('stop', { session_id: 'cdx-user', turn_id: 'turn-1', last_assistant_message: 'hi', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+      expect(result.status).toBe(0);
+      expect(JSON.parse(fs.readFileSync(
+        spanContextPath('cdx-span-context', 'turn-span-context'),
+        'utf8',
+      ))).toMatchObject({
+        session_id: 'cdx-span-context',
+        turn_id: 'turn-span-context',
+        spanAttributes: {
+          'multica.issue.id': 'issue-1',
+          'multica.agent.name': 'codex',
+        },
+        received_at: expect.any(String),
+      });
+      const serialized = fs.readFileSync(
+        spanContextPath('cdx-span-context', 'turn-span-context'),
+        'utf8',
+      );
+      expect(serialized).not.toContain('must-not-overwrite');
+      expect(serialized).not.toContain('must-not-leak');
+      expect(serialized).not.toContain(longValue);
+    },
+  );
 
-    const records = readJsonl();
-    const userPromptRecord = records.find((r) =>
-      r['event.name'] === 'other' && r['gen_ai.input.messages_delta']?.[0]?.parts?.[0]?.content === 'hello');
-    expect(userPromptRecord).toBeTruthy();
+  test('does not persist invocation span attributes for SessionStart', () => {
+    const result = runHook('session-start', {
+      session_id: 'cdx-session-start',
+      turn_id: 'turn-session-start',
+    }, {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES: 'multica.issue.id=issue-session-start',
+    });
 
-    const stepRequests = records.filter((r) => r['event.name'] === 'llm.request');
-    expect(stepRequests.length).toBeGreaterThan(0);
-    expect(stepRequests.every((r) => r['gen_ai.step.id'] && r['gen_ai.request.model'])).toBe(true);
+    expect(result.status).toBe(0);
+    expect(fs.existsSync(spanContextPath('cdx-session-start', 'turn-session-start'))).toBe(false);
+    expect(fs.existsSync(markerPath('cdx-session-start'))).toBe(true);
   });
 
-  test('Bash tool.call arguments 合并 transcript workdir,其他参数保持原始结构', () => {
-    writeFakeTranscript([
-      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
-      { timestamp: '2026-05-27T10:00:01Z', type: 'turn_context', payload: { turn_id: 'turn-1', model: 'gpt-5.5' }},
-      { timestamp: '2026-05-27T10:00:02Z', type: 'response_item', payload: {
-        type: 'function_call',
-        name: 'exec_command',
-        call_id: 'call-1',
-        arguments: JSON.stringify({ cmd: 'pwd', workdir: '/tmp/project', yield_time_ms: 1000 }),
-      }},
-      { timestamp: '2026-05-27T10:00:03Z', type: 'response_item', payload: {
-        type: 'function_call_output',
-        call_id: 'call-1',
-        output: 'ok',
-      }},
-      { timestamp: '2026-05-27T10:00:04Z', type: 'event_msg', payload: { type: 'token_count', info: {
-        last_token_usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 15 },
-      }}},
-    ]);
-
-    runHook('session-start', { session_id: 'cdx-bash', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
-    runHook('user-prompt-submit', { session_id: 'cdx-bash', prompt: 'run pwd', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
-    runHook('pre-tool-use', {
-      session_id: 'cdx-bash',
+  test('keeps invocation span attributes isolated by turn within one session', () => {
+    runHook('user-prompt-submit', {
+      session_id: 'cdx-shared-session',
       turn_id: 'turn-1',
-      tool_name: 'Bash',
-      tool_use_id: 'call-1',
-      tool_input: { command: 'pwd' },
-      transcript_path: TRANSCRIPT,
+    }, {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES: 'multica.issue.id=issue-1',
     });
-    runHook('post-tool-use', {
-      session_id: 'cdx-bash',
-      turn_id: 'turn-1',
-      tool_name: 'Bash',
-      tool_use_id: 'call-1',
-      tool_response: 'ok',
-      transcript_path: TRANSCRIPT,
-    });
-    runHook('stop', { session_id: 'cdx-bash', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
-
-    const records = readJsonl();
-    const toolCall = records.find((r) => r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'call-1');
-    expect(toolCall?.['gen_ai.tool.call.arguments']).toEqual({
-      command: 'pwd',
-      workdir: '/tmp/project',
+    runHook('user-prompt-submit', {
+      session_id: 'cdx-shared-session',
+      turn_id: 'turn-2',
+    }, {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES: 'multica.issue.id=issue-2',
     });
 
-    const outputToolCall = records
-      .find((r) => r['event.name'] === 'llm.response')
-      ?.['gen_ai.output.messages']?.[0]?.parts
-      ?.find((part) => part.type === 'tool_call' && part.id === 'call-1');
-    expect(outputToolCall?.arguments).toEqual({
-      command: 'pwd',
-      workdir: '/tmp/project',
+    expect(JSON.parse(fs.readFileSync(
+      spanContextPath('cdx-shared-session', 'turn-1'),
+      'utf8',
+    )).spanAttributes).toEqual({ 'multica.issue.id': 'issue-1' });
+    expect(JSON.parse(fs.readFileSync(
+      spanContextPath('cdx-shared-session', 'turn-2'),
+      'utf8',
+    )).spanAttributes).toEqual({ 'multica.issue.id': 'issue-2' });
+  });
+
+  test('keeps only the latest wakeup for one session', () => {
+    runHook('stop', { session_id: 'cdx-overwrite', turn_id: 'turn-1' });
+    runHook('stop', { session_id: 'cdx-overwrite', turn_id: 'turn-2' });
+
+    expect(JSON.parse(fs.readFileSync(markerPath('cdx-overwrite'), 'utf8'))).toMatchObject({
+      session_id: 'cdx-overwrite',
+      turn_id: 'turn-2',
     });
   });
 
-  test('非 Bash tool.call arguments 使用 transcript 原始参数', () => {
-    writeFakeTranscript([
-      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
-      { timestamp: '2026-05-27T10:00:01Z', type: 'turn_context', payload: { turn_id: 'turn-1', model: 'gpt-5.5' }},
-      { timestamp: '2026-05-27T10:00:02Z', type: 'response_item', payload: {
-        type: 'function_call',
-        name: 'write_stdin',
-        call_id: 'call-write',
-        arguments: JSON.stringify({ session_id: 7, chars: 'q', yield_time_ms: 500 }),
-      }},
-      { timestamp: '2026-05-27T10:00:03Z', type: 'response_item', payload: {
-        type: 'function_call_output',
-        call_id: 'call-write',
-        output: 'ok',
-      }},
-      { timestamp: '2026-05-27T10:00:04Z', type: 'event_msg', payload: { type: 'token_count', info: {
-        last_token_usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 15 },
-      }}},
-    ]);
+  test('ignores non-discovery events and malformed session identifiers', () => {
+    runHook('pre-tool-use', { session_id: 'cdx-ignore', tool_name: 'Bash' });
+    runHook('stop', { turn_id: 'turn-missing-session' });
 
-    runHook('session-start', { session_id: 'cdx-other-tool', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
-    runHook('user-prompt-submit', { session_id: 'cdx-other-tool', prompt: 'send stdin', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
-    runHook('pre-tool-use', {
-      session_id: 'cdx-other-tool',
-      turn_id: 'turn-1',
-      tool_name: 'write_stdin',
-      tool_use_id: 'call-write',
-      tool_input: { session_id: 7 },
-      transcript_path: TRANSCRIPT,
-    });
-    runHook('post-tool-use', {
-      session_id: 'cdx-other-tool',
-      turn_id: 'turn-1',
-      tool_name: 'write_stdin',
-      tool_use_id: 'call-write',
-      tool_response: 'ok',
-      transcript_path: TRANSCRIPT,
-    });
-    runHook('stop', { session_id: 'cdx-other-tool', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
-
-    const records = readJsonl();
-    const toolCall = records.find((r) => r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'call-write');
-    expect(toolCall?.['gen_ai.tool.call.arguments']).toEqual({
-      session_id: 7,
-      chars: 'q',
-      yield_time_ms: 500,
-    });
+    const markerDir = path.join(dataDir, 'state', 'codex', 'transcript-wakeups');
+    expect(fs.existsSync(markerDir) ? fs.readdirSync(markerDir) : []).toEqual([]);
   });
 
-  test('transcript-only apply_patch/web_search/tool_search 生成 tool.call arguments', () => {
-    writeFakeTranscript([
-      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
-      { timestamp: '2026-05-27T10:00:01Z', type: 'turn_context', payload: { turn_id: 'turn-1', model: 'gpt-5.5' }},
-      { timestamp: '2026-05-27T10:00:02Z', type: 'response_item', payload: {
-        type: 'custom_tool_call',
-        name: 'apply_patch',
-        call_id: 'call-patch',
-        input: '*** Begin Patch\n*** End Patch',
-      }},
-      { timestamp: '2026-05-27T10:00:03Z', type: 'response_item', payload: {
-        type: 'custom_tool_call_output',
-        call_id: 'call-patch',
-        output: 'ok',
-      }},
-      { timestamp: '2026-05-27T10:00:04Z', type: 'response_item', payload: {
-        type: 'web_search_call',
-        status: 'completed',
-        action: { type: 'search', query: 'codex hooks' },
-      }},
-      { timestamp: '2026-05-27T10:00:05Z', type: 'response_item', payload: {
-        type: 'tool_search_call',
-        call_id: 'call-tool-search',
-        status: 'completed',
-        execution: 'client',
-        arguments: { query: 'browser mcp', limit: 5 },
-      }},
-      { timestamp: '2026-05-27T10:00:06Z', type: 'response_item', payload: {
-        type: 'tool_search_output',
-        call_id: 'call-tool-search',
-        status: 'completed',
-        execution: 'client',
-        tools: [{ name: 'browser.open' }],
-      }},
-      { timestamp: '2026-05-27T10:00:07Z', type: 'event_msg', payload: { type: 'token_count', info: {
-        last_token_usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 15 },
-      }}},
-    ]);
+  test('acknowledges ignored events on stdout', () => {
+    const result = runHook('pre-tool-use', { session_id: 'cdx-ignore', tool_name: 'Bash' });
 
-    runHook('session-start', { session_id: 'cdx-transcript-tools', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
-    runHook('user-prompt-submit', { session_id: 'cdx-transcript-tools', prompt: 'use tools', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
-    runHook('stop', { session_id: 'cdx-transcript-tools', turn_id: 'turn-1', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+  });
 
-    const records = readJsonl();
-    const calls = records.filter((r) => r['event.name'] === 'tool.call');
-    expect(calls.map((r) => r['gen_ai.tool.name'])).toEqual([
-      'apply_patch',
-      'web_search',
-      'tool_search',
-    ]);
+  test('logs wakeup write failures without failing the hook', () => {
+    fs.mkdirSync(path.join(dataDir, 'state', 'codex'), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'state', 'codex', 'transcript-wakeups'), 'not-a-directory');
 
-    expect(calls.find((r) => r['gen_ai.tool.name'] === 'apply_patch')?.['gen_ai.tool.call.arguments']).toEqual({
-      command: '*** Begin Patch\n*** End Patch',
-    });
-    expect(calls.find((r) => r['gen_ai.tool.name'] === 'web_search')?.['gen_ai.tool.call.arguments']).toEqual({
-      type: 'search',
-      query: 'codex hooks',
-    });
-    expect(calls.find((r) => r['gen_ai.tool.name'] === 'tool_search')?.['gen_ai.tool.call.arguments']).toEqual({
-      query: 'browser mcp',
-      limit: 5,
+    const result = runHook('stop', { session_id: 'cdx-error', turn_id: 'turn-error' });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    const errorDir = path.join(dataDir, 'logs', 'codex', 'errors');
+    const errorFile = path.join(errorDir, fs.readdirSync(errorDir)[0]);
+    expect(fs.readFileSync(errorFile, 'utf8')).toContain('"stage":"wakeup_write"');
+  });
+
+  test('logs span context write failures without blocking the wakeup marker', () => {
+    fs.mkdirSync(path.join(dataDir, 'state', 'codex'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dataDir, 'state', 'codex', 'transcript-span-contexts'),
+      'not-a-directory',
+    );
+
+    const result = runHook('user-prompt-submit', {
+      session_id: 'cdx-span-error',
+      turn_id: 'turn-span-error',
+    }, {
+      LOONGSUITE_PILOT_SPAN_ATTRIBUTES: 'multica.issue.id=issue-error',
     });
 
-    const outputParts = records
-      .filter((r) => r['event.name'] === 'llm.response')
-      .flatMap((r) => r['gen_ai.output.messages']?.[0]?.parts ?? []);
-    expect(outputParts.filter((part) => part.type === 'tool_call').map((part) => part.arguments)).toEqual([
-      { command: '*** Begin Patch\n*** End Patch' },
-      { type: 'search', query: 'codex hooks' },
-      { query: 'browser mcp', limit: 5 },
-    ]);
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('{}');
+    expect(fs.existsSync(markerPath('cdx-span-error'))).toBe(true);
+    const errorDir = path.join(dataDir, 'logs', 'codex', 'errors');
+    const errorFiles = fs.readdirSync(errorDir);
+    expect(errorFiles.some(file => (
+      fs.readFileSync(path.join(errorDir, file), 'utf8').includes('"stage":"span_context_write"')
+    ))).toBe(true);
   });
 
-  test('上下文压缩后 llm.request 记录全量 input.messages', () => {
-    writeFakeTranscript([
-      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
-      { timestamp: '2026-05-27T10:00:01Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-compact' }},
-      { timestamp: '2026-05-27T10:00:02Z', type: 'response_item', payload: {
-        type: 'message',
-        role: 'developer',
-        content: [{ type: 'input_text', text: 'compressed developer context' }],
-      }},
-      { timestamp: '2026-05-27T10:00:03Z', type: 'response_item', payload: {
-        type: 'message',
-        role: 'user',
-        content: [{ type: 'input_text', text: 'compressed environment context' }],
-      }},
-      { timestamp: '2026-05-27T10:00:04Z', type: 'turn_context', payload: { turn_id: 'turn-compact', model: 'gpt-5.5' }},
-      { timestamp: '2026-05-27T10:00:05Z', type: 'response_item', payload: {
-        type: 'message',
-        role: 'user',
-        content: [{ type: 'input_text', text: 'actual user prompt' }],
-      }},
-      { timestamp: '2026-05-27T10:00:06Z', type: 'event_msg', payload: {
-        type: 'user_message',
-        message: 'actual user prompt',
-      }},
-      { timestamp: '2026-05-27T10:00:07Z', type: 'event_msg', payload: { type: 'token_count', info: {
-        last_token_usage: { input_tokens: 20, output_tokens: 5, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 25 },
-      }}},
-    ]);
+  test('derives the shared Pilot data directory from the installed shell wrapper', () => {
+    if (process.platform === 'win32') return;
+    const pilotRoot = path.join(dataDir, 'shared-pilot');
+    const hookDir = path.join(pilotRoot, 'hooks');
+    const taskHome = path.join(dataDir, 'task-home');
+    const codexHome = path.join(dataDir, 'task-codex-home');
+    fs.mkdirSync(hookDir, { recursive: true });
+    fs.mkdirSync(taskHome, { recursive: true });
+    fs.copyFileSync(PROCESSOR, path.join(hookDir, 'codex-hook-processor.mjs'));
+    fs.copyFileSync(SHELL_WRAPPER, path.join(hookDir, 'codex-loongsuite-pilot-hook.sh'));
+    fs.cpSync(SHARED_HOOK_ASSETS, path.join(hookDir, 'shared'), { recursive: true });
+    fs.chmodSync(path.join(hookDir, 'codex-loongsuite-pilot-hook.sh'), 0o755);
 
-    runHook('session-start', { session_id: 'cdx-compact', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
-    runHook('stop', { session_id: 'cdx-compact', turn_id: 'turn-compact', last_assistant_message: 'done', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
+    const env = {
+      ...process.env,
+      HOME: taskHome,
+      CODEX_HOME: codexHome,
+    };
+    delete env.LOONGSUITE_PILOT_DATA_DIR;
+    const result = spawnSync('bash', [
+      path.join(hookDir, 'codex-loongsuite-pilot-hook.sh'),
+      'session-start',
+    ], {
+      input: JSON.stringify({ session_id: 'cdx-wrapper' }),
+      env,
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
 
-    const req = readJsonl().find((r) => r['event.name'] === 'llm.request' && r['gen_ai.step.id']);
-    expect(req?.['gen_ai.input.messages_delta']).toEqual([
-      { role: 'user', parts: [{ type: 'text', content: 'actual user prompt' }] },
-    ]);
-    expect(req?.['gen_ai.input.messages']).toEqual([
-      { role: 'developer', parts: [{ type: 'text', content: 'compressed developer context' }] },
-      { role: 'user', parts: [{ type: 'text', content: 'compressed environment context' }] },
-      { role: 'user', parts: [{ type: 'text', content: 'actual user prompt' }] },
-    ]);
-  });
-
-  test('同一 turn 压缩后的重复 turn_context 不产生空 input.messages_delta', () => {
-    writeFakeTranscript([
-      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
-      { timestamp: '2026-05-27T10:00:01Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-compact-repeat' }},
-      { timestamp: '2026-05-27T10:00:02Z', type: 'turn_context', payload: { turn_id: 'turn-compact-repeat', model: 'gpt-5.5' }},
-      { timestamp: '2026-05-27T10:00:03Z', type: 'event_msg', payload: { type: 'user_message', message: 'before compact' }},
-      { timestamp: '2026-05-27T10:00:04Z', type: 'response_item', payload: {
-        type: 'function_call',
-        name: 'exec_command',
-        call_id: 'call-before',
-        arguments: JSON.stringify({ cmd: 'pwd' }),
-      }},
-      { timestamp: '2026-05-27T10:00:05Z', type: 'response_item', payload: {
-        type: 'function_call_output',
-        call_id: 'call-before',
-        output: 'ok-before',
-      }},
-      { timestamp: '2026-05-27T10:00:06Z', type: 'compacted', payload: {
-        message: 'compact',
-        replacement_history: [],
-      }},
-      { timestamp: '2026-05-27T10:00:07Z', type: 'turn_context', payload: { turn_id: 'turn-compact-repeat', model: 'gpt-5.5' }},
-      { timestamp: '2026-05-27T10:00:08Z', type: 'event_msg', payload: { type: 'context_compacted' }},
-      { timestamp: '2026-05-27T10:00:09Z', type: 'response_item', payload: {
-        type: 'function_call',
-        name: 'exec_command',
-        call_id: 'call-after',
-        arguments: JSON.stringify({ cmd: 'ls' }),
-      }},
-      { timestamp: '2026-05-27T10:00:10Z', type: 'response_item', payload: {
-        type: 'function_call_output',
-        call_id: 'call-after',
-        output: 'ok-after',
-      }},
-      { timestamp: '2026-05-27T10:00:11Z', type: 'event_msg', payload: { type: 'token_count', info: {
-        last_token_usage: { input_tokens: 20, output_tokens: 5, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 25 },
-      }}},
-    ]);
-
-    runHook('session-start', { session_id: 'cdx-repeat-context', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
-    runHook('stop', { session_id: 'cdx-repeat-context', turn_id: 'turn-compact-repeat', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
-
-    const requests = readJsonl().filter((r) => r['event.name'] === 'llm.request' && r['gen_ai.step.id']);
-    expect(requests).toHaveLength(2);
-    expect(requests.every((r) => Array.isArray(r['gen_ai.input.messages_delta']))).toBe(true);
-    expect(requests[0]?.['gen_ai.input.messages_delta']).toEqual([
-      { role: 'user', parts: [{ type: 'text', content: 'before compact' }] },
-    ]);
-    expect(requests[1]?.['gen_ai.input.messages_delta']).toEqual([
-      { role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-before', response: 'ok-before' }] },
-    ]);
-  });
-
-  test('turn_aborted 后即使收到 Stop 也不由正常 Hook 重复导出', () => {
-    writeFakeTranscript([
-      { timestamp: '2026-05-27T10:00:00Z', type: 'session_meta', payload: { model_provider: 'openai' }},
-      { timestamp: '2026-05-27T10:00:01Z', type: 'turn_context', payload: { turn_id: 'turn-aborted', model: 'gpt-5.5' }},
-      { timestamp: '2026-05-27T10:00:02Z', type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-aborted' }},
-      { timestamp: '2026-05-27T10:00:03Z', type: 'event_msg', payload: { type: 'token_count', info: {
-        last_token_usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 15 },
-      }}},
-      { timestamp: '2026-05-27T10:00:04Z', type: 'event_msg', payload: { type: 'turn_aborted', turn_id: 'turn-aborted', reason: 'interrupted' }},
-    ]);
-
-    runHook('session-start', { session_id: 'cdx-aborted', model: 'gpt-5.5', source: 'startup', transcript_path: TRANSCRIPT });
-    runHook('user-prompt-submit', { session_id: 'cdx-aborted', prompt: 'stop me', turn_id: 'turn-aborted', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
-    runHook('stop', { session_id: 'cdx-aborted', turn_id: 'turn-aborted', model: 'gpt-5.5', transcript_path: TRANSCRIPT });
-
-    expect(readJsonl()).toEqual([]);
-  });
-
-  test('缺 session_id 不污染 state 目录', () => {
-    runHook('post-tool-use', { tool_name: 'Bash' });
-    const dir = path.join(DATA_DIR, 'state', 'codex', 'sessions');
-    expect(fs.existsSync(dir) ? fs.readdirSync(dir).length : 0).toBe(0);
+    expect(result.status).toBe(0);
+    const marker = path.join(
+      pilotRoot,
+      'state',
+      'codex',
+      'transcript-wakeups',
+      'cdx-wrapper.json',
+    );
+    expect(JSON.parse(fs.readFileSync(marker, 'utf8'))).toMatchObject({
+      session_id: 'cdx-wrapper',
+      codex_home: codexHome,
+      session_dir: path.join(codexHome, 'sessions'),
+    });
+    expect(fs.existsSync(path.join(taskHome, '.loongsuite-pilot'))).toBe(false);
   });
 });

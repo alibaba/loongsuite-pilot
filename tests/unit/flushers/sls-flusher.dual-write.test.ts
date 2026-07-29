@@ -8,8 +8,7 @@ import type { SlsFlusherConfig, SlsEndpoint } from '../../../src/types/index.js'
 import { buildTestEntry } from '../../helpers/fixture-builder.js';
 
 const mockPostLogStoreLogs = vi.fn().mockResolvedValue(undefined);
-const mockAppendLine = vi.fn().mockResolvedValue(undefined);
-const mockEnsureDir = vi.fn().mockResolvedValue(undefined);
+const mockFailureWrite = vi.fn().mockResolvedValue(true);
 
 // Track each ALY client constructor call so we can assert on per-endpoint instances.
 const akClientCtorCalls: Array<{ endpoint: string; accessKeyId: string }> = [];
@@ -27,10 +26,15 @@ const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async 
 vi.stubGlobal('fetch', fetchSpy);
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
-  appendLine: (...args: unknown[]) => mockAppendLine(...args),
-  ensureDir: (...args: unknown[]) => mockEnsureDir(...args),
   getTodayDateString: () => '2026-04-27',
   readInstalledVersion: () => '0.0.0-test',
+}));
+
+vi.mock('../../../src/flushers/sls-failure-log-writer.js', () => ({
+  SlsFailureLogWriter: vi.fn().mockImplementation(() => ({
+    start: vi.fn().mockResolvedValue(undefined),
+    write: mockFailureWrite,
+  })),
 }));
 
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -176,15 +180,14 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
     // Webtracking still went through.
     expect(fetchSpy).toHaveBeenCalledOnce();
     // Only the failing leg's batch was persisted.
-    expect(mockAppendLine).toHaveBeenCalledOnce();
-    const [filePath, line] = mockAppendLine.mock.calls[0];
-    expect(filePath).toContain('user-sls.jsonl');
-    const parsed = JSON.parse(line);
-    expect(parsed.endpoint).toBe('user-sls');
-    expect(parsed.error).toContain('quota exceeded');
+    expect(mockFailureWrite).toHaveBeenCalledOnce();
+    const metadata = mockFailureWrite.mock.calls[0][0];
+    expect(metadata.endpoint).toBe('user-sls');
+    expect(String(metadata.error)).toContain('quota exceeded');
+    expect(metadata).not.toHaveProperty('logGroup');
   });
 
-  it('per-endpoint failed-log filenames are unique even when kind matches', async () => {
+  it('persists independent metadata for endpoints that share the same kind', async () => {
     const flusher = new SlsFlusher(
       makeConfig([
         akEndpoint('user-sls', 'https://cn-shanghai.log.aliyuncs.com', 'user-proj'),
@@ -201,9 +204,8 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
     await flusher.send(buildTestEntry());
     await flusher.flush();
 
-    expect(mockAppendLine).toHaveBeenCalledTimes(2);
-    const filePaths = mockAppendLine.mock.calls.map((c: unknown[]) => String(c[0]));
-    expect(filePaths.some((p: string) => p.endsWith('user-sls.jsonl'))).toBe(true);
-    expect(filePaths.some((p: string) => p.endsWith('internal-sls.jsonl'))).toBe(true);
+    expect(mockFailureWrite).toHaveBeenCalledTimes(2);
+    const endpoints = mockFailureWrite.mock.calls.map((call: unknown[]) => (call[0] as { endpoint: string }).endpoint);
+    expect(endpoints.sort()).toEqual(['internal-sls', 'user-sls']);
   });
 });

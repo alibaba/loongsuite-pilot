@@ -29,9 +29,8 @@ import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
     enabled: true,
-    endpoint: 'http://localhost:4318',
+    endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318', headers: { 'x-key': 'val' } }],
     protocol: 'http/protobuf' as const,
-    headers: { 'x-key': 'val' },
     serviceName: 'test-pilot',
     ...overrides,
   };
@@ -190,5 +189,139 @@ describe('OtlpTraceFlusher - export', () => {
     const failedCalls = allCalls.filter((c) => (c[0] as string).includes('otlp-failed'));
     expect(debugCalls.length).toBeGreaterThan(0);
     expect(failedCalls.length).toBeGreaterThan(0);
+  });
+});
+
+describe('OtlpTraceFlusher - multi-backend fan-out', () => {
+  beforeEach(() => {
+    vi.mocked(fsUtils.appendLine).mockClear();
+    vi.mocked(fsUtils.ensureDir).mockClear();
+  });
+
+  function twoEndpointConfig(overrides: Record<string, unknown> = {}) {
+    return {
+      enabled: true,
+      endpoints: [
+        { name: 'backend-a', endpoint: 'http://a:4318' },
+        { name: 'backend-b', endpoint: 'http://b:4318' },
+      ],
+      protocol: 'http/protobuf' as const,
+      serviceName: 'test-pilot',
+      ...overrides,
+    };
+  }
+
+  it('exports the same spans to every backend once', async () => {
+    const calls: Record<string, number> = {};
+    const factory = (opts: { name: string }) => ({
+      export: (_spans: any, cb: (r: { code: number }) => void) => {
+        calls[opts.name] = (calls[opts.name] ?? 0) + 1;
+        cb({ code: ExportResultCode.SUCCESS });
+      },
+      shutdown: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const flusher = new OtlpTraceFlusher(twoEndpointConfig(), undefined, factory as any);
+    await flusher.exportSpansForAgent('claude-code', [makeMockSpan()] as any);
+    await flusher.shutdown();
+
+    expect(calls['backend-a']).toBe(1);
+    expect(calls['backend-b']).toBe(1);
+  });
+
+  it('fans out to backends split across two serviceNames (once each)', async () => {
+    const calls: Record<string, number> = {};
+    const factory = (opts: { name: string }) => ({
+      export: (_spans: any, cb: (r: { code: number }) => void) => {
+        calls[opts.name] = (calls[opts.name] ?? 0) + 1;
+        cb({ code: ExportResultCode.SUCCESS });
+      },
+      shutdown: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const cfg = twoEndpointConfig({
+      endpoints: [
+        { name: 'user', endpoint: 'http://a:4318' },
+        { name: 'inner', endpoint: 'http://b:4318', serviceName: 'managed-svc' },
+      ],
+    });
+    const flusher = new OtlpTraceFlusher(cfg, undefined, factory as any);
+    await flusher.exportSpansForAgent('claude-code', [makeMockSpan()] as any);
+    await flusher.shutdown();
+
+    // each backend belongs to a distinct serviceName group, still exactly once
+    expect(calls['user']).toBe(1);
+    expect(calls['inner']).toBe(1);
+  });
+
+  it('builds a distinct service.name resource per endpoint serviceName group', () => {
+    const cfg = twoEndpointConfig({
+      endpoints: [
+        { name: 'user', endpoint: 'http://a:4318' },
+        { name: 'inner', endpoint: 'http://b:4318', serviceName: 'managed-svc' },
+      ],
+    });
+    const flusher = new OtlpTraceFlusher(cfg) as any;
+    // default group uses cfg.serviceName; inner group uses its override
+    const userRes = flusher.buildResource('claude-code', 'test-pilot');
+    const innerRes = flusher.buildResource('claude-code', 'managed-svc');
+    expect(userRes.attributes['service.name']).toBe('test-pilot-claude-code');
+    expect(innerRes.attributes['service.name']).toBe('managed-svc-claude-code');
+  });
+
+  it('isolates a failing backend and still exports to the healthy one', async () => {
+    const factory = (opts: { name: string }) => ({
+      export: (_spans: any, cb: (r: { code: number; error?: Error }) => void) => {
+        if (opts.name === 'backend-b') {
+          cb({ code: ExportResultCode.FAILED, error: new Error('503 from b') });
+        } else {
+          cb({ code: ExportResultCode.SUCCESS });
+        }
+      },
+      shutdown: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const flusher = new OtlpTraceFlusher(twoEndpointConfig(), undefined, factory as any);
+    await flusher.exportSpansForAgent('claude-code', [makeMockSpan()] as any);
+    await flusher.shutdown();
+
+    const failedCalls = vi.mocked(fsUtils.appendLine).mock.calls.filter(
+      (c) => (c[0] as string).includes('otlp-failed'),
+    );
+    // only backend-b failed → exactly its endpoint-tagged file is written
+    expect(failedCalls.length).toBeGreaterThan(0);
+    expect(failedCalls.every((c) => (c[0] as string).includes('__backend-b'))).toBe(true);
+    expect(failedCalls.some((c) => (c[0] as string).includes('__backend-a'))).toBe(false);
+  });
+
+  it('sanitizes a malicious endpoint name in the failed-log path', async () => {
+    const factory = () => ({
+      export: (_spans: any, cb: (r: { code: number; error?: Error }) => void) =>
+        cb({ code: ExportResultCode.FAILED, error: new Error('boom') }),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const cfg = {
+      enabled: true,
+      endpoints: [{ name: '../../../../tmp/pwn', endpoint: 'http://evil:4318' }],
+      protocol: 'http/protobuf' as const,
+      serviceName: 'test-pilot',
+    };
+    const flusher = new OtlpTraceFlusher(cfg, undefined, factory as any);
+    await flusher.exportSpansForAgent('claude-code', [makeMockSpan()] as any);
+    await flusher.shutdown();
+
+    const failedCalls = vi.mocked(fsUtils.appendLine).mock.calls.filter(
+      (c) => (c[0] as string).includes('otlp-failed'),
+    );
+    expect(failedCalls.length).toBeGreaterThan(0);
+    // separators are replaced so the name stays a single file inside otlp-failed
+    // (embedded dots are harmless without separators — no directory traversal)
+    for (const c of failedCalls) {
+      const p = c[0] as string;
+      expect(p).toContain('otlp-failed');
+      expect(p).not.toContain('/tmp/pwn');
+      expect(p).toContain('.._.._.._.._tmp_pwn'); // slashes → '_', dots kept
+    }
   });
 });

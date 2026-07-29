@@ -1,5 +1,6 @@
 import pino from 'pino';
 import build from 'pino-roll';
+import { writeFile } from 'node:fs/promises';
 
 const LOG_LEVEL = (process.env.LOG_LEVEL?.toLowerCase() ?? 'info') as pino.Level;
 
@@ -42,15 +43,21 @@ export async function initFileLogging(logFilePath: string): Promise<void> {
     mkdir: true,
     size: '50m',
     dateFormat: 'yyyy-MM-dd',
+    limit: { count: 10, removeOtherLogFiles: true },
   });
 
-  rootLogger = pino(
-    pinoOpts,
-    pino.multistream([
-      { stream: process.stdout, level: LOG_LEVEL },
-      { stream: fileStream, level: LOG_LEVEL },
-    ]),
-  );
+  const useStdout = process.stdout.isTTY || process.env.LOONGSUITE_PILOT_STDOUT === '1';
+  const streams: pino.StreamEntry[] = [{ stream: fileStream, level: LOG_LEVEL }];
+  if (useStdout) {
+    streams.unshift({ stream: process.stdout, level: LOG_LEVEL });
+  } else {
+    // Daemon mode: truncate the base file that launchd/service manager may
+    // have opened via StandardOutPath. pino-roll writes to date-suffixed files
+    // so this base file is no longer needed.
+    await writeFile(logFilePath, '', 'utf8').catch(() => {});
+  }
+
+  rootLogger = pino(pinoOpts, pino.multistream(streams));
 
   loggerVersion++;
   childCache.clear();

@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { ClientType } from '../types/index.js';
-import type { AnalyticsConfig, AgentDetectionEntry } from '../types/index.js';
+import type { AnalyticsConfig, AgentDetectionEntry, AgentStopReason } from '../types/index.js';
 import { AgentControlManager } from './agent-control-manager.js';
 import { AgentDiscoveryService } from './agent-discovery-service.js';
 import { InputManager } from './input-manager.js';
@@ -8,8 +8,9 @@ import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { detectAgent } from '../deployment/detect-utils.js';
+import { GlobalAttributesProvider } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
-import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion } from '../utils/fs-utils.js';
+import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion, cleanStaleTmpFiles } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import * as fsSync from 'node:fs';
 
@@ -36,16 +37,22 @@ import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-sess
 import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
-import { CodexLogInput } from '../inputs/codex-log/codex-log-input.js';
-import { CodexAbortedTurnInput } from '../inputs/codex-aborted-turn/codex-aborted-turn-input.js';
+import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
+import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
+import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
+import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
-import { HookWatchdog, type PluginCheckTarget } from './hook-watchdog.js';
+import { CorrelationStore } from './upstream-link/correlation-store.js';
+import { TraceLinker } from './upstream-link/trace-linker.js';
+import { AcpCorrelateRetentionService } from './upstream-link/acp-correlate-retention-service.js';
+import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
+import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
-import { FileCollectionManager } from '../file-collection/file-collection-manager.js';
+import { PipelineManager } from '../pipeline/pipeline-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
 import { AlarmManager } from '../metrics/alarm-manager.js';
 import { LocalWorkerActivationService } from '../local-workers/local-worker-activation-service.js';
@@ -89,9 +96,11 @@ export class Orchestrator extends EventEmitter {
     'qoder-cli-session': 'qoder',
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
-    'codex-log': 'codex',
-    'codex-aborted-turn': 'codex',
+    'codex-transcript': 'codex',
+    'kiro-cli-log': 'kiro-cli',
+    'kiro-cli-session': 'kiro-cli',
     'opencode-log': 'opencode',
+    'pi-coding-agent-log': 'pi-coding-agent',
     'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
   };
@@ -104,16 +113,19 @@ export class Orchestrator extends EventEmitter {
   private stateStore!: StateStore;
   private flusher!: BaseFlusher;
   private logRetentionService!: LogRetentionService;
+  private acpCorrelateRetentionService?: AcpCorrelateRetentionService;
+  private legacySlsFailedLogCleanupService: LegacySlsFailedLogCleanupService | null = null;
   private hookWatchdog!: HookWatchdog;
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
   private localWorkerActivationService: LocalWorkerActivationService | null = null;
-  private fileCollectionManager: FileCollectionManager | null = null;
+  private pipelineManager: PipelineManager | null = null;
   private metricsWriter!: MetricsWriter;
   private alarmManager!: AlarmManager;
   private runtimeWriter: RuntimeWriter | null = null;
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
+  private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
 
   constructor(config: AnalyticsConfig) {
@@ -134,6 +146,7 @@ export class Orchestrator extends EventEmitter {
     // 1. Ensure data directories
     await ensureDir(this.dataDir);
     await ensureDir(path.join(this.dataDir, 'logs'));
+    await cleanStaleTmpFiles(path.join(this.dataDir, 'logs'));
 
     // 2. Load state & agent-control config
     this.stateStore = new StateStore(path.join(this.dataDir, 'logs', 'input-state.json'));
@@ -145,6 +158,10 @@ export class Orchestrator extends EventEmitter {
     await this.agentControlManager.load();
 
     // 3. Build flushers
+    this.globalAttributesProvider = new GlobalAttributesProvider(
+      this.config.globalSpanAttributes ?? {},
+      path.join(this.dataDir, 'span-attributes.json'),
+    );
     this.flusher = await this.buildFlusher();
 
     // 4. Build InputManager & AlarmManager
@@ -157,6 +174,22 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setAgentsConfig(this.config.agents);
     this.inputManager.setAlarmManager(this.alarmManager);
     this.inputManager.setMaskConfig(this.config.mask ?? { mode: 'none', types: [] });
+
+    // Upstream trace linking (opt-in): stamp trace_id/parent_span_id from the
+    // acp-correlate store so agent spans reparent under the upstream span.
+    if (this.config.upstreamLink?.enabled) {
+      const correlateDir = path.join(this.dataDir, 'acp-correlate');
+      await ensureDir(correlateDir);
+      const store = new CorrelationStore(correlateDir);
+      const traceLinker = new TraceLinker(store);
+      this.inputManager.setTraceLinker(traceLinker);
+      this.acpCorrelateRetentionService = new AcpCorrelateRetentionService(this.dataDir, this.config.upstreamLink, traceLinker);
+      this.acpCorrelateRetentionService.start();
+      // Adapters/env hooks must write records under this exact path; a custom
+      // config.json dataDir that diverges from where they write silently yields
+      // no linking, so surface the resolved dir for diagnosis.
+      logger.info('upstream trace linking enabled', { correlateDir, ttlMs: this.config.upstreamLink.ttlMs });
+    }
 
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
     const pilotDir = this.resolvePilotDir();
@@ -184,13 +217,17 @@ export class Orchestrator extends EventEmitter {
     this.agentDiscoveryService.on('agent:started', (id: string) => {
       logger.info('agent detected and started', { id });
     });
-    this.agentDiscoveryService.on('agent:stopped', (id: string) => {
-      logger.info('agent stopped', { id });
-      this.alarmManager.record(
-        'INPUT_STOP_ALARM', '3',
-        `input ${id} stopped unexpectedly`,
-        { input_name: id },
-      );
+    this.agentDiscoveryService.on('agent:stopped', (id: string, reason: AgentStopReason) => {
+      if (reason === 'unexpected') {
+        logger.warn('agent stopped unexpectedly', { id });
+        this.alarmManager.record(
+          'INPUT_STOP_ALARM', '3',
+          `input ${id} stopped unexpectedly (reason=unexpected)`,
+          { input_name: id },
+        );
+      } else {
+        logger.debug('agent stopped', { id, reason });
+      }
     });
     await this.agentDiscoveryService.start();
 
@@ -203,7 +240,11 @@ export class Orchestrator extends EventEmitter {
       ...HookWatchdog.defaultTargets(),
       ...this.buildHookWatchdogTargets(),
     ];
-    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets);
+    const interceptTargets = [
+      ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
+      ...this.buildPluginInjectInterceptTargets(),
+    ];
+    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
     this.hookWatchdog.start();
 
     // 11. Start updater watchdog only when resolved auto-update is enabled.
@@ -216,17 +257,18 @@ export class Orchestrator extends EventEmitter {
       this.updaterWatchdog.start();
     }
 
-    // 12. Start file collection pipelines (disabled by default)
-    if (this.config.fileCollection.enabled) {
-      this.fileCollectionManager = new FileCollectionManager({
+    // 12. Start pipeline subsystem (disabled by default)
+    if (this.config.pipeline.enabled) {
+      this.pipelineManager = new PipelineManager({
         configDir: path.join(this.dataDir, 'configs', 'local'),
-        stateDir: path.join(this.dataDir, 'state', 'file-collection'),
-        failedLogDir: path.join(this.dataDir, 'logs', 'file-collection-failed'),
+        stateDir: path.join(this.dataDir, 'state', 'pipeline'),
+        failedLogDir: path.join(this.dataDir, 'logs', 'pipeline-failed'),
         dataDir: this.dataDir,
+        pipelineConfig: this.config.pipeline,
       });
-      await this.fileCollectionManager.start();
+      await this.pipelineManager.start();
     } else {
-      logger.info('file collection disabled, skipping');
+      logger.info('pipeline subsystem disabled, skipping');
     }
 
     // 13. Start metrics writer (L1 + L2 every 10min, alarms every 30s → local JSONL + remote via sender.ts)
@@ -245,13 +287,15 @@ export class Orchestrator extends EventEmitter {
     });
     await this.metricsWriter.start();
 
-    // 14. Start status bar support (runtime.json + metrics summary + native app)
+    // 14. Always publish runtime health for service managers. The status bar UI
+    // may be disabled, but Windows Task Scheduler still needs runtime.json to
+    // distinguish a healthy collector from a task whose child process died.
+    const packageVersion = this.readPackageVersion();
+    this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
+    this.runtimeWriter.start();
+
+    // Status bar metrics/native UI remain optional.
     if (this.config.statusBar.enabled) {
-      const packageVersion = this.readPackageVersion();
-
-      this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
-      this.runtimeWriter.start();
-
       this.metricsSummaryWriter = new MetricsSummaryWriter(this.dataDir, this.config.statusBar);
       this.metricsSummaryWriter.start();
 
@@ -268,13 +312,16 @@ export class Orchestrator extends EventEmitter {
     logger.info('orchestrator started', {
       inputs: detectionEntries.length,
     });
+
+    this.legacySlsFailedLogCleanupService = new LegacySlsFailedLogCleanupService(this.dataDir);
+    this.legacySlsFailedLogCleanupService.start();
   }
 
   async stop(): Promise<void> {
     if (!this.isRunning) return;
     logger.info('stopping orchestrator');
 
-    await this.fileCollectionManager?.stop();
+    await this.pipelineManager?.stop();
     await this.metricsWriter?.stop();
     await this.statusBarAppManager?.stop('orchestrator-shutdown').catch(() => {});
     this.metricsSummaryWriter?.stop();
@@ -282,7 +329,10 @@ export class Orchestrator extends EventEmitter {
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
     this.hookWatchdog?.stop();
+    this.legacySlsFailedLogCleanupService?.stop();
+    this.legacySlsFailedLogCleanupService = null;
     this.logRetentionService?.stop();
+    this.acpCorrelateRetentionService?.stop();
     await this.localWorkerActivationService?.stop();
     await this.deploymentManager?.stopWorkers();
     await this.agentDiscoveryService?.stop();
@@ -362,6 +412,7 @@ export class Orchestrator extends EventEmitter {
       targets.push({
         agentId: def.id,
         settingsPath: def.hook.settingsPath,
+        settingsSyntax: def.hook.settingsSyntax,
         expectedHooks: def.hook.events,
         markers: [scriptName],
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
@@ -369,6 +420,62 @@ export class Orchestrator extends EventEmitter {
     }
 
     return targets;
+  }
+
+  /**
+   * Self-heal targets for plugin-inject agents (currently OpenCode).
+   *
+   * Unlike hook agents, these write a plugin spec into the agent's own config
+   * file (not a shared settings.json), so they use the intercept mechanism:
+   * an arbitrary check/repair pair rather than the hook-array-shaped
+   * PluginCheckTarget. The intercept runner also gives us cooldown + a daily
+   * repair cap, which bounds config rewrites (relevant because re-injecting
+   * into a JSONC config strips comments).
+   */
+  private buildPluginInjectInterceptTargets(): InterceptCheckTarget[] {
+    const defs = this.deploymentManager.getDefinitions();
+    const targets: InterceptCheckTarget[] = [];
+
+    for (const def of defs) {
+      if (def.deployMode !== 'plugin-inject' || !def.pluginInject) continue;
+
+      const pluginFile = this.resolvePluginSpecPath(def.pluginInject.pluginSpec);
+
+      targets.push({
+        id: `plugin-inject:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
+        precondition: async () => {
+          // Only self-heal when the plugin asset is actually deployed AND the
+          // agent is present. Otherwise repair would inject a spec pointing at
+          // a missing file, or fail repeatedly when no config file exists.
+          if (pluginFile && !(await fileExists(pluginFile))) return false;
+          return detectAgent(def.detection);
+        },
+        check: async () => {
+          // Healthy == spec still present in the agent's config file.
+          return !(await this.deploymentManager.needsRedeploy(def));
+        },
+        repair: async () => {
+          const result = await this.deploymentManager.deploySingle(def);
+          if (!result.success) {
+            throw new Error(result.error ?? `re-inject failed for ${def.id}`);
+          }
+        },
+      });
+    }
+
+    return targets;
+  }
+
+  /**
+   * Resolve a plugin spec to a local file path for existence checks.
+   * Returns null for non-file specs (e.g. npm package names), which skips the
+   * plugin-file precondition gate.
+   */
+  private resolvePluginSpecPath(spec: string): string | null {
+    const resolved = spec.replace(/\$PILOT_DATA/g, this.dataDir);
+    if (resolved.startsWith('file://')) return resolved.slice('file://'.length);
+    return path.isAbsolute(resolved) ? resolved : null;
   }
 
   private async buildFlusher(): Promise<BaseFlusher> {
@@ -393,15 +500,19 @@ export class Orchestrator extends EventEmitter {
       flushers.push(r);
     }
 
-    const otlpTraceCfg = buildOtlpTraceConfig(this.config);
-    if (otlpTraceCfg?.enabled) {
-      try {
+    try {
+      const otlpTraceCfg = buildOtlpTraceConfig(this.config);
+      if (otlpTraceCfg?.enabled && otlpTraceCfg.endpoints.length > 0) {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
-        const r = new OtlpTraceFlusher({ ...otlpTraceCfg, dataDir: this.dataDir });
+        const r = new OtlpTraceFlusher(
+          { ...otlpTraceCfg, dataDir: this.dataDir },
+          this.globalAttributesProvider,
+        );
         flushers.push(r);
-      } catch (err) {
-        logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
       }
+    } catch (err) {
+      // Never let a malformed trace config take down the other flushers.
+      logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
     }
 
     if (flushers.length === 0) {
@@ -701,7 +812,7 @@ export class Orchestrator extends EventEmitter {
       this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-cn-trace']) &&
       this.agentControlManager.resolveEnabled(
         'qoder-work-cn-trace',
-        listenerCfg['qoder-work-cn-trace']?.enabled ?? false,
+        listenerCfg['qoder-work-cn-trace']?.enabled ?? true,
       );
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkCNTraceInput, {
@@ -868,41 +979,73 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- Codex Log (OTel plugin JSONL) ---
-    const codexLogDir = this.resolveCodexLogDir();
-    const codexLogInput = new CodexLogInput({
+    // --- Kiro CLI Log (sqlite transcript + hook JSONL) ---
+    const kiroCliLogDir = this.resolveKiroCliLogDir();
+    // Eagerly create the log dir so kiro-cli-log's availability check
+    // (directoryExists) passes on first boot. Without this, the input
+    // never starts because the dir is only created later by the
+    // delayedCollect subprocess — a chicken-egg problem.
+    await ensureDir(kiroCliLogDir);
+    const kiroCliLogInput = new KiroCliLogInput({
       stateStore: this.stateStore,
-      logDir: codexLogDir,
+      logDir: kiroCliLogDir,
     });
-    this.inputManager.registerInput(codexLogInput);
+    this.inputManager.registerInput(kiroCliLogInput);
     entries.push(
-      this.inputManager.buildDetectionEntry(codexLogInput, {
-        watchPaths: [codexLogDir],
-        isAvailable: async () => directoryExists(codexLogDir),
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codex-log']) &&
+      this.inputManager.buildDetectionEntry(kiroCliLogInput, {
+        watchPaths: [kiroCliLogDir],
+        isAvailable: async () => directoryExists(kiroCliLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['kiro-cli-log']) &&
           this.agentControlManager.resolveEnabled(
-            'codex-log',
-            listenerCfg['codex-log']?.enabled ?? true,
+            'kiro-cli-log',
+            listenerCfg['kiro-cli-log']?.enabled ?? true,
           ),
-        pollIntervalMs: listenerCfg['codex-log']?.pollInterval,
+        pollIntervalMs: listenerCfg['kiro-cli-log']?.pollInterval,
       }),
     );
 
-    // --- Codex interrupted turns (transcript tailer) ---
-    const codexAbortedTurnInput = new CodexAbortedTurnInput({
+    // --- Kiro CLI Session (delayed sidecar scan, runs hook processor delayedCollect) ---
+    const kiroCliHookProcessorPath = path.join(
+      this.dataDir,
+      'hooks',
+      'kiro-cli-hook-processor.mjs',
+    );
+    const kiroCliSessionWatchPaths = KiroCliSessionInput.getWatchPaths(this.dataDir);
+    const kiroCliSessionInput = new KiroCliSessionInput({
+      stateStore: this.stateStore,
+      hookProcessorPath: kiroCliHookProcessorPath,
+      dataDir: this.dataDir,
+      pollIntervalMs: listenerCfg['kiro-cli-session']?.pollInterval,
+    });
+    this.inputManager.registerInput(kiroCliSessionInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(kiroCliSessionInput, {
+        watchPaths: kiroCliSessionWatchPaths,
+        isAvailable: async () => KiroCliSessionInput.checkAvailability(kiroCliHookProcessorPath),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['kiro-cli-session']) &&
+          this.agentControlManager.resolveEnabled(
+            'kiro-cli-session',
+            listenerCfg['kiro-cli-session']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['kiro-cli-session']?.pollInterval,
+      }),
+    );
+
+    // --- Codex rollout transcript (completed and interrupted turns) ---
+    const codexTranscriptInput = new CodexTranscriptInput({
       stateStore: this.stateStore,
     });
-    this.inputManager.registerInput(codexAbortedTurnInput);
+    this.inputManager.registerInput(codexTranscriptInput);
     entries.push(
-      this.inputManager.buildDetectionEntry(codexAbortedTurnInput, {
-        watchPaths: CodexAbortedTurnInput.getWatchPaths(),
-        isAvailable: CodexAbortedTurnInput.checkAvailability,
-        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codex-aborted-turn']) &&
+      this.inputManager.buildDetectionEntry(codexTranscriptInput, {
+        watchPaths: CodexTranscriptInput.getWatchPaths(),
+        isAvailable: CodexTranscriptInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codex-transcript']) &&
           this.agentControlManager.resolveEnabled(
-            'codex-aborted-turn',
-            listenerCfg['codex-aborted-turn']?.enabled ?? true,
+            'codex-transcript',
+            listenerCfg['codex-transcript']?.enabled ?? true,
           ),
-        pollIntervalMs: listenerCfg['codex-aborted-turn']?.pollInterval,
+        pollIntervalMs: listenerCfg['codex-transcript']?.pollInterval,
       }),
     );
 
@@ -928,6 +1071,27 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['opencode-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['opencode-log']?.pollInterval,
+      }),
+    );
+
+    // --- Pi Coding Agent Log (Pi extension JSONL) ---
+    const piCodingAgentLogDir = path.join(this.dataDir, 'logs', 'pi-coding-agent');
+    await ensurePiCodingAgentLogDir(piCodingAgentLogDir);
+    const piCodingAgentLogInput = new PiCodingAgentLogInput({
+      stateStore: this.stateStore,
+      logDir: piCodingAgentLogDir,
+    });
+    this.inputManager.registerInput(piCodingAgentLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(piCodingAgentLogInput, {
+        watchPaths: [piCodingAgentLogDir],
+        isAvailable: async () => directoryExists(piCodingAgentLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['pi-coding-agent-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'pi-coding-agent-log',
+            listenerCfg['pi-coding-agent-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['pi-coding-agent-log']?.pollInterval,
       }),
     );
 
@@ -966,26 +1130,11 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['wukong']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['wukong']?.pollInterval,
+        unavailableThreshold: 3,
       }),
     );
 
     return entries;
-  }
-
-  private resolveCodexLogDir(): string {
-    try {
-      const configPath = path.join(os.homedir(), '.codex', 'otel-config.json');
-      const raw = fs.readFileSync(configPath, 'utf-8');
-      const cfg = JSON.parse(raw);
-      if (cfg.log_dir && typeof cfg.log_dir === 'string') {
-        return cfg.log_dir.replace(/^~/, os.homedir());
-      }
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        logger.warn('failed to read codex otel-config.json', { error: String(err) });
-      }
-    }
-    return path.join(this.dataDir, 'logs', 'codex');
   }
 
   private resolveClaudeCodeLogDir(): string {
@@ -1002,6 +1151,10 @@ export class Orchestrator extends EventEmitter {
       }
     }
     return path.join(this.dataDir, 'logs', 'claude-code');
+  }
+
+  private resolveKiroCliLogDir(): string {
+    return path.join(this.dataDir, 'logs', 'kiro-cli');
   }
 
   /**
@@ -1131,4 +1284,3 @@ export class Orchestrator extends EventEmitter {
     return this.alarmManager;
   }
 }
-

@@ -34,6 +34,22 @@ describe('serialiseLogEntry', () => {
     expect(out['agent.custom_key']).toBe('customVal');
   });
 
+  it('drops agent-scoped extension fields when requested', () => {
+    const out = serialiseLogEntry(makeEntry({
+      'agent.qoder.cwd': '/workspace/project',
+      'agent.cursor.hook_event_name': 'preToolUse',
+      'agent.qoderwork.promptId': 'prompt-1',
+      'agent.custom_key': 'customVal',
+    }), { dropAgentScopedFields: true });
+
+    expect(out).not.toHaveProperty('agent.qoder.cwd');
+    expect(out).not.toHaveProperty('agent.cursor.hook_event_name');
+    expect(out).not.toHaveProperty('agent.qoderwork.promptId');
+    expect(out['agent.custom_key']).toBe('customVal');
+    expect(out['agent.file_path']).toBe('/src/app.ts');
+    expect(out['gen_ai.agent.type']).toBe('qoder');
+  });
+
   it('converts scalar values to strings', () => {
     const out = serialiseLogEntry(makeEntry({
       'gen_ai.usage.input_tokens': 42,

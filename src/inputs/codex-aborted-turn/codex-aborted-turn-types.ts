@@ -66,6 +66,7 @@ export interface CodexTokenUsage {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  cacheCreationTokens: number;
   reasoningOutputTokens?: number;
   totalTokens: number;
 }

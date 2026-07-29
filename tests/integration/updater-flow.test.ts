@@ -133,13 +133,24 @@ describe('Updater integration (real filesystem)', () => {
     realExec = realUtil.promisify(realCp.execFile) as any;
   });
 
-  function setupExecFileRouting(opts?: { npmFails?: boolean }) {
+  function setupExecFileRouting(opts?: {
+    npmFails?: boolean;
+    sqliteHealthCheckFails?: boolean;
+  }) {
     mockExecFile.mockImplementation((cmd: string, args: string[], execOpts: any) => {
       if (cmd === 'tar') {
         return realExec(cmd, args, execOpts);
       }
       if (cmd === 'npm' && opts?.npmFails) {
         return Promise.reject(new Error('npm ERR!'));
+      }
+      if (
+        cmd === process.execPath
+        && args[0] === '-e'
+        && args[1] === "require('sqlite3')"
+        && opts?.sqliteHealthCheckFails
+      ) {
+        return Promise.reject(new Error('Could not locate the bindings file'));
       }
       return Promise.resolve({ stdout: '', stderr: '' });
     });
@@ -183,6 +194,39 @@ describe('Updater integration (real filesystem)', () => {
 
     expect(await readPointer('current')).toBe('1.0.1_aaa');
     expect(await readPointer('previous')).toBeNull();
+  });
+
+  // ─── sqlite3 health check failure → no activation ─────
+
+  it('does NOT update pointers or restart collector when sqlite3 health check fails', async () => {
+    const v1Dir = await createFakeVersion('1.0.1', 'aaa');
+    await setCurrentPointer(v1Dir);
+    await fs.writeFile(path.join(testDir, 'previous'), '1.0.0_old\n');
+
+    const { tarballBytes, sha256 } = await createFakeTarball('1.0.2', 'bbb');
+    mockFetchForUpgrade(tarballBytes, {
+      version: '1.0.2', git_commit: 'bbb',
+      package_url: 'https://example.com/pkg.tar.gz', sha256,
+    });
+    setupExecFileRouting({ sqliteHealthCheckFails: true });
+
+    const updater = new Updater(makeConfig(), testDir);
+    await updater.check();
+
+    expect(mockExecFile).toHaveBeenCalledWith(
+      process.execPath,
+      ['-e', "require('sqlite3')"],
+      expect.objectContaining({
+        cwd: path.join(testDir, 'versions', '1.0.2_bbb.candidate'),
+        env: expect.any(Object),
+      }),
+    );
+    expect(await readPointer('current')).toBe('1.0.1_aaa');
+    expect(await readPointer('previous')).toBe('1.0.0_old');
+    const restartCalls = mockExecFile.mock.calls.filter(
+      ([, args]: [string, string[]]) => args.includes('restart-collector'),
+    );
+    expect(restartCalls).toHaveLength(0);
   });
 
   // ─── SHA-256 mismatch → no pointer update ─────────────

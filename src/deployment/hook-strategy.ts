@@ -1,3 +1,4 @@
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type {
   AgentDefinition,
@@ -7,7 +8,14 @@ import type {
   DeployedAgentRecord,
 } from '../types/index.js';
 import { HookManager, type HookDefinition } from '../hooks/hook-manager.js';
-import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
+import {
+  fileExists,
+  readJsonFile,
+  writeJsonFile,
+  writeTextFileAtomic,
+  resolveHome,
+  ensureDir,
+} from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 import {
@@ -32,7 +40,7 @@ function eventToSubcommand(event: string): string {
  * piping to work correctly.  Bare `.ps1` paths fail to receive stdin when
  * spawned through cmd.exe / child_process.
  */
-function wrapPs1Command(cmd: string): string {
+function wrapLegacyPs1Command(cmd: string): string {
   if (process.platform !== 'win32') return cmd;
   const parts = cmd.split(' ');
   const script = parts[0];
@@ -40,6 +48,33 @@ function wrapPs1Command(cmd: string): string {
   const args = parts.slice(1).join(' ');
   const wrapped = `powershell -NoProfile -ExecutionPolicy Bypass -File ${script}`;
   return args ? `${wrapped} ${args}` : wrapped;
+}
+
+function wrapPs1Command(cmd: string, agentId: string): string {
+  if (process.platform !== 'win32' || agentId !== 'codex') {
+    return wrapLegacyPs1Command(cmd);
+  }
+
+  const match = cmd.match(/^(.*?\.ps1)(?:\s+(.*))?$/i);
+  if (!match) return cmd;
+  const script = match[1];
+  const args = match[2] ?? '';
+  const wrapped = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${script}"`;
+  return args ? `${wrapped} ${args}` : wrapped;
+}
+
+function appendEventSubcommand(
+  command: string,
+  event: string,
+  style: AgentHookConfig['eventSubcommand'],
+): string {
+  if (style === 'kebab-case') {
+    return `${command} ${eventToSubcommand(event)}`;
+  }
+  if (style === 'as-is') {
+    return `${command} ${event}`;
+  }
+  return command;
 }
 
 /**
@@ -50,12 +85,24 @@ function formatHookCommand(
   hookCommand: string,
   event: string,
   style: AgentHookConfig['eventSubcommand'],
+  agentId: string,
 ): string {
-  const cmd = wrapPs1Command(hookCommand);
-  if (style === 'kebab-case') {
-    return `${cmd} ${eventToSubcommand(event)}`;
-  }
-  return cmd;
+  return appendEventSubcommand(wrapPs1Command(hookCommand, agentId), event, style);
+}
+
+function legacyCodexHookCommands(
+  hookCommand: string,
+  event: string,
+  style: AgentHookConfig['eventSubcommand'],
+  agentId: string,
+): string[] {
+  if (process.platform !== 'win32' || agentId !== 'codex') return [];
+
+  const current = formatHookCommand(hookCommand, event, style, agentId);
+  return [...new Set([
+    appendEventSubcommand(hookCommand, event, style),
+    appendEventSubcommand(wrapLegacyPs1Command(hookCommand), event, style),
+  ])].filter(command => command !== current);
 }
 
 export class HookStrategy implements DeployStrategy {
@@ -74,11 +121,23 @@ export class HookStrategy implements DeployStrategy {
       return true;
     }
 
+    if (def.hook?.kiroAgent) {
+      return this.kiroAgentNeedsDeploy(def);
+    }
+
     const hookDefs = this.buildHookDefinitions(def);
     for (const hookDef of hookDefs) {
       if (!(await this.hookManager.isHookInstalled(hookDef))) {
         return true;
       }
+    }
+    for (const retiredDef of this.buildRetiredHookDefinitions(def)) {
+      if (await this.hookManager.isHookInstalled(retiredDef)) {
+        return true;
+      }
+    }
+    if (await this.needsTrustRepairForCodex(def)) {
+      return true;
     }
     return false;
   }
@@ -94,6 +153,28 @@ export class HookStrategy implements DeployStrategy {
     return existing?.version !== undefined;
   }
 
+  private async needsTrustRepairForCodex(def: AgentDefinition): Promise<boolean> {
+    const cfg = def.hook?.trustToml;
+    if (!cfg || !def.hook) return false;
+
+    const hookCommand = resolveHome(def.hook.hookCommand);
+    const eventToCommand: Record<string, string> = {};
+    for (const event of def.hook.events) {
+      eventToCommand[event] = formatHookCommand(
+        hookCommand, event, def.hook.eventSubcommand, def.id,
+      );
+    }
+    const eventToGroupIndex = await this.resolveGroupIndices(def);
+    return !verifyTrustHashes({
+      configPath: resolveHome(cfg.configPath),
+      hooksJsonAbsPath: path.resolve(resolveHome(def.hook.settingsPath)),
+      hookEvents: def.hook.events,
+      eventToCommand,
+      eventToGroupIndex,
+      marker: cfg.marker,
+    }).valid;
+  }
+
   async deploy(def: AgentDefinition): Promise<DeployResult> {
     const hookConfig = def.hook;
     if (!hookConfig) {
@@ -102,6 +183,36 @@ export class HookStrategy implements DeployStrategy {
 
     try {
       await this.ensureSettingsFile(hookConfig.settingsPath);
+
+      // Kiro CLI: settingsPath 是整个 Agent 定义 JSON，需要顶层 name + tools +
+      // hooks:<event>:[{command, matcher}]（flat，无 type 字段）。
+      // NOTE: this branch returns early — it does NOT run retiredEvents cleanup
+      // or env injection (applyEnvToSettings). kiro-cli.json currently declares
+      // neither field, so this is a no-op today; if retiredEvents/env are added
+      // later, deployKiroAgent must handle them explicitly (or route through the
+      // standard flow) — don't assume the shared path covers them.
+      if (hookConfig.kiroAgent) {
+        await this.deployKiroAgent(def);
+        logger.info('hooks deployed', { agentId: def.id, events: hookConfig.events.length });
+        return { success: true, agentId: def.id, deployMode: 'hook' };
+      }
+
+      const retiredHookDefs = this.buildRetiredHookDefinitions(def);
+      for (const retiredHookDef of retiredHookDefs) {
+        const removed = await this.hookManager.uninstallHook(retiredHookDef);
+        if (!removed) {
+          return { success: false, agentId: def.id, deployMode: 'hook', error: 'failed to remove retired hook event' };
+        }
+      }
+      if (hookConfig.trustToml && retiredHookDefs.length > 0) {
+        const trust = hookConfig.trustToml;
+        removeTrustBlock(
+          resolveHome(trust.configPath),
+          trust.marker,
+          path.resolve(resolveHome(hookConfig.settingsPath)),
+          retiredHookDefs.map(definition => definition.hookJsonPath.at(-1)!),
+        );
+      }
 
       if (hookConfig.env) {
         try {
@@ -182,7 +293,7 @@ export class HookStrategy implements DeployStrategy {
     // 构建 event → 实际写入 hooks.json 的完整 command(与 buildHookDefinitions 一致)
     const eventToCmd: Record<string, string> = {};
     for (const ev of def.hook!.events) {
-      eventToCmd[ev] = formatHookCommand(hookCommand, ev, def.hook!.eventSubcommand);
+      eventToCmd[ev] = formatHookCommand(hookCommand, ev, def.hook!.eventSubcommand, def.id);
     }
 
     // 回读 hooks.json,算出每个 event 中 pilot hook 的实际 group index。
@@ -262,7 +373,7 @@ export class HookStrategy implements DeployStrategy {
       for (const event of def.hook!.events) {
         const arr = hooks[event];
         if (!Array.isArray(arr)) continue;
-        const cmd = formatHookCommand(hookCommand, event, def.hook!.eventSubcommand);
+        const cmd = formatHookCommand(hookCommand, event, def.hook!.eventSubcommand, def.id);
         for (let i = 0; i < arr.length; i++) {
           const entry = arr[i];
           // nested: {hooks: [{command}]}
@@ -293,14 +404,45 @@ export class HookStrategy implements DeployStrategy {
     return hookConfig.events.map(event => ({
       agentId: def.id,
       settingsPath: hookConfig.settingsPath,
+      settingsSyntax: hookConfig.settingsSyntax,
       hookJsonPath: ['hooks', event],
       hookCommand: formatHookCommand(
-        hookConfig.hookCommand, event, hookConfig.eventSubcommand,
+        hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
       ),
       matcher: hookConfig.matcher,
       useNestedFormat: hookConfig.format === 'nested',
-      replaceHookCommands: hookConfig.replaceHookCommands,
+      replaceHookCommands: [
+        ...(hookConfig.replaceHookCommands ?? []),
+        ...legacyCodexHookCommands(
+          hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
+        ),
+      ],
     }));
+  }
+
+  private buildRetiredHookDefinitions(def: AgentDefinition): HookDefinition[] {
+    const hookConfig = def.hook;
+    if (!hookConfig?.retiredEvents?.length) return [];
+    const currentEvents = new Set(hookConfig.events);
+    return [...new Set(hookConfig.retiredEvents)]
+      .filter(event => !currentEvents.has(event))
+      .map(event => ({
+        agentId: def.id,
+        settingsPath: hookConfig.settingsPath,
+        settingsSyntax: hookConfig.settingsSyntax,
+        hookJsonPath: ['hooks', event],
+        hookCommand: formatHookCommand(
+          hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
+        ),
+        matcher: hookConfig.matcher,
+        useNestedFormat: hookConfig.format === 'nested',
+        replaceHookCommands: [
+          ...(hookConfig.replaceHookCommands ?? []),
+          ...legacyCodexHookCommands(
+            hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
+          ),
+        ],
+      }));
   }
 
   /**
@@ -360,23 +502,131 @@ export class HookStrategy implements DeployStrategy {
   }
 
   /**
+   * Kiro CLI Agent 定义 JSON（~/.kiro/agents/<name>.json）专用 deploy。
+   *
+   * 文件结构（round3 实证，hook.rs Hook 扁平结构无 type 字段）：
+   *   { "name": "...", "tools": [...], "hooks": { "<event>": [{"command": "..."}] } }
+   * 每个 hook 条目是 flat {command, matcher?}（无 type 字段，否则 Kiro loader 拒绝）。
+   */
+  private async deployKiroAgent(def: AgentDefinition): Promise<void> {
+    const hookConfig = def.hook!;
+    const settingsPath = resolveHome(hookConfig.settingsPath);
+    const agent = hookConfig.kiroAgent!;
+    const hookCommandBase = resolveHome(hookConfig.hookCommand);
+
+    await ensureDir(path.dirname(settingsPath));
+    const existing = (await readJsonFile<Record<string, unknown>>(settingsPath)) ?? {};
+
+    const merged: Record<string, unknown> = { ...existing };
+    merged['name'] = agent.name;
+    merged['tools'] = agent.tools;
+
+    const hooks = (merged['hooks'] && typeof merged['hooks'] === 'object')
+      ? { ...(merged['hooks'] as Record<string, unknown>) }
+      : {};
+
+    for (const event of hookConfig.events) {
+      const cmd = formatHookCommand(hookCommandBase, event, hookConfig.eventSubcommand, def.id);
+      const entry: Record<string, unknown> = { command: cmd };
+      if (hookConfig.matcher) entry['matcher'] = hookConfig.matcher;
+
+      const arr = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
+      // 移除旧的 pilot hook 条目（command 以 hookCommandBase 开头），保留第三方
+      const filtered = arr.filter((e) => {
+        const existingCmd = (e as any)?.command;
+        return typeof existingCmd !== 'string' || !existingCmd.startsWith(hookCommandBase);
+      });
+      // 幂等：已存在则不重复 push
+      const present = filtered.some((e) => (e as any)?.command === cmd);
+      if (!present) filtered.push(entry);
+      hooks[event] = filtered;
+    }
+
+    merged['hooks'] = hooks;
+    await writeJsonFile(settingsPath, merged);
+
+    // Make pilot-kiro the default agent so users can run `kiro-cli` without
+    // `--agent pilot-kiro`. Only set when missing — don't override a user's
+    // explicit choice (they can still pass --agent for a one-off override).
+    await this.setKiroDefaultAgentIfMissing(agent.name);
+  }
+
+  /**
+   * Set `chat.defaultAgent = <agentName>` in ~/.kiro/settings/cli.json when not
+   * already set, so kiro-cli launches with the pilot agent by default.
+   */
+  private async setKiroDefaultAgentIfMissing(agentName: string): Promise<void> {
+    // NOTE: distinct from hookConfig.settingsPath (~/.kiro/agents/pilot-kiro.json).
+    // This is Kiro's CLI-level settings file — a different concern (default-agent
+    // selection, not the agent definition). Kiro fixes both paths; if the config
+    // root ever moves, update this literal alongside settingsPath rather than
+    // coupling them via a new config field (they're not 1:1 related).
+    const cliSettingsPath = resolveHome('~/.kiro/settings/cli.json');
+    try {
+      await ensureDir(path.dirname(cliSettingsPath));
+      const cli = (await readJsonFile<Record<string, unknown>>(cliSettingsPath)) ?? {};
+      const cur = cli['chat.defaultAgent'];
+      if (typeof cur === 'string' && cur.length > 0) return; // respect existing choice
+      cli['chat.defaultAgent'] = agentName;
+      await writeJsonFile(cliSettingsPath, cli);
+      logger.info('kiro default agent set', { path: cliSettingsPath, agent: agentName });
+    } catch (err) {
+      logger.warn('failed to set kiro default agent', { error: String(err) });
+    }
+  }
+
+  private async kiroAgentNeedsDeploy(def: AgentDefinition): Promise<boolean> {
+    const hookConfig = def.hook!;
+    const settings = await readJsonFile<Record<string, unknown>>(resolveHome(hookConfig.settingsPath));
+    if (!settings) return true;
+    const hooks = settings['hooks'] as Record<string, unknown> | undefined;
+    if (!hooks || typeof hooks !== 'object') return true;
+    const base = resolveHome(hookConfig.hookCommand);
+    for (const event of hookConfig.events) {
+      const cmd = formatHookCommand(base, event, hookConfig.eventSubcommand, def.id);
+      const arr = hooks[event];
+      if (!Array.isArray(arr)) return true;
+      const found = arr.some((e) => (e as any)?.command === cmd);
+      if (!found) return true;
+    }
+    return false;
+  }
+
+  /**
    * Ensure the settings file exists with a valid structure.
    * Cursor's hooks.json requires a `version` field; Codex's does NOT
    * (Codex uses `#[serde(deny_unknown_fields)]` and only allows `hooks`).
    */
   private async ensureSettingsFile(settingsPath: string): Promise<void> {
     const isHooksJson = settingsPath.endsWith('hooks.json');
-    const needsVersion = isHooksJson && settingsPath.includes('.cursor');
+    if (!isHooksJson) return;
 
+    const needsVersion = isHooksJson && settingsPath.includes('.cursor');
+    const existed = await fileExists(settingsPath);
     const existing = await readJsonFile<Record<string, unknown>>(settingsPath);
-    if (!existing) {
-      if (isHooksJson) {
-        const initial: Record<string, unknown> = { hooks: {} };
-        if (needsVersion) {
-          initial.version = 1;
-        }
-        await writeJsonFile(settingsPath, initial);
+    if (existed && !existing) {
+      const raw = await fs.readFile(settingsPath, 'utf8');
+      if (raw.trim() !== '') {
+        throw new Error(`refusing to overwrite invalid settings: ${settingsPath}`);
       }
+
+      const initial: Record<string, unknown> = { hooks: {} };
+      if (needsVersion) {
+        initial.version = 1;
+      }
+      await writeTextFileAtomic(
+        settingsPath,
+        `${JSON.stringify(initial, null, 2)}\n`,
+        { expected: { exists: true, content: raw } },
+      );
+      return;
+    }
+    if (!existing) {
+      const initial: Record<string, unknown> = { hooks: {} };
+      if (needsVersion) {
+        initial.version = 1;
+      }
+      await writeJsonFile(settingsPath, initial);
     } else if (needsVersion && existing.version === undefined) {
       existing.version = 1;
       await writeJsonFile(settingsPath, existing);

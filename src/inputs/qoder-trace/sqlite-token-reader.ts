@@ -18,9 +18,15 @@ export interface SqliteTokenData {
   model?: string;
 }
 
-export async function readSqliteTokensForSession(sessionId: string): Promise<SqliteTokenData[]> {
-  const dbPath = resolveQoderDbPath();
-  if (!dbPath) return [];
+export interface SqliteTokenResult {
+  rows: SqliteTokenData[];
+  /** The DB path that contained the session data, for caller-side variant detection. */
+  matchedDbPath: string | null;
+}
+
+export async function readSqliteTokensForSession(sessionId: string): Promise<SqliteTokenResult> {
+  const dbPaths = resolveAllQoderDbPaths();
+  if (dbPaths.length === 0) return { rows: [], matchedDbPath: null };
 
   const sql = `
     SELECT
@@ -41,43 +47,59 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
     ORDER BY cm.gmt_create ASC
   `;
 
-  let rows: Array<{
-    message_id?: string;
-    session_id?: string;
-    request_id: string;
-    gmt_create: number;
-    token_info: string;
-    model_info?: string | null;
-    record_extra?: string | null;
-  }>;
-  try {
-    rows = await queryReadonly(dbPath, sql, [sessionId]);
-  } catch (err) {
-    logger.debug('sqlite query failed', { sessionId, error: String(err) });
-    return [];
-  }
+  for (const dbPath of dbPaths) {
+    let rows: Array<{
+      message_id?: string;
+      session_id?: string;
+      request_id: string;
+      gmt_create: number;
+      token_info: string;
+      model_info?: string | null;
+      record_extra?: string | null;
+    }>;
+    try {
+      rows = await queryReadonly(dbPath, sql, [sessionId]);
+    } catch (err) {
+      logger.debug('sqlite query failed', { sessionId, dbPath, error: String(err) });
+      continue;
+    }
 
-  const results: SqliteTokenData[] = [];
-  for (const row of rows) {
-    const info = parseTokenInfo(row.token_info);
-    if (!info) continue;
-    results.push({
-      sessionId: row.session_id ?? '',
-      requestId: row.request_id ?? '',
-      messageId: row.message_id ?? '',
-      gmtCreate: row.gmt_create,
-      inputTokens: info.promptTokens,
-      outputTokens: info.completionTokens,
-      cacheReadTokens: info.cachedTokens,
-      model: parseModelKey(row.model_info) ?? parseRecordModelKey(row.record_extra),
-    });
+    if (rows.length === 0) continue;
+
+    const results: SqliteTokenData[] = [];
+    for (const row of rows) {
+      const info = parseTokenInfo(row.token_info);
+      if (!info) continue;
+      results.push({
+        sessionId: row.session_id ?? '',
+        requestId: row.request_id ?? '',
+        messageId: row.message_id ?? '',
+        gmtCreate: row.gmt_create,
+        inputTokens: info.promptTokens,
+        outputTokens: info.completionTokens,
+        cacheReadTokens: info.cachedTokens,
+        model: parseModelKey(row.model_info) ?? parseRecordModelKey(row.record_extra),
+      });
+    }
+    if (results.length > 0) return { rows: results, matchedDbPath: dbPath };
   }
-  return results;
+  return { rows: [], matchedDbPath: null };
 }
 
-function resolveQoderDbPath(): string | null {
+/**
+ * Determine if a matched DB path belongs to the IntelliJ-specific database.
+ * Normalizes path separators to handle Windows backslashes correctly.
+ */
+export function isIdeaDbPath(dbPath: string | null): boolean {
+  if (!dbPath) return false;
+  const normalized = dbPath.replace(/\\/g, '/');
+  return normalized.includes('.qoder/shared_client');
+}
+
+function resolveAllQoderDbPaths(): string[] {
   // Qoder Desktop (Electron app) keeps SQLite under platform app-support.
   // Qoder for JetBrains shares state through ~/.qoder/shared_client/.
+  // Both may coexist on the same machine with different sessions, so we return ALL accessible paths.
   const appdata = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
   const candidates = process.platform === 'darwin'
     ? [
@@ -94,17 +116,16 @@ function resolveQoderDbPath(): string | null {
           resolveHome('~/.qoder/shared_client/cache/db/local.db'),
         ];
 
-  // Sync access check: only runs once per collect cycle for a fixed set of paths.
-  // Acceptable because the path list is small (1-2 candidates) and the result is cached by callers.
+  const available: string[] = [];
   for (const candidate of candidates) {
     try {
       fs.accessSync(candidate);
-      return candidate;
+      available.push(candidate);
     } catch {
       continue;
     }
   }
-  return null;
+  return available;
 }
 
 function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: number; cachedTokens: number } | null {

@@ -1,8 +1,15 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { enrichCliTurn, enrichIdeTurn, injectTraceId } from '../../../src/inputs/qoder-trace/token-enricher.js';
+import { QoderTraceInput } from '../../../src/inputs/qoder-trace/qoder-trace-input.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
+import type { InterceptTokenData } from '../../../src/inputs/qoder-trace/intercept-token-reader.js';
 import type { SegmentTokenData } from '../../../src/inputs/qoder-trace/segment-token-reader.js';
 import type { SqliteTokenData } from '../../../src/inputs/qoder-trace/sqlite-token-reader.js';
+import { getTodayDateString } from '../../../src/utils/fs-utils.js';
+import { MockStateStore } from '../../helpers/mock-state-store.js';
 
 function makeEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEntry {
   return {
@@ -15,6 +22,19 @@ function makeEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEn
     time_unix_nano: '1780000001000000000',
     ...overrides,
   } as AgentActivityEntry;
+}
+
+function makeIntercept(overrides: Partial<InterceptTokenData> = {}): InterceptTokenData {
+  return {
+    id: 'chatcmpl-A',
+    ts: 1780000002000,
+    promptTokens: 1200,
+    completionTokens: 80,
+    cachedTokens: 900,
+    reasoningTokens: 0,
+    totalTokens: 1280,
+    ...overrides,
+  };
 }
 
 describe('QoderTraceInput token-enricher', () => {
@@ -160,6 +180,106 @@ describe('QoderTraceInput token-enricher', () => {
       enrichCliTurn(entries, []);
 
       expect(entries[0]['gen_ai.usage.input_tokens']).toBeUndefined();
+    });
+
+    it('uses intercept by response id when the segment request id is different', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({ 'gen_ai.response.id': 'chatcmpl-A' }),
+      ];
+      const segments: SegmentTokenData[] = [{
+        requestId: 'segment-uuid-A',
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        requestStartTs: 1780000000000,
+        responseEndTs: 1780000002000,
+        toolFinishedTs: 0,
+        stopReason: 'end_turn',
+        model: 'auto',
+      }];
+
+      enrichCliTurn(entries, segments, undefined, [makeIntercept()]);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(1200);
+      expect(entries[0]['gen_ai.usage.output_tokens']).toBe(80);
+      expect(entries[0]['gen_ai.usage.cache_read.input_tokens']).toBe(900);
+      expect(entries[0]['gen_ai.usage.total_tokens']).toBe(1280);
+    });
+
+    it('gives intercept usage priority over non-zero segment and existing usage', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'chatcmpl-A',
+          'gen_ai.usage.input_tokens': 10,
+          'gen_ai.usage.output_tokens': 1,
+          'gen_ai.usage.total_tokens': 11,
+        }),
+      ];
+      const segments: SegmentTokenData[] = [{
+        requestId: 'chatcmpl-A',
+        inputTokens: 5000,
+        outputTokens: 200,
+        cacheReadTokens: 3000,
+        cacheCreationTokens: 100,
+        requestStartTs: 0,
+        responseEndTs: 0,
+        toolFinishedTs: 0,
+        stopReason: '',
+        model: '',
+      }];
+
+      enrichCliTurn(entries, segments, undefined, [makeIntercept()]);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(1200);
+      expect(entries[0]['gen_ai.usage.output_tokens']).toBe(80);
+      expect(entries[0]['gen_ai.usage.cache_read.input_tokens']).toBe(900);
+      expect(entries[0]['gen_ai.usage.total_tokens']).toBe(1280);
+    });
+
+    it('uses segment only as fallback and does not replace existing positive usage', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'gen_ai.response.id': 'req-A',
+          'gen_ai.usage.input_tokens': 700,
+          'gen_ai.usage.output_tokens': 30,
+          'gen_ai.usage.total_tokens': 730,
+        }),
+      ];
+      const segments: SegmentTokenData[] = [{
+        requestId: 'req-A',
+        inputTokens: 5000,
+        outputTokens: 200,
+        cacheReadTokens: 3000,
+        cacheCreationTokens: 0,
+        requestStartTs: 0,
+        responseEndTs: 0,
+        toolFinishedTs: 0,
+        stopReason: '',
+        model: '',
+      }];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(700);
+      expect(entries[0]['gen_ai.usage.output_tokens']).toBe(30);
+      expect(entries[0]['gen_ai.usage.total_tokens']).toBe(730);
+    });
+
+    it('uses the newest valid intercept record and derives total when absent', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({ 'gen_ai.response.id': 'chatcmpl-A' }),
+      ];
+      const intercepts = [
+        makeIntercept({ ts: 100, promptTokens: 100, completionTokens: 10, totalTokens: 110 }),
+        makeIntercept({ ts: 200, promptTokens: 150, completionTokens: 20, totalTokens: 0 }),
+      ];
+
+      enrichCliTurn(entries, [], undefined, intercepts);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(150);
+      expect(entries[0]['gen_ai.usage.output_tokens']).toBe(20);
+      expect(entries[0]['gen_ai.usage.total_tokens']).toBe(170);
     });
   });
 
@@ -356,7 +476,7 @@ describe('QoderTraceInput token-enricher', () => {
       expect(entries[1]['gen_ai.response.model']).toBe('gm51model');
     });
 
-    it('does not match if timestamp difference exceeds 1000ms', () => {
+    it('does not match if timestamp difference exceeds the fallback window (5000ms)', () => {
       const entries: AgentActivityEntry[] = [
         makeEntry({
           'event.name': 'llm.response',
@@ -366,7 +486,7 @@ describe('QoderTraceInput token-enricher', () => {
       ];
       const sqliteRows: SqliteTokenData[] = [{
         requestId: 'sqlite-req-far',
-        gmtCreate: 1780000002000,
+        gmtCreate: 1780000006000, // 6000ms away → beyond the widened 5000ms window
         inputTokens: 9999,
         outputTokens: 99,
         cacheReadTokens: 0,
@@ -376,6 +496,27 @@ describe('QoderTraceInput token-enricher', () => {
 
       // Unmatched entries get 0 (not undefined) for consistent AGENT aggregation
       expect(entries[0]['gen_ai.usage.input_tokens']).toBe(0);
+    });
+
+    it('matches within the widened window (2000ms, previously rejected)', () => {
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.agent.type': 'qoder',
+          time_unix_nano: '1780000000000000000',
+        }),
+      ];
+      const sqliteRows: SqliteTokenData[] = [{
+        requestId: 'sqlite-req-near',
+        gmtCreate: 1780000002000, // 2000ms away → now within the 5000ms fallback
+        inputTokens: 777,
+        outputTokens: 9,
+        cacheReadTokens: 0,
+      }];
+
+      enrichIdeTurn(entries, sqliteRows);
+
+      expect(entries[0]['gen_ai.usage.input_tokens']).toBe(777);
     });
 
     it('handles empty SQLite data gracefully', () => {
@@ -472,5 +613,98 @@ describe('QoderTraceInput token-enricher', () => {
     it('does nothing for empty array', () => {
       expect(() => injectTraceId([])).not.toThrow();
     });
+  });
+});
+
+describe('QoderTraceInput bootstrap history filtering', () => {
+  it('consumes every session batch created after startup with an empty history', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-empty-start-'));
+    try {
+      const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+      const logFile = path.join(tmpDir, logFileName);
+      const record = (id: string, turnId: string, batchId: string) => ({
+        'event.id': id,
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': 'qoder',
+        'gen_ai.session.id': batchId,
+        'gen_ai.turn.id': turnId,
+        'agent.transcript.cursor_mode': 'bootstrap',
+        'agent.transcript.cursor_batch_id': batchId,
+        time_unix_nano: '1780000000000000000',
+      });
+      const stateStore = new MockStateStore();
+      const input = new QoderTraceInput({
+        stateStore: stateStore as any,
+        logDir: tmpDir,
+        pollIntervalMs: 60_000,
+      });
+
+      await input.start();
+      expect(stateStore.get('qoder-trace')).toMatchObject({
+        lastFile: logFileName,
+        lastOffset: 0,
+        extra: { hookHistoryInitialized: true },
+      });
+
+      await fs.writeFile(logFile, [
+        record('session-a-old', 'session-a-old-turn', 'session-a-batch'),
+        record('session-a-latest', 'session-a-latest-turn', 'session-a-batch'),
+        record('session-b-old', 'session-b-old-turn', 'session-b-batch'),
+        record('session-b-latest', 'session-b-latest-turn', 'session-b-batch'),
+      ].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+
+      const entries = await (input as any).collect() as AgentActivityEntry[];
+      await input.stop();
+      expect(entries.map(entry => entry['event.id'])).toEqual([
+        'session-a-latest',
+        'session-b-latest',
+      ]);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('protects every later old-session batch after the global file state is initialized', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-bootstrap-'));
+    try {
+      const logFileName = `qoder-${getTodayDateString()}.jsonl`;
+      const logFile = path.join(tmpDir, logFileName);
+      const record = (id: string, turnId: string, batchId: string) => ({
+        'event.id': id,
+        'event.name': 'llm.response',
+        'gen_ai.agent.type': 'qoder',
+        'gen_ai.turn.id': turnId,
+        'agent.transcript.cursor_mode': 'bootstrap',
+        'agent.transcript.cursor_batch_id': batchId,
+        time_unix_nano: '1780000000000000000',
+      });
+      await fs.writeFile(logFile, [
+        record('session-a-old', 'session-a-old-turn', 'session-a-batch'),
+        record('session-a-latest', 'session-a-latest-turn', 'session-a-batch'),
+        record('session-b-old', 'session-b-old-turn', 'session-b-batch'),
+        record('session-b-latest', 'session-b-latest-turn', 'session-b-batch'),
+      ].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+
+      const stateStore = new MockStateStore();
+      // lastFile proves the process-level cold start already occurred before
+      // these old sessions first appeared.
+      stateStore.set('qoder-trace', { lastFile: logFileName, lastOffset: 0 });
+      const input = new QoderTraceInput({
+        stateStore: stateStore as any,
+        logDir: tmpDir,
+        pollIntervalMs: 60_000,
+      });
+      const entries: AgentActivityEntry[] = [];
+      input.on('entries', batch => entries.push(...batch));
+      await input.start();
+      await input.stop();
+
+      expect(entries.map(entry => entry['event.id'])).toEqual([
+        'session-a-latest',
+        'session-b-latest',
+      ]);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   });
 });

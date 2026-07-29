@@ -24,8 +24,28 @@ $ErrorActionPreference = "Stop"
 # ============================================================
 # Constants & Paths
 # ============================================================
-$CACHE_DIR = Join-Path $env:USERPROFILE ".loongsuite-pilot"
-$DATA_DIR = if ($env:LOONGSUITE_PILOT_DATA_DIR) { $env:LOONGSUITE_PILOT_DATA_DIR } else { $CACHE_DIR }
+$DEFAULT_PILOT_DIR = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+$LAYOUT_FILE = Join-Path $PSScriptRoot "loongsuite-pilot-layout.json"
+$INSTALL_LAYOUT = $null
+if (Test-Path -LiteralPath $LAYOUT_FILE) {
+    try {
+        $INSTALL_LAYOUT = Get-Content -LiteralPath $LAYOUT_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {}
+}
+$CACHE_DIR = if ($env:LOONGSUITE_PILOT_CACHE_DIR) {
+    $env:LOONGSUITE_PILOT_CACHE_DIR
+} elseif ($INSTALL_LAYOUT -and $INSTALL_LAYOUT.cacheDir) {
+    [string]$INSTALL_LAYOUT.cacheDir
+} else {
+    $DEFAULT_PILOT_DIR
+}
+$DATA_DIR = if ($env:LOONGSUITE_PILOT_DATA_DIR) {
+    $env:LOONGSUITE_PILOT_DATA_DIR
+} elseif ($INSTALL_LAYOUT -and $INSTALL_LAYOUT.dataDir) {
+    [string]$INSTALL_LAYOUT.dataDir
+} else {
+    $DEFAULT_PILOT_DIR
+}
 $VERSIONS_DIR = Join-Path $CACHE_DIR "versions"
 $CURRENT_FILE = Join-Path $CACHE_DIR "current"
 $PREVIOUS_FILE = Join-Path $CACHE_DIR "previous"
@@ -36,13 +56,28 @@ $UPDATER_PID_FILE = Join-Path $DATA_DIR "loongsuite-pilot-updater.pid"
 $LOG_DIR = Join-Path $DATA_DIR "logs"
 $LOG_FILE = Join-Path $LOG_DIR "loongsuite-pilot-service.log"
 $UPDATER_LOG_FILE = Join-Path $LOG_DIR "loongsuite-pilot-updater.log"
+$RUNTIME_FILE = Join-Path $LOG_DIR "runtime.json"
 $CONFIG_FILE = Join-Path $DATA_DIR "config.json"
+$SPAN_ATTR_FILE = Join-Path $DATA_DIR "span-attributes.json"
 $NODE_PIN_FILE = Join-Path $CACHE_DIR "node-bin"
 $INIT_TYPE_FILE = Join-Path $DATA_DIR "init-type"
 
-$TASK_NAME_COLLECTOR = "LoongsuitePilot"
-$TASK_NAME_UPDATER = "LoongsuitePilotUpdater"
+# Task names are per-user: multiple users can run on one machine, each with their
+# own data dir under %USERPROFILE%. A global task name would collide -- the second
+# user cannot delete or overwrite the first user's task (Access is denied), so it
+# would fail with "already exists" and drop to the background fallback. The shared
+# \LoongsuitePilot folder stays cross-user writable; only the task name is scoped.
+# Tag from whoami (DOMAIN\user) -- the same identity used for the task principal --
+# not $env:USERNAME (bare SAM name): two same-named accounts from different domains
+# (CORP\alice vs DEV\alice) would otherwise share one task name and re-introduce the
+# cross-user "already exists" collision this scoping is meant to prevent.
+$USER_TAG = ((whoami) -replace '[^A-Za-z0-9._-]', '_')
+$TASK_NAME_COLLECTOR = "LoongsuitePilot-$USER_TAG"
+$TASK_NAME_UPDATER = "LoongsuitePilotUpdater-$USER_TAG"
 $TASK_FOLDER = "\LoongsuitePilot"
+
+# Legacy global task names (pre per-user naming) -- cleaned up best-effort on start.
+$LEGACY_TASK_NAMES = @("LoongsuitePilot", "LoongsuitePilotUpdater")
 
 $LOONGSUITE_PILOT_BIN = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.cmd"
 
@@ -206,6 +241,36 @@ function Test-PidRunning {
     return $false
 }
 
+function Get-CollectorRuntime {
+    param([datetimeoffset]$NotBefore = [datetimeoffset]::MinValue)
+    if (-not (Test-Path -LiteralPath $RUNTIME_FILE)) { return $null }
+    try {
+        $runtime = Get-Content -LiteralPath $RUNTIME_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
+        $updatedAt = [datetimeoffset]::Parse(
+            [string]$runtime.updatedAt,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind
+        )
+        $pidValue = [int]$runtime.pid
+        if (
+            $runtime.status -ne "active" -or
+            $pidValue -le 0 -or
+            $updatedAt -lt $NotBefore -or
+            $updatedAt -lt [datetimeoffset]::Now.AddMinutes(-2) -or
+            -not (Get-Process -Id $pidValue -ErrorAction SilentlyContinue)
+        ) {
+            return $null
+        }
+        return $runtime
+    } catch {
+        return $null
+    }
+}
+
+function Test-CollectorRunning {
+    return $null -ne (Get-CollectorRuntime)
+}
+
 function Stop-PidFile {
     param([string]$pidFile)
     if (-not (Test-PidRunning $pidFile)) {
@@ -254,6 +319,157 @@ function Get-TaskRunning {
     return $task.State -eq "Running"
 }
 
+function Wait-ForCollectorHeartbeat {
+    param([int]$TimeoutSeconds = 15)
+    $notBefore = [datetimeoffset]::Now.AddSeconds(-2)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if (
+            (Get-CollectorRuntime -NotBefore $notBefore) -or
+            (Test-PidRunning $PID_FILE)
+        ) {
+            return $true
+        }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
+function Start-CompatibleExistingCollectorTask {
+    $task = $null
+    for ($attempt = 0; $attempt -lt 5 -and -not $task; $attempt++) {
+        $task = Get-ScheduledTask `
+            -TaskName $TASK_NAME_COLLECTOR `
+            -TaskPath "$TASK_FOLDER\" `
+            -ErrorAction SilentlyContinue
+        if (-not $task) { Start-Sleep -Seconds 1 }
+    }
+    if (-not $task) { return $false }
+
+    $expectedLauncher = Join-Path $BOOTSTRAP_DIR "collector-launch.vbs"
+    $action = $task.Actions | Select-Object -First 1
+    $actionArgs = if ($action) { [string]$action.Arguments } else { "" }
+    $actionExe = if ($action) { [string]$action.Execute } else { "" }
+    $isWscript = [System.IO.Path]::GetFileName($actionExe) -ieq "wscript.exe"
+    $usesExpectedLauncher = $actionArgs.IndexOf(
+        $expectedLauncher,
+        [System.StringComparison]::OrdinalIgnoreCase
+    ) -ge 0
+    if (-not $isWscript -or -not $usesExpectedLauncher) {
+        Write-Host "Existing collector task uses an incompatible action; refusing to reuse it." -ForegroundColor Yellow
+        return $false
+    }
+
+    try {
+        if ($task.State -eq "Running") {
+            Stop-ScheduledTask `
+                -TaskName $TASK_NAME_COLLECTOR `
+                -TaskPath "$TASK_FOLDER\" `
+                -ErrorAction SilentlyContinue
+            for ($attempt = 0; $attempt -lt 10; $attempt++) {
+                Start-Sleep -Seconds 1
+                $task = Get-ScheduledTask `
+                    -TaskName $TASK_NAME_COLLECTOR `
+                    -TaskPath "$TASK_FOLDER\" `
+                    -ErrorAction SilentlyContinue
+                if (-not $task -or $task.State -ne "Running") { break }
+            }
+        }
+        Start-ScheduledTask `
+            -TaskName $TASK_NAME_COLLECTOR `
+            -TaskPath "$TASK_FOLDER\" `
+            -ErrorAction Stop
+        return (Wait-ForCollectorHeartbeat -TimeoutSeconds 30)
+    } catch {
+        Write-Host "Existing collector task could not be started: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    }
+}
+
+# Register a scheduled task, preferring Interactive and falling back to S4U.
+# Interactive tasks remain manageable by the same standard user. S4U stays
+# available for environments that explicitly grant batch-logon rights.
+function Register-PilotTask {
+    param(
+        [string]$taskName,
+        $action,
+        $triggers,
+        $settings,
+        [string]$description
+    )
+    $userId = whoami
+    $lastErr = $null
+    foreach ($logonType in @("Interactive", "S4U")) {
+        # Clear any task a previous attempt left behind. A failed registration can
+        # still create the task entry before erroring on the principal.
+        try { schtasks.exe /Delete /TN "$TASK_FOLDER\$taskName" /F 2>$null | Out-Null } catch {}
+        try {
+            # On-disk location of the task definition (absolute filesystem path).
+            $diskPath = "$env:SystemRoot\System32\Tasks$TASK_FOLDER\$taskName"
+            Write-Host "   Registering '$taskName' (user=$userId, logon=$logonType, path=$diskPath)..."
+            $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType $logonType -RunLevel Limited
+            Register-ScheduledTask `
+                -TaskName $taskName `
+                -TaskPath "$TASK_FOLDER\" `
+                -Action $action `
+                -Trigger $triggers `
+                -Settings $settings `
+                -Principal $principal `
+                -Description $description `
+                -ErrorAction Stop | Out-Null
+            Write-Host "   Registered '$taskName' with logon type $logonType" -ForegroundColor Green
+            return $true
+        } catch {
+            $lastErr = $_
+            # Log every attempt (incl. HRESULT) so the failing logon type is
+            # visible, not just the last error thrown to the caller.
+            $hr = ""
+            if ($_.Exception -and $null -ne $_.Exception.HResult) {
+                $hr = " (HRESULT 0x{0:X8})" -f $_.Exception.HResult
+            }
+            Write-Host "   $logonType registration failed$hr : $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+    throw $lastErr
+}
+
+# Build a VBScript launcher that runs node fully hidden, and return a task action
+# that invokes it via wscript.exe. Interactive-principal tasks run in the user's
+# desktop session, where powershell.exe still pops a console window despite
+# -WindowStyle Hidden (the window the user sees). wscript.exe is a GUI-subsystem
+# host (no console of its own) and WshShell.Run(cmd, 0, True) launches node with a
+# hidden window and waits for it, so the task stays "Running" and the repeating
+# watchdog trigger keeps working -- but nothing is visible and there is no window
+# to accidentally close. Paths are baked into the .vbs (no argument passing) to
+# avoid quoting issues across the Task Scheduler + wscript layers.
+function New-HiddenTaskAction {
+    param([string]$vbsPath, [string]$nodeBin, [string]$entry)
+    # Double any embedded quote so a path with a " cannot terminate the VBScript
+    # string literal early (defensive: Windows paths cannot contain ", but
+    # $CONFIG_FILE/$CACHE_DIR derive from user-settable data/cache directories).
+    $cfgEsc   = $CONFIG_FILE -replace '"', '""'
+    $dataEsc  = $DATA_DIR    -replace '"', '""'
+    $cacheEsc = $CACHE_DIR   -replace '"', '""'
+    $cwdEsc   = $CACHE_DIR   -replace '"', '""'
+    $nodeEsc  = $nodeBin     -replace '"', '""'
+    $entryEsc = $entry       -replace '"', '""'
+    $vbs = @"
+Set sh = CreateObject("WScript.Shell")
+sh.Environment("PROCESS").Item("AGENT_DATA_COLLECTION_CONFIG") = "$cfgEsc"
+sh.Environment("PROCESS").Item("LOONGSUITE_PILOT_DATA_DIR") = "$dataEsc"
+sh.Environment("PROCESS").Item("LOONGSUITE_PILOT_CACHE_DIR") = "$cacheEsc"
+sh.CurrentDirectory = "$cwdEsc"
+sh.Run """$nodeEsc"" ""$entryEsc""", 0, True
+"@
+    # Unicode (UTF-16 LE + BOM): wscript reads a BOM-less .vbs as the system ANSI
+    # code page, while -Encoding Default is ANSI on Windows PowerShell 5.1 but UTF-8
+    # on PowerShell 7+. A non-ASCII path (e.g. a Chinese %USERPROFILE%) would then be
+    # mojibake and the daemon would fail to launch. A BOM is read correctly
+    # regardless of PowerShell version or system code page.
+    Set-Content -Path $vbsPath -Value $vbs -Encoding Unicode
+    return (New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$vbsPath`"" -WorkingDirectory $CACHE_DIR)
+}
+
 function Install-CollectorTask {
     param([string]$nodeBin)
     $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
@@ -262,15 +478,15 @@ function Install-CollectorTask {
         return $false
     }
 
-    $action = New-ScheduledTaskAction `
-        -Execute "powershell.exe" `
-        -Argument "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry'`"" `
-        -WorkingDirectory $CACHE_DIR
+    $action = New-HiddenTaskAction (Join-Path $BOOTSTRAP_DIR "collector-launch.vbs") $nodeBin $entry
 
     # Two triggers: AtLogOn for initial start + repeating every 5 min as a watchdog.
     # If the process crashes or is killed, the repeating trigger re-launches it.
     # MultipleInstances=IgnoreNew ensures a second instance is never spawned while running.
-    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
+    # -User scopes the logon trigger to the current user; without it the trigger
+    # fires for ALL users, which requires admin rights and fails registration with
+    # "Access is denied" (0x80070005) for standard users.
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User (whoami)
     $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
         -RepetitionInterval (New-TimeSpan -Minutes 5)
 
@@ -283,26 +499,17 @@ function Install-CollectorTask {
         -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit ([TimeSpan]::Zero)
 
-    # S4U logon type: runs under the user's identity in a non-interactive session,
-    # so the process survives RDP/SSH disconnect without requiring a stored password.
-    $principal = New-ScheduledTaskPrincipal -UserId (whoami) -LogonType S4U -RunLevel Limited
-
     # Remove existing task first (schtasks is more reliable than Unregister-ScheduledTask)
     # Use try/catch because schtasks stderr + $ErrorActionPreference=Stop can throw
     try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
     try { schtasks.exe /Delete /TN "$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
 
-    Register-ScheduledTask `
-        -TaskName $TASK_NAME_COLLECTOR `
-        -TaskPath "$TASK_FOLDER\" `
-        -Action $action `
-        -Trigger @($triggerLogon, $triggerRepeat) `
-        -Settings $settings `
-        -Principal $principal `
-        -Description "LoongSuite Pilot data collector" `
-        -ErrorAction Stop | Out-Null
-
-    return $true
+    return (Register-PilotTask `
+        -taskName $TASK_NAME_COLLECTOR `
+        -action $action `
+        -triggers @($triggerLogon, $triggerRepeat) `
+        -settings $settings `
+        -description "LoongSuite Pilot data collector")
 }
 
 function Install-UpdaterTask {
@@ -310,12 +517,10 @@ function Install-UpdaterTask {
     $entry = Join-Path $BOOTSTRAP_DIR "updater-daemon.js"
     if (-not (Test-Path $entry)) { return $false }
 
-    $action = New-ScheduledTaskAction `
-        -Execute "powershell.exe" `
-        -Argument "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry'`"" `
-        -WorkingDirectory $CACHE_DIR
+    $action = New-HiddenTaskAction (Join-Path $BOOTSTRAP_DIR "updater-launch.vbs") $nodeBin $entry
 
-    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
+    # -User scopes the trigger to the current user (all-users trigger needs admin).
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User (whoami)
     $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
         -RepetitionInterval (New-TimeSpan -Minutes 5)
 
@@ -328,25 +533,22 @@ function Install-UpdaterTask {
         -RestartInterval (New-TimeSpan -Minutes 5) `
         -ExecutionTimeLimit ([TimeSpan]::Zero)
 
-    $principal = New-ScheduledTaskPrincipal -UserId (whoami) -LogonType S4U -RunLevel Limited
-
     try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_UPDATER" /F 2>$null | Out-Null } catch {}
     try { schtasks.exe /Delete /TN "$TASK_NAME_UPDATER" /F 2>$null | Out-Null } catch {}
 
-    Register-ScheduledTask `
-        -TaskName $TASK_NAME_UPDATER `
-        -TaskPath "$TASK_FOLDER\" `
-        -Action $action `
-        -Trigger @($triggerLogon, $triggerRepeat) `
-        -Settings $settings `
-        -Principal $principal `
-        -Description "LoongSuite Pilot auto-updater" `
-        -ErrorAction Stop | Out-Null
-
-    return $true
+    return (Register-PilotTask `
+        -taskName $TASK_NAME_UPDATER `
+        -action $action `
+        -triggers @($triggerLogon, $triggerRepeat) `
+        -settings $settings `
+        -description "LoongSuite Pilot auto-updater")
 }
 
 function Remove-AllTasks {
+    $launchers = @{
+        $TASK_NAME_COLLECTOR = "collector-launch.vbs"
+        $TASK_NAME_UPDATER = "updater-launch.vbs"
+    }
     foreach ($name in @($TASK_NAME_UPDATER, $TASK_NAME_COLLECTOR)) {
         $task = Get-ScheduledTask -TaskName $name -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
         if ($task) {
@@ -356,6 +558,13 @@ function Remove-AllTasks {
         }
         try { schtasks.exe /Delete /TN "$TASK_FOLDER\$name" /F 2>$null | Out-Null } catch {}
         try { schtasks.exe /Delete /TN "$name" /F 2>$null | Out-Null } catch {}
+        # Never remove a launcher while an inaccessible task still references it.
+        if (-not (Get-TaskExists $name)) {
+            Remove-Item `
+                (Join-Path $BOOTSTRAP_DIR $launchers[$name]) `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -408,6 +617,11 @@ function Cmd-RunUpdater {
 # CMD: start
 # ============================================================
 function Cmd-Start {
+    $runtime = Get-CollectorRuntime
+    if ($runtime) {
+        Write-Host "loongsuite-pilot is already running (PID $($runtime.pid))"
+        return
+    }
     if (Test-PidRunning $PID_FILE) {
         $pidVal = (Get-Content $PID_FILE).Trim()
         Write-Host "loongsuite-pilot is already running (PID $pidVal)"
@@ -422,6 +636,16 @@ function Cmd-Start {
         Write-Error "node runtime not found"
         exit 1
     }
+    Write-Host "   node: $nodeBin"
+    Write-Host "   bootstrap dir: $BOOTSTRAP_DIR"
+    Write-Host "   config: $CONFIG_FILE"
+
+    # Best-effort cleanup of legacy global-named tasks from older versions. If they
+    # are owned by another account (e.g. an earlier admin run) the delete is denied
+    # and simply left alone -- the per-user task name avoids colliding with them.
+    foreach ($legacy in $LEGACY_TASK_NAMES) {
+        try { schtasks.exe /Delete /TN "$TASK_FOLDER\$legacy" /F 2>$null | Out-Null } catch {}
+    }
 
     # Try Task Scheduler
     $taskInstalled = $false
@@ -434,51 +658,47 @@ function Cmd-Start {
                 Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
             }
             Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
-            for ($i = 0; $i -lt 5; $i++) {
-                Start-Sleep -Seconds 2
-                if (Get-TaskRunning $TASK_NAME_COLLECTOR) {
-                    Write-Host "loongsuite-pilot started (Task Scheduler)"
-                    return
-                }
+            if (Wait-ForCollectorHeartbeat) {
+                Write-Host "loongsuite-pilot started (Task Scheduler)"
+                return
             }
+            $t = Get-ScheduledTaskInfo -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
+            $rc = if ($t) { "0x{0:X8}" -f $t.LastTaskResult } else { "unknown" }
+            throw "Collector task produced no runtime heartbeat (LastTaskResult=$rc)."
         }
     } catch {
-        Write-Host "Task Scheduler registration failed: $_" -ForegroundColor Yellow
+        $hr = ""
+        if ($_.Exception -and $null -ne $_.Exception.HResult) {
+            $hr = " (HRESULT 0x{0:X8})" -f $_.Exception.HResult
+        }
+        Write-Host "Task Scheduler registration failed$hr : $($_.Exception.Message)" -ForegroundColor Yellow
+        # An older task may be inaccessible for replacement but still be owned by
+        # this user and point at the stable launcher path. The launcher was just
+        # regenerated with the new Node/config/package paths, so it is safe to
+        # start and reuse that task after validating its action.
+        if (Start-CompatibleExistingCollectorTask) {
+            Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+            Write-Host "Reused existing scheduled task: $TASK_NAME_COLLECTOR" -ForegroundColor Green
+            return
+        }
     }
 
-    # Fallback: background process (like nohup on Linux)
-    Write-Host "Using background process fallback." -ForegroundColor Yellow
-    Write-Host "   Service will NOT auto-start on boot." -ForegroundColor Yellow
-
-    $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
-    if (-not (Test-Path $entry)) {
-        Write-Error "Bootstrap script missing"
-        exit 1
+    # No background fallback — Task Scheduler registration is required.
+    $staleTask = Get-ScheduledTask `
+        -TaskName $TASK_NAME_COLLECTOR `
+        -TaskPath "$TASK_FOLDER\" `
+        -ErrorAction SilentlyContinue
+    if ($staleTask -and [string]$staleTask.Principal.LogonType -eq "S4U") {
+        Write-Host "A stale S4U collector task blocks replacement by the current user." -ForegroundColor Yellow
+        Write-Host "   Remove it once from an elevated PowerShell, then run start/install again:" -ForegroundColor Yellow
+        Write-Host "   schtasks.exe /Delete /TN `"$TASK_FOLDER\$TASK_NAME_COLLECTOR`" /F" -ForegroundColor Yellow
     }
-
-    $errLog = Join-Path $LOG_DIR "loongsuite-pilot-service-err.log"
-    $proc = Start-Process -FilePath "powershell.exe" `
-        -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
-        -WorkingDirectory $CACHE_DIR `
-        -WindowStyle Hidden `
-        -PassThru
-
-    Set-Content -Path $PID_FILE -Value $proc.Id
-    Set-Content -Path $INIT_TYPE_FILE -Value "background"
-    Write-Host "loongsuite-pilot started (PID $($proc.Id), background)"
-
-    # Also start updater
-    $updaterEntry = Join-Path $BOOTSTRAP_DIR "updater-daemon.js"
-    if ((Test-Path $updaterEntry) -and -not (Test-PidRunning $UPDATER_PID_FILE)) {
-        $updaterErrLog = Join-Path $LOG_DIR "loongsuite-pilot-updater-err.log"
-        $uproc = Start-Process -FilePath "powershell.exe" `
-            -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$updaterEntry' >> '$UPDATER_LOG_FILE' 2>> '$updaterErrLog'`"" `
-            -WorkingDirectory $CACHE_DIR `
-            -WindowStyle Hidden `
-            -PassThru
-        Set-Content -Path $UPDATER_PID_FILE -Value $uproc.Id
-        Write-Host "loongsuite-pilot updater started (PID $($uproc.Id))"
-    }
+    Write-Error "Failed to register system service via Task Scheduler."
+    Write-Host "   Possible causes:" -ForegroundColor Yellow
+    Write-Host "     - 'Log on as a batch job' right not granted (S4U)" -ForegroundColor Yellow
+    Write-Host "     - Task Scheduler service not running" -ForegroundColor Yellow
+    Write-Host "     - Insufficient permissions for task registration" -ForegroundColor Yellow
+    exit 1
 }
 
 # ============================================================
@@ -553,23 +773,52 @@ function Cmd-RestartCollector {
             Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
             Write-Host "collector restarted (Task Scheduler)"
             $restarted = $true
-        } catch {}
+        } catch {
+            Write-Host "Task Scheduler restart failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
     }
 
     if (-not $restarted) {
-        $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
-        if (-not (Test-Path $entry)) {
-            Write-Error "Bootstrap script missing"
-            exit 1
+        # Self-healing: try to register Task Scheduler for degraded (background/unknown) installs
+        $initType = ""
+        if (Test-Path $INIT_TYPE_FILE) { $initType = (Get-Content $INIT_TYPE_FILE -ErrorAction SilentlyContinue).Trim() }
+        # "background" is a legacy init-type value from pre-Task-Scheduler installs (aligned with Linux nohup/unknown)
+        if ($initType -in @("background", "unknown", "")) {
+            try {
+                $ok = Install-CollectorTask $nodeBin
+                if ($ok) {
+                    Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+                    Start-Sleep -Seconds 1
+                    if (Get-TaskRunning $TASK_NAME_COLLECTOR) {
+                        Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                        Write-Host "collector self-healed: registered with Task Scheduler"
+                        $restarted = $true
+                    }
+                }
+            } catch {
+                Write-Host "Self-heal failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
         }
-        $errLog = Join-Path $LOG_DIR "loongsuite-pilot-service-err.log"
-        $proc = Start-Process -FilePath "powershell.exe" `
-            -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
-            -WorkingDirectory $CACHE_DIR `
-            -WindowStyle Hidden `
-            -PassThru
-        Set-Content -Path $PID_FILE -Value $proc.Id
-        Write-Host "collector restarted (PID $($proc.Id))"
+        if (-not $restarted) {
+            if ($initType -in @("background", "unknown", "")) {
+                $entry = Join-Path $BOOTSTRAP_DIR "collector-daemon.js"
+                if (-not (Test-Path $entry)) {
+                    Write-Error "Bootstrap script missing"
+                    exit 1
+                }
+                $errLog = Join-Path $LOG_DIR "loongsuite-pilot-service-err.log"
+                $proc = Start-Process -FilePath "powershell.exe" `
+                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
+                    -WorkingDirectory $CACHE_DIR `
+                    -WindowStyle Hidden `
+                    -PassThru
+                Set-Content -Path $PID_FILE -Value $proc.Id
+                Write-Host "collector restarted (background fallback, self-heal failed)" -ForegroundColor Yellow
+            } else {
+                Write-Error "Service manager failed to restart collector (init_type=$initType)"
+                exit 1
+            }
+        }
     }
 
     # Schedule updater restart in background (equivalent to setsid on Linux)
@@ -621,23 +870,52 @@ function Cmd-RestartUpdater {
                 Write-Host "updater restarted (Task Scheduler)"
                 $restarted = $true
             }
-        } catch {}
+        } catch {
+            Write-Host "Task Scheduler restart failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
     }
 
     if (-not $restarted) {
-        $entry = Join-Path $BOOTSTRAP_DIR "updater-daemon.js"
-        if (-not (Test-Path $entry)) {
-            Write-Host "Updater bootstrap script missing"
-            return
+        # Self-healing: try to register Task Scheduler for degraded (background/unknown) installs
+        $initType = ""
+        if (Test-Path $INIT_TYPE_FILE) { $initType = (Get-Content $INIT_TYPE_FILE -ErrorAction SilentlyContinue).Trim() }
+        # "background" is a legacy init-type value from pre-Task-Scheduler installs (aligned with Linux nohup/unknown)
+        if ($initType -in @("background", "unknown", "")) {
+            try {
+                $ok = Install-UpdaterTask $nodeBin
+                if ($ok) {
+                    Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
+                    Start-Sleep -Seconds 1
+                    if (Get-TaskRunning $TASK_NAME_UPDATER) {
+                        Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                        Write-Host "updater self-healed: registered with Task Scheduler"
+                        $restarted = $true
+                    }
+                }
+            } catch {
+                Write-Host "Self-heal failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
         }
-        $updaterErrLog = Join-Path $LOG_DIR "loongsuite-pilot-updater-err.log"
-        $proc = Start-Process -FilePath "powershell.exe" `
-            -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$UPDATER_LOG_FILE' 2>> '$updaterErrLog'`"" `
-            -WorkingDirectory $CACHE_DIR `
-            -WindowStyle Hidden `
-            -PassThru
-        Set-Content -Path $UPDATER_PID_FILE -Value $proc.Id
-        Write-Host "updater restarted (PID $($proc.Id))"
+        if (-not $restarted) {
+            if ($initType -in @("background", "unknown", "")) {
+                $entry = Join-Path $BOOTSTRAP_DIR "updater-daemon.js"
+                if (-not (Test-Path $entry)) {
+                    Write-Host "Updater bootstrap script missing"
+                    return
+                }
+                $updaterErrLog = Join-Path $LOG_DIR "loongsuite-pilot-updater-err.log"
+                $proc = Start-Process -FilePath "powershell.exe" `
+                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$UPDATER_LOG_FILE' 2>> '$updaterErrLog'`"" `
+                    -WorkingDirectory $CACHE_DIR `
+                    -WindowStyle Hidden `
+                    -PassThru
+                Set-Content -Path $UPDATER_PID_FILE -Value $proc.Id
+                Write-Host "updater restarted (background fallback, self-heal failed)" -ForegroundColor Yellow
+            } else {
+                Write-Error "Service manager failed to restart updater (init_type=$initType)"
+                return
+            }
+        }
     }
 }
 
@@ -656,16 +934,20 @@ function Cmd-Status {
 
     # Collector status
     $collectorRunning = $false
-    if (Test-PidRunning $PID_FILE) {
+    $runtime = Get-CollectorRuntime
+    if ($runtime) {
+        Write-Host "loongsuite-pilot${verInfo} is running (PID $($runtime.pid), heartbeat)"
+        $collectorRunning = $true
+    } elseif (Test-PidRunning $PID_FILE) {
         $pidVal = (Get-Content $PID_FILE).Trim()
         Write-Host "loongsuite-pilot${verInfo} is running (PID $pidVal)"
-        $collectorRunning = $true
-    } elseif (Get-TaskRunning $TASK_NAME_COLLECTOR) {
-        Write-Host "loongsuite-pilot${verInfo} is running (Task Scheduler)"
         $collectorRunning = $true
     }
     if (-not $collectorRunning) {
         Write-Host "loongsuite-pilot${verInfo} is not running"
+        if (Get-TaskRunning $TASK_NAME_COLLECTOR) {
+            Write-Host "   collector task: running without a runtime heartbeat" -ForegroundColor Yellow
+        }
     }
 
     # Updater status
@@ -805,6 +1087,58 @@ function Cmd-Log {
 # ============================================================
 # CMD: help
 # ============================================================
+# Manage span-attributes.json — user-defined attributes injected into trace
+# spans (not the event log). The collector re-reads the file per turn, so
+# changes take effect without a restart.
+function Cmd-SpanAttr {
+    $sub = if ($SubArgs.Count -ge 1) { $SubArgs[0] } else { "" }
+
+    if ($sub -ieq "clear") {
+        if (Test-Path $SPAN_ATTR_FILE) { Remove-Item $SPAN_ATTR_FILE -Force }
+        Write-Host "cleared custom span attributes ($SPAN_ATTR_FILE)"
+        return
+    }
+
+    if ($sub.ToLower() -in @("set", "unset", "list")) {
+        $nodeBin = Resolve-Node
+        if (-not $nodeBin) { Write-Error "[span-attr] node runtime not found"; exit 1 }
+        $js = @'
+const fs = require("fs");
+const file = process.argv[1], op = process.argv[2], key = process.argv[3], value = process.argv[4];
+const RESERVED = ["gen_ai.","git.","workspace.","event.","trace_","user.","cost_","agent.","time_unix_nano","observed_time_unix_nano"];
+const isReserved = k => RESERVED.some(p => k === p || k.indexOf(p) === 0);
+function read() { try { const o = JSON.parse(fs.readFileSync(file, "utf-8")); return (o && typeof o === "object" && !Array.isArray(o)) ? o : {}; } catch { return {}; } }
+function write(o) { const tmp = file + ".tmp"; fs.writeFileSync(tmp, JSON.stringify(o, null, 2) + "\n"); fs.renameSync(tmp, file); }
+if (op === "set") {
+  if (!key || value === undefined) { console.error("usage: span-attr set <key> <value>"); process.exit(1); }
+  if (isReserved(key)) { console.error("refused: \"" + key + "\" uses a reserved prefix (gen_ai./git./workspace./event./trace_/user./cost_/agent./...)"); process.exit(1); }
+  const o = read(); o[key] = String(value); write(o); console.log("set " + key + "=" + o[key]);
+} else if (op === "unset") {
+  if (!key) { console.error("usage: span-attr unset <key>"); process.exit(1); }
+  const o = read(); if (Object.prototype.hasOwnProperty.call(o, key)) { delete o[key]; write(o); console.log("unset " + key); } else { console.log("(no such key: " + key + ")"); }
+} else if (op === "list") {
+  const o = read(); const ks = Object.keys(o);
+  if (ks.length === 0) { console.log("(no custom span attributes)"); } else { for (const k of ks) console.log(k + "=" + o[k]); }
+}
+'@
+        $rest = if ($SubArgs.Count -ge 2) { $SubArgs[1..($SubArgs.Count - 1)] } else { @() }
+        & $nodeBin -e $js $SPAN_ATTR_FILE $sub @rest
+        exit $LASTEXITCODE
+    }
+
+    Write-Host "Usage: loongsuite-pilot span-attr <set|unset|list|clear>"
+    Write-Host ""
+    Write-Host "  set <key> <value>   Set a custom trace span attribute"
+    Write-Host "  unset <key>         Remove a custom attribute"
+    Write-Host "  list                Show current custom attributes"
+    Write-Host "  clear               Remove all custom attributes"
+    Write-Host ""
+    Write-Host "Attributes are injected into trace spans only (not the event log)."
+    Write-Host "Reserved-prefix keys (gen_ai./git./workspace./event./trace_/user./cost_/agent./...) are rejected."
+    Write-Host "Changes take effect on the next turn - no restart needed."
+    if ($sub -ne "" -and $sub.ToLower() -notin @("help", "-h", "--help")) { exit 1 }
+}
+
 function Cmd-Help {
     Write-Host "Usage: loongsuite-pilot <command>"
     Write-Host ""
@@ -815,6 +1149,7 @@ function Cmd-Help {
     Write-Host "  status          Show service status (default)"
     Write-Host "  info            Show version and config info"
     Write-Host "  log             Tail the service log"
+    Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     Write-Host "  rollback        Roll back to the previous version"
     Write-Host "  help            Show this help message"
 }
@@ -834,6 +1169,7 @@ switch ($Command.ToLower()) {
     "restart-updater"    { Cmd-RestartUpdater }
     "run"                { Cmd-Run }
     "run-updater"        { Cmd-RunUpdater }
+    "span-attr"          { Cmd-SpanAttr }
     { $_ -in "help","--help","-h" } { Cmd-Help }
     default {
         Write-Host "Unknown command: $Command"

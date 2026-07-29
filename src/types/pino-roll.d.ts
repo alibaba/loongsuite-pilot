@@ -9,7 +9,7 @@ declare module 'pino-roll' {
     mkdir?: boolean;
     extension?: string;
     symlink?: boolean;
-    limit?: { count?: number };
+    limit?: { count?: number; removeOtherLogFiles?: boolean };
   }
 
   function build(options: PinoRollOptions): Promise<WriteStream>;
