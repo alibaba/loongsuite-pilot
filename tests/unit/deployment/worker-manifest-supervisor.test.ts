@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { WorkerManifestSupervisor } from '../../../src/deployment/worker-manifest-supervisor.js';
+import {
+  WorkerManifestSupervisor,
+  type WindowsProcessIdentity,
+  type WindowsProcessOperations,
+} from '../../../src/deployment/worker-manifest-supervisor.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -64,6 +68,25 @@ describe('WorkerManifestSupervisor', () => {
     return JSON.parse(
       await fs.readFile(path.join(stateDir, 'supervisor-status.json'), 'utf-8'),
     ) as Record<string, unknown>;
+  }
+
+  function processIdentity(pid: number, creationTime = '2026-07-30T00:00:00.0000000Z'): WindowsProcessIdentity {
+    return {
+      pid,
+      creationTime,
+      executablePath: 'C:\\Program Files\\nodejs\\node.exe',
+    };
+  }
+
+  async function writeTrackedWindowsWorker(pid: number, identity = processIdentity(pid)): Promise<void> {
+    await writeManifest(['unused']);
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(path.join(stateDir, 'worker.pid'), `${pid}\n`, 'utf-8');
+    await fs.writeFile(
+      path.join(stateDir, 'worker.pid.identity.json'),
+      JSON.stringify(identity),
+      'utf-8',
+    );
   }
 
   it('resolves the controlled pilot node placeholder to the running Pilot node', async () => {
@@ -263,6 +286,194 @@ describe('WorkerManifestSupervisor', () => {
 
     expect(await supervisor.isWorkerRunning(bundleRoot, options())).toBe(true);
     expect(identityQuery).not.toHaveBeenCalled();
+  });
+
+  it('persists the managed Windows worker pid before process identity lookup completes', async () => {
+    const entry = path.join(bundleRoot, 'worker-entrypoint.mjs');
+    await fs.writeFile(entry, 'setInterval(() => {}, 1000);', 'utf-8');
+    await writeManifest(['${pilot:node}', entry]);
+
+    let resolveIdentity!: (identity: WindowsProcessIdentity) => void;
+    const identity = new Promise<WindowsProcessIdentity>(resolve => {
+      resolveIdentity = resolve;
+    });
+    const windowsProcessOperations: WindowsProcessOperations = {
+      readProcessIdentity: vi.fn(() => identity),
+      listDescendantPids: vi.fn(async () => []),
+      taskkill: vi.fn(async () => {}),
+    };
+    const supervisor = new WorkerManifestSupervisor({
+      platform: 'win32',
+      windowsProcessOperations,
+    });
+    const start = supervisor.startIfPresent('local-worker:test', bundleRoot, {}, options());
+
+    let workerPid = 0;
+    try {
+      await vi.waitFor(() => {
+        expect(windowsProcessOperations.readProcessIdentity).toHaveBeenCalledOnce();
+      });
+      workerPid = Number(vi.mocked(windowsProcessOperations.readProcessIdentity).mock.calls[0][0]);
+      await expect(fs.readFile(path.join(stateDir, 'worker.pid'), 'utf-8')).resolves.toBe(`${workerPid}\n`);
+    } finally {
+      if (workerPid > 0) resolveIdentity(processIdentity(workerPid));
+      await start;
+      if (workerPid > 0) {
+        try {
+          process.kill(workerPid, 'SIGKILL');
+        } catch {
+          // The worker may already have exited.
+        }
+        await vi.waitFor(() => {
+          expect(() => process.kill(workerPid, 0)).toThrow();
+        });
+      }
+    }
+  });
+
+  it('cleans a stale managed Windows pid when its identity file is missing and the process is gone', async () => {
+    const rootPid = 40_001;
+    const windowsProcessOperations: WindowsProcessOperations = {
+      readProcessIdentity: vi.fn(async () => undefined),
+      listDescendantPids: vi.fn(async () => []),
+      taskkill: vi.fn(async () => {}),
+    };
+    await writeManifest(['unused']);
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(path.join(stateDir, 'worker.pid'), `${rootPid}\n`, 'utf-8');
+
+    const supervisor = new WorkerManifestSupervisor({
+      platform: 'win32',
+      windowsProcessOperations,
+    });
+
+    expect(await supervisor.stopIfPresent('local-worker:test', bundleRoot, options())).toBe(true);
+    expect(windowsProcessOperations.readProcessIdentity).toHaveBeenCalledWith(rootPid);
+    expect(windowsProcessOperations.taskkill).not.toHaveBeenCalled();
+    await expect(fs.stat(path.join(stateDir, 'worker.pid'))).rejects.toThrow();
+    await expect(readStatus()).resolves.toMatchObject({
+      state: 'stopped',
+      reason: 'WorkerProcessNotFound',
+      pid: rootPid,
+    });
+  });
+
+  it('refuses to stop a live managed Windows pid when its identity file is missing', async () => {
+    const rootPid = 40_002;
+    const windowsProcessOperations: WindowsProcessOperations = {
+      readProcessIdentity: vi.fn(async pid => processIdentity(pid)),
+      listDescendantPids: vi.fn(async () => []),
+      taskkill: vi.fn(async () => {}),
+    };
+    await writeManifest(['unused']);
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(path.join(stateDir, 'worker.pid'), `${rootPid}\n`, 'utf-8');
+
+    const supervisor = new WorkerManifestSupervisor({
+      platform: 'win32',
+      windowsProcessOperations,
+    });
+
+    expect(await supervisor.stopIfPresent('local-worker:test', bundleRoot, options())).toBe(false);
+    expect(windowsProcessOperations.readProcessIdentity).toHaveBeenCalledWith(rootPid);
+    expect(windowsProcessOperations.taskkill).not.toHaveBeenCalled();
+    await expect(readStatus()).resolves.toMatchObject({
+      state: 'failed',
+      reason: 'WorkerProcessIdentityMissing',
+      pid: rootPid,
+    });
+  });
+
+  it('gracefully stops and verifies the complete managed Windows process tree', async () => {
+    const rootPid = 41_001;
+    const childPid = 41_002;
+    const alivePids = new Set([rootPid, childPid]);
+    const windowsProcessOperations: WindowsProcessOperations = {
+      readProcessIdentity: vi.fn(async pid => processIdentity(pid)),
+      listDescendantPids: vi.fn(async () => [childPid]),
+      taskkill: vi.fn(async (pid, force) => {
+        if (force) alivePids.delete(pid);
+      }),
+    };
+    await writeTrackedWindowsWorker(rootPid);
+
+    const supervisor = new WorkerManifestSupervisor({
+      platform: 'win32',
+      windowsProcessOperations,
+    });
+    const internals = supervisor as unknown as {
+      isAlive(pid: number): boolean;
+      waitForExit(pid: number, timeoutMs: number): Promise<void>;
+      waitForPidsExit(pids: number[], timeoutMs: number): Promise<void>;
+    };
+    vi.spyOn(internals, 'isAlive').mockImplementation(pid => alivePids.has(pid));
+    vi.spyOn(internals, 'waitForExit').mockResolvedValue();
+    vi.spyOn(internals, 'waitForPidsExit').mockResolvedValue();
+
+    expect(await supervisor.stopIfPresent('local-worker:test', bundleRoot, options())).toBe(true);
+    expect(windowsProcessOperations.listDescendantPids).toHaveBeenCalledWith(rootPid);
+    expect(windowsProcessOperations.taskkill).toHaveBeenNthCalledWith(1, rootPid, false);
+    expect(windowsProcessOperations.taskkill).toHaveBeenCalledWith(rootPid, true);
+    expect(windowsProcessOperations.taskkill).toHaveBeenCalledWith(childPid, true);
+    expect(alivePids).toEqual(new Set());
+    await expect(readStatus()).resolves.toMatchObject({ state: 'stopped', pid: rootPid });
+  });
+
+  it('reports WorkerProcessTreeStopFailed when a managed Windows descendant remains alive', async () => {
+    const rootPid = 42_001;
+    const childPid = 42_002;
+    const windowsProcessOperations: WindowsProcessOperations = {
+      readProcessIdentity: vi.fn(async pid => processIdentity(pid)),
+      listDescendantPids: vi.fn(async () => [childPid]),
+      taskkill: vi.fn(async () => {
+        throw new Error('simulated taskkill failure');
+      }),
+    };
+    await writeTrackedWindowsWorker(rootPid);
+
+    const supervisor = new WorkerManifestSupervisor({
+      platform: 'win32',
+      windowsProcessOperations,
+    });
+    const internals = supervisor as unknown as {
+      isAlive(pid: number): boolean;
+      waitForExit(pid: number, timeoutMs: number): Promise<void>;
+      waitForPidsExit(pids: number[], timeoutMs: number): Promise<void>;
+    };
+    vi.spyOn(internals, 'isAlive').mockReturnValue(true);
+    vi.spyOn(internals, 'waitForExit').mockResolvedValue();
+    vi.spyOn(internals, 'waitForPidsExit').mockResolvedValue();
+
+    expect(await supervisor.stopIfPresent('local-worker:test', bundleRoot, options())).toBe(false);
+    await expect(readStatus()).resolves.toMatchObject({
+      state: 'failed',
+      reason: 'WorkerProcessTreeStopFailed',
+      remainingPids: [rootPid, childPid],
+    });
+  });
+
+  it('uses injected Windows process identity checks without requiring a Windows test host', async () => {
+    const rootPid = 43_001;
+    const windowsProcessOperations: WindowsProcessOperations = {
+      readProcessIdentity: vi.fn(async pid => processIdentity(pid, '2026-07-30T00:00:01.0000000Z')),
+      listDescendantPids: vi.fn(async () => []),
+      taskkill: vi.fn(async () => {}),
+    };
+    await writeTrackedWindowsWorker(rootPid);
+
+    const supervisor = new WorkerManifestSupervisor({
+      platform: 'win32',
+      windowsProcessOperations,
+    });
+
+    expect(await supervisor.stopIfPresent('local-worker:test', bundleRoot, options())).toBe(true);
+    expect(windowsProcessOperations.readProcessIdentity).toHaveBeenCalledWith(rootPid);
+    expect(windowsProcessOperations.taskkill).not.toHaveBeenCalled();
+    await expect(readStatus()).resolves.toMatchObject({
+      state: 'stopped',
+      reason: 'WorkerPidIdentityMismatch',
+      pid: rootPid,
+    });
   });
 
   it.runIf(process.platform === 'win32')('does not stop a reused Windows pid with a different creation time', async () => {

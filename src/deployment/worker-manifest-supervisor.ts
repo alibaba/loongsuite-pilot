@@ -6,6 +6,7 @@ import { createLogger } from '../utils/logger.js';
 import { ensureDir, fileExists } from '../utils/fs-utils.js';
 
 const logger = createLogger('WorkerManifestSupervisor');
+const WINDOWS_PROCESS_COMMAND_TIMEOUT_MS = 5000;
 
 export interface WorkerManifest {
   name: string;
@@ -36,10 +37,16 @@ interface WorkerRuntime {
   stopping: boolean;
 }
 
-interface WindowsProcessIdentity {
+export interface WindowsProcessIdentity {
   pid: number;
   creationTime: string;
   executablePath: string;
+}
+
+export interface WindowsProcessOperations {
+  readProcessIdentity(pid: number): Promise<WindowsProcessIdentity | undefined>;
+  listDescendantPids(rootPid: number): Promise<number[]>;
+  taskkill(pid: number, force: boolean): Promise<void>;
 }
 
 export interface WorkerManifestOptions {
@@ -50,6 +57,7 @@ export interface WorkerManifestOptions {
 export interface WorkerManifestSupervisorOptions {
   platform?: NodeJS.Platform;
   nodeExecutable?: string;
+  windowsProcessOperations?: WindowsProcessOperations;
 }
 
 class WorkerManifestContractError extends Error {
@@ -68,10 +76,12 @@ export class WorkerManifestSupervisor {
   private readonly runtimes = new Map<string, WorkerRuntime>();
   private readonly platform: NodeJS.Platform;
   private readonly nodeExecutable: string;
+  private readonly windowsProcessOperations?: WindowsProcessOperations;
 
   constructor(options: WorkerManifestSupervisorOptions = {}) {
     this.platform = options.platform ?? process.platform;
     this.nodeExecutable = options.nodeExecutable ?? process.execPath;
+    this.windowsProcessOperations = options.windowsProcessOperations;
   }
 
   async startIfPresent(
@@ -278,8 +288,27 @@ export class WorkerManifestSupervisor {
         return false;
       }
 
+      const verifyWindowsProcessIdentity = this.shouldVerifyWindowsProcessIdentity(options);
+      if (verifyWindowsProcessIdentity) {
+        try {
+          await fs.writeFile(paths.pid, `${child.pid}\n`, 'utf-8');
+        } catch (err) {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            // The child may have exited before its pid could be persisted.
+          }
+          await failStart(err);
+          return false;
+        }
+        if (settled) {
+          await fs.rm(paths.pid, { force: true });
+          return false;
+        }
+      }
+
       let processIdentity: WindowsProcessIdentity | undefined;
-      if (this.shouldVerifyWindowsProcessIdentity(options)) {
+      if (verifyWindowsProcessIdentity) {
         try {
           processIdentity = await this.readWindowsProcessIdentity(child.pid);
         } catch (err) {
@@ -315,8 +344,10 @@ export class WorkerManifestSupervisor {
           await this.writeStatus(this.processIdentityPath(paths.pid), { ...processIdentity });
           if (settled) return false;
         }
-        await fs.writeFile(paths.pid, `${child.pid}\n`, 'utf-8');
-        if (settled) return false;
+        if (!verifyWindowsProcessIdentity) {
+          await fs.writeFile(paths.pid, `${child.pid}\n`, 'utf-8');
+          if (settled) return false;
+        }
         this.runtimes.set(paths.pid, activeRuntime);
         await this.writeStatus(paths.status, {
           state: 'running',
@@ -388,19 +419,6 @@ export class WorkerManifestSupervisor {
     let processIdentity: WindowsProcessIdentity | undefined;
     if (this.shouldVerifyWindowsProcessIdentity(options)) {
       processIdentity = await this.readStoredWindowsProcessIdentity(this.processIdentityPath(paths.pid), pid);
-      if (!processIdentity) {
-        await this.writeStatus(paths.status, {
-          state: 'failed',
-          name: manifest.name,
-          agentId,
-          pid,
-          reason: 'WorkerProcessIdentityMissing',
-          error: 'worker pid exists without a recorded Windows process identity',
-          updatedAt: new Date().toISOString(),
-        });
-        logger.error('worker process identity missing; refusing to stop pid', { agentId, pid });
-        return false;
-      }
 
       let actualIdentity: WindowsProcessIdentity | undefined;
       try {
@@ -438,6 +456,25 @@ export class WorkerManifestSupervisor {
         });
         logger.info('stale worker pid removed because the process no longer exists', { agentId, pid });
         return true;
+      }
+
+      if (!processIdentity) {
+        await this.writeStatus(paths.status, {
+          state: 'failed',
+          name: manifest.name,
+          agentId,
+          pid,
+          reason: 'WorkerProcessIdentityMissing',
+          error: 'worker pid exists without a recorded Windows process identity',
+          actualIdentity,
+          updatedAt: new Date().toISOString(),
+        });
+        logger.error('worker process identity missing; refusing to stop live pid', {
+          agentId,
+          pid,
+          actualExecutableName: path.win32.basename(actualIdentity.executablePath),
+        });
+        return false;
       }
 
       if (!this.isSameWindowsProcess(processIdentity, actualIdentity)) {
@@ -485,25 +522,8 @@ export class WorkerManifestSupervisor {
       platform: this.platform,
     });
 
-    const useManagedWindowsProcessTree = this.platform === 'win32' && this.isManagedLocalWorker(options);
     let remainingPids: number[] = [];
-    if (useManagedWindowsProcessTree) {
-      try {
-        await this.runTaskkill(pid, true);
-        logger.info('managed worker process tree force cleanup requested', {
-          agentId,
-          pid,
-          platform: this.platform,
-        });
-      } catch (err) {
-        logger.warn('managed worker process tree force cleanup failed', {
-          agentId,
-          pid,
-          rootAlive: this.isAlive(pid),
-          error: String(err),
-        });
-      }
-    } else if (this.platform === 'win32') {
+    if (this.platform === 'win32') {
       remainingPids = await this.stopWindowsProcessTree(agentId, pid);
     } else {
       try {
@@ -524,7 +544,6 @@ export class WorkerManifestSupervisor {
     }
 
     await this.waitForExit(pid, 5000);
-    if (useManagedWindowsProcessTree && this.isAlive(pid)) remainingPids = [pid];
     if ((this.platform !== 'win32' && this.isAlive(pid)) || remainingPids.length > 0) {
       await this.writeStatus(paths.status, {
         state: 'failed',
@@ -748,6 +767,9 @@ export class WorkerManifestSupervisor {
     if (!Number.isSafeInteger(rootPid) || rootPid <= 0) {
       return Promise.reject(new Error('worker pid must be a positive integer'));
     }
+    if (this.windowsProcessOperations) {
+      return this.windowsProcessOperations.listDescendantPids(rootPid);
+    }
     const script = `
 $rootPid = [uint32]$env:LOONGSUITE_WORKER_ROOT_PID
 $processes = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId)
@@ -779,6 +801,7 @@ while ($pending.Count -gt 0) {
           LOONGSUITE_WORKER_ROOT_PID: String(rootPid),
         },
         windowsHide: true,
+        timeout: WINDOWS_PROCESS_COMMAND_TIMEOUT_MS,
       }, (err, stdout) => {
         if (err) {
           reject(err);
@@ -796,6 +819,9 @@ while ($pending.Count -gt 0) {
   private readWindowsProcessIdentity(pid: number): Promise<WindowsProcessIdentity | undefined> {
     if (!Number.isSafeInteger(pid) || pid <= 0) {
       return Promise.reject(new Error('worker pid must be a positive integer'));
+    }
+    if (this.windowsProcessOperations) {
+      return this.windowsProcessOperations.readProcessIdentity(pid);
     }
     const script = `
 $ErrorActionPreference = "Stop"
@@ -823,7 +849,7 @@ if ($null -ne $process) {
           LOONGSUITE_WORKER_PID: String(pid),
         },
         windowsHide: true,
-        timeout: 5000,
+        timeout: WINDOWS_PROCESS_COMMAND_TIMEOUT_MS,
       }, (err, stdout) => {
         if (err) {
           reject(err);
@@ -891,7 +917,7 @@ if ($null -ne $process) {
   private shouldVerifyWindowsProcessIdentity(options: WorkerManifestOptions): boolean {
     return this.isManagedLocalWorker(options)
       && this.platform === 'win32'
-      && process.platform === 'win32';
+      && (process.platform === 'win32' || this.windowsProcessOperations !== undefined);
   }
 
   private processIdentityPath(pidPath: string): string {
@@ -902,10 +928,16 @@ if ($null -ne $process) {
     if (!Number.isSafeInteger(pid) || pid <= 0) {
       return Promise.reject(new Error('worker pid must be a positive integer'));
     }
+    if (this.windowsProcessOperations) {
+      return this.windowsProcessOperations.taskkill(pid, force);
+    }
     const args = ['/PID', String(pid), '/T'];
     if (force) args.push('/F');
     return new Promise((resolve, reject) => {
-      execFile('taskkill.exe', args, { windowsHide: true }, err => {
+      execFile('taskkill.exe', args, {
+        windowsHide: true,
+        timeout: WINDOWS_PROCESS_COMMAND_TIMEOUT_MS,
+      }, err => {
         if (err) reject(err);
         else resolve();
       });
@@ -929,10 +961,11 @@ if ($null -ne $process) {
 
     const failed = code !== 0 || signal !== null;
     const policy = manifest.restartPolicy ?? {};
+    const maxRestarts = policy.maxRestarts ?? 0;
     const shouldRestart = !runtime.stopping
       && failed
       && policy.type === 'on-failure'
-      && runtime.restarts < (policy.maxRestarts ?? 0);
+      && runtime.restarts < maxRestarts;
 
     await this.writeStatus(paths.status, {
       state: shouldRestart ? 'restarting' : 'exited',
@@ -945,12 +978,31 @@ if ($null -ne $process) {
     });
 
     if (!shouldRestart) {
+      if (!runtime.stopping && failed && policy.type === 'on-failure' && runtime.restarts >= maxRestarts) {
+        logger.warn('worker restart policy exhausted', {
+          agentId,
+          manifest: manifest.name,
+          restartCount: runtime.restarts,
+          maxRestarts,
+          exitCode: code,
+          signal,
+        });
+      }
       this.runtimes.delete(runtimeKey);
       return;
     }
 
     runtime.restarts += 1;
     const delayMs = Math.max(0, policy.backoffSeconds ?? 0) * 1000;
+    logger.info('worker restart scheduled', {
+      agentId,
+      manifest: manifest.name,
+      restartCount: runtime.restarts,
+      maxRestarts,
+      delayMs,
+      exitCode: code,
+      signal,
+    });
     setTimeout(() => {
       if (runtime.stopping) return;
       void this.start(agentId, bundleRoot, manifest, env, options, runtime);

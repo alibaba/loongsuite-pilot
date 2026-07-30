@@ -109,7 +109,7 @@ export class LocalWorkerActivationService {
     }
 
     const fingerprint = await this.fingerprint(instance, template);
-    if (this.activeFingerprints.get(instance.id) === fingerprint && await this.isInstanceWorkerAlive(template, instance)) return;
+    if (this.activeFingerprints.get(instance.id) === fingerprint) return;
 
     logger.info('reconciling local worker', { instanceId: instance.id, runtime: instance.runtime, trigger });
 
@@ -202,14 +202,6 @@ export class LocalWorkerActivationService {
       enabled: instance.enabled,
       sourceHash: sourceHash ?? '',
     })).digest('hex');
-  }
-
-  private async isInstanceWorkerAlive(template: AgentDefinition, instance: LocalWorkerInstance): Promise<boolean> {
-    const def = this.buildDefinition(template, instance);
-    return this.strategy.isWorkerRunning(def, {
-      instance: this.buildManifestInstance(instance),
-      runtimeOptions: this.buildRuntimeOptions(instance),
-    });
   }
 
   private async hasSupervisorFailureToPreserve(instance: LocalWorkerInstance): Promise<boolean> {

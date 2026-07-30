@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
+const WINDOWS_ACL_COMMAND_TIMEOUT_MS = 15_000;
 
 const WINDOWS_ACL_PROTECT = `
 $ErrorActionPreference = "Stop"
@@ -68,6 +69,7 @@ export async function preparePrivateLocalWorkerDirectory(
         LOONGSUITE_WORKER_ACL_TARGET: directory,
       },
       windowsHide: true,
+      timeout: WINDOWS_ACL_COMMAND_TIMEOUT_MS,
     });
   } catch (err) {
     const stderr = String((err as { stderr?: unknown }).stderr ?? '').trim();

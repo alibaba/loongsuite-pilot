@@ -344,7 +344,7 @@ while true; do sleep 1; done
     }
   });
 
-  it('restarts a same-fingerprint instance when the worker process is no longer alive', async () => {
+  it('does not redeploy a same-fingerprint instance while restarting or after the restart policy is exhausted', async () => {
     const tarball = path.join(tmpDir, 'sample-local-runtime-0.0.1.tar.gz');
     const captureFile = path.join(tmpDir, 'worker-runs.txt');
     const installMarker = path.join(tmpDir, 'install-ran');
@@ -353,10 +353,10 @@ while true; do sleep 1; done
       captureFile,
       installMarker,
       `#!/bin/bash\nprintf 'run\\n' >> "${captureFile}"\nexit 7\n`,
-      { type: 'on-failure', maxRestarts: 0, backoffSeconds: 0 },
+      { type: 'on-failure', maxRestarts: 1, backoffSeconds: 1 },
     );
 
-    await connectLocalWorker({
+    const instance = await connectLocalWorker({
       dataDir,
       runtime: 'claude-code',
       bootstrapToken: token(),
@@ -385,20 +385,40 @@ while true; do sleep 1; done
       await vi.waitFor(async () => {
         const runs = (await fs.readFile(captureFile, 'utf-8')).trim().split('\n');
         expect(runs).toHaveLength(1);
+        const status = JSON.parse(
+          await fs.readFile(path.join(stateDir(dataDir, instance.id), 'supervisor-status.json'), 'utf-8'),
+        ) as { state: string };
+        expect(status.state).toBe('restarting');
       });
 
-      await service.refresh('test');
+      await service.refresh('poll');
+      await service.refresh('poll');
+      await new Promise(resolve => setTimeout(resolve, 250));
+
+      expect((await fs.readFile(captureFile, 'utf-8')).trim().split('\n')).toEqual(['run']);
 
       await vi.waitFor(async () => {
         const runs = (await fs.readFile(captureFile, 'utf-8')).trim().split('\n');
-        expect(runs.length).toBeGreaterThanOrEqual(2);
-      });
+        expect(runs).toHaveLength(2);
+        const status = JSON.parse(
+          await fs.readFile(path.join(stateDir(dataDir, instance.id), 'supervisor-status.json'), 'utf-8'),
+        ) as { state: string };
+        expect(status.state).toBe('exited');
+      }, { timeout: 3000 });
+
+      await service.refresh('poll');
+      await service.refresh('poll');
+      await new Promise(resolve => setTimeout(resolve, 250));
+
+      expect((await fs.readFile(captureFile, 'utf-8')).trim().split('\n')).toEqual(['run', 'run']);
     } finally {
       await service.stop();
     }
   });
 
   it.each([
+    'WorkerManifestPlaceholderInvalid',
+    'RuntimeBundlePlatformUnsupported',
     'WorkerProcessIdentityMissing',
     'WorkerProcessIdentityCheckFailed',
     'WorkerProcessTreeStopFailed',
@@ -421,5 +441,25 @@ while true; do sleep 1; done
     };
 
     await expect(internals.hasSupervisorFailureToPreserve(instance)).resolves.toBe(true);
+  });
+
+  it('does not preserve unrelated supervisor failure reasons', async () => {
+    const instance = await connectLocalWorker({
+      dataDir,
+      runtime: 'claude-code',
+      bootstrapToken: token(),
+      workDir: path.join(tmpDir, 'project'),
+    });
+    await fs.writeFile(
+      path.join(stateDir(dataDir, instance.id), 'supervisor-status.json'),
+      JSON.stringify({ state: 'failed', reason: 'LocalWorkerDeployFailed' }),
+      'utf-8',
+    );
+    const service = new LocalWorkerActivationService({ dataDir, pilotDir, definitions: [] });
+    const internals = service as unknown as {
+      hasSupervisorFailureToPreserve(instance: typeof instance): Promise<boolean>;
+    };
+
+    await expect(internals.hasSupervisorFailureToPreserve(instance)).resolves.toBe(false);
   });
 });
