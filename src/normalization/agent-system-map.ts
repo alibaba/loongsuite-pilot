@@ -16,6 +16,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'pi-coding-agent': 'pi',
   'grok-build': 'grok',
   'wukong': 'wukong',
+  'workbuddy': 'workbuddy',
 };
 
 export function resolveAgentSystem(agentType: string): string {

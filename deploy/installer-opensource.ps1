@@ -158,6 +158,16 @@ function Test-NodeSuitable {
 function Resolve-Node {
     $candidates = @()
 
+    # Existing installations pin the exact Node binary used for deployment.
+    foreach ($pinFile in @(
+        (Join-Path $DataDir "node-bin"),
+        (Join-Path $CACHE_DIR "node-bin")
+    )) {
+        if (-not (Test-Path -LiteralPath $pinFile)) { continue }
+        $pinned = ([string](Get-Content -LiteralPath $pinFile -Raw -ErrorAction SilentlyContinue)).Trim()
+        if ($pinned) { $candidates += $pinned }
+    }
+
     # nvm-windows
     $nvmHome = $env:NVM_HOME
     if ($nvmHome -and (Test-Path $nvmHome)) {
@@ -996,7 +1006,8 @@ function Remove-HookConfigs {
         (Join-Path $env:USERPROFILE ".qoderworkcn\settings.json"),
         (Join-Path $env:USERPROFILE ".claude\settings.json"),
         (Join-Path $env:USERPROFILE ".qwen\settings.json"),
-        (Join-Path $env:USERPROFILE ".grok\hooks\loongsuite-pilot.json")
+        (Join-Path $env:USERPROFILE ".grok\hooks\loongsuite-pilot.json"),
+        (Join-Path $env:USERPROFILE ".workbuddy\settings.json")
     )
 
     foreach ($cfg in $configs) {
@@ -1032,6 +1043,10 @@ try {
     });
     if (filtered.length === 0) { delete hooks[event]; changed = true; }
     else hooks[event] = filtered;
+  }
+  if (Object.keys(hooks).length === 0) {
+    delete data.hooks;
+    changed = true;
   }
   if (changed) {
     fs.writeFileSync(cfg, JSON.stringify(data, null, 2) + '\n', 'utf-8');
@@ -1669,6 +1684,46 @@ function Assert-SafePilotDirectory {
     return $fullPath
 }
 
+function ConvertTo-ExtendedLengthPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if ($fullPath.StartsWith("\\?\")) { return $fullPath }
+    if ($fullPath.StartsWith("\\")) {
+        return "\\?\UNC\$($fullPath.Substring(2))"
+    }
+    return "\\?\$fullPath"
+}
+
+function Remove-PilotPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $extendedPath = ConvertTo-ExtendedLengthPath -Path $Path
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            if ([System.IO.Directory]::Exists($extendedPath)) {
+                [System.IO.Directory]::Delete($extendedPath, $true)
+            } elseif ([System.IO.File]::Exists($extendedPath)) {
+                [System.IO.File]::SetAttributes($extendedPath, [System.IO.FileAttributes]::Normal)
+                [System.IO.File]::Delete($extendedPath)
+            }
+            return
+        } catch {
+            $lastError = $_
+            if ($attempt -lt 3) { Start-Sleep -Milliseconds (100 * $attempt) }
+        }
+    }
+    throw $lastError
+}
+
 function Remove-PilotInstallationFiles {
     $cachePath = Assert-SafePilotDirectory -Path $CACHE_DIR -Purpose "cache"
     $dataPath = Assert-SafePilotDirectory -Path $DataDir -Purpose "data"
@@ -1680,7 +1735,7 @@ function Remove-PilotInstallationFiles {
 
     if ($cachePath -ine $dataPath -and -not $cacheContainsData) {
         if (Test-Path -LiteralPath $cachePath) {
-            Remove-Item -LiteralPath $cachePath -Recurse -Force
+            Remove-PilotPath -Path $cachePath
         }
     } else {
         foreach ($relativePath in @(
@@ -1693,7 +1748,7 @@ function Remove-PilotInstallationFiles {
         )) {
             $target = Join-Path $cachePath $relativePath
             if (Test-Path -LiteralPath $target) {
-                Remove-Item -LiteralPath $target -Recurse -Force
+                Remove-PilotPath -Path $target
             }
         }
     }
@@ -1701,7 +1756,7 @@ function Remove-PilotInstallationFiles {
     foreach ($relativePath in @("hooks", "skills", "plugins")) {
         $target = Join-Path $dataPath $relativePath
         if (Test-Path -LiteralPath $target) {
-            Remove-Item -LiteralPath $target -Recurse -Force
+            Remove-PilotPath -Path $target
         }
     }
 }
@@ -1720,6 +1775,10 @@ function Cmd-Uninstall {
 
     Remove-PilotScheduledTasks
     Msg "    ✅ 已移除计划任务" "    ✅ Removed scheduled tasks"
+
+    # Resolve the pinned runtime before installation files (including node-bin)
+    # are removed. JSON config cleanup must also work when Node is absent from PATH.
+    $script:NODE_BIN = Resolve-Node
 
     Msg "==> 删除安装目录..." "==> Removing installation..."
     Remove-PilotInstallationFiles
@@ -1761,7 +1820,7 @@ function Cmd-Uninstall {
         Msg "==> 删除数据目录 (-Purge)..." "==> Removing data directory (-Purge)..."
         $safeDataDir = Assert-SafePilotDirectory -Path $DataDir -Purpose "data"
         if (Test-Path -LiteralPath $safeDataDir) {
-            Remove-Item -LiteralPath $safeDataDir -Recurse -Force
+            Remove-PilotPath -Path $safeDataDir
         }
         Msg "    ✅ 已删除 $DataDir" "    ✅ Removed $DataDir"
     } else {

@@ -439,7 +439,7 @@ export class HookStrategy implements DeployStrategy {
       hookCommand: formatHookCommand(
         hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
       ),
-      matcher: hookConfig.matcher,
+      matcher: hookConfig.eventMatchers?.[event] ?? hookConfig.matcher,
       useNestedFormat: hookConfig.format === 'nested',
       replaceHookCommands: [
         ...(hookConfig.replaceHookCommands ?? []),
@@ -464,7 +464,7 @@ export class HookStrategy implements DeployStrategy {
         hookCommand: formatHookCommand(
           hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
         ),
-        matcher: hookConfig.matcher,
+        matcher: hookConfig.eventMatchers?.[event] ?? hookConfig.matcher,
         useNestedFormat: hookConfig.format === 'nested',
         replaceHookCommands: [
           ...(hookConfig.replaceHookCommands ?? []),

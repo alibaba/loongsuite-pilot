@@ -51,6 +51,8 @@ export interface AgentActivityEntry {
   'gen_ai.session.id': string;
   'gen_ai.turn.id'?: string;
   'gen_ai.step.id'?: string;
+  'gen_ai.turn.start'?: boolean;
+  'gen_ai.turn.end'?: boolean;
   'gen_ai.response.id'?: string;
   'gen_ai.agent.type': string;
   'gen_ai.agent.id'?: string;
@@ -82,6 +84,7 @@ export interface AgentActivityEntry {
   'gen_ai.tool.call.arguments'?: JsonValue;
   'gen_ai.tool.call.result'?: JsonValue;
   'gen_ai.tool.call.duration'?: number;
+  'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;
   /** Grok evidence used to associate a tool call with its execution result. */
   'loongsuite.grok.match.strategy'?: 'id' | 'name_order' | 'unmatched';

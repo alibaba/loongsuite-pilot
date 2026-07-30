@@ -47,6 +47,7 @@ import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-c
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
+import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
@@ -108,6 +109,7 @@ export class Orchestrator extends EventEmitter {
     'mimo-code-log': 'mimo-code',
     'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
+    'workbuddy': 'workbuddy',
   };
 
   private readonly config: AnalyticsConfig;
@@ -202,7 +204,7 @@ export class Orchestrator extends EventEmitter {
       dataDir: this.dataDir,
       pilotDir,
     });
-    await this.deploymentManager.deployAll();
+    await this.deploymentManager.deployAll(def => this.isAgentGatedEnabled(def.id));
 
     this.localWorkerActivationService = new LocalWorkerActivationService({
       dataDir: this.dataDir,
@@ -412,6 +414,7 @@ export class Orchestrator extends EventEmitter {
 
     for (const def of defs) {
       if (def.deployMode !== 'hook' || !def.hook) continue;
+      if (!this.isAgentGatedEnabled(def.id)) continue;
 
       const scriptName = path.basename(def.hook.hookCommand);
       targets.push({
@@ -1184,6 +1187,26 @@ export class Orchestrator extends EventEmitter {
           ),
         pollIntervalMs: listenerCfg['wukong']?.pollInterval,
         unavailableThreshold: 3,
+      }),
+    );
+
+    // --- WorkBuddy (Hook/file wakeups + local transcript polling fallback) ---
+    const workBuddyInput = new WorkBuddyInput({
+      stateStore: this.stateStore,
+      hookEventDir: path.join(this.dataDir, 'state', 'workbuddy', 'hook-events'),
+      pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
+    });
+    this.inputManager.registerInput(workBuddyInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(workBuddyInput, {
+        watchPaths: WorkBuddyInput.getWatchPaths(),
+        isAvailable: WorkBuddyInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP.workbuddy) &&
+          this.agentControlManager.resolveEnabled(
+            'workbuddy',
+            listenerCfg.workbuddy?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
       }),
     );
 

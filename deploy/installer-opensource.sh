@@ -1715,6 +1715,7 @@ remove_hook_configs() {
         "$HOME/.codex/hooks.json"
         "$HOME/.qwen/settings.json"
         "$HOME/.grok/hooks/loongsuite-pilot.json"
+        "$HOME/.workbuddy/settings.json"
     )
 
     local _has_node=0

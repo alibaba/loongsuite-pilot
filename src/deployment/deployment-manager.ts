@@ -65,7 +65,7 @@ export class DeploymentManager {
     this.loader = new AgentDefLoader(loaderOpts);
   }
 
-  async deployAll(): Promise<DeployResult[]> {
+  async deployAll(enabled?: (def: AgentDefinition) => boolean): Promise<DeployResult[]> {
     // ── Phase 0: migrate from old plugins (fail-open) ──
     try {
       await runPluginMigration();
@@ -79,6 +79,16 @@ export class DeploymentManager {
     const results: DeployResult[] = [];
 
     for (const def of this.definitions) {
+      if (enabled && !enabled(def)) {
+        logger.debug('agent excluded from deployment', { agentId: def.id });
+        results.push({
+          success: true,
+          agentId: def.id,
+          deployMode: def.deployMode,
+          skipped: true,
+        });
+        continue;
+      }
       try {
         const result = await this.deployAgent(def);
         results.push(result);
