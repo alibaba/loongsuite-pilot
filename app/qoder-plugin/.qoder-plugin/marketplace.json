@@ -1,0 +1,18 @@
+{
+  "name": "loongsuite-test-sensen",
+  "owner": {
+    "name": "sensen"
+  },
+  "metadata": {
+    "description": "LoongSuite Pilot 测试插件市场",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "loongsuite-pilot-installer",
+      "source": "./loongsuite-pilot-installer",
+      "description": "自动安装 loongsuite-pilot：捆绑多平台 Node v22.2.0 运行时，安装参数由管理员在 config/install-params.conf 配置",
+      "version": "0.2.0"
+    }
+  ]
+}
