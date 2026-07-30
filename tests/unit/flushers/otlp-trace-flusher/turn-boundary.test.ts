@@ -92,15 +92,16 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     const mockConvert = vi.mocked(convertEventLogToTrace);
     mockConvert.mockClear();
 
-    // First turn — makeEntry() defaults to event.name=llm.response, so the
-    // old buffer is considered "complete enough" for Signal B to flush it.
+    // A confirmed same session makes the new group key a turn boundary.
     await flusher.send(makeEntry({
+      'gen_ai.session.id': 'session-a',
       'trace_id': 'aaaa2f3577b34da6a3ce929d0e0e4736',
     }));
     expect(mockConvert).not.toHaveBeenCalled();
 
     // New trace_id → old turn should flush
     await flusher.send(makeEntry({
+      'gen_ai.session.id': 'session-a',
       'trace_id': 'bbbb2f3577b34da6a3ce929d0e0e4736',
     }));
     expect(mockConvert).toHaveBeenCalledTimes(1);
@@ -108,10 +109,9 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     expect(records).toHaveLength(1);
   });
 
-  it('Signal B: preserves legacy preemption when session identity is unavailable', async () => {
-    // The concurrency guard is intentionally limited to two known, different
-    // sessions. Agents without gen_ai.session.id keep the original behavior:
-    // a different group key from the same agent type preempts the old buffer.
+  it('Signal B: does NOT preempt when session identity is unavailable', async () => {
+    // An unknown session cannot prove that a different group key represents
+    // sequential user flow rather than a concurrent turn.
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);
     mockConvert.mockClear();
@@ -123,12 +123,21 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     }));
     expect(mockConvert).not.toHaveBeenCalled();
 
-    // A different group key retains the pre-session-aware Signal B behavior.
+    // A different group key must not preempt the unknown-session buffer.
     await flusher.send(makeEntry({
       'event.name': 'llm.request',
       'trace_id': 'bbbb2f3577b34da6a3ce929d0e0e4736',
     }));
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    // The old turn still flushes normally on its own terminal Signal A.
+    await flusher.send(makeEntry({
+      'event.name': 'llm.response',
+      'trace_id': 'aaaa2f3577b34da6a3ce929d0e0e4736',
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
     expect(mockConvert).toHaveBeenCalledTimes(1);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
   });
 
   it('Signal C: shutdown drains all pending buffers', async () => {

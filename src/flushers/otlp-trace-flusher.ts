@@ -226,14 +226,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
 
     // Signal B: a different turn from the same agent type is a boundary only
-    // when it belongs to the same session, or when session identity is unknown.
-    // Explicitly different sessions may run concurrently; preempting one would
+    // when both turns are confirmed to belong to the same session.
+    // Different or unknown sessions may be concurrent; preempting one would
     // split its records and synthesize duplicate ENTRY/AGENT spans.
-    // Missing session identity preserves the legacy preempt behavior.
     const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) || undefined;
     for (const [bufKey, buf] of this.turnBuffers) {
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
-      if (incomingSessionId && buf.sessionId && incomingSessionId !== buf.sessionId) continue;
+      if (!incomingSessionId || !buf.sessionId || incomingSessionId !== buf.sessionId) continue;
       buf.completed = true;
       this.triggerFlush(buf, false);
     }

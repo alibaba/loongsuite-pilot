@@ -251,10 +251,9 @@ describe('OtlpTraceFlusher - concurrent subagent regression', () => {
     expect((abandonedRecords[0] as Record<string, unknown>)['gen_ai.turn.id']).toBe('s1:t1');
   });
 
-  it('preserves legacy preemption when session info is missing', async () => {
-    // The concurrency guard applies only when both sessions are known and
-    // different. Agents that do not emit gen_ai.session.id retain the
-    // original same-agent/different-key Signal B behavior.
+  it('does NOT preempt when both session ids are missing', async () => {
+    // Without two known session ids, Signal B cannot prove that the turns
+    // are sequential rather than concurrent.
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);
     mockConvert.mockClear();
@@ -268,16 +267,54 @@ describe('OtlpTraceFlusher - concurrent subagent regression', () => {
       'trace_id': trace1,
       'event.name': 'other',
     }));
-    // New turn arrives, also without gen_ai.session.id — legacy Signal B
-    // preempts the old buffer even though it has no llm.response.
+    // New turn arrives, also without gen_ai.session.id — keep both buffers
+    // open until their own terminal/idle/cap/shutdown signal.
     await flusher.send(makeEntry({
       'gen_ai.turn.id': 'no-ses:t2',
       'trace_id': trace2,
       'event.name': 'other',
     }));
-    expect(mockConvert).toHaveBeenCalledTimes(1);
-    expect(mockConvert.mock.calls[0][0]).toHaveLength(1);
-    expect((mockConvert.mock.calls[0][0][0] as Record<string, unknown>)['gen_ai.turn.id']).toBe('no-ses:t1');
+    expect(mockConvert).not.toHaveBeenCalled();
+  });
+
+  it('does NOT preempt a known-session buffer when the incoming session is missing', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': 'known-session:t1',
+      'gen_ai.session.id': 'known-session',
+      'trace_id': '99992f3577b34da6a3ce929d0e0e4736',
+      'event.name': 'other',
+    }));
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': 'unknown-session:t1',
+      'trace_id': 'aaaa3f3577b34da6a3ce929d0e0e4736',
+      'event.name': 'other',
+    }));
+
+    expect(mockConvert).not.toHaveBeenCalled();
+  });
+
+  it('does NOT preempt an unknown-session buffer when the incoming session is known', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': 'unknown-session:t1',
+      'trace_id': 'bbbb3f3577b34da6a3ce929d0e0e4736',
+      'event.name': 'other',
+    }));
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': 'known-session:t1',
+      'gen_ai.session.id': 'known-session',
+      'trace_id': 'cccc3f3577b34da6a3ce929d0e0e4736',
+      'event.name': 'other',
+    }));
+
+    expect(mockConvert).not.toHaveBeenCalled();
   });
 
   it('learns a session id from later records before applying Signal B', async () => {
