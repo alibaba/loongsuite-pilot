@@ -368,6 +368,7 @@ function buildListenersConfig(
     'codex-transcript': { enabled: true, pollInterval: 30_000 },
     'opencode-log': { enabled: true, pollInterval: 30_000 },
     'pi-coding-agent-log': { enabled: true, pollInterval: 30_000 },
+    workbuddy: { enabled: true, pollInterval: 30_000 },
   };
 
   const result = { ...defaults };

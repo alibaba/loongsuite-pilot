@@ -33,11 +33,17 @@ describe('JsonlFlusher', () => {
   });
 
   describe('send (T008)', () => {
-    it('calls serialiseLogEntry and writes via appendLine', async () => {
+    it('writes canonical JSON values without flattening their types', async () => {
       const entry = buildTestEntry({
         uuid: 'e1',
         agentType: ClientType.Qoder,
         timestamp: 1700000000000,
+        'gen_ai.turn.start': true,
+        'gen_ai.usage.total_tokens': 12,
+        'gen_ai.output.messages': [{
+          role: 'assistant',
+          parts: [{ type: 'text', content: 'synthetic output' }],
+        }],
       });
       await flusher.send(entry);
 
@@ -50,6 +56,12 @@ describe('JsonlFlusher', () => {
       expect(parsed.logTime).toBeUndefined();
       expect(parsed.data).toBeUndefined();
       expect(parsed['gen_ai.session.id']).toBeDefined();
+      expect(parsed['gen_ai.turn.start']).toBe(true);
+      expect(parsed['gen_ai.usage.total_tokens']).toBe(12);
+      expect(parsed['gen_ai.output.messages']).toEqual([{
+        role: 'assistant',
+        parts: [{ type: 'text', content: 'synthetic output' }],
+      }]);
     });
 
     it('omits agent-scoped extension fields from output', async () => {

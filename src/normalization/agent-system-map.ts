@@ -15,6 +15,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'mimo-code': 'mimo-code',
   'pi-coding-agent': 'pi',
   'wukong': 'wukong',
+  'workbuddy': 'workbuddy',
 };
 
 export function resolveAgentSystem(agentType: string): string {

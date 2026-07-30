@@ -106,6 +106,47 @@ describe('DeploymentManager', () => {
       expect(results[0].success).toBe(true);
     });
 
+    it('does not detect or deploy agents disabled by the caller', async () => {
+      const enabledDef: AgentDefinition = {
+        id: 'enabled-agent',
+        displayName: 'Enabled',
+        deployMode: 'hook',
+        detection: { paths: [], commands: [] },
+        hook: {
+          settingsPath: path.join(tmpDir, 'enabled-hooks.json'),
+          events: ['Stop'],
+          hookCommand: '/opt/enabled.sh',
+          format: 'flat',
+        },
+      };
+      const disabledDef: AgentDefinition = {
+        id: 'disabled-agent',
+        displayName: 'Disabled',
+        deployMode: 'hook',
+        detection: { paths: [], commands: [] },
+        hook: {
+          settingsPath: path.join(tmpDir, 'disabled-hooks.json'),
+          events: ['Stop'],
+          hookCommand: '/opt/disabled.sh',
+          format: 'flat',
+        },
+      };
+      await writeAgentDef(enabledDef);
+      await writeAgentDef(disabledDef);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const mgr = makeManager();
+      const results = await mgr.deployAll(def => def.id === enabledDef.id);
+
+      expect(results).toHaveLength(2);
+      expect(results.find(result => result.agentId === disabledDef.id)?.skipped).toBe(true);
+      expect(vi.mocked(detectAgent)).toHaveBeenCalledTimes(1);
+      expect(await fs.stat(path.join(tmpDir, 'enabled-hooks.json'))).toBeDefined();
+      await expect(fs.stat(path.join(tmpDir, 'disabled-hooks.json'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+
     it('continues when one agent fails', async () => {
       const def1: AgentDefinition = {
         id: 'agent-ok',

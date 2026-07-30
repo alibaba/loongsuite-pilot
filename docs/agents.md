@@ -24,6 +24,11 @@ Use these IDs in installer options, `agent-control.json`, and `config.json`.
 | Qoder Work CN | `qoder-work-cn` | Hook and local data sources. |
 | Qwen Code CLI | `qwen-code-cli` | Hook integration; parses qwen-code transcript JSONL on Stop. |
 | Wukong | `wukong` | CLI API polling via local `wukong-cli`. |
+| WorkBuddy | `workbuddy` | Structural Hook/file wakeups with a 30-second local transcript polling fallback. Verified on WorkBuddy Desktop 5.2.6 for macOS and 5.3.5.0 for Windows 11. |
+
+The Windows verification used an installed Pilot package, resolved Node from the
+installer-pinned `node-bin` with Node absent from `PATH`, and passed strict JSONL
+validation against a real WorkBuddy transcript.
 
 Codex collection is transcript-backed. Pilot uses the lightweight
 `SessionStart` and `UserPromptSubmit` hooks to discover the effective
