@@ -108,41 +108,27 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     expect(records).toHaveLength(1);
   });
 
-  it('Signal B: does NOT flush old buffer that has no llm.response (still in progress)', async () => {
-    // Regression test for the multi-ENTRY/AGENT bug observed with mimo-code
-    // when a sibling turn (e.g. auto-triggered distill agent) starts while
-    // the build turn is still streaming records. The old buffer has only
-    // llm.request / tool.call events — flushing it on the sibling's arrival
-    // would split the turn's records across buffers and produce duplicate
-    // ENTRY/AGENT spans in the same trace.
+  it('Signal B: preserves legacy preemption when session identity is unavailable', async () => {
+    // The concurrency guard is intentionally limited to two known, different
+    // sessions. Agents without gen_ai.session.id keep the original behavior:
+    // a different group key from the same agent type preempts the old buffer.
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);
     mockConvert.mockClear();
 
-    // First turn — only llm.request, no llm.response yet (still in progress).
+    // First turn — only llm.request, no llm.response and no session id.
     await flusher.send(makeEntry({
       'event.name': 'llm.request',
       'trace_id': 'aaaa2f3577b34da6a3ce929d0e0e4736',
     }));
     expect(mockConvert).not.toHaveBeenCalled();
 
-    // Sibling turn arrives — old buffer must NOT be flushed (no llm.response).
+    // A different group key retains the pre-session-aware Signal B behavior.
     await flusher.send(makeEntry({
       'event.name': 'llm.request',
       'trace_id': 'bbbb2f3577b34da6a3ce929d0e0e4736',
     }));
-    expect(mockConvert).not.toHaveBeenCalled();
-
-    // Old turn now completes (llm.response arrives) — Signal A should fire
-    // and flush the OLD buffer with both its records (request + response).
-    await flusher.send(makeEntry({
-      'event.name': 'llm.response',
-      'trace_id': 'aaaa2f3577b34da6a3ce929d0e0e4736',
-      'gen_ai.response.finish_reasons': ['stop'],
-    }));
     expect(mockConvert).toHaveBeenCalledTimes(1);
-    const records = mockConvert.mock.calls[0][0];
-    expect(records).toHaveLength(2);
   });
 
   it('Signal C: shutdown drains all pending buffers', async () => {

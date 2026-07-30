@@ -156,6 +156,57 @@ describe('OtlpTraceFlusher - concurrent subagent regression', () => {
     }
   });
 
+  it('keeps interleaved Codex sessions isolated until their own stop signals', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    const a = {
+      'gen_ai.agent.type': 'codex',
+      'gen_ai.turn.id': 'codex-session-a:t1',
+      'gen_ai.session.id': 'codex-session-a',
+      'trace_id': '77772f3577b34da6a3ce929d0e0e4736',
+    };
+    const b = {
+      'gen_ai.agent.type': 'codex',
+      'gen_ai.turn.id': 'codex-session-b:t1',
+      'gen_ai.session.id': 'codex-session-b',
+      'trace_id': '88882f3577b34da6a3ce929d0e0e4736',
+    };
+
+    await flusher.send(makeEntry({ ...a, 'event.name': 'other' }));
+    await flusher.send(makeEntry({
+      ...a,
+      'event.name': 'llm.response',
+      'gen_ai.response.finish_reasons': ['tool_call'],
+    }));
+    await flusher.send(makeEntry({ ...b, 'event.name': 'other' }));
+    await flusher.send(makeEntry({ ...a, 'event.name': 'llm.request' }));
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    await flusher.send(makeEntry({
+      ...b,
+      'event.name': 'llm.response',
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
+    await flusher.send(makeEntry({
+      ...a,
+      'event.name': 'llm.response',
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
+    await flusher.flush();
+
+    expect(mockConvert).toHaveBeenCalledTimes(2);
+    const recordsByTurn = new Map(
+      mockConvert.mock.calls.map(([records]) => [
+        (records[0] as Record<string, unknown>)['gen_ai.turn.id'],
+        records,
+      ]),
+    );
+    expect(recordsByTurn.get(a['gen_ai.turn.id'])).toHaveLength(4);
+    expect(recordsByTurn.get(b['gen_ai.turn.id'])).toHaveLength(2);
+  });
+
   it('preempts an abandoned same-session buffer with no llm.response when a new same-session turn arrives', async () => {
     // PR #115 review issue 3: an abandoned same-session turn that only has
     // llm.request / tool.call records (the user moved on or MiMo crashed
@@ -200,12 +251,10 @@ describe('OtlpTraceFlusher - concurrent subagent regression', () => {
     expect((abandonedRecords[0] as Record<string, unknown>)['gen_ai.turn.id']).toBe('s1:t1');
   });
 
-  it('does NOT preempt an abandoned buffer with no llm.response when session info is missing', async () => {
-    // When gen_ai.session.id is missing on either side, we can't tell
-    // same-session (sequential, safe to preempt) from different-session
-    // (concurrent subagent, must not preempt). Fall back to the original
-    // hasLlmResponse safety check so an in-progress turn isn't split on
-    // every sibling arrival.
+  it('preserves legacy preemption when session info is missing', async () => {
+    // The concurrency guard applies only when both sessions are known and
+    // different. Agents that do not emit gen_ai.session.id retain the
+    // original same-agent/different-key Signal B behavior.
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);
     mockConvert.mockClear();
@@ -219,14 +268,48 @@ describe('OtlpTraceFlusher - concurrent subagent regression', () => {
       'trace_id': trace1,
       'event.name': 'other',
     }));
-    // New turn arrives, also without gen_ai.session.id — must NOT preempt
-    // (hasLlmResponse guard still applies when session info is missing).
+    // New turn arrives, also without gen_ai.session.id — legacy Signal B
+    // preempts the old buffer even though it has no llm.response.
     await flusher.send(makeEntry({
       'gen_ai.turn.id': 'no-ses:t2',
       'trace_id': trace2,
       'event.name': 'other',
     }));
-    // No preemption should have fired before shutdown flush.
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(1);
+    expect((mockConvert.mock.calls[0][0][0] as Record<string, unknown>)['gen_ai.turn.id']).toBe('no-ses:t1');
+  });
+
+  it('learns a session id from later records before applying Signal B', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    const mainTurnId = 'late-session:t1';
+    const mainTraceId = '55552f3577b34da6a3ce929d0e0e4736';
+
+    // The first record has no session id, but a later record for the same
+    // turn supplies it. The buffer should retain that identity.
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': mainTurnId,
+      'trace_id': mainTraceId,
+      'event.name': 'other',
+    }));
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': mainTurnId,
+      'gen_ai.session.id': 'late-session',
+      'trace_id': mainTraceId,
+      'event.name': 'llm.response',
+      'gen_ai.response.finish_reasons': ['tool_call'],
+    }));
+
+    // A different known session must not preempt the first turn.
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': 'parallel-session:t1',
+      'gen_ai.session.id': 'parallel-session',
+      'trace_id': '66662f3577b34da6a3ce929d0e0e4736',
+      'event.name': 'other',
+    }));
     expect(mockConvert).not.toHaveBeenCalled();
   });
 

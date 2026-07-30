@@ -46,6 +46,7 @@ interface TurnBuffer {
   keySource: 'turn_id' | 'trace_id' | 'session_id' | 'ephemeral';
   keyValue: string;
   agentType: string;
+  sessionId?: string;
   records: AgentActivityEntry[];
   completed: boolean;
   lastActivityMs: number;
@@ -224,31 +225,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
       return;
     }
 
-    // Signal B: check if there's an active buffer for same agentType with different key.
-    // Same session (or one side missing session info): treat as sequential user flow —
-    // preempt the older buffer so it converts and frees. This includes abandoned
-    // turns that never emit a terminal llm.response (e.g. MiMo crashed mid-stream,
-    // user moved on, turnIdleTimeoutMs=0). For same-session buffers we preempt
-    // even without llm.response; for missing-session-info buffers we keep the
-    // original hasLlmResponse safety check to avoid splitting in-progress turns
-    // on every sibling arrival.
-    // Different non-empty sessions → concurrent subagent (e.g. mimo-code's
-    // checkpoint-writer / distill), never preempt — flushing mid-stream would
-    // split the parent turn's records and produce duplicate ENTRY/AGENT spans
-    // in the same trace_id (observed 2026-07-16 with concurrent subagent spawns).
-    const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) ?? '';
+    // Signal B: a different turn from the same agent type is a boundary only
+    // when it belongs to the same session, or when session identity is unknown.
+    // Explicitly different sessions may run concurrently; preempting one would
+    // split its records and synthesize duplicate ENTRY/AGENT spans.
+    // Missing session identity preserves the legacy preempt behavior.
+    const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) || undefined;
     for (const [bufKey, buf] of this.turnBuffers) {
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
-      const bufSessionId = (buf.records[0]?.['gen_ai.session.id'] as string | undefined) ?? '';
-      const differentSessions = !!incomingSessionId && !!bufSessionId && incomingSessionId !== bufSessionId;
-      if (differentSessions) continue;
-      const sameSessionConfirmed = !!incomingSessionId && !!bufSessionId && incomingSessionId === bufSessionId;
-      if (!sameSessionConfirmed) {
-        const hasLlmResponse = buf.records.some(
-          (r) => r['event.name'] === 'llm.response',
-        );
-        if (!hasLlmResponse) continue;
-      }
+      if (incomingSessionId && buf.sessionId && incomingSessionId !== buf.sessionId) continue;
       buf.completed = true;
       this.triggerFlush(buf, false);
     }
@@ -275,11 +260,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
         keySource: source,
         keyValue: value,
         agentType,
+        sessionId: incomingSessionId,
         records: [],
         completed: false,
         lastActivityMs: Date.now(),
       };
       this.turnBuffers.set(key, buf);
+    } else if (!buf.sessionId && incomingSessionId) {
+      buf.sessionId = incomingSessionId;
     }
     buf.records.push(entry);
     buf.lastActivityMs = Date.now();
