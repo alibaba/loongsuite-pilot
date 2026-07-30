@@ -754,7 +754,7 @@ const AGENT_FILTER = (_FILTER_SRC.trim().toLowerCase() === 'all' || _FILTER_SRC.
   : _FILTER_SRC.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 const MAX_SAMPLES = parseInt(process.env.E2E_JSONL_MAX_SAMPLES || '3', 10);
 
-const REQUIRED = [
+const COMMON_REQUIRED = [
   'time_unix_nano', 'event.id', 'user.id', 'event.name',
   'gen_ai.session.id', 'gen_ai.agent.type', 'gen_ai.provider.name',
 ];
@@ -762,11 +762,38 @@ const EVENT_NAME_ENUM = new Set([
   'llm.request', 'llm.response', 'tool.call', 'tool.result',
   'skill.use', 'tool.approve', 'other',
 ]);
-const OPTIONAL_COVERAGE = [
-  'trace_id', 'span_id', 'gen_ai.request.model', 'gen_ai.response.model',
+const CONDITIONAL_REQUIRED = {
+  'tool.call': ['gen_ai.tool.name', 'gen_ai.tool.call.id'],
+  'tool.result': ['gen_ai.tool.name', 'gen_ai.tool.call.id'],
+  'skill.use': ['gen_ai.skill.name'],
+};
+const COVERAGE_FIELDS = [
+  ...COMMON_REQUIRED,
+  'trace_id', 'span_id', 'gen_ai.turn.id', 'gen_ai.step.id',
+  'gen_ai.turn.start', 'gen_ai.turn.end',
+  'gen_ai.request.id', 'gen_ai.request.model',
+  'gen_ai.response.id', 'gen_ai.response.model', 'gen_ai.response.finish_reasons',
+  'gen_ai.input.messages_delta', 'gen_ai.output.messages',
   'gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens',
-  'gen_ai.tool.call.id',
+  'gen_ai.tool.name', 'gen_ai.tool.call.id', 'gen_ai.tool.call.duration',
+  'tool.result.status', 'error.type',
 ];
+const NUMBER_FIELDS = [
+  'gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens',
+  'gen_ai.usage.cache_read.input_tokens', 'gen_ai.usage.cache_creation.input_tokens',
+  'gen_ai.usage.total_tokens', 'gen_ai.usage.input_cost',
+  'gen_ai.usage.output_cost', 'gen_ai.usage.cache_read.input_cost',
+  'gen_ai.usage.cache_creation.input_cost', 'gen_ai.usage.total_cost',
+];
+const ARRAY_FIELDS = [
+  'gen_ai.response.finish_reasons', 'gen_ai.input.messages',
+  'gen_ai.input.messages_delta', 'gen_ai.output.messages',
+  'gen_ai.system_instructions', 'gen_ai.tool.definitions',
+];
+const PLACEHOLDER_FIELDS = [
+  'gen_ai.provider.name', 'gen_ai.request.model', 'gen_ai.response.model',
+];
+const PLACEHOLDERS = new Set(['unknown', 'n/a', 'na', 'none', 'null', 'undefined']);
 
 function listJsonl(dir) {
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
@@ -794,6 +821,22 @@ function pct(num, total) {
   return ((num / total) * 100).toFixed(1) + '%';
 }
 
+function hasValue(value) {
+  return value !== undefined && value !== null && value !== '';
+}
+
+function increment(target, key, amount = 1) {
+  target[key] = (target[key] || 0) + amount;
+}
+
+function validTraceId(value) {
+  return typeof value === 'string' && /^[0-9a-f]{32}$/i.test(value) && !/^0{32}$/.test(value);
+}
+
+function validSpanId(value) {
+  return typeof value === 'string' && /^[0-9a-f]{16}$/i.test(value) && !/^0{16}$/.test(value);
+}
+
 const files = listJsonl(LOG_DIR).filter(matchesAgentFilter);
 if (!files.length) {
   console.log('[jsonl-validate] no .jsonl files in ' + LOG_DIR + (AGENT_FILTER.length ? ' (filter=' + AGENT_FILTER.join(',') + ')' : ''));
@@ -803,67 +846,223 @@ if (!files.length) {
 
 let totalEntries = 0;
 let totalWindowed = 0;
-let totalMissing = 0;
-let totalBadEnum = 0;
-let totalParseErr = 0;
+let hardIssueTotal = 0;
 const globalEventName = Object.create(null);
 const globalAgentType = Object.create(null);
 const globalProvider = Object.create(null);
-const globalCoverage = Object.create(null);
-OPTIONAL_COVERAGE.forEach(k => { globalCoverage[k] = 0; });
-const missingSamples = [];
+const issueCounts = Object.create(null);
+const issueSamples = [];
+const fileStats = new Map();
+const rows = [];
+const coverage = Object.create(null);
+
+function addIssue(file, category, fields = []) {
+  hardIssueTotal++;
+  increment(issueCounts, category);
+  const stat = fileStats.get(file);
+  if (stat) stat.issues++;
+  if (issueSamples.length < MAX_SAMPLES) {
+    issueSamples.push({ file, category, fields: [...new Set(fields)].sort() });
+  }
+}
+
+function recordCoverage(eventName, entry) {
+  const name = typeof eventName === 'string' && eventName ? eventName : '<missing>';
+  if (!coverage[name]) coverage[name] = { count: 0, fields: Object.create(null) };
+  coverage[name].count++;
+  for (const field of COVERAGE_FIELDS) {
+    if (hasValue(entry[field])) increment(coverage[name].fields, field);
+  }
+}
+
+function validateTypes(file, entry) {
+  const bad = [];
+  if (hasValue(entry.time_unix_nano) && (typeof entry.time_unix_nano !== 'string' || !/^\\d+$/.test(entry.time_unix_nano))) bad.push('time_unix_nano');
+  if (hasValue(entry.observed_time_unix_nano) && (typeof entry.observed_time_unix_nano !== 'string' || !/^\\d+$/.test(entry.observed_time_unix_nano))) bad.push('observed_time_unix_nano');
+  for (const field of ['event.id', 'user.id', 'event.name', 'gen_ai.session.id', 'gen_ai.agent.type', 'gen_ai.provider.name']) {
+    if (hasValue(entry[field]) && typeof entry[field] !== 'string') bad.push(field);
+  }
+  if (hasValue(entry.trace_id) && !validTraceId(entry.trace_id)) bad.push('trace_id');
+  if (hasValue(entry.span_id) && !validSpanId(entry.span_id)) bad.push('span_id');
+  if (hasValue(entry.parent_span_id) && !validSpanId(entry.parent_span_id)) bad.push('parent_span_id');
+  for (const field of NUMBER_FIELDS) {
+    if (hasValue(entry[field]) && (typeof entry[field] !== 'number' || !Number.isFinite(entry[field]) || entry[field] < 0)) bad.push(field);
+  }
+  if (hasValue(entry['gen_ai.tool.call.duration'])
+    && (typeof entry['gen_ai.tool.call.duration'] !== 'number'
+      || !Number.isFinite(entry['gen_ai.tool.call.duration'])
+      || entry['gen_ai.tool.call.duration'] <= 0)) {
+    bad.push('gen_ai.tool.call.duration');
+  }
+  for (const field of ARRAY_FIELDS) {
+    if (hasValue(entry[field]) && !Array.isArray(entry[field])) bad.push(field);
+  }
+  for (const field of ['gen_ai.turn.start', 'gen_ai.turn.end']) {
+    if (hasValue(entry[field]) && typeof entry[field] !== 'boolean') bad.push(field);
+  }
+  for (const field of ['gen_ai.tool.call.arguments', 'gen_ai.tool.call.result']) {
+    const value = entry[field];
+    if (typeof value === 'string' && /^[\\s]*[\\[{]/.test(value)) bad.push(field);
+  }
+  if (bad.length) addIssue(file, 'type_error', bad);
+}
 
 for (const file of files) {
   const base = path.basename(file);
-  let entries = 0;
-  let windowed = 0;
-  let missing = 0;
-  let badEnum = 0;
-  let parseErr = 0;
-  const eventName = Object.create(null);
+  const stat = { entries: 0, windowed: 0, issues: 0, eventName: Object.create(null) };
+  fileStats.set(base, stat);
   const raw = fs.readFileSync(file, 'utf8').split(/\\r?\\n/);
   for (const line of raw) {
     if (!line.trim()) continue;
     let entry;
-    try { entry = JSON.parse(line); } catch (e) { parseErr++; totalParseErr++; continue; }
-    entries++; totalEntries++;
-    if (!withinWindow(entry)) continue;
-    windowed++; totalWindowed++;
-    const miss = REQUIRED.filter(k => entry[k] === undefined || entry[k] === null || entry[k] === '');
-    if (miss.length) {
-      missing++; totalMissing++;
-      if (missingSamples.length < MAX_SAMPLES) missingSamples.push({ file: base, missing: miss, eventId: entry['event.id'] || '<no-id>' });
+    try {
+      entry = JSON.parse(line);
+    } catch (e) {
+      stat.entries++;
+      totalEntries++;
+      addIssue(base, 'parse_error');
+      continue;
     }
+    stat.entries++;
+    totalEntries++;
+    if (!withinWindow(entry)) continue;
+    stat.windowed++;
+    totalWindowed++;
     const en = entry['event.name'];
-    if (en !== undefined && !EVENT_NAME_ENUM.has(en)) { badEnum++; totalBadEnum++; }
-    if (en) eventName[en] = (eventName[en] || 0) + 1;
+    const conditional = CONDITIONAL_REQUIRED[en] || [];
+    const miss = [...COMMON_REQUIRED, ...conditional].filter(k => !hasValue(entry[k]));
+    const failedStatus = typeof entry['tool.result.status'] === 'string'
+      && ['failure', 'failed', 'error'].includes(entry['tool.result.status'].toLowerCase());
+    const finishReasons = Array.isArray(entry['gen_ai.response.finish_reasons'])
+      ? entry['gen_ai.response.finish_reasons'] : [];
+    if ((failedStatus || finishReasons.includes('error') || hasValue(entry['error.message']))
+      && !hasValue(entry['error.type'])) {
+      miss.push('error.type');
+    }
+    if (miss.length) {
+      addIssue(base, 'missing_required', miss);
+    }
+    if (en !== undefined && !EVENT_NAME_ENUM.has(en)) addIssue(base, 'bad_event_name', ['event.name']);
+    if (en) increment(stat.eventName, en);
     if (en) globalEventName[en] = (globalEventName[en] || 0) + 1;
     const at = entry['gen_ai.agent.type']; if (at) globalAgentType[at] = (globalAgentType[at] || 0) + 1;
     const pr = entry['gen_ai.provider.name']; if (pr) globalProvider[pr] = (globalProvider[pr] || 0) + 1;
-    for (const k of OPTIONAL_COVERAGE) if (entry[k] !== undefined && entry[k] !== null && entry[k] !== '') globalCoverage[k]++;
+    validateTypes(base, entry);
+    recordCoverage(en, entry);
+    rows.push({ file: base, entry });
   }
-  const tag = missing || badEnum || parseErr ? 'FAIL' : 'OK';
-  const summary = Object.entries(eventName).map(([k, v]) => k + '=' + v).join(', ') || '<none>';
-  console.log('[jsonl-validate] ' + tag + ' ' + base + ' entries=' + entries + ' windowed=' + windowed + ' missing=' + missing + ' badEnum=' + badEnum + ' parseErr=' + parseErr + ' event.name{' + summary + '}');
+}
+
+const seenEventIds = new Map();
+for (const row of rows) {
+  const eventId = row.entry['event.id'];
+  if (typeof eventId !== 'string' || !eventId) continue;
+  if (seenEventIds.has(eventId)) addIssue(row.file, 'duplicate_event_id', ['event.id']);
+  else seenEventIds.set(eventId, row);
+}
+
+const steps = new Map();
+for (const row of rows) {
+  const entry = row.entry;
+  if (entry['event.name'] !== 'llm.request' && entry['event.name'] !== 'llm.response') continue;
+  if (!hasValue(entry['gen_ai.step.id'])) continue;
+  const key = String(entry['gen_ai.session.id']) + '\\0' + String(entry['gen_ai.turn.id'] || '') + '\\0' + String(entry['gen_ai.step.id']);
+  if (!steps.has(key)) steps.set(key, []);
+  steps.get(key).push(row);
+}
+for (const stepRows of steps.values()) {
+  const requests = stepRows.filter(row => row.entry['event.name'] === 'llm.request');
+  const responses = stepRows.filter(row => row.entry['event.name'] === 'llm.response');
+  if (requests.length !== 1 || responses.length !== 1) {
+    addIssue(stepRows[0].file, 'model_pair_error', ['event.name', 'gen_ai.step.id']);
+  }
+}
+
+const tools = new Map();
+for (const row of rows) {
+  const entry = row.entry;
+  if (entry['event.name'] !== 'tool.call' && entry['event.name'] !== 'tool.result') continue;
+  const callId = entry['gen_ai.tool.call.id'];
+  if (!hasValue(callId)) continue;
+  const key = String(entry['gen_ai.session.id']) + '\\0' + String(callId);
+  if (!tools.has(key)) tools.set(key, []);
+  tools.get(key).push(row);
+}
+for (const toolRows of tools.values()) {
+  const calls = toolRows.filter(row => row.entry['event.name'] === 'tool.call');
+  const results = toolRows.filter(row => row.entry['event.name'] === 'tool.result');
+  const names = new Set(toolRows.map(row => row.entry['gen_ai.tool.name']).filter(hasValue));
+  if (calls.length !== 1 || results.length !== 1 || names.size !== 1) {
+    addIssue(toolRows[0].file, 'tool_pair_error', ['event.name', 'gen_ai.tool.call.id', 'gen_ai.tool.name']);
+  }
+}
+
+const turns = new Map();
+for (const row of rows) {
+  const entry = row.entry;
+  if (!hasValue(entry['gen_ai.turn.id'])) continue;
+  if (!hasValue(entry['gen_ai.turn.start']) && !hasValue(entry['gen_ai.turn.end'])) continue;
+  const key = String(entry['gen_ai.session.id']) + '\\0' + String(entry['gen_ai.turn.id']);
+  if (!turns.has(key)) turns.set(key, []);
+  turns.get(key).push(row);
+}
+for (const turnRows of turns.values()) {
+  const starts = turnRows.filter(row => row.entry['gen_ai.turn.start'] === true).length;
+  const ends = turnRows.filter(row => row.entry['gen_ai.turn.end'] === true).length;
+  if (starts !== 1 || ends !== 1) {
+    addIssue(turnRows[0].file, 'turn_boundary_error', ['gen_ai.turn.start', 'gen_ai.turn.end']);
+  }
+}
+
+let placeholderCount = 0;
+for (const row of rows) {
+  for (const field of PLACEHOLDER_FIELDS) {
+    const value = row.entry[field];
+    if (typeof value === 'string' && PLACEHOLDERS.has(value.trim().toLowerCase())) placeholderCount++;
+  }
+}
+
+if (SINCE_SECONDS > 0 && totalWindowed === 0) {
+  addIssue(path.basename(files[0]), 'empty_window');
+}
+
+for (const [base, stat] of fileStats) {
+  const tag = stat.issues ? 'FAIL' : 'OK';
+  const summary = Object.entries(stat.eventName).map(([k, v]) => k + '=' + v).join(', ') || '<none>';
+  console.log('[jsonl-validate] ' + tag + ' ' + base + ' entries=' + stat.entries + ' windowed=' + stat.windowed + ' issues=' + stat.issues + ' event.name{' + summary + '}');
 }
 
 console.log('');
 console.log('=== [jsonl-validate] summary ===');
 console.log('  files=' + files.length + ' entries=' + totalEntries + ' windowed=' + totalWindowed);
-console.log('  missing_required=' + totalMissing + ' (' + pct(totalMissing, totalWindowed) + ')');
-console.log('  bad_event_name=' + totalBadEnum + ' parse_errors=' + totalParseErr);
+for (const category of [
+  'missing_required', 'bad_event_name', 'parse_error', 'type_error',
+  'duplicate_event_id', 'model_pair_error', 'tool_pair_error', 'turn_boundary_error',
+  'empty_window',
+]) {
+  console.log('  ' + category + '=' + (issueCounts[category] || 0));
+}
+console.log('  suspicious_placeholders=' + placeholderCount + ' (reported, not a universal failure)');
 console.log('  event.name: ' + (Object.entries(globalEventName).map(([k, v]) => k + '=' + v).join(', ') || '<none>'));
 console.log('  gen_ai.agent.type: ' + (Object.entries(globalAgentType).map(([k, v]) => k + '=' + v).join(', ') || '<none>'));
 console.log('  gen_ai.provider.name: ' + (Object.entries(globalProvider).map(([k, v]) => k + '=' + v).join(', ') || '<none>'));
-console.log('  optional field coverage (of windowed):');
-for (const k of OPTIONAL_COVERAGE) console.log('    ' + k + '=' + globalCoverage[k] + ' (' + pct(globalCoverage[k], totalWindowed) + ')');
-if (missingSamples.length) {
-  console.log('  missing samples (up to ' + MAX_SAMPLES + '):');
-  for (const s of missingSamples) console.log('    - ' + s.file + ' eventId=' + s.eventId + ' missing=[' + s.missing.join(',') + ']');
+console.log('  per-event field coverage:');
+for (const eventName of Object.keys(coverage).sort()) {
+  const eventCoverage = coverage[eventName];
+  console.log('    ' + eventName + ' count=' + eventCoverage.count);
+  for (const field of COVERAGE_FIELDS) {
+    const count = eventCoverage.fields[field] || 0;
+    console.log('      ' + field + '=' + count + ' (' + pct(count, eventCoverage.count) + ')');
+  }
+}
+if (issueSamples.length) {
+  console.log('  issue samples (field names only, up to ' + MAX_SAMPLES + '):');
+  for (const sample of issueSamples) {
+    console.log('    - file=' + sample.file + ' category=' + sample.category + ' fields=[' + sample.fields.join(',') + ']');
+  }
 }
 
-const failed = totalMissing > 0 || totalBadEnum > 0 || totalParseErr > 0;
-if (failed && STRICT) {
+if (hardIssueTotal > 0 && STRICT) {
   console.error('[jsonl-validate] STRICT: failures detected → exit 1');
   process.exit(1);
 }
@@ -875,7 +1074,7 @@ process.exit(0);
  * 校验 ~/.loongsuite-pilot/logs/output/*.jsonl 是否满足 AgentActivityEntry schema。
  * 环境变量：
  *   E2E_JSONL_VALIDATE=0         禁用
- *   E2E_JSONL_STRICT=1           有任何缺失/枚举错即 exit 1
+ *   E2E_JSONL_STRICT=1           schema、类型、唯一性或关联错误时 exit 1
  *   E2E_JSONL_SINCE_SECONDS=600  仅统计最近 N 秒的条目
  *   E2E_JSONL_AGENT_FILTER=claude-code,codex,qoder-cli,cursor-cli,qwen-code-cli,opencode  仅校验 agent 前缀匹配的文件（默认）；设为 all 或 * 关闭过滤
  *   E2E_JSONL_LOG_DIR=/path      覆盖默认 ~/.loongsuite-pilot/logs/output

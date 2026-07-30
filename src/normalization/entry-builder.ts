@@ -247,16 +247,34 @@ export interface SerialiseLogEntryOptions {
 
 const AGENT_SCOPED_FIELD_RE = /^agent\.[^.]+\..+$/;
 
+/**
+ * Selects the canonical fields that may leave the normalization boundary while
+ * preserving their JSON value types. JSON-native sinks should use this shape;
+ * string-only sinks can pass it through serialiseLogEntry.
+ */
+export function projectLogEntry(
+  entry: AgentActivityEntry,
+  options: SerialiseLogEntryOptions = {},
+): Record<string, JsonValue> {
+  const out: Record<string, JsonValue> = {};
+
+  for (const [key, value] of Object.entries(entry)) {
+    if (value === undefined || value === null) continue;
+    if (LEGACY_ALIAS_FIELDS.has(key)) continue;
+    if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) continue;
+    out[key] = value;
+  }
+
+  return out;
+}
+
 export function serialiseLogEntry(
   entry: AgentActivityEntry,
   options: SerialiseLogEntryOptions = {},
 ): SerializedLogEntry {
   const out: SerializedLogEntry = {};
 
-  for (const [key, value] of Object.entries(entry)) {
-    if (value === undefined || value === null) continue;
-    if (LEGACY_ALIAS_FIELDS.has(key)) continue;
-    if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) continue;
+  for (const [key, value] of Object.entries(projectLogEntry(entry, options))) {
     out[key] = serializeValue(value);
   }
 
