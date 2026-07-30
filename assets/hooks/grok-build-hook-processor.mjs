@@ -39,6 +39,9 @@ import {
   hasExportedPrompt,
   markPromptExported,
   cleanupExpiredStates,
+  withSessionStateLock,
+  isSessionClosed,
+  markSessionClosed,
 } from './grok-build/state.mjs';
 import { parseGrokTranscript } from './grok-build/transcript-parser.mjs';
 import { parseGrokUpdates } from './grok-build/updates-parser.mjs';
@@ -246,10 +249,16 @@ function readSystemPrompt(chatHistoryPath) {
 
 function normalizeTerminalReason(value, fallback = 'end_turn') {
   if (typeof value !== 'string' || !value) return fallback;
-  const reason = value.toLowerCase();
+  const reason = value.toLowerCase().replace(/[\s-]+/g, '_');
   if (reason === 'canceled') return 'cancelled';
   if (reason === 'max_output_tokens') return 'max_tokens';
   return reason;
+}
+
+function isSessionClosingStop(trigger, event) {
+  if (trigger !== 'stop') return false;
+  const reason = normalizeTerminalReason(event?.stop_reason, '');
+  return reason === 'shutdown' || reason === 'channel_closed';
 }
 
 function classifyModelError(event) {
@@ -305,8 +314,8 @@ function terminalTargets(trigger, event, state, updateTurns) {
   if (trigger === 'stop' || trigger === 'stop-failure') {
     const updateTurn = currentUpdateTurn(updateTurns, event.prompt_id);
     const promptId = event.prompt_id
-      || updateTurn?.promptId
-      || `${state.session_id}:turn:${(state.turn_count || 0) + 1}`;
+      || updateTurn?.promptId;
+    if (!promptId) return [];
     return [{
       updateTurn,
       promptId,
@@ -319,14 +328,22 @@ function terminalTargets(trigger, event, state, updateTurns) {
     }];
   }
 
-  return updateTurns
+  let eligible = updateTurns
     .filter((turn) => turn.completed)
+    .filter((turn) => !!turn.promptId)
     .filter((turn) => !event.prompt_id || turn.promptId !== event.prompt_id)
-    .filter((turn) => !hasExportedPrompt(state, turn.promptId))
+    .filter((turn) => !hasExportedPrompt(state, turn.promptId));
+  const pendingColdStart = (state.turn_count || 0) === 0
+    && (state.chat_checkpoint?.offset || 0) === 0
+    && (state.updates_checkpoint?.offset || 0) === 0
+    && (state.recent_prompt_ids?.length || 0) === 0;
+  if (pendingColdStart && eligible.length > 1) {
+    eligible = eligible.slice(-1);
+  }
+  return eligible
     .map((turn) => ({
       updateTurn: turn,
-      promptId: turn.promptId
-        || `${state.session_id}:turn:${(state.turn_count || 0) + 1}`,
+      promptId: turn.promptId,
       stopReason: normalizeTerminalReason(turn.stopReason, 'end_turn'),
       errorType: normalizeTerminalReason(turn.stopReason) === 'error' ? 'model_error' : null,
     }));
@@ -376,15 +393,6 @@ function buildTurnRecords({
     ];
   }
 
-  if (fusedTurn.llmCalls.length === 0) {
-    const terminalFinish = mapStopReason(fusedTurn.stopReason);
-    promptRecord['gen_ai.response.finish_reasons'] = [terminalFinish];
-    promptRecord['gen_ai.output.finish_reason'] = terminalFinish;
-    if (errorType) {
-      promptRecord['error.type'] = errorType;
-      promptRecord['error.message'] = 'model request failed';
-    }
-  }
   records.push(promptRecord);
 
   fusedTurn.llmCalls.forEach((call, callIndex) => {
@@ -392,7 +400,10 @@ function buildTurnRecords({
     const stepSpanId = generateSpanId();
     const llmSpanId = generateSpanId();
     const responseId = call.message_id || `${stepId}:response`;
-    const inputMessages = convertInputMessages(call.input_messages, call.protocol || 'anthropic');
+    const inputMessages = convertInputMessages(
+      call.input_messages,
+      call.protocol || 'anthropic',
+    ).filter((message) => message?.role !== 'system');
 
     let inputHash;
     let delta;
@@ -450,16 +461,20 @@ function buildTurnRecords({
       'gen_ai.response.finish_reasons': [finishReason],
       'gen_ai.output.finish_reason': finishReason,
       'gen_ai.react.finish_reason': finishReason,
-      'gen_ai.usage.input_tokens': inputTokens,
-      'gen_ai.usage.output_tokens': outputTokens,
-      'gen_ai.usage.cache_read.input_tokens': cacheRead,
-      'gen_ai.usage.cache_creation.input_tokens': cacheCreation,
-      'gen_ai.usage.total_tokens': inputTokens + outputTokens,
-      'gen_ai.output.messages': convertOutputMessages(call.output_content, call.finishReason),
       'loongsuite.grok.timing.source': call.timingSource,
     };
-    const isLast = callIndex === fusedTurn.llmCalls.length - 1;
-    if (isLast && errorType) {
+    if (!call.incomplete) {
+      responseRecord['gen_ai.usage.input_tokens'] = inputTokens;
+      responseRecord['gen_ai.usage.output_tokens'] = outputTokens;
+      responseRecord['gen_ai.usage.cache_read.input_tokens'] = cacheRead;
+      responseRecord['gen_ai.usage.cache_creation.input_tokens'] = cacheCreation;
+      responseRecord['gen_ai.usage.total_tokens'] = inputTokens + outputTokens;
+      responseRecord['gen_ai.output.messages'] = convertOutputMessages(
+        call.output_content,
+        call.finishReason,
+      );
+    }
+    if (errorType && finishReason === 'error') {
       responseRecord['error.type'] = errorType;
       responseRecord['error.message'] = 'model request failed';
     }
@@ -520,6 +535,32 @@ function buildTurnRecords({
     }
   });
 
+  const terminalFinish = mapStopReason(fusedTurn.stopReason);
+  const latestRecordNanos = records.reduce((latest, record) => {
+    const current = BigInt(record.time_unix_nano || '0');
+    return current > latest ? current : latest;
+  }, 0n);
+  const observedTerminalNanos = BigInt(msToUnixNanos(
+    fusedTurn.terminalTimestampMs,
+    runtimeFallbackMs,
+  ));
+  const terminalRecord = {
+    _sequence: sequence++,
+    time_unix_nano: String(
+      observedTerminalNanos > latestRecordNanos ? observedTerminalNanos : latestRecordNanos,
+    ),
+    'event.id': crypto.randomUUID(),
+    'event.name': 'other',
+    ...baseFields,
+    'gen_ai.response.finish_reasons': [terminalFinish],
+    'gen_ai.output.finish_reason': terminalFinish,
+  };
+  if (errorType) {
+    terminalRecord['error.type'] = errorType;
+    terminalRecord['error.message'] = 'model request failed';
+  }
+  records.push(terminalRecord);
+
   records.sort((left, right) => {
     const leftTime = BigInt(left.time_unix_nano || '0');
     const rightTime = BigInt(right.time_unix_nano || '0');
@@ -535,8 +576,18 @@ async function processHook(trigger) {
   const event = tryReadStdin();
   const sessionId = requireSessionId(event);
   if (!sessionId) return;
+  if (isSessionClosingStop(trigger, event)) return;
 
   cleanupExpiredStates();
+  return withSessionStateLock(sessionId, () => processHookLocked(trigger, event, sessionId));
+}
+
+async function processHookLocked(trigger, event, sessionId) {
+  // SessionEnd is the final authority for a session. Keep a content-free,
+  // expiring tombstone after deleting state so a concurrently delayed Stop
+  // cannot recreate fresh state and export the same prompt again.
+  if (isSessionClosed(sessionId)) return;
+
   const state = loadState(sessionId);
   if (event.transcript_path) state.transcript_path = event.transcript_path;
   if (event.cwd && typeof event.cwd === 'string') state.cwd = event.cwd;
@@ -564,6 +615,7 @@ async function processHook(trigger) {
     state.transcript_path = updatesPath;
     if (trigger === 'session-end') {
       clearState(sessionId);
+      markSessionClosed(sessionId);
     } else {
       const baselineChat = parseGrokTranscript(chatHistoryPath, 0);
       const baselineUpdates = parseGrokUpdates(updatesPath, {});
@@ -607,28 +659,36 @@ async function processHook(trigger) {
     state.initialized = true;
     state.chat_checkpoint = checkpointFor(chatHistoryPath, chatResult.nextOffset);
     state.updates_checkpoint = updatesResult.checkpoint;
-    if (trigger === 'session-end') clearState(sessionId);
-    else saveState(sessionId, state);
+    if (trigger === 'session-end') {
+      clearState(sessionId);
+      markSessionClosed(sessionId);
+    } else saveState(sessionId, state);
     return;
   }
 
   const hasCurrentEvidence = !!event.prompt_id
     || chatResult.turns.length > 0
     || updatesResult.turns.length > 0;
-  const targets = (hasCurrentEvidence
+  const candidateTargets = (hasCurrentEvidence
     ? terminalTargets(trigger, event, state, updatesResult.turns)
-    : [])
+    : []);
+  const targets = candidateTargets
     .filter((target) => !hasExportedPrompt(state, target.promptId));
   if (targets.length === 0) {
     state.initialized = true;
-    if (updatesResult.lastCompletedOffset > (state.updates_checkpoint?.offset || 0)) {
+    if (
+      (trigger === 'user-prompt-submit' || trigger === 'session-end' || candidateTargets.length > 0)
+      && updatesResult.lastCompletedOffset > (state.updates_checkpoint?.offset || 0)
+    ) {
       state.updates_checkpoint = {
         ...updatesResult.checkpoint,
         offset: updatesResult.lastCompletedOffset,
       };
     }
-    if (trigger === 'session-end') clearState(sessionId);
-    else saveState(sessionId, state);
+    if (trigger === 'session-end') {
+      clearState(sessionId);
+      markSessionClosed(sessionId);
+    } else saveState(sessionId, state);
     return;
   }
 
@@ -678,8 +738,10 @@ async function processHook(trigger) {
       offset: updatesResult.lastCompletedOffset,
     };
   }
-  if (trigger === 'session-end') clearState(sessionId);
-  else saveState(sessionId, state);
+  if (trigger === 'session-end') {
+    clearState(sessionId);
+    markSessionClosed(sessionId);
+  } else saveState(sessionId, state);
 }
 
 const DISPATCH = {

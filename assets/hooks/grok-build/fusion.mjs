@@ -74,16 +74,41 @@ export function fuseGrokTurn({
   stopReason,
   hookTimestampMs,
 }) {
-  const llmCalls = chatTurn?.llmCalls ?? [];
+  const chatLlmCalls = chatTurn?.llmCalls ?? [];
   const startMs = updateTurn?.startMs
     ?? null;
   const completedEndMs = updateTurn?.completed ? updateTurn?.endMs : null;
   const endMs = completedEndMs ?? hookTimestampMs ?? updateTurn?.endMs ?? null;
+  const isErrorTurn = stopReason === 'error';
   const selectedGroups = selectUnifiedGroups(unifiedGroups ?? [], {
     startMs,
     endMs,
-    expectedCount: llmCalls.length,
+    // A failed request can have a real inference_start without a corresponding
+    // assistant chat record. Preserve the extra group so it can become an
+    // observed incomplete LLM attempt below.
+    expectedCount: isErrorTurn ? 0 : chatLlmCalls.length,
   });
+  const llmCalls = [...chatLlmCalls];
+  if (isErrorTurn && selectedGroups.length > chatLlmCalls.length) {
+    for (let index = chatLlmCalls.length; index < selectedGroups.length; index += 1) {
+      const group = selectedGroups[index];
+      if (!Number.isFinite(group?.startMs) || Number.isFinite(group?.endMs)) continue;
+      llmCalls.push({
+        type: 'llm_call',
+        protocol: 'anthropic',
+        model: 'grok',
+        message_id: `${promptId}:incomplete:${group.loopIndex ?? index + 1}`,
+        input_messages: [],
+        _input_is_delta: true,
+        output_content: [],
+        stop_reason: 'error',
+        declaredToolIds: [],
+        toolDetails: new Map(),
+        promptIndex: updateTurn?.promptIndex ?? chatTurn?.promptIndex ?? null,
+        incomplete: true,
+      });
+    }
+  }
   const updateStarts = updateTurn?.toolStarts ?? [];
   const updateCompletions = updateTurn?.toolCompletions ?? [];
   const usedUpdateStarts = new Set();
@@ -267,6 +292,7 @@ export function fuseGrokTurn({
     promptIndex: updateTurn?.promptIndex ?? chatTurn?.promptIndex ?? null,
     prompt: chatTurn?.prompt ?? '',
     promptTimestampMs: startMs ?? hookTimestampMs,
+    terminalTimestampMs: endMs ?? hookTimestampMs,
     stopReason,
     usage: updateTurn?.usage ?? null,
     llmCalls: fusedCalls,

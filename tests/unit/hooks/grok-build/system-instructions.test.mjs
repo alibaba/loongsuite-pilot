@@ -70,8 +70,11 @@ function writeChatHistory(systemPrompt, options = {}) {
 }
 
 function runHook(payload, extraEnv = {}) {
+  const inputPayload = payload?.session_id && payload.prompt_id === undefined
+    ? { prompt_id: `${payload.session_id}:turn:1`, ...payload }
+    : payload;
   return spawnSync('node', [PROCESSOR, 'stop'], {
-    input: JSON.stringify(payload),
+    input: JSON.stringify(inputPayload),
     env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR, ...extraEnv },
     encoding: 'utf-8',
     timeout: 10_000,
@@ -208,7 +211,11 @@ describe('grok-build F3a — gen_ai.system_instructions array on first AGENT spa
       fs.unlinkSync(path.join(logDir, f));
     }
 
-    r = runHook({ ...basePayload, timestamp: '2026-07-17T11:00:02.500Z' });
+    r = runHook({
+      ...basePayload,
+      prompt_id: 's-sys-multi:turn:2',
+      timestamp: '2026-07-17T11:00:02.500Z',
+    });
     expect(r.status).toBe(0);
     const recordsBatch2 = readJsonlRecords();
     const turn2 = recordsBatch2.filter((rec) =>
@@ -269,7 +276,11 @@ describe('grok-build F3a — gen_ai.system_instructions array on first AGENT spa
     }
 
     // Second stop — turn 2 only (offset advanced)
-    r = runHook({ ...basePayload, timestamp: '2026-07-17T11:00:02.500Z' });
+    r = runHook({
+      ...basePayload,
+      prompt_id: 's-sys-incr:turn:2',
+      timestamp: '2026-07-17T11:00:02.500Z',
+    });
     expect(r.status).toBe(0);
     const state2 = readState('s-sys-incr');
     expect(state2.turn_count).toBe(2);

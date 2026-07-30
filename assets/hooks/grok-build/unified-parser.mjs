@@ -176,7 +176,14 @@ export function selectUnifiedGroups(groups, {
     });
   }
   if (expectedCount > 0 && selected.length > expectedCount) {
-    selected = selected.slice(-expectedCount);
+    // A cancelled turn can contain a completed inference that produced the
+    // assistant tool_call followed by a new inference_start with no matching
+    // inference_done/chat assistant record. Do not let that trailing attempt
+    // displace the completed inference that the chat record represents.
+    const completed = selected.filter((group) => Number.isFinite(group.endMs));
+    selected = completed.length >= expectedCount
+      ? completed.slice(-expectedCount)
+      : selected.slice(-expectedCount);
   }
   return selected;
 }

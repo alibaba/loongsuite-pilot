@@ -57,8 +57,11 @@ function copyFixture(name) {
 }
 
 function runHook(payload, extraEnv = {}) {
+  const inputPayload = payload?.session_id && payload.prompt_id === undefined
+    ? { prompt_id: `${payload.session_id}:turn:1`, ...payload }
+    : payload;
   return spawnSync('node', [PROCESSOR, 'stop'], {
-    input: JSON.stringify(payload),
+    input: JSON.stringify(inputPayload),
     env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR, HOME: FAKE_HOME, ...extraEnv },
     encoding: 'utf-8',
     timeout: 10_000,
@@ -116,6 +119,7 @@ describe('grok-build AGENT span aggregation fields — processor side', () => {
 
     runHook({
       session_id: SID,
+      prompt_id: `${SID}:turn:2`,
       stop_reason: 'end_turn',
       transcript_path: transcriptPath,
       timestamp: '2026-07-17T10:00:00.000Z',
@@ -135,14 +139,14 @@ describe('grok-build AGENT span aggregation fields — processor side', () => {
     });
 
     const records = readJsonlRecords();
-    const otherRecs = records.filter((rec) => rec['event.name'] === 'other');
-    expect(otherRecs.length).toBeGreaterThanOrEqual(2);
-    // First turn's "other" record has AGENT span attrs
-    expect(otherRecs[0]['gen_ai.agent.description']).toBe('Grok Build coding agent');
-    expect(otherRecs[0]['gen_ai.data_source.id']).toBe('grok-build');
-    // Each turn becomes an independent trace with its own AGENT span.
-    expect(otherRecs[1]['gen_ai.agent.description']).toBe('Grok Build coding agent');
-    expect(otherRecs[1]['gen_ai.data_source.id']).toBe('grok-build');
+    const promptRecs = records.filter((rec) =>
+      rec['event.name'] === 'other'
+      && rec['gen_ai.agent.description'] === 'Grok Build coding agent');
+    expect(promptRecs).toHaveLength(2);
+    expect(new Set(promptRecs.map((rec) => rec['gen_ai.turn.id']))).toEqual(
+      new Set([`${SID}:turn:1`, `${SID}:turn:2`]),
+    );
+    expect(promptRecs.every((rec) => rec['gen_ai.data_source.id'] === 'grok-build')).toBe(true);
   });
 });
 

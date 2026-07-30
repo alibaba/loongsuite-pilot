@@ -129,8 +129,11 @@ function writeUnifiedJsonl() {
 }
 
 function runHook(payload, extraEnv = {}) {
+  const inputPayload = payload?.session_id && payload.prompt_id === undefined
+    ? { prompt_id: `${payload.session_id}:turn:1`, ...payload }
+    : payload;
   return spawnSync('node', [PROCESSOR, 'stop'], {
-    input: JSON.stringify(payload),
+    input: JSON.stringify(inputPayload),
     env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR, HOME: FAKE_HOME, ...extraEnv },
     encoding: 'utf-8',
     timeout: 10_000,
@@ -302,6 +305,7 @@ describe('grok-build F1 — loadUsageBySession usage injection', () => {
     // Second cmdStop selects the new event by the turn's timestamp window.
     const r2 = runHook({
       session_id: SID,
+      prompt_id: `${SID}:turn:2`,
       stop_reason: 'end_turn',
       transcript_path: transcriptPath,
       timestamp: '2026-07-17T10:01:02.500Z',

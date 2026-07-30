@@ -4,7 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { parseGrokUnified } from '../../../../assets/hooks/grok-build/unified-parser.mjs';
+import {
+  parseGrokUnified,
+  selectUnifiedGroups,
+} from '../../../../assets/hooks/grok-build/unified-parser.mjs';
 import { fuseGrokTurn } from '../../../../assets/hooks/grok-build/fusion.mjs';
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
@@ -29,6 +32,33 @@ describe('Grok unified parser + three-source fusion', () => {
       elapsedMs: 125,
       success: false,
     });
+  });
+
+  test('keeps the completed inference when cancellation leaves a trailing inference_start', () => {
+    const groups = [
+      {
+        loopIndex: 1,
+        startMs: 1000,
+        endMs: 1500,
+        promptTokens: 100,
+        completionTokens: 20,
+        tools: [{ name: 'todo_write', startMs: 1500, endMs: 1500, elapsedMs: 0 }],
+      },
+      {
+        loopIndex: 2,
+        startMs: 1500,
+        endMs: null,
+        promptTokens: 0,
+        completionTokens: 0,
+        tools: [],
+      },
+    ];
+
+    expect(selectUnifiedGroups(groups, {
+      startMs: 1000,
+      endMs: 2000,
+      expectedCount: 1,
+    })).toEqual([groups[0]]);
   });
 
   test('uses real LLM/tool clocks, tokens, failed status, and attributable result', () => {

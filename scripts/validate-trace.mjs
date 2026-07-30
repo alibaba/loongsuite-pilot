@@ -12,7 +12,17 @@ const OTLP_DEBUG_DIR = path.join(homedir(), '.loongsuite-pilot', 'logs', 'otlp-d
 const VALID_SPAN_KINDS = ['ENTRY', 'AGENT', 'STEP', 'LLM', 'TOOL', 'CHAIN', 'RETRIEVER', 'RERANKER', 'EMBEDDING', 'TASK'];
 const KNOWN_SUBAGENT_TOOLS = new Set(['Agent']);
 // TODO: remove 'tool_calls' once all producers are migrated to singular 'tool_call'
-const VALID_FINISH_REASONS = new Set(['stop', 'length', 'content_filter', 'tool_call', 'tool_calls', 'error', 'end_turn', 'max_tokens']);
+const VALID_FINISH_REASONS = new Set([
+  'stop',
+  'length',
+  'content_filter',
+  'tool_call',
+  'tool_calls',
+  'error',
+  'cancelled',
+  'end_turn',
+  'max_tokens',
+]);
 const VALID_PART_TYPES = new Set(['text', 'tool_call', 'tool_call_response', 'reasoning']);
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -355,17 +365,26 @@ function shortKey(key) {
 function validateTime(trace, rules) {
   const checks = [];
   const { spans, childrenMap } = trace;
+  const grokAllowsObservedZeroDuration = spans.some((span) =>
+    span.resource?.['gen_ai.agent.type'] === 'grok-build'
+    || span.resource?.['gen_ai.agent.system'] === 'grok'
+    || span.attributes?.['gen_ai.agent.type'] === 'grok-build');
 
-  let allNonZero = true;
+  let allDurationsValid = true;
   for (const s of spans) {
     const start = BigInt(s.startTimeUnixNano);
     const end = BigInt(s.endTimeUnixNano);
-    if (end <= start) {
+    if (end < start || (end === start && !grokAllowsObservedZeroDuration)) {
       checks.push(error('time.non_zero_duration', `duration=${Number(end - start) / 1e6}ms`, s.spanId, s.name));
-      allNonZero = false;
+      allDurationsValid = false;
     }
   }
-  if (allNonZero) checks.push(pass('time.non_zero_duration'));
+  if (allDurationsValid) {
+    checks.push(pass(
+      'time.non_zero_duration',
+      grokAllowsObservedZeroDuration ? 'Grok observed zero-duration spans are allowed' : undefined,
+    ));
+  }
 
   const steps = spans.filter(s => s._kind === 'STEP');
   const agentSpan = spans.find(s => s._kind === 'AGENT');

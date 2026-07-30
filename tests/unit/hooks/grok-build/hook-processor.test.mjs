@@ -30,8 +30,15 @@ function copyFixture(name) {
 }
 
 function runHook(subcommand, payload, extraEnv = {}) {
+  const inputPayload = (
+    (subcommand === 'stop' || subcommand === 'stop-failure')
+    && payload?.session_id
+    && payload.prompt_id === undefined
+  )
+    ? { prompt_id: `${payload.session_id}:turn:1`, ...payload }
+    : payload;
   return spawnSync('node', [PROCESSOR, subcommand], {
-    input: JSON.stringify(payload),
+    input: JSON.stringify(inputPayload),
     env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR, ...extraEnv },
     encoding: 'utf-8',
     timeout: 10_000,
@@ -196,6 +203,7 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
     ].map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf-8');
     runHook('stop', {
       session_id: 's-multi',
+      prompt_id: 's-multi:turn:2',
       stop_reason: 'end_turn',
       transcript_path: transcriptPath,
       timestamp: '2026-07-16T08:00:02.000Z',
@@ -211,6 +219,7 @@ describe('grok-build-hook-processor — Stop 端到端', () => {
     ].map((r) => JSON.stringify(r)).join('\n') + '\n');
     runHook('stop', {
       session_id: 's-multi',
+      prompt_id: 's-multi:turn:3',
       stop_reason: 'end_turn',
       transcript_path: transcriptPath,
       timestamp: '2026-07-16T08:01:02.000Z',

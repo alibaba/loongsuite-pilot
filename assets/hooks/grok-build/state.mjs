@@ -12,11 +12,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 
 export const STATE_VERSION = 2;
 export const MAX_RECENT_PROMPT_IDS = 64;
 export const STATE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+export const STATE_LOCK_TIMEOUT_MS = 2_000;
+export const STATE_LOCK_STALE_MS = 30_000;
+const STATE_LOCK_RETRY_MS = 25;
 
 function pilotDataDir() {
   return process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
@@ -39,6 +43,80 @@ function ensureStateDir() {
 
 function stateFilePath(sessionId) {
   return path.join(ensureStateDir(), `${sanitizeSessionId(sessionId)}.json`);
+}
+
+function stateLockPath(sessionId) {
+  return path.join(ensureStateDir(), `${sanitizeSessionId(sessionId)}.lock`);
+}
+
+function closedMarkerPath(sessionId) {
+  return path.join(ensureStateDir(), `${sanitizeSessionId(sessionId)}.closed`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function removeLockIfOwned(lockPath, token) {
+  try {
+    const current = JSON.parse(fs.readFileSync(lockPath, 'utf-8'));
+    if (current?.token === token) fs.unlinkSync(lockPath);
+  } catch {}
+}
+
+/**
+ * Serialize the complete state read-modify-write transaction for one session.
+ *
+ * Hook events execute in independent Node processes, so atomic state-file
+ * replacement alone cannot prevent two processes from reading the same state
+ * and both exporting the same prompt. The lock uses O_EXCL creation, bounded
+ * waiting, and stale-lock recovery. A token check prevents a stale owner from
+ * deleting a newer process's lock during release.
+ */
+export async function withSessionStateLock(sessionId, callback, options = {}) {
+  const timeoutMs = Number.isFinite(options.timeoutMs)
+    ? Math.max(0, options.timeoutMs)
+    : STATE_LOCK_TIMEOUT_MS;
+  const staleMs = Number.isFinite(options.staleMs)
+    ? Math.max(1, options.staleMs)
+    : STATE_LOCK_STALE_MS;
+  const retryMs = Number.isFinite(options.retryMs)
+    ? Math.max(1, options.retryMs)
+    : STATE_LOCK_RETRY_MS;
+  const lockPath = stateLockPath(sessionId);
+  const token = `${process.pid}:${crypto.randomUUID()}`;
+  const startedAt = Date.now();
+  let fd = null;
+
+  while (fd == null) {
+    try {
+      fd = fs.openSync(lockPath, 'wx', 0o600);
+      fs.writeFileSync(fd, JSON.stringify({
+        token,
+        pid: process.pid,
+        acquired_at_ms: Date.now(),
+      }), 'utf-8');
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err;
+      try {
+        if (Date.now() - fs.statSync(lockPath).mtimeMs > staleMs) {
+          fs.unlinkSync(lockPath);
+          continue;
+        }
+      } catch {}
+      if (Date.now() - startedAt >= timeoutMs) {
+        throw new Error(`timed out acquiring Grok session state lock for ${sanitizeSessionId(sessionId)}`);
+      }
+      await sleep(retryMs);
+    }
+  }
+
+  try {
+    return await callback();
+  } finally {
+    try { fs.closeSync(fd); } catch {}
+    removeLockIfOwned(lockPath, token);
+  }
 }
 
 function emptyCheckpoint() {
@@ -155,6 +233,29 @@ export function clearState(sessionId) {
   try { fs.unlinkSync(stateFilePath(sessionId)); } catch {}
 }
 
+export function isSessionClosed(sessionId, now = Date.now()) {
+  const file = closedMarkerPath(sessionId);
+  try {
+    const marker = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    const closedAt = Number(marker?.closed_at_ms);
+    if (Number.isFinite(closedAt) && now - closedAt <= STATE_RETENTION_MS) return true;
+    fs.unlinkSync(file);
+  } catch {}
+  return false;
+}
+
+export function markSessionClosed(sessionId, now = Date.now()) {
+  const dest = closedMarkerPath(sessionId);
+  const tmp = `${dest}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({ closed_at_ms: now }), 'utf-8');
+    fs.renameSync(tmp, dest);
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch {}
+    throw err;
+  }
+}
+
 function writeCleanupMarker(markerPath, now) {
   const tmp = `${markerPath}.${process.pid}.tmp`;
   try {
@@ -178,7 +279,12 @@ export function cleanupExpiredStates(now = Date.now()) {
   let deleted = 0;
   try {
     for (const name of fs.readdirSync(dir)) {
-      if (!name.endsWith('.json') || name === '.cleanup.json') continue;
+      if (
+        (!name.endsWith('.json') && !name.endsWith('.closed'))
+        || name === '.cleanup.json'
+      ) {
+        continue;
+      }
       const file = path.join(dir, name);
       try {
         if (now - fs.statSync(file).mtimeMs > STATE_RETENTION_MS) {

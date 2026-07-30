@@ -91,13 +91,14 @@ describe('grok-build parseGrokTranscript — fixtures 真实 chat_history 格式
     const turn = data.turns[0];
     // user_info + system-reminder 应被跳过 — input_messages 只含真实 user_query
     const inputMsgs = turn.llmCalls[0].input_messages;
-    // system prompt + 真实 user_query
+    // system prompt 独立采集，不进入会在 turn 内累积的 input_messages。
+    expect(inputMsgs.some((m) => m.role === 'system')).toBe(false);
     expect(inputMsgs.some((m) => m.role === 'user' && JSON.stringify(m).includes('user_query'))).toBe(true);
     expect(inputMsgs.some((m) => JSON.stringify(m).includes('user_info>'))).toBe(false);
     expect(inputMsgs.some((m) => JSON.stringify(m).includes('system-reminder>'))).toBe(false);
   });
 
-  test('无 assistant 记录 → turns 为空(首次运行防护不触发)', () => {
+  test('无 assistant 记录仍返回 prompt-only turn，供 StopFailure 保留用户输入', () => {
     const fp = path.join(fs.mkdtempSync(path.join(process.cwd(), '.tmp-grok-parser-')), 'chat_history.jsonl');
     try {
       fs.writeFileSync(fp, [
@@ -105,7 +106,12 @@ describe('grok-build parseGrokTranscript — fixtures 真实 chat_history 格式
         { type: 'user', content: [{ type: 'text', text: '<user_query>\nhi\n</user_query>' }], prompt_index: 0, timestamp: '2026-07-16T10:00:00Z' },
       ].map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf-8');
       const data = parseGrokTranscript(fp);
-      expect(data.turns).toEqual([]);
+      expect(data.turns).toEqual([{
+        promptIndex: '0',
+        prompt: 'hi',
+        promptTimestamp: '2026-07-16T10:00:00Z',
+        llmCalls: [],
+      }]);
     } finally {
       fs.rmSync(path.dirname(fp), { recursive: true, force: true });
     }

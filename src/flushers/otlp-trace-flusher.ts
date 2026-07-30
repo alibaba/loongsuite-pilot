@@ -69,6 +69,76 @@ interface ToolOutcome {
   errorType: string;
 }
 
+interface TraceOutcome {
+  status: 'error' | 'cancelled';
+  errorType: string;
+  message: string;
+}
+
+interface LlmOutcome {
+  errorType: string;
+  message: string;
+}
+
+function parseSystemInstructions(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string' || value.length === 0) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) return parsed;
+  } catch {}
+  return [{ type: 'text', content: value }];
+}
+
+function stripSystemRoleMessages(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.filter((message) =>
+      !message || typeof message !== 'object'
+      || (message as Record<string, unknown>).role !== 'system');
+  }
+  if (typeof value !== 'string' || value.length === 0) return value;
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return value;
+    return JSON.stringify(parsed.filter((message) =>
+      !message || typeof message !== 'object'
+      || (message as Record<string, unknown>).role !== 'system'));
+  } catch {
+    return value;
+  }
+}
+
+function prepareGrokConversionRecords(records: AgentActivityEntry[]): {
+  records: AgentActivityEntry[];
+  systemInstructions: unknown[];
+} {
+  let systemInstructions: unknown[] = [];
+  const prepared = records.map((record) => {
+    const copy = { ...record } as AgentActivityEntry;
+    if (systemInstructions.length === 0 && copy['gen_ai.system_instructions'] != null) {
+      systemInstructions = parseSystemInstructions(copy['gen_ai.system_instructions']);
+    }
+    delete copy['gen_ai.system_instructions'];
+
+    for (const key of ['gen_ai.input.messages', 'gen_ai.input.messages_delta'] as const) {
+      if (copy[key] != null) copy[key] = stripSystemRoleMessages(copy[key]) as never;
+    }
+
+    // The upstream converter discards `other` records without content. Retain
+    // this structural marker in memory even when content capture is disabled so
+    // session/turn/user metadata still reaches ENTRY and AGENT spans.
+    if (
+      copy['event.name'] === 'other'
+      && copy['gen_ai.input.messages'] == null
+      && copy['gen_ai.input.messages_delta'] == null
+    ) {
+      copy['gen_ai.input.messages_delta'] = [] as never;
+    }
+    return copy;
+  });
+  return { records: prepared, systemInstructions };
+}
+
 /** Minimal exporter surface used by the flusher; lets tests inject fakes. */
 export interface TraceExporterLike {
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void;
@@ -134,12 +204,17 @@ const MAX_CONVERT_STATES = 64;
 class AgentSpanEnrichingHandler extends ExtendedTelemetryHandler {
   currentExtraAttrs: Record<string, string | number> = {};
   currentToolOutcomes = new Map<string, ToolOutcome>();
+  currentToolDurations = new Map<string, number>();
+  currentLlmOutcomes = new Map<string, LlmOutcome>();
+  currentTurnOutcome: TraceOutcome | null = null;
+  currentSystemInstructions: unknown[] = [];
+  currentSystemInstructionInjected = false;
 
   constructor(opts: { tracerProvider: BasicTracerProvider }) {
     super(opts);
   }
 
-  stopInvokeAgent(invocation: any, endTime?: number): any {
+  private enrichAgentInvocation(invocation: any): void {
     const a = this.currentExtraAttrs;
     if (a && invocation && typeof invocation === 'object') {
       const desc = a['gen_ai.agent.description'];
@@ -155,13 +230,58 @@ class AgentSpanEnrichingHandler extends ExtendedTelemetryHandler {
         invocation.usageCacheCreationInputTokens = cc;
       }
     }
+  }
+
+  stopLlm(invocation: any, endTime?: number): any {
+    if (!this.currentSystemInstructionInjected && this.currentSystemInstructions.length > 0) {
+      invocation.systemInstruction = this.currentSystemInstructions;
+      this.currentSystemInstructionInjected = true;
+    }
+    const responseId = typeof invocation?.responseId === 'string'
+      ? invocation.responseId
+      : '';
+    const outcome = responseId ? this.currentLlmOutcomes.get(responseId) : undefined;
+    if (outcome) {
+      return super.failLlm(invocation, {
+        type: outcome.errorType,
+        message: outcome.message,
+      }, endTime);
+    }
+    return super.stopLlm(invocation, endTime);
+  }
+
+  stopInvokeAgent(invocation: any, endTime?: number): any {
+    this.enrichAgentInvocation(invocation);
+    if (this.currentTurnOutcome) {
+      return super.failInvokeAgent(invocation, {
+        type: this.currentTurnOutcome.errorType,
+        message: this.currentTurnOutcome.message,
+      }, endTime);
+    }
     return super.stopInvokeAgent(invocation, endTime);
+  }
+
+  stopEntry(invocation: any, endTime?: number): any {
+    if (this.currentTurnOutcome) {
+      return super.failEntry(invocation, {
+        type: this.currentTurnOutcome.errorType,
+        message: this.currentTurnOutcome.message,
+      }, endTime);
+    }
+    return super.stopEntry(invocation, endTime);
   }
 
   stopExecuteTool(invocation: any, endTime?: number): any {
     const toolCallId = typeof invocation?.toolCallId === 'string'
       ? invocation.toolCallId
       : '';
+    const duration = toolCallId ? this.currentToolDurations.get(toolCallId) : undefined;
+    if (typeof duration === 'number' && Number.isFinite(duration)) {
+      invocation.attributes = {
+        ...(invocation.attributes ?? {}),
+        'gen_ai.tool.call.duration': Math.max(0, duration),
+      };
+    }
     const outcome = toolCallId ? this.currentToolOutcomes.get(toolCallId) : undefined;
     if (outcome) {
       return super.failExecuteTool(invocation, {
@@ -493,10 +613,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
     try {
       try {
         const agentSpanAttrs = this.collectAgentSpanAttributes(records);
-        if (handler instanceof AgentSpanEnrichingHandler) {
-          handler.currentExtraAttrs = agentSpanAttrs;
-          handler.currentToolOutcomes = this.collectToolOutcomes(records);
-        }
 
         // Inject user-defined custom attributes (config/env/file) into trace
         // spans only — never the event log. Resolved per turn so the mutable
@@ -531,7 +647,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
             ...prefixKeys,
           ]),
         ];
-        const recordsForConversion = customKeys.length === 0
+        let recordsForConversion = customKeys.length === 0
           ? records
           : records.map((r) => {
               const copy: AgentActivityEntry = { ...r };
@@ -540,6 +656,28 @@ export class OtlpTraceFlusher extends BaseFlusher {
               }
               return copy;
             });
+        let systemInstructions: unknown[] = [];
+        if (agentType === 'grok-build') {
+          const prepared = prepareGrokConversionRecords(recordsForConversion);
+          recordsForConversion = prepared.records;
+          systemInstructions = prepared.systemInstructions;
+        }
+
+        if (handler instanceof AgentSpanEnrichingHandler) {
+          handler.currentExtraAttrs = agentSpanAttrs;
+          handler.currentToolOutcomes = this.collectToolOutcomes(records);
+          handler.currentToolDurations = agentType === 'grok-build'
+            ? this.collectToolDurations(records)
+            : new Map();
+          handler.currentLlmOutcomes = agentType === 'grok-build'
+            ? this.collectLlmOutcomes(records)
+            : new Map();
+          handler.currentTurnOutcome = agentType === 'grok-build'
+            ? this.collectTurnOutcome(records)
+            : null;
+          handler.currentSystemInstructions = systemInstructions;
+          handler.currentSystemInstructionInjected = false;
+        }
 
         const result = (() => {
           try {
@@ -551,6 +689,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
             if (handler instanceof AgentSpanEnrichingHandler) {
               handler.currentExtraAttrs = {};
               handler.currentToolOutcomes.clear();
+              handler.currentToolDurations.clear();
+              handler.currentLlmOutcomes.clear();
+              handler.currentTurnOutcome = null;
+              handler.currentSystemInstructions = [];
+              handler.currentSystemInstructionInjected = false;
             }
           }
         })();
@@ -597,6 +740,55 @@ export class OtlpTraceFlusher extends BaseFlusher {
       outcomes.set(toolCallId, { status, errorType });
     }
     return outcomes;
+  }
+
+  private collectToolDurations(records: AgentActivityEntry[]): Map<string, number> {
+    const durations = new Map<string, number>();
+    for (const record of records) {
+      if (record['event.name'] !== 'tool.result') continue;
+      const toolCallId = record['gen_ai.tool.call.id'];
+      const duration = record['gen_ai.tool.call.duration'];
+      if (typeof toolCallId !== 'string' || !toolCallId) continue;
+      if (typeof duration !== 'number' || !Number.isFinite(duration)) continue;
+      durations.set(toolCallId, Math.max(0, duration));
+    }
+    return durations;
+  }
+
+  private collectLlmOutcomes(records: AgentActivityEntry[]): Map<string, LlmOutcome> {
+    const outcomes = new Map<string, LlmOutcome>();
+    for (const record of records) {
+      if (record['event.name'] !== 'llm.response') continue;
+      const responseId = record['gen_ai.response.id'];
+      const errorType = record['error.type'];
+      if (typeof responseId !== 'string' || !responseId) continue;
+      if (typeof errorType !== 'string' || !errorType) continue;
+      outcomes.set(responseId, {
+        errorType,
+        message: 'model request failed',
+      });
+    }
+    return outcomes;
+  }
+
+  private collectTurnOutcome(records: AgentActivityEntry[]): TraceOutcome | null {
+    for (const record of records) {
+      if (record['event.name'] !== 'other') continue;
+      const raw = record['gen_ai.response.finish_reasons'];
+      const reasons = Array.isArray(raw)
+        ? raw.filter((value): value is string => typeof value === 'string')
+        : (typeof raw === 'string' ? [raw] : []);
+      if (reasons.includes('error')) {
+        const errorType = typeof record['error.type'] === 'string' && record['error.type']
+          ? record['error.type']
+          : 'model_error';
+        return { status: 'error', errorType, message: 'model request failed' };
+      }
+      if (reasons.includes('cancelled')) {
+        return { status: 'cancelled', errorType: 'cancelled', message: 'turn cancelled' };
+      }
+    }
+    return null;
   }
 
   private async exportInBatches(

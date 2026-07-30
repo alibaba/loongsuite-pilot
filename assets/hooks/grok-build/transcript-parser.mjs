@@ -173,7 +173,6 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
   let assistantSeq = 0;
   let systemPrompt = null;
 
-  let assistantSeen = false;
   for (const line of content.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -228,7 +227,6 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
     }
 
     if (recordType === 'assistant') {
-      assistantSeen = true;
       assistantSeq++;
       const msgId = record.message_id || record.id || `_syn_assistant_${assistantSeq}`;
       const recordTs = record.timestamp || null;
@@ -272,10 +270,6 @@ export function parseGrokTranscript(transcriptPath, byteOffset = 0) {
       });
       continue;
     }
-  }
-
-  if (!assistantSeen) {
-    return { turns: [], nextOffset, systemPrompt };
   }
 
   const llmCalls = buildLlmCalls(conversationRecords, toolResultTimestamps, toolResultContents, toolResultErrors);
@@ -369,7 +363,9 @@ function buildLlmCalls(conversationRecords, toolResultTimestamps, toolResultCont
 
   for (const rec of conversationRecords) {
     if (rec.type === 'system') {
-      conversationHistory.push({ role: 'system', content: rec.content });
+      // System instructions are captured separately and must not participate in
+      // the turn-wide input-message accumulator, otherwise the OTLP converter
+      // repeats them on every later LLM span.
       continue;
     }
 
@@ -457,8 +453,6 @@ function buildLlmCalls(conversationRecords, toolResultTimestamps, toolResultCont
 }
 
 function splitIntoTurns(conversationRecords, llmCalls) {
-  if (llmCalls.length === 0) return [];
-
   const promptIndexOrder = [];
   const promptIndexSet = new Set();
   const promptIndexInfo = new Map();
@@ -483,6 +477,7 @@ function splitIntoTurns(conversationRecords, llmCalls) {
   }
 
   if (promptIndexOrder.length === 0) {
+    if (llmCalls.length === 0) return [];
     const firstTs = llmCalls[0]?.timestamp || null;
     return [{
       prompt: '',
@@ -494,10 +489,12 @@ function splitIntoTurns(conversationRecords, llmCalls) {
   const turns = [];
   for (const pid of promptIndexOrder) {
     const turnLlmCalls = llmCalls.filter((c) => c.promptIndex === pid);
-    if (turnLlmCalls.length === 0) continue;
 
     const info = promptIndexInfo.get(pid) || {};
-    const promptTimestamp = info.promptTimestamp || promptIndexBoundaryTs.get(pid) || turnLlmCalls[0]?.timestamp || null;
+    const promptTimestamp = info.promptTimestamp
+      || promptIndexBoundaryTs.get(pid)
+      || turnLlmCalls[0]?.timestamp
+      || null;
 
     let fallbackTs = promptTimestamp || turnLlmCalls[0]?.timestamp || null;
     for (const call of turnLlmCalls) {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -26,12 +26,27 @@ afterEach(() => {
   fs.rmSync(sessionDir, { recursive: true, force: true });
 });
 
-function run(subcommand, payload) {
+function run(subcommand, payload, extraEnv = {}) {
   return spawnSync('node', [PROCESSOR, subcommand], {
     input: JSON.stringify(payload),
-    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir },
+    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, ...extraEnv },
     encoding: 'utf-8',
     timeout: 10_000,
+  });
+}
+
+function runAsync(subcommand, payload, extraEnv = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('node', [PROCESSOR, subcommand], {
+      env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, ...extraEnv },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf-8');
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('close', (status) => resolve({ status, stderr }));
+    child.stdin.end(JSON.stringify(payload));
   });
 }
 
@@ -140,7 +155,24 @@ describe('Grok v2 lifecycle', () => {
 
     writeJsonl(chatPath, [
       { type: 'system', content: 'system secret' },
-      ...chatTurn(0, 'first', 'partial answer', '2026-07-29T03:00:00.000Z'),
+      {
+        type: 'user',
+        content: [{ type: 'text', text: '<user_query>\nfirst\n</user_query>' }],
+        prompt_index: 0,
+        timestamp: '2026-07-29T03:00:00.000Z',
+      },
+      {
+        type: 'assistant',
+        content: [{
+          type: 'tool_use',
+          id: 'cancel-tool',
+          name: 'read_file',
+          input: { path: '/tmp/missing' },
+        }],
+        model: 'grok',
+        stop_reason: 'tool_use',
+        timestamp: '2026-07-29T03:00:00.500Z',
+      },
       {
         type: 'user',
         content: [{ type: 'text', text: '<user_query>\nsecond\n</user_query>' }],
@@ -165,7 +197,13 @@ describe('Grok v2 lifecycle', () => {
     const firstBatch = records();
     expect(firstBatch.filter((record) => record['event.name'] === 'llm.response')).toHaveLength(1);
     expect(firstBatch.find((record) => record['event.name'] === 'llm.response')
-      ['gen_ai.response.finish_reasons']).toEqual(['cancelled']);
+      ['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
+    const terminalRecord = firstBatch.find((record) =>
+      record['event.name'] === 'other'
+      && record['gen_ai.response.finish_reasons']?.[0] === 'cancelled');
+    expect(terminalRecord).toBeDefined();
+    expect(firstBatch.find((record) => record['event.name'] === 'tool.result')
+      ['tool.result.status']).toBe('cancelled');
 
     expect(run('user-prompt-submit', payload).status).toBe(0);
     expect(records()).toHaveLength(firstBatch.length);
@@ -178,13 +216,25 @@ describe('Grok v2 lifecycle', () => {
     expect(fs.existsSync(statePath(sid))).toBe(false);
   });
 
-  test('StopFailure emits classified generic error without raw details', () => {
+  test('StopFailure preserves a prompt-only turn and real incomplete inference without raw details', () => {
     const sid = 's-failure';
     const updatesPath = path.join(sessionDir, 'updates.jsonl');
+    const unifiedPath = path.join(sessionDir, 'unified.jsonl');
     writeJsonl(path.join(sessionDir, 'chat_history.jsonl'), [
       { type: 'system', content: 'system' },
-      ...chatTurn(0, 'fail', 'request failed', '2026-07-29T04:00:00.000Z'),
+      {
+        type: 'user',
+        content: [{ type: 'text', text: '<user_query>\nfail\n</user_query>' }],
+        prompt_index: 0,
+        timestamp: '2026-07-29T04:00:00.000Z',
+      },
     ]);
+    writeJsonl(unifiedPath, [{
+      ts: '2026-07-29T04:00:00.200Z',
+      sid,
+      msg: 'shell.turn.inference_start',
+      ctx: { loop_index: 1 },
+    }]);
     writeJsonl(updatesPath, terminal(
       'p-fail',
       0,
@@ -199,13 +249,178 @@ describe('Grok v2 lifecycle', () => {
       timestamp: '2026-07-29T04:00:01.100Z',
       error: 'HTTP 429 from secret endpoint',
       error_details: 'secret endpoint and credential',
-    }).status).toBe(0);
+    }, { GROK_UNIFIED_LOG_PATH: unifiedPath }).status).toBe(0);
 
+    const request = records().find((record) => record['event.name'] === 'llm.request');
     const response = records().find((record) => record['event.name'] === 'llm.response');
+    expect(request).toBeDefined();
+    expect(request['loongsuite.grok.timing.source']).toBe('unified');
     expect(response['gen_ai.response.finish_reasons']).toEqual(['error']);
     expect(response['error.type']).toBe('rate_limit');
     expect(response['error.message']).toBe('model request failed');
+    expect(response).not.toHaveProperty('gen_ai.output.messages');
+    expect(response).not.toHaveProperty('gen_ai.usage.input_tokens');
+    expect(records().find((record) =>
+      record['event.name'] === 'other'
+      && record['gen_ai.input.messages_delta'])).toBeDefined();
     expect(JSON.stringify(records())).not.toContain('secret endpoint and credential');
+  });
+
+  test.each([
+    ['shutdown after SessionEnd', ['session-end', 'shutdown']],
+    ['shutdown before SessionEnd', ['shutdown', 'session-end']],
+  ])('%s does not replay a completed turn', (_name, order) => {
+    const sid = `s-${order.join('-')}`;
+    const updatesPath = path.join(sessionDir, `${sid}-updates.jsonl`);
+    const chatPath = path.join(sessionDir, 'chat_history.jsonl');
+    writeJsonl(chatPath, [
+      { type: 'system', content: 'system' },
+      ...chatTurn(0, 'hello', 'done', '2026-07-29T04:10:00.000Z'),
+    ]);
+    writeJsonl(updatesPath, terminal(
+      `${sid}-p1`,
+      0,
+      'end_turn',
+      Date.parse('2026-07-29T04:10:01.000Z'),
+    ));
+
+    expect(run('stop', {
+      session_id: sid,
+      prompt_id: `${sid}-p1`,
+      transcript_path: updatesPath,
+      reason: 'end_turn',
+      timestamp: '2026-07-29T04:10:01.100Z',
+    }).status).toBe(0);
+    const emitted = records().length;
+    expect(emitted).toBeGreaterThan(0);
+
+    for (const event of order) {
+      const subcommand = event === 'session-end' ? 'session-end' : 'stop';
+      expect(run(subcommand, {
+        session_id: sid,
+        transcript_path: updatesPath,
+        reason: event === 'shutdown' ? 'shutdown' : undefined,
+        timestamp: '2026-07-29T04:10:02.000Z',
+      }).status).toBe(0);
+    }
+    expect(records()).toHaveLength(emitted);
+    expect(fs.existsSync(statePath(sid))).toBe(false);
+  });
+
+  test('SessionEnd before a delayed Stop still exports the completed turn only once', () => {
+    const sid = 's-session-end-first';
+    const updatesPath = path.join(sessionDir, 'updates.jsonl');
+    const chatPath = path.join(sessionDir, 'chat_history.jsonl');
+    writeJsonl(chatPath, []);
+    writeJsonl(updatesPath, []);
+
+    expect(run('user-prompt-submit', {
+      session_id: sid,
+      prompt_id: 'p1',
+      transcript_path: updatesPath,
+      timestamp: '2026-07-29T04:15:00.000Z',
+    }).status).toBe(0);
+
+    writeJsonl(chatPath, [
+      { type: 'system', content: 'system' },
+      ...chatTurn(0, 'hello', 'done', '2026-07-29T04:15:00.000Z'),
+    ]);
+    writeJsonl(updatesPath, terminal(
+      'p1',
+      0,
+      'end_turn',
+      Date.parse('2026-07-29T04:15:01.000Z'),
+    ));
+
+    expect(run('session-end', {
+      session_id: sid,
+      transcript_path: updatesPath,
+      timestamp: '2026-07-29T04:15:01.100Z',
+    }).status).toBe(0);
+    const emitted = records().length;
+    expect(emitted).toBeGreaterThan(0);
+
+    expect(run('stop', {
+      session_id: sid,
+      prompt_id: 'p1',
+      transcript_path: updatesPath,
+      reason: 'end_turn',
+      timestamp: '2026-07-29T04:15:01.200Z',
+    }).status).toBe(0);
+    expect(records()).toHaveLength(emitted);
+    expect(fs.existsSync(statePath(sid))).toBe(false);
+  });
+
+  test('concurrent Stop and SessionEnd serialize to a single export', async () => {
+    const sid = 's-concurrent-stop-session-end';
+    const updatesPath = path.join(sessionDir, 'updates.jsonl');
+    const chatPath = path.join(sessionDir, 'chat_history.jsonl');
+    writeJsonl(chatPath, []);
+    writeJsonl(updatesPath, []);
+
+    expect(run('user-prompt-submit', {
+      session_id: sid,
+      prompt_id: 'p1',
+      transcript_path: updatesPath,
+      timestamp: '2026-07-29T04:16:00.000Z',
+    }).status).toBe(0);
+
+    writeJsonl(chatPath, [
+      { type: 'system', content: 'system' },
+      ...chatTurn(0, 'hello', 'done', '2026-07-29T04:16:00.000Z'),
+    ]);
+    writeJsonl(updatesPath, terminal(
+      'p1',
+      0,
+      'end_turn',
+      Date.parse('2026-07-29T04:16:01.000Z'),
+    ));
+
+    const base = {
+      session_id: sid,
+      transcript_path: updatesPath,
+      timestamp: '2026-07-29T04:16:01.100Z',
+    };
+    const [stop, sessionEnd] = await Promise.all([
+      runAsync('stop', { ...base, prompt_id: 'p1', reason: 'end_turn' }),
+      runAsync('session-end', base),
+    ]);
+    expect(stop.status, stop.stderr).toBe(0);
+    expect(sessionEnd.status, sessionEnd.stderr).toBe(0);
+
+    const output = records();
+    expect(new Set(output.map((record) => record['gen_ai.turn.id']))).toEqual(new Set(['p1']));
+    expect(output.filter((record) => record['event.name'] === 'llm.response')).toHaveLength(1);
+    expect(fs.existsSync(statePath(sid))).toBe(false);
+  });
+
+  test('Stop without a real promptId defers without consuming chat history', () => {
+    const sid = 's-no-prompt-id';
+    const updatesPath = path.join(sessionDir, 'updates.jsonl');
+    writeJsonl(path.join(sessionDir, 'chat_history.jsonl'), [
+      { type: 'system', content: 'system' },
+      ...chatTurn(0, 'hello', 'done', '2026-07-29T04:20:00.000Z'),
+    ]);
+
+    expect(run('stop', {
+      session_id: sid,
+      transcript_path: updatesPath,
+      reason: 'end_turn',
+      timestamp: '2026-07-29T04:20:01.000Z',
+    }).status).toBe(0);
+    expect(records()).toHaveLength(0);
+    expect(JSON.parse(fs.readFileSync(statePath(sid), 'utf-8')).chat_checkpoint.offset).toBe(0);
+
+    expect(run('stop', {
+      session_id: sid,
+      prompt_id: 'real-prompt-id',
+      transcript_path: updatesPath,
+      reason: 'end_turn',
+      timestamp: '2026-07-29T04:20:01.100Z',
+    }).status).toBe(0);
+    expect(new Set(records().map((record) => record['gen_ai.turn.id']))).toEqual(
+      new Set(['real-prompt-id']),
+    );
   });
 
   test('first UserPromptSubmit baselines pre-existing history instead of replaying it later', () => {
