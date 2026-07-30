@@ -8,17 +8,12 @@
 #   loongsuite-pilot status
 #   loongsuite-pilot info
 #   loongsuite-pilot rollback
+#   loongsuite-pilot worker connect|list|status|disconnect|delete
 #   loongsuite-pilot help
 
-[CmdletBinding()]
-param(
-    [Parameter(Position = 0)]
-    [string]$Command = "status",
-
-    [Parameter(Position = 1, ValueFromRemainingArguments)]
-    [string[]]$SubArgs
-)
-
+$CliArgs = @($args)
+$Command = if ($CliArgs.Count -ge 1) { [string]$CliArgs[0] } else { "status" }
+$SubArgs = if ($CliArgs.Count -ge 2) { [string[]]$CliArgs[1..($CliArgs.Count - 1)] } else { @() }
 $ErrorActionPreference = "Stop"
 
 # ============================================================
@@ -1085,6 +1080,34 @@ function Cmd-Log {
 }
 
 # ============================================================
+# CMD: worker (foreground local Worker management CLI)
+# ============================================================
+function Cmd-Worker {
+    $versionDir = Resolve-CurrentVersion
+    if (-not $versionDir) {
+        Write-Error "Current loongsuite-pilot version not found"
+        exit 1
+    }
+
+    $entry = Join-Path $versionDir "dist\index.js"
+    if (-not (Test-Path $entry -PathType Leaf)) {
+        Write-Error "Worker CLI entrypoint missing"
+        exit 1
+    }
+
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) {
+        Write-Error "node runtime not found"
+        exit 1
+    }
+
+    $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
+    $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
+    & $nodeBin $entry "worker" @SubArgs
+    exit $LASTEXITCODE
+}
+
+# ============================================================
 # CMD: help
 # ============================================================
 # Manage span-attributes.json — user-defined attributes injected into trace
@@ -1151,6 +1174,8 @@ function Cmd-Help {
     Write-Host "  log             Tail the service log"
     Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     Write-Host "  rollback        Roll back to the previous version"
+    Write-Host "  worker          Manage local Workers:"
+    Write-Host "                    worker connect/list/status/disconnect/delete"
     Write-Host "  help            Show this help message"
 }
 
@@ -1165,6 +1190,7 @@ switch ($Command.ToLower()) {
     "info"               { Cmd-Info }
     "log"                { Cmd-Log }
     "rollback"           { Cmd-Rollback }
+    "worker"             { Cmd-Worker }
     "restart-collector"  { Cmd-RestartCollector }
     "restart-updater"    { Cmd-RestartUpdater }
     "run"                { Cmd-Run }

@@ -233,8 +233,8 @@ function Check-Deps {
     }
 
     # Pin node binary path
-    if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
-    Set-Content -Path (Join-Path $DataDir "node-bin") -Value $script:NODE_BIN
+    if (-not (Test-Path $CACHE_DIR)) { New-Item -ItemType Directory -Path $CACHE_DIR -Force | Out-Null }
+    Set-Content -Path (Join-Path $CACHE_DIR "node-bin") -Value $script:NODE_BIN
 
     # Derive npm
     $npmPath = Join-Path (Split-Path $script:NODE_BIN) "npm.cmd"
