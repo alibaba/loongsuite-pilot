@@ -265,18 +265,22 @@ describe('ConfigLoader', () => {
       expect(config.listeners['qoder-cli-session'].enabled).toBe(true);
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
       expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 30_000 });
     });
 
     it('merges file-level listener overrides', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         listeners: {
           qoder: { enabled: false, pollInterval: 120000 },
+          'opencode-log': { pollInterval: 1000 },
         },
       });
 
       const config = await loadConfig();
       expect(config.listeners.qoder.enabled).toBe(false);
       expect(config.listeners.qoder.pollInterval).toBe(120000);
+      expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 1000 });
     });
 
     it('migrates a legacy codex-log listener override to codex-transcript', async () => {
@@ -536,14 +540,33 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {
           mode: 'custom',
-          types: ['apiKey', 'cloudAccessKey', 'pii', 'databaseUrl'],
+          types: [
+            'apiKey',
+            'cloudAccessKey',
+            'pii',
+            'databaseUrl',
+            'idCard',
+            'phone',
+            'email',
+            'ipAddress',
+            'bankCard',
+          ],
         },
       });
 
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        types: ['apiKey', 'cloudAccessKey', 'databaseUrl'],
+        types: [
+          'apiKey',
+          'cloudAccessKey',
+          'databaseUrl',
+          'idCard',
+          'phone',
+          'email',
+          'ipAddress',
+          'bankCard',
+        ],
       });
     });
 
@@ -588,12 +611,23 @@ describe('ConfigLoader', () => {
           types: ['apiKey'],
         },
       });
-      vi.stubEnv('LOONGSUITE_PILOT_MASK_TYPES', 'cloudAccessKey,pii,databaseUrl');
+      vi.stubEnv(
+        'LOONGSUITE_PILOT_MASK_TYPES',
+        'cloudAccessKey,pii,databaseUrl,idCard,phone,email,ipAddress,bankCard',
+      );
 
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        types: ['cloudAccessKey', 'databaseUrl'],
+        types: [
+          'cloudAccessKey',
+          'databaseUrl',
+          'idCard',
+          'phone',
+          'email',
+          'ipAddress',
+          'bankCard',
+        ],
       });
     });
   });
@@ -784,6 +818,33 @@ describe('ConfigLoader', () => {
 
       expect(result).toBeDefined();
       expect(result!.resourceAttributeKeys).toEqual(['agentteams.worker.name', 'custom.attr']);
+    });
+
+    it('buildOtlpTraceConfig defaults spanAttributePassthroughPrefixes to []', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://jaeger:4318' },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.spanAttributePassthroughPrefixes).toEqual([]);
+    });
+
+    it('buildOtlpTraceConfig trims and de-dups spanAttributePassthroughPrefixes', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          endpoint: 'http://jaeger:4318',
+          spanAttributePassthroughPrefixes: ['multica.', 'multica.', ' custom. ', ' '],
+        },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.spanAttributePassthroughPrefixes).toEqual(['multica.', 'custom.']);
     });
 
     it('buildOtlpTraceConfig expands cms into an arms endpoint', async () => {
@@ -1055,6 +1116,43 @@ describe('ConfigLoader', () => {
     it('is empty when neither config nor env set', async () => {
       const config = await loadConfig();
       expect(config.globalSpanAttributes).toEqual({});
+    });
+  });
+
+  describe('upstreamLink config', () => {
+    it('is disabled by default', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      const config = await loadConfig();
+      expect(config.upstreamLink.enabled).toBe(false);
+      expect(config.upstreamLink.ttlMs).toBe(86_400_000);
+    });
+
+    it('enables via env and reads ttl from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { ttlMs: 3_600_000 } });
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK', 'true');
+      const config = await loadConfig();
+      expect(config.upstreamLink.enabled).toBe(true);
+      expect(config.upstreamLink.ttlMs).toBe(3_600_000);
+    });
+
+    it('treats an empty-string enable env as unset (not "true")', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK', '');
+      const config = await loadConfig();
+      expect(config.upstreamLink.enabled).toBe(false);
+    });
+
+    it('clamps ttlMs=0 to the 24h default (would delete all files otherwise)', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { enabled: true, ttlMs: 0 } });
+      const config = await loadConfig();
+      expect(config.upstreamLink.ttlMs).toBe(86_400_000);
+    });
+
+    it('clamps a negative ttlMs env to the 24h default', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS', '-5');
+      const config = await loadConfig();
+      expect(config.upstreamLink.ttlMs).toBe(86_400_000);
     });
   });
 });

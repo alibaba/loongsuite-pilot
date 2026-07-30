@@ -156,6 +156,26 @@ describe('Orchestrator.buildPluginInjectInterceptTargets', () => {
       expect(await target.precondition()).toBe(true);
       expect(fileExists).not.toHaveBeenCalled();
     });
+
+    it('checks absolute extension paths used by Pi Coding Agent', async () => {
+      getDefinitions.mockReturnValue([
+        pluginInjectDef({
+          id: 'pi-coding-agent',
+          pluginInject: {
+            configPaths: ['~/.pi/agent/settings.json'],
+            pluginSpec: `${DATA_DIR}/plugins/pi-coding-agent/index.mjs`,
+            pluginId: 'loongsuite-pilot-pi-coding-agent',
+            configKey: 'extensions',
+          },
+        }),
+      ]);
+      vi.mocked(fileExists).mockResolvedValue(true);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const [target] = callBuild(orch);
+      expect(await target.precondition()).toBe(true);
+      expect(fileExists).toHaveBeenCalledWith(`${DATA_DIR}/plugins/pi-coding-agent/index.mjs`);
+    });
   });
 
   describe('check (healthy when spec present)', () => {

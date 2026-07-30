@@ -12,8 +12,9 @@ import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
 import { applyAgentContentPolicy } from '../normalization/agent-content-policy.js';
 import { maskAgentActivityEntry } from '../mask/entry-masker.js';
-import { loadEnabledRules } from '../mask/rule-loader.js';
-import type { CompiledMaskRule } from '../mask/types.js';
+import { loadMaskPlan } from '../mask/rule-loader.js';
+import type { MaskPlan } from '../mask/types.js';
+import type { TraceLinker } from './upstream-link/trace-linker.js';
 
 const logger = createLogger('InputManager');
 
@@ -47,7 +48,8 @@ export class InputManager extends EventEmitter {
   private configuredUserId: string = '';
   private agentsConfig: AgentsConfig = {};
   private maskConfig: MaskConfig = { mode: 'none', types: [] };
-  private maskRules: CompiledMaskRule[] = [];
+  private maskPlan: MaskPlan = { rules: [], piiTypes: new Set() };
+  private traceLinker: TraceLinker | null = null;
 
   setFlusher(flusher: BaseFlusher): void {
     this.flusher = flusher;
@@ -71,7 +73,11 @@ export class InputManager extends EventEmitter {
 
   setMaskConfig(config: MaskConfig): void {
     this.maskConfig = config;
-    this.maskRules = loadEnabledRules(config);
+    this.maskPlan = loadMaskPlan(config);
+  }
+
+  setTraceLinker(linker: TraceLinker): void {
+    this.traceLinker = linker;
   }
 
   registerInput(input: BaseInput): void {
@@ -181,6 +187,7 @@ export class InputManager extends EventEmitter {
       isAvailable: () => Promise<boolean>;
       enabled: () => boolean;
       pollIntervalMs?: number;
+      unavailableThreshold?: number;
     },
   ): AgentDetectionEntry {
     return {
@@ -192,6 +199,7 @@ export class InputManager extends EventEmitter {
       start: () => this.startInput(input.id),
       stop: () => this.stopInput(input.id),
       pollIntervalMs: opts.pollIntervalMs ?? 300_000,
+      ...(opts.unavailableThreshold != null ? { unavailableThreshold: opts.unavailableThreshold } : {}),
     };
   }
 
@@ -223,15 +231,26 @@ export class InputManager extends EventEmitter {
       }
     }
 
+    // Upstream trace linking: stamp trace_id / parent_span_id from correlation
+    // store so agent spans reparent under the upstream span. Fully fail-open.
+    if (this.traceLinker) {
+      try {
+        await this.traceLinker.stamp(entries);
+      } catch (err) {
+        logger.warn('trace linker stamp failed (skipped)', { inputId, error: String(err) });
+      }
+    }
+
     const policyAppliedEntries = entries.map(entry =>
       applyAgentContentPolicy(entry, this.agentsConfig),
     );
 
-    const maskedEntries = this.maskRules.length === 0
-      ? policyAppliedEntries
-      : policyAppliedEntries.map(entry =>
-          maskAgentActivityEntry(entry, this.maskConfig, this.maskRules),
-        );
+    const maskedEntries =
+      this.maskPlan.rules.length === 0 && this.maskPlan.piiTypes.size === 0
+        ? policyAppliedEntries
+        : policyAppliedEntries.map(entry =>
+            maskAgentActivityEntry(entry, this.maskConfig, this.maskPlan),
+          );
 
     logger.info('dispatching entries', { inputId, count: maskedEntries.length });
     await this.dispatchEntries(inputId, maskedEntries, batchBytes);

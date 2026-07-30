@@ -15,7 +15,6 @@ const HOOK_CONFIG_FILES = [
   '.qoderwork/settings.json',
   '.qoderworkcn/settings.json',
   '.claude/settings.json',
-  '.codex/hooks.json',
   '.qwen/settings.json',
 ];
 
@@ -63,5 +62,83 @@ describe('uninstall cleans the OpenCode plugin-inject spec', () => {
     expect(sh).toContain('plugins/opencode/plugin.mjs');
     expect(ps1).toContain('loongsuite-pilot-opencode');
     expect(ps1).toContain('plugins/opencode/plugin.mjs');
+  });
+});
+
+describe('uninstall cleans the Pi Coding Agent extension injection', () => {
+  it('sh defines and calls remove_pi_coding_agent_extension', () => {
+    expect(sh).toMatch(/remove_pi_coding_agent_extension\(\)\s*\{/);
+    const uninstall = sh.slice(sh.indexOf('cmd_uninstall()'));
+    expect(uninstall).toContain('remove_pi_coding_agent_extension');
+  });
+
+  it('ps1 defines and calls Remove-PiCodingAgentExtension', () => {
+    expect(ps1).toMatch(/function Remove-PiCodingAgentExtension\s*\{/);
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(uninstall).toContain('Remove-PiCodingAgentExtension');
+  });
+
+  it('targets Pi settings and matches only the Pilot extension', () => {
+    expect(sh).toContain('.pi/agent/settings.json');
+    expect(ps1).toContain('.pi\\agent\\settings.json');
+    expect(sh).toContain('loongsuite-pilot-pi-coding-agent');
+    expect(sh).toContain('plugins/pi-coding-agent/index.mjs');
+    expect(ps1).toContain('loongsuite-pilot-pi-coding-agent');
+    expect(ps1).toContain('plugins/pi-coding-agent/index.mjs');
+  });
+});
+
+describe('Windows uninstall verifies scheduled task removal', () => {
+  it('uses PowerShell unregister with a checked schtasks fallback', () => {
+    const cleanup = ps1.slice(
+      ps1.indexOf('function Remove-OnePilotScheduledTask'),
+      ps1.indexOf('function Assert-SafePilotDirectory'),
+    );
+    expect(cleanup).toContain('Unregister-ScheduledTask');
+    expect(cleanup).toContain('$schtasksExit = $LASTEXITCODE');
+    expect(cleanup).toContain('Scheduled task still exists after deletion');
+    expect(cleanup).not.toContain('catch {}');
+  });
+
+  it('removes both current-user collector and updater task names', () => {
+    const cleanup = ps1.slice(
+      ps1.indexOf('function Remove-PilotScheduledTasks'),
+      ps1.indexOf('function Assert-SafePilotDirectory'),
+    );
+    expect(cleanup).toContain('"LoongsuitePilot-$userTag"');
+    expect(cleanup).toContain('"LoongsuitePilotUpdater-$userTag"');
+    expect(cleanup).toContain('Remove-OnePilotScheduledTask');
+  });
+});
+
+describe('Windows uninstall has dedicated Codex hook cleanup', () => {
+  it('removes only Pilot direct or nested Codex hook commands', () => {
+    const cleanup = ps1.slice(
+      ps1.indexOf('function Test-IsPilotCodexHookCommand'),
+      ps1.indexOf('function Remove-OnePilotScheduledTask'),
+    );
+    expect(cleanup).toContain('function Remove-CodexHookConfig');
+    expect(cleanup).toContain('.codex\\hooks.json');
+    expect(cleanup).toContain('codex-loongsuite-pilot-hook');
+    expect(cleanup).toContain('otel-codex-hook');
+    expect(cleanup).toContain('Pilot Codex nested hook command is still present');
+    expect(cleanup).toContain('if ($eventProperties.Count -eq 0) { return }');
+    expect(cleanup).toContain('$null -eq $entry');
+    expect(cleanup).toContain('$verifyEventProperties');
+  });
+
+  it('keeps Codex cleanup separate from the generic hook cleaner', () => {
+    const genericCleanup = ps1.slice(
+      ps1.indexOf('function Remove-HookConfigs'),
+      ps1.indexOf('function Remove-OpenCodePlugin'),
+    );
+    expect(genericCleanup).not.toContain('.codex\\hooks.json');
+  });
+
+  it('calls dedicated Codex cleanup from uninstall', () => {
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(uninstall).toContain('Remove-CodexHookConfig');
+    expect(uninstall.indexOf('Remove-CodexHookConfig'))
+      .toBeLessThan(uninstall.indexOf('Remove-CodexTrustState'));
   });
 });

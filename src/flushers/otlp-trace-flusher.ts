@@ -21,6 +21,7 @@ import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
 import {
   DEFAULT_GIT_PASSTHROUGH_KEYS,
+  isReservedKey,
   type GlobalAttributesProvider,
 } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
@@ -135,6 +136,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly debugDir: string;
   private readonly failedDir: string;
   private readonly resourceAttributeKeys: string[];
+  private readonly spanAttributePassthroughPrefixes: string[];
   private readonly globalAttributesProvider?: GlobalAttributesProvider;
 
   private idleTimer?: ReturnType<typeof setInterval>;
@@ -177,6 +179,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     this.resourceAttributeKeys = (cfg.resourceAttributeKeys ?? [])
       .map(key => key.trim())
       .filter(key => key.length > 0);
+    this.spanAttributePassthroughPrefixes = (cfg.spanAttributePassthroughPrefixes ?? [])
+      .map(prefix => prefix.trim())
+      .filter(prefix => prefix.length > 0);
 
     if (cfg.captureMessageContent !== false) {
       process.env.OTEL_SEMCONV_STABILITY_OPT_IN ??= 'gen_ai_latest_experimental';
@@ -423,7 +428,22 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // are already on the records and only need to be listed as keys.
         const customAttrs = this.globalAttributesProvider?.resolve() ?? {};
         const customKeys = Object.keys(customAttrs);
-        const passthroughKeys = [...new Set([...DEFAULT_GIT_PASSTHROUGH_KEYS, ...customKeys])];
+        // Caller-supplied attributes (e.g. multica.*) are already stamped as
+        // top-level fields on the records by the hook/plugin; discover any key
+        // matching a configured prefix and list it so it reaches span attributes.
+        const prefixKeys = this.spanAttributePassthroughPrefixes.length === 0
+          ? []
+          : [...new Set(
+              records.flatMap(r =>
+                Object.keys(r).filter(k =>
+                  // Defense-in-depth: never surface reserved/pipeline keys even if a
+                  // misconfigured prefix (e.g. "gen_ai.") happens to match them.
+                  !isReservedKey(k) &&
+                  this.spanAttributePassthroughPrefixes.some(p => k.startsWith(p)),
+                ),
+              ),
+            )];
+        const passthroughKeys = [...new Set([...DEFAULT_GIT_PASSTHROUGH_KEYS, ...customKeys, ...prefixKeys])];
         const recordsForConversion = customKeys.length === 0
           ? records
           : records.map((r) => {

@@ -84,7 +84,7 @@ Backends are **deduplicated** by normalized endpoint URL + full request headers,
 
 Shared vs. per-backend settings (spans are converted once per distinct `service.name`):
 
-- **Shared across all backends:** `resourceAttributes`, `captureMessageContent`, `resourceAttributeKeys`, `maxExportBatchBytes`, `turnIdleTimeoutMs`.
+- **Shared across all backends:** `resourceAttributes`, `captureMessageContent`, `resourceAttributeKeys`, `spanAttributePassthroughPrefixes`, `maxExportBatchBytes`, `turnIdleTimeoutMs`.
 - **Per-backend:** endpoint URL, headers, compression, and `service.name` (see below — user vs. managed backends can differ).
 
 A failing backend is isolated — it does not block the healthy backends, and its failed spans are persisted separately under `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<backend-name>.jsonl`.
@@ -255,7 +255,7 @@ Also enable [Data Masking](masking.md) when trace data may include secrets.
 
 Two kinds of extra attributes can be attached to trace spans:
 
-**1. Git/workspace attributes (automatic).** When an agent reports its working directory, spans automatically carry `git.repo`, `git.branch`, `git.domain`, and `workspace.current_root`, inferred from the local git repository. These are also present in the event log (SLS / JSONL) output.
+**1. Git/workspace attributes (automatic).** When an agent reports its working directory, spans automatically carry `workspace.path` (the absolute working directory / process cwd), plus `git.repo`, `git.branch`, `git.domain`, and `workspace.current_root` inferred from the local git repository. `workspace.path` is present regardless of git; the `git.*` and `workspace.current_root` fields require the directory to be a git repository. These are also present in the event log (SLS / JSONL) output.
 
 **2. User-defined attributes.** Attach arbitrary key/value pairs from three sources, merged with precedence **config < env < file**. Unlike the git fields above, these are written to **trace spans only** (never the event log / SLS / JSONL):
 
@@ -285,6 +285,34 @@ Notes:
 - Values are strings. File edits are picked up on the next processing cycle (bounded by the input poll interval, ~30s), not instantly.
 - Keys are written verbatim as span attribute names. **Avoid keys starting with `agent.`** and other reserved prefixes (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`) — such keys are skipped.
 - Attributes never overwrite existing span attributes (fill-only).
+
+**3. Per-invocation passthrough attributes.** The three sources above are process-global (one shared pilot daemon), so they cannot vary per agent call. To attribute individual calls (e.g. which user / issue triggered a run), the calling process sets a **per-invocation** env var on the spawned agent, and the daemon passes matching keys through onto that call's spans.
+
+- The host process sets `LOONGSUITE_PILOT_SPAN_ATTRIBUTES` (same `key=value,key=value` format) on the agent subprocess. The agent's hook/plugin parses it at startup and stamps the pairs as top-level fields on every record it emits, so each call carries its own values.
+
+  ```bash
+  # set by the launcher per agent invocation
+  export LOONGSUITE_PILOT_SPAN_ATTRIBUTES="multica.issue.id=AGE-992,multica.user.id=staff"
+  ```
+
+- `config.json` → `otlpTrace.spanAttributePassthroughPrefixes` lists the key prefixes the daemon should surface onto spans:
+
+  ```json
+  { "otlpTrace": { "spanAttributePassthroughPrefixes": ["multica."] } }
+  ```
+
+**Built-in OpenCode attribute (`opencode.message.id`).** The OpenCode plugin always stamps `opencode.message.id` (the opencode assistant-message id) on its `llm.request`, `llm.response`, `tool.call` and `tool.result` records — no launcher env var required. To surface it on spans, just list the `opencode.` prefix; it then appears on ENTRY / AGENT / STEP / LLM / TOOL spans (LLM and TOOL take the value from their own records; ENTRY / AGENT / STEP take the turn-level value):
+
+  ```json
+  { "otlpTrace": { "spanAttributePassthroughPrefixes": ["opencode."] } }
+  ```
+
+Notes:
+- Unlike source #2 (spans only), passthrough attributes are ordinary top-level record fields, so they appear in **both** the event log (SLS / JSONL) and the trace spans — same behavior as the git fields.
+- Reserved-prefix keys (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`, `agent.`) and sensitive names (token/secret/password/…) are dropped by the hook. Use a dedicated namespace such as `multica.*`.
+- Values must not contain a comma `,` (it is the pair separator); a value is also capped at 512 chars.
+- Only keys matching a configured prefix are passed through; all other top-level fields are unaffected. Supported for claude-code, codex, qoder, and opencode.
+- Codex snapshots these process-level attributes on `UserPromptSubmit` (with `Stop` as a fail-open fallback) and correlates them to transcript records by session and turn. This prevents a resumed session launched by a different invocation from reusing the previous invocation's attributes.
 
 ## Verify Trace Output
 

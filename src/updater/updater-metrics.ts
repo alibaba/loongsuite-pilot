@@ -6,6 +6,8 @@ import { resolveLocalIp } from '../utils/network-utils.js';
 import { flattenToStrings } from '../utils/record-utils.js';
 import { checkProcessLiveness, COLLECTOR_PROCESS_PATTERNS } from '../utils/pid-utils.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
+import { readStartupCrash } from '../utils/crash-breadcrumb.js';
+import { classifyStartupCrash } from './startup-crash-classifier.js';
 import { sendAlarm, sendStatus } from '../internal/sender.js';
 import type { AlarmLevel, AlarmType, AlarmEntry } from '../metrics/alarm-manager.js';
 
@@ -50,6 +52,7 @@ export interface UpdaterMetricsOptions {
 
 export class UpdaterMetrics {
   private readonly logsDir: string;
+  private readonly dataDir: string;
   private readonly version: string;
   private readonly ip: string;
   private readonly userId: string;
@@ -66,6 +69,7 @@ export class UpdaterMetrics {
 
   constructor(opts: UpdaterMetricsOptions) {
     this.logsDir = path.join(opts.dataDir, 'logs', 'metric_alarm');
+    this.dataDir = opts.dataDir;
     this.version = opts.version;
     this.collectorPidFile = opts.collectorPidFile;
     this.collectorLiveness = opts.collectorLiveness
@@ -203,8 +207,18 @@ export class UpdaterMetrics {
     this.lastCollectorAlarmAt = now;
     this.writeAlarm(
       'SERVICE_NOT_RUNNING_ALARM', '3',
-      `loongsuite-pilot collector process is not running after ${this.collectorConsecutiveFailures} checks: ${liveness.reason}`,
+      this.buildNotRunningMessage(liveness.reason),
     );
+  }
+
+  // Enrich the not-running alarm (after #133 debounce has confirmed absence) with the
+  // real startup-failure cause the dying collector recorded — message only, no schema change.
+  private buildNotRunningMessage(livenessReason: string): string {
+    const base = `loongsuite-pilot collector process is not running after ${this.collectorConsecutiveFailures} checks: ${livenessReason}`;
+    const breadcrumb = readStartupCrash(this.dataDir);
+    if (!breadcrumb) return base;
+    const { reason, detailHead } = classifyStartupCrash(breadcrumb);
+    return `${base} | cause=${reason} detail="${detailHead}" phase=${breadcrumb.phase} version=${breadcrumb.version}`;
   }
 }
 

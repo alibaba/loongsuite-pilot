@@ -20,6 +20,18 @@ vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
 }));
 
+const mockFsAccess = vi.fn();
+vi.mock('node:fs', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...original,
+    promises: {
+      ...original.promises,
+      access: (...args: unknown[]) => mockFsAccess(...args),
+    },
+  };
+});
+
 const mockExecFile = (childProcess as any).execFile as Mock;
 
 function makeExecFileImpl(responses: Record<string, string>) {
@@ -1655,5 +1667,33 @@ describe('WukongInput', () => {
     // Records are globally time-ascending.
     const times = entries.map(e => BigInt(String(e['time_unix_nano'])));
     for (let i = 1; i < times.length; i++) expect(times[i] >= times[i - 1]).toBe(true);
+  });
+
+  describe('checkAvailability', () => {
+    it('returns false when daemon socket is missing', async () => {
+      mockFsAccess.mockRejectedValue(new Error('ENOENT'));
+      const result = await WukongInput.checkAvailability();
+      expect(result).toBe(false);
+    });
+
+    it('returns false when service status check fails', async () => {
+      mockFsAccess.mockResolvedValue(undefined);
+      mockExecFile.mockImplementation((...allArgs: unknown[]) => {
+        const cb = allArgs[allArgs.length - 1] as Function;
+        cb(new Error('connection refused'), { stdout: '', stderr: 'connection refused' });
+      });
+      const result = await WukongInput.checkAvailability();
+      expect(result).toBe(false);
+    });
+
+    it('returns true when socket exists and service is running', async () => {
+      mockFsAccess.mockResolvedValue(undefined);
+      mockExecFile.mockImplementation((...allArgs: unknown[]) => {
+        const cb = allArgs[allArgs.length - 1] as Function;
+        cb(null, { stdout: 'Service is running', stderr: '' });
+      });
+      const result = await WukongInput.checkAvailability();
+      expect(result).toBe(true);
+    });
   });
 });

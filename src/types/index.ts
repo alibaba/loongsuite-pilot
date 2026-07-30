@@ -33,7 +33,25 @@ export interface CmsConfig {
 
 export type MaskMode = 'none' | 'all' | 'custom';
 
-export type MaskType = 'cloudAccessKey' | 'apiKey' | 'privateKey' | 'databaseUrl';
+export const PII_MASK_TYPES = [
+  'idCard',
+  'phone',
+  'email',
+  'ipAddress',
+  'bankCard',
+] as const;
+
+export type PiiMaskType = (typeof PII_MASK_TYPES)[number];
+
+export const SUPPORTED_MASK_TYPES = [
+  'cloudAccessKey',
+  'apiKey',
+  'privateKey',
+  'databaseUrl',
+  ...PII_MASK_TYPES,
+] as const;
+
+export type MaskType = (typeof SUPPORTED_MASK_TYPES)[number];
 
 export interface MaskConfig {
   mode: MaskMode;
@@ -49,6 +67,8 @@ export interface OtlpTraceRawConfig {
   captureMessageContent?: boolean;
   turnIdleTimeoutMs?: number;
   resourceAttributeKeys?: string[];
+  /** Top-level record-key prefixes (e.g. "multica.") whose fields are passed through to span attributes. */
+  spanAttributePassthroughPrefixes?: string[];
   maxExportBatchBytes?: number;
   compression?: 'none' | 'gzip';
 }
@@ -100,8 +120,20 @@ export interface AnalyticsConfig {
   pipeline: PipelineToggle;
   statusBar: StatusBarConfig;
   autoUpdate?: AutoUpdateConfig;
+  upstreamLink: UpstreamLinkConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
   globalSpanAttributes?: Record<string, string>;
+}
+
+/**
+ * Upstream trace linking: stamp collected records with an upstream trace_id /
+ * parent_span_id resolved from the acp-correlate store so agent spans reparent
+ * under the upstream span. Disabled by default.
+ */
+export interface UpstreamLinkConfig {
+  enabled: boolean;
+  /** TTL (ms) after which acp-correlate files/locks are cleaned up. */
+  ttlMs: number;
 }
 
 export interface AgentConfig {
@@ -139,6 +171,8 @@ export interface OtlpTraceFlusherConfig {
   debug?: boolean;
   turnIdleTimeoutMs?: number;
   resourceAttributeKeys?: string[];
+  /** Top-level record-key prefixes (e.g. "multica.") whose fields are passed through to span attributes. */
+  spanAttributePassthroughPrefixes?: string[];
   maxExportBatchBytes?: number;
   dataDir?: string;
 }
@@ -205,6 +239,8 @@ export interface AgentDetectionEntry {
   stop: () => Promise<void>;
   pollIntervalMs: number;
   runOnActive?: boolean;
+  /** Consecutive unavailable checks required before stopping a running entry (default 1). */
+  unavailableThreshold?: number;
 }
 
 export interface LogRetentionConfig {
@@ -256,5 +292,7 @@ export interface InputState {
   highWatermark?: number;
   extra?: Record<string, unknown>;
 }
+
+export type AgentStopReason = 'unavailable' | 'disabled' | 'shutdown' | 'unexpected';
 
 export type EntryState = 'idle' | 'starting' | 'running' | 'stopping';

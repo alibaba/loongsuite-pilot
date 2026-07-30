@@ -1,9 +1,15 @@
 import { readFileSync } from 'node:fs';
+import {
+  PII_MASK_TYPES,
+  SUPPORTED_MASK_TYPES,
+} from '../types/index.js';
 import type { MaskConfig, MaskType } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import type {
   CompiledMaskRule,
+  MaskPlan,
   MaskRuleKind,
+  PiiMaskType,
   SensitiveRuleDefinition,
   SensitiveRulesManifest,
 } from './types.js';
@@ -11,12 +17,11 @@ import type {
 const RULES_URL = new URL('./sensitive-rules.json', import.meta.url);
 const logger = createLogger('MaskRuleLoader');
 const SUPPORTED_RULE_KINDS = new Set<MaskRuleKind>(['regex', 'block', 'urlWithPassword']);
-const SUPPORTED_MASK_TYPES = new Set<MaskType>([
-  'cloudAccessKey',
-  'apiKey',
-  'privateKey',
-  'databaseUrl',
-]);
+const PII_MASK_TYPE_SET = new Set<MaskType>(PII_MASK_TYPES);
+const MANIFEST_MASK_TYPES = new Set<MaskType>(
+  SUPPORTED_MASK_TYPES.filter(type => !PII_MASK_TYPE_SET.has(type)),
+);
+const SUPPORTED_MASK_TYPE_SET = new Set<MaskType>(SUPPORTED_MASK_TYPES);
 
 let cachedRules: CompiledMaskRule[] | undefined;
 
@@ -26,7 +31,9 @@ export function loadSensitiveRules(): CompiledMaskRule[] {
       const raw = readFileSync(RULES_URL, 'utf8');
       cachedRules = compileSensitiveRules(JSON.parse(raw) as SensitiveRulesManifest);
     } catch (err) {
-      logger.error('failed to load sensitive rules, mask disabled', { error: String(err) });
+      logger.error('failed to load sensitive rule manifest, manifest rules disabled', {
+        error: String(err),
+      });
       cachedRules = [];
     }
   }
@@ -35,8 +42,26 @@ export function loadSensitiveRules(): CompiledMaskRule[] {
 
 export function loadEnabledRules(config: MaskConfig): CompiledMaskRule[] {
   const enabledTypes = resolveEnabledMaskTypes(config);
-  if (enabledTypes.size === 0) return [];
+  if (![...enabledTypes].some(type => MANIFEST_MASK_TYPES.has(type))) return [];
   return loadSensitiveRules().filter(rule => enabledTypes.has(rule.type));
+}
+
+export function loadMaskPlan(config: MaskConfig): MaskPlan {
+  const enabledTypes = resolveEnabledMaskTypes(config);
+  if (enabledTypes.size === 0) {
+    return { rules: [], piiTypes: new Set() };
+  }
+
+  return {
+    rules: [...enabledTypes].some(type => MANIFEST_MASK_TYPES.has(type))
+      ? loadSensitiveRules().filter(rule => enabledTypes.has(rule.type))
+      : [],
+    piiTypes: new Set(
+      [...enabledTypes].filter((type): type is PiiMaskType =>
+        PII_MASK_TYPE_SET.has(type),
+      ),
+    ),
+  };
 }
 
 export function filterRulesByConfig(
@@ -51,7 +76,7 @@ export function filterRulesByConfig(
 export function resolveEnabledMaskTypes(config: MaskConfig): Set<MaskType> {
   if (config.mode === 'none') return new Set();
   if (config.mode === 'all') return new Set(SUPPORTED_MASK_TYPES);
-  return new Set(config.types.filter(type => SUPPORTED_MASK_TYPES.has(type)));
+  return new Set(config.types.filter(type => SUPPORTED_MASK_TYPE_SET.has(type)));
 }
 
 export function compileSensitiveRules(manifest: SensitiveRulesManifest): CompiledMaskRule[] {
@@ -113,7 +138,7 @@ function validateBaseRule(rule: SensitiveRuleDefinition): void {
   if (!rule.id || typeof rule.id !== 'string') {
     throw new Error('mask rule missing id');
   }
-  if (!SUPPORTED_MASK_TYPES.has(rule.type)) {
+  if (!SUPPORTED_MASK_TYPE_SET.has(rule.type)) {
     throw new Error(`mask rule ${rule.id} has unsupported type`);
   }
   if (!SUPPORTED_RULE_KINDS.has(rule.kind)) {

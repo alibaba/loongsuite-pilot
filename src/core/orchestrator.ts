@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { ClientType } from '../types/index.js';
-import type { AnalyticsConfig, AgentDetectionEntry } from '../types/index.js';
+import type { AnalyticsConfig, AgentDetectionEntry, AgentStopReason } from '../types/index.js';
 import { AgentControlManager } from './agent-control-manager.js';
 import { AgentDiscoveryService } from './agent-discovery-service.js';
 import { InputManager } from './input-manager.js';
@@ -41,10 +41,14 @@ import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcrip
 import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
+import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
+import { CorrelationStore } from './upstream-link/correlation-store.js';
+import { TraceLinker } from './upstream-link/trace-linker.js';
+import { AcpCorrelateRetentionService } from './upstream-link/acp-correlate-retention-service.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
@@ -96,6 +100,7 @@ export class Orchestrator extends EventEmitter {
     'kiro-cli-log': 'kiro-cli',
     'kiro-cli-session': 'kiro-cli',
     'opencode-log': 'opencode',
+    'pi-coding-agent-log': 'pi-coding-agent',
     'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
   };
@@ -108,6 +113,7 @@ export class Orchestrator extends EventEmitter {
   private stateStore!: StateStore;
   private flusher!: BaseFlusher;
   private logRetentionService!: LogRetentionService;
+  private acpCorrelateRetentionService?: AcpCorrelateRetentionService;
   private legacySlsFailedLogCleanupService: LegacySlsFailedLogCleanupService | null = null;
   private hookWatchdog!: HookWatchdog;
   private updaterWatchdog: UpdaterWatchdog | null = null;
@@ -169,6 +175,22 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setAlarmManager(this.alarmManager);
     this.inputManager.setMaskConfig(this.config.mask ?? { mode: 'none', types: [] });
 
+    // Upstream trace linking (opt-in): stamp trace_id/parent_span_id from the
+    // acp-correlate store so agent spans reparent under the upstream span.
+    if (this.config.upstreamLink?.enabled) {
+      const correlateDir = path.join(this.dataDir, 'acp-correlate');
+      await ensureDir(correlateDir);
+      const store = new CorrelationStore(correlateDir);
+      const traceLinker = new TraceLinker(store);
+      this.inputManager.setTraceLinker(traceLinker);
+      this.acpCorrelateRetentionService = new AcpCorrelateRetentionService(this.dataDir, this.config.upstreamLink, traceLinker);
+      this.acpCorrelateRetentionService.start();
+      // Adapters/env hooks must write records under this exact path; a custom
+      // config.json dataDir that diverges from where they write silently yields
+      // no linking, so surface the resolved dir for diagnosis.
+      logger.info('upstream trace linking enabled', { correlateDir, ttlMs: this.config.upstreamLink.ttlMs });
+    }
+
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
     const pilotDir = this.resolvePilotDir();
     this.deploymentManager = new DeploymentManager({
@@ -195,13 +217,17 @@ export class Orchestrator extends EventEmitter {
     this.agentDiscoveryService.on('agent:started', (id: string) => {
       logger.info('agent detected and started', { id });
     });
-    this.agentDiscoveryService.on('agent:stopped', (id: string) => {
-      logger.info('agent stopped', { id });
-      this.alarmManager.record(
-        'INPUT_STOP_ALARM', '3',
-        `input ${id} stopped unexpectedly`,
-        { input_name: id },
-      );
+    this.agentDiscoveryService.on('agent:stopped', (id: string, reason: AgentStopReason) => {
+      if (reason === 'unexpected') {
+        logger.warn('agent stopped unexpectedly', { id });
+        this.alarmManager.record(
+          'INPUT_STOP_ALARM', '3',
+          `input ${id} stopped unexpectedly (reason=unexpected)`,
+          { input_name: id },
+        );
+      } else {
+        logger.debug('agent stopped', { id, reason });
+      }
     });
     await this.agentDiscoveryService.start();
 
@@ -215,7 +241,7 @@ export class Orchestrator extends EventEmitter {
       ...this.buildHookWatchdogTargets(),
     ];
     const interceptTargets = [
-      ...HookWatchdog.defaultInterceptTargets(this.dataDir),
+      ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
       ...this.buildPluginInjectInterceptTargets(),
     ];
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
@@ -261,13 +287,15 @@ export class Orchestrator extends EventEmitter {
     });
     await this.metricsWriter.start();
 
-    // 14. Start status bar support (runtime.json + metrics summary + native app)
+    // 14. Always publish runtime health for service managers. The status bar UI
+    // may be disabled, but Windows Task Scheduler still needs runtime.json to
+    // distinguish a healthy collector from a task whose child process died.
+    const packageVersion = this.readPackageVersion();
+    this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
+    this.runtimeWriter.start();
+
+    // Status bar metrics/native UI remain optional.
     if (this.config.statusBar.enabled) {
-      const packageVersion = this.readPackageVersion();
-
-      this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
-      this.runtimeWriter.start();
-
       this.metricsSummaryWriter = new MetricsSummaryWriter(this.dataDir, this.config.statusBar);
       this.metricsSummaryWriter.start();
 
@@ -304,6 +332,7 @@ export class Orchestrator extends EventEmitter {
     this.legacySlsFailedLogCleanupService?.stop();
     this.legacySlsFailedLogCleanupService = null;
     this.logRetentionService?.stop();
+    this.acpCorrelateRetentionService?.stop();
     await this.localWorkerActivationService?.stop();
     await this.deploymentManager?.stopWorkers();
     await this.agentDiscoveryService?.stop();
@@ -383,6 +412,7 @@ export class Orchestrator extends EventEmitter {
       targets.push({
         agentId: def.id,
         settingsPath: def.hook.settingsPath,
+        settingsSyntax: def.hook.settingsSyntax,
         expectedHooks: def.hook.events,
         markers: [scriptName],
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
@@ -393,7 +423,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   /**
-   * Self-heal targets for plugin-inject agents (e.g. opencode, qwen-code-cli).
+   * Self-heal targets for plugin-inject agents (currently OpenCode).
    *
    * Unlike hook agents, these write a plugin spec into the agent's own config
    * file (not a shared settings.json), so they use the intercept mechanism:
@@ -413,6 +443,7 @@ export class Orchestrator extends EventEmitter {
 
       targets.push({
         id: `plugin-inject:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
         precondition: async () => {
           // Only self-heal when the plugin asset is actually deployed AND the
           // agent is present. Otherwise repair would inject a spec pointing at
@@ -443,7 +474,8 @@ export class Orchestrator extends EventEmitter {
    */
   private resolvePluginSpecPath(spec: string): string | null {
     const resolved = spec.replace(/\$PILOT_DATA/g, this.dataDir);
-    return resolved.startsWith('file://') ? resolved.slice('file://'.length) : null;
+    if (resolved.startsWith('file://')) return resolved.slice('file://'.length);
+    return path.isAbsolute(resolved) ? resolved : null;
   }
 
   private async buildFlusher(): Promise<BaseFlusher> {
@@ -1027,6 +1059,7 @@ export class Orchestrator extends EventEmitter {
     const opencodeLogInput = new OpenCodeLogInput({
       stateStore: this.stateStore,
       logDir: opencodeLogDir,
+      pollIntervalMs: listenerCfg['opencode-log']?.pollInterval,
     });
     this.inputManager.registerInput(opencodeLogInput);
     entries.push(
@@ -1039,6 +1072,27 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['opencode-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['opencode-log']?.pollInterval,
+      }),
+    );
+
+    // --- Pi Coding Agent Log (Pi extension JSONL) ---
+    const piCodingAgentLogDir = path.join(this.dataDir, 'logs', 'pi-coding-agent');
+    await ensurePiCodingAgentLogDir(piCodingAgentLogDir);
+    const piCodingAgentLogInput = new PiCodingAgentLogInput({
+      stateStore: this.stateStore,
+      logDir: piCodingAgentLogDir,
+    });
+    this.inputManager.registerInput(piCodingAgentLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(piCodingAgentLogInput, {
+        watchPaths: [piCodingAgentLogDir],
+        isAvailable: async () => directoryExists(piCodingAgentLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['pi-coding-agent-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'pi-coding-agent-log',
+            listenerCfg['pi-coding-agent-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['pi-coding-agent-log']?.pollInterval,
       }),
     );
 
@@ -1077,6 +1131,7 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['wukong']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['wukong']?.pollInterval,
+        unavailableThreshold: 3,
       }),
     );
 

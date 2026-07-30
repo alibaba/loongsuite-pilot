@@ -24,8 +24,28 @@ $ErrorActionPreference = "Stop"
 # ============================================================
 # Constants & Paths
 # ============================================================
-$CACHE_DIR = Join-Path $env:USERPROFILE ".loongsuite-pilot"
-$DATA_DIR = if ($env:LOONGSUITE_PILOT_DATA_DIR) { $env:LOONGSUITE_PILOT_DATA_DIR } else { $CACHE_DIR }
+$DEFAULT_PILOT_DIR = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+$LAYOUT_FILE = Join-Path $PSScriptRoot "loongsuite-pilot-layout.json"
+$INSTALL_LAYOUT = $null
+if (Test-Path -LiteralPath $LAYOUT_FILE) {
+    try {
+        $INSTALL_LAYOUT = Get-Content -LiteralPath $LAYOUT_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {}
+}
+$CACHE_DIR = if ($env:LOONGSUITE_PILOT_CACHE_DIR) {
+    $env:LOONGSUITE_PILOT_CACHE_DIR
+} elseif ($INSTALL_LAYOUT -and $INSTALL_LAYOUT.cacheDir) {
+    [string]$INSTALL_LAYOUT.cacheDir
+} else {
+    $DEFAULT_PILOT_DIR
+}
+$DATA_DIR = if ($env:LOONGSUITE_PILOT_DATA_DIR) {
+    $env:LOONGSUITE_PILOT_DATA_DIR
+} elseif ($INSTALL_LAYOUT -and $INSTALL_LAYOUT.dataDir) {
+    [string]$INSTALL_LAYOUT.dataDir
+} else {
+    $DEFAULT_PILOT_DIR
+}
 $VERSIONS_DIR = Join-Path $CACHE_DIR "versions"
 $CURRENT_FILE = Join-Path $CACHE_DIR "current"
 $PREVIOUS_FILE = Join-Path $CACHE_DIR "previous"
@@ -36,6 +56,7 @@ $UPDATER_PID_FILE = Join-Path $DATA_DIR "loongsuite-pilot-updater.pid"
 $LOG_DIR = Join-Path $DATA_DIR "logs"
 $LOG_FILE = Join-Path $LOG_DIR "loongsuite-pilot-service.log"
 $UPDATER_LOG_FILE = Join-Path $LOG_DIR "loongsuite-pilot-updater.log"
+$RUNTIME_FILE = Join-Path $LOG_DIR "runtime.json"
 $CONFIG_FILE = Join-Path $DATA_DIR "config.json"
 $SPAN_ATTR_FILE = Join-Path $DATA_DIR "span-attributes.json"
 $NODE_PIN_FILE = Join-Path $CACHE_DIR "node-bin"
@@ -220,6 +241,36 @@ function Test-PidRunning {
     return $false
 }
 
+function Get-CollectorRuntime {
+    param([datetimeoffset]$NotBefore = [datetimeoffset]::MinValue)
+    if (-not (Test-Path -LiteralPath $RUNTIME_FILE)) { return $null }
+    try {
+        $runtime = Get-Content -LiteralPath $RUNTIME_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
+        $updatedAt = [datetimeoffset]::Parse(
+            [string]$runtime.updatedAt,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind
+        )
+        $pidValue = [int]$runtime.pid
+        if (
+            $runtime.status -ne "active" -or
+            $pidValue -le 0 -or
+            $updatedAt -lt $NotBefore -or
+            $updatedAt -lt [datetimeoffset]::Now.AddMinutes(-2) -or
+            -not (Get-Process -Id $pidValue -ErrorAction SilentlyContinue)
+        ) {
+            return $null
+        }
+        return $runtime
+    } catch {
+        return $null
+    }
+}
+
+function Test-CollectorRunning {
+    return $null -ne (Get-CollectorRuntime)
+}
+
 function Stop-PidFile {
     param([string]$pidFile)
     if (-not (Test-PidRunning $pidFile)) {
@@ -268,13 +319,76 @@ function Get-TaskRunning {
     return $task.State -eq "Running"
 }
 
-# Register a scheduled task, trying S4U first, then falling back to Interactive.
-# S4U runs under the user's identity in a non-interactive session (survives
-# RDP/SSH disconnect, no stored password) but requires the "Log on as a batch
-# job" right, which standard (non-admin) users lack -- so S4U registration throws
-# "Access is denied" (0x80070005) for them. Interactive needs no special right and
-# still auto-starts at logon, so it is the fallback before dropping to a plain
-# background process.
+function Wait-ForCollectorHeartbeat {
+    param([int]$TimeoutSeconds = 15)
+    $notBefore = [datetimeoffset]::Now.AddSeconds(-2)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if (
+            (Get-CollectorRuntime -NotBefore $notBefore) -or
+            (Test-PidRunning $PID_FILE)
+        ) {
+            return $true
+        }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
+function Start-CompatibleExistingCollectorTask {
+    $task = $null
+    for ($attempt = 0; $attempt -lt 5 -and -not $task; $attempt++) {
+        $task = Get-ScheduledTask `
+            -TaskName $TASK_NAME_COLLECTOR `
+            -TaskPath "$TASK_FOLDER\" `
+            -ErrorAction SilentlyContinue
+        if (-not $task) { Start-Sleep -Seconds 1 }
+    }
+    if (-not $task) { return $false }
+
+    $expectedLauncher = Join-Path $BOOTSTRAP_DIR "collector-launch.vbs"
+    $action = $task.Actions | Select-Object -First 1
+    $actionArgs = if ($action) { [string]$action.Arguments } else { "" }
+    $actionExe = if ($action) { [string]$action.Execute } else { "" }
+    $isWscript = [System.IO.Path]::GetFileName($actionExe) -ieq "wscript.exe"
+    $usesExpectedLauncher = $actionArgs.IndexOf(
+        $expectedLauncher,
+        [System.StringComparison]::OrdinalIgnoreCase
+    ) -ge 0
+    if (-not $isWscript -or -not $usesExpectedLauncher) {
+        Write-Host "Existing collector task uses an incompatible action; refusing to reuse it." -ForegroundColor Yellow
+        return $false
+    }
+
+    try {
+        if ($task.State -eq "Running") {
+            Stop-ScheduledTask `
+                -TaskName $TASK_NAME_COLLECTOR `
+                -TaskPath "$TASK_FOLDER\" `
+                -ErrorAction SilentlyContinue
+            for ($attempt = 0; $attempt -lt 10; $attempt++) {
+                Start-Sleep -Seconds 1
+                $task = Get-ScheduledTask `
+                    -TaskName $TASK_NAME_COLLECTOR `
+                    -TaskPath "$TASK_FOLDER\" `
+                    -ErrorAction SilentlyContinue
+                if (-not $task -or $task.State -ne "Running") { break }
+            }
+        }
+        Start-ScheduledTask `
+            -TaskName $TASK_NAME_COLLECTOR `
+            -TaskPath "$TASK_FOLDER\" `
+            -ErrorAction Stop
+        return (Wait-ForCollectorHeartbeat -TimeoutSeconds 30)
+    } catch {
+        Write-Host "Existing collector task could not be started: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    }
+}
+
+# Register a scheduled task, preferring Interactive and falling back to S4U.
+# Interactive tasks remain manageable by the same standard user. S4U stays
+# available for environments that explicitly grant batch-logon rights.
 function Register-PilotTask {
     param(
         [string]$taskName,
@@ -285,10 +399,9 @@ function Register-PilotTask {
     )
     $userId = whoami
     $lastErr = $null
-    foreach ($logonType in @("S4U", "Interactive")) {
-        # Clear any task a previous attempt left behind. A failed S4U registration
-        # can still create the task entry before erroring on the principal, which
-        # would make the Interactive retry fail with "already exists".
+    foreach ($logonType in @("Interactive", "S4U")) {
+        # Clear any task a previous attempt left behind. A failed registration can
+        # still create the task entry before erroring on the principal.
         try { schtasks.exe /Delete /TN "$TASK_FOLDER\$taskName" /F 2>$null | Out-Null } catch {}
         try {
             # On-disk location of the task definition (absolute filesystem path).
@@ -333,14 +446,18 @@ function New-HiddenTaskAction {
     param([string]$vbsPath, [string]$nodeBin, [string]$entry)
     # Double any embedded quote so a path with a " cannot terminate the VBScript
     # string literal early (defensive: Windows paths cannot contain ", but
-    # $CONFIG_FILE/$CACHE_DIR derive from the user-settable LOONGSUITE_PILOT_DATA_DIR).
+    # $CONFIG_FILE/$CACHE_DIR derive from user-settable data/cache directories).
     $cfgEsc   = $CONFIG_FILE -replace '"', '""'
+    $dataEsc  = $DATA_DIR    -replace '"', '""'
+    $cacheEsc = $CACHE_DIR   -replace '"', '""'
     $cwdEsc   = $CACHE_DIR   -replace '"', '""'
     $nodeEsc  = $nodeBin     -replace '"', '""'
     $entryEsc = $entry       -replace '"', '""'
     $vbs = @"
 Set sh = CreateObject("WScript.Shell")
 sh.Environment("PROCESS").Item("AGENT_DATA_COLLECTION_CONFIG") = "$cfgEsc"
+sh.Environment("PROCESS").Item("LOONGSUITE_PILOT_DATA_DIR") = "$dataEsc"
+sh.Environment("PROCESS").Item("LOONGSUITE_PILOT_CACHE_DIR") = "$cacheEsc"
 sh.CurrentDirectory = "$cwdEsc"
 sh.Run """$nodeEsc"" ""$entryEsc""", 0, True
 "@
@@ -428,6 +545,10 @@ function Install-UpdaterTask {
 }
 
 function Remove-AllTasks {
+    $launchers = @{
+        $TASK_NAME_COLLECTOR = "collector-launch.vbs"
+        $TASK_NAME_UPDATER = "updater-launch.vbs"
+    }
     foreach ($name in @($TASK_NAME_UPDATER, $TASK_NAME_COLLECTOR)) {
         $task = Get-ScheduledTask -TaskName $name -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
         if ($task) {
@@ -437,11 +558,13 @@ function Remove-AllTasks {
         }
         try { schtasks.exe /Delete /TN "$TASK_FOLDER\$name" /F 2>$null | Out-Null } catch {}
         try { schtasks.exe /Delete /TN "$name" /F 2>$null | Out-Null } catch {}
-    }
-    # Clean up the hidden VBScript launchers created by New-HiddenTaskAction so
-    # removing the tasks leaves no orphaned launcher scripts behind.
-    foreach ($vbs in @("collector-launch.vbs", "updater-launch.vbs")) {
-        Remove-Item (Join-Path $BOOTSTRAP_DIR $vbs) -Force -ErrorAction SilentlyContinue
+        # Never remove a launcher while an inaccessible task still references it.
+        if (-not (Get-TaskExists $name)) {
+            Remove-Item `
+                (Join-Path $BOOTSTRAP_DIR $launchers[$name]) `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -494,6 +617,11 @@ function Cmd-RunUpdater {
 # CMD: start
 # ============================================================
 function Cmd-Start {
+    $runtime = Get-CollectorRuntime
+    if ($runtime) {
+        Write-Host "loongsuite-pilot is already running (PID $($runtime.pid))"
+        return
+    }
     if (Test-PidRunning $PID_FILE) {
         $pidVal = (Get-Content $PID_FILE).Trim()
         Write-Host "loongsuite-pilot is already running (PID $pidVal)"
@@ -530,24 +658,13 @@ function Cmd-Start {
                 Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
             }
             Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
-            for ($i = 0; $i -lt 5; $i++) {
-                Start-Sleep -Seconds 2
-                if (Get-TaskRunning $TASK_NAME_COLLECTOR) {
-                    Write-Host "loongsuite-pilot started (Task Scheduler)"
-                    return
-                }
+            if (Wait-ForCollectorHeartbeat) {
+                Write-Host "loongsuite-pilot started (Task Scheduler)"
+                return
             }
-            # Registered but never reached Running within 10s. The task is installed
-            # with a 5-min watchdog trigger, so do NOT drop to the background fallback:
-            # that would start a second collector alongside the task once the watchdog
-            # fires (duplicate collection). Surface the last result and let the
-            # watchdog keep retrying -- autostart is already configured.
             $t = Get-ScheduledTaskInfo -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
             $rc = if ($t) { "0x{0:X8}" -f $t.LastTaskResult } else { "unknown" }
-            Write-Host "Task registered but not running after 10s (LastTaskResult=$rc)." -ForegroundColor Yellow
-            Write-Host "   Autostart is configured; the 5-min watchdog trigger will keep retrying." -ForegroundColor Yellow
-            Write-Host "   Check the task in Task Scheduler and the log below." -ForegroundColor Yellow
-            return
+            throw "Collector task produced no runtime heartbeat (LastTaskResult=$rc)."
         }
     } catch {
         $hr = ""
@@ -555,10 +672,27 @@ function Cmd-Start {
             $hr = " (HRESULT 0x{0:X8})" -f $_.Exception.HResult
         }
         Write-Host "Task Scheduler registration failed$hr : $($_.Exception.Message)" -ForegroundColor Yellow
+        # An older task may be inaccessible for replacement but still be owned by
+        # this user and point at the stable launcher path. The launcher was just
+        # regenerated with the new Node/config/package paths, so it is safe to
+        # start and reuse that task after validating its action.
+        if (Start-CompatibleExistingCollectorTask) {
+            Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+            Write-Host "Reused existing scheduled task: $TASK_NAME_COLLECTOR" -ForegroundColor Green
+            return
+        }
     }
 
     # No background fallback — Task Scheduler registration is required.
-    Remove-AllTasks
+    $staleTask = Get-ScheduledTask `
+        -TaskName $TASK_NAME_COLLECTOR `
+        -TaskPath "$TASK_FOLDER\" `
+        -ErrorAction SilentlyContinue
+    if ($staleTask -and [string]$staleTask.Principal.LogonType -eq "S4U") {
+        Write-Host "A stale S4U collector task blocks replacement by the current user." -ForegroundColor Yellow
+        Write-Host "   Remove it once from an elevated PowerShell, then run start/install again:" -ForegroundColor Yellow
+        Write-Host "   schtasks.exe /Delete /TN `"$TASK_FOLDER\$TASK_NAME_COLLECTOR`" /F" -ForegroundColor Yellow
+    }
     Write-Error "Failed to register system service via Task Scheduler."
     Write-Host "   Possible causes:" -ForegroundColor Yellow
     Write-Host "     - 'Log on as a batch job' right not granted (S4U)" -ForegroundColor Yellow
@@ -800,16 +934,20 @@ function Cmd-Status {
 
     # Collector status
     $collectorRunning = $false
-    if (Test-PidRunning $PID_FILE) {
+    $runtime = Get-CollectorRuntime
+    if ($runtime) {
+        Write-Host "loongsuite-pilot${verInfo} is running (PID $($runtime.pid), heartbeat)"
+        $collectorRunning = $true
+    } elseif (Test-PidRunning $PID_FILE) {
         $pidVal = (Get-Content $PID_FILE).Trim()
         Write-Host "loongsuite-pilot${verInfo} is running (PID $pidVal)"
-        $collectorRunning = $true
-    } elseif (Get-TaskRunning $TASK_NAME_COLLECTOR) {
-        Write-Host "loongsuite-pilot${verInfo} is running (Task Scheduler)"
         $collectorRunning = $true
     }
     if (-not $collectorRunning) {
         Write-Host "loongsuite-pilot${verInfo} is not running"
+        if (Get-TaskRunning $TASK_NAME_COLLECTOR) {
+            Write-Host "   collector task: running without a runtime heartbeat" -ForegroundColor Yellow
+        }
     }
 
     # Updater status

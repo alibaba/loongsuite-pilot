@@ -19,7 +19,9 @@ import type {
   SlsEndpoint,
   SlsMode,
   StatusBarConfig,
+  UpstreamLinkConfig,
 } from '../types/index.js';
+import { SUPPORTED_MASK_TYPES } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
@@ -112,6 +114,11 @@ export interface ConfigFile {
   collectTrace?: boolean;
   serviceNamePrefix?: string;
 
+  upstreamLink?: {
+    enabled?: boolean;
+    ttlMs?: number;
+  };
+
   mask?: {
     mode?: string;
     types?: string[];
@@ -133,6 +140,7 @@ export interface ConfigFile {
     captureMessageContent?: boolean;
     turnIdleTimeoutMs?: number;
     resourceAttributeKeys?: string[];
+    spanAttributePassthroughPrefixes?: string[];
   };
 
   agents?: Record<string, {
@@ -176,7 +184,7 @@ function env(key: string): string | undefined {
 
 function envBool(key: string, fallback: boolean): boolean {
   const v = env(key);
-  if (v === undefined) return fallback;
+  if (v === undefined || v.trim() === '') return fallback; // empty string == unset, not "true"
   return v !== 'false' && v !== '0';
 }
 
@@ -242,7 +250,18 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     fileCollection: buildFileCollectionConfig(file),
     pipeline: buildPipelineConfig(file),
     statusBar: buildStatusBarConfig(file),
+    upstreamLink: buildUpstreamLinkConfig(file),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
+  };
+}
+
+function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
+  const ttlMs = envInt('LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS', file?.upstreamLink?.ttlMs ?? 86_400_000); // 24h
+  return {
+    enabled: envBool('LOONGSUITE_PILOT_UPSTREAM_LINK', file?.upstreamLink?.enabled ?? false),
+    // Clamp: ttlMs <= 0 would make the retention cutoff Date.now() (or the future),
+    // deleting all freshly-written correlation files and silently breaking linking.
+    ttlMs: ttlMs > 0 ? ttlMs : 86_400_000,
   };
 }
 
@@ -301,13 +320,6 @@ function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
   return result;
 }
 
-const SUPPORTED_MASK_TYPES: readonly MaskType[] = [
-  'cloudAccessKey',
-  'apiKey',
-  'privateKey',
-  'databaseUrl',
-];
-
 const SUPPORTED_MASK_TYPE_SET = new Set<string>(SUPPORTED_MASK_TYPES);
 
 function parseMaskTypes(value: string | string[] | undefined): MaskType[] {
@@ -354,6 +366,8 @@ function buildListenersConfig(
     'cursor-hook': { enabled: true, pollInterval: 30_000 },
     'claude-code-log': { enabled: true, pollInterval: 30_000 },
     'codex-transcript': { enabled: true, pollInterval: 30_000 },
+    'opencode-log': { enabled: true, pollInterval: 30_000 },
+    'pi-coding-agent-log': { enabled: true, pollInterval: 30_000 },
   };
 
   const result = { ...defaults };
@@ -571,6 +585,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     debug: otlp?.debug ?? config.cms.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
+    spanAttributePassthroughPrefixes: resolveSpanAttributePassthroughPrefixes(otlp),
     maxExportBatchBytes: otlp?.maxExportBatchBytes,
   };
 }
@@ -631,6 +646,20 @@ function resolveResourceAttributeKeys(
       .filter((key): key is string => typeof key === 'string')
       .map(key => key.trim())
       .filter(key => key.length > 0),
+  )];
+}
+
+function resolveSpanAttributePassthroughPrefixes(
+  otlp: AnalyticsConfig['otlpTrace'],
+): string[] {
+  const prefixes = Array.isArray(otlp?.spanAttributePassthroughPrefixes)
+    ? otlp.spanAttributePassthroughPrefixes
+    : [];
+  return [...new Set(
+    prefixes
+      .filter((prefix): prefix is string => typeof prefix === 'string')
+      .map(prefix => prefix.trim())
+      .filter(prefix => prefix.length > 0),
   )];
 }
 

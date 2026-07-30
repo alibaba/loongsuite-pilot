@@ -1,3 +1,4 @@
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type {
   AgentDefinition,
@@ -7,7 +8,14 @@ import type {
   DeployedAgentRecord,
 } from '../types/index.js';
 import { HookManager, type HookDefinition } from '../hooks/hook-manager.js';
-import { readJsonFile, writeJsonFile, resolveHome, ensureDir } from '../utils/fs-utils.js';
+import {
+  fileExists,
+  readJsonFile,
+  writeJsonFile,
+  writeTextFileAtomic,
+  resolveHome,
+  ensureDir,
+} from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 import {
@@ -32,7 +40,7 @@ function eventToSubcommand(event: string): string {
  * piping to work correctly.  Bare `.ps1` paths fail to receive stdin when
  * spawned through cmd.exe / child_process.
  */
-function wrapPs1Command(cmd: string): string {
+function wrapLegacyPs1Command(cmd: string): string {
   if (process.platform !== 'win32') return cmd;
   const parts = cmd.split(' ');
   const script = parts[0];
@@ -40,6 +48,33 @@ function wrapPs1Command(cmd: string): string {
   const args = parts.slice(1).join(' ');
   const wrapped = `powershell -NoProfile -ExecutionPolicy Bypass -File ${script}`;
   return args ? `${wrapped} ${args}` : wrapped;
+}
+
+function wrapPs1Command(cmd: string, agentId: string): string {
+  if (process.platform !== 'win32' || agentId !== 'codex') {
+    return wrapLegacyPs1Command(cmd);
+  }
+
+  const match = cmd.match(/^(.*?\.ps1)(?:\s+(.*))?$/i);
+  if (!match) return cmd;
+  const script = match[1];
+  const args = match[2] ?? '';
+  const wrapped = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${script}"`;
+  return args ? `${wrapped} ${args}` : wrapped;
+}
+
+function appendEventSubcommand(
+  command: string,
+  event: string,
+  style: AgentHookConfig['eventSubcommand'],
+): string {
+  if (style === 'kebab-case') {
+    return `${command} ${eventToSubcommand(event)}`;
+  }
+  if (style === 'as-is') {
+    return `${command} ${event}`;
+  }
+  return command;
 }
 
 /**
@@ -50,15 +85,24 @@ function formatHookCommand(
   hookCommand: string,
   event: string,
   style: AgentHookConfig['eventSubcommand'],
+  agentId: string,
 ): string {
-  const cmd = wrapPs1Command(hookCommand);
-  if (style === 'kebab-case') {
-    return `${cmd} ${eventToSubcommand(event)}`;
-  }
-  if (style === 'as-is') {
-    return `${cmd} ${event}`;
-  }
-  return cmd;
+  return appendEventSubcommand(wrapPs1Command(hookCommand, agentId), event, style);
+}
+
+function legacyCodexHookCommands(
+  hookCommand: string,
+  event: string,
+  style: AgentHookConfig['eventSubcommand'],
+  agentId: string,
+): string[] {
+  if (process.platform !== 'win32' || agentId !== 'codex') return [];
+
+  const current = formatHookCommand(hookCommand, event, style, agentId);
+  return [...new Set([
+    appendEventSubcommand(hookCommand, event, style),
+    appendEventSubcommand(wrapLegacyPs1Command(hookCommand), event, style),
+  ])].filter(command => command !== current);
 }
 
 export class HookStrategy implements DeployStrategy {
@@ -92,6 +136,9 @@ export class HookStrategy implements DeployStrategy {
         return true;
       }
     }
+    if (await this.needsTrustRepairForCodex(def)) {
+      return true;
+    }
     return false;
   }
 
@@ -104,6 +151,28 @@ export class HookStrategy implements DeployStrategy {
 
     const existing = await readJsonFile<Record<string, unknown>>(settingsPath);
     return existing?.version !== undefined;
+  }
+
+  private async needsTrustRepairForCodex(def: AgentDefinition): Promise<boolean> {
+    const cfg = def.hook?.trustToml;
+    if (!cfg || !def.hook) return false;
+
+    const hookCommand = resolveHome(def.hook.hookCommand);
+    const eventToCommand: Record<string, string> = {};
+    for (const event of def.hook.events) {
+      eventToCommand[event] = formatHookCommand(
+        hookCommand, event, def.hook.eventSubcommand, def.id,
+      );
+    }
+    const eventToGroupIndex = await this.resolveGroupIndices(def);
+    return !verifyTrustHashes({
+      configPath: resolveHome(cfg.configPath),
+      hooksJsonAbsPath: path.resolve(resolveHome(def.hook.settingsPath)),
+      hookEvents: def.hook.events,
+      eventToCommand,
+      eventToGroupIndex,
+      marker: cfg.marker,
+    }).valid;
   }
 
   async deploy(def: AgentDefinition): Promise<DeployResult> {
@@ -224,7 +293,7 @@ export class HookStrategy implements DeployStrategy {
     // 构建 event → 实际写入 hooks.json 的完整 command(与 buildHookDefinitions 一致)
     const eventToCmd: Record<string, string> = {};
     for (const ev of def.hook!.events) {
-      eventToCmd[ev] = formatHookCommand(hookCommand, ev, def.hook!.eventSubcommand);
+      eventToCmd[ev] = formatHookCommand(hookCommand, ev, def.hook!.eventSubcommand, def.id);
     }
 
     // 回读 hooks.json,算出每个 event 中 pilot hook 的实际 group index。
@@ -304,7 +373,7 @@ export class HookStrategy implements DeployStrategy {
       for (const event of def.hook!.events) {
         const arr = hooks[event];
         if (!Array.isArray(arr)) continue;
-        const cmd = formatHookCommand(hookCommand, event, def.hook!.eventSubcommand);
+        const cmd = formatHookCommand(hookCommand, event, def.hook!.eventSubcommand, def.id);
         for (let i = 0; i < arr.length; i++) {
           const entry = arr[i];
           // nested: {hooks: [{command}]}
@@ -335,13 +404,19 @@ export class HookStrategy implements DeployStrategy {
     return hookConfig.events.map(event => ({
       agentId: def.id,
       settingsPath: hookConfig.settingsPath,
+      settingsSyntax: hookConfig.settingsSyntax,
       hookJsonPath: ['hooks', event],
       hookCommand: formatHookCommand(
-        hookConfig.hookCommand, event, hookConfig.eventSubcommand,
+        hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
       ),
       matcher: hookConfig.matcher,
       useNestedFormat: hookConfig.format === 'nested',
-      replaceHookCommands: hookConfig.replaceHookCommands,
+      replaceHookCommands: [
+        ...(hookConfig.replaceHookCommands ?? []),
+        ...legacyCodexHookCommands(
+          hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
+        ),
+      ],
     }));
   }
 
@@ -354,13 +429,19 @@ export class HookStrategy implements DeployStrategy {
       .map(event => ({
         agentId: def.id,
         settingsPath: hookConfig.settingsPath,
+        settingsSyntax: hookConfig.settingsSyntax,
         hookJsonPath: ['hooks', event],
         hookCommand: formatHookCommand(
-          hookConfig.hookCommand, event, hookConfig.eventSubcommand,
+          hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
         ),
         matcher: hookConfig.matcher,
         useNestedFormat: hookConfig.format === 'nested',
-        replaceHookCommands: hookConfig.replaceHookCommands,
+        replaceHookCommands: [
+          ...(hookConfig.replaceHookCommands ?? []),
+          ...legacyCodexHookCommands(
+            hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
+          ),
+        ],
       }));
   }
 
@@ -445,7 +526,7 @@ export class HookStrategy implements DeployStrategy {
       : {};
 
     for (const event of hookConfig.events) {
-      const cmd = formatHookCommand(hookCommandBase, event, hookConfig.eventSubcommand);
+      const cmd = formatHookCommand(hookCommandBase, event, hookConfig.eventSubcommand, def.id);
       const entry: Record<string, unknown> = { command: cmd };
       if (hookConfig.matcher) entry['matcher'] = hookConfig.matcher;
 
@@ -502,7 +583,7 @@ export class HookStrategy implements DeployStrategy {
     if (!hooks || typeof hooks !== 'object') return true;
     const base = resolveHome(hookConfig.hookCommand);
     for (const event of hookConfig.events) {
-      const cmd = formatHookCommand(base, event, hookConfig.eventSubcommand);
+      const cmd = formatHookCommand(base, event, hookConfig.eventSubcommand, def.id);
       const arr = hooks[event];
       if (!Array.isArray(arr)) return true;
       const found = arr.some((e) => (e as any)?.command === cmd);
@@ -518,17 +599,34 @@ export class HookStrategy implements DeployStrategy {
    */
   private async ensureSettingsFile(settingsPath: string): Promise<void> {
     const isHooksJson = settingsPath.endsWith('hooks.json');
-    const needsVersion = isHooksJson && settingsPath.includes('.cursor');
+    if (!isHooksJson) return;
 
+    const needsVersion = isHooksJson && settingsPath.includes('.cursor');
+    const existed = await fileExists(settingsPath);
     const existing = await readJsonFile<Record<string, unknown>>(settingsPath);
-    if (!existing) {
-      if (isHooksJson) {
-        const initial: Record<string, unknown> = { hooks: {} };
-        if (needsVersion) {
-          initial.version = 1;
-        }
-        await writeJsonFile(settingsPath, initial);
+    if (existed && !existing) {
+      const raw = await fs.readFile(settingsPath, 'utf8');
+      if (raw.trim() !== '') {
+        throw new Error(`refusing to overwrite invalid settings: ${settingsPath}`);
       }
+
+      const initial: Record<string, unknown> = { hooks: {} };
+      if (needsVersion) {
+        initial.version = 1;
+      }
+      await writeTextFileAtomic(
+        settingsPath,
+        `${JSON.stringify(initial, null, 2)}\n`,
+        { expected: { exists: true, content: raw } },
+      );
+      return;
+    }
+    if (!existing) {
+      const initial: Record<string, unknown> = { hooks: {} };
+      if (needsVersion) {
+        initial.version = 1;
+      }
+      await writeJsonFile(settingsPath, initial);
     } else if (needsVersion && existing.version === undefined) {
       existing.version = 1;
       await writeJsonFile(settingsPath, existing);
