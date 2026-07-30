@@ -1,3 +1,4 @@
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type {
   AgentDefinition,
@@ -7,7 +8,14 @@ import type {
   DeployedAgentRecord,
 } from '../types/index.js';
 import { HookManager, type HookDefinition } from '../hooks/hook-manager.js';
-import { readJsonFile, writeJsonFile, resolveHome, ensureDir } from '../utils/fs-utils.js';
+import {
+  fileExists,
+  readJsonFile,
+  writeJsonFile,
+  writeTextFileAtomic,
+  resolveHome,
+  ensureDir,
+} from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 import {
@@ -417,6 +425,7 @@ export class HookStrategy implements DeployStrategy {
     return hookConfig.events.map(event => ({
       agentId: def.id,
       settingsPath: hookConfig.settingsPath,
+      settingsSyntax: hookConfig.settingsSyntax,
       hookJsonPath: ['hooks', eventToKey(event, hookConfig.eventKeyCase)],
       hookCommand: formatHookCommand(
         hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
@@ -441,6 +450,7 @@ export class HookStrategy implements DeployStrategy {
       .map(event => ({
         agentId: def.id,
         settingsPath: hookConfig.settingsPath,
+        settingsSyntax: hookConfig.settingsSyntax,
         hookJsonPath: ['hooks', eventToKey(event, hookConfig.eventKeyCase)],
         hookCommand: formatHookCommand(
           hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
@@ -610,17 +620,34 @@ export class HookStrategy implements DeployStrategy {
    */
   private async ensureSettingsFile(settingsPath: string): Promise<void> {
     const isHooksJson = settingsPath.endsWith('hooks.json');
-    const needsVersion = isHooksJson && settingsPath.includes('.cursor');
+    if (!isHooksJson) return;
 
+    const needsVersion = isHooksJson && settingsPath.includes('.cursor');
+    const existed = await fileExists(settingsPath);
     const existing = await readJsonFile<Record<string, unknown>>(settingsPath);
-    if (!existing) {
-      if (isHooksJson) {
-        const initial: Record<string, unknown> = { hooks: {} };
-        if (needsVersion) {
-          initial.version = 1;
-        }
-        await writeJsonFile(settingsPath, initial);
+    if (existed && !existing) {
+      const raw = await fs.readFile(settingsPath, 'utf8');
+      if (raw.trim() !== '') {
+        throw new Error(`refusing to overwrite invalid settings: ${settingsPath}`);
       }
+
+      const initial: Record<string, unknown> = { hooks: {} };
+      if (needsVersion) {
+        initial.version = 1;
+      }
+      await writeTextFileAtomic(
+        settingsPath,
+        `${JSON.stringify(initial, null, 2)}\n`,
+        { expected: { exists: true, content: raw } },
+      );
+      return;
+    }
+    if (!existing) {
+      const initial: Record<string, unknown> = { hooks: {} };
+      if (needsVersion) {
+        initial.version = 1;
+      }
+      await writeJsonFile(settingsPath, initial);
     } else if (needsVersion && existing.version === undefined) {
       existing.version = 1;
       await writeJsonFile(settingsPath, existing);

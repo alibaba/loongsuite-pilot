@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { ClientType } from '../types/index.js';
-import type { AnalyticsConfig, AgentDetectionEntry } from '../types/index.js';
+import type { AnalyticsConfig, AgentDetectionEntry, AgentStopReason } from '../types/index.js';
 import { AgentControlManager } from './agent-control-manager.js';
 import { AgentDiscoveryService } from './agent-discovery-service.js';
 import { InputManager } from './input-manager.js';
@@ -43,6 +43,7 @@ import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
+import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 
@@ -103,6 +104,7 @@ export class Orchestrator extends EventEmitter {
     'kiro-cli-session': 'kiro-cli',
     'opencode-log': 'opencode',
     'pi-coding-agent-log': 'pi-coding-agent',
+    'mimo-code-log': 'mimo-code',
     'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
   };
@@ -219,13 +221,17 @@ export class Orchestrator extends EventEmitter {
     this.agentDiscoveryService.on('agent:started', (id: string) => {
       logger.info('agent detected and started', { id });
     });
-    this.agentDiscoveryService.on('agent:stopped', (id: string) => {
-      logger.info('agent stopped', { id });
-      this.alarmManager.record(
-        'INPUT_STOP_ALARM', '3',
-        `input ${id} stopped unexpectedly`,
-        { input_name: id },
-      );
+    this.agentDiscoveryService.on('agent:stopped', (id: string, reason: AgentStopReason) => {
+      if (reason === 'unexpected') {
+        logger.warn('agent stopped unexpectedly', { id });
+        this.alarmManager.record(
+          'INPUT_STOP_ALARM', '3',
+          `input ${id} stopped unexpectedly (reason=unexpected)`,
+          { input_name: id },
+        );
+      } else {
+        logger.debug('agent stopped', { id, reason });
+      }
     });
     await this.agentDiscoveryService.start();
 
@@ -410,6 +416,7 @@ export class Orchestrator extends EventEmitter {
       targets.push({
         agentId: def.id,
         settingsPath: def.hook.settingsPath,
+        settingsSyntax: def.hook.settingsSyntax,
         expectedHooks: def.hook.events,
         markers: [scriptName],
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
@@ -420,7 +427,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   /**
-   * Self-heal targets for plugin-inject agents (e.g. opencode, qwen-code-cli).
+   * Self-heal targets for plugin-inject agents (currently OpenCode).
    *
    * Unlike hook agents, these write a plugin spec into the agent's own config
    * file (not a shared settings.json), so they use the intercept mechanism:
@@ -1077,6 +1084,7 @@ export class Orchestrator extends EventEmitter {
     const opencodeLogInput = new OpenCodeLogInput({
       stateStore: this.stateStore,
       logDir: opencodeLogDir,
+      pollIntervalMs: listenerCfg['opencode-log']?.pollInterval,
     });
     this.inputManager.registerInput(opencodeLogInput);
     entries.push(
@@ -1110,6 +1118,29 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['pi-coding-agent-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['pi-coding-agent-log']?.pollInterval,
+      }),
+    );
+
+    // --- MiMo Code Log (event_t plugin JSONL) ---
+    // Plugin-inject agent (same shape as opencode). Pre-create log dir so
+    // fs.watch in AgentDiscoveryService succeeds immediately after install.
+    const mimoCodeLogDir = path.join(this.dataDir, 'logs', 'mimo-code');
+    await ensureDir(mimoCodeLogDir);
+    const mimoCodeLogInput = new MimoCodeLogInput({
+      stateStore: this.stateStore,
+      logDir: mimoCodeLogDir,
+    });
+    this.inputManager.registerInput(mimoCodeLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(mimoCodeLogInput, {
+        watchPaths: [mimoCodeLogDir],
+        isAvailable: async () => directoryExists(mimoCodeLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['mimo-code-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'mimo-code-log',
+            listenerCfg['mimo-code-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['mimo-code-log']?.pollInterval,
       }),
     );
 
@@ -1148,6 +1179,7 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['wukong']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['wukong']?.pollInterval,
+        unavailableThreshold: 3,
       }),
     );
 

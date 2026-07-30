@@ -25,6 +25,35 @@ const VALID_FINISH_REASONS = new Set([
 ]);
 const VALID_PART_TYPES = new Set(['text', 'tool_call', 'tool_call_response', 'reasoning']);
 
+export function isRuntimeSkillLoadSpan(tool) {
+  return tool?.attributes?.['gen_ai.tool.type'] === 'extension' &&
+    Boolean(
+      tool.attributes?.['gen_ai.skill.id'] ||
+      tool.attributes?.['gen_ai.skill.name'],
+    );
+}
+
+export function unmatchedToolsForLlmOutput(tools, expectedToolCalls) {
+  return tools.filter((tool) => {
+    if (isRuntimeSkillLoadSpan(tool)) return false;
+    const toolCallId = tool.attributes?.['gen_ai.tool.call.id'];
+    const toolName = tool.attributes?.['gen_ai.tool.name'];
+    return !expectedToolCalls.some((toolCall) =>
+      (toolCallId && toolCall.id && toolCall.id === toolCallId) ||
+      (toolName && toolCall.name && toolCall.name === toolName));
+  });
+}
+
+export function hasModelToolSpanForOutput(tools, expectedToolCall) {
+  return tools.some((tool) => {
+    if (isRuntimeSkillLoadSpan(tool)) return false;
+    return (expectedToolCall.id &&
+        tool.attributes?.['gen_ai.tool.call.id'] === expectedToolCall.id) ||
+      (expectedToolCall.name &&
+        tool.attributes?.['gen_ai.tool.name'] === expectedToolCall.name);
+  });
+}
+
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 function parseCli() {
@@ -713,24 +742,18 @@ function validateSemantic(trace, rules) {
         }
       } catch { continue; }
 
-      for (const tool of tools) {
+      // Runtime/user-triggered Skill loads are truthful TOOL spans but are not
+      // emitted by the model, so they intentionally have no output tool_call.
+      for (const tool of unmatchedToolsForLlmOutput(tools, expectedToolCalls)) {
         const toolCallId = tool.attributes?.['gen_ai.tool.call.id'];
         const toolName = tool.attributes?.['gen_ai.tool.name'];
-        const matched = expectedToolCalls.some(tc =>
-          (toolCallId && tc.id && tc.id === toolCallId) || (toolName && tc.name && tc.name === toolName)
-        );
-        if (!matched) {
-          checks.push(error('semantic.tool_matches_llm_output',
-            `TOOL ${toolName || toolCallId} not found in LLM output tool_calls`, tool.spanId, tool.name));
-          allToolsMatch = false;
-        }
+        checks.push(error('semantic.tool_matches_llm_output',
+          `TOOL ${toolName || toolCallId} not found in LLM output tool_calls`, tool.spanId, tool.name));
+        allToolsMatch = false;
       }
 
       for (const tc of expectedToolCalls) {
-        const matched = tools.some(t =>
-          (tc.id && t.attributes?.['gen_ai.tool.call.id'] === tc.id) ||
-          (tc.name && t.attributes?.['gen_ai.tool.name'] === tc.name)
-        );
+        const matched = hasModelToolSpanForOutput(tools, tc);
         if (!matched) {
           if (KNOWN_SUBAGENT_TOOLS.has(tc.name)) {
             checks.push(warn('semantic.tool_matches_llm_output',
@@ -1082,4 +1105,6 @@ function main() {
   process.exit(report.summary.verdict === 'FAIL' ? 1 : 0);
 }
 
-main();
+const isCliEntry = process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isCliEntry) main();

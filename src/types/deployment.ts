@@ -7,6 +7,7 @@
 export type DeployMode = 'hook' | 'plugin-probe' | 'plugin-inject' | 'detection-only';
 export type MountType = 'wrapper' | 'rc-inject' | 'env-inject';
 export type HookFormat = 'flat' | 'nested';
+export type SettingsSyntax = 'json' | 'jsonc';
 export type PluginSourceType = 'oss' | 'tar';
 
 // ─── Agent Definition (loaded from agents.d/*.json) ───
@@ -33,6 +34,12 @@ export interface TrustTomlConfig {
 
 export interface AgentHookConfig {
   settingsPath: string;
+  /**
+   * Syntax accepted by the owning agent's settings file. Defaults to strict
+   * JSON. JSONC files are edited in place so comments and unrelated formatting
+   * survive hook installation.
+   */
+  settingsSyntax?: SettingsSyntax;
   events: string[];
   hookCommand: string;
   format: HookFormat;

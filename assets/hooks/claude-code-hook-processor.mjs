@@ -193,6 +193,52 @@ function isoToUnixNanos(isoStr) {
   return String(ms) + '000000';
 }
 
+// ─── runtime Skill load 辅助 ───
+
+/**
+ * 显式 /skill 没有模型生成的 tool_use id。使用 transcript 中稳定字段生成 call id,
+ * 使同一条 meta 注入在重放时仍映射为同一个 TOOL span。
+ */
+function deterministicSkillLoadId(sessionId, promptId, metaUuid, rootPath) {
+  const h = crypto
+    .createHash('sha256')
+    .update([
+      sessionId || '',
+      promptId || '',
+      metaUuid || '',
+      rootPath || '',
+    ].join('\0'))
+    .digest('hex')
+    .slice(0, 24);
+  return `toolu_skillload_${h}`;
+}
+
+function skillAttributes(skillLoad, fallbackName) {
+  const name = skillLoad?.name
+    || (typeof fallbackName === 'string' ? fallbackName.trim().replace(/^\/+/, '') : null);
+  const id = skillLoad?.id || name;
+  return {
+    ...(name ? { 'gen_ai.skill.name': name } : {}),
+    ...(id ? { 'gen_ai.skill.id': id } : {}),
+  };
+}
+
+function positiveSkillLoadTimes(skillLoad, fallbackTimestamp) {
+  const minDurationNanos = 1_000_000n; // converter uses millisecond start/end times
+  let call = BigInt(isoToUnixNanos(
+    skillLoad?.commandTimestamp || skillLoad?.metaTimestamp || fallbackTimestamp,
+  ));
+  let result = BigInt(isoToUnixNanos(
+    skillLoad?.metaTimestamp || fallbackTimestamp || skillLoad?.commandTimestamp,
+  ));
+
+  if (call === 0n && result > minDurationNanos) call = result - minDurationNanos;
+  if (call === 0n) call = BigInt(Date.now()) * 1_000_000n;
+  if (result <= call) result = call + minDurationNanos;
+
+  return { call: String(call), result: String(result) };
+}
+
 // ─── cmd handlers ───
 
 // TODO: subagent 事件累积到 state.events，当前 exportSession 未消费。
@@ -473,6 +519,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
   // Phase 1: 为每个 llm_call 创建 step + 生成 LLM 事件
   const toolIdToStep = new Map(); // tool_use_id → { stepId, stepSpanId }
   const llmCalls = turn.llmCalls || [];
+  let firstStepOwner = null;
 
   for (const ev of llmCalls) {
     stepRound++;
@@ -480,6 +527,9 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     const currentStepSpanId = generateSpanId();
     const llmSpanId = generateSpanId();
     const responseId = ev.message_id || `${currentStepId}:r`;
+    if (!firstStepOwner) {
+      firstStepOwner = { stepId: currentStepId, stepSpanId: currentStepSpanId };
+    }
 
     // 注册该 LLM 声明的所有 tool_use_id → 当前 step
     for (const toolId of (ev.declaredToolIds || [])) {
@@ -571,6 +621,14 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     prevInputMsgs = ev._input_is_delta ? [] : inputMsgs;
   }
 
+  const skillLoads = Array.isArray(turn.skillLoads) ? turn.skillLoads : [];
+  const skillLoadsByToolId = new Map(
+    skillLoads
+      .filter((load) => load.sourceToolUseId)
+      .map((load) => [load.sourceToolUseId, load]),
+  );
+  const consumedSkillLoads = new Set();
+
   // Phase 2: 为每个 tool 生成 tool.call + tool.result，归属到声明方 LLM 的 step
   for (const ev of llmCalls) {
     for (const toolId of (ev.declaredToolIds || [])) {
@@ -590,6 +648,11 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
       if (toolName === 'Agent' || toolName === 'agent') continue;
 
       const toolSpanId = generateSpanId();
+      const skillLoad = toolName === 'Skill' ? skillLoadsByToolId.get(toolId) : null;
+      const skillFields = toolName === 'Skill'
+        ? skillAttributes(skillLoad, toolBlock.input?.skill || toolBlock.input?.name)
+        : {};
+      if (skillLoad) consumedSkillLoads.add(skillLoad);
 
       // tool.call
       records.push({
@@ -603,6 +666,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
         'gen_ai.tool.name': toolName,
         'gen_ai.tool.call.id': toolId,
         'gen_ai.tool.call.arguments': toJsonValue(toolBlock.input || {}),
+        ...skillFields,
       });
 
       // tool.result (only if we have a result timestamp)
@@ -619,6 +683,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
           'gen_ai.tool.call.id': toolId,
           'gen_ai.tool.call.result': toJsonValue(timestamps.resultContent || ''),
           'tool.result.status': timestamps.isError ? 'error' : 'success',
+          ...skillFields,
         };
         if (timestamps.isError) {
           resultRecord['error.type'] = 'ToolError';
@@ -628,6 +693,62 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
         }
         records.push(resultRecord);
       }
+
+    }
+  }
+
+  // /skill 和其他 runtime meta 注入没有 LLM tool_use。将加载事实建模成
+  // extension TOOL span,但不篡改 LLM output.messages。
+  if (firstStepOwner) {
+    const synthesizedCallIds = new Set();
+    for (const skillLoad of skillLoads) {
+      if (consumedSkillLoads.has(skillLoad)) continue;
+      const callId = deterministicSkillLoadId(
+        sessionId,
+        skillLoad.promptId || turn.promptId,
+        skillLoad.metaUuid || skillLoad.metaTimestamp,
+        skillLoad.rootPath,
+      );
+      if (synthesizedCallIds.has(callId)) continue;
+      synthesizedCallIds.add(callId);
+
+      const toolSpanId = generateSpanId();
+      const skillFields = skillAttributes(skillLoad);
+      const times = positiveSkillLoadTimes(
+        skillLoad,
+        llmCalls[0]?.request_start_time || llmCalls[0]?.timestamp,
+      );
+      records.push({
+        time_unix_nano: times.call,
+        'event.id': crypto.randomUUID(),
+        'event.name': 'tool.call',
+        ...baseFields,
+        span_id: toolSpanId,
+        parent_span_id: firstStepOwner.stepSpanId,
+        'gen_ai.step.id': firstStepOwner.stepId,
+        'gen_ai.tool.name': 'load_skill',
+        'gen_ai.tool.type': 'extension',
+        'gen_ai.tool.call.id': callId,
+        'gen_ai.tool.call.arguments': toJsonValue({
+          skill: skillLoad.name || skillLoad.id || 'unknown',
+        }),
+        ...skillFields,
+      });
+      records.push({
+        time_unix_nano: times.result,
+        'event.id': crypto.randomUUID(),
+        'event.name': 'tool.result',
+        ...baseFields,
+        span_id: toolSpanId,
+        parent_span_id: firstStepOwner.stepSpanId,
+        'gen_ai.step.id': firstStepOwner.stepId,
+        'gen_ai.tool.name': 'load_skill',
+        'gen_ai.tool.type': 'extension',
+        'gen_ai.tool.call.id': callId,
+        'gen_ai.tool.call.result': toJsonValue({ success: true }),
+        'tool.result.status': 'success',
+        ...skillFields,
+      });
     }
   }
 

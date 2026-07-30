@@ -301,4 +301,45 @@ describe('OtlpTraceFlusher - conversion', () => {
       expect(opts.passthroughKeys?.some((k) => k.startsWith('gen_ai.'))).toBe(false);
     });
   });
+
+  it('drops orphan llm.request / tool.call before conversion (no matching response/result)', async () => {
+    // Reproduces the mimo-code build-agent interrupted-turn scenario: turn
+    // has llm.request + 2 tool.call but no llm.response / tool.result. The
+    // flusher should drop the orphan request/call events so the converter
+    // doesn't emit empty LLM/TOOL spans with duration=0.
+    const entries = [
+      { 'event.name': 'other', 'gen_ai.agent.type': 'mimo-code', 'gen_ai.turn.id': 't5', 'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'hi' }] }] },
+      { 'event.name': 'llm.request', 'gen_ai.agent.type': 'mimo-code', 'gen_ai.turn.id': 't5', 'gen_ai.step.id': 't5:s1' },
+      { 'event.name': 'tool.call', 'gen_ai.agent.type': 'mimo-code', 'gen_ai.turn.id': 't5', 'gen_ai.step.id': 't5:s1', 'gen_ai.tool.call.id': 'call_orphan_1' },
+      { 'event.name': 'tool.call', 'gen_ai.agent.type': 'mimo-code', 'gen_ai.turn.id': 't5', 'gen_ai.step.id': 't5:s1', 'gen_ai.tool.call.id': 'call_orphan_2' },
+      // No Signal A (no llm.response with finish_reason=stop) — flush via shutdown.
+    ] as unknown as AgentActivityEntry[];
+
+    for (const e of entries) await flusher.send(e);
+    await flusher.flush();
+
+    expect(convertEventLogToTrace).toHaveBeenCalled();
+    const callArgs = vi.mocked(convertEventLogToTrace).mock.calls[0];
+    const sanitized = callArgs[0] as AgentActivityEntry[];
+    // Orphan llm.request + 2 tool.call dropped; "other" event kept.
+    expect(sanitized).toHaveLength(1);
+    expect(sanitized[0]['event.name']).toBe('other');
+  });
+
+  it('keeps llm.request / tool.call when matching response / result exists', async () => {
+    const entries = [
+      { 'event.name': 'llm.request', 'gen_ai.agent.type': 'claude-code', 'gen_ai.turn.id': 't6', 'gen_ai.step.id': 't6:s1' },
+      { 'event.name': 'tool.call', 'gen_ai.agent.type': 'claude-code', 'gen_ai.turn.id': 't6', 'gen_ai.step.id': 't6:s1', 'gen_ai.tool.call.id': 'call_ok' },
+      { 'event.name': 'tool.result', 'gen_ai.agent.type': 'claude-code', 'gen_ai.turn.id': 't6', 'gen_ai.step.id': 't6:s1', 'gen_ai.tool.call.id': 'call_ok' },
+      { 'event.name': 'llm.response', 'gen_ai.agent.type': 'claude-code', 'gen_ai.turn.id': 't6', 'gen_ai.step.id': 't6:s1', 'gen_ai.response.finish_reasons': ['stop'] },
+    ] as unknown as AgentActivityEntry[];
+
+    for (const e of entries) await flusher.send(e);
+
+    expect(convertEventLogToTrace).toHaveBeenCalled();
+    const callArgs = vi.mocked(convertEventLogToTrace).mock.calls[0];
+    const sanitized = callArgs[0] as AgentActivityEntry[];
+    // All 4 records kept — pairs are complete.
+    expect(sanitized).toHaveLength(4);
+  });
 });
