@@ -23,20 +23,19 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 
-import { logHookError } from '../shared/error-logger.mjs';
-
 export const MAX_TRANSCRIPT_BYTES = 50 * 1024 * 1024; // 50 MB safety limit
 const MISSING_PROMPT_ID = '__missing_prompt_id__';
-const PARSER_AGENT_ID = 'claude-code';
 
-// Claude Code 显式 /skill 调用后,会以 isMeta user 记录注入 SKILL.md 内容,
-// 首行形如 "Base directory for this skill: <绝对路径>"。根 SKILL.md 的路径
-// 只在此注入里出现(Skill tool_use 本身不含路径),靠 sourceToolUseID 关联。
+// Claude Code 加载 skill 后,会以 isMeta user 记录注入 SKILL.md 内容,
+// 首行形如 "Base directory for this skill: <绝对路径>"。模型触发的 Skill tool
+// 通过 sourceToolUseID 关联;旧版本的模型触发正文可能没有 Base directory 头,
+// 但 sourceToolUseID 仍可精确确认它属于 Skill。用户直接输入 /skill 时没有该 ID。
 const SKILL_BASE_DIR_PREFIX = 'Base directory for this skill:';
+const COMMAND_NAME_PATTERN = /<command-name>\s*\/([^<\s]+)\s*<\/command-name>/i;
 
 /**
  * 从 isMeta 注入文本首行提取 skill 根目录,拼出根 SKILL.md 路径。
- * 只做原样拼接,不做归一化(归一化留给下游按 client+turnId 去重时统一处理)。
+ * 只做原样拼接,不访问文件系统。
  * @returns {string|null} `<baseDir>/SKILL.md` 或 null(非 skill 注入)
  */
 function extractSkillRootPath(text) {
@@ -45,7 +44,24 @@ function extractSkillRootPath(text) {
   const firstLine = nl >= 0 ? text.slice(0, nl) : text;
   const baseDir = firstLine.slice(SKILL_BASE_DIR_PREFIX.length).trim();
   if (!baseDir) return null;
-  return baseDir.replace(/\/+$/, '') + '/SKILL.md';
+  return baseDir.replace(/[\\/]+$/, '') + '/SKILL.md';
+}
+
+function normalizeSkillName(value) {
+  if (typeof value !== 'string') return null;
+  const name = value.trim().replace(/^\/+/, '');
+  return name || null;
+}
+
+function extractSlashCommandName(text) {
+  if (typeof text !== 'string') return null;
+  return normalizeSkillName(text.match(COMMAND_NAME_PATTERN)?.[1]);
+}
+
+function extractSkillNameFromRootPath(rootPath) {
+  if (typeof rootPath !== 'string') return null;
+  const parts = rootPath.replace(/[\\/]+SKILL\.md$/i, '').split(/[\\/]/).filter(Boolean);
+  return normalizeSkillName(parts.at(-1));
 }
 
 function isMetaRecord(record) {
@@ -164,8 +180,9 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
   const toolResultContents = new Map(); // tool_use_id → result content
   const toolResultErrors = new Map(); // tool_use_id → boolean (is_error)
   const subagentInfoByToolId = new Map(); // Agent tool_use_id → { agentId, agentType }
-  const skillRootByToolId = new Map(); // Skill tool_use_id → 根 SKILL.md 路径(来自 isMeta 注入)
-  const skillToolUseIdSet = new Set(); // #1: 本次 window 内 name==='Skill' 的 tool_use id(结构信号)
+  const skillToolsById = new Map(); // Skill tool_use_id → { name, promptId }
+  const slashCommandsByPromptId = new Map(); // promptId → { name, timestamp }
+  const skillLoads = []; // 从 skill isMeta 注入还原的加载事实
   let currentPromptId = null; // 当前 turn 的 promptId(从 user record 提取)
 
   for (const line of content.split('\n')) {
@@ -218,9 +235,11 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
           if (block.type === 'tool_use' && block.id && recordTs) {
             group.toolUseTimestamps.set(block.id, recordTs);
           }
-          // #1: 顺带收集 Skill tool_use id,供 isMeta 注入做「结构确认」(与前缀解耦)。
           if (block.type === 'tool_use' && block.name === 'Skill' && block.id) {
-            skillToolUseIdSet.add(block.id);
+            skillToolsById.set(block.id, {
+              name: normalizeSkillName(block.input?.skill || block.input?.name),
+              promptId: currentPromptId,
+            });
           }
         }
       }
@@ -238,24 +257,49 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
       if (promptId) currentPromptId = promptId;
 
       const userContent = msg.content;
+      const userText = extractTextContent(userContent);
+      let metaKind = null;
 
-      // 显式 /skill 注入: 捕获 sourceToolUseID → 根 SKILL.md 路径。
-      // 仅额外捕获此映射,不改变 isMeta 其余记录被丢弃的行为。
-      // #1: 路径提取仍「前缀优先」不变(跨 parse-window 边界时 Skill 块可能已在上一
-      // window 消费,此处仍能靠前缀拿到路径,绝不比现状更窄)。
-      if (isMeta && record.sourceToolUseID) {
-        const rootPath = extractSkillRootPath(extractTextContent(userContent));
-        if (rootPath) {
-          skillRootByToolId.set(record.sourceToolUseID, rootPath);
-        } else if (skillToolUseIdSet.has(record.sourceToolUseID)) {
-          // #2 漂移可观测: 仅当「结构确认为 skill 注入(sourceToolUseID 指向本 window
-          // 的 Skill tool_use)但路径提取失败」时打点——把前缀漂移导致的静默回归变成
-          // 可检测信号。结构 gate 确保不对「非 skill 的 isMeta+sourceToolUseID」误报。
-          logHookError({
-            agentId: PARSER_AGENT_ID,
-            stage: 'skill_root_parse',
-            errorType: 'skill_root_parse_miss',
-            errorMessage: `sourceToolUseID=${record.sourceToolUseID} resolves to a Skill tool_use but SKILL.md root path extraction failed (prefix mismatch)`,
+      if (!isMeta) {
+        const commandName = extractSlashCommandName(userText);
+        if (commandName) {
+          slashCommandsByPromptId.set(promptMapKey(currentPromptId), {
+            name: commandName,
+            timestamp: recordTs,
+          });
+        }
+      }
+
+      // Skill isMeta 是 Claude 实际注入给后续 LLM 的上下文。无论是否带
+      // sourceToolUseID,带标准 Base directory 头的记录都识别。旧格式可能没有
+      // 该头,此时仅在 sourceToolUseID 精确指向真实 Skill tool_use 时识别。
+      if (isMeta) {
+        const rootPath = extractSkillRootPath(userText);
+        const sourceToolUseId = record.sourceToolUseID || null;
+        const sourceTool = sourceToolUseId ? skillToolsById.get(sourceToolUseId) : null;
+        if (rootPath || sourceTool) {
+          const slashCommand = slashCommandsByPromptId.get(promptMapKey(currentPromptId));
+          const name = sourceTool?.name
+            || slashCommand?.name
+            || extractSkillNameFromRootPath(rootPath);
+          const trigger = sourceTool
+            ? 'model_tool'
+            : slashCommand
+              ? 'slash_command'
+              : 'runtime_meta';
+
+          metaKind = 'skill_context';
+          skillLoads.push({
+            promptId: currentPromptId,
+            trigger,
+            sourceToolUseId,
+            name,
+            id: name,
+            rootPath,
+            content: userContent,
+            metaUuid: record.uuid || null,
+            commandTimestamp: slashCommand?.timestamp || null,
+            metaTimestamp: recordTs,
           });
         }
       }
@@ -287,6 +331,8 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
         timestamp: recordTs,
         promptId: currentPromptId,
         isMeta,
+        metaKind,
+        uuid: record.uuid || null,
       });
     }
   }
@@ -303,9 +349,15 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
 
   // Phase 3: 构建 llm_call 事件(带时间戳 + tool 归属信息)
   const llmCalls = [];
-  const conversationHistory = [];
-  let prevCount = 0;
+  const conversationHistoryByPromptId = new Map();
   const lastToolResultTsByPromptId = new Map();
+  const historyForPrompt = (promptId) => {
+    const key = promptMapKey(promptId);
+    if (!conversationHistoryByPromptId.has(key)) {
+      conversationHistoryByPromptId.set(key, { messages: [], emittedCount: 0 });
+    }
+    return conversationHistoryByPromptId.get(key);
+  };
   const updateLastToolResultTs = (promptId, ts) => {
     if (!ts) return;
     const key = promptMapKey(promptId);
@@ -315,8 +367,9 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
 
   for (const rec of conversationRecords) {
     if (rec.type === 'user') {
-      if (!rec.isMeta) {
-        conversationHistory.push({ role: 'user', content: rec.content });
+      const history = historyForPrompt(rec.promptId);
+      if (!rec.isMeta || rec.metaKind === 'skill_context') {
+        history.messages.push({ role: 'user', content: rec.content });
       }
       if (!rec.isMeta && Array.isArray(rec.content)) {
         for (const part of rec.content) {
@@ -336,7 +389,8 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
       const cacheRead = usage.cache_read_input_tokens || 0;
       const cacheCreate = usage.cache_creation_input_tokens || 0;
 
-      const delta = conversationHistory.slice(prevCount);
+      const history = historyForPrompt(group.promptId);
+      const delta = history.messages.slice(history.emittedCount);
 
       const declaredToolIds = [];
       for (const block of group.mergedContent) {
@@ -383,11 +437,11 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
         promptId: group.promptId,
       });
 
-      conversationHistory.push({
+      history.messages.push({
         role: 'assistant',
         content: group.mergedContent,
       });
-      prevCount = conversationHistory.length;
+      history.emittedCount = history.messages.length;
 
       for (const toolId of declaredToolIds) {
         const ts = toolResultTimestamps.get(toolId);
@@ -397,7 +451,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
   }
 
   // Phase 4: 按 promptId 切分 turns
-  const turns = splitIntoTurns(conversationRecords, llmCalls, skillRootByToolId);
+  const turns = splitIntoTurns(conversationRecords, llmCalls, skillLoads);
 
   return { turns, nextOffset: fileSize };
 }
@@ -409,7 +463,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
  * 同一 turn 内所有 user record 共享同一 promptId。
  * promptId 变化 = 新 turn 开始。
  */
-function splitIntoTurns(conversationRecords, llmCalls, skillRootByToolId = new Map()) {
+function splitIntoTurns(conversationRecords, llmCalls, skillLoads = []) {
   if (llmCalls.length === 0) return [];
 
   // 收集所有出现的 promptId(按首次出现顺序)
@@ -443,10 +497,11 @@ function splitIntoTurns(conversationRecords, llmCalls, skillRootByToolId = new M
     // 无 promptId (所有 user record 都是系统注入的),fallback 为单 turn
     const firstTs = llmCalls[0]?.timestamp || null;
     return [{
+      promptId: null,
       prompt: '',
       promptTimestamp: firstTs,
       llmCalls,
-      skillRootByToolId,
+      skillLoads,
     }];
   }
 
@@ -470,27 +525,25 @@ function splitIntoTurns(conversationRecords, llmCalls, skillRootByToolId = new M
     }
 
     turns.push({
+      promptId: pid,
       prompt: info.promptText || '',
       promptTimestamp,
       llmCalls: turnLlmCalls,
-      skillRootByToolId,
+      skillLoads: skillLoads.filter((load) => load.promptId === pid),
     });
   }
 
   // 处理没有 promptId 的 llmCalls (edge case: assistant record 出现在任何 user record 之前)
   const orphanCalls = llmCalls.filter((c) => !c.promptId);
   if (orphanCalls.length > 0) {
-    if (turns.length > 0) {
-      // 归入最后一个 turn
-      turns[turns.length - 1].llmCalls.push(...orphanCalls);
-    } else {
-      turns.push({
-        prompt: '',
-        promptTimestamp: orphanCalls[0]?.timestamp || null,
-        llmCalls: orphanCalls,
-        skillRootByToolId,
-      });
-    }
+    // 无法归属的 assistant 使用独立 fallback turn,不能污染任何真实 promptId。
+    turns.push({
+      promptId: null,
+      prompt: '',
+      promptTimestamp: orphanCalls[0]?.timestamp || null,
+      llmCalls: orphanCalls,
+      skillLoads: skillLoads.filter((load) => !load.promptId),
+    });
   }
 
   return turns;

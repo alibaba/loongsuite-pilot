@@ -171,7 +171,7 @@ Before marking an integration ready:
 
 - Support `captureMessageContent: false` for prompts, completions, tool arguments, and tool results when the agent exposes those fields.
 - Keep secrets out of source-specific extension fields unless they are required and subject to masking.
-- Verify `mask.mode: all` masks API keys, access keys, private keys, and database URLs in emitted output. See [Data Masking](masking.md).
+- Verify `mask.mode: all` masks supported secrets and personal sensitive data in emitted output. See [Data Masking](masking.md).
 - Fail open in hook/plugin code so the agent is never blocked by telemetry collection.
 
 ## Test Checklist

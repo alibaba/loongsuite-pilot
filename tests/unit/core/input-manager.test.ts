@@ -300,9 +300,12 @@ describe('InputManager', () => {
       manager.registerInput(input as any);
 
       const apiKey = 'sk-1234567890abcdefghijklmnop';
+      const phone = '13800138000';
       const entry = buildTestEntry({
         agentType: ClientType.Cursor,
-        'gen_ai.output.messages': [{ role: 'assistant', content: apiKey }],
+        'gen_ai.output.messages': [
+          { role: 'assistant', content: `apiKey=${apiKey} phone=${phone}` },
+        ],
       });
 
       input.emit('entries', [entry]);
@@ -311,7 +314,9 @@ describe('InputManager', () => {
       for (const child of [jsonl, sls, http]) {
         expect(child.batchCalls).toHaveLength(1);
         expect(JSON.stringify(child.batchCalls[0][0])).toContain('[APIKEY_MASKED]');
+        expect(JSON.stringify(child.batchCalls[0][0])).toContain('[PHONE_MASKED]');
         expect(JSON.stringify(child.batchCalls[0][0])).not.toContain(apiKey);
+        expect(JSON.stringify(child.batchCalls[0][0])).not.toContain(phone);
       }
     });
   });
