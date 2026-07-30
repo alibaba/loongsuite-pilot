@@ -112,7 +112,6 @@ export class LocalWorkerActivationService {
     if (this.activeFingerprints.get(instance.id) === fingerprint && await this.isInstanceWorkerAlive(template, instance)) return;
 
     logger.info('reconciling local worker', { instanceId: instance.id, runtime: instance.runtime, trigger });
-    await this.stopInstance(instance);
 
     const def = this.buildDefinition(template, instance);
     const result = await this.strategy.deploy(def, {

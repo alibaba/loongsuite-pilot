@@ -28,7 +28,12 @@ describe('WorkerManifestSupervisor', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    await fs.rm(tmpDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 100,
+    });
   });
 
   async function writeManifest(command: string[], extra: Record<string, unknown> = {}): Promise<void> {
@@ -213,6 +218,53 @@ describe('WorkerManifestSupervisor', () => {
     });
   });
 
+  it.runIf(process.platform === 'win32')('does not require process identity for non-instance manifest workers', async () => {
+    const entry = path.join(bundleRoot, 'worker-entrypoint.mjs');
+    const pidPath = path.join(bundleRoot, '.legacy-worker', 'worker.pid');
+    await fs.writeFile(entry, 'setInterval(() => {}, 1000);', 'utf-8');
+    await writeManifest(['${pilot:node}', entry], {
+      paths: {
+        pid: '.legacy-worker/worker.pid',
+        status: '.legacy-worker/supervisor-status.json',
+        log: '.legacy-worker/worker.log',
+      },
+    });
+
+    const supervisor = new WorkerManifestSupervisor();
+    expect(await supervisor.startIfPresent('collection:test', bundleRoot, {}, {})).toBe(true);
+
+    const pid = Number.parseInt(await fs.readFile(pidPath, 'utf-8'), 10);
+    try {
+      expect(pid).toBeGreaterThan(0);
+      await expect(fs.stat(`${pidPath}.identity.json`)).rejects.toThrow();
+    } finally {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // The test process may already have exited.
+      }
+      await vi.waitFor(() => {
+        expect(() => process.kill(pid, 0)).toThrow();
+      });
+    }
+  });
+
+  it('checks worker health without querying Windows process identity', async () => {
+    const pidPath = path.join(stateDir, 'worker.pid');
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(pidPath, `${process.pid}\n`, 'utf-8');
+    await writeManifest(['unused']);
+
+    const supervisor = new WorkerManifestSupervisor({ platform: 'win32' });
+    const internals = supervisor as unknown as {
+      readWindowsProcessIdentity(pid: number): Promise<unknown>;
+    };
+    const identityQuery = vi.spyOn(internals, 'readWindowsProcessIdentity');
+
+    expect(await supervisor.isWorkerRunning(bundleRoot, options())).toBe(true);
+    expect(identityQuery).not.toHaveBeenCalled();
+  });
+
   it.runIf(process.platform === 'win32')('does not stop a reused Windows pid with a different creation time', async () => {
     const entry = path.join(bundleRoot, 'worker-entrypoint.mjs');
     await fs.writeFile(entry, 'setInterval(() => {}, 1000);', 'utf-8');
@@ -261,47 +313,4 @@ describe('WorkerManifestSupervisor', () => {
     }
   });
 
-  it('does not force-kill a Windows pid whose identity changes during graceful stop', async () => {
-    const supervisor = new WorkerManifestSupervisor({ platform: 'win32' });
-    const internals = supervisor as unknown as {
-      stopWindowsProcessTree(
-        agentId: string,
-        pid: number,
-        rootIdentity: { pid: number; creationTime: string; executablePath: string },
-      ): Promise<number[]>;
-      listWindowsDescendantProcesses(pid: number): Promise<Array<{
-        pid: number;
-        identity?: { pid: number; creationTime: string; executablePath: string };
-      }>>;
-      readWindowsProcessIdentity(pid: number): Promise<{
-        pid: number;
-        creationTime: string;
-        executablePath: string;
-      } | undefined>;
-      runTaskkill(pid: number, force: boolean): Promise<void>;
-      waitForPidsExit(pids: number[], timeoutMs: number): Promise<void>;
-      isAlive(pid: number): boolean;
-    };
-    const expectedIdentity = {
-      pid: 4242,
-      creationTime: '2026-07-29T01:00:00.0000000Z',
-      executablePath: 'C:\\Program Files\\nodejs\\node.exe',
-    };
-    vi.spyOn(internals, 'listWindowsDescendantProcesses').mockResolvedValue([]);
-    vi.spyOn(internals, 'waitForPidsExit').mockResolvedValue();
-    vi.spyOn(internals, 'isAlive').mockReturnValue(true);
-    vi.spyOn(internals, 'readWindowsProcessIdentity').mockResolvedValue({
-      ...expectedIdentity,
-      creationTime: '2026-07-29T01:01:00.0000000Z',
-    });
-    const taskkill = vi.spyOn(internals, 'runTaskkill').mockResolvedValue();
-
-    await expect(internals.stopWindowsProcessTree(
-      'local-worker:test',
-      expectedIdentity.pid,
-      expectedIdentity,
-    )).resolves.toEqual([]);
-    expect(taskkill).toHaveBeenCalledTimes(1);
-    expect(taskkill).toHaveBeenCalledWith(expectedIdentity.pid, false);
-  });
 });
