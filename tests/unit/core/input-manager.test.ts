@@ -20,6 +20,7 @@ class StubInput extends EventEmitter {
   private _running = false;
   startCalls = 0;
   stopCalls = 0;
+  backpressureProvider: (() => unknown) | null = null;
 
   constructor(id: string) {
     super();
@@ -36,6 +37,10 @@ class StubInput extends EventEmitter {
   async stop() {
     this._running = false;
     this.stopCalls++;
+  }
+
+  setBackpressureProvider(provider: (() => unknown) | null) {
+    this.backpressureProvider = provider;
   }
 }
 
@@ -61,6 +66,24 @@ describe('InputManager', () => {
       await new Promise(r => setTimeout(r, 50));
 
       expect(flusher.batchCalls.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('injects current flusher backpressure provider into registered inputs', () => {
+      flusher.backpressureState = {
+        active: true,
+        queuedEntries: 5000,
+        queuedBytes: 64 * 1024 * 1024,
+        reason: 'entries_high_watermark',
+      };
+      const input = new StubInput('test-input');
+
+      manager.registerInput(input as any);
+
+      expect(input.backpressureProvider?.()).toMatchObject({
+        active: true,
+        queuedEntries: 5000,
+        reason: 'entries_high_watermark',
+      });
     });
 
     it('serializes multiple entry batches from the same input', async () => {

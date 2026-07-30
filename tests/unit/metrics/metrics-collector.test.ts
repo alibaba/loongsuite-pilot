@@ -241,6 +241,64 @@ describe('MetricsCollector', () => {
       const result = collector.collectL2Flushers(buildSnapshot());
       expect(result).toEqual([]);
     });
+
+    it('includes SLS delivery health fields when present', () => {
+      const flushers = new Map<string, any>();
+      flushers.set('activity', {
+        inEntries: 10,
+        inBytes: 2000,
+        outEntries: 4,
+        outFailed: 1,
+        totalDelayMs: 250,
+        lastFlushTime: '2026-05-19 10:05:00',
+        startTime: '2026-05-19 09:00:00',
+        flusherName: 'sls',
+        mode: 'ak',
+        endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+        project: 'proj-a',
+        logstore: 'store-a',
+        queuedEntries: 6,
+        queuedBytes: 12345,
+        oldestQueuedAgeMs: 60_000,
+        backpressureActive: true,
+        backpressureReason: 'bytes_high_watermark',
+        backpressureSince: '2026-05-19 10:00:00',
+        consecutiveFailures: 3,
+        lastAttemptTime: '2026-05-19 10:04:00',
+        lastSuccessTime: '2026-05-19 09:58:00',
+        lastErrorTime: '2026-05-19 10:04:30',
+        lastErrorType: 'retryable_network',
+        lastStatusCode: 504,
+        nextRetryTime: '2026-05-19 10:05:30',
+        retryExpiredEntriesTotal: 1,
+        queueOverflowEntriesTotal: 2,
+        nonRetryableFailedEntriesTotal: 3,
+        shutdownPendingWrittenEntriesTotal: 4,
+        shutdownPendingRestoredEntriesTotal: 5,
+      });
+
+      const result = collector.collectL2Flushers(buildSnapshot({ flushers }));
+      expect(result[0]).toMatchObject({
+        queued_entries: '6',
+        queued_bytes: '12345',
+        oldest_queued_age_ms: '60000',
+        backpressure_active: 'true',
+        backpressure_reason: 'bytes_high_watermark',
+        backpressure_since: '2026-05-19 10:00:00',
+        consecutive_failures: '3',
+        last_attempt_time: '2026-05-19 10:04:00',
+        last_success_time: '2026-05-19 09:58:00',
+        last_error_time: '2026-05-19 10:04:30',
+        last_error_type: 'retryable_network',
+        last_status_code: '504',
+        next_retry_time: '2026-05-19 10:05:30',
+        retry_expired_entries_total: '1',
+        queue_overflow_entries_total: '2',
+        non_retryable_failed_entries_total: '3',
+        shutdown_pending_written_entries_total: '4',
+        shutdown_pending_restored_entries_total: '5',
+      });
+    });
   });
 
   describe('calcCpuPercent (via collectL1)', () => {

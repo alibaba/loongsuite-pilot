@@ -1,5 +1,13 @@
 import type { AgentActivityEntry } from '../types/index.js';
 
+export interface FlusherBackpressureState {
+  active: boolean;
+  queuedEntries?: number;
+  queuedBytes?: number;
+  retryAfterMs?: number;
+  reason?: string;
+}
+
 /**
  * Abstract base for all data output flushers.
  * Extend this to add new output destinations (SLS, JSONL, HTTP, etc.).
@@ -14,6 +22,10 @@ export abstract class BaseFlusher {
 
   async start(): Promise<void> {
     // Subclasses can override to perform async initialisation.
+  }
+
+  getBackpressureState(): FlusherBackpressureState {
+    return { active: false };
   }
 
   /** Raw-passthrough for session records or other non-activity data. */

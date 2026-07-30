@@ -163,6 +163,40 @@ describe('BaseInput', () => {
       expect(stopped).toBe(true);
       expect(onStop).toHaveBeenCalledOnce();
     });
+
+    it('skips collect while output backpressure is active', async () => {
+      const collectSpy = vi.fn(async () => [buildTestEntry()]);
+      input.collectFn = collectSpy;
+      input.setBackpressureProvider(() => ({
+        active: true,
+        queuedEntries: 5000,
+        queuedBytes: 64 * 1024 * 1024,
+        retryAfterMs: 5000,
+        reason: 'entries_high_watermark',
+      }));
+
+      await input.start();
+      expect(collectSpy).not.toHaveBeenCalled();
+      expect(stateStore.saveCount).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(collectSpy).not.toHaveBeenCalled();
+      expect(stateStore.saveCount).toBe(0);
+    });
+
+    it('resumes collect when output backpressure clears', async () => {
+      const collectSpy = vi.fn(async () => []);
+      let active = true;
+      input.collectFn = collectSpy;
+      input.setBackpressureProvider(() => ({ active }));
+
+      await input.start();
+      expect(collectSpy).not.toHaveBeenCalled();
+
+      active = false;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(collectSpy).toHaveBeenCalledOnce();
+    });
   });
 
   describe('entries event emission', () => {

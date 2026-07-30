@@ -1,4 +1,4 @@
-import { BaseFlusher } from './base-flusher.js';
+import { BaseFlusher, type FlusherBackpressureState } from './base-flusher.js';
 import type { AgentActivityEntry } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -57,6 +57,20 @@ export class MultiFlusher extends BaseFlusher {
 
   async shutdown(): Promise<void> {
     await Promise.allSettled(this.flushers.map(r => r.shutdown()));
+  }
+
+  override getBackpressureState(): FlusherBackpressureState {
+    const states = this.flushers.map(flusher => flusher.getBackpressureState());
+    const active = states.filter(state => state.active);
+    if (active.length === 0) return { active: false };
+
+    return {
+      active: true,
+      queuedEntries: Math.max(0, ...active.map(state => state.queuedEntries ?? 0)),
+      queuedBytes: Math.max(0, ...active.map(state => state.queuedBytes ?? 0)),
+      retryAfterMs: Math.max(0, ...active.map(state => state.retryAfterMs ?? 0)),
+      reason: active.map(state => state.reason).filter(Boolean).join(',') || 'child_backpressure',
+    };
   }
 
   override async sendRaw(topic: string, payload: Record<string, unknown>): Promise<void> {
