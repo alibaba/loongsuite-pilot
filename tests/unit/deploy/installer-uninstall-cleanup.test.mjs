@@ -73,6 +73,46 @@ describe('uninstall cleans the OpenCode plugin-inject spec', () => {
     expect(ps1).toContain('loongsuite-pilot-opencode');
     expect(ps1).toContain('plugins/opencode/plugin.mjs');
   });
+
+  // Regression for the 2026-07-29 bug where a rebase resolution dropped the
+  // opening `$configs = @(` line of Remove-OpenCodePlugin, leaving the
+  // foreach loop referencing an undefined $configs and breaking PowerShell
+  // parsing of the whole uninstall flow.
+  it('ps1 Remove-OpenCodePlugin body opens with $configs = @(', () => {
+    const fn = ps1.slice(
+      ps1.indexOf('function Remove-OpenCodePlugin'),
+      ps1.indexOf('function Remove-PiCodingAgentExtension'),
+    );
+    expect(fn).toMatch(/function Remove-OpenCodePlugin\s*\{\s*\n\s*\$configs\s*=\s*@\(/);
+  });
+});
+
+// Regression for the 2026-07-29 bug where two orphan `}` survived after
+// Remove-MimoCodePlugin's closing brace (rebase artifact), throwing the
+// whole .ps1 brace balance off and breaking PowerShell parsing. The brace
+// counts must match across the entire file — PowerShell is whitespace- and
+// brace-sensitive, so even one orphan brace aborts the uninstall flow.
+describe('installer-opensource.ps1 brace balance', () => {
+  it('open { count equals close } count across the whole file', () => {
+    const open = (ps1.match(/\{/g) || []).length;
+    const close = (ps1.match(/\}/g) || []).length;
+    expect(open).toBe(close);
+  });
+
+  it('Remove-MimoCodePlugin is followed by exactly one closing brace', () => {
+    // Find the function, then check that immediately after its closing
+    // `}` (which we locate by scanning to the next `# ===` banner) there
+    // is no orphan `}`.
+    const start = ps1.indexOf('function Remove-MimoCodePlugin');
+    expect(start).toBeGreaterThan(-1);
+    const end = ps1.indexOf('# ====', start);
+    expect(end).toBeGreaterThan(start);
+    const body = ps1.slice(start, end);
+    // The function body must be brace-balanced on its own.
+    const open = (body.match(/\{/g) || []).length;
+    const close = (body.match(/\}/g) || []).length;
+    expect(open).toBe(close);
+  });
 });
 
 describe('uninstall cleans the Pi Coding Agent extension injection', () => {
@@ -181,5 +221,41 @@ describe('Windows uninstall has dedicated Codex hook cleanup', () => {
     expect(uninstall).toContain('Remove-CodexHookConfig');
     expect(uninstall.indexOf('Remove-CodexHookConfig'))
       .toBeLessThan(uninstall.indexOf('Remove-CodexTrustState'));
+  });
+});
+
+describe('uninstall cleans the MiMo Code plugin-inject spec', () => {
+  it('sh defines remove_mimocode_plugin', () => {
+    expect(sh).toMatch(/remove_mimocode_plugin\(\)\s*\{/);
+  });
+
+  it('sh calls remove_mimocode_plugin inside cmd_uninstall', () => {
+    const uninstall = sh.slice(sh.indexOf('cmd_uninstall()'));
+    expect(uninstall).toContain('remove_mimocode_plugin');
+  });
+
+  it('ps1 defines Remove-MimoCodePlugin', () => {
+    expect(ps1).toMatch(/function Remove-MimoCodePlugin\s*\{/);
+  });
+
+  it('ps1 calls Remove-MimoCodePlugin inside Cmd-Uninstall', () => {
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(uninstall).toContain('Remove-MimoCodePlugin');
+  });
+
+  for (const cfg of ['mimocode.jsonc', 'mimocode.json']) {
+    it(`sh cleans ~/.config/mimocode/${cfg}`, () => {
+      expect(sh).toContain(`.config/mimocode/${cfg}`);
+    });
+    it(`ps1 cleans .config\\mimocode\\${cfg}`, () => {
+      expect(ps1).toContain(`.config\\mimocode\\${cfg}`);
+    });
+  }
+
+  it('matches our entries by pluginId or plugin file path', () => {
+    expect(sh).toContain('loongsuite-pilot-mimo-code');
+    expect(sh).toContain('plugins/mimo-code/plugin.mjs');
+    expect(ps1).toContain('loongsuite-pilot-mimo-code');
+    expect(ps1).toContain('plugins/mimo-code/plugin.mjs');
   });
 });

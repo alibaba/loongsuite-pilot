@@ -135,6 +135,12 @@ export interface CodexExtractedTranscriptTurn {
   startedAtMs: number;
   terminalAtMs: number;
   prompt?: string;
+  /**
+   * True once the transcript proves that the submitted prompt is complete.
+   * A user response_item alone may only be Codex control context while the
+   * UserPromptSubmit wakeup races the persisted user message.
+   */
+  promptReady: boolean;
   inputMessages: JsonValue[];
   cwd?: string;
   developerInstructions?: string;

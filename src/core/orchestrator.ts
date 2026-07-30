@@ -42,6 +42,7 @@ import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
+import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
@@ -102,6 +103,7 @@ export class Orchestrator extends EventEmitter {
     'kiro-cli-session': 'kiro-cli',
     'opencode-log': 'opencode',
     'pi-coding-agent-log': 'pi-coding-agent',
+    'mimo-code-log': 'mimo-code',
     'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
@@ -1096,6 +1098,29 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['pi-coding-agent-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['pi-coding-agent-log']?.pollInterval,
+      }),
+    );
+
+    // --- MiMo Code Log (event_t plugin JSONL) ---
+    // Plugin-inject agent (same shape as opencode). Pre-create log dir so
+    // fs.watch in AgentDiscoveryService succeeds immediately after install.
+    const mimoCodeLogDir = path.join(this.dataDir, 'logs', 'mimo-code');
+    await ensureDir(mimoCodeLogDir);
+    const mimoCodeLogInput = new MimoCodeLogInput({
+      stateStore: this.stateStore,
+      logDir: mimoCodeLogDir,
+    });
+    this.inputManager.registerInput(mimoCodeLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(mimoCodeLogInput, {
+        watchPaths: [mimoCodeLogDir],
+        isAvailable: async () => directoryExists(mimoCodeLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['mimo-code-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'mimo-code-log',
+            listenerCfg['mimo-code-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['mimo-code-log']?.pollInterval,
       }),
     );
 
