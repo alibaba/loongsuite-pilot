@@ -12,6 +12,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'cursor-hook': 'cursor',
   'qwen-code-cli': 'qwen-code',
   'opencode': 'opencode',
+  'mimo-code': 'mimo-code',
   'pi-coding-agent': 'pi',
   'wukong': 'wukong',
 };

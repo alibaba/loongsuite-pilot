@@ -92,7 +92,8 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     const mockConvert = vi.mocked(convertEventLogToTrace);
     mockConvert.mockClear();
 
-    // First turn
+    // First turn — makeEntry() defaults to event.name=llm.response, so the
+    // old buffer is considered "complete enough" for Signal B to flush it.
     await flusher.send(makeEntry({
       'trace_id': 'aaaa2f3577b34da6a3ce929d0e0e4736',
     }));
@@ -105,6 +106,43 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     expect(mockConvert).toHaveBeenCalledTimes(1);
     const records = mockConvert.mock.calls[0][0];
     expect(records).toHaveLength(1);
+  });
+
+  it('Signal B: does NOT flush old buffer that has no llm.response (still in progress)', async () => {
+    // Regression test for the multi-ENTRY/AGENT bug observed with mimo-code
+    // when a sibling turn (e.g. auto-triggered distill agent) starts while
+    // the build turn is still streaming records. The old buffer has only
+    // llm.request / tool.call events — flushing it on the sibling's arrival
+    // would split the turn's records across buffers and produce duplicate
+    // ENTRY/AGENT spans in the same trace.
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    // First turn — only llm.request, no llm.response yet (still in progress).
+    await flusher.send(makeEntry({
+      'event.name': 'llm.request',
+      'trace_id': 'aaaa2f3577b34da6a3ce929d0e0e4736',
+    }));
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    // Sibling turn arrives — old buffer must NOT be flushed (no llm.response).
+    await flusher.send(makeEntry({
+      'event.name': 'llm.request',
+      'trace_id': 'bbbb2f3577b34da6a3ce929d0e0e4736',
+    }));
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    // Old turn now completes (llm.response arrives) — Signal A should fire
+    // and flush the OLD buffer with both its records (request + response).
+    await flusher.send(makeEntry({
+      'event.name': 'llm.response',
+      'trace_id': 'aaaa2f3577b34da6a3ce929d0e0e4736',
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    const records = mockConvert.mock.calls[0][0];
+    expect(records).toHaveLength(2);
   });
 
   it('Signal C: shutdown drains all pending buffers', async () => {
