@@ -187,6 +187,7 @@ export class InputManager extends EventEmitter {
       isAvailable: () => Promise<boolean>;
       enabled: () => boolean;
       pollIntervalMs?: number;
+      unavailableThreshold?: number;
     },
   ): AgentDetectionEntry {
     return {
@@ -198,6 +199,7 @@ export class InputManager extends EventEmitter {
       start: () => this.startInput(input.id),
       stop: () => this.stopInput(input.id),
       pollIntervalMs: opts.pollIntervalMs ?? 300_000,
+      ...(opts.unavailableThreshold != null ? { unavailableThreshold: opts.unavailableThreshold } : {}),
     };
   }
 
