@@ -179,7 +179,7 @@ describe('HookStrategy', () => {
       expect(secondCall.hookJsonPath).toEqual(['hooks', 'PostToolUse']);
     });
 
-    it('quotes only Codex PowerShell hook paths and removes the previous Windows command', async () => {
+    it('quotes Codex PowerShell hook paths and removes the previous Windows command', async () => {
       const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
       Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
       try {
@@ -204,6 +204,38 @@ describe('HookStrategy', () => {
           hookCommand: 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass '
             + `-File "${script}" stop`,
           replaceHookCommands: [`${script} stop`],
+        });
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
+    it('quotes Grok PowerShell hook paths with spaces and keeps snake_case keys', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      try {
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const script = 'C:/Users/Test User/Pilot Data/hooks/grok-build-loongsuite-pilot-hook.ps1';
+        const def = makeDef({
+          id: 'grok-build',
+          hook: {
+            settingsPath: 'C:/Users/Test User/.grok/hooks/loongsuite-pilot.json',
+            events: ['StopFailure'],
+            hookCommand: script,
+            format: 'nested',
+            matcher: '',
+            eventSubcommand: 'kebab-case',
+            eventKeyCase: 'snake',
+          },
+        });
+
+        await strategy.needsDeploy(def);
+
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0]).toMatchObject({
+          hookJsonPath: ['hooks', 'stop_failure'],
+          hookCommand: 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass '
+            + `-File "${script}" stop-failure`,
+          replaceHookCommands: [`${script} stop-failure`],
         });
       } finally {
         if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
@@ -794,6 +826,31 @@ describe('HookStrategy', () => {
 
       const result = await strategy.undeploy(makeDef());
       expect(result).toBe(false);
+    });
+
+    it('also removes retired events using the configured event key case', async () => {
+      mockHookManager.uninstallHook.mockResolvedValue(true);
+      const def = makeDef({
+        id: 'grok-build',
+        hook: {
+          settingsPath: '/home/.grok/hooks/loongsuite-pilot.json',
+          events: ['Stop'],
+          retiredEvents: ['SubagentStart', 'SubagentStop'],
+          hookCommand: '/opt/pilot/hooks/grok-build-loongsuite-pilot-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          eventKeyCase: 'snake',
+        },
+      });
+
+      expect(await strategy.undeploy(def)).toBe(true);
+      expect(mockHookManager.uninstallHook.mock.calls.map(
+        ([definition]) => definition.hookJsonPath,
+      )).toEqual([
+        ['hooks', 'stop'],
+        ['hooks', 'subagent_start'],
+        ['hooks', 'subagent_stop'],
+      ]);
     });
   });
 

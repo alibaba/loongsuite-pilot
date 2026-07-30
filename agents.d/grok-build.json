@@ -11,6 +11,14 @@
     "events": ["Stop", "StopFailure", "UserPromptSubmit", "SessionEnd"],
     "retiredEvents": ["SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart", "SubagentStop", "SubagentEnd"],
     "hookCommand": "$PILOT_DATA/hooks/grok-build-loongsuite-pilot-hook.sh",
+    "requiredAssets": [
+      "grok-build-loongsuite-pilot-hook.sh",
+      "grok-build-hook-processor.mjs",
+      "grok-build",
+      "shared",
+      "agent-event-normalizer.mjs",
+      "claude-code/message-converter.mjs"
+    ],
     "format": "nested",
     "matcher": "",
     "eventSubcommand": "kebab-case",

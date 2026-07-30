@@ -8,6 +8,7 @@ import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { detectAgent } from '../deployment/detect-utils.js';
+import { toHookSettingsEventKey } from '../deployment/hook-strategy.js';
 import { GlobalAttributesProvider } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion, cleanStaleTmpFiles } from '../utils/fs-utils.js';
@@ -412,14 +413,17 @@ export class Orchestrator extends EventEmitter {
     for (const def of defs) {
       if (def.deployMode !== 'hook' || !def.hook) continue;
 
-      const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
+      const scriptName = path.basename(def.hook.hookCommand);
       targets.push({
         agentId: def.id,
         settingsPath: def.hook.settingsPath,
         settingsSyntax: def.hook.settingsSyntax,
-        expectedHooks: def.hook.events,
+        expectedHooks: def.hook.events.map(event =>
+          toHookSettingsEventKey(event, def.hook!.eventKeyCase)),
         markers: [scriptName],
-        repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
+        precondition: () => this.deploymentManager.isDetected(def),
+        healthCheck: () => this.deploymentManager.needsRedeploy(def).then(needs => !needs),
+        repairFn: () => this.deploymentManager.repairSingle(def).then(r => r.success),
       });
     }
 

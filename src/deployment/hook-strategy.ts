@@ -46,7 +46,7 @@ function eventToSubcommand(event: string): string {
  * 与 `eventToSubcommand` 独立:subcommand 是 argv 后缀,这里是 settings
  * JSON 字段名,两条维度互不影响。
  */
-function eventToKey(
+export function toHookSettingsEventKey(
   event: string,
   style: AgentHookConfig['eventKeyCase'],
 ): string {
@@ -72,7 +72,8 @@ function wrapLegacyPs1Command(cmd: string): string {
 }
 
 function wrapPs1Command(cmd: string, agentId: string): string {
-  if (process.platform !== 'win32' || agentId !== 'codex') {
+  const requiresQuotedPath = agentId === 'codex' || agentId === 'grok-build';
+  if (process.platform !== 'win32' || !requiresQuotedPath) {
     return wrapLegacyPs1Command(cmd);
   }
 
@@ -111,13 +112,18 @@ function formatHookCommand(
   return appendEventSubcommand(wrapPs1Command(hookCommand, agentId), event, style);
 }
 
-function legacyCodexHookCommands(
+function legacyPowerShellHookCommands(
   hookCommand: string,
   event: string,
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string[] {
-  if (process.platform !== 'win32' || agentId !== 'codex') return [];
+  if (
+    process.platform !== 'win32'
+    || (agentId !== 'codex' && agentId !== 'grok-build')
+  ) {
+    return [];
+  }
 
   const current = formatHookCommand(hookCommand, event, style, agentId);
   return [...new Set([
@@ -355,7 +361,10 @@ export class HookStrategy implements DeployStrategy {
   }
 
   async undeploy(def: AgentDefinition): Promise<boolean> {
-    const hookDefs = this.buildHookDefinitions(def);
+    const hookDefs = [
+      ...this.buildHookDefinitions(def),
+      ...this.buildRetiredHookDefinitions(def),
+    ];
     let allOk = true;
     for (const hookDef of hookDefs) {
       const ok = await this.hookManager.uninstallHook(hookDef);
@@ -392,7 +401,7 @@ export class HookStrategy implements DeployStrategy {
       }
 
       for (const event of def.hook!.events) {
-        const arr = hooks[eventToKey(event, def.hook!.eventKeyCase)];
+        const arr = hooks[toHookSettingsEventKey(event, def.hook!.eventKeyCase)];
         if (!Array.isArray(arr)) continue;
         const cmd = formatHookCommand(hookCommand, event, def.hook!.eventSubcommand, def.id);
         for (let i = 0; i < arr.length; i++) {
@@ -426,7 +435,7 @@ export class HookStrategy implements DeployStrategy {
       agentId: def.id,
       settingsPath: hookConfig.settingsPath,
       settingsSyntax: hookConfig.settingsSyntax,
-      hookJsonPath: ['hooks', eventToKey(event, hookConfig.eventKeyCase)],
+      hookJsonPath: ['hooks', toHookSettingsEventKey(event, hookConfig.eventKeyCase)],
       hookCommand: formatHookCommand(
         hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
       ),
@@ -434,7 +443,7 @@ export class HookStrategy implements DeployStrategy {
       useNestedFormat: hookConfig.format === 'nested',
       replaceHookCommands: [
         ...(hookConfig.replaceHookCommands ?? []),
-        ...legacyCodexHookCommands(
+        ...legacyPowerShellHookCommands(
           hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
         ),
       ],
@@ -451,7 +460,7 @@ export class HookStrategy implements DeployStrategy {
         agentId: def.id,
         settingsPath: hookConfig.settingsPath,
         settingsSyntax: hookConfig.settingsSyntax,
-        hookJsonPath: ['hooks', eventToKey(event, hookConfig.eventKeyCase)],
+        hookJsonPath: ['hooks', toHookSettingsEventKey(event, hookConfig.eventKeyCase)],
         hookCommand: formatHookCommand(
           hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
         ),
@@ -459,7 +468,7 @@ export class HookStrategy implements DeployStrategy {
         useNestedFormat: hookConfig.format === 'nested',
         replaceHookCommands: [
           ...(hookConfig.replaceHookCommands ?? []),
-          ...legacyCodexHookCommands(
+          ...legacyPowerShellHookCommands(
             hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
           ),
         ],

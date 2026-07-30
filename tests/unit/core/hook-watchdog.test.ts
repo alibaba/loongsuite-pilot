@@ -565,4 +565,67 @@ describe('HookWatchdog', () => {
       expect(repairFn).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('authoritative dynamic hook health', () => {
+    function makeDynamicTarget(overrides: Partial<PluginCheckTarget> = {}): PluginCheckTarget {
+      return {
+        agentId: 'grok-build',
+        settingsPath: path.join(tmpDir, '.grok', 'hooks', 'loongsuite-pilot.json'),
+        expectedHooks: ['stop', 'stop_failure', 'user_prompt_submit', 'session_end'],
+        markers: ['grok-build-loongsuite-pilot-hook.sh'],
+        precondition: vi.fn(async () => true),
+        healthCheck: vi.fn(async () => true),
+        repairFn: vi.fn(async () => true),
+        ...overrides,
+      };
+    }
+
+    it('skips an undetected agent without creating its settings directory', async () => {
+      const target = makeDynamicTarget({
+        precondition: vi.fn(async () => false),
+      });
+
+      const summary = await new HookWatchdog(makeConfig(), [target]).runCheck();
+
+      expect(summary).toEqual({ checked: 0, repaired: 0, skipped: 1 });
+      expect(target.healthCheck).not.toHaveBeenCalled();
+      expect(target.repairFn).not.toHaveBeenCalled();
+      await expect(fs.stat(path.dirname(target.settingsPath))).rejects.toThrow();
+    });
+
+    it('repairs a detected agent even when the settings directory is missing', async () => {
+      let healthy = false;
+      const healthCheck = vi.fn(async () => healthy);
+      const repairFn = vi.fn(async () => {
+        healthy = true;
+        return true;
+      });
+      const target = makeDynamicTarget({ healthCheck, repairFn });
+
+      const summary = await new HookWatchdog(makeConfig(), [target]).runCheck();
+
+      expect(summary).toEqual({ checked: 0, repaired: 1, skipped: 0 });
+      expect(repairFn).toHaveBeenCalledOnce();
+      expect(healthCheck).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not report repaired when the post-repair health check still fails', async () => {
+      const healthCheck = vi.fn(async () => false);
+      const repairFn = vi.fn(async () => true);
+      const target = makeDynamicTarget({ healthCheck, repairFn });
+
+      const summary = await new HookWatchdog(makeConfig(), [target]).runCheck();
+
+      expect(summary).toEqual({ checked: 1, repaired: 0, skipped: 0 });
+      expect(repairFn).toHaveBeenCalledOnce();
+      expect(healthCheck).toHaveBeenCalledTimes(2);
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        'hook-watchdog.repair-failed',
+        expect.objectContaining({
+          agent: 'grok-build',
+          error: 'post-repair health check failed',
+        }),
+      );
+    });
+  });
 });

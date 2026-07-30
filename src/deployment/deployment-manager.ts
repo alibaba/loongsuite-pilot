@@ -1,3 +1,4 @@
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type {
   AgentDefinition,
@@ -6,7 +7,11 @@ import type {
   DeployedAgentsState,
   DeployedAgentRecord,
 } from '../types/index.js';
-import { AgentDefLoader, type AgentDefLoaderOptions } from './agent-def-loader.js';
+import {
+  AgentDefLoader,
+  isSafeHookAssetPath,
+  type AgentDefLoaderOptions,
+} from './agent-def-loader.js';
 import { HookStrategy } from './hook-strategy.js';
 import { PluginProbeStrategy } from './plugin-probe-strategy.js';
 import { PluginInjectStrategy } from './plugin-inject-strategy.js';
@@ -100,6 +105,15 @@ export class DeploymentManager {
   }
 
   /**
+   * Watchdog repair entry point. Kept separate from deploySingle so callers
+   * can express repair intent while sharing the same detection, asset restore,
+   * registration, and state persistence path.
+   */
+  async repairSingle(def: AgentDefinition): Promise<DeployResult> {
+    return this.deploySingle(def);
+  }
+
+  /**
    * Remove a plugin-inject agent's spec from its config file (e.g. MiMo
    * Code's mimocode.jsonc, OpenCode's opencode.jsonc). Called by the
    * uninstaller path so the agent's config doesn't keep a dangling spec
@@ -123,6 +137,10 @@ export class DeploymentManager {
     return this.definitions;
   }
 
+  async isDetected(def: AgentDefinition): Promise<boolean> {
+    return this.getStrategy(def).detect(def);
+  }
+
   /**
    * Whether the agent's integration is currently missing and needs to be
    * (re)deployed. Used by the watchdog to detect specs overwritten by other
@@ -130,6 +148,7 @@ export class DeploymentManager {
    */
   async needsRedeploy(def: AgentDefinition): Promise<boolean> {
     await this.loadState();
+    if (await this.hookAssetsNeedRepair(def)) return true;
     const strategy = this.getStrategy(def);
     return strategy.needsDeploy(def, this.state[def.id]);
   }
@@ -152,6 +171,18 @@ export class DeploymentManager {
     if (!detected) {
       logger.debug('agent not detected, skipping', { agentId: def.id });
       return { success: true, agentId: def.id, deployMode: def.deployMode, skipped: true };
+    }
+
+    if (await this.hookAssetsNeedRepair(def)) {
+      const restored = await this.restoreRequiredHookAssets(def);
+      if (!restored) {
+        return {
+          success: false,
+          agentId: def.id,
+          deployMode: def.deployMode,
+          error: 'failed to restore required hook assets',
+        };
+      }
     }
 
     const record = this.state[def.id];
@@ -215,5 +246,120 @@ export class DeploymentManager {
 
   private async saveState(): Promise<void> {
     await writeJsonFile(this.stateFilePath, this.state);
+  }
+
+  private async hookAssetsNeedRepair(def: AgentDefinition): Promise<boolean> {
+    const assets = def.hook?.requiredAssets;
+    if (!assets?.length) return false;
+
+    for (const asset of assets) {
+      if (!isSafeHookAssetPath(asset)) return true;
+      const source = path.join(this.pilotDir, 'assets', 'hooks', asset);
+      const target = path.join(this.dataDir, 'hooks', asset);
+      if (!(await this.assetMatches(source, target))) return true;
+    }
+    return false;
+  }
+
+  private async assetMatches(source: string, target: string): Promise<boolean> {
+    try {
+      const [sourceStat, targetStat] = await Promise.all([
+        fs.stat(source),
+        fs.stat(target),
+      ]);
+      if (sourceStat.isDirectory() !== targetStat.isDirectory()) return false;
+      if (sourceStat.isFile() !== targetStat.isFile()) return false;
+
+      if (sourceStat.isDirectory()) {
+        const entries = await fs.readdir(source);
+        for (const entry of entries) {
+          if (!(await this.assetMatches(
+            path.join(source, entry),
+            path.join(target, entry),
+          ))) {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      if (!sourceStat.isFile() || sourceStat.size !== targetStat.size) return false;
+      if (
+        process.platform !== 'win32'
+        && source.endsWith('.sh')
+        && (targetStat.mode & 0o111) === 0
+      ) {
+        return false;
+      }
+      const [sourceBytes, targetBytes] = await Promise.all([
+        fs.readFile(source),
+        fs.readFile(target),
+      ]);
+      return sourceBytes.equals(targetBytes);
+    } catch {
+      return false;
+    }
+  }
+
+  private async restoreRequiredHookAssets(def: AgentDefinition): Promise<boolean> {
+    const assets = def.hook?.requiredAssets;
+    if (!assets?.length) return true;
+
+    try {
+      for (const asset of assets) {
+        if (!isSafeHookAssetPath(asset)) {
+          throw new Error(`unsafe hook asset path: ${String(asset)}`);
+        }
+        const source = path.join(this.pilotDir, 'assets', 'hooks', asset);
+        const target = path.join(this.dataDir, 'hooks', asset);
+        await this.copyAssetTreeAtomic(source, target);
+      }
+      logger.info('required hook assets restored', {
+        agentId: def.id,
+        assets: assets.length,
+      });
+      return true;
+    } catch (err) {
+      logger.error('required hook asset restore failed', {
+        agentId: def.id,
+        error: String(err),
+      });
+      return false;
+    }
+  }
+
+  private async copyAssetTreeAtomic(source: string, target: string): Promise<void> {
+    const stat = await fs.stat(source);
+    if (stat.isDirectory()) {
+      await fs.mkdir(target, { recursive: true });
+      for (const entry of await fs.readdir(source)) {
+        await this.copyAssetTreeAtomic(
+          path.join(source, entry),
+          path.join(target, entry),
+        );
+      }
+      return;
+    }
+    if (!stat.isFile()) {
+      throw new Error(`unsupported hook asset type: ${source}`);
+    }
+
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await fs.copyFile(source, temp);
+      const mode = source.endsWith('.sh') ? 0o755 : (stat.mode & 0o777);
+      await fs.chmod(temp, mode).catch(() => {});
+      try {
+        await fs.rename(temp, target);
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EACCES') throw err;
+        await fs.rm(target, { force: true });
+        await fs.rename(temp, target);
+      }
+    } finally {
+      await fs.rm(temp, { force: true }).catch(() => {});
+    }
   }
 }

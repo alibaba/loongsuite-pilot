@@ -148,4 +148,56 @@ describe('AgentDefLoader', () => {
     expect(defs).toHaveLength(0);
   });
 
+  it('loads safe relative required hook assets', async () => {
+    const def = {
+      id: 'asset-test',
+      displayName: 'Asset Test',
+      deployMode: 'hook',
+      detection: { paths: ['~/.asset-test'], commands: [] },
+      hook: {
+        settingsPath: '~/.asset-test/hooks.json',
+        events: ['Stop'],
+        hookCommand: '$PILOT_DATA/hooks/asset-test.sh',
+        requiredAssets: ['asset-test.sh', 'shared/runtime.mjs'],
+        format: 'flat',
+      },
+    };
+    await fs.writeFile(path.join(builtinDir, 'asset.json'), JSON.stringify(def));
+
+    const defs = await makeLoader().load();
+
+    expect(defs).toHaveLength(1);
+    expect(defs[0].hook?.requiredAssets).toEqual([
+      'asset-test.sh',
+      'shared/runtime.mjs',
+    ]);
+  });
+
+  for (const unsafe of [
+    '../outside',
+    '/absolute/path',
+    'C:\\outside\\hook.ps1',
+    'C:drive-relative.ps1',
+    'nested/../escape',
+  ]) {
+    it(`rejects unsafe required hook asset ${unsafe}`, async () => {
+      const def = {
+        id: 'unsafe-asset',
+        displayName: 'Unsafe Asset',
+        deployMode: 'hook',
+        detection: { paths: ['~/.unsafe'], commands: [] },
+        hook: {
+          settingsPath: '~/.unsafe/hooks.json',
+          events: ['Stop'],
+          hookCommand: '$PILOT_DATA/hooks/unsafe.sh',
+          requiredAssets: [unsafe],
+          format: 'flat',
+        },
+      };
+      await fs.writeFile(path.join(builtinDir, 'unsafe.json'), JSON.stringify(def));
+
+      expect(await makeLoader().load()).toHaveLength(0);
+    });
+  }
+
 });

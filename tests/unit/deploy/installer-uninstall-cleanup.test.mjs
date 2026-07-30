@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
 const sh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf-8');
@@ -16,6 +24,7 @@ const HOOK_CONFIG_FILES = [
   '.qoderworkcn/settings.json',
   '.claude/settings.json',
   '.qwen/settings.json',
+  '.grok/hooks/loongsuite-pilot.json',
 ];
 
 describe('uninstall cleans hook configs for all hook agents', () => {
@@ -27,6 +36,87 @@ describe('uninstall cleans hook configs for all hook agents', () => {
       expect(ps1).toContain(f.replace(/\//g, '\\'));
     });
   }
+
+  it('matches Pilot hook basenames when a custom data directory is used', () => {
+    expect(sh).toContain('-loongsuite-pilot-hook');
+    expect(ps1).toContain('-loongsuite-pilot-hook');
+    expect(sh).toContain('markers.some(marker => cmd.includes(marker))');
+    expect(ps1).toContain('markers.some(marker => cmd.includes(marker))');
+  });
+
+  it('checks direct and nested commands while preserving unrelated entries', () => {
+    for (const installer of [sh, ps1]) {
+      expect(installer).toContain('Array.isArray(e.hooks)');
+      expect(installer).toContain('const filtered = entries.filter');
+      expect(installer).toContain('return !hasMarker');
+    }
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'POSIX cleanup removes custom-dataDir Grok hooks and preserves third-party hooks',
+    () => {
+      const root = mkdtempSync(resolve(tmpdir(), 'pilot-uninstall-grok-'));
+      try {
+        const grokDir = resolve(root, '.grok', 'hooks');
+        mkdirSync(grokDir, { recursive: true });
+        const settingsPath = resolve(grokDir, 'loongsuite-pilot.json');
+        writeFileSync(settingsPath, JSON.stringify({
+          hooks: {
+            stop: [
+              {
+                matcher: '',
+                hooks: [{
+                  command: '/opt/custom-pilot/hooks/grok-build-loongsuite-pilot-hook.sh stop',
+                  type: 'command',
+                }],
+              },
+              {
+                matcher: '',
+                hooks: [{
+                  command: '/opt/third-party/grok-hook.sh stop',
+                  type: 'command',
+                }],
+              },
+            ],
+            subagent_start: [{
+              command: '/opt/custom-pilot/hooks/grok-build-loongsuite-pilot-hook.sh subagent-start',
+            }],
+          },
+        }), 'utf8');
+
+        const start = sh.indexOf('remove_hook_configs()');
+        const end = sh.indexOf('\n# ============================================================', start + 1);
+        expect(start).toBeGreaterThan(-1);
+        expect(end).toBeGreaterThan(start);
+        const scriptPath = resolve(root, 'cleanup.sh');
+        writeFileSync(scriptPath, [
+          '#!/usr/bin/env bash',
+          'set -euo pipefail',
+          'msg() { :; }',
+          sh.slice(start, end),
+          'remove_hook_configs',
+          '',
+        ].join('\n'), { mode: 0o755 });
+
+        execFileSync('bash', [scriptPath], {
+          env: { ...process.env, HOME: root },
+          stdio: 'pipe',
+        });
+
+        const cleaned = JSON.parse(readFileSync(settingsPath, 'utf8'));
+        expect(cleaned.hooks.stop).toEqual([{
+          matcher: '',
+          hooks: [{
+            command: '/opt/third-party/grok-hook.sh stop',
+            type: 'command',
+          }],
+        }]);
+        expect(cleaned.hooks.subagent_start).toBeUndefined();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('uninstall cleans the OpenCode plugin-inject spec', () => {

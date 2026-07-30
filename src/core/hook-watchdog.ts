@@ -24,6 +24,18 @@ export interface PluginCheckTarget {
   /** Substrings that identify our hook command in settings.json */
   markers: string[];
 
+  /**
+   * Optional availability gate for dynamically discovered hook agents.
+   * When it succeeds, a missing settings directory is considered repairable
+   * instead of "unavailable".
+   */
+  precondition?: () => Promise<boolean>;
+  /**
+   * Optional authoritative health check. Dynamic hook targets use their
+   * deployment strategy so event-key transforms, retired events, and runtime
+   * assets are checked by the same logic used for deployment.
+   */
+  healthCheck?: () => Promise<boolean>;
   /** External command binary path (for plugin-type repair). Required if repairFn is not set. */
   binPath?: string;
   /** Arguments for the external install command. */
@@ -172,8 +184,16 @@ export class HookWatchdog {
   }
 
   private async checkTarget(target: PluginCheckTarget): Promise<TargetResult> {
+    if (target.precondition && !(await target.precondition())) {
+      logger.debug('hook-watchdog.skipped', {
+        agent: target.agentId,
+        reason: 'precondition',
+      });
+      return { agentId: target.agentId, status: 'unavailable' };
+    }
+
     const settingsDirOk = await directoryExists(path.dirname(target.settingsPath));
-    if (!settingsDirOk) {
+    if (!settingsDirOk && !target.precondition) {
       logger.debug('hook-watchdog.skipped', {
         agent: target.agentId,
         reason: 'settings-dir-missing',
@@ -207,8 +227,15 @@ export class HookWatchdog {
     }
     this.lastInvalidConfigByTarget.delete(this.invalidConfigTargetKey(target));
     const settings = document.status === 'ok' ? document.data : null;
-    const missing = this.findMissingHooks(settings, target);
-    const found = target.expectedHooks.length - missing.length;
+    const authoritativeHealthy = target.healthCheck
+      ? await target.healthCheck()
+      : null;
+    const missing = target.healthCheck
+      ? (authoritativeHealthy ? [] : ['integration'])
+      : this.findMissingHooks(settings, target);
+    const found = target.healthCheck
+      ? (authoritativeHealthy ? target.expectedHooks.length : 0)
+      : target.expectedHooks.length - missing.length;
 
     if (missing.length === 0) {
       logger.info('hook-watchdog.check', {
@@ -251,6 +278,13 @@ export class HookWatchdog {
     this.lastRepairAt.set(target.agentId, Date.now());
 
     if (!ok) {
+      return { agentId: target.agentId, status: 'repair-failed', missing };
+    }
+    if (target.healthCheck && !(await target.healthCheck())) {
+      logger.error('hook-watchdog.repair-failed', {
+        agent: target.agentId,
+        error: 'post-repair health check failed',
+      });
       return { agentId: target.agentId, status: 'repair-failed', missing };
     }
     return { agentId: target.agentId, status: 'repaired', missing };

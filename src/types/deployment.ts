@@ -48,6 +48,16 @@ export interface AgentHookConfig {
   /** Events previously owned by this hook that must be removed during deploy. */
   retiredEvents?: string[];
   /**
+   * Hook runtime assets required by this integration, relative to
+   * `<pilotDir>/assets/hooks` and `<dataDir>/hooks`.
+   *
+   * The deployment watchdog compares these packaged assets with the installed
+   * copies and restores missing or modified files before repairing hook
+   * registration. Directories are checked recursively. Absolute paths and
+   * traversal segments are rejected by AgentDefLoader.
+   */
+  requiredAssets?: string[];
+  /**
    * 可选的 trust TOML 配置。仅 Codex 等需要 trust hash 校验的 agent 填写。
    * 设置后，HookStrategy 在 deploy 时会调用 codex-trust-writer 写入对应 TOML 文件。
    */

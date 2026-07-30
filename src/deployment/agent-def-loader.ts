@@ -8,6 +8,14 @@ const logger = createLogger('AgentDefLoader');
 
 const REQUIRED_FIELDS: (keyof AgentDefinition)[] = ['id', 'displayName', 'deployMode', 'detection'];
 
+export function isSafeHookAssetPath(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) return false;
+  const normalized = value.replace(/\\/g, '/');
+  if (normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized)) return false;
+  return normalized.split('/').every(segment =>
+    segment.length > 0 && segment !== '.' && segment !== '..');
+}
+
 export interface AgentDefLoaderOptions {
   builtinDir: string;
   localDir: string;
@@ -93,6 +101,20 @@ export class AgentDefLoader {
     if (mode !== 'hook' && mode !== 'plugin-probe' && mode !== 'plugin-inject' && mode !== 'detection-only') {
       logger.warn('invalid agent definition: unknown deployMode', { file: filePath, deployMode: mode });
       return false;
+    }
+    const hook = obj.hook;
+    if (hook && typeof hook === 'object' && !Array.isArray(hook)) {
+      const requiredAssets = (hook as Record<string, unknown>).requiredAssets;
+      if (
+        requiredAssets !== undefined
+        && (
+          !Array.isArray(requiredAssets)
+          || requiredAssets.some(asset => !isSafeHookAssetPath(asset))
+        )
+      ) {
+        logger.warn('invalid agent definition: unsafe hook requiredAssets', { file: filePath });
+        return false;
+      }
     }
     return true;
   }

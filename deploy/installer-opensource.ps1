@@ -984,7 +984,10 @@ function GC-OldVersions {
 # Remove hook configs
 # ============================================================
 function Remove-HookConfigs {
-    $HOOK_MARKER = ".loongsuite-pilot"
+    $HOOK_MARKERS = @(
+        "-loongsuite-pilot-hook."
+    )
+    $hookMarkersJson = $HOOK_MARKERS | ConvertTo-Json -Compress
     $configs = @(
         (Join-Path $env:USERPROFILE ".cursor\hooks.json"),
         (Join-Path $env:USERPROFILE ".qoder\settings.json"),
@@ -992,19 +995,26 @@ function Remove-HookConfigs {
         (Join-Path $env:USERPROFILE ".qoderwork\settings.json"),
         (Join-Path $env:USERPROFILE ".qoderworkcn\settings.json"),
         (Join-Path $env:USERPROFILE ".claude\settings.json"),
-        (Join-Path $env:USERPROFILE ".qwen\settings.json")
+        (Join-Path $env:USERPROFILE ".qwen\settings.json"),
+        (Join-Path $env:USERPROFILE ".grok\hooks\loongsuite-pilot.json")
     )
 
     foreach ($cfg in $configs) {
         if (-not (Test-Path $cfg)) { continue }
         $short = $cfg -replace [regex]::Escape($env:USERPROFILE), "~"
 
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️  跳过: $short (无 Node.js，请手动删除 Pilot hook 条目)" `
+                "    ⚠️  Skipped: $short (Node.js unavailable, manually remove Pilot hook entries)"
+            continue
+        }
+
         try {
             $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
             & $script:NODE_BIN -e @'
 const fs = require('fs');
 const cfg = process.argv[1];
-const marker = process.argv[2];
+const markers = JSON.parse(process.argv[2]);
 try {
   const data = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
   const hooks = data.hooks;
@@ -1015,7 +1025,8 @@ try {
     const filtered = entries.filter(e => {
       const cmd = e.command || '';
       const nested = Array.isArray(e.hooks) ? e.hooks : [];
-      const hasMarker = cmd.includes(marker) || nested.some(h => (h.command || '').includes(marker));
+      const hasMarker = markers.some(marker => cmd.includes(marker))
+        || nested.some(h => markers.some(marker => (h.command || '').includes(marker)));
       if (hasMarker) changed = true;
       return !hasMarker;
     });
@@ -1026,7 +1037,7 @@ try {
     fs.writeFileSync(cfg, JSON.stringify(data, null, 2) + '\n', 'utf-8');
   }
 } catch(e) { process.stderr.write(e.message); process.exit(1); }
-'@ $cfg $HOOK_MARKER 2>$null
+'@ $cfg $hookMarkersJson 2>$null
             $ErrorActionPreference = $prevEAP
             Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short"
         } catch {

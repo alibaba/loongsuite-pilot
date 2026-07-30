@@ -1702,7 +1702,9 @@ gc_old_versions() {
 # Remove hook entries injected into tool config files
 # ============================================================
 remove_hook_configs() {
-    local HOOK_MARKER=".loongsuite-pilot"
+    local HOOK_MARKERS=(
+        "-loongsuite-pilot-hook."
+    )
     local configs=(
         "$HOME/.cursor/hooks.json"
         "$HOME/.qoder/settings.json"
@@ -1712,6 +1714,7 @@ remove_hook_configs() {
         "$HOME/.claude/settings.json"
         "$HOME/.codex/hooks.json"
         "$HOME/.qwen/settings.json"
+        "$HOME/.grok/hooks/loongsuite-pilot.json"
     )
 
     local _has_node=0
@@ -1731,7 +1734,7 @@ remove_hook_configs() {
             node -e "
 const fs = require('fs');
 const cfg = process.argv[1];
-const marker = process.argv[2];
+const markers = process.argv.slice(2);
 try {
   const data = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
   const hooks = data.hooks;
@@ -1742,7 +1745,8 @@ try {
     const filtered = entries.filter(e => {
       const cmd = e.command || '';
       const nested = Array.isArray(e.hooks) ? e.hooks : [];
-      const hasMarker = cmd.includes(marker) || nested.some(h => (h.command || '').includes(marker));
+      const hasMarker = markers.some(marker => cmd.includes(marker))
+        || nested.some(h => markers.some(marker => (h.command || '').includes(marker)));
       if (hasMarker) changed = true;
       return !hasMarker;
     });
@@ -1756,12 +1760,12 @@ try {
     process.stdout.write('skip');
   }
 } catch(e) { process.stderr.write(e.message); process.exit(1); }
-" "$cfg" "$HOOK_MARKER" && ok=1
+" "$cfg" "${HOOK_MARKERS[@]}" && ok=1
         else
             # Node unavailable: skip auto-cleanup to avoid over-deletion
-            if grep -q "$HOOK_MARKER" "$cfg" 2>/dev/null; then
-                msg "    ⚠️  跳过: $short (无 Node.js，请手动删除含 $HOOK_MARKER 的 hook 条目)" \
-                    "    ⚠️  Skipped: $short (no Node.js, manually remove hook entries containing $HOOK_MARKER)"
+            if grep -Eq -- '-loongsuite-pilot-hook\.' "$cfg" 2>/dev/null; then
+                msg "    ⚠️  跳过: $short (无 Node.js，请手动删除 Pilot hook 条目)" \
+                    "    ⚠️  Skipped: $short (no Node.js, manually remove Pilot hook entries)"
             else
                 ok=1
             fi

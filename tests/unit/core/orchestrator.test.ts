@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { AnalyticsConfig } from '../../../src/types/index.js';
+import type { AgentDefinition, AnalyticsConfig } from '../../../src/types/index.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -209,6 +209,56 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
 describe('Orchestrator', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  describe('dynamic hook watchdog targets', () => {
+    it('uses Grok snake_case keys and authoritative deployment checks', async () => {
+      const def: AgentDefinition = {
+        id: 'grok-build',
+        displayName: 'Grok Build',
+        deployMode: 'hook',
+        detection: { paths: ['/home/test/.grok'], commands: [] },
+        hook: {
+          settingsPath: '/home/test/.grok/hooks/loongsuite-pilot.json',
+          events: ['Stop', 'StopFailure', 'UserPromptSubmit', 'SessionEnd'],
+          retiredEvents: ['SubagentStart'],
+          hookCommand: '/tmp/test-data/hooks/grok-build-loongsuite-pilot-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          eventKeyCase: 'snake',
+        },
+      };
+      const isDetected = vi.fn(async () => true);
+      const needsRedeploy = vi.fn(async () => false);
+      const repairSingle = vi.fn(async () => ({
+        success: true,
+        agentId: 'grok-build',
+        deployMode: 'hook' as const,
+      }));
+      const orch = new Orchestrator(makeConfig());
+      (orch as any).deploymentManager = {
+        getDefinitions: () => [def],
+        isDetected,
+        needsRedeploy,
+        repairSingle,
+      };
+
+      const [target] = (orch as any).buildHookWatchdogTargets();
+
+      expect(target.expectedHooks).toEqual([
+        'stop',
+        'stop_failure',
+        'user_prompt_submit',
+        'session_end',
+      ]);
+      expect(target.markers).toEqual(['grok-build-loongsuite-pilot-hook.sh']);
+      await expect(target.precondition()).resolves.toBe(true);
+      await expect(target.healthCheck()).resolves.toBe(true);
+      await expect(target.repairFn()).resolves.toBe(true);
+      expect(isDetected).toHaveBeenCalledWith(def);
+      expect(needsRedeploy).toHaveBeenCalledWith(def);
+      expect(repairSingle).toHaveBeenCalledWith(def);
+    });
   });
 
   describe('startup sequence (T038)', () => {

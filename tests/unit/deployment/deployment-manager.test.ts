@@ -247,6 +247,132 @@ describe('DeploymentManager', () => {
     });
   });
 
+  describe('required hook asset repair', () => {
+    function makeGrokDef(): AgentDefinition {
+      return {
+        id: 'grok-build',
+        displayName: 'Grok Build',
+        deployMode: 'hook',
+        detection: { paths: [path.join(tmpDir, '.grok')], commands: [] },
+        hook: {
+          settingsPath: path.join(tmpDir, '.grok', 'hooks', 'loongsuite-pilot.json'),
+          events: ['Stop'],
+          retiredEvents: ['SubagentStart'],
+          hookCommand: path.join(dataDir, 'hooks', 'grok-build-loongsuite-pilot-hook.sh'),
+          requiredAssets: [
+            'grok-build-loongsuite-pilot-hook.sh',
+            'grok-build',
+          ],
+          format: 'nested',
+          matcher: '',
+          eventSubcommand: 'kebab-case',
+          eventKeyCase: 'snake',
+        },
+      };
+    }
+
+    async function writePackagedAssets(): Promise<void> {
+      const sourceRoot = path.join(pilotDir, 'assets', 'hooks');
+      await fs.mkdir(path.join(sourceRoot, 'grok-build'), { recursive: true });
+      await fs.writeFile(
+        path.join(sourceRoot, 'grok-build-loongsuite-pilot-hook.sh'),
+        '#!/usr/bin/env bash\n',
+        { mode: 0o755 },
+      );
+      await fs.writeFile(
+        path.join(sourceRoot, 'grok-build', 'processor.mjs'),
+        'export const version = 1;\n',
+      );
+    }
+
+    async function writeHealthySettings(def: AgentDefinition): Promise<void> {
+      await fs.mkdir(path.dirname(def.hook!.settingsPath), { recursive: true });
+      await fs.writeFile(def.hook!.settingsPath, JSON.stringify({
+        hooks: {
+          stop: [{
+            matcher: '',
+            hooks: [{
+              command: `${def.hook!.hookCommand} stop`,
+              type: 'command',
+            }],
+          }],
+        },
+      }));
+    }
+
+    it('detects modified required assets even when hook registration is healthy', async () => {
+      const def = makeGrokDef();
+      await writePackagedAssets();
+      await writeHealthySettings(def);
+      await fs.mkdir(path.join(dataDir, 'hooks', 'grok-build'), { recursive: true });
+      await fs.copyFile(
+        path.join(pilotDir, 'assets', 'hooks', 'grok-build-loongsuite-pilot-hook.sh'),
+        path.join(dataDir, 'hooks', 'grok-build-loongsuite-pilot-hook.sh'),
+      );
+      await fs.copyFile(
+        path.join(pilotDir, 'assets', 'hooks', 'grok-build', 'processor.mjs'),
+        path.join(dataDir, 'hooks', 'grok-build', 'processor.mjs'),
+      );
+      const mgr = makeManager();
+
+      expect(await mgr.needsRedeploy(def)).toBe(false);
+      await fs.writeFile(
+        path.join(dataDir, 'hooks', 'grok-build', 'processor.mjs'),
+        'tampered\n',
+      );
+      expect(await mgr.needsRedeploy(def)).toBe(true);
+    });
+
+    it('restores assets and missing settings through repairSingle', async () => {
+      const def = makeGrokDef();
+      await writePackagedAssets();
+      await fs.mkdir(path.join(tmpDir, '.grok'), { recursive: true });
+      vi.mocked(detectAgent).mockResolvedValue(true);
+      const mgr = makeManager();
+
+      const result = await mgr.repairSingle(def);
+
+      expect(result.success).toBe(true);
+      expect(await fs.readFile(
+        path.join(dataDir, 'hooks', 'grok-build', 'processor.mjs'),
+        'utf-8',
+      )).toBe('export const version = 1;\n');
+      expect((await fs.stat(
+        path.join(dataDir, 'hooks', 'grok-build-loongsuite-pilot-hook.sh'),
+      )).mode & 0o111).not.toBe(0);
+      expect(JSON.parse(await fs.readFile(def.hook!.settingsPath, 'utf-8')))
+        .toMatchObject({
+          hooks: {
+            stop: [{
+              hooks: [{
+                command: `${def.hook!.hookCommand} stop`,
+              }],
+            }],
+          },
+        });
+      expect(await mgr.needsRedeploy(def)).toBe(false);
+    });
+
+    it('fails repair when a declared packaged asset is missing', async () => {
+      const def = makeGrokDef();
+      await fs.mkdir(path.join(tmpDir, '.grok'), { recursive: true });
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const result = await makeManager().repairSingle(def);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('failed to restore required hook assets');
+    });
+
+    it('exposes the deployment strategy detection result to watchdog targets', async () => {
+      const def = makeGrokDef();
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      expect(await makeManager().isDetected(def)).toBe(true);
+      expect(detectAgent).toHaveBeenCalledWith(def.detection);
+    });
+  });
+
   describe('getDefinitions', () => {
     it('returns loaded definitions after deployAll', async () => {
       const def: AgentDefinition = {
