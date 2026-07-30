@@ -152,7 +152,7 @@ When enabled, the upstream `traceparent` reaches Pilot via one of two schemes an
 | Backend    | Use Case                                                                |
 | ---------- | ----------------------------------------------------------------------- |
 | JSONL      | Local backup and easy inspection. Enabled by default.                   |
-| SLS        | Alibaba Cloud Log Service reporting. Supports WebTracking and AK modes. |
+| SLS        | Alibaba Cloud Log Service reporting. Supports WebTracking, AK, and API Key modes. |
 | HTTP       | POST batches to a custom endpoint.                                      |
 | OTLP Trace | Export GenAI activity as OpenTelemetry traces.                          |
 

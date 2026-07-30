@@ -38,6 +38,7 @@ export interface SlsEndpointEntry {
   mode?: SlsMode;
   accessKeyId?: string;
   accessKeySecret?: string;
+  apiKey?: string;
 }
 
 export interface SlsSingleConfig {
@@ -45,6 +46,7 @@ export interface SlsSingleConfig {
   mode?: SlsMode;
   accessKeyId?: string;
   accessKeySecret?: string;
+  apiKey?: string;
   endpoint?: string;
   project?: string;
   logstore?: string;
@@ -680,8 +682,20 @@ function resolveCaptureMessageContent(agents: AgentsConfig): boolean {
   return values.every(a => a.captureMessageContent !== false);
 }
 
+function inferSlsMode(args: {
+  mode?: SlsMode;
+  accessKeyId?: string;
+  accessKeySecret?: string;
+  apiKey?: string;
+}): SlsMode {
+  if (args.mode) return args.mode;
+  if (args.accessKeyId && args.accessKeySecret) return 'ak';
+  if (args.apiKey) return 'apiKey';
+  return 'webtracking';
+}
+
 function parseSlsEndpointEntry(ep: SlsEndpointEntry, index: number): SlsEndpoint {
-  const mode: SlsMode = ep.mode ?? (ep.accessKeyId && ep.accessKeySecret ? 'ak' : 'webtracking');
+  const mode = inferSlsMode(ep);
   const rawEndpoint = ep.endpoint ?? '';
   const endpoint = rawEndpoint
     ? (/^https?:\/\//.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`)
@@ -695,10 +709,14 @@ function parseSlsEndpointEntry(ep: SlsEndpointEntry, index: number): SlsEndpoint
     mode,
     redact: false,
   };
-  if (mode === 'ak') {
+  if (mode === 'ak' || ep.accessKeyId || ep.accessKeySecret) {
     result.accessKeyId = ep.accessKeyId ?? '';
     result.accessKeySecret = ep.accessKeySecret ?? '';
   }
+  if (mode === 'apiKey' || ep.apiKey) {
+    result.apiKey = ep.apiKey ?? '';
+  }
+  warnIfAmbiguousSlsCredentials(result);
   return result;
 }
 
@@ -719,6 +737,7 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
     const userMode = readUserSlsMode(single);
     const userAk = env('LOONGSUITE_SLS_ACCESS_KEY_ID') ?? single.accessKeyId;
     const userSk = env('LOONGSUITE_SLS_ACCESS_KEY_SECRET') ?? single.accessKeySecret;
+    const userApiKey = env('LOONGSUITE_SLS_API_KEY') ?? single.apiKey;
     const userRawEndpoint = env('LOONGSUITE_SLS_ENDPOINT') ?? single.endpoint;
     const userProject = env('LOONGSUITE_SLS_PROJECT') ?? single.project;
     const userLogstore = env('LOONGSUITE_SLS_LOGSTORE') ?? single.logstore;
@@ -733,6 +752,7 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
         logstore: userLogstore!,
         accessKeyId: userAk,
         accessKeySecret: userSk,
+        apiKey: userApiKey,
       });
       endpoints = [userEndpoint];
     } else {
@@ -763,12 +783,15 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
   const topLevelEndpoint = primary?.endpoint ?? '';
   const topLevelAk = primary?.accessKeyId ?? '';
   const topLevelSk = primary?.accessKeySecret ?? '';
+  const topLevelApiKey = primary?.apiKey ?? '';
 
   const enabled = single?.enabled !== undefined
     ? single.enabled
     : endpoints.length > 0 && endpoints.every(ep => {
         if (!ep.endpoint || !ep.logstore) return false;
+        if (hasAmbiguousSlsCredentials(ep)) return false;
         if (ep.mode === 'ak') return !!(ep.project && ep.accessKeyId && ep.accessKeySecret);
+        if (ep.mode === 'apiKey') return !!(ep.project && ep.apiKey);
         return true;
       });
 
@@ -777,6 +800,7 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
     mode: topLevelMode,
     accessKeyId: topLevelAk,
     accessKeySecret: topLevelSk,
+    apiKey: topLevelApiKey,
     endpoint: topLevelEndpoint,
     endpoints,
     batchMaxSize: single?.batchMaxSize ?? 20,
@@ -787,7 +811,7 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
 
 function readUserSlsMode(single: SlsSingleConfig | null): SlsMode | undefined {
   const raw = env('LOONGSUITE_SLS_MODE') ?? single?.mode;
-  if (raw === 'ak' || raw === 'webtracking') return raw;
+  if (raw === 'ak' || raw === 'webtracking' || raw === 'apiKey') return raw;
   return undefined;
 }
 
@@ -798,8 +822,9 @@ function buildUserSlsEndpoint(args: {
   logstore: string;
   accessKeyId: string | undefined;
   accessKeySecret: string | undefined;
+  apiKey: string | undefined;
 }): SlsEndpoint {
-  const mode: SlsMode = args.mode ?? (args.accessKeyId && args.accessKeySecret ? 'ak' : 'webtracking');
+  const mode = inferSlsMode(args);
 
   const rawEndpoint = args.rawEndpoint ?? '';
   const endpoint = rawEndpoint
@@ -815,11 +840,29 @@ function buildUserSlsEndpoint(args: {
     mode,
     redact: false,
   };
-  if (mode === 'ak') {
+  if (mode === 'ak' || args.accessKeyId || args.accessKeySecret) {
     result.accessKeyId = args.accessKeyId ?? '';
     result.accessKeySecret = args.accessKeySecret ?? '';
   }
+  if (mode === 'apiKey' || args.apiKey) {
+    result.apiKey = args.apiKey ?? '';
+  }
+  warnIfAmbiguousSlsCredentials(result);
   return result;
+}
+
+function hasAmbiguousSlsCredentials(endpoint: SlsEndpoint): boolean {
+  return !!(endpoint.apiKey && (endpoint.accessKeyId || endpoint.accessKeySecret));
+}
+
+function warnIfAmbiguousSlsCredentials(endpoint: SlsEndpoint): void {
+  if (!hasAmbiguousSlsCredentials(endpoint)) return;
+  logger.warn('SLS endpoint has both API Key and AK/SK credentials; endpoint disabled until credentials are unambiguous', {
+    endpoint: endpoint.name,
+    mode: endpoint.mode,
+    project: endpoint.project,
+    logstore: endpoint.logstore,
+  });
 }
 
 /**
