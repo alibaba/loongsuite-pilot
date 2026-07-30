@@ -13,7 +13,9 @@
 | Claude Code | `claude-code` | Hook 集成。 |
 | Codex | `codex` | Hook 集成。 |
 | Cursor | `cursor` | Hook 集成。 |
+| Kiro CLI | `kiro-cli` | Hook 集成，并延迟采集本地 SQLite/session 数据；源端暂不提供 Token 用量。 |
 | OpenCode | `opencode` | 插件注入。 |
+| Pi Coding Agent | `pi-coding-agent` | 注入 Pi Extension，采集 LLM 与工具生命周期事件。 |
 | Qoder | `qoder` | Hook 集成。 |
 | Qoder CN | `qoder-cn` | Hook 集成。 |
 | Qoder for JetBrains | `qoder-jetbrains` | 部署/检测专用 ID。`agent-control.json` 中采集开关为 `qoder`；`config.json` 中内容策略为 `qoder-idea`。 |
@@ -22,6 +24,12 @@
 | Qoder Work CN | `qoder-work-cn` | Hook 和本地数据源。 |
 | Qwen Code CLI | `qwen-code-cli` | Hook 集成；Stop 时解析 qwen-code transcript JSONL。 |
 | Wukong | `wukong` | 通过本地 `wukong-cli` 进行 CLI API 轮询。 |
+
+Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
+`SessionStart` 和 `UserPromptSubmit` Hook 发现当前实际生效的
+`CODEX_HOME`（包括编排器为单个任务创建的独立目录），并采集该 session
+根目录下最近活跃的 rollout 文件。`Stop` 仅作为尽力而为的唤醒信号，
+目录发现不依赖它。
 
 ## 安装时选择 Agent
 

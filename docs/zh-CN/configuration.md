@@ -76,7 +76,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 | 上报日志到阿里云 SLS | [SLS 输出](sls-output.md) |
 | 将 GenAI 活动上报为 OTLP Trace | [Trace 输出](trace-output.md) |
 | POST 到自定义 HTTP 接口 | [HTTP 输出](http-output.md) |
-| 脱敏 API Key、AccessKey、私钥和数据库 URL | [数据脱敏](masking.md) |
+| 脱敏 API Key、AccessKey、私钥、数据库 URL 和个人敏感信息 | [数据脱敏](masking.md) |
 
 ## 日志保留
 

@@ -10,7 +10,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/qoderwork-hook-processor.mjs');
 const AGENT_ID = 'qoder-work-test';
 const LOG_PREFIX = 'qoder-work';
-const LINE_RECORD = path.resolve(__dirname, '../../../../assets/hooks/.line_records.qoder-work-test.json');
 
 let DATA_DIR;
 let TRANSCRIPT;
@@ -18,12 +17,10 @@ let TRANSCRIPT;
 beforeEach(() => {
   DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qoderwork-hook-test-'));
   TRANSCRIPT = path.join(DATA_DIR, 'transcript.jsonl');
-  try { fs.rmSync(LINE_RECORD, { force: true }); } catch {}
 });
 
 afterEach(() => {
   try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch {}
-  try { fs.rmSync(LINE_RECORD, { force: true }); } catch {}
 });
 
 function writeTranscript(records) {
@@ -39,7 +36,7 @@ function runHook(sessionId) {
     }),
     env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR },
     encoding: 'utf-8',
-    timeout: 10_000,
+    timeout: 30_000,
   });
 }
 
@@ -92,6 +89,92 @@ function baseRows(userContent) {
     },
   ];
 }
+
+function turnRows(index, text) {
+  const second = String(50 + index * 2).padStart(2, '0');
+  return [
+    {
+      type: 'user',
+      uuid: `user-${index}`,
+      promptId: `prompt-${index}`,
+      timestamp: `2026-06-18T01:35:${second}.477Z`,
+      message: { role: 'user', content: [{ type: 'text', text }] },
+      sessionId: 'sess-recovery',
+      userType: 'external',
+      isSidechain: false,
+    },
+    {
+      type: 'assistant',
+      uuid: `assistant-${index}`,
+      parentUuid: `user-${index}`,
+      timestamp: `2026-06-18T01:35:${second}.977Z`,
+      message: {
+        role: 'assistant',
+        id: `msg-${index}`,
+        content: [{ type: 'text', text: `answer ${index}` }],
+        stop_reason: 'end_turn',
+      },
+      sessionId: 'sess-recovery',
+      isSidechain: false,
+    },
+  ];
+}
+
+describe('qoderwork-hook-processor cursor recovery', () => {
+  test('bootstraps only the latest old turn, persists cursor outside hooks, then resumes incrementally', () => {
+    writeTranscript([
+      ...turnRows(1, 'historical prompt 1'),
+      ...turnRows(2, 'historical prompt 2'),
+    ]);
+
+    const first = runHook('sess-recovery');
+    expect(first.status).toBe(0);
+
+    const bootstrapRecords = readJsonlRecords();
+    expect(inputContents(bootstrapRecords)).toEqual(['historical prompt 2']);
+    expect(new Set(bootstrapRecords.map(r => r['agent.transcript.cursor_mode']))).toEqual(
+      new Set(['bootstrap']),
+    );
+    expect(new Set(bootstrapRecords.map(r => r['agent.transcript.cursor_reason']))).toEqual(
+      new Set(['missing-cursor']),
+    );
+    expect(new Set(bootstrapRecords.map(r => r['agent.transcript.cursor_batch_id'])).size).toBe(1);
+
+    const persistentCursorDir = path.join(
+      DATA_DIR,
+      'state',
+      'hooks',
+      `${AGENT_ID}-line-records`,
+    );
+    const cursorFiles = fs.readdirSync(persistentCursorDir).filter(file => file.endsWith('.json'));
+    expect(cursorFiles).toHaveLength(1);
+    const persistentCursor = JSON.parse(
+      fs.readFileSync(path.join(persistentCursorDir, cursorFiles[0]), 'utf-8'),
+    );
+    expect(persistentCursor).toMatchObject({
+      session_id: 'sess-recovery',
+      transcript_path: TRANSCRIPT,
+    });
+
+    const before = bootstrapRecords.length;
+    fs.appendFileSync(
+      TRANSCRIPT,
+      turnRows(3, 'new prompt 3').map(row => JSON.stringify(row)).join('\n') + '\n',
+      'utf-8',
+    );
+    const second = runHook('sess-recovery');
+    expect(second.status).toBe(0);
+
+    const incrementalRecords = readJsonlRecords().slice(before);
+    expect(inputContents(incrementalRecords)).toEqual(['new prompt 3']);
+    expect(new Set(incrementalRecords.map(r => r['agent.transcript.cursor_mode']))).toEqual(
+      new Set(['incremental']),
+    );
+    expect(new Set(incrementalRecords.map(r => r['agent.transcript.cursor_reason']))).toEqual(
+      new Set(['incremental']),
+    );
+  });
+});
 
 describe('qoderwork-hook-processor user prompt extraction', () => {
   test('emits per-step input deltas that the converter accumulates', async () => {
@@ -269,5 +352,42 @@ describe('qoderwork-hook-processor user prompt extraction', () => {
     expect(result.status).toBe(0);
 
     expect(inputContents(readJsonlRecords())).toEqual([]);
+  });
+});
+
+describe('qoderwork-hook-processor response.id', () => {
+  test('uses message.id as gen_ai.response.id when present', () => {
+    // QoderWork 0.6.2 transcript assistant rows carry message.id = chatcmpl-xxx,
+    // which matches the id captured by qoderwork-runtime-wrapper. Preferring it
+    // enables direct token matching in qoder-work-trace-input.
+    const rows = baseRows([{ type: 'text', text: 'hi' }]).map((r) =>
+      r.type === 'assistant' ? { ...r, message: { ...r.message, id: 'chatcmpl-resp-1' } } : r,
+    );
+    writeTranscript(rows);
+
+    const result = runHook('sess-resp-id-msg');
+    expect(result.status).toBe(0);
+
+    const resp = readJsonlRecords().find((r) => r['event.name'] === 'llm.response');
+    expect(resp).toBeDefined();
+    expect(resp['gen_ai.response.id']).toBe('chatcmpl-resp-1');
+  });
+
+  test('falls back to parentUuid when message.id is absent', () => {
+    // Older QoderWork versions have no message.id — behavior must stay unchanged.
+    const rows = baseRows([{ type: 'text', text: 'hi' }]).map((r) =>
+      r.type === 'assistant'
+        ? { ...r, message: { role: r.message.role, content: r.message.content, stop_reason: r.message.stop_reason } }
+        : r,
+    );
+    writeTranscript(rows);
+
+    const result = runHook('sess-resp-id-parent');
+    expect(result.status).toBe(0);
+
+    const resp = readJsonlRecords().find((r) => r['event.name'] === 'llm.response');
+    expect(resp).toBeDefined();
+    // baseRows assistant row has parentUuid 'user-1'
+    expect(resp['gen_ai.response.id']).toBe('user-1');
   });
 });

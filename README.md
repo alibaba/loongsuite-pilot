@@ -6,6 +6,12 @@ English | [简体中文](README.zh-CN.md)
 
 LoongSuite Pilot is a local telemetry collector for AI coding agents. It discovers supported agents on a developer machine, installs the required hooks or plugins, normalizes activity into a shared GenAI event schema, and exports logs or traces to your chosen backends.
 
+<p align="center">
+  <img src="docs/_assets/img/dashboard.png" alt="LoongSuite Pilot local dashboard" width="880">
+  <br>
+  <em>Local dashboard — multi-agent collection status, token usage, and reporting health at a glance.</em>
+</p>
+
 ## Why LoongSuite Pilot?
 
 Development teams often use more than one AI coding agent, and each agent records activity in a different local format. Pilot gives teams one local collector that can discover those agents, collect their activity, normalize the data, and send it to destinations that are useful for analysis, audit, and observability.
@@ -39,7 +45,9 @@ Pilot is designed to answer practical questions:
 | Claude Code   | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Codex         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       |
+| Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       |
 | OpenCode      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
+| Pi Coding Agent | Extension injection     | Yes          | Yes        | Yes         | Yes                       |
 | Qoder         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Qoder CN      | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Qoder for JetBrains | Detection-only      | Yes          | Yes        | Yes         | Yes                       |
@@ -48,6 +56,21 @@ Pilot is designed to answer practical questions:
 | Qoder Work CN | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
 | Qwen Code CLI | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       |
+
+### Documented Windows Agent Support
+
+The table above describes Pilot's general integration capabilities; it does not imply that every agent is supported on every operating system. The following agents are currently explicitly documented as supported on Windows:
+
+| Agent | Windows Integration | Trace Export | Log Export | Token Usage | Conversation / Tool Calls | Requirement |
+|-------|---------------------|--------------|------------|-------------|---------------------------|-------------|
+| Claude Code | Hook | Yes | Yes | Yes | Yes | — |
+| Cursor | Hook | Yes | Yes | Yes | Yes | — |
+| Qoder Work | Hook / local data source | Yes | Yes | No | Yes | User edition |
+| Qoder CLI | Hook | Yes | Yes | No | Yes | — |
+| Qoder IDE | Hook / local data source | Yes | Yes | Yes | Yes | Qoder 1.10.0 or later, User edition |
+| OpenCode | Plugin injection | Yes | Yes | Yes | Yes | — |
+
+Agents omitted from this Windows table do not currently have an explicit Windows support statement; omission does not necessarily mean that the agent cannot run on Windows. See the [Alibaba Cloud AI Coding Agent access guide](https://help.aliyun.com/zh/cms/cloudmonitor-2-0/ai-application-access-ai-coding-agent/) for the source support matrix and [Installation](docs/installation.md) for Windows prerequisites and setup.
 
 
 Agent definitions live in `agents.d/`. You can add new agents without changing the deployment framework; see [Agent Onboarding](docs/agent-onboarding.md).
@@ -106,6 +129,21 @@ Start with the guide that matches what you want to change:
 | See global config loading and retention settings | [Configuration Guide](docs/configuration.md)     |
 
 
+### Upstream Trace Linking (optional)
+
+Link collected agent spans to an **upstream** trace so each turn's span tree reparents under the upstream span. Disabled by default, and fully fail-open (never affects normal collection/reporting).
+
+| Setting | Values | Default |
+| ------- | ------ | ------- |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK` (env) · `upstreamLink.enabled` (config.json) | `true` / `1` to enable; unset, `false`, or `0` to disable | disabled |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS` (env) · `upstreamLink.ttlMs` (config.json) | cleanup TTL in ms for `acp-correlate` files | `86400000` (24h) |
+
+When enabled, the upstream `traceparent` reaches Pilot via one of two schemes and is stamped onto collected records (`trace_id` on the turn, `parent_span_id` on the user-input event):
+
+- **Correlation file** (per-turn): the caller writes `{sessionId, contentHash, contentPrefix, traceparent}` to `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl` when it sends a prompt. Linking is protocol-agnostic — the only requirement is that `sessionId` matches the `gen_ai.session.id` Pilot collects for that turn, and the content (hash or prefix) matches the collected user text. ACP clients satisfy this naturally (the `session/new` id flows into collection), so ACP is the primary case.
+- **Environment** (`TRACEPARENT` on the agent process): applied to the session's first turn, via the agent's hook. Use this when the caller cannot obtain a per-turn `sessionId` up front.
+
+
 ## Output Data
 
 
@@ -140,6 +178,16 @@ loongsuite-pilot monitor start
 ```
 
 Then open `http://127.0.0.1:8765/`.
+
+macOS menu bar app:
+
+On macOS, Pilot automatically runs a menu bar app after installation — no extra command needed. It shows live token, session, request, and tool counts, plus per-agent and per-provider breakdowns, so you can keep an eye on activity without opening the dashboard.
+
+<p align="center">
+  <img src="docs/_assets/img/menubar.jpg" alt="LoongSuite Pilot macOS menu bar app" width="360">
+</p>
+
+To disable it, set `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP=false` or add `"enableStatusBarApp": false` to `~/.loongsuite-pilot/config.json`.
 
 ## Documentation
 
@@ -184,10 +232,10 @@ We are looking forward to your feedback and suggestions. Scan the QR code below 
 ### Related Projects
 
 - [LoongCollector](https://github.com/alibaba/loongcollector) - Universal node agent for log, metric and eBPF-based collection
-- [LoongSuite JS Plugins](https://github.com/alibaba/loongsuite-js-plugins) - OpenTelemetry instrumentation plugins for JS-based AI coding agents
-- [LoongSuite Python Agent](https://github.com/alibaba/loongsuite-python-agent) - Process agent for Python applications
-- [LoongSuite Go Agent](https://github.com/alibaba/loongsuite-go-agent) - Process agent for Golang with compile-time instrumentation
-- [LoongSuite Java Agent](https://github.com/alibaba/loongsuite-java-agent) - Process agent for Java applications
+- [LoongSuite JS](https://github.com/alibaba/loongsuite-js) - OpenTelemetry instrumentation plugins for JS-based AI coding agents
+- [LoongSuite Python](https://github.com/alibaba/loongsuite-python) - Process agent for Python applications
+- [LoongSuite Go](https://github.com/alibaba/loongsuite-go) - Process agent for Golang with compile-time instrumentation
+- [LoongSuite Java](https://github.com/alibaba/loongsuite-java) - GenAI telemetry utility library for Java applications
 
 ## License
 

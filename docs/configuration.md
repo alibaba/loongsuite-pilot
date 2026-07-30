@@ -76,7 +76,7 @@ Do not put `apiKey` together with `accessKeyId` / `accessKeySecret` on the same 
 | Report logs to Alibaba Cloud SLS | [SLS Output](sls-output.md) |
 | Report GenAI activity as OTLP traces | [Trace Output](trace-output.md) |
 | POST events to a custom HTTP endpoint | [HTTP Output](http-output.md) |
-| Mask API keys, access keys, private keys, and database URLs | [Data Masking](masking.md) |
+| Mask API keys, access keys, private keys, database URLs, and personal sensitive data | [Data Masking](masking.md) |
 
 ## Retention
 

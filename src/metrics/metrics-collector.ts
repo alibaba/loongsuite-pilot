@@ -1,11 +1,17 @@
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { formatTime } from '../utils/time-utils.js';
 import { resolveLocalIp } from '../utils/network-utils.js';
-import { isPidFileRunning } from '../utils/pid-utils.js';
-import { isUpdaterRunningOnWindowsSync } from '../utils/process-discovery.js';
+import { checkProcessLiveness, UPDATER_PROCESS_PATTERNS } from '../utils/pid-utils.js';
+import { createLogger } from '../utils/logger.js';
+import type { ProcessLiveness } from '../utils/pid-utils.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
+
+const logger = createLogger('MetricsCollector');
+
+const MIN_NODE_MAJOR = 18;
 
 export interface L1Metrics {
   version: string;
@@ -126,10 +132,17 @@ export interface DataflowSnapshot {
   inputIdleMinutes: Map<string, number>;
 }
 
+export interface NodeBinDiagnostic {
+  originalPath: string;
+  pathExists: boolean;
+  pathExecutable: boolean;
+}
+
 export interface InfraHealthSnapshot {
   updaterPidAlive: boolean;
   currentVersionValid: boolean;
   nodeBinValid: boolean;
+  nodeBinDiagnostic?: NodeBinDiagnostic;
   rollbackAvailable: boolean;
   versionCount: number;
   canaryPolicy: string;
@@ -144,6 +157,7 @@ export class MetricsCollector {
   private readonly agentsConfig: AgentsConfig;
   private readonly slsEndpoints: SlsEndpoint[];
   private readonly cmsWorkspace: string;
+  private readonly updaterLiveness: (pidFile: string) => ProcessLiveness;
   private readonly startTime: string;
   private readonly startTimestamp: number;
   private readonly instanceId: string;
@@ -161,7 +175,7 @@ export class MetricsCollector {
   private updaterConsecutiveFailures = 0;
   private lastInfraHealth: InfraHealthSnapshot | null = null;
 
-  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string }) {
+  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; updaterLiveness?: (pidFile: string) => ProcessLiveness }) {
     this.version = opts.version;
     this.userId = opts.userId;
     this.dataDir = opts.dataDir;
@@ -169,6 +183,8 @@ export class MetricsCollector {
     this.agentsConfig = opts.agentsConfig ?? {};
     this.slsEndpoints = opts.slsEndpoints ?? [];
     this.cmsWorkspace = opts.cmsWorkspace ?? '';
+    this.updaterLiveness = opts.updaterLiveness
+      ?? ((pidFile: string) => checkProcessLiveness(pidFile, UPDATER_PROCESS_PATTERNS));
     this.startTimestamp = Math.floor(Date.now() / 1000);
     this.startTime = formatTime(new Date());
     this.localIp = resolveLocalIp();
@@ -350,10 +366,9 @@ export class MetricsCollector {
 
     let updaterPidAlive = true;
     if (this.l1CycleCount > 2) {
-      updaterPidAlive = isPidFileRunning(path.join(this.dataDir, 'loongsuite-pilot-updater.pid'));
-      if (!updaterPidAlive && process.platform === 'win32') {
-        updaterPidAlive = isUpdaterRunningOnWindowsSync();
-      }
+      updaterPidAlive = this.updaterLiveness(
+        path.join(this.dataDir, 'loongsuite-pilot-updater.pid'),
+      ).running;
       if (updaterPidAlive) {
         this.updaterConsecutiveFailures = 0;
       } else {
@@ -362,14 +377,15 @@ export class MetricsCollector {
     }
 
     const currentVersionValid = checkVersionPointer(this.dataDir);
-    const nodeBinValid = checkNodeBin(this.dataDir);
+    const nodeBinResult = checkNodeBin(this.dataDir);
     const rollbackAvailable = checkRollbackAvailable(this.dataDir);
     const versionCount = countVersions(this.dataDir);
 
     this.lastInfraHealth = {
       updaterPidAlive,
       currentVersionValid,
-      nodeBinValid,
+      nodeBinValid: nodeBinResult.valid,
+      nodeBinDiagnostic: nodeBinResult.diagnostic,
       rollbackAvailable,
       versionCount,
       canaryPolicy: this.canaryPolicy,
@@ -444,15 +460,109 @@ function checkVersionPointer(dataDir: string): boolean {
   }
 }
 
-function checkNodeBin(dataDir: string): boolean {
+function checkNodeBin(dataDir: string): { valid: boolean; diagnostic?: NodeBinDiagnostic } {
+  const nodeBinFile = path.join(dataDir, 'node-bin');
+  let originalPath = '';
   try {
-    const nodePath = fs.readFileSync(path.join(dataDir, 'node-bin'), 'utf-8').trim();
-    if (!nodePath) return false;
-    fs.accessSync(nodePath, fs.constants.X_OK);
+    originalPath = fs.readFileSync(nodeBinFile, 'utf-8').trim();
+  } catch {
+    return { valid: false, diagnostic: { originalPath: '', pathExists: false, pathExecutable: false } };
+  }
+
+  if (originalPath && isExecutable(originalPath)) {
+    return { valid: true };
+  }
+
+  const healed = healNodeBin(nodeBinFile);
+  if (healed) return { valid: true };
+
+  return {
+    valid: false,
+    diagnostic: {
+      originalPath,
+      pathExists: originalPath ? fs.existsSync(originalPath) : false,
+      pathExecutable: originalPath ? isExecutable(originalPath) : false,
+    },
+  };
+}
+
+function isExecutable(p: string): boolean {
+  try {
+    fs.accessSync(p, fs.constants.X_OK);
     return true;
   } catch {
     return false;
   }
+}
+
+function healNodeBin(nodeBinFile: string): boolean {
+  const candidate = findNodeCandidate();
+  if (!candidate) {
+    logger.warn(`node-bin self-heal failed, no valid Node.js candidate found (version >= ${MIN_NODE_MAJOR} required)`);
+    return false;
+  }
+  try {
+    const dir = path.dirname(nodeBinFile);
+    const tmpFile = path.join(dir, `.node-bin.${process.pid}.tmp`);
+    fs.writeFileSync(tmpFile, candidate + '\n', 'utf-8');
+    fs.renameSync(tmpFile, nodeBinFile);
+    logger.info('node-bin self-healed', { newPath: candidate });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasSuitableVersion(p: string): boolean {
+  try {
+    const out = execFileSync(p, ['--version'], { timeout: 3000, encoding: 'utf-8' });
+    const m = /^v(\d+)\./.exec(out.trim());
+    if (!m) return false;
+    return Number(m[1]) >= MIN_NODE_MAJOR;
+  } catch {
+    return false;
+  }
+}
+
+function findNodeCandidate(): string | null {
+  if (process.execPath && isExecutable(process.execPath) && hasSuitableVersion(process.execPath)) {
+    return fs.realpathSync(process.execPath);
+  }
+
+  const home = os.homedir();
+  const candidates: string[] = [];
+
+  try {
+    const nvmDir = path.join(home, '.nvm', 'versions', 'node');
+    const versions = fs.readdirSync(nvmDir).sort().reverse();
+    for (const v of versions) {
+      candidates.push(path.join(nvmDir, v, 'bin', 'node'));
+    }
+  } catch { /* nvm not installed */ }
+
+  candidates.push(
+    path.join(home, '.fnm', 'aliases', 'default', 'bin', 'node'),
+    path.join(home, '.volta', 'bin', 'node'),
+    '/opt/homebrew/bin/node',
+    '/usr/local/bin/node',
+    path.join(home, '.local', 'bin', 'node'),
+  );
+
+  const pathDirs = (process.env.PATH || '').split(path.delimiter);
+  for (const dir of pathDirs) {
+    if (dir) candidates.push(path.join(dir, 'node'));
+  }
+
+  for (const c of candidates) {
+    if (isExecutable(c) && hasSuitableVersion(c)) {
+      try {
+        return fs.realpathSync(c);
+      } catch {
+        return c;
+      }
+    }
+  }
+  return null;
 }
 
 function checkRollbackAvailable(dataDir: string): boolean {

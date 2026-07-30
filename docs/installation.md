@@ -88,7 +88,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--cms-endpoint <url>` | CMS or ARMS trace endpoint. |
 | `--cms-workspace <name>` | CMS workspace value. |
 | `--service-name-prefix <name>` | Service name prefix used by reporting backends. |
-| `--system-service` | Register as a system-level service instead of a user-level service. |
+| `--system-service` | **Deprecated** — ignored. Init system is now auto-detected (systemd-user → systemd-system → init.d). |
 | `--lang <lang>` | Output language: `zh` or `en`. |
 
 ## Verify Installation
@@ -135,6 +135,8 @@ http://127.0.0.1:8765/
 ```
 
 ## Uninstall
+
+Uninstall stops the service, removes installed files, and cleans the integrations written into agent configs (hook entries for Claude Code, Codex, Cursor, Qoder, Qwen, etc., and the injected plugin spec in OpenCode's config). Add `--purge` (`-Purge` on Windows) to also delete the local data directory.
 
 Keep data on Linux/macOS:
 

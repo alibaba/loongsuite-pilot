@@ -70,6 +70,67 @@ Pilot 也支持 CMS 风格的 Trace 配置：
 | `LOONGSUITE_PILOT_CMS_ENDPOINT` | CMS 或 ARMS Trace endpoint。 |
 | `LOONGSUITE_PILOT_CMS_WORKSPACE` | workspace header 值。 |
 
+## 多 Trace 后端
+
+Trace 导出会把**同一批**转换后的 span **同时**发往**所有**已配置的后端(转换一次,导出时扇出)。后端来自以下配置的并集:
+
+- `otlpTrace`(通用 OTLP,用户配置)
+- `cms`(ARMS/CMS 简写,用户配置)
+- `innerTrace.otlp[]` 与 `innerTrace.cms[]`(托管后端,见下)
+
+> **行为变更提示:** `otlpTrace` 与 `cms` 现在是**叠加(并集)**关系,不再互斥。旧版本中同时配置两者只会使用 `otlpTrace`;升级后 span 会**同时**投递到两者——如不希望重复投递,请检查配置。
+
+后端会按"规范化 URL + 完整请求 headers"**去重**,因此把同一个后端列两遍(例如既作为用户后端又作为托管后端)只会导出一次;URL 相同但鉴权 header / workspace / license 不同的两个后端会被视为不同后端各自保留。
+
+共享 vs 单后端设置(span 按不同 `service.name` 各转换一次):
+
+- **所有后端共享:** `resourceAttributes`、`captureMessageContent`、`resourceAttributeKeys`、`spanAttributePassthroughPrefixes`、`maxExportBatchBytes`、`turnIdleTimeoutMs`。
+- **每后端独立:** endpoint URL、headers、compression,以及 `service.name`(见下文——用户后端与托管后端可不同)。
+
+某个后端失败会被隔离——不会阻塞健康后端,其失败 span 会单独落盘到 `~/.loongsuite-pilot/logs/otlp-failed/<service>-<agent>__<后端名>.jsonl`。
+
+### 托管后端(`configs/inner/data_config.json`)
+
+托管/受管部署可通过 `~/.loongsuite-pilot/configs/inner/data_config.json`(与托管 SLS endpoint 复用同一文件)下发额外的 trace 后端。这些后端会**追加**到用户在 `config.json` 中配置的后端之上:
+
+```json
+{
+  "sls": [ /* 托管 SLS endpoint(不变) */ ],
+  "serviceNamePrefix": "managed-service",
+  "otlp": [
+    {
+      "name": "team-collector",
+      "endpoint": "https://collector.internal:4318",
+      "headers": { "x-token": "..." },
+      "compression": "gzip"
+    }
+  ],
+  "cms": [
+    {
+      "name": "managed-arms",
+      "endpoint": "https://proj-xxx.../apm/trace/opentelemetry",
+      "licenseKey": "...",
+      "workspace": "...",
+      "project": "..."
+    }
+  ]
+}
+```
+
+| 字段 | 适用 | 说明 |
+|------|------|------|
+| `serviceNamePrefix` | 顶层 | **所有**托管后端的 service name 前缀——trace(`otlp[]`/`cms[]`,作为 `service.name`)与 log(`sls[]`,作为 `__service_name__` tag)——用于与用户后端区分。可选;省略时回退到用户的 `serviceNamePrefix`(即不做区分)。 |
+| `otlp[].name` / `cms[].name` | 两者 | 用于日志与失败日志文件名的标签。可选(默认 `inner-otlp-<i>` / `inner-cms-<i>`)。 |
+| `otlp[].endpoint` | otlp | OTLP HTTP 基础 URL(自动补 `/v1/traces`)。 |
+| `otlp[].headers` | otlp | 请求 header(如鉴权 token)。 |
+| `otlp[].compression` | otlp | `gzip`(默认)或 `none`。 |
+| `cms[].endpoint` | cms | ARMS/CMS trace endpoint。 |
+| `cms[].licenseKey` | cms | 作为 `x-arms-license-key` 发送。 |
+| `cms[].project` | cms | 作为 `x-arms-project` 发送。省略时从 endpoint 域名提取。 |
+| `cms[].workspace` | cms | 作为 `x-cms-workspace` 发送。 |
+
+每个 `cms[]` 条目会展开为一个带 `x-arms-*` / `x-cms-*` header 的 OTLP 后端;只要存在 CMS 后端,就会附加 `acs.arms.service.feature=genai_app` 资源属性(如上所述为共享)。此处设置 `serviceNamePrefix` 后,托管后端会以 `<serviceNamePrefix>-<agent>` 上报,用户后端仍用用户前缀;此时 span 会按不同 `service.name` 各转换一次(通常两次——用户与托管)。托管配置格式错误(例如 `otlp`/`cms` 写成非数组)会被忽略,而不会导致采集失败。
+
 ## 后端接入示例
 
 ### Jaeger
@@ -189,6 +250,69 @@ Pilot 会将 Trace 发送到 `http://localhost:3000/api/public/otel/v1/traces`�
 ```
 
 如果 Trace 数据可能包含密钥，也建议开启 [数据脱敏](masking.md)。
+
+## 自定义 Span 属性
+
+有两类额外属性可以附加到 trace span 上：
+
+**1. Git/工作区属性（自动）**：当 agent 上报了工作目录时，span 会自动带上 `workspace.path`（agent 运行的绝对工作目录 / 进程 cwd），以及由本地 git 仓库推断的 `git.repo`、`git.branch`、`git.domain`、`workspace.current_root`。`workspace.path` 与 git 无关、始终会带上；而 `git.*` 和 `workspace.current_root` 需要该目录是 git 仓库才会出现。这些字段**同时也会**出现在 event log（SLS / JSONL）中。
+
+**2. 用户自定义属性**：从三个来源给 span 附加任意键值对，优先级 **config < env < 文件**。与上面的 git 字段不同，这些**只写入 trace span**（不进 event log / SLS / JSONL）：
+
+- `config.json` → `globalSpanAttributes`（启动时读一次）：
+
+  ```json
+  { "globalSpanAttributes": { "team": "infra", "deployment.env": "prod" } }
+  ```
+
+- 环境变量 `OTEL_SPAN_ATTRIBUTES`（OTel 格式，启动时读一次）：
+
+  ```bash
+  export OTEL_SPAN_ATTRIBUTES="team=infra,deployment.env=prod"
+  ```
+
+- 可变文件 `~/.loongsuite-pilot/span-attributes.json`（`{"key":"value"}`），改动后会被重新读取，无需重启。推荐用 CLI 管理（而非手动编辑）：
+
+  ```bash
+  loongsuite-pilot span-attr set release 2026.07
+  loongsuite-pilot span-attr set oncall alice
+  loongsuite-pilot span-attr list
+  loongsuite-pilot span-attr unset oncall
+  loongsuite-pilot span-attr clear
+  ```
+
+说明：
+- 值均为字符串。文件改动会在下一个处理周期生效（受采集轮询间隔约束，约 30s），并非即时。
+- key 会原样作为 span 属性名。**请避免以 `agent.` 开头**及其它保留前缀（`gen_ai.`、`git.`、`workspace.`、`event.`、`trace_`、`user.`、`cost_`）——这类 key 会被跳过。
+- 属性为 fill-only，绝不覆盖 span 已有属性。
+
+**3. 按次调用的透传属性。** 上述三个来源都是进程级全局的（一台机器一个共享 pilot daemon），无法按每次 agent 调用区分。若要对单次调用做归因（如哪个用户 / issue 触发了本次运行），由调用方在被拉起的 agent 子进程上设置**按次**环境变量，daemon 再把匹配前缀的 key 透传到该次调用的 span 上。
+
+- 宿主进程在 agent 子进程上设置 `LOONGSUITE_PILOT_SPAN_ATTRIBUTES`（同样是 `key=value,key=value` 格式）。agent 的 hook/plugin 在启动时解析它，并把这些键值对作为顶层字段写入它产出的每条 record，因此每次调用都带上各自的值。
+
+  ```bash
+  # 由启动器在每次 agent 调用时设置
+  export LOONGSUITE_PILOT_SPAN_ATTRIBUTES="multica.issue.id=AGE-992,multica.user.id=staff"
+  ```
+
+- `config.json` → `otlpTrace.spanAttributePassthroughPrefixes` 列出 daemon 需要透传到 span 的 key 前缀：
+
+  ```json
+  { "otlpTrace": { "spanAttributePassthroughPrefixes": ["multica."] } }
+  ```
+
+**OpenCode 内置属性（`opencode.message.id`）。** OpenCode 插件会在其 `llm.request`、`llm.response`、`tool.call`、`tool.result` 记录上自动打上 `opencode.message.id`（opencode 的 assistant 消息 id）——无需启动器 env 变量。要让它出现在 span 上，只需列出 `opencode.` 前缀；随后它会出现在 ENTRY / AGENT / STEP / LLM / TOOL span 上（LLM、TOOL 取各自记录的值，ENTRY / AGENT / STEP 取 turn 级值）：
+
+  ```json
+  { "otlpTrace": { "spanAttributePassthroughPrefixes": ["opencode."] } }
+  ```
+
+说明：
+- 与来源 #2（仅 span）不同，透传属性是普通的顶层 record 字段，因此会**同时**出现在 event log（SLS / JSONL）和 trace span 上——与 git 字段行为一致。
+- 保留前缀 key（`gen_ai.`、`git.`、`workspace.`、`event.`、`trace_`、`user.`、`cost_`、`agent.`）以及敏感命名（token/secret/password/…）会被 hook 丢弃。请使用 `multica.*` 等专用命名空间。
+- 仅匹配所配置前缀的 key 会被透传，其它顶层字段不受影响。目前支持 claude-code、codex、qoder 和 opencode。
+- Codex 会在 `UserPromptSubmit` 时保存这些进程级属性（以 `Stop` 作为 fail-open 兜底），并按 session 与 turn 关联到 transcript 记录，避免同一个 session 被不同调用恢复时沿用上一次调用的属性。
+- value 不能包含逗号 `,`（逗号是键值对分隔符）；单个 value 长度上限 512 字符。
 
 ## 验证 Trace 输出
 

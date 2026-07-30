@@ -74,7 +74,17 @@ describe('agent overview aggregation', () => {
         ],
       },
       failedLines: [
-        JSON.stringify({ ts: Date.parse('2026-05-05T04:00:03.000Z'), project: 'p', logstore: 'l', error: 'boom' }),
+        JSON.stringify({
+          schema_version: 2,
+          ts: Date.parse('2026-05-05T04:00:03.000Z'),
+          endpoint: 'activity',
+          project: 'p',
+          logstore: 'l',
+          error_type: 'Error',
+          error_summary: 'boom',
+          batch_count: 20,
+          batch_bytes: 2048,
+        }),
       ],
     });
 
@@ -377,12 +387,47 @@ describe('agent overview aggregation', () => {
       restoreEnv(savedEnv);
     }
   });
+
+  it('ignores legacy delete-pending files and skips damaged metadata lines', async () => {
+    const dataDir = await fixtureDir();
+    await writeRuntimeFiles(dataDir, {
+      failedLines: [
+        '{damaged',
+        JSON.stringify({
+          schema_version: 2,
+          ts: Date.parse('2026-05-05T04:00:03.000Z'),
+          endpoint: 'internal-sls',
+          project: 'p1',
+          logstore: 'l1',
+          error_type: 'TimeoutError',
+          error_summary: 'timeout',
+          batch_count: 2,
+          batch_bytes: 100,
+        }),
+      ],
+    });
+    const pendingDir = path.join(dataDir, 'sls-failed-logs.delete-pending');
+    await mkdir(pendingDir, { recursive: true });
+    await writeFile(
+      path.join(pendingDir, 'legacy.jsonl'),
+      JSON.stringify({ ts: Date.now(), error: 'must not count' }),
+    );
+
+    const overview = await createOverviewAggregator({
+      dataDir,
+      nowProvider: () => new Date('2026-05-05T04:01:00.000Z'),
+    }).getOverview({ force: true });
+
+    expect(overview.reporting.failedUploadsToday).toBe(1);
+    expect(JSON.stringify(overview.timeline)).toContain('internal-sls');
+    expect(JSON.stringify(overview.timeline)).not.toContain('must not count');
+  });
 });
 
 async function fixtureDir(options = {}) {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'loongsuite-pilot-overview-'));
   await mkdir(path.join(dataDir, 'logs', 'output'), { recursive: true });
-  await mkdir(path.join(dataDir, 'sls-failed-logs'), { recursive: true });
+  await mkdir(path.join(dataDir, 'logs', 'sls-failed-logs'), { recursive: true });
   const config = {
     enabled: true,
     dataDir,
@@ -425,7 +470,10 @@ async function writeRuntimeFiles(dataDir, options) {
     await writeFile(path.join(dataDir, 'logs', 'output', name), lines.join('\n'));
   }
   if (options.failedLines) {
-    await writeFile(path.join(dataDir, 'sls-failed-logs', 'agentActivity.jsonl'), options.failedLines.join('\n'));
+    await writeFile(
+      path.join(dataDir, 'logs', 'sls-failed-logs', 'activity-a1b2c3d4-0000-2026-05-05.jsonl'),
+      options.failedLines.join('\n'),
+    );
   }
 }
 

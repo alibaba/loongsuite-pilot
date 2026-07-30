@@ -237,7 +237,7 @@ async function buildOverview(opts) {
     maxIndexBytesPerRefresh: opts.maxIndexBytesPerRefresh,
     maxIndexLinesPerRefresh: opts.maxIndexLinesPerRefresh,
   });
-  const failures = await aggregateFailedUploads(path.join(opts.dataDir, 'sls-failed-logs'), {
+  const failures = await aggregateFailedUploads(path.join(opts.dataDir, 'logs', 'sls-failed-logs'), {
     maxBytes: opts.failedLogMaxBytes,
   });
 
@@ -742,11 +742,17 @@ async function aggregateFailedUploads(failedDir, options) {
         timestamp,
         type: 'reporting.failure',
         severity: 'error',
-        summary: 'Upload failed and was saved locally',
+        summary: 'Upload failed; diagnostic metadata was saved locally',
         details: {
+          endpoint: row.endpoint,
           project: row.project,
           logstore: row.logstore,
-          error: row.error,
+          errorType: row.error_type,
+          errorCode: row.error_code,
+          httpStatus: row.http_status,
+          error: row.error_summary,
+          batchCount: row.batch_count,
+          batchBytes: row.batch_bytes,
           file: path.basename(filePath),
         },
       }));

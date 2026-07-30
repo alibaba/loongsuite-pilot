@@ -4,6 +4,51 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { MetricsCollector } from '../../../src/metrics/metrics-collector.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
+import type { ProcessLiveness } from '../../../src/utils/pid-utils.js';
+
+const fsMockState: {
+  blockAccessSync: boolean;
+  accessOverride: ((p: string, mode?: number) => void) | null;
+} = { blockAccessSync: false, accessOverride: null };
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    accessSync: (p: fs.PathLike, mode?: number) => {
+      if (fsMockState.accessOverride) {
+        return fsMockState.accessOverride(String(p), mode);
+      }
+      if (fsMockState.blockAccessSync && mode === actual.constants.X_OK) {
+        throw new Error(`EACCES: permission denied, access '${p}'`);
+      }
+      return actual.accessSync(p as any, mode);
+    },
+  };
+});
+
+vi.mock('../../../src/utils/logger.js', () => ({
+  createLogger: () => ({
+    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
+  }),
+}));
+
+const execMockState: {
+  override: ((file: string) => string) | null;
+} = { override: null };
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    execFileSync: (file: any, args?: any, opts?: any) => {
+      if (execMockState.override) {
+        return execMockState.override(String(file));
+      }
+      return actual.execFileSync(file, args, opts);
+    },
+  };
+});
 
 function buildSnapshot(overrides: Partial<DataflowSnapshot> = {}): DataflowSnapshot {
   return {
@@ -293,50 +338,70 @@ describe('MetricsCollector', () => {
   });
 
   describe('infra health (via collectL1)', () => {
-    it('reports updater_pid_alive=true during grace period even if PID file missing', () => {
-      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+    it('reports updater_pid_alive=true during grace period even if updater liveness is down', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        updaterLiveness: () => down('pid file is missing'),
+      });
       const r1 = col.collectL1(buildSnapshot());
       const r2 = col.collectL1(buildSnapshot());
       expect(r1.updater_pid_alive).toBe('true');
       expect(r2.updater_pid_alive).toBe('true');
     });
 
-    it('reports updater_pid_alive=false after grace period when PID file missing', () => {
-      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
-      col.collectL1(buildSnapshot()); // cycle 1
-      col.collectL1(buildSnapshot()); // cycle 2
-      const r3 = col.collectL1(buildSnapshot()); // cycle 3 - past grace
+    it('reports updater_pid_alive=false after grace period when updater identity is absent', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        updaterLiveness: () => down('no matching updater command found'),
+      });
+      col.collectL1(buildSnapshot());
+      col.collectL1(buildSnapshot());
+      const r3 = col.collectL1(buildSnapshot());
       expect(r3.updater_pid_alive).toBe('false');
-    });
-
-    it('reports updater_pid_alive=true when PID file contains current process PID', () => {
-      fs.writeFileSync(path.join(tmpDir, 'loongsuite-pilot-updater.pid'), String(process.pid));
-      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
-      col.collectL1(buildSnapshot()); // cycle 1
-      col.collectL1(buildSnapshot()); // cycle 2
-      const r3 = col.collectL1(buildSnapshot()); // cycle 3
-      expect(r3.updater_pid_alive).toBe('true');
-    });
-
-    it('reports updater_pid_alive=false when PID file contains malformed content', () => {
-      fs.writeFileSync(path.join(tmpDir, 'loongsuite-pilot-updater.pid'), 'abc\n');
-      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
-      col.collectL1(buildSnapshot()); // grace 1
-      col.collectL1(buildSnapshot()); // grace 2
-      const r3 = col.collectL1(buildSnapshot()); // past grace
-      expect(r3.updater_pid_alive).toBe('false');
-    });
-
-    it('increments consecutive failures and resets on alive', () => {
-      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
-      col.collectL1(buildSnapshot()); // grace 1
-      col.collectL1(buildSnapshot()); // grace 2
-      col.collectL1(buildSnapshot()); // fail 1
       expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(1);
-      col.collectL1(buildSnapshot()); // fail 2
-      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(2);
+    });
 
-      fs.writeFileSync(path.join(tmpDir, 'loongsuite-pilot-updater.pid'), String(process.pid));
+    it('reports updater_pid_alive=true when stale PID is recovered by process identity scan', () => {
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        updaterLiveness: () => ({
+          running: true,
+          pid: 456,
+          source: 'process-scan',
+          reason: 'matching process command found; pid file points to stale or mismatched pid 123',
+          pidFileState: 'stale',
+        }),
+      });
+      col.collectL1(buildSnapshot());
+      col.collectL1(buildSnapshot());
+      const r3 = col.collectL1(buildSnapshot());
+      expect(r3.updater_pid_alive).toBe('true');
+      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(0);
+    });
+
+    it('increments consecutive failures and resets on identity match', () => {
+      const liveness = vi.fn<[], ProcessLiveness>()
+        .mockReturnValueOnce(down('no matching updater command found'))
+        .mockReturnValueOnce(down('no matching updater command found'))
+        .mockReturnValueOnce({ running: true, pid: 456, source: 'process-scan', reason: 'matching process command found' });
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        updaterLiveness: liveness,
+      });
+      col.collectL1(buildSnapshot());
+      col.collectL1(buildSnapshot());
+      col.collectL1(buildSnapshot());
+      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(1);
+      col.collectL1(buildSnapshot());
+      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(2);
       col.collectL1(buildSnapshot());
       expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(0);
       expect(col.getLastInfraHealth()!.updaterPidAlive).toBe(true);
@@ -361,10 +426,13 @@ describe('MetricsCollector', () => {
       expect(col.collectL1(buildSnapshot()).node_bin_valid).toBe('true');
     });
 
-    it('reports node_bin_valid=false when node-bin points to non-existent path', () => {
+    it('self-heals node-bin when path is invalid but process.execPath is available', () => {
       fs.writeFileSync(path.join(tmpDir, 'node-bin'), '/nonexistent/path/node');
       const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
-      expect(col.collectL1(buildSnapshot()).node_bin_valid).toBe('false');
+      expect(col.collectL1(buildSnapshot()).node_bin_valid).toBe('true');
+      const healed = fs.readFileSync(path.join(tmpDir, 'node-bin'), 'utf-8').trim();
+      expect(healed).not.toBe('/nonexistent/path/node');
+      expect(healed.length).toBeGreaterThan(0);
     });
 
     it('reports rollback_available based on previous file validity', () => {
@@ -456,4 +524,174 @@ describe('MetricsCollector', () => {
       expect(col.collectL1(buildSnapshot()).cms_workspace).toBe('ws-abc');
     });
   });
+  describe('node-bin self-heal', () => {
+    it('does not modify node-bin file when path is already valid', () => {
+      const validPath = process.execPath;
+      fs.writeFileSync(path.join(tmpDir, 'node-bin'), validPath);
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+      col.collectL1(buildSnapshot());
+      const content = fs.readFileSync(path.join(tmpDir, 'node-bin'), 'utf-8').trim();
+      expect(content).toBe(validPath);
+    });
+
+    it('heals node-bin using process.execPath and is idempotent', () => {
+      fs.writeFileSync(path.join(tmpDir, 'node-bin'), '/stale/nvm/v18/bin/node');
+      const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+
+      col.collectL1(buildSnapshot());
+      const first = fs.readFileSync(path.join(tmpDir, 'node-bin'), 'utf-8').trim();
+      expect(col.getLastInfraHealth()!.nodeBinValid).toBe(true);
+      expect(col.getLastInfraHealth()!.nodeBinDiagnostic).toBeUndefined();
+
+      col.collectL1(buildSnapshot());
+      const second = fs.readFileSync(path.join(tmpDir, 'node-bin'), 'utf-8').trim();
+      expect(second).toBe(first);
+    });
+
+    it('reports diagnostic when self-heal fails (no usable node found)', () => {
+      const stalePath = '/nonexistent/nvm/v16/bin/node';
+      fs.writeFileSync(path.join(tmpDir, 'node-bin'), stalePath);
+
+      const execPathSpy = vi.spyOn(process, 'execPath', 'get').mockReturnValue('/also/broken/node');
+      const origPath = process.env.PATH;
+      process.env.PATH = '/no_such_dir';
+      fsMockState.blockAccessSync = true;
+
+      try {
+        const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+        col.collectL1(buildSnapshot());
+        const health = col.getLastInfraHealth()!;
+        expect(health.nodeBinValid).toBe(false);
+        expect(health.nodeBinDiagnostic).toEqual({
+          originalPath: stalePath,
+          pathExists: false,
+          pathExecutable: false,
+        });
+      } finally {
+        fsMockState.blockAccessSync = false;
+        process.env.PATH = origPath;
+        execPathSpy.mockRestore();
+      }
+    });
+
+    it('diagnostic distinguishes exists-but-not-executable from missing', () => {
+      const existsNotExec = path.join(tmpDir, 'fake-node');
+      fs.writeFileSync(existsNotExec, 'not a binary');
+      fs.chmodSync(existsNotExec, 0o644);
+      fs.writeFileSync(path.join(tmpDir, 'node-bin'), existsNotExec);
+
+      const execPathSpy = vi.spyOn(process, 'execPath', 'get').mockReturnValue('/also/broken/node');
+      const origPath = process.env.PATH;
+      process.env.PATH = '/no_such_dir';
+      fsMockState.blockAccessSync = true;
+
+      try {
+        const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+        col.collectL1(buildSnapshot());
+        const health = col.getLastInfraHealth()!;
+        expect(health.nodeBinValid).toBe(false);
+        expect(health.nodeBinDiagnostic).toEqual({
+          originalPath: existsNotExec,
+          pathExists: true,
+          pathExecutable: false,
+        });
+      } finally {
+        fsMockState.blockAccessSync = false;
+        process.env.PATH = origPath;
+        execPathSpy.mockRestore();
+      }
+    });
+
+    it('skips an executable candidate whose Node major version is below 18', () => {
+      const stalePath = '/nonexistent/nvm/v16/bin/node';
+      fs.writeFileSync(path.join(tmpDir, 'node-bin'), stalePath);
+
+      const execPathSpy = vi.spyOn(process, 'execPath', 'get').mockReturnValue('/fake/current/node');
+      const origPath = process.env.PATH;
+      process.env.PATH = '/fake/bin';
+      fsMockState.accessOverride = (p, mode) => {
+        if (mode === fs.constants.X_OK && p === '/fake/bin/node') return;
+        if (mode === fs.constants.X_OK) throw new Error(`EACCES: ${p}`);
+      };
+      execMockState.override = () => 'v16.20.0\n';
+
+      try {
+        const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+        col.collectL1(buildSnapshot());
+        const health = col.getLastInfraHealth()!;
+        expect(health.nodeBinValid).toBe(false);
+        expect(fs.readFileSync(path.join(tmpDir, 'node-bin'), 'utf-8').trim()).toBe(stalePath);
+      } finally {
+        fsMockState.accessOverride = null;
+        execMockState.override = null;
+        process.env.PATH = origPath;
+        execPathSpy.mockRestore();
+      }
+    });
+
+    it('accepts an executable candidate whose Node major version is >= 18', () => {
+      const stalePath = '/nonexistent/nvm/v16/bin/node';
+      fs.writeFileSync(path.join(tmpDir, 'node-bin'), stalePath);
+
+      const execPathSpy = vi.spyOn(process, 'execPath', 'get').mockReturnValue('/fake/current/node');
+      const origPath = process.env.PATH;
+      process.env.PATH = '/fake/bin';
+      fsMockState.accessOverride = (p, mode) => {
+        if (mode === fs.constants.X_OK && p === '/fake/bin/node') return;
+        if (mode === fs.constants.X_OK) throw new Error(`EACCES: ${p}`);
+      };
+      execMockState.override = (file) => (file === '/fake/bin/node' ? 'v20.11.0\n' : 'v16.20.0\n');
+
+      try {
+        const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+        col.collectL1(buildSnapshot());
+        const health = col.getLastInfraHealth()!;
+        expect(health.nodeBinValid).toBe(true);
+        expect(fs.readFileSync(path.join(tmpDir, 'node-bin'), 'utf-8').trim()).toBe('/fake/bin/node');
+      } finally {
+        fsMockState.accessOverride = null;
+        execMockState.override = null;
+        process.env.PATH = origPath;
+        execPathSpy.mockRestore();
+      }
+    });
+
+    it('skips a candidate whose --version execution fails', () => {
+      const stalePath = '/nonexistent/nvm/v16/bin/node';
+      fs.writeFileSync(path.join(tmpDir, 'node-bin'), stalePath);
+
+      const execPathSpy = vi.spyOn(process, 'execPath', 'get').mockReturnValue('/fake/current/node');
+      const origPath = process.env.PATH;
+      process.env.PATH = '/fake/bin';
+      fsMockState.accessOverride = (p, mode) => {
+        if (mode === fs.constants.X_OK && p === '/fake/bin/node') return;
+        if (mode === fs.constants.X_OK) throw new Error(`EACCES: ${p}`);
+      };
+      execMockState.override = () => {
+        throw new Error('ETIMEDOUT: --version timed out');
+      };
+
+      try {
+        const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+        col.collectL1(buildSnapshot());
+        const health = col.getLastInfraHealth()!;
+        expect(health.nodeBinValid).toBe(false);
+        expect(fs.readFileSync(path.join(tmpDir, 'node-bin'), 'utf-8').trim()).toBe(stalePath);
+      } finally {
+        fsMockState.accessOverride = null;
+        execMockState.override = null;
+        process.env.PATH = origPath;
+        execPathSpy.mockRestore();
+      }
+    });
+  });
 });
+
+function down(reason: string): ProcessLiveness {
+  return {
+    running: false,
+    source: 'none',
+    reason,
+    pidFileState: 'missing',
+  };
+}

@@ -444,6 +444,66 @@ describe('Updater', () => {
       );
     });
 
+    it('removes stale versions after a successful automatic upgrade', async () => {
+      setupForDownload();
+      let currentReads = 0;
+      let previousReads = 0;
+
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (filePath.endsWith('/current')) {
+          currentReads++;
+          return Promise.resolve(currentReads <= 2 ? '1.0.1_aaa\n' : '1.0.2_bbb\n');
+        }
+        if (filePath.endsWith('/previous')) {
+          previousReads++;
+          return Promise.resolve(previousReads === 1 ? '1.0.0_zzz\n' : '1.0.1_aaa\n');
+        }
+        if (filePath.includes('/versions/1.0.1_aaa/VERSION')) {
+          return Promise.resolve('version=1.0.1\ngit_commit=aaa\n');
+        }
+        if (filePath.includes('/versions/1.0.2_bbb/VERSION')) {
+          return Promise.resolve('version=1.0.2\ngit_commit=bbb\n');
+        }
+        if (filePath.includes('/scripts/')) return Promise.resolve(Buffer.from('script'));
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsReaddir.mockImplementation((dir: string) => {
+        if (dir.includes('download-tmp')) return Promise.resolve(['loongsuite-pilot']);
+        if (dir.endsWith('/versions')) {
+          return Promise.resolve(['1.0.0_old', '1.0.1_aaa', '1.0.2_bbb']);
+        }
+        return Promise.resolve([]);
+      });
+      mockFsAccess.mockImplementation((p: string) => {
+        if (p.includes('versions/1.0.1_aaa')) return Promise.resolve();
+        if (p.includes('package.json')) return Promise.resolve();
+        if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
+        if (p.includes('scripts/collector-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/updater-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/loongsuite-pilot.sh')) return Promise.resolve();
+        if (p.includes('postinstall.js')) return Promise.reject(new Error('ENOENT'));
+        return Promise.reject(new Error('ENOENT'));
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(mockFsRm).toHaveBeenCalledWith(
+        expect.stringContaining('/versions/1.0.0_old'),
+        expect.objectContaining({ recursive: true, force: true }),
+      );
+      const staleRmIndex = mockFsRm.mock.calls.findIndex(
+        ([p]: [string]) => p.includes('/versions/1.0.0_old'),
+      );
+      const restartCallIndex = mockExecFile.mock.calls.findIndex(
+        ([cmd, args]: [string, string[]]) => String(cmd).includes('loongsuite-pilot') && args[0] === 'restart-collector',
+      );
+      expect(mockFsRm.mock.invocationCallOrder[staleRmIndex]).toBeGreaterThan(
+        mockExecFile.mock.invocationCallOrder[restartCallIndex],
+      );
+    });
+
     it('aborts when download returns HTTP error', async () => {
       mockFetch
         .mockResolvedValueOnce(makeResponseJson(makeManifest()))
@@ -680,10 +740,8 @@ describe('Updater', () => {
 
   // ─── GC ────────────────────────────────────────────────
 
-  describe('gcOldVersions (via full check cycle)', () => {
-    it('preserves current and previous, removes others', async () => {
-      // We test gc indirectly — it runs at end of successful check()
-      // Setup a successful update cycle
+  describe('gcOldVersions', () => {
+    it('preserves current and previous while removing one stale version', async () => {
       mockFsReadFile.mockImplementation((p: string) => {
         if (p.endsWith('/current')) return Promise.resolve('1.0.2_bbb\n');
         if (p.endsWith('/previous')) return Promise.resolve('1.0.1_aaa\n');
@@ -707,6 +765,81 @@ describe('Updater', () => {
       );
       expect(rmCalls).toHaveLength(1);
       expect(rmCalls[0][0]).toContain('1.0.0_old');
+    });
+
+    it('removes only the oldest stale version per cleanup run', async () => {
+      mockFsReadFile.mockImplementation((p: string) => {
+        if (p.endsWith('/current')) return Promise.resolve('1.0.2_bbb\n');
+        if (p.endsWith('/previous')) return Promise.resolve('1.0.1_aaa\n');
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsReaddir.mockImplementation((dir: string) => {
+        if (dir.endsWith('/versions')) {
+          return Promise.resolve(['1.0.0_old', '0.9.9_older', '1.0.1_aaa', '1.0.2_bbb']);
+        }
+        return Promise.resolve([]);
+      });
+      mockFsStat.mockImplementation((p: string) => Promise.resolve({
+        isDirectory: () => true,
+        mtimeMs: p.includes('0.9.9_older') ? 10 : 20,
+      }));
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await (updater as any).gcOldVersions();
+
+      const rmCalls = mockFsRm.mock.calls.filter(
+        ([p]: [string]) => p.includes('versions/'),
+      );
+      expect(rmCalls).toHaveLength(1);
+      expect(rmCalls[0][0]).toContain('0.9.9_older');
+      expect(rmCalls[0][0]).not.toContain('1.0.0_old');
+    });
+
+    it('cleans stale versions during an already up-to-date check', async () => {
+      mockFetch.mockResolvedValueOnce(
+        makeResponseJson(makeManifest({ version: '1.0.2', git_commit: 'bbb' })),
+      );
+      mockFsReadFile.mockImplementation((p: string) => {
+        if (p.endsWith('/current')) return Promise.resolve('1.0.2_bbb\n');
+        if (p.endsWith('/previous')) return Promise.resolve('1.0.1_aaa\n');
+        if (p.endsWith('/VERSION')) return Promise.resolve('version=1.0.2\ngit_commit=bbb\n');
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsAccess.mockResolvedValue(undefined);
+      mockFsReaddir.mockImplementation((dir: string) => {
+        if (dir.endsWith('/versions')) {
+          return Promise.resolve(['1.0.0_old', '1.0.1_aaa', '1.0.2_bbb']);
+        }
+        return Promise.resolve([]);
+      });
+      mockFsStat.mockResolvedValue({ isDirectory: () => true });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(mockFsRm).toHaveBeenCalledWith(
+        expect.stringContaining('/versions/1.0.0_old'),
+        expect.objectContaining({ recursive: true, force: true }),
+      );
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips cleanup when current pointer is missing', async () => {
+      mockFsReadFile.mockRejectedValue(new Error('ENOENT'));
+      mockFsReaddir.mockImplementation((dir: string) => {
+        if (dir.endsWith('/versions')) {
+          return Promise.resolve(['1.0.0_old']);
+        }
+        return Promise.resolve([]);
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await (updater as any).gcOldVersions();
+
+      const rmCalls = mockFsRm.mock.calls.filter(
+        ([p]: [string]) => p.includes('versions/'),
+      );
+      expect(rmCalls).toHaveLength(0);
     });
   });
 

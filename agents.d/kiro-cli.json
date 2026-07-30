@@ -1,0 +1,30 @@
+{
+  "id": "kiro-cli",
+  "displayName": "Kiro CLI",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.kiro", "~/.local/share/kiro-cli"],
+    "commands": ["kiro-cli"]
+  },
+  "runtime": {
+    "nodeSqlite": "required-for-transcript",
+    "nodeSqliteSince": "22.5.0",
+    "fallback": "无 node:sqlite 时 hook fail-open：transcript 双源中的 sqlite 主干不可用，仅 hook 事件链路（postToolUse tool_response + stop 信号）可采集；STEP/LLM span 与 token/credit 对齐依赖 transcript，故无 builtin 时不含 LLM 步。"
+  },
+  "hook": {
+    "settingsPath": "~/.kiro/agents/pilot-kiro.json",
+    "events": ["userPromptSubmit", "preToolUse", "postToolUse", "stop"],
+    "hookCommand": "$PILOT_DATA/hooks/kiro-cli-loongsuite-pilot-hook.sh",
+    "format": "flat",
+    "matcher": "*",
+    "eventSubcommand": "as-is",
+    "kiroAgent": {
+      "name": "pilot-kiro",
+      "tools": ["read", "write", "shell", "grep", "glob", "report", "thinking", "todo"]
+    }
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/kiro-cli"
+  }
+}

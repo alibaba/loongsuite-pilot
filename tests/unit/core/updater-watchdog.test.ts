@@ -14,8 +14,10 @@ vi.mock('../../../src/utils/logger.js', () => ({
 }));
 
 const mockExecFileAsync = vi.fn();
+const mockExecFileSync = vi.fn();
 vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
+  execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
 }));
 vi.mock('node:util', () => ({
   promisify: () => (...args: unknown[]) => mockExecFileAsync(...args),
@@ -68,6 +70,16 @@ describe('UpdaterWatchdog', () => {
 
   beforeEach(async () => {
     tmpDir = await createTempDir('updater-watchdog-test-');
+    mockExecFileSync.mockReset();
+    mockExecFileSync.mockImplementation((cmd: string, args: string[] = []) => {
+      if (cmd === 'ps' && args.includes('-p')) {
+        return 'node /home/test/.loongsuite-pilot/bin/updater-daemon.js\n';
+      }
+      if (cmd === 'powershell.exe' && args.includes('-Command')) {
+        return 'node C:\\Users\\test\\.loongsuite-pilot\\bin\\updater-daemon.js\n';
+      }
+      return '';
+    });
     mockExecFileAsync.mockReset();
     mockExecFileAsync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === 'ps') {
@@ -137,13 +149,33 @@ describe('UpdaterWatchdog', () => {
     });
   });
 
-  it('restarts when updater command does not look like the updater daemon', async () => {
-    await writePid(tmpDir);
-    await writeHeartbeat(tmpDir);
-    mockExecFileAsync.mockImplementation((cmd: string) => {
-      if (cmd === 'ps') return Promise.resolve({ stdout: 'node /tmp/other.js\n', stderr: '' });
-      return Promise.resolve({ stdout: '', stderr: '' });
+  it('reports healthy when updater PID changed but process identity matches heartbeat', async () => {
+    await writeHeartbeat(tmpDir, { pid: 456 });
+    const alarms = makeAlarmManager();
+
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      alarmManager: alarms,
+      updaterLiveness: () => ({
+        running: true,
+        pid: 456,
+        source: 'process-scan',
+        reason: 'matching process command found; pid file points to stale or mismatched pid 123',
+        pidFileState: 'stale',
+      }),
     });
+
+    const result = await wd.runCheck();
+
+    expect(result.status).toBe('healthy');
+    expect(alarms.serialize()).toEqual([]);
+  });
+
+  it('restarts when updater command does not look like the updater daemon', async () => {
+    await writeHeartbeat(tmpDir);
 
     const alarms = makeAlarmManager();
     const wd = new UpdaterWatchdog({
@@ -152,6 +184,16 @@ describe('UpdaterWatchdog', () => {
       loongsuitePilotBin: '/bin/loongsuite-pilot',
       startupGraceMs: 0,
       alarmManager: alarms,
+      updaterLiveness: () => ({
+        running: false,
+        pid: UPDATER_PID,
+        source: 'none',
+        reason: 'pid file points to mismatched process',
+        pidFileState: 'stale',
+        pidFileProcessAlive: true,
+        pidFileCommand: 'node /tmp/other.js',
+        pidFileCommandMatched: false,
+      }),
     });
 
     const result = await wd.runCheck();

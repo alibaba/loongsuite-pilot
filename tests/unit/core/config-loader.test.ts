@@ -130,6 +130,41 @@ describe('ConfigLoader', () => {
       expect(config.flushers.sls?.enabled).toBe(true);
     });
 
+    it('tags inner SLS endpoints with inner serviceNamePrefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'user-svc',
+        sls: { endpoint: 'https://user.log.aliyuncs.com', project: 'up', logstore: 'ul' },
+      });
+      // second read = configs/inner/data_config.json
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'managed-svc',
+        sls: [{ name: 'inner', endpoint: 'https://inner.log.aliyuncs.com', project: 'ip', logstore: 'il' }],
+      });
+
+      const config = await loadConfig();
+      const eps = config.flushers.sls!.endpoints;
+      const user = eps.find(e => e.project === 'up')!;
+      const inner = eps.find(e => e.project === 'ip')!;
+      // user backend inherits the shared prefix (no override); inner carries its own
+      expect(user.serviceName).toBeUndefined();
+      expect(inner.serviceName).toBe('managed-svc');
+    });
+
+    it('leaves inner SLS serviceName unset when inner prefix equals the user prefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'same-svc',
+        sls: { endpoint: 'https://user.log.aliyuncs.com', project: 'up', logstore: 'ul' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'same-svc',
+        sls: [{ name: 'inner', endpoint: 'https://inner.log.aliyuncs.com', project: 'ip', logstore: 'il' }],
+      });
+
+      const config = await loadConfig();
+      const inner = config.flushers.sls!.endpoints.find(e => e.project === 'ip')!;
+      expect(inner.serviceName).toBeUndefined();
+    });
+
     it('uses env SLS destination over file values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         sls: {
@@ -223,21 +258,29 @@ describe('ConfigLoader', () => {
       expect(config.listeners.qoder.enabled).toBe(true);
       expect(config.listeners['qoder-sqlite'].enabled).toBe(true);
       expect(config.listeners['qoder-work'].enabled).toBe(true);
+      expect(config.listeners['qoder-work-cn-trace']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['qoder-work-cn-hook']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['qoder-work-cn-log']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['qoder-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 30_000 });
       expect(config.listeners['qoder-cli-session'].enabled).toBe(true);
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
       expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 30_000 });
     });
 
     it('merges file-level listener overrides', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         listeners: {
           qoder: { enabled: false, pollInterval: 120000 },
+          'opencode-log': { pollInterval: 1000 },
         },
       });
 
       const config = await loadConfig();
       expect(config.listeners.qoder.enabled).toBe(false);
       expect(config.listeners.qoder.pollInterval).toBe(120000);
+      expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 1000 });
     });
 
     it('migrates a legacy codex-log listener override to codex-transcript', async () => {
@@ -497,14 +540,33 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {
           mode: 'custom',
-          types: ['apiKey', 'cloudAccessKey', 'pii', 'databaseUrl'],
+          types: [
+            'apiKey',
+            'cloudAccessKey',
+            'pii',
+            'databaseUrl',
+            'idCard',
+            'phone',
+            'email',
+            'ipAddress',
+            'bankCard',
+          ],
         },
       });
 
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        types: ['apiKey', 'cloudAccessKey', 'databaseUrl'],
+        types: [
+          'apiKey',
+          'cloudAccessKey',
+          'databaseUrl',
+          'idCard',
+          'phone',
+          'email',
+          'ipAddress',
+          'bankCard',
+        ],
       });
     });
 
@@ -549,12 +611,23 @@ describe('ConfigLoader', () => {
           types: ['apiKey'],
         },
       });
-      vi.stubEnv('LOONGSUITE_PILOT_MASK_TYPES', 'cloudAccessKey,pii,databaseUrl');
+      vi.stubEnv(
+        'LOONGSUITE_PILOT_MASK_TYPES',
+        'cloudAccessKey,pii,databaseUrl,idCard,phone,email,ipAddress,bankCard',
+      );
 
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        types: ['cloudAccessKey', 'databaseUrl'],
+        types: [
+          'cloudAccessKey',
+          'databaseUrl',
+          'idCard',
+          'phone',
+          'email',
+          'ipAddress',
+          'bankCard',
+        ],
       });
     });
   });
@@ -700,7 +773,7 @@ describe('ConfigLoader', () => {
       expect(config.otlpTrace).toBeUndefined();
     });
 
-    it('buildOtlpTraceConfig uses new path when otlpTrace.endpoint present', async () => {
+    it('buildOtlpTraceConfig builds a single endpoint from otlpTrace', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: true,
         otlpTrace: {
@@ -717,8 +790,13 @@ describe('ConfigLoader', () => {
       const result = buildOtlpTraceConfig(config);
 
       expect(result).toBeDefined();
-      expect(result!.endpoint).toBe('http://jaeger:4318');
-      expect(result!.headers).toEqual({ 'X-Custom': 'val' });
+      expect(result!.endpoints).toHaveLength(1);
+      expect(result!.endpoints[0]).toEqual({
+        name: 'user-otlp',
+        endpoint: 'http://jaeger:4318',
+        headers: { 'X-Custom': 'val' },
+        compression: undefined,
+      });
       expect(result!.resourceAttributes).toEqual({ 'team': 'infra' });
       expect(result!.serviceName).toBe('my-svc');
       expect(result!.debug).toBe(true);
@@ -742,7 +820,34 @@ describe('ConfigLoader', () => {
       expect(result!.resourceAttributeKeys).toEqual(['agentteams.worker.name', 'custom.attr']);
     });
 
-    it('buildOtlpTraceConfig falls back to cms path when no otlpTrace', async () => {
+    it('buildOtlpTraceConfig defaults spanAttributePassthroughPrefixes to []', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://jaeger:4318' },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.spanAttributePassthroughPrefixes).toEqual([]);
+    });
+
+    it('buildOtlpTraceConfig trims and de-dups spanAttributePassthroughPrefixes', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          endpoint: 'http://jaeger:4318',
+          spanAttributePassthroughPrefixes: ['multica.', 'multica.', ' custom. ', ' '],
+        },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.spanAttributePassthroughPrefixes).toEqual(['multica.', 'custom.']);
+    });
+
+    it('buildOtlpTraceConfig expands cms into an arms endpoint', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: true,
         cms: { licenseKey: 'key123', endpoint: 'https://arms.cn-hangzhou.arms.aliyuncs.com', workspace: 'ws1' },
@@ -752,17 +857,18 @@ describe('ConfigLoader', () => {
       const result = buildOtlpTraceConfig(config);
 
       expect(result).toBeDefined();
-      expect(result!.endpoint).toBe('https://arms.cn-hangzhou.arms.aliyuncs.com');
-      expect(result!.headers).toEqual({
+      expect(result!.endpoints).toHaveLength(1);
+      expect(result!.endpoints[0]!.name).toBe('user-cms');
+      expect(result!.endpoints[0]!.endpoint).toBe('https://arms.cn-hangzhou.arms.aliyuncs.com');
+      expect(result!.endpoints[0]!.headers).toEqual({
         'x-arms-license-key': 'key123',
         'x-arms-project': 'arms',
         'x-cms-workspace': 'ws1',
       });
       expect(result!.resourceAttributes).toEqual({ 'acs.arms.service.feature': 'genai_app' });
-      expect(result!.resourceAttributeKeys).toEqual([]);
     });
 
-    it('buildOtlpTraceConfig prefers otlpTrace over cms', async () => {
+    it('buildOtlpTraceConfig unions otlpTrace AND cms (both sent)', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: true,
         cms: { licenseKey: 'key', endpoint: 'https://arms.example.com', workspace: 'ws' },
@@ -773,9 +879,156 @@ describe('ConfigLoader', () => {
       const result = buildOtlpTraceConfig(config);
 
       expect(result).toBeDefined();
-      expect(result!.endpoint).toBe('http://tempo:4318');
-      expect(result!.headers).toBeUndefined();
-      expect(result!.resourceAttributes).toBeUndefined();
+      expect(result!.endpoints).toHaveLength(2);
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-otlp', 'user-cms']);
+      expect(result!.endpoints[0]!.endpoint).toBe('http://tempo:4318');
+      expect(result!.endpoints[1]!.endpoint).toBe('https://arms.example.com');
+      // arms resource attribute is shared across all backends
+      expect(result!.resourceAttributes).toEqual({ 'acs.arms.service.feature': 'genai_app' });
+    });
+
+    it('buildOtlpTraceConfig adds inner otlp[] and cms[] backends (union)', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://tempo:4318' },
+      });
+      // second read = configs/inner/data_config.json
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlp: [{ name: 'managed-otlp', endpoint: 'http://collector.internal:4318', headers: { 'x-token': 't' } }],
+        cms: [{ name: 'managed-arms', endpoint: 'https://managed.arms.aliyuncs.com', licenseKey: 'lk', project: 'proj', workspace: 'wksp' }],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-otlp', 'managed-otlp', 'managed-arms']);
+      const arms = result!.endpoints.find(e => e.name === 'managed-arms')!;
+      expect(arms.headers).toEqual({
+        'x-arms-license-key': 'lk',
+        'x-arms-project': 'proj',
+        'x-cms-workspace': 'wksp',
+      });
+    });
+
+    it('buildOtlpTraceConfig tags inner backends with inner serviceNamePrefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        serviceNamePrefix: 'user-svc',
+        otlpTrace: { endpoint: 'http://tempo:4318' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'managed-svc',
+        otlp: [{ name: 'managed-otlp', endpoint: 'http://collector.internal:4318' }],
+        cms: [{ name: 'managed-arms', endpoint: 'https://managed.arms.aliyuncs.com', licenseKey: 'lk' }],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      // top-level serviceName stays the user prefix
+      expect(result!.serviceName).toBe('user-svc');
+      // user backend leaves serviceName unset (inherits top-level)
+      expect(result!.endpoints.find(e => e.name === 'user-otlp')!.serviceName).toBeUndefined();
+      // both inner backends carry the managed serviceName
+      expect(result!.endpoints.find(e => e.name === 'managed-otlp')!.serviceName).toBe('managed-svc');
+      expect(result!.endpoints.find(e => e.name === 'managed-arms')!.serviceName).toBe('managed-svc');
+    });
+
+    it('buildOtlpTraceConfig leaves inner serviceName unset when it equals the user prefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        serviceNamePrefix: 'same-svc',
+        otlpTrace: { endpoint: 'http://tempo:4318' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'same-svc',
+        otlp: [{ name: 'managed-otlp', endpoint: 'http://collector.internal:4318' }],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      // no differentiation needed -> inner endpoint inherits the top-level name
+      expect(result!.endpoints.find(e => e.name === 'managed-otlp')!.serviceName).toBeUndefined();
+    });
+
+    it('buildOtlpTraceConfig keeps same-url backends split by inner serviceName', async () => {
+      // user + inner point at the same ARMS url with the same license, but the
+      // inner backend has a distinct serviceName -> both must be kept.
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        serviceNamePrefix: 'user-svc',
+        cms: { licenseKey: 'lk', endpoint: 'https://a.arms.aliyuncs.com', workspace: 'w' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'managed-svc',
+        cms: [{ name: 'managed-dup', endpoint: 'https://a.arms.aliyuncs.com', licenseKey: 'lk', workspace: 'w' }],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-cms', 'managed-dup']);
+      expect(result!.endpoints.find(e => e.name === 'managed-dup')!.serviceName).toBe('managed-svc');
+    });
+
+    it('buildOtlpTraceConfig dedups by url + license-key + project', async () => {
+      // user-cms: project is extracted from the hostname ('a'), license 'lk'
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        cms: { licenseKey: 'lk', endpoint: 'https://a.arms.aliyuncs.com', workspace: 'w' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        cms: [
+          // same url + same license + same (extracted) project 'a' -> dropped
+          { name: 'dup', endpoint: 'https://a.arms.aliyuncs.com', licenseKey: 'lk', workspace: 'w' },
+          // same url, different license -> kept
+          { name: 'other-tenant', endpoint: 'https://a.arms.aliyuncs.com', licenseKey: 'lk2', workspace: 'w2' },
+        ],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-cms', 'other-tenant']);
+    });
+
+    it('buildOtlpTraceConfig keeps same-url/license/project backends that differ only by workspace', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        cms: { licenseKey: 'lk', endpoint: 'https://a.arms.aliyuncs.com', workspace: 'w1' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        cms: [
+          // same url + same license + same project, only workspace differs -> kept
+          { name: 'other-workspace', endpoint: 'https://a.arms.aliyuncs.com', licenseKey: 'lk', workspace: 'w2' },
+        ],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-cms', 'other-workspace']);
+    });
+
+    it('buildOtlpTraceConfig ignores malformed (non-array) inner otlp/cms without throwing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://tempo:4318' },
+      });
+      // control-plane serialization error: otlp/cms are objects, not arrays
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlp: { endpoint: 'http://oops:4318' },
+        cms: 'not-an-array',
+      });
+
+      const config = await loadConfig();
+      // must not throw — a bad managed push cannot brick flusher construction
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-otlp']);
     });
 
     it('buildOtlpTraceConfig returns undefined when collectTrace is false', async () => {
@@ -800,7 +1053,7 @@ describe('ConfigLoader', () => {
       const result = buildOtlpTraceConfig(config);
 
       expect(result).toBeDefined();
-      expect(result!.endpoint).toBe('http://from-env:4318');
+      expect(result!.endpoints[0]!.endpoint).toBe('http://from-env:4318');
     });
 
     it('env var LOONGSUITE_PILOT_OTLP_HEADERS overrides file headers', async () => {
@@ -817,7 +1070,7 @@ describe('ConfigLoader', () => {
       const result = buildOtlpTraceConfig(config);
 
       expect(result).toBeDefined();
-      expect(result!.headers).toEqual({ from: 'env' });
+      expect(result!.endpoints[0]!.headers).toEqual({ from: 'env' });
     });
 
     it('new path with empty headers produces undefined headers', async () => {
@@ -830,7 +1083,76 @@ describe('ConfigLoader', () => {
       const result = buildOtlpTraceConfig(config);
 
       expect(result).toBeDefined();
-      expect(result!.headers).toBeUndefined();
+      expect(result!.endpoints[0]!.headers).toBeUndefined();
+    });
+  });
+
+  describe('globalSpanAttributes', () => {
+    afterEach(() => {
+      delete process.env.OTEL_SPAN_ATTRIBUTES;
+    });
+
+    it('reads from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ globalSpanAttributes: { team: 'infra', env: 'prod' } });
+      const config = await loadConfig();
+      expect(config.globalSpanAttributes).toEqual({ team: 'infra', env: 'prod' });
+    });
+
+    it('OTEL_SPAN_ATTRIBUTES env overrides config on collision', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ globalSpanAttributes: { team: 'infra', env: 'prod' } });
+      vi.stubEnv('OTEL_SPAN_ATTRIBUTES', 'env=staging,extra=v');
+      const config = await loadConfig();
+      expect(config.globalSpanAttributes).toEqual({ team: 'infra', env: 'staging', extra: 'v' });
+    });
+
+    it('drops reserved-prefix keys and non-strings from config', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        globalSpanAttributes: { team: 'infra', 'git.repo': 'x', num: 5, obj: { a: 1 } },
+      });
+      const config = await loadConfig();
+      expect(config.globalSpanAttributes).toEqual({ team: 'infra', num: '5' });
+    });
+
+    it('is empty when neither config nor env set', async () => {
+      const config = await loadConfig();
+      expect(config.globalSpanAttributes).toEqual({});
+    });
+  });
+
+  describe('upstreamLink config', () => {
+    it('is disabled by default', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      const config = await loadConfig();
+      expect(config.upstreamLink.enabled).toBe(false);
+      expect(config.upstreamLink.ttlMs).toBe(86_400_000);
+    });
+
+    it('enables via env and reads ttl from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { ttlMs: 3_600_000 } });
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK', 'true');
+      const config = await loadConfig();
+      expect(config.upstreamLink.enabled).toBe(true);
+      expect(config.upstreamLink.ttlMs).toBe(3_600_000);
+    });
+
+    it('treats an empty-string enable env as unset (not "true")', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK', '');
+      const config = await loadConfig();
+      expect(config.upstreamLink.enabled).toBe(false);
+    });
+
+    it('clamps ttlMs=0 to the 24h default (would delete all files otherwise)', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { enabled: true, ttlMs: 0 } });
+      const config = await loadConfig();
+      expect(config.upstreamLink.ttlMs).toBe(86_400_000);
+    });
+
+    it('clamps a negative ttlMs env to the 24h default', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS', '-5');
+      const config = await loadConfig();
+      expect(config.upstreamLink.ttlMs).toBe(86_400_000);
     });
   });
 });

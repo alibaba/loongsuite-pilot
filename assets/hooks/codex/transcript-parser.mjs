@@ -24,6 +24,7 @@ import fs from 'node:fs';
  * @property {number} inputTokens
  * @property {number} outputTokens
  * @property {number} cachedInputTokens
+ * @property {number} cacheCreationTokens
  * @property {number} reasoningOutputTokens
  * @property {number} totalTokens
  */
@@ -106,6 +107,7 @@ function parseTokenUsage(raw) {
     inputTokens: Number(raw['input_tokens'] || 0),
     outputTokens: Number(raw['output_tokens'] || 0),
     cachedInputTokens: Number(raw['cached_input_tokens'] || 0),
+    cacheCreationTokens: Number(raw['cache_creation_input_tokens'] || 0),
     reasoningOutputTokens: Number(raw['reasoning_output_tokens'] || 0),
     totalTokens: Number(raw['total_tokens'] || 0),
   };
@@ -120,6 +122,7 @@ function tokenUsageEqual(a, b) {
     a.inputTokens === b.inputTokens &&
     a.outputTokens === b.outputTokens &&
     a.cachedInputTokens === b.cachedInputTokens &&
+    a.cacheCreationTokens === b.cacheCreationTokens &&
     a.reasoningOutputTokens === b.reasoningOutputTokens &&
     a.totalTokens === b.totalTokens
   );

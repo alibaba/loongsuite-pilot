@@ -83,7 +83,9 @@ interface StepContext {
 const ACTIVITY_TYPE_TO_TOOL_NAME: Record<string, string> = {
   TERMINAL: 'terminal',
   FILE_WRITE: 'file_write',
+  FILE_READ: 'file_read',
   GREP_SEARCH: 'grep_search',
+  SEARCH: 'search',
   DIRECTORY_LIST: 'directory_list',
   SKILL: 'skill',
   ARTIFACT: 'artifact',
@@ -1222,16 +1224,45 @@ export class WukongInput extends BaseInput {
           result = { output: content.output, exit_code: content.exit_code };
           break;
         case 'FILE_WRITE':
-          args = content.path ? { path: content.path } : undefined;
+          args = compactObject({ path: content.path ?? content.file_path });
           result = { status: content.status ?? 'done' };
+          break;
+        case 'FILE_READ':
+          args = compactObject({ path: content.path, start_line: content.start_line });
+          result = compactObject({
+            content: content.content,
+            snippet: content.snippet,
+            total_lines: content.total_lines,
+            status: content.status,
+            error_message: content.error_message,
+          });
           break;
         case 'GREP_SEARCH':
           args = content.query ? { query: content.query } : undefined;
           result = content.matches ?? content.output;
           break;
+        case 'SEARCH':
+          args = compactObject({ queries: content.queries, search_type: content.search_type });
+          result = compactObject({ results: content.results, status: content.status });
+          break;
         case 'DIRECTORY_LIST':
           args = content.path ? { path: content.path } : undefined;
-          result = content.entries ?? content.output;
+          result = content.entries ?? content.output ?? compactObject({
+            files: content.files,
+            total_count: content.total_count,
+            status: content.status,
+          });
+          break;
+        case 'SKILL':
+          args = compactObject({ skill_name: content.skill_name, purpose: content.purpose, meta: content.meta });
+          result = compactObject({
+            output: content.output,
+            status: content.status,
+            error_message: content.error_message,
+          });
+          break;
+        case 'ARTIFACT':
+          result = compactObject({ artifactsMetadata: content.artifactsMetadata, generatedAt: content.generatedAt });
           break;
         default:
           args = content.input ?? undefined;
@@ -1261,7 +1292,10 @@ export class WukongInput extends BaseInput {
       attributes: { source: 'wukong', message_id: msg.id },
     });
 
-    const hasError = content?.exit_code !== undefined && content.exit_code !== 0;
+    const toolResultStatus = resolveActivityResultStatus(content);
+    const errorMessage = typeof content?.error_message === 'string' && content.error_message.length > 0
+      ? content.error_message
+      : undefined;
     const toolResultEntry = buildAgentActivityEntry({
       timestamp: finishTime,
       'event.id': hashId([task.session_id, msg.id, 'activity_result', toolCallId, String(toolIdx + 1)]),
@@ -1274,7 +1308,8 @@ export class WukongInput extends BaseInput {
       'gen_ai.tool.call.id': toolCallId,
       ...(result !== undefined ? { 'gen_ai.tool.call.result': toJsonValue(result) } : {}),
       ...(duration !== undefined ? { 'gen_ai.tool.call.duration': duration } : {}),
-      'tool.result.status': hasError ? 'failure' : 'success',
+      'tool.result.status': toolResultStatus,
+      ...(errorMessage !== undefined ? { 'error.message': errorMessage } : {}),
       'trace_id': traceId,
       'span_id': resultSpanId,
       'parent_span_id': parentSpanId,
@@ -1364,6 +1399,23 @@ function hashId(parts: Array<string | number | undefined>): string {
 
 function numOr(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function compactObject(fields: Record<string, unknown>): Record<string, unknown> | undefined {
+  const entries = Object.entries(fields).filter(([, value]) => value !== undefined && value !== null);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function resolveActivityResultStatus(content: Record<string, unknown> | undefined): 'success' | 'failure' | 'cancelled' {
+  if (!content) return 'success';
+  if (content.exit_code !== undefined && content.exit_code !== 0) return 'failure';
+  if (typeof content.error_message === 'string' && content.error_message.length > 0) return 'failure';
+  if (typeof content.status !== 'string') return 'success';
+
+  const status = content.status.toLowerCase();
+  if (status === 'error' || status === 'failed' || status === 'failure') return 'failure';
+  if (status === 'cancelled' || status === 'canceled') return 'cancelled';
+  return 'success';
 }
 
 function resolveTurnId(sessionId: string, msg: WukongMessage): string {
