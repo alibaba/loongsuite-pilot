@@ -19,34 +19,35 @@ Qoder CLI 插件：安装并启用后，在下一次会话启动时自动检测�
 |--------|------|
 | `INSTALLER_URL` | loongsuite-pilot 安装脚本地址 |
 | `NODE_VERSION` | Node 版本，默认 `22.22.2` |
-| `NODE_DIST_BASE_URL` | Node 分发包下载源（默认 OSS），布局需为 `<base>/v<ver>/<tarball>` |
+| `NODE_DIST_BASE_URL` | Node 分发包下载源（默认 OSS），分发包平铺在该前缀下：`<base>/node-v<ver>-<platform>.tar.gz` |
 | `INSTALL_ARGS` | 透传给 `installer.sh install` 的参数数组，按 `--参数名 "值"` 成对填写，新增参数无需改脚本 |
 
 运行期环境变量可覆盖（优先级最高）：`LOONGSUITE_PILOT_INSTALLER_URL`、`LOONGSUITE_PILOT_NODE_DIST_BASE_URL`、`LOONGSUITE_PILOT_USER_ID`。
 
 ## Node 分发包
 
-默认从 OSS 在线下载，**无需随插件分发任何二进制**。当前源：
+默认从 OSS 在线下载，**仓库与插件都不携带任何 node 二进制**。当前源：
 
 ```
-https://taiye-test-sh.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/node-dist/v22.22.2/
+https://taiye-test-sh.oss-cn-shanghai.aliyuncs.com/sensen-test/node-v22.22.2-<platform>.tar.gz
 ```
 
-维护者刷新/换版本时，先拉取产物（含 sha256 校验）：
+已上传的平台：`darwin-arm64`、`darwin-x64`、`linux-x64`、`linux-arm64`、`win-x64`（均为公读）。
+
+维护者刷新/换版本时，先拉取产物（含 sha256 校验，输出到 `vendor/node/`）：
 
 ```bash
 ./scripts/package-node-dists.sh             # 默认 22.22.2
 ./scripts/package-node-dists.sh 22.22.2     # 显式指定版本
 ```
 
-覆盖平台矩阵：`darwin-arm64`、`darwin-x64`、`linux-x64`、`linux-arm64`、`win-x64`。然后上传：
+然后上传到 `NODE_DIST_BASE_URL` 对应前缀（注意平铺、公读）：
 
 ```bash
-ossutil cp -r -f vendor/node/ \
-  oss://taiye-test-sh/loongsuite-pilot/node-dist/v22.22.2/ --acl public-read
+ossutil cp -r -f vendor/node/ oss://taiye-test-sh/sensen-test/ --acl public-read
 ```
 
-产物不入 git（约 239MB，已 gitignore）。若需**离线分发**，把对应平台的包放到插件 `vendor/node/` 内一同拷给用户，脚本会优先用本地包、不访问网络。
+产物不入 git（约 241MB，已 gitignore），上传后本地可删。若需**离线分发**，把对应平台的包放回插件 `vendor/node/` 一同拷给用户，脚本会优先用本地包、不访问网络。
 
 ## 安装与验证
 

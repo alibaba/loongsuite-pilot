@@ -15,7 +15,7 @@ PILOT_BIN="$HOME/.local/bin/loongsuite-pilot"
 # ---- 内置默认值（可被 config/install-params.conf 及环境变量覆盖） ----
 INSTALLER_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite/loongsuite-pilot/installer.sh"
 NODE_VERSION="22.22.2"
-NODE_DIST_BASE_URL="https://taiye-test-sh.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/node-dist"
+NODE_DIST_BASE_URL="https://taiye-test-sh.oss-cn-shanghai.aliyuncs.com/sensen-test"
 NODE_MIN_MAJOR=22
 INSTALL_ARGS=()
 
@@ -88,7 +88,7 @@ provision_node() {
         dl_tar="$vendor_tar"
     else
         dl_tar="$DATA_DIR/$tarball"
-        local url="$NODE_DIST_BASE_URL/v${NODE_VERSION}/$tarball"
+        local url="$NODE_DIST_BASE_URL/$tarball"
         log "从 $url 下载 node 分发包"
         curl -fsSL "$url" -o "$dl_tar" 2>>"$LOG_FILE" || { log "❌ node 分发包下载失败: $url"; return 1; }
     fi
