@@ -423,7 +423,7 @@ describe('Grok v2 lifecycle', () => {
     );
   });
 
-  test('first UserPromptSubmit baselines pre-existing history instead of replaying it later', () => {
+  test('first UserPromptSubmit does not replay pre-existing completed history later', () => {
     const sid = 's-preexisting-baseline';
     const updatesPath = path.join(sessionDir, 'updates.jsonl');
     const chatPath = path.join(sessionDir, 'chat_history.jsonl');
@@ -470,6 +470,68 @@ describe('Grok v2 lifecycle', () => {
     expect(new Set(output.map((record) => record['gen_ai.turn.id']))).toEqual(
       new Set(['p-current']),
     );
+    expect(JSON.stringify(output)).not.toContain('historical answer');
+  });
+
+  test('first UserPromptSubmit keeps the already-persisted current prompt for Stop', () => {
+    const sid = 's-live-user-prompt-order';
+    const updatesPath = path.join(sessionDir, 'updates.jsonl');
+    const chatPath = path.join(sessionDir, 'chat_history.jsonl');
+    writeJsonl(chatPath, [
+      { type: 'system', content: 'system' },
+      ...chatTurn(0, 'historical', 'historical answer', '2026-07-29T04:40:00.000Z'),
+      {
+        type: 'user',
+        content: [{ type: 'text', text: '<user_query>\ncurrent prompt\n</user_query>' }],
+        prompt_index: 1,
+        timestamp: '2026-07-29T04:41:00.000Z',
+      },
+    ]);
+    writeJsonl(updatesPath, terminal(
+      'p-historical',
+      0,
+      'end_turn',
+      Date.parse('2026-07-29T04:40:01.000Z'),
+    ));
+
+    // Grok writes the current user record before invoking UserPromptSubmit.
+    expect(run('user-prompt-submit', {
+      session_id: sid,
+      prompt_id: 'p-current',
+      transcript_path: updatesPath,
+      timestamp: '2026-07-29T04:41:00.000Z',
+    }).status).toBe(0);
+
+    fs.appendFileSync(
+      chatPath,
+      `${JSON.stringify({
+        type: 'assistant',
+        content: 'current answer',
+        model: 'grok',
+        stop_reason: 'end_turn',
+        timestamp: '2026-07-29T04:41:00.500Z',
+      })}\n`,
+    );
+    fs.appendFileSync(
+      updatesPath,
+      terminal('p-current', 1, 'end_turn', Date.parse('2026-07-29T04:41:01.000Z'))
+        .map((record) => `${JSON.stringify(record)}\n`)
+        .join(''),
+    );
+
+    expect(run('stop', {
+      session_id: sid,
+      prompt_id: 'p-current',
+      transcript_path: updatesPath,
+      stop_reason: 'end_turn',
+      timestamp: '2026-07-29T04:41:01.100Z',
+    }).status).toBe(0);
+
+    const output = records();
+    expect(new Set(output.map((record) => record['gen_ai.turn.id']))).toEqual(
+      new Set(['p-current']),
+    );
+    expect(JSON.stringify(output)).toContain('current prompt');
     expect(JSON.stringify(output)).not.toContain('historical answer');
   });
 

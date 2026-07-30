@@ -607,9 +607,15 @@ async function processHookLocked(trigger, event, sessionId) {
     return;
   }
 
-  // A first UserPromptSubmit/SessionEnd establishes safe file baselines. This
-  // prevents a later cancellation hook from replaying turns that predate
-  // plugin activation.
+  // A first UserPromptSubmit establishes the session without advancing either
+  // file cursor. Grok persists the current user record before invoking this
+  // hook, so baselining to EOF here would discard that prompt and leave the
+  // following Stop with only the assistant suffix. The terminal hook reads
+  // from the beginning and selects only its real promptId/promptIndex, which
+  // preserves the current turn without backfilling older completed turns.
+  //
+  // A first SessionEnd has no current turn boundary we can identify safely, so
+  // it still establishes-and-clears the state without replaying history.
   if (!state.initialized && (trigger === 'user-prompt-submit' || trigger === 'session-end')) {
     state.initialized = true;
     state.transcript_path = updatesPath;
@@ -617,10 +623,6 @@ async function processHookLocked(trigger, event, sessionId) {
       clearState(sessionId);
       markSessionClosed(sessionId);
     } else {
-      const baselineChat = parseGrokTranscript(chatHistoryPath, 0);
-      const baselineUpdates = parseGrokUpdates(updatesPath, {});
-      state.chat_checkpoint = checkpointFor(chatHistoryPath, baselineChat.nextOffset);
-      state.updates_checkpoint = baselineUpdates.checkpoint;
       saveState(sessionId, state);
     }
     return;
