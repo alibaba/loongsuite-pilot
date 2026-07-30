@@ -521,7 +521,6 @@ export class CodexTranscriptInput extends BaseInput {
       }
     }
 
-    if (turn.prompt) activeTurn.emittedPrompt = true;
     activeTurn.emittedStepCount = (activeTurn.emittedStepCount ?? 0) + closedStepCount;
 
     const lastClosedRange = closedStepCount > 0

@@ -1712,6 +1712,7 @@ remove_hook_configs() {
         "$HOME/.claude/settings.json"
         "$HOME/.codex/hooks.json"
         "$HOME/.qwen/settings.json"
+        "$HOME/.workbuddy/settings.json"
     )
 
     local _has_node=0
@@ -1885,6 +1886,68 @@ try {
 }
 
 # ============================================================
+# MiMo Code also uses deployMode "plugin-inject": a spec is written into its
+# own config file's plugin array. Same shape as remove_opencode_plugin but for
+# ~/.config/mimocode/mimocode.json[c]. Without this, the spec survives
+# uninstall and points at a (possibly purged) plugin.mjs, so the next MiMo
+# Code launch loads a non-existent module.
+# ============================================================
+remove_mimocode_plugin() {
+    local configs=(
+        "$HOME/.config/mimocode/mimocode.jsonc"
+        "$HOME/.config/mimocode/mimocode.json"
+    )
+
+    for cfg in "${configs[@]}"; do
+        [ -f "$cfg" ] || continue
+        local short="${cfg/#$HOME/\~}"
+
+        if ! command -v node &>/dev/null; then
+            msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        fi
+
+        local result
+        result=$(node -e "
+const fs = require('fs');
+const f = process.argv[1];
+const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-mimo-code') || s.includes('plugins/mimo-code/plugin.mjs'));
+const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
+const stripJsonc = src => src
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^\s*\/\/.*\$/gm, '')
+  .replace(/[ \t]+\/\/.*\$/gm, '');
+try {
+  const raw = fs.readFileSync(f, 'utf-8');
+  let data, hadComments = false;
+  try { data = JSON.parse(raw); }
+  catch { data = JSON.parse(stripJsonc(raw)); hadComments = true; }
+  const key = Array.isArray(data.plugins) ? 'plugins' : (Array.isArray(data.plugin) ? 'plugin' : null);
+  if (!key) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data[key].length;
+  data[key] = data[key].filter(e => !isOurs(entryStr(e)));
+  if (data[key].length === before) { process.stdout.write('nochange'); process.exit(0); }
+  if (hadComments) fs.writeFileSync(f + '.bak', raw, 'utf-8');
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write(hadComments ? 'cleaned-bak' : 'cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$cfg" 2>/dev/null) || result="error"
+
+        case "$result" in
+            cleaned)
+                msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" ;;
+            cleaned-bak)
+                msg "    ✅ 已清理: $short (含注释,原文件备份为 $short.bak)" \
+                    "    ✅ Cleaned: $short (had comments, original backed up to $short.bak)" ;;
+            nochange)
+                : ;;
+            *)
+                msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
+        esac
+    done
+}
+
+# ============================================================
 # CMD: uninstall
 # ============================================================
 cmd_uninstall() {
@@ -1982,6 +2045,11 @@ cmd_uninstall() {
 
     msg "==> 清理 Pi Coding Agent Extension 配置..." "==> Cleaning up Pi Coding Agent extension config..."
     remove_pi_coding_agent_extension
+    echo ""
+
+    # Remove plugin-inject specs (MiMo Code)
+    msg "==> 清理 MiMo Code 插件配置..." "==> Cleaning up MiMo Code plugin config..."
+    remove_mimocode_plugin
     echo ""
 
     # Remove installation artifacts

@@ -58,7 +58,7 @@ export function buildCodexTranscriptSegment(
   const contextStepCount = opts.contextStepCount ?? turn.steps.length;
   let nextInputContext = inputContext;
 
-  if (includePrompt && turn.prompt) {
+  if (includePrompt && turn.promptReady && turn.prompt) {
     records.push(buildEntry({
       ...base,
       timestamp: turn.startedAtMs,

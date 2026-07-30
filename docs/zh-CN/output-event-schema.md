@@ -2,9 +2,9 @@
 
 [English](../output-event-schema.md) | 简体中文
 
-LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。敏感内容字段是 opt-in 字段，可在输出前进行脱敏。
+LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot 当前输出格式是 GenAI audit-event 的一个变体。敏感内容字段是 opt-in 字段，可在输出前进行脱敏。
 
-下面的类型描述的是规范化事件的语义值。JSONL、SLS 等日志型输出可能会为了后端兼容将值序列化为字符串。
+下面的类型描述的是规范化事件的语义值。JSONL 保留原生 JSON 类型；SLS 等只接受字符串列的后端可在各自输出边界进行序列化。
 
 ## Event Names
 
@@ -18,6 +18,15 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。敏�
 | `tool.approve` | 用户批准工具或动作执行的事件。 |
 | `other` | 无法归类到上述类型的其他事件。 |
 
+四类核心事件的 `event.name` 与 GenAI audit-event 对应关系如下：
+
+| Pilot `event.name` | GenAI audit-event `event.name` |
+|--------------------|--------------------------------|
+| `llm.request` | `gen_ai.model.request` |
+| `llm.response` | `gen_ai.model.response` |
+| `tool.call` | `gen_ai.tool.call` |
+| `tool.result` | `gen_ai.tool.result` |
+
 ## 字段说明
 
 必填程度与 OpenTelemetry 语义保持一致：
@@ -29,8 +38,8 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。敏�
 
 | 字段 | 类型 | 必填程度 | 说明 |
 |------|------|----------|------|
-| `time_unix_nano` | uint64 | Required | 事件发生时间，Unix 纳秒。 |
-| `observed_time_unix_nano` | uint64 | Recommended | collector 观察到事件的时间，Unix 纳秒。 |
+| `time_unix_nano` | uint64 | Required | 语义事件发生时间，Unix 纳秒。对于配对 span，它表示真实的 request/response 或 call/result 边界，而不是采集时间。 |
+| `observed_time_unix_nano` | uint64 | Recommended | collector 观察到事件的时间，Unix 纳秒；它可以与源事件时间不同。 |
 | `event.id` | string | Required | collector 生成的全局唯一事件 ID。 |
 | `event.name` | string | Required | 事件名称，见 [Event Names](#event-names)。 |
 | `user.id` | string | Required | 用户标识，例如员工号、本地账号或机器级身份。 |
@@ -71,7 +80,7 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。敏�
 | `gen_ai.tool.call.exec.id` | string | Recommended | 工具执行侧 ID。 |
 | `gen_ai.tool.call.arguments` | json | Opt-In | 工具调用参数，可能包含敏感内容。 |
 | `gen_ai.tool.call.result` | json | Opt-In | 工具结果 payload，可能包含敏感内容。 |
-| `gen_ai.tool.call.duration` | int | Recommended | 工具执行耗时，单位毫秒。 |
+| `gen_ai.tool.call.duration` | int | Recommended | 使用匹配的 result 边界减去 call 边界得到的正数工具执行耗时，单位毫秒；任一边界缺失或差值非正时省略。 |
 | `gen_ai.skill.name` | string | `skill.use` Conditionally Required | 技能或扩展能力名称。 |
 | `error.type` | string | 操作以错误结束时 Conditionally Required | 低基数错误类型、错误码、异常类名或 HTTP 状态。 |
 | `error.message` | string | `error.type` 存在时 Recommended | 人类可读错误详情。 |

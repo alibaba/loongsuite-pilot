@@ -1824,6 +1824,62 @@ describe('CodexTranscriptInput', () => {
     });
   });
 
+  it('waits for the submitted user message before emitting a prompt assembled across scans', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-prompt-ready-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const environmentContext = '<environment_context>\n  <cwd>C:\\project</cwd>\n</environment_context>';
+    const initial = [
+      record('2026-06-24T06:00:00.000Z', 'session_meta', {
+        id: 'session-1', model_provider: 'openai',
+      }),
+      record('2026-06-24T06:00:01.000Z', 'event_msg', {
+        type: 'task_started', turn_id: 'turn-1',
+      }),
+      record('2026-06-24T06:00:01.100Z', 'response_item', {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: environmentContext }],
+      }),
+      record('2026-06-24T06:00:01.200Z', 'turn_context', {
+        turn_id: 'turn-1', model: 'gpt-5.5', cwd: 'C:\\project',
+      }),
+    ];
+    const transcript = await writeTranscript(sessionDir, initial.join('\n') + '\n');
+
+    await processTranscriptOnce(input, transcript);
+
+    expect(entries).toHaveLength(0);
+    expect((transcriptCheckpoint(stateStore, transcript) as {
+      activeTurn?: { emittedPrompt?: boolean };
+    }).activeTurn?.emittedPrompt).not.toBe(true);
+
+    await fs.appendFile(transcript, [
+      record('2026-06-24T06:00:01.700Z', 'response_item', {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: '修复 Windows 采集' }],
+      }),
+      record('2026-06-24T06:00:01.710Z', 'event_msg', {
+        type: 'user_message', message: '修复 Windows 采集',
+      }),
+    ].join('\n') + '\n', 'utf8');
+    await processTranscriptOnce(input, transcript);
+    await processTranscriptOnce(input, transcript);
+
+    const promptEntries = entries.filter(entry => entry['event.name'] === 'other');
+    expect(promptEntries).toHaveLength(1);
+    expect(promptEntries[0]).toMatchObject({
+      'gen_ai.input.messages_delta': [{
+        role: 'user',
+        parts: [{ type: 'text', content: `${environmentContext}\n修复 Windows 采集` }],
+      }],
+    });
+    expect((transcriptCheckpoint(stateStore, transcript) as {
+      activeTurn?: { emittedPrompt?: boolean };
+    }).activeTurn?.emittedPrompt).toBe(true);
+  });
+
   it('does not shift a token sample without a completed response wave onto a later step', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-unmatched-token-'));
     tempDirs.push(root);

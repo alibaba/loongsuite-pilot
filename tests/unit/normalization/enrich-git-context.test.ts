@@ -42,6 +42,38 @@ describe('enrichCanonicalEntryWithGit', () => {
     expect(entry['git.branch']).toBe('main');
   });
 
+  it('accepts Windows absolute cwd paths for git enrichment', async () => {
+    inferGitContext.mockResolvedValue({
+      repo: 'org/win-proj',
+      branch: 'feature/windows',
+      domain: 'github.com',
+      root: 'C:\\Users\\foo\\proj',
+    });
+    const entry: Record<string, unknown> = {};
+    const record = { 'agent.opencode.cwd': 'C:\\Users\\foo\\proj\\src' };
+
+    await enrichCanonicalEntryWithGit(entry, record, 'opencode');
+
+    expect(inferGitContext).toHaveBeenCalledWith('C:\\Users\\foo\\proj\\src');
+    expect(entry['workspace.path']).toBe('C:\\Users\\foo\\proj\\src');
+    expect(entry['workspace.current_root']).toBe('C:\\Users\\foo\\proj');
+    expect(entry['git.repo']).toBe('org/win-proj');
+  });
+
+  it('accepts Windows absolute workspace roots when cwd is absent', async () => {
+    inferGitContext.mockResolvedValue({ root: '\\\\server\\share\\repo' });
+    const entry: Record<string, unknown> = {};
+    const record = {
+      'agent.opencode.workspace_roots': JSON.stringify(['\\\\server\\share\\repo']),
+    };
+
+    await enrichCanonicalEntryWithGit(entry, record, 'opencode');
+
+    expect(inferGitContext).toHaveBeenCalledWith('\\\\server\\share\\repo');
+    expect(entry['workspace.path']).toBe('\\\\server\\share\\repo');
+    expect(entry['workspace.current_root']).toBe('\\\\server\\share\\repo');
+  });
+
   it('does not run git inference when git.repo and git.branch are already present, but still sets workspace.path', async () => {
     const entry: Record<string, unknown> = { 'git.repo': 'org/proj', 'git.branch': 'main' };
     const record = { 'agent.opencode.cwd': '/Users/foo/proj' };

@@ -60,7 +60,7 @@ export class DeploymentManager {
     this.loader = new AgentDefLoader(loaderOpts);
   }
 
-  async deployAll(): Promise<DeployResult[]> {
+  async deployAll(enabled?: (def: AgentDefinition) => boolean): Promise<DeployResult[]> {
     // ── Phase 0: migrate from old plugins (fail-open) ──
     try {
       await runPluginMigration();
@@ -74,6 +74,16 @@ export class DeploymentManager {
     const results: DeployResult[] = [];
 
     for (const def of this.definitions) {
+      if (enabled && !enabled(def)) {
+        logger.debug('agent excluded from deployment', { agentId: def.id });
+        results.push({
+          success: true,
+          agentId: def.id,
+          deployMode: def.deployMode,
+          skipped: true,
+        });
+        continue;
+      }
       try {
         const result = await this.deployAgent(def);
         results.push(result);
@@ -97,6 +107,26 @@ export class DeploymentManager {
     const result = await this.deployAgent(def);
     await this.saveState();
     return result;
+  }
+
+  /**
+   * Remove a plugin-inject agent's spec from its config file (e.g. MiMo
+   * Code's mimocode.jsonc, OpenCode's opencode.jsonc). Called by the
+   * uninstaller path so the agent's config doesn't keep a dangling spec
+   * pointing at a (possibly purged) plugin.mjs.
+   */
+  async undeployAgent(def: AgentDefinition): Promise<boolean> {
+    await this.loadState();
+    const strategy = this.getStrategy(def);
+    if (!('undeploy' in strategy) || typeof (strategy as { undeploy?: unknown }).undeploy !== 'function') {
+      return false;
+    }
+    const ok = await (strategy as { undeploy: (def: AgentDefinition) => Promise<boolean> }).undeploy(def);
+    if (ok && this.state[def.id]) {
+      delete this.state[def.id];
+      await this.saveState();
+    }
+    return ok;
   }
 
   getDefinitions(): AgentDefinition[] {

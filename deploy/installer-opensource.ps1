@@ -158,6 +158,16 @@ function Test-NodeSuitable {
 function Resolve-Node {
     $candidates = @()
 
+    # Existing installations pin the exact Node binary used for deployment.
+    foreach ($pinFile in @(
+        (Join-Path $DataDir "node-bin"),
+        (Join-Path $CACHE_DIR "node-bin")
+    )) {
+        if (-not (Test-Path -LiteralPath $pinFile)) { continue }
+        $pinned = ([string](Get-Content -LiteralPath $pinFile -Raw -ErrorAction SilentlyContinue)).Trim()
+        if ($pinned) { $candidates += $pinned }
+    }
+
     # nvm-windows
     $nvmHome = $env:NVM_HOME
     if ($nvmHome -and (Test-Path $nvmHome)) {
@@ -992,7 +1002,8 @@ function Remove-HookConfigs {
         (Join-Path $env:USERPROFILE ".qoderwork\settings.json"),
         (Join-Path $env:USERPROFILE ".qoderworkcn\settings.json"),
         (Join-Path $env:USERPROFILE ".claude\settings.json"),
-        (Join-Path $env:USERPROFILE ".qwen\settings.json")
+        (Join-Path $env:USERPROFILE ".qwen\settings.json"),
+        (Join-Path $env:USERPROFILE ".workbuddy\settings.json")
     )
 
     foreach ($cfg in $configs) {
@@ -1021,6 +1032,10 @@ try {
     });
     if (filtered.length === 0) { delete hooks[event]; changed = true; }
     else hooks[event] = filtered;
+  }
+  if (Object.keys(hooks).length === 0) {
+    delete data.hooks;
+    changed = true;
   }
   if (changed) {
     fs.writeFileSync(cfg, JSON.stringify(data, null, 2) + '\n', 'utf-8');
@@ -1126,6 +1141,62 @@ try {
         "cleaned"  { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }
         "nochange" { }
         default    { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
+    }
+}
+
+# ============================================================
+# Remove plugin-inject specs (MiMo Code)
+# ============================================================
+# MiMo Code uses deployMode "plugin-inject": a spec is written into its own
+# config file's plugin array. Same shape as Remove-OpenCodePlugin but for
+# ~/.config/mimocode/mimocode.json[c]. Without this, the spec survives
+# uninstall and points at a (possibly purged) plugin.mjs.
+function Remove-MimoCodePlugin {
+    $configs = @(
+        (Join-Path $env:USERPROFILE ".config\mimocode\mimocode.jsonc"),
+        (Join-Path $env:USERPROFILE ".config\mimocode\mimocode.json")
+    )
+
+    foreach ($cfg in $configs) {
+        if (-not (Test-Path $cfg)) { continue }
+        $short = $cfg -replace [regex]::Escape($env:USERPROFILE), "~"
+
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        }
+
+        $result = & $script:NODE_BIN -e @'
+const fs = require('fs');
+const f = process.argv[1];
+const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-mimo-code') || s.includes('plugins/mimo-code/plugin.mjs'));
+const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
+const stripJsonc = src => src
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^\s*\/\/.*$/gm, '')
+  .replace(/[ \t]+\/\/.*$/gm, '');
+try {
+  const raw = fs.readFileSync(f, 'utf-8');
+  let data, hadComments = false;
+  try { data = JSON.parse(raw); }
+  catch { data = JSON.parse(stripJsonc(raw)); hadComments = true; }
+  const key = Array.isArray(data.plugins) ? 'plugins' : (Array.isArray(data.plugin) ? 'plugin' : null);
+  if (!key) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data[key].length;
+  data[key] = data[key].filter(e => !isOurs(entryStr(e)));
+  if (data[key].length === before) { process.stdout.write('nochange'); process.exit(0); }
+  if (hadComments) fs.writeFileSync(f + '.bak', raw, 'utf-8');
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write(hadComments ? 'cleaned-bak' : 'cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+'@ $cfg 2>$null
+
+        switch ($result) {
+            "cleaned"     { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }
+            "cleaned-bak" { Msg "    ✅ 已清理: $short (含注释,原文件备份为 $short.bak)" "    ✅ Cleaned: $short (had comments, original backed up to $short.bak)" }
+            "nochange"    { }
+            default       { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
+        }
     }
 }
 
@@ -1602,6 +1673,46 @@ function Assert-SafePilotDirectory {
     return $fullPath
 }
 
+function ConvertTo-ExtendedLengthPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if ($fullPath.StartsWith("\\?\")) { return $fullPath }
+    if ($fullPath.StartsWith("\\")) {
+        return "\\?\UNC\$($fullPath.Substring(2))"
+    }
+    return "\\?\$fullPath"
+}
+
+function Remove-PilotPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $extendedPath = ConvertTo-ExtendedLengthPath -Path $Path
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            if ([System.IO.Directory]::Exists($extendedPath)) {
+                [System.IO.Directory]::Delete($extendedPath, $true)
+            } elseif ([System.IO.File]::Exists($extendedPath)) {
+                [System.IO.File]::SetAttributes($extendedPath, [System.IO.FileAttributes]::Normal)
+                [System.IO.File]::Delete($extendedPath)
+            }
+            return
+        } catch {
+            $lastError = $_
+            if ($attempt -lt 3) { Start-Sleep -Milliseconds (100 * $attempt) }
+        }
+    }
+    throw $lastError
+}
+
 function Remove-PilotInstallationFiles {
     $cachePath = Assert-SafePilotDirectory -Path $CACHE_DIR -Purpose "cache"
     $dataPath = Assert-SafePilotDirectory -Path $DataDir -Purpose "data"
@@ -1613,7 +1724,7 @@ function Remove-PilotInstallationFiles {
 
     if ($cachePath -ine $dataPath -and -not $cacheContainsData) {
         if (Test-Path -LiteralPath $cachePath) {
-            Remove-Item -LiteralPath $cachePath -Recurse -Force
+            Remove-PilotPath -Path $cachePath
         }
     } else {
         foreach ($relativePath in @(
@@ -1626,7 +1737,7 @@ function Remove-PilotInstallationFiles {
         )) {
             $target = Join-Path $cachePath $relativePath
             if (Test-Path -LiteralPath $target) {
-                Remove-Item -LiteralPath $target -Recurse -Force
+                Remove-PilotPath -Path $target
             }
         }
     }
@@ -1634,7 +1745,7 @@ function Remove-PilotInstallationFiles {
     foreach ($relativePath in @("hooks", "skills", "plugins")) {
         $target = Join-Path $dataPath $relativePath
         if (Test-Path -LiteralPath $target) {
-            Remove-Item -LiteralPath $target -Recurse -Force
+            Remove-PilotPath -Path $target
         }
     }
 }
@@ -1653,6 +1764,10 @@ function Cmd-Uninstall {
 
     Remove-PilotScheduledTasks
     Msg "    ✅ 已移除计划任务" "    ✅ Removed scheduled tasks"
+
+    # Resolve the pinned runtime before installation files (including node-bin)
+    # are removed. JSON config cleanup must also work when Node is absent from PATH.
+    $script:NODE_BIN = Resolve-Node
 
     Msg "==> 删除安装目录..." "==> Removing installation..."
     Remove-PilotInstallationFiles
@@ -1686,11 +1801,15 @@ function Cmd-Uninstall {
     Remove-PiCodingAgentExtension
     Write-Host ""
 
+    Msg "==> 清理 MiMo Code 插件配置..." "==> Cleaning up MiMo Code plugin config..."
+    Remove-MimoCodePlugin
+    Write-Host ""
+
     if ($Purge) {
         Msg "==> 删除数据目录 (-Purge)..." "==> Removing data directory (-Purge)..."
         $safeDataDir = Assert-SafePilotDirectory -Path $DataDir -Purpose "data"
         if (Test-Path -LiteralPath $safeDataDir) {
-            Remove-Item -LiteralPath $safeDataDir -Recurse -Force
+            Remove-PilotPath -Path $safeDataDir
         }
         Msg "    ✅ 已删除 $DataDir" "    ✅ Removed $DataDir"
     } else {

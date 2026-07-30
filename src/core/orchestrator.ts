@@ -42,8 +42,10 @@ import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
+import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
+import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
@@ -101,8 +103,10 @@ export class Orchestrator extends EventEmitter {
     'kiro-cli-session': 'kiro-cli',
     'opencode-log': 'opencode',
     'pi-coding-agent-log': 'pi-coding-agent',
+    'mimo-code-log': 'mimo-code',
     'qwen-code-cli-log': 'qwen-code-cli',
     'wukong': 'wukong',
+    'workbuddy': 'workbuddy',
   };
 
   private readonly config: AnalyticsConfig;
@@ -197,7 +201,7 @@ export class Orchestrator extends EventEmitter {
       dataDir: this.dataDir,
       pilotDir,
     });
-    await this.deploymentManager.deployAll();
+    await this.deploymentManager.deployAll(def => this.isAgentGatedEnabled(def.id));
 
     this.localWorkerActivationService = new LocalWorkerActivationService({
       dataDir: this.dataDir,
@@ -407,6 +411,7 @@ export class Orchestrator extends EventEmitter {
 
     for (const def of defs) {
       if (def.deployMode !== 'hook' || !def.hook) continue;
+      if (!this.isAgentGatedEnabled(def.id)) continue;
 
       const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
       targets.push({
@@ -1096,6 +1101,29 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- MiMo Code Log (event_t plugin JSONL) ---
+    // Plugin-inject agent (same shape as opencode). Pre-create log dir so
+    // fs.watch in AgentDiscoveryService succeeds immediately after install.
+    const mimoCodeLogDir = path.join(this.dataDir, 'logs', 'mimo-code');
+    await ensureDir(mimoCodeLogDir);
+    const mimoCodeLogInput = new MimoCodeLogInput({
+      stateStore: this.stateStore,
+      logDir: mimoCodeLogDir,
+    });
+    this.inputManager.registerInput(mimoCodeLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(mimoCodeLogInput, {
+        watchPaths: [mimoCodeLogDir],
+        isAvailable: async () => directoryExists(mimoCodeLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['mimo-code-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'mimo-code-log',
+            listenerCfg['mimo-code-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['mimo-code-log']?.pollInterval,
+      }),
+    );
+
     // --- Qwen Code CLI Log (transcript-driven hook JSONL) ---
     const qwenCodeCliLogDir = path.join(this.dataDir, 'logs', 'qwen-code-cli');
     // Pre-create log dir so fs.watch in AgentDiscoveryService succeeds immediately.
@@ -1132,6 +1160,26 @@ export class Orchestrator extends EventEmitter {
           ),
         pollIntervalMs: listenerCfg['wukong']?.pollInterval,
         unavailableThreshold: 3,
+      }),
+    );
+
+    // --- WorkBuddy (Hook/file wakeups + local transcript polling fallback) ---
+    const workBuddyInput = new WorkBuddyInput({
+      stateStore: this.stateStore,
+      hookEventDir: path.join(this.dataDir, 'state', 'workbuddy', 'hook-events'),
+      pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
+    });
+    this.inputManager.registerInput(workBuddyInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(workBuddyInput, {
+        watchPaths: WorkBuddyInput.getWatchPaths(),
+        isAvailable: WorkBuddyInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP.workbuddy) &&
+          this.agentControlManager.resolveEnabled(
+            'workbuddy',
+            listenerCfg.workbuddy?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
       }),
     );
 
