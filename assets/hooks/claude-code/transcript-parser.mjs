@@ -319,6 +319,9 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
                 agentType: record.toolUseResult?.agentType
                   || record.toolUseResult?.agent_type
                   || '',
+                status: record.toolUseResult?.status || '',
+                isAsync: record.toolUseResult?.isAsync === true
+                  || record.toolUseResult?.is_async === true,
               });
             }
           }

@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROCESSOR = path.resolve(__dirname, '../../../../assets/hooks/claude-code-hook-processor.mjs');
@@ -119,6 +120,58 @@ function parentTranscriptWithAgent(sessionId, agentId, agentType = 'general-purp
         id: 'msg_parent_2',
         content: [{ type: 'text', text: 'done' }],
         usage: { input_tokens: 20, output_tokens: 10 },
+        stop_reason: 'end_turn',
+      },
+    },
+  ]);
+}
+
+function parentTranscriptWithBackgroundAgent(sessionId, agentId, agentType = 'general-purpose') {
+  return writeTranscript(sessionId, [
+    {
+      type: 'user',
+      timestamp: '2026-06-04T02:57:32.000Z',
+      message: { content: [{ type: 'text', text: 'delegate this in background' }] },
+    },
+    {
+      type: 'assistant',
+      timestamp: '2026-06-04T02:57:35.000Z',
+      message: {
+        id: 'msg_parent_bg_1',
+        content: [{
+          type: 'tool_use',
+          id: 'agent_call_bg_1',
+          name: 'Agent',
+          input: { subagent_type: agentType, run_in_background: true },
+        }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+        stop_reason: 'tool_use',
+      },
+    },
+    {
+      type: 'user',
+      timestamp: '2026-06-04T02:57:36.000Z',
+      toolUseResult: {
+        agentId,
+        agentType,
+        status: 'async_launched',
+        isAsync: true,
+      },
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'agent_call_bg_1',
+          content: 'Background agent launched successfully.',
+        }],
+      },
+    },
+    {
+      type: 'assistant',
+      timestamp: '2026-06-04T02:57:37.000Z',
+      message: {
+        id: 'msg_parent_bg_2',
+        content: [{ type: 'text', text: 'background task started' }],
+        usage: { input_tokens: 20, output_tokens: 6 },
         stop_reason: 'end_turn',
       },
     },
@@ -364,6 +417,208 @@ describe('claude-code-hook-processor v2 端到端', () => {
 });
 
 describe('claude-code 一级子 Agent 上报', () => {
+  test('后台子 Agent 完成前不导出，SubagentStop 后导出完整父子链路', async () => {
+    const sessionId = 's-subagent-background';
+    const agentId = 'background-child-1';
+    const transcriptPath = parentTranscriptWithBackgroundAgent(sessionId, agentId);
+    const childTranscriptPath = writeSubagentTranscript(sessionId, agentId, [
+      {
+        type: 'user',
+        timestamp: '2026-06-04T02:57:35.100Z',
+        message: { content: [{ type: 'text', text: 'run background command' }] },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T02:57:35.900Z',
+        message: {
+          id: 'msg_child_bg_1',
+          content: [{
+            type: 'tool_use',
+            id: 'child_bash_1',
+            name: 'Bash',
+            input: { command: 'echo done' },
+          }],
+          usage: { input_tokens: 7, output_tokens: 2 },
+          stop_reason: 'tool_use',
+        },
+      },
+    ]);
+
+    const launch = runHook('stop', {
+      session_id: sessionId,
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    });
+    expect(launch.status).toBe(0);
+    expect(readJsonlRecords()).toEqual([]);
+    expect(readState(sessionId)?.pending_subagent_turns).toHaveLength(1);
+
+    fs.appendFileSync(childTranscriptPath, [
+      {
+        type: 'user',
+        timestamp: '2026-06-04T03:07:36.100Z',
+        message: {
+          content: [{
+            type: 'tool_result',
+            tool_use_id: 'child_bash_1',
+            content: 'done',
+          }],
+        },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T03:07:37.000Z',
+        message: {
+          id: 'msg_child_bg_2',
+          content: [{ type: 'text', text: 'background child completed' }],
+          usage: { input_tokens: 8, output_tokens: 4 },
+          stop_reason: 'end_turn',
+        },
+      },
+    ].map((record) => JSON.stringify(record)).join('\n') + '\n');
+
+    const completion = runHook('subagent-stop', {
+      session_id: sessionId,
+      agent_id: agentId,
+      agent_type: 'general-purpose',
+      agent_transcript_path: childTranscriptPath,
+      transcript_path: transcriptPath,
+    });
+    expect(completion.status).toBe(0);
+
+    const records = readJsonlRecords();
+    const parentAgentCalls = records.filter((record) =>
+      record['event.name'] === 'tool.call'
+      && record['gen_ai.tool.call.id'] === 'agent_call_bg_1');
+    const finalChildResponse = records.find((record) =>
+      record['event.name'] === 'llm.response'
+      && record['gen_ai.agent.scope'] === 'subagent'
+      && record['gen_ai.response.id'] === 'msg_child_bg_2');
+
+    expect(parentAgentCalls).toHaveLength(1);
+    expect(finalChildResponse?.['gen_ai.usage.output_tokens']).toBe(4);
+    expect(finalChildResponse?.['gen_ai.output.messages']).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'assistant',
+          parts: expect.arrayContaining([
+            expect.objectContaining({ type: 'text', content: 'background child completed' }),
+          ]),
+        }),
+      ]),
+    );
+    expect(readState(sessionId)?.pending_subagent_turns ?? []).toEqual([]);
+
+    const duplicateCompletion = runHook('subagent-stop', {
+      session_id: sessionId,
+      agent_id: agentId,
+      agent_type: 'general-purpose',
+      agent_transcript_path: childTranscriptPath,
+      transcript_path: transcriptPath,
+    });
+    expect(duplicateCompletion.status).toBe(0);
+    expect(readJsonlRecords()).toHaveLength(records.length);
+    expect(readState(sessionId)?.completed_subagents?.[agentId]).toBeUndefined();
+
+    const exportedSpans = [];
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      endpoints: [{ name: 'test', endpoint: 'http://localhost:4318' }],
+      protocol: 'http/protobuf',
+      serviceName: 'test-pilot',
+      dataDir: DATA_DIR,
+    }, undefined, () => ({
+      export: (spans, callback) => {
+        exportedSpans.push(...spans);
+        callback({ code: 0 });
+      },
+      shutdown: async () => {},
+    }));
+    try {
+      await flusher.sendBatch(records);
+      await flusher.flush();
+    } finally {
+      await flusher.shutdown();
+    }
+
+    const parentAgentToolSpan = exportedSpans.find((span) =>
+      span.name === 'execute_tool Agent');
+    const childAgentSpan = exportedSpans.find((span) =>
+      span.name === 'invoke_agent general-purpose'
+      && span.attributes['gen_ai.agent.scope'] === 'subagent');
+    const parentAgentStepSpan = exportedSpans.find((span) =>
+      span.spanContext().spanId === parentAgentToolSpan?.parentSpanId);
+    expect(parentAgentToolSpan).toBeDefined();
+    expect(parentAgentStepSpan).toBeDefined();
+    expect(childAgentSpan).toBeDefined();
+    expect(childAgentSpan?.parentSpanId).toBe(parentAgentToolSpan.spanContext().spanId);
+    const toNanos = ([seconds, nanos]) => BigInt(seconds) * 1_000_000_000n + BigInt(nanos);
+    expect(toNanos(childAgentSpan.endTime))
+      .toBeLessThanOrEqual(toNanos(parentAgentToolSpan.endTime));
+    expect(toNanos(parentAgentToolSpan.endTime))
+      .toBeLessThanOrEqual(toNanos(parentAgentStepSpan.endTime));
+    expect(childAgentSpan?.attributes).toMatchObject({
+      'gen_ai.turn.id': `${sessionId}:t1`,
+      'gen_ai.agent.scope': 'subagent',
+      'gen_ai.agent.depth': 1,
+      'gen_ai.agent.parent.id': sessionId,
+      'gen_ai.subagent.parent_tool_call.id': 'agent_call_bg_1',
+    });
+    expect(String(childAgentSpan?.attributes['gen_ai.output.messages']))
+      .toContain('background child completed');
+    const spanIds = exportedSpans.map((span) => span.spanContext().spanId);
+    expect(new Set(spanIds).size).toBe(spanIds.length);
+  });
+
+  test('SubagentStop 早于父 Stop 时仍只导出一次完整链路', () => {
+    const sessionId = 's-subagent-background-early';
+    const agentId = 'background-child-early';
+    const transcriptPath = parentTranscriptWithBackgroundAgent(sessionId, agentId);
+    const childTranscriptPath = writeSubagentTranscript(sessionId, agentId, [
+      {
+        type: 'user',
+        timestamp: '2026-06-04T02:57:35.100Z',
+        message: { content: [{ type: 'text', text: 'finish quickly' }] },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-06-04T02:57:35.900Z',
+        message: {
+          id: 'msg_child_early_final',
+          content: [{ type: 'text', text: 'quick child completed' }],
+          usage: { input_tokens: 3, output_tokens: 2 },
+          stop_reason: 'end_turn',
+        },
+      },
+    ]);
+
+    runHook('subagent-stop', {
+      session_id: sessionId,
+      agent_id: agentId,
+      agent_type: 'general-purpose',
+      agent_transcript_path: childTranscriptPath,
+      transcript_path: transcriptPath,
+    });
+    expect(readJsonlRecords()).toEqual([]);
+
+    runHook('stop', {
+      session_id: sessionId,
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    });
+
+    const records = readJsonlRecords();
+    expect(records.filter((record) =>
+      record['event.name'] === 'tool.call'
+      && record['gen_ai.tool.call.id'] === 'agent_call_bg_1')).toHaveLength(1);
+    expect(records.some((record) =>
+      record['event.name'] === 'llm.response'
+      && record['gen_ai.agent.scope'] === 'subagent'
+      && record['gen_ai.response.id'] === 'msg_child_early_final')).toBe(true);
+    expect(readState(sessionId)?.pending_subagent_turns ?? []).toEqual([]);
+    expect(readState(sessionId)?.completed_subagents?.[agentId]).toBeUndefined();
+  });
+
   test('子 transcript 记录继承父 turn 链路并挂到 Agent tool call', () => {
     const sessionId = 's-subagent';
     const agentId = 'child-1';

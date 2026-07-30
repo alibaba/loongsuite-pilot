@@ -46,6 +46,7 @@ import {
   loadState,
   saveState,
   readAndDeleteChildState,
+  withStateLock,
 } from './claude-code/state.mjs';
 import {
   parseClaudeTranscript,
@@ -70,6 +71,7 @@ const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
 // Caller-supplied span attributes (e.g. multica.*) stamped as top-level record
 // fields so the trace flusher can pass matching keys through to span attributes.
 const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, { agentId: AGENT_ID });
+const FINALIZED_SUBAGENT_LIMIT = 128;
 
 // ─── utilities ───
 
@@ -132,6 +134,9 @@ function collectSubagentLinks(turn) {
         agentId: detail.agentId,
         agentName: detail.agentType || block.input?.subagent_type || 'Subagent',
         parentToolCallId: block.id,
+        isBackground: block.input?.run_in_background === true
+          || detail.status === 'async_launched'
+          || detail.isAsync === true,
       });
     }
   }
@@ -294,68 +299,82 @@ function positiveSkillLoadTimes(skillLoad, fallbackTimestamp) {
 
 // ─── cmd handlers ───
 
-// TODO: subagent 事件累积到 state.events，当前 exportSession 未消费。
-// 预留用于未来子 agent trace 合并（将子 agent 的 span 关联到主 trace）。
-function cmdSubagentStart() {
+async function cmdSubagentStart() {
   const event = tryReadStdin();
   if (isCursorCaller(event)) return;
   const sessionId = requireSessionId(event, 'cmd');
   if (!sessionId) return;
 
-  const state = loadState(sessionId);
-  if (!state.transcript_path && event.transcript_path) {
-    state.transcript_path = event.transcript_path;
-  }
-  if (!state.cwd && event.cwd && typeof event.cwd === 'string') {
-    state.cwd = event.cwd;
-  }
-  state.events = state.events || [];
-  state.events.push({
-    type: 'subagent_start',
-    timestamp: nowSec(),
-    subagent_session_id: event.subagent_session_id || '',
-    agent_id: event.agent_id || '',
-    agent_type: event.agent_type || '',
+  await withStateLock(sessionId, async () => {
+    const state = loadState(sessionId);
+    if (!state.transcript_path && event.transcript_path) {
+      state.transcript_path = event.transcript_path;
+    }
+    if (!state.cwd && event.cwd && typeof event.cwd === 'string') {
+      state.cwd = event.cwd;
+    }
+    state.events = state.events || [];
+    state.events.push({
+      type: 'subagent_start',
+      timestamp: nowSec(),
+      subagent_session_id: event.subagent_session_id || '',
+      agent_id: event.agent_id || '',
+      agent_type: event.agent_type || '',
+    });
+    saveState(sessionId, state);
   });
-  saveState(sessionId, state);
 }
 
-function cmdSubagentStop() {
+async function cmdSubagentStop() {
   const event = tryReadStdin();
   if (isCursorCaller(event)) return;
   const sessionId = requireSessionId(event, 'cmd');
   if (!sessionId) return;
 
-  const state = loadState(sessionId);
-  if (!state.transcript_path && event.transcript_path) {
-    state.transcript_path = event.transcript_path;
-  }
-  if (!state.cwd && event.cwd && typeof event.cwd === 'string') {
-    state.cwd = event.cwd;
-  }
+  await withStateLock(sessionId, async () => {
+    const state = loadState(sessionId);
+    if (!state.transcript_path && event.transcript_path) {
+      state.transcript_path = event.transcript_path;
+    }
+    if (!state.cwd && event.cwd && typeof event.cwd === 'string') {
+      state.cwd = event.cwd;
+    }
 
-  const childSid = event.subagent_session_id || 'unknown';
-  let childStateSnapshot = null;
-  if (childSid && childSid !== 'unknown' && childSid !== sessionId) {
-    childStateSnapshot = readAndDeleteChildState(childSid);
-  }
+    const agentId = event.agent_id || event.subagent_session_id || '';
+    const childSid = event.subagent_session_id || 'unknown';
+    let childStateSnapshot = null;
+    if (childSid && childSid !== 'unknown' && childSid !== sessionId) {
+      childStateSnapshot = readAndDeleteChildState(childSid);
+    }
 
-  state.events = state.events || [];
-  const evData = {
-    type: 'subagent_stop',
-    timestamp: nowSec(),
-    subagent_session_id: childSid,
-    stop_reason: event.stop_reason || 'end_turn',
-    input_tokens: event.usage?.input_tokens || event.input_tokens || 0,
-    output_tokens: event.usage?.output_tokens || event.output_tokens || 0,
-    cache_read_input_tokens: event.usage?.cache_read_input_tokens || event.cache_read_input_tokens || 0,
-    cache_creation_input_tokens: event.usage?.cache_creation_input_tokens || event.cache_creation_input_tokens || 0,
-  };
-  if (childStateSnapshot && Array.isArray(childStateSnapshot.events) && childStateSnapshot.events.length > 0) {
-    evData._child_state = childStateSnapshot;
-  }
-  state.events.push(evData);
-  saveState(sessionId, state);
+    state.completed_subagents = state.completed_subagents || {};
+    const finalizedSubagents = new Set(state.finalized_subagent_ids || []);
+    if (agentId && !finalizedSubagents.has(agentId)) {
+      state.completed_subagents[agentId] = true;
+    }
+
+    state.events = state.events || [];
+    const evData = {
+      type: 'subagent_stop',
+      timestamp: nowSec(),
+      subagent_session_id: childSid,
+      agent_id: agentId,
+      agent_type: event.agent_type || '',
+      agent_transcript_path: event.agent_transcript_path || '',
+      stop_reason: event.stop_reason || 'end_turn',
+      input_tokens: event.usage?.input_tokens || event.input_tokens || 0,
+      output_tokens: event.usage?.output_tokens || event.output_tokens || 0,
+      cache_read_input_tokens: event.usage?.cache_read_input_tokens || event.cache_read_input_tokens || 0,
+      cache_creation_input_tokens: event.usage?.cache_creation_input_tokens || event.cache_creation_input_tokens || 0,
+    };
+    if (childStateSnapshot && Array.isArray(childStateSnapshot.events) && childStateSnapshot.events.length > 0) {
+      evData._child_state = childStateSnapshot;
+    }
+    state.events.push(evData);
+
+    await finalizePendingSubagentTurns(state);
+    saveState(sessionId, state);
+  });
 }
 
 async function cmdStop() {
@@ -367,33 +386,35 @@ async function cmdStop() {
   // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
 
-  const state = loadState(sessionId);
-  if (!state.transcript_path && event.transcript_path) {
-    state.transcript_path = event.transcript_path;
-  }
-  if (event.cwd && typeof event.cwd === 'string') {
-    state.cwd = event.cwd;
-  }
-  state.stop_time = nowSec();
-  saveState(sessionId, state);
-
-  try {
-    await exportSession(state, event.stop_reason || 'end_turn');
-    if (typeof state._next_transcript_offset === 'number') {
-      state.transcript_offset = state._next_transcript_offset;
-      delete state._next_transcript_offset;
+  await withStateLock(sessionId, async () => {
+    const state = loadState(sessionId);
+    if (!state.transcript_path && event.transcript_path) {
+      state.transcript_path = event.transcript_path;
     }
-    state.events = [];
-    state.stop_time = null;
+    if (event.cwd && typeof event.cwd === 'string') {
+      state.cwd = event.cwd;
+    }
+    state.stop_time = nowSec();
     saveState(sessionId, state);
-  } catch (err) {
-    logHookError({
-      agentId: AGENT_ID,
-      stage: 'cmd_stop',
-      errorType: 'export_failed',
-      errorMessage: err?.message || String(err),
-    });
-  }
+
+    try {
+      await exportSession(state, event.stop_reason || 'end_turn');
+      if (typeof state._next_transcript_offset === 'number') {
+        state.transcript_offset = state._next_transcript_offset;
+        delete state._next_transcript_offset;
+      }
+      state.events = [];
+      state.stop_time = null;
+      saveState(sessionId, state);
+    } catch (err) {
+      logHookError({
+        agentId: AGENT_ID,
+        stage: 'cmd_stop',
+        errorType: 'export_failed',
+        errorMessage: err?.message || String(err),
+      });
+    }
+  });
 }
 
 // ─── transcript 稳定性等待 ───
@@ -421,6 +442,178 @@ async function waitForTranscriptStable(transcriptPath, minSize = 0) {
     prevSize = size;
     await new Promise((r) => setTimeout(r, 150));
   }
+}
+
+function sortRecordsByTimestamp(records) {
+  records.sort((a, b) => {
+    const ta = BigInt(a.time_unix_nano || '0');
+    const tb = BigInt(b.time_unix_nano || '0');
+    if (ta < tb) return -1;
+    if (ta > tb) return 1;
+    return 0;
+  });
+  return records;
+}
+
+function cleanRecords(records, runtimeConfig) {
+  return records.map((record) =>
+    applyHookContentPolicy(sanitizeObject(record) || record, runtimeConfig));
+}
+
+function extendBackgroundAgentResult(records, link, childRecords) {
+  let childEnd = 0n;
+  for (const record of childRecords) {
+    const timestamp = BigInt(record.time_unix_nano || '0');
+    if (timestamp > childEnd) childEnd = timestamp;
+  }
+  if (childEnd === 0n) return;
+
+  const parentResult = records.find((record) =>
+    record['event.name'] === 'tool.result'
+    && record['gen_ai.tool.call.id'] === link.parentToolCallId);
+  if (!parentResult) return;
+  if (BigInt(parentResult.time_unix_nano || '0') < childEnd) {
+    parentResult.time_unix_nano = String(childEnd);
+  }
+}
+
+function buildSubagentRecords({
+  parentTranscriptPath,
+  parentSessionId,
+  parentTraceId,
+  parentTurnId,
+  link,
+  userId,
+  cwd,
+  intercept,
+}) {
+  const childTranscriptPath = resolveSubagentTranscriptPath(parentTranscriptPath, link.agentId);
+  if (!childTranscriptPath || !fs.existsSync(childTranscriptPath)) {
+    return { records: [], mergedResponseIds: new Set() };
+  }
+
+  let childParseResult;
+  try {
+    childParseResult = parseClaudeTranscript(childTranscriptPath, 0);
+  } catch (err) {
+    logHookError({
+      agentId: AGENT_ID,
+      stage: 'subagent_transcript_parse',
+      errorType: 'parse_failed',
+      errorMessage: err?.message || String(err),
+    });
+    return { records: [], mergedResponseIds: new Set() };
+  }
+
+  const childRecords = [];
+  const mergedResponseIds = new Set();
+  let childHash = INITIAL_HASH;
+  for (let childTurnIndex = 0; childTurnIndex < childParseResult.turns.length; childTurnIndex++) {
+    const childBuild = buildTurnRecords(
+      childParseResult.turns[childTurnIndex],
+      childTurnIndex,
+      link.agentId,
+      childHash,
+      userId,
+      'end_turn',
+      cwd,
+      intercept,
+    );
+    childHash = childBuild.hash;
+    for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
+
+    for (const childRecord of childBuild.records) {
+      // The child prompt is already present in the first llm.request delta.
+      // Keeping its `other` record would incorrectly feed the parent ENTRY.
+      if (childRecord['event.name'] === 'other') continue;
+      childRecords.push({
+        ...childRecord,
+        trace_id: parentTraceId,
+        'gen_ai.session.id': parentSessionId,
+        'gen_ai.turn.id': parentTurnId,
+        'gen_ai.agent.scope': 'subagent',
+        'gen_ai.agent.depth': 1,
+        'gen_ai.agent.id': link.agentId,
+        'gen_ai.agent.name': link.agentName,
+        'gen_ai.agent.parent.id': parentSessionId,
+        'gen_ai.subagent.parent_tool_call.id': link.parentToolCallId,
+      });
+    }
+  }
+
+  return { records: childRecords, mergedResponseIds };
+}
+
+async function finalizePendingSubagentTurns(state) {
+  const pendingTurns = Array.isArray(state.pending_subagent_turns)
+    ? state.pending_subagent_turns
+    : [];
+  if (pendingTurns.length === 0) return;
+
+  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+  const sessionId = state.session_id || 'unknown';
+  const userId = resolveUserId({}, runtimeConfig);
+  const cwd = state.cwd || undefined;
+  const intercept = loadInterceptForSession(sessionId);
+  const mergedResponseIds = new Set();
+  const completedSubagents = state.completed_subagents || {};
+  const remainingTurns = [];
+
+  for (const pending of pendingTurns) {
+    const records = Array.isArray(pending.records) ? [...pending.records] : [];
+    const backgroundLinks = Array.isArray(pending.background_links)
+      ? pending.background_links
+      : [];
+
+    for (const link of backgroundLinks) {
+      if (link.completed || !completedSubagents[link.agentId]) continue;
+      const childTranscriptPath = resolveSubagentTranscriptPath(
+        state.transcript_path,
+        link.agentId,
+      );
+      if (childTranscriptPath) {
+        await waitForTranscriptStable(childTranscriptPath, 0);
+      }
+      const childBuild = buildSubagentRecords({
+        parentTranscriptPath: state.transcript_path,
+        parentSessionId: sessionId,
+        parentTraceId: pending.trace_id,
+        parentTurnId: pending.turn_id,
+        link,
+        userId,
+        cwd,
+        intercept,
+      });
+      extendBackgroundAgentResult(records, link, childBuild.records);
+      records.push(...cleanRecords(childBuild.records, runtimeConfig));
+      for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
+      link.completed = true;
+      delete completedSubagents[link.agentId];
+    }
+
+    if (backgroundLinks.every((link) => link.completed)) {
+      writeJsonlRecords(
+        defaultLogDir(),
+        AGENT_ID,
+        sortRecordsByTimestamp(records),
+      );
+      state.finalized_subagent_ids = [
+        ...(state.finalized_subagent_ids || []),
+        ...backgroundLinks.map((link) => link.agentId),
+      ].slice(-FINALIZED_SUBAGENT_LIMIT);
+    } else {
+      remainingTurns.push({
+        ...pending,
+        records,
+        background_links: backgroundLinks,
+      });
+    }
+  }
+
+  state.pending_subagent_turns = remainingTurns;
+  state.completed_subagents = completedSubagents;
+  reapInterceptFiles(intercept, mergedResponseIds);
+  reapStaleIntercept(sessionId);
 }
 
 // ─── Stop 主导出流程 ───
@@ -510,76 +703,55 @@ async function exportSession(state, stopReason) {
     }
 
     const turnRecords = [...records];
+    const backgroundLinks = [];
     const parentRecord = records[0];
     if (parentRecord) {
       // 只展开主会话的直接子 Agent。子 transcript 内再次调用 Agent 时，
       // buildTurnRecords 会保留 TOOL span，但不会递归读取孙级 transcript。
       for (const link of collectSubagentLinks(turn)) {
-        const childTranscriptPath = resolveSubagentTranscriptPath(transcriptPath, link.agentId);
-        if (!childTranscriptPath || !fs.existsSync(childTranscriptPath)) continue;
-
-        let childParseResult;
-        try {
-          childParseResult = parseClaudeTranscript(childTranscriptPath, 0);
-        } catch (err) {
-          logHookError({
-            agentId: AGENT_ID,
-            stage: 'subagent_transcript_parse',
-            errorType: 'parse_failed',
-            errorMessage: err?.message || String(err),
-          });
+        const completion = state.completed_subagents?.[link.agentId];
+        if (link.isBackground && !completion) {
+          backgroundLinks.push({ ...link, completed: false });
           continue;
         }
-        let childHash = INITIAL_HASH;
-        for (let childTurnIndex = 0; childTurnIndex < childParseResult.turns.length; childTurnIndex++) {
-          const childBuild = buildTurnRecords(
-            childParseResult.turns[childTurnIndex],
-            childTurnIndex,
-            link.agentId,
-            childHash,
-            userId,
-            'end_turn',
-            cwd,
-            intercept,
-          );
-          childHash = childBuild.hash;
-          for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
-
-          for (const childRecord of childBuild.records) {
-            // `other` 会被转换器当成父 ENTRY 输入；子 prompt 已包含在首个
-            // llm.request.messages_delta 中，无需重复上报。
-            if (childRecord['event.name'] === 'other') continue;
-            turnRecords.push({
-              ...childRecord,
-              trace_id: parentRecord.trace_id,
-              'gen_ai.session.id': sessionId,
-              'gen_ai.turn.id': parentRecord['gen_ai.turn.id'],
-              'gen_ai.agent.scope': 'subagent',
-              'gen_ai.agent.depth': 1,
-              'gen_ai.agent.id': link.agentId,
-              'gen_ai.agent.name': link.agentName,
-              'gen_ai.agent.parent.id': sessionId,
-              'gen_ai.subagent.parent_tool_call.id': link.parentToolCallId,
-            });
-          }
+        const childBuild = buildSubagentRecords({
+          parentTranscriptPath: transcriptPath,
+          parentSessionId: sessionId,
+          parentTraceId: parentRecord.trace_id,
+          parentTurnId: parentRecord['gen_ai.turn.id'],
+          link,
+          userId,
+          cwd,
+          intercept,
+        });
+        if (link.isBackground) {
+          extendBackgroundAgentResult(turnRecords, link, childBuild.records);
         }
+        turnRecords.push(...childBuild.records);
+        for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
+        if (completion) delete state.completed_subagents[link.agentId];
       }
     }
 
-    turnRecords.sort((a, b) => {
-      const ta = BigInt(a.time_unix_nano || '0');
-      const tb = BigInt(b.time_unix_nano || '0');
-      if (ta < tb) return -1;
-      if (ta > tb) return 1;
-      return 0;
-    });
-    allRecords.push(...turnRecords);
+    sortRecordsByTimestamp(turnRecords);
+    if (backgroundLinks.length > 0 && parentRecord) {
+      state.pending_subagent_turns = state.pending_subagent_turns || [];
+      state.pending_subagent_turns.push({
+        created_at: nowSec(),
+        trace_id: parentRecord.trace_id,
+        turn_id: parentRecord['gen_ai.turn.id'],
+        records: cleanRecords(turnRecords, runtimeConfig),
+        background_links: backgroundLinks,
+      });
+    } else {
+      allRecords.push(...turnRecords);
+    }
   }
 
   // turn_count 计入全部 turns(含跳过的历史), 确保 offset 正确推进不重复上报
   state.turn_count = baseTurnCount + parseResult.turns.length;
 
-  const cleaned = allRecords.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
+  const cleaned = cleanRecords(allRecords, runtimeConfig);
   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
 
   // Cleanup intercept files: delete what we merged + drop stragglers from
