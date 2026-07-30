@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
-describe('installer SLS config output', () => {
+describe('internal installer SLS config output', () => {
   const installers = [
     'deploy/installer.sh',
     'deploy/installer-inner.sh',
