@@ -127,6 +127,10 @@ function parentTranscriptWithAgent(sessionId, agentId, agentType = 'general-purp
 }
 
 function parentTranscriptWithBackgroundAgent(sessionId, agentId, agentType = 'general-purpose') {
+  return parentTranscriptWithBackgroundAgents(sessionId, [{ agentId, agentType }]);
+}
+
+function parentTranscriptWithBackgroundAgents(sessionId, agents) {
   return writeTranscript(sessionId, [
     {
       type: 'user',
@@ -138,19 +142,19 @@ function parentTranscriptWithBackgroundAgent(sessionId, agentId, agentType = 'ge
       timestamp: '2026-06-04T02:57:35.000Z',
       message: {
         id: 'msg_parent_bg_1',
-        content: [{
+        content: agents.map(({ agentType = 'general-purpose' }, index) => ({
           type: 'tool_use',
-          id: 'agent_call_bg_1',
+          id: `agent_call_bg_${index + 1}`,
           name: 'Agent',
           input: { subagent_type: agentType, run_in_background: true },
-        }],
+        })),
         usage: { input_tokens: 10, output_tokens: 5 },
         stop_reason: 'tool_use',
       },
     },
-    {
+    ...agents.map(({ agentId, agentType = 'general-purpose' }, index) => ({
       type: 'user',
-      timestamp: '2026-06-04T02:57:36.000Z',
+      timestamp: `2026-06-04T02:57:36.${String(index).padStart(3, '0')}Z`,
       toolUseResult: {
         agentId,
         agentType,
@@ -160,11 +164,11 @@ function parentTranscriptWithBackgroundAgent(sessionId, agentId, agentType = 'ge
       message: {
         content: [{
           type: 'tool_result',
-          tool_use_id: 'agent_call_bg_1',
+          tool_use_id: `agent_call_bg_${index + 1}`,
           content: 'Background agent launched successfully.',
         }],
       },
-    },
+    })),
     {
       type: 'assistant',
       timestamp: '2026-06-04T02:57:37.000Z',
@@ -617,6 +621,76 @@ describe('claude-code 一级子 Agent 上报', () => {
       && record['gen_ai.response.id'] === 'msg_child_early_final')).toBe(true);
     expect(readState(sessionId)?.pending_subagent_turns ?? []).toEqual([]);
     expect(readState(sessionId)?.completed_subagents?.[agentId]).toBeUndefined();
+  });
+
+  test('多个后台子 Agent 的重复完成通知不会留下陈旧完成标记', () => {
+    const sessionId = 's-subagent-background-multiple';
+    const firstAgentId = 'background-child-first';
+    const secondAgentId = 'background-child-second';
+    const transcriptPath = parentTranscriptWithBackgroundAgents(sessionId, [
+      { agentId: firstAgentId, agentType: 'general-purpose' },
+      { agentId: secondAgentId, agentType: 'Explore' },
+    ]);
+    const writeCompletedChild = (agentId, responseId, text) =>
+      writeSubagentTranscript(sessionId, agentId, [
+        {
+          type: 'user',
+          timestamp: '2026-06-04T02:57:35.100Z',
+          message: { content: [{ type: 'text', text: `prompt for ${agentId}` }] },
+        },
+        {
+          type: 'assistant',
+          timestamp: '2026-06-04T03:07:37.000Z',
+          message: {
+            id: responseId,
+            content: [{ type: 'text', text }],
+            usage: { input_tokens: 3, output_tokens: 2 },
+            stop_reason: 'end_turn',
+          },
+        },
+      ]);
+    const firstTranscriptPath = writeCompletedChild(
+      firstAgentId,
+      'msg_child_first_final',
+      'first child completed',
+    );
+    const secondTranscriptPath = writeCompletedChild(
+      secondAgentId,
+      'msg_child_second_final',
+      'second child completed',
+    );
+
+    runHook('stop', {
+      session_id: sessionId,
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    });
+    expect(readJsonlRecords()).toEqual([]);
+
+    const complete = (agentId, agentType, childTranscriptPath) => runHook('subagent-stop', {
+      session_id: sessionId,
+      agent_id: agentId,
+      agent_type: agentType,
+      agent_transcript_path: childTranscriptPath,
+      transcript_path: transcriptPath,
+    });
+    complete(firstAgentId, 'general-purpose', firstTranscriptPath);
+    expect(readJsonlRecords()).toEqual([]);
+    expect(readState(sessionId)?.completed_subagents?.[firstAgentId]).toBeUndefined();
+
+    complete(firstAgentId, 'general-purpose', firstTranscriptPath);
+    expect(readState(sessionId)?.completed_subagents?.[firstAgentId]).toBeUndefined();
+
+    complete(secondAgentId, 'Explore', secondTranscriptPath);
+    const records = readJsonlRecords();
+    expect(records.filter((record) =>
+      record['event.name'] === 'tool.call'
+      && record['gen_ai.tool.name'] === 'Agent')).toHaveLength(2);
+    expect(records.filter((record) =>
+      record['event.name'] === 'llm.response'
+      && record['gen_ai.agent.scope'] === 'subagent')).toHaveLength(2);
+    expect(readState(sessionId)?.pending_subagent_turns ?? []).toEqual([]);
+    expect(readState(sessionId)?.completed_subagents ?? {}).toEqual({});
   });
 
   test('子 transcript 记录继承父 turn 链路并挂到 Agent tool call', () => {

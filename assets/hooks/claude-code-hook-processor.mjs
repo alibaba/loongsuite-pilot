@@ -566,7 +566,11 @@ async function finalizePendingSubagentTurns(state) {
       : [];
 
     for (const link of backgroundLinks) {
-      if (link.completed || !completedSubagents[link.agentId]) continue;
+      if (link.completed) {
+        delete completedSubagents[link.agentId];
+        continue;
+      }
+      if (!completedSubagents[link.agentId]) continue;
       const childTranscriptPath = resolveSubagentTranscriptPath(
         state.transcript_path,
         link.agentId,
