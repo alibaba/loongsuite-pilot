@@ -71,6 +71,8 @@ const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
 // Caller-supplied span attributes (e.g. multica.*) stamped as top-level record
 // fields so the trace flusher can pass matching keys through to span attributes.
 const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, { agentId: AGENT_ID });
+// Retain recent completion tombstones to ignore delayed duplicate SubagentStop
+// events while keeping the persisted session state bounded.
 const FINALIZED_SUBAGENT_LIMIT = 128;
 
 // ─── utilities ───
@@ -91,6 +93,12 @@ function isAgentTool(toolName) {
   return toolName === 'Agent' || toolName === 'agent';
 }
 
+/**
+ * Resolve a direct subagent transcript at:
+ * <parent-directory>/<parent-session>/subagents/agent-<agent-id>.jsonl
+ *
+ * Returns null when the agent ID cannot be resolved safely inside that directory.
+ */
 function resolveSubagentTranscriptPath(parentTranscriptPath, agentId) {
   const rawAgentId = String(agentId || '').trim();
   if (
