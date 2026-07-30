@@ -4,20 +4,29 @@ Qoder CLI 插件：安装并启用后，在下一次会话启动时自动检测�
 
 ## 工作机制
 
-`SessionStart`（`matcher: startup`、`async: true`）hook 触发 [scripts/ensure-pilot.sh](scripts/ensure-pilot.sh)：
+`SessionStart`（`matcher: startup`、`async: true`）hook 按平台分两条注册：
 
-1. **幂等检查** — `~/.local/bin/loongsuite-pilot` 已存在则立即退出（0.002s，无感）
+| 平台 | `shell` | 脚本 | 安装器 |
+|------|---------|------|--------|
+| macOS / Linux | `bash` | [scripts/ensure-pilot.sh](scripts/ensure-pilot.sh) | `installer.sh`（kebab-case 参数） |
+| Windows | `powershell` | [scripts/ensure-pilot.ps1](scripts/ensure-pilot.ps1) | `installer.ps1`（PascalCase 参数） |
+
+两条每次会话都会尝试执行，非本平台的那条因找不到 shell 而失败退出（已实测：仅写一行 CLI 日志，**不会向对话注入任何内容**）。Windows 上若 bash 脚本被 Git Bash 拉起，会自行静默退出让位给 PowerShell hook。
+
+两个脚本逻辑等价：
+
+1. **幂等检查** — CLI 入口已存在则立即退出（mac/Linux `~/.local/bin/loongsuite-pilot`；Windows `%USERPROFILE%\.local\bin\loongsuite-pilot.cmd`）
 2. **并发锁** — 多会话同时启动时只有一个实例执行安装
 3. **Node 运行时** — 本机已有 node ≥ 22 则复用；否则按平台从 OSS 下载 Node v22.22.2 并解包到插件数据目录（不依赖 nvm、不写用户 shell 配置）
-4. **安装 pilot** — 下载 installer 并透传管理员配置的参数
+4. **安装 pilot** — 下载对应平台的 installer 并透传管理员配置的参数
 
 ## 管理员配置
 
-编辑 [config/install-params.conf](config/install-params.conf)（bash 语法，hook 会 source 它）：
+编辑 [config/install-params.conf](config/install-params.conf)（bash 语法，bash hook 直接 source；PowerShell hook 解析同一份文件并自动把 `--collect-log` 这类 kebab-case 转成 `-CollectLog`）：
 
 | 配置项 | 说明 |
 |--------|------|
-| `INSTALLER_URL` | loongsuite-pilot 安装脚本地址 |
+| `INSTALLER_URL` | loongsuite-pilot 安装脚本地址（`.sh`）；Windows 固定用同目录的 `installer.ps1`，除非这里显式填 `.ps1` 地址 |
 | `NODE_VERSION` | Node 版本，默认 `22.22.2` |
 | `NODE_DIST_BASE_URL` | Node 分发包下载源（默认 OSS），分发包平铺在该前缀下：`<base>/node-v<ver>-<platform>.tar.gz` |
 | `INSTALL_ARGS` | 透传给 `installer.sh install` 的参数数组，按 `--参数名 "值"` 成对填写，新增参数无需改脚本 |
@@ -61,8 +70,20 @@ loongsuite-pilot status                     # 验证
 
 安装日志：`~/.qoder/plugins/data/loongsuite-pilot-installer-*/install.log`
 
-## 已知限制
+## 已知限制与验证边界
 
-- Windows 暂不支持自动安装（hook 为 bash 脚本），Node 的 `win-x64.zip` 已纳入分发矩阵备用
-- 仅在 macOS(arm64) 上做过端到端验证；其他平台走同一代码路径但未实测
-- OSS 上的分发包需为公读（`--acl public-read`），因为 hook 用匿名 curl 下载
+- **macOS(arm64)：已端到端实测**（插件安装 → 会话触发 → pilot running → 参数落地）
+- **Linux x64/arm64、darwin-x64**：走完全相同的 bash 代码路径，但未在对应机器上实测
+- **Windows**：已验证 ps1 语法解析、配置解析与参数映射、node win-x64 包下载解包（均在 pwsh 7.4.6 下跑通）；但**未在真实 Windows 上跑过完整安装流程**，installer.ps1 的实际执行与 launchd/服务注册部分待验证
+- Node 分发包目前只上传了 `win-x64`；Windows on ARM 会先试 `arm64`、失败后回退到 x64（走系统仿真）
+- OSS 上的分发包需为公读（`--acl public-read`），因为 hook 用匿名下载
+
+## 本地自测
+
+```bash
+# bash 侧：仅准备 node（不装 pilot）
+./scripts/ensure-pilot.sh --provision-node-only
+
+# PowerShell 侧：配置解析 + 参数映射单测（任意平台可跑）
+pwsh -NoProfile -File tests/test-config-parsing.ps1
+```

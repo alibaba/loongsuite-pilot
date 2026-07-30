@@ -34,7 +34,7 @@ fi
 mkdir -p "$DATA_DIR"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
 
-# ---- 平台检测 ----
+# ---- 平台检测（Windows 交由 ensure-pilot.ps1 处理，本脚本静默退出） ----
 detect_platform() {
     local os arch
     case "$(uname -s)" in
@@ -50,6 +50,11 @@ detect_platform() {
     esac
     echo "${os}-${arch}"
 }
+
+# Windows 下若本脚本被 Git Bash 拉起，直接让位给 PowerShell hook，避免重复安装
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) exit 0 ;;
+esac
 
 # ---- node >= 22 探测（本机已有则直接复用，不重复安装） ----
 find_node() {
@@ -74,10 +79,6 @@ find_node() {
 provision_node() {
     local platform tarball vendor_tar dl_tar extract_dir
     platform=$(detect_platform) || { log "❌ 不支持的平台: $(uname -s)/$(uname -m)"; return 1; }
-    if [ "${platform%%-*}" = "win" ]; then
-        log "❌ Windows 平台暂不支持 bash hook 自动安装，请手动安装"
-        return 1
-    fi
     tarball="node-v${NODE_VERSION}-${platform}.tar.gz"
     vendor_tar="$PLUGIN_ROOT/vendor/node/$tarball"
     extract_dir="$DATA_DIR/node"

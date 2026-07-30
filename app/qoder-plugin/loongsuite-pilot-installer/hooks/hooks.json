@@ -7,7 +7,14 @@
         "hooks": [
           {
             "type": "command",
+            "shell": "bash",
             "command": "\"${QODER_PLUGIN_ROOT}\"/scripts/ensure-pilot.sh",
+            "timeout": 900
+          },
+          {
+            "type": "command",
+            "shell": "powershell",
+            "command": "& '${QODER_PLUGIN_ROOT}\\scripts\\ensure-pilot.ps1'",
             "timeout": 900
           }
         ]
