@@ -179,6 +179,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
   const toolResultTimestamps = new Map(); // tool_use_id → ISO8601 timestamp
   const toolResultContents = new Map(); // tool_use_id → result content
   const toolResultErrors = new Map(); // tool_use_id → boolean (is_error)
+  const subagentInfoByToolId = new Map(); // Agent tool_use_id → { agentId, agentType }
   const skillToolsById = new Map(); // Skill tool_use_id → { name, promptId }
   const slashCommandsByPromptId = new Map(); // promptId → { name, timestamp }
   const skillLoads = []; // 从 skill isMeta 注入还原的加载事实
@@ -311,6 +312,18 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
             const resultContent = part.content || part.output || part.result || '';
             toolResultContents.set(part.tool_use_id, resultContent);
             if (part.is_error) toolResultErrors.set(part.tool_use_id, true);
+            const agentId = record.toolUseResult?.agentId || record.toolUseResult?.agent_id;
+            if (agentId) {
+              subagentInfoByToolId.set(part.tool_use_id, {
+                agentId,
+                agentType: record.toolUseResult?.agentType
+                  || record.toolUseResult?.agent_type
+                  || '',
+                status: record.toolUseResult?.status || '',
+                isAsync: record.toolUseResult?.isAsync === true
+                  || record.toolUseResult?.is_async === true,
+              });
+            }
           }
         }
       }
@@ -395,7 +408,14 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
         const resultTs = toolResultTimestamps.get(toolId) || null;
         const resultContent = toolResultContents.get(toolId) || '';
         const isError = toolResultErrors.get(toolId) || false;
-        toolDetails.set(toolId, { call: callTs, result: resultTs, resultContent, isError });
+        const subagentInfo = subagentInfoByToolId.get(toolId);
+        toolDetails.set(toolId, {
+          call: callTs,
+          result: resultTs,
+          resultContent,
+          isError,
+          ...(subagentInfo || {}),
+        });
       }
 
       const requestStartTime = lastToolResultTsByPromptId.get(promptMapKey(group.promptId)) || null;

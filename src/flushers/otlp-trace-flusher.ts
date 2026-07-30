@@ -113,6 +113,13 @@ const defaultExporterFactory: OtlpExporterFactory = ({ url, headers, compression
 
 const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
 const MAX_CONVERT_STATES = 64;
+const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
+  'gen_ai.turn.id',
+  'gen_ai.agent.scope',
+  'gen_ai.agent.depth',
+  'gen_ai.agent.parent.id',
+  'gen_ai.subagent.parent_tool_call.id',
+];
 
 function estimateSpanSize(span: ReadableSpan): number {
   let size = 512;
@@ -473,7 +480,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
                 ),
               ),
             )];
-        const passthroughKeys = [...new Set([...DEFAULT_GIT_PASSTHROUGH_KEYS, ...customKeys, ...prefixKeys])];
+        const passthroughKeys = [...new Set([
+          ...DEFAULT_GIT_PASSTHROUGH_KEYS,
+          ...GEN_AI_HIERARCHY_PASSTHROUGH_KEYS,
+          ...customKeys,
+          ...prefixKeys,
+        ])];
         const recordsForConversion = customKeys.length === 0
           ? records
           : records.map((r) => {

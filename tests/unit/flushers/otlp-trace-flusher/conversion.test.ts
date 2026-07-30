@@ -154,6 +154,30 @@ describe('OtlpTraceFlusher - conversion', () => {
     );
   });
 
+  it('always preserves Agent hierarchy keys on converted spans', async () => {
+    const entry = {
+      'event.name': 'llm.response',
+      'gen_ai.agent.type': 'claude-code',
+      'gen_ai.turn.id': 'parent-session:t1',
+      'gen_ai.agent.scope': 'subagent',
+      'gen_ai.agent.depth': 1,
+      'gen_ai.agent.parent.id': 'parent-session',
+      'gen_ai.subagent.parent_tool_call.id': 'agent-call-1',
+      'gen_ai.response.finish_reasons': ['stop'],
+    } as unknown as AgentActivityEntry;
+
+    await flusher.send(entry);
+
+    const opts = vi.mocked(convertEventLogToTrace).mock.calls[0][1] as { passthroughKeys?: string[] };
+    expect(opts.passthroughKeys).toEqual(expect.arrayContaining([
+      'gen_ai.turn.id',
+      'gen_ai.agent.scope',
+      'gen_ai.agent.depth',
+      'gen_ai.agent.parent.id',
+      'gen_ai.subagent.parent_tool_call.id',
+    ]));
+  });
+
   describe('with GlobalAttributesProvider', () => {
     let p: OtlpTraceFlusher;
 
@@ -261,13 +285,21 @@ describe('OtlpTraceFlusher - conversion', () => {
         'event.name': 'llm.response',
         'gen_ai.agent.type': 'claude-code',
         'gen_ai.turn.id': 'tp3',
+        'gen_ai.unapproved.attribute': 'ignored',
         'gen_ai.response.finish_reasons': ['stop'],
       } as unknown as AgentActivityEntry;
 
       await p.send(entry);
 
       const opts = vi.mocked(convertEventLogToTrace).mock.calls.at(-1)![1] as { passthroughKeys?: string[] };
-      expect(opts.passthroughKeys?.some((k) => k.startsWith('gen_ai.'))).toBe(false);
+      expect(opts.passthroughKeys).toEqual(expect.arrayContaining([
+        'gen_ai.turn.id',
+        'gen_ai.agent.scope',
+        'gen_ai.agent.depth',
+        'gen_ai.agent.parent.id',
+        'gen_ai.subagent.parent_tool_call.id',
+      ]));
+      expect(opts.passthroughKeys).not.toContain('gen_ai.unapproved.attribute');
     });
   });
 
