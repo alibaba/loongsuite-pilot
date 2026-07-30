@@ -1,4 +1,4 @@
-# 验证 ensure-pilot.ps1 的配置解析与 kebab→Pascal 参数映射（可在任意平台用 pwsh 跑）
+﻿# 验证 ensure-pilot.ps1 的配置解析与 kebab→Pascal 参数映射（可在任意平台用 pwsh 跑）
 $ErrorActionPreference = 'Stop'
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 $script = Join-Path $pluginRoot 'scripts\ensure-pilot.ps1'

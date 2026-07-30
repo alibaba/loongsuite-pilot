@@ -68,15 +68,30 @@ qodercli plugins install /path/to/loongsuite-pilot-installer   # 默认 user 级
 loongsuite-pilot status                     # 验证
 ```
 
-安装日志：`~/.qoder/plugins/data/loongsuite-pilot-installer-*/install.log`
+安装日志：`~/.qoder/plugins/data/loongsuite-pilot-installer-*/install.log`（Windows：`%USERPROFILE%\.qoder\plugins\data\...`）
+
+插件本体落盘位置：`~/.qoder/plugins/cache/<市场名或 local>/loongsuite-pilot-installer/<版本>/`
+
+> 注意：插件缓存**按版本号复用**。改了代码但版本号不变时，`plugins install` 不会刷新已有缓存；开发期验证请先 `plugins uninstall` 或递增 `version`。
 
 ## 已知限制与验证边界
 
 - **macOS(arm64)：已端到端实测**（插件安装 → 会话触发 → pilot running → 参数落地）
+- **Windows Server (NT 10.0, AMD64, PowerShell 5.1)：已端到端实测** — 插件 user 级安装 → 会话触发 → 40 秒完成安装 → `loongsuite-pilot v1.1.19 running`（Task Scheduler 自启）→ 9 个管理员参数全部落到 config.json
 - **Linux x64/arm64、darwin-x64**：走完全相同的 bash 代码路径，但未在对应机器上实测
-- **Windows**：已验证 ps1 语法解析、配置解析与参数映射、node win-x64 包下载解包（均在 pwsh 7.4.6 下跑通）；但**未在真实 Windows 上跑过完整安装流程**，installer.ps1 的实际执行与 launchd/服务注册部分待验证
 - Node 分发包目前只上传了 `win-x64`；Windows on ARM 会先试 `arm64`、失败后回退到 x64（走系统仿真）
 - OSS 上的分发包需为公读（`--acl public-read`），因为 hook 用匿名下载
+- 不传 `--user.id` 时 config.json 不会写入 `userId` 字段，由 pilot 运行时回退到 hostname
+
+### Windows 实测中发现并修复的问题
+
+以下三个 bug 只在真实 Windows 上才暴露，已全部修复并重验：
+
+| 问题 | 表现 | 修复 |
+|------|------|------|
+| ps1 无 BOM | PS 5.1 按 ANSI 读带中文注释的脚本，报 `UnexpectedToken` 直接无法解析 | ps1 文件写入 UTF-8 BOM |
+| conf 读取编码 | `Get-Content -Raw` 按 ANSI/GBK 读无 BOM 的 conf，中文注释吞掉后续字节，`INSTALL_ARGS` 解成空（参数全丢） | 改用 `[IO.File]::ReadAllText($conf, UTF8)` |
+| 残留锁 | CLI 退出杀掉 async hook 进程，锁目录残留，后续所有会话永久跳过安装 | 锁加 15 分钟 TTL，过期自动接管（sh/ps1 均同步） |
 
 ## 本地自测
 

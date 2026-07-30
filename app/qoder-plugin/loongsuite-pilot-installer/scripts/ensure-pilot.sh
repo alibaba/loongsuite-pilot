@@ -124,6 +124,11 @@ if [ -x "$PILOT_BIN" ] || [ -x /usr/local/bin/loongsuite-pilot ]; then
 fi
 
 # ---- 并发锁：多会话同时启动时只允许一个实例执行安装 ----
+# CLI 退出可能杀掉 hook 进程导致锁残留，超过 TTL（15 分钟）的旧锁直接接管
+if [ -d "$LOCK_DIR" ] && [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +15 2>/dev/null)" ]; then
+    log "接管过期锁"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+fi
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     log "另一实例正在安装，跳过"
     exit 0

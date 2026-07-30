@@ -1,4 +1,4 @@
-# loongsuite-pilot-installer 插件 SessionStart hook（Windows）：
+﻿# loongsuite-pilot-installer 插件 SessionStart hook（Windows）：
 # 与 ensure-pilot.sh 等价 —— 幂等检测并安装 loongsuite-pilot，node 依赖统一使用
 # v22.22.2（从 NODE_DIST_BASE_URL 下载 win-x64.zip，vendor\node 内有包则优先用本地包）。
 # 管理员参数复用同一份 config\install-params.conf，kebab-case 自动转成 installer.ps1
@@ -27,14 +27,16 @@ $InstallArgs = @()
 
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 function Write-Log($msg) {
-    "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg | Add-Content -Path $LogFile
+    # 显式 UTF8：Add-Content 默认 ANSI/GBK 会把中文日志写成乱码
+    "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg | Add-Content -Path $LogFile -Encoding UTF8
 }
 
 # ---- 解析 install-params.conf（bash 语法）：复用同一份管理员配置 ----
 function Read-AdminConfig {
     $conf = Join-Path $PluginRoot 'config\install-params.conf'
     if (-not (Test-Path $conf)) { return }
-    $text = Get-Content -Raw -Path $conf
+    # 必须显式按 UTF-8 读：conf 含中文注释且无 BOM，PS 5.1 默认 ANSI/GBK 会吞并后续 ASCII 字节，破坏 INSTALL_ARGS 块的行结构
+    $text = [System.IO.File]::ReadAllText($conf, [System.Text.Encoding]::UTF8)
 
     if ($text -match '(?m)^\s*NODE_VERSION\s*=\s*"([^"]*)"') { $script:NodeVersion = $Matches[1] }
     if ($text -match '(?m)^\s*NODE_DIST_BASE_URL\s*=\s*"([^"]*)"') { $script:NodeDistBaseUrl = $Matches[1] }
@@ -142,6 +144,15 @@ if ($ProvisionNodeOnly) {
 if (Test-Path $PilotCmd) { exit 0 }
 
 # ---- 并发锁：多会话同时启动时只允许一个实例执行安装 ----
+# CLI 退出可能杀掉 hook 进程导致锁残留，超过 TTL 的旧锁直接接管
+$LockTtlMinutes = 15
+if (Test-Path $LockDir) {
+    $age = (Get-Date) - (Get-Item $LockDir).CreationTime
+    if ($age.TotalMinutes -gt $LockTtlMinutes) {
+        Write-Log ("接管过期锁（存在 " + [int]$age.TotalMinutes + " 分钟）")
+        Remove-Item $LockDir -Force -Recurse -ErrorAction SilentlyContinue
+    }
+}
 try {
     New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null
 } catch {
@@ -160,7 +171,7 @@ try {
     Invoke-WebRequest -Uri $InstallerUrl -OutFile $installerTmp -UseBasicParsing
 
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installerTmp install @InstallArgs *>&1 |
-        Add-Content -Path $LogFile
+        Add-Content -Path $LogFile -Encoding UTF8
     if ($LASTEXITCODE -ne 0) { throw "installer exited with code $LASTEXITCODE" }
 
     $status = (& $PilotCmd status 2>&1) -join ' '
