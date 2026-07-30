@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # 拉取 loongsuite-pilot-installer 插件所需的多平台 Node 分发包到 vendor/node/。
-# 产物不入 git（体积大），本地打包分发或后续上传 OSS：
-#   ossutil cp -r vendor/node/ oss://<bucket>/<prefix>/node-dist/v<ver>/
-# 上传后将 config/install-params.conf 的 NODE_DIST_BASE_URL 指向 <base>，
-# 目录布局保持 <base>/v<ver>/<tarball> 即可。
+# 产物不入 git（体积大），用于上传 OSS 供插件在线下载：
+#   ossutil cp -r -f vendor/node/ oss://taiye-test-sh/loongsuite-pilot/node-dist/v<ver>/ --acl public-read
+# 上传后保持 config/install-params.conf 的 NODE_DIST_BASE_URL 与上传前缀一致，
+# 目录布局：<base>/v<ver>/<tarball>。
 set -euo pipefail
 
-NODE_VERSION="${1:-22.2.0}"
-BASE_URL="${NODE_DIST_BASE_URL:-https://nodejs.org/dist}"
+NODE_VERSION="${1:-22.22.2}"
+BASE_URL="${NODE_UPSTREAM_URL:-https://nodejs.org/dist}"
 VENDOR_DIR="$(cd "$(dirname "$0")/.." && pwd)/vendor/node"
 
 # 平台矩阵：mac(arm64/x64)、linux(x64/arm64)、windows(x64, zip)

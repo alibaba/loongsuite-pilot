@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # loongsuite-pilot-installer 插件 SessionStart hook：
-# 幂等检测并安装 loongsuite-pilot。node 依赖优先使用插件捆绑的分发包
-# （vendor/node/，统一 v22.2.0），缺失时从可配置源下载，不再依赖 nvm。
+# 幂等检测并安装 loongsuite-pilot。node 依赖统一使用 v22.22.2：默认从
+# NODE_DIST_BASE_URL（OSS）按平台下载，vendor/node 内有包则优先用本地包。
 # 管理员参数从 config/install-params.conf 读取并透传给 installer。
 # 用法：ensure-pilot.sh [--provision-node-only]（后者仅准备 node 并打印路径，供测试）
 set -uo pipefail
@@ -14,8 +14,8 @@ PILOT_BIN="$HOME/.local/bin/loongsuite-pilot"
 
 # ---- 内置默认值（可被 config/install-params.conf 及环境变量覆盖） ----
 INSTALLER_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite/loongsuite-pilot/installer.sh"
-NODE_VERSION="22.2.0"
-NODE_DIST_BASE_URL="https://nodejs.org/dist"
+NODE_VERSION="22.22.2"
+NODE_DIST_BASE_URL="https://taiye-test-sh.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/node-dist"
 NODE_MIN_MAJOR=22
 INSTALL_ARGS=()
 
@@ -84,13 +84,13 @@ provision_node() {
     mkdir -p "$extract_dir"
 
     if [ -f "$vendor_tar" ]; then
-        log "使用插件捆绑的 node 分发包: $tarball"
+        log "使用插件本地捆绑的 node 分发包: $tarball"
         dl_tar="$vendor_tar"
     else
         dl_tar="$DATA_DIR/$tarball"
         local url="$NODE_DIST_BASE_URL/v${NODE_VERSION}/$tarball"
-        log "vendor 无捆绑包，从 $url 下载"
-        curl -fsSL "$url" -o "$dl_tar" 2>>"$LOG_FILE" || { log "❌ node 分发包下载失败"; return 1; }
+        log "从 $url 下载 node 分发包"
+        curl -fsSL "$url" -o "$dl_tar" 2>>"$LOG_FILE" || { log "❌ node 分发包下载失败: $url"; return 1; }
     fi
 
     tar -xzf "$dl_tar" -C "$extract_dir" 2>>"$LOG_FILE" || { log "❌ node 分发包解压失败"; return 1; }
@@ -103,9 +103,9 @@ ensure_node() {
     if bin_dir=$(find_node); then
         log "node 环境就绪: $bin_dir"
     else
-        log "未检测到 node >= $NODE_MIN_MAJOR，启用捆绑分发包 (v$NODE_VERSION)"
+        log "未检测到 node >= $NODE_MIN_MAJOR，准备 node v$NODE_VERSION"
         bin_dir=$(provision_node) || return 1
-        log "捆绑 node 就绪: $bin_dir ($("$bin_dir/node" -v 2>/dev/null))"
+        log "node 就绪: $bin_dir ($("$bin_dir/node" -v 2>/dev/null))"
     fi
     export PATH="$bin_dir:$HOME/.local/bin:$PATH"
 }
