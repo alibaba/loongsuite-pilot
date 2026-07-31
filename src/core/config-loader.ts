@@ -118,6 +118,7 @@ export interface ConfigFile {
 
   upstreamLink?: {
     enabled?: boolean;
+    propagateToTools?: boolean;
     ttlMs?: number;
   };
 
@@ -261,6 +262,10 @@ function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
   const ttlMs = envInt('LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS', file?.upstreamLink?.ttlMs ?? 86_400_000); // 24h
   return {
     enabled: envBool('LOONGSUITE_PILOT_UPSTREAM_LINK', file?.upstreamLink?.enabled ?? false),
+    propagateToTools: envBool(
+      'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS',
+      file?.upstreamLink?.propagateToTools ?? false,
+    ),
     // Clamp: ttlMs <= 0 would make the retention cutoff Date.now() (or the future),
     // deleting all freshly-written correlation files and silently breaking linking.
     ttlMs: ttlMs > 0 ? ttlMs : 86_400_000,

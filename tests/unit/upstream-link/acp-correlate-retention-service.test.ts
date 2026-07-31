@@ -30,7 +30,11 @@ describe('AcpCorrelateRetentionService', () => {
     const staleLock = writeFile('old.env.lock', 48 * 3600_000);
     const fresh = writeFile('new.jsonl', 60_000); // 1min
 
-    const svc = new AcpCorrelateRetentionService(dataDir, { enabled: true, ttlMs: 24 * 3600_000 });
+    const svc = new AcpCorrelateRetentionService(dataDir, {
+      enabled: true,
+      propagateToTools: false,
+      ttlMs: 24 * 3600_000,
+    });
     const result = await svc.runCleanup();
 
     expect(result.deleted).toBe(2);
@@ -41,7 +45,11 @@ describe('AcpCorrelateRetentionService', () => {
 
   it('no-ops when the directory is absent', async () => {
     fs.rmSync(dir, { recursive: true, force: true });
-    const svc = new AcpCorrelateRetentionService(dataDir, { enabled: true, ttlMs: 1000 });
+    const svc = new AcpCorrelateRetentionService(dataDir, {
+      enabled: true,
+      propagateToTools: false,
+      ttlMs: 1000,
+    });
     const result = await svc.runCleanup();
     expect(result).toEqual({ deleted: 0, errors: 0 });
   });

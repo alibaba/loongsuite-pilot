@@ -29,6 +29,11 @@ import { appendLine, ensureDir, getTodayDateString, readInstalledVersion } from 
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
+import {
+  attachReservedToolSpanIds,
+  ReservedToolSpanIdGenerator,
+  type ToolSpanIdReservations,
+} from './tool-span-id-reservation.js';
 
 const logger = createLogger('otlp-trace-flusher');
 
@@ -56,6 +61,7 @@ interface AgentConvertState {
   provider: BasicTracerProvider;
   handler: ExtendedTelemetryHandler;
   inMem: InMemorySpanExporter;
+  toolSpanIds: ToolSpanIdReservations;
   active: number;
 }
 
@@ -453,7 +459,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     convertKey: string,
   ): Promise<void> {
     const convertState = this.getOrCreateConvertState(agentType, serviceName, projectedResourceAttributes, convertKey);
-    const { handler, provider, inMem } = convertState;
+    const { handler, provider, inMem, toolSpanIds } = convertState;
     convertState.active += 1;
 
     try {
@@ -503,10 +509,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // user Ctrl+C, agent errored mid-step). The converter library would
         // otherwise still emit a span for the orphan request/call.
         const sanitized = dropOrphanPairs(recordsForConversion);
-        const result = convertEventLogToTrace(
-          sanitized as unknown as EventLogRecord[],
-          { handler, strict: false, passthroughKeys },
-        );
+        toolSpanIds.prepare(sanitized);
+        let result;
+        try {
+          result = convertEventLogToTrace(
+            sanitized as unknown as EventLogRecord[],
+            { handler, strict: false, passthroughKeys },
+          );
+        } finally {
+          toolSpanIds.clear();
+        }
         if (result.warnings.length > 0) {
           logger.warn(`Conversion warnings for ${agentType}`, { warnings: result.warnings.join('; ') });
         }
@@ -620,13 +632,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     const resource = this.buildResource(agentType, serviceName, projectedResourceAttributes);
     const inMem = new InMemorySpanExporter();
+    const idGenerator = new ReservedToolSpanIdGenerator();
     const provider = new BasicTracerProvider({
       resource,
+      idGenerator,
       spanProcessors: [new SimpleSpanProcessor(inMem)],
     });
     const handler = new ExtendedTelemetryHandler({ tracerProvider: provider });
+    const toolSpanIds = attachReservedToolSpanIds(handler, idGenerator);
 
-    state = { provider, handler, inMem, active: 0 };
+    state = { provider, handler, inMem, toolSpanIds, active: 0 };
     this.agentConvertStates.set(key, state);
     this.evictConvertStates();
     return state;

@@ -1125,6 +1125,7 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       const config = await loadConfig();
       expect(config.upstreamLink.enabled).toBe(false);
+      expect(config.upstreamLink.propagateToTools).toBe(false);
       expect(config.upstreamLink.ttlMs).toBe(86_400_000);
     });
 
@@ -1134,6 +1135,19 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.upstreamLink.enabled).toBe(true);
       expect(config.upstreamLink.ttlMs).toBe(3_600_000);
+    });
+
+    it('enables downstream tool propagation from config or env', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        upstreamLink: { enabled: true, propagateToTools: true },
+      });
+      let config = await loadConfig();
+      expect(config.upstreamLink.propagateToTools).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { enabled: true } });
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS', '1');
+      config = await loadConfig();
+      expect(config.upstreamLink.propagateToTools).toBe(true);
     });
 
     it('treats an empty-string enable env as unset (not "true")', async () => {

@@ -182,7 +182,111 @@ function parentTranscriptWithBackgroundAgents(sessionId, agents) {
   ]);
 }
 
+function enableToolPropagation() {
+  fs.writeFileSync(
+    path.join(DATA_DIR, 'config.json'),
+    JSON.stringify({
+      upstreamLink: {
+        enabled: true,
+        propagateToTools: true,
+      },
+    }),
+  );
+}
+
 describe('claude-code-hook-processor v2 端到端', () => {
+  test('PreToolUse 注入 per-tool traceparent，Stop 复用其 span id', () => {
+    enableToolPropagation();
+    const upstreamTraceId = '4bf92f3577b34da6a3ce929d0e0e4736';
+    const upstreamSpanId = '00f067aa0ba902b7';
+    const traceparent = `00-${upstreamTraceId}-${upstreamSpanId}-01`;
+
+    const pre = runHook('pre-tool-use', {
+      session_id: 's-propagate',
+      prompt_id: 'prompt-1',
+      tool_name: 'Bash',
+      tool_use_id: 'tu-propagate',
+      tool_input: {
+        command: 'my-cli --work',
+        description: 'run user cli',
+        timeout: 5000,
+        run_in_background: false,
+      },
+    }, {
+      TRACEPARENT: traceparent,
+      TRACESTATE: 'vendor=value',
+    });
+
+    expect(pre.status).toBe(0);
+    const lines = pre.stdout.trim().split('\n');
+    expect(lines).toHaveLength(1);
+    const hookOutput = JSON.parse(lines[0]);
+    expect(hookOutput.hookSpecificOutput.permissionDecision).toBeUndefined();
+    const updated = hookOutput.hookSpecificOutput.updatedInput;
+    expect(updated.description).toBe('run user cli');
+    expect(updated.timeout).toBe(5000);
+    expect(updated.run_in_background).toBe(false);
+    const injected = /TRACEPARENT='00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})'/.exec(updated.command);
+    expect(injected).not.toBeNull();
+    expect(injected[1]).toBe(upstreamTraceId);
+    expect(injected[3]).toBe('01');
+    const reservedToolSpanId = injected[2];
+
+    const transcriptPath = writeTranscript('s-propagate', [
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: [{ type: 'text', text: 'run my cli' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:49.000Z', message: { id: 'msg_1', content: [{ type: 'tool_use', id: 'tu-propagate', name: 'Bash', input: { command: 'my-cli --work' } }], usage: { input_tokens: 100, output_tokens: 50 }, stop_reason: 'tool_use' } },
+      { type: 'user', timestamp: '2026-06-04T02:57:49.200Z', message: { content: [{ type: 'tool_result', tool_use_id: 'tu-propagate', content: 'done' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:52.000Z', message: { id: 'msg_2', content: [{ type: 'text', text: 'complete' }], usage: { input_tokens: 200, output_tokens: 20 }, stop_reason: 'end_turn' } },
+    ]);
+    const stop = runHook('stop', {
+      session_id: 's-propagate',
+      prompt_id: 'prompt-1',
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    }, {
+      TRACEPARENT: traceparent,
+      TRACESTATE: 'vendor=value',
+    });
+    expect(stop.status).toBe(0);
+
+    const records = readJsonlRecords();
+    const toolCall = records.find((r) =>
+      r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'tu-propagate');
+    const toolResult = records.find((r) =>
+      r['event.name'] === 'tool.result' && r['gen_ai.tool.call.id'] === 'tu-propagate');
+    expect(toolCall.span_id).toBe(reservedToolSpanId);
+    expect(toolResult.span_id).toBe(reservedToolSpanId);
+
+    const later = runHook('pre-tool-use', {
+      session_id: 's-propagate',
+      prompt_id: 'prompt-2',
+      tool_name: 'Bash',
+      tool_use_id: 'tu-later',
+      tool_input: { command: 'my-cli --again' },
+    }, { TRACEPARENT: traceparent });
+    expect(later.stdout.trim()).toBe('{}');
+  });
+
+  test('PreToolUse 默认关闭，并跳过子 Agent Bash', () => {
+    const traceparent = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
+    const payload = {
+      session_id: 's-disabled',
+      tool_name: 'Bash',
+      tool_use_id: 'tu-disabled',
+      tool_input: { command: 'my-cli' },
+    };
+    expect(runHook('pre-tool-use', payload, { TRACEPARENT: traceparent }).stdout.trim()).toBe('{}');
+
+    enableToolPropagation();
+    expect(runHook('pre-tool-use', {
+      ...payload,
+      session_id: 's-subagent',
+      tool_use_id: 'tu-subagent',
+      agent_id: 'agent-child',
+      agent_type: 'Explore',
+    }, { TRACEPARENT: traceparent }).stdout.trim()).toBe('{}');
+  });
+
   test('AgentTeams 环境变量会进入 hook record resourceAttributes', () => {
     const transcriptPath = writeTranscript('sat1', [
       { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: [{ type: 'text', text: 'hello' }] } },
