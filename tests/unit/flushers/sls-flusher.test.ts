@@ -44,6 +44,7 @@ function makeConfig(overrides: Partial<SlsFlusherConfig> = {}): SlsFlusherConfig
     enabled: true,
     accessKeyId: 'ak',
     accessKeySecret: 'sk',
+    apiKey: '',
     endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
     mode: 'ak',
     endpoints: [

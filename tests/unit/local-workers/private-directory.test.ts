@@ -19,7 +19,7 @@ describe.runIf(process.platform === 'win32')('private local worker directory', (
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it('removes inherited access for other users from the instance directory and token', async () => {
+  it('removes inherited access and remains safe when prepared again', async () => {
     const instanceDir = path.join(tmpDir, '实例 目录');
     const tokenPath = path.join(instanceDir, 'credentials', 'bootstrap-token');
     await fs.mkdir(instanceDir, { recursive: true });
@@ -33,6 +33,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     await fs.mkdir(path.dirname(tokenPath), { recursive: true });
     await fs.writeFile(tokenPath, 'secret', 'utf-8');
+    await preparePrivateLocalWorkerDirectory(instanceDir);
     await preparePrivateLocalWorkerDirectory(instanceDir);
 
     const result = await runPowerShellJson<{

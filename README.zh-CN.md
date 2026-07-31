@@ -133,7 +133,7 @@ loongsuite-pilot info
 | 后端 | 用途 |
 |------|------|
 | JSONL | 本地备份和调试查看，默认开启。 |
-| SLS | 上报到阿里云日志服务，支持 WebTracking 和 AK 模式。 |
+| SLS | 上报到阿里云日志服务，支持 WebTracking、AK 和 API Key 模式。 |
 | HTTP | 批量 POST 到自定义服务端。 |
 | OTLP Trace | 将 GenAI 活动导出为 OpenTelemetry Trace。 |
 
