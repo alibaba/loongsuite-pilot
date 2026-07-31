@@ -29,7 +29,7 @@ Qoder CLI 插件：安装并启用后，在下一次会话启动时自动检测�
 ```
 ① 修改 config/install-params.conf
 ② 递增 .qoder-plugin/plugin.json 的 version   ← 必需！缓存按版本号复用
-③ 重新分发（zip / marketplace），用户 plugins install
+③ 重新分发（zip），用户 plugins install
 ④ 用户下次会话 → 指纹不一致 → uninstall --purge → 按新参数安装 → 写新指纹
 ⑤ 此后每次会话指纹命中，毫秒级静默跳过
 ```
@@ -74,13 +74,12 @@ https://taiye-test-sh.oss-cn-shanghai.aliyuncs.com/sensen-test/node-v22.22.2-<pl
 ossutil cp -r -f vendor/node/ oss://taiye-test-sh/sensen-test/ --acl public-read
 ```
 
-产物不入 git（约 241MB，已 gitignore），上传后本地可删。若需**离线分发**，把对应平台的包放回插件 `vendor/node/` 一同拷给用户，脚本会优先用本地包、不访问网络。
+产物不入 git（约 241MB），上传后本地可删。若需**离线分发**，把对应平台的包放回插件 `vendor/node/` 一同拷给用户，脚本会优先用本地包、不访问网络。
 
 ## 安装与验证
 
 ```bash
 qodercli plugins install /path/to/loongsuite-pilot-installer   # 默认 user 级
-# 或从市场：qodercli plugins marketplace add <市场目录/仓库> && qodercli plugins install loongsuite-pilot-installer
 # 重启 CLI 或 /plugins reload，下一次会话启动即自动安装
 
 loongsuite-pilot status                     # 验证
@@ -88,7 +87,7 @@ loongsuite-pilot status                     # 验证
 
 安装日志：`~/.qoder/plugins/data/loongsuite-pilot-installer-*/install.log`（Windows：`%USERPROFILE%\.qoder\plugins\data\...`）
 
-插件本体落盘位置：`~/.qoder/plugins/cache/<市场名或 local>/loongsuite-pilot-installer/<版本>/`
+插件本体落盘位置：`~/.qoder/plugins/cache/local/loongsuite-pilot-installer/<版本>/`
 
 > 注意：插件缓存**按版本号复用**。改了代码但版本号不变时，`plugins install` 不会刷新已有缓存；开发期验证请先 `plugins uninstall` 或递增 `version`。
 
@@ -120,6 +119,6 @@ loongsuite-pilot status                     # 验证
 # bash 侧：仅准备 node（不装 pilot）
 ./scripts/ensure-pilot.sh --provision-node-only
 
-# PowerShell 侧：配置解析 + 参数映射单测（任意平台可跑）
-pwsh -NoProfile -File tests/test-config-parsing.ps1
+# PowerShell 侧：仅准备 node（不装 pilot）
+pwsh -NoProfile -File scripts/ensure-pilot.ps1 -ProvisionNodeOnly
 ```
