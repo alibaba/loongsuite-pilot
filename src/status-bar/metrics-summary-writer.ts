@@ -1,11 +1,10 @@
 import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
-import { createReadStream } from 'node:fs';
-import { createInterface } from 'node:readline';
 import type { StatusBarConfig } from '../types/index.js';
 import { writeJsonFile, readJsonFile, ensureDir, getTodayDateString } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
+import { scanJsonlTail } from './jsonl-tail-reader.js';
 
 const logger = createLogger('MetricsSummaryWriter');
 
@@ -116,6 +115,38 @@ interface ScanState {
   files: Record<string, { offset: number; size: number; ino: number }>;
 }
 
+interface SerializedDayStats {
+  tokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  sessions: string[];
+  requests: number;
+  toolCalls: number;
+  events: number;
+  modelTokens: Array<[string, { total: number; input: number; cacheRead: number }]>;
+  agentStats: Array<[string, { sessions: string[]; events: number; tokens: number }]>;
+  providerTokens: Array<[string, number]>;
+  repoStats: Array<[string, { sessions: string[]; events: number }]>;
+}
+
+interface CurrentDayFileState {
+  fileName: string;
+  dev: number;
+  ino: number;
+  birthtimeMs: number;
+  offset: number;
+  size: number;
+  stats: SerializedDayStats;
+}
+
+interface CurrentDayState {
+  version: 1;
+  day: string;
+  files: CurrentDayFileState[];
+}
+
 // ── Class ──
 
 export class MetricsSummaryWriter {
@@ -125,6 +156,7 @@ export class MetricsSummaryWriter {
   private readonly summaryPath: string;
   private readonly digestPath: string;
   private readonly scanStatePath: string;
+  private readonly currentDayStatePath: string;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private intervalTimer: ReturnType<typeof setInterval> | null = null;
   private isRefreshing = false;
@@ -136,6 +168,7 @@ export class MetricsSummaryWriter {
     this.summaryPath = path.join(dataDir, 'logs', 'metrics-summary.json');
     this.digestPath = path.join(dataDir, 'cache', 'metrics-daily-digest.json');
     this.scanStatePath = path.join(dataDir, 'cache', 'metrics-scan-state.json');
+    this.currentDayStatePath = path.join(dataDir, 'cache', 'metrics-current-day-state.json');
   }
 
   start(): void {
@@ -186,8 +219,20 @@ export class MetricsSummaryWriter {
     const today = getTodayDateString();
     const scanState = await this.loadScanState();
     const digest = await this.loadDigest();
-
     const files = await this.listOutputFiles();
+    let currentDayState = await this.loadCurrentDayState();
+
+    // Finish the previous active day before starting a new one. The replacement
+    // write is idempotent, so a crash between digest and state persistence cannot
+    // double-count the day on restart.
+    if (currentDayState && currentDayState.day !== today) {
+      currentDayState = await this.refreshCurrentDayState(currentDayState, files);
+      const completedStats = mergeCurrentDayStats(currentDayState);
+      digest.days[currentDayState.day] = this.dayStatsToDigest(completedStats);
+      this.copyCurrentDayOffsetsToScanState(currentDayState, scanState);
+      currentDayState = null;
+    }
+
     const liveStats = new Map<string, DayStats>();
     const fullScanDays = new Set<string>();
 
@@ -195,35 +240,27 @@ export class MetricsSummaryWriter {
       const match = FILE_NAME_PATTERN.exec(path.basename(file));
       if (!match) continue;
       const day = match[2];
+      if (day === today) continue;
 
       const fileStat = await this.safeStat(file);
       if (!fileStat) continue;
 
       const baseName = path.basename(file);
-      const isToday = day === today;
-
-      // Today's files: always scan from offset 0. The file is actively written by flushers,
-      // and we need session dedup (Set) + model/provider/repo breakdowns that can't be
-      // incrementally maintained without serializing Sets. Cost is acceptable (<1MB/day typical).
-      // Past files: incremental scan using cached offset.
-      // Exception: if a past day has no digest entry yet, scan from start to ensure data is captured.
       let startOffset = 0;
-      if (!isToday) {
-        const hasDigest = !!digest.days[day];
-        const cached = scanState.files[baseName];
-        if (hasDigest && cached && cached.ino === fileStat.ino && cached.size <= fileStat.size) {
-          startOffset = cached.offset;
-        }
-        if (startOffset >= fileStat.size && hasDigest) {
-          this.ensureDayStats(liveStats, day);
-          continue;
-        }
+      const hasDigest = !!digest.days[day];
+      const cached = scanState.files[baseName];
+      if (hasDigest && cached && cached.ino === fileStat.ino && cached.size <= fileStat.size) {
+        startOffset = cached.offset;
+      }
+      if (startOffset >= fileStat.size && hasDigest) {
+        this.ensureDayStats(liveStats, day);
+        continue;
       }
 
-      if (startOffset === 0 && !isToday) fullScanDays.add(day);
+      if (startOffset === 0) fullScanDays.add(day);
 
       const dayStats = this.ensureDayStats(liveStats, day);
-      const newOffset = await this.scanFile(file, startOffset, dayStats);
+      const newOffset = await this.scanFile(file, startOffset, fileStat.size, dayStats);
 
       scanState.files[baseName] = {
         offset: newOffset,
@@ -246,8 +283,13 @@ export class MetricsSummaryWriter {
       }
     }
 
-    // Current day — merge live + any partial digest
-    const todayLive = liveStats.get(today);
+    currentDayState ??= {
+      version: 1,
+      day: today,
+      files: [],
+    };
+    currentDayState = await this.refreshCurrentDayState(currentDayState, files);
+    const todayLive = mergeCurrentDayStats(currentDayState);
 
     // Prune old digest entries
     this.pruneDigest(digest, today);
@@ -255,12 +297,14 @@ export class MetricsSummaryWriter {
     // Build summary from digest + live data
     const summary = this.buildSummary(digest, todayLive, today);
 
-    // Persist — write source-of-truth (digest, scanState) before derived output (summary)
-    // so crash recovery favors re-scanning over data loss
+    // Persist source-of-truth before the derived summary. Each state file is
+    // written atomically; after a crash, replay starts from the last committed
+    // offset and produces the same summary without double-counting.
     await ensureDir(path.dirname(this.digestPath));
     await ensureDir(path.dirname(this.summaryPath));
     await writeJsonFile(this.digestPath, digest);
     await writeJsonFile(this.scanStatePath, scanState);
+    await writeJsonFile(this.currentDayStatePath, currentDayState);
     await writeJsonFile(this.summaryPath, summary);
 
     logger.debug('metrics summary written', {
@@ -291,50 +335,100 @@ export class MetricsSummaryWriter {
   private ensureDayStats(map: Map<string, DayStats>, day: string): DayStats {
     let stats = map.get(day);
     if (!stats) {
-      stats = {
-        tokens: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheCreationTokens: 0,
-        sessions: new Set(),
-        requests: 0,
-        toolCalls: 0,
-        events: 0,
-        modelTokens: new Map(),
-        agentStats: new Map(),
-        providerTokens: new Map(),
-        repoStats: new Map(),
-      };
+      stats = createDayStats();
       map.set(day, stats);
     }
     return stats;
   }
 
-  private async scanFile(filePath: string, startOffset: number, stats: DayStats): Promise<number> {
-    return new Promise<number>((resolve, reject) => {
-      let currentOffset = startOffset;
-      const stream = createReadStream(filePath, {
-        start: startOffset,
-        encoding: 'utf8',
-      });
-      const rl = createInterface({ input: stream, crlfDelay: Infinity });
-
-      rl.on('line', (line) => {
-        currentOffset += Buffer.byteLength(line, 'utf8') + 1; // +1 for newline
-        if (!line.trim()) return;
-
-        try {
-          const record = JSON.parse(line) as Record<string, string>;
-          this.applyRecord(record, stats);
-        } catch {
-          // skip malformed lines
-        }
-      });
-
-      rl.on('close', () => resolve(currentOffset));
-      rl.on('error', reject);
+  private async scanFile(
+    filePath: string,
+    startOffset: number,
+    endOffset: number,
+    stats: DayStats,
+  ): Promise<number> {
+    const result = await scanJsonlTail(filePath, startOffset, endOffset, {
+      onRecord: record => {
+        this.applyRecord(record as Record<string, string>, stats);
+      },
     });
+    logger.debug('metrics summary file scanned', {
+      file: path.basename(filePath),
+      startOffset,
+      endOffset,
+      nextOffset: result.nextOffset,
+      bytesRead: result.bytesRead,
+      mode: startOffset === 0 ? 'rebuild' : 'incremental',
+    });
+    return result.nextOffset;
+  }
+
+  private async refreshCurrentDayState(
+    state: CurrentDayState,
+    files: string[],
+  ): Promise<CurrentDayState> {
+    const existingByName = new Map(state.files.map(file => [file.fileName, file]));
+    const nextByName = new Map(existingByName);
+    let totalBytesRead = 0;
+
+    for (const filePath of files) {
+      const match = FILE_NAME_PATTERN.exec(path.basename(filePath));
+      if (!match || match[2] !== state.day) continue;
+
+      const fileStat = await this.safeStat(filePath);
+      if (!fileStat) continue;
+
+      const fileName = path.basename(filePath);
+      const existing = existingByName.get(fileName);
+      const canResume = existing !== undefined
+        && sameFileIdentity(existing, fileStat)
+        && existing.offset <= fileStat.size
+        && existing.size <= fileStat.size;
+      const startOffset = canResume ? existing.offset : 0;
+      const stats = canResume ? deserializeDayStats(existing.stats) : createDayStats();
+      const result = await scanJsonlTail(filePath, startOffset, fileStat.size, {
+        onRecord: record => {
+          this.applyRecord(record as Record<string, string>, stats);
+        },
+      });
+      totalBytesRead += result.bytesRead;
+
+      nextByName.set(fileName, {
+        fileName,
+        dev: fileStat.dev,
+        ino: fileStat.ino,
+        birthtimeMs: fileStat.birthtimeMs,
+        offset: result.nextOffset,
+        size: fileStat.size,
+        stats: serializeDayStats(stats),
+      });
+    }
+
+    logger.debug('metrics current-day files refreshed', {
+      day: state.day,
+      fileCount: nextByName.size,
+      bytesRead: totalBytesRead,
+    });
+
+    return {
+      version: 1,
+      day: state.day,
+      files: Array.from(nextByName.values())
+        .sort((left, right) => left.fileName.localeCompare(right.fileName)),
+    };
+  }
+
+  private copyCurrentDayOffsetsToScanState(
+    state: CurrentDayState,
+    scanState: ScanState,
+  ): void {
+    for (const file of state.files) {
+      scanState.files[file.fileName] = {
+        offset: file.offset,
+        size: file.size,
+        ino: file.ino,
+      };
+    }
   }
 
   private applyRecord(record: Record<string, string>, stats: DayStats): void {
@@ -637,9 +731,215 @@ export class MetricsSummaryWriter {
     const data = await readJsonFile<DigestFile>(this.digestPath);
     return data && data.days ? data : { version: 1, days: {} };
   }
+
+  private async loadCurrentDayState(): Promise<CurrentDayState | null> {
+    const data = await readJsonFile<CurrentDayState>(this.currentDayStatePath);
+    if (!data
+      || data.version !== 1
+      || typeof data.day !== 'string'
+      || !Array.isArray(data.files)) {
+      return null;
+    }
+
+    try {
+      for (const file of data.files) {
+        if (!file
+          || typeof file.fileName !== 'string'
+          || !Number.isFinite(file.dev)
+          || !Number.isFinite(file.ino)
+          || !Number.isFinite(file.birthtimeMs)
+          || !Number.isFinite(file.offset)
+          || file.offset < 0
+          || !Number.isFinite(file.size)
+          || file.size < 0) {
+          return null;
+        }
+        deserializeDayStats(file.stats);
+      }
+      return data;
+    } catch {
+      logger.warn('metrics current-day state is invalid; rebuilding');
+      return null;
+    }
+  }
 }
 
 // ── Helpers ──
+
+function createDayStats(): DayStats {
+  return {
+    tokens: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    sessions: new Set(),
+    requests: 0,
+    toolCalls: 0,
+    events: 0,
+    modelTokens: new Map(),
+    agentStats: new Map(),
+    providerTokens: new Map(),
+    repoStats: new Map(),
+  };
+}
+
+function serializeDayStats(stats: DayStats): SerializedDayStats {
+  return {
+    tokens: stats.tokens,
+    inputTokens: stats.inputTokens,
+    outputTokens: stats.outputTokens,
+    cacheReadTokens: stats.cacheReadTokens,
+    cacheCreationTokens: stats.cacheCreationTokens,
+    sessions: Array.from(stats.sessions).sort(),
+    requests: stats.requests,
+    toolCalls: stats.toolCalls,
+    events: stats.events,
+    modelTokens: Array.from(stats.modelTokens.entries())
+      .sort(([left], [right]) => left.localeCompare(right)),
+    agentStats: Array.from(stats.agentStats.entries())
+      .map(([agentType, data]) => [
+        agentType,
+        {
+          sessions: Array.from(data.sessions).sort(),
+          events: data.events,
+          tokens: data.tokens,
+        },
+      ] as [string, { sessions: string[]; events: number; tokens: number }])
+      .sort(([left], [right]) => left.localeCompare(right)),
+    providerTokens: Array.from(stats.providerTokens.entries())
+      .sort(([left], [right]) => left.localeCompare(right)),
+    repoStats: Array.from(stats.repoStats.entries())
+      .map(([repo, data]) => [
+        repo,
+        {
+          sessions: Array.from(data.sessions).sort(),
+          events: data.events,
+        },
+      ] as [string, { sessions: string[]; events: number }])
+      .sort(([left], [right]) => left.localeCompare(right)),
+  };
+}
+
+function deserializeDayStats(serialized: SerializedDayStats): DayStats {
+  if (!serialized
+    || !Array.isArray(serialized.sessions)
+    || !Array.isArray(serialized.modelTokens)
+    || !Array.isArray(serialized.agentStats)
+    || !Array.isArray(serialized.providerTokens)
+    || !Array.isArray(serialized.repoStats)) {
+    throw new Error('invalid serialized day stats');
+  }
+
+  const stats = createDayStats();
+  stats.tokens = finiteNumber(serialized.tokens);
+  stats.inputTokens = finiteNumber(serialized.inputTokens);
+  stats.outputTokens = finiteNumber(serialized.outputTokens);
+  stats.cacheReadTokens = finiteNumber(serialized.cacheReadTokens);
+  stats.cacheCreationTokens = finiteNumber(serialized.cacheCreationTokens);
+  stats.sessions = new Set(serialized.sessions.filter(value => typeof value === 'string'));
+  stats.requests = finiteNumber(serialized.requests);
+  stats.toolCalls = finiteNumber(serialized.toolCalls);
+  stats.events = finiteNumber(serialized.events);
+
+  for (const item of serialized.modelTokens) {
+    if (!Array.isArray(item) || typeof item[0] !== 'string' || !item[1]) continue;
+    stats.modelTokens.set(item[0], {
+      total: finiteNumber(item[1].total),
+      input: finiteNumber(item[1].input),
+      cacheRead: finiteNumber(item[1].cacheRead),
+    });
+  }
+  for (const item of serialized.agentStats) {
+    if (!Array.isArray(item) || typeof item[0] !== 'string' || !item[1]) continue;
+    stats.agentStats.set(item[0], {
+      sessions: new Set(
+        Array.isArray(item[1].sessions)
+          ? item[1].sessions.filter(value => typeof value === 'string')
+          : [],
+      ),
+      events: finiteNumber(item[1].events),
+      tokens: finiteNumber(item[1].tokens),
+    });
+  }
+  for (const item of serialized.providerTokens) {
+    if (!Array.isArray(item) || typeof item[0] !== 'string') continue;
+    stats.providerTokens.set(item[0], finiteNumber(item[1]));
+  }
+  for (const item of serialized.repoStats) {
+    if (!Array.isArray(item) || typeof item[0] !== 'string' || !item[1]) continue;
+    stats.repoStats.set(item[0], {
+      sessions: new Set(
+        Array.isArray(item[1].sessions)
+          ? item[1].sessions.filter(value => typeof value === 'string')
+          : [],
+      ),
+      events: finiteNumber(item[1].events),
+    });
+  }
+  return stats;
+}
+
+function mergeCurrentDayStats(state: CurrentDayState): DayStats {
+  const merged = createDayStats();
+  for (const file of state.files) {
+    mergeDayStats(merged, deserializeDayStats(file.stats));
+  }
+  return merged;
+}
+
+function mergeDayStats(target: DayStats, source: DayStats): void {
+  target.tokens += source.tokens;
+  target.inputTokens += source.inputTokens;
+  target.outputTokens += source.outputTokens;
+  target.cacheReadTokens += source.cacheReadTokens;
+  target.cacheCreationTokens += source.cacheCreationTokens;
+  target.requests += source.requests;
+  target.toolCalls += source.toolCalls;
+  target.events += source.events;
+  for (const session of source.sessions) target.sessions.add(session);
+
+  for (const [model, data] of source.modelTokens) {
+    const current = target.modelTokens.get(model) ?? { total: 0, input: 0, cacheRead: 0 };
+    current.total += data.total;
+    current.input += data.input;
+    current.cacheRead += data.cacheRead;
+    target.modelTokens.set(model, current);
+  }
+  for (const [agentType, data] of source.agentStats) {
+    const current = target.agentStats.get(agentType) ?? {
+      sessions: new Set<string>(),
+      events: 0,
+      tokens: 0,
+    };
+    current.events += data.events;
+    current.tokens += data.tokens;
+    for (const session of data.sessions) current.sessions.add(session);
+    target.agentStats.set(agentType, current);
+  }
+  for (const [provider, tokens] of source.providerTokens) {
+    target.providerTokens.set(provider, (target.providerTokens.get(provider) ?? 0) + tokens);
+  }
+  for (const [repo, data] of source.repoStats) {
+    const current = target.repoStats.get(repo) ?? {
+      sessions: new Set<string>(),
+      events: 0,
+    };
+    current.events += data.events;
+    for (const session of data.sessions) current.sessions.add(session);
+    target.repoStats.set(repo, current);
+  }
+}
+
+function sameFileIdentity(file: CurrentDayFileState, stat: fsSync.Stats): boolean {
+  return file.dev === stat.dev
+    && file.ino === stat.ino
+    && file.birthtimeMs === stat.birthtimeMs;
+}
+
+function finiteNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
 
 function toNumber(value: unknown): number {
   if (typeof value === 'number') return value;
