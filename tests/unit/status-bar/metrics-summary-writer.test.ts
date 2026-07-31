@@ -5,10 +5,15 @@ import { createTempDir, cleanupTempDir } from '../../helpers/fixture-builder.js'
 import { MetricsSummaryWriter } from '../../../src/status-bar/metrics-summary-writer.js';
 import type { StatusBarConfig } from '../../../src/types/index.js';
 
+const logger = vi.hoisted(() => ({
+  info: vi.fn(),
+  debug: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
 vi.mock('../../../src/utils/logger.js', () => ({
-  createLogger: () => ({
-    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
-  }),
+  createLogger: () => logger,
 }));
 
 function makeConfig(overrides: Partial<StatusBarConfig> = {}): StatusBarConfig {
@@ -23,6 +28,12 @@ function makeConfig(overrides: Partial<StatusBarConfig> = {}): StatusBarConfig {
 function today(): string {
   const d = new Date();
   return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
+}
+
+function currentDayScanBytes(): number[] {
+  return logger.debug.mock.calls
+    .filter(([message]) => message === 'metrics current-day files refreshed')
+    .map(([, details]) => (details as { bytesRead: number }).bytesRead);
 }
 
 function makeLlmResponse(overrides: Record<string, string> = {}): Record<string, string> {
@@ -76,12 +87,14 @@ describe('MetricsSummaryWriter', () => {
   let tmpDir: string;
 
   beforeEach(async () => {
+    vi.clearAllMocks();
     tmpDir = await createTempDir('metrics-summary-test-');
     await fs.mkdir(path.join(tmpDir, 'logs', 'output'), { recursive: true });
     await fs.mkdir(path.join(tmpDir, 'cache'), { recursive: true });
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     await cleanupTempDir(tmpDir);
   });
 
@@ -190,6 +203,7 @@ describe('MetricsSummaryWriter', () => {
     const claude = agents.find((a: { agentType: string }) => a.agentType === 'claude-code');
     expect(cursor.events).toBe(3);
     expect(claude.events).toBe(2);
+    expect(summary.ranges.today.totalSessions).toBe(1);
   });
 
   it('incremental scan: only reads new lines on second refresh', async () => {
@@ -220,6 +234,176 @@ describe('MetricsSummaryWriter', () => {
 
     summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
     expect(summary.ranges.today.totalTokens).toBe(1500);
+    expect(summary.ranges.today.totalSessions).toBe(1);
+
+    await writer.refresh();
+
+    const scanBytes = currentDayScanBytes();
+    expect(scanBytes).toHaveLength(3);
+    expect(scanBytes[0]).toBeGreaterThan(0);
+    expect(scanBytes[1]).toBe(Buffer.byteLength(JSON.stringify(resp2) + '\n'));
+    expect(scanBytes[2]).toBe(0);
+  });
+
+  it('restores current-day aggregate state across writer restarts without rescanning', async () => {
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    await writeJsonlFile(outputDir, `codex-${today()}.jsonl`, [
+      makeLlmRequest({ 'gen_ai.agent.type': 'codex' }),
+      makeLlmResponse({ 'gen_ai.agent.type': 'codex' }),
+    ]);
+
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(1200);
+    expect(summary.ranges.today.totalEvents).toBe(2);
+    expect(currentDayScanBytes()).toEqual([
+      expect.any(Number),
+      0,
+    ]);
+  });
+
+  it('does not commit a trailing partial JSONL record', async () => {
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const filePath = path.join(outputDir, `codex-${today()}.jsonl`);
+    const first = makeLlmResponse({ 'gen_ai.usage.total_tokens': '1000' });
+    const second = makeLlmResponse({ 'gen_ai.usage.total_tokens': '500' });
+    const firstLine = JSON.stringify(first) + '\n';
+    const secondLine = JSON.stringify(second);
+    const splitAt = Math.floor(secondLine.length / 2);
+    await fs.writeFile(filePath, firstLine + secondLine.slice(0, splitAt));
+
+    const writer = new MetricsSummaryWriter(tmpDir, makeConfig());
+    await writer.refresh();
+
+    let summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(1000);
+
+    const statePath = path.join(tmpDir, 'cache', 'metrics-current-day-state.json');
+    const state = JSON.parse(await fs.readFile(statePath, 'utf8'));
+    expect(state.files[0].offset).toBe(Buffer.byteLength(firstLine));
+
+    await fs.appendFile(filePath, secondLine.slice(splitAt) + '\n');
+    await writer.refresh();
+
+    summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(1500);
+    expect(summary.ranges.today.totalEvents).toBe(2);
+  });
+
+  it('rebuilds only a replaced current-day file', async () => {
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const codexPath = path.join(outputDir, `codex-${today()}.jsonl`);
+    const claudePath = path.join(outputDir, `claude-code-${today()}.jsonl`);
+    await writeJsonlFile(outputDir, path.basename(codexPath), [
+      makeLlmResponse({
+        'gen_ai.agent.type': 'codex',
+        'gen_ai.session.id': 'codex-old',
+        'gen_ai.usage.total_tokens': '1000',
+      }),
+    ]);
+    await writeJsonlFile(outputDir, path.basename(claudePath), [
+      makeLlmResponse({
+        'gen_ai.agent.type': 'claude-code',
+        'gen_ai.session.id': 'claude-stable',
+        'gen_ai.usage.total_tokens': '2000',
+      }),
+    ]);
+
+    const writer = new MetricsSummaryWriter(tmpDir, makeConfig());
+    await writer.refresh();
+
+    const replacementPath = `${codexPath}.replacement`;
+    await fs.writeFile(replacementPath, JSON.stringify(makeLlmResponse({
+      'gen_ai.agent.type': 'codex',
+      'gen_ai.session.id': 'codex-new',
+      'gen_ai.usage.total_tokens': '500',
+    })) + '\n');
+    await fs.rename(replacementPath, codexPath);
+    await writer.refresh();
+
+    const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(2500);
+    expect(summary.ranges.today.totalEvents).toBe(2);
+    expect(summary.ranges.today.totalSessions).toBe(2);
+  });
+
+  it('rebuilds a current-day file after it is truncated in place', async () => {
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const filePath = path.join(outputDir, `codex-${today()}.jsonl`);
+    const original = makeLlmResponse({
+      'gen_ai.session.id': 'old-session',
+      'gen_ai.usage.total_tokens': '123456',
+    });
+    const replacement = makeLlmResponse({
+      'gen_ai.session.id': 'new-session',
+      'gen_ai.usage.total_tokens': '50',
+    });
+    await fs.writeFile(filePath, JSON.stringify(original) + '\n');
+
+    const writer = new MetricsSummaryWriter(tmpDir, makeConfig());
+    await writer.refresh();
+    await fs.truncate(filePath, 0);
+    await fs.writeFile(filePath, JSON.stringify(replacement) + '\n');
+    await writer.refresh();
+
+    const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(50);
+    expect(summary.ranges.today.totalEvents).toBe(1);
+    expect(summary.ranges.today.totalSessions).toBe(1);
+  });
+
+  it('falls back to one full rebuild when current-day state is corrupt', async () => {
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    await writeJsonlFile(outputDir, `codex-${today()}.jsonl`, [
+      makeLlmResponse({ 'gen_ai.usage.total_tokens': '1000' }),
+    ]);
+
+    const writer = new MetricsSummaryWriter(tmpDir, makeConfig());
+    await writer.refresh();
+    await fs.writeFile(
+      path.join(tmpDir, 'cache', 'metrics-current-day-state.json'),
+      JSON.stringify({ version: 1, day: today(), files: [{ broken: true }] }),
+    );
+    await writer.refresh();
+
+    const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(1000);
+    expect(summary.ranges.today.totalEvents).toBe(1);
+    expect(currentDayScanBytes().at(-1)).toBeGreaterThan(0);
+  });
+
+  it('finalizes the previous day including data appended after its last refresh', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-30T12:00:00'));
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const previousDayPath = path.join(outputDir, 'codex-2026-07-30.jsonl');
+    const first = makeLlmResponse({ 'gen_ai.usage.total_tokens': '1000' });
+    const second = makeLlmResponse({ 'gen_ai.usage.total_tokens': '500' });
+    await fs.writeFile(previousDayPath, JSON.stringify(first) + '\n');
+
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    await fs.appendFile(previousDayPath, JSON.stringify(second) + '\n');
+
+    vi.setSystemTime(new Date('2026-07-31T00:01:00'));
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(0);
+    expect(summary.ranges.sevenDays.totalTokens).toBe(1500);
+
+    const digest = JSON.parse(await fs.readFile(
+      path.join(tmpDir, 'cache', 'metrics-daily-digest.json'),
+      'utf8',
+    ));
+    expect(digest.days['2026-07-30'].tokens).toBe(1500);
+
+    const currentState = JSON.parse(await fs.readFile(
+      path.join(tmpDir, 'cache', 'metrics-current-day-state.json'),
+      'utf8',
+    ));
+    expect(currentState.day).toBe('2026-07-31');
   });
 
   it('handles empty output directory gracefully', async () => {
