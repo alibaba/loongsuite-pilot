@@ -13,6 +13,7 @@
 | Claude Code | `claude-code` | Hook 集成。 |
 | Codex | `codex` | Hook 集成。 |
 | Cursor | `cursor` | Hook 集成。 |
+| Grok Build | `grok-build` | 四个 fail-open Hook + 本地 session 日志融合，采集 LLM、Token、工具、取消和失败生命周期。 |
 | Kiro CLI | `kiro-cli` | Hook 集成，并延迟采集本地 SQLite/session 数据；源端暂不提供 Token 用量。 |
 | OpenCode | `opencode` | 插件注入。 |
 | Pi Coding Agent | `pi-coding-agent` | 注入 Pi Extension，采集 LLM 与工具生命周期事件。 |
@@ -35,12 +36,43 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 根目录下最近活跃的 rollout 文件。`Stop` 仅作为尽力而为的唤醒信号，
 目录发现不依赖它。
 
+### Grok Build 采集
+
+当 `~/.grok` 存在时，Pilot 会检测到 Grok Build，并在
+`~/.grok/hooks/loongsuite-pilot.json` 中安装四个 fail-open Hook：
+`stop`、`stop_failure`、`user_prompt_submit` 和 `session_end`。当前不支持
+subagent Hook；部署时会清理 Pilot 旧版本遗留的 subagent 和工具 Hook。
+
+每个完成的 turn 会融合 Grok 自身的三类 JSONL 数据：
+
+- session 目录下的 `chat_history.jsonl`：消息、模型元数据、工具参数和
+  system instruction。
+- session 目录下的 `updates.jsonl`：prompt 标识、turn 完成状态、取消、
+  失败和工具状态。
+- `~/.grok/logs/unified.jsonl`：模型时间、Token、工具耗时和执行结果。
+
+Pilot 从安装后观察到的当前 turn 开始采集，不回放更早的 session 历史。
+由于 Grok 异步持久化最终取消状态，取消 turn 可能在下一次
+`UserPromptSubmit` 或 `SessionEnd` 时补采。将
+`agents["grok-build"].captureMessageContent` 设置为 `false`，会同时清除
+user、assistant、system 内容、工具参数、工具结果和原始错误详情。
+
+安装产物同时包含 POSIX 和 PowerShell Hook 启动器。总体支持表不代表已完成
+Windows 安装态验证；在完成真实 Windows E2E 前，Grok Build 不列入明确的
+Windows 支持矩阵。
+
 ## 安装时选择 Agent
 
 使用 `--agents` 跳过交互选择：
 
 ```bash
 bash /tmp/loongsuite-pilot-installer.sh install --agents "claude-code,codex,cursor"
+```
+
+仅安装 Grok Build：
+
+```bash
+bash /tmp/loongsuite-pilot-installer.sh install --agents "grok-build"
 ```
 
 安装器仍会检查所选 Agent 是否存在于当前机器上，再部署对应采集能力。
@@ -81,7 +113,8 @@ loongsuite-pilot restart
   "agents": {
     "claude-code": { "enabled": true, "captureMessageContent": false },
     "codex": { "enabled": true, "captureMessageContent": false },
-    "cursor": { "enabled": true, "captureMessageContent": true }
+    "cursor": { "enabled": true, "captureMessageContent": true },
+    "grok-build": { "enabled": true, "captureMessageContent": false }
   }
 }
 ```

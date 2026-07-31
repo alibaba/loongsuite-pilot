@@ -53,9 +53,11 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `gen_ai.turn.id` | string | Recommended | 一次用户请求到 Agent 最终响应的轮次 ID。 |
 | `gen_ai.step.id` | string | Recommended | 一次 ReAct 循环或 Agent 中间步骤。 |
 | `gen_ai.response.id` | string | Recommended | 模型 Provider 返回的 LLM response ID。 |
-| `gen_ai.agent.type` | string | Required | Agent 产品类型，例如 `claude-code`、`codex`、`cursor`、`qoder` 或 `qoder-work`。 |
+| `gen_ai.agent.type` | string | Required | Agent 产品类型，例如 `claude-code`、`codex`、`cursor`、`grok-build`、`qoder` 或 `qoder-work`。 |
 | `gen_ai.agent.id` | string | Recommended | Agent 运行实例 ID。 |
 | `gen_ai.agent.name` | string | Recommended | Agent 实例可读名称。 |
+| `gen_ai.agent.description` | string | Recommended | Agent 集成的可读描述；Grok Build 在每个 turn 上提供。 |
+| `gen_ai.data_source.id` | string | Recommended | 生成遥测数据的来源集成稳定标识。 |
 | `gen_ai.provider.name` | string | Required | 模型 Provider 名称，见 [Provider Names](#provider-names)。 |
 | `gen_ai.request.id` | string | Recommended | 客户端请求 ID，用于关联网关或 Provider 日志。 |
 | `gen_ai.request.model` | string | 可获取时 Conditionally Required | 客户端请求的模型。 |
@@ -75,12 +77,17 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `gen_ai.input.messages_delta` | json array | Recommended | 相比上一条 `llm.request` 新增的输入消息片段。 |
 | `gen_ai.input.messages_hash` | string | Recommended | 完整输入上下文 hash，用于去重和缓存分析。 |
 | `gen_ai.output.messages` | json array | Opt-In | 模型输出消息，包含文本、reasoning、tool-call parts 和 finish reason，可能包含敏感内容。 |
+| `gen_ai.system_instructions` | json array | Opt-In | 发送给模型的 system instructions，可能包含敏感内容。Grok Build 每条 trace 仅在第一个 LLM request 上携带。 |
+| `gen_ai.tool.definitions` | json array | Opt-In | 暴露给模型的工具定义，描述或 schema 可能包含敏感内容。 |
 | `gen_ai.tool.name` | string | `tool.call` 和 `tool.result` Required | 工具名称。 |
 | `gen_ai.tool.call.id` | string | 可获取时 Recommended | 用于关联 `tool.call` 和 `tool.result` 的工具调用 ID。 |
 | `gen_ai.tool.call.exec.id` | string | Recommended | 工具执行侧 ID。 |
 | `gen_ai.tool.call.arguments` | json | Opt-In | 工具调用参数，可能包含敏感内容。 |
 | `gen_ai.tool.call.result` | json | Opt-In | 工具结果 payload，可能包含敏感内容。 |
-| `gen_ai.tool.call.duration` | int | Recommended | 使用匹配的 result 边界减去 call 边界得到的正数工具执行耗时，单位毫秒；任一边界缺失或差值非正时省略。 |
+| `gen_ai.tool.call.duration` | int | Recommended | 非负工具执行耗时，单位毫秒。源端真实上报 `0` 时保留；无法得到可信耗时时省略。 |
+| `tool.result.status` | string | `tool.result` Recommended | 规范化执行状态：`success`、`failure`、`cancelled` 或 `unknown`。 |
+| `loongsuite.grok.match.strategy` | string | Grok Build 工具事件 Recommended | Grok 工具调用与执行结果的关联方式：`id`、`name_order` 或 `unmatched`；不包含消息内容。 |
+| `loongsuite.grok.timing.source` | string | Grok Build 事件 Recommended | Grok 三源融合最终采用的时钟：`unified`、`updates` 或 `hook`；不包含消息内容。 |
 | `gen_ai.skill.name` | string | `skill.use` Conditionally Required | 技能或扩展能力名称。 |
 | `error.type` | string | 操作以错误结束时 Conditionally Required | 低基数错误类型、错误码、异常类名或 HTTP 状态。 |
 | `error.message` | string | `error.type` 存在时 Recommended | 人类可读错误详情。 |
@@ -121,7 +128,9 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 |----|------|
 | `stop` | 模型正常生成结束。 |
 | `length` | 达到最大输出 token 限制。 |
-| `tool_calls` | 模型触发工具调用。 |
+| `tool_call` | 模型触发一个或多个工具调用。 |
+| `tool_calls` | 为现有 producer 保留的复数兼容拼写。 |
 | `content_filter` | 内容安全过滤停止生成。 |
 | `end_turn` | 模型结束当前轮次。 |
 | `cancelled` | 用户中断生成，不表示 Provider 或 Agent 错误。 |
+| `error` | 模型请求或 Agent turn 失败。 |

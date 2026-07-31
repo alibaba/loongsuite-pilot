@@ -55,9 +55,11 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.turn.id` | string | Recommended | One user request through the agent's final response. |
 | `gen_ai.step.id` | string | Recommended | One ReAct loop or intermediate agent step. |
 | `gen_ai.response.id` | string | Recommended | LLM response ID returned by the model provider when available. |
-| `gen_ai.agent.type` | string | Required | Agent product type, such as `claude-code`, `codex`, `cursor`, `qoder`, or `qoder-work`. |
+| `gen_ai.agent.type` | string | Required | Agent product type, such as `claude-code`, `codex`, `cursor`, `grok-build`, `qoder`, or `qoder-work`. |
 | `gen_ai.agent.id` | string | Recommended | Unique runtime instance ID for the agent. |
 | `gen_ai.agent.name` | string | Recommended | Human-readable agent instance name. |
+| `gen_ai.agent.description` | string | Recommended | Human-readable description of the agent integration. Grok Build provides this on every turn. |
+| `gen_ai.data_source.id` | string | Recommended | Stable identifier for the source integration that produced the telemetry. |
 | `gen_ai.provider.name` | string | Required | Model provider name. See [Provider Names](#provider-names). |
 | `gen_ai.request.id` | string | Recommended | Client-side request ID used to correlate with gateway or provider logs. |
 | `gen_ai.request.model` | string | Conditionally Required when available | Model requested by the client. |
@@ -77,12 +79,17 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.input.messages_delta` | json array | Recommended | Newly added input message fragments compared with the previous `llm.request`. |
 | `gen_ai.input.messages_hash` | string | Recommended | Hash of the full input context for deduplication and cache analysis. |
 | `gen_ai.output.messages` | json array | Opt-In | Model output messages, including text, reasoning, tool-call parts, and finish reason. May contain sensitive content. |
+| `gen_ai.system_instructions` | json array | Opt-In | System instructions sent to the model. May contain sensitive content. Grok Build places them on the first LLM request in each trace only. |
+| `gen_ai.tool.definitions` | json array | Opt-In | Tool definitions exposed to the model. Descriptions or schemas may contain sensitive content. |
 | `gen_ai.tool.name` | string | Required for `tool.call` and `tool.result` | Tool name. |
 | `gen_ai.tool.call.id` | string | Recommended when available | Tool call ID used to correlate `tool.call` and `tool.result`. |
 | `gen_ai.tool.call.exec.id` | string | Recommended | Tool execution-side ID. |
 | `gen_ai.tool.call.arguments` | json | Opt-In | Tool call arguments. May contain sensitive content. |
 | `gen_ai.tool.call.result` | json | Opt-In | Tool result payload. May contain sensitive content. |
-| `gen_ai.tool.call.duration` | int | Recommended | Positive tool execution duration in milliseconds, computed from the matched result boundary minus the call boundary. Omit it when either boundary is unavailable or the difference is not positive. |
+| `gen_ai.tool.call.duration` | int | Recommended | Non-negative tool execution duration in milliseconds. Preserve a source-reported `0`; omit the field when no trustworthy duration is available. |
+| `tool.result.status` | string | Recommended for `tool.result` | Normalized execution state: `success`, `failure`, `cancelled`, or `unknown`. |
+| `loongsuite.grok.match.strategy` | string | Recommended for Grok Build tool events | How a Grok tool call was associated with its execution: `id`, `name_order`, or `unmatched`. It contains no message content. |
+| `loongsuite.grok.timing.source` | string | Recommended for Grok Build events | Clock selected during Grok three-source fusion: `unified`, `updates`, or `hook`. It contains no message content. |
 | `gen_ai.skill.name` | string | Conditionally Required for `skill.use` | Skill or extension capability name. |
 | `error.type` | string | Conditionally Required when the operation ends with an error | Low-cardinality error type, error code, exception class, or HTTP status. |
 | `error.message` | string | Recommended when `error.type` exists | Human-readable error detail. |
@@ -123,7 +130,9 @@ If none of the above values apply, use a lowercase dotted provider name such as 
 |-------|-------------|
 | `stop` | Model generation completed normally. |
 | `length` | Maximum output token limit was reached. |
-| `tool_calls` | The model triggered a tool call. |
+| `tool_call` | The model triggered one or more tool calls. |
+| `tool_calls` | Legacy plural spelling accepted from existing producers. |
 | `content_filter` | Content safety filtering stopped generation. |
 | `end_turn` | The model ended the turn. |
 | `cancelled` | The user interrupted generation; this is not a provider or agent error. |
+| `error` | The model request or agent turn failed. |

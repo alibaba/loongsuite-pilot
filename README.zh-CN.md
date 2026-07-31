@@ -42,6 +42,7 @@ Pilot 主要帮助回答这些问题：
 | Claude Code | Hook | Yes | Yes | Yes | Yes |
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
+| Grok Build | Hook + 本地 session 日志 | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / session 轮询 | Yes | Yes | No | Yes |
 | OpenCode | 插件注入 | Yes | Yes | Yes | Yes |
 | Pi Coding Agent | Extension 注入 | Yes | Yes | Yes | Yes |

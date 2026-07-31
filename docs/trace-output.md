@@ -314,6 +314,27 @@ Notes:
 - Only keys matching a configured prefix are passed through; all other top-level fields are unaffected. Supported for claude-code, codex, qoder, and opencode.
 - Codex snapshots these process-level attributes on `UserPromptSubmit` (with `Stop` as a fail-open fallback) and correlates them to transcript records by session and turn. This prevents a resumed session launched by a different invocation from reusing the previous invocation's attributes.
 
+### Grok Build trace semantics
+
+Grok Build traces use `gen_ai.agent.system=grok` and retain the model provider
+reported by Grok (normally `x_ai`). Each real prompt produces one
+`ENTRY -> AGENT -> STEP -> LLM/TOOL` trace. Timing, token usage, and tool
+execution data are reconstructed from Grok's chat history, updates, and unified
+logs without synthesizing positive durations.
+
+Two non-sensitive diagnostic attributes explain the reconstruction decision:
+
+| Attribute | Values | Meaning |
+|-----------|--------|---------|
+| `loongsuite.grok.match.strategy` | `id`, `name_order`, `unmatched` | How a tool call was associated with its execution result. |
+| `loongsuite.grok.timing.source` | `unified`, `updates`, `hook` | Which source supplied the event timestamp. |
+
+A source-reported zero tool duration remains `0`. Failed and cancelled turns
+close ENTRY and AGENT spans with a normalized status; raw upstream error text is
+not copied into span error messages. With `captureMessageContent=false`, LLM
+input/output, system instructions, tool arguments, tool results, and raw errors
+are absent from the trace.
+
 ## Verify Trace Output
 
 ```bash

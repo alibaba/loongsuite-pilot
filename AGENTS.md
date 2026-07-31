@@ -53,6 +53,7 @@
 | Qoder Work CN | `qoder-work-cn` | Hook | `BaseHookInput` / `BaseSessionInput` | `inputs/qoder-work*/` | `agents.d/qoder-work-cn.json` |
 | Qoder CLI | `qoder` | Hook | `BaseHookInput` / `BaseSessionInput` | `inputs/qoder-cli*/` | `agents.d/qoder.json` |
 | Cursor | `cursor` | Hook | `BaseHookInput` | `inputs/cursor-hook/` | `agents.d/cursor.json` |
+| Grok Build | `grok-build` | Hook | `BaseHookInput` | `inputs/grok-build-log/` | `agents.d/grok-build.json` |
 | Claude Code | `claude-code` | Plugin-Probe | `BaseHookInput` | `inputs/claude-code-log/` | `agents.d/claude-code.json` |
 | Codex | `codex` | Plugin-Probe | `BaseHookInput` | `inputs/codex-log/` | `agents.d/codex.json` |
 | OpenCode | `opencode` | Plugin-Probe | `BaseHookInput` | `inputs/opencode-log/` | `agents.d/opencode.json` |

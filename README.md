@@ -45,6 +45,7 @@ Pilot is designed to answer practical questions:
 | Claude Code   | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Codex         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       |
+| Grok Build    | Hook + local session logs | Yes          | Yes        | Yes         | Yes                       |
 | Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       |
 | OpenCode      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
 | Pi Coding Agent | Extension injection     | Yes          | Yes        | Yes         | Yes                       |

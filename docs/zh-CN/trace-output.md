@@ -314,6 +314,25 @@ Pilot 会将 Trace 发送到 `http://localhost:3000/api/public/otel/v1/traces`�
 - Codex 会在 `UserPromptSubmit` 时保存这些进程级属性（以 `Stop` 作为 fail-open 兜底），并按 session 与 turn 关联到 transcript 记录，避免同一个 session 被不同调用恢复时沿用上一次调用的属性。
 - value 不能包含逗号 `,`（逗号是键值对分隔符）；单个 value 长度上限 512 字符。
 
+### Grok Build Trace 语义
+
+Grok Build Trace 使用 `gen_ai.agent.system=grok`，并保留 Grok 上报的模型
+Provider（通常为 `x_ai`）。每个真实 prompt 生成一条
+`ENTRY -> AGENT -> STEP -> LLM/TOOL` Trace。时间、Token 和工具执行数据由
+Grok 的 chat history、updates 和 unified 日志融合得到，不会合成正数耗时。
+
+两个不包含敏感内容的诊断属性用于说明融合结果：
+
+| 属性 | 取值 | 含义 |
+|------|------|------|
+| `loongsuite.grok.match.strategy` | `id`、`name_order`、`unmatched` | 工具调用与执行结果的关联方式。 |
+| `loongsuite.grok.timing.source` | `unified`、`updates`、`hook` | 事件时间来自哪个数据源。 |
+
+源端真实上报的零耗时工具会保留 `0`。失败和取消 turn 会使用规范化状态关闭
+ENTRY 和 AGENT span，不会把上游原始错误文本复制到 span 错误信息中。设置
+`captureMessageContent=false` 后，Trace 中不会包含 LLM 输入输出、system
+instructions、工具参数、工具结果和原始错误。
+
 ## 验证 Trace 输出
 
 ```bash

@@ -13,6 +13,7 @@ Use these IDs in installer options, `agent-control.json`, and `config.json`.
 | Claude Code | `claude-code` | Hook integration. |
 | Codex | `codex` | Hook integration. |
 | Cursor | `cursor` | Hook integration. |
+| Grok Build | `grok-build` | Four fail-open hooks plus local session-log fusion; captures LLM, token, tool, cancellation, and failure lifecycle data. |
 | Kiro CLI | `kiro-cli` | Hook integration with delayed local SQLite/session collection. Token usage is not exposed by the source. |
 | OpenCode | `opencode` | Plugin injection. |
 | Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. |
@@ -36,12 +37,46 @@ Codex collection is transcript-backed. Pilot uses the lightweight
 recent rollout files from that session root. `Stop` is retained as a
 best-effort wakeup and is not required for directory discovery.
 
+### Grok Build collection
+
+Pilot detects Grok Build when `~/.grok` exists and installs four fail-open
+hooks in `~/.grok/hooks/loongsuite-pilot.json`: `stop`, `stop_failure`,
+`user_prompt_submit`, and `session_end`. Subagent hooks are not supported;
+Pilot removes obsolete Pilot-owned subagent and tool hooks during deployment.
+
+Each completed turn is reconstructed from three Grok-owned JSONL sources:
+
+- Session `chat_history.jsonl` for messages, model metadata, tool arguments,
+  and the system instruction.
+- Session `updates.jsonl` for prompt identity, turn completion, cancellation,
+  failure, and tool status.
+- `~/.grok/logs/unified.jsonl` for model timing, token usage, tool timing, and
+  execution results.
+
+Pilot starts from the turn observed after installation and does not replay
+older session history. A cancellation can be collected on the next
+`UserPromptSubmit` or `SessionEnd` because Grok persists its final cancellation
+state asynchronously. Set `agents["grok-build"].captureMessageContent` to `false`
+to remove user, assistant, and system content together with tool arguments,
+tool results, and raw error details.
+
+The distribution includes both POSIX and PowerShell hook launchers. The
+general support table does not claim installed-product Windows verification;
+Grok Build is intentionally omitted from the explicit Windows matrix until a
+real Windows E2E run is recorded.
+
 ## Choose Agents During Installation
 
 Use `--agents` to skip the interactive selection step:
 
 ```bash
 bash /tmp/loongsuite-pilot-installer.sh install --agents "claude-code,codex,cursor"
+```
+
+For Grok Build only:
+
+```bash
+bash /tmp/loongsuite-pilot-installer.sh install --agents "grok-build"
 ```
 
 The installer still checks whether each selected agent exists on the machine before deploying collection capabilities.
@@ -82,7 +117,8 @@ Use `config.json` when you need to control message content capture:
   "agents": {
     "claude-code": { "enabled": true, "captureMessageContent": false },
     "codex": { "enabled": true, "captureMessageContent": false },
-    "cursor": { "enabled": true, "captureMessageContent": true }
+    "cursor": { "enabled": true, "captureMessageContent": true },
+    "grok-build": { "enabled": true, "captureMessageContent": false }
   }
 }
 ```
