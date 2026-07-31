@@ -133,6 +133,41 @@ function Initialize-NodeRuntime {
     $env:PATH = "$binDir;$(Join-Path $env:USERPROFILE '.local\bin');$env:PATH"
 }
 
+# ---- 运行子进程并把所有流追加到日志 ----
+# 必须用文件重定向而不是 `| Add-Content`：
+#   • 管道会等 stdout 句柄关闭，installer 启动的后台守护进程会继承句柄 → 永远挂死
+#   • EAP=Stop 下子进程的 stderr 经管道会变成终止性错误
+function Invoke-Logged([string[]]$PsArgs) {
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File @PsArgs *>> $LogFile
+        return $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prevEap }
+}
+
+# ---- 硬停 pilot：Windows 下不停干净时 installer 删不掉数据目录 ----
+function Stop-PilotHard {
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if (Test-Path $PilotCmd) { & $PilotCmd stop *>> $LogFile }
+        # 移除计划任务，否则会重新拉起守护进程
+        Get-ScheduledTask -ErrorAction SilentlyContinue |
+            Where-Object { $_.TaskName -match 'Loongsuite' } | ForEach-Object {
+                Stop-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -ErrorAction SilentlyContinue
+                Unregister-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        # 杀掉持有数据目录的 wscript 启动器与 node 守护进程
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.CommandLine -match '\.loongsuite-pilot' } | ForEach-Object {
+                Write-Log ("停止残留进程 " + $_.Name + " pid " + $_.ProcessId)
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+        Start-Sleep -Seconds 2
+    } finally { $ErrorActionPreference = $prevEap }
+}
+
 # ---- 测试入口：仅准备 node ----
 if ($ProvisionNodeOnly) {
     Initialize-NodeRuntime
@@ -140,8 +175,30 @@ if ($ProvisionNodeOnly) {
     exit 0
 }
 
-# ---- 幂等：已安装直接退出（每次会话启动都会触发本脚本） ----
-if (Test-Path $PilotCmd) { exit 0 }
+# ---- 参数指纹：installer 对 config.json 是合并语义（未传参数保留旧值），
+# 因此参数变更时必须先 uninstall -Purge 再重装，否则旧配置会残留 ----
+$FingerprintFile = Join-Path $DataDir 'install-args.sha256'
+
+function Get-ArgsFingerprint {
+    $payload = "url=$InstallerUrl`n" + (($InstallArgs | ForEach-Object { "$_`n" }) -join '')
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($payload))
+        return -join ($bytes | ForEach-Object { $_.ToString('x2') })
+    } finally { $sha.Dispose() }
+}
+
+$CurrentFp = Get-ArgsFingerprint
+
+function Test-PilotInstalled { Test-Path $PilotCmd }
+
+function Test-FingerprintMatch {
+    if (-not (Test-Path $FingerprintFile)) { return $false }
+    return ((Get-Content -Raw $FingerprintFile).Trim() -eq $CurrentFp)
+}
+
+# ---- 幂等：已安装且参数未变则立即退出（每次会话启动都会触发本脚本） ----
+if ((Test-PilotInstalled) -and (Test-FingerprintMatch)) { exit 0 }
 
 # ---- 并发锁：多会话同时启动时只允许一个实例执行安装 ----
 # CLI 退出可能杀掉 hook 进程导致锁残留，超过 TTL 的旧锁直接接管
@@ -161,7 +218,11 @@ try {
 }
 
 try {
-    Write-Log '未检测到 loongsuite-pilot，开始自动安装'
+    # 拿到锁后重新判定：可能另一实例已经装好了相同配置
+    if ((Test-PilotInstalled) -and (Test-FingerprintMatch)) { exit 0 }
+
+    $needReinstall = Test-PilotInstalled
+    if ($needReinstall) { Write-Log '已安装但参数指纹不一致，卸载后按新配置重装' }
     Write-Log "installer: $InstallerUrl"
     Write-Log "install args: $($InstallArgs -join ' ')"
 
@@ -170,11 +231,29 @@ try {
     $installerTmp = Join-Path $DataDir 'installer.ps1'
     Invoke-WebRequest -Uri $InstallerUrl -OutFile $installerTmp -UseBasicParsing
 
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installerTmp install @InstallArgs *>&1 |
-        Add-Content -Path $LogFile -Encoding UTF8
-    if ($LASTEXITCODE -ne 0) { throw "installer exited with code $LASTEXITCODE" }
+    if ($needReinstall) {
+        Stop-PilotHard
+        $rc = Invoke-Logged @($installerTmp, 'uninstall', '-Purge')
+        # 数据目录偶尔仍被残留句柄占用，补一手强删，否则旧 config 会被合并保留
+        $pilotHome = Join-Path $env:USERPROFILE '.loongsuite-pilot'
+        if (Test-Path $pilotHome) {
+            & cmd /c "rmdir /s /q `"$pilotHome`"" *>> $LogFile
+        }
+        if ((Test-PilotInstalled) -or (Test-Path $pilotHome)) {
+            Write-Log "⚠️ 卸载未完全成功 (rc=$rc)，继续尝试安装（installer 会覆盖同名配置项）"
+        } else {
+            Write-Log '旧版本已卸载'
+        }
+    }
 
-    $status = (& $PilotCmd status 2>&1) -join ' '
+    $rc = Invoke-Logged (@($installerTmp, 'install') + $InstallArgs)
+    if ($rc -ne 0) { throw "installer exited with code $rc" }
+
+    Set-Content -Path $FingerprintFile -Value $CurrentFp -Encoding ASCII
+    # 直接调 .cmd 并取回字符串（不进管道），避免后台进程持有句柄导致挂死
+    $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    $status = (& $PilotCmd status 2>$null) -join ' '
+    $ErrorActionPreference = $prevEap
     Write-Log "✅ 安装完成。status: $status"
     # stdout 纯文本会作为 SessionStart 附加上下文注入对话，让用户感知安装结果
     Write-Output "loongsuite-pilot 已由插件自动安装完成：$status"

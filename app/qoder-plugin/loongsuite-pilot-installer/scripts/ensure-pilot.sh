@@ -118,8 +118,32 @@ if [ "${1:-}" = "--provision-node-only" ]; then
     exit 0
 fi
 
-# ---- 幂等：已安装直接退出（每次会话启动都会触发本脚本） ----
-if [ -x "$PILOT_BIN" ] || [ -x /usr/local/bin/loongsuite-pilot ]; then
+# ---- 参数指纹：installer 对 config.json 是合并语义（未传参数保留旧值），
+# 因此参数变更时必须先 uninstall --purge 再重装，否则旧配置会残留 ----
+FINGERPRINT_FILE="$DATA_DIR/install-args.sha256"
+
+compute_fingerprint() {
+    local payload
+    payload="url=$INSTALLER_URL"$'\n'"$(printf '%s\n' ${INSTALL_ARGS[@]+"${INSTALL_ARGS[@]}"})"
+    if command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$payload" | shasum -a 256 | awk '{print $1}'
+    else
+        printf '%s' "$payload" | sha256sum | awk '{print $1}'
+    fi
+}
+
+CURRENT_FP=$(compute_fingerprint)
+
+is_installed() {
+    [ -x "$PILOT_BIN" ] || [ -x /usr/local/bin/loongsuite-pilot ]
+}
+
+fingerprint_matches() {
+    [ -f "$FINGERPRINT_FILE" ] && [ "$(cat "$FINGERPRINT_FILE" 2>/dev/null)" = "$CURRENT_FP" ]
+}
+
+# ---- 幂等：已安装且参数未变则立即退出（每次会话启动都会触发本脚本） ----
+if is_installed && fingerprint_matches; then
     exit 0
 fi
 
@@ -135,7 +159,18 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
-log "未检测到 loongsuite-pilot，开始自动安装"
+# 拿到锁后重新判定：可能另一实例已经装好了相同配置
+if is_installed && fingerprint_matches; then
+    exit 0
+fi
+
+# 参数变更：先卸载（含 --purge），避免旧 sls/cms 配置残留
+NEED_REINSTALL=0
+if is_installed; then
+    NEED_REINSTALL=1
+    log "已安装但参数指纹不一致，卸载后按新配置重装"
+fi
+
 log "installer: $INSTALLER_URL"
 log "install args: ${INSTALL_ARGS[*]+${INSTALL_ARGS[*]}}"
 
@@ -144,14 +179,26 @@ ensure_node || {
     exit 1
 }
 
-# ---- 下载并执行 installer（参数来自管理员配置） ----
+# ---- 下载 installer（卸载与安装共用同一份） ----
 INSTALLER_TMP="$DATA_DIR/installer.sh"
 if ! curl -fsSL "$INSTALLER_URL" -o "$INSTALLER_TMP" 2>>"$LOG_FILE"; then
     log "❌ installer 下载失败: $INSTALLER_URL"
     echo "loongsuite-pilot 自动安装失败：installer 下载失败，详见 $LOG_FILE" >&2
     exit 1
 fi
-if bash "$INSTALLER_TMP" install ${INSTALL_ARGS[@]+"${INSTALL_ARGS[@]}"} >> "$LOG_FILE" 2>&1; then
+
+if [ "$NEED_REINSTALL" = "1" ]; then
+    # stdin 必须接 /dev/null：installer 用 [ ! -t 0 ] 判非交互，而 hook 继承的 stdin
+    # 不一定能让它走到非交互分支，一旦阻塞会直接碰 hook 超时（900s）
+    if bash "$INSTALLER_TMP" uninstall --purge < /dev/null >> "$LOG_FILE" 2>&1; then
+        log "旧版本已卸载"
+    else
+        log "⚠️ 卸载未完全成功，继续尝试安装（installer 会覆盖同名配置项）"
+    fi
+fi
+
+if bash "$INSTALLER_TMP" install ${INSTALL_ARGS[@]+"${INSTALL_ARGS[@]}"} < /dev/null >> "$LOG_FILE" 2>&1; then
+    printf '%s' "$CURRENT_FP" > "$FINGERPRINT_FILE"
     STATUS=$("$PILOT_BIN" status 2>&1 || true)
     log "✅ 安装完成。status: $STATUS"
     # stdout 纯文本会作为 SessionStart 附加上下文注入对话，让用户感知安装结果
