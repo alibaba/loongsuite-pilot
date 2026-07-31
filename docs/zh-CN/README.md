@@ -19,6 +19,7 @@
 | [本地 JSONL 输出](local-jsonl-output.md) | 将规范化事件写入本地文件，并验证采集是否生效。 |
 | [SLS 输出](sls-output.md) | 将日志上报到阿里云日志服务。 |
 | [Trace 输出](trace-output.md) | 将 GenAI 活动导出为 OTLP Trace。 |
+| [Claude Code 下游 CLI Trace 传播](claude-code-downstream-trace-propagation.md) | 将上游 Trace 上下文继续传给 Claude Code 通过 Bash 调用的用户 CLI。 |
 | [HTTP 输出](http-output.md) | 将规范化事件 POST 到自定义接口。 |
 
 ## 配置采集与隐私

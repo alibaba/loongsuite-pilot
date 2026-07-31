@@ -110,6 +110,7 @@ loongsuite-pilot info
 | 写入本地 JSONL 日志 | [本地 JSONL 输出](docs/zh-CN/local-jsonl-output.md) |
 | 上报日志到 SLS | [SLS 输出](docs/zh-CN/sls-output.md) |
 | 上报 OTLP Trace | [Trace 输出](docs/zh-CN/trace-output.md) |
+| 将上游 Trace 继续传给 Claude Code 调用的 CLI | [Claude Code 下游 CLI Trace 传播](docs/zh-CN/claude-code-downstream-trace-propagation.md) |
 | POST 到 HTTP 接口 | [HTTP 输出](docs/zh-CN/http-output.md) |
 | 输出前进行密钥脱敏 | [数据脱敏](docs/zh-CN/masking.md) |
 | 查看全局配置加载顺序和保留策略 | [配置总览](docs/zh-CN/configuration.md) |
