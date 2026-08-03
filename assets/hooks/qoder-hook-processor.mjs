@@ -150,6 +150,26 @@ function timestampToUnixNanos(value) {
   return String(BigInt(Date.now()) * 1_000_000n);
 }
 
+function timestampOrderNanos(value) {
+  if (typeof value !== 'string' || !value) return null;
+
+  // Date.parse() truncates ISO fractions to milliseconds. Qoder emits
+  // microsecond timestamps, so two ordered events such as .999176 and .999890
+  // otherwise compare as equal and can collapse adjacent LLM boundaries.
+  const match = value.match(/^(.*?)(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/);
+  if (match) {
+    const [, wholeSeconds, fraction = '', zone] = match;
+    const wholeSecondsMs = Date.parse(`${wholeSeconds}${zone}`);
+    if (!Number.isNaN(wholeSecondsMs)) {
+      const fractionNanos = BigInt((fraction + '000000000').slice(0, 9));
+      return BigInt(wholeSecondsMs) * 1_000_000n + fractionNanos;
+    }
+  }
+
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : BigInt(ms) * 1_000_000n;
+}
+
 function computeDurationMs(startNanos, endNanos) {
   if (!startNanos || !endNanos || startNanos === endNanos) return 0;
   try {
@@ -720,14 +740,14 @@ export function buildLlmBoundaries(progressEvents, contentEvents) {
   let currentGroup = [];
   let currentToolIds = new Set();
   let resolvedToolIds = new Set();
-  let currentToolStartMs = null;
+  let currentToolStartNanos = null;
 
   function flushGroup() {
     if (currentGroup.length > 0) assistantGroups.push(currentGroup);
     currentGroup = [];
     currentToolIds = new Set();
     resolvedToolIds = new Set();
-    currentToolStartMs = null;
+    currentToolStartNanos = null;
   }
 
   for (const row of contentEvents) {
@@ -741,8 +761,8 @@ export function buildLlmBoundaries(progressEvents, contentEvents) {
       }
       continue;
     }
-    const ts = row.timestamp ? Date.parse(row.timestamp) : 0;
-    if (!ts) continue;
+    const ts = timestampOrderNanos(row.timestamp);
+    if (ts === null) continue;
 
     const toolCycleComplete = currentGroup.length > 0 &&
       currentToolIds.size > 0 &&
@@ -754,10 +774,10 @@ export function buildLlmBoundaries(progressEvents, contentEvents) {
     // result while preventing an unresolved tool from swallowing all later LLMs.
     const completedByHook = currentGroup.length > 0 &&
       currentToolIds.size > 0 &&
-      currentToolStartMs !== null &&
+      currentToolStartNanos !== null &&
       progressEvents.filter(pe => {
-        const peMs = Date.parse(pe.ts) || 0;
-        return peMs > currentToolStartMs && peMs < ts && (
+        const peTs = timestampOrderNanos(pe.ts);
+        return peTs !== null && peTs > currentToolStartNanos && peTs < ts && (
           pe.hookEvent === 'PostToolUse' || pe.hookEvent === 'PostToolUseFailure'
         );
       }).length >= currentToolIds.size;
@@ -767,7 +787,7 @@ export function buildLlmBoundaries(progressEvents, contentEvents) {
     for (const block of row.message?.content || []) {
       if (block?.type === 'tool_use' && block.id) {
         currentToolIds.add(block.id);
-        if (currentToolStartMs === null) currentToolStartMs = ts;
+        if (currentToolStartNanos === null) currentToolStartNanos = ts;
       }
     }
   }
@@ -777,14 +797,16 @@ export function buildLlmBoundaries(progressEvents, contentEvents) {
   const boundaries = [];
   for (let i = 0; i < assistantGroups.length; i++) {
     const group = assistantGroups[i];
-    const groupStartMs = Date.parse(group[0].timestamp) || 0;
-    const groupEndMs = Date.parse(group[group.length - 1].timestamp) || groupStartMs;
+    const groupStartNanos = timestampOrderNanos(group[0].timestamp);
+    const groupEndNanos = timestampOrderNanos(group[group.length - 1].timestamp) ?? groupStartNanos;
+    if (groupStartNanos === null || groupEndNanos === null) continue;
 
     // Find start time: last tool completion or UserPromptSubmit BEFORE this group
     let startTs = null;
     for (const pe of progressEvents) {
-      const peMs = Date.parse(pe.ts) || 0;
-      if (peMs >= groupStartMs) break;
+      const peTs = timestampOrderNanos(pe.ts);
+      if (peTs === null) continue;
+      if (peTs >= groupStartNanos) break;
       if (
         pe.hookEvent === 'PostToolUse' ||
         pe.hookEvent === 'PostToolUseFailure' ||
@@ -797,8 +819,8 @@ export function buildLlmBoundaries(progressEvents, contentEvents) {
     // Find end time: first PreToolUse or Stop AFTER this group
     let endTs = null;
     for (const pe of progressEvents) {
-      const peMs = Date.parse(pe.ts) || 0;
-      if (peMs <= groupEndMs) continue;
+      const peTs = timestampOrderNanos(pe.ts);
+      if (peTs === null || peTs <= groupEndNanos) continue;
       if (pe.hookEvent === 'PreToolUse' || pe.hookEvent === 'Stop') {
         endTs = pe.ts;
         break;
@@ -1080,19 +1102,19 @@ function assignContentToBoundaries(boundaries, contentEvents) {
     // Skip the user prompt row (already handled as user-hook outside boundaries)
     if (row.type === 'user' && !isToolResult(row)) continue;
 
-    const rowTs = row.timestamp ? Date.parse(row.timestamp) : 0;
-    if (!rowTs) continue;
+    const rowTs = timestampOrderNanos(row.timestamp);
+    if (rowTs === null) continue;
 
     // Each boundary "owns" from its startTs to the NEXT boundary's startTs (exclusive).
     // This ensures tool_result events (which occur between endTs and next startTs)
     // are assigned to the current boundary, not lost in the gap.
     let bestIdx = -1;
     for (let i = 0; i < boundaries.length; i++) {
-      const startMs = Date.parse(boundaries[i].startTs) || 0;
-      const nextStartMs = (i + 1 < boundaries.length)
-        ? Date.parse(boundaries[i + 1].startTs) || Infinity
-        : Infinity;
-      if (rowTs >= startMs && rowTs < nextStartMs) {
+      const startTs = timestampOrderNanos(boundaries[i].startTs);
+      const nextStartTs = (i + 1 < boundaries.length)
+        ? timestampOrderNanos(boundaries[i + 1].startTs)
+        : null;
+      if (startTs !== null && rowTs >= startTs && (nextStartTs === null || rowTs < nextStartTs)) {
         bestIdx = i;
         break;
       }

@@ -202,6 +202,50 @@ describe('buildLlmBoundaries complete-response priority', () => {
     expect(buildLlmBoundaries(progress, rows)).toHaveLength(2);
   });
 
+  it('preserves microsecond ordering between tool completion and the next assistant response', () => {
+    const rows = [
+      {
+        type: 'user',
+        timestamp: '2026-08-03T09:22:25.100000Z',
+        message: { role: 'user', content: 'run two tools in sequence' },
+      },
+      assistant('2026-08-03T09:22:25.555446Z', [
+        { type: 'tool_use', id: 'tool-b', name: 'Read', input: {} },
+      ]),
+      toolResult('2026-08-03T09:22:26.668419Z', 'tool-b'),
+      assistant('2026-08-03T09:22:26.999890Z', [
+        { type: 'tool_use', id: 'tool-c', name: 'Read', input: {} },
+      ]),
+      toolResult('2026-08-03T09:22:27.500000Z', 'tool-c'),
+    ];
+    const progress = [
+      { hookEvent: 'UserPromptSubmit', ts: '2026-08-03T09:22:25.000000Z' },
+      { hookEvent: 'PreToolUse', ts: '2026-08-03T09:22:25.996439Z' },
+      { hookEvent: 'PostToolUse', ts: '2026-08-03T09:22:26.999176Z' },
+      { hookEvent: 'PreToolUse', ts: '2026-08-03T09:22:27.281923Z' },
+      { hookEvent: 'Stop', ts: '2026-08-03T09:22:28.000000Z' },
+    ];
+
+    const boundaries = buildLlmBoundaries(progress, rows);
+    expect(boundaries.map(boundary => boundary.startTs)).toEqual([
+      '2026-08-03T09:22:25.000000Z',
+      '2026-08-03T09:22:26.999176Z',
+    ]);
+
+    const records = buildEventsFromBoundaries(
+      boundaries, rows, rows, 'turn-microseconds', 'session-1', 'qoder', {}, undefined,
+    );
+    expect(records
+      .filter(record => record['event.name'] === 'llm.request' || record['event.name'] === 'llm.response')
+      .map(record => [record['event.name'], record['gen_ai.step.id']]))
+      .toEqual([
+        ['llm.request', 'turn-microseconds:s1'],
+        ['llm.response', 'turn-microseconds:s1'],
+        ['llm.request', 'turn-microseconds:s2'],
+        ['llm.response', 'turn-microseconds:s2'],
+      ]);
+  });
+
   it('starts a complete next step after PostToolUseFailure', () => {
     const rows = [
       {
