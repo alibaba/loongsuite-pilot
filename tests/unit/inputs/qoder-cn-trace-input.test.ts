@@ -136,6 +136,37 @@ describe('QoderCnTraceInput.collect (session-level enrich)', () => {
     expect(respB['gen_ai.response.id']).toBe('msg-2');
   });
 
+  it('enriches from the IDE plugin layout without ever relabelling agent.type', async () => {
+    // Only the ~/.qoder-cn/shared_client layout exists here. Tokens must still land,
+    // and agent.type must stay 'qoder-cn': identity comes from the hook record, never
+    // from which candidate DB matched (design D3).
+    await fs.rm(path.dirname(dbPath), { recursive: true, force: true });
+    const pluginDbDir = path.join(tmpHome, '.qoder-cn', 'shared_client', 'cache', 'db');
+    await fs.mkdir(pluginDbDir, { recursive: true });
+    const pluginDbPath = path.join(pluginDbDir, 'local.db');
+    await createSchema(pluginDbPath);
+
+    const sessionId = 'sess-plugin-layout';
+    await insertRow(pluginDbPath, {
+      id: 'msg-plugin', session_id: sessionId, request_id: 'req-plugin', role: 'assistant',
+      token_info: JSON.stringify({ prompt_tokens: 300, completion_tokens: 30, cached_tokens: 0 }),
+      gmt_create: 1_780_000_021_000,
+    });
+
+    await writeHookJsonl(logDir, [
+      buildEntry({ event: 'llm.request', turn: 'turn-P', step: 'turn-P:s1', session: sessionId, ts: 1_780_000_020_000 }),
+      buildEntry({ event: 'llm.response', turn: 'turn-P', step: 'turn-P:s1', session: sessionId, ts: 1_780_000_021_000 }),
+    ]);
+
+    const entries = await collectOnce();
+
+    const response = entries.find(e => e['event.name'] === 'llm.response')!;
+    expect(response['gen_ai.usage.input_tokens']).toBe(300);
+    expect(response['gen_ai.usage.output_tokens']).toBe(30);
+    expect(response['gen_ai.response.id']).toBe('msg-plugin');
+    expect(entries.every(e => e['gen_ai.agent.type'] === 'qoder-cn')).toBe(true);
+  });
+
   it('assigns a distinct trace_id per turn even when sessionId is shared', async () => {
     const sessionId = 'sess-trace';
     await insertRow(dbPath, {
