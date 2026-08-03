@@ -76,8 +76,16 @@ function homeDir(): string {
 
 function pilotBinPath(): string {
   const home = homeDir();
-  const ext = process.platform === 'win32' ? '.ps1' : '';
-  return path.join(home, '.local', 'bin', `loongsuite-pilot${ext}`);
+  // On Windows deploy as loongsuite-pilot-service.ps1 (not loongsuite-pilot.ps1):
+  // a bare `loongsuite-pilot` resolves an on-PATH .ps1 (ExternalScript) BEFORE the
+  // .cmd shim, and a directly-run .ps1 obeys the session ExecutionPolicy (often
+  // Restricted) instead of the shim's -ExecutionPolicy Bypass. A non-colliding
+  // name keeps the .cmd the only match for the bare command name. Source in the
+  // package remains scripts/loongsuite-pilot.ps1; only the installed basename changes.
+  if (process.platform === 'win32') {
+    return path.join(home, '.local', 'bin', 'loongsuite-pilot-service.ps1');
+  }
+  return path.join(home, '.local', 'bin', 'loongsuite-pilot');
 }
 
 function defaultPaths(): UpdaterPaths {
@@ -637,6 +645,15 @@ export class Updater {
     const cliScript = path.join(srcDir, `loongsuite-pilot${cliExt}`);
     await fs.mkdir(path.dirname(loongsuitePilotBin), { recursive: true });
     await this.copyFileAtomic(cliScript, loongsuitePilotBin, 0o755);
+
+    // Remove any stale same-name script from older installs that would shadow the
+    // .cmd shim. Destination is already -service.ps1 on win32 (see pilotBinPath);
+    // without this cleanup the first post-upgrade sync would leave the legacy
+    // loongsuite-pilot.ps1 in place and re-break bare-command resolution.
+    if (process.platform === 'win32') {
+      const legacyPs1 = path.join(path.dirname(loongsuitePilotBin), 'loongsuite-pilot.ps1');
+      await fs.rm(legacyPs1, { force: true }).catch(() => undefined);
+    }
 
     logger.info('installed scripts synced');
   }
