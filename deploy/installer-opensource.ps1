@@ -754,13 +754,20 @@ function Write-Config {
     }
     $cfgJson = $cfgArgs | ConvertTo-Json -Compress
 
-    # Pipe the JSON through stdin instead of a temp file: writing UTF-8 *without BOM*
-    # requires .NET calls that Constrained Language Mode (WDAC) forbids, and a BOM would
-    # break node's JSON.parse. node reads fd 0, so no file — and no CLM-blocked APIs.
+    # Stage the JSON through a temp file rather than piping it to node's stdin. Under Windows
+    # PowerShell 5.1 a string piped to a native command is encoded with $OutputEncoding (default
+    # ASCII), so any non-ASCII value (Chinese serviceNamePrefix/userId, a Chinese username in the
+    # path, custom mask types...) would be mangled to "?" before node ever sees it. Set-Content
+    # -Encoding UTF8 is CLM-safe (no forbidden .NET calls) and encodes UTF-8 correctly regardless
+    # of $OutputEncoding; it prepends a BOM in PS5.1, which node strips below before JSON.parse.
+    $cfgTmp = Join-Path $env:TEMP ("lp-config-" + (Get-Random) + ".json")
+    Set-Content -LiteralPath $cfgTmp -Value $cfgJson -Encoding UTF8 -NoNewline
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $cfgJson | & $script:NODE_BIN -e @'
+    & $script:NODE_BIN -e @'
 const fs = require('fs');
-const opts = JSON.parse(fs.readFileSync(0, 'utf-8'));
+let raw = fs.readFileSync(process.argv[1], 'utf-8');
+if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
+const opts = JSON.parse(raw);
 
 let existing = {};
 try { existing = JSON.parse(fs.readFileSync(opts.configPath, 'utf-8')); } catch {}
@@ -831,8 +838,9 @@ if (opts.selectedAgents) {
 }
 
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
-'@
+'@ $cfgTmp
     $ErrorActionPreference = $prevEAP
+    Remove-Item -LiteralPath $cfgTmp -Force -ErrorAction SilentlyContinue
 
     Msg "    ✅ 配置已写入" "    ✅ Config written"
     Write-Host ""
@@ -877,19 +885,39 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0loongsuite-pilot-s
     Set-Content -Path $cmdFile -Value $cmdContent -Encoding ASCII
     Msg "    ✅ 已安装: $cmdFile" "    ✅ Installed: $cmdFile"
 
-    # Add to user PATH if not already there. Use the HKCU:\Environment registry key via
-    # cmdlets instead of [Environment]::Get/SetEnvironmentVariable, which are .NET static
-    # calls that Constrained Language Mode (WDAC) forbids.
-    $userPath = (Get-ItemProperty -Path 'HKCU:\Environment' -Name Path -ErrorAction SilentlyContinue).Path
-    if ($userPath -notlike "*$binDir*") {
-        $newPath = if ($userPath) { "$binDir;$userPath" } else { $binDir }
-        Set-ItemProperty -Path 'HKCU:\Environment' -Name Path -Value $newPath
+    # Add to user PATH if not already there. The persistent write uses reg.exe (a native command,
+    # CLM-safe) rather than [Environment]::SetEnvironmentVariable (a .NET static call WDAC forbids)
+    # or Set-ItemProperty. Two hazards this avoids:
+    #   1. Set-ItemProperty writes plain REG_SZ by default, DOWNGRADING a REG_EXPAND_SZ Path.
+    #   2. Get-ItemProperty returns Path already EXPANDED; writing that back FREEZES
+    #      %USERPROFILE%/%SystemRoot% tokens into literal paths.
+    # So we read the RAW (unexpanded) value and its type via `reg query`, then write it back with
+    # `reg add /t <type>` to preserve REG_EXPAND_SZ and the tokens. The presence check still uses
+    # the EXPANDED value so a bin dir already present via a %VAR% token is not added twice.
+    $expandedPath = (Get-ItemProperty -Path 'HKCU:\Environment' -Name Path -ErrorAction SilentlyContinue).Path
+    if ($expandedPath -notlike "*$binDir*") {
+        $pathType = 'REG_EXPAND_SZ'
+        $rawUserPath = ''
+        $regOut = reg query "HKCU\Environment" /v Path 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            foreach ($line in $regOut) {
+                if ($line -match '^\s*Path\s+(REG_(?:EXPAND_)?SZ)\s+(.*)$') {
+                    $pathType = $Matches[1]
+                    $rawUserPath = $Matches[2]
+                    break
+                }
+            }
+        }
+        # Never drop the existing PATH: if reg query yielded nothing usable, fall back to the
+        # expanded value (worst case re-freezes tokens, but preserves all entries).
+        if (-not $rawUserPath -and $expandedPath) { $rawUserPath = $expandedPath }
+        $newPath = if ($rawUserPath) { "$binDir;$rawUserPath" } else { $binDir }
+        reg add "HKCU\Environment" /v Path /t $pathType /d "$newPath" /f | Out-Null
         # Best-effort broadcast so already-open Explorer-spawned terminals refresh their PATH
-        # without a re-login. [Environment]::SetEnvironmentVariable persists AND sends
-        # WM_SETTINGCHANGE, but is a .NET static call that Constrained Language Mode (WDAC)
-        # forbids — the registry write above already persisted the value, so we just swallow
-        # the failure there (a new logon picks it up regardless). Get-ItemProperty returned the
-        # value already expanded, so this never re-introduces %VAR% tokens as a plain REG_SZ.
+        # without a re-login: [Environment]::SetEnvironmentVariable persists AND sends
+        # WM_SETTINGCHANGE. It is a .NET static call CLM forbids, so swallow failures — the reg add
+        # above already persisted the typed value. $newPath still carries raw %VAR% tokens, so on
+        # non-CLM hosts .NET also writes REG_EXPAND_SZ (no downgrade).
         try { [Environment]::SetEnvironmentVariable('Path', $newPath, 'User') } catch {}
         Msg "    已将 $binDir 添加到用户 PATH" "    Added $binDir to user PATH"
         $env:Path = "$binDir;$env:Path"

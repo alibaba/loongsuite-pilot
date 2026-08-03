@@ -69,6 +69,12 @@ describe('workbuddy hook event writer', () => {
     const installedProcessor = path.join(hooksDir, 'workbuddy-hook-event-writer.mjs');
     await mkdir(hooksDir, { recursive: true });
     await copyFile(processor, installedProcessor);
+    // The processor imports ./shared/decode-payload.mjs; a real install ships it alongside.
+    await mkdir(path.join(hooksDir, 'shared'), { recursive: true });
+    await copyFile(
+      path.resolve('assets/hooks/shared/decode-payload.mjs'),
+      path.join(hooksDir, 'shared', 'decode-payload.mjs'),
+    );
 
     execFileSync(process.execPath, [installedProcessor, 'session-start'], {
       input: JSON.stringify({

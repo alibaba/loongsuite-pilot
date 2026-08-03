@@ -18,7 +18,8 @@ import {
 // input/output pipeline.
 //
 // The lockfile lives at a caller-chosen path (e.g. <dataDir>/logs/collector.lock)
-// and holds JSON `{ pid, startedAt }`. Creation is atomic via `fs.openSync(..,'wx')`.
+// and holds JSON `{ pid, startedAt }`. It is published atomically (temp file + hardlink)
+// so a peer never observes a created-but-empty lockfile — see `writeOwnLock`.
 
 export interface SingleInstanceLock {
   /** Absolute path of the lockfile this handle owns. */
@@ -55,37 +56,65 @@ function readLock(lockPath: string): LockPayload | null {
   return null;
 }
 
-// Stale = the recorded holder is no longer the daemon we expect. Age is deliberately
-// NOT part of the check: these are long-running daemons, so any age threshold would
-// eventually evict a perfectly healthy holder and reopen the very duplication window
-// this lock exists to close.
+// A lock is stale when its recorded holder is no longer a daemon we expect. For a *healthy*
+// holder age is deliberately NOT part of the check: these are long-running daemons, so any age
+// threshold on a matching holder would eventually evict a perfectly healthy one and reopen the
+// very duplication window this lock exists to close.
 //
-// Two conditions make a lock stale:
-//  1. The recorded pid is not alive. `isProcessAlive` treats EPERM as alive (matters
-//     on Windows, where a foreign-owned process still means "occupied").
-//  2. The pid IS alive but its command line is not one of our daemons. On Unix a pid
-//     can be recycled after the holder crashes without releasing; the recycled pid
-//     would otherwise be misread as a live holder and block every future start. When
-//     `patterns` are supplied we verify process identity, so a reused pid running some
-//     unrelated program is correctly treated as stale. A pid whose command line still
-//     matches is a genuine second daemon — exactly what we want to keep out.
-// If the command line can't be read we fail conservative (treat as held, not stale).
+// Conditions that make a lock stale:
+//  1. The recorded pid is not alive. `isProcessAlive` treats EPERM as alive (matters on
+//     Windows, where a foreign-owned process still means "occupied").
+//  2. The pid IS alive but its command line is readable and is not one of our daemons. On Unix a
+//     pid can be recycled after the holder crashes without releasing; the recycled pid would
+//     otherwise be misread as a live holder and block every future start. A readable command line
+//     that still matches is a genuine second daemon — exactly what we want to keep out.
+//  3. The pid is alive but its command line is UNREADABLE (foreign-owned / permission-denied /
+//     transient) AND the lock is implausibly old. We can't confirm identity, so we stay
+//     conservative (held) for a fresh lock; but an unreadable holder older than
+//     UNREADABLE_HOLDER_MAX_AGE_MS is almost certainly a crashed daemon whose pid was reused by an
+//     uninspectable process — without this escape valve such a lock would deadlock every future
+//     start forever. Healthy daemons of ours expose a readable, matching command line and take
+//     branch 2, so they are never aged out here.
+const UNREADABLE_HOLDER_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h — generous; only breaks true deadlocks
+
 function isStale(lock: LockPayload | null, patterns?: readonly ProcessCommandPattern[]): boolean {
   if (!lock) return true;
   if (!isProcessAlive(lock.pid)) return true;
   if (!patterns || patterns.length === 0) return false;
   const command = readProcessCommand(lock.pid);
-  if (!command) return false;
+  if (!command) {
+    return (
+      typeof lock.startedAt === 'number' &&
+      Date.now() - lock.startedAt > UNREADABLE_HOLDER_MAX_AGE_MS
+    );
+  }
   return !isCommandMatch(command, patterns);
 }
 
 function writeOwnLock(lockPath: string): void {
   const payload = JSON.stringify({ pid: process.pid, startedAt: Date.now() });
-  const handle = fs.openSync(lockPath, 'wx');
+  // Atomic publish: write the full payload to a temp file, then hardlink it into place.
+  // link(2) is atomic and fails with EEXIST when a holder already exists, so a concurrent
+  // reader never observes a created-but-empty lockfile. `openSync(..,'wx')` + `writeSync`
+  // is NOT atomic that way: the file exists empty for a window between create and write, and
+  // a peer that reads it during that window parses no pid, treats the lock as stale, unlinks
+  // it, and both processes end up "holding" it — the exact double-acquire this guard prevents.
+  const tmp = `${lockPath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, payload);
   try {
-    fs.writeSync(handle, payload);
+    fs.linkSync(tmp, lockPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') throw err; // a live holder exists
+    // Filesystem without hardlink support (some network/FAT mounts): fall back to exclusive
+    // create. Narrow non-atomic window, but preserves correctness on such mounts.
+    const handle = fs.openSync(lockPath, 'wx');
+    try {
+      fs.writeSync(handle, payload);
+    } finally {
+      fs.closeSync(handle);
+    }
   } finally {
-    fs.closeSync(handle);
+    try { fs.unlinkSync(tmp); } catch { /* best-effort temp cleanup */ }
   }
 }
 

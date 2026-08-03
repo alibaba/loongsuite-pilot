@@ -5,13 +5,14 @@
  * decode-payload.mjs — 把 hook stdin 的原始字节解码为字符串,并修复
  * Cursor/Qoder 在中文 Windows 上的 UTF-8→GBK 双重编码。
  *
- * 背景:部分 host agent 会先把 UTF-8 的 hook 负载按系统代码页(GBK/CP936)解码成字符串,
- * 再以 UTF-8 重新编码后经 stdin 传入,导致中文乱码(ASCII/JSON 结构不受影响)。
- * 还原:对收到的字节做 gbkEncode(utf8Decode(bytes)),若结果是严格合法的 UTF-8 则采用,
- * 否则保留原始 UTF-8(正确输入天然走后者,无副作用)。
+ * 背景:中文 Windows 上部分 host agent(Cursor/Qoder)会先把 UTF-8 的 hook 负载按系统代码页
+ * (GBK/CP936)解码成字符串,再以 UTF-8 重新编码后经 stdin 传入,导致中文乱码(ASCII/JSON 结构不受影响)。
+ * 还原:对收到的字节做 gbkEncode(utf8Decode(bytes)),若结果是严格合法的 UTF-8 则采用,否则保留原始 UTF-8。
  *
  * 该纠偏原先在 PowerShell hook wrapper 里用 .NET 完成,但 WDAC 受限语言模式(CLM)禁止
  * .NET 静态调用,故整体移入 node —— node 不受 CLM 约束,PS 侧从此无需触碰字节。
+ * 注意:原 PowerShell 版本是 .ps1、只在 Windows 运行,纠偏只作用于 Windows;移入 node 后必须显式限定
+ * process.platform === 'win32',否则在 macOS/Linux 上会误纠合法 UTF-8(严格 UTF-8 校验无法排除孤立 CJK 误纠)。
  */
 
 // char code point -> [lead, trail],首次使用时用内置 TextDecoder('gbk') 运行时反建,模块级缓存。
@@ -66,7 +67,12 @@ export function decodePayload(buf) {
     buf = buf.subarray(3);
   }
   const utf8 = buf.toString('utf-8');
-  if (buf.length > 2) {
+  // GBK 双重编码纠偏仅在 Windows 上进行。该乱码只源于中文 Windows 上的 host agent(Cursor/Qoder)
+  // 先按系统代码页(CP936)解码 UTF-8 负载再重新编码;原 PowerShell 版本本就是 .ps1、只在 Windows 运行。
+  // 移入 node 后若不加平台判断,会在 macOS/Linux 上对本就合法的 UTF-8(如孤立中文字符)误纠而损坏遥测——
+  // 因为孤立 CJK 字符的 GBK 编码字节本身也可能是合法 UTF-8,严格校验无法排除这种误纠。
+  // 额外要求负载含非 ASCII 字节:纯 ASCII 不可能是该乱码,借此跳过绝大多数负载,也避免无谓构建 GBK 编码表。
+  if (process.platform === 'win32' && buf.length > 2 && /[^\x00-\x7f]/.test(utf8)) {
     try {
       const recovered = gbkEncode(utf8);
       // 严格 UTF-8 校验:仅当还原结果是合法 UTF-8 才采用(排除正确输入被误纠)。
