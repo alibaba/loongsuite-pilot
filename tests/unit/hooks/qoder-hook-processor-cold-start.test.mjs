@@ -63,6 +63,27 @@ function runProcessor(sessionId = 'session-old') {
   });
 }
 
+function runRetry(triggerEndLine, sessionId = 'session-old') {
+  return spawnSync('node', [
+    PROCESSOR,
+    '--agent-id', 'qoder',
+    '--log-prefix', 'qoder',
+    '--retry',
+    '--transcript', transcriptPath,
+    '--session', sessionId,
+    '--trigger-end-line', String(triggerEndLine),
+    '--cwd', '/tmp/qoder-project',
+  ], {
+    env: {
+      ...process.env,
+      LOONGSUITE_PILOT_DATA_DIR: dataDir,
+      HOOK_RETRY_DELAY: '0',
+    },
+    encoding: 'utf-8',
+    timeout: 30_000,
+  });
+}
+
 function readHistory() {
   const historyDir = path.join(dataDir, 'logs', 'qoder', 'history');
   if (!fs.existsSync(historyDir)) return [];
@@ -143,5 +164,125 @@ describe('qoder-hook-processor cold-start recovery', () => {
     expect(new Set(persistedSessionIds)).toEqual(
       new Set(['session-old', 'session-second-old']),
     );
+  });
+
+  it('collects the Stop-anchored turn on cold retry and leaves a queued prompt unread', () => {
+    const progress = hookEvent => ({
+      type: 'progress',
+      timestamp: '2026-07-31T04:33:41.000Z',
+      data: { hookEvent, hookName: hookEvent },
+    });
+    const targetTurn = [
+      progress('UserPromptSubmit'),
+      ...turnRows(2, 'target prompt'),
+    ];
+    const triggerEndLine = 2 + targetTurn.length;
+    const queuedPrompt = {
+      type: 'user',
+      uuid: 'queued-user',
+      timestamp: '2026-07-31T04:33:46.000Z',
+      sessionId: 'session-old',
+      message: { role: 'user', content: 'queued prompt' },
+    };
+    const initialRows = [
+      ...turnRows(1, 'historical prompt'),
+      ...targetTurn,
+      progress('Stop'),
+      progress('Stop'),
+      progress('SessionEnd'),
+      { type: 'session_meta', sessionId: 'session-old' },
+      progress('UserPromptSubmit'),
+      queuedPrompt,
+    ];
+    fs.writeFileSync(
+      transcriptPath,
+      `${initialRows.map(row => JSON.stringify(row)).join('\n')}\n`,
+    );
+
+    const first = runRetry(triggerEndLine);
+    expect(first.status).toBe(0);
+    expect(userBoundaryPrompts(readHistory())).toEqual(['target prompt']);
+
+    const cursorDir = path.join(dataDir, 'state', 'hooks', 'qoder-line-records');
+    const cursorFile = path.join(cursorDir, fs.readdirSync(cursorDir)[0]);
+    const firstCursor = JSON.parse(fs.readFileSync(cursorFile, 'utf-8'));
+    expect(firstCursor.last_line_count).toBe(8);
+
+    const secondTriggerEndLine = initialRows.length + 1;
+    fs.appendFileSync(transcriptPath, [
+      {
+        type: 'assistant',
+        uuid: 'queued-assistant',
+        timestamp: '2026-07-31T04:33:49.000Z',
+        sessionId: 'session-old',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'queued answer' }],
+          stop_reason: 'end_turn',
+        },
+      },
+      progress('Stop'),
+      progress('SessionEnd'),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    const second = runRetry(secondTriggerEndLine);
+    expect(second.status).toBe(0);
+    expect(userBoundaryPrompts(readHistory())).toEqual(['target prompt', 'queued prompt']);
+  });
+
+  it('keeps equal PostToolUse events from separate tool cycles', () => {
+    const ts = second => `2026-07-30T11:48:${second}`;
+    const progress = (hookEvent, second, hookName = hookEvent) => ({
+      type: 'progress',
+      timestamp: ts(second),
+      data: { hookEvent, hookName },
+    });
+    const assistant = (second, content) => ({
+      type: 'assistant',
+      timestamp: ts(second),
+      message: { role: 'assistant', content },
+    });
+    const toolResult = (second, id) => ({
+      type: 'user',
+      timestamp: ts(second),
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: id, content: `result-${id}` }],
+      },
+    });
+
+    fs.writeFileSync(transcriptPath, [
+      progress('UserPromptSubmit', '01.000Z'),
+      {
+        type: 'user',
+        timestamp: ts('01.001Z'),
+        message: { role: 'user', content: 'run dependent tools' },
+      },
+      assistant('04.000Z', [{ type: 'thinking', thinking: 'step one' }]),
+      assistant('04.001Z', [{ type: 'tool_use', id: 'read-1', name: 'Read', input: {} }]),
+      toolResult('04.002Z', 'read-1'),
+      progress('PostToolUse', '04.100Z', 'PostToolUse:Read'),
+      progress('PostToolUse', '04.101Z', 'PostToolUse:Read'),
+      assistant('13.000Z', [{ type: 'thinking', thinking: 'step two' }]),
+      assistant('13.001Z', [{ type: 'tool_use', id: 'grep-1', name: 'Grep', input: {} }]),
+      toolResult('13.002Z', 'grep-1'),
+      progress('PostToolUse', '13.100Z', 'PostToolUse:Grep'),
+      progress('PostToolUse', '13.101Z', 'PostToolUse:Grep'),
+      assistant('49.000Z', [{ type: 'thinking', thinking: 'final' }]),
+      assistant('49.001Z', [{ type: 'text', text: 'done' }]),
+      progress('Stop', '50.000Z'),
+      lastPrompt(1),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    const result = runProcessor();
+    expect(result.status).toBe(0);
+    const responses = readHistory().filter(record => record['event.name'] === 'llm.response');
+
+    expect(responses.map(record => record['gen_ai.step.id'].split(':').at(-1))).toEqual([
+      's1', 's2', 's3',
+    ]);
+    expect(responses.map(record => record['gen_ai.response.finish_reasons'])).toEqual([
+      ['tool_call'], ['tool_call'], ['end_turn'],
+    ]);
   });
 });
