@@ -79,6 +79,15 @@ export interface AgentHookConfig {
    */
   rawCommand?: boolean;
   /**
+   * Windows-only: shell to declare on the nested hook entry
+   * (`{ command, type, shell }`). Some hosts (Qoder family) require an explicit
+   * `"shell": "powershell"` so the host runs the `.ps1` command through
+   * PowerShell instead of its default shell. Ignored on non-Windows platforms
+   * (where the command is a `.sh`), and only emitted for agents that set it —
+   * codex must never set it (its settings use serde deny_unknown_fields).
+   */
+  winShell?: string;
+  /**
    * Optional env block to merge into the agent's settings.json on deploy.
    *
    * Each value may contain the `$PILOT_DATA` token; AgentDefLoader resolves

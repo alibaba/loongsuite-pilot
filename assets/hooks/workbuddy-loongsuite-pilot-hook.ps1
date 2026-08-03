@@ -24,7 +24,7 @@ if (-not $env:LOONGSUITE_PILOT_DATA_DIR) {
 }
 
 function Write-EmptyResult {
-    [Console]::Out.WriteLine($EMPTY_RESULT)
+    Write-Output $EMPTY_RESULT
 }
 
 function Convert-NodePath {
@@ -111,50 +111,24 @@ try {
         exit 0
     }
 
-    $stdinStream = [Console]::OpenStandardInput()
-    $memory = New-Object System.IO.MemoryStream
-    $stdinStream.CopyTo($memory)
-    [byte[]]$rawBytes = $memory.ToArray()
-    $memory.Dispose()
-
-    if (
-        $rawBytes.Length -ge 3 -and
-        $rawBytes[0] -eq 0xEF -and
-        $rawBytes[1] -eq 0xBB -and
-        $rawBytes[2] -eq 0xBF
-    ) {
-        if ($rawBytes.Length -eq 3) {
-            $rawBytes = [byte[]]@()
-        } else {
-            $rawBytes = $rawBytes[3..($rawBytes.Length - 1)]
-        }
-    }
-
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $nodeBin
-    $startInfo.Arguments = "`"$Processor`" `"$Subcommand`""
-    $startInfo.UseShellExecute = $false
-    $startInfo.RedirectStandardInput = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $startInfo.CreateNoWindow = $true
-
-    $process = [System.Diagnostics.Process]::Start($startInfo)
-    if ($rawBytes.Length -gt 0) {
-        $process.StandardInput.BaseStream.Write($rawBytes, 0, $rawBytes.Length)
-    }
-    $process.StandardInput.Close()
-    $result = $process.StandardOutput.ReadToEnd()
-    $process.StandardError.ReadToEnd() | Out-Null
-    $process.WaitForExit()
-
-    if ($process.ExitCode -ne 0) {
+    # CLM/WDAC-safe passthrough: node inherits this process's stdin (fd0) and
+    # reads it directly; PowerShell never touches the bytes. The old code used
+    # [Console]::OpenStandardInput / MemoryStream / ProcessStartInfo, whose .NET
+    # calls throw under Constrained Language Mode (WDAC/Device Guard) and silently
+    # drop telemetry. BOM stripping and the Chinese UTF-8->GBK fixup now live in
+    # node (shared/decode-payload.mjs).
+    # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 parses a BOM-less
+    # script using the system ANSI code page (GBK/936 on Chinese Windows); any
+    # non-ASCII byte here can corrupt parsing and abort the whole script.
+    $result = & $nodeBin $Processor $Subcommand 2>$null
+    if ($LASTEXITCODE -ne 0) {
         Write-EmptyResult
         exit 0
     }
+    $result = ($result | Out-String).Trim()
 
-    if ($result -and $result.Trim()) {
-        [Console]::Out.WriteLine($result.Trim())
+    if ($result) {
+        Write-Output $result
     } else {
         Write-EmptyResult
     }
