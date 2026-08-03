@@ -237,21 +237,23 @@ function Test-PidRunning {
 }
 
 function Get-CollectorRuntime {
-    param([datetimeoffset]$NotBefore = [datetimeoffset]::MinValue)
+    # Use [datetime] (a Constrained-Language core type) instead of [datetimeoffset],
+    # which is not a core type and throws under CLM (WDAC). Comparisons stay correct
+    # because every value below is a local-time [datetime].
+    param([datetime]$NotBefore = [datetime]::MinValue)
     if (-not (Test-Path -LiteralPath $RUNTIME_FILE)) { return $null }
     try {
         $runtime = Get-Content -LiteralPath $RUNTIME_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
-        $updatedAt = [datetimeoffset]::Parse(
-            [string]$runtime.updatedAt,
-            [System.Globalization.CultureInfo]::InvariantCulture,
-            [System.Globalization.DateTimeStyles]::RoundtripKind
-        )
+        # Get-Date (a cmdlet) parses the ISO-8601 timestamp without the CLM-forbidden
+        # [datetimeoffset]::Parse / [CultureInfo]::InvariantCulture / [DateTimeStyles],
+        # normalizing any offset to local time to match (Get-Date) below.
+        $updatedAt = Get-Date -Date ([string]$runtime.updatedAt)
         $pidValue = [int]$runtime.pid
         if (
             $runtime.status -ne "active" -or
             $pidValue -le 0 -or
             $updatedAt -lt $NotBefore -or
-            $updatedAt -lt [datetimeoffset]::Now.AddMinutes(-2) -or
+            $updatedAt -lt (Get-Date).AddMinutes(-2) -or
             -not (Get-Process -Id $pidValue -ErrorAction SilentlyContinue)
         ) {
             return $null
@@ -287,11 +289,15 @@ function Stop-PidFile {
 }
 
 function Stop-OrphanProcesses {
+    # $Match limits which daemons are terminated; the default kills both. Callers that
+    # re-register a single task (Install-CollectorTask / Install-UpdaterTask) pass a
+    # narrow pattern so they only reap the daemon they are about to re-launch.
+    param([string]$Match = "collector-daemon|updater-daemon")
     Get-Process -Name "node" -ErrorAction SilentlyContinue |
         Where-Object {
             try {
                 $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
-                $cmdLine -match "collector-daemon" -or $cmdLine -match "updater-daemon"
+                $cmdLine -match $Match
             } catch { $false }
         } | ForEach-Object {
             Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
@@ -316,7 +322,7 @@ function Get-TaskRunning {
 
 function Wait-ForCollectorHeartbeat {
     param([int]$TimeoutSeconds = 15)
-    $notBefore = [datetimeoffset]::Now.AddSeconds(-2)
+    $notBefore = (Get-Date).AddSeconds(-2)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
         if (
@@ -345,11 +351,12 @@ function Start-CompatibleExistingCollectorTask {
     $action = $task.Actions | Select-Object -First 1
     $actionArgs = if ($action) { [string]$action.Arguments } else { "" }
     $actionExe = if ($action) { [string]$action.Execute } else { "" }
-    $isWscript = [System.IO.Path]::GetFileName($actionExe) -ieq "wscript.exe"
-    $usesExpectedLauncher = $actionArgs.IndexOf(
-        $expectedLauncher,
-        [System.StringComparison]::OrdinalIgnoreCase
-    ) -ge 0
+    # Split-Path -Leaf and case-folded string ops instead of [System.IO.Path]::GetFileName
+    # and String.IndexOf(StringComparison), which are forbidden under Constrained Language
+    # Mode (WDAC). $actionExe is typically the bare "wscript.exe".
+    $exeLeaf = if ($actionExe) { Split-Path -Leaf $actionExe } else { "" }
+    $isWscript = $exeLeaf -ieq "wscript.exe"
+    $usesExpectedLauncher = $actionArgs.ToLower().Contains($expectedLauncher.ToLower())
     if (-not $isWscript -or -not $usesExpectedLauncher) {
         Write-Host "Existing collector task uses an incompatible action; refusing to reuse it." -ForegroundColor Yellow
         return $false
@@ -494,6 +501,13 @@ function Install-CollectorTask {
         -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit ([TimeSpan]::Zero)
 
+    # Kill any collector daemon left running under the OLD task registration BEFORE we
+    # delete/re-create the task. Deleting a task does not stop its running child, and the
+    # freshly registered task's MultipleInstances=IgnoreNew only counts instances under the
+    # new registration — so without this reap the orphan keeps running alongside the new
+    # instance and both write the same output (duplicate-collection incident root cause).
+    Stop-OrphanProcesses -Match "collector-daemon"
+
     # Remove existing task first (schtasks is more reliable than Unregister-ScheduledTask)
     # Use try/catch because schtasks stderr + $ErrorActionPreference=Stop can throw
     try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
@@ -527,6 +541,10 @@ function Install-UpdaterTask {
         -RestartCount 3 `
         -RestartInterval (New-TimeSpan -Minutes 5) `
         -ExecutionTimeLimit ([TimeSpan]::Zero)
+
+    # Reap any orphaned updater daemon from the old registration before re-creating
+    # the task (same rationale as Install-CollectorTask above).
+    Stop-OrphanProcesses -Match "updater-daemon"
 
     try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_UPDATER" /F 2>$null | Out-Null } catch {}
     try { schtasks.exe /Delete /TN "$TASK_NAME_UPDATER" /F 2>$null | Out-Null } catch {}

@@ -56,7 +56,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# Wrap in try/catch: setting a static property on [Console] throws under Constrained
+# Language Mode (WDAC), and with $ErrorActionPreference=Stop that would abort the whole
+# script at load. Console encoding is cosmetic, so degrade silently.
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
 # ============================================================
 # Constants
@@ -128,10 +131,9 @@ if (-not $PackageUrl) {
 function Detect-Lang {
     if ($Lang) { return $Lang }
     if ($env:LOONGSUITE_PILOT_LANG) { return $env:LOONGSUITE_PILOT_LANG }
-    try {
-        $culture = [System.Globalization.CultureInfo]::CurrentUICulture.Name
-        if ($culture -match "zh") { return "zh" }
-    } catch {}
+    # $PSUICulture is an automatic variable (no .NET static call), so it works under
+    # Constrained Language Mode where [CultureInfo]::CurrentUICulture would throw.
+    if ($PSUICulture -match "zh") { return "zh" }
     return "en"
 }
 
@@ -143,12 +145,18 @@ function Msg {
 }
 
 function Test-CanPrompt {
-    $processArgs = [Environment]::GetCommandLineArgs()
-    if ($processArgs -contains "-NonInteractive") { return $false }
+    # Each .NET call below throws under Constrained Language Mode (WDAC); guard every one
+    # and default to non-interactive (the safe degrade — irm|iex installs are non-interactive).
+    try {
+        $processArgs = [Environment]::GetCommandLineArgs()
+        if ($processArgs -contains "-NonInteractive") { return $false }
+    } catch {}
     try {
         if ([Console]::IsInputRedirected) { return $false }
     } catch {}
-    return [Environment]::UserInteractive -and $null -ne $Host.UI.RawUI
+    try {
+        return [Environment]::UserInteractive -and $null -ne $Host.UI.RawUI
+    } catch { return $false }
 }
 
 # ============================================================
@@ -287,10 +295,15 @@ function Download-AndExtract {
         if (Test-Path -LiteralPath $PackageUrl) {
             Copy-Item -LiteralPath $PackageUrl -Destination $archivePath -Force
         } elseif ($PackageUrl -match '^file://') {
-            $localPackagePath = ([Uri]$PackageUrl).LocalPath
+            # Strip the file:// scheme with string ops instead of casting to [Uri], which is
+            # forbidden under Constrained Language Mode (WDAC). Handles file:///C:/x and
+            # file://C:/x; forward slashes are normalized to backslashes.
+            $localPackagePath = ($PackageUrl -replace '^file:/{2,3}', '') -replace '/', '\'
             Copy-Item -LiteralPath $localPackagePath -Destination $archivePath -Force
         } else {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            # Best-effort TLS1.2 bump; setting this static property throws under Constrained
+            # Language Mode (WDAC), so swallow it (modern Windows defaults to TLS1.2 anyway).
+            try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
             Invoke-WebRequest -Uri $PackageUrl -OutFile $archivePath -UseBasicParsing
         }
     } catch {
@@ -740,13 +753,14 @@ function Write-Config {
         probeResult       = "$($script:PROBE_RESULT)"
     }
     $cfgJson = $cfgArgs | ConvertTo-Json -Compress
-    $cfgTmp = Join-Path $env:TEMP "lp-config-args.json"
-    [System.IO.File]::WriteAllText($cfgTmp, $cfgJson, [System.Text.UTF8Encoding]::new($false))
 
+    # Pipe the JSON through stdin instead of a temp file: writing UTF-8 *without BOM*
+    # requires .NET calls that Constrained Language Mode (WDAC) forbids, and a BOM would
+    # break node's JSON.parse. node reads fd 0, so no file — and no CLM-blocked APIs.
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    & $script:NODE_BIN -e @'
+    $cfgJson | & $script:NODE_BIN -e @'
 const fs = require('fs');
-const opts = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8'));
+const opts = JSON.parse(fs.readFileSync(0, 'utf-8'));
 
 let existing = {};
 try { existing = JSON.parse(fs.readFileSync(opts.configPath, 'utf-8')); } catch {}
@@ -817,10 +831,8 @@ if (opts.selectedAgents) {
 }
 
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
-'@ $cfgTmp
+'@
     $ErrorActionPreference = $prevEAP
-
-    Remove-Item $cfgTmp -Force -ErrorAction SilentlyContinue
 
     Msg "    ✅ 配置已写入" "    ✅ Config written"
     Write-Host ""
@@ -834,36 +846,51 @@ function Install-Command {
     $binDir = Join-Path $env:USERPROFILE ".local\bin"
     if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir -Force | Out-Null }
 
-    # Copy the PowerShell service management script
-    $ps1File = Join-Path $binDir "loongsuite-pilot.ps1"
+    # Copy the PowerShell service management script. Deploy it as loongsuite-pilot-service.ps1,
+    # NOT loongsuite-pilot.ps1: in PowerShell a bare `loongsuite-pilot` resolves an on-PATH .ps1
+    # (ExternalScript) BEFORE the .cmd shim, and a directly-run .ps1 obeys the session
+    # ExecutionPolicy (often Restricted) instead of the shim's -ExecutionPolicy Bypass. A
+    # non-colliding name keeps the .cmd the only match for the bare command name.
+    $ps1File = Join-Path $binDir "loongsuite-pilot-service.ps1"
     $ps1Src = Join-Path $script:PERMANENT_DIR "scripts\loongsuite-pilot.ps1"
     if (Test-Path $ps1Src) {
         Copy-Item $ps1Src $ps1File -Force
     }
+    # Remove any stale same-name script from older installs that would shadow the .cmd shim.
+    $legacyPs1 = Join-Path $binDir "loongsuite-pilot.ps1"
+    if (Test-Path $legacyPs1) { Remove-Item $legacyPs1 -Force -ErrorAction SilentlyContinue }
     $layoutFile = Join-Path $binDir "loongsuite-pilot-layout.json"
     $layout = [ordered]@{
         dataDir = $DataDir
         cacheDir = $CACHE_DIR
     } | ConvertTo-Json
-    [System.IO.File]::WriteAllText(
-        $layoutFile,
-        "$layout$([Environment]::NewLine)",
-        (New-Object System.Text.UTF8Encoding($false))
-    )
+    # loongsuite-pilot.ps1 reads this back with Get-Content -Encoding UTF8 | ConvertFrom-Json,
+    # which tolerates a BOM, so Set-Content is fine here (and CLM-safe, unlike WriteAllText).
+    Set-Content -LiteralPath $layoutFile -Value $layout -Encoding UTF8
 
     # Create a .cmd shim that forwards to the PowerShell script
     $cmdFile = Join-Path $binDir "loongsuite-pilot.cmd"
     $cmdContent = @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0loongsuite-pilot.ps1" %*
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0loongsuite-pilot-service.ps1" %*
 '@
     Set-Content -Path $cmdFile -Value $cmdContent -Encoding ASCII
     Msg "    ✅ 已安装: $cmdFile" "    ✅ Installed: $cmdFile"
 
-    # Add to user PATH if not already there
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    # Add to user PATH if not already there. Use the HKCU:\Environment registry key via
+    # cmdlets instead of [Environment]::Get/SetEnvironmentVariable, which are .NET static
+    # calls that Constrained Language Mode (WDAC) forbids.
+    $userPath = (Get-ItemProperty -Path 'HKCU:\Environment' -Name Path -ErrorAction SilentlyContinue).Path
     if ($userPath -notlike "*$binDir*") {
-        [Environment]::SetEnvironmentVariable("Path", "$binDir;$userPath", "User")
+        $newPath = if ($userPath) { "$binDir;$userPath" } else { $binDir }
+        Set-ItemProperty -Path 'HKCU:\Environment' -Name Path -Value $newPath
+        # Best-effort broadcast so already-open Explorer-spawned terminals refresh their PATH
+        # without a re-login. [Environment]::SetEnvironmentVariable persists AND sends
+        # WM_SETTINGCHANGE, but is a .NET static call that Constrained Language Mode (WDAC)
+        # forbids — the registry write above already persisted the value, so we just swallow
+        # the failure there (a new logon picks it up regardless). Get-ItemProperty returned the
+        # value already expanded, so this never re-introduces %VAR% tokens as a plain REG_SZ.
+        try { [Environment]::SetEnvironmentVariable('Path', $newPath, 'User') } catch {}
         Msg "    已将 $binDir 添加到用户 PATH" "    Added $binDir to user PATH"
         $env:Path = "$binDir;$env:Path"
     }
@@ -967,6 +994,9 @@ function Print-Summary {
     Msg "命令:" "Commands:"
     Write-Host "   loongsuite-pilot          # 查看状态 / Status"
     Write-Host "   loongsuite-pilot info     # 版本与配置 / Version & config"
+    Write-Host ""
+    Msg "提示: 请新开一个终端后再使用 loongsuite-pilot 命令 (WDAC/受限环境可能需注销重登)。" `
+        "Tip: open a NEW terminal before using the loongsuite-pilot command (a WDAC/locked-down environment may require signing out and back in)."
     Write-Host "============================================================"
 }
 
@@ -997,7 +1027,7 @@ function Stop-PilotService {
     }
 
     # Also try the loongsuite-pilot command (use .ps1 directly to avoid cmd.exe popup)
-    $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
+    $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
     if (Test-Path $ps1Path) {
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ps1Path stop 2>$null
@@ -1045,7 +1075,7 @@ function Remove-HookConfigs {
 
     foreach ($cfg in $configs) {
         if (-not (Test-Path $cfg)) { continue }
-        $short = $cfg -replace [regex]::Escape($env:USERPROFILE), "~"
+        $short = $cfg.Replace($env:USERPROFILE, "~")
 
         try {
             $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
@@ -1102,7 +1132,7 @@ function Remove-OpenCodePlugin {
 
     foreach ($cfg in $configs) {
         if (-not (Test-Path $cfg)) { continue }
-        $short = $cfg -replace [regex]::Escape($env:USERPROFILE), "~"
+        $short = $cfg.Replace($env:USERPROFILE, "~")
 
         if (-not $script:NODE_BIN) {
             Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
@@ -1194,7 +1224,7 @@ function Remove-HermesPlugin {
 function Remove-PiCodingAgentExtension {
     $cfg = Join-Path $env:USERPROFILE ".pi\agent\settings.json"
     if (-not (Test-Path $cfg)) { return }
-    $short = $cfg -replace [regex]::Escape($env:USERPROFILE), "~"
+    $short = $cfg.Replace($env:USERPROFILE, "~")
 
     if (-not $script:NODE_BIN) {
         Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
@@ -1241,7 +1271,7 @@ function Remove-MimoCodePlugin {
 
     foreach ($cfg in $configs) {
         if (-not (Test-Path $cfg)) { continue }
-        $short = $cfg -replace [regex]::Escape($env:USERPROFILE), "~"
+        $short = $cfg.Replace($env:USERPROFILE, "~")
 
         if (-not $script:NODE_BIN) {
             Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
@@ -1398,7 +1428,7 @@ function Cmd-Install {
         Install-Command
 
         Msg "==> 启动服务..." "==> Starting service..."
-        $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
+        $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
         $started = Start-PilotAndWait -ScriptPath $ps1Path
         if (-not $started) {
             if ($curVer -and (Test-Path (Join-Path $CACHE_DIR "previous"))) {
@@ -1466,7 +1496,7 @@ function Cmd-Upgrade {
         Install-Command
 
         Msg "==> 启动新版本..." "==> Starting new version..."
-        $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
+        $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
         $started = Start-PilotAndWait -ScriptPath $ps1Path
         if ($started) {
             Msg "    ✅ 新版本启动成功" "    ✅ New version started successfully"
@@ -1495,21 +1525,37 @@ function Cmd-Upgrade {
     }
 }
 
+# Write UTF-8 *without BOM* in a way that works under Constrained Language Mode (WDAC),
+# where [System.IO.File]::WriteAllText / New-Object UTF8Encoding are forbidden. We stage the
+# content through a temp file (Set-Content prepends a BOM) and let node rewrite it BOM-free,
+# because these files (.codex/hooks.json, config.toml) are read by node/Codex, which choke
+# on a BOM. Falls back to Set-Content (with BOM) only if node is somehow unavailable.
+function Write-FileUtf8NoBom {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Content
+    )
+    if (-not $script:NODE_BIN) {
+        Set-Content -LiteralPath $Path -Value $Content -Encoding UTF8 -NoNewline
+        return
+    }
+    $tmp = Join-Path $env:TEMP ("lp-write-" + (Get-Random) + ".tmp")
+    Set-Content -LiteralPath $tmp -Value $Content -Encoding UTF8 -NoNewline
+    & $script:NODE_BIN -e 'const fs=require("fs");let s=fs.readFileSync(process.argv[1],"utf-8");if(s.charCodeAt(0)===0xFEFF)s=s.slice(1);fs.writeFileSync(process.argv[2],s);' $tmp $Path
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+}
+
 function Remove-CodexTrustState {
     $configPath = Join-Path $env:USERPROFILE ".codex\config.toml"
     if (-not (Test-Path -LiteralPath $configPath)) { return }
 
     $content = Get-Content -LiteralPath $configPath -Raw
     $pattern = '(?ms)^[ \t]*# BEGIN otel-codex-hook trust[ \t]*\r?\n.*?^[ \t]*# END otel-codex-hook trust[ \t]*(?:\r?\n)?'
-    $updated = [regex]::Replace($content, $pattern, "")
+    $updated = $content -replace $pattern, ""
     if ($updated -eq $content) { return }
 
-    $updated = [regex]::Replace($updated, '(\r?\n){3,}', "$([Environment]::NewLine)$([Environment]::NewLine)")
-    [System.IO.File]::WriteAllText(
-        $configPath,
-        $updated,
-        (New-Object System.Text.UTF8Encoding($false))
-    )
+    $updated = $updated -replace '(\r?\n){3,}', "`r`n`r`n"
+    Write-FileUtf8NoBom -Path $configPath -Content $updated
     Msg "    ✅ Codex trust 状态已清理" "    ✅ Codex trust state cleaned"
 }
 
@@ -1524,10 +1570,9 @@ function Remove-CodexHookConfig {
     if (-not (Test-Path -LiteralPath $configPath)) { return }
 
     try {
-        $raw = [System.IO.File]::ReadAllText(
-            $configPath,
-            [System.Text.Encoding]::UTF8
-        )
+        # Get-Content -Encoding UTF8 handles both BOM and no-BOM files and is CLM-safe,
+        # unlike [System.IO.File]::ReadAllText.
+        $raw = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8
         $data = $raw | ConvertFrom-Json
         if (-not $data.hooks -or
             $null -eq $data.hooks.PSObject -or
@@ -1599,18 +1644,14 @@ function Remove-CodexHookConfig {
         }
 
         if ($changed) {
-            $updated = ($data | ConvertTo-Json -Depth 100) + [Environment]::NewLine
-            [System.IO.File]::WriteAllText(
-                $configPath,
-                $updated,
-                (New-Object System.Text.UTF8Encoding($false))
-            )
+            $updated = ($data | ConvertTo-Json -Depth 100) + "`r`n"
+            Write-FileUtf8NoBom -Path $configPath -Content $updated
         }
 
         # Do not report success until the resulting config is independently
         # checked for both direct and nested Pilot commands.
         $verifyData = (
-            [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8) |
+            Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 |
                 ConvertFrom-Json
         )
         if ($verifyData.hooks) {
@@ -1706,7 +1747,7 @@ function Remove-OnePilotScheduledTask {
 function Remove-PilotScheduledTasks {
     $taskFolder = "\LoongsuitePilot"
     $currentIdentity = (whoami).Trim()
-    $currentUser = [Environment]::UserName
+    $currentUser = $env:USERNAME
     $userTag = ($currentIdentity -replace '[^A-Za-z0-9._-]', '_')
     $currentUserTasks = @(
         "LoongsuitePilot-$userTag",
@@ -1727,7 +1768,7 @@ function Remove-PilotScheduledTasks {
                 -not $taskOwner -or
                 $taskOwner -ieq $currentIdentity -or
                 $taskOwner -ieq $currentUser -or
-                $taskOwner.EndsWith("\$currentUser", [System.StringComparison]::OrdinalIgnoreCase)
+                $taskOwner.ToLower().EndsWith("\$currentUser".ToLower())
             )
             if (-not $isCurrentOwner) { continue }
         }
@@ -1746,10 +1787,15 @@ function Assert-SafePilotDirectory {
         [string]$Purpose
     )
 
-    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $rootPath = [System.IO.Path]::GetPathRoot($fullPath).TrimEnd('\')
-    $profilePath = [System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\')
-    if (-not $fullPath -or $fullPath -ieq $rootPath -or $fullPath -ieq $profilePath) {
+    # CLM-safe path normalization: Convert-Path resolves the absolute path without the
+    # forbidden [System.IO.Path]::GetFullPath; fall back to the raw path if it can't be
+    # resolved (e.g. it no longer exists). Split-Path -Qualifier gives the drive root ("C:").
+    $fullPath = $Path
+    try { $fullPath = (Convert-Path -LiteralPath $Path -ErrorAction Stop) } catch { $fullPath = $Path }
+    $fullPath = $fullPath.TrimEnd('\')
+    $rootPath = (Split-Path -Qualifier $fullPath -ErrorAction SilentlyContinue)
+    $profilePath = $env:USERPROFILE.TrimEnd('\')
+    if (-not $fullPath -or $fullPath -ieq $rootPath -or $fullPath -ieq "$rootPath\" -or $fullPath -ieq $profilePath) {
         throw "Refusing to use unsafe $Purpose directory: $Path"
     }
     return $fullPath
@@ -1761,7 +1807,8 @@ function ConvertTo-ExtendedLengthPath {
         [string]$Path
     )
 
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $fullPath = $Path
+    try { $fullPath = (Convert-Path -LiteralPath $Path -ErrorAction Stop) } catch { $fullPath = $Path }
     if ($fullPath.StartsWith("\\?\")) { return $fullPath }
     if ($fullPath.StartsWith("\\")) {
         return "\\?\UNC\$($fullPath.Substring(2))"
@@ -1778,13 +1825,23 @@ function Remove-PilotPath {
     if (-not (Test-Path -LiteralPath $Path)) { return }
     $extendedPath = ConvertTo-ExtendedLengthPath -Path $Path
     $lastError = $null
+    $isFullLanguage = $ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage'
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
-            if ([System.IO.Directory]::Exists($extendedPath)) {
-                [System.IO.Directory]::Delete($extendedPath, $true)
-            } elseif ([System.IO.File]::Exists($extendedPath)) {
-                [System.IO.File]::SetAttributes($extendedPath, [System.IO.FileAttributes]::Normal)
-                [System.IO.File]::Delete($extendedPath)
+            if ($isFullLanguage) {
+                # Fast path: .NET calls handle the \\?\ extended-length path (deep node_modules
+                # trees that exceed MAX_PATH). Available only under Full Language Mode.
+                if ([System.IO.Directory]::Exists($extendedPath)) {
+                    [System.IO.Directory]::Delete($extendedPath, $true)
+                } elseif ([System.IO.File]::Exists($extendedPath)) {
+                    [System.IO.File]::SetAttributes($extendedPath, [System.IO.FileAttributes]::Normal)
+                    [System.IO.File]::Delete($extendedPath)
+                }
+            } else {
+                # Constrained Language Mode (WDAC): the .NET calls above are forbidden. Fall
+                # back to Remove-Item on the original path — covers all but pathological >260-char
+                # paths, which are rare and can be cleaned manually if they ever surface.
+                Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
             }
             return
         } catch {
@@ -1798,11 +1855,8 @@ function Remove-PilotPath {
 function Remove-PilotInstallationFiles {
     $cachePath = Assert-SafePilotDirectory -Path $CACHE_DIR -Purpose "cache"
     $dataPath = Assert-SafePilotDirectory -Path $DataDir -Purpose "data"
-    $cachePrefix = $cachePath + [System.IO.Path]::DirectorySeparatorChar
-    $cacheContainsData = $dataPath.StartsWith(
-        $cachePrefix,
-        [System.StringComparison]::OrdinalIgnoreCase
-    )
+    $cachePrefix = $cachePath + '\'
+    $cacheContainsData = $dataPath.ToLower().StartsWith($cachePrefix.ToLower())
 
     if ($cachePath -ine $dataPath -and -not $cacheContainsData) {
         if (Test-Path -LiteralPath $cachePath) {
@@ -1862,10 +1916,12 @@ function Cmd-Uninstall {
 
     Msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
     $cmdFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.cmd"
-    $ps1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
+    $ps1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
+    $legacyPs1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
     $layoutFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-layout.json"
     if (Test-Path $cmdFile) { Remove-Item $cmdFile -Force }
     if (Test-Path $ps1File) { Remove-Item $ps1File -Force }
+    if (Test-Path $legacyPs1File) { Remove-Item $legacyPs1File -Force }
     if (Test-Path $layoutFile) { Remove-Item $layoutFile -Force }
     Msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
     Write-Host ""
