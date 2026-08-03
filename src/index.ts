@@ -6,6 +6,8 @@ import { createLogger, initFileLogging } from './utils/logger.js';
 import { resolveHome, readInstalledVersion } from './utils/fs-utils.js';
 import { writeStartupCrash, clearStartupCrash, resolveBreadcrumbDataDir } from './utils/crash-breadcrumb.js';
 import { handleWorkerCli } from './local-workers/worker-cli.js';
+import { acquireSingleInstanceLock } from './utils/single-instance-lock.js';
+import { COLLECTOR_PROCESS_PATTERNS } from './utils/pid-utils.js';
 
 const logger = createLogger('Main');
 
@@ -36,11 +38,33 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Cross-process single-instance guard. Multiple collector daemons on one machine
+  // tail the same source and append to the same output, duplicating every record
+  // (see logs/output duplicate-collection incident). The scheduled-task
+  // `MultipleInstances=IgnoreNew` policy is bypassed whenever the task is
+  // re-registered while an instance is still running, so this pid lock — acquired
+  // before any pipeline is wired up — is the daemon's own last line of defense.
+  const lockPath = path.join(logDir, 'collector.lock');
+  const { lock, holderPid } = acquireSingleInstanceLock(lockPath, COLLECTOR_PROCESS_PATTERNS);
+  if (!lock) {
+    logger.warn('another collector instance already holds the lock; exiting', {
+      pid: process.pid,
+      holderPid,
+      lockPath,
+    });
+    return;
+  }
+  logger.info('single-instance lock acquired', { pid: process.pid, lockPath });
+  // Fires for normal completion, signal-driven shutdown (via process.exit below),
+  // and the fatal-error path in main().catch — covering every exit route.
+  process.on('exit', () => lock.release());
+
   const orchestrator = new Orchestrator(config);
 
   const shutdown = async () => {
     logger.info('shutdown signal received');
     await orchestrator.stop();
+    lock.release();
     process.exit(0);
   };
   process.on('SIGINT', () => void shutdown());

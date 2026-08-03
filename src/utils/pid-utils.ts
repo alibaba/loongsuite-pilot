@@ -123,7 +123,7 @@ export function checkProcessLiveness(pidFile: string, patterns: readonly Process
   };
 }
 
-function readProcessCommand(pid: number): string {
+export function readProcessCommand(pid: number): string {
   try {
     if (process.platform === 'win32') {
       return execFileSync('powershell.exe', [
