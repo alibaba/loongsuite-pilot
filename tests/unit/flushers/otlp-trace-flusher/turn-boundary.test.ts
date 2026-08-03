@@ -75,6 +75,21 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
   });
 
+  it('Signal A: finish_reason=error triggers immediate flush', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    await flusher.send(makeEntry({ 'event.name': 'llm.request' }));
+    await flusher.send(makeEntry({
+      'gen_ai.response.finish_reasons': ['error'],
+      'error.type': 'RateLimitError',
+    }));
+
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
+  });
+
   it('Signal A: finish_reason=tool_calls does NOT end turn', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);
@@ -206,6 +221,39 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
 
       expect(mockConvert).toHaveBeenCalledTimes(1);
       expect(mockConvert.mock.calls[0][0]).toHaveLength(5);
+    });
+
+    it('Hermes retry batch: error response does not drop the successful retry', async () => {
+      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+      const mockConvert = vi.mocked(convertEventLogToTrace);
+      mockConvert.mockClear();
+
+      const turnId = 'hermes-session:retry-turn';
+      const base = {
+        'gen_ai.turn.id': turnId,
+        'gen_ai.agent.type': 'hermes',
+        'trace_id': '4bf92f3577b34da6a3ce929d0e0e4736',
+      };
+      await flusher.sendBatch([
+        makeEntry({ ...base, 'event.name': 'llm.request', 'gen_ai.step.id': `${turnId}:s1` }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'gen_ai.step.id': `${turnId}:s1`,
+          'gen_ai.response.finish_reasons': ['error'],
+          'error.type': 'RateLimitError',
+        }),
+        makeEntry({ ...base, 'event.name': 'llm.request', 'gen_ai.step.id': `${turnId}:s2` }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'gen_ai.step.id': `${turnId}:s2`,
+          'gen_ai.response.finish_reasons': ['stop'],
+        }),
+      ]);
+
+      expect(mockConvert).toHaveBeenCalledTimes(1);
+      expect(mockConvert.mock.calls[0][0]).toHaveLength(4);
     });
 
     it('Claude-like batch: tools sorted before stop are all included in one flush', async () => {

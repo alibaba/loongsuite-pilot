@@ -12,6 +12,7 @@ Choose the lightest integration that the target agent supports.
 |-------------|----------|
 | Hook | The agent can run a command on lifecycle, prompt, response, or tool events. |
 | Plugin injection | The agent can load a local plugin from its config file. |
+| Native directory plugin | The agent scans a plugin directory containing a manifest and executable module. |
 | Local log or session polling | The agent already writes structured local files. |
 | SQLite polling | The agent stores activity in a local SQLite database. |
 | CLI or API polling | The agent exposes a local command or API for activity data. |
@@ -89,11 +90,12 @@ Important fields:
 |-------|---------|
 | `id` | Stable agent ID used in config, output, and admission control. |
 | `displayName` | Human-readable agent name. |
-| `deployMode` | `hook`, `plugin-inject`, or `plugin-probe`. |
+| `deployMode` | `hook`, `plugin-inject`, `directory-plugin`, or `plugin-probe`. |
 | `detection.paths` | Local paths that indicate the agent is installed. |
 | `detection.commands` | Commands that indicate the agent is installed. |
 | `hook` | Hook settings path, events, command, and format. Required for hook mode. |
 | `pluginInject` | Config paths and plugin spec. Required for plugin injection mode. |
+| `directoryPlugin` | Managed source and target directories. Required for native directory plugin mode. |
 | `input` | Source type and source location for the collector input. |
 
 `pluginInject.configKey` can target an array field other than the default

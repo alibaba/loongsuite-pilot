@@ -1014,6 +1014,39 @@ cmd_token_usage() {
     exec "$node_bin" "$entry" token-usage "$@"
 }
 
+cleanup_hermes_for_rollback() {
+    local target_version_dir="$1"
+    [ -f "$target_version_dir/agents.d/hermes-agent.json" ] && return 0
+
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || return 0
+    "$node_bin" -e '
+const fs = require("fs");
+const path = require("path");
+const stateFile = process.argv[1];
+const fallback = path.join(process.env.HERMES_HOME || path.join(process.env.HOME || "", ".hermes"), "plugins", "loongsuite-pilot");
+let state = {};
+try { state = JSON.parse(fs.readFileSync(stateFile, "utf8")); } catch {}
+const recorded = state?.["hermes-agent"]?.targetDir;
+const target = typeof recorded === "string" && path.isAbsolute(recorded) ? recorded : fallback;
+const marker = path.join(target, ".loongsuite-pilot-managed.json");
+try {
+  const meta = JSON.parse(fs.readFileSync(marker, "utf8"));
+  if (meta.owner !== "loongsuite-pilot" || meta.agentId !== "hermes-agent") process.exit(0);
+  fs.rmSync(target, { recursive: true, force: true });
+  if (state && typeof state === "object" && state["hermes-agent"]) {
+    delete state["hermes-agent"];
+    const tmp = stateFile + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
+    fs.renameSync(tmp, stateFile);
+  }
+  process.stdout.write(target + "\n");
+} catch {}
+' "$DATA_DIR/deployed-agents.json" | while IFS= read -r removed; do
+        [ -n "$removed" ] && echo "   Removed Hermes plugin not supported by rollback target: $removed"
+    done
+}
+
 cmd_rollback() {
     if [ ! -f "$PREVIOUS_FILE" ]; then
         echo "❌ No previous version to roll back to"
@@ -1050,6 +1083,8 @@ cmd_rollback() {
         echo "❌ Failed to sync scripts for rollback target: $prev_dir"
         exit 1
     fi
+
+    cleanup_hermes_for_rollback "$VERSIONS_DIR/$prev_dir"
 
     echo "✅ Rolled back to version: $prev_dir"
     echo "   Restarting service..."

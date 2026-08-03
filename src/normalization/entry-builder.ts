@@ -133,6 +133,13 @@ export function buildAgentActivityEntry(
     'gen_ai.tool.call.result': jsonAlias(opts, 'gen_ai.tool.call.result', 'tool.result.payload'),
     'gen_ai.tool.call.duration': resolveToolCallDuration(opts),
     'gen_ai.skill.name': stringAlias(opts, 'gen_ai.skill.name', 'skill.name'),
+    'gen_ai.skill.id': stringAlias(opts, 'gen_ai.skill.id', 'skill.id'),
+    'gen_ai.skill.description': stringAlias(
+      opts,
+      'gen_ai.skill.description',
+      'skill.description',
+    ),
+    'gen_ai.skill.version': stringAlias(opts, 'gen_ai.skill.version', 'skill.version'),
     'gen_ai.system_instructions': jsonAlias(
       opts,
       'gen_ai.system_instructions',

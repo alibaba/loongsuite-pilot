@@ -118,4 +118,17 @@ describe('applyAgentContentPolicy', () => {
 
     expect(result).not.toHaveProperty('input.messages');
   });
+
+  it('maps Hermes telemetry to the hermes-agent content policy', () => {
+    const result = applyAgentContentPolicy(makeEntry({
+      'gen_ai.agent.type': ClientType.Hermes,
+    }), {
+      'hermes-agent': { captureMessageContent: false },
+    });
+
+    expect(result).not.toHaveProperty('gen_ai.input.messages');
+    expect(result).not.toHaveProperty('gen_ai.output.messages');
+    expect(result).not.toHaveProperty('gen_ai.tool.call.arguments');
+    expect(result).not.toHaveProperty('gen_ai.tool.call.result');
+  });
 });

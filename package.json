@@ -64,7 +64,8 @@
   "files": [
     "dist/",
     "assets/",
-    "scripts/"
+    "scripts/",
+    "agents.d/"
   ],
   "overrides": {
     "cookie": "1.0.0",
