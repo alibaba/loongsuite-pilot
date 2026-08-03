@@ -281,6 +281,50 @@ describe('QoderTraceInput token-enricher', () => {
       expect(entries[0]['gen_ai.usage.output_tokens']).toBe(20);
       expect(entries[0]['gen_ai.usage.total_tokens']).toBe(170);
     });
+
+    it('preserves per-tool hook timing when CLI segment timing has no tool ID', () => {
+      const ms = (value: number) => String(BigInt(value) * 1_000_000n);
+      const base = 1_780_000_000_000;
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.response.id': 'req-tools',
+          'gen_ai.step.id': 'turn-tools:s1',
+          time_unix_nano: ms(base + 200),
+        }),
+        makeEntry({
+          'event.name': 'tool.call',
+          'gen_ai.step.id': 'turn-tools:s1',
+          'gen_ai.tool.call.id': 'slow-tool',
+          time_unix_nano: ms(base + 201),
+        } as any),
+        makeEntry({
+          'event.name': 'tool.result',
+          'gen_ai.step.id': 'turn-tools:s1',
+          'gen_ai.tool.call.id': 'slow-tool',
+          'gen_ai.tool.call.duration': 4000,
+          time_unix_nano: ms(base + 4201),
+        } as any),
+      ];
+      const segments: SegmentTokenData[] = [{
+        requestId: 'req-tools',
+        inputTokens: 10,
+        outputTokens: 2,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        requestStartTs: base + 100,
+        responseEndTs: base + 200,
+        toolFinishedTs: base + 5000,
+        stopReason: 'tool_call',
+        model: 'qmodel',
+      }];
+
+      enrichCliTurn(entries, segments);
+
+      expect(entries[1].time_unix_nano).toBe(ms(base + 201));
+      expect(entries[2].time_unix_nano).toBe(ms(base + 4201));
+      expect(entries[2]['gen_ai.tool.call.duration']).toBe(4000);
+    });
   });
 
   describe('enrichIdeTurn (SQLite structure match)', () => {
@@ -366,7 +410,7 @@ describe('QoderTraceInput token-enricher', () => {
       expect(entries[3]['gen_ai.usage.input_tokens']).toBe(200);
     });
 
-    it('marks low confidence and avoids structural assignment when assistant counts differ', () => {
+    it('aggregates extra SQLite calls into the last response when assistant counts differ', () => {
       const entries: AgentActivityEntry[] = [
         makeEntry({
           'event.name': 'llm.request',
@@ -413,8 +457,103 @@ describe('QoderTraceInput token-enricher', () => {
 
       enrichIdeTurn(entries, sqliteRows);
 
-      expect(entries[1]['gen_ai.response.id']).toBeUndefined();
-      expect(entries[1]['gen_ai.response.model']).toBe('auto');
+      expect(entries[1]['gen_ai.response.id']).toBe('message-a-2');
+      expect(entries[1]['gen_ai.response.model']).toBe('gm51model');
+      expect(entries[1]['gen_ai.usage.input_tokens']).toBe(300);
+      expect(entries[1]['gen_ai.usage.output_tokens']).toBe(30);
+      expect(entries[1]['gen_ai.usage.total_tokens']).toBe(330);
+      expect(entries[1]['gen_ai.usage.cache_read.input_tokens']).toBe(7);
+      expect((entries[1] as any)['agent.qoder.usage_match_mode']).toBe('aggregated_tail');
+      expect((entries[1] as any)['agent.qoder.sqlite_row_count']).toBe(2);
+    });
+
+    it('preserves hook tool status and per-ID timing during SQLite enrichment', () => {
+      const ms = (value: number) => String(BigInt(value) * 1_000_000n);
+      const base = 1_780_000_000_000;
+      const entries: AgentActivityEntry[] = [
+        makeEntry({
+          'event.name': 'other',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          time_unix_nano: ms(base),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s1',
+          time_unix_nano: ms(base + 100),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s1',
+          time_unix_nano: ms(base + 200),
+        } as any),
+        makeEntry({
+          'event.name': 'tool.call',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s1',
+          'gen_ai.tool.call.id': 'slow-tool',
+          time_unix_nano: ms(base + 201),
+        } as any),
+        makeEntry({
+          'event.name': 'tool.result',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s1',
+          'gen_ai.tool.call.id': 'slow-tool',
+          'tool.result.status': 'failure',
+          'gen_ai.tool.call.duration': 4000,
+          time_unix_nano: ms(base + 4201),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.request',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s2',
+          time_unix_nano: ms(base + 4202),
+        } as any),
+        makeEntry({
+          'event.name': 'llm.response',
+          'gen_ai.session.id': 'sess-tools',
+          'gen_ai.turn.id': 'turn-tools',
+          'gen_ai.step.id': 'turn-tools:s2',
+          time_unix_nano: ms(base + 5000),
+        } as any),
+      ];
+      const sqliteRows: SqliteTokenData[] = [
+        {
+          sessionId: 'sess-tools',
+          requestId: 'request-tools',
+          messageId: 'message-tools-1',
+          gmtCreate: base + 200,
+          inputTokens: 100,
+          outputTokens: 10,
+          cacheReadTokens: 0,
+          model: 'gm51model',
+        },
+        {
+          sessionId: 'sess-tools',
+          requestId: 'request-tools',
+          messageId: 'message-tools-2',
+          gmtCreate: base + 5000,
+          inputTokens: 200,
+          outputTokens: 20,
+          cacheReadTokens: 0,
+          model: 'gm51model',
+        },
+      ];
+
+      enrichIdeTurn(entries, sqliteRows);
+
+      expect(entries[3].time_unix_nano).toBe(ms(base + 201));
+      expect(entries[4].time_unix_nano).toBe(ms(base + 4201));
+      expect(entries[4]['gen_ai.tool.call.duration']).toBe(4000);
+      expect(entries[4]['tool.result.status']).toBe('failure');
+      expect(entries[5].time_unix_nano).toBe(ms(base + 4202));
     });
   });
 

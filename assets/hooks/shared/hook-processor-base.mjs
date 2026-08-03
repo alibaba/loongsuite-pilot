@@ -268,7 +268,7 @@ export function getTranscriptLineCount(transcriptPath) {
   }
 }
 
-export function getLineRangeInfo(agentId, transcriptPath, sessionId) {
+export function getLineRangeInfo(agentId, transcriptPath, sessionId, knownCurrentCount) {
   const record = loadLineRecord(agentId, sessionId);
   const hasRecordedOffset = Number.isFinite(record.last_line_count)
     && record.last_line_count >= 0;
@@ -277,7 +277,11 @@ export function getLineRangeInfo(agentId, transcriptPath, sessionId) {
   const recordedTranscript = record.transcript_path || '';
   let reason = hasRecordedOffset ? 'incremental' : 'missing-cursor';
 
-  const currentCount = getTranscriptLineCount(transcriptPath);
+  // Callers that already hold a transcript snapshot can pass its line count so
+  // cursor validation does not read the complete file a second time.
+  const currentCount = Number.isFinite(knownCurrentCount)
+    ? knownCurrentCount
+    : getTranscriptLineCount(transcriptPath);
 
   if (recordedSession && recordedSession !== sessionId) {
     logDebug(agentId, `Session changed: ${recordedSession} -> ${sessionId}, reset to 0`);
