@@ -1,4 +1,4 @@
-# Qoder hook entrypoint (Windows) — delegates to qoder-hook-processor.mjs.
+# Qoder hook entrypoint (Windows) - delegates to qoder-hook-processor.mjs.
 # Usage: powershell -File qoder-loongsuite-pilot-hook.ps1 [agent-id]
 
 $ErrorActionPreference = "Continue"
@@ -58,57 +58,18 @@ if (-not $nodeBin) {
 }
 
 try {
-    # Read stdin as raw bytes to avoid PowerShell encoding issues (GB2312/ASCII mangles UTF-8)
-    $stdinStream = [Console]::OpenStandardInput()
-    $ms = New-Object System.IO.MemoryStream
-    $stdinStream.CopyTo($ms)
-    $rawBytes = $ms.ToArray()
-    $ms.Dispose()
-
-    # Strip UTF-8 BOM (EF BB BF) before any encoding fixup
-    if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
-        $rawBytes = $rawBytes[3..($rawBytes.Length - 1)]
-    }
-
-    # Fix Cursor's UTF-8→GBK double-encoding on Chinese Windows.
-    # Cursor encodes hook payloads through the system codepage (GBK/CP936), garbling
-    # all non-ASCII text.  Reversal: decode the garbled bytes as UTF-8, encode the
-    # resulting string as GBK — this recovers the ORIGINAL UTF-8 bytes.  We validate
-    # by checking that the recovered bytes are valid UTF-8; if not, keep the originals.
-    if ($rawBytes.Length -gt 2) {
-        try {
-            $utf8    = [System.Text.Encoding]::UTF8
-            $gbk     = [System.Text.Encoding]::GetEncoding(936)
-            $garbled = $utf8.GetString($rawBytes)
-            $recovered = $gbk.GetBytes($garbled)
-
-            $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
-            [void]$strictUtf8.GetString($recovered)
-
-            $rawBytes = $recovered
-        } catch {
-            # Validation failed — original bytes are already correct UTF-8, keep them
-        }
-    }
-
-    if ($rawBytes.Length -eq 0) {
-        & $nodeBin $Processor --agent-id $AgentId 2>$null
-    } else {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $nodeBin
-        $psi.Arguments = "`"$Processor`" --agent-id $AgentId"
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardInput = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $false
-        $psi.CreateNoWindow = $true
-
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        $proc.StandardInput.BaseStream.Write($rawBytes, 0, $rawBytes.Length)
-        $proc.StandardInput.Close()
-        $null = $proc.StandardOutput.ReadToEnd()
-        $proc.WaitForExit()
-    }
+    # CLM/WDAC-safe: let node inherit this process's stdin (fd0) and read it
+    # directly; PowerShell never touches the bytes. The old implementation used
+    # [Console]::OpenStandardInput / MemoryStream / ProcessStartInfo to spawn
+    # node -- those .NET calls throw under Constrained Language Mode (enforced by
+    # Device Guard/WDAC), crashing the hook and silently dropping telemetry. BOM
+    # stripping and the Chinese UTF-8->GBK double-encoding fixup now live in node
+    # (shared/decode-payload.mjs), so here we only pass through, which works in
+    # both language modes.
+    # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 parses a BOM-less
+    # script using the system ANSI code page (GBK/936 on Chinese Windows); any
+    # non-ASCII byte here can corrupt parsing and abort the whole script.
+    & $nodeBin $Processor --agent-id $AgentId 2>$null | Out-Null
 } catch {}
 
 exit 0

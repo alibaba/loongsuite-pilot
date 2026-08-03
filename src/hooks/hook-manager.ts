@@ -47,6 +47,13 @@ export interface HookDefinition {
    *   { command, type, matcher }
    */
   useNestedFormat?: boolean;
+  /**
+   * Optional shell declared on the nested hook entry's inner object
+   * (`{ command, type, shell }`). Set for hosts (Qoder family on Windows) that
+   * need `"shell": "powershell"` to run the `.ps1` command through PowerShell.
+   * Only emitted when set, so agents that omit it (e.g. codex) are unaffected.
+   */
+  shell?: string;
 }
 
 /**
@@ -121,7 +128,11 @@ export class HookManager {
       const hookEntry = def.useNestedFormat
         ? {
             matcher: def.matcher ?? '*',
-            hooks: [{ command: def.hookCommand, type: 'command' }],
+            hooks: [{
+              command: def.hookCommand,
+              type: 'command',
+              ...(def.shell ? { shell: def.shell } : {}),
+            }],
           }
         : {
             type: 'command',
@@ -363,7 +374,11 @@ export class HookManager {
     return def.useNestedFormat
       ? {
           matcher: def.matcher ?? '*',
-          hooks: [{ command: def.hookCommand, type: 'command' }],
+          hooks: [{
+            command: def.hookCommand,
+            type: 'command',
+            ...(def.shell ? { shell: def.shell } : {}),
+          }],
         }
       : {
           type: 'command',

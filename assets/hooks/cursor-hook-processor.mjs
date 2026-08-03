@@ -15,6 +15,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { decodePayload } from './shared/decode-payload.mjs';
 import {
   applyHookContentPolicy,
   hashJson,
@@ -66,9 +67,8 @@ async function readStdin() {
   for await (const chunk of process.stdin) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   }
-  let str = Buffer.concat(chunks).toString('utf-8');
-  if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
-  return str;
+  // decodePayload 去 BOM 并修复中文 UTF-8->GBK 双重编码(纠偏已从 PS 侧移入 node)。
+  return decodePayload(Buffer.concat(chunks));
 }
 
 async function appendJsonl(filePath, record) {
