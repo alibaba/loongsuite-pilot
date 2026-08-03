@@ -5,6 +5,8 @@ import { UpdaterMetrics } from './updater-metrics.js';
 import { buildAutoUpdateConfig, type ConfigFile } from '../core/config-loader.js';
 import { createLogger, initFileLogging } from '../utils/logger.js';
 import { readJsonFile, resolveHome, readInstalledVersion } from '../utils/fs-utils.js';
+import { acquireSingleInstanceLock } from '../utils/single-instance-lock.js';
+import { UPDATER_PROCESS_PATTERNS } from '../utils/pid-utils.js';
 
 const logger = createLogger('UpdaterMain');
 
@@ -29,6 +31,22 @@ async function main(): Promise<void> {
     logger.info('auto-update disabled via config, exiting');
     process.exit(0);
   }
+
+  // Same single-instance guard as the collector: a re-registered scheduled task
+  // can leave a previous updater daemon orphaned, and duplicate updaters race on
+  // version pointers and rollout state. Acquire before starting any work.
+  const lockPath = path.join(dataDir, 'logs', 'updater.lock');
+  const { lock, holderPid } = acquireSingleInstanceLock(lockPath, UPDATER_PROCESS_PATTERNS);
+  if (!lock) {
+    logger.warn('another updater instance already holds the lock; exiting', {
+      pid: process.pid,
+      holderPid,
+      lockPath,
+    });
+    process.exit(0);
+  }
+  logger.info('single-instance lock acquired', { pid: process.pid, lockPath });
+  process.on('exit', () => lock.release());
 
   const userId = process.env.LOONGSUITE_PILOT_USER_ID
     ?? file?.userId ?? file?.['user.id'] ?? os.hostname();

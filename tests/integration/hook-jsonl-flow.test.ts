@@ -219,6 +219,10 @@ describe('Hook JSONL integration flow', () => {
       path.join(sharedDir, 'hook-processor-base.mjs'),
     );
     await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/decode-payload.mjs'),
+      path.join(sharedDir, 'decode-payload.mjs'),
+    );
+    await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/qoder-db-utils.mjs'),
       path.join(sharedDir, 'qoder-db-utils.mjs'),
     );
@@ -343,6 +347,10 @@ describe('Hook JSONL integration flow', () => {
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/decode-payload.mjs'),
+      path.join(sharedDir, 'decode-payload.mjs'),
     );
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/qoder-db-utils.mjs'),
@@ -687,6 +695,10 @@ describe('Hook JSONL integration flow', () => {
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/decode-payload.mjs'),
+      path.join(sharedDir, 'decode-payload.mjs'),
     );
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/qoder-db-utils.mjs'),

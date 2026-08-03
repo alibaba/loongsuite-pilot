@@ -13,6 +13,7 @@ import {
   buildQoderHookRecord,
   loadHookRuntimeConfig,
 } from '../agent-event-normalizer.mjs';
+import { decodePayload } from './decode-payload.mjs';
 
 const ENABLE_LOGGING = true;
 export const HOOKS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -382,10 +383,9 @@ export async function readStdin() {
   for await (const chunk of process.stdin) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   }
-  let str = Buffer.concat(chunks).toString('utf-8');
-  // Strip UTF-8 BOM — PowerShell 5.x adds BOM when piping strings to native commands
-  if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
-  return str;
+  // decodePayload 负责去 UTF-8 BOM + 修复 Cursor/Qoder 中文 UTF-8→GBK 双重编码。
+  // (原先由 PowerShell hook wrapper 用 .NET 完成,已移入 node 以兼容 WDAC 受限语言模式)
+  return decodePayload(Buffer.concat(chunks));
 }
 
 export async function parseStdinPayload(agentId) {

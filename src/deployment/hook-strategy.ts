@@ -411,6 +411,7 @@ export class HookStrategy implements DeployStrategy {
       ),
       matcher: hookConfig.eventMatchers?.[event] ?? hookConfig.matcher,
       useNestedFormat: hookConfig.format === 'nested',
+      shell: process.platform === 'win32' ? hookConfig.winShell : undefined,
       replaceHookCommands: [
         ...(hookConfig.replaceHookCommands ?? []),
         ...legacyCodexHookCommands(
