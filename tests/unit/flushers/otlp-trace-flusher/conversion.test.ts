@@ -150,7 +150,12 @@ describe('OtlpTraceFlusher - conversion', () => {
 
     const opts = vi.mocked(convertEventLogToTrace).mock.calls[0][1] as { passthroughKeys?: string[] };
     expect(opts.passthroughKeys).toEqual(
-      expect.arrayContaining(['git.repo', 'git.branch', 'git.domain', 'workspace.current_root']),
+      expect.arrayContaining([
+        'git.repo',
+        'git.branch',
+        'git.domain',
+        'workspace.current_root',
+      ]),
     );
   });
 
@@ -176,6 +181,45 @@ describe('OtlpTraceFlusher - conversion', () => {
       'gen_ai.agent.parent.id',
       'gen_ai.subagent.parent_tool_call.id',
     ]));
+  });
+
+  it('adds skill attributes only to the matching tool span', () => {
+    const records = [
+      {
+        'event.name': 'tool.call',
+        'gen_ai.tool.call.id': 'skill-call-1',
+        'gen_ai.skill.name': 'dogfood',
+        'gen_ai.skill.id': 'dogfood',
+      },
+      {
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.id': 'skill-call-1',
+        'gen_ai.skill.description': 'Exploratory QA for web apps.',
+        'gen_ai.skill.version': '1.0.0',
+      },
+    ] as unknown as AgentActivityEntry[];
+    const toolSpan = {
+      attributes: {
+        'gen_ai.span.kind': 'TOOL',
+        'gen_ai.tool.call.id': 'skill-call-1',
+      },
+    };
+    const llmSpan = {
+      attributes: {
+        'gen_ai.span.kind': 'LLM',
+        'gen_ai.tool.call.id': 'skill-call-1',
+      },
+    };
+
+    (flusher as any).enrichToolSkillAttributes(records, [toolSpan, llmSpan]);
+
+    expect(toolSpan.attributes).toMatchObject({
+      'gen_ai.skill.name': 'dogfood',
+      'gen_ai.skill.id': 'dogfood',
+      'gen_ai.skill.description': 'Exploratory QA for web apps.',
+      'gen_ai.skill.version': '1.0.0',
+    });
+    expect(llmSpan.attributes).not.toHaveProperty('gen_ai.skill.name');
   });
 
   describe('with GlobalAttributesProvider', () => {

@@ -1026,6 +1026,45 @@ function Cmd-Info {
 # ============================================================
 # CMD: rollback
 # ============================================================
+function Remove-HermesPluginForRollback {
+    param([string]$TargetVersionPath)
+
+    if (Test-Path (Join-Path $TargetVersionPath "agents.d\hermes-agent.json")) { return }
+
+    $hermesHome = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:USERPROFILE ".hermes" }
+    $pluginDir = Join-Path $hermesHome "plugins\loongsuite-pilot"
+    $stateFile = Join-Path $DATA_DIR "deployed-agents.json"
+    $state = $null
+    if (Test-Path $stateFile) {
+        try {
+            $state = Get-Content $stateFile -Raw | ConvertFrom-Json
+            $recorded = $state.'hermes-agent'.targetDir
+            if ($recorded -and [System.IO.Path]::IsPathRooted([string]$recorded)) {
+                $pluginDir = [string]$recorded
+            }
+        } catch {
+            $state = $null
+        }
+    }
+
+    $marker = Join-Path $pluginDir ".loongsuite-pilot-managed.json"
+    if (-not (Test-Path $marker)) { return }
+    try {
+        $meta = Get-Content $marker -Raw | ConvertFrom-Json
+        if ($meta.owner -ne "loongsuite-pilot" -or $meta.agentId -ne "hermes-agent") { return }
+        Remove-Item $pluginDir -Recurse -Force
+        if ($state -and $state.'hermes-agent') {
+            $state.PSObject.Properties.Remove('hermes-agent')
+            $tmp = "$stateFile.tmp"
+            $state | ConvertTo-Json -Depth 20 | Set-Content $tmp
+            Move-Item -Force $tmp $stateFile
+        }
+        Write-Host "   Removed Hermes plugin not supported by rollback target: $pluginDir"
+    } catch {
+        Write-Warning "Failed to clean Hermes plugin during rollback: $pluginDir"
+    }
+}
+
 function Cmd-Rollback {
     if (-not (Test-Path $PREVIOUS_FILE)) {
         Write-Error "No previous version to roll back to"
@@ -1062,6 +1101,8 @@ function Cmd-Rollback {
         Write-Error "Failed to sync scripts for rollback target: $prevDir"
         exit 1
     }
+
+    Remove-HermesPluginForRollback $prevPath
 
     Write-Host "Rolled back to version: $prevDir"
     Write-Host "   Restarting service..."

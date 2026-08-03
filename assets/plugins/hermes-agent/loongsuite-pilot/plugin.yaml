@@ -1,0 +1,14 @@
+name: loongsuite-pilot
+version: 1.0.0
+description: LoongSuite Pilot observability for Nous Research Hermes Agent
+provides_hooks:
+  - on_session_start
+  - pre_llm_call
+  - pre_api_request
+  - post_api_request
+  - api_request_error
+  - pre_tool_call
+  - post_tool_call
+  - post_llm_call
+  - on_session_end
+  - on_session_finalize

@@ -1143,6 +1143,51 @@ try {
     }
 }
 
+function Remove-HermesPlugin {
+    $hermesHome = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:USERPROFILE ".hermes" }
+    $pluginDir = Join-Path $hermesHome "plugins\loongsuite-pilot"
+    $stateFile = Join-Path $DataDir "deployed-agents.json"
+    if (Test-Path $stateFile) {
+        try {
+            $state = Get-Content $stateFile -Raw | ConvertFrom-Json
+            $recorded = $state.'hermes-agent'.targetDir
+            if ($recorded -and [System.IO.Path]::IsPathRooted([string]$recorded)) {
+                $pluginDir = [string]$recorded
+            }
+        } catch {
+            # Fall back to the current HERMES_HOME-derived path.
+        }
+    }
+    $marker = Join-Path $pluginDir ".loongsuite-pilot-managed.json"
+    if (-not (Test-Path $marker)) { return }
+
+    try {
+        $meta = Get-Content $marker -Raw | ConvertFrom-Json
+        if ($meta.owner -ne "loongsuite-pilot" -or $meta.agentId -ne "hermes-agent") {
+            Msg "    ⚠️  保留未受 Pilot 管理的 Hermes 插件: $pluginDir" `
+                "    ⚠️  Preserved unmanaged Hermes plugin: $pluginDir"
+            return
+        }
+        $hermesCli = if ($env:HERMES_CLI) {
+            $env:HERMES_CLI
+        } else {
+            Join-Path $hermesHome "hermes-agent\venv\Scripts\hermes.exe"
+        }
+        if (-not (Test-Path $hermesCli)) {
+            $hermesCommand = Get-Command hermes -ErrorAction SilentlyContinue
+            if ($hermesCommand) { $hermesCli = $hermesCommand.Source }
+        }
+        if (Test-Path $hermesCli) {
+            & $hermesCli plugins disable loongsuite-pilot *> $null
+        }
+        Remove-Item $pluginDir -Recurse -Force
+        Msg "    ✅ 已清理: $pluginDir" "    ✅ Cleaned: $pluginDir"
+    } catch {
+        Msg "    ⚠️  跳过: $pluginDir (需手动清理)" `
+            "    ⚠️  Skipped: $pluginDir (manual cleanup needed)"
+    }
+}
+
 # ============================================================
 # Remove Pi Coding Agent extension injection
 # ============================================================
@@ -1805,6 +1850,11 @@ function Cmd-Uninstall {
     # Resolve the pinned runtime before installation files (including node-bin)
     # are removed. JSON config cleanup must also work when Node is absent from PATH.
     $script:NODE_BIN = Resolve-Node
+
+    # Read the persisted target before the default data/install directory is removed.
+    Msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."
+    Remove-HermesPlugin
+    Write-Host ""
 
     Msg "==> 删除安装目录..." "==> Removing installation..."
     Remove-PilotInstallationFiles

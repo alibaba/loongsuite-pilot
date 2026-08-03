@@ -13,6 +13,7 @@ import { createLogger } from '../utils/logger.js';
 import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion, cleanStaleTmpFiles } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import * as fsSync from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 // Flushers
 import { BaseFlusher } from '../flushers/base-flusher.js';
@@ -44,6 +45,7 @@ import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
+import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
 
@@ -105,6 +107,7 @@ export class Orchestrator extends EventEmitter {
     'pi-coding-agent-log': 'pi-coding-agent',
     'mimo-code-log': 'mimo-code',
     'qwen-code-cli-log': 'qwen-code-cli',
+    'hermes-agent-log': 'hermes-agent',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
   };
@@ -247,6 +250,7 @@ export class Orchestrator extends EventEmitter {
     const interceptTargets = [
       ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
       ...this.buildPluginInjectInterceptTargets(),
+      ...this.buildDirectoryPluginInterceptTargets(),
     ];
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
     this.hookWatchdog.start();
@@ -464,6 +468,33 @@ export class Orchestrator extends EventEmitter {
           const result = await this.deploymentManager.deploySingle(def);
           if (!result.success) {
             throw new Error(result.error ?? `re-inject failed for ${def.id}`);
+          }
+        },
+      });
+    }
+
+    return targets;
+  }
+
+  /** Self-heal managed native plugin directories, such as Hermes plugins. */
+  private buildDirectoryPluginInterceptTargets(): InterceptCheckTarget[] {
+    const defs = this.deploymentManager.getDefinitions();
+    const targets: InterceptCheckTarget[] = [];
+
+    for (const def of defs) {
+      if (def.deployMode !== 'directory-plugin' || !def.directoryPlugin) continue;
+
+      targets.push({
+        id: `directory-plugin:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
+        precondition: async () =>
+          (await directoryExists(def.directoryPlugin!.sourceDir))
+          && (await detectAgent(def.detection)),
+        check: async () => !(await this.deploymentManager.needsRedeploy(def)),
+        repair: async () => {
+          const result = await this.deploymentManager.deploySingle(def);
+          if (!result.success) {
+            throw new Error(result.error ?? `directory plugin repair failed for ${def.id}`);
           }
         },
       });
@@ -1146,6 +1177,28 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- Hermes Agent (native Python directory plugin JSONL) ---
+    const hermesLogDir = path.join(this.dataDir, 'logs', 'hermes-agent');
+    await ensureDir(hermesLogDir);
+    const hermesLogInput = new HermesLogInput({
+      stateStore: this.stateStore,
+      sessionDir: hermesLogDir,
+      pollIntervalMs: listenerCfg['hermes-agent-log']?.pollInterval,
+    });
+    this.inputManager.registerInput(hermesLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(hermesLogInput, {
+        watchPaths: [hermesLogDir],
+        isAvailable: async () => directoryExists(hermesLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['hermes-agent-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'hermes-agent-log',
+            listenerCfg['hermes-agent-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['hermes-agent-log']?.pollInterval,
+      }),
+    );
+
     // --- Wukong (CLI API polling) ---
     const wukongInput = new WukongInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(wukongInput);
@@ -1236,7 +1289,7 @@ export class Orchestrator extends EventEmitter {
     return 'unknown';
   }
 
-  private resolvePilotDir(): string {
+  private resolvePilotDir(moduleUrl: string = import.meta.url): string {
     try {
       const currentFile = path.join(this.dataDir, 'current');
       const versionName = fsSync.readFileSync(currentFile, 'utf-8').trim();
@@ -1254,6 +1307,29 @@ export class Orchestrator extends EventEmitter {
     const legacyPackageDir = path.join(this.dataDir, 'package');
     if (fsSync.existsSync(path.join(legacyPackageDir, 'dist', 'index.js'))) {
       return legacyPackageDir;
+    }
+
+    try {
+      const moduleDir = path.dirname(fileURLToPath(moduleUrl));
+      const candidates = [
+        path.resolve(moduleDir, '..'),
+        path.resolve(moduleDir, '..', '..'),
+      ];
+      for (const modulePackageDir of candidates) {
+        const packageJson = path.join(modulePackageDir, 'package.json');
+        const agentsDir = path.join(modulePackageDir, 'agents.d');
+        if (
+          fsSync.existsSync(packageJson)
+          && fsSync.existsSync(agentsDir)
+          && fsSync.statSync(packageJson).isFile()
+          && fsSync.statSync(agentsDir).isDirectory()
+        ) {
+          logger.debug('resolved pilotDir from module package root', { pilotDir: modulePackageDir });
+          return modulePackageDir;
+        }
+      }
+    } catch {
+      // Module URL is invalid or the runtime package does not include required assets.
     }
 
     return this.dataDir;

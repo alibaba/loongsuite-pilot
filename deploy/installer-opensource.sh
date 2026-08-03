@@ -1875,6 +1875,92 @@ try {
     done
 }
 
+# Remove only the Hermes directory plugin owned by this Pilot installation.
+remove_hermes_plugin() {
+    local hermes_home="${HERMES_HOME:-$HOME/.hermes}"
+    local default_plugin_dir="$hermes_home/plugins/loongsuite-pilot"
+    local state_file="$DATA_DIR/deployed-agents.json"
+    local plugin_dir="$default_plugin_dir"
+
+    if ! command -v node &>/dev/null; then
+        msg "    ⚠️  跳过: $plugin_dir (无 node,需手动清理)" \
+            "    ⚠️  Skipped: $plugin_dir (node unavailable, manual cleanup needed)"
+        return 0
+    fi
+
+    plugin_dir=$(node -e "
+const fs = require('fs');
+const path = require('path');
+const stateFile = process.argv[1];
+let target = process.argv[2];
+try {
+  const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  const recorded = state?.['hermes-agent']?.targetDir;
+  if (typeof recorded === 'string' && path.isAbsolute(recorded)) target = recorded;
+} catch {}
+process.stdout.write(target);
+" "$state_file" "$default_plugin_dir" 2>/dev/null) || plugin_dir="$default_plugin_dir"
+
+    local marker="$plugin_dir/.loongsuite-pilot-managed.json"
+    [ -f "$marker" ] || return 0
+
+    local ownership
+    ownership=$(node -e "
+const fs = require('fs');
+const path = require('path');
+const dir = process.argv[1];
+const marker = path.join(dir, '.loongsuite-pilot-managed.json');
+try {
+  const meta = JSON.parse(fs.readFileSync(marker, 'utf8'));
+  if (meta.owner !== 'loongsuite-pilot' || meta.agentId !== 'hermes-agent') {
+    process.stdout.write('unmanaged');
+    process.exit(0);
+  }
+  process.stdout.write('owned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$plugin_dir" 2>/dev/null) || ownership="error"
+
+    if [ "$ownership" = "owned" ]; then
+        local hermes_cli="${HERMES_CLI:-$hermes_home/hermes-agent/venv/bin/hermes}"
+        if [ ! -x "$hermes_cli" ] && command -v hermes &>/dev/null; then
+            hermes_cli=$(command -v hermes)
+        fi
+        if [ -x "$hermes_cli" ]; then
+            "$hermes_cli" plugins disable loongsuite-pilot >/dev/null 2>&1 || true
+        fi
+    fi
+
+    local result="$ownership"
+    if [ "$ownership" = "owned" ]; then
+        result=$(node -e "
+const fs = require('fs');
+const path = require('path');
+const dir = process.argv[1];
+const marker = path.join(dir, '.loongsuite-pilot-managed.json');
+try {
+  const meta = JSON.parse(fs.readFileSync(marker, 'utf8'));
+  if (meta.owner !== 'loongsuite-pilot' || meta.agentId !== 'hermes-agent') {
+    process.stdout.write('unmanaged');
+    process.exit(0);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+  process.stdout.write('cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$plugin_dir" 2>/dev/null) || result="error"
+    fi
+
+    case "$result" in
+        cleaned)
+            msg "    ✅ 已清理: $plugin_dir" "    ✅ Cleaned: $plugin_dir" ;;
+        unmanaged)
+            msg "    ⚠️  保留未受 Pilot 管理的 Hermes 插件: $plugin_dir" \
+                "    ⚠️  Preserved unmanaged Hermes plugin: $plugin_dir" ;;
+        *)
+            msg "    ⚠️  跳过: $plugin_dir (需手动清理)" \
+                "    ⚠️  Skipped: $plugin_dir (manual cleanup needed)" ;;
+    esac
+}
+
 # ============================================================
 # Remove Pi Coding Agent extension injection
 # ============================================================
@@ -2055,6 +2141,11 @@ cmd_uninstall() {
         esac
     fi
     msg "    ✅ 服务已停止" "    ✅ Service stopped"
+    echo ""
+
+    # Read the persisted target before the data/install directory is removed.
+    msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."
+    remove_hermes_plugin
     echo ""
 
     # Remove hook entries from tool configs BEFORE removing install dir

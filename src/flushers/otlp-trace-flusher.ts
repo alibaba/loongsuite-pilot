@@ -33,13 +33,19 @@ import path from 'node:path';
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
-const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled']);
+const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
 // Hard cap on simultaneously-open turn buffers. Above this, the oldest
 // incomplete buffers are force-flushed to bound memory in pathological
 // cases (e.g. an agent that never emits a terminal llm.response AND never
 // sends a same-session successor AND turnIdleTimeoutMs=0). Normal load
 // stays well under this; the cap is defense-in-depth, not a tuned limit.
 const MAX_TURN_BUFFERS = 64;
+const SKILL_ATTRIBUTE_KEYS = [
+  'gen_ai.skill.name',
+  'gen_ai.skill.id',
+  'gen_ai.skill.description',
+  'gen_ai.skill.version',
+] as const;
 
 interface TurnBuffer {
   key: string;
@@ -520,6 +526,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       inMem.reset();
 
       if (spans.length === 0) return;
+      this.enrichToolSkillAttributes(records, spans);
 
       const exportState = this.getOrCreateExportState(agentType, serviceName);
 
@@ -630,6 +637,33 @@ export class OtlpTraceFlusher extends BaseFlusher {
     this.agentConvertStates.set(key, state);
     this.evictConvertStates();
     return state;
+  }
+
+  private enrichToolSkillAttributes(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+  ): void {
+    const attributesByCallId = new Map<string, Record<string, string>>();
+    for (const record of records) {
+      if (record['event.name'] !== 'tool.call' && record['event.name'] !== 'tool.result') continue;
+      const callId = record['gen_ai.tool.call.id'];
+      if (typeof callId !== 'string' || callId.length === 0) continue;
+
+      const attributes = attributesByCallId.get(callId) ?? {};
+      for (const key of SKILL_ATTRIBUTE_KEYS) {
+        const value = record[key];
+        if (typeof value === 'string' && value.length > 0) attributes[key] = value;
+      }
+      if (Object.keys(attributes).length > 0) attributesByCallId.set(callId, attributes);
+    }
+
+    for (const span of spans) {
+      if (span.attributes['gen_ai.span.kind'] !== 'TOOL') continue;
+      const callId = span.attributes['gen_ai.tool.call.id'];
+      if (typeof callId !== 'string') continue;
+      const attributes = attributesByCallId.get(callId);
+      if (attributes) Object.assign(span.attributes, attributes);
+    }
   }
 
   private evictConvertStates(): void {

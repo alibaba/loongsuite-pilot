@@ -39,6 +39,7 @@ const AGENT_TYPE_TO_CONFIG_KEY: Record<string, string> = {
   'qoder-cli': 'qoder',
   'qoder-cli-hook': 'qoder',
   'cursor-hook': 'cursor',
+  'hermes': 'hermes-agent',
 };
 
 export function applyAgentContentPolicy(

@@ -4,7 +4,12 @@
 
 // ─── Deploy Mode ───
 
-export type DeployMode = 'hook' | 'plugin-probe' | 'plugin-inject' | 'detection-only';
+export type DeployMode =
+  | 'hook'
+  | 'plugin-probe'
+  | 'plugin-inject'
+  | 'directory-plugin'
+  | 'detection-only';
 export type MountType = 'wrapper' | 'rc-inject' | 'env-inject';
 export type HookFormat = 'flat' | 'nested';
 export type SettingsSyntax = 'json' | 'jsonc';
@@ -152,6 +157,30 @@ export interface AgentRuntimeConfig {
   fallback?: string;
 }
 
+export interface DirectoryPluginConfig {
+  /** Managed plugin directory copied by Pilot. */
+  sourceDir: string;
+  /** Final directory consumed by the target Agent. */
+  targetDir: string;
+  /** Ownership marker stored inside targetDir. */
+  markerFile?: string;
+  /** Optional target-native command used to activate the copied plugin. */
+  activation?: DirectoryPluginActivationConfig;
+}
+
+export interface DirectoryPluginActivationConfig {
+  /** Target Agent CLI executable. */
+  command: string;
+  /** Capability probe. A non-zero result means an older target does not require activation. */
+  probeArgs?: string[];
+  /** Maximum runtime for probe/enable/disable commands. */
+  timeoutMs?: number;
+  /** Arguments that enable the plugin after it has been copied. */
+  enableArgs: string[];
+  /** Best-effort arguments that disable the plugin before Pilot removes it. */
+  disableArgs?: string[];
+}
+
 export interface AgentDefinition {
   id: string;
   displayName: string;
@@ -162,6 +191,7 @@ export interface AgentDefinition {
   hook?: AgentHookConfig;
   pluginProbe?: PluginProbeConfig;
   pluginInject?: PluginInjectConfig;
+  directoryPlugin?: DirectoryPluginConfig;
   input?: AgentInputConfig;
   /** 运行时要求（如 node:sqlite）与无该依赖时的 fallback 声明 */
   runtime?: AgentRuntimeConfig;
@@ -193,6 +223,8 @@ export interface DeployedAgentRecord {
   deployedAt: string;
   sourceHash?: string;
   lastRemoteCheckedAt?: string;
+  /** Resolved external target for managed directory plugins. */
+  targetDir?: string;
 }
 
 export type DeployedAgentsState = Record<string, DeployedAgentRecord>;
