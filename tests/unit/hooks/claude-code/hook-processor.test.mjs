@@ -287,6 +287,21 @@ describe('claude-code-hook-processor v2 端到端', () => {
     }, { TRACEPARENT: traceparent }).stdout.trim()).toBe('{}');
   });
 
+  test('PreToolUse 跳过后台 Bash（run_in_background）以避免下游悬挂父 span', () => {
+    enableToolPropagation();
+    const traceparent = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
+    // 后台 Bash 的 tool.call 在本轮 Stop 记录中没有配对的 tool.result，
+    // 会被 dropOrphanPairs 丢弃、预留的 parent span 永不 emit，因此不得注入。
+    const out = runHook('pre-tool-use', {
+      session_id: 's-bg',
+      tool_name: 'Bash',
+      tool_use_id: 'tu-bg',
+      tool_input: { command: 'my-cli --serve', run_in_background: true },
+    }, { TRACEPARENT: traceparent });
+    expect(out.status).toBe(0);
+    expect(out.stdout.trim()).toBe('{}');
+  });
+
   test('AgentTeams 环境变量会进入 hook record resourceAttributes', () => {
     const transcriptPath = writeTranscript('sat1', [
       { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: [{ type: 'text', text: 'hello' }] } },

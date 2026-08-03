@@ -166,18 +166,26 @@ export function consumeToolContext(dataDir, sessionId, toolUseId) {
  */
 export function markToolPropagationConsumed(dataDir, sessionId) {
   if (!dataDir || !sessionId) return;
+  const file = consumedPath(dataDir, sessionId);
   try {
     const dir = correlateDir(dataDir);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
-      consumedPath(dataDir, sessionId),
+      file,
       JSON.stringify({ sessionId, ts: new Date().toISOString() }),
       { encoding: 'utf-8', flag: 'wx' },
     );
   } catch (err) {
-    if (err?.code !== 'EEXIST') {
-      // fail-open
+    // The marker already exists from an earlier turn. Refresh its mtime so the
+    // mtime-based acp-correlate retention TTL does not reclaim the first-turn
+    // marker of a session that is still active past the TTL window (which would
+    // reset first-turn-only propagation and re-inject on later turns). Only a
+    // truly idle session — no Stop for a full TTL — is then reclaimed.
+    if (err?.code === 'EEXIST') {
+      const now = new Date();
+      try { fs.utimesSync(file, now, now); } catch {}
     }
+    // Any other error is a fail-open miss.
   }
 }
 

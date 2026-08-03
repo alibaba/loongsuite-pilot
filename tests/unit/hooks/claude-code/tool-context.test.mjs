@@ -90,6 +90,23 @@ describe('claude-code per-tool context', () => {
     })).toBeNull();
   });
 
+  it('refreshes the consumed marker mtime on later turns so active sessions survive TTL cleanup', () => {
+    markToolPropagationConsumed(dataDir, 'sid-ttl');
+    const markerPath = path.join(dataDir, 'acp-correlate', 'sid-ttl.tool-propagation.done');
+    expect(fs.existsSync(markerPath)).toBe(true);
+
+    // Age the marker past the mtime-based retention TTL window.
+    const stale = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    fs.utimesSync(markerPath, stale, stale);
+    const staleMtime = fs.statSync(markerPath).mtimeMs;
+
+    // A later Stop must bump the mtime forward (wx write -> EEXIST -> utimes),
+    // so an active long session is not reaped and first-turn-only is preserved.
+    markToolPropagationConsumed(dataDir, 'sid-ttl');
+    expect(fs.statSync(markerPath).mtimeMs).toBeGreaterThan(staleMtime);
+    expect(isToolPropagationConsumed(dataDir, 'sid-ttl')).toBe(true);
+  });
+
   it('fails open for invalid traceparent and malformed input', () => {
     expect(reserveToolContext({
       dataDir,
