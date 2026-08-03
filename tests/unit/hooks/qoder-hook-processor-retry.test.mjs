@@ -11,6 +11,7 @@ import {
   readRetryLock,
   releaseRetryLock,
   retryLockPath,
+  readTranscriptSnapshot,
   selectTurnSegmentsForCollection,
   tryAcquireRetryLock,
 } from '../../../assets/hooks/qoder-hook-processor.mjs';
@@ -256,6 +257,63 @@ describe('buildLlmBoundaries complete-response priority', () => {
       ]);
   });
 
+  it('uses PostToolUseFailure to close a tool cycle whose result is missing', () => {
+    const rows = [
+      {
+        type: 'user',
+        timestamp: '2026-07-30T00:59:59.100Z',
+        message: { role: 'user', content: 'read the missing file' },
+      },
+      assistant('2026-07-30T01:00:00.000Z', [
+        { type: 'tool_use', id: 'tool-a', name: 'Read', input: { path: 'missing' } },
+      ]),
+      assistant('2026-07-30T01:00:02.000Z', [
+        { type: 'text', text: 'the tool was cancelled' },
+      ]),
+    ];
+    const progress = [
+      { hookEvent: 'UserPromptSubmit', ts: '2026-07-30T00:59:59.000Z' },
+      { hookEvent: 'PreToolUse', ts: '2026-07-30T01:00:00.500Z' },
+      { hookEvent: 'PostToolUseFailure', ts: '2026-07-30T01:00:01.500Z' },
+      { hookEvent: 'Stop', ts: '2026-07-30T01:00:03.000Z' },
+    ];
+
+    const boundaries = buildLlmBoundaries(progress, rows);
+    expect(boundaries).toHaveLength(2);
+    const records = buildEventsFromBoundaries(
+      boundaries, rows, rows, 'turn-missing-result', 'session-1', 'qoder', {}, undefined,
+    );
+    expect(records
+      .filter(record => record['event.name'] === 'llm.request' || record['event.name'] === 'llm.response')
+      .map(record => [record['event.name'], record['gen_ai.step.id']]))
+      .toEqual([
+        ['llm.request', 'turn-missing-result:s1'],
+        ['llm.response', 'turn-missing-result:s1'],
+        ['llm.request', 'turn-missing-result:s2'],
+        ['llm.response', 'turn-missing-result:s2'],
+      ]);
+  });
+
+  it('does not close a parallel response until completion signals cover its declared tools', () => {
+    const rows = [
+      assistant('2026-07-30T01:00:00.000Z', [
+        { type: 'tool_use', id: 'tool-a', name: 'Read', input: {} },
+      ]),
+      assistant('2026-07-30T01:00:00.001Z', [
+        { type: 'tool_use', id: 'tool-b', name: 'Read', input: {} },
+      ]),
+      toolResult('2026-07-30T01:00:00.500Z', 'tool-a'),
+      assistant('2026-07-30T01:00:02.000Z', [
+        { type: 'tool_use', id: 'tool-c', name: 'Read', input: {} },
+      ]),
+    ];
+    const progress = [
+      { hookEvent: 'PostToolUse', ts: '2026-07-30T01:00:01.000Z' },
+    ];
+
+    expect(buildLlmBoundaries(progress, rows)).toHaveLength(1);
+  });
+
   it('does not invent a boundary without a completed tool cycle', () => {
     const rows = [
       assistant('2026-07-30T01:00:00.000Z', [{ type: 'thinking', thinking: 'first' }]),
@@ -281,7 +339,7 @@ describe('findIncrementalTurnEndLine', () => {
     ];
     fs.writeFileSync(transcript, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
 
-    expect(findIncrementalTurnEndLine(transcript, 0, rows.length)).toBe(5);
+    expect(findIncrementalTurnEndLine(readTranscriptSnapshot(transcript), 0, rows.length)).toBe(5);
   });
 
   it('uses the scan end when no next prompt has appeared', () => {
@@ -294,7 +352,9 @@ describe('findIncrementalTurnEndLine', () => {
     ];
     fs.writeFileSync(transcript, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
 
-    expect(findIncrementalTurnEndLine(transcript, 0, rows.length)).toBe(rows.length);
+    expect(findIncrementalTurnEndLine(
+      readTranscriptSnapshot(transcript), 0, rows.length,
+    )).toBe(rows.length);
   });
 
   it('preserves the next real user row when its progress marker is absent', () => {
@@ -307,7 +367,7 @@ describe('findIncrementalTurnEndLine', () => {
     ];
     fs.writeFileSync(transcript, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
 
-    expect(findIncrementalTurnEndLine(transcript, 0, rows.length)).toBe(3);
+    expect(findIncrementalTurnEndLine(readTranscriptSnapshot(transcript), 0, rows.length)).toBe(3);
   });
 });
 
@@ -347,7 +407,7 @@ describe('findTriggeredTurnWindow', () => {
     ];
     const transcript = writeTranscript('cold-queued.jsonl', rows);
 
-    expect(findTriggeredTurnWindow(transcript, 8, rows.length)).toEqual({
+    expect(findTriggeredTurnWindow(readTranscriptSnapshot(transcript), 8)).toEqual({
       status: 'complete',
       reason: 'session-end',
       startLine: 5,
@@ -367,7 +427,7 @@ describe('findTriggeredTurnWindow', () => {
     ];
     const transcript = writeTranscript('missing-session-end.jsonl', rows);
 
-    expect(findTriggeredTurnWindow(transcript, 3, rows.length)).toMatchObject({
+    expect(findTriggeredTurnWindow(readTranscriptSnapshot(transcript), 3)).toMatchObject({
       status: 'waiting',
       reason: 'next-prompt-before-session-end',
     });
@@ -383,7 +443,7 @@ describe('findTriggeredTurnWindow', () => {
     ];
     const transcript = writeTranscript('cli-last-prompt.jsonl', rows);
 
-    expect(findTriggeredTurnWindow(transcript, 3, rows.length)).toEqual({
+    expect(findTriggeredTurnWindow(readTranscriptSnapshot(transcript), 3)).toEqual({
       status: 'complete',
       reason: 'last-prompt',
       startLine: 0,

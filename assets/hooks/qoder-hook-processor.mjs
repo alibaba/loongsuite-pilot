@@ -18,8 +18,6 @@ import {
   parseStdinPayload,
   logDebug,
   getLineRangeInfo,
-  getTranscriptLineCount,
-  readTranscriptLines,
   appendRowsToHistory,
   updateLineRecord,
   loadHookRuntimeConfig,
@@ -202,21 +200,27 @@ async function main() {
       }
     }
     try {
-      const range = getLineRangeInfo(agentId, transcriptPath, sessionId);
-      if (!range) return;
-
       let targetWindow = null;
+      let retrySnapshot = null;
+      let range = null;
       if (Number.isFinite(triggerEndLine)) {
         // Stop may be appended only after the hook process receives its
         // payload. Poll briefly for that Stop's SessionEnd, without ever
         // falling through into a queued next prompt.
         const maxBoundaryPolls = 3;
         for (let poll = 0; poll < maxBoundaryPolls; poll++) {
-          targetWindow = findTriggeredTurnWindow(
+          // One immutable snapshot per poll supplies both EOF/cursor validation
+          // and turn-boundary discovery. The successful snapshot is passed
+          // directly to processTranscript, so it is never read again.
+          retrySnapshot = readTranscriptSnapshot(transcriptPath);
+          range = getLineRangeInfo(
+            agentId,
             transcriptPath,
-            triggerEndLine,
-            getTranscriptLineCount(transcriptPath),
+            sessionId,
+            retrySnapshot.lineCount,
           );
+          if (!range) return;
+          targetWindow = findTriggeredTurnWindow(retrySnapshot, triggerEndLine);
           if (targetWindow.status === 'complete') break;
           if (poll + 1 < maxBoundaryPolls) {
             await new Promise(r => setTimeout(r, 1000));
@@ -243,6 +247,16 @@ async function main() {
           );
           return;
         }
+      } else {
+        // Compatibility with a retry spawned by an older deployed wrapper.
+        retrySnapshot = readTranscriptSnapshot(transcriptPath);
+        range = getLineRangeInfo(
+          agentId,
+          transcriptPath,
+          sessionId,
+          retrySnapshot.lineCount,
+        );
+        if (!range) return;
       }
 
       await processTranscript(
@@ -254,6 +268,7 @@ async function main() {
           delayApplied: true,
           rangeReason: range.reason,
           fixedTurnWindow: targetWindow?.status === 'complete',
+          snapshot: retrySnapshot,
         },
       );
     } finally {
@@ -276,14 +291,17 @@ async function main() {
 
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
 
-  const range = getLineRangeInfo(agentId, transcriptPath, sessionId);
+  // Read once: this snapshot supplies EOF, incomplete detection, Turn parsing,
+  // and the eventual processor input.
+  const snapshot = readTranscriptSnapshot(transcriptPath);
+  const range = getLineRangeInfo(agentId, transcriptPath, sessionId, snapshot.lineCount);
   if (!range) return;
 
   const startLine = range.startLine;
   const endLine = range.endLine;
-  const lines = readTranscriptLines(transcriptPath, startLine, endLine);
-  logDebug(agentId, `Read ${lines.length} lines (range: ${startLine}-${endLine})`);
-  if (!lines.length) {
+  const parsed = snapshot.rows.slice(startLine, endLine).filter(Boolean);
+  logDebug(agentId, `Read ${parsed.length} lines (range: ${startLine}-${endLine})`);
+  if (!parsed.length) {
     updateLineRecord(agentId, transcriptPath, sessionId, endLine);
     return;
   }
@@ -291,11 +309,6 @@ async function main() {
   // Detect incomplete transcript (race condition in print/non-interactive mode:
   // Stop hook fires BEFORE transcript is fully written, and writes happen AFTER hook returns).
   // Solution: spawn a background retry that runs after 5s delay.
-  let parsed = [];
-  for (const line of lines) {
-    try { parsed.push(JSON.parse(line)); } catch { /* skip */ }
-  }
-
   // last-prompt is the authoritative end-of-transcript marker written by qodercli on exit.
   // If absent, the file is still being flushed (race: Stop hook fires before transcript flush).
   const hasLastPrompt = parsed.some(p => p.type === 'last-prompt');
@@ -327,7 +340,7 @@ async function main() {
     try {
       await processTranscript(
         agentId, logPrefix, transcriptPath, sessionId, startLine, endLine,
-        runtimeConfig, cwd, { rangeReason: range.reason },
+        runtimeConfig, cwd, { rangeReason: range.reason, snapshot },
       );
     } finally {
       releaseRetryLock(transcriptPath);
@@ -337,7 +350,7 @@ async function main() {
 
   await processTranscript(
     agentId, logPrefix, transcriptPath, sessionId, startLine, endLine,
-    runtimeConfig, cwd, { rangeReason: range.reason },
+    runtimeConfig, cwd, { rangeReason: range.reason, snapshot },
   );
 }
 
@@ -376,31 +389,27 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
     }
   }
 
+  const snapshot = opts?.snapshot || readTranscriptSnapshot(transcriptPath);
+
   // A Stop-anchored retry receives an exact UserPromptSubmit -> SessionEnd
   // window. Do not expand that range to the current EOF: it may already contain
   // the next queued prompt.
   let endLine = initialEndLine;
   if (!opts?.fixedTurnWindow) {
-    const currentCount = getTranscriptLineCount(transcriptPath);
+    const currentCount = snapshot.lineCount;
     if (currentCount > endLine) {
       endLine = currentCount;
     }
     if ((opts?.rangeReason || 'incremental') === 'incremental') {
-      endLine = findIncrementalTurnEndLine(transcriptPath, startLine, endLine);
+      endLine = findIncrementalTurnEndLine(snapshot, startLine, endLine);
     }
   }
 
-  let lines = readTranscriptLines(transcriptPath, startLine, endLine);
-  logDebug(agentId, `Processing ${lines.length} lines (range: ${startLine}-${endLine})`);
-  if (!lines.length) {
+  let parsed = snapshot.rows.slice(startLine, endLine).filter(Boolean);
+  logDebug(agentId, `Processing ${parsed.length} lines (range: ${startLine}-${endLine})`);
+  if (!parsed.length) {
     updateLineRecord(agentId, transcriptPath, sessionId, endLine);
     return;
-  }
-
-  // --- Phase 1: Parse all transcript lines ---
-  let parsed = [];
-  for (const line of lines) {
-    try { parsed.push(JSON.parse(line)); } catch { /* skip */ }
   }
 
   // --- Phase 2: Extract progress timing + content events ---
@@ -443,35 +452,36 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
       logDebug(agentId, `Transcript not yet complete (no Stop event in progress). Skipping processing.`);
       return;
     }
-    // Stop detected — reprocess the entire transcript from the beginning so
-    // splitContentEventsIntoTurns sees the complete ReAct chain (user →
-    // assistant(text+tool_use) → user(tool_result) → assistant(text)) and
-    // generates one turn with all LLM calls and correct input.messages_delta.
-    startLine = 0;
-    lines = readTranscriptLines(transcriptPath, startLine, endLine);
-    logDebug(agentId, `Reprocessing full transcript from 0-${endLine} (${lines.length} lines)`);
-    // Re-parse since we reset startLine
-    parsed = [];
-    for (const line of lines) {
-      try { parsed.push(JSON.parse(line)); } catch { /* skip */ }
-    }
-    // Re-extract progress + content events from the full transcript
-    progressEvents.length = 0;
-    contentEvents.length = 0;
-    lastProgressHookEvent = '';
-    for (const row of parsed) {
-      const rowType = row.type;
-      if (rowType === 'progress') {
-        const data = row.data || {};
-        const hookEvent = data.hookEvent || '';
-        if (hookEvent && hookEvent !== lastProgressHookEvent) {
-          progressEvents.push({ hookEvent, ts: row.timestamp, hookName: data.hookName || '' });
-        }
-        if (hookEvent) lastProgressHookEvent = hookEvent;
-      } else {
-        lastProgressHookEvent = '';
-        if (rowType === 'user' || rowType === 'assistant') {
-          contentEvents.push(row);
+    // A precise retry snapshot already contains the complete target Turn. Only
+    // legacy/non-anchored handling needs the historical full-snapshot view to
+    // recover a Turn that may have been split across multiple Stop callbacks.
+    if (opts?.fixedTurnWindow) {
+      logDebug(agentId, `Processing precise QoderCN turn window ${startLine}-${endLine}`);
+    } else {
+      // Stop detected — use the already-loaded snapshot from the beginning so
+      // splitContentEventsIntoTurns can recover a Turn that crossed multiple
+      // QoderCN Stop callbacks. This changes only the in-memory slice; it does
+      // not read the transcript again.
+      startLine = 0;
+      parsed = snapshot.rows.slice(startLine, endLine).filter(Boolean);
+      logDebug(agentId, `Reprocessing snapshot from 0-${endLine} (${parsed.length} lines)`);
+      progressEvents.length = 0;
+      contentEvents.length = 0;
+      lastProgressHookEvent = '';
+      for (const row of parsed) {
+        const rowType = row.type;
+        if (rowType === 'progress') {
+          const data = row.data || {};
+          const hookEvent = data.hookEvent || '';
+          if (hookEvent && hookEvent !== lastProgressHookEvent) {
+            progressEvents.push({ hookEvent, ts: row.timestamp, hookName: data.hookName || '' });
+          }
+          if (hookEvent) lastProgressHookEvent = hookEvent;
+        } else {
+          lastProgressHookEvent = '';
+          if (rowType === 'user' || rowType === 'assistant') {
+            contentEvents.push(row);
+          }
         }
       }
     }
@@ -483,11 +493,10 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
   // inheriting the first prompt of the whole transcript segment.
   const allTurnSegments = splitContentEventsIntoTurns(contentEvents);
   const rangeReason = opts?.rangeReason || 'incremental';
-  // Cursor recovery always reads the full transcript to re-establish a safe
-  // checkpoint, but only the latest logical turn is new. QoderCN also rebuilds
-  // from line 0 on every completed Stop so its full ReAct chain is available;
-  // it must therefore emit only the latest logical turn even with a valid
-  // incremental cursor.
+  // Cursor recovery may inspect the full snapshot to re-establish a safe
+  // checkpoint, but only the latest logical turn is new. Legacy/non-anchored
+  // QoderCN handling may also rebuild from snapshot line 0; an exact retry
+  // window already contains one Turn. In all cases QoderCN emits only latest.
   const turnSegments = selectTurnSegmentsForCollection(allTurnSegments, rangeReason, agentId);
   const keepLatestTurnOnly = turnSegments.length < allTurnSegments.length;
   if (keepLatestTurnOnly && allTurnSegments.length > turnSegments.length) {
@@ -534,47 +543,60 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
 }
 
 export function selectTurnSegmentsForCollection(turnSegments, rangeReason, agentId) {
-  // QoderCN intentionally reparses the complete transcript on every Stop to
-  // rebuild its ReAct chain. Other variants only do that during cursor
-  // recovery. In both cases, only the latest logical turn may be emitted.
+  // QoderCN can inspect a complete snapshot to rebuild its ReAct chain. Other
+  // variants do that only during cursor recovery. Only latest may be emitted.
   if (rangeReason !== 'incremental' || agentId === 'qoder-cn') {
     return turnSegments.slice(-1);
   }
   return turnSegments;
 }
 
-export function findIncrementalTurnEndLine(transcriptPath, startLine, scanEndLine) {
+export function readTranscriptSnapshot(transcriptPath) {
   try {
-    if (!fs.existsSync(transcriptPath)) return scanEndLine;
-    const allLines = fs.readFileSync(transcriptPath, 'utf-8').split('\n');
-    let sawStop = false;
-
-    for (let i = startLine; i < scanEndLine && i < allLines.length; i++) {
-      const text = allLines[i].trim();
-      if (!text) continue;
-
-      let row;
-      try { row = JSON.parse(text); } catch { continue; }
-      const hookEvent = row.type === 'progress' ? row.data?.hookEvent || '' : '';
-      if (hookEvent === 'Stop') {
-        sawStop = true;
-      } else if (sawStop && (
-        hookEvent === 'UserPromptSubmit' ||
-        (row.type === 'user' && !isToolResult(row))
-      )) {
-        // `last_line_count` is the next unread zero-based line index. Returning
-        // the prompt line itself consumes the prior Stop/session metadata while
-        // preserving the queued turn's timing marker and user content.
-        return i;
-      }
+    if (!fs.existsSync(transcriptPath)) {
+      return { lineCount: 0, rows: [], reason: 'transcript-missing' };
     }
+    const content = fs.readFileSync(transcriptPath, 'utf-8');
+    const lines = content.split('\n');
+    const lineCount = content.length > 0 && content[content.length - 1] !== '\n'
+      ? lines.length
+      : Math.max(0, lines.length - 1);
+    const rows = new Array(lineCount);
+    for (let i = 0; i < lineCount; i++) {
+      const text = lines[i].trim();
+      if (!text) continue;
+      try { rows[i] = JSON.parse(text); } catch { /* skip malformed line */ }
+    }
+    return { lineCount, rows, reason: 'ok' };
   } catch {
-    // Fail open to the caller's original scan range.
+    return { lineCount: 0, rows: [], reason: 'read-failed' };
+  }
+}
+
+export function findIncrementalTurnEndLine(snapshot, startLine, scanEndLine) {
+  const rows = snapshot?.rows || [];
+  let sawStop = false;
+
+  for (let i = startLine; i < scanEndLine && i < rows.length; i++) {
+    const row = rows[i];
+    if (!row) continue;
+    const hookEvent = hookEventOf(row);
+    if (hookEvent === 'Stop') {
+      sawStop = true;
+    } else if (sawStop && (
+      hookEvent === 'UserPromptSubmit' ||
+      (row.type === 'user' && !isToolResult(row))
+    )) {
+      // `last_line_count` is the next unread zero-based line index. Returning
+      // the prompt line itself consumes the prior Stop/session metadata while
+      // preserving the queued turn's timing marker and user content.
+      return i;
+    }
   }
   return scanEndLine;
 }
 
-export function findTriggeredTurnWindow(transcriptPath, triggerEndLine, scanEndLine) {
+export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
   const waiting = reason => ({
     status: 'waiting',
     reason,
@@ -584,16 +606,9 @@ export function findTriggeredTurnWindow(transcriptPath, triggerEndLine, scanEndL
   });
 
   try {
-    if (!fs.existsSync(transcriptPath)) return waiting('transcript-missing');
-    const allLines = fs.readFileSync(transcriptPath, 'utf-8').split('\n');
-    const limit = Math.min(scanEndLine, allLines.length);
-    const rows = new Array(limit);
-
-    for (let i = 0; i < limit; i++) {
-      const text = allLines[i].trim();
-      if (!text) continue;
-      try { rows[i] = JSON.parse(text); } catch { /* skip malformed line */ }
-    }
+    if (snapshot?.reason !== 'ok') return waiting(snapshot?.reason || 'read-failed');
+    const rows = snapshot.rows;
+    const limit = snapshot.lineCount;
 
     // The trigger snapshot can end immediately before Qoder appends its Stop
     // progress rows. Its last visible prompt identifies the active turn; the
@@ -705,12 +720,14 @@ export function buildLlmBoundaries(progressEvents, contentEvents) {
   let currentGroup = [];
   let currentToolIds = new Set();
   let resolvedToolIds = new Set();
+  let currentToolStartMs = null;
 
   function flushGroup() {
     if (currentGroup.length > 0) assistantGroups.push(currentGroup);
     currentGroup = [];
     currentToolIds = new Set();
     resolvedToolIds = new Set();
+    currentToolStartMs = null;
   }
 
   for (const row of contentEvents) {
@@ -730,11 +747,28 @@ export function buildLlmBoundaries(progressEvents, contentEvents) {
     const toolCycleComplete = currentGroup.length > 0 &&
       currentToolIds.size > 0 &&
       [...currentToolIds].every(id => resolvedToolIds.has(id));
-    if (toolCycleComplete) flushGroup();
+    // A cancelled/interrupted tool can omit its transcript tool_result even
+    // though Qoder emitted a completion hook. Count completion signals only
+    // within this group and require enough signals to cover every tool already
+    // declared; this preserves late parallel tool_use blocks after an early
+    // result while preventing an unresolved tool from swallowing all later LLMs.
+    const completedByHook = currentGroup.length > 0 &&
+      currentToolIds.size > 0 &&
+      currentToolStartMs !== null &&
+      progressEvents.filter(pe => {
+        const peMs = Date.parse(pe.ts) || 0;
+        return peMs > currentToolStartMs && peMs < ts && (
+          pe.hookEvent === 'PostToolUse' || pe.hookEvent === 'PostToolUseFailure'
+        );
+      }).length >= currentToolIds.size;
+    if (toolCycleComplete || completedByHook) flushGroup();
 
     currentGroup.push(row);
     for (const block of row.message?.content || []) {
-      if (block?.type === 'tool_use' && block.id) currentToolIds.add(block.id);
+      if (block?.type === 'tool_use' && block.id) {
+        currentToolIds.add(block.id);
+        if (currentToolStartMs === null) currentToolStartMs = ts;
+      }
     }
   }
   flushGroup();
@@ -841,8 +875,10 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
 
     // llm.request for this step
     let inputDelta;
+    let emitRequest = i > 0;
     if (i === 0 && userRow) {
       inputDelta = [{ role: 'user', parts: [{ type: 'text', content: extractUserText(userRow) }] }];
+      emitRequest = true;
     } else if (toolResultsForNextStep.length > 0) {
       inputDelta = toolResultsForNextStep.map(tr => ({
         role: 'tool',
@@ -850,7 +886,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
       }));
     }
 
-    if (inputDelta) {
+    if (emitRequest) {
       records.push({
         'event.id': crypto.randomUUID(),
         'event.name': 'llm.request',
@@ -861,7 +897,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         'gen_ai.provider.name': providerName,
         'gen_ai.request.model': stepModel,
         'user.id': userId,
-        'gen_ai.input.messages_delta': inputDelta,
+        ...(inputDelta ? { 'gen_ai.input.messages_delta': inputDelta } : {}),
         'agent.source': 'qoder-transcript-hook',
         time_unix_nano: startNanos,
         observed_time_unix_nano: observedTs,
