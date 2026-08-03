@@ -13,6 +13,9 @@
  * .NET 静态调用,故整体移入 node —— node 不受 CLM 约束,PS 侧从此无需触碰字节。
  * 注意:原 PowerShell 版本是 .ps1、只在 Windows 运行,纠偏只作用于 Windows;移入 node 后必须显式限定
  * process.platform === 'win32',否则在 macOS/Linux 上会误纠合法 UTF-8(严格 UTF-8 校验无法排除孤立 CJK 误纠)。
+ * 即便限定 win32,严格 UTF-8 校验仍不足以排除干净单 CJK 的误纠(如「业」的 GBK 字节 D2 B5 恰是合法
+ * UTF-8 的 U+04B5),故再加一道"膨胀判据":真正的双重编码必然使收到的中间串 code point 数 > 还原串
+ * (UTF-8 的 CJK 占 3 字节,被误当 GBK 每字符 2 字节解码后字符数变多),仅当膨胀时才采纳,消除假阳性。
  */
 
 // char code point -> [lead, trail],首次使用时用内置 TextDecoder('gbk') 运行时反建,模块级缓存。
@@ -75,9 +78,14 @@ export function decodePayload(buf) {
   if (process.platform === 'win32' && buf.length > 2 && /[^\x00-\x7f]/.test(utf8)) {
     try {
       const recovered = gbkEncode(utf8);
-      // 严格 UTF-8 校验:仅当还原结果是合法 UTF-8 才采用(排除正确输入被误纠)。
-      new TextDecoder('utf-8', { fatal: true }).decode(recovered);
-      return recovered.toString('utf-8');
+      // 严格 UTF-8 校验:还原结果必须是合法 UTF-8(排除大部分正确输入被误纠)。
+      const recoveredStr = new TextDecoder('utf-8', { fatal: true }).decode(recovered);
+      // 膨胀判据:真正的 UTF-8→GBK 双重编码必然使收到的中间串 code point 数 > 还原串
+      // ——UTF-8 的 CJK 占 3 字节,被误当 GBK(每字符 2 字节)解码后字符数变多。反之干净单 CJK
+      // (如「业」→ GBK D2 B5 恰是合法 UTF-8 U+04B5「ҵ」)长度不变,严格校验放行却是误纠。仅当膨胀时才采纳。
+      if ([...utf8].length > [...recoveredStr].length) {
+        return recoveredStr;
+      }
     } catch {
       // 非双重编码(或 gbk 不可用)——保留原始 UTF-8
     }
