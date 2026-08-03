@@ -24,8 +24,14 @@ function homeDir(): string {
 }
 
 function defaultPilotBinPath(): string {
-  const ext = process.platform === 'win32' ? '.ps1' : '';
-  return path.join(homeDir(), '.local', 'bin', `loongsuite-pilot${ext}`);
+  // Keep in lockstep with installer-opensource.ps1 / updater.ts pilotBinPath():
+  // Windows installs the management script as loongsuite-pilot-service.ps1 so the
+  // bare `loongsuite-pilot` command resolves the .cmd shim, not a Restricted-
+  // ExecutionPolicy ExternalScript of the same name.
+  if (process.platform === 'win32') {
+    return path.join(homeDir(), '.local', 'bin', 'loongsuite-pilot-service.ps1');
+  }
+  return path.join(homeDir(), '.local', 'bin', 'loongsuite-pilot');
 }
 
 export type UpdaterWatchdogStatus =

@@ -308,6 +308,30 @@ describe('UpdaterWatchdog', () => {
     ]));
   });
 
+  it('defaults Windows pilot bin to loongsuite-pilot-service.ps1', async () => {
+    mockPlatform('win32');
+    const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
+    mockExecFileAsync.mockResolvedValue({ stdout: '', stderr: '' });
+
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      startupGraceMs: 0,
+    });
+
+    await wd.runCheck();
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      'powershell.exe',
+      expect.arrayContaining([
+        '-File',
+        path.join(home, '.local', 'bin', 'loongsuite-pilot-service.ps1'),
+        'restart-updater',
+      ]),
+      expect.objectContaining({ windowsHide: true }),
+    );
+  });
+
   it('restarts through PowerShell on Windows', async () => {
     mockPlatform('win32');
     mockExecFileAsync.mockImplementation((cmd: string, args: string[]) => {
@@ -320,7 +344,7 @@ describe('UpdaterWatchdog', () => {
     const wd = new UpdaterWatchdog({
       enabled: true,
       dataDir: tmpDir,
-      loongsuitePilotBin: 'C:\\Users\\test\\.local\\bin\\loongsuite-pilot.ps1',
+      loongsuitePilotBin: 'C:\\Users\\test\\.local\\bin\\loongsuite-pilot-service.ps1',
       startupGraceMs: 0,
     });
 
@@ -331,7 +355,7 @@ describe('UpdaterWatchdog', () => {
       'powershell.exe',
       expect.arrayContaining([
         '-File',
-        'C:\\Users\\test\\.local\\bin\\loongsuite-pilot.ps1',
+        'C:\\Users\\test\\.local\\bin\\loongsuite-pilot-service.ps1',
         'restart-updater',
       ]),
       expect.objectContaining({ windowsHide: true }),
@@ -346,7 +370,7 @@ describe('UpdaterWatchdog', () => {
     const wd = new UpdaterWatchdog({
       enabled: true,
       dataDir: tmpDir,
-      loongsuitePilotBin: 'C:\\Users\\test\\.local\\bin\\loongsuite-pilot.ps1',
+      loongsuitePilotBin: 'C:\\Users\\test\\.local\\bin\\loongsuite-pilot-service.ps1',
       startupGraceMs: 0,
     });
 
@@ -355,7 +379,7 @@ describe('UpdaterWatchdog', () => {
     expect(result.status).toBe('healthy');
     expect(mockExecFileAsync).not.toHaveBeenCalledWith(
       'powershell.exe',
-      expect.arrayContaining(['-File', 'C:\\Users\\test\\.local\\bin\\loongsuite-pilot.ps1', 'restart-updater']),
+      expect.arrayContaining(['-File', 'C:\\Users\\test\\.local\\bin\\loongsuite-pilot-service.ps1', 'restart-updater']),
       expect.anything(),
     );
   });

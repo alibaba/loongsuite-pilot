@@ -82,7 +82,7 @@ vi.mock('../../../src/utils/fs-utils.js', async (importOriginal) => {
 // --- Mock global fetch ---
 const mockFetch = vi.fn<[string, any?], Promise<Response>>();
 
-import { Updater } from '../../../src/updater/updater.js';
+import { Updater, buildPaths } from '../../../src/updater/updater.js';
 import type { VersionManifest, LocalVersion } from '../../../src/updater/updater.js';
 
 function makeConfig(overrides: Partial<AutoUpdateConfig> = {}): AutoUpdateConfig {
@@ -405,6 +405,40 @@ describe('Updater', () => {
         expect.stringContaining('/versions/1.0.1_aaa/scripts/loongsuite-pilot.sh'),
         expect.stringMatching(/\.local\/bin\/loongsuite-pilot\.tmp$/),
       );
+    });
+
+    it('syncs Windows CLI as -service.ps1 and removes legacy loongsuite-pilot.ps1', async () => {
+      const realPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+      try {
+        expect(buildPaths(tmpDir).loongsuitePilotBin).toMatch(/loongsuite-pilot-service\.ps1$/);
+
+        setupForDownload();
+        mockFsAccess.mockImplementation((p: string) => {
+          if (p.includes('package.json')) return Promise.resolve();
+          if (p.includes('dist/index.js')) return Promise.resolve();
+          if (p.includes('dist/updater/index.js')) return Promise.resolve();
+          if (p.includes('postinstall.js')) return Promise.reject(new Error('ENOENT'));
+          if (p.includes('collector-daemon.js')) return Promise.resolve();
+          if (p.includes('updater-daemon.js')) return Promise.resolve();
+          if (p.includes('loongsuite-pilot.ps1')) return Promise.resolve();
+          return Promise.reject(new Error('ENOENT'));
+        });
+
+        const updater = new Updater(makeConfig(), tmpDir);
+        await updater.check();
+
+        expect(mockFsCopyFile).toHaveBeenCalledWith(
+          expect.stringContaining('/scripts/loongsuite-pilot.ps1'),
+          expect.stringMatching(/loongsuite-pilot-service\.ps1\.tmp$/),
+        );
+        expect(mockFsRm).toHaveBeenCalledWith(
+          expect.stringMatching(/[/\\]loongsuite-pilot\.ps1$/),
+          expect.objectContaining({ force: true }),
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', { configurable: true, value: realPlatform });
+      }
     });
 
     it('updates previous pointer when upgrading', async () => {
