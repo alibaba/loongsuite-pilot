@@ -1,12 +1,15 @@
 import * as path from 'node:path';
 import { readJsonFile, writeJsonFile } from '../../utils/fs-utils.js';
 import {
+  type CodexDailyUsageCollectionSkippedResult,
   type TokenUsageAgent,
   type TokenUsageDailyResult,
   type TokenUsageDeltas,
+  type TokenUsageScanMetadata,
+  type TokenUsageSkippedStatusRow,
   type TokenUsageStateEntry,
   type TokenUsageStateFile,
-  type TokenUsageStatusRow,
+  type TokenUsageSuccessStatusRow,
   type TokenUsageTotals,
 } from './types.js';
 
@@ -42,8 +45,9 @@ export class TokenUsageStateStore {
     agent: TokenUsageAgent,
     userId: string,
     usage: TokenUsageDailyResult,
+    scan: TokenUsageScanMetadata,
     now = new Date(),
-  ): Promise<TokenUsageStatusRow> {
+  ): Promise<TokenUsageSuccessStatusRow> {
     const state = await this.readState();
     const key = stateKey(agent, usage.date);
     const previous = state.entries[key]?.totals ?? null;
@@ -60,7 +64,7 @@ export class TokenUsageStateStore {
     pruneEntries(state, now, this.retentionDays);
     await writeJsonFile(this.statePath, state);
 
-    return toStatusRow(agent, userId, { ...usage, ...effectiveTotals }, deltas, now);
+    return toStatusRow(agent, userId, { ...usage, ...effectiveTotals }, deltas, scan, now);
   }
 
   private async readState(): Promise<TokenUsageStateFile> {
@@ -112,13 +116,18 @@ function toStatusRow(
   userId: string,
   usage: TokenUsageDailyResult,
   deltas: TokenUsageDeltas,
+  scan: TokenUsageScanMetadata,
   now: Date,
-): TokenUsageStatusRow {
+): TokenUsageSuccessStatusRow {
   return {
     category: 'token_usage',
     agent,
     user_id: userId,
     date: usage.date,
+    collection_status: 'ok',
+    candidate_files: String(scan.candidateFiles),
+    candidate_bytes: String(scan.candidateBytes),
+    scan_limit_bytes: String(scan.scanLimitBytes),
     calls_total: String(usage.calls),
     calls_delta: String(deltas.calls),
     input_tokens_total: String(usage.input_tokens),
@@ -135,6 +144,26 @@ function toStatusRow(
     estimated_calls_delta: String(deltas.estimated_calls),
     files_scanned: String(usage.files_scanned),
     files_with_usage: String(usage.files_with_usage),
+    __time__: Math.floor(now.getTime() / 1000),
+  };
+}
+
+export function buildTokenUsageSkippedStatusRow(
+  agent: TokenUsageAgent,
+  userId: string,
+  result: CodexDailyUsageCollectionSkippedResult,
+  now = new Date(),
+): TokenUsageSkippedStatusRow {
+  return {
+    category: 'token_usage',
+    agent,
+    user_id: userId,
+    date: result.date,
+    collection_status: 'skipped',
+    skip_reason: result.reason,
+    candidate_files: String(result.candidateFiles),
+    candidate_bytes: String(result.candidateBytes),
+    scan_limit_bytes: String(result.scanLimitBytes),
     __time__: Math.floor(now.getTime() / 1000),
   };
 }
