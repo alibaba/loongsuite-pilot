@@ -36,7 +36,9 @@ async function main(): Promise<void> {
   // Same single-instance guard as the collector: a re-registered scheduled task
   // can leave a previous updater daemon orphaned, and duplicate updaters race on
   // version pointers and rollout state. Acquire before starting any work.
-  const lockPath = path.join(dataDir, 'logs', 'updater.lock');
+  // Lock file is runtime state, not a log — keep it in the dataDir root alongside
+  // the pid file, not under logs/.
+  const lockPath = path.join(dataDir, 'updater.lock');
   const { lock, holderPid } = acquireSingleInstanceLock(lockPath, UPDATER_PROCESS_PATTERNS);
   if (!lock) {
     logger.warn('another updater instance already holds the lock; exiting', {
