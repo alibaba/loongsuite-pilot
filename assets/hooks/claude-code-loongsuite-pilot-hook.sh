@@ -95,8 +95,13 @@ fi
 
 # 2. fallback search (read-only)
 if [[ -z "$NODE_BIN" ]]; then
-  nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
+  # Managed runtime node (never removed by user node-manager churn) comes first.
+  runtime_candidates=("$(dirname "$NODE_PIN_FILE")/runtime"/node-v*/bin/node)
   candidates=()
+  for (( i=${#runtime_candidates[@]}-1; i>=0; i-- )); do
+    candidates+=("${runtime_candidates[i]}")
+  done
+  nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
   for (( i=${#nvm_candidates[@]}-1; i>=0; i-- )); do
     candidates+=("${nvm_candidates[i]}")
   done

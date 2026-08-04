@@ -21,6 +21,12 @@ function Resolve-NodeBin {
         if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
     }
     $candidates = @()
+    # Managed runtime node (never removed by user node-manager churn) comes first.
+    $runtimeDir = Join-Path (Split-Path $pinFile) "runtime"
+    if (Test-Path $runtimeDir) {
+        $runtimeDirs = Get-ChildItem $runtimeDir -Directory -Filter "node-v*" -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+        foreach ($d in $runtimeDirs) { $candidates += Join-Path $d.FullName "bin\node.exe" }
+    }
     $nvmHome = $env:NVM_HOME
     if ($nvmHome -and (Test-Path $nvmHome)) {
         $nvmDirs = Get-ChildItem $nvmHome -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
