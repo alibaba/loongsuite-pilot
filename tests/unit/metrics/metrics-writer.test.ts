@@ -60,6 +60,13 @@ function buildSnapshot(): DataflowSnapshot {
   };
 }
 
+function writeMetricsSummary(dataDir: string, content: unknown | string): void {
+  fs.writeFileSync(
+    path.join(dataDir, 'logs', 'metrics-summary.json'),
+    typeof content === 'string' ? content : JSON.stringify(content),
+  );
+}
+
 describe('MetricsWriter', () => {
   let tmpDir: string;
   let writer: MetricsWriter;
@@ -269,12 +276,109 @@ describe('MetricsWriter', () => {
       scan_limit_bytes: '209715200',
       calls_total: '2',
       total_tokens_total: '34',
+      metrics_summary_available: 'false',
     });
+    expect(call![1].sample_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
 
     const statePath = path.join(tmpDir, 'logs', 'metric_alarm', 'token-usage-state.json');
     const jsonlPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-token-usage-metrics.jsonl');
     expect(fs.existsSync(statePath)).toBe(true);
     expect(fs.existsSync(jsonlPath)).toBe(false);
+  });
+
+  it('adds the Codex metrics summary snapshot and difference to the same status row', async () => {
+    vi.setSystemTime(new Date('2026-08-04T02:10:45.000Z'));
+    writeMetricsSummary(tmpDir, {
+      generatedAt: '2026-08-04T02:10:20.000Z',
+      ranges: {
+        today: {
+          agentShares: [
+            { agentType: 'cursor', tokens: 99 },
+            { agentType: 'codex', tokens: 20 },
+          ],
+        },
+      },
+    });
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u-token',
+      getSnapshot: buildSnapshot,
+    });
+
+    await (writer as any).writeTokenUsageMetrics();
+
+    const call = mockSendStatus.mock.calls.find(
+      (c: unknown[]) => c[0] === 'pilot_token_usage',
+    );
+    expect(call![1]).toMatchObject({
+      total_tokens_total: '34',
+      metrics_summary_available: 'true',
+      metrics_summary_codex_total_tokens: '20',
+      metrics_summary_generated_at: '2026-08-04T02:10:20.000Z',
+      metrics_summary_age_seconds: '25',
+      difference_tokens: '14',
+    });
+  });
+
+  it.each([
+    ['missing file', null],
+    ['invalid JSON', '{'],
+    ['invalid generatedAt', {
+      generatedAt: 'not-a-date',
+      ranges: { today: { agentShares: [{ agentType: 'codex', tokens: 20 }] } },
+    }],
+    ['missing Codex entry', {
+      generatedAt: '2026-08-04T02:10:20.000Z',
+      ranges: { today: { agentShares: [{ agentType: 'cursor', tokens: 20 }] } },
+    }],
+    ['negative Codex tokens', {
+      generatedAt: '2026-08-04T02:10:20.000Z',
+      ranges: { today: { agentShares: [{ agentType: 'codex', tokens: -1 }] } },
+    }],
+    ['non-finite Codex tokens', '{"generatedAt":"2026-08-04T02:10:20.000Z","ranges":{"today":{"agentShares":[{"agentType":"codex","tokens":1e309}]}}}'],
+  ])('keeps token usage reporting when metrics summary is unavailable: %s', async (_name, content) => {
+    if (content !== null) writeMetricsSummary(tmpDir, content);
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u-token',
+      getSnapshot: buildSnapshot,
+    });
+
+    await (writer as any).writeTokenUsageMetrics();
+
+    const call = mockSendStatus.mock.calls.find(
+      (c: unknown[]) => c[0] === 'pilot_token_usage',
+    );
+    expect(call![1]).toMatchObject({
+      total_tokens_total: '34',
+      metrics_summary_available: 'false',
+    });
+    expect(call![1]).not.toHaveProperty('metrics_summary_codex_total_tokens');
+    expect(call![1]).not.toHaveProperty('metrics_summary_generated_at');
+    expect(call![1]).not.toHaveProperty('metrics_summary_age_seconds');
+    expect(call![1]).not.toHaveProperty('difference_tokens');
+  });
+
+  it('generates a unique sample_id for each non-overlapping token sample', async () => {
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u-token',
+      getSnapshot: buildSnapshot,
+    });
+
+    await (writer as any).writeTokenUsageMetrics();
+    await (writer as any).writeTokenUsageMetrics();
+
+    const rows = mockSendStatus.mock.calls
+      .filter((call) => call[0] === 'pilot_token_usage')
+      .map((call) => call[1]);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].sample_id).not.toBe(rows[1].sample_id);
   });
 
   it('emits a skipped row without creating token state or zero totals', async () => {
@@ -307,7 +411,11 @@ describe('MetricsWriter', () => {
       candidate_files: '3',
       candidate_bytes: '300',
       scan_limit_bytes: '200',
+      metrics_summary_available: 'false',
     }));
+    expect(call![1].sample_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
     expect(Object.keys(call![1] as object).some((key) => key.endsWith('_total') || key.endsWith('_delta'))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, 'logs', 'metric_alarm', 'token-usage-state.json'))).toBe(false);
   });

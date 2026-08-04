@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import { appendLine, ensureDir } from '../utils/fs-utils.js';
+import { appendLine, ensureDir, readJsonFile } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { flattenToStrings } from '../utils/record-utils.js';
 import { sendAlarm, sendRunningStatus, sendStatus } from '../internal/sender.js';
@@ -23,6 +24,12 @@ const CPU_THRESHOLD_PERCENT = 80;
 const MEM_THRESHOLD_MB = 512;
 const INFRA_ALARM_COOLDOWN_MS = 3_600_000;
 
+interface CodexMetricsSummarySnapshot {
+  totalTokens: number;
+  generatedAt: string;
+  ageSeconds: number;
+}
+
 export interface MetricsWriterOptions {
   dataDir: string;
   version: string;
@@ -39,6 +46,7 @@ export interface MetricsWriterOptions {
 
 export class MetricsWriter {
   private readonly logsDir: string;
+  private readonly metricsSummaryPath: string;
   private readonly collector: MetricsCollector;
   private readonly getSnapshot: () => DataflowSnapshot;
   private readonly alarmManager: AlarmManager | null;
@@ -56,6 +64,7 @@ export class MetricsWriter {
 
   constructor(opts: MetricsWriterOptions) {
     this.logsDir = path.join(opts.dataDir, 'logs', 'metric_alarm');
+    this.metricsSummaryPath = path.join(opts.dataDir, 'logs', 'metrics-summary.json');
     this.collector = new MetricsCollector({
       version: opts.version,
       userId: opts.userId,
@@ -291,7 +300,21 @@ export class MetricsWriter {
 
   private async collectAndWriteTokenUsageMetrics(): Promise<void> {
     try {
-      const result = await collectCodexDailyUsage();
+      const sampleId = randomUUID();
+      const sampledAtMs = Date.now();
+      const [result, summary] = await Promise.all([
+        collectCodexDailyUsage(),
+        readCodexMetricsSummary(this.metricsSummaryPath, sampledAtMs),
+      ]);
+      const comparisonFields = summary
+        ? {
+            metrics_summary_available: 'true',
+            metrics_summary_codex_total_tokens: String(summary.totalTokens),
+            metrics_summary_generated_at: summary.generatedAt,
+            metrics_summary_age_seconds: String(summary.ageSeconds),
+          }
+        : { metrics_summary_available: 'false' };
+
       if (result.status === 'skipped') {
         logger.warn('Codex token usage scan skipped: candidate bytes exceed limit', {
           candidateFiles: result.candidateFiles,
@@ -299,12 +322,23 @@ export class MetricsWriter {
           scanLimitBytes: result.scanLimitBytes,
         });
         const row = buildTokenUsageSkippedStatusRow('codex', this.userId, result);
-        sendStatus('pilot_token_usage', flattenToStrings(row));
+        sendStatus('pilot_token_usage', flattenToStrings({
+          ...row,
+          sample_id: sampleId,
+          ...comparisonFields,
+        }));
         return;
       }
 
       const row = await this.tokenUsageState.buildStatusRow('codex', this.userId, result.usage, result);
-      sendStatus('pilot_token_usage', flattenToStrings(row));
+      sendStatus('pilot_token_usage', flattenToStrings({
+        ...row,
+        sample_id: sampleId,
+        ...comparisonFields,
+        ...(summary
+          ? { difference_tokens: String(Number(row.total_tokens_total) - summary.totalTokens) }
+          : {}),
+      }));
     } catch (err) {
       logger.warn('token usage metrics write failed', { error: String(err) });
     }
@@ -326,4 +360,38 @@ export class MetricsWriter {
       logger.warn('alarm write failed', { error: String(err) });
     }
   }
+}
+
+async function readCodexMetricsSummary(
+  summaryPath: string,
+  sampledAtMs: number,
+): Promise<CodexMetricsSummarySnapshot | null> {
+  const raw = await readJsonFile<unknown>(summaryPath);
+  if (!isRecord(raw) || typeof raw.generatedAt !== 'string') return null;
+
+  const generatedAtMs = Date.parse(raw.generatedAt);
+  if (!Number.isFinite(generatedAtMs)) return null;
+
+  const ranges = raw.ranges;
+  if (!isRecord(ranges) || !isRecord(ranges.today) || !Array.isArray(ranges.today.agentShares)) {
+    return null;
+  }
+
+  const codex = ranges.today.agentShares.find(
+    (entry): entry is Record<string, unknown> => isRecord(entry) && entry.agentType === 'codex',
+  );
+  if (!codex || typeof codex.tokens !== 'number'
+    || !Number.isFinite(codex.tokens) || codex.tokens < 0) {
+    return null;
+  }
+
+  return {
+    totalTokens: codex.tokens,
+    generatedAt: raw.generatedAt,
+    ageSeconds: Math.max(0, Math.floor((sampledAtMs - generatedAtMs) / 1_000)),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
