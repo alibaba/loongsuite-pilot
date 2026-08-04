@@ -60,7 +60,10 @@ async function main(): Promise<void> {
     : null;
   if (pidFile) writePidFileSync(pidFile);
 
+  // flushLogsSync() first: same rationale as the collector — this is the one exit path
+  // guaranteed to run, so it is the single reliable place to flush the pino-roll stream.
   process.on('exit', () => {
+    flushLogsSync();
     lock.release();
     if (pidFile) removeOwnPidFileSync(pidFile);
   });

@@ -78,7 +78,12 @@ async function main(): Promise<void> {
 
   // Fires for normal completion, signal-driven shutdown (via process.exit below),
   // and the fatal-error path in main().catch — covering every exit route.
+  // flushLogsSync() goes first and is the single guaranteed flush: the pino-roll
+  // SonicBoom has no on-exit flush of its own, and this handler is the one path that
+  // always runs — even if shutdown()'s own flush is skipped because orchestrator.stop()
+  // rejected. Sync + idempotent + already try/catch, so it is zero-risk here.
   process.on('exit', () => {
+    flushLogsSync();
     lock.release();
     if (pidFile) removeOwnPidFileSync(pidFile);
   });
@@ -87,10 +92,18 @@ async function main(): Promise<void> {
 
   const shutdown = async () => {
     logger.info('shutdown signal received');
-    await orchestrator.stop();
-    lock.release();
-    flushLogsSync();
-    process.exit(0);
+    try {
+      await orchestrator.stop();
+    } catch (err) {
+      // A rejected stop() (e.g. flusher.shutdown()/stateStore.save() throwing) must not
+      // skip the flush+exit below and silently fall through to the process.on('exit')
+      // fallback with stop() half-done and this shutdown log lost.
+      logger.error('error during orchestrator shutdown', { error: String(err) });
+    } finally {
+      lock.release();
+      flushLogsSync();
+      process.exit(0);
+    }
   };
   process.on('SIGINT', () => void shutdown());
   process.on('SIGTERM', () => void shutdown());
