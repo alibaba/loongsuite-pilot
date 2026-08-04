@@ -8,7 +8,10 @@ import type { DataflowSnapshot, L1Metrics } from './metrics-collector.js';
 import type { AlarmManager } from './alarm-manager.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
 import { collectCodexDailyUsage } from './token-usage/codex-token-usage.js';
-import { TokenUsageStateStore } from './token-usage/token-usage-state.js';
+import {
+  buildTokenUsageSkippedStatusRow,
+  TokenUsageStateStore,
+} from './token-usage/token-usage-state.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
 
 const logger = createLogger('MetricsWriter');
@@ -288,8 +291,19 @@ export class MetricsWriter {
 
   private async collectAndWriteTokenUsageMetrics(): Promise<void> {
     try {
-      const usage = await collectCodexDailyUsage();
-      const row = await this.tokenUsageState.buildStatusRow('codex', this.userId, usage);
+      const result = await collectCodexDailyUsage();
+      if (result.status === 'skipped') {
+        logger.warn('Codex token usage scan skipped: candidate bytes exceed limit', {
+          candidateFiles: result.candidateFiles,
+          candidateBytes: result.candidateBytes,
+          scanLimitBytes: result.scanLimitBytes,
+        });
+        const row = buildTokenUsageSkippedStatusRow('codex', this.userId, result);
+        sendStatus('pilot_token_usage', flattenToStrings(row));
+        return;
+      }
+
+      const row = await this.tokenUsageState.buildStatusRow('codex', this.userId, result.usage, result);
       sendStatus('pilot_token_usage', flattenToStrings(row));
     } catch (err) {
       logger.warn('token usage metrics write failed', { error: String(err) });
