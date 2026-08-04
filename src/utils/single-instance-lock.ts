@@ -17,7 +17,7 @@ import {
 // own last line of defense: it must be acquired before the daemon wires up any
 // input/output pipeline.
 //
-// The lockfile lives at a caller-chosen path (e.g. <dataDir>/logs/collector.lock)
+// The lockfile lives at a caller-chosen path (e.g. <dataDir>/collector.lock)
 // and holds JSON `{ pid, startedAt }`. It is published atomically (temp file + hardlink)
 // so a peer never observes a created-but-empty lockfile — see `writeOwnLock`.
 

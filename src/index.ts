@@ -47,7 +47,9 @@ async function main(): Promise<void> {
   // `MultipleInstances=IgnoreNew` policy is bypassed whenever the task is
   // re-registered while an instance is still running, so this pid lock — acquired
   // before any pipeline is wired up — is the daemon's own last line of defense.
-  const lockPath = path.join(logDir, 'collector.lock');
+  // Lock file is runtime state, not a log — keep it in the dataDir root alongside
+  // the pid file, not under logs/.
+  const lockPath = path.join(dataDir, 'collector.lock');
   const { lock, holderPid } = acquireSingleInstanceLock(lockPath, COLLECTOR_PROCESS_PATTERNS);
   if (!lock) {
     logger.warn('another collector instance already holds the lock; exiting', {
