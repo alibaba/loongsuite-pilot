@@ -394,4 +394,27 @@ describe('UpdaterWatchdog', () => {
     expect(await wd.runCheck()).toEqual({ status: 'disabled' });
     expect(mockExecFileAsync).not.toHaveBeenCalled();
   });
+
+  it('does not check or restart updater for an agentshell current version', async () => {
+    await fs.writeFile(path.join(tmpDir, 'current'), '1.1.20-agentshell_abcdef0\n', 'utf-8');
+    const alarms = makeAlarmManager();
+    const updaterLiveness = vi.fn(() => ({
+      running: false,
+      source: 'none' as const,
+      reason: 'pid file is missing; no matching process found',
+    }));
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      alarmManager: alarms,
+      updaterLiveness,
+    });
+
+    expect(await wd.runCheck()).toEqual({ status: 'disabled' });
+    expect(updaterLiveness).not.toHaveBeenCalled();
+    expect(mockExecFileAsync).not.toHaveBeenCalled();
+    expect(alarms.serialize()).toEqual([]);
+  });
 });
