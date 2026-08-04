@@ -118,7 +118,11 @@ export class HookManager {
       const updatedArr = target[lastKey] as any[];
 
       if (this.isCommandPresent(updatedArr, def.hookCommand)) {
-        if (updatedArr !== arr) {
+        // Entry already present. It may predate a newly-added `shell` field
+        // (e.g. Qoder gained winShell after the hook was first installed) —
+        // repair the stale entry in place instead of leaving it untouched.
+        const shellRepaired = this.applyShellToEntries(updatedArr, def.hookCommand, def.shell);
+        if (updatedArr !== arr || shellRepaired) {
           await writeJsonFile(def.settingsPath, settings);
         }
         logger.debug('hook already installed', { agentId: def.agentId });
@@ -227,7 +231,12 @@ export class HookManager {
         return false;
       }
 
-      return this.isCommandPresent(hooks, def.hookCommand);
+      if (!this.isCommandPresent(hooks, def.hookCommand)) return false;
+
+      // A matching command whose nested entry lacks the required `shell` counts
+      // as not fully installed, so an upgrade that adds winShell (Qoder family
+      // on Windows) redeploys and repairs the entry rather than skipping it.
+      return this.hasRequiredShell(hooks, def.hookCommand, def.shell);
     } catch {
       return false;
     }
@@ -555,6 +564,41 @@ export class HookManager {
 
   private isCommandPresent(arr: any[], command: string): boolean {
     return arr.some((entry: any) => this.entryMatchesCommand(entry, command));
+  }
+
+  /**
+   * Whether the nested inner hook matching `command` declares the required
+   * `shell`. `shell` lives only on nested inner entries (`{ command, type,
+   * shell }`), so this only inspects those. Returns true when `shell` is unset
+   * (non-Windows, or agents that don't declare winShell) — the shell dimension
+   * is simply ignored there.
+   */
+  private hasRequiredShell(arr: any[], command: string, shell?: string): boolean {
+    if (!shell) return true;
+    return arr.some((entry: any) =>
+      Array.isArray(entry.hooks) &&
+      entry.hooks.some((h: any) => h.command === command && h.shell === shell),
+    );
+  }
+
+  /**
+   * Set `shell` on every nested inner hook matching `command` when it is
+   * missing or stale. Returns true if any entry was mutated. No-op when `shell`
+   * is unset. Used to repair entries installed before winShell was introduced.
+   */
+  private applyShellToEntries(arr: any[], command: string, shell?: string): boolean {
+    if (!shell) return false;
+    let changed = false;
+    for (const entry of arr) {
+      if (!Array.isArray(entry.hooks)) continue;
+      for (const h of entry.hooks) {
+        if (h.command === command && h.shell !== shell) {
+          h.shell = shell;
+          changed = true;
+        }
+      }
+    }
+    return changed;
   }
 
   private removeCommands(arr: any[], commands: string[]): any[] {
