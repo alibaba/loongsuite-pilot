@@ -2,12 +2,12 @@
 import * as path from 'path';
 import { Orchestrator } from './core/orchestrator.js';
 import { loadConfig } from './core/config-loader.js';
-import { createLogger, initFileLogging } from './utils/logger.js';
+import { createLogger, initFileLogging, flushLogsSync } from './utils/logger.js';
 import { resolveHome, readInstalledVersion } from './utils/fs-utils.js';
 import { writeStartupCrash, clearStartupCrash, resolveBreadcrumbDataDir } from './utils/crash-breadcrumb.js';
 import { handleWorkerCli } from './local-workers/worker-cli.js';
 import { acquireSingleInstanceLock } from './utils/single-instance-lock.js';
-import { COLLECTOR_PROCESS_PATTERNS } from './utils/pid-utils.js';
+import { COLLECTOR_PROCESS_PATTERNS, writePidFileSync, removeOwnPidFileSync } from './utils/pid-utils.js';
 
 const logger = createLogger('Main');
 
@@ -35,7 +35,10 @@ async function main(): Promise<void> {
     // misread as this run's failure cause.
     clearStartupCrash(resolveBreadcrumbDataDir());
     logger.info('analytics disabled via config or LOONGSUITE_PILOT_ENABLED=false');
-    return;
+    // initFileLogging arms a non-unref'd pino-roll rotation timer that keeps the
+    // event loop alive, so a bare `return` would linger as an orphan — exit explicitly.
+    flushLogsSync();
+    process.exit(0);
   }
 
   // Cross-process single-instance guard. Multiple collector daemons on one machine
@@ -44,7 +47,9 @@ async function main(): Promise<void> {
   // `MultipleInstances=IgnoreNew` policy is bypassed whenever the task is
   // re-registered while an instance is still running, so this pid lock — acquired
   // before any pipeline is wired up — is the daemon's own last line of defense.
-  const lockPath = path.join(logDir, 'collector.lock');
+  // Lock file is runtime state, not a log — keep it in the dataDir root alongside
+  // the pid file, not under logs/.
+  const lockPath = path.join(dataDir, 'collector.lock');
   const { lock, holderPid } = acquireSingleInstanceLock(lockPath, COLLECTOR_PROCESS_PATTERNS);
   if (!lock) {
     logger.warn('another collector instance already holds the lock; exiting', {
@@ -52,20 +57,53 @@ async function main(): Promise<void> {
       holderPid,
       lockPath,
     });
-    return;
+    // See the disabled-config branch above: the pino-roll rotation timer keeps the
+    // event loop alive, so a bare `return` here leaves an orphan under the race where
+    // a peer already holds the lock. Exit explicitly.
+    flushLogsSync();
+    process.exit(0);
   }
   logger.info('single-instance lock acquired', { pid: process.pid, lockPath });
+
+  // On Windows the launcher cannot record the daemon's real pid: there is no exec(2),
+  // so wscript/PowerShell run node as a *child* and would only ever capture the wrapper
+  // pid (or, on the Task Scheduler path, nothing at all). Unix keeps writing the pid file
+  // from the script via `echo $$ + exec`, so this is win32-only. dataDir is env-first here
+  // and the Windows launchers inject LOONGSUITE_PILOT_DATA_DIR, so this path matches the
+  // `$DATA_DIR\loongsuite-pilot.pid` the .ps1 reads for stop/status.
+  const pidFile = process.platform === 'win32'
+    ? path.join(dataDir, 'loongsuite-pilot.pid')
+    : null;
+  if (pidFile) writePidFileSync(pidFile);
+
   // Fires for normal completion, signal-driven shutdown (via process.exit below),
   // and the fatal-error path in main().catch — covering every exit route.
-  process.on('exit', () => lock.release());
+  // flushLogsSync() goes first and is the single guaranteed flush: the pino-roll
+  // SonicBoom has no on-exit flush of its own, and this handler is the one path that
+  // always runs — even if shutdown()'s own flush is skipped because orchestrator.stop()
+  // rejected. Sync + idempotent + already try/catch, so it is zero-risk here.
+  process.on('exit', () => {
+    flushLogsSync();
+    lock.release();
+    if (pidFile) removeOwnPidFileSync(pidFile);
+  });
 
   const orchestrator = new Orchestrator(config);
 
   const shutdown = async () => {
     logger.info('shutdown signal received');
-    await orchestrator.stop();
-    lock.release();
-    process.exit(0);
+    try {
+      await orchestrator.stop();
+    } catch (err) {
+      // A rejected stop() (e.g. flusher.shutdown()/stateStore.save() throwing) must not
+      // skip the flush+exit below and silently fall through to the process.on('exit')
+      // fallback with stop() half-done and this shutdown log lost.
+      logger.error('error during orchestrator shutdown', { error: String(err) });
+    } finally {
+      lock.release();
+      flushLogsSync();
+      process.exit(0);
+    }
   };
   process.on('SIGINT', () => void shutdown());
   process.on('SIGTERM', () => void shutdown());
@@ -94,6 +132,7 @@ main().catch((err) => {
     version: readInstalledVersion(breadcrumbDir),
     error: err,
   });
+  flushLogsSync();
   process.exit(1);
 });
 
