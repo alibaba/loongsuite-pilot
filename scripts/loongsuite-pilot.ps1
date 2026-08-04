@@ -600,7 +600,11 @@ function Cmd-Run {
         exit 1
     }
 
-    Set-Content -Path $PID_FILE -Value $PID
+    # Windows has no exec(2): node runs as our child, so it publishes its own pid file
+    # (see src/index.ts) instead of us recording the wrapper pid here. Export the data
+    # dir so node's env-first resolution writes $DATA_DIR\loongsuite-pilot.pid — the exact
+    # path stop/status read.
+    $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
     $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
     & $nodeBin $entry
 }
@@ -621,7 +625,9 @@ function Cmd-RunUpdater {
         exit 1
     }
 
-    Set-Content -Path $UPDATER_PID_FILE -Value $PID
+    # See Cmd-Run: node publishes its own pid file on Windows. Export the data dir so
+    # node writes $DATA_DIR\loongsuite-pilot-updater.pid where stop/status read it.
+    $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
     $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
     & $nodeBin $entry
 }
@@ -820,12 +826,13 @@ function Cmd-RestartCollector {
                     exit 1
                 }
                 $errLog = Join-Path $LOG_DIR "loongsuite-pilot-service-err.log"
-                $proc = Start-Process -FilePath "powershell.exe" `
-                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
+                # node publishes its own pid file on Windows (see src/index.ts); export the
+                # data dir so it lands at $DATA_DIR\loongsuite-pilot.pid. No Set-Content here —
+                # $proc.Id would be the wrapper pid, not node's.
+                Start-Process -FilePath "powershell.exe" `
+                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'; `$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
                     -WorkingDirectory $CACHE_DIR `
-                    -WindowStyle Hidden `
-                    -PassThru
-                Set-Content -Path $PID_FILE -Value $proc.Id
+                    -WindowStyle Hidden
                 Write-Host "collector restarted (background fallback, self-heal failed)" -ForegroundColor Yellow
             } else {
                 Write-Error "Service manager failed to restart collector (init_type=$initType)"
@@ -917,12 +924,13 @@ function Cmd-RestartUpdater {
                     return
                 }
                 $updaterErrLog = Join-Path $LOG_DIR "loongsuite-pilot-updater-err.log"
-                $proc = Start-Process -FilePath "powershell.exe" `
-                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$UPDATER_LOG_FILE' 2>> '$updaterErrLog'`"" `
+                # node publishes its own pid file on Windows (see src/updater/index.ts); export
+                # the data dir so it lands at $DATA_DIR\loongsuite-pilot-updater.pid. No
+                # Set-Content — $proc.Id would be the wrapper pid, not node's.
+                Start-Process -FilePath "powershell.exe" `
+                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'; `$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$UPDATER_LOG_FILE' 2>> '$updaterErrLog'`"" `
                     -WorkingDirectory $CACHE_DIR `
-                    -WindowStyle Hidden `
-                    -PassThru
-                Set-Content -Path $UPDATER_PID_FILE -Value $proc.Id
+                    -WindowStyle Hidden
                 Write-Host "updater restarted (background fallback, self-heal failed)" -ForegroundColor Yellow
             } else {
                 Write-Error "Service manager failed to restart updater (init_type=$initType)"

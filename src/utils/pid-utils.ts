@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 export type ProcessLivenessSource = 'pid-file' | 'process-scan' | 'none';
@@ -43,6 +44,39 @@ export function readPidFile(pidFile: string): number | null {
     return Number.isInteger(pid) && pid > 0 ? pid : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Write this process's pid to `pidFile` as a bare integer + newline — the exact
+ * format the launcher scripts read (`Get-Content .Trim()` / `cat`). Used on Windows,
+ * where there is no exec(2) to let the wrapper record the daemon's real pid, so the
+ * daemon publishes its own. Best-effort: a write failure must not block startup.
+ */
+export function writePidFileSync(pidFile: string): void {
+  try {
+    fs.mkdirSync(path.dirname(pidFile), { recursive: true });
+  } catch {
+    // Dir may already exist; the write below surfaces any real failure.
+  }
+  try {
+    fs.writeFileSync(pidFile, `${process.pid}\n`);
+  } catch {
+    // Best-effort: never let pid-file publishing crash the daemon.
+  }
+}
+
+/**
+ * Remove `pidFile`, but only when it still records this process — so a crash-recovery
+ * peer that already took over is never clobbered. Idempotent and best-effort.
+ */
+export function removeOwnPidFileSync(pidFile: string): void {
+  try {
+    if (readPidFile(pidFile) === process.pid) {
+      fs.unlinkSync(pidFile);
+    }
+  } catch {
+    // Best-effort: never let pid-file cleanup crash shutdown.
   }
 }
 
