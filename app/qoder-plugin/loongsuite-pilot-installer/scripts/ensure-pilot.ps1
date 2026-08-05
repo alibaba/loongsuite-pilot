@@ -125,7 +125,10 @@ function Install-Node {
                 Write-Log "从 $url 下载 node 分发包"
                 Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
             }
-            Expand-Archive -Path $zip -DestinationPath $extractDir -Force
+            # 受限语言模式下 Expand-Archive 不可用（Microsoft.PowerShell.Archive 脚本模块内部创建压缩类型被禁），
+            # 改用系统自带 tar.exe（bsdtar，Win10 1803+/Server2019+ 内置）解 zip——外部程序，CLM 允许
+            & tar.exe -xf $zip -C $extractDir
+            if ($LASTEXITCODE -ne 0) { throw "tar 解包失败 (exit $LASTEXITCODE)" }
             if ($zip -ne $vendorZip) { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
             return (Join-Path $extractDir "node-v$NodeVersion-win-$arch")
         } catch {
@@ -160,28 +163,6 @@ function Invoke-Logged([string[]]$PsArgs) {
     } finally { $ErrorActionPreference = $prevEap }
 }
 
-# ---- 硬停 pilot：Windows 下不停干净时 installer 删不掉数据目录 ----
-function Stop-PilotHard {
-    $prevEap = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        if (Test-Path $PilotCmd) { & $PilotCmd stop *>> $LogFile }
-        # 移除计划任务，否则会重新拉起守护进程
-        Get-ScheduledTask -ErrorAction SilentlyContinue |
-            Where-Object { $_.TaskName -match 'Loongsuite' } | ForEach-Object {
-                Stop-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -ErrorAction SilentlyContinue
-                Unregister-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -Confirm:$false -ErrorAction SilentlyContinue
-            }
-        # 杀掉持有数据目录的 wscript 启动器与 node 守护进程
-        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -and $_.CommandLine -match '\.loongsuite-pilot' } | ForEach-Object {
-                Write-Log ("停止残留进程 " + $_.Name + " pid " + $_.ProcessId)
-                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-            }
-        Start-Sleep -Seconds 2
-    } finally { $ErrorActionPreference = $prevEap }
-}
-
 # ---- 测试入口：仅准备 node ----
 if ($ProvisionNodeOnly) {
     Initialize-NodeRuntime
@@ -195,16 +176,20 @@ if ($ProvisionNodeOnly) {
 $FingerprintFile = Join-Path $DataDir 'install-args.sha256'
 
 function Get-ArgsFingerprint {
+    # 指纹仅用于“参数是否变化”的本地自比对（从不跨到 bash 侧），无需密码学哈希。
+    # 受限语言模式（ConstrainedLanguage）下 Get-FileHash 同样不可用——它是脚本模块 cmdlet，
+    # 内部创建 SHA256 类型会触发 “Cannot create type”；[Security.Cryptography]/[Text.Encoding]
+    # 静态调用也被禁。故改用纯 PS 双滚动哈希（算术运算符 + String.ToCharArray 均为 CLM 允许），
+    # 全程在内存计算不落盘，避免把 license key 明文写进指纹文件。
     $payload = "url=$InstallerUrl`n" + (($InstallArgs | ForEach-Object { "$_`n" }) -join '')
-    # 受限语言模式禁用 [System.Security.Cryptography]/[System.Text.Encoding]，改用 Get-FileHash（cmdlet）
-    # 对临时文件求 SHA256；临时文件按 $PID 命名，避免多会话并发写同一路径
-    $tmp = Join-Path $DataDir "fingerprint.$PID.tmp"
-    try {
-        Set-Content -Path $tmp -Value $payload -Encoding UTF8 -NoNewline
-        return (Get-FileHash -Path $tmp -Algorithm SHA256).Hash
-    } finally {
-        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    $h1 = [long]0
+    $h2 = [long]0
+    foreach ($ch in $payload.ToCharArray()) {
+        $code = [long][int]$ch
+        $h1 = ($h1 * 131 + $code) % 1000000007
+        $h2 = ($h2 * 1000003 + $code) % 998244353
     }
+    return "$h1-$h2"
 }
 
 $CurrentFp = Get-ArgsFingerprint
@@ -250,10 +235,10 @@ function Invoke-Install {
         if ((Test-PilotInstalled) -and (Test-FingerprintMatch)) { return }
 
         # 未安装 → 直接装；已装但指纹不一致 → 重新 install 覆盖（不再 uninstall -Purge，保留本地数据）
+        # 与 bash 侧一致：installer 的 install 自身会停旧进程、merge 覆盖并重启（含被运行中 node.exe/
+        # wscript 启动器占用的文件），Windows 上实测可直接覆盖，无需预先手动停机/杀进程/删计划任务
         if (Test-PilotInstalled) {
-            Write-Log '已安装但参数指纹不一致，按新配置重新 install（install 会 merge 覆盖并重启）'
-            # 先停服务/计划任务/占用进程：Windows 下 install 无法覆盖被占用的文件（不删数据目录）
-            Stop-PilotHard
+            Write-Log '已安装但参数指纹不一致，按新配置重新 install（install 会停旧进程、merge 覆盖并重启）'
         }
         Write-Log "installer: $InstallerUrl"
         Write-Log "install args: $($InstallArgs -join ' ')"
