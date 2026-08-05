@@ -147,6 +147,62 @@ describe('DeploymentManager', () => {
       });
     });
 
+    it('undeploys a hook agent that was deployed then disabled', async () => {
+      const settingsPath = path.join(tmpDir, 'toggle-hooks.json');
+      const def: AgentDefinition = {
+        id: 'toggle-agent',
+        displayName: 'Toggle',
+        deployMode: 'hook',
+        detection: { paths: [], commands: [] },
+        hook: {
+          settingsPath,
+          events: ['Stop'],
+          hookCommand: '/opt/toggle.sh',
+          format: 'flat',
+        },
+      };
+      await writeAgentDef(def);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const mgr = makeManager();
+
+      // 1) enabled → hook is installed into the settings file
+      await mgr.deployAll(() => true);
+      const afterDeploy = await fs.readFile(settingsPath, 'utf-8');
+      expect(afterDeploy).toContain('/opt/toggle.sh');
+
+      // 2) disabled → the previously installed hook is removed, not merely skipped
+      const results = await mgr.deployAll(() => false);
+      expect(results.find(result => result.agentId === def.id)?.skipped).toBe(true);
+      const afterDisable = await fs.readFile(settingsPath, 'utf-8');
+      expect(afterDisable).not.toContain('/opt/toggle.sh');
+    });
+
+    it('does not touch settings for an agent disabled without a prior deployment', async () => {
+      const settingsPath = path.join(tmpDir, 'never-deployed-hooks.json');
+      const def: AgentDefinition = {
+        id: 'never-deployed-agent',
+        displayName: 'Never Deployed',
+        deployMode: 'hook',
+        detection: { paths: [], commands: [] },
+        hook: {
+          settingsPath,
+          events: ['Stop'],
+          hookCommand: '/opt/never.sh',
+          format: 'flat',
+        },
+      };
+      await writeAgentDef(def);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const mgr = makeManager();
+      const results = await mgr.deployAll(() => false);
+
+      expect(results.find(result => result.agentId === def.id)?.skipped).toBe(true);
+      // No state record → cleanup must not create/rewrite the settings file.
+      await expect(fs.stat(settingsPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
     it('continues when one agent fails', async () => {
       const def1: AgentDefinition = {
         id: 'agent-ok',

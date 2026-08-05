@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import type { HookWatchdogConfig } from '../types/index.js';
-import { directoryExists, fileExists, resolveHome } from '../utils/fs-utils.js';
+import { directoryExists, fileExists } from '../utils/fs-utils.js';
 import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -30,6 +30,14 @@ export interface PluginCheckTarget {
   installArgs?: string[];
   /** Direct repair function (for hook-type repair via HookManager). Takes precedence over binPath. */
   repairFn?: () => Promise<boolean>;
+
+  /**
+   * Whether the owning agent is enabled by the user's selection
+   * (config.agents[<id>].enabled). When this returns false the target is
+   * neither checked nor repaired — a disabled agent must never have its hook
+   * (re)injected. Omitted → treated as enabled (backward compatible).
+   */
+  enabled?: () => boolean | Promise<boolean>;
 }
 
 export interface InterceptCheckTarget {
@@ -79,7 +87,7 @@ export interface CheckResult {
 
 export interface TargetResult {
   agentId: string;
-  status: 'healthy' | 'repaired' | 'cooldown' | 'unavailable' | 'invalid-config' | 'repair-failed';
+  status: 'healthy' | 'repaired' | 'cooldown' | 'unavailable' | 'invalid-config' | 'repair-failed' | 'disabled';
   expected?: number;
   found?: number;
   missing?: string[];
@@ -112,7 +120,7 @@ export class HookWatchdog {
     interceptTargets?: InterceptCheckTarget[],
   ) {
     this.config = config;
-    this.targets = targets ?? HookWatchdog.defaultTargets();
+    this.targets = targets ?? [];
     this.interceptTargets = interceptTargets ?? [];
   }
 
@@ -151,7 +159,7 @@ export class HookWatchdog {
     for (const target of this.targets) {
       try {
         const result = await this.checkTarget(target);
-        if (result.status === 'unavailable' || result.status === 'invalid-config') {
+        if (result.status === 'unavailable' || result.status === 'invalid-config' || result.status === 'disabled') {
           summary.skipped++;
         } else if (result.status === 'repaired') {
           summary.repaired++;
@@ -172,6 +180,14 @@ export class HookWatchdog {
   }
 
   private async checkTarget(target: PluginCheckTarget): Promise<TargetResult> {
+    if (target.enabled && !(await target.enabled())) {
+      logger.debug('hook-watchdog.skipped', {
+        agent: target.agentId,
+        reason: 'disabled',
+      });
+      return { agentId: target.agentId, status: 'disabled' };
+    }
+
     const settingsDirOk = await directoryExists(path.dirname(target.settingsPath));
     if (!settingsDirOk) {
       logger.debug('hook-watchdog.skipped', {
@@ -460,42 +476,6 @@ export class HookWatchdog {
     }
   }
 
-  // ─── Default targets (hardcoded, matching existing style) ───────────────
-
-  static defaultTargets(): PluginCheckTarget[] {
-    return [
-      {
-        agentId: 'claude-code',
-        settingsPath: resolveHome('~/.claude/settings.json'),
-        expectedHooks: [
-          'Stop',
-          'SubagentStart',
-          'SubagentStop',
-        ],
-        binPath: resolveHome(
-          '~/.cache/opentelemetry.instrumentation.claude/package/bin/otel-claude-hook',
-        ),
-        installArgs: ['install', '--user', '--no-alias', '--quiet'],
-        markers: ['otel-claude-hook', 'opentelemetry.instrumentation.claude'],
-      },
-      {
-        agentId: 'codex',
-        settingsPath: resolveHome('~/.codex/hooks.json'),
-        expectedHooks: [
-          'SessionStart',
-          'UserPromptSubmit',
-          'PreToolUse',
-          'PostToolUse',
-          'Stop',
-        ],
-        binPath: resolveHome(
-          '~/.cache/opentelemetry.instrumentation.codex/package/bin/otel-codex-hook',
-        ),
-        installArgs: ['install'],
-        markers: ['otel-codex-hook', 'opentelemetry.instrumentation.codex'],
-      },
-    ];
-  }
 
   /**
    * Shell-rc intercept block definitions (qodercli + claude-code).
