@@ -14,9 +14,9 @@ PILOT_BIN="$HOME/.local/bin/loongsuite-pilot"
 PILOT_HOME="$HOME/.loongsuite-pilot"   # pilot 数据目录（默认），内含 pid 文件，用于判活
 
 # ---- 内置默认值（可被 config/install-params.conf 及环境变量覆盖） ----
-INSTALLER_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite/loongsuite-pilot/installer.sh"
+INSTALLER_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot-dev/installer.sh"
 NODE_VERSION="22.22.2"
-NODE_DIST_BASE_URL="https://taiye-test-sh.oss-cn-shanghai.aliyuncs.com/sensen-test"
+NODE_DIST_BASE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node/22.22.2"
 NODE_MIN_MAJOR=22
 INSTALL_ARGS=()
 

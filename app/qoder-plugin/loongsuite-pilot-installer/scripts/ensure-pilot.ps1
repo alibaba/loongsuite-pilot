@@ -23,7 +23,7 @@ $PilotHome = Join-Path $env:USERPROFILE '.loongsuite-pilot'   # pilot 数据目�
 # ---- 内置默认值（可被 config\install-params.conf 及环境变量覆盖） ----
 $InstallerUrl = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot-dev/installer.ps1'
 $NodeVersion = '22.22.2'
-$NodeDistBaseUrl = 'https://taiye-test-sh.oss-cn-shanghai.aliyuncs.com/sensen-test'
+$NodeDistBaseUrl = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node/22.22.2'
 $NodeMinMajor = 22
 $InstallArgs = @()
 
