@@ -6,7 +6,8 @@
 # 用法：ensure-pilot.ps1 [-ProvisionNodeOnly]
 [CmdletBinding()]
 param(
-    [switch]$ProvisionNodeOnly
+    [switch]$ProvisionNodeOnly,
+    [switch]$RunInstall   # detach 出的独立进程用：直接执行重活，不再二次 detach
 )
 
 $ErrorActionPreference = 'Stop'
@@ -219,8 +220,65 @@ function Test-PilotRunning {
     return [bool](Get-Process -Id ([int]$pidVal) -ErrorAction SilentlyContinue)
 }
 
-# ---- 幂等快路径（每次会话启动都会触发本脚本）----
-# 已安装 + 参数未变：在跑则秒过；进程已死则直接 start 复活（无需重新下载/安装）
+# ---- Invoke-Install：重活（抢锁 + node + 下载 installer + install + 写指纹）----
+# 由 detach 出的独立进程（-RunInstall）执行：不随会话退出而中断，也不占用 hook 返回时间。
+function Invoke-Install {
+    # 并发锁：多会话同时启动时只允许一个实例执行安装
+    # CLI 退出可能杀掉 hook 进程导致锁残留，超过 TTL 的旧锁直接接管
+    $LockTtlMinutes = 15
+    if (Test-Path $LockDir) {
+        $age = (Get-Date) - (Get-Item $LockDir).CreationTime
+        if ($age.TotalMinutes -gt $LockTtlMinutes) {
+            Write-Log ("接管过期锁（存在 " + [int]$age.TotalMinutes + " 分钟）")
+            Remove-Item $LockDir -Force -Recurse -ErrorAction SilentlyContinue
+        }
+    }
+    try {
+        New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null
+    } catch {
+        Write-Log '另一实例正在安装，跳过'
+        return
+    }
+
+    try {
+        # 拿到锁后重新判定：可能另一实例已经装好了相同配置
+        if ((Test-PilotInstalled) -and (Test-FingerprintMatch)) { return }
+
+        # 未安装 → 直接装；已装但指纹不一致 → 重新 install 覆盖（不再 uninstall -Purge，保留本地数据）
+        if (Test-PilotInstalled) {
+            Write-Log '已安装但参数指纹不一致，按新配置重新 install（install 会 merge 覆盖并重启）'
+            # 先停服务/计划任务/占用进程：Windows 下 install 无法覆盖被占用的文件（不删数据目录）
+            Stop-PilotHard
+        }
+        Write-Log "installer: $InstallerUrl"
+        Write-Log "install args: $($InstallArgs -join ' ')"
+
+        Initialize-NodeRuntime
+
+        $installerTmp = Join-Path $DataDir 'installer.ps1'
+        Invoke-WebRequest -Uri $InstallerUrl -OutFile $installerTmp -UseBasicParsing
+
+        $rc = Invoke-Logged (@($installerTmp, 'install') + $InstallArgs)
+        if ($rc -ne 0) { throw "installer exited with code $rc" }
+
+        Set-Content -Path $FingerprintFile -Value $CurrentFp -Encoding ASCII
+        # 直接调 .cmd 并取回字符串（不进管道），避免后台进程持有句柄导致挂死
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        $status = (& $PilotCmd status 2>$null) -join ' '
+        $ErrorActionPreference = $prevEap
+        Write-Log "✅ 安装完成。status: $status"
+    } catch {
+        Write-Log "❌ 安装失败: $($_.Exception.Message)"
+    } finally {
+        Remove-Item $LockDir -Force -Recurse -ErrorAction SilentlyContinue
+    }
+}
+
+# ---- detached 独立进程入口：直接执行重活，跳过下面的快路径/detach，避免 fork 炸弹 ----
+if ($RunInstall) { Invoke-Install; exit 0 }
+
+# ---- 幂等快路径（每次会话启动都会触发本 hook，毫秒级）----
+# 已安装 + 参数未变：在跑则秒过；进程已死则直接 start 复活（秒级，无需重新下载/安装）
 if ((Test-PilotInstalled) -and (Test-FingerprintMatch)) {
     if (Test-PilotRunning) { exit 0 }
     Write-Log '已安装且参数未变，但服务未运行，尝试拉起'
@@ -232,56 +290,14 @@ if ((Test-PilotInstalled) -and (Test-FingerprintMatch)) {
     exit 0
 }
 
-# ---- 并发锁：多会话同时启动时只允许一个实例执行安装 ----
-# CLI 退出可能杀掉 hook 进程导致锁残留，超过 TTL 的旧锁直接接管
-$LockTtlMinutes = 15
-if (Test-Path $LockDir) {
-    $age = (Get-Date) - (Get-Item $LockDir).CreationTime
-    if ($age.TotalMinutes -gt $LockTtlMinutes) {
-        Write-Log ("接管过期锁（存在 " + [int]$age.TotalMinutes + " 分钟）")
-        Remove-Item $LockDir -Force -Recurse -ErrorAction SilentlyContinue
-    }
-}
-try {
-    New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null
-} catch {
-    Write-Log '另一实例正在安装，跳过'
-    exit 0
-}
-
-try {
-    # 拿到锁后重新判定：可能另一实例已经装好了相同配置
-    if ((Test-PilotInstalled) -and (Test-FingerprintMatch)) { exit 0 }
-
-    # 未安装 → 直接装；已装但指纹不一致 → 重新 install 覆盖（不再 uninstall -Purge，保留本地数据）
-    if (Test-PilotInstalled) {
-        Write-Log '已安装但参数指纹不一致，按新配置重新 install（install 会 merge 覆盖并重启）'
-        # 先停服务/计划任务/占用进程：Windows 下 install 无法覆盖被占用的文件（不删数据目录）
-        Stop-PilotHard
-    }
-    Write-Log "installer: $InstallerUrl"
-    Write-Log "install args: $($InstallArgs -join ' ')"
-
-    Initialize-NodeRuntime
-
-    $installerTmp = Join-Path $DataDir 'installer.ps1'
-    Invoke-WebRequest -Uri $InstallerUrl -OutFile $installerTmp -UseBasicParsing
-
-    $rc = Invoke-Logged (@($installerTmp, 'install') + $InstallArgs)
-    if ($rc -ne 0) { throw "installer exited with code $rc" }
-
-    Set-Content -Path $FingerprintFile -Value $CurrentFp -Encoding ASCII
-    # 直接调 .cmd 并取回字符串（不进管道），避免后台进程持有句柄导致挂死
-    $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    $status = (& $PilotCmd status 2>$null) -join ' '
-    $ErrorActionPreference = $prevEap
-    Write-Log "✅ 安装完成。status: $status"
-    # stdout 纯文本会作为 SessionStart 附加上下文注入对话，让用户感知安装结果
-    Write-Output "loongsuite-pilot 已由插件自动安装完成：$status"
-} catch {
-    Write-Log "❌ 安装失败: $($_.Exception.Message)"
-    Write-Error "loongsuite-pilot 自动安装失败，详见 $LogFile"
-    exit 1
-} finally {
-    Remove-Item $LockDir -Force -Recurse -ErrorAction SilentlyContinue
-}
+# ---- 需要安装/重装：detach 出独立进程执行重活，hook 立即返回 ----
+# 好处：① 不阻塞会话 ② 分钟级安装不随 CLI 退出被腰斩（Start-Process 为独立进程）
+# uid 靠 env 传给独立进程：其无 stdin payload，无法再从 stdin 解析 extra.user.uid
+if ($userId) { $env:LOONGSUITE_PILOT_USER_ID = $userId }
+Write-Log '触发后台安装/重装，detach 独立进程执行'
+Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @(
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-RunInstall'
+) | Out-Null
+# stdout 作为 SessionStart 附加上下文注入对话，让用户知道正在后台安装
+Write-Output "loongsuite-pilot 正在后台自动安装，完成后自动生效（详见 $LogFile）"
+exit 0

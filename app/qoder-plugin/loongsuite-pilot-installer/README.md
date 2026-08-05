@@ -15,14 +15,18 @@ Qoder CLI 插件：安装并启用后，在下一次会话启动时自动检测�
 
 两个脚本逻辑等价：
 
-1. **幂等 + 参数指纹** — CLI 入口已存在且参数指纹未变则立即退出（mac/Linux `~/.local/bin/loongsuite-pilot`；Windows `%USERPROFILE%\.local\bin\loongsuite-pilot.cmd`）
-2. **并发锁** — 多会话同时启动时只有一个实例执行（node 下载也在锁内，不会重复下载）
-3. **Node 运行时** — 本机已有 node ≥ 22 则复用；否则按平台从 OSS 下载 Node v22.22.2 并解包到插件数据目录（不依赖 nvm、不写用户 shell 配置）
-4. **安装 / 重装 pilot** — 未安装则直接安装；已安装但参数指纹不一致则先 `uninstall --purge` 再按新参数安装
+1. **三信号幂等闸门** — 每次会话启动触发，命中即毫秒级退出：
+   - 已安装（mac/Linux `~/.local/bin/loongsuite-pilot`；Windows `%USERPROFILE%\.local\bin\loongsuite-pilot.cmd`）+ 参数指纹未变 + 进程存活（读 `~/.loongsuite-pilot/loongsuite-pilot.pid` 判活）→ 直接跳过
+   - 已安装 + 指纹未变但进程已死 → 直接 `start` 复活（秒级，不重装）
+   - 未安装 / 指纹不一致 → 进入安装流程（见下条 detach）
+2. **异步 detach** — 需要安装/重装时，hook 只做上面的判定就立即返回、并向对话注入“正在后台安装”提示；真正的重活扔进一个脱离 CLI 进程树的后台进程执行，既不阻塞会话、也不随 CLI 退出被腰斩（mac/Linux：`setsid`/`nohup` + `</dev/null`；Windows：`Start-Process -WindowStyle Hidden`。uid 经环境变量传给后台进程，因其已无 stdin payload）
+3. **并发锁** — 多会话同时启动时只有一个后台进程执行安装（node 下载也在锁内，不会重复下载）
+4. **Node 运行时** — 本机已有 node ≥ 22 则复用；否则按平台从 OSS 下载 Node v22.22.2 并解包到插件数据目录（不依赖 nvm、不写用户 shell 配置）
+5. **安装 / 重装 pilot** — 未安装则直接安装；指纹不一致则重新 `install` 覆盖（installer 对 config.json 是 merge 语义、自身会停旧进程并重启，**不再 `uninstall --purge`**，保留本地数据；Windows 侧安装前先 `Stop-PilotHard` 确保被占用文件可覆盖）
 
 ## 管理员批量更新配置
 
-`installer` 对 `config.json` 是**合并语义**（未传的参数保留旧值），直接重跑 install 会残留旧配置。因此插件用**参数指纹**（`INSTALLER_URL` + `INSTALL_ARGS` 的 sha256，存于 `<QODER_PLUGIN_DATA>/install-args.sha256`）判定变更，不一致则卸载重装。
+`installer` 对 `config.json` 是**合并语义**（未传的参数保留旧值），直接重跑 install 会残留旧配置。因此插件用**参数指纹**（`INSTALLER_URL` + `INSTALL_ARGS` 的 sha256，存于 `<QODER_PLUGIN_DATA>/install-args.sha256`）判定变更，不一致则重新 install 覆盖。
 
 批量更新流程：
 
@@ -30,13 +34,13 @@ Qoder CLI 插件：安装并启用后，在下一次会话启动时自动检测�
 ① 修改 config/install-params.conf
 ② 递增 .qoder-plugin/plugin.json 的 version   ← 必需！缓存按版本号复用
 ③ 重新分发（zip），用户 plugins install
-④ 用户下次会话 → 指纹不一致 → uninstall --purge → 按新参数安装 → 写新指纹
+④ 用户下次会话 → 指纹不一致 → 后台重新 install 覆盖 → 写新指纹
 ⑤ 此后每次会话指纹命中，毫秒级静默跳过
 ```
 
-> ⚠️ `--purge` 会删除 `~/.loongsuite-pilot`，**包括未上传的本地日志与采集 offset**。参数变更通常意味着换上报目标，旧数据不再适用，故采用此语义。
+> 重装采用 `install` 覆盖而非 `uninstall --purge`：installer 合并写 config.json，管理员下发的参数会覆盖同名旧值，本地日志与采集 offset 得以保留。若确需清空本地数据，请手动执行 `loongsuite-pilot uninstall --purge`。
 
-> 首次安装插件时若本机已有手动安装的 pilot（无指纹记录），会被当作“参数不一致”而卸载重装 —— 这是有意设计，确保最终配置以管理员下发为准。
+> 首次安装插件时若本机已有手动安装的 pilot（无指纹记录），会被当作“参数不一致”而重新 install 覆盖 —— 这是有意设计，确保最终配置以管理员下发为准。
 
 ## 管理员配置
 
@@ -95,6 +99,7 @@ loongsuite-pilot status                     # 验证
 
 - **macOS(arm64)：已端到端实测**（插件安装 → 会话触发 → pilot running → 参数落地）
 - **Windows Server (NT 10.0, AMD64, PowerShell 5.1)：已端到端实测** — 插件 user 级安装 → 会话触发 → 40 秒完成安装 → `loongsuite-pilot v1.1.19 running`（Task Scheduler 自启）→ 9 个管理员参数全部落到 config.json
+  - ⚠️ 该实测走的是**旧的同步 + `uninstall --purge` 路径**。当前改动（三信号闸门 + `-RunInstall` detach 独立进程 + 去 `--purge` 仅保留 `Stop-PilotHard`）尚未在真实 Windows 重验，重点需验：`Start-Process -WindowStyle Hidden` detach 是否随 CLI 退出被杀、pidfile 路径是否为 `%USERPROFILE%\.loongsuite-pilot\loongsuite-pilot.pid`、指纹不一致时 `install`（不 purge）能否正确覆盖被占用文件
 - **Linux x64/arm64、darwin-x64**：走完全相同的 bash 代码路径，但未在对应机器上实测
 - Node 分发包目前只上传了 `win-x64`；Windows on ARM 会先试 `arm64`、失败后回退到 x64（走系统仿真）
 - OSS 上的分发包需为公读（`--acl public-read`），因为 hook 用匿名下载
@@ -108,10 +113,10 @@ loongsuite-pilot status                     # 验证
 |------|------|------|
 | ps1 无 BOM | PS 5.1 按 ANSI 读带中文注释的脚本，报 `UnexpectedToken` 直接无法解析 | ps1 文件写入 UTF-8 BOM |
 | conf 读取编码 | `Get-Content -Raw` 按 ANSI/GBK 读无 BOM 的 conf，中文注释吞掉后续字节，`INSTALL_ARGS` 解成空（参数全丢） | 改用 `[IO.File]::ReadAllText($conf, UTF8)` |
-| 残留锁 | CLI 退出杀掉 async hook 进程，锁目录残留，后续所有会话永久跳过安装 | 锁加 15 分钟 TTL，过期自动接管（sh/ps1 均同步） |
+| 残留锁 | CLI 退出杀掉 async hook 进程，锁目录残留，后续所有会话永久跳过安装 | 锁加 15 分钟 TTL，过期自动接管（sh/ps1 均同步）。注：安装已改为 detach 独立进程，不再随 CLI 退出被杀，进一步降低残留概率 |
 | 子进程输出进管道会挂死 | `installer \| Add-Content` 等 stdout 句柄关闭，而 installer 启动的守护进程继承了句柄 → hook 永久阶段 | 改用文件重定向 `*>> $LogFile`，不用管道 |
 | EAP=Stop + 子进程 stderr | 子进程的错误流经 `*>&1` 合并后变成我们的终止性错误，重装直接中断 | 子进程调用前局部设 `ErrorActionPreference='Continue'` |
-| 卸载删不掉数据目录 | wscript 启动器与计划任务持有 `~/.loongsuite-pilot`，`Remove-Item` 报“文件正在使用” | 卸载前先 stop + 卸载计划任务 + 杀掉持有目录的进程，卸载后再补一手 `rmdir /s /q` |
+| 重装覆盖被占用文件 | wscript 启动器与计划任务持有 `~/.loongsuite-pilot` 内文件，`install` 覆盖时报“文件正在使用” | 指纹不一致重装前先 `Stop-PilotHard`（stop + 卸载计划任务 + 杀掉持有目录的进程），再 `install` 覆盖；**不再 `uninstall --purge` / `rmdir`**，本地数据保留 |
 
 ## 本地自测
 

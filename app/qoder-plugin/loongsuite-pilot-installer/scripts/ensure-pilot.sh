@@ -167,8 +167,63 @@ pilot_cmd() {
     fi
 }
 
-# ---- 幂等快路径（每次会话启动都会触发本脚本）----
-# 已安装 + 参数未变：在跑则秒过；进程已死则直接 start 复活（无需重新下载/安装）
+# ---- run_install：重活（抢锁 + node + 下载 installer + install + 写指纹）----
+# 由 detach 出的后台子进程（--run-install）执行：脱离 CLI 进程树，不随会话退出而中断，
+# 也不占用 hook 返回时间。首次/重装可能数分钟，全在这里。
+run_install() {
+    # 并发锁：多会话同时启动时只允许一个实例执行安装
+    # CLI 退出可能杀掉 hook 进程导致锁残留，超过 TTL（15 分钟）的旧锁直接接管
+    if [ -d "$LOCK_DIR" ] && [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +15 2>/dev/null)" ]; then
+        log "接管过期锁"
+        rmdir "$LOCK_DIR" 2>/dev/null || true
+    fi
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        log "另一实例正在安装，跳过"
+        return 0
+    fi
+    trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+
+    # 拿到锁后重新判定：可能另一实例已经装好了相同配置（并已 start）
+    if is_installed && fingerprint_matches; then
+        return 0
+    fi
+
+    # 未安装 → 直接装；已装但指纹不一致 → 重新 install 覆盖（不再 uninstall --purge）
+    if is_installed; then
+        log "已安装但参数指纹不一致，按新配置重新 install（install 会停旧进程并 merge 覆盖）"
+    fi
+
+    log "installer: $INSTALLER_URL"
+    log "install args: ${INSTALL_ARGS[*]+${INSTALL_ARGS[*]}}"
+
+    ensure_node || { log "❌ node 环境准备失败"; return 1; }
+
+    # ---- 下载 installer ----
+    local installer_tmp="$DATA_DIR/installer.sh"
+    if ! curl -fsSL "$INSTALLER_URL" -o "$installer_tmp" 2>>"$LOG_FILE"; then
+        log "❌ installer 下载失败: $INSTALLER_URL"
+        return 1
+    fi
+
+    # stdin 必须接 /dev/null：installer 用 [ ! -t 0 ] 判非交互，继承的 stdin 一旦阻塞会挂死
+    if bash "$installer_tmp" install ${INSTALL_ARGS[@]+"${INSTALL_ARGS[@]}"} < /dev/null >> "$LOG_FILE" 2>&1; then
+        printf '%s' "$CURRENT_FP" > "$FINGERPRINT_FILE"
+        local status; status=$("$PILOT_BIN" status 2>&1 || true)
+        log "✅ 安装完成。status: $status"
+    else
+        log "❌ installer 执行失败"
+        return 1
+    fi
+}
+
+# ---- detached 子进程入口：直接执行重活，跳过下面的快路径/detach，避免 fork 炸弹 ----
+if [ "${1:-}" = "--run-install" ]; then
+    run_install
+    exit $?
+fi
+
+# ---- 幂等快路径（每次会话启动都会触发本 hook，毫秒级）----
+# 已安装 + 参数未变：在跑则秒过；进程已死则直接 start 复活（秒级，无需重新下载/安装）
 if is_installed && fingerprint_matches; then
     is_running && exit 0
     log "已安装且参数未变，但服务未运行，尝试拉起"
@@ -181,54 +236,17 @@ if is_installed && fingerprint_matches; then
     exit 0
 fi
 
-# ---- 并发锁：多会话同时启动时只允许一个实例执行安装 ----
-# CLI 退出可能杀掉 hook 进程导致锁残留，超过 TTL（15 分钟）的旧锁直接接管
-if [ -d "$LOCK_DIR" ] && [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +15 2>/dev/null)" ]; then
-    log "接管过期锁"
-    rmdir "$LOCK_DIR" 2>/dev/null || true
-fi
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    log "另一实例正在安装，跳过"
-    exit 0
-fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
-
-# 拿到锁后重新判定：可能另一实例已经装好了相同配置（并已 start）
-if is_installed && fingerprint_matches; then
-    exit 0
-fi
-
-# 未安装 → 直接装；已装但指纹不一致 → 重新 install 覆盖（不再 uninstall --purge）
-if is_installed; then
-    log "已安装但参数指纹不一致，按新配置重新 install（install 会停旧进程并 merge 覆盖）"
-fi
-
-log "installer: $INSTALLER_URL"
-log "install args: ${INSTALL_ARGS[*]+${INSTALL_ARGS[*]}}"
-
-ensure_node || {
-    echo "loongsuite-pilot 自动安装失败：node 环境准备失败，详见 $LOG_FILE" >&2
-    exit 1
-}
-
-# ---- 下载 installer ----
-INSTALLER_TMP="$DATA_DIR/installer.sh"
-if ! curl -fsSL "$INSTALLER_URL" -o "$INSTALLER_TMP" 2>>"$LOG_FILE"; then
-    log "❌ installer 下载失败: $INSTALLER_URL"
-    echo "loongsuite-pilot 自动安装失败：installer 下载失败，详见 $LOG_FILE" >&2
-    exit 1
-fi
-
-# stdin 必须接 /dev/null：installer 用 [ ! -t 0 ] 判非交互，hook 继承的 stdin 一旦阻塞会直接碰 hook 超时（900s）
-if bash "$INSTALLER_TMP" install ${INSTALL_ARGS[@]+"${INSTALL_ARGS[@]}"} < /dev/null >> "$LOG_FILE" 2>&1; then
-    printf '%s' "$CURRENT_FP" > "$FINGERPRINT_FILE"
-    STATUS=$("$PILOT_BIN" status 2>&1 || true)
-    log "✅ 安装完成。status: $STATUS"
-    # stdout 纯文本会作为 SessionStart 附加上下文注入对话，让用户感知安装结果
-    echo "loongsuite-pilot 已由插件自动安装完成：$STATUS"
-    exit 0
+# ---- 需要安装/重装：detach 出后台子进程执行重活，hook 立即返回 ----
+# 好处：① 不阻塞会话 ② 分钟级安装不随 CLI 退出被腰斩（脱离进程组 + 忽略 SIGHUP）
+# uid 靠 env 传给子进程：子进程无 stdin payload，无法再从 stdin 解析 extra.user.uid
+export LOONGSUITE_PILOT_USER_ID="$USER_ID"
+log "触发后台安装/重装，detach 子进程执行"
+if command -v setsid >/dev/null 2>&1; then
+    ( setsid bash "$0" --run-install >>"$LOG_FILE" 2>&1 </dev/null & )
 else
-    log "❌ installer 执行失败"
-    echo "loongsuite-pilot 自动安装失败，详见 $LOG_FILE" >&2
-    exit 1
+    # mac 无 setsid：nohup 忽略 SIGHUP + 子 shell 立即退出，使子进程 reparent 到 launchd
+    ( nohup bash "$0" --run-install >>"$LOG_FILE" 2>&1 </dev/null & )
 fi
+# stdout 作为 SessionStart 附加上下文注入对话，让用户知道正在后台安装
+echo "loongsuite-pilot 正在后台自动安装，完成后自动生效（详见 $LOG_FILE）"
+exit 0
