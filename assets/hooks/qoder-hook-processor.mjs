@@ -45,17 +45,20 @@ const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
 // fields so the trace flusher can pass matching keys through to span attributes.
 const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, { agentId: 'qoder' });
 
-// --- Retry lockfile (qoder-cn only) -----------------------------------------
-// QoderCN fires Stop hook multiple times per turn AND incomplete transcript
-// causes background retries — without coordination these can stack up and
-// produce duplicate records. We guard at two points:
-//   1. parent process: skip spawn if a live lock exists
-//   2. retry subprocess: refuse to enter processTranscript if a peer holds it
-// The lock file lives at <HOOKS_DIR>/.retry-locks/<sha1>.lock and contains
-// JSON `{ pid, sessionId, startedAt }`.
+// --- Per-transcript processing lock -----------------------------------------
+// Every Stop can create a detached retry. Serialize the complete read -> append
+// -> cursor-advance transaction for one transcript so duplicate or adjacent
+// retries cannot commit from the same stale cursor. Contenders wait and re-read
+// state after acquiring the lock; they never treat lock contention as a reason
+// to discard a distinct Turn.
+//
+// The lock file lives at <HOOKS_DIR>/.retry-locks/<sha1>.lock and contains JSON
+// `{ pid, sessionId, startedAt }`.
 
 export const RETRY_LOCK_DIR = path.join(HOOKS_DIR, '.retry-locks');
 export const RETRY_LOCK_MAX_AGE_MS = 60_000;
+export const RETRY_LOCK_WAIT_TIMEOUT_MS = 15_000;
+export const RETRY_LOCK_POLL_INTERVAL_MS = 25;
 
 export function retryLockPath(transcriptPath, dir = RETRY_LOCK_DIR) {
   const hash = crypto.createHash('sha1').update(transcriptPath).digest('hex');
@@ -128,6 +131,33 @@ export function releaseRetryLock(transcriptPath, dir = RETRY_LOCK_DIR) {
       fs.unlinkSync(lockPath);
     }
   } catch { /* best-effort */ }
+}
+
+export async function acquireRetryLock(
+  transcriptPath,
+  sessionId,
+  {
+    dir = RETRY_LOCK_DIR,
+    waitMs = RETRY_LOCK_WAIT_TIMEOUT_MS,
+    pollMs = RETRY_LOCK_POLL_INTERVAL_MS,
+  } = {},
+) {
+  const boundedWaitMs = clampInteger(waitMs, RETRY_LOCK_WAIT_TIMEOUT_MS, 0, 60_000);
+  const boundedPollMs = clampInteger(pollMs, RETRY_LOCK_POLL_INTERVAL_MS, 5, 1_000);
+  const deadline = Date.now() + boundedWaitMs;
+
+  while (true) {
+    if (tryAcquireRetryLock(transcriptPath, sessionId, dir)) return true;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise(resolve => setTimeout(resolve, Math.min(boundedPollMs, remaining)));
+  }
+}
+
+function clampInteger(value, fallback, min, max) {
+  const parsed = typeof value === 'number' ? value : Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(parsed)));
 }
 
 // --- Timestamp helpers -------------------------------------------------------
@@ -204,22 +234,27 @@ async function main() {
     logDebug(agentId, `Retry: processing ${transcriptPath} for session ${sessionId}`);
     const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
 
-    // qoder-cn only: serialize concurrent retries on the same transcript.
-    // We wait the HOOK_RETRY_DELAY first (so all queued Stop hooks have
-    // already advanced the offset via updateLineRecord), then acquire the
-    // lock. The losers see currentCount==lastCount in getLineRangeInfo and exit.
+    // Reserve the transcript before applying the flush delay. Earlier Stop
+    // retries therefore retain commit order while later retries wait. The wait
+    // time counts toward HOOK_RETRY_DELAY, so a contender does not sleep for an
+    // extra five seconds after its predecessor finishes.
     const retryDelay = parseInt(process.env.HOOK_RETRY_DELAY || '0', 10);
-    if (retryDelay > 0) {
-      await new Promise(r => setTimeout(r, retryDelay));
-    }
-
-    if (agentId === 'qoder-cn') {
-      if (!tryAcquireRetryLock(transcriptPath, sessionId)) {
-        logDebug(agentId, `Retry skipped: lock held by peer for ${transcriptPath}`);
-        return;
-      }
+    const lockWaitStartedAt = Date.now();
+    const lockAcquired = await acquireRetryLock(transcriptPath, sessionId, {
+      waitMs: process.env.HOOK_RETRY_LOCK_WAIT_MS,
+      pollMs: process.env.HOOK_RETRY_LOCK_POLL_MS,
+    });
+    if (!lockAcquired) {
+      logDebug(agentId, `Retry lock wait timed out; rescheduling ${transcriptPath}`);
+      spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine);
+      return;
     }
     try {
+      const remainingDelay = retryDelay - (Date.now() - lockWaitStartedAt);
+      if (remainingDelay > 0) {
+        await new Promise(r => setTimeout(r, remainingDelay));
+      }
+
       let targetWindow = null;
       let retrySnapshot = null;
       let range = null;
@@ -228,19 +263,18 @@ async function main() {
         // payload. Poll briefly for that Stop and a stable right boundary,
         // without ever falling through into a queued next prompt.
         const maxBoundaryPolls = 3;
-        const configuredPollInterval = Number.parseInt(
-          process.env.HOOK_RETRY_BOUNDARY_POLL_INTERVAL_MS || '1000',
+        const boundaryPollIntervalMs = clampInteger(
+          process.env.HOOK_RETRY_BOUNDARY_POLL_INTERVAL_MS,
+          1000,
           10,
+          5000,
         );
-        const boundaryPollIntervalMs = Number.isFinite(configuredPollInterval)
-          ? Math.max(0, configuredPollInterval)
-          : 1000;
         let previousEofCandidateKey = null;
         for (let poll = 0; poll < maxBoundaryPolls; poll++) {
           // One immutable snapshot per poll supplies both EOF/cursor validation
           // and turn-boundary discovery. The successful snapshot is passed
           // directly to processTranscript, so it is never read again.
-          retrySnapshot = readTranscriptSnapshot(transcriptPath);
+          retrySnapshot = readTranscriptSnapshot(transcriptPath, { includeContentHash: true });
           range = getLineRangeInfo(
             agentId,
             transcriptPath,
@@ -250,25 +284,14 @@ async function main() {
           if (!range) return;
           targetWindow = findTriggeredTurnWindow(retrySnapshot, triggerEndLine);
           if (targetWindow.status === 'complete') break;
-          if (targetWindow.reason === 'stop-at-eof') {
-            const candidateKey = [
-              targetWindow.startLine,
-              targetWindow.stopLine,
-              targetWindow.endLine,
-              retrySnapshot.contentHash,
-            ].join(':');
-            if (candidateKey === previousEofCandidateKey) {
-              targetWindow = {
-                ...targetWindow,
-                status: 'complete',
-                reason: 'stable-stop-eof',
-              };
-              break;
-            }
-            previousEofCandidateKey = candidateKey;
-          } else {
-            previousEofCandidateKey = null;
-          }
+          const stability = assessStableEofCandidate(
+            previousEofCandidateKey,
+            targetWindow,
+            retrySnapshot,
+          );
+          previousEofCandidateKey = stability.candidateKey;
+          targetWindow = stability.targetWindow;
+          if (targetWindow.status === 'complete') break;
           if (poll + 1 < maxBoundaryPolls) {
             await new Promise(r => setTimeout(r, boundaryPollIntervalMs));
           }
@@ -306,7 +329,7 @@ async function main() {
         if (!range) return;
       }
 
-      await processTranscript(
+      const committed = await processTranscript(
         agentId, logPrefix, transcriptPath, sessionId,
         targetWindow?.startLine ?? range.startLine,
         targetWindow?.endLine ?? range.endLine,
@@ -318,8 +341,12 @@ async function main() {
           snapshot: retrySnapshot,
         },
       );
+      if (committed === false) {
+        logDebug(agentId, `Retry commit failed; rescheduling ${transcriptPath}`);
+        spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine);
+      }
     } finally {
-      if (agentId === 'qoder-cn') releaseRetryLock(transcriptPath);
+      releaseRetryLock(transcriptPath);
     }
     return;
   }
@@ -349,7 +376,38 @@ async function main() {
   const parsed = snapshot.rows.slice(startLine, endLine).filter(Boolean);
   logDebug(agentId, `Read ${parsed.length} lines (range: ${startLine}-${endLine})`);
   if (!parsed.length) {
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
+    if (!tryAcquireRetryLock(transcriptPath, sessionId)) {
+      logDebug(agentId, `Empty range deferred: transcript lock held for ${transcriptPath}`);
+      return;
+    }
+    try {
+      const lockedSnapshot = readTranscriptSnapshot(transcriptPath);
+      const lockedRange = getLineRangeInfo(
+        agentId,
+        transcriptPath,
+        sessionId,
+        lockedSnapshot.lineCount,
+      );
+      if (lockedRange) {
+        const lockedRows = lockedSnapshot.rows
+          .slice(lockedRange.startLine, lockedRange.endLine)
+          .filter(Boolean);
+        if (lockedRows.length === 0) {
+          updateLineRecord(agentId, transcriptPath, sessionId, lockedRange.endLine);
+        } else {
+          spawnDelayedRetry(
+            agentId,
+            transcriptPath,
+            sessionId,
+            logPrefix,
+            cwd,
+            lockedRange.endLine,
+          );
+        }
+      }
+    } finally {
+      releaseRetryLock(transcriptPath);
+    }
     return;
   }
 
@@ -361,49 +419,47 @@ async function main() {
   const hasLastPrompt = parsed.some(p => p.type === 'last-prompt');
   if (parsed.length > 0 && !hasLastPrompt) {
     logDebug(agentId, `Transcript incomplete (${parsed.length} lines, no last-prompt marker). Spawning background retry in 5s.`);
-    if (agentId === 'qoder-cn') {
-      // qoder-cn: QoderCN fires Stop multiple times per turn. The retry's
-      // child-side lock serializes actual processing, but skipping needless
-      // spawn calls here keeps process churn down.
-      const lockPath = retryLockPath(transcriptPath);
-      const existing = readRetryLock(lockPath);
-      if (existing && !isRetryLockStale(existing)) {
-        logDebug(agentId, `Skip spawn: live retry lock held by pid ${existing.pid}`);
-      } else {
-        if (existing) { try { fs.unlinkSync(lockPath); } catch { /* ignore */ } }
-        spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine);
-      }
-    } else {
+    // Do not suppress a spawn just because a retry currently owns the lock:
+    // the new Stop may belong to a distinct queued Turn. The child waits, then
+    // re-reads the cursor and either commits that Turn or proves it is a duplicate.
+    spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine);
+    return;
+  }
+
+  // A complete normal-mode snapshot writes the same history/cursor state as a
+  // retry. If a retry is already committing, enqueue this exact Stop instead of
+  // blocking the foreground hook or dropping it.
+  if (!tryAcquireRetryLock(transcriptPath, sessionId)) {
+    logDebug(agentId, `Stop deferred: transcript lock held for ${transcriptPath}`);
+    spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine);
+    return;
+  }
+  try {
+    // Re-read both snapshot and cursor under the lock; the values inspected
+    // above are only a fast-path completion check and may already be stale.
+    const lockedSnapshot = readTranscriptSnapshot(transcriptPath);
+    const lockedRange = getLineRangeInfo(
+      agentId,
+      transcriptPath,
+      sessionId,
+      lockedSnapshot.lineCount,
+    );
+    if (!lockedRange) return;
+    const committed = await processTranscript(
+      agentId, logPrefix, transcriptPath, sessionId,
+      lockedRange.startLine, lockedRange.endLine,
+      runtimeConfig, cwd,
+      { rangeReason: lockedRange.reason, snapshot: lockedSnapshot },
+    );
+    if (committed === false) {
+      logDebug(agentId, `Stop commit failed; rescheduling ${transcriptPath}`);
       spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine);
     }
-    return;
+  } finally {
+    releaseRetryLock(transcriptPath);
   }
-
-  if (agentId === 'qoder-cn') {
-    if (!tryAcquireRetryLock(transcriptPath, sessionId)) {
-      logDebug(agentId, `Stop skipped: peer retry/handler holds lock for ${transcriptPath}`);
-      return;
-    }
-    try {
-      await processTranscript(
-        agentId, logPrefix, transcriptPath, sessionId, startLine, endLine,
-        runtimeConfig, cwd, { rangeReason: range.reason, snapshot },
-      );
-    } finally {
-      releaseRetryLock(transcriptPath);
-    }
-    return;
-  }
-
-  await processTranscript(
-    agentId, logPrefix, transcriptPath, sessionId, startLine, endLine,
-    runtimeConfig, cwd, { rangeReason: range.reason, snapshot },
-  );
 }
 
-// NOTE: Retry subprocess won't race with normal hook because non-interactive mode (--print)
-// only fires Stop once per session (process exits after hook returns). The offset check in
-// getLineRangeInfo prevents double-processing if another hook invocation somehow occurs.
 function spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine) {
   const nodebin = process.argv[0];
   const script = fileURLToPath(import.meta.url);
@@ -588,6 +644,7 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
     logDebug(agentId, `Appended ${rowsToAppend.length} rows`);
     updateLineRecord(agentId, transcriptPath, sessionId, endLine);
   }
+  return success;
 }
 
 export function selectTurnSegmentsForCollection(turnSegments, rangeReason, agentId) {
@@ -599,7 +656,7 @@ export function selectTurnSegmentsForCollection(turnSegments, rangeReason, agent
   return turnSegments;
 }
 
-export function readTranscriptSnapshot(transcriptPath) {
+export function readTranscriptSnapshot(transcriptPath, { includeContentHash = false } = {}) {
   try {
     if (!fs.existsSync(transcriptPath)) {
       return { lineCount: 0, rows: [], contentHash: '', reason: 'transcript-missing' };
@@ -615,11 +672,38 @@ export function readTranscriptSnapshot(transcriptPath) {
       if (!text) continue;
       try { rows[i] = JSON.parse(text); } catch { /* skip malformed line */ }
     }
-    const contentHash = crypto.createHash('sha1').update(content).digest('hex');
+    const contentHash = includeContentHash
+      ? crypto.createHash('sha1').update(content).digest('hex')
+      : '';
     return { lineCount, rows, contentHash, reason: 'ok' };
   } catch {
     return { lineCount: 0, rows: [], contentHash: '', reason: 'read-failed' };
   }
+}
+
+export function assessStableEofCandidate(previousKey, targetWindow, snapshot) {
+  if (targetWindow?.reason !== 'stop-at-eof' || !snapshot?.contentHash) {
+    return { candidateKey: null, targetWindow };
+  }
+
+  const candidateKey = [
+    targetWindow.startLine,
+    targetWindow.stopLine,
+    targetWindow.endLine,
+    snapshot.contentHash,
+  ].join(':');
+  if (candidateKey !== previousKey) {
+    return { candidateKey, targetWindow };
+  }
+
+  return {
+    candidateKey,
+    targetWindow: {
+      ...targetWindow,
+      status: 'complete',
+      reason: 'stable-stop-eof',
+    },
+  };
 }
 
 export function findIncrementalTurnEndLine(snapshot, startLine, scanEndLine) {
