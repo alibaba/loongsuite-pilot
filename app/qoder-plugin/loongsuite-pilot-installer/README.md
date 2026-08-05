@@ -93,7 +93,7 @@ ossutil cp -r -f vendor/node/ oss://taiye-test-sh/sensen-test/ --acl public-read
 
 zip 名取自 `.qoder-plugin/plugin.json` 的 name+version(如 `loongsuite-pilot-installer-0.3.0.zip`);默认排除 `vendor/node/` 与运行期落盘文件(`install.log`/`install.lock`/`install-args.sha256` 等)。
 
-zip 顶层含两个插件目录:`loongsuite-pilot-installer/` 与打包时**现场生成**的占位空插件 `__empty__/`(仅 `.qoder-plugin/plugin.json`,不入仓)。
+zip 顶层含 `loongsuite-pilot-installer/` 与打包时**现场生成**的空文件夹 `__empty__/`(仅一个空目录条目,不入仓)。
 
 ## 安装与验证
 

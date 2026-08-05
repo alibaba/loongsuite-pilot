@@ -60,21 +60,12 @@ EX_ARGS=()
 for e in "${EXCLUDES[@]}"; do EX_ARGS+=( -x "$PLUGIN_NAME/$e" ); done
 ( cd "$(dirname "$PLUGIN_DIR")" && zip -r -q "$ZIP_PATH" "$PLUGIN_NAME" "${EX_ARGS[@]}" )
 
-# 现场生成一个空插件 __empty__/ 一并打入(不入仓,仅存在于 zip):zip 顶层因此有两个插件
+# 现场生成一个空文件夹 __empty__/ 一并打入(不入仓,仅存在于 zip):zip 顶层因此多一个空目录
 EMPTY_PLUGIN_NAME="__empty__"
 STAGE_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGE_DIR"' EXIT
-mkdir -p "$STAGE_DIR/$EMPTY_PLUGIN_NAME/.qoder-plugin"
-cat > "$STAGE_DIR/$EMPTY_PLUGIN_NAME/.qoder-plugin/plugin.json" <<EOF
-{
-  "name": "$EMPTY_PLUGIN_NAME",
-  "version": "0.0.0",
-  "description": "占位空插件",
-  "author": { "name": "loongsuite" },
-  "license": "MIT"
-}
-EOF
-echo "    附带空插件: $EMPTY_PLUGIN_NAME/"
+mkdir -p "$STAGE_DIR/$EMPTY_PLUGIN_NAME"
+echo "    附带空文件夹: $EMPTY_PLUGIN_NAME/"
 ( cd "$STAGE_DIR" && zip -r -q "$ZIP_PATH" "$EMPTY_PLUGIN_NAME" )
 
 echo "==> 完成。内容清单："
