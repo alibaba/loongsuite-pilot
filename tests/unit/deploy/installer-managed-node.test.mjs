@@ -73,6 +73,21 @@ curl() {
 }
 wget() { return 127; }
 
+unzip() {
+  # CI runners may lack Info-ZIP tools; win fixtures are tar.gz archives in
+  # disguise, so the stub extracts with tar instead of a real unzip.
+  local file="" dest=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -d) dest="$2"; shift 2 ;;
+      -*) shift ;;
+      *) file="$1"; shift ;;
+    esac
+  done
+  [ -n "$dest" ] || return 2
+  tar -xzf "$file" -C "$dest"
+}
+
 uname() {
   case "$1" in
     -s) echo "$FAKE_OS" ;;
@@ -122,6 +137,16 @@ function runBashFail(body, opts = {}) {
   }
 }
 
+// shasum ships with macOS perl but Linux runners often only have sha256sum.
+function sha256File(file) {
+  for (const [cmd, args] of [['shasum', ['-a', '256']], ['sha256sum', []]]) {
+    try {
+      return execFileSync(cmd, [...args, file], { encoding: 'utf-8' }).split(/\s+/)[0];
+    } catch { /* try next */ }
+  }
+  throw new Error('neither shasum nor sha256sum available');
+}
+
 // Build a fake node dist tarball whose bin/node reports $version.
 function makeNodeTarball(ossDir, version, osName, arch) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'node-fixture-'));
@@ -133,7 +158,7 @@ function makeNodeTarball(ossDir, version, osName, arch) {
     chmodSync(bin, 0o755);
     const archive = `node-v${version}-${osName}-${arch}.tar.gz`;
     execFileSync('tar', ['-czf', path.join(ossDir, archive), '-C', tmp, `node-v${version}-${osName}-${arch}`]);
-    const sum = execFileSync('shasum', ['-a', '256', path.join(ossDir, archive)], { encoding: 'utf-8' }).split(/\s+/)[0];
+    const sum = sha256File(path.join(ossDir, archive));
     writeFileSync(path.join(ossDir, 'SHASUMS256.txt'), `${sum}  ${archive}\n`);
     return archive;
   } finally {
@@ -149,7 +174,7 @@ function makeModulesTarball(ossDir, osName, arch) {
     writeFileSync(path.join(modDir, 'index.js'), 'module.exports = 1;\n');
     const archive = `node-modules-${osName}-${arch}.tar.gz`;
     execFileSync('tar', ['-czf', path.join(ossDir, archive), '-C', tmp, 'node_modules']);
-    const sum = execFileSync('shasum', ['-a', '256', path.join(ossDir, archive)], { encoding: 'utf-8' }).split(/\s+/)[0];
+    const sum = sha256File(path.join(ossDir, archive));
     writeFileSync(path.join(ossDir, 'SHASUMS256.txt'), `${sum}  ${archive}\n`);
     return archive;
   } finally {
@@ -326,9 +351,13 @@ echo OK
   });
 });
 
-// Fake win zip fixture. layout: 'official' = node.exe at the archive root
-// (Node.js official distro layout), 'bin' = bin/node.exe, 'broken' = no binary.
-function makeNodeZipFixture(ossDir, layout) {
+// Fake win archive fixture, portable across CI runners (GitHub Linux runners
+// lack Info-ZIP `zip`/`unzip`). The archive is really a tar.gz named .zip;
+// the harness's unzip stub extracts it with tar, exercising the installer's
+// zip code path (command -v unzip, unzip -q ... -d ...) without real tooling.
+// layout: 'official' = node.exe at the archive root (Node.js official distro
+// layout), 'bin' = bin/node.exe, 'broken' = no binary.
+function makeNodeWinArchiveFixture(ossDir, layout) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'node-zip-fixture-'));
   try {
     const dirName = 'node-v9.9.9-win-x64';
@@ -348,8 +377,8 @@ function makeNodeZipFixture(ossDir, layout) {
       writeFileSync(path.join(tmp, dirName, 'README.txt'), 'no node binary here\n');
     }
     const archive = 'node-v9.9.9-win-x64.zip';
-    execFileSync('zip', ['-qr', path.join(ossDir, archive), dirName], { cwd: tmp });
-    const sum = execFileSync('shasum', ['-a', '256', path.join(ossDir, archive)], { encoding: 'utf-8' }).split(/\s+/)[0];
+    execFileSync('tar', ['-czf', path.join(ossDir, archive), '-C', tmp, dirName]);
+    const sum = sha256File(path.join(ossDir, archive));
     writeFileSync(path.join(ossDir, 'SHASUMS256.txt'), `${sum}  ${archive}\n`);
     return archive;
   } finally {
@@ -358,6 +387,68 @@ function makeNodeZipFixture(ossDir, layout) {
 }
 
 const WIN_ENV = { env: { FAKE_OS: 'MINGW64_NT-10.0', FAKE_ARCH: 'x86_64' } };
+
+describe('managed_node_bin layout resolution', () => {
+  it('resolves the official win layout (node.exe at the root)', () => {
+    const body = `
+dir="$DATA_DIR/fake-node-dir"
+mkdir -p "$dir"
+printf '#!/bin/sh\\necho "v9.9.9"\\n' > "$dir/node.exe"
+chmod +x "$dir/node.exe"
+managed_node_bin "$dir" win
+`;
+    const { out } = runBash(body, WIN_ENV);
+    expect(out.trim().endsWith('/fake-node-dir/node.exe')).toBe(true);
+    expect(out.trim()).not.toContain('/bin/');
+  });
+
+  it('resolves the bin layout on win', () => {
+    const body = `
+dir="$DATA_DIR/fake-node-dir"
+mkdir -p "$dir/bin"
+printf '#!/bin/sh\\necho "v9.9.9"\\n' > "$dir/bin/node.exe"
+chmod +x "$dir/bin/node.exe"
+managed_node_bin "$dir" win
+`;
+    const { out } = runBash(body, WIN_ENV);
+    expect(out.trim().endsWith(path.posix.join('bin', 'node.exe'))).toBe(true);
+  });
+
+  it('prefers bin/node.exe when both layouts exist', () => {
+    const body = `
+dir="$DATA_DIR/fake-node-dir"
+mkdir -p "$dir/bin"
+printf '#!/bin/sh\\necho "v9.9.9"\\n' > "$dir/bin/node.exe"
+printf '#!/bin/sh\\necho "v9.9.9"\\n' > "$dir/node.exe"
+chmod +x "$dir/bin/node.exe" "$dir/node.exe"
+managed_node_bin "$dir" win
+`;
+    const { out } = runBash(body, WIN_ENV);
+    expect(out.trim().endsWith(path.posix.join('bin', 'node.exe'))).toBe(true);
+  });
+
+  it('resolves bin/node for non-win and never the root fallback', () => {
+    const body = `
+dir="$DATA_DIR/fake-node-dir"
+mkdir -p "$dir/bin"
+printf '#!/bin/sh\\necho "v9.9.9"\\n' > "$dir/bin/node"
+printf '#!/bin/sh\\necho "v9.9.9"\\n' > "$dir/node.exe"
+chmod +x "$dir/bin/node" "$dir/node.exe"
+managed_node_bin "$dir" darwin
+`;
+    const { out } = runBash(body);
+    expect(out.trim().endsWith(path.posix.join('bin', 'node'))).toBe(true);
+  });
+
+  it('returns non-zero when no usable binary exists', () => {
+    const res = runBashFail(`
+dir="$DATA_DIR/fake-node-dir"
+mkdir -p "$dir"
+managed_node_bin "$dir" win
+`, WIN_ENV);
+    expect(res.failed).toBe(true);
+  });
+});
 
 describe('ensure_managed_node win layouts', () => {
   it('accepts the official Node.js win zip layout (node.exe at the root)', () => {
@@ -369,7 +460,7 @@ echo "PATH=$out"
 `;
     const { out } = runBash(body, {
       ...WIN_ENV,
-      fixture: (oss) => makeNodeZipFixture(oss, 'official'),
+      fixture: (oss) => makeNodeWinArchiveFixture(oss, 'official'),
     });
     expect(out).toContain(path.posix.join('runtime', 'node-v9.9.9-win-x64', 'node.exe'));
     expect(out).not.toContain(path.posix.join('bin', 'node.exe'));
@@ -383,7 +474,7 @@ echo "PATH=$out"
 `;
     const { out } = runBash(body, {
       ...WIN_ENV,
-      fixture: (oss) => makeNodeZipFixture(oss, 'bin'),
+      fixture: (oss) => makeNodeWinArchiveFixture(oss, 'bin'),
     });
     expect(out).toContain(path.posix.join('runtime', 'node-v9.9.9-win-x64', 'bin', 'node.exe'));
   });
@@ -396,7 +487,7 @@ echo OK
 `;
     const { out } = runBash(body, {
       ...WIN_ENV,
-      fixture: (oss) => makeNodeZipFixture(oss, 'broken'),
+      fixture: (oss) => makeNodeWinArchiveFixture(oss, 'broken'),
     });
     expect(out.trim()).toBe('OK');
   });
