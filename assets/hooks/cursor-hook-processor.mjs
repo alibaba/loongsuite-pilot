@@ -181,6 +181,7 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
       'gen_ai.tool.call.id': toolCallId,
       'gen_ai.tool.call.arguments': { path: skill.skillPath },
       'gen_ai.skill.name': skill.skillName,
+      'gen_ai.skill.id': skill.skillId || skill.skillName,
       'agent.cursor.skill_detection_source':
         skill.detectionSource || 'transcript_post_assembly',
     }, runtimeConfig));
@@ -195,6 +196,7 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
       'gen_ai.tool.name': 'Read',
       'gen_ai.tool.call.id': toolCallId,
       'gen_ai.skill.name': skill.skillName,
+      'gen_ai.skill.id': skill.skillId || skill.skillName,
       'agent.cursor.skill_detection_source':
         skill.detectionSource || 'transcript_post_assembly',
     }, runtimeConfig));
@@ -207,16 +209,19 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
 function filterSkillsForReadInjection(skills, assembledFromTranscript) {
   return skills.filter(skill => {
     const sources = skill.detectionSources || [];
+    const hasExplicitUsageSignal = sources.includes('manual_attachment') ||
+      sources.includes('agent_skill');
 
     if (!assembledFromTranscript) {
-      return sources.includes('manual_attachment') ||
+      return hasExplicitUsageSignal ||
         sources.includes('transcript_read');
     }
 
     // The transcript assembler already materializes real Read tool_use entries.
-    // Only synthesize a Read when manual attachment is the sole evidence. A skill
-    // with both sources already has its real transcript Read in the assembled step.
-    return sources.includes('manual_attachment') &&
+    // Only synthesize a Read when an explicit user-row signal has no matching
+    // transcript Read. A skill with both sources already has its real Read in the
+    // assembled step.
+    return hasExplicitUsageSignal &&
       !sources.includes('transcript_read');
   });
 }
