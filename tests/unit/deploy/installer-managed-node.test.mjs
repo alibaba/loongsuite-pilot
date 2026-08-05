@@ -325,3 +325,79 @@ echo OK
     expect(out.trim()).toBe('OK');
   });
 });
+
+// Fake win zip fixture. layout: 'official' = node.exe at the archive root
+// (Node.js official distro layout), 'bin' = bin/node.exe, 'broken' = no binary.
+function makeNodeZipFixture(ossDir, layout) {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'node-zip-fixture-'));
+  try {
+    const dirName = 'node-v9.9.9-win-x64';
+    if (layout === 'official') {
+      mkdirSync(path.join(tmp, dirName), { recursive: true });
+      const bin = path.join(tmp, dirName, 'node.exe');
+      writeFileSync(bin, '#!/bin/sh\necho "v9.9.9"\n');
+      chmodSync(bin, 0o755);
+    } else if (layout === 'bin') {
+      const binDir = path.join(tmp, dirName, 'bin');
+      mkdirSync(binDir, { recursive: true });
+      const bin = path.join(binDir, 'node.exe');
+      writeFileSync(bin, '#!/bin/sh\necho "v9.9.9"\n');
+      chmodSync(bin, 0o755);
+    } else {
+      mkdirSync(path.join(tmp, dirName), { recursive: true });
+      writeFileSync(path.join(tmp, dirName, 'README.txt'), 'no node binary here\n');
+    }
+    const archive = 'node-v9.9.9-win-x64.zip';
+    execFileSync('zip', ['-qr', path.join(ossDir, archive), dirName], { cwd: tmp });
+    const sum = execFileSync('shasum', ['-a', '256', path.join(ossDir, archive)], { encoding: 'utf-8' }).split(/\s+/)[0];
+    writeFileSync(path.join(ossDir, 'SHASUMS256.txt'), `${sum}  ${archive}\n`);
+    return archive;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+const WIN_ENV = { env: { FAKE_OS: 'MINGW64_NT-10.0', FAKE_ARCH: 'x86_64' } };
+
+describe('ensure_managed_node win layouts', () => {
+  it('accepts the official Node.js win zip layout (node.exe at the root)', () => {
+    const body = `
+out=$(ensure_managed_node) || { echo "ENSURE_FAILED"; exit 1; }
+echo "PATH=$out"
+[ -x "$out" ] || { echo "NOT_EXECUTABLE"; exit 1; }
+"$out" --version
+`;
+    const { out } = runBash(body, {
+      ...WIN_ENV,
+      fixture: (oss) => makeNodeZipFixture(oss, 'official'),
+    });
+    expect(out).toContain(path.posix.join('runtime', 'node-v9.9.9-win-x64', 'node.exe'));
+    expect(out).not.toContain(path.posix.join('bin', 'node.exe'));
+    expect(out).toContain('v9.9.9');
+  });
+
+  it('prefers the bin layout when bin/node.exe is present', () => {
+    const body = `
+out=$(ensure_managed_node) || { echo "ENSURE_FAILED"; exit 1; }
+echo "PATH=$out"
+`;
+    const { out } = runBash(body, {
+      ...WIN_ENV,
+      fixture: (oss) => makeNodeZipFixture(oss, 'bin'),
+    });
+    expect(out).toContain(path.posix.join('runtime', 'node-v9.9.9-win-x64', 'bin', 'node.exe'));
+  });
+
+  it('aborts on a layout without any node binary and leaves no residue', () => {
+    const body = `
+if ensure_managed_node >/dev/null 2>&1; then echo "SHOULD_HAVE_FAILED"; exit 1; fi
+[ -e "$DATA_DIR/runtime/node-v9.9.9-win-x64" ] && { echo "LEFT_RESIDUE"; exit 1; }
+echo OK
+`;
+    const { out } = runBash(body, {
+      ...WIN_ENV,
+      fixture: (oss) => makeNodeZipFixture(oss, 'broken'),
+    });
+    expect(out.trim()).toBe('OK');
+  });
+});

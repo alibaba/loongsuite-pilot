@@ -585,6 +585,47 @@ describe('MetricsCollector', () => {
       expect(healed).toContain(path.join('node-v24.1.0-test-arm64', 'bin'));
     });
 
+    it('supports the official win zip layout (node.exe at the runtime dir root)', () => {
+      const platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      try {
+        const runtimeDir = path.join(tmpDir, 'runtime', 'node-v22.22.2-win-x64');
+        fs.mkdirSync(runtimeDir, { recursive: true });
+        const rootNode = path.join(runtimeDir, 'node.exe');
+        fs.writeFileSync(rootNode, '#!/bin/sh\necho "v22.22.2"\n');
+        fs.chmodSync(rootNode, 0o755);
+        fs.writeFileSync(path.join(tmpDir, 'node-bin'), '/nonexistent/node');
+
+        const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+        expect(col.collectL1(buildSnapshot()).node_bin_valid).toBe('true');
+
+        const healed = fs.readFileSync(path.join(tmpDir, 'node-bin'), 'utf-8').trim();
+        expect(fs.realpathSync(healed)).toBe(fs.realpathSync(rootNode));
+      } finally {
+        platformSpy.mockRestore();
+      }
+    });
+
+    it('prefers bin/node.exe over the official root layout on win', () => {
+      const platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      try {
+        const runtimeDir = path.join(tmpDir, 'runtime', 'node-v22.22.2-win-x64');
+        fs.mkdirSync(path.join(runtimeDir, 'bin'), { recursive: true });
+        for (const p of [path.join(runtimeDir, 'bin', 'node.exe'), path.join(runtimeDir, 'node.exe')]) {
+          fs.writeFileSync(p, '#!/bin/sh\necho "v22.22.2"\n');
+          fs.chmodSync(p, 0o755);
+        }
+        fs.writeFileSync(path.join(tmpDir, 'node-bin'), '/nonexistent/node');
+
+        const col = new MetricsCollector({ version: '1.0.0', userId: 'test-user', dataDir: tmpDir });
+        col.collectL1(buildSnapshot());
+
+        const healed = fs.readFileSync(path.join(tmpDir, 'node-bin'), 'utf-8').trim();
+        expect(healed).toBe(fs.realpathSync(path.join(runtimeDir, 'bin', 'node.exe')));
+      } finally {
+        platformSpy.mockRestore();
+      }
+    });
+
     it('reports diagnostic when self-heal fails (no usable node found)', () => {
       const stalePath = '/nonexistent/nvm/v16/bin/node';
       fs.writeFileSync(path.join(tmpDir, 'node-bin'), stalePath);

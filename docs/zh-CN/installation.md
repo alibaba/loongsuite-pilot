@@ -119,6 +119,8 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
         └── bin/node               # 托管运行时；daemon 与各 hook 的 fallback 首位
 ```
 
+Windows 兼容两种产物布局：`bin\node.exe` 与官方 zip 的根目录 `node.exe`（优先前者）。
+
 运行期自愈：`node-bin` 指向的路径失效时，collector 的自愈逻辑会优先重指 `runtime/` 下的托管 node（永不被 node 版本管理器删除）；各 hook 脚本的只读 fallback 也把托管 runtime 路径放在第一位。
 
 环境变量覆盖（调试/内网镜像用）：

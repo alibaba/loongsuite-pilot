@@ -550,6 +550,10 @@ function findNodeCandidate(dataDir?: string): string | null {
       const binName = process.platform === 'win32' ? 'node.exe' : 'node';
       for (const e of entries) {
         candidates.push(path.join(runtimeDir, e, 'bin', binName));
+        // Official Node.js win zip layout: node.exe at the archive root.
+        if (process.platform === 'win32') {
+          candidates.push(path.join(runtimeDir, e, binName));
+        }
       }
     } catch { /* runtime dir not installed */ }
   }

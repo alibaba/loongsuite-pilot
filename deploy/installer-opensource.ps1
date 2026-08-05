@@ -290,15 +290,25 @@ function Test-ManagedNodeChecksum {
     }
 }
 
+function Resolve-ManagedNodeBin {
+    param([string]$NodeDir)
+    # Prefer the bin/ layout; official Node.js win zips put node.exe at the root.
+    $binLayout = Join-Path $NodeDir "bin\node.exe"
+    if (Test-Path $binLayout) { return $binLayout }
+    $officialLayout = Join-Path $NodeDir "node.exe"
+    if (Test-Path $officialLayout) { return $officialLayout }
+    return $null
+}
+
 function Ensure-ManagedNode {
     $platform = Get-ManagedNodePlatform
     if (-not $platform) { return $null }
     $runtimeDir = Join-Path $DataDir "runtime"
     $archive = "node-v$($script:NODE_VERSION)-$($platform.Os)-$($platform.Arch).zip"
     $nodeDir = Join-Path $runtimeDir "node-v$($script:NODE_VERSION)-$($platform.Os)-$($platform.Arch)"
-    $nodeBin = Join-Path $nodeDir "bin\node.exe"
+    $nodeBin = Resolve-ManagedNodeBin $nodeDir
 
-    if (Test-Path $nodeBin) {
+    if ($nodeBin) {
         try {
             $v = (& $nodeBin --version 2>$null)
             if ($v -eq "v$($script:NODE_VERSION)") { return $nodeBin }
@@ -319,12 +329,15 @@ function Ensure-ManagedNode {
         if (Test-Path $nodeDir) { Remove-Item $nodeDir -Recurse -Force }
         if (-not (Test-Path $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
         Expand-Archive -Path $archivePath -DestinationPath $runtimeDir -Force
-        if (-not (Test-Path $nodeBin)) {
-            Msg "    ❌ 解压后未找到 $nodeBin" "    ❌ $nodeBin not found after extraction"
+        $nodeBin = Resolve-ManagedNodeBin $nodeDir
+        if (-not $nodeBin) {
+            Msg "    ❌ 解压产物中未找到 node.exe（bin\ 或根目录布局）" "    ❌ No node.exe found in extracted archive (bin\ or root layout)"
+            Remove-Item $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
             return $null
         }
         return $nodeBin
     } catch {
+        Remove-Item $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
         return $null
     } finally {
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue

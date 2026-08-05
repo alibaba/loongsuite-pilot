@@ -55,6 +55,12 @@ describe('sh installer variants wire the managed node runtime', () => {
       expect(noticePos).toBeGreaterThan(-1);
       expect(npmPos).toBeGreaterThan(noticePos);
     });
+    it.skipIf(!present)(`${f} supports both win layouts and cleans up failed extractions`, () => {
+      const blk = sh.slice(sh.indexOf('# >>> managed-node-runtime >>>'), sh.indexOf('# <<< managed-node-runtime <<<'));
+      expect(blk).toMatch(/managed_node_bin\(\)\s*\{/);
+      expect(blk).toContain('"$1/node.exe"');
+      expect(blk.split('rm -rf "$node_dir"').length - 1).toBeGreaterThanOrEqual(2);
+    });
   }
 });
 
@@ -93,6 +99,12 @@ describe('ps1 installer variants wire the managed node runtime', () => {
       expect(noticePos).toBeGreaterThan(-1);
       expect(npmPos).toBeGreaterThan(noticePos);
     });
+    it.skipIf(!present)(`${f} supports both win layouts and cleans up failed extractions`, () => {
+      expect(ps1).toMatch(/function Resolve-ManagedNodeBin\s*\{/);
+      expect(ps1).toContain('Join-Path $NodeDir "node.exe"');
+      const ensure = ps1.slice(ps1.indexOf('function Ensure-ManagedNode'), ps1.indexOf('function Ensure-NodeModules'));
+      expect(ensure.split('Remove-Item $nodeDir').length - 1).toBeGreaterThanOrEqual(3);
+    });
   }
 });
 
@@ -116,5 +128,6 @@ describe('hook fallbacks prefer the managed runtime node', () => {
     expect(runtimePos).toBeGreaterThan(-1);
     expect(voltaPos).toBeGreaterThan(runtimePos);
     expect(resolveFn).toContain('bin\\node.exe');
+    expect(resolveFn.split('Join-Path $d.FullName "node.exe"').length - 1).toBeGreaterThanOrEqual(2);
   });
 });

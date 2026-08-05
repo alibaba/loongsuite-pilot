@@ -25,7 +25,11 @@ function Resolve-NodeBin {
     $runtimeDir = Join-Path (Split-Path $pinFile) "runtime"
     if (Test-Path $runtimeDir) {
         $runtimeDirs = Get-ChildItem $runtimeDir -Directory -Filter "node-v*" -ErrorAction SilentlyContinue | Sort-Object Name -Descending
-        foreach ($d in $runtimeDirs) { $candidates += Join-Path $d.FullName "bin\node.exe" }
+        foreach ($d in $runtimeDirs) {
+            $candidates += Join-Path $d.FullName "bin\node.exe"
+            # Official Node.js win zip layout: node.exe at the root.
+            $candidates += Join-Path $d.FullName "node.exe"
+        }
     }
     $nvmHome = $env:NVM_HOME
     if ($nvmHome -and (Test-Path $nvmHome)) {

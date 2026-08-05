@@ -348,6 +348,22 @@ managed_node_verify() {
     return 0
 }
 
+managed_node_bin() {
+    # managed_node_bin <node-dir> <os>
+    # Prefer the bin/ layout; official Node.js win zips put node.exe at the root.
+    local bin="$1/bin/node"
+    [ "$2" = "win" ] && bin="$1/bin/node.exe"
+    if [ -x "$bin" ]; then
+        echo "$bin"
+        return 0
+    fi
+    if [ "$2" = "win" ] && [ -x "$1/node.exe" ]; then
+        echo "$1/node.exe"
+        return 0
+    fi
+    return 1
+}
+
 ensure_managed_node() {
     local runtime_dir="$DATA_DIR/runtime"
     local tuple os arch
@@ -358,10 +374,10 @@ ensure_managed_node() {
     [ "$os" = "win" ] && ext="zip"
     local archive="node-v${NODE_VERSION}-${os}-${arch}.${ext}"
     local node_dir="$runtime_dir/node-v${NODE_VERSION}-${os}-${arch}"
-    local node_bin="$node_dir/bin/node"
-    [ "$os" = "win" ] && node_bin="$node_dir/bin/node.exe"
+    local node_bin=""
+    node_bin=$(managed_node_bin "$node_dir" "$os") || node_bin=""
 
-    if [ -x "$node_bin" ] && [ "$("$node_bin" --version 2>/dev/null)" = "v${NODE_VERSION}" ]; then
+    if [ -n "$node_bin" ] && [ "$("$node_bin" --version 2>/dev/null)" = "v${NODE_VERSION}" ]; then
         echo "$node_bin"
         return 0
     fi
@@ -395,8 +411,10 @@ ensure_managed_node() {
     fi
     rm -rf "$tmp"
 
-    if [ ! -x "$node_bin" ]; then
-        echo "managed node: extracted binary not found at $node_bin" >&2
+    node_bin=$(managed_node_bin "$node_dir" "$os") || node_bin=""
+    if [ -z "$node_bin" ]; then
+        echo "managed node: extracted archive has no usable node binary under $node_dir (bin/node or node.exe)" >&2
+        rm -rf "$node_dir"
         return 1
     fi
     if [ "$os" = "darwin" ] && command -v xattr >/dev/null 2>&1; then
