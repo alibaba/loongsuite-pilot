@@ -60,7 +60,3 @@ installer 对 `config.json` 是**合并语义**（未传的参数保留旧值）
 - 插件本体：`~/.qoder/plugins/cache/local/loongsuite-pilot-installer/<版本>/`
 
 > 插件缓存**按版本号复用**：改了代码但版本号不变时 `plugins install` 不会刷新缓存，开发期验证请先 `plugins uninstall` 或递增 `version`。
-
----
-
-维护者（Node 分发打包、插件 zip 打包、内部实现机制、平台验证边界等）见 [../tools/README.md](../tools/README.md)。
