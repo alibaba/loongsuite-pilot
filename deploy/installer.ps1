@@ -140,6 +140,28 @@ function Msg {
 }
 
 # ============================================================
+# Interactive-terminal detection
+# ============================================================
+# [Environment]::UserInteractive 单独判断不可靠:在 SessionStart hook / detached 后台进程里
+# 它仍为 $true,且普通 powershell.exe 宿主的 $Host.UI.RawUI 即便 stdin 被重定向也非 null。
+# 于是 Read-Host 会读到 $null(stdin 为空/EOF),后续 .Trim() 抛 InvokeMethodOnNull;确认覆盖
+# 处则把 $null 当成"否"而静默取消重装。故改为:必须是交互用户 且 stdin、stdout 都未被重定向
+# 才算可交互。插件侧 ensure-pilot 用 `*>> $LogFile` 运行本安装器 → stdout 被重定向 →
+# 判为非交互(即使 detach 出的隐藏窗口仍带控制台,只判 stdin 会在 Read-Host 上卡死)。
+# 受限语言模式(ConstrainedLanguage)下这些 .NET 静态调用会抛错 → catch → 判为非交互,
+# 正是锁定/无人值守环境的安全默认。
+function Test-Interactive {
+    try {
+        if (-not [Environment]::UserInteractive) { return $false }
+        if ([Console]::IsInputRedirected) { return $false }
+        if ([Console]::IsOutputRedirected) { return $false }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# ============================================================
 # Node.js resolution
 # ============================================================
 function Test-NodeSuitable {
@@ -272,13 +294,35 @@ function Download-AndExtract {
 
     Msg "==> 解压安装包..." "==> Extracting..."
 
-    # Try tar (available on Windows 10+)
+    # Windows 自带 bsdtar(%SystemRoot%\System32\tar.exe,Win10 1803+/Server2019+),能正确解析
+    # C:\ 这类带盘符路径。但裸 `tar` 在装了 Git 的机器上常解析到 Git 附带的 GNU tar(MSYS),
+    # GNU tar 会把 `-f C:\...\package.tar.gz` 里的冒号当成 rsh 远程主机(host:path 语法),转而
+    # 尝试连接名为 "C" 的主机 —— 直接卡死。故:① 优先用 System32 的 bsdtar;② 兜底用 PATH 上的
+    # tar 时补 --force-local(GNU tar 专用,强制把冒号按本地文件解释;bsdtar 不认此参数会立即报错
+    # 退出、不会卡死,从而落到 7-Zip 兜底)。始终检查 $LASTEXITCODE 并保留 tar 输出,避免"失败却
+    # 当成功"后只报笼统的 package.json 缺失。
     $extracted = $false
-    if (Get-Command tar -ErrorAction SilentlyContinue) {
-        try {
-            & tar -xzf $archivePath -C $tmpDir 2>$null
-            $extracted = $true
-        } catch {}
+    $lastTarErr = ""
+
+    $tarAttempts = @()
+    $sysTar = Join-Path $env:SystemRoot "System32\tar.exe"
+    if (Test-Path $sysTar) {
+        $tarAttempts += , @($sysTar, @('-xzf', $archivePath, '-C', $tmpDir))
+    }
+    $pathTar = Get-Command tar -ErrorAction SilentlyContinue
+    if ($pathTar -and $pathTar.Source -ne $sysTar) {
+        # PATH 上的 tar 可能是 Git 的 GNU tar,补 --force-local 防冒号卡死
+        $tarAttempts += , @($pathTar.Source, @('--force-local', '-xzf', $archivePath, '-C', $tmpDir))
+    }
+
+    foreach ($attempt in $tarAttempts) {
+        $tarExe = $attempt[0]; $tarArgs = $attempt[1]
+        Msg "    tar: $tarExe" "    tar: $tarExe"
+        $tarOut = & $tarExe @tarArgs 2>&1
+        if ($LASTEXITCODE -eq 0) { $extracted = $true; break }
+        $lastTarErr = "$tarExe (exit $LASTEXITCODE): $(($tarOut | Out-String).Trim())"
+        Msg "    ⚠️  tar 解包失败,尝试下一种方式: $lastTarErr" `
+            "    ⚠️  tar failed, trying next method: $lastTarErr"
     }
 
     if (-not $extracted) {
@@ -297,6 +341,7 @@ function Download-AndExtract {
 
     if (-not $extracted) {
         Msg "❌ 无法解压: 需要 tar (Windows 10+) 或 7-Zip" "❌ Cannot extract: requires tar (Windows 10+) or 7-Zip"
+        if ($lastTarErr) { Msg "   最后一次 tar 错误: $lastTarErr" "   Last tar error: $lastTarErr" }
         exit 1
     }
 
@@ -362,10 +407,8 @@ function Select-Agents {
     $ErrorActionPreference = $prevEAP
     if (-not $agentCount -or $agentCount -eq "0") { return }
 
-    # Non-interactive detection
-    $isInteractive = $false
-    try { $isInteractive = [Environment]::UserInteractive -and $Host.UI.RawUI -ne $null } catch { $isInteractive = $false }
-    if (-not $isInteractive) {
+    # Non-interactive detection (hook/detached/重定向 stdin,stdout → 自动选已检测到的)
+    if (-not (Test-Interactive)) {
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
         $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
 const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
@@ -404,7 +447,8 @@ if (lang === 'zh') {
 '@ $LANG_MODE
     $ErrorActionPreference = $prevEAP
 
-    $selectInput = (Read-Host "    >").Trim() -replace '[，、；]', ','
+    # [string] 兜底:Read-Host 在 stdin EOF 时返回 $null,直接 .Trim() 会抛 InvokeMethodOnNull
+    $selectInput = ([string](Read-Host "    >")).Trim() -replace '[，、；]', ','
 
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
@@ -434,9 +478,7 @@ process.stdout.write(ids.join(','));
 # ============================================================
 function Prompt-UserId {
     if ($UserId) { return }
-    $isInteractive = $false
-    try { $isInteractive = [Environment]::UserInteractive -and $Host.UI.RawUI -ne $null } catch { $isInteractive = $false }
-    if (-not $isInteractive) { return }
+    if (-not (Test-Interactive)) { return }
 
     $configFile = Join-Path $DataDir "config.json"
     $existingUid = ""
@@ -458,7 +500,7 @@ try { const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf-8')); p
         Msg "    请输入你的 userId（用于数据归属，可直接回车跳过）:" `
             "    Enter your userId (for data attribution, press Enter to skip):"
     }
-    $input = (Read-Host "    >").Trim()
+    $input = ([string](Read-Host "    >")).Trim()
     if ($input) {
         $script:UserId = $input
     } elseif ($existingUid) {
@@ -515,9 +557,7 @@ for (const c of changed) { console.log(c.label + ': ' + c.oldVal + ' -> ' + c.ne
     Msg "⚠️  以下配置将被覆盖:" "⚠️  The following config will be overwritten:"
     $diffs | ForEach-Object { Write-Host "    $_" }
 
-    $isInteractive = $false
-    try { $isInteractive = [Environment]::UserInteractive -and $Host.UI.RawUI -ne $null } catch { $isInteractive = $false }
-    if ($isInteractive) {
+    if (Test-Interactive) {
         Write-Host ""
         Msg "    确认覆盖? (y/N):" "    Confirm overwrite? (y/N):"
         $answer = Read-Host "    >"
