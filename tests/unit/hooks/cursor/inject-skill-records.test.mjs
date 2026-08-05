@@ -59,6 +59,12 @@ describe('filterSkillsForReadInjection', () => {
     expect(filterSkillsForReadInjection(skills, true)).toEqual(skills);
   });
 
+  it('should synthesize standalone agent_skill usage after transcript assembly', () => {
+    const skills = [skillWithSources('agent_skill')];
+
+    expect(filterSkillsForReadInjection(skills, true)).toEqual(skills);
+  });
+
   it('should not synthesize transcript reads after transcript assembly', () => {
     const transcriptOnly = skillWithSources('transcript_read');
     const dualSource = skillWithSources('manual_attachment', 'transcript_read');
@@ -109,11 +115,13 @@ describe('injectSkillRecords', () => {
     expect(toolCall['gen_ai.tool.name']).toBe('Read');
     expect(toolCall['gen_ai.tool.call.arguments']).toEqual({ path: '/Users/test/.cursor/skills/my-skill/SKILL.md' });
     expect(toolCall['gen_ai.skill.name']).toBe('my-skill');
+    expect(toolCall['gen_ai.skill.id']).toBe('my-skill');
     expect(toolCall['agent.cursor.skill_detection_source']).toBe('transcript_post_assembly');
 
     expect(toolResult['event.name']).toBe('tool.result');
     expect(toolResult['gen_ai.tool.name']).toBe('Read');
     expect(toolResult['gen_ai.skill.name']).toBe('my-skill');
+    expect(toolResult['gen_ai.skill.id']).toBe('my-skill');
     expect(toolResult['agent.cursor.skill_detection_source']).toBe('transcript_post_assembly');
   });
 
@@ -296,12 +304,14 @@ describe('injectSkillRecords', () => {
         path: '/Users/test/.cursor/skills/count-if-statements/SKILL.md',
       },
       'gen_ai.skill.name': 'count-if-statements',
+      'gen_ai.skill.id': 'count-if-statements',
       'agent.cursor.skill_detection_source': 'manual_attachment',
     });
     expect(records[2]).toMatchObject({
       'event.name': 'tool.result',
       'gen_ai.tool.name': 'Read',
       'gen_ai.skill.name': 'count-if-statements',
+      'gen_ai.skill.id': 'count-if-statements',
       'agent.cursor.skill_detection_source': 'manual_attachment',
     });
   });
