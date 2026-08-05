@@ -1086,10 +1086,37 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
 }
 
 function finalizeRecords(records, cwd) {
+  markTurnBoundaries(records);
   for (const record of records) {
     if (cwd) record['agent.qoder.cwd'] = cwd;
     Object.assign(record, SPAN_ATTRIBUTES, RESOURCE_BASE_FIELD_PATCH, RESOURCE_ATTRIBUTE_FIELDS);
   }
+  return records;
+}
+
+/**
+ * Mark the turn's opening and closing event (qoder IDE only).
+ *
+ * The records of one turn arrive in emission order, so the first one is the
+ * user-input `other` event and the turn closes with its last `llm.response`.
+ * The event-log contract allows exactly one start and one end per turn, so the
+ * flags are only ever set to true and never stamped on the events in between.
+ */
+export function markTurnBoundaries(records) {
+  if (records.length === 0) return records;
+  if (records[0]['gen_ai.agent.type'] !== 'qoder') return records;
+
+  records[0]['gen_ai.turn.start'] = true;
+
+  let closing = records[records.length - 1];
+  for (let i = records.length - 1; i >= 0; i--) {
+    if (records[i]['event.name'] === 'llm.response') {
+      closing = records[i];
+      break;
+    }
+  }
+  closing['gen_ai.turn.end'] = true;
+
   return records;
 }
 
