@@ -309,7 +309,7 @@ span ID，不影响其他 Trace 数据采集。
 - Claude Code。
 - 主 Agent。
 - 通过环境变量传入的会话首轮上游上下文。
-- Claude Code `Bash` 工具调用。
+- Claude Code `Bash` 工具调用，包括设置 `run_in_background: true` 的后台命令。
 - W3C `TRACEPARENT`。
 - 可选的 `TRACESTATE`。
 
@@ -323,6 +323,20 @@ span ID，不影响其他 Trace 数据采集。
 - 恢复已有会话时注入一份新的环境变量上下文。
 - 仅通过 ACP per-turn 关联文件提供、但未出现在 Claude Code 进程环境中的
   下游上下文。
+
+## 已知限制
+
+Pilot 必须在下游进程启动前通过 `PreToolUse(Bash)` 注入上下文，因此 TOOL
+span ID 的预留早于工具执行结果。Claude Code 成功启动后台 Bash 后会立即
+产生包含后台任务 ID 的 `tool_result`，Pilot 可以正常生成与其配对的 TOOL
+span；后台进程是否已经运行结束不影响这次配对。
+
+如果 Claude Code 在写入工具结果和执行 Stop hook 之前被强制终止（例如进程
+被操作系统直接杀死或主机崩溃），下游进程可能已经收到上下文，但 Pilot 没有
+机会导出预留的 TOOL span。此时下游 span 会暂时引用一个后端不存在的父 span。
+预留状态会在 TTL 到期后被清理，但无法在 Claude Code 没有留下完整 transcript
+和 Stop 事件的情况下补建 TOOL span。正常完成、正常失败或能够写入
+`tool_result` 的中断不受此限制。
 
 ## 如何验证链路
 

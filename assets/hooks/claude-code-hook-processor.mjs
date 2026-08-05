@@ -300,11 +300,6 @@ function cmdPreToolUse() {
   // v1 policy: only propagate from the main agent's Bash calls.
   if (event.agent_id || event.agent_type) return;
   if (event.tool_name !== 'Bash') return;
-  // A background Bash produces no paired tool.result in this turn's Stop
-  // records, so its TOOL span is dropped by dropOrphanPairs and the reserved
-  // parent span id is never emitted. Skip propagation to avoid leaving the
-  // downstream process with a dangling (nonexistent) parent span.
-  if (event.tool_input?.run_in_background === true) return;
   const toolUseId = typeof event.tool_use_id === 'string' ? event.tool_use_id : '';
   if (!toolUseId) return;
 

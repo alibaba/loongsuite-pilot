@@ -287,19 +287,52 @@ describe('claude-code-hook-processor v2 端到端', () => {
     }, { TRACEPARENT: traceparent }).stdout.trim()).toBe('{}');
   });
 
-  test('PreToolUse 跳过后台 Bash（run_in_background）以避免下游悬挂父 span', () => {
+  test('PreToolUse 为后台 Bash 注入上下文，并复用即时 tool_result 的 TOOL span id', () => {
     enableToolPropagation();
     const traceparent = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
-    // 后台 Bash 的 tool.call 在本轮 Stop 记录中没有配对的 tool.result，
-    // 会被 dropOrphanPairs 丢弃、预留的 parent span 永不 emit，因此不得注入。
-    const out = runHook('pre-tool-use', {
+    const pre = runHook('pre-tool-use', {
       session_id: 's-bg',
       tool_name: 'Bash',
       tool_use_id: 'tu-bg',
       tool_input: { command: 'my-cli --serve', run_in_background: true },
     }, { TRACEPARENT: traceparent });
-    expect(out.status).toBe(0);
-    expect(out.stdout.trim()).toBe('{}');
+    expect(pre.status).toBe(0);
+
+    const hookOutput = JSON.parse(pre.stdout.trim());
+    const updated = hookOutput.hookSpecificOutput.updatedInput;
+    expect(updated.run_in_background).toBe(true);
+    const injected = /TRACEPARENT='00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})'/.exec(
+      updated.command,
+    );
+    expect(injected).not.toBeNull();
+    const reservedToolSpanId = injected[2];
+
+    // Claude Code returns a tool_result as soon as the background process is
+    // launched. The result contains the task id while the process keeps running.
+    const transcriptPath = writeTranscript('s-bg', [
+      { type: 'user', timestamp: '2026-06-04T02:57:32.000Z', message: { content: [{ type: 'text', text: 'start my cli in background' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:49.000Z', message: { id: 'msg-bg-1', content: [{ type: 'tool_use', id: 'tu-bg', name: 'Bash', input: { command: 'my-cli --serve', run_in_background: true } }], usage: { input_tokens: 100, output_tokens: 50 }, stop_reason: 'tool_use' } },
+      { type: 'user', timestamp: '2026-06-04T02:57:49.200Z', toolUseResult: { backgroundTaskId: 'bg-task-1' }, message: { content: [{ type: 'tool_result', tool_use_id: 'tu-bg', content: 'Command running in background with ID: bg-task-1' }] } },
+      { type: 'assistant', timestamp: '2026-06-04T02:57:52.000Z', message: { id: 'msg-bg-2', content: [{ type: 'text', text: 'background task started' }], usage: { input_tokens: 200, output_tokens: 20 }, stop_reason: 'end_turn' } },
+    ]);
+    const stop = runHook('stop', {
+      session_id: 's-bg',
+      stop_reason: 'end_turn',
+      transcript_path: transcriptPath,
+    }, { TRACEPARENT: traceparent });
+    expect(stop.status).toBe(0);
+
+    const records = readJsonlRecords();
+    const toolCall = records.find((r) =>
+      r['event.name'] === 'tool.call' && r['gen_ai.tool.call.id'] === 'tu-bg');
+    const toolResult = records.find((r) =>
+      r['event.name'] === 'tool.result' && r['gen_ai.tool.call.id'] === 'tu-bg');
+    expect(toolCall).toBeDefined();
+    expect(toolResult).toBeDefined();
+    expect(toolCall.span_id).toBe(reservedToolSpanId);
+    expect(toolResult.span_id).toBe(reservedToolSpanId);
+    expect(toolCall['gen_ai.tool.call.arguments']).toMatchObject({ run_in_background: true });
+    expect(toolResult['gen_ai.tool.call.result']).toContain('bg-task-1');
   });
 
   test('AgentTeams 环境变量会进入 hook record resourceAttributes', () => {
