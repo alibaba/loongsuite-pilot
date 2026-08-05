@@ -71,7 +71,7 @@ describe('extractAgentSkillsMetadata', () => {
     });
   });
 
-  it('should treat only standalone agent_skill elements as usage', () => {
+  it('should treat standalone agent_skill elements inside agent_skills as usage', () => {
     const pluginSkillPath =
       '/Users/test/.claude/plugins/cache/context-hub/utilities/431adcc76243/skills/ai-rag2/SKILL.md';
     const userText = [
@@ -83,6 +83,16 @@ describe('extractAgentSkillsMetadata', () => {
     expect(extractAgentSkillsMetadata(userText)).toEqual({
       availableSkills: [],
       usedSkills: [{ skillName: 'ai-rag2', skillPath: pluginSkillPath }],
+    });
+  });
+
+  it('should ignore agent_skill elements outside the agent_skills container', () => {
+    const userText =
+      '<agent_skill fullPath="/Users/test/.agents/skills/demo/SKILL.md">example</agent_skill>';
+
+    expect(extractAgentSkillsMetadata(userText)).toEqual({
+      availableSkills: [],
+      usedSkills: [],
     });
   });
 });
@@ -228,6 +238,57 @@ describe('detectSkillFromTranscript', () => {
       skillPath,
       detectionSource: 'agent_skill',
       detectionSources: ['agent_skill'],
+    }]);
+  });
+
+  it('should ignore an agent_skill example inside user_query', () => {
+    const lines = [
+      { role: 'user', message: { content: [{ type: 'text', text: [
+        '<user_query>',
+        'explain this example:',
+        '<agent_skills>',
+        '<agent_skill fullPath="/Users/test/.agents/skills/demo/SKILL.md">example</agent_skill>',
+        '</agent_skills>',
+        '</user_query>',
+      ].join('\n') }] } },
+      { type: 'turn_ended' },
+    ];
+
+    ({ dir: tempDir, filePath: transcriptPath } = createTempTranscript(lines));
+
+    expect(detectSkillFromTranscript(
+      transcriptPath,
+      'explain this example: example',
+    )).toBeNull();
+  });
+
+  it('should ignore an agent_skill example inside attached SKILL.md content', () => {
+    const attachedSkillPath = '/Users/test/.agents/skills/attached/SKILL.md';
+    const lines = [
+      { role: 'user', message: { content: [{ type: 'text', text: [
+        '<manually_attached_skills>',
+        'Skill Name: attached',
+        `Path: ${attachedSkillPath}`,
+        'SKILL.md content:',
+        '# Attached Skill',
+        '<agent_skills>',
+        '<agent_skill fullPath="/Users/test/.agents/skills/demo/SKILL.md">example</agent_skill>',
+        '</agent_skills>',
+        '</manually_attached_skills>',
+        '<user_query>',
+        'use attached',
+        '</user_query>',
+      ].join('\n') }] } },
+      { type: 'turn_ended' },
+    ];
+
+    ({ dir: tempDir, filePath: transcriptPath } = createTempTranscript(lines));
+
+    expect(detectSkillFromTranscript(transcriptPath, 'use attached')).toEqual([{
+      skillName: 'attached',
+      skillPath: attachedSkillPath,
+      detectionSource: 'manual_attachment',
+      detectionSources: ['manual_attachment'],
     }]);
   });
 

@@ -20,6 +20,12 @@ const MANUALLY_ATTACHED_SKILLS_RE =
 const ATTACHED_SKILL_HEADER_RE =
   /(?:^|\r?\n)Skill Name:\s*([^\r\n]+)\r?\nPath:\s*([^\r\n]+)\r?\nSKILL\.md content:\s*(?:\r?\n|$)/g;
 const USER_QUERY_RE = /<user_query>\s*([\s\S]*?)\s*<\/user_query>/i;
+const USER_QUERY_CONTAINER_RE =
+  /<user_query\b[^>]*>[\s\S]*?<\/user_query>/gi;
+const MANUALLY_ATTACHED_SKILLS_CONTAINER_RE =
+  /<manually_attached_skills\b[^>]*>[\s\S]*?<\/manually_attached_skills>/gi;
+const AGENT_SKILLS_CONTAINER_RE =
+  /<agent_skills\b[^>]*>([\s\S]*?)<\/agent_skills>/gi;
 const AVAILABLE_SKILLS_RE =
   /<available_skills\b[^>]*>([\s\S]*?)<\/available_skills>/gi;
 const AGENT_SKILL_RE =
@@ -88,7 +94,7 @@ export function detectSkillFromTranscript(transcriptPath, userPrompt) {
     addDetectedSkill(detected, skill, 'manual_attachment');
   }
 
-  // Cursor also emits an <agent_skills><available_skills> catalog. Parse it for
+  // Step 3: Cursor emits an <agent_skills><available_skills> catalog. Parse it for
   // compatibility, but only standalone <agent_skill> elements outside that
   // catalog are per-turn usage evidence.
   const agentSkills = extractAgentSkillsMetadata(matchedUserText);
@@ -170,18 +176,35 @@ export function extractAgentSkillsMetadata(userText) {
   if (!userText) return { availableSkills: [], usedSkills: [] };
 
   const availableSkills = [];
-  AVAILABLE_SKILLS_RE.lastIndex = 0;
-  const textWithoutCatalogs = userText.replace(
-    AVAILABLE_SKILLS_RE,
-    (_container, catalogBody) => {
-      availableSkills.push(...extractAgentSkillElements(catalogBody));
-      return '';
-    },
-  );
+  const usedSkills = [];
+
+  // Both containers below contain user-controlled text, including the full
+  // inlined SKILL.md body. Remove them before looking for Cursor metadata so an
+  // XML example cannot become a synthetic skill usage signal.
+  MANUALLY_ATTACHED_SKILLS_CONTAINER_RE.lastIndex = 0;
+  USER_QUERY_CONTAINER_RE.lastIndex = 0;
+  const metadataText = userText
+    .replace(MANUALLY_ATTACHED_SKILLS_CONTAINER_RE, '')
+    .replace(USER_QUERY_CONTAINER_RE, '');
+
+  // Only <agent_skill> elements inside Cursor's <agent_skills> metadata
+  // container are eligible. Catalog entries remain available-only metadata.
+  AGENT_SKILLS_CONTAINER_RE.lastIndex = 0;
+  for (const containerMatch of metadataText.matchAll(AGENT_SKILLS_CONTAINER_RE)) {
+    AVAILABLE_SKILLS_RE.lastIndex = 0;
+    const usageBody = containerMatch[1].replace(
+      AVAILABLE_SKILLS_RE,
+      (_container, catalogBody) => {
+        availableSkills.push(...extractAgentSkillElements(catalogBody));
+        return '';
+      },
+    );
+    usedSkills.push(...extractAgentSkillElements(usageBody));
+  }
 
   return {
     availableSkills,
-    usedSkills: extractAgentSkillElements(textWithoutCatalogs),
+    usedSkills,
   };
 }
 
