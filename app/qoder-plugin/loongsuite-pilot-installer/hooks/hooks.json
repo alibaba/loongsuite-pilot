@@ -14,7 +14,7 @@
           {
             "type": "command",
             "shell": "powershell",
-            "command": "powershell '${QODER_PLUGIN_ROOT}\\scripts\\ensure-pilot.ps1'",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${QODER_PLUGIN_ROOT}/scripts/ensure-pilot.ps1\"",
             "timeout": 900
           }
         ]

@@ -21,7 +21,7 @@ $PilotCmd = Join-Path $env:USERPROFILE '.local\bin\loongsuite-pilot.cmd'
 $PilotHome = Join-Path $env:USERPROFILE '.loongsuite-pilot'   # pilot 数据目录（默认），内含 pid 文件，用于判活
 
 # ---- 内置默认值（可被 config\install-params.conf 及环境变量覆盖） ----
-$InstallerUrl = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1'
+$InstallerUrl = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot-dev/installer.ps1'
 $NodeVersion = '22.22.2'
 $NodeDistBaseUrl = 'https://taiye-test-sh.oss-cn-shanghai.aliyuncs.com/sensen-test'
 $NodeMinMajor = 22
