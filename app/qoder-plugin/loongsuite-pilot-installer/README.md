@@ -65,11 +65,12 @@ https://taiye-test-sh.oss-cn-shanghai.aliyuncs.com/sensen-test/node-v22.22.2-<pl
 
 已上传的平台：`darwin-arm64`、`darwin-x64`、`linux-x64`、`linux-arm64`、`win-x64`（均为公读）。
 
-维护者刷新/换版本时，先拉取产物（含 sha256 校验，输出到 `vendor/node/`）：
+维护者刷新/换版本时，先拉取产物（含 sha256 校验，输出到本插件的 `vendor/node/`）。
+打包脚本是维护者工具、不随插件分发，位于同级的 `app/qoder-plugin/tools/`（在插件根目录执行）：
 
 ```bash
-./scripts/package-node-dists.sh             # 默认 22.22.2
-./scripts/package-node-dists.sh 22.22.2     # 显式指定版本
+../tools/package-node-dists.sh             # 默认 22.22.2
+../tools/package-node-dists.sh 22.22.2     # 显式指定版本
 ```
 
 然后上传到 `NODE_DIST_BASE_URL` 对应前缀（注意平铺、公读）：

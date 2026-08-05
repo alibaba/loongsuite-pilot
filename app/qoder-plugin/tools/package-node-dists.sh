@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# 拉取 loongsuite-pilot-installer 插件所需的多平台 Node 分发包到 vendor/node/。
-# 产物不入 git（体积大），用于上传 OSS 供插件在线下载（平铺、公读）：
-#   ossutil cp -r -f vendor/node/ oss://taiye-test-sh/sensen-test/ --acl public-read
+# 维护者工具（不随插件分发）：拉取 loongsuite-pilot-installer 插件所需的多平台
+# Node 分发包到插件的 vendor/node/。产物不入 git（体积大），用于上传 OSS 供插件
+# 在线下载（平铺、公读）：
+#   ossutil cp -r -f loongsuite-pilot-installer/vendor/node/ oss://taiye-test-sh/sensen-test/ --acl public-read
 # 上传前缀需与 config/install-params.conf 的 NODE_DIST_BASE_URL 一致，
 # 插件请求地址：<base>/node-v<ver>-<platform>.tar.gz
 set -euo pipefail
 
 NODE_VERSION="${1:-22.22.2}"
 BASE_URL="${NODE_UPSTREAM_URL:-https://nodejs.org/dist}"
-VENDOR_DIR="$(cd "$(dirname "$0")/.." && pwd)/vendor/node"
+# 本脚本位于 app/qoder-plugin/tools/，产物写入同级插件目录的 vendor/node/
+VENDOR_DIR="$(cd "$(dirname "$0")/../loongsuite-pilot-installer" && pwd)/vendor/node"
 
 # 平台矩阵：mac(arm64/x64)、linux(x64/arm64)、windows(x64, zip)
 TARBALLS=(
