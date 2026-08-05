@@ -37,8 +37,9 @@ function Write-Log($msg) {
 function Read-AdminConfig {
     $conf = Join-Path $PluginRoot 'config\install-params.conf'
     if (-not (Test-Path $conf)) { return }
-    # 必须显式按 UTF-8 读：conf 含中文注释且无 BOM，PS 5.1 默认 ANSI/GBK 会吞并后续 ASCII 字节，破坏 INSTALL_ARGS 块的行结构
-    $text = [System.IO.File]::ReadAllText($conf, [System.Text.Encoding]::UTF8)
+    # 必须显式按 UTF-8 读：conf 含中文注释且无 BOM，PS 5.1 默认 ANSI/GBK 会吞并后续 ASCII 字节，破坏 INSTALL_ARGS 块的行结构。
+    # 用 Get-Content -Encoding UTF8（cmdlet）而非 [System.IO.File]::ReadAllText：受限语言模式（ConstrainedLanguage）下禁止调用非核心 .NET 类型的静态方法
+    $text = Get-Content -Raw -Path $conf -Encoding UTF8
 
     if ($text -match '(?m)^\s*NODE_VERSION\s*=\s*"([^"]*)"') { $script:NodeVersion = $Matches[1] }
     if ($text -match '(?m)^\s*NODE_DIST_BASE_URL\s*=\s*"([^"]*)"') { $script:NodeDistBaseUrl = $Matches[1] }
@@ -47,21 +48,21 @@ function Read-AdminConfig {
     if ($text -match '(?m)^\s*INSTALLER_URL\s*=\s*"([^"]*\.ps1)"') { $script:InstallerUrl = $Matches[1] }
 
     # INSTALL_ARGS=( --collect-log "true" ... ) → -CollectLog true ...
+    # 受限语言模式禁用 [regex]::Matches，改用 -split 按行 + -match 逐行解析（均为语言运算符，CLM 允许）
     if ($text -match '(?ms)^\s*INSTALL_ARGS\s*=\s*\((.*?)^\s*\)') {
         $body = $Matches[1]
-        $tokens = [regex]::Matches($body, '"([^"]*)"|(--[\w\.\-]+)') | ForEach-Object {
-            if ($_.Groups[1].Success) { $_.Groups[1].Value } else { $_.Groups[2].Value }
-        }
         $parsed = @()
-        foreach ($t in $tokens) {
-            if ($t -like '--*') {
+        foreach ($line in ($body -split "`r?`n")) {
+            $line = $line.Trim()
+            if (-not $line -or $line.StartsWith('#')) { continue }
+            # 每行形如 --collect-log "true"，也兼容无值的裸开关 --flag
+            if ($line -match '^(--[\w\.\-]+)(?:\s+"([^"]*)")?\s*$') {
                 # --collect-log / --user.id → -CollectLog / -UserId
-                $name = ($t.Substring(2) -split '[-\.]' | ForEach-Object {
+                $name = ($Matches[1].Substring(2) -split '[-\.]' | ForEach-Object {
                     if ($_.Length -gt 0) { $_.Substring(0, 1).ToUpper() + $_.Substring(1) }
                 }) -join ''
                 $parsed += "-$name"
-            } else {
-                $parsed += $t
+                if ($Matches[2]) { $parsed += $Matches[2] }
             }
         }
         $script:InstallArgs = $parsed
@@ -78,11 +79,11 @@ if ($env:LOONGSUITE_PILOT_NODE_DIST_BASE_URL) { $NodeDistBaseUrl = $env:LOONGSUI
 $userId = if ($env:LOONGSUITE_PILOT_USER_ID) { $env:LOONGSUITE_PILOT_USER_ID }
           elseif ($env:QODER_USER_ID) { $env:QODER_USER_ID }
           else { $null }
-# 仅当 stdin 被重定向（hook 运行时）才读，避免 -ProvisionNodeOnly 在终端自测时阻塞
-if (-not $userId -and [Console]::IsInputRedirected) {
-    $payload = [Console]::In.ReadToEnd()
-    $m = [regex]::Match($payload, '"uid"\s*:\s*"([^"]*)"')
-    if ($m.Success) { $userId = $m.Groups[1].Value }
+# 从 stdin 读 hook payload 解析 uid：受限语言模式禁用 [Console]，改用自动变量 $input
+# （hook 运行时 Qoder 把 payload 送到 stdin 管道；未重定向时 $input 为空、不阻塞，故无需 IsInputRedirected 守卫）
+if (-not $userId) {
+    $payload = @($input) -join "`n"
+    if ($payload -match '"uid"\s*:\s*"([^"]*)"') { $userId = $Matches[1] }
 }
 if ($userId) { $InstallArgs += @('-UserId', $userId) }
 
@@ -195,11 +196,15 @@ $FingerprintFile = Join-Path $DataDir 'install-args.sha256'
 
 function Get-ArgsFingerprint {
     $payload = "url=$InstallerUrl`n" + (($InstallArgs | ForEach-Object { "$_`n" }) -join '')
-    $sha = [System.Security.Cryptography.SHA256]::Create()
+    # 受限语言模式禁用 [System.Security.Cryptography]/[System.Text.Encoding]，改用 Get-FileHash（cmdlet）
+    # 对临时文件求 SHA256；临时文件按 $PID 命名，避免多会话并发写同一路径
+    $tmp = Join-Path $DataDir "fingerprint.$PID.tmp"
     try {
-        $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($payload))
-        return -join ($bytes | ForEach-Object { $_.ToString('x2') })
-    } finally { $sha.Dispose() }
+        Set-Content -Path $tmp -Value $payload -Encoding UTF8 -NoNewline
+        return (Get-FileHash -Path $tmp -Algorithm SHA256).Hash
+    } finally {
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
 }
 
 $CurrentFp = Get-ArgsFingerprint

@@ -91,6 +91,7 @@ ossutil cp -r -f ../loongsuite-pilot-installer/vendor/node/ oss://taiye-test-sh/
 | 子进程输出进管道会挂死 | `installer \| Add-Content` 等 stdout 句柄关闭，而 installer 启动的守护进程继承了句柄 → hook 永久阶段 | 改用文件重定向 `*>> $LogFile`，不用管道 |
 | EAP=Stop + 子进程 stderr | 子进程的错误流经 `*>&1` 合并后变成我们的终止性错误，重装直接中断 | 子进程调用前局部设 `ErrorActionPreference='Continue'` |
 | 重装覆盖被占用文件 | wscript 启动器与计划任务持有 `~/.loongsuite-pilot` 内文件，`install` 覆盖时报“文件正在使用” | 指纹不一致重装前先 `Stop-PilotHard`（stop + 卸载计划任务 + 杀掉持有目录的进程），再 `install` 覆盖；**不再 `uninstall --purge` / `rmdir`**，本地数据保留 |
+| 受限语言模式（CLM）下无法运行 | AppLocker/WDAC 环境把 PS 置于 ConstrainedLanguage，禁止调用非核心 .NET 类型的静态方法/构造，脚本大量 `[System.IO.File]`/`[regex]`/`[System.Security.Cryptography.SHA256]`/`[System.Text.Encoding]`/`[Console]` 调用直接失败 | 全部改为 cmdlet / 语言运算符：conf 读取用 `Get-Content -Raw -Encoding UTF8`，`INSTALL_ARGS` 解析用 `-split`+`-match` 逐行，stdin 读取用 `$input`，指纹用 `Get-FileHash` 对临时文件求 SHA256。仅保留 `[int]`/`[bool]`/`[switch]` 等 CLM 核心类型强转 |
 
 ## 本地自测
 
