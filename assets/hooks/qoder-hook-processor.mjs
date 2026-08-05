@@ -225,9 +225,17 @@ async function main() {
       let range = null;
       if (Number.isFinite(triggerEndLine)) {
         // Stop may be appended only after the hook process receives its
-        // payload. Poll briefly for that Stop's SessionEnd, without ever
-        // falling through into a queued next prompt.
+        // payload. Poll briefly for that Stop and a stable right boundary,
+        // without ever falling through into a queued next prompt.
         const maxBoundaryPolls = 3;
+        const configuredPollInterval = Number.parseInt(
+          process.env.HOOK_RETRY_BOUNDARY_POLL_INTERVAL_MS || '1000',
+          10,
+        );
+        const boundaryPollIntervalMs = Number.isFinite(configuredPollInterval)
+          ? Math.max(0, configuredPollInterval)
+          : 1000;
+        let previousEofCandidateKey = null;
         for (let poll = 0; poll < maxBoundaryPolls; poll++) {
           // One immutable snapshot per poll supplies both EOF/cursor validation
           // and turn-boundary discovery. The successful snapshot is passed
@@ -242,8 +250,27 @@ async function main() {
           if (!range) return;
           targetWindow = findTriggeredTurnWindow(retrySnapshot, triggerEndLine);
           if (targetWindow.status === 'complete') break;
+          if (targetWindow.reason === 'stop-at-eof') {
+            const candidateKey = [
+              targetWindow.startLine,
+              targetWindow.stopLine,
+              targetWindow.endLine,
+              retrySnapshot.contentHash,
+            ].join(':');
+            if (candidateKey === previousEofCandidateKey) {
+              targetWindow = {
+                ...targetWindow,
+                status: 'complete',
+                reason: 'stable-stop-eof',
+              };
+              break;
+            }
+            previousEofCandidateKey = candidateKey;
+          } else {
+            previousEofCandidateKey = null;
+          }
           if (poll + 1 < maxBoundaryPolls) {
-            await new Promise(r => setTimeout(r, 1000));
+            await new Promise(r => setTimeout(r, boundaryPollIntervalMs));
           }
         }
 
@@ -411,9 +438,10 @@ async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, 
 
   const snapshot = opts?.snapshot || readTranscriptSnapshot(transcriptPath);
 
-  // A Stop-anchored retry receives an exact UserPromptSubmit -> SessionEnd
-  // window. Do not expand that range to the current EOF: it may already contain
-  // the next queued prompt.
+  // A Stop-anchored retry receives an exact Turn window ending at an explicit
+  // terminal marker, the next prompt boundary, or a stable EOF after Stop. Do
+  // not expand that range to the current EOF: it may already contain a queued
+  // next prompt.
   let endLine = initialEndLine;
   if (!opts?.fixedTurnWindow) {
     const currentCount = snapshot.lineCount;
@@ -574,7 +602,7 @@ export function selectTurnSegmentsForCollection(turnSegments, rangeReason, agent
 export function readTranscriptSnapshot(transcriptPath) {
   try {
     if (!fs.existsSync(transcriptPath)) {
-      return { lineCount: 0, rows: [], reason: 'transcript-missing' };
+      return { lineCount: 0, rows: [], contentHash: '', reason: 'transcript-missing' };
     }
     const content = fs.readFileSync(transcriptPath, 'utf-8');
     const lines = content.split('\n');
@@ -587,9 +615,10 @@ export function readTranscriptSnapshot(transcriptPath) {
       if (!text) continue;
       try { rows[i] = JSON.parse(text); } catch { /* skip malformed line */ }
     }
-    return { lineCount, rows, reason: 'ok' };
+    const contentHash = crypto.createHash('sha1').update(content).digest('hex');
+    return { lineCount, rows, contentHash, reason: 'ok' };
   } catch {
-    return { lineCount: 0, rows: [], reason: 'read-failed' };
+    return { lineCount: 0, rows: [], contentHash: '', reason: 'read-failed' };
   }
 }
 
@@ -617,12 +646,13 @@ export function findIncrementalTurnEndLine(snapshot, startLine, scanEndLine) {
 }
 
 export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
-  const waiting = reason => ({
+  const waiting = (reason, details = {}) => ({
     status: 'waiting',
     reason,
     startLine: null,
     stopLine: null,
     endLine: null,
+    ...details,
   });
 
   try {
@@ -710,10 +740,27 @@ export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
         hookEvent === 'UserPromptSubmit' ||
         (rows[i]?.type === 'user' && !isToolResult(rows[i]))
       ) {
-        return waiting('next-prompt-before-session-end');
+        // The next real prompt is itself an unambiguous right boundary for the
+        // completed Stop turn. Exclude it from this fixed window so its own Stop
+        // callback can consume it later.
+        return {
+          status: 'complete',
+          reason: 'next-prompt',
+          startLine,
+          stopLine,
+          endLine: i,
+        };
       }
     }
-    return waiting('session-end-not-found');
+    // Desktop/JetBrains sessions may remain open after every Stop and therefore
+    // emit neither SessionEnd nor qodercli's last-prompt marker. The retry caller
+    // promotes this candidate only after two byte-identical snapshots, proving
+    // the transcript has stopped growing before the fixed EOF window is used.
+    return waiting('stop-at-eof', {
+      startLine,
+      stopLine,
+      endLine: limit,
+    });
   } catch {
     return waiting('read-failed');
   }

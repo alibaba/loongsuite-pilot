@@ -78,6 +78,7 @@ function runRetry(triggerEndLine, sessionId = 'session-old') {
       ...process.env,
       LOONGSUITE_PILOT_DATA_DIR: dataDir,
       HOOK_RETRY_DELAY: '0',
+      HOOK_RETRY_BOUNDARY_POLL_INTERVAL_MS: '0',
     },
     encoding: 'utf-8',
     timeout: 30_000,
@@ -189,7 +190,6 @@ describe('qoder-hook-processor cold-start recovery', () => {
       ...targetTurn,
       progress('Stop'),
       progress('Stop'),
-      progress('SessionEnd'),
       { type: 'session_meta', sessionId: 'session-old' },
       progress('UserPromptSubmit'),
       queuedPrompt,
@@ -222,12 +222,61 @@ describe('qoder-hook-processor cold-start recovery', () => {
         },
       },
       progress('Stop'),
-      progress('SessionEnd'),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
 
     const second = runRetry(secondTriggerEndLine);
     expect(second.status).toBe(0);
     expect(userBoundaryPrompts(readHistory())).toEqual(['target prompt', 'queued prompt']);
+  });
+
+  it('collects a real IDE-shaped Turn that ends with Stop at stable EOF', () => {
+    const progress = hookEvent => ({
+      type: 'progress',
+      timestamp: '2026-08-05T04:00:20.496534Z',
+      data: { hookEvent, hookName: hookEvent },
+    });
+    const rows = [
+      {
+        type: 'session_meta',
+        sessionId: 'ide-session',
+        data: { meta_type: 'session_info', content: { mode: 'agent', session_type: 'assistant' } },
+      },
+      progress('SessionStart'),
+      {
+        type: 'user',
+        uuid: 'ide-user',
+        timestamp: '2026-08-05T04:00:16.005147Z',
+        sessionId: 'ide-session',
+        message: { role: 'user', content: 'IDE prompt' },
+      },
+      {
+        type: 'assistant',
+        uuid: 'ide-thinking',
+        timestamp: '2026-08-05T04:00:19.821317Z',
+        sessionId: 'ide-session',
+        message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'reasoning' }] },
+      },
+      {
+        type: 'assistant',
+        uuid: 'ide-text',
+        timestamp: '2026-08-05T04:00:19.821627Z',
+        sessionId: 'ide-session',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'IDE answer' }] },
+      },
+      progress('Stop'),
+    ];
+    fs.writeFileSync(
+      transcriptPath,
+      `${rows.map(row => JSON.stringify(row)).join('\n')}\n`,
+    );
+
+    // The Stop hook snapshot ended immediately before Qoder appended its Stop
+    // progress row, matching the production race from the attached user log.
+    const result = runRetry(rows.length - 1, 'ide-session');
+
+    expect(result.status).toBe(0);
+    expect(userBoundaryPrompts(readHistory())).toEqual(['IDE prompt']);
+    expect(readHistory().some(record => record['event.name'] === 'llm.response')).toBe(true);
   });
 
   it('keeps equal PostToolUse events from separate tool cycles', () => {

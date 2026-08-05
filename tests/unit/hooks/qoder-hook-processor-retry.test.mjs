@@ -460,7 +460,7 @@ describe('findTriggeredTurnWindow', () => {
     });
   });
 
-  it('waits instead of consuming the next prompt when SessionEnd is missing', () => {
+  it('uses the next prompt as a boundary when SessionEnd is missing', () => {
     const rows = [
       progress('UserPromptSubmit'),
       user('target prompt'),
@@ -471,9 +471,29 @@ describe('findTriggeredTurnWindow', () => {
     ];
     const transcript = writeTranscript('missing-session-end.jsonl', rows);
 
-    expect(findTriggeredTurnWindow(readTranscriptSnapshot(transcript), 3)).toMatchObject({
+    expect(findTriggeredTurnWindow(readTranscriptSnapshot(transcript), 3)).toEqual({
+      status: 'complete',
+      reason: 'next-prompt',
+      startLine: 0,
+      stopLine: 3,
+      endLine: 4,
+    });
+  });
+
+  it('returns a stable-EOF candidate when Stop is the final row', () => {
+    const rows = [
+      user('target prompt'),
+      assistant('target answer'),
+      progress('Stop'),
+    ];
+    const transcript = writeTranscript('stop-at-eof.jsonl', rows);
+
+    expect(findTriggeredTurnWindow(readTranscriptSnapshot(transcript), 2)).toEqual({
       status: 'waiting',
-      reason: 'next-prompt-before-session-end',
+      reason: 'stop-at-eof',
+      startLine: 0,
+      stopLine: 2,
+      endLine: 3,
     });
   });
 
