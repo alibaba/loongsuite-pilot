@@ -3,6 +3,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  acquireRetryLock,
+  assessStableEofCandidate,
   buildLlmBoundaries,
   buildEventsFromBoundaries,
   findIncrementalTurnEndLine,
@@ -73,6 +75,32 @@ describe('tryAcquireRetryLock', () => {
     fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, sessionId: 'old', startedAt: 1 }));
     expect(tryAcquireRetryLock('/tmp/t.jsonl', 'sess-2', lockDir)).toBe(true);
     expect(readRetryLock(lockPath).sessionId).toBe('sess-2');
+  });
+});
+
+describe('acquireRetryLock', () => {
+  it('waits for a peer lock and acquires it after release', async () => {
+    expect(tryAcquireRetryLock('/tmp/t.jsonl', 'peer', lockDir)).toBe(true);
+    const waiting = acquireRetryLock('/tmp/t.jsonl', 'sess-2', {
+      dir: lockDir,
+      waitMs: 500,
+      pollMs: 5,
+    });
+    setTimeout(() => releaseRetryLock('/tmp/t.jsonl', lockDir), 20);
+
+    await expect(waiting).resolves.toBe(true);
+    expect(readRetryLock(retryLockPath('/tmp/t.jsonl', lockDir)).sessionId).toBe('sess-2');
+  });
+
+  it('times out without deleting a live peer lock', async () => {
+    expect(tryAcquireRetryLock('/tmp/t.jsonl', 'peer', lockDir)).toBe(true);
+
+    await expect(acquireRetryLock('/tmp/t.jsonl', 'sess-2', {
+      dir: lockDir,
+      waitMs: 20,
+      pollMs: 5,
+    })).resolves.toBe(false);
+    expect(readRetryLock(retryLockPath('/tmp/t.jsonl', lockDir)).sessionId).toBe('peer');
   });
 });
 
@@ -460,7 +488,7 @@ describe('findTriggeredTurnWindow', () => {
     });
   });
 
-  it('waits instead of consuming the next prompt when SessionEnd is missing', () => {
+  it('uses the next prompt as a boundary when SessionEnd is missing', () => {
     const rows = [
       progress('UserPromptSubmit'),
       user('target prompt'),
@@ -471,9 +499,58 @@ describe('findTriggeredTurnWindow', () => {
     ];
     const transcript = writeTranscript('missing-session-end.jsonl', rows);
 
-    expect(findTriggeredTurnWindow(readTranscriptSnapshot(transcript), 3)).toMatchObject({
+    expect(findTriggeredTurnWindow(readTranscriptSnapshot(transcript), 3)).toEqual({
+      status: 'complete',
+      reason: 'next-prompt',
+      startLine: 0,
+      stopLine: 3,
+      endLine: 4,
+    });
+  });
+
+  it('returns a stable-EOF candidate when Stop is the final row', () => {
+    const rows = [
+      user('target prompt'),
+      assistant('target answer'),
+      progress('Stop'),
+    ];
+    const transcript = writeTranscript('stop-at-eof.jsonl', rows);
+
+    expect(findTriggeredTurnWindow(readTranscriptSnapshot(transcript), 2)).toEqual({
       status: 'waiting',
-      reason: 'next-prompt-before-session-end',
+      reason: 'stop-at-eof',
+      startLine: 0,
+      stopLine: 2,
+      endLine: 3,
+    });
+  });
+
+  it('requires two identical hashed snapshots before accepting Stop at EOF', () => {
+    const waitingWindow = {
+      status: 'waiting',
+      reason: 'stop-at-eof',
+      startLine: 0,
+      stopLine: 2,
+      endLine: 3,
+    };
+    const first = assessStableEofCandidate(null, waitingWindow, { contentHash: 'hash-a' });
+    expect(first.targetWindow.status).toBe('waiting');
+
+    const changed = assessStableEofCandidate(
+      first.candidateKey,
+      waitingWindow,
+      { contentHash: 'hash-b' },
+    );
+    expect(changed.targetWindow.status).toBe('waiting');
+
+    const stable = assessStableEofCandidate(
+      changed.candidateKey,
+      waitingWindow,
+      { contentHash: 'hash-b' },
+    );
+    expect(stable.targetWindow).toMatchObject({
+      status: 'complete',
+      reason: 'stable-stop-eof',
     });
   });
 

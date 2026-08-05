@@ -165,31 +165,40 @@ function isLineRecordNewer(candidate, existing) {
 
 const LOCK_WAIT_ARRAY = new Int32Array(new SharedArrayBuffer(4));
 
-function updateAggregateShadow(file, transcriptPath, record) {
-  const lockFile = `${file}.lock`;
-  const deadline = Date.now() + 1_000;
+function withSyncFileLock(lockFile, waitMs, staleMs, action) {
+  const deadline = Date.now() + waitMs;
   let acquired = false;
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.dirname(lockFile), { recursive: true });
     while (!acquired) {
       try {
         const fd = fs.openSync(lockFile, 'wx');
         fs.closeSync(fd);
         acquired = true;
       } catch (err) {
-        if (err?.code !== 'EEXIST') return false;
+        if (err?.code !== 'EEXIST') return { acquired: false };
         try {
           const stat = fs.statSync(lockFile);
-          if (Date.now() - stat.mtimeMs > 30_000) {
+          if (Date.now() - stat.mtimeMs > staleMs) {
             fs.unlinkSync(lockFile);
             continue;
           }
         } catch { /* retry acquisition */ }
-        if (Date.now() >= deadline) return false;
+        if (Date.now() >= deadline) return { acquired: false };
         Atomics.wait(LOCK_WAIT_ARRAY, 0, 0, 10);
       }
     }
 
+    return { acquired: true, value: action() };
+  } finally {
+    if (acquired) {
+      try { fs.unlinkSync(lockFile); } catch { /* best-effort lock cleanup */ }
+    }
+  }
+}
+
+function updateAggregateShadow(file, transcriptPath, record) {
+  const result = withSyncFileLock(`${file}.lock`, 1_000, 30_000, () => {
     const records = readJsonObject(file) || {};
     const existing = records[transcriptPath];
     if (existing?.session_id === record.session_id
@@ -202,11 +211,9 @@ function updateAggregateShadow(file, transcriptPath, record) {
       updated_at: record.updated_at,
     };
     return saveJsonObject(file, records);
-  } finally {
-    if (acquired) {
-      try { fs.unlinkSync(lockFile); } catch { /* best-effort lock cleanup */ }
-    }
-  }
+  });
+
+  return result.acquired ? result.value : false;
 }
 
 function rollbackShadowFiles(agentId) {
@@ -367,7 +374,14 @@ export function appendRowsToHistory(agentId, logPrefix, rows) {
   const logFile = getHistoryLogFile(agentId, logPrefix);
   try {
     fs.mkdirSync(path.dirname(logFile), { recursive: true });
-    fs.appendFileSync(logFile, rows.join('\n') + '\n', 'utf-8');
+    const result = withSyncFileLock(`${logFile}.lock`, 15_000, 10_000, () => {
+      fs.appendFileSync(logFile, rows.join('\n') + '\n', 'utf-8');
+      return true;
+    });
+    if (!result.acquired) {
+      logDebug(agentId, `ERROR appending rows to history: timed out waiting for ${logFile}.lock`);
+      return false;
+    }
     logDebug(agentId, `Appended ${rows.length} rows to ${logFile}`);
     return true;
   } catch (e) {
