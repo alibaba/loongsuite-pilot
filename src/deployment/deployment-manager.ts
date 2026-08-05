@@ -121,8 +121,11 @@ export class DeploymentManager {
    * watchdog targets and carry heavier undeploy semantics (uninstall scripts,
    * JSONC rewrites), so their disable path is intentionally left unchanged.
    *
-   * Best-effort: undeploy failure is logged but the record is still cleared to
-   * avoid re-running the (partial) cleanup on every startup.
+   * The record is dropped only once cleanup succeeds. Hook uninstall is
+   * idempotent (a no-op when nothing matches — hook-manager.ts), so a failure
+   * means the hook is still in the settings file; we keep the record so the
+   * next startup retries rather than early-returning (:135) and leaking a
+   * firing hook forever (the watchdog also skips it via enabled()===false).
    */
   private async undeployDisabledAgent(def: AgentDefinition): Promise<DeployResult> {
     const result: DeployResult = {
@@ -138,14 +141,19 @@ export class DeploymentManager {
     }
 
     logger.info('agent disabled — removing previously deployed hook', { agentId: def.id });
+    let ok = false;
     try {
-      const ok = await this.hookStrategy.undeploy(def);
-      if (!ok) {
-        logger.warn('agent disable undeploy incomplete', { agentId: def.id });
-      }
+      ok = await this.hookStrategy.undeploy(def);
     } catch (err) {
       logger.error('agent disable undeploy failed', { agentId: def.id, error: String(err) });
     }
+
+    if (!ok) {
+      // Keep the record so the idempotent cleanup is retried next start.
+      logger.warn('agent disable undeploy incomplete — keeping record to retry', { agentId: def.id });
+      return { ...result, success: false, skipped: false, error: 'hook undeploy incomplete' };
+    }
+
     delete this.state[def.id];
     return result;
   }

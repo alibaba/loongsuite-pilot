@@ -12,9 +12,9 @@ HookWatchdog 是 pilot daemon 内置的巡检器，每 5 分钟（`intervalMs`�
 
 检测 agent settings.json 文件中 `hooks.<event>` 数组是否包含 pilot 的 hook 命令条目。
 
-targets 来源有两种：
-- `HookWatchdog.defaultTargets()`：硬编码的 otel plugin 类（claude-code / codex），用外部安装命令修复
-- `orchestrator.buildHookWatchdogTargets()`：从 `agents.d/*.json` 中 `deployMode: "hook"` 的定义动态构建，用 `DeploymentManager.deploySingle()` 修复
+targets 来源：
+- `orchestrator.buildHookWatchdogTargets()`：从 `agents.d/*.json` 中 `deployMode: "hook"` 的定义动态构建，用 `DeploymentManager.deploySingle()` 修复。每个 target 带 `enabled()` 门禁（`config.agents[id].enabled !== false`），被禁用的 agent 运行期跳过，不再重注入。
+- （已移除）早期的 `HookWatchdog.defaultTargets()` 硬编码 otel plugin 目标已删除：claude-code / codex 已是 hook 模式并由上面的动态构建覆盖，旧 otel 缓存目录也由 plugin-migration 主动清理。
 
 修复方式二选一：
 - **repairFn**（优先）：调用 `DeploymentManager.deploySingle(def)` 重新执行 `HookStrategy.deploy()`，重写 settings.json hook 条目

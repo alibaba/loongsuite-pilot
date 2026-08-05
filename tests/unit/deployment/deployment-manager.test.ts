@@ -203,6 +203,87 @@ describe('DeploymentManager', () => {
       await expect(fs.stat(settingsPath)).rejects.toMatchObject({ code: 'ENOENT' });
     });
 
+    it('keeps the deploy record when undeploy fails so cleanup is retried', async () => {
+      const def: AgentDefinition = {
+        id: 'retry-agent',
+        displayName: 'Retry',
+        deployMode: 'hook',
+        detection: { paths: [], commands: [] },
+        hook: {
+          settingsPath: path.join(tmpDir, 'retry-hooks.json'),
+          events: ['Stop'],
+          hookCommand: '/opt/retry.sh',
+          format: 'flat',
+        },
+      };
+      await writeAgentDef(def);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const mgr = makeManager();
+      await mgr.deployAll(() => true); // record created
+
+      const undeploySpy = vi
+        .spyOn((mgr as unknown as { hookStrategy: { undeploy: (d: AgentDefinition) => Promise<boolean> } }).hookStrategy, 'undeploy')
+        .mockResolvedValue(false);
+
+      // 1st disable: undeploy fails → record kept, result surfaced as failed.
+      const first = await mgr.deployAll(() => false);
+      expect(first.find(result => result.agentId === def.id)?.success).toBe(false);
+      expect(undeploySpy).toHaveBeenCalledTimes(1);
+
+      // 2nd disable: record still present → cleanup retried (not early-returned).
+      await mgr.deployAll(() => false);
+      expect(undeploySpy).toHaveBeenCalledTimes(2);
+
+      // Once cleanup finally succeeds the record is dropped and retries stop.
+      undeploySpy.mockResolvedValue(true);
+      await mgr.deployAll(() => false);
+      expect(undeploySpy).toHaveBeenCalledTimes(3);
+      await mgr.deployAll(() => false);
+      expect(undeploySpy).toHaveBeenCalledTimes(3);
+    });
+
+    it('removes retired hook events on disable, not just current events', async () => {
+      const settingsPath = path.join(tmpDir, 'retired-hooks.json');
+      const withBoth: AgentDefinition = {
+        id: 'retired-agent',
+        displayName: 'Retired',
+        deployMode: 'hook',
+        detection: { paths: [], commands: [] },
+        hook: {
+          settingsPath,
+          events: ['Stop', 'PreToolUse'],
+          hookCommand: '/opt/retired.sh',
+          format: 'flat',
+        },
+      };
+      await writeAgentDef(withBoth);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const mgr = makeManager();
+      await mgr.deployAll(() => true); // installs Stop + PreToolUse
+      const afterDeploy = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+      expect(afterDeploy.hooks.Stop).toBeDefined();
+      expect(afterDeploy.hooks.PreToolUse).toBeDefined();
+
+      // New version retires PreToolUse (current events drop it).
+      await writeAgentDef({
+        ...withBoth,
+        hook: {
+          settingsPath,
+          events: ['Stop'],
+          retiredEvents: ['PreToolUse'],
+          hookCommand: '/opt/retired.sh',
+          format: 'flat',
+        },
+      });
+
+      // Disable → must remove BOTH the current Stop hook and the retired one.
+      await mgr.deployAll(() => false);
+      const afterDisable = await fs.readFile(settingsPath, 'utf-8');
+      expect(afterDisable).not.toContain('/opt/retired.sh');
+    });
+
     it('continues when one agent fails', async () => {
       const def1: AgentDefinition = {
         id: 'agent-ok',
