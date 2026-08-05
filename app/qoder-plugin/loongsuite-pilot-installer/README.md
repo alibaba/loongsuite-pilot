@@ -83,17 +83,17 @@ ossutil cp -r -f vendor/node/ oss://taiye-test-sh/sensen-test/ --acl public-read
 
 ## 打包分发（zip）
 
-把插件本体打成可分发 zip（zip 内顶层是 `loongsuite-pilot-installer/`,解开即可 `plugins install`）。脚本在同级 `app/qoder-plugin/tools/`,产物默认输出到 `app/qoder-plugin/dist/`(不入 git):
+把插件打成可分发 zip。脚本在同级 `app/qoder-plugin/tools/`，产物默认输出到 `app/qoder-plugin/dist/`（不入 git）：
 
 ```bash
-../tools/package-plugin-zip.sh              # 只打本体(推荐,node 联网下载)
-../tools/package-plugin-zip.sh --with-node  # 连 vendor/node/ 一起打(离线分发)
+../tools/package-plugin-zip.sh              # 只打本体（推荐，node 联网下载）
+../tools/package-plugin-zip.sh --with-node  # 连 vendor/node/ 一起打（离线分发）
 ../tools/package-plugin-zip.sh -o /tmp      # 指定输出目录
 ```
 
-zip 名取自 `.qoder-plugin/plugin.json` 的 name+version(如 `loongsuite-pilot-installer-0.3.0.zip`);默认排除 `vendor/node/` 与运行期落盘文件(`install.log`/`install.lock`/`install-args.sha256` 等)。
-
-zip 顶层含两个插件目录:`loongsuite-pilot-installer/` 与打包时**现场生成**的占位空插件 `__empty__/`(仅 `.qoder-plugin/plugin.json`,不入仓)。
+- zip 名取自 `.qoder-plugin/plugin.json` 的 name+version（如 `loongsuite-pilot-installer-0.3.0.zip`）
+- 默认排除 `vendor/node/` 与运行期落盘文件（`install.log`、`install.lock`、`install-args.sha256` 等）
+- zip 顶层含两个目录：真实插件 `loongsuite-pilot-installer/`，以及打包时**现场生成**的占位空插件 `__empty__/`（仅含 `.qoder-plugin/plugin.json`，不入仓）
 
 ## 安装与验证
 

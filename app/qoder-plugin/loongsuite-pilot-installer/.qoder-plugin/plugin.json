@@ -1,7 +1,7 @@
 {
   "name": "loongsuite-pilot-installer",
   "version": "0.3.0",
-  "description": "自动安装 loongsuite-pilot：捆绑多平台 Node v22.2.0 运行时，安装参数由管理员在 config/install-params.conf 配置",
+  "description": "会话启动时自动检测并安装、启用 loongsuite-pilot",
   "author": { "name": "loongsuite" },
   "license": "MIT",
   "keywords": ["loongsuite-pilot", "installer", "observability"]
