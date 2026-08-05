@@ -13,20 +13,17 @@ LOCK_DIR="$DATA_DIR/install.lock"
 PILOT_BIN="$HOME/.local/bin/loongsuite-pilot"
 PILOT_HOME="$HOME/.loongsuite-pilot"   # pilot 数据目录（默认），内含 pid 文件，用于判活
 
-# ---- 内置默认值（可被 config/install-params.conf 及环境变量覆盖） ----
+# ---- 插件内置常量：安装器地址 / node 运行时（由维护者维护，管理员无需配置） ----
 INSTALLER_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot-dev/installer.sh"
 NODE_VERSION="22.22.2"
 NODE_DIST_BASE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node/22.22.2"
 NODE_MIN_MAJOR=22
-INSTALL_ARGS=()
 
+# ---- 管理员参数：仅 INSTALL_ARGS 从 config/install-params.conf 读取 ----
+INSTALL_ARGS=()
 CONF="$PLUGIN_ROOT/config/install-params.conf"
 # shellcheck disable=SC1090
 [ -f "$CONF" ] && . "$CONF"
-
-# 环境变量覆盖（管理员/用户级）
-INSTALLER_URL="${LOONGSUITE_PILOT_INSTALLER_URL:-$INSTALLER_URL}"
-NODE_DIST_BASE_URL="${LOONGSUITE_PILOT_NODE_DIST_BASE_URL:-$NODE_DIST_BASE_URL}"
 # --user.id 追加覆盖：installer 顺序解析参数，后出现者生效
 # 来源优先级：管理员显式覆盖 > Qoder 注入的 QODER_USER_ID > 解析 hook stdin 的 extra.user.uid
 # QODER_USER_ID 仅在 hook 运行时由 Qoder 注入到进程环境（交互 shell 里没有），与 stdin payload 同源

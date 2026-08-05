@@ -29,12 +29,11 @@ Node 运行时自动准备：本机已有 node ≥ 22 则复用，否则自动�
 
 | 配置项 | 说明 |
 |--------|------|
-| `INSTALLER_URL` | loongsuite-pilot 安装脚本地址（`.sh`）；Windows 固定用同目录的 `installer.ps1`，除非这里显式填 `.ps1` 地址 |
-| `NODE_VERSION` | Node 版本，默认 `22.22.2` |
-| `NODE_DIST_BASE_URL` | Node 分发包下载源 |
 | `INSTALL_ARGS` | 透传给 installer 的参数数组，按 `--参数名 "值"` 成对填写，新增参数无需改脚本 |
 
-运行期环境变量可覆盖（优先级最高）：`LOONGSUITE_PILOT_INSTALLER_URL`、`LOONGSUITE_PILOT_NODE_DIST_BASE_URL`、`LOONGSUITE_PILOT_USER_ID`。
+> 安装器地址、Node 版本、Node 分发包下载源均为**插件内置常量**（由维护者在脚本内维护），不再通过 conf 配置。
+
+运行期环境变量 `LOONGSUITE_PILOT_USER_ID` 可覆盖 `--user.id`。
 
 > 不传 `--user.id` 时 config.json 不写 `userId` 字段，由 pilot 运行时回退到 hostname。
 

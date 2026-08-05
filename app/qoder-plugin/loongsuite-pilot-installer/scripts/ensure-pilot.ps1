@@ -20,11 +20,12 @@ $LockDir = Join-Path $DataDir 'install.lock'
 $PilotCmd = Join-Path $env:USERPROFILE '.local\bin\loongsuite-pilot.cmd'
 $PilotHome = Join-Path $env:USERPROFILE '.loongsuite-pilot'   # pilot 数据目录（默认），内含 pid 文件，用于判活
 
-# ---- 内置默认值（可被 config\install-params.conf 及环境变量覆盖） ----
+# ---- 插件内置常量：安装器地址 / node 运行时（由维护者维护，管理员无需配置） ----
 $InstallerUrl = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot-dev/installer.ps1'
 $NodeVersion = '22.22.2'
 $NodeDistBaseUrl = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node/22.22.2'
 $NodeMinMajor = 22
+# 管理员参数：仅 InstallArgs 从 config\install-params.conf 读取
 $InstallArgs = @()
 
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
@@ -33,19 +34,14 @@ function Write-Log($msg) {
     "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg | Add-Content -Path $LogFile -Encoding UTF8
 }
 
-# ---- 解析 install-params.conf（bash 语法）：复用同一份管理员配置 ----
+# ---- 解析 install-params.conf（bash 语法）：只读管理员参数 INSTALL_ARGS ----
+# 安装器地址 / node 版本 / node 下载源均为插件内置常量，不从 conf 读取
 function Read-AdminConfig {
     $conf = Join-Path $PluginRoot 'config\install-params.conf'
     if (-not (Test-Path $conf)) { return }
     # 必须显式按 UTF-8 读：conf 含中文注释且无 BOM，PS 5.1 默认 ANSI/GBK 会吞并后续 ASCII 字节，破坏 INSTALL_ARGS 块的行结构。
     # 用 Get-Content -Encoding UTF8（cmdlet）而非 [System.IO.File]::ReadAllText：受限语言模式（ConstrainedLanguage）下禁止调用非核心 .NET 类型的静态方法
     $text = Get-Content -Raw -Path $conf -Encoding UTF8
-
-    if ($text -match '(?m)^\s*NODE_VERSION\s*=\s*"([^"]*)"') { $script:NodeVersion = $Matches[1] }
-    if ($text -match '(?m)^\s*NODE_DIST_BASE_URL\s*=\s*"([^"]*)"') { $script:NodeDistBaseUrl = $Matches[1] }
-    # Windows 用 installer.ps1，因此忽略 conf 里指向 installer.sh 的 INSTALLER_URL，
-    # 仅当管理员显式配置了 .ps1 地址时才采用
-    if ($text -match '(?m)^\s*INSTALLER_URL\s*=\s*"([^"]*\.ps1)"') { $script:InstallerUrl = $Matches[1] }
 
     # INSTALL_ARGS=( --collect-log "true" ... ) → -CollectLog true ...
     # 受限语言模式禁用 [regex]::Matches，改用 -split 按行 + -match 逐行解析（均为语言运算符，CLM 允许）
@@ -71,9 +67,6 @@ function Read-AdminConfig {
 
 Read-AdminConfig
 
-# 环境变量覆盖（优先级最高）
-if ($env:LOONGSUITE_PILOT_INSTALLER_URL) { $InstallerUrl = $env:LOONGSUITE_PILOT_INSTALLER_URL }
-if ($env:LOONGSUITE_PILOT_NODE_DIST_BASE_URL) { $NodeDistBaseUrl = $env:LOONGSUITE_PILOT_NODE_DIST_BASE_URL }
 # --user.id 来源优先级：管理员显式覆盖 > Qoder 注入的 QODER_USER_ID > 解析 hook stdin 的 extra.user.uid
 # QODER_USER_ID 仅在 hook 运行时由 Qoder 注入到进程环境（交互 shell 里没有），与 stdin payload 同源
 $userId = if ($env:LOONGSUITE_PILOT_USER_ID) { $env:LOONGSUITE_PILOT_USER_ID }
