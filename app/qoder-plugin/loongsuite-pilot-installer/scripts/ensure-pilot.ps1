@@ -17,6 +17,7 @@ $DataDir = if ($env:QODER_PLUGIN_DATA) { $env:QODER_PLUGIN_DATA } else { Join-Pa
 $LogFile = Join-Path $DataDir 'install.log'
 $LockDir = Join-Path $DataDir 'install.lock'
 $PilotCmd = Join-Path $env:USERPROFILE '.local\bin\loongsuite-pilot.cmd'
+$PilotHome = Join-Path $env:USERPROFILE '.loongsuite-pilot'   # pilot 数据目录（默认），内含 pid 文件，用于判活
 
 # ---- 内置默认值（可被 config\install-params.conf 及环境变量覆盖） ----
 $InstallerUrl = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1'
@@ -71,7 +72,18 @@ Read-AdminConfig
 # 环境变量覆盖（优先级最高）
 if ($env:LOONGSUITE_PILOT_INSTALLER_URL) { $InstallerUrl = $env:LOONGSUITE_PILOT_INSTALLER_URL }
 if ($env:LOONGSUITE_PILOT_NODE_DIST_BASE_URL) { $NodeDistBaseUrl = $env:LOONGSUITE_PILOT_NODE_DIST_BASE_URL }
-if ($env:LOONGSUITE_PILOT_USER_ID) { $InstallArgs += @('-UserId', $env:LOONGSUITE_PILOT_USER_ID) }
+# --user.id 来源优先级：管理员显式覆盖 > Qoder 注入的 QODER_USER_ID > 解析 hook stdin 的 extra.user.uid
+# QODER_USER_ID 仅在 hook 运行时由 Qoder 注入到进程环境（交互 shell 里没有），与 stdin payload 同源
+$userId = if ($env:LOONGSUITE_PILOT_USER_ID) { $env:LOONGSUITE_PILOT_USER_ID }
+          elseif ($env:QODER_USER_ID) { $env:QODER_USER_ID }
+          else { $null }
+# 仅当 stdin 被重定向（hook 运行时）才读，避免 -ProvisionNodeOnly 在终端自测时阻塞
+if (-not $userId -and [Console]::IsInputRedirected) {
+    $payload = [Console]::In.ReadToEnd()
+    $m = [regex]::Match($payload, '"uid"\s*:\s*"([^"]*)"')
+    if ($m.Success) { $userId = $m.Groups[1].Value }
+}
+if ($userId) { $InstallArgs += @('-UserId', $userId) }
 
 # ---- node >= 22 探测（本机已有则复用，不重复下载） ----
 function Find-Node {
@@ -175,8 +187,9 @@ if ($ProvisionNodeOnly) {
     exit 0
 }
 
-# ---- 参数指纹：installer 对 config.json 是合并语义（未传参数保留旧值），
-# 因此参数变更时必须先 uninstall -Purge 再重装，否则旧配置会残留 ----
+# ---- 参数指纹：判断"要装的参数是否和上次一致"。installer 对 config.json 是合并语义，
+# 参数变更时重新 install 覆盖即可（installer 自身会 merge + 重启，故不再 uninstall -Purge）。
+# 指纹不再单独决定退出：还要结合 pilot 是否在运行，避免"装过但进程已死"被误判为无需处理 ----
 $FingerprintFile = Join-Path $DataDir 'install-args.sha256'
 
 function Get-ArgsFingerprint {
@@ -197,8 +210,27 @@ function Test-FingerprintMatch {
     return ((Get-Content -Raw $FingerprintFile).Trim() -eq $CurrentFp)
 }
 
-# ---- 幂等：已安装且参数未变则立即退出（每次会话启动都会触发本脚本） ----
-if ((Test-PilotInstalled) -and (Test-FingerprintMatch)) { exit 0 }
+# pilot 是否在运行：读 pidfile 并确认对应进程存活（与 installer 判活方式一致，不 spawn node）
+function Test-PilotRunning {
+    $pidFile = Join-Path $PilotHome 'loongsuite-pilot.pid'
+    if (-not (Test-Path $pidFile)) { return $false }
+    $pidVal = (Get-Content -Raw $pidFile -ErrorAction SilentlyContinue).Trim()
+    if ($pidVal -notmatch '^\d+$') { return $false }
+    return [bool](Get-Process -Id ([int]$pidVal) -ErrorAction SilentlyContinue)
+}
+
+# ---- 幂等快路径（每次会话启动都会触发本脚本）----
+# 已安装 + 参数未变：在跑则秒过；进程已死则直接 start 复活（无需重新下载/安装）
+if ((Test-PilotInstalled) -and (Test-FingerprintMatch)) {
+    if (Test-PilotRunning) { exit 0 }
+    Write-Log '已安装且参数未变，但服务未运行，尝试拉起'
+    $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    & $PilotCmd start *>> $LogFile
+    $rc = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+    if ($rc -eq 0) { Write-Log '✅ 服务已拉起' } else { Write-Log "⚠️ 服务拉起失败 (rc=$rc)，详见日志" }
+    exit 0
+}
 
 # ---- 并发锁：多会话同时启动时只允许一个实例执行安装 ----
 # CLI 退出可能杀掉 hook 进程导致锁残留，超过 TTL 的旧锁直接接管
@@ -221,8 +253,12 @@ try {
     # 拿到锁后重新判定：可能另一实例已经装好了相同配置
     if ((Test-PilotInstalled) -and (Test-FingerprintMatch)) { exit 0 }
 
-    $needReinstall = Test-PilotInstalled
-    if ($needReinstall) { Write-Log '已安装但参数指纹不一致，卸载后按新配置重装' }
+    # 未安装 → 直接装；已装但指纹不一致 → 重新 install 覆盖（不再 uninstall -Purge，保留本地数据）
+    if (Test-PilotInstalled) {
+        Write-Log '已安装但参数指纹不一致，按新配置重新 install（install 会 merge 覆盖并重启）'
+        # 先停服务/计划任务/占用进程：Windows 下 install 无法覆盖被占用的文件（不删数据目录）
+        Stop-PilotHard
+    }
     Write-Log "installer: $InstallerUrl"
     Write-Log "install args: $($InstallArgs -join ' ')"
 
@@ -230,21 +266,6 @@ try {
 
     $installerTmp = Join-Path $DataDir 'installer.ps1'
     Invoke-WebRequest -Uri $InstallerUrl -OutFile $installerTmp -UseBasicParsing
-
-    if ($needReinstall) {
-        Stop-PilotHard
-        $rc = Invoke-Logged @($installerTmp, 'uninstall', '-Purge')
-        # 数据目录偶尔仍被残留句柄占用，补一手强删，否则旧 config 会被合并保留
-        $pilotHome = Join-Path $env:USERPROFILE '.loongsuite-pilot'
-        if (Test-Path $pilotHome) {
-            & cmd /c "rmdir /s /q `"$pilotHome`"" *>> $LogFile
-        }
-        if ((Test-PilotInstalled) -or (Test-Path $pilotHome)) {
-            Write-Log "⚠️ 卸载未完全成功 (rc=$rc)，继续尝试安装（installer 会覆盖同名配置项）"
-        } else {
-            Write-Log '旧版本已卸载'
-        }
-    }
 
     $rc = Invoke-Logged (@($installerTmp, 'install') + $InstallArgs)
     if ($rc -ne 0) { throw "installer exited with code $rc" }
