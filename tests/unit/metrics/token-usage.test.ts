@@ -1,16 +1,27 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { collectCodexDailyUsage } from '../../../src/metrics/token-usage/codex-token-usage.js';
-import { TokenUsageStateStore } from '../../../src/metrics/token-usage/token-usage-state.js';
-import { computeTotalTokens, type TokenUsageDailyResult } from '../../../src/metrics/token-usage/types.js';
+import {
+  collectCodexDailyUsage,
+  DEFAULT_MAX_CODEX_TOKEN_SCAN_BYTES,
+} from '../../../src/metrics/token-usage/codex-token-usage.js';
+import {
+  buildTokenUsageSkippedStatusRow,
+  TokenUsageStateStore,
+} from '../../../src/metrics/token-usage/token-usage-state.js';
+import {
+  computeTotalTokens,
+  type CodexDailyUsageCollectionOkResult,
+  type TokenUsageDailyResult,
+  type TokenUsageScanMetadata,
+} from '../../../src/metrics/token-usage/types.js';
 
 describe('Codex token usage collector', () => {
   it('collects exact usage from representative fixtures', async () => {
     const root = createCodexFixture();
     try {
-      const actual = await collectCodexDailyUsage({
+      const actual = await collectOkUsage({
         codexHome: root,
         date: '2026-06-18',
       });
@@ -23,7 +34,7 @@ describe('Codex token usage collector', () => {
         cache_read_tokens: 60,
         reasoning_tokens: 5,
         estimated_calls: 1,
-        files_scanned: 2,
+        files_scanned: 1,
         files_with_usage: 1,
         total_tokens: 477,
       });
@@ -93,7 +104,7 @@ describe('Codex token usage collector', () => {
     ]);
 
     try {
-      await expect(collectCodexDailyUsage({ codexHome: root, date: '2026-06-18' })).resolves.toMatchObject({
+      await expect(collectOkUsage({ codexHome: root, date: '2026-06-18' })).resolves.toMatchObject({
         calls: 1,
         estimated_calls: 0,
         input_tokens: 30,
@@ -162,7 +173,7 @@ describe('Codex token usage collector', () => {
     ]);
 
     try {
-      await expect(collectCodexDailyUsage({ codexHome: root, date: '2026-06-18' })).resolves.toMatchObject({
+      await expect(collectOkUsage({ codexHome: root, date: '2026-06-18' })).resolves.toMatchObject({
         calls: 2,
         input_tokens: 21,
         cache_read_tokens: 9,
@@ -220,7 +231,7 @@ describe('Codex token usage collector', () => {
     writeJsonl(path.join(archivedDir, 'rollout-archived-copy.jsonl'), records);
 
     try {
-      await expect(collectCodexDailyUsage({ codexHome: root, date: '2026-06-18' })).resolves.toMatchObject({
+      await expect(collectOkUsage({ codexHome: root, date: '2026-06-18' })).resolves.toMatchObject({
         calls: 1,
         input_tokens: 60,
         cache_read_tokens: 40,
@@ -289,7 +300,7 @@ describe('Codex token usage collector', () => {
     ]);
 
     try {
-      await expect(collectCodexDailyUsage({ codexHome: root, date: '2026-06-18' })).resolves.toMatchObject({
+      await expect(collectOkUsage({ codexHome: root, date: '2026-06-18' })).resolves.toMatchObject({
         calls: 1,
         input_tokens: 40,
         cache_read_tokens: 10,
@@ -368,7 +379,7 @@ describe('Codex token usage collector', () => {
     fs.utimesSync(filePath, new Date('2026-06-19T00:02:00+08:00'), new Date('2026-06-19T00:02:00+08:00'));
 
     try {
-      await expect(collectCodexDailyUsage({ codexHome: root, date: '2026-06-19' })).resolves.toMatchObject({
+      await expect(collectOkUsage({ codexHome: root, date: '2026-06-19' })).resolves.toMatchObject({
         calls: 1,
         input_tokens: 30,
         cache_read_tokens: 20,
@@ -439,7 +450,7 @@ describe('Codex token usage collector', () => {
     ]);
 
     try {
-      await expect(collectCodexDailyUsage({ codexHome: root, date: '2026-06-18' })).resolves.toMatchObject({
+      await expect(collectOkUsage({ codexHome: root, date: '2026-06-18' })).resolves.toMatchObject({
         calls: 1,
         input_tokens: 1,
         output_tokens: 1,
@@ -498,7 +509,7 @@ describe('Codex token usage collector', () => {
     }
 
     try {
-      await expect(collectCodexDailyUsage({ codexHome: root, date: '2026-06-18' })).resolves.toMatchObject({
+      await expect(collectOkUsage({ codexHome: root, date: '2026-06-18' })).resolves.toMatchObject({
         calls: 2,
         input_tokens: 120,
         cache_read_tokens: 80,
@@ -514,7 +525,7 @@ describe('Codex token usage collector', () => {
   it('returns zero totals when no Codex usage exists for the date', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-token-empty-'));
     try {
-      const actual = await collectCodexDailyUsage({
+      const actual = await collectOkUsage({
         codexHome: root,
         date: '2026-06-18',
       });
@@ -535,6 +546,248 @@ describe('Codex token usage collector', () => {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+
+  describe('scan size guard', () => {
+    it('scans when candidate bytes are below the configured limit', async () => {
+      const fixture = createSingleCodexFile('below-limit');
+      try {
+        const size = fs.statSync(fixture.filePath).size;
+        const result = await collectOkResult({
+          codexHome: fixture.root,
+          date: '2026-06-18',
+          maxScanBytes: size + 1,
+        });
+
+        expect(result).toMatchObject({
+          status: 'ok',
+          candidateFiles: 1,
+          candidateBytes: size,
+          scanLimitBytes: size + 1,
+        });
+      } finally {
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+
+    it('scans when candidate bytes exactly equal the configured limit', async () => {
+      const fixture = createSingleCodexFile('equal-limit');
+      try {
+        const size = fs.statSync(fixture.filePath).size;
+        const result = await collectOkResult({
+          codexHome: fixture.root,
+          date: '2026-06-18',
+          maxScanBytes: size,
+        });
+
+        expect(result.scanLimitBytes).toBe(size);
+        expect(result.candidateBytes).toBe(size);
+      } finally {
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+
+    it('skips one over-limit file before scanning its full contents', async () => {
+      const fixture = createSingleCodexFile('over-limit', 'x'.repeat(2048));
+      try {
+        const size = fs.statSync(fixture.filePath).size;
+        const result = await collectCodexDailyUsage({
+          codexHome: fixture.root,
+          date: '2026-06-18',
+          maxScanBytes: size - 1,
+        });
+
+        expect(result).toEqual({
+          status: 'skipped',
+          date: '2026-06-18',
+          codexHome: fixture.root,
+          reason: 'scan_bytes_limit_exceeded',
+          candidateFiles: 1,
+          candidateBytes: size,
+          scanLimitBytes: size - 1,
+        });
+      } finally {
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+
+    it('caps a full scan at the candidate size captured before the file grows', async () => {
+      const fixture = createSingleCodexFile('growing-file');
+      const initialSize = fs.statSync(fixture.filePath).size;
+      const originalStat = fs.promises.stat.bind(fs.promises);
+      let appended = false;
+      const statSpy = vi.spyOn(fs.promises, 'stat').mockImplementation(async (target) => {
+        const stat = await originalStat(target);
+        if (!appended && String(target) === fixture.filePath) {
+          appended = true;
+          fs.appendFileSync(
+            fixture.filePath,
+            `${JSON.stringify({
+              timestamp: '2026-06-18T09:01:00+08:00',
+              type: 'event_msg',
+              payload: {
+                type: 'token_count',
+                info: {
+                  last_token_usage: {
+                    input_tokens: 10,
+                    cached_input_tokens: 0,
+                    output_tokens: 5,
+                    reasoning_output_tokens: 0,
+                  },
+                },
+              },
+            })}\n`,
+          );
+        }
+        return stat;
+      });
+
+      try {
+        const result = await collectOkResult({
+          codexHome: fixture.root,
+          date: '2026-06-18',
+          maxScanBytes: initialSize,
+        });
+
+        expect(fs.statSync(fixture.filePath).size).toBeGreaterThan(initialSize);
+        expect(result).toMatchObject({ candidateBytes: initialSize, scanLimitBytes: initialSize });
+        expect(result.usage).toMatchObject({ calls: 0, total_tokens: 0 });
+      } finally {
+        statSpy.mockRestore();
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+
+    it('skips when multiple small Codex files exceed the limit in aggregate', async () => {
+      const first = createSingleCodexFile('aggregate-one');
+      try {
+        const dayDir = path.dirname(first.filePath);
+        const secondPath = path.join(dayDir, 'rollout-aggregate-two.jsonl');
+        writeJsonl(secondPath, [sessionMeta('aggregate-two')]);
+        const combinedSize = fs.statSync(first.filePath).size + fs.statSync(secondPath).size;
+
+        await expect(
+          collectCodexDailyUsage({
+            codexHome: first.root,
+            date: '2026-06-18',
+            maxScanBytes: combinedSize - 1,
+          }),
+        ).resolves.toMatchObject({
+          status: 'skipped',
+          candidateFiles: 2,
+          candidateBytes: combinedSize,
+        });
+      } finally {
+        fs.rmSync(first.root, { recursive: true, force: true });
+      }
+    });
+
+    it('does not charge a large non-Codex rollout against the scan budget', async () => {
+      const fixture = createSingleCodexFile('codex-only');
+      try {
+        const nonCodexPath = path.join(path.dirname(fixture.filePath), 'rollout-other-agent.jsonl');
+        writeJsonl(nonCodexPath, [
+          {
+            timestamp: '2026-06-18T09:00:00+08:00',
+            type: 'session_meta',
+            payload: { originator: 'multica-agent-sdk', session_id: 'other-agent' },
+          },
+          'x'.repeat(4096),
+        ]);
+        const codexSize = fs.statSync(fixture.filePath).size;
+
+        const result = await collectOkResult({
+          codexHome: fixture.root,
+          date: '2026-06-18',
+          maxScanBytes: codexSize,
+        });
+        expect(result).toMatchObject({
+          candidateFiles: 1,
+          candidateBytes: codexSize,
+          scanLimitBytes: codexSize,
+        });
+      } finally {
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+
+    it('counts valid Codex files from active and archived session directories', async () => {
+      const fixture = createSingleCodexFile('active');
+      try {
+        const archivedDir = path.join(fixture.root, 'archived_sessions');
+        fs.mkdirSync(archivedDir, { recursive: true });
+        const archivedPath = path.join(archivedDir, 'rollout-archived.jsonl');
+        writeJsonl(archivedPath, [sessionMeta('archived')]);
+        const combinedSize = fs.statSync(fixture.filePath).size + fs.statSync(archivedPath).size;
+
+        const result = await collectOkResult({ codexHome: fixture.root, date: '2026-06-18' });
+        expect(result).toMatchObject({ candidateFiles: 2, candidateBytes: combinedSize });
+        expect(result.usage.files_scanned).toBe(2);
+      } finally {
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+
+    it('safely ignores invalid, empty, and overlong first lines', async () => {
+      const fixture = createSingleCodexFile('valid-probe');
+      try {
+        const dayDir = path.dirname(fixture.filePath);
+        const invalidPath = path.join(dayDir, 'rollout-invalid-first-line.jsonl');
+        const emptyPath = path.join(dayDir, 'rollout-empty.jsonl');
+        const overlongPath = path.join(dayDir, 'rollout-overlong-first-line.jsonl');
+        writeJsonl(invalidPath, ['not-json']);
+        fs.writeFileSync(emptyPath, '', 'utf8');
+        fs.utimesSync(emptyPath, new Date('2026-06-18T12:00:00+08:00'), new Date('2026-06-18T12:00:00+08:00'));
+        writeJsonl(overlongPath, ['x'.repeat(64 * 1024)]);
+
+        const result = await collectOkResult({ codexHome: fixture.root, date: '2026-06-18' });
+        expect(result).toMatchObject({
+          candidateFiles: 1,
+          candidateBytes: fs.statSync(fixture.filePath).size,
+        });
+      } finally {
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+
+    it('continues probing a valid session_meta line after short reads', async () => {
+      const fixture = createSingleCodexFile('short-read');
+      const originalOpen = fs.promises.open.bind(fs.promises);
+      const openSpy = vi.spyOn(fs.promises, 'open').mockImplementationOnce(async (file, flags, mode) => {
+        const handle = await originalOpen(file, flags, mode);
+        const originalRead = handle.read.bind(handle);
+        handle.read = ((buffer: Buffer, offset: number, length: number, position: number) =>
+          originalRead(buffer, offset, Math.min(length, 1), position)) as typeof handle.read;
+        return handle;
+      });
+
+      try {
+        const result = await collectOkResult({ codexHome: fixture.root, date: '2026-06-18' });
+        expect(result).toMatchObject({ candidateFiles: 1, candidateBytes: fs.statSync(fixture.filePath).size });
+      } finally {
+        openSpy.mockRestore();
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+
+    it('surfaces unexpected first-line probe I/O failures instead of reporting ok', async () => {
+      const fixture = createSingleCodexFile('probe-io-failure');
+      const probeError = Object.assign(new Error('probe read failed'), { code: 'EIO' });
+      const openSpy = vi.spyOn(fs.promises, 'open').mockRejectedValueOnce(probeError);
+
+      try {
+        await expect(
+          collectCodexDailyUsage({ codexHome: fixture.root, date: '2026-06-18' }),
+        ).rejects.toBe(probeError);
+      } finally {
+        openSpy.mockRestore();
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+
+    it('uses an exact default limit of 200 MiB', () => {
+      expect(DEFAULT_MAX_CODEX_TOKEN_SCAN_BYTES).toBe(209_715_200);
+    });
+  });
 });
 
 describe('TokenUsageStateStore', () => {
@@ -546,8 +799,15 @@ describe('TokenUsageStateStore', () => {
         'codex',
         'u1',
         makeUsage({ calls: 2, total_tokens: 20 }),
+        makeScan(),
         new Date('2026-06-18T12:00:00+08:00'),
       );
+      expect(first).toMatchObject({
+        collection_status: 'ok',
+        candidate_files: '2',
+        candidate_bytes: '1024',
+        scan_limit_bytes: '209715200',
+      });
       expect(first.calls_delta).toBe('0');
       expect(first.total_tokens_delta).toBe('0');
 
@@ -555,6 +815,7 @@ describe('TokenUsageStateStore', () => {
         'codex',
         'u1',
         makeUsage({ calls: 5, total_tokens: 55 }),
+        makeScan(),
         new Date('2026-06-18T12:10:00+08:00'),
       );
       expect(second.calls_delta).toBe('3');
@@ -572,12 +833,14 @@ describe('TokenUsageStateStore', () => {
         'codex',
         'u1',
         makeUsage({ date: '2026-06-17', total_tokens: 100 }),
+        makeScan(),
         new Date('2026-06-17T12:00:00+08:00'),
       );
       const lower = await store.buildStatusRow(
         'codex',
         'u1',
         makeUsage({ date: '2026-06-17', total_tokens: 90 }),
+        makeScan(),
         new Date('2026-06-17T12:10:00+08:00'),
       );
       expect(lower.total_tokens_delta).toBe('0');
@@ -587,6 +850,7 @@ describe('TokenUsageStateStore', () => {
         'codex',
         'u1',
         makeUsage({ date: '2026-06-17', total_tokens: 110 }),
+        makeScan(),
         new Date('2026-06-17T12:20:00+08:00'),
       );
       expect(recovered.total_tokens_delta).toBe('10');
@@ -596,6 +860,7 @@ describe('TokenUsageStateStore', () => {
         'codex',
         'u1',
         makeUsage({ date: '2026-06-19', total_tokens: 10 }),
+        makeScan(),
         new Date('2026-06-19T12:00:00+08:00'),
       );
 
@@ -616,12 +881,14 @@ describe('TokenUsageStateStore', () => {
         'codex',
         'u1',
         makeUsage({ input_tokens: 100, total_tokens: 100 }),
+        makeScan(),
         new Date('2026-06-18T12:00:00+08:00'),
       );
       const partial = await store.buildStatusRow(
         'codex',
         'u1',
         makeUsage({ input_tokens: 50, output_tokens: 60, total_tokens: 110 }),
+        makeScan(),
         new Date('2026-06-18T12:10:00+08:00'),
       );
 
@@ -662,6 +929,7 @@ describe('TokenUsageStateStore', () => {
         'codex',
         'u1',
         makeUsage({ input_tokens: 100, output_tokens: 20, reasoning_tokens: 5, total_tokens: 115 }),
+        makeScan(),
         new Date('2026-06-18T12:00:00+08:00'),
       );
 
@@ -672,6 +940,37 @@ describe('TokenUsageStateStore', () => {
     } finally {
       fs.rmSync(dataDir, { recursive: true, force: true });
     }
+  });
+
+  it('builds a skipped row without any total or delta fields', () => {
+    const row = buildTokenUsageSkippedStatusRow(
+      'codex',
+      'u1',
+      {
+        status: 'skipped',
+        date: '2026-06-18',
+        codexHome: '/tmp/codex',
+        reason: 'scan_bytes_limit_exceeded',
+        candidateFiles: 3,
+        candidateBytes: 300,
+        scanLimitBytes: 200,
+      },
+      new Date('2026-06-18T12:00:00+08:00'),
+    );
+
+    expect(row).toEqual({
+      category: 'token_usage',
+      agent: 'codex',
+      user_id: 'u1',
+      date: '2026-06-18',
+      collection_status: 'skipped',
+      skip_reason: 'scan_bytes_limit_exceeded',
+      candidate_files: '3',
+      candidate_bytes: '300',
+      scan_limit_bytes: '200',
+      __time__: 1781755200,
+    });
+    expect(Object.keys(row).some((key) => key.endsWith('_total') || key.endsWith('_delta'))).toBe(false);
   });
 });
 
@@ -690,6 +989,50 @@ function makeUsage(overrides: Partial<TokenUsageDailyResult> = {}): TokenUsageDa
     total_tokens: 0,
   };
   return { ...base, ...overrides };
+}
+
+function makeScan(overrides: Partial<TokenUsageScanMetadata> = {}): TokenUsageScanMetadata {
+  return {
+    candidateFiles: 2,
+    candidateBytes: 1024,
+    scanLimitBytes: DEFAULT_MAX_CODEX_TOKEN_SCAN_BYTES,
+    ...overrides,
+  };
+}
+
+async function collectOkResult(
+  opts: Parameters<typeof collectCodexDailyUsage>[0],
+): Promise<CodexDailyUsageCollectionOkResult> {
+  const result = await collectCodexDailyUsage(opts);
+  expect(result.status).toBe('ok');
+  if (result.status !== 'ok') throw new Error(`expected ok result, received ${result.status}`);
+  return result;
+}
+
+async function collectOkUsage(
+  opts: Parameters<typeof collectCodexDailyUsage>[0],
+): Promise<TokenUsageDailyResult> {
+  return (await collectOkResult(opts)).usage;
+}
+
+function sessionMeta(sessionId: string): Record<string, unknown> {
+  return {
+    timestamp: '2026-06-18T09:00:00+08:00',
+    type: 'session_meta',
+    payload: { originator: 'Codex Desktop', session_id: sessionId },
+  };
+}
+
+function createSingleCodexFile(
+  name: string,
+  trailingContent?: string,
+): { root: string; filePath: string } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-token-size-guard-'));
+  const dayDir = path.join(root, 'sessions', '2026', '06', '18');
+  fs.mkdirSync(dayDir, { recursive: true });
+  const filePath = path.join(dayDir, `rollout-${name}.jsonl`);
+  writeJsonl(filePath, trailingContent ? [sessionMeta(name), trailingContent] : [sessionMeta(name)]);
+  return { root, filePath };
 }
 
 function createCodexFixture(): string {

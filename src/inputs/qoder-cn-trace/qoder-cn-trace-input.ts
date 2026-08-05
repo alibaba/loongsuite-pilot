@@ -152,7 +152,9 @@ export class QoderCnTraceInput extends BaseInput {
     }
 
     for (const [sessionId, sessionEntries] of ideSessionGroups) {
-      const sqliteRows = await readSqliteTokensForSession(sessionId);
+      // Intentionally ignores matchedDbPath: agent.type must never be derived from
+      // which candidate DB matched. See resolveQoderCnDbPaths in sqlite-token-reader.
+      const { rows: sqliteRows } = await readSqliteTokensForSession(sessionId);
       enrichIdeTurn(sessionEntries, sqliteRows);
       // Post-processing after enrichIdeTurn:
       expandContainerTimes(sessionEntries);

@@ -150,8 +150,76 @@ describe('OtlpTraceFlusher - conversion', () => {
 
     const opts = vi.mocked(convertEventLogToTrace).mock.calls[0][1] as { passthroughKeys?: string[] };
     expect(opts.passthroughKeys).toEqual(
-      expect.arrayContaining(['git.repo', 'git.branch', 'git.domain', 'workspace.current_root']),
+      expect.arrayContaining([
+        'git.repo',
+        'git.branch',
+        'git.domain',
+        'workspace.current_root',
+      ]),
     );
+  });
+
+  it('always preserves Agent hierarchy keys on converted spans', async () => {
+    const entry = {
+      'event.name': 'llm.response',
+      'gen_ai.agent.type': 'claude-code',
+      'gen_ai.turn.id': 'parent-session:t1',
+      'gen_ai.agent.scope': 'subagent',
+      'gen_ai.agent.depth': 1,
+      'gen_ai.agent.parent.id': 'parent-session',
+      'gen_ai.subagent.parent_tool_call.id': 'agent-call-1',
+      'gen_ai.response.finish_reasons': ['stop'],
+    } as unknown as AgentActivityEntry;
+
+    await flusher.send(entry);
+
+    const opts = vi.mocked(convertEventLogToTrace).mock.calls[0][1] as { passthroughKeys?: string[] };
+    expect(opts.passthroughKeys).toEqual(expect.arrayContaining([
+      'gen_ai.turn.id',
+      'gen_ai.agent.scope',
+      'gen_ai.agent.depth',
+      'gen_ai.agent.parent.id',
+      'gen_ai.subagent.parent_tool_call.id',
+    ]));
+  });
+
+  it('adds skill attributes only to the matching tool span', () => {
+    const records = [
+      {
+        'event.name': 'tool.call',
+        'gen_ai.tool.call.id': 'skill-call-1',
+        'gen_ai.skill.name': 'dogfood',
+        'gen_ai.skill.id': 'dogfood',
+      },
+      {
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.id': 'skill-call-1',
+        'gen_ai.skill.description': 'Exploratory QA for web apps.',
+        'gen_ai.skill.version': '1.0.0',
+      },
+    ] as unknown as AgentActivityEntry[];
+    const toolSpan = {
+      attributes: {
+        'gen_ai.span.kind': 'TOOL',
+        'gen_ai.tool.call.id': 'skill-call-1',
+      },
+    };
+    const llmSpan = {
+      attributes: {
+        'gen_ai.span.kind': 'LLM',
+        'gen_ai.tool.call.id': 'skill-call-1',
+      },
+    };
+
+    (flusher as any).enrichToolSkillAttributes(records, [toolSpan, llmSpan]);
+
+    expect(toolSpan.attributes).toMatchObject({
+      'gen_ai.skill.name': 'dogfood',
+      'gen_ai.skill.id': 'dogfood',
+      'gen_ai.skill.description': 'Exploratory QA for web apps.',
+      'gen_ai.skill.version': '1.0.0',
+    });
+    expect(llmSpan.attributes).not.toHaveProperty('gen_ai.skill.name');
   });
 
   describe('with GlobalAttributesProvider', () => {
@@ -261,13 +329,62 @@ describe('OtlpTraceFlusher - conversion', () => {
         'event.name': 'llm.response',
         'gen_ai.agent.type': 'claude-code',
         'gen_ai.turn.id': 'tp3',
+        'gen_ai.unapproved.attribute': 'ignored',
         'gen_ai.response.finish_reasons': ['stop'],
       } as unknown as AgentActivityEntry;
 
       await p.send(entry);
 
       const opts = vi.mocked(convertEventLogToTrace).mock.calls.at(-1)![1] as { passthroughKeys?: string[] };
-      expect(opts.passthroughKeys?.some((k) => k.startsWith('gen_ai.'))).toBe(false);
+      expect(opts.passthroughKeys).toEqual(expect.arrayContaining([
+        'gen_ai.turn.id',
+        'gen_ai.agent.scope',
+        'gen_ai.agent.depth',
+        'gen_ai.agent.parent.id',
+        'gen_ai.subagent.parent_tool_call.id',
+      ]));
+      expect(opts.passthroughKeys).not.toContain('gen_ai.unapproved.attribute');
     });
+  });
+
+  it('drops orphan llm.request / tool.call before conversion (no matching response/result)', async () => {
+    // Reproduces the mimo-code build-agent interrupted-turn scenario: turn
+    // has llm.request + 2 tool.call but no llm.response / tool.result. The
+    // flusher should drop the orphan request/call events so the converter
+    // doesn't emit empty LLM/TOOL spans with duration=0.
+    const entries = [
+      { 'event.name': 'other', 'gen_ai.agent.type': 'mimo-code', 'gen_ai.turn.id': 't5', 'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'hi' }] }] },
+      { 'event.name': 'llm.request', 'gen_ai.agent.type': 'mimo-code', 'gen_ai.turn.id': 't5', 'gen_ai.step.id': 't5:s1' },
+      { 'event.name': 'tool.call', 'gen_ai.agent.type': 'mimo-code', 'gen_ai.turn.id': 't5', 'gen_ai.step.id': 't5:s1', 'gen_ai.tool.call.id': 'call_orphan_1' },
+      { 'event.name': 'tool.call', 'gen_ai.agent.type': 'mimo-code', 'gen_ai.turn.id': 't5', 'gen_ai.step.id': 't5:s1', 'gen_ai.tool.call.id': 'call_orphan_2' },
+      // No Signal A (no llm.response with finish_reason=stop) — flush via shutdown.
+    ] as unknown as AgentActivityEntry[];
+
+    for (const e of entries) await flusher.send(e);
+    await flusher.flush();
+
+    expect(convertEventLogToTrace).toHaveBeenCalled();
+    const callArgs = vi.mocked(convertEventLogToTrace).mock.calls[0];
+    const sanitized = callArgs[0] as AgentActivityEntry[];
+    // Orphan llm.request + 2 tool.call dropped; "other" event kept.
+    expect(sanitized).toHaveLength(1);
+    expect(sanitized[0]['event.name']).toBe('other');
+  });
+
+  it('keeps llm.request / tool.call when matching response / result exists', async () => {
+    const entries = [
+      { 'event.name': 'llm.request', 'gen_ai.agent.type': 'claude-code', 'gen_ai.turn.id': 't6', 'gen_ai.step.id': 't6:s1' },
+      { 'event.name': 'tool.call', 'gen_ai.agent.type': 'claude-code', 'gen_ai.turn.id': 't6', 'gen_ai.step.id': 't6:s1', 'gen_ai.tool.call.id': 'call_ok' },
+      { 'event.name': 'tool.result', 'gen_ai.agent.type': 'claude-code', 'gen_ai.turn.id': 't6', 'gen_ai.step.id': 't6:s1', 'gen_ai.tool.call.id': 'call_ok' },
+      { 'event.name': 'llm.response', 'gen_ai.agent.type': 'claude-code', 'gen_ai.turn.id': 't6', 'gen_ai.step.id': 't6:s1', 'gen_ai.response.finish_reasons': ['stop'] },
+    ] as unknown as AgentActivityEntry[];
+
+    for (const e of entries) await flusher.send(e);
+
+    expect(convertEventLogToTrace).toHaveBeenCalled();
+    const callArgs = vi.mocked(convertEventLogToTrace).mock.calls[0];
+    const sanitized = callArgs[0] as AgentActivityEntry[];
+    // All 4 records kept — pairs are complete.
+    expect(sanitized).toHaveLength(4);
   });
 });

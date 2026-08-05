@@ -4,9 +4,15 @@
 
 // ─── Deploy Mode ───
 
-export type DeployMode = 'hook' | 'plugin-probe' | 'plugin-inject' | 'detection-only';
+export type DeployMode =
+  | 'hook'
+  | 'plugin-probe'
+  | 'plugin-inject'
+  | 'directory-plugin'
+  | 'detection-only';
 export type MountType = 'wrapper' | 'rc-inject' | 'env-inject';
 export type HookFormat = 'flat' | 'nested';
+export type SettingsSyntax = 'json' | 'jsonc';
 export type PluginSourceType = 'oss' | 'tar';
 
 // ─── Agent Definition (loaded from agents.d/*.json) ───
@@ -33,10 +39,18 @@ export interface TrustTomlConfig {
 
 export interface AgentHookConfig {
   settingsPath: string;
+  /**
+   * Syntax accepted by the owning agent's settings file. Defaults to strict
+   * JSON. JSONC files are edited in place so comments and unrelated formatting
+   * survive hook installation.
+   */
+  settingsSyntax?: SettingsSyntax;
   events: string[];
   hookCommand: string;
   format: HookFormat;
   matcher?: string;
+  /** Optional matcher override keyed by hook event name. */
+  eventMatchers?: Record<string, string>;
   replaceHookCommands?: string[];
   /** Events previously owned by this hook that must be removed during deploy. */
   retiredEvents?: string[];
@@ -64,6 +78,15 @@ export interface AgentHookConfig {
    * where the quoted path in -File "..." would become literal characters.
    */
   rawCommand?: boolean;
+  /**
+   * Windows-only: shell to declare on the nested hook entry
+   * (`{ command, type, shell }`). Some hosts (Qoder family) require an explicit
+   * `"shell": "powershell"` so the host runs the `.ps1` command through
+   * PowerShell instead of its default shell. Ignored on non-Windows platforms
+   * (where the command is a `.sh`), and only emitted for agents that set it —
+   * codex must never set it (its settings use serde deny_unknown_fields).
+   */
+  winShell?: string;
   /**
    * Optional env block to merge into the agent's settings.json on deploy.
    *
@@ -143,6 +166,30 @@ export interface AgentRuntimeConfig {
   fallback?: string;
 }
 
+export interface DirectoryPluginConfig {
+  /** Managed plugin directory copied by Pilot. */
+  sourceDir: string;
+  /** Final directory consumed by the target Agent. */
+  targetDir: string;
+  /** Ownership marker stored inside targetDir. */
+  markerFile?: string;
+  /** Optional target-native command used to activate the copied plugin. */
+  activation?: DirectoryPluginActivationConfig;
+}
+
+export interface DirectoryPluginActivationConfig {
+  /** Target Agent CLI executable. */
+  command: string;
+  /** Capability probe. A non-zero result means an older target does not require activation. */
+  probeArgs?: string[];
+  /** Maximum runtime for probe/enable/disable commands. */
+  timeoutMs?: number;
+  /** Arguments that enable the plugin after it has been copied. */
+  enableArgs: string[];
+  /** Best-effort arguments that disable the plugin before Pilot removes it. */
+  disableArgs?: string[];
+}
+
 export interface AgentDefinition {
   id: string;
   displayName: string;
@@ -153,6 +200,7 @@ export interface AgentDefinition {
   hook?: AgentHookConfig;
   pluginProbe?: PluginProbeConfig;
   pluginInject?: PluginInjectConfig;
+  directoryPlugin?: DirectoryPluginConfig;
   input?: AgentInputConfig;
   /** 运行时要求（如 node:sqlite）与无该依赖时的 fallback 声明 */
   runtime?: AgentRuntimeConfig;
@@ -184,6 +232,8 @@ export interface DeployedAgentRecord {
   deployedAt: string;
   sourceHash?: string;
   lastRemoteCheckedAt?: string;
+  /** Resolved external target for managed directory plugins. */
+  targetDir?: string;
 }
 
 export type DeployedAgentsState = Record<string, DeployedAgentRecord>;

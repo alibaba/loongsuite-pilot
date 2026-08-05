@@ -15,6 +15,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { decodePayload } from './shared/decode-payload.mjs';
 import {
   applyHookContentPolicy,
   hashJson,
@@ -66,9 +67,8 @@ async function readStdin() {
   for await (const chunk of process.stdin) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   }
-  let str = Buffer.concat(chunks).toString('utf-8');
-  if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
-  return str;
+  // decodePayload 去 BOM 并修复中文 UTF-8->GBK 双重编码(纠偏已从 PS 侧移入 node)。
+  return decodePayload(Buffer.concat(chunks));
 }
 
 async function appendJsonl(filePath, record) {
@@ -181,7 +181,8 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
       'gen_ai.tool.call.id': toolCallId,
       'gen_ai.tool.call.arguments': { path: skill.skillPath },
       'gen_ai.skill.name': skill.skillName,
-      'agent.cursor.skill_detection_source': 'transcript_post_assembly',
+      'agent.cursor.skill_detection_source':
+        skill.detectionSource || 'transcript_post_assembly',
     }, runtimeConfig));
 
     // tool.result
@@ -194,12 +195,30 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
       'gen_ai.tool.name': 'Read',
       'gen_ai.tool.call.id': toolCallId,
       'gen_ai.skill.name': skill.skillName,
-      'agent.cursor.skill_detection_source': 'transcript_post_assembly',
+      'agent.cursor.skill_detection_source':
+        skill.detectionSource || 'transcript_post_assembly',
     }, runtimeConfig));
   }
 
   // Insert after the first LLM response.
   records.splice(targetLlmIdx + 1, 0, ...insertRecords);
+}
+
+function filterSkillsForReadInjection(skills, assembledFromTranscript) {
+  return skills.filter(skill => {
+    const sources = skill.detectionSources || [];
+
+    if (!assembledFromTranscript) {
+      return sources.includes('manual_attachment') ||
+        sources.includes('transcript_read');
+    }
+
+    // The transcript assembler already materializes real Read tool_use entries.
+    // Only synthesize a Read when manual attachment is the sole evidence. A skill
+    // with both sources already has its real transcript Read in the assembled step.
+    return sources.includes('manual_attachment') &&
+      !sources.includes('transcript_read');
+  });
 }
 
 async function main() {
@@ -364,10 +383,17 @@ async function main() {
         if (transcriptPathForSkill && promptForSkill?.prompt && records.length > 0) {
           const { detectSkillFromTranscript } = await import('./cursor/skill-detector.mjs');
           const detectedSkills = detectSkillFromTranscript(transcriptPathForSkill, promptForSkill.prompt);
-          // The Windows transcript assembler already materializes transcript
-          // tool_use entries. Only compensate paths assembled from hook events.
-          if (detectedSkills && detectedSkills.length > 0 && !assembledFromTranscript) {
-            injectSkillRecords(records, detectedSkills, runtimeConfig);
+          if (detectedSkills && detectedSkills.length > 0) {
+            // The Windows transcript assembler already materializes transcript
+            // Read tool_use entries. Synthesize only pure manual attachments on
+            // that path; hook-event assembly still needs both evidence sources.
+            const readSkills = filterSkillsForReadInjection(
+              detectedSkills,
+              assembledFromTranscript,
+            );
+            if (readSkills.length > 0) {
+              injectSkillRecords(records, readSkills, runtimeConfig);
+            }
           }
         }
       } catch { /* best-effort skill detection — never block output */ }
@@ -443,4 +469,4 @@ if (
   });
 }
 
-export { injectSkillRecords };
+export { filterSkillsForReadInjection, injectSkillRecords };

@@ -8,17 +8,12 @@
 #   loongsuite-pilot status
 #   loongsuite-pilot info
 #   loongsuite-pilot rollback
+#   loongsuite-pilot worker connect|list|status|disconnect|delete
 #   loongsuite-pilot help
 
-[CmdletBinding()]
-param(
-    [Parameter(Position = 0)]
-    [string]$Command = "status",
-
-    [Parameter(Position = 1, ValueFromRemainingArguments)]
-    [string[]]$SubArgs
-)
-
+$CliArgs = @($args)
+$Command = if ($CliArgs.Count -ge 1) { [string]$CliArgs[0] } else { "status" }
+$SubArgs = if ($CliArgs.Count -ge 2) { [string[]]$CliArgs[1..($CliArgs.Count - 1)] } else { @() }
 $ErrorActionPreference = "Stop"
 
 # ============================================================
@@ -242,21 +237,23 @@ function Test-PidRunning {
 }
 
 function Get-CollectorRuntime {
-    param([datetimeoffset]$NotBefore = [datetimeoffset]::MinValue)
+    # Use [datetime] (a Constrained-Language core type) instead of [datetimeoffset],
+    # which is not a core type and throws under CLM (WDAC). Comparisons stay correct
+    # because every value below is a local-time [datetime].
+    param([datetime]$NotBefore = [datetime]::MinValue)
     if (-not (Test-Path -LiteralPath $RUNTIME_FILE)) { return $null }
     try {
         $runtime = Get-Content -LiteralPath $RUNTIME_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
-        $updatedAt = [datetimeoffset]::Parse(
-            [string]$runtime.updatedAt,
-            [System.Globalization.CultureInfo]::InvariantCulture,
-            [System.Globalization.DateTimeStyles]::RoundtripKind
-        )
+        # Get-Date (a cmdlet) parses the ISO-8601 timestamp without the CLM-forbidden
+        # [datetimeoffset]::Parse / [CultureInfo]::InvariantCulture / [DateTimeStyles],
+        # normalizing any offset to local time to match (Get-Date) below.
+        $updatedAt = Get-Date -Date ([string]$runtime.updatedAt)
         $pidValue = [int]$runtime.pid
         if (
             $runtime.status -ne "active" -or
             $pidValue -le 0 -or
             $updatedAt -lt $NotBefore -or
-            $updatedAt -lt [datetimeoffset]::Now.AddMinutes(-2) -or
+            $updatedAt -lt (Get-Date).AddMinutes(-2) -or
             -not (Get-Process -Id $pidValue -ErrorAction SilentlyContinue)
         ) {
             return $null
@@ -292,11 +289,15 @@ function Stop-PidFile {
 }
 
 function Stop-OrphanProcesses {
+    # $Match limits which daemons are terminated; the default kills both. Callers that
+    # re-register a single task (Install-CollectorTask / Install-UpdaterTask) pass a
+    # narrow pattern so they only reap the daemon they are about to re-launch.
+    param([string]$Match = "collector-daemon|updater-daemon")
     Get-Process -Name "node" -ErrorAction SilentlyContinue |
         Where-Object {
             try {
                 $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
-                $cmdLine -match "collector-daemon" -or $cmdLine -match "updater-daemon"
+                $cmdLine -match $Match
             } catch { $false }
         } | ForEach-Object {
             Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
@@ -321,7 +322,7 @@ function Get-TaskRunning {
 
 function Wait-ForCollectorHeartbeat {
     param([int]$TimeoutSeconds = 15)
-    $notBefore = [datetimeoffset]::Now.AddSeconds(-2)
+    $notBefore = (Get-Date).AddSeconds(-2)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
         if (
@@ -350,11 +351,12 @@ function Start-CompatibleExistingCollectorTask {
     $action = $task.Actions | Select-Object -First 1
     $actionArgs = if ($action) { [string]$action.Arguments } else { "" }
     $actionExe = if ($action) { [string]$action.Execute } else { "" }
-    $isWscript = [System.IO.Path]::GetFileName($actionExe) -ieq "wscript.exe"
-    $usesExpectedLauncher = $actionArgs.IndexOf(
-        $expectedLauncher,
-        [System.StringComparison]::OrdinalIgnoreCase
-    ) -ge 0
+    # Split-Path -Leaf and case-folded string ops instead of [System.IO.Path]::GetFileName
+    # and String.IndexOf(StringComparison), which are forbidden under Constrained Language
+    # Mode (WDAC). $actionExe is typically the bare "wscript.exe".
+    $exeLeaf = if ($actionExe) { Split-Path -Leaf $actionExe } else { "" }
+    $isWscript = $exeLeaf -ieq "wscript.exe"
+    $usesExpectedLauncher = $actionArgs.ToLower().Contains($expectedLauncher.ToLower())
     if (-not $isWscript -or -not $usesExpectedLauncher) {
         Write-Host "Existing collector task uses an incompatible action; refusing to reuse it." -ForegroundColor Yellow
         return $false
@@ -499,6 +501,13 @@ function Install-CollectorTask {
         -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit ([TimeSpan]::Zero)
 
+    # Kill any collector daemon left running under the OLD task registration BEFORE we
+    # delete/re-create the task. Deleting a task does not stop its running child, and the
+    # freshly registered task's MultipleInstances=IgnoreNew only counts instances under the
+    # new registration — so without this reap the orphan keeps running alongside the new
+    # instance and both write the same output (duplicate-collection incident root cause).
+    Stop-OrphanProcesses -Match "collector-daemon"
+
     # Remove existing task first (schtasks is more reliable than Unregister-ScheduledTask)
     # Use try/catch because schtasks stderr + $ErrorActionPreference=Stop can throw
     try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_COLLECTOR" /F 2>$null | Out-Null } catch {}
@@ -532,6 +541,10 @@ function Install-UpdaterTask {
         -RestartCount 3 `
         -RestartInterval (New-TimeSpan -Minutes 5) `
         -ExecutionTimeLimit ([TimeSpan]::Zero)
+
+    # Reap any orphaned updater daemon from the old registration before re-creating
+    # the task (same rationale as Install-CollectorTask above).
+    Stop-OrphanProcesses -Match "updater-daemon"
 
     try { schtasks.exe /Delete /TN "$TASK_FOLDER\$TASK_NAME_UPDATER" /F 2>$null | Out-Null } catch {}
     try { schtasks.exe /Delete /TN "$TASK_NAME_UPDATER" /F 2>$null | Out-Null } catch {}
@@ -587,7 +600,11 @@ function Cmd-Run {
         exit 1
     }
 
-    Set-Content -Path $PID_FILE -Value $PID
+    # Windows has no exec(2): node runs as our child, so it publishes its own pid file
+    # (see src/index.ts) instead of us recording the wrapper pid here. Export the data
+    # dir so node's env-first resolution writes $DATA_DIR\loongsuite-pilot.pid — the exact
+    # path stop/status read.
+    $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
     $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
     & $nodeBin $entry
 }
@@ -608,7 +625,9 @@ function Cmd-RunUpdater {
         exit 1
     }
 
-    Set-Content -Path $UPDATER_PID_FILE -Value $PID
+    # See Cmd-Run: node publishes its own pid file on Windows. Export the data dir so
+    # node writes $DATA_DIR\loongsuite-pilot-updater.pid where stop/status read it.
+    $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
     $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
     & $nodeBin $entry
 }
@@ -807,12 +826,13 @@ function Cmd-RestartCollector {
                     exit 1
                 }
                 $errLog = Join-Path $LOG_DIR "loongsuite-pilot-service-err.log"
-                $proc = Start-Process -FilePath "powershell.exe" `
-                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
+                # node publishes its own pid file on Windows (see src/index.ts); export the
+                # data dir so it lands at $DATA_DIR\loongsuite-pilot.pid. No Set-Content here —
+                # $proc.Id would be the wrapper pid, not node's.
+                Start-Process -FilePath "powershell.exe" `
+                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'; `$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$LOG_FILE' 2>> '$errLog'`"" `
                     -WorkingDirectory $CACHE_DIR `
-                    -WindowStyle Hidden `
-                    -PassThru
-                Set-Content -Path $PID_FILE -Value $proc.Id
+                    -WindowStyle Hidden
                 Write-Host "collector restarted (background fallback, self-heal failed)" -ForegroundColor Yellow
             } else {
                 Write-Error "Service manager failed to restart collector (init_type=$initType)"
@@ -904,12 +924,13 @@ function Cmd-RestartUpdater {
                     return
                 }
                 $updaterErrLog = Join-Path $LOG_DIR "loongsuite-pilot-updater-err.log"
-                $proc = Start-Process -FilePath "powershell.exe" `
-                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$UPDATER_LOG_FILE' 2>> '$updaterErrLog'`"" `
+                # node publishes its own pid file on Windows (see src/updater/index.ts); export
+                # the data dir so it lands at $DATA_DIR\loongsuite-pilot-updater.pid. No
+                # Set-Content — $proc.Id would be the wrapper pid, not node's.
+                Start-Process -FilePath "powershell.exe" `
+                    -ArgumentList "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"`$env:LOONGSUITE_PILOT_DATA_DIR='$DATA_DIR'; `$env:AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'; & '$nodeBin' '$entry' >> '$UPDATER_LOG_FILE' 2>> '$updaterErrLog'`"" `
                     -WorkingDirectory $CACHE_DIR `
-                    -WindowStyle Hidden `
-                    -PassThru
-                Set-Content -Path $UPDATER_PID_FILE -Value $proc.Id
+                    -WindowStyle Hidden
                 Write-Host "updater restarted (background fallback, self-heal failed)" -ForegroundColor Yellow
             } else {
                 Write-Error "Service manager failed to restart updater (init_type=$initType)"
@@ -1031,6 +1052,45 @@ function Cmd-Info {
 # ============================================================
 # CMD: rollback
 # ============================================================
+function Remove-HermesPluginForRollback {
+    param([string]$TargetVersionPath)
+
+    if (Test-Path (Join-Path $TargetVersionPath "agents.d\hermes-agent.json")) { return }
+
+    $hermesHome = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:USERPROFILE ".hermes" }
+    $pluginDir = Join-Path $hermesHome "plugins\loongsuite-pilot"
+    $stateFile = Join-Path $DATA_DIR "deployed-agents.json"
+    $state = $null
+    if (Test-Path $stateFile) {
+        try {
+            $state = Get-Content $stateFile -Raw | ConvertFrom-Json
+            $recorded = $state.'hermes-agent'.targetDir
+            if ($recorded -and [System.IO.Path]::IsPathRooted([string]$recorded)) {
+                $pluginDir = [string]$recorded
+            }
+        } catch {
+            $state = $null
+        }
+    }
+
+    $marker = Join-Path $pluginDir ".loongsuite-pilot-managed.json"
+    if (-not (Test-Path $marker)) { return }
+    try {
+        $meta = Get-Content $marker -Raw | ConvertFrom-Json
+        if ($meta.owner -ne "loongsuite-pilot" -or $meta.agentId -ne "hermes-agent") { return }
+        Remove-Item $pluginDir -Recurse -Force
+        if ($state -and $state.'hermes-agent') {
+            $state.PSObject.Properties.Remove('hermes-agent')
+            $tmp = "$stateFile.tmp"
+            $state | ConvertTo-Json -Depth 20 | Set-Content $tmp
+            Move-Item -Force $tmp $stateFile
+        }
+        Write-Host "   Removed Hermes plugin not supported by rollback target: $pluginDir"
+    } catch {
+        Write-Warning "Failed to clean Hermes plugin during rollback: $pluginDir"
+    }
+}
+
 function Cmd-Rollback {
     if (-not (Test-Path $PREVIOUS_FILE)) {
         Write-Error "No previous version to roll back to"
@@ -1068,6 +1128,8 @@ function Cmd-Rollback {
         exit 1
     }
 
+    Remove-HermesPluginForRollback $prevPath
+
     Write-Host "Rolled back to version: $prevDir"
     Write-Host "   Restarting service..."
     Cmd-Restart
@@ -1082,6 +1144,34 @@ function Cmd-Log {
     } else {
         Write-Host "No log file found: $LOG_FILE"
     }
+}
+
+# ============================================================
+# CMD: worker (foreground local Worker management CLI)
+# ============================================================
+function Cmd-Worker {
+    $versionDir = Resolve-CurrentVersion
+    if (-not $versionDir) {
+        Write-Error "Current loongsuite-pilot version not found"
+        exit 1
+    }
+
+    $entry = Join-Path $versionDir "dist\index.js"
+    if (-not (Test-Path $entry -PathType Leaf)) {
+        Write-Error "Worker CLI entrypoint missing"
+        exit 1
+    }
+
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) {
+        Write-Error "node runtime not found"
+        exit 1
+    }
+
+    $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
+    $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
+    & $nodeBin $entry "worker" @SubArgs
+    exit $LASTEXITCODE
 }
 
 # ============================================================
@@ -1151,6 +1241,8 @@ function Cmd-Help {
     Write-Host "  log             Tail the service log"
     Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     Write-Host "  rollback        Roll back to the previous version"
+    Write-Host "  worker          Manage local Workers:"
+    Write-Host "                    worker connect/list/status/disconnect/delete"
     Write-Host "  help            Show this help message"
 }
 
@@ -1165,6 +1257,7 @@ switch ($Command.ToLower()) {
     "info"               { Cmd-Info }
     "log"                { Cmd-Log }
     "rollback"           { Cmd-Rollback }
+    "worker"             { Cmd-Worker }
     "restart-collector"  { Cmd-RestartCollector }
     "restart-updater"    { Cmd-RestartUpdater }
     "run"                { Cmd-Run }

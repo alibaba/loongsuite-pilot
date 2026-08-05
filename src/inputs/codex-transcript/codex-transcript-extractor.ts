@@ -108,6 +108,7 @@ function extractCodexTurn(
   let terminalAtMs = 0;
   let status: CodexTerminalStatus | null = null;
   let sawTerminal = false;
+  let sawSubmittedUserMessage = false;
   let finalText: string | undefined;
   let model = opts.model ?? 'unknown';
   let cwd = opts.cwd;
@@ -210,6 +211,7 @@ function extractCodexTurn(
     if (record.type === 'event_msg') {
       if (payload.type === 'user_message') {
         appendPrompt(stringValue(payload.message));
+        sawSubmittedUserMessage = true;
         markActivity(timestamp);
         continue;
       }
@@ -412,6 +414,10 @@ function extractCodexTurn(
 
   const resolvedStatus = status ?? 'completed';
   const steps = stepEnvelopes.map(envelope => envelope.step);
+  const promptReady = Boolean(
+    prompt
+    && (sawSubmittedUserMessage || steps.length > 0 || sawTerminal),
+  );
   const turn: CodexExtractedTranscriptTurn = {
     sessionId: meta?.sessionId || fallbackSessionId,
     transcriptTurnId: expectedTurnId,
@@ -421,6 +427,7 @@ function extractCodexTurn(
     startedAtMs: startedAtMs || terminalAtMs,
     terminalAtMs,
     ...(prompt ? { prompt } : {}),
+    promptReady,
     inputMessages,
     ...(cwd ? { cwd } : {}),
     ...(developerInstructions ? { developerInstructions } : {}),

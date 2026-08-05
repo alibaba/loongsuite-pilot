@@ -1,4 +1,4 @@
-# Cursor hook entrypoint (Windows) — delegates to cursor-hook-processor.mjs.
+# Cursor hook entrypoint (Windows) - delegates to cursor-hook-processor.mjs.
 #
 # Fail-open: any error outputs "{}" and exits 0.
 
@@ -86,36 +86,16 @@ if (-not $nodeBin) {
 }
 
 try {
-    # Read stdin as raw bytes to avoid PowerShell encoding issues (GB2312/ASCII mangles UTF-8)
-    $stdinStream = [Console]::OpenStandardInput()
-    $ms = New-Object System.IO.MemoryStream
-    $stdinStream.CopyTo($ms)
-    $rawBytes = $ms.ToArray()
-    $ms.Dispose()
-
-    # Strip UTF-8 BOM (EF BB BF) before passing to Node.
-    if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
-        $rawBytes = $rawBytes[3..($rawBytes.Length - 1)]
-    }
-
-    if ($rawBytes.Length -eq 0) {
-        $result = & $nodeBin $Processor 2>$null
-    } else {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $nodeBin
-        $psi.Arguments = "`"$Processor`""
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardInput = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $false
-        $psi.CreateNoWindow = $true
-
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        $proc.StandardInput.BaseStream.Write($rawBytes, 0, $rawBytes.Length)
-        $proc.StandardInput.Close()
-        $result = $proc.StandardOutput.ReadToEnd()
-        $proc.WaitForExit()
-    }
+    # CLM/WDAC-safe passthrough: node inherits this process's stdin (fd0) and
+    # reads it directly; PowerShell never touches the bytes. The old code used
+    # [Console]::OpenStandardInput / MemoryStream / ProcessStartInfo, whose .NET
+    # calls throw under Constrained Language Mode (WDAC/Device Guard) and silently
+    # drop telemetry. BOM stripping and the Chinese UTF-8->GBK fixup now live in
+    # node (shared/decode-payload.mjs).
+    # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 parses a BOM-less
+    # script using the system ANSI code page (GBK/936 on Chinese Windows); any
+    # non-ASCII byte here can corrupt parsing and abort the whole script.
+    $result = & $nodeBin $Processor 2>$null
     if ($result) { Write-Output $result } else { Write-Output $EMPTY_RESULT }
 } catch {
     Write-Error "[loongsuite-pilot] hook processor failed"

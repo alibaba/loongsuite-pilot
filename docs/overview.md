@@ -26,6 +26,7 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / local session polling | Yes | Yes | No | Yes |
+| Hermes Agent | Native directory plugin | Yes | Yes | Yes | Yes |
 | OpenCode | Plugin injection | Yes | Yes | Yes | Yes |
 | Pi Coding Agent | Extension injection | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
@@ -36,6 +37,7 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Qoder Work CN | Hook / local data polling | Yes | Yes | Yes | Yes |
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
 | Wukong | CLI API polling | Yes | Yes | Yes | Yes |
+| WorkBuddy | Hook wakeup + local transcript watch/poll fallback | Yes | Yes | Yes | Yes |
 
 ### Documented Windows Agent Support
 
@@ -49,6 +51,7 @@ The general support table describes integration capabilities across Pilot and mu
 | Qoder CLI | Hook | Yes | Yes | No | Yes | — |
 | Qoder IDE | Hook / local data source | Yes | Yes | Yes | Yes | Qoder 1.10.0 or later, User edition |
 | OpenCode | Plugin injection | Yes | Yes | Yes | Yes | — |
+| WorkBuddy | Hook wakeup + local transcript | Yes | Yes | Yes | Yes | WorkBuddy Desktop 5.3.5.0; Windows 11 installed-product E2E |
 
 Agents omitted from this table do not currently have an explicit Windows support statement; omission does not necessarily mean that the agent cannot run on Windows. This matrix follows the [Alibaba Cloud AI Coding Agent access guide](https://help.aliyun.com/zh/cms/cloudmonitor-2-0/ai-application-access-ai-coding-agent/). See [Installation](installation.md) for Windows prerequisites and setup.
 

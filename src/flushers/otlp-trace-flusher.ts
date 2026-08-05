@@ -33,13 +33,26 @@ import path from 'node:path';
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
-const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled']);
+const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
+// Hard cap on simultaneously-open turn buffers. Above this, the oldest
+// incomplete buffers are force-flushed to bound memory in pathological
+// cases (e.g. an agent that never emits a terminal llm.response AND never
+// sends a same-session successor AND turnIdleTimeoutMs=0). Normal load
+// stays well under this; the cap is defense-in-depth, not a tuned limit.
+const MAX_TURN_BUFFERS = 64;
+const SKILL_ATTRIBUTE_KEYS = [
+  'gen_ai.skill.name',
+  'gen_ai.skill.id',
+  'gen_ai.skill.description',
+  'gen_ai.skill.version',
+] as const;
 
 interface TurnBuffer {
   key: string;
   keySource: 'turn_id' | 'trace_id' | 'session_id' | 'ephemeral';
   keyValue: string;
   agentType: string;
+  sessionId?: string;
   records: AgentActivityEntry[];
   completed: boolean;
   lastActivityMs: number;
@@ -86,6 +99,7 @@ const RESERVED_RESOURCE_KEYS = new Set([
   'host.name',
   'gen_ai.agent.type',
   'gen_ai.agent.system',
+  'gen_ai.framework',
 ]);
 
 type ResourceProjectionValue = string | number | boolean;
@@ -105,6 +119,13 @@ const defaultExporterFactory: OtlpExporterFactory = ({ url, headers, compression
 
 const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
 const MAX_CONVERT_STATES = 64;
+const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
+  'gen_ai.turn.id',
+  'gen_ai.agent.scope',
+  'gen_ai.agent.depth',
+  'gen_ai.agent.parent.id',
+  'gen_ai.subagent.parent_tool_call.id',
+];
 
 function estimateSpanSize(span: ReadableSpan): number {
   let size = 512;
@@ -217,11 +238,30 @@ export class OtlpTraceFlusher extends BaseFlusher {
       return;
     }
 
-    // Signal B: check if there's an active buffer for same agentType with different key
+    // Signal B: a different turn from the same agent type is a boundary only
+    // when both turns are confirmed to belong to the same session.
+    // Different or unknown sessions may be concurrent; preempting one would
+    // split its records and synthesize duplicate ENTRY/AGENT spans.
+    const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) || undefined;
     for (const [bufKey, buf] of this.turnBuffers) {
-      if (buf.agentType === agentType && bufKey !== key && !buf.completed) {
-        buf.completed = true;
-        this.triggerFlush(buf, false);
+      if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
+      if (!incomingSessionId || !buf.sessionId || incomingSessionId !== buf.sessionId) continue;
+      buf.completed = true;
+      this.triggerFlush(buf, false);
+    }
+
+    // Bounded cleanup: if buffers have accumulated past the hard cap (pathological
+    // case where neither Signal A, same-session successor, nor idle timeout ever
+    // fires for many turns), flush oldest incomplete buffers to bound memory.
+    if (this.turnBuffers.size > MAX_TURN_BUFFERS) {
+      const overflow = this.turnBuffers.size - MAX_TURN_BUFFERS;
+      const candidates = [...this.turnBuffers.values()]
+        .filter((b) => !b.completed)
+        .sort((a, b) => a.lastActivityMs - b.lastActivityMs)
+        .slice(0, overflow);
+      for (const b of candidates) {
+        b.completed = true;
+        this.triggerFlush(b, false);
       }
     }
 
@@ -232,11 +272,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
         keySource: source,
         keyValue: value,
         agentType,
+        sessionId: incomingSessionId,
         records: [],
         completed: false,
         lastActivityMs: Date.now(),
       };
       this.turnBuffers.set(key, buf);
+    } else if (!buf.sessionId && incomingSessionId) {
+      buf.sessionId = incomingSessionId;
     }
     buf.records.push(entry);
     buf.lastActivityMs = Date.now();
@@ -443,7 +486,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
                 ),
               ),
             )];
-        const passthroughKeys = [...new Set([...DEFAULT_GIT_PASSTHROUGH_KEYS, ...customKeys, ...prefixKeys])];
+        const passthroughKeys = [...new Set([
+          ...DEFAULT_GIT_PASSTHROUGH_KEYS,
+          ...GEN_AI_HIERARCHY_PASSTHROUGH_KEYS,
+          ...customKeys,
+          ...prefixKeys,
+        ])];
         const recordsForConversion = customKeys.length === 0
           ? records
           : records.map((r) => {
@@ -454,8 +502,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
               return copy;
             });
 
+        // Drop orphan llm.request / tool.call events before conversion so the
+        // converter doesn't emit empty LLM/TOOL spans with duration=0 and
+        // missing output.messages / tool.call.result. This happens when a
+        // turn is interrupted before llm.response / tool.result arrive (e.g.
+        // user Ctrl+C, agent errored mid-step). The converter library would
+        // otherwise still emit a span for the orphan request/call.
+        const sanitized = dropOrphanPairs(recordsForConversion);
         const result = convertEventLogToTrace(
-          recordsForConversion as unknown as EventLogRecord[],
+          sanitized as unknown as EventLogRecord[],
           { handler, strict: false, passthroughKeys },
         );
         if (result.warnings.length > 0) {
@@ -471,6 +526,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       inMem.reset();
 
       if (spans.length === 0) return;
+      this.enrichToolSkillAttributes(records, spans);
 
       const exportState = this.getOrCreateExportState(agentType, serviceName);
 
@@ -581,6 +637,33 @@ export class OtlpTraceFlusher extends BaseFlusher {
     this.agentConvertStates.set(key, state);
     this.evictConvertStates();
     return state;
+  }
+
+  private enrichToolSkillAttributes(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+  ): void {
+    const attributesByCallId = new Map<string, Record<string, string>>();
+    for (const record of records) {
+      if (record['event.name'] !== 'tool.call' && record['event.name'] !== 'tool.result') continue;
+      const callId = record['gen_ai.tool.call.id'];
+      if (typeof callId !== 'string' || callId.length === 0) continue;
+
+      const attributes = attributesByCallId.get(callId) ?? {};
+      for (const key of SKILL_ATTRIBUTE_KEYS) {
+        const value = record[key];
+        if (typeof value === 'string' && value.length > 0) attributes[key] = value;
+      }
+      if (Object.keys(attributes).length > 0) attributesByCallId.set(callId, attributes);
+    }
+
+    for (const span of spans) {
+      if (span.attributes['gen_ai.span.kind'] !== 'TOOL') continue;
+      const callId = span.attributes['gen_ai.tool.call.id'];
+      if (typeof callId !== 'string') continue;
+      const attributes = attributesByCallId.get(callId);
+      if (attributes) Object.assign(span.attributes, attributes);
+    }
   }
 
   private evictConvertStates(): void {
@@ -737,6 +820,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
       'host.name': os.hostname(),
       'gen_ai.agent.type': agentType,
       'gen_ai.agent.system': resolveAgentSystem(agentType),
+      // ARMS GenAI semconv recommends gen_ai.framework on every span. The
+      // converter library doesn't set it on span attributes, so we set it on
+      // the Resource — OTel resources propagate to all spans of the trace,
+      // which CMS reads the same way as span-level gen_ai.framework.
+      'gen_ai.framework': agentType,
       ...userAttrs,
       ...projectedAttrs,
     });
@@ -799,4 +887,49 @@ export class OtlpTraceFlusher extends BaseFlusher {
 function hasTerminalFinishReason(finishReasons: unknown): boolean {
   return Array.isArray(finishReasons)
     && finishReasons.some(reason => typeof reason === 'string' && TERMINAL_FINISH_REASONS.has(reason));
+}
+
+/**
+ * Drop orphan llm.request and tool.call events that have no matching
+ * llm.response / tool.result in the same turn buffer. Without this, the
+ * converter library still emits an LLM/TOOL span for the orphan event with
+ * duration=0 (endMs=startMs) and missing output.messages / tool.call.result.
+ *
+ * Pairing scope:
+ *   - llm.request ↔ llm.response: by gen_ai.step.id (a step is "complete"
+ *     if it has at least one llm.response).
+ *   - tool.call ↔ tool.result: by gen_ai.tool.call.id (a tool call is
+ *     "complete" if a tool.result with the same call.id exists).
+ *
+ * Records whose pairing mate is missing are dropped. Records without
+ * step.id (user-hook prompts / "other" events / llm.response-only) and
+ * tool.result-only records are always kept — they don't produce orphan
+ * spans downstream.
+ */
+function dropOrphanPairs(records: AgentActivityEntry[]): AgentActivityEntry[] {
+  const stepsWithResponse = new Set<string>();
+  const completedToolCallIds = new Set<string>();
+  for (const r of records) {
+    if (r['event.name'] === 'llm.response') {
+      const stepId = (r['gen_ai.step.id'] as string | undefined) ?? '__no_step__';
+      stepsWithResponse.add(stepId);
+    }
+    if (r['event.name'] === 'tool.result') {
+      const callId = r['gen_ai.tool.call.id'] as string | undefined;
+      if (callId) completedToolCallIds.add(callId);
+    }
+  }
+  return records.filter((r) => {
+    const name = r['event.name'];
+    if (name === 'llm.request') {
+      const stepId = (r['gen_ai.step.id'] as string | undefined) ?? '__no_step__';
+      return stepsWithResponse.has(stepId);
+    }
+    if (name === 'tool.call') {
+      const callId = r['gen_ai.tool.call.id'] as string | undefined;
+      // Keep tool.call only if it has no call.id (rare) or a matching result.
+      return !callId || completedToolCallIds.has(callId);
+    }
+    return true;
+  });
 }

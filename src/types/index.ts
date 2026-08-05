@@ -33,7 +33,25 @@ export interface CmsConfig {
 
 export type MaskMode = 'none' | 'all' | 'custom';
 
-export type MaskType = 'cloudAccessKey' | 'apiKey' | 'privateKey' | 'databaseUrl';
+export const PII_MASK_TYPES = [
+  'idCard',
+  'phone',
+  'email',
+  'ipAddress',
+  'bankCard',
+] as const;
+
+export type PiiMaskType = (typeof PII_MASK_TYPES)[number];
+
+export const SUPPORTED_MASK_TYPES = [
+  'cloudAccessKey',
+  'apiKey',
+  'privateKey',
+  'databaseUrl',
+  ...PII_MASK_TYPES,
+] as const;
+
+export type MaskType = (typeof SUPPORTED_MASK_TYPES)[number];
 
 export interface MaskConfig {
   mode: MaskMode;
@@ -159,14 +177,15 @@ export interface OtlpTraceFlusherConfig {
   dataDir?: string;
 }
 
-export type SlsMode = 'ak' | 'webtracking';
+export type SlsMode = 'ak' | 'webtracking' | 'apiKey';
 
 export interface SlsFlusherConfig {
   enabled: boolean;
-  /** 上报模式：'ak' 使用 AK/SK 签名的 postLogStoreLogs，'webtracking' 使用匿名 PutWebtracking */
+  /** 上报模式：'ak' 使用 AK/SK 签名，'apiKey' 使用 Bearer API Key，'webtracking' 使用 WebTracking */
   mode: SlsMode;
   accessKeyId: string;
   accessKeySecret: string;
+  apiKey: string;
   /** 完整 SLS endpoint URL，如 https://cn-hangzhou.log.aliyuncs.com */
   endpoint: string;
   endpoints: SlsEndpoint[];
@@ -183,10 +202,11 @@ export interface SlsEndpoint {
   project: string;
   logstore: string;
   kind: 'agentActivity' | 'agentTelemetry' | 'mcp' | 'trace';
-  /** Per-endpoint transport mode. 'ak' requires accessKeyId/accessKeySecret. */
+  /** Per-endpoint transport mode. 'ak' requires AK/SK; 'apiKey' requires apiKey. */
   mode: SlsMode;
   accessKeyId?: string;
   accessKeySecret?: string;
+  apiKey?: string;
   redact?: boolean;
   /** Overrides the shared serviceNamePrefix for this endpoint's __service_name__ tag. */
   serviceName?: string;
@@ -221,6 +241,8 @@ export interface AgentDetectionEntry {
   stop: () => Promise<void>;
   pollIntervalMs: number;
   runOnActive?: boolean;
+  /** Consecutive unavailable checks required before stopping a running entry (default 1). */
+  unavailableThreshold?: number;
 }
 
 export interface LogRetentionConfig {
@@ -272,5 +294,7 @@ export interface InputState {
   highWatermark?: number;
   extra?: Record<string, unknown>;
 }
+
+export type AgentStopReason = 'unavailable' | 'disabled' | 'shutdown' | 'unexpected';
 
 export type EntryState = 'idle' | 'starting' | 'running' | 'stopping';

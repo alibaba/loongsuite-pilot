@@ -106,6 +106,47 @@ describe('DeploymentManager', () => {
       expect(results[0].success).toBe(true);
     });
 
+    it('does not detect or deploy agents disabled by the caller', async () => {
+      const enabledDef: AgentDefinition = {
+        id: 'enabled-agent',
+        displayName: 'Enabled',
+        deployMode: 'hook',
+        detection: { paths: [], commands: [] },
+        hook: {
+          settingsPath: path.join(tmpDir, 'enabled-hooks.json'),
+          events: ['Stop'],
+          hookCommand: '/opt/enabled.sh',
+          format: 'flat',
+        },
+      };
+      const disabledDef: AgentDefinition = {
+        id: 'disabled-agent',
+        displayName: 'Disabled',
+        deployMode: 'hook',
+        detection: { paths: [], commands: [] },
+        hook: {
+          settingsPath: path.join(tmpDir, 'disabled-hooks.json'),
+          events: ['Stop'],
+          hookCommand: '/opt/disabled.sh',
+          format: 'flat',
+        },
+      };
+      await writeAgentDef(enabledDef);
+      await writeAgentDef(disabledDef);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const mgr = makeManager();
+      const results = await mgr.deployAll(def => def.id === enabledDef.id);
+
+      expect(results).toHaveLength(2);
+      expect(results.find(result => result.agentId === disabledDef.id)?.skipped).toBe(true);
+      expect(vi.mocked(detectAgent)).toHaveBeenCalledTimes(1);
+      expect(await fs.stat(path.join(tmpDir, 'enabled-hooks.json'))).toBeDefined();
+      await expect(fs.stat(path.join(tmpDir, 'disabled-hooks.json'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+
     it('continues when one agent fails', async () => {
       const def1: AgentDefinition = {
         id: 'agent-ok',
@@ -167,6 +208,41 @@ describe('DeploymentManager', () => {
       const results = await mgr.deployAll();
       expect(results).toHaveLength(0);
     });
+
+    it('routes directory-plugin definitions to the managed directory strategy', async () => {
+      const sourceDir = path.join(dataDir, 'plugins', 'hermes-agent', 'loongsuite-pilot');
+      const targetDir = path.join(tmpDir, 'hermes-home', 'plugins', 'loongsuite-pilot');
+      await fs.mkdir(sourceDir, { recursive: true });
+      await fs.writeFile(path.join(sourceDir, 'plugin.yaml'), 'name: loongsuite-pilot\n');
+      const def: AgentDefinition = {
+        id: 'hermes-agent',
+        displayName: 'Hermes Agent',
+        deployMode: 'directory-plugin',
+        detection: { paths: [path.dirname(targetDir)], commands: ['hermes'] },
+        directoryPlugin: { sourceDir, targetDir },
+      };
+      await writeAgentDef(def);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const [result] = await makeManager().deployAll();
+
+      expect(result).toMatchObject({
+        success: true,
+        agentId: 'hermes-agent',
+        deployMode: 'directory-plugin',
+      });
+      expect(JSON.parse(await fs.readFile(
+        path.join(targetDir, '.loongsuite-pilot-managed.json'),
+        'utf8',
+      ))).toMatchObject({ owner: 'loongsuite-pilot', agentId: 'hermes-agent' });
+      expect(JSON.parse(await fs.readFile(
+        path.join(dataDir, 'deployed-agents.json'),
+        'utf8',
+      ))['hermes-agent']).toMatchObject({
+        deployMode: 'directory-plugin',
+        targetDir: path.resolve(targetDir),
+      });
+    });
   });
 
   describe('deploySingle', () => {
@@ -189,6 +265,75 @@ describe('DeploymentManager', () => {
       const result = await mgr.deploySingle(def);
 
       expect(result.agentId).toBe('single-test');
+    });
+
+    it('serializes duplicate directory plugin deployments', async () => {
+      const sourceDir = path.join(dataDir, 'plugins', 'hermes-agent', 'loongsuite-pilot');
+      const targetDir = path.join(tmpDir, 'hermes-home', 'plugins', 'loongsuite-pilot');
+      await fs.mkdir(sourceDir, { recursive: true });
+      await fs.writeFile(path.join(sourceDir, 'plugin.yaml'), 'name: loongsuite-pilot\n');
+      const def: AgentDefinition = {
+        id: 'hermes-agent',
+        displayName: 'Hermes Agent',
+        deployMode: 'directory-plugin',
+        detection: { paths: [path.dirname(targetDir)], commands: ['hermes'] },
+        directoryPlugin: { sourceDir, targetDir },
+      };
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const mgr = makeManager();
+      const strategy = (mgr as any).directoryPluginStrategy;
+      const originalDeploy = strategy.deploy.bind(strategy);
+      const deploySpy = vi.spyOn(strategy, 'deploy').mockImplementation(async (agentDef: AgentDefinition) => {
+        await new Promise(resolve => setTimeout(resolve, 30));
+        return originalDeploy(agentDef);
+      });
+
+      const results = await Promise.all([
+        mgr.deploySingle(def),
+        mgr.deploySingle(def),
+      ]);
+
+      expect(deploySpy).toHaveBeenCalledTimes(1);
+      expect(results.filter(result => result.skipped)).toHaveLength(1);
+      expect(JSON.parse(await fs.readFile(
+        path.join(targetDir, '.loongsuite-pilot-managed.json'),
+        'utf8',
+      ))).toMatchObject({ owner: 'loongsuite-pilot', agentId: 'hermes-agent' });
+    });
+
+    it('preserves state updates from concurrent agent deployments', async () => {
+      const mgr = makeManager();
+      const defs = ['agent-a', 'agent-b'].map((id): AgentDefinition => ({
+        id,
+        displayName: id,
+        deployMode: 'detection-only',
+        detection: { paths: [], commands: [] },
+      }));
+      let active = 0;
+      let maxActive = 0;
+      vi.spyOn(mgr as any, 'deployAgent').mockImplementation(async (def: AgentDefinition) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        (mgr as any).state[def.id] = {
+          deployMode: def.deployMode,
+          deployedAt: new Date().toISOString(),
+        };
+        active -= 1;
+        return { success: true, agentId: def.id, deployMode: def.deployMode };
+      });
+
+      await Promise.all(defs.map(def => mgr.deploySingle(def)));
+
+      expect(maxActive).toBe(1);
+      expect(JSON.parse(await fs.readFile(
+        path.join(dataDir, 'deployed-agents.json'),
+        'utf8',
+      ))).toMatchObject({
+        'agent-a': { deployMode: 'detection-only' },
+        'agent-b': { deployMode: 'detection-only' },
+      });
     });
   });
 

@@ -103,10 +103,9 @@ if (-not $PackageUrl) {
 function Detect-Lang {
     if ($Lang) { return $Lang }
     if ($env:LOONGSUITE_PILOT_LANG) { return $env:LOONGSUITE_PILOT_LANG }
-    try {
-        $culture = [System.Globalization.CultureInfo]::CurrentUICulture.Name
-        if ($culture -match "zh") { return "zh" }
-    } catch {}
+    # $PSUICulture is an automatic variable (no .NET static call), so it works under
+    # Constrained Language Mode where [CultureInfo]::CurrentUICulture would throw.
+    if ($PSUICulture -match "zh") { return "zh" }
     return "en"
 }
 
@@ -235,8 +234,11 @@ function Download-AndExtract {
 
     Msg "==> 下载安装包: $PackageUrl" "==> Downloading: $PackageUrl"
 
+    # Best-effort TLS1.2 bump. Under Constrained Language Mode (WDAC/Device Guard)
+    # setting a static property on ServicePointManager throws; swallow it so the
+    # download below still runs (modern Windows defaults to TLS1.2 anyway).
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $PackageUrl -OutFile $archivePath -UseBasicParsing
     } catch {
         Msg "❌ 下载失败: $_" "❌ Download failed: $_"
@@ -438,12 +440,13 @@ function Write-Config {
         updateUrl           = "$UPDATE_PACKAGE_URL"
     }
     $cfgJson = $cfgArgs | ConvertTo-Json -Compress
-    $cfgTmp = Join-Path $env:TEMP "lp-config-args.json"
-    [System.IO.File]::WriteAllText($cfgTmp, $cfgJson, [System.Text.UTF8Encoding]::new($false))
 
-    & $script:NODE_BIN -e @'
+    # Pipe the JSON through stdin instead of a temp file: writing UTF-8 *without BOM*
+    # requires .NET calls that Constrained Language Mode (WDAC) forbids, and a BOM would
+    # break node's JSON.parse. node reads fd 0, so no file — and no CLM-blocked APIs.
+    $cfgJson | & $script:NODE_BIN -e @'
 const fs = require('fs');
-const opts = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8'));
+const opts = JSON.parse(fs.readFileSync(0, 'utf-8'));
 
 let existing = {};
 try { existing = JSON.parse(fs.readFileSync(opts.configPath, 'utf-8')); } catch {}
@@ -495,9 +498,7 @@ fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 
 const innerDataConfig = { sls: [INTERNAL_SLS] };
 fs.writeFileSync(opts.innerDataConfigPath, JSON.stringify(innerDataConfig, null, 2) + '\n');
-'@ $cfgTmp
-
-    Remove-Item $cfgTmp -Force -ErrorAction SilentlyContinue
+'@
 
     Msg "    ✅ 配置已写入" "    ✅ Config written"
     Write-Host ""
@@ -511,26 +512,43 @@ function Install-Command {
     $binDir = Join-Path $env:USERPROFILE ".local\bin"
     if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir -Force | Out-Null }
 
-    # Copy the PowerShell service management script
-    $ps1File = Join-Path $binDir "loongsuite-pilot.ps1"
+    # Copy the PowerShell service management script. Deploy it as loongsuite-pilot-service.ps1,
+    # NOT loongsuite-pilot.ps1: in PowerShell a bare `loongsuite-pilot` resolves an on-PATH .ps1
+    # (ExternalScript) BEFORE the .cmd shim, and a directly-run .ps1 obeys the session
+    # ExecutionPolicy (often Restricted) instead of the shim's -ExecutionPolicy Bypass. A
+    # non-colliding name keeps the .cmd the only match for the bare command name.
+    $ps1File = Join-Path $binDir "loongsuite-pilot-service.ps1"
     $ps1Src = Join-Path $script:PERMANENT_DIR "scripts\loongsuite-pilot.ps1"
     if (Test-Path $ps1Src) {
         Copy-Item $ps1Src $ps1File -Force
     }
+    # Remove any stale same-name script from older installs that would shadow the .cmd shim.
+    $legacyPs1 = Join-Path $binDir "loongsuite-pilot.ps1"
+    if (Test-Path $legacyPs1) { Remove-Item $legacyPs1 -Force -ErrorAction SilentlyContinue }
 
     # Create a .cmd shim that forwards to the PowerShell script
     $cmdFile = Join-Path $binDir "loongsuite-pilot.cmd"
     $cmdContent = @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0loongsuite-pilot.ps1" %*
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0loongsuite-pilot-service.ps1" %*
 '@
     Set-Content -Path $cmdFile -Value $cmdContent -Encoding ASCII
     Msg "    ✅ 已安装: $cmdFile" "    ✅ Installed: $cmdFile"
 
-    # Add to user PATH if not already there
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    # Add to user PATH if not already there. Use the HKCU:\Environment registry key via
+    # cmdlets instead of [Environment]::Get/SetEnvironmentVariable, which are .NET static
+    # calls that Constrained Language Mode (WDAC) forbids.
+    $userPath = (Get-ItemProperty -Path 'HKCU:\Environment' -Name Path -ErrorAction SilentlyContinue).Path
     if ($userPath -notlike "*$binDir*") {
-        [Environment]::SetEnvironmentVariable("Path", "$binDir;$userPath", "User")
+        $newPath = if ($userPath) { "$binDir;$userPath" } else { $binDir }
+        Set-ItemProperty -Path 'HKCU:\Environment' -Name Path -Value $newPath
+        # Best-effort broadcast so already-open Explorer-spawned terminals refresh their PATH
+        # without a re-login. [Environment]::SetEnvironmentVariable persists AND sends
+        # WM_SETTINGCHANGE, but is a .NET static call that Constrained Language Mode (WDAC)
+        # forbids — the registry write above already persisted the value, so we just swallow
+        # the failure there (a new logon picks it up regardless). Get-ItemProperty returned the
+        # value already expanded, so this never re-introduces %VAR% tokens as a plain REG_SZ.
+        try { [Environment]::SetEnvironmentVariable('Path', $newPath, 'User') } catch {}
         Msg "    已将 $binDir 添加到用户 PATH" "    Added $binDir to user PATH"
         $env:Path = "$binDir;$env:Path"
     }
@@ -645,6 +663,9 @@ function Print-Summary {
     Msg "命令:" "Commands:"
     Write-Host "   loongsuite-pilot          # 查看状态 / Status"
     Write-Host "   loongsuite-pilot info     # 版本与配置 / Version & config"
+    Write-Host ""
+    Msg "提示: 请新开一个终端后再使用 loongsuite-pilot 命令 (WDAC/受限环境可能需注销重登)。" `
+        "Tip: open a NEW terminal before using the loongsuite-pilot command (a WDAC/locked-down environment may require signing out and back in)."
     Write-Host "============================================================"
 }
 
@@ -720,7 +741,7 @@ function Remove-HookConfigs {
 
     foreach ($cfg in $configs) {
         if (-not (Test-Path $cfg)) { continue }
-        $short = $cfg -replace [regex]::Escape($env:USERPROFILE), "~"
+        $short = $cfg.Replace($env:USERPROFILE, "~")
 
         try {
             & $script:NODE_BIN -e @'
@@ -969,6 +990,68 @@ function Cmd-Upgrade {
 # ============================================================
 # CMD: uninstall
 # ============================================================
+# Remove one scheduled task: stop it, unregister it (falling back to schtasks.exe),
+# and confirm it is truly gone -- throwing if not, so callers never delete the
+# launcher files a surviving task still points at.
+function Remove-OnePilotScheduledTask {
+    param(
+        [Parameter(Mandatory = $true)] [string]$TaskName,
+        [Parameter(Mandatory = $true)] [string]$TaskPath
+    )
+    $task = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
+    if (-not $task) { return }
+    if ($task.State -eq "Running") {
+        Stop-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
+    }
+    try {
+        Unregister-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Confirm:$false -ErrorAction Stop
+    } catch {
+        $unregisterError = $_.Exception.Message
+        $fullTaskName = "$($TaskPath.TrimEnd('\'))\$TaskName"
+        & schtasks.exe /Delete /TN $fullTaskName /F 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to remove scheduled task $fullTaskName (Unregister-ScheduledTask: $unregisterError; schtasks exit: $LASTEXITCODE). Run uninstall from an elevated PowerShell."
+        }
+    }
+    $remaining = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
+    if ($remaining) {
+        throw "Scheduled task still exists after deletion: $($TaskPath.TrimEnd('\'))\$TaskName"
+    }
+}
+
+# Remove this user's scheduled tasks. Tasks are registered with a per-user suffix
+# (LoongsuitePilot-<host>_<user>) so multiple Windows users can coexist -- the old
+# hardcoded global names never matched them, which is exactly why uninstall left
+# tasks running against a deleted bin\*.vbs. Reconstruct the suffixed names the same
+# way the service script does; also clean up the legacy global names, but only when
+# they are owned by the current user so another account's task is never touched.
+function Remove-PilotScheduledTasks {
+    $taskFolder = "\LoongsuitePilot\"
+    $currentIdentity = (whoami).Trim()
+    # $env:USERNAME 而非 [Environment]::UserName:后者是 CLM(WDAC/Device Guard)禁止的 .NET 静态成员访问,
+    # 受限环境下卸载一进本函数即抛错,恰好击穿本 CR 的 CLM 卸载目标。环境变量语义等价且 CLM 安全。
+    $currentUser = $env:USERNAME
+    $userTag = ($currentIdentity -replace '[^A-Za-z0-9._-]', '_')
+    $currentUserTasks = @("LoongsuitePilot-$userTag", "LoongsuitePilotUpdater-$userTag")
+    $legacyTasks = @("LoongsuitePilot", "LoongsuitePilotUpdater")
+
+    foreach ($taskName in @($currentUserTasks + $legacyTasks)) {
+        if ($taskName -in $legacyTasks) {
+            $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
+            if (-not $task) { continue }
+            $taskOwner = [string]$task.Principal.UserId
+            $isCurrentOwner = (
+                -not $taskOwner -or
+                $taskOwner -ieq $currentIdentity -or
+                $taskOwner -ieq $currentUser -or
+                $taskOwner -ilike "*\$currentUser"
+            )
+            if (-not $isCurrentOwner) { continue }
+        }
+        Remove-OnePilotScheduledTask -TaskName $taskName -TaskPath $taskFolder
+    }
+}
+
 function Cmd-Uninstall {
     Msg "🗑️  开始卸载 $PACKAGE_NAME ..." "🗑️  Uninstalling $PACKAGE_NAME ..."
     Write-Host ""
@@ -978,31 +1061,40 @@ function Cmd-Uninstall {
     Msg "    ✅ 服务已停止" "    ✅ Service stopped"
     Write-Host ""
 
-    # Remove Task Scheduler tasks
-    $taskFolder = "\LoongsuitePilot"
-    foreach ($taskName in @("LoongsuitePilotUpdater", "LoongsuitePilot")) {
-        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
-        if ($task) {
-            if ($task.State -eq "Running") {
-                Stop-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
-            }
-            Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -Confirm:$false -ErrorAction SilentlyContinue
-        }
+    # Remove Task Scheduler tasks. Must fully succeed before we delete the launcher
+    # files below: a surviving task keeps firing wscript against a deleted
+    # bin\*.vbs every 5 minutes ("cannot find script file" popups).
+    Msg "==> 移除计划任务..." "==> Removing scheduled tasks..."
+    $taskRemovalOk = $true
+    try {
+        Remove-PilotScheduledTasks
+        Msg "    ✅ 已移除计划任务" "    ✅ Removed scheduled tasks"
+    } catch {
+        $taskRemovalOk = $false
+        Msg "    ⚠️  计划任务未完全移除: $($_.Exception.Message)" `
+            "    ⚠️  Scheduled tasks not fully removed: $($_.Exception.Message)"
     }
-    Msg "    ✅ 已移除计划任务" "    ✅ Removed scheduled tasks"
+    Write-Host ""
 
     Msg "==> 删除安装目录..." "==> Removing installation..."
     $installDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
-    if (Test-Path $installDir) {
-        Remove-Item $installDir -Recurse -Force
+    if (-not $taskRemovalOk) {
+        Msg "    ⏭️  跳过删除 $installDir(计划任务未完全移除,避免残留任务空跑弹窗)" `
+            "    ⏭️  Skipped removing $installDir (scheduled tasks remain; avoids orphaned-task popups)"
+    } else {
+        if (Test-Path $installDir) {
+            Remove-Item $installDir -Recurse -Force
+        }
+        Msg "    ✅ 已删除 $installDir" "    ✅ Removed $installDir"
     }
-    Msg "    ✅ 已删除 $installDir" "    ✅ Removed $installDir"
 
     Msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
     $cmdFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.cmd"
-    $ps1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
+    $ps1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
+    $legacyPs1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
     if (Test-Path $cmdFile) { Remove-Item $cmdFile -Force }
     if (Test-Path $ps1File) { Remove-Item $ps1File -Force }
+    if (Test-Path $legacyPs1File) { Remove-Item $legacyPs1File -Force }
     Msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
     Write-Host ""
 

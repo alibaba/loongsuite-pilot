@@ -49,6 +49,24 @@ Pilot 按以下顺序解析配置：
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | 覆盖 `serviceNamePrefix`。 |
 | `LOG_LEVEL` | 运行日志级别：`debug`、`info`、`warn`、`error` 或 `silent`。 |
 
+## SLS 密钥配置
+
+SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 key 写入本地 `config.json`，请确保文件权限合适，不要把该文件分享出去。
+
+```json
+{
+  "sls": {
+    "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+    "project": "my-project",
+    "logstore": "my-logstore",
+    "mode": "apiKey",
+    "apiKey": "your-api-key"
+  }
+}
+```
+
+同一个 SLS 目标里不要同时配置 `apiKey` 和 `accessKeyId` / `accessKeySecret`。完整模式示例见 [SLS 输出](sls-output.md)。
+
 ## 配置主题
 
 | 任务 | 文档 |
@@ -58,7 +76,7 @@ Pilot 按以下顺序解析配置：
 | 上报日志到阿里云 SLS | [SLS 输出](sls-output.md) |
 | 将 GenAI 活动上报为 OTLP Trace | [Trace 输出](trace-output.md) |
 | POST 到自定义 HTTP 接口 | [HTTP 输出](http-output.md) |
-| 脱敏 API Key、AccessKey、私钥和数据库 URL | [数据脱敏](masking.md) |
+| 脱敏 API Key、AccessKey、私钥、数据库 URL 和个人敏感信息 | [数据脱敏](masking.md) |
 
 ## 日志保留
 

@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { inferGitContext } from '../utils/git-context.js';
 
 export async function enrichCanonicalEntryWithGit(
@@ -25,14 +26,18 @@ function extractProbeDir(
 ): string | undefined {
   const cwd = normalizeString(entry[`agent.${namespace}.cwd`])
     ?? normalizeString(record[`agent.${namespace}.cwd`]);
-  if (cwd?.startsWith('/')) return cwd;
+  if (cwd && isAbsolutePath(cwd)) return cwd;
 
   const roots = entry[`agent.${namespace}.workspace_roots`]
     ?? record[`agent.${namespace}.workspace_roots`];
   const rootList = normalizeStringArray(roots);
-  if (rootList.length > 0 && rootList[0].startsWith('/')) return rootList[0];
+  if (rootList.length > 0 && isAbsolutePath(rootList[0])) return rootList[0];
 
   return undefined;
+}
+
+function isAbsolutePath(value: string): boolean {
+  return path.posix.isAbsolute(value) || path.win32.isAbsolute(value);
 }
 
 function normalizeString(value: unknown): string | undefined {

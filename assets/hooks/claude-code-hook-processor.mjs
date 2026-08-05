@@ -46,6 +46,7 @@ import {
   loadState,
   saveState,
   readAndDeleteChildState,
+  withStateLock,
 } from './claude-code/state.mjs';
 import {
   parseClaudeTranscript,
@@ -70,6 +71,9 @@ const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
 // Caller-supplied span attributes (e.g. multica.*) stamped as top-level record
 // fields so the trace flusher can pass matching keys through to span attributes.
 const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, { agentId: AGENT_ID });
+// Retain recent completion tombstones to ignore delayed duplicate SubagentStop
+// events while keeping the persisted session state bounded.
+const FINALIZED_SUBAGENT_LIMIT = 128;
 
 // ─── utilities ───
 
@@ -83,6 +87,68 @@ function pilotDataDir() {
 
 function defaultLogDir() {
   return path.join(pilotDataDir(), 'logs', AGENT_ID);
+}
+
+function isAgentTool(toolName) {
+  return toolName === 'Agent' || toolName === 'agent';
+}
+
+/**
+ * Resolve a direct subagent transcript at:
+ * <parent-directory>/<parent-session>/subagents/agent-<agent-id>.jsonl
+ *
+ * Returns null when the agent ID cannot be resolved safely inside that directory.
+ */
+function resolveSubagentTranscriptPath(parentTranscriptPath, agentId) {
+  const rawAgentId = String(agentId || '').trim();
+  if (
+    !rawAgentId
+    || rawAgentId.includes('/')
+    || rawAgentId.includes('\\')
+    || rawAgentId.includes('\0')
+  ) return null;
+
+  const safeAgentId = path.basename(rawAgentId).replace(/\.jsonl$/, '');
+  if (!safeAgentId || safeAgentId === '.' || safeAgentId === '..') return null;
+
+  const parentSessionId = path.basename(parentTranscriptPath, path.extname(parentTranscriptPath));
+  const filename = safeAgentId.startsWith('agent-')
+    ? `${safeAgentId}.jsonl`
+    : `agent-${safeAgentId}.jsonl`;
+  const subagentDir = path.resolve(
+    path.dirname(parentTranscriptPath),
+    parentSessionId,
+    'subagents',
+  );
+  const transcriptPath = path.resolve(subagentDir, filename);
+  const relativePath = path.relative(subagentDir, transcriptPath);
+  if (
+    !relativePath
+    || relativePath === '..'
+    || relativePath.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relativePath)
+  ) return null;
+  return transcriptPath;
+}
+
+function collectSubagentLinks(turn) {
+  const links = [];
+  for (const llmCall of (turn.llmCalls || [])) {
+    for (const block of (llmCall.output_content || [])) {
+      if (!block?.id || !isAgentTool(block.name)) continue;
+      const detail = llmCall.toolDetails?.get(block.id);
+      if (!detail?.agentId) continue;
+      links.push({
+        agentId: detail.agentId,
+        agentName: detail.agentType || block.input?.subagent_type || 'Subagent',
+        parentToolCallId: block.id,
+        isBackground: block.input?.run_in_background === true
+          || detail.status === 'async_launched'
+          || detail.isAsync === true,
+      });
+    }
+  }
+  return links;
 }
 
 // ─── intercept (BUN_OPTIONS preload) data integration ───
@@ -193,70 +259,130 @@ function isoToUnixNanos(isoStr) {
   return String(ms) + '000000';
 }
 
-// ─── cmd handlers ───
+// ─── runtime Skill load 辅助 ───
 
-// TODO: subagent 事件累积到 state.events，当前 exportSession 未消费。
-// 预留用于未来子 agent trace 合并（将子 agent 的 span 关联到主 trace）。
-function cmdSubagentStart() {
-  const event = tryReadStdin();
-  if (isCursorCaller(event)) return;
-  const sessionId = requireSessionId(event, 'cmd');
-  if (!sessionId) return;
-
-  const state = loadState(sessionId);
-  if (!state.transcript_path && event.transcript_path) {
-    state.transcript_path = event.transcript_path;
-  }
-  if (!state.cwd && event.cwd && typeof event.cwd === 'string') {
-    state.cwd = event.cwd;
-  }
-  state.events = state.events || [];
-  state.events.push({
-    type: 'subagent_start',
-    timestamp: nowSec(),
-    subagent_session_id: event.subagent_session_id || '',
-    agent_id: event.agent_id || '',
-    agent_type: event.agent_type || '',
-  });
-  saveState(sessionId, state);
+/**
+ * 显式 /skill 没有模型生成的 tool_use id。使用 transcript 中稳定字段生成 call id,
+ * 使同一条 meta 注入在重放时仍映射为同一个 TOOL span。
+ */
+function deterministicSkillLoadId(sessionId, promptId, metaUuid, rootPath) {
+  const h = crypto
+    .createHash('sha256')
+    .update([
+      sessionId || '',
+      promptId || '',
+      metaUuid || '',
+      rootPath || '',
+    ].join('\0'))
+    .digest('hex')
+    .slice(0, 24);
+  return `toolu_skillload_${h}`;
 }
 
-function cmdSubagentStop() {
+function skillAttributes(skillLoad, fallbackName) {
+  const name = skillLoad?.name
+    || (typeof fallbackName === 'string' ? fallbackName.trim().replace(/^\/+/, '') : null);
+  const id = skillLoad?.id || name;
+  return {
+    ...(name ? { 'gen_ai.skill.name': name } : {}),
+    ...(id ? { 'gen_ai.skill.id': id } : {}),
+  };
+}
+
+function positiveSkillLoadTimes(skillLoad, fallbackTimestamp) {
+  const minDurationNanos = 1_000_000n; // converter uses millisecond start/end times
+  let call = BigInt(isoToUnixNanos(
+    skillLoad?.commandTimestamp || skillLoad?.metaTimestamp || fallbackTimestamp,
+  ));
+  let result = BigInt(isoToUnixNanos(
+    skillLoad?.metaTimestamp || fallbackTimestamp || skillLoad?.commandTimestamp,
+  ));
+
+  if (call === 0n && result > minDurationNanos) call = result - minDurationNanos;
+  if (call === 0n) call = BigInt(Date.now()) * 1_000_000n;
+  if (result <= call) result = call + minDurationNanos;
+
+  return { call: String(call), result: String(result) };
+}
+
+// ─── cmd handlers ───
+
+async function cmdSubagentStart() {
   const event = tryReadStdin();
   if (isCursorCaller(event)) return;
   const sessionId = requireSessionId(event, 'cmd');
   if (!sessionId) return;
 
-  const state = loadState(sessionId);
-  if (!state.transcript_path && event.transcript_path) {
-    state.transcript_path = event.transcript_path;
-  }
-  if (!state.cwd && event.cwd && typeof event.cwd === 'string') {
-    state.cwd = event.cwd;
-  }
+  await withStateLock(sessionId, async () => {
+    const state = loadState(sessionId);
+    if (!state.transcript_path && event.transcript_path) {
+      state.transcript_path = event.transcript_path;
+    }
+    if (!state.cwd && event.cwd && typeof event.cwd === 'string') {
+      state.cwd = event.cwd;
+    }
+    state.events = state.events || [];
+    state.events.push({
+      type: 'subagent_start',
+      timestamp: nowSec(),
+      subagent_session_id: event.subagent_session_id || '',
+      agent_id: event.agent_id || '',
+      agent_type: event.agent_type || '',
+    });
+    saveState(sessionId, state);
+  });
+}
 
-  const childSid = event.subagent_session_id || 'unknown';
-  let childStateSnapshot = null;
-  if (childSid && childSid !== 'unknown' && childSid !== sessionId) {
-    childStateSnapshot = readAndDeleteChildState(childSid);
-  }
+async function cmdSubagentStop() {
+  const event = tryReadStdin();
+  if (isCursorCaller(event)) return;
+  const sessionId = requireSessionId(event, 'cmd');
+  if (!sessionId) return;
 
-  state.events = state.events || [];
-  const evData = {
-    type: 'subagent_stop',
-    timestamp: nowSec(),
-    subagent_session_id: childSid,
-    stop_reason: event.stop_reason || 'end_turn',
-    input_tokens: event.usage?.input_tokens || event.input_tokens || 0,
-    output_tokens: event.usage?.output_tokens || event.output_tokens || 0,
-    cache_read_input_tokens: event.usage?.cache_read_input_tokens || event.cache_read_input_tokens || 0,
-    cache_creation_input_tokens: event.usage?.cache_creation_input_tokens || event.cache_creation_input_tokens || 0,
-  };
-  if (childStateSnapshot && Array.isArray(childStateSnapshot.events) && childStateSnapshot.events.length > 0) {
-    evData._child_state = childStateSnapshot;
-  }
-  state.events.push(evData);
-  saveState(sessionId, state);
+  await withStateLock(sessionId, async () => {
+    const state = loadState(sessionId);
+    if (!state.transcript_path && event.transcript_path) {
+      state.transcript_path = event.transcript_path;
+    }
+    if (!state.cwd && event.cwd && typeof event.cwd === 'string') {
+      state.cwd = event.cwd;
+    }
+
+    const agentId = event.agent_id || event.subagent_session_id || '';
+    const childSid = event.subagent_session_id || 'unknown';
+    let childStateSnapshot = null;
+    if (childSid && childSid !== 'unknown' && childSid !== sessionId) {
+      childStateSnapshot = readAndDeleteChildState(childSid);
+    }
+
+    state.completed_subagents = state.completed_subagents || {};
+    const finalizedSubagents = new Set(state.finalized_subagent_ids || []);
+    if (agentId && !finalizedSubagents.has(agentId)) {
+      state.completed_subagents[agentId] = true;
+    }
+
+    state.events = state.events || [];
+    const evData = {
+      type: 'subagent_stop',
+      timestamp: nowSec(),
+      subagent_session_id: childSid,
+      agent_id: agentId,
+      agent_type: event.agent_type || '',
+      agent_transcript_path: event.agent_transcript_path || '',
+      stop_reason: event.stop_reason || 'end_turn',
+      input_tokens: event.usage?.input_tokens || event.input_tokens || 0,
+      output_tokens: event.usage?.output_tokens || event.output_tokens || 0,
+      cache_read_input_tokens: event.usage?.cache_read_input_tokens || event.cache_read_input_tokens || 0,
+      cache_creation_input_tokens: event.usage?.cache_creation_input_tokens || event.cache_creation_input_tokens || 0,
+    };
+    if (childStateSnapshot && Array.isArray(childStateSnapshot.events) && childStateSnapshot.events.length > 0) {
+      evData._child_state = childStateSnapshot;
+    }
+    state.events.push(evData);
+
+    await finalizePendingSubagentTurns(state);
+    saveState(sessionId, state);
+  });
 }
 
 async function cmdStop() {
@@ -268,33 +394,35 @@ async function cmdStop() {
   // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
 
-  const state = loadState(sessionId);
-  if (!state.transcript_path && event.transcript_path) {
-    state.transcript_path = event.transcript_path;
-  }
-  if (event.cwd && typeof event.cwd === 'string') {
-    state.cwd = event.cwd;
-  }
-  state.stop_time = nowSec();
-  saveState(sessionId, state);
-
-  try {
-    await exportSession(state, event.stop_reason || 'end_turn');
-    if (typeof state._next_transcript_offset === 'number') {
-      state.transcript_offset = state._next_transcript_offset;
-      delete state._next_transcript_offset;
+  await withStateLock(sessionId, async () => {
+    const state = loadState(sessionId);
+    if (!state.transcript_path && event.transcript_path) {
+      state.transcript_path = event.transcript_path;
     }
-    state.events = [];
-    state.stop_time = null;
+    if (event.cwd && typeof event.cwd === 'string') {
+      state.cwd = event.cwd;
+    }
+    state.stop_time = nowSec();
     saveState(sessionId, state);
-  } catch (err) {
-    logHookError({
-      agentId: AGENT_ID,
-      stage: 'cmd_stop',
-      errorType: 'export_failed',
-      errorMessage: err?.message || String(err),
-    });
-  }
+
+    try {
+      await exportSession(state, event.stop_reason || 'end_turn');
+      if (typeof state._next_transcript_offset === 'number') {
+        state.transcript_offset = state._next_transcript_offset;
+        delete state._next_transcript_offset;
+      }
+      state.events = [];
+      state.stop_time = null;
+      saveState(sessionId, state);
+    } catch (err) {
+      logHookError({
+        agentId: AGENT_ID,
+        stage: 'cmd_stop',
+        errorType: 'export_failed',
+        errorMessage: err?.message || String(err),
+      });
+    }
+  });
 }
 
 // ─── transcript 稳定性等待 ───
@@ -322,6 +450,182 @@ async function waitForTranscriptStable(transcriptPath, minSize = 0) {
     prevSize = size;
     await new Promise((r) => setTimeout(r, 150));
   }
+}
+
+function sortRecordsByTimestamp(records) {
+  records.sort((a, b) => {
+    const ta = BigInt(a.time_unix_nano || '0');
+    const tb = BigInt(b.time_unix_nano || '0');
+    if (ta < tb) return -1;
+    if (ta > tb) return 1;
+    return 0;
+  });
+  return records;
+}
+
+function cleanRecords(records, runtimeConfig) {
+  return records.map((record) =>
+    applyHookContentPolicy(sanitizeObject(record) || record, runtimeConfig));
+}
+
+function extendBackgroundAgentResult(records, link, childRecords) {
+  let childEnd = 0n;
+  for (const record of childRecords) {
+    const timestamp = BigInt(record.time_unix_nano || '0');
+    if (timestamp > childEnd) childEnd = timestamp;
+  }
+  if (childEnd === 0n) return;
+
+  const parentResult = records.find((record) =>
+    record['event.name'] === 'tool.result'
+    && record['gen_ai.tool.call.id'] === link.parentToolCallId);
+  if (!parentResult) return;
+  if (BigInt(parentResult.time_unix_nano || '0') < childEnd) {
+    parentResult.time_unix_nano = String(childEnd);
+  }
+}
+
+function buildSubagentRecords({
+  parentTranscriptPath,
+  parentSessionId,
+  parentTraceId,
+  parentTurnId,
+  link,
+  userId,
+  cwd,
+  intercept,
+}) {
+  const childTranscriptPath = resolveSubagentTranscriptPath(parentTranscriptPath, link.agentId);
+  if (!childTranscriptPath || !fs.existsSync(childTranscriptPath)) {
+    return { records: [], mergedResponseIds: new Set() };
+  }
+
+  let childParseResult;
+  try {
+    childParseResult = parseClaudeTranscript(childTranscriptPath, 0);
+  } catch (err) {
+    logHookError({
+      agentId: AGENT_ID,
+      stage: 'subagent_transcript_parse',
+      errorType: 'parse_failed',
+      errorMessage: err?.message || String(err),
+    });
+    return { records: [], mergedResponseIds: new Set() };
+  }
+
+  const childRecords = [];
+  const mergedResponseIds = new Set();
+  let childHash = INITIAL_HASH;
+  for (let childTurnIndex = 0; childTurnIndex < childParseResult.turns.length; childTurnIndex++) {
+    const childBuild = buildTurnRecords(
+      childParseResult.turns[childTurnIndex],
+      childTurnIndex,
+      link.agentId,
+      childHash,
+      userId,
+      'end_turn',
+      cwd,
+      intercept,
+    );
+    childHash = childBuild.hash;
+    for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
+
+    for (const childRecord of childBuild.records) {
+      // The child prompt is already present in the first llm.request delta.
+      // Keeping its `other` record would incorrectly feed the parent ENTRY.
+      if (childRecord['event.name'] === 'other') continue;
+      childRecords.push({
+        ...childRecord,
+        trace_id: parentTraceId,
+        'gen_ai.session.id': parentSessionId,
+        'gen_ai.turn.id': parentTurnId,
+        'gen_ai.agent.scope': 'subagent',
+        'gen_ai.agent.depth': 1,
+        'gen_ai.agent.id': link.agentId,
+        'gen_ai.agent.name': link.agentName,
+        'gen_ai.agent.parent.id': parentSessionId,
+        'gen_ai.subagent.parent_tool_call.id': link.parentToolCallId,
+      });
+    }
+  }
+
+  return { records: childRecords, mergedResponseIds };
+}
+
+async function finalizePendingSubagentTurns(state) {
+  const pendingTurns = Array.isArray(state.pending_subagent_turns)
+    ? state.pending_subagent_turns
+    : [];
+  if (pendingTurns.length === 0) return;
+
+  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+  const sessionId = state.session_id || 'unknown';
+  const userId = resolveUserId({}, runtimeConfig);
+  const cwd = state.cwd || undefined;
+  const intercept = loadInterceptForSession(sessionId);
+  const mergedResponseIds = new Set();
+  const completedSubagents = state.completed_subagents || {};
+  const remainingTurns = [];
+
+  for (const pending of pendingTurns) {
+    const records = Array.isArray(pending.records) ? [...pending.records] : [];
+    const backgroundLinks = Array.isArray(pending.background_links)
+      ? pending.background_links
+      : [];
+
+    for (const link of backgroundLinks) {
+      if (link.completed) {
+        delete completedSubagents[link.agentId];
+        continue;
+      }
+      if (!completedSubagents[link.agentId]) continue;
+      const childTranscriptPath = resolveSubagentTranscriptPath(
+        state.transcript_path,
+        link.agentId,
+      );
+      if (childTranscriptPath) {
+        await waitForTranscriptStable(childTranscriptPath, 0);
+      }
+      const childBuild = buildSubagentRecords({
+        parentTranscriptPath: state.transcript_path,
+        parentSessionId: sessionId,
+        parentTraceId: pending.trace_id,
+        parentTurnId: pending.turn_id,
+        link,
+        userId,
+        cwd,
+        intercept,
+      });
+      extendBackgroundAgentResult(records, link, childBuild.records);
+      records.push(...cleanRecords(childBuild.records, runtimeConfig));
+      for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
+      link.completed = true;
+      delete completedSubagents[link.agentId];
+    }
+
+    if (backgroundLinks.every((link) => link.completed)) {
+      writeJsonlRecords(
+        defaultLogDir(),
+        AGENT_ID,
+        sortRecordsByTimestamp(records),
+      );
+      state.finalized_subagent_ids = [
+        ...(state.finalized_subagent_ids || []),
+        ...backgroundLinks.map((link) => link.agentId),
+      ].slice(-FINALIZED_SUBAGENT_LIMIT);
+    } else {
+      remainingTurns.push({
+        ...pending,
+        records,
+        background_links: backgroundLinks,
+      });
+    }
+  }
+
+  state.pending_subagent_turns = remainingTurns;
+  state.completed_subagents = completedSubagents;
+  reapInterceptFiles(intercept, mergedResponseIds);
+  reapStaleIntercept(sessionId);
 }
 
 // ─── Stop 主导出流程 ───
@@ -405,17 +709,61 @@ async function exportSession(state, stopReason) {
       cwd,
       intercept,
     );
-    allRecords.push(...records);
     logHash = hash;
     if (turnMerged) {
       for (const rid of turnMerged) mergedResponseIds.add(rid);
+    }
+
+    const turnRecords = [...records];
+    const backgroundLinks = [];
+    const parentRecord = records[0];
+    if (parentRecord) {
+      // 只展开主会话的直接子 Agent。子 transcript 内再次调用 Agent 时，
+      // buildTurnRecords 会保留 TOOL span，但不会递归读取孙级 transcript。
+      for (const link of collectSubagentLinks(turn)) {
+        const completion = state.completed_subagents?.[link.agentId];
+        if (link.isBackground && !completion) {
+          backgroundLinks.push({ ...link, completed: false });
+          continue;
+        }
+        const childBuild = buildSubagentRecords({
+          parentTranscriptPath: transcriptPath,
+          parentSessionId: sessionId,
+          parentTraceId: parentRecord.trace_id,
+          parentTurnId: parentRecord['gen_ai.turn.id'],
+          link,
+          userId,
+          cwd,
+          intercept,
+        });
+        if (link.isBackground) {
+          extendBackgroundAgentResult(turnRecords, link, childBuild.records);
+        }
+        turnRecords.push(...childBuild.records);
+        for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
+        if (completion) delete state.completed_subagents[link.agentId];
+      }
+    }
+
+    sortRecordsByTimestamp(turnRecords);
+    if (backgroundLinks.length > 0 && parentRecord) {
+      state.pending_subagent_turns = state.pending_subagent_turns || [];
+      state.pending_subagent_turns.push({
+        created_at: nowSec(),
+        trace_id: parentRecord.trace_id,
+        turn_id: parentRecord['gen_ai.turn.id'],
+        records: cleanRecords(turnRecords, runtimeConfig),
+        background_links: backgroundLinks,
+      });
+    } else {
+      allRecords.push(...turnRecords);
     }
   }
 
   // turn_count 计入全部 turns(含跳过的历史), 确保 offset 正确推进不重复上报
   state.turn_count = baseTurnCount + parseResult.turns.length;
 
-  const cleaned = allRecords.map((r) => applyHookContentPolicy(sanitizeObject(r) || r, runtimeConfig));
+  const cleaned = cleanRecords(allRecords, runtimeConfig);
   writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
 
   // Cleanup intercept files: delete what we merged + drop stragglers from
@@ -473,6 +821,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
   // Phase 1: 为每个 llm_call 创建 step + 生成 LLM 事件
   const toolIdToStep = new Map(); // tool_use_id → { stepId, stepSpanId }
   const llmCalls = turn.llmCalls || [];
+  let firstStepOwner = null;
 
   for (const ev of llmCalls) {
     stepRound++;
@@ -480,6 +829,9 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     const currentStepSpanId = generateSpanId();
     const llmSpanId = generateSpanId();
     const responseId = ev.message_id || `${currentStepId}:r`;
+    if (!firstStepOwner) {
+      firstStepOwner = { stepId: currentStepId, stepSpanId: currentStepSpanId };
+    }
 
     // 注册该 LLM 声明的所有 tool_use_id → 当前 step
     for (const toolId of (ev.declaredToolIds || [])) {
@@ -571,6 +923,14 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
     prevInputMsgs = ev._input_is_delta ? [] : inputMsgs;
   }
 
+  const skillLoads = Array.isArray(turn.skillLoads) ? turn.skillLoads : [];
+  const skillLoadsByToolId = new Map(
+    skillLoads
+      .filter((load) => load.sourceToolUseId)
+      .map((load) => [load.sourceToolUseId, load]),
+  );
+  const consumedSkillLoads = new Set();
+
   // Phase 2: 为每个 tool 生成 tool.call + tool.result，归属到声明方 LLM 的 step
   for (const ev of llmCalls) {
     for (const toolId of (ev.declaredToolIds || [])) {
@@ -587,9 +947,13 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
       if (!toolBlock) continue;
 
       const toolName = toolBlock.name || 'unknown';
-      if (toolName === 'Agent' || toolName === 'agent') continue;
 
       const toolSpanId = generateSpanId();
+      const skillLoad = toolName === 'Skill' ? skillLoadsByToolId.get(toolId) : null;
+      const skillFields = toolName === 'Skill'
+        ? skillAttributes(skillLoad, toolBlock.input?.skill || toolBlock.input?.name)
+        : {};
+      if (skillLoad) consumedSkillLoads.add(skillLoad);
 
       // tool.call
       records.push({
@@ -603,6 +967,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
         'gen_ai.tool.name': toolName,
         'gen_ai.tool.call.id': toolId,
         'gen_ai.tool.call.arguments': toJsonValue(toolBlock.input || {}),
+        ...skillFields,
       });
 
       // tool.result (only if we have a result timestamp)
@@ -619,6 +984,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
           'gen_ai.tool.call.id': toolId,
           'gen_ai.tool.call.result': toJsonValue(timestamps.resultContent || ''),
           'tool.result.status': timestamps.isError ? 'error' : 'success',
+          ...skillFields,
         };
         if (timestamps.isError) {
           resultRecord['error.type'] = 'ToolError';
@@ -628,6 +994,62 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
         }
         records.push(resultRecord);
       }
+
+    }
+  }
+
+  // /skill 和其他 runtime meta 注入没有 LLM tool_use。将加载事实建模成
+  // extension TOOL span,但不篡改 LLM output.messages。
+  if (firstStepOwner) {
+    const synthesizedCallIds = new Set();
+    for (const skillLoad of skillLoads) {
+      if (consumedSkillLoads.has(skillLoad)) continue;
+      const callId = deterministicSkillLoadId(
+        sessionId,
+        skillLoad.promptId || turn.promptId,
+        skillLoad.metaUuid || skillLoad.metaTimestamp,
+        skillLoad.rootPath,
+      );
+      if (synthesizedCallIds.has(callId)) continue;
+      synthesizedCallIds.add(callId);
+
+      const toolSpanId = generateSpanId();
+      const skillFields = skillAttributes(skillLoad);
+      const times = positiveSkillLoadTimes(
+        skillLoad,
+        llmCalls[0]?.request_start_time || llmCalls[0]?.timestamp,
+      );
+      records.push({
+        time_unix_nano: times.call,
+        'event.id': crypto.randomUUID(),
+        'event.name': 'tool.call',
+        ...baseFields,
+        span_id: toolSpanId,
+        parent_span_id: firstStepOwner.stepSpanId,
+        'gen_ai.step.id': firstStepOwner.stepId,
+        'gen_ai.tool.name': 'load_skill',
+        'gen_ai.tool.type': 'extension',
+        'gen_ai.tool.call.id': callId,
+        'gen_ai.tool.call.arguments': toJsonValue({
+          skill: skillLoad.name || skillLoad.id || 'unknown',
+        }),
+        ...skillFields,
+      });
+      records.push({
+        time_unix_nano: times.result,
+        'event.id': crypto.randomUUID(),
+        'event.name': 'tool.result',
+        ...baseFields,
+        span_id: toolSpanId,
+        parent_span_id: firstStepOwner.stepSpanId,
+        'gen_ai.step.id': firstStepOwner.stepId,
+        'gen_ai.tool.name': 'load_skill',
+        'gen_ai.tool.type': 'extension',
+        'gen_ai.tool.call.id': callId,
+        'gen_ai.tool.call.result': toJsonValue({ success: true }),
+        'tool.result.status': 'success',
+        ...skillFields,
+      });
     }
   }
 

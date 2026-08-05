@@ -46,6 +46,7 @@ Pilot is designed to answer practical questions:
 | Codex         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       |
+| Hermes Agent  | Native directory plugin   | Yes          | Yes        | Yes         | Yes                       |
 | OpenCode      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
 | Pi Coding Agent | Extension injection     | Yes          | Yes        | Yes         | Yes                       |
 | Qoder         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
@@ -56,6 +57,7 @@ Pilot is designed to answer practical questions:
 | Qoder Work CN | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       |
 | Qwen Code CLI | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       |
+| WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       |
 
 ### Documented Windows Agent Support
 
@@ -69,6 +71,7 @@ The table above describes Pilot's general integration capabilities; it does not 
 | Qoder CLI | Hook | Yes | Yes | No | Yes | — |
 | Qoder IDE | Hook / local data source | Yes | Yes | Yes | Yes | Qoder 1.10.0 or later, User edition |
 | OpenCode | Plugin injection | Yes | Yes | Yes | Yes | — |
+| WorkBuddy | Hook wakeup + local transcript | Yes | Yes | Yes | Yes | WorkBuddy Desktop 5.3.5.0; Windows 11 installed-product E2E |
 
 Agents omitted from this Windows table do not currently have an explicit Windows support statement; omission does not necessarily mean that the agent cannot run on Windows. See the [Alibaba Cloud AI Coding Agent access guide](https://help.aliyun.com/zh/cms/cloudmonitor-2-0/ai-application-access-ai-coding-agent/) for the source support matrix and [Installation](docs/installation.md) for Windows prerequisites and setup.
 
@@ -150,7 +153,7 @@ When enabled, the upstream `traceparent` reaches Pilot via one of two schemes an
 | Backend    | Use Case                                                                |
 | ---------- | ----------------------------------------------------------------------- |
 | JSONL      | Local backup and easy inspection. Enabled by default.                   |
-| SLS        | Alibaba Cloud Log Service reporting. Supports WebTracking and AK modes. |
+| SLS        | Alibaba Cloud Log Service reporting. Supports WebTracking, AK, and API Key modes. |
 | HTTP       | POST batches to a custom endpoint.                                      |
 | OTLP Trace | Export GenAI activity as OpenTelemetry traces.                          |
 

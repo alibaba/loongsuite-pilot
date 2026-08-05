@@ -9,6 +9,11 @@
 #     --sls-logstore "my-logstore" \
 #     --sls-ak-id "your-ak-id" \
 #     --sls-ak-secret "your-ak-secret"
+#   curl -fsSL <URL>/installer.sh | bash -s -- install \
+#     --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
+#     --sls-project "my-project" \
+#     --sls-logstore "my-logstore" \
+#     --sls-api-key "your-api-key"
 #
 # Install a specific version:
 #   curl -fsSL <URL>/installer.sh | bash -s -- install --version 1.2.0
@@ -43,6 +48,7 @@ SLS_PROJECT=""
 SLS_LOGSTORE=""
 SLS_AK_ID=""
 SLS_AK_SECRET=""
+SLS_API_KEY=""
 DATA_DIR="$DEFAULT_DATA_DIR"
 LOG_LEVEL=""
 USER_ID=""
@@ -84,6 +90,8 @@ while [[ $# -gt 0 ]]; do
         --sls-ak-id=*)        SLS_AK_ID="${1#*=}"; shift ;;
         --sls-ak-secret)      SLS_AK_SECRET="$2"; shift 2 ;;
         --sls-ak-secret=*)    SLS_AK_SECRET="${1#*=}"; shift ;;
+        --sls-api-key)        SLS_API_KEY="$2"; shift 2 ;;
+        --sls-api-key=*)      SLS_API_KEY="${1#*=}"; shift ;;
         --package-url)        PACKAGE_URL="$2"; shift 2 ;;
         --package-url=*)      PACKAGE_URL="${1#--package-url=}"; shift ;;
         --data-dir)           DATA_DIR="$2"; shift 2 ;;
@@ -138,6 +146,10 @@ if [ "$MASK_MODE" = "custom" ] && [ -z "$MASK_TYPES" ]; then
 fi
 if [ -n "$MASK_TYPES" ] && [ "$MASK_MODE" != "custom" ]; then
     echo "❌ --mask-types can only be used with --mask-mode custom" >&2
+    exit 1
+fi
+if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; }; then
+    echo "❌ --sls-api-key cannot be used with --sls-ak-id or --sls-ak-secret" >&2
     exit 1
 fi
 
@@ -502,10 +514,18 @@ try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { pro
 
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
+const slsModeOf = sls => {
+  if (!sls) return '';
+  if (sls.mode) return sls.mode;
+  if (sls.apiKey) return 'apiKey';
+  if (sls.accessKeyId || sls.accessKeySecret) return 'ak';
+  return '';
+};
 const checks = [
   { label: 'sls.endpoint',       oldVal: (old.sls||{}).endpoint||'',       newVal: newVals.slsEndpoint },
   { label: 'sls.project',        oldVal: (old.sls||{}).project||'',        newVal: newVals.slsProject },
   { label: 'sls.logstore',       oldVal: (old.sls||{}).logstore||'',       newVal: newVals.slsLogstore },
+  { label: 'sls.mode',           oldVal: slsModeOf(old.sls),               newVal: newVals.slsMode },
   { label: 'cms.licenseKey',     oldVal: (old.cms||{}).licenseKey||'',     newVal: newVals.cmsLicenseKey },
   { label: 'cms.endpoint',       oldVal: (old.cms||{}).endpoint||'',       newVal: newVals.cmsEndpoint },
   { label: 'cms.workspace',      oldVal: (old.cms||{}).workspace||'',      newVal: newVals.cmsWorkspace },
@@ -520,8 +540,8 @@ if (!changed.length) process.exit(0);
 for (const c of changed) {
   console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","maskMode":"%s","maskTypes":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$MASK_MODE" "$MASK_TYPES")" 2>/dev/null || true)
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","maskMode":"%s","maskTypes":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$MASK_MODE" "$MASK_TYPES")" 2>/dev/null || true)
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -592,10 +612,10 @@ deploy_package() {
         msg "==> 部署到 $target ..." "==> Deploying to $target ..."
         mkdir -p "$versions_dir"
         rm -rf "$target"
-        cp -r "$src" "$target"
-
-        echo "$dir_name" > "$current_file.tmp"
-        mv -f "$current_file.tmp" "$current_file"
+        if ! cp -r "$src" "$target"; then
+            msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
+            return 1
+        fi
 
         PERMANENT_DIR="$target"
     else
@@ -603,7 +623,10 @@ deploy_package() {
             "==> Deploying to $PERMANENT_DIR ..."
         mkdir -p "$(dirname "$PERMANENT_DIR")"
         rm -rf "$PERMANENT_DIR"
-        cp -r "$src" "$PERMANENT_DIR"
+        if ! cp -r "$src" "$PERMANENT_DIR"; then
+            msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
+            return 1
+        fi
     fi
     msg "    ✅ 部署完成" "    ✅ Deployed"
     echo ""
@@ -611,18 +634,30 @@ deploy_package() {
     deploy_bootstrap_scripts
 
     msg "==> 安装依赖..." "==> Installing dependencies..."
-    (cd "$PERMANENT_DIR" && "$NPM_BIN" install --production --no-optional 2>&1 | tail -1)
+    if ! (cd "$PERMANENT_DIR" && "$NPM_BIN" install --production --no-optional 2>&1 | tail -1); then
+        msg "    ❌ 依赖安装失败" "    ❌ Dependency installation failed"
+        return 1
+    fi
     msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     echo ""
 
     msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
     if [ -f scripts/postinstall.js ]; then
-        "$NODE_BIN" scripts/postinstall.js
+        "$NODE_BIN" scripts/postinstall.js || {
+            msg "    ❌ Hook 脚本部署失败" "    ❌ Hook script deployment failed"
+            return 1
+        }
     fi
     msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
     msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
         "    If using Codex desktop app, please manually trust hooks on first launch"
     echo ""
+
+    # Write current pointer only after all deploy steps succeed
+    if [ -n "$ver" ] && [ -n "$commit" ]; then
+        echo "$dir_name" > "$current_file.tmp"
+        mv -f "$current_file.tmp" "$current_file"
+    fi
 }
 
 # ============================================================
@@ -672,7 +707,7 @@ write_config() {
         "==> Writing config to $config_file ..."
     mkdir -p "$DATA_DIR"
 
-    "$NODE_BIN" -e "
+    LP_SLS_API_KEY="$SLS_API_KEY" "$NODE_BIN" -e "
 const fs = require('fs');
 const path = '$config_file';
 
@@ -695,19 +730,31 @@ const slsProject  = '${SLS_PROJECT}';
 const slsLogstore = '${SLS_LOGSTORE}';
 const slsAkId     = '${SLS_AK_ID}';
 const slsAkSecret = '${SLS_AK_SECRET}';
+const slsApiKey   = process.env.LP_SLS_API_KEY || '';
 const logLevel    = '${LOG_LEVEL}';
 const userId      = '${USER_ID}';
 
-if (slsEndpoint || slsProject || slsLogstore) {
+if (slsEndpoint || slsProject || slsLogstore || slsApiKey) {
   config.sls = config.sls || {};
   delete config.sls.destinationOverride;
   if (slsEndpoint) {
     config.sls.endpoint = slsEndpoint;
   }
-  if (slsAkId && slsAkSecret) {
+  if (slsApiKey) {
+    config.sls.mode = 'apiKey';
+    config.sls.apiKey = slsApiKey;
+    delete config.sls.accessKeyId;
+    delete config.sls.accessKeySecret;
+  } else if (slsAkId && slsAkSecret) {
     config.sls.mode = 'ak';
     config.sls.accessKeyId = slsAkId;
     config.sls.accessKeySecret = slsAkSecret;
+    delete config.sls.apiKey;
+  } else if (slsEndpoint || slsProject || slsLogstore) {
+    config.sls.mode = 'webtracking';
+    delete config.sls.apiKey;
+    delete config.sls.accessKeyId;
+    delete config.sls.accessKeySecret;
   }
   if (slsProject && slsLogstore) {
     config.sls.project = slsProject;
@@ -1578,7 +1625,34 @@ cmd_upgrade() {
 
     # Deploy new version to versions/<ver>_<commit>/
     # Old version stays untouched; deploy_package writes current/previous pointers
-    deploy_package "$INSTALL_SRC"
+    if ! deploy_package "$INSTALL_SRC"; then
+        echo ""
+        msg "⚠️  部署失败，正在回滚到旧版本..." \
+            "⚠️  Deployment failed, rolling back to old version..."
+        local _rollback_ok=1
+        if command -v loongsuite-pilot &>/dev/null; then
+            loongsuite-pilot rollback 2>/dev/null || _rollback_ok=0
+        elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
+            "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || _rollback_ok=0
+        fi
+        if [ "$_rollback_ok" -eq 1 ]; then
+            if command -v loongsuite-pilot &>/dev/null; then
+                loongsuite-pilot start 2>/dev/null || _rollback_ok=0
+            elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
+                "$HOME/.local/bin/loongsuite-pilot" start 2>/dev/null || _rollback_ok=0
+            fi
+        fi
+        if [ "$_rollback_ok" -eq 1 ]; then
+            msg "❌ 升级失败（部署/依赖安装出错），已回滚到 v${old_ver:-unknown} 并重启服务" \
+                "❌ Upgrade failed (deploy/dependency error), rolled back to v${old_ver:-unknown} and restarted"
+        else
+            msg "❌ 升级失败且自动回滚未成功，请手动恢复:" \
+                "❌ Upgrade failed and auto-rollback did not succeed. Manual recovery:"
+            msg "   loongsuite-pilot rollback && loongsuite-pilot start" \
+                "   loongsuite-pilot rollback && loongsuite-pilot start"
+        fi
+        exit 1
+    fi
     install_loongsuite_pilot_command
 
     # Start the new version
@@ -1606,15 +1680,23 @@ cmd_upgrade() {
 
     loongsuite-pilot stop 2>/dev/null || true
 
+    local _rb_ok=1
     if command -v loongsuite-pilot &>/dev/null; then
-        loongsuite-pilot rollback 2>/dev/null || true
+        loongsuite-pilot rollback 2>/dev/null || _rb_ok=0
     else
-        "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || true
+        "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || _rb_ok=0
     fi
 
-    msg "❌ 升级失败，已回滚到 v${old_ver:-unknown}" \
-        "❌ Upgrade failed, rolled back to v${old_ver:-unknown}"
-    msg "   请检查日志: loongsuite-pilot log" "   Check logs: loongsuite-pilot log"
+    if [ "$_rb_ok" -eq 1 ]; then
+        msg "❌ 升级失败，已回滚到 v${old_ver:-unknown}" \
+            "❌ Upgrade failed, rolled back to v${old_ver:-unknown}"
+        msg "   请检查日志: loongsuite-pilot log" "   Check logs: loongsuite-pilot log"
+    else
+        msg "❌ 升级失败且回滚未成功，请手动恢复:" \
+            "❌ Upgrade failed and rollback did not succeed. Manual recovery:"
+        msg "   loongsuite-pilot rollback && loongsuite-pilot start" \
+            "   loongsuite-pilot rollback && loongsuite-pilot start"
+    fi
     exit 1
 }
 
@@ -1662,14 +1744,23 @@ remove_hook_configs() {
         "$HOME/.claude/settings.json"
         "$HOME/.codex/hooks.json"
         "$HOME/.qwen/settings.json"
+        "$HOME/.workbuddy/settings.json"
     )
+
+    local _has_node=0
+    if command -v node &>/dev/null; then
+        _has_node=1
+    else
+        msg "    ⚠️  未找到 Node.js，含 hook 的配置文件将跳过自动清理" \
+            "    ⚠️  Node.js not found, config files with hooks will skip auto-cleanup"
+    fi
 
     for cfg in "${configs[@]}"; do
         [ -f "$cfg" ] || continue
         local short="${cfg/#$HOME/\~}"
 
         local ok=0
-        if command -v node &>/dev/null; then
+        if [ "$_has_node" -eq 1 ]; then
             node -e "
 const fs = require('fs');
 const cfg = process.argv[1];
@@ -1699,6 +1790,14 @@ try {
   }
 } catch(e) { process.stderr.write(e.message); process.exit(1); }
 " "$cfg" "$HOOK_MARKER" && ok=1
+        else
+            # Node unavailable: skip auto-cleanup to avoid over-deletion
+            if grep -q "$HOOK_MARKER" "$cfg" 2>/dev/null; then
+                msg "    ⚠️  跳过: $short (无 Node.js，请手动删除含 $HOOK_MARKER 的 hook 条目)" \
+                    "    ⚠️  Skipped: $short (no Node.js, manually remove hook entries containing $HOOK_MARKER)"
+            else
+                ok=1
+            fi
         fi
 
         if [ "$ok" -eq 1 ]; then
@@ -1776,6 +1875,92 @@ try {
     done
 }
 
+# Remove only the Hermes directory plugin owned by this Pilot installation.
+remove_hermes_plugin() {
+    local hermes_home="${HERMES_HOME:-$HOME/.hermes}"
+    local default_plugin_dir="$hermes_home/plugins/loongsuite-pilot"
+    local state_file="$DATA_DIR/deployed-agents.json"
+    local plugin_dir="$default_plugin_dir"
+
+    if ! command -v node &>/dev/null; then
+        msg "    ⚠️  跳过: $plugin_dir (无 node,需手动清理)" \
+            "    ⚠️  Skipped: $plugin_dir (node unavailable, manual cleanup needed)"
+        return 0
+    fi
+
+    plugin_dir=$(node -e "
+const fs = require('fs');
+const path = require('path');
+const stateFile = process.argv[1];
+let target = process.argv[2];
+try {
+  const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  const recorded = state?.['hermes-agent']?.targetDir;
+  if (typeof recorded === 'string' && path.isAbsolute(recorded)) target = recorded;
+} catch {}
+process.stdout.write(target);
+" "$state_file" "$default_plugin_dir" 2>/dev/null) || plugin_dir="$default_plugin_dir"
+
+    local marker="$plugin_dir/.loongsuite-pilot-managed.json"
+    [ -f "$marker" ] || return 0
+
+    local ownership
+    ownership=$(node -e "
+const fs = require('fs');
+const path = require('path');
+const dir = process.argv[1];
+const marker = path.join(dir, '.loongsuite-pilot-managed.json');
+try {
+  const meta = JSON.parse(fs.readFileSync(marker, 'utf8'));
+  if (meta.owner !== 'loongsuite-pilot' || meta.agentId !== 'hermes-agent') {
+    process.stdout.write('unmanaged');
+    process.exit(0);
+  }
+  process.stdout.write('owned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$plugin_dir" 2>/dev/null) || ownership="error"
+
+    if [ "$ownership" = "owned" ]; then
+        local hermes_cli="${HERMES_CLI:-$hermes_home/hermes-agent/venv/bin/hermes}"
+        if [ ! -x "$hermes_cli" ] && command -v hermes &>/dev/null; then
+            hermes_cli=$(command -v hermes)
+        fi
+        if [ -x "$hermes_cli" ]; then
+            "$hermes_cli" plugins disable loongsuite-pilot >/dev/null 2>&1 || true
+        fi
+    fi
+
+    local result="$ownership"
+    if [ "$ownership" = "owned" ]; then
+        result=$(node -e "
+const fs = require('fs');
+const path = require('path');
+const dir = process.argv[1];
+const marker = path.join(dir, '.loongsuite-pilot-managed.json');
+try {
+  const meta = JSON.parse(fs.readFileSync(marker, 'utf8'));
+  if (meta.owner !== 'loongsuite-pilot' || meta.agentId !== 'hermes-agent') {
+    process.stdout.write('unmanaged');
+    process.exit(0);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+  process.stdout.write('cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$plugin_dir" 2>/dev/null) || result="error"
+    fi
+
+    case "$result" in
+        cleaned)
+            msg "    ✅ 已清理: $plugin_dir" "    ✅ Cleaned: $plugin_dir" ;;
+        unmanaged)
+            msg "    ⚠️  保留未受 Pilot 管理的 Hermes 插件: $plugin_dir" \
+                "    ⚠️  Preserved unmanaged Hermes plugin: $plugin_dir" ;;
+        *)
+            msg "    ⚠️  跳过: $plugin_dir (需手动清理)" \
+                "    ⚠️  Skipped: $plugin_dir (manual cleanup needed)" ;;
+    esac
+}
+
 # ============================================================
 # Remove Pi Coding Agent extension injection
 # ============================================================
@@ -1816,6 +2001,68 @@ try {
         *)
             msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
     esac
+}
+
+# ============================================================
+# MiMo Code also uses deployMode "plugin-inject": a spec is written into its
+# own config file's plugin array. Same shape as remove_opencode_plugin but for
+# ~/.config/mimocode/mimocode.json[c]. Without this, the spec survives
+# uninstall and points at a (possibly purged) plugin.mjs, so the next MiMo
+# Code launch loads a non-existent module.
+# ============================================================
+remove_mimocode_plugin() {
+    local configs=(
+        "$HOME/.config/mimocode/mimocode.jsonc"
+        "$HOME/.config/mimocode/mimocode.json"
+    )
+
+    for cfg in "${configs[@]}"; do
+        [ -f "$cfg" ] || continue
+        local short="${cfg/#$HOME/\~}"
+
+        if ! command -v node &>/dev/null; then
+            msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        fi
+
+        local result
+        result=$(node -e "
+const fs = require('fs');
+const f = process.argv[1];
+const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-mimo-code') || s.includes('plugins/mimo-code/plugin.mjs'));
+const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
+const stripJsonc = src => src
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^\s*\/\/.*\$/gm, '')
+  .replace(/[ \t]+\/\/.*\$/gm, '');
+try {
+  const raw = fs.readFileSync(f, 'utf-8');
+  let data, hadComments = false;
+  try { data = JSON.parse(raw); }
+  catch { data = JSON.parse(stripJsonc(raw)); hadComments = true; }
+  const key = Array.isArray(data.plugins) ? 'plugins' : (Array.isArray(data.plugin) ? 'plugin' : null);
+  if (!key) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data[key].length;
+  data[key] = data[key].filter(e => !isOurs(entryStr(e)));
+  if (data[key].length === before) { process.stdout.write('nochange'); process.exit(0); }
+  if (hadComments) fs.writeFileSync(f + '.bak', raw, 'utf-8');
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write(hadComments ? 'cleaned-bak' : 'cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$cfg" 2>/dev/null) || result="error"
+
+        case "$result" in
+            cleaned)
+                msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" ;;
+            cleaned-bak)
+                msg "    ✅ 已清理: $short (含注释,原文件备份为 $short.bak)" \
+                    "    ✅ Cleaned: $short (had comments, original backed up to $short.bak)" ;;
+            nochange)
+                : ;;
+            *)
+                msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
+        esac
+    done
 }
 
 # ============================================================
@@ -1896,20 +2143,12 @@ cmd_uninstall() {
     msg "    ✅ 服务已停止" "    ✅ Service stopped"
     echo ""
 
-    # Remove package directory
-    msg "==> 删除安装目录..." "==> Removing installation..."
-    rm -rf "$HOME/.loongsuite-pilot"
-    msg "    ✅ 已删除 $HOME/.loongsuite-pilot" \
-        "    ✅ Removed $HOME/.loongsuite-pilot"
-
-    # Remove loongsuite-pilot command
-    msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
-    rm -f "$HOME/.local/bin/loongsuite-pilot"
-    rm -f /usr/local/bin/loongsuite-pilot 2>/dev/null || true
-    msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
+    # Read the persisted target before the data/install directory is removed.
+    msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."
+    remove_hermes_plugin
     echo ""
 
-    # Remove hook entries from tool configs
+    # Remove hook entries from tool configs BEFORE removing install dir
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     remove_hook_configs
     remove_qodercli_token_intercept
@@ -1929,6 +2168,29 @@ cmd_uninstall() {
 
     msg "==> 清理 Pi Coding Agent Extension 配置..." "==> Cleaning up Pi Coding Agent extension config..."
     remove_pi_coding_agent_extension
+    echo ""
+
+    # Remove plugin-inject specs (MiMo Code)
+    msg "==> 清理 MiMo Code 插件配置..." "==> Cleaning up MiMo Code plugin config..."
+    remove_mimocode_plugin
+    echo ""
+
+    # Remove installation artifacts
+    msg "==> 删除安装目录..." "==> Removing installation..."
+    local _cache_dir="$HOME/.loongsuite-pilot"
+    rm -rf "${_cache_dir:?}/versions"
+    rm -rf "${_cache_dir:?}/bin"
+    rm -rf "${_cache_dir:?}/package"
+    rm -f "${_cache_dir:?}/current"
+    rm -f "${_cache_dir:?}/previous"
+    rm -f "${_cache_dir:?}/node-bin"
+    msg "    ✅ 已删除安装文件" "    ✅ Installation files removed"
+
+    # Remove loongsuite-pilot command
+    msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
+    rm -f "$HOME/.local/bin/loongsuite-pilot"
+    rm -f /usr/local/bin/loongsuite-pilot 2>/dev/null || true
+    msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
     echo ""
 
     # Data directory

@@ -133,6 +133,13 @@ export function buildAgentActivityEntry(
     'gen_ai.tool.call.result': jsonAlias(opts, 'gen_ai.tool.call.result', 'tool.result.payload'),
     'gen_ai.tool.call.duration': resolveToolCallDuration(opts),
     'gen_ai.skill.name': stringAlias(opts, 'gen_ai.skill.name', 'skill.name'),
+    'gen_ai.skill.id': stringAlias(opts, 'gen_ai.skill.id', 'skill.id'),
+    'gen_ai.skill.description': stringAlias(
+      opts,
+      'gen_ai.skill.description',
+      'skill.description',
+    ),
+    'gen_ai.skill.version': stringAlias(opts, 'gen_ai.skill.version', 'skill.version'),
     'gen_ai.system_instructions': jsonAlias(
       opts,
       'gen_ai.system_instructions',
@@ -247,16 +254,34 @@ export interface SerialiseLogEntryOptions {
 
 const AGENT_SCOPED_FIELD_RE = /^agent\.[^.]+\..+$/;
 
+/**
+ * Selects the canonical fields that may leave the normalization boundary while
+ * preserving their JSON value types. JSON-native sinks should use this shape;
+ * string-only sinks can pass it through serialiseLogEntry.
+ */
+export function projectLogEntry(
+  entry: AgentActivityEntry,
+  options: SerialiseLogEntryOptions = {},
+): Record<string, JsonValue> {
+  const out: Record<string, JsonValue> = {};
+
+  for (const [key, value] of Object.entries(entry)) {
+    if (value === undefined || value === null) continue;
+    if (LEGACY_ALIAS_FIELDS.has(key)) continue;
+    if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) continue;
+    out[key] = value;
+  }
+
+  return out;
+}
+
 export function serialiseLogEntry(
   entry: AgentActivityEntry,
   options: SerialiseLogEntryOptions = {},
 ): SerializedLogEntry {
   const out: SerializedLogEntry = {};
 
-  for (const [key, value] of Object.entries(entry)) {
-    if (value === undefined || value === null) continue;
-    if (LEGACY_ALIAS_FIELDS.has(key)) continue;
-    if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) continue;
+  for (const [key, value] of Object.entries(projectLogEntry(entry, options))) {
     out[key] = serializeValue(value);
   }
 

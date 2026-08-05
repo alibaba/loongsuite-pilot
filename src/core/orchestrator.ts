@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { ClientType } from '../types/index.js';
-import type { AnalyticsConfig, AgentDetectionEntry } from '../types/index.js';
+import type { AnalyticsConfig, AgentDetectionEntry, AgentStopReason } from '../types/index.js';
 import { AgentControlManager } from './agent-control-manager.js';
 import { PROPRIETARY_BUILD } from './build-constants.js';
 import { AgentDiscoveryService } from './agent-discovery-service.js';
@@ -14,6 +14,7 @@ import { createLogger } from '../utils/logger.js';
 import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion, cleanStaleTmpFiles } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import * as fsSync from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 // Flushers
 import { BaseFlusher } from '../flushers/base-flusher.js';
@@ -43,8 +44,11 @@ import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
+import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
+import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
+import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
@@ -102,8 +106,11 @@ export class Orchestrator extends EventEmitter {
     'kiro-cli-session': 'kiro-cli',
     'opencode-log': 'opencode',
     'pi-coding-agent-log': 'pi-coding-agent',
+    'mimo-code-log': 'mimo-code',
     'qwen-code-cli-log': 'qwen-code-cli',
+    'hermes-agent-log': 'hermes-agent',
     'wukong': 'wukong',
+    'workbuddy': 'workbuddy',
   };
 
   private readonly config: AnalyticsConfig;
@@ -198,7 +205,7 @@ export class Orchestrator extends EventEmitter {
       dataDir: this.dataDir,
       pilotDir,
     });
-    await this.deploymentManager.deployAll();
+    await this.deploymentManager.deployAll(def => this.isAgentGatedEnabled(def.id));
 
     this.localWorkerActivationService = new LocalWorkerActivationService({
       dataDir: this.dataDir,
@@ -218,13 +225,17 @@ export class Orchestrator extends EventEmitter {
     this.agentDiscoveryService.on('agent:started', (id: string) => {
       logger.info('agent detected and started', { id });
     });
-    this.agentDiscoveryService.on('agent:stopped', (id: string) => {
-      logger.info('agent stopped', { id });
-      this.alarmManager.record(
-        'INPUT_STOP_ALARM', '3',
-        `input ${id} stopped unexpectedly`,
-        { input_name: id },
-      );
+    this.agentDiscoveryService.on('agent:stopped', (id: string, reason: AgentStopReason) => {
+      if (reason === 'unexpected') {
+        logger.warn('agent stopped unexpectedly', { id });
+        this.alarmManager.record(
+          'INPUT_STOP_ALARM', '3',
+          `input ${id} stopped unexpectedly (reason=unexpected)`,
+          { input_name: id },
+        );
+      } else {
+        logger.debug('agent stopped', { id, reason });
+      }
     });
     await this.agentDiscoveryService.start();
 
@@ -240,6 +251,7 @@ export class Orchestrator extends EventEmitter {
     const interceptTargets = [
       ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
       ...this.buildPluginInjectInterceptTargets(),
+      ...this.buildDirectoryPluginInterceptTargets(),
     ];
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
     this.hookWatchdog.start();
@@ -405,11 +417,13 @@ export class Orchestrator extends EventEmitter {
 
     for (const def of defs) {
       if (def.deployMode !== 'hook' || !def.hook) continue;
+      if (!this.isAgentGatedEnabled(def.id)) continue;
 
       const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
       targets.push({
         agentId: def.id,
         settingsPath: def.hook.settingsPath,
+        settingsSyntax: def.hook.settingsSyntax,
         expectedHooks: def.hook.events,
         markers: [scriptName],
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
@@ -420,7 +434,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   /**
-   * Self-heal targets for plugin-inject agents (e.g. opencode, qwen-code-cli).
+   * Self-heal targets for plugin-inject agents (currently OpenCode).
    *
    * Unlike hook agents, these write a plugin spec into the agent's own config
    * file (not a shared settings.json), so they use the intercept mechanism:
@@ -456,6 +470,33 @@ export class Orchestrator extends EventEmitter {
           const result = await this.deploymentManager.deploySingle(def);
           if (!result.success) {
             throw new Error(result.error ?? `re-inject failed for ${def.id}`);
+          }
+        },
+      });
+    }
+
+    return targets;
+  }
+
+  /** Self-heal managed native plugin directories, such as Hermes plugins. */
+  private buildDirectoryPluginInterceptTargets(): InterceptCheckTarget[] {
+    const defs = this.deploymentManager.getDefinitions();
+    const targets: InterceptCheckTarget[] = [];
+
+    for (const def of defs) {
+      if (def.deployMode !== 'directory-plugin' || !def.directoryPlugin) continue;
+
+      targets.push({
+        id: `directory-plugin:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
+        precondition: async () =>
+          (await directoryExists(def.directoryPlugin!.sourceDir))
+          && (await detectAgent(def.detection)),
+        check: async () => !(await this.deploymentManager.needsRedeploy(def)),
+        repair: async () => {
+          const result = await this.deploymentManager.deploySingle(def);
+          if (!result.success) {
+            throw new Error(result.error ?? `directory plugin repair failed for ${def.id}`);
           }
         },
       });
@@ -1056,6 +1097,7 @@ export class Orchestrator extends EventEmitter {
     const opencodeLogInput = new OpenCodeLogInput({
       stateStore: this.stateStore,
       logDir: opencodeLogDir,
+      pollIntervalMs: listenerCfg['opencode-log']?.pollInterval,
     });
     this.inputManager.registerInput(opencodeLogInput);
     entries.push(
@@ -1092,6 +1134,29 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- MiMo Code Log (event_t plugin JSONL) ---
+    // Plugin-inject agent (same shape as opencode). Pre-create log dir so
+    // fs.watch in AgentDiscoveryService succeeds immediately after install.
+    const mimoCodeLogDir = path.join(this.dataDir, 'logs', 'mimo-code');
+    await ensureDir(mimoCodeLogDir);
+    const mimoCodeLogInput = new MimoCodeLogInput({
+      stateStore: this.stateStore,
+      logDir: mimoCodeLogDir,
+    });
+    this.inputManager.registerInput(mimoCodeLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(mimoCodeLogInput, {
+        watchPaths: [mimoCodeLogDir],
+        isAvailable: async () => directoryExists(mimoCodeLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['mimo-code-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'mimo-code-log',
+            listenerCfg['mimo-code-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['mimo-code-log']?.pollInterval,
+      }),
+    );
+
     // --- Qwen Code CLI Log (transcript-driven hook JSONL) ---
     const qwenCodeCliLogDir = path.join(this.dataDir, 'logs', 'qwen-code-cli');
     // Pre-create log dir so fs.watch in AgentDiscoveryService succeeds immediately.
@@ -1114,6 +1179,28 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- Hermes Agent (native Python directory plugin JSONL) ---
+    const hermesLogDir = path.join(this.dataDir, 'logs', 'hermes-agent');
+    await ensureDir(hermesLogDir);
+    const hermesLogInput = new HermesLogInput({
+      stateStore: this.stateStore,
+      sessionDir: hermesLogDir,
+      pollIntervalMs: listenerCfg['hermes-agent-log']?.pollInterval,
+    });
+    this.inputManager.registerInput(hermesLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(hermesLogInput, {
+        watchPaths: [hermesLogDir],
+        isAvailable: async () => directoryExists(hermesLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['hermes-agent-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'hermes-agent-log',
+            listenerCfg['hermes-agent-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['hermes-agent-log']?.pollInterval,
+      }),
+    );
+
     // --- Wukong (CLI API polling) ---
     const wukongInput = new WukongInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(wukongInput);
@@ -1127,6 +1214,27 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['wukong']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['wukong']?.pollInterval,
+        unavailableThreshold: 3,
+      }),
+    );
+
+    // --- WorkBuddy (Hook/file wakeups + local transcript polling fallback) ---
+    const workBuddyInput = new WorkBuddyInput({
+      stateStore: this.stateStore,
+      hookEventDir: path.join(this.dataDir, 'state', 'workbuddy', 'hook-events'),
+      pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
+    });
+    this.inputManager.registerInput(workBuddyInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(workBuddyInput, {
+        watchPaths: WorkBuddyInput.getWatchPaths(),
+        isAvailable: WorkBuddyInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP.workbuddy) &&
+          this.agentControlManager.resolveEnabled(
+            'workbuddy',
+            listenerCfg.workbuddy?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
       }),
     );
 
@@ -1194,7 +1302,7 @@ export class Orchestrator extends EventEmitter {
     return 'unknown';
   }
 
-  private resolvePilotDir(): string {
+  private resolvePilotDir(moduleUrl: string = import.meta.url): string {
     try {
       const currentFile = path.join(this.dataDir, 'current');
       const versionName = fsSync.readFileSync(currentFile, 'utf-8').trim();
@@ -1212,6 +1320,29 @@ export class Orchestrator extends EventEmitter {
     const legacyPackageDir = path.join(this.dataDir, 'package');
     if (fsSync.existsSync(path.join(legacyPackageDir, 'dist', 'index.js'))) {
       return legacyPackageDir;
+    }
+
+    try {
+      const moduleDir = path.dirname(fileURLToPath(moduleUrl));
+      const candidates = [
+        path.resolve(moduleDir, '..'),
+        path.resolve(moduleDir, '..', '..'),
+      ];
+      for (const modulePackageDir of candidates) {
+        const packageJson = path.join(modulePackageDir, 'package.json');
+        const agentsDir = path.join(modulePackageDir, 'agents.d');
+        if (
+          fsSync.existsSync(packageJson)
+          && fsSync.existsSync(agentsDir)
+          && fsSync.statSync(packageJson).isFile()
+          && fsSync.statSync(agentsDir).isDirectory()
+        ) {
+          logger.debug('resolved pilotDir from module package root', { pilotDir: modulePackageDir });
+          return modulePackageDir;
+        }
+      }
+    } catch {
+      // Module URL is invalid or the runtime package does not include required assets.
     }
 
     return this.dataDir;

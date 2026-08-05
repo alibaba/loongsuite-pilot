@@ -76,10 +76,15 @@ export abstract class BaseSessionInput extends BaseInput {
     const handle = await fs.open(filePath, 'r');
     try {
       const buf = Buffer.alloc(stat.size - offset);
-      await handle.read(buf, 0, buf.length, offset);
-      const text = buf.toString('utf-8');
-      this.stateStore.setOffset(stateKey, stat.size);
+      const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
+      const bytes = buf.subarray(0, bytesRead);
+      const lastNewline = bytes.lastIndexOf(0x0a);
       this.stateStore.update(stateKey, { extra: { inode: (stat as any).ino } });
+      if (lastNewline < 0) return [];
+
+      const completeBytes = bytes.subarray(0, lastNewline + 1);
+      const text = completeBytes.toString('utf-8');
+      this.stateStore.setOffset(stateKey, offset + completeBytes.length);
 
       const entries: AgentActivityEntry[] = [];
       for (const line of text.split('\n')) {

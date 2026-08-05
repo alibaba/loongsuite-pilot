@@ -3,13 +3,29 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createInterface } from 'node:readline';
 import {
+  type CodexDailyUsageCollectionResult,
   computeTotalTokens,
-  type TokenUsageDailyResult,
   type TokenUsageTotals,
   zeroTokenUsageTotals,
 } from './types.js';
 
 const CHARS_PER_TOKEN = 4;
+const SESSION_META_PROBE_BYTES = 64 * 1024;
+const SESSION_META_PROBE_CHUNK_BYTES = 256;
+export const DEFAULT_MAX_CODEX_TOKEN_SCAN_BYTES = 200 * 1024 * 1024;
+
+interface CodexScanCandidate {
+  path: string;
+  size: number;
+}
+
+interface CodexScanPlan {
+  date: string;
+  codexHome: string;
+  files: CodexScanCandidate[];
+  candidateBytes: number;
+  scanLimitBytes: number;
+}
 
 interface JsonRecord {
   type?: unknown;
@@ -40,30 +56,81 @@ interface ScanState {
 export interface CollectCodexDailyUsageOptions {
   date?: string;
   codexHome?: string;
+  maxScanBytes?: number;
 }
 
-export async function collectCodexDailyUsage(opts: CollectCodexDailyUsageOptions = {}): Promise<TokenUsageDailyResult> {
+export async function collectCodexDailyUsage(
+  opts: CollectCodexDailyUsageOptions = {},
+): Promise<CodexDailyUsageCollectionResult> {
   const date = opts.date ?? localDateString();
   const codexHome = expandHome(opts.codexHome ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'));
+  const scanPlan = await buildScanPlan(
+    codexHome,
+    date,
+    opts.maxScanBytes ?? DEFAULT_MAX_CODEX_TOKEN_SCAN_BYTES,
+  );
+
+  if (scanPlan.candidateBytes > scanPlan.scanLimitBytes) {
+    return {
+      status: 'skipped',
+      date: scanPlan.date,
+      codexHome: scanPlan.codexHome,
+      reason: 'scan_bytes_limit_exceeded',
+      candidateFiles: scanPlan.files.length,
+      candidateBytes: scanPlan.candidateBytes,
+      scanLimitBytes: scanPlan.scanLimitBytes,
+    };
+  }
+
   const totals = zeroTokenUsageTotals();
   const seenKeys = new Set<string>();
 
-  for (const filePath of await candidateSessionFiles(codexHome, date)) {
-    addTotals(totals, await scanFile(filePath, date, seenKeys));
+  for (const candidate of scanPlan.files) {
+    addTotals(totals, await scanFile(candidate.path, candidate.size, date, seenKeys));
   }
 
   totals.total_tokens = computeTotalTokens(totals);
   return {
-    date,
-    codex_home: codexHome,
-    ...totals,
+    status: 'ok',
+    usage: {
+      date,
+      codex_home: codexHome,
+      ...totals,
+    },
+    candidateFiles: scanPlan.files.length,
+    candidateBytes: scanPlan.candidateBytes,
+    scanLimitBytes: scanPlan.scanLimitBytes,
   };
 }
 
-async function candidateSessionFiles(codexHome: string, targetDay: string): Promise<string[]> {
+async function buildScanPlan(codexHome: string, targetDay: string, scanLimitBytes: number): Promise<CodexScanPlan> {
+  const preliminaryFiles = await preliminaryCandidateSessionFiles(codexHome, targetDay);
+  const files: CodexScanCandidate[] = [];
+  let candidateBytes = 0;
+
+  for (const candidate of preliminaryFiles) {
+    const firstLine = await readFirstLineBounded(candidate.path);
+    if (firstLine === null || !isValidCodexSession(firstLine)) continue;
+    files.push(candidate);
+    candidateBytes += candidate.size;
+  }
+
+  return {
+    date: targetDay,
+    codexHome,
+    files,
+    candidateBytes,
+    scanLimitBytes,
+  };
+}
+
+async function preliminaryCandidateSessionFiles(
+  codexHome: string,
+  targetDay: string,
+): Promise<CodexScanCandidate[]> {
   const sessionsDir = path.join(codexHome, 'sessions');
   const dayStartMs = localDayStartMs(targetDay);
-  const files: string[] = [];
+  const files: CodexScanCandidate[] = [];
 
   if (await isDirectory(sessionsDir)) {
     for (const yearName of await sortedDirNames(sessionsDir, isDigits)) {
@@ -88,16 +155,53 @@ async function candidateSessionFiles(codexHome: string, targetDay: string): Prom
   return files;
 }
 
-async function addCandidateFile(files: string[], filePath: string, dayStartMs: number): Promise<void> {
+async function addCandidateFile(
+  files: CodexScanCandidate[],
+  filePath: string,
+  dayStartMs: number,
+): Promise<void> {
   try {
     const st = await fsp.stat(filePath);
-    if (st.isFile() && st.mtimeMs >= dayStartMs) files.push(filePath);
-  } catch {
+    if (st.isFile() && st.mtimeMs >= dayStartMs) files.push({ path: filePath, size: st.size });
+  } catch (err) {
+    if (!isIgnorableFileRaceError(err)) throw err;
     // A session can be archived or restored while the directory is being scanned.
   }
 }
 
-async function scanFile(filePath: string, targetDay: string, seenKeys: Set<string>): Promise<TokenUsageTotals> {
+async function readFirstLineBounded(filePath: string): Promise<string | null> {
+  let handle: Awaited<ReturnType<typeof fsp.open>> | null = null;
+  try {
+    handle = await fsp.open(filePath, 'r');
+    const buffer = Buffer.alloc(SESSION_META_PROBE_BYTES);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const chunkBytes = Math.min(SESSION_META_PROBE_CHUNK_BYTES, buffer.length - offset);
+      const { bytesRead } = await handle.read(buffer, offset, chunkBytes, offset);
+      if (bytesRead === 0) return buffer.toString('utf8', 0, offset);
+
+      const newlineInChunk = buffer.subarray(offset, offset + bytesRead).indexOf(0x0a);
+      if (newlineInChunk >= 0) {
+        return buffer.toString('utf8', 0, offset + newlineInChunk);
+      }
+
+      offset += bytesRead;
+    }
+    return null;
+  } catch (err) {
+    if (isIgnorableFileRaceError(err)) return null;
+    throw err;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function scanFile(
+  filePath: string,
+  maxBytes: number,
+  targetDay: string,
+  seenKeys: Set<string>,
+): Promise<TokenUsageTotals> {
   const totals = zeroTokenUsageTotals();
   totals.files_scanned = 1;
 
@@ -117,7 +221,7 @@ async function scanFile(filePath: string, targetDay: string, seenKeys: Set<strin
 
   let firstLine = true;
   try {
-    for await (const line of readLines(filePath)) {
+    for await (const line of readLines(filePath, maxBytes)) {
       if (firstLine) {
         firstLine = false;
         if (!isValidCodexSession(line)) return totals;
@@ -426,8 +530,9 @@ async function isDirectory(dir: string): Promise<boolean> {
   }
 }
 
-async function* readLines(filePath: string): AsyncGenerator<string> {
-  const input = createReadStream(filePath, { encoding: 'utf8' });
+async function* readLines(filePath: string, maxBytes: number): AsyncGenerator<string> {
+  if (maxBytes <= 0) return;
+  const input = createReadStream(filePath, { encoding: 'utf8', end: maxBytes - 1 });
   const lines = createInterface({ input, crlfDelay: Infinity });
   try {
     for await (const line of lines) yield line;
@@ -435,6 +540,12 @@ async function* readLines(filePath: string): AsyncGenerator<string> {
     lines.close();
     input.destroy();
   }
+}
+
+function isIgnorableFileRaceError(err: unknown): boolean {
+  if (!err || typeof err !== 'object' || !('code' in err)) return false;
+  const code = (err as { code?: unknown }).code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
 function isDigits(name: string): boolean {

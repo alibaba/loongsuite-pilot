@@ -17,6 +17,28 @@ export interface TokenUsageDailyResult extends TokenUsageTotals {
   codex_home: string;
 }
 
+export interface TokenUsageScanMetadata {
+  candidateFiles: number;
+  candidateBytes: number;
+  scanLimitBytes: number;
+}
+
+export interface CodexDailyUsageCollectionOkResult extends TokenUsageScanMetadata {
+  status: 'ok';
+  usage: TokenUsageDailyResult;
+}
+
+export interface CodexDailyUsageCollectionSkippedResult extends TokenUsageScanMetadata {
+  status: 'skipped';
+  date: string;
+  codexHome: string;
+  reason: 'scan_bytes_limit_exceeded';
+}
+
+export type CodexDailyUsageCollectionResult =
+  | CodexDailyUsageCollectionOkResult
+  | CodexDailyUsageCollectionSkippedResult;
+
 export interface TokenUsageStateEntry {
   agent: TokenUsageAgent;
   date: string;
@@ -39,11 +61,20 @@ export interface TokenUsageDeltas {
   total_tokens: number;
 }
 
-export interface TokenUsageStatusRow {
+interface TokenUsageStatusRowBase {
   category: 'token_usage';
   agent: TokenUsageAgent;
   user_id: string;
   date: string;
+  collection_status: 'ok' | 'skipped';
+  candidate_files: string;
+  candidate_bytes: string;
+  scan_limit_bytes: string;
+  __time__: number;
+}
+
+export interface TokenUsageSuccessStatusRow extends TokenUsageStatusRowBase {
+  collection_status: 'ok';
   calls_total: string;
   calls_delta: string;
   input_tokens_total: string;
@@ -60,8 +91,14 @@ export interface TokenUsageStatusRow {
   estimated_calls_delta: string;
   files_scanned: string;
   files_with_usage: string;
-  __time__: number;
 }
+
+export interface TokenUsageSkippedStatusRow extends TokenUsageStatusRowBase {
+  collection_status: 'skipped';
+  skip_reason: 'scan_bytes_limit_exceeded';
+}
+
+export type TokenUsageStatusRow = TokenUsageSuccessStatusRow | TokenUsageSkippedStatusRow;
 
 export function zeroTokenUsageTotals(): TokenUsageTotals {
   return {

@@ -6,6 +6,21 @@ import { MetricsWriter } from '../../../src/metrics/metrics-writer.js';
 import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
 
+const fsMockState = { blockAccessSync: false };
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    accessSync: (p: fs.PathLike, mode?: number) => {
+      if (fsMockState.blockAccessSync && mode === actual.constants.X_OK) {
+        throw new Error(`EACCES: permission denied, access '${p}'`);
+      }
+      return actual.accessSync(p as any, mode);
+    },
+  };
+});
+
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
     info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
@@ -45,6 +60,13 @@ function buildSnapshot(): DataflowSnapshot {
   };
 }
 
+function writeMetricsSummary(dataDir: string, content: unknown | string): void {
+  fs.writeFileSync(
+    path.join(dataDir, 'logs', 'metrics-summary.json'),
+    typeof content === 'string' ? content : JSON.stringify(content),
+  );
+}
+
 describe('MetricsWriter', () => {
   let tmpDir: string;
   let writer: MetricsWriter;
@@ -58,17 +80,23 @@ describe('MetricsWriter', () => {
     mockSendRunningStatus.mockClear();
     mockCollectCodexDailyUsage.mockReset();
     mockCollectCodexDailyUsage.mockResolvedValue({
-      date: '2026-06-18',
-      codex_home: '/tmp/codex',
-      calls: 2,
-      input_tokens: 10,
-      output_tokens: 5,
-      cache_read_tokens: 20,
-      reasoning_tokens: 1,
-      estimated_calls: 0,
-      files_scanned: 1,
-      files_with_usage: 1,
-      total_tokens: 34,
+      status: 'ok',
+      usage: {
+        date: '2026-06-18',
+        codex_home: '/tmp/codex',
+        calls: 2,
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_read_tokens: 20,
+        reasoning_tokens: 1,
+        estimated_calls: 0,
+        files_scanned: 1,
+        files_with_usage: 1,
+        total_tokens: 34,
+      },
+      candidateFiles: 1,
+      candidateBytes: 4096,
+      scanLimitBytes: 209715200,
     });
   });
 
@@ -242,14 +270,201 @@ describe('MetricsWriter', () => {
       agent: 'codex',
       user_id: 'u-token',
       date: '2026-06-18',
+      collection_status: 'ok',
+      candidate_files: '1',
+      candidate_bytes: '4096',
+      scan_limit_bytes: '209715200',
       calls_total: '2',
       total_tokens_total: '34',
+      metrics_summary_available: 'false',
     });
+    expect(call![1].sample_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
 
     const statePath = path.join(tmpDir, 'logs', 'metric_alarm', 'token-usage-state.json');
     const jsonlPath = path.join(tmpDir, 'logs', 'metric_alarm', 'pilot-token-usage-metrics.jsonl');
     expect(fs.existsSync(statePath)).toBe(true);
     expect(fs.existsSync(jsonlPath)).toBe(false);
+  });
+
+  it('adds the Codex metrics summary snapshot and difference to the same status row', async () => {
+    vi.setSystemTime(new Date('2026-08-04T02:10:45.000Z'));
+    writeMetricsSummary(tmpDir, {
+      generatedAt: '2026-08-04T02:10:20.000Z',
+      ranges: {
+        today: {
+          agentShares: [
+            { agentType: 'cursor', tokens: 99 },
+            { agentType: 'codex', tokens: 20 },
+          ],
+        },
+      },
+    });
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u-token',
+      getSnapshot: buildSnapshot,
+    });
+
+    await (writer as any).writeTokenUsageMetrics();
+
+    const call = mockSendStatus.mock.calls.find(
+      (c: unknown[]) => c[0] === 'pilot_token_usage',
+    );
+    expect(call![1]).toMatchObject({
+      total_tokens_total: '34',
+      metrics_summary_available: 'true',
+      metrics_summary_codex_total_tokens: '20',
+      metrics_summary_generated_at: '2026-08-04T02:10:20.000Z',
+      metrics_summary_age_seconds: '25',
+      difference_tokens: '14',
+    });
+  });
+
+  it.each([
+    ['missing file', null],
+    ['invalid JSON', '{'],
+    ['invalid generatedAt', {
+      generatedAt: 'not-a-date',
+      ranges: { today: { agentShares: [{ agentType: 'codex', tokens: 20 }] } },
+    }],
+    ['missing Codex entry', {
+      generatedAt: '2026-08-04T02:10:20.000Z',
+      ranges: { today: { agentShares: [{ agentType: 'cursor', tokens: 20 }] } },
+    }],
+    ['negative Codex tokens', {
+      generatedAt: '2026-08-04T02:10:20.000Z',
+      ranges: { today: { agentShares: [{ agentType: 'codex', tokens: -1 }] } },
+    }],
+    ['non-finite Codex tokens', '{"generatedAt":"2026-08-04T02:10:20.000Z","ranges":{"today":{"agentShares":[{"agentType":"codex","tokens":1e309}]}}}'],
+  ])('keeps token usage reporting when metrics summary is unavailable: %s', async (_name, content) => {
+    if (content !== null) writeMetricsSummary(tmpDir, content);
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u-token',
+      getSnapshot: buildSnapshot,
+    });
+
+    await (writer as any).writeTokenUsageMetrics();
+
+    const call = mockSendStatus.mock.calls.find(
+      (c: unknown[]) => c[0] === 'pilot_token_usage',
+    );
+    expect(call![1]).toMatchObject({
+      total_tokens_total: '34',
+      metrics_summary_available: 'false',
+    });
+    expect(call![1]).not.toHaveProperty('metrics_summary_codex_total_tokens');
+    expect(call![1]).not.toHaveProperty('metrics_summary_generated_at');
+    expect(call![1]).not.toHaveProperty('metrics_summary_age_seconds');
+    expect(call![1]).not.toHaveProperty('difference_tokens');
+  });
+
+  it('generates a unique sample_id for each non-overlapping token sample', async () => {
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u-token',
+      getSnapshot: buildSnapshot,
+    });
+
+    await (writer as any).writeTokenUsageMetrics();
+    await (writer as any).writeTokenUsageMetrics();
+
+    const rows = mockSendStatus.mock.calls
+      .filter((call) => call[0] === 'pilot_token_usage')
+      .map((call) => call[1]);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].sample_id).not.toBe(rows[1].sample_id);
+  });
+
+  it('emits a skipped row without creating token state or zero totals', async () => {
+    mockCollectCodexDailyUsage.mockResolvedValue({
+      status: 'skipped',
+      date: '2026-06-18',
+      codexHome: '/tmp/codex',
+      reason: 'scan_bytes_limit_exceeded',
+      candidateFiles: 3,
+      candidateBytes: 300,
+      scanLimitBytes: 200,
+    });
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u-token',
+      getSnapshot: buildSnapshot,
+    });
+
+    vi.useRealTimers();
+    await writer.start();
+    await vi.waitFor(() => {
+      expect(mockSendStatus.mock.calls.some((call) => call[0] === 'pilot_token_usage')).toBe(true);
+    });
+
+    const call = mockSendStatus.mock.calls.find((c: unknown[]) => c[0] === 'pilot_token_usage');
+    expect(call![1]).toEqual(expect.objectContaining({
+      collection_status: 'skipped',
+      skip_reason: 'scan_bytes_limit_exceeded',
+      candidate_files: '3',
+      candidate_bytes: '300',
+      scan_limit_bytes: '200',
+      metrics_summary_available: 'false',
+    }));
+    expect(call![1].sample_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(Object.keys(call![1] as object).some((key) => key.endsWith('_total') || key.endsWith('_delta'))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, 'logs', 'metric_alarm', 'token-usage-state.json'))).toBe(false);
+  });
+
+  it('leaves existing token state byte-for-byte unchanged when a scan is skipped', async () => {
+    const statePath = path.join(tmpDir, 'logs', 'metric_alarm', 'token-usage-state.json');
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    const existingState = '{"version":2,"entries":{"sentinel":{"value":1}}}\n';
+    fs.writeFileSync(statePath, existingState, 'utf8');
+    mockCollectCodexDailyUsage.mockResolvedValue({
+      status: 'skipped',
+      date: '2026-06-18',
+      codexHome: '/tmp/codex',
+      reason: 'scan_bytes_limit_exceeded',
+      candidateFiles: 2,
+      candidateBytes: 201,
+      scanLimitBytes: 200,
+    });
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u-token',
+      getSnapshot: buildSnapshot,
+    });
+
+    vi.useRealTimers();
+    await writer.start();
+    await vi.waitFor(() => {
+      expect(mockSendStatus.mock.calls.some((call) => call[0] === 'pilot_token_usage')).toBe(true);
+    });
+
+    expect(fs.readFileSync(statePath, 'utf8')).toBe(existingState);
+  });
+
+  it('keeps other L2 status reporting non-fatal when token scanning fails', async () => {
+    mockCollectCodexDailyUsage.mockRejectedValue(new Error('scan failed'));
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u-token',
+      getSnapshot: buildSnapshot,
+    });
+
+    vi.useRealTimers();
+    await (writer as any).writeL2();
+
+    expect(mockSendStatus.mock.calls.some((call) => call[0] === 'pilot_input_detail')).toBe(true);
+    expect(mockSendStatus.mock.calls.some((call) => call[0] === 'pilot_flusher_detail')).toBe(true);
+    expect(mockSendStatus.mock.calls.some((call) => call[0] === 'pilot_token_usage')).toBe(false);
   });
 
   it('coalesces overlapping L2 writes into one token scan', async () => {
@@ -273,17 +488,23 @@ describe('MetricsWriter', () => {
     await vi.waitFor(() => expect(mockCollectCodexDailyUsage).toHaveBeenCalledTimes(1));
 
     resolveUsage({
-      date: '2026-06-18',
-      codex_home: '/tmp/codex',
-      calls: 2,
-      input_tokens: 10,
-      output_tokens: 5,
-      cache_read_tokens: 20,
-      reasoning_tokens: 1,
-      estimated_calls: 0,
-      files_scanned: 1,
-      files_with_usage: 1,
-      total_tokens: 34,
+      status: 'ok',
+      usage: {
+        date: '2026-06-18',
+        codex_home: '/tmp/codex',
+        calls: 2,
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_read_tokens: 20,
+        reasoning_tokens: 1,
+        estimated_calls: 0,
+        files_scanned: 1,
+        files_with_usage: 1,
+        total_tokens: 34,
+      },
+      candidateFiles: 1,
+      candidateBytes: 4096,
+      scanLimitBytes: 209715200,
     });
     await first;
   });
@@ -475,7 +696,7 @@ describe('MetricsWriter', () => {
       expect(alarm).toBeUndefined();
     });
 
-    it('INVALID_NODE_BIN_ALARM fires when node-bin is invalid', async () => {
+    it('INVALID_NODE_BIN_ALARM fires when node-bin is invalid and self-heal fails', async () => {
       fs.writeFileSync(path.join(tmpDir, 'node-bin'), '/nonexistent/path/node');
       const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
       writer = new MetricsWriter({
@@ -486,13 +707,25 @@ describe('MetricsWriter', () => {
         alarmManager,
       });
 
-      vi.useRealTimers();
-      await writer.start();
+      const execPathSpy = vi.spyOn(process, 'execPath', 'get').mockReturnValue('/also/broken/node');
+      const origPath = process.env.PATH;
+      process.env.PATH = '/no_such_dir';
+      fsMockState.blockAccessSync = true;
 
-      const entries = alarmManager.serialize();
-      const alarm = entries.find(e => e.alarm_type === 'INVALID_NODE_BIN_ALARM');
-      expect(alarm).toBeDefined();
-      expect(alarm!.alarm_level).toBe('2');
+      try {
+        vi.useRealTimers();
+        await writer.start();
+
+        const entries = alarmManager.serialize();
+        const alarm = entries.find(e => e.alarm_type === 'INVALID_NODE_BIN_ALARM');
+        expect(alarm).toBeDefined();
+        expect(alarm!.alarm_level).toBe('2');
+        expect(alarm!.alarm_message).toContain('path does not exist');
+      } finally {
+        fsMockState.blockAccessSync = false;
+        process.env.PATH = origPath;
+        execPathSpy.mockRestore();
+      }
     });
 
     it('INVALID_NODE_BIN_ALARM does not fire when node-bin is valid', async () => {

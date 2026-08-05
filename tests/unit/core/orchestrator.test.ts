@@ -17,8 +17,10 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
   writeJsonFile: vi.fn().mockResolvedValue(undefined),
   appendLine: vi.fn().mockResolvedValue(undefined),
   directoryExists: vi.fn().mockResolvedValue(false),
+  fileExists: vi.fn().mockResolvedValue(false),
   getTodayDateString: () => '2026-04-27',
   readInstalledVersion: () => '1.0.0-test',
+  cleanStaleTmpFiles: vi.fn().mockResolvedValue(undefined),
 }));
 
 const mockStateStoreLoad = vi.fn().mockResolvedValue(undefined);
@@ -44,11 +46,12 @@ vi.mock('../../../src/core/agent-control-manager.js', () => ({
 
 const mockDiscoveryStart = vi.fn().mockResolvedValue(undefined);
 const mockDiscoveryStop = vi.fn().mockResolvedValue(undefined);
+const discoveryHandlers: Record<string, Function> = {};
 vi.mock('../../../src/core/agent-discovery-service.js', () => ({
   AgentDiscoveryService: vi.fn().mockImplementation(() => ({
     start: mockDiscoveryStart,
     stop: mockDiscoveryStop,
-    on: vi.fn(),
+    on: vi.fn((event: string, handler: Function) => { discoveryHandlers[event] = handler; }),
   })),
 }));
 
@@ -140,16 +143,13 @@ import { CursorHookInput } from '../../../src/inputs/cursor-hook/cursor-hook-inp
 (CursorHookInput as any).getWatchPaths = vi.fn().mockReturnValue(['/tmp/cursor-hook']);
 (CursorHookInput as any).checkAvailability = vi.fn().mockResolvedValue(true);
 
-const mockFCMStart = vi.fn().mockResolvedValue(undefined);
-const mockFCMStop = vi.fn().mockResolvedValue(undefined);
-vi.mock('../../../src/file-collection/file-collection-manager.js', () => ({
-  FileCollectionManager: vi.fn().mockImplementation(() => ({
-    start: mockFCMStart,
-    stop: mockFCMStop,
+const mockAlarmRecord = vi.fn();
+vi.mock('../../../src/metrics/alarm-manager.js', () => ({
+  AlarmManager: vi.fn().mockImplementation(() => ({
+    record: mockAlarmRecord,
   })),
 }));
 
-import { FileCollectionManager } from '../../../src/file-collection/file-collection-manager.js';
 import { Orchestrator } from '../../../src/core/orchestrator.js';
 
 function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
@@ -190,6 +190,11 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
     },
     fileCollection: {
       enabled: false,
+    },
+    pipeline: {
+      enabled: false,
+      file: { enabled: false },
+      qoderApi: { enabled: false },
     },
     statusBar: {
       enabled: false,
@@ -243,6 +248,20 @@ describe('Orchestrator', () => {
       await orch.start();
 
       expect(events).toEqual(['starting', 'started']);
+      await orch.stop();
+    });
+
+    it('passes the configured OpenCode log poll interval to the input', async () => {
+      const config = makeConfig();
+      config.listeners['opencode-log'] = { enabled: true, pollInterval: 1000 };
+
+      const orch = new Orchestrator(config);
+      await orch.start();
+
+      const input = (orch as any).inputManager.getInput('opencode-log');
+      expect(input).toBeDefined();
+      expect(input.pollIntervalMs).toBe(1000);
+
       await orch.stop();
     });
   });
@@ -320,29 +339,6 @@ describe('Orchestrator', () => {
     });
   });
 
-  describe('fileCollection toggle', () => {
-    it('starts FileCollectionManager when fileCollection.enabled is true', async () => {
-      const orch = new Orchestrator(makeConfig({ fileCollection: { enabled: true } }));
-      await orch.start();
-
-      expect(FileCollectionManager).toHaveBeenCalledTimes(1);
-      expect(mockFCMStart).toHaveBeenCalledTimes(1);
-
-      await orch.stop();
-      expect(mockFCMStop).toHaveBeenCalledTimes(1);
-    });
-
-    it('skips FileCollectionManager when fileCollection.enabled is false', async () => {
-      const orch = new Orchestrator(makeConfig({ fileCollection: { enabled: false } }));
-      await orch.start();
-
-      expect(FileCollectionManager).not.toHaveBeenCalled();
-      expect(mockFCMStart).not.toHaveBeenCalled();
-
-      await orch.stop();
-    });
-  });
-
   describe('setUserId', () => {
     it('delegates to InputManager.setUserId', async () => {
       const orch = new Orchestrator(makeConfig());
@@ -350,6 +346,62 @@ describe('Orchestrator', () => {
 
       orch.setUserId('user-123');
       // No crash expected
+      await orch.stop();
+    });
+  });
+
+  describe('agent:stopped alarm semantics', () => {
+    it('records INPUT_STOP_ALARM only for unexpected reason', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+
+      const handler = discoveryHandlers['agent:stopped'];
+      expect(handler).toBeDefined();
+
+      mockAlarmRecord.mockClear();
+      handler('wukong', 'unexpected');
+      expect(mockAlarmRecord).toHaveBeenCalledWith(
+        'INPUT_STOP_ALARM', '3',
+        'input wukong stopped unexpectedly (reason=unexpected)',
+        { input_name: 'wukong' },
+      );
+
+      await orch.stop();
+    });
+
+    it('does not record alarm for unavailable reason', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+
+      const handler = discoveryHandlers['agent:stopped'];
+      mockAlarmRecord.mockClear();
+      handler('wukong', 'unavailable');
+      expect(mockAlarmRecord).not.toHaveBeenCalled();
+
+      await orch.stop();
+    });
+
+    it('does not record alarm for disabled reason', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+
+      const handler = discoveryHandlers['agent:stopped'];
+      mockAlarmRecord.mockClear();
+      handler('qoder-trace', 'disabled');
+      expect(mockAlarmRecord).not.toHaveBeenCalled();
+
+      await orch.stop();
+    });
+
+    it('does not record alarm for shutdown reason', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+
+      const handler = discoveryHandlers['agent:stopped'];
+      mockAlarmRecord.mockClear();
+      handler('cursor-hook', 'shutdown');
+      expect(mockAlarmRecord).not.toHaveBeenCalled();
+
       await orch.stop();
     });
   });

@@ -10,6 +10,7 @@ import { AgentDefLoader, type AgentDefLoaderOptions } from './agent-def-loader.j
 import { HookStrategy } from './hook-strategy.js';
 import { PluginProbeStrategy } from './plugin-probe-strategy.js';
 import { PluginInjectStrategy } from './plugin-inject-strategy.js';
+import { DirectoryPluginStrategy } from './directory-plugin-strategy.js';
 import { DetectionOnlyStrategy } from './detection-only-strategy.js';
 import { writeDeployNotification } from './deploy-notification.js';
 import { runPluginMigration } from './plugin-migration.js';
@@ -31,11 +32,13 @@ export class DeploymentManager {
   private readonly hookStrategy: HookStrategy;
   private readonly pluginProbeStrategy: PluginProbeStrategy;
   private readonly pluginInjectStrategy: PluginInjectStrategy;
+  private readonly directoryPluginStrategy: DirectoryPluginStrategy;
   private readonly detectionOnlyStrategy: DetectionOnlyStrategy;
   private readonly loader: AgentDefLoader;
   private readonly stateFilePath: string;
   private state: DeployedAgentsState = {};
   private definitions: AgentDefinition[] = [];
+  private operationTail: Promise<void> = Promise.resolve();
 
   constructor(opts: DeploymentManagerOptions) {
     this.dataDir = opts.dataDir;
@@ -49,6 +52,7 @@ export class DeploymentManager {
     this.hookStrategy = new HookStrategy(hookManager);
     this.pluginProbeStrategy = new PluginProbeStrategy(opts.dataDir, opts.pilotDir);
     this.pluginInjectStrategy = new PluginInjectStrategy(opts.dataDir, opts.pilotDir);
+    this.directoryPluginStrategy = new DirectoryPluginStrategy(opts.dataDir);
     this.detectionOnlyStrategy = new DetectionOnlyStrategy();
 
     const loaderOpts: AgentDefLoaderOptions = {
@@ -60,7 +64,11 @@ export class DeploymentManager {
     this.loader = new AgentDefLoader(loaderOpts);
   }
 
-  async deployAll(): Promise<DeployResult[]> {
+  deployAll(enabled?: (def: AgentDefinition) => boolean): Promise<DeployResult[]> {
+    return this.runExclusive(() => this.deployAllUnlocked(enabled));
+  }
+
+  private async deployAllUnlocked(enabled?: (def: AgentDefinition) => boolean): Promise<DeployResult[]> {
     // ── Phase 0: migrate from old plugins (fail-open) ──
     try {
       await runPluginMigration();
@@ -74,6 +82,16 @@ export class DeploymentManager {
     const results: DeployResult[] = [];
 
     for (const def of this.definitions) {
+      if (enabled && !enabled(def)) {
+        logger.debug('agent excluded from deployment', { agentId: def.id });
+        results.push({
+          success: true,
+          agentId: def.id,
+          deployMode: def.deployMode,
+          skipped: true,
+        });
+        continue;
+      }
       try {
         const result = await this.deployAgent(def);
         results.push(result);
@@ -92,11 +110,33 @@ export class DeploymentManager {
     return results;
   }
 
-  async deploySingle(def: AgentDefinition): Promise<DeployResult> {
+  deploySingle(def: AgentDefinition): Promise<DeployResult> {
+    return this.runExclusive(async () => {
+      await this.loadState();
+      const result = await this.deployAgent(def);
+      await this.saveState();
+      return result;
+    });
+  }
+
+  /**
+   * Remove a plugin-inject agent's spec from its config file (e.g. MiMo
+   * Code's mimocode.jsonc, OpenCode's opencode.jsonc). Called by the
+   * uninstaller path so the agent's config doesn't keep a dangling spec
+   * pointing at a (possibly purged) plugin.mjs.
+   */
+  async undeployAgent(def: AgentDefinition): Promise<boolean> {
     await this.loadState();
-    const result = await this.deployAgent(def);
-    await this.saveState();
-    return result;
+    const strategy = this.getStrategy(def);
+    if (!('undeploy' in strategy) || typeof (strategy as { undeploy?: unknown }).undeploy !== 'function') {
+      return false;
+    }
+    const ok = await (strategy as { undeploy: (def: AgentDefinition) => Promise<boolean> }).undeploy(def);
+    if (ok && this.state[def.id]) {
+      delete this.state[def.id];
+      await this.saveState();
+    }
+    return ok;
   }
 
   getDefinitions(): AgentDefinition[] {
@@ -108,10 +148,12 @@ export class DeploymentManager {
    * (re)deployed. Used by the watchdog to detect specs overwritten by other
    * tools. Returns true when the strategy reports the integration is absent.
    */
-  async needsRedeploy(def: AgentDefinition): Promise<boolean> {
-    await this.loadState();
-    const strategy = this.getStrategy(def);
-    return strategy.needsDeploy(def, this.state[def.id]);
+  needsRedeploy(def: AgentDefinition): Promise<boolean> {
+    return this.runExclusive(async () => {
+      await this.loadState();
+      const strategy = this.getStrategy(def);
+      return strategy.needsDeploy(def, this.state[def.id]);
+    });
   }
 
   async stopWorkers(): Promise<void> {
@@ -168,6 +210,10 @@ export class DeploymentManager {
         await writeDeployNotification(this.dataDir, def.displayName, def.pluginProbe.mountType);
       }
 
+      if (def.deployMode === 'directory-plugin' && def.directoryPlugin) {
+        newRecord.targetDir = path.resolve(def.directoryPlugin.targetDir);
+      }
+
       this.state[def.id] = newRecord;
     }
 
@@ -182,6 +228,8 @@ export class DeploymentManager {
         return this.pluginProbeStrategy;
       case 'plugin-inject':
         return this.pluginInjectStrategy;
+      case 'directory-plugin':
+        return this.directoryPluginStrategy;
       case 'detection-only':
         return this.detectionOnlyStrategy;
       default:
@@ -195,5 +243,14 @@ export class DeploymentManager {
 
   private async saveState(): Promise<void> {
     await writeJsonFile(this.stateFilePath, this.state);
+  }
+
+  private runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.operationTail.then(operation, operation);
+    this.operationTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 }

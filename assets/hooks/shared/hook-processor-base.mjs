@@ -13,6 +13,7 @@ import {
   buildQoderHookRecord,
   loadHookRuntimeConfig,
 } from '../agent-event-normalizer.mjs';
+import { decodePayload } from './decode-payload.mjs';
 
 const ENABLE_LOGGING = true;
 export const HOOKS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -268,7 +269,7 @@ export function getTranscriptLineCount(transcriptPath) {
   }
 }
 
-export function getLineRangeInfo(agentId, transcriptPath, sessionId) {
+export function getLineRangeInfo(agentId, transcriptPath, sessionId, knownCurrentCount) {
   const record = loadLineRecord(agentId, sessionId);
   const hasRecordedOffset = Number.isFinite(record.last_line_count)
     && record.last_line_count >= 0;
@@ -277,7 +278,11 @@ export function getLineRangeInfo(agentId, transcriptPath, sessionId) {
   const recordedTranscript = record.transcript_path || '';
   let reason = hasRecordedOffset ? 'incremental' : 'missing-cursor';
 
-  const currentCount = getTranscriptLineCount(transcriptPath);
+  // Callers that already hold a transcript snapshot can pass its line count so
+  // cursor validation does not read the complete file a second time.
+  const currentCount = Number.isFinite(knownCurrentCount)
+    ? knownCurrentCount
+    : getTranscriptLineCount(transcriptPath);
 
   if (recordedSession && recordedSession !== sessionId) {
     logDebug(agentId, `Session changed: ${recordedSession} -> ${sessionId}, reset to 0`);
@@ -378,10 +383,9 @@ export async function readStdin() {
   for await (const chunk of process.stdin) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   }
-  let str = Buffer.concat(chunks).toString('utf-8');
-  // Strip UTF-8 BOM — PowerShell 5.x adds BOM when piping strings to native commands
-  if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
-  return str;
+  // decodePayload 负责去 UTF-8 BOM + 修复 Cursor/Qoder 中文 UTF-8→GBK 双重编码。
+  // (原先由 PowerShell hook wrapper 用 .NET 完成,已移入 node 以兼容 WDAC 受限语言模式)
+  return decodePayload(Buffer.concat(chunks));
 }
 
 export async function parseStdinPayload(agentId) {

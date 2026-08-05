@@ -18,6 +18,11 @@ Files are named by agent and date:
 
 Each line is one normalized event.
 
+JSONL preserves native JSON types: token counts remain numbers, flags remain
+booleans, and message/tool payloads remain arrays or objects. String-only
+backends such as wide-table log stores perform their own serialization at the
+backend boundary.
+
 ## Enable Or Disable JSONL
 
 ```json

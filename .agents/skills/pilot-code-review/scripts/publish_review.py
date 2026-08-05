@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""
+Prepare review findings for platform publishing.
+
+Parses final-report.md to extract structured findings, generates:
+  - platform-summary.md (summary comment body)
+  - publish-payload.json (structured data for inline + summary publishing)
+
+Usage:
+  python3 publish_review.py --repo-root <path> --target-type pr --target-id <id> --platform github
+  python3 publish_review.py --repo-root <path> --target-type branch --target-id <name> --platform gitlab
+"""
+import argparse
+import json
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def sanitize_branch_name(name: str) -> str:
+    return name.replace("/", "-")
+
+
+def parse_findings(report_path: Path) -> List[Dict[str, Any]]:
+    """Extract findings from final-report.md structured format."""
+    if not report_path.exists():
+        return []
+
+    content = report_path.read_text(encoding="utf-8")
+    findings: List[Dict[str, Any]] = []
+
+    # Match the structured finding format:
+    # - Severity: <level>
+    #   - File: [path:line](...)
+    #   - 问题: ...
+    #   - 影响: ...
+    #   - 建议: ...
+    pattern = re.compile(
+        r"-\s*Severity:\s*(Critical|High|Medium|Low)\s*\n"
+        r"\s*-\s*File:\s*\[([^\]]+)\]\([^)]*\)\s*\n"
+        r"\s*-\s*问题:\s*(.+?)\s*\n"
+        r"\s*-\s*影响:\s*(.+?)\s*\n"
+        r"\s*-\s*建议:\s*(.+?)(?=\n\s*-\s*Severity:|\n\s*##|\Z)",
+        re.DOTALL,
+    )
+
+    for m in pattern.finditer(content):
+        severity = m.group(1)
+        file_ref = m.group(2).strip()
+        issue = m.group(3).strip()
+        impact = m.group(4).strip()
+        suggestion = m.group(5).strip()
+
+        # Parse file:line from reference
+        path = ""
+        line = 0
+        if ":" in file_ref:
+            parts = file_ref.rsplit(":", 1)
+            path = parts[0]
+            try:
+                line = int(parts[1])
+            except ValueError:
+                line = 0
+        else:
+            path = file_ref
+
+        findings.append({
+            "severity": severity,
+            "path": path,
+            "line": line,
+            "issue": issue,
+            "impact": impact,
+            "suggestion": suggestion,
+        })
+
+    return findings
+
+
+def parse_lifecycle_verdict(report_path: Path) -> Dict[str, str]:
+    """Extract Lifecycle Verdict PASS/FAIL results."""
+    if not report_path.exists():
+        return {}
+
+    content = report_path.read_text(encoding="utf-8")
+    verdict: Dict[str, str] = {}
+
+    # Match patterns like "资源释放：PASS" or "- 资源释放: `PASS`"
+    checks = ["资源释放", "死锁/卡死风险", "状态恢复正确性"]
+    for check in checks:
+        pattern = re.compile(rf"{re.escape(check)}[：:\s]*`?(PASS|FAIL)`?", re.IGNORECASE)
+        m = pattern.search(content)
+        if m:
+            verdict[check] = m.group(1).upper()
+
+    return verdict
+
+
+def format_inline_comment(finding: Dict[str, Any]) -> str:
+    """Format a single finding as an inline comment body."""
+    severity = finding["severity"]
+    return (
+        f"**[{severity}]** {finding['issue']}\n\n"
+        f"**影响:** {finding['impact']}\n"
+        f"**建议:** {finding['suggestion']}"
+    )
+
+
+def generate_summary(findings: List[Dict[str, Any]], verdict: Dict[str, str], target_dir: str) -> str:
+    """Generate the summary comment markdown."""
+    stats = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+    for f in findings:
+        stats[f["severity"]] = stats.get(f["severity"], 0) + 1
+
+    total = sum(stats.values())
+
+    lines = [
+        "## 🔍 Code Review Summary\n",
+        "| Severity | Count |",
+        "|----------|-------|",
+        f"| Critical | {stats['Critical']} |",
+        f"| High     | {stats['High']} |",
+        f"| Medium   | {stats['Medium']} |",
+        f"| Low      | {stats['Low']} |",
+        "",
+    ]
+
+    if verdict:
+        lines.extend([
+            "### Lifecycle Verdict\n",
+            "| Check | Result |",
+            "|-------|--------|",
+        ])
+        for check, result in verdict.items():
+            emoji = "✅" if result == "PASS" else "❌"
+            lines.append(f"| {check} | {emoji} {result} |")
+        lines.append("")
+
+    if total == 0:
+        lines.extend([
+            "### 总体结论\n",
+            "未发现阻断问题。代码质量良好，可合入。",
+            "",
+        ])
+    else:
+        blocking = stats["Critical"] + stats["High"]
+        if blocking > 0:
+            lines.extend([
+                "### 总体结论\n",
+                f"发现 {blocking} 个阻断问题（{stats['Critical']} Critical + {stats['High']} High），建议修复后再合入。",
+                "",
+            ])
+        else:
+            lines.extend([
+                "### 总体结论\n",
+                f"发现 {total} 个非阻断问题（{stats['Medium']} Medium + {stats['Low']} Low），可合入但建议后续改进。",
+                "",
+            ])
+
+    lines.extend([
+        "---",
+        f"*评审报告详见: `{target_dir}/final-report.md`*  ",
+        "*Generated by LoongSuite-Pilot Code Review Agent*",
+    ])
+
+    return "\n".join(lines)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Prepare review for platform publishing.")
+    parser.add_argument("--repo-root", required=True)
+    parser.add_argument("--target-type", required=True, choices=["pr", "branch"])
+    parser.add_argument("--target-id", required=True)
+    parser.add_argument("--platform", required=True, choices=["github", "gitlab"])
+    parser.add_argument("--mr-id", type=int, help="GitLab MR ID (required for gitlab platform)")
+    parser.add_argument("--gitlab-repo", help="GitLab repo path like 'group/project' (required for gitlab platform)")
+    args = parser.parse_args()
+
+    repo_root = Path(args.repo_root).resolve()
+    target_id_dir = sanitize_branch_name(args.target_id) if args.target_type == "branch" else args.target_id
+    review_dir = repo_root / "code-review" / f"{args.target_type}-{target_id_dir}"
+    report_path = review_dir / "final-report.md"
+
+    if not report_path.exists():
+        raise SystemExit(f"final-report.md not found at: {report_path}")
+
+    # Parse findings and verdict
+    findings = parse_findings(report_path)
+    verdict = parse_lifecycle_verdict(report_path)
+
+    # Generate summary
+    target_dir = f"code-review/{args.target_type}-{target_id_dir}"
+    summary = generate_summary(findings, verdict, target_dir)
+
+    # Write summary file
+    summary_path = review_dir / "platform-summary.md"
+    summary_path.write_text(summary + "\n", encoding="utf-8")
+
+    # Prepare inline comments (only Critical/High/Medium for inline)
+    inline_findings = [f for f in findings if f["severity"] in ("Critical", "High", "Medium") and f["path"] and f["line"] > 0]
+
+    # Build publish payload
+    payload: Dict[str, Any] = {
+        "platform": args.platform,
+        "target_type": args.target_type,
+        "target_id": args.target_id,
+        "prepared_at": utc_now(),
+        "summary_file": str(summary_path.relative_to(repo_root)),
+        "inline_comments": [
+            {
+                "path": f["path"],
+                "line": f["line"],
+                "severity": f["severity"],
+                "body": format_inline_comment(f),
+            }
+            for f in inline_findings
+        ],
+        "stats": {
+            "total_findings": len(findings),
+            "inline_publishable": len(inline_findings),
+            "severity_breakdown": {
+                "critical": sum(1 for f in findings if f["severity"] == "Critical"),
+                "high": sum(1 for f in findings if f["severity"] == "High"),
+                "medium": sum(1 for f in findings if f["severity"] == "Medium"),
+                "low": sum(1 for f in findings if f["severity"] == "Low"),
+            },
+        },
+    }
+
+    if args.platform == "gitlab":
+        payload["gitlab"] = {
+            "mr_id": args.mr_id,
+            "repo_path": args.gitlab_repo,
+        }
+
+    payload_path = review_dir / "publish-payload.json"
+    payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    # Output result
+    print(json.dumps({
+        "status": "prepared",
+        "summary_file": str(summary_path.relative_to(repo_root)),
+        "payload_file": str(payload_path.relative_to(repo_root)),
+        "inline_count": len(inline_findings),
+        "total_findings": len(findings),
+    }, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

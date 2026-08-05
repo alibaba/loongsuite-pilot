@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import { BaseFlusher } from './base-flusher.js';
-import { serialiseLogEntry } from '../normalization/entry-builder.js';
+import { projectLogEntry } from '../normalization/entry-builder.js';
 import type { AgentActivityEntry, JsonlFlusherConfig } from '../types/index.js';
 import { appendLine, ensureDir, getTodayDateString } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
@@ -23,8 +23,8 @@ export class JsonlFlusher extends BaseFlusher {
   async send(entry: AgentActivityEntry): Promise<void> {
     const agentType = entry['gen_ai.agent.type'] ?? entry['agent.type'] ?? 'unknown';
     const filePath = this.resolveFilePath(agentType);
-    const serialized = serialiseLogEntry(entry, { dropAgentScopedFields: true });
-    const line = JSON.stringify(serialized);
+    const projected = projectLogEntry(entry, { dropAgentScopedFields: true });
+    const line = JSON.stringify(projected);
     await appendLine(filePath, line);
   }
 

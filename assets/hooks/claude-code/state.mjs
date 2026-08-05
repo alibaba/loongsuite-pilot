@@ -26,6 +26,8 @@ function pilotDataDir() {
 }
 
 const STATE_DIR = path.join(pilotDataDir(), 'state', 'claude-code', 'sessions');
+const LOCK_WAIT_MS = 10_000;
+const LOCK_STALE_MS = 30_000;
 
 export function sanitizeSessionId(sessionId) {
   const base = path.basename(String(sessionId));
@@ -77,6 +79,42 @@ export function saveState(sessionId, state) {
   } catch (err) {
     try { fs.unlinkSync(tmp); } catch {}
     throw err;
+  }
+}
+
+/**
+ * Serialize hook processes that mutate the same Claude session state.
+ * Stop and SubagentStop may run concurrently for background agents.
+ */
+export async function withStateLock(sessionId, fn) {
+  ensureStateDir();
+  const lockPath = path.join(STATE_DIR, `${sanitizeSessionId(sessionId)}.lock`);
+  const deadline = Date.now() + LOCK_WAIT_MS;
+
+  while (true) {
+    try {
+      fs.mkdirSync(lockPath);
+      break;
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err;
+      try {
+        const stat = fs.statSync(lockPath);
+        if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
+          fs.rmdirSync(lockPath);
+          continue;
+        }
+      } catch (_) {}
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out waiting for session state lock: ${sanitizeSessionId(sessionId)}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  try {
+    return await fn();
+  } finally {
+    try { fs.rmdirSync(lockPath); } catch {}
   }
 }
 
