@@ -1,6 +1,6 @@
 {
   "name": "loongsuite-pilot-installer",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "会话启动时自动检测并安装、启用 loongsuite-pilot",
   "author": { "name": "loongsuite" },
   "license": "MIT",
