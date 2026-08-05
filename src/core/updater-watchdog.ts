@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
@@ -32,6 +33,15 @@ function defaultPilotBinPath(): string {
     return path.join(homeDir(), '.local', 'bin', 'loongsuite-pilot-service.ps1');
   }
   return path.join(homeDir(), '.local', 'bin', 'loongsuite-pilot');
+}
+
+function isAgentShellCurrentVersion(dataDir: string): boolean {
+  try {
+    const current = fs.readFileSync(path.join(dataDir, 'current'), 'utf-8').trim();
+    return current.toLowerCase().includes('-agentshell');
+  } catch {
+    return false;
+  }
 }
 
 export type UpdaterWatchdogStatus =
@@ -109,6 +119,10 @@ export class UpdaterWatchdog {
       logger.info('updater-watchdog disabled');
       return;
     }
+    if (isAgentShellCurrentVersion(this.dataDir)) {
+      logger.info('updater-watchdog disabled for agentshell version');
+      return;
+    }
     this.startedAt = Date.now();
     this.lastTickAt = 0;
     logger.info('updater-watchdog started', {
@@ -129,6 +143,7 @@ export class UpdaterWatchdog {
 
   async runCheck(): Promise<UpdaterWatchdogResult> {
     if (!this.enabled) return { status: 'disabled' };
+    if (isAgentShellCurrentVersion(this.dataDir)) return { status: 'disabled' };
 
     const now = Date.now();
     if (this.lastTickAt > 0 && now - this.lastTickAt > this.intervalMs + this.sleepWakeGraceMs) {
