@@ -334,7 +334,12 @@ export class HookStrategy implements DeployStrategy {
   }
 
   async undeploy(def: AgentDefinition): Promise<boolean> {
-    const hookDefs = this.buildHookDefinitions(def);
+    // Mirror deploy(): also remove retiredEvents (e.g. codex's PreToolUse/
+    // PostToolUse from an older version). Otherwise disabling a codex agent
+    // that was first deployed by an old build leaves those retired hooks
+    // firing, since current events don't cover them.
+    const retiredHookDefs = this.buildRetiredHookDefinitions(def);
+    const hookDefs = [...this.buildHookDefinitions(def), ...retiredHookDefs];
     let allOk = true;
     for (const hookDef of hookDefs) {
       const ok = await this.hookManager.uninstallHook(hookDef);
@@ -346,7 +351,11 @@ export class HookStrategy implements DeployStrategy {
         const cfg = def.hook.trustToml;
         const configPath = resolveHome(cfg.configPath);
         const hooksJsonAbsPath = path.resolve(resolveHome(def.hook.settingsPath));
-        removeTrustBlock(configPath, cfg.marker, hooksJsonAbsPath, def.hook.events);
+        const retiredEvents = retiredHookDefs.map(d => d.hookJsonPath.at(-1) as string);
+        removeTrustBlock(configPath, cfg.marker, hooksJsonAbsPath, [
+          ...def.hook.events,
+          ...retiredEvents,
+        ]);
       } catch (err) {
         logger.warn('codex trust cleanup failed (non-blocking)', { error: String(err) });
       }

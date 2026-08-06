@@ -243,10 +243,7 @@ export class Orchestrator extends EventEmitter {
     this.logRetentionService.start();
 
     // 10. Start hook watchdog (periodically restores hooks overwritten by other tools)
-    const hookWatchdogTargets = [
-      ...HookWatchdog.defaultTargets(),
-      ...this.buildHookWatchdogTargets(),
-    ];
+    const hookWatchdogTargets = this.buildHookWatchdogTargets();
     const interceptTargets = [
       ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
       ...this.buildPluginInjectInterceptTargets(),
@@ -415,7 +412,6 @@ export class Orchestrator extends EventEmitter {
 
     for (const def of defs) {
       if (def.deployMode !== 'hook' || !def.hook) continue;
-      if (!this.isAgentGatedEnabled(def.id)) continue;
 
       const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
       targets.push({
@@ -424,6 +420,10 @@ export class Orchestrator extends EventEmitter {
         settingsSyntax: def.hook.settingsSyntax,
         expectedHooks: def.hook.events,
         markers: [scriptName],
+        // Runtime gate: a user who has turned this agent off (config.agents[id]
+        // .enabled === false) must never have its hook re-injected. Evaluated on
+        // each check so a config change takes effect without rebuilding targets.
+        enabled: () => this.isAgentGatedEnabled(def.id),
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
       });
     }

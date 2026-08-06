@@ -83,13 +83,7 @@ export class DeploymentManager {
 
     for (const def of this.definitions) {
       if (enabled && !enabled(def)) {
-        logger.debug('agent excluded from deployment', { agentId: def.id });
-        results.push({
-          success: true,
-          agentId: def.id,
-          deployMode: def.deployMode,
-          skipped: true,
-        });
+        results.push(await this.undeployDisabledAgent(def));
         continue;
       }
       try {
@@ -108,6 +102,60 @@ export class DeploymentManager {
     logger.info('deployAll complete', { total: results.length, deployed, skipped, failed });
 
     return results;
+  }
+
+  /**
+   * Handle a hook agent the user has turned off (config.agents[<id>].enabled ===
+   * false). Skipping (re)deployment alone is not enough: a hook installed on a
+   * prior run — while the agent was still enabled — stays in the tool's
+   * settings file and keeps firing. So when a deployed-agents record exists we
+   * actively undeploy it (mirroring the intercept watchdog's disabled-cleanup),
+   * then drop the record so this runs at most once per disable.
+   *
+   * Gated on an existing state record: an agent the user has never enabled has
+   * no record, so we never touch its settings file (matching the "does not
+   * detect or deploy disabled agents" contract).
+   *
+   * Scope is limited to hook agents — plugin-probe / plugin-inject /
+   * directory-plugin integrations self-heal through their own enabled-gated
+   * watchdog targets and carry heavier undeploy semantics (uninstall scripts,
+   * JSONC rewrites), so their disable path is intentionally left unchanged.
+   *
+   * The record is dropped only once cleanup succeeds. Hook uninstall is
+   * idempotent (a no-op when nothing matches — hook-manager.ts), so a failure
+   * means the hook is still in the settings file; we keep the record so the
+   * next startup retries rather than early-returning (:135) and leaking a
+   * firing hook forever (the watchdog also skips it via enabled()===false).
+   */
+  private async undeployDisabledAgent(def: AgentDefinition): Promise<DeployResult> {
+    const result: DeployResult = {
+      success: true,
+      agentId: def.id,
+      deployMode: def.deployMode,
+      skipped: true,
+    };
+
+    if (def.deployMode !== 'hook' || !this.state[def.id]) {
+      logger.debug('agent excluded from deployment', { agentId: def.id });
+      return result;
+    }
+
+    logger.info('agent disabled — removing previously deployed hook', { agentId: def.id });
+    let ok = false;
+    try {
+      ok = await this.hookStrategy.undeploy(def);
+    } catch (err) {
+      logger.error('agent disable undeploy failed', { agentId: def.id, error: String(err) });
+    }
+
+    if (!ok) {
+      // Keep the record so the idempotent cleanup is retried next start.
+      logger.warn('agent disable undeploy incomplete — keeping record to retry', { agentId: def.id });
+      return { ...result, success: false, skipped: false, error: 'hook undeploy incomplete' };
+    }
+
+    delete this.state[def.id];
+    return result;
   }
 
   deploySingle(def: AgentDefinition): Promise<DeployResult> {
