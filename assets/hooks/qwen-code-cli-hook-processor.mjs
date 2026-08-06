@@ -70,8 +70,8 @@ function bindInvocationResourceContext(state) {
   if (Object.keys(INVOCATION_RESOURCE_ATTRIBUTES).length > 0) {
     state.resource_attributes = INVOCATION_RESOURCE_ATTRIBUTES;
   } else {
-    // A session can be resumed outside AgentTeams. Do not retain a stale
-    // worker identity from an earlier invocation.
+    // A session can be resumed without custom identity variables. Do not
+    // retain a stale worker identity from an earlier invocation.
     delete state.resource_attributes;
   }
 }

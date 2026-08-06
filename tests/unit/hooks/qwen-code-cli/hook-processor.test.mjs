@@ -195,7 +195,7 @@ describe('hook-processor: cmdStop end-to-end', () => {
     expect(turn2EventNames).toContain('llm.response');
   });
 
-  test('binds each resumed turn to the current AgentTeams worker without stale context', () => {
+  test('binds each resumed turn to the current worker without stale context', () => {
     const sid = 'sess-worker-resume-1';
     const transcriptPath = writeTranscript(sid, [
       userRec('u1', 'q1', '2026-06-17T08:00:00.000Z', sid),

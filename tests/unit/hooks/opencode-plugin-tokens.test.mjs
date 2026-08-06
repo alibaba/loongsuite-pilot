@@ -117,7 +117,7 @@ describe('opencode plugin token mapping', () => {
     expect(rec.resourceAttributes).toBeUndefined();
   });
 
-  it('uses AgentTeams worker context without exposing non-allowlisted values', async () => {
+  it('uses custom worker context without exposing non-allowlisted values', async () => {
     process.env.AGENTTEAMS_WORKER_NAME = ' planner ';
     process.env.AGENTTEAMS_INSTANCE_ID = ' instance-01 ';
     process.env.AGENTTEAMS_TOKEN = 'must-not-leak';

@@ -27,7 +27,7 @@
 | 文档 | 用途 |
 |------|------|
 | [Agent 配置](agents.md) | 选择采集哪些 Agent，并控制消息内容采集。 |
-| [AgentTeams Worker 上下文](agentteams-worker-context.md) | 为不同逻辑 Worker 设置 `gen_ai.agent.name` 和 OTLP Resource 属性。 |
+| [自定义 Agent 名称和实例](custom-agent-identity.md) | 设置 `gen_ai.agent.name` 和 `agentteams.instance.id`。 |
 | [数据脱敏](masking.md) | 输出前脱敏密钥和个人敏感信息。 |
 | [输出事件 Schema](output-event-schema.md) | 查看规范化事件名称、字段、Provider 和结束原因。 |
 

@@ -57,7 +57,7 @@ describe('hook resource context helper', () => {
     });
   });
 
-  test('hook and plugin helpers keep the same AgentTeams contract', () => {
+  test('hook and plugin helpers keep the same resource context contract', () => {
     expect(PLUGIN_RESOURCE_ENV_FIELD_MAP).toEqual(DEFAULT_RESOURCE_ENV_FIELD_MAP);
 
     const env = {

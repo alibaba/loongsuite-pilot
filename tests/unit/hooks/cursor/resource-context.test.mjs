@@ -57,7 +57,7 @@ function readHistoryRecords() {
     .map((line) => JSON.parse(line));
 }
 
-describe('Cursor CLI AgentTeams resource context', () => {
+describe('Cursor CLI custom resource context', () => {
   it('does not let another CLI conversation activate context for Desktop', () => {
     const records = [{ 'gen_ai.agent.type': 'cursor' }];
     const events = [

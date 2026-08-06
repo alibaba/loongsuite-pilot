@@ -58,7 +58,7 @@ async function emitUserRecord() {
     .map((line) => JSON.parse(line));
 }
 
-describe('MiMo Code AgentTeams resource context', () => {
+describe('MiMo Code custom resource context', () => {
   it('keeps the native agent name and raw shape when context is absent', async () => {
     const records = await emitUserRecord();
 

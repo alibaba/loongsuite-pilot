@@ -95,7 +95,7 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `workspace.path` | string | Recommended | agent 进程实际运行的工作目录（cwd），与 git 无关。即使目录不是 git 仓库也会带上。 |
 | `agent.*` | json | Opt-In | Agent-specific 扩展属性。稳定且高频查询的维度应逐步沉淀为结构化字段。 |
 
-## AgentTeams 调用上下文
+## 自定义 Agent 标识
 
 当支持的 Agent 进程携带以下环境变量启动时，Pilot 会将 Worker 上下文写入当前 Turn：
 

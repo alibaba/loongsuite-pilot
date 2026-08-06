@@ -1,6 +1,6 @@
-# AgentTeams Worker 上下文使用指南
+# 自定义 `gen_ai.agent.name` 和 `agentteams.instance.id`
 
-启动 AI Coding Agent 时设置 AgentTeams Worker 环境变量，Pilot 会使用逻辑 Worker 名称标记 GenAI 事件和 Trace。这样可以在同一种 Agent 下区分 `planner`、`reviewer`、`coder` 等不同角色。
+启动 AI Coding Agent 时设置环境变量，可以自定义 Pilot 采集数据中的 Agent 名称和运行实例。例如，在同一种 Agent 下区分 `planner`、`reviewer`、`coder` 等不同角色。
 
 ## 支持范围
 
@@ -31,7 +31,7 @@ export AGENTTEAMS_WORKER_NAME=planner
 export AGENTTEAMS_INSTANCE_ID=task-42-worker-1
 ```
 
-如果由 AgentTeams 或其他编排系统启动 Agent，请把两个变量分别传入每个 Agent 进程的环境。
+如果由编排系统启动 Agent，请把两个变量分别传入每个 Agent 进程的环境。
 
 ## 启动 Agent
 
@@ -67,7 +67,7 @@ opencode
 ```
 
 - `gen_ai.agent.type` 表示 Agent 产品类型。
-- `gen_ai.agent.name` 表示 AgentTeams 中的逻辑 Worker 名称。
+- `gen_ai.agent.name` 表示自定义的逻辑 Agent 名称。
 - `AGENTTEAMS_INSTANCE_ID` 不会覆盖 Agent 原有的 `gen_ai.agent.id`。
 
 ## 验证

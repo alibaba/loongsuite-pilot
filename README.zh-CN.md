@@ -107,7 +107,7 @@ loongsuite-pilot info
 | 任务 | 文档 |
 |------|------|
 | 选择采集哪些 Agent，控制内容采集策略 | [Agent 配置](docs/zh-CN/agents.md) |
-| 为 AgentTeams Worker 标记 Agent 名称和实例 | [AgentTeams Worker 上下文](docs/zh-CN/agentteams-worker-context.md) |
+| 自定义 Agent 名称和实例 | [自定义 `gen_ai.agent.name` 和 `agentteams.instance.id`](docs/zh-CN/custom-agent-identity.md) |
 | 写入本地 JSONL 日志 | [本地 JSONL 输出](docs/zh-CN/local-jsonl-output.md) |
 | 上报日志到 SLS | [SLS 输出](docs/zh-CN/sls-output.md) |
 | 上报 OTLP Trace | [Trace 输出](docs/zh-CN/trace-output.md) |

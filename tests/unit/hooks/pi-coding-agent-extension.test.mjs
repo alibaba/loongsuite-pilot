@@ -212,7 +212,7 @@ describe('Pi Coding Agent extension', () => {
     }
   });
 
-  it('stamps AgentTeams worker context on every record in the turn', async () => {
+  it('stamps custom worker context on every record in the turn', async () => {
     process.env.AGENTTEAMS_WORKER_NAME = 'reviewer';
     process.env.AGENTTEAMS_INSTANCE_ID = 'pi-instance-01';
     process.env.AGENTTEAMS_TOKEN = 'must-not-leak';

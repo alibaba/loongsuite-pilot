@@ -97,7 +97,7 @@ Required levels follow OpenTelemetry wording:
 | `workspace.path` | string | Recommended | Absolute working directory the agent ran in (process cwd), independent of git. Present even when the directory is not a git repository. |
 | `agent.*` | json | Opt-In | Agent-specific extension attributes. Stable high-query dimensions should become structured fields over time. |
 
-## AgentTeams Invocation Context
+## Custom Agent Identity
 
 When a supported agent process starts with the following environment variables, Pilot writes the worker context to the current turn:
 
