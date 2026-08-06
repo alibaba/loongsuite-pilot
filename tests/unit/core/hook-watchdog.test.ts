@@ -286,6 +286,58 @@ describe('HookWatchdog', () => {
     });
   });
 
+  describe('disabled', () => {
+    it('does not repair a plugin target whose agent is disabled, even with hooks missing', async () => {
+      const target = makeClaudeTarget(tmpDir, { enabled: () => false });
+      await makeBin(target.binPath);
+
+      // Hooks are missing — a repair would fire if the target were enabled.
+      const settings = buildHealthySettings(target);
+      delete (settings.hooks as Record<string, unknown>).Stop;
+      await writeSettings(target.settingsPath, settings);
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary).toEqual({ checked: 0, repaired: 0, skipped: 1 });
+      expect(spawnCalls).toHaveLength(0);
+    });
+
+    it('does not invoke repairFn for a disabled hook target', async () => {
+      const repairFn = vi.fn(async () => true);
+      const target: PluginCheckTarget = {
+        agentId: 'claude-code',
+        settingsPath: path.join(tmpDir, '.claude', 'settings.json'),
+        expectedHooks: ['Stop'],
+        markers: ['claude-code-loongsuite-pilot-hook.sh'],
+        repairFn,
+        enabled: () => false,
+      };
+      await fs.mkdir(path.dirname(target.settingsPath), { recursive: true });
+      // No settings.json → all hooks missing → repair would fire if enabled.
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary).toEqual({ checked: 0, repaired: 0, skipped: 1 });
+      expect(repairFn).not.toHaveBeenCalled();
+    });
+
+    it('still repairs when enabled() returns true', async () => {
+      const target = makeClaudeTarget(tmpDir, { enabled: () => true });
+      await makeBin(target.binPath);
+      const settings = buildHealthySettings(target);
+      delete (settings.hooks as Record<string, unknown>).Stop;
+      await writeSettings(target.settingsPath, settings);
+
+      const wd = new HookWatchdog(makeConfig(), [target]);
+      const summary = await wd.runCheck();
+
+      expect(summary.repaired).toBe(1);
+      expect(spawnCalls).toHaveLength(1);
+    });
+  });
+
   describe('repair failure', () => {
     it('does not throw when spawn exits non-zero', async () => {
       const target = makeClaudeTarget(tmpDir);

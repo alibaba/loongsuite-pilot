@@ -40,6 +40,14 @@ async function main(): Promise<void> {
     dataDir,
   });
 
+  // --list: enumerate the same set of agents as a normal probe, but skip the
+  // on-disk machine detection. Used by the installer when the user explicitly
+  // picks agents (--agents), where the detection result is irrelevant — we only
+  // need each id to write the enable/disable gate. Agents with no detection
+  // rules (e.g. internal *-local-runtime runtimes) stay excluded here, exactly
+  // as a normal probe excludes them — they are not user-selectable.
+  const listOnly = process.argv.includes('--list');
+
   const defs = await loader.load();
   const results: ProbeResult[] = [];
 
@@ -47,7 +55,7 @@ async function main(): Promise<void> {
     if (def.detection.paths.length === 0 && def.detection.commands.length === 0) {
       continue;
     }
-    const detected = await detectAgent(def.detection);
+    const detected = listOnly ? false : await detectAgent(def.detection);
     const reason = detected ? await findDetectionReason(def.detection) : '';
     results.push({
       id: def.id,
