@@ -9,7 +9,7 @@
  *   $ node claude-code-hook-processor.mjs <subcommand>
  *
  * v2 重构:
- *   - 只处理 3 个 subcommand: stop / subagent-start / subagent-stop
+ *   - 只处理 4 个 subcommand: pre-tool-use / stop / subagent-start / subagent-stop
  *   - 纯 transcript 驱动: 时间戳从 transcript record.timestamp 获取
  *   - tool→step 归属: 通过 tool_use_id 从 LLM output_content 匹配到声明方 step
  *   - 不再依赖 alignWithHookEvents / hook 事件累积
@@ -49,6 +49,12 @@ import {
   withStateLock,
 } from './claude-code/state.mjs';
 import {
+  buildBashUpdatedInput,
+  consumeToolContext,
+  markToolPropagationConsumed,
+  reserveToolContext,
+} from './claude-code/tool-context.mjs';
+import {
   parseClaudeTranscript,
 } from './claude-code/transcript-parser.mjs';
 import {
@@ -74,6 +80,7 @@ const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, { agentId: AGENT
 // Retain recent completion tombstones to ignore delayed duplicate SubagentStop
 // events while keeping the persisted session state bounded.
 const FINALIZED_SUBAGENT_LIMIT = 128;
+let emittedHookResponse = false;
 
 // ─── utilities ───
 
@@ -279,6 +286,45 @@ function deterministicSkillLoadId(sessionId, promptId, metaUuid, rootPath) {
   return `toolu_skillload_${h}`;
 }
 
+function toolPropagationEnabled(runtimeConfig) {
+  return runtimeConfig?.upstreamLink?.enabled === true
+    && runtimeConfig?.upstreamLink?.propagateToTools === true;
+}
+
+function cmdPreToolUse() {
+  const event = tryReadStdin();
+  if (isCursorCaller(event)) return;
+  const sessionId = requireSessionId(event, 'pre_tool_use');
+  if (!sessionId) return;
+
+  // v1 policy: only propagate from the main agent's Bash calls.
+  if (event.agent_id || event.agent_type) return;
+  if (event.tool_name !== 'Bash') return;
+  const toolUseId = typeof event.tool_use_id === 'string' ? event.tool_use_id : '';
+  if (!toolUseId) return;
+
+  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+  if (!toolPropagationEnabled(runtimeConfig)) return;
+
+  const context = reserveToolContext({
+    dataDir: pilotDataDir(),
+    sessionId,
+    toolUseId,
+    traceparent: process.env.TRACEPARENT,
+    tracestate: process.env.TRACESTATE,
+  });
+  const updatedInput = buildBashUpdatedInput(event.tool_input, context);
+  if (!updatedInput) return;
+
+  emittedHookResponse = true;
+  process.stdout.write(`${JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      updatedInput,
+    },
+  })}\n`);
+}
+
 function skillAttributes(skillLoad, fallbackName) {
   const name = skillLoad?.name
     || (typeof fallbackName === 'string' ? fallbackName.trim().replace(/^\/+/, '') : null);
@@ -391,8 +437,13 @@ async function cmdStop() {
   const sessionId = requireSessionId(event, 'cmd');
   if (!sessionId) return;
 
+  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+
   // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
   recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  if (toolPropagationEnabled(runtimeConfig)) {
+    markToolPropagationConsumed(pilotDataDir(), sessionId);
+  }
 
   await withStateLock(sessionId, async () => {
     const state = loadState(sessionId);
@@ -948,7 +999,8 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
 
       const toolName = toolBlock.name || 'unknown';
 
-      const toolSpanId = generateSpanId();
+      const reservedContext = consumeToolContext(pilotDataDir(), sessionId, toolId);
+      const toolSpanId = reservedContext?.spanId || generateSpanId();
       const skillLoad = toolName === 'Skill' ? skillLoadsByToolId.get(toolId) : null;
       const skillFields = toolName === 'Skill'
         ? skillAttributes(skillLoad, toolBlock.input?.skill || toolBlock.input?.name)
@@ -1070,6 +1122,7 @@ function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStop
 // ─── dispatcher ───
 
 const DISPATCH = {
+  'pre-tool-use': cmdPreToolUse,
   'stop': cmdStop,
   'subagent-start': cmdSubagentStart,
   'subagent-stop': cmdSubagentStop,
@@ -1086,7 +1139,7 @@ if (fn) {
       errorMessage: err?.message || String(err),
     });
   }).finally(() => {
-    process.stdout.write('{}\n');
+    if (!emittedHookResponse) process.stdout.write('{}\n');
   });
 } else {
   process.stdout.write('{}\n');

@@ -3,7 +3,7 @@
 # Usage (registered in ~/.claude/settings.json by pilot HookStrategy):
 #   powershell -File $PILOT_DATA/hooks/claude-code-loongsuite-pilot-hook.ps1 <subcommand>
 #
-# Subcommand: stop / subagent-start / subagent-stop
+# Subcommand: pre-tool-use / stop / subagent-start / subagent-stop
 #
 # Fail-open: any error outputs "{}" and exits 0.
 
@@ -15,7 +15,7 @@ $Processor = Join-Path $ScriptDir "claude-code-hook-processor.mjs"
 $Subcommand = if ($args.Count -gt 0) { $args[0] } else { "unknown" }
 
 # Only process registered subcommands
-if ($Subcommand -notin @("stop", "subagent-start", "subagent-stop")) {
+if ($Subcommand -notin @("pre-tool-use", "stop", "subagent-start", "subagent-stop")) {
     Write-Output $EMPTY_RESULT
     exit 0
 }
