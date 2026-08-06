@@ -1,23 +1,160 @@
 import { describe, expect, it } from 'vitest';
-import { mapTranscriptRow } from '../../../assets/hooks/qwen-work-cn-hook-processor.mjs';
+import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
+import {
+  extractText,
+  processTranscript,
+} from '../../../assets/hooks/qwen-work-cn-hook-processor.mjs';
+
+const common = {
+  sessionId: 'sess-qwen-1',
+  cwd: '/workspace',
+  version: '0.1.5',
+  isSidechain: false,
+};
+
+function realShapeRows() {
+  return [
+    {
+      ...common,
+      type: 'user',
+      uuid: 'user-1',
+      promptId: 'prompt-turn-1',
+      timestamp: '2026-08-06T03:44:58.934Z',
+      message: { role: 'user', content: [
+        { type: 'text', text: '<system-reminder>workspace context</system-reminder>' },
+        { type: 'text', text: 'inspect package.json' },
+      ] },
+    },
+    {
+      ...common,
+      type: 'assistant',
+      uuid: 'thinking-1',
+      parentUuid: 'user-1',
+      timestamp: '2026-08-06T03:45:03.994Z',
+      message: { role: 'assistant', id: 'response-1', model: 'qwork-advanced', content: [{ type: 'thinking', thinking: 'reason 1' }] },
+    },
+    {
+      ...common,
+      type: 'assistant',
+      uuid: 'tool-call-row-1',
+      parentUuid: 'thinking-1',
+      timestamp: '2026-08-06T03:45:03.994Z',
+      message: { role: 'assistant', id: 'response-1', model: 'qwork-advanced', stop_reason: 'tool_use', content: [
+        { type: 'tool_use', id: 'call-1', name: 'Glob', input: { pattern: 'package.json' } },
+      ] },
+    },
+    {
+      ...common,
+      type: 'user',
+      uuid: 'tool-result-row-1',
+      parentUuid: 'tool-call-row-1',
+      promptId: 'prompt-turn-1',
+      timestamp: '2026-08-06T03:45:04.099Z',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call-1', content: ['package.json'] }] },
+    },
+    {
+      ...common,
+      type: 'assistant',
+      uuid: 'thinking-2',
+      parentUuid: 'tool-result-row-1',
+      timestamp: '2026-08-06T03:45:08.673Z',
+      message: { role: 'assistant', id: 'response-2', model: 'qwork-advanced', content: [{ type: 'thinking', thinking: 'reason 2' }] },
+    },
+    {
+      ...common,
+      type: 'assistant',
+      uuid: 'tool-call-row-2',
+      parentUuid: 'thinking-2',
+      timestamp: '2026-08-06T03:45:08.673Z',
+      message: { role: 'assistant', id: 'response-2', model: 'qwork-advanced', stop_reason: 'tool_use', content: [
+        { type: 'tool_use', id: 'call-2', name: 'Read', input: { file_path: 'package.json' } },
+      ] },
+    },
+    {
+      ...common,
+      type: 'user',
+      uuid: 'tool-result-row-2',
+      parentUuid: 'tool-call-row-2',
+      promptId: 'prompt-turn-1',
+      timestamp: '2026-08-06T03:45:08.776Z',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call-2', content: '{"name":"pilot"}' }] },
+    },
+    {
+      ...common,
+      type: 'assistant',
+      uuid: 'thinking-3',
+      parentUuid: 'tool-result-row-2',
+      timestamp: '2026-08-06T03:45:14.512Z',
+      message: { role: 'assistant', id: 'response-3', model: 'qwork-advanced', content: [{ type: 'thinking', thinking: 'reason 3' }] },
+    },
+    {
+      ...common,
+      type: 'assistant',
+      uuid: 'text-3',
+      parentUuid: 'thinking-3',
+      timestamp: '2026-08-06T03:45:14.512Z',
+      message: { role: 'assistant', id: 'response-3', model: 'qwork-advanced', stop_reason: 'end_turn', content: [{ type: 'text', text: 'done' }] },
+    },
+  ];
+}
 
 describe('QwenWorkCN hook processor', () => {
-  it('maps prompt, response, tool call and tool result fields', () => {
-    const common = { sessionId: 'sess-1', cwd: '/workspace', timestamp: 1770000000000, version: '0.1.5' };
-    const rows = [
-      { ...common, type: 'user', uuid: 'u1', message: { role: 'user', content: [{ type: 'text', text: 'hello' }] } },
-      { ...common, type: 'assistant', uuid: 'a1', message: { role: 'assistant', model: 'qwen3-coder', content: [{ type: 'text', text: 'hi' }] } },
-      { ...common, type: 'assistant', uuid: 'a2', message: { role: 'assistant', model: 'qwen3-coder', content: [{ type: 'tool_use', id: 'call-1', name: 'Read', input: { file_path: '/a.ts' } }] } },
-      { ...common, type: 'user', uuid: 'u2', toolUseResult: { content: 'ok' }, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call-1', content: 'ok' }] } },
-    ];
-    const events = rows.flatMap(row => mapTranscriptRow(row, 'fallback', { userId: 'user-1' }, '/fallback'));
+  it('joins every text block in the user prompt', () => {
+    expect(extractText(realShapeRows()[0])).toBe(
+      '<system-reminder>workspace context</system-reminder>\ninspect package.json',
+    );
+  });
 
-    expect(events.map(event => event['event.name'])).toEqual(['llm.request', 'llm.response', 'tool.call', 'tool.result']);
+  it('uses the QoderWork-compatible turn/step algorithm with independent Qwen fields', async () => {
+    const events = processTranscript(
+      realShapeRows(),
+      'fallback-session',
+      { userId: 'user-1' },
+      '/fallback',
+      { rangeReason: 'incremental' },
+    );
+
+    expect(events.map(event => event['event.name'])).toEqual([
+      'other',
+      'llm.request', 'llm.response', 'tool.call', 'tool.result',
+      'llm.request', 'llm.response', 'tool.call', 'tool.result',
+      'llm.request', 'llm.response',
+    ]);
     expect(events.every(event => event['gen_ai.agent.type'] === 'qwen-work-cn')).toBe(true);
-    expect(events[0]['gen_ai.input.messages_delta'][0].parts[0].content).toBe('hello');
-    expect(events[1]['gen_ai.response.model']).toBe('qwen3-coder');
-    expect(events[2]['gen_ai.tool.call.arguments']).toEqual({ file_path: '/a.ts' });
-    expect(events[3]['gen_ai.tool.call.result']).toEqual({ content: 'ok' });
-    expect(events.every(event => event['agent.source'] === 'qwen-work-cn-transcript-hook')).toBe(true);
+    expect(events.every(event => event['gen_ai.turn.id'] === 'prompt-turn-1')).toBe(true);
+    expect(events.filter(event => event['event.name'] !== 'other').map(event => event['gen_ai.step.id'])).toEqual([
+      'prompt-turn-1:s1', 'prompt-turn-1:s1', 'prompt-turn-1:s1', 'prompt-turn-1:s1',
+      'prompt-turn-1:s2', 'prompt-turn-1:s2', 'prompt-turn-1:s2', 'prompt-turn-1:s2',
+      'prompt-turn-1:s3', 'prompt-turn-1:s3',
+    ]);
+    expect(events.filter(event => event['event.name'] === 'llm.request')).toHaveLength(3);
+    expect(events.filter(event => event['event.name'] === 'llm.response')).toHaveLength(3);
+    expect(events.filter(event => event['event.name'] === 'llm.response').map(event =>
+      event['gen_ai.output.messages'][0].parts.map(part => part.type))).toEqual([
+      ['reasoning', 'tool_call'],
+      ['reasoning', 'tool_call'],
+      ['reasoning', 'text'],
+    ]);
+
+    const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
+    try {
+      const conversion = await convertEventLogToReadableSpans(events);
+      expect(conversion.warnings).toEqual([]);
+      const kinds = conversion.spans.map(span => span.attributes['gen_ai.span.kind']);
+      expect(kinds.filter(kind => kind === 'STEP')).toHaveLength(3);
+      expect(kinds.filter(kind => kind === 'LLM')).toHaveLength(3);
+      expect(kinds.filter(kind => kind === 'TOOL')).toHaveLength(2);
+      expect(conversion.spans
+        .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')
+        .every(span => span.duration[0] > 0 || span.duration[1] > 0)).toBe(true);
+    } finally {
+      if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;
+      if (previousCapture === undefined) delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      else process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = previousCapture;
+    }
   });
 });
