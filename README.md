@@ -47,6 +47,7 @@ Pilot is designed to answer practical questions:
 | Cursor        | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       |
 | Hermes Agent  | Native directory plugin   | Yes          | Yes        | Yes         | Yes                       |
+| OpenClaw      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
 | OpenCode      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       |
 | Pi Coding Agent | Extension injection     | Yes          | Yes        | Yes         | Yes                       |
 | Qoder         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
@@ -58,6 +59,8 @@ Pilot is designed to answer practical questions:
 | Qwen Code CLI | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       |
 | WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       |
+
+OpenClaw integration requires OpenClaw 2026.5.12 or later.
 
 ### Documented Windows Agent Support
 

@@ -71,6 +71,16 @@ export interface OtlpTraceRawConfig {
   spanAttributePassthroughPrefixes?: string[];
   maxExportBatchBytes?: number;
   compression?: 'none' | 'gzip';
+  /**
+   * When set, the flusher treats an entry as a turn-completion signal only
+   * if `entry[terminalEventHookField]` is in `terminalEventHookValues`,
+   * INSTEAD of the default `gen_ai.response.finish_reasons` check. Used by
+   * agents (e.g. OpenClaw) whose ReAct loop emits multiple
+   * finish_reason=stop llm.response records per turn — the default would
+   * flush prematurely after the first cycle.
+   */
+  terminalEventHookField?: string;
+  terminalEventHookValues?: string[];
 }
 
 /** A single OTLP trace backend (managed inner or user), export-time only. */
@@ -175,6 +185,21 @@ export interface OtlpTraceFlusherConfig {
   spanAttributePassthroughPrefixes?: string[];
   maxExportBatchBytes?: number;
   dataDir?: string;
+  /**
+   * When set, the flusher treats an entry as a turn-completion signal only
+   * if `entry[terminalEventHookField]` is in `terminalEventHookValues`,
+   * INSTEAD of the default `gen_ai.response.finish_reasons` check.
+   *
+   * Used by agents (e.g. OpenClaw) whose ReAct loop emits multiple
+   * `finish_reason=stop` llm.response records per turn — one per LLM cycle.
+   * The default finish_reason Signal A would flush the turn prematurely
+   * after the first cycle, dropping every subsequent cycle's records when
+   * the input poll splits the turn across sendBatch calls. Pointing this
+   * at the agent's end-of-run hook (e.g. `agent.openclaw.hook=llm_output`)
+   * defers the flush until the run is genuinely complete.
+   */
+  terminalEventHookField?: string;
+  terminalEventHookValues?: string[];
 }
 
 export type SlsMode = 'ak' | 'webtracking' | 'apiKey';

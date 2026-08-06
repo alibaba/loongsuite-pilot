@@ -2066,6 +2066,92 @@ try {
 }
 
 # ============================================================
+# Remove OpenClaw's nested plugin entry and load path.
+# ============================================================
+# OpenClaw stores injected plugins under plugins.load.paths plus
+# plugins.entries. The generic hook cleanup does not cover this shape, and
+# leaving either value behind makes OpenClaw load a path that uninstall is
+# about to remove. Only Pilot-owned values are removed; unrelated plugins and
+# their configuration remain semantically unchanged.
+remove_openclaw_plugin() {
+    local state_dir="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
+    local managed_path="$DATA_DIR/plugins/openclaw/plugin.mjs"
+    local configs=()
+    [ -n "${OPENCLAW_CONFIG_PATH:-}" ] && configs+=("$OPENCLAW_CONFIG_PATH")
+    configs+=(
+        "$state_dir/openclaw.json"
+        "$state_dir/config.json"
+        "$HOME/.openclaw/openclaw.json"
+        "$HOME/.openclaw/config.json"
+    )
+
+    local seen="|"
+    for cfg in "${configs[@]}"; do
+        [ -f "$cfg" ] || continue
+        case "$seen" in *"|$cfg|"*) continue ;; esac
+        seen="${seen}${cfg}|"
+        local short="${cfg/#$HOME/\~}"
+
+        if ! command -v node &>/dev/null; then
+            msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        fi
+
+        local result
+        result=$(node -e "
+const fs = require('fs');
+const f = process.argv[1];
+const managed = process.argv[2].replaceAll('\\\\', '/');
+const entryStr = value => typeof value === 'string'
+  ? value
+  : (Array.isArray(value) && typeof value[0] === 'string' ? value[0] : '');
+const isOurs = value => {
+  const normalized = entryStr(value).replaceAll('\\\\', '/');
+  const plain = normalized.startsWith('file://') ? normalized.slice('file://'.length) : normalized;
+  return plain === managed ||
+    normalized.includes('loongsuite-pilot-openclaw') ||
+    normalized.includes('plugins/openclaw/plugin.mjs') && plain.includes('.loongsuite-pilot/');
+};
+try {
+  const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  let changed = false;
+  for (const key of ['plugin', 'plugins']) {
+    if (!Array.isArray(data[key])) continue;
+    const filtered = data[key].filter(value => !isOurs(value));
+    if (filtered.length !== data[key].length) { data[key] = filtered; changed = true; }
+  }
+  const plugins = data.plugins && typeof data.plugins === 'object' && !Array.isArray(data.plugins)
+    ? data.plugins
+    : null;
+  if (plugins) {
+    if (plugins.load && typeof plugins.load === 'object' && Array.isArray(plugins.load.paths)) {
+      const filtered = plugins.load.paths.filter(value => !isOurs(value));
+      if (filtered.length !== plugins.load.paths.length) { plugins.load.paths = filtered; changed = true; }
+    }
+    if (plugins.entries && typeof plugins.entries === 'object' && !Array.isArray(plugins.entries) &&
+        Object.prototype.hasOwnProperty.call(plugins.entries, 'loongsuite-pilot-openclaw')) {
+      delete plugins.entries['loongsuite-pilot-openclaw'];
+      changed = true;
+    }
+  }
+  if (!changed) { process.stdout.write('nochange'); process.exit(0); }
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\\n', 'utf-8');
+  process.stdout.write('cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$cfg" "$managed_path" 2>/dev/null) || result="error"
+
+        case "$result" in
+            cleaned)
+                msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" ;;
+            nochange)
+                : ;;
+            *)
+                msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
+        esac
+    done
+}
+
+# ============================================================
 # CMD: uninstall
 # ============================================================
 cmd_uninstall() {
@@ -2146,6 +2232,10 @@ cmd_uninstall() {
     # Read the persisted target before the data/install directory is removed.
     msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."
     remove_hermes_plugin
+    echo ""
+
+    msg "==> 清理 OpenClaw 插件配置..." "==> Cleaning up OpenClaw plugin config..."
+    remove_openclaw_plugin
     echo ""
 
     # Remove hook entries from tool configs BEFORE removing install dir

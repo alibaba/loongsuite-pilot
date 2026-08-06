@@ -180,6 +180,11 @@ export function getNumberValue(data, key) {
   return typeof val === 'number' && Number.isFinite(val) ? val : undefined;
 }
 
+function truncate(value, max) {
+  if (typeof value !== 'string') return value;
+  return value.length > max ? value.slice(0, max) + '...[truncated]' : value;
+}
+
 export function toJsonValue(value) {
   if (value === undefined) return undefined;
   if (
@@ -281,6 +286,7 @@ const AGENT_TYPE_TO_CONFIG_KEY = {
   'qoder-cn-hook': 'qoder-cn',
   'cursor-hook': 'cursor',
   'cursor-cli': 'cursor',
+  'openclaw': 'openclaw',
 };
 
 export function applyHookContentPolicy(record, runtimeConfig = {}) {
