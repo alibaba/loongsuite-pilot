@@ -13,6 +13,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  agentBaseFieldPatch,
+  collectResourceAttributesFromEnv,
+} from '../shared/resource-context.mjs';
 
 const AGENT_TYPE = 'pi-coding-agent';
 const MAX_STRING_LENGTH = 64 * 1024;
@@ -20,6 +24,12 @@ const MAX_MESSAGES = 40;
 const MAX_ARRAY_ITEMS = 100;
 const MAX_OBJECT_KEYS = 100;
 const MAX_DEPTH = 8;
+
+const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_TYPE });
+const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
+const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
+  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
+  : {};
 
 const pluginDir = path.dirname(fileURLToPath(import.meta.url));
 // Installed layout: $PILOT_DATA/plugins/pi-coding-agent/index.mjs.
@@ -339,6 +349,8 @@ function turnFields(ctx, state, timestamp = Date.now()) {
     'gen_ai.agent.type': AGENT_TYPE,
     'gen_ai.agent.name': 'Pi Coding Agent',
     [`agent.${AGENT_TYPE}.cwd`]: ctx.cwd,
+    ...RESOURCE_BASE_FIELD_PATCH,
+    ...RESOURCE_ATTRIBUTE_FIELDS,
   };
 }
 

@@ -95,6 +95,17 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `workspace.path` | string | Recommended | agent 进程实际运行的工作目录（cwd），与 git 无关。即使目录不是 git 仓库也会带上。 |
 | `agent.*` | json | Opt-In | Agent-specific 扩展属性。稳定且高频查询的维度应逐步沉淀为结构化字段。 |
 
+## AgentTeams 调用上下文
+
+当支持的 Agent 进程携带以下环境变量启动时，Pilot 会在 Agent 的 Hook 或 Plugin 内捕获调用上下文，并将其绑定到当前 Turn：
+
+| 环境变量 | Event 字段 | 说明 |
+|----------|------------|------|
+| `AGENTTEAMS_WORKER_NAME` | `gen_ai.agent.name`、`resourceAttributes["agentteams.worker.name"]` | 逻辑 Worker 名称；主 Agent 上优先于 Agent 原生名称。 |
+| `AGENTTEAMS_INSTANCE_ID` | `resourceAttributes["agentteams.instance.id"]` | 当前 Worker 运行实例；不会覆盖 `gen_ai.agent.id`。 |
+
+当前支持 Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、MiMo Code、Qwen Code CLI 和 Cursor CLI。Cursor Desktop 不读取这组变量。未设置变量时，现有事件字段和名称回退行为不变。Pilot 只采集上述固定白名单字段；其他 `AGENTTEAMS_*` 变量不会进入事件或 OTLP Resource。
+
 ## Provider Names
 
 | 值 | 说明 |

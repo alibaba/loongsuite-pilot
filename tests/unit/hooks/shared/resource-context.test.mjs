@@ -4,10 +4,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  DEFAULT_RESOURCE_ENV_FIELD_MAP,
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
   parseSpanAttributesFromEnv,
 } from '../../../../assets/hooks/shared/resource-context.mjs';
+import {
+  DEFAULT_RESOURCE_ENV_FIELD_MAP as PLUGIN_RESOURCE_ENV_FIELD_MAP,
+  agentBaseFieldPatch as pluginAgentBaseFieldPatch,
+  collectResourceAttributesFromEnv as collectPluginResourceAttributesFromEnv,
+} from '../../../../assets/plugins/shared/resource-context.mjs';
 
 const ROOT = path.resolve(fileURLToPath(import.meta.url), '../../../../..');
 
@@ -49,6 +55,39 @@ describe('hook resource context helper', () => {
     })).toEqual({
       'gen_ai.agent.name': 'worker-01',
     });
+  });
+
+  test('hook and plugin helpers keep the same AgentTeams contract', () => {
+    expect(PLUGIN_RESOURCE_ENV_FIELD_MAP).toEqual(DEFAULT_RESOURCE_ENV_FIELD_MAP);
+
+    const env = {
+      AGENTTEAMS_WORKER_NAME: ' planner ',
+      AGENTTEAMS_INSTANCE_ID: ' instance-01 ',
+      AGENTTEAMS_TOKEN: 'must-not-leak',
+      AGENTTEAMS_TEAM_NAME: 'not-allowlisted',
+    };
+    const hookAttributes = collectResourceAttributesFromEnv(env);
+    const pluginAttributes = collectPluginResourceAttributesFromEnv(env);
+
+    expect(pluginAttributes).toEqual(hookAttributes);
+    expect(pluginAgentBaseFieldPatch(pluginAttributes)).toEqual(
+      agentBaseFieldPatch(hookAttributes),
+    );
+    expect(JSON.stringify(pluginAttributes)).not.toContain('must-not-leak');
+  });
+
+  test('hook and plugin helpers both reject empty and over-long values', () => {
+    const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const env = {
+        AGENTTEAMS_WORKER_NAME: ' ',
+        AGENTTEAMS_INSTANCE_ID: 'x'.repeat(513),
+      };
+      expect(collectResourceAttributesFromEnv(env)).toEqual({});
+      expect(collectPluginResourceAttributesFromEnv(env)).toEqual({});
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

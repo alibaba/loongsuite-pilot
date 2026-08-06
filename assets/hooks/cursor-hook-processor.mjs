@@ -26,6 +26,10 @@ import { toInternalEvent } from './cursor/source-event.mjs';
 import { appendEvent, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
 import { assembleTurn } from './cursor/react-assembler.mjs';
 import { buildCursorRecordsFromTranscript } from './cursor/transcript-assembler.mjs';
+import {
+  agentBaseFieldPatch,
+  collectResourceAttributesFromEnv,
+} from './shared/resource-context.mjs';
 
 function resolveDataDir() {
   const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
@@ -93,6 +97,37 @@ function inferVariant(events) {
     if (ev.cursor_version && CLI_VERSION_PATTERN.test(ev.cursor_version)) return 'cursor-cli';
   }
   return 'cursor';
+}
+
+function findConversationResourceAttributes(events, conversationId) {
+  const scopedEvents = events.filter(event => event.conversation_id === conversationId);
+  const promptContext = scopedEvents.find(event =>
+    event.hook_event === 'beforeSubmitPrompt' &&
+    event.resource_attributes &&
+    Object.keys(event.resource_attributes).length > 0
+  );
+  const contextEvent = promptContext || scopedEvents.find(event =>
+    event.resource_attributes && Object.keys(event.resource_attributes).length > 0
+  );
+  return contextEvent?.resource_attributes || {};
+}
+
+function applyCursorCliResourceContext(records, events, conversationId, variant) {
+  if (variant !== 'cursor-cli' || records.length === 0) return;
+  // The journal is shared by Cursor Desktop and Cursor CLI. Re-check only the
+  // current conversation so a pending CLI event cannot activate this feature
+  // for an unrelated Desktop turn.
+  const conversationVariant = inferVariant(
+    events.filter(event => event.conversation_id === conversationId),
+  );
+  if (conversationVariant !== 'cursor-cli') return;
+  const resourceAttributes = findConversationResourceAttributes(events, conversationId);
+  if (Object.keys(resourceAttributes).length === 0) return;
+
+  const baseFieldPatch = agentBaseFieldPatch(resourceAttributes);
+  for (const record of records) {
+    Object.assign(record, baseFieldPatch, { resourceAttributes });
+  }
 }
 
 function compactJournal(allEvents, consumedConversationIds) {
@@ -284,6 +319,12 @@ async function main() {
 
   // Convert to internal event and append to journal
   const internalEvent = toInternalEvent(payload);
+  const invocationResourceAttributes = collectResourceAttributesFromEnv(process.env, {
+    agentId: 'cursor-cli',
+  });
+  if (Object.keys(invocationResourceAttributes).length > 0) {
+    internalEvent.resource_attributes = invocationResourceAttributes;
+  }
   try {
     appendEvent(internalEvent);
   } catch (err) {
@@ -403,6 +444,8 @@ async function main() {
         }
       } catch { /* best-effort skill detection — never block output */ }
 
+      applyCursorCliResourceContext(records, allEvents, convId, variant);
+
       if (records.length > 0) {
         const day = localDateString(now);
         const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
@@ -440,6 +483,8 @@ async function main() {
           stopConversationId: convId,
         });
 
+        applyCursorCliResourceContext(result.records, allEvents, convId, variant);
+
         if (result.records.length > 0) {
           const day = localDateString(now);
           const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
@@ -474,4 +519,9 @@ if (
   });
 }
 
-export { filterSkillsForReadInjection, injectSkillRecords };
+export {
+  applyCursorCliResourceContext,
+  filterSkillsForReadInjection,
+  findConversationResourceAttributes,
+  injectSkillRecords,
+};
