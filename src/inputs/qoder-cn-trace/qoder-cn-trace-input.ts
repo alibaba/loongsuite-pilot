@@ -11,6 +11,13 @@ import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpo
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSqliteTokensForSession } from './sqlite-token-reader.js';
 import { enrichIdeTurn, injectTraceId } from '../qoder-trace/token-enricher.js';
+import { BoundedLruMap } from '../../utils/bounded-lru-map.js';
+
+// No idle TTL on purpose: a user can leave a session open over lunch and come back to
+// it, and expiring the anchor would re-parent their later turns onto a new turn id,
+// splitting one conversation into two traces. Capacity is the only eviction trigger.
+const SESSION_ANCHOR_LIMIT = 500;
+const ANCHOR_EVICTION_LOG_INTERVAL_MS = 5 * 60 * 1000;
 
 export interface QoderCnTraceInputOptions extends InputOptions {
   logDir?: string;
@@ -36,8 +43,15 @@ export class QoderCnTraceInput extends BaseInput {
 
   // Persists across collect() cycles: tracks the last anchor turn.id and its
   // max step counter per session so orphan turns from later cycles can be
-  // merged into the correct turn.
-  private readonly sessionAnchor = new Map<string, { turnId: string; maxStep: number }>();
+  // merged into the correct turn. Bounded by capacity: a machine that churns
+  // through sessions drops the least-recently-used anchors instead of growing
+  // this map forever.
+  private readonly sessionAnchor = new BoundedLruMap<{ turnId: string; maxStep: number }>(
+    SESSION_ANCHOR_LIMIT,
+  );
+
+  private pendingAnchorEvictions = 0;
+  private lastAnchorEvictionLogAt = 0;
 
   constructor(opts: QoderCnTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
@@ -97,9 +111,11 @@ export class QoderCnTraceInput extends BaseInput {
           const m = ((e['gen_ai.step.id'] as string) || '').match(/:s(\d+)$/);
           if (m) { const n = parseInt(m[1]); if (n > maxStep) maxStep = n; }
         }
-        this.sessionAnchor.set(sessionId, { turnId, maxStep });
+        this.recordSessionAnchor(sessionId, { turnId, maxStep });
       } else {
-        // Orphan turn: reassign to the last anchor if one exists.
+        // Orphan turn: reassign to the last anchor if one exists. A missing anchor —
+        // never recorded, or evicted under capacity pressure — leaves the turn's own
+        // turn.id/step.id in place; reassigning to another session would mis-attribute.
         const anchor = this.sessionAnchor.get(sessionId);
         if (!anchor) continue;
 
@@ -193,6 +209,29 @@ export class QoderCnTraceInput extends BaseInput {
       ordered.push(...turnEntries);
     }
     return ordered;
+  }
+
+  // ─── Session anchor bookkeeping ─────────────────────────────────────────────
+
+  private recordSessionAnchor(
+    sessionId: string,
+    anchor: { turnId: string; maxStep: number },
+  ): void {
+    const evicted = this.sessionAnchor.set(sessionId, anchor);
+    if (evicted === 0) return;
+
+    // Reaching capacity means the limit is too small for real usage, which is worth
+    // knowing — but a full map evicts on every write, so aggregate before logging.
+    this.pendingAnchorEvictions += evicted;
+    const now = Date.now();
+    if (now - this.lastAnchorEvictionLogAt < ANCHOR_EVICTION_LOG_INTERVAL_MS) return;
+    this.lastAnchorEvictionLogAt = now;
+    this.logger.info('session anchor capacity reached, evicted least-recently-used anchors', {
+      evicted: this.pendingAnchorEvictions,
+      size: this.sessionAnchor.size,
+      limit: SESSION_ANCHOR_LIMIT,
+    });
+    this.pendingAnchorEvictions = 0;
   }
 
   // ─── Hook JSONL reading ─────────────────────────────────────────────────────
