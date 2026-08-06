@@ -168,17 +168,33 @@ pilot_cmd() {
 # 由 detach 出的后台子进程（--run-install）执行：脱离 CLI 进程树，不随会话退出而中断，
 # 也不占用 hook 返回时间。首次/重装可能数分钟，全在这里。
 run_install() {
-    # 并发锁：多会话同时启动时只允许一个实例执行安装
-    # CLI 退出可能杀掉 hook 进程导致锁残留，超过 TTL（15 分钟）的旧锁直接接管
-    if [ -d "$LOCK_DIR" ] && [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +15 2>/dev/null)" ]; then
-        log "接管过期锁"
-        rmdir "$LOCK_DIR" 2>/dev/null || true
+    # 并发锁：多会话同时启动时只允许一个实例执行安装。
+    # 锁目录内写入持锁进程 PID；接管前先判活——只有 PID 确实已死（进程被杀/重启后残留）
+    # 才回收。detach 出的安装进程脱离了 CLI、不受 hook 900s 约束，慢装存活时绝不能按时间
+    # 误判回收，否则会拉起第二个并发 install 抢写 config.json。TTL 仅兜底“读不到 PID”的
+    # 极端情况（如刚 mkdir 尚未写入、pid 文件损坏）：读不到 PID 且超过 15 分钟才强制回收。
+    if [ -d "$LOCK_DIR" ]; then
+        local lock_pid expired=""
+        lock_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+        [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +15 2>/dev/null)" ] && expired=1
+        if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+            log "另一实例（pid=$lock_pid）正在安装，跳过"
+            return 0
+        fi
+        if [ -z "$lock_pid" ] && [ -z "$expired" ]; then
+            log "锁刚建立（持有者 PID 写入中），跳过"
+            return 0
+        fi
+        log "接管失效锁（pid=${lock_pid:-未知}）"
+        rm -rf "$LOCK_DIR" 2>/dev/null || true
     fi
     if ! mkdir "$LOCK_DIR" 2>/dev/null; then
         log "另一实例正在安装，跳过"
         return 0
     fi
-    trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+    echo "$$" > "$LOCK_DIR/pid"
+    # 仅释放自己持有的锁：校验锁内 PID == 自己，避免误删被其它实例接管后重建的锁
+    trap '[ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT
 
     # 拿到锁后重新判定：可能另一实例已经装好了相同配置（并已 start）
     if is_installed && fingerprint_matches; then

@@ -206,15 +206,27 @@ function Test-PilotRunning {
 # ---- Invoke-Install：重活（抢锁 + node + 下载 installer + install + 写指纹）----
 # 由 detach 出的独立进程（-RunInstall）执行：不随会话退出而中断，也不占用 hook 返回时间。
 function Invoke-Install {
-    # 并发锁：多会话同时启动时只允许一个实例执行安装
-    # CLI 退出可能杀掉 hook 进程导致锁残留，超过 TTL 的旧锁直接接管
+    # 并发锁：多会话同时启动时只允许一个实例执行安装。
+    # 锁目录内写入持锁进程 PID；接管前先判活——只有 PID 确实已死才回收。detach 出的独立
+    # 进程不受 hook 900s 约束，慢装存活时绝不按时间误判回收，否则会拉起第二个并发 install
+    # 抢写 config.json。TTL 仅兜底“读不到 PID”的极端情况（刚建尚未写入 / pid 文件损坏）：
+    # 读不到 PID 且超过 15 分钟才强制回收。
     $LockTtlMinutes = 15
+    $LockPidFile = Join-Path $LockDir 'pid'
     if (Test-Path $LockDir) {
-        $age = (Get-Date) - (Get-Item $LockDir).CreationTime
-        if ($age.TotalMinutes -gt $LockTtlMinutes) {
-            Write-Log ("接管过期锁（存在 " + [int]$age.TotalMinutes + " 分钟）")
-            Remove-Item $LockDir -Force -Recurse -ErrorAction SilentlyContinue
+        $lockPid = if (Test-Path $LockPidFile) { (Get-Content -Raw $LockPidFile -ErrorAction SilentlyContinue).Trim() } else { '' }
+        $expired = ((Get-Date) - (Get-Item $LockDir).CreationTime).TotalMinutes -gt $LockTtlMinutes
+        $alive = ($lockPid -match '^\d+$') -and [bool](Get-Process -Id ([int]$lockPid) -ErrorAction SilentlyContinue)
+        if ($alive) {
+            Write-Log "另一实例（pid=$lockPid）正在安装，跳过"
+            return
         }
+        if ((-not $lockPid) -and (-not $expired)) {
+            Write-Log '锁刚建立（持有者 PID 写入中），跳过'
+            return
+        }
+        Write-Log "接管失效锁（pid=$(if ($lockPid) { $lockPid } else { '未知' })）"
+        Remove-Item $LockDir -Force -Recurse -ErrorAction SilentlyContinue
     }
     try {
         New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null
@@ -222,6 +234,7 @@ function Invoke-Install {
         Write-Log '另一实例正在安装，跳过'
         return
     }
+    Set-Content -Path $LockPidFile -Value $PID -Encoding ASCII
 
     try {
         # 拿到锁后重新判定：可能另一实例已经装好了相同配置
@@ -253,7 +266,9 @@ function Invoke-Install {
     } catch {
         Write-Log "❌ 安装失败: $($_.Exception.Message)"
     } finally {
-        Remove-Item $LockDir -Force -Recurse -ErrorAction SilentlyContinue
+        # 仅释放自己持有的锁：校验锁内 PID == 自己，避免误删被其它实例接管后重建的锁
+        $ownerPid = if (Test-Path $LockPidFile) { (Get-Content -Raw $LockPidFile -ErrorAction SilentlyContinue).Trim() } else { '' }
+        if ($ownerPid -eq "$PID") { Remove-Item $LockDir -Force -Recurse -ErrorAction SilentlyContinue }
     }
 }
 
