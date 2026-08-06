@@ -143,8 +143,6 @@ export interface ConfigFile {
     turnIdleTimeoutMs?: number;
     resourceAttributeKeys?: string[];
     spanAttributePassthroughPrefixes?: string[];
-    terminalEventHookField?: string;
-    terminalEventHookValues?: string[];
   };
 
   agents?: Record<string, {
@@ -593,8 +591,6 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     spanAttributePassthroughPrefixes: resolveSpanAttributePassthroughPrefixes(otlp),
     maxExportBatchBytes: otlp?.maxExportBatchBytes,
-    terminalEventHookField: otlp?.terminalEventHookField,
-    terminalEventHookValues: otlp?.terminalEventHookValues,
   };
 }
 

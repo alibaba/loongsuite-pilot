@@ -129,7 +129,7 @@ describe('OtlpTraceFlusher - CP5 no-double-emit regression', () => {
     expect(withOutput.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('flushes the turn ONLY when terminalEventHookValue (llm_output) arrives, not on intermediate model_call_ended stop', async () => {
+  it('flushes OpenClaw only on llm_output, not on intermediate model_call_ended stop', async () => {
     // Regression: OpenClaw's ReAct loop emits multiple model_call_ended per
     // turn (one per cycle), each with finish_reason=['stop']. The default
     // Signal A (finish_reason='stop') flushed the turn after the FIRST cycle
@@ -137,12 +137,10 @@ describe('OtlpTraceFlusher - CP5 no-double-emit regression', () => {
     // model:3, llm_output) arriving in later input polls were dropped at the
     // door. validate-trace reported step 2/3 missing (gate #4 FAIL).
     //
-    // Fix: configure terminalEventHookField='agent.openclaw.hook' +
-    // terminalEventHookValues=['llm_output'] so only the llm_output record
-    // (which fires ONCE at end of run) triggers Signal A. Intermediate
-    // model_call_ended records (hook=model_call_ended, NOT in the values
-    // list) are NOT terminal — the turn stays in the buffer across
-    // sendBatch calls until llm_output arrives.
+    // OpenClaw's dedicated terminal rule uses only the llm_output record
+    // (which fires ONCE at end of run) as Signal A. Intermediate
+    // model_call_ended records are NOT terminal, so the turn stays in the
+    // buffer across sendBatch calls until llm_output arrives.
     //
     // This test simulates the production poll splitting a turn across two
     // sendBatch calls. Without the terminal-hook fix, the first batch's
@@ -150,15 +148,9 @@ describe('OtlpTraceFlusher - CP5 no-double-emit regression', () => {
     // batch would be dropped (only 1 ENTRY, 1 STEP, 1 LLM, 1 TOOL captured).
     const entries = await loadFixtureEvents();
 
-    // Build a flusher configured like the OpenClaw production setup.
-    const terminalCfg = {
-      ...makeConfig(),
-      terminalEventHookField: 'agent.openclaw.hook',
-      terminalEventHookValues: ['llm_output'],
-    } as const;
     const localCaptured: CapturedSpan[] = [];
     const localFlusher = new OtlpTraceFlusher(
-      terminalCfg,
+      makeConfig(),
       undefined,
       () => makeCapturingExporter(localCaptured),
     );

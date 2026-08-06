@@ -33,8 +33,10 @@ const AGENT_TYPE = "openclaw";
 const PLUGIN_ID = "loongsuite-pilot-openclaw";
 const MAX_RUNS = 200;
 const MAX_SESSIONS = 100;
+const MAX_RUN_STATE_ENTRIES = 512;
 const MAX_CONTENT_SIZE = 64 * 1024;
 const MAX_TOOL_RESULT_SIZE = 64 * 1024;
+const PILOT_CONFIG_CACHE_TTL_MS = 5_000;
 
 // ---------------------------------------------------------------------------
 // Caller-supplied span attributes (inlined mirror of resource-context.mjs)
@@ -155,6 +157,11 @@ function safeStringify(obj) {
   });
 }
 
+function safeJsonClone(value) {
+  const serialized = safeStringify(value);
+  return serialized === undefined ? undefined : JSON.parse(serialized);
+}
+
 function truncate(str, max) {
   if (typeof str !== "string") return str;
   return str.length > max ? str.slice(0, max) + "...[truncated]" : str;
@@ -185,14 +192,25 @@ function truncateContent(val) {
 // Config
 // ---------------------------------------------------------------------------
 
+let pilotConfigCache = { path: null, loadedAt: 0, value: {} };
+
 function loadPilotConfig() {
-  try {
-    const cfgPath = path.join(resolveDataDir(), "config.json");
-    const raw = fs.readFileSync(cfgPath, "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return {};
+  const cfgPath = path.join(resolveDataDir(), "config.json");
+  const now = Date.now();
+  if (
+    pilotConfigCache.path === cfgPath
+    && now - pilotConfigCache.loadedAt < PILOT_CONFIG_CACHE_TTL_MS
+  ) {
+    return pilotConfigCache.value;
   }
+
+  let value = {};
+  try {
+    const raw = fs.readFileSync(cfgPath, "utf-8");
+    value = JSON.parse(raw);
+  } catch {}
+  pilotConfigCache = { path: cfgPath, loadedAt: now, value };
+  return value;
 }
 
 function resolveUserId(cfg) {
@@ -300,6 +318,29 @@ function writeError(source, err) {
 const runs = new Map();
 const sessions = new Map();
 const sessionRunIds = new Map();
+
+function setBounded(map, key, value) {
+  if (map.has(key)) map.delete(key);
+  map.set(key, value);
+  while (map.size > MAX_RUN_STATE_ENTRIES) {
+    map.delete(map.keys().next().value);
+  }
+}
+
+function addBounded(set, value) {
+  if (set.has(value)) return;
+  set.add(value);
+  while (set.size > MAX_RUN_STATE_ENTRIES) {
+    set.delete(set.values().next().value);
+  }
+}
+
+function pushBounded(list, value) {
+  list.push(value);
+  if (list.length > MAX_RUN_STATE_ENTRIES) {
+    list.splice(0, list.length - MAX_RUN_STATE_ENTRIES);
+  }
+}
 
 function bindSessionRun(sessionKey, runId) {
   if (!sessionKey || !runId) return;
@@ -586,7 +627,7 @@ function buildToolResultInputMessage(event) {
 
 function rememberCallUsage(run, callId, usage) {
   if (!run || !callId || usage.missing || run.perCallUsage.has(callId)) return;
-  run.perCallUsage.set(callId, usage);
+  setBounded(run.perCallUsage, callId, usage);
 }
 
 function sumCallUsage(run) {
@@ -644,7 +685,7 @@ function emitUnmatchedModelResponse(run, callId, userId, emit) {
     "agent.openclaw.context_window_source": ended.contextWindowSource,
   };
   emit(record);
-  run.assistantResponseCallIds.add(callId);
+  addBounded(run.assistantResponseCallIds, callId);
 }
 
 function flushUnmatchedModelResponses(run, userId, emit, exceptCallId) {
@@ -782,7 +823,7 @@ function handleModelCallStarted(event, ctx, userId, emit) {
   // previous call explicitly so retries/errors do not become orphan requests.
   flushUnmatchedModelResponses(run, userId, emit);
   const callId = `${runId}:model:${++run.callSeq}`;
-  if (event?.callId) run.nativeCallIds.set(event.callId, callId);
+  if (event?.callId) setBounded(run.nativeCallIds, event.callId, callId);
   run.currentStepCallId = callId;
   run.lastCallId = callId;
   if (event?.provider) run.provider = event.provider;
@@ -791,7 +832,7 @@ function handleModelCallStarted(event, ctx, userId, emit) {
   if (event?.sessionKey) run.sessionKey = run.sessionKey || event.sessionKey;
 
   const common = buildCommonFields(run, run.sessionId, userId);
-  run.modelCallStartedAtNanos.set(callId, common.time_unix_nano);
+  setBounded(run.modelCallStartedAtNanos, callId, common.time_unix_nano);
 
   const startsAgentCycle = run.llmInputPending;
   run.llmInputPending = false;
@@ -843,7 +884,7 @@ function handleModelCallEnded(event, ctx, userId, emit) {
     // Per-call usage, output and stopReason arrive on the following
     // before_message_write AssistantMessage. Stash end metadata and emit one
     // canonical llm.response there instead of producing split response records.
-    run.modelCallEnds.set(callId, { ...event });
+    setBounded(run.modelCallEnds, callId, { ...event });
   }
 }
 
@@ -896,8 +937,8 @@ function handleBeforeToolCall(event, ctx, userId, emit) {
   const stepId = run.currentStepCallId || run.lastCallId;
   const common = buildCommonFields(run, run.sessionId, userId);
   if (event?.toolCallId) {
-    if (stepId) run.toolStepCallIds.set(event.toolCallId, stepId);
-    run.toolStartedAtNanos.set(event.toolCallId, common.time_unix_nano);
+    if (stepId) setBounded(run.toolStepCallIds, event.toolCallId, stepId);
+    setBounded(run.toolStartedAtNanos, event.toolCallId, common.time_unix_nano);
   }
   const record = {
     ...common,
@@ -907,7 +948,7 @@ function handleBeforeToolCall(event, ctx, userId, emit) {
     "gen_ai.tool.call.id": event?.toolCallId,
     "gen_ai.tool.call.exec.id": event?.toolCallId,
     "gen_ai.tool.call.arguments": event?.params
-      ? truncateContent(JSON.parse(JSON.stringify(event.params)))
+      ? truncateContent(safeJsonClone(event.params))
       : undefined,
     "agent.openclaw.hook": "before_tool_call",
   };
@@ -966,7 +1007,7 @@ function handleAfterToolCall(event, ctx, userId, emit) {
     "gen_ai.tool.call.id": event?.toolCallId,
     "gen_ai.tool.call.exec.id": event?.toolCallId,
     "gen_ai.tool.call.result": result !== undefined
-      ? truncateContent(JSON.parse(JSON.stringify(result)))
+      ? truncateContent(safeJsonClone(result))
       : undefined,
     "gen_ai.tool.call.duration": event?.durationMs,
     "tool.result.status": isError ? "failure" : "success",
@@ -986,8 +1027,8 @@ function handleToolResultPersist(event, ctx, userId, emit) {
   const toolCallId = event?.message?.toolCallId || event?.toolCallId;
   if (toolCallId && !run.persistedToolCallIds.has(toolCallId)) {
     const inputMessage = buildToolResultInputMessage(event);
-    if (inputMessage) run.pendingToolInputMessages.push(inputMessage);
-    run.persistedToolCallIds.add(toolCallId);
+    if (inputMessage) pushBounded(run.pendingToolInputMessages, inputMessage);
+    addBounded(run.persistedToolCallIds, toolCallId);
   }
   const stepId = run
     ? ((toolCallId && run.toolStepCallIds.get(toolCallId)) || run.currentStepCallId || run.lastCallId)
@@ -1000,7 +1041,7 @@ function handleToolResultPersist(event, ctx, userId, emit) {
     "gen_ai.tool.call.id": event?.toolCallId,
     "agent.openclaw.hook": "tool_result_persist",
     "agent.openclaw.persisted_message": event?.message
-      ? truncateContent(JSON.parse(JSON.stringify(event.message)))
+      ? truncateContent(safeJsonClone(event.message))
       : undefined,
     "agent.openclaw.is_synthetic": event?.isSynthetic,
   };
@@ -1062,7 +1103,7 @@ function handleBeforeMessageWrite(event, ctx, userId, emit) {
     const responseId = message.responseId || targetCallId;
     rememberCallUsage(run, targetCallId, usage);
     run.modelCallEnds.delete(targetCallId);
-    run.assistantResponseCallIds.add(targetCallId);
+    addBounded(run.assistantResponseCallIds, targetCallId);
     const stopReason = message.stopReason;
     const record = {
       ...buildCommonFields(run, run.sessionId, userId),

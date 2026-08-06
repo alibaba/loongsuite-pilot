@@ -301,11 +301,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     // Signal A: terminal event detected → mark turn complete.
     // Default: gen_ai.response.finish_reasons ∈ {stop, end_turn, cancelled, error}.
-    // When `terminalEventHookField` is configured, only records whose value
-    // at that field is in `terminalEventHookValues` count as terminal. Used
-    // for agents (e.g. OpenClaw) whose ReAct loop emits multiple
-    // finish_reason=stop records per turn — the default would flush
-    // prematurely after the first cycle and drop later cycles' records.
+    // OpenClaw has a dedicated run-level terminal hook because each ReAct
+    // model call carries its own finish reason.
     // 逐条模式下立即 flush；批量模式下（_deferSignalA=true）仅标记 completed，
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
     if (this.isTerminalEvent(entry)) {
@@ -383,12 +380,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
-    const field = this.cfg.terminalEventHookField;
-    const values = this.cfg.terminalEventHookValues;
-    if (field && values && values.length > 0) {
-      const v = entry[field];
-      return typeof v === 'string' && values.includes(v);
-    }
     // OpenClaw emits one finish reason per ReAct model call. Those values close
     // individual LLM spans, not the whole agent turn. Its llm_output hook is the
     // stable end-of-run boundary in every supported version (>=2026.5.12).

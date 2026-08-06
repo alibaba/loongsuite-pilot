@@ -460,6 +460,55 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(result['error.message']).toBe('command failed');
   });
 
+  it('serializes BigInt and circular tool payloads without dropping records', async () => {
+    const plugin = await loadPlugin();
+    const handlers = registerPlugin(plugin);
+    const runId = 'non-json-tool-run';
+    const sessionId = 'non-json-tool-session';
+    const sessionKey = 'agent:main:non-json-tool';
+    const toolCallId = 'non-json-tool-call';
+    const ctx = { runId, sessionId, sessionKey, agentId: 'main' };
+
+    handlers.model_call_started(
+      { runId, sessionId, sessionKey, callId: 'native-call', provider: 'test', model: 'test-model' },
+      ctx,
+    );
+
+    const params = { count: 7n };
+    params.self = params;
+    handlers.before_tool_call(
+      { runId, toolName: 'exec', toolCallId, params },
+      ctx,
+    );
+
+    const resultPayload = { count: 11n };
+    resultPayload.self = resultPayload;
+    handlers.after_tool_call(
+      { runId, toolName: 'exec', toolCallId, result: resultPayload, durationMs: 1 },
+      ctx,
+    );
+
+    const persistedMessage = { toolCallId, count: 13n };
+    persistedMessage.self = persistedMessage;
+    handlers.tool_result_persist(
+      { sessionKey, toolName: 'exec', toolCallId, message: persistedMessage },
+      { sessionKey, agentId: 'main' },
+    );
+
+    const records = readOutputRecords();
+    const call = records.find((record) => record['agent.openclaw.hook'] === 'before_tool_call');
+    const result = records.find((record) => record['agent.openclaw.hook'] === 'after_tool_call');
+    const persisted = records.find((record) => record['agent.openclaw.hook'] === 'tool_result_persist');
+
+    expect(call['gen_ai.tool.call.arguments']).toMatchObject({ count: '7', self: '[Circular]' });
+    expect(result['gen_ai.tool.call.result']).toMatchObject({ count: '11', self: '[Circular]' });
+    expect(persisted['agent.openclaw.persisted_message']).toMatchObject({
+      toolCallId,
+      count: '13',
+      self: '[Circular]',
+    });
+  });
+
   it('emits user prompt as messages_delta on before_agent_run (user-hook pattern)', async () => {
     const plugin = await loadPlugin();
     const envelopes = readJsonl('pilot-probe-events-smoke.jsonl');
@@ -824,6 +873,24 @@ describe('OpenClaw plugin stateful pipeline', () => {
     const response = records.find((r) => r['agent.openclaw.hook'] === 'before_message_write');
     expect(response['gen_ai.usage.input_tokens']).toBeGreaterThan(0);
     expect(response['gen_ai.usage.output_tokens']).toBeGreaterThan(0);
+  });
+
+  it('caches Pilot config reads across hooks within the TTL', async () => {
+    const configPath = path.join(pilotDataDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ agents: { openclaw: {} } }));
+    const plugin = await loadPlugin();
+    const readFileSpy = vi.spyOn(fs, 'readFileSync');
+    const handlers = registerPlugin(plugin);
+    const sessionId = 'config-cache-session';
+    const runId = 'config-cache-run';
+    const ctx = { sessionId, runId, sessionKey: 'agent:main:config-cache', agentId: 'main' };
+
+    handlers.session_start({ sessionId }, ctx);
+    handlers.before_agent_run({ runId, prompt: 'hello' }, ctx);
+    handlers.agent_end({ runId, success: true }, ctx);
+
+    const configReads = readFileSpy.mock.calls.filter(([file]) => file === configPath);
+    expect(configReads).toHaveLength(1);
   });
 
   it('honors the OpenClaw plugin-level captureMessageContent=false setting', async () => {
