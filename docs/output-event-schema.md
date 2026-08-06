@@ -99,7 +99,7 @@ Required levels follow OpenTelemetry wording:
 
 ## AgentTeams Invocation Context
 
-When a supported agent process starts with the following environment variables, Pilot captures the invocation context inside the agent Hook or Plugin and binds it to the current turn:
+When a supported agent process starts with the following environment variables, Pilot writes the worker context to the current turn:
 
 | Environment variable | Event field | Description |
 |----------------------|-------------|-------------|

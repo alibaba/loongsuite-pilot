@@ -97,7 +97,7 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 
 ## AgentTeams 调用上下文
 
-当支持的 Agent 进程携带以下环境变量启动时，Pilot 会在 Agent 的 Hook 或 Plugin 内捕获调用上下文，并将其绑定到当前 Turn：
+当支持的 Agent 进程携带以下环境变量启动时，Pilot 会将 Worker 上下文写入当前 Turn：
 
 | 环境变量 | Event 字段 | 说明 |
 |----------|------------|------|
