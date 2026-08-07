@@ -324,6 +324,28 @@ function extractCodexTurn(
 
     if (record.type !== 'response_item') continue;
     const itemType = stringValue(payload.type);
+    if (itemType === 'agent_message' && meta?.threadSource === 'subagent') {
+      const recipient = stringValue(payload.recipient);
+      const communicationMeta = asRecord(payload.internal_chat_message_metadata_passthrough);
+      const messageTurnId = stringValue(communicationMeta?.turn_id);
+      // Codex represents the initial parent → child delegation as an internal
+      // agent_message rather than a user_message. Treat it as the child turn's
+      // input only when it targets this child and belongs to this turn; child →
+      // parent completion messages in root rollouts must not become prompts.
+      if (
+        (!meta.agentPath || !recipient || recipient === meta.agentPath)
+        && (!messageTurnId || messageTurnId === expectedTurnId)
+      ) {
+        const message = transcriptInputMessage('user', payload.content);
+        if (message) {
+          inputMessages.push(message);
+          appendPrompt(message.parts[0]?.content);
+          sawSubmittedUserMessage = true;
+          markActivity(timestamp);
+        }
+      }
+      continue;
+    }
     if (itemType === 'message') {
       const role = stringValue(payload.role);
       if (role === 'assistant') {

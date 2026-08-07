@@ -409,12 +409,12 @@ describe('CodexTranscriptInput', () => {
       expect(new Set(childEntries.map(entry => entry['gen_ai.subagent.parent_tool_call.id']))).toEqual(
         new Set([`call-subagent-${CHILD_FIXTURES.indexOf(fixture) + 1}`]),
       );
-      const parentTool = entries.find(entry => (
-        entry['event.name'] === 'tool.call'
-        && entry['gen_ai.tool.call.id'] === `call-subagent-${CHILD_FIXTURES.indexOf(fixture) + 1}`
-      ));
-      const childRoot = childEntries.find(entry => entry['event.name'] === 'other');
-      expect(childRoot?.parent_span_id).toBe(parentTool?.span_id);
+      expect(childEntries.some(entry => entry['event.name'] === 'other')).toBe(false);
+      expect(childEntries.find(entry => entry['event.name'] === 'llm.request')).toEqual(
+        expect.objectContaining({
+          'gen_ai.input.messages': expect.any(Array),
+        }),
+      );
     }
     expect(globalProcessedTurnIds(stateStore)).toEqual(expect.arrayContaining([
       'parent-turn-1',

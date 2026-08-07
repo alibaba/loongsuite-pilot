@@ -10,7 +10,6 @@ import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import {
   buildCodexTranscriptSegment,
-  codexToolSpanId,
   nextInputMessagesForStep,
 } from './codex-transcript-builder.js';
 import {
@@ -1899,12 +1898,11 @@ function rewriteSubagentEntries(
   },
 ): AgentActivityEntry[] {
   const parentTurnId = `${context.parentThreadId}:${context.parentTurnId}`;
-  const parentToolSpanId = codexToolSpanId(
-    context.parentThreadId,
-    context.parentTurnId,
-    context.parentToolCallId,
-  );
-  return entries.map(entry => ({
+  // The converter consumes every `other` record as a turn-level ENTRY input
+  // before it partitions subagent records. Keep the child prompt on its
+  // llm.request and omit child `other` markers so they cannot pollute or
+  // re-parent the parent ENTRY span.
+  return entries.filter(entry => entry['event.name'] !== 'other').map(entry => ({
     ...entry,
     trace_id: context.parentTraceId,
     'gen_ai.session.id': context.parentThreadId,
@@ -1915,9 +1913,6 @@ function rewriteSubagentEntries(
     ...(context.agentName ? { 'gen_ai.agent.name': context.agentName } : {}),
     'gen_ai.agent.parent.id': context.parentThreadId,
     'gen_ai.subagent.parent_tool_call.id': context.parentToolCallId,
-    ...(entry['event.name'] === 'other' && entry['gen_ai.turn.end'] !== true
-      ? { parent_span_id: parentToolSpanId }
-      : {}),
   }));
 }
 

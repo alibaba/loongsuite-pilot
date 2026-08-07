@@ -26,6 +26,69 @@ const CHILD_FIXTURES = [
 ] as const;
 
 describe('CodexSubagentLinker', () => {
+  it('extracts the parent delegation agent_message as the child prompt', () => {
+    const turnId = 'child-turn-agent-message';
+    const meta = childMeta({
+      threadId: 'child-agent-message',
+      agentPath: '/root/child_agent_message',
+    });
+    const records = [
+      {
+        timestamp: '2026-08-07T09:20:31.534Z',
+        type: 'turn_context',
+        payload: { turn_id: turnId, model: 'gpt-5.4' },
+      },
+      {
+        timestamp: '2026-08-07T09:20:31.538Z',
+        type: 'response_item',
+        payload: {
+          type: 'agent_message',
+          author: '/root',
+          recipient: '/root/child_agent_message',
+          content: [
+            { type: 'input_text', text: 'inspect the delegated file' },
+            { type: 'encrypted_content', encrypted_content: 'redacted' },
+          ],
+          internal_chat_message_metadata_passthrough: { turn_id: turnId },
+        },
+      },
+      {
+        timestamp: '2026-08-07T09:20:42.113Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          id: 'response-child',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'done' }],
+        },
+      },
+      {
+        timestamp: '2026-08-07T09:20:42.255Z',
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: { total_token_usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } },
+        },
+      },
+      {
+        timestamp: '2026-08-07T09:20:42.270Z',
+        type: 'event_msg',
+        payload: { type: 'task_complete', turn_id: turnId, last_agent_message: 'done' },
+      },
+    ];
+
+    const turn = extractCodexPartialTurn(records, meta, meta.threadId, turnId);
+
+    expect(turn).toMatchObject({
+      prompt: 'inspect the delegated file',
+      promptReady: true,
+      inputMessages: [{
+        role: 'user',
+        parts: [{ type: 'text', content: 'inspect the delegated file' }],
+      }],
+    });
+  });
+
   it('links all four fixture children by agent path even when children arrive first', async () => {
     const linker = new CodexSubagentLinker();
     for (const fixture of CHILD_FIXTURES) {

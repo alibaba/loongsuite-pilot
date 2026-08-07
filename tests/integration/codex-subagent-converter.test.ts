@@ -74,6 +74,10 @@ describe('Codex subagent converter integration', () => {
           'gen_ai.agent.id': `child-${index}`,
           'gen_ai.agent.parent.id': 'parent-session',
           'gen_ai.subagent.parent_tool_call.id': callId,
+          'gen_ai.input.messages_delta': [{
+            role: 'user',
+            parts: [{ type: 'text', content: `delegated task ${index}` }],
+          }],
         },
         {
           ...base,
@@ -141,6 +145,7 @@ describe('Codex subagent converter integration', () => {
       expect(tool).toBeDefined();
       expect(child).toBeDefined();
       expect(child?.parentSpanId).toBe(tool?.spanContext().spanId);
+      expect(child?.attributes['gen_ai.input.messages']).toContain(`delegated task ${index}`);
     }
   });
 });
