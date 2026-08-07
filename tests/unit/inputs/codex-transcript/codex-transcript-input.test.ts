@@ -1954,6 +1954,12 @@ describe('CodexTranscriptInput', () => {
         finish_reason: 'stop',
       }],
     });
+    expect(responses[0]?.['agent.codex.turn_status']).toBeUndefined();
+    expect(entries).toContainEqual(expect.objectContaining({
+      'event.name': 'other',
+      'agent.codex.turn_status': 'completed',
+      'gen_ai.turn.end': true,
+    }));
     const finalRequest = entries.find(entry => (
       entry['event.name'] === 'llm.request'
       && entry['gen_ai.step.id'] === 'session-1:turn-1:s3'

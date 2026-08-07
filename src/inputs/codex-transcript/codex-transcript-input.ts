@@ -640,7 +640,14 @@ export class CodexTranscriptInput extends BaseInput {
         );
       }
     }
-    const readyEntries = built.entries;
+    // A Codex model wave may finish with `stop` and then resume in the same
+    // transcript turn (for example after a subagent completion notification or
+    // a failed spawn retry). Emit a distinct lifecycle marker only after the
+    // authoritative task_complete / turn_aborted boundary. This also closes a
+    // turn whose final LLM response was already emitted in an earlier poll.
+    const readyEntries = terminal && built.entries.length > 0
+      ? [...built.entries, codexTurnEndMarker(built.entries, turn.status)]
+      : built.entries;
     const entries = this.filterNewSegmentEntries(readyEntries, activeTurn);
     const diagnostics: SegmentRecoveryDiagnostics = {
       sourceRecordCount: records.items.length,
@@ -959,6 +966,10 @@ export class CodexTranscriptInput extends BaseInput {
     for (const entry of entries) {
       const eventName = entry['event.name'];
       if (eventName === 'other') {
+        if (entry['gen_ai.turn.end'] === true) {
+          out.push(entry);
+          continue;
+        }
         if (activeTurn.emittedPrompt) continue;
         activeTurn.emittedPrompt = true;
         out.push(entry);
@@ -1904,8 +1915,41 @@ function rewriteSubagentEntries(
     ...(context.agentName ? { 'gen_ai.agent.name': context.agentName } : {}),
     'gen_ai.agent.parent.id': context.parentThreadId,
     'gen_ai.subagent.parent_tool_call.id': context.parentToolCallId,
-    ...(entry['event.name'] === 'other' ? { parent_span_id: parentToolSpanId } : {}),
+    ...(entry['event.name'] === 'other' && entry['gen_ai.turn.end'] !== true
+      ? { parent_span_id: parentToolSpanId }
+      : {}),
   }));
+}
+
+function codexTurnEndMarker(
+  entries: AgentActivityEntry[],
+  status: 'completed' | 'interrupted',
+): AgentActivityEntry {
+  const source = [...entries].reverse().find(entry => entry['event.name'] === 'llm.response')
+    ?? entries.at(-1);
+  if (!source) throw new Error('cannot build Codex turn-end marker without a source entry');
+  return {
+    time_unix_nano: source.time_unix_nano,
+    ...(source.observed_time_unix_nano
+      ? { observed_time_unix_nano: source.observed_time_unix_nano }
+      : {}),
+    'event.id': `${source['event.id']}:turn-end`,
+    'event.name': 'other',
+    'user.id': source['user.id'],
+    ...(source.trace_id ? { trace_id: source.trace_id } : {}),
+    parent_span_id: '0000000000000001',
+    'gen_ai.session.id': source['gen_ai.session.id'],
+    ...(source['gen_ai.turn.id'] ? { 'gen_ai.turn.id': source['gen_ai.turn.id'] } : {}),
+    'gen_ai.turn.end': true,
+    'gen_ai.agent.type': source['gen_ai.agent.type'],
+    ...(source['gen_ai.agent.id'] ? { 'gen_ai.agent.id': source['gen_ai.agent.id'] } : {}),
+    ...(source['gen_ai.agent.name'] ? { 'gen_ai.agent.name': source['gen_ai.agent.name'] } : {}),
+    'gen_ai.provider.name': source['gen_ai.provider.name'],
+    ...(source['agent.codex.transcript_turn_id']
+      ? { 'agent.codex.transcript_turn_id': source['agent.codex.transcript_turn_id'] }
+      : {}),
+    'agent.codex.turn_status': status,
+  };
 }
 
 function serializedEntryBytes(entry: AgentActivityEntry): number {
