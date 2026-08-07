@@ -58,10 +58,12 @@ PERMANENT_DIR="${posix(tmp)}/perm"
 mkdir -p "$DATA_DIR" "$PERMANENT_DIR"
 
 curl() {
+  printf '%s\n' "$*" >> "$FAKE_OSS/.curl-args"
   local url="" dest=""
   while [ $# -gt 0 ]; do
     case "$1" in
       -o|-O) dest="$2"; shift 2 ;;
+      --retry|--connect-timeout|--max-time) shift 2 ;;
       -*) shift ;;
       *) url="$1"; shift ;;
     esac
@@ -276,6 +278,36 @@ echo OK
       },
     });
     expect(out.trim()).toBe('OK');
+  });
+
+  it('accepts sha256sum binary-mode SHASUMS entries (<hash> *<name>)', () => {
+    const body = `
+out=$(ensure_managed_node) || { echo "ENSURE_FAILED"; exit 1; }
+echo "PATH=$out"
+`;
+    const { out } = runBash(body, {
+      fixture: (oss) => {
+        const archive = makeNodeTarball(oss, '9.9.9', 'darwin', 'arm64');
+        // sha256sum binary mode prefixes the filename with '*'
+        const sum = sha256File(path.join(oss, archive));
+        writeFileSync(path.join(oss, 'SHASUMS256.txt'), `${sum} *${archive}\n`);
+      },
+    });
+    expect(out).toContain(path.posix.join('runtime', 'node-v9.9.9-darwin-arm64', 'bin', 'node'));
+  });
+
+  it('bounds downloads with connect/total timeouts (curl and wget)', () => {
+    const body = `
+ensure_managed_node >/dev/null 2>&1 || true
+cat "$FAKE_OSS/.curl-args" 2>/dev/null
+`;
+    const { out } = runBash(body, {
+      fixture: (oss) => makeNodeTarball(oss, '9.9.9', 'darwin', 'arm64'),
+    });
+    expect(out).toContain('--connect-timeout 20');
+    expect(out).toContain('--max-time 600');
+    // wget fallback path is not exercised by the stub; assert statically.
+    expect(block).toContain('wget -q --tries=2 --timeout=20');
   });
 
   it('fails when the download is unavailable (fallback trigger)', () => {

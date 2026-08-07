@@ -73,6 +73,25 @@ node_is_suitable() {
   return 0
 }
 
+# Numeric-descending sort for version directory paths (stdin, one per line).
+# Prefers sort -V; falls back to zero-padded keys where sort -V is unavailable
+# (e.g. BSD/macOS sort, which has no -V).
+sort_version_dirs_desc() {
+  if printf '' | sort -V >/dev/null 2>&1; then
+    sort -rV
+    return
+  fi
+  local d v ma mi pa
+  while IFS= read -r d; do
+    v="${d##*/}"; v="${v#node-v}"; v="${v#v}"
+    IFS=. read -r ma mi pa <<<"$v"
+    [[ "$ma" =~ ^([0-9]+) ]] && ma="${BASH_REMATCH[1]}" || ma=0
+    [[ "$mi" =~ ^([0-9]+) ]] && mi="${BASH_REMATCH[1]}" || mi=0
+    [[ "$pa" =~ ^([0-9]+) ]] && pa="${BASH_REMATCH[1]}" || pa=0
+    printf '%04d.%04d.%04d|%s\n' "$ma" "$mi" "$pa" "$d"
+  done | sort -r | cut -d'|' -f2-
+}
+
 NODE_PIN_FILE="$LOONGSUITE_PILOT_DATA_DIR/node-bin"
 NODE_BIN=""
 
@@ -84,16 +103,18 @@ if [[ -f "$NODE_PIN_FILE" ]]; then
 fi
 
 if [[ -z "$NODE_BIN" ]]; then
-  # Managed runtime node (never removed by user node-manager churn) comes first.
-  runtime_candidates=("$(dirname "$NODE_PIN_FILE")/runtime"/node-v*/bin/node)
+  # Managed runtime node (never removed by user node-manager churn) comes first,
+  # newest version first. Numeric-descending order matches the daemon's
+  # compareNodeRuntimeDirs; a plain reverse glob is lexicographic and would
+  # prefer node-v22.9.0 over node-v22.22.2.
   candidates=()
-  for (( i=${#runtime_candidates[@]}-1; i>=0; i-- )); do
-    candidates+=("${runtime_candidates[i]}")
-  done
-  nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
-  for (( i=${#nvm_candidates[@]}-1; i>=0; i-- )); do
-    candidates+=("${nvm_candidates[i]}")
-  done
+  runtime_dir="$(dirname "$NODE_PIN_FILE")/runtime"
+  while IFS= read -r d; do
+    [[ -n "$d" ]] && candidates+=("$d/bin/node")
+  done < <(for d in "$runtime_dir"/node-v*; do [[ -d "$d" ]] && printf '%s\n' "$d"; done | sort_version_dirs_desc)
+  while IFS= read -r d; do
+    [[ -n "$d" ]] && candidates+=("$d/bin/node")
+  done < <(for d in "$HOME/.nvm/versions/node"/*; do [[ -d "$d" ]] && printf '%s\n' "$d"; done | sort_version_dirs_desc)
   candidates+=(
     "$HOME/.volta/bin/node"
     "$HOME/.fnm/aliases/default/bin/node"

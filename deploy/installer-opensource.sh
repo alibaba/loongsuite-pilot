@@ -312,10 +312,12 @@ managed_node_is_musl() {
 
 managed_node_download() {
     # managed_node_download <url> <dest>
+    # Bounded timeouts mirror the .ps1 installer (-TimeoutSec 600); without
+    # them a stalled TCP connection hangs the installer indefinitely.
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 2 "$1" -o "$2"
+        curl -fsSL --retry 2 --connect-timeout 20 --max-time 600 "$1" -o "$2"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q "$1" -O "$2"
+        wget -q --tries=2 --timeout=20 "$1" -O "$2"
     else
         return 1
     fi
@@ -335,7 +337,9 @@ managed_node_sha256() {
 managed_node_verify() {
     # managed_node_verify <archive> <shasums-file> <archive-basename>
     local expected actual
-    expected=$(grep -E "[[:space:]]${3}\$" "$2" 2>/dev/null | awk '{print $1}' | head -1)
+    # [*]? accepts sha256sum binary-mode lines ("<hash> *<name>"), matching
+    # the .ps1 installer's Test-ManagedNodeChecksum.
+    expected=$(grep -E "[[:space:]][*]?${3}\$" "$2" 2>/dev/null | awk '{print $1}' | head -1)
     if [ -z "$expected" ]; then
         echo "managed node: SHASUMS256.txt has no entry for $3" >&2
         return 1

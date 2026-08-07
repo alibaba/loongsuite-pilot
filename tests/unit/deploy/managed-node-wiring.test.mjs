@@ -112,13 +112,32 @@ describe('hook fallbacks prefer the managed runtime node', () => {
   for (const f of HOOK_SH) {
     const sh = readFileSync(resolve(f), 'utf-8');
     it(`${f} lists runtime/ candidates before nvm`, () => {
-      const runtimePos = sh.indexOf('runtime_candidates=');
-      const nvmPos = sh.indexOf('nvm_candidates=');
+      const runtimePos = sh.indexOf('runtime_dir="$(dirname "$NODE_PIN_FILE")/runtime"');
+      const nvmPos = sh.indexOf('.nvm/versions/node');
       expect(runtimePos).toBeGreaterThan(-1);
       expect(nvmPos).toBeGreaterThan(runtimePos);
-      expect(sh).toContain('runtime"/node-v*/bin/node');
+      expect(sh).toContain('"$runtime_dir"/node-v*');
+    });
+    it(`${f} orders version dirs numerically, not by reverse glob`, () => {
+      expect(sh).toContain('sort_version_dirs_desc()');
+      expect(sh).not.toContain('runtime_candidates=');
+      expect(sh).not.toContain('nvm_candidates=');
     });
   }
+
+  it('all hooks share one numeric sort helper with a sort -V fallback', () => {
+    const fns = HOOK_SH.map(f => {
+      const sh = readFileSync(resolve(f), 'utf-8');
+      const m = sh.match(/sort_version_dirs_desc\(\) \{[\s\S]*?\n\}\n/);
+      expect(m, f).not.toBeNull();
+      return m[0];
+    });
+    expect(new Set(fns).size).toBe(1);
+    expect(fns[0]).toContain('sort -rV');
+    // BSD/macOS sort lacks -V; the zero-padded key fallback must be present.
+    expect(fns[0]).toContain('sort -V >/dev/null 2>&1');
+    expect(fns[0]).toContain("printf '%04d.%04d.%04d|%s\\n'");
+  });
 
   it('common.ps1 Resolve-NodeBin lists runtime candidates first', () => {
     const ps1 = readFileSync(resolve('assets/hooks/shared/common.ps1'), 'utf-8');
@@ -129,5 +148,13 @@ describe('hook fallbacks prefer the managed runtime node', () => {
     expect(voltaPos).toBeGreaterThan(runtimePos);
     expect(resolveFn).toContain('bin\\node.exe');
     expect(resolveFn.split('Join-Path $d.FullName "node.exe"').length - 1).toBeGreaterThanOrEqual(2);
+  });
+
+  it('common.ps1 sorts version dirs numerically via Get-NodeVersionSortKey', () => {
+    const ps1 = readFileSync(resolve('assets/hooks/shared/common.ps1'), 'utf-8');
+    expect(ps1).toContain('function Get-NodeVersionSortKey');
+    const resolveFn = ps1.slice(ps1.indexOf('function Resolve-NodeBin'), ps1.indexOf('# CLM/WDAC-safe'));
+    expect(resolveFn).not.toContain('Sort-Object Name -Descending');
+    expect(resolveFn.split('Get-NodeVersionSortKey $_.Name').length - 1).toBeGreaterThanOrEqual(3);
   });
 });
