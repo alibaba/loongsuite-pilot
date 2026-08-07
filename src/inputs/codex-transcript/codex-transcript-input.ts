@@ -10,6 +10,7 @@ import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import {
   buildCodexTranscriptSegment,
+  codexToolSpanId,
   nextInputMessagesForStep,
 } from './codex-transcript-builder.js';
 import {
@@ -27,6 +28,9 @@ import {
   MAX_EMITTED_TERMINAL_TURNS,
   MAX_GLOBAL_EMITTED_TERMINAL_TURNS,
   type CodexActiveTranscriptTurn,
+  type CodexPendingFusionChild,
+  type CodexPendingFusionTurn,
+  type CodexPendingSubagentTurn,
   type CodexPendingTerminalTurn,
   type CodexTranscriptInputContext,
   type CodexTranscriptCheckpoint,
@@ -139,6 +143,8 @@ export class CodexTranscriptInput extends BaseInput {
   private lastSubagentShadowSummary = '';
   private lastWakeupMarkerCleanupAtMs = 0;
   private lastSpanContextCleanupAtMs = 0;
+  private readonly transcriptMetaByPath = new Map<string, ReturnType<typeof extractCodexTranscriptMeta>>();
+  private readonly transcriptPathByThreadId = new Map<string, string>();
 
   constructor(opts: CodexTranscriptInputOptions) {
     super({ stateStore: opts.stateStore, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
@@ -157,9 +163,17 @@ export class CodexTranscriptInput extends BaseInput {
 
   protected override async onStart(): Promise<void> {
     this.loadGlobalProcessedTerminalTurnIds();
-    for (const { filePath, baselineOnStart } of await this.discoverSessionFiles()) {
+    const discovered = await this.discoverSessionFiles();
+    await this.indexDiscoveredTranscriptOwners(discovered);
+    for (const { filePath, baselineOnStart } of discovered) {
       const key = this.stateKey(filePath);
-      if (baselineOnStart && !this.readCheckpoint(key)) await this.baselineFile(filePath, key);
+      const meta = this.transcriptMetaByPath.get(filePath);
+      const neededByPendingFusion = meta?.depth === 1
+        && meta.parentThreadId !== undefined
+        && this.hasPendingFusionForParent(meta.parentThreadId);
+      if (baselineOnStart && !neededByPendingFusion && !this.readCheckpoint(key)) {
+        await this.baselineFile(filePath, key);
+      }
     }
     this.saveGlobalProcessedTerminalTurnIds();
     await Promise.all([
@@ -189,9 +203,17 @@ export class CodexTranscriptInput extends BaseInput {
   protected override async collect(): Promise<AgentActivityEntry[]> {
     await this.cleanupExpiredSpanContexts(Date.now());
     let emittedCount = 0;
-    for (const { filePath } of await this.discoverSessionFiles()) {
+    const discovered = await this.discoverSessionFiles();
+    await this.indexDiscoveredTranscriptOwners(discovered);
+    discovered.sort((left, right) => {
+      const leftDepth = this.transcriptMetaByPath.get(left.filePath)?.depth ?? 0;
+      const rightDepth = this.transcriptMetaByPath.get(right.filePath)?.depth ?? 0;
+      return leftDepth - rightDepth || left.filePath.localeCompare(right.filePath);
+    });
+    for (const { filePath } of discovered) {
       emittedCount += await this.processFile(filePath);
     }
+    emittedCount += await this.finalizeReadySubagentFusions();
     this.reportSubagentShadowLinks();
     if (emittedCount > 0) {
       this.logger.debug('cycle produced entries', { count: emittedCount });
@@ -248,6 +270,8 @@ export class CodexTranscriptInput extends BaseInput {
         scanOffset: 0,
         activeTurn: null,
         pendingTerminal: null,
+        pendingFusion: null,
+        pendingSubagent: null,
         ownerSessionMetaOffset: null,
         emittedTerminalTurnIds: [],
       };
@@ -263,6 +287,15 @@ export class CodexTranscriptInput extends BaseInput {
       checkpointChanged = true;
     }
     await this.registerSubagentOwnerMeta(filePath, checkpoint.ownerSessionMetaOffset);
+
+    const ownerMeta = this.transcriptMetaByPath.get(filePath) ?? null;
+    const isDirectSubagent = ownerMeta?.threadSource === 'subagent' && ownerMeta.depth === 1;
+    if (ownerMeta?.depth === 0) this.registerPersistedSubagentSpawns(checkpoint, ownerMeta.threadId);
+
+    if (checkpoint.pendingFusion || checkpoint.pendingSubagent) {
+      if (checkpointChanged) this.saveCheckpoint(key, checkpoint);
+      return 0;
+    }
 
     let emittedCount = 0;
     let processedTerminalCount = 0;
@@ -346,15 +379,72 @@ export class CodexTranscriptInput extends BaseInput {
           checkpoint.pendingTerminal = null;
           processedTerminalCount++;
         } else {
+          if (
+            isDirectSubagent
+            && terminalTurnId
+            && ownerMeta?.createdAtMs !== undefined
+            && checkpoint.activeTurn.startedAtMs < ownerMeta.createdAtMs
+          ) {
+            // Forked child rollouts contain copied parent history after their
+            // owning session_meta. It must not become the child's pending turn.
+            checkpoint.activeTurn = null;
+            processedTerminalCount++;
+            checkpoint.scanOffset = nextScanOffset;
+            continue;
+          }
+
+          if (isDirectSubagent) {
+            if (terminalTurnId) {
+              checkpoint.pendingSubagent = {
+                turnId: terminalTurnId,
+                terminalEndOffset: nextScanOffset,
+              };
+              blocked = true;
+            }
+            checkpoint.scanOffset = nextScanOffset;
+            break;
+          }
+
+          const activeBeforeRecovery = terminalTurnId
+            ? cloneActiveTurn(checkpoint.activeTurn)
+            : null;
           const recovered = await this.recoverTurnSegment(
             filePath,
             checkpoint,
             nextScanOffset,
             terminalTurnId !== null,
           );
-          emittedCount += this.emitEntryBatches(recovered.entries);
+          const fusionChildren = terminalTurnId
+            ? checkpoint.activeTurn?.subagentSpawns ?? []
+            : [];
+          if (
+            terminalTurnId
+            && recovered.kind !== 'unparseable'
+            && fusionChildren.length > 0
+            && activeBeforeRecovery
+            // A root rollout can contain many completed historical turns. Only
+            // the terminal at the current file tail may still be waiting for
+            // its children. Gating an earlier terminal lets later children be
+            // consumed by that stale turn's time-order fallback.
+            && nextScanOffset >= stat.size
+          ) {
+            activeBeforeRecovery.subagentSpawns = fusionChildren;
+            checkpoint.activeTurn = activeBeforeRecovery;
+            checkpoint.pendingFusion = {
+              turnId: terminalTurnId,
+              parentThreadId: ownerMeta?.threadId ?? sessionIdFromTranscriptPath(filePath),
+              parentTraceId: parentTraceIdForChildren(fusionChildren),
+              terminalEndOffset: nextScanOffset,
+              children: fusionChildren,
+              createdAtMs: Date.now(),
+            };
+            blocked = true;
+          } else {
+            emittedCount += this.emitEntryBatches(recovered.entries);
+          }
           if (
             recovered.kind !== 'unparseable'
+            && !checkpoint.pendingFusion
             && recovered.consumedEndOffset > checkpoint.activeTurn.startOffset
           ) {
             checkpoint.activeTurn.startOffset = recovered.consumedEndOffset;
@@ -375,7 +465,7 @@ export class CodexTranscriptInput extends BaseInput {
                 sourceRecordCount: recovered.diagnostics.sourceRecordCount,
               });
               blocked = true;
-            } else {
+            } else if (!checkpoint.pendingFusion) {
               this.rememberProcessedTerminalTurnId(checkpoint, terminalTurnId);
               this.rememberGlobalProcessedTerminalTurnId(terminalTurnId);
               checkpoint.activeTurn = null;
@@ -508,8 +598,18 @@ export class CodexTranscriptInput extends BaseInput {
     if (meta?.depth === 0) {
       const parentTraceId = stringValue(built.entries[0]?.trace_id);
       if (parentTraceId) {
-        this.subagentLinker.registerSpawns(
-          extractCodexSpawnDescriptors(turn, records.items, parentTraceId),
+        const spawns = extractCodexSpawnDescriptors(turn, records.items, parentTraceId);
+        this.subagentLinker.registerSpawns(spawns);
+        activeTurn.subagentSpawns = mergePendingFusionChildren(
+          activeTurn.subagentSpawns ?? [],
+          spawns.map(spawn => ({
+            parentToolCallId: spawn.parentToolCallId,
+            parentTraceId: spawn.parentTraceId,
+            spawnedAtMs: spawn.spawnedAtMs,
+            ...(spawn.taskName ? { taskName: spawn.taskName } : {}),
+            ...(spawn.agentPath ? { agentPath: spawn.agentPath } : {}),
+            ...(spawn.childThreadId ? { childThreadId: spawn.childThreadId } : {}),
+          })),
         );
       }
     }
@@ -624,7 +724,154 @@ export class CodexTranscriptInput extends BaseInput {
     if (this.subagentLinker.hasThread(threadId)) return;
     const record = await readJsonLineAt(filePath, ownerSessionMetaOffset);
     const meta = record ? extractCodexTranscriptMeta(record) : null;
-    if (meta) this.subagentLinker.registerChild(meta);
+    if (meta) {
+      this.transcriptMetaByPath.set(filePath, meta);
+      this.transcriptPathByThreadId.set(meta.threadId, filePath);
+      this.subagentLinker.registerChild(meta);
+    }
+  }
+
+  private async indexDiscoveredTranscriptOwners(files: DiscoveredSessionFile[]): Promise<void> {
+    this.transcriptMetaByPath.clear();
+    this.transcriptPathByThreadId.clear();
+    for (const { filePath } of files) {
+      let stat;
+      try {
+        stat = await fs.stat(filePath);
+      } catch {
+        continue;
+      }
+      const checkpoint = this.readCheckpoint(this.stateKey(filePath));
+      const ownerOffset = checkpoint?.ownerSessionMetaOffset
+        ?? await findOwnerSessionMetaOffset(filePath, stat.size);
+      if (ownerOffset === null) continue;
+      const record = await readJsonLineAt(filePath, ownerOffset);
+      const meta = record ? extractCodexTranscriptMeta(record) : null;
+      if (!meta) continue;
+      this.transcriptMetaByPath.set(filePath, meta);
+      this.transcriptPathByThreadId.set(meta.threadId, filePath);
+      this.subagentLinker.registerChild(meta);
+    }
+  }
+
+  private registerPersistedSubagentSpawns(
+    checkpoint: CodexTranscriptCheckpoint,
+    parentThreadId: string,
+  ): void {
+    const active = checkpoint.activeTurn;
+    if (!active?.subagentSpawns?.length) return;
+    this.subagentLinker.registerSpawns(active.subagentSpawns.map(spawn => ({
+      parentThreadId,
+      parentTurnId: active.turnId,
+      parentTraceId: spawn.parentTraceId,
+      parentToolCallId: spawn.parentToolCallId,
+      spawnedAtMs: spawn.spawnedAtMs,
+      ...(spawn.taskName ? { taskName: spawn.taskName } : {}),
+      ...(spawn.agentPath ? { agentPath: spawn.agentPath } : {}),
+      ...(spawn.childThreadId ? { childThreadId: spawn.childThreadId } : {}),
+    })));
+  }
+
+  private hasPendingFusionForParent(parentThreadId: string): boolean {
+    for (const key of this.stateStore.keys()) {
+      if (!key.startsWith(`${this.id}:`)) continue;
+      const checkpoint = this.readCheckpoint(key);
+      if (checkpoint?.pendingFusion?.parentThreadId === parentThreadId) return true;
+    }
+    return false;
+  }
+
+  private async finalizeReadySubagentFusions(): Promise<number> {
+    let emittedCount = 0;
+    const links = this.subagentLinker.snapshot().links;
+    for (const [parentPath, meta] of this.transcriptMetaByPath) {
+      if (!meta || meta.depth !== 0) continue;
+      const parentKey = this.stateKey(parentPath);
+      const parentCheckpoint = this.readCheckpoint(parentKey);
+      const pending = parentCheckpoint?.pendingFusion;
+      if (!parentCheckpoint || !pending || !parentCheckpoint.activeTurn) continue;
+
+      const resolved = pending.children.map(child => {
+        const linked = links.find(link => (
+          link.parentThreadId === pending.parentThreadId
+          && link.parentTurnId === pending.turnId
+          && link.parentToolCallId === child.parentToolCallId
+          && (!child.childThreadId || link.childThreadId === child.childThreadId)
+        ));
+        const childThreadId = child.childThreadId ?? linked?.childThreadId;
+        const childPath = childThreadId ? this.transcriptPathByThreadId.get(childThreadId) : undefined;
+        const childCheckpoint = childPath ? this.readCheckpoint(this.stateKey(childPath)) : null;
+        return { child, linked, childThreadId, childPath, childCheckpoint };
+      });
+      if (resolved.some(item => (
+        !item.childThreadId
+        || !item.childPath
+        || !item.childCheckpoint?.pendingSubagent
+        || !item.childCheckpoint.activeTurn
+      ))) continue;
+
+      const childOutputs: Array<{
+        entries: AgentActivityEntry[];
+        path: string;
+        checkpoint: CodexTranscriptCheckpoint;
+      }> = [];
+      let ready = true;
+      for (const item of resolved) {
+        const childCheckpoint = item.childCheckpoint!;
+        const childPending = childCheckpoint.pendingSubagent!;
+        const recovered = await this.recoverTurnSegment(
+          item.childPath!,
+          childCheckpoint,
+          childPending.terminalEndOffset,
+          true,
+        );
+        if (recovered.kind === 'unparseable') {
+          ready = false;
+          break;
+        }
+        childOutputs.push({
+          entries: rewriteSubagentEntries(recovered.entries, {
+            parentThreadId: pending.parentThreadId,
+            parentTurnId: pending.turnId,
+            parentTraceId: pending.parentTraceId,
+            parentToolCallId: item.child.parentToolCallId,
+            childThreadId: item.childThreadId!,
+            agentName: this.transcriptMetaByPath.get(item.childPath!)?.agentNickname
+              ?? item.child.agentPath
+              ?? item.child.taskName,
+          }),
+          path: item.childPath!,
+          checkpoint: childCheckpoint,
+        });
+      }
+      if (!ready) continue;
+
+      const parentRecovered = await this.recoverTurnSegment(
+        parentPath,
+        parentCheckpoint,
+        pending.terminalEndOffset,
+        true,
+      );
+      if (parentRecovered.kind === 'unparseable') continue;
+
+      for (const output of childOutputs) {
+        emittedCount += this.emitEntryBatches(output.entries);
+        const turnId = output.checkpoint.pendingSubagent!.turnId;
+        this.rememberProcessedTerminalTurnId(output.checkpoint, turnId);
+        this.rememberGlobalProcessedTerminalTurnId(turnId);
+        output.checkpoint.activeTurn = null;
+        output.checkpoint.pendingSubagent = null;
+        this.saveCheckpoint(this.stateKey(output.path), output.checkpoint);
+      }
+      emittedCount += this.emitEntryBatches(parentRecovered.entries);
+      this.rememberProcessedTerminalTurnId(parentCheckpoint, pending.turnId);
+      this.rememberGlobalProcessedTerminalTurnId(pending.turnId);
+      parentCheckpoint.activeTurn = null;
+      parentCheckpoint.pendingFusion = null;
+      this.saveCheckpoint(parentKey, parentCheckpoint);
+    }
+    this.saveGlobalProcessedTerminalTurnIds();
+    return emittedCount;
   }
 
   private reportSubagentShadowLinks(): void {
@@ -875,6 +1122,8 @@ export class CodexTranscriptInput extends BaseInput {
       scanOffset: nextOffset,
       activeTurn,
       pendingTerminal: null,
+      pendingFusion: null,
+      pendingSubagent: null,
       ownerSessionMetaOffset,
       emittedTerminalTurnIds: [],
     });
@@ -1089,6 +1338,7 @@ export class CodexTranscriptInput extends BaseInput {
           emittedToolCallIds: stringArray(active.emittedToolCallIds),
           emittedToolResultIds: stringArray(active.emittedToolResultIds),
           inputContext: parseInputContext(active.inputContext),
+          subagentSpawns: parsePendingFusionChildren(active.subagentSpawns),
         }
       : null;
     const pending = asRecord(value.pendingTerminal);
@@ -1104,11 +1354,37 @@ export class CodexTranscriptInput extends BaseInput {
           ...(typeof pending.sourceRecordCount === 'number' ? { sourceRecordCount: pending.sourceRecordCount } : {}),
         }
       : null;
+    const fusion = asRecord(value.pendingFusion);
+    const fusionChildren = parsePendingFusionChildren(fusion?.children);
+    const pendingFusion: CodexPendingFusionTurn | null = fusion
+      && typeof fusion.turnId === 'string'
+      && typeof fusion.parentThreadId === 'string'
+      && typeof fusion.parentTraceId === 'string'
+      && typeof fusion.terminalEndOffset === 'number'
+      && typeof fusion.createdAtMs === 'number'
+      && fusionChildren.length > 0
+      ? {
+          turnId: fusion.turnId,
+          parentThreadId: fusion.parentThreadId,
+          parentTraceId: fusion.parentTraceId,
+          terminalEndOffset: fusion.terminalEndOffset,
+          children: fusionChildren,
+          createdAtMs: fusion.createdAtMs,
+        }
+      : null;
+    const subagent = asRecord(value.pendingSubagent);
+    const pendingSubagent: CodexPendingSubagentTurn | null = subagent
+      && typeof subagent.turnId === 'string'
+      && typeof subagent.terminalEndOffset === 'number'
+      ? { turnId: subagent.turnId, terminalEndOffset: subagent.terminalEndOffset }
+      : null;
     return {
       inode: value.inode,
       scanOffset: value.scanOffset,
       activeTurn,
       pendingTerminal,
+      pendingFusion,
+      pendingSubagent,
       // Do not migrate legacy latestSessionMetaOffset. In forked rollouts that
       // value commonly points at copied parent metadata, so processFile will
       // perform one bounded header scan to recover the owning meta safely.
@@ -1492,6 +1768,80 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string')
     : [];
+}
+
+function parsePendingFusionChildren(value: unknown): CodexPendingFusionChild[] {
+  if (!Array.isArray(value)) return [];
+  const children: CodexPendingFusionChild[] = [];
+  for (const item of value) {
+    const child = asRecord(item);
+    if (
+      !child
+      || typeof child.parentToolCallId !== 'string'
+      || typeof child.parentTraceId !== 'string'
+      || typeof child.spawnedAtMs !== 'number'
+    ) continue;
+    children.push({
+      parentToolCallId: child.parentToolCallId,
+      parentTraceId: child.parentTraceId,
+      spawnedAtMs: child.spawnedAtMs,
+      ...(typeof child.taskName === 'string' ? { taskName: child.taskName } : {}),
+      ...(typeof child.agentPath === 'string' ? { agentPath: child.agentPath } : {}),
+      ...(typeof child.childThreadId === 'string' ? { childThreadId: child.childThreadId } : {}),
+    });
+  }
+  return children;
+}
+
+function mergePendingFusionChildren(
+  current: CodexPendingFusionChild[],
+  incoming: CodexPendingFusionChild[],
+): CodexPendingFusionChild[] {
+  const merged = new Map(current.map(child => [child.parentToolCallId, child]));
+  for (const child of incoming) {
+    merged.set(child.parentToolCallId, { ...merged.get(child.parentToolCallId), ...child });
+  }
+  return [...merged.values()];
+}
+
+function cloneActiveTurn(activeTurn: CodexActiveTranscriptTurn): CodexActiveTranscriptTurn {
+  return structuredClone(activeTurn);
+}
+
+function parentTraceIdForChildren(children: CodexPendingFusionChild[]): string {
+  return children[0]?.parentTraceId ?? '';
+}
+
+function rewriteSubagentEntries(
+  entries: AgentActivityEntry[],
+  context: {
+    parentThreadId: string;
+    parentTurnId: string;
+    parentTraceId: string;
+    parentToolCallId: string;
+    childThreadId: string;
+    agentName?: string;
+  },
+): AgentActivityEntry[] {
+  const parentTurnId = `${context.parentThreadId}:${context.parentTurnId}`;
+  const parentToolSpanId = codexToolSpanId(
+    context.parentThreadId,
+    context.parentTurnId,
+    context.parentToolCallId,
+  );
+  return entries.map(entry => ({
+    ...entry,
+    trace_id: context.parentTraceId,
+    'gen_ai.session.id': context.parentThreadId,
+    'gen_ai.turn.id': parentTurnId,
+    'gen_ai.agent.scope': 'subagent',
+    'gen_ai.agent.depth': 1,
+    'gen_ai.agent.id': context.childThreadId,
+    ...(context.agentName ? { 'gen_ai.agent.name': context.agentName } : {}),
+    'gen_ai.agent.parent.id': context.parentThreadId,
+    'gen_ai.subagent.parent_tool_call.id': context.parentToolCallId,
+    ...(entry['event.name'] === 'other' ? { parent_span_id: parentToolSpanId } : {}),
+  }));
 }
 
 function serializedEntryBytes(entry: AgentActivityEntry): number {

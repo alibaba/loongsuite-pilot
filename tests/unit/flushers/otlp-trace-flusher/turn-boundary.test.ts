@@ -75,6 +75,34 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
   });
 
+  it('does not close a fused parent turn on a subagent stop', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+    const turnId = 'parent:turn-1';
+
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': turnId,
+      'gen_ai.agent.type': 'codex',
+      'event.name': 'llm.request',
+    }));
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': turnId,
+      'gen_ai.agent.type': 'codex',
+      'gen_ai.agent.scope': 'subagent',
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    await flusher.send(makeEntry({
+      'gen_ai.turn.id': turnId,
+      'gen_ai.agent.type': 'codex',
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(3);
+  });
+
   it('Signal A: finish_reason=error triggers immediate flush', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);

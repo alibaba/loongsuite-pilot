@@ -34,6 +34,33 @@ export interface CodexActiveTranscriptTurn {
   emittedToolCallIds?: string[];
   emittedToolResultIds?: string[];
   inputContext?: CodexTranscriptInputContext;
+  /** Direct spawn_agent calls already observed while this parent turn streamed. */
+  subagentSpawns?: CodexPendingFusionChild[];
+}
+
+export interface CodexPendingFusionChild {
+  parentToolCallId: string;
+  parentTraceId: string;
+  spawnedAtMs: number;
+  taskName?: string;
+  agentPath?: string;
+  childThreadId?: string;
+}
+
+/** Parent terminal held until every direct child rollout reaches a terminal. */
+export interface CodexPendingFusionTurn {
+  turnId: string;
+  parentThreadId: string;
+  parentTraceId: string;
+  terminalEndOffset: number;
+  children: CodexPendingFusionChild[];
+  createdAtMs: number;
+}
+
+/** Completed child range retained in its rollout until it can be fused. */
+export interface CodexPendingSubagentTurn {
+  turnId: string;
+  terminalEndOffset: number;
 }
 
 /**
@@ -55,6 +82,8 @@ export interface CodexTranscriptCheckpoint {
   scanOffset: number;
   activeTurn: CodexActiveTranscriptTurn | null;
   pendingTerminal: CodexPendingTerminalTurn | null;
+  pendingFusion: CodexPendingFusionTurn | null;
+  pendingSubagent: CodexPendingSubagentTurn | null;
   /**
    * Offset of the session_meta that describes this rollout file itself.
    *

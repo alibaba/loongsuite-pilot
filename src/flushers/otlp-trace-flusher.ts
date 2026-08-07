@@ -386,6 +386,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    // A fused child shares the parent's turn buffer. Its stop closes only the
+    // child lifecycle; the delayed root response remains the turn boundary.
+    if (
+      normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex'
+      && entry['gen_ai.agent.scope'] === 'subagent'
+    ) return false;
     // OpenClaw emits one finish reason per ReAct model call. Those values close
     // individual LLM spans, not the whole agent turn. Its llm_output hook is the
     // stable end-of-run boundary in every supported version (>=2026.5.12).
