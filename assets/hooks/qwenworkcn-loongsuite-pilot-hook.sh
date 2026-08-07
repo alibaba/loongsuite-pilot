@@ -7,12 +7,9 @@ PROCESSOR="$HOOKS_DIR/qwen-work-cn-hook-processor.mjs"
 PILOT_DATA_DIR="$(cd "$HOOKS_DIR/.." && pwd)"
 export LOONGSUITE_PILOT_DATA_DIR="$PILOT_DATA_DIR"
 [[ -f "$PROCESSOR" ]] || exit 0
-
-NODE_BIN=""
-for candidate in "$HOME/.loongsuite-pilot/node-bin" /opt/homebrew/bin/node /usr/local/bin/node "$HOME/.local/bin/node"; do
-  if [[ "$candidate" == */node-bin && -f "$candidate" ]]; then candidate="$(tr -d '[:space:]' < "$candidate")"; fi
-  if [[ -x "$candidate" ]] && "$candidate" --version >/dev/null 2>&1; then NODE_BIN="$candidate"; break; fi
-done
-if [[ -z "$NODE_BIN" ]] && command -v node >/dev/null 2>&1; then NODE_BIN="$(command -v node)"; fi
-[[ -n "$NODE_BIN" ]] || exit 0
+RUNTIME_RESOLVER="$HOOKS_DIR/shared/node-runtime.sh"
+[[ -f "$RUNTIME_RESOLVER" ]] || exit 0
+# shellcheck source=shared/node-runtime.sh
+source "$RUNTIME_RESOLVER"
+NODE_BIN="$(resolve_pilot_node_bin 2>/dev/null)" || exit 0
 exec "$NODE_BIN" "$PROCESSOR" --agent-id qwen-work-cn --log-prefix qwen-work-cn
