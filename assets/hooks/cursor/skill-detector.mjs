@@ -4,18 +4,34 @@
  * Strategy: After assembly completes, match the transcript user row for the
  * current turn, then collect skills from either:
  * - Cursor's <manually_attached_skills> metadata on that user row; or
- * - Read tool_use entries targeting ~/.cursor/skills/<name>/SKILL.md.
+ * - A standalone <agent_skill fullPath="..."> usage signal; or
+ * - Read tool_use entries targeting a recognized skills[-suffix] path.
  */
 
 import fs from 'node:fs';
 
-// Path pattern: /.cursor/skills/<skill-name>/SKILL.md (case-insensitive)
-const SKILL_PATH_RE = /[/\\]\.cursor[/\\]skills[/\\]([\w-]+)[/\\]SKILL\.md/i;
+// Keep path semantics aligned with @loongsuite/otel-util-genai while requiring
+// the path to end at the skill definition document. The stricter suffix avoids
+// treating arbitrary files below an ordinary "skills" directory as usage.
+const SKILL_DOCUMENT_PATH_RE =
+  /(?:^|[/\\])skills(?:-[A-Za-z0-9][A-Za-z0-9_-]*)?[/\\](?:\.system[/\\])?([^/\\"'\s]+)[/\\]SKILL\.md$/i;
 const MANUALLY_ATTACHED_SKILLS_RE =
   /<manually_attached_skills>([\s\S]*?)<\/manually_attached_skills>/i;
 const ATTACHED_SKILL_HEADER_RE =
   /(?:^|\r?\n)Skill Name:\s*([^\r\n]+)\r?\nPath:\s*([^\r\n]+)\r?\nSKILL\.md content:\s*(?:\r?\n|$)/g;
 const USER_QUERY_RE = /<user_query>\s*([\s\S]*?)\s*<\/user_query>/i;
+const USER_QUERY_CONTAINER_RE =
+  /<user_query\b[^>]*>[\s\S]*?<\/user_query>/gi;
+const MANUALLY_ATTACHED_SKILLS_CONTAINER_RE =
+  /<manually_attached_skills\b[^>]*>[\s\S]*?<\/manually_attached_skills>/gi;
+const AGENT_SKILLS_CONTAINER_RE =
+  /<agent_skills\b[^>]*>([\s\S]*?)<\/agent_skills>/gi;
+const AVAILABLE_SKILLS_RE =
+  /<available_skills\b[^>]*>([\s\S]*?)<\/available_skills>/gi;
+const AGENT_SKILL_RE =
+  /<agent_skill\b([^>]*)>[\s\S]*?<\/agent_skill>/gi;
+const AGENT_SKILL_FULL_PATH_RE =
+  /\bfullPath\s*=\s*(?:"([^"]+)"|'([^']+)')/i;
 
 /**
  * Detect skill usage from transcript for a specific turn.
@@ -25,8 +41,8 @@ const USER_QUERY_RE = /<user_query>\s*([\s\S]*?)\s*<\/user_query>/i;
  * @returns {{
  *   skillName: string,
  *   skillPath: string,
- *   detectionSource: 'manual_attachment' | 'transcript_read',
- *   detectionSources: ('manual_attachment' | 'transcript_read')[]
+ *   detectionSource: 'manual_attachment' | 'agent_skill' | 'transcript_read',
+ *   detectionSources: ('manual_attachment' | 'agent_skill' | 'transcript_read')[]
  * }[] | null}
  */
 export function detectSkillFromTranscript(transcriptPath, userPrompt) {
@@ -78,7 +94,15 @@ export function detectSkillFromTranscript(transcriptPath, userPrompt) {
     addDetectedSkill(detected, skill, 'manual_attachment');
   }
 
-  // Step 3: Scan assistant messages after the matched user message until the
+  // Step 3: Cursor emits an <agent_skills><available_skills> catalog. Parse it for
+  // compatibility, but only standalone <agent_skill> elements outside that
+  // catalog are per-turn usage evidence.
+  const agentSkills = extractAgentSkillsMetadata(matchedUserText);
+  for (const skill of agentSkills.usedSkills) {
+    addDetectedSkill(detected, skill, 'agent_skill');
+  }
+
+  // Step 4: Scan assistant messages after the matched user message until the
   // turn boundary for actual Read SKILL.md tool calls.
   for (let i = matchedTurnStart + 1; i < entries.length; i++) {
     const e = entries[i];
@@ -88,12 +112,9 @@ export function detectSkillFromTranscript(transcriptPath, userPrompt) {
       for (const block of e.message.content) {
         if (block.type === 'tool_use' && (block.name === 'Read' || block.name === 'ReadFile')) {
           const filePath = block.input?.path || block.input?.file_path || '';
-          const match = filePath.match(SKILL_PATH_RE);
-          if (match) {
-            addDetectedSkill(detected, {
-              skillName: match[1],
-              skillPath: filePath,
-            }, 'transcript_read');
+          const skill = parseSkillDocumentPath(filePath);
+          if (skill) {
+            addDetectedSkill(detected, skill, 'transcript_read');
           }
         }
       }
@@ -132,14 +153,83 @@ export function extractManuallyAttachedSkills(userText) {
   for (const match of container.matchAll(ATTACHED_SKILL_HEADER_RE)) {
     const declaredName = match[1].trim();
     const skillPath = match[2].trim();
-    const pathMatch = skillPath.match(SKILL_PATH_RE);
-    if (!declaredName || !pathMatch) continue;
+    const parsedPath = parseSkillDocumentPath(skillPath);
+    if (!declaredName || !parsedPath) continue;
     skills.push({
       skillName: declaredName,
       skillPath,
     });
   }
   return skills;
+}
+
+/**
+ * Parse Cursor's agent skill metadata without treating the available-skills
+ * catalog as actual usage.
+ *
+ * @returns {{
+ *   availableSkills: { skillName: string, skillPath: string }[],
+ *   usedSkills: { skillName: string, skillPath: string }[]
+ * }}
+ */
+export function extractAgentSkillsMetadata(userText) {
+  if (!userText) return { availableSkills: [], usedSkills: [] };
+
+  const availableSkills = [];
+  const usedSkills = [];
+
+  // Both containers below contain user-controlled text, including the full
+  // inlined SKILL.md body. Remove them before looking for Cursor metadata so an
+  // XML example cannot become a synthetic skill usage signal.
+  MANUALLY_ATTACHED_SKILLS_CONTAINER_RE.lastIndex = 0;
+  USER_QUERY_CONTAINER_RE.lastIndex = 0;
+  const metadataText = userText
+    .replace(MANUALLY_ATTACHED_SKILLS_CONTAINER_RE, '')
+    .replace(USER_QUERY_CONTAINER_RE, '');
+
+  // Only <agent_skill> elements inside Cursor's <agent_skills> metadata
+  // container are eligible. Catalog entries remain available-only metadata.
+  AGENT_SKILLS_CONTAINER_RE.lastIndex = 0;
+  for (const containerMatch of metadataText.matchAll(AGENT_SKILLS_CONTAINER_RE)) {
+    AVAILABLE_SKILLS_RE.lastIndex = 0;
+    const usageBody = containerMatch[1].replace(
+      AVAILABLE_SKILLS_RE,
+      (_container, catalogBody) => {
+        availableSkills.push(...extractAgentSkillElements(catalogBody));
+        return '';
+      },
+    );
+    usedSkills.push(...extractAgentSkillElements(usageBody));
+  }
+
+  return {
+    availableSkills,
+    usedSkills,
+  };
+}
+
+function extractAgentSkillElements(text) {
+  const skills = [];
+  AGENT_SKILL_RE.lastIndex = 0;
+  for (const match of text.matchAll(AGENT_SKILL_RE)) {
+    const attributes = match[1] || '';
+    const fullPathMatch = attributes.match(AGENT_SKILL_FULL_PATH_RE);
+    const skillPath = (fullPathMatch?.[1] || fullPathMatch?.[2] || '').trim();
+    const skill = parseSkillDocumentPath(skillPath);
+    if (skill) skills.push(skill);
+  }
+  return skills;
+}
+
+export function parseSkillDocumentPath(filePath) {
+  if (typeof filePath !== 'string') return null;
+  const skillPath = filePath.trim();
+  const match = skillPath.match(SKILL_DOCUMENT_PATH_RE);
+  if (!match) return null;
+  return {
+    skillName: match[1],
+    skillPath,
+  };
 }
 
 function addDetectedSkill(detected, skill, source) {

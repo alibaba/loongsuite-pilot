@@ -226,12 +226,31 @@ export function loadHookRuntimeConfig(dataDir) {
     file = {};
   }
 
+  const envBool = (name, fallback) => {
+    const raw = process.env[name];
+    if (raw === undefined || raw === '') return fallback;
+    return raw === '1' || raw.toLowerCase() === 'true';
+  };
+  const upstreamLink = file.upstreamLink && typeof file.upstreamLink === 'object'
+    ? file.upstreamLink
+    : {};
+
   return {
     userId: process.env.LOONGSUITE_PILOT_USER_ID
       || file.userId
       || file['user.id']
       || os.hostname(),
     agents: file.agents && typeof file.agents === 'object' ? file.agents : {},
+    upstreamLink: {
+      enabled: envBool(
+        'LOONGSUITE_PILOT_UPSTREAM_LINK',
+        upstreamLink.enabled === true,
+      ),
+      propagateToTools: envBool(
+        'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS',
+        upstreamLink.propagateToTools === true,
+      ),
+    },
   };
 }
 

@@ -48,6 +48,7 @@ param(
     [string]$CmsWorkspace,
     [string]$ServiceNamePrefix,
     [string]$Agents,
+    [switch]$AllAgents,
     [string]$MaskMode,
     [string]$MaskTypes,
     [switch]$Purge
@@ -369,9 +370,34 @@ function Download-AndExtract {
 $script:PROBE_RESULT = "[]"
 
 function Probe-Agents {
-    Msg "==> 探测 AI Agent..." "==> Probing AI Agents..."
+    # -AllAgents: no per-agent gate is written (Write-Config clears config.agents),
+    # so the agent list is never needed — skip probing entirely.
+    if ($AllAgents) { return }
+
     $probeScript = Join-Path $script:INSTALL_SRC "dist\cli-probe.cjs"
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+
+    # -Agents specified: the user has chosen exactly which agents to enable, so
+    # on-disk detection is irrelevant. We still enumerate agent definitions with
+    # --list (no existence checks) to learn every id for the enable/disable gate.
+    if ($script:SELECTED_AGENTS) {
+        Msg "==> 枚举 Agent 定义 (已指定 -Agents，跳过探测)..." "==> Listing agent definitions (-Agents given; skipping detection)..."
+        if (Test-Path $probeScript) {
+            try {
+                $raw = & $script:NODE_BIN $probeScript --list 2>$null
+                if ($raw) {
+                    $script:PROBE_RESULT = if ($raw -is [array]) { $raw -join "" } else { $raw }
+                }
+            } catch {
+                $script:PROBE_RESULT = "[]"
+            }
+        }
+        $ErrorActionPreference = $prevEAP
+        Write-Host ""
+        return
+    }
+
+    Msg "==> 探测 AI Agent..." "==> Probing AI Agents..."
     if (Test-Path $probeScript) {
         try {
             $raw = & $script:NODE_BIN $probeScript 2>$null
@@ -396,6 +422,21 @@ function Probe-Agents {
 $script:SELECTED_AGENTS = $Agents
 
 function Select-Agents {
+    # -AllAgents: collect every agent. Skip selection entirely and leave no gate
+    # in config (Write-Config clears config.agents), so pilot auto-detects all
+    # agents at runtime — including ones installed after this run.
+    if ($AllAgents) {
+        if ($script:SELECTED_AGENTS) {
+            Msg "    ⚠️  -AllAgents 已启用，忽略 -Agents 指定的列表" `
+                "    ⚠️  -AllAgents is set; ignoring the -Agents list"
+            $script:SELECTED_AGENTS = ""
+        }
+        Msg "    采集全部 Agent (不写入选择，由 pilot 运行时自动探测)" `
+            "    Collecting all agents (no selection written; pilot auto-detects at runtime)"
+        Write-Host ""
+        return
+    }
+
     if ($script:SELECTED_AGENTS) {
         Msg "    使用指定的 Agent: $($script:SELECTED_AGENTS)" "    Using specified agents: $($script:SELECTED_AGENTS)"
         Write-Host ""
@@ -717,6 +758,7 @@ function Write-Config {
         cmsWorkspace      = "$CmsWorkspace"
         serviceNamePrefix = "$ServiceNamePrefix"
         selectedAgents    = "$($script:SELECTED_AGENTS)"
+        allAgentsMode     = $(if ($AllAgents) { "1" } else { "" })
         maskMode          = "$MaskMode"
         maskTypes         = "$MaskTypes"
         probeResult       = "$($script:PROBE_RESULT)"
@@ -782,7 +824,11 @@ if (opts.maskMode) {
     config.mask.types = opts.maskTypes.split(',').map(t => t.trim()).filter(Boolean);
   } else { delete config.mask.types; }
 }
-if (opts.selectedAgents) {
+if (opts.allAgentsMode === '1') {
+  // Collect all agents: drop any per-agent gate so the opt-out default (an
+  // agent not listed is enabled) applies to every agent, now and in future.
+  delete config.agents;
+} else if (opts.selectedAgents) {
   config.agents = config.agents || {};
   const selected = opts.selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
   const allAgents = JSON.parse(opts.probeResult || '[]');

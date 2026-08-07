@@ -61,6 +61,7 @@ CMS_ENDPOINT=""
 CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
 SELECTED_AGENTS=""
+ALL_AGENTS=0
 MASK_MODE=""
 MASK_TYPES=""
 HAS_SUDO=0
@@ -123,6 +124,7 @@ while [[ $# -gt 0 ]]; do
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
         --agents)             SELECTED_AGENTS="$2"; shift 2 ;;
         --agents=*)           SELECTED_AGENTS="${1#*=}"; shift ;;
+        --all-agents)         ALL_AGENTS=1; shift ;;
         --mask-mode)          MASK_MODE="$2"; shift 2 ;;
         --mask-mode=*)        MASK_MODE="${1#*=}"; shift ;;
         --mask-types)         MASK_TYPES="$2"; shift 2 ;;
@@ -384,6 +386,23 @@ download_and_extract() {
 PROBE_RESULT="[]"
 
 probe_agents() {
+    # --all-agents: no per-agent gate is written (write_config clears
+    # config.agents), so the agent list is never needed — skip probing entirely.
+    if [ "$ALL_AGENTS" = "1" ]; then
+        return 0
+    fi
+
+    # --agents specified: the user has chosen exactly which agents to enable, so
+    # on-disk detection is irrelevant. We still enumerate agent definitions with
+    # --list (no existence checks) to learn every id for the enable/disable gate.
+    if [ -n "$SELECTED_AGENTS" ]; then
+        msg "==> 枚举 Agent 定义 (已指定 --agents，跳过探测)..." \
+            "==> Listing agent definitions (--agents given; skipping detection)..."
+        PROBE_RESULT=$("$NODE_BIN" "$INSTALL_SRC/dist/cli-probe.cjs" --list 2>/dev/null) || PROBE_RESULT="[]"
+        echo ""
+        return 0
+    fi
+
     msg "==> 探测 AI Agent..." "==> Probing AI Agents..."
     PROBE_RESULT=$("$NODE_BIN" "$INSTALL_SRC/dist/cli-probe.cjs" 2>/dev/null) || {
         msg "    ⚠️  Agent 探测失败，将跳过选择" "    ⚠️  Agent probe failed, skipping selection"
@@ -400,6 +419,21 @@ probe_agents() {
 # Agent selection: interactive menu or --agents flag
 # ============================================================
 select_agents() {
+    # --all-agents: collect every agent. Skip selection entirely and leave no
+    # gate in config (write_config clears config.agents), so pilot auto-detects
+    # all agents at runtime — including ones installed after this run.
+    if [ "$ALL_AGENTS" = "1" ]; then
+        if [ -n "$SELECTED_AGENTS" ]; then
+            msg "    ⚠️  --all-agents 已启用，忽略 --agents 指定的列表" \
+                "    ⚠️  --all-agents is set; ignoring the --agents list"
+            SELECTED_AGENTS=""
+        fi
+        msg "    采集全部 Agent (不写入选择，由 pilot 运行时自动探测)" \
+            "    Collecting all agents (no selection written; pilot auto-detects at runtime)"
+        echo ""
+        return 0
+    fi
+
     if [ -n "$SELECTED_AGENTS" ]; then
         msg "    使用指定的 Agent: $SELECTED_AGENTS" "    Using specified agents: $SELECTED_AGENTS"
         echo ""
@@ -774,6 +808,7 @@ const cmsEndpoint = '${CMS_ENDPOINT}';
 const cmsWorkspace = '${CMS_WORKSPACE}';
 const serviceNamePrefix = '${SERVICE_NAME_PREFIX}';
 const selectedAgents = '${SELECTED_AGENTS}';
+const allAgentsMode = '${ALL_AGENTS}';
 const maskMode = '${MASK_MODE}';
 const maskTypes = '${MASK_TYPES}';
 
@@ -802,7 +837,11 @@ if (maskMode) {
   }
 }
 
-if (selectedAgents) {
+if (allAgentsMode === '1') {
+  // Collect all agents: drop any per-agent gate so the opt-out default (an
+  // agent not listed is enabled) applies to every agent, now and in future.
+  delete config.agents;
+} else if (selectedAgents) {
   config.agents = config.agents || {};
   const selected = selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
   const allAgents = JSON.parse(process.argv[1] || '[]');

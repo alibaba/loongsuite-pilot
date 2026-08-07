@@ -1,8 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { detectSkillFromTranscript } from '../../../../assets/hooks/cursor/skill-detector.mjs';
+import {
+  detectSkillFromTranscript,
+  extractAgentSkillsMetadata,
+  parseSkillDocumentPath,
+} from '../../../../assets/hooks/cursor/skill-detector.mjs';
 
 function createTempTranscript(lines) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-detector-test-'));
@@ -15,6 +19,83 @@ function createTempTranscript(lines) {
 function cleanup(dir) {
   fs.rmSync(dir, { recursive: true, force: true });
 }
+
+describe('parseSkillDocumentPath', () => {
+  it.each([
+    ['/Users/utkvrjan/.agents/skills/ai-rag2/SKILL.md', 'ai-rag2'],
+    [
+      '/Users/utkvrjan/.claude/plugins/cache/context-hub/utilities/431adcc76243/skills/ai-rag2/SKILL.md',
+      'ai-rag2',
+    ],
+    ['/Users/test/.cursor/skills/code-review/SKILL.md', 'code-review'],
+    ['/Users/test/.cursor/skills-cursor/create-rule/SKILL.md', 'create-rule'],
+    ['/Users/test/.codex/skills/.system/imagegen/SKILL.md', 'imagegen'],
+    ['/workspace/project/skills/deploy-helper/SKILL.md', 'deploy-helper'],
+    ['C:\\Users\\test\\.agents\\skills\\ai-rag2\\SKILL.md', 'ai-rag2'],
+  ])('should recognize supported skill document path %s', (skillPath, skillName) => {
+    expect(parseSkillDocumentPath(skillPath)).toEqual({ skillName, skillPath });
+  });
+
+  it.each([
+    '/Users/test/.cursor/commands/ai-rag2.md',
+    '/Users/test/.agents/skills/ai-rag2/README.md',
+    '/Users/test/.agents/skills/ai-rag2/scripts/run.js',
+  ])('should reject non-SKILL.md path %s', skillPath => {
+    expect(parseSkillDocumentPath(skillPath)).toBeNull();
+  });
+});
+
+describe('extractAgentSkillsMetadata', () => {
+  it('should parse available skills as catalog entries without usage', () => {
+    const userText = [
+      '<agent_skills>',
+      '<available_skills>',
+      '<agent_skill fullPath="/Users/test/.cursor/skills-cursor/create-rule/SKILL.md">create</agent_skill>',
+      '<agent_skill fullPath="/Users/test/.agents/skills/ai-rag2/SKILL.md">rag</agent_skill>',
+      '</available_skills>',
+      '</agent_skills>',
+    ].join('\n');
+
+    expect(extractAgentSkillsMetadata(userText)).toEqual({
+      availableSkills: [
+        {
+          skillName: 'create-rule',
+          skillPath: '/Users/test/.cursor/skills-cursor/create-rule/SKILL.md',
+        },
+        {
+          skillName: 'ai-rag2',
+          skillPath: '/Users/test/.agents/skills/ai-rag2/SKILL.md',
+        },
+      ],
+      usedSkills: [],
+    });
+  });
+
+  it('should treat standalone agent_skill elements inside agent_skills as usage', () => {
+    const pluginSkillPath =
+      '/Users/test/.claude/plugins/cache/context-hub/utilities/431adcc76243/skills/ai-rag2/SKILL.md';
+    const userText = [
+      '<agent_skills>',
+      `<agent_skill fullPath='${pluginSkillPath}'>rag</agent_skill>`,
+      '</agent_skills>',
+    ].join('\n');
+
+    expect(extractAgentSkillsMetadata(userText)).toEqual({
+      availableSkills: [],
+      usedSkills: [{ skillName: 'ai-rag2', skillPath: pluginSkillPath }],
+    });
+  });
+
+  it('should ignore agent_skill elements outside the agent_skills container', () => {
+    const userText =
+      '<agent_skill fullPath="/Users/test/.agents/skills/demo/SKILL.md">example</agent_skill>';
+
+    expect(extractAgentSkillsMetadata(userText)).toEqual({
+      availableSkills: [],
+      usedSkills: [],
+    });
+  });
+});
 
 describe('detectSkillFromTranscript', () => {
   let tempDir;
@@ -83,6 +164,129 @@ describe('detectSkillFromTranscript', () => {
     expect(result).toEqual([{
       skillName: 'count-if-statements',
       skillPath: '/Users/test/.cursor/skills/count-if-statements/SKILL.md',
+      detectionSource: 'manual_attachment',
+      detectionSources: ['manual_attachment'],
+    }]);
+  });
+
+  it('should detect manually attached skills outside .cursor/skills', () => {
+    const pluginSkillPath =
+      '/Users/utkvrjan/.claude/plugins/cache/context-hub/utilities/431adcc76243/skills/ai-rag2/SKILL.md';
+    const lines = [
+      { role: 'user', message: { content: [{ type: 'text', text: [
+        '<manually_attached_skills>',
+        'Skill Name: ai-rag2',
+        `Path: ${pluginSkillPath}`,
+        'SKILL.md content:',
+        '# AI RAG',
+        '</manually_attached_skills>',
+        '<user_query>',
+        'use ai-rag2',
+        '</user_query>',
+      ].join('\n') }] } },
+      { type: 'turn_ended' },
+    ];
+
+    ({ dir: tempDir, filePath: transcriptPath } = createTempTranscript(lines));
+
+    expect(detectSkillFromTranscript(transcriptPath, 'use ai-rag2')).toEqual([{
+      skillName: 'ai-rag2',
+      skillPath: pluginSkillPath,
+      detectionSource: 'manual_attachment',
+      detectionSources: ['manual_attachment'],
+    }]);
+  });
+
+  it('should not treat available agent skills catalog as usage', () => {
+    const lines = [
+      { role: 'user', message: { content: [{ type: 'text', text: [
+        '<agent_skills>',
+        '<available_skills>',
+        '<agent_skill fullPath="/Users/test/.agents/skills/ai-rag2/SKILL.md">rag</agent_skill>',
+        '</available_skills>',
+        '</agent_skills>',
+        '<user_query>',
+        'answer without a skill',
+        '</user_query>',
+      ].join('\n') }] } },
+      { type: 'turn_ended' },
+    ];
+
+    ({ dir: tempDir, filePath: transcriptPath } = createTempTranscript(lines));
+
+    expect(detectSkillFromTranscript(transcriptPath, 'answer without a skill')).toBeNull();
+  });
+
+  it('should detect a standalone agent_skill usage signal', () => {
+    const skillPath = '/Users/test/.agents/skills/ai-rag2/SKILL.md';
+    const lines = [
+      { role: 'user', message: { content: [{ type: 'text', text: [
+        '<agent_skills>',
+        `<agent_skill fullPath="${skillPath}">rag</agent_skill>`,
+        '</agent_skills>',
+        '<user_query>',
+        'use ai-rag2',
+        '</user_query>',
+      ].join('\n') }] } },
+      { type: 'turn_ended' },
+    ];
+
+    ({ dir: tempDir, filePath: transcriptPath } = createTempTranscript(lines));
+
+    expect(detectSkillFromTranscript(transcriptPath, 'use ai-rag2')).toEqual([{
+      skillName: 'ai-rag2',
+      skillPath,
+      detectionSource: 'agent_skill',
+      detectionSources: ['agent_skill'],
+    }]);
+  });
+
+  it('should ignore an agent_skill example inside user_query', () => {
+    const lines = [
+      { role: 'user', message: { content: [{ type: 'text', text: [
+        '<user_query>',
+        'explain this example:',
+        '<agent_skills>',
+        '<agent_skill fullPath="/Users/test/.agents/skills/demo/SKILL.md">example</agent_skill>',
+        '</agent_skills>',
+        '</user_query>',
+      ].join('\n') }] } },
+      { type: 'turn_ended' },
+    ];
+
+    ({ dir: tempDir, filePath: transcriptPath } = createTempTranscript(lines));
+
+    expect(detectSkillFromTranscript(
+      transcriptPath,
+      'explain this example: example',
+    )).toBeNull();
+  });
+
+  it('should ignore an agent_skill example inside attached SKILL.md content', () => {
+    const attachedSkillPath = '/Users/test/.agents/skills/attached/SKILL.md';
+    const lines = [
+      { role: 'user', message: { content: [{ type: 'text', text: [
+        '<manually_attached_skills>',
+        'Skill Name: attached',
+        `Path: ${attachedSkillPath}`,
+        'SKILL.md content:',
+        '# Attached Skill',
+        '<agent_skills>',
+        '<agent_skill fullPath="/Users/test/.agents/skills/demo/SKILL.md">example</agent_skill>',
+        '</agent_skills>',
+        '</manually_attached_skills>',
+        '<user_query>',
+        'use attached',
+        '</user_query>',
+      ].join('\n') }] } },
+      { type: 'turn_ended' },
+    ];
+
+    ({ dir: tempDir, filePath: transcriptPath } = createTempTranscript(lines));
+
+    expect(detectSkillFromTranscript(transcriptPath, 'use attached')).toEqual([{
+      skillName: 'attached',
+      skillPath: attachedSkillPath,
       detectionSource: 'manual_attachment',
       detectionSources: ['manual_attachment'],
     }]);
@@ -254,7 +458,7 @@ describe('detectSkillFromTranscript', () => {
     expect(result[0].skillPath).toBe('C:\\Users\\test\\.cursor\\skills\\code-review\\SKILL.md');
   });
 
-  it('should return null when path is not under .cursor/skills/', () => {
+  it('should detect a skill under a generic skills directory', () => {
     const lines = [
       { role: 'user', message: { content: [{ type: 'text', text: '<user_query>\nread some file\n</user_query>' }] } },
       { role: 'assistant', message: { content: [
@@ -266,7 +470,12 @@ describe('detectSkillFromTranscript', () => {
     ({ dir: tempDir, filePath: transcriptPath } = createTempTranscript(lines));
 
     const result = detectSkillFromTranscript(transcriptPath, 'read some file');
-    expect(result).toBeNull();
+    expect(result).toEqual([{
+      skillName: 'my-skill',
+      skillPath: '/Users/test/projects/skills/my-skill/SKILL.md',
+      detectionSource: 'transcript_read',
+      detectionSources: ['transcript_read'],
+    }]);
   });
 
   it('should return null when transcriptPath is empty or null', () => {

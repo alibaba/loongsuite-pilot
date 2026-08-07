@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -78,9 +78,43 @@ function runRetry(triggerEndLine, sessionId = 'session-old') {
       ...process.env,
       LOONGSUITE_PILOT_DATA_DIR: dataDir,
       HOOK_RETRY_DELAY: '0',
+      HOOK_RETRY_BOUNDARY_POLL_INTERVAL_MS: '10',
     },
     encoding: 'utf-8',
     timeout: 30_000,
+  });
+}
+
+function runRetryAsync(triggerEndLine, sessionId = 'session-old', { retryDelay = '0' } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      PROCESSOR,
+      '--agent-id', 'qoder',
+      '--log-prefix', 'qoder',
+      '--retry',
+      '--transcript', transcriptPath,
+      '--session', sessionId,
+      '--trigger-end-line', String(triggerEndLine),
+      '--cwd', '/tmp/qoder-project',
+    ], {
+      env: {
+        ...process.env,
+        LOONGSUITE_PILOT_DATA_DIR: dataDir,
+        HOOK_RETRY_DELAY: retryDelay,
+        HOOK_RETRY_BOUNDARY_POLL_INTERVAL_MS: '10',
+        HOOK_RETRY_LOCK_WAIT_MS: '2000',
+        HOOK_RETRY_LOCK_POLL_MS: '5',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('close', (status, signal) => resolve({ status, signal, stdout, stderr }));
   });
 }
 
@@ -189,7 +223,6 @@ describe('qoder-hook-processor cold-start recovery', () => {
       ...targetTurn,
       progress('Stop'),
       progress('Stop'),
-      progress('SessionEnd'),
       { type: 'session_meta', sessionId: 'session-old' },
       progress('UserPromptSubmit'),
       queuedPrompt,
@@ -222,12 +255,152 @@ describe('qoder-hook-processor cold-start recovery', () => {
         },
       },
       progress('Stop'),
-      progress('SessionEnd'),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
 
     const second = runRetry(secondTriggerEndLine);
     expect(second.status).toBe(0);
     expect(userBoundaryPrompts(readHistory())).toEqual(['target prompt', 'queued prompt']);
+  });
+
+  it('collects a real IDE-shaped Turn that ends with Stop at stable EOF', () => {
+    const progress = hookEvent => ({
+      type: 'progress',
+      timestamp: '2026-08-05T04:00:20.496534Z',
+      data: { hookEvent, hookName: hookEvent },
+    });
+    const rows = [
+      {
+        type: 'session_meta',
+        sessionId: 'ide-session',
+        data: { meta_type: 'session_info', content: { mode: 'agent', session_type: 'assistant' } },
+      },
+      progress('SessionStart'),
+      {
+        type: 'user',
+        uuid: 'ide-user',
+        timestamp: '2026-08-05T04:00:16.005147Z',
+        sessionId: 'ide-session',
+        message: { role: 'user', content: 'IDE prompt' },
+      },
+      {
+        type: 'assistant',
+        uuid: 'ide-thinking',
+        timestamp: '2026-08-05T04:00:19.821317Z',
+        sessionId: 'ide-session',
+        message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'reasoning' }] },
+      },
+      {
+        type: 'assistant',
+        uuid: 'ide-text',
+        timestamp: '2026-08-05T04:00:19.821627Z',
+        sessionId: 'ide-session',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'IDE answer' }] },
+      },
+      progress('Stop'),
+    ];
+    fs.writeFileSync(
+      transcriptPath,
+      `${rows.map(row => JSON.stringify(row)).join('\n')}\n`,
+    );
+
+    // The Stop hook snapshot ended immediately before Qoder appended its Stop
+    // progress row, matching the production race from the attached user log.
+    const result = runRetry(rows.length - 1, 'ide-session');
+
+    expect(result.status).toBe(0);
+    expect(userBoundaryPrompts(readHistory())).toEqual(['IDE prompt']);
+    expect(readHistory().some(record => record['event.name'] === 'llm.response')).toBe(true);
+  });
+
+  it('commits one copy when duplicate retries race on the same Stop window', async () => {
+    const progress = hookEvent => ({
+      type: 'progress',
+      timestamp: '2026-08-05T04:00:20.000Z',
+      data: { hookEvent, hookName: hookEvent },
+    });
+    const rows = [
+      { type: 'session_meta', sessionId: 'ide-session' },
+      progress('SessionStart'),
+      {
+        type: 'user',
+        timestamp: '2026-08-05T04:00:16.000Z',
+        sessionId: 'ide-session',
+        message: { role: 'user', content: 'one prompt' },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-08-05T04:00:19.000Z',
+        sessionId: 'ide-session',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'one answer' }] },
+      },
+      progress('Stop'),
+    ];
+    fs.writeFileSync(transcriptPath, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
+
+    const results = await Promise.all([
+      runRetryAsync(rows.length - 1, 'ide-session'),
+      runRetryAsync(rows.length - 1, 'ide-session'),
+    ]);
+
+    expect(results.map(result => result.status)).toEqual([0, 0]);
+    expect(userBoundaryPrompts(readHistory())).toEqual(['one prompt']);
+    expect(readHistory().filter(record => record['event.name'] === 'llm.response')).toHaveLength(1);
+  });
+
+  it('serializes adjacent Stop retries and commits both Turns once', async () => {
+    const progress = hookEvent => ({
+      type: 'progress',
+      timestamp: '2026-08-05T04:00:20.000Z',
+      data: { hookEvent, hookName: hookEvent },
+    });
+    const rows = [
+      { type: 'session_meta', sessionId: 'ide-session' },
+      progress('UserPromptSubmit'),
+      {
+        type: 'user',
+        timestamp: '2026-08-05T04:00:16.000Z',
+        sessionId: 'ide-session',
+        message: { role: 'user', content: 'first prompt' },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-08-05T04:00:19.000Z',
+        sessionId: 'ide-session',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'first answer' }] },
+      },
+      progress('Stop'),
+      progress('UserPromptSubmit'),
+      {
+        type: 'user',
+        timestamp: '2026-08-05T04:00:21.000Z',
+        sessionId: 'ide-session',
+        message: { role: 'user', content: 'second prompt' },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-08-05T04:00:24.000Z',
+        sessionId: 'ide-session',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'second answer' }] },
+      },
+      progress('Stop'),
+    ];
+    fs.writeFileSync(transcriptPath, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
+
+    const first = runRetryAsync(4, 'ide-session', { retryDelay: '50' });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    const second = runRetryAsync(8, 'ide-session', { retryDelay: '50' });
+    const results = await Promise.all([first, second]);
+
+    expect(results.map(result => result.status)).toEqual([0, 0]);
+    expect(userBoundaryPrompts(readHistory())).toEqual(['first prompt', 'second prompt']);
+    expect(readHistory().filter(record => record['event.name'] === 'llm.response')).toHaveLength(2);
+
+    const cursorDir = path.join(dataDir, 'state', 'hooks', 'qoder-line-records');
+    const cursor = JSON.parse(fs.readFileSync(
+      path.join(cursorDir, fs.readdirSync(cursorDir)[0]),
+      'utf-8',
+    ));
+    expect(cursor.last_line_count).toBe(rows.length);
   });
 
   it('keeps equal PostToolUse events from separate tool cycles', () => {
