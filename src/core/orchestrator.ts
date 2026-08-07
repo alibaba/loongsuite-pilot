@@ -34,6 +34,7 @@ import { QoderWorkTraceInput as QoderWorkCNTraceInput } from '../inputs/qoder-wo
 import { QoderWorkSqliteInput } from '../inputs/qoder-work-sqlite/qoder-work-sqlite-input.js';
 import { QoderWorkTraceInput } from '../inputs/qoder-work-trace/qoder-work-trace-input.js';
 import { QwenWorkCNInput } from '../inputs/qwen-work-cn/qwen-work-cn-input.js';
+import { QwenWorkCNTraceInput } from '../inputs/qwen-work-cn/qwen-work-cn-trace-input.js';
 import { QwenWorkCNSqliteInput } from '../inputs/qwen-work-cn/qwen-work-cn-sqlite-input.js';
 import { QoderCliInput } from '../inputs/qoder-cli/qoder-cli-input.js';
 import { QoderCliSessionInput } from '../inputs/qoder-cli-session/qoder-cli-session-input.js';
@@ -98,6 +99,7 @@ export class Orchestrator extends EventEmitter {
     'qoder-work-cn-hook': 'qoder-work-cn',
     'qoder-work-cn-log': 'qoder-work-cn',
     'qoder-work-cn-sqlite': 'qoder-work-cn',
+    'qwen-work-cn-trace': 'qwen-work-cn',
     'qwen-work-cn-hook': 'qwen-work-cn',
     'qwen-work-cn-sqlite': 'qwen-work-cn',
     'qoder-cli-hook': 'qoder',
@@ -944,24 +946,24 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    // --- QwenWorkCN: dedicated Hook pipeline with independent SQLite fallback ---
-    const qwenWorkCNHookInput = new QwenWorkCNInput({
+    // --- QwenWorkCN Trace: independent hook + segments + token intercept merge ---
+    const qwenWorkCNTraceInput = new QwenWorkCNTraceInput({
       stateStore: this.stateStore,
       logDir: path.join(this.dataDir, 'logs', 'qwen-work-cn', 'history'),
     });
-    this.inputManager.registerInput(qwenWorkCNHookInput);
-    const qwenWorkCNHookEnabled = () =>
-      this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qwen-work-cn-hook']) &&
+    this.inputManager.registerInput(qwenWorkCNTraceInput);
+    const qwenWorkCNTraceEnabled = () =>
+      this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qwen-work-cn-trace']) &&
       this.agentControlManager.resolveEnabled(
-        'qwen-work-cn-hook',
-        listenerCfg['qwen-work-cn-hook']?.enabled ?? true,
+        'qwen-work-cn-trace',
+        listenerCfg['qwen-work-cn-trace']?.enabled ?? true,
       );
     entries.push(
-      this.inputManager.buildDetectionEntry(qwenWorkCNHookInput, {
-        watchPaths: QwenWorkCNInput.getWatchPaths(),
-        isAvailable: QwenWorkCNInput.checkAvailability,
-        enabled: qwenWorkCNHookEnabled,
-        pollIntervalMs: listenerCfg['qwen-work-cn-hook']?.pollInterval,
+      this.inputManager.buildDetectionEntry(qwenWorkCNTraceInput, {
+        watchPaths: QwenWorkCNTraceInput.getWatchPaths(),
+        isAvailable: QwenWorkCNTraceInput.checkAvailability,
+        enabled: qwenWorkCNTraceEnabled,
+        pollIntervalMs: listenerCfg['qwen-work-cn-trace']?.pollInterval,
       }),
     );
 
@@ -971,7 +973,7 @@ export class Orchestrator extends EventEmitter {
       this.inputManager.buildDetectionEntry(qwenWorkCNSqliteInput, {
         watchPaths: QwenWorkCNSqliteInput.getWatchPaths(),
         isAvailable: QwenWorkCNSqliteInput.checkAvailability,
-        enabled: () => !qwenWorkCNHookEnabled() &&
+        enabled: () => !qwenWorkCNTraceEnabled() &&
           this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qwen-work-cn-sqlite']) &&
           this.agentControlManager.resolveEnabled(
             'qwen-work-cn-sqlite',

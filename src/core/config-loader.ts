@@ -368,6 +368,7 @@ function buildListenersConfig(
     'qoder-work-cn-hook': { enabled: true, pollInterval: 30_000 },
     'qoder-work-cn-log': { enabled: true, pollInterval: 30_000 },
     'qoder-work-cn-sqlite': { enabled: true, pollInterval: 30_000 },
+    'qwen-work-cn-trace': { enabled: true, pollInterval: 30_000 },
     'qwen-work-cn-hook': { enabled: true, pollInterval: 30_000 },
     'qwen-work-cn-sqlite': { enabled: true, pollInterval: 30_000 },
     'qoder-cli-hook': { enabled: true, pollInterval: 30_000 },
