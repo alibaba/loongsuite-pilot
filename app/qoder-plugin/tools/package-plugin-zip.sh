@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 维护者工具（不随插件分发）：把 loongsuite-pilot-installer 插件目录打成可分发的 zip。
-# 产物结构：zip 内顶层是 loongsuite-pilot-installer/，解开后可直接
-#   qodercli plugins install /path/to/loongsuite-pilot-installer
+# 产物结构：zip 内顶层是版本目录 loongsuite-pilot-installer-<version>/，其下是插件本体
+#   loongsuite-pilot-installer/，任意解压器解开后都得到统一的版本目录，再直接
+#   qodercli plugins install /path/to/loongsuite-pilot-installer-<version>/loongsuite-pilot-installer
 # 默认排除 vendor/node/（体积大、hook 在线下载）与运行期落盘文件。
 # 用法：
 #   ./package-plugin-zip.sh                 # 只打插件本体（推荐，联网下载 node）
@@ -40,42 +41,27 @@ mkdir -p "$OUT_DIR"
 ZIP_PATH="$OUT_DIR/${PLUGIN_NAME}-${VERSION}.zip"
 rm -f "$ZIP_PATH"
 
-# 默认排除：运行期落盘（install.log 等应在 DATA_DIR，正常不在插件里，兜底排除）、系统垃圾、node 分发包
-EXCLUDES=(
-    '*/.DS_Store' '.DS_Store'
-    '*/install.log' '*/install.lock/*' '*/install.lock'
-    '*/install-args.sha256' '*/installer.sh' '*/installer.ps1'
-)
-if [ "$WITH_NODE" -eq 0 ]; then
-    EXCLUDES+=( '*/vendor/node/*' '*/vendor/node' )
-fi
-
 echo "==> 打包 $PLUGIN_NAME v$VERSION"
 echo "    源目录: $PLUGIN_DIR"
 echo "    vendor/node: $([ "$WITH_NODE" -eq 1 ] && echo '包含（离线分发）' || echo '排除（在线下载）')"
 echo "    产物: $ZIP_PATH"
 
-# 用 (cd 父目录) 保证 zip 内顶层是 loongsuite-pilot-installer/
-EX_ARGS=()
-for e in "${EXCLUDES[@]}"; do EX_ARGS+=( -x "$PLUGIN_NAME/$e" ); done
-( cd "$(dirname "$PLUGIN_DIR")" && zip -r -q "$ZIP_PATH" "$PLUGIN_NAME" "${EX_ARGS[@]}" )
-
-# 现场生成一个空插件 __empty__/ 一并打入(不入仓,仅存在于 zip):zip 顶层因此有两个插件
-EMPTY_PLUGIN_NAME="__empty__"
+# 先把插件拷进版本目录 loongsuite-pilot-installer-<version>/loongsuite-pilot-installer/，
+# 再从 staging 打包，保证 zip 内顶层是版本目录（任意解压器都得到统一的版本目录）。
+WRAP_NAME="${PLUGIN_NAME}-${VERSION}"
 STAGE_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGE_DIR"' EXIT
-mkdir -p "$STAGE_DIR/$EMPTY_PLUGIN_NAME/.qoder-plugin"
-cat > "$STAGE_DIR/$EMPTY_PLUGIN_NAME/.qoder-plugin/plugin.json" <<EOF
-{
-  "name": "$EMPTY_PLUGIN_NAME",
-  "version": "0.0.0",
-  "description": "占位空插件",
-  "author": { "name": "loongsuite" },
-  "license": "MIT"
-}
-EOF
-echo "    附带空插件: $EMPTY_PLUGIN_NAME/"
-( cd "$STAGE_DIR" && zip -r -q "$ZIP_PATH" "$EMPTY_PLUGIN_NAME" )
+mkdir -p "$STAGE_DIR/$WRAP_NAME"
+
+RSYNC_EXCLUDES=( --exclude='.DS_Store'
+    --exclude='install.log' --exclude='install.lock'
+    --exclude='install-args.sha256' --exclude='installer.sh' --exclude='installer.ps1' )
+if [ "$WITH_NODE" -eq 0 ]; then
+    RSYNC_EXCLUDES+=( --exclude='vendor/node' )
+fi
+rsync -a "${RSYNC_EXCLUDES[@]}" "$PLUGIN_DIR" "$STAGE_DIR/$WRAP_NAME/"
+
+( cd "$STAGE_DIR" && zip -r -q "$ZIP_PATH" "$WRAP_NAME" )
 
 echo "==> 完成。内容清单："
 unzip -l "$ZIP_PATH"
