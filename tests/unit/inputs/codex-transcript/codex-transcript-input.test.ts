@@ -362,6 +362,7 @@ describe('CodexTranscriptInput', () => {
       threadSource: 'subagent',
       parentThreadId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       depth: 1,
+      createdAtMs: Date.parse('2026-08-07T02:00:04.100Z'),
       agentPath: '/root/fixture_child',
       agentNickname: 'FixtureChild',
       provider: 'openai',
@@ -402,7 +403,21 @@ describe('CodexTranscriptInput', () => {
       expect(transcriptCheckpoint(stateStore, childTranscripts.get(fixture.threadId)!)).toMatchObject({
         ownerSessionMetaOffset: 0,
       });
+      expect(childEntries.every(entry => entry['gen_ai.agent.scope'] === undefined)).toBe(true);
     }
+    expect(input.getSubagentLinkSnapshot()).toMatchObject({
+      detectedChildren: 4,
+      detectedSpawns: 4,
+      linkedChildren: 4,
+      orphanChildren: 0,
+      links: CHILD_FIXTURES.map((fixture, index) => expect.objectContaining({
+        childThreadId: fixture.threadId,
+        parentThreadId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        parentTurnId: 'parent-turn-1',
+        parentToolCallId: `call-subagent-${index + 1}`,
+        confidence: 'agent_path',
+      })),
+    });
   });
 
   it('rebuilds owning metadata instead of trusting a legacy latest-meta checkpoint', async () => {

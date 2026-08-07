@@ -36,6 +36,7 @@ export function extractCodexTranscriptMeta(record: Record<string, unknown>): Cod
   const depth = rawDepth !== undefined && rawDepth >= 0
     ? Math.trunc(rawDepth)
     : threadSource === 'subagent' ? 1 : 0;
+  const createdAtMs = timestampMs(payload, timestampMs(record, Number.NaN));
   const baseInstructions = readInstructionText(payload.base_instructions);
   const toolDefinitions = Array.isArray(payload.dynamic_tools)
     ? toJsonValue(payload.dynamic_tools)
@@ -46,6 +47,7 @@ export function extractCodexTranscriptMeta(record: Record<string, unknown>): Cod
     threadSource,
     ...(parentThreadId ? { parentThreadId } : {}),
     depth,
+    ...(Number.isFinite(createdAtMs) ? { createdAtMs } : {}),
     ...(agentPath ? { agentPath } : {}),
     ...(agentNickname ? { agentNickname } : {}),
     ...(agentRole ? { agentRole } : {}),

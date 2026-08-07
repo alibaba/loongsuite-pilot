@@ -13,6 +13,11 @@ import {
   nextInputMessagesForStep,
 } from './codex-transcript-builder.js';
 import {
+  CodexSubagentLinker,
+  extractCodexSpawnDescriptors,
+  type CodexSubagentLinkSnapshot,
+} from './codex-subagent-linker.js';
+import {
   extractCodexPartialTurn,
   extractCodexPartialTurnWithBoundaries,
   extractCodexTranscriptMeta,
@@ -129,6 +134,9 @@ export class CodexTranscriptInput extends BaseInput {
   private processedTerminalTurnIdsDirty = false;
   private processedTerminalTurnIds = new Set<string>();
   private processedTerminalTurnIdOrder: string[] = [];
+  private readonly subagentLinker = new CodexSubagentLinker();
+  private readonly reportedSubagentLinks = new Map<string, string>();
+  private lastSubagentShadowSummary = '';
   private lastWakeupMarkerCleanupAtMs = 0;
   private lastSpanContextCleanupAtMs = 0;
 
@@ -184,10 +192,16 @@ export class CodexTranscriptInput extends BaseInput {
     for (const { filePath } of await this.discoverSessionFiles()) {
       emittedCount += await this.processFile(filePath);
     }
+    this.reportSubagentShadowLinks();
     if (emittedCount > 0) {
       this.logger.debug('cycle produced entries', { count: emittedCount });
     }
     return [];
+  }
+
+  /** Phase-2 diagnostic surface. Shadow linking never mutates emitted records. */
+  getSubagentLinkSnapshot(): CodexSubagentLinkSnapshot {
+    return this.subagentLinker.snapshot();
   }
 
   private emitEntryBatches(entries: AgentActivityEntry[]): number {
@@ -248,6 +262,7 @@ export class CodexTranscriptInput extends BaseInput {
       checkpoint.ownerSessionMetaOffset = await findOwnerSessionMetaOffset(filePath, stat.size);
       checkpointChanged = true;
     }
+    await this.registerSubagentOwnerMeta(filePath, checkpoint.ownerSessionMetaOffset);
 
     let emittedCount = 0;
     let processedTerminalCount = 0;
@@ -490,6 +505,14 @@ export class CodexTranscriptInput extends BaseInput {
       ...(inputContext ? { inputContext } : {}),
       contextStepCount: committedTurn.steps.length,
     });
+    if (meta?.depth === 0) {
+      const parentTraceId = stringValue(built.entries[0]?.trace_id);
+      if (parentTraceId) {
+        this.subagentLinker.registerSpawns(
+          extractCodexSpawnDescriptors(turn, records.items, parentTraceId),
+        );
+      }
+    }
     const readyEntries = built.entries;
     const entries = this.filterNewSegmentEntries(readyEntries, activeTurn);
     const diagnostics: SegmentRecoveryDiagnostics = {
@@ -590,6 +613,58 @@ export class CodexTranscriptInput extends BaseInput {
       return context;
     }
     return { ...context, delta: nextInputMessagesForStep(lastStep) };
+  }
+
+  private async registerSubagentOwnerMeta(
+    filePath: string,
+    ownerSessionMetaOffset: number | null,
+  ): Promise<void> {
+    if (ownerSessionMetaOffset === null) return;
+    const threadId = sessionIdFromTranscriptPath(filePath);
+    if (this.subagentLinker.hasThread(threadId)) return;
+    const record = await readJsonLineAt(filePath, ownerSessionMetaOffset);
+    const meta = record ? extractCodexTranscriptMeta(record) : null;
+    if (meta) this.subagentLinker.registerChild(meta);
+  }
+
+  private reportSubagentShadowLinks(): void {
+    const snapshot = this.subagentLinker.snapshot();
+    if (snapshot.detectedChildren === 0 && snapshot.detectedSpawns === 0) return;
+
+    const summary = [
+      snapshot.detectedChildren,
+      snapshot.detectedSpawns,
+      snapshot.linkedChildren,
+      snapshot.orphanChildren,
+    ].join(':');
+    if (summary !== this.lastSubagentShadowSummary) {
+      this.lastSubagentShadowSummary = summary;
+      this.logger.info('Codex subagent linker shadow summary', {
+        detectedChildren: snapshot.detectedChildren,
+        detectedSpawns: snapshot.detectedSpawns,
+        linkedChildren: snapshot.linkedChildren,
+        orphanChildren: snapshot.orphanChildren,
+      });
+    }
+
+    for (const link of snapshot.links) {
+      const fingerprint = [
+        link.confidence,
+        link.parentToolCallId ?? '',
+        link.orphanReason ?? '',
+      ].join(':');
+      if (this.reportedSubagentLinks.get(link.childThreadId) === fingerprint) continue;
+      this.reportedSubagentLinks.set(link.childThreadId, fingerprint);
+      this.logger.debug('Codex subagent shadow link resolved', {
+        childThreadId: link.childThreadId,
+        parentThreadId: link.parentThreadId,
+        parentTurnId: link.parentTurnId,
+        parentToolCallId: link.parentToolCallId,
+        agentPath: link.agentPath,
+        confidence: link.confidence,
+        orphanReason: link.orphanReason,
+      });
+    }
   }
 
   private filterNewSegmentEntries(

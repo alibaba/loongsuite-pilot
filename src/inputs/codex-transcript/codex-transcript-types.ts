@@ -80,6 +80,7 @@ export interface CodexTranscriptMeta {
   threadSource: 'user' | 'subagent' | 'unknown';
   parentThreadId?: string;
   depth: number;
+  createdAtMs?: number;
   agentPath?: string;
   agentNickname?: string;
   agentRole?: string;
