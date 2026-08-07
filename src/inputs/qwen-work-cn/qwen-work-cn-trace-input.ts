@@ -13,6 +13,10 @@ import { getInterceptFile, readInterceptFile, type InterceptData, type Intercept
 const NANO_PER_MILLI = 1_000_000n;
 const SEGMENT_TIMING_TOLERANCE_MS = 5 * 60 * 1000;
 const SEGMENT_STATE_TTL_MS = 60 * 60 * 1000;
+const HOOK_OFFSET_MAP_KEY = 'hookLogOffsets';
+const MAX_HOOK_READ_BYTES = 16 * 1024 * 1024;
+
+type HookOffsetMap = Record<string, number>;
 
 /**
  * Independent QwenWorkCN trace collector.
@@ -102,36 +106,78 @@ export class QwenWorkCNTraceInput extends BaseInput {
   }
 
   private async readHookJsonl(): Promise<AgentActivityEntry[]> {
-    const logFileName = `qwen-work-cn-${getTodayDateString()}.jsonl`;
-    const logFile = path.join(this.logDir, logFileName);
+    const today = getTodayDateString();
+    const state = this.getState();
+    const fileNames = await this.listHookFiles();
+    if (fileNames.length === 0) return [];
+
+    const persistedOffsets = this.getHookOffsetMap(state.extra?.[HOOK_OFFSET_MAP_KEY]);
+    const offsets = persistedOffsets
+      ? { ...persistedOffsets }
+      : await this.seedHookOffsets(fileNames, state.lastFile, state.lastOffset, today);
+    const candidates = await this.getHookCandidates(fileNames, offsets);
+    const entries: AgentActivityEntry[] = [];
+
+    for (const fileName of candidates) {
+      const result = await this.readHookFile(fileName, offsets[fileName] ?? 0);
+      offsets[fileName] = result.offset;
+      entries.push(...result.entries);
+    }
+
+    const liveFiles = new Set(fileNames);
+    const prunedOffsets: HookOffsetMap = {};
+    for (const [fileName, offset] of Object.entries(offsets)) {
+      if (liveFiles.has(fileName)) prunedOffsets[fileName] = offset;
+    }
+
+    const checkpointFile = candidates[candidates.length - 1] ?? fileNames[fileNames.length - 1];
+    if (checkpointFile && (
+      !persistedOffsets
+      || state.lastFile !== checkpointFile
+      || state.lastOffset !== (prunedOffsets[checkpointFile] ?? 0)
+      || !this.sameHookOffsets(persistedOffsets, prunedOffsets)
+    )) {
+      this.setState({
+        lastFile: checkpointFile,
+        lastOffset: prunedOffsets[checkpointFile] ?? 0,
+        extra: {
+          ...(state.extra ?? {}),
+          [HOOK_OFFSET_MAP_KEY]: prunedOffsets,
+        },
+      });
+    }
+    return entries;
+  }
+
+  private async readHookFile(
+    fileName: string,
+    startOffset: number,
+  ): Promise<{ entries: AgentActivityEntry[]; offset: number }> {
+    const logFile = path.join(this.logDir, fileName);
     let stat;
     try {
       stat = await fs.stat(logFile);
     } catch {
-      return [];
+      return { entries: [], offset: startOffset };
     }
 
-    const state = this.getState();
-    let offset = state.lastFile === logFileName ? (state.lastOffset ?? 0) : 0;
+    let offset = startOffset;
     if (offset > 0 && stat.size < offset) offset = 0;
-    if (stat.size <= offset) return [];
+    if (stat.size <= offset) return { entries: [], offset: stat.size };
 
     const handle = await fs.open(logFile, 'r');
     const entries: AgentActivityEntry[] = [];
     try {
-      const readSize = Math.min(stat.size - offset, 16 * 1024 * 1024);
+      const readSize = Math.min(stat.size - offset, MAX_HOOK_READ_BYTES);
       const buffer = Buffer.alloc(readSize);
-      await handle.read(buffer, 0, readSize, offset);
-      let text = buffer.toString('utf-8');
-      let consumedBytes = readSize;
-      if (readSize < stat.size - offset) {
-        const lastNewLine = text.lastIndexOf('\n');
-        if (lastNewLine >= 0) {
-          text = text.substring(0, lastNewLine);
-          consumedBytes = Buffer.byteLength(text, 'utf-8') + 1;
-        }
-      }
-      this.setState({ lastFile: logFileName, lastOffset: offset + consumedBytes });
+      const { bytesRead } = await handle.read(buffer, 0, readSize, offset);
+      const chunk = buffer.subarray(0, bytesRead);
+      // Never advance beyond a complete JSONL row. This also protects a UTF-8
+      // sequence split at the read boundary because decoding stops at '\n'.
+      const lastNewLine = chunk.lastIndexOf(0x0a);
+      if (lastNewLine < 0) return { entries, offset };
+      const consumedBytes = lastNewLine + 1;
+      const text = chunk.subarray(0, lastNewLine).toString('utf-8');
       for (const line of text.split('\n')) {
         if (!line.trim()) continue;
         try {
@@ -141,10 +187,86 @@ export class QwenWorkCNTraceInput extends BaseInput {
           this.logger.warn('invalid QwenWorkCN history JSONL line');
         }
       }
+      return { entries, offset: offset + consumedBytes };
     } finally {
       await handle.close();
     }
-    return entries;
+  }
+
+  private async listHookFiles(): Promise<string[]> {
+    let fileNames: string[];
+    try {
+      fileNames = await fs.readdir(this.logDir);
+    } catch {
+      return [];
+    }
+    return fileNames
+      .filter(fileName => /^qwen-work-cn-\d{4}-\d{2}-\d{2}\.jsonl$/.test(fileName))
+      .sort();
+  }
+
+  private async getHookCandidates(fileNames: string[], offsets: HookOffsetMap): Promise<string[]> {
+    const candidates: string[] = [];
+    for (const fileName of fileNames) {
+      try {
+        const size = (await fs.stat(path.join(this.logDir, fileName))).size;
+        // A greater offset means the file was truncated/replaced and must be
+        // replayed from zero. A smaller offset means it still has unread data.
+        if ((offsets[fileName] ?? 0) !== size) candidates.push(fileName);
+      } catch {
+        // A concurrently rotated file will be retried if it reappears.
+      }
+    }
+    return candidates;
+  }
+
+  private getHookOffsetMap(raw: unknown): HookOffsetMap | null {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const offsets: HookOffsetMap = {};
+    for (const [fileName, offset] of Object.entries(raw)) {
+      if (typeof offset === 'number' && Number.isFinite(offset) && offset >= 0) {
+        offsets[fileName] = offset;
+      }
+    }
+    return Object.keys(offsets).length > 0 ? offsets : null;
+  }
+
+  private async seedHookOffsets(
+    fileNames: string[],
+    lastFile: string | undefined,
+    lastOffset: number | undefined,
+    today: string,
+  ): Promise<HookOffsetMap> {
+    const offsets: HookOffsetMap = {};
+    for (const fileName of fileNames) {
+      try {
+        offsets[fileName] = (await fs.stat(path.join(this.logDir, fileName))).size;
+      } catch {
+        offsets[fileName] = 0;
+      }
+    }
+
+    if (lastFile && fileNames.includes(lastFile)) {
+      // Legacy checkpoint migration: resume the checkpoint file, baseline
+      // older history, and consume every date file created after it. This
+      // preserves data across multi-day downtime, not only one midnight.
+      offsets[lastFile] = lastOffset ?? 0;
+      for (const fileName of fileNames) {
+        if (fileName > lastFile) offsets[fileName] = 0;
+      }
+    } else {
+      // True cold start follows the existing no-replay policy.
+      const todayFile = `qwen-work-cn-${today}.jsonl`;
+      if (fileNames.includes(todayFile)) offsets[todayFile] = 0;
+    }
+    return offsets;
+  }
+
+  private sameHookOffsets(left: HookOffsetMap, right: HookOffsetMap): boolean {
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+    return leftKeys.length === rightKeys.length
+      && rightKeys.every(fileName => left[fileName] === right[fileName]);
   }
 
   private collectSessionCwd(entries: AgentActivityEntry[]): Map<string, string> {

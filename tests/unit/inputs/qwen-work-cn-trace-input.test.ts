@@ -171,10 +171,56 @@ describe('QwenWorkCNTraceInput', () => {
     const response = entries.find(value => value['event.id'] === 'response')!;
     expect(response['gen_ai.usage.input_tokens']).toBeUndefined();
   });
+
+  it('drains every file after a legacy checkpoint across multi-day rollover without replay', async () => {
+    const oldFile = datedFile(-2);
+    const middleFile = datedFile(-1);
+    const consumed = entry({ 'event.id': 'old-consumed', 'event.name': 'other' });
+    const pending = entry({ 'event.id': 'old-pending', 'event.name': 'other' });
+    const middle = entry({ 'event.id': 'middle-new', 'event.name': 'other' });
+    const current = entry({ 'event.id': 'today-new', 'event.name': 'other' });
+    const consumedLine = `${JSON.stringify(consumed)}\n`;
+    await fs.writeFile(path.join(historyDir, oldFile), `${consumedLine}${JSON.stringify(pending)}\n`);
+    await fs.writeFile(path.join(historyDir, middleFile), `${JSON.stringify(middle)}\n`);
+    await fs.writeFile(path.join(historyDir, todayFile()), `${JSON.stringify(current)}\n`);
+    stateStore.update('qwen-work-cn-trace', {
+      lastFile: oldFile,
+      lastOffset: Buffer.byteLength(consumedLine),
+    });
+
+    const first = await collectOnce(makeInput());
+    expect(first.map(value => value['event.id'])).toEqual(['old-pending', 'middle-new', 'today-new']);
+    expect(stateStore.get('qwen-work-cn-trace').extra?.hookLogOffsets).toMatchObject({
+      [oldFile]: (await fs.stat(path.join(historyDir, oldFile))).size,
+      [middleFile]: (await fs.stat(path.join(historyDir, middleFile))).size,
+      [todayFile()]: (await fs.stat(path.join(historyDir, todayFile()))).size,
+    });
+
+    const second = await collectOnce(makeInput());
+    expect(second).toEqual([]);
+  });
+
+  it('does not checkpoint an incomplete final JSONL row', async () => {
+    const record = entry({ 'event.id': 'completed-later', 'event.name': 'other' });
+    const logFile = path.join(historyDir, todayFile());
+    await fs.writeFile(logFile, JSON.stringify(record));
+
+    expect(await collectOnce(makeInput())).toEqual([]);
+    expect((stateStore.get('qwen-work-cn-trace').extra?.hookLogOffsets as Record<string, number>)[todayFile()])
+      .toBe(0);
+
+    await fs.appendFile(logFile, '\n');
+    expect((await collectOnce(makeInput())).map(value => value['event.id'])).toEqual(['completed-later']);
+  });
 });
 
 function todayFile(): string {
+  return datedFile(0);
+}
+
+function datedFile(dayOffset: number): string {
   const date = new Date();
+  date.setDate(date.getDate() + dayOffset);
   const day = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
   return `qwen-work-cn-${day}.jsonl`;
 }

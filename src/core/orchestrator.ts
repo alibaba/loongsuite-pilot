@@ -976,6 +976,29 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // Keep the standalone Hook listener as an explicit fallback when the
+    // richer trace merger is disabled. This mirrors the QoderWorkCN lifecycle
+    // and makes the qwen-work-cn-hook listener setting effective.
+    const qwenWorkCNHookInput = new QwenWorkCNInput({
+      stateStore: this.stateStore,
+      logDir: qwenWorkCNLogDir,
+      pollIntervalMs: listenerCfg['qwen-work-cn-hook']?.pollInterval,
+    });
+    this.inputManager.registerInput(qwenWorkCNHookInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(qwenWorkCNHookInput, {
+        watchPaths: [qwenWorkCNLogDir],
+        isAvailable: QwenWorkCNInput.checkAvailability,
+        enabled: () => !qwenWorkCNTraceEnabled() &&
+          this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qwen-work-cn-hook']) &&
+          this.agentControlManager.resolveEnabled(
+            'qwen-work-cn-hook',
+            listenerCfg['qwen-work-cn-hook']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['qwen-work-cn-hook']?.pollInterval,
+      }),
+    );
+
     const qwenWorkCNSqliteInput = new QwenWorkCNSqliteInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(qwenWorkCNSqliteInput);
     entries.push(
