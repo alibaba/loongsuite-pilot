@@ -1791,8 +1791,10 @@ remove_hook_configs() {
         "$HOME/.qoder-cn/settings.json"
         "$HOME/.qoderwork/settings.json"
         "$HOME/.qoderworkcn/settings.json"
+        "$HOME/.qwenworkcn/settings.json"
         "$HOME/.claude/settings.json"
         "$HOME/.codex/hooks.json"
+        "$HOME/.kiro/agents/pilot-kiro.json"
         "$HOME/.qwen/settings.json"
         "$HOME/.workbuddy/settings.json"
     )

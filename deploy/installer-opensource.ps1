@@ -1096,7 +1096,9 @@ function Remove-HookConfigs {
         (Join-Path $env:USERPROFILE ".qoder-cn\settings.json"),
         (Join-Path $env:USERPROFILE ".qoderwork\settings.json"),
         (Join-Path $env:USERPROFILE ".qoderworkcn\settings.json"),
+        (Join-Path $env:USERPROFILE ".qwenworkcn\settings.json"),
         (Join-Path $env:USERPROFILE ".claude\settings.json"),
+        (Join-Path $env:USERPROFILE ".kiro\agents\pilot-kiro.json"),
         (Join-Path $env:USERPROFILE ".qwen\settings.json"),
         (Join-Path $env:USERPROFILE ".workbuddy\settings.json")
     )
