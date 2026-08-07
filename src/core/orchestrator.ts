@@ -947,9 +947,14 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- QwenWorkCN Trace: independent hook + segments + token intercept merge ---
+    const qwenWorkCNLogDir = path.join(this.dataDir, 'logs', 'qwen-work-cn', 'history');
+    const qwenWorkCNSegmentsRoot = resolveHome('~/.qwenworkcn/logs/sessions');
+    const qwenWorkCNInterceptFile = path.join(this.dataDir, 'logs', 'qwenworkcn-intercept.jsonl');
     const qwenWorkCNTraceInput = new QwenWorkCNTraceInput({
       stateStore: this.stateStore,
-      logDir: path.join(this.dataDir, 'logs', 'qwen-work-cn', 'history'),
+      logDir: qwenWorkCNLogDir,
+      segmentsRoot: qwenWorkCNSegmentsRoot,
+      interceptFile: qwenWorkCNInterceptFile,
     });
     this.inputManager.registerInput(qwenWorkCNTraceInput);
     const qwenWorkCNTraceEnabled = () =>
@@ -960,7 +965,11 @@ export class Orchestrator extends EventEmitter {
       );
     entries.push(
       this.inputManager.buildDetectionEntry(qwenWorkCNTraceInput, {
-        watchPaths: QwenWorkCNTraceInput.getWatchPaths(),
+        watchPaths: QwenWorkCNTraceInput.getWatchPaths({
+          logDir: qwenWorkCNLogDir,
+          segmentsRoot: qwenWorkCNSegmentsRoot,
+          interceptFile: qwenWorkCNInterceptFile,
+        }),
         isAvailable: QwenWorkCNTraceInput.checkAvailability,
         enabled: qwenWorkCNTraceEnabled,
         pollIntervalMs: listenerCfg['qwen-work-cn-trace']?.pollInterval,

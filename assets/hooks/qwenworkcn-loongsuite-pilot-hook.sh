@@ -4,6 +4,8 @@ set -euo pipefail
 [[ -t 0 ]] && exit 0
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROCESSOR="$HOOKS_DIR/qwen-work-cn-hook-processor.mjs"
+PILOT_DATA_DIR="$(cd "$HOOKS_DIR/.." && pwd)"
+export LOONGSUITE_PILOT_DATA_DIR="$PILOT_DATA_DIR"
 [[ -f "$PROCESSOR" ]] || exit 0
 
 NODE_BIN=""

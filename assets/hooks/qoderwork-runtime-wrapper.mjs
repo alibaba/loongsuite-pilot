@@ -27,9 +27,13 @@ import { fileURLToPath } from 'url';
 const require = createRequire(import.meta.url);
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 
-const INTERCEPT_DIR = path.join(os.homedir(), '.loongsuite-pilot', 'logs');
+// The installer deploys this file at <dataDir>/hooks. Deriving the data root
+// from the loaded wrapper keeps GUI workers aligned with the orchestrator even
+// when no shell environment is inherited and dataDir is customized.
+const WRAPPER_PATH = fileURLToPath(import.meta.url);
+const PILOT_DATA_DIR = path.dirname(path.dirname(WRAPPER_PATH));
+const INTERCEPT_DIR = path.join(PILOT_DATA_DIR, 'logs');
 const ERROR_LOG = path.join(INTERCEPT_DIR, 'qoderwork-wrapper-error.log');
 const MIN_SYSTEM_PROMPT_LENGTH = 100;
 

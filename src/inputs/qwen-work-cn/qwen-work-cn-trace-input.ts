@@ -46,11 +46,11 @@ export class QwenWorkCNTraceInput extends BaseInput {
     return directoryExists(resolveHome('~/.qwenworkcn'));
   }
 
-  static getWatchPaths(): string[] {
+  static getWatchPaths(opts: QwenWorkCNTraceWatchPaths = {}): string[] {
     return [
-      resolveHome('~/.loongsuite-pilot/logs/qwen-work-cn/history'),
-      resolveHome('~/.qwenworkcn/logs/sessions'),
-      getInterceptFile('qwenworkcn-intercept.jsonl'),
+      opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qwen-work-cn/history'),
+      opts.segmentsRoot ?? resolveHome('~/.qwenworkcn/logs/sessions'),
+      opts.interceptFile ?? getInterceptFile('qwenworkcn-intercept.jsonl'),
     ];
   }
 
@@ -506,6 +506,11 @@ export interface QwenWorkCNTraceInputOptions extends InputOptions {
   segmentsRoot?: string;
   interceptFile?: string;
 }
+
+export type QwenWorkCNTraceWatchPaths = Pick<
+  QwenWorkCNTraceInputOptions,
+  'logDir' | 'segmentsRoot' | 'interceptFile'
+>;
 
 interface SegmentEvent {
   ts?: string;

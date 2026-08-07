@@ -1,5 +1,8 @@
 $ErrorActionPreference = "Continue"
-$Processor = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "qwen-work-cn-hook-processor.mjs"
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Processor = Join-Path $ScriptDir "qwen-work-cn-hook-processor.mjs"
+$PilotDataDir = Split-Path -Parent $ScriptDir
+$env:LOONGSUITE_PILOT_DATA_DIR = $PilotDataDir
 if (-not [Console]::IsInputRedirected) { exit 0 }
 if (-not (Test-Path $Processor)) { exit 0 }
 $NodeBin = (Get-Command node -ErrorAction SilentlyContinue).Source

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { cpSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -14,7 +14,9 @@ describe.skipIf(!transcript)('QwenWorkCN real transcript pipeline', () => {
   });
 
   it('maps a local QwenWorkCN transcript through the dedicated hook entrypoint', () => {
-    const hookEntrypoint = path.resolve('assets/hooks/qwenworkcn-loongsuite-pilot-hook.sh');
+    const hooksDir = path.join(outputRoot!, 'hooks');
+    deployQwenHooks(hooksDir);
+    const hookEntrypoint = path.join(hooksDir, 'qwenworkcn-loongsuite-pilot-hook.sh');
     const sessionId = path.basename(transcript!, '.jsonl');
     const result = spawnSync('bash', [hookEntrypoint], {
       input: JSON.stringify({
@@ -27,6 +29,7 @@ describe.skipIf(!transcript)('QwenWorkCN real transcript pipeline', () => {
       env: { ...process.env, NODE_ENV: 'production', LOONGSUITE_PILOT_DATA_DIR: outputRoot! },
     });
     expect(result.status).toBe(0);
+    expect(result.stdout, result.stderr).toContain('{}');
 
     const historyDir = path.join(outputRoot!, 'logs', 'qwen-work-cn', 'history');
     const historyFile = readdirSync(historyDir).find(name => name.endsWith('.jsonl'));
@@ -54,4 +57,17 @@ function findTranscript(root: string): string | undefined {
   return candidates
     .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs)
     .find(file => readFileSync(file, 'utf-8').includes('"type":"user"'));
+}
+
+function deployQwenHooks(hooksDir: string): void {
+  const sourceDir = path.resolve('assets', 'hooks');
+  mkdirSync(hooksDir, { recursive: true });
+  for (const file of [
+    'qwenworkcn-loongsuite-pilot-hook.sh',
+    'qwen-work-cn-hook-processor.mjs',
+    'agent-event-normalizer.mjs',
+  ]) {
+    copyFileSync(path.join(sourceDir, file), path.join(hooksDir, file));
+  }
+  cpSync(path.join(sourceDir, 'shared'), path.join(hooksDir, 'shared'), { recursive: true });
 }

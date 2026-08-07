@@ -77,6 +77,11 @@ describe('QwenWorkCNTraceInput', () => {
       expect.stringContaining('.qwenworkcn/logs/sessions'),
       expect.stringContaining('qwenworkcn-intercept.jsonl'),
     ]));
+    expect(QwenWorkCNTraceInput.getWatchPaths({
+      logDir: historyDir,
+      segmentsRoot,
+      interceptFile,
+    })).toEqual([historyDir, segmentsRoot, interceptFile]);
   });
 
   it('enriches zero-token Qwen segments from qwenworkcn-intercept by response id', async () => {
