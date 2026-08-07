@@ -290,8 +290,30 @@ export class CodexTranscriptInput extends BaseInput {
 
     const ownerMeta = this.transcriptMetaByPath.get(filePath) ?? null;
     const isDirectSubagent = ownerMeta?.threadSource === 'subagent' && ownerMeta.depth === 1;
+    if (
+      isDirectSubagent
+      && checkpoint.pendingSubagent
+      && checkpoint.activeTurn
+      && ownerMeta?.createdAtMs !== undefined
+      && isCopiedParentTurn(
+        checkpoint.pendingSubagent.turnId,
+        checkpoint.activeTurn.startedAtMs,
+        ownerMeta.createdAtMs,
+      )
+    ) {
+      checkpoint.pendingSubagent = null;
+      checkpoint.activeTurn = null;
+      checkpointChanged = true;
+    }
+    if (checkpoint.pendingFusion) {
+      const pruned = pruneSupersededFusionChildren(checkpoint.pendingFusion.children);
+      if (pruned.length !== checkpoint.pendingFusion.children.length) {
+        checkpoint.pendingFusion.children = pruned;
+        if (checkpoint.activeTurn) checkpoint.activeTurn.subagentSpawns = pruned;
+        checkpointChanged = true;
+      }
+    }
     if (ownerMeta?.depth === 0) this.registerPersistedSubagentSpawns(checkpoint, ownerMeta.threadId);
-
     if (checkpoint.pendingFusion || checkpoint.pendingSubagent) {
       if (checkpointChanged) this.saveCheckpoint(key, checkpoint);
       return 0;
@@ -383,7 +405,11 @@ export class CodexTranscriptInput extends BaseInput {
             isDirectSubagent
             && terminalTurnId
             && ownerMeta?.createdAtMs !== undefined
-            && checkpoint.activeTurn.startedAtMs < ownerMeta.createdAtMs
+            && isCopiedParentTurn(
+              terminalTurnId,
+              checkpoint.activeTurn.startedAtMs,
+              ownerMeta.createdAtMs,
+            )
           ) {
             // Forked child rollouts contain copied parent history after their
             // owning session_meta. It must not become the child's pending turn.
@@ -600,16 +626,17 @@ export class CodexTranscriptInput extends BaseInput {
       if (parentTraceId) {
         const spawns = extractCodexSpawnDescriptors(turn, records.items, parentTraceId);
         this.subagentLinker.registerSpawns(spawns);
+        const fusionChildren = spawns.map(spawn => ({
+          parentToolCallId: spawn.parentToolCallId,
+          parentTraceId: spawn.parentTraceId,
+          spawnedAtMs: spawn.spawnedAtMs,
+          ...(spawn.taskName ? { taskName: spawn.taskName } : {}),
+          ...(spawn.agentPath ? { agentPath: spawn.agentPath } : {}),
+          ...(spawn.childThreadId ? { childThreadId: spawn.childThreadId } : {}),
+        }));
         activeTurn.subagentSpawns = mergePendingFusionChildren(
           activeTurn.subagentSpawns ?? [],
-          spawns.map(spawn => ({
-            parentToolCallId: spawn.parentToolCallId,
-            parentTraceId: spawn.parentTraceId,
-            spawnedAtMs: spawn.spawnedAtMs,
-            ...(spawn.taskName ? { taskName: spawn.taskName } : {}),
-            ...(spawn.agentPath ? { agentPath: spawn.agentPath } : {}),
-            ...(spawn.childThreadId ? { childThreadId: spawn.childThreadId } : {}),
-          })),
+          fusionChildren,
         );
       }
     }
@@ -1802,6 +1829,43 @@ function mergePendingFusionChildren(
     merged.set(child.parentToolCallId, { ...merged.get(child.parentToolCallId), ...child });
   }
   return [...merged.values()];
+}
+
+function pruneSupersededFusionChildren(
+  children: CodexPendingFusionChild[],
+): CodexPendingFusionChild[] {
+  const successfulPaths = new Set(children
+    .filter(child => child.childThreadId)
+    .map(child => normalizeFusionAgentPath(child.agentPath ?? child.taskName))
+    .filter((value): value is string => value !== undefined));
+  return children.filter(child => (
+    child.childThreadId
+    || !successfulPaths.has(normalizeFusionAgentPath(child.agentPath ?? child.taskName) ?? '')
+  ));
+}
+
+function normalizeFusionAgentPath(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim().replace(/\/+$/, '');
+  if (!trimmed) return undefined;
+  return trimmed.startsWith('/') ? trimmed : `/root/${trimmed.replace(/^root\//, '')}`;
+}
+
+function isCopiedParentTurn(
+  turnId: string,
+  observedStartedAtMs: number,
+  ownerCreatedAtMs: number,
+): boolean {
+  const uuidTimestamp = uuidV7TimestampMs(turnId);
+  return (uuidTimestamp ?? observedStartedAtMs) < ownerCreatedAtMs;
+}
+
+function uuidV7TimestampMs(value: string): number | undefined {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    return undefined;
+  }
+  const timestamp = Number.parseInt(value.replace(/-/g, '').slice(0, 12), 16);
+  return Number.isSafeInteger(timestamp) ? timestamp : undefined;
 }
 
 function cloneActiveTurn(activeTurn: CodexActiveTranscriptTurn): CodexActiveTranscriptTurn {

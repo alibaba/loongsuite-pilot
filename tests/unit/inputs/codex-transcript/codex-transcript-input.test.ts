@@ -549,6 +549,27 @@ describe('CodexTranscriptInput', () => {
     await waitFor(() => Boolean(transcriptCheckpoint(first.stateStore, parentTranscript)?.pendingFusion));
     await first.input.stop();
 
+    const parentKey = `codex-transcript:${parentTranscript}`;
+    const persisted = first.stateStore.get(parentKey);
+    const codexTranscript = structuredClone(persisted.extra?.codexTranscript) as Record<string, unknown>;
+    const rejectedSpawn = {
+      parentToolCallId: 'call-rejected-before-restart',
+      parentTraceId: 'stale-trace',
+      spawnedAtMs: 1,
+      taskName: 'fixture_child',
+    };
+    const pendingFusion = codexTranscript.pendingFusion as { children: unknown[] };
+    const activeTurn = codexTranscript.activeTurn as { subagentSpawns: unknown[] };
+    Object.assign(pendingFusion.children[0] as object, { childThreadId: CHILD_FIXTURES[0].threadId });
+    Object.assign(activeTurn.subagentSpawns[0] as object, { childThreadId: CHILD_FIXTURES[0].threadId });
+    pendingFusion.children.push(rejectedSpawn);
+    activeTurn.subagentSpawns.push(rejectedSpawn);
+    first.stateStore.update(parentKey, {
+      lastOffset: persisted.lastOffset,
+      extra: { ...(persisted.extra ?? {}), codexTranscript },
+    });
+    await first.stateStore.save();
+
     for (const fixture of CHILD_FIXTURES) {
       const text = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, fixture.name), 'utf8');
       await writeTranscriptNamed(first.sessionDir, fixture.name, text);
@@ -609,6 +630,40 @@ describe('CodexTranscriptInput', () => {
       pendingSubagent: {
         turnId: 'child-turn-1',
       },
+    });
+  });
+
+  it('skips copied parent terminals whose line timestamps were rewritten at fork time', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-rewritten-time-'));
+    tempDirs.push(root);
+    const { input, sessionDir, stateStore } = await createInput(root);
+    const fixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const parentTurnId = '019fdb63-2fc6-7491-9895-8c8f86a8bcab';
+    const childTurnId = '019fdb63-714b-7c72-9c8c-c2e40d9c9111';
+    const lines = fixture.trimEnd().split('\n').map((line, index) => {
+      const parsed = JSON.parse(line) as { timestamp: string; payload: Record<string, unknown> };
+      if (index === 0) {
+        parsed.timestamp = '2026-08-07T08:42:35.146Z';
+        parsed.payload.timestamp = parsed.timestamp;
+        parsed.payload.id = '019fdb63-710a-7131-978c-6a6ee744fff9';
+      }
+      if (index >= 1 && index <= 8) parsed.timestamp = '2026-08-07T08:42:35.204Z';
+      return JSON.stringify(parsed)
+        .replaceAll('parent-turn-1', parentTurnId)
+        .replaceAll('child-turn-1', childTurnId);
+    });
+    const transcript = await writeTranscriptNamed(
+      sessionDir,
+      CHILD_FIXTURE_NAME,
+      lines.join('\n') + '\n',
+    );
+
+    await waitFor(() => Boolean(transcriptCheckpoint(stateStore, transcript)?.pendingSubagent));
+    await input.stop();
+
+    expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+      pendingSubagent: { turnId: childTurnId },
+      activeTurn: { turnId: childTurnId },
     });
   });
 

@@ -171,6 +171,13 @@ describe('CodexSubagentLinker', () => {
       }),
     ]);
   });
+
+  it('does not create a descriptor for a rejected spawn call', () => {
+    const turn = turnWithSpawn();
+    turn.steps[0].tools[0].output = 'collab spawn failed: agent thread limit reached';
+
+    expect(extractCodexSpawnDescriptors(turn, [], 'trace-rejected')).toEqual([]);
+  });
 });
 
 async function readOwnerMeta(fixture: string): Promise<CodexTranscriptMeta> {

@@ -185,6 +185,12 @@ export function extractCodexSpawnDescriptors(
     for (const tool of step.tools) {
       if (tool.name !== 'spawn_agent') continue;
       const activity = activities.get(tool.callId);
+      const output = asRecord(tool.output);
+      // A rejected spawn still has a function_call and an input task_name, but
+      // it creates no child lifecycle. Only a started activity or a structured
+      // successful result is eligible for linking/fusion.
+      const resultAgentPath = stringValue(output?.agent_path) ?? stringValue(output?.task_name);
+      if (!activity && !resultAgentPath) continue;
       const taskName = spawnTaskName(tool);
       descriptors.push({
         parentThreadId: turn.sessionId,
