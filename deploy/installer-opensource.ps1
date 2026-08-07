@@ -1341,6 +1341,83 @@ try {
 }
 
 # ============================================================
+# Remove OpenClaw's nested plugin entry and load path.
+# ============================================================
+function Remove-OpenClawPlugin {
+    $stateDir = if ($env:OPENCLAW_STATE_DIR) {
+        $env:OPENCLAW_STATE_DIR
+    } else {
+        Join-Path $env:USERPROFILE ".openclaw"
+    }
+    $configs = @()
+    if ($env:OPENCLAW_CONFIG_PATH) { $configs += $env:OPENCLAW_CONFIG_PATH }
+    $configs += @(
+        (Join-Path $stateDir "openclaw.json"),
+        (Join-Path $stateDir "config.json"),
+        (Join-Path $env:USERPROFILE ".openclaw\openclaw.json"),
+        (Join-Path $env:USERPROFILE ".openclaw\config.json")
+    )
+    $managedPath = Join-Path $DataDir "plugins\openclaw\plugin.mjs"
+
+    foreach ($cfg in ($configs | Select-Object -Unique)) {
+        if (-not (Test-Path $cfg)) { continue }
+        $short = $cfg.Replace($env:USERPROFILE, "~")
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        }
+
+        $result = & $script:NODE_BIN -e @'
+const fs = require('fs');
+const f = process.argv[1];
+const managed = process.argv[2].replaceAll('\\', '/');
+const entryStr = value => typeof value === 'string'
+  ? value
+  : (Array.isArray(value) && typeof value[0] === 'string' ? value[0] : '');
+const isOurs = value => {
+  const normalized = entryStr(value).replaceAll('\\', '/');
+  const plain = normalized.startsWith('file://') ? normalized.slice('file://'.length) : normalized;
+  return plain === managed ||
+    normalized.includes('loongsuite-pilot-openclaw') ||
+    normalized.includes('plugins/openclaw/plugin.mjs') && plain.includes('.loongsuite-pilot/');
+};
+try {
+  const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  let changed = false;
+  for (const key of ['plugin', 'plugins']) {
+    if (!Array.isArray(data[key])) continue;
+    const filtered = data[key].filter(value => !isOurs(value));
+    if (filtered.length !== data[key].length) { data[key] = filtered; changed = true; }
+  }
+  const plugins = data.plugins && typeof data.plugins === 'object' && !Array.isArray(data.plugins)
+    ? data.plugins
+    : null;
+  if (plugins) {
+    if (plugins.load && typeof plugins.load === 'object' && Array.isArray(plugins.load.paths)) {
+      const filtered = plugins.load.paths.filter(value => !isOurs(value));
+      if (filtered.length !== plugins.load.paths.length) { plugins.load.paths = filtered; changed = true; }
+    }
+    if (plugins.entries && typeof plugins.entries === 'object' && !Array.isArray(plugins.entries) &&
+        Object.prototype.hasOwnProperty.call(plugins.entries, 'loongsuite-pilot-openclaw')) {
+      delete plugins.entries['loongsuite-pilot-openclaw'];
+      changed = true;
+    }
+  }
+  if (!changed) { process.stdout.write('nochange'); process.exit(0); }
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write('cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+'@ $cfg $managedPath 2>$null
+
+        switch ($result) {
+            "cleaned"  { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }
+            "nochange" { }
+            default    { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
+        }
+    }
+}
+
+# ============================================================
 # Remove OTel plugin (Claude/Codex)
 # ============================================================
 function Remove-OtelPlugin {
@@ -1936,6 +2013,10 @@ function Cmd-Uninstall {
     # Read the persisted target before the default data/install directory is removed.
     Msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."
     Remove-HermesPlugin
+    Write-Host ""
+
+    Msg "==> 清理 OpenClaw 插件配置..." "==> Cleaning up OpenClaw plugin config..."
+    Remove-OpenClawPlugin
     Write-Host ""
 
     Msg "==> 删除安装目录..." "==> Removing installation..."

@@ -1,0 +1,18 @@
+{
+  "id": "loongsuite-pilot-openclaw",
+  "icon": "https://cdn.simpleicons.org/openai",
+  "activation": {
+    "onStartup": true
+  },
+  "enabledByDefault": true,
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "captureMessageContent": {
+        "type": "boolean",
+        "description": "Whether to capture full prompt / response / tool content. Set to false to redact.",
+        "default": true
+      }
+    }
+  }
+}

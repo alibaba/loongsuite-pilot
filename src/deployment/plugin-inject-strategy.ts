@@ -1,5 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import type {
   AgentDefinition,
   DeployResult,
@@ -12,6 +14,12 @@ import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('PluginInjectStrategy');
+const execFileAsync = promisify(execFile);
+
+const DEFAULT_OPENCLAW_ENTRY_CONFIG = {
+  enabled: true,
+  hooks: { allowConversationAccess: true },
+};
 
 /**
  * Strip single-line (//) and multi-line comments from JSONC text
@@ -90,12 +98,17 @@ export class PluginInjectStrategy implements DeployStrategy {
 
     try {
       const raw = await fs.readFile(configPath, 'utf-8');
-      const json = JSON.parse(stripJsoncComments(raw));
-      const pluginKey = this.resolvePluginKey(json, config);
-      const plugins: unknown[] = json[pluginKey] ?? [];
-      if (!Array.isArray(plugins)) return true;
-
+      const json = JSON.parse(stripJsoncComments(raw)) as Record<string, unknown>;
       const resolvedSpec = this.resolveSpec(config.pluginSpec);
+
+      if (this.isOpenclawNested(config)) {
+        if (Array.isArray(json.plugin) || Array.isArray(json.plugins)) return true;
+        const desiredEntry = config.entryConfig ?? DEFAULT_OPENCLAW_ENTRY_CONFIG;
+        return !this.openclawHasPlugin(json, resolvedSpec, config.pluginId, desiredEntry);
+      }
+      const pluginKey = this.resolvePluginKey(json, config);
+      const plugins: unknown[] = (json[pluginKey] as unknown[]) ?? [];
+      if (!Array.isArray(plugins)) return true;
       return !plugins.some((entry) => this.matchesSpec(entry, resolvedSpec, config.pluginId));
     } catch (err) {
       logger.warn('failed to read config file', { configPath, error: String(err) });
@@ -110,6 +123,16 @@ export class PluginInjectStrategy implements DeployStrategy {
     }
 
     try {
+      const versionError = await this.checkMinimumVersion(config);
+      if (versionError) {
+        return {
+          success: false,
+          agentId: def.id,
+          deployMode: 'plugin-inject',
+          error: versionError,
+        };
+      }
+
       const configPath = await this.findConfigFile(config, config.createIfMissing === true);
       if (!configPath) {
         return {
@@ -121,44 +144,90 @@ export class PluginInjectStrategy implements DeployStrategy {
       }
 
       const raw = await fs.readFile(configPath, 'utf-8');
-      const json = JSON.parse(stripJsoncComments(raw));
-      const pluginKey = this.resolvePluginKey(json, config);
-
-      if (!Array.isArray(json[pluginKey])) {
-        json[pluginKey] = [];
-      }
-
+      const json = JSON.parse(stripJsoncComments(raw)) as Record<string, unknown>;
       const resolvedSpec = this.resolveSpec(config.pluginSpec);
+      const migratingLegacyOpenclawSchema = this.isOpenclawNested(config)
+        && (Array.isArray(json.plugin) || Array.isArray(json.plugins));
 
-      // Remove old/replaced specs
-      if (config.replaceSpecs?.length) {
-        json[pluginKey] = (json[pluginKey] as unknown[]).filter((entry) => {
-          const entryStr = typeof entry === 'string' ? entry : Array.isArray(entry) ? entry[0] : '';
-          return !config.replaceSpecs!.some((old) =>
-            typeof entryStr === 'string' && entryStr.includes(old),
-          );
-        });
+      let mutated: boolean;
+      if (this.isOpenclawNested(config)) {
+        mutated = this.openclawInject(json, resolvedSpec, config);
+      } else {
+        mutated = this.flatArrayInject(json, resolvedSpec, config);
       }
 
-      // Remove existing matching spec to avoid duplicates
-      json[pluginKey] = (json[pluginKey] as unknown[]).filter(
-        (entry) => !this.matchesSpec(entry, resolvedSpec, config.pluginId),
-      );
-
-      json[pluginKey].push(resolvedSpec);
-
-      const hasComments = raw !== JSON.stringify(JSON.parse(stripJsoncComments(raw)), null, 2) + '\n';
-      if (hasComments) {
-        logger.warn('config will be rewritten as JSON; JSONC comments in the original file will be removed', { configPath });
-        await fs.writeFile(configPath + '.bak', raw, 'utf-8');
+      if (mutated) {
+        const hasComments = raw !== JSON.stringify(JSON.parse(stripJsoncComments(raw)), null, 2) + '\n';
+        if (hasComments || migratingLegacyOpenclawSchema) {
+          if (hasComments) {
+            logger.warn('config will be rewritten as JSON; JSONC comments in the original file will be removed', { configPath });
+          }
+          await this.writePrivateBackup(configPath + '.bak', raw);
+        }
+        await fs.writeFile(configPath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
+        logger.info('plugin injected', { agentId: def.id, configPath, spec: resolvedSpec });
+      } else {
+        logger.info('plugin already injected', { agentId: def.id, configPath, spec: resolvedSpec });
       }
-
-      await fs.writeFile(configPath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
-      logger.info('plugin injected', { agentId: def.id, configPath, spec: resolvedSpec });
       return { success: true, agentId: def.id, deployMode: 'plugin-inject' };
     } catch (err) {
       return { success: false, agentId: def.id, deployMode: 'plugin-inject', error: String(err) };
     }
+  }
+
+  private async checkMinimumVersion(config: PluginInjectConfig): Promise<string | null> {
+    const check = config.versionCheck;
+    if (!check) return null;
+    if (check.command.length === 0 || !check.command[0]) {
+      return 'invalid version check: command must not be empty';
+    }
+
+    const minimum = this.parseVersion(check.minimum);
+    if (!minimum || minimum.suffix) {
+      return `invalid minimum supported version: ${check.minimum}`;
+    }
+
+    try {
+      const { stdout, stderr } = await execFileAsync(check.command[0], check.command.slice(1), {
+        timeout: 10_000,
+        maxBuffer: 64 * 1024,
+        windowsHide: true,
+      });
+      const detected = this.parseVersion(`${stdout}\n${stderr}`);
+      if (!detected) {
+        return `unable to determine target version; requires >= ${check.minimum}`;
+      }
+      if (detected.suffix && !/^\d+(?:\.\d+)*$/.test(detected.suffix)) {
+        return `unsupported prerelease target version ${detected.raw}; requires >= ${check.minimum}`;
+      }
+      if (this.compareVersionCore(detected.core, minimum.core) < 0) {
+        return `unsupported target version ${detected.raw}; requires >= ${check.minimum}`;
+      }
+      return null;
+    } catch (err) {
+      return `target version check failed; requires >= ${check.minimum}: ${String(err)}`;
+    }
+  }
+
+  private parseVersion(text: string): { raw: string; core: [number, number, number]; suffix?: string } | null {
+    const match = text.match(/(?:^|[^0-9])v?(\d{4})\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/m);
+    if (!match) return null;
+    const raw = `${match[1]}.${match[2]}.${match[3]}${match[4] ? `-${match[4]}` : ''}`;
+    return {
+      raw,
+      core: [Number(match[1]), Number(match[2]), Number(match[3])],
+      suffix: match[4],
+    };
+  }
+
+  private compareVersionCore(
+    left: [number, number, number],
+    right: [number, number, number],
+  ): number {
+    for (let i = 0; i < left.length; i++) {
+      if (left[i] !== right[i]) return left[i] - right[i];
+    }
+    return 0;
   }
 
   async undeploy(def: AgentDefinition): Promise<boolean> {
@@ -170,22 +239,27 @@ export class PluginInjectStrategy implements DeployStrategy {
       if (!configPath) return false;
 
       const raw = await fs.readFile(configPath, 'utf-8');
-      const json = JSON.parse(stripJsoncComments(raw));
-      const pluginKey = this.resolvePluginKey(json, config);
-
-      if (!Array.isArray(json[pluginKey])) return true;
-
+      const json = JSON.parse(stripJsoncComments(raw)) as Record<string, unknown>;
       const resolvedSpec = this.resolveSpec(config.pluginSpec);
-      const before = (json[pluginKey] as unknown[]).length;
-      json[pluginKey] = (json[pluginKey] as unknown[]).filter(
-        (entry) => !this.matchesSpec(entry, resolvedSpec, config.pluginId),
-      );
 
-      if ((json[pluginKey] as unknown[]).length < before) {
+      let mutated: boolean;
+      if (this.isOpenclawNested(config)) {
+        mutated = this.openclawRemove(json, resolvedSpec, config);
+      } else {
+        const pluginKey = this.resolvePluginKey(json, config);
+        if (!Array.isArray(json[pluginKey])) return true;
+        const before = (json[pluginKey] as unknown[]).length;
+        json[pluginKey] = (json[pluginKey] as unknown[]).filter(
+          (entry) => !this.matchesSpec(entry, resolvedSpec, config.pluginId),
+        );
+        mutated = (json[pluginKey] as unknown[]).length < before;
+      }
+
+      if (mutated) {
         const hasComments = raw !== JSON.stringify(JSON.parse(stripJsoncComments(raw)), null, 2) + '\n';
         if (hasComments) {
           logger.warn('config will be rewritten as JSON; JSONC comments in the original file will be removed', { configPath });
-          await fs.writeFile(configPath + '.bak', raw, 'utf-8');
+          await this.writePrivateBackup(configPath + '.bak', raw);
         }
         await fs.writeFile(configPath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
         logger.info('plugin removed', { agentId: def.id, configPath });
@@ -214,12 +288,21 @@ export class PluginInjectStrategy implements DeployStrategy {
         encoding: 'utf-8',
         flag: 'wx',
         mode: 0o600,
-      }).catch(async err => {
+      }).catch(async (err) => {
         if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       });
       return resolved;
     }
     return null;
+  }
+
+  private isOpenclawNested(config: PluginInjectConfig): boolean {
+    return config.configShape === 'openclaw-nested';
+  }
+
+  private async writePrivateBackup(backupPath: string, raw: string): Promise<void> {
+    await fs.writeFile(backupPath, raw, { encoding: 'utf-8', mode: 0o600 });
+    if (process.platform !== 'win32') await fs.chmod(backupPath, 0o600);
   }
 
   private resolvePluginKey(
@@ -243,5 +326,296 @@ export class PluginInjectStrategy implements DeployStrategy {
         : '';
 
     return entryStr === resolvedSpec || entryStr.includes(pluginId);
+  }
+
+  private flatArrayInject(
+    json: Record<string, unknown>,
+    resolvedSpec: string,
+    config: PluginInjectConfig,
+  ): boolean {
+    const pluginKey = this.resolvePluginKey(json, config);
+    if (!Array.isArray(json[pluginKey])) {
+      json[pluginKey] = [];
+    }
+
+    if (config.replaceSpecs?.length) {
+      json[pluginKey] = (json[pluginKey] as unknown[]).filter((entry) => {
+        const entryStr = typeof entry === 'string' ? entry : Array.isArray(entry) ? entry[0] : '';
+        return !config.replaceSpecs!.some((old) =>
+          typeof entryStr === 'string' && entryStr.includes(old),
+        );
+      });
+    }
+
+    const before = (json[pluginKey] as unknown[]).length;
+    json[pluginKey] = (json[pluginKey] as unknown[]).filter(
+      (entry) => !this.matchesSpec(entry, resolvedSpec, config.pluginId),
+    );
+    let mutated = (json[pluginKey] as unknown[]).length < before;
+
+    if (!(json[pluginKey] as unknown[]).some((entry) => this.matchesSpec(entry, resolvedSpec, config.pluginId))) {
+      (json[pluginKey] as unknown[]).push(resolvedSpec);
+      mutated = true;
+    }
+    return mutated;
+  }
+
+  private ensurePluginsObject(json: Record<string, unknown>): Record<string, unknown> {
+    if (typeof json.plugins !== 'object' || json.plugins === null || Array.isArray(json.plugins)) {
+      json.plugins = {};
+    }
+    return json.plugins as Record<string, unknown>;
+  }
+
+  private ensureLoadObject(plugins: Record<string, unknown>): Record<string, unknown> {
+    if (typeof plugins.load !== 'object' || plugins.load === null || Array.isArray(plugins.load)) {
+      plugins.load = {};
+    }
+    return plugins.load as Record<string, unknown>;
+  }
+
+  private ensureEntriesObject(plugins: Record<string, unknown>): Record<string, unknown> {
+    if (typeof plugins.entries !== 'object' || plugins.entries === null || Array.isArray(plugins.entries)) {
+      plugins.entries = {};
+    }
+    return plugins.entries as Record<string, unknown>;
+  }
+
+  private ensurePathsArray(load: Record<string, unknown>): unknown[] {
+    if (!Array.isArray(load.paths)) {
+      load.paths = [];
+    }
+    return load.paths as unknown[];
+  }
+
+  /**
+   * OpenClaw's `plugins.load.paths` expects plain filesystem paths (not
+   * `file://` URLs like OpenCode's flat-array shape). Strip the URL scheme
+   * before writing so `openclaw config validate` finds the plugin on disk.
+   */
+  private toOpenclawPath(spec: string): string {
+    if (spec.startsWith('file://')) return spec.slice('file://'.length);
+    return spec;
+  }
+
+  private pathMatches(entry: unknown, resolvedSpec: string, pluginId: string): boolean {
+    if (typeof entry !== 'string') return false;
+    if (entry === resolvedSpec || entry === this.toOpenclawPath(resolvedSpec)) return true;
+    return entry.includes(pluginId);
+  }
+
+  private openclawHasPlugin(
+    json: Record<string, unknown>,
+    resolvedSpec: string,
+    pluginId: string,
+    desiredEntry: Record<string, unknown>,
+  ): boolean {
+    const plugins = typeof json.plugins === 'object' && json.plugins !== null && !Array.isArray(json.plugins)
+      ? (json.plugins as Record<string, unknown>)
+      : null;
+    if (!plugins) return false;
+
+    const load = typeof plugins.load === 'object' && plugins.load !== null && !Array.isArray(plugins.load)
+      ? (plugins.load as Record<string, unknown>)
+      : null;
+    const paths = load && Array.isArray(load.paths) ? (load.paths as unknown[]) : [];
+    const hasPath = paths.some((entry) => this.pathMatches(entry, resolvedSpec, pluginId));
+
+    const entries = typeof plugins.entries === 'object' && plugins.entries !== null && !Array.isArray(plugins.entries)
+      ? (plugins.entries as Record<string, unknown>)
+      : null;
+    const entry = entries ? entries[pluginId] : null;
+    const entryConfigured = typeof entry === 'object'
+      && entry !== null
+      && !Array.isArray(entry)
+      && this.isDeepSubset(entry as Record<string, unknown>, desiredEntry);
+
+    return hasPath && entryConfigured;
+  }
+
+  private openclawInject(
+    json: Record<string, unknown>,
+    resolvedSpec: string,
+    config: PluginInjectConfig,
+  ): boolean {
+    let mutated = false;
+    const legacyEntries: unknown[] = [];
+
+    if (Array.isArray(json.plugin)) {
+      legacyEntries.push(...json.plugin);
+      delete json.plugin;
+      mutated = true;
+    }
+    if (Array.isArray(json.plugins)) {
+      legacyEntries.push(...json.plugins);
+      delete json.plugins;
+      mutated = true;
+    }
+
+    const plugins = this.ensurePluginsObject(json);
+    const load = this.ensureLoadObject(plugins);
+    let paths = this.ensurePathsArray(load);
+    const entries = this.ensureEntriesObject(plugins);
+
+    for (const legacyEntry of legacyEntries) {
+      const legacySpec = typeof legacyEntry === 'string'
+        ? legacyEntry
+        : Array.isArray(legacyEntry) && typeof legacyEntry[0] === 'string'
+          ? legacyEntry[0]
+          : null;
+      if (!legacySpec) continue;
+      if (this.pathMatches(legacySpec, resolvedSpec, config.pluginId)) continue;
+      if (config.replaceSpecs?.some((old) => legacySpec.includes(old))) continue;
+      const migratedPath = this.toOpenclawPath(legacySpec);
+      if (!paths.includes(migratedPath)) paths.push(migratedPath);
+    }
+
+    if (config.replaceSpecs?.length) {
+      const before = paths.length;
+      const filtered = paths.filter((entry) => {
+        if (typeof entry !== 'string') return true;
+        return !config.replaceSpecs!.some((old) => entry.includes(old));
+      });
+      if (filtered.length !== before) {
+        load.paths = filtered;
+        paths = filtered;
+        mutated = true;
+      }
+    }
+
+    if (paths.some((entry) => this.pathMatches(entry, resolvedSpec, config.pluginId))) {
+      const before = paths.length;
+      load.paths = paths.filter((entry) => !this.pathMatches(entry, resolvedSpec, config.pluginId));
+      paths = load.paths as unknown[];
+      if ((load.paths as unknown[]).length !== before) mutated = true;
+    }
+
+    if (!paths.some((entry) => this.pathMatches(entry, resolvedSpec, config.pluginId))) {
+      paths.push(this.toOpenclawPath(resolvedSpec));
+      mutated = true;
+    }
+
+    const desiredEntry = config.entryConfig ?? DEFAULT_OPENCLAW_ENTRY_CONFIG;
+    const existing = entries[config.pluginId];
+    if (
+      typeof existing !== 'object' ||
+      existing === null ||
+      Array.isArray(existing) ||
+      !this.isDeepSubset(existing as Record<string, unknown>, desiredEntry)
+    ) {
+      entries[config.pluginId] = this.deepMerge(
+        existing && typeof existing === 'object' && !Array.isArray(existing)
+          ? existing as Record<string, unknown>
+          : {},
+        desiredEntry,
+      );
+      mutated = true;
+    }
+
+    return mutated;
+  }
+
+  private openclawRemove(
+    json: Record<string, unknown>,
+    resolvedSpec: string,
+    config: PluginInjectConfig,
+  ): boolean {
+    const plugins = typeof json.plugins === 'object' && json.plugins !== null && !Array.isArray(json.plugins)
+      ? (json.plugins as Record<string, unknown>)
+      : null;
+    if (!plugins) return false;
+
+    let mutated = false;
+
+    const load = typeof plugins.load === 'object' && plugins.load !== null && !Array.isArray(plugins.load)
+      ? (plugins.load as Record<string, unknown>)
+      : null;
+    if (load && Array.isArray(load.paths)) {
+      const before = (load.paths as unknown[]).length;
+      const filtered = (load.paths as unknown[]).filter(
+        (entry) => !this.pathMatches(entry, resolvedSpec, config.pluginId),
+      );
+      if (filtered.length !== before) {
+        load.paths = filtered;
+        mutated = true;
+      }
+    }
+
+    const entries = typeof plugins.entries === 'object' && plugins.entries !== null && !Array.isArray(plugins.entries)
+      ? (plugins.entries as Record<string, unknown>)
+      : null;
+    if (entries && entries[config.pluginId] !== undefined) {
+      delete entries[config.pluginId];
+      mutated = true;
+    }
+
+    return mutated;
+  }
+
+  private isDeepSubset(actual: Record<string, unknown>, desired: Record<string, unknown>): boolean {
+    for (const [key, desiredValue] of Object.entries(desired)) {
+      if (!Object.prototype.hasOwnProperty.call(actual, key)) return false;
+      const actualValue = actual[key];
+      if (Array.isArray(desiredValue)) {
+        if (!Array.isArray(actualValue) || !this.configValuesEqual(actualValue, desiredValue)) {
+          return false;
+        }
+      } else if (
+        typeof actualValue === 'object' && actualValue !== null && !Array.isArray(actualValue)
+        && typeof desiredValue === 'object' && desiredValue !== null && !Array.isArray(desiredValue)
+      ) {
+        if (!this.isDeepSubset(
+          actualValue as Record<string, unknown>,
+          desiredValue as Record<string, unknown>,
+        )) return false;
+      } else if (actualValue !== desiredValue) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private configValuesEqual(actual: unknown, desired: unknown): boolean {
+    if (Array.isArray(actual) || Array.isArray(desired)) {
+      if (!Array.isArray(actual) || !Array.isArray(desired) || actual.length !== desired.length) {
+        return false;
+      }
+      return desired.every((value, index) => this.configValuesEqual(actual[index], value));
+    }
+    if (
+      typeof actual === 'object' && actual !== null
+      && typeof desired === 'object' && desired !== null
+    ) {
+      const actualRecord = actual as Record<string, unknown>;
+      const desiredRecord = desired as Record<string, unknown>;
+      const actualKeys = Object.keys(actualRecord);
+      const desiredKeys = Object.keys(desiredRecord);
+      return actualKeys.length === desiredKeys.length
+        && desiredKeys.every(key => Object.prototype.hasOwnProperty.call(actualRecord, key)
+          && this.configValuesEqual(actualRecord[key], desiredRecord[key]));
+    }
+    return actual === desired;
+  }
+
+  private deepMerge(
+    existing: Record<string, unknown>,
+    desired: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const merged = { ...existing };
+    for (const [key, desiredValue] of Object.entries(desired)) {
+      const existingValue = existing[key];
+      if (
+        typeof existingValue === 'object' && existingValue !== null && !Array.isArray(existingValue)
+        && typeof desiredValue === 'object' && desiredValue !== null && !Array.isArray(desiredValue)
+      ) {
+        merged[key] = this.deepMerge(
+          existingValue as Record<string, unknown>,
+          desiredValue as Record<string, unknown>,
+        );
+      } else {
+        merged[key] = desiredValue;
+      }
+    }
+    return merged;
   }
 }
