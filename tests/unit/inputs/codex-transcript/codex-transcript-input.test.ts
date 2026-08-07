@@ -4,10 +4,20 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/resource-context.mjs';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
+import { extractCodexTranscriptMeta } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
 import { CodexTranscriptInput } from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
 import type { AgentActivityEntry, JsonValue } from '../../../../src/types/index.js';
 
 const tempDirs: string[] = [];
+const SUBAGENT_FIXTURE_DIR = path.resolve(process.cwd(), 'tests/fixtures/codex-subagent');
+const PARENT_FIXTURE_NAME = 'rollout-2026-08-07T10-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl';
+const CHILD_FIXTURE_NAME = 'rollout-2026-08-07T10-00-04-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl';
+const CHILD_FIXTURES = [
+  { name: CHILD_FIXTURE_NAME, threadId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', turnId: 'child-turn-1' },
+  { name: 'rollout-2026-08-07T10-00-05-cccccccc-cccc-4ccc-8ccc-cccccccccccc.jsonl', threadId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', turnId: 'child-turn-2' },
+  { name: 'rollout-2026-08-07T10-00-06-dddddddd-dddd-4ddd-8ddd-dddddddddddd.jsonl', threadId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', turnId: 'child-turn-3' },
+  { name: 'rollout-2026-08-07T10-00-07-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.jsonl', threadId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', turnId: 'child-turn-4' },
+] as const;
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
@@ -342,6 +352,101 @@ function globalProcessedTurnIds(stateStore: StateStore): string[] {
 }
 
 describe('CodexTranscriptInput', () => {
+  it('extracts the single-level subagent relationship from owning session metadata', async () => {
+    const fixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const firstRecord = JSON.parse(fixture.split('\n')[0]) as Record<string, unknown>;
+
+    expect(extractCodexTranscriptMeta(firstRecord)).toEqual(expect.objectContaining({
+      threadId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      rootSessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      threadSource: 'subagent',
+      parentThreadId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      depth: 1,
+      agentPath: '/root/fixture_child',
+      agentNickname: 'FixtureChild',
+      provider: 'openai',
+    }));
+  });
+
+  it('uses the owning child meta instead of copied parent meta in a forked rollout', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-owner-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createInput(root);
+    const parentFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, PARENT_FIXTURE_NAME), 'utf8');
+
+    await writeTranscriptNamed(sessionDir, PARENT_FIXTURE_NAME, parentFixture);
+    await waitFor(() => responsesForTurn(entries, 'parent-turn-1').length === 1);
+    const childTranscripts = new Map<string, string>();
+    for (const fixture of CHILD_FIXTURES) {
+      const text = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, fixture.name), 'utf8');
+      childTranscripts.set(fixture.threadId, await writeTranscriptNamed(sessionDir, fixture.name, text));
+    }
+    await waitFor(() => CHILD_FIXTURES.every(fixture =>
+      responsesForTurn(entries, fixture.turnId).length === 1));
+    await input.stop();
+
+    expect(responsesForTurn(entries, 'parent-turn-1')).toHaveLength(1);
+    for (const fixture of CHILD_FIXTURES) {
+      const childEntries = entries.filter(entry =>
+        entry['agent.codex.transcript_turn_id'] === fixture.turnId);
+      expect(childEntries.length).toBeGreaterThan(0);
+      expect(new Set(childEntries.map(entry => entry['gen_ai.session.id']))).toEqual(
+        new Set([fixture.threadId]),
+      );
+      expect(new Set(childEntries.map(entry => entry['gen_ai.agent.id']))).toEqual(
+        new Set([fixture.threadId]),
+      );
+      expect(new Set(childEntries.map(entry => entry['gen_ai.turn.id']))).toEqual(
+        new Set([`${fixture.threadId}:${fixture.turnId}`]),
+      );
+      expect(transcriptCheckpoint(stateStore, childTranscripts.get(fixture.threadId)!)).toMatchObject({
+        ownerSessionMetaOffset: 0,
+      });
+    }
+  });
+
+  it('rebuilds owning metadata instead of trusting a legacy latest-meta checkpoint', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-subagent-migration-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const childFixture = await fs.readFile(path.join(SUBAGENT_FIXTURE_DIR, CHILD_FIXTURE_NAME), 'utf8');
+    const childLines = childFixture.trimEnd().split('\n');
+    const childTranscript = await writeTranscriptNamed(sessionDir, CHILD_FIXTURE_NAME, childFixture);
+    const stat = await fs.stat(childTranscript);
+    const copiedParentEndOffset = Buffer.byteLength(childLines.slice(0, 9).join('\n') + '\n');
+    const copiedParentMetaOffset = Buffer.byteLength(childLines[0] + '\n');
+    const persistedState = new StateStore(path.join(root, 'input-state.json'));
+    await persistedState.load();
+    persistedState.update(`codex-transcript:${childTranscript}`, {
+      lastOffset: copiedParentEndOffset,
+      extra: {
+        codexTranscript: {
+          inode: stat.ino,
+          scanOffset: copiedParentEndOffset,
+          activeTurn: null,
+          pendingTerminal: null,
+          // This is the pre-fix shape and deliberately points at parent meta.
+          latestSessionMetaOffset: copiedParentMetaOffset,
+          emittedTerminalTurnIds: ['parent-turn-1'],
+        },
+      },
+    });
+    await persistedState.save();
+
+    const recovered = await createInput(root);
+    await waitFor(() => responsesForTurn(recovered.entries, 'child-turn-1').length === 1);
+    await recovered.input.stop();
+
+    const childEntries = recovered.entries.filter(entry =>
+      entry['agent.codex.transcript_turn_id'] === 'child-turn-1');
+    expect(new Set(childEntries.map(entry => entry['gen_ai.agent.id']))).toEqual(
+      new Set(['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb']),
+    );
+    expect(transcriptCheckpoint(recovered.stateStore, childTranscript)).toMatchObject({
+      ownerSessionMetaOffset: 0,
+    });
+  });
+
   it('emits a terminal LLM pair with zero usage for a completed turn without output', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-empty-completed-'));
     tempDirs.push(root);

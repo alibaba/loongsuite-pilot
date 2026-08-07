@@ -55,7 +55,14 @@ export interface CodexTranscriptCheckpoint {
   scanOffset: number;
   activeTurn: CodexActiveTranscriptTurn | null;
   pendingTerminal: CodexPendingTerminalTurn | null;
-  latestSessionMetaOffset: number | null;
+  /**
+   * Offset of the session_meta that describes this rollout file itself.
+   *
+   * Forked Codex rollouts can contain multiple session_meta records: the
+   * child's own meta followed by copied parent history. Keeping the latest
+   * meta therefore misattributes child turns to the parent session.
+   */
+  ownerSessionMetaOffset: number | null;
   /** Terminal turns already processed by this transcript, including empty control turns. */
   emittedTerminalTurnIds: string[];
 }
@@ -66,7 +73,16 @@ export interface CodexTranscriptGlobalState {
 }
 
 export interface CodexTranscriptMeta {
-  sessionId: string;
+  /** The Codex thread/rollout described by this session_meta record. */
+  threadId: string;
+  /** Root user session shared by a subagent tree when Codex supplies it. */
+  rootSessionId: string;
+  threadSource: 'user' | 'subagent' | 'unknown';
+  parentThreadId?: string;
+  depth: number;
+  agentPath?: string;
+  agentNickname?: string;
+  agentRole?: string;
   provider: string;
   baseInstructions?: string;
   toolDefinitions?: JsonValue;

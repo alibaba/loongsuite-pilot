@@ -234,7 +234,7 @@ export class CodexTranscriptInput extends BaseInput {
         scanOffset: 0,
         activeTurn: null,
         pendingTerminal: null,
-        latestSessionMetaOffset: null,
+        ownerSessionMetaOffset: null,
         emittedTerminalTurnIds: [],
       };
       checkpointChanged = true;
@@ -242,6 +242,11 @@ export class CodexTranscriptInput extends BaseInput {
       await this.baselineFile(filePath, key);
       this.saveGlobalProcessedTerminalTurnIds();
       return 0;
+    }
+
+    if (checkpoint.ownerSessionMetaOffset === null) {
+      checkpoint.ownerSessionMetaOffset = await findOwnerSessionMetaOffset(filePath, stat.size);
+      checkpointChanged = true;
     }
 
     let emittedCount = 0;
@@ -275,7 +280,11 @@ export class CodexTranscriptInput extends BaseInput {
         const payload = asRecord(line.record.payload);
         if (!payload) return;
         if (line.record.type === 'session_meta') {
-          checkpoint.latestSessionMetaOffset = line.startOffset;
+          checkpoint.ownerSessionMetaOffset = selectOwnerSessionMetaOffset(
+            filePath,
+            checkpoint.ownerSessionMetaOffset,
+            line,
+          );
           return;
         }
 
@@ -436,9 +445,9 @@ export class CodexTranscriptInput extends BaseInput {
       };
     }
     const records = await readJsonLines(filePath, activeTurn.startOffset, endOffset);
-    const metaRecord = checkpoint.latestSessionMetaOffset === null
+    const metaRecord = checkpoint.ownerSessionMetaOffset === null
       ? null
-      : await readJsonLineAt(filePath, checkpoint.latestSessionMetaOffset);
+      : await readJsonLineAt(filePath, checkpoint.ownerSessionMetaOffset);
     const meta = metaRecord ? extractCodexTranscriptMeta(metaRecord) : null;
     const extraction = extractCodexPartialTurnWithBoundaries(
       records.items,
@@ -753,14 +762,18 @@ export class CodexTranscriptInput extends BaseInput {
     } catch {
       return;
     }
-    let latestSessionMetaOffset: number | null = null;
+    let ownerSessionMetaOffset: number | null = null;
     let activeTurn: CodexActiveTranscriptTurn | null = null;
     const completedTurnIds: string[] = [];
     const { nextOffset } = await scanJsonLines(filePath, 0, stat.size, line => {
       const payload = asRecord(line.record.payload);
       if (!payload) return;
       if (line.record.type === 'session_meta') {
-        latestSessionMetaOffset = line.startOffset;
+        ownerSessionMetaOffset = selectOwnerSessionMetaOffset(
+          filePath,
+          ownerSessionMetaOffset,
+          line,
+        );
         return;
       }
       const turnId = turnIdForStart(line.record, payload);
@@ -787,7 +800,7 @@ export class CodexTranscriptInput extends BaseInput {
       scanOffset: nextOffset,
       activeTurn,
       pendingTerminal: null,
-      latestSessionMetaOffset,
+      ownerSessionMetaOffset,
       emittedTerminalTurnIds: [],
     });
   }
@@ -1021,8 +1034,11 @@ export class CodexTranscriptInput extends BaseInput {
       scanOffset: value.scanOffset,
       activeTurn,
       pendingTerminal,
-      latestSessionMetaOffset: typeof value.latestSessionMetaOffset === 'number'
-        ? value.latestSessionMetaOffset
+      // Do not migrate legacy latestSessionMetaOffset. In forked rollouts that
+      // value commonly points at copied parent metadata, so processFile will
+      // perform one bounded header scan to recover the owning meta safely.
+      ownerSessionMetaOffset: typeof value.ownerSessionMetaOffset === 'number'
+        ? value.ownerSessionMetaOffset
         : null,
       emittedTerminalTurnIds: Array.isArray(value.emittedTerminalTurnIds)
         ? value.emittedTerminalTurnIds.filter((item): item is string => typeof item === 'string')
@@ -1265,6 +1281,37 @@ async function scanJsonLines(
   } finally {
     await handle.close();
   }
+}
+
+async function findOwnerSessionMetaOffset(
+  filePath: string,
+  endOffset: number,
+): Promise<number | null> {
+  let ownerOffset: number | null = null;
+  let sawSessionMeta = false;
+  await scanJsonLines(filePath, 0, endOffset, line => {
+    if (line.record.type !== 'session_meta') {
+      // Codex writes the owning meta and any copied fork metadata as a header.
+      // Stop before scanning the potentially large inherited conversation.
+      return sawSessionMeta ? false : undefined;
+    }
+    sawSessionMeta = true;
+    ownerOffset = selectOwnerSessionMetaOffset(filePath, ownerOffset, line);
+    return undefined;
+  });
+  return ownerOffset;
+}
+
+function selectOwnerSessionMetaOffset(
+  filePath: string,
+  currentOffset: number | null,
+  line: JsonLine,
+): number | null {
+  const meta = extractCodexTranscriptMeta(line.record);
+  if (!meta) return currentOffset;
+  const rolloutThreadId = sessionIdFromTranscriptPath(filePath);
+  if (meta.threadId === rolloutThreadId) return line.startOffset;
+  return currentOffset ?? line.startOffset;
 }
 
 async function readJsonLineAt(filePath: string, offset: number): Promise<Record<string, unknown> | null> {
