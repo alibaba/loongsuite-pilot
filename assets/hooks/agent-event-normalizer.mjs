@@ -300,6 +300,7 @@ const AGENT_TYPE_TO_CONFIG_KEY = {
   'qoder-cn-hook': 'qoder-cn',
   'cursor-hook': 'cursor',
   'cursor-cli': 'cursor',
+  'openclaw': 'openclaw',
 };
 
 export function applyHookContentPolicy(record, runtimeConfig = {}) {

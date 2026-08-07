@@ -14,6 +14,7 @@ Use these IDs in installer options, `agent-control.json`, and `config.json`.
 | Codex | `codex` | Hook integration. |
 | Cursor | `cursor` | Hook integration. |
 | Kiro CLI | `kiro-cli` | Hook integration with delayed local SQLite/session collection. Token usage is not exposed by the source. |
+| OpenClaw | `openclaw` | Plugin injection for OpenClaw 2026.5.12 or later. Captures native LLM, ReAct, tool, token, error, and cancellation events. |
 | OpenCode | `opencode` | Plugin injection. |
 | Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. |
 | Qoder | `qoder` | Hook integration. |
@@ -35,6 +36,38 @@ Codex collection is transcript-backed. Pilot uses the lightweight
 `CODEX_HOME`, including task-scoped homes created by orchestrators, and tails
 recent rollout files from that session root. `Stop` is retained as a
 best-effort wakeup and is not required for directory discovery.
+
+## OpenClaw Compatibility And Lifecycle
+
+Pilot supports stable OpenClaw releases `>=2026.5.12`. Prerelease builds and
+older versions are rejected before Pilot changes the OpenClaw configuration.
+During deployment, Pilot adds its module path to `plugins.load.paths` and adds
+this entry to the active OpenClaw configuration:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "loongsuite-pilot-openclaw": {
+        "enabled": true,
+        "hooks": { "allowConversationAccess": true }
+      }
+    }
+  }
+}
+```
+
+`allowConversationAccess` is required for the native conversation lifecycle
+hooks that carry per-call messages and usage. Pilot creates a private backup
+before migrating a legacy plugin-array configuration. Upgrade and uninstall
+only replace or remove Pilot's own path and entry; unrelated plugins and their
+settings are preserved.
+
+The injected plugin writes append-only source events below
+`~/.loongsuite-pilot/logs/openclaw/`. The directory is mode `0700` and files are
+mode `0600` on POSIX systems. Provider errors or cancelled calls can legitimately
+have no output message or token usage; Pilot reports the native finish reason
+and timing without inventing content or zero token counts.
 
 ## Choose Agents During Installation
 
@@ -82,6 +115,7 @@ Use `config.json` when you need to control message content capture:
   "agents": {
     "claude-code": { "enabled": true, "captureMessageContent": false },
     "codex": { "enabled": true, "captureMessageContent": false },
+    "openclaw": { "enabled": true, "captureMessageContent": false },
     "cursor": { "enabled": true, "captureMessageContent": true }
   }
 }
