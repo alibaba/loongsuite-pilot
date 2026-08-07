@@ -339,7 +339,9 @@ export class QwenWorkCNTraceInput extends BaseInput {
             (response as Record<string, unknown>).time_unix_nano = pair.endNano;
             if (pair.model) {
               for (const entry of stepEntries) {
-                if (!entry['gen_ai.request.model'] || entry['gen_ai.request.model'] === 'auto') {
+                if (!entry['gen_ai.request.model']
+                  || entry['gen_ai.request.model'] === 'auto'
+                  || entry['gen_ai.request.model'] === 'unknown') {
                   (entry as Record<string, unknown>)['gen_ai.request.model'] = pair.model;
                 }
                 if (entry['event.name'] === 'llm.response') {

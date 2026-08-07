@@ -81,8 +81,26 @@ describe('QwenWorkCNTraceInput', () => {
 
   it('enriches zero-token Qwen segments from qwenworkcn-intercept by response id', async () => {
     await writeHistory([
-      entry({ 'event.id': 'request', 'event.name': 'llm.request' }),
-      entry({ 'event.id': 'response', 'gen_ai.response.id': 'chatcmpl-qwen-1' }),
+      entry({
+        'event.id': 'request',
+        'event.name': 'llm.request',
+        'gen_ai.request.model': 'unknown',
+      }),
+      entry({
+        'event.id': 'tool-call',
+        'event.name': 'tool.call' as never,
+        'gen_ai.request.model': 'unknown',
+      }),
+      entry({
+        'event.id': 'tool-result',
+        'event.name': 'tool.result' as never,
+        'gen_ai.request.model': 'unknown',
+      }),
+      entry({
+        'event.id': 'response',
+        'gen_ai.request.model': 'unknown',
+        'gen_ai.response.id': 'chatcmpl-qwen-1',
+      }),
     ]);
     await writeSegments([
       { ts: '2026-08-06T06:00:00.000Z', type: 'model.request.started', turn_id: 'turn-1', request_id: 'request-1', data: { model: 'qmodel_latest' } },
@@ -106,6 +124,8 @@ describe('QwenWorkCNTraceInput', () => {
     expect(response['gen_ai.usage.cache_read.input_tokens']).toBe(24_576);
     expect(response['gen_ai.usage.total_tokens']).toBe(32_911);
     expect(response['gen_ai.request.model']).toBe('qmodel_latest');
+    expect(response['gen_ai.response.model']).toBe('qmodel_latest');
+    expect(entries.every(value => value['gen_ai.request.model'] === 'qmodel_latest')).toBe(true);
     expect(entries.every(value => value['gen_ai.agent.type'] === ClientType.QwenWorkCN)).toBe(true);
     expect(entries[0]?.trace_id).toMatch(/^[0-9a-f]{32}$/);
   });
