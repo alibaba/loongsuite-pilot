@@ -97,6 +97,17 @@ Required levels follow OpenTelemetry wording:
 | `workspace.path` | string | Recommended | Absolute working directory the agent ran in (process cwd), independent of git. Present even when the directory is not a git repository. |
 | `agent.*` | json | Opt-In | Agent-specific extension attributes. Stable high-query dimensions should become structured fields over time. |
 
+## Custom Agent Identity
+
+When a supported agent process starts with the following environment variables, Pilot writes the worker context to the current turn:
+
+| Environment variable | Event field | Description |
+|----------------------|-------------|-------------|
+| `AGENTTEAMS_WORKER_NAME` | `gen_ai.agent.name`, `resourceAttributes["agentteams.worker.name"]` | Logical worker name; takes precedence over the native name for a main agent. |
+| `AGENTTEAMS_INSTANCE_ID` | `resourceAttributes["agentteams.instance.id"]` | Concrete worker instance; never overwrites `gen_ai.agent.id`. |
+
+This is currently supported for Claude Code, Qoder, Codex, OpenCode, Pi Coding Agent, MiMo Code, Qwen Code CLI, and Cursor CLI. Cursor Desktop does not consume these variables. Existing event fields and name fallbacks remain unchanged when the variables are absent. Pilot collects only the two fixed allowlisted variables above; other `AGENTTEAMS_*` variables are never written to events or OTLP resources.
+
 ## Provider Names
 
 | Value | Description |

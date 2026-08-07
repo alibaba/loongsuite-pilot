@@ -28,10 +28,15 @@ function writeTranscript(sessionId, records) {
   return file;
 }
 
-function runHook(subcommand, payload) {
+function runHook(subcommand, payload, extraEnv = {}) {
+  const env = { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR };
+  delete env.AGENTTEAMS_WORKER_NAME;
+  delete env.AGENTTEAMS_INSTANCE_ID;
+  delete env.AGENTTEAMS_TOKEN;
+  Object.assign(env, extraEnv);
   const r = spawnSync('node', [PROCESSOR, subcommand], {
     input: JSON.stringify(payload),
-    env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: DATA_DIR },
+    env,
     encoding: 'utf-8',
     timeout: 10_000,
   });
@@ -188,6 +193,47 @@ describe('hook-processor: cmdStop end-to-end', () => {
       .filter((r) => r['gen_ai.turn.id'] === `${sid}:t2`)
       .map((r) => r['event.name']);
     expect(turn2EventNames).toContain('llm.response');
+  });
+
+  test('binds each resumed turn to the current worker without stale context', () => {
+    const sid = 'sess-worker-resume-1';
+    const transcriptPath = writeTranscript(sid, [
+      userRec('u1', 'q1', '2026-06-17T08:00:00.000Z', sid),
+      assistantRec('a1', [{ text: 'a1' }], '2026-06-17T08:00:10.000Z', {}, sid),
+    ]);
+    const payload = {
+      session_id: sid,
+      transcript_path: transcriptPath,
+      cwd: '/work',
+      stop_reason: 'end_turn',
+    };
+
+    runHook('stop', payload, {
+      AGENTTEAMS_WORKER_NAME: 'planner',
+      AGENTTEAMS_INSTANCE_ID: 'qwen-instance-01',
+      AGENTTEAMS_TOKEN: 'must-not-leak',
+    });
+
+    fs.appendFileSync(transcriptPath, [
+      userRec('u2', 'q2', '2026-06-17T08:01:00.000Z', sid),
+      assistantRec('a2', [{ text: 'a2' }], '2026-06-17T08:01:10.000Z', {}, sid),
+    ].map((record) => JSON.stringify(record)).join('\n') + '\n');
+
+    runHook('stop', payload, {
+      AGENTTEAMS_WORKER_NAME: 'reviewer',
+      AGENTTEAMS_INSTANCE_ID: 'qwen-instance-02',
+    });
+
+    const records = readEmittedRecords();
+    const turn1 = records.filter((record) => record['gen_ai.turn.id'] === `${sid}:t1`);
+    const turn2 = records.filter((record) => record['gen_ai.turn.id'] === `${sid}:t2`);
+    expect(turn1.length).toBeGreaterThan(0);
+    expect(turn2.length).toBeGreaterThan(0);
+    expect(turn1.every((record) => record['gen_ai.agent.name'] === 'planner')).toBe(true);
+    expect(turn2.every((record) => record['gen_ai.agent.name'] === 'reviewer')).toBe(true);
+    expect(turn1[0].resourceAttributes['agentteams.instance.id']).toBe('qwen-instance-01');
+    expect(turn2[0].resourceAttributes['agentteams.instance.id']).toBe('qwen-instance-02');
+    expect(JSON.stringify(records)).not.toContain('must-not-leak');
   });
 
   test('first-run guard: long transcript with many turns only emits last turn', () => {

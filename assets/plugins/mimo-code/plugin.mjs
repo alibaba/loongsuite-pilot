@@ -37,10 +37,20 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import {
+  agentBaseFieldPatch,
+  collectResourceAttributesFromEnv,
+} from "../shared/resource-context.mjs";
 
 const AGENT_TYPE = "mimo-code";
 const MAX_SESSIONS = 100;
 const MAX_CONTENT_SIZE = 64 * 1024;
+
+const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_TYPE });
+const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
+const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
+  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
+  : {};
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -261,6 +271,8 @@ function buildCommonFields(sessionID, session, userId) {
     // it as a resource attribute, but mirroring it here on every record keeps
     // the event log self-describing for downstream tooling.
     "gen_ai.framework": AGENT_TYPE,
+    ...RESOURCE_BASE_FIELD_PATCH,
+    ...RESOURCE_ATTRIBUTE_FIELDS,
   };
 }
 
