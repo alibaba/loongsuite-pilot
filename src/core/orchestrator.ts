@@ -51,6 +51,12 @@ import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
 import { TraceLinker } from './upstream-link/trace-linker.js';
 import { AcpCorrelateRetentionService } from './upstream-link/acp-correlate-retention-service.js';
+import {
+  anyAgentMultimodalEnabled,
+  createUploader,
+  isAgentMultimodalEnabled,
+  MultimodalProcessor,
+} from '../multimodal/index.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
@@ -131,6 +137,8 @@ export class Orchestrator extends EventEmitter {
   private statusBarAppManager: StatusBarAppManager | null = null;
   private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
+  /** Shared multimodal processor when infra + agents opt in; also used for Input wiring. */
+  private multimodalProcessor: MultimodalProcessor | null = null;
 
   constructor(config: AnalyticsConfig) {
     super();
@@ -193,6 +201,25 @@ export class Orchestrator extends EventEmitter {
       // config.json dataDir that diverges from where they write silently yields
       // no linking, so surface the resolved dir for diagnosis.
       logger.info('upstream trace linking enabled', { correlateDir, ttlMs: this.config.upstreamLink.ttlMs });
+    }
+
+    // Multimodal: shared Processor/Uploader when infra + at least one agent opts in.
+    // Per-input enablement is wired at registration (Input caches; no per-entry gate).
+    const multimodalConfig = this.config.multimodal;
+    const agentsWantMultimodal = anyAgentMultimodalEnabled(this.config.agents);
+    this.multimodalProcessor = null;
+    if (agentsWantMultimodal && !multimodalConfig) {
+      logger.warn('agents enable multimodal but global multimodal infra is missing; inputs will not convert media to uri');
+    } else if (multimodalConfig && agentsWantMultimodal) {
+      try {
+        const uploader = createUploader(multimodalConfig);
+        const processor = new MultimodalProcessor(multimodalConfig.storageBasePath, uploader);
+        this.inputManager.setMultimodalProcessor(processor);
+        this.multimodalProcessor = processor;
+        logger.info('multimodal processor enabled', { uploader: multimodalConfig.uploader });
+      } catch (err) {
+        logger.error('multimodal init failed; disabled for process', { error: String(err) });
+      }
     }
 
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
@@ -1037,8 +1064,16 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Codex rollout transcript (completed and interrupted turns) ---
+    const codexAgentCfg = this.config.agents.codex ?? { captureMessageContent: true };
+    const codexMultimodalEnabled = !!this.multimodalProcessor
+      && isAgentMultimodalEnabled('codex', codexAgentCfg);
     const codexTranscriptInput = new CodexTranscriptInput({
       stateStore: this.stateStore,
+      multimodal: {
+        enabled: codexMultimodalEnabled,
+        uploadMode: codexAgentCfg.multimodal?.uploadMode ?? 'none',
+        ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
+      },
     });
     this.inputManager.registerInput(codexTranscriptInput);
     entries.push(

@@ -402,6 +402,22 @@ describe('InputManager', () => {
       expect(stopped).toBe(true);
       expect(flusher.sendBatch).toHaveBeenCalledTimes(1);
     });
+
+    it('shuts down multimodal processor after draining queues', async () => {
+      const shutdown = vi.fn(async () => undefined);
+      manager.setMultimodalProcessor({ shutdown } as any);
+      await manager.stopAll();
+      expect(shutdown).toHaveBeenCalledTimes(1);
+    });
+
+    it('continues stopAll when multimodal processor shutdown fails', async () => {
+      const shutdown = vi.fn(async () => {
+        throw new Error('shutdown boom');
+      });
+      manager.setMultimodalProcessor({ shutdown } as any);
+      await expect(manager.stopAll()).resolves.toBeUndefined();
+      expect(shutdown).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('no flusher warning', () => {

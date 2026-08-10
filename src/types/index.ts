@@ -121,6 +121,8 @@ export interface AnalyticsConfig {
   statusBar: StatusBarConfig;
   autoUpdate?: AutoUpdateConfig;
   upstreamLink: UpstreamLinkConfig;
+  /** Global multimodal storage infra; policy is under agents.<id>.multimodal. */
+  multimodal?: MultimodalRuntimeConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
   globalSpanAttributes?: Record<string, string>;
 }
@@ -136,9 +138,60 @@ export interface UpstreamLinkConfig {
   ttlMs: number;
 }
 
+export const MULTIMODAL_UPLOAD_MODES = [
+  'none',
+  // 'input',
+  // 'output',
+  'both',
+] as const;
+export type MultimodalUploadMode = (typeof MULTIMODAL_UPLOAD_MODES)[number];
+
+export const MULTIMODAL_UPLOADER_KINDS = ['sls', 'oss'] as const;
+export type MultimodalUploaderKind = (typeof MULTIMODAL_UPLOADER_KINDS)[number];
+
+export interface MultimodalOssConfig {
+  endpoint: string;
+  accessKeyId: string;
+  accessKeySecret: string;
+  securityToken?: string;
+}
+
+export interface MultimodalSlsConfig {
+  endpoint: string;
+  project: string;
+  logstore: string;
+  accessKeyId: string;
+  accessKeySecret: string;
+  securityToken?: string;
+}
+
+/**
+ * Global multimodal storage infrastructure. Capture/upload policy is per-agent
+ * under AgentConfig.multimodal.
+ * storageBasePath: required oss:// for OSS; for SLS derived as sls://{project}/{logstore}.
+ */
+export interface MultimodalRuntimeConfig {
+  uploader: MultimodalUploaderKind;
+  storageBasePath: string;
+  oss?: MultimodalOssConfig;
+  sls?: MultimodalSlsConfig;
+}
+
+/**
+ * config.json `agents.<id>` keys with multimodal extraction implemented.
+ * Capability lives in code (not user config); expand as more agents land.
+ */
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex'] as const;
+
+/** Per-agent multimodal policy. uploadMode=none (default) disables. */
+export interface AgentMultimodalConfig {
+  uploadMode: MultimodalUploadMode;
+}
+
 export interface AgentConfig {
   enabled?: boolean;
   captureMessageContent: boolean;
+  multimodal?: AgentMultimodalConfig;
 }
 
 export type AgentsConfig = Record<string, AgentConfig>;
