@@ -65,11 +65,16 @@ interface MinimaxCodeRolloutFileState {
  *     为 null/空 + 无 text/toolCalls → 注入 finish_reasons=['interrupted']
  *     + 占位 output.messages + 0 usage, 满足 validate-trace 强制规则。
  *
- * Round 3 deferred (见 PR description "Future Work"):
- *   - `BaseSessionInput.processSessionLine` 改 multi-entry return, 让 rollout
- *     emit llm.request + llm.response pair (当前 emit 单 entry, 含 input
- *     + output messages)。需要 base class 改动, 影响所有 SessionInput 子类。
- *   - synthesizeOrphanToolRecords flusher 增强, 视真实 E2E 数据决定。
+ * Round 4 (PR #233): processSessionLine now emits paired
+ *   llm.request + llm.response entries (Round 3 changed BaseSessionInput
+ *   to multi-entry return; this input was migrated to match). Emits
+ *   shared trace_id, session/turn/step, agent.type, response.id,
+ *   request.id so the OTLP pairLlm can pair them into a single STEP
+ *   span.
+ *
+ * Round 4 future work (见 PR description "Future Work"):
+ *   - synthesizeOrphanToolRecords flusher enhancement, deferred
+ *     until real E2E traces show the orphan case.
  */
 export class MinimaxCodeRolloutInput extends BaseSessionInput {
   readonly id = 'minimax-code-rollout';
@@ -237,10 +242,20 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     const traceId = this.normalizeTraceId(
       (record['traceId'] as string | undefined) ?? (record['trace_id'] as string | undefined),
     );
-    const responseId = (response['responseId'] as string | undefined)
+    // requestId / responseId: read top-level first (canonical location per
+    // MiniMax Code rollout schema; stable across retries — e.g. attempt 2
+    // keeps the same id even if startedAt shifts), then fall back to the
+    // nested request/response object, then to a synthetic string. This
+    // mirrors PR #101 zcode-rollout-input behavior and keeps OTLP pair key
+    // stable across retry records.
+    const responseId = (record['responseId'] as string | undefined)
+      ?? (record['response_id'] as string | undefined)
+      ?? (response['responseId'] as string | undefined)
       ?? (response['response_id'] as string | undefined)
       ?? `${sessionId}:${turnId ?? 'unknown'}:${String(startedAt ?? '')}`;
-    const requestId = (request['requestId'] as string | undefined)
+    const requestId = (record['requestId'] as string | undefined)
+      ?? (record['request_id'] as string | undefined)
+      ?? (request['requestId'] as string | undefined)
       ?? (request['request_id'] as string | undefined)
       ?? `${sessionId}:${turnId ?? 'unknown'}:req:${String(startedAt ?? '')}`;
 

@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { MinimaxCodeLogInput } from '../../../src/inputs/minimax-code-log/minimax-code-log-input.js';
 
@@ -25,11 +25,20 @@ describe('MinimaxCodeLogInput', () => {
     expect(input.agentType).toBe('minimax-code');
   });
 
-  it('checkAvailability 在目录不存在时返回 false', async () => {
-    const elsewhere = path.join(TMPDIR, 'no-such-dir');
-    const input = new MinimaxCodeLogInput({ stateStore, logDir: elsewhere });
-    expect(await MinimaxCodeLogInput.checkAvailability()).toBe(false);
-    expect(input.agentType).toBe('minimax-code');
+  it('checkAvailability 在目录不存在时返回 false (mock directoryExists)', async () => {
+    // Copilot review (PR #233, suppressed): 静态 checkAvailability 读真实
+    // ~ 路径, 直接调会受 dev 机 ~/.loongsuite-pilot/logs/minimax-code
+    // 是否存在影响. 用 vi.mock 强制 directoryExists 返回 false, 测
+    // 逻辑层短路.
+    const fsUtils = await import('../../../src/utils/fs-utils.js');
+    const spy = vi.spyOn(fsUtils, 'directoryExists').mockResolvedValue(false);
+    try {
+      const result = await MinimaxCodeLogInput.checkAvailability();
+      expect(result).toBe(false);
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('transformRecord 接受最小可用 llm.response record', async () => {

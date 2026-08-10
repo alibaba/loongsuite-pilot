@@ -27,9 +27,12 @@
  *     只在 Stop 给最终响应,无法支撑 per-LLM 配对。这部分由 minimax-code-rollout
  *     input 从 ~/.minimax-code/rollout/ 补全(每条 record 含完整 request body +
  *     response text/toolCalls/usage + startedAt/completedAt)。
- *   - Stop 事件只发 "other" 标记 turn 元数据(agent.event.name=stop, tool.call.count),
- *     不带 terminal finish_reason —— terminal signal 由 rollout input 的最后一条
- *     llm.response(finish_reason=stop)提供, turnIdleTimeoutMs(120s) 作为兜底。
+ *   - Stop 事件发 "other" 标记 turn 元数据(agent.event.name=stop, tool.call.count),
+ *     并携带 gen_ai.response.finish_reasons=['end_turn'|'interrupted'] 触发 Signal A
+ *     立即 flush。turnFlushDebounceMs(35s) 给 minimax-code-log input (5s poll) 和
+ *     minimax-code-rollout input (30s poll) 留出 dispatch 时间。真正的 per-LLM
+ *     llm.response (含 finish_reason) 由 rollout input 从
+ *     ~/.minimax-code/rollout/*.jsonl 补全。
  *
  * 字段命名全部使用 ARMS GenAI 约定的 gen_ai.* 前缀。
  * finish_reasons 输出为 string[](规范要求 array)。

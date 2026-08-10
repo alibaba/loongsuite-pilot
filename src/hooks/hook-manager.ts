@@ -131,7 +131,10 @@ export class HookManager {
 
       const hookEntry = def.useNestedFormat
         ? {
-            matcher: def.matcher ?? '*',
+            // matcher 缺省时不写空字段 (跟 zcode PR #101 / hook-manager.ts:144
+            // flat format 行为保持一致)。 某些 host (如 MiniMax Code) 对
+            // matcher: '*' 敏感或直接 reject, 显式省略更安全。
+            ...(def.matcher ? { matcher: def.matcher } : {}),
             hooks: [{
               command: def.hookCommand,
               type: 'command',

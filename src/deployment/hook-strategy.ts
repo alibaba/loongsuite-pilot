@@ -249,6 +249,23 @@ export class HookStrategy implements DeployStrategy {
         }
       }
 
+      if (hookConfig.extraSettings) {
+        try {
+          await this.applyExtraSettings(
+            hookConfig.settingsPath,
+            hookConfig.extraSettings,
+          );
+        } catch (err) {
+          // extraSettings merge failure must not block hook deployment — pilot
+          // can still write the hook entry; the sibling flag (e.g.
+          // settings.hooks.enabled=true) is a soft requirement.
+          logger.warn('settings.extraSettings merge failed (non-blocking)', {
+            agentId: def.id,
+            error: String(err),
+          });
+        }
+      }
+
       const hookDefs = this.buildHookDefinitions(def);
       for (const hookDef of hookDefs) {
         const installed = await this.hookManager.isHookInstalled(hookDef);
@@ -444,11 +461,17 @@ export class HookStrategy implements DeployStrategy {
     const hookConfig = def.hook;
     if (!hookConfig) return [];
 
+    // Round 4 (PR #233): honor `hookContainerPath` (default ['hooks']) so
+    // agents with non-standard config schemas (ZCode, MiniMax Code nest
+    // event arrays under settings.hooks.events.<event>) get their hooks
+    // written to the correct JSON path. Mirrors PR #101 hook-strategy
+    // change.
+    const containerPath = hookConfig.hookContainerPath ?? ['hooks'];
     return hookConfig.events.map(event => ({
       agentId: def.id,
       settingsPath: hookConfig.settingsPath,
       settingsSyntax: hookConfig.settingsSyntax,
-      hookJsonPath: ['hooks', event],
+      hookJsonPath: [...containerPath, event],
       hookCommand: formatHookCommand(
         hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
       ),
@@ -468,13 +491,14 @@ export class HookStrategy implements DeployStrategy {
     const hookConfig = def.hook;
     if (!hookConfig?.retiredEvents?.length) return [];
     const currentEvents = new Set(hookConfig.events);
+    const containerPath = hookConfig.hookContainerPath ?? ['hooks'];
     return [...new Set(hookConfig.retiredEvents)]
       .filter(event => !currentEvents.has(event))
       .map(event => ({
         agentId: def.id,
         settingsPath: hookConfig.settingsPath,
         settingsSyntax: hookConfig.settingsSyntax,
-        hookJsonPath: ['hooks', event],
+        hookJsonPath: [...containerPath, event],
         hookCommand: formatHookCommand(
           hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
         ),
@@ -543,6 +567,56 @@ export class HookStrategy implements DeployStrategy {
     existing.env = envBlock;
     await writeJsonFile(settingsPath, existing);
     logger.info('settings.env merged', { settingsPath, keys: Object.keys(env) });
+  }
+
+  /**
+   * Round 4 (PR #233): Deep-merge `extraSettings` into the agent's settings
+   * file. Used by agents like ZCode / MiniMax Code that require a sibling
+   * flag (e.g. `settings.hooks.enabled = true`) for the registered hook
+   * entries to actually fire.
+   *
+   * Merge semantics: walk both trees, overwrite at leaf level, recurse into
+   * nested objects without blowing away sibling keys the user already
+   * configured (preserves `model` / `provider` etc.). Mirrors PR #101.
+   */
+  private async applyExtraSettings(
+    settingsPath: string,
+    extra: Record<string, unknown>,
+  ): Promise<void> {
+    const existing =
+      (await readJsonFile<Record<string, unknown>>(settingsPath)) ?? {};
+
+    const mergeLeaf = (
+      target: Record<string, unknown>,
+      src: Record<string, unknown>,
+    ): boolean => {
+      let changed = false;
+      for (const [key, value] of Object.entries(src)) {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          const child = (target[key] as Record<string, unknown> | undefined) ?? {};
+          if (typeof child !== 'object' || Array.isArray(child)) {
+            target[key] = value;
+            changed = true;
+            continue;
+          }
+          if (mergeLeaf(child, value as Record<string, unknown>)) {
+            target[key] = child;
+            changed = true;
+          }
+        } else {
+          if (target[key] !== value) {
+            target[key] = value;
+            changed = true;
+          }
+        }
+      }
+      return changed;
+    };
+
+    const changed = mergeLeaf(existing, extra);
+    if (!changed) return;
+    await writeJsonFile(settingsPath, existing);
+    logger.info('settings.extraSettings merged', { settingsPath, keys: Object.keys(extra) });
   }
 
   /**
