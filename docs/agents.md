@@ -125,8 +125,46 @@ Use `config.json` when you need to control message content capture:
 |---------|-------------|
 | `enabled` | Set to `false` to disable the agent from config. |
 | `captureMessageContent` | Set to `false` to avoid collecting full prompts, completions, tool arguments, and tool results where the integration supports that policy. |
+| `multimodal.uploadMode` | Multimodal upload policy. `none` (default) disables conversion; `both` converts supported image blobs to object-storage `uri` parts at write time. Extraction is implemented for `codex` only today. |
 
 For sensitive environments, pair `captureMessageContent: false` with [Data Masking](masking.md).
+
+## Configure Multimodal Per Agent
+
+Multimodal collection needs both:
+
+1. Global `config.multimodal` object-storage infrastructure; see [Configuration Guide](configuration.md#multimodal-object-storage).
+2. A non-`none` `uploadMode` on the target agent.
+
+Example (Codex):
+
+```json
+{
+  "multimodal": {
+    "uploader": "oss",
+    "storageBasePath": "oss://your-bucket/pilot-mm",
+    "oss": {
+      "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+      "accessKeyId": "your-access-key-id",
+      "accessKeySecret": "your-access-key-secret"
+    }
+  },
+  "agents": {
+    "codex": {
+      "enabled": true,
+      "captureMessageContent": true,
+      "multimodal": { "uploadMode": "both" }
+    }
+  }
+}
+```
+
+Behavior summary:
+
+- Codex transcript `input_image` data-URLs (including tool image outputs) are converted to `uri` parts at write time; base64 is not written into JSONL.
+- Upload is asynchronous; when the queue is full or upload fails, Pilot may still emit an optimistic `uri` (dangling) and log a warning.
+- With `captureMessageContent: false`, `gen_ai.input.multimodal_metadata` is stripped together with other message-content fields.
+- Only `codex` is wired today; other agent IDs ignore `uploadMode` until their extractors land.
 
 ## Verify Agent Collection
 

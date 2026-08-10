@@ -25,9 +25,9 @@ This directory contains user-facing guides for installing, configuring, operatin
 
 | Document | Use It For |
 |----------|------------|
-| [Agent Configuration](agents.md) | Select agents and control message content capture. |
+| [Agent Configuration](agents.md) | Select agents and control message content and multimodal capture. |
 | [Data Masking](masking.md) | Mask secrets and personal sensitive data before output. |
-| [Output Event Schema](output-event-schema.md) | Review normalized event names, fields, provider values, and finish reasons. |
+| [Output Event Schema](output-event-schema.md) | Review normalized event names, fields, multimodal uri parts, provider values, and finish reasons. |
 
 ## Extend Pilot
 

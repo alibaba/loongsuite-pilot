@@ -67,11 +67,66 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 
 同一个 SLS 目标里不要同时配置 `apiKey` 和 `accessKeyId` / `accessKeySecret`。完整模式示例见 [SLS 输出](sls-output.md)。
 
+## 多模态对象存储
+
+当需要把 Codex 等 Agent 消息中的图片从 base64 转为对象存储 `uri` 时，在 `config.json` 配置全局多模态基础设施。是否实际上传由各 Agent 的 `agents.<id>.multimodal.uploadMode` 控制，见 [Agent 配置](agents.md)。
+
+### OSS
+
+```json
+{
+  "multimodal": {
+    "uploader": "oss",
+    "storageBasePath": "oss://your-bucket/pilot-mm",
+    "oss": {
+      "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+      "accessKeyId": "your-access-key-id",
+      "accessKeySecret": "your-access-key-secret"
+    }
+  }
+}
+```
+
+| 配置项 | 说明 |
+|--------|------|
+| `multimodal.uploader` | `oss` 或 `sls`。 |
+| `multimodal.storageBasePath` | OSS 必填，须以 `oss://` 开头，形如 `oss://bucket/prefix`。 |
+| `multimodal.oss.endpoint` | 标准区域 Endpoint（不支持 accelerate）。 |
+| `multimodal.oss.accessKeyId` / `accessKeySecret` | 访问凭证；可选 `securityToken`（STS）。 |
+
+### SLS PutObject
+
+SLS 多模态走独立 PutObject 通道，与日志 `sls` flusher 不是同一配置块。`storageBasePath` 由 `project` / `logstore` 推导为 `sls://{project}/{logstore}`，无需手写。
+
+```json
+{
+  "multimodal": {
+    "uploader": "sls",
+    "sls": {
+      "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+      "project": "your-project",
+      "logstore": "logstore-multimodal",
+      "accessKeyId": "your-access-key-id",
+      "accessKeySecret": "your-access-key-secret"
+    }
+  }
+}
+```
+
+| 配置项 | 说明 |
+|--------|------|
+| `multimodal.sls.endpoint` | SLS Endpoint。 |
+| `multimodal.sls.project` | SLS Project。 |
+| `multimodal.sls.logstore` | 用于存放多模态对象的 Logstore；缺省为 `logstore-multimodal`。 |
+| `multimodal.sls.accessKeyId` / `accessKeySecret` | 访问凭证；可选 `securityToken`（STS）。 |
+
+全局多模态配置缺失或非法时，Pilot 会 fail-open：进程继续采集文本，但不做 blob→uri 转换。
+
 ## 配置主题
 
 | 任务 | 文档 |
 |------|------|
-| 选择采集哪些 Agent，是否采集消息内容 | [Agent 配置](agents.md) |
+| 选择采集哪些 Agent，是否采集消息内容 / 多模态 | [Agent 配置](agents.md) |
 | 写入本地 JSONL 文件 | [本地 JSONL 输出](local-jsonl-output.md) |
 | 上报日志到阿里云 SLS | [SLS 输出](sls-output.md) |
 | 将 GenAI 活动上报为 OTLP Trace | [Trace 输出](trace-output.md) |

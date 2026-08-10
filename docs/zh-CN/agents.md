@@ -121,8 +121,46 @@ loongsuite-pilot restart
 |--------|------|
 | `enabled` | 设置为 `false` 可从配置层禁用该 Agent。 |
 | `captureMessageContent` | 设置为 `false` 可避免采集完整 Prompt、Completion、工具参数和工具结果，前提是对应集成支持该策略。 |
+| `multimodal.uploadMode` | 多模态上传策略。`none`（默认）关闭；`both` 在写时将支持的图片 blob 转为对象存储 `uri`。当前仅 `codex` 实现了提取。 |
 
 敏感环境建议同时设置 `captureMessageContent: false` 和 [数据脱敏](masking.md)。
+
+## 按 Agent 配置多模态
+
+多模态需要两处同时就绪：
+
+1. 全局 `config.multimodal` 对象存储基础设施，见 [配置总览](configuration.md#多模态对象存储)。
+2. 对应 Agent 的 `uploadMode` 不为 `none`。
+
+示例（Codex）：
+
+```json
+{
+  "multimodal": {
+    "uploader": "oss",
+    "storageBasePath": "oss://your-bucket/pilot-mm",
+    "oss": {
+      "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+      "accessKeyId": "your-access-key-id",
+      "accessKeySecret": "your-access-key-secret"
+    }
+  },
+  "agents": {
+    "codex": {
+      "enabled": true,
+      "captureMessageContent": true,
+      "multimodal": { "uploadMode": "both" }
+    }
+  }
+}
+```
+
+行为摘要：
+
+- Codex transcript 中的 `input_image` data-URL（含工具读图结果）会在写时转为 `uri` part，不再把 base64 写入 JSONL。
+- 上传异步进行；队列满或上传失败时仍可能返回乐观 `uri`（dangling），并打 warn 日志。
+- `captureMessageContent: false` 时，`gen_ai.input.multimodal_metadata` 会与其他消息内容字段一并剥离。
+- 当前能力仅对 `codex` 生效；其他 Agent ID 即使配置了 `uploadMode` 也不会转换。
 
 ## 验证 Agent 采集
 
