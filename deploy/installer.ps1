@@ -584,7 +584,7 @@ function Probe-Agents {
             $script:PROBE_RESULT = "[]"
         }
     }
-    $count = $script:PROBE_RESULT | & $script:NODE_BIN -e "const r=JSON.parse(require('fs').readFileSync(0,'utf-8'));process.stdout.write(String(r.length))" 2>$null
+    $count = $script:PROBE_RESULT | & $script:NODE_BIN -e "const r=JSON.parse(require('fs').readFileSync(0,'utf-8').replace(/^\uFEFF/,''));process.stdout.write(String(r.length))" 2>$null
     $ErrorActionPreference = $prevEAP
     if (-not $count) { $count = "0" }
     Msg "    ✅ 探测到 ${count} 个 Agent 定义" "    ✅ Found ${count} agent definitions"
@@ -619,7 +619,7 @@ function Select-Agents {
     }
 
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $agentCount = $script:PROBE_RESULT | & $script:NODE_BIN -e "const r=JSON.parse(require('fs').readFileSync(0,'utf-8'));process.stdout.write(String(r.length))" 2>$null
+    $agentCount = $script:PROBE_RESULT | & $script:NODE_BIN -e "const r=JSON.parse(require('fs').readFileSync(0,'utf-8').replace(/^\uFEFF/,''));process.stdout.write(String(r.length))" 2>$null
     $ErrorActionPreference = $prevEAP
     if (-not $agentCount -or $agentCount -eq "0") { return }
 
@@ -627,7 +627,7 @@ function Select-Agents {
     if (-not (Test-Interactive)) {
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
         $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
-const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
+const r = JSON.parse(require('fs').readFileSync(0,'utf-8').replace(/^\uFEFF/,''));
 const detected = r.filter(a => a.detected).map(a => a.id);
 process.stdout.write(detected.join(','));
 '@ 2>$null
@@ -641,7 +641,7 @@ process.stdout.write(detected.join(','));
     # Interactive menu
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $script:PROBE_RESULT | & $script:NODE_BIN -e @'
-const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
+const r = JSON.parse(require('fs').readFileSync(0,'utf-8').replace(/^\uFEFF/,''));
 const lang = process.argv[1];
 const defaults = [];
 for (let i = 0; i < r.length; i++) {
@@ -668,7 +668,7 @@ if (lang === 'zh') {
 
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
-const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
+const r = JSON.parse(require('fs').readFileSync(0,'utf-8').replace(/^\uFEFF/,''));
 const input = (process.argv[1] || '').replace(/[，、；]/g, ',');
 let indices;
 if (!input.trim()) {
@@ -702,7 +702,7 @@ function Prompt-UserId {
         try {
             $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
             $existingUid = & $script:NODE_BIN -e @'
-try { const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf-8')); process.stdout.write(c.userId||''); } catch {}
+try { const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf-8').replace(/^\uFEFF/,'')); process.stdout.write(c.userId||''); } catch {}
 '@ $configFile 2>$null
             $ErrorActionPreference = $prevEAP
         } catch {}
@@ -747,7 +747,7 @@ function Confirm-ConfigOverwrite {
     $diffs = & $script:NODE_BIN -e @'
 const fs = require('fs');
 let old = {};
-try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
+try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8').replace(/^\uFEFF/,'')); } catch { process.exit(0); }
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
 const checks = [
@@ -963,10 +963,10 @@ function Write-Config {
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $cfgJson | & $script:NODE_BIN -e @'
 const fs = require('fs');
-const opts = JSON.parse(fs.readFileSync(0, 'utf-8'));
+const opts = JSON.parse(fs.readFileSync(0, 'utf-8').replace(/^\uFEFF/,''));
 
 let existing = {};
-try { existing = JSON.parse(fs.readFileSync(opts.configPath, 'utf-8')); } catch {}
+try { existing = JSON.parse(fs.readFileSync(opts.configPath, 'utf-8').replace(/^\uFEFF/,'')); } catch {}
 
 const config = {
   ...existing,
@@ -1032,8 +1032,15 @@ if (opts.allAgentsMode === '1') {
 
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 '@
+    $writeExit = $LASTEXITCODE
     $ErrorActionPreference = $prevEAP
 
+    # node prints its stack to stderr and exits non-zero on failure; without this check
+    # the installer would print "✅ Config written" over a config that was never updated.
+    if ($writeExit -ne 0 -or -not (Test-Path $configFile)) {
+        Msg "    ❌ 配置写入失败 (node 退出码 $writeExit)" "    ❌ Config write failed (node exit $writeExit)"
+        exit 1
+    }
     Msg "    ✅ 配置已写入" "    ✅ Config written"
     Write-Host ""
 }
@@ -1273,7 +1280,7 @@ const fs = require('fs');
 const cfg = process.argv[1];
 const marker = process.argv[2];
 try {
-  const data = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
+  const data = JSON.parse(fs.readFileSync(cfg, 'utf-8').replace(/^\uFEFF/,''));
   const hooks = data.hooks;
   if (!hooks || typeof hooks !== 'object') process.exit(0);
   let changed = false;
@@ -1320,7 +1327,7 @@ const fs = require('fs');
 const f = process.argv[1];
 const isOurs = c => c.includes('otel-claude-hook') || c.includes('hook-entry.sh');
 try {
-  const d = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  const d = JSON.parse(fs.readFileSync(f, 'utf-8').replace(/^\uFEFF/,''));
   if (d && d.hooks) {
     for (const ev of Object.keys(d.hooks)) {
       if (!Array.isArray(d.hooks[ev])) continue;
