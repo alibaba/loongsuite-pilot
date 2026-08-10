@@ -58,14 +58,16 @@ interface CandidateSelection {
   orphanReason?: CodexSubagentLink['orphanReason'];
 }
 
-const MAX_SHADOW_DESCRIPTORS = 10_000;
+export const MAX_LINK_DESCRIPTORS = 10_000;
 
 /**
- * In-memory, depth-one linker used by the phase-2 shadow path.
+ * In-memory linker for depth-one Codex subagents.
  *
- * The linker recalculates assignments from its descriptor registry instead of
- * locking the first match. This lets a child observed before its parent move
- * from orphan/time-order to an exact match when later parent facts arrive.
+ * The linker recalculates assignments as parent and child facts arrive. Only
+ * explicit child ids and unambiguous agent paths are eligible for trace
+ * fusion; time-order links remain available for diagnostics only. Spawn
+ * identity is keyed by parentToolCallId, so repeated agent paths remain
+ * distinct child lifecycles.
  */
 export class CodexSubagentLinker {
   private readonly spawns = new Map<string, CodexSpawnDescriptor>();
@@ -76,7 +78,7 @@ export class CodexSubagentLinker {
       const key = spawnKey(descriptor);
       const previous = this.spawns.get(key);
       this.spawns.set(key, previous ? mergeSpawn(previous, descriptor) : descriptor);
-      trimOldest(this.spawns, MAX_SHADOW_DESCRIPTORS);
+      trimOldest(this.spawns, MAX_LINK_DESCRIPTORS);
     }
   }
 
@@ -91,7 +93,7 @@ export class CodexSubagentLinker {
       ...(meta.agentPath ? { agentPath: meta.agentPath } : {}),
       ...(meta.agentNickname ? { agentNickname: meta.agentNickname } : {}),
     });
-    trimOldest(this.children, MAX_SHADOW_DESCRIPTORS);
+    trimOldest(this.children, MAX_LINK_DESCRIPTORS);
   }
 
   hasThread(threadId: string): boolean {

@@ -47,20 +47,29 @@ export interface CodexPendingFusionChild {
   childThreadId?: string;
 }
 
-/** Parent terminal held until every direct child rollout reaches a terminal. */
+/** Parent task_complete staged until the current cycle rebuilds or degrades its direct children. */
 export interface CodexPendingFusionTurn {
   turnId: string;
   parentThreadId: string;
   parentTraceId: string;
   terminalEndOffset: number;
   children: CodexPendingFusionChild[];
-  createdAtMs: number;
 }
 
-/** Completed child range retained in its rollout until it can be fused. */
+/**
+ * Completed child turn consumed from its rollout but not emitted independently.
+ * The active-turn snapshot lets fusion reconstruct it after the child scan
+ * offset advances or the collector restarts.
+ */
 export interface CodexPendingSubagentTurn {
   turnId: string;
+  parentThreadId: string;
+  parentTurnId: string;
+  parentTraceId: string;
+  parentToolCallId: string;
+  confidence: 'explicit_id' | 'agent_path';
   terminalEndOffset: number;
+  activeTurn: CodexActiveTranscriptTurn;
 }
 
 /**

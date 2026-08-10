@@ -15,6 +15,8 @@ import {
 import {
   CodexSubagentLinker,
   extractCodexSpawnDescriptors,
+  MAX_LINK_DESCRIPTORS,
+  type CodexSubagentLink,
   type CodexSubagentLinkSnapshot,
 } from './codex-subagent-linker.js';
 import {
@@ -34,9 +36,17 @@ import {
   type CodexTranscriptInputContext,
   type CodexTranscriptCheckpoint,
   type CodexTranscriptGlobalState,
+  type CodexTranscriptMeta,
   type CodexTranscriptSourceRange,
 } from './codex-transcript-types.js';
 import { stringValue, timestampMs } from './codex-transcript-utils.js';
+
+type ReliableCodexSubagentLink = CodexSubagentLink & {
+  parentTurnId: string;
+  parentTraceId: string;
+  parentToolCallId: string;
+  confidence: 'explicit_id' | 'agent_path';
+};
 
 const DEFAULT_SESSION_DIR = '~/.codex/sessions';
 const READ_CHUNK_SIZE = 1024 * 1024;
@@ -118,6 +128,14 @@ interface DynamicDirectoryWalkBudget {
   remainingRolloutFiles: number;
 }
 
+interface ParentTurnIndex {
+  filePath: string;
+  inode: number;
+  scanOffset: number;
+  complete: boolean;
+  turnIds: Set<string>;
+}
+
 export interface CodexTranscriptInputOptions extends InputOptions {
   sessionDir?: string;
   wakeupDir?: string;
@@ -139,7 +157,8 @@ export class CodexTranscriptInput extends BaseInput {
   private processedTerminalTurnIdOrder: string[] = [];
   private readonly subagentLinker = new CodexSubagentLinker();
   private readonly reportedSubagentLinks = new Map<string, string>();
-  private lastSubagentShadowSummary = '';
+  private readonly parentTurnIndexes = new Map<string, ParentTurnIndex>();
+  private lastSubagentLinkSummary = '';
   private lastWakeupMarkerCleanupAtMs = 0;
   private lastSpanContextCleanupAtMs = 0;
   private readonly transcriptMetaByPath = new Map<string, ReturnType<typeof extractCodexTranscriptMeta>>();
@@ -213,14 +232,14 @@ export class CodexTranscriptInput extends BaseInput {
       emittedCount += await this.processFile(filePath);
     }
     emittedCount += await this.finalizeReadySubagentFusions();
-    this.reportSubagentShadowLinks();
+    this.reportSubagentLinks();
     if (emittedCount > 0) {
       this.logger.debug('cycle produced entries', { count: emittedCount });
     }
     return [];
   }
 
-  /** Phase-2 diagnostic surface. Shadow linking never mutates emitted records. */
+  /** Current parent/child assignments, including diagnostic-only confidence levels. */
   getSubagentLinkSnapshot(): CodexSubagentLinkSnapshot {
     return this.subagentLinker.snapshot();
   }
@@ -289,37 +308,69 @@ export class CodexTranscriptInput extends BaseInput {
 
     const ownerMeta = this.transcriptMetaByPath.get(filePath) ?? null;
     const isDirectSubagent = ownerMeta?.threadSource === 'subagent' && ownerMeta.depth === 1;
-    if (
-      isDirectSubagent
-      && checkpoint.pendingSubagent
-      && checkpoint.activeTurn
-      && ownerMeta?.createdAtMs !== undefined
-      && isCopiedParentTurn(
-        checkpoint.pendingSubagent.turnId,
-        checkpoint.activeTurn.startedAtMs,
-        ownerMeta.createdAtMs,
-      )
-    ) {
-      checkpoint.pendingSubagent = null;
-      checkpoint.activeTurn = null;
-      checkpointChanged = true;
-    }
-    if (checkpoint.pendingFusion) {
-      const pruned = pruneSupersededFusionChildren(checkpoint.pendingFusion.children);
-      if (pruned.length !== checkpoint.pendingFusion.children.length) {
-        checkpoint.pendingFusion.children = pruned;
-        if (checkpoint.activeTurn) checkpoint.activeTurn.subagentSpawns = pruned;
-        checkpointChanged = true;
-      }
-    }
+    const parentTurnIndex = isDirectSubagent
+      && ownerMeta?.parentThreadId
+      && (checkpoint.scanOffset < stat.size || checkpoint.activeTurn !== null || checkpoint.pendingTerminal !== null)
+      ? await this.refreshParentTurnIndex(ownerMeta.parentThreadId)
+      : undefined;
     if (ownerMeta?.depth === 0) this.registerPersistedSubagentSpawns(checkpoint, ownerMeta.threadId);
-    if (checkpoint.pendingFusion || checkpoint.pendingSubagent) {
-      if (checkpointChanged) this.saveCheckpoint(key, checkpoint);
-      return 0;
-    }
 
     let emittedCount = 0;
     let processedTerminalCount = 0;
+    if (
+      isDirectSubagent
+      && checkpoint.pendingTerminal
+      && checkpoint.activeTurn?.turnId === checkpoint.pendingTerminal.turnId
+      && shouldSkipCopiedParentTurn(
+        checkpoint.pendingTerminal.turnId,
+        checkpoint.activeTurn.startedAtMs,
+        ownerMeta?.createdAtMs,
+        parentTurnIndex,
+      )
+    ) {
+      checkpoint.activeTurn = null;
+      checkpoint.pendingTerminal = null;
+      processedTerminalCount++;
+      checkpointChanged = true;
+    }
+    if (isDirectSubagent && ownerMeta && checkpoint.pendingSubagent) {
+      const candidate = this.reliableCandidateForChild(ownerMeta);
+      if (
+        !candidate
+        || candidate.parentThreadId !== checkpoint.pendingSubagent.parentThreadId
+        || candidate.parentTurnId !== checkpoint.pendingSubagent.parentTurnId
+        || candidate.parentTraceId !== checkpoint.pendingSubagent.parentTraceId
+        || candidate.parentToolCallId !== checkpoint.pendingSubagent.parentToolCallId
+      ) {
+        const released = await this.releaseCapturedSubagentIndependently(filePath, checkpoint);
+        emittedCount += released.emittedCount;
+        processedTerminalCount += released.processedTerminalCount;
+        checkpointChanged = true;
+      }
+    }
+    if (checkpoint.pendingFusion) {
+      const reliableChildren = this.reliableFusionChildren(
+        checkpoint.pendingFusion.parentThreadId,
+        checkpoint.pendingFusion.turnId,
+        checkpoint.pendingFusion.children,
+      );
+      if (reliableChildren.length !== checkpoint.pendingFusion.children.length) {
+        checkpoint.pendingFusion.children = reliableChildren;
+        if (checkpoint.activeTurn) checkpoint.activeTurn.subagentSpawns = reliableChildren;
+        checkpointChanged = true;
+      }
+    }
+    if (checkpoint.pendingFusion?.children.length === 0) {
+      const released = await this.releaseParentFusionIndependently(filePath, checkpoint);
+      emittedCount += released.emittedCount;
+      processedTerminalCount += released.processedTerminalCount;
+      checkpointChanged = true;
+    }
+    if (checkpoint.pendingFusion) {
+      if (checkpointChanged) this.saveCheckpoint(key, checkpoint);
+      return emittedCount;
+    }
+
     let scannedBytes = 0;
 
     const hadPendingTerminal = checkpoint.pendingTerminal !== null;
@@ -403,11 +454,11 @@ export class CodexTranscriptInput extends BaseInput {
           if (
             isDirectSubagent
             && terminalTurnId
-            && ownerMeta?.createdAtMs !== undefined
-            && isCopiedParentTurn(
+            && shouldSkipCopiedParentTurn(
               terminalTurnId,
               checkpoint.activeTurn.startedAtMs,
-              ownerMeta.createdAtMs,
+              ownerMeta?.createdAtMs,
+              parentTurnIndex,
             )
           ) {
             // Forked child rollouts contain copied parent history after their
@@ -418,29 +469,60 @@ export class CodexTranscriptInput extends BaseInput {
             continue;
           }
 
-          if (isDirectSubagent) {
-            if (terminalTurnId) {
-              checkpoint.pendingSubagent = {
-                turnId: terminalTurnId,
-                terminalEndOffset: nextScanOffset,
-              };
-              blocked = true;
-            }
-            checkpoint.scanOffset = nextScanOffset;
-            break;
-          }
-
           const activeBeforeRecovery = terminalTurnId
             ? cloneActiveTurn(checkpoint.activeTurn)
             : null;
+          const reliableCandidate = isDirectSubagent
+            && ownerMeta
+            && !checkpoint.pendingSubagent
+            ? this.reliableCandidateForChild(ownerMeta)
+            : undefined;
+          // A reliably linked child must not emit an independent partial trace
+          // before the parent reaches task_complete. Recover on a clone so the
+          // persisted child snapshot keeps the complete turn range and empty
+          // emission registry for terminal capture or forced finalization.
+          const recoveryCheckpoint = reliableCandidate
+            ? {
+                ...checkpoint,
+                activeTurn: cloneActiveTurn(checkpoint.activeTurn),
+              }
+            : checkpoint;
           const recovered = await this.recoverTurnSegment(
             filePath,
-            checkpoint,
+            recoveryCheckpoint,
             nextScanOffset,
             terminalTurnId !== null,
           );
+          if (
+            terminalTurnId
+            && activeBeforeRecovery
+            && recovered.kind !== 'unparseable'
+            && reliableCandidate
+          ) {
+            checkpoint.pendingSubagent = {
+              turnId: terminalTurnId,
+              parentThreadId: reliableCandidate.parentThreadId,
+              parentTurnId: reliableCandidate.parentTurnId,
+              parentTraceId: reliableCandidate.parentTraceId,
+              parentToolCallId: reliableCandidate.parentToolCallId,
+              confidence: reliableCandidate.confidence,
+              terminalEndOffset: nextScanOffset,
+              activeTurn: activeBeforeRecovery,
+            };
+            // The terminal range is consumed but deliberately not marked as
+            // emitted. The persisted snapshot is the sole owner until fusion.
+            checkpoint.activeTurn = null;
+            checkpoint.scanOffset = nextScanOffset;
+            processedTerminalCount++;
+            continue;
+          }
+          const fusionParentThreadId = ownerMeta?.threadId ?? sessionIdFromTranscriptPath(filePath);
           const fusionChildren = terminalTurnId
-            ? checkpoint.activeTurn?.subagentSpawns ?? []
+            ? this.reliableFusionChildren(
+                fusionParentThreadId,
+                terminalTurnId,
+                checkpoint.activeTurn?.subagentSpawns ?? [],
+              )
             : [];
           if (
             terminalTurnId
@@ -457,19 +539,19 @@ export class CodexTranscriptInput extends BaseInput {
             checkpoint.activeTurn = activeBeforeRecovery;
             checkpoint.pendingFusion = {
               turnId: terminalTurnId,
-              parentThreadId: ownerMeta?.threadId ?? sessionIdFromTranscriptPath(filePath),
+              parentThreadId: fusionParentThreadId,
               parentTraceId: parentTraceIdForChildren(fusionChildren),
               terminalEndOffset: nextScanOffset,
               children: fusionChildren,
-              createdAtMs: Date.now(),
             };
             blocked = true;
-          } else {
+          } else if (!reliableCandidate) {
             emittedCount += this.emitEntryBatches(recovered.entries);
           }
           if (
             recovered.kind !== 'unparseable'
             && !checkpoint.pendingFusion
+            && !reliableCandidate
             && recovered.consumedEndOffset > checkpoint.activeTurn.startOffset
           ) {
             checkpoint.activeTurn.startOffset = recovered.consumedEndOffset;
@@ -564,6 +646,7 @@ export class CodexTranscriptInput extends BaseInput {
     checkpoint: CodexTranscriptCheckpoint,
     endOffset: number,
     terminal: boolean,
+    inferredTerminalStatus?: 'interrupted',
   ): Promise<SegmentRecoveryResult> {
     const activeTurn = checkpoint.activeTurn;
     if (!activeTurn) {
@@ -596,6 +679,7 @@ export class CodexTranscriptInput extends BaseInput {
       };
     }
     const turn = extraction.turn;
+    if (inferredTerminalStatus) turn.status = inferredTerminalStatus;
     updateActiveTurnFromExtractedTurn(activeTurn, turn);
     if (turn.unmatchedTokenUsages.length > 0) {
       this.logger.warn('Codex transcript token samples could not be assigned to a response wave', {
@@ -787,6 +871,67 @@ export class CodexTranscriptInput extends BaseInput {
     }
   }
 
+  /**
+   * Build an incremental ownership index for the exact parent rollout named by
+   * a depth-one child's session_meta. An exact turn-id hit is positive evidence
+   * of copied parent history; a miss is authoritative only after this snapshot
+   * has been scanned to a stable EOF.
+   */
+  private async refreshParentTurnIndex(parentThreadId: string): Promise<ParentTurnIndex | undefined> {
+    const filePath = this.transcriptPathByThreadId.get(parentThreadId);
+    if (!filePath) return undefined;
+    const meta = this.transcriptMetaByPath.get(filePath);
+    if (!meta || meta.threadId !== parentThreadId || meta.depth !== 0) return undefined;
+
+    let stat;
+    try {
+      stat = await fs.stat(filePath);
+    } catch {
+      return undefined;
+    }
+
+    let index = this.parentTurnIndexes.get(parentThreadId);
+    if (
+      !index
+      || index.filePath !== filePath
+      || index.inode !== stat.ino
+      || index.scanOffset > stat.size
+    ) {
+      index = {
+        filePath,
+        inode: stat.ino,
+        scanOffset: 0,
+        complete: false,
+        turnIds: new Set<string>(),
+      };
+      this.parentTurnIndexes.set(parentThreadId, index);
+    }
+
+    if (index.scanOffset < stat.size) {
+      const scan = await scanJsonLines(filePath, index.scanOffset, stat.size, line => {
+        const payload = asRecord(line.record.payload);
+        if (!payload) return;
+        const turnId = turnIdForStart(line.record, payload)
+          ?? terminalTurnIdFor(line.record, payload);
+        if (turnId) index!.turnIds.add(turnId);
+      });
+      index.scanOffset = scan.nextOffset;
+    }
+
+    // Re-stat after scanning so a concurrent parent append cannot turn a stale
+    // EOF snapshot into an authoritative negative ownership decision.
+    try {
+      const current = await fs.stat(filePath);
+      index.complete = current.ino === index.inode && index.scanOffset >= current.size;
+    } catch {
+      index.complete = false;
+    }
+    this.parentTurnIndexes.delete(parentThreadId);
+    this.parentTurnIndexes.set(parentThreadId, index);
+    trimOldestMap(this.parentTurnIndexes, MAX_LINK_DESCRIPTORS);
+    return index;
+  }
+
   private registerPersistedSubagentSpawns(
     checkpoint: CodexTranscriptCheckpoint,
     parentThreadId: string,
@@ -814,9 +959,151 @@ export class CodexTranscriptInput extends BaseInput {
     return false;
   }
 
+  private reliableCandidateForChild(
+    meta: CodexTranscriptMeta,
+  ): ReliableCodexSubagentLink | undefined {
+    if (!meta.parentThreadId) return undefined;
+    const link = this.subagentLinker.snapshot().links.find(candidate => (
+      candidate.childThreadId === meta.threadId
+      && candidate.parentThreadId === meta.parentThreadId
+      && candidate.parentTurnId !== undefined
+      && candidate.parentTraceId !== undefined
+      && candidate.parentToolCallId !== undefined
+      && isReliableFusionConfidence(candidate.confidence)
+    ));
+    if (
+      !link
+      || !link.parentTurnId
+      || !link.parentTraceId
+      || !link.parentToolCallId
+      || !isReliableFusionConfidence(link.confidence)
+    ) return undefined;
+    for (const [filePath, parentMeta] of this.transcriptMetaByPath) {
+      if (parentMeta?.threadId !== link.parentThreadId || parentMeta.depth !== 0) continue;
+      const checkpoint = this.readCheckpoint(this.stateKey(filePath));
+      const parentTurnId = checkpoint?.pendingFusion?.turnId ?? checkpoint?.activeTurn?.turnId;
+      const spawns = checkpoint?.pendingFusion?.children ?? checkpoint?.activeTurn?.subagentSpawns ?? [];
+      if (
+        parentTurnId === link.parentTurnId
+        && spawns.some(spawn => spawn.parentToolCallId === link.parentToolCallId)
+      ) {
+        return {
+          ...link,
+          parentTurnId: link.parentTurnId,
+          parentTraceId: link.parentTraceId,
+          parentToolCallId: link.parentToolCallId,
+          confidence: link.confidence,
+        };
+      }
+    }
+    return undefined;
+  }
+
+  private reliableFusionChildren(
+    parentThreadId: string,
+    parentTurnId: string,
+    children: CodexPendingFusionChild[],
+  ): CodexPendingFusionChild[] {
+    const links = this.subagentLinker.snapshot().links;
+    const reliable: CodexPendingFusionChild[] = [];
+    for (const child of children) {
+      const matches = links.filter(link => (
+        link.parentThreadId === parentThreadId
+        && link.parentTurnId === parentTurnId
+        && link.parentToolCallId === child.parentToolCallId
+        && isReliableFusionConfidence(link.confidence)
+      ));
+      if (matches.length !== 1) continue;
+      const link = matches[0]!;
+      const childPath = this.transcriptPathByThreadId.get(link.childThreadId);
+      const checkpoint = childPath ? this.readCheckpoint(this.stateKey(childPath)) : null;
+      const captured = checkpoint?.pendingSubagent;
+      if (captured && captured.parentToolCallId !== child.parentToolCallId) continue;
+      if (
+        checkpoint
+        && !captured
+        && checkpoint.activeTurn === null
+        && checkpoint.emittedTerminalTurnIds.length > 0
+      ) continue;
+      reliable.push({ ...child, childThreadId: link.childThreadId });
+    }
+    return reliable;
+  }
+
+  private async releaseParentFusionIndependently(
+    filePath: string,
+    checkpoint: CodexTranscriptCheckpoint,
+  ): Promise<{ emittedCount: number; processedTerminalCount: number }> {
+    const pending = checkpoint.pendingFusion;
+    if (!pending) return { emittedCount: 0, processedTerminalCount: 0 };
+
+    checkpoint.scanOffset = Math.max(checkpoint.scanOffset, pending.terminalEndOffset);
+    checkpoint.pendingFusion = null;
+    this.logger.warn('Codex parent fusion has no reliable child candidates; emitting independently', {
+      transcriptPath: filePath,
+      turnId: pending.turnId,
+    });
+
+    if (!checkpoint.activeTurn) {
+      return { emittedCount: 0, processedTerminalCount: 0 };
+    }
+    const recovered = await this.recoverTurnSegment(
+      filePath,
+      checkpoint,
+      pending.terminalEndOffset,
+      true,
+    );
+    if (recovered.kind === 'unparseable') {
+      checkpoint.pendingTerminal = newPendingTerminal(
+        pending.turnId,
+        pending.terminalEndOffset,
+        recovered.diagnostics.sourceRecordCount,
+      );
+      return { emittedCount: 0, processedTerminalCount: 0 };
+    }
+
+    const emittedCount = this.emitEntryBatches(recovered.entries);
+    this.rememberProcessedTerminalTurnId(checkpoint, pending.turnId);
+    this.rememberGlobalProcessedTerminalTurnId(pending.turnId);
+    checkpoint.activeTurn = null;
+    checkpoint.pendingTerminal = null;
+    return { emittedCount, processedTerminalCount: 1 };
+  }
+
+  private async releaseCapturedSubagentIndependently(
+    filePath: string,
+    checkpoint: CodexTranscriptCheckpoint,
+  ): Promise<{ emittedCount: number; processedTerminalCount: number }> {
+    const captured = checkpoint.pendingSubagent;
+    if (!captured) return { emittedCount: 0, processedTerminalCount: 0 };
+    const recoveryCheckpoint: CodexTranscriptCheckpoint = {
+      ...checkpoint,
+      activeTurn: cloneActiveTurn(captured.activeTurn),
+      pendingSubagent: null,
+    };
+    const recovered = await this.recoverTurnSegment(
+      filePath,
+      recoveryCheckpoint,
+      captured.terminalEndOffset,
+      true,
+    );
+    if (recovered.kind === 'unparseable') {
+      this.logger.warn('captured Codex child could not be rebuilt for independent fallback', {
+        transcriptPath: filePath,
+        turnId: captured.turnId,
+        parentToolCallId: captured.parentToolCallId,
+      });
+      return { emittedCount: 0, processedTerminalCount: 0 };
+    }
+    const emittedCount = this.emitEntryBatches(recovered.entries);
+    this.rememberProcessedTerminalTurnId(checkpoint, captured.turnId);
+    this.rememberGlobalProcessedTerminalTurnId(captured.turnId);
+    checkpoint.pendingSubagent = null;
+    return { emittedCount, processedTerminalCount: 1 };
+  }
+
   private async finalizeReadySubagentFusions(): Promise<number> {
     let emittedCount = 0;
-    const links = this.subagentLinker.snapshot().links;
     for (const [parentPath, meta] of this.transcriptMetaByPath) {
       if (!meta || meta.depth !== 0) continue;
       const parentKey = this.stateKey(parentPath);
@@ -825,42 +1112,66 @@ export class CodexTranscriptInput extends BaseInput {
       if (!parentCheckpoint || !pending || !parentCheckpoint.activeTurn) continue;
 
       const resolved = pending.children.map(child => {
-        const linked = links.find(link => (
-          link.parentThreadId === pending.parentThreadId
-          && link.parentTurnId === pending.turnId
-          && link.parentToolCallId === child.parentToolCallId
-          && (!child.childThreadId || link.childThreadId === child.childThreadId)
-        ));
-        const childThreadId = child.childThreadId ?? linked?.childThreadId;
+        const childThreadId = child.childThreadId;
         const childPath = childThreadId ? this.transcriptPathByThreadId.get(childThreadId) : undefined;
         const childCheckpoint = childPath ? this.readCheckpoint(this.stateKey(childPath)) : null;
-        return { child, linked, childThreadId, childPath, childCheckpoint };
+        const captured = childCheckpoint?.pendingSubagent;
+        return { child, childThreadId, childPath, childCheckpoint, captured };
       });
-      if (resolved.some(item => (
-        !item.childThreadId
-        || !item.childPath
-        || !item.childCheckpoint?.pendingSubagent
-        || !item.childCheckpoint.activeTurn
-      ))) continue;
 
       const childOutputs: Array<{
         entries: AgentActivityEntry[];
         path: string;
         checkpoint: CodexTranscriptCheckpoint;
+        turnId: string;
+        parentToolCallId: string;
+        source: 'captured-terminal' | 'forced-parent-terminal';
       }> = [];
-      let ready = true;
+      const degradedToolCallIds: string[] = [];
       for (const item of resolved) {
-        const childCheckpoint = item.childCheckpoint!;
-        const childPending = childCheckpoint.pendingSubagent!;
+        const childCheckpoint = item.childCheckpoint;
+        const childPath = item.childPath;
+        const childThreadId = item.childThreadId;
+        if (!childCheckpoint || !childPath || !childThreadId) {
+          degradedToolCallIds.push(item.child.parentToolCallId);
+          continue;
+        }
+        const captured = item.captured;
+        const capturedMatches = captured
+          && captured.parentThreadId === pending.parentThreadId
+          && captured.parentTurnId === pending.turnId
+          && captured.parentTraceId === pending.parentTraceId
+          && captured.parentToolCallId === item.child.parentToolCallId;
+        const canForceActive = !captured
+          && childCheckpoint.activeTurn !== null
+          && !hasEmittedActiveTurnState(childCheckpoint.activeTurn)
+          && childCheckpoint.scanOffset > childCheckpoint.activeTurn.startOffset;
+        if (!capturedMatches && !canForceActive) {
+          degradedToolCallIds.push(item.child.parentToolCallId);
+          continue;
+        }
+
+        const activeSnapshot = capturedMatches
+          ? captured.activeTurn
+          : childCheckpoint.activeTurn!;
+        const terminalEndOffset = capturedMatches
+          ? captured.terminalEndOffset
+          : childCheckpoint.scanOffset;
+        const recoveryCheckpoint: CodexTranscriptCheckpoint = {
+          ...childCheckpoint,
+          activeTurn: cloneActiveTurn(activeSnapshot),
+          pendingSubagent: null,
+        };
         const recovered = await this.recoverTurnSegment(
-          item.childPath!,
-          childCheckpoint,
-          childPending.terminalEndOffset,
+          childPath,
+          recoveryCheckpoint,
+          terminalEndOffset,
           true,
+          capturedMatches ? undefined : 'interrupted',
         );
         if (recovered.kind === 'unparseable') {
-          ready = false;
-          break;
+          degradedToolCallIds.push(item.child.parentToolCallId);
+          continue;
         }
         childOutputs.push({
           entries: rewriteSubagentEntries(recovered.entries, {
@@ -868,16 +1179,18 @@ export class CodexTranscriptInput extends BaseInput {
             parentTurnId: pending.turnId,
             parentTraceId: pending.parentTraceId,
             parentToolCallId: item.child.parentToolCallId,
-            childThreadId: item.childThreadId!,
-            agentName: this.transcriptMetaByPath.get(item.childPath!)?.agentNickname
+            childThreadId,
+            agentName: this.transcriptMetaByPath.get(childPath)?.agentNickname
               ?? item.child.agentPath
               ?? item.child.taskName,
           }),
-          path: item.childPath!,
+          path: childPath,
           checkpoint: childCheckpoint,
+          turnId: activeSnapshot.turnId,
+          parentToolCallId: item.child.parentToolCallId,
+          source: capturedMatches ? 'captured-terminal' : 'forced-parent-terminal',
         });
       }
-      if (!ready) continue;
 
       const parentRecovered = await this.recoverTurnSegment(
         parentPath,
@@ -887,13 +1200,30 @@ export class CodexTranscriptInput extends BaseInput {
       );
       if (parentRecovered.kind === 'unparseable') continue;
 
+      if (degradedToolCallIds.length > 0) {
+        this.logger.warn('Codex parent reached task_complete before every child could be rebuilt; degrading missing children', {
+          transcriptPath: parentPath,
+          turnId: pending.turnId,
+          parentToolCallIds: degradedToolCallIds,
+        });
+      }
+
       for (const output of childOutputs) {
         emittedCount += this.emitEntryBatches(output.entries);
-        const turnId = output.checkpoint.pendingSubagent!.turnId;
-        this.rememberProcessedTerminalTurnId(output.checkpoint, turnId);
-        this.rememberGlobalProcessedTerminalTurnId(turnId);
-        output.checkpoint.activeTurn = null;
-        output.checkpoint.pendingSubagent = null;
+        this.rememberProcessedTerminalTurnId(output.checkpoint, output.turnId);
+        this.rememberGlobalProcessedTerminalTurnId(output.turnId);
+        if (
+          output.source === 'captured-terminal'
+          && output.checkpoint.pendingSubagent?.parentToolCallId === output.parentToolCallId
+        ) {
+          output.checkpoint.pendingSubagent = null;
+        } else if (
+          output.source === 'forced-parent-terminal'
+          && output.checkpoint.activeTurn?.turnId === output.turnId
+        ) {
+          output.checkpoint.activeTurn = null;
+          output.checkpoint.pendingTerminal = null;
+        }
         this.saveCheckpoint(this.stateKey(output.path), output.checkpoint);
       }
       emittedCount += this.emitEntryBatches(parentRecovered.entries);
@@ -907,7 +1237,7 @@ export class CodexTranscriptInput extends BaseInput {
     return emittedCount;
   }
 
-  private reportSubagentShadowLinks(): void {
+  private reportSubagentLinks(): void {
     const snapshot = this.subagentLinker.snapshot();
     if (snapshot.detectedChildren === 0 && snapshot.detectedSpawns === 0) return;
 
@@ -917,9 +1247,9 @@ export class CodexTranscriptInput extends BaseInput {
       snapshot.linkedChildren,
       snapshot.orphanChildren,
     ].join(':');
-    if (summary !== this.lastSubagentShadowSummary) {
-      this.lastSubagentShadowSummary = summary;
-      this.logger.info('Codex subagent linker shadow summary', {
+    if (summary !== this.lastSubagentLinkSummary) {
+      this.lastSubagentLinkSummary = summary;
+      this.logger.info('Codex subagent linker summary', {
         detectedChildren: snapshot.detectedChildren,
         detectedSpawns: snapshot.detectedSpawns,
         linkedChildren: snapshot.linkedChildren,
@@ -934,8 +1264,12 @@ export class CodexTranscriptInput extends BaseInput {
         link.orphanReason ?? '',
       ].join(':');
       if (this.reportedSubagentLinks.get(link.childThreadId) === fingerprint) continue;
+      // Refresh insertion order when a link changes so the bounded map keeps
+      // the most recently reported lifecycle fingerprints.
+      this.reportedSubagentLinks.delete(link.childThreadId);
       this.reportedSubagentLinks.set(link.childThreadId, fingerprint);
-      this.logger.debug('Codex subagent shadow link resolved', {
+      trimOldestMap(this.reportedSubagentLinks, MAX_LINK_DESCRIPTORS);
+      this.logger.debug('Codex subagent link resolved', {
         childThreadId: link.childThreadId,
         parentThreadId: link.parentThreadId,
         parentTurnId: link.parentTurnId,
@@ -1353,33 +1687,9 @@ export class CodexTranscriptInput extends BaseInput {
     const raw = this.stateStore.get(key).extra?.codexTranscript;
     const value = asRecord(raw);
     if (!value || typeof value.inode !== 'number' || typeof value.scanOffset !== 'number') return null;
-    const active = asRecord(value.activeTurn);
-    const model = stringValue(active?.model);
-    const cwd = stringValue(active?.cwd);
-    const developerInstructions = stringValue(active?.developerInstructions);
-    const activeTurn = active
-      && typeof active.turnId === 'string'
-      && typeof active.startOffset === 'number'
-      && typeof active.startedAtMs === 'number'
-      ? {
-          turnId: active.turnId,
-          startOffset: active.startOffset,
-          startedAtMs: active.startedAtMs,
-          ...(model ? { model } : {}),
-          ...(cwd ? { cwd } : {}),
-          ...(developerInstructions ? { developerInstructions } : {}),
-          emittedPrompt: active.emittedPrompt === true,
-          emittedStepCount: typeof active.emittedStepCount === 'number' ? active.emittedStepCount : 0,
-          emittedStepRequestIds: stringArray(active.emittedStepRequestIds),
-          emittedStepResponseIds: stringArray(active.emittedStepResponseIds),
-          emittedToolCallIds: stringArray(active.emittedToolCallIds),
-          emittedToolResultIds: stringArray(active.emittedToolResultIds),
-          inputContext: parseInputContext(active.inputContext),
-          subagentSpawns: parsePendingFusionChildren(active.subagentSpawns),
-        }
-      : null;
+    const activeTurn = parseActiveTranscriptTurn(value.activeTurn);
     const pending = asRecord(value.pendingTerminal);
-    const pendingTerminal = pending
+    let pendingTerminal = pending
       && typeof pending.turnId === 'string'
       && typeof pending.terminalEndOffset === 'number'
       ? {
@@ -1398,7 +1708,6 @@ export class CodexTranscriptInput extends BaseInput {
       && typeof fusion.parentThreadId === 'string'
       && typeof fusion.parentTraceId === 'string'
       && typeof fusion.terminalEndOffset === 'number'
-      && typeof fusion.createdAtMs === 'number'
       && fusionChildren.length > 0
       ? {
           turnId: fusion.turnId,
@@ -1406,15 +1715,44 @@ export class CodexTranscriptInput extends BaseInput {
           parentTraceId: fusion.parentTraceId,
           terminalEndOffset: fusion.terminalEndOffset,
           children: fusionChildren,
-          createdAtMs: fusion.createdAtMs,
         }
       : null;
     const subagent = asRecord(value.pendingSubagent);
+    const capturedActiveTurn = parseActiveTranscriptTurn(subagent?.activeTurn);
+    const confidence = subagent?.confidence;
     const pendingSubagent: CodexPendingSubagentTurn | null = subagent
       && typeof subagent.turnId === 'string'
+      && typeof subagent.parentThreadId === 'string'
+      && typeof subagent.parentTurnId === 'string'
+      && typeof subagent.parentTraceId === 'string'
+      && typeof subagent.parentToolCallId === 'string'
+      && (confidence === 'explicit_id' || confidence === 'agent_path')
       && typeof subagent.terminalEndOffset === 'number'
-      ? { turnId: subagent.turnId, terminalEndOffset: subagent.terminalEndOffset }
+      && capturedActiveTurn
+      ? {
+          turnId: subagent.turnId,
+          parentThreadId: subagent.parentThreadId,
+          parentTurnId: subagent.parentTurnId,
+          parentTraceId: subagent.parentTraceId,
+          parentToolCallId: subagent.parentToolCallId,
+          confidence,
+          terminalEndOffset: subagent.terminalEndOffset,
+          activeTurn: capturedActiveTurn,
+        }
       : null;
+    if (
+      subagent
+      && !pendingSubagent
+      && activeTurn
+      && typeof subagent.turnId === 'string'
+      && typeof subagent.terminalEndOffset === 'number'
+      && activeTurn.turnId === subagent.turnId
+    ) {
+      // Older pendingSubagent checkpoints blocked the child file and retained
+      // the active turn at the top level. They have no reliable spawn identity,
+      // so recover them through the normal independent terminal path.
+      pendingTerminal ??= newPendingTerminal(subagent.turnId, subagent.terminalEndOffset, 0);
+    }
     return {
       inode: value.inode,
       scanOffset: value.scanOffset,
@@ -1807,6 +2145,41 @@ function stringArray(value: unknown): string[] {
     : [];
 }
 
+function parseActiveTranscriptTurn(value: unknown): CodexActiveTranscriptTurn | null {
+  const active = asRecord(value);
+  if (
+    !active
+    || typeof active.turnId !== 'string'
+    || typeof active.startOffset !== 'number'
+    || typeof active.startedAtMs !== 'number'
+  ) return null;
+  const model = stringValue(active.model);
+  const cwd = stringValue(active.cwd);
+  const developerInstructions = stringValue(active.developerInstructions);
+  return {
+    turnId: active.turnId,
+    startOffset: active.startOffset,
+    startedAtMs: active.startedAtMs,
+    ...(model ? { model } : {}),
+    ...(cwd ? { cwd } : {}),
+    ...(developerInstructions ? { developerInstructions } : {}),
+    emittedPrompt: active.emittedPrompt === true,
+    emittedStepCount: typeof active.emittedStepCount === 'number' ? active.emittedStepCount : 0,
+    emittedStepRequestIds: stringArray(active.emittedStepRequestIds),
+    emittedStepResponseIds: stringArray(active.emittedStepResponseIds),
+    emittedToolCallIds: stringArray(active.emittedToolCallIds),
+    emittedToolResultIds: stringArray(active.emittedToolResultIds),
+    inputContext: parseInputContext(active.inputContext),
+    subagentSpawns: parsePendingFusionChildren(active.subagentSpawns),
+  };
+}
+
+function isReliableFusionConfidence(
+  confidence: CodexSubagentLink['confidence'],
+): confidence is 'explicit_id' | 'agent_path' {
+  return confidence === 'explicit_id' || confidence === 'agent_path';
+}
+
 function parsePendingFusionChildren(value: unknown): CodexPendingFusionChild[] {
   if (!Array.isArray(value)) return [];
   const children: CodexPendingFusionChild[] = [];
@@ -1841,33 +2214,42 @@ function mergePendingFusionChildren(
   return [...merged.values()];
 }
 
-function pruneSupersededFusionChildren(
-  children: CodexPendingFusionChild[],
-): CodexPendingFusionChild[] {
-  const successfulPaths = new Set(children
-    .filter(child => child.childThreadId)
-    .map(child => normalizeFusionAgentPath(child.agentPath ?? child.taskName))
-    .filter((value): value is string => value !== undefined));
-  return children.filter(child => (
-    child.childThreadId
-    || !successfulPaths.has(normalizeFusionAgentPath(child.agentPath ?? child.taskName) ?? '')
-  ));
+function classifyParentTurnOwnership(
+  turnId: string,
+  index: ParentTurnIndex | undefined,
+): 'copied' | 'child' | 'unknown' {
+  if (!index) return 'unknown';
+  if (index.turnIds.has(turnId)) return 'copied';
+  return index.complete ? 'child' : 'unknown';
 }
 
-function normalizeFusionAgentPath(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  const trimmed = value.trim().replace(/\/+$/, '');
-  if (!trimmed) return undefined;
-  return trimmed.startsWith('/') ? trimmed : `/root/${trimmed.replace(/^root\//, '')}`;
+function shouldSkipCopiedParentTurn(
+  turnId: string,
+  observedStartedAtMs: number,
+  ownerCreatedAtMs: number | undefined,
+  index: ParentTurnIndex | undefined,
+): boolean {
+  const ownership = classifyParentTurnOwnership(turnId, index);
+  if (ownership === 'copied') return true;
+  if (ownership === 'child' || ownerCreatedAtMs === undefined) return false;
+  return isCopiedParentTurnByTime(turnId, observedStartedAtMs, ownerCreatedAtMs);
 }
 
-function isCopiedParentTurn(
+function isCopiedParentTurnByTime(
   turnId: string,
   observedStartedAtMs: number,
   ownerCreatedAtMs: number,
 ): boolean {
   const uuidTimestamp = uuidV7TimestampMs(turnId);
   return (uuidTimestamp ?? observedStartedAtMs) < ownerCreatedAtMs;
+}
+
+function trimOldestMap<T>(values: Map<string, T>, maxSize: number): void {
+  while (values.size > maxSize) {
+    const oldest = values.keys().next().value as string | undefined;
+    if (oldest === undefined) return;
+    values.delete(oldest);
+  }
 }
 
 function uuidV7TimestampMs(value: string): number | undefined {
@@ -1880,6 +2262,15 @@ function uuidV7TimestampMs(value: string): number | undefined {
 
 function cloneActiveTurn(activeTurn: CodexActiveTranscriptTurn): CodexActiveTranscriptTurn {
   return structuredClone(activeTurn);
+}
+
+function hasEmittedActiveTurnState(activeTurn: CodexActiveTranscriptTurn): boolean {
+  return activeTurn.emittedPrompt === true
+    || (activeTurn.emittedStepCount ?? 0) > 0
+    || (activeTurn.emittedStepRequestIds?.length ?? 0) > 0
+    || (activeTurn.emittedStepResponseIds?.length ?? 0) > 0
+    || (activeTurn.emittedToolCallIds?.length ?? 0) > 0
+    || (activeTurn.emittedToolResultIds?.length ?? 0) > 0;
 }
 
 function parentTraceIdForChildren(children: CodexPendingFusionChild[]): string {

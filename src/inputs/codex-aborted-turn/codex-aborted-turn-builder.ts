@@ -290,6 +290,7 @@ function buildCancelledResponse(
     'gen_ai.request.model': model,
     'gen_ai.response.model': model,
     'gen_ai.response.finish_reasons': ['cancelled'],
+    'gen_ai.turn.end': true,
     ...(messages.length > 0 ? { 'gen_ai.output.messages': agentResponseMessages(messages) } : {}),
     ...usageFields(usage),
     ...sharedLlmFields(turn),

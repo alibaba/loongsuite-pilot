@@ -10,6 +10,6 @@ regression case for selecting the rollout's owning metadata instead of the last
 metadata record in the file.
 
 The parent contains four `spawn_agent` calls whose returned task paths match
-the four child `agent_path` values. Phase-2 shadow-link tests use that mapping
-to prove parallel children are associated one-to-one without changing emitted
-trace records.
+the four child `agent_path` values. Fusion tests use that mapping to prove
+parallel children are associated one-to-one by `parentToolCallId` and emitted
+under their parent trace.
