@@ -37,7 +37,7 @@ export type CodexBlobToUri = (params: {
   mime_type: string;
   modality: 'image';
   time_unix_ms?: number;
-}) => { uri: string; mime_type: string; modality?: string; size: number; sha256: string } | null;
+}) => { uri: string; mime_type: string; modality?: string; size?: number } | null;
 
 export function extractCodexTerminalTurn(
   records: Record<string, unknown>[],

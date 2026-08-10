@@ -1,9 +1,12 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/resource-context.mjs';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
+import { buildCodexTranscriptSegment } from '../../../../src/inputs/codex-transcript/codex-transcript-builder.js';
+import { extractCodexPartialTurn } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
 import { CodexTranscriptInput } from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
 import type { AgentActivityEntry, JsonValue } from '../../../../src/types/index.js';
 
@@ -1930,3 +1933,322 @@ describe('CodexTranscriptInput', () => {
     });
   });
 });
+
+describe('Codex transcript multimodal extraction', () => {
+  type TurnBodyItem = { type: string; payload: Record<string, unknown> };
+
+  function extractRecord(
+    timestamp: string,
+    type: string,
+    payload: Record<string, unknown>,
+  ): Record<string, unknown> {
+    return { timestamp, type, payload };
+  }
+
+  function fakeBlobToUri(input: {
+    content: string;
+    mime_type: string;
+    modality: 'image';
+  }) {
+    const bytes = Buffer.from(input.content, 'base64');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    return {
+      uri: `oss://test/${digest}.${input.mime_type === 'image/jpeg' ? 'jpg' : 'png'}`,
+      mime_type: input.mime_type,
+      modality: 'image' as const,
+      size: bytes.length,
+    };
+  }
+
+  function userContentItem(content: unknown[]): TurnBodyItem {
+    return {
+      type: 'response_item',
+      payload: { type: 'message', role: 'user', content },
+    };
+  }
+
+  function userMessageItem(message: string | Record<string, unknown>): TurnBodyItem {
+    return {
+      type: 'event_msg',
+      payload: typeof message === 'string'
+        ? { type: 'user_message', message }
+        : { type: 'user_message', ...message },
+    };
+  }
+
+  function responseItem(payload: Record<string, unknown>): TurnBodyItem {
+    return { type: 'response_item', payload };
+  }
+
+  /** Shared session/turn envelope; tests only supply the varying middle body. */
+  function multimodalRecords(
+    body: TurnBodyItem[],
+    options: {
+      sessionId?: string;
+      turnId?: string;
+      cwd?: string;
+      /** null omits agent_message (e.g. tool-only turns). */
+      agentMessage?: string | null;
+      lastAgentMessage?: string;
+    } = {},
+  ): { records: Record<string, unknown>[]; sessionId: string; turnId: string } {
+    const sessionId = options.sessionId ?? 's';
+    const turnId = options.turnId ?? 't';
+    let seq = 0;
+    const at = () => `2026-08-04T03:50:${String(seq++).padStart(2, '0')}.000Z`;
+    const agentMessage = options.agentMessage === undefined ? 'ok' : options.agentMessage;
+    const records: Record<string, unknown>[] = [
+      extractRecord(at(), 'session_meta', { id: sessionId, model_provider: 'openai' }),
+      extractRecord(at(), 'turn_context', {
+        turn_id: turnId,
+        model: 'gpt-5.5',
+        ...(options.cwd ? { cwd: options.cwd } : {}),
+      }),
+      extractRecord(at(), 'event_msg', { type: 'task_started', turn_id: turnId }),
+      ...body.map(item => extractRecord(at(), item.type, item.payload)),
+    ];
+    if (agentMessage !== null) {
+      records.push(extractRecord(at(), 'event_msg', {
+        type: 'agent_message', message: agentMessage, phase: 'final',
+      }));
+    }
+    records.push(
+      extractRecord(at(), 'event_msg', {
+        type: 'token_count',
+        info: { last_token_usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } },
+      }),
+      extractRecord(at(), 'event_msg', {
+        type: 'task_complete',
+        turn_id: turnId,
+        last_agent_message: options.lastAgentMessage ?? agentMessage ?? 'ok',
+      }),
+    );
+    return { records, sessionId, turnId };
+  }
+
+  function extractTurn(
+    fixture: { records: Record<string, unknown>[]; sessionId: string; turnId: string },
+    options?: Parameters<typeof extractCodexPartialTurn>[4],
+  ) {
+    return extractCodexPartialTurn(
+      fixture.records,
+      { sessionId: fixture.sessionId, provider: 'openai' },
+      fixture.sessionId,
+      fixture.turnId,
+      options,
+    );
+  }
+
+  function userParts(turn: NonNullable<ReturnType<typeof extractCodexPartialTurn>>): any[] {
+    return (turn.inputMessages[0] as any).parts;
+  }
+
+  it('write-time converts input_image to uri parts and keeps text-only prompt', () => {
+    // Shape mirrors real Codex paste/upload turns (codex-hook-debug):
+    // Files mentioned + path, then <image path="..."> wrapper around input_image.
+    const png = Buffer.from('fake-png').toString('base64');
+    const imagePath = '/tmp/pipeline.jpg';
+    const userText = [
+      '',
+      '# Files mentioned by the user:',
+      '',
+      `## pipeline.jpg: ${imagePath}`,
+      '',
+      '## My request for Codex:',
+      '这个图像是什么意思？',
+      '',
+    ].join('\n');
+    const fixture = multimodalRecords([
+      userContentItem([
+        { type: 'input_text', text: userText },
+        { type: 'input_text', text: `<image name=[Image #1] path="${imagePath}">` },
+        { type: 'input_image', image_url: `data:image/png;base64,${png}`, detail: 'high' },
+        { type: 'input_text', text: '</image>' },
+      ]),
+      userMessageItem({ message: userText, images: [], local_images: [imagePath] }),
+    ], {
+      sessionId: 'session-img',
+      turnId: 'turn-img',
+      cwd: '/tmp/project',
+      agentMessage: 'a pipeline diagram',
+    });
+
+    const turn = extractTurn(fixture, { blobToUri: fakeBlobToUri });
+
+    expect(turn).not.toBeNull();
+    expect(turn!.prompt).toContain('这个图像是什么意思？');
+    expect(turn!.prompt).toContain(imagePath);
+    expect(turn!.prompt).not.toContain(png);
+    expect(turn!.prompt).not.toContain('data:image');
+
+    const parts = userParts(turn!);
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toEqual({ type: 'text', content: userText });
+    expect(parts[1]).toMatchObject({
+      type: 'uri',
+      mime_type: 'image/png',
+      modality: 'image',
+    });
+    expect(parts[1].uri).toMatch(/^oss:\/\/test\//);
+    expect(JSON.stringify(parts)).not.toContain(png);
+    expect(JSON.stringify(parts)).not.toContain('<image');
+    expect(JSON.stringify(parts)).not.toContain('</image>');
+    // Local path remains in the files-mentioned text; only image wrappers are collapsed.
+    expect(parts[0].content).toContain(imagePath);
+
+    const { entries } = buildCodexTranscriptSegment(turn!, { includePrompt: true });
+    const request = entries.find(e => e['event.name'] === 'llm.request' || e['event.name'] === 'llm.response');
+    const messages = (request?.['gen_ai.input.messages'] ?? request?.['gen_ai.input.messages_delta']) as any[];
+    const outParts = messages?.[0]?.parts ?? [];
+    expect(outParts.some((p: any) => p.type === 'uri')).toBe(true);
+    expect(outParts.some((p: any) => p.type === 'blob')).toBe(false);
+  });
+
+  it('collapses multiple Codex image wrappers and keeps non-wrapper text', () => {
+    const png1 = Buffer.from('fake-png-1').toString('base64');
+    const png2 = Buffer.from('fake-png-2').toString('base64');
+    const filesText = '\n# Files mentioned by the user:\n\n## a.png: /tmp/a.png\n';
+    const fixture = multimodalRecords([
+      userContentItem([
+        { type: 'input_text', text: filesText },
+        { type: 'input_text', text: '<image name=[Image #1] path="/tmp/a.png">' },
+        { type: 'input_image', image_url: `data:image/png;base64,${png1}`, detail: 'high' },
+        { type: 'input_text', text: '</image>' },
+        { type: 'input_text', text: '<image name=[Image #2] path="/tmp/b.png">' },
+        { type: 'input_image', image_url: `data:image/png;base64,${png2}`, detail: 'high' },
+        { type: 'input_text', text: '</image>' },
+        { type: 'input_text', text: 'compare these' },
+      ]),
+      userMessageItem('compare these'),
+    ]);
+
+    const turn = extractTurn(fixture, { blobToUri: fakeBlobToUri });
+    expect(userParts(turn!)).toEqual([
+      { type: 'text', content: filesText },
+      {
+        type: 'uri',
+        mime_type: 'image/png',
+        modality: 'image',
+        uri: fakeBlobToUri({ content: png1, mime_type: 'image/png', modality: 'image' }).uri,
+      },
+      {
+        type: 'uri',
+        mime_type: 'image/png',
+        modality: 'image',
+        uri: fakeBlobToUri({ content: png2, mime_type: 'image/png', modality: 'image' }).uri,
+      },
+      { type: 'text', content: 'compare these' },
+    ]);
+  });
+
+  it('does not collapse image tags when no uri sits between them', () => {
+    const fixture = multimodalRecords([
+      userContentItem([
+        { type: 'input_text', text: 'look' },
+        { type: 'input_text', text: '<image name=[Image #1] path="/tmp/a.png">' },
+        { type: 'input_image', image_url: '/tmp/a.png' },
+        { type: 'input_text', text: '</image>' },
+      ]),
+      userMessageItem('look'),
+    ]);
+
+    const turn = extractTurn(fixture, { blobToUri: fakeBlobToUri });
+    expect(userParts(turn!)).toEqual([
+      { type: 'text', content: 'look' },
+      { type: 'text', content: '<image name=[Image #1] path="/tmp/a.png">' },
+      { type: 'text', content: '</image>' },
+    ]);
+  });
+
+  it('write-time converts function_call_output input_image arrays to uri parts', () => {
+    const jpeg = Buffer.from('fake-jpeg').toString('base64');
+    const fixture = multimodalRecords([
+      userContentItem([{ type: 'input_text', text: '/tmp/a.jpg what is this?' }]),
+      userMessageItem('/tmp/a.jpg what is this?'),
+      responseItem({
+        type: 'function_call', call_id: 'call-1', name: 'read_file',
+        arguments: JSON.stringify({ path: '/tmp/a.jpg' }),
+      }),
+      responseItem({
+        type: 'function_call_output',
+        call_id: 'call-1',
+        output: [{ type: 'input_image', image_url: `data:image/jpeg;base64,${jpeg}`, detail: 'high' }],
+      }),
+    ], { agentMessage: null, lastAgentMessage: 'a photo' });
+
+    const turn = extractTurn(fixture, { blobToUri: fakeBlobToUri });
+    expect(turn).not.toBeNull();
+    expect(turn!.steps[0]?.tools[0]?.output).toEqual([
+      {
+        type: 'uri',
+        mime_type: 'image/jpeg',
+        modality: 'image',
+        uri: fakeBlobToUri({ content: jpeg, mime_type: 'image/jpeg', modality: 'image' }).uri,
+      },
+    ]);
+  });
+
+  it('converts images only when uploadMode is both', () => {
+    const png = Buffer.from('fake-png-mode').toString('base64');
+    const fixture = multimodalRecords([
+      userContentItem([
+        { type: 'input_text', text: 'look' },
+        { type: 'input_image', image_url: `data:image/png;base64,${png}` },
+      ]),
+      responseItem({
+        type: 'function_call',
+        call_id: 'c1',
+        name: 'ReadImage',
+        arguments: '{}',
+      }),
+      responseItem({
+        type: 'function_call_output',
+        call_id: 'c1',
+        output: [{ type: 'input_image', image_url: `data:image/png;base64,${png}` }],
+      }),
+      userMessageItem('look'),
+    ]);
+
+    const off = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'none' });
+    expect(userParts(off!)).toEqual([{ type: 'text', content: 'look' }]);
+    expect(JSON.stringify(off!.steps)).not.toContain('"type":"uri"');
+    expect(JSON.stringify(off)).not.toContain(png);
+
+    const on = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'both' });
+    expect(userParts(on!)[1]).toMatchObject({ type: 'uri' });
+    const toolOut = on!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
+    expect(toolOut?.some(p => p.type === 'uri')).toBe(true);
+  });
+
+  it('does not attach media when blobToUri is omitted', () => {
+    const png = Buffer.from('fake-png').toString('base64');
+    const fixture = multimodalRecords([
+      userContentItem([
+        { type: 'input_text', text: 'look' },
+        { type: 'input_image', image_url: `data:image/png;base64,${png}` },
+      ]),
+      userMessageItem('look'),
+    ]);
+
+    const turn = extractTurn(fixture);
+    expect(userParts(turn!)).toEqual([{ type: 'text', content: 'look' }]);
+    expect(JSON.stringify(turn!.inputMessages)).not.toContain(png);
+  });
+
+  // Codex currently persists images as data-URL base64; path-only input_image is not handled yet.
+  it('ignores input_image with path-only image_url', () => {
+    const imagePath = '/tmp/pipeline.jpg';
+    const fixture = multimodalRecords([
+      userContentItem([
+        { type: 'input_text', text: 'look' },
+        { type: 'input_image', image_url: imagePath },
+      ]),
+      userMessageItem('look'),
+    ]);
+
+    const turn = extractTurn(fixture, { blobToUri: fakeBlobToUri });
+    expect(userParts(turn!)).toEqual([{ type: 'text', content: 'look' }]);
+    expect(JSON.stringify(turn!.inputMessages)).not.toContain(imagePath);
+  });
+});
+
