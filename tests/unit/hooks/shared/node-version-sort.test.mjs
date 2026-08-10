@@ -14,6 +14,14 @@ const fnMatch = sh.match(/sort_version_dirs_desc\(\) \{[\s\S]*?\n\}\n/);
 if (!fnMatch) throw new Error('sort_version_dirs_desc not found in hook script');
 const SORT_FN = fnMatch[0];
 
+// The real candidate-collection code from the shipped hook, so the end-to-end test
+// exercises what users run instead of a copy that can drift.
+const helperMatch = sh.match(/  add_node_bin_candidates\(\) \{[\s\S]*?\n  \}\n/);
+if (!helperMatch) throw new Error('add_node_bin_candidates not found in hook script');
+const ADD_FN = helperMatch[0];
+const RUNTIME_CALL = sh.split('\n').find(l => l.includes('add_node_bin_candidates "$(for d in "$runtime_dir"'));
+if (!RUNTIME_CALL) throw new Error('runtime add_node_bin_candidates call not found in hook script');
+
 // node-v22.9.0 vs node-v22.22.2 is the regression case: lexicographic order
 // (and a plain reverse glob) prefers the older 22.9.0.
 const EXPECTED = ['node-v24.1.0-darwin-arm64', 'node-v22.22.2', 'node-v22.9.0', 'node-v18.20.0'];
@@ -49,26 +57,53 @@ describe('sort_version_dirs_desc (hook.sh fallback)', () => {
       .toEqual(EXPECTED);
   });
 
-  it('selects the newest runtime dir end-to-end in the fallback glob loop', () => {
-    const tmp = mkdtempSync(resolve(tmpdir(), 'hook-sort-'));
-    try {
-      for (const d of EXPECTED) mkdirSync(resolve(tmp, 'runtime', d, 'bin'), { recursive: true });
-      const body = `
+  // Both shells matter: hooks carry a bash shebang but are sometimes launched via
+  // `sh`, and bash in POSIX mode rejects process substitution.
+  for (const shell of [['bash'], ['bash', '--posix']]) {
+    it(`selects the newest runtime dir end-to-end in the fallback glob loop (${shell.join(' ')})`, () => {
+      const tmp = mkdtempSync(resolve(tmpdir(), 'hook-sort-'));
+      try {
+        for (const d of EXPECTED) mkdirSync(resolve(tmp, 'runtime', d, 'bin'), { recursive: true });
+        const body = `
+set -euo pipefail
 ${SORT_FN}
 candidates=()
 runtime_dir="$1/runtime"
-while IFS= read -r d; do
-  [[ -n "$d" ]] && candidates+=("$d/bin/node")
-done < <(for d in "$runtime_dir"/node-v*; do [[ -d "$d" ]] && printf '%s\\n' "$d"; done | sort_version_dirs_desc)
+${ADD_FN}
+${RUNTIME_CALL}
 printf '%s\\n' "\${candidates[0]}"
 `;
-      const r = spawnSync('bash', ['-c', body, 'bash', tmp], { encoding: 'utf-8' });
-      if (r.status !== 0) throw new Error(`bash exited ${r.status}\nstderr: ${r.stderr}`);
-      expect(r.stdout.trim()).toBe(resolve(tmp, 'runtime/node-v24.1.0-darwin-arm64/bin/node'));
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
-  });
+        const r = spawnSync(shell[0], [...shell.slice(1), '-c', body, 'bash', tmp], { encoding: 'utf-8' });
+        if (r.status !== 0) throw new Error(`${shell.join(' ')} exited ${r.status}\nstderr: ${r.stderr}`);
+        expect(r.stdout.trim()).toBe(resolve(tmp, 'runtime/node-v24.1.0-darwin-arm64/bin/node'));
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it(`survives an empty runtime dir under set -e (${shell.join(' ')})`, () => {
+      // <<<"" still feeds one blank line, so an unguarded loop body would fail and
+      // `set -e` would abort the whole hook before any node was resolved.
+      const tmp = mkdtempSync(resolve(tmpdir(), 'hook-sort-empty-'));
+      try {
+        mkdirSync(resolve(tmp, 'runtime'), { recursive: true });
+        const body = `
+set -euo pipefail
+${SORT_FN}
+candidates=()
+runtime_dir="$1/runtime"
+${ADD_FN}
+${RUNTIME_CALL}
+echo "COUNT=\${#candidates[@]}"
+`;
+        const r = spawnSync(shell[0], [...shell.slice(1), '-c', body, 'bash', tmp], { encoding: 'utf-8' });
+        if (r.status !== 0) throw new Error(`${shell.join(' ')} exited ${r.status}\nstderr: ${r.stderr}`);
+        expect(r.stdout.trim()).toBe('COUNT=0');
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 let pwshAvailable = false;
