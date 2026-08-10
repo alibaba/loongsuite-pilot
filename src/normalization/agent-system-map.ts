@@ -14,6 +14,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'qwen-code-cli': 'qwen-code',
   'opencode': 'opencode',
   'mimo-code': 'mimo-code',
+  'minimax-code': 'minimax-code',
   'pi-coding-agent': 'pi',
   'grok-build': 'grok',
   'hermes': 'hermes',

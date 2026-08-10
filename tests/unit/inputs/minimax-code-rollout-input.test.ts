@@ -20,6 +20,10 @@ describe('MinimaxCodeRolloutInput', () => {
   let stateStore: StateStore;
 
   beforeEach(async () => {
+    // Delete any persisted state.json so each test starts with a clean
+    // stateStore. Without this, prior tests' persisted turnStepMap / offsets
+    // leak into subsequent tests (StateStore.load() re-hydrates from disk).
+    fs.rmSync(path.join(TMPDIR, 'state.json'), { force: true });
     stateStore = new StateStore(path.join(TMPDIR, 'state.json'));
     await stateStore.load();
   });
@@ -204,6 +208,246 @@ describe('MinimaxCodeRolloutInput', () => {
     const stateKey = `minimax-code-rollout:${target}`;
     const persisted = stateStore.get(stateKey);
     expect(persisted.lastOffset).toBe(fs.statSync(target).size);
-    expect(persisted.extra?.inode).toBe(fs.statSync(target).ino);
+    expect(persisted.extra?.minimaxCodeRollout?.inode).toBe(fs.statSync(target).ino);
+  });
+
+  // ─── Round 2: turnStepMap 持久化 ───
+
+  it('Round 2: 同 turnId + 同 requestId (retry) 共享 step.id', async () => {
+    const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
+    const rec1: any = {
+      type: 'model-io',
+      sessionId: 's1',
+      turnId: 'turn-A',
+      requestId: 'req-1',
+      startedAt: 1700000000000,
+      completedAt: 1700000001234,
+      request: { messages: [{ role: 'user', content: 'hi' }] },
+      response: { modelId: 'm1', finishReason: 'stop' },
+    };
+    const rec2: any = {
+      ...rec1,
+      attempt: 2,
+      response: { modelId: 'm1', finishReason: 'stop' },
+    };
+    const e1 = await (input as any).processSessionLine(rec1, '/tmp/x.jsonl');
+    const e2 = await (input as any).processSessionLine(rec2, '/tmp/x.jsonl');
+    expect(e1!['gen_ai.step.id']).toBe('turn-A:s1');
+    expect(e2!['gen_ai.step.id']).toBe('turn-A:s1');
+  });
+
+  it('Round 2: 同 turn 不同 requestId → 递增 stepIdx', async () => {
+    const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
+    const rec1: any = {
+      type: 'model-io', sessionId: 's1', turnId: 'turn-A', requestId: 'req-1',
+      startedAt: 1700000000000, completedAt: 1700000001234,
+      request: { messages: [] }, response: { modelId: 'm1' },
+    };
+    const rec2: any = {
+      ...rec1, requestId: 'req-2', startedAt: 1700000005000,
+    };
+    const e1 = await (input as any).processSessionLine(rec1, '/tmp/x.jsonl');
+    const e2 = await (input as any).processSessionLine(rec2, '/tmp/x.jsonl');
+    expect(e1!['gen_ai.step.id']).toBe('turn-A:s1');
+    expect(e2!['gen_ai.step.id']).toBe('turn-A:s2');
+  });
+
+  it('Round 2: 不同 turnId 各自从 s1 开始', async () => {
+    const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
+    const rec1: any = {
+      type: 'model-io', sessionId: 's1', turnId: 'turn-A', requestId: 'req-1',
+      request: { messages: [] }, response: { modelId: 'm1' },
+    };
+    const rec2: any = {
+      ...rec1, turnId: 'turn-B', requestId: 'req-1',
+    };
+    const e1 = await (input as any).processSessionLine(rec1, '/tmp/x.jsonl');
+    const e2 = await (input as any).processSessionLine(rec2, '/tmp/x.jsonl');
+    expect(e1!['gen_ai.step.id']).toBe('turn-A:s1');
+    expect(e2!['gen_ai.step.id']).toBe('turn-B:s1');
+  });
+
+  it('Round 2: 缺 turnId 时不分配 step.id (validator 诊断)', async () => {
+    const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
+    const rec: any = {
+      type: 'model-io', sessionId: 's1', requestId: 'req-1',
+      request: { messages: [] }, response: { modelId: 'm1' },
+    };
+    const e = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    expect(e!['gen_ai.step.id']).toBeUndefined();
+  });
+
+  it('Round 2: 跨 input 实例 + 共享 stateStore → step.id 复用序号', async () => {
+    const input1 = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
+    const rec1: any = {
+      type: 'model-io', sessionId: 's1', turnId: 'turn-A',
+      request: { requestId: 'req-1', messages: [] },
+      response: { modelId: 'm1' },
+    };
+    const e1 = await (input1 as any).processSessionLine(rec1, '/tmp/x.jsonl');
+    expect(e1!['gen_ai.step.id']).toBe('turn-A:s1');
+
+    // 模拟重启: 新 input 实例, 复用同一 stateStore
+    const input2 = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
+    const rec2: any = {
+      type: 'model-io', sessionId: 's1', turnId: 'turn-A',
+      request: { requestId: 'req-2', messages: [] },
+      response: { modelId: 'm1' },
+    };
+    const e2 = await (input2 as any).processSessionLine(rec2, '/tmp/x.jsonl');
+    // 持久化后 nextStepIdx 已递增 → s2
+    expect(e2!['gen_ai.step.id']).toBe('turn-A:s2');
+  });
+
+  // ─── Round 2: 文件轮转 (inode 变化) ───
+
+  it('Round 2: 文件 inode 变更 (轮转) → turnStepMap 清空,新 turnId 从 s1 重新开始', async () => {
+    const sessDir = path.join(TMPDIR, 'rollout-rot');
+    fs.mkdirSync(sessDir, { recursive: true });
+    const target = path.join(sessDir, 'model-io-sess_rotate.jsonl');
+    fs.writeFileSync(target, '');
+
+    const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: sessDir });
+    await (input as any).onStart();
+
+    const stateKey = `minimax-code-rollout:${target}`;
+    // pre-populate stale turnStepMap with old turnId + high nextStepIdx
+    stateStore.update(stateKey, {
+      extra: {
+        minimaxCodeRollout: {
+          inode: 999999, // mismatched inode forces rotation detection
+          turnStepMap: {
+            'turn_old-stale': { requestSet: ['old-req'], nextStepIdx: 99 },
+          },
+        },
+      },
+    });
+
+    // Rotate: rewrite file (new inode)
+    fs.unlinkSync(target);
+    fs.writeFileSync(target, '');
+
+    await input.collect();
+    const after = stateStore.get(stateKey);
+    expect(after.extra?.minimaxCodeRollout?.inode).toBe(fs.statSync(target).ino);
+    // 旧 turnStepMap 已清空
+    expect(after.extra.minimaxCodeRollout.turnStepMap['turn_old-stale']).toBeUndefined();
+  });
+
+  it('Round 2: 文件 inode=0 sentinel (file appeared after onStart) → seed inode 不清 turnStepMap', async () => {
+    const sessDir = path.join(TMPDIR, 'rollout-late');
+    fs.mkdirSync(sessDir, { recursive: true });
+    const target = path.join(sessDir, 'model-io-sess_late-appear.jsonl');
+    // 先不调 onStart,模拟"文件在 onStart 之后才出现"
+    fs.writeFileSync(target, '');
+
+    const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: sessDir });
+    // 不调 onStart
+    const stateKey = `minimax-code-rollout:${target}`;
+
+    // pre-populate turnStepMap with stale nextStepIdx=99 (没有 inode 字段)
+    stateStore.update(stateKey, {
+      extra: {
+        minimaxCodeRollout: {
+          inode: 0, // 0 sentinel
+          turnStepMap: {
+            'turn_x': { requestSet: ['req-x'], nextStepIdx: 99 },
+          },
+        },
+      },
+    });
+
+    // 给文件 append 一些内容
+    fs.appendFileSync(target, '{"a":1}\n');
+
+    await input.collect();
+    const after = stateStore.get(stateKey);
+    // inode 0 sentinel 时 seed inode 但不清 turnStepMap
+    expect(after.extra?.minimaxCodeRollout?.inode).toBe(fs.statSync(target).ino);
+    // turn_x 的 nextStepIdx=99 还在
+    expect(after.extra.minimaxCodeRollout.turnStepMap['turn_x'].nextStepIdx).toBe(99);
+  });
+
+  // ─── Round 2: interrupted 路径 ───
+
+  it('Round 2: interrupted rollout (completedAt present, no finishReason/text/toolCalls) → 注入 interrupted finish_reason + 占位 output + 0 usage', async () => {
+    const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
+    const rec: any = {
+      type: 'model-io',
+      sessionId: 's1',
+      turnId: 'turn-A',
+      requestId: 'req-interrupted',
+      startedAt: 1700000000000,
+      completedAt: 1700000001000,
+      request: { messages: [{ role: 'user', content: 'hi' }] },
+      response: {
+        // 没有 finishReason / text / toolCalls
+        modelId: 'm1',
+        responseId: 'r-interrupted',
+      },
+    };
+    const entry = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    expect(entry!['gen_ai.response.finish_reasons']).toEqual(['interrupted']);
+    // 占位 output.messages
+    const outMsgs = entry!['gen_ai.output.messages'];
+    expect(Array.isArray(outMsgs)).toBe(true);
+    expect(outMsgs.length).toBe(1);
+    expect(outMsgs[0].role).toBe('assistant');
+    expect(outMsgs[0].finish_reason).toBe('interrupted');
+    // usage 全 0
+    expect(entry!['gen_ai.usage.input_tokens']).toBe(0);
+    expect(entry!['gen_ai.usage.output_tokens']).toBe(0);
+    expect(entry!['gen_ai.usage.cache_read.input_tokens']).toBe(0);
+    expect(entry!['gen_ai.usage.cache_creation.input_tokens']).toBe(0);
+  });
+
+  it('Round 2: 正常 finishReason 时不注入 interrupted (走原 finish_reason)', async () => {
+    const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
+    const rec: any = {
+      type: 'model-io',
+      sessionId: 's1',
+      turnId: 'turn-A',
+      requestId: 'req-normal',
+      startedAt: 1700000000000,
+      completedAt: 1700000001234,
+      request: { messages: [] },
+      response: { modelId: 'm1', text: 'hello', finishReason: 'stop' },
+    };
+    const entry = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    expect(entry!['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    expect(entry!['gen_ai.usage.input_tokens']).not.toBe(0); // 真实值
+  });
+
+  it('Round 2: completedAt 缺失时不视为 interrupted (fallback to stop)', async () => {
+    const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
+    const rec: any = {
+      type: 'model-io',
+      sessionId: 's1',
+      turnId: 'turn-A',
+      requestId: 'req-no-completed',
+      startedAt: 1700000000000,
+      // completedAt missing
+      request: { messages: [] },
+      response: { modelId: 'm1' },
+    };
+    const entry = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    expect(entry!['gen_ai.response.finish_reasons']).toEqual(['stop']);
+  });
+
+  it('Round 2: 有 text 但 completedAt 缺失 → 不视为 interrupted', async () => {
+    const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
+    const rec: any = {
+      type: 'model-io',
+      sessionId: 's1',
+      turnId: 'turn-A',
+      requestId: 'req-text-only',
+      // no completedAt
+      request: { messages: [] },
+      response: { modelId: 'm1', text: 'partial response' },
+    };
+    const entry = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    // 没有 completedAt 触发 interrupted 检测,fallback to resolveFinishReasons
+    // 也没 finishReason → 'stop'
+    expect(entry!['gen_ai.response.finish_reasons']).toEqual(['stop']);
   });
 });

@@ -22,6 +22,25 @@ export interface MinimaxCodeRolloutInputOptions extends Omit<SessionInputOptions
 }
 
 /**
+ * Per-file persistent state under `extra.minimaxCodeRollout`. Mirrors the
+ * zcode-rollout `extra.zcodeRollout` pattern (PR #101): BaseSessionInput's
+ * stateStore does shallow-merge of `extra` per `${inputId}:${filePath}` key,
+ * so we keep our turnStepMap under a dedicated sub-key to survive across
+ * polls and restarts.
+ *
+ *   - inode: tracks file rotation; cleared alongside turnStepMap when the
+ *     rollout file is rotated (new session file = new turnIds).
+ *   - turnStepMap[turnId]: per-turn counter + requestId de-dup set. A retry
+ *     record sharing the same requestId as an earlier record in the same
+ *     turn reuses the same stepIdx (so attempt>1 records collapse into one
+ *     STEP span).
+ */
+interface MinimaxCodeRolloutFileState {
+  inode: number;
+  turnStepMap: Record<string, { requestSet: string[]; nextStepIdx: number }>;
+}
+
+/**
  * MiniMax Code rollout JSONL tail — sibling input to MinimaxCodeLogInput.
  *
  * Reads ~/.minimax-code/rollout/model-io-sess_<sid>.jsonl (one file per
@@ -40,18 +59,17 @@ export interface MinimaxCodeRolloutInputOptions extends Omit<SessionInputOptions
  *     parts:[] (空) → validator 判 LLM span 缺失 input/output.messages。
  *   - traceId 去连字符转 32-hex (W3C); UUID 带连字符会被 OTLP 转换器拒并
  *     重新分配 traceId, 造成事件归并错位。
+ *   - turnStepMap 持久化 (Round 2): per-turn 计数器 + requestId 去重,
+ *     跨重启 step.id 稳定。文件轮转 (inode 变化) 时清空。
+ *   - interrupted 路径注入 (Round 2): completedAt 存在 + response.finishReason
+ *     为 null/空 + 无 text/toolCalls → 注入 finish_reasons=['interrupted']
+ *     + 占位 output.messages + 0 usage, 满足 validate-trace 强制规则。
  *
- * Inheritance mirrors zcode-rollout-input / qoder-cli-session: per-file
- * inode-aware offset via BaseSessionInput; LISTENER_AGENT_MAP['minimax-code-rollout']
- * = 'minimax-code'.
- *
- * Round 1 scope (deferred to Round 2 — see PR description):
- *   - step.id 派生为 ${turnId}:s${stepIdx}; 不持久化 turnStepMap.
- *   - emit 单个 llm.response entry (含 input.messages 附在 response 旁),
- *     不发独立 llm.request. BaseSessionInput.processSessionLine 仍返回单个
- *     entry; 升级到 pair 需要 BaseSessionInput 改造 (与 PR #101 一致)。
- *   - interrupted 路径注入 / synthesizeOrphanToolRecords / 多路径 tool
- *     definitions 抽取等高级处理见 PR description "Future Work" 章节。
+ * Round 3 deferred (见 PR description "Future Work"):
+ *   - `BaseSessionInput.processSessionLine` 改 multi-entry return, 让 rollout
+ *     emit llm.request + llm.response pair (当前 emit 单 entry, 含 input
+ *     + output messages)。需要 base class 改动, 影响所有 SessionInput 子类。
+ *   - synthesizeOrphanToolRecords flusher 增强, 视真实 E2E 数据决定。
  */
 export class MinimaxCodeRolloutInput extends BaseSessionInput {
   readonly id = 'minimax-code-rollout';
@@ -77,19 +95,78 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
 
   protected override async onStart(): Promise<void> {
     // Pre-seed offsets for existing files so a fresh install doesn't replay
-    // historical rollout records (mirrors zcode-rollout-input / qoder-cli-session
-    // onStart).
+    // historical rollout records (mirrors zcode-rollout-input onStart).
+    // Also initialize extra.minimaxCodeRollout.{inode,turnStepMap} so the
+    // first poll's pre-pass doesn't false-trigger rotation clearing.
     const files = await this.discoverSessionFiles();
     for (const filePath of files) {
       try {
         const stat = await fs.stat(filePath);
-        const stateKey = `${this.id}:${filePath}`;
+        const stateKey = this.stateKey(filePath);
         this.stateStore.setOffset(stateKey, stat.size);
-        this.stateStore.update(stateKey, { extra: { inode: (stat as any).ino } });
+        this.stateStore.update(stateKey, {
+          extra: {
+            minimaxCodeRollout: {
+              inode: (stat as any).ino,
+              turnStepMap: {},
+            } as MinimaxCodeRolloutFileState,
+          },
+        });
       } catch {
         // File may disappear while MiniMax Code rotates session rollout data.
       }
     }
+  }
+
+  /**
+   * Pre-pass: detect file rotation by comparing stat.ino against
+   * extra.minimaxCodeRollout.inode. When rotation is detected, clear
+   * turnStepMap (new session file = new turnIds; old counters are
+   * meaningless) before delegating to super.collect().
+   *
+   * BaseSessionInput.processFile is private and clears only `extra.inode`
+   * (shallow merge leaves extra.minimaxCodeRollout untouched), so we
+   * front-run it here. Mirrors zcode-rollout-input pre-pass (PR #101).
+   *
+   * Inode=0 sentinel (CP5 fix): when prevRollout is missing (file appeared
+   * after onStart) or prevRollout.inode is 0, seed inode to the real
+   * stat.ino WITHOUT clearing turnStepMap. Otherwise the next poll's
+   * pre-pass would see inode=0 !== stat.ino and falsely trigger rotation,
+   * wiping step.id state mid-turn → step.id misalignment.
+   */
+  protected override async collect(): Promise<AgentActivityEntry[]> {
+    const files = await this.discoverSessionFiles();
+    for (const filePath of files) {
+      try {
+        const stat = await fs.stat(filePath);
+        const currentIno = (stat as any).ino as number;
+        const stateKey = this.stateKey(filePath);
+        const prevState = this.stateStore.get(stateKey);
+        const prevRollout = prevState.extra?.minimaxCodeRollout as
+          | MinimaxCodeRolloutFileState
+          | undefined;
+        const prevInode = prevRollout?.inode;
+        const prevInodeValid = typeof prevInode === 'number' && prevInode !== 0;
+        const rotated = prevInodeValid && prevInode !== currentIno;
+        // Seed inode on first sight (or after the 0-sentinel), preserving any
+        // turnStepMap state accumulated since the last valid inode. Only
+        // real rotation clears turnStepMap.
+        if (!prevRollout || !prevInodeValid || rotated) {
+          this.stateStore.update(stateKey, {
+            extra: {
+              minimaxCodeRollout: {
+                inode: currentIno,
+                turnStepMap: rotated ? {} : (prevRollout?.turnStepMap ?? {}),
+              } as MinimaxCodeRolloutFileState,
+            },
+          });
+        }
+      } catch {
+        // File may disappear between discoverSessionFiles and stat; base
+        // class will skip it. Non-blocking.
+      }
+    }
+    return super.collect();
   }
 
   protected async discoverSessionFiles(): Promise<string[]> {
@@ -143,7 +220,19 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     const inputMessages = this.buildInputMessages(request);
     const outputMessages = this.buildOutputMessages(response);
     const toolDefinitions = this.extractToolDefinitions(request);
-    const finishReasons = this.resolveFinishReasons(response);
+
+    // Interrupted path detection (Round 2): completedAt present but the
+    // response has no finishReason / no text / no toolCalls. This is the
+    // typical SIGTERM / timeout / Ctrl+C pattern — the LLM call was
+    // terminated mid-flight. Without placeholder fields, the LLM span is
+    // missing gen_ai.output.messages / finish_reasons / usage, which
+    // validate-trace flags as ERROR (CLAUDE.md "semantic.llm_has_input_output"
+    // MUST rule).
+    const isInterrupted = this.detectInterruptedResponse(response, completedAt);
+
+    const finishReasons = isInterrupted
+      ? ['interrupted']
+      : this.resolveFinishReasons(response);
 
     const traceId = this.normalizeTraceId(
       (record['traceId'] as string | undefined) ?? (record['trace_id'] as string | undefined),
@@ -155,18 +244,14 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
       ?? (request['request_id'] as string | undefined)
       ?? `${sessionId}:${turnId ?? 'unknown'}:req:${String(startedAt ?? '')}`;
 
-    // Step.id 派生: turnId + 当前文件已处理字节偏移 (不持久化, 仅 in-session stable).
-    // Round 2 计划: 持久化 turnStepMap (与 PR #101 zcode-rollout 对齐).
-    const stateKey = `${this.id}:${filePath}`;
-    const state = this.stateStore.get(stateKey);
-    const fileOffset = state.lastOffset ?? 0;
-    const stepId = turnId ? `${turnId}:s${Math.max(1, fileOffset)}` : undefined;
+    // step.id 派生 (Round 2): persistent per-turn counter, de-duped by
+    // requestId. Same requestId within a turn reuses the same stepIdx (so
+    // attempt>1 retries collapse into one STEP span). Persisted across
+    // restarts. Cleared on file rotation (see collect() pre-pass).
+    const stepId = this.allocateStepId(filePath, turnId ?? '', requestId);
 
     // Round 1: 单 entry 形式, 包含 input.messages + output.messages + usage.
-    // The OTLP trace converter constructs a non-zero-duration LLM span from
-    // a single llm.response entry that carries both input.messages and
-    // output.messages. Round 2 will switch to paired llm.request + llm.response
-    // (requires BaseSessionInput multi-entry support, mirroring PR #101).
+    // Round 3 计划: 改 multi-entry 形式, emit llm.request + llm.response pair.
     const combined: Record<string, unknown> = {
       'event.name': 'llm.response',
       'gen_ai.agent.type': ClientType.MiniMaxCode,
@@ -180,24 +265,40 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
       'gen_ai.response.id': responseId,
       'gen_ai.request.id': requestId,
       'gen_ai.response.finish_reasons': finishReasons,
-      'gen_ai.usage.input_tokens': this.coerceNumber((response as any).usage?.inputTokens ?? (response as any).usage?.input_tokens),
-      'gen_ai.usage.output_tokens': this.coerceNumber((response as any).usage?.outputTokens ?? (response as any).usage?.output_tokens),
-      'gen_ai.usage.cache_read.input_tokens': this.coerceNumber(
-        (response as any).usage?.cacheReadTokens ?? (response as any).usage?.cache_read?.input_tokens,
-      ),
-      'gen_ai.usage.cache_creation.input_tokens': this.coerceNumber(
-        (response as any).usage?.cacheCreationTokens ?? (response as any).usage?.cache_creation?.input_tokens,
-      ),
+      'gen_ai.usage.input_tokens': isInterrupted
+        ? 0
+        : this.coerceNumber((response as any).usage?.inputTokens ?? (response as any).usage?.input_tokens),
+      'gen_ai.usage.output_tokens': isInterrupted
+        ? 0
+        : this.coerceNumber((response as any).usage?.outputTokens ?? (response as any).usage?.output_tokens),
+      'gen_ai.usage.cache_read.input_tokens': isInterrupted
+        ? 0
+        : this.coerceNumber(
+          (response as any).usage?.cacheReadTokens ?? (response as any).usage?.cache_read?.input_tokens,
+        ),
+      'gen_ai.usage.cache_creation.input_tokens': isInterrupted
+        ? 0
+        : this.coerceNumber(
+          (response as any).usage?.cacheCreationTokens ?? (response as any).usage?.cache_creation?.input_tokens,
+        ),
       ...(traceId ? { trace_id: traceId } : {}),
       ...(toolDefinitions ? { 'gen_ai.tool.definitions': toolDefinitions } : {}),
       ...(inputMessages ? { 'gen_ai.input.messages': inputMessages } : {}),
-      ...(outputMessages ? { 'gen_ai.output.messages': outputMessages } : {}),
+      ...(outputMessages
+        ? { 'gen_ai.output.messages': outputMessages }
+        : isInterrupted
+          ? { 'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: '' }], finish_reason: 'interrupted' }] as unknown as JsonValue }
+          : {}),
     };
     const entry = buildAgentActivityEntry(combined as any);
     return entry;
   }
 
   // ─── helpers ───
+
+  private stateKey(filePath: string): string {
+    return `${this.id}:${filePath}`;
+  }
 
   private extractSessionIdFromFilePath(filePath: string): string | null {
     // model-io-sess_<sid>.jsonl
@@ -210,6 +311,68 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     if (typeof raw !== 'string' || raw.length === 0) return undefined;
     const hex = raw.replace(/[^0-9a-fA-F]/g, '').toLowerCase();
     return hex.length === 32 ? hex : undefined;
+  }
+
+  private detectInterruptedResponse(
+    response: Record<string, unknown>,
+    completedAt: string | number | undefined,
+  ): boolean {
+    if (!completedAt) return false;
+    const finishReason = (response['finishReason'] as string | undefined)
+      ?? (response['finish_reason'] as string | undefined);
+    if (typeof finishReason === 'string' && finishReason.length > 0) return false;
+    const text = (response['text'] as string | undefined) ?? '';
+    const toolCalls = (response['toolCalls'] as unknown[]) ?? (response['tool_calls'] as unknown[]) ?? [];
+    if (typeof text === 'string' && text.length > 0) return false;
+    if (Array.isArray(toolCalls) && toolCalls.length > 0) return false;
+    return true;
+  }
+
+  /**
+   * Allocate a stable step.id per (turnId, requestId). Same requestId within
+   * a turn reuses the same stepIdx (so attempt>1 retries collapse into one
+   * STEP). Persisted in extra.minimaxCodeRollout.turnStepMap so it survives
+   * restarts and per-file inode rotation (cleared in collect() pre-pass).
+   *
+   * Returns `${turnId}:s${stepIdx+1}` when turnId is non-empty, otherwise
+   * undefined (no step.id - the entry floats outside any STEP, validator
+   * surfaces this as structure.step_has_one_llm for diagnosis).
+   */
+  private allocateStepId(filePath: string, turnId: string, requestId: string): string | undefined {
+    if (!turnId) return undefined;
+    const stateKey = this.stateKey(filePath);
+    const prevState = this.stateStore.get(stateKey);
+    const prevExtra = prevState.extra?.minimaxCodeRollout as
+      | MinimaxCodeRolloutFileState
+      | undefined;
+
+    const fileState: MinimaxCodeRolloutFileState = prevExtra && typeof prevExtra === 'object'
+      ? prevExtra
+      : { inode: 0, turnStepMap: {} };
+
+    let turnState = fileState.turnStepMap[turnId];
+    if (!turnState) {
+      turnState = { requestSet: [], nextStepIdx: 0 };
+      fileState.turnStepMap[turnId] = turnState;
+    }
+
+    let stepIdx: number;
+    const reqIdx = turnState.requestSet.indexOf(requestId);
+    if (reqIdx >= 0) {
+      stepIdx = reqIdx;
+    } else {
+      stepIdx = turnState.nextStepIdx;
+      turnState.requestSet.push(requestId);
+      turnState.nextStepIdx++;
+    }
+
+    // Persist (shallow merge of extra replaces minimaxCodeRollout wholesale,
+    // which is what we want — we already mutated turnStepMap in place).
+    this.stateStore.update(stateKey, {
+      extra: { minimaxCodeRollout: fileState },
+    });
+
+    return `${turnId}:s${stepIdx + 1}`;
   }
 
   private buildInputMessages(request: Record<string, unknown>): JsonValue | undefined {
@@ -273,23 +436,20 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
           const text = (c['text'] as string | undefined) ?? '';
           const ctype = (c['type'] as string | undefined) ?? 'text';
           if (ctype === 'text') return { type: 'text', content: text } as unknown as JsonValue;
-          // best-effort passthrough for unknown part types
           return { type: ctype, content: text } as unknown as JsonValue;
         });
     }
     if (content && typeof content === 'object') {
-      // Tool result object — pass through
       return [{ type: 'text', content: toJsonValue(content) } as unknown as JsonValue];
     }
     return [];
   }
 
   private extractToolDefinitions(request: Record<string, unknown>): JsonValue | undefined {
-    // Multi-path lookup mirrors zcode-rollout-input's normalizeToolDefinitions
-    // (G1 fix), accommodating both flat ({name, description, input_schema})
-    // and OpenAI nested ({type:'function', function:{name, ...}}) shapes. v1
-    // rollout records are likely flat; once we observe nested forms we'll
-    // add `unwindFunctionWrapper` here.
+    // Multi-path lookup accommodates both flat ({name, description,
+    // input_schema}) and OpenAI nested ({type:'function', function:{name, ...}})
+    // shapes. v1 rollout records are likely flat; once we observe nested
+    // forms we'll add `unwindFunctionWrapper` here.
     const candidates: unknown[] = [
       (request['body'] as any)?.tools,
       (request as any).tools,
@@ -309,7 +469,6 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
 
   private normalizeToolDef(rec: Record<string, unknown>): JsonValue {
     const flat: Record<string, unknown> = { ...rec };
-    // OpenAI nested: {type:'function', function:{name, description, parameters}}
     if (rec['function'] && typeof rec['function'] === 'object') {
       Object.assign(flat, rec['function'] as Record<string, unknown>);
     }
