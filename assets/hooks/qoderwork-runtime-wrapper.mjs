@@ -181,21 +181,28 @@ function findHostAppRuntime(resourceRoots) {
 
 const resourceRoots = candidateResourceRoots();
 const host = classifyHost(resourceRoots);
-const hostRuntime = host ? findHostAppRuntime(resourceRoots) : null;
+// Runtime discovery is intentionally independent from host classification.
+// A future/unknown sibling app still needs its own worker to run normally even
+// though we do not yet know which product-specific intercept file to use.
+const hostRuntime = findHostAppRuntime(resourceRoots);
 
-if (host && hostRuntime) {
-  // Certain we will hand control to the host app's OWN runtime. Install
-  // interception, then load it. The app behaves exactly as if unhooked, plus we
-  // capture token usage.
-  const interceptFile = path.join(INTERCEPT_DIR, host.interceptFile);
-  installInterceptHooks(interceptFile);
+if (hostRuntime) {
+  // Only recognized products get interception. Unknown hosts are transparently
+  // forwarded to their own bundled runtime without modifying JSON globals.
+  if (host) {
+    const interceptFile = path.join(INTERCEPT_DIR, host.interceptFile);
+    installInterceptHooks(interceptFile);
+  }
   try {
     await import(hostRuntime);
   } catch (e) {
     // The app's own runtime failed to load — the app would have hit this even
     // without us. Do not throw (module-level throw crashes the worker_thread and
     // blocks the SDK's own transport fallback) and do not try any other runtime.
-    logDiag(`host runtime import failed: host=${host.id}, runtime=${hostRuntime} :: ${e && e.message}`);
+    logDiag(
+      `host runtime import failed: host=${host?.id || 'unrecognized'}, runtime=${hostRuntime} `
+      + `:: ${e && e.message}`,
+    );
   }
 } else {
   // Could not locate the host app's own runtime. Per design priority we refuse
@@ -203,7 +210,7 @@ if (host && hostRuntime) {
   // nothing, load nothing: token interception is lost, the app is never handed a
   // wrong runtime. The SDK detects the empty worker entry and degrades on its own.
   logDiag(
-    'supported host app/runtime not found — skipping intercept to avoid loading a foreign runtime '
+    'host app runtime not found — skipping intercept to avoid loading a foreign runtime '
     + `(execPath=${process.execPath || ''}, resourcesPath=${process.resourcesPath || ''})`,
   );
 }
