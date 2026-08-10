@@ -973,6 +973,14 @@ try {
 # Remove OTel plugin (Claude/Codex)
 # ============================================================
 function Remove-OtelPlugin {
+    # Uninstall never runs Check-Deps, so $script:NODE_BIN is empty here.
+    # Resolve it best-effort (nvm/fnm/Volta/common paths/PATH). If node is
+    # unavailable the JSON/TOML cleanups below skip cleanly, while the plugin
+    # directory removal at the end still runs.
+    if (-not $script:NODE_BIN) {
+        $script:NODE_BIN = Resolve-Node
+    }
+
     # Clean Claude settings.json hooks
     $claudeSettings = Join-Path $env:USERPROFILE ".claude\settings.json"
     if ((Test-Path $claudeSettings) -and $script:NODE_BIN) {
@@ -1007,7 +1015,7 @@ try {
     $codexConfig = Join-Path $env:USERPROFILE ".codex\config.toml"
     if (Test-Path $codexConfig) {
         $content = Get-Content $codexConfig -Raw -ErrorAction SilentlyContinue
-        if ($content -match "# BEGIN otel-codex-hook trust") {
+        if (($content -match "# BEGIN otel-codex-hook trust") -and $script:NODE_BIN) {
             & $script:NODE_BIN -e @'
 const fs = require('fs');
 const f = process.argv[1];
