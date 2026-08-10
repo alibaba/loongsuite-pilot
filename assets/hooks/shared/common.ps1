@@ -14,6 +14,20 @@ function Test-NodeSuitable {
     } catch { return $false }
 }
 
+# Numeric sort key for version dir names, equivalent to the daemon's
+# compareNodeRuntimeDirs. Sort-Object Name is lexicographic and would prefer
+# node-v22.9.0 over node-v22.22.2 once several versions accumulate.
+function Get-NodeVersionSortKey {
+    param([string]$Name)
+    $key = ''
+    foreach ($part in ($Name -replace '^node-v','').Split('.')) {
+        $digits = $part -replace '^[^0-9]*','' -replace '[^0-9].*$',''
+        if (-not $digits) { $digits = '0' }
+        $key += ('{0:D10}' -f [int]$digits)
+    }
+    return $key
+}
+
 function Resolve-NodeBin {
     $pinFiles = @()
     if ($env:LOONGSUITE_PILOT_CACHE_DIR) {
@@ -32,15 +46,31 @@ function Resolve-NodeBin {
         }
     }
     $candidates = @()
+    # Managed runtime node (never removed by user node-manager churn) comes
+    # first, preserving the custom cache/data/default pin-file priority.
+    foreach ($pinFile in $pinFiles) {
+        $runtimeDir = Join-Path (Split-Path $pinFile) "runtime"
+        if (Test-Path $runtimeDir) {
+            $runtimeDirs = Get-ChildItem $runtimeDir -Directory -Filter "node-v*" -ErrorAction SilentlyContinue |
+                Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
+            foreach ($d in $runtimeDirs) {
+                $candidates += Join-Path $d.FullName "bin\node.exe"
+                # Official Node.js win zip layout: node.exe at the root.
+                $candidates += Join-Path $d.FullName "node.exe"
+            }
+        }
+    }
     $nvmHome = $env:NVM_HOME
     if ($nvmHome -and (Test-Path $nvmHome)) {
-        $nvmDirs = Get-ChildItem $nvmHome -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+        $nvmDirs = Get-ChildItem $nvmHome -Directory -ErrorAction SilentlyContinue |
+            Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
         foreach ($d in $nvmDirs) { $candidates += Join-Path $d.FullName "node.exe" }
     }
     if ($env:USERPROFILE) {
         $fnmDir = Join-Path $env:USERPROFILE ".fnm\node-versions"
         if (Test-Path $fnmDir) {
-            $fnmDirs = Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+            $fnmDirs = Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue |
+                Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
             foreach ($d in $fnmDirs) { $candidates += Join-Path $d.FullName "installation\node.exe" }
         }
         $candidates += Join-Path $env:USERPROFILE ".volta\bin\node.exe"

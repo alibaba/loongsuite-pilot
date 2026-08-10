@@ -49,6 +49,7 @@ import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-c
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
+import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
 
@@ -114,6 +115,7 @@ export class Orchestrator extends EventEmitter {
     'mimo-code-log': 'mimo-code',
     'qwen-code-cli-log': 'qwen-code-cli',
     'hermes-agent-log': 'hermes-agent',
+    'openclaw-plugin-log': 'openclaw',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
   };
@@ -1267,6 +1269,28 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['qwen-code-cli-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['qwen-code-cli-log']?.pollInterval,
+      }),
+    );
+
+    // --- OpenClaw Plugin Log (event_t plugin JSONL) ---
+    const openClawPluginLogDir = path.join(this.dataDir, 'logs', 'openclaw');
+    await ensureOpenClawPluginLogDir(openClawPluginLogDir);
+    const openClawPluginInput = new OpenClawPluginInput({
+      stateStore: this.stateStore,
+      logDir: openClawPluginLogDir,
+      pollIntervalMs: listenerCfg['openclaw-plugin-log']?.pollInterval,
+    });
+    this.inputManager.registerInput(openClawPluginInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(openClawPluginInput, {
+        watchPaths: [openClawPluginLogDir],
+        isAvailable: async () => directoryExists(openClawPluginLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['openclaw-plugin-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'openclaw-plugin-log',
+            listenerCfg['openclaw-plugin-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['openclaw-plugin-log']?.pollInterval,
       }),
     );
 

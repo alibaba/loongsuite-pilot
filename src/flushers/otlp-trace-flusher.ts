@@ -1,4 +1,5 @@
 import { ExportResultCode, type ExportResult } from '@opentelemetry/core';
+import { SpanStatusCode } from '@opentelemetry/api';
 import { Resource } from '@opentelemetry/resources';
 import {
   BasicTracerProvider,
@@ -234,6 +235,20 @@ export class OtlpTraceFlusher extends BaseFlusher {
     );
 
     if (source === 'ephemeral') {
+      // Drop metadata-only "other" events (e.g. OpenClaw before_message_write /
+      // tool_result_persist records that lack turn.id/trace_id/session.id).
+      // The converter silently discards them inside a turn (converter.js:73),
+      // but converting them standalone via the ephemeral path produces a fresh
+      // ENTRY+AGENT pair per record, polluting the trace tree with phantom
+      // roots. Skip them so only entries carrying real LLM/tool/input data
+      // get a standalone conversion.
+      if (isMetadataOnlyOtherEvent(entry)) {
+        logger.debug('Dropping metadata-only ephemeral other event', {
+          eventName: entry['event.name'],
+          hook: entry['agent.openclaw.hook'],
+        });
+        return;
+      }
       await this.convertAndExport(agentType, [entry]);
       return;
     }
@@ -290,10 +305,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
     buf.records.push(entry);
     buf.lastActivityMs = Date.now();
 
-    // Signal A: 检测到终态 finish_reason，标记 turn 完成。
+    // Signal A: terminal event detected → mark turn complete.
+    // Default: gen_ai.response.finish_reasons ∈ {stop, end_turn, cancelled, error}.
+    // OpenClaw has a dedicated run-level terminal hook because each ReAct
+    // model call carries its own finish reason.
     // 逐条模式下立即 flush；批量模式下（_deferSignalA=true）仅标记 completed，
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
-    if (hasTerminalFinishReason(entry['gen_ai.response.finish_reasons'])) {
+    if (this.isTerminalEvent(entry)) {
       buf.completed = true;
       if (!this._deferSignalA) {
         this.triggerFlush(buf);
@@ -366,6 +384,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   // --- Internal ---
+
+  private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    // OpenClaw emits one finish reason per ReAct model call. Those values close
+    // individual LLM spans, not the whole agent turn. Its llm_output hook is the
+    // stable end-of-run boundary in every supported version (>=2026.5.12).
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'openclaw') {
+      return entry['agent.openclaw.hook'] === 'llm_output';
+    }
+    return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
+  }
 
   private resolveGroupKey(entry: AgentActivityEntry): {
     source: TurnBuffer['keySource'];
@@ -539,6 +567,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
       if (spans.length === 0) return;
       this.enrichToolSkillAttributes(records, spans);
+      if (agentType === 'openclaw') {
+        this.enrichOpenClawToolAttributes(records, spans);
+        this.enrichOpenClawLlmAttributes(records, spans);
+      }
 
       const exportState = this.getOrCreateExportState(agentType, serviceName);
 
@@ -678,6 +710,114 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (typeof callId !== 'string') continue;
       const attributes = attributesByCallId.get(callId);
       if (attributes) Object.assign(span.attributes, attributes);
+    }
+  }
+
+  private enrichOpenClawLlmAttributes(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+  ): void {
+    const extensionByResponseId = new Map<string, {
+      reasoningTokens?: number;
+      errorType?: string;
+    }>();
+
+    for (const record of records) {
+      if (record['event.name'] !== 'llm.response') continue;
+      const responseId = record['gen_ai.response.id'];
+      if (typeof responseId !== 'string' || responseId.length === 0) continue;
+      const reasoning = record['gen_ai.usage.reasoning_tokens'];
+      const errorType = record['error.type'];
+      extensionByResponseId.set(responseId, {
+        reasoningTokens: typeof reasoning === 'number' && Number.isFinite(reasoning)
+          ? reasoning
+          : undefined,
+        errorType: typeof errorType === 'string' && errorType.length > 0
+          ? errorType
+          : undefined,
+      });
+    }
+
+    let totalReasoningTokens = 0;
+    let sawReasoningTokens = false;
+    for (const span of spans) {
+      if (span.attributes['gen_ai.span.kind'] !== 'LLM') continue;
+      const responseId = span.attributes['gen_ai.response.id'];
+      if (typeof responseId !== 'string') continue;
+      const extension = extensionByResponseId.get(responseId);
+      if (!extension) continue;
+      if (extension.reasoningTokens !== undefined) {
+        span.attributes['gen_ai.usage.reasoning_tokens'] = extension.reasoningTokens;
+        totalReasoningTokens += extension.reasoningTokens;
+        sawReasoningTokens = true;
+      }
+      if (extension.errorType) {
+        span.attributes['error.type'] = extension.errorType;
+        Object.assign(span.status, {
+          code: SpanStatusCode.ERROR,
+          message: 'OpenClaw model call failed',
+        });
+      }
+    }
+
+    if (sawReasoningTokens) {
+      for (const span of spans) {
+        if (span.attributes['gen_ai.span.kind'] === 'AGENT') {
+          span.attributes['gen_ai.usage.reasoning_tokens'] = totalReasoningTokens;
+        }
+      }
+    }
+  }
+
+  private enrichOpenClawToolAttributes(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+  ): void {
+    const extensionByCallId = new Map<string, {
+      resultStatus?: string;
+      errorType?: string;
+      errorMessage?: string;
+    }>();
+
+    for (const record of records) {
+      if (record['event.name'] !== 'tool.result') continue;
+      const callId = record['gen_ai.tool.call.id'];
+      if (typeof callId !== 'string' || callId.length === 0) continue;
+      const resultStatus = record['tool.result.status'];
+      const errorType = record['error.type'];
+      const errorMessage = record['error.message'];
+      extensionByCallId.set(callId, {
+        resultStatus: typeof resultStatus === 'string' && resultStatus.length > 0
+          ? resultStatus
+          : undefined,
+        errorType: typeof errorType === 'string' && errorType.length > 0
+          ? errorType
+          : undefined,
+        errorMessage: typeof errorMessage === 'string' && errorMessage.length > 0
+          ? errorMessage
+          : undefined,
+      });
+    }
+
+    for (const span of spans) {
+      if (span.attributes['gen_ai.span.kind'] !== 'TOOL') continue;
+      const callId = span.attributes['gen_ai.tool.call.id'];
+      if (typeof callId !== 'string') continue;
+      const extension = extensionByCallId.get(callId);
+      if (!extension) continue;
+      if (extension.resultStatus) {
+        span.attributes['tool.result.status'] = extension.resultStatus;
+      }
+      if (extension.errorType) span.attributes['error.type'] = extension.errorType;
+      if (extension.errorMessage) span.attributes['error.message'] = extension.errorMessage;
+
+      const resultStatus = extension.resultStatus?.toLowerCase();
+      if (extension.errorType || resultStatus === 'failure' || resultStatus === 'error') {
+        Object.assign(span.status, {
+          code: SpanStatusCode.ERROR,
+          message: extension.errorMessage || 'OpenClaw tool call failed',
+        });
+      }
     }
   }
 
@@ -921,6 +1061,18 @@ function hasTerminalFinishReason(finishReasons: unknown): boolean {
  * tool.result-only records are always kept — they don't produce orphan
  * spans downstream.
  */
+function isMetadataOnlyOtherEvent(entry: AgentActivityEntry): boolean {
+  // The converter (converter.js:73-74) only consumes "other" events that
+  // carry gen_ai.input.messages(_delta) — they feed the ENTRY span's
+  // input.messages. All other "other" events are silently discarded inside
+  // a turn. Converting such records standalone via the ephemeral path
+  // still produces a phantom ENTRY+AGENT pair, so drop them at the door.
+  if (entry['event.name'] !== 'other') return false;
+  if (entry['gen_ai.input.messages'] !== undefined) return false;
+  if (entry['gen_ai.input.messages_delta'] !== undefined) return false;
+  return true;
+}
+
 function dropOrphanPairs(records: AgentActivityEntry[]): AgentActivityEntry[] {
   const stepsWithResponse = new Set<string>();
   const completedToolCallIds = new Set<string>();

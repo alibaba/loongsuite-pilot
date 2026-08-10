@@ -151,10 +151,21 @@ export interface PluginInjectConfig {
   pluginSpec: string;
   pluginId: string;
   replaceSpecs?: string[];
+  /** Agent-specific config layout. Omitted for the legacy flat-array layout. */
+  configShape?: 'openclaw-nested';
+  /** Required plugin entry fields for nested config layouts. */
+  entryConfig?: Record<string, unknown>;
   /** Target array field. Defaults to auto-detected `plugins` / `plugin`. */
   configKey?: string;
   /** Create the first config path with an empty object when none exists. */
   createIfMissing?: boolean;
+  /** Refuse deployment before touching config when the target is too old. */
+  versionCheck?: {
+    /** Executable followed by argv entries; executed directly without a shell. */
+    command: string[];
+    /** Minimum supported stable version. */
+    minimum: string;
+  };
 }
 
 export interface AgentRuntimeConfig {

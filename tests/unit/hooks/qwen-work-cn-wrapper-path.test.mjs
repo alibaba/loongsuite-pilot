@@ -7,6 +7,7 @@ const powershell = readFileSync(resolve('assets/hooks/qwenworkcn-loongsuite-pilo
 const qoderShell = readFileSync(resolve('assets/hooks/qoderwork-loongsuite-pilot-hook.sh'), 'utf-8');
 const qoderPowershell = readFileSync(resolve('assets/hooks/qoderwork-loongsuite-pilot-hook.ps1'), 'utf-8');
 const commonPowershell = readFileSync(resolve('assets/hooks/shared/common.ps1'), 'utf-8');
+const shellRuntime = readFileSync(resolve('assets/hooks/shared/node-runtime.sh'), 'utf-8');
 const runtime = readFileSync(resolve('assets/hooks/qoderwork-runtime-wrapper.mjs'), 'utf-8');
 
 describe('QwenWorkCN wrapper dataDir propagation', () => {
@@ -20,12 +21,18 @@ describe('QwenWorkCN wrapper dataDir propagation', () => {
     expect(powershell).toContain('$env:LOONGSUITE_PILOT_DATA_DIR = $PilotDataDir');
   });
 
-  it('uses the same shell runtime resolver for QwenWorkCN and QoderWork', () => {
-    for (const wrapper of [shell, qoderShell]) {
-      expect(wrapper).toContain('shared/node-runtime.sh');
-      expect(wrapper).toContain('resolve_pilot_node_bin');
-      expect(wrapper).toContain('export LOONGSUITE_PILOT_DATA_DIR="$PILOT_DATA_DIR"');
+  it('keeps QwenWorkCN shell runtime lookup aligned with QoderWork managed-node support', () => {
+    expect(shell).toContain('shared/node-runtime.sh');
+    expect(shell).toContain('resolve_pilot_node_bin');
+    expect(shellRuntime).toContain('runtime_dir="$(dirname "$pin_file")/runtime"');
+    expect(qoderShell).toContain('runtime_dir="$(dirname "$NODE_PIN_FILE")/runtime"');
+    for (const source of [shellRuntime, qoderShell]) {
+      expect(source).toContain('sort_version_dirs_desc()');
+      expect(source).toContain('.nvm/versions/node');
+      expect(source).toContain('.fnm/aliases/default/bin/node');
+      expect(source).toContain('.volta/bin/node');
     }
+    expect(qoderShell).toContain('export LOONGSUITE_PILOT_DATA_DIR="$PILOT_DATA_DIR"');
   });
 
   it('uses the same PowerShell runtime resolver for QwenWorkCN and QoderWork', () => {

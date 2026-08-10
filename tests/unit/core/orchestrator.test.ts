@@ -314,6 +314,22 @@ describe('Orchestrator', () => {
 
       await orch.stop();
     });
+
+    it('registers the OpenClaw plugin JSONL input with the configured data directory', async () => {
+      const config = makeConfig();
+      config.listeners['openclaw-plugin-log'] = { enabled: true, pollInterval: 1234 };
+
+      const orch = new Orchestrator(config);
+      await orch.start();
+
+      const input = (orch as any).inputManager.getInput('openclaw-plugin-log');
+      expect(input).toBeDefined();
+      expect(input.agentType).toBe('openclaw');
+      expect(input.pollIntervalMs).toBe(1234);
+      expect(input.logDir).toBe('/tmp/test-data/logs/openclaw');
+
+      await orch.stop();
+    });
   });
 
   describe('stop sequence (T039)', () => {

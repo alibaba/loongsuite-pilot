@@ -1,0 +1,13 @@
+{
+  "name": "loongsuite-pilot-openclaw",
+  "version": "1.0.0",
+  "description": "loongsuite-pilot OpenClaw event_t plugin — captures 16 hooks and writes JSONL for ARMS GenAI trace pipeline.",
+  "main": "plugin.mjs",
+  "type": "module",
+  "private": true,
+  "openclaw": {
+    "extensions": [
+      "./plugin.mjs"
+    ]
+  }
+}

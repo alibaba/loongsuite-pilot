@@ -260,6 +260,40 @@ describe('uninstall cleans the MiMo Code plugin-inject spec', () => {
   });
 });
 
+describe('uninstall cleans only the Pilot OpenClaw plugin injection', () => {
+  it('defines and calls cleanup in both installers', () => {
+    expect(sh).toMatch(/remove_openclaw_plugin\(\)\s*\{/);
+    expect(sh.slice(sh.indexOf('cmd_uninstall()'))).toContain('remove_openclaw_plugin');
+    expect(ps1).toMatch(/function Remove-OpenClawPlugin\s*\{/);
+    expect(ps1.slice(ps1.indexOf('function Cmd-Uninstall'))).toContain('Remove-OpenClawPlugin');
+  });
+
+  it('checks the supported config paths and environment overrides', () => {
+    for (const marker of ['OPENCLAW_CONFIG_PATH', 'OPENCLAW_STATE_DIR', 'openclaw.json', 'config.json']) {
+      expect(sh).toContain(marker);
+      expect(ps1).toContain(marker);
+    }
+  });
+
+  it('removes the exact entry and managed path while filtering arrays', () => {
+    for (const installer of [sh, ps1]) {
+      expect(installer).toContain("delete plugins.entries['loongsuite-pilot-openclaw']");
+      expect(installer).toContain("plugins.load.paths.filter(value => !isOurs(value))");
+      expect(installer).toContain("['plugin', 'plugins']");
+      expect(installer).toContain('plugins/openclaw/plugin.mjs');
+    }
+  });
+
+  it('runs cleanup before installation files are removed', () => {
+    const shUninstall = sh.slice(sh.indexOf('cmd_uninstall()'));
+    expect(shUninstall.indexOf('remove_openclaw_plugin'))
+      .toBeLessThan(shUninstall.indexOf('local _cache_dir="$HOME/.loongsuite-pilot"'));
+    const psUninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(psUninstall.indexOf('Remove-OpenClawPlugin'))
+      .toBeLessThan(psUninstall.indexOf('Remove-PilotInstallationFiles'));
+  });
+});
+
 describe('uninstall only cleans the managed Hermes directory plugin', () => {
   it('defines and calls marker-aware cleanup in the shell installer', () => {
     expect(sh).toMatch(/remove_hermes_plugin\(\)\s*\{/);

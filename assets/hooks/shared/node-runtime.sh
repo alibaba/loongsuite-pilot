@@ -32,9 +32,27 @@ pilot_read_node_pin() {
   printf '%s\n' "$pinned"
 }
 
+# Numeric-descending sort for Node version directories. GNU sort supports -V;
+# BSD/macOS sort falls back to zero-padded numeric keys.
+sort_version_dirs_desc() {
+  if printf '' | sort -V >/dev/null 2>&1; then
+    sort -rV
+    return
+  fi
+  local dir version major minor patch
+  while IFS= read -r dir; do
+    version="${dir##*/}"; version="${version#node-v}"; version="${version#v}"
+    IFS=. read -r major minor patch <<<"$version"
+    [[ "$major" =~ ^([0-9]+) ]] && major="${BASH_REMATCH[1]}" || major=0
+    [[ "$minor" =~ ^([0-9]+) ]] && minor="${BASH_REMATCH[1]}" || minor=0
+    [[ "$patch" =~ ^([0-9]+) ]] && patch="${BASH_REMATCH[1]}" || patch=0
+    printf '%04d.%04d.%04d|%s\n' "$major" "$minor" "$patch" "$dir"
+  done | sort -r | cut -d'|' -f2-
+}
+
 resolve_pilot_node_bin() {
-  local pin_file candidate
-  local -a pin_files=() candidates=() nvm_candidates=()
+  local pin_file runtime_dir candidate dir
+  local -a pin_files=() candidates=()
 
   [[ -n "${LOONGSUITE_PILOT_CACHE_DIR:-}" ]] && pin_files+=("$LOONGSUITE_PILOT_CACHE_DIR/node-bin")
   [[ -n "${LOONGSUITE_PILOT_DATA_DIR:-}" ]] && pin_files+=("$LOONGSUITE_PILOT_DATA_DIR/node-bin")
@@ -45,14 +63,24 @@ resolve_pilot_node_bin() {
     return 0
   done
 
-  nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
-  for (( i=${#nvm_candidates[@]}-1; i>=0; i-- )); do
-    candidates+=("${nvm_candidates[i]}")
+  # Prefer Pilot-managed runtimes, preserving the pin-file directory priority.
+  for pin_file in "${pin_files[@]}"; do
+    runtime_dir="$(dirname "$pin_file")/runtime"
+    while IFS= read -r dir; do
+      [[ -n "$dir" ]] && candidates+=("$dir/bin/node")
+    done < <(for dir in "$runtime_dir"/node-v*; do
+      [[ -d "$dir" ]] && printf '%s\n' "$dir"
+    done | sort_version_dirs_desc)
   done
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] && candidates+=("$dir/bin/node")
+  done < <(for dir in "$HOME/.nvm/versions/node"/*; do
+    [[ -d "$dir" ]] && printf '%s\n' "$dir"
+  done | sort_version_dirs_desc)
   candidates+=(
+    "$HOME/.volta/bin/node"
     "$HOME/.fnm/aliases/default/bin/node"
     "$HOME/.local/share/fnm/aliases/default/bin/node"
-    "$HOME/.volta/bin/node"
     /opt/homebrew/bin/node
     /usr/local/bin/node
     "$HOME/.local/bin/node"

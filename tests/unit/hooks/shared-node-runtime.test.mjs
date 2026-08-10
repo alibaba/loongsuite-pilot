@@ -52,6 +52,12 @@ describe.runIf(process.platform !== 'win32')('shared Hook Node runtime resolver'
     expect(await resolveNode()).toBe(validNode);
   });
 
+  it('prefers the newest managed runtime using numeric version order', async () => {
+    await fakeNode(path.join(dataDir, 'runtime', 'node-v22.9.0', 'bin', 'node'), 22);
+    const newest = await fakeNode(path.join(dataDir, 'runtime', 'node-v22.22.2', 'bin', 'node'), 22);
+    expect(await resolveNode()).toBe(newest);
+  });
+
   async function resolveNode() {
     const { stdout } = await execFileAsync('/bin/bash', [
       '-c',

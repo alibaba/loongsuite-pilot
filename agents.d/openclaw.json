@@ -1,0 +1,31 @@
+{
+  "id": "openclaw",
+  "displayName": "OpenClaw",
+  "deployMode": "plugin-inject",
+  "detection": {
+    "paths": ["~/.openclaw"],
+    "commands": ["openclaw"]
+  },
+  "pluginInject": {
+    "configPaths": [
+      "~/.openclaw/openclaw.json",
+      "~/.openclaw/config.json"
+    ],
+    "pluginSpec": "file://$PILOT_DATA/plugins/openclaw/plugin.mjs",
+    "pluginId": "loongsuite-pilot-openclaw",
+    "replaceSpecs": [
+      "loongsuite-pilot-openclaw",
+      "loongsuite-pilot-openclaw-smoke"
+    ],
+    "configShape": "openclaw-nested",
+    "createIfMissing": true,
+    "versionCheck": {
+      "command": ["openclaw", "--version"],
+      "minimum": "2026.5.12"
+    }
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/openclaw"
+  }
+}

@@ -36,6 +36,11 @@ DEFAULT_DATA_DIR="$HOME/.loongsuite-pilot"
 
 # OSS download base URL
 _OSS_BASE_URL="https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot"
+# Managed Node.js runtime + prebuilt node_modules (downloaded from OSS at install time)
+NODE_VERSION="${LOONGSUITE_PILOT_NODE_VERSION:-22.22.2}"
+NODE_DEPS_BASE="${LOONGSUITE_PILOT_NODE_DEPS_URL:-https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node}"
+NODE_MODULES_BASE="${LOONGSUITE_PILOT_NODE_MODULES_URL:-https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node-modules}"
+
 
 # ============================================================
 # Parse sub-command
@@ -63,6 +68,7 @@ MASK_MODE=""
 MASK_TYPES=""
 HAS_SUDO=0
 PURGE=0
+PREFER_SYSTEM_NODE=0
 
 # First arg is sub-command (or option -> default to install)
 if [[ $# -gt 0 ]]; then
@@ -123,6 +129,8 @@ while [[ $# -gt 0 ]]; do
         --mask-types)         MASK_TYPES="$2"; shift 2 ;;
         --mask-types=*)       MASK_TYPES="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
+        --prefer-system-node) PREFER_SYSTEM_NODE=1; shift ;;
+        --prefer-system-node=*) PREFER_SYSTEM_NODE=1; shift ;;
         --system-service)
             echo "⚠️  --system-service is deprecated and ignored. Auto-detection is now the default." >&2
             shift ;;
@@ -258,14 +266,237 @@ resolve_node() {
     return 1
 }
 
+# >>> managed-node-runtime >>>
+# Managed Node.js runtime + prebuilt node_modules, downloaded from OSS.
+# Everything here logs to stderr only: ensure_managed_node is captured via
+# $(...) and must print the node path — and nothing else — on stdout.
+_mn_msg() {
+    if [ "${LANG_MODE:-en}" = "zh" ]; then echo "$1" >&2; else echo "$2" >&2; fi
+}
+
+managed_node_platform() {
+    local os arch
+    case "$(uname -s)" in
+        Darwin) os="darwin" ;;
+        Linux) os="linux" ;;
+        MINGW*|MSYS*|CYGWIN*) os="win" ;;
+        *)
+            echo "managed node: unsupported platform $(uname -s)" >&2
+            return 1 ;;
+    esac
+    case "$(uname -m)" in
+        arm64|aarch64) arch="arm64" ;;
+        x86_64|amd64) arch="x64" ;;
+        *)
+            echo "managed node: unsupported architecture $(uname -m)" >&2
+            return 1 ;;
+    esac
+    if [ "$os" = "win" ] && [ "$arch" = "arm64" ]; then
+        _mn_msg "managed node: win-arm64 无托管产物，回退系统 node + npm install" \
+                "managed node: no win-arm64 artifact, falling back to system node + npm install"
+        return 1
+    fi
+    if [ "$os" = "linux" ] && managed_node_is_musl; then
+        _mn_msg "managed node: linux musl (Alpine) 无托管产物，回退系统 node + npm install" \
+                "managed node: no linux-musl artifact, falling back to system node + npm install"
+        return 1
+    fi
+    echo "$os $arch"
+}
+
+managed_node_is_musl() {
+    ls /lib/ld-musl-* >/dev/null 2>&1 && return 0
+    ldd --version 2>&1 | grep -qi musl && return 0
+    return 1
+}
+
+managed_node_download() {
+    # managed_node_download <url> <dest>
+    # Bounded timeouts mirror the .ps1 installer (-TimeoutSec 600); without
+    # them a stalled TCP connection hangs the installer indefinitely.
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 2 --connect-timeout 20 --max-time 600 "$1" -o "$2"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --tries=2 --timeout=20 "$1" -O "$2"
+    else
+        return 1
+    fi
+}
+
+managed_node_sha256() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        echo "managed node: neither shasum nor sha256sum available" >&2
+        return 1
+    fi
+}
+
+managed_node_verify() {
+    # managed_node_verify <archive> <shasums-file> <archive-basename>
+    local expected actual
+    # [*]? accepts sha256sum binary-mode lines ("<hash> *<name>"), matching
+    # the .ps1 installer's Test-ManagedNodeChecksum.
+    expected=$(grep -E "[[:space:]][*]?${3}\$" "$2" 2>/dev/null | awk '{print $1}' | head -1)
+    if [ -z "$expected" ]; then
+        echo "managed node: SHASUMS256.txt has no entry for $3" >&2
+        return 1
+    fi
+    actual=$(managed_node_sha256 "$1") || return 1
+    if [ "$expected" != "$actual" ]; then
+        echo "managed node: sha256 mismatch for $3 (expected $expected, got $actual)" >&2
+        return 1
+    fi
+    return 0
+}
+
+managed_node_bin() {
+    # managed_node_bin <node-dir> <os>
+    # Prefer the bin/ layout; official Node.js win zips put node.exe at the root.
+    local bin="$1/bin/node"
+    [ "$2" = "win" ] && bin="$1/bin/node.exe"
+    if [ -x "$bin" ]; then
+        echo "$bin"
+        return 0
+    fi
+    if [ "$2" = "win" ] && [ -x "$1/node.exe" ]; then
+        echo "$1/node.exe"
+        return 0
+    fi
+    return 1
+}
+
+ensure_managed_node() {
+    local runtime_dir="$DATA_DIR/runtime"
+    local tuple os arch
+    tuple=$(managed_node_platform) || return 1
+    os="${tuple% *}"; arch="${tuple#* }"
+
+    local ext="tar.gz"
+    [ "$os" = "win" ] && ext="zip"
+    local archive="node-v${NODE_VERSION}-${os}-${arch}.${ext}"
+    local node_dir="$runtime_dir/node-v${NODE_VERSION}-${os}-${arch}"
+    local node_bin=""
+    node_bin=$(managed_node_bin "$node_dir" "$os") || node_bin=""
+
+    if [ -n "$node_bin" ] && [ "$("$node_bin" --version 2>/dev/null)" = "v${NODE_VERSION}" ]; then
+        echo "$node_bin"
+        return 0
+    fi
+
+    local base="${NODE_DEPS_BASE%/}/${NODE_VERSION}"
+    local tmp
+    tmp=$(mktemp -d) || return 1
+
+    _mn_msg "==> 下载托管 Node.js v${NODE_VERSION} (${os}-${arch})..." \
+            "==> Downloading managed Node.js v${NODE_VERSION} (${os}-${arch})..."
+    if ! managed_node_download "$base/$archive" "$tmp/$archive" \
+        || ! managed_node_download "$base/SHASUMS256.txt" "$tmp/SHASUMS256.txt" \
+        || ! managed_node_verify "$tmp/$archive" "$tmp/SHASUMS256.txt" "$archive"; then
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    mkdir -p "$runtime_dir"
+    rm -rf "$node_dir"
+    if [ "$ext" = "zip" ]; then
+        if ! command -v unzip >/dev/null 2>&1 || ! unzip -q "$tmp/$archive" -d "$runtime_dir"; then
+            rm -rf "$tmp" "$node_dir"
+            return 1
+        fi
+    else
+        if ! { tar --warning=no-unknown-keyword -xzf "$tmp/$archive" -C "$runtime_dir" 2>/dev/null \
+                || tar -xzf "$tmp/$archive" -C "$runtime_dir"; }; then
+            rm -rf "$tmp" "$node_dir"
+            return 1
+        fi
+    fi
+    rm -rf "$tmp"
+
+    node_bin=$(managed_node_bin "$node_dir" "$os") || node_bin=""
+    if [ -z "$node_bin" ]; then
+        echo "managed node: extracted archive has no usable node binary under $node_dir (bin/node or node.exe)" >&2
+        rm -rf "$node_dir"
+        return 1
+    fi
+    if [ "$os" = "darwin" ] && command -v xattr >/dev/null 2>&1; then
+        xattr -dr com.apple.quarantine "$node_dir" 2>/dev/null || true
+    fi
+    echo "$node_bin"
+}
+
+ensure_node_modules() {
+    # ensure_node_modules <app-version>  (expects PERMANENT_DIR to point at the deployed version dir)
+    local app_version="${1:-latest}"
+    local tuple os arch
+    tuple=$(managed_node_platform) || return 1
+    os="${tuple% *}"; arch="${tuple#* }"
+
+    local modules_dir="$PERMANENT_DIR/node_modules"
+    local marker="$modules_dir/.pilot-modules-version"
+    local stamp="${app_version} ${os} ${arch}"
+    if [ -d "$modules_dir" ] && [ "$(cat "$marker" 2>/dev/null)" = "$stamp" ]; then
+        return 0
+    fi
+
+    local archive="node-modules-${os}-${arch}.tar.gz"
+    local base="${NODE_MODULES_BASE%/}/${app_version}"
+    local tmp
+    tmp=$(mktemp -d) || return 1
+
+    _mn_msg "==> 下载预编译 node_modules (${os}-${arch}, app v${app_version})..." \
+            "==> Downloading prebuilt node_modules (${os}-${arch}, app v${app_version})..."
+    if ! managed_node_download "$base/$archive" "$tmp/$archive" \
+        || ! managed_node_download "$base/SHASUMS256.txt" "$tmp/SHASUMS256.txt" \
+        || ! managed_node_verify "$tmp/$archive" "$tmp/SHASUMS256.txt" "$archive"; then
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    local stage="$tmp/stage"
+    mkdir -p "$stage"
+    if ! { tar --warning=no-unknown-keyword -xzf "$tmp/$archive" -C "$stage" 2>/dev/null \
+            || tar -xzf "$tmp/$archive" -C "$stage"; }; then
+        rm -rf "$tmp"
+        return 1
+    fi
+    if [ ! -d "$stage/node_modules" ]; then
+        rm -rf "$tmp"
+        echo "managed node_modules: archive does not contain node_modules/" >&2
+        return 1
+    fi
+    echo "$stamp" > "$stage/node_modules/.pilot-modules-version"
+    rm -rf "$modules_dir"
+    if ! mv "$stage/node_modules" "$modules_dir"; then
+        rm -rf "$tmp"
+        return 1
+    fi
+    rm -rf "$tmp"
+    return 0
+}
+# <<< managed-node-runtime <<<
+
 check_deps() {
     msg "==> 检查依赖..." "==> Checking dependencies..."
 
-    NODE_BIN=$(resolve_node) || {
+    NODE_BIN=""
+    if [ "${PREFER_SYSTEM_NODE:-0}" -eq 1 ]; then
+        NODE_BIN=$(resolve_node) || NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
+    else
+        NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
+        if [ -z "$NODE_BIN" ]; then
+            msg "    ⚠️ 托管 Node.js 不可用（平台不支持或下载失败），回退系统 node" \
+                "    ⚠️ Managed Node.js unavailable (unsupported platform or download failed), falling back to system node"
+            NODE_BIN=$(resolve_node) || NODE_BIN=""
+        fi
+    fi
+    if [ -z "$NODE_BIN" ]; then
         msg "❌ 缺少依赖: node，请先安装后重试" \
             "❌ Missing dependency: node — please install it first"
         exit 1
-    }
+    fi
 
     NODE_MAJOR=$("$NODE_BIN" -e "process.stdout.write(String(process.versions.node.split('.')[0]))")
     if [ "$NODE_MAJOR" -lt 18 ]; then
@@ -634,11 +865,18 @@ deploy_package() {
     deploy_bootstrap_scripts
 
     msg "==> 安装依赖..." "==> Installing dependencies..."
-    if ! (cd "$PERMANENT_DIR" && "$NPM_BIN" install --production --no-optional 2>&1 | tail -1); then
-        msg "    ❌ 依赖安装失败" "    ❌ Dependency installation failed"
-        return 1
+    local modules_ver="${ver:-${INSTALL_VERSION:-latest}}"
+    if ensure_node_modules "$modules_ver"; then
+        msg "    ✅ 依赖安装完成（预编译 node_modules）" "    ✅ Dependencies installed (prebuilt node_modules)"
+    else
+        msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" \
+            "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
+        if ! (cd "$PERMANENT_DIR" && "$NPM_BIN" install --production --no-optional 2>&1 | tail -1); then
+            msg "    ❌ 依赖安装失败" "    ❌ Dependency installation failed"
+            return 1
+        fi
+        msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     fi
-    msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     echo ""
 
     msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
@@ -2118,6 +2356,92 @@ try {
 }
 
 # ============================================================
+# Remove OpenClaw's nested plugin entry and load path.
+# ============================================================
+# OpenClaw stores injected plugins under plugins.load.paths plus
+# plugins.entries. The generic hook cleanup does not cover this shape, and
+# leaving either value behind makes OpenClaw load a path that uninstall is
+# about to remove. Only Pilot-owned values are removed; unrelated plugins and
+# their configuration remain semantically unchanged.
+remove_openclaw_plugin() {
+    local state_dir="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
+    local managed_path="$DATA_DIR/plugins/openclaw/plugin.mjs"
+    local configs=()
+    [ -n "${OPENCLAW_CONFIG_PATH:-}" ] && configs+=("$OPENCLAW_CONFIG_PATH")
+    configs+=(
+        "$state_dir/openclaw.json"
+        "$state_dir/config.json"
+        "$HOME/.openclaw/openclaw.json"
+        "$HOME/.openclaw/config.json"
+    )
+
+    local seen="|"
+    for cfg in "${configs[@]}"; do
+        [ -f "$cfg" ] || continue
+        case "$seen" in *"|$cfg|"*) continue ;; esac
+        seen="${seen}${cfg}|"
+        local short="${cfg/#$HOME/\~}"
+
+        if ! command -v node &>/dev/null; then
+            msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        fi
+
+        local result
+        result=$(node -e "
+const fs = require('fs');
+const f = process.argv[1];
+const managed = process.argv[2].replaceAll('\\\\', '/');
+const entryStr = value => typeof value === 'string'
+  ? value
+  : (Array.isArray(value) && typeof value[0] === 'string' ? value[0] : '');
+const isOurs = value => {
+  const normalized = entryStr(value).replaceAll('\\\\', '/');
+  const plain = normalized.startsWith('file://') ? normalized.slice('file://'.length) : normalized;
+  return plain === managed ||
+    normalized.includes('loongsuite-pilot-openclaw') ||
+    normalized.includes('plugins/openclaw/plugin.mjs') && plain.includes('.loongsuite-pilot/');
+};
+try {
+  const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  let changed = false;
+  for (const key of ['plugin', 'plugins']) {
+    if (!Array.isArray(data[key])) continue;
+    const filtered = data[key].filter(value => !isOurs(value));
+    if (filtered.length !== data[key].length) { data[key] = filtered; changed = true; }
+  }
+  const plugins = data.plugins && typeof data.plugins === 'object' && !Array.isArray(data.plugins)
+    ? data.plugins
+    : null;
+  if (plugins) {
+    if (plugins.load && typeof plugins.load === 'object' && Array.isArray(plugins.load.paths)) {
+      const filtered = plugins.load.paths.filter(value => !isOurs(value));
+      if (filtered.length !== plugins.load.paths.length) { plugins.load.paths = filtered; changed = true; }
+    }
+    if (plugins.entries && typeof plugins.entries === 'object' && !Array.isArray(plugins.entries) &&
+        Object.prototype.hasOwnProperty.call(plugins.entries, 'loongsuite-pilot-openclaw')) {
+      delete plugins.entries['loongsuite-pilot-openclaw'];
+      changed = true;
+    }
+  }
+  if (!changed) { process.stdout.write('nochange'); process.exit(0); }
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\\n', 'utf-8');
+  process.stdout.write('cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$cfg" "$managed_path" 2>/dev/null) || result="error"
+
+        case "$result" in
+            cleaned)
+                msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" ;;
+            nochange)
+                : ;;
+            *)
+                msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
+        esac
+    done
+}
+
+# ============================================================
 # CMD: uninstall
 # ============================================================
 cmd_uninstall() {
@@ -2198,6 +2522,10 @@ cmd_uninstall() {
     # Read the persisted target before the data/install directory is removed.
     msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."
     remove_hermes_plugin
+    echo ""
+
+    msg "==> 清理 OpenClaw 插件配置..." "==> Cleaning up OpenClaw plugin config..."
+    remove_openclaw_plugin
     echo ""
 
     # Remove hook entries from tool configs BEFORE removing install dir

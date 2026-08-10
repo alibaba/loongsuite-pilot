@@ -43,6 +43,7 @@ Pilot 主要帮助回答这些问题：
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / session 轮询 | Yes | Yes | No | Yes |
+| OpenClaw | 插件注入 | Yes | Yes | Yes | Yes |
 | OpenCode | 插件注入 | Yes | Yes | Yes | Yes |
 | Pi Coding Agent | Extension 注入 | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
@@ -54,6 +55,8 @@ Pilot 主要帮助回答这些问题：
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
+
+OpenClaw 集成要求 OpenClaw 2026.5.12 或更高版本。
 
 ### Windows Agent 明确支持情况
 
@@ -107,6 +110,7 @@ loongsuite-pilot info
 | 任务 | 文档 |
 |------|------|
 | 选择采集哪些 Agent，控制内容采集策略 | [Agent 配置](docs/zh-CN/agents.md) |
+| 自定义 Agent 名称和实例 | [自定义 `gen_ai.agent.name` 和 `agentteams.instance.id`](docs/zh-CN/custom-agent-identity.md) |
 | 写入本地 JSONL 日志 | [本地 JSONL 输出](docs/zh-CN/local-jsonl-output.md) |
 | 上报日志到 SLS | [SLS 输出](docs/zh-CN/sls-output.md) |
 | 上报 OTLP Trace | [Trace 输出](docs/zh-CN/trace-output.md) |

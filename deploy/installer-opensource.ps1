@@ -52,7 +52,8 @@ param(
     [string]$Agents,
     [string]$MaskMode,
     [string]$MaskTypes,
-    [switch]$Purge
+    [switch]$Purge,
+    [switch]$PreferSystemNode
 )
 
 $ErrorActionPreference = "Stop"
@@ -74,6 +75,11 @@ $CACHE_DIR = if ($env:LOONGSUITE_PILOT_CACHE_DIR) {
 $PERMANENT_DIR = Join-Path $CACHE_DIR "package"
 
 $_OSS_BASE_URL = "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot"
+# Managed Node.js runtime + prebuilt node_modules (downloaded from OSS at install time)
+if ($env:LOONGSUITE_PILOT_NODE_VERSION) { $script:NODE_VERSION = $env:LOONGSUITE_PILOT_NODE_VERSION } else { $script:NODE_VERSION = "22.22.2" }
+if ($env:LOONGSUITE_PILOT_NODE_DEPS_URL) { $script:NODE_DEPS_BASE = $env:LOONGSUITE_PILOT_NODE_DEPS_URL } else { $script:NODE_DEPS_BASE = "https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node" }
+if ($env:LOONGSUITE_PILOT_NODE_MODULES_URL) { $script:NODE_MODULES_BASE = $env:LOONGSUITE_PILOT_NODE_MODULES_URL } else { $script:NODE_MODULES_BASE = "https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node-modules" }
+
 
 # ============================================================
 # Defaults
@@ -226,6 +232,164 @@ function Resolve-Node {
     return $null
 }
 
+# >>> managed-node-runtime >>>
+# Managed Node.js runtime + prebuilt node_modules, downloaded from OSS.
+function Get-ManagedNodePlatform {
+    $archRaw = $env:PROCESSOR_ARCHITEW6432
+    if (-not $archRaw) { $archRaw = $env:PROCESSOR_ARCHITECTURE }
+    switch ($archRaw) {
+        "AMD64" { return [pscustomobject]@{ Os = "win"; Arch = "x64" } }
+        "ARM64" {
+            Msg "    ⚠️ 托管 Node.js 无 win-arm64 产物，回退系统 node + npm install" `
+                "    ⚠️ No win-arm64 managed Node.js artifact, falling back to system node + npm install"
+            return $null
+        }
+        default {
+            Msg "    ⚠️ 托管 Node.js 不支持架构 $archRaw，回退系统 node + npm install" `
+                "    ⚠️ Managed Node.js does not support arch $archRaw, falling back to system node + npm install"
+            return $null
+        }
+    }
+}
+
+function Invoke-ManagedNodeDownload {
+    param([string]$Url, [string]$Dest)
+    try {
+        $prevProgress = $ProgressPreference
+        $ProgressPreference = "SilentlyContinue"
+        Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing -TimeoutSec 600
+        $ProgressPreference = $prevProgress
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Test-ManagedNodeChecksum {
+    param([string]$Archive, [string]$ShasumsFile, [string]$Name)
+    try {
+        $expected = $null
+        foreach ($line in (Get-Content $ShasumsFile)) {
+            if ($line -match ("^([0-9a-fA-F]{64})\s+\*?" + [regex]::Escape($Name) + "\s*$")) {
+                $expected = $Matches[1].ToLower()
+                break
+            }
+        }
+        if (-not $expected) {
+            Msg "    ❌ SHASUMS256.txt 中缺少 $Name 的校验和" "    ❌ SHASUMS256.txt has no entry for $Name"
+            return $false
+        }
+        $actual = (Get-FileHash -Algorithm SHA256 -Path $Archive).Hash.ToLower()
+        if ($actual -ne $expected) {
+            Msg "    ❌ $Name sha256 校验失败 (expected $expected, got $actual)" "    ❌ sha256 mismatch for $Name (expected $expected, got $actual)"
+            return $false
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-ManagedNodeBin {
+    param([string]$NodeDir)
+    # Prefer the bin/ layout; official Node.js win zips put node.exe at the root.
+    $binLayout = Join-Path $NodeDir "bin\node.exe"
+    if (Test-Path $binLayout) { return $binLayout }
+    $officialLayout = Join-Path $NodeDir "node.exe"
+    if (Test-Path $officialLayout) { return $officialLayout }
+    return $null
+}
+
+function Ensure-ManagedNode {
+    $platform = Get-ManagedNodePlatform
+    if (-not $platform) { return $null }
+    $runtimeDir = Join-Path $DataDir "runtime"
+    $archive = "node-v$($script:NODE_VERSION)-$($platform.Os)-$($platform.Arch).zip"
+    $nodeDir = Join-Path $runtimeDir "node-v$($script:NODE_VERSION)-$($platform.Os)-$($platform.Arch)"
+    $nodeBin = Resolve-ManagedNodeBin $nodeDir
+
+    if ($nodeBin) {
+        try {
+            $v = (& $nodeBin --version 2>$null)
+            if ($v -eq "v$($script:NODE_VERSION)") { return $nodeBin }
+        } catch { }
+    }
+
+    $base = $script:NODE_DEPS_BASE.TrimEnd('/') + "/$($script:NODE_VERSION)"
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("pilot-managed-node-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    try {
+        Msg "==> 下载托管 Node.js v$($script:NODE_VERSION) (win-x64)..." "==> Downloading managed Node.js v$($script:NODE_VERSION) (win-x64)..."
+        $archivePath = Join-Path $tmp $archive
+        $shasumsPath = Join-Path $tmp "SHASUMS256.txt"
+        if (-not (Invoke-ManagedNodeDownload "$base/$archive" $archivePath)) { return $null }
+        if (-not (Invoke-ManagedNodeDownload "$base/SHASUMS256.txt" $shasumsPath)) { return $null }
+        if (-not (Test-ManagedNodeChecksum $archivePath $shasumsPath $archive)) { return $null }
+
+        if (Test-Path $nodeDir) { Remove-Item $nodeDir -Recurse -Force }
+        if (-not (Test-Path $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
+        Expand-Archive -Path $archivePath -DestinationPath $runtimeDir -Force
+        $nodeBin = Resolve-ManagedNodeBin $nodeDir
+        if (-not $nodeBin) {
+            Msg "    ❌ 解压产物中未找到 node.exe（bin\ 或根目录布局）" "    ❌ No node.exe found in extracted archive (bin\ or root layout)"
+            Remove-Item $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
+            return $null
+        }
+        return $nodeBin
+    } catch {
+        Remove-Item $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
+        return $null
+    } finally {
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Ensure-NodeModules {
+    param([string]$AppVersion = "latest")
+    $platform = Get-ManagedNodePlatform
+    if (-not $platform) { return $false }
+
+    $modulesDir = Join-Path $script:PERMANENT_DIR "node_modules"
+    $marker = Join-Path $modulesDir ".pilot-modules-version"
+    $stamp = "$AppVersion $($platform.Os) $($platform.Arch)"
+    if ((Test-Path $modulesDir) -and (Test-Path $marker)) {
+        $existing = (Get-Content $marker -ErrorAction SilentlyContinue | Out-String).Trim()
+        if ($existing -eq $stamp) { return $true }
+    }
+
+    $archive = "node-modules-$($platform.Os)-$($platform.Arch).tar.gz"
+    $base = $script:NODE_MODULES_BASE.TrimEnd('/') + "/$AppVersion"
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("pilot-node-modules-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    try {
+        Msg "==> 下载预编译 node_modules (win-x64, app v$AppVersion)..." "==> Downloading prebuilt node_modules (win-x64, app v$AppVersion)..."
+        $archivePath = Join-Path $tmp $archive
+        $shasumsPath = Join-Path $tmp "SHASUMS256.txt"
+        if (-not (Invoke-ManagedNodeDownload "$base/$archive" $archivePath)) { return $false }
+        if (-not (Invoke-ManagedNodeDownload "$base/SHASUMS256.txt" $shasumsPath)) { return $false }
+        if (-not (Test-ManagedNodeChecksum $archivePath $shasumsPath $archive)) { return $false }
+
+        $tarCmd = Get-Command tar -ErrorAction SilentlyContinue
+        if (-not $tarCmd) { return $false }
+        $stage = Join-Path $tmp "stage"
+        New-Item -ItemType Directory -Path $stage -Force | Out-Null
+        & tar -xzf $archivePath -C $stage
+        if ($LASTEXITCODE -ne 0) { return $false }
+        $stagedModules = Join-Path $stage "node_modules"
+        if (-not (Test-Path $stagedModules)) { return $false }
+
+        Set-Content -Path (Join-Path $stagedModules ".pilot-modules-version") -Value $stamp
+        if (Test-Path $modulesDir) { Remove-Item $modulesDir -Recurse -Force }
+        Move-Item $stagedModules $modulesDir
+        return $true
+    } catch {
+        return $false
+    } finally {
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+# <<< managed-node-runtime <<<
+
 # ============================================================
 # Check dependencies
 # ============================================================
@@ -235,7 +399,18 @@ $script:NPM_BIN = ""
 function Check-Deps {
     Msg "==> 检查依赖..." "==> Checking dependencies..."
 
-    $script:NODE_BIN = Resolve-Node
+    $script:NODE_BIN = ""
+    if ($PreferSystemNode) {
+        $script:NODE_BIN = Resolve-Node
+        if (-not $script:NODE_BIN) { $script:NODE_BIN = Ensure-ManagedNode }
+    } else {
+        $script:NODE_BIN = Ensure-ManagedNode
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️ 托管 Node.js 不可用（平台不支持或下载失败），回退系统 node" `
+                "    ⚠️ Managed Node.js unavailable (unsupported platform or download failed), falling back to system node"
+            $script:NODE_BIN = Resolve-Node
+        }
+    }
     if (-not $script:NODE_BIN) {
         Msg "❌ 缺少依赖: node，请先安装后重试" "❌ Missing dependency: node — please install it first"
         exit 1
@@ -647,22 +822,28 @@ function Deploy-Package {
     Write-Host ""
 
     Msg "==> 安装依赖..." "==> Installing dependencies..."
-    $nodeDir = Split-Path $script:NODE_BIN
-    $savedPath = $env:PATH
-    if ($env:PATH -notlike "*$nodeDir*") { $env:PATH = "$nodeDir;$env:PATH" }
-    Push-Location $script:PERMANENT_DIR
-    try {
-        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-        & $script:NPM_BIN install --omit=dev --omit=optional 2>&1 | Select-Object -Last 1
-        $npmExit = $LASTEXITCODE
-        $ErrorActionPreference = $prevEAP
-    } finally {
-        Pop-Location
-        $env:PATH = $savedPath
-    }
-    if ($npmExit -ne 0) {
-        Msg "❌ 依赖安装失败 (exit=$npmExit)，请检查 npm 日志" "❌ Dependencies installation failed (exit=$npmExit), check npm logs"
-        exit 1
+    $modulesVer = $ver
+    if (-not $modulesVer) { if ($Version) { $modulesVer = $Version } else { $modulesVer = "latest" } }
+    $modulesFromOss = Ensure-NodeModules $modulesVer
+    if (-not $modulesFromOss) {
+        Msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
+        $nodeDir = Split-Path $script:NODE_BIN
+        $savedPath = $env:PATH
+        if ($env:PATH -notlike "*$nodeDir*") { $env:PATH = "$nodeDir;$env:PATH" }
+        Push-Location $script:PERMANENT_DIR
+        try {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+            & $script:NPM_BIN install --omit=dev --omit=optional 2>&1 | Select-Object -Last 1
+            $npmExit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEAP
+        } finally {
+            Pop-Location
+            $env:PATH = $savedPath
+        }
+        if ($npmExit -ne 0) {
+            Msg "❌ 依赖安装失败 (exit=$npmExit)，请检查 npm 日志" "❌ Dependencies installation failed (exit=$npmExit), check npm logs"
+            exit 1
+        }
     }
 
     # Only publish current/previous after the candidate is complete. This keeps
@@ -675,7 +856,11 @@ function Deploy-Package {
     }
 
     Deploy-BootstrapScripts
-    Msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
+    if ($modulesFromOss) {
+        Msg "    ✅ 依赖安装完成（预编译 node_modules）" "    ✅ Dependencies installed (prebuilt node_modules)"
+    } else {
+        Msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
+    }
     Write-Host ""
 
     Msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
@@ -1347,6 +1532,83 @@ try {
 }
 
 # ============================================================
+# Remove OpenClaw's nested plugin entry and load path.
+# ============================================================
+function Remove-OpenClawPlugin {
+    $stateDir = if ($env:OPENCLAW_STATE_DIR) {
+        $env:OPENCLAW_STATE_DIR
+    } else {
+        Join-Path $env:USERPROFILE ".openclaw"
+    }
+    $configs = @()
+    if ($env:OPENCLAW_CONFIG_PATH) { $configs += $env:OPENCLAW_CONFIG_PATH }
+    $configs += @(
+        (Join-Path $stateDir "openclaw.json"),
+        (Join-Path $stateDir "config.json"),
+        (Join-Path $env:USERPROFILE ".openclaw\openclaw.json"),
+        (Join-Path $env:USERPROFILE ".openclaw\config.json")
+    )
+    $managedPath = Join-Path $DataDir "plugins\openclaw\plugin.mjs"
+
+    foreach ($cfg in ($configs | Select-Object -Unique)) {
+        if (-not (Test-Path $cfg)) { continue }
+        $short = $cfg.Replace($env:USERPROFILE, "~")
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        }
+
+        $result = & $script:NODE_BIN -e @'
+const fs = require('fs');
+const f = process.argv[1];
+const managed = process.argv[2].replaceAll('\\', '/');
+const entryStr = value => typeof value === 'string'
+  ? value
+  : (Array.isArray(value) && typeof value[0] === 'string' ? value[0] : '');
+const isOurs = value => {
+  const normalized = entryStr(value).replaceAll('\\', '/');
+  const plain = normalized.startsWith('file://') ? normalized.slice('file://'.length) : normalized;
+  return plain === managed ||
+    normalized.includes('loongsuite-pilot-openclaw') ||
+    normalized.includes('plugins/openclaw/plugin.mjs') && plain.includes('.loongsuite-pilot/');
+};
+try {
+  const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  let changed = false;
+  for (const key of ['plugin', 'plugins']) {
+    if (!Array.isArray(data[key])) continue;
+    const filtered = data[key].filter(value => !isOurs(value));
+    if (filtered.length !== data[key].length) { data[key] = filtered; changed = true; }
+  }
+  const plugins = data.plugins && typeof data.plugins === 'object' && !Array.isArray(data.plugins)
+    ? data.plugins
+    : null;
+  if (plugins) {
+    if (plugins.load && typeof plugins.load === 'object' && Array.isArray(plugins.load.paths)) {
+      const filtered = plugins.load.paths.filter(value => !isOurs(value));
+      if (filtered.length !== plugins.load.paths.length) { plugins.load.paths = filtered; changed = true; }
+    }
+    if (plugins.entries && typeof plugins.entries === 'object' && !Array.isArray(plugins.entries) &&
+        Object.prototype.hasOwnProperty.call(plugins.entries, 'loongsuite-pilot-openclaw')) {
+      delete plugins.entries['loongsuite-pilot-openclaw'];
+      changed = true;
+    }
+  }
+  if (!changed) { process.stdout.write('nochange'); process.exit(0); }
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write('cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+'@ $cfg $managedPath 2>$null
+
+        switch ($result) {
+            "cleaned"  { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }
+            "nochange" { }
+            default    { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
+        }
+    }
+}
+
+# ============================================================
 # Remove OTel plugin (Claude/Codex)
 # ============================================================
 function Remove-OtelPlugin {
@@ -1942,6 +2204,10 @@ function Cmd-Uninstall {
     # Read the persisted target before the default data/install directory is removed.
     Msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."
     Remove-HermesPlugin
+    Write-Host ""
+
+    Msg "==> 清理 OpenClaw 插件配置..." "==> Cleaning up OpenClaw plugin config..."
+    Remove-OpenClawPlugin
     Write-Host ""
 
     Msg "==> 删除安装目录..." "==> Removing installation..."
