@@ -192,17 +192,17 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
   protected async processSessionLine(
     record: Record<string, unknown>,
     filePath: string,
-  ): Promise<AgentActivityEntry | null> {
+  ): Promise<AgentActivityEntry[]> {
     // Round 1: process only the documented `type: 'model-io'` records.
     // Future MiniMax Code rollout schema additions (other event types) are
     // intentionally skipped to keep the input narrowly scoped; expanding the
     // accepted shape will be a follow-up PR once the rollout schema stabilizes.
-    if (record['type'] !== 'model-io') return null;
+    if (record['type'] !== 'model-io') return [];
 
     const sessionId = (record['sessionId'] as string | undefined)
       ?? (record['session_id'] as string | undefined)
       ?? this.extractSessionIdFromFilePath(filePath);
-    if (!sessionId) return null;
+    if (!sessionId) return [];
 
     const turnId = (record['turnId'] as string | undefined) ?? (record['turn_id'] as string | undefined);
     const request = (record['request'] as Record<string, unknown> | undefined) ?? {};
@@ -250,10 +250,17 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     // restarts. Cleared on file rotation (see collect() pre-pass).
     const stepId = this.allocateStepId(filePath, turnId ?? '', requestId);
 
-    // Round 1: 单 entry 形式, 包含 input.messages + output.messages + usage.
-    // Round 3 计划: 改 multi-entry 形式, emit llm.request + llm.response pair.
-    const combined: Record<string, unknown> = {
-      'event.name': 'llm.response',
+    // Round 3 (PR #233): emit paired llm.request + llm.response entries
+    // instead of the Round 1 combined single entry. The OTLP trace
+    // converter's pairLlm uses gen_ai.response.id to pair the two events
+    // into a single STEP span; emitting them as two separate entries
+    // produces a cleaner span tree (request side carries tool definitions
+    // and input.messages; response side carries output.messages and
+    // usage) and matches the zcode-rollout-input (PR #101) shape.
+    //
+    // Common fields shared by both entries (trace_id, session/turn/step,
+    // agent type, model, response.id, request.id) ensure pairing works.
+    const sharedFields: Record<string, unknown> = {
       'gen_ai.agent.type': ClientType.MiniMaxCode,
       'gen_ai.agent.name': 'MiniMax Code',
       'gen_ai.session.id': sessionId,
@@ -264,6 +271,21 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
       'gen_ai.response.model': modelId,
       'gen_ai.response.id': responseId,
       'gen_ai.request.id': requestId,
+      ...(traceId ? { trace_id: traceId } : {}),
+    };
+
+    const requestRecord: Record<string, unknown> = {
+      ...sharedFields,
+      'event.name': 'llm.request',
+      time_unix_nano: timestampToUnixNanos(startedAt) ?? '0',
+      ...(inputMessages ? { 'gen_ai.input.messages': inputMessages } : {}),
+      ...(toolDefinitions ? { 'gen_ai.tool.definitions': toolDefinitions } : {}),
+    };
+
+    const responseRecord: Record<string, unknown> = {
+      ...sharedFields,
+      'event.name': 'llm.response',
+      time_unix_nano: timestampToUnixNanos(completedAt) ?? timestampToUnixNanos(startedAt) ?? '0',
       'gen_ai.response.finish_reasons': finishReasons,
       'gen_ai.usage.input_tokens': isInterrupted
         ? 0
@@ -281,17 +303,16 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
         : this.coerceNumber(
           (response as any).usage?.cacheCreationTokens ?? (response as any).usage?.cache_creation?.input_tokens,
         ),
-      ...(traceId ? { trace_id: traceId } : {}),
-      ...(toolDefinitions ? { 'gen_ai.tool.definitions': toolDefinitions } : {}),
-      ...(inputMessages ? { 'gen_ai.input.messages': inputMessages } : {}),
       ...(outputMessages
         ? { 'gen_ai.output.messages': outputMessages }
         : isInterrupted
           ? { 'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: '' }], finish_reason: 'interrupted' }] as unknown as JsonValue }
           : {}),
     };
-    const entry = buildAgentActivityEntry(combined as any);
-    return entry;
+
+    const requestEntry = buildAgentActivityEntry(requestRecord as any);
+    const responseEntry = buildAgentActivityEntry(responseRecord as any);
+    return [requestEntry, responseEntry];
   }
 
   // ─── helpers ───

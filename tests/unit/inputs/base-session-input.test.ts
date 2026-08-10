@@ -13,8 +13,11 @@ class TestSessionInput extends BaseSessionInput {
   readonly agentType = ClientType.QoderWork;
 
   discoverFn: () => Promise<string[]> = async () => [];
-  processLineFn: (record: Record<string, unknown>, filePath: string) => Promise<AgentActivityEntry | null> =
-    async (record) => buildTestEntry({ filePath: (record.file_path as string) ?? '' });
+  processLineFn: (record: Record<string, unknown>, filePath: string) => Promise<AgentActivityEntry[]> =
+    async (record) => {
+      const entry = buildTestEntry({ filePath: (record.file_path as string) ?? '' });
+      return entry ? [entry] : [];
+    };
 
   protected async discoverSessionFiles(): Promise<string[]> {
     return this.discoverFn();
@@ -23,7 +26,7 @@ class TestSessionInput extends BaseSessionInput {
   protected async processSessionLine(
     record: Record<string, unknown>,
     filePath: string,
-  ): Promise<AgentActivityEntry | null> {
+  ): Promise<AgentActivityEntry[]> {
     return this.processLineFn(record, filePath);
   }
 }

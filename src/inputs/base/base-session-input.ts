@@ -91,8 +91,13 @@ export abstract class BaseSessionInput extends BaseInput {
         if (!line.trim()) continue;
         try {
           const parsed = JSON.parse(line) as Record<string, unknown>;
-          const entry = await this.processSessionLine(parsed, filePath);
-          if (entry) entries.push(entry);
+          // Round 3 (PR #233): processSessionLine now returns an array so that
+          // a single source record can emit multiple normalized entries
+          // (e.g. paired llm.request + llm.response for rollout transcripts).
+          // Subclasses that historically returned `null` to skip now return
+          // `[]`; subclasses that returned a single entry return `[entry]`.
+          const lineEntries = await this.processSessionLine(parsed, filePath);
+          entries.push(...lineEntries);
         } catch (err) {
           this.logger.warn('invalid session line', { file: filePath, error: String(err) });
         }
@@ -106,9 +111,17 @@ export abstract class BaseSessionInput extends BaseInput {
   /** Discover session files to process. */
   protected abstract discoverSessionFiles(): Promise<string[]>;
 
-  /** Process a single parsed JSON line from a session file. Return null to skip. */
+  /**
+   * Process a single parsed JSON line from a session file.
+   *
+   * Round 3 (PR #233): returns an array of entries to support paired
+   * llm.request + llm.response emission (a single transcript record can
+   * yield two normalized entries). Return `[]` to skip the line.
+   * Subclasses that historically returned `null` to skip now return `[]`;
+   * subclasses that returned a single entry return `[entry]`.
+   */
   protected abstract processSessionLine(
     record: Record<string, unknown>,
     filePath: string,
-  ): Promise<AgentActivityEntry | null>;
+  ): Promise<AgentActivityEntry[]>;
 }

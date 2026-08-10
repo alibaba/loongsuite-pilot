@@ -185,8 +185,8 @@ export class QoderWorkTraceInput extends BaseSessionInput {
     return files.sort();
   }
 
-  protected async processSessionLine(): Promise<AgentActivityEntry | null> {
-    return null;
+  protected async processSessionLine(): Promise<AgentActivityEntry[]> {
+    return [];
   }
 
   protected override async collect(): Promise<AgentActivityEntry[]> {

@@ -72,8 +72,8 @@ export class QoderCliSessionInput extends BaseSessionInput {
   protected async processSessionLine(
     record: Record<string, unknown>,
     filePath: string,
-  ): Promise<AgentActivityEntry | null> {
-    if (record.type !== SUPPORTED_EVENT_TYPE) return null;
+  ): Promise<AgentActivityEntry[]> {
+    if (record.type !== SUPPORTED_EVENT_TYPE) return [];
 
     const data = asRecord(record.data);
     const sessionInfo = extractSessionInfo(filePath);
@@ -101,7 +101,7 @@ export class QoderCliSessionInput extends BaseSessionInput {
     addIfPresent(attributes, 'stop_reason', stringValue(data.stop_reason));
     addIfPresent(attributes, 'content_block_count', finiteNumber(data.content_block_count));
 
-    return buildAgentActivityEntry({
+    return [buildAgentActivityEntry({
       timestamp,
       time_unix_nano: timestampToUnixNanos(timestamp),
       'event.id': buildDeterministicEventId(filePath, record, responseId),
@@ -116,7 +116,7 @@ export class QoderCliSessionInput extends BaseSessionInput {
       'gen_ai.usage.cache_creation.input_tokens': cacheWriteTokens,
       'gen_ai.usage.total_tokens': sumIfPresent(inputTokens, outputTokens),
       attributes,
-    });
+    })];
   }
 
   private stateKey(filePath: string): string {

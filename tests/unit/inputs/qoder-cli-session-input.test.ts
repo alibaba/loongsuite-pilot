@@ -23,7 +23,7 @@ class TestQoderCliSessionInput extends QoderCliSessionInput {
   async mapOnce(
     record: Record<string, unknown>,
     filePath: string,
-  ): Promise<AgentActivityEntry | null> {
+  ): Promise<AgentActivityEntry[]> {
     return this.processSessionLine(record, filePath);
   }
 }
@@ -209,7 +209,8 @@ describe('QoderCliSessionInput', () => {
     const row = makeModelResponse({ requestId: 'request-no-model', seq: 3 });
     delete (row.data as Record<string, unknown>).model;
 
-    const entry = await input.mapOnce(row, file);
+    const entries = await input.mapOnce(row, file);
+    const entry = entries[0];
 
     expect(entry?.['gen_ai.request.model']).toBe('unknown');
     expect(entry?.['gen_ai.response.model']).toBe('unknown');

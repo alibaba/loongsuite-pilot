@@ -60,49 +60,62 @@ describe('MinimaxCodeRolloutInput', () => {
       { type: 'other', sessionId: 's1' },
       '/tmp/x.jsonl',
     );
-    expect(result).toBeNull();
+    expect(result).toEqual([]);
   });
 
   it('processSessionLine 缺 sessionId 时从 model-io-sess_<sid>.jsonl 文件名提取', async () => {
     const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
     const rec = JSON.parse(fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n')[0]);
     delete rec.sessionId;
-    const entry = await (input as any).processSessionLine(
+    const entries = await (input as any).processSessionLine(
       rec,
       '/tmp/rollout/model-io-sess_abc-def-123.jsonl',
     );
-    expect(entry).toBeTruthy();
-    expect(entry!['gen_ai.session.id']).toBe('abc-def-123');
+    expect(entries).toHaveLength(2);
+    expect(entries[1]!['gen_ai.session.id']).toBe('abc-def-123');
   });
 
-  it('processSessionLine 解析 model-io record → llm.response entry (含 input.messages / output.messages / usage)', async () => {
+  it('processSessionLine 解析 model-io record → emit [llm.request, llm.response] pair', async () => {
     const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
     expect(lines.length).toBeGreaterThanOrEqual(1);
     const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
     const rec = JSON.parse(lines[0]);
-    const entry = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
-    expect(entry).toBeTruthy();
-    expect(entry!['event.name']).toBe('llm.response');
-    expect(entry!['gen_ai.agent.type']).toBe('minimax-code');
-    expect(entry!['gen_ai.agent.name']).toBe('MiniMax Code');
-    expect(entry!['gen_ai.session.id']).toBe(rec.sessionId);
-    // input.messages: fixture 第一条 record 应至少有 user/system 消息
-    const inMsgs = entry!['gen_ai.input.messages'];
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    expect(entries).toHaveLength(2);
+
+    // ── request entry (entries[0])
+    const requestEntry = entries[0];
+    expect(requestEntry['event.name']).toBe('llm.request');
+    expect(requestEntry['gen_ai.agent.type']).toBe('minimax-code');
+    expect(requestEntry['gen_ai.agent.name']).toBe('MiniMax Code');
+    expect(requestEntry['gen_ai.session.id']).toBe(rec.sessionId);
+    const inMsgs = requestEntry['gen_ai.input.messages'];
     expect(Array.isArray(inMsgs)).toBe(true);
     expect(inMsgs.length).toBeGreaterThan(0);
-    // 所有 parts 必须使用 ARMS GenAI parts 结构
     for (const m of inMsgs) {
       expect(m.role).toBeDefined();
       expect(Array.isArray(m.parts)).toBe(true);
     }
-    // output.messages: 至少 assistant 一条
-    const outMsgs = entry!['gen_ai.output.messages'];
+    expect(requestEntry['gen_ai.request.id']).toBeDefined();
+    expect(requestEntry['gen_ai.response.id']).toBeDefined();
+
+    // ── response entry (entries[1])
+    const responseEntry = entries[1];
+    expect(responseEntry['event.name']).toBe('llm.response');
+    expect(responseEntry['gen_ai.session.id']).toBe(rec.sessionId);
+    expect(responseEntry['gen_ai.request.id']).toBe(requestEntry['gen_ai.request.id']);
+    expect(responseEntry['gen_ai.response.id']).toBe(requestEntry['gen_ai.response.id']);
+    const outMsgs = responseEntry['gen_ai.output.messages'];
     expect(Array.isArray(outMsgs)).toBe(true);
     expect(outMsgs[0].role).toBe('assistant');
     expect(outMsgs[0].finish_reason).toBeDefined();
-    // usage
-    expect(entry!['gen_ai.usage.input_tokens']).toBe(10);
-    expect(entry!['gen_ai.usage.output_tokens']).toBe(20);
+    expect(responseEntry['gen_ai.usage.input_tokens']).toBe(10);
+    expect(responseEntry['gen_ai.usage.output_tokens']).toBe(20);
+
+    // time boundaries: request.entry.time_unix_nano <= response.entry.time_unix_nano
+    expect(BigInt(requestEntry['time_unix_nano'])).toBeLessThanOrEqual(
+      BigInt(responseEntry['time_unix_nano']),
+    );
   });
 
   it('processSessionLine: finish_reasons 缺省 → ["stop"]', async () => {
@@ -116,8 +129,8 @@ describe('MinimaxCodeRolloutInput', () => {
       request: { messages: [{ role: 'user', content: 'hi' }] },
       response: { modelId: 'm1', text: 'hello' /* no finishReason */ },
     };
-    const entry = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
-    expect(entry!['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    expect(entries[1]!['gen_ai.response.finish_reasons']).toEqual(['stop']);
   });
 
   it('processSessionLine: traceId UUID 带连字符 → 32-hex (W3C)', async () => {
@@ -129,9 +142,11 @@ describe('MinimaxCodeRolloutInput', () => {
       request: { messages: [] },
       response: { modelId: 'm1' },
     };
-    const entry = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
-    expect(entry!.trace_id).toBe('11111111222233334444555555555555');
-    expect(entry!.trace_id).toMatch(/^[0-9a-f]{32}$/);
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    // trace_id 在 request 和 response entry 上应一致 (OTLP pair key)
+    expect(entries[0]!.trace_id).toBe('11111111222233334444555555555555');
+    expect(entries[1]!.trace_id).toBe('11111111222233334444555555555555');
+    expect(entries[0]!.trace_id).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it('processSessionLine: tool.role 消息 parts.type 为 tool_call_response (P1 fix)', async () => {
@@ -148,8 +163,9 @@ describe('MinimaxCodeRolloutInput', () => {
       },
       response: { modelId: 'm1', text: 'done' },
     };
-    const entry = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
-    const inMsgs = entry!['gen_ai.input.messages'];
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    // input.messages 应该在 request entry (entries[0])
+    const inMsgs = entries[0]!['gen_ai.input.messages'];
     const toolPart = inMsgs.flatMap((m: any) => m.parts).find((p: any) => p.type === 'tool_call_response');
     expect(toolPart).toBeDefined();
     expect(toolPart.id).toBe('call-1');
@@ -158,7 +174,7 @@ describe('MinimaxCodeRolloutInput', () => {
     expect(stale).toBeUndefined();
   });
 
-  it('processSessionLine: tool definitions 抽取并归一化为 ARMS FunctionToolDefinition', async () => {
+  it('processSessionLine: tool definitions 抽取并归一化为 ARMS FunctionToolDefinition (在 request entry)', async () => {
     const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
     const rec = {
       type: 'model-io',
@@ -180,8 +196,9 @@ describe('MinimaxCodeRolloutInput', () => {
       },
       response: { modelId: 'm1' },
     };
-    const entry = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
-    const defs = entry!['gen_ai.tool.definitions'];
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    // tool.definitions 在 request entry
+    const defs = entries[0]!['gen_ai.tool.definitions'];
     expect(defs).toBeDefined();
     expect(defs).toHaveLength(1);
     expect(defs[0].type).toBe('function');
@@ -232,8 +249,8 @@ describe('MinimaxCodeRolloutInput', () => {
     };
     const e1 = await (input as any).processSessionLine(rec1, '/tmp/x.jsonl');
     const e2 = await (input as any).processSessionLine(rec2, '/tmp/x.jsonl');
-    expect(e1!['gen_ai.step.id']).toBe('turn-A:s1');
-    expect(e2!['gen_ai.step.id']).toBe('turn-A:s1');
+    expect(e1[1]!['gen_ai.step.id']).toBe('turn-A:s1');
+    expect(e2[1]!['gen_ai.step.id']).toBe('turn-A:s1');
   });
 
   it('Round 2: 同 turn 不同 requestId → 递增 stepIdx', async () => {
@@ -248,8 +265,8 @@ describe('MinimaxCodeRolloutInput', () => {
     };
     const e1 = await (input as any).processSessionLine(rec1, '/tmp/x.jsonl');
     const e2 = await (input as any).processSessionLine(rec2, '/tmp/x.jsonl');
-    expect(e1!['gen_ai.step.id']).toBe('turn-A:s1');
-    expect(e2!['gen_ai.step.id']).toBe('turn-A:s2');
+    expect(e1[1]!['gen_ai.step.id']).toBe('turn-A:s1');
+    expect(e2[1]!['gen_ai.step.id']).toBe('turn-A:s2');
   });
 
   it('Round 2: 不同 turnId 各自从 s1 开始', async () => {
@@ -263,8 +280,8 @@ describe('MinimaxCodeRolloutInput', () => {
     };
     const e1 = await (input as any).processSessionLine(rec1, '/tmp/x.jsonl');
     const e2 = await (input as any).processSessionLine(rec2, '/tmp/x.jsonl');
-    expect(e1!['gen_ai.step.id']).toBe('turn-A:s1');
-    expect(e2!['gen_ai.step.id']).toBe('turn-B:s1');
+    expect(e1[1]!['gen_ai.step.id']).toBe('turn-A:s1');
+    expect(e2[1]!['gen_ai.step.id']).toBe('turn-B:s1');
   });
 
   it('Round 2: 缺 turnId 时不分配 step.id (validator 诊断)', async () => {
@@ -285,7 +302,7 @@ describe('MinimaxCodeRolloutInput', () => {
       response: { modelId: 'm1' },
     };
     const e1 = await (input1 as any).processSessionLine(rec1, '/tmp/x.jsonl');
-    expect(e1!['gen_ai.step.id']).toBe('turn-A:s1');
+    expect(e1[1]!['gen_ai.step.id']).toBe('turn-A:s1');
 
     // 模拟重启: 新 input 实例, 复用同一 stateStore
     const input2 = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
@@ -296,7 +313,7 @@ describe('MinimaxCodeRolloutInput', () => {
     };
     const e2 = await (input2 as any).processSessionLine(rec2, '/tmp/x.jsonl');
     // 持久化后 nextStepIdx 已递增 → s2
-    expect(e2!['gen_ai.step.id']).toBe('turn-A:s2');
+    expect(e2[1]!['gen_ai.step.id']).toBe('turn-A:s2');
   });
 
   // ─── Round 2: 文件轮转 (inode 变化) ───
@@ -376,29 +393,29 @@ describe('MinimaxCodeRolloutInput', () => {
       type: 'model-io',
       sessionId: 's1',
       turnId: 'turn-A',
-      requestId: 'req-interrupted',
+      request: { requestId: 'req-interrupted', messages: [{ role: 'user', content: 'hi' }] },
       startedAt: 1700000000000,
       completedAt: 1700000001000,
-      request: { messages: [{ role: 'user', content: 'hi' }] },
       response: {
         // 没有 finishReason / text / toolCalls
         modelId: 'm1',
         responseId: 'r-interrupted',
       },
     };
-    const entry = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
-    expect(entry!['gen_ai.response.finish_reasons']).toEqual(['interrupted']);
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    const responseEntry = entries[1];
+    expect(responseEntry['gen_ai.response.finish_reasons']).toEqual(['interrupted']);
     // 占位 output.messages
-    const outMsgs = entry!['gen_ai.output.messages'];
+    const outMsgs = responseEntry['gen_ai.output.messages'];
     expect(Array.isArray(outMsgs)).toBe(true);
     expect(outMsgs.length).toBe(1);
     expect(outMsgs[0].role).toBe('assistant');
     expect(outMsgs[0].finish_reason).toBe('interrupted');
     // usage 全 0
-    expect(entry!['gen_ai.usage.input_tokens']).toBe(0);
-    expect(entry!['gen_ai.usage.output_tokens']).toBe(0);
-    expect(entry!['gen_ai.usage.cache_read.input_tokens']).toBe(0);
-    expect(entry!['gen_ai.usage.cache_creation.input_tokens']).toBe(0);
+    expect(responseEntry['gen_ai.usage.input_tokens']).toBe(0);
+    expect(responseEntry['gen_ai.usage.output_tokens']).toBe(0);
+    expect(responseEntry['gen_ai.usage.cache_read.input_tokens']).toBe(0);
+    expect(responseEntry['gen_ai.usage.cache_creation.input_tokens']).toBe(0);
   });
 
   it('Round 2: 正常 finishReason 时不注入 interrupted (走原 finish_reason)', async () => {
@@ -407,15 +424,14 @@ describe('MinimaxCodeRolloutInput', () => {
       type: 'model-io',
       sessionId: 's1',
       turnId: 'turn-A',
-      requestId: 'req-normal',
+      request: { requestId: 'req-normal', messages: [] },
       startedAt: 1700000000000,
       completedAt: 1700000001234,
-      request: { messages: [] },
       response: { modelId: 'm1', text: 'hello', finishReason: 'stop' },
     };
-    const entry = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
-    expect(entry!['gen_ai.response.finish_reasons']).toEqual(['stop']);
-    expect(entry!['gen_ai.usage.input_tokens']).not.toBe(0); // 真实值
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    expect(entries[1]['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    expect(entries[1]['gen_ai.usage.input_tokens']).not.toBe(0); // 真实值
   });
 
   it('Round 2: completedAt 缺失时不视为 interrupted (fallback to stop)', async () => {
@@ -424,14 +440,13 @@ describe('MinimaxCodeRolloutInput', () => {
       type: 'model-io',
       sessionId: 's1',
       turnId: 'turn-A',
-      requestId: 'req-no-completed',
+      request: { requestId: 'req-no-completed', messages: [] },
       startedAt: 1700000000000,
       // completedAt missing
-      request: { messages: [] },
       response: { modelId: 'm1' },
     };
-    const entry = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
-    expect(entry!['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    expect(entries[1]['gen_ai.response.finish_reasons']).toEqual(['stop']);
   });
 
   it('Round 2: 有 text 但 completedAt 缺失 → 不视为 interrupted', async () => {
@@ -440,14 +455,13 @@ describe('MinimaxCodeRolloutInput', () => {
       type: 'model-io',
       sessionId: 's1',
       turnId: 'turn-A',
-      requestId: 'req-text-only',
+      request: { requestId: 'req-text-only', messages: [] },
       // no completedAt
-      request: { messages: [] },
       response: { modelId: 'm1', text: 'partial response' },
     };
-    const entry = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
     // 没有 completedAt 触发 interrupted 检测,fallback to resolveFinishReasons
     // 也没 finishReason → 'stop'
-    expect(entry!['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    expect(entries[1]['gen_ai.response.finish_reasons']).toEqual(['stop']);
   });
 });
