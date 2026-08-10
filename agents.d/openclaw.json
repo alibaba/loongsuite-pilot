@@ -20,7 +20,10 @@
     "configShape": "openclaw-nested",
     "createIfMissing": true,
     "versionCheck": {
-      "command": ["openclaw", "--version"],
+      "commandCandidates": [
+        ["~/.openclaw-bundle/wrapper/openclaw", "--version"],
+        ["openclaw", "--version"]
+      ],
       "minimum": "2026.5.12"
     }
   },

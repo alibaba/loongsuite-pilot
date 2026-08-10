@@ -177,7 +177,7 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
   it('accepts the minimum supported OpenClaw version before deployment', async () => {
     const result = await strategy.deploy(openclawDef({
       versionCheck: {
-        command: [process.execPath, '-e', 'process.stdout.write("OpenClaw 2026.5.12")'],
+        command: [process.execPath, '-e', 'process.stdout.write("2026.5.12")'],
         minimum: '2026.5.12',
       },
     }));
@@ -201,7 +201,7 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
     await fs.rm(configPath, { force: true });
     const result = await strategy.deploy(openclawDef({
       versionCheck: {
-        command: [process.execPath, '-e', 'process.stdout.write("OpenClaw 2026.5.11")'],
+        command: [process.execPath, '-e', 'process.stdout.write("2026.5.11")'],
         minimum: '2026.5.12',
       },
     }));
@@ -214,7 +214,7 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
   it('rejects prerelease and unparseable versions without changing config', async () => {
     const original = '{\n  "theme": "dark"\n}\n';
     await fs.writeFile(configPath, original);
-    for (const reportedVersion of ['OpenClaw 2026.5.12-rc.1', 'OpenClaw unknown']) {
+    for (const reportedVersion of ['2026.5.12-rc.1', 'unknown']) {
       const result = await strategy.deploy(openclawDef({
         versionCheck: {
           command: [process.execPath, '-e', `process.stdout.write(${JSON.stringify(reportedVersion)})`],
@@ -224,6 +224,64 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
       expect(result.success).toBe(false);
       expect(await fs.readFile(configPath, 'utf8')).toBe(original);
     }
+  });
+
+  it('uses the first available version command candidate', async () => {
+    const result = await strategy.deploy(openclawDef({
+      versionCheck: {
+        commandCandidates: [
+          [process.execPath, '-e', 'process.stdout.write("2026.6.11")'],
+          [process.execPath, '-e', 'process.exit(9)'],
+        ],
+        minimum: '2026.5.12',
+      },
+    }));
+
+    expect(result.success).toBe(true);
+  });
+
+  it('skips an unavailable preferred version command candidate', async () => {
+    const result = await strategy.deploy(openclawDef({
+      versionCheck: {
+        commandCandidates: [
+          [path.join(tmpDir, 'missing-enterprise-cli'), '--version'],
+          [process.execPath, '-e', 'process.stdout.write("2026.6.11")'],
+        ],
+        minimum: '2026.5.12',
+      },
+    }));
+
+    expect(result.success).toBe(true);
+  });
+
+  it('does not fall through after the selected version command fails', async () => {
+    const original = '{\n  "theme": "dark"\n}\n';
+    await fs.writeFile(configPath, original);
+    const result = await strategy.deploy(openclawDef({
+      versionCheck: {
+        commandCandidates: [
+          [process.execPath, '-e', 'process.exit(9)'],
+          [process.execPath, '-e', 'process.stdout.write("2026.6.11")'],
+        ],
+        minimum: '2026.5.12',
+      },
+    }));
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('target version check failed');
+    expect(await fs.readFile(configPath, 'utf8')).toBe(original);
+  });
+
+  it('reports when no version command candidate is available', async () => {
+    const result = await strategy.deploy(openclawDef({
+      versionCheck: {
+        commandCandidates: [[path.join(tmpDir, 'missing-enterprise-cli'), '--version']],
+        minimum: '2026.5.12',
+      },
+    }));
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('target version command not found');
   });
 
   it('needsDeploy returns true when only path is present (entry missing)', async () => {

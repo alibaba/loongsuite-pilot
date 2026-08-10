@@ -161,8 +161,17 @@ export interface PluginInjectConfig {
   createIfMissing?: boolean;
   /** Refuse deployment before touching config when the target is too old. */
   versionCheck?: {
-    /** Executable followed by argv entries; executed directly without a shell. */
-    command: string[];
+    /**
+     * Executable followed by argv entries; executed directly without a shell.
+     * Kept for existing agent definitions that only need one command.
+     */
+    command?: string[];
+    /**
+     * Ordered executable candidates. The first available command is selected
+     * and executed once; an execution failure does not fall through to a later
+     * candidate.
+     */
+    commandCandidates?: string[][];
     /** Minimum supported stable version. */
     minimum: string;
   };

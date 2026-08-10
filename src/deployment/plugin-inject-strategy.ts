@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { constants as fsConstants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type {
@@ -10,7 +11,7 @@ import type {
   PluginInjectConfig,
 } from '../types/index.js';
 import { fileExists, resolveHome } from '../utils/fs-utils.js';
-import { detectAgent } from './detect-utils.js';
+import { commandExists, detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('PluginInjectStrategy');
@@ -178,7 +179,15 @@ export class PluginInjectStrategy implements DeployStrategy {
   private async checkMinimumVersion(config: PluginInjectConfig): Promise<string | null> {
     const check = config.versionCheck;
     if (!check) return null;
-    if (check.command.length === 0 || !check.command[0]) {
+
+    const candidates = check.commandCandidates?.length
+      ? check.commandCandidates
+      : check.command
+        ? [check.command]
+        : [];
+    if (!candidates.some(
+      candidate => Array.isArray(candidate) && candidate.length > 0 && candidate[0],
+    )) {
       return 'invalid version check: command must not be empty';
     }
 
@@ -187,8 +196,11 @@ export class PluginInjectStrategy implements DeployStrategy {
       return `invalid minimum supported version: ${check.minimum}`;
     }
 
+    const command = await this.resolveVersionCheckCommand(candidates);
+    if (!command) return `target version command not found; requires >= ${check.minimum}`;
+
     try {
-      const { stdout, stderr } = await execFileAsync(check.command[0], check.command.slice(1), {
+      const { stdout, stderr } = await execFileAsync(command[0], command.slice(1), {
         timeout: 10_000,
         maxBuffer: 64 * 1024,
         windowsHide: true,
@@ -207,6 +219,36 @@ export class PluginInjectStrategy implements DeployStrategy {
     } catch (err) {
       return `target version check failed; requires >= ${check.minimum}: ${String(err)}`;
     }
+  }
+
+  private async resolveVersionCheckCommand(
+    candidates: string[][],
+  ): Promise<string[] | null> {
+    for (const candidate of candidates) {
+      if (!Array.isArray(candidate) || candidate.length === 0 || !candidate[0]) continue;
+
+      const executable = resolveHome(candidate[0]);
+      const resolved = [executable, ...candidate.slice(1)];
+      const isPath = path.isAbsolute(executable)
+        || executable.includes('/')
+        || executable.includes('\\');
+
+      if (isPath) {
+        try {
+          await fs.access(
+            executable,
+            process.platform === 'win32' ? fsConstants.F_OK : fsConstants.X_OK,
+          );
+          return resolved;
+        } catch {
+          continue;
+        }
+      }
+
+      if (await commandExists(executable)) return resolved;
+    }
+
+    return null;
   }
 
   private parseVersion(text: string): { raw: string; core: [number, number, number]; suffix?: string } | null {
