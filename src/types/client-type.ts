@@ -38,6 +38,7 @@ export enum ClientType {
   GithubCopilotHook = 'github-copilot-hook',
   AoneCopilotHook = 'aone-copilot-hook',
   OpenCode = 'opencode',
+  ZCode = 'zcode',
 
 }
 

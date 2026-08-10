@@ -61,6 +61,15 @@ export interface AgentHookConfig {
    */
   rawCommand?: boolean;
   /**
+   * Optional intermediate path segment between `hooks` and the event name
+   * in the agent's settings JSON. Defaults to undefined (writes
+   * `hooks.<event>`). Set to `'events'` for agents whose schema strictly
+   * requires `hooks.events.<event>` (zcode.cjs hkn schema strict mode —
+   * writing `hooks.<event>` would be silently rejected and the hook would
+   * never fire). Spec §1.4 / source-evidence.md §4.
+   */
+  eventsRoot?: string;
+  /**
    * Optional env block to merge into the agent's settings.json on deploy.
    *
    * Each value may contain the `$PILOT_DATA` token; AgentDefLoader resolves
