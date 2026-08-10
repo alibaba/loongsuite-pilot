@@ -1,12 +1,11 @@
 ﻿# loongsuite-pilot-installer 插件 SessionStart hook（Windows）：
-# 与 ensure-pilot.sh 等价 —— 幂等检测并安装 loongsuite-pilot，node 依赖统一使用
-# v22.22.2（从 NODE_DIST_BASE_URL 下载 win-x64.zip，vendor\node 内有包则优先用本地包）。
+# 与 ensure-pilot.sh 等价 —— 幂等检测并安装 loongsuite-pilot；node 运行时由 installer
+# 自行准备，本 hook 不再管。
 # 管理员参数复用同一份 config\install-params.conf，kebab-case 自动转成 installer.ps1
 # 需要的 PascalCase 参数。
-# 用法：ensure-pilot.ps1 [-ProvisionNodeOnly]
+# 用法：ensure-pilot.ps1
 [CmdletBinding()]
 param(
-    [switch]$ProvisionNodeOnly,
     [switch]$RunInstall   # detach 出的独立进程用：直接执行重活，不再二次 detach
 )
 
@@ -20,11 +19,8 @@ $LockDir = Join-Path $DataDir 'install.lock'
 $PilotCmd = Join-Path $env:USERPROFILE '.local\bin\loongsuite-pilot.cmd'
 $PilotHome = Join-Path $env:USERPROFILE '.loongsuite-pilot'   # pilot 数据目录（默认），内含 pid 文件，用于判活
 
-# ---- 插件内置常量：安装器地址 / node 运行时（由维护者维护，管理员无需配置） ----
-$InstallerUrl = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot-dev/installer.ps1'
-$NodeVersion = '22.22.2'
-$NodeDistBaseUrl = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node/22.22.2'
-$NodeMinMajor = 22
+# ---- 插件内置常量：安装器地址（由维护者维护，管理员无需配置） ----
+$InstallerUrl = 'https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.ps1'
 # 管理员参数：仅 InstallArgs 从 config\install-params.conf 读取
 $InstallArgs = @()
 
@@ -35,7 +31,7 @@ function Write-Log($msg) {
 }
 
 # ---- 解析 install-params.conf（bash 语法）：只读管理员参数 INSTALL_ARGS ----
-# 安装器地址 / node 版本 / node 下载源均为插件内置常量，不从 conf 读取
+# 安装器地址为插件内置常量，不从 conf 读取
 function Read-AdminConfig {
     $conf = Join-Path $PluginRoot 'config\install-params.conf'
     if (-not (Test-Path $conf)) { return }
@@ -80,69 +76,6 @@ if (-not $userId) {
 }
 if ($userId) { $InstallArgs += @('-UserId', $userId) }
 
-# ---- node >= 22 探测（本机已有则复用，不重复下载） ----
-function Find-Node {
-    $candidates = @()
-    $bundled = Join-Path $DataDir 'node'
-    if (Test-Path $bundled) {
-        $candidates += Get-ChildItem -Path $bundled -Directory -Filter 'node-v*' |
-            ForEach-Object { $_.FullName }
-    }
-    foreach ($dir in $candidates) {
-        if (Test-Path (Join-Path $dir 'node.exe')) { return $dir }
-    }
-    $onPath = Get-Command node -ErrorAction SilentlyContinue
-    if ($onPath) {
-        $ver = (& $onPath.Source -v) -replace '^v', ''
-        if ([int]($ver -split '\.')[0] -ge $NodeMinMajor) { return (Split-Path -Parent $onPath.Source) }
-    }
-    return $null
-}
-
-# ---- 下载/解包 node 分发包（仅 win-x64 已上传，ARM 上回退到 x64 走仿真） ----
-function Install-Node {
-    $extractDir = Join-Path $DataDir 'node'
-    New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-
-    $arches = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { @('arm64', 'x64') } else { @('x64') }
-    foreach ($arch in $arches) {
-        $zipName = "node-v$NodeVersion-win-$arch.zip"
-        $vendorZip = Join-Path $PluginRoot "vendor\node\$zipName"
-        try {
-            if (Test-Path $vendorZip) {
-                Write-Log "使用插件本地捆绑的 node 分发包: $zipName"
-                $zip = $vendorZip
-            } else {
-                $zip = Join-Path $DataDir $zipName
-                $url = "$NodeDistBaseUrl/$zipName"
-                Write-Log "从 $url 下载 node 分发包"
-                Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-            }
-            # 受限语言模式下 Expand-Archive 不可用（Microsoft.PowerShell.Archive 脚本模块内部创建压缩类型被禁），
-            # 改用系统自带 tar.exe（bsdtar，Win10 1803+/Server2019+ 内置）解 zip——外部程序，CLM 允许
-            & tar.exe -xf $zip -C $extractDir
-            if ($LASTEXITCODE -ne 0) { throw "tar 解包失败 (exit $LASTEXITCODE)" }
-            if ($zip -ne $vendorZip) { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
-            return (Join-Path $extractDir "node-v$NodeVersion-win-$arch")
-        } catch {
-            Write-Log "node $arch 包获取失败: $($_.Exception.Message)"
-        }
-    }
-    throw "无法获取 node v$NodeVersion (win)"
-}
-
-function Initialize-NodeRuntime {
-    $binDir = Find-Node
-    if ($binDir) {
-        Write-Log "node 环境就绪: $binDir"
-    } else {
-        Write-Log "未检测到 node >= $NodeMinMajor，准备 node v$NodeVersion"
-        $binDir = Install-Node
-        Write-Log "node 就绪: $binDir ($(& (Join-Path $binDir 'node.exe') -v))"
-    }
-    $env:PATH = "$binDir;$(Join-Path $env:USERPROFILE '.local\bin');$env:PATH"
-}
-
 # ---- 运行子进程并把所有流追加到日志 ----
 # 必须用文件重定向而不是 `| Add-Content`：
 #   • 管道会等 stdout 句柄关闭，installer 启动的后台守护进程会继承句柄 → 永远挂死
@@ -154,13 +87,6 @@ function Invoke-Logged([string[]]$PsArgs) {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File @PsArgs *>> $LogFile
         return $LASTEXITCODE
     } finally { $ErrorActionPreference = $prevEap }
-}
-
-# ---- 测试入口：仅准备 node ----
-if ($ProvisionNodeOnly) {
-    Initialize-NodeRuntime
-    & node -v
-    exit 0
 }
 
 # ---- 参数指纹：判断"要装的参数是否和上次一致"。installer 对 config.json 是合并语义，
@@ -203,7 +129,7 @@ function Test-PilotRunning {
     return [bool](Get-Process -Id ([int]$pidVal) -ErrorAction SilentlyContinue)
 }
 
-# ---- Invoke-Install：重活（抢锁 + node + 下载 installer + install + 写指纹）----
+# ---- Invoke-Install：重活（抢锁 + 下载 installer + install + 写指纹；node 由 installer 自备）----
 # 由 detach 出的独立进程（-RunInstall）执行：不随会话退出而中断，也不占用 hook 返回时间。
 function Invoke-Install {
     # 并发锁：多会话同时启动时只允许一个实例执行安装。
@@ -248,8 +174,6 @@ function Invoke-Install {
         }
         Write-Log "installer: $InstallerUrl"
         Write-Log "install args: $($InstallArgs -join ' ')"
-
-        Initialize-NodeRuntime
 
         $installerTmp = Join-Path $DataDir 'installer.ps1'
         Invoke-WebRequest -Uri $InstallerUrl -OutFile $installerTmp -UseBasicParsing

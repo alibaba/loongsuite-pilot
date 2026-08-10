@@ -3,18 +3,15 @@
 # 产物结构：zip 内顶层是版本目录 loongsuite-pilot-installer-<version>/，其下是插件本体
 #   loongsuite-pilot-installer/，任意解压器解开后都得到统一的版本目录，再直接
 #   qodercli plugins install /path/to/loongsuite-pilot-installer-<version>/loongsuite-pilot-installer
-# 默认排除 vendor/node/（体积大、hook 在线下载）与运行期落盘文件。
+# 默认排除运行期落盘文件（install.log 等）与系统垃圾。node 运行时由 installer 自备,不入包。
 # 用法：
-#   ./package-plugin-zip.sh                 # 只打插件本体（推荐，联网下载 node）
-#   ./package-plugin-zip.sh --with-node     # 连 vendor/node/ 一起打（离线分发）
+#   ./package-plugin-zip.sh                 # 打插件本体
 #   ./package-plugin-zip.sh -o /tmp         # 指定产物输出目录
 set -euo pipefail
 
-WITH_NODE=0
 OUT_DIR=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --with-node) WITH_NODE=1; shift ;;
         -o|--out)    OUT_DIR="$2"; shift 2 ;;
         -h|--help)
             grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -43,7 +40,6 @@ rm -f "$ZIP_PATH"
 
 echo "==> 打包 $PLUGIN_NAME v$VERSION"
 echo "    源目录: $PLUGIN_DIR"
-echo "    vendor/node: $([ "$WITH_NODE" -eq 1 ] && echo '包含（离线分发）' || echo '排除（在线下载）')"
 echo "    产物: $ZIP_PATH"
 
 # 先把插件拷进版本目录 loongsuite-pilot-installer-<version>/loongsuite-pilot-installer/，
@@ -56,9 +52,6 @@ mkdir -p "$STAGE_DIR/$WRAP_NAME"
 RSYNC_EXCLUDES=( --exclude='.DS_Store'
     --exclude='install.log' --exclude='install.lock'
     --exclude='install-args.sha256' --exclude='installer.sh' --exclude='installer.ps1' )
-if [ "$WITH_NODE" -eq 0 ]; then
-    RSYNC_EXCLUDES+=( --exclude='vendor/node' )
-fi
 rsync -a "${RSYNC_EXCLUDES[@]}" "$PLUGIN_DIR" "$STAGE_DIR/$WRAP_NAME/"
 
 ( cd "$STAGE_DIR" && zip -r -q "$ZIP_PATH" "$WRAP_NAME" )

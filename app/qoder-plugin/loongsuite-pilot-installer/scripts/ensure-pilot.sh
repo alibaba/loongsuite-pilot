@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # loongsuite-pilot-installer 插件 SessionStart hook：
-# 幂等检测并安装 loongsuite-pilot。node 依赖统一使用 v22.22.2：默认从
-# NODE_DIST_BASE_URL（OSS）按平台下载，vendor/node 内有包则优先用本地包。
+# 幂等检测并安装 loongsuite-pilot。node 运行时由 installer 自行准备，本 hook 不再管。
 # 管理员参数从 config/install-params.conf 读取并透传给 installer。
-# 用法：ensure-pilot.sh [--provision-node-only]（后者仅准备 node 并打印路径，供测试）
+# 用法：ensure-pilot.sh
 set -uo pipefail
 
 PLUGIN_ROOT="${QODER_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -13,11 +12,8 @@ LOCK_DIR="$DATA_DIR/install.lock"
 PILOT_BIN="$HOME/.local/bin/loongsuite-pilot"
 PILOT_HOME="$HOME/.loongsuite-pilot"   # pilot 数据目录（默认），内含 pid 文件，用于判活
 
-# ---- 插件内置常量：安装器地址 / node 运行时（由维护者维护，管理员无需配置） ----
-INSTALLER_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot-dev/installer.sh"
-NODE_VERSION="22.22.2"
-NODE_DIST_BASE_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node/22.22.2"
-NODE_MIN_MAJOR=22
+# ---- 插件内置常量：安装器地址（由维护者维护，管理员无需配置） ----
+INSTALLER_URL="https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh"
 
 # ---- 管理员参数：仅 INSTALL_ARGS 从 config/install-params.conf 读取 ----
 INSTALL_ARGS=()
@@ -28,7 +24,7 @@ CONF="$PLUGIN_ROOT/config/install-params.conf"
 # 来源优先级：管理员显式覆盖 > Qoder 注入的 QODER_USER_ID > 解析 hook stdin 的 extra.user.uid
 # QODER_USER_ID 仅在 hook 运行时由 Qoder 注入到进程环境（交互 shell 里没有），与 stdin payload 同源
 USER_ID="${LOONGSUITE_PILOT_USER_ID:-${QODER_USER_ID:-}}"
-# 仅当 stdin 是管道（hook 运行时）才读，避免 --provision-node-only 在终端自测时 cat 阻塞
+# 仅当 stdin 是管道（hook 运行时）才读，避免终端里手动执行时 cat 阻塞
 if [ -z "$USER_ID" ] && [ ! -t 0 ]; then
     USER_ID=$(cat 2>/dev/null \
         | grep -o '"uid"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 \
@@ -41,89 +37,10 @@ fi
 mkdir -p "$DATA_DIR"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
 
-# ---- 平台检测（Windows 交由 ensure-pilot.ps1 处理，本脚本静默退出） ----
-detect_platform() {
-    local os arch
-    case "$(uname -s)" in
-        Darwin) os="darwin" ;;
-        Linux)  os="linux" ;;
-        MINGW*|MSYS*|CYGWIN*) os="win" ;;
-        *) return 1 ;;
-    esac
-    case "$(uname -m)" in
-        arm64|aarch64) arch="arm64" ;;
-        x86_64|amd64)  arch="x64" ;;
-        *) return 1 ;;
-    esac
-    echo "${os}-${arch}"
-}
-
 # Windows 下若本脚本被 Git Bash 拉起，直接让位给 PowerShell hook，避免重复安装
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) exit 0 ;;
 esac
-
-# ---- node >= 22 探测（本机已有则直接复用，不重复安装） ----
-find_node() {
-    local d major
-    # 之前由本插件解包的捆绑 node
-    for d in "$DATA_DIR/node"/node-v*/bin; do
-        [ -x "$d/node" ] && { echo "$d"; return 0; }
-    done
-    for d in "$HOME/.nvm/versions/node"/*/bin; do
-        [ -x "$d/node" ] || continue
-        major=$(basename "$(dirname "$d")" | sed 's/^v//' | cut -d. -f1)
-        [ "$major" -ge "$NODE_MIN_MAJOR" ] 2>/dev/null && { echo "$d"; return 0; }
-    done
-    if command -v node >/dev/null 2>&1; then
-        major=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)
-        [ "$major" -ge "$NODE_MIN_MAJOR" ] 2>/dev/null && { dirname "$(command -v node)"; return 0; }
-    fi
-    return 1
-}
-
-# ---- 捆绑/下载 node 分发包并解压到插件数据目录 ----
-provision_node() {
-    local platform tarball vendor_tar dl_tar extract_dir
-    platform=$(detect_platform) || { log "❌ 不支持的平台: $(uname -s)/$(uname -m)"; return 1; }
-    tarball="node-v${NODE_VERSION}-${platform}.tar.gz"
-    vendor_tar="$PLUGIN_ROOT/vendor/node/$tarball"
-    extract_dir="$DATA_DIR/node"
-    mkdir -p "$extract_dir"
-
-    if [ -f "$vendor_tar" ]; then
-        log "使用插件本地捆绑的 node 分发包: $tarball"
-        dl_tar="$vendor_tar"
-    else
-        dl_tar="$DATA_DIR/$tarball"
-        local url="$NODE_DIST_BASE_URL/$tarball"
-        log "从 $url 下载 node 分发包"
-        curl -fsSL "$url" -o "$dl_tar" 2>>"$LOG_FILE" || { log "❌ node 分发包下载失败: $url"; return 1; }
-    fi
-
-    tar -xzf "$dl_tar" -C "$extract_dir" 2>>"$LOG_FILE" || { log "❌ node 分发包解压失败"; return 1; }
-    [ "$dl_tar" != "$vendor_tar" ] && rm -f "$dl_tar"
-    echo "$extract_dir/node-v${NODE_VERSION}-${platform}/bin"
-}
-
-ensure_node() {
-    local bin_dir
-    if bin_dir=$(find_node); then
-        log "node 环境就绪: $bin_dir"
-    else
-        log "未检测到 node >= $NODE_MIN_MAJOR，准备 node v$NODE_VERSION"
-        bin_dir=$(provision_node) || return 1
-        log "node 就绪: $bin_dir ($("$bin_dir/node" -v 2>/dev/null))"
-    fi
-    export PATH="$bin_dir:$HOME/.local/bin:$PATH"
-}
-
-# ---- 测试入口：仅准备 node ----
-if [ "${1:-}" = "--provision-node-only" ]; then
-    ensure_node || exit 1
-    command -v node && node -v
-    exit 0
-fi
 
 # ---- 参数指纹：判断"要装的参数是否和上次一致"。installer 对 config.json 是合并语义，
 # 参数变更时重新 install 覆盖即可（installer 自身会停旧进程 + merge + 重启，故不再 uninstall --purge）。
@@ -164,7 +81,7 @@ pilot_cmd() {
     fi
 }
 
-# ---- run_install：重活（抢锁 + node + 下载 installer + install + 写指纹）----
+# ---- run_install：重活（抢锁 + 下载 installer + install + 写指纹；node 由 installer 自备）----
 # 由 detach 出的后台子进程（--run-install）执行：脱离 CLI 进程树，不随会话退出而中断，
 # 也不占用 hook 返回时间。首次/重装可能数分钟，全在这里。
 run_install() {
@@ -208,8 +125,6 @@ run_install() {
 
     log "installer: $INSTALLER_URL"
     log "install args: ${INSTALL_ARGS[*]+${INSTALL_ARGS[*]}}"
-
-    ensure_node || { log "❌ node 环境准备失败"; return 1; }
 
     # ---- 下载 installer ----
     local installer_tmp="$DATA_DIR/installer.sh"
