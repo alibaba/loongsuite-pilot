@@ -298,7 +298,10 @@ describe('MinimaxCodeRolloutInput', () => {
       request: { messages: [] }, response: { modelId: 'm1' },
     };
     const e = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
-    expect(e!['gen_ai.step.id']).toBeUndefined();
+    // Round 3 (PR #233): processSessionLine returns AgentActivityEntry[]; the
+    // step.id lives on the response entry (index 1) — request side has no
+    // step.id when turnId is missing.
+    expect(e[1]!['gen_ai.step.id']).toBeUndefined();
   });
 
   it('Round 2: 跨 input 实例 + 共享 stateStore → step.id 复用序号', async () => {

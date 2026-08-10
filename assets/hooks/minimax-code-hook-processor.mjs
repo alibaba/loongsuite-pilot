@@ -308,14 +308,38 @@ function cmdStop() {
 
 // ─── dispatch ───
 
+// Hook host invokes this script synchronously over stdin/stdout and reads
+// the JSON response from stdout to apply hook-policy decisions. Even when
+// the hook is fail-open (no JSON response needed), the host expects stdout
+// to be a valid JSON document (commonly `{}`) before it proceeds. We always
+// emit `{}\n` from a finally block so subcommand handlers can short-circuit
+// (e.g. missing sessionId, unknown subcommand) without leaving stdout empty
+// and blocking the host. Mirrors assets/hooks/claude-code-hook-processor.mjs.
+
+const DISPATCH = {
+  'session-start':       cmdSessionStart,
+  'user-prompt-submit':  cmdUserPromptSubmit,
+  'pre-tool-use':        cmdPreToolUse,
+  'post-tool-use':       cmdPostToolUse,
+  'stop':                cmdStop,
+};
+
 const subcommand = process.argv[2] || '';
-switch (subcommand) {
-  case 'session-start':       cmdSessionStart(); break;
-  case 'user-prompt-submit':  cmdUserPromptSubmit(); break;
-  case 'pre-tool-use':        cmdPreToolUse(); break;
-  case 'post-tool-use':       cmdPostToolUse(); break;
-  case 'stop':                cmdStop(); break;
-  default:
-    // Unknown subcommand: fail-open, emit nothing.
-    break;
+const handler = DISPATCH[subcommand];
+if (handler) {
+  try {
+    handler();
+  } catch (err) {
+    logHookError({
+      agentId: AGENT_ID,
+      stage: `dispatch_${subcommand}`,
+      errorType: 'unhandled',
+      errorMessage: err?.message || String(err),
+    });
+  } finally {
+    process.stdout.write('{}\n');
+  }
+} else {
+  // Unknown subcommand: fail-open, emit empty JSON so the host can proceed.
+  process.stdout.write('{}\n');
 }

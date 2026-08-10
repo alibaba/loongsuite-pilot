@@ -65,14 +65,27 @@ interface MinimaxCodeRolloutFileState {
  *     为 null/空 + 无 text/toolCalls → 注入 finish_reasons=['interrupted']
  *     + 占位 output.messages + 0 usage, 满足 validate-trace 强制规则。
  *
- * Round 4 (PR #233): processSessionLine now emits paired
- *   llm.request + llm.response entries (Round 3 changed BaseSessionInput
- *   to multi-entry return; this input was migrated to match). Emits
+ * Round 3 (PR #233): processSessionLine now emits paired
+ *   llm.request + llm.response entries (BaseSessionInput changed to
+ *   multi-entry return; this input was migrated to match). Emits
  *   shared trace_id, session/turn/step, agent.type, response.id,
  *   request.id so the OTLP pairLlm can pair them into a single STEP
  *   span.
  *
- * Round 4 future work (见 PR description "Future Work"):
+ * Round 4 (PR #233): hook payload plumbing — AgentHookConfig
+ *   hookContainerPath / extraSettings / hookType fields, hook-strategy
+ *   honors them, hook-manager matcher omit, requestId/responseId read
+ *   top-level first. See agents.d/minimax-code.json and
+ *   src/deployment/hook-strategy.ts.
+ *
+ * Round 5 (PR #233): validate-trace and OTLP flusher now recognize
+ *   'interrupted' as a terminal finish_reason (Round 2 emit path was
+ *   already correct; only the downstream recognition was missing).
+ *   Hook processor dispatch now writes '{}\n' to stdout in a finally
+ *   block so the host command-hook protocol never blocks on an empty
+ *   stdout.
+ *
+ * Future work (见 PR description "Future Work"):
  *   - synthesizeOrphanToolRecords flusher enhancement, deferred
  *     until real E2E traces show the orphan case.
  */
