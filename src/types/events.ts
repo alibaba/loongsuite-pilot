@@ -86,6 +86,9 @@ export interface AgentActivityEntry {
   'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;
   'gen_ai.skill.name'?: string;
+  'gen_ai.skill.id'?: string;
+  'gen_ai.skill.description'?: string;
+  'gen_ai.skill.version'?: string;
   /**
    * 模型的 system instructions（MessagePart[] 数组形式），数据源为 codex transcript 的
    * `session_meta.payload.base_instructions.text` + `turn_context.payload.developer_instructions`。

@@ -15,6 +15,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { decodePayload } from './shared/decode-payload.mjs';
 import {
   applyHookContentPolicy,
   hashJson,
@@ -25,6 +26,10 @@ import { toInternalEvent } from './cursor/source-event.mjs';
 import { appendEvent, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
 import { assembleTurn } from './cursor/react-assembler.mjs';
 import { buildCursorRecordsFromTranscript } from './cursor/transcript-assembler.mjs';
+import {
+  agentBaseFieldPatch,
+  collectResourceAttributesFromEnv,
+} from './shared/resource-context.mjs';
 
 function resolveDataDir() {
   const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
@@ -66,9 +71,8 @@ async function readStdin() {
   for await (const chunk of process.stdin) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   }
-  let str = Buffer.concat(chunks).toString('utf-8');
-  if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
-  return str;
+  // decodePayload 去 BOM 并修复中文 UTF-8->GBK 双重编码(纠偏已从 PS 侧移入 node)。
+  return decodePayload(Buffer.concat(chunks));
 }
 
 async function appendJsonl(filePath, record) {
@@ -93,6 +97,37 @@ function inferVariant(events) {
     if (ev.cursor_version && CLI_VERSION_PATTERN.test(ev.cursor_version)) return 'cursor-cli';
   }
   return 'cursor';
+}
+
+function findConversationResourceAttributes(events, conversationId) {
+  const scopedEvents = events.filter(event => event.conversation_id === conversationId);
+  const promptContext = scopedEvents.find(event =>
+    event.hook_event === 'beforeSubmitPrompt' &&
+    event.resource_attributes &&
+    Object.keys(event.resource_attributes).length > 0
+  );
+  const contextEvent = promptContext || scopedEvents.find(event =>
+    event.resource_attributes && Object.keys(event.resource_attributes).length > 0
+  );
+  return contextEvent?.resource_attributes || {};
+}
+
+function applyCursorCliResourceContext(records, events, conversationId, variant) {
+  if (variant !== 'cursor-cli' || records.length === 0) return;
+  // The journal is shared by Cursor Desktop and Cursor CLI. Re-check only the
+  // current conversation so a pending CLI event cannot activate this feature
+  // for an unrelated Desktop turn.
+  const conversationVariant = inferVariant(
+    events.filter(event => event.conversation_id === conversationId),
+  );
+  if (conversationVariant !== 'cursor-cli') return;
+  const resourceAttributes = findConversationResourceAttributes(events, conversationId);
+  if (Object.keys(resourceAttributes).length === 0) return;
+
+  const baseFieldPatch = agentBaseFieldPatch(resourceAttributes);
+  for (const record of records) {
+    Object.assign(record, baseFieldPatch, { resourceAttributes });
+  }
 }
 
 function compactJournal(allEvents, consumedConversationIds) {
@@ -181,6 +216,7 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
       'gen_ai.tool.call.id': toolCallId,
       'gen_ai.tool.call.arguments': { path: skill.skillPath },
       'gen_ai.skill.name': skill.skillName,
+      'gen_ai.skill.id': skill.skillId || skill.skillName,
       'agent.cursor.skill_detection_source':
         skill.detectionSource || 'transcript_post_assembly',
     }, runtimeConfig));
@@ -195,6 +231,7 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
       'gen_ai.tool.name': 'Read',
       'gen_ai.tool.call.id': toolCallId,
       'gen_ai.skill.name': skill.skillName,
+      'gen_ai.skill.id': skill.skillId || skill.skillName,
       'agent.cursor.skill_detection_source':
         skill.detectionSource || 'transcript_post_assembly',
     }, runtimeConfig));
@@ -207,16 +244,19 @@ function injectSkillRecords(records, skills, runtimeConfig = {}) {
 function filterSkillsForReadInjection(skills, assembledFromTranscript) {
   return skills.filter(skill => {
     const sources = skill.detectionSources || [];
+    const hasExplicitUsageSignal = sources.includes('manual_attachment') ||
+      sources.includes('agent_skill');
 
     if (!assembledFromTranscript) {
-      return sources.includes('manual_attachment') ||
+      return hasExplicitUsageSignal ||
         sources.includes('transcript_read');
     }
 
     // The transcript assembler already materializes real Read tool_use entries.
-    // Only synthesize a Read when manual attachment is the sole evidence. A skill
-    // with both sources already has its real transcript Read in the assembled step.
-    return sources.includes('manual_attachment') &&
+    // Only synthesize a Read when an explicit user-row signal has no matching
+    // transcript Read. A skill with both sources already has its real Read in the
+    // assembled step.
+    return hasExplicitUsageSignal &&
       !sources.includes('transcript_read');
   });
 }
@@ -279,6 +319,12 @@ async function main() {
 
   // Convert to internal event and append to journal
   const internalEvent = toInternalEvent(payload);
+  const invocationResourceAttributes = collectResourceAttributesFromEnv(process.env, {
+    agentId: 'cursor-cli',
+  });
+  if (Object.keys(invocationResourceAttributes).length > 0) {
+    internalEvent.resource_attributes = invocationResourceAttributes;
+  }
   try {
     appendEvent(internalEvent);
   } catch (err) {
@@ -398,6 +444,8 @@ async function main() {
         }
       } catch { /* best-effort skill detection — never block output */ }
 
+      applyCursorCliResourceContext(records, allEvents, convId, variant);
+
       if (records.length > 0) {
         const day = localDateString(now);
         const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
@@ -435,6 +483,8 @@ async function main() {
           stopConversationId: convId,
         });
 
+        applyCursorCliResourceContext(result.records, allEvents, convId, variant);
+
         if (result.records.length > 0) {
           const day = localDateString(now);
           const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
@@ -469,4 +519,9 @@ if (
   });
 }
 
-export { filterSkillsForReadInjection, injectSkillRecords };
+export {
+  applyCursorCliResourceContext,
+  filterSkillsForReadInjection,
+  findConversationResourceAttributes,
+  injectSkillRecords,
+};

@@ -84,6 +84,9 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.tool.call.result` | json | Opt-In | Tool result payload. May contain sensitive content. |
 | `gen_ai.tool.call.duration` | int | Recommended | Positive tool execution duration in milliseconds, computed from the matched result boundary minus the call boundary. Omit it when either boundary is unavailable or the difference is not positive. |
 | `gen_ai.skill.name` | string | Conditionally Required for `skill.use` | Skill or extension capability name. |
+| `gen_ai.skill.id` | string | Recommended when skill identity is available | Stable skill identifier. |
+| `gen_ai.skill.description` | string | Recommended when skill metadata is available | Human-readable skill description. |
+| `gen_ai.skill.version` | string | Recommended when skill metadata is available | Skill version. |
 | `error.type` | string | Conditionally Required when the operation ends with an error | Low-cardinality error type, error code, exception class, or HTTP status. |
 | `error.message` | string | Recommended when `error.type` exists | Human-readable error detail. |
 | `agent.channel` | string | Recommended | Request source channel, such as `ide_plugin`, `web`, or `api`. |
@@ -93,6 +96,17 @@ Required levels follow OpenTelemetry wording:
 | `workspace.current_root` | string | Recommended | Git top-level directory, inferred when the working directory is a git repository. |
 | `workspace.path` | string | Recommended | Absolute working directory the agent ran in (process cwd), independent of git. Present even when the directory is not a git repository. |
 | `agent.*` | json | Opt-In | Agent-specific extension attributes. Stable high-query dimensions should become structured fields over time. |
+
+## Custom Agent Identity
+
+When a supported agent process starts with the following environment variables, Pilot writes the worker context to the current turn:
+
+| Environment variable | Event field | Description |
+|----------------------|-------------|-------------|
+| `AGENTTEAMS_WORKER_NAME` | `gen_ai.agent.name`, `resourceAttributes["agentteams.worker.name"]` | Logical worker name; takes precedence over the native name for a main agent. |
+| `AGENTTEAMS_INSTANCE_ID` | `resourceAttributes["agentteams.instance.id"]` | Concrete worker instance; never overwrites `gen_ai.agent.id`. |
+
+This is currently supported for Claude Code, Qoder, Codex, OpenCode, Pi Coding Agent, MiMo Code, Qwen Code CLI, and Cursor CLI. Cursor Desktop does not consume these variables. Existing event fields and name fallbacks remain unchanged when the variables are absent. Pilot collects only the two fixed allowlisted variables above; other `AGENTTEAMS_*` variables are never written to events or OTLP resources.
 
 ## Provider Names
 

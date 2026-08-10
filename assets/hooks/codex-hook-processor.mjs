@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { decodePayload } from './shared/decode-payload.mjs';
 import { logHookError } from './shared/error-logger.mjs';
 import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
 import {
@@ -34,7 +35,8 @@ function pilotDataDir() {
 
 function tryReadStdin() {
   try {
-    const input = fs.readFileSync(0, 'utf8').trim();
+    // decodePayload 去 BOM 并修复中文 UTF-8->GBK 双重编码(纠偏已从 PS 侧移入 node)。
+    const input = decodePayload(fs.readFileSync(0)).trim();
     if (!input) return {};
     const value = JSON.parse(input);
     return value && typeof value === 'object' && !Array.isArray(value) ? value : {};

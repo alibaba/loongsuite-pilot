@@ -12,6 +12,7 @@
 |----------|----------|
 | Hook | Agent 可以在生命周期、Prompt、响应或工具事件上执行命令。 |
 | 插件注入 | Agent 可以从配置文件加载本地插件。 |
+| 原生目录插件 | Agent 会扫描包含清单和可执行模块的插件目录。 |
 | 本地日志或 session 轮询 | Agent 已经写入结构化本地文件。 |
 | SQLite 轮询 | Agent 将活动存储在本地 SQLite 数据库。 |
 | CLI 或 API 轮询 | Agent 暴露本地命令或 API 可读取活动数据。 |
@@ -89,11 +90,12 @@ Hook 示例：
 |------|------|
 | `id` | 稳定 Agent ID，用于配置、输出和准入控制。 |
 | `displayName` | 用户可读 Agent 名称。 |
-| `deployMode` | `hook`、`plugin-inject` 或 `plugin-probe`。 |
+| `deployMode` | `hook`、`plugin-inject`、`directory-plugin` 或 `plugin-probe`。 |
 | `detection.paths` | 可用于判断 Agent 是否安装的本地路径。 |
 | `detection.commands` | 可用于判断 Agent 是否安装的命令。 |
 | `hook` | Hook settings 路径、事件、命令和格式。Hook 模式必填。 |
 | `pluginInject` | 配置路径和插件 spec。插件注入模式必填。 |
+| `directoryPlugin` | Pilot 管理的源目录和目标目录。原生目录插件模式必填。 |
 | `input` | collector input 使用的数据源类型和位置。 |
 
 `pluginInject.configKey` 可指定默认 `plugin` / `plugins` 之外的数组字段，

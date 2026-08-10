@@ -42,6 +42,8 @@ export enum ClientType {
   AoneCopilotHook = 'aone-copilot-hook',
   OpenCode = 'opencode',
   MimoCode = 'mimo-code',
+  Hermes = 'hermes',
+  OpenClaw = 'openclaw',
 
 }
 

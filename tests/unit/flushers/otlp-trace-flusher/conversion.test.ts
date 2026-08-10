@@ -150,7 +150,12 @@ describe('OtlpTraceFlusher - conversion', () => {
 
     const opts = vi.mocked(convertEventLogToTrace).mock.calls[0][1] as { passthroughKeys?: string[] };
     expect(opts.passthroughKeys).toEqual(
-      expect.arrayContaining(['git.repo', 'git.branch', 'git.domain', 'workspace.current_root']),
+      expect.arrayContaining([
+        'git.repo',
+        'git.branch',
+        'git.domain',
+        'workspace.current_root',
+      ]),
     );
   });
 
@@ -176,6 +181,146 @@ describe('OtlpTraceFlusher - conversion', () => {
       'gen_ai.agent.parent.id',
       'gen_ai.subagent.parent_tool_call.id',
     ]));
+  });
+
+  it('adds skill attributes only to the matching tool span', () => {
+    const records = [
+      {
+        'event.name': 'tool.call',
+        'gen_ai.tool.call.id': 'skill-call-1',
+        'gen_ai.skill.name': 'dogfood',
+        'gen_ai.skill.id': 'dogfood',
+      },
+      {
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.id': 'skill-call-1',
+        'gen_ai.skill.description': 'Exploratory QA for web apps.',
+        'gen_ai.skill.version': '1.0.0',
+      },
+    ] as unknown as AgentActivityEntry[];
+    const toolSpan = {
+      attributes: {
+        'gen_ai.span.kind': 'TOOL',
+        'gen_ai.tool.call.id': 'skill-call-1',
+      },
+    };
+    const llmSpan = {
+      attributes: {
+        'gen_ai.span.kind': 'LLM',
+        'gen_ai.tool.call.id': 'skill-call-1',
+      },
+    };
+
+    (flusher as any).enrichToolSkillAttributes(records, [toolSpan, llmSpan]);
+
+    expect(toolSpan.attributes).toMatchObject({
+      'gen_ai.skill.name': 'dogfood',
+      'gen_ai.skill.id': 'dogfood',
+      'gen_ai.skill.description': 'Exploratory QA for web apps.',
+      'gen_ai.skill.version': '1.0.0',
+    });
+    expect(llmSpan.attributes).not.toHaveProperty('gen_ai.skill.name');
+  });
+
+  it('enriches OpenClaw LLM and AGENT spans with per-call reasoning tokens and error status', () => {
+    const records = [
+      {
+        'event.name': 'llm.response',
+        'gen_ai.response.id': 'provider-response-1',
+        'gen_ai.usage.reasoning_tokens': 59,
+        'error.type': 'model_call_error',
+      },
+      {
+        'event.name': 'llm.response',
+        'gen_ai.response.id': 'provider-response-2',
+        'gen_ai.usage.reasoning_tokens': 22,
+      },
+    ] as unknown as AgentActivityEntry[];
+    const failedLlm = {
+      attributes: {
+        'gen_ai.span.kind': 'LLM',
+        'gen_ai.response.id': 'provider-response-1',
+      },
+      status: { code: 0 },
+    };
+    const successfulLlm = {
+      attributes: {
+        'gen_ai.span.kind': 'LLM',
+        'gen_ai.response.id': 'provider-response-2',
+      },
+      status: { code: 0 },
+    };
+    const agent = {
+      attributes: { 'gen_ai.span.kind': 'AGENT' },
+      status: { code: 0 },
+    };
+
+    (flusher as any).enrichOpenClawLlmAttributes(
+      records,
+      [failedLlm, successfulLlm, agent],
+    );
+
+    expect(failedLlm.attributes).toMatchObject({
+      'gen_ai.usage.reasoning_tokens': 59,
+      'error.type': 'model_call_error',
+    });
+    expect(failedLlm.status.code).toBe(2);
+    expect(successfulLlm.attributes).toMatchObject({
+      'gen_ai.usage.reasoning_tokens': 22,
+    });
+    expect(agent.attributes).toMatchObject({
+      'gen_ai.usage.reasoning_tokens': 81,
+    });
+  });
+
+  it('preserves OpenClaw tool failure attributes and OTLP error status', () => {
+    const records = [
+      {
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.id': 'failed-tool-1',
+        'tool.result.status': 'failure',
+        'error.type': 'tool_use_failure',
+        'error.message': 'command exited with code 7',
+      },
+      {
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.id': 'successful-tool-1',
+        'tool.result.status': 'success',
+      },
+    ] as unknown as AgentActivityEntry[];
+    const failedTool = {
+      attributes: {
+        'gen_ai.span.kind': 'TOOL',
+        'gen_ai.tool.call.id': 'failed-tool-1',
+      },
+      status: { code: 0 },
+    };
+    const successfulTool = {
+      attributes: {
+        'gen_ai.span.kind': 'TOOL',
+        'gen_ai.tool.call.id': 'successful-tool-1',
+      },
+      status: { code: 0 },
+    };
+
+    (flusher as any).enrichOpenClawToolAttributes(
+      records,
+      [failedTool, successfulTool],
+    );
+
+    expect(failedTool.attributes).toMatchObject({
+      'tool.result.status': 'failure',
+      'error.type': 'tool_use_failure',
+      'error.message': 'command exited with code 7',
+    });
+    expect(failedTool.status).toMatchObject({
+      code: 2,
+      message: 'command exited with code 7',
+    });
+    expect(successfulTool.attributes).toMatchObject({
+      'tool.result.status': 'success',
+    });
+    expect(successfulTool.status.code).toBe(0);
   });
 
   describe('with GlobalAttributesProvider', () => {

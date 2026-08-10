@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { AgentDefinition } from '../types/index.js';
@@ -90,7 +91,13 @@ export class AgentDefLoader {
       }
     }
     const mode = obj.deployMode;
-    if (mode !== 'hook' && mode !== 'plugin-probe' && mode !== 'plugin-inject' && mode !== 'detection-only') {
+    if (
+      mode !== 'hook'
+      && mode !== 'plugin-probe'
+      && mode !== 'plugin-inject'
+      && mode !== 'directory-plugin'
+      && mode !== 'detection-only'
+    ) {
       logger.warn('invalid agent definition: unknown deployMode', { file: filePath, deployMode: mode });
       return false;
     }
@@ -119,9 +126,13 @@ export class AgentDefLoader {
   }
 
   private resolveString(s: string): string {
+    const hermesHome = process.env.HERMES_HOME || '~/.hermes';
+    const hermesCli = this.resolveHermesCli(hermesHome);
     let result = s
       .replace(/\$PILOT_DIR/g, this.pilotDir)
-      .replace(/\$PILOT_DATA/g, this.dataDir);
+      .replace(/\$PILOT_DATA/g, this.dataDir)
+      .replace(/\$HERMES_CLI/g, hermesCli)
+      .replace(/\$HERMES_HOME/g, hermesHome);
 
     result = resolveHome(result);
 
@@ -130,5 +141,18 @@ export class AgentDefLoader {
       result = result.replace(/\.sh(?=\s|$)/, '.ps1');
     }
     return result;
+  }
+
+  private resolveHermesCli(hermesHome: string): string {
+    if (process.env.HERMES_CLI) return process.env.HERMES_CLI;
+    const bundledCli = resolveHome(path.join(
+      hermesHome,
+      'hermes-agent',
+      'venv',
+      process.platform === 'win32' ? 'Scripts' : 'bin',
+      process.platform === 'win32' ? 'hermes.exe' : 'hermes',
+    ));
+    if (existsSync(bundledCli)) return bundledCli;
+    return process.platform === 'win32' ? 'hermes.exe' : 'hermes';
   }
 }

@@ -393,4 +393,89 @@ describe('HookManager', () => {
     expect(ok).toBe(false);
     await expect(fs.readFile(settingsPath, 'utf-8')).resolves.toBe(invalid);
   });
+
+  describe('winShell upgrade (nested `shell` field)', () => {
+    const HOOK_CMD = 'powershell -NoProfile -ExecutionPolicy Bypass -File "C:\\qoder-loongsuite-pilot-hook.ps1" qoder';
+
+    async function writeStaleEntry(settingsPath: string): Promise<void> {
+      // An entry as written by an older pilot that predates winShell: no `shell`.
+      await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+      await fs.writeFile(settingsPath, JSON.stringify({
+        hooks: {
+          Stop: [
+            {
+              matcher: '*',
+              hooks: [{ command: HOOK_CMD, type: 'command' }],
+            },
+          ],
+        },
+      }, null, 2));
+    }
+
+    it('treats a shell-less entry as not installed when winShell is required', async () => {
+      const settingsPath = path.join(tmpDir, '.qoder', 'settings.json');
+      await writeStaleEntry(settingsPath);
+
+      const manager = new HookManager(path.join(tmpDir, 'hooks'), path.join(tmpDir, 'logs'));
+      await expect(manager.isHookInstalled({
+        agentId: 'qoder',
+        settingsPath,
+        hookJsonPath: ['hooks', 'Stop'],
+        hookCommand: HOOK_CMD,
+        matcher: '*',
+        useNestedFormat: true,
+        shell: 'powershell',
+      })).resolves.toBe(false);
+    });
+
+    it('repairs a shell-less entry on (re)install without duplicating it', async () => {
+      const settingsPath = path.join(tmpDir, '.qoder', 'settings.json');
+      await writeStaleEntry(settingsPath);
+
+      const manager = new HookManager(path.join(tmpDir, 'hooks'), path.join(tmpDir, 'logs'));
+      const ok = await manager.installHook({
+        agentId: 'qoder',
+        settingsPath,
+        hookJsonPath: ['hooks', 'Stop'],
+        hookCommand: HOOK_CMD,
+        matcher: '*',
+        useNestedFormat: true,
+        shell: 'powershell',
+      });
+
+      expect(ok).toBe(true);
+      const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+      expect(settings.hooks.Stop).toEqual([
+        {
+          matcher: '*',
+          hooks: [{ command: HOOK_CMD, type: 'command', shell: 'powershell' }],
+        },
+      ]);
+      // Once repaired, it reads back as fully installed.
+      await expect(manager.isHookInstalled({
+        agentId: 'qoder',
+        settingsPath,
+        hookJsonPath: ['hooks', 'Stop'],
+        hookCommand: HOOK_CMD,
+        matcher: '*',
+        useNestedFormat: true,
+        shell: 'powershell',
+      })).resolves.toBe(true);
+    });
+
+    it('ignores the shell dimension when winShell is not declared', async () => {
+      const settingsPath = path.join(tmpDir, '.qoder', 'settings.json');
+      await writeStaleEntry(settingsPath);
+
+      const manager = new HookManager(path.join(tmpDir, 'hooks'), path.join(tmpDir, 'logs'));
+      await expect(manager.isHookInstalled({
+        agentId: 'qoder',
+        settingsPath,
+        hookJsonPath: ['hooks', 'Stop'],
+        hookCommand: HOOK_CMD,
+        matcher: '*',
+        useNestedFormat: true,
+      })).resolves.toBe(true);
+    });
+  });
 });

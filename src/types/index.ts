@@ -134,6 +134,8 @@ export interface AnalyticsConfig {
  */
 export interface UpstreamLinkConfig {
   enabled: boolean;
+  /** Propagate the linked context into supported downstream CLI tool calls. */
+  propagateToTools: boolean;
   /** TTL (ms) after which acp-correlate files/locks are cleaned up. */
   ttlMs: number;
 }

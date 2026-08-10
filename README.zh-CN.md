@@ -43,6 +43,7 @@ Pilot 主要帮助回答这些问题：
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / session 轮询 | Yes | Yes | No | Yes |
+| OpenClaw | 插件注入 | Yes | Yes | Yes | Yes |
 | OpenCode | 插件注入 | Yes | Yes | Yes | Yes |
 | Pi Coding Agent | Extension 注入 | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
@@ -54,6 +55,8 @@ Pilot 主要帮助回答这些问题：
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
+
+OpenClaw 集成要求 OpenClaw 2026.5.12 或更高版本。
 
 ### Windows Agent 明确支持情况
 
@@ -107,9 +110,11 @@ loongsuite-pilot info
 | 任务 | 文档 |
 |------|------|
 | 选择采集哪些 Agent，控制内容采集策略 | [Agent 配置](docs/zh-CN/agents.md) |
+| 自定义 Agent 名称和实例 | [自定义 `gen_ai.agent.name` 和 `agentteams.instance.id`](docs/zh-CN/custom-agent-identity.md) |
 | 写入本地 JSONL 日志 | [本地 JSONL 输出](docs/zh-CN/local-jsonl-output.md) |
 | 上报日志到 SLS | [SLS 输出](docs/zh-CN/sls-output.md) |
 | 上报 OTLP Trace | [Trace 输出](docs/zh-CN/trace-output.md) |
+| 将上游 Trace 继续传给 Claude Code 调用的 CLI | [Claude Code 下游 CLI Trace 传播](docs/zh-CN/claude-code-downstream-trace-propagation.md) |
 | POST 到 HTTP 接口 | [HTTP 输出](docs/zh-CN/http-output.md) |
 | 输出前进行密钥脱敏 | [数据脱敏](docs/zh-CN/masking.md) |
 | 查看全局配置加载顺序和保留策略 | [配置总览](docs/zh-CN/configuration.md) |
@@ -121,12 +126,15 @@ loongsuite-pilot info
 | 配置项 | 取值 | 默认 |
 | ------ | ---- | ---- |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK`(环境变量)· `upstreamLink.enabled`(config.json) | `true` / `1` 开启;不设、`false` 或 `0` 关闭 | 关闭 |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS`(环境变量)· `upstreamLink.propagateToTools`(config.json) | 将首轮上游上下文传给受支持的下游 CLI 工具调用 | 关闭 |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS`(环境变量)· `upstreamLink.ttlMs`(config.json) | `acp-correlate` 文件清理 TTL(毫秒) | `86400000`(24 小时) |
 
 开启后,上游 `traceparent` 经以下两种方案之一到达 Pilot,并在采集时 stamp 到记录(turn 打 `trace_id`、用户输入事件打 `parent_span_id`):
 
 - **关联文件**(per-turn):调用方在发送 prompt 时,把 `{sessionId, contentHash, contentPrefix, traceparent}` 写入 `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl`。串联与协议无关——唯一要求是 `sessionId` 等于 Pilot 采集该 turn 时的 `gen_ai.session.id`,且内容(hash 或前缀)能匹配采集到的用户文本。ACP client 天然满足(`session/new` 的 id 会贯穿采集),故 ACP 是主要场景。
 - **环境变量**(agent 进程上的 `TRACEPARENT`):经 agent 的 hook 作用于该会话的第一个 turn。适用于调用方无法预先拿到 per-turn `sessionId` 的情况。
+
+对于 Claude Code，同时开启上游串联和 `propagateToTools` 后，Pilot 还会把首轮上下文传给主 agent 的 `Bash` 调用。`PreToolUse(Bash)` hook 会预留 TOOL span id，在 Bash 命令前注入 `TRACEPARENT`（存在有效值时也注入 `TRACESTATE`），Stop hook 构建 TOOL span 时再复用同一个 id。下游 CLI 需要自行读取这些环境变量并配置 trace exporter。首版全程 fail-open，暂不覆盖 subagent、PowerShell、MCP 工具、后续 turn，以及带新上下文恢复的会话。
 
 ## 输出数据
 

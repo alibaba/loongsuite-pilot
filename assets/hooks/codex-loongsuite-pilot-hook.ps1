@@ -48,7 +48,7 @@ function Log-Error {
 }
 
 function Write-EmptyResult {
-    [Console]::Out.WriteLine($EMPTY_RESULT)
+    Write-Output $EMPTY_RESULT
 }
 
 function Convert-NodePath {
@@ -144,56 +144,23 @@ try {
         exit 0
     }
 
-    # Preserve Codex's UTF-8 JSON exactly; PowerShell 5.1 text pipelines can
-    # otherwise reinterpret non-ASCII prompts using a legacy code page.
-    $stdinStream = [Console]::OpenStandardInput()
-    $memory = New-Object System.IO.MemoryStream
-    $stdinStream.CopyTo($memory)
-    [byte[]]$rawBytes = $memory.ToArray()
-    $memory.Dispose()
-
-    if (
-        $rawBytes.Length -ge 3 -and
-        $rawBytes[0] -eq 0xEF -and
-        $rawBytes[1] -eq 0xBB -and
-        $rawBytes[2] -eq 0xBF
-    ) {
-        if ($rawBytes.Length -eq 3) {
-            $rawBytes = [byte[]]@()
-        } else {
-            $rawBytes = $rawBytes[3..($rawBytes.Length - 1)]
-        }
+    # CLM/WDAC-safe passthrough: node inherits this process's stdin (fd0) and
+    # reads Codex's UTF-8 JSON directly; PowerShell never touches the bytes. The
+    # old code used [Console]::OpenStandardInput / MemoryStream / ProcessStartInfo,
+    # whose .NET calls throw under Constrained Language Mode (WDAC/Device Guard)
+    # and silently drop telemetry. BOM stripping and the Chinese UTF-8->GBK fixup
+    # now live in node (shared/decode-payload.mjs).
+    # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 parses a BOM-less
+    # script using the system ANSI code page (GBK/936 on Chinese Windows); any
+    # non-ASCII byte here can corrupt parsing and abort the whole script.
+    $result = & $nodeBin $Processor $Subcommand 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "processor exited with code $LASTEXITCODE"
     }
+    $result = ($result | Out-String).Trim()
 
-    if ($rawBytes.Length -eq 0) {
-        $result = & $nodeBin $Processor $Subcommand 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            throw "processor exited with code $LASTEXITCODE"
-        }
-        $result = $result -join [Environment]::NewLine
-    } else {
-        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $startInfo.FileName = $nodeBin
-        $startInfo.Arguments = "`"$Processor`" `"$Subcommand`""
-        $startInfo.UseShellExecute = $false
-        $startInfo.RedirectStandardInput = $true
-        $startInfo.RedirectStandardOutput = $true
-        $startInfo.RedirectStandardError = $true
-        $startInfo.CreateNoWindow = $true
-
-        $process = [System.Diagnostics.Process]::Start($startInfo)
-        $process.StandardInput.BaseStream.Write($rawBytes, 0, $rawBytes.Length)
-        $process.StandardInput.Close()
-        $result = $process.StandardOutput.ReadToEnd()
-        $stderr = $process.StandardError.ReadToEnd()
-        $process.WaitForExit()
-        if ($process.ExitCode -ne 0) {
-            throw "processor exited with code $($process.ExitCode): $stderr"
-        }
-    }
-
-    if ($result -and $result.Trim()) {
-        [Console]::Out.WriteLine($result.Trim())
+    if ($result) {
+        Write-Output $result
     } else {
         Write-EmptyResult
     }

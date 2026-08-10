@@ -75,6 +75,21 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
   });
 
+  it('Signal A: finish_reason=error triggers immediate flush', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+
+    await flusher.send(makeEntry({ 'event.name': 'llm.request' }));
+    await flusher.send(makeEntry({
+      'gen_ai.response.finish_reasons': ['error'],
+      'error.type': 'RateLimitError',
+    }));
+
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
+  });
+
   it('Signal A: finish_reason=tool_calls does NOT end turn', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const mockConvert = vi.mocked(convertEventLogToTrace);
@@ -85,6 +100,33 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     }));
     // Should NOT trigger conversion
     expect(mockConvert).not.toHaveBeenCalled();
+  });
+
+  it('OpenClaw uses llm_output as its default boundary even after a per-call stop', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const mockConvert = vi.mocked(convertEventLogToTrace);
+    mockConvert.mockClear();
+    const base = {
+      'gen_ai.agent.type': 'openclaw',
+      'gen_ai.turn.id': 'openclaw-default-boundary',
+      'trace_id': '4bf92f3577b34da6a3ce929d0e0e4736',
+    };
+
+    await flusher.send(makeEntry({
+      ...base,
+      'agent.openclaw.hook': 'before_message_write',
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
+    expect(mockConvert).not.toHaveBeenCalled();
+
+    await flusher.send(makeEntry({
+      ...base,
+      'event.name': 'other',
+      'agent.openclaw.hook': 'llm_output',
+      'gen_ai.response.finish_reasons': undefined,
+    }));
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
   });
 
   it('Signal B: new groupKey triggers flush of old buffer', async () => {
@@ -206,6 +248,96 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
 
       expect(mockConvert).toHaveBeenCalledTimes(1);
       expect(mockConvert.mock.calls[0][0]).toHaveLength(5);
+    });
+
+    it('Hermes retry batch: error response does not drop the successful retry', async () => {
+      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+      const mockConvert = vi.mocked(convertEventLogToTrace);
+      mockConvert.mockClear();
+
+      const turnId = 'hermes-session:retry-turn';
+      const base = {
+        'gen_ai.turn.id': turnId,
+        'gen_ai.agent.type': 'hermes',
+        'trace_id': '4bf92f3577b34da6a3ce929d0e0e4736',
+      };
+      await flusher.sendBatch([
+        makeEntry({ ...base, 'event.name': 'llm.request', 'gen_ai.step.id': `${turnId}:s1` }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'gen_ai.step.id': `${turnId}:s1`,
+          'gen_ai.response.finish_reasons': ['error'],
+          'error.type': 'RateLimitError',
+        }),
+        makeEntry({ ...base, 'event.name': 'llm.request', 'gen_ai.step.id': `${turnId}:s2` }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'gen_ai.step.id': `${turnId}:s2`,
+          'gen_ai.response.finish_reasons': ['stop'],
+        }),
+      ]);
+
+      expect(mockConvert).toHaveBeenCalledTimes(1);
+      expect(mockConvert.mock.calls[0][0]).toHaveLength(4);
+    });
+
+    it('OpenClaw error/recovery across batches waits for the llm_output marker', async () => {
+      const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+      const mockConvert = vi.mocked(convertEventLogToTrace);
+      mockConvert.mockClear();
+
+      const turnId = 'openclaw-session:error-turn';
+      const base = {
+        'gen_ai.turn.id': turnId,
+        'gen_ai.agent.type': 'openclaw',
+        'trace_id': '4bf92f3577b34da6a3ce929d0e0e4736',
+        'gen_ai.step.id': `${turnId}:model:1`,
+      };
+      await flusher.sendBatch([
+        makeEntry({ ...base, 'event.name': 'llm.request' }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'agent.openclaw.hook': 'model_call_ended',
+          'agent.openclaw.outcome': 'error',
+          'gen_ai.response.finish_reasons': ['error'],
+        }),
+      ]);
+      expect(mockConvert).not.toHaveBeenCalled();
+
+      await flusher.sendBatch([
+        makeEntry({ ...base, 'event.name': 'llm.request', 'gen_ai.step.id': `${turnId}:model:2` }),
+        makeEntry({
+          ...base,
+          'event.name': 'llm.response',
+          'gen_ai.step.id': `${turnId}:model:2`,
+          'agent.openclaw.hook': 'before_message_write',
+          'gen_ai.response.finish_reasons': ['stop'],
+          'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'recovered' }], finish_reason: 'stop' }],
+          'gen_ai.usage.input_tokens': 7,
+          'gen_ai.usage.output_tokens': 2,
+        }),
+      ]);
+      expect(mockConvert).not.toHaveBeenCalled();
+
+      await flusher.sendBatch([
+        makeEntry({
+          ...base,
+          'event.name': 'other',
+          'gen_ai.step.id': undefined,
+          'agent.openclaw.hook': 'llm_output',
+        }),
+      ]);
+
+      expect(mockConvert).toHaveBeenCalledTimes(1);
+      const convertedRecords = mockConvert.mock.calls[0][0] as Record<string, unknown>[];
+      expect(convertedRecords).toHaveLength(5);
+      expect(convertedRecords.at(-1)).toMatchObject({
+        'agent.openclaw.hook': 'llm_output',
+        'event.name': 'other',
+      });
     });
 
     it('Claude-like batch: tools sorted before stop are all included in one flush', async () => {

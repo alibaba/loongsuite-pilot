@@ -7,6 +7,9 @@ import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('QoderCnSqliteTokenReader');
 
+/** Path tail shared by the standalone-app layouts, appended to an app-support dir name. */
+const DB_PATH_SEGMENTS = ['SharedClientCache', 'cache', 'db', 'local.db'] as const;
+
 export interface SqliteTokenData {
   sessionId?: string;
   requestId: string;
@@ -18,9 +21,15 @@ export interface SqliteTokenData {
   model?: string;
 }
 
-export async function readSqliteTokensForSession(sessionId: string): Promise<SqliteTokenData[]> {
-  const dbPath = resolveQoderCnDbPath();
-  if (!dbPath) return [];
+export interface SqliteTokenResult {
+  rows: SqliteTokenData[];
+  /** The candidate DB that contained this session. Debug logging only — see resolveQoderCnDbPaths. */
+  matchedDbPath: string | null;
+}
+
+export async function readSqliteTokensForSession(sessionId: string): Promise<SqliteTokenResult> {
+  const dbPaths = resolveQoderCnDbPaths();
+  if (dbPaths.length === 0) return { rows: [], matchedDbPath: null };
 
   const sql = `
     SELECT
@@ -41,57 +50,93 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
     ORDER BY cm.gmt_create ASC
   `;
 
-  let rows: Array<{
-    message_id?: string;
-    session_id?: string;
-    request_id: string;
-    gmt_create: number;
-    token_info: string;
-    model_info?: string | null;
-    record_extra?: string | null;
-  }>;
-  try {
-    rows = await queryReadonly(dbPath, sql, [sessionId]);
-  } catch (err) {
-    logger.debug('sqlite query failed', { sessionId, error: String(err) });
-    return [];
+  for (const dbPath of dbPaths) {
+    let rows: Array<{
+      message_id?: string;
+      session_id?: string;
+      request_id: string;
+      gmt_create: number;
+      token_info: string;
+      model_info?: string | null;
+      record_extra?: string | null;
+    }>;
+    try {
+      rows = await queryReadonly(dbPath, sql, [sessionId]);
+    } catch (err) {
+      logger.debug('sqlite query failed', { sessionId, dbPath, error: String(err) });
+      continue;
+    }
+
+    if (rows.length === 0) continue;
+
+    const results: SqliteTokenData[] = [];
+    for (const row of rows) {
+      const info = parseTokenInfo(row.token_info);
+      if (!info) continue;
+      results.push({
+        sessionId: row.session_id ?? '',
+        requestId: row.request_id ?? '',
+        messageId: row.message_id ?? '',
+        gmtCreate: row.gmt_create,
+        inputTokens: info.promptTokens,
+        outputTokens: info.completionTokens,
+        cacheReadTokens: info.cachedTokens,
+        model: parseModelKey(row.model_info) ?? parseRecordModelKey(row.record_extra),
+      });
+    }
+    if (results.length > 0) return { rows: results, matchedDbPath: dbPath };
   }
 
-  const results: SqliteTokenData[] = [];
-  for (const row of rows) {
-    const info = parseTokenInfo(row.token_info);
-    if (!info) continue;
-    results.push({
-      sessionId: row.session_id ?? '',
-      requestId: row.request_id ?? '',
-      messageId: row.message_id ?? '',
-      gmtCreate: row.gmt_create,
-      inputTokens: info.promptTokens,
-      outputTokens: info.completionTokens,
-      cacheReadTokens: info.cachedTokens,
-      model: parseModelKey(row.model_info) ?? parseRecordModelKey(row.record_extra),
-    });
-  }
-  return results;
+  return { rows: [], matchedDbPath: null };
 }
 
-function resolveQoderCnDbPath(): string | null {
-  const appdata = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
-  const candidates = process.platform === 'darwin'
-    ? [resolveHome('~/Library/Application Support/QoderCN/SharedClientCache/cache/db/local.db')]
+/**
+ * Qoder CN ships more than one data layout, and both share the same `~/.qoder-cn`
+ * config directory:
+ *
+ *   IDE plugin host  ~/.qoder-cn/shared_client/cache/db/local.db
+ *   standalone app   <app-support>/QoderCN/SharedClientCache/cache/db/local.db
+ *
+ * Config-dir presence therefore says nothing about where the DB lives, so probe every
+ * accessible candidate and let `session_id` decide ownership: a candidate that does not
+ * contain the session simply returns zero rows and we move on. Session ids are per-session
+ * UUIDs, so a wrong candidate can never mis-attribute data.
+ *
+ * `<app-support>/Qoder/SharedClientCache/...` is deliberately NOT a candidate: that is the
+ * international Qoder desktop DB. No CN build has been observed using it, and it can be
+ * hundreds of MB — opening it on every enrichment would cost real IO for no benefit.
+ *
+ * DO NOT use the matched path to derive or rewrite `gen_ai.agent.type`. Identity comes only
+ * from hook deploy location -> hook script agent id -> the hook record. `qoder-trace` does
+ * relabel qoder -> qoder-idea via `isIdeaDbPath()`, which tests
+ * `includes('.qoder/shared_client')`; `.qoder-cn/shared_client` escapes that test purely
+ * because the substring is `-cn/` rather than `/`. That is a coincidence, not a guarantee.
+ * Copying that pattern here, or loosening the test, would mislabel every Qoder CN user.
+ */
+function resolveQoderCnDbPaths(): string[] {
+  const appSupportRoot = process.platform === 'darwin'
+    ? resolveHome('~/Library/Application Support')
     : process.platform === 'win32'
-      ? [path.join(appdata, 'QoderCN', 'SharedClientCache', 'cache', 'db', 'local.db')]
-      : [resolveHome('~/.config/QoderCN/SharedClientCache/cache/db/local.db')];
+      ? (process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'))
+      : resolveHome('~/.config');
 
+  // Ordered by observed hit rate.
+  const candidates = [
+    path.join(os.homedir(), '.qoder-cn', 'shared_client', 'cache', 'db', 'local.db'),
+    path.join(appSupportRoot, 'QoderCN', ...DB_PATH_SEGMENTS),
+    path.join(appSupportRoot, 'Qoder CN', ...DB_PATH_SEGMENTS),
+  ];
+
+  const available: string[] = [];
   for (const candidate of candidates) {
     try {
       fs.accessSync(candidate);
-      return candidate;
+      available.push(candidate);
     } catch {
       continue;
     }
   }
-  return null;
+  return available;
 }
 
 function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: number; cachedTokens: number } | null {

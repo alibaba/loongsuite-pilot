@@ -256,6 +256,77 @@ describe('HookStrategy', () => {
       expect(call.replaceHookCommands).toEqual(['/old/hook.sh']);
     });
 
+    it('emits winShell as def.shell on Windows', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      try {
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const def = makeDef({
+          id: 'qoder',
+          hook: {
+            settingsPath: 'C:/Users/test/.qoder/settings.json',
+            events: ['Stop'],
+            hookCommand: 'C:/Users/test/.loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.ps1',
+            format: 'nested',
+            matcher: '*',
+            winShell: 'powershell',
+          },
+        });
+
+        await strategy.needsDeploy(def);
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0].shell).toBe('powershell');
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
+    it('ignores winShell on non-Windows platforms', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+      try {
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const def = makeDef({
+          id: 'qoder',
+          hook: {
+            settingsPath: '/home/.qoder/settings.json',
+            events: ['Stop'],
+            hookCommand: '/opt/pilot/hooks/qoder-loongsuite-pilot-hook.sh',
+            format: 'nested',
+            matcher: '*',
+            winShell: 'powershell',
+          },
+        });
+
+        await strategy.needsDeploy(def);
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0].shell).toBeUndefined();
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
+    it('leaves def.shell undefined when winShell is not set (e.g. codex)', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      try {
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const def = makeDef({
+          id: 'codex',
+          hook: {
+            settingsPath: 'C:/Users/test/.codex/hooks.json',
+            events: ['Stop'],
+            hookCommand: 'C:/Users/test/.loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.ps1',
+            format: 'nested',
+            matcher: '*',
+          },
+        });
+
+        await strategy.needsDeploy(def);
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0].shell).toBeUndefined();
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
     it('uses per-event matchers when configured', async () => {
       mockHookManager.isHookInstalled.mockResolvedValue(true);
       await strategy.needsDeploy(makeDef({

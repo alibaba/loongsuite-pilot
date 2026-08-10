@@ -14,6 +14,20 @@ function Test-NodeSuitable {
     } catch { return $false }
 }
 
+# Numeric sort key for version dir names, equivalent to the daemon's
+# compareNodeRuntimeDirs. Sort-Object Name is lexicographic and would prefer
+# node-v22.9.0 over node-v22.22.2 once several versions accumulate.
+function Get-NodeVersionSortKey {
+    param([string]$Name)
+    $key = ''
+    foreach ($part in ($Name -replace '^node-v','').Split('.')) {
+        $digits = $part -replace '^[^0-9]*','' -replace '[^0-9].*$',''
+        if (-not $digits) { $digits = '0' }
+        $key += ('{0:D10}' -f [int]$digits)
+    }
+    return $key
+}
+
 function Resolve-NodeBin {
     $pinFile = Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
     if (Test-Path $pinFile) {
@@ -21,14 +35,27 @@ function Resolve-NodeBin {
         if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
     }
     $candidates = @()
+    # Managed runtime node (never removed by user node-manager churn) comes first.
+    $runtimeDir = Join-Path (Split-Path $pinFile) "runtime"
+    if (Test-Path $runtimeDir) {
+        $runtimeDirs = Get-ChildItem $runtimeDir -Directory -Filter "node-v*" -ErrorAction SilentlyContinue |
+            Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
+        foreach ($d in $runtimeDirs) {
+            $candidates += Join-Path $d.FullName "bin\node.exe"
+            # Official Node.js win zip layout: node.exe at the root.
+            $candidates += Join-Path $d.FullName "node.exe"
+        }
+    }
     $nvmHome = $env:NVM_HOME
     if ($nvmHome -and (Test-Path $nvmHome)) {
-        $nvmDirs = Get-ChildItem $nvmHome -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+        $nvmDirs = Get-ChildItem $nvmHome -Directory -ErrorAction SilentlyContinue |
+            Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
         foreach ($d in $nvmDirs) { $candidates += Join-Path $d.FullName "node.exe" }
     }
     $fnmDir = Join-Path $env:USERPROFILE ".fnm\node-versions"
     if (Test-Path $fnmDir) {
-        $fnmDirs = Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+        $fnmDirs = Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue |
+            Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
         foreach ($d in $fnmDirs) { $candidates += Join-Path $d.FullName "installation\node.exe" }
     }
     $candidates += Join-Path $env:USERPROFILE ".volta\bin\node.exe"
@@ -42,66 +69,23 @@ function Resolve-NodeBin {
     return $null
 }
 
-function Read-StdinRawBytes {
-    $stdinStream = [Console]::OpenStandardInput()
-    $ms = New-Object System.IO.MemoryStream
-    $stdinStream.CopyTo($ms)
-    $rawBytes = $ms.ToArray()
-    $ms.Dispose()
-
-    # Strip UTF-8 BOM (EF BB BF)
-    if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
-        $rawBytes = $rawBytes[3..($rawBytes.Length - 1)]
-    }
-
-    # Fix UTF-8->GBK double-encoding on Chinese Windows
-    if ($rawBytes.Length -gt 2) {
-        try {
-            $utf8    = [System.Text.Encoding]::UTF8
-            $gbk     = [System.Text.Encoding]::GetEncoding(936)
-            $garbled = $utf8.GetString($rawBytes)
-            $recovered = $gbk.GetBytes($garbled)
-
-            $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
-            [void]$strictUtf8.GetString($recovered)
-
-            $rawBytes = $recovered
-        } catch {}
-    }
-
-    return ,$rawBytes
-}
-
+# CLM/WDAC-safe node invocation: node inherits this process's stdin (fd0) and
+# reads it directly; PowerShell never touches the bytes. The old helper pair
+# (Read-StdinRawBytes + a ProcessStartInfo-based spawn) used .NET calls that throw
+# under Constrained Language Mode (WDAC/Device Guard), crashing hooks and silently
+# dropping telemetry. BOM stripping and the Chinese UTF-8->GBK double-encoding
+# fixup now live in node (shared/decode-payload.mjs), so this helper only passes
+# stdin through -- which works in both FullLanguage and ConstrainedLanguage.
 function Invoke-NodeProcessor {
     param(
         [string]$NodeBin,
         [string]$ProcessorPath,
-        [string]$ExtraArgs,
-        [byte[]]$StdinBytes
+        [string]$ExtraArgs
     )
-    if ($StdinBytes.Length -eq 0) {
-        if ($ExtraArgs) {
-            return & $NodeBin $ProcessorPath $ExtraArgs.Split(' ') 2>$null
-        } else {
-            return & $NodeBin $ProcessorPath 2>$null
-        }
+    if ($ExtraArgs) {
+        return & $NodeBin $ProcessorPath $ExtraArgs.Split(' ') 2>$null
     }
-
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $NodeBin
-    $psi.Arguments = if ($ExtraArgs) { "`"$ProcessorPath`" $ExtraArgs" } else { "`"$ProcessorPath`"" }
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $false
-    $psi.CreateNoWindow = $true
-
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    $proc.StandardInput.BaseStream.Write($StdinBytes, 0, $StdinBytes.Length)
-    $proc.StandardInput.Close()
-    $result = $proc.StandardOutput.ReadToEnd()
-    $proc.WaitForExit()
-    return $result
+    return & $NodeBin $ProcessorPath 2>$null
 }
 
 function Log-HookError {

@@ -13,6 +13,7 @@
  *     session_id, start_time, cwd,
  *     transcript_path, transcript_offset?,
  *     turn_count,                  // turns already exported (incl. skipped historic)
+ *     resource_attributes?,         // invocation context captured by the latest Stop hook
  *     stop_time?,
  *     events: []                   // v2 subagent_start/stop accumulator (unused in v1)
  *   }

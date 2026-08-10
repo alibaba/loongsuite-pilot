@@ -12,11 +12,20 @@ const EXTENSION_PATH = path.resolve(
 
 let tmpDir;
 let previousDataDir;
+let previousResourceEnv;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-coding-agent-extension-'));
   previousDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR;
   process.env.LOONGSUITE_PILOT_DATA_DIR = tmpDir;
+  previousResourceEnv = {
+    AGENTTEAMS_WORKER_NAME: process.env.AGENTTEAMS_WORKER_NAME,
+    AGENTTEAMS_INSTANCE_ID: process.env.AGENTTEAMS_INSTANCE_ID,
+    AGENTTEAMS_TOKEN: process.env.AGENTTEAMS_TOKEN,
+  };
+  delete process.env.AGENTTEAMS_WORKER_NAME;
+  delete process.env.AGENTTEAMS_INSTANCE_ID;
+  delete process.env.AGENTTEAMS_TOKEN;
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-07-16T08:00:00.000Z'));
 });
@@ -26,6 +35,10 @@ afterEach(() => {
   vi.useRealTimers();
   if (previousDataDir === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
   else process.env.LOONGSUITE_PILOT_DATA_DIR = previousDataDir;
+  for (const [key, value] of Object.entries(previousResourceEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -161,6 +174,8 @@ describe('Pi Coding Agent extension', () => {
     const request = records.find(record => record['event.name'] === 'llm.request');
     expect(request['gen_ai.session.id']).toBe('pi-session-1');
     expect(request['gen_ai.agent.type']).toBe('pi-coding-agent');
+    expect(request['gen_ai.agent.name']).toBe('Pi Coding Agent');
+    expect(request.resourceAttributes).toBeUndefined();
     expect(request['agent.pi-coding-agent.cwd']).toBe('/workspace/example');
     expect(request['gen_ai.input.messages'][0].parts[0].content).toBe('Inspect the repository');
     expect(request['gen_ai.tool.definitions'].map(tool => tool.name)).toEqual(['read', 'bash']);
@@ -194,6 +209,29 @@ describe('Pi Coding Agent extension', () => {
       const logFile = path.join(logDir, 'pi-coding-agent-2026-07-16.jsonl');
       expect(fs.statSync(logDir).mode & 0o777).toBe(0o700);
       expect(fs.statSync(logFile).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('stamps custom worker context on every record in the turn', async () => {
+    process.env.AGENTTEAMS_WORKER_NAME = 'reviewer';
+    process.env.AGENTTEAMS_INSTANCE_ID = 'pi-instance-01';
+    process.env.AGENTTEAMS_TOKEN = 'must-not-leak';
+
+    const runtime = await createRuntime();
+    await startTurn(runtime);
+    await runtime.emit('context', {
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Inspect the repository' }] }],
+    });
+
+    const records = readRecords();
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) {
+      expect(record['gen_ai.agent.name']).toBe('reviewer');
+      expect(record.resourceAttributes).toEqual({
+        'agentteams.worker.name': 'reviewer',
+        'agentteams.instance.id': 'pi-instance-01',
+      });
+      expect(JSON.stringify(record)).not.toContain('must-not-leak');
     }
   });
 

@@ -13,6 +13,7 @@ import {
   buildQoderHookRecord,
   loadHookRuntimeConfig,
 } from '../agent-event-normalizer.mjs';
+import { decodePayload } from './decode-payload.mjs';
 
 const ENABLE_LOGGING = true;
 export const HOOKS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -164,31 +165,40 @@ function isLineRecordNewer(candidate, existing) {
 
 const LOCK_WAIT_ARRAY = new Int32Array(new SharedArrayBuffer(4));
 
-function updateAggregateShadow(file, transcriptPath, record) {
-  const lockFile = `${file}.lock`;
-  const deadline = Date.now() + 1_000;
+function withSyncFileLock(lockFile, waitMs, staleMs, action) {
+  const deadline = Date.now() + waitMs;
   let acquired = false;
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.dirname(lockFile), { recursive: true });
     while (!acquired) {
       try {
         const fd = fs.openSync(lockFile, 'wx');
         fs.closeSync(fd);
         acquired = true;
       } catch (err) {
-        if (err?.code !== 'EEXIST') return false;
+        if (err?.code !== 'EEXIST') return { acquired: false };
         try {
           const stat = fs.statSync(lockFile);
-          if (Date.now() - stat.mtimeMs > 30_000) {
+          if (Date.now() - stat.mtimeMs > staleMs) {
             fs.unlinkSync(lockFile);
             continue;
           }
         } catch { /* retry acquisition */ }
-        if (Date.now() >= deadline) return false;
+        if (Date.now() >= deadline) return { acquired: false };
         Atomics.wait(LOCK_WAIT_ARRAY, 0, 0, 10);
       }
     }
 
+    return { acquired: true, value: action() };
+  } finally {
+    if (acquired) {
+      try { fs.unlinkSync(lockFile); } catch { /* best-effort lock cleanup */ }
+    }
+  }
+}
+
+function updateAggregateShadow(file, transcriptPath, record) {
+  const result = withSyncFileLock(`${file}.lock`, 1_000, 30_000, () => {
     const records = readJsonObject(file) || {};
     const existing = records[transcriptPath];
     if (existing?.session_id === record.session_id
@@ -201,11 +211,9 @@ function updateAggregateShadow(file, transcriptPath, record) {
       updated_at: record.updated_at,
     };
     return saveJsonObject(file, records);
-  } finally {
-    if (acquired) {
-      try { fs.unlinkSync(lockFile); } catch { /* best-effort lock cleanup */ }
-    }
-  }
+  });
+
+  return result.acquired ? result.value : false;
 }
 
 function rollbackShadowFiles(agentId) {
@@ -268,7 +276,7 @@ export function getTranscriptLineCount(transcriptPath) {
   }
 }
 
-export function getLineRangeInfo(agentId, transcriptPath, sessionId) {
+export function getLineRangeInfo(agentId, transcriptPath, sessionId, knownCurrentCount) {
   const record = loadLineRecord(agentId, sessionId);
   const hasRecordedOffset = Number.isFinite(record.last_line_count)
     && record.last_line_count >= 0;
@@ -277,7 +285,11 @@ export function getLineRangeInfo(agentId, transcriptPath, sessionId) {
   const recordedTranscript = record.transcript_path || '';
   let reason = hasRecordedOffset ? 'incremental' : 'missing-cursor';
 
-  const currentCount = getTranscriptLineCount(transcriptPath);
+  // Callers that already hold a transcript snapshot can pass its line count so
+  // cursor validation does not read the complete file a second time.
+  const currentCount = Number.isFinite(knownCurrentCount)
+    ? knownCurrentCount
+    : getTranscriptLineCount(transcriptPath);
 
   if (recordedSession && recordedSession !== sessionId) {
     logDebug(agentId, `Session changed: ${recordedSession} -> ${sessionId}, reset to 0`);
@@ -362,7 +374,14 @@ export function appendRowsToHistory(agentId, logPrefix, rows) {
   const logFile = getHistoryLogFile(agentId, logPrefix);
   try {
     fs.mkdirSync(path.dirname(logFile), { recursive: true });
-    fs.appendFileSync(logFile, rows.join('\n') + '\n', 'utf-8');
+    const result = withSyncFileLock(`${logFile}.lock`, 15_000, 10_000, () => {
+      fs.appendFileSync(logFile, rows.join('\n') + '\n', 'utf-8');
+      return true;
+    });
+    if (!result.acquired) {
+      logDebug(agentId, `ERROR appending rows to history: timed out waiting for ${logFile}.lock`);
+      return false;
+    }
     logDebug(agentId, `Appended ${rows.length} rows to ${logFile}`);
     return true;
   } catch (e) {
@@ -378,10 +397,9 @@ export async function readStdin() {
   for await (const chunk of process.stdin) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   }
-  let str = Buffer.concat(chunks).toString('utf-8');
-  // Strip UTF-8 BOM — PowerShell 5.x adds BOM when piping strings to native commands
-  if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
-  return str;
+  // decodePayload 负责去 UTF-8 BOM + 修复 Cursor/Qoder 中文 UTF-8→GBK 双重编码。
+  // (原先由 PowerShell hook wrapper 用 .NET 完成,已移入 node 以兼容 WDAC 受限语言模式)
+  return decodePayload(Buffer.concat(chunks));
 }
 
 export async function parseStdinPayload(agentId) {

@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 
 const sh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf-8');
 const ps1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf-8');
+const runtimeSh = readFileSync(resolve('scripts', 'loongsuite-pilot.sh'), 'utf-8');
+const runtimePs1 = readFileSync(resolve('scripts', 'loongsuite-pilot.ps1'), 'utf-8');
 
 // Hook-mode agents whose settings files must be cleaned on uninstall. Kept in
 // sync with agents.d/*.json (deployMode: hook). A missing entry means the
@@ -257,5 +259,78 @@ describe('uninstall cleans the MiMo Code plugin-inject spec', () => {
     expect(sh).toContain('plugins/mimo-code/plugin.mjs');
     expect(ps1).toContain('loongsuite-pilot-mimo-code');
     expect(ps1).toContain('plugins/mimo-code/plugin.mjs');
+  });
+});
+
+describe('uninstall cleans only the Pilot OpenClaw plugin injection', () => {
+  it('defines and calls cleanup in both installers', () => {
+    expect(sh).toMatch(/remove_openclaw_plugin\(\)\s*\{/);
+    expect(sh.slice(sh.indexOf('cmd_uninstall()'))).toContain('remove_openclaw_plugin');
+    expect(ps1).toMatch(/function Remove-OpenClawPlugin\s*\{/);
+    expect(ps1.slice(ps1.indexOf('function Cmd-Uninstall'))).toContain('Remove-OpenClawPlugin');
+  });
+
+  it('checks the supported config paths and environment overrides', () => {
+    for (const marker of ['OPENCLAW_CONFIG_PATH', 'OPENCLAW_STATE_DIR', 'openclaw.json', 'config.json']) {
+      expect(sh).toContain(marker);
+      expect(ps1).toContain(marker);
+    }
+  });
+
+  it('removes the exact entry and managed path while filtering arrays', () => {
+    for (const installer of [sh, ps1]) {
+      expect(installer).toContain("delete plugins.entries['loongsuite-pilot-openclaw']");
+      expect(installer).toContain("plugins.load.paths.filter(value => !isOurs(value))");
+      expect(installer).toContain("['plugin', 'plugins']");
+      expect(installer).toContain('plugins/openclaw/plugin.mjs');
+    }
+  });
+
+  it('runs cleanup before installation files are removed', () => {
+    const shUninstall = sh.slice(sh.indexOf('cmd_uninstall()'));
+    expect(shUninstall.indexOf('remove_openclaw_plugin'))
+      .toBeLessThan(shUninstall.indexOf('local _cache_dir="$HOME/.loongsuite-pilot"'));
+    const psUninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(psUninstall.indexOf('Remove-OpenClawPlugin'))
+      .toBeLessThan(psUninstall.indexOf('Remove-PilotInstallationFiles'));
+  });
+});
+
+describe('uninstall only cleans the managed Hermes directory plugin', () => {
+  it('defines and calls marker-aware cleanup in the shell installer', () => {
+    expect(sh).toMatch(/remove_hermes_plugin\(\)\s*\{/);
+    expect(sh.slice(sh.indexOf('cmd_uninstall()'))).toContain('remove_hermes_plugin');
+    expect(sh).toContain('.loongsuite-pilot-managed.json');
+    expect(sh).toContain("meta.owner !== 'loongsuite-pilot'");
+    expect(sh).toContain("meta.agentId !== 'hermes-agent'");
+    expect(sh).toContain("state?.['hermes-agent']?.targetDir");
+    expect(sh).toContain('plugins disable loongsuite-pilot');
+    const uninstall = sh.slice(sh.indexOf('cmd_uninstall()'));
+    expect(uninstall.indexOf('remove_hermes_plugin'))
+      .toBeLessThan(uninstall.indexOf('local _cache_dir="$HOME/.loongsuite-pilot"'));
+  });
+
+  it('defines and calls marker-aware cleanup in the PowerShell installer', () => {
+    expect(ps1).toMatch(/function Remove-HermesPlugin\s*\{/);
+    expect(ps1.slice(ps1.indexOf('function Cmd-Uninstall'))).toContain('Remove-HermesPlugin');
+    expect(ps1).toContain('.loongsuite-pilot-managed.json');
+    expect(ps1).toContain('$meta.owner -ne "loongsuite-pilot"');
+    expect(ps1).toContain('$meta.agentId -ne "hermes-agent"');
+    expect(ps1).toContain("$state.'hermes-agent'.targetDir");
+    expect(ps1).toContain('plugins disable loongsuite-pilot');
+    const uninstall = ps1.slice(ps1.indexOf('function Cmd-Uninstall'));
+    expect(uninstall.indexOf('Remove-HermesPlugin'))
+      .toBeLessThan(uninstall.indexOf('Remove-PilotInstallationFiles'));
+  });
+
+  it('removes Hermes on rollback only when the target version lacks support', () => {
+    expect(runtimeSh).toMatch(/cleanup_hermes_for_rollback\(\)\s*\{/);
+    expect(runtimeSh).toContain('agents.d/hermes-agent.json');
+    expect(runtimeSh.slice(runtimeSh.indexOf('cmd_rollback()')))
+      .toContain('cleanup_hermes_for_rollback');
+    expect(runtimePs1).toMatch(/function Remove-HermesPluginForRollback\s*\{/);
+    expect(runtimePs1).toContain('agents.d\\hermes-agent.json');
+    expect(runtimePs1.slice(runtimePs1.indexOf('function Cmd-Rollback')))
+      .toContain('Remove-HermesPluginForRollback');
   });
 });

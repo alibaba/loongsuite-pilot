@@ -1,0 +1,24 @@
+{
+  "id": "hermes-agent",
+  "displayName": "Hermes Agent",
+  "deployMode": "directory-plugin",
+  "detection": {
+    "paths": ["$HERMES_HOME"],
+    "commands": ["hermes"]
+  },
+  "directoryPlugin": {
+    "sourceDir": "$PILOT_DIR/assets/plugins/hermes-agent/loongsuite-pilot",
+    "targetDir": "$HERMES_HOME/plugins/loongsuite-pilot",
+    "activation": {
+      "command": "$HERMES_CLI",
+      "probeArgs": ["plugins", "enable", "--help"],
+      "enableArgs": ["plugins", "enable", "loongsuite-pilot", "--no-allow-tool-override"],
+      "disableArgs": ["plugins", "disable", "loongsuite-pilot"]
+    }
+  },
+  "input": {
+    "type": "session-file-polling",
+    "logDir": "$PILOT_DATA/logs/hermes-agent",
+    "filePattern": "hermes-agent-*.jsonl"
+  }
+}

@@ -4,7 +4,12 @@
 
 // ─── Deploy Mode ───
 
-export type DeployMode = 'hook' | 'plugin-probe' | 'plugin-inject' | 'detection-only';
+export type DeployMode =
+  | 'hook'
+  | 'plugin-probe'
+  | 'plugin-inject'
+  | 'directory-plugin'
+  | 'detection-only';
 export type MountType = 'wrapper' | 'rc-inject' | 'env-inject';
 export type HookFormat = 'flat' | 'nested';
 export type SettingsSyntax = 'json' | 'jsonc';
@@ -74,6 +79,15 @@ export interface AgentHookConfig {
    */
   rawCommand?: boolean;
   /**
+   * Windows-only: shell to declare on the nested hook entry
+   * (`{ command, type, shell }`). Some hosts (Qoder family) require an explicit
+   * `"shell": "powershell"` so the host runs the `.ps1` command through
+   * PowerShell instead of its default shell. Ignored on non-Windows platforms
+   * (where the command is a `.sh`), and only emitted for agents that set it —
+   * codex must never set it (its settings use serde deny_unknown_fields).
+   */
+  winShell?: string;
+  /**
    * Optional env block to merge into the agent's settings.json on deploy.
    *
    * Each value may contain the `$PILOT_DATA` token; AgentDefLoader resolves
@@ -137,10 +151,21 @@ export interface PluginInjectConfig {
   pluginSpec: string;
   pluginId: string;
   replaceSpecs?: string[];
+  /** Agent-specific config layout. Omitted for the legacy flat-array layout. */
+  configShape?: 'openclaw-nested';
+  /** Required plugin entry fields for nested config layouts. */
+  entryConfig?: Record<string, unknown>;
   /** Target array field. Defaults to auto-detected `plugins` / `plugin`. */
   configKey?: string;
   /** Create the first config path with an empty object when none exists. */
   createIfMissing?: boolean;
+  /** Refuse deployment before touching config when the target is too old. */
+  versionCheck?: {
+    /** Executable followed by argv entries; executed directly without a shell. */
+    command: string[];
+    /** Minimum supported stable version. */
+    minimum: string;
+  };
 }
 
 export interface AgentRuntimeConfig {
@@ -150,6 +175,30 @@ export interface AgentRuntimeConfig {
   nodeSqliteSince?: string;
   /** 无该 builtin 时的 fallback 行为说明 */
   fallback?: string;
+}
+
+export interface DirectoryPluginConfig {
+  /** Managed plugin directory copied by Pilot. */
+  sourceDir: string;
+  /** Final directory consumed by the target Agent. */
+  targetDir: string;
+  /** Ownership marker stored inside targetDir. */
+  markerFile?: string;
+  /** Optional target-native command used to activate the copied plugin. */
+  activation?: DirectoryPluginActivationConfig;
+}
+
+export interface DirectoryPluginActivationConfig {
+  /** Target Agent CLI executable. */
+  command: string;
+  /** Capability probe. A non-zero result means an older target does not require activation. */
+  probeArgs?: string[];
+  /** Maximum runtime for probe/enable/disable commands. */
+  timeoutMs?: number;
+  /** Arguments that enable the plugin after it has been copied. */
+  enableArgs: string[];
+  /** Best-effort arguments that disable the plugin before Pilot removes it. */
+  disableArgs?: string[];
 }
 
 export interface AgentDefinition {
@@ -162,6 +211,7 @@ export interface AgentDefinition {
   hook?: AgentHookConfig;
   pluginProbe?: PluginProbeConfig;
   pluginInject?: PluginInjectConfig;
+  directoryPlugin?: DirectoryPluginConfig;
   input?: AgentInputConfig;
   /** 运行时要求（如 node:sqlite）与无该依赖时的 fallback 声明 */
   runtime?: AgentRuntimeConfig;
@@ -193,6 +243,8 @@ export interface DeployedAgentRecord {
   deployedAt: string;
   sourceHash?: string;
   lastRemoteCheckedAt?: string;
+  /** Resolved external target for managed directory plugins. */
+  targetDir?: string;
 }
 
 export type DeployedAgentsState = Record<string, DeployedAgentRecord>;

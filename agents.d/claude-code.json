@@ -9,6 +9,7 @@
   "hook": {
     "settingsPath": "~/.claude/settings.json",
     "events": [
+      "PreToolUse",
       "Stop",
       "SubagentStart",
       "SubagentStop"
@@ -16,6 +17,9 @@
     "hookCommand": "$PILOT_DATA/hooks/claude-code-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",
+    "eventMatchers": {
+      "PreToolUse": "Bash"
+    },
     "eventSubcommand": "kebab-case",
     "replaceHookCommands": [
       "otel-claude-hook",

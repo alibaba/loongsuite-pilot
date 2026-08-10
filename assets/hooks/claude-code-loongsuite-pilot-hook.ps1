@@ -1,9 +1,9 @@
-# Claude Code hook entrypoint (Windows) — delegates to claude-code-hook-processor.mjs.
+# Claude Code hook entrypoint (Windows) - delegates to claude-code-hook-processor.mjs.
 #
 # Usage (registered in ~/.claude/settings.json by pilot HookStrategy):
 #   powershell -File $PILOT_DATA/hooks/claude-code-loongsuite-pilot-hook.ps1 <subcommand>
 #
-# Subcommand: stop / subagent-start / subagent-stop
+# Subcommand: pre-tool-use / stop / subagent-start / subagent-stop
 #
 # Fail-open: any error outputs "{}" and exits 0.
 
@@ -15,7 +15,7 @@ $Processor = Join-Path $ScriptDir "claude-code-hook-processor.mjs"
 $Subcommand = if ($args.Count -gt 0) { $args[0] } else { "unknown" }
 
 # Only process registered subcommands
-if ($Subcommand -notin @("stop", "subagent-start", "subagent-stop")) {
+if ($Subcommand -notin @("pre-tool-use", "stop", "subagent-start", "subagent-stop")) {
     Write-Output $EMPTY_RESULT
     exit 0
 }
@@ -100,51 +100,16 @@ if (-not [Console]::IsInputRedirected) {
 }
 
 try {
-    # Read stdin as raw bytes to avoid PowerShell encoding issues (GB2312/ASCII mangles UTF-8)
-    $stdinStream = [Console]::OpenStandardInput()
-    $ms = New-Object System.IO.MemoryStream
-    $stdinStream.CopyTo($ms)
-    $rawBytes = $ms.ToArray()
-    $ms.Dispose()
-
-    # Strip UTF-8 BOM (EF BB BF) before any encoding fixup
-    if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
-        $rawBytes = $rawBytes[3..($rawBytes.Length - 1)]
-    }
-
-    # Fix Cursor's UTF-8→GBK double-encoding on Chinese Windows.
-    if ($rawBytes.Length -gt 2) {
-        try {
-            $utf8    = [System.Text.Encoding]::UTF8
-            $gbk     = [System.Text.Encoding]::GetEncoding(936)
-            $garbled = $utf8.GetString($rawBytes)
-            $recovered = $gbk.GetBytes($garbled)
-
-            $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
-            [void]$strictUtf8.GetString($recovered)
-
-            $rawBytes = $recovered
-        } catch {}
-    }
-
-    if ($rawBytes.Length -eq 0) {
-        $result = & $nodeBin $Processor $Subcommand 2>$null
-    } else {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $nodeBin
-        $psi.Arguments = "`"$Processor`" $Subcommand"
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardInput = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $false
-        $psi.CreateNoWindow = $true
-
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        $proc.StandardInput.BaseStream.Write($rawBytes, 0, $rawBytes.Length)
-        $proc.StandardInput.Close()
-        $result = $proc.StandardOutput.ReadToEnd()
-        $proc.WaitForExit()
-    }
+    # CLM/WDAC-safe passthrough: node inherits this process's stdin (fd0) and
+    # reads it directly; PowerShell never touches the bytes. The old code used
+    # [Console]::OpenStandardInput / MemoryStream / ProcessStartInfo, whose .NET
+    # calls throw under Constrained Language Mode (WDAC/Device Guard) and silently
+    # drop telemetry. BOM stripping and the Chinese UTF-8->GBK fixup now live in
+    # node (shared/decode-payload.mjs).
+    # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 parses a BOM-less
+    # script using the system ANSI code page (GBK/936 on Chinese Windows); any
+    # non-ASCII byte here can corrupt parsing and abort the whole script.
+    $result = & $nodeBin $Processor $Subcommand 2>$null
     if ($result) { Write-Output $result } else { Write-Output $EMPTY_RESULT }
 } catch {
     Write-Error "[claude-code-hook] processor failed (subcommand=$Subcommand)"

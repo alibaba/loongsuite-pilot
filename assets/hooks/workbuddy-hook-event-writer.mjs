@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { decodePayload } from './shared/decode-payload.mjs';
 
 const EVENT_NAMES = new Map([
   ['session-start', 'SessionStart'],
@@ -16,7 +17,9 @@ const EVENT_NAMES = new Map([
 ]);
 
 function readStdin() {
-  return fs.readFileSync(0, 'utf8');
+  // 读原始字节后交给 decodePayload:去 UTF-8 BOM,并在中文 Windows 上修复 Cursor/Qoder 的
+  // UTF-8->GBK 双重编码。与其它 host processor 一致,也让 .ps1 里"BOM 剥离与 GBK 纠偏已移入 node"的注释成立。
+  return decodePayload(fs.readFileSync(0));
 }
 
 function stringField(value) {

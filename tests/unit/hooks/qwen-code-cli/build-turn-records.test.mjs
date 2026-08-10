@@ -70,6 +70,38 @@ describe('buildTurnRecords — basic shape', () => {
     expect([...traceIds][0]).toMatch(/^[0-9a-f]{32}$/);
   });
 
+  test('keeps the existing raw shape when invocation resource context is absent', () => {
+    const turn = makeTurn({ llmCalls: [makeLlmCall()] });
+    const { records } = buildTurnRecords(turn, 0, 'sess-1', INITIAL_HASH, 'u-1', 'end_turn');
+    for (const record of records) {
+      expect(record['gen_ai.agent.name']).toBeUndefined();
+      expect(record.resourceAttributes).toBeUndefined();
+    }
+  });
+
+  test('stamps invocation resource context on every record', () => {
+    const turn = makeTurn({ llmCalls: [makeLlmCall()] });
+    const resourceAttributes = {
+      'agentteams.worker.name': 'planner',
+      'agentteams.instance.id': 'qwen-instance-01',
+    };
+    const { records } = buildTurnRecords(
+      turn,
+      0,
+      'sess-1',
+      INITIAL_HASH,
+      'u-1',
+      'end_turn',
+      '/work',
+      resourceAttributes,
+    );
+    for (const record of records) {
+      expect(record['gen_ai.agent.name']).toBe('planner');
+      expect(record.resourceAttributes).toEqual(resourceAttributes);
+      expect(record['gen_ai.agent.id']).toBe('sess-1');
+    }
+  });
+
   test('turn.id format = <sessionId>:t<N> (C2)', () => {
     const turn = makeTurn({ llmCalls: [makeLlmCall()] });
     const { records } = buildTurnRecords(turn, 2, 'sess-1', INITIAL_HASH, 'u-1', 'end_turn');
