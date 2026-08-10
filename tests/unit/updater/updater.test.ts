@@ -30,6 +30,7 @@ const mockFsStat = vi.fn();
 const mockFsCp = vi.fn<[string, string, any], Promise<void>>();
 const mockFsCopyFile = vi.fn<[string, string], Promise<void>>();
 const mockFsChmod = vi.fn<[string, number], Promise<void>>();
+const mockFsMkdtemp = vi.fn<[string], Promise<string>>();
 
 vi.mock('node:fs/promises', () => ({
   readFile: (...args: [string, string]) => mockFsReadFile(...args),
@@ -43,12 +44,14 @@ vi.mock('node:fs/promises', () => ({
   cp: (...args: [string, string, any]) => mockFsCp(...args),
   copyFile: (...args: [string, string]) => mockFsCopyFile(...args),
   chmod: (...args: [string, number]) => mockFsChmod(...args),
+  mkdtemp: (...args: [string]) => mockFsMkdtemp(...args),
 }));
 
 // --- Mock node:fs (createWriteStream) ---
 vi.mock('node:fs', () => ({
   createWriteStream: vi.fn(() => ({ fake: true })),
   createReadStream: vi.fn(),
+  readdirSync: vi.fn(() => []),
 }));
 
 // --- Mock stream pipeline ---
@@ -147,6 +150,8 @@ describe('Updater', () => {
     mockFsCopyFile.mockResolvedValue(undefined);
     mockFsChmod.mockResolvedValue(undefined);
     mockFsReaddir.mockResolvedValue([]);
+    // Default: mkdtemp returns a deterministic child of the requested prefix.
+    mockFsMkdtemp.mockImplementation((prefix: string) => Promise.resolve(prefix + 'XXXXXX'));
     // Default: no current pointer file → first deployment
     mockFsReadFile.mockRejectedValue(new Error('ENOENT'));
     // Default: access checks fail (nothing exists)
@@ -323,6 +328,75 @@ describe('Updater', () => {
         expect.stringContaining('current.tmp'),
         expect.stringContaining('/current'),
       );
+    });
+
+    it('adopts the managed node runtime + prebuilt modules and pins node-bin', async () => {
+      const expOs = process.platform === 'win32' ? 'win' : process.platform;
+      const expArch = process.arch;
+      const supported = ['darwin', 'linux', 'win'].includes(expOs)
+        && ['x64', 'arm64'].includes(expArch)
+        && !(expOs === 'win' && expArch === 'arm64');
+      // On an unsupported host the updater keeps the system node; nothing to assert.
+      if (!supported) return;
+
+      const nodeArchive = `node-v22.22.2-${expOs}-${expArch}.${expOs === 'win' ? 'zip' : 'tar.gz'}`;
+      const modulesArchive = `node-modules-${expOs}-${expArch}.tar.gz`;
+      const nodeLeaf = expOs === 'win' ? 'node.exe' : 'node';
+      const nodeBin = `${tmpDir}/runtime/node-v22.22.2-${expOs}-${expArch}/bin/${nodeLeaf}`;
+
+      mockFetch
+        .mockResolvedValueOnce(makeResponseJson(makeManifest()))  // manifest
+        .mockResolvedValueOnce(makeResponseStream())              // package
+        .mockResolvedValueOnce(makeResponseStream())              // node archive
+        .mockResolvedValueOnce(makeResponseStream())              // node SHASUMS
+        .mockResolvedValueOnce(makeResponseStream())              // modules archive
+        .mockResolvedValueOnce(makeResponseStream());             // modules SHASUMS
+      mockComputeSha256.mockResolvedValue('SHA');
+
+      mockFsReaddir.mockImplementation((dir: string) => {
+        if (dir.includes('download-tmp')) return Promise.resolve(['loongsuite-pilot']);
+        return Promise.resolve([]);
+      });
+      mockFsStat.mockResolvedValue({ isDirectory: () => true });
+      mockFsAccess.mockImplementation((p: string) => {
+        if (p.includes('postinstall.js')) return Promise.reject(new Error('ENOENT'));
+        if (p.includes('package.json')) return Promise.resolve();
+        if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
+        if (p.includes('collector-daemon.js')) return Promise.resolve();
+        if (p.includes('updater-daemon.js')) return Promise.resolve();
+        if (p.includes('loongsuite-pilot.')) return Promise.resolve();
+        // Managed node binary + staged prebuilt modules exist after extraction.
+        if (p.includes('/runtime/') && (p.endsWith(`/${nodeLeaf}`))) return Promise.resolve();
+        if (p.includes('.pilot-nm-') && p.endsWith('node_modules')) return Promise.resolve();
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (String(filePath).includes('SHASUMS256')) {
+          return Promise.resolve(`SHA  ${nodeArchive}\nSHA  ${modulesArchive}\n` as unknown as string);
+        }
+        if (String(filePath).includes('/scripts/')) {
+          return Promise.resolve(Buffer.from('script') as unknown as string);
+        }
+        return Promise.reject(new Error('ENOENT'));
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      // node-bin pin repointed at the managed runtime (atomic tmp + rename).
+      expect(mockFsWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('node-bin.tmp'),
+        nodeBin + '\n',
+      );
+      expect(mockFsRename).toHaveBeenCalledWith(
+        expect.stringContaining('node-bin.tmp'),
+        expect.stringContaining('node-bin'),
+      );
+
+      // Prebuilt modules were adopted, so npm install must be skipped.
+      const execCommands = mockExecFile.mock.calls.map((c: unknown[]) => String(c[0]));
+      expect(execCommands).not.toContain('npm');
     });
 
     it('syncs installed scripts after switching the current pointer', async () => {
