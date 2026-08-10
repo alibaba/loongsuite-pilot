@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { runInNewContext } from 'node:vm';
 
 const sh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf-8');
 const ps1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf-8');
@@ -319,41 +318,56 @@ describe('uninstall cleans only the Pilot OpenClaw plugin injection', () => {
   it.each(extractOpenClawCleanupScripts())(
     '%s streamed cleanup removes both current and legacy managed paths',
     (_platform, cleanupScript) => {
-      const tempDir = mkdtempSync(join(tmpdir(), 'pilot-oc-cleanup-'));
-      try {
-        const configPath = join(tempDir, 'config.json');
-        const managedPath = join(tempDir, '.loongsuite-pilot', 'plugins', 'openclaw')
-          .replaceAll('\\', '/');
-        writeFileSync(configPath, JSON.stringify({
-          plugin: [`file://${managedPath}/plugin.mjs`, '/unrelated/legacy.mjs'],
-          plugins: {
-            load: { paths: [managedPath, `${managedPath}/plugin.mjs`, '/unrelated/plugin'] },
-            entries: {
-              'loongsuite-pilot-openclaw': { enabled: true },
-              unrelated: { enabled: true },
+      const configPath = '/tmp/pilot-openclaw-config.json';
+      const managedPath = '/tmp/.loongsuite-pilot/plugins/openclaw';
+      let writtenConfig;
+      let stdout = '';
+      let stderr = '';
+      const fs = {
+        readFileSync(path, encoding) {
+          expect(path).toBe(configPath);
+          expect(['utf8', 'utf-8']).toContain(encoding);
+          return JSON.stringify({
+            plugin: [`file://${managedPath}/plugin.mjs`, '/unrelated/legacy.mjs'],
+            plugins: {
+              load: { paths: [managedPath, `${managedPath}/plugin.mjs`, '/unrelated/plugin'] },
+              entries: {
+                'loongsuite-pilot-openclaw': { enabled: true },
+                unrelated: { enabled: true },
+              },
             },
-          },
-        }));
+          });
+        },
+        writeFileSync(path, value, encoding) {
+          expect(path).toBe(configPath);
+          expect(['utf8', 'utf-8']).toContain(encoding);
+          writtenConfig = value;
+        },
+      };
+      const sandboxProcess = {
+        env: {
+          PILOT_OC_CONFIG: configPath,
+          PILOT_OC_MANAGED: managedPath,
+        },
+        stdout: { write: value => { stdout += value; } },
+        stderr: { write: value => { stderr += value; } },
+        exit: code => { throw new Error(`cleanup unexpectedly exited with ${code}: ${stderr}`); },
+      };
 
-        const result = spawnSync(process.execPath, [], {
-          input: cleanupScript,
-          encoding: 'utf-8',
-          env: {
-            ...process.env,
-            PILOT_OC_CONFIG: configPath,
-            PILOT_OC_MANAGED: managedPath,
-          },
-        });
+      runInNewContext(cleanupScript, {
+        process: sandboxProcess,
+        require(id) {
+          expect(id).toBe('fs');
+          return fs;
+        },
+      });
 
-        expect(result.status, result.stderr).toBe(0);
-        expect(result.stdout).toBe('cleaned');
-        const cleaned = JSON.parse(readFileSync(configPath, 'utf-8'));
-        expect(cleaned.plugin).toEqual(['/unrelated/legacy.mjs']);
-        expect(cleaned.plugins.load.paths).toEqual(['/unrelated/plugin']);
-        expect(cleaned.plugins.entries).toEqual({ unrelated: { enabled: true } });
-      } finally {
-        rmSync(tempDir, { recursive: true, force: true });
-      }
+      expect(stdout).toBe('cleaned');
+      expect(stderr).toBe('');
+      const cleaned = JSON.parse(writtenConfig);
+      expect(cleaned.plugin).toEqual(['/unrelated/legacy.mjs']);
+      expect(cleaned.plugins.load.paths).toEqual(['/unrelated/plugin']);
+      expect(cleaned.plugins.entries).toEqual({ unrelated: { enabled: true } });
     },
   );
 
