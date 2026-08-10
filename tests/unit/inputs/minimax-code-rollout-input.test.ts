@@ -474,4 +474,45 @@ describe('MinimaxCodeRolloutInput', () => {
     // 也没 finishReason → 'stop'
     expect(entries[1]['gen_ai.response.finish_reasons']).toEqual(['stop']);
   });
+
+  // ─── Round 6: empty output messages placeholder ───
+
+  it('Round 6: text+toolCalls 都空但有 finishReason (e.g. length cap) → 始终 emit 占位 output.messages (validate-trace semantic.llm_has_input_output)', async () => {
+    // Previously buildOutputMessages returned undefined in this case,
+    // making the llm.response entry omit gen_ai.output.messages, which
+    // validate-trace.mjs semantic.llm_has_input_output MUST rule flagged
+    // as ERROR. Round 6 fix: always emit a placeholder assistant message
+    // carrying the real finish_reason so the entry validates AND the
+    // termination signal is preserved.
+    const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
+    const rec: any = {
+      type: 'model-io',
+      sessionId: 's1',
+      turnId: 'turn-A',
+      request: { requestId: 'req-empty', messages: [] },
+      startedAt: 1700000000000,
+      completedAt: 1700000001000,
+      response: {
+        // 故意 text='' (空字符串) + 无 toolCalls, finishReason='length'
+        // (model hit token cap and returned no content)
+        modelId: 'm1',
+        text: '',
+        finishReason: 'length',
+      },
+    };
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    const responseEntry = entries[1];
+    // 不是 interrupted, finish_reason 用 response.finishReason='length'
+    expect(responseEntry['gen_ai.response.finish_reasons']).toEqual(['length']);
+    // 必须有 output.messages (validate-trace 不再 ERROR)
+    const outMsgs = responseEntry['gen_ai.output.messages'];
+    expect(Array.isArray(outMsgs)).toBe(true);
+    expect(outMsgs.length).toBe(1);
+    expect(outMsgs[0].role).toBe('assistant');
+    // placeholder 携带真实 finish_reason (length),不是 'stop' 也不是 'interrupted'
+    expect(outMsgs[0].finish_reason).toBe('length');
+    // parts 是空数组 (no text, no tool calls)
+    expect(Array.isArray(outMsgs[0].parts)).toBe(true);
+    expect(outMsgs[0].parts.length).toBe(0);
+  });
 });

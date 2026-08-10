@@ -28,11 +28,12 @@
  *     input 从 ~/.minimax-code/rollout/ 补全(每条 record 含完整 request body +
  *     response text/toolCalls/usage + startedAt/completedAt)。
  *   - Stop 事件发 "other" 标记 turn 元数据(agent.event.name=stop, tool.call.count),
- *     并携带 gen_ai.response.finish_reasons=['end_turn'|'interrupted'] 触发 Signal A
- *     立即 flush。turnFlushDebounceMs(35s) 给 minimax-code-log input (5s poll) 和
- *     minimax-code-rollout input (30s poll) 留出 dispatch 时间。真正的 per-LLM
- *     llm.response (含 finish_reason) 由 rollout input 从
- *     ~/.minimax-code/rollout/*.jsonl 补全。
+ *     并携带 gen_ai.response.finish_reasons=['end_turn'|'interrupted'|'cancelled']
+ *     触发 Signal A 立即 flush(只有当 hook payload 显式提供 interrupted/cancelled
+ *     信号时才 emit 终止 finish_reason; 没信号默认 'end_turn')。turnFlushDebounceMs(35s)
+ *     给 minimax-code-log input (5s poll) 和 minimax-code-rollout input (30s poll)
+ *     留出 dispatch 时间。真正的 per-LLM llm.response (含 finish_reason) 由 rollout
+ *     input 从 ~/.minimax-code/rollout/*.jsonl 补全。
  *
  * 字段命名全部使用 ARMS GenAI 约定的 gen_ai.* 前缀。
  * finish_reasons 输出为 string[](规范要求 array)。
@@ -283,15 +284,34 @@ function cmdStop() {
   // 再发 llm.response 会与 rollout 的 per-LLM response 争抢 pairing,造成
   // orphan llm.request(duration=0ms + messages 缺失)。
   //
-  // Stop 事件携带 tool.call.count 标记 + ['end_turn'|'interrupted'] finish_reason,
-  // 触发 Signal A 立即 flush。turnFlushDebounceMs(35s) 给 minimax-code-log input
-  // 和 minimax-code-rollout input 留出 dispatch 时间。
+  // Stop 事件携带 tool.call.count 元数据 + ['end_turn'|'interrupted'|'cancelled']
+  // finish_reason, 触发 Signal A 立即 flush。turnFlushDebounceMs(35s) 给
+  // minimax-code-log input 和 minimax-code-rollout input 留出 dispatch 时间。
   //
-  // - toolCallCount > 0 (normal): emit ['end_turn']
-  // - toolCallCount === 0 (interrupted): emit ['interrupted'] — MiniMax Code
-  //   被 SIGTERM/Ctrl+C 截断, 骨架 span 立即 flush, 不等 120s idle timeout。
-  const toolCallCount = event.toolCallCount ?? 0;
-  const isInterrupted = toolCallCount === 0;
+  // interrupted / cancelled 推断 (Round 6): 读取 hook payload 的显式信号
+  // (event.interrupted | event.isInterrupted | event.is_interrupted) →
+  // 'interrupted'; (event.cancelled | event.isCancelled | event.is_cancelled) →
+  // 'cancelled'; 都没显式信号就默认 'end_turn'。
+  //
+  // 早期 (Round 1-5) 用 toolCallCount === 0 作为中断 heuristic, 这会把
+  // 纯聊天 session (zero tool calls, 正常 end_turn) 误判为 interrupted。
+  // 在 Round 5 把 'interrupted' 加进 TERMINAL_FINISH_REASONS 后会触发
+  // 不必要的 immediate flush (每个 chat-only turn 都立刻 flush), 所以
+  // Round 6 改成读显式信号。
+  //
+  // interrupted 优先于 cancelled (如果同时给两个,按 interrupted 处理)。
+  // 字段命名兼容 camelCase + snake_case 两种形态, MiniMax Code SDK
+  // 最终字段名待官方确认。
+  const toolCallCount = typeof event.toolCallCount === 'number' ? event.toolCallCount : 0;
+  const interruptedSignal = event.interrupted
+    ?? event.isInterrupted
+    ?? event.is_interrupted;
+  const cancelledSignal = event.cancelled
+    ?? event.isCancelled
+    ?? event.is_cancelled;
+  const isInterrupted = interruptedSignal === true;
+  const isCancelled = !isInterrupted && cancelledSignal === true;
+  const finishReason = isInterrupted ? 'interrupted' : (isCancelled ? 'cancelled' : 'end_turn');
   const record = {
     ...baseFields(event, userId, runtimeConfig),
     time_unix_nano: isoToUnixNanos(event.timestamp || event.ts),
@@ -300,7 +320,7 @@ function cmdStop() {
     'gen_ai.agent.event.name': 'stop',
     'gen_ai.agent.event.source': event.source || 'stop',
     'gen_ai.tool.call.count': toolCallCount,
-    'gen_ai.response.finish_reasons': [isInterrupted ? 'interrupted' : 'end_turn'],
+    'gen_ai.response.finish_reasons': [finishReason],
   };
   const cleaned = applyHookContentPolicy(sanitizeObject(record) || record, runtimeConfig);
   writeJsonlRecords(defaultLogDir(), AGENT_ID, [cleaned]);

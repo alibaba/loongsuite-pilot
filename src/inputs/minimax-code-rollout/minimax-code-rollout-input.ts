@@ -85,6 +85,18 @@ interface MinimaxCodeRolloutFileState {
  *   block so the host command-hook protocol never blocks on an empty
  *   stdout.
  *
+ * Round 6 (PR #233): buildOutputMessages now always returns at least
+ *   one assistant message (even when both text and toolCalls are
+ *   empty), so gen_ai.output.messages is unconditionally set on every
+ *   llm.response entry. validate-trace.mjs semantic.llm_has_input_output
+ *   MUST rule previously flagged empty-text / empty-toolCalls responses
+ *   (refusals, length-cap terminations, empty streaming responses) as
+ *   ERROR for missing output.messages. The finish_reason on the empty
+ *   placeholder carries the actual termination signal (length/refusal/
+ *   stop/etc.) so downstream consumers can still distinguish "empty"
+ *   from "interrupted" (which uses finish_reason='interrupted' on the
+ *   same placeholder shape).
+ *
  * Future work (见 PR description "Future Work"):
  *   - synthesizeOrphanToolRecords flusher enhancement, deferred
  *     until real E2E traces show the orphan case.
@@ -236,7 +248,6 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
       ?? (request['body'] as any)?.provider;
 
     const inputMessages = this.buildInputMessages(request);
-    const outputMessages = this.buildOutputMessages(response);
     const toolDefinitions = this.extractToolDefinitions(request);
 
     // Interrupted path detection (Round 2): completedAt present but the
@@ -246,7 +257,16 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     // missing gen_ai.output.messages / finish_reasons / usage, which
     // validate-trace flags as ERROR (CLAUDE.md "semantic.llm_has_input_output"
     // MUST rule).
+    //
+    // Round 6: detect BEFORE calling buildOutputMessages so we can pass a
+    // synthetic finishReason='interrupted' through to the placeholder
+    // output message. The placeholder's per-message finish_reason then
+    // matches the entry-level gen_ai.response.finish_reasons=['interrupted'],
+    // so downstream consumers (ARMS GenAI) can correlate them.
     const isInterrupted = this.detectInterruptedResponse(response, completedAt);
+    const outputMessages = isInterrupted
+      ? this.buildOutputMessages({ ...response, finishReason: 'interrupted' })
+      : this.buildOutputMessages(response);
 
     const finishReasons = isInterrupted
       ? ['interrupted']
@@ -331,11 +351,13 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
         : this.coerceNumber(
           (response as any).usage?.cacheCreationTokens ?? (response as any).usage?.cache_creation?.input_tokens,
         ),
-      ...(outputMessages
-        ? { 'gen_ai.output.messages': outputMessages }
-        : isInterrupted
-          ? { 'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: '' }], finish_reason: 'interrupted' }] as unknown as JsonValue }
-          : {}),
+      // buildOutputMessages always returns a non-empty assistant message
+      // (Round 6 fix — see buildOutputMessages comment), so the
+      // gen_ai.output.messages key is always set. validate-trace.mjs
+      // semantic.llm_has_input_output MUST rule no longer fails on
+      // empty-text / empty-toolCalls responses (refusal, length cap,
+      // empty streaming response).
+      'gen_ai.output.messages': outputMessages as JsonValue,
     };
 
     const requestEntry = buildAgentActivityEntry(requestRecord as any);
@@ -438,7 +460,7 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     return out.length > 0 ? (out as JsonValue) : undefined;
   }
 
-  private buildOutputMessages(response: Record<string, unknown>): JsonValue | undefined {
+  private buildOutputMessages(response: Record<string, unknown>): JsonValue {
     const text = (response['text'] as string | undefined) ?? '';
     const toolCalls = (response['toolCalls'] as unknown[]) ?? (response['tool_calls'] as unknown[]) ?? [];
     const finish = (response['finishReason'] as string | undefined)
@@ -462,7 +484,15 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
         } as JsonValue);
       }
     }
-    if (parts.length === 0) return undefined;
+    // Always emit at least one assistant message. validate-trace.mjs
+    // (semantic.llm_has_input_output MUST) flags llm.response entries that
+    // omit gen_ai.output.messages as ERROR. A model call that produced no
+    // text and no tool calls (e.g. refusal, finish_reason=length with no
+    // tokens returned, an empty streaming response) still needs an empty
+    // assistant message so the entry validates. The finish_reason on the
+    // placeholder carries the actual termination signal (length/refusal/
+    // stop/etc.) so downstream consumers can distinguish "empty" from
+    // "interrupted".
     return [{ role: 'assistant', parts, finish_reason: finish } as unknown as JsonValue];
   }
 
