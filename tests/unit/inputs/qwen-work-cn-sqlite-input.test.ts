@@ -51,6 +51,31 @@ describe('QwenWorkCNSqliteInput', () => {
     expect(entries.every(entry => entry['agent.source'] === 'qwen-work-cn-sqlite')).toBe(true);
   });
 
+  it('continues across a batch boundary when rows share updated_at', async () => {
+    await exec(`INSERT INTO sub_chats VALUES ('sc-1', 'sess-1', 'qwen3-coder');`);
+    const inserts = Array.from({ length: 1001 }, (_, index) => (
+      `INSERT INTO messages VALUES ('m-${index}', 'sc-1', ${index}, 'user', '[{"type":"text","text":"prompt ${index}"}]', 1770000001);`
+    )).join('\n');
+    await exec(inserts);
+
+    const input = new TestInput({ stateStore: state as never, dbPath });
+    expect((await input.collectNow())).toHaveLength(1000);
+    expect((await input.collectNow())).toHaveLength(1);
+    expect(await input.collectNow()).toEqual([]);
+  });
+
+  it('collects a row inserted later with the same updated_at', async () => {
+    await exec(`
+      INSERT INTO sub_chats VALUES ('sc-1', 'sess-1', 'qwen3-coder');
+      INSERT INTO messages VALUES ('m-1', 'sc-1', 0, 'user', '[{"type":"text","text":"first"}]', 1770000001);
+    `);
+    const input = new TestInput({ stateStore: state as never, dbPath });
+    expect((await input.collectNow()).map(entry => entry['agent.message_id'])).toEqual(['m-1']);
+
+    await exec(`INSERT INTO messages VALUES ('m-2', 'sc-1', 1, 'user', '[{"type":"text","text":"second"}]', 1770000001);`);
+    expect((await input.collectNow()).map(entry => entry['agent.message_id'])).toEqual(['m-2']);
+  });
+
   function exec(sql: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const db = new sqlite3.Database(dbPath);

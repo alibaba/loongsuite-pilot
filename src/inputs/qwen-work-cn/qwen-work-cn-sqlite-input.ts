@@ -19,6 +19,7 @@ export interface QwenWorkCNSqliteInputOptions extends InputOptions {
 }
 
 interface MessageRow {
+  rowId: number;
   id: string;
   sessionId: string | null;
   subChatId: string;
@@ -65,10 +66,25 @@ export class QwenWorkCNSqliteInput extends BaseInput {
 
   protected override async onStart(): Promise<void> {
     const state = this.stateStore.get(this.id);
-    if (typeof state.extra?.lastUpdatedAt === 'number') return;
+    if (typeof state.extra?.lastUpdatedAt === 'number') {
+      if (typeof state.extra?.lastUpdatedRowId !== 'number') {
+        // Replay the legacy cursor's boundary second once so rows previously
+        // skipped by the timestamp-only cursor can be recovered.
+        this.stateStore.update(this.id, {
+          extra: { ...plainObject(state.extra), lastUpdatedRowId: 0 },
+        });
+      }
+      return;
+    }
     try {
-      const lastUpdatedAt = await readMaxUpdatedAt(this.dbPath);
-      this.stateStore.update(this.id, { extra: { ...plainObject(state.extra), lastUpdatedAt } });
+      const cursor = await readLatestCursor(this.dbPath);
+      this.stateStore.update(this.id, {
+        extra: {
+          ...plainObject(state.extra),
+          lastUpdatedAt: cursor.updatedAt,
+          lastUpdatedRowId: cursor.rowId,
+        },
+      });
     } catch (error) {
       this.logger.warn('failed to baseline qwen-work-cn sqlite cursor', { error: String(error) });
     }
@@ -76,10 +92,13 @@ export class QwenWorkCNSqliteInput extends BaseInput {
 
   protected async collect(): Promise<AgentActivityEntry[]> {
     const state = this.stateStore.get(this.id);
-    const cursor = typeof state.extra?.lastUpdatedAt === 'number' ? state.extra.lastUpdatedAt : 0;
+    const cursorUpdatedAt = typeof state.extra?.lastUpdatedAt === 'number' ? state.extra.lastUpdatedAt : 0;
+    const cursorRowId = typeof state.extra?.lastUpdatedRowId === 'number'
+      ? state.extra.lastUpdatedRowId
+      : 0;
     let rows: MessageRow[];
     try {
-      rows = await readRows(this.dbPath, cursor);
+      rows = await readRows(this.dbPath, cursorUpdatedAt, cursorRowId);
     } catch (error) {
       this.logger.error('failed to read qwen-work-cn sqlite rows', { error: String(error) });
       return [];
@@ -88,15 +107,15 @@ export class QwenWorkCNSqliteInput extends BaseInput {
 
     const emittedIds = new Set(stringArray(state.extra, 'emittedToolResultIds'));
     const entries: AgentActivityEntry[] = [];
-    let maxUpdatedAt = cursor;
     for (const row of rows) {
-      maxUpdatedAt = Math.max(maxUpdatedAt, row.updatedAt);
       entries.push(...mapRow(row, emittedIds));
     }
+    const lastRow = rows[rows.length - 1];
     this.stateStore.update(this.id, {
       extra: {
         ...plainObject(state.extra),
-        lastUpdatedAt: maxUpdatedAt,
+        lastUpdatedAt: lastRow.updatedAt,
+        lastUpdatedRowId: lastRow.rowId,
         emittedToolResultIds: [...emittedIds].slice(-TOOL_RESULT_DEDUPE_LIMIT),
       },
     });
@@ -178,26 +197,27 @@ function mapRow(row: MessageRow, emittedIds: Set<string>): AgentActivityEntry[] 
   return entries;
 }
 
-function readRows(dbPath: string, cursor: number): Promise<MessageRow[]> {
+function readRows(dbPath: string, cursorUpdatedAt: number, cursorRowId: number): Promise<MessageRow[]> {
   return all<MessageRow>(dbPath, `
-    SELECT m.id AS id, sc.session_id AS sessionId, m.sub_chat_id AS subChatId,
+    SELECT m.rowid AS rowId, m.id AS id, sc.session_id AS sessionId, m.sub_chat_id AS subChatId,
       m.sequence AS sequence, m.role AS role, m.parts AS parts,
       m.updated_at AS updatedAt, sc.model_level AS modelLevel
     FROM messages m
     LEFT JOIN sub_chats sc ON sc.id = m.sub_chat_id
-    WHERE m.updated_at > ? AND m.parts IS NOT NULL AND m.parts != '' AND m.parts != '[]'
-    ORDER BY m.updated_at ASC, m.sequence ASC
+    WHERE (m.updated_at > ? OR (m.updated_at = ? AND m.rowid > ?))
+      AND m.parts IS NOT NULL AND m.parts != '' AND m.parts != '[]'
+    ORDER BY m.updated_at ASC, m.rowid ASC
     LIMIT ${SQL_BATCH_LIMIT}
-  `, [cursor]);
+  `, [cursorUpdatedAt, cursorUpdatedAt, cursorRowId]);
 }
 
-async function readMaxUpdatedAt(dbPath: string): Promise<number> {
-  const rows = await all<{ maxUpdatedAt: number | null }>(
+async function readLatestCursor(dbPath: string): Promise<{ updatedAt: number; rowId: number }> {
+  const rows = await all<{ updatedAt: number; rowId: number }>(
     dbPath,
-    'SELECT MAX(updated_at) AS maxUpdatedAt FROM messages',
+    'SELECT updated_at AS updatedAt, rowid AS rowId FROM messages ORDER BY updated_at DESC, rowid DESC LIMIT 1',
     [],
   );
-  return rows[0]?.maxUpdatedAt ?? 0;
+  return rows[0] ?? { updatedAt: 0, rowId: 0 };
 }
 
 function all<T>(dbPath: string, sql: string, params: unknown[]): Promise<T[]> {

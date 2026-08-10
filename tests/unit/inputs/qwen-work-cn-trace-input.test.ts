@@ -127,6 +127,7 @@ describe('QwenWorkCNTraceInput', () => {
     expect(response['gen_ai.usage.input_tokens']).toBe(32_244);
     expect(response['gen_ai.usage.output_tokens']).toBe(667);
     expect(response['gen_ai.usage.cache_read.input_tokens']).toBe(24_576);
+    expect(response['gen_ai.usage.reasoning_tokens']).toBe(285);
     expect(response['gen_ai.usage.total_tokens']).toBe(32_911);
     expect(response['gen_ai.request.model']).toBe('qmodel_latest');
     expect(response['gen_ai.response.model']).toBe('qmodel_latest');
@@ -146,7 +147,7 @@ describe('QwenWorkCNTraceInput', () => {
     ]);
     await fs.writeFile(interceptFile, `${JSON.stringify({
       type: 'token', ts: Date.now(), id: 'chatcmpl-qwen-2',
-      prompt_tokens: 999, completion_tokens: 999, cached_tokens: 80, total_tokens: 1998,
+      prompt_tokens: 999, completion_tokens: 999, cached_tokens: 80, reasoning_tokens: 7, total_tokens: 1998,
     })}\n`);
 
     const entries = await collectOnce(makeInput());
@@ -155,6 +156,7 @@ describe('QwenWorkCNTraceInput', () => {
     expect(response['gen_ai.usage.output_tokens']).toBe(20);
     expect(response['gen_ai.usage.total_tokens']).toBe(120);
     expect(response['gen_ai.usage.cache_read.input_tokens']).toBe(80);
+    expect(response['gen_ai.usage.reasoning_tokens']).toBe(7);
   });
 
   it('does not read the QoderWork intercept file', async () => {
@@ -211,6 +213,31 @@ describe('QwenWorkCNTraceInput', () => {
 
     await fs.appendFile(logFile, '\n');
     expect((await collectOnce(makeInput())).map(value => value['event.id'])).toEqual(['completed-later']);
+  });
+
+  it('does not checkpoint an incomplete final segment row', async () => {
+    const segmentDir = path.join(segmentsRoot, encodedCwd, 'session-1', 'segments');
+    const segmentFile = path.join(segmentDir, 'run.jsonl');
+    await fs.mkdir(segmentDir, { recursive: true });
+    const event = {
+      ts: '2026-08-06T06:00:00.000Z',
+      type: 'model.request.started',
+      turn_id: 'turn-1',
+      request_id: 'request-incomplete',
+      data: { model: 'qmodel_latest' },
+    };
+    await fs.writeFile(segmentFile, JSON.stringify(event));
+
+    const input = makeInput();
+    await (input as any).readSegmentFile('session-1', segmentFile);
+    const stateKey = `qwen-work-cn-trace:segment:${segmentFile}`;
+    expect(stateStore.getOffset(stateKey)).toBe(0);
+    expect((input as any).inFlightPairs.get('session-1')).toBeUndefined();
+
+    await fs.appendFile(segmentFile, '\n');
+    await (input as any).readSegmentFile('session-1', segmentFile);
+    expect(stateStore.getOffset(stateKey)).toBe((await fs.stat(segmentFile)).size);
+    expect((input as any).inFlightPairs.get('session-1')?.has('request-incomplete')).toBe(true);
   });
 });
 

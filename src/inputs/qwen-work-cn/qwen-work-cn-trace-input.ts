@@ -351,16 +351,17 @@ export class QwenWorkCNTraceInput extends BaseInput {
     try {
       const readSize = Math.min(stat.size - offset, 16 * 1024 * 1024);
       const buffer = Buffer.alloc(readSize);
-      await handle.read(buffer, 0, readSize, offset);
-      text = buffer.toString('utf-8');
-      let consumedBytes = readSize;
-      if (readSize < stat.size - offset) {
-        const lastNewLine = text.lastIndexOf('\n');
-        if (lastNewLine >= 0) {
-          text = text.substring(0, lastNewLine);
-          consumedBytes = Buffer.byteLength(text, 'utf-8') + 1;
-        }
+      const { bytesRead } = await handle.read(buffer, 0, readSize, offset);
+      const chunk = buffer.subarray(0, bytesRead);
+      // Segment files are live JSONL streams. Never checkpoint bytes beyond a
+      // complete row, even when this read reached the current end of file.
+      const lastNewLine = chunk.lastIndexOf(0x0a);
+      if (lastNewLine < 0) {
+        this.stateStore.update(stateKey, { extra: { inode } });
+        return;
       }
+      const consumedBytes = lastNewLine + 1;
+      text = chunk.subarray(0, lastNewLine).toString('utf-8');
       this.stateStore.setOffset(stateKey, offset + consumedBytes);
       this.stateStore.update(stateKey, { extra: { inode } });
     } finally {
@@ -474,7 +475,7 @@ export class QwenWorkCNTraceInput extends BaseInput {
             hasSegmentUsage = this.applyUsage(response, pair.usage);
           }
           if (!hasSegmentUsage) this.applyInterceptUsage(response, interceptTokens);
-          else this.applyInterceptCacheRead(response, interceptTokens);
+          else this.applyInterceptUsageOverlay(response, interceptTokens);
         }
         this.applyToolTiming(sessionId, stepEntries);
       }
@@ -510,13 +511,19 @@ export class QwenWorkCNTraceInput extends BaseInput {
     const outputTokens = positiveNumber(usage.outputTokens);
     const cacheReadTokens = positiveNumber(usage.cacheReadInputTokens);
     const cacheCreationTokens = positiveNumber(usage.cacheCreationInputTokens);
-    if (!inputTokens && !outputTokens && !cacheReadTokens && !cacheCreationTokens) return false;
+    const reasoningTokens = positiveNumber(usage.reasoningTokens);
+    if (!inputTokens
+      && !outputTokens
+      && !cacheReadTokens
+      && !cacheCreationTokens
+      && !reasoningTokens) return false;
     const target = response as Record<string, unknown>;
     if (inputTokens) target['gen_ai.usage.input_tokens'] = inputTokens;
     if (outputTokens) target['gen_ai.usage.output_tokens'] = outputTokens;
     if (inputTokens || outputTokens) target['gen_ai.usage.total_tokens'] = (inputTokens ?? 0) + (outputTokens ?? 0);
     if (cacheReadTokens) target['gen_ai.usage.cache_read.input_tokens'] = cacheReadTokens;
     if (cacheCreationTokens) target['gen_ai.usage.cache_creation.input_tokens'] = cacheCreationTokens;
+    if (reasoningTokens) target['gen_ai.usage.reasoning_tokens'] = reasoningTokens;
     return true;
   }
 
@@ -528,6 +535,7 @@ export class QwenWorkCNTraceInput extends BaseInput {
       inputTokens: match.promptTokens,
       outputTokens: match.completionTokens,
       cacheReadInputTokens: match.cachedTokens,
+      reasoningTokens: match.reasoningTokens,
     });
     if (applied && match.totalTokens) {
       (response as Record<string, unknown>)['gen_ai.usage.total_tokens'] = match.totalTokens;
@@ -535,11 +543,14 @@ export class QwenWorkCNTraceInput extends BaseInput {
     return applied;
   }
 
-  private applyInterceptCacheRead(response: AgentActivityEntry, tokens: Map<string, InterceptTokenData>): void {
+  private applyInterceptUsageOverlay(response: AgentActivityEntry, tokens: Map<string, InterceptTokenData>): void {
     const responseId = response['gen_ai.response.id'] as string | undefined;
     const match = responseId ? tokens.get(responseId) : undefined;
     if (match?.cachedTokens && !response['gen_ai.usage.cache_read.input_tokens']) {
       (response as Record<string, unknown>)['gen_ai.usage.cache_read.input_tokens'] = match.cachedTokens;
+    }
+    if (match?.reasoningTokens && !response['gen_ai.usage.reasoning_tokens']) {
+      (response as Record<string, unknown>)['gen_ai.usage.reasoning_tokens'] = match.reasoningTokens;
     }
   }
 
@@ -655,6 +666,7 @@ interface TokenUsage {
   outputTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
+  reasoningTokens?: number;
 }
 
 interface InFlightPair {
