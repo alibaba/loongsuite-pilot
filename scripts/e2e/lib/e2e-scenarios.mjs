@@ -1512,6 +1512,11 @@ export function localBuildInstallScript(userId, env) {
     }
   }
 
+  const extraFlags = (env.E2E_INSTALLER_EXTRA_FLAGS ?? '').trim();
+  if (extraFlags) {
+    installerFlags.push(extraFlags);
+  }
+
   const flagsStr = installerFlags.join(' \\\n    ');
 
   return `

@@ -496,7 +496,7 @@ function isExecutable(p: string): boolean {
 }
 
 function healNodeBin(nodeBinFile: string): boolean {
-  const candidate = findNodeCandidate();
+  const candidate = findNodeCandidate(path.dirname(nodeBinFile));
   if (!candidate) {
     logger.warn(`node-bin self-heal failed, no valid Node.js candidate found (version >= ${MIN_NODE_MAJOR} required)`);
     return false;
@@ -524,13 +524,45 @@ function hasSuitableVersion(p: string): boolean {
   }
 }
 
-function findNodeCandidate(): string | null {
+function compareNodeRuntimeDirs(a: string, b: string): number {
+  const parse = (s: string): number[] =>
+    s.replace(/^node-v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  const pa = parse(a);
+  const pb = parse(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function findNodeCandidate(dataDir?: string): string | null {
+  const candidates: string[] = [];
+
+  // Managed runtime node is immune to user node-manager churn — check it first.
+  if (dataDir) {
+    try {
+      const runtimeDir = path.join(dataDir, 'runtime');
+      const entries = fs.readdirSync(runtimeDir)
+        .filter(e => e.startsWith('node-v'))
+        .sort(compareNodeRuntimeDirs)
+        .reverse();
+      const binName = process.platform === 'win32' ? 'node.exe' : 'node';
+      for (const e of entries) {
+        candidates.push(path.join(runtimeDir, e, 'bin', binName));
+        // Official Node.js win zip layout: node.exe at the archive root.
+        if (process.platform === 'win32') {
+          candidates.push(path.join(runtimeDir, e, binName));
+        }
+      }
+    } catch { /* runtime dir not installed */ }
+  }
+
   if (process.execPath && isExecutable(process.execPath) && hasSuitableVersion(process.execPath)) {
-    return fs.realpathSync(process.execPath);
+    candidates.push(fs.realpathSync(process.execPath));
   }
 
   const home = os.homedir();
-  const candidates: string[] = [];
 
   try {
     const nvmDir = path.join(home, '.nvm', 'versions', 'node');
