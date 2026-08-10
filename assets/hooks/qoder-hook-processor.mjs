@@ -1225,17 +1225,25 @@ function finalizeRecords(records, cwd) {
   return records;
 }
 
+// Variants whose records are committed one complete turn at a time, so the
+// batch boundaries coincide with the turn boundaries. qoder-cli is excluded:
+// its transcript may commit several turns in one batch.
+const TURN_BOUNDARY_VARIANTS = new Set(['qoder', 'qoder-cn']);
+
 /**
- * Mark the turn's opening and closing event (qoder IDE only).
+ * Mark the turn's opening and closing event (qoder / qoder-cn IDE only).
  *
  * The records of one turn arrive in emission order, so the first one is the
  * user-input `other` event and the turn closes with its last `llm.response`.
  * The event-log contract allows exactly one start and one end per turn, so the
  * flags are only ever set to true and never stamped on the events in between.
+ * A turn without any `llm.response` (interrupted before the model replied)
+ * falls back to closing on its last record, which keeps the single-end
+ * guarantee intact.
  */
 export function markTurnBoundaries(records) {
   if (records.length === 0) return records;
-  if (records[0]['gen_ai.agent.type'] !== 'qoder') return records;
+  if (!TURN_BOUNDARY_VARIANTS.has(records[0]['gen_ai.agent.type'])) return records;
 
   records[0]['gen_ai.turn.start'] = true;
 
