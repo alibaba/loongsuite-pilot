@@ -28,6 +28,8 @@ import {
   timestampToUnixNanos,
 } from './agent-event-normalizer.mjs';
 
+const REVIEW_COPY_PREFIX = '[SYSTEM: This is an automated background review task';
+
 async function main() {
   const { agentId, logPrefix } = parseArgs();
   const payload = await parseStdinPayload(agentId);
@@ -57,6 +59,21 @@ async function main() {
 }
 
 function processTranscript(parsed, fallbackSessionId, runtimeConfig = {}, fallbackCwd, opts = {}) {
+  // QwenWorkCN, like QoderWork, forks a copy of the original transcript and
+  // appends an automated review task. The original session has already been
+  // collected, so consuming the copy would duplicate every preceding turn.
+  const isReviewCopy = parsed.some(row => (
+    row?.type === 'user'
+    && blocksOf(row).some(block =>
+      block?.type === 'text'
+      && typeof block.text === 'string'
+      && block.text.trimStart().startsWith(REVIEW_COPY_PREFIX))
+  ));
+  if (isReviewCopy) {
+    logDebug('qwen-work-cn', `Skipping review-copy session ${fallbackSessionId || ''}`);
+    return [];
+  }
+
   const contentRows = parsed.filter(row => {
     if (!row || (row.type !== 'user' && row.type !== 'assistant')) return false;
     if (row.isSidechain === true || row.isSidechain === 'true') return false;

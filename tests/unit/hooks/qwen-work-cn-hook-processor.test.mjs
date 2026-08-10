@@ -105,6 +105,42 @@ describe('QwenWorkCN hook processor', () => {
     );
   });
 
+  it('skips a copied session when an automated background review is appended', () => {
+    const reviewCopyRows = [
+      ...realShapeRows(),
+      {
+        ...common,
+        type: 'user',
+        uuid: 'review-task',
+        parentUuid: 'text-3',
+        timestamp: '2026-08-06T03:45:15.000Z',
+        message: { role: 'user', content: [
+          { type: 'text', text: '[SYSTEM: This is an automated background review task. Review the preceding conversation.]' },
+        ] },
+      },
+      {
+        ...common,
+        type: 'assistant',
+        uuid: 'review-response',
+        parentUuid: 'review-task',
+        timestamp: '2026-08-06T03:45:16.000Z',
+        message: { role: 'assistant', id: 'review-response', model: 'qwork-advanced', content: [
+          { type: 'text', text: 'The review is complete.' },
+        ] },
+      },
+    ];
+
+    for (const rangeReason of ['incremental', 'missing-cursor']) {
+      expect(processTranscript(
+        reviewCopyRows,
+        'sess-review-copy',
+        { userId: 'user-1' },
+        '/fallback',
+        { rangeReason },
+      )).toEqual([]);
+    }
+  });
+
   it('uses the QoderWork-compatible turn/step algorithm with independent Qwen fields', async () => {
     const events = processTranscript(
       realShapeRows(),
