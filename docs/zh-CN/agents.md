@@ -38,9 +38,10 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 
 ## OpenClaw 兼容性与生命周期
 
-Pilot 支持 OpenClaw `>=2026.5.12` 的稳定版本。预发布版本或更早版本会在
-修改 OpenClaw 配置前被拒绝。部署时，Pilot 会把自身模块路径加入
-`plugins.load.paths`，并向生效的 OpenClaw 配置加入以下条目：
+Pilot 支持 OpenClaw `>=2026.5.12`。插件包会声明这一最低宿主版本，
+OpenClaw 在加载插件时使用当前运行版本自行校验；不兼容的宿主会跳过插件并
+输出诊断，Pilot 不再通过启动 OpenClaw CLI 获取版本。部署时，Pilot 会把
+插件包目录加入 `plugins.load.paths`，并向生效的 OpenClaw 配置加入以下条目：
 
 ```json
 {
@@ -57,8 +58,8 @@ Pilot 支持 OpenClaw `>=2026.5.12` 的稳定版本。预发布版本或更早�
 
 原生会话生命周期 Hook 通过 `allowConversationAccess` 提供每次 LLM 调用的
 消息和用量，因此该权限是必需的。迁移旧版插件数组配置前，Pilot 会创建
-权限受限的备份；升级和卸载只替换或删除 Pilot 自己的路径与条目，保留其他
-插件及其配置。
+权限受限的备份。升级时会把 Pilot 旧的单文件加载路径替换为插件包目录；
+卸载会同时清理新旧两种路径和 Pilot 自己的条目，并保留其他插件及其配置。
 
 注入的插件会把 append-only 源事件写入
 `~/.loongsuite-pilot/logs/openclaw/`。在 POSIX 系统上，目录权限为 `0700`，

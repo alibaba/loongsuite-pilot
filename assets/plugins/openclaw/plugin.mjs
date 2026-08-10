@@ -37,6 +37,7 @@ const MAX_RUN_STATE_ENTRIES = 512;
 const MAX_CONTENT_SIZE = 64 * 1024;
 const MAX_TOOL_RESULT_SIZE = 64 * 1024;
 const PILOT_CONFIG_CACHE_TTL_MS = 5_000;
+const MIN_OPENCLAW_VERSION = "2026.5.12";
 
 // ---------------------------------------------------------------------------
 // Caller-supplied span attributes (inlined mirror of resource-context.mjs)
@@ -1217,6 +1218,21 @@ function makeHandler(fn) {
   };
 }
 
+function reportUnsupportedHost(api) {
+  const message =
+    `[${PLUGIN_ID}] incompatible OpenClaw plugin API: `
+    + `api.on is unavailable; OpenClaw >=${MIN_OPENCLAW_VERSION} is required`;
+  try {
+    if (typeof api?.logger?.error === "function") {
+      api.logger.error(message);
+    } else {
+      console.error(message);
+    }
+  } catch {
+    // Telemetry diagnostics must never affect the host process.
+  }
+}
+
 export default {
   id: PLUGIN_ID,
   name: "loongsuite-pilot-openclaw",
@@ -1224,6 +1240,11 @@ export default {
     "ARMS GenAI event_t producer: captures 16 OpenClaw plugin hooks and writes JSONL for loongsuite-pilot BaseHookInput.",
 
   register(api) {
+    if (typeof api?.on !== "function") {
+      reportUnsupportedHost(api);
+      return;
+    }
+
     agentCwd = process.cwd() || undefined;
     openClawPluginConfig = api?.pluginConfig && typeof api.pluginConfig === "object"
       ? api.pluginConfig
@@ -1237,7 +1258,7 @@ export default {
     }
 
     const on = (name, fn) => {
-      if (typeof api?.on === "function") api.on(name, makeHandler(fn));
+      api.on(name, makeHandler(fn));
     };
 
     // 7 conversation-access hooks (OpenClaw CONVERSATION_HOOK_NAMES)

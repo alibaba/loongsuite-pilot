@@ -1,11 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const sh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf-8');
 const ps1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf-8');
 const runtimeSh = readFileSync(resolve('scripts', 'loongsuite-pilot.sh'), 'utf-8');
 const runtimePs1 = readFileSync(resolve('scripts', 'loongsuite-pilot.ps1'), 'utf-8');
+
+function extractOpenClawCleanupScripts() {
+  const shMarker = "<<'NODE'\n";
+  const shStart = sh.indexOf(shMarker, sh.indexOf('remove_openclaw_plugin()'));
+  const psMarker = "$cleanupScript = @'\n";
+  const psStart = ps1.indexOf(psMarker, ps1.indexOf('function Remove-OpenClawPlugin'));
+  return [
+    ['sh', sh.slice(shStart + shMarker.length, sh.indexOf('\nNODE', shStart))],
+    ['ps1', ps1.slice(psStart + psMarker.length, ps1.indexOf("\n'@", psStart))],
+  ];
+}
 
 // Hook-mode agents whose settings files must be cleaned on uninstall. Kept in
 // sync with agents.d/*.json (deployMode: hook). A missing entry means the
@@ -282,9 +295,67 @@ describe('uninstall cleans only the Pilot OpenClaw plugin injection', () => {
       expect(installer).toContain("delete plugins.entries['loongsuite-pilot-openclaw']");
       expect(installer).toContain("plugins.load.paths.filter(value => !isOurs(value))");
       expect(installer).toContain("['plugin', 'plugins']");
+      expect(installer).toContain("plain === managed + '/plugin.mjs'");
       expect(installer).toContain('plugins/openclaw/plugin.mjs');
     }
   });
+
+  it('streams cleanup code and paths without putting openclaw in Node argv', () => {
+    const shCleanup = sh.slice(
+      sh.indexOf('remove_openclaw_plugin()'),
+      sh.indexOf('# CMD: uninstall', sh.indexOf('remove_openclaw_plugin()')),
+    );
+    const psCleanup = ps1.slice(
+      ps1.indexOf('function Remove-OpenClawPlugin'),
+      ps1.indexOf('# Remove OTel plugin', ps1.indexOf('function Remove-OpenClawPlugin')),
+    );
+
+    expect(shCleanup).not.toMatch(/node\s+-e/);
+    expect(shCleanup).toContain('PILOT_OC_CONFIG="$cfg" PILOT_OC_MANAGED="$managed_path" node');
+    expect(psCleanup).not.toContain('& $script:NODE_BIN -e');
+    expect(psCleanup).toContain('$cleanupScript | & $script:NODE_BIN');
+  });
+
+  it.each(extractOpenClawCleanupScripts())(
+    '%s streamed cleanup removes both current and legacy managed paths',
+    (_platform, cleanupScript) => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'pilot-oc-cleanup-'));
+      try {
+        const configPath = join(tempDir, 'config.json');
+        const managedPath = join(tempDir, '.loongsuite-pilot', 'plugins', 'openclaw')
+          .replaceAll('\\', '/');
+        writeFileSync(configPath, JSON.stringify({
+          plugin: [`file://${managedPath}/plugin.mjs`, '/unrelated/legacy.mjs'],
+          plugins: {
+            load: { paths: [managedPath, `${managedPath}/plugin.mjs`, '/unrelated/plugin'] },
+            entries: {
+              'loongsuite-pilot-openclaw': { enabled: true },
+              unrelated: { enabled: true },
+            },
+          },
+        }));
+
+        const result = spawnSync(process.execPath, [], {
+          input: cleanupScript,
+          encoding: 'utf-8',
+          env: {
+            ...process.env,
+            PILOT_OC_CONFIG: configPath,
+            PILOT_OC_MANAGED: managedPath,
+          },
+        });
+
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toBe('cleaned');
+        const cleaned = JSON.parse(readFileSync(configPath, 'utf-8'));
+        expect(cleaned.plugin).toEqual(['/unrelated/legacy.mjs']);
+        expect(cleaned.plugins.load.paths).toEqual(['/unrelated/plugin']);
+        expect(cleaned.plugins.entries).toEqual({ unrelated: { enabled: true } });
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('runs cleanup before installation files are removed', () => {
     const shUninstall = sh.slice(sh.indexOf('cmd_uninstall()'));

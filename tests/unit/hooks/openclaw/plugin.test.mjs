@@ -24,6 +24,8 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_PATH = path.resolve(__dirname, '../../../../assets/plugins/openclaw/plugin.mjs');
+const PLUGIN_PACKAGE_PATH = path.resolve(__dirname, '../../../../assets/plugins/openclaw/package.json');
+const OPENCLAW_AGENT_DEF_PATH = path.resolve(__dirname, '../../../../agents.d/openclaw.json');
 const FIXTURES = path.join(__dirname, 'fixtures');
 
 function readJsonl(name) {
@@ -110,6 +112,17 @@ function todayStamp() {
 }
 
 describe('OpenClaw plugin stateful pipeline', () => {
+  it('delegates the minimum host-version check to OpenClaw without a CLI command', () => {
+    const packageJson = JSON.parse(fs.readFileSync(PLUGIN_PACKAGE_PATH, 'utf-8'));
+    const agentDefinition = JSON.parse(fs.readFileSync(OPENCLAW_AGENT_DEF_PATH, 'utf-8'));
+
+    expect(packageJson.openclaw.install.minHostVersion).toBe('>=2026.5.12');
+    expect(agentDefinition.pluginInject).not.toHaveProperty('versionCheck');
+    expect(agentDefinition.pluginInject.pluginSpec).toBe(
+      'file://$PILOT_DATA/plugins/openclaw',
+    );
+  });
+
   it('registers 16 hooks via api.on', async () => {
     const plugin = await loadPlugin();
     const registered = new Set();
@@ -132,6 +145,15 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(registered.has('before_agent_reply')).toBe(true);
     expect(registered.has('before_model_resolve')).toBe(true);
     expect(registered.has('before_prompt_build')).toBe(true);
+  });
+
+  it('fails open with a clear diagnostic when the host plugin API is unsupported', async () => {
+    const plugin = await loadPlugin();
+    const logger = { error: vi.fn() };
+
+    expect(() => plugin.register({ logger })).not.toThrow();
+    expect(logger.error).toHaveBeenCalledOnce();
+    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.5.12 is required');
   });
 
   it('reports an unwritable plugin log directory once when scoped debug is enabled', async () => {

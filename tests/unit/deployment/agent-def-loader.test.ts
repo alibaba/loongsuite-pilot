@@ -136,35 +136,6 @@ describe('AgentDefLoader', () => {
     expect(defs[0].detection.paths[0]).toBe(path.join(os.homedir(), '.cursor'));
   });
 
-  it('expands ~ in nested version command candidates', async () => {
-    const def = {
-      id: 'candidate-test',
-      displayName: 'Candidate Test',
-      deployMode: 'plugin-inject',
-      detection: { paths: ['~/.candidate-test'], commands: [] },
-      pluginInject: {
-        configPaths: ['~/.candidate-test/config.json'],
-        pluginSpec: '$PILOT_DATA/plugins/candidate-test/plugin.mjs',
-        pluginId: 'loongsuite-pilot-candidate-test',
-        versionCheck: {
-          commandCandidates: [
-            ['~/.agent-bundle/wrapper/agent-cli', '--version'],
-            ['agent-cli', '--version'],
-          ],
-          minimum: '2026.5.12',
-        },
-      },
-    };
-    await fs.writeFile(path.join(builtinDir, 'candidate-test.json'), JSON.stringify(def));
-
-    const [loaded] = await makeLoader().load();
-
-    expect(loaded.pluginInject?.versionCheck?.commandCandidates?.[0]?.[0]).toBe(
-      path.join(os.homedir(), '.agent-bundle', 'wrapper', 'agent-cli'),
-    );
-    expect(loaded.pluginInject?.versionCheck?.commandCandidates?.[1]?.[0]).toBe('agent-cli');
-  });
-
   it('resolves HERMES_HOME for directory plugins', async () => {
     const previous = process.env.HERMES_HOME;
     const previousCli = process.env.HERMES_CLI;

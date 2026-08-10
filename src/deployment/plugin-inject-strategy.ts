@@ -1,8 +1,5 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { constants as fsConstants } from 'node:fs';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type {
   AgentDefinition,
   DeployResult,
@@ -11,11 +8,10 @@ import type {
   PluginInjectConfig,
 } from '../types/index.js';
 import { fileExists, resolveHome } from '../utils/fs-utils.js';
-import { commandExists, detectAgent } from './detect-utils.js';
+import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('PluginInjectStrategy');
-const execFileAsync = promisify(execFile);
 
 const DEFAULT_OPENCLAW_ENTRY_CONFIG = {
   enabled: true,
@@ -124,16 +120,6 @@ export class PluginInjectStrategy implements DeployStrategy {
     }
 
     try {
-      const versionError = await this.checkMinimumVersion(config);
-      if (versionError) {
-        return {
-          success: false,
-          agentId: def.id,
-          deployMode: 'plugin-inject',
-          error: versionError,
-        };
-      }
-
       const configPath = await this.findConfigFile(config, config.createIfMissing === true);
       if (!configPath) {
         return {
@@ -174,102 +160,6 @@ export class PluginInjectStrategy implements DeployStrategy {
     } catch (err) {
       return { success: false, agentId: def.id, deployMode: 'plugin-inject', error: String(err) };
     }
-  }
-
-  private async checkMinimumVersion(config: PluginInjectConfig): Promise<string | null> {
-    const check = config.versionCheck;
-    if (!check) return null;
-
-    const candidates = check.commandCandidates?.length
-      ? check.commandCandidates
-      : check.command
-        ? [check.command]
-        : [];
-    if (!candidates.some(
-      candidate => Array.isArray(candidate) && candidate.length > 0 && candidate[0],
-    )) {
-      return 'invalid version check: command must not be empty';
-    }
-
-    const minimum = this.parseVersion(check.minimum);
-    if (!minimum || minimum.suffix) {
-      return `invalid minimum supported version: ${check.minimum}`;
-    }
-
-    const command = await this.resolveVersionCheckCommand(candidates);
-    if (!command) return `target version command not found; requires >= ${check.minimum}`;
-
-    try {
-      const { stdout, stderr } = await execFileAsync(command[0], command.slice(1), {
-        timeout: 10_000,
-        maxBuffer: 64 * 1024,
-        windowsHide: true,
-      });
-      const detected = this.parseVersion(`${stdout}\n${stderr}`);
-      if (!detected) {
-        return `unable to determine target version; requires >= ${check.minimum}`;
-      }
-      if (detected.suffix && !/^\d+(?:\.\d+)*$/.test(detected.suffix)) {
-        return `unsupported prerelease target version ${detected.raw}; requires >= ${check.minimum}`;
-      }
-      if (this.compareVersionCore(detected.core, minimum.core) < 0) {
-        return `unsupported target version ${detected.raw}; requires >= ${check.minimum}`;
-      }
-      return null;
-    } catch (err) {
-      return `target version check failed; requires >= ${check.minimum}: ${String(err)}`;
-    }
-  }
-
-  private async resolveVersionCheckCommand(
-    candidates: string[][],
-  ): Promise<string[] | null> {
-    for (const candidate of candidates) {
-      if (!Array.isArray(candidate) || candidate.length === 0 || !candidate[0]) continue;
-
-      const executable = resolveHome(candidate[0]);
-      const resolved = [executable, ...candidate.slice(1)];
-      const isPath = path.isAbsolute(executable)
-        || executable.includes('/')
-        || executable.includes('\\');
-
-      if (isPath) {
-        try {
-          await fs.access(
-            executable,
-            process.platform === 'win32' ? fsConstants.F_OK : fsConstants.X_OK,
-          );
-          return resolved;
-        } catch {
-          continue;
-        }
-      }
-
-      if (await commandExists(executable)) return resolved;
-    }
-
-    return null;
-  }
-
-  private parseVersion(text: string): { raw: string; core: [number, number, number]; suffix?: string } | null {
-    const match = text.match(/(?:^|[^0-9])v?(\d{4})\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/m);
-    if (!match) return null;
-    const raw = `${match[1]}.${match[2]}.${match[3]}${match[4] ? `-${match[4]}` : ''}`;
-    return {
-      raw,
-      core: [Number(match[1]), Number(match[2]), Number(match[3])],
-      suffix: match[4],
-    };
-  }
-
-  private compareVersionCore(
-    left: [number, number, number],
-    right: [number, number, number],
-  ): number {
-    for (let i = 0; i < left.length; i++) {
-      if (left[i] !== right[i]) return left[i] - right[i];
-    }
-    return 0;
   }
 
   async undeploy(def: AgentDefinition): Promise<boolean> {

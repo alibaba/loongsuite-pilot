@@ -2323,7 +2323,7 @@ try {
 # their configuration remain semantically unchanged.
 remove_openclaw_plugin() {
     local state_dir="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
-    local managed_path="$DATA_DIR/plugins/openclaw/plugin.mjs"
+    local managed_path="$DATA_DIR/plugins/openclaw"
     local configs=()
     [ -n "${OPENCLAW_CONFIG_PATH:-}" ] && configs+=("$OPENCLAW_CONFIG_PATH")
     configs+=(
@@ -2346,17 +2346,18 @@ remove_openclaw_plugin() {
         fi
 
         local result
-        result=$(node -e "
+        result=$(PILOT_OC_CONFIG="$cfg" PILOT_OC_MANAGED="$managed_path" node 2>/dev/null <<'NODE'
 const fs = require('fs');
-const f = process.argv[1];
-const managed = process.argv[2].replaceAll('\\\\', '/');
+const f = process.env.PILOT_OC_CONFIG;
+const managed = process.env.PILOT_OC_MANAGED.replaceAll('\\', '/');
 const entryStr = value => typeof value === 'string'
   ? value
   : (Array.isArray(value) && typeof value[0] === 'string' ? value[0] : '');
 const isOurs = value => {
-  const normalized = entryStr(value).replaceAll('\\\\', '/');
+  const normalized = entryStr(value).replaceAll('\\', '/');
   const plain = normalized.startsWith('file://') ? normalized.slice('file://'.length) : normalized;
   return plain === managed ||
+    plain === managed + '/plugin.mjs' ||
     normalized.includes('loongsuite-pilot-openclaw') ||
     normalized.includes('plugins/openclaw/plugin.mjs') && plain.includes('.loongsuite-pilot/');
 };
@@ -2383,10 +2384,11 @@ try {
     }
   }
   if (!changed) { process.stdout.write('nochange'); process.exit(0); }
-  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\\n', 'utf-8');
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
   process.stdout.write('cleaned');
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
-" "$cfg" "$managed_path" 2>/dev/null) || result="error"
+NODE
+) || result="error"
 
         case "$result" in
             cleaned)

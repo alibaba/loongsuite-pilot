@@ -8,6 +8,9 @@
   "openclaw": {
     "extensions": [
       "./plugin.mjs"
-    ]
+    ],
+    "install": {
+      "minHostVersion": ">=2026.5.12"
+    }
   }
 }
