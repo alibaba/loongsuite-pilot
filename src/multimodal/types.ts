@@ -55,11 +55,15 @@ export interface UriPart {
   uri: string;
 }
 
+/**
+ * Attached on entries as gen_ai.input.multimodal_metadata.
+ * Built from uri parts on the entry (mime/modality already on the part;
+ * content hash lives in the uri path).
+ */
 export interface MultimodalMetadataItem {
   uri: string;
   mime_type: string;
-  size: number;
-  sha256: string;
+  modality?: string;
 }
 
 /** Hard limits (not config-driven). */

@@ -34,59 +34,60 @@ export function attachMultimodalMetadata(
   entry[MULTIMODAL_METADATA_FIELD] = items as unknown as JsonValue;
 }
 
-/** Attach metadata for uri parts present on the entry (lookup by uri). */
-export function attachMultimodalMetadataForEntry(
-  entry: AgentActivityEntry,
-  byUri: { readonly size: number; get(key: string): MultimodalMetadataItem | undefined },
-): void {
-  if (byUri.size === 0) return;
+/**
+ * Attach multimodal_metadata from uri parts already on the entry.
+ * Dedupes by uri (first wins). No side cache — mime/modality live on the part.
+ */
+export function attachMultimodalMetadataForEntry(entry: AgentActivityEntry): void {
   const items: MultimodalMetadataItem[] = [];
   const seen = new Set<string>();
-  for (const uri of collectUriStringsFromEntry(entry)) {
-    if (seen.has(uri)) continue;
-    const item = byUri.get(uri);
-    if (!item) continue;
-    seen.add(uri);
-    items.push(item);
+  for (const part of collectUriPartsFromEntry(entry)) {
+    if (seen.has(part.uri)) continue;
+    seen.add(part.uri);
+    items.push({
+      uri: part.uri,
+      mime_type: part.mime_type || 'application/octet-stream',
+      ...(part.modality ? { modality: part.modality } : {}),
+    });
   }
   attachMultimodalMetadata(entry, items);
 }
 
-function collectUriStringsFromEntry(entry: AgentActivityEntry): string[] {
-  const uris: string[] = [];
+function collectUriPartsFromEntry(entry: AgentActivityEntry): UriPart[] {
+  const parts: UriPart[] = [];
   for (const field of MESSAGE_FIELDS) {
     const value = entry[field];
-    if (Array.isArray(value)) uris.push(...collectUriStringsFromMessages(value));
+    if (Array.isArray(value)) parts.push(...collectUriPartsFromMessages(value));
   }
   if (entry[TOOL_RESULT_FIELD] !== undefined) {
-    uris.push(...collectUriStringsFromValue(entry[TOOL_RESULT_FIELD]));
+    parts.push(...collectUriPartsFromValue(entry[TOOL_RESULT_FIELD]));
   }
-  return uris;
+  return parts;
 }
 
-function collectUriStringsFromMessages(messages: unknown[]): string[] {
-  const uris: string[] = [];
+function collectUriPartsFromMessages(messages: unknown[]): UriPart[] {
+  const parts: UriPart[] = [];
   for (const message of messages) {
     const record = asRecord(message);
     if (!record || !Array.isArray(record.parts)) continue;
     for (const part of record.parts) {
       if (isUriPart(part)) {
-        uris.push(part.uri);
+        parts.push(part);
         continue;
       }
       const partRecord = asRecord(part);
       if (partRecord?.type === 'tool_call_response') {
-        uris.push(...collectUriStringsFromValue(partRecord.response));
+        parts.push(...collectUriPartsFromValue(partRecord.response));
       }
     }
   }
-  return uris;
+  return parts;
 }
 
-function collectUriStringsFromValue(value: unknown): string[] {
+function collectUriPartsFromValue(value: unknown): UriPart[] {
   if (Array.isArray(value)) {
-    return value.filter(isUriPart).map(part => part.uri);
+    return value.filter(isUriPart);
   }
-  if (isUriPart(value)) return [value.uri];
+  if (isUriPart(value)) return [value];
   return [];
 }

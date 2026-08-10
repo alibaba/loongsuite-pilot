@@ -21,8 +21,6 @@ import {
 } from './codex-transcript-extractor.js';
 import type { MultimodalProcessor } from '../../multimodal/processor.js';
 import { attachMultimodalMetadataForEntry } from '../../multimodal/rewrite.js';
-import { LruMap, MULTIMODAL_LRU_LIMIT } from '../../multimodal/uploader/lru-set.js';
-import type { MultimodalMetadataItem } from '../../multimodal/types.js';
 import {
   MAX_EMITTED_TERMINAL_TURNS,
   MAX_GLOBAL_EMITTED_TERMINAL_TURNS,
@@ -138,8 +136,6 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly includeMultimodal: boolean;
   private readonly multimodalUploadMode: MultimodalUploadMode;
   private readonly multimodalProcessor: MultimodalProcessor | null;
-  /** Bounded uri→metadata cache filled by toUri; read at emit for multimodal_metadata. */
-  private readonly multimodalMetaByUri = new LruMap<MultimodalMetadataItem>(MULTIMODAL_LRU_LIMIT);
   private wakeupWatcher: FSWatcher | null = null;
   private processedTerminalTurnIdsLoaded = false;
   private processedTerminalTurnIdsDirty = false;
@@ -223,7 +219,7 @@ export class CodexTranscriptInput extends BaseInput {
     const flush = (): void => {
       if (batch.length === 0) return;
       for (const entry of batch) {
-        attachMultimodalMetadataForEntry(entry, this.multimodalMetaByUri);
+        attachMultimodalMetadataForEntry(entry);
       }
       this.emit('entries', batch);
       emittedCount += batch.length;
@@ -1167,16 +1163,7 @@ export class CodexTranscriptInput extends BaseInput {
 
   private readonly blobToUri: CodexBlobToUri = (params) => {
     if (!this.multimodalProcessor) return null;
-    const result = this.multimodalProcessor.toUri(params);
-    if (result) {
-      this.multimodalMetaByUri.set(result.uri, {
-        uri: result.uri,
-        mime_type: result.mime_type,
-        size: result.size,
-        sha256: result.sha256,
-      });
-    }
-    return result;
+    return this.multimodalProcessor.toUri(params);
   };
 }
 

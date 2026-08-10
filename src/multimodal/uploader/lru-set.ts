@@ -1,4 +1,4 @@
-/** Default capacity for multimodal LRU caches (upload success keys, uri metadata). */
+/** Default capacity for multimodal LRU caches (e.g. upload success keys). */
 export const MULTIMODAL_LRU_LIMIT = 2048;
 
 /**
