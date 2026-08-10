@@ -24,6 +24,9 @@ const logger = createLogger('MultimodalProcessor');
  * (`successKeys`). `pendingKeys` skips a second enqueue while the same
  * targetPath is already uploading, so concurrent identical blobs do not
  * double-PUT.
+ *
+ * Lifecycle: after `shutdown()` starts, `toUri` rejects new blobs. Shutdown
+ * best-effort drains in-flight uploads then closes the Uploader (idempotent).
  */
 export class MultimodalProcessor {
   private readonly pending = new Set<Promise<void>>();
@@ -31,11 +34,18 @@ export class MultimodalProcessor {
   private readonly pendingKeys = new Set<string>();
   private pendingBytes = 0;
   private shuttingDown = false;
+  private readonly storageBasePath: string;
 
   constructor(
-    private readonly storageBasePath: string,
+    storageBasePath: string,
     private readonly uploader: Uploader,
-  ) {}
+  ) {
+    const base = (storageBasePath ?? '').trim().replace(/\/+$/, '');
+    if (!base) {
+      throw new Error('multimodal storageBasePath is required');
+    }
+    this.storageBasePath = base;
+  }
 
   /**
    * Synchronously returns a storage uri (or null if the blob is invalid).
@@ -154,8 +164,19 @@ export class MultimodalProcessor {
     }
   }
 
+  /**
+   * Stop accepting new blobs, wait briefly for in-flight uploads, then close
+   * the uploader. Idempotent: later calls return immediately. Timed-out
+   * uploads may still finish in the background; the uploader refuses new work
+   * after close.
+   */
   async shutdown(timeoutMs = MULTIMODAL_SHUTDOWN_TIMEOUT_MS): Promise<void> {
+    if (this.shuttingDown) {
+      logger.debug('multimodal shutdown skipped (already in progress or done)');
+      return;
+    }
     this.shuttingDown = true;
+
     if (this.pending.size > 0) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -168,7 +189,14 @@ export class MultimodalProcessor {
       } finally {
         if (timer) clearTimeout(timer);
       }
+      if (this.pending.size > 0) {
+        logger.warn('multimodal shutdown timed out with uploads still in flight', {
+          pending: this.pending.size,
+          timeoutMs,
+        });
+      }
     }
+
     try {
       await this.uploader.shutdown(timeoutMs);
     } catch (err) {

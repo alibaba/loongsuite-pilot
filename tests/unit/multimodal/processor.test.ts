@@ -1,0 +1,275 @@
+import { createHash } from 'node:crypto';
+import { describe, expect, it, vi } from 'vitest';
+import { MultimodalProcessor } from '../../../src/multimodal/processor.js';
+import {
+  MAX_MULTIMODAL_BASE64_CHARS,
+  MAX_MULTIMODAL_DATA_SIZE,
+  MAX_MULTIMODAL_PENDING_UPLOADS,
+} from '../../../src/multimodal/types.js';
+import { FakeUploader } from './fake-uploader.js';
+
+const STORAGE_BASE = 'oss://bucket/pilot-mm';
+
+describe('MultimodalProcessor.toUri', () => {
+  it('returns optimistic uri and enqueues upload', async () => {
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    const bytes = Buffer.from('png-bytes');
+    const result = processor.toUri({
+      content: bytes.toString('base64'),
+      mime_type: 'image/png',
+      modality: 'image',
+      time_unix_ms: 1_700_000_000_000,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.uri).toMatch(/^oss:\/\/bucket\/pilot-mm\/20231114\/[a-f0-9]{64}\.png$/);
+    expect(result!.mime_type).toBe('image/png');
+    expect(result!.modality).toBe('image');
+    expect(result!.size).toBe(bytes.length);
+    expect(result!.sha256).toBe(createHash('sha256').update(bytes).digest('hex'));
+
+    await processor.shutdown(1000);
+    expect(uploader.items).toHaveLength(1);
+  });
+
+  it('returns uri even when upload will fail (dangling uri)', async () => {
+    const uploader = new FakeUploader();
+    uploader.failNext = true;
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    const result = processor.toUri({
+      content: Buffer.from('x').toString('base64'),
+      mime_type: 'image/png',
+      time_unix_ms: 1_700_000_000_000,
+    });
+    expect(result?.uri).toMatch(/^oss:\/\/bucket\/pilot-mm\//);
+    await processor.shutdown(1000);
+    expect(uploader.items).toHaveLength(1);
+  });
+
+  it('rejects oversized payloads', () => {
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    const huge = Buffer.alloc(MAX_MULTIMODAL_DATA_SIZE + 1, 1).toString('base64');
+    expect(processor.toUri({ content: huge, mime_type: 'image/png' })).toBeNull();
+    expect(uploader.items).toHaveLength(0);
+  });
+
+  it('rejects empty content', () => {
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    expect(processor.toUri({ content: '', mime_type: 'image/png' })).toBeNull();
+  });
+
+  it('rejects overlong base64 strings before decode', () => {
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    const huge = 'A'.repeat(MAX_MULTIMODAL_BASE64_CHARS + 1);
+    expect(processor.toUri({ content: huge, mime_type: 'image/png' })).toBeNull();
+    expect(uploader.items).toHaveLength(0);
+  });
+
+  it('rejects content that cannot decode to bytes', () => {
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    expect(processor.toUri({ content: '!!!!', mime_type: 'image/png' })).toBeNull();
+    expect(uploader.items).toHaveLength(0);
+  });
+
+  it('keeps optimistic uri when uploader throws', async () => {
+    const uploader = new FakeUploader();
+    uploader.throwOnUpload = true;
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    const result = processor.toUri({
+      content: Buffer.from('boom').toString('base64'),
+      mime_type: 'image/png',
+      time_unix_ms: 1_700_000_000_000,
+    });
+    expect(result?.uri).toMatch(/^oss:\/\/bucket\/pilot-mm\//);
+    await processor.shutdown(1000);
+  });
+
+  it('returns dangling uri when pending uploads hit the queue limit', async () => {
+    let release!: () => void;
+    const hold = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const uploader = new FakeUploader();
+    uploader.hold = hold;
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+
+    for (let i = 0; i < MAX_MULTIMODAL_PENDING_UPLOADS; i++) {
+      const result = processor.toUri({
+        content: Buffer.from(`img-${i}`).toString('base64'),
+        mime_type: 'image/png',
+        time_unix_ms: 1_700_000_000_000,
+      });
+      expect(result).not.toBeNull();
+    }
+
+    const overflow = processor.toUri({
+      content: Buffer.from('overflow').toString('base64'),
+      mime_type: 'image/png',
+      time_unix_ms: 1_700_000_000_000,
+    });
+    expect(overflow?.uri).toMatch(/^oss:\/\/bucket\/pilot-mm\//);
+
+    release();
+    await processor.shutdown(1000);
+    // Overflow uri was returned but not enqueued.
+    expect(uploader.items).toHaveLength(MAX_MULTIMODAL_PENDING_UPLOADS);
+  });
+
+  it('returns dangling uri when pending bytes hit the limit', async () => {
+    // Production pending-bytes budget is 1GiB; re-import processor with a tiny
+    // mock so this case stays cheap without affecting other tests' static imports.
+    vi.resetModules();
+    vi.doMock('../../../src/multimodal/types.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../../../src/multimodal/types.js')>();
+      return { ...actual, MAX_MULTIMODAL_PENDING_BYTES: 64 };
+    });
+    try {
+      const { MultimodalProcessor: ProcessorWithTinyBudget } = await import(
+        '../../../src/multimodal/processor.js'
+      );
+      let release!: () => void;
+      const hold = new Promise<void>(resolve => {
+        release = resolve;
+      });
+      const uploader = new FakeUploader();
+      uploader.hold = hold;
+      const processor = new ProcessorWithTinyBudget(STORAGE_BASE, uploader);
+
+      const first = processor.toUri({
+        content: Buffer.alloc(40, 1).toString('base64'),
+        mime_type: 'image/png',
+        time_unix_ms: 1_700_000_000_000,
+      });
+      expect(first).not.toBeNull();
+
+      const overflow = processor.toUri({
+        content: Buffer.alloc(40, 2).toString('base64'),
+        mime_type: 'image/png',
+        time_unix_ms: 1_700_000_000_000,
+      });
+      expect(overflow?.uri).toMatch(/^oss:\/\/bucket\/pilot-mm\//);
+
+      release();
+      await processor.shutdown(1000);
+      expect(uploader.items).toHaveLength(1);
+      expect(uploader.items[0]!.expectedSize).toBe(40);
+    } finally {
+      vi.doUnmock('../../../src/multimodal/types.js');
+      vi.resetModules();
+    }
+  });
+
+  it('dedupes in-flight uploads for the same targetPath', async () => {
+    let release!: () => void;
+    const hold = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const uploader = new FakeUploader();
+    uploader.hold = hold;
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    const content = Buffer.from('same-blob').toString('base64');
+    const params = {
+      content,
+      mime_type: 'image/png' as const,
+      time_unix_ms: 1_700_000_000_000,
+    };
+
+    const first = processor.toUri(params);
+    const second = processor.toUri(params);
+    expect(first?.uri).toBe(second?.uri);
+    expect(first?.sha256).toBe(second?.sha256);
+
+    release();
+    await processor.shutdown(1000);
+    expect(uploader.items).toHaveLength(1);
+  });
+
+  it('rejects new blobs after shutdown starts', async () => {
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    const shutdown = processor.shutdown(1000);
+    expect(processor.toUri({
+      content: Buffer.from('late').toString('base64'),
+      mime_type: 'image/png',
+    })).toBeNull();
+    await shutdown;
+  });
+
+  it('rejects empty storageBasePath at construction', () => {
+    expect(() => new MultimodalProcessor('', new FakeUploader())).toThrow(
+      /storageBasePath is required/,
+    );
+    expect(() => new MultimodalProcessor('   ', new FakeUploader())).toThrow(
+      /storageBasePath is required/,
+    );
+  });
+
+  it('shutdown drains in-flight uploads then closes uploader', async () => {
+    let release!: () => void;
+    const hold = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const uploader = new FakeUploader();
+    uploader.hold = hold;
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+
+    expect(processor.toUri({
+      content: Buffer.from('drain-me').toString('base64'),
+      mime_type: 'image/png',
+      time_unix_ms: 1_700_000_000_000,
+    })).not.toBeNull();
+
+    const shuttingDown = processor.shutdown(1000);
+    // Still blocked on hold — uploader not closed yet.
+    expect(uploader.shutdownCalls).toBe(0);
+    release();
+    await shuttingDown;
+    expect(uploader.shutdownCalls).toBe(1);
+    expect(uploader.closed).toBe(true);
+    expect(uploader.items).toHaveLength(1);
+  });
+
+  it('shutdown times out but still closes uploader and rejects new work', async () => {
+    let release!: () => void;
+    const hold = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const uploader = new FakeUploader();
+    uploader.hold = hold;
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+
+    expect(processor.toUri({
+      content: Buffer.from('slow').toString('base64'),
+      mime_type: 'image/png',
+      time_unix_ms: 1_700_000_000_000,
+    })).not.toBeNull();
+
+    await processor.shutdown(20);
+    expect(uploader.shutdownCalls).toBe(1);
+    expect(uploader.closed).toBe(true);
+    expect(processor.toUri({
+      content: Buffer.from('after').toString('base64'),
+      mime_type: 'image/png',
+    })).toBeNull();
+
+    release();
+    // Give the abandoned upload a tick; closed uploader should not accept it as success path for new work.
+    await new Promise(resolve => setTimeout(resolve, 0));
+  });
+
+  it('shutdown is idempotent and closes uploader once', async () => {
+    const uploader = new FakeUploader();
+    const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
+    await processor.shutdown(100);
+    await processor.shutdown(100);
+    expect(uploader.shutdownCalls).toBe(1);
+    expect(uploader.closed).toBe(true);
+  });
+});
+
+

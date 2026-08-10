@@ -82,7 +82,12 @@ export class InputManager extends EventEmitter {
     this.traceLinker = linker;
   }
 
+  /** Process-scoped; reject replacing a different live instance. */
   setMultimodalProcessor(processor: MultimodalProcessor): void {
+    if (this.multimodalProcessor && this.multimodalProcessor !== processor) {
+      logger.warn('multimodal processor already set; ignoring replacement');
+      return;
+    }
     this.multimodalProcessor = processor;
   }
 
