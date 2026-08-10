@@ -1,0 +1,42 @@
+{
+  "id": "minimax-code",
+  "displayName": "MiniMax Code",
+  "deployMode": "hook",
+  "detection": {
+    "paths": [
+      "~/.minimax-code",
+      "~/.config/minimax-code",
+      "~/.local/share/minimax-code"
+    ],
+    "commands": [
+      "minimax-code"
+    ]
+  },
+  "hook": {
+    "settingsPath": "~/.minimax-code/settings.json",
+    "events": [
+      "SessionStart",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "Stop"
+    ],
+    "hookCommand": "$PILOT_DATA/hooks/minimax-code-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "eventSubcommand": "kebab-case",
+    "hookContainerPath": ["hooks", "events"],
+    "extraSettings": {
+      "hooks": { "enabled": true }
+    },
+    "hookType": "command",
+    "hookTypeRationale": "Aligned with ZCode (PR #101) and Claude Code hook protocol. command mode via stdin/stdout is the only known cross-platform transport for MiniMax Code; a future SDK-mode hook may be added by MiniMax Code team once exposed."
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/minimax-code"
+  },
+  "flusher": {
+    "turnIdleTimeoutMs": 120000,
+    "turnFlushDebounceMs": 35000
+  }
+}

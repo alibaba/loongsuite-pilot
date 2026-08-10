@@ -47,6 +47,7 @@ export enum ClientType {
   Hermes = 'hermes',
   OpenClaw = 'openclaw',
   Dsh = 'dsh',
+  MiniMaxCode = 'minimax-code',
 
 }
 

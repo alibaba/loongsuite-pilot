@@ -60,6 +60,8 @@ import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
 import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
+import { MinimaxCodeLogInput } from '../inputs/minimax-code-log/minimax-code-log-input.js';
+import { MinimaxCodeRolloutInput } from '../inputs/minimax-code-rollout/minimax-code-rollout-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
 import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js';
@@ -146,6 +148,8 @@ export class Orchestrator extends EventEmitter {
     'opencode-log': 'opencode',
     'pi-coding-agent-log': 'pi-coding-agent',
     'mimo-code-log': 'mimo-code',
+    'minimax-code-log': 'minimax-code',
+    'minimax-code-rollout': 'minimax-code',
     'qwen-code-cli-log': 'qwen-code-cli',
     'hermes-agent-log': 'hermes-agent',
     'openclaw-plugin-log': 'openclaw',
@@ -1474,6 +1478,53 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['mimo-code-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['mimo-code-log']?.pollInterval,
+      }),
+    );
+
+    // --- MiniMax Code Log (event_t hook JSONL) ---
+    // Plugin-inject-style agent (same shape as opencode/mimo-code). Pre-create
+    // log dir so fs.watch in AgentDiscoveryService succeeds immediately after
+    // install with --purge.
+    const minimaxCodeLogDir = path.join(this.dataDir, 'logs', 'minimax-code');
+    await ensureDir(minimaxCodeLogDir);
+    const minimaxCodeLogInput = new MinimaxCodeLogInput({
+      stateStore: this.stateStore,
+      logDir: minimaxCodeLogDir,
+    });
+    this.inputManager.registerInput(minimaxCodeLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(minimaxCodeLogInput, {
+        watchPaths: [minimaxCodeLogDir],
+        isAvailable: async () => directoryExists(minimaxCodeLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['minimax-code-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'minimax-code-log',
+            listenerCfg['minimax-code-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['minimax-code-log']?.pollInterval,
+      }),
+    );
+
+    // --- MiniMax Code Rollout (transcript/rollout JSONL tail) ---
+    // Reads ~/.minimax-code/rollout/model-io-sess_<sid>.jsonl, emits
+    // per-LLM llm.response entries with gen_ai.input.messages /
+    // gen_ai.output.messages / gen_ai.usage.* / gen_ai.tool.definitions.
+    // Sibling input to MinimaxCodeLogInput (hybrid collection per
+    // docs/agent-onboarding.md#reliable-hybrid-collection).
+    const minimaxCodeRolloutInput = new MinimaxCodeRolloutInput({
+      stateStore: this.stateStore,
+    });
+    this.inputManager.registerInput(minimaxCodeRolloutInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(minimaxCodeRolloutInput, {
+        watchPaths: MinimaxCodeRolloutInput.getWatchPaths(),
+        isAvailable: MinimaxCodeRolloutInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['minimax-code-rollout']) &&
+          this.agentControlManager.resolveEnabled(
+            'minimax-code-rollout',
+            listenerCfg['minimax-code-rollout']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['minimax-code-rollout']?.pollInterval,
       }),
     );
 
