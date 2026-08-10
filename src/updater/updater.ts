@@ -606,7 +606,11 @@ export class Updater {
         await this.syncInstalledScripts(targetDir);
         // Repoint the CLI wrapper at the managed runtime only after activation, so
         // the collector/updater restart (and any future launch) runs on it. Skipped
-        // when we fell back to system node, preserving the existing pin.
+        // when we fell back to system node, preserving the existing pin. When the
+        // managed runtime was adopted, pinNodeRuntime throws on failure so we roll the
+        // pointers back below: the activated version's node_modules are ABI-tied to the
+        // managed node, and leaving the pin on the old node would crash-loop the
+        // collector on mismatched native addons with no self-heal.
         if (managedNodeBin) {
           await this.pinNodeRuntime(managedNodeBin);
         }
@@ -882,7 +886,26 @@ export class Updater {
       await this.writePointerFile(this.paths.nodePinFile, nodeBin);
       logger.info('pinned managed node runtime', { nodeBin, pin: this.paths.nodePinFile });
     } catch (err) {
-      logger.warn('failed to pin managed node runtime', { error: String(err) });
+      // The freshly activated version ships node_modules compiled against the managed
+      // node ABI. If the CLI wrapper cannot be repointed at that runtime, the collector
+      // restarts on the old (system) node and crash-loops on ABI-mismatched native
+      // addons — a state the version-only self-heal cannot detect or repair. Surface it
+      // (event + alarm) and rethrow so the caller rolls the pointers back to the
+      // previous, ABI-consistent install rather than marking the upgrade successful.
+      void this.metrics?.writeEvent('managed_node_pin_failed', {
+        error: String(err),
+        node_bin: nodeBin,
+        pin: this.paths.nodePinFile,
+      });
+      void this.metrics?.writeAlarm(
+        'UPDATER_NODE_PIN_ALARM', '2',
+        `failed to pin managed node runtime at ${this.paths.nodePinFile}: ${String(err)}`,
+      );
+      logger.error('failed to pin managed node runtime, aborting activation', {
+        error: String(err),
+        pin: this.paths.nodePinFile,
+      });
+      throw err;
     }
   }
 

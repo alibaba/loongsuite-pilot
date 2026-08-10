@@ -399,6 +399,89 @@ describe('Updater', () => {
       expect(execCommands).not.toContain('npm');
     });
 
+    it('rolls pointers back when pinning the managed node runtime fails', async () => {
+      const expOs = process.platform === 'win32' ? 'win' : process.platform;
+      const expArch = process.arch;
+      const supported = ['darwin', 'linux', 'win'].includes(expOs)
+        && ['x64', 'arch'].includes(expArch === 'arm64' ? 'arch' : expArch)
+        && !(expOs === 'win' && expArch === 'arm64');
+      // On an unsupported host the managed runtime is never adopted, so there is no
+      // pin step to fail; the ABI-consistency hazard this guards does not arise.
+      if (!supported) return;
+
+      const nodeArchive = `node-v22.22.2-${expOs}-${expArch}.${expOs === 'win' ? 'zip' : 'tar.gz'}`;
+      const modulesArchive = `node-modules-${expOs}-${expArch}.tar.gz`;
+      const nodeLeaf = expOs === 'win' ? 'node.exe' : 'node';
+
+      mockFetch
+        .mockResolvedValueOnce(makeResponseJson(makeManifest()))  // manifest
+        .mockResolvedValueOnce(makeResponseStream())              // package
+        .mockResolvedValueOnce(makeResponseStream())              // node archive
+        .mockResolvedValueOnce(makeResponseStream())              // node SHASUMS
+        .mockResolvedValueOnce(makeResponseStream())              // modules archive
+        .mockResolvedValueOnce(makeResponseStream());             // modules SHASUMS
+      mockComputeSha256.mockResolvedValue('SHA');
+
+      mockFsReaddir.mockImplementation((dir: string) => {
+        if (dir.includes('download-tmp')) return Promise.resolve(['loongsuite-pilot']);
+        return Promise.resolve([]);
+      });
+      mockFsStat.mockResolvedValue({ isDirectory: () => true });
+      mockFsAccess.mockImplementation((p: string) => {
+        if (p.includes('postinstall.js')) return Promise.reject(new Error('ENOENT'));
+        if (p.includes('package.json')) return Promise.resolve();
+        if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
+        if (p.includes('collector-daemon.js')) return Promise.resolve();
+        if (p.includes('updater-daemon.js')) return Promise.resolve();
+        if (p.includes('loongsuite-pilot.')) return Promise.resolve();
+        if (p.includes('/runtime/') && p.endsWith(`/${nodeLeaf}`)) return Promise.resolve();
+        if (p.includes('.pilot-nm-') && p.endsWith('node_modules')) return Promise.resolve();
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (String(filePath).includes('SHASUMS256')) {
+          return Promise.resolve(`SHA  ${nodeArchive}\nSHA  ${modulesArchive}\n` as unknown as string);
+        }
+        if (String(filePath).endsWith('/current')) return Promise.resolve('1.0.1_aaa\n' as unknown as string);
+        if (String(filePath).endsWith('/previous')) return Promise.resolve('1.0.0_zzz\n' as unknown as string);
+        if (String(filePath).endsWith('/VERSION')) return Promise.resolve('version=1.0.1\ngit_commit=aaa\n' as unknown as string);
+        if (String(filePath).includes('/scripts/')) {
+          return Promise.resolve(Buffer.from('script') as unknown as string);
+        }
+        return Promise.reject(new Error('ENOENT'));
+      });
+      // The managed runtime is adopted, but repointing the CLI wrapper fails.
+      mockFsWriteFile.mockImplementation((filePath: string) => {
+        if (String(filePath).includes('node-bin.tmp')) {
+          return Promise.reject(new Error('EACCES: pin dir not writable'));
+        }
+        return Promise.resolve();
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      // The pin was attempted (managed runtime adopted)...
+      expect(mockFsWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('node-bin.tmp'),
+        expect.any(String),
+      );
+      // ...and because it failed, the previous pointers were restored instead of
+      // leaving the new (managed-ABI) version active on the old system-node pin.
+      expect(mockFsWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('/current.tmp'),
+        '1.0.1_aaa\n',
+      );
+      expect(mockFsWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('/previous.tmp'),
+        '1.0.0_zzz\n',
+      );
+      // The upgrade must not report success: no collector restart was executed.
+      const execCommands = mockExecFile.mock.calls.map((c: unknown[]) => String(c[0]));
+      expect(execCommands).not.toContain('npm');
+    });
+
     it('syncs installed scripts after switching the current pointer', async () => {
       setupForDownload();
       mockFsAccess.mockImplementation((p: string) => {
