@@ -8,6 +8,7 @@ import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { buildCodexTranscriptSegment } from '../../../../src/inputs/codex-transcript/codex-transcript-builder.js';
 import { extractCodexPartialTurn } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
 import { CodexTranscriptInput } from '../../../../src/inputs/codex-transcript/codex-transcript-input.js';
+import { MAX_MULTIMODAL_PARTS } from '../../../../src/multimodal/types.js';
 import type { AgentActivityEntry, JsonValue } from '../../../../src/types/index.js';
 
 const tempDirs: string[] = [];
@@ -2233,6 +2234,23 @@ describe('Codex transcript multimodal extraction', () => {
     const turn = extractTurn(fixture);
     expect(userParts(turn!)).toEqual([{ type: 'text', content: 'look' }]);
     expect(JSON.stringify(turn!.inputMessages)).not.toContain(png);
+  });
+
+  it('caps converted input_image parts at MAX_MULTIMODAL_PARTS', () => {
+    const content = Array.from({ length: MAX_MULTIMODAL_PARTS + 2 }, (_, i) => {
+      const png = Buffer.from(`img-${i}`).toString('base64');
+      return { type: 'input_image', image_url: `data:image/png;base64,${png}` };
+    });
+    const fixture = multimodalRecords([
+      userContentItem([{ type: 'input_text', text: 'many' }, ...content]),
+      userMessageItem('many'),
+    ]);
+
+    const turn = extractTurn(fixture, { blobToUri: fakeBlobToUri });
+    const parts = userParts(turn!);
+    const uriParts = parts.filter((p: any) => p.type === 'uri');
+    expect(uriParts).toHaveLength(MAX_MULTIMODAL_PARTS);
+    expect(parts.some((p: any) => p.type === 'text' && p.content === 'many')).toBe(true);
   });
 
   // Codex currently persists images as data-URL base64; path-only input_image is not handled yet.
