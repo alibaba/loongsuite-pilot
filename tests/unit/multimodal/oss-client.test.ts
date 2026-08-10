@@ -1,10 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildV4PutRequest,
   normalizeOssEndpoint,
   ossPutObject,
   parseOssStorageBasePath,
 } from '../../../src/multimodal/uploader/oss-client.js';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 describe('oss-client (OSS V4)', () => {
   it('derives region from regional endpoint host', () => {
@@ -142,5 +147,35 @@ describe('oss-client (OSS V4)', () => {
     expect(emptyKey.ok).toBe(false);
     expect(emptyKey.retryable).toBe(false);
     expect(emptyKey.error).toMatch(/object key is required/);
+  });
+
+  it('aborts hung PUT after timeoutMs', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', (_url: string, init?: RequestInit) => new Promise((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) return;
+      if (signal.aborted) {
+        reject(new Error('aborted'));
+        return;
+      }
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    }));
+
+    const put = ossPutObject({
+      endpoint: 'https://oss-cn-shanghai.aliyuncs.com',
+      bucket: 'valid-bucket',
+      objectKey: '20260101/abc.png',
+      accessKeyId: 'ak',
+      accessKeySecret: 'sk',
+      body: Buffer.from('x'),
+      contentType: 'image/png',
+      timeoutMs: 50,
+    });
+
+    await vi.advanceTimersByTimeAsync(50);
+    const result = await put;
+    expect(result.ok).toBe(false);
+    expect(result.retryable).toBe(true);
+    expect(result.error).toMatch(/aborted/i);
   });
 });

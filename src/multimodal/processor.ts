@@ -198,7 +198,7 @@ export class MultimodalProcessor {
     }
 
     try {
-      await this.uploader.shutdown(timeoutMs);
+      await this.uploader.shutdown();
     } catch (err) {
       logger.warn('multimodal uploader shutdown failed', { error: String(err) });
     }

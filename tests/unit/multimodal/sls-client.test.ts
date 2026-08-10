@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildV1PutRequest,
   normalizeSlsEndpoint,
@@ -6,6 +6,11 @@ import {
   slsPutObject,
   tryParseSlsStorageBasePath,
 } from '../../../src/multimodal/uploader/sls-client.js';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 describe('sls-client (SLS Auth V1 PutObject)', () => {
   it('normalizes endpoint host', () => {
@@ -166,5 +171,36 @@ describe('sls-client (SLS Auth V1 PutObject)', () => {
     expect(emptyKey.ok).toBe(false);
     expect(emptyKey.retryable).toBe(false);
     expect(emptyKey.error).toMatch(/object key is required/);
+  });
+
+  it('aborts hung PUT after timeoutMs', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', (_url: string, init?: RequestInit) => new Promise((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) return;
+      if (signal.aborted) {
+        reject(new Error('aborted'));
+        return;
+      }
+      signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    }));
+
+    const put = slsPutObject({
+      endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+      project: 'p',
+      logstore: 'l',
+      objectKey: '20260101/abc.png',
+      accessKeyId: 'ak',
+      accessKeySecret: 'sk',
+      body: Buffer.from('x'),
+      contentType: 'image/png',
+      timeoutMs: 50,
+    });
+
+    await vi.advanceTimersByTimeAsync(50);
+    const result = await put;
+    expect(result.ok).toBe(false);
+    expect(result.retryable).toBe(true);
+    expect(result.error).toMatch(/aborted/i);
   });
 });

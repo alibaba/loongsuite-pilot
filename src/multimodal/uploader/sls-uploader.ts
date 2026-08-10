@@ -18,6 +18,7 @@ export class SlsUploader implements Uploader {
   private readonly project: string;
   private readonly logstore: string;
   private readonly successKeys = new LruMap<true>(MULTIMODAL_LRU_LIMIT);
+  private closed = false;
 
   constructor(
     private readonly sls: MultimodalSlsConfig,
@@ -34,6 +35,11 @@ export class SlsUploader implements Uploader {
 
   async upload(item: UploadItem, opts?: { skipIfExists?: boolean }): Promise<boolean> {
     try {
+      if (this.closed) {
+        logger.warn('sls upload skipped: uploader closed');
+        return false;
+      }
+
       if (!item.data || item.data.length !== item.expectedSize) {
         logger.warn('sls upload skipped: invalid payload size', {
           expectedSize: item.expectedSize,
@@ -50,6 +56,9 @@ export class SlsUploader implements Uploader {
       }
 
       const result = await withRetries(DEFAULT_MULTIMODAL_RETRY, async () => {
+        if (this.closed) {
+          return { ok: false as const, retryable: false, error: 'uploader closed' };
+        }
         const put = await slsPutObject({
           endpoint: this.sls.endpoint,
           project: this.project,
@@ -82,6 +91,7 @@ export class SlsUploader implements Uploader {
         return false;
       }
 
+      if (this.closed) return false;
       this.successKeys.set(objectKey, true);
       logger.debug('sls upload ok', {
         targetPath: item.targetPath,
@@ -95,7 +105,12 @@ export class SlsUploader implements Uploader {
     }
   }
 
-  async shutdown(_timeoutMs?: number): Promise<void> {
+  async shutdown(): Promise<void> {
+    if (this.closed) {
+      logger.debug('sls uploader shutdown skipped (already closed)');
+      return;
+    }
+    this.closed = true;
     this.successKeys.clear();
   }
 }

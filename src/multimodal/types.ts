@@ -18,7 +18,7 @@ export interface UploadItem {
 
 export interface Uploader {
   upload(item: UploadItem, opts?: { skipIfExists?: boolean }): Promise<boolean>;
-  shutdown(timeoutMs?: number): Promise<void>;
+  shutdown(): Promise<void>;
 }
 
 /** Raw base64 payload for MultimodalProcessor.toUri. */

@@ -14,6 +14,7 @@ export class OssUploader implements Uploader {
   private readonly bucket: string;
   private readonly prefix: string;
   private readonly successKeys = new LruMap<true>(MULTIMODAL_LRU_LIMIT);
+  private closed = false;
 
   constructor(
     private readonly oss: MultimodalOssConfig,
@@ -26,6 +27,11 @@ export class OssUploader implements Uploader {
 
   async upload(item: UploadItem, opts?: { skipIfExists?: boolean }): Promise<boolean> {
     try {
+      if (this.closed) {
+        logger.warn('oss upload skipped: uploader closed');
+        return false;
+      }
+
       if (!item.data || item.data.length !== item.expectedSize) {
         logger.warn('oss upload skipped: invalid payload size', {
           expectedSize: item.expectedSize,
@@ -44,6 +50,9 @@ export class OssUploader implements Uploader {
       }
 
       const result = await withRetries(DEFAULT_MULTIMODAL_RETRY, async () => {
+        if (this.closed) {
+          return { ok: false as const, retryable: false, error: 'uploader closed' };
+        }
         const put = await ossPutObject({
           endpoint: this.oss.endpoint,
           bucket: this.bucket,
@@ -74,7 +83,12 @@ export class OssUploader implements Uploader {
         return false;
       }
 
+      if (this.closed) return false;
       this.successKeys.set(objectKey, true);
+      logger.debug('oss upload ok', {
+        targetPath: item.targetPath,
+        size: item.expectedSize,
+      });
       return true;
     } catch (err) {
       logger.warn('oss upload failed', { error: String(err), size: item.expectedSize });
@@ -82,7 +96,12 @@ export class OssUploader implements Uploader {
     }
   }
 
-  async shutdown(_timeoutMs?: number): Promise<void> {
+  async shutdown(): Promise<void> {
+    if (this.closed) {
+      logger.debug('oss uploader shutdown skipped (already closed)');
+      return;
+    }
+    this.closed = true;
     this.successKeys.clear();
   }
 }
