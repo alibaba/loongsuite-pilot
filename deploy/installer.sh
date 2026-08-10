@@ -502,6 +502,16 @@ ensure_node_modules() {
     rm -rf "$tmp"
     return 0
 }
+
+run_npm() {
+    # npm shipped with the managed runtime is a symlink to npm-cli.js, whose
+    # `#!/usr/bin/env node` shebang resolves node through PATH. The runtime's bin dir
+    # is not on PATH, so calling "$NPM_BIN" directly dies with
+    # "env: node: No such file or directory" on hosts without a system node — exactly
+    # the hosts the managed runtime exists for. Mirrors the .ps1 npm fallback, which
+    # already prepends the node dir.
+    PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" "$@"
+}
 # <<< managed-node-runtime <<<
 
 check_deps() {
@@ -564,8 +574,8 @@ check_deps() {
         exit 1
     fi
 
-    msg "    ✅ node $("$NODE_BIN" --version)  npm $("$NPM_BIN" --version)" \
-        "    ✅ node $("$NODE_BIN" --version)  npm $("$NPM_BIN" --version)"
+    msg "    ✅ node $("$NODE_BIN" --version)  npm $(run_npm --version)" \
+        "    ✅ node $("$NODE_BIN" --version)  npm $(run_npm --version)"
     msg "    node pinned: $NODE_BIN" "    node pinned: $NODE_BIN"
     echo ""
 }
@@ -918,7 +928,10 @@ deploy_package() {
     else
         msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" \
             "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
-        (cd "$PERMANENT_DIR" && "$NPM_BIN" install --production --no-optional 2>&1 | tail -1)
+        if ! (cd "$PERMANENT_DIR" && run_npm install --production --no-optional 2>&1 | tail -1); then
+            msg "    ❌ 依赖安装失败" "    ❌ Dependency installation failed"
+            return 1
+        fi
         msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
     fi
     echo ""
