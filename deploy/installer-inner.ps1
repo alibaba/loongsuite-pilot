@@ -139,6 +139,15 @@ function Test-NodeSuitable {
 function Resolve-Node {
     $candidates = @()
 
+    # Existing installations pin the exact Node binary used for deployment.
+    # Read it first so uninstall works even when no system node is on PATH
+    # (e.g. installs that used the managed Node runtime).
+    $pinFile = Join-Path $DataDir "node-bin"
+    if (Test-Path -LiteralPath $pinFile) {
+        $pinned = ([string](Get-Content -LiteralPath $pinFile -Raw -ErrorAction SilentlyContinue)).Trim()
+        if ($pinned) { $candidates += $pinned }
+    }
+
     # nvm-windows
     $nvmHome = $env:NVM_HOME
     if ($nvmHome -and (Test-Path $nvmHome)) {
