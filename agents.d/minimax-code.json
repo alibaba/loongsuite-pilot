@@ -5,8 +5,11 @@
   "detection": {
     "paths": [
       "~/.minimax-code",
+      "~/.minimax-agent-cn",
       "~/.config/minimax-code",
-      "~/.local/share/minimax-code"
+      "~/.local/share/minimax-code",
+      "%APPDATA%/MiniMax",
+      "%APPDATA%/MiniMax-Code"
     ],
     "commands": [
       "minimax-code"
@@ -14,6 +17,7 @@
   },
   "hook": {
     "settingsPath": "~/.minimax-code/settings.json",
+    "settingsPathWindows": "%APPDATA%/MiniMax/settings.json",
     "events": [
       "SessionStart",
       "UserPromptSubmit",
@@ -22,6 +26,7 @@
       "Stop"
     ],
     "hookCommand": "$PILOT_DATA/hooks/minimax-code-loongsuite-pilot-hook.sh",
+    "hookCommandWindows": "$PILOT_DATA/hooks/minimax-code-loongsuite-pilot-hook.ps1",
     "format": "nested",
     "eventSubcommand": "kebab-case",
     "hookContainerPath": ["hooks", "events"],

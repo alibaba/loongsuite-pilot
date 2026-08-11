@@ -5,12 +5,19 @@ import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { MinimaxCodeLogInput } from '../../../src/inputs/minimax-code-log/minimax-code-log-input.js';
 
-const TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'minimax-code-log-test-'));
-
 describe('MinimaxCodeLogInput', () => {
+  let TMPDIR: string;
   let stateStore: StateStore;
 
   beforeEach(async () => {
+    // Round 8 fix (PR #233, addressing copilot suppressed comment):
+    // create a fresh temp dir per test. The previous module-level
+    // `mkdtempSync` + `afterEach rmSync` pattern deleted the dir between
+    // tests, so subsequent `beforeEach` calls reused the same path
+    // (now missing) and broke StateStore.load() (needs the parent dir
+    // to exist). Per-test recreation makes the suite order-independent
+    // and matches the rollout-input test pattern.
+    TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'minimax-code-log-test-'));
     stateStore = new StateStore(path.join(TMPDIR, 'state.json'));
     await stateStore.load();
   });

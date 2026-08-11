@@ -83,6 +83,35 @@ function appendEventSubcommand(
 }
 
 /**
+ * Pick the right settings path for the current platform.
+ * Round 8 fix (PR #233, addressing fangxiu-wf review): agents that ship
+ * a per-platform settings location (e.g. the official MiniMax Code
+ * 3.0.60 Windows client writes to `%APPDATA%\MiniMax\settings.json`)
+ * declare the Windows path in `settingsPathWindows`; everywhere else
+ * we fall back to the POSIX `settingsPath`.
+ */
+function resolvePlatformSettingsPath(hookConfig: AgentHookConfig): string {
+  if (process.platform === 'win32' && hookConfig.settingsPathWindows) {
+    return hookConfig.settingsPathWindows;
+  }
+  return hookConfig.settingsPath;
+}
+
+/**
+ * Pick the right hook command for the current platform. Mirrors
+ * `resolvePlatformSettingsPath` but for the hook script — some agents
+ * ship a dedicated `.ps1` (e.g. MiniMax Code) so the AgentDefLoader's
+ * automatic `.sh` -> `.ps1` extension rewrite points at a file that
+ * actually exists in the deployed `assets/hooks/` directory.
+ */
+function resolvePlatformHookCommand(hookConfig: AgentHookConfig): string {
+  if (process.platform === 'win32' && hookConfig.hookCommandWindows) {
+    return hookConfig.hookCommandWindows;
+  }
+  return hookConfig.hookCommand;
+}
+
+/**
  * 拼 hooks.json 中实际写入的 command 字符串。
  * 必须与 codex trust hash 算用的字符串完全一致。
  */
@@ -126,6 +155,15 @@ export class HookStrategy implements DeployStrategy {
       return true;
     }
 
+    // Round 8 fix (PR #233, addressing fangxiu-wf review finding #5):
+    // validate that the settings file's extraSettings match the agent
+    // def's required values. Without this, a user (or third-party tool)
+    // that flips `hooks.enabled = false` would have the deployment
+    // reported healthy even though no events will ever fire.
+    if (await this.needsExtraSettingsRepair(def)) {
+      return true;
+    }
+
     if (def.hook?.kiroAgent) {
       return this.kiroAgentNeedsDeploy(def);
     }
@@ -145,6 +183,51 @@ export class HookStrategy implements DeployStrategy {
       return true;
     }
     return false;
+  }
+
+  private async needsExtraSettingsRepair(def: AgentDefinition): Promise<boolean> {
+    const extra = def.hook?.extraSettings;
+    if (!extra || Object.keys(extra).length === 0) return false;
+
+    const settingsPath = resolvePlatformSettingsPath(def.hook!);
+    const existing =
+      (await readJsonFile<Record<string, unknown>>(settingsPath)) ?? {};
+    return this.diffExtraSettings(existing, extra).length > 0;
+  }
+
+  /**
+   * Walk the existing settings object and the agent def's required
+   * extraSettings. Return a list of dot-paths whose values differ (or
+   * are missing on the existing side). The list is empty when the
+   * existing file already has every required value, so the deployment
+   * is healthy and needs no repair.
+   */
+  private diffExtraSettings(
+    existing: Record<string, unknown>,
+    required: Record<string, unknown>,
+    prefix = '',
+  ): string[] {
+    const mismatches: string[] = [];
+    for (const [key, expected] of Object.entries(required)) {
+      const path = prefix ? `${prefix}.${key}` : key;
+      const actual = existing[key];
+      if (expected && typeof expected === 'object' && !Array.isArray(expected)) {
+        if (!actual || typeof actual !== 'object' || Array.isArray(actual)) {
+          mismatches.push(path);
+          continue;
+        }
+        mismatches.push(
+          ...this.diffExtraSettings(
+            actual as Record<string, unknown>,
+            expected as Record<string, unknown>,
+            path,
+          ),
+        );
+      } else if (actual !== expected) {
+        mismatches.push(path);
+      }
+    }
+    return mismatches;
   }
 
   private async needsSettingsRepairForCodex(def: AgentDefinition): Promise<boolean> {
@@ -184,8 +267,17 @@ export class HookStrategy implements DeployStrategy {
       return { success: false, agentId: def.id, deployMode: 'hook', error: 'missing hook config' };
     }
 
+    // Round 8 fix (PR #233, addressing fangxiu-wf review): the official
+    // MiniMax Code 3.0.60 Windows desktop client stores settings under
+    // a per-platform location (`%APPDATA%\MiniMax\settings.json`), not
+    // the POSIX `~/.minimax-code/`. Resolve per-platform so the Windows
+    // AgentDefLoader's `*.sh` -> `*.ps1` rewrite (driven by `hookCommand`)
+    // uses a settings path that actually exists on Windows.
+    const resolvedSettingsPath = resolvePlatformSettingsPath(hookConfig);
+    const resolvedHookCommand = resolvePlatformHookCommand(hookConfig);
+
     try {
-      await this.ensureSettingsFile(hookConfig.settingsPath);
+      await this.ensureSettingsFile(resolvedSettingsPath);
 
       // Kiro CLI: settingsPath 是整个 Agent 定义 JSON，需要顶层 name + tools +
       // hooks:<event>:[{command, matcher}]（flat，无 type 字段）。
@@ -372,6 +464,25 @@ export class HookStrategy implements DeployStrategy {
       if (!ok) allOk = false;
     }
 
+    // Round 8 fix (PR #233, addressing fangxiu-wf review finding #5):
+    // roll back the extraSettings we set during deploy so the user's
+    // settings file returns to its original shape. We do not have a
+    // "snapshot of pre-deploy values" record, so the rollback is
+    // best-effort: we delete leaf keys that exactly match what we
+    // wrote. If the user originally had a non-default value (e.g.
+    // `hooks.enabled = true` they set themselves), they can re-set
+    // it after undeploy.
+    if (def.hook?.extraSettings && Object.keys(def.hook.extraSettings).length > 0) {
+      try {
+        await this.removeExtraSettings(def.hook);
+      } catch (err) {
+        logger.warn('settings.extraSettings rollback failed (non-blocking)', {
+          agentId: def.id,
+          error: String(err),
+        });
+      }
+    }
+
     if (def.hook?.trustToml) {
       try {
         const cfg = def.hook.trustToml;
@@ -384,6 +495,7 @@ export class HookStrategy implements DeployStrategy {
 
     return allOk;
   }
+
 
   /** Resolve each exact installed Pilot handler. Ambiguity is unsafe for trust. */
   private async resolveInstalledCodexHooks(
@@ -466,14 +578,23 @@ export class HookStrategy implements DeployStrategy {
     // event arrays under settings.hooks.events.<event>) get their hooks
     // written to the correct JSON path. Mirrors PR #101 hook-strategy
     // change.
+    //
+    // Round 8 (PR #233): per-platform settingsPath + hookCommand so the
+    // Windows hook entry points at the per-platform settings JSON and
+    // ships a real `.ps1` (the old code wrote the POSIX settingsPath +
+    // POSIX hookCommand, then the .sh -> .ps1 extension rewrite in
+    // AgentDefLoader pointed at a .ps1 file that did not exist in the
+    // package).
     const containerPath = hookConfig.hookContainerPath ?? ['hooks'];
+    const settingsPath = resolvePlatformSettingsPath(hookConfig);
+    const hookCommand = resolvePlatformHookCommand(hookConfig);
     return hookConfig.events.map(event => ({
       agentId: def.id,
-      settingsPath: hookConfig.settingsPath,
+      settingsPath,
       settingsSyntax: hookConfig.settingsSyntax,
       hookJsonPath: [...containerPath, event],
       hookCommand: formatHookCommand(
-        hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
+        hookCommand, event, hookConfig.eventSubcommand, def.id,
       ),
       matcher: hookConfig.eventMatchers?.[event] ?? hookConfig.matcher,
       useNestedFormat: hookConfig.format === 'nested',
@@ -492,15 +613,17 @@ export class HookStrategy implements DeployStrategy {
     if (!hookConfig?.retiredEvents?.length) return [];
     const currentEvents = new Set(hookConfig.events);
     const containerPath = hookConfig.hookContainerPath ?? ['hooks'];
+    const settingsPath = resolvePlatformSettingsPath(hookConfig);
+    const hookCommand = resolvePlatformHookCommand(hookConfig);
     return [...new Set(hookConfig.retiredEvents)]
       .filter(event => !currentEvents.has(event))
       .map(event => ({
         agentId: def.id,
-        settingsPath: hookConfig.settingsPath,
+        settingsPath,
         settingsSyntax: hookConfig.settingsSyntax,
         hookJsonPath: [...containerPath, event],
         hookCommand: formatHookCommand(
-          hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
+          hookCommand, event, hookConfig.eventSubcommand, def.id,
         ),
         matcher: hookConfig.eventMatchers?.[event] ?? hookConfig.matcher,
         useNestedFormat: hookConfig.format === 'nested',

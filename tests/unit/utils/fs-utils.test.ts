@@ -6,6 +6,7 @@ import {
   cleanStaleTmpFiles,
   readJsonFile,
   writeJsonFile,
+  resolveHome,
   writeTextFileAtomic,
 } from '../../../src/utils/fs-utils.js';
 
@@ -138,5 +139,64 @@ describe('readJsonFile', () => {
     const broken = path.join(dir, 'broken.json');
     await fs.writeFile(broken, '\uFEFF{"a":', 'utf8');
     expect(await readJsonFile(broken)).toBeNull();
+  });
+});
+
+// Round 8 fix (PR #233): env-var expansion in resolveHome, so agent defs
+// can reference Windows %APPDATA% / POSIX $VAR without runtime
+// path-rewriting surprises. Behavior is platform-scoped: Windows only
+// rewrites %VAR%, POSIX only rewrites $VAR/${VAR}.
+describe('resolveHome env-var expansion', () => {
+  const originalPlatform = process.platform;
+  // Snapshot of env vars we touch in the suite, so we can restore them
+  // even if a test sets them in a way vi cannot roll back.
+  const tracked = ['APPDATA', 'HOME', 'NOT_SET_VAR'];
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    vi.restoreAllMocks();
+    for (const key of tracked) {
+      if (process.env[key] !== undefined) delete process.env[key];
+    }
+  });
+
+  it('expands %VAR% on Windows', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    process.env.APPDATA = 'C:\\Users\\test';
+    expect(resolveHome('%APPDATA%\\MiniMax\\settings.json'))
+      .toBe('C:\\Users\\test\\MiniMax\\settings.json');
+  });
+
+  it('expands $VAR and ${VAR} on POSIX', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    process.env.HOME = '/home/test';
+    expect(resolveHome('$HOME/.minimax-code/rollout'))
+      .toBe('/home/test/.minimax-code/rollout');
+    expect(resolveHome('${HOME}/.minimax-code/rollout'))
+      .toBe('/home/test/.minimax-code/rollout');
+  });
+
+  it('does NOT expand %VAR% on POSIX (avoids rewriting literal %)', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    // No APPDATA env, but the literal % should pass through untouched.
+    expect(resolveHome('%APPDATA%/foo')).toBe('%APPDATA%/foo');
+  });
+
+  it('does NOT expand $VAR on Windows', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    process.env.HOME = 'C:\\Users\\test';
+    expect(resolveHome('$HOME/foo')).toBe('$HOME/foo');
+  });
+
+  it('leaves %VAR% literal when the env var is undefined', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    // NOT_SET is not set; should pass through untouched.
+    expect(resolveHome('%NOT_SET_VAR%\\foo')).toBe('%NOT_SET_VAR%\\foo');
+  });
+
+  it('still expands ~ on all platforms', () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+    const home = os.homedir();
+    expect(resolveHome('~/.minimax-code')).toBe(path.join(home, '.minimax-code'));
   });
 });

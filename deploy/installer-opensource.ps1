@@ -1767,6 +1767,11 @@ function GC-OldVersions {
 # ============================================================
 function Remove-HookConfigs {
     $HOOK_MARKER = ".loongsuite-pilot"
+    # Round 8 fix (PR #233, addressing fangxiu-wf review finding #1):
+    # the official MiniMax Code 3.0.60 Windows desktop client writes its
+    # settings to %APPDATA%\MiniMax\settings.json (the platform-resolved
+    # path). The legacy POSIX path ~/.minimax-code/settings.json is kept
+    # for developer-machine installs that predate the Windows release.
     $configs = @(
         (Join-Path $env:USERPROFILE ".cursor\hooks.json"),
         (Join-Path $env:USERPROFILE ".qoder\settings.json"),
@@ -1777,7 +1782,9 @@ function Remove-HookConfigs {
         (Join-Path $env:USERPROFILE ".claude\settings.json"),
         (Join-Path $env:USERPROFILE ".kiro\agents\pilot-kiro.json"),
         (Join-Path $env:USERPROFILE ".qwen\settings.json"),
-        (Join-Path $env:USERPROFILE ".workbuddy\settings.json")
+        (Join-Path $env:USERPROFILE ".workbuddy\settings.json"),
+        (Join-Path $env:USERPROFILE ".minimax-code\settings.json"),
+        (Join-Path $env:APPDATA "MiniMax\settings.json")
     )
 
     foreach ($cfg in $configs) {

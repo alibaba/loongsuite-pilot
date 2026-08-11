@@ -157,6 +157,93 @@ describe('minimax-code-hook-processor: cmdStop interrupted-signal resolution', (
   });
 });
 
+// ─── cmdPostToolUse tool-result status classification (Round 8) ───
+
+describe('minimax-code-hook-processor: cmdPostToolUse tool-result status', () => {
+  test('对象 toolResult={content: "ok"} 无 status/exitCode → status=success (false positive 修复)', () => {
+    // Round 8 fix (PR #233, addressing fangxiu-wf review finding #6):
+    // the previous code fell through to 'error' when toolResult was a
+    // non-empty object without `status` AND without `exitCode`. A
+    // legitimate {content: "ok"} payload was being reported as
+    // failed. The fix: honor `status` and `exitCode` when present,
+    // and otherwise default to 'success' (the !isError path is itself
+    // a positive signal that the tool call returned without error).
+    const sid = 'sess-tool-ok-1';
+    const result = runHook('post-tool-use', {
+      session_id: sid,
+      sessionId: sid,
+      timestamp: '2026-08-10T12:00:00.000Z',
+      tool_name: 'read_file',
+      tool_input: { path: '/tmp/x' },
+      tool_use_id: 'c1',
+      // No `status`, no `exitCode` — only `content` (the actual result).
+      toolResult: { content: 'ok' },
+    });
+    expect(result.status).toBe(0);
+
+    const records = readEmittedRecords();
+    const toolResult = records.find((r) => r['event.name'] === 'tool.result');
+    expect(toolResult).toBeDefined();
+    expect(toolResult['gen_ai.tool.call.status']).toBe('success');
+    expect(toolResult['tool.result.status']).toBe('success');
+  });
+
+  test('对象 toolResult={exitCode: 1} → status=error', () => {
+    const sid = 'sess-tool-exit-1';
+    const result = runHook('post-tool-use', {
+      session_id: sid,
+      sessionId: sid,
+      timestamp: '2026-08-10T12:00:00.000Z',
+      tool_name: 'run_cmd',
+      tool_input: { cmd: 'false' },
+      tool_use_id: 'c1',
+      toolResult: { exitCode: 1, stderr: 'failed' },
+    });
+    expect(result.status).toBe(0);
+
+    const records = readEmittedRecords();
+    const toolResult = records.find((r) => r['event.name'] === 'tool.result');
+    expect(toolResult['gen_ai.tool.call.status']).toBe('error');
+  });
+
+  test('对象 toolResult={status: "partial"} → status=partial (honor explicit)', () => {
+    const sid = 'sess-tool-partial-1';
+    const result = runHook('post-tool-use', {
+      session_id: sid,
+      sessionId: sid,
+      timestamp: '2026-08-10T12:00:00.000Z',
+      tool_name: 'long_op',
+      tool_input: {},
+      tool_use_id: 'c1',
+      toolResult: { status: 'partial', content: 'chunk1' },
+    });
+    expect(result.status).toBe(0);
+
+    const records = readEmittedRecords();
+    const toolResult = records.find((r) => r['event.name'] === 'tool.result');
+    expect(toolResult['gen_ai.tool.call.status']).toBe('partial');
+  });
+
+  test('isError=true 时 status=error (regardless of object shape)', () => {
+    const sid = 'sess-tool-iserror-1';
+    const result = runHook('post-tool-use', {
+      session_id: sid,
+      sessionId: sid,
+      timestamp: '2026-08-10T12:00:00.000Z',
+      tool_name: 'broken',
+      tool_input: {},
+      tool_use_id: 'c1',
+      isError: true,
+      toolResult: { content: 'something' },
+    });
+    expect(result.status).toBe(0);
+
+    const records = readEmittedRecords();
+    const toolResult = records.find((r) => r['event.name'] === 'tool.result');
+    expect(toolResult['gen_ai.tool.call.status']).toBe('error');
+  });
+});
+
 // ─── cmdStop 协议契约 (Round 5) ───
 
 describe('minimax-code-hook-processor: cmdStop stdout 协议', () => {

@@ -14,10 +14,18 @@ import {
 } from '../base/base-session-input.js';
 
 const DEFAULT_SESSION_DIR = '~/.minimax-code/rollout';
+const DEFAULT_SESSION_DIR_WINDOWS = '%APPDATA%/MiniMax/rollout';
 const DEFAULT_FILE_PATTERN = 'model-io-sess_*.jsonl';
 
 export interface MinimaxCodeRolloutInputOptions extends Omit<SessionInputOptions, 'sessionDir' | 'filePattern'> {
   sessionDir?: string;
+  /**
+   * Round 8 fix (PR #233, addressing fangxiu-wf review): the official
+   * MiniMax Code 3.0.60 Windows desktop client writes its native rollout
+   * to `%APPDATA%\MiniMax\rollout\`, not the POSIX `~/.minimax-code/rollout/`.
+   * Use this override on Windows; falls back to `sessionDir` if absent.
+   */
+  sessionDirWindows?: string;
   filePattern?: string;
 }
 
@@ -108,7 +116,11 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
   constructor(opts: MinimaxCodeRolloutInputOptions) {
     super({
       stateStore: opts.stateStore,
-      sessionDir: opts.sessionDir ?? resolveHome(DEFAULT_SESSION_DIR),
+      sessionDir: resolveHome(
+        (process.platform === 'win32' && opts.sessionDirWindows)
+          ? opts.sessionDirWindows
+          : (opts.sessionDir ?? DEFAULT_SESSION_DIR),
+      ),
       filePattern: opts.filePattern ?? DEFAULT_FILE_PATTERN,
       pollIntervalMs: opts.pollIntervalMs
         ?? (Number(process.env.MINIMAX_CODE_ROLLOUT_POLL_INTERVAL) || 30_000),
@@ -116,23 +128,64 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
   }
 
   static getWatchPaths(): string[] {
-    return [resolveHome(DEFAULT_SESSION_DIR)];
+    return [resolveHome(
+      process.platform === 'win32'
+        ? DEFAULT_SESSION_DIR_WINDOWS
+        : DEFAULT_SESSION_DIR,
+    )];
   }
 
   static async checkAvailability(): Promise<boolean> {
-    return directoryExists(resolveHome(DEFAULT_SESSION_DIR));
+    return directoryExists(resolveHome(
+      process.platform === 'win32'
+        ? DEFAULT_SESSION_DIR_WINDOWS
+        : DEFAULT_SESSION_DIR,
+    ));
   }
 
   protected override async onStart(): Promise<void> {
-    // Pre-seed offsets for existing files so a fresh install doesn't replay
-    // historical rollout records (mirrors zcode-rollout-input onStart).
-    // Also initialize extra.minimaxCodeRollout.{inode,turnStepMap} so the
-    // first poll's pre-pass doesn't false-trigger rotation clearing.
+    // Baseline new files only; resume files with existing checkpoint state.
+    //
+    // Round 8 fix (PR #233, addressing fangxiu-wf review): the previous
+    // implementation unconditionally set offset = stat.size and reset
+    // turnStepMap for every existing file, which silently discarded any
+    // records appended while Pilot was stopped (Pilot restart would not
+    // see them). The new logic:
+    //
+    //   - Files with no prior state (newly observed since last start):
+    //     set offset = stat.size, init turnStepMap = {}. This is the
+    //     "fresh install" path — we don't replay historical rollout on
+    //     first install.
+    //   - Files with prior state (offset > 0 OR extra.minimaxCodeRollout
+    //     already initialized): leave offset and turnStepMap alone.
+    //     processFile will resume from the saved offset on the next
+    //     collect() cycle, recovering any records appended while Pilot
+    //     was stopped. If the file rotated (inode change), the pre-pass
+    //     in collect() clears turnStepMap and resets offset to 0 before
+    //     delegating to super.collect(), so rotation is still detected.
+    //
+    // The inode is initialized for new files so the pre-pass in collect()
+    // doesn't false-trigger rotation clearing on the first poll.
     const files = await this.discoverSessionFiles();
     for (const filePath of files) {
       try {
         const stat = await fs.stat(filePath);
         const stateKey = this.stateKey(filePath);
+        const prevState = this.stateStore.get(stateKey);
+        const prevOffset = this.stateStore.getOffset(stateKey);
+        const prevRollout = prevState.extra?.minimaxCodeRollout as
+          | MinimaxCodeRolloutFileState
+          | undefined;
+        const hasCheckpoint =
+          prevOffset > 0 || (prevRollout !== undefined && prevRollout.inode !== 0);
+        if (hasCheckpoint) {
+          // Existing file with persisted state — resume from saved offset
+          // on next collect(). Do not touch offset or turnStepMap.
+          continue;
+        }
+        // New file (or first sight after a state wipe): baseline to EOF
+        // and init turnStepMap so the pre-pass doesn't false-trigger
+        // rotation clearing on the first poll.
         this.stateStore.setOffset(stateKey, stat.size);
         this.stateStore.update(stateKey, {
           extra: {
@@ -250,27 +303,38 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     const inputMessages = this.buildInputMessages(request);
     const toolDefinitions = this.extractToolDefinitions(request);
 
-    // Interrupted path detection (Round 2): completedAt present but the
-    // response has no finishReason / no text / no toolCalls. This is the
-    // typical SIGTERM / timeout / Ctrl+C pattern — the LLM call was
-    // terminated mid-flight. Without placeholder fields, the LLM span is
-    // missing gen_ai.output.messages / finish_reasons / usage, which
-    // validate-trace flags as ERROR (CLAUDE.md "semantic.llm_has_input_output"
-    // MUST rule).
+    // Source-faithful output (Round 8 fix, PR #233, addressing fangxiu-wf
+    // review finding #4): the previous Round 2/6 implementation
+    // synthesized `interrupted` finish_reasons + a placeholder output
+    // message + 0-token usage whenever the response was structurally
+    // incomplete (completedAt present but no finishReason / text /
+    // toolCalls). This "fixed" validate-trace's missing-output check
+    // but fabricated GenAI semantics: an empty refusal, a length-cap
+    // termination, or a schema drift all got reported as "interrupted"
+    // with synthesized content, indistinguishable from a real SIGTERM.
     //
-    // Round 6: detect BEFORE calling buildOutputMessages so we can pass a
-    // synthetic finishReason='interrupted' through to the placeholder
-    // output message. The placeholder's per-message finish_reason then
-    // matches the entry-level gen_ai.response.finish_reasons=['interrupted'],
-    // so downstream consumers (ARMS GenAI) can correlate them.
-    const isInterrupted = this.detectInterruptedResponse(response, completedAt);
-    const outputMessages = isInterrupted
-      ? this.buildOutputMessages({ ...response, finishReason: 'interrupted' })
-      : this.buildOutputMessages(response);
-
-    const finishReasons = isInterrupted
-      ? ['interrupted']
-      : this.resolveFinishReasons(response);
+    // The new behavior:
+    //   - output.messages is built source-faithfully from response.text
+    //     and response.toolCalls. If both are missing, output.messages
+    //     is omitted from the entry (no placeholder, no inference).
+    //   - finish_reasons is read from response.finishReason / finish_reason
+    //     when present, otherwise omitted.
+    //   - usage tokens are read from response.usage.* when present,
+    //     otherwise omitted.
+    //   - A separate `event.name: 'diagnostic'` entry is appended when
+    //     the response is structurally incomplete, so downstream tooling
+    //     can still surface the issue without the entry itself carrying
+    //     fabricated values.
+    //
+    // validate-trace WILL now flag these entries as ERROR (by design —
+    // incomplete source data is incomplete source data). The diagnostic
+    // entry gives operators a single grep target for follow-up
+    // (event.name = "diagnostic" AND gen_ai.diagnostic.reason).
+    const outputMessages = this.buildOutputMessages(response);
+    const finishReasons = this.resolveFinishReasons(response);
+    const diagnostic = this.buildIncompleteResponseDiagnostic(
+      response, completedAt, outputMessages, finishReasons,
+    );
 
     const traceId = this.normalizeTraceId(
       (record['traceId'] as string | undefined) ?? (record['trace_id'] as string | undefined),
@@ -334,35 +398,35 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
       ...sharedFields,
       'event.name': 'llm.response',
       time_unix_nano: timestampToUnixNanos(completedAt) ?? timestampToUnixNanos(startedAt) ?? '0',
-      'gen_ai.response.finish_reasons': finishReasons,
-      'gen_ai.usage.input_tokens': isInterrupted
-        ? 0
-        : this.coerceNumber((response as any).usage?.inputTokens ?? (response as any).usage?.input_tokens),
-      'gen_ai.usage.output_tokens': isInterrupted
-        ? 0
-        : this.coerceNumber((response as any).usage?.outputTokens ?? (response as any).usage?.output_tokens),
-      'gen_ai.usage.cache_read.input_tokens': isInterrupted
-        ? 0
-        : this.coerceNumber(
-          (response as any).usage?.cacheReadTokens ?? (response as any).usage?.cache_read?.input_tokens,
-        ),
-      'gen_ai.usage.cache_creation.input_tokens': isInterrupted
-        ? 0
-        : this.coerceNumber(
-          (response as any).usage?.cacheCreationTokens ?? (response as any).usage?.cache_creation?.input_tokens,
-        ),
-      // buildOutputMessages always returns a non-empty assistant message
-      // (Round 6 fix — see buildOutputMessages comment), so the
-      // gen_ai.output.messages key is always set. validate-trace.mjs
-      // semantic.llm_has_input_output MUST rule no longer fails on
-      // empty-text / empty-toolCalls responses (refusal, length cap,
-      // empty streaming response).
-      'gen_ai.output.messages': outputMessages as JsonValue,
+      // Source-faithful finish_reasons: only present when the response
+      // declares a finishReason. Round 8 fix (PR #233) — see the comment
+      // block above for rationale. validate-trace will flag missing
+      // finish_reasons as ERROR, which is the correct signal that
+      // the source data is incomplete.
+      ...(finishReasons ? { 'gen_ai.response.finish_reasons': finishReasons } : {}),
+      // Source-faithful usage: only set when the response actually has
+      // numeric usage fields. Do NOT default to 0 (that synthesized
+      // "0 tokens used" and masked incomplete source data — see
+      // fangxiu-wf review finding #4).
+      ...this.optionalUsageField('gen_ai.usage.input_tokens',
+          (response as any).usage?.inputTokens ?? (response as any).usage?.input_tokens),
+      ...this.optionalUsageField('gen_ai.usage.output_tokens',
+          (response as any).usage?.outputTokens ?? (response as any).usage?.output_tokens),
+      ...this.optionalUsageField('gen_ai.usage.cache_read.input_tokens',
+          (response as any).usage?.cacheReadTokens ?? (response as any).usage?.cache_read?.input_tokens),
+      ...this.optionalUsageField('gen_ai.usage.cache_creation.input_tokens',
+          (response as any).usage?.cacheCreationTokens ?? (response as any).usage?.cache_creation?.input_tokens),
+      // Source-faithful output.messages: only set when text or toolCalls
+      // produced actual content. Missing when both are empty, so downstream
+      // can distinguish "truncated refusal" from "synthesized empty".
+      ...(outputMessages ? { 'gen_ai.output.messages': outputMessages } : {}),
     };
 
     const requestEntry = buildAgentActivityEntry(requestRecord as any);
     const responseEntry = buildAgentActivityEntry(responseRecord as any);
-    return [requestEntry, responseEntry];
+    const entries: AgentActivityEntry[] = [requestEntry, responseEntry];
+    if (diagnostic) entries.push(diagnostic);
+    return entries;
   }
 
   // ─── helpers ───
@@ -384,19 +448,94 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     return hex.length === 32 ? hex : undefined;
   }
 
-  private detectInterruptedResponse(
+  private detectIncompleteResponse(
     response: Record<string, unknown>,
     completedAt: string | number | undefined,
-  ): boolean {
-    if (!completedAt) return false;
+  ): { isIncomplete: boolean; missingFields: string[] } {
+    // Round 8 fix (PR #233, addressing fangxiu-wf review finding #4):
+    // we DO NOT classify incomplete responses as "interrupted" anymore.
+    // A real SIGTERM / Ctrl+C case is best detected by the host hook
+    // (see assets/hooks/minimax-code-hook-processor.mjs cmdStop),
+    // not by guessing from missing response fields. This helper now
+    // only reports WHICH fields are missing, so the diagnostic event
+    // can carry an accurate reason code.
+    //
+    // Threshold: a response is "incomplete" if BOTH the finishReason
+    // AND the content-bearing fields (text + toolCalls) are missing.
+    // This matches the original Round 2/6 SIGTERM heuristic (completedAt
+    // + no finishReason + no text + no toolCalls) but is a strict
+    // subset — the Round 2 heuristic was brittle because a normal
+    // pure-chat response (no tool calls, no usage) also satisfied it
+    // and got mis-classified as "interrupted". A response missing
+    // finishReason + text + toolCalls is genuinely broken; a response
+    // missing only usage or only toolCalls is fine and we stay quiet.
+    const missing: string[] = [];
     const finishReason = (response['finishReason'] as string | undefined)
       ?? (response['finish_reason'] as string | undefined);
-    if (typeof finishReason === 'string' && finishReason.length > 0) return false;
+    if (typeof finishReason !== 'string' || finishReason.length === 0) {
+      missing.push('finishReason');
+    }
     const text = (response['text'] as string | undefined) ?? '';
+    const hasText = typeof text === 'string' && text.length > 0;
+    if (!hasText) {
+      missing.push('text');
+    }
     const toolCalls = (response['toolCalls'] as unknown[]) ?? (response['tool_calls'] as unknown[]) ?? [];
-    if (typeof text === 'string' && text.length > 0) return false;
-    if (Array.isArray(toolCalls) && toolCalls.length > 0) return false;
-    return true;
+    const hasToolCalls = Array.isArray(toolCalls) && toolCalls.length > 0;
+    if (!hasToolCalls) {
+      missing.push('toolCalls');
+    }
+    const usage = (response as any).usage;
+    if (!usage || typeof usage !== 'object') {
+      missing.push('usage');
+    }
+    // Strict: missing finishReason AND missing (text + toolCalls).
+    // This is the genuine SIGTERM-like pattern. A normal pure-chat
+    // response has text + finishReason but no toolCalls/usage, and
+    // should NOT fire a diagnostic.
+    const isIncomplete = !hasText && !hasToolCalls && missing.includes('finishReason');
+    return { isIncomplete, missingFields: missing };
+  }
+
+  private buildIncompleteResponseDiagnostic(
+    response: Record<string, unknown>,
+    completedAt: string | number | undefined,
+    outputMessages: JsonValue | undefined,
+    finishReasons: string[] | undefined,
+  ): AgentActivityEntry | null {
+    const { isIncomplete, missingFields } = this.detectIncompleteResponse(
+      response, completedAt,
+    );
+    if (!isIncomplete) return null;
+
+    // The diagnostic event is a separate AgentActivityEntry so consumers
+    // can surface "this response was incomplete" without the llm.response
+    // entry itself carrying fabricated values. The event.name distinguishes
+    // it from normal llm.request / llm.response, and gen_ai.diagnostic.*
+    // attributes carry the reason + missing-field list.
+    const diagnosticRecord: Record<string, unknown> = {
+      'event.name': 'diagnostic',
+      time_unix_nano: timestampToUnixNanos(completedAt) ?? timestampToUnixNanos(Date.now()) ?? '0',
+      'gen_ai.agent.type': ClientType.MiniMaxCode,
+      'gen_ai.agent.name': 'MiniMax Code',
+      'gen_ai.session.id': (response['sessionId'] as string | undefined)
+        ?? (response['session_id'] as string | undefined)
+        ?? undefined,
+      'gen_ai.diagnostic.reason': 'incomplete_response',
+      'gen_ai.diagnostic.missing_fields': missingFields,
+      'gen_ai.diagnostic.completed_at_present': completedAt !== undefined,
+      // Flag the source-faithful outcome of the corresponding llm.response
+      // entry so operators can correlate diagnostic -> llm.response without
+      // parsing the JSONL.
+      'gen_ai.diagnostic.llm_response_has_output_messages': outputMessages !== undefined,
+      'gen_ai.diagnostic.llm_response_has_finish_reasons': finishReasons !== undefined,
+    };
+    return buildAgentActivityEntry(diagnosticRecord as any);
+  }
+
+  private optionalUsageField(field: string, raw: unknown): Record<string, unknown> {
+    const n = this.coerceNumber(raw);
+    return n !== undefined ? { [field]: n } : {};
   }
 
   /**
@@ -460,12 +599,12 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     return out.length > 0 ? (out as JsonValue) : undefined;
   }
 
-  private buildOutputMessages(response: Record<string, unknown>): JsonValue {
+  private buildOutputMessages(response: Record<string, unknown>): JsonValue | undefined {
     const text = (response['text'] as string | undefined) ?? '';
     const toolCalls = (response['toolCalls'] as unknown[]) ?? (response['tool_calls'] as unknown[]) ?? [];
     const finish = (response['finishReason'] as string | undefined)
-      ?? (response['finish_reason'] as string | undefined)
-      ?? 'stop';
+      ?? (response['finish_reason'] as string | undefined);
+
     const parts: JsonValue[] = [];
     if (typeof text === 'string' && text.length > 0) {
       parts.push({ type: 'text', content: text });
@@ -484,16 +623,24 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
         } as JsonValue);
       }
     }
-    // Always emit at least one assistant message. validate-trace.mjs
-    // (semantic.llm_has_input_output MUST) flags llm.response entries that
-    // omit gen_ai.output.messages as ERROR. A model call that produced no
-    // text and no tool calls (e.g. refusal, finish_reason=length with no
-    // tokens returned, an empty streaming response) still needs an empty
-    // assistant message so the entry validates. The finish_reason on the
-    // placeholder carries the actual termination signal (length/refusal/
-    // stop/etc.) so downstream consumers can distinguish "empty" from
-    // "interrupted".
-    return [{ role: 'assistant', parts, finish_reason: finish } as unknown as JsonValue];
+    // Source-faithful output: emit nothing when the response has no
+    // recoverable content. The previous Round 6 behavior synthesized a
+    // placeholder assistant message so validate-trace's
+    // semantic.llm_has_input_output rule would not ERROR — but that
+    // fabrication hid incomplete source data (refusals, length-cap
+    // terminations, schema drift) behind a fake "stop" finish_reason.
+    //
+    // Round 8 fix (PR #233, addressing fangxiu-wf review finding #4):
+    // omit the entry when nothing is recoverable, and let the
+    // separate `event.name: 'diagnostic'` entry (built by
+    // buildIncompleteResponseDiagnostic) surface the issue.
+    if (parts.length === 0) return undefined;
+
+    const message: Record<string, JsonValue | undefined> = { role: 'assistant', parts };
+    if (typeof finish === 'string' && finish.length > 0) {
+      message.finish_reason = finish;
+    }
+    return [message as unknown as JsonValue];
   }
 
   private toParts(role: string, content: unknown, msg: Record<string, unknown>): JsonValue[] {
@@ -561,10 +708,15 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     return out as JsonValue;
   }
 
-  private resolveFinishReasons(response: Record<string, unknown>): string[] {
+  private resolveFinishReasons(response: Record<string, unknown>): string[] | undefined {
+    // Source-faithful: only return a finish_reasons array when the source
+    // actually declares one. Round 8 fix (PR #233, addressing fangxiu-wf
+    // review finding #4): the previous implementation defaulted to
+    // `['stop']` when no finishReason was present, which fabricated a
+    // termination signal for incomplete source data.
     const raw = (response['finishReason'] as string | undefined)
       ?? (response['finish_reason'] as string | undefined);
-    if (typeof raw !== 'string' || raw.length === 0) return ['stop'];
+    if (typeof raw !== 'string' || raw.length === 0) return undefined;
     return [raw];
   }
 

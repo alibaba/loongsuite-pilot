@@ -41,6 +41,19 @@ export interface TrustTomlConfig {
 export interface AgentHookConfig {
   settingsPath: string;
   /**
+   * Windows-only override for `settingsPath`. Used when the official client
+   * stores its settings under a per-platform location (e.g. the official
+   * MiniMax Code 3.0.60 Windows desktop client writes to
+   * `%APPDATA%\MiniMax\settings.json`, not the POSIX `~/.minimax-code/`).
+   * When undefined, `settingsPath` is used on Windows too — that's the
+   * common case for most agents in this repo.
+   *
+   * Round 8 fix (PR #233, addressing fangxiu-wf review): without this
+   * override, Pilot was unable to detect or inject hooks into the
+   * official Windows client, so no events were captured.
+   */
+  settingsPathWindows?: string;
+  /**
    * Syntax accepted by the owning agent's settings file. Defaults to strict
    * JSON. JSONC files are edited in place so comments and unrelated formatting
    * survive hook installation.
@@ -48,6 +61,20 @@ export interface AgentHookConfig {
   settingsSyntax?: SettingsSyntax;
   events: string[];
   hookCommand: string;
+  /**
+   * Windows-only override for `hookCommand`. Used when the agent ships
+   * a Windows shell wrapper alongside the POSIX `.sh` (e.g. MiniMax Code
+   * ships both `minimax-code-loongsuite-pilot-hook.sh` and a matching
+   * `.ps1` for Windows; the AgentDefLoader's `.sh` -> `.ps1` rewrite
+   * works for cases where the extension is the only platform diff, but
+   * it can't synthesize the .ps1 from scratch if the file does not exist
+   * in the deployed `assets/hooks/` directory).
+   *
+   * Round 8 fix (PR #233, addressing fangxiu-wf review): without this
+   * override, the generated Windows command pointed to a `.ps1` file
+   * that was never shipped in the package.
+   */
+  hookCommandWindows?: string;
   format: HookFormat;
   matcher?: string;
   /** Optional matcher override keyed by hook event name. */

@@ -2070,6 +2070,12 @@ gc_old_versions() {
 # ============================================================
 remove_hook_configs() {
     local HOOK_MARKER=".loongsuite-pilot"
+    # Round 8 fix (PR #233, addressing fangxiu-wf review finding #1):
+    # the official MiniMax Code 3.0.60 Windows desktop client writes its
+    # settings to %APPDATA%\MiniMax\settings.json. We list both the
+    # legacy POSIX path and the Windows path so uninstall cleans both
+    # the POSIX install (developer machines, Linux/CI) and the Windows
+    # install (official Windows desktop client).
     local configs=(
         "$HOME/.cursor/hooks.json"
         "$HOME/.qoder/settings.json"
@@ -2082,6 +2088,8 @@ remove_hook_configs() {
         "$HOME/.kiro/agents/pilot-kiro.json"
         "$HOME/.qwen/settings.json"
         "$HOME/.workbuddy/settings.json"
+        "$HOME/.minimax-code/settings.json"
+        "${APPDATA:-$HOME/AppData/Roaming}/MiniMax/settings.json"
     )
 
     local _has_node=0

@@ -118,7 +118,11 @@ describe('MinimaxCodeRolloutInput', () => {
     );
   });
 
-  it('processSessionLine: finish_reasons 缺省 → ["stop"]', async () => {
+  it('processSessionLine: finish_reasons 缺省 → undefined (source-faithful, Round 8)', async () => {
+    // Round 8 fix (PR #233): the previous behavior defaulted to
+    // ['stop'] when no finishReason was present, fabricating a
+    // termination signal. Source-faithful behavior now omits the
+    // field entirely when the source doesn't declare one.
     const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
     const rec = {
       type: 'model-io',
@@ -130,7 +134,7 @@ describe('MinimaxCodeRolloutInput', () => {
       response: { modelId: 'm1', text: 'hello' /* no finishReason */ },
     };
     const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
-    expect(entries[1]!['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    expect(entries[1]!['gen_ai.response.finish_reasons']).toBeUndefined();
   });
 
   it('processSessionLine: traceId UUID 带连字符 → 32-hex (W3C)', async () => {
@@ -233,6 +237,49 @@ describe('MinimaxCodeRolloutInput', () => {
     const persisted = stateStore.get(stateKey);
     expect(persisted.lastOffset).toBe(fs.statSync(target).size);
     expect(persisted.extra?.minimaxCodeRollout?.inode).toBe(fs.statSync(target).ino);
+  });
+
+  it('Round 8: onStart 不重置已有 offset (Pilot 重启后从 checkpoint 恢复, 不丢 Pilot 停机期间的记录)', async () => {
+    // Round 8 fix (PR #233, addressing fangxiu-wf review finding #3):
+    // the previous onStart unconditionally set offset = stat.size and
+    // reset turnStepMap, silently discarding records appended while
+    // Pilot was stopped. The new behavior: files with a persisted
+    // checkpoint keep their offset; only first-sight files get
+    // baselined to EOF.
+    //
+    // Test setup: pre-seed state with a partial read (offset=50 of a
+    // 100-byte file). Then write more data (file grows to 150 bytes).
+    // onStart should NOT reset offset to 150; it should leave 50 so
+    // the next collect() picks up the 50..150 bytes (records written
+    // while Pilot was stopped).
+    const target = path.join(TMPDIR, 'model-io-sess_resume.jsonl');
+    fs.writeFileSync(target, '{"line":1}\n{"line":2}\n');
+    const stateKey = `minimax-code-rollout:${target}`;
+    stateStore.setOffset(stateKey, 50);
+    stateStore.update(stateKey, {
+      extra: {
+        minimaxCodeRollout: {
+          inode: fs.statSync(target).ino,
+          turnStepMap: { 'turn-x': { requestSet: ['old-req'], nextStepIdx: 5 } },
+        },
+      },
+    });
+
+    // Append more data (simulating records written while Pilot was down).
+    const originalSize = fs.statSync(target).size; // 22 (2 lines of `{"line":N}\n`)
+    fs.appendFileSync(target, '{"line":3}\n{"line":4}\n{"line":5}\n');
+    const newSize = fs.statSync(target).size;
+    expect(newSize).toBeGreaterThan(originalSize);
+
+    const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
+    await (input as any).onStart();
+
+    // offset should be 50 (NOT 150 — we don't want to lose the
+    // records written between offset 50 and 150).
+    expect(stateStore.getOffset(stateKey)).toBe(50);
+    // turnStepMap should be preserved (not reset).
+    const persisted = stateStore.get(stateKey);
+    expect(persisted.extra?.minimaxCodeRollout?.turnStepMap?.['turn-x']?.nextStepIdx).toBe(5);
   });
 
   // ─── Round 2: turnStepMap 持久化 ───
@@ -395,40 +442,56 @@ describe('MinimaxCodeRolloutInput', () => {
     expect(after.extra.minimaxCodeRollout.turnStepMap['turn_x'].nextStepIdx).toBe(99);
   });
 
-  // ─── Round 2: interrupted 路径 ───
+  // ─── Round 8: source-faithful output ───
 
-  it('Round 2: interrupted rollout (completedAt present, no finishReason/text/toolCalls) → 注入 interrupted finish_reason + 占位 output + 0 usage', async () => {
+  it('Round 8: incomplete response (completedAt present, no finishReason/text/toolCalls) → 不合成 finish_reasons / output.messages / usage,emit diagnostic event', async () => {
     const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
     const rec: any = {
       type: 'model-io',
       sessionId: 's1',
       turnId: 'turn-A',
-      request: { requestId: 'req-interrupted', messages: [{ role: 'user', content: 'hi' }] },
+      request: { requestId: 'req-incomplete', messages: [{ role: 'user', content: 'hi' }] },
       startedAt: 1700000000000,
       completedAt: 1700000001000,
       response: {
-        // 没有 finishReason / text / toolCalls
+        // No finishReason / text / toolCalls / usage — source is incomplete.
         modelId: 'm1',
-        responseId: 'r-interrupted',
+        responseId: 'r-incomplete',
       },
     };
     const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    // 3 entries: request, response, diagnostic
+    expect(entries.length).toBe(3);
+    const requestEntry = entries[0];
     const responseEntry = entries[1];
-    expect(responseEntry['gen_ai.response.finish_reasons']).toEqual(['interrupted']);
-    // 占位 output.messages
-    const outMsgs = responseEntry['gen_ai.output.messages'];
-    expect(Array.isArray(outMsgs)).toBe(true);
-    expect(outMsgs.length).toBe(1);
-    expect(outMsgs[0].role).toBe('assistant');
-    expect(outMsgs[0].finish_reason).toBe('interrupted');
-    // usage 全 0
-    expect(responseEntry['gen_ai.usage.input_tokens']).toBe(0);
-    expect(responseEntry['gen_ai.usage.output_tokens']).toBe(0);
-    expect(responseEntry['gen_ai.usage.cache_read.input_tokens']).toBe(0);
-    expect(responseEntry['gen_ai.usage.cache_creation.input_tokens']).toBe(0);
+    const diagnosticEntry = entries[2];
+
+    // Source-faithful response: NO finish_reasons, NO output.messages,
+    // NO usage tokens. The entry explicitly omits these so downstream
+    // can distinguish "incomplete source data" from "synthesized".
+    expect(responseEntry['gen_ai.response.finish_reasons']).toBeUndefined();
+    expect(responseEntry['gen_ai.output.messages']).toBeUndefined();
+    expect(responseEntry['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(responseEntry['gen_ai.usage.output_tokens']).toBeUndefined();
+    expect(responseEntry['gen_ai.usage.cache_read.input_tokens']).toBeUndefined();
+    expect(responseEntry['gen_ai.usage.cache_creation.input_tokens']).toBeUndefined();
+
+    // Request entry still has the input messages (those were present).
+    expect(requestEntry['event.name']).toBe('llm.request');
+
+    // Diagnostic event surfaces the issue without fabricating GenAI
+    // semantics in the llm.response entry.
+    expect(diagnosticEntry['event.name']).toBe('diagnostic');
+    expect(diagnosticEntry['gen_ai.diagnostic.reason']).toBe('incomplete_response');
+    expect(diagnosticEntry['gen_ai.diagnostic.missing_fields']).toEqual(
+      expect.arrayContaining(['finishReason', 'text', 'toolCalls', 'usage']),
+    );
+    expect(diagnosticEntry['gen_ai.diagnostic.completed_at_present']).toBe(true);
+    expect(diagnosticEntry['gen_ai.diagnostic.llm_response_has_output_messages']).toBe(false);
+    expect(diagnosticEntry['gen_ai.diagnostic.llm_response_has_finish_reasons']).toBe(false);
   });
 
-  it('Round 2: 正常 finishReason 时不注入 interrupted (走原 finish_reason)', async () => {
+  it('Round 8: 正常 finishReason 时不 emit diagnostic,只 llm.request + llm.response', async () => {
     const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
     const rec: any = {
       type: 'model-io',
@@ -440,11 +503,13 @@ describe('MinimaxCodeRolloutInput', () => {
       response: { modelId: 'm1', text: 'hello', finishReason: 'stop' },
     };
     const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    // 2 entries: no diagnostic, normal finish_reasons ['stop']
+    expect(entries.length).toBe(2);
     expect(entries[1]['gen_ai.response.finish_reasons']).toEqual(['stop']);
-    expect(entries[1]['gen_ai.usage.input_tokens']).not.toBe(0); // 真实值
+    expect(entries[1]['gen_ai.usage.input_tokens']).toBeUndefined(); // not set, no usage in source
   });
 
-  it('Round 2: completedAt 缺失时不视为 interrupted (fallback to stop)', async () => {
+  it('Round 8: completedAt 缺失 + 多个字段缺失 → emit diagnostic', async () => {
     const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
     const rec: any = {
       type: 'model-io',
@@ -456,34 +521,44 @@ describe('MinimaxCodeRolloutInput', () => {
       response: { modelId: 'm1' },
     };
     const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
-    expect(entries[1]['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    expect(entries.length).toBe(3);
+    const responseEntry = entries[1];
+    expect(responseEntry['gen_ai.response.finish_reasons']).toBeUndefined();
+    const diagnosticEntry = entries[2];
+    expect(diagnosticEntry['event.name']).toBe('diagnostic');
+    expect(diagnosticEntry['gen_ai.diagnostic.completed_at_present']).toBe(false);
   });
 
-  it('Round 2: 有 text 但 completedAt 缺失 → 不视为 interrupted', async () => {
+  it('Round 8: 有 text + finishReason + usage → 不 emit diagnostic (3 fields present)', async () => {
     const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
     const rec: any = {
       type: 'model-io',
       sessionId: 's1',
       turnId: 'turn-A',
-      request: { requestId: 'req-text-only', messages: [] },
+      request: { requestId: 'req-3-fields', messages: [] },
+      startedAt: 1700000000000,
       // no completedAt
-      response: { modelId: 'm1', text: 'partial response' },
+      response: { modelId: 'm1', text: 'ok', finishReason: 'stop', usage: { inputTokens: 5 } },
     };
     const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
-    // 没有 completedAt 触发 interrupted 检测,fallback to resolveFinishReasons
-    // 也没 finishReason → 'stop'
+    // 2 entries: 3 of 4 fields present, so not incomplete
+    expect(entries.length).toBe(2);
     expect(entries[1]['gen_ai.response.finish_reasons']).toEqual(['stop']);
   });
 
-  // ─── Round 6: empty output messages placeholder ───
+  // ─── Round 8: empty output.messages omission ───
 
-  it('Round 6: text+toolCalls 都空但有 finishReason (e.g. length cap) → 始终 emit 占位 output.messages (validate-trace semantic.llm_has_input_output)', async () => {
-    // Previously buildOutputMessages returned undefined in this case,
-    // making the llm.response entry omit gen_ai.output.messages, which
-    // validate-trace.mjs semantic.llm_has_input_output MUST rule flagged
-    // as ERROR. Round 6 fix: always emit a placeholder assistant message
-    // carrying the real finish_reason so the entry validates AND the
-    // termination signal is preserved.
+  it('Round 8: text+toolCalls 都空但有 finishReason (e.g. length cap) → 不 emit output.messages, 不 emit diagnostic (finishReason 已说清)', async () => {
+    // The previous Round 6 behavior emitted a placeholder assistant
+    // message so validate-trace's semantic.llm_has_input_output rule
+    // would not ERROR. Round 8 (source-faithful) reverses that: a model
+    // call that produced no recoverable content now leaves
+    // gen_ai.output.messages unset. The finish_reasons=['length'] field
+    // already tells the story ("model hit token cap, no content"), so
+    // we do NOT emit a separate diagnostic — the diagnostic is
+    // reserved for the truly broken case (no finishReason + no
+    // content). validate-trace WILL flag the entry as missing output
+    // messages, which is the correct signal for downstream.
     const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
     const rec: any = {
       type: 'model-io',
@@ -501,18 +576,10 @@ describe('MinimaxCodeRolloutInput', () => {
       },
     };
     const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    expect(entries.length).toBe(2);
     const responseEntry = entries[1];
-    // 不是 interrupted, finish_reason 用 response.finishReason='length'
+    // response carries finish_reasons=['length'] but NO output.messages
     expect(responseEntry['gen_ai.response.finish_reasons']).toEqual(['length']);
-    // 必须有 output.messages (validate-trace 不再 ERROR)
-    const outMsgs = responseEntry['gen_ai.output.messages'];
-    expect(Array.isArray(outMsgs)).toBe(true);
-    expect(outMsgs.length).toBe(1);
-    expect(outMsgs[0].role).toBe('assistant');
-    // placeholder 携带真实 finish_reason (length),不是 'stop' 也不是 'interrupted'
-    expect(outMsgs[0].finish_reason).toBe('length');
-    // parts 是空数组 (no text, no tool calls)
-    expect(Array.isArray(outMsgs[0].parts)).toBe(true);
-    expect(outMsgs[0].parts.length).toBe(0);
+    expect(responseEntry['gen_ai.output.messages']).toBeUndefined();
   });
 });

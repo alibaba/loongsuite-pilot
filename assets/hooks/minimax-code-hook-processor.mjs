@@ -236,7 +236,20 @@ function cmdPostToolUse() {
   if (isError) {
     status = 'error';
   } else if (toolResult && typeof toolResult === 'object') {
-    status = toolResult.status || (toolResult.exitCode === 0 ? 'success' : 'error');
+    // Round 8 fix (PR #233, addressing fangxiu-wf review): previously a
+    // non-empty object without `status` AND without `exitCode` (e.g.
+    // {content: "ok"} from a MiniMax Code tool result) fell through to
+    // 'error' because `undefined || (undefined === 0 ? 'success' : 'error')`
+    // is 'error'. Honor status/exitCode when present, otherwise assume
+    // success (the !isError path is itself a positive signal that the
+    // tool call returned without an error).
+    if (typeof toolResult.status === 'string' && toolResult.status.length > 0) {
+      status = toolResult.status;
+    } else if (typeof toolResult.exitCode === 'number') {
+      status = toolResult.exitCode === 0 ? 'success' : 'error';
+    } else {
+      status = 'success';
+    }
   } else {
     status = 'success';
   }
