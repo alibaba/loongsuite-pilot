@@ -24,12 +24,22 @@ export class MinimaxCodeLogInput extends BaseHookInput {
   readonly id = 'minimax-code-log';
   readonly agentType = ClientType.MiniMaxCode;
 
-  constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
+  constructor(
+    opts: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] },
+  ) {
+    // Round 9 fix (PR #233, addressing copilot suppressed comment): the
+    // previous `opts?` + `opts!.stateStore` shape was a runtime footgun —
+    // `new MinimaxCodeLogInput()` would crash on `undefined.stateStore`
+    // instead of getting a clear typecheck error. `stateStore` is required
+    // by the base class (`InputOptions.stateStore: StateStore`), so the
+    // argument is required here too. `logDir` / `logPrefix` /
+    // `pollIntervalMs` keep their `?` because they have sensible defaults
+    // resolved below.
     super({
-      stateStore: opts!.stateStore,
-      logDir: opts?.logDir ?? resolveHome('~/.loongsuite-pilot/logs/minimax-code'),
-      logPrefix: opts?.logPrefix ?? 'minimax-code',
-      pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
+      stateStore: opts.stateStore,
+      logDir: opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/minimax-code'),
+      logPrefix: opts.logPrefix ?? 'minimax-code',
+      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
     });
   }
 

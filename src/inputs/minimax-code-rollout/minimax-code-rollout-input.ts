@@ -332,9 +332,6 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     // (event.name = "diagnostic" AND gen_ai.diagnostic.reason).
     const outputMessages = this.buildOutputMessages(response);
     const finishReasons = this.resolveFinishReasons(response);
-    const diagnostic = this.buildIncompleteResponseDiagnostic(
-      response, completedAt, outputMessages, finishReasons,
-    );
 
     const traceId = this.normalizeTraceId(
       (record['traceId'] as string | undefined) ?? (record['trace_id'] as string | undefined),
@@ -361,6 +358,29 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     // attempt>1 retries collapse into one STEP span). Persisted across
     // restarts. Cleared on file rotation (see collect() pre-pass).
     const stepId = this.allocateStepId(filePath, turnId ?? '', requestId);
+
+    // Round 9 fix (PR #233, copilot suppressed comment): compute the
+    // diagnostic BEFORE building sharedFields, but pass sharedFields
+    // (session/turn/step/response id + trace_id) into it so the
+    // diagnostic event can be correlated with the paired llm.request /
+    // llm.response. The previous implementation read
+    // response.sessionId / response.session_id, but in the MiniMax Code
+    // rollout schema sessionId lives at the top-level record (not in
+    // the nested `response` object), so the diagnostic came out with
+    // an empty `gen_ai.session.id` and lost correlation.
+    const diagnostic = this.buildIncompleteResponseDiagnostic({
+      response,
+      completedAt,
+      outputMessages,
+      finishReasons,
+      sharedFields: {
+        sessionId,
+        turnId,
+        stepId,
+        responseId,
+        traceId,
+      },
+    });
 
     // Round 3 (PR #233): emit paired llm.request + llm.response entries
     // instead of the Round 1 combined single entry. The OTLP trace
@@ -497,12 +517,20 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     return { isIncomplete, missingFields: missing };
   }
 
-  private buildIncompleteResponseDiagnostic(
-    response: Record<string, unknown>,
-    completedAt: string | number | undefined,
-    outputMessages: JsonValue | undefined,
-    finishReasons: string[] | undefined,
-  ): AgentActivityEntry | null {
+  private buildIncompleteResponseDiagnostic(opts: {
+    response: Record<string, unknown>;
+    completedAt: string | number | undefined;
+    outputMessages: JsonValue | undefined;
+    finishReasons: string[] | undefined;
+    sharedFields: {
+      sessionId: string;
+      turnId: string | undefined;
+      stepId: string | undefined;
+      responseId: string;
+      traceId: string | undefined;
+    };
+  }): AgentActivityEntry | null {
+    const { response, completedAt, outputMessages, finishReasons, sharedFields } = opts;
     const { isIncomplete, missingFields } = this.detectIncompleteResponse(
       response, completedAt,
     );
@@ -513,14 +541,29 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     // entry itself carrying fabricated values. The event.name distinguishes
     // it from normal llm.request / llm.response, and gen_ai.diagnostic.*
     // attributes carry the reason + missing-field list.
+    //
+    // Round 9 fix (PR #233, copilot suppressed comment): the previous
+    // implementation read session/turn/step/trace_id from
+    // `response.sessionId` / `response.session_id`, but in the MiniMax
+    // Code rollout schema these fields live at the TOP-LEVEL record
+    // (sessionId / turnId on the record; responseId / requestId on the
+    // record or nested request/response), not on the nested `response`
+    // object. As a result the diagnostic event came out with an empty
+    // `gen_ai.session.id` and lost correlation with the paired
+    // llm.response entry. Now we receive the already-computed
+    // sharedFields from the outer processSessionLine scope and copy
+    // them verbatim so the diagnostic and the response entries share
+    // the exact same correlation key.
     const diagnosticRecord: Record<string, unknown> = {
       'event.name': 'diagnostic',
       time_unix_nano: timestampToUnixNanos(completedAt) ?? timestampToUnixNanos(Date.now()) ?? '0',
       'gen_ai.agent.type': ClientType.MiniMaxCode,
       'gen_ai.agent.name': 'MiniMax Code',
-      'gen_ai.session.id': (response['sessionId'] as string | undefined)
-        ?? (response['session_id'] as string | undefined)
-        ?? undefined,
+      'gen_ai.session.id': sharedFields.sessionId,
+      ...(sharedFields.turnId !== undefined ? { 'gen_ai.turn.id': sharedFields.turnId } : {}),
+      ...(sharedFields.stepId !== undefined ? { 'gen_ai.step.id': sharedFields.stepId } : {}),
+      'gen_ai.response.id': sharedFields.responseId,
+      ...(sharedFields.traceId ? { trace_id: sharedFields.traceId } : {}),
       'gen_ai.diagnostic.reason': 'incomplete_response',
       'gen_ai.diagnostic.missing_fields': missingFields,
       'gen_ai.diagnostic.completed_at_present': completedAt !== undefined,

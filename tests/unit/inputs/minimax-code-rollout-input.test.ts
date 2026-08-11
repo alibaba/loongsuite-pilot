@@ -489,6 +489,23 @@ describe('MinimaxCodeRolloutInput', () => {
     expect(diagnosticEntry['gen_ai.diagnostic.completed_at_present']).toBe(true);
     expect(diagnosticEntry['gen_ai.diagnostic.llm_response_has_output_messages']).toBe(false);
     expect(diagnosticEntry['gen_ai.diagnostic.llm_response_has_finish_reasons']).toBe(false);
+
+    // Round 9 fix (PR #233, copilot suppressed comment): the diagnostic
+    // event must carry the SAME correlation keys as the paired
+    // llm.request / llm.response entries so operators can join them
+    // back. sessionId / turnId / stepId / responseId / trace_id come
+    // from the top-level rollout record (not the nested `response`
+    // object), so this assertion would have failed before Round 9.
+    expect(diagnosticEntry['gen_ai.session.id']).toBe('s1');
+    expect(diagnosticEntry['gen_ai.turn.id']).toBe('turn-A');
+    expect(diagnosticEntry['gen_ai.step.id']).toBe('turn-A:s1');
+    expect(diagnosticEntry['gen_ai.response.id']).toBe('r-incomplete');
+    // session/turn/step/response.id must match the llm.response entry
+    // so an operator can join the two on any of these keys.
+    expect(diagnosticEntry['gen_ai.session.id']).toBe(responseEntry['gen_ai.session.id']);
+    expect(diagnosticEntry['gen_ai.turn.id']).toBe(responseEntry['gen_ai.turn.id']);
+    expect(diagnosticEntry['gen_ai.step.id']).toBe(responseEntry['gen_ai.step.id']);
+    expect(diagnosticEntry['gen_ai.response.id']).toBe(responseEntry['gen_ai.response.id']);
   });
 
   it('Round 8: 正常 finishReason 时不 emit diagnostic,只 llm.request + llm.response', async () => {

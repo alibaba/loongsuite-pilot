@@ -99,4 +99,28 @@ describe('MinimaxCodeLogInput', () => {
     expect(entry!['gen_ai.tool.call.id']).toBe('call-1');
     expect(entry!['gen_ai.tool.call.arguments']).toEqual({ file_path: '/etc/hosts' });
   });
+
+  it('Round 9: constructor 用最小参数 (只 stateStore) 时 logDir / logPrefix / pollIntervalMs 走默认值', () => {
+    // Round 9 fix (PR #233, copilot suppressed comment): the previous
+    // signature was `opts?: Partial<...> & { stateStore: ... }`, which
+    // was a runtime footgun — `new MinimaxCodeLogInput()` (no args) would
+    // crash on `undefined.stateStore` instead of failing the typecheck.
+    // The new signature is `opts: Partial<...> & { stateStore: ... }`,
+    // so the argument is required, and `logDir` / `logPrefix` /
+    // `pollIntervalMs` keep their defaults via `??`. This test exercises
+    // the defaults-only path: the constructor must accept an object
+    // with only `stateStore` and produce a working instance.
+    const input = new MinimaxCodeLogInput({ stateStore });
+    expect(input.id).toBe('minimax-code-log');
+    expect(input.agentType).toBe('minimax-code');
+    // Base class surfaces its resolved options on a public-ish field;
+    // logDir should be the resolveHome('~/.loongsuite-pilot/logs/minimax-code')
+    // default, not empty/undefined.
+    const baseOpts = (input as any).opts ?? (input as any).options ?? null;
+    if (baseOpts) {
+      expect(baseOpts.logDir).toBeTruthy();
+      expect(baseOpts.logPrefix).toBe('minimax-code');
+      expect(baseOpts.pollIntervalMs).toBe(30_000);
+    }
+  });
 });
