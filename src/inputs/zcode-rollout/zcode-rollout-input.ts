@@ -119,7 +119,6 @@ export class ZCodeRolloutInput extends BaseInput {
       return [];
     }
 
-    const prevOffset = this.stateStore.getOffset(stateKey);
     const prevState = this.stateStore.get(stateKey);
     const prevInode = prevState.extra?.inode as number | undefined;
 
@@ -515,8 +514,12 @@ export class ZCodeRolloutInput extends BaseInput {
     // or times out, response.finishReason may be null/empty. Defaulting to 'stop'
     // incorrectly marks interrupted sessions as normal completions and causes
     // the flusher to treat this as a terminal signal, dropping late hook entries.
-    // Use 'unknown' as neutral default; the hook path provides the real finish_reason.
-    const finishReason = str(response.finishReason) ?? str(response.finish_reason) ?? 'unknown';
+    // When completedAt exists but finishReason is missing → 'interrupted'.
+    // When both are missing → 'end_turn' as safe neutral (not a terminal signal).
+    const rawFinishReason = str(response.finishReason) ?? str(response.finish_reason);
+    const hasCompletedAt = !!(str(record.completedAt) ?? str(record.completed_at));
+    const finishReason = rawFinishReason
+      ?? (hasCompletedAt ? 'interrupted' : 'end_turn');
     const responseId = str(response.responseId) ?? str(response.response_id) ?? requestId;
     const responseModelId = str(response.modelId) ?? str(response.model_id) ?? modelId;
     const toolCallsRaw = Array.isArray(response.toolCalls) ? response.toolCalls : [];
@@ -650,7 +653,7 @@ export class ZCodeRolloutInput extends BaseInput {
     // interrupted sessions.
     const outputMessages: JsonValue = outputParts.length > 0
       ? [{ role: 'assistant', parts: outputParts }]
-      : (finishReason === 'unknown' || finishReason === 'interrupted')
+      : finishReason === 'interrupted'
         ? [{ role: 'assistant', parts: [{ type: 'text', content: '' }] }]
         : [];
 

@@ -9,9 +9,10 @@
  *   output message: { role: 'assistant', parts: [{type:'text',content},{type:'tool_call',...}] }
  *   tool result:    { role: 'tool', tool_call_id, parts: [{type:'tool_result', content}] }
  *
- * This module is shared logic — both the hook-processor (mjs envelope path)
- * and the rollout input (ts path that re-implements inline) must produce
- * identical message shapes. Tests verify equivalence on the paired fixture.
+ * NOTE: This module is NOT currently imported by zcode-hook-processor.mjs or
+ * ZCodeRolloutInput — both implement their own message conversion inline.
+ * This file serves as the reference message-shape spec; record shape
+ * equivalence is verified by tests in tests/unit/hooks/zcode/.
  */
 
 /**

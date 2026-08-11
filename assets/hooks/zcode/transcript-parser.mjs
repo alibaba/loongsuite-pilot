@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * transcript-parser.mjs — ZCode rollout JSONL `model_io` parser.
+ * transcript-parser.mjs — ZCode rollout JSONL `model_io` parser (reference implementation).
  *
  * Source: ~/.zcode/cli/rollout/model-io-sess_<sanitized-sid>.jsonl
  * Each line is a complete LLM attempt record (model_io), containing:
@@ -11,19 +11,12 @@
  *   request{messages_sample_truncated[], toolNames[], messageCount, messagesKind},
  *   response{text, finishReason, responseId, modelId, toolCalls[], usage{...}}
  *
- * This module converts ONE rollout line into a structured TurnAttempt object
- * that the hook-processor's buildRolloutRecords() then expands into the
- * canonical event_t records (llm.request + llm.response + tool.call/result
- * + STEP envelope).
- *
- * Pure data transform — no JSONL writing here. Used by both:
- *   - assets/hooks/zcode-hook-processor.mjs (mjs, envelope path fallback)
- *   - tests/unit/hooks/zcode/*.test.mjs (vitest)
- *
- * NOT used by ZCodeRolloutInput (ts) — the TS input re-implements the same
- * parsing inline because it must return AgentActivityEntry[] directly.
- * The record shapes produced by both paths are identical (verified by the
- * 'paired fixture three-field consistency' test in tests/unit/hooks/zcode/).
+ * NOTE: This module is NOT currently imported by zcode-hook-processor.mjs or
+ * ZCodeRolloutInput. Both of those implement their own parsing inline (the
+ * hook-processor emits envelope-only records, the TS rollout input returns
+ * AgentActivityEntry[] directly). This file serves as the reference data-
+ * transform spec; record shape equivalence is verified by the 'paired fixture
+ * three-field consistency' test in tests/unit/hooks/zcode/.
  */
 
 /**

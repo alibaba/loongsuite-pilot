@@ -111,16 +111,21 @@ async function cmdStop() {
     return;
   }
 
+  // timestamp: use event's own timestamp for determinism (same Stop event
+  // firing twice must produce the same fallback turnId for idempotency).
+  const timestamp = getString(event, 'timestamp') || new Date().toISOString();
+
   // turnId: ZCode Stop stdin guarantees session_id but turnId is best-effort.
-  // When absent, derive a deterministic turn id from sessionId + timestamp
-  // so the AGENT envelope is still emitted for cross-source stitching.
+  // When absent, derive a deterministic turn id from sessionId + the event's
+  // timestamp so the AGENT envelope is still emitted for cross-source stitching.
+  // Uses the event's timestamp (NOT new Date()) so re-invocation of the same
+  // Stop event produces the same turnId — preserving idempotency guard.
   const turnId = getString(event, 'turn_id', 'turnId')
-    || deriveSpanId('turn-fallback', sessionId, new Date().toISOString());
+    || deriveSpanId('turn-fallback', sessionId, timestamp);
 
   // traceId: generate a W3C-compliant 32-hex trace_id when absent (NOT 16-hex).
   const traceIdRaw = getString(event, 'trace_id', 'traceId');
   const traceId = traceIdRaw ? toW3CTraceId(traceIdRaw) : toW3CTraceId(generateTraceId());
-  const timestamp = getString(event, 'timestamp') || new Date().toISOString();
   const cwd = getString(event, 'cwd');
   const stopReason = getString(event, 'stop_reason', 'stopReason') || 'end_turn';
 

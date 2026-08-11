@@ -699,7 +699,13 @@ export class HookStrategy implements DeployStrategy {
     const existing = await readJsonFile<Record<string, unknown>>(resolvedPath);
     if (!existing) return; // ensureSettingsFile should have created it
 
-    const hooks = (existing.hooks as Record<string, unknown> | undefined) ?? {};
+    // Guard: existing.hooks may be a non-object (e.g. boolean from user config).
+    // Only reuse if it's a plain object; otherwise start fresh.
+    const rawHooks = existing.hooks;
+    const hooks: Record<string, unknown> =
+      (rawHooks && typeof rawHooks === 'object' && !Array.isArray(rawHooks))
+        ? { ...(rawHooks as Record<string, unknown>) }
+        : {};
     if (hooks.enabled === true) return; // already enabled
 
     hooks.enabled = true;
