@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 
@@ -19,26 +19,24 @@ function extractOpenClawCleanupScripts() {
   ];
 }
 
-// Hook-mode agents whose settings files must be cleaned on uninstall. Kept in
-// sync with agents.d/*.json (deployMode: hook). A missing entry means the
-// agent's hook survives uninstall.
-const HOOK_CONFIG_FILES = [
-  '.cursor/hooks.json',
-  '.qoder/settings.json',
-  '.qoder-cn/settings.json',
-  '.qoderwork/settings.json',
-  '.qoderworkcn/settings.json',
-  '.claude/settings.json',
-  '.qwen/settings.json',
-  '.workbuddy/settings.json',
-];
+// Derive lifecycle coverage from the deployment manifests. New hook agents
+// must not require a second hand-maintained list in this test.
+const HOOK_CONFIG_FILES = [...new Set(
+  readdirSync(resolve('agents.d'))
+    .filter(name => name.endsWith('.json'))
+    .map(name => JSON.parse(readFileSync(resolve('agents.d', name), 'utf-8')))
+    .filter(agent => agent.deployMode === 'hook' && agent.hook?.settingsPath)
+    .map(agent => agent.hook.settingsPath.replace(/^~\//, '')),
+)].sort();
 
 describe('uninstall cleans hook configs for all hook agents', () => {
   for (const f of HOOK_CONFIG_FILES) {
     it(`sh remove_hook_configs includes ${f}`, () => {
       expect(sh).toContain(`$HOME/${f}`);
     });
-    it(`ps1 Remove-HookConfigs includes ${f}`, () => {
+    it(`PowerShell uninstall covers ${f}`, () => {
+      // Codex uses a dedicated schema-aware cleanup function; checking the
+      // complete installer source covers both generic and dedicated cleaners.
       expect(ps1).toContain(f.replace(/\//g, '\\'));
     });
   }

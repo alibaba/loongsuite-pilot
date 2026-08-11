@@ -6,6 +6,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'qoder-idea': 'qoder',
   'qoder-work': 'qoder',
   'qoder-work-cn': 'qoder',
+  'qwen-work-cn': 'qwen',
   'qoder-cli': 'qoder',
   'qoder-cli-hook': 'qoder',
   'cursor': 'cursor',

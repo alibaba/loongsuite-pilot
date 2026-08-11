@@ -47,12 +47,16 @@ vi.mock('../../../src/core/agent-control-manager.js', () => ({
 const mockDiscoveryStart = vi.fn().mockResolvedValue(undefined);
 const mockDiscoveryStop = vi.fn().mockResolvedValue(undefined);
 const discoveryHandlers: Record<string, Function> = {};
+let discoveryEntries: Array<{ id: string; watchPaths: string[]; enabled: () => boolean }> = [];
 vi.mock('../../../src/core/agent-discovery-service.js', () => ({
-  AgentDiscoveryService: vi.fn().mockImplementation(() => ({
-    start: mockDiscoveryStart,
-    stop: mockDiscoveryStop,
-    on: vi.fn((event: string, handler: Function) => { discoveryHandlers[event] = handler; }),
-  })),
+  AgentDiscoveryService: vi.fn().mockImplementation((entries = []) => {
+    discoveryEntries = entries;
+    return {
+      start: mockDiscoveryStart,
+      stop: mockDiscoveryStop,
+      on: vi.fn((event: string, handler: Function) => { discoveryHandlers[event] = handler; }),
+    };
+  }),
 }));
 
 vi.mock('@alicloud/log', () => ({
@@ -209,6 +213,7 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
 describe('Orchestrator', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    discoveryEntries = [];
   });
 
   describe('startup sequence (T038)', () => {
@@ -261,6 +266,51 @@ describe('Orchestrator', () => {
       const input = (orch as any).inputManager.getInput('opencode-log');
       expect(input).toBeDefined();
       expect(input.pollIntervalMs).toBe(1000);
+
+      await orch.stop();
+    });
+
+    it('uses the configured dataDir for all QwenWorkCN Hook and intercept paths', async () => {
+      const dataDir = '/tmp/custom-pilot-data';
+      const orch = new Orchestrator(makeConfig({ dataDir }));
+      await orch.start();
+
+      const input = orch.getInputManager().getInput('qwen-work-cn-trace') as any;
+      const historyDir = `${dataDir}/logs/qwen-work-cn/history`;
+      const interceptFile = `${dataDir}/logs/qwenworkcn-intercept.jsonl`;
+      expect(input.logDir).toBe(historyDir);
+      expect(input.interceptFile).toBe(interceptFile);
+
+      const detection = discoveryEntries.find(entry => entry.id === 'qwen-work-cn-trace');
+      expect(detection?.watchPaths).toEqual([
+        historyDir,
+        '/home/test/.qwenworkcn/logs/sessions',
+        interceptFile,
+      ]);
+
+      await orch.stop();
+    });
+
+    it('registers the QwenWorkCN Hook listener as a fallback when trace is disabled', async () => {
+      const config = makeConfig();
+      config.listeners['qwen-work-cn-trace'] = { enabled: false };
+      config.listeners['qwen-work-cn-hook'] = { enabled: true, pollInterval: 1234 };
+
+      const orch = new Orchestrator(config);
+      await orch.start();
+
+      const input = orch.getInputManager().getInput('qwen-work-cn-hook') as any;
+      expect(input).toBeDefined();
+      expect(input.pollIntervalMs).toBe(1234);
+      const detection = discoveryEntries.find(entry => entry.id === 'qwen-work-cn-hook');
+      expect(detection?.watchPaths).toEqual([
+        `${config.dataDir}/logs/qwen-work-cn/history`,
+      ]);
+      // Isolate listener fallback selection from the independently tested
+      // agent-control/config gates used by every detection entry.
+      (orch as any).isAgentGatedEnabled = () => true;
+      (orch as any).agentControlManager.resolveEnabled = (_id: string, configured: boolean) => configured;
+      expect(detection?.enabled()).toBe(true);
 
       await orch.stop();
     });
