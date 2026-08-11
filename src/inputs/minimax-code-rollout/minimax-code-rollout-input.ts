@@ -69,9 +69,12 @@ interface MinimaxCodeRolloutFileState {
  *     重新分配 traceId, 造成事件归并错位。
  *   - turnStepMap 持久化 (Round 2): per-turn 计数器 + requestId 去重,
  *     跨重启 step.id 稳定。文件轮转 (inode 变化) 时清空。
- *   - interrupted 路径注入 (Round 2): completedAt 存在 + response.finishReason
- *     为 null/空 + 无 text/toolCalls → 注入 finish_reasons=['interrupted']
- *     + 占位 output.messages + 0 usage, 满足 validate-trace 强制规则。
+ *   - interrupted 路径注入 (Round 2) — REVERTED in Round 8: 之前会注入
+ *     finish_reasons=['interrupted'] + 占位 output.messages + 0 usage,
+ *     但这跟真实 SIGTERM/长度上限截断/拒绝回答无法区分, 制造了假 GenAI
+ *     语义。Round 8 改为 source-faithful: 缺字段就不 emit, 单独 emit 一个
+ *     event.name='diagnostic' 的事件来标记"response 结构不完整" (见下方
+ *     Round 8 段落)。
  *
  * Round 3 (PR #233): processSessionLine now emits paired
  *   llm.request + llm.response entries (BaseSessionInput changed to
@@ -93,17 +96,39 @@ interface MinimaxCodeRolloutFileState {
  *   block so the host command-hook protocol never blocks on an empty
  *   stdout.
  *
- * Round 6 (PR #233): buildOutputMessages now always returns at least
- *   one assistant message (even when both text and toolCalls are
- *   empty), so gen_ai.output.messages is unconditionally set on every
- *   llm.response entry. validate-trace.mjs semantic.llm_has_input_output
- *   MUST rule previously flagged empty-text / empty-toolCalls responses
- *   (refusals, length-cap terminations, empty streaming responses) as
- *   ERROR for missing output.messages. The finish_reason on the empty
- *   placeholder carries the actual termination signal (length/refusal/
- *   stop/etc.) so downstream consumers can still distinguish "empty"
- *   from "interrupted" (which uses finish_reason='interrupted' on the
- *   same placeholder shape).
+ * Round 6 (PR #233): buildOutputMessages initially forced a placeholder
+ *   assistant message on every empty-text / empty-toolCalls response so
+ *   validate-trace would not flag it as ERROR. This was superseded by
+ *   Round 8 — see below.
+ *
+ * Round 8 (PR #233): source-faithful output. The previous Round 2/6
+ *   behavior synthesized finish_reasons, output.messages, and usage
+ *   fields whenever the response was structurally incomplete, which
+ *   fabricated GenAI semantics (a refusal and a SIGTERM became
+ *   indistinguishable). The new behavior: buildOutputMessages returns
+ *   JsonValue | undefined and is omitted from the entry when the source
+ *   has no recoverable content; resolveFinishReasons returns
+ *   string[] | undefined (no ['stop'] default); optionalUsageField only
+ *   emits a field when the source actually has a numeric value. A
+ *   separate event.name='diagnostic' entry (carrying
+ *   gen_ai.diagnostic.{reason, missing_fields, ...}) is appended when
+ *   the response is structurally incomplete (no text + no toolCalls +
+ *   no finishReason), so operators have a single grep target
+ *   (event.name='diagnostic' AND gen_ai.diagnostic.reason) for
+ *   follow-up. validate-trace WILL now flag missing output.messages /
+ *   finish_reasons as ERROR by design — that is the correct signal
+ *   that the source data is incomplete. See fangxiu-wf review
+ *   finding #4.
+ *
+ * Round 9 (PR #233): diagnostic event now carries the same correlation
+ *   keys (gen_ai.session.id / turn.id / step.id / response.id / trace_id)
+ *   as the paired llm.request / llm.response entries. Previously the
+ *   diagnostic read sessionId / session_id from the nested `response`
+ *   object, but in the MiniMax Code rollout schema these live at the
+ *   TOP-LEVEL record, so every diagnostic came out with an empty
+ *   gen_ai.session.id and lost correlation. buildIncompleteResponseDiagnostic
+ *   now accepts sharedFields from processSessionLine scope and copies
+ *   them verbatim.
  *
  * Future work (见 PR description "Future Work"):
  *   - synthesizeOrphanToolRecords flusher enhancement, deferred

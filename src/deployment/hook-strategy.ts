@@ -273,8 +273,20 @@ export class HookStrategy implements DeployStrategy {
     // the POSIX `~/.minimax-code/`. Resolve per-platform so the Windows
     // AgentDefLoader's `*.sh` -> `*.ps1` rewrite (driven by `hookCommand`)
     // uses a settings path that actually exists on Windows.
+    //
+    // Round 10 fix (PR #233, copilot suppressed comment): the previous
+    // Round 8 code declared `resolvedSettingsPath` and
+    // `resolvedHookCommand` but only the former was actually used (for
+    // `ensureSettingsFile`); `applyExtraSettings` / `applyEnvToSettings` /
+    // `removeTrustBlock` all still received the raw POSIX
+    // `hookConfig.settingsPath`, so on Windows the sibling-flag writes
+    // (e.g. `settings.hooks.enabled=true`) hit a non-existent file and
+    // the deployment was reported successful even though the required
+    // flag was never persisted. `buildHookDefinitions` was already
+    // correct (it has its own per-platform resolve); only the deploy()
+    // envelope leaked POSIX paths. Now we use `resolvedSettingsPath`
+    // everywhere a settings file is read or written.
     const resolvedSettingsPath = resolvePlatformSettingsPath(hookConfig);
-    const resolvedHookCommand = resolvePlatformHookCommand(hookConfig);
 
     try {
       await this.ensureSettingsFile(resolvedSettingsPath);
@@ -330,7 +342,7 @@ export class HookStrategy implements DeployStrategy {
 
       if (hookConfig.env) {
         try {
-          await this.applyEnvToSettings(hookConfig.settingsPath, hookConfig.env);
+          await this.applyEnvToSettings(resolvedSettingsPath, hookConfig.env);
         } catch (err) {
           // env injection failure must not block hook deployment — pilot can still
           // collect the basic transcript-based events without preload.
@@ -344,7 +356,7 @@ export class HookStrategy implements DeployStrategy {
       if (hookConfig.extraSettings) {
         try {
           await this.applyExtraSettings(
-            hookConfig.settingsPath,
+            resolvedSettingsPath,
             hookConfig.extraSettings,
           );
         } catch (err) {
@@ -585,6 +597,17 @@ export class HookStrategy implements DeployStrategy {
     // POSIX hookCommand, then the .sh -> .ps1 extension rewrite in
     // AgentDefLoader pointed at a .ps1 file that did not exist in the
     // package).
+    //
+    // Round 10 (PR #233): buildHookDefinitions was already correct, but
+    // the deploy() envelope (applyExtraSettings / applyEnvToSettings /
+    // removeTrustBlock) was still passing the raw POSIX
+    // hookConfig.settingsPath, so on Windows the sibling-flag writes
+    // (e.g. settings.hooks.enabled=true) hit a non-existent file and
+    // the deployment was reported successful even though the required
+    // flag was never persisted. deploy() now uses
+    // resolvePlatformSettingsPath(...) everywhere a settings file is
+    // read or written, so the contract is consistent across the
+    // hook-entry write and the sibling-flag write.
     const containerPath = hookConfig.hookContainerPath ?? ['hooks'];
     const settingsPath = resolvePlatformSettingsPath(hookConfig);
     const hookCommand = resolvePlatformHookCommand(hookConfig);
