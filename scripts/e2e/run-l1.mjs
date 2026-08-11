@@ -21,6 +21,7 @@ import {
   buildJsonlValidationSh,
   buildJsonlAgentCoverageCheck,
   buildAgentConfigSetupScript,
+  buildAgentEnsureOnlyScript,
   buildAgentProbeOnlyScript,
   buildProbeEnvInjections,
   buildProbeDetectionValidationScript,
@@ -60,14 +61,21 @@ async function keepAliveOnFailure(code) {
 async function waitForPilotReady(requiredAgents) {
   const waitScript = [
     'set -euo pipefail',
-    'LOG="$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log"',
+    'LOG_GLOB="$HOME/.loongsuite-pilot/logs/loongsuite-pilot-service.log*"',
     'TIMEOUT=180',
     'ELAPSED=0',
     `REQUIRED="${requiredAgents.join(' ')}"`,
+    'agent_ready() {',
+    '  _agent="$1"',
+    '  grep -q "\\\"id\\\":\\\"deploy:${_agent}\\\".*agent detected and started" $LOG_GLOB 2>/dev/null && return 0',
+    '  grep -q "\\\"agentId\\\":\\\"${_agent}\\\".*\\\"msg\\\":\\\"hooks deployed\\\"" $LOG_GLOB 2>/dev/null && return 0',
+    '  grep -q "\\\"agentId\\\":\\\"${_agent}\\\".*\\\"msg\\\":\\\"plugin injected\\\"" $LOG_GLOB 2>/dev/null && return 0',
+    '  return 1',
+    '}',
     'while [ $ELAPSED -lt $TIMEOUT ]; do',
     '  ALL_FOUND=1',
     '  for agent in $REQUIRED; do',
-    '    if ! grep -q "\\"id\\":\\"deploy:${agent}\\".*agent detected and started" "$LOG" 2>/dev/null; then',
+    '    if ! agent_ready "$agent"; then',
     '      ALL_FOUND=0',
     '      break',
     '    fi',
@@ -81,7 +89,7 @@ async function waitForPilotReady(requiredAgents) {
     'done',
     'echo "[pilot-ready] WARNING: timed out (${TIMEOUT}s). Agent deployment status:"',
     'for agent in $REQUIRED; do',
-    '  if grep -q "\\"id\\":\\"deploy:${agent}\\".*agent detected and started" "$LOG" 2>/dev/null; then',
+    '  if agent_ready "$agent"; then',
     '    echo "  OK: $agent"',
     '  else',
     '    echo "  MISSING: $agent"',
@@ -89,7 +97,7 @@ async function waitForPilotReady(requiredAgents) {
     'done',
     'echo ""',
     'echo "[pilot-ready] Last 10 deploy-related log lines:"',
-    'grep -iE "deploy|Discover|detected" "$LOG" 2>/dev/null | tail -10 || true',
+    'grep -iE "deploy|Discover|detected" $LOG_GLOB 2>/dev/null | tail -10 || true',
   ].join('\n');
   return runLocalScript({
     script: waitScript,
@@ -110,18 +118,6 @@ async function installSmokeScenario(env) {
     await keepAliveOnFailure(install.code ?? 1);
   }
 
-  console.log('[e2e-l1] phase 1.5 = probe detection validation');
-  const probeValidation = await runLocalScript({
-    script: buildProbeDetectionValidationScript(),
-    artifactDir: ARTIFACT_DIR,
-    artifactLabel: 'probe-detection-validate',
-  });
-  if (probeValidation.code !== 0) {
-    console.error('[e2e-l1] Probe detection validation FAILED');
-    console.error(probeValidation.stdout || probeValidation.stderr);
-    await keepAliveOnFailure(probeValidation.code ?? 1);
-  }
-
   const configScript = buildAgentConfigSetupScript(env);
   if (configScript) {
     console.log('[e2e-l1] phase 2 = agent configs (codex/claude/proxy)');
@@ -132,11 +128,97 @@ async function installSmokeScenario(env) {
     });
   }
 
-  const requiredAgents = ['claude-code', 'codex', 'qoder'];
-  console.log(`[e2e-l1] phase 3 = wait pilot detect agents: ${requiredAgents.join(', ')}`);
-  await waitForPilotReady(requiredAgents);
+  const ensureScript = buildAgentEnsureOnlyScript(env);
+  if (ensureScript) {
+    console.log('[e2e-l1] phase 2.5 = ensure CLI agents');
+    const ensure = await runLocalScript({
+      script: `${buildProbeEnvInjections(env)}${ensureScript}`,
+      artifactDir: ARTIFACT_DIR,
+      artifactLabel: 'agent-ensure',
+    });
+    if (ensure.code !== 0) {
+      console.error(ensure.stderr || ensure.stdout);
+      await keepAliveOnFailure(ensure.code ?? 1);
+    }
 
-  const probeBody = buildAgentProbeOnlyScript(env);
+    console.log('[e2e-l1] phase 2.5b = enable ensured CLI agents and restart pilot');
+    const restart = await runLocalScript({
+      script: `set -euo pipefail
+node - <<'NODE'
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const configPath = path.join(os.homedir(), '.loongsuite-pilot', 'config.json');
+const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+cfg.agents ||= {};
+const required = '${env.E2E_REQUIRED_DEPLOY_AGENTS || ''}'.split(',').map(s => s.trim()).filter(Boolean);
+for (const agent of required) cfg.agents[agent] = { ...(cfg.agents[agent] || {}), enabled: true };
+fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+console.log('[e2e-l1] enabled agents in config:', required.join(','));
+NODE
+mkdir -p \
+  "$HOME/.claude" \
+  "$HOME/.codex/sessions" \
+  "$HOME/.qoder/logs/sessions" \
+  "$HOME/.cursor" \
+  "$HOME/.qwen" \
+  "$HOME/.config/opencode" \
+  "$HOME/.loongsuite-pilot/logs/claude-code" \
+  "$HOME/.loongsuite-pilot/logs/cursor/history" \
+  "$HOME/.loongsuite-pilot/logs/qoder/history" \
+  "$HOME/.loongsuite-pilot/logs/qwen-code-cli" \
+  "$HOME/.loongsuite-pilot/logs/opencode"
+
+# Create default opencode.jsonc so pilot can inject plugin
+cat > "$HOME/.config/opencode/opencode.jsonc" <<'OPENCODE_JSON'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": []
+}
+OPENCODE_JSON
+
+# Create default qwen settings.json so pilot can inject hooks
+cat > "$HOME/.qwen/settings.json" <<'QWEN_JSON'
+{
+  "hooks": {}
+}
+QWEN_JSON
+
+loongsuite-pilot restart || (loongsuite-pilot stop 2>/dev/null || true; loongsuite-pilot start)
+sleep 5
+loongsuite-pilot status`,
+      artifactDir: ARTIFACT_DIR,
+      artifactLabel: 'pilot-restart-after-ensure',
+    });
+    if (restart.code !== 0) {
+      console.error(restart.stderr || restart.stdout);
+      await keepAliveOnFailure(restart.code ?? 1);
+    }
+  }
+
+  console.log('[e2e-l1] phase 2.6 = probe detection validation');
+  const deployAgents = env.E2E_REQUIRED_DEPLOY_AGENTS;
+  const probeValidation = await runLocalScript({
+    script: buildProbeDetectionValidationScript(deployAgents),
+    artifactDir: ARTIFACT_DIR,
+    artifactLabel: 'probe-detection-validate',
+  });
+  if (probeValidation.code !== 0) {
+    console.error('[e2e-l1] Probe detection validation FAILED');
+    console.error(probeValidation.stdout || probeValidation.stderr);
+    await keepAliveOnFailure(probeValidation.code ?? 1);
+  }
+
+  const requiredAgents = deployAgents.split(',').map(s => s.trim()).filter(Boolean);
+  console.log(`[e2e-l1] phase 3 = wait pilot detect agents: ${requiredAgents.join(', ')}`);
+  const ready = await waitForPilotReady(requiredAgents);
+  if (ready.code !== 0) {
+    console.error('[e2e-l1] Pilot readiness wait FAILED');
+    console.error(ready.stdout || ready.stderr);
+    await keepAliveOnFailure(ready.code ?? 1);
+  }
+
+  const probeBody = buildAgentProbeOnlyScript({ ...env, E2E_ENSURE_AGENT_CLIS: '0' });
   if (probeBody) {
     console.log('[e2e-l1] phase 4 = agent probes');
     const probeScript = `${buildProbeEnvInjections(env)}${probeBody}`;
@@ -168,20 +250,8 @@ async function installSmokeScenario(env) {
     }
   }
 
-  console.log('[e2e-l1] phase 7 = file-collection pipeline validation');
-  const fcValidation = await runLocalScript({
-    script: buildFileCollectionValidationSh(),
-    artifactDir: ARTIFACT_DIR,
-    artifactLabel: 'file-collection-validate',
-  });
-  if (fcValidation.code !== 0) {
-    console.error('[e2e-l1] File collection validation FAILED');
-    console.error(fcValidation.stdout || fcValidation.stderr);
-    await keepAliveOnFailure(fcValidation.code ?? 1);
-  }
-
   const required = env.E2E_REQUIRED_JSONL_AGENTS;
-  console.log(`[e2e-l1] phase 8 = JSONL agent coverage (${required})`);
+  console.log(`[e2e-l1] phase 7 = JSONL agent coverage (${required})`);
   const coverage = await runLocalScript({
     script: buildJsonlAgentCoverageCheck(required),
     artifactDir: ARTIFACT_DIR,
@@ -191,6 +261,18 @@ async function installSmokeScenario(env) {
     console.error('[e2e-l1] JSONL agent coverage FAILED');
     console.error(coverage.stdout || coverage.stderr);
     await keepAliveOnFailure(coverage.code ?? 1);
+  }
+
+  console.log('[e2e-l1] phase 8 = file-collection pipeline validation');
+  const fcValidation = await runLocalScript({
+    script: buildFileCollectionValidationSh(),
+    artifactDir: ARTIFACT_DIR,
+    artifactLabel: 'file-collection-validate',
+  });
+  if (fcValidation.code !== 0) {
+    console.error('[e2e-l1] File collection validation FAILED');
+    console.error(fcValidation.stdout || fcValidation.stderr);
+    await keepAliveOnFailure(fcValidation.code ?? 1);
   }
   console.log('[e2e-l1] install-smoke PASSED.');
 }

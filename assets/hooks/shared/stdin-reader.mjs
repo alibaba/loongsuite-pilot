@@ -12,6 +12,8 @@
 
 import fs from 'node:fs';
 
+import { decodePayload } from './decode-payload.mjs';
+
 export function readStdinJson() {
   try {
     const chunks = [];
@@ -29,8 +31,8 @@ export function readStdinJson() {
     if (fd !== 0) {
       try { fs.closeSync(fd); } catch {}
     }
-    let raw = Buffer.concat(chunks).toString('utf-8');
-    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
+    // decodePayload 去 BOM 并修复中文 UTF-8->GBK 双重编码(纠偏已从 PS 侧移入 node)。
+    const raw = decodePayload(Buffer.concat(chunks));
     if (!raw.trim()) return {};
     return JSON.parse(raw);
   } catch {

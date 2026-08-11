@@ -31,17 +31,17 @@
 
 | 模块 | 路径 | 职责 | 详细文档 |
 |------|------|------|---------|
-| 核心编排 | `src/core/` | 启动流程、生命周期、Agent 发现与准入控制 | [docs/modules/core.md](docs/modules/core.md) |
-| 输入源 | `src/inputs/` | 6 种采集基类 + 各 Agent 实现 | [docs/modules/inputs.md](docs/modules/inputs.md) |
-| 数据输出 | `src/flushers/` | SLS / JSONL / HTTP 多目标扇出 | [docs/modules/flushers.md](docs/modules/flushers.md) |
-| 文件采集 | `src/file-collection/` | 本地文件采集 → SLS 独立管道 | [docs/modules/file-collection.md](docs/modules/file-collection.md) |
-| 部署管理 | `src/deployment/` | 声明式 Agent 部署（Hook / Plugin-Probe） | [docs/modules/hooks.md](docs/modules/hooks.md) |
-| 归一化 | `src/normalization/` | 原始数据 → AgentActivityEntry 标准格式 | [docs/modules/normalization.md](docs/modules/normalization.md) |
-| 持久化 | `src/checkpoints/` | StateStore + SnapshotStore 状态管理 | [docs/modules/checkpoints.md](docs/modules/checkpoints.md) |
-| 自动更新 | `src/updater/` | 多版本管理、增量更新、灰度发布、自动回滚 | [docs/modules/updater.md](docs/modules/updater.md) |
-| 运行时 | `deploy/` | 安装、CLI、服务管理、版本指针 | [docs/modules/runtime.md](docs/modules/runtime.md) |
-| 监控 | `src/internal/` | 本地 dashboard、进程采样、健康状态 | [docs/modules/monitor.md](docs/modules/monitor.md) |
-| 类型定义 | `src/types/` | ClientType、事件结构、配置类型 | [docs/modules/types.md](docs/modules/types.md) |
+| 核心编排 | `src/core/` | 启动流程、生命周期、Agent 发现与准入控制 | [产品概览](docs/zh-CN/overview.md) |
+| 输入源 | `src/inputs/` | 6 种采集基类 + 各 Agent 实现 | [新 Agent 接入](docs/zh-CN/agent-onboarding.md) |
+| 数据输出 | `src/flushers/` | SLS / JSONL / HTTP 多目标扇出 | [配置指南](docs/zh-CN/configuration.md) |
+| 文件采集 | `src/file-collection/` | 本地文件采集 → SLS 独立管道 | [SLS 输出](docs/zh-CN/sls-output.md) |
+| 部署管理 | `src/deployment/` | 声明式 Agent 部署（Hook / Plugin-Probe） | [Agent 定义](docs/zh-CN/agent-onboarding.md#agent-定义) |
+| 归一化 | `src/normalization/` | 原始数据 → AgentActivityEntry 标准格式 | [输出事件 Schema](docs/zh-CN/output-event-schema.md) |
+| 持久化 | `src/checkpoints/` | StateStore + SnapshotStore 状态管理 | [临时异常下的 Checkpoint](docs/zh-CN/agent-onboarding.md#临时异常下的-checkpoint) |
+| 自动更新 | `src/updater/` | 多版本管理、增量更新、灰度发布、自动回滚 | [安装与服务管理](docs/zh-CN/installation.md) |
+| 运行时 | `deploy/` | 安装、CLI、服务管理、版本指针 | [安装与服务管理](docs/zh-CN/installation.md) |
+| 监控 | `src/internal/` | 本地 dashboard、进程采样、健康状态 | [本地运行目录](docs/zh-CN/overview.md#本地运行目录) |
+| 类型定义 | `src/types/` | ClientType、事件结构、配置类型 | [输出事件 Schema](docs/zh-CN/output-event-schema.md) |
 
 ## Agent 采集矩阵
 
@@ -56,7 +56,9 @@
 | Claude Code | `claude-code` | Plugin-Probe | `BaseHookInput` | `inputs/claude-code-log/` | `agents.d/claude-code.json` |
 | Codex | `codex` | Plugin-Probe | `BaseHookInput` | `inputs/codex-log/` | `agents.d/codex.json` |
 | OpenCode | `opencode` | Plugin-Probe | `BaseHookInput` | `inputs/opencode-log/` | `agents.d/opencode.json` |
+| Pi Coding Agent | `pi-coding-agent` | Extension Inject | `BaseHookInput` | `inputs/pi-coding-agent-log/` | `agents.d/pi-coding-agent.json` |
 | Qwen Code CLI | `qwen-code-cli` | Hook | `BaseHookInput` | `inputs/qwen-code-cli-log/` | `agents.d/qwen-code-cli.json` |
+| WorkBuddy | `workbuddy` | Hook | `BaseInput`（Hook/文件唤醒 + 本地 transcript 30 秒轮询兜底） | `inputs/workbuddy/` | `agents.d/workbuddy.json` |
 | Wukong | `wukong` | CLI API Polling | `BaseInput` | `inputs/wukong/` | N/A |
 
 ## 依赖关系
@@ -91,7 +93,7 @@ AgentDiscoveryService ──发现──→ InputManager ──注册──→ I
 | 性能测试 | `tests/performance/` | 采集吞吐和延迟基准 |
 | 测试夹具 | `tests/fixtures/` | Mock 数据和预置文件 |
 | 测试辅助 | `tests/helpers/` | 共享测试工具函数 |
-| 远程 E2E 指南 | [docs/E2E-REMOTE-TEST-GUIDE.md](docs/E2E-REMOTE-TEST-GUIDE.md) | 远程机器测试操作手册 |
+| 最终安装态验收 | [新 Agent 接入：安装产物最终验收](docs/zh-CN/agent-onboarding.md#安装产物最终验收) | 真实 Agent、严格 JSONL validator 与字段质量验收 |
 
 ## 本地基础设施
 
@@ -114,9 +116,10 @@ AgentDiscoveryService ──发现──→ InputManager ──注册──→ I
 
 ## 快速入口
 
-- **我要理解整体架构** → [docs/constitution.md](docs/constitution.md)
-- **我要接入新 Agent** → [docs/agent-onboarding-guide.md](docs/agent-onboarding-guide.md) + [docs/modules/hooks.md](docs/modules/hooks.md)
-- **我要理解数据流** → [docs/modules/core.md](docs/modules/core.md) + [docs/modules/inputs.md](docs/modules/inputs.md)
-- **我要新增输出通道** → [docs/modules/flushers.md](docs/modules/flushers.md)
+- **我要理解整体架构** → [docs/zh-CN/overview.md](docs/zh-CN/overview.md)
+- **我要接入新 Agent** → [docs/zh-CN/agent-onboarding.md](docs/zh-CN/agent-onboarding.md)
+- **我要设计 transcript + Hook 混合采集、时间边界或 checkpoint** → [docs/zh-CN/agent-onboarding.md#可靠的混合采集](docs/zh-CN/agent-onboarding.md#可靠的混合采集)
+- **我要理解数据流** → [docs/zh-CN/overview.md#采集的数据](docs/zh-CN/overview.md#采集的数据) + [docs/zh-CN/output-event-schema.md](docs/zh-CN/output-event-schema.md)
+- **我要配置输出通道** → [docs/zh-CN/configuration.md](docs/zh-CN/configuration.md)
 - **我要了解部署运维** → [README.md](README.md)（打包/安装/升级/卸载）
-- **我要了解数据 Schema** → [docs/ai_event_schema.md](docs/ai_event_schema.md)
+- **我要了解数据 Schema** → [docs/zh-CN/output-event-schema.md](docs/zh-CN/output-event-schema.md)

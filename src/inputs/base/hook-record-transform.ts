@@ -58,6 +58,10 @@ export async function transformHookRecord(
       ?? getNumberValue(record, 'gen_ai.tool.call.duration_ms')
       ?? getNumberValue(record, 'tool.result.duration')
       ?? getNumberValue(record, 'tool.result.duration_ms'),
+    'gen_ai.skill.name': getStringValue(record, 'gen_ai.skill.name'),
+    'gen_ai.skill.id': getStringValue(record, 'gen_ai.skill.id'),
+    'gen_ai.skill.description': getStringValue(record, 'gen_ai.skill.description'),
+    'gen_ai.skill.version': getStringValue(record, 'gen_ai.skill.version'),
     'gen_ai.system_instructions': toJsonValue(record['gen_ai.system_instructions']),
     'gen_ai.tool.definitions': toJsonValue(record['gen_ai.tool.definitions']),
     'error.type': getStringValue(record, 'error.type'),

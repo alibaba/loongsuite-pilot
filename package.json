@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@alicloud/log": "^1.2.6",
-    "@loongsuite/otel-util-genai": "^0.1.0-beta.8",
+    "@loongsuite/otel-util-genai": "^0.1.0-beta.13",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/exporter-trace-otlp-proto": "^0.57.0",
     "@opentelemetry/otlp-transformer": "^0.57.0",
@@ -38,6 +38,7 @@
     "@opentelemetry/sdk-trace-base": "^1.30.0",
     "axios": "^1.6.0",
     "express": "^4.18.0",
+    "jsonc-parser": "^3.3.1",
     "pino": "^9.14.0",
     "pino-roll": "^3.1.0",
     "sqlite3": "^5.1.7",
@@ -57,10 +58,14 @@
   "optionalDependencies": {
     "@rollup/rollup-darwin-arm64": "^4.60.2"
   },
+  "allowScripts": {
+    "sqlite3@5.1.7": true
+  },
   "files": [
     "dist/",
     "assets/",
-    "scripts/"
+    "scripts/",
+    "agents.d/"
   ],
   "overrides": {
     "cookie": "1.0.0",

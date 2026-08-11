@@ -62,6 +62,31 @@ describe('InputManager', () => {
 
       expect(flusher.batchCalls.length).toBeGreaterThanOrEqual(1);
     });
+
+    it('serializes multiple entry batches from the same input', async () => {
+      const input = new StubInput('test-input');
+      const order: string[] = [];
+      let releaseFirst!: () => void;
+      const firstBlocked = new Promise<void>(resolve => {
+        releaseFirst = resolve;
+      });
+      flusher.sendBatch = vi.fn(async (entries: AgentActivityEntry[]) => {
+        const id = String(entries[0]['event.id']);
+        order.push(`start:${id}`);
+        if (id === 'first') await firstBlocked;
+        order.push(`finish:${id}`);
+      });
+      manager.registerInput(input as any);
+
+      input.emit('entries', [buildTestEntry({ 'event.id': 'first' })]);
+      input.emit('entries', [buildTestEntry({ 'event.id': 'second' })]);
+      await new Promise(resolve => setTimeout(resolve, 20));
+
+      expect(order).toEqual(['start:first']);
+      releaseFirst();
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(order).toEqual(['start:first', 'finish:first', 'start:second', 'finish:second']);
+    });
   });
 
   describe('userId injection (T031)', () => {
@@ -275,9 +300,12 @@ describe('InputManager', () => {
       manager.registerInput(input as any);
 
       const apiKey = 'sk-1234567890abcdefghijklmnop';
+      const phone = '13800138000';
       const entry = buildTestEntry({
         agentType: ClientType.Cursor,
-        'gen_ai.output.messages': [{ role: 'assistant', content: apiKey }],
+        'gen_ai.output.messages': [
+          { role: 'assistant', content: `apiKey=${apiKey} phone=${phone}` },
+        ],
       });
 
       input.emit('entries', [entry]);
@@ -286,7 +314,9 @@ describe('InputManager', () => {
       for (const child of [jsonl, sls, http]) {
         expect(child.batchCalls).toHaveLength(1);
         expect(JSON.stringify(child.batchCalls[0][0])).toContain('[APIKEY_MASKED]');
+        expect(JSON.stringify(child.batchCalls[0][0])).toContain('[PHONE_MASKED]');
         expect(JSON.stringify(child.batchCalls[0][0])).not.toContain(apiKey);
+        expect(JSON.stringify(child.batchCalls[0][0])).not.toContain(phone);
       }
     });
   });
@@ -339,6 +369,38 @@ describe('InputManager', () => {
       await manager.stopAll();
       expect(i1.stopCalls).toBe(1);
       expect(i2.stopCalls).toBe(1);
+    });
+
+    it('waits for queued entries before completing shutdown', async () => {
+      const input = new StubInput('queued-input');
+      let releaseBatch!: () => void;
+      let batchStarted!: () => void;
+      const started = new Promise<void>(resolve => {
+        batchStarted = resolve;
+      });
+      const blocked = new Promise<void>(resolve => {
+        releaseBatch = resolve;
+      });
+      flusher.sendBatch = vi.fn(async () => {
+        batchStarted();
+        await blocked;
+      });
+      manager.registerInput(input as any);
+      await input.start();
+      input.emit('entries', [buildTestEntry({ 'event.id': 'queued' })]);
+      await started;
+
+      let stopped = false;
+      const stopping = manager.stopAll().then(() => {
+        stopped = true;
+      });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(stopped).toBe(false);
+
+      releaseBatch();
+      await stopping;
+      expect(stopped).toBe(true);
+      expect(flusher.sendBatch).toHaveBeenCalledTimes(1);
     });
   });
 

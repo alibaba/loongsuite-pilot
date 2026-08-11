@@ -49,6 +49,24 @@ Equivalent environment variables:
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | Override `serviceNamePrefix`. |
 | `LOG_LEVEL` | Runtime log level: `debug`, `info`, `warn`, `error`, or `silent`. |
 
+## SLS Secret Configuration
+
+SLS destinations may use WebTracking, AK/SK, or API Key mode. API Key mode stores the key in local `config.json`, so prefer filesystem permissions and avoid sharing the file.
+
+```json
+{
+  "sls": {
+    "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+    "project": "my-project",
+    "logstore": "my-logstore",
+    "mode": "apiKey",
+    "apiKey": "your-api-key"
+  }
+}
+```
+
+Do not put `apiKey` together with `accessKeyId` / `accessKeySecret` on the same SLS destination. Use [SLS Output](sls-output.md) for full mode examples.
+
 ## Configuration Topics
 
 | Task | Guide |
@@ -58,7 +76,7 @@ Equivalent environment variables:
 | Report logs to Alibaba Cloud SLS | [SLS Output](sls-output.md) |
 | Report GenAI activity as OTLP traces | [Trace Output](trace-output.md) |
 | POST events to a custom HTTP endpoint | [HTTP Output](http-output.md) |
-| Mask API keys, access keys, private keys, and database URLs | [Data Masking](masking.md) |
+| Mask API keys, access keys, private keys, database URLs, and personal sensitive data | [Data Masking](masking.md) |
 
 ## Retention
 

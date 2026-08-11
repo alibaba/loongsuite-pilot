@@ -18,6 +18,10 @@
 
 每一行是一条规范化事件。
 
+JSONL 会保留原生 JSON 类型：token 数量保持 number，标志位保持 boolean，
+消息和工具载荷保持 array/object。宽表日志等只接受字符串列的后端，应只在各自
+输出边界完成序列化，不能影响本地 JSONL。
+
 ## 开启或关闭 JSONL
 
 ```json
@@ -35,6 +39,16 @@
 | `enabled` | 开启或关闭本地 JSONL 输出。 |
 | `outputDir` | 输出文件目录。 |
 | `rotateDaily` | 按日期写入文件。 |
+
+## 保留和磁盘保护
+
+本地 JSONL 输出遵循 [配置总览](configuration.md) 里的全局保留策略。默认情况下，Output 日志保留 7 天。
+
+Pilot 也内置了针对异常大日志的磁盘保护清理：
+
+- 单个 Output 文件超过 512 MiB，且已经超过 2 天时，可以被提前清理。
+- 如果 `logs/output` 超过 2 GiB，会从更老日期的 Output 文件开始删除，直到目录低于水位。
+- 当天 Output 文件不会被保留清理删除。空间压力清理也会保留昨天的 Output 文件。
 
 环境变量：
 

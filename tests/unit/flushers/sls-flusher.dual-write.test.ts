@@ -6,10 +6,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { SlsFlusherConfig, SlsEndpoint } from '../../../src/types/index.js';
 import { buildTestEntry } from '../../helpers/fixture-builder.js';
+import * as http from 'node:http';
+import * as crypto from 'node:crypto';
 
 const mockPostLogStoreLogs = vi.fn().mockResolvedValue(undefined);
-const mockAppendLine = vi.fn().mockResolvedValue(undefined);
-const mockEnsureDir = vi.fn().mockResolvedValue(undefined);
+const mockFailureWrite = vi.fn().mockResolvedValue(true);
 
 // Track each ALY client constructor call so we can assert on per-endpoint instances.
 const akClientCtorCalls: Array<{ endpoint: string; accessKeyId: string }> = [];
@@ -27,10 +28,15 @@ const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async 
 vi.stubGlobal('fetch', fetchSpy);
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
-  appendLine: (...args: unknown[]) => mockAppendLine(...args),
-  ensureDir: (...args: unknown[]) => mockEnsureDir(...args),
   getTodayDateString: () => '2026-04-27',
   readInstalledVersion: () => '0.0.0-test',
+}));
+
+vi.mock('../../../src/flushers/sls-failure-log-writer.js', () => ({
+  SlsFailureLogWriter: vi.fn().mockImplementation(() => ({
+    start: vi.fn().mockResolvedValue(undefined),
+    write: mockFailureWrite,
+  })),
 }));
 
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -58,12 +64,22 @@ function wtEndpoint(name: string, url: string, project: string): SlsEndpoint {
   };
 }
 
+function apiKeyEndpoint(name: string, url: string, project: string): SlsEndpoint {
+  return {
+    name, endpoint: url, project, logstore: `${project}-store`,
+    kind: 'agentActivity', mode: 'apiKey',
+    apiKey: `${name}-api-key`,
+    redact: false,
+  };
+}
+
 function makeConfig(endpoints: SlsEndpoint[]): SlsFlusherConfig {
   const primary = endpoints[0];
   return {
     enabled: true,
     accessKeyId: primary.accessKeyId ?? '',
     accessKeySecret: primary.accessKeySecret ?? '',
+    apiKey: primary.apiKey ?? '',
     endpoint: primary.endpoint,
     mode: primary.mode,
     endpoints,
@@ -176,15 +192,14 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
     // Webtracking still went through.
     expect(fetchSpy).toHaveBeenCalledOnce();
     // Only the failing leg's batch was persisted.
-    expect(mockAppendLine).toHaveBeenCalledOnce();
-    const [filePath, line] = mockAppendLine.mock.calls[0];
-    expect(filePath).toContain('user-sls.jsonl');
-    const parsed = JSON.parse(line);
-    expect(parsed.endpoint).toBe('user-sls');
-    expect(parsed.error).toContain('quota exceeded');
+    expect(mockFailureWrite).toHaveBeenCalledOnce();
+    const metadata = mockFailureWrite.mock.calls[0][0];
+    expect(metadata.endpoint).toBe('user-sls');
+    expect(String(metadata.error)).toContain('quota exceeded');
+    expect(metadata).not.toHaveProperty('logGroup');
   });
 
-  it('per-endpoint failed-log filenames are unique even when kind matches', async () => {
+  it('persists independent metadata for endpoints that share the same kind', async () => {
     const flusher = new SlsFlusher(
       makeConfig([
         akEndpoint('user-sls', 'https://cn-shanghai.log.aliyuncs.com', 'user-proj'),
@@ -201,9 +216,102 @@ describe('SlsFlusher dual-write — per-endpoint dispatch', () => {
     await flusher.send(buildTestEntry());
     await flusher.flush();
 
-    expect(mockAppendLine).toHaveBeenCalledTimes(2);
-    const filePaths = mockAppendLine.mock.calls.map((c: unknown[]) => String(c[0]));
-    expect(filePaths.some((p: string) => p.endsWith('user-sls.jsonl'))).toBe(true);
-    expect(filePaths.some((p: string) => p.endsWith('internal-sls.jsonl'))).toBe(true);
+    expect(mockFailureWrite).toHaveBeenCalledTimes(2);
+    const endpoints = mockFailureWrite.mock.calls.map((call: unknown[]) => (call[0] as { endpoint: string }).endpoint);
+    expect(endpoints.sort()).toEqual(['internal-sls', 'user-sls']);
+  });
+
+  it('apiKey endpoint posts protobuf to local mock service with bearer auth', async () => {
+    const received = await withMockSlsServer(async ({ endpoint, requests }) => {
+      const flusher = new SlsFlusher(
+        makeConfig([apiKeyEndpoint('api-key-sls', endpoint, 'api-key-project')]),
+        '/tmp/data',
+      );
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      return requests[0];
+    });
+
+    expect(received.url).toBe('/logstores/api-key-project-store/shards/lb');
+    expect(received.headers.authorization).toBe('Bearer api-key-sls-api-key');
+    expect(received.headers['content-type']).toBe('application/x-protobuf');
+    expect(Number.isFinite(Date.parse(String(received.headers.date)))).toBe(true);
+    expect(received.headers['x-log-apiversion']).toBe('0.6.0');
+    expect(received.headers['x-log-signaturemethod']).toBeUndefined();
+    expect(received.headers['content-md5']).toBe(
+      crypto.createHash('md5').update(received.body).digest('hex').toUpperCase(),
+    );
+    expect(received.headers['x-log-bodyrawsize']).toBe(String(received.body.byteLength));
+    expect(received.body.toString('utf8')).toContain('gen_ai.session.id');
+    expect(received.body.toString('utf8')).toContain('test-session-1');
+  });
+
+  it('apiKey failure persists failed batch without raw API Key', async () => {
+    await withMockSlsServer(async ({ endpoint }) => {
+      const flusher = new SlsFlusher(
+        makeConfig([apiKeyEndpoint('api-key-sls', endpoint, 'api-key-project')]),
+        '/tmp/data',
+      );
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+    }, { statusCode: 403, body: '{"errorCode":"Forbidden"}' });
+
+    expect(mockFailureWrite).toHaveBeenCalledOnce();
+    const [failure] = mockFailureWrite.mock.calls[0];
+    expect(JSON.stringify(failure)).not.toContain('api-key-sls-api-key');
+    expect(failure).toMatchObject({
+      endpoint: 'api-key-sls',
+      mode: 'apiKey',
+      project: 'api-key-project',
+      logstore: 'api-key-project-store',
+      kind: 'agentActivity',
+      batchCount: 1,
+    });
+    expect(failure.batchBytes).toBeGreaterThan(0);
+    expect(String(failure.error)).toContain('Forbidden');
   });
 });
+
+interface MockRequest {
+  url: string;
+  headers: http.IncomingHttpHeaders;
+  body: Buffer;
+}
+
+async function withMockSlsServer<T>(
+  fn: (args: { endpoint: string; requests: MockRequest[] }) => Promise<T>,
+  response: { statusCode: number; body: string } = { statusCode: 200, body: '' },
+): Promise<T> {
+  const requests: MockRequest[] = [];
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+    req.on('end', () => {
+      requests.push({
+        url: req.url ?? '',
+        headers: req.headers,
+        body: Buffer.concat(chunks),
+      });
+      res.statusCode = response.statusCode;
+      res.end(response.body);
+    });
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+
+  try {
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('mock server did not bind to a TCP port');
+    return await fn({ endpoint: `http://127.0.0.1:${address.port}`, requests });
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close(err => err ? reject(err) : resolve());
+    });
+  }
+}

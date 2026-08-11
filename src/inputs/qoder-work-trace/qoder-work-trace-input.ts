@@ -1,11 +1,11 @@
 import * as crypto from 'node:crypto';
-import { createReadStream } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { createInterface } from 'node:readline';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
+import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
+import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
@@ -86,6 +86,20 @@ export class QoderWorkTraceInput extends BaseInput {
 
   protected override async onStart(): Promise<void> {
     await ensureDir(this.logDir);
+    const checkpoint = await createHookHistoryStartupCheckpoint(
+      this.getState(),
+      this.logDir,
+      this.logPrefix,
+    );
+    if (!checkpoint) return;
+    this.setState(checkpoint.state);
+    if (checkpoint.skippedExistingBytes > 0) {
+      this.logger.warn('history checkpoint missing, baselining existing file without replay', {
+        skippedBytes: checkpoint.skippedExistingBytes,
+      });
+    } else {
+      this.logger.info('history checkpoint initialized before first hook record');
+    }
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
@@ -95,23 +109,10 @@ export class QoderWorkTraceInput extends BaseInput {
       await this.readSdkTokenState();
 
       // 1. Hook JSONL — primary source of structure.
-      const { entries: rawEntries, isFirstRun, turnCount } = await this.readHookJsonl();
+      const rawEntries = await this.readHookJsonl();
       if (rawEntries.length === 0) return [];
 
-      // A fresh collector must not replay a whole pre-existing daily hook log.
-      const allTurnGroups = this.groupByTurn(rawEntries);
-      const entries = isFirstRun
-        ? [...allTurnGroups.values()].at(-1) ?? []
-        : rawEntries;
-      if (isFirstRun) {
-        const state = this.getState();
-        const extra = state.extra && typeof state.extra === 'object'
-          ? state.extra as Record<string, unknown>
-          : {};
-        this.setState({
-          extra: { ...extra, qoderWorkTurnCount: turnCount ?? allTurnGroups.size },
-        });
-      }
+      const entries = filterBootstrapHistoryTurns(rawEntries);
 
       // 2. Discover the (sessionId, cwd) pairs we have entries for, then read
       //    fresh segments for each. Lazily — sessions absent from hook batch
@@ -148,7 +149,7 @@ export class QoderWorkTraceInput extends BaseInput {
 
   // ─── Hook JSONL reading ────────────────────────────────────────────────────
 
-  private async readHookJsonl(): Promise<HookJsonlBatch> {
+  private async readHookJsonl(): Promise<AgentActivityEntry[]> {
     const today = getTodayDateString();
     const logFileName = `${this.logPrefix}-${today}.jsonl`;
     const logFile = path.join(this.logDir, logFileName);
@@ -157,7 +158,7 @@ export class QoderWorkTraceInput extends BaseInput {
     try {
       stat = await fs.stat(logFile);
     } catch {
-      return { entries: [], isFirstRun: false };
+      return [];
     }
 
     const state = this.getState();
@@ -167,16 +168,7 @@ export class QoderWorkTraceInput extends BaseInput {
       this.logger.info('file truncated, resetting offset', { file: logFile });
       offset = 0;
     }
-    if (stat.size <= offset) return { entries: [], isFirstRun: false };
-
-    const hasFirstRunMarker = state.extra
-      && typeof state.extra === 'object'
-      && Object.hasOwn(state.extra, 'qoderWorkTurnCount');
-    const isFirstRun = offset === 0 && !hasFirstRunMarker;
-
-    if (isFirstRun) {
-      return this.readFirstRunHookBaseline(logFile, logFileName, stat.size);
-    }
+    if (stat.size <= offset) return [];
 
     const handle = await fs.open(logFile, 'r');
     const entries: AgentActivityEntry[] = [];
@@ -206,41 +198,7 @@ export class QoderWorkTraceInput extends BaseInput {
       await handle.close();
     }
 
-    return { entries, isFirstRun };
-  }
-
-  private async readFirstRunHookBaseline(
-    logFile: string,
-    logFileName: string,
-    fileSize: number,
-  ): Promise<HookJsonlBatch> {
-    let latestTurnId: string | undefined;
-    let latestTurnEntries: AgentActivityEntry[] = [];
-    let turnCount = 0;
-    const reader = createInterface({
-      input: createReadStream(logFile, { encoding: 'utf-8' }),
-      crlfDelay: Infinity,
-    });
-
-    for await (const line of reader) {
-      if (!line.trim()) continue;
-      try {
-        const record = JSON.parse(line) as AgentActivityEntry;
-        if (!record['event.name']) continue;
-        const turnId = String(record['gen_ai.turn.id'] ?? 'unknown');
-        if (turnId !== latestTurnId) {
-          latestTurnId = turnId;
-          latestTurnEntries = [];
-          turnCount++;
-        }
-        latestTurnEntries.push(record);
-      } catch {
-        this.logger.warn('invalid JSONL line');
-      }
-    }
-
-    this.setState({ lastFile: logFileName, lastOffset: fileSize });
-    return { entries: latestTurnEntries, isFirstRun: true, turnCount };
+    return entries;
   }
 
   // ─── Segments reading ──────────────────────────────────────────────────────
@@ -879,12 +837,6 @@ export interface QoderWorkTraceInputOptions extends InputOptions {
   segmentsRoot?: string;
   sdkLogDir?: string;
   interceptFile?: string;
-}
-
-interface HookJsonlBatch {
-  entries: AgentActivityEntry[];
-  isFirstRun: boolean;
-  turnCount?: number;
 }
 
 interface SegmentEvent {

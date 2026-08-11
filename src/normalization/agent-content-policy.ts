@@ -11,6 +11,8 @@ const MESSAGE_CONTENT_FIELDS = new Set([
   'gen_ai.output.messages',
   'gen_ai.tool.call.arguments',
   'gen_ai.tool.call.result',
+  'gen_ai.system_instructions',
+  'gen_ai.tool.definitions',
   'input.messages',
   'input.messages_delta',
   'output.messages',
@@ -37,6 +39,7 @@ const AGENT_TYPE_TO_CONFIG_KEY: Record<string, string> = {
   'qoder-cli': 'qoder',
   'qoder-cli-hook': 'qoder',
   'cursor-hook': 'cursor',
+  'hermes': 'hermes-agent',
 };
 
 export function applyAgentContentPolicy(

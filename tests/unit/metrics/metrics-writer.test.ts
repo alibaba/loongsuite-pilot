@@ -6,6 +6,21 @@ import { MetricsWriter } from '../../../src/metrics/metrics-writer.js';
 import { AlarmManager } from '../../../src/metrics/alarm-manager.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
 
+const fsMockState = { blockAccessSync: false };
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    accessSync: (p: fs.PathLike, mode?: number) => {
+      if (fsMockState.blockAccessSync && mode === actual.constants.X_OK) {
+        throw new Error(`EACCES: permission denied, access '${p}'`);
+      }
+      return actual.accessSync(p as any, mode);
+    },
+  };
+});
+
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
     info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
@@ -39,6 +54,28 @@ function buildSnapshot(): DataflowSnapshot {
     ]),
     inputIdleMinutes: new Map(),
   };
+}
+
+function makeAlarmWriter(tmpDir: string): { writer: MetricsWriter; alarmManager: AlarmManager } {
+  const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
+  return {
+    alarmManager,
+    writer: new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: buildSnapshot,
+      alarmManager,
+    }),
+  };
+}
+
+function checkThresholdsForTest(writer: MetricsWriter, metrics: { cpu: string; mem: string }): void {
+  (writer as any).checkThresholds(metrics);
+}
+
+function cpuAboveProcessThreshold(): string {
+  return '81';
 }
 
 describe('MetricsWriter', () => {
@@ -203,6 +240,170 @@ describe('MetricsWriter', () => {
     expect(flusherLine.user_id).toBe('u1');
   });
 
+  describe('process resource thresholds', () => {
+    it('debounces soft memory alarms until 3 consecutive samples', () => {
+      const setup = makeAlarmWriter(tmpDir);
+      writer = setup.writer;
+      const { alarmManager } = setup;
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '600' });
+      checkThresholdsForTest(writer, { cpu: '0', mem: '620' });
+      expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeUndefined();
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '640' });
+      const alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM');
+
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_level).toBe('2');
+      expect(alarm!.alarm_message).toContain('soft threshold 512MB');
+      expect(alarm!.alarm_message).toContain('3 consecutive soft samples');
+    });
+
+    it('alerts hard and critical memory tiers immediately', () => {
+      const setup = makeAlarmWriter(tmpDir);
+      writer = setup.writer;
+      const { alarmManager } = setup;
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '1200' });
+      let alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_level).toBe('2');
+      expect(alarm!.alarm_message).toContain('hard threshold 1024MB');
+      expect(alarm!.alarm_message).toContain('1 consecutive hard sample');
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '2300' });
+      alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_level).toBe('3');
+      expect(alarm!.alarm_message).toContain('critical threshold 2048MB');
+      expect(alarm!.alarm_message).toContain('1 consecutive critical sample');
+    });
+
+    it('does not reuse hard or critical samples after falling back to soft memory tier', () => {
+      for (const initialMem of ['1200', '2300']) {
+        vi.setSystemTime(new Date('2026-07-15T00:00:00Z'));
+        const setup = makeAlarmWriter(tmpDir);
+        writer = setup.writer;
+        const { alarmManager } = setup;
+
+        checkThresholdsForTest(writer, { cpu: '0', mem: initialMem });
+        expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeDefined();
+
+        vi.setSystemTime(new Date('2026-07-15T01:00:01Z'));
+        checkThresholdsForTest(writer, { cpu: '0', mem: '600' });
+        expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeUndefined();
+
+        checkThresholdsForTest(writer, { cpu: '0', mem: '620' });
+        expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeUndefined();
+
+        checkThresholdsForTest(writer, { cpu: '0', mem: '640' });
+        const softAlarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM');
+        expect(softAlarm).toBeDefined();
+        expect(softAlarm!.alarm_message).toContain('soft threshold 512MB');
+        expect(softAlarm!.alarm_message).toContain('3 consecutive soft samples');
+      }
+    });
+
+    it('uses one memory cooldown for same or lower tiers and lets higher tiers escalate', () => {
+      vi.setSystemTime(new Date('2026-07-15T00:00:00Z'));
+      const setup = makeAlarmWriter(tmpDir);
+      writer = setup.writer;
+      const { alarmManager } = setup;
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '600' });
+      checkThresholdsForTest(writer, { cpu: '0', mem: '620' });
+      checkThresholdsForTest(writer, { cpu: '0', mem: '640' });
+      let alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_message).toContain('soft threshold 512MB');
+
+      vi.setSystemTime(new Date('2026-07-15T00:30:00Z'));
+      checkThresholdsForTest(writer, { cpu: '0', mem: '650' });
+      expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeUndefined();
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '1200' });
+      alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_message).toContain('hard threshold 1024MB');
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '700' });
+      checkThresholdsForTest(writer, { cpu: '0', mem: '710' });
+      checkThresholdsForTest(writer, { cpu: '0', mem: '720' });
+      expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeUndefined();
+    });
+
+    it('suppresses transient CPU spikes until 3 consecutive process CPU samples', () => {
+      const setup = makeAlarmWriter(tmpDir);
+      writer = setup.writer;
+      const { alarmManager } = setup;
+      const highCpu = cpuAboveProcessThreshold();
+
+      checkThresholdsForTest(writer, { cpu: highCpu, mem: '128' });
+      checkThresholdsForTest(writer, { cpu: highCpu, mem: '128' });
+      expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_CPU_ALARM')).toBeUndefined();
+
+      checkThresholdsForTest(writer, { cpu: highCpu, mem: '128' });
+      const alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_CPU_ALARM');
+
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_level).toBe('2');
+      expect(alarm!.alarm_message).toContain('3 consecutive samples');
+      expect(alarm!.alarm_message).toContain('CPU usage 81% exceeds 80%');
+      expect(alarm!.alarm_message).not.toContain('cores');
+    });
+
+    it('compares CPU threshold against raw process percent', () => {
+      const setup = makeAlarmWriter(tmpDir);
+      writer = setup.writer;
+      const { alarmManager } = setup;
+
+      checkThresholdsForTest(writer, { cpu: '81', mem: '128' });
+      checkThresholdsForTest(writer, { cpu: '81', mem: '128' });
+      checkThresholdsForTest(writer, { cpu: '81', mem: '128' });
+
+      const alarm = alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_CPU_ALARM');
+      expect(alarm).toBeDefined();
+      expect(alarm!.alarm_message).toContain('CPU usage 81% exceeds 80%');
+    });
+
+    it('keeps CPU and memory alarms split in the same flush window', () => {
+      const setup = makeAlarmWriter(tmpDir);
+      writer = setup.writer;
+      const { alarmManager } = setup;
+      const highCpu = cpuAboveProcessThreshold();
+
+      checkThresholdsForTest(writer, { cpu: highCpu, mem: '128' });
+      checkThresholdsForTest(writer, { cpu: highCpu, mem: '128' });
+      checkThresholdsForTest(writer, { cpu: highCpu, mem: '1200' });
+
+      const entries = alarmManager.serialize();
+      expect(entries.map(e => e.alarm_type).sort()).toEqual([
+        'PROCESS_CPU_ALARM',
+        'PROCESS_MEMORY_ALARM',
+      ]);
+      expect(entries.find(e => e.alarm_type === 'PROCESS_CPU_ALARM')!.alarm_message).toContain('CPU usage');
+      expect(entries.find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')!.alarm_message).toContain('Memory usage');
+    });
+
+    it('cools down repeated process resource alarms', () => {
+      vi.setSystemTime(new Date('2026-07-15T00:00:00Z'));
+      const setup = makeAlarmWriter(tmpDir);
+      writer = setup.writer;
+      const { alarmManager } = setup;
+
+      checkThresholdsForTest(writer, { cpu: '0', mem: '1200' });
+      expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeDefined();
+
+      vi.setSystemTime(new Date('2026-07-15T00:30:00Z'));
+      checkThresholdsForTest(writer, { cpu: '0', mem: '1300' });
+      expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeUndefined();
+
+      vi.setSystemTime(new Date('2026-07-15T01:00:01Z'));
+      checkThresholdsForTest(writer, { cpu: '0', mem: '1300' });
+      expect(alarmManager.serialize().find(e => e.alarm_type === 'PROCESS_MEMORY_ALARM')).toBeDefined();
+    });
+  });
+
   describe('DEGRADED_STARTUP_ALARM', () => {
     it('records alarm when init_type is nohup', async () => {
       fs.writeFileSync(path.join(tmpDir, 'init-type'), 'nohup');
@@ -310,6 +511,12 @@ describe('MetricsWriter', () => {
         userId: 'u1',
         getSnapshot: buildSnapshot,
         alarmManager,
+        updaterLiveness: () => ({
+          running: false,
+          source: 'none',
+          reason: 'no matching updater command found',
+          pidFileState: 'missing',
+        }),
       });
 
       vi.useRealTimers();
@@ -366,7 +573,7 @@ describe('MetricsWriter', () => {
       expect(alarm).toBeUndefined();
     });
 
-    it('INVALID_NODE_BIN_ALARM fires when node-bin is invalid', async () => {
+    it('INVALID_NODE_BIN_ALARM fires when node-bin is invalid and self-heal fails', async () => {
       fs.writeFileSync(path.join(tmpDir, 'node-bin'), '/nonexistent/path/node');
       const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId: 'test-user' });
       writer = new MetricsWriter({
@@ -377,13 +584,25 @@ describe('MetricsWriter', () => {
         alarmManager,
       });
 
-      vi.useRealTimers();
-      await writer.start();
+      const execPathSpy = vi.spyOn(process, 'execPath', 'get').mockReturnValue('/also/broken/node');
+      const origPath = process.env.PATH;
+      process.env.PATH = '/no_such_dir';
+      fsMockState.blockAccessSync = true;
 
-      const entries = alarmManager.serialize();
-      const alarm = entries.find(e => e.alarm_type === 'INVALID_NODE_BIN_ALARM');
-      expect(alarm).toBeDefined();
-      expect(alarm!.alarm_level).toBe('2');
+      try {
+        vi.useRealTimers();
+        await writer.start();
+
+        const entries = alarmManager.serialize();
+        const alarm = entries.find(e => e.alarm_type === 'INVALID_NODE_BIN_ALARM');
+        expect(alarm).toBeDefined();
+        expect(alarm!.alarm_level).toBe('2');
+        expect(alarm!.alarm_message).toContain('path does not exist');
+      } finally {
+        fsMockState.blockAccessSync = false;
+        process.env.PATH = origPath;
+        execPathSpy.mockRestore();
+      }
     });
 
     it('INVALID_NODE_BIN_ALARM does not fire when node-bin is valid', async () => {

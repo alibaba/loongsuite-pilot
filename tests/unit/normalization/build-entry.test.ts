@@ -124,4 +124,15 @@ describe('buildAgentActivityEntry', () => {
     expect(entry['agent.content']).toBeUndefined();
     expect(entry['agent.inline_diff_message']).toBeUndefined();
   });
+
+  it('normalizes a hook tool error to failure and marks the event as erroneous', () => {
+    const entry = buildAgentActivityEntry({
+      'event.name': 'tool.result',
+      'gen_ai.agent.type': ClientType.Qoder,
+      'tool.result.status': 'error',
+    });
+
+    expect(entry['tool.result.status']).toBe('failure');
+    expect(entry['error.type']).toBe('_OTHER');
+  });
 });

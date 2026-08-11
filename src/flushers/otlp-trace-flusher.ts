@@ -1,4 +1,5 @@
-import { ExportResultCode } from '@opentelemetry/core';
+import { ExportResultCode, type ExportResult } from '@opentelemetry/core';
+import { SpanStatusCode } from '@opentelemetry/api';
 import { Resource } from '@opentelemetry/resources';
 import {
   BasicTracerProvider,
@@ -19,22 +20,45 @@ import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.
 import { BaseFlusher } from './base-flusher.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
+import {
+  DEFAULT_GIT_PASSTHROUGH_KEYS,
+  isReservedKey,
+  type GlobalAttributesProvider,
+} from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
 import { appendLine, ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
+import {
+  attachReservedToolSpanIds,
+  ReservedToolSpanIdGenerator,
+  type ToolSpanIdReservations,
+} from './tool-span-id-reservation.js';
 
 const logger = createLogger('otlp-trace-flusher');
 
 const VALID_TRACE_ID_RE = /^[0-9a-f]{32}$/;
-const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled']);
+const TERMINAL_FINISH_REASONS = new Set(['stop', 'end_turn', 'cancelled', 'error']);
+// Hard cap on simultaneously-open turn buffers. Above this, the oldest
+// incomplete buffers are force-flushed to bound memory in pathological
+// cases (e.g. an agent that never emits a terminal llm.response AND never
+// sends a same-session successor AND turnIdleTimeoutMs=0). Normal load
+// stays well under this; the cap is defense-in-depth, not a tuned limit.
+const MAX_TURN_BUFFERS = 64;
+const SKILL_ATTRIBUTE_KEYS = [
+  'gen_ai.skill.name',
+  'gen_ai.skill.id',
+  'gen_ai.skill.description',
+  'gen_ai.skill.version',
+] as const;
 
 interface TurnBuffer {
   key: string;
   keySource: 'turn_id' | 'trace_id' | 'session_id' | 'ephemeral';
   keyValue: string;
   agentType: string;
+  sessionId?: string;
   records: AgentActivityEntry[];
   completed: boolean;
   lastActivityMs: number;
@@ -44,11 +68,34 @@ interface AgentConvertState {
   provider: BasicTracerProvider;
   handler: ExtendedTelemetryHandler;
   inMem: InMemorySpanExporter;
+  toolSpanIds: ToolSpanIdReservations;
   active: number;
 }
 
+/** Minimal exporter surface used by the flusher; lets tests inject fakes. */
+export interface TraceExporterLike {
+  export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void;
+  shutdown(): Promise<void>;
+}
+
+/** Factory for exporters, injectable for testing. */
+export type OtlpExporterFactory = (opts: {
+  url: string;
+  headers: Record<string, string>;
+  compression: CompressionAlgorithm;
+  name: string;
+}) => TraceExporterLike;
+
+interface ResolvedOtlpEndpoint {
+  name: string;
+  url: string;
+  headers: Record<string, string>;
+  compression: CompressionAlgorithm;
+  serviceName: string;
+}
+
 interface AgentExportState {
-  exporter: OTLPTraceExporter;
+  exporters: Array<{ name: string; exporter: TraceExporterLike }>;
 }
 
 const RESERVED_RESOURCE_KEYS = new Set([
@@ -59,6 +106,7 @@ const RESERVED_RESOURCE_KEYS = new Set([
   'host.name',
   'gen_ai.agent.type',
   'gen_ai.agent.system',
+  'gen_ai.framework',
 ]);
 
 type ResourceProjectionValue = string | number | boolean;
@@ -73,8 +121,18 @@ function resolveEndpointUrl(raw: string): string {
   return url;
 }
 
+const defaultExporterFactory: OtlpExporterFactory = ({ url, headers, compression }) =>
+  new OTLPTraceExporter({ url, headers, compression });
+
 const DEFAULT_MAX_EXPORT_BATCH_BYTES = 10 * 1024 * 1024; // 10 MB
 const MAX_CONVERT_STATES = 64;
+const GEN_AI_HIERARCHY_PASSTHROUGH_KEYS = [
+  'gen_ai.turn.id',
+  'gen_ai.agent.scope',
+  'gen_ai.agent.depth',
+  'gen_ai.agent.parent.id',
+  'gen_ai.subagent.parent_tool_call.id',
+];
 
 function estimateSpanSize(span: ReadableSpan): number {
   let size = 512;
@@ -101,10 +159,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private readonly agentExportStates = new Map<string, AgentExportState>();
   private readonly instanceId = randomUUID();
   private readonly pilotVersion: string;
-  private readonly resolvedEndpointUrl: string;
+  private readonly endpoints: ResolvedOtlpEndpoint[];
+  private readonly exporterFactory: OtlpExporterFactory;
   private readonly debugDir: string;
   private readonly failedDir: string;
   private readonly resourceAttributeKeys: string[];
+  private readonly spanAttributePassthroughPrefixes: string[];
+  private readonly globalAttributesProvider?: GlobalAttributesProvider;
 
   private idleTimer?: ReturnType<typeof setInterval>;
   private inFlightExports = new Set<Promise<void>>();
@@ -117,23 +178,38 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // 即时 flush 会把 key 加入 flushedTurnKeys，导致后续同 key 的子 records 被丢弃。
   private _deferSignalA = false;
 
-  constructor(cfg: OtlpTraceFlusherConfig) {
+  constructor(
+    cfg: OtlpTraceFlusherConfig,
+    globalAttributesProvider?: GlobalAttributesProvider,
+    exporterFactory?: OtlpExporterFactory,
+  ) {
     super();
-    if (!cfg.endpoint) {
-      throw new Error('[otlp-trace-flusher] config.endpoint is required when enabled');
+    if (!cfg.endpoints || cfg.endpoints.length === 0) {
+      throw new Error('[otlp-trace-flusher] config.endpoints must be non-empty when enabled');
     }
     if (!cfg.serviceName) {
       throw new Error('[otlp-trace-flusher] config.serviceName is required when enabled');
     }
     this.cfg = cfg;
+    this.globalAttributesProvider = globalAttributesProvider;
+    this.exporterFactory = exporterFactory ?? defaultExporterFactory;
+    this.endpoints = cfg.endpoints.map((ep, i) => ({
+      name: ep.name || `otlp-${i}`,
+      url: resolveEndpointUrl(ep.endpoint),
+      headers: ep.headers ?? {},
+      compression: ep.compression === 'none' ? CompressionAlgorithm.NONE : CompressionAlgorithm.GZIP,
+      serviceName: ep.serviceName || cfg.serviceName,
+    }));
     const dataDir = cfg.dataDir ?? os.homedir() + '/.loongsuite-pilot';
     this.pilotVersion = readInstalledVersion(dataDir);
-    this.resolvedEndpointUrl = resolveEndpointUrl(cfg.endpoint);
     this.debugDir = path.join(dataDir, 'logs', 'otlp-debug');
     this.failedDir = path.join(dataDir, 'logs', 'otlp-failed');
     this.resourceAttributeKeys = (cfg.resourceAttributeKeys ?? [])
       .map(key => key.trim())
       .filter(key => key.length > 0);
+    this.spanAttributePassthroughPrefixes = (cfg.spanAttributePassthroughPrefixes ?? [])
+      .map(prefix => prefix.trim())
+      .filter(prefix => prefix.length > 0);
 
     if (cfg.captureMessageContent !== false) {
       process.env.OTEL_SEMCONV_STABILITY_OPT_IN ??= 'gen_ai_latest_experimental';
@@ -145,7 +221,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
       this.idleTimer.unref();
     }
 
-    logger.info(`OTLP trace flusher initialized → ${this.resolvedEndpointUrl}`);
+    logger.info(
+      `OTLP trace flusher initialized → ${this.endpoints.map(e => `${e.name}(${e.url})`).join(', ')}`,
+    );
   }
 
   // --- Public API (BaseFlusher) ---
@@ -157,6 +235,20 @@ export class OtlpTraceFlusher extends BaseFlusher {
     );
 
     if (source === 'ephemeral') {
+      // Drop metadata-only "other" events (e.g. OpenClaw before_message_write /
+      // tool_result_persist records that lack turn.id/trace_id/session.id).
+      // The converter silently discards them inside a turn (converter.js:73),
+      // but converting them standalone via the ephemeral path produces a fresh
+      // ENTRY+AGENT pair per record, polluting the trace tree with phantom
+      // roots. Skip them so only entries carrying real LLM/tool/input data
+      // get a standalone conversion.
+      if (isMetadataOnlyOtherEvent(entry)) {
+        logger.debug('Dropping metadata-only ephemeral other event', {
+          eventName: entry['event.name'],
+          hook: entry['agent.openclaw.hook'],
+        });
+        return;
+      }
       await this.convertAndExport(agentType, [entry]);
       return;
     }
@@ -167,11 +259,30 @@ export class OtlpTraceFlusher extends BaseFlusher {
       return;
     }
 
-    // Signal B: check if there's an active buffer for same agentType with different key
+    // Signal B: a different turn from the same agent type is a boundary only
+    // when both turns are confirmed to belong to the same session.
+    // Different or unknown sessions may be concurrent; preempting one would
+    // split its records and synthesize duplicate ENTRY/AGENT spans.
+    const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) || undefined;
     for (const [bufKey, buf] of this.turnBuffers) {
-      if (buf.agentType === agentType && bufKey !== key && !buf.completed) {
-        buf.completed = true;
-        this.triggerFlush(buf, false);
+      if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
+      if (!incomingSessionId || !buf.sessionId || incomingSessionId !== buf.sessionId) continue;
+      buf.completed = true;
+      this.triggerFlush(buf, false);
+    }
+
+    // Bounded cleanup: if buffers have accumulated past the hard cap (pathological
+    // case where neither Signal A, same-session successor, nor idle timeout ever
+    // fires for many turns), flush oldest incomplete buffers to bound memory.
+    if (this.turnBuffers.size > MAX_TURN_BUFFERS) {
+      const overflow = this.turnBuffers.size - MAX_TURN_BUFFERS;
+      const candidates = [...this.turnBuffers.values()]
+        .filter((b) => !b.completed)
+        .sort((a, b) => a.lastActivityMs - b.lastActivityMs)
+        .slice(0, overflow);
+      for (const b of candidates) {
+        b.completed = true;
+        this.triggerFlush(b, false);
       }
     }
 
@@ -182,19 +293,25 @@ export class OtlpTraceFlusher extends BaseFlusher {
         keySource: source,
         keyValue: value,
         agentType,
+        sessionId: incomingSessionId,
         records: [],
         completed: false,
         lastActivityMs: Date.now(),
       };
       this.turnBuffers.set(key, buf);
+    } else if (!buf.sessionId && incomingSessionId) {
+      buf.sessionId = incomingSessionId;
     }
     buf.records.push(entry);
     buf.lastActivityMs = Date.now();
 
-    // Signal A: 检测到终态 finish_reason，标记 turn 完成。
+    // Signal A: terminal event detected → mark turn complete.
+    // Default: gen_ai.response.finish_reasons ∈ {stop, end_turn, cancelled, error}.
+    // OpenClaw has a dedicated run-level terminal hook because each ReAct
+    // model call carries its own finish reason.
     // 逐条模式下立即 flush；批量模式下（_deferSignalA=true）仅标记 completed，
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
-    if (hasTerminalFinishReason(entry['gen_ai.response.finish_reasons'])) {
+    if (this.isTerminalEvent(entry)) {
       buf.completed = true;
       if (!this._deferSignalA) {
         this.triggerFlush(buf);
@@ -237,8 +354,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     await this.flush();
 
-    const exportShutdowns = [...this.agentExportStates.values()].map(
-      (s) => s.exporter.shutdown(),
+    const exportShutdowns = [...this.agentExportStates.values()].flatMap(
+      (s) => s.exporters.map((e) => e.exporter.shutdown()),
     );
     const providerShutdowns = [...this.agentConvertStates.values()].map(
       (s) => s.provider.shutdown(),
@@ -253,14 +370,30 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Test seam ---
 
   async exportSpansForAgent(agentType: string, spans: ReadableSpan[]): Promise<void> {
-    const exportState = this.getOrCreateExportState(agentType);
     if (this.cfg.debug) {
       await this.writeDebugLog(agentType, spans);
     }
-    await this.exportInBatches(exportState, agentType, spans);
+    // Fan out to every backend; each endpoint belongs to exactly one serviceName
+    // group, so the spans reach each backend once.
+    const serviceNames = [...new Set(this.endpoints.map((e) => e.serviceName))];
+    await Promise.all(
+      serviceNames.map((serviceName) =>
+        this.exportInBatches(this.getOrCreateExportState(agentType, serviceName), agentType, spans),
+      ),
+    );
   }
 
   // --- Internal ---
+
+  private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    // OpenClaw emits one finish reason per ReAct model call. Those values close
+    // individual LLM spans, not the whole agent turn. Its llm_output hook is the
+    // stable end-of-run boundary in every supported version (>=2026.5.12).
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'openclaw') {
+      return entry['agent.openclaw.hook'] === 'llm_output';
+    }
+    return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
+  }
 
   private resolveGroupKey(entry: AgentActivityEntry): {
     source: TurnBuffer['keySource'];
@@ -331,34 +464,95 @@ export class OtlpTraceFlusher extends BaseFlusher {
   ): Promise<void> {
     if (records.length === 0) return;
     const projectedResourceAttributes = this.collectResourceAttributes(records);
-    const convertKey = this.buildConvertStateKey(agentType, projectedResourceAttributes);
-    const prev = this.convertLocks.get(convertKey) ?? Promise.resolve();
-    const current = prev.then(() => this.doConvertAndExport(
-      agentType,
-      records,
-      projectedResourceAttributes,
-      convertKey,
-    ));
-    this.convertLocks.set(convertKey, current.catch(() => {}));
-    await current;
+    // Convert once per distinct service.name (backends may split into user/inner
+    // service names). Each service name owns an independent convert state, so the
+    // common single-name case still converts exactly once.
+    const serviceNames = [...new Set(this.endpoints.map((e) => e.serviceName))];
+    await Promise.all(
+      serviceNames.map((serviceName) => {
+        const convertKey = this.buildConvertStateKey(agentType, serviceName, projectedResourceAttributes);
+        const prev = this.convertLocks.get(convertKey) ?? Promise.resolve();
+        const current = prev.then(() => this.doConvertAndExport(
+          agentType,
+          serviceName,
+          records,
+          projectedResourceAttributes,
+          convertKey,
+        ));
+        this.convertLocks.set(convertKey, current.catch(() => {}));
+        return current;
+      }),
+    );
   }
 
   private async doConvertAndExport(
     agentType: string,
+    serviceName: string,
     records: AgentActivityEntry[],
     projectedResourceAttributes: Record<string, ResourceProjectionValue>,
     convertKey: string,
   ): Promise<void> {
-    const convertState = this.getOrCreateConvertState(agentType, projectedResourceAttributes, convertKey);
-    const { handler, provider, inMem } = convertState;
+    const convertState = this.getOrCreateConvertState(agentType, serviceName, projectedResourceAttributes, convertKey);
+    const { handler, provider, inMem, toolSpanIds } = convertState;
     convertState.active += 1;
 
     try {
       try {
-        const result = convertEventLogToTrace(
-          records as unknown as EventLogRecord[],
-          { handler, strict: false },
-        );
+        // Inject user-defined custom attributes (config/env/file) into trace
+        // spans only — never the event log. Resolved per turn so the mutable
+        // file is picked up on change. Values are fill-only stamped onto record
+        // copies (originals untouched) so passthroughKeys can read them; git.*
+        // are already on the records and only need to be listed as keys.
+        const customAttrs = this.globalAttributesProvider?.resolve() ?? {};
+        const customKeys = Object.keys(customAttrs);
+        // Caller-supplied attributes (e.g. multica.*) are already stamped as
+        // top-level fields on the records by the hook/plugin; discover any key
+        // matching a configured prefix and list it so it reaches span attributes.
+        const prefixKeys = this.spanAttributePassthroughPrefixes.length === 0
+          ? []
+          : [...new Set(
+              records.flatMap(r =>
+                Object.keys(r).filter(k =>
+                  // Defense-in-depth: never surface reserved/pipeline keys even if a
+                  // misconfigured prefix (e.g. "gen_ai.") happens to match them.
+                  !isReservedKey(k) &&
+                  this.spanAttributePassthroughPrefixes.some(p => k.startsWith(p)),
+                ),
+              ),
+            )];
+        const passthroughKeys = [...new Set([
+          ...DEFAULT_GIT_PASSTHROUGH_KEYS,
+          ...GEN_AI_HIERARCHY_PASSTHROUGH_KEYS,
+          ...customKeys,
+          ...prefixKeys,
+        ])];
+        const recordsForConversion = customKeys.length === 0
+          ? records
+          : records.map((r) => {
+              const copy: AgentActivityEntry = { ...r };
+              for (const [k, v] of Object.entries(customAttrs)) {
+                if (copy[k] === undefined) copy[k] = v;
+              }
+              return copy;
+            });
+
+        // Drop orphan llm.request / tool.call events before conversion so the
+        // converter doesn't emit empty LLM/TOOL spans with duration=0 and
+        // missing output.messages / tool.call.result. This happens when a
+        // turn is interrupted before llm.response / tool.result arrive (e.g.
+        // user Ctrl+C, agent errored mid-step). The converter library would
+        // otherwise still emit a span for the orphan request/call.
+        const sanitized = dropOrphanPairs(recordsForConversion);
+        toolSpanIds.prepare(sanitized);
+        let result;
+        try {
+          result = convertEventLogToTrace(
+            sanitized as unknown as EventLogRecord[],
+            { handler, strict: false, passthroughKeys },
+          );
+        } finally {
+          toolSpanIds.clear();
+        }
         if (result.warnings.length > 0) {
           logger.warn(`Conversion warnings for ${agentType}`, { warnings: result.warnings.join('; ') });
         }
@@ -372,8 +566,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
       inMem.reset();
 
       if (spans.length === 0) return;
+      this.enrichToolSkillAttributes(records, spans);
+      if (agentType === 'openclaw') {
+        this.enrichOpenClawToolAttributes(records, spans);
+        this.enrichOpenClawLlmAttributes(records, spans);
+      }
 
-      const exportState = this.getOrCreateExportState(agentType);
+      const exportState = this.getOrCreateExportState(agentType, serviceName);
 
       if (this.cfg.debug) {
         await this.writeDebugLog(agentType, spans);
@@ -413,22 +612,41 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (batches.length > 1) {
       logger.info(`Exporting ${spans.length} spans in ${batches.length} batches`, { agentType, maxBytes });
     }
+
+    // Fan out per-endpoint in parallel: each backend drains its own batches
+    // sequentially, but backends run concurrently — so a slow/hung backend
+    // only delays itself, not the healthy ones (no head-of-line blocking).
+    await Promise.allSettled(
+      exportState.exporters.map(({ name, exporter }) =>
+        this.exportBatchesToEndpoint(exporter, name, agentType, batches),
+      ),
+    );
+  }
+
+  private async exportBatchesToEndpoint(
+    exporter: TraceExporterLike,
+    endpointName: string,
+    agentType: string,
+    batches: ReadableSpan[][],
+  ): Promise<void> {
     for (const batch of batches) {
-      await this.doExport(exportState, agentType, batch);
+      await this.doExport(exporter, endpointName, agentType, batch);
     }
   }
 
   private doExport(
-    exportState: AgentExportState,
+    exporter: TraceExporterLike,
+    endpointName: string,
     agentType: string,
     spans: ReadableSpan[],
   ): Promise<void> {
+    // Never rejects: a failing backend is isolated + persisted, not propagated.
     return new Promise<void>((resolve) => {
-      exportState.exporter.export(spans, (result) => {
+      exporter.export(spans, (result) => {
         if (result.code !== ExportResultCode.SUCCESS) {
           const errMsg = result.error?.message ?? 'unknown export error';
-          logger.warn(`Export failed for ${agentType}: ${errMsg}`);
-          this.writeFailedLog(agentType, spans, {
+          logger.warn(`Export failed for ${agentType} → ${endpointName}: ${errMsg}`);
+          this.writeFailedLog(agentType, endpointName, spans, {
             code: result.code,
             message: errMsg,
           }).catch(() => undefined);
@@ -440,8 +658,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   private getOrCreateConvertState(
     agentType: string,
+    serviceName: string,
     projectedResourceAttributes: Record<string, ResourceProjectionValue> = {},
-    key = this.buildConvertStateKey(agentType, projectedResourceAttributes),
+    key = this.buildConvertStateKey(agentType, serviceName, projectedResourceAttributes),
   ): AgentConvertState {
     let state = this.agentConvertStates.get(key);
     if (state) {
@@ -450,18 +669,156 @@ export class OtlpTraceFlusher extends BaseFlusher {
       return state;
     }
 
-    const resource = this.buildResource(agentType, projectedResourceAttributes);
+    const resource = this.buildResource(agentType, serviceName, projectedResourceAttributes);
     const inMem = new InMemorySpanExporter();
+    const idGenerator = new ReservedToolSpanIdGenerator();
     const provider = new BasicTracerProvider({
       resource,
+      idGenerator,
       spanProcessors: [new SimpleSpanProcessor(inMem)],
     });
     const handler = new ExtendedTelemetryHandler({ tracerProvider: provider });
+    const toolSpanIds = attachReservedToolSpanIds(handler, idGenerator);
 
-    state = { provider, handler, inMem, active: 0 };
+    state = { provider, handler, inMem, toolSpanIds, active: 0 };
     this.agentConvertStates.set(key, state);
     this.evictConvertStates();
     return state;
+  }
+
+  private enrichToolSkillAttributes(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+  ): void {
+    const attributesByCallId = new Map<string, Record<string, string>>();
+    for (const record of records) {
+      if (record['event.name'] !== 'tool.call' && record['event.name'] !== 'tool.result') continue;
+      const callId = record['gen_ai.tool.call.id'];
+      if (typeof callId !== 'string' || callId.length === 0) continue;
+
+      const attributes = attributesByCallId.get(callId) ?? {};
+      for (const key of SKILL_ATTRIBUTE_KEYS) {
+        const value = record[key];
+        if (typeof value === 'string' && value.length > 0) attributes[key] = value;
+      }
+      if (Object.keys(attributes).length > 0) attributesByCallId.set(callId, attributes);
+    }
+
+    for (const span of spans) {
+      if (span.attributes['gen_ai.span.kind'] !== 'TOOL') continue;
+      const callId = span.attributes['gen_ai.tool.call.id'];
+      if (typeof callId !== 'string') continue;
+      const attributes = attributesByCallId.get(callId);
+      if (attributes) Object.assign(span.attributes, attributes);
+    }
+  }
+
+  private enrichOpenClawLlmAttributes(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+  ): void {
+    const extensionByResponseId = new Map<string, {
+      reasoningTokens?: number;
+      errorType?: string;
+    }>();
+
+    for (const record of records) {
+      if (record['event.name'] !== 'llm.response') continue;
+      const responseId = record['gen_ai.response.id'];
+      if (typeof responseId !== 'string' || responseId.length === 0) continue;
+      const reasoning = record['gen_ai.usage.reasoning_tokens'];
+      const errorType = record['error.type'];
+      extensionByResponseId.set(responseId, {
+        reasoningTokens: typeof reasoning === 'number' && Number.isFinite(reasoning)
+          ? reasoning
+          : undefined,
+        errorType: typeof errorType === 'string' && errorType.length > 0
+          ? errorType
+          : undefined,
+      });
+    }
+
+    let totalReasoningTokens = 0;
+    let sawReasoningTokens = false;
+    for (const span of spans) {
+      if (span.attributes['gen_ai.span.kind'] !== 'LLM') continue;
+      const responseId = span.attributes['gen_ai.response.id'];
+      if (typeof responseId !== 'string') continue;
+      const extension = extensionByResponseId.get(responseId);
+      if (!extension) continue;
+      if (extension.reasoningTokens !== undefined) {
+        span.attributes['gen_ai.usage.reasoning_tokens'] = extension.reasoningTokens;
+        totalReasoningTokens += extension.reasoningTokens;
+        sawReasoningTokens = true;
+      }
+      if (extension.errorType) {
+        span.attributes['error.type'] = extension.errorType;
+        Object.assign(span.status, {
+          code: SpanStatusCode.ERROR,
+          message: 'OpenClaw model call failed',
+        });
+      }
+    }
+
+    if (sawReasoningTokens) {
+      for (const span of spans) {
+        if (span.attributes['gen_ai.span.kind'] === 'AGENT') {
+          span.attributes['gen_ai.usage.reasoning_tokens'] = totalReasoningTokens;
+        }
+      }
+    }
+  }
+
+  private enrichOpenClawToolAttributes(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+  ): void {
+    const extensionByCallId = new Map<string, {
+      resultStatus?: string;
+      errorType?: string;
+      errorMessage?: string;
+    }>();
+
+    for (const record of records) {
+      if (record['event.name'] !== 'tool.result') continue;
+      const callId = record['gen_ai.tool.call.id'];
+      if (typeof callId !== 'string' || callId.length === 0) continue;
+      const resultStatus = record['tool.result.status'];
+      const errorType = record['error.type'];
+      const errorMessage = record['error.message'];
+      extensionByCallId.set(callId, {
+        resultStatus: typeof resultStatus === 'string' && resultStatus.length > 0
+          ? resultStatus
+          : undefined,
+        errorType: typeof errorType === 'string' && errorType.length > 0
+          ? errorType
+          : undefined,
+        errorMessage: typeof errorMessage === 'string' && errorMessage.length > 0
+          ? errorMessage
+          : undefined,
+      });
+    }
+
+    for (const span of spans) {
+      if (span.attributes['gen_ai.span.kind'] !== 'TOOL') continue;
+      const callId = span.attributes['gen_ai.tool.call.id'];
+      if (typeof callId !== 'string') continue;
+      const extension = extensionByCallId.get(callId);
+      if (!extension) continue;
+      if (extension.resultStatus) {
+        span.attributes['tool.result.status'] = extension.resultStatus;
+      }
+      if (extension.errorType) span.attributes['error.type'] = extension.errorType;
+      if (extension.errorMessage) span.attributes['error.message'] = extension.errorMessage;
+
+      const resultStatus = extension.resultStatus?.toLowerCase();
+      if (extension.errorType || resultStatus === 'failure' || resultStatus === 'error') {
+        Object.assign(span.status, {
+          code: SpanStatusCode.ERROR,
+          message: extension.errorMessage || 'OpenClaw tool call failed',
+        });
+      }
+    }
   }
 
   private evictConvertStates(): void {
@@ -484,9 +841,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   private buildConvertStateKey(
     agentType: string,
+    serviceName: string,
     projectedResourceAttributes: Record<string, ResourceProjectionValue>,
   ): string {
-    return `${agentType}|${this.stableJson(projectedResourceAttributes)}`;
+    return `${agentType}|${serviceName}|${this.stableJson(projectedResourceAttributes)}`;
   }
 
   private stableJson(value: Record<string, ResourceProjectionValue>): string {
@@ -555,25 +913,31 @@ export class OtlpTraceFlusher extends BaseFlusher {
     return undefined;
   }
 
-  private getOrCreateExportState(agentType: string): AgentExportState {
-    let state = this.agentExportStates.get(agentType);
+  private getOrCreateExportState(agentType: string, serviceName: string): AgentExportState {
+    const key = `${agentType}|${serviceName}`;
+    let state = this.agentExportStates.get(key);
     if (state) return state;
 
-    const exporter = new OTLPTraceExporter({
-      url: this.resolvedEndpointUrl,
-      headers: this.cfg.headers ?? {},
-      compression: this.cfg.compression === 'none'
-        ? CompressionAlgorithm.NONE
-        : CompressionAlgorithm.GZIP,
-    });
+    const exporters = this.endpoints
+      .filter((ep) => ep.serviceName === serviceName)
+      .map((ep) => ({
+        name: ep.name,
+        exporter: this.exporterFactory({
+          url: ep.url,
+          headers: ep.headers,
+          compression: ep.compression,
+          name: ep.name,
+        }),
+      }));
 
-    state = { exporter };
-    this.agentExportStates.set(agentType, state);
+    state = { exporters };
+    this.agentExportStates.set(key, state);
     return state;
   }
 
   private buildResource(
     agentType: string,
+    serviceName: string,
     projectedResourceAttributes: Record<string, ResourceProjectionValue> = {},
   ): Resource {
     const userAttrs: Record<string, string> = {};
@@ -604,13 +968,18 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
 
     return new Resource({
-      'service.name': `${this.cfg.serviceName}-${agentType}`,
+      'service.name': `${serviceName}-${agentType}`,
       'service.version': this.pilotVersion,
       'service.instance.id': this.instanceId,
       'service.namespace': 'loongsuite-pilot',
       'host.name': os.hostname(),
       'gen_ai.agent.type': agentType,
       'gen_ai.agent.system': resolveAgentSystem(agentType),
+      // ARMS GenAI semconv recommends gen_ai.framework on every span. The
+      // converter library doesn't set it on span attributes, so we set it on
+      // the Resource — OTel resources propagate to all spans of the trace,
+      // which CMS reads the same way as span-level gen_ai.framework.
+      'gen_ai.framework': agentType,
       ...userAttrs,
       ...projectedAttrs,
     });
@@ -634,11 +1003,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   private async writeFailedLog(
     agentType: string,
+    endpointName: string,
     spans: ReadableSpan[],
     error: { code: number; message: string },
   ): Promise<void> {
     try {
-      const svcName = `${this.cfg.serviceName}-${agentType}`;
+      // Sanitize endpointName (comes from managed config `name`) so it cannot
+      // escape failedDir via path traversal or create unintended subdirs.
+      const safeEndpoint = endpointName.replace(/[^A-Za-z0-9._-]/g, '_');
+      const svcName = `${this.cfg.serviceName}-${agentType}__${safeEndpoint}`;
       const dir = this.failedDir;
       await ensureDir(dir);
       const filepath = path.join(dir, `${svcName}.jsonl`);
@@ -669,4 +1042,61 @@ export class OtlpTraceFlusher extends BaseFlusher {
 function hasTerminalFinishReason(finishReasons: unknown): boolean {
   return Array.isArray(finishReasons)
     && finishReasons.some(reason => typeof reason === 'string' && TERMINAL_FINISH_REASONS.has(reason));
+}
+
+/**
+ * Drop orphan llm.request and tool.call events that have no matching
+ * llm.response / tool.result in the same turn buffer. Without this, the
+ * converter library still emits an LLM/TOOL span for the orphan event with
+ * duration=0 (endMs=startMs) and missing output.messages / tool.call.result.
+ *
+ * Pairing scope:
+ *   - llm.request ↔ llm.response: by gen_ai.step.id (a step is "complete"
+ *     if it has at least one llm.response).
+ *   - tool.call ↔ tool.result: by gen_ai.tool.call.id (a tool call is
+ *     "complete" if a tool.result with the same call.id exists).
+ *
+ * Records whose pairing mate is missing are dropped. Records without
+ * step.id (user-hook prompts / "other" events / llm.response-only) and
+ * tool.result-only records are always kept — they don't produce orphan
+ * spans downstream.
+ */
+function isMetadataOnlyOtherEvent(entry: AgentActivityEntry): boolean {
+  // The converter (converter.js:73-74) only consumes "other" events that
+  // carry gen_ai.input.messages(_delta) — they feed the ENTRY span's
+  // input.messages. All other "other" events are silently discarded inside
+  // a turn. Converting such records standalone via the ephemeral path
+  // still produces a phantom ENTRY+AGENT pair, so drop them at the door.
+  if (entry['event.name'] !== 'other') return false;
+  if (entry['gen_ai.input.messages'] !== undefined) return false;
+  if (entry['gen_ai.input.messages_delta'] !== undefined) return false;
+  return true;
+}
+
+function dropOrphanPairs(records: AgentActivityEntry[]): AgentActivityEntry[] {
+  const stepsWithResponse = new Set<string>();
+  const completedToolCallIds = new Set<string>();
+  for (const r of records) {
+    if (r['event.name'] === 'llm.response') {
+      const stepId = (r['gen_ai.step.id'] as string | undefined) ?? '__no_step__';
+      stepsWithResponse.add(stepId);
+    }
+    if (r['event.name'] === 'tool.result') {
+      const callId = r['gen_ai.tool.call.id'] as string | undefined;
+      if (callId) completedToolCallIds.add(callId);
+    }
+  }
+  return records.filter((r) => {
+    const name = r['event.name'];
+    if (name === 'llm.request') {
+      const stepId = (r['gen_ai.step.id'] as string | undefined) ?? '__no_step__';
+      return stepsWithResponse.has(stepId);
+    }
+    if (name === 'tool.call') {
+      const callId = r['gen_ai.tool.call.id'] as string | undefined;
+      // Keep tool.call only if it has no call.id (rare) or a matching result.
+      return !callId || completedToolCallIds.has(callId);
+    }
+    return true;
+  });
 }

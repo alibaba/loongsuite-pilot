@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto';
 import type { AgentActivityEntry } from '../../types/index.js';
+import type { InterceptTokenData } from './intercept-token-reader.js';
 import type { SegmentTokenData } from './segment-token-reader.js';
 import type { SqliteTokenData } from './sqlite-token-reader.js';
 
@@ -9,17 +10,11 @@ import type { SqliteTokenData } from './sqlite-token-reader.js';
 // ~1.4s; the accurate agent.qoder.match_ts (when present) matches within a few ms.
 const TIMESTAMP_THRESHOLD_MS = 5000;
 
-// Time-sanity guard for the order-based pass: reject a positional pair whose
-// response↔row time gap is implausibly large (guards against mis-alignment when a
-// row is missing in the middle). STRICT applies when the response carries the
-// accurate match_ts; LOOSE applies when only the drifted time_unix_nano is available.
-const ORDER_MATCH_STRICT_MS = 1000;
-const ORDER_MATCH_LOOSE_MS = 3000;
-
 export function enrichCliTurn(
   entries: AgentActivityEntry[],
   segments: SegmentTokenData[],
   systemPrompt?: string,
+  interceptTokens: InterceptTokenData[] = [],
 ): void {
   if (systemPrompt) {
     const firstReq = entries.find(e =>
@@ -32,8 +27,6 @@ export function enrichCliTurn(
     }
   }
 
-  if (segments.length === 0) return;
-
   for (const seg of segments) {
     const matches = entries.filter(e =>
       e['gen_ai.response.id'] === seg.requestId && e['event.name'] === 'llm.response',
@@ -41,22 +34,27 @@ export function enrichCliTurn(
 
     if (matches.length === 0) continue;
 
-    matches[0]['gen_ai.usage.input_tokens'] = seg.inputTokens;
-    matches[0]['gen_ai.usage.output_tokens'] = seg.outputTokens;
-    matches[0]['gen_ai.usage.total_tokens'] = seg.inputTokens + seg.outputTokens;
-    matches[0]['gen_ai.usage.cache_read.input_tokens'] = seg.cacheReadTokens;
-    matches[0]['gen_ai.usage.cache_creation.input_tokens'] = seg.cacheCreationTokens;
+    // Segment usage is a compatibility fallback only. New qodercli releases
+    // emit zero token fields in segments, while intercept observes the actual
+    // provider usage. Preserve any native usage already present on the entry.
+    const shouldUseSegmentTokens =
+      !hasPositiveEntryUsage(matches[0]) &&
+      (seg.inputTokens > 0 || seg.outputTokens > 0);
+
+    if (shouldUseSegmentTokens) {
+      matches[0]['gen_ai.usage.input_tokens'] = seg.inputTokens;
+      matches[0]['gen_ai.usage.output_tokens'] = seg.outputTokens;
+      matches[0]['gen_ai.usage.total_tokens'] = seg.inputTokens + seg.outputTokens;
+      matches[0]['gen_ai.usage.cache_read.input_tokens'] = seg.cacheReadTokens;
+      matches[0]['gen_ai.usage.cache_creation.input_tokens'] = seg.cacheCreationTokens;
+
+      for (let i = 1; i < matches.length; i++) {
+        zeroUsage(matches[i]);
+      }
+    }
 
     if (seg.stopReason && !matches[0]['gen_ai.response.finish_reasons']) {
       matches[0]['gen_ai.response.finish_reasons'] = [seg.stopReason];
-    }
-
-    for (let i = 1; i < matches.length; i++) {
-      matches[i]['gen_ai.usage.input_tokens'] = 0;
-      matches[i]['gen_ai.usage.output_tokens'] = 0;
-      matches[i]['gen_ai.usage.total_tokens'] = 0;
-      matches[i]['gen_ai.usage.cache_read.input_tokens'] = 0;
-      matches[i]['gen_ai.usage.cache_creation.input_tokens'] = 0;
     }
 
     // Inject segment-derived timestamps and model for the entire step (unified clock source)
@@ -87,8 +85,8 @@ export function enrichCliTurn(
       matches[0].time_unix_nano = String(BigInt(seg.responseEndTs) * 1_000_000n);
     }
 
-    // tool.call: use segment responseEndTs (tool starts when LLM finishes)
-    // tool.result: use segment toolFinishedTs (tool ends when execution completes)
+    // Preserve per-tool hook timestamps when available. Segment timing has no
+    // tool ID, so it is only a fallback for legacy hook records.
     if (stepId && seg.toolFinishedTs > 0) {
       const toolCalls = entries.filter(e =>
         e['event.name'] === 'tool.call' && e['gen_ai.step.id'] === stepId,
@@ -101,15 +99,90 @@ export function enrichCliTurn(
       const toolDurationMs = seg.responseEndTs > 0
         ? seg.toolFinishedTs - seg.responseEndTs
         : 0;
-      for (const tc of toolCalls) tc.time_unix_nano = toolCallTs;
+      for (const tc of toolCalls) {
+        if (parseUnixNanos(tc.time_unix_nano) === undefined) {
+          tc.time_unix_nano = toolCallTs;
+        }
+      }
       for (const tr of toolResults) {
-        tr.time_unix_nano = toolResultTs;
-        if (toolDurationMs > 0) {
+        if (parseUnixNanos(tr.time_unix_nano) === undefined) {
+          tr.time_unix_nano = toolResultTs;
+        }
+        if (tr['gen_ai.tool.call.duration'] === undefined && toolDurationMs > 0) {
           (tr as Record<string, unknown>)['gen_ai.tool.call.duration'] = toolDurationMs;
         }
       }
     }
   }
+
+  // Intercept is the authoritative qodercli token source. Apply it last so an
+  // exact response-id match overrides native/legacy segment usage, but never
+  // guesses by order or timestamp when ids differ.
+  applyInterceptUsage(entries, interceptTokens);
+}
+
+function applyInterceptUsage(
+  entries: AgentActivityEntry[],
+  interceptTokens: InterceptTokenData[],
+): void {
+  if (interceptTokens.length === 0) return;
+
+  // Intercept may observe an incremental and then a final usage object for the
+  // same response. Keep the newest valid record for each globally-unique id.
+  const latestByResponseId = new Map<string, InterceptTokenData>();
+  for (const token of interceptTokens) {
+    if (!token.id || !hasPositiveInterceptUsage(token)) continue;
+    const previous = latestByResponseId.get(token.id);
+    if (!previous || token.ts >= previous.ts) {
+      latestByResponseId.set(token.id, token);
+    }
+  }
+
+  for (const [responseId, usage] of latestByResponseId) {
+    const matches = entries.filter(entry =>
+      entry['event.name'] === 'llm.response' &&
+      entry['gen_ai.response.id'] === responseId,
+    );
+    if (matches.length === 0) continue;
+
+    const total = usage.totalTokens > 0
+      ? usage.totalTokens
+      : usage.promptTokens + usage.completionTokens;
+    matches[0]['gen_ai.usage.input_tokens'] = usage.promptTokens;
+    matches[0]['gen_ai.usage.output_tokens'] = usage.completionTokens;
+    matches[0]['gen_ai.usage.total_tokens'] = total;
+    matches[0]['gen_ai.usage.cache_read.input_tokens'] = usage.cachedTokens;
+    // Intercept does not expose cache_creation. Leave a native/segment value
+    // intact instead of replacing it with a fabricated zero.
+
+    // A response id may be represented by separate thinking/text entries.
+    // Attribute provider usage once to avoid double counting.
+    for (let i = 1; i < matches.length; i++) {
+      zeroUsage(matches[i]);
+    }
+  }
+}
+
+function hasPositiveInterceptUsage(usage: InterceptTokenData): boolean {
+  return usage.promptTokens > 0 || usage.completionTokens > 0 || usage.totalTokens > 0;
+}
+
+function hasPositiveEntryUsage(entry: AgentActivityEntry): boolean {
+  return positiveNumber(entry['gen_ai.usage.input_tokens']) ||
+    positiveNumber(entry['gen_ai.usage.output_tokens']) ||
+    positiveNumber(entry['gen_ai.usage.total_tokens']);
+}
+
+function positiveNumber(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+function zeroUsage(entry: AgentActivityEntry): void {
+  entry['gen_ai.usage.input_tokens'] = 0;
+  entry['gen_ai.usage.output_tokens'] = 0;
+  entry['gen_ai.usage.total_tokens'] = 0;
+  entry['gen_ai.usage.cache_read.input_tokens'] = 0;
+  entry['gen_ai.usage.cache_creation.input_tokens'] = 0;
 }
 
 export function enrichIdeTurn(
@@ -129,8 +202,8 @@ export function enrichIdeTurn(
 
   matchIdeTurnsBySqliteOrder(entries, sortedGroups, used, tokenWritten);
 
-  // Conservative fallback for incomplete SQLite metadata or structurally unmatched responses:
-  // match by close timestamp only, preserving the previous behavior.
+  // Compatibility fallback for rows that lack the session/message metadata
+  // needed by the deterministic turn/order pass.
   for (const [requestId, group] of sortedGroups) {
     for (const row of group) {
       // Skip rows already consumed by the order-based pass so Pass B only handles
@@ -236,21 +309,44 @@ export function enrichIdeTurn(
 
     if (req) {
       if (i > 0) {
-        // Previous step's gmt_create + 1ms (accounts for tool.result buffer in prior step)
-        req.time_unix_nano = String(BigInt(matchedPairs[i - 1].gmtCreate + 1) * 1_000_000n);
+        // Start after the previous response and all of its tools. Hook records
+        // now carry per-tool result timestamps, so a fixed +1ms after the
+        // response would make the next LLM overlap a still-running tool.
+        let requestStart = BigInt(matchedPairs[i - 1].gmtCreate + 1) * 1_000_000n;
+        const previousResponseIndex = entries.indexOf(matchedPairs[i - 1].entry);
+        const currentResponseIndex = entries.indexOf(respEntry);
+        for (let j = previousResponseIndex + 1; j < currentResponseIndex; j++) {
+          if (entries[j]['event.name'] !== 'tool.result') continue;
+          const resultTime = parseUnixNanos(entries[j].time_unix_nano);
+          if (resultTime !== undefined && resultTime >= requestStart) {
+            requestStart = resultTime + 1_000_000n;
+          }
+        }
+        const hookRequestTime = parseUnixNanos(req.time_unix_nano);
+        if (hookRequestTime !== undefined && hookRequestTime > requestStart) {
+          requestStart = hookRequestTime;
+        }
+        req.time_unix_nano = String(requestStart);
       } else if (userBoundary) {
         // Use userBoundary.time + 1ms so the LLM request starts strictly after
         // the user prompt event. When both share the same timestamp the converter
         // generates a duplicate empty STEP (0ms, no LLM children) because it
         // sees two events at the same instant inside step s1.
         const ubNs = BigInt(String(userBoundary.time_unix_nano));
-        req.time_unix_nano = String(ubNs + 1_000_000n); // +1ms
+        const minimumRequestTime = ubNs + 1_000_000n;
+        const hookRequestTime = parseUnixNanos(req.time_unix_nano);
+        req.time_unix_nano = String(
+          hookRequestTime !== undefined && hookRequestTime > minimumRequestTime
+            ? hookRequestTime
+            : minimumRequestTime,
+        );
       }
     }
 
-    // IDE data has no tool-finished timestamp; place tool.call at response time
-    // and tool.result 1ms later. The next step's llm.request is offset by +1ms
-    // to match, keeping steps non-overlapping.
+    // Preserve per-tool timestamps emitted by the hook. SQLite has no tool ID
+    // or tool-finished timestamp, so it cannot improve those values. The old
+    // gmt_create/+1ms fallback is retained only for legacy records whose tool
+    // timestamps are missing or malformed.
     const toolCallTs = String(BigInt(gmtCreate) * 1_000_000n);
     const toolResultTs = String(BigInt(gmtCreate + 1) * 1_000_000n);
     const respIdx = entries.indexOf(respEntry);
@@ -258,8 +354,14 @@ export function enrichIdeTurn(
       ? entries.indexOf(matchedPairs[i + 1].entry)
       : entries.length;
     for (let j = respIdx + 1; j < rightBound; j++) {
-      if (entries[j]['event.name'] === 'tool.call') entries[j].time_unix_nano = toolCallTs;
-      if (entries[j]['event.name'] === 'tool.result') entries[j].time_unix_nano = toolResultTs;
+      if (entries[j]['event.name'] === 'tool.call' &&
+          parseUnixNanos(entries[j].time_unix_nano) === undefined) {
+        entries[j].time_unix_nano = toolCallTs;
+      }
+      if (entries[j]['event.name'] === 'tool.result' &&
+          parseUnixNanos(entries[j].time_unix_nano) === undefined) {
+        entries[j].time_unix_nano = toolResultTs;
+      }
     }
   }
 
@@ -315,44 +417,54 @@ function matchIdeTurnsBySqliteOrder(
   const turnGroups = groupEntriesByTurn(entries);
   if (turnGroups.length === 0) return;
 
-  if (sessionGroups.length < turnGroups.length) {
-    for (const [, turnEntries] of turnGroups) {
-      markLowConfidence(turnEntries, 'request_count_mismatch');
-    }
-    return;
-  }
-
-  const candidateGroups = sessionGroups.slice(sessionGroups.length - turnGroups.length);
-  for (let i = 0; i < turnGroups.length; i++) {
+  // SQLite contains the full session while hook entries normally contain only
+  // newly collected turns, so align the newest request groups with those turns.
+  // If SQLite is still persisting the newest request, enrich only the available
+  // prefix and leave later responses at zero rather than guessing by timestamp.
+  const pairCount = Math.min(sessionGroups.length, turnGroups.length);
+  const candidateGroups = sessionGroups.slice(sessionGroups.length - pairCount);
+  for (let i = 0; i < pairCount; i++) {
     const [, turnEntries] = turnGroups[i];
     const [requestId, sqliteRows] = candidateGroups[i];
     const responses = turnEntries.filter(e => e['event.name'] === 'llm.response');
+    if (responses.length === 0 || sqliteRows.length === 0) continue;
 
-    // Best-effort ordered matching. Counts often differ (sub-agent turns miss the
-    // final answer in the transcript; the latest row may not be persisted yet).
-    // Match the aligned prefix by order instead of abandoning the whole turn to the
-    // timestamp fallback. A time-sanity guard rejects positionally-aligned pairs
-    // whose times are implausibly far apart (mid-turn gap → order shifts by one →
-    // the shifted pair lands on a neighbouring call seconds away) so they fall
-    // through to the nearest-timestamp fallback (Pass B) instead of mis-attributing.
-    const n = Math.min(responses.length, sqliteRows.length);
-    // When counts match exactly, trust order fully (clock-independent) — this is the
-    // original, well-tested contract. The time-sanity guard applies only in the
-    // best-effort (unequal count) path, where a mid-turn gap would shift the pairing.
-    const countsMatch = responses.length === sqliteRows.length;
-    for (let j = 0; j < n; j++) {
-      const response = responses[j];
-      const row = sqliteRows[j];
-      if (!countsMatch) {
-        const threshold = accurateMatchMs(response) !== undefined
-          ? ORDER_MATCH_STRICT_MS
-          : ORDER_MATCH_LOOSE_MS;
-        if (Math.abs(matchMs(response) - row.gmtCreate) > threshold) {
-          markLowConfidence([response], 'order_time_gap');
-          continue;
-        }
-      }
-      applySqliteRowToIdeResponse(entries, turnEntries, response, row, requestId, used, tokenWritten);
+    // This is only a cross-Turn safety check, not a call-boundary heuristic.
+    // New hook records carry an accurate first-assistant timestamp. If the
+    // newest SQLite request group is actually a stale prior Turn (the current
+    // Turn has not been persisted yet), leave it unmatched to avoid replaying
+    // old usage. Old hook records without match_ts retain order compatibility.
+    const turnAnchor = responses
+      .map(accurateMatchMs)
+      .find((value): value is number => value !== undefined);
+    if (turnAnchor !== undefined &&
+        Math.abs(turnAnchor - sqliteRows[0].gmtCreate) > TIMESTAMP_THRESHOLD_MS) {
+      continue;
+    }
+
+    // Transcript reconstruction deliberately prefers one complete response over
+    // speculative splitting. Enrichment must therefore conserve usage when the
+    // transcript produces fewer spans than SQLite has provider calls:
+    //
+    //   response 1..N-1 <- row 1..N-1
+    //   response N      <- sum(row N..M)
+    //
+    // SQLite enriches usage only; it never changes the transcript Step boundary.
+    const oneToOneCount = Math.min(responses.length, sqliteRows.length);
+    for (let j = 0; j < oneToOneCount; j++) {
+      const isLastResponse = j === responses.length - 1;
+      const rowsForResponse = isLastResponse
+        ? sqliteRows.slice(j)
+        : [sqliteRows[j]];
+      applySqliteRowsToIdeResponse(
+        entries,
+        turnEntries,
+        responses[j],
+        rowsForResponse,
+        requestId,
+        used,
+        tokenWritten,
+      );
     }
   }
 }
@@ -369,50 +481,69 @@ function groupEntriesByTurn(entries: AgentActivityEntry[]): Array<[string, Agent
   return [...groups.entries()].filter(([, group]) => group.some(e => e['event.name'] === 'llm.response'));
 }
 
-function applySqliteRowToIdeResponse(
+function applySqliteRowsToIdeResponse(
   allEntries: AgentActivityEntry[],
   turnEntries: AgentActivityEntry[],
   response: AgentActivityEntry,
-  row: SqliteTokenData,
+  rows: SqliteTokenData[],
   requestId: string,
   used: Set<AgentActivityEntry>,
   tokenWritten: Set<string>,
 ): void {
+  if (rows.length === 0) return;
+  // The last SQLite row best represents the end of a response candidate that
+  // absorbed multiple provider calls.
+  const representative = rows[rows.length - 1];
   used.add(response);
-  (response as Record<string, unknown>).__matched_gmt_create = row.gmtCreate;
+  (response as Record<string, unknown>).__matched_gmt_create = representative.gmtCreate;
   response['gen_ai.request.id'] = requestId;
   (response as Record<string, unknown>)['agent.request_id'] = requestId;
-  response['gen_ai.response.id'] = row.messageId || requestId;
+  response['gen_ai.response.id'] = representative.messageId || requestId;
 
-  if (row.model && row.model !== 'unknown') {
-    response['gen_ai.request.model'] = row.model;
-    response['gen_ai.response.model'] = row.model;
+  if (representative.model && representative.model !== 'unknown') {
+    response['gen_ai.request.model'] = representative.model;
+    response['gen_ai.response.model'] = representative.model;
   }
 
   const request = findStepRequest(allEntries, response) ?? turnEntries.find(e => e['event.name'] === 'llm.request');
   if (request) {
     request['gen_ai.request.id'] = requestId;
     (request as Record<string, unknown>)['agent.request_id'] = requestId;
-    if (row.model && row.model !== 'unknown') request['gen_ai.request.model'] = row.model;
+    if (representative.model && representative.model !== 'unknown') {
+      request['gen_ai.request.model'] = representative.model;
+    }
   }
 
-  const dedupeKey = sqliteDedupeKey(row);
-  if (tokenWritten.has(dedupeKey)) return;
-  response['gen_ai.usage.input_tokens'] = row.inputTokens;
-  response['gen_ai.usage.output_tokens'] = row.outputTokens;
-  response['gen_ai.usage.total_tokens'] = row.inputTokens + row.outputTokens;
-  response['gen_ai.usage.cache_read.input_tokens'] = row.cacheReadTokens;
-  tokenWritten.add(dedupeKey);
+  const unusedRows = rows.filter(row => !tokenWritten.has(sqliteDedupeKey(row)));
+  if (unusedRows.length === 0) return;
+
+  const inputTokens = unusedRows.reduce((sum, row) => sum + row.inputTokens, 0);
+  const outputTokens = unusedRows.reduce((sum, row) => sum + row.outputTokens, 0);
+  const cacheReadTokens = unusedRows.reduce((sum, row) => sum + row.cacheReadTokens, 0);
+  response['gen_ai.usage.input_tokens'] = inputTokens;
+  response['gen_ai.usage.output_tokens'] = outputTokens;
+  response['gen_ai.usage.total_tokens'] = inputTokens + outputTokens;
+  response['gen_ai.usage.cache_read.input_tokens'] = cacheReadTokens;
+
+  if (unusedRows.length > 1) {
+    (response as Record<string, unknown>)['agent.qoder.usage_match_mode'] = 'aggregated_tail';
+    (response as Record<string, unknown>)['agent.qoder.sqlite_row_count'] = unusedRows.length;
+  }
+  for (const row of unusedRows) tokenWritten.add(sqliteDedupeKey(row));
+}
+
+function parseUnixNanos(value: unknown): bigint | undefined {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return undefined;
+  try {
+    return BigInt(value);
+  } catch {
+    return undefined;
+  }
 }
 
 function findStepRequest(entries: AgentActivityEntry[], response: AgentActivityEntry): AgentActivityEntry | undefined {
   const stepId = response['gen_ai.step.id'];
   return entries.find(e => e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId);
-}
-
-function markLowConfidence(entries: AgentActivityEntry[], _warning: string): void {
-  // Low-confidence match: no additional fields written to avoid polluting output.
-  void entries;
 }
 
 function sqliteDedupeKey(row: SqliteTokenData): string {

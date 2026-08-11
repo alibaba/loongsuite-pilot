@@ -79,6 +79,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--sls-logstore <name>` | SLS logstore name. |
 | `--sls-ak-id <key>` | SLS Access Key ID for AK mode. |
 | `--sls-ak-secret <key>` | SLS Access Key Secret for AK mode. |
+| `--sls-api-key <key>` | SLS API Key for API Key mode. Cannot be combined with AK/SK flags. |
 | `--mask-mode <mode>` | Data masking mode: `all`, `none`, or `custom`. |
 | `--mask-types <list>` | Comma-separated mask types. Required when `--mask-mode custom`. |
 | `--collect-log <true\|false>` | Enable or disable SLS log reporting. |
@@ -87,7 +88,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--cms-endpoint <url>` | CMS or ARMS trace endpoint. |
 | `--cms-workspace <name>` | CMS workspace value. |
 | `--service-name-prefix <name>` | Service name prefix used by reporting backends. |
-| `--system-service` | Register as a system-level service instead of a user-level service. |
+| `--system-service` | **Deprecated** — ignored. Init system is now auto-detected (systemd-user → systemd-system → init.d). |
 | `--lang <lang>` | Output language: `zh` or `en`. |
 
 ## Verify Installation

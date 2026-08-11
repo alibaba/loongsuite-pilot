@@ -22,10 +22,64 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import {
+  agentBaseFieldPatch,
+  collectResourceAttributesFromEnv,
+} from "../shared/resource-context.mjs";
 
 const AGENT_TYPE = "opencode";
 const MAX_SESSIONS = 100;
 const MAX_CONTENT_SIZE = 64 * 1024;
+
+const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_TYPE });
+const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
+const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
+  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
+  : {};
+
+// ---------------------------------------------------------------------------
+// Caller-supplied span attributes
+// ---------------------------------------------------------------------------
+// The host process (e.g. multica daemon) sets LOONGSUITE_PILOT_SPAN_ATTRIBUTES
+// as `key=value,key=value` per agent invocation. Parsed once at init and stamped
+// onto every record as top-level fields so the trace flusher can pass matching
+// keys through to span attributes. Inlined (no import) — plugins ship standalone.
+// Mirrors parseSpanAttributesFromEnv in assets/hooks/shared/resource-context.mjs.
+const SPAN_ATTR_RESERVED_PREFIXES = [
+  "gen_ai.",
+  "git.",
+  "workspace.",
+  "event.",
+  "trace_",
+  "user.",
+  "cost_",
+  "agent.",
+  "time_unix_nano",
+  "observed_time_unix_nano",
+];
+const SPAN_ATTR_MAX_VALUE_LENGTH = 512;
+const SPAN_ATTR_SENSITIVE_RE =
+  /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE)([_.-]|$)|^(API_KEY|API_HEADER)$/i;
+
+function parseSpanAttributesFromEnv(env = process.env) {
+  const out = {};
+  const raw = env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  if (typeof raw !== "string" || raw.length === 0) return out;
+  for (const pair of raw.split(",")) {
+    const idx = pair.indexOf("=");
+    if (idx <= 0) continue;
+    const key = pair.slice(0, idx).trim();
+    const value = pair.slice(idx + 1).trim();
+    if (!key || !value) continue;
+    if (SPAN_ATTR_RESERVED_PREFIXES.some((p) => key === p || key.startsWith(p))) continue;
+    if (SPAN_ATTR_SENSITIVE_RE.test(key)) continue;
+    if (value.length > SPAN_ATTR_MAX_VALUE_LENGTH) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env);
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -151,6 +205,12 @@ function resolveUserId(cfg) {
 
 let _logDirReady = false;
 
+// Working directory of the OpenCode instance, captured once at server init.
+// One OpenCode server instance maps to one project directory, so this is stable
+// for the process lifetime. Emitted as agent.opencode.cwd so the pilot pipeline
+// can enrich git.repo / workspace.current_root downstream.
+let agentCwd;
+
 function writeRecord(record) {
   try {
     if (!_logDirReady) {
@@ -240,6 +300,10 @@ function buildCommonFields(sessionID, session, userId) {
     "gen_ai.agent.type": AGENT_TYPE,
     "gen_ai.agent.name": AGENT_TYPE,
     "gen_ai.agent.id": session.agentMeta?.name || undefined,
+    ...(agentCwd ? { [`agent.${AGENT_TYPE}.cwd`]: agentCwd } : {}),
+    ...SPAN_ATTRIBUTES,
+    ...RESOURCE_BASE_FIELD_PATCH,
+    ...RESOURCE_ATTRIBUTE_FIELDS,
   };
 }
 
@@ -365,6 +429,30 @@ function buildOutputMessages(pendingParts, finishReason) {
 // Event handlers
 // ---------------------------------------------------------------------------
 
+// 方案1(env):首个 turn 读 process.env.TRACEPARENT,写 session 级关联记录到
+// acp-correlate/<sessionId>.jsonl,每 session 只写一次(O_CREAT|O_EXCL 锁)。fail-open。
+const UPSTREAM_TP_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i;
+function recordUpstreamEnvOnce(sessionID) {
+  try {
+    const tp = (process.env.TRACEPARENT || "").trim();
+    const m = UPSTREAM_TP_RE.exec(tp);
+    if (!m || m[1].toLowerCase() === "0".repeat(32) || m[2].toLowerCase() === "0".repeat(16)) return;
+    const dir = path.join(resolveDataDir(), "acp-correlate");
+    fs.mkdirSync(dir, { recursive: true });
+    const base = path.basename(String(sessionID)).replace(/[^a-zA-Z0-9_-]/g, "_") || "unknown";
+    try {
+      fs.closeSync(fs.openSync(path.join(dir, `${base}.env.lock`), "wx"));
+    } catch (e) {
+      if (e && e.code === "EEXIST") return; // 已写过, 正常返回
+      throw e;
+    }
+    const rec = { type: "session", sessionId: sessionID, traceparent: tp, ts: new Date().toISOString() };
+    fs.appendFileSync(path.join(dir, `${base}.jsonl`), JSON.stringify(rec) + "\n", "utf-8");
+  } catch {
+    // fail-open: 绝不影响 opencode
+  }
+}
+
 function handleChatMessage(inp, out, userId) {
   const sessionID = inp.sessionID;
   if (!sessionID) return;
@@ -372,6 +460,7 @@ function handleChatMessage(inp, out, userId) {
   const session = getSession(sessionID);
 
   session.turnSeq += 1;
+  if (session.turnSeq === 1) recordUpstreamEnvOnce(sessionID);
   const turnId = `${sessionID}:t${session.turnSeq}`;
   const traceId = generateTraceId();
 
@@ -471,6 +560,7 @@ function handleMessagePartUpdated(props, userId) {
     session.pendingParts = [];
     turn.stepSeq += 1;
     turn.currentStepId = `${turn.turnId}:s${turn.stepSeq}`;
+    turn.currentMessageId = part.messageID;
     session.stepStartTimeMs = props.time || Date.now();
 
     const model = session.modelInfo;
@@ -480,6 +570,7 @@ function handleMessagePartUpdated(props, userId) {
       "gen_ai.step.id": turn.currentStepId,
       "gen_ai.provider.name": inferProviderName(model?.providerID),
       "gen_ai.request.model": model?.modelID,
+      "opencode.message.id": part.messageID,
     };
     record.time_unix_nano = msToNanos(session.stepStartTimeMs) || nowNanos();
 
@@ -570,6 +661,7 @@ function handleMessagePartUpdated(props, userId) {
         "gen_ai.tool.call.arguments": argsStr
           ? truncateContent(argsStr)
           : undefined,
+        "opencode.message.id": part.messageID,
       };
       if (state.time?.start) {
         toolCallRecord.time_unix_nano = msToNanos(state.time.start);
@@ -605,6 +697,7 @@ function handleMessagePartUpdated(props, userId) {
             : safeStringify(resultPayload)
         ),
         "tool.result.status": state?.status === "error" ? "error" : "success",
+        "opencode.message.id": part.messageID,
       };
       if (state.time?.end) {
         toolResultRecord.time_unix_nano = msToNanos(state.time.end);
@@ -664,6 +757,7 @@ function handleMessageUpdated(props, userId) {
     ...buildCommonFields(sessionID, session, userId),
     "event.name": "llm.response",
     "gen_ai.step.id": turn.currentStepId,
+    "opencode.message.id": info.id,
     "gen_ai.provider.name": inferProviderName(
       info.providerID || model?.providerID
     ),
@@ -753,6 +847,7 @@ function handleToolExecuteBefore(inp, out, userId) {
     "gen_ai.tool.call.arguments": argsStr
       ? truncateContent(argsStr)
       : undefined,
+    "opencode.message.id": turn.currentMessageId,
   });
 }
 
@@ -769,6 +864,18 @@ function handleToolExecuteAfter(inp, out, userId) {
   if (!callID || session.emittedToolCalls.has(`result:${callID}`)) return;
 
   const resultPayload = out?.output ?? out?.result ?? "";
+
+  // MCP tools: opencode does not pass the result through this after-hook
+  // (out.output / out.result are empty), yet it DOES populate part.state.output,
+  // which the message.part.updated path reads. If there is no content and no
+  // error here, bail out WITHOUT marking result:<callID> consumed, so the part
+  // path can own the result. Otherwise we would emit an empty tool.result and
+  // block the path that actually carries the MCP output.
+  const hasResultContent = typeof resultPayload === "string"
+    ? resultPayload.length > 0
+    : resultPayload != null;
+  if (!hasResultContent && !out?.error) return;
+
   const matchingPart = session.pendingParts.find(
     (pp) => pp.kind === "tool_call" && pp.callID === callID
   );
@@ -795,6 +902,7 @@ function handleToolExecuteAfter(inp, out, userId) {
         : safeStringify(resultPayload)
     ),
     "tool.result.status": out?.error ? "error" : "success",
+    "opencode.message.id": turn.currentMessageId,
   };
   if (matchingPart?.startTimeMs) {
     const endMs = Date.now();
@@ -828,6 +936,14 @@ export default {
 
   server: async (input, _options) => {
     ensureDir(logDir());
+
+    // OpenCode passes the instance context here; `directory` is the working
+    // directory. Fall back to process.cwd() (the plugin runs inside the
+    // OpenCode process, whose cwd is the same directory).
+    agentCwd =
+      (typeof input?.directory === "string" && input.directory) ||
+      process.cwd() ||
+      undefined;
 
     const cfg = loadPilotConfig();
     const userId = resolveUserId(cfg);

@@ -38,6 +38,12 @@ beforeEach(async () => {
   await createSchema(dbPath);
 
   stateStore = new MockStateStore();
+  // Most tests exercise ordinary incremental collection. Seed the byte cursor
+  // explicitly so they do not accidentally depend on cold-start semantics.
+  stateStore.set('qoder-cn-trace', {
+    lastFile: `qoder-cn-${getTodayDateString()}.jsonl`,
+    lastOffset: 0,
+  });
 });
 
 afterEach(async () => {
@@ -45,6 +51,53 @@ afterEach(async () => {
 });
 
 describe('QoderCnTraceInput.collect (session-level enrich)', () => {
+  it('baselines existing incremental history when the input checkpoint is missing', async () => {
+    const oldEntries = [
+      buildEntry({ event: 'llm.response', turn: 'historical-turn-1', step: 'historical-turn-1:s1', session: '', ts: 1_780_000_000_000 }),
+      buildEntry({ event: 'llm.response', turn: 'historical-turn-2', step: 'historical-turn-2:s1', session: '', ts: 1_780_000_001_000 }),
+    ];
+    for (const entry of oldEntries) {
+      entry['agent.transcript.cursor_mode'] = 'incremental';
+    }
+    await writeHookJsonl(logDir, oldEntries);
+
+    // Reproduce a redeploy/state-loss boundary while the daily history remains.
+    stateStore = new MockStateStore();
+    const input = new QoderCnTraceInput({
+      stateStore: stateStore as any,
+      logDir,
+      pollIntervalMs: 60_000,
+    });
+    const collected: AgentActivityEntry[] = [];
+    input.on('entries', (batch: AgentActivityEntry[]) => collected.push(...batch));
+
+    await input.start();
+    expect(collected).toEqual([]);
+
+    const logFileName = `qoder-cn-${getTodayDateString()}.jsonl`;
+    const logFile = path.join(logDir, logFileName);
+    const baselineSize = (await fs.stat(logFile)).size;
+    expect(stateStore.get('qoder-cn-trace')).toMatchObject({
+      lastFile: logFileName,
+      lastOffset: baselineSize,
+      extra: { hookHistoryInitialized: true },
+    });
+
+    const nextEntry = buildEntry({
+      event: 'llm.response',
+      turn: 'turn-after-baseline',
+      step: 'turn-after-baseline:s1',
+      session: '',
+      ts: 1_780_000_002_000,
+    });
+    nextEntry['agent.transcript.cursor_mode'] = 'incremental';
+    await fs.appendFile(logFile, `${JSON.stringify(nextEntry)}\n`, 'utf-8');
+
+    const appended = await (input as any).collect() as AgentActivityEntry[];
+    await input.stop();
+    expect(appended.map(entry => entry['gen_ai.turn.id'])).toEqual(['turn-after-baseline']);
+  });
+
   it('aggregates multiple turns in the same session into one enrich pass', async () => {
     // SQLite has 2 assistant rows (one per LLM call); hook JSONL has 2 turns
     // referencing those calls. With session-level aggregation matchIdeTurnsBySqliteOrder
@@ -81,6 +134,37 @@ describe('QoderCnTraceInput.collect (session-level enrich)', () => {
     expect(respB['gen_ai.usage.input_tokens']).toBe(200);
     expect(respB['gen_ai.usage.output_tokens']).toBe(20);
     expect(respB['gen_ai.response.id']).toBe('msg-2');
+  });
+
+  it('enriches from the IDE plugin layout without ever relabelling agent.type', async () => {
+    // Only the ~/.qoder-cn/shared_client layout exists here. Tokens must still land,
+    // and agent.type must stay 'qoder-cn': identity comes from the hook record, never
+    // from which candidate DB matched (design D3).
+    await fs.rm(path.dirname(dbPath), { recursive: true, force: true });
+    const pluginDbDir = path.join(tmpHome, '.qoder-cn', 'shared_client', 'cache', 'db');
+    await fs.mkdir(pluginDbDir, { recursive: true });
+    const pluginDbPath = path.join(pluginDbDir, 'local.db');
+    await createSchema(pluginDbPath);
+
+    const sessionId = 'sess-plugin-layout';
+    await insertRow(pluginDbPath, {
+      id: 'msg-plugin', session_id: sessionId, request_id: 'req-plugin', role: 'assistant',
+      token_info: JSON.stringify({ prompt_tokens: 300, completion_tokens: 30, cached_tokens: 0 }),
+      gmt_create: 1_780_000_021_000,
+    });
+
+    await writeHookJsonl(logDir, [
+      buildEntry({ event: 'llm.request', turn: 'turn-P', step: 'turn-P:s1', session: sessionId, ts: 1_780_000_020_000 }),
+      buildEntry({ event: 'llm.response', turn: 'turn-P', step: 'turn-P:s1', session: sessionId, ts: 1_780_000_021_000 }),
+    ]);
+
+    const entries = await collectOnce();
+
+    const response = entries.find(e => e['event.name'] === 'llm.response')!;
+    expect(response['gen_ai.usage.input_tokens']).toBe(300);
+    expect(response['gen_ai.usage.output_tokens']).toBe(30);
+    expect(response['gen_ai.response.id']).toBe('msg-plugin');
+    expect(entries.every(e => e['gen_ai.agent.type'] === 'qoder-cn')).toBe(true);
   });
 
   it('assigns a distinct trace_id per turn even when sessionId is shared', async () => {

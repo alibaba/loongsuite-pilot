@@ -8,6 +8,11 @@
 #     -SlsLogstore "my-logstore" `
 #     -SlsAkId "your-ak-id" `
 #     -SlsAkSecret "your-ak-secret"
+#   .\installer-opensource.ps1 install `
+#     -SlsEndpoint "https://cn-hangzhou.log.aliyuncs.com" `
+#     -SlsProject "my-project" `
+#     -SlsLogstore "my-logstore" `
+#     -SlsApiKey "your-api-key"
 #
 # Install a specific version:
 #   .\installer-opensource.ps1 install -Version 1.2.0
@@ -30,6 +35,7 @@ param(
     [string]$SlsLogstore,
     [string]$SlsAkId,
     [string]$SlsAkSecret,
+    [string]$SlsApiKey,
     [string]$PackageUrl,
     [string]$DataDir,
     [string]$LogLevel,
@@ -46,25 +52,48 @@ param(
     [string]$Agents,
     [string]$MaskMode,
     [string]$MaskTypes,
-    [switch]$Purge
+    [switch]$Purge,
+    [switch]$PreferSystemNode
 )
 
 $ErrorActionPreference = "Stop"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# Wrap in try/catch: setting a static property on [Console] throws under Constrained
+# Language Mode (WDAC), and with $ErrorActionPreference=Stop that would abort the whole
+# script at load. Console encoding is cosmetic, so degrade silently.
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
 # ============================================================
 # Constants
 # ============================================================
 $PACKAGE_NAME = "loongsuite-pilot"
-$DEFAULT_DATA_DIR = Join-Path $env:USERPROFILE ".loongsuite-pilot"
-$PERMANENT_DIR = Join-Path $DEFAULT_DATA_DIR "package"
+$DEFAULT_PILOT_DIR = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+$CACHE_DIR = if ($env:LOONGSUITE_PILOT_CACHE_DIR) {
+    $env:LOONGSUITE_PILOT_CACHE_DIR
+} else {
+    $DEFAULT_PILOT_DIR
+}
+$PERMANENT_DIR = Join-Path $CACHE_DIR "package"
 
 $_OSS_BASE_URL = "https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot"
+# Managed Node.js runtime + prebuilt node_modules (downloaded from OSS at install time)
+if ($env:LOONGSUITE_PILOT_NODE_VERSION) { $script:NODE_VERSION = $env:LOONGSUITE_PILOT_NODE_VERSION } else { $script:NODE_VERSION = "22.22.2" }
+if ($env:LOONGSUITE_PILOT_NODE_DEPS_URL) { $script:NODE_DEPS_BASE = $env:LOONGSUITE_PILOT_NODE_DEPS_URL } else { $script:NODE_DEPS_BASE = "https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node" }
+if ($env:LOONGSUITE_PILOT_NODE_MODULES_URL) { $script:NODE_MODULES_BASE = $env:LOONGSUITE_PILOT_NODE_MODULES_URL } else { $script:NODE_MODULES_BASE = "https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node-modules" }
+
 
 # ============================================================
 # Defaults
 # ============================================================
-if (-not $DataDir) { $DataDir = $DEFAULT_DATA_DIR }
+if (-not $DataDir) {
+    $DataDir = if ($env:LOONGSUITE_PILOT_DATA_DIR) {
+        $env:LOONGSUITE_PILOT_DATA_DIR
+    } else {
+        $DEFAULT_PILOT_DIR
+    }
+}
+$env:LOONGSUITE_PILOT_DATA_DIR = $DataDir
+$env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
+$env:AGENT_DATA_COLLECTION_CONFIG = Join-Path $DataDir "config.json"
 if (-not $PackageUrl -and $env:LOONGSUITE_PILOT_PACKAGE_URL) {
     $PackageUrl = $env:LOONGSUITE_PILOT_PACKAGE_URL
 }
@@ -86,6 +115,10 @@ if ($MaskTypes -and $MaskMode -ne "custom") {
     Write-Error "-MaskTypes can only be used with -MaskMode custom"
     exit 1
 }
+if ($SlsApiKey -and ($SlsAkId -or $SlsAkSecret)) {
+    Write-Error "-SlsApiKey cannot be used with -SlsAkId or -SlsAkSecret"
+    exit 1
+}
 
 # ============================================================
 # Resolve package URL
@@ -104,10 +137,9 @@ if (-not $PackageUrl) {
 function Detect-Lang {
     if ($Lang) { return $Lang }
     if ($env:LOONGSUITE_PILOT_LANG) { return $env:LOONGSUITE_PILOT_LANG }
-    try {
-        $culture = [System.Globalization.CultureInfo]::CurrentUICulture.Name
-        if ($culture -match "zh") { return "zh" }
-    } catch {}
+    # $PSUICulture is an automatic variable (no .NET static call), so it works under
+    # Constrained Language Mode where [CultureInfo]::CurrentUICulture would throw.
+    if ($PSUICulture -match "zh") { return "zh" }
     return "en"
 }
 
@@ -116,6 +148,21 @@ $LANG_MODE = Detect-Lang
 function Msg {
     param([string]$zh, [string]$en)
     if ($LANG_MODE -eq "zh") { Write-Host $zh } else { Write-Host $en }
+}
+
+function Test-CanPrompt {
+    # Each .NET call below throws under Constrained Language Mode (WDAC); guard every one
+    # and default to non-interactive (the safe degrade — irm|iex installs are non-interactive).
+    try {
+        $processArgs = [Environment]::GetCommandLineArgs()
+        if ($processArgs -contains "-NonInteractive") { return $false }
+    } catch {}
+    try {
+        if ([Console]::IsInputRedirected) { return $false }
+    } catch {}
+    try {
+        return [Environment]::UserInteractive -and $null -ne $Host.UI.RawUI
+    } catch { return $false }
 }
 
 # ============================================================
@@ -134,6 +181,16 @@ function Test-NodeSuitable {
 
 function Resolve-Node {
     $candidates = @()
+
+    # Existing installations pin the exact Node binary used for deployment.
+    foreach ($pinFile in @(
+        (Join-Path $DataDir "node-bin"),
+        (Join-Path $CACHE_DIR "node-bin")
+    )) {
+        if (-not (Test-Path -LiteralPath $pinFile)) { continue }
+        $pinned = ([string](Get-Content -LiteralPath $pinFile -Raw -ErrorAction SilentlyContinue)).Trim()
+        if ($pinned) { $candidates += $pinned }
+    }
 
     # nvm-windows
     $nvmHome = $env:NVM_HOME
@@ -175,6 +232,164 @@ function Resolve-Node {
     return $null
 }
 
+# >>> managed-node-runtime >>>
+# Managed Node.js runtime + prebuilt node_modules, downloaded from OSS.
+function Get-ManagedNodePlatform {
+    $archRaw = $env:PROCESSOR_ARCHITEW6432
+    if (-not $archRaw) { $archRaw = $env:PROCESSOR_ARCHITECTURE }
+    switch ($archRaw) {
+        "AMD64" { return [pscustomobject]@{ Os = "win"; Arch = "x64" } }
+        "ARM64" {
+            Msg "    ⚠️ 托管 Node.js 无 win-arm64 产物，回退系统 node + npm install" `
+                "    ⚠️ No win-arm64 managed Node.js artifact, falling back to system node + npm install"
+            return $null
+        }
+        default {
+            Msg "    ⚠️ 托管 Node.js 不支持架构 $archRaw，回退系统 node + npm install" `
+                "    ⚠️ Managed Node.js does not support arch $archRaw, falling back to system node + npm install"
+            return $null
+        }
+    }
+}
+
+function Invoke-ManagedNodeDownload {
+    param([string]$Url, [string]$Dest)
+    try {
+        $prevProgress = $ProgressPreference
+        $ProgressPreference = "SilentlyContinue"
+        Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing -TimeoutSec 600
+        $ProgressPreference = $prevProgress
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Test-ManagedNodeChecksum {
+    param([string]$Archive, [string]$ShasumsFile, [string]$Name)
+    try {
+        $expected = $null
+        foreach ($line in (Get-Content $ShasumsFile)) {
+            if ($line -match ("^([0-9a-fA-F]{64})\s+\*?" + [regex]::Escape($Name) + "\s*$")) {
+                $expected = $Matches[1].ToLower()
+                break
+            }
+        }
+        if (-not $expected) {
+            Msg "    ❌ SHASUMS256.txt 中缺少 $Name 的校验和" "    ❌ SHASUMS256.txt has no entry for $Name"
+            return $false
+        }
+        $actual = (Get-FileHash -Algorithm SHA256 -Path $Archive).Hash.ToLower()
+        if ($actual -ne $expected) {
+            Msg "    ❌ $Name sha256 校验失败 (expected $expected, got $actual)" "    ❌ sha256 mismatch for $Name (expected $expected, got $actual)"
+            return $false
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-ManagedNodeBin {
+    param([string]$NodeDir)
+    # Prefer the bin/ layout; official Node.js win zips put node.exe at the root.
+    $binLayout = Join-Path $NodeDir "bin\node.exe"
+    if (Test-Path $binLayout) { return $binLayout }
+    $officialLayout = Join-Path $NodeDir "node.exe"
+    if (Test-Path $officialLayout) { return $officialLayout }
+    return $null
+}
+
+function Ensure-ManagedNode {
+    $platform = Get-ManagedNodePlatform
+    if (-not $platform) { return $null }
+    $runtimeDir = Join-Path $DataDir "runtime"
+    $archive = "node-v$($script:NODE_VERSION)-$($platform.Os)-$($platform.Arch).zip"
+    $nodeDir = Join-Path $runtimeDir "node-v$($script:NODE_VERSION)-$($platform.Os)-$($platform.Arch)"
+    $nodeBin = Resolve-ManagedNodeBin $nodeDir
+
+    if ($nodeBin) {
+        try {
+            $v = (& $nodeBin --version 2>$null)
+            if ($v -eq "v$($script:NODE_VERSION)") { return $nodeBin }
+        } catch { }
+    }
+
+    $base = $script:NODE_DEPS_BASE.TrimEnd('/') + "/$($script:NODE_VERSION)"
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("pilot-managed-node-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    try {
+        Msg "==> 下载托管 Node.js v$($script:NODE_VERSION) (win-x64)..." "==> Downloading managed Node.js v$($script:NODE_VERSION) (win-x64)..."
+        $archivePath = Join-Path $tmp $archive
+        $shasumsPath = Join-Path $tmp "SHASUMS256.txt"
+        if (-not (Invoke-ManagedNodeDownload "$base/$archive" $archivePath)) { return $null }
+        if (-not (Invoke-ManagedNodeDownload "$base/SHASUMS256.txt" $shasumsPath)) { return $null }
+        if (-not (Test-ManagedNodeChecksum $archivePath $shasumsPath $archive)) { return $null }
+
+        if (Test-Path $nodeDir) { Remove-Item $nodeDir -Recurse -Force }
+        if (-not (Test-Path $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
+        Expand-Archive -Path $archivePath -DestinationPath $runtimeDir -Force
+        $nodeBin = Resolve-ManagedNodeBin $nodeDir
+        if (-not $nodeBin) {
+            Msg "    ❌ 解压产物中未找到 node.exe（bin\ 或根目录布局）" "    ❌ No node.exe found in extracted archive (bin\ or root layout)"
+            Remove-Item $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
+            return $null
+        }
+        return $nodeBin
+    } catch {
+        Remove-Item $nodeDir -Recurse -Force -ErrorAction SilentlyContinue
+        return $null
+    } finally {
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Ensure-NodeModules {
+    param([string]$AppVersion = "latest")
+    $platform = Get-ManagedNodePlatform
+    if (-not $platform) { return $false }
+
+    $modulesDir = Join-Path $script:PERMANENT_DIR "node_modules"
+    $marker = Join-Path $modulesDir ".pilot-modules-version"
+    $stamp = "$AppVersion $($platform.Os) $($platform.Arch)"
+    if ((Test-Path $modulesDir) -and (Test-Path $marker)) {
+        $existing = (Get-Content $marker -ErrorAction SilentlyContinue | Out-String).Trim()
+        if ($existing -eq $stamp) { return $true }
+    }
+
+    $archive = "node-modules-$($platform.Os)-$($platform.Arch).tar.gz"
+    $base = $script:NODE_MODULES_BASE.TrimEnd('/') + "/$AppVersion"
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("pilot-node-modules-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    try {
+        Msg "==> 下载预编译 node_modules (win-x64, app v$AppVersion)..." "==> Downloading prebuilt node_modules (win-x64, app v$AppVersion)..."
+        $archivePath = Join-Path $tmp $archive
+        $shasumsPath = Join-Path $tmp "SHASUMS256.txt"
+        if (-not (Invoke-ManagedNodeDownload "$base/$archive" $archivePath)) { return $false }
+        if (-not (Invoke-ManagedNodeDownload "$base/SHASUMS256.txt" $shasumsPath)) { return $false }
+        if (-not (Test-ManagedNodeChecksum $archivePath $shasumsPath $archive)) { return $false }
+
+        $tarCmd = Get-Command tar -ErrorAction SilentlyContinue
+        if (-not $tarCmd) { return $false }
+        $stage = Join-Path $tmp "stage"
+        New-Item -ItemType Directory -Path $stage -Force | Out-Null
+        & tar -xzf $archivePath -C $stage
+        if ($LASTEXITCODE -ne 0) { return $false }
+        $stagedModules = Join-Path $stage "node_modules"
+        if (-not (Test-Path $stagedModules)) { return $false }
+
+        Set-Content -Path (Join-Path $stagedModules ".pilot-modules-version") -Value $stamp
+        if (Test-Path $modulesDir) { Remove-Item $modulesDir -Recurse -Force }
+        Move-Item $stagedModules $modulesDir
+        return $true
+    } catch {
+        return $false
+    } finally {
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+# <<< managed-node-runtime <<<
+
 # ============================================================
 # Check dependencies
 # ============================================================
@@ -184,7 +399,18 @@ $script:NPM_BIN = ""
 function Check-Deps {
     Msg "==> 检查依赖..." "==> Checking dependencies..."
 
-    $script:NODE_BIN = Resolve-Node
+    $script:NODE_BIN = ""
+    if ($PreferSystemNode) {
+        $script:NODE_BIN = Resolve-Node
+        if (-not $script:NODE_BIN) { $script:NODE_BIN = Ensure-ManagedNode }
+    } else {
+        $script:NODE_BIN = Ensure-ManagedNode
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️ 托管 Node.js 不可用（平台不支持或下载失败），回退系统 node" `
+                "    ⚠️ Managed Node.js unavailable (unsupported platform or download failed), falling back to system node"
+            $script:NODE_BIN = Resolve-Node
+        }
+    }
     if (-not $script:NODE_BIN) {
         Msg "❌ 缺少依赖: node，请先安装后重试" "❌ Missing dependency: node — please install it first"
         exit 1
@@ -200,8 +426,8 @@ function Check-Deps {
     }
 
     # Pin node binary path
-    if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
-    Set-Content -Path (Join-Path $DataDir "node-bin") -Value $script:NODE_BIN
+    if (-not (Test-Path $CACHE_DIR)) { New-Item -ItemType Directory -Path $CACHE_DIR -Force | Out-Null }
+    Set-Content -Path (Join-Path $CACHE_DIR "node-bin") -Value $script:NODE_BIN
 
     # Derive npm
     $npmPath = Join-Path (Split-Path $script:NODE_BIN) "npm.cmd"
@@ -241,8 +467,20 @@ function Download-AndExtract {
     Msg "==> 下载安装包: $PackageUrl" "==> Downloading: $PackageUrl"
 
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $PackageUrl -OutFile $archivePath -UseBasicParsing
+        if (Test-Path -LiteralPath $PackageUrl) {
+            Copy-Item -LiteralPath $PackageUrl -Destination $archivePath -Force
+        } elseif ($PackageUrl -match '^file://') {
+            # Strip the file:// scheme with string ops instead of casting to [Uri], which is
+            # forbidden under Constrained Language Mode (WDAC). Handles file:///C:/x and
+            # file://C:/x; forward slashes are normalized to backslashes.
+            $localPackagePath = ($PackageUrl -replace '^file:/{2,3}', '') -replace '/', '\'
+            Copy-Item -LiteralPath $localPackagePath -Destination $archivePath -Force
+        } else {
+            # Best-effort TLS1.2 bump; setting this static property throws under Constrained
+            # Language Mode (WDAC), so swallow it (modern Windows defaults to TLS1.2 anyway).
+            try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+            Invoke-WebRequest -Uri $PackageUrl -OutFile $archivePath -UseBasicParsing
+        }
     } catch {
         Msg "❌ 下载失败: $_" "❌ Download failed: $_"
         exit 1
@@ -322,7 +560,7 @@ function Select-Agents {
     if (-not $agentCount -or $agentCount -eq "0") { return }
 
     # Non-interactive detection
-    $isInteractive = [Environment]::UserInteractive -and $Host.UI.RawUI -ne $null
+    $isInteractive = Test-CanPrompt
     if (-not $isInteractive) {
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
         $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
@@ -362,12 +600,14 @@ if (lang === 'zh') {
 '@ $LANG_MODE
     $ErrorActionPreference = $prevEAP
 
-    $selectInput = Read-Host "    >"
+    $rawSelection = Read-Host "    >"
+    $selectInput = if ($null -eq $rawSelection) { "" } else { $rawSelection.Trim() }
+    $selectInput = $selectInput -replace '[，、；]', ','
 
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
 const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
-const input = process.argv[1] || '';
+const input = (process.argv[1] || '').replace(/[，、；]/g, ',');
 let indices;
 if (!input.trim()) {
   indices = r.map((a, i) => a.detected ? i : -1).filter(i => i >= 0);
@@ -392,9 +632,6 @@ process.stdout.write(ids.join(','));
 # ============================================================
 function Prompt-UserId {
     if ($UserId) { return }
-    $isInteractive = [Environment]::UserInteractive -and $Host.UI.RawUI -ne $null
-    if (-not $isInteractive) { return }
-
     $configFile = Join-Path $DataDir "config.json"
     $existingUid = ""
     if (Test-Path $configFile) {
@@ -407,6 +644,19 @@ try { const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf-8')); p
         } catch {}
     }
 
+    # Reinstall preserves the existing identity without prompting. To change it,
+    # callers must pass -UserId explicitly; this keeps scripted installs fully
+    # non-interactive and avoids Read-Host failures in Windows PowerShell 5.1.
+    if ($existingUid) {
+        $script:UserId = $existingUid
+        return
+    }
+
+    $isInteractive = Test-CanPrompt
+    if (-not $isInteractive) {
+        return
+    }
+
     Write-Host ""
     if ($existingUid) {
         Msg "    当前 userId: $existingUid" "    Current userId: $existingUid"
@@ -415,7 +665,8 @@ try { const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf-8')); p
         Msg "    请输入你的 userId（用于数据归属，可直接回车跳过）:" `
             "    Enter your userId (for data attribution, press Enter to skip):"
     }
-    $input = (Read-Host "    >").Trim()
+    $rawInput = Read-Host "    >"
+    $input = if ($null -eq $rawInput) { "" } else { $rawInput.Trim() }
     if ($input) {
         $script:UserId = $input
     } elseif ($existingUid) {
@@ -430,10 +681,17 @@ function Confirm-ConfigOverwrite {
     $configFile = Join-Path $DataDir "config.json"
     if (-not (Test-Path $configFile)) { return }
 
+    $slsModeForDiff = ""
+    if ($SlsApiKey) {
+        $slsModeForDiff = "apiKey"
+    } elseif ($SlsAkId -and $SlsAkSecret) {
+        $slsModeForDiff = "ak"
+    }
     $jsonArg = @{
         slsEndpoint = $SlsEndpoint
         slsProject = $SlsProject
         slsLogstore = $SlsLogstore
+        slsMode = $slsModeForDiff
         cmsLicenseKey = $CmsLicenseKey
         cmsEndpoint = $CmsEndpoint
         cmsWorkspace = $CmsWorkspace
@@ -449,10 +707,18 @@ let old = {};
 try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
+const slsModeOf = sls => {
+  if (!sls) return '';
+  if (sls.mode) return sls.mode;
+  if (sls.apiKey) return 'apiKey';
+  if (sls.accessKeyId || sls.accessKeySecret) return 'ak';
+  return '';
+};
 const checks = [
   { label: 'sls.endpoint',      oldVal: (old.sls||{}).endpoint||'',      newVal: newVals.slsEndpoint },
   { label: 'sls.project',       oldVal: (old.sls||{}).project||'',       newVal: newVals.slsProject },
   { label: 'sls.logstore',      oldVal: (old.sls||{}).logstore||'',      newVal: newVals.slsLogstore },
+  { label: 'sls.mode',          oldVal: slsModeOf(old.sls),              newVal: newVals.slsMode },
   { label: 'cms.licenseKey',    oldVal: (old.cms||{}).licenseKey||'',    newVal: newVals.cmsLicenseKey },
   { label: 'cms.endpoint',      oldVal: (old.cms||{}).endpoint||'',      newVal: newVals.cmsEndpoint },
   { label: 'cms.workspace',     oldVal: (old.cms||{}).workspace||'',     newVal: newVals.cmsWorkspace },
@@ -472,7 +738,7 @@ for (const c of changed) { console.log(c.label + ': ' + c.oldVal + ' -> ' + c.ne
     Msg "⚠️  以下配置将被覆盖:" "⚠️  The following config will be overwritten:"
     $diffs | ForEach-Object { Write-Host "    $_" }
 
-    $isInteractive = [Environment]::UserInteractive -and $Host.UI.RawUI -ne $null
+    $isInteractive = Test-CanPrompt
     if ($isInteractive) {
         Write-Host ""
         Msg "    确认覆盖? (y/N):" "    Confirm overwrite? (y/N):"
@@ -491,7 +757,7 @@ for (const c of changed) { console.log(c.label + ': ' + c.oldVal + ' -> ' + c.ne
 # ============================================================
 function Deploy-BootstrapScripts {
     $srcDir = Join-Path $script:PERMANENT_DIR "scripts"
-    $bootDir = Join-Path $env:USERPROFILE ".loongsuite-pilot\bin"
+    $bootDir = Join-Path $CACHE_DIR "bin"
     if (-not (Test-Path $bootDir)) { New-Item -ItemType Directory -Path $bootDir -Force | Out-Null }
     Copy-Item (Join-Path $srcDir "collector-daemon.js") $bootDir -Force
 }
@@ -501,7 +767,8 @@ function Deploy-BootstrapScripts {
 # ============================================================
 function Deploy-Package {
     param([string]$src)
-    $cacheDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+
+    $cacheDir = $CACHE_DIR
     $versionsDir = Join-Path $cacheDir "versions"
     $currentFile = Join-Path $cacheDir "current"
     $previousFile = Join-Path $cacheDir "previous"
@@ -516,23 +783,29 @@ function Deploy-Package {
         }
     }
 
+    $deployedDirName = ""
+    $oldDir = ""
     if ($ver -and $commit) {
-        $dirName = "${ver}_${commit}"
-        $target = Join-Path $versionsDir $dirName
-
         if (Test-Path $currentFile) {
             $oldDir = (Get-Content $currentFile -ErrorAction SilentlyContinue).Trim()
-            if ($oldDir -and $oldDir -ne $dirName) {
-                Set-Content -Path $previousFile -Value $oldDir
-            }
+        }
+
+        $baseDirName = "${ver}_${commit}"
+        $deployedDirName = $baseDirName
+        $target = Join-Path $versionsDir $deployedDirName
+        if (Test-Path -LiteralPath $target) {
+            # Never overwrite a version directory in place. A collector may still
+            # have native modules loaded from it, especially when replacing an old
+            # S4U task that the current shell cannot terminate.
+            $suffix = "$(Get-Date -Format 'yyyyMMddHHmmss')_$(Get-Random -Minimum 1000 -Maximum 9999)"
+            $deployedDirName = "${baseDirName}_${suffix}"
+            $target = Join-Path $versionsDir $deployedDirName
         }
 
         Msg "==> 部署到 $target ..." "==> Deploying to $target ..."
         if (-not (Test-Path $versionsDir)) { New-Item -ItemType Directory -Path $versionsDir -Force | Out-Null }
-        if (Test-Path $target) { Remove-Item $target -Recurse -Force }
         Copy-Item $src $target -Recurse
 
-        Set-Content -Path $currentFile -Value $dirName
         $script:PERMANENT_DIR = $target
     } else {
         Msg "==> 部署到 $($script:PERMANENT_DIR) ..." "==> Deploying to $($script:PERMANENT_DIR) ..."
@@ -544,27 +817,46 @@ function Deploy-Package {
     Msg "    ✅ 部署完成" "    ✅ Deployed"
     Write-Host ""
 
-    Deploy-BootstrapScripts
-
     Msg "==> 安装依赖..." "==> Installing dependencies..."
-    $nodeDir = Split-Path $script:NODE_BIN
-    $savedPath = $env:PATH
-    if ($env:PATH -notlike "*$nodeDir*") { $env:PATH = "$nodeDir;$env:PATH" }
-    Push-Location $script:PERMANENT_DIR
-    try {
-        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-        & $script:NPM_BIN install --omit=dev --omit=optional 2>&1 | Select-Object -Last 1
-        $npmExit = $LASTEXITCODE
-        $ErrorActionPreference = $prevEAP
-    } finally {
-        Pop-Location
-        $env:PATH = $savedPath
+    $modulesVer = $ver
+    if (-not $modulesVer) { if ($Version) { $modulesVer = $Version } else { $modulesVer = "latest" } }
+    $modulesFromOss = Ensure-NodeModules $modulesVer
+    if (-not $modulesFromOss) {
+        Msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
+        $nodeDir = Split-Path $script:NODE_BIN
+        $savedPath = $env:PATH
+        if ($env:PATH -notlike "*$nodeDir*") { $env:PATH = "$nodeDir;$env:PATH" }
+        Push-Location $script:PERMANENT_DIR
+        try {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+            & $script:NPM_BIN install --omit=dev --omit=optional 2>&1 | Select-Object -Last 1
+            $npmExit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEAP
+        } finally {
+            Pop-Location
+            $env:PATH = $savedPath
+        }
+        if ($npmExit -ne 0) {
+            Msg "❌ 依赖安装失败 (exit=$npmExit)，请检查 npm 日志" "❌ Dependencies installation failed (exit=$npmExit), check npm logs"
+            exit 1
+        }
     }
-    if ($npmExit -ne 0) {
-        Msg "❌ 依赖安装失败 (exit=$npmExit)，请检查 npm 日志" "❌ Dependencies installation failed (exit=$npmExit), check npm logs"
-        exit 1
+
+    # Only publish current/previous after the candidate is complete. This keeps
+    # the old version recoverable when dependency installation fails.
+    if ($deployedDirName) {
+        if ($oldDir -and $oldDir -ne $deployedDirName) {
+            Set-Content -Path $previousFile -Value $oldDir
+        }
+        Set-Content -Path $currentFile -Value $deployedDirName
     }
-    Msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
+
+    Deploy-BootstrapScripts
+    if ($modulesFromOss) {
+        Msg "    ✅ 依赖安装完成（预编译 node_modules）" "    ✅ Dependencies installed (prebuilt node_modules)"
+    } else {
+        Msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
+    }
     Write-Host ""
 
     Msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
@@ -582,7 +874,7 @@ function Deploy-Package {
 # Migrate legacy layout
 # ============================================================
 function Migrate-LegacyLayout {
-    $cacheDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+    $cacheDir = $CACHE_DIR
     $currentFile = Join-Path $cacheDir "current"
     $legacyDir = Join-Path $cacheDir "package"
     $versionsDir = Join-Path $cacheDir "versions"
@@ -631,6 +923,7 @@ function Write-Config {
         slsLogstore       = "$SlsLogstore"
         slsAkId           = "$SlsAkId"
         slsAkSecret       = "$SlsAkSecret"
+        slsApiKey         = "$SlsApiKey"
         logLevel          = "$LogLevel"
         userId            = "$($script:UserId)"
         collectLog        = "$CollectLog"
@@ -645,13 +938,21 @@ function Write-Config {
         probeResult       = "$($script:PROBE_RESULT)"
     }
     $cfgJson = $cfgArgs | ConvertTo-Json -Compress
-    $cfgTmp = Join-Path $env:TEMP "lp-config-args.json"
-    [System.IO.File]::WriteAllText($cfgTmp, $cfgJson, [System.Text.UTF8Encoding]::new($false))
 
+    # Stage the JSON through a temp file rather than piping it to node's stdin. Under Windows
+    # PowerShell 5.1 a string piped to a native command is encoded with $OutputEncoding (default
+    # ASCII), so any non-ASCII value (Chinese serviceNamePrefix/userId, a Chinese username in the
+    # path, custom mask types...) would be mangled to "?" before node ever sees it. Set-Content
+    # -Encoding UTF8 is CLM-safe (no forbidden .NET calls) and encodes UTF-8 correctly regardless
+    # of $OutputEncoding; it prepends a BOM in PS5.1, which node strips below before JSON.parse.
+    $cfgTmp = Join-Path $env:TEMP ("lp-config-" + (Get-Random) + ".json")
+    Set-Content -LiteralPath $cfgTmp -Value $cfgJson -Encoding UTF8 -NoNewline
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     & $script:NODE_BIN -e @'
 const fs = require('fs');
-const opts = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8'));
+let raw = fs.readFileSync(process.argv[1], 'utf-8');
+if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
+const opts = JSON.parse(raw);
 
 let existing = {};
 try { existing = JSON.parse(fs.readFileSync(opts.configPath, 'utf-8')); } catch {}
@@ -667,14 +968,25 @@ if (config.userId === undefined && config['user.id'] !== undefined) {
 }
 delete config['user.id'];
 
-if (opts.slsEndpoint || opts.slsProject || opts.slsLogstore) {
+if (opts.slsEndpoint || opts.slsProject || opts.slsLogstore || opts.slsApiKey) {
   config.sls = config.sls || {};
   delete config.sls.destinationOverride;
   if (opts.slsEndpoint) config.sls.endpoint = opts.slsEndpoint;
-  if (opts.slsAkId && opts.slsAkSecret) {
+  if (opts.slsApiKey) {
+    config.sls.mode = 'apiKey';
+    config.sls.apiKey = opts.slsApiKey;
+    delete config.sls.accessKeyId;
+    delete config.sls.accessKeySecret;
+  } else if (opts.slsAkId && opts.slsAkSecret) {
     config.sls.mode = 'ak';
     config.sls.accessKeyId = opts.slsAkId;
     config.sls.accessKeySecret = opts.slsAkSecret;
+    delete config.sls.apiKey;
+  } else if (opts.slsEndpoint || opts.slsProject || opts.slsLogstore) {
+    config.sls.mode = 'webtracking';
+    delete config.sls.apiKey;
+    delete config.sls.accessKeyId;
+    delete config.sls.accessKeySecret;
   }
   if (opts.slsProject && opts.slsLogstore) {
     config.sls.project = opts.slsProject;
@@ -713,8 +1025,7 @@ if (opts.selectedAgents) {
 fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 '@ $cfgTmp
     $ErrorActionPreference = $prevEAP
-
-    Remove-Item $cfgTmp -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $cfgTmp -Force -ErrorAction SilentlyContinue
 
     Msg "    ✅ 配置已写入" "    ✅ Config written"
     Write-Host ""
@@ -728,26 +1039,71 @@ function Install-Command {
     $binDir = Join-Path $env:USERPROFILE ".local\bin"
     if (-not (Test-Path $binDir)) { New-Item -ItemType Directory -Path $binDir -Force | Out-Null }
 
-    # Copy the PowerShell service management script
-    $ps1File = Join-Path $binDir "loongsuite-pilot.ps1"
+    # Copy the PowerShell service management script. Deploy it as loongsuite-pilot-service.ps1,
+    # NOT loongsuite-pilot.ps1: in PowerShell a bare `loongsuite-pilot` resolves an on-PATH .ps1
+    # (ExternalScript) BEFORE the .cmd shim, and a directly-run .ps1 obeys the session
+    # ExecutionPolicy (often Restricted) instead of the shim's -ExecutionPolicy Bypass. A
+    # non-colliding name keeps the .cmd the only match for the bare command name.
+    $ps1File = Join-Path $binDir "loongsuite-pilot-service.ps1"
     $ps1Src = Join-Path $script:PERMANENT_DIR "scripts\loongsuite-pilot.ps1"
     if (Test-Path $ps1Src) {
         Copy-Item $ps1Src $ps1File -Force
     }
+    # Remove any stale same-name script from older installs that would shadow the .cmd shim.
+    $legacyPs1 = Join-Path $binDir "loongsuite-pilot.ps1"
+    if (Test-Path $legacyPs1) { Remove-Item $legacyPs1 -Force -ErrorAction SilentlyContinue }
+    $layoutFile = Join-Path $binDir "loongsuite-pilot-layout.json"
+    $layout = [ordered]@{
+        dataDir = $DataDir
+        cacheDir = $CACHE_DIR
+    } | ConvertTo-Json
+    # loongsuite-pilot.ps1 reads this back with Get-Content -Encoding UTF8 | ConvertFrom-Json,
+    # which tolerates a BOM, so Set-Content is fine here (and CLM-safe, unlike WriteAllText).
+    Set-Content -LiteralPath $layoutFile -Value $layout -Encoding UTF8
 
     # Create a .cmd shim that forwards to the PowerShell script
     $cmdFile = Join-Path $binDir "loongsuite-pilot.cmd"
     $cmdContent = @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0loongsuite-pilot.ps1" %*
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0loongsuite-pilot-service.ps1" %*
 '@
     Set-Content -Path $cmdFile -Value $cmdContent -Encoding ASCII
     Msg "    ✅ 已安装: $cmdFile" "    ✅ Installed: $cmdFile"
 
-    # Add to user PATH if not already there
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ($userPath -notlike "*$binDir*") {
-        [Environment]::SetEnvironmentVariable("Path", "$binDir;$userPath", "User")
+    # Add to user PATH if not already there. The persistent write uses reg.exe (a native command,
+    # CLM-safe) rather than [Environment]::SetEnvironmentVariable (a .NET static call WDAC forbids)
+    # or Set-ItemProperty. Two hazards this avoids:
+    #   1. Set-ItemProperty writes plain REG_SZ by default, DOWNGRADING a REG_EXPAND_SZ Path.
+    #   2. Get-ItemProperty returns Path already EXPANDED; writing that back FREEZES
+    #      %USERPROFILE%/%SystemRoot% tokens into literal paths.
+    # So we read the RAW (unexpanded) value and its type via `reg query`, then write it back with
+    # `reg add /t <type>` to preserve REG_EXPAND_SZ and the tokens. The presence check still uses
+    # the EXPANDED value so a bin dir already present via a %VAR% token is not added twice.
+    $expandedPath = (Get-ItemProperty -Path 'HKCU:\Environment' -Name Path -ErrorAction SilentlyContinue).Path
+    if ($expandedPath -notlike "*$binDir*") {
+        $pathType = 'REG_EXPAND_SZ'
+        $rawUserPath = ''
+        $regOut = reg query "HKCU\Environment" /v Path 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            foreach ($line in $regOut) {
+                if ($line -match '^\s*Path\s+(REG_(?:EXPAND_)?SZ)\s+(.*)$') {
+                    $pathType = $Matches[1]
+                    $rawUserPath = $Matches[2]
+                    break
+                }
+            }
+        }
+        # Never drop the existing PATH: if reg query yielded nothing usable, fall back to the
+        # expanded value (worst case re-freezes tokens, but preserves all entries).
+        if (-not $rawUserPath -and $expandedPath) { $rawUserPath = $expandedPath }
+        $newPath = if ($rawUserPath) { "$binDir;$rawUserPath" } else { $binDir }
+        reg add "HKCU\Environment" /v Path /t $pathType /d "$newPath" /f | Out-Null
+        # Best-effort broadcast so already-open Explorer-spawned terminals refresh their PATH
+        # without a re-login: [Environment]::SetEnvironmentVariable persists AND sends
+        # WM_SETTINGCHANGE. It is a .NET static call CLM forbids, so swallow failures — the reg add
+        # above already persisted the typed value. $newPath still carries raw %VAR% tokens, so on
+        # non-CLM hosts .NET also writes REG_EXPAND_SZ (no downgrade).
+        try { [Environment]::SetEnvironmentVariable('Path', $newPath, 'User') } catch {}
         Msg "    已将 $binDir 添加到用户 PATH" "    Added $binDir to user PATH"
         $env:Path = "$binDir;$env:Path"
     }
@@ -758,7 +1114,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0loongsuite-pilot.p
 # Version helpers
 # ============================================================
 function Get-InstalledVersion {
-    $cacheDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+    $cacheDir = $CACHE_DIR
     $currentFile = Join-Path $cacheDir "current"
     $versionsDir = Join-Path $cacheDir "versions"
 
@@ -851,6 +1207,9 @@ function Print-Summary {
     Msg "命令:" "Commands:"
     Write-Host "   loongsuite-pilot          # 查看状态 / Status"
     Write-Host "   loongsuite-pilot info     # 版本与配置 / Version & config"
+    Write-Host ""
+    Msg "提示: 请新开一个终端后再使用 loongsuite-pilot 命令 (WDAC/受限环境可能需注销重登)。" `
+        "Tip: open a NEW terminal before using the loongsuite-pilot command (a WDAC/locked-down environment may require signing out and back in)."
     Write-Host "============================================================"
 }
 
@@ -881,7 +1240,7 @@ function Stop-PilotService {
     }
 
     # Also try the loongsuite-pilot command (use .ps1 directly to avoid cmd.exe popup)
-    $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
+    $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
     if (Test-Path $ps1Path) {
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ps1Path stop 2>$null
@@ -893,7 +1252,7 @@ function Stop-PilotService {
 # GC old versions
 # ============================================================
 function GC-OldVersions {
-    $cacheDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
+    $cacheDir = $CACHE_DIR
     $versionsDir = Join-Path $cacheDir "versions"
     $currentFile = Join-Path $cacheDir "current"
     $previousFile = Join-Path $cacheDir "previous"
@@ -923,13 +1282,13 @@ function Remove-HookConfigs {
         (Join-Path $env:USERPROFILE ".qoderwork\settings.json"),
         (Join-Path $env:USERPROFILE ".qoderworkcn\settings.json"),
         (Join-Path $env:USERPROFILE ".claude\settings.json"),
-        (Join-Path $env:USERPROFILE ".codex\hooks.json"),
-        (Join-Path $env:USERPROFILE ".qwen\settings.json")
+        (Join-Path $env:USERPROFILE ".qwen\settings.json"),
+        (Join-Path $env:USERPROFILE ".workbuddy\settings.json")
     )
 
     foreach ($cfg in $configs) {
         if (-not (Test-Path $cfg)) { continue }
-        $short = $cfg -replace [regex]::Escape($env:USERPROFILE), "~"
+        $short = $cfg.Replace($env:USERPROFILE, "~")
 
         try {
             $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
@@ -953,6 +1312,10 @@ try {
     });
     if (filtered.length === 0) { delete hooks[event]; changed = true; }
     else hooks[event] = filtered;
+  }
+  if (Object.keys(hooks).length === 0) {
+    delete data.hooks;
+    changed = true;
   }
   if (changed) {
     fs.writeFileSync(cfg, JSON.stringify(data, null, 2) + '\n', 'utf-8');
@@ -982,7 +1345,7 @@ function Remove-OpenCodePlugin {
 
     foreach ($cfg in $configs) {
         if (-not (Test-Path $cfg)) { continue }
-        $short = $cfg -replace [regex]::Escape($env:USERPROFILE), "~"
+        $short = $cfg.Replace($env:USERPROFILE, "~")
 
         if (-not $script:NODE_BIN) {
             Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
@@ -1019,6 +1382,222 @@ try {
             "cleaned-bak" { Msg "    ✅ 已清理: $short (含注释,原文件备份为 $short.bak)" "    ✅ Cleaned: $short (had comments, original backed up to $short.bak)" }
             "nochange"    { }
             default       { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
+        }
+    }
+}
+
+function Remove-HermesPlugin {
+    $hermesHome = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:USERPROFILE ".hermes" }
+    $pluginDir = Join-Path $hermesHome "plugins\loongsuite-pilot"
+    $stateFile = Join-Path $DataDir "deployed-agents.json"
+    if (Test-Path $stateFile) {
+        try {
+            $state = Get-Content $stateFile -Raw | ConvertFrom-Json
+            $recorded = $state.'hermes-agent'.targetDir
+            if ($recorded -and [System.IO.Path]::IsPathRooted([string]$recorded)) {
+                $pluginDir = [string]$recorded
+            }
+        } catch {
+            # Fall back to the current HERMES_HOME-derived path.
+        }
+    }
+    $marker = Join-Path $pluginDir ".loongsuite-pilot-managed.json"
+    if (-not (Test-Path $marker)) { return }
+
+    try {
+        $meta = Get-Content $marker -Raw | ConvertFrom-Json
+        if ($meta.owner -ne "loongsuite-pilot" -or $meta.agentId -ne "hermes-agent") {
+            Msg "    ⚠️  保留未受 Pilot 管理的 Hermes 插件: $pluginDir" `
+                "    ⚠️  Preserved unmanaged Hermes plugin: $pluginDir"
+            return
+        }
+        $hermesCli = if ($env:HERMES_CLI) {
+            $env:HERMES_CLI
+        } else {
+            Join-Path $hermesHome "hermes-agent\venv\Scripts\hermes.exe"
+        }
+        if (-not (Test-Path $hermesCli)) {
+            $hermesCommand = Get-Command hermes -ErrorAction SilentlyContinue
+            if ($hermesCommand) { $hermesCli = $hermesCommand.Source }
+        }
+        if (Test-Path $hermesCli) {
+            & $hermesCli plugins disable loongsuite-pilot *> $null
+        }
+        Remove-Item $pluginDir -Recurse -Force
+        Msg "    ✅ 已清理: $pluginDir" "    ✅ Cleaned: $pluginDir"
+    } catch {
+        Msg "    ⚠️  跳过: $pluginDir (需手动清理)" `
+            "    ⚠️  Skipped: $pluginDir (manual cleanup needed)"
+    }
+}
+
+# ============================================================
+# Remove Pi Coding Agent extension injection
+# ============================================================
+function Remove-PiCodingAgentExtension {
+    $cfg = Join-Path $env:USERPROFILE ".pi\agent\settings.json"
+    if (-not (Test-Path $cfg)) { return }
+    $short = $cfg.Replace($env:USERPROFILE, "~")
+
+    if (-not $script:NODE_BIN) {
+        Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+        return
+    }
+
+    $result = & $script:NODE_BIN -e @'
+const fs = require('fs');
+const f = process.argv[1];
+const isOurs = s => typeof s === 'string' && (
+  s.includes('loongsuite-pilot-pi-coding-agent') ||
+  s.includes('plugins/pi-coding-agent/index.mjs')
+);
+try {
+  const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  if (!Array.isArray(data.extensions)) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data.extensions.length;
+  data.extensions = data.extensions.filter(entry => !isOurs(typeof entry === 'string' ? entry : ''));
+  if (data.extensions.length === before) { process.stdout.write('nochange'); process.exit(0); }
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write('cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+'@ $cfg 2>$null
+
+    switch ($result) {
+        "cleaned"  { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }
+        "nochange" { }
+        default    { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
+    }
+}
+
+# ============================================================
+# Remove plugin-inject specs (MiMo Code)
+# ============================================================
+# MiMo Code uses deployMode "plugin-inject": a spec is written into its own
+# config file's plugin array. Same shape as Remove-OpenCodePlugin but for
+# ~/.config/mimocode/mimocode.json[c]. Without this, the spec survives
+# uninstall and points at a (possibly purged) plugin.mjs.
+function Remove-MimoCodePlugin {
+    $configs = @(
+        (Join-Path $env:USERPROFILE ".config\mimocode\mimocode.jsonc"),
+        (Join-Path $env:USERPROFILE ".config\mimocode\mimocode.json")
+    )
+
+    foreach ($cfg in $configs) {
+        if (-not (Test-Path $cfg)) { continue }
+        $short = $cfg.Replace($env:USERPROFILE, "~")
+
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        }
+
+        $result = & $script:NODE_BIN -e @'
+const fs = require('fs');
+const f = process.argv[1];
+const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-mimo-code') || s.includes('plugins/mimo-code/plugin.mjs'));
+const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
+const stripJsonc = src => src
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^\s*\/\/.*$/gm, '')
+  .replace(/[ \t]+\/\/.*$/gm, '');
+try {
+  const raw = fs.readFileSync(f, 'utf-8');
+  let data, hadComments = false;
+  try { data = JSON.parse(raw); }
+  catch { data = JSON.parse(stripJsonc(raw)); hadComments = true; }
+  const key = Array.isArray(data.plugins) ? 'plugins' : (Array.isArray(data.plugin) ? 'plugin' : null);
+  if (!key) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data[key].length;
+  data[key] = data[key].filter(e => !isOurs(entryStr(e)));
+  if (data[key].length === before) { process.stdout.write('nochange'); process.exit(0); }
+  if (hadComments) fs.writeFileSync(f + '.bak', raw, 'utf-8');
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write(hadComments ? 'cleaned-bak' : 'cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+'@ $cfg 2>$null
+
+        switch ($result) {
+            "cleaned"     { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }
+            "cleaned-bak" { Msg "    ✅ 已清理: $short (含注释,原文件备份为 $short.bak)" "    ✅ Cleaned: $short (had comments, original backed up to $short.bak)" }
+            "nochange"    { }
+            default       { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
+        }
+    }
+}
+
+# ============================================================
+# Remove OpenClaw's nested plugin entry and load path.
+# ============================================================
+function Remove-OpenClawPlugin {
+    $stateDir = if ($env:OPENCLAW_STATE_DIR) {
+        $env:OPENCLAW_STATE_DIR
+    } else {
+        Join-Path $env:USERPROFILE ".openclaw"
+    }
+    $configs = @()
+    if ($env:OPENCLAW_CONFIG_PATH) { $configs += $env:OPENCLAW_CONFIG_PATH }
+    $configs += @(
+        (Join-Path $stateDir "openclaw.json"),
+        (Join-Path $stateDir "config.json"),
+        (Join-Path $env:USERPROFILE ".openclaw\openclaw.json"),
+        (Join-Path $env:USERPROFILE ".openclaw\config.json")
+    )
+    $managedPath = Join-Path $DataDir "plugins\openclaw\plugin.mjs"
+
+    foreach ($cfg in ($configs | Select-Object -Unique)) {
+        if (-not (Test-Path $cfg)) { continue }
+        $short = $cfg.Replace($env:USERPROFILE, "~")
+        if (-not $script:NODE_BIN) {
+            Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        }
+
+        $result = & $script:NODE_BIN -e @'
+const fs = require('fs');
+const f = process.argv[1];
+const managed = process.argv[2].replaceAll('\\', '/');
+const entryStr = value => typeof value === 'string'
+  ? value
+  : (Array.isArray(value) && typeof value[0] === 'string' ? value[0] : '');
+const isOurs = value => {
+  const normalized = entryStr(value).replaceAll('\\', '/');
+  const plain = normalized.startsWith('file://') ? normalized.slice('file://'.length) : normalized;
+  return plain === managed ||
+    normalized.includes('loongsuite-pilot-openclaw') ||
+    normalized.includes('plugins/openclaw/plugin.mjs') && plain.includes('.loongsuite-pilot/');
+};
+try {
+  const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  let changed = false;
+  for (const key of ['plugin', 'plugins']) {
+    if (!Array.isArray(data[key])) continue;
+    const filtered = data[key].filter(value => !isOurs(value));
+    if (filtered.length !== data[key].length) { data[key] = filtered; changed = true; }
+  }
+  const plugins = data.plugins && typeof data.plugins === 'object' && !Array.isArray(data.plugins)
+    ? data.plugins
+    : null;
+  if (plugins) {
+    if (plugins.load && typeof plugins.load === 'object' && Array.isArray(plugins.load.paths)) {
+      const filtered = plugins.load.paths.filter(value => !isOurs(value));
+      if (filtered.length !== plugins.load.paths.length) { plugins.load.paths = filtered; changed = true; }
+    }
+    if (plugins.entries && typeof plugins.entries === 'object' && !Array.isArray(plugins.entries) &&
+        Object.prototype.hasOwnProperty.call(plugins.entries, 'loongsuite-pilot-openclaw')) {
+      delete plugins.entries['loongsuite-pilot-openclaw'];
+      changed = true;
+    }
+  }
+  if (!changed) { process.stdout.write('nochange'); process.exit(0); }
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write('cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+'@ $cfg $managedPath 2>$null
+
+        switch ($result) {
+            "cleaned"  { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }
+            "nochange" { }
+            default    { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
         }
     }
 }
@@ -1078,6 +1657,38 @@ try {
     }
 }
 
+function Start-PilotAndWait {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptPath,
+        [int]$TimeoutSeconds = 30
+    )
+
+    if (-not (Test-Path -LiteralPath $ScriptPath)) { return $false }
+
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $startOutput = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ScriptPath start 2>&1
+    $startExit = $LASTEXITCODE
+    $startOutput | ForEach-Object { Write-Host $_ }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $statusOutput = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ScriptPath status 2>$null
+        if ($statusOutput -match "is running") {
+            $ErrorActionPreference = $prevEAP
+            return $true
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+
+    $ErrorActionPreference = $prevEAP
+    if ($startExit -ne 0) {
+        Write-Host "   start command exited with code $startExit" -ForegroundColor Yellow
+    }
+    return $false
+}
+
 # ============================================================
 # CMD: install
 # ============================================================
@@ -1107,20 +1718,20 @@ function Cmd-Install {
         Install-Command
 
         Msg "==> 启动服务..." "==> Starting service..."
-        $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
-        if (Test-Path $ps1Path) {
-            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ps1Path start 2>$null
-            Start-Sleep -Seconds 2
-            $statusOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ps1Path status 2>$null
-            $ErrorActionPreference = $prevEAP
-            if ($statusOut -match "is running") {
-                Msg "    ✅ 服务已启动" "    ✅ Service started"
-            } else {
-                Msg "    ⚠️  服务可能尚未就绪，请检查: loongsuite-pilot status" `
-                    "    ⚠️  Service may not be ready. Check: loongsuite-pilot status"
+        $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
+        $started = Start-PilotAndWait -ScriptPath $ps1Path
+        if (-not $started) {
+            if ($curVer -and (Test-Path (Join-Path $CACHE_DIR "previous"))) {
+                Msg "⚠️  新安装未产生运行心跳，正在恢复 previous 版本..." `
+                    "⚠️  The new installation produced no runtime heartbeat; restoring the previous version..."
+                $prevEAP = $ErrorActionPreference
+                $ErrorActionPreference = "Continue"
+                & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ps1Path rollback 2>$null
+                $ErrorActionPreference = $prevEAP
             }
+            throw "Collector failed to produce a runtime heartbeat after installation."
         }
+        Msg "    ✅ 服务已启动" "    ✅ Service started"
         Write-Host ""
         Print-Summary "install"
     } finally {
@@ -1175,21 +1786,13 @@ function Cmd-Upgrade {
         Install-Command
 
         Msg "==> 启动新版本..." "==> Starting new version..."
-        $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
-        $started = $false
-        if (Test-Path $ps1Path) {
-            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ps1Path start 2>$null
-            Start-Sleep -Seconds 2
-            $statusOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ps1Path status 2>$null
-            $ErrorActionPreference = $prevEAP
-            if ($statusOut -match "is running") {
-                Msg "    ✅ 新版本启动成功" "    ✅ New version started successfully"
-                Write-Host ""
-                GC-OldVersions
-                Print-Summary "upgrade"
-                $started = $true
-            }
+        $ps1Path = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
+        $started = Start-PilotAndWait -ScriptPath $ps1Path
+        if ($started) {
+            Msg "    ✅ 新版本启动成功" "    ✅ New version started successfully"
+            Write-Host ""
+            GC-OldVersions
+            Print-Summary "upgrade"
         }
 
         if (-not $started) {
@@ -1212,6 +1815,367 @@ function Cmd-Upgrade {
     }
 }
 
+# Write UTF-8 *without BOM* in a way that works under Constrained Language Mode (WDAC),
+# where [System.IO.File]::WriteAllText / New-Object UTF8Encoding are forbidden. We stage the
+# content through a temp file (Set-Content prepends a BOM) and let node rewrite it BOM-free,
+# because these files (.codex/hooks.json, config.toml) are read by node/Codex, which choke
+# on a BOM. Falls back to Set-Content (with BOM) only if node is somehow unavailable.
+function Write-FileUtf8NoBom {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Content
+    )
+    if (-not $script:NODE_BIN) {
+        Set-Content -LiteralPath $Path -Value $Content -Encoding UTF8 -NoNewline
+        return
+    }
+    $tmp = Join-Path $env:TEMP ("lp-write-" + (Get-Random) + ".tmp")
+    Set-Content -LiteralPath $tmp -Value $Content -Encoding UTF8 -NoNewline
+    & $script:NODE_BIN -e 'const fs=require("fs");let s=fs.readFileSync(process.argv[1],"utf-8");if(s.charCodeAt(0)===0xFEFF)s=s.slice(1);fs.writeFileSync(process.argv[2],s);' $tmp $Path
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+}
+
+function Remove-CodexTrustState {
+    $configPath = Join-Path $env:USERPROFILE ".codex\config.toml"
+    if (-not (Test-Path -LiteralPath $configPath)) { return }
+
+    $content = Get-Content -LiteralPath $configPath -Raw
+    $pattern = '(?ms)^[ \t]*# BEGIN otel-codex-hook trust[ \t]*\r?\n.*?^[ \t]*# END otel-codex-hook trust[ \t]*(?:\r?\n)?'
+    $updated = $content -replace $pattern, ""
+    if ($updated -eq $content) { return }
+
+    $updated = $updated -replace '(\r?\n){3,}', "`r`n`r`n"
+    Write-FileUtf8NoBom -Path $configPath -Content $updated
+    Msg "    ✅ Codex trust 状态已清理" "    ✅ Codex trust state cleaned"
+}
+
+function Test-IsPilotCodexHookCommand {
+    param([object]$Command)
+    if ($null -eq $Command) { return $false }
+    return ([string]$Command) -match '(?i)(?:\.loongsuite-pilot|codex-loongsuite-pilot-hook|otel-codex-hook)'
+}
+
+function Remove-CodexHookConfig {
+    $configPath = Join-Path $env:USERPROFILE ".codex\hooks.json"
+    if (-not (Test-Path -LiteralPath $configPath)) { return }
+
+    try {
+        # Get-Content -Encoding UTF8 handles both BOM and no-BOM files and is CLM-safe,
+        # unlike [System.IO.File]::ReadAllText.
+        $raw = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8
+        $data = $raw | ConvertFrom-Json
+        if (-not $data.hooks -or
+            $null -eq $data.hooks.PSObject -or
+            $null -eq $data.hooks.PSObject.Properties) {
+            return
+        }
+
+        $changed = $false
+        $eventProperties = @(
+            $data.hooks.PSObject.Properties |
+                Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace($_.Name) }
+        )
+        if ($eventProperties.Count -eq 0) { return }
+
+        foreach ($eventProperty in $eventProperties) {
+            $eventName = $eventProperty.Name
+            $entries = @($eventProperty.Value)
+            $keptEntries = @()
+
+            foreach ($entry in $entries) {
+                # Preserve malformed or extension-owned null/scalar entries. They
+                # are not Pilot commands and uninstall must not fail on them.
+                if ($null -eq $entry -or $null -eq $entry.PSObject) {
+                    $keptEntries += ,$entry
+                    continue
+                }
+
+                $commandProperty = $entry.PSObject.Properties["command"]
+                $directCommand = if ($commandProperty) { $commandProperty.Value } else { $null }
+                if (Test-IsPilotCodexHookCommand $directCommand) {
+                    $changed = $true
+                    continue
+                }
+
+                $nestedProperty = $entry.PSObject.Properties["hooks"]
+                if ($nestedProperty -and $null -ne $nestedProperty.Value) {
+                    $nestedHooks = @($nestedProperty.Value)
+                    $keptNestedHooks = @(
+                        $nestedHooks | Where-Object {
+                            if ($null -eq $_ -or $null -eq $_.PSObject) {
+                                return $true
+                            }
+                            $nestedCommandProperty = $_.PSObject.Properties["command"]
+                            $nestedCommand = if ($nestedCommandProperty) {
+                                $nestedCommandProperty.Value
+                            } else {
+                                $null
+                            }
+                            -not (Test-IsPilotCodexHookCommand $nestedCommand)
+                        }
+                    )
+                    if ($keptNestedHooks.Count -ne $nestedHooks.Count) {
+                        $changed = $true
+                        $entry.hooks = @($keptNestedHooks)
+                    }
+                    if ($nestedHooks.Count -gt 0 -and $keptNestedHooks.Count -eq 0) {
+                        continue
+                    }
+                }
+
+                $keptEntries += ,$entry
+            }
+
+            if ($keptEntries.Count -eq 0) {
+                $data.hooks.PSObject.Properties.Remove($eventName)
+            } else {
+                $data.hooks.$eventName = @($keptEntries)
+            }
+        }
+
+        if ($changed) {
+            $updated = ($data | ConvertTo-Json -Depth 100) + "`r`n"
+            Write-FileUtf8NoBom -Path $configPath -Content $updated
+        }
+
+        # Do not report success until the resulting config is independently
+        # checked for both direct and nested Pilot commands.
+        $verifyData = (
+            Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 |
+                ConvertFrom-Json
+        )
+        if ($verifyData.hooks) {
+            $verifyEventProperties = @(
+                $verifyData.hooks.PSObject.Properties |
+                    Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace($_.Name) }
+            )
+            foreach ($eventProperty in $verifyEventProperties) {
+                foreach ($entry in @($eventProperty.Value)) {
+                    if ($null -eq $entry -or $null -eq $entry.PSObject) { continue }
+
+                    $commandProperty = $entry.PSObject.Properties["command"]
+                    $directCommand = if ($commandProperty) { $commandProperty.Value } else { $null }
+                    if (Test-IsPilotCodexHookCommand $directCommand) {
+                        throw "Pilot Codex hook command is still present"
+                    }
+
+                    $nestedProperty = $entry.PSObject.Properties["hooks"]
+                    $nestedHooks = if ($nestedProperty) { @($nestedProperty.Value) } else { @() }
+                    foreach ($nestedHook in $nestedHooks) {
+                        if ($null -eq $nestedHook -or $null -eq $nestedHook.PSObject) { continue }
+                        $nestedCommandProperty = $nestedHook.PSObject.Properties["command"]
+                        $nestedCommand = if ($nestedCommandProperty) {
+                            $nestedCommandProperty.Value
+                        } else {
+                            $null
+                        }
+                        if (Test-IsPilotCodexHookCommand $nestedCommand) {
+                            throw "Pilot Codex nested hook command is still present"
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($changed) {
+            Msg "    ✅ 已清理: ~\.codex\hooks.json" `
+                "    ✅ Cleaned: ~\.codex\hooks.json"
+        }
+    } catch {
+        throw "Failed to clean Pilot hooks from $configPath`: $($_.Exception.Message)"
+    }
+}
+
+function Remove-OnePilotScheduledTask {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TaskName,
+        [Parameter(Mandatory = $true)]
+        [string]$TaskPath
+    )
+
+    $task = Get-ScheduledTask `
+        -TaskName $TaskName `
+        -TaskPath $TaskPath `
+        -ErrorAction SilentlyContinue
+    if (-not $task) { return }
+
+    if ($task.State -eq "Running") {
+        Stop-ScheduledTask `
+            -TaskName $TaskName `
+            -TaskPath $TaskPath `
+            -ErrorAction SilentlyContinue
+    }
+
+    $unregisterError = $null
+    try {
+        Unregister-ScheduledTask `
+            -TaskName $TaskName `
+            -TaskPath $TaskPath `
+            -Confirm:$false `
+            -ErrorAction Stop
+    } catch {
+        $unregisterError = $_.Exception.Message
+        $fullTaskName = "$($TaskPath.TrimEnd('\'))\$TaskName"
+        & schtasks.exe /Delete /TN $fullTaskName /F 2>$null | Out-Null
+        $schtasksExit = $LASTEXITCODE
+        if ($schtasksExit -ne 0) {
+            throw "Failed to remove scheduled task $fullTaskName (Unregister-ScheduledTask: $unregisterError; schtasks exit: $schtasksExit). Run uninstall from an elevated PowerShell."
+        }
+    }
+
+    $remaining = Get-ScheduledTask `
+        -TaskName $TaskName `
+        -TaskPath $TaskPath `
+        -ErrorAction SilentlyContinue
+    if ($remaining) {
+        $fullTaskName = "$($TaskPath.TrimEnd('\'))\$TaskName"
+        throw "Scheduled task still exists after deletion: $fullTaskName"
+    }
+}
+
+function Remove-PilotScheduledTasks {
+    $taskFolder = "\LoongsuitePilot"
+    $currentIdentity = (whoami).Trim()
+    $currentUser = $env:USERNAME
+    $userTag = ($currentIdentity -replace '[^A-Za-z0-9._-]', '_')
+    $currentUserTasks = @(
+        "LoongsuitePilot-$userTag",
+        "LoongsuitePilotUpdater-$userTag"
+    )
+    $legacyTasks = @("LoongsuitePilot", "LoongsuitePilotUpdater")
+
+    foreach ($taskName in @($currentUserTasks + $legacyTasks)) {
+        $isLegacy = $taskName -in $legacyTasks
+        $task = Get-ScheduledTask `
+            -TaskName $taskName `
+            -TaskPath "$taskFolder\" `
+            -ErrorAction SilentlyContinue
+        if ($isLegacy) {
+            if (-not $task) { continue }
+            $taskOwner = [string]$task.Principal.UserId
+            $isCurrentOwner = (
+                -not $taskOwner -or
+                $taskOwner -ieq $currentIdentity -or
+                $taskOwner -ieq $currentUser -or
+                $taskOwner.ToLower().EndsWith("\$currentUser".ToLower())
+            )
+            if (-not $isCurrentOwner) { continue }
+        }
+
+        Remove-OnePilotScheduledTask `
+            -TaskName $taskName `
+            -TaskPath "$taskFolder\"
+    }
+}
+
+function Assert-SafePilotDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Purpose
+    )
+
+    # CLM-safe path normalization: Convert-Path resolves the absolute path without the
+    # forbidden [System.IO.Path]::GetFullPath; fall back to the raw path if it can't be
+    # resolved (e.g. it no longer exists). Split-Path -Qualifier gives the drive root ("C:").
+    $fullPath = $Path
+    try { $fullPath = (Convert-Path -LiteralPath $Path -ErrorAction Stop) } catch { $fullPath = $Path }
+    $fullPath = $fullPath.TrimEnd('\')
+    $rootPath = (Split-Path -Qualifier $fullPath -ErrorAction SilentlyContinue)
+    $profilePath = $env:USERPROFILE.TrimEnd('\')
+    if (-not $fullPath -or $fullPath -ieq $rootPath -or $fullPath -ieq "$rootPath\" -or $fullPath -ieq $profilePath) {
+        throw "Refusing to use unsafe $Purpose directory: $Path"
+    }
+    return $fullPath
+}
+
+function ConvertTo-ExtendedLengthPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fullPath = $Path
+    try { $fullPath = (Convert-Path -LiteralPath $Path -ErrorAction Stop) } catch { $fullPath = $Path }
+    if ($fullPath.StartsWith("\\?\")) { return $fullPath }
+    if ($fullPath.StartsWith("\\")) {
+        return "\\?\UNC\$($fullPath.Substring(2))"
+    }
+    return "\\?\$fullPath"
+}
+
+function Remove-PilotPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $extendedPath = ConvertTo-ExtendedLengthPath -Path $Path
+    $lastError = $null
+    $isFullLanguage = $ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage'
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            if ($isFullLanguage) {
+                # Fast path: .NET calls handle the \\?\ extended-length path (deep node_modules
+                # trees that exceed MAX_PATH). Available only under Full Language Mode.
+                if ([System.IO.Directory]::Exists($extendedPath)) {
+                    [System.IO.Directory]::Delete($extendedPath, $true)
+                } elseif ([System.IO.File]::Exists($extendedPath)) {
+                    [System.IO.File]::SetAttributes($extendedPath, [System.IO.FileAttributes]::Normal)
+                    [System.IO.File]::Delete($extendedPath)
+                }
+            } else {
+                # Constrained Language Mode (WDAC): the .NET calls above are forbidden. Fall
+                # back to Remove-Item on the original path — covers all but pathological >260-char
+                # paths, which are rare and can be cleaned manually if they ever surface.
+                Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            }
+            return
+        } catch {
+            $lastError = $_
+            if ($attempt -lt 3) { Start-Sleep -Milliseconds (100 * $attempt) }
+        }
+    }
+    throw $lastError
+}
+
+function Remove-PilotInstallationFiles {
+    $cachePath = Assert-SafePilotDirectory -Path $CACHE_DIR -Purpose "cache"
+    $dataPath = Assert-SafePilotDirectory -Path $DataDir -Purpose "data"
+    $cachePrefix = $cachePath + '\'
+    $cacheContainsData = $dataPath.ToLower().StartsWith($cachePrefix.ToLower())
+
+    if ($cachePath -ine $dataPath -and -not $cacheContainsData) {
+        if (Test-Path -LiteralPath $cachePath) {
+            Remove-PilotPath -Path $cachePath
+        }
+    } else {
+        foreach ($relativePath in @(
+            "versions",
+            "bin",
+            "package",
+            "current",
+            "previous",
+            "node-bin"
+        )) {
+            $target = Join-Path $cachePath $relativePath
+            if (Test-Path -LiteralPath $target) {
+                Remove-PilotPath -Path $target
+            }
+        }
+    }
+
+    foreach ($relativePath in @("hooks", "skills", "plugins")) {
+        $target = Join-Path $dataPath $relativePath
+        if (Test-Path -LiteralPath $target) {
+            Remove-PilotPath -Path $target
+        }
+    }
+}
+
 # ============================================================
 # CMD: uninstall
 # ============================================================
@@ -1224,36 +2188,42 @@ function Cmd-Uninstall {
     Msg "    ✅ 服务已停止" "    ✅ Service stopped"
     Write-Host ""
 
-    # Remove Task Scheduler tasks
-    $taskFolder = "\LoongsuitePilot"
-    foreach ($taskName in @("LoongsuitePilot")) {
-        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
-        if ($task) {
-            if ($task.State -eq "Running") {
-                Stop-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
-            }
-            Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -Confirm:$false -ErrorAction SilentlyContinue
-        }
-    }
+    Remove-PilotScheduledTasks
     Msg "    ✅ 已移除计划任务" "    ✅ Removed scheduled tasks"
 
+    # Resolve the pinned runtime before installation files (including node-bin)
+    # are removed. JSON config cleanup must also work when Node is absent from PATH.
+    $script:NODE_BIN = Resolve-Node
+
+    # Read the persisted target before the default data/install directory is removed.
+    Msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."
+    Remove-HermesPlugin
+    Write-Host ""
+
+    Msg "==> 清理 OpenClaw 插件配置..." "==> Cleaning up OpenClaw plugin config..."
+    Remove-OpenClawPlugin
+    Write-Host ""
+
     Msg "==> 删除安装目录..." "==> Removing installation..."
-    $installDir = Join-Path $env:USERPROFILE ".loongsuite-pilot"
-    if (Test-Path $installDir) {
-        Remove-Item $installDir -Recurse -Force
-    }
-    Msg "    ✅ 已删除 $installDir" "    ✅ Removed $installDir"
+    Remove-PilotInstallationFiles
+    Msg "    ✅ 已删除安装文件" "    ✅ Removed installation files"
 
     Msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
     $cmdFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.cmd"
-    $ps1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
+    $ps1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-service.ps1"
+    $legacyPs1File = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot.ps1"
+    $layoutFile = Join-Path $env:USERPROFILE ".local\bin\loongsuite-pilot-layout.json"
     if (Test-Path $cmdFile) { Remove-Item $cmdFile -Force }
     if (Test-Path $ps1File) { Remove-Item $ps1File -Force }
+    if (Test-Path $legacyPs1File) { Remove-Item $legacyPs1File -Force }
+    if (Test-Path $layoutFile) { Remove-Item $layoutFile -Force }
     Msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
     Write-Host ""
 
     Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     Remove-HookConfigs
+    Remove-CodexHookConfig
+    Remove-CodexTrustState
     Write-Host ""
 
     Msg "==> 清理 Claude/Codex 插件..." "==> Cleaning up Claude/Codex plugins..."
@@ -1264,9 +2234,20 @@ function Cmd-Uninstall {
     Remove-OpenCodePlugin
     Write-Host ""
 
+    Msg "==> 清理 Pi Coding Agent Extension 配置..." "==> Cleaning up Pi Coding Agent extension config..."
+    Remove-PiCodingAgentExtension
+    Write-Host ""
+
+    Msg "==> 清理 MiMo Code 插件配置..." "==> Cleaning up MiMo Code plugin config..."
+    Remove-MimoCodePlugin
+    Write-Host ""
+
     if ($Purge) {
         Msg "==> 删除数据目录 (-Purge)..." "==> Removing data directory (-Purge)..."
-        if (Test-Path $DataDir) { Remove-Item $DataDir -Recurse -Force }
+        $safeDataDir = Assert-SafePilotDirectory -Path $DataDir -Purpose "data"
+        if (Test-Path -LiteralPath $safeDataDir) {
+            Remove-PilotPath -Path $safeDataDir
+        }
         Msg "    ✅ 已删除 $DataDir" "    ✅ Removed $DataDir"
     } else {
         Msg "📁 数据目录已保留: $DataDir" "📁 Data directory preserved: $DataDir"

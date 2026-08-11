@@ -19,6 +19,7 @@
 | [本地 JSONL 输出](local-jsonl-output.md) | 将规范化事件写入本地文件，并验证采集是否生效。 |
 | [SLS 输出](sls-output.md) | 将日志上报到阿里云日志服务。 |
 | [Trace 输出](trace-output.md) | 将 GenAI 活动导出为 OTLP Trace。 |
+| [Claude Code 下游 CLI Trace 传播](claude-code-downstream-trace-propagation.md) | 将上游 Trace 上下文继续传给 Claude Code 通过 Bash 调用的用户 CLI。 |
 | [HTTP 输出](http-output.md) | 将规范化事件 POST 到自定义接口。 |
 
 ## 配置采集与隐私
@@ -26,7 +27,8 @@
 | 文档 | 用途 |
 |------|------|
 | [Agent 配置](agents.md) | 选择采集哪些 Agent，并控制消息内容采集。 |
-| [数据脱敏](masking.md) | 输出前脱敏 API Key、AccessKey、私钥和数据库 URL。 |
+| [自定义 Agent 名称和实例](custom-agent-identity.md) | 设置 `gen_ai.agent.name` 和 `agentteams.instance.id`。 |
+| [数据脱敏](masking.md) | 输出前脱敏密钥和个人敏感信息。 |
 | [输出事件 Schema](output-event-schema.md) | 查看规范化事件名称、字段、Provider 和结束原因。 |
 
 ## 扩展 Pilot

@@ -7,17 +7,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   buildQoderHookRecord,
   loadHookRuntimeConfig,
 } from '../agent-event-normalizer.mjs';
+import { decodePayload } from './decode-payload.mjs';
 
 const ENABLE_LOGGING = true;
 export const HOOKS_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+export const LOONGSUITE_PILOT_DATA_DIR = process.env.LOONGSUITE_PILOT_DATA_DIR
+  || path.join(os.homedir(), '.loongsuite-pilot');
 export const LOONGSUITE_PILOT_LOGS_BASE_DIR = (() => {
-  const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
-  return path.join(configured || path.join(os.homedir(), '.loongsuite-pilot'), 'logs');
+  return path.join(LOONGSUITE_PILOT_DATA_DIR, 'logs');
 })();
 
 // --- CLI argument parsing ---------------------------------------------------
@@ -68,43 +71,191 @@ export function logDebug(agentId, message) {
   } catch { /* best-effort */ }
 }
 
-// --- Line record persistence (per agent-id) ---------------------------------
+// --- Line record persistence (per agent-id and session) ---------------------
 
-function lineRecordFile(agentId) {
+function aggregateLineRecordFile(agentId) {
+  return path.join(LOONGSUITE_PILOT_DATA_DIR, 'state', 'hooks', `${agentId}-line-records.json`);
+}
+
+function deployedLegacyLineRecordFile(agentId) {
   return path.join(HOOKS_DIR, `.line_records.${agentId}.json`);
 }
 
-export function loadLineRecords(agentId) {
+function sessionLineRecordDir(agentId) {
+  return path.join(LOONGSUITE_PILOT_DATA_DIR, 'state', 'hooks', `${agentId}-line-records`);
+}
+
+function sessionLineRecordFile(agentId, sessionId) {
+  const sessionHash = crypto.createHash('sha256').update(sessionId).digest('hex');
+  return path.join(sessionLineRecordDir(agentId), `${sessionHash}.json`);
+}
+
+function readJsonObject(file) {
   try {
-    const f = lineRecordFile(agentId);
-    if (!fs.existsSync(f)) return {};
-    return JSON.parse(fs.readFileSync(f, 'utf-8'));
+    if (!fs.existsSync(file)) return null;
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
   } catch {
-    return {};
+    return null;
   }
 }
 
-export function saveLineRecords(agentId, records) {
+function saveJsonObject(file, value) {
+  let tmp = '';
   try {
-    const f = lineRecordFile(agentId);
-    fs.mkdirSync(path.dirname(f), { recursive: true });
-    fs.writeFileSync(f, JSON.stringify(records, null, 2), 'utf-8');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf-8');
+    fs.renameSync(tmp, file);
     return true;
   } catch {
+    if (tmp) {
+      try { fs.unlinkSync(tmp); } catch { /* best-effort temp cleanup */ }
+    }
     return false;
   }
 }
 
+function saveSessionLineRecord(agentId, sessionId, record) {
+  return saveJsonObject(sessionLineRecordFile(agentId, sessionId), record);
+}
+
+function reconcileAggregateLineRecord(agentId, requestedSessionId) {
+  const sources = [
+    aggregateLineRecordFile(agentId),
+    deployedLegacyLineRecordFile(agentId),
+  ];
+
+  for (const source of sources) {
+    const records = readJsonObject(source);
+    if (!records) continue;
+
+    for (const [transcriptPath, value] of Object.entries(records)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const sessionId = typeof value.session_id === 'string' ? value.session_id : '';
+      if (!sessionId || sessionId !== requestedSessionId) continue;
+
+      const target = sessionLineRecordFile(agentId, sessionId);
+      const existing = readJsonObject(target);
+      const candidate = {
+        ...value,
+        session_id: sessionId,
+        transcript_path: transcriptPath,
+      };
+      if (!existing || isLineRecordNewer(candidate, existing)) {
+        saveSessionLineRecord(agentId, sessionId, candidate);
+      }
+    }
+  }
+}
+
+function isLineRecordNewer(candidate, existing) {
+  if (candidate.transcript_path === existing.transcript_path) {
+    // Cursor progress for one transcript is monotonic. An older implementation
+    // may write a later timestamp with a stale line count after a concurrent
+    // read-modify-write, but that must never rewind the per-session primary.
+    return Number(candidate.last_line_count) > Number(existing.last_line_count);
+  }
+
+  const candidateUpdated = typeof candidate.updated_at === 'string' ? candidate.updated_at : '';
+  const existingUpdated = typeof existing.updated_at === 'string' ? existing.updated_at : '';
+  return Boolean(candidateUpdated)
+    && (!existingUpdated || candidateUpdated > existingUpdated);
+}
+
+const LOCK_WAIT_ARRAY = new Int32Array(new SharedArrayBuffer(4));
+
+function withSyncFileLock(lockFile, waitMs, staleMs, action) {
+  const deadline = Date.now() + waitMs;
+  let acquired = false;
+  try {
+    fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+    while (!acquired) {
+      try {
+        const fd = fs.openSync(lockFile, 'wx');
+        fs.closeSync(fd);
+        acquired = true;
+      } catch (err) {
+        if (err?.code !== 'EEXIST') return { acquired: false };
+        try {
+          const stat = fs.statSync(lockFile);
+          if (Date.now() - stat.mtimeMs > staleMs) {
+            fs.unlinkSync(lockFile);
+            continue;
+          }
+        } catch { /* retry acquisition */ }
+        if (Date.now() >= deadline) return { acquired: false };
+        Atomics.wait(LOCK_WAIT_ARRAY, 0, 0, 10);
+      }
+    }
+
+    return { acquired: true, value: action() };
+  } finally {
+    if (acquired) {
+      try { fs.unlinkSync(lockFile); } catch { /* best-effort lock cleanup */ }
+    }
+  }
+}
+
+function updateAggregateShadow(file, transcriptPath, record) {
+  const result = withSyncFileLock(`${file}.lock`, 1_000, 30_000, () => {
+    const records = readJsonObject(file) || {};
+    const existing = records[transcriptPath];
+    if (existing?.session_id === record.session_id
+      && Number(existing.last_line_count) > Number(record.last_line_count)) {
+      return true;
+    }
+    records[transcriptPath] = {
+      session_id: record.session_id,
+      last_line_count: record.last_line_count,
+      updated_at: record.updated_at,
+    };
+    return saveJsonObject(file, records);
+  });
+
+  return result.acquired ? result.value : false;
+}
+
+function rollbackShadowFiles(agentId) {
+  const files = [aggregateLineRecordFile(agentId)];
+  const deployedHooksDir = path.join(LOONGSUITE_PILOT_DATA_DIR, 'hooks');
+  if (path.resolve(HOOKS_DIR) === path.resolve(deployedHooksDir)) {
+    files.push(deployedLegacyLineRecordFile(agentId));
+  }
+  return files;
+}
+
+export function loadLineRecord(agentId, sessionId) {
+  if (!sessionId) return {};
+  const file = sessionLineRecordFile(agentId, sessionId);
+
+  // Older releases stored every transcript in one per-agent JSON object,
+  // either in the persistent state directory or beside the deployed hooks.
+  // Reconcile the requested session lazily. The aggregate files remain as
+  // locked rollback shadows, so a forward upgrade after an old-version rollback
+  // can recover any cursor advances made while that version was active.
+  reconcileAggregateLineRecord(agentId, sessionId);
+  return readJsonObject(file) || {};
+}
+
 export function updateLineRecord(agentId, transcriptPath, sessionId, endLine) {
-  const records = loadLineRecords(agentId);
-  records[transcriptPath] = {
+  const record = {
     session_id: sessionId,
+    transcript_path: transcriptPath,
     last_line_count: endLine,
     updated_at: new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, ''),
   };
-  const ok = saveLineRecords(agentId, records);
-  if (ok) logDebug(agentId, `Updated record: ${transcriptPath} -> ${endLine} lines`);
-  else logDebug(agentId, 'Warning: Failed to save line records');
+  const ok = saveSessionLineRecord(agentId, sessionId, record);
+  if (ok) {
+    logDebug(agentId, `Updated record: ${transcriptPath} -> ${endLine} lines`);
+    for (const shadow of rollbackShadowFiles(agentId)) {
+      if (!updateAggregateShadow(shadow, transcriptPath, record)) {
+        logDebug(agentId, `Warning: Failed to update rollback cursor shadow ${shadow}`);
+      }
+    }
+  } else {
+    logDebug(agentId, 'Warning: Failed to save line records');
+  }
   return ok;
 }
 
@@ -125,17 +276,30 @@ export function getTranscriptLineCount(transcriptPath) {
   }
 }
 
-export function getLineRange(agentId, transcriptPath, sessionId) {
-  const records = loadLineRecords(agentId);
-  const record = records[transcriptPath] || {};
-  let lastCount = record.last_line_count || 0;
+export function getLineRangeInfo(agentId, transcriptPath, sessionId, knownCurrentCount) {
+  const record = loadLineRecord(agentId, sessionId);
+  const hasRecordedOffset = Number.isFinite(record.last_line_count)
+    && record.last_line_count >= 0;
+  let lastCount = hasRecordedOffset ? record.last_line_count : 0;
   const recordedSession = record.session_id || '';
+  const recordedTranscript = record.transcript_path || '';
+  let reason = hasRecordedOffset ? 'incremental' : 'missing-cursor';
 
-  const currentCount = getTranscriptLineCount(transcriptPath);
+  // Callers that already hold a transcript snapshot can pass its line count so
+  // cursor validation does not read the complete file a second time.
+  const currentCount = Number.isFinite(knownCurrentCount)
+    ? knownCurrentCount
+    : getTranscriptLineCount(transcriptPath);
 
   if (recordedSession && recordedSession !== sessionId) {
     logDebug(agentId, `Session changed: ${recordedSession} -> ${sessionId}, reset to 0`);
     lastCount = 0;
+    reason = 'session-changed';
+  }
+  if (recordedTranscript && recordedTranscript !== transcriptPath) {
+    logDebug(agentId, `Transcript changed for session ${sessionId}, reset to 0`);
+    lastCount = 0;
+    reason = 'transcript-changed';
   }
   if (currentCount === 0) {
     logDebug(agentId, 'Transcript is empty');
@@ -148,10 +312,21 @@ export function getLineRange(agentId, transcriptPath, sessionId) {
   if (currentCount < lastCount) {
     logDebug(agentId, `File truncated (${lastCount} -> ${currentCount}), sending all`);
     lastCount = 0;
+    reason = 'truncated';
   }
 
-  logDebug(agentId, `Range: ${lastCount} -> ${currentCount}`);
-  return [lastCount, currentCount];
+  logDebug(agentId, `Range: ${lastCount} -> ${currentCount} (${reason})`);
+  return { startLine: lastCount, endLine: currentCount, reason };
+}
+
+/**
+ * Compatibility API for a transient mixed-version deployment: the shared
+ * module may be replaced before an older deployed processor that still imports
+ * the tuple form. Current in-tree processors use getLineRangeInfo().
+ */
+export function getLineRange(agentId, transcriptPath, sessionId) {
+  const info = getLineRangeInfo(agentId, transcriptPath, sessionId);
+  return info ? [info.startLine, info.endLine] : null;
 }
 
 export function readTranscriptLines(transcriptPath, startLine, endLine) {
@@ -199,7 +374,14 @@ export function appendRowsToHistory(agentId, logPrefix, rows) {
   const logFile = getHistoryLogFile(agentId, logPrefix);
   try {
     fs.mkdirSync(path.dirname(logFile), { recursive: true });
-    fs.appendFileSync(logFile, rows.join('\n') + '\n', 'utf-8');
+    const result = withSyncFileLock(`${logFile}.lock`, 15_000, 10_000, () => {
+      fs.appendFileSync(logFile, rows.join('\n') + '\n', 'utf-8');
+      return true;
+    });
+    if (!result.acquired) {
+      logDebug(agentId, `ERROR appending rows to history: timed out waiting for ${logFile}.lock`);
+      return false;
+    }
     logDebug(agentId, `Appended ${rows.length} rows to ${logFile}`);
     return true;
   } catch (e) {
@@ -215,10 +397,9 @@ export async function readStdin() {
   for await (const chunk of process.stdin) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   }
-  let str = Buffer.concat(chunks).toString('utf-8');
-  // Strip UTF-8 BOM — PowerShell 5.x adds BOM when piping strings to native commands
-  if (str.charCodeAt(0) === 0xFEFF) str = str.slice(1);
-  return str;
+  // decodePayload 负责去 UTF-8 BOM + 修复 Cursor/Qoder 中文 UTF-8→GBK 双重编码。
+  // (原先由 PowerShell hook wrapper 用 .NET 完成,已移入 node 以兼容 WDAC 受限语言模式)
+  return decodePayload(Buffer.concat(chunks));
 }
 
 export async function parseStdinPayload(agentId) {

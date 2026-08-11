@@ -39,20 +39,75 @@ export async function readJsonFile<T>(path: string): Promise<T | null> {
   }
 }
 
-/**
- * Writes pretty-printed JSON atomically (write-to-tmp + rename) and ensures
- * parent directories exist. Errors are propagated to the caller.
- */
-export async function writeJsonFile(
+export type ExpectedFileState =
+  | { exists: false }
+  | { exists: true; content: string };
+
+export interface AtomicTextWriteOptions {
+  /**
+   * Optional optimistic concurrency guard. The write is rejected when the
+   * target no longer matches the content observed by the caller.
+   */
+  expected?: ExpectedFileState;
+  /**
+   * Optional one-time backup path. Existing backups are never overwritten.
+   * Only applies when the expected target already exists.
+   */
+  backupPath?: string;
+}
+
+async function assertExpectedFileState(
   path: string,
-  data: unknown
+  expected: ExpectedFileState,
+): Promise<void> {
+  let current: string | null;
+  try {
+    current = await fsp.readFile(path, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    current = null;
+  }
+
+  const matches = expected.exists
+    ? current === expected.content
+    : current === null;
+  if (!matches) {
+    throw new Error(`file changed before write: ${path}`);
+  }
+}
+
+/**
+ * Writes text atomically (write-to-tmp + rename) and ensures the parent
+ * directory exists. Errors are propagated to the caller.
+ */
+export async function writeTextFileAtomic(
+  path: string,
+  text: string,
+  options: AtomicTextWriteOptions = {},
 ): Promise<void> {
   const dir = nodePath.dirname(path);
   await ensureDir(dir);
-  const text = `${JSON.stringify(data, null, 2)}\n`;
+
+  if (options.expected) {
+    await assertExpectedFileState(path, options.expected);
+  }
+
+  if (options.backupPath && options.expected?.exists) {
+    try {
+      await fsp.copyFile(path, options.backupPath, fs.constants.COPYFILE_EXCL);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+  }
+
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
   try {
     await fsp.writeFile(tmp, text, 'utf8');
+    // Re-check after preparing the temporary file. This narrows the remaining
+    // race to the final compare-and-rename window.
+    if (options.expected) {
+      await assertExpectedFileState(path, options.expected);
+    }
     await fsp.rename(tmp, path);
   } catch (err: unknown) {
     const code = (err as NodeJS.ErrnoException).code;
@@ -64,6 +119,9 @@ export async function writeJsonFile(
       const tmp2 = `${path}.${process.pid}.${Date.now()}.tmp`;
       try {
         await fsp.writeFile(tmp2, text, 'utf8');
+        if (options.expected) {
+          await assertExpectedFileState(path, options.expected);
+        }
         await fsp.rename(tmp2, path);
       } catch (retryErr) {
         await fsp.unlink(tmp2).catch(() => {});
@@ -77,6 +135,9 @@ export async function writeJsonFile(
       if (!tmpExists) throw err;
       await new Promise(r => setTimeout(r, 50));
       try {
+        if (options.expected) {
+          await assertExpectedFileState(path, options.expected);
+        }
         await fsp.rename(tmp, path);
       } catch {
         await fsp.unlink(tmp).catch(() => {});
@@ -90,18 +151,39 @@ export async function writeJsonFile(
 }
 
 /**
+ * Writes pretty-printed JSON atomically. This remains the strict-JSON writer;
+ * JSONC callers must preserve and edit the original text instead.
+ */
+export async function writeJsonFile(
+  path: string,
+  data: unknown
+): Promise<void> {
+  await writeTextFileAtomic(path, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+/**
  * Removes stale `.tmp` files left behind by interrupted atomic writes (e.g. process
  * killed mid-rename). Call once at startup for directories that use writeJsonFile.
+ *
+ * Cleanup is **age-based**, not pid-based: a fresh `.tmp` (any pid) may belong to a
+ * concurrent live process — e.g. two daemon instances overlapping during a restart.
+ * Deleting it would break that process's `rename(tmp, path)` with ENOENT, failing
+ * the collection cycle. Only remove tmp files older than `maxAgeMs` (a tmp that old
+ * is definitely not mid-rename, since rename is instantaneous).
  */
-export async function cleanStaleTmpFiles(dir: string): Promise<void> {
-  const currentPid = String(process.pid);
+export async function cleanStaleTmpFiles(dir: string, maxAgeMs = 60_000): Promise<void> {
+  const now = Date.now();
   try {
     const entries = await fsp.readdir(dir);
-    const tmpFiles = entries.filter(f => {
-      const m = f.match(/\.(\d+)\.\d+\.tmp$/);
-      return m != null && m[1] !== currentPid;
-    });
-    await Promise.all(tmpFiles.map(f => fsp.unlink(nodePath.join(dir, f)).catch(() => {})));
+    for (const f of entries) {
+      if (!/\.(\d+)\.\d+\.tmp$/.test(f)) continue;
+      const full = nodePath.join(dir, f);
+      try {
+        const st = await fsp.stat(full);
+        if (now - st.mtimeMs < maxAgeMs) continue;
+        await fsp.unlink(full).catch(() => {});
+      } catch {}
+    }
   } catch {}
 }
 

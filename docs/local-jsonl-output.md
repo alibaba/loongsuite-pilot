@@ -18,6 +18,11 @@ Files are named by agent and date:
 
 Each line is one normalized event.
 
+JSONL preserves native JSON types: token counts remain numbers, flags remain
+booleans, and message/tool payloads remain arrays or objects. String-only
+backends such as wide-table log stores perform their own serialization at the
+backend boundary.
+
 ## Enable Or Disable JSONL
 
 ```json
@@ -35,6 +40,16 @@ Each line is one normalized event.
 | `enabled` | Enables or disables local JSONL output. |
 | `outputDir` | Directory where output files are written. |
 | `rotateDaily` | Rotates output by date. |
+
+## Retention And Disk Protection
+
+Local JSONL output follows the global retention policy in [Configuration Guide](configuration.md). By default, output logs are retained for 7 days.
+
+Pilot also has fixed disk-protection cleanup for unusually large local output:
+
+- Output files larger than 512 MiB can be removed after they are older than 2 days.
+- If `logs/output` exceeds 2 GiB, older dated output files are removed until the directory is back under the limit.
+- Today's output file is never removed by retention cleanup. Size-pressure cleanup also keeps yesterday's output files.
 
 Environment variables:
 

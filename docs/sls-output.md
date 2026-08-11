@@ -20,6 +20,14 @@ For AK mode, also pass:
 --sls-ak-secret "your-access-key-secret"
 ```
 
+For API Key mode, pass:
+
+```bash
+--sls-api-key "your-api-key"
+```
+
+Do not pass `--sls-api-key` together with `--sls-ak-id` or `--sls-ak-secret`.
+
 ## WebTracking Mode
 
 Use WebTracking mode when the destination logstore accepts WebTracking writes.
@@ -37,6 +45,32 @@ Use WebTracking mode when the destination logstore accepts WebTracking writes.
   }
 }
 ```
+
+## API Key Mode
+
+Use API Key mode when your SLS destination accepts collection API Key authentication. Pilot writes through the direct SLS protobuf API:
+
+- `POST /logstores/{logstore}/shards/lb`
+- `Authorization: Bearer <apiKey>`
+- `Content-Type: application/x-protobuf`
+- `Content-MD5` with the protobuf body MD5 in uppercase hex
+
+This mode is not WebTracking query-parameter upload.
+
+```json
+{
+  "sls": {
+    "enabled": true,
+    "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+    "project": "my-project",
+    "logstore": "my-logstore",
+    "mode": "apiKey",
+    "apiKey": "your-api-key"
+  }
+}
+```
+
+Do not configure `apiKey` and `accessKeyId` / `accessKeySecret` on the same SLS destination.
 
 ## AK Mode
 
@@ -71,6 +105,14 @@ Use an array when the same events should be sent to multiple SLS destinations:
       "mode": "webtracking"
     },
     {
+      "name": "api-key-sls",
+      "endpoint": "https://cn-beijing.log.aliyuncs.com",
+      "project": "api-key-project",
+      "logstore": "agent-activity",
+      "mode": "apiKey",
+      "apiKey": "your-api-key"
+    },
+    {
       "name": "secure-sls",
       "endpoint": "https://cn-shanghai.log.aliyuncs.com",
       "project": "secure-project",
@@ -90,7 +132,8 @@ Use an array when the same events should be sent to multiple SLS destinations:
 | `LOONGSUITE_SLS_ENDPOINT` | SLS endpoint URL. |
 | `LOONGSUITE_SLS_PROJECT` | SLS project. |
 | `LOONGSUITE_SLS_LOGSTORE` | SLS logstore. |
-| `LOONGSUITE_SLS_MODE` | `webtracking` or `ak`. |
+| `LOONGSUITE_SLS_MODE` | `webtracking`, `ak`, or `apiKey`. |
+| `LOONGSUITE_SLS_API_KEY` | API Key for API Key mode. |
 | `LOONGSUITE_SLS_ACCESS_KEY_ID` | Access Key ID for AK mode. |
 | `LOONGSUITE_SLS_ACCESS_KEY_SECRET` | Access Key Secret for AK mode. |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | Set `false` or `0` to disable SLS reporting. |
@@ -102,11 +145,13 @@ loongsuite-pilot restart
 loongsuite-pilot status
 ```
 
-If SLS upload fails, failed batches are persisted locally:
+If an SLS upload still fails after retries, Pilot persists bounded diagnostic metadata locally:
 
 ```bash
-ls ~/.loongsuite-pilot/sls-failed-logs/
+ls ~/.loongsuite-pilot/logs/sls-failed-logs/
 ```
+
+These JSONL records contain the endpoint, error summary, batch count, and batch byte estimate. They do **not** contain the failed batch payload, message content, request headers, or credentials, so they cannot be used to replay failed uploads. Files rotate by local date and at 10 MiB; the directory is limited to 50 MiB and also follows `retention.slsFailedDays` (7 days by default).
 
 Local JSONL output can help confirm whether collection itself is working before debugging SLS delivery:
 

@@ -2,6 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { HookStrategy } from '../../../src/deployment/hook-strategy.js';
 import type { AgentDefinition, DeployedAgentRecord } from '../../../src/types/index.js';
 
+vi.mock('node:fs/promises', async () => {
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  return {
+    ...actual,
+    readFile: vi.fn(),
+  };
+});
+
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
     info: vi.fn(),
@@ -16,13 +24,29 @@ vi.mock('../../../src/deployment/detect-utils.js', () => ({
 }));
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
+  fileExists: vi.fn(),
   readJsonFile: vi.fn(),
   writeJsonFile: vi.fn(),
+  writeTextFileAtomic: vi.fn(),
   resolveHome: vi.fn((p: string) => p),
+  ensureDir: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../../../src/deployment/codex-trust-writer.js', () => ({
+  writeTrustedHashes: vi.fn(),
+  removeTrustBlock: vi.fn(),
+  verifyTrustHashes: vi.fn(() => ({ valid: true, mismatches: [] })),
 }));
 
 import { detectAgent } from '../../../src/deployment/detect-utils.js';
-import { readJsonFile, writeJsonFile } from '../../../src/utils/fs-utils.js';
+import * as fs from 'node:fs/promises';
+import {
+  fileExists,
+  readJsonFile,
+  writeJsonFile,
+  writeTextFileAtomic,
+} from '../../../src/utils/fs-utils.js';
+import { verifyTrustHashes } from '../../../src/deployment/codex-trust-writer.js';
 
 function makeDef(overrides?: Partial<AgentDefinition>): AgentDefinition {
   return {
@@ -50,6 +74,7 @@ describe('HookStrategy', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(fileExists).mockResolvedValue(false);
     mockHookManager = {
       isHookInstalled: vi.fn(),
       installHook: vi.fn(),
@@ -108,6 +133,34 @@ describe('HookStrategy', () => {
       expect(mockHookManager.isHookInstalled).not.toHaveBeenCalled();
     });
 
+    it('returns true when Codex hook exists but its trust state is invalid', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({ hooks: {} });
+      vi.mocked(verifyTrustHashes).mockReturnValue({
+        valid: false,
+        mismatches: ['missing trust state'],
+      });
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+
+      const result = await strategy.needsDeploy(makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          trustToml: {
+            configPath: '/home/.codex/config.toml',
+            trustAlgo: 'v1',
+            marker: 'otel-codex-hook',
+          },
+        },
+      }));
+
+      expect(result).toBe(true);
+      expect(verifyTrustHashes).toHaveBeenCalledOnce();
+    });
+
     it('builds correct hook definitions from agent config', async () => {
       mockHookManager.isHookInstalled.mockResolvedValue(true);
       const def = makeDef();
@@ -126,6 +179,65 @@ describe('HookStrategy', () => {
       expect(secondCall.hookJsonPath).toEqual(['hooks', 'PostToolUse']);
     });
 
+    it('quotes only Codex PowerShell hook paths and removes the previous Windows command', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      try {
+        vi.mocked(readJsonFile).mockResolvedValue({ hooks: {} });
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const script = 'C:/Users/Test User/.loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.ps1';
+        const def = makeDef({
+          id: 'codex',
+          hook: {
+            settingsPath: 'C:/Users/Test User/.codex/hooks.json',
+            events: ['Stop'],
+            hookCommand: script,
+            format: 'nested',
+            matcher: '*',
+            eventSubcommand: 'kebab-case',
+          },
+        });
+
+        await strategy.needsDeploy(def);
+
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0]).toMatchObject({
+          hookCommand: 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass '
+            + `-File "${script}" stop`,
+          replaceHookCommands: [`${script} stop`],
+        });
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
+    it('preserves the existing Windows command format for non-Codex hook agents', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      try {
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const def = makeDef({
+          id: 'claude-code',
+          hook: {
+            settingsPath: 'C:/Users/test/.claude/settings.json',
+            events: ['Stop'],
+            hookCommand: 'C:/Users/test/.loongsuite-pilot/hooks/claude-code-hook.ps1',
+            format: 'nested',
+            eventSubcommand: 'kebab-case',
+          },
+        });
+
+        await strategy.needsDeploy(def);
+
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0]).toMatchObject({
+          hookCommand: 'powershell -NoProfile -ExecutionPolicy Bypass '
+            + '-File C:/Users/test/.loongsuite-pilot/hooks/claude-code-hook.ps1 stop',
+          replaceHookCommands: [],
+        });
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
     it('passes replaceHookCommands to hook definitions', async () => {
       mockHookManager.isHookInstalled.mockResolvedValue(true);
       const def = makeDef({
@@ -142,6 +254,114 @@ describe('HookStrategy', () => {
       const call = mockHookManager.isHookInstalled.mock.calls[0][0];
       expect(call.useNestedFormat).toBe(true);
       expect(call.replaceHookCommands).toEqual(['/old/hook.sh']);
+    });
+
+    it('emits winShell as def.shell on Windows', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      try {
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const def = makeDef({
+          id: 'qoder',
+          hook: {
+            settingsPath: 'C:/Users/test/.qoder/settings.json',
+            events: ['Stop'],
+            hookCommand: 'C:/Users/test/.loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.ps1',
+            format: 'nested',
+            matcher: '*',
+            winShell: 'powershell',
+          },
+        });
+
+        await strategy.needsDeploy(def);
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0].shell).toBe('powershell');
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
+    it('ignores winShell on non-Windows platforms', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+      try {
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const def = makeDef({
+          id: 'qoder',
+          hook: {
+            settingsPath: '/home/.qoder/settings.json',
+            events: ['Stop'],
+            hookCommand: '/opt/pilot/hooks/qoder-loongsuite-pilot-hook.sh',
+            format: 'nested',
+            matcher: '*',
+            winShell: 'powershell',
+          },
+        });
+
+        await strategy.needsDeploy(def);
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0].shell).toBeUndefined();
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
+    it('leaves def.shell undefined when winShell is not set (e.g. codex)', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      try {
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const def = makeDef({
+          id: 'codex',
+          hook: {
+            settingsPath: 'C:/Users/test/.codex/hooks.json',
+            events: ['Stop'],
+            hookCommand: 'C:/Users/test/.loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.ps1',
+            format: 'nested',
+            matcher: '*',
+          },
+        });
+
+        await strategy.needsDeploy(def);
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0].shell).toBeUndefined();
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
+    it('uses per-event matchers when configured', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      await strategy.needsDeploy(makeDef({
+        hook: {
+          settingsPath: '/home/.workbuddy/settings.json',
+          events: ['SessionStart', 'PreToolUse'],
+          hookCommand: '/opt/pilot/hooks/workbuddy.sh',
+          format: 'nested',
+          eventMatchers: { PreToolUse: '.*' },
+        },
+      }));
+      expect(mockHookManager.isHookInstalled.mock.calls[0][0].matcher).toBeUndefined();
+      expect(mockHookManager.isHookInstalled.mock.calls[1][0].matcher).toBe('.*');
+    });
+
+    it('passes JSONC settings syntax to Qwen hook definitions', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      const def = makeDef({
+        id: 'qwen-code-cli',
+        hook: {
+          settingsPath: '/home/.qwen/settings.json',
+          settingsSyntax: 'jsonc',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/qwen.sh',
+          format: 'nested',
+        },
+      });
+
+      await strategy.needsDeploy(def);
+
+      expect(mockHookManager.isHookInstalled.mock.calls[0][0]).toMatchObject({
+        agentId: 'qwen-code-cli',
+        settingsSyntax: 'jsonc',
+        settingsPath: '/home/.qwen/settings.json',
+      });
     });
   });
 
@@ -302,6 +522,46 @@ describe('HookStrategy', () => {
       await strategy.deploy(def);
 
       expect(writeJsonFile).not.toHaveBeenCalled();
+    });
+
+    it('does not replace an existing invalid strict hooks.json file', async () => {
+      vi.mocked(fileExists).mockResolvedValue(true);
+      vi.mocked(readJsonFile).mockResolvedValue(null);
+      vi.mocked(fs.readFile).mockResolvedValue('{ "hooks": ');
+
+      const result = await strategy.deploy(makeDef());
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('refusing to overwrite invalid settings');
+      expect(writeJsonFile).not.toHaveBeenCalled();
+      expect(mockHookManager.installHook).not.toHaveBeenCalled();
+    });
+
+    it('initializes an existing whitespace-only Cursor hooks.json safely', async () => {
+      vi.mocked(fileExists).mockResolvedValue(true);
+      vi.mocked(readJsonFile).mockResolvedValue(null);
+      vi.mocked(fs.readFile).mockResolvedValue('  \n');
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      const def = makeDef({
+        hook: {
+          settingsPath: '/home/.cursor/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/test.sh',
+          format: 'flat',
+        },
+      });
+      const result = await strategy.deploy(def);
+
+      expect(result.success).toBe(true);
+      expect(writeTextFileAtomic).toHaveBeenCalledWith(
+        '/home/.cursor/hooks.json',
+        '{\n  "hooks": {},\n  "version": 1\n}\n',
+        { expected: { exists: true, content: '  \n' } },
+      );
+      expect(writeJsonFile).not.toHaveBeenCalled();
+      expect(mockHookManager.installHook).toHaveBeenCalled();
     });
 
     it('installs only hooks not already installed', async () => {
@@ -536,6 +796,49 @@ describe('HookStrategy', () => {
 
       const result = await strategy.undeploy(makeDef());
       expect(result).toBe(false);
+    });
+  });
+
+  describe('kiro agent default-agent config', () => {
+    const kiroDef = (overrides?: Partial<AgentDefinition>): AgentDefinition => makeDef({
+      id: 'kiro-cli',
+      hook: {
+        settingsPath: '/home/.kiro/agents/pilot-kiro.json',
+        events: ['userPromptSubmit', 'preToolUse', 'postToolUse', 'stop'],
+        hookCommand: '/opt/pilot/hooks/kiro.sh',
+        format: 'flat',
+        matcher: '*',
+        eventSubcommand: 'as-is',
+        kiroAgent: { name: 'pilot-kiro', tools: ['read', 'write', 'shell'] },
+        ...overrides,
+      },
+    });
+
+    it('sets chat.defaultAgent=pilot-kiro in cli.json when missing', async () => {
+      // pilot-kiro.json: empty; cli.json: no chat.defaultAgent
+      vi.mocked(readJsonFile).mockResolvedValue({} as any);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      await strategy.deploy(kiroDef());
+
+      // writeJsonFile should be called with cli.json containing chat.defaultAgent
+      const calls = vi.mocked(writeJsonFile).mock.calls;
+      const cliCall = calls.find((c: any) => String(c[0]).includes('settings/cli.json'));
+      expect(cliCall).toBeTruthy();
+      expect((cliCall![1] as any)['chat.defaultAgent']).toBe('pilot-kiro');
+    });
+
+    it('does not override an existing chat.defaultAgent', async () => {
+      // cli.json already has a different defaultAgent
+      vi.mocked(readJsonFile).mockResolvedValue({ 'chat.defaultAgent': 'my-custom-agent' } as any);
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      await strategy.deploy(kiroDef());
+
+      const cliCall = vi.mocked(writeJsonFile).mock.calls
+        .find((c: any) => String(c[0]).includes('settings/cli.json'));
+      // Should not write cli.json (defaultAgent already set, respected)
+      expect(cliCall).toBeUndefined();
     });
   });
 });

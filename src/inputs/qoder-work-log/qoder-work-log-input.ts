@@ -124,6 +124,7 @@ export type SdkEvent =
       kind: 'result';
       ts: number;
       sessionId: string;
+      resultId: string;
       subtype: string;
       durationMs: number;
       durationApiMs: number;
@@ -720,6 +721,7 @@ export function parseSdkLogLine(line: string): SdkEvent | null {
       kind: 'result',
       ts: tsNum,
       sessionId: stringOr(data.session_id, ''),
+      resultId: stringOr(data.uuid, ''),
       subtype: stringOr(data.subtype, ''),
       durationMs: numberOr(data.duration_ms, 0),
       durationApiMs: numberOr(data.duration_api_ms, 0),

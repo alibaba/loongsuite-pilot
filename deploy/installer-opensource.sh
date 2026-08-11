@@ -9,6 +9,11 @@
 #     --sls-logstore "my-logstore" \
 #     --sls-ak-id "your-ak-id" \
 #     --sls-ak-secret "your-ak-secret"
+#   curl -fsSL <URL>/installer.sh | bash -s -- install \
+#     --sls-endpoint "https://cn-hangzhou.log.aliyuncs.com" \
+#     --sls-project "my-project" \
+#     --sls-logstore "my-logstore" \
+#     --sls-api-key "your-api-key"
 #
 # Install a specific version:
 #   curl -fsSL <URL>/installer.sh | bash -s -- install --version 1.2.0
@@ -31,6 +36,11 @@ DEFAULT_DATA_DIR="$HOME/.loongsuite-pilot"
 
 # OSS download base URL
 _OSS_BASE_URL="https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot"
+# Managed Node.js runtime + prebuilt node_modules (downloaded from OSS at install time)
+NODE_VERSION="${LOONGSUITE_PILOT_NODE_VERSION:-22.22.2}"
+NODE_DEPS_BASE="${LOONGSUITE_PILOT_NODE_DEPS_URL:-https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node}"
+NODE_MODULES_BASE="${LOONGSUITE_PILOT_NODE_MODULES_URL:-https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/deps/node-modules}"
+
 
 # ============================================================
 # Parse sub-command
@@ -43,6 +53,7 @@ SLS_PROJECT=""
 SLS_LOGSTORE=""
 SLS_AK_ID=""
 SLS_AK_SECRET=""
+SLS_API_KEY=""
 DATA_DIR="$DEFAULT_DATA_DIR"
 LOG_LEVEL=""
 USER_ID=""
@@ -57,7 +68,7 @@ MASK_MODE=""
 MASK_TYPES=""
 HAS_SUDO=0
 PURGE=0
-SYSTEM_SERVICE=0
+PREFER_SYSTEM_NODE=0
 
 # First arg is sub-command (or option -> default to install)
 if [[ $# -gt 0 ]]; then
@@ -85,6 +96,8 @@ while [[ $# -gt 0 ]]; do
         --sls-ak-id=*)        SLS_AK_ID="${1#*=}"; shift ;;
         --sls-ak-secret)      SLS_AK_SECRET="$2"; shift 2 ;;
         --sls-ak-secret=*)    SLS_AK_SECRET="${1#*=}"; shift ;;
+        --sls-api-key)        SLS_API_KEY="$2"; shift 2 ;;
+        --sls-api-key=*)      SLS_API_KEY="${1#*=}"; shift ;;
         --package-url)        PACKAGE_URL="$2"; shift 2 ;;
         --package-url=*)      PACKAGE_URL="${1#--package-url=}"; shift ;;
         --data-dir)           DATA_DIR="$2"; shift 2 ;;
@@ -116,7 +129,11 @@ while [[ $# -gt 0 ]]; do
         --mask-types)         MASK_TYPES="$2"; shift 2 ;;
         --mask-types=*)       MASK_TYPES="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
-        --system-service)     SYSTEM_SERVICE=1; shift ;;
+        --prefer-system-node) PREFER_SYSTEM_NODE=1; shift ;;
+        --prefer-system-node=*) PREFER_SYSTEM_NODE=1; shift ;;
+        --system-service)
+            echo "⚠️  --system-service is deprecated and ignored. Auto-detection is now the default." >&2
+            shift ;;
         *)
             echo "Unknown option: $1" >&2
             exit 1 ;;
@@ -139,6 +156,10 @@ if [ -n "$MASK_TYPES" ] && [ "$MASK_MODE" != "custom" ]; then
     echo "❌ --mask-types can only be used with --mask-mode custom" >&2
     exit 1
 fi
+if [ -n "$SLS_API_KEY" ] && { [ -n "$SLS_AK_ID" ] || [ -n "$SLS_AK_SECRET" ]; }; then
+    echo "❌ --sls-api-key cannot be used with --sls-ak-id or --sls-ak-secret" >&2
+    exit 1
+fi
 
 # Validate current user and sudo access on Linux
 validate_install_user() {
@@ -148,27 +169,11 @@ validate_install_user() {
             current_user=$(whoami)
             if [ "$(id -u)" -eq 0 ]; then
                 HAS_SUDO=1
-                SYSTEM_SERVICE=1
                 msg "   ✅ 以 root 身份安装（自动使用系统级服务）" \
                     "   ✅ Installing as root (auto system-level service)"
-            elif [ "$SYSTEM_SERVICE" -eq 1 ]; then
-                if sudo -n true 2>/dev/null; then
-                    HAS_SUDO=1
-                    msg "   ✅ sudo 权限校验通过 (user: $current_user)" \
-                        "   ✅ sudo access verified (user: $current_user)"
-                elif sudo -v 2>/dev/null; then
-                    HAS_SUDO=1
-                    msg "   ✅ sudo 权限校验通过 (user: $current_user)" \
-                        "   ✅ sudo access verified (user: $current_user)"
-                else
-                    HAS_SUDO=0
-                    SYSTEM_SERVICE=0
-                    msg "⚠️  无 sudo 权限 — 无法注册系统级服务。将使用用户态 systemd 服务。" \
-                        "⚠️  No sudo access — cannot register system-level service. Using user-level systemd."
-                fi
             else
-                msg "   Install user: $current_user（服务类型将在启动时检测）" \
-                    "   Install user: $current_user (service type determined at start)"
+                msg "   Install user: $current_user（服务类型将在启动时自动检测）" \
+                    "   Install user: $current_user (service type auto-detected at start)"
             fi
             ;;
     esac
@@ -261,14 +266,237 @@ resolve_node() {
     return 1
 }
 
+# >>> managed-node-runtime >>>
+# Managed Node.js runtime + prebuilt node_modules, downloaded from OSS.
+# Everything here logs to stderr only: ensure_managed_node is captured via
+# $(...) and must print the node path — and nothing else — on stdout.
+_mn_msg() {
+    if [ "${LANG_MODE:-en}" = "zh" ]; then echo "$1" >&2; else echo "$2" >&2; fi
+}
+
+managed_node_platform() {
+    local os arch
+    case "$(uname -s)" in
+        Darwin) os="darwin" ;;
+        Linux) os="linux" ;;
+        MINGW*|MSYS*|CYGWIN*) os="win" ;;
+        *)
+            echo "managed node: unsupported platform $(uname -s)" >&2
+            return 1 ;;
+    esac
+    case "$(uname -m)" in
+        arm64|aarch64) arch="arm64" ;;
+        x86_64|amd64) arch="x64" ;;
+        *)
+            echo "managed node: unsupported architecture $(uname -m)" >&2
+            return 1 ;;
+    esac
+    if [ "$os" = "win" ] && [ "$arch" = "arm64" ]; then
+        _mn_msg "managed node: win-arm64 无托管产物，回退系统 node + npm install" \
+                "managed node: no win-arm64 artifact, falling back to system node + npm install"
+        return 1
+    fi
+    if [ "$os" = "linux" ] && managed_node_is_musl; then
+        _mn_msg "managed node: linux musl (Alpine) 无托管产物，回退系统 node + npm install" \
+                "managed node: no linux-musl artifact, falling back to system node + npm install"
+        return 1
+    fi
+    echo "$os $arch"
+}
+
+managed_node_is_musl() {
+    ls /lib/ld-musl-* >/dev/null 2>&1 && return 0
+    ldd --version 2>&1 | grep -qi musl && return 0
+    return 1
+}
+
+managed_node_download() {
+    # managed_node_download <url> <dest>
+    # Bounded timeouts mirror the .ps1 installer (-TimeoutSec 600); without
+    # them a stalled TCP connection hangs the installer indefinitely.
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 2 --connect-timeout 20 --max-time 600 "$1" -o "$2"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --tries=2 --timeout=20 "$1" -O "$2"
+    else
+        return 1
+    fi
+}
+
+managed_node_sha256() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        echo "managed node: neither shasum nor sha256sum available" >&2
+        return 1
+    fi
+}
+
+managed_node_verify() {
+    # managed_node_verify <archive> <shasums-file> <archive-basename>
+    local expected actual
+    # [*]? accepts sha256sum binary-mode lines ("<hash> *<name>"), matching
+    # the .ps1 installer's Test-ManagedNodeChecksum.
+    expected=$(grep -E "[[:space:]][*]?${3}\$" "$2" 2>/dev/null | awk '{print $1}' | head -1)
+    if [ -z "$expected" ]; then
+        echo "managed node: SHASUMS256.txt has no entry for $3" >&2
+        return 1
+    fi
+    actual=$(managed_node_sha256 "$1") || return 1
+    if [ "$expected" != "$actual" ]; then
+        echo "managed node: sha256 mismatch for $3 (expected $expected, got $actual)" >&2
+        return 1
+    fi
+    return 0
+}
+
+managed_node_bin() {
+    # managed_node_bin <node-dir> <os>
+    # Prefer the bin/ layout; official Node.js win zips put node.exe at the root.
+    local bin="$1/bin/node"
+    [ "$2" = "win" ] && bin="$1/bin/node.exe"
+    if [ -x "$bin" ]; then
+        echo "$bin"
+        return 0
+    fi
+    if [ "$2" = "win" ] && [ -x "$1/node.exe" ]; then
+        echo "$1/node.exe"
+        return 0
+    fi
+    return 1
+}
+
+ensure_managed_node() {
+    local runtime_dir="$DATA_DIR/runtime"
+    local tuple os arch
+    tuple=$(managed_node_platform) || return 1
+    os="${tuple% *}"; arch="${tuple#* }"
+
+    local ext="tar.gz"
+    [ "$os" = "win" ] && ext="zip"
+    local archive="node-v${NODE_VERSION}-${os}-${arch}.${ext}"
+    local node_dir="$runtime_dir/node-v${NODE_VERSION}-${os}-${arch}"
+    local node_bin=""
+    node_bin=$(managed_node_bin "$node_dir" "$os") || node_bin=""
+
+    if [ -n "$node_bin" ] && [ "$("$node_bin" --version 2>/dev/null)" = "v${NODE_VERSION}" ]; then
+        echo "$node_bin"
+        return 0
+    fi
+
+    local base="${NODE_DEPS_BASE%/}/${NODE_VERSION}"
+    local tmp
+    tmp=$(mktemp -d) || return 1
+
+    _mn_msg "==> 下载托管 Node.js v${NODE_VERSION} (${os}-${arch})..." \
+            "==> Downloading managed Node.js v${NODE_VERSION} (${os}-${arch})..."
+    if ! managed_node_download "$base/$archive" "$tmp/$archive" \
+        || ! managed_node_download "$base/SHASUMS256.txt" "$tmp/SHASUMS256.txt" \
+        || ! managed_node_verify "$tmp/$archive" "$tmp/SHASUMS256.txt" "$archive"; then
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    mkdir -p "$runtime_dir"
+    rm -rf "$node_dir"
+    if [ "$ext" = "zip" ]; then
+        if ! command -v unzip >/dev/null 2>&1 || ! unzip -q "$tmp/$archive" -d "$runtime_dir"; then
+            rm -rf "$tmp" "$node_dir"
+            return 1
+        fi
+    else
+        if ! { tar --warning=no-unknown-keyword -xzf "$tmp/$archive" -C "$runtime_dir" 2>/dev/null \
+                || tar -xzf "$tmp/$archive" -C "$runtime_dir"; }; then
+            rm -rf "$tmp" "$node_dir"
+            return 1
+        fi
+    fi
+    rm -rf "$tmp"
+
+    node_bin=$(managed_node_bin "$node_dir" "$os") || node_bin=""
+    if [ -z "$node_bin" ]; then
+        echo "managed node: extracted archive has no usable node binary under $node_dir (bin/node or node.exe)" >&2
+        rm -rf "$node_dir"
+        return 1
+    fi
+    if [ "$os" = "darwin" ] && command -v xattr >/dev/null 2>&1; then
+        xattr -dr com.apple.quarantine "$node_dir" 2>/dev/null || true
+    fi
+    echo "$node_bin"
+}
+
+ensure_node_modules() {
+    # ensure_node_modules <app-version>  (expects PERMANENT_DIR to point at the deployed version dir)
+    local app_version="${1:-latest}"
+    local tuple os arch
+    tuple=$(managed_node_platform) || return 1
+    os="${tuple% *}"; arch="${tuple#* }"
+
+    local modules_dir="$PERMANENT_DIR/node_modules"
+    local marker="$modules_dir/.pilot-modules-version"
+    local stamp="${app_version} ${os} ${arch}"
+    if [ -d "$modules_dir" ] && [ "$(cat "$marker" 2>/dev/null)" = "$stamp" ]; then
+        return 0
+    fi
+
+    local archive="node-modules-${os}-${arch}.tar.gz"
+    local base="${NODE_MODULES_BASE%/}/${app_version}"
+    local tmp
+    tmp=$(mktemp -d) || return 1
+
+    _mn_msg "==> 下载预编译 node_modules (${os}-${arch}, app v${app_version})..." \
+            "==> Downloading prebuilt node_modules (${os}-${arch}, app v${app_version})..."
+    if ! managed_node_download "$base/$archive" "$tmp/$archive" \
+        || ! managed_node_download "$base/SHASUMS256.txt" "$tmp/SHASUMS256.txt" \
+        || ! managed_node_verify "$tmp/$archive" "$tmp/SHASUMS256.txt" "$archive"; then
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    local stage="$tmp/stage"
+    mkdir -p "$stage"
+    if ! { tar --warning=no-unknown-keyword -xzf "$tmp/$archive" -C "$stage" 2>/dev/null \
+            || tar -xzf "$tmp/$archive" -C "$stage"; }; then
+        rm -rf "$tmp"
+        return 1
+    fi
+    if [ ! -d "$stage/node_modules" ]; then
+        rm -rf "$tmp"
+        echo "managed node_modules: archive does not contain node_modules/" >&2
+        return 1
+    fi
+    echo "$stamp" > "$stage/node_modules/.pilot-modules-version"
+    rm -rf "$modules_dir"
+    if ! mv "$stage/node_modules" "$modules_dir"; then
+        rm -rf "$tmp"
+        return 1
+    fi
+    rm -rf "$tmp"
+    return 0
+}
+# <<< managed-node-runtime <<<
+
 check_deps() {
     msg "==> 检查依赖..." "==> Checking dependencies..."
 
-    NODE_BIN=$(resolve_node) || {
+    NODE_BIN=""
+    if [ "${PREFER_SYSTEM_NODE:-0}" -eq 1 ]; then
+        NODE_BIN=$(resolve_node) || NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
+    else
+        NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
+        if [ -z "$NODE_BIN" ]; then
+            msg "    ⚠️ 托管 Node.js 不可用（平台不支持或下载失败），回退系统 node" \
+                "    ⚠️ Managed Node.js unavailable (unsupported platform or download failed), falling back to system node"
+            NODE_BIN=$(resolve_node) || NODE_BIN=""
+        fi
+    fi
+    if [ -z "$NODE_BIN" ]; then
         msg "❌ 缺少依赖: node，请先安装后重试" \
             "❌ Missing dependency: node — please install it first"
         exit 1
-    }
+    fi
 
     NODE_MAJOR=$("$NODE_BIN" -e "process.stdout.write(String(process.versions.node.split('.')[0]))")
     if [ "$NODE_MAJOR" -lt 18 ]; then
@@ -427,14 +655,27 @@ if (lang === 'zh') {
 }
 " "$PROBE_RESULT" "$LANG_MODE"
 
-    # Read user input
+    # Read user input (Node readline handles UTF-8 editing; normalize Chinese punctuation).
+    # Prompt must go to stderr so it is visible and not captured by $().
     local select_input
-    read -r select_input
+    select_input=$("$NODE_BIN" -e "
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+rl.question('    > ', (answer) => {
+  const normalized = answer.replace(/[，、；]/g, ',').trim();
+  process.stdout.write(normalized);
+  rl.close();
+});
+") || {
+        printf "    > " >&2
+        read -r select_input
+        select_input=$(printf '%s' "$select_input" | sed 's/，/,/g; s/、/,/g; s/；/,/g')
+    }
 
     # Compute final selection: empty input = detected agents, otherwise use exact input
     SELECTED_AGENTS=$("$NODE_BIN" -e "
 const r = JSON.parse(process.argv[1]);
-const input = process.argv[2] || '';
+const input = (process.argv[2] || '').replace(/[，、；]/g, ',');
 let indices;
 if (!input.trim()) {
   indices = r.map((a, i) => a.detected ? i : -1).filter(i => i >= 0);
@@ -504,10 +745,18 @@ try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { pro
 
 const newVals = JSON.parse(process.argv[2]);
 const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
+const slsModeOf = sls => {
+  if (!sls) return '';
+  if (sls.mode) return sls.mode;
+  if (sls.apiKey) return 'apiKey';
+  if (sls.accessKeyId || sls.accessKeySecret) return 'ak';
+  return '';
+};
 const checks = [
   { label: 'sls.endpoint',       oldVal: (old.sls||{}).endpoint||'',       newVal: newVals.slsEndpoint },
   { label: 'sls.project',        oldVal: (old.sls||{}).project||'',        newVal: newVals.slsProject },
   { label: 'sls.logstore',       oldVal: (old.sls||{}).logstore||'',       newVal: newVals.slsLogstore },
+  { label: 'sls.mode',           oldVal: slsModeOf(old.sls),               newVal: newVals.slsMode },
   { label: 'cms.licenseKey',     oldVal: (old.cms||{}).licenseKey||'',     newVal: newVals.cmsLicenseKey },
   { label: 'cms.endpoint',       oldVal: (old.cms||{}).endpoint||'',       newVal: newVals.cmsEndpoint },
   { label: 'cms.workspace',      oldVal: (old.cms||{}).workspace||'',      newVal: newVals.cmsWorkspace },
@@ -522,8 +771,8 @@ if (!changed.length) process.exit(0);
 for (const c of changed) {
   console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
 }
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","maskMode":"%s","maskTypes":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$MASK_MODE" "$MASK_TYPES")" 2>/dev/null || true)
+" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","maskMode":"%s","maskTypes":"%s"}' \
+        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$MASK_MODE" "$MASK_TYPES")" 2>/dev/null || true)
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -594,10 +843,10 @@ deploy_package() {
         msg "==> 部署到 $target ..." "==> Deploying to $target ..."
         mkdir -p "$versions_dir"
         rm -rf "$target"
-        cp -r "$src" "$target"
-
-        echo "$dir_name" > "$current_file.tmp"
-        mv -f "$current_file.tmp" "$current_file"
+        if ! cp -r "$src" "$target"; then
+            msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
+            return 1
+        fi
 
         PERMANENT_DIR="$target"
     else
@@ -605,7 +854,10 @@ deploy_package() {
             "==> Deploying to $PERMANENT_DIR ..."
         mkdir -p "$(dirname "$PERMANENT_DIR")"
         rm -rf "$PERMANENT_DIR"
-        cp -r "$src" "$PERMANENT_DIR"
+        if ! cp -r "$src" "$PERMANENT_DIR"; then
+            msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
+            return 1
+        fi
     fi
     msg "    ✅ 部署完成" "    ✅ Deployed"
     echo ""
@@ -613,18 +865,37 @@ deploy_package() {
     deploy_bootstrap_scripts
 
     msg "==> 安装依赖..." "==> Installing dependencies..."
-    (cd "$PERMANENT_DIR" && "$NPM_BIN" install --production --no-optional 2>&1 | tail -1)
-    msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
+    local modules_ver="${ver:-${INSTALL_VERSION:-latest}}"
+    if ensure_node_modules "$modules_ver"; then
+        msg "    ✅ 依赖安装完成（预编译 node_modules）" "    ✅ Dependencies installed (prebuilt node_modules)"
+    else
+        msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" \
+            "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
+        if ! (cd "$PERMANENT_DIR" && "$NPM_BIN" install --production --no-optional 2>&1 | tail -1); then
+            msg "    ❌ 依赖安装失败" "    ❌ Dependency installation failed"
+            return 1
+        fi
+        msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
+    fi
     echo ""
 
     msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
     if [ -f scripts/postinstall.js ]; then
-        "$NODE_BIN" scripts/postinstall.js
+        "$NODE_BIN" scripts/postinstall.js || {
+            msg "    ❌ Hook 脚本部署失败" "    ❌ Hook script deployment failed"
+            return 1
+        }
     fi
     msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
     msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
         "    If using Codex desktop app, please manually trust hooks on first launch"
     echo ""
+
+    # Write current pointer only after all deploy steps succeed
+    if [ -n "$ver" ] && [ -n "$commit" ]; then
+        echo "$dir_name" > "$current_file.tmp"
+        mv -f "$current_file.tmp" "$current_file"
+    fi
 }
 
 # ============================================================
@@ -674,7 +945,7 @@ write_config() {
         "==> Writing config to $config_file ..."
     mkdir -p "$DATA_DIR"
 
-    "$NODE_BIN" -e "
+    LP_SLS_API_KEY="$SLS_API_KEY" "$NODE_BIN" -e "
 const fs = require('fs');
 const path = '$config_file';
 
@@ -697,19 +968,31 @@ const slsProject  = '${SLS_PROJECT}';
 const slsLogstore = '${SLS_LOGSTORE}';
 const slsAkId     = '${SLS_AK_ID}';
 const slsAkSecret = '${SLS_AK_SECRET}';
+const slsApiKey   = process.env.LP_SLS_API_KEY || '';
 const logLevel    = '${LOG_LEVEL}';
 const userId      = '${USER_ID}';
 
-if (slsEndpoint || slsProject || slsLogstore) {
+if (slsEndpoint || slsProject || slsLogstore || slsApiKey) {
   config.sls = config.sls || {};
   delete config.sls.destinationOverride;
   if (slsEndpoint) {
     config.sls.endpoint = slsEndpoint;
   }
-  if (slsAkId && slsAkSecret) {
+  if (slsApiKey) {
+    config.sls.mode = 'apiKey';
+    config.sls.apiKey = slsApiKey;
+    delete config.sls.accessKeyId;
+    delete config.sls.accessKeySecret;
+  } else if (slsAkId && slsAkSecret) {
     config.sls.mode = 'ak';
     config.sls.accessKeyId = slsAkId;
     config.sls.accessKeySecret = slsAkSecret;
+    delete config.sls.apiKey;
+  } else if (slsEndpoint || slsProject || slsLogstore) {
+    config.sls.mode = 'webtracking';
+    delete config.sls.apiKey;
+    delete config.sls.accessKeyId;
+    delete config.sls.accessKeySecret;
   }
   if (slsProject && slsLogstore) {
     config.sls.project = slsProject;
@@ -857,11 +1140,13 @@ _sed_inplace() {
 }
 
 inject_qodercli_token_intercept() {
-    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder'; then return 0; fi
+    # Not selected: clean up any stale block from a prior install, then bail.
+    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder'; then remove_qodercli_token_intercept; return 0; fi
     if ! command -v qodercli >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/qodercli-token-intercept.mjs"
-    if [ ! -f "$intercept_script" ]; then return 0; fi
+    local runtime_wrapper="$DATA_DIR/hooks/qodercli-runtime-wrapper.sh"
+    if [ ! -f "$intercept_script" ] || [ ! -f "$runtime_wrapper" ]; then return 0; fi
 
     msg "==> 配置 qodercli token 采集..." "==> Configuring qodercli token intercept..."
 
@@ -872,14 +1157,30 @@ inject_qodercli_token_intercept() {
             msg "    ⚠️  $file 不可写，跳过" "    ⚠️  $file is not writable, skipping"
             return 0
         fi
-        if grep -q 'loongsuite-pilot BEGIN qodercli-intercept' "$file" 2>/dev/null; then return 0; fi
+        # Migrate-or-skip: our block may already be present. If it is the current
+        # guard shape (signature line present) we're done; otherwise it is an
+        # older released bare-function block sharing the same marker — remove it
+        # so the new guarded block below replaces it (the old bare block
+        # parse-errors under a user alias, which is exactly what we're fixing).
+        if grep -q 'loongsuite-pilot BEGIN qodercli-intercept' "$file" 2>/dev/null; then
+            if grep -qF 'qodercli-runtime-wrapper.sh' "$file"; then return 0; fi
+            _sed_inplace '/# loongsuite-pilot BEGIN qodercli-intercept/,/# loongsuite-pilot END qodercli-intercept/d' "$file"
+        fi
         [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
         # Double-quoted heredoc so $DATA_DIR expands at install time, honoring
         # --data-dir overrides. $@ is escaped to defer expansion to runtime.
+        # The `if ! alias ... eval '...'` shape guards against clobbering a
+        # user's own qodercli alias/function AND avoids a parse error: a bare
+        # qodercli() token would fail to parse under an active alias (interactive
+        # shells expand aliases at parse time, before the guard runs), so the
+        # definition is deferred behind eval. Keep byte-identical to the
+        # watchdog's blockFn (src/core/hook-watchdog.ts).
         cat >> "$file" << INTERCEPTBLOCK
 
 # loongsuite-pilot BEGIN qodercli-intercept
-qodercli() { BUN_OPTIONS="--preload=$DATA_DIR/hooks/qodercli-token-intercept.mjs" command qodercli "\$@"; }
+if ! alias qodercli >/dev/null 2>&1 && ! typeset -f qodercli >/dev/null 2>&1; then
+  eval 'qodercli() { "$DATA_DIR/hooks/qodercli-runtime-wrapper.sh" "\$@"; }'
+fi
 # loongsuite-pilot END qodercli-intercept
 INTERCEPTBLOCK
         msg "    ✅ 已写入 $file (请执行 source $file 或打开新终端)" \
@@ -891,6 +1192,18 @@ INTERCEPTBLOCK
         */bash) _inject_to_rc "$HOME/.bashrc" ;;
         *)      _inject_to_rc "$HOME/.bashrc" ;;
     esac
+
+    # If the user already defines their own `qodercli`, our guard skipped the
+    # wrapper (to avoid clobbering it), so collection won't run. Tell them how
+    # to opt in, since there is otherwise no signal explaining the silence.
+    if _rc_user_override_present qodercli \
+        'loongsuite-pilot BEGIN qodercli-intercept' \
+        'loongsuite-pilot END qodercli-intercept'; then
+        msg "    ⚠️  检测到你已自定义 qodercli(alias/function)，为避免覆盖，采集未启用。" \
+            "    ⚠️  Detected your own 'qodercli' (alias/function); collection is disabled to avoid clobbering it."
+        msg "        如需启用采集，请让你的定义调用： $runtime_wrapper" \
+            "        To enable collection, have your definition call: $runtime_wrapper"
+    fi
     echo ""
 }
 
@@ -916,7 +1229,8 @@ remove_qodercli_token_intercept() {
 # ============================================================
 inject_qoderwork_runtime_wrapper() {
     if [ "$(uname)" != "Darwin" ]; then return 0; fi
-    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder-work'; then return 0; fi
+    # Not selected: clean up any stale env/plist from a prior install, then bail.
+    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder-work'; then remove_qoderwork_runtime_wrapper; return 0; fi
     # Cover system-wide (/Applications) and per-user (~/Applications) installs;
     # the wrapper's RUNTIME_CANDIDATES handles both locations symmetrically.
     if [ ! -d "/Applications/QoderWork.app" ] && [ ! -d "$HOME/Applications/QoderWork.app" ]; then return 0; fi
@@ -1009,8 +1323,29 @@ remove_qoderwork_runtime_wrapper() {
 # The wrapper prepends our preload but preserves any existing BUN_OPTIONS
 # the user (or qodercli wrapper, or launchd setenv) may have set.
 # ============================================================
+# Detect a user-defined <cli> alias/function OUTSIDE our managed block.
+#   $1=cli name  $2=BEGIN marker substring  $3=END marker substring
+# Returns 0 (true) when found. Our injected wrapper's `if ! alias ...` guard
+# intentionally skips such users to avoid clobbering their setup — which means
+# collection is silently off for them. This lets the installer surface a
+# one-time, actionable hint at install time (rc is sourced too often to warn on
+# every shell). Heuristic: scans common rc files with our block stripped; misses
+# aliases defined in files those rc's source.
+_rc_user_override_present() {
+    local cli="$1" begin="$2" end="$3" file
+    for file in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+        [ -f "$file" ] || continue
+        if sed "/$begin/,/$end/d" "$file" 2>/dev/null \
+           | grep -Eq "^[[:space:]]*(alias[[:space:]]+$cli=|(function[[:space:]]+)?$cli[[:space:]]*\(\)|function[[:space:]]+$cli([[:space:]]|\{|\$))"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 inject_claude_code_fetch_intercept() {
-    if ! echo "$SELECTED_AGENTS" | grep -q 'claude-code'; then return 0; fi
+    # Not selected: clean up any stale block from a prior install, then bail.
+    if ! echo "$SELECTED_AGENTS" | grep -q 'claude-code'; then remove_claude_code_fetch_intercept; return 0; fi
     if ! command -v claude >/dev/null 2>&1; then return 0; fi
 
     local intercept_script="$DATA_DIR/hooks/claude-code-fetch-intercept.mjs"
@@ -1025,15 +1360,31 @@ inject_claude_code_fetch_intercept() {
             msg "    ⚠️  $file 不可写，跳过" "    ⚠️  $file is not writable, skipping"
             return 0
         fi
-        if grep -q 'loongsuite-pilot BEGIN claude-code-intercept' "$file" 2>/dev/null; then return 0; fi
+        # Migrate-or-skip: our block may already be present. If it is the current
+        # guard shape (signature line present) we're done; otherwise it is an
+        # older released bare-function block sharing the same marker — remove it
+        # so the new guarded block below replaces it (the old bare block
+        # parse-errors under a user alias, which is exactly what we're fixing).
+        if grep -q 'loongsuite-pilot BEGIN claude-code-intercept' "$file" 2>/dev/null; then
+            if grep -qF 'if ! alias claude >/dev/null 2>&1' "$file"; then return 0; fi
+            _sed_inplace '/# loongsuite-pilot BEGIN claude-code-intercept/,/# loongsuite-pilot END claude-code-intercept/d' "$file"
+        fi
         [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" -eq 0 ] && echo "" >> "$file"
         # Double-quoted heredoc so $DATA_DIR expands at install time, honoring
         # --data-dir overrides. Other refs (${BUN_OPTIONS}, $@) are escaped to
         # defer expansion until the wrapper actually runs in the user's shell.
+        # The `if ! alias ... eval '...'` shape guards against clobbering a
+        # user's own claude alias/function (e.g. a proxy+flags alias) AND avoids
+        # a parse error: a bare claude() token would fail to parse under an
+        # active alias (interactive shells expand aliases at parse time, before
+        # the guard runs), so the definition is deferred behind eval. Keep
+        # byte-identical to the watchdog's blockFn (src/core/hook-watchdog.ts).
         cat >> "$file" << INTERCEPTBLOCK
 
 # loongsuite-pilot BEGIN claude-code-intercept
-claude() { BUN_OPTIONS="--preload=$DATA_DIR/hooks/claude-code-fetch-intercept.mjs \${BUN_OPTIONS}" command claude "\$@"; }
+if ! alias claude >/dev/null 2>&1 && ! typeset -f claude >/dev/null 2>&1; then
+  eval 'claude() { BUN_OPTIONS="--preload=$DATA_DIR/hooks/claude-code-fetch-intercept.mjs \${BUN_OPTIONS}" command claude "\$@"; }'
+fi
 # loongsuite-pilot END claude-code-intercept
 INTERCEPTBLOCK
         msg "    ✅ 已写入 $file (请执行 source $file 或打开新终端)" \
@@ -1045,6 +1396,18 @@ INTERCEPTBLOCK
         */bash) _inject_to_rc "$HOME/.bashrc" ;;
         *)      _inject_to_rc "$HOME/.bashrc" ;;
     esac
+
+    # If the user already defines their own `claude`, our guard skipped the
+    # wrapper (to avoid clobbering it), so collection won't run. Tell them how
+    # to opt in, since there is otherwise no signal explaining the silence.
+    if _rc_user_override_present claude \
+        'loongsuite-pilot BEGIN claude-code-intercept' \
+        'loongsuite-pilot END claude-code-intercept'; then
+        msg "    ⚠️  检测到你已自定义 claude(alias/function)，为避免覆盖，采集未启用。" \
+            "    ⚠️  Detected your own 'claude' (alias/function); collection is disabled to avoid clobbering it."
+        msg "        如需启用采集，请在你的 claude 定义中加入： BUN_OPTIONS=\"--preload=$DATA_DIR/hooks/claude-code-fetch-intercept.mjs \${BUN_OPTIONS}\"" \
+            "        To enable collection, add to your claude definition: BUN_OPTIONS=\"--preload=$DATA_DIR/hooks/claude-code-fetch-intercept.mjs \${BUN_OPTIONS}\""
+    fi
     echo ""
 }
 
@@ -1427,11 +1790,7 @@ cmd_install() {
     inject_claude_code_fetch_intercept
 
     msg "==> 启动服务..." "==> Starting service..."
-    local _start_args=""
-    if [ "$SYSTEM_SERVICE" -eq 1 ]; then
-        _start_args="--system-service"
-    fi
-    if loongsuite-pilot start $_start_args; then
+    if loongsuite-pilot start; then
         sleep 2
         local _status_out
         _status_out="$(loongsuite-pilot status 2>/dev/null || true)"
@@ -1504,7 +1863,34 @@ cmd_upgrade() {
 
     # Deploy new version to versions/<ver>_<commit>/
     # Old version stays untouched; deploy_package writes current/previous pointers
-    deploy_package "$INSTALL_SRC"
+    if ! deploy_package "$INSTALL_SRC"; then
+        echo ""
+        msg "⚠️  部署失败，正在回滚到旧版本..." \
+            "⚠️  Deployment failed, rolling back to old version..."
+        local _rollback_ok=1
+        if command -v loongsuite-pilot &>/dev/null; then
+            loongsuite-pilot rollback 2>/dev/null || _rollback_ok=0
+        elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
+            "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || _rollback_ok=0
+        fi
+        if [ "$_rollback_ok" -eq 1 ]; then
+            if command -v loongsuite-pilot &>/dev/null; then
+                loongsuite-pilot start 2>/dev/null || _rollback_ok=0
+            elif [ -f "$HOME/.local/bin/loongsuite-pilot" ]; then
+                "$HOME/.local/bin/loongsuite-pilot" start 2>/dev/null || _rollback_ok=0
+            fi
+        fi
+        if [ "$_rollback_ok" -eq 1 ]; then
+            msg "❌ 升级失败（部署/依赖安装出错），已回滚到 v${old_ver:-unknown} 并重启服务" \
+                "❌ Upgrade failed (deploy/dependency error), rolled back to v${old_ver:-unknown} and restarted"
+        else
+            msg "❌ 升级失败且自动回滚未成功，请手动恢复:" \
+                "❌ Upgrade failed and auto-rollback did not succeed. Manual recovery:"
+            msg "   loongsuite-pilot rollback && loongsuite-pilot start" \
+                "   loongsuite-pilot rollback && loongsuite-pilot start"
+        fi
+        exit 1
+    fi
     install_loongsuite_pilot_command
 
     # Start the new version
@@ -1532,15 +1918,23 @@ cmd_upgrade() {
 
     loongsuite-pilot stop 2>/dev/null || true
 
+    local _rb_ok=1
     if command -v loongsuite-pilot &>/dev/null; then
-        loongsuite-pilot rollback 2>/dev/null || true
+        loongsuite-pilot rollback 2>/dev/null || _rb_ok=0
     else
-        "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || true
+        "$HOME/.local/bin/loongsuite-pilot" rollback 2>/dev/null || _rb_ok=0
     fi
 
-    msg "❌ 升级失败，已回滚到 v${old_ver:-unknown}" \
-        "❌ Upgrade failed, rolled back to v${old_ver:-unknown}"
-    msg "   请检查日志: loongsuite-pilot log" "   Check logs: loongsuite-pilot log"
+    if [ "$_rb_ok" -eq 1 ]; then
+        msg "❌ 升级失败，已回滚到 v${old_ver:-unknown}" \
+            "❌ Upgrade failed, rolled back to v${old_ver:-unknown}"
+        msg "   请检查日志: loongsuite-pilot log" "   Check logs: loongsuite-pilot log"
+    else
+        msg "❌ 升级失败且回滚未成功，请手动恢复:" \
+            "❌ Upgrade failed and rollback did not succeed. Manual recovery:"
+        msg "   loongsuite-pilot rollback && loongsuite-pilot start" \
+            "   loongsuite-pilot rollback && loongsuite-pilot start"
+    fi
     exit 1
 }
 
@@ -1588,14 +1982,23 @@ remove_hook_configs() {
         "$HOME/.claude/settings.json"
         "$HOME/.codex/hooks.json"
         "$HOME/.qwen/settings.json"
+        "$HOME/.workbuddy/settings.json"
     )
+
+    local _has_node=0
+    if command -v node &>/dev/null; then
+        _has_node=1
+    else
+        msg "    ⚠️  未找到 Node.js，含 hook 的配置文件将跳过自动清理" \
+            "    ⚠️  Node.js not found, config files with hooks will skip auto-cleanup"
+    fi
 
     for cfg in "${configs[@]}"; do
         [ -f "$cfg" ] || continue
         local short="${cfg/#$HOME/\~}"
 
         local ok=0
-        if command -v node &>/dev/null; then
+        if [ "$_has_node" -eq 1 ]; then
             node -e "
 const fs = require('fs');
 const cfg = process.argv[1];
@@ -1625,6 +2028,14 @@ try {
   }
 } catch(e) { process.stderr.write(e.message); process.exit(1); }
 " "$cfg" "$HOOK_MARKER" && ok=1
+        else
+            # Node unavailable: skip auto-cleanup to avoid over-deletion
+            if grep -q "$HOOK_MARKER" "$cfg" 2>/dev/null; then
+                msg "    ⚠️  跳过: $short (无 Node.js，请手动删除含 $HOOK_MARKER 的 hook 条目)" \
+                    "    ⚠️  Skipped: $short (no Node.js, manually remove hook entries containing $HOOK_MARKER)"
+            else
+                ok=1
+            fi
         fi
 
         if [ "$ok" -eq 1 ]; then
@@ -1694,6 +2105,282 @@ try {
             cleaned-bak)
                 msg "    ✅ 已清理: $short (含注释,原文件备份为 $short.bak)" \
                     "    ✅ Cleaned: $short (had comments, original backed up to $short.bak)" ;;
+            nochange)
+                : ;;
+            *)
+                msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
+        esac
+    done
+}
+
+# Remove only the Hermes directory plugin owned by this Pilot installation.
+remove_hermes_plugin() {
+    local hermes_home="${HERMES_HOME:-$HOME/.hermes}"
+    local default_plugin_dir="$hermes_home/plugins/loongsuite-pilot"
+    local state_file="$DATA_DIR/deployed-agents.json"
+    local plugin_dir="$default_plugin_dir"
+
+    if ! command -v node &>/dev/null; then
+        msg "    ⚠️  跳过: $plugin_dir (无 node,需手动清理)" \
+            "    ⚠️  Skipped: $plugin_dir (node unavailable, manual cleanup needed)"
+        return 0
+    fi
+
+    plugin_dir=$(node -e "
+const fs = require('fs');
+const path = require('path');
+const stateFile = process.argv[1];
+let target = process.argv[2];
+try {
+  const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  const recorded = state?.['hermes-agent']?.targetDir;
+  if (typeof recorded === 'string' && path.isAbsolute(recorded)) target = recorded;
+} catch {}
+process.stdout.write(target);
+" "$state_file" "$default_plugin_dir" 2>/dev/null) || plugin_dir="$default_plugin_dir"
+
+    local marker="$plugin_dir/.loongsuite-pilot-managed.json"
+    [ -f "$marker" ] || return 0
+
+    local ownership
+    ownership=$(node -e "
+const fs = require('fs');
+const path = require('path');
+const dir = process.argv[1];
+const marker = path.join(dir, '.loongsuite-pilot-managed.json');
+try {
+  const meta = JSON.parse(fs.readFileSync(marker, 'utf8'));
+  if (meta.owner !== 'loongsuite-pilot' || meta.agentId !== 'hermes-agent') {
+    process.stdout.write('unmanaged');
+    process.exit(0);
+  }
+  process.stdout.write('owned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$plugin_dir" 2>/dev/null) || ownership="error"
+
+    if [ "$ownership" = "owned" ]; then
+        local hermes_cli="${HERMES_CLI:-$hermes_home/hermes-agent/venv/bin/hermes}"
+        if [ ! -x "$hermes_cli" ] && command -v hermes &>/dev/null; then
+            hermes_cli=$(command -v hermes)
+        fi
+        if [ -x "$hermes_cli" ]; then
+            "$hermes_cli" plugins disable loongsuite-pilot >/dev/null 2>&1 || true
+        fi
+    fi
+
+    local result="$ownership"
+    if [ "$ownership" = "owned" ]; then
+        result=$(node -e "
+const fs = require('fs');
+const path = require('path');
+const dir = process.argv[1];
+const marker = path.join(dir, '.loongsuite-pilot-managed.json');
+try {
+  const meta = JSON.parse(fs.readFileSync(marker, 'utf8'));
+  if (meta.owner !== 'loongsuite-pilot' || meta.agentId !== 'hermes-agent') {
+    process.stdout.write('unmanaged');
+    process.exit(0);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+  process.stdout.write('cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$plugin_dir" 2>/dev/null) || result="error"
+    fi
+
+    case "$result" in
+        cleaned)
+            msg "    ✅ 已清理: $plugin_dir" "    ✅ Cleaned: $plugin_dir" ;;
+        unmanaged)
+            msg "    ⚠️  保留未受 Pilot 管理的 Hermes 插件: $plugin_dir" \
+                "    ⚠️  Preserved unmanaged Hermes plugin: $plugin_dir" ;;
+        *)
+            msg "    ⚠️  跳过: $plugin_dir (需手动清理)" \
+                "    ⚠️  Skipped: $plugin_dir (manual cleanup needed)" ;;
+    esac
+}
+
+# ============================================================
+# Remove Pi Coding Agent extension injection
+# ============================================================
+remove_pi_coding_agent_extension() {
+    local cfg="$HOME/.pi/agent/settings.json"
+    [ -f "$cfg" ] || return 0
+
+    local short="${cfg/#$HOME/\~}"
+    if ! command -v node &>/dev/null; then
+        msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+        return 0
+    fi
+
+    local result
+    result=$(node -e "
+const fs = require('fs');
+const f = process.argv[1];
+const isOurs = s => typeof s === 'string' && (
+  s.includes('loongsuite-pilot-pi-coding-agent') ||
+  s.includes('plugins/pi-coding-agent/index.mjs')
+);
+try {
+  const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  if (!Array.isArray(data.extensions)) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data.extensions.length;
+  data.extensions = data.extensions.filter(entry => !isOurs(typeof entry === 'string' ? entry : ''));
+  if (data.extensions.length === before) { process.stdout.write('nochange'); process.exit(0); }
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write('cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$cfg" 2>/dev/null) || result="error"
+
+    case "$result" in
+        cleaned)
+            msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" ;;
+        nochange)
+            : ;;
+        *)
+            msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
+    esac
+}
+
+# ============================================================
+# MiMo Code also uses deployMode "plugin-inject": a spec is written into its
+# own config file's plugin array. Same shape as remove_opencode_plugin but for
+# ~/.config/mimocode/mimocode.json[c]. Without this, the spec survives
+# uninstall and points at a (possibly purged) plugin.mjs, so the next MiMo
+# Code launch loads a non-existent module.
+# ============================================================
+remove_mimocode_plugin() {
+    local configs=(
+        "$HOME/.config/mimocode/mimocode.jsonc"
+        "$HOME/.config/mimocode/mimocode.json"
+    )
+
+    for cfg in "${configs[@]}"; do
+        [ -f "$cfg" ] || continue
+        local short="${cfg/#$HOME/\~}"
+
+        if ! command -v node &>/dev/null; then
+            msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        fi
+
+        local result
+        result=$(node -e "
+const fs = require('fs');
+const f = process.argv[1];
+const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-mimo-code') || s.includes('plugins/mimo-code/plugin.mjs'));
+const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
+const stripJsonc = src => src
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^\s*\/\/.*\$/gm, '')
+  .replace(/[ \t]+\/\/.*\$/gm, '');
+try {
+  const raw = fs.readFileSync(f, 'utf-8');
+  let data, hadComments = false;
+  try { data = JSON.parse(raw); }
+  catch { data = JSON.parse(stripJsonc(raw)); hadComments = true; }
+  const key = Array.isArray(data.plugins) ? 'plugins' : (Array.isArray(data.plugin) ? 'plugin' : null);
+  if (!key) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data[key].length;
+  data[key] = data[key].filter(e => !isOurs(entryStr(e)));
+  if (data[key].length === before) { process.stdout.write('nochange'); process.exit(0); }
+  if (hadComments) fs.writeFileSync(f + '.bak', raw, 'utf-8');
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  process.stdout.write(hadComments ? 'cleaned-bak' : 'cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$cfg" 2>/dev/null) || result="error"
+
+        case "$result" in
+            cleaned)
+                msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" ;;
+            cleaned-bak)
+                msg "    ✅ 已清理: $short (含注释,原文件备份为 $short.bak)" \
+                    "    ✅ Cleaned: $short (had comments, original backed up to $short.bak)" ;;
+            nochange)
+                : ;;
+            *)
+                msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
+        esac
+    done
+}
+
+# ============================================================
+# Remove OpenClaw's nested plugin entry and load path.
+# ============================================================
+# OpenClaw stores injected plugins under plugins.load.paths plus
+# plugins.entries. The generic hook cleanup does not cover this shape, and
+# leaving either value behind makes OpenClaw load a path that uninstall is
+# about to remove. Only Pilot-owned values are removed; unrelated plugins and
+# their configuration remain semantically unchanged.
+remove_openclaw_plugin() {
+    local state_dir="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
+    local managed_path="$DATA_DIR/plugins/openclaw/plugin.mjs"
+    local configs=()
+    [ -n "${OPENCLAW_CONFIG_PATH:-}" ] && configs+=("$OPENCLAW_CONFIG_PATH")
+    configs+=(
+        "$state_dir/openclaw.json"
+        "$state_dir/config.json"
+        "$HOME/.openclaw/openclaw.json"
+        "$HOME/.openclaw/config.json"
+    )
+
+    local seen="|"
+    for cfg in "${configs[@]}"; do
+        [ -f "$cfg" ] || continue
+        case "$seen" in *"|$cfg|"*) continue ;; esac
+        seen="${seen}${cfg}|"
+        local short="${cfg/#$HOME/\~}"
+
+        if ! command -v node &>/dev/null; then
+            msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+            continue
+        fi
+
+        local result
+        result=$(node -e "
+const fs = require('fs');
+const f = process.argv[1];
+const managed = process.argv[2].replaceAll('\\\\', '/');
+const entryStr = value => typeof value === 'string'
+  ? value
+  : (Array.isArray(value) && typeof value[0] === 'string' ? value[0] : '');
+const isOurs = value => {
+  const normalized = entryStr(value).replaceAll('\\\\', '/');
+  const plain = normalized.startsWith('file://') ? normalized.slice('file://'.length) : normalized;
+  return plain === managed ||
+    normalized.includes('loongsuite-pilot-openclaw') ||
+    normalized.includes('plugins/openclaw/plugin.mjs') && plain.includes('.loongsuite-pilot/');
+};
+try {
+  const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  let changed = false;
+  for (const key of ['plugin', 'plugins']) {
+    if (!Array.isArray(data[key])) continue;
+    const filtered = data[key].filter(value => !isOurs(value));
+    if (filtered.length !== data[key].length) { data[key] = filtered; changed = true; }
+  }
+  const plugins = data.plugins && typeof data.plugins === 'object' && !Array.isArray(data.plugins)
+    ? data.plugins
+    : null;
+  if (plugins) {
+    if (plugins.load && typeof plugins.load === 'object' && Array.isArray(plugins.load.paths)) {
+      const filtered = plugins.load.paths.filter(value => !isOurs(value));
+      if (filtered.length !== plugins.load.paths.length) { plugins.load.paths = filtered; changed = true; }
+    }
+    if (plugins.entries && typeof plugins.entries === 'object' && !Array.isArray(plugins.entries) &&
+        Object.prototype.hasOwnProperty.call(plugins.entries, 'loongsuite-pilot-openclaw')) {
+      delete plugins.entries['loongsuite-pilot-openclaw'];
+      changed = true;
+    }
+  }
+  if (!changed) { process.stdout.write('nochange'); process.exit(0); }
+  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\\n', 'utf-8');
+  process.stdout.write('cleaned');
+} catch (e) { process.stderr.write(e.message); process.exit(1); }
+" "$cfg" "$managed_path" 2>/dev/null) || result="error"
+
+        case "$result" in
+            cleaned)
+                msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" ;;
             nochange)
                 : ;;
             *)
@@ -1780,20 +2467,16 @@ cmd_uninstall() {
     msg "    ✅ 服务已停止" "    ✅ Service stopped"
     echo ""
 
-    # Remove package directory
-    msg "==> 删除安装目录..." "==> Removing installation..."
-    rm -rf "$HOME/.loongsuite-pilot"
-    msg "    ✅ 已删除 $HOME/.loongsuite-pilot" \
-        "    ✅ Removed $HOME/.loongsuite-pilot"
-
-    # Remove loongsuite-pilot command
-    msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
-    rm -f "$HOME/.local/bin/loongsuite-pilot"
-    rm -f /usr/local/bin/loongsuite-pilot 2>/dev/null || true
-    msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
+    # Read the persisted target before the data/install directory is removed.
+    msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."
+    remove_hermes_plugin
     echo ""
 
-    # Remove hook entries from tool configs
+    msg "==> 清理 OpenClaw 插件配置..." "==> Cleaning up OpenClaw plugin config..."
+    remove_openclaw_plugin
+    echo ""
+
+    # Remove hook entries from tool configs BEFORE removing install dir
     msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
     remove_hook_configs
     remove_qodercli_token_intercept
@@ -1809,6 +2492,33 @@ cmd_uninstall() {
     # Remove plugin-inject specs (OpenCode)
     msg "==> 清理 OpenCode 插件配置..." "==> Cleaning up OpenCode plugin config..."
     remove_opencode_plugin
+    echo ""
+
+    msg "==> 清理 Pi Coding Agent Extension 配置..." "==> Cleaning up Pi Coding Agent extension config..."
+    remove_pi_coding_agent_extension
+    echo ""
+
+    # Remove plugin-inject specs (MiMo Code)
+    msg "==> 清理 MiMo Code 插件配置..." "==> Cleaning up MiMo Code plugin config..."
+    remove_mimocode_plugin
+    echo ""
+
+    # Remove installation artifacts
+    msg "==> 删除安装目录..." "==> Removing installation..."
+    local _cache_dir="$HOME/.loongsuite-pilot"
+    rm -rf "${_cache_dir:?}/versions"
+    rm -rf "${_cache_dir:?}/bin"
+    rm -rf "${_cache_dir:?}/package"
+    rm -f "${_cache_dir:?}/current"
+    rm -f "${_cache_dir:?}/previous"
+    rm -f "${_cache_dir:?}/node-bin"
+    msg "    ✅ 已删除安装文件" "    ✅ Installation files removed"
+
+    # Remove loongsuite-pilot command
+    msg "==> 删除 loongsuite-pilot 命令..." "==> Removing loongsuite-pilot command..."
+    rm -f "$HOME/.local/bin/loongsuite-pilot"
+    rm -f /usr/local/bin/loongsuite-pilot 2>/dev/null || true
+    msg "    ✅ loongsuite-pilot 命令已删除" "    ✅ loongsuite-pilot command removed"
     echo ""
 
     # Data directory

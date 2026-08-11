@@ -2,9 +2,9 @@
 
 [English](../output-event-schema.md) | 简体中文
 
-LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。敏感内容字段是 opt-in 字段，可在输出前进行脱敏。
+LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot 当前输出格式是 GenAI audit-event 的一个变体。敏感内容字段是 opt-in 字段，可在输出前进行脱敏。
 
-下面的类型描述的是规范化事件的语义值。JSONL、SLS 等日志型输出可能会为了后端兼容将值序列化为字符串。
+下面的类型描述的是规范化事件的语义值。JSONL 保留原生 JSON 类型；SLS 等只接受字符串列的后端可在各自输出边界进行序列化。
 
 ## Event Names
 
@@ -18,6 +18,15 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。敏�
 | `tool.approve` | 用户批准工具或动作执行的事件。 |
 | `other` | 无法归类到上述类型的其他事件。 |
 
+四类核心事件的 `event.name` 与 GenAI audit-event 对应关系如下：
+
+| Pilot `event.name` | GenAI audit-event `event.name` |
+|--------------------|--------------------------------|
+| `llm.request` | `gen_ai.model.request` |
+| `llm.response` | `gen_ai.model.response` |
+| `tool.call` | `gen_ai.tool.call` |
+| `tool.result` | `gen_ai.tool.result` |
+
 ## 字段说明
 
 必填程度与 OpenTelemetry 语义保持一致：
@@ -29,8 +38,8 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。敏�
 
 | 字段 | 类型 | 必填程度 | 说明 |
 |------|------|----------|------|
-| `time_unix_nano` | uint64 | Required | 事件发生时间，Unix 纳秒。 |
-| `observed_time_unix_nano` | uint64 | Recommended | collector 观察到事件的时间，Unix 纳秒。 |
+| `time_unix_nano` | uint64 | Required | 语义事件发生时间，Unix 纳秒。对于配对 span，它表示真实的 request/response 或 call/result 边界，而不是采集时间。 |
+| `observed_time_unix_nano` | uint64 | Recommended | collector 观察到事件的时间，Unix 纳秒；它可以与源事件时间不同。 |
 | `event.id` | string | Required | collector 生成的全局唯一事件 ID。 |
 | `event.name` | string | Required | 事件名称，见 [Event Names](#event-names)。 |
 | `user.id` | string | Required | 用户标识，例如员工号、本地账号或机器级身份。 |
@@ -71,16 +80,31 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。敏�
 | `gen_ai.tool.call.exec.id` | string | Recommended | 工具执行侧 ID。 |
 | `gen_ai.tool.call.arguments` | json | Opt-In | 工具调用参数，可能包含敏感内容。 |
 | `gen_ai.tool.call.result` | json | Opt-In | 工具结果 payload，可能包含敏感内容。 |
-| `gen_ai.tool.call.duration` | int | Recommended | 工具执行耗时，单位毫秒。 |
+| `gen_ai.tool.call.duration` | int | Recommended | 使用匹配的 result 边界减去 call 边界得到的正数工具执行耗时，单位毫秒；任一边界缺失或差值非正时省略。 |
 | `gen_ai.skill.name` | string | `skill.use` Conditionally Required | 技能或扩展能力名称。 |
+| `gen_ai.skill.id` | string | 技能标识可用时 Recommended | 稳定的技能标识。 |
+| `gen_ai.skill.description` | string | 技能元数据可用时 Recommended | 技能描述。 |
+| `gen_ai.skill.version` | string | 技能元数据可用时 Recommended | 技能版本。 |
 | `error.type` | string | 操作以错误结束时 Conditionally Required | 低基数错误类型、错误码、异常类名或 HTTP 状态。 |
 | `error.message` | string | `error.type` 存在时 Recommended | 人类可读错误详情。 |
 | `agent.channel` | string | Recommended | 请求来源渠道，例如 `ide_plugin`、`web` 或 `api`。 |
 | `git.domain` | string | Recommended | 当前 workspace 的 Git 托管域名。 |
 | `git.repo` | string | Recommended | 当前 workspace 的 Git 仓库名或 URL。 |
 | `git.branch` | string | Recommended | 当前 Git 分支。 |
-| `workspace.current_root` | string | Recommended | 当前 workspace root 路径。 |
+| `workspace.current_root` | string | Recommended | Git 顶层目录，仅当工作目录是 git 仓库时推断得出。 |
+| `workspace.path` | string | Recommended | agent 进程实际运行的工作目录（cwd），与 git 无关。即使目录不是 git 仓库也会带上。 |
 | `agent.*` | json | Opt-In | Agent-specific 扩展属性。稳定且高频查询的维度应逐步沉淀为结构化字段。 |
+
+## 自定义 Agent 标识
+
+当支持的 Agent 进程携带以下环境变量启动时，Pilot 会将 Worker 上下文写入当前 Turn：
+
+| 环境变量 | Event 字段 | 说明 |
+|----------|------------|------|
+| `AGENTTEAMS_WORKER_NAME` | `gen_ai.agent.name`、`resourceAttributes["agentteams.worker.name"]` | 逻辑 Worker 名称；主 Agent 上优先于 Agent 原生名称。 |
+| `AGENTTEAMS_INSTANCE_ID` | `resourceAttributes["agentteams.instance.id"]` | 当前 Worker 运行实例；不会覆盖 `gen_ai.agent.id`。 |
+
+当前支持 Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、MiMo Code、Qwen Code CLI 和 Cursor CLI。Cursor Desktop 不读取这组变量。未设置变量时，现有事件字段和名称回退行为不变。Pilot 只采集上述固定白名单字段；其他 `AGENTTEAMS_*` 变量不会进入事件或 OTLP Resource。
 
 ## Provider Names
 

@@ -14,8 +14,10 @@ vi.mock('../../../src/utils/logger.js', () => ({
 }));
 
 const mockExecFileAsync = vi.fn();
+const mockExecFileSync = vi.fn();
 vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
+  execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
 }));
 vi.mock('node:util', () => ({
   promisify: () => (...args: unknown[]) => mockExecFileAsync(...args),
@@ -68,6 +70,16 @@ describe('UpdaterWatchdog', () => {
 
   beforeEach(async () => {
     tmpDir = await createTempDir('updater-watchdog-test-');
+    mockExecFileSync.mockReset();
+    mockExecFileSync.mockImplementation((cmd: string, args: string[] = []) => {
+      if (cmd === 'ps' && args.includes('-p')) {
+        return 'node /home/test/.loongsuite-pilot/bin/updater-daemon.js\n';
+      }
+      if (cmd === 'powershell.exe' && args.includes('-Command')) {
+        return 'node C:\\Users\\test\\.loongsuite-pilot\\bin\\updater-daemon.js\n';
+      }
+      return '';
+    });
     mockExecFileAsync.mockReset();
     mockExecFileAsync.mockImplementation((cmd: string, args: string[]) => {
       if (cmd === 'ps') {
@@ -137,13 +149,33 @@ describe('UpdaterWatchdog', () => {
     });
   });
 
-  it('restarts when updater command does not look like the updater daemon', async () => {
-    await writePid(tmpDir);
-    await writeHeartbeat(tmpDir);
-    mockExecFileAsync.mockImplementation((cmd: string) => {
-      if (cmd === 'ps') return Promise.resolve({ stdout: 'node /tmp/other.js\n', stderr: '' });
-      return Promise.resolve({ stdout: '', stderr: '' });
+  it('reports healthy when updater PID changed but process identity matches heartbeat', async () => {
+    await writeHeartbeat(tmpDir, { pid: 456 });
+    const alarms = makeAlarmManager();
+
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      alarmManager: alarms,
+      updaterLiveness: () => ({
+        running: true,
+        pid: 456,
+        source: 'process-scan',
+        reason: 'matching process command found; pid file points to stale or mismatched pid 123',
+        pidFileState: 'stale',
+      }),
     });
+
+    const result = await wd.runCheck();
+
+    expect(result.status).toBe('healthy');
+    expect(alarms.serialize()).toEqual([]);
+  });
+
+  it('restarts when updater command does not look like the updater daemon', async () => {
+    await writeHeartbeat(tmpDir);
 
     const alarms = makeAlarmManager();
     const wd = new UpdaterWatchdog({
@@ -152,6 +184,16 @@ describe('UpdaterWatchdog', () => {
       loongsuitePilotBin: '/bin/loongsuite-pilot',
       startupGraceMs: 0,
       alarmManager: alarms,
+      updaterLiveness: () => ({
+        running: false,
+        pid: UPDATER_PID,
+        source: 'none',
+        reason: 'pid file points to mismatched process',
+        pidFileState: 'stale',
+        pidFileProcessAlive: true,
+        pidFileCommand: 'node /tmp/other.js',
+        pidFileCommandMatched: false,
+      }),
     });
 
     const result = await wd.runCheck();
@@ -266,6 +308,30 @@ describe('UpdaterWatchdog', () => {
     ]));
   });
 
+  it('defaults Windows pilot bin to loongsuite-pilot-service.ps1', async () => {
+    mockPlatform('win32');
+    const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
+    mockExecFileAsync.mockResolvedValue({ stdout: '', stderr: '' });
+
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      startupGraceMs: 0,
+    });
+
+    await wd.runCheck();
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      'powershell.exe',
+      expect.arrayContaining([
+        '-File',
+        path.join(home, '.local', 'bin', 'loongsuite-pilot-service.ps1'),
+        'restart-updater',
+      ]),
+      expect.objectContaining({ windowsHide: true }),
+    );
+  });
+
   it('restarts through PowerShell on Windows', async () => {
     mockPlatform('win32');
     mockExecFileAsync.mockImplementation((cmd: string, args: string[]) => {
@@ -278,7 +344,7 @@ describe('UpdaterWatchdog', () => {
     const wd = new UpdaterWatchdog({
       enabled: true,
       dataDir: tmpDir,
-      loongsuitePilotBin: 'C:\\Users\\test\\.local\\bin\\loongsuite-pilot.ps1',
+      loongsuitePilotBin: 'C:\\Users\\test\\.local\\bin\\loongsuite-pilot-service.ps1',
       startupGraceMs: 0,
     });
 
@@ -289,7 +355,7 @@ describe('UpdaterWatchdog', () => {
       'powershell.exe',
       expect.arrayContaining([
         '-File',
-        'C:\\Users\\test\\.local\\bin\\loongsuite-pilot.ps1',
+        'C:\\Users\\test\\.local\\bin\\loongsuite-pilot-service.ps1',
         'restart-updater',
       ]),
       expect.objectContaining({ windowsHide: true }),
@@ -304,7 +370,7 @@ describe('UpdaterWatchdog', () => {
     const wd = new UpdaterWatchdog({
       enabled: true,
       dataDir: tmpDir,
-      loongsuitePilotBin: 'C:\\Users\\test\\.local\\bin\\loongsuite-pilot.ps1',
+      loongsuitePilotBin: 'C:\\Users\\test\\.local\\bin\\loongsuite-pilot-service.ps1',
       startupGraceMs: 0,
     });
 
@@ -313,7 +379,7 @@ describe('UpdaterWatchdog', () => {
     expect(result.status).toBe('healthy');
     expect(mockExecFileAsync).not.toHaveBeenCalledWith(
       'powershell.exe',
-      expect.arrayContaining(['-File', 'C:\\Users\\test\\.local\\bin\\loongsuite-pilot.ps1', 'restart-updater']),
+      expect.arrayContaining(['-File', 'C:\\Users\\test\\.local\\bin\\loongsuite-pilot-service.ps1', 'restart-updater']),
       expect.anything(),
     );
   });
@@ -327,5 +393,28 @@ describe('UpdaterWatchdog', () => {
 
     expect(await wd.runCheck()).toEqual({ status: 'disabled' });
     expect(mockExecFileAsync).not.toHaveBeenCalled();
+  });
+
+  it('does not check or restart updater for an agentshell current version', async () => {
+    await fs.writeFile(path.join(tmpDir, 'current'), '1.1.20-agentshell_abcdef0\n', 'utf-8');
+    const alarms = makeAlarmManager();
+    const updaterLiveness = vi.fn(() => ({
+      running: false,
+      source: 'none' as const,
+      reason: 'pid file is missing; no matching process found',
+    }));
+    const wd = new UpdaterWatchdog({
+      enabled: true,
+      dataDir: tmpDir,
+      loongsuitePilotBin: '/bin/loongsuite-pilot',
+      startupGraceMs: 0,
+      alarmManager: alarms,
+      updaterLiveness,
+    });
+
+    expect(await wd.runCheck()).toEqual({ status: 'disabled' });
+    expect(updaterLiveness).not.toHaveBeenCalled();
+    expect(mockExecFileAsync).not.toHaveBeenCalled();
+    expect(alarms.serialize()).toEqual([]);
   });
 });

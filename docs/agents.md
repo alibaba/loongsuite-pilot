@@ -13,7 +13,10 @@ Use these IDs in installer options, `agent-control.json`, and `config.json`.
 | Claude Code | `claude-code` | Hook integration. |
 | Codex | `codex` | Hook integration. |
 | Cursor | `cursor` | Hook integration. |
+| Kiro CLI | `kiro-cli` | Hook integration with delayed local SQLite/session collection. Token usage is not exposed by the source. |
+| OpenClaw | `openclaw` | Plugin injection for OpenClaw 2026.5.12 or later. Captures native LLM, ReAct, tool, token, error, and cancellation events. |
 | OpenCode | `opencode` | Plugin injection. |
+| Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. |
 | Qoder | `qoder` | Hook integration. |
 | Qoder CN | `qoder-cn` | Hook integration. |
 | Qoder for JetBrains | `qoder-jetbrains` | Detection-only deploy ID. Agent gating uses `qoder` in `agent-control.json`; content policy uses `qoder-idea` in `config.json`. |
@@ -22,6 +25,49 @@ Use these IDs in installer options, `agent-control.json`, and `config.json`.
 | Qoder Work CN | `qoder-work-cn` | Hook and local data sources. |
 | Qwen Code CLI | `qwen-code-cli` | Hook integration; parses qwen-code transcript JSONL on Stop. |
 | Wukong | `wukong` | CLI API polling via local `wukong-cli`. |
+| WorkBuddy | `workbuddy` | Structural Hook/file wakeups with a 30-second local transcript polling fallback. Verified on WorkBuddy Desktop 5.2.6 for macOS and 5.3.5.0 for Windows 11. |
+
+The Windows verification used an installed Pilot package, resolved Node from the
+installer-pinned `node-bin` with Node absent from `PATH`, and passed strict JSONL
+validation against a real WorkBuddy transcript.
+
+Codex collection is transcript-backed. Pilot uses the lightweight
+`SessionStart` and `UserPromptSubmit` hooks to discover the effective
+`CODEX_HOME`, including task-scoped homes created by orchestrators, and tails
+recent rollout files from that session root. `Stop` is retained as a
+best-effort wakeup and is not required for directory discovery.
+
+## OpenClaw Compatibility And Lifecycle
+
+Pilot supports stable OpenClaw releases `>=2026.5.12`. Prerelease builds and
+older versions are rejected before Pilot changes the OpenClaw configuration.
+During deployment, Pilot adds its module path to `plugins.load.paths` and adds
+this entry to the active OpenClaw configuration:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "loongsuite-pilot-openclaw": {
+        "enabled": true,
+        "hooks": { "allowConversationAccess": true }
+      }
+    }
+  }
+}
+```
+
+`allowConversationAccess` is required for the native conversation lifecycle
+hooks that carry per-call messages and usage. Pilot creates a private backup
+before migrating a legacy plugin-array configuration. Upgrade and uninstall
+only replace or remove Pilot's own path and entry; unrelated plugins and their
+settings are preserved.
+
+The injected plugin writes append-only source events below
+`~/.loongsuite-pilot/logs/openclaw/`. The directory is mode `0700` and files are
+mode `0600` on POSIX systems. Provider errors or cancelled calls can legitimately
+have no output message or token usage; Pilot reports the native finish reason
+and timing without inventing content or zero token counts.
 
 ## Choose Agents During Installation
 
@@ -69,6 +115,7 @@ Use `config.json` when you need to control message content capture:
   "agents": {
     "claude-code": { "enabled": true, "captureMessageContent": false },
     "codex": { "enabled": true, "captureMessageContent": false },
+    "openclaw": { "enabled": true, "captureMessageContent": false },
     "cursor": { "enabled": true, "captureMessageContent": true }
   }
 }

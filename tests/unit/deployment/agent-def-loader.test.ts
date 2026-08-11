@@ -136,6 +136,127 @@ describe('AgentDefLoader', () => {
     expect(defs[0].detection.paths[0]).toBe(path.join(os.homedir(), '.cursor'));
   });
 
+  it('resolves HERMES_HOME for directory plugins', async () => {
+    const previous = process.env.HERMES_HOME;
+    const previousCli = process.env.HERMES_CLI;
+    process.env.HERMES_HOME = path.join(tmpDir, 'hermes-profile');
+    process.env.HERMES_CLI = path.join(tmpDir, 'hermes-bin', 'hermes');
+    try {
+      const def = {
+        id: 'hermes-agent',
+        displayName: 'Hermes Agent',
+        deployMode: 'directory-plugin',
+        detection: { paths: ['$HERMES_HOME'], commands: ['hermes'] },
+        directoryPlugin: {
+          sourceDir: '$PILOT_DIR/assets/plugins/hermes-agent/loongsuite-pilot',
+          targetDir: '$HERMES_HOME/plugins/loongsuite-pilot',
+          activation: {
+            command: '$HERMES_CLI',
+            enableArgs: ['plugins', 'enable', 'loongsuite-pilot'],
+          },
+        },
+      };
+      await fs.writeFile(path.join(builtinDir, 'hermes-agent.json'), JSON.stringify(def));
+
+      const [loaded] = await makeLoader().load();
+
+      expect(loaded.deployMode).toBe('directory-plugin');
+      expect(loaded.detection.paths[0]).toBe(path.join(tmpDir, 'hermes-profile'));
+      expect(loaded.directoryPlugin?.sourceDir).toBe(
+        '/opt/pilot/assets/plugins/hermes-agent/loongsuite-pilot',
+      );
+      expect(loaded.directoryPlugin?.targetDir).toBe(
+        path.join(tmpDir, 'hermes-profile', 'plugins', 'loongsuite-pilot'),
+      );
+      expect(loaded.directoryPlugin?.activation?.command).toBe(
+        path.join(tmpDir, 'hermes-bin', 'hermes'),
+      );
+    } finally {
+      if (previous === undefined) delete process.env.HERMES_HOME;
+      else process.env.HERMES_HOME = previous;
+      if (previousCli === undefined) delete process.env.HERMES_CLI;
+      else process.env.HERMES_CLI = previousCli;
+    }
+  });
+
+  it('falls back to the Hermes command on PATH when the bundled CLI is absent', async () => {
+    const previousHome = process.env.HERMES_HOME;
+    const previousCli = process.env.HERMES_CLI;
+    process.env.HERMES_HOME = path.join(tmpDir, 'hermes-profile');
+    delete process.env.HERMES_CLI;
+    try {
+      const def = {
+        id: 'hermes-agent',
+        displayName: 'Hermes Agent',
+        deployMode: 'directory-plugin',
+        detection: { paths: ['$HERMES_HOME'], commands: ['hermes'] },
+        directoryPlugin: {
+          sourceDir: '$PILOT_DIR/hermes-plugin',
+          targetDir: '$HERMES_HOME/plugins/loongsuite-pilot',
+          activation: {
+            command: '$HERMES_CLI',
+            enableArgs: ['plugins', 'enable', 'loongsuite-pilot'],
+          },
+        },
+      };
+      await fs.writeFile(path.join(builtinDir, 'hermes-agent.json'), JSON.stringify(def));
+
+      const [loaded] = await makeLoader().load();
+
+      expect(loaded.directoryPlugin?.activation?.command).toBe(
+        process.platform === 'win32' ? 'hermes.exe' : 'hermes',
+      );
+    } finally {
+      if (previousHome === undefined) delete process.env.HERMES_HOME;
+      else process.env.HERMES_HOME = previousHome;
+      if (previousCli === undefined) delete process.env.HERMES_CLI;
+      else process.env.HERMES_CLI = previousCli;
+    }
+  });
+
+  it('uses the official bundled Hermes CLI when it exists', async () => {
+    const previousHome = process.env.HERMES_HOME;
+    const previousCli = process.env.HERMES_CLI;
+    const hermesHome = path.join(tmpDir, 'hermes-profile');
+    const bundledCli = path.join(
+      hermesHome,
+      'hermes-agent',
+      'venv',
+      process.platform === 'win32' ? 'Scripts' : 'bin',
+      process.platform === 'win32' ? 'hermes.exe' : 'hermes',
+    );
+    process.env.HERMES_HOME = hermesHome;
+    delete process.env.HERMES_CLI;
+    try {
+      await fs.mkdir(path.dirname(bundledCli), { recursive: true });
+      await fs.writeFile(bundledCli, '');
+      const def = {
+        id: 'hermes-agent',
+        displayName: 'Hermes Agent',
+        deployMode: 'directory-plugin',
+        detection: { paths: ['$HERMES_HOME'], commands: ['hermes'] },
+        directoryPlugin: {
+          sourceDir: '$PILOT_DIR/hermes-plugin',
+          targetDir: '$HERMES_HOME/plugins/loongsuite-pilot',
+          activation: {
+            command: '$HERMES_CLI',
+            enableArgs: ['plugins', 'enable', 'loongsuite-pilot'],
+          },
+        },
+      };
+      await fs.writeFile(path.join(builtinDir, 'hermes-agent.json'), JSON.stringify(def));
+
+      const [loaded] = await makeLoader().load();
+
+      expect(loaded.directoryPlugin?.activation?.command).toBe(bundledCli);
+    } finally {
+      if (previousHome === undefined) delete process.env.HERMES_HOME;
+      else process.env.HERMES_HOME = previousHome;
+      if (previousCli === undefined) delete process.env.HERMES_CLI;
+      else process.env.HERMES_CLI = previousCli;
+    }
+  });
+
   it('handles missing directories gracefully', async () => {
     const loader = new AgentDefLoader({
       builtinDir: path.join(tmpDir, 'nonexistent'),

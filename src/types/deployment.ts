@@ -4,9 +4,15 @@
 
 // ─── Deploy Mode ───
 
-export type DeployMode = 'hook' | 'plugin-probe' | 'plugin-inject' | 'detection-only';
+export type DeployMode =
+  | 'hook'
+  | 'plugin-probe'
+  | 'plugin-inject'
+  | 'directory-plugin'
+  | 'detection-only';
 export type MountType = 'wrapper' | 'rc-inject' | 'env-inject';
 export type HookFormat = 'flat' | 'nested';
+export type SettingsSyntax = 'json' | 'jsonc';
 export type PluginSourceType = 'oss' | 'tar';
 
 // ─── Agent Definition (loaded from agents.d/*.json) ───
@@ -33,10 +39,18 @@ export interface TrustTomlConfig {
 
 export interface AgentHookConfig {
   settingsPath: string;
+  /**
+   * Syntax accepted by the owning agent's settings file. Defaults to strict
+   * JSON. JSONC files are edited in place so comments and unrelated formatting
+   * survive hook installation.
+   */
+  settingsSyntax?: SettingsSyntax;
   events: string[];
   hookCommand: string;
   format: HookFormat;
   matcher?: string;
+  /** Optional matcher override keyed by hook event name. */
+  eventMatchers?: Record<string, string>;
   replaceHookCommands?: string[];
   /** Events previously owned by this hook that must be removed during deploy. */
   retiredEvents?: string[];
@@ -52,8 +66,12 @@ export interface AgentHookConfig {
    * Claude / Codex 的 mjs handler 通过 argv 区分事件，设为 'kebab-case' 后，
    * buildHookDefinitions 会把 hookCommand 转成 `${hookCommand} ${kebabEvent}`，
    * trust hash 也用同样字符串，保证一致性。
+   *
+   * Kiro CLI 的 hook trigger 是 camelCase（userPromptSubmit/postToolUse/...），
+   * 设为 'as-is' 后，buildHookDefinitions 会把 hookCommand 转成
+   * `${hookCommand} ${event}`（事件名原样追加）。
    */
-  eventSubcommand?: 'kebab-case';
+  eventSubcommand?: 'kebab-case' | 'as-is';
   /**
    * If true, omit quotes around the -File path on Windows.
    * Use for agents whose hook executor does direct spawn (not shell),
@@ -69,6 +87,15 @@ export interface AgentHookConfig {
    * never fire). Spec §1.4 / source-evidence.md §4.
    */
   eventsRoot?: string;
+  /**
+   * Windows-only: shell to declare on the nested hook entry
+   * (`{ command, type, shell }`). Some hosts (Qoder family) require an explicit
+   * `"shell": "powershell"` so the host runs the `.ps1` command through
+   * PowerShell instead of its default shell. Ignored on non-Windows platforms
+   * (where the command is a `.sh`), and only emitted for agents that set it —
+   * codex must never set it (its settings use serde deny_unknown_fields).
+   */
+  winShell?: string;
   /**
    * Optional env block to merge into the agent's settings.json on deploy.
    *
@@ -92,6 +119,15 @@ export interface AgentHookConfig {
    * inject_claude_code_fetch_intercept).
    */
   env?: Record<string, string>;
+  /**
+   * Kiro CLI 专用：settingsPath 指向的是一整个 Agent 定义 JSON
+   * （~/.kiro/agents/<name>.json），需要顶层 name + tools 字段。
+   * HookStrategy 在 ensureSettingsFile 时若文件缺失会用此模板 seed。
+   */
+  kiroAgent?: {
+    name: string;
+    tools: string[];
+  };
 }
 
 export interface PluginSourceConfig {
@@ -124,6 +160,54 @@ export interface PluginInjectConfig {
   pluginSpec: string;
   pluginId: string;
   replaceSpecs?: string[];
+  /** Agent-specific config layout. Omitted for the legacy flat-array layout. */
+  configShape?: 'openclaw-nested';
+  /** Required plugin entry fields for nested config layouts. */
+  entryConfig?: Record<string, unknown>;
+  /** Target array field. Defaults to auto-detected `plugins` / `plugin`. */
+  configKey?: string;
+  /** Create the first config path with an empty object when none exists. */
+  createIfMissing?: boolean;
+  /** Refuse deployment before touching config when the target is too old. */
+  versionCheck?: {
+    /** Executable followed by argv entries; executed directly without a shell. */
+    command: string[];
+    /** Minimum supported stable version. */
+    minimum: string;
+  };
+}
+
+export interface AgentRuntimeConfig {
+  /** 运行时依赖的简述，如 "required-for-transcript" */
+  nodeSqlite?: string;
+  /** 该 builtin 首次可用的 Node 版本 */
+  nodeSqliteSince?: string;
+  /** 无该 builtin 时的 fallback 行为说明 */
+  fallback?: string;
+}
+
+export interface DirectoryPluginConfig {
+  /** Managed plugin directory copied by Pilot. */
+  sourceDir: string;
+  /** Final directory consumed by the target Agent. */
+  targetDir: string;
+  /** Ownership marker stored inside targetDir. */
+  markerFile?: string;
+  /** Optional target-native command used to activate the copied plugin. */
+  activation?: DirectoryPluginActivationConfig;
+}
+
+export interface DirectoryPluginActivationConfig {
+  /** Target Agent CLI executable. */
+  command: string;
+  /** Capability probe. A non-zero result means an older target does not require activation. */
+  probeArgs?: string[];
+  /** Maximum runtime for probe/enable/disable commands. */
+  timeoutMs?: number;
+  /** Arguments that enable the plugin after it has been copied. */
+  enableArgs: string[];
+  /** Best-effort arguments that disable the plugin before Pilot removes it. */
+  disableArgs?: string[];
 }
 
 export interface AgentDefinition {
@@ -136,7 +220,10 @@ export interface AgentDefinition {
   hook?: AgentHookConfig;
   pluginProbe?: PluginProbeConfig;
   pluginInject?: PluginInjectConfig;
+  directoryPlugin?: DirectoryPluginConfig;
   input?: AgentInputConfig;
+  /** 运行时要求（如 node:sqlite）与无该依赖时的 fallback 声明 */
+  runtime?: AgentRuntimeConfig;
 }
 
 // ─── Deploy Result ───
@@ -165,6 +252,8 @@ export interface DeployedAgentRecord {
   deployedAt: string;
   sourceHash?: string;
   lastRemoteCheckedAt?: string;
+  /** Resolved external target for managed directory plugins. */
+  targetDir?: string;
 }
 
 export type DeployedAgentsState = Record<string, DeployedAgentRecord>;

@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { ClientType } from '../types/index.js';
-import type { AnalyticsConfig, AgentDetectionEntry } from '../types/index.js';
+import type { AnalyticsConfig, AgentDetectionEntry, AgentStopReason } from '../types/index.js';
 import { AgentControlManager } from './agent-control-manager.js';
 import { AgentDiscoveryService } from './agent-discovery-service.js';
 import { InputManager } from './input-manager.js';
@@ -8,10 +8,12 @@ import { StateStore } from '../checkpoints/state-store.js';
 import { HookManager } from '../hooks/hook-manager.js';
 import { DeploymentManager } from '../deployment/deployment-manager.js';
 import { detectAgent } from '../deployment/detect-utils.js';
+import { GlobalAttributesProvider } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveHome, ensureDir, directoryExists, readJsonFile, writeJsonFile, fileExists, readInstalledVersion, cleanStaleTmpFiles } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import * as fsSync from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 // Flushers
 import { BaseFlusher } from '../flushers/base-flusher.js';
@@ -37,13 +39,24 @@ import { QoderTraceInput } from '../inputs/qoder-trace/qoder-trace-input.js';
 import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
 import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
+import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
+import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
+import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
+import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { ZCodeHookInput } from '../inputs/zcode-hook/zcode-hook-input.js';
 import { ZCodeRolloutInput } from '../inputs/zcode-rollout/zcode-rollout-input.js';
+import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
+import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
+import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
+import { CorrelationStore } from './upstream-link/correlation-store.js';
+import { TraceLinker } from './upstream-link/trace-linker.js';
+import { AcpCorrelateRetentionService } from './upstream-link/acp-correlate-retention-service.js';
+import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
 import { PipelineManager } from '../pipeline/pipeline-manager.js';
@@ -91,11 +104,18 @@ export class Orchestrator extends EventEmitter {
     'cursor-hook': 'cursor',
     'claude-code-log': 'claude-code',
     'codex-transcript': 'codex',
+    'kiro-cli-log': 'kiro-cli',
+    'kiro-cli-session': 'kiro-cli',
     'opencode-log': 'opencode',
+    'pi-coding-agent-log': 'pi-coding-agent',
+    'mimo-code-log': 'mimo-code',
     'qwen-code-cli-log': 'qwen-code-cli',
     'zcode-hook': 'zcode',
     'zcode-rollout': 'zcode',
+    'hermes-agent-log': 'hermes-agent',
+    'openclaw-plugin-log': 'openclaw',
     'wukong': 'wukong',
+    'workbuddy': 'workbuddy',
   };
 
   private readonly config: AnalyticsConfig;
@@ -106,6 +126,8 @@ export class Orchestrator extends EventEmitter {
   private stateStore!: StateStore;
   private flusher!: BaseFlusher;
   private logRetentionService!: LogRetentionService;
+  private acpCorrelateRetentionService?: AcpCorrelateRetentionService;
+  private legacySlsFailedLogCleanupService: LegacySlsFailedLogCleanupService | null = null;
   private hookWatchdog!: HookWatchdog;
   private updaterWatchdog: UpdaterWatchdog | null = null;
   private deploymentManager!: DeploymentManager;
@@ -116,6 +138,7 @@ export class Orchestrator extends EventEmitter {
   private runtimeWriter: RuntimeWriter | null = null;
   private metricsSummaryWriter: MetricsSummaryWriter | null = null;
   private statusBarAppManager: StatusBarAppManager | null = null;
+  private globalAttributesProvider!: GlobalAttributesProvider;
   private isRunning = false;
 
   constructor(config: AnalyticsConfig) {
@@ -148,6 +171,10 @@ export class Orchestrator extends EventEmitter {
     await this.agentControlManager.load();
 
     // 3. Build flushers
+    this.globalAttributesProvider = new GlobalAttributesProvider(
+      this.config.globalSpanAttributes ?? {},
+      path.join(this.dataDir, 'span-attributes.json'),
+    );
     this.flusher = await this.buildFlusher();
 
     // 4. Build InputManager & AlarmManager
@@ -161,13 +188,29 @@ export class Orchestrator extends EventEmitter {
     this.inputManager.setAlarmManager(this.alarmManager);
     this.inputManager.setMaskConfig(this.config.mask ?? { mode: 'none', types: [] });
 
+    // Upstream trace linking (opt-in): stamp trace_id/parent_span_id from the
+    // acp-correlate store so agent spans reparent under the upstream span.
+    if (this.config.upstreamLink?.enabled) {
+      const correlateDir = path.join(this.dataDir, 'acp-correlate');
+      await ensureDir(correlateDir);
+      const store = new CorrelationStore(correlateDir);
+      const traceLinker = new TraceLinker(store);
+      this.inputManager.setTraceLinker(traceLinker);
+      this.acpCorrelateRetentionService = new AcpCorrelateRetentionService(this.dataDir, this.config.upstreamLink, traceLinker);
+      this.acpCorrelateRetentionService.start();
+      // Adapters/env hooks must write records under this exact path; a custom
+      // config.json dataDir that diverges from where they write silently yields
+      // no linking, so surface the resolved dir for diagnosis.
+      logger.info('upstream trace linking enabled', { correlateDir, ttlMs: this.config.upstreamLink.ttlMs });
+    }
+
     // 5. Deploy agent collection capabilities (hooks + plugins, best-effort)
     const pilotDir = this.resolvePilotDir();
     this.deploymentManager = new DeploymentManager({
       dataDir: this.dataDir,
       pilotDir,
     });
-    await this.deploymentManager.deployAll();
+    await this.deploymentManager.deployAll(def => this.isAgentGatedEnabled(def.id));
 
     this.localWorkerActivationService = new LocalWorkerActivationService({
       dataDir: this.dataDir,
@@ -187,13 +230,17 @@ export class Orchestrator extends EventEmitter {
     this.agentDiscoveryService.on('agent:started', (id: string) => {
       logger.info('agent detected and started', { id });
     });
-    this.agentDiscoveryService.on('agent:stopped', (id: string) => {
-      logger.info('agent stopped', { id });
-      this.alarmManager.record(
-        'INPUT_STOP_ALARM', '3',
-        `input ${id} stopped unexpectedly`,
-        { input_name: id },
-      );
+    this.agentDiscoveryService.on('agent:stopped', (id: string, reason: AgentStopReason) => {
+      if (reason === 'unexpected') {
+        logger.warn('agent stopped unexpectedly', { id });
+        this.alarmManager.record(
+          'INPUT_STOP_ALARM', '3',
+          `input ${id} stopped unexpectedly (reason=unexpected)`,
+          { input_name: id },
+        );
+      } else {
+        logger.debug('agent stopped', { id, reason });
+      }
     });
     await this.agentDiscoveryService.start();
 
@@ -202,13 +249,11 @@ export class Orchestrator extends EventEmitter {
     this.logRetentionService.start();
 
     // 10. Start hook watchdog (periodically restores hooks overwritten by other tools)
-    const hookWatchdogTargets = [
-      ...HookWatchdog.defaultTargets(),
-      ...this.buildHookWatchdogTargets(),
-    ];
+    const hookWatchdogTargets = this.buildHookWatchdogTargets();
     const interceptTargets = [
-      ...HookWatchdog.defaultInterceptTargets(this.dataDir),
+      ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id)),
       ...this.buildPluginInjectInterceptTargets(),
+      ...this.buildDirectoryPluginInterceptTargets(),
     ];
     this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
     this.hookWatchdog.start();
@@ -253,13 +298,15 @@ export class Orchestrator extends EventEmitter {
     });
     await this.metricsWriter.start();
 
-    // 14. Start status bar support (runtime.json + metrics summary + native app)
+    // 14. Always publish runtime health for service managers. The status bar UI
+    // may be disabled, but Windows Task Scheduler still needs runtime.json to
+    // distinguish a healthy collector from a task whose child process died.
+    const packageVersion = this.readPackageVersion();
+    this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
+    this.runtimeWriter.start();
+
+    // Status bar metrics/native UI remain optional.
     if (this.config.statusBar.enabled) {
-      const packageVersion = this.readPackageVersion();
-
-      this.runtimeWriter = new RuntimeWriter(this.dataDir, this.config.statusBar, packageVersion);
-      this.runtimeWriter.start();
-
       this.metricsSummaryWriter = new MetricsSummaryWriter(this.dataDir, this.config.statusBar);
       this.metricsSummaryWriter.start();
 
@@ -276,6 +323,9 @@ export class Orchestrator extends EventEmitter {
     logger.info('orchestrator started', {
       inputs: detectionEntries.length,
     });
+
+    this.legacySlsFailedLogCleanupService = new LegacySlsFailedLogCleanupService(this.dataDir);
+    this.legacySlsFailedLogCleanupService.start();
   }
 
   async stop(): Promise<void> {
@@ -290,7 +340,10 @@ export class Orchestrator extends EventEmitter {
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
     this.hookWatchdog?.stop();
+    this.legacySlsFailedLogCleanupService?.stop();
+    this.legacySlsFailedLogCleanupService = null;
     this.logRetentionService?.stop();
+    this.acpCorrelateRetentionService?.stop();
     await this.localWorkerActivationService?.stop();
     await this.deploymentManager?.stopWorkers();
     await this.agentDiscoveryService?.stop();
@@ -370,9 +423,14 @@ export class Orchestrator extends EventEmitter {
       targets.push({
         agentId: def.id,
         settingsPath: def.hook.settingsPath,
+        settingsSyntax: def.hook.settingsSyntax,
         expectedHooks: def.hook.events,
         markers: [scriptName],
         eventsRoot: def.hook.eventsRoot,
+        // Runtime gate: a user who has turned this agent off (config.agents[id]
+        // .enabled === false) must never have its hook re-injected. Evaluated on
+        // each check so a config change takes effect without rebuilding targets.
+        enabled: () => this.isAgentGatedEnabled(def.id),
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
       });
     }
@@ -381,7 +439,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   /**
-   * Self-heal targets for plugin-inject agents (e.g. opencode, qwen-code-cli).
+   * Self-heal targets for plugin-inject agents (currently OpenCode).
    *
    * Unlike hook agents, these write a plugin spec into the agent's own config
    * file (not a shared settings.json), so they use the intercept mechanism:
@@ -401,6 +459,7 @@ export class Orchestrator extends EventEmitter {
 
       targets.push({
         id: `plugin-inject:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
         precondition: async () => {
           // Only self-heal when the plugin asset is actually deployed AND the
           // agent is present. Otherwise repair would inject a spec pointing at
@@ -424,6 +483,33 @@ export class Orchestrator extends EventEmitter {
     return targets;
   }
 
+  /** Self-heal managed native plugin directories, such as Hermes plugins. */
+  private buildDirectoryPluginInterceptTargets(): InterceptCheckTarget[] {
+    const defs = this.deploymentManager.getDefinitions();
+    const targets: InterceptCheckTarget[] = [];
+
+    for (const def of defs) {
+      if (def.deployMode !== 'directory-plugin' || !def.directoryPlugin) continue;
+
+      targets.push({
+        id: `directory-plugin:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id),
+        precondition: async () =>
+          (await directoryExists(def.directoryPlugin!.sourceDir))
+          && (await detectAgent(def.detection)),
+        check: async () => !(await this.deploymentManager.needsRedeploy(def)),
+        repair: async () => {
+          const result = await this.deploymentManager.deploySingle(def);
+          if (!result.success) {
+            throw new Error(result.error ?? `directory plugin repair failed for ${def.id}`);
+          }
+        },
+      });
+    }
+
+    return targets;
+  }
+
   /**
    * Resolve a plugin spec to a local file path for existence checks.
    * Returns null for non-file specs (e.g. npm package names), which skips the
@@ -431,7 +517,8 @@ export class Orchestrator extends EventEmitter {
    */
   private resolvePluginSpecPath(spec: string): string | null {
     const resolved = spec.replace(/\$PILOT_DATA/g, this.dataDir);
-    return resolved.startsWith('file://') ? resolved.slice('file://'.length) : null;
+    if (resolved.startsWith('file://')) return resolved.slice('file://'.length);
+    return path.isAbsolute(resolved) ? resolved : null;
   }
 
   private async buildFlusher(): Promise<BaseFlusher> {
@@ -456,15 +543,19 @@ export class Orchestrator extends EventEmitter {
       flushers.push(r);
     }
 
-    const otlpTraceCfg = buildOtlpTraceConfig(this.config);
-    if (otlpTraceCfg?.enabled) {
-      try {
+    try {
+      const otlpTraceCfg = buildOtlpTraceConfig(this.config);
+      if (otlpTraceCfg?.enabled && otlpTraceCfg.endpoints.length > 0) {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
-        const r = new OtlpTraceFlusher({ ...otlpTraceCfg, dataDir: this.dataDir });
+        const r = new OtlpTraceFlusher(
+          { ...otlpTraceCfg, dataDir: this.dataDir },
+          this.globalAttributesProvider,
+        );
         flushers.push(r);
-      } catch (err) {
-        logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
       }
+    } catch (err) {
+      // Never let a malformed trace config take down the other flushers.
+      logger.warn('OtlpTraceFlusher unavailable, skipping', { error: String(err) });
     }
 
     if (flushers.length === 0) {
@@ -764,7 +855,7 @@ export class Orchestrator extends EventEmitter {
       this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['qoder-work-cn-trace']) &&
       this.agentControlManager.resolveEnabled(
         'qoder-work-cn-trace',
-        listenerCfg['qoder-work-cn-trace']?.enabled ?? false,
+        listenerCfg['qoder-work-cn-trace']?.enabled ?? true,
       );
     entries.push(
       this.inputManager.buildDetectionEntry(qoderWorkCNTraceInput, {
@@ -931,6 +1022,58 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- Kiro CLI Log (sqlite transcript + hook JSONL) ---
+    const kiroCliLogDir = this.resolveKiroCliLogDir();
+    // Eagerly create the log dir so kiro-cli-log's availability check
+    // (directoryExists) passes on first boot. Without this, the input
+    // never starts because the dir is only created later by the
+    // delayedCollect subprocess — a chicken-egg problem.
+    await ensureDir(kiroCliLogDir);
+    const kiroCliLogInput = new KiroCliLogInput({
+      stateStore: this.stateStore,
+      logDir: kiroCliLogDir,
+    });
+    this.inputManager.registerInput(kiroCliLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(kiroCliLogInput, {
+        watchPaths: [kiroCliLogDir],
+        isAvailable: async () => directoryExists(kiroCliLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['kiro-cli-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'kiro-cli-log',
+            listenerCfg['kiro-cli-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['kiro-cli-log']?.pollInterval,
+      }),
+    );
+
+    // --- Kiro CLI Session (delayed sidecar scan, runs hook processor delayedCollect) ---
+    const kiroCliHookProcessorPath = path.join(
+      this.dataDir,
+      'hooks',
+      'kiro-cli-hook-processor.mjs',
+    );
+    const kiroCliSessionWatchPaths = KiroCliSessionInput.getWatchPaths(this.dataDir);
+    const kiroCliSessionInput = new KiroCliSessionInput({
+      stateStore: this.stateStore,
+      hookProcessorPath: kiroCliHookProcessorPath,
+      dataDir: this.dataDir,
+      pollIntervalMs: listenerCfg['kiro-cli-session']?.pollInterval,
+    });
+    this.inputManager.registerInput(kiroCliSessionInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(kiroCliSessionInput, {
+        watchPaths: kiroCliSessionWatchPaths,
+        isAvailable: async () => KiroCliSessionInput.checkAvailability(kiroCliHookProcessorPath),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['kiro-cli-session']) &&
+          this.agentControlManager.resolveEnabled(
+            'kiro-cli-session',
+            listenerCfg['kiro-cli-session']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['kiro-cli-session']?.pollInterval,
+      }),
+    );
+
     // --- Codex rollout transcript (completed and interrupted turns) ---
     const codexTranscriptInput = new CodexTranscriptInput({
       stateStore: this.stateStore,
@@ -959,6 +1102,7 @@ export class Orchestrator extends EventEmitter {
     const opencodeLogInput = new OpenCodeLogInput({
       stateStore: this.stateStore,
       logDir: opencodeLogDir,
+      pollIntervalMs: listenerCfg['opencode-log']?.pollInterval,
     });
     this.inputManager.registerInput(opencodeLogInput);
     entries.push(
@@ -971,6 +1115,50 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['opencode-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['opencode-log']?.pollInterval,
+      }),
+    );
+
+    // --- Pi Coding Agent Log (Pi extension JSONL) ---
+    const piCodingAgentLogDir = path.join(this.dataDir, 'logs', 'pi-coding-agent');
+    await ensurePiCodingAgentLogDir(piCodingAgentLogDir);
+    const piCodingAgentLogInput = new PiCodingAgentLogInput({
+      stateStore: this.stateStore,
+      logDir: piCodingAgentLogDir,
+    });
+    this.inputManager.registerInput(piCodingAgentLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(piCodingAgentLogInput, {
+        watchPaths: [piCodingAgentLogDir],
+        isAvailable: async () => directoryExists(piCodingAgentLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['pi-coding-agent-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'pi-coding-agent-log',
+            listenerCfg['pi-coding-agent-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['pi-coding-agent-log']?.pollInterval,
+      }),
+    );
+
+    // --- MiMo Code Log (event_t plugin JSONL) ---
+    // Plugin-inject agent (same shape as opencode). Pre-create log dir so
+    // fs.watch in AgentDiscoveryService succeeds immediately after install.
+    const mimoCodeLogDir = path.join(this.dataDir, 'logs', 'mimo-code');
+    await ensureDir(mimoCodeLogDir);
+    const mimoCodeLogInput = new MimoCodeLogInput({
+      stateStore: this.stateStore,
+      logDir: mimoCodeLogDir,
+    });
+    this.inputManager.registerInput(mimoCodeLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(mimoCodeLogInput, {
+        watchPaths: [mimoCodeLogDir],
+        isAvailable: async () => directoryExists(mimoCodeLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['mimo-code-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'mimo-code-log',
+            listenerCfg['mimo-code-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['mimo-code-log']?.pollInterval,
       }),
     );
 
@@ -996,6 +1184,50 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- OpenClaw Plugin Log (event_t plugin JSONL) ---
+    const openClawPluginLogDir = path.join(this.dataDir, 'logs', 'openclaw');
+    await ensureOpenClawPluginLogDir(openClawPluginLogDir);
+    const openClawPluginInput = new OpenClawPluginInput({
+      stateStore: this.stateStore,
+      logDir: openClawPluginLogDir,
+      pollIntervalMs: listenerCfg['openclaw-plugin-log']?.pollInterval,
+    });
+    this.inputManager.registerInput(openClawPluginInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(openClawPluginInput, {
+        watchPaths: [openClawPluginLogDir],
+        isAvailable: async () => directoryExists(openClawPluginLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['openclaw-plugin-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'openclaw-plugin-log',
+            listenerCfg['openclaw-plugin-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['openclaw-plugin-log']?.pollInterval,
+      }),
+    );
+
+    // --- Hermes Agent (native Python directory plugin JSONL) ---
+    const hermesLogDir = path.join(this.dataDir, 'logs', 'hermes-agent');
+    await ensureDir(hermesLogDir);
+    const hermesLogInput = new HermesLogInput({
+      stateStore: this.stateStore,
+      sessionDir: hermesLogDir,
+      pollIntervalMs: listenerCfg['hermes-agent-log']?.pollInterval,
+    });
+    this.inputManager.registerInput(hermesLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(hermesLogInput, {
+        watchPaths: [hermesLogDir],
+        isAvailable: async () => directoryExists(hermesLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['hermes-agent-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'hermes-agent-log',
+            listenerCfg['hermes-agent-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['hermes-agent-log']?.pollInterval,
+      }),
+    );
+
     // --- Wukong (CLI API polling) ---
     const wukongInput = new WukongInput({ stateStore: this.stateStore });
     this.inputManager.registerInput(wukongInput);
@@ -1009,6 +1241,27 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['wukong']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['wukong']?.pollInterval,
+        unavailableThreshold: 3,
+      }),
+    );
+
+    // --- WorkBuddy (Hook/file wakeups + local transcript polling fallback) ---
+    const workBuddyInput = new WorkBuddyInput({
+      stateStore: this.stateStore,
+      hookEventDir: path.join(this.dataDir, 'state', 'workbuddy', 'hook-events'),
+      pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
+    });
+    this.inputManager.registerInput(workBuddyInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(workBuddyInput, {
+        watchPaths: WorkBuddyInput.getWatchPaths(),
+        isAvailable: WorkBuddyInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP.workbuddy) &&
+          this.agentControlManager.resolveEnabled(
+            'workbuddy',
+            listenerCfg.workbuddy?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
       }),
     );
 
@@ -1082,6 +1335,10 @@ export class Orchestrator extends EventEmitter {
     return path.join(this.dataDir, 'logs', 'claude-code');
   }
 
+  private resolveKiroCliLogDir(): string {
+    return path.join(this.dataDir, 'logs', 'kiro-cli');
+  }
+
   /**
    * Check whether an agent is allowed to run based on config.agents gate.
    * - No config.agents or empty: always true (backward compat)
@@ -1112,7 +1369,7 @@ export class Orchestrator extends EventEmitter {
     return 'unknown';
   }
 
-  private resolvePilotDir(): string {
+  private resolvePilotDir(moduleUrl: string = import.meta.url): string {
     try {
       const currentFile = path.join(this.dataDir, 'current');
       const versionName = fsSync.readFileSync(currentFile, 'utf-8').trim();
@@ -1130,6 +1387,29 @@ export class Orchestrator extends EventEmitter {
     const legacyPackageDir = path.join(this.dataDir, 'package');
     if (fsSync.existsSync(path.join(legacyPackageDir, 'dist', 'index.js'))) {
       return legacyPackageDir;
+    }
+
+    try {
+      const moduleDir = path.dirname(fileURLToPath(moduleUrl));
+      const candidates = [
+        path.resolve(moduleDir, '..'),
+        path.resolve(moduleDir, '..', '..'),
+      ];
+      for (const modulePackageDir of candidates) {
+        const packageJson = path.join(modulePackageDir, 'package.json');
+        const agentsDir = path.join(modulePackageDir, 'agents.d');
+        if (
+          fsSync.existsSync(packageJson)
+          && fsSync.existsSync(agentsDir)
+          && fsSync.statSync(packageJson).isFile()
+          && fsSync.statSync(agentsDir).isDirectory()
+        ) {
+          logger.debug('resolved pilotDir from module package root', { pilotDir: modulePackageDir });
+          return modulePackageDir;
+        }
+      }
+    } catch {
+      // Module URL is invalid or the runtime package does not include required assets.
     }
 
     return this.dataDir;

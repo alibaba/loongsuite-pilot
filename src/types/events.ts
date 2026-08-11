@@ -51,6 +51,8 @@ export interface AgentActivityEntry {
   'gen_ai.session.id': string;
   'gen_ai.turn.id'?: string;
   'gen_ai.step.id'?: string;
+  'gen_ai.turn.start'?: boolean;
+  'gen_ai.turn.end'?: boolean;
   'gen_ai.response.id'?: string;
   'gen_ai.agent.type': string;
   'gen_ai.agent.id'?: string;
@@ -80,8 +82,12 @@ export interface AgentActivityEntry {
   'gen_ai.tool.call.arguments'?: JsonValue;
   'gen_ai.tool.call.result'?: JsonValue;
   'gen_ai.tool.call.duration'?: number;
+  'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;
   'gen_ai.skill.name'?: string;
+  'gen_ai.skill.id'?: string;
+  'gen_ai.skill.description'?: string;
+  'gen_ai.skill.version'?: string;
   /**
    * 模型的 system instructions（MessagePart[] 数组形式），数据源为 codex transcript 的
    * `session_meta.payload.base_instructions.text` + `turn_context.payload.developer_instructions`。
@@ -104,6 +110,8 @@ export interface AgentActivityEntry {
   'git.domain'?: string;
   /** Selected workspace root for path normalization/repo attribution. */
   'workspace.current_root'?: string;
+  /** Absolute working directory the agent ran in (process cwd), independent of git. */
+  'workspace.path'?: string;
   'error.type'?: string;
   'error.message'?: string;
   /** Dynamic OTLP resource attributes emitted by hook processors. */

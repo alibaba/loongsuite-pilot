@@ -36,6 +36,11 @@ import {
   writeJsonlRecords,
 } from './shared/event-emitter.mjs';
 import { logHookError } from './shared/error-logger.mjs';
+import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
+import {
+  agentBaseFieldPatch,
+  collectResourceAttributesFromEnv,
+} from './shared/resource-context.mjs';
 import {
   sanitizeObject,
   loadHookRuntimeConfig,
@@ -57,6 +62,19 @@ import {
 import { inferProvider } from './qwen-code-cli/provider-inferrer.mjs';
 
 const AGENT_ID = 'qwen-code-cli';
+const INVOCATION_RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, {
+  agentId: AGENT_ID,
+});
+
+function bindInvocationResourceContext(state) {
+  if (Object.keys(INVOCATION_RESOURCE_ATTRIBUTES).length > 0) {
+    state.resource_attributes = INVOCATION_RESOURCE_ATTRIBUTES;
+  } else {
+    // A session can be resumed without custom identity variables. Do not
+    // retain a stale worker identity from an earlier invocation.
+    delete state.resource_attributes;
+  }
+}
 
 // ─── utilities ───
 
@@ -167,7 +185,11 @@ async function cmdStop() {
   const sessionId = requireSessionId(event, 'stop');
   if (!sessionId) return;
 
+  // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
+  recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+
   const state = loadState(sessionId);
+  bindInvocationResourceContext(state);
   if (!state.transcript_path && event.transcript_path) {
     state.transcript_path = event.transcript_path;
   }
@@ -298,6 +320,7 @@ async function exportSession(state, stopReason) {
     const turnStopReason = isLast ? stopReason : 'end_turn';
     const { records, hash } = buildTurnRecords(
       turn, baseTurnCount + i, sessionId, logHash, userId, turnStopReason, cwd,
+      state.resource_attributes,
     );
     allRecords.push(...records);
     logHash = hash;
@@ -341,10 +364,25 @@ async function exportSession(state, stopReason) {
  * @param userId    Resolved user.id
  * @param turnStopReason Stop reason for the last LLM call in this turn
  * @param cwd       Optional working dir for agent.qwen-code-cli.cwd
+ * @param resourceAttributes  Invocation-scoped resource attributes captured by the Stop hook
  * @returns {{records: object[], hash: string}}
  */
-export function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, turnStopReason, cwd) {
+export function buildTurnRecords(
+  turn,
+  turnIndex,
+  sessionId,
+  prevHash,
+  userId,
+  turnStopReason,
+  cwd,
+  resourceAttributes = {},
+) {
   const records = [];
+  const safeResourceAttributes = resourceAttributes &&
+    typeof resourceAttributes === 'object' &&
+    !Array.isArray(resourceAttributes)
+    ? resourceAttributes
+    : {};
   // [C2] turn.id = <sessionId>:t<N>
   const turnId = `${sessionId}:t${turnIndex + 1}`;
   let runningHash = prevHash;
@@ -360,6 +398,10 @@ export function buildTurnRecords(turn, turnIndex, sessionId, prevHash, userId, t
     'user.id': userId,
     ...(cwd ? { 'agent.qwen-code-cli.cwd': cwd } : {}),
     ...(turn.gitBranch ? { 'git.branch': turn.gitBranch } : {}),
+    ...agentBaseFieldPatch(safeResourceAttributes),
+    ...(Object.keys(safeResourceAttributes).length > 0
+      ? { resourceAttributes: safeResourceAttributes }
+      : {}),
   };
 
   // [C7] User input → event.name=other + messages_delta (做法 A).

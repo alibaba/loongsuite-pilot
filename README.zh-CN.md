@@ -42,7 +42,10 @@ Pilot 主要帮助回答这些问题：
 | Claude Code | Hook | Yes | Yes | Yes | Yes |
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
+| Kiro CLI | Hook / session 轮询 | Yes | Yes | No | Yes |
+| OpenClaw | 插件注入 | Yes | Yes | Yes | Yes |
 | OpenCode | 插件注入 | Yes | Yes | Yes | Yes |
+| Pi Coding Agent | Extension 注入 | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | Yes | Yes | Yes | Yes |
 | Qoder for JetBrains | 自动检测 | Yes | Yes | Yes | Yes |
@@ -51,6 +54,25 @@ Pilot 主要帮助回答这些问题：
 | Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
+| WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
+
+OpenClaw 集成要求 OpenClaw 2026.5.12 或更高版本。
+
+### Windows Agent 明确支持情况
+
+上表描述 Pilot 的总体接入能力，不代表每个 Agent 在所有操作系统上均受支持。目前文档明确说明支持 Windows 的 Agent 如下：
+
+| Agent | Windows 集成方式 | Trace 上报 | 日志上报 | Token 用量 | 对话 / 工具调用 | 使用条件 |
+|-------|------------------|------------|----------|------------|-----------------|----------|
+| Claude Code | Hook | 支持 | 支持 | 支持 | 支持 | — |
+| Cursor | Hook | 支持 | 支持 | 支持 | 支持 | — |
+| Qoder Work | Hook / 本地数据源 | 支持 | 支持 | 不支持 | 支持 | User 版本 |
+| Qoder CLI | Hook | 支持 | 支持 | 不支持 | 支持 | — |
+| Qoder IDE | Hook / 本地数据源 | 支持 | 支持 | 支持 | 支持 | Qoder 1.10.0 及以上 User 版本 |
+| OpenCode | 插件注入 | 支持 | 支持 | 支持 | 支持 | — |
+| WorkBuddy | Hook 唤醒 + 本地 transcript | 支持 | 支持 | 支持 | 支持 | WorkBuddy Desktop 5.3.5.0；Windows 11 安装态 E2E |
+
+未列入 Windows 表格的 Agent，表示当前没有明确的 Windows 支持声明，并不一定代表无法在 Windows 上运行。支持矩阵参考[阿里云 AI Coding Agent 接入文档](https://help.aliyun.com/zh/cms/cloudmonitor-2-0/ai-application-access-ai-coding-agent/)，Windows 环境要求与安装方法见[安装指南](docs/zh-CN/installation.md)。
 
 Agent 定义位于 `agents.d/`。如需接入新的 Agent，请参考 [新 Agent 接入](docs/zh-CN/agent-onboarding.md)。
 
@@ -88,19 +110,38 @@ loongsuite-pilot info
 | 任务 | 文档 |
 |------|------|
 | 选择采集哪些 Agent，控制内容采集策略 | [Agent 配置](docs/zh-CN/agents.md) |
+| 自定义 Agent 名称和实例 | [自定义 `gen_ai.agent.name` 和 `agentteams.instance.id`](docs/zh-CN/custom-agent-identity.md) |
 | 写入本地 JSONL 日志 | [本地 JSONL 输出](docs/zh-CN/local-jsonl-output.md) |
 | 上报日志到 SLS | [SLS 输出](docs/zh-CN/sls-output.md) |
 | 上报 OTLP Trace | [Trace 输出](docs/zh-CN/trace-output.md) |
+| 将上游 Trace 继续传给 Claude Code 调用的 CLI | [Claude Code 下游 CLI Trace 传播](docs/zh-CN/claude-code-downstream-trace-propagation.md) |
 | POST 到 HTTP 接口 | [HTTP 输出](docs/zh-CN/http-output.md) |
 | 输出前进行密钥脱敏 | [数据脱敏](docs/zh-CN/masking.md) |
 | 查看全局配置加载顺序和保留策略 | [配置总览](docs/zh-CN/configuration.md) |
+
+### 上游 Trace 串联(可选)
+
+把采集到的 agent span 挂到**上游** trace 下,使每一轮的 span 树重挂到上游 span。默认关闭,且全程 fail-open(绝不影响正常采集/上报)。
+
+| 配置项 | 取值 | 默认 |
+| ------ | ---- | ---- |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK`(环境变量)· `upstreamLink.enabled`(config.json) | `true` / `1` 开启;不设、`false` 或 `0` 关闭 | 关闭 |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS`(环境变量)· `upstreamLink.propagateToTools`(config.json) | 将首轮上游上下文传给受支持的下游 CLI 工具调用 | 关闭 |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS`(环境变量)· `upstreamLink.ttlMs`(config.json) | `acp-correlate` 文件清理 TTL(毫秒) | `86400000`(24 小时) |
+
+开启后,上游 `traceparent` 经以下两种方案之一到达 Pilot,并在采集时 stamp 到记录(turn 打 `trace_id`、用户输入事件打 `parent_span_id`):
+
+- **关联文件**(per-turn):调用方在发送 prompt 时,把 `{sessionId, contentHash, contentPrefix, traceparent}` 写入 `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl`。串联与协议无关——唯一要求是 `sessionId` 等于 Pilot 采集该 turn 时的 `gen_ai.session.id`,且内容(hash 或前缀)能匹配采集到的用户文本。ACP client 天然满足(`session/new` 的 id 会贯穿采集),故 ACP 是主要场景。
+- **环境变量**(agent 进程上的 `TRACEPARENT`):经 agent 的 hook 作用于该会话的第一个 turn。适用于调用方无法预先拿到 per-turn `sessionId` 的情况。
+
+对于 Claude Code，同时开启上游串联和 `propagateToTools` 后，Pilot 还会把首轮上下文传给主 agent 的 `Bash` 调用。`PreToolUse(Bash)` hook 会预留 TOOL span id，在 Bash 命令前注入 `TRACEPARENT`（存在有效值时也注入 `TRACESTATE`），Stop hook 构建 TOOL span 时再复用同一个 id。下游 CLI 需要自行读取这些环境变量并配置 trace exporter。首版全程 fail-open，暂不覆盖 subagent、PowerShell、MCP 工具、后续 turn，以及带新上下文恢复的会话。
 
 ## 输出数据
 
 | 后端 | 用途 |
 |------|------|
 | JSONL | 本地备份和调试查看，默认开启。 |
-| SLS | 上报到阿里云日志服务，支持 WebTracking 和 AK 模式。 |
+| SLS | 上报到阿里云日志服务，支持 WebTracking、AK 和 API Key 模式。 |
 | HTTP | 批量 POST 到自定义服务端。 |
 | OTLP Trace | 将 GenAI 活动导出为 OpenTelemetry Trace。 |
 

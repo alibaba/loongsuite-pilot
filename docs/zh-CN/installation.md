@@ -6,10 +6,9 @@
 
 ## 前置要求
 
-- Node.js 18 或更高版本
-- `npm`
 - `curl` 或 `wget`
 - Windows 下需要 PowerShell 5.1 或更高版本
+- Node.js 18+ 与 `npm`：在受支持平台上由安装器自动下载**托管 Node.js 运行时**（见下文），无需预装；Linux musl（Alpine）与 Windows ARM64 等不受支持平台仍需自备 Node.js 18+ 与 `npm`
 
 ## 在 Linux 或 macOS 从公开包安装
 
@@ -79,6 +78,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--sls-logstore <name>` | SLS logstore。 |
 | `--sls-ak-id <key>` | AK 模式的 Access Key ID。 |
 | `--sls-ak-secret <key>` | AK 模式的 Access Key Secret。 |
+| `--sls-api-key <key>` | API Key 模式的 SLS API Key，不能和 AK/SK 参数同时使用。 |
 | `--mask-mode <mode>` | 脱敏模式：`all`、`none` 或 `custom`。 |
 | `--mask-types <list>` | 逗号分隔的脱敏类型，`--mask-mode custom` 时必填。 |
 | `--collect-log <true\|false>` | 开启或关闭 SLS 日志上报。 |
@@ -87,8 +87,51 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--cms-endpoint <url>` | CMS 或 ARMS Trace endpoint。 |
 | `--cms-workspace <name>` | CMS workspace 值。 |
 | `--service-name-prefix <name>` | 上报后端使用的 service name 前缀。 |
-| `--system-service` | 注册为系统级服务，而不是用户级服务。 |
+| `--system-service` | **已废弃** — 忽略。Init 系统现在自动检测（systemd-user → systemd-system → init.d）。 |
+| `--prefer-system-node` | 优先使用系统已安装的 Node.js，仅当系统没有可用 node 时才下载托管运行时（默认行为是始终下载并固定托管运行时）。 |
 | `--lang <lang>` | 输出语言：`zh` 或 `en`。 |
+
+## 托管 Node.js 运行时
+
+为避免「用户环境删除/切换 node 导致采集中断」，安装器默认从 OSS 下载并固定一份**托管 Node.js 运行时**与**预编译 node_modules**，采集运行时不再依赖系统 node：
+
+1. `ensure_managed_node`：按平台/架构下载 `node-v<版本>-<os>-<arch>` 包，校验 `SHASUMS256.txt` 后解压到 `<数据目录>/runtime/`，并把该 node 路径写入 `<数据目录>/node-bin`。macOS 会执行 `xattr -dr com.apple.quarantine` 去除隔离属性。
+2. `ensure_node_modules`：按 app 版本 × 平台 × 架构下载预编译 `node_modules`（含原生模块 `sqlite3`、`zstd-napi`），校验后替换安装目录下的 `node_modules`。
+3. 任一步失败都会回退到旧路径（`resolve_node` 找系统 node / `npm install --production --no-optional`），都不会硬失败；彻底无路可走才报错退出。
+
+平台覆盖与回退：
+
+| 平台/arch | 托管 node | 托管 node_modules | 行为 |
+|---|---|---|---|
+| macOS arm64 / x64 | ✅ | ✅ | 托管下载 |
+| Linux x64 / arm64（glibc） | ✅ | ✅ | 托管下载 |
+| Windows x64 | ✅ | ✅ | 托管下载 |
+| Linux musl（Alpine） | ❌ | ❌ | 回退系统 node + `npm install`，安装器会明确提示 |
+| Windows ARM64 | ❌ | ❌ | 回退系统 node + `npm install`，安装器会明确提示 |
+
+本地布局：
+
+```text
+~/.loongsuite-pilot/
+├── node-bin                       # 固定的 node 路径（默认指向 runtime/ 下的托管 node）
+└── runtime/
+    └── node-v22.22.2-darwin-arm64/
+        └── bin/node               # 托管运行时；daemon 与各 hook 的 fallback 首位
+```
+
+Windows 兼容两种产物布局：`bin\node.exe` 与官方 zip 的根目录 `node.exe`（优先前者）。
+
+运行期自愈：`node-bin` 指向的路径失效时，collector 的自愈逻辑会优先重指 `runtime/` 下的托管 node（永不被 node 版本管理器删除）；各 hook 脚本的只读 fallback 也把托管 runtime 路径放在第一位。
+
+环境变量覆盖（调试/内网镜像用）：
+
+| 变量 | 说明 |
+|------|------|
+| `LOONGSUITE_PILOT_NODE_VERSION` | 托管 node 版本，默认 `22.22.2`。 |
+| `LOONGSUITE_PILOT_NODE_DEPS_URL` | 托管 node 下载 base URL。 |
+| `LOONGSUITE_PILOT_NODE_MODULES_URL` | 预编译 node_modules 下载 base URL。 |
+
+诊断提示：安装日志出现 `下载托管 Node.js` / `Downloading managed Node.js` 即走托管路径；出现 `回退系统 node` / `falling back to system node` 说明托管下载失败或平台不受支持，随后会使用系统 node；`sha256 mismatch` 表示产物校验失败，已中止落盘并回退。
 
 ## 验证安装
 

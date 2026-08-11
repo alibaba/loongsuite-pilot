@@ -80,9 +80,10 @@ describe('QoderWorkTraceInput (CN variant)', () => {
     // so the round-tripped ms value may differ from the original due to
     // timezone handling. Verify the nanos are 6 zeros + ms digits (BigInt format).
     const entryRequest = entries.find(
-      e => e['event.name'] === 'other' && !e['gen_ai.step.id'],
+      e => e['event.name'] === 'other',
     );
     expect(entryRequest).toBeDefined();
+    expect(entryRequest!['gen_ai.step.id']?.toString()).toMatch(/:s1$/);
     const startNano = entryRequest!.time_unix_nano;
     expect(startNano).toMatch(/^\d{16,}$/);
     // Verify it ends with 000000 (BigInt ms×1_000_000n always does)
@@ -195,6 +196,44 @@ describe('QoderWorkTraceInput (CN variant)', () => {
     expect(stepResponse!['gen_ai.usage.input_tokens']).toBe(1234);
     expect(stepResponse!['gen_ai.usage.output_tokens']).toBe(567);
     expect(stepResponse!['gen_ai.usage.total_tokens']).toBe(1801);
+  });
+
+  it('emits later result windows in the same session with distinct turn ids', async () => {
+    const firstLines = buildFullSessionLines({
+      sessionId: 'sess-repeat',
+      messageId: 'msg-first',
+      startMs: 1000,
+      endMs: 2000,
+      stopReason: 'end_turn',
+      inputTokens: 10,
+      outputTokens: 2,
+      text: 'first',
+    });
+    await fs.appendFile(logFile, firstLines.join('\n') + '\n', 'utf-8');
+    seedOffset(0);
+
+    const first = await collectOnce(makeInput());
+    expect(first.length).toBeGreaterThan(0);
+    const firstTurnId = first.find(e => e['gen_ai.turn.id'])?.['gen_ai.turn.id'];
+    expect(firstTurnId).toBe('sess-repeat:t1');
+
+    const secondLines = buildFullSessionLines({
+      sessionId: 'sess-repeat',
+      messageId: 'msg-second',
+      startMs: 3000,
+      endMs: 4000,
+      stopReason: 'end_turn',
+      inputTokens: 20,
+      outputTokens: 4,
+      text: 'second',
+    });
+    await fs.appendFile(logFile, secondLines.join('\n') + '\n', 'utf-8');
+
+    const second = await collectOnce(makeInput());
+    expect(second.length).toBeGreaterThan(0);
+    const secondTurnId = second.find(e => e['gen_ai.turn.id'])?.['gen_ai.turn.id'];
+    expect(secondTurnId).toBe('sess-repeat:t2');
+    expect(secondTurnId).not.toBe(firstTurnId);
   });
 
   it('resolves model from set_model_policy', async () => {
