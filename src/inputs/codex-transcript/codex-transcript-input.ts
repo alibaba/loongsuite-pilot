@@ -13,6 +13,13 @@ import {
   nextInputMessagesForStep,
 } from './codex-transcript-builder.js';
 import {
+  CodexSubagentLinker,
+  extractCodexSpawnDescriptors,
+  MAX_LINK_DESCRIPTORS,
+  type CodexSubagentLink,
+  type CodexSubagentLinkSnapshot,
+} from './codex-subagent-linker.js';
+import {
   extractCodexPartialTurn,
   extractCodexPartialTurnWithBoundaries,
   extractCodexTranscriptMeta,
@@ -22,13 +29,24 @@ import {
   MAX_EMITTED_TERMINAL_TURNS,
   MAX_GLOBAL_EMITTED_TERMINAL_TURNS,
   type CodexActiveTranscriptTurn,
+  type CodexPendingFusionChild,
+  type CodexPendingFusionTurn,
+  type CodexPendingSubagentTurn,
   type CodexPendingTerminalTurn,
   type CodexTranscriptInputContext,
   type CodexTranscriptCheckpoint,
   type CodexTranscriptGlobalState,
+  type CodexTranscriptMeta,
   type CodexTranscriptSourceRange,
 } from './codex-transcript-types.js';
 import { stringValue, timestampMs } from './codex-transcript-utils.js';
+
+type ReliableCodexSubagentLink = CodexSubagentLink & {
+  parentTurnId: string;
+  parentTraceId: string;
+  parentToolCallId: string;
+  confidence: 'explicit_id' | 'agent_path';
+};
 
 const DEFAULT_SESSION_DIR = '~/.codex/sessions';
 const READ_CHUNK_SIZE = 1024 * 1024;
@@ -110,6 +128,14 @@ interface DynamicDirectoryWalkBudget {
   remainingRolloutFiles: number;
 }
 
+interface ParentTurnIndex {
+  filePath: string;
+  inode: number;
+  scanOffset: number;
+  complete: boolean;
+  turnIds: Set<string>;
+}
+
 export interface CodexTranscriptInputOptions extends InputOptions {
   sessionDir?: string;
   wakeupDir?: string;
@@ -129,8 +155,14 @@ export class CodexTranscriptInput extends BaseInput {
   private processedTerminalTurnIdsDirty = false;
   private processedTerminalTurnIds = new Set<string>();
   private processedTerminalTurnIdOrder: string[] = [];
+  private readonly subagentLinker = new CodexSubagentLinker();
+  private readonly reportedSubagentLinks = new Map<string, string>();
+  private readonly parentTurnIndexes = new Map<string, ParentTurnIndex>();
+  private lastSubagentLinkSummary = '';
   private lastWakeupMarkerCleanupAtMs = 0;
   private lastSpanContextCleanupAtMs = 0;
+  private readonly transcriptMetaByPath = new Map<string, ReturnType<typeof extractCodexTranscriptMeta>>();
+  private readonly transcriptPathByThreadId = new Map<string, string>();
 
   constructor(opts: CodexTranscriptInputOptions) {
     super({ stateStore: opts.stateStore, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
@@ -149,9 +181,17 @@ export class CodexTranscriptInput extends BaseInput {
 
   protected override async onStart(): Promise<void> {
     this.loadGlobalProcessedTerminalTurnIds();
-    for (const { filePath, baselineOnStart } of await this.discoverSessionFiles()) {
+    const discovered = await this.discoverSessionFiles();
+    await this.indexDiscoveredTranscriptOwners(discovered);
+    for (const { filePath, baselineOnStart } of discovered) {
       const key = this.stateKey(filePath);
-      if (baselineOnStart && !this.readCheckpoint(key)) await this.baselineFile(filePath, key);
+      const meta = this.transcriptMetaByPath.get(filePath);
+      const neededByPendingFusion = meta?.depth === 1
+        && meta.parentThreadId !== undefined
+        && this.hasPendingFusionForParent(meta.parentThreadId);
+      if (baselineOnStart && !neededByPendingFusion && !this.readCheckpoint(key)) {
+        await this.baselineFile(filePath, key);
+      }
     }
     this.saveGlobalProcessedTerminalTurnIds();
     await Promise.all([
@@ -181,13 +221,27 @@ export class CodexTranscriptInput extends BaseInput {
   protected override async collect(): Promise<AgentActivityEntry[]> {
     await this.cleanupExpiredSpanContexts(Date.now());
     let emittedCount = 0;
-    for (const { filePath } of await this.discoverSessionFiles()) {
+    const discovered = await this.discoverSessionFiles();
+    await this.indexDiscoveredTranscriptOwners(discovered);
+    discovered.sort((left, right) => {
+      const leftDepth = this.transcriptMetaByPath.get(left.filePath)?.depth ?? 0;
+      const rightDepth = this.transcriptMetaByPath.get(right.filePath)?.depth ?? 0;
+      return leftDepth - rightDepth || left.filePath.localeCompare(right.filePath);
+    });
+    for (const { filePath } of discovered) {
       emittedCount += await this.processFile(filePath);
     }
+    emittedCount += await this.finalizeReadySubagentFusions();
+    this.reportSubagentLinks();
     if (emittedCount > 0) {
       this.logger.debug('cycle produced entries', { count: emittedCount });
     }
     return [];
+  }
+
+  /** Current parent/child assignments, including diagnostic-only confidence levels. */
+  getSubagentLinkSnapshot(): CodexSubagentLinkSnapshot {
+    return this.subagentLinker.snapshot();
   }
 
   private emitEntryBatches(entries: AgentActivityEntry[]): number {
@@ -234,7 +288,9 @@ export class CodexTranscriptInput extends BaseInput {
         scanOffset: 0,
         activeTurn: null,
         pendingTerminal: null,
-        latestSessionMetaOffset: null,
+        pendingFusion: null,
+        pendingSubagent: null,
+        ownerSessionMetaOffset: null,
         emittedTerminalTurnIds: [],
       };
       checkpointChanged = true;
@@ -244,8 +300,77 @@ export class CodexTranscriptInput extends BaseInput {
       return 0;
     }
 
+    if (checkpoint.ownerSessionMetaOffset === null) {
+      checkpoint.ownerSessionMetaOffset = await findOwnerSessionMetaOffset(filePath, stat.size);
+      checkpointChanged = true;
+    }
+    await this.registerSubagentOwnerMeta(filePath, checkpoint.ownerSessionMetaOffset);
+
+    const ownerMeta = this.transcriptMetaByPath.get(filePath) ?? null;
+    const isDirectSubagent = ownerMeta?.threadSource === 'subagent' && ownerMeta.depth === 1;
+    const parentTurnIndex = isDirectSubagent
+      && ownerMeta?.parentThreadId
+      && (checkpoint.scanOffset < stat.size || checkpoint.activeTurn !== null || checkpoint.pendingTerminal !== null)
+      ? await this.refreshParentTurnIndex(ownerMeta.parentThreadId)
+      : undefined;
+    if (ownerMeta?.depth === 0) this.registerPersistedSubagentSpawns(checkpoint, ownerMeta.threadId);
+
     let emittedCount = 0;
     let processedTerminalCount = 0;
+    if (
+      isDirectSubagent
+      && checkpoint.pendingTerminal
+      && checkpoint.activeTurn?.turnId === checkpoint.pendingTerminal.turnId
+      && shouldSkipCopiedParentTurn(
+        checkpoint.pendingTerminal.turnId,
+        checkpoint.activeTurn.startedAtMs,
+        ownerMeta?.createdAtMs,
+        parentTurnIndex,
+      )
+    ) {
+      checkpoint.activeTurn = null;
+      checkpoint.pendingTerminal = null;
+      processedTerminalCount++;
+      checkpointChanged = true;
+    }
+    if (isDirectSubagent && ownerMeta && checkpoint.pendingSubagent) {
+      const candidate = this.reliableCandidateForChild(ownerMeta);
+      if (
+        !candidate
+        || candidate.parentThreadId !== checkpoint.pendingSubagent.parentThreadId
+        || candidate.parentTurnId !== checkpoint.pendingSubagent.parentTurnId
+        || candidate.parentTraceId !== checkpoint.pendingSubagent.parentTraceId
+        || candidate.parentToolCallId !== checkpoint.pendingSubagent.parentToolCallId
+      ) {
+        const released = await this.releaseCapturedSubagentIndependently(filePath, checkpoint);
+        emittedCount += released.emittedCount;
+        processedTerminalCount += released.processedTerminalCount;
+        checkpointChanged = true;
+      }
+    }
+    if (checkpoint.pendingFusion) {
+      const reliableChildren = this.reliableFusionChildren(
+        checkpoint.pendingFusion.parentThreadId,
+        checkpoint.pendingFusion.turnId,
+        checkpoint.pendingFusion.children,
+      );
+      if (reliableChildren.length !== checkpoint.pendingFusion.children.length) {
+        checkpoint.pendingFusion.children = reliableChildren;
+        if (checkpoint.activeTurn) checkpoint.activeTurn.subagentSpawns = reliableChildren;
+        checkpointChanged = true;
+      }
+    }
+    if (checkpoint.pendingFusion?.children.length === 0) {
+      const released = await this.releaseParentFusionIndependently(filePath, checkpoint);
+      emittedCount += released.emittedCount;
+      processedTerminalCount += released.processedTerminalCount;
+      checkpointChanged = true;
+    }
+    if (checkpoint.pendingFusion) {
+      if (checkpointChanged) this.saveCheckpoint(key, checkpoint);
+      return emittedCount;
+    }
+
     let scannedBytes = 0;
 
     const hadPendingTerminal = checkpoint.pendingTerminal !== null;
@@ -275,7 +400,11 @@ export class CodexTranscriptInput extends BaseInput {
         const payload = asRecord(line.record.payload);
         if (!payload) return;
         if (line.record.type === 'session_meta') {
-          checkpoint.latestSessionMetaOffset = line.startOffset;
+          checkpoint.ownerSessionMetaOffset = selectOwnerSessionMetaOffset(
+            filePath,
+            checkpoint.ownerSessionMetaOffset,
+            line,
+          );
           return;
         }
 
@@ -322,15 +451,107 @@ export class CodexTranscriptInput extends BaseInput {
           checkpoint.pendingTerminal = null;
           processedTerminalCount++;
         } else {
+          if (
+            isDirectSubagent
+            && terminalTurnId
+            && shouldSkipCopiedParentTurn(
+              terminalTurnId,
+              checkpoint.activeTurn.startedAtMs,
+              ownerMeta?.createdAtMs,
+              parentTurnIndex,
+            )
+          ) {
+            // Forked child rollouts contain copied parent history after their
+            // owning session_meta. It must not become the child's pending turn.
+            checkpoint.activeTurn = null;
+            processedTerminalCount++;
+            checkpoint.scanOffset = nextScanOffset;
+            continue;
+          }
+
+          const activeBeforeRecovery = terminalTurnId
+            ? cloneActiveTurn(checkpoint.activeTurn)
+            : null;
+          const reliableCandidate = isDirectSubagent
+            && ownerMeta
+            && !checkpoint.pendingSubagent
+            ? this.reliableCandidateForChild(ownerMeta)
+            : undefined;
+          // A reliably linked child must not emit an independent partial trace
+          // before the parent reaches task_complete. Recover on a clone so the
+          // persisted child snapshot keeps the complete turn range and empty
+          // emission registry for terminal capture or forced finalization.
+          const recoveryCheckpoint = reliableCandidate
+            ? {
+                ...checkpoint,
+                activeTurn: cloneActiveTurn(checkpoint.activeTurn),
+              }
+            : checkpoint;
           const recovered = await this.recoverTurnSegment(
             filePath,
-            checkpoint,
+            recoveryCheckpoint,
             nextScanOffset,
             terminalTurnId !== null,
           );
-          emittedCount += this.emitEntryBatches(recovered.entries);
+          if (
+            terminalTurnId
+            && activeBeforeRecovery
+            && recovered.kind !== 'unparseable'
+            && reliableCandidate
+          ) {
+            checkpoint.pendingSubagent = {
+              turnId: terminalTurnId,
+              parentThreadId: reliableCandidate.parentThreadId,
+              parentTurnId: reliableCandidate.parentTurnId,
+              parentTraceId: reliableCandidate.parentTraceId,
+              parentToolCallId: reliableCandidate.parentToolCallId,
+              confidence: reliableCandidate.confidence,
+              terminalEndOffset: nextScanOffset,
+              activeTurn: activeBeforeRecovery,
+            };
+            // The terminal range is consumed but deliberately not marked as
+            // emitted. The persisted snapshot is the sole owner until fusion.
+            checkpoint.activeTurn = null;
+            checkpoint.scanOffset = nextScanOffset;
+            processedTerminalCount++;
+            continue;
+          }
+          const fusionParentThreadId = ownerMeta?.threadId ?? sessionIdFromTranscriptPath(filePath);
+          const fusionChildren = terminalTurnId
+            ? this.reliableFusionChildren(
+                fusionParentThreadId,
+                terminalTurnId,
+                checkpoint.activeTurn?.subagentSpawns ?? [],
+              )
+            : [];
+          if (
+            terminalTurnId
+            && recovered.kind !== 'unparseable'
+            && fusionChildren.length > 0
+            && activeBeforeRecovery
+            // A root rollout can contain many completed historical turns. Only
+            // the terminal at the current file tail may still be waiting for
+            // its children. Gating an earlier terminal lets later children be
+            // consumed by that stale turn's time-order fallback.
+            && nextScanOffset >= stat.size
+          ) {
+            activeBeforeRecovery.subagentSpawns = fusionChildren;
+            checkpoint.activeTurn = activeBeforeRecovery;
+            checkpoint.pendingFusion = {
+              turnId: terminalTurnId,
+              parentThreadId: fusionParentThreadId,
+              parentTraceId: parentTraceIdForChildren(fusionChildren),
+              terminalEndOffset: nextScanOffset,
+              children: fusionChildren,
+            };
+            blocked = true;
+          } else if (!reliableCandidate) {
+            emittedCount += this.emitEntryBatches(recovered.entries);
+          }
           if (
             recovered.kind !== 'unparseable'
+            && !checkpoint.pendingFusion
+            && !reliableCandidate
             && recovered.consumedEndOffset > checkpoint.activeTurn.startOffset
           ) {
             checkpoint.activeTurn.startOffset = recovered.consumedEndOffset;
@@ -351,7 +572,7 @@ export class CodexTranscriptInput extends BaseInput {
                 sourceRecordCount: recovered.diagnostics.sourceRecordCount,
               });
               blocked = true;
-            } else {
+            } else if (!checkpoint.pendingFusion) {
               this.rememberProcessedTerminalTurnId(checkpoint, terminalTurnId);
               this.rememberGlobalProcessedTerminalTurnId(terminalTurnId);
               checkpoint.activeTurn = null;
@@ -425,6 +646,7 @@ export class CodexTranscriptInput extends BaseInput {
     checkpoint: CodexTranscriptCheckpoint,
     endOffset: number,
     terminal: boolean,
+    inferredTerminalStatus?: 'interrupted',
   ): Promise<SegmentRecoveryResult> {
     const activeTurn = checkpoint.activeTurn;
     if (!activeTurn) {
@@ -436,9 +658,9 @@ export class CodexTranscriptInput extends BaseInput {
       };
     }
     const records = await readJsonLines(filePath, activeTurn.startOffset, endOffset);
-    const metaRecord = checkpoint.latestSessionMetaOffset === null
+    const metaRecord = checkpoint.ownerSessionMetaOffset === null
       ? null
-      : await readJsonLineAt(filePath, checkpoint.latestSessionMetaOffset);
+      : await readJsonLineAt(filePath, checkpoint.ownerSessionMetaOffset);
     const meta = metaRecord ? extractCodexTranscriptMeta(metaRecord) : null;
     const extraction = extractCodexPartialTurnWithBoundaries(
       records.items,
@@ -457,6 +679,7 @@ export class CodexTranscriptInput extends BaseInput {
       };
     }
     const turn = extraction.turn;
+    if (inferredTerminalStatus) turn.status = inferredTerminalStatus;
     updateActiveTurnFromExtractedTurn(activeTurn, turn);
     if (turn.unmatchedTokenUsages.length > 0) {
       this.logger.warn('Codex transcript token samples could not be assigned to a response wave', {
@@ -481,7 +704,33 @@ export class CodexTranscriptInput extends BaseInput {
       ...(inputContext ? { inputContext } : {}),
       contextStepCount: committedTurn.steps.length,
     });
-    const readyEntries = built.entries;
+    if (meta?.depth === 0) {
+      const parentTraceId = stringValue(built.entries[0]?.trace_id);
+      if (parentTraceId) {
+        const spawns = extractCodexSpawnDescriptors(turn, records.items, parentTraceId);
+        this.subagentLinker.registerSpawns(spawns);
+        const fusionChildren = spawns.map(spawn => ({
+          parentToolCallId: spawn.parentToolCallId,
+          parentTraceId: spawn.parentTraceId,
+          spawnedAtMs: spawn.spawnedAtMs,
+          ...(spawn.taskName ? { taskName: spawn.taskName } : {}),
+          ...(spawn.agentPath ? { agentPath: spawn.agentPath } : {}),
+          ...(spawn.childThreadId ? { childThreadId: spawn.childThreadId } : {}),
+        }));
+        activeTurn.subagentSpawns = mergePendingFusionChildren(
+          activeTurn.subagentSpawns ?? [],
+          fusionChildren,
+        );
+      }
+    }
+    // A Codex model wave may finish with `stop` and then resume in the same
+    // transcript turn (for example after a subagent completion notification or
+    // a failed spawn retry). Emit a distinct lifecycle marker only after the
+    // authoritative task_complete / turn_aborted boundary. This also closes a
+    // turn whose final LLM response was already emitted in an earlier poll.
+    const readyEntries = terminal && built.entries.length > 0
+      ? [...built.entries, codexTurnEndMarker(built.entries, turn.status)]
+      : built.entries;
     const entries = this.filterNewSegmentEntries(readyEntries, activeTurn);
     const diagnostics: SegmentRecoveryDiagnostics = {
       sourceRecordCount: records.items.length,
@@ -583,6 +832,455 @@ export class CodexTranscriptInput extends BaseInput {
     return { ...context, delta: nextInputMessagesForStep(lastStep) };
   }
 
+  private async registerSubagentOwnerMeta(
+    filePath: string,
+    ownerSessionMetaOffset: number | null,
+  ): Promise<void> {
+    if (ownerSessionMetaOffset === null) return;
+    const threadId = sessionIdFromTranscriptPath(filePath);
+    if (this.subagentLinker.hasThread(threadId)) return;
+    const record = await readJsonLineAt(filePath, ownerSessionMetaOffset);
+    const meta = record ? extractCodexTranscriptMeta(record) : null;
+    if (meta) {
+      this.transcriptMetaByPath.set(filePath, meta);
+      this.transcriptPathByThreadId.set(meta.threadId, filePath);
+      this.subagentLinker.registerChild(meta);
+    }
+  }
+
+  private async indexDiscoveredTranscriptOwners(files: DiscoveredSessionFile[]): Promise<void> {
+    this.transcriptMetaByPath.clear();
+    this.transcriptPathByThreadId.clear();
+    for (const { filePath } of files) {
+      let stat;
+      try {
+        stat = await fs.stat(filePath);
+      } catch {
+        continue;
+      }
+      const checkpoint = this.readCheckpoint(this.stateKey(filePath));
+      const ownerOffset = checkpoint?.ownerSessionMetaOffset
+        ?? await findOwnerSessionMetaOffset(filePath, stat.size);
+      if (ownerOffset === null) continue;
+      const record = await readJsonLineAt(filePath, ownerOffset);
+      const meta = record ? extractCodexTranscriptMeta(record) : null;
+      if (!meta) continue;
+      this.transcriptMetaByPath.set(filePath, meta);
+      this.transcriptPathByThreadId.set(meta.threadId, filePath);
+      this.subagentLinker.registerChild(meta);
+    }
+  }
+
+  /**
+   * Build an incremental ownership index for the exact parent rollout named by
+   * a depth-one child's session_meta. An exact turn-id hit is positive evidence
+   * of copied parent history; a miss is authoritative only after this snapshot
+   * has been scanned to a stable EOF.
+   */
+  private async refreshParentTurnIndex(parentThreadId: string): Promise<ParentTurnIndex | undefined> {
+    const filePath = this.transcriptPathByThreadId.get(parentThreadId);
+    if (!filePath) return undefined;
+    const meta = this.transcriptMetaByPath.get(filePath);
+    if (!meta || meta.threadId !== parentThreadId || meta.depth !== 0) return undefined;
+
+    let stat;
+    try {
+      stat = await fs.stat(filePath);
+    } catch {
+      return undefined;
+    }
+
+    let index = this.parentTurnIndexes.get(parentThreadId);
+    if (
+      !index
+      || index.filePath !== filePath
+      || index.inode !== stat.ino
+      || index.scanOffset > stat.size
+    ) {
+      index = {
+        filePath,
+        inode: stat.ino,
+        scanOffset: 0,
+        complete: false,
+        turnIds: new Set<string>(),
+      };
+      this.parentTurnIndexes.set(parentThreadId, index);
+    }
+
+    if (index.scanOffset < stat.size) {
+      const scan = await scanJsonLines(filePath, index.scanOffset, stat.size, line => {
+        const payload = asRecord(line.record.payload);
+        if (!payload) return;
+        const turnId = turnIdForStart(line.record, payload)
+          ?? terminalTurnIdFor(line.record, payload);
+        if (turnId) index!.turnIds.add(turnId);
+      });
+      index.scanOffset = scan.nextOffset;
+    }
+
+    // Re-stat after scanning so a concurrent parent append cannot turn a stale
+    // EOF snapshot into an authoritative negative ownership decision.
+    try {
+      const current = await fs.stat(filePath);
+      index.complete = current.ino === index.inode && index.scanOffset >= current.size;
+    } catch {
+      index.complete = false;
+    }
+    this.parentTurnIndexes.delete(parentThreadId);
+    this.parentTurnIndexes.set(parentThreadId, index);
+    trimOldestMap(this.parentTurnIndexes, MAX_LINK_DESCRIPTORS);
+    return index;
+  }
+
+  private registerPersistedSubagentSpawns(
+    checkpoint: CodexTranscriptCheckpoint,
+    parentThreadId: string,
+  ): void {
+    const active = checkpoint.activeTurn;
+    if (!active?.subagentSpawns?.length) return;
+    this.subagentLinker.registerSpawns(active.subagentSpawns.map(spawn => ({
+      parentThreadId,
+      parentTurnId: active.turnId,
+      parentTraceId: spawn.parentTraceId,
+      parentToolCallId: spawn.parentToolCallId,
+      spawnedAtMs: spawn.spawnedAtMs,
+      ...(spawn.taskName ? { taskName: spawn.taskName } : {}),
+      ...(spawn.agentPath ? { agentPath: spawn.agentPath } : {}),
+      ...(spawn.childThreadId ? { childThreadId: spawn.childThreadId } : {}),
+    })));
+  }
+
+  private hasPendingFusionForParent(parentThreadId: string): boolean {
+    for (const key of this.stateStore.keys()) {
+      if (!key.startsWith(`${this.id}:`)) continue;
+      const checkpoint = this.readCheckpoint(key);
+      if (checkpoint?.pendingFusion?.parentThreadId === parentThreadId) return true;
+    }
+    return false;
+  }
+
+  private reliableCandidateForChild(
+    meta: CodexTranscriptMeta,
+  ): ReliableCodexSubagentLink | undefined {
+    if (!meta.parentThreadId) return undefined;
+    const link = this.subagentLinker.snapshot().links.find(candidate => (
+      candidate.childThreadId === meta.threadId
+      && candidate.parentThreadId === meta.parentThreadId
+      && candidate.parentTurnId !== undefined
+      && candidate.parentTraceId !== undefined
+      && candidate.parentToolCallId !== undefined
+      && isReliableFusionConfidence(candidate.confidence)
+    ));
+    if (
+      !link
+      || !link.parentTurnId
+      || !link.parentTraceId
+      || !link.parentToolCallId
+      || !isReliableFusionConfidence(link.confidence)
+    ) return undefined;
+    for (const [filePath, parentMeta] of this.transcriptMetaByPath) {
+      if (parentMeta?.threadId !== link.parentThreadId || parentMeta.depth !== 0) continue;
+      const checkpoint = this.readCheckpoint(this.stateKey(filePath));
+      const parentTurnId = checkpoint?.pendingFusion?.turnId ?? checkpoint?.activeTurn?.turnId;
+      const spawns = checkpoint?.pendingFusion?.children ?? checkpoint?.activeTurn?.subagentSpawns ?? [];
+      if (
+        parentTurnId === link.parentTurnId
+        && spawns.some(spawn => spawn.parentToolCallId === link.parentToolCallId)
+      ) {
+        return {
+          ...link,
+          parentTurnId: link.parentTurnId,
+          parentTraceId: link.parentTraceId,
+          parentToolCallId: link.parentToolCallId,
+          confidence: link.confidence,
+        };
+      }
+    }
+    return undefined;
+  }
+
+  private reliableFusionChildren(
+    parentThreadId: string,
+    parentTurnId: string,
+    children: CodexPendingFusionChild[],
+  ): CodexPendingFusionChild[] {
+    const links = this.subagentLinker.snapshot().links;
+    const reliable: CodexPendingFusionChild[] = [];
+    for (const child of children) {
+      const matches = links.filter(link => (
+        link.parentThreadId === parentThreadId
+        && link.parentTurnId === parentTurnId
+        && link.parentToolCallId === child.parentToolCallId
+        && isReliableFusionConfidence(link.confidence)
+      ));
+      if (matches.length !== 1) continue;
+      const link = matches[0]!;
+      const childPath = this.transcriptPathByThreadId.get(link.childThreadId);
+      const checkpoint = childPath ? this.readCheckpoint(this.stateKey(childPath)) : null;
+      const captured = checkpoint?.pendingSubagent;
+      if (captured && captured.parentToolCallId !== child.parentToolCallId) continue;
+      if (
+        checkpoint
+        && !captured
+        && checkpoint.activeTurn === null
+        && checkpoint.emittedTerminalTurnIds.length > 0
+      ) continue;
+      reliable.push({ ...child, childThreadId: link.childThreadId });
+    }
+    return reliable;
+  }
+
+  private async releaseParentFusionIndependently(
+    filePath: string,
+    checkpoint: CodexTranscriptCheckpoint,
+  ): Promise<{ emittedCount: number; processedTerminalCount: number }> {
+    const pending = checkpoint.pendingFusion;
+    if (!pending) return { emittedCount: 0, processedTerminalCount: 0 };
+
+    checkpoint.scanOffset = Math.max(checkpoint.scanOffset, pending.terminalEndOffset);
+    checkpoint.pendingFusion = null;
+    this.logger.warn('Codex parent fusion has no reliable child candidates; emitting independently', {
+      transcriptPath: filePath,
+      turnId: pending.turnId,
+    });
+
+    if (!checkpoint.activeTurn) {
+      return { emittedCount: 0, processedTerminalCount: 0 };
+    }
+    const recovered = await this.recoverTurnSegment(
+      filePath,
+      checkpoint,
+      pending.terminalEndOffset,
+      true,
+    );
+    if (recovered.kind === 'unparseable') {
+      checkpoint.pendingTerminal = newPendingTerminal(
+        pending.turnId,
+        pending.terminalEndOffset,
+        recovered.diagnostics.sourceRecordCount,
+      );
+      return { emittedCount: 0, processedTerminalCount: 0 };
+    }
+
+    const emittedCount = this.emitEntryBatches(recovered.entries);
+    this.rememberProcessedTerminalTurnId(checkpoint, pending.turnId);
+    this.rememberGlobalProcessedTerminalTurnId(pending.turnId);
+    checkpoint.activeTurn = null;
+    checkpoint.pendingTerminal = null;
+    return { emittedCount, processedTerminalCount: 1 };
+  }
+
+  private async releaseCapturedSubagentIndependently(
+    filePath: string,
+    checkpoint: CodexTranscriptCheckpoint,
+  ): Promise<{ emittedCount: number; processedTerminalCount: number }> {
+    const captured = checkpoint.pendingSubagent;
+    if (!captured) return { emittedCount: 0, processedTerminalCount: 0 };
+    const recoveryCheckpoint: CodexTranscriptCheckpoint = {
+      ...checkpoint,
+      activeTurn: cloneActiveTurn(captured.activeTurn),
+      pendingSubagent: null,
+    };
+    const recovered = await this.recoverTurnSegment(
+      filePath,
+      recoveryCheckpoint,
+      captured.terminalEndOffset,
+      true,
+    );
+    if (recovered.kind === 'unparseable') {
+      this.logger.warn('captured Codex child could not be rebuilt for independent fallback', {
+        transcriptPath: filePath,
+        turnId: captured.turnId,
+        parentToolCallId: captured.parentToolCallId,
+      });
+      return { emittedCount: 0, processedTerminalCount: 0 };
+    }
+    const emittedCount = this.emitEntryBatches(recovered.entries);
+    this.rememberProcessedTerminalTurnId(checkpoint, captured.turnId);
+    this.rememberGlobalProcessedTerminalTurnId(captured.turnId);
+    checkpoint.pendingSubagent = null;
+    return { emittedCount, processedTerminalCount: 1 };
+  }
+
+  private async finalizeReadySubagentFusions(): Promise<number> {
+    let emittedCount = 0;
+    for (const [parentPath, meta] of this.transcriptMetaByPath) {
+      if (!meta || meta.depth !== 0) continue;
+      const parentKey = this.stateKey(parentPath);
+      const parentCheckpoint = this.readCheckpoint(parentKey);
+      const pending = parentCheckpoint?.pendingFusion;
+      if (!parentCheckpoint || !pending || !parentCheckpoint.activeTurn) continue;
+
+      const resolved = pending.children.map(child => {
+        const childThreadId = child.childThreadId;
+        const childPath = childThreadId ? this.transcriptPathByThreadId.get(childThreadId) : undefined;
+        const childCheckpoint = childPath ? this.readCheckpoint(this.stateKey(childPath)) : null;
+        const captured = childCheckpoint?.pendingSubagent;
+        return { child, childThreadId, childPath, childCheckpoint, captured };
+      });
+
+      const childOutputs: Array<{
+        entries: AgentActivityEntry[];
+        path: string;
+        checkpoint: CodexTranscriptCheckpoint;
+        turnId: string;
+        parentToolCallId: string;
+        source: 'captured-terminal' | 'forced-parent-terminal';
+      }> = [];
+      const degradedToolCallIds: string[] = [];
+      for (const item of resolved) {
+        const childCheckpoint = item.childCheckpoint;
+        const childPath = item.childPath;
+        const childThreadId = item.childThreadId;
+        if (!childCheckpoint || !childPath || !childThreadId) {
+          degradedToolCallIds.push(item.child.parentToolCallId);
+          continue;
+        }
+        const captured = item.captured;
+        const capturedMatches = captured
+          && captured.parentThreadId === pending.parentThreadId
+          && captured.parentTurnId === pending.turnId
+          && captured.parentTraceId === pending.parentTraceId
+          && captured.parentToolCallId === item.child.parentToolCallId;
+        const canForceActive = !captured
+          && childCheckpoint.activeTurn !== null
+          && !hasEmittedActiveTurnState(childCheckpoint.activeTurn)
+          && childCheckpoint.scanOffset > childCheckpoint.activeTurn.startOffset;
+        if (!capturedMatches && !canForceActive) {
+          degradedToolCallIds.push(item.child.parentToolCallId);
+          continue;
+        }
+
+        const activeSnapshot = capturedMatches
+          ? captured.activeTurn
+          : childCheckpoint.activeTurn!;
+        const terminalEndOffset = capturedMatches
+          ? captured.terminalEndOffset
+          : childCheckpoint.scanOffset;
+        const recoveryCheckpoint: CodexTranscriptCheckpoint = {
+          ...childCheckpoint,
+          activeTurn: cloneActiveTurn(activeSnapshot),
+          pendingSubagent: null,
+        };
+        const recovered = await this.recoverTurnSegment(
+          childPath,
+          recoveryCheckpoint,
+          terminalEndOffset,
+          true,
+          capturedMatches ? undefined : 'interrupted',
+        );
+        if (recovered.kind === 'unparseable') {
+          degradedToolCallIds.push(item.child.parentToolCallId);
+          continue;
+        }
+        childOutputs.push({
+          entries: rewriteSubagentEntries(recovered.entries, {
+            parentThreadId: pending.parentThreadId,
+            parentTurnId: pending.turnId,
+            parentTraceId: pending.parentTraceId,
+            parentToolCallId: item.child.parentToolCallId,
+            childThreadId,
+            agentName: this.transcriptMetaByPath.get(childPath)?.agentNickname
+              ?? item.child.agentPath
+              ?? item.child.taskName,
+          }),
+          path: childPath,
+          checkpoint: childCheckpoint,
+          turnId: activeSnapshot.turnId,
+          parentToolCallId: item.child.parentToolCallId,
+          source: capturedMatches ? 'captured-terminal' : 'forced-parent-terminal',
+        });
+      }
+
+      const parentRecovered = await this.recoverTurnSegment(
+        parentPath,
+        parentCheckpoint,
+        pending.terminalEndOffset,
+        true,
+      );
+      if (parentRecovered.kind === 'unparseable') continue;
+
+      if (degradedToolCallIds.length > 0) {
+        this.logger.warn('Codex parent reached task_complete before every child could be rebuilt; degrading missing children', {
+          transcriptPath: parentPath,
+          turnId: pending.turnId,
+          parentToolCallIds: degradedToolCallIds,
+        });
+      }
+
+      for (const output of childOutputs) {
+        emittedCount += this.emitEntryBatches(output.entries);
+        this.rememberProcessedTerminalTurnId(output.checkpoint, output.turnId);
+        this.rememberGlobalProcessedTerminalTurnId(output.turnId);
+        if (
+          output.source === 'captured-terminal'
+          && output.checkpoint.pendingSubagent?.parentToolCallId === output.parentToolCallId
+        ) {
+          output.checkpoint.pendingSubagent = null;
+        } else if (
+          output.source === 'forced-parent-terminal'
+          && output.checkpoint.activeTurn?.turnId === output.turnId
+        ) {
+          output.checkpoint.activeTurn = null;
+          output.checkpoint.pendingTerminal = null;
+        }
+        this.saveCheckpoint(this.stateKey(output.path), output.checkpoint);
+      }
+      emittedCount += this.emitEntryBatches(parentRecovered.entries);
+      this.rememberProcessedTerminalTurnId(parentCheckpoint, pending.turnId);
+      this.rememberGlobalProcessedTerminalTurnId(pending.turnId);
+      parentCheckpoint.activeTurn = null;
+      parentCheckpoint.pendingFusion = null;
+      this.saveCheckpoint(parentKey, parentCheckpoint);
+    }
+    this.saveGlobalProcessedTerminalTurnIds();
+    return emittedCount;
+  }
+
+  private reportSubagentLinks(): void {
+    const snapshot = this.subagentLinker.snapshot();
+    if (snapshot.detectedChildren === 0 && snapshot.detectedSpawns === 0) return;
+
+    const summary = [
+      snapshot.detectedChildren,
+      snapshot.detectedSpawns,
+      snapshot.linkedChildren,
+      snapshot.orphanChildren,
+    ].join(':');
+    if (summary !== this.lastSubagentLinkSummary) {
+      this.lastSubagentLinkSummary = summary;
+      this.logger.info('Codex subagent linker summary', {
+        detectedChildren: snapshot.detectedChildren,
+        detectedSpawns: snapshot.detectedSpawns,
+        linkedChildren: snapshot.linkedChildren,
+        orphanChildren: snapshot.orphanChildren,
+      });
+    }
+
+    for (const link of snapshot.links) {
+      const fingerprint = [
+        link.confidence,
+        link.parentToolCallId ?? '',
+        link.orphanReason ?? '',
+      ].join(':');
+      if (this.reportedSubagentLinks.get(link.childThreadId) === fingerprint) continue;
+      // Refresh insertion order when a link changes so the bounded map keeps
+      // the most recently reported lifecycle fingerprints.
+      this.reportedSubagentLinks.delete(link.childThreadId);
+      this.reportedSubagentLinks.set(link.childThreadId, fingerprint);
+      trimOldestMap(this.reportedSubagentLinks, MAX_LINK_DESCRIPTORS);
+      this.logger.debug('Codex subagent link resolved', {
+        childThreadId: link.childThreadId,
+        parentThreadId: link.parentThreadId,
+        parentTurnId: link.parentTurnId,
+        parentToolCallId: link.parentToolCallId,
+        agentPath: link.agentPath,
+        confidence: link.confidence,
+        orphanReason: link.orphanReason,
+      });
+    }
+  }
+
   private filterNewSegmentEntries(
     entries: AgentActivityEntry[],
     activeTurn: NonNullable<CodexTranscriptCheckpoint['activeTurn']>,
@@ -601,6 +1299,10 @@ export class CodexTranscriptInput extends BaseInput {
     for (const entry of entries) {
       const eventName = entry['event.name'];
       if (eventName === 'other') {
+        if (entry['gen_ai.turn.end'] === true) {
+          out.push(entry);
+          continue;
+        }
         if (activeTurn.emittedPrompt) continue;
         activeTurn.emittedPrompt = true;
         out.push(entry);
@@ -753,14 +1455,18 @@ export class CodexTranscriptInput extends BaseInput {
     } catch {
       return;
     }
-    let latestSessionMetaOffset: number | null = null;
+    let ownerSessionMetaOffset: number | null = null;
     let activeTurn: CodexActiveTranscriptTurn | null = null;
     const completedTurnIds: string[] = [];
     const { nextOffset } = await scanJsonLines(filePath, 0, stat.size, line => {
       const payload = asRecord(line.record.payload);
       if (!payload) return;
       if (line.record.type === 'session_meta') {
-        latestSessionMetaOffset = line.startOffset;
+        ownerSessionMetaOffset = selectOwnerSessionMetaOffset(
+          filePath,
+          ownerSessionMetaOffset,
+          line,
+        );
         return;
       }
       const turnId = turnIdForStart(line.record, payload);
@@ -787,7 +1493,9 @@ export class CodexTranscriptInput extends BaseInput {
       scanOffset: nextOffset,
       activeTurn,
       pendingTerminal: null,
-      latestSessionMetaOffset,
+      pendingFusion: null,
+      pendingSubagent: null,
+      ownerSessionMetaOffset,
       emittedTerminalTurnIds: [],
     });
   }
@@ -979,32 +1687,9 @@ export class CodexTranscriptInput extends BaseInput {
     const raw = this.stateStore.get(key).extra?.codexTranscript;
     const value = asRecord(raw);
     if (!value || typeof value.inode !== 'number' || typeof value.scanOffset !== 'number') return null;
-    const active = asRecord(value.activeTurn);
-    const model = stringValue(active?.model);
-    const cwd = stringValue(active?.cwd);
-    const developerInstructions = stringValue(active?.developerInstructions);
-    const activeTurn = active
-      && typeof active.turnId === 'string'
-      && typeof active.startOffset === 'number'
-      && typeof active.startedAtMs === 'number'
-      ? {
-          turnId: active.turnId,
-          startOffset: active.startOffset,
-          startedAtMs: active.startedAtMs,
-          ...(model ? { model } : {}),
-          ...(cwd ? { cwd } : {}),
-          ...(developerInstructions ? { developerInstructions } : {}),
-          emittedPrompt: active.emittedPrompt === true,
-          emittedStepCount: typeof active.emittedStepCount === 'number' ? active.emittedStepCount : 0,
-          emittedStepRequestIds: stringArray(active.emittedStepRequestIds),
-          emittedStepResponseIds: stringArray(active.emittedStepResponseIds),
-          emittedToolCallIds: stringArray(active.emittedToolCallIds),
-          emittedToolResultIds: stringArray(active.emittedToolResultIds),
-          inputContext: parseInputContext(active.inputContext),
-        }
-      : null;
+    const activeTurn = parseActiveTranscriptTurn(value.activeTurn);
     const pending = asRecord(value.pendingTerminal);
-    const pendingTerminal = pending
+    let pendingTerminal = pending
       && typeof pending.turnId === 'string'
       && typeof pending.terminalEndOffset === 'number'
       ? {
@@ -1016,13 +1701,70 @@ export class CodexTranscriptInput extends BaseInput {
           ...(typeof pending.sourceRecordCount === 'number' ? { sourceRecordCount: pending.sourceRecordCount } : {}),
         }
       : null;
+    const fusion = asRecord(value.pendingFusion);
+    const fusionChildren = parsePendingFusionChildren(fusion?.children);
+    const pendingFusion: CodexPendingFusionTurn | null = fusion
+      && typeof fusion.turnId === 'string'
+      && typeof fusion.parentThreadId === 'string'
+      && typeof fusion.parentTraceId === 'string'
+      && typeof fusion.terminalEndOffset === 'number'
+      && fusionChildren.length > 0
+      ? {
+          turnId: fusion.turnId,
+          parentThreadId: fusion.parentThreadId,
+          parentTraceId: fusion.parentTraceId,
+          terminalEndOffset: fusion.terminalEndOffset,
+          children: fusionChildren,
+        }
+      : null;
+    const subagent = asRecord(value.pendingSubagent);
+    const capturedActiveTurn = parseActiveTranscriptTurn(subagent?.activeTurn);
+    const confidence = subagent?.confidence;
+    const pendingSubagent: CodexPendingSubagentTurn | null = subagent
+      && typeof subagent.turnId === 'string'
+      && typeof subagent.parentThreadId === 'string'
+      && typeof subagent.parentTurnId === 'string'
+      && typeof subagent.parentTraceId === 'string'
+      && typeof subagent.parentToolCallId === 'string'
+      && (confidence === 'explicit_id' || confidence === 'agent_path')
+      && typeof subagent.terminalEndOffset === 'number'
+      && capturedActiveTurn
+      ? {
+          turnId: subagent.turnId,
+          parentThreadId: subagent.parentThreadId,
+          parentTurnId: subagent.parentTurnId,
+          parentTraceId: subagent.parentTraceId,
+          parentToolCallId: subagent.parentToolCallId,
+          confidence,
+          terminalEndOffset: subagent.terminalEndOffset,
+          activeTurn: capturedActiveTurn,
+        }
+      : null;
+    if (
+      subagent
+      && !pendingSubagent
+      && activeTurn
+      && typeof subagent.turnId === 'string'
+      && typeof subagent.terminalEndOffset === 'number'
+      && activeTurn.turnId === subagent.turnId
+    ) {
+      // Older pendingSubagent checkpoints blocked the child file and retained
+      // the active turn at the top level. They have no reliable spawn identity,
+      // so recover them through the normal independent terminal path.
+      pendingTerminal ??= newPendingTerminal(subagent.turnId, subagent.terminalEndOffset, 0);
+    }
     return {
       inode: value.inode,
       scanOffset: value.scanOffset,
       activeTurn,
       pendingTerminal,
-      latestSessionMetaOffset: typeof value.latestSessionMetaOffset === 'number'
-        ? value.latestSessionMetaOffset
+      pendingFusion,
+      pendingSubagent,
+      // Do not migrate legacy latestSessionMetaOffset. In forked rollouts that
+      // value commonly points at copied parent metadata, so processFile will
+      // perform one bounded header scan to recover the owning meta safely.
+      ownerSessionMetaOffset: typeof value.ownerSessionMetaOffset === 'number'
+        ? value.ownerSessionMetaOffset
         : null,
       emittedTerminalTurnIds: Array.isArray(value.emittedTerminalTurnIds)
         ? value.emittedTerminalTurnIds.filter((item): item is string => typeof item === 'string')
@@ -1267,6 +2009,37 @@ async function scanJsonLines(
   }
 }
 
+async function findOwnerSessionMetaOffset(
+  filePath: string,
+  endOffset: number,
+): Promise<number | null> {
+  let ownerOffset: number | null = null;
+  let sawSessionMeta = false;
+  await scanJsonLines(filePath, 0, endOffset, line => {
+    if (line.record.type !== 'session_meta') {
+      // Codex writes the owning meta and any copied fork metadata as a header.
+      // Stop before scanning the potentially large inherited conversation.
+      return sawSessionMeta ? false : undefined;
+    }
+    sawSessionMeta = true;
+    ownerOffset = selectOwnerSessionMetaOffset(filePath, ownerOffset, line);
+    return undefined;
+  });
+  return ownerOffset;
+}
+
+function selectOwnerSessionMetaOffset(
+  filePath: string,
+  currentOffset: number | null,
+  line: JsonLine,
+): number | null {
+  const meta = extractCodexTranscriptMeta(line.record);
+  if (!meta) return currentOffset;
+  const rolloutThreadId = sessionIdFromTranscriptPath(filePath);
+  if (meta.threadId === rolloutThreadId) return line.startOffset;
+  return currentOffset ?? line.startOffset;
+}
+
 async function readJsonLineAt(filePath: string, offset: number): Promise<Record<string, unknown> | null> {
   const handle = await fs.open(filePath, 'r');
   try {
@@ -1370,6 +2143,199 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string')
     : [];
+}
+
+function parseActiveTranscriptTurn(value: unknown): CodexActiveTranscriptTurn | null {
+  const active = asRecord(value);
+  if (
+    !active
+    || typeof active.turnId !== 'string'
+    || typeof active.startOffset !== 'number'
+    || typeof active.startedAtMs !== 'number'
+  ) return null;
+  const model = stringValue(active.model);
+  const cwd = stringValue(active.cwd);
+  const developerInstructions = stringValue(active.developerInstructions);
+  return {
+    turnId: active.turnId,
+    startOffset: active.startOffset,
+    startedAtMs: active.startedAtMs,
+    ...(model ? { model } : {}),
+    ...(cwd ? { cwd } : {}),
+    ...(developerInstructions ? { developerInstructions } : {}),
+    emittedPrompt: active.emittedPrompt === true,
+    emittedStepCount: typeof active.emittedStepCount === 'number' ? active.emittedStepCount : 0,
+    emittedStepRequestIds: stringArray(active.emittedStepRequestIds),
+    emittedStepResponseIds: stringArray(active.emittedStepResponseIds),
+    emittedToolCallIds: stringArray(active.emittedToolCallIds),
+    emittedToolResultIds: stringArray(active.emittedToolResultIds),
+    inputContext: parseInputContext(active.inputContext),
+    subagentSpawns: parsePendingFusionChildren(active.subagentSpawns),
+  };
+}
+
+function isReliableFusionConfidence(
+  confidence: CodexSubagentLink['confidence'],
+): confidence is 'explicit_id' | 'agent_path' {
+  return confidence === 'explicit_id' || confidence === 'agent_path';
+}
+
+function parsePendingFusionChildren(value: unknown): CodexPendingFusionChild[] {
+  if (!Array.isArray(value)) return [];
+  const children: CodexPendingFusionChild[] = [];
+  for (const item of value) {
+    const child = asRecord(item);
+    if (
+      !child
+      || typeof child.parentToolCallId !== 'string'
+      || typeof child.parentTraceId !== 'string'
+      || typeof child.spawnedAtMs !== 'number'
+    ) continue;
+    children.push({
+      parentToolCallId: child.parentToolCallId,
+      parentTraceId: child.parentTraceId,
+      spawnedAtMs: child.spawnedAtMs,
+      ...(typeof child.taskName === 'string' ? { taskName: child.taskName } : {}),
+      ...(typeof child.agentPath === 'string' ? { agentPath: child.agentPath } : {}),
+      ...(typeof child.childThreadId === 'string' ? { childThreadId: child.childThreadId } : {}),
+    });
+  }
+  return children;
+}
+
+function mergePendingFusionChildren(
+  current: CodexPendingFusionChild[],
+  incoming: CodexPendingFusionChild[],
+): CodexPendingFusionChild[] {
+  const merged = new Map(current.map(child => [child.parentToolCallId, child]));
+  for (const child of incoming) {
+    merged.set(child.parentToolCallId, { ...merged.get(child.parentToolCallId), ...child });
+  }
+  return [...merged.values()];
+}
+
+function classifyParentTurnOwnership(
+  turnId: string,
+  index: ParentTurnIndex | undefined,
+): 'copied' | 'child' | 'unknown' {
+  if (!index) return 'unknown';
+  if (index.turnIds.has(turnId)) return 'copied';
+  return index.complete ? 'child' : 'unknown';
+}
+
+function shouldSkipCopiedParentTurn(
+  turnId: string,
+  observedStartedAtMs: number,
+  ownerCreatedAtMs: number | undefined,
+  index: ParentTurnIndex | undefined,
+): boolean {
+  const ownership = classifyParentTurnOwnership(turnId, index);
+  if (ownership === 'copied') return true;
+  if (ownership === 'child' || ownerCreatedAtMs === undefined) return false;
+  return isCopiedParentTurnByTime(turnId, observedStartedAtMs, ownerCreatedAtMs);
+}
+
+function isCopiedParentTurnByTime(
+  turnId: string,
+  observedStartedAtMs: number,
+  ownerCreatedAtMs: number,
+): boolean {
+  const uuidTimestamp = uuidV7TimestampMs(turnId);
+  return (uuidTimestamp ?? observedStartedAtMs) < ownerCreatedAtMs;
+}
+
+function trimOldestMap<T>(values: Map<string, T>, maxSize: number): void {
+  while (values.size > maxSize) {
+    const oldest = values.keys().next().value as string | undefined;
+    if (oldest === undefined) return;
+    values.delete(oldest);
+  }
+}
+
+function uuidV7TimestampMs(value: string): number | undefined {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    return undefined;
+  }
+  const timestamp = Number.parseInt(value.replace(/-/g, '').slice(0, 12), 16);
+  return Number.isSafeInteger(timestamp) ? timestamp : undefined;
+}
+
+function cloneActiveTurn(activeTurn: CodexActiveTranscriptTurn): CodexActiveTranscriptTurn {
+  return structuredClone(activeTurn);
+}
+
+function hasEmittedActiveTurnState(activeTurn: CodexActiveTranscriptTurn): boolean {
+  return activeTurn.emittedPrompt === true
+    || (activeTurn.emittedStepCount ?? 0) > 0
+    || (activeTurn.emittedStepRequestIds?.length ?? 0) > 0
+    || (activeTurn.emittedStepResponseIds?.length ?? 0) > 0
+    || (activeTurn.emittedToolCallIds?.length ?? 0) > 0
+    || (activeTurn.emittedToolResultIds?.length ?? 0) > 0;
+}
+
+function parentTraceIdForChildren(children: CodexPendingFusionChild[]): string {
+  return children[0]?.parentTraceId ?? '';
+}
+
+function rewriteSubagentEntries(
+  entries: AgentActivityEntry[],
+  context: {
+    parentThreadId: string;
+    parentTurnId: string;
+    parentTraceId: string;
+    parentToolCallId: string;
+    childThreadId: string;
+    agentName?: string;
+  },
+): AgentActivityEntry[] {
+  const parentTurnId = `${context.parentThreadId}:${context.parentTurnId}`;
+  // The converter consumes every `other` record as a turn-level ENTRY input
+  // before it partitions subagent records. Keep the child prompt on its
+  // llm.request and omit child `other` markers so they cannot pollute or
+  // re-parent the parent ENTRY span.
+  return entries.filter(entry => entry['event.name'] !== 'other').map(entry => ({
+    ...entry,
+    trace_id: context.parentTraceId,
+    'gen_ai.session.id': context.parentThreadId,
+    'gen_ai.turn.id': parentTurnId,
+    'gen_ai.agent.scope': 'subagent',
+    'gen_ai.agent.depth': 1,
+    'gen_ai.agent.id': context.childThreadId,
+    ...(context.agentName ? { 'gen_ai.agent.name': context.agentName } : {}),
+    'gen_ai.agent.parent.id': context.parentThreadId,
+    'gen_ai.subagent.parent_tool_call.id': context.parentToolCallId,
+  }));
+}
+
+function codexTurnEndMarker(
+  entries: AgentActivityEntry[],
+  status: 'completed' | 'interrupted',
+): AgentActivityEntry {
+  const source = [...entries].reverse().find(entry => entry['event.name'] === 'llm.response')
+    ?? entries.at(-1);
+  if (!source) throw new Error('cannot build Codex turn-end marker without a source entry');
+  return {
+    time_unix_nano: source.time_unix_nano,
+    ...(source.observed_time_unix_nano
+      ? { observed_time_unix_nano: source.observed_time_unix_nano }
+      : {}),
+    'event.id': `${source['event.id']}:turn-end`,
+    'event.name': 'other',
+    'user.id': source['user.id'],
+    ...(source.trace_id ? { trace_id: source.trace_id } : {}),
+    parent_span_id: '0000000000000001',
+    'gen_ai.session.id': source['gen_ai.session.id'],
+    ...(source['gen_ai.turn.id'] ? { 'gen_ai.turn.id': source['gen_ai.turn.id'] } : {}),
+    'gen_ai.turn.end': true,
+    'gen_ai.agent.type': source['gen_ai.agent.type'],
+    ...(source['gen_ai.agent.id'] ? { 'gen_ai.agent.id': source['gen_ai.agent.id'] } : {}),
+    ...(source['gen_ai.agent.name'] ? { 'gen_ai.agent.name': source['gen_ai.agent.name'] } : {}),
+    'gen_ai.provider.name': source['gen_ai.provider.name'],
+    ...(source['agent.codex.transcript_turn_id']
+      ? { 'agent.codex.transcript_turn_id': source['agent.codex.transcript_turn_id'] }
+      : {}),
+    'agent.codex.turn_status': status,
+  };
 }
 
 function serializedEntryBytes(entry: AgentActivityEntry): number {

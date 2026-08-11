@@ -18,12 +18,39 @@ export function extractCodexTranscriptMeta(record: Record<string, unknown>): Cod
   const payload = asRecord(record.payload);
   if (!payload) return null;
 
+  const threadId = stringValue(payload.id) ?? '';
+  const source = asRecord(payload.source);
+  const subagent = asRecord(source?.subagent);
+  const threadSpawn = asRecord(subagent?.thread_spawn);
+  const parentThreadId = stringValue(threadSpawn?.parent_thread_id);
+  const agentPath = stringValue(threadSpawn?.agent_path);
+  const agentNickname = stringValue(threadSpawn?.agent_nickname);
+  const agentRole = stringValue(threadSpawn?.agent_role);
+  const rawThreadSource = stringValue(payload.thread_source);
+  const threadSource: CodexTranscriptMeta['threadSource'] = rawThreadSource === 'subagent' || parentThreadId
+    ? 'subagent'
+    : rawThreadSource === 'user'
+      ? 'user'
+      : 'unknown';
+  const rawDepth = numberValue(threadSpawn?.depth);
+  const depth = rawDepth !== undefined && rawDepth >= 0
+    ? Math.trunc(rawDepth)
+    : threadSource === 'subagent' ? 1 : 0;
+  const createdAtMs = timestampMs(payload, timestampMs(record, Number.NaN));
   const baseInstructions = readInstructionText(payload.base_instructions);
   const toolDefinitions = Array.isArray(payload.dynamic_tools)
     ? toJsonValue(payload.dynamic_tools)
     : undefined;
   return {
-    sessionId: stringValue(payload.id) ?? '',
+    threadId,
+    rootSessionId: stringValue(payload.session_id) ?? threadId,
+    threadSource,
+    ...(parentThreadId ? { parentThreadId } : {}),
+    depth,
+    ...(Number.isFinite(createdAtMs) ? { createdAtMs } : {}),
+    ...(agentPath ? { agentPath } : {}),
+    ...(agentNickname ? { agentNickname } : {}),
+    ...(agentRole ? { agentRole } : {}),
     provider: stringValue(payload.model_provider) ?? 'openai',
     ...(baseInstructions ? { baseInstructions } : {}),
     ...(toolDefinitions !== undefined ? { toolDefinitions } : {}),
@@ -297,6 +324,28 @@ function extractCodexTurn(
 
     if (record.type !== 'response_item') continue;
     const itemType = stringValue(payload.type);
+    if (itemType === 'agent_message' && meta?.threadSource === 'subagent') {
+      const recipient = stringValue(payload.recipient);
+      const communicationMeta = asRecord(payload.internal_chat_message_metadata_passthrough);
+      const messageTurnId = stringValue(communicationMeta?.turn_id);
+      // Codex represents the initial parent → child delegation as an internal
+      // agent_message rather than a user_message. Treat it as the child turn's
+      // input only when it targets this child and belongs to this turn; child →
+      // parent completion messages in root rollouts must not become prompts.
+      if (
+        (!meta.agentPath || !recipient || recipient === meta.agentPath)
+        && (!messageTurnId || messageTurnId === expectedTurnId)
+      ) {
+        const message = transcriptInputMessage('user', payload.content);
+        if (message) {
+          inputMessages.push(message);
+          appendPrompt(message.parts[0]?.content);
+          sawSubmittedUserMessage = true;
+          markActivity(timestamp);
+        }
+      }
+      continue;
+    }
     if (itemType === 'message') {
       const role = stringValue(payload.role);
       if (role === 'assistant') {
@@ -419,7 +468,7 @@ function extractCodexTurn(
     && (sawSubmittedUserMessage || steps.length > 0 || sawTerminal),
   );
   const turn: CodexExtractedTranscriptTurn = {
-    sessionId: meta?.sessionId || fallbackSessionId,
+    sessionId: meta?.threadId || fallbackSessionId,
     transcriptTurnId: expectedTurnId,
     provider: meta?.provider ?? 'openai',
     model,

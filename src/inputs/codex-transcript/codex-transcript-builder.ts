@@ -248,7 +248,7 @@ function buildToolEntries(
   stepId: string,
   stepSpanId: string,
 ): AgentActivityEntry[] {
-  const spanId = hashId([turn.sessionId, turn.transcriptTurnId, 'tool', tool.callId], 16);
+  const spanId = codexToolSpanId(turn.sessionId, turn.transcriptTurnId, tool.callId);
   const records = [buildEntry({
     ...base,
     timestamp: tool.startedAtMs,
@@ -328,6 +328,10 @@ function buildEntry(fields: Record<string, JsonValue>): AgentActivityEntry {
 
 function hashId(parts: string[], length: number): string {
   return crypto.createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, length);
+}
+
+export function codexToolSpanId(sessionId: string, turnId: string, toolCallId: string): string {
+  return hashId([sessionId, turnId, 'tool', toolCallId], 16);
 }
 
 function hashInputMessages(previousHash: string, messages: JsonValue[]): string {
