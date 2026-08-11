@@ -42,7 +42,7 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-async function createRuntime(config = {}) {
+async function createRuntime(config = {}, identity) {
   fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify(config));
   const handlers = new Map();
   const api = {
@@ -61,7 +61,8 @@ async function createRuntime(config = {}) {
     },
   };
   const mod = await import(`${pathToFileURL(EXTENSION_PATH).href}?t=${Date.now()}_${Math.random()}`);
-  mod.default(api);
+  const extension = identity ? mod.createPiTelemetryExtension(identity) : mod.default;
+  extension(api);
 
   const ctx = {
     cwd: '/workspace/example',
@@ -110,6 +111,41 @@ async function startTurn(runtime) {
 }
 
 describe('Pi Coding Agent extension', () => {
+  it('binds registered PI SDK Agent identity while keeping the shared log protocol', async () => {
+    const runtime = await createRuntime({
+      agents: {
+        'acme-code': { captureMessageContent: false },
+        'pi-coding-agent': { captureMessageContent: true },
+      },
+    }, {
+      agentType: 'acme-code',
+      agentId: 'acme-code',
+      agentName: 'Acme Code Agent',
+      agentSystem: 'pi',
+      framework: 'pi',
+    });
+    await startTurn(runtime);
+    await runtime.emit('context', {
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'secret prompt' }] }],
+    });
+
+    const records = readRecords();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      'event.name': 'llm.request',
+      'gen_ai.agent.type': 'acme-code',
+      'gen_ai.agent.id': 'acme-code',
+      'gen_ai.agent.name': 'Acme Code Agent',
+      'gen_ai.agent.system': 'pi',
+      'gen_ai.framework': 'pi',
+      'agent.acme-code.cwd': '/workspace/example',
+    });
+    expect(records[0]['gen_ai.input.messages']).toBeUndefined();
+    expect(fs.readdirSync(path.join(tmpDir, 'logs', 'pi-coding-agent'))).toContain(
+      'pi-coding-agent-2026-07-16.jsonl',
+    );
+  });
+
   it('emits canonical request, response, tool call, and tool result records', async () => {
     const runtime = await createRuntime({ userId: 'user-1' });
     await startTurn(runtime);

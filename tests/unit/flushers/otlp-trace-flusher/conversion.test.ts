@@ -112,6 +112,21 @@ describe('OtlpTraceFlusher - conversion', () => {
     });
   });
 
+  it('uses an explicit PI system and framework for a registered custom Agent resource', () => {
+    const records = [{
+      'gen_ai.agent.system': 'pi',
+      'gen_ai.framework': 'pi',
+    }] as unknown as AgentActivityEntry[];
+    const identity = (flusher as any).resolveAgentResourceIdentity('acme-code', records);
+    const resource = (flusher as any).buildResource('acme-code', 'test-pilot', {}, identity);
+
+    expect(resource.attributes).toMatchObject({
+      'gen_ai.agent.type': 'acme-code',
+      'gen_ai.agent.system': 'pi',
+      'gen_ai.framework': 'pi',
+    });
+  });
+
   it('evicts old per-resource convert states when resource attribute cardinality grows', () => {
     for (let i = 0; i < 70; i += 1) {
       (flusher as any).getOrCreateConvertState('claude-code', 'test-pilot', {

@@ -973,6 +973,41 @@ cmd_worker() {
     exec "$node_bin" "$entry" worker "$@"
 }
 
+cmd_agent() {
+    ensure_dirs
+    sync_bootstrap_scripts
+
+    local node_bin
+    node_bin=$(resolve_node) || {
+        echo "❌ node runtime not found" >&2
+        return 1
+    }
+
+    local version_dir
+    version_dir=$(resolve_current_version) || {
+        echo "❌ No valid loongsuite-pilot version found" >&2
+        return 1
+    }
+    local entry="$version_dir/dist/index.js"
+    local subcommand="${1:-}"
+
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    "$node_bin" "$entry" agent "$@" || return $?
+
+    # The command performs injection/removal synchronously. Restart only an
+    # already-running collector so it reloads definitions and watchdog targets;
+    # do not unexpectedly start a service the user intentionally stopped.
+    case "$subcommand" in
+        register|unregister)
+            if is_running; then
+                cmd_restart_collector
+            fi
+            ;;
+    esac
+}
+
 cmd_token_usage() {
     ensure_dirs
 
@@ -1865,6 +1900,7 @@ cmd_help() {
     echo "  status          Show service status (default)"
     echo "  info            Show version and config info"
     echo "  token-usage     Show token usage TUI"
+    echo "  agent ...       Register/list/diagnose PI SDK Agents"
     echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     echo "  monitor start   Start process resource monitor"
     echo "  monitor stop    Stop process resource monitor"
@@ -1897,6 +1933,7 @@ case "${1:-status}" in
     span-attr)   shift; cmd_span_attr "$@" ;;
     monitor)             cmd_monitor "${2:-}" ;;
     worker)              shift; cmd_worker "$@" ;;
+    agent)               shift; cmd_agent "$@" ;;
     rollback)            cmd_rollback ;;
     restart-collector)   cmd_restart_collector ;;
     restart-updater)     cmd_restart_updater ;;

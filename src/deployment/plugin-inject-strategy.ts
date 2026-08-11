@@ -236,7 +236,9 @@ export class PluginInjectStrategy implements DeployStrategy {
 
     try {
       const configPath = await this.findConfigFile(config, false);
-      if (!configPath) return false;
+      // Idempotent cleanup: a removed Agent/config directory means there is no
+      // remaining Pilot spec to clean up.
+      if (!configPath) return true;
 
       const raw = await fs.readFile(configPath, 'utf-8');
       const json = JSON.parse(stripJsoncComments(raw)) as Record<string, unknown>;

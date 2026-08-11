@@ -101,6 +101,28 @@ export class AgentDefLoader {
       logger.warn('invalid agent definition: unknown deployMode', { file: filePath, deployMode: mode });
       return false;
     }
+    if (obj.piSdk !== undefined) {
+      const piSdk = obj.piSdk as Record<string, unknown> | null;
+      const pluginInject = obj.pluginInject as Record<string, unknown> | null;
+      const id = obj.id;
+      const normalizedDataDir = this.dataDir.replace(/\\/g, '/').replace(/\/$/, '');
+      if (
+        mode !== 'plugin-inject'
+        || typeof id !== 'string'
+        || !/^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(id)
+        || !piSdk
+        || piSdk.schemaVersion !== 1
+        || typeof piSdk.agentDir !== 'string'
+        || piSdk.agentDir.length === 0
+        || !pluginInject
+        || pluginInject.configKey !== 'extensions'
+        || pluginInject.pluginId !== `loongsuite-pilot-pi-sdk-${id}`
+        || pluginInject.pluginSpec !== `${normalizedDataDir}/plugins/pi-coding-agent/agents/${id}.mjs`
+      ) {
+        logger.warn('invalid PI SDK Agent definition', { file: filePath });
+        return false;
+      }
+    }
     return true;
   }
 

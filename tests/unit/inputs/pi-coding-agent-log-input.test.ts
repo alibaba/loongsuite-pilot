@@ -134,6 +134,80 @@ describe('PiCodingAgentLogInput', () => {
     expect(secondEntries).toHaveLength(0);
   });
 
+  it('preserves the registered PI SDK Agent identity from canonical records', async () => {
+    const today = new Date();
+    const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    await fs.writeFile(path.join(tmpDir, `pi-coding-agent-${date}.jsonl`), `${JSON.stringify({
+      'event.name': 'llm.response',
+      'gen_ai.session.id': 'custom-session',
+      'gen_ai.agent.type': 'acme-code',
+      'gen_ai.agent.id': 'acme-code',
+      'gen_ai.agent.name': 'Acme Code Agent',
+      'gen_ai.agent.system': 'pi',
+      'gen_ai.framework': 'pi',
+      'agent.acme-code.cwd': tmpDir,
+      'gen_ai.response.finish_reasons': ['stop'],
+    })}\n`);
+
+    const input = new PiCodingAgentLogInput({ stateStore: stateStore as never, logDir: tmpDir });
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', batch => entries.push(...batch));
+    await input.start();
+    await input.stop();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      'gen_ai.agent.type': 'acme-code',
+      'gen_ai.agent.id': 'acme-code',
+      'gen_ai.agent.name': 'Acme Code Agent',
+      'gen_ai.agent.system': 'pi',
+      'gen_ai.framework': 'pi',
+      'workspace.path': tmpDir,
+    });
+  });
+
+  it('drops records for a disabled SDK Agent while collecting another PI Agent', async () => {
+    const today = new Date();
+    const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const records = ['disabled-code', 'enabled-code'].map(agentType => ({
+      'event.id': `${agentType}-event`,
+      'event.name': 'llm.response',
+      'gen_ai.session.id': `${agentType}-session`,
+      'gen_ai.agent.type': agentType,
+      'gen_ai.agent.id': agentType,
+      'gen_ai.response.finish_reasons': ['stop'],
+    }));
+    await fs.writeFile(
+      path.join(tmpDir, `pi-coding-agent-${date}.jsonl`),
+      `${records.map(record => JSON.stringify(record)).join('\n')}\n`,
+    );
+
+    const input = new PiCodingAgentLogInput({
+      stateStore: stateStore as never,
+      logDir: tmpDir,
+      agentEnabled: agentType => agentType !== 'disabled-code',
+    });
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', batch => entries.push(...batch));
+    await input.start();
+    await input.stop();
+
+    expect(entries.map(entry => entry['gen_ai.agent.type'])).toEqual(['enabled-code']);
+
+    // The disabled record is intentionally discarded rather than retained for
+    // replay if the Agent is re-enabled later.
+    const restarted = new PiCodingAgentLogInput({
+      stateStore: stateStore as never,
+      logDir: tmpDir,
+      agentEnabled: () => true,
+    });
+    const replayed: AgentActivityEntry[] = [];
+    restarted.on('entries', batch => replayed.push(...batch));
+    await restarted.start();
+    await restarted.stop();
+    expect(replayed).toHaveLength(0);
+  });
+
   it('tightens an existing log directory when the input starts', async () => {
     if (process.platform === 'win32') return;
     await fs.chmod(tmpDir, 0o755);

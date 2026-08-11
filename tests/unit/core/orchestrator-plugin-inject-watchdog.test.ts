@@ -41,6 +41,7 @@ function callBuild(orch: Orchestrator) {
       precondition: () => Promise<boolean>;
       check: () => Promise<boolean>;
       repair: () => Promise<void>;
+      cleanup?: () => Promise<void>;
     }>;
   }).buildPluginInjectInterceptTargets();
 }
@@ -79,6 +80,7 @@ describe('Orchestrator.buildPluginInjectInterceptTargets', () => {
   let getDefinitions: ReturnType<typeof vi.fn>;
   let needsRedeploy: ReturnType<typeof vi.fn>;
   let deploySingle: ReturnType<typeof vi.fn>;
+  let undeployAgent: ReturnType<typeof vi.fn>;
   let orch: Orchestrator;
 
   beforeEach(() => {
@@ -86,7 +88,8 @@ describe('Orchestrator.buildPluginInjectInterceptTargets', () => {
     getDefinitions = vi.fn();
     needsRedeploy = vi.fn();
     deploySingle = vi.fn();
-    orch = makeOrchestrator({ getDefinitions, needsRedeploy, deploySingle });
+    undeployAgent = vi.fn();
+    orch = makeOrchestrator({ getDefinitions, needsRedeploy, deploySingle, undeployAgent });
   });
 
   it('only builds targets for plugin-inject agents', () => {
@@ -214,5 +217,50 @@ describe('Orchestrator.buildPluginInjectInterceptTargets', () => {
       const [target] = callBuild(orch);
       await expect(target.repair()).rejects.toThrow('no config file');
     });
+  });
+
+  describe('cleanup (remove injection when disabled)', () => {
+    it('delegates to DeploymentManager.undeployAgent', async () => {
+      getDefinitions.mockReturnValue([pluginInjectDef()]);
+      undeployAgent.mockResolvedValue(true);
+
+      const [target] = callBuild(orch);
+      await target.cleanup?.();
+
+      expect(undeployAgent).toHaveBeenCalledWith(expect.objectContaining({ id: 'opencode' }));
+    });
+
+    it('throws when cleanup cannot remove the injected spec', async () => {
+      getDefinitions.mockReturnValue([pluginInjectDef()]);
+      undeployAgent.mockResolvedValue(false);
+
+      const [target] = callBuild(orch);
+      await expect(target.cleanup?.()).rejects.toThrow('failed to remove injected plugin');
+    });
+  });
+});
+
+describe('Orchestrator PI SDK shared input gating', () => {
+  it('keeps the shared PI input enabled when built-in PI is disabled but a registered SDK Agent is enabled', () => {
+    const orch = new Orchestrator({
+      dataDir: DATA_DIR,
+      agents: {
+        'pi-coding-agent': { enabled: false, captureMessageContent: true },
+        'acme-code': { enabled: true, captureMessageContent: true },
+      },
+    } as never);
+    (orch as unknown as { deploymentManager: unknown }).deploymentManager = {
+      getDefinitions: () => [
+        pluginInjectDef({ id: 'pi-coding-agent' }),
+        pluginInjectDef({
+          id: 'acme-code',
+          piSdk: { schemaVersion: 1, agentDir: '/tmp/acme/pi' },
+        }),
+      ],
+    };
+
+    const enabled = (orch as unknown as { isAnyPiSdkAgentEnabled: () => boolean }).isAnyPiSdkAgentEnabled();
+
+    expect(enabled).toBe(true);
   });
 });

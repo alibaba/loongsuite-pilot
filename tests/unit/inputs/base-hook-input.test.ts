@@ -106,6 +106,36 @@ describe('BaseHookInput', () => {
       expect(moreEntries[0]!.filePath).toBe('/second.ts');
     });
 
+    it('keeps an incomplete trailing JSONL record for the next poll', async () => {
+      const today = getTodayDateString();
+      const logFile = path.join(tmpDir, `test-hook-${today}.jsonl`);
+      const completeRecord = JSON.stringify({ file_path: '/written-in-two-parts.ts' });
+      const splitAt = Math.floor(completeRecord.length / 2);
+      await fs.writeFile(logFile, completeRecord.slice(0, splitAt));
+
+      const firstEntries: AgentActivityEntry[] = [];
+      input.on('entries', (entries: AgentActivityEntry[]) => firstEntries.push(...entries));
+      await input.start();
+      await input.stop();
+      expect(firstEntries).toHaveLength(0);
+      expect(stateStore.get('test-hook').lastOffset).toBe(0);
+
+      await fs.appendFile(logFile, `${completeRecord.slice(splitAt)}\n`);
+      const nextInput = new TestHookInput({
+        stateStore: stateStore as any,
+        logDir: tmpDir,
+        logPrefix: 'test-hook',
+        pollIntervalMs: 60_000,
+      });
+      const nextEntries: AgentActivityEntry[] = [];
+      nextInput.on('entries', (entries: AgentActivityEntry[]) => nextEntries.push(...entries));
+      await nextInput.start();
+      await nextInput.stop();
+
+      expect(nextEntries).toHaveLength(1);
+      expect(nextEntries[0].filePath).toBe('/written-in-two-parts.ts');
+    });
+
     it('should not re-read already consumed bytes', async () => {
       const today = getTodayDateString();
       const logFile = path.join(tmpDir, `test-hook-${today}.jsonl`);

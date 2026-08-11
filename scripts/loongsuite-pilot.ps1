@@ -1175,6 +1175,42 @@ function Cmd-Worker {
 }
 
 # ============================================================
+# CMD: agent (registered high-level PI SDK Agent management)
+# ============================================================
+function Cmd-Agent {
+    $versionDir = Resolve-CurrentVersion
+    if (-not $versionDir) {
+        Write-Error "Current loongsuite-pilot version not found"
+        exit 1
+    }
+
+    $entry = Join-Path $versionDir "dist\index.js"
+    if (-not (Test-Path $entry -PathType Leaf)) {
+        Write-Error "Agent CLI entrypoint missing"
+        exit 1
+    }
+
+    $nodeBin = Resolve-Node
+    if (-not $nodeBin) {
+        Write-Error "node runtime not found"
+        exit 1
+    }
+
+    $subcommand = if ($SubArgs.Count -ge 1) { [string]$SubArgs[0] } else { "" }
+    $wasRunning = (Test-CollectorRunning) -or (Test-PidRunning $PID_FILE)
+    $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
+    $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
+    $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
+    & $nodeBin $entry "agent" @SubArgs
+    $result = $LASTEXITCODE
+    if ($result -ne 0) { exit $result }
+
+    if ($wasRunning -and $subcommand.ToLower() -in @("register", "unregister")) {
+        Cmd-RestartCollector
+    }
+}
+
+# ============================================================
 # CMD: help
 # ============================================================
 # Manage span-attributes.json — user-defined attributes injected into trace
@@ -1240,6 +1276,7 @@ function Cmd-Help {
     Write-Host "  info            Show version and config info"
     Write-Host "  log             Tail the service log"
     Write-Host "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
+    Write-Host "  agent ...       Register/list/diagnose PI SDK Agents"
     Write-Host "  rollback        Roll back to the previous version"
     Write-Host "  worker          Manage local Workers:"
     Write-Host "                    worker connect/list/status/disconnect/delete"
@@ -1258,6 +1295,7 @@ switch ($Command.ToLower()) {
     "log"                { Cmd-Log }
     "rollback"           { Cmd-Rollback }
     "worker"             { Cmd-Worker }
+    "agent"              { Cmd-Agent }
     "restart-collector"  { Cmd-RestartCollector }
     "restart-updater"    { Cmd-RestartUpdater }
     "run"                { Cmd-Run }

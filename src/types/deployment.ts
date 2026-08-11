@@ -177,6 +177,21 @@ export interface AgentRuntimeConfig {
   fallback?: string;
 }
 
+/**
+ * Metadata for a custom Agent built on the high-level
+ * `@earendil-works/pi-coding-agent` SDK.
+ *
+ * PI SDK integrations still deploy through the generic `plugin-inject`
+ * strategy.  This marker identifies definitions managed by the public
+ * `loongsuite-pilot agent ...` CLI so shared input gating, diagnostics, and
+ * uninstall cleanup can include them without introducing another deploy mode.
+ */
+export interface PiSdkIntegrationConfig {
+  schemaVersion: 1;
+  /** Directory passed to createAgentSession({ agentDir }). */
+  agentDir: string;
+}
+
 export interface DirectoryPluginConfig {
   /** Managed plugin directory copied by Pilot. */
   sourceDir: string;
@@ -211,6 +226,8 @@ export interface AgentDefinition {
   hook?: AgentHookConfig;
   pluginProbe?: PluginProbeConfig;
   pluginInject?: PluginInjectConfig;
+  /** Present only for registered high-level PI SDK Agents. */
+  piSdk?: PiSdkIntegrationConfig;
   directoryPlugin?: DirectoryPluginConfig;
   input?: AgentInputConfig;
   /** 运行时要求（如 node:sqlite）与无该依赖时的 fallback 声明 */

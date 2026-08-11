@@ -99,6 +99,41 @@ describe('AgentDefLoader', () => {
     expect(defs[0].displayName).toBe('Cursor Local Override');
   });
 
+  it('loads a valid registered PI SDK definition and rejects malformed markers', async () => {
+    const valid = {
+      id: 'acme-code',
+      displayName: 'Acme Code',
+      deployMode: 'plugin-inject',
+      detection: { paths: ['/tmp/acme'], commands: ['acme'] },
+      piSdk: { schemaVersion: 1, agentDir: '/tmp/acme/pi' },
+      pluginInject: {
+        configPaths: ['/tmp/acme/pi/settings.json'],
+        pluginSpec: '$PILOT_DATA/plugins/pi-coding-agent/agents/acme-code.mjs',
+        pluginId: 'loongsuite-pilot-pi-sdk-acme-code',
+        configKey: 'extensions',
+      },
+    };
+    await fs.writeFile(path.join(localDir, 'valid.json'), JSON.stringify(valid));
+    await fs.writeFile(path.join(localDir, 'invalid.json'), JSON.stringify({
+      ...valid,
+      id: 'broken-pi-sdk',
+      pluginInject: { ...valid.pluginInject, configKey: 'plugins' },
+    }));
+    await fs.writeFile(path.join(localDir, 'spoofed.json'), JSON.stringify({
+      ...valid,
+      id: 'spoofed-pi-sdk',
+      pluginInject: {
+        ...valid.pluginInject,
+        pluginId: 'loongsuite-pilot-pi-sdk-someone-else',
+      },
+    }));
+
+    const defs = await makeLoader().load();
+
+    expect(defs.map(def => def.id)).toEqual(['acme-code']);
+    expect(defs[0].piSdk).toEqual({ schemaVersion: 1, agentDir: '/tmp/acme/pi' });
+  });
+
   it('replaces $PILOT_DIR and $PILOT_DATA variables', async () => {
     const def = {
       id: 'var-test',

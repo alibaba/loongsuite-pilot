@@ -2204,8 +2204,6 @@ try {
 # ============================================================
 remove_pi_coding_agent_extension() {
     local cfg="$HOME/.pi/agent/settings.json"
-    [ -f "$cfg" ] || return 0
-
     local short="${cfg/#$HOME/\~}"
     if ! command -v node &>/dev/null; then
         msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
@@ -2215,25 +2213,49 @@ remove_pi_coding_agent_extension() {
     local result
     result=$(node -e "
 const fs = require('fs');
-const f = process.argv[1];
-const isOurs = s => typeof s === 'string' && (
-  s.includes('loongsuite-pilot-pi-coding-agent') ||
-  s.includes('plugins/pi-coding-agent/index.mjs')
-);
+const path = require('path');
+const defaultConfig = process.argv[1];
+const dataDir = process.argv[2];
+const targets = [{ configPath: defaultConfig, markers: ['loongsuite-pilot-pi-coding-agent', 'plugins/pi-coding-agent/index.mjs'] }];
+const resolveValue = value => typeof value === 'string'
+  ? value.replace(/^~(?=[\\/])/, process.env.HOME || '').replaceAll('\$PILOT_DATA', dataDir)
+  : value;
+const localDir = path.join(dataDir, 'agents.d.local');
 try {
-  const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
-  if (!Array.isArray(data.extensions)) { process.stdout.write('nochange'); process.exit(0); }
-  const before = data.extensions.length;
-  data.extensions = data.extensions.filter(entry => !isOurs(typeof entry === 'string' ? entry : ''));
-  if (data.extensions.length === before) { process.stdout.write('nochange'); process.exit(0); }
-  fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
-  process.stdout.write('cleaned');
+  for (const name of fs.existsSync(localDir) ? fs.readdirSync(localDir) : []) {
+    if (!name.endsWith('.json')) continue;
+    let def;
+    try { def = JSON.parse(fs.readFileSync(path.join(localDir, name), 'utf8')); } catch { continue; }
+    if (def?.piSdk?.schemaVersion !== 1 || !def?.pluginInject?.pluginId?.startsWith('loongsuite-pilot-pi-sdk-')) continue;
+    const spec = resolveValue(def.pluginInject.pluginSpec);
+    for (const configPath of def.pluginInject.configPaths || []) {
+      targets.push({
+        configPath: resolveValue(configPath),
+        markers: [def.pluginInject.pluginId, spec, 'plugins/pi-coding-agent/agents/'].filter(Boolean),
+      });
+    }
+  }
+  let cleaned = 0;
+  for (const target of targets) {
+    if (!target.configPath || !fs.existsSync(target.configPath)) continue;
+    const data = JSON.parse(fs.readFileSync(target.configPath, 'utf-8'));
+    if (!Array.isArray(data.extensions)) continue;
+    const before = data.extensions.length;
+    data.extensions = data.extensions.filter(entry => {
+      const value = typeof entry === 'string' ? entry : '';
+      return !target.markers.some(marker => value === marker || value.includes(marker));
+    });
+    if (data.extensions.length === before) continue;
+    fs.writeFileSync(target.configPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+    cleaned++;
+  }
+  process.stdout.write(cleaned > 0 ? 'cleaned' : 'nochange');
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
-" "$cfg" 2>/dev/null) || result="error"
+" "$cfg" "$DATA_DIR" 2>/dev/null) || result="error"
 
     case "$result" in
         cleaned)
-            msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" ;;
+            msg "    ✅ 已清理 Pi / PI SDK Agent 扩展配置" "    ✅ Cleaned Pi / PI SDK Agent extension configs" ;;
         nochange)
             : ;;
         *)

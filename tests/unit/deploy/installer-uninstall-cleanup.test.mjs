@@ -138,6 +138,15 @@ describe('uninstall cleans the Pi Coding Agent extension injection', () => {
     expect(ps1).toContain('loongsuite-pilot-pi-coding-agent');
     expect(ps1).toContain('plugins/pi-coding-agent/index.mjs');
   });
+
+  it('discovers registered PI SDK Agent settings from local definitions', () => {
+    for (const source of [sh, ps1]) {
+      expect(source).toContain('agents.d.local');
+      expect(source).toContain('piSdk?.schemaVersion');
+      expect(source).toContain('loongsuite-pilot-pi-sdk-');
+      expect(source).toContain('plugins/pi-coding-agent/agents/');
+    }
+  });
 });
 
 describe('Windows uninstall verifies scheduled task removal', () => {
