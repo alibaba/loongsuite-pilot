@@ -6,14 +6,19 @@ Use this guide to choose which AI coding agents Pilot should collect from and wh
 
 ## Supported Agent IDs
 
-Use these IDs in installer options, `agent-control.json`, and `config.json`.
+These IDs identify the supported integrations. Most can be used in installer
+options, `agent-control.json`, and `config.json`; shared integrations and output
+type differences are called out in the notes.
 
 | Agent | ID | Notes |
 |-------|----|-------|
 | Claude Code | `claude-code` | Hook integration. |
 | Codex | `codex` | Hook integration. |
 | Cursor | `cursor` | Hook integration. |
+| Cursor CLI | `cursor-cli` | Detected and emitted as `cursor-cli`, but reuses Cursor's installed Hook/input pipeline rather than deploying an independent Hook. Use `cursor-cli` for an output-specific content policy. |
+| Hermes Agent | `hermes-agent` | Native directory plugin and local session-file collection. Output records use `gen_ai.agent.type=hermes`. |
 | Kiro CLI | `kiro-cli` | Hook integration with delayed local SQLite/session collection. Token usage is not exposed by the source. |
+| MiMo Code | `mimo-code` | Plugin injection; captures LLM, tool, and token lifecycle events. |
 | OpenClaw | `openclaw` | Plugin injection for OpenClaw 2026.5.12 or later. Captures native LLM, ReAct, tool, token, error, and cancellation events. |
 | OpenCode | `opencode` | Plugin injection. |
 | Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. |
@@ -24,7 +29,7 @@ Use these IDs in installer options, `agent-control.json`, and `config.json`.
 | Qoder Work | `qoder-work` | Hook and local data sources. |
 | Qoder Work CN | `qoder-work-cn` | Hook and local data sources. |
 | Qwen Code CLI | `qwen-code-cli` | Hook integration; parses qwen-code transcript JSONL on Stop. |
-| Wukong | `wukong` | CLI API polling via local `wukong-cli`. |
+| Wukong | `wukong` | Runtime auto-discovery and CLI API polling via local `wukong-cli`; it is not an `agents.d` installer selection. |
 | WorkBuddy | `workbuddy` | Structural Hook/file wakeups with a 30-second local transcript polling fallback. Verified on WorkBuddy Desktop 5.2.6 for macOS and 5.3.5.0 for Windows 11. |
 
 The Windows verification used an installed Pilot package, resolved Node from the
