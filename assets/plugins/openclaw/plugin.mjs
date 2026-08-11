@@ -553,13 +553,19 @@ function finiteTokenCount(value) {
 
 function normalizeUsage(rawUsage) {
   const usage = rawUsage && typeof rawUsage === "object" ? rawUsage : {};
-  const input = finiteTokenCount(usage.input);
+  const uncachedInput = finiteTokenCount(usage.input);
   const output = finiteTokenCount(usage.output);
   const cacheRead = finiteTokenCount(usage.cacheRead);
   const cacheWrite = finiteTokenCount(usage.cacheWrite);
   // Some newer runtimes expose this extra field even though it is not part of
   // the minimum-version hook contract. Keep it strictly best-effort.
   const reasoning = finiteTokenCount(usage.reasoningTokens);
+  // OpenClaw reports uncached, cache-read and cache-write input separately.
+  // GenAI input_tokens is inclusive: the cache fields remain as breakdowns,
+  // while both input_tokens and total_tokens include them.
+  const input = uncachedInput === undefined && cacheRead === undefined && cacheWrite === undefined
+    ? undefined
+    : (uncachedInput ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0);
   const missing = input === undefined && output === undefined;
   return {
     input,

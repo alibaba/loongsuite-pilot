@@ -89,8 +89,9 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     const terminal = records.find(record => record['agent.openclaw.hook'] === 'llm_output');
     expect(terminal).toMatchObject({
       'event.name': 'other',
-      'agent.openclaw.aggregate_usage.input_tokens': 2108,
+      'agent.openclaw.aggregate_usage.input_tokens': 27452,
       'agent.openclaw.aggregate_usage.output_tokens': 326,
+      'agent.openclaw.aggregate_usage.total_tokens': 27778,
       'agent.openclaw.per_call_usage.count': 2,
     });
     expect(terminal?.['gen_ai.usage.input_tokens']).toBeUndefined();
@@ -103,8 +104,8 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       record['gen_ai.usage.output_tokens'],
       record['gen_ai.response.finish_reasons'],
     ])).toEqual([
-      [906, 129, ['tool_calls']],
-      [1202, 197, ['stop']],
+      [13578, 129, ['tool_calls']],
+      [13874, 197, ['stop']],
     ]);
 
     const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
@@ -126,11 +127,12 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       expect(llmSpans.map(span => [
         span.attributes['gen_ai.usage.input_tokens'],
         span.attributes['gen_ai.usage.output_tokens'],
+        span.attributes['gen_ai.usage.cache_read.input_tokens'],
         span.attributes['gen_ai.usage.total_tokens'],
         span.attributes['gen_ai.response.finish_reasons'],
       ])).toEqual([
-        [906, 129, 1035, ['tool_calls']],
-        [1202, 197, 1399, ['stop']],
+        [13578, 129, 12672, 13707, ['tool_calls']],
+        [13874, 197, 12672, 14071, ['stop']],
       ]);
       expect(llmSpans.every(span => String(span.attributes['gen_ai.response.id']).startsWith('chatcmpl-'))).toBe(true);
 
@@ -143,9 +145,9 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
 
       const agentSpan = converted.spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT');
       expect(agentSpan?.attributes).toMatchObject({
-        'gen_ai.usage.input_tokens': 2108,
+        'gen_ai.usage.input_tokens': 27452,
         'gen_ai.usage.output_tokens': 326,
-        'gen_ai.usage.total_tokens': 2434,
+        'gen_ai.usage.total_tokens': 27778,
       });
     } finally {
       if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;

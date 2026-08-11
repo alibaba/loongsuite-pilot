@@ -221,8 +221,8 @@ describe('OpenClaw plugin stateful pipeline', () => {
       r['gen_ai.usage.reasoning_tokens'],
       r['gen_ai.usage.total_tokens'],
     ])).toEqual([
-      [906, 129, 12672, 59, 1035],
-      [1202, 197, 12672, 22, 1399],
+      [13578, 129, 12672, 59, 13707],
+      [13874, 197, 12672, 22, 14071],
     ]);
     expect(responses.map((r) => r['gen_ai.response.finish_reasons'])).toEqual([
       ['tool_calls'],
@@ -237,8 +237,9 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(terminal['gen_ai.output.messages']).toBeUndefined();
     expect(terminal['gen_ai.usage.input_tokens']).toBeUndefined();
     expect(terminal['gen_ai.usage.output_tokens']).toBeUndefined();
-    expect(terminal['agent.openclaw.aggregate_usage.input_tokens']).toBe(2108);
+    expect(terminal['agent.openclaw.aggregate_usage.input_tokens']).toBe(27452);
     expect(terminal['agent.openclaw.aggregate_usage.output_tokens']).toBe(326);
+    expect(terminal['agent.openclaw.aggregate_usage.total_tokens']).toBe(27778);
     expect(terminal['agent.openclaw.aggregate_usage.reasoning_tokens']).toBe(81);
     expect(terminal['agent.openclaw.per_call_usage.count']).toBe(2);
     expect(terminal['agent.openclaw.per_call_usage.mismatch']).toBeUndefined();
@@ -263,6 +264,49 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(terminal['gen_ai.usage.input_tokens']).toBeUndefined();
     expect(terminal['gen_ai.usage.output_tokens']).toBeUndefined();
     expect(terminal['gen_ai.usage.total_tokens']).toBeUndefined();
+  });
+
+  it('includes cache read and creation in input and total without double-counting reasoning', async () => {
+    const plugin = await loadPlugin();
+    const runId = 'cache-usage-run';
+    const sessionId = 'cache-usage-session';
+    const sessionKey = 'agent:main:cache-usage';
+    const callId = `${runId}:model:1`;
+    const usage = {
+      input: 11,
+      output: 7,
+      cacheRead: 3,
+      cacheWrite: 5,
+      reasoningTokens: 2,
+    };
+    const records = await replay(plugin, [
+      { hook: 'llm_input', event: { runId, sessionId, sessionKey, provider: 'test', model: 'test-model', prompt: 'use cache' } },
+      { hook: 'model_call_started', event: { runId, sessionId, sessionKey, callId, provider: 'test', model: 'test-model' } },
+      { hook: 'model_call_ended', event: { runId, sessionId, sessionKey, callId, outcome: 'completed', durationMs: 4 } },
+      { hook: 'before_message_write', event: { sessionKey, message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], provider: 'test', model: 'test-model', usage, stopReason: 'stop' } } },
+      { hook: 'llm_output', event: { runId, sessionId, provider: 'test', model: 'test-model', usage } },
+    ]);
+
+    const response = records.find((record) => record['event.name'] === 'llm.response');
+    expect(response).toMatchObject({
+      'gen_ai.usage.input_tokens': 19,
+      'gen_ai.usage.output_tokens': 7,
+      'gen_ai.usage.cache_read.input_tokens': 3,
+      'gen_ai.usage.cache_creation.input_tokens': 5,
+      'gen_ai.usage.reasoning_tokens': 2,
+      'gen_ai.usage.total_tokens': 26,
+    });
+
+    const terminal = records.find((record) => record['agent.openclaw.hook'] === 'llm_output');
+    expect(terminal).toMatchObject({
+      'agent.openclaw.aggregate_usage.input_tokens': 19,
+      'agent.openclaw.aggregate_usage.output_tokens': 7,
+      'agent.openclaw.aggregate_usage.cache_read_input_tokens': 3,
+      'agent.openclaw.aggregate_usage.cache_creation_input_tokens': 5,
+      'agent.openclaw.aggregate_usage.reasoning_tokens': 2,
+      'agent.openclaw.aggregate_usage.total_tokens': 26,
+    });
+    expect(terminal['agent.openclaw.per_call_usage.mismatch']).toBeUndefined();
   });
 
   it('keeps trace_id and gen_ai.turn.id stable across all events in the run', async () => {
@@ -799,9 +843,9 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(responses[0]['gen_ai.response.id']).toBe('provider-empty-error');
     expect(responses[0]['gen_ai.response.finish_reasons']).toEqual(['error']);
     expect(responses[0]['gen_ai.output.messages']).toBeUndefined();
-    expect(responses[0]['gen_ai.usage.input_tokens']).toBe(11);
+    expect(responses[0]['gen_ai.usage.input_tokens']).toBe(14);
     expect(responses[0]['gen_ai.usage.output_tokens']).toBe(0);
-    expect(responses[0]['gen_ai.usage.total_tokens']).toBe(11);
+    expect(responses[0]['gen_ai.usage.total_tokens']).toBe(14);
     expect(responses[0]['agent.openclaw.duration_ms']).toBe(17);
     expect(responses[0]['agent.openclaw.error_category']).toBe('authentication');
     expect(responses[0]['error.type']).toBe('model_call_error');
