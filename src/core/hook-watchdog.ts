@@ -21,6 +21,13 @@ export interface PluginCheckTarget {
   /** Substrings that identify our hook command in settings.json */
   markers: string[];
 
+  /**
+   * Optional nested key under `hooks` where hook entries live.
+   * e.g. eventsRoot="events" → check hooks.events.<event> instead of hooks.<event>.
+   * Used by agents with strict schemas like ZCode.
+   */
+  eventsRoot?: string;
+
   /** External command binary path (for plugin-type repair). Required if repairFn is not set. */
   binPath?: string;
   /** Arguments for the external install command. */
@@ -213,8 +220,15 @@ export class HookWatchdog {
     const missing: string[] = [];
     const hooksRoot = settings?.hooks as Record<string, unknown> | undefined;
 
+    // Support eventsRoot for agents with strict schemas (e.g. ZCode uses
+    // hooks.events.Stop instead of hooks.Stop). When eventsRoot is set,
+    // navigate one level deeper before checking for event arrays.
+    const eventContainer = target.eventsRoot
+      ? (hooksRoot?.[target.eventsRoot] as Record<string, unknown> | undefined)
+      : hooksRoot;
+
     for (const event of target.expectedHooks) {
-      const arr = hooksRoot?.[event];
+      const arr = eventContainer?.[event];
       if (!Array.isArray(arr)) {
         missing.push(event);
         continue;

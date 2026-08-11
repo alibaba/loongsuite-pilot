@@ -372,6 +372,7 @@ export class Orchestrator extends EventEmitter {
         settingsPath: def.hook.settingsPath,
         expectedHooks: def.hook.events,
         markers: [scriptName],
+        eventsRoot: def.hook.eventsRoot,
         repairFn: () => this.deploymentManager.deploySingle(def).then(r => r.success),
       });
     }
