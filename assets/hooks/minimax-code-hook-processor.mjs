@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Copyright 2026 MiniMax
+// Copyright 2026 Alibaba Group Holding Limited
 // SPDX-License-Identifier: Apache-2.0
 
 /**

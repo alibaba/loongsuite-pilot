@@ -1772,6 +1772,15 @@ function Remove-HookConfigs {
     # settings to %APPDATA%\MiniMax\settings.json (the platform-resolved
     # path). The legacy POSIX path ~/.minimax-code/settings.json is kept
     # for developer-machine installs that predate the Windows release.
+    #
+    # Round 11 fix (PR #233, copilot suppressed comment): the agent
+    # detection list (`agents.d/minimax-code.json` detection.paths)
+    # also includes `%APPDATA%/MiniMax-Code/settings.json` (alternate
+    # Windows install location for the variant that uses the
+    # hyphenated directory name), but the uninstaller cleanup only
+    # removed the un-hyphenated `MiniMax` path. Add the hyphenated
+    # variant so uninstall reliably cleans hook injection for both
+    # possible Windows install locations.
     $configs = @(
         (Join-Path $env:USERPROFILE ".cursor\hooks.json"),
         (Join-Path $env:USERPROFILE ".qoder\settings.json"),
@@ -1784,7 +1793,8 @@ function Remove-HookConfigs {
         (Join-Path $env:USERPROFILE ".qwen\settings.json"),
         (Join-Path $env:USERPROFILE ".workbuddy\settings.json"),
         (Join-Path $env:USERPROFILE ".minimax-code\settings.json"),
-        (Join-Path $env:APPDATA "MiniMax\settings.json")
+        (Join-Path $env:APPDATA "MiniMax\settings.json"),
+        (Join-Path $env:APPDATA "MiniMax-Code\settings.json")
     )
 
     foreach ($cfg in $configs) {

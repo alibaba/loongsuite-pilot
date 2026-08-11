@@ -185,7 +185,19 @@ export class QoderWorkTraceInput extends BaseSessionInput {
     return files.sort();
   }
 
-  protected async processSessionLine(): Promise<AgentActivityEntry[]> {
+  // Round 11 fix (PR #233, copilot suppressed comment): the base
+  // class signature is `processSessionLine(record, filePath)`. The
+  // previous override had no parameters, which works at runtime but
+  // makes the signature inconsistent with the abstract method and
+  // prevents using the `override` keyword for safer refactors
+  // (TypeScript flags the missing `override` modifier because the
+  // base method is abstract, not because of a runtime mismatch).
+  // Match the base signature with underscore-prefixed unused
+  // parameters and add the `override` keyword.
+  protected override async processSessionLine(
+    _record: Record<string, unknown>,
+    _filePath: string,
+  ): Promise<AgentActivityEntry[]> {
     return [];
   }
 
