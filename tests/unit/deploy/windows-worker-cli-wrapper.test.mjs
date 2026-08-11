@@ -14,7 +14,7 @@ describe('Windows worker CLI wrapper', () => {
     if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it('pins the installer Node runtime under the cache directory', async () => {
+  it('pins the installer Node runtime for both worker and deployed Hooks', async () => {
     const installer = await fs.readFile(path.resolve('deploy/installer-opensource.ps1'), 'utf-8');
     const checkDeps = installer.slice(
       installer.indexOf('function Check-Deps'),
@@ -22,7 +22,7 @@ describe('Windows worker CLI wrapper', () => {
     );
 
     expect(checkDeps).toContain('Join-Path $CACHE_DIR "node-bin"');
-    expect(checkDeps).not.toContain('Join-Path $DataDir "node-bin"');
+    expect(checkDeps).toContain('Join-Path $DataDir "node-bin"');
   });
 
   it.runIf(process.platform === 'win32')('uses separate Unicode data/cache dirs and forwards worker argv unchanged', async () => {

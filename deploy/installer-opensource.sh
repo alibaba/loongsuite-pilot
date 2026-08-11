@@ -1228,41 +1228,43 @@ remove_qodercli_token_intercept() {
 }
 
 # ============================================================
-# QoderWork runtime wrapper: intercept token usage via QODER_WORKER_RUNTIME_PATH
+# QoderWork-family runtime wrapper: intercept token usage via the SDK-wide
+# QODER_WORKER_RUNTIME_PATH and QwenWorkCN-specific
+# QW_QODER_WORKER_RUNTIME_PATH override.
 #
-# QoderWork runs its agent SDK in a Node.js worker_thread (not Bun), so the
-# qodercli BUN_OPTIONS --preload trick does not apply. The SDK honors
-# QODER_WORKER_RUNTIME_PATH as the worker entry; our wrapper installs a
-# JSON.parse hook then imports the real runtime. On macOS we set this via
-# launchctl setenv so the GUI-launched app inherits it. Linux/Windows are
+# These desktop apps run the agent SDK in a Node.js worker_thread (not Bun), so
+# the qodercli BUN_OPTIONS --preload trick does not apply. The wrapper installs
+# a JSON.parse hook then imports the verified host runtime. On macOS we set the
+# variables via launchctl so GUI-launched apps inherit them. Linux/Windows are
 # skipped (Electron env injection there is tracked separately).
 # ============================================================
 inject_qoderwork_runtime_wrapper() {
     if [ "$(uname)" != "Darwin" ]; then return 0; fi
-    # Not selected: clean up any stale env/plist from a prior install, then bail.
-    if ! echo "$SELECTED_AGENTS" | grep -q 'qoder-work'; then remove_qoderwork_runtime_wrapper; return 0; fi
-    # Cover system-wide (/Applications) and per-user (~/Applications) installs;
-    # the wrapper's RUNTIME_CANDIDATES handles both locations symmetrically.
-    if [ ! -d "/Applications/QoderWork.app" ] && [ ! -d "$HOME/Applications/QoderWork.app" ]; then return 0; fi
+    local wants_qoder_family=false
+    local wants_qwen_work_cn=false
+    if echo "$SELECTED_AGENTS" | grep -q 'qoder-work'; then wants_qoder_family=true; fi
+    if echo "$SELECTED_AGENTS" | grep -q 'qwen-work-cn'; then wants_qwen_work_cn=true; fi
+    if [ "$wants_qoder_family" != "true" ] && [ "$wants_qwen_work_cn" != "true" ]; then
+        remove_qoderwork_runtime_wrapper
+        return 0
+    fi
 
     local wrapper_script="$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs"
     if [ ! -f "$wrapper_script" ]; then return 0; fi
 
-    msg "==> 配置 QoderWork token 采集..." "==> Configuring QoderWork token intercept..."
+    msg "==> 配置 QoderWork 系列 token 采集..." "==> Configuring QoderWork-family token intercept..."
 
-    # (1) Set immediately for the current launchd session so QoderWork can pick
-    # up the env without waiting for a re-login.
-    launchctl setenv QODER_WORKER_RUNTIME_PATH "$wrapper_script"
-
-    # (2) Persist across reboots via a LaunchAgent plist. launchctl setenv on
-    # its own is session-scoped — a macOS reboot would otherwise silently drop
-    # the env and the wrapper would stop being injected. The plist contains a
-    # one-shot RunAtLoad job that re-runs `launchctl setenv` on every user
-    # login (when launchd auto-loads agents from ~/Library/LaunchAgents).
     local plist_dir="$HOME/Library/LaunchAgents"
-    local plist_path="$plist_dir/com.loongsuite-pilot.qoderwork-env.plist"
     mkdir -p "$plist_dir"
-    cat > "$plist_path" << PLIST
+
+    if [ "$wants_qoder_family" = "true" ] && {
+        [ -d "/Applications/QoderWork.app" ] || [ -d "$HOME/Applications/QoderWork.app" ] ||
+        [ -d "/Applications/QoderWork CN.app" ] || [ -d "$HOME/Applications/QoderWork CN.app" ] ||
+        [ -d "/Applications/QoderWorkCN.app" ] || [ -d "$HOME/Applications/QoderWorkCN.app" ];
+    }; then
+        local qoder_plist_path="$plist_dir/com.loongsuite-pilot.qoderwork-env.plist"
+        launchctl setenv QODER_WORKER_RUNTIME_PATH "$wrapper_script"
+        cat > "$qoder_plist_path" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1281,20 +1283,61 @@ inject_qoderwork_runtime_wrapper() {
 </dict>
 </plist>
 PLIST
+        launchctl unload "$qoder_plist_path" 2>/dev/null || true
+        launchctl load "$qoder_plist_path" 2>/dev/null || true
+        msg "    ✅ QODER_WORKER_RUNTIME_PATH (QoderWork/QoderWorkCN)" \
+            "    ✅ QODER_WORKER_RUNTIME_PATH (QoderWork/QoderWorkCN)"
+    else
+        local stale_qoder_plist="$plist_dir/com.loongsuite-pilot.qoderwork-env.plist"
+        launchctl unload "$stale_qoder_plist" 2>/dev/null || true
+        rm -f "$stale_qoder_plist"
+        if launchctl getenv QODER_WORKER_RUNTIME_PATH 2>/dev/null | grep -q 'loongsuite-pilot'; then
+            launchctl unsetenv QODER_WORKER_RUNTIME_PATH
+        fi
+    fi
 
-    # (3) Reload now so the plist (and any updated path) is registered
-    # idempotently. unload-before-load avoids "already loaded" errors when
-    # upgrading the path. Errors are non-fatal — current-session setenv above
-    # already covers the immediate use case.
-    launchctl unload "$plist_path" 2>/dev/null || true
-    launchctl load "$plist_path" 2>/dev/null || true
+    # QwenWorkCN checks this product-specific override before falling back to
+    # the SDK-wide QODER_WORKER_RUNTIME_PATH. Setting it prevents another
+    # Qoder-family application from deciding QwenWorkCN's worker entry.
+    if [ "$wants_qwen_work_cn" = "true" ] && {
+        [ -d "/Applications/QwenWorkCN.app" ] || [ -d "$HOME/Applications/QwenWorkCN.app" ];
+    }; then
+        local qwen_plist_path="$plist_dir/com.loongsuite-pilot.qwenworkcn-env.plist"
+        launchctl setenv QW_QODER_WORKER_RUNTIME_PATH "$wrapper_script"
+        cat > "$qwen_plist_path" << PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.loongsuite-pilot.qwenworkcn-env</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/launchctl</string>
+        <string>setenv</string>
+        <string>QW_QODER_WORKER_RUNTIME_PATH</string>
+        <string>$wrapper_script</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+        launchctl unload "$qwen_plist_path" 2>/dev/null || true
+        launchctl load "$qwen_plist_path" 2>/dev/null || true
+        msg "    ✅ QW_QODER_WORKER_RUNTIME_PATH (QwenWorkCN 优先)" \
+            "    ✅ QW_QODER_WORKER_RUNTIME_PATH (QwenWorkCN priority)"
+    else
+        local stale_qwen_plist="$plist_dir/com.loongsuite-pilot.qwenworkcn-env.plist"
+        launchctl unload "$stale_qwen_plist" 2>/dev/null || true
+        rm -f "$stale_qwen_plist"
+        if launchctl getenv QW_QODER_WORKER_RUNTIME_PATH 2>/dev/null | grep -q 'loongsuite-pilot'; then
+            launchctl unsetenv QW_QODER_WORKER_RUNTIME_PATH
+        fi
+    fi
 
-    msg "    ✅ launchctl setenv QODER_WORKER_RUNTIME_PATH" \
-        "    ✅ launchctl setenv QODER_WORKER_RUNTIME_PATH"
-    msg "    ✅ LaunchAgent 已注册 (重启 macOS 后自动恢复 env)" \
-        "    ✅ LaunchAgent registered (auto-restores env after macOS reboot)"
-    msg "    ⚠️  请完全退出并重新打开 QoderWork 以生效" \
-        "    ⚠️  Please fully quit and restart QoderWork for changes to take effect"
+    msg "    ⚠️  请完全退出并重新打开对应应用以生效" \
+        "    ⚠️  Fully quit and restart the corresponding app for changes to take effect"
     echo ""
 }
 
@@ -1303,13 +1346,15 @@ remove_qoderwork_runtime_wrapper() {
 
     # Unload + remove the LaunchAgent plist so the env stops auto-restoring on
     # next login.
-    local plist_path="$HOME/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist"
-    if [ -f "$plist_path" ]; then
-        launchctl unload "$plist_path" 2>/dev/null || true
-        rm -f "$plist_path"
-        msg "    已清理 LaunchAgent (qoderwork-env)" \
-            "    Cleaned up LaunchAgent (qoderwork-env)"
-    fi
+    local plist_path
+    for plist_path in \
+        "$HOME/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist" \
+        "$HOME/Library/LaunchAgents/com.loongsuite-pilot.qwenworkcn-env.plist"; do
+        if [ -f "$plist_path" ]; then
+            launchctl unload "$plist_path" 2>/dev/null || true
+            rm -f "$plist_path"
+        fi
+    done
 
     # Drop the env from the current session too (conservative grep avoids
     # touching env values the user set manually to a non-loongsuite path).
@@ -1317,6 +1362,11 @@ remove_qoderwork_runtime_wrapper() {
         launchctl unsetenv QODER_WORKER_RUNTIME_PATH
         msg "    已清理 QODER_WORKER_RUNTIME_PATH" \
             "    Cleaned up QODER_WORKER_RUNTIME_PATH"
+    fi
+    if launchctl getenv QW_QODER_WORKER_RUNTIME_PATH 2>/dev/null | grep -q 'loongsuite-pilot'; then
+        launchctl unsetenv QW_QODER_WORKER_RUNTIME_PATH
+        msg "    已清理 QW_QODER_WORKER_RUNTIME_PATH" \
+            "    Cleaned up QW_QODER_WORKER_RUNTIME_PATH"
     fi
 }
 
@@ -1989,8 +2039,10 @@ remove_hook_configs() {
         "$HOME/.qoder-cn/settings.json"
         "$HOME/.qoderwork/settings.json"
         "$HOME/.qoderworkcn/settings.json"
+        "$HOME/.qwenworkcn/settings.json"
         "$HOME/.claude/settings.json"
         "$HOME/.codex/hooks.json"
+        "$HOME/.kiro/agents/pilot-kiro.json"
         "$HOME/.qwen/settings.json"
         "$HOME/.workbuddy/settings.json"
     )
