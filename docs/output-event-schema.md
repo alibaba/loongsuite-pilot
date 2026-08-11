@@ -100,7 +100,7 @@ Required levels follow OpenTelemetry wording:
 
 ## Multimodal Message Parts
 
-When global multimodal infrastructure and the agent `uploadMode` are enabled (see [Configuration Guide](configuration.md#multimodal-object-storage) and [Agent Configuration](agents.md#configure-multimodal-per-agent)), media in message `parts` uses object-storage references instead of inline base64:
+When global multimodal infrastructure and the agent `uploadMode` are enabled (see [Configuration Guide](configuration.md#multimodal-object-storage) and [Multimodal Collection](multimodal.md)), media in message `parts` uses object-storage references instead of inline base64:
 
 | `parts[].type` | Description |
 |----------------|-------------|

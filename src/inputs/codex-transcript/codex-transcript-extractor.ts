@@ -1,6 +1,11 @@
 import * as path from 'node:path';
 import { MAX_MULTIMODAL_PARTS } from '../../multimodal/types.js';
-import type { JsonValue, MultimodalUploadMode } from '../../types/index.js';
+import {
+  multimodalUploadIncludesInput,
+  multimodalUploadIncludesTool,
+  type JsonValue,
+  type MultimodalUploadMode,
+} from '../../types/index.js';
 import type {
   CodexPartialTurnExtraction,
   CodexExtractedTranscriptTurn,
@@ -345,7 +350,7 @@ function extractCodexTurn(
         const message = transcriptInputMessage(
           role,
           payload.content,
-          uploadMode === 'both' ? blobToUri : undefined,
+          multimodalUploadIncludesInput(uploadMode) ? blobToUri : undefined,
           timestamp,
         );
         if (message) {
@@ -405,7 +410,7 @@ function extractCodexTurn(
     const toolOutput = transcriptToolOutput(
       itemType,
       payload,
-      uploadMode === 'both' ? blobToUri : undefined,
+      multimodalUploadIncludesTool(uploadMode) ? blobToUri : undefined,
       timestamp,
     );
     if (!toolOutput) continue;

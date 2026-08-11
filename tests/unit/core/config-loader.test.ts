@@ -721,6 +721,29 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.agents.codex.multimodal).toEqual({ uploadMode: 'none' });
     });
+
+    it('accepts input, output, and tool uploadMode values', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          codex: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'input' },
+          },
+          cursor: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'tool' },
+          },
+          'claude-code': {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'output' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.agents.codex.multimodal).toEqual({ uploadMode: 'input' });
+      expect(config.agents.cursor.multimodal).toEqual({ uploadMode: 'tool' });
+      expect(config.agents['claude-code'].multimodal).toEqual({ uploadMode: 'output' });
+    });
   });
 
   describe('mask config', () => {

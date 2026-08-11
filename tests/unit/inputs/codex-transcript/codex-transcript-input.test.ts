@@ -2189,7 +2189,7 @@ describe('Codex transcript multimodal extraction', () => {
     ]);
   });
 
-  it('converts images only when uploadMode is both', () => {
+  it('gates input vs tool image conversion by uploadMode', () => {
     const png = Buffer.from('fake-png-mode').toString('base64');
     const fixture = multimodalRecords([
       userContentItem([
@@ -2215,10 +2215,20 @@ describe('Codex transcript multimodal extraction', () => {
     expect(JSON.stringify(off!.steps)).not.toContain('"type":"uri"');
     expect(JSON.stringify(off)).not.toContain(png);
 
-    const on = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'both' });
-    expect(userParts(on!)[1]).toMatchObject({ type: 'uri' });
-    const toolOut = on!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
+    const inputOnly = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'input' });
+    expect(userParts(inputOnly!)[1]).toMatchObject({ type: 'uri' });
+    const inputToolOut = inputOnly!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
+    expect(inputToolOut?.some(p => p.type === 'uri')).toBe(false);
+
+    const toolOnly = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'tool' });
+    expect(userParts(toolOnly!).some((p: any) => p.type === 'uri')).toBe(false);
+    const toolOut = toolOnly!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
     expect(toolOut?.some(p => p.type === 'uri')).toBe(true);
+
+    const both = extractTurn(fixture, { blobToUri: fakeBlobToUri, uploadMode: 'both' });
+    expect(userParts(both!)[1]).toMatchObject({ type: 'uri' });
+    const bothToolOut = both!.steps.flatMap(s => s.tools).find(t => t.callId === 'c1')?.output as any[];
+    expect(bothToolOut?.some(p => p.type === 'uri')).toBe(true);
   });
 
   it('does not attach media when blobToUri is omitted', () => {

@@ -69,7 +69,7 @@ SLS 目标支持 WebTracking、AK/SK 和 API Key 模式。API Key 模式会把 k
 
 ## 多模态对象存储
 
-当需要把 Codex 等 Agent 消息中的图片从 base64 转为对象存储 `uri` 时，在 `config.json` 配置全局多模态基础设施。是否实际上传由各 Agent 的 `agents.<id>.multimodal.uploadMode` 控制，见 [Agent 配置](agents.md)。
+当需要把 Codex 等 Agent 消息中的图片从 base64 转为对象存储 `uri` 时，在 `config.json` 配置全局多模态基础设施。是否实际上传由各 Agent 的 `agents.<id>.multimodal.uploadMode` 控制，见 [多模态采集](multimodal.md)。
 
 ### OSS
 
@@ -126,7 +126,7 @@ SLS 多模态走独立 PutObject 通道，与日志 `sls` flusher 不是同一�
 
 | 任务 | 文档 |
 |------|------|
-| 选择采集哪些 Agent，是否采集消息内容 / 多模态 | [Agent 配置](agents.md) |
+| 选择采集哪些 Agent，是否采集消息内容 / 多模态 | [Agent 配置](agents.md)、[多模态采集](multimodal.md) |
 | 写入本地 JSONL 文件 | [本地 JSONL 输出](local-jsonl-output.md) |
 | 上报日志到阿里云 SLS | [SLS 输出](sls-output.md) |
 | 将 GenAI 活动上报为 OTLP Trace | [Trace 输出](trace-output.md) |

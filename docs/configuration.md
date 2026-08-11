@@ -69,7 +69,7 @@ Do not put `apiKey` together with `accessKeyId` / `accessKeySecret` on the same 
 
 ## Multimodal Object Storage
 
-When Pilot should convert inline images in agent messages from base64 into object-storage `uri` parts, configure global multimodal infrastructure in `config.json`. Whether upload actually runs is controlled per agent by `agents.<id>.multimodal.uploadMode`; see [Agent Configuration](agents.md).
+When Pilot should convert inline images in agent messages from base64 into object-storage `uri` parts, configure global multimodal infrastructure in `config.json`. Whether upload actually runs is controlled per agent by `agents.<id>.multimodal.uploadMode`; see [Multimodal Collection](multimodal.md).
 
 ### OSS
 
@@ -126,7 +126,7 @@ If global multimodal config is missing or invalid, Pilot fails open: text collec
 
 | Task | Guide |
 |------|-------|
-| Choose which agents to collect and whether message content / multimodal capture runs | [Agent Configuration](agents.md) |
+| Choose which agents to collect and whether message content / multimodal capture runs | [Agent Configuration](agents.md), [Multimodal Collection](multimodal.md) |
 | Write normalized events to local JSONL files | [Local JSONL Output](local-jsonl-output.md) |
 | Report logs to Alibaba Cloud SLS | [SLS Output](sls-output.md) |
 | Report GenAI activity as OTLP traces | [Trace Output](trace-output.md) |

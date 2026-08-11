@@ -142,11 +142,27 @@ export interface UpstreamLinkConfig {
 
 export const MULTIMODAL_UPLOAD_MODES = [
   'none',
-  // 'input',
-  // 'output',
+  'input',
+  'output',
+  'tool',
   'both',
 ] as const;
 export type MultimodalUploadMode = (typeof MULTIMODAL_UPLOAD_MODES)[number];
+
+/** User input */
+export function multimodalUploadIncludesInput(mode: MultimodalUploadMode): boolean {
+  return mode === 'input' || mode === 'both';
+}
+
+/** model output */
+export function multimodalUploadIncludesOutput(mode: MultimodalUploadMode): boolean {
+  return mode === 'output' || mode === 'both';
+}
+
+/** Tool-result */
+export function multimodalUploadIncludesTool(mode: MultimodalUploadMode): boolean {
+  return mode === 'tool' || mode === 'both';
+}
 
 export const MULTIMODAL_UPLOADER_KINDS = ['sls', 'oss'] as const;
 export type MultimodalUploaderKind = (typeof MULTIMODAL_UPLOADER_KINDS)[number];

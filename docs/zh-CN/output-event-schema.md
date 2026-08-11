@@ -98,7 +98,7 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 
 ## 多模态消息 Parts
 
-当全局多模态基础设施与 Agent `uploadMode` 已开启时（见 [配置总览](configuration.md#多模态对象存储) 与 [Agent 配置](agents.md#按-agent-配置多模态)），消息 `parts` 中的媒体使用对象存储引用，而不是内联 base64：
+当全局多模态基础设施与 Agent `uploadMode` 已开启时（见 [配置总览](configuration.md#多模态对象存储) 与 [多模态采集](multimodal.md)），消息 `parts` 中的媒体使用对象存储引用，而不是内联 base64：
 
 | `parts[].type` | 说明 |
 |----------------|------|
