@@ -19,12 +19,12 @@ vi.mock('../../../src/deployment/detect-utils.js', () => ({
 
 vi.mock('../../../src/utils/fs-utils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/utils/fs-utils.js')>();
-  return { ...actual, fileExists: vi.fn() };
+  return { ...actual, fileExists: vi.fn(), directoryExists: vi.fn() };
 });
 
 import { Orchestrator } from '../../../src/core/orchestrator.js';
 import { detectAgent } from '../../../src/deployment/detect-utils.js';
-import { fileExists } from '../../../src/utils/fs-utils.js';
+import { directoryExists, fileExists } from '../../../src/utils/fs-utils.js';
 
 const DATA_DIR = '/tmp/orch-plugin-inject-test';
 
@@ -138,6 +138,29 @@ describe('Orchestrator.buildPluginInjectInterceptTargets', () => {
       expect(await target.precondition()).toBe(true);
       // file gate is resolved against $PILOT_DATA → dataDir
       expect(fileExists).toHaveBeenCalledWith(`${DATA_DIR}/plugins/opencode/plugin.mjs`);
+    });
+
+    it('accepts an existing OpenClaw directory plugin asset', async () => {
+      getDefinitions.mockReturnValue([
+        pluginInjectDef({
+          id: 'openclaw',
+          pluginInject: {
+            configPaths: ['~/.openclaw/openclaw.json'],
+            pluginSpec: 'file://$PILOT_DATA/plugins/openclaw',
+            pluginId: 'loongsuite-pilot-openclaw',
+            configShape: 'openclaw-nested',
+          },
+        }),
+      ]);
+      vi.mocked(fileExists).mockResolvedValue(false);
+      vi.mocked(directoryExists).mockResolvedValue(true);
+      vi.mocked(detectAgent).mockResolvedValue(true);
+
+      const [target] = callBuild(orch);
+      expect(await target.precondition()).toBe(true);
+      expect(fileExists).toHaveBeenCalledWith(`${DATA_DIR}/plugins/openclaw`);
+      expect(directoryExists).toHaveBeenCalledWith(`${DATA_DIR}/plugins/openclaw`);
+      expect(detectAgent).toHaveBeenCalled();
     });
 
     it('skips the file gate for non-file specs (e.g. npm package)', async () => {

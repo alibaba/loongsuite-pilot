@@ -450,7 +450,7 @@ export class Orchestrator extends EventEmitter {
     for (const def of defs) {
       if (def.deployMode !== 'plugin-inject' || !def.pluginInject) continue;
 
-      const pluginFile = this.resolvePluginSpecPath(def.pluginInject.pluginSpec);
+      const pluginPath = this.resolvePluginSpecPath(def.pluginInject.pluginSpec);
 
       targets.push({
         id: `plugin-inject:${def.id}`,
@@ -458,8 +458,12 @@ export class Orchestrator extends EventEmitter {
         precondition: async () => {
           // Only self-heal when the plugin asset is actually deployed AND the
           // agent is present. Otherwise repair would inject a spec pointing at
-          // a missing file, or fail repeatedly when no config file exists.
-          if (pluginFile && !(await fileExists(pluginFile))) return false;
+          // a missing asset, or fail repeatedly when no config file exists.
+          if (
+            pluginPath
+            && !(await fileExists(pluginPath))
+            && !(await directoryExists(pluginPath))
+          ) return false;
           return detectAgent(def.detection);
         },
         check: async () => {
@@ -506,9 +510,9 @@ export class Orchestrator extends EventEmitter {
   }
 
   /**
-   * Resolve a plugin spec to a local file path for existence checks.
+   * Resolve a plugin spec to a local filesystem path for existence checks.
    * Returns null for non-file specs (e.g. npm package names), which skips the
-   * plugin-file precondition gate.
+   * plugin-asset precondition gate.
    */
   private resolvePluginSpecPath(spec: string): string | null {
     const resolved = spec.replace(/\$PILOT_DATA/g, this.dataDir);

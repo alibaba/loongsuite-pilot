@@ -40,6 +40,7 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
       const handlers: Record<string, (event: any, ctx: any) => unknown> = {};
       plugin.register({
         pluginConfig: {},
+        runtime: { version: '2026.6.10' },
         on(name: string, handler: (event: any, ctx: any) => unknown) {
           handlers[name] = handler;
         },

@@ -16,7 +16,7 @@
     "replaceSpecs": [
       "loongsuite-pilot-openclaw",
       "loongsuite-pilot-openclaw-smoke",
-      "plugins/openclaw/plugin.mjs"
+      "$PILOT_DATA/plugins/openclaw/plugin.mjs"
     ],
     "configShape": "openclaw-nested",
     "createIfMissing": true

@@ -64,6 +64,7 @@ function registerPlugin(plugin, pluginConfig = {}) {
   const handlers = {};
   const api = {
     pluginConfig,
+    runtime: { version: '2026.6.10' },
     on: (name, handler) => { handlers[name] = handler; },
   };
   plugin.register(api);
@@ -121,12 +122,21 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(agentDefinition.pluginInject.pluginSpec).toBe(
       'file://$PILOT_DATA/plugins/openclaw',
     );
+    expect(agentDefinition.pluginInject.replaceSpecs).toContain(
+      '$PILOT_DATA/plugins/openclaw/plugin.mjs',
+    );
+    expect(agentDefinition.pluginInject.replaceSpecs).not.toContain(
+      'plugins/openclaw/plugin.mjs',
+    );
   });
 
   it('registers 16 hooks via api.on', async () => {
     const plugin = await loadPlugin();
     const registered = new Set();
-    const api = { on: (name) => registered.add(name) };
+    const api = {
+      runtime: { version: '2026.5.12' },
+      on: (name) => registered.add(name),
+    };
     plugin.register(api);
     expect(registered.size).toBe(16);
     expect(registered.has('session_start')).toBe(true);
@@ -146,6 +156,42 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(registered.has('before_model_resolve')).toBe(true);
     expect(registered.has('before_prompt_build')).toBe(true);
   });
+
+  it.each([
+    ['missing', undefined],
+    ['unparseable', 'not-a-version'],
+    ['too old', '2026.3.2'],
+    ['prerelease below the stable floor', '2026.5.12-beta.1'],
+  ])('does not register hooks when the host version is %s', async (_label, version) => {
+    const plugin = await loadPlugin();
+    const registered = new Set();
+    const logger = { error: vi.fn() };
+    const api = {
+      logger,
+      runtime: version === undefined ? {} : { version },
+      on: (name) => registered.add(name),
+    };
+
+    expect(() => plugin.register(api)).not.toThrow();
+    expect(registered.size).toBe(0);
+    expect(logger.error).toHaveBeenCalledOnce();
+    expect(logger.error.mock.calls[0][0]).toContain('OpenClaw >=2026.5.12 is required');
+  });
+
+  it.each(['2026.5.12', '2026.5.12-1', 'v2026.6.10'])(
+    'registers hooks on supported host version %s',
+    async (version) => {
+      const plugin = await loadPlugin();
+      const registered = new Set();
+
+      plugin.register({
+        runtime: { version },
+        on: (name) => registered.add(name),
+      });
+
+      expect(registered.size).toBe(16);
+    },
+  );
 
   it('fails open with a clear diagnostic when the host plugin API is unsupported', async () => {
     const plugin = await loadPlugin();

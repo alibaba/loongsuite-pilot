@@ -336,6 +336,18 @@ export class PluginInjectStrategy implements DeployStrategy {
     return entry.includes(pluginId);
   }
 
+  private openclawReplacementMatches(entry: string, replacementSpec: string): boolean {
+    const resolvedReplacement = this.resolveSpec(replacementSpec);
+    const isPathReplacement = replacementSpec.includes('$PILOT_DATA')
+      || resolvedReplacement.startsWith('file://')
+      || path.isAbsolute(resolvedReplacement);
+
+    if (!isPathReplacement) return entry.includes(replacementSpec);
+
+    return path.normalize(this.toOpenclawPath(entry))
+      === path.normalize(this.toOpenclawPath(resolvedReplacement));
+  }
+
   private openclawHasPlugin(
     json: Record<string, unknown>,
     resolvedSpec: string,
@@ -397,7 +409,7 @@ export class PluginInjectStrategy implements DeployStrategy {
           : null;
       if (!legacySpec) continue;
       if (this.pathMatches(legacySpec, resolvedSpec, config.pluginId)) continue;
-      if (config.replaceSpecs?.some((old) => legacySpec.includes(old))) continue;
+      if (config.replaceSpecs?.some((old) => this.openclawReplacementMatches(legacySpec, old))) continue;
       const migratedPath = this.toOpenclawPath(legacySpec);
       if (!paths.includes(migratedPath)) paths.push(migratedPath);
     }
@@ -406,7 +418,7 @@ export class PluginInjectStrategy implements DeployStrategy {
       const before = paths.length;
       const filtered = paths.filter((entry) => {
         if (typeof entry !== 'string') return true;
-        return !config.replaceSpecs!.some((old) => entry.includes(old));
+        return !config.replaceSpecs!.some((old) => this.openclawReplacementMatches(entry, old));
       });
       if (filtered.length !== before) {
         load.paths = filtered;

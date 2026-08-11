@@ -1224,10 +1224,37 @@ function makeHandler(fn) {
   };
 }
 
-function reportUnsupportedHost(api) {
+function parseOpenClawVersion(value) {
+  if (typeof value !== "string") return null;
+  const match = value.trim().match(
+    /^v?(\d{4})\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/,
+  );
+  if (!match) return null;
+  return {
+    core: [Number(match[1]), Number(match[2]), Number(match[3])],
+    suffix: match[4],
+  };
+}
+
+function isSupportedOpenClawVersion(value) {
+  const parsed = parseOpenClawVersion(value);
+  const minimum = parseOpenClawVersion(MIN_OPENCLAW_VERSION);
+  if (!parsed || !minimum) return false;
+
+  for (let i = 0; i < minimum.core.length; i++) {
+    if (parsed.core[i] > minimum.core[i]) return true;
+    if (parsed.core[i] < minimum.core[i]) return false;
+  }
+
+  // OpenClaw numeric suffixes are release corrections (for example -1),
+  // while named prereleases at the minimum core remain below the floor.
+  return !parsed.suffix || /^\d+(?:\.\d+)*$/.test(parsed.suffix);
+}
+
+function reportUnsupportedHost(api, detail) {
   const message =
     `[${PLUGIN_ID}] incompatible OpenClaw plugin API: `
-    + `api.on is unavailable; OpenClaw >=${MIN_OPENCLAW_VERSION} is required`;
+    + `${detail}; OpenClaw >=${MIN_OPENCLAW_VERSION} is required`;
   try {
     if (typeof api?.logger?.error === "function") {
       api.logger.error(message);
@@ -1247,7 +1274,16 @@ export default {
 
   register(api) {
     if (typeof api?.on !== "function") {
-      reportUnsupportedHost(api);
+      reportUnsupportedHost(api, "api.on is unavailable");
+      return;
+    }
+
+    const hostVersion = api?.runtime?.version;
+    if (!isSupportedOpenClawVersion(hostVersion)) {
+      const versionLabel = typeof hostVersion === "string" && hostVersion.length > 0
+        ? hostVersion
+        : "unavailable";
+      reportUnsupportedHost(api, `api.runtime.version=${versionLabel} is unsupported`);
       return;
     }
 

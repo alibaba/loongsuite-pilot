@@ -150,7 +150,7 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
         replaceSpecs: [
           'loongsuite-pilot-openclaw',
           'loongsuite-pilot-openclaw-smoke',
-          'plugins/openclaw/plugin.mjs',
+          '$PILOT_DATA/plugins/openclaw/plugin.mjs',
         ],
         configShape: 'openclaw-nested',
         createIfMissing: true,
@@ -319,6 +319,25 @@ describe('PluginInjectStrategy — openclaw-nested shape', () => {
     expect(plugins.load.paths).toContain(`${dataDir}/plugins/openclaw`);
     expect(plugins.load.paths).not.toContain(oldPath);
     expect(plugins.load.paths).toContain('/other/plugin.mjs');
+  });
+
+  it('preserves an unrelated plugin path with the same OpenClaw suffix', async () => {
+    const managedOldPath = `${dataDir}/plugins/openclaw/plugin.mjs`;
+    const unrelatedPath = '/opt/vendor/plugins/openclaw/plugin.mjs';
+    await fs.writeFile(configPath, JSON.stringify({
+      plugins: {
+        load: { paths: [managedOldPath, unrelatedPath] },
+        entries: {},
+      },
+    }));
+
+    await strategy.deploy(openclawDef());
+
+    const cfg = await readConfig();
+    const plugins = cfg.plugins as { load: { paths: string[] } };
+    expect(plugins.load.paths).not.toContain(managedOldPath);
+    expect(plugins.load.paths).toContain(unrelatedPath);
+    expect(plugins.load.paths).toContain(`${dataDir}/plugins/openclaw`);
   });
 
   it('is idempotent on repeated deploys', async () => {
