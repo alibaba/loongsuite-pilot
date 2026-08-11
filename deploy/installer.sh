@@ -69,6 +69,15 @@ SELECTED_AGENTS=""
 ALL_AGENTS=0
 MASK_MODE=""
 MASK_TYPES=""
+SLS_REQUESTED=0
+CMS_REQUESTED=0
+CMS_LICENSE_KEY_SET=0
+CMS_ENDPOINT_SET=0
+CMS_WORKSPACE_SET=0
+COLLECT_LOG_SET=0
+COLLECT_TRACE_SET=0
+SERVICE_NAME_PREFIX_SET=0
+PACKAGE_SELECTOR_EXPLICIT=0
 HAS_SUDO=0
 PURGE=0
 PREFER_SYSTEM_NODE=0
@@ -89,21 +98,21 @@ fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --sls-endpoint)       SLS_ENDPOINT="$2"; shift 2 ;;
-        --sls-endpoint=*)     SLS_ENDPOINT="${1#*=}"; shift ;;
-        --sls-project)        SLS_PROJECT="$2"; shift 2 ;;
-        --sls-project=*)      SLS_PROJECT="${1#*=}"; shift ;;
-        --sls-logstore)       SLS_LOGSTORE="$2"; shift 2 ;;
-        --sls-logstore=*)     SLS_LOGSTORE="${1#*=}"; shift ;;
-        --sls-ak-id)          SLS_AK_ID="$2"; shift 2 ;;
-        --sls-ak-id=*)        SLS_AK_ID="${1#*=}"; shift ;;
-        --sls-ak-secret)      SLS_AK_SECRET="$2"; shift 2 ;;
-        --sls-ak-secret=*)    SLS_AK_SECRET="${1#*=}"; shift ;;
+        --sls-endpoint)       SLS_ENDPOINT="$2"; SLS_REQUESTED=1; shift 2 ;;
+        --sls-endpoint=*)     SLS_ENDPOINT="${1#*=}"; SLS_REQUESTED=1; shift ;;
+        --sls-project)        SLS_PROJECT="$2"; SLS_REQUESTED=1; shift 2 ;;
+        --sls-project=*)      SLS_PROJECT="${1#*=}"; SLS_REQUESTED=1; shift ;;
+        --sls-logstore)       SLS_LOGSTORE="$2"; SLS_REQUESTED=1; shift 2 ;;
+        --sls-logstore=*)     SLS_LOGSTORE="${1#*=}"; SLS_REQUESTED=1; shift ;;
+        --sls-ak-id)          SLS_AK_ID="$2"; SLS_REQUESTED=1; shift 2 ;;
+        --sls-ak-id=*)        SLS_AK_ID="${1#*=}"; SLS_REQUESTED=1; shift ;;
+        --sls-ak-secret)      SLS_AK_SECRET="$2"; SLS_REQUESTED=1; shift 2 ;;
+        --sls-ak-secret=*)    SLS_AK_SECRET="${1#*=}"; SLS_REQUESTED=1; shift ;;
         --default-sls-override|--default-sls-override=*)
             echo "❌ --default-sls-override is no longer supported. Internal builds always dual-write." >&2
             exit 1 ;;
-        --package-url)        PACKAGE_URL="$2"; shift 2 ;;
-        --package-url=*)      PACKAGE_URL="${1#--package-url=}"; shift ;;
+        --package-url)        PACKAGE_URL="$2"; PACKAGE_SELECTOR_EXPLICIT=1; shift 2 ;;
+        --package-url=*)      PACKAGE_URL="${1#--package-url=}"; PACKAGE_SELECTOR_EXPLICIT=1; shift ;;
         --data-dir)           DATA_DIR="$2"; shift 2 ;;
         --data-dir=*)         DATA_DIR="${1#*=}"; shift ;;
         --log-level)          LOG_LEVEL="$2"; shift 2 ;;
@@ -112,22 +121,22 @@ while [[ $# -gt 0 ]]; do
         --userId=*|--user.id=*) USER_ID="${1#*=}"; shift ;;
         --lang)               export LOONGSUITE_PILOT_LANG="$2"; shift 2 ;;
         --lang=*)             export LOONGSUITE_PILOT_LANG="${1#--lang=}"; shift ;;
-        --version)            INSTALL_VERSION="$2"; shift 2 ;;
-        --version=*)          INSTALL_VERSION="${1#*=}"; shift ;;
-        --channel)            CHANNEL="$2"; shift 2 ;;
-        --channel=*)          CHANNEL="${1#*=}"; shift ;;
-        --collect-log)        COLLECT_LOG="$2"; shift 2 ;;
-        --collect-log=*)      COLLECT_LOG="${1#*=}"; shift ;;
-        --collect-trace)      COLLECT_TRACE="$2"; shift 2 ;;
-        --collect-trace=*)    COLLECT_TRACE="${1#*=}"; shift ;;
-        --cms-license-key)    CMS_LICENSE_KEY="$2"; shift 2 ;;
-        --cms-license-key=*)  CMS_LICENSE_KEY="${1#*=}"; shift ;;
-        --cms-endpoint)       CMS_ENDPOINT="$2"; shift 2 ;;
-        --cms-endpoint=*)     CMS_ENDPOINT="${1#*=}"; shift ;;
-        --cms-workspace)      CMS_WORKSPACE="$2"; shift 2 ;;
-        --cms-workspace=*)    CMS_WORKSPACE="${1#*=}"; shift ;;
-        --service-name-prefix) SERVICE_NAME_PREFIX="$2"; shift 2 ;;
-        --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
+        --version)            INSTALL_VERSION="$2"; PACKAGE_SELECTOR_EXPLICIT=1; shift 2 ;;
+        --version=*)          INSTALL_VERSION="${1#*=}"; PACKAGE_SELECTOR_EXPLICIT=1; shift ;;
+        --channel)            CHANNEL="$2"; PACKAGE_SELECTOR_EXPLICIT=1; shift 2 ;;
+        --channel=*)          CHANNEL="${1#*=}"; PACKAGE_SELECTOR_EXPLICIT=1; shift ;;
+        --collect-log)        COLLECT_LOG="$2"; COLLECT_LOG_SET=1; shift 2 ;;
+        --collect-log=*)      COLLECT_LOG="${1#*=}"; COLLECT_LOG_SET=1; shift ;;
+        --collect-trace)      COLLECT_TRACE="$2"; COLLECT_TRACE_SET=1; shift 2 ;;
+        --collect-trace=*)    COLLECT_TRACE="${1#*=}"; COLLECT_TRACE_SET=1; shift ;;
+        --cms-license-key)    CMS_LICENSE_KEY="$2"; CMS_REQUESTED=1; CMS_LICENSE_KEY_SET=1; shift 2 ;;
+        --cms-license-key=*)  CMS_LICENSE_KEY="${1#*=}"; CMS_REQUESTED=1; CMS_LICENSE_KEY_SET=1; shift ;;
+        --cms-endpoint)       CMS_ENDPOINT="$2"; CMS_REQUESTED=1; CMS_ENDPOINT_SET=1; shift 2 ;;
+        --cms-endpoint=*)     CMS_ENDPOINT="${1#*=}"; CMS_REQUESTED=1; CMS_ENDPOINT_SET=1; shift ;;
+        --cms-workspace)      CMS_WORKSPACE="$2"; CMS_REQUESTED=1; CMS_WORKSPACE_SET=1; shift 2 ;;
+        --cms-workspace=*)    CMS_WORKSPACE="${1#*=}"; CMS_REQUESTED=1; CMS_WORKSPACE_SET=1; shift ;;
+        --service-name-prefix) SERVICE_NAME_PREFIX="$2"; SERVICE_NAME_PREFIX_SET=1; shift 2 ;;
+        --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; SERVICE_NAME_PREFIX_SET=1; shift ;;
         --agents)             SELECTED_AGENTS="$2"; shift 2 ;;
         --agents=*)           SELECTED_AGENTS="${1#*=}"; shift ;;
         --all-agents)         ALL_AGENTS=1; shift ;;
@@ -578,6 +587,293 @@ check_deps() {
         "    ✅ node $("$NODE_BIN" --version)  npm $(run_npm --version)"
     msg "    node pinned: $NODE_BIN" "    node pinned: $NODE_BIN"
     echo ""
+}
+
+# ============================================================
+# Existing install: update reporting config only, then restart
+# ============================================================
+PILOT_COMMAND=""
+
+detect_existing_pilot() {
+    PILOT_COMMAND=""
+    if command -v loongsuite-pilot >/dev/null 2>&1; then
+        PILOT_COMMAND="$(command -v loongsuite-pilot)"
+    elif [ -x "$HOME/.local/bin/loongsuite-pilot" ]; then
+        PILOT_COMMAND="$HOME/.local/bin/loongsuite-pilot"
+    else
+        return 1
+    fi
+
+    local status_output=""
+    if status_output="$(LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" \
+        LOONGSUITE_PILOT_CACHE_DIR="$DATA_DIR" \
+        "$PILOT_COMMAND" status 2>&1)"; then
+        :
+    else
+        :
+    fi
+
+    if printf '%s\n' "$status_output" | grep -Eq 'is running|is not running'; then
+        return 0
+    fi
+
+    msg "❌ loongsuite-pilot status 返回了无法识别的结果，已停止配置" \
+        "❌ loongsuite-pilot status returned an unrecognized result; configuration stopped"
+    [ -n "$status_output" ] && printf '%s\n' "$status_output" >&2
+    return 2
+}
+
+is_agentshell_current() {
+    local current_file="$DATA_DIR/current"
+    [ -r "$current_file" ] || return 1
+    LC_ALL=C grep -qi -- '-agentshell' "$current_file" 2>/dev/null
+}
+
+resolve_reconfigure_node() {
+    local pinned_file="$DATA_DIR/node-bin"
+    if [ -f "$pinned_file" ]; then
+        local pinned_node
+        pinned_node="$(tr -d '\r\n' < "$pinned_file")"
+        if _node_is_suitable "$pinned_node"; then
+            printf '%s\n' "$pinned_node"
+            return 0
+        fi
+    fi
+    resolve_node
+}
+
+restore_reporting_config() {
+    local config_file="$1"
+    local backup_file="$2"
+    local had_config="$3"
+    if [ "$had_config" -eq 1 ]; then
+        cp -p "$backup_file" "$config_file"
+    else
+        rm -f "$config_file"
+    fi
+}
+
+write_existing_reporting_config() {
+    local config_file="$DATA_DIR/config.json"
+    local backup_file=""
+    local had_config=0
+
+    mkdir -p "$DATA_DIR"
+    if [ -f "$config_file" ]; then
+        had_config=1
+        backup_file="$(mktemp "${config_file}.reconfigure-backup.XXXXXX")"
+        cp -p "$config_file" "$backup_file"
+    fi
+
+    NODE_BIN="$(resolve_reconfigure_node)" || {
+        [ -n "$backup_file" ] && rm -f "$backup_file"
+        msg "❌ 无法找到已安装实例可用的 Node.js，配置未修改" \
+            "❌ No usable Node.js was found for the existing installation; config unchanged"
+        return 1
+    }
+
+    if ! LP_CONFIG_PATH="$config_file" \
+        LP_SLS_REQUESTED="$SLS_REQUESTED" \
+        LP_SLS_ENDPOINT="$SLS_ENDPOINT" \
+        LP_SLS_PROJECT="$SLS_PROJECT" \
+        LP_SLS_LOGSTORE="$SLS_LOGSTORE" \
+        LP_SLS_AK_ID="$SLS_AK_ID" \
+        LP_SLS_AK_SECRET="$SLS_AK_SECRET" \
+        LP_CMS_REQUESTED="$CMS_REQUESTED" \
+        LP_CMS_LICENSE_KEY_SET="$CMS_LICENSE_KEY_SET" \
+        LP_CMS_ENDPOINT_SET="$CMS_ENDPOINT_SET" \
+        LP_CMS_WORKSPACE_SET="$CMS_WORKSPACE_SET" \
+        LP_CMS_LICENSE_KEY="$CMS_LICENSE_KEY" \
+        LP_CMS_ENDPOINT="$CMS_ENDPOINT" \
+        LP_CMS_WORKSPACE="$CMS_WORKSPACE" \
+        LP_COLLECT_LOG_SET="$COLLECT_LOG_SET" \
+        LP_COLLECT_TRACE_SET="$COLLECT_TRACE_SET" \
+        LP_SERVICE_NAME_PREFIX_SET="$SERVICE_NAME_PREFIX_SET" \
+        LP_COLLECT_LOG="$COLLECT_LOG" \
+        LP_COLLECT_TRACE="$COLLECT_TRACE" \
+        LP_SERVICE_NAME_PREFIX="$SERVICE_NAME_PREFIX" \
+        "$NODE_BIN" - <<'NODE'
+const fs = require('fs');
+
+const configPath = process.env.LP_CONFIG_PATH;
+const isPlainObject = value =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+const required = (value, label) => {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`SLS ${label} is required`);
+  }
+  return value;
+};
+
+let config = {};
+if (fs.existsSync(configPath)) {
+  config = JSON.parse(fs.readFileSync(configPath, 'utf8').replace(/^\uFEFF/, ''));
+  if (!isPlainObject(config)) throw new Error('config.json root must be an object');
+}
+
+if (process.env.LP_SLS_REQUESTED === '1') {
+  const endpoint = required(process.env.LP_SLS_ENDPOINT, 'endpoint');
+  const project = required(process.env.LP_SLS_PROJECT, 'project');
+  const logstore = required(process.env.LP_SLS_LOGSTORE, 'logstore');
+  const accessKeyId = process.env.LP_SLS_AK_ID || '';
+  const accessKeySecret = process.env.LP_SLS_AK_SECRET || '';
+  if (!!accessKeyId !== !!accessKeySecret) {
+    throw new Error('SLS access key id and secret must be provided together');
+  }
+
+  const userSls = {
+    name: 'user-sls',
+    endpoint,
+    project,
+    logstore,
+    mode: accessKeyId ? 'ak' : 'webtracking',
+  };
+  if (accessKeyId) {
+    userSls.accessKeyId = accessKeyId;
+    userSls.accessKeySecret = accessKeySecret;
+  }
+
+  if (config.sls === undefined) {
+    config.sls = [userSls];
+  } else if (Array.isArray(config.sls)) {
+    if (!config.sls.every(isPlainObject)) {
+      throw new Error('config.sls array entries must be objects');
+    }
+    let replaced = false;
+    const merged = [];
+    for (const entry of config.sls) {
+      if (entry.name !== 'user-sls') {
+        merged.push(entry);
+      } else if (!replaced) {
+        merged.push(userSls);
+        replaced = true;
+      }
+    }
+    if (!replaced) merged.push(userSls);
+    config.sls = merged;
+  } else if (isPlainObject(config.sls)) {
+    const legacy = { ...config.sls };
+    delete legacy.destinationOverride;
+    delete legacy.endpoints;
+    legacy.endpoint = endpoint;
+    legacy.project = project;
+    legacy.logstore = logstore;
+    legacy.mode = accessKeyId ? 'ak' : 'webtracking';
+    if (accessKeyId) {
+      legacy.accessKeyId = accessKeyId;
+      legacy.accessKeySecret = accessKeySecret;
+    } else {
+      delete legacy.accessKeyId;
+      delete legacy.accessKeySecret;
+    }
+    config.sls = legacy;
+  } else {
+    throw new Error('config.sls must be an object or array');
+  }
+}
+
+if (process.env.LP_CMS_REQUESTED === '1') {
+  if (config.cms !== undefined && !isPlainObject(config.cms)) {
+    throw new Error('config.cms must be an object');
+  }
+  const cms = { ...(config.cms || {}) };
+  if (process.env.LP_CMS_LICENSE_KEY_SET === '1') {
+    cms.licenseKey = process.env.LP_CMS_LICENSE_KEY || '';
+  }
+  if (process.env.LP_CMS_ENDPOINT_SET === '1') {
+    cms.endpoint = process.env.LP_CMS_ENDPOINT || '';
+  }
+  if (process.env.LP_CMS_WORKSPACE_SET === '1') {
+    cms.workspace = process.env.LP_CMS_WORKSPACE || '';
+  }
+  if (typeof cms.licenseKey !== 'string' || cms.licenseKey.trim() === '') {
+    throw new Error('CMS license key is required');
+  }
+  if (typeof cms.endpoint !== 'string' || cms.endpoint.trim() === '') {
+    throw new Error('CMS endpoint is required');
+  }
+  config.cms = cms;
+}
+
+if (process.env.LP_COLLECT_LOG_SET === '1') {
+  config.collectLog = process.env.LP_COLLECT_LOG === 'true';
+}
+if (process.env.LP_COLLECT_TRACE_SET === '1') {
+  config.collectTrace = process.env.LP_COLLECT_TRACE === 'true';
+}
+if (process.env.LP_SERVICE_NAME_PREFIX_SET === '1') {
+  config.serviceNamePrefix = process.env.LP_SERVICE_NAME_PREFIX || '';
+}
+
+const tempPath = `${configPath}.tmp-${process.pid}-${Date.now()}`;
+try {
+  fs.writeFileSync(tempPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
+  if (fs.existsSync(configPath)) {
+    fs.chmodSync(tempPath, fs.statSync(configPath).mode);
+  }
+  fs.renameSync(tempPath, configPath);
+} finally {
+  if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true });
+}
+NODE
+    then
+        [ -n "$backup_file" ] && rm -f "$backup_file"
+        msg "❌ config.json 合并失败，原配置已保留" \
+            "❌ Failed to merge config.json; original config preserved"
+        return 1
+    fi
+
+    REPORTING_CONFIG_BACKUP="$backup_file"
+    REPORTING_CONFIG_HAD_FILE="$had_config"
+    return 0
+}
+
+verify_pilot_running() {
+    local retries="${LOONGSUITE_PILOT_STATUS_RETRIES:-5}"
+    local delay="${LOONGSUITE_PILOT_STATUS_RETRY_DELAY:-1}"
+    local attempt status_output
+    for ((attempt=1; attempt<=retries; attempt++)); do
+        status_output="$(LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" \
+            LOONGSUITE_PILOT_CACHE_DIR="$DATA_DIR" \
+            "$PILOT_COMMAND" status 2>&1 || true)"
+        if printf '%s\n' "$status_output" | grep -q 'is running'; then
+            return 0
+        fi
+        [ "$attempt" -lt "$retries" ] && sleep "$delay"
+    done
+    return 1
+}
+
+reconfigure_existing_reporting() {
+    msg "==> 检测到已安装实例，仅更新用户上报配置..." \
+        "==> Existing installation detected; updating user reporting config only..."
+    if [ "$PACKAGE_SELECTOR_EXPLICIT" -eq 1 ]; then
+        msg "⚠️  本次不会应用 channel/version/package-url，当前版本保持不变；升级请单独执行 upgrade" \
+            "⚠️  channel/version/package-url are ignored here; the installed version is unchanged. Run upgrade separately."
+    fi
+
+    REPORTING_CONFIG_BACKUP=""
+    REPORTING_CONFIG_HAD_FILE=0
+    write_existing_reporting_config || return 1
+
+    msg "==> 重启 loongsuite-pilot ..." "==> Restarting loongsuite-pilot ..."
+    if LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" \
+        LOONGSUITE_PILOT_CACHE_DIR="$DATA_DIR" \
+        "$PILOT_COMMAND" restart && verify_pilot_running; then
+        [ -n "$REPORTING_CONFIG_BACKUP" ] && rm -f "$REPORTING_CONFIG_BACKUP"
+        msg "✅ 上报配置已更新，loongsuite-pilot 正在运行" \
+            "✅ Reporting config updated and loongsuite-pilot is running"
+        return 0
+    fi
+
+    msg "❌ 重启或状态验证失败，正在恢复旧 config.json ..." \
+        "❌ Restart or status verification failed; restoring the previous config.json ..."
+    restore_reporting_config "$DATA_DIR/config.json" "$REPORTING_CONFIG_BACKUP" "$REPORTING_CONFIG_HAD_FILE"
+    LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" \
+        LOONGSUITE_PILOT_CACHE_DIR="$DATA_DIR" \
+        "$PILOT_COMMAND" restart >/dev/null 2>&1 || true
+    [ -n "$REPORTING_CONFIG_BACKUP" ] && rm -f "$REPORTING_CONFIG_BACKUP"
+    return 1
 }
 
 # ============================================================
@@ -1481,6 +1777,21 @@ cmd_install() {
     msg "==> 开始安装 $PACKAGE_NAME ..." \
         "==> Installing $PACKAGE_NAME ..."
     echo ""
+
+    if [ "$SLS_REQUESTED" -eq 1 ] || [ "$CMS_REQUESTED" -eq 1 ]; then
+        local detect_result=0
+        if detect_existing_pilot; then
+            if is_agentshell_current; then
+                reconfigure_existing_reporting
+                return $?
+            fi
+        else
+            detect_result=$?
+        fi
+        if [ "$detect_result" -eq 2 ]; then
+            return 1
+        fi
+    fi
 
     validate_install_user
     check_deps

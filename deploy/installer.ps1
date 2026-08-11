@@ -57,6 +57,24 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$script:SLS_REQUESTED = $PSBoundParameters.ContainsKey("SlsEndpoint") -or
+    $PSBoundParameters.ContainsKey("SlsProject") -or
+    $PSBoundParameters.ContainsKey("SlsLogstore") -or
+    $PSBoundParameters.ContainsKey("SlsAkId") -or
+    $PSBoundParameters.ContainsKey("SlsAkSecret")
+$script:CMS_REQUESTED = $PSBoundParameters.ContainsKey("CmsLicenseKey") -or
+    $PSBoundParameters.ContainsKey("CmsEndpoint") -or
+    $PSBoundParameters.ContainsKey("CmsWorkspace")
+$script:CMS_LICENSE_KEY_SET = $PSBoundParameters.ContainsKey("CmsLicenseKey")
+$script:CMS_ENDPOINT_SET = $PSBoundParameters.ContainsKey("CmsEndpoint")
+$script:CMS_WORKSPACE_SET = $PSBoundParameters.ContainsKey("CmsWorkspace")
+$script:COLLECT_LOG_SET = $PSBoundParameters.ContainsKey("CollectLog")
+$script:COLLECT_TRACE_SET = $PSBoundParameters.ContainsKey("CollectTrace")
+$script:SERVICE_NAME_PREFIX_SET = $PSBoundParameters.ContainsKey("ServiceNamePrefix")
+$script:PACKAGE_SELECTOR_EXPLICIT = $PSBoundParameters.ContainsKey("PackageUrl") -or
+    $PSBoundParameters.ContainsKey("Version") -or
+    $PSBoundParameters.ContainsKey("Channel")
+
 # ============================================================
 # Constants
 # ============================================================
@@ -448,6 +466,350 @@ function Check-Deps {
     Msg "    ✅ node $nodeVer  npm $npmVer" "    ✅ node $nodeVer  npm $npmVer"
     Msg "    node pinned: $($script:NODE_BIN)" "    node pinned: $($script:NODE_BIN)"
     Write-Host ""
+}
+
+# ============================================================
+# Existing install: update reporting config only, then restart
+# ============================================================
+$script:PILOT_COMMAND = ""
+$script:PILOT_LAST_OUTPUT = ""
+$script:PILOT_LAST_EXIT_CODE = 0
+
+function Resolve-PilotManagementCommand {
+    $pathCommand = Get-Command loongsuite-pilot -CommandType Application, ExternalScript -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($pathCommand) {
+        if ($pathCommand.Source) { return $pathCommand.Source }
+        if ($pathCommand.Path) { return $pathCommand.Path }
+    }
+
+    $defaultBin = Join-Path $env:USERPROFILE ".local\bin"
+    foreach ($candidate in @(
+        (Join-Path $defaultBin "loongsuite-pilot.cmd"),
+        (Join-Path $defaultBin "loongsuite-pilot.ps1")
+    )) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+    return $null
+}
+
+function Invoke-PilotManagement {
+    param([string]$Argument)
+
+    $script:PILOT_LAST_OUTPUT = ""
+    $script:PILOT_LAST_EXIT_CODE = 1
+    $previousEAP = $ErrorActionPreference
+    $hadDataDirEnv = Test-Path Env:LOONGSUITE_PILOT_DATA_DIR
+    $previousDataDirEnv = if ($hadDataDirEnv) {
+        (Get-Item Env:LOONGSUITE_PILOT_DATA_DIR).Value
+    } else { $null }
+    $hadCacheDirEnv = Test-Path Env:LOONGSUITE_PILOT_CACHE_DIR
+    $previousCacheDirEnv = if ($hadCacheDirEnv) {
+        (Get-Item Env:LOONGSUITE_PILOT_CACHE_DIR).Value
+    } else { $null }
+    $ErrorActionPreference = "Continue"
+    try {
+        $env:LOONGSUITE_PILOT_DATA_DIR = $DataDir
+        $env:LOONGSUITE_PILOT_CACHE_DIR = $DataDir
+        if ($script:PILOT_COMMAND -match '(?i)\.ps1$') {
+            $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:PILOT_COMMAND $Argument 2>&1
+        } else {
+            $output = & $script:PILOT_COMMAND $Argument 2>&1
+        }
+        $script:PILOT_LAST_OUTPUT = ($output | Out-String).Trim()
+        $script:PILOT_LAST_EXIT_CODE = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+    } catch {
+        $script:PILOT_LAST_OUTPUT = $_.Exception.Message
+        $script:PILOT_LAST_EXIT_CODE = 1
+    } finally {
+        if ($hadDataDirEnv) {
+            Set-Item Env:LOONGSUITE_PILOT_DATA_DIR -Value $previousDataDirEnv
+        } else {
+            Remove-Item Env:LOONGSUITE_PILOT_DATA_DIR -ErrorAction SilentlyContinue
+        }
+        if ($hadCacheDirEnv) {
+            Set-Item Env:LOONGSUITE_PILOT_CACHE_DIR -Value $previousCacheDirEnv
+        } else {
+            Remove-Item Env:LOONGSUITE_PILOT_CACHE_DIR -ErrorAction SilentlyContinue
+        }
+        $ErrorActionPreference = $previousEAP
+    }
+}
+
+function Get-ExistingPilotState {
+    $script:PILOT_COMMAND = Resolve-PilotManagementCommand
+    if (-not $script:PILOT_COMMAND) { return "missing" }
+
+    Invoke-PilotManagement "status"
+    if ($script:PILOT_LAST_OUTPUT -match "is running" -or
+        $script:PILOT_LAST_OUTPUT -match "is not running") {
+        return "installed"
+    }
+
+    Msg "❌ loongsuite-pilot status 返回了无法识别的结果，已停止配置" `
+        "❌ loongsuite-pilot status returned an unrecognized result; configuration stopped"
+    if ($script:PILOT_LAST_OUTPUT) { Write-Host $script:PILOT_LAST_OUTPUT }
+    return "unknown"
+}
+
+function Test-AgentShellCurrent {
+    $currentFile = Join-Path $DataDir "current"
+    if (-not (Test-Path -LiteralPath $currentFile -PathType Leaf)) { return $false }
+    try {
+        $currentText = Get-Content -LiteralPath $currentFile -Raw -ErrorAction Stop
+    } catch {
+        return $false
+    }
+    return $currentText -match '(?i)-agentshell'
+}
+
+function Resolve-ReconfigureNode {
+    $pinnedFile = Join-Path $DataDir "node-bin"
+    if (Test-Path $pinnedFile) {
+        $pinnedNode = (Get-Content $pinnedFile -Raw).Trim()
+        if (Test-NodeSuitable $pinnedNode) { return $pinnedNode }
+    }
+    return (Resolve-Node)
+}
+
+function Restore-ReportingConfig {
+    param(
+        [string]$ConfigFile,
+        [string]$BackupFile,
+        [bool]$HadConfig
+    )
+    if ($HadConfig) {
+        Copy-Item $BackupFile $ConfigFile -Force
+    } elseif (Test-Path $ConfigFile) {
+        Remove-Item $ConfigFile -Force
+    }
+}
+
+function Write-ExistingReportingConfig {
+    $configFile = Join-Path $DataDir "config.json"
+    if (-not (Test-Path $DataDir)) {
+        New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
+    }
+
+    $script:REPORTING_CONFIG_HAD_FILE = Test-Path $configFile
+    $script:REPORTING_CONFIG_BACKUP = ""
+    if ($script:REPORTING_CONFIG_HAD_FILE) {
+        $script:REPORTING_CONFIG_BACKUP = "$configFile.reconfigure-backup.$PID.$(Get-Random)"
+        Copy-Item $configFile $script:REPORTING_CONFIG_BACKUP -Force
+    }
+
+    $script:NODE_BIN = Resolve-ReconfigureNode
+    if (-not $script:NODE_BIN) {
+        if ($script:REPORTING_CONFIG_BACKUP) {
+            Remove-Item $script:REPORTING_CONFIG_BACKUP -Force -ErrorAction SilentlyContinue
+        }
+        Msg "❌ 无法找到已安装实例可用的 Node.js，配置未修改" `
+            "❌ No usable Node.js was found for the existing installation; config unchanged"
+        return $false
+    }
+
+    $cfgArgs = [ordered]@{
+        configPath          = $configFile
+        slsRequested        = [bool]$script:SLS_REQUESTED
+        slsEndpoint         = "$SlsEndpoint"
+        slsProject          = "$SlsProject"
+        slsLogstore         = "$SlsLogstore"
+        slsAkId             = "$SlsAkId"
+        slsAkSecret         = "$SlsAkSecret"
+        cmsRequested        = [bool]$script:CMS_REQUESTED
+        cmsLicenseKeySet    = [bool]$script:CMS_LICENSE_KEY_SET
+        cmsEndpointSet      = [bool]$script:CMS_ENDPOINT_SET
+        cmsWorkspaceSet     = [bool]$script:CMS_WORKSPACE_SET
+        cmsLicenseKey       = "$CmsLicenseKey"
+        cmsEndpoint         = "$CmsEndpoint"
+        cmsWorkspace        = "$CmsWorkspace"
+        collectLogSet       = [bool]$script:COLLECT_LOG_SET
+        collectTraceSet     = [bool]$script:COLLECT_TRACE_SET
+        serviceNamePrefixSet = [bool]$script:SERVICE_NAME_PREFIX_SET
+        collectLog          = "$CollectLog"
+        collectTrace        = "$CollectTrace"
+        serviceNamePrefix   = "$ServiceNamePrefix"
+    }
+    $cfgJson = $cfgArgs | ConvertTo-Json -Compress
+
+    $previousEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    # Pipe JSON through stdin to avoid CLM/WDAC-blocked .NET file APIs and BOM issues.
+    $nodeOutput = $cfgJson | & $script:NODE_BIN -e @'
+const fs = require('fs');
+const opts = JSON.parse(fs.readFileSync(0, 'utf8').replace(/^\uFEFF/, ''));
+const isPlainObject = value =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+const required = (value, label) => {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`SLS ${label} is required`);
+  }
+  return value;
+};
+
+let config = {};
+if (fs.existsSync(opts.configPath)) {
+  config = JSON.parse(fs.readFileSync(opts.configPath, 'utf8').replace(/^\uFEFF/, ''));
+  if (!isPlainObject(config)) throw new Error('config.json root must be an object');
+}
+
+if (opts.slsRequested) {
+  const endpoint = required(opts.slsEndpoint, 'endpoint');
+  const project = required(opts.slsProject, 'project');
+  const logstore = required(opts.slsLogstore, 'logstore');
+  const accessKeyId = opts.slsAkId || '';
+  const accessKeySecret = opts.slsAkSecret || '';
+  if (!!accessKeyId !== !!accessKeySecret) {
+    throw new Error('SLS access key id and secret must be provided together');
+  }
+  const userSls = {
+    name: 'user-sls',
+    endpoint,
+    project,
+    logstore,
+    mode: accessKeyId ? 'ak' : 'webtracking',
+  };
+  if (accessKeyId) {
+    userSls.accessKeyId = accessKeyId;
+    userSls.accessKeySecret = accessKeySecret;
+  }
+
+  if (config.sls === undefined) {
+    config.sls = [userSls];
+  } else if (Array.isArray(config.sls)) {
+    if (!config.sls.every(isPlainObject)) {
+      throw new Error('config.sls array entries must be objects');
+    }
+    let replaced = false;
+    const merged = [];
+    for (const entry of config.sls) {
+      if (entry.name !== 'user-sls') {
+        merged.push(entry);
+      } else if (!replaced) {
+        merged.push(userSls);
+        replaced = true;
+      }
+    }
+    if (!replaced) merged.push(userSls);
+    config.sls = merged;
+  } else if (isPlainObject(config.sls)) {
+    const legacy = { ...config.sls };
+    delete legacy.destinationOverride;
+    delete legacy.endpoints;
+    legacy.endpoint = endpoint;
+    legacy.project = project;
+    legacy.logstore = logstore;
+    legacy.mode = accessKeyId ? 'ak' : 'webtracking';
+    if (accessKeyId) {
+      legacy.accessKeyId = accessKeyId;
+      legacy.accessKeySecret = accessKeySecret;
+    } else {
+      delete legacy.accessKeyId;
+      delete legacy.accessKeySecret;
+    }
+    config.sls = legacy;
+  } else {
+    throw new Error('config.sls must be an object or array');
+  }
+}
+
+if (opts.cmsRequested) {
+  if (config.cms !== undefined && !isPlainObject(config.cms)) {
+    throw new Error('config.cms must be an object');
+  }
+  const cms = { ...(config.cms || {}) };
+  if (opts.cmsLicenseKeySet) cms.licenseKey = opts.cmsLicenseKey || '';
+  if (opts.cmsEndpointSet) cms.endpoint = opts.cmsEndpoint || '';
+  if (opts.cmsWorkspaceSet) cms.workspace = opts.cmsWorkspace || '';
+  if (typeof cms.licenseKey !== 'string' || cms.licenseKey.trim() === '') {
+    throw new Error('CMS license key is required');
+  }
+  if (typeof cms.endpoint !== 'string' || cms.endpoint.trim() === '') {
+    throw new Error('CMS endpoint is required');
+  }
+  config.cms = cms;
+}
+
+if (opts.collectLogSet) config.collectLog = opts.collectLog === 'true';
+if (opts.collectTraceSet) config.collectTrace = opts.collectTrace === 'true';
+if (opts.serviceNamePrefixSet) config.serviceNamePrefix = opts.serviceNamePrefix || '';
+
+const tempPath = `${opts.configPath}.tmp-${process.pid}-${Date.now()}`;
+try {
+  fs.writeFileSync(tempPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
+  if (fs.existsSync(opts.configPath)) {
+    fs.chmodSync(tempPath, fs.statSync(opts.configPath).mode);
+  }
+  fs.renameSync(tempPath, opts.configPath);
+} finally {
+  if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true });
+}
+'@
+    $nodeExit = $LASTEXITCODE
+    $ErrorActionPreference = $previousEAP
+
+    if ($nodeExit -ne 0) {
+        if ($nodeOutput) { Write-Host ($nodeOutput | Out-String).Trim() }
+        if ($script:REPORTING_CONFIG_BACKUP) {
+            Remove-Item $script:REPORTING_CONFIG_BACKUP -Force -ErrorAction SilentlyContinue
+        }
+        Msg "❌ config.json 合并失败，原配置已保留" `
+            "❌ Failed to merge config.json; original config preserved"
+        return $false
+    }
+    return $true
+}
+
+function Test-PilotRunning {
+    $retries = if ($env:LOONGSUITE_PILOT_STATUS_RETRIES) {
+        [int]$env:LOONGSUITE_PILOT_STATUS_RETRIES
+    } else { 5 }
+    $delaySeconds = if ($env:LOONGSUITE_PILOT_STATUS_RETRY_DELAY) {
+        [double]$env:LOONGSUITE_PILOT_STATUS_RETRY_DELAY
+    } else { 1 }
+
+    for ($attempt = 1; $attempt -le $retries; $attempt++) {
+        Invoke-PilotManagement "status"
+        if ($script:PILOT_LAST_OUTPUT -match "is running") { return $true }
+        if ($attempt -lt $retries -and $delaySeconds -gt 0) {
+            Start-Sleep -Milliseconds ([int]($delaySeconds * 1000))
+        }
+    }
+    return $false
+}
+
+function Reconfigure-ExistingReporting {
+    Msg "==> 检测到已安装实例，仅更新用户上报配置..." `
+        "==> Existing installation detected; updating user reporting config only..."
+    if ($script:PACKAGE_SELECTOR_EXPLICIT) {
+        Msg "⚠️  本次不会应用 channel/version/package-url，当前版本保持不变；升级请单独执行 upgrade" `
+            "⚠️  channel/version/package-url are ignored here; the installed version is unchanged. Run upgrade separately."
+    }
+
+    if (-not (Write-ExistingReportingConfig)) { return $false }
+
+    Msg "==> 重启 loongsuite-pilot ..." "==> Restarting loongsuite-pilot ..."
+    Invoke-PilotManagement "restart"
+    if ($script:PILOT_LAST_EXIT_CODE -eq 0 -and (Test-PilotRunning)) {
+        if ($script:REPORTING_CONFIG_BACKUP) {
+            Remove-Item $script:REPORTING_CONFIG_BACKUP -Force -ErrorAction SilentlyContinue
+        }
+        Msg "✅ 上报配置已更新，loongsuite-pilot 正在运行" `
+            "✅ Reporting config updated and loongsuite-pilot is running"
+        return $true
+    }
+
+    Msg "❌ 重启或状态验证失败，正在恢复旧 config.json ..." `
+        "❌ Restart or status verification failed; restoring the previous config.json ..."
+    Restore-ReportingConfig `
+        (Join-Path $DataDir "config.json") `
+        $script:REPORTING_CONFIG_BACKUP `
+        $script:REPORTING_CONFIG_HAD_FILE
+    Invoke-PilotManagement "restart"
+    if ($script:REPORTING_CONFIG_BACKUP) {
+        Remove-Item $script:REPORTING_CONFIG_BACKUP -Force -ErrorAction SilentlyContinue
+    }
+    return $false
 }
 
 # ============================================================
@@ -1379,6 +1741,15 @@ try {
 function Cmd-Install {
     Msg "==> 开始安装 $PACKAGE_NAME ..." "==> Installing $PACKAGE_NAME ..."
     Write-Host ""
+
+    if ($script:SLS_REQUESTED -or $script:CMS_REQUESTED) {
+        $existingState = Get-ExistingPilotState
+        if ($existingState -eq "installed" -and (Test-AgentShellCurrent)) {
+            if (-not (Reconfigure-ExistingReporting)) { exit 1 }
+            return
+        }
+        if ($existingState -eq "unknown") { exit 1 }
+    }
 
     Check-Deps
     Migrate-LegacyLayout
