@@ -232,14 +232,13 @@ export class Orchestrator extends EventEmitter {
     this.agentDiscoveryService.on('agent:started', (id: string) => {
       logger.info('agent detected and started', { id });
     });
-    this.agentDiscoveryService.on('agent:stopped', (id: string, reason: AgentStopReason) => {
+    this.agentDiscoveryService.on('agent:stopped', (id: string, reason: AgentStopReason, errSummary?: string) => {
       if (reason === 'unexpected') {
-        logger.warn('agent stopped unexpectedly', { id });
-        this.alarmManager.record(
-          'INPUT_STOP_ALARM', '3',
-          `input ${id} stopped unexpectedly (reason=unexpected)`,
-          { input_name: id },
-        );
+        logger.warn('agent stopped unexpectedly', { id, errSummary });
+        const message = errSummary
+          ? `input ${id} stopped unexpectedly (reason=unexpected): ${errSummary}`
+          : `input ${id} stopped unexpectedly (reason=unexpected)`;
+        this.alarmManager.record('INPUT_STOP_ALARM', '3', message, { input_name: id });
       } else {
         logger.debug('agent stopped', { id, reason });
       }

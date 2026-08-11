@@ -435,6 +435,22 @@ describe('Orchestrator', () => {
       await orch.stop();
     });
 
+    it('appends the error summary to the alarm message when provided', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+
+      const handler = discoveryHandlers['agent:stopped'];
+      mockAlarmRecord.mockClear();
+      handler('deploy:codex', 'unexpected', "ENOENT: open '~/x'");
+      expect(mockAlarmRecord).toHaveBeenCalledWith(
+        'INPUT_STOP_ALARM', '3',
+        "input deploy:codex stopped unexpectedly (reason=unexpected): ENOENT: open '~/x'",
+        { input_name: 'deploy:codex' },
+      );
+
+      await orch.stop();
+    });
+
     it('does not record alarm for unavailable reason', async () => {
       const orch = new Orchestrator(makeConfig());
       await orch.start();

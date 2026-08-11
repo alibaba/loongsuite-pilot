@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import { EventEmitter } from 'node:events';
 import type { AgentDetectionEntry, AgentStopReason, EntryState } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
@@ -6,6 +7,11 @@ import { createLogger } from '../utils/logger.js';
 const logger = createLogger('AgentDiscoveryService');
 
 const DEFAULT_POLL_MS = 300_000; // 5 minutes
+// Consecutive processEntry() exceptions on a running entry before we treat it
+// as a real (unexpected) stop. At the default poll interval this is ~15 minutes
+// of sustained failure, so transient probe hiccups never reach the alarm channel.
+const ERROR_THRESHOLD = 3;
+const ERROR_SUMMARY_MAX_LEN = 200;
 const FORCE_POLLING = process.env.LOONGSUITE_PILOT_FORCE_POLLING === 'true';
 
 interface EntryRuntime {
@@ -14,6 +20,25 @@ interface EntryRuntime {
   watcher: fs.FSWatcher | null;
   pollTimer: ReturnType<typeof setInterval> | null;
   consecutiveUnavailable: number;
+  consecutiveErrors: number;
+}
+
+/**
+ * Condense an error into a single-line, length-bounded summary safe to attach
+ * to an alarm message: collapse whitespace, hide the user's home directory, and
+ * truncate. Lifecycle errors (enabled/isAvailable/start) may embed absolute
+ * paths, so the home directory is masked to `~`.
+ */
+export function summarizeError(err: unknown): string {
+  const home = os.homedir();
+  let text = String(err).replace(/\s+/g, ' ').trim();
+  if (home) {
+    text = text.split(home).join('~');
+  }
+  if (text.length > ERROR_SUMMARY_MAX_LEN) {
+    text = `${text.slice(0, ERROR_SUMMARY_MAX_LEN - 1)}…`;
+  }
+  return text;
 }
 
 /**
@@ -35,6 +60,7 @@ export class AgentDiscoveryService extends EventEmitter {
         watcher: null,
         pollTimer: null,
         consecutiveUnavailable: 0,
+        consecutiveErrors: 0,
       });
     }
   }
@@ -102,6 +128,7 @@ export class AgentDiscoveryService extends EventEmitter {
 
       if (shouldRun && rt.state !== 'running') {
         rt.consecutiveUnavailable = 0;
+        rt.consecutiveErrors = 0;
         rt.state = 'starting';
         logger.info('starting agent', { id: entry.id });
         await entry.start();
@@ -110,12 +137,14 @@ export class AgentDiscoveryService extends EventEmitter {
       } else if (!shouldRun && (rt.state === 'running' || rt.state === 'starting')) {
         if (!enabled) {
           rt.consecutiveUnavailable = 0;
+          rt.consecutiveErrors = 0;
           await this.stopEntry(rt, 'disabled');
         } else {
           rt.consecutiveUnavailable++;
           const threshold = entry.unavailableThreshold ?? 1;
           if (rt.consecutiveUnavailable >= threshold) {
             rt.consecutiveUnavailable = 0;
+            rt.consecutiveErrors = 0;
             await this.stopEntry(rt, 'unavailable');
           } else {
             logger.debug('agent unavailable, debouncing', {
@@ -127,21 +156,49 @@ export class AgentDiscoveryService extends EventEmitter {
         }
       } else if (shouldRun && rt.state === 'running' && entry.runOnActive) {
         rt.consecutiveUnavailable = 0;
+        rt.consecutiveErrors = 0;
         await entry.start();
       } else if (shouldRun && rt.state === 'running') {
         rt.consecutiveUnavailable = 0;
+        rt.consecutiveErrors = 0;
       }
     } catch (err) {
-      logger.error('processEntry failed', { id: entry.id, error: String(err) });
-      const wasRunning = rt.state === 'running';
-      rt.state = 'idle';
-      if (wasRunning) {
-        this.emit('agent:stopped', rt.entry.id, 'unexpected' satisfies AgentStopReason);
+      // A lifecycle call (enabled/isAvailable/start) threw. This is a probe
+      // failure, NOT evidence that a running input actually stopped. Only after
+      // ERROR_THRESHOLD consecutive failures do we conclude the entry is truly
+      // broken and stop it via the normal stopEntry() path (which calls
+      // entry.stop() first), classifying it as 'unexpected'. Below the
+      // threshold a running entry keeps its state — we never emit a stop event
+      // for an input that is still running, and never leave state out of sync.
+      if (rt.state === 'running') {
+        rt.consecutiveErrors++;
+        if (rt.consecutiveErrors >= ERROR_THRESHOLD) {
+          logger.error('agent stopped unexpectedly after repeated failures', {
+            id: entry.id,
+            consecutiveErrors: rt.consecutiveErrors,
+            error: String(err),
+          });
+          rt.consecutiveErrors = 0;
+          await this.stopEntry(rt, 'unexpected', summarizeError(err));
+        } else {
+          logger.warn('processEntry failed, retaining running state', {
+            id: entry.id,
+            consecutiveErrors: rt.consecutiveErrors,
+            threshold: ERROR_THRESHOLD,
+            error: String(err),
+          });
+        }
+      } else {
+        // Failure while starting or idle: reset to idle for the next poll to
+        // retry. The entry was never running, so no stop event is emitted.
+        logger.error('processEntry failed', { id: entry.id, state: rt.state, error: String(err) });
+        rt.consecutiveErrors = 0;
+        rt.state = 'idle';
       }
     }
   }
 
-  private async stopEntry(rt: EntryRuntime, reason: AgentStopReason): Promise<void> {
+  private async stopEntry(rt: EntryRuntime, reason: AgentStopReason, errSummary?: string): Promise<void> {
     rt.state = 'stopping';
     try {
       await rt.entry.stop();
@@ -149,7 +206,11 @@ export class AgentDiscoveryService extends EventEmitter {
       logger.warn('entry stop failed', { id: rt.entry.id, error: String(err) });
     }
     rt.state = 'idle';
-    this.emit('agent:stopped', rt.entry.id, reason);
+    if (errSummary) {
+      this.emit('agent:stopped', rt.entry.id, reason, errSummary);
+    } else {
+      this.emit('agent:stopped', rt.entry.id, reason);
+    }
   }
 
   private setupWatcher(rt: EntryRuntime): void {

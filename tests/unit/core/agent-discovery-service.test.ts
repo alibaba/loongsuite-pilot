@@ -70,6 +70,7 @@ describe('AgentDiscoveryService', () => {
   });
 });
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as os from 'node:os';
 import type { AgentDetectionEntry } from '../../../src/types/index.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -84,7 +85,7 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...original, watch: (...args: unknown[]) => mockFsWatch(...args) };
 });
 
-import { AgentDiscoveryService } from '../../../src/core/agent-discovery-service.js';
+import { AgentDiscoveryService, summarizeError } from '../../../src/core/agent-discovery-service.js';
 
 function makeEntry(overrides: Partial<AgentDetectionEntry> = {}): AgentDetectionEntry {
   return {
@@ -311,7 +312,7 @@ describe('AgentDiscoveryService', () => {
       expect(stopped).toEqual([{ id: 'test-agent', reason: 'shutdown' }]);
     });
 
-    it('emits unexpected reason when running entry throws during refresh', async () => {
+    it('does not emit or change state on a single exception while running', async () => {
       const availableFn = vi.fn().mockResolvedValue(true);
       const entry = makeEntry({ isAvailable: availableFn });
       const svc = new AgentDiscoveryService([entry]);
@@ -321,11 +322,143 @@ describe('AgentDiscoveryService', () => {
       await svc.start();
       expect(svc.getStates()['test-agent']).toBe('running');
 
-      availableFn.mockRejectedValue(new Error('crash'));
+      availableFn.mockRejectedValue(new Error('probe hiccup'));
       await svc.refresh('test');
 
+      // Probe threw once: the input is still running, so state is retained and
+      // no stop event is emitted. entry.stop() must not have been called.
+      expect(svc.getStates()['test-agent']).toBe('running');
+      expect(stopped).toHaveLength(0);
+      expect(entry.stop).not.toHaveBeenCalled();
+      await svc.stop();
+    });
+
+    it('does not emit when runOnActive reentry start throws once', async () => {
+      const startFn = vi.fn().mockResolvedValue(undefined);
+      const entry = makeEntry({ start: startFn, runOnActive: true });
+      const svc = new AgentDiscoveryService([entry]);
+      const stopped: Array<{ id: string; reason: string }> = [];
+      svc.on('agent:stopped', (id: string, reason: string) => stopped.push({ id, reason }));
+
+      await svc.start();
+      expect(svc.getStates()['test-agent']).toBe('running');
+      expect(startFn).toHaveBeenCalledTimes(1);
+
+      startFn.mockRejectedValueOnce(new Error('reentry boom'));
+      await svc.refresh('test');
+
+      expect(svc.getStates()['test-agent']).toBe('running');
+      expect(stopped).toHaveLength(0);
+      await svc.stop();
+    });
+
+    it('stops with unexpected reason and error summary after threshold consecutive exceptions', async () => {
+      const availableFn = vi.fn().mockResolvedValue(true);
+      const entry = makeEntry({ isAvailable: availableFn });
+      const svc = new AgentDiscoveryService([entry]);
+      const stopped: Array<{ id: string; reason: string; summary?: string }> = [];
+      svc.on('agent:stopped', (id: string, reason: string, summary?: string) =>
+        stopped.push({ id, reason, summary }));
+
+      await svc.start();
+      expect(svc.getStates()['test-agent']).toBe('running');
+
+      availableFn.mockRejectedValue(new Error('persistent failure'));
+      await svc.refresh('poll-1');
+      await svc.refresh('poll-2');
+      expect(stopped).toHaveLength(0);
+      expect(svc.getStates()['test-agent']).toBe('running');
+
+      await svc.refresh('poll-3');
       expect(svc.getStates()['test-agent']).toBe('idle');
-      expect(stopped).toEqual([{ id: 'test-agent', reason: 'unexpected' }]);
+      expect(entry.stop).toHaveBeenCalledTimes(1);
+      expect(stopped).toHaveLength(1);
+      expect(stopped[0].id).toBe('test-agent');
+      expect(stopped[0].reason).toBe('unexpected');
+      expect(stopped[0].summary).toContain('persistent failure');
+      await svc.stop();
+    });
+
+    it('resets the error counter when a poll succeeds between exceptions', async () => {
+      const availableFn = vi.fn().mockResolvedValue(true);
+      const entry = makeEntry({ isAvailable: availableFn });
+      const svc = new AgentDiscoveryService([entry]);
+      const stopped: Array<{ id: string; reason: string }> = [];
+      svc.on('agent:stopped', (id: string, reason: string) => stopped.push({ id, reason }));
+
+      await svc.start();
+
+      availableFn.mockRejectedValue(new Error('boom'));
+      await svc.refresh('err-1');
+      await svc.refresh('err-2');
+      expect(stopped).toHaveLength(0);
+
+      availableFn.mockResolvedValue(true);
+      await svc.refresh('recover');
+      expect(svc.getStates()['test-agent']).toBe('running');
+
+      // Counter reset: two more exceptions must not reach the threshold.
+      availableFn.mockRejectedValue(new Error('boom again'));
+      await svc.refresh('err-3');
+      await svc.refresh('err-4');
+      expect(stopped).toHaveLength(0);
+      expect(svc.getStates()['test-agent']).toBe('running');
+      await svc.stop();
+    });
+
+    it('resets to idle without emitting when first start fails', async () => {
+      const startFn = vi.fn().mockRejectedValue(new Error('start failed'));
+      const entry = makeEntry({ start: startFn });
+      const svc = new AgentDiscoveryService([entry]);
+      const stopped: string[] = [];
+      svc.on('agent:stopped', (id: string) => stopped.push(id));
+
+      await svc.start();
+
+      // start() threw while state was 'starting' (never running), so we fall
+      // back to idle for the next poll and emit no stop event.
+      expect(svc.getStates()['test-agent']).toBe('idle');
+      expect(stopped).toHaveLength(0);
+      await svc.stop();
+    });
+
+    it('does not double-start after an unexpected stop', async () => {
+      const availableFn = vi.fn().mockResolvedValue(true);
+      const startFn = vi.fn().mockResolvedValue(undefined);
+      const entry = makeEntry({ isAvailable: availableFn, start: startFn });
+      const svc = new AgentDiscoveryService([entry]);
+
+      await svc.start();
+      expect(startFn).toHaveBeenCalledTimes(1);
+
+      availableFn.mockRejectedValue(new Error('boom'));
+      await svc.refresh('e1');
+      await svc.refresh('e2');
+      await svc.refresh('e3');
+      expect(svc.getStates()['test-agent']).toBe('idle');
+
+      // Recovered: a full idle → running start cycle runs exactly once more,
+      // never a redundant start() while already running.
+      availableFn.mockResolvedValue(true);
+      await svc.refresh('recover');
+      expect(svc.getStates()['test-agent']).toBe('running');
+      expect(startFn).toHaveBeenCalledTimes(2);
+      await svc.stop();
+    });
+
+    it('does not attach an error summary to normal (non-unexpected) stops', async () => {
+      const enabledFn = vi.fn().mockReturnValue(true);
+      const entry = makeEntry({ enabled: enabledFn });
+      const svc = new AgentDiscoveryService([entry]);
+      const stopped: Array<{ reason: string; summary?: string }> = [];
+      svc.on('agent:stopped', (_id: string, reason: string, summary?: string) =>
+        stopped.push({ reason, summary }));
+
+      await svc.start();
+      enabledFn.mockReturnValue(false);
+      await svc.refresh('test');
+
+      expect(stopped).toEqual([{ reason: 'disabled', summary: undefined }]);
       await svc.stop();
     });
   });
@@ -385,5 +518,26 @@ describe('AgentDiscoveryService', () => {
 
       await svc.stop();
     });
+  });
+});
+
+describe('summarizeError', () => {
+  it('collapses multi-line stacks into a single line', () => {
+    const err = new Error('line one\n  at foo\n  at bar');
+    const summary = summarizeError(err);
+    expect(summary).not.toContain('\n');
+    expect(summary).toContain('line one');
+  });
+
+  it('truncates to 200 characters', () => {
+    const summary = summarizeError(new Error('x'.repeat(500)));
+    expect(summary.length).toBeLessThanOrEqual(200);
+  });
+
+  it('replaces the home directory with ~', () => {
+    const home = os.homedir();
+    const summary = summarizeError(new Error(`ENOENT: no such file, open '${home}/.loongsuite-pilot/x'`));
+    expect(summary).not.toContain(home);
+    expect(summary).toContain('~/.loongsuite-pilot/x');
   });
 });
