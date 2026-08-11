@@ -10,9 +10,9 @@
  *
  * V3 subcommand:
  *   stop  → read stdin (sessionId/turnId/traceId/timestamp), emit
- *           ENTRY + AGENT envelope records (NO gen_ai.input/output.messages —
- *           messages come from the independent ZCodeRolloutInput that tails
- *           ~/.zcode/cli/rollout/model-io-sess_*.jsonl).
+ *           ENTRY + AGENT envelope records with gen_ai.response.finish_reasons
+ *           (end_turn/interrupted). Per-LLM messages come from the independent
+ *           ZCodeRolloutInput that tails ~/.zcode/cli/rollout/model-io-sess_*.jsonl.
  *
  * Per architect de8a29fe + spec.md §1.1-§1.2:
  *   - hook path = boundary span only (ENTRY/AGENT envelope)
@@ -20,6 +20,14 @@
  *   - cross-source stitching via trace_id (UUID→W3C) + gen_ai.session.id +
  *     gen_ai.turn.id; AGENT span_id and STEP parent_span_id derived from
  *     the SAME shared deriveSpanId() so they match deterministically.
+ *
+ * Cross-source correlation resilience:
+ *   - ZCode Stop stdin guarantees session_id; turnId and traceId are
+ *     best-effort. When turnId is absent, we derive a deterministic turn
+ *     identifier from sessionId + timestamp to ensure AGENT envelope is
+ *     still emitted (critical for rollout STEP parent_span_id matching).
+ *   - When traceId is absent, we generate a W3C-compliant 32-hex trace_id
+ *     (NOT a 16-hex span_id) so the flusher accepts it.
  *
  * Per spec.md §1.2 fallback: if Stop hook does NOT fire (zcode crash / kill /
  * session timeout), the OTLP flusher synthesizes ENTRY/AGENT envelopes via
@@ -38,6 +46,7 @@ import { readStdinJson } from './shared/stdin-reader.mjs';
 import {
   toW3CTraceId,
   deriveSpanId,
+  generateTraceId,
   writeJsonlRecords,
 } from './shared/event-emitter.mjs';
 import { logHookError } from './shared/error-logger.mjs';
@@ -102,9 +111,15 @@ async function cmdStop() {
     return;
   }
 
-  const turnId = getString(event, 'turn_id', 'turnId');
+  // turnId: ZCode Stop stdin guarantees session_id but turnId is best-effort.
+  // When absent, derive a deterministic turn id from sessionId + timestamp
+  // so the AGENT envelope is still emitted for cross-source stitching.
+  const turnId = getString(event, 'turn_id', 'turnId')
+    || deriveSpanId('turn-fallback', sessionId, new Date().toISOString());
+
+  // traceId: generate a W3C-compliant 32-hex trace_id when absent (NOT 16-hex).
   const traceIdRaw = getString(event, 'trace_id', 'traceId');
-  const traceId = toW3CTraceId(traceIdRaw);
+  const traceId = traceIdRaw ? toW3CTraceId(traceIdRaw) : toW3CTraceId(generateTraceId());
   const timestamp = getString(event, 'timestamp') || new Date().toISOString();
   const cwd = getString(event, 'cwd');
   const stopReason = getString(event, 'stop_reason', 'stopReason') || 'end_turn';
@@ -149,7 +164,9 @@ async function cmdStop() {
 export function buildEnvelopeRecords({ sessionId, turnId, traceId, timestamp, userId, cwd, stopReason }) {
   const records = [];
   const ts = isoToUnixNanos(timestamp);
-  const w3cTraceId = traceId || toW3CTraceId(crypto.randomUUID());
+  // Use 32-hex W3C trace_id; fallback uses generateTraceId() (NOT generateSpanId)
+  // to produce a valid 32-hex id. toW3CTraceId strips dashes from UUID form.
+  const w3cTraceId = traceId || toW3CTraceId(generateTraceId());
 
   const entrySpanId = deriveSpanId('entry', sessionId);
   const agentSpanId = turnId
@@ -161,6 +178,7 @@ export function buildEnvelopeRecords({ sessionId, turnId, traceId, timestamp, us
     'gen_ai.session.id': sessionId,
     'gen_ai.agent.type': AGENT_ID,
     'gen_ai.agent.id': sessionId,
+    'gen_ai.agent.name': 'ZCode',
     'user.id': userId || os.hostname(),
     ...(cwd ? { 'agent.zcode.cwd': cwd } : {}),
   };
@@ -171,25 +189,29 @@ export function buildEnvelopeRecords({ sessionId, turnId, traceId, timestamp, us
     'event.id': crypto.randomUUID(),
     'event.name': 'other',
     ...baseFields,
+    'agent.source': 'zcode-hook',
     span_id: entrySpanId,
     'gen_ai.span.kind': 'entry',
     'gen_ai.response.finish_reasons': [stopReason || 'end_turn'],
   });
 
   // AGENT envelope — marks turn boundary inside the session.
-  if (turnId) {
-    records.push({
-      time_unix_nano: ts,
-      'event.id': crypto.randomUUID(),
-      'event.name': 'other',
-      ...baseFields,
-      'gen_ai.turn.id': turnId,
-      span_id: agentSpanId,
-      parent_span_id: entrySpanId,
-      'gen_ai.span.kind': 'agent',
-      'gen_ai.response.finish_reasons': [stopReason || 'end_turn'],
-    });
-  }
+  // Always emitted (turnId is now guaranteed by cmdStop's fallback derivation).
+  // agent.source identifies the hook path so the flusher can distinguish
+  // hook-originated envelopes from rollout-originated ones for dual-source
+  // terminal suppression.
+  records.push({
+    time_unix_nano: ts,
+    'event.id': crypto.randomUUID(),
+    'event.name': 'other',
+    ...baseFields,
+    'gen_ai.turn.id': turnId,
+    'agent.source': 'zcode-hook',
+    span_id: agentSpanId,
+    parent_span_id: entrySpanId,
+    'gen_ai.span.kind': 'agent',
+    'gen_ai.response.finish_reasons': [stopReason || 'end_turn'],
+  });
 
   // Sort by time (ENTRY before AGENT — same timestamp, but stable order).
   records.sort((a, b) => {

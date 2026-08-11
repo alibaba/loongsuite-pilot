@@ -146,11 +146,26 @@ export class ZCodeRolloutInput extends BaseInput {
       const buf = Buffer.alloc(stat.size - offset);
       await handle.read(buf, 0, buf.length, offset);
       const text = buf.toString('utf-8');
-      this.stateStore.setOffset(stateKey, stat.size);
+
+      // P1 fix: only commit offset to the LAST COMPLETE NEWLINE, not stat.size.
+      // If ZCode writes a partial final line (no trailing \n), we must NOT
+      // advance past it — the next poll will re-read from the last \n and
+      // pick up the completed line. Without this, a half-written JSONL line
+      // is parsed as invalid, offset jumps to EOF, and the rest of the line
+      // arriving in the next poll is permanently lost.
+      const lastNewline = text.lastIndexOf('\n');
+      const committedBytes = lastNewline >= 0
+        ? offset + Buffer.byteLength(text.slice(0, lastNewline + 1), 'utf-8')
+        : offset;
+      if (committedBytes > offset) {
+        this.stateStore.setOffset(stateKey, committedBytes);
+      }
       this.stateStore.update(stateKey, { extra: { inode: Number((stat as any).ino) } });
 
+      // Parse only complete lines (up to and including the last \n).
+      const completeText = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : '';
       const lines: Record<string, unknown>[] = [];
-      for (const line of text.split('\n')) {
+      for (const line of completeText.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed) continue;
         let parsed: Record<string, unknown>;
@@ -329,6 +344,8 @@ export class ZCodeRolloutInput extends BaseInput {
         'gen_ai.step.id': p.stepId,
         'gen_ai.agent.type': ClientType.ZCode,
         'gen_ai.agent.id': p.sid,
+        'gen_ai.agent.name': 'ZCode',
+        'agent.source': 'zcode-rollout',
         'gen_ai.provider.name': p.providerId,
         'gen_ai.tool.name': p.toolName,
         'gen_ai.tool.call.id': p.callId,
@@ -352,6 +369,8 @@ export class ZCodeRolloutInput extends BaseInput {
           'gen_ai.step.id': p.stepId,
           'gen_ai.agent.type': ClientType.ZCode,
           'gen_ai.agent.id': p.sid,
+          'gen_ai.agent.name': 'ZCode',
+          'agent.source': 'zcode-rollout',
           'gen_ai.provider.name': p.providerId,
           'gen_ai.tool.name': result.toolName ?? p.toolName,
           'gen_ai.tool.call.id': p.callId,
@@ -368,9 +387,11 @@ export class ZCodeRolloutInput extends BaseInput {
           parent_span_id: p.stepSpanId,
         }));
       } else {
-        // Placeholder tool.result (1ms duration) per task #3 — paired result
-        // never arrived (e.g. LLM aborted before consuming tool output). Keeps
-        // the tool.call non-orphan and TOOL span duration non-zero.
+        // Placeholder tool.result (1ms duration) — paired result never arrived
+        // (e.g. LLM aborted before consuming tool output, or session was
+        // interrupted). Use 'interrupted' status to indicate this is NOT a
+        // real successful completion; the previous 'ok' was incorrectly
+        // normalized to 'unknown' and produced false audit semantics.
         out.push(buildAgentActivityEntry({
           time_unix_nano: resultTimeNs,
           'event.id': crypto.randomUUID(),
@@ -380,11 +401,13 @@ export class ZCodeRolloutInput extends BaseInput {
           'gen_ai.step.id': p.stepId,
           'gen_ai.agent.type': ClientType.ZCode,
           'gen_ai.agent.id': p.sid,
+          'gen_ai.agent.name': 'ZCode',
+          'agent.source': 'zcode-rollout',
           'gen_ai.provider.name': p.providerId,
           'gen_ai.tool.name': p.toolName,
           'gen_ai.tool.call.id': p.callId,
           'gen_ai.tool.call.exec.id': p.callId,
-          'tool.result.status': 'ok',
+          'tool.result.status': 'interrupted',
           trace_id: p.traceId,
           span_id: toolSpanId,
           parent_span_id: p.stepSpanId,
@@ -488,7 +511,12 @@ export class ZCodeRolloutInput extends BaseInput {
 
     const response = (record.response && typeof record.response === 'object' ? record.response : {}) as Record<string, unknown>;
     const responseText = str(response.text) ?? '';
-    const finishReason = str(response.finishReason) ?? str(response.finish_reason) ?? 'stop';
+    // P1 fix: do NOT default finishReason to 'stop' — when ZCode is interrupted
+    // or times out, response.finishReason may be null/empty. Defaulting to 'stop'
+    // incorrectly marks interrupted sessions as normal completions and causes
+    // the flusher to treat this as a terminal signal, dropping late hook entries.
+    // Use 'unknown' as neutral default; the hook path provides the real finish_reason.
+    const finishReason = str(response.finishReason) ?? str(response.finish_reason) ?? 'unknown';
     const responseId = str(response.responseId) ?? str(response.response_id) ?? requestId;
     const responseModelId = str(response.modelId) ?? str(response.model_id) ?? modelId;
     const toolCallsRaw = Array.isArray(response.toolCalls) ? response.toolCalls : [];
@@ -541,6 +569,8 @@ export class ZCodeRolloutInput extends BaseInput {
         'gen_ai.turn.id': turnId,
         'gen_ai.agent.type': ClientType.ZCode,
         'gen_ai.agent.id': sessionId,
+        'gen_ai.agent.name': 'ZCode',
+        'agent.source': 'zcode-rollout',
         'gen_ai.provider.name': providerId,
         'gen_ai.input.messages_delta': userDeltaJsonValue,
         trace_id: traceId,
@@ -562,6 +592,8 @@ export class ZCodeRolloutInput extends BaseInput {
       'gen_ai.step.id': stepId,
       'gen_ai.agent.type': ClientType.ZCode,
       'gen_ai.agent.id': sessionId,
+      'gen_ai.agent.name': 'ZCode',
+      'agent.source': 'zcode-rollout',
       'gen_ai.provider.name': providerId,
       trace_id: traceId,
       span_id: stepSpanId,
@@ -579,6 +611,8 @@ export class ZCodeRolloutInput extends BaseInput {
       'gen_ai.step.id': stepId,
       'gen_ai.agent.type': ClientType.ZCode,
       'gen_ai.agent.id': sessionId,
+      'gen_ai.agent.name': 'ZCode',
+      'agent.source': 'zcode-rollout',
       'gen_ai.response.id': responseId,
       'gen_ai.provider.name': providerId,
       'gen_ai.request.model': modelId,
@@ -610,9 +644,15 @@ export class ZCodeRolloutInput extends BaseInput {
       }
       outputParts.push(part);
     }
+    // P1 fix: for interrupted turns where responseText and toolCalls are both
+    // empty, emit a placeholder assistant message instead of an empty array.
+    // Empty output.messages is typically rejected by the trace validator for
+    // interrupted sessions.
     const outputMessages: JsonValue = outputParts.length > 0
       ? [{ role: 'assistant', parts: outputParts }]
-      : [];
+      : (finishReason === 'unknown' || finishReason === 'interrupted')
+        ? [{ role: 'assistant', parts: [{ type: 'text', content: '' }] }]
+        : [];
 
     entries.push(buildAgentActivityEntry({
       time_unix_nano: responseTimeNs,
@@ -623,6 +663,8 @@ export class ZCodeRolloutInput extends BaseInput {
       'gen_ai.step.id': stepId,
       'gen_ai.agent.type': ClientType.ZCode,
       'gen_ai.agent.id': sessionId,
+      'gen_ai.agent.name': 'ZCode',
+      'agent.source': 'zcode-rollout',
       'gen_ai.response.id': responseId,
       'gen_ai.provider.name': providerId,
       'gen_ai.request.model': modelId,
@@ -693,6 +735,8 @@ export class ZCodeRolloutInput extends BaseInput {
         'gen_ai.step.id': stepId,
         'gen_ai.agent.type': ClientType.ZCode,
         'gen_ai.agent.id': sessionId,
+        'gen_ai.agent.name': 'ZCode',
+        'agent.source': 'zcode-rollout',
         'gen_ai.provider.name': providerId,
         'gen_ai.tool.name': tc.name,
         'gen_ai.tool.call.id': tc.id,
@@ -717,6 +761,8 @@ export class ZCodeRolloutInput extends BaseInput {
           'gen_ai.step.id': stepId,
           'gen_ai.agent.type': ClientType.ZCode,
           'gen_ai.agent.id': sessionId,
+          'gen_ai.agent.name': 'ZCode',
+          'agent.source': 'zcode-rollout',
           'gen_ai.provider.name': providerId,
           'gen_ai.tool.name': result.toolName ?? tc.name,
           'gen_ai.tool.call.id': tc.id,
@@ -733,10 +779,9 @@ export class ZCodeRolloutInput extends BaseInput {
           parent_span_id: stepSpanId,
         }));
       } else {
-        // Placeholder tool.result (1ms duration) per task #3 — paired result
-        // not found in nextRecord (nextRecord absent or no matching tool msg).
-        // Emitting a placeholder keeps the tool.call non-orphan and TOOL span
-        // duration non-zero (validator: time.non_zero_duration).
+        // Placeholder tool.result (1ms duration) — paired result not found in
+        // nextRecord (nextRecord absent or no matching tool msg). Use
+        // 'interrupted' status to indicate this is NOT a real completion.
         entries.push(buildAgentActivityEntry({
           time_unix_nano: toolResultTimeNs,
           'event.id': crypto.randomUUID(),
@@ -746,11 +791,13 @@ export class ZCodeRolloutInput extends BaseInput {
           'gen_ai.step.id': stepId,
           'gen_ai.agent.type': ClientType.ZCode,
           'gen_ai.agent.id': sessionId,
+          'gen_ai.agent.name': 'ZCode',
+          'agent.source': 'zcode-rollout',
           'gen_ai.provider.name': providerId,
           'gen_ai.tool.name': tc.name,
           'gen_ai.tool.call.id': tc.id,
           'gen_ai.tool.call.exec.id': tc.id,
-          'tool.result.status': 'ok',
+          'tool.result.status': 'interrupted',
           trace_id: traceId,
           span_id: toolSpanId,
           parent_span_id: stepSpanId,

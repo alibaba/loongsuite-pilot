@@ -124,9 +124,9 @@ describe('buildEnvelopeRecords', () => {
 // ─── rollout writer timing vs hook fire (spec §1.5 #7) ───
 
 describe('rollout writer timing vs hook fire (spec §1.5 #7 + source-evidence §10/§11)', () => {
-  test('probe-hook-trace.log proves rollout file existed when Stop hook fired', () => {
+  test('probe-hook-trace.json proves rollout file existed when Stop hook fired', () => {
     const traceLog = fs.readFileSync(
-      path.join(FIXTURE_DIR, 'probe-hook-trace.log'),
+      path.join(FIXTURE_DIR, 'probe-hook-trace.json'),
       'utf-8',
     );
     const traceLine = JSON.parse(traceLog.trim());

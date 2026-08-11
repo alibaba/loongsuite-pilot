@@ -22,12 +22,12 @@ export class ZCodeHookInput extends BaseHookInput {
   readonly id = 'zcode-hook';
   readonly agentType = ClientType.ZCode;
 
-  constructor(opts?: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
+  constructor(opts: Partial<HookInputOptions> & { stateStore: HookInputOptions['stateStore'] }) {
     super({
-      stateStore: opts!.stateStore,
-      logDir: opts?.logDir ?? resolveHome('~/.loongsuite-pilot/logs/zcode'),
-      logPrefix: opts?.logPrefix ?? 'zcode',
-      pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
+      stateStore: opts.stateStore,
+      logDir: opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/zcode'),
+      logPrefix: opts.logPrefix ?? 'zcode',
+      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
     });
   }
 

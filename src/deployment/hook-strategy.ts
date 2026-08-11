@@ -108,6 +108,13 @@ export class HookStrategy implements DeployStrategy {
     try {
       await this.ensureSettingsFile(hookConfig.settingsPath);
 
+      // ZCode requires hooks.enabled=true in its config.json for hooks to fire.
+      // Fresh installs and users who previously disabled hooks need this set.
+      // Preserve existing user config — only write if absent or false.
+      if (def.id === 'zcode') {
+        await this.ensureZcodeHooksEnabled(hookConfig.settingsPath);
+      }
+
       const retiredHookDefs = this.buildRetiredHookDefinitions(def);
       for (const retiredHookDef of retiredHookDefs) {
         const removed = await this.hookManager.uninstallHook(retiredHookDef);
@@ -260,6 +267,21 @@ export class HookStrategy implements DeployStrategy {
         removeTrustBlock(configPath, cfg.marker, hooksJsonAbsPath, def.hook.events);
       } catch (err) {
         logger.warn('codex trust cleanup failed (non-blocking)', { error: String(err) });
+      }
+    }
+
+    // Disable ZCode hooks on undeploy so the agent stops firing hooks.
+    if (def.id === 'zcode' && def.hook?.settingsPath) {
+      try {
+        const resolvedPath = resolveHome(def.hook.settingsPath);
+        const existing = await readJsonFile<Record<string, unknown>>(resolvedPath);
+        if (existing?.hooks && typeof existing.hooks === 'object') {
+          (existing.hooks as Record<string, unknown>).enabled = false;
+          await writeJsonFile(resolvedPath, existing);
+          logger.info('zcode hooks.enabled set to false on undeploy', { settingsPath: resolvedPath });
+        }
+      } catch (err) {
+        logger.warn('zcode hooks.enabled cleanup failed (non-blocking)', { error: String(err) });
       }
     }
 
@@ -439,5 +461,31 @@ export class HookStrategy implements DeployStrategy {
       delete existing.version;
       await writeJsonFile(settingsPath, existing);
     }
+  }
+
+  /**
+   * Ensure ZCode's config.json has hooks.enabled=true.
+   *
+   * ZCode's hook system requires `hooks.enabled: true` in the user-level
+   * config (~/.zcode/cli/config.json). Without this, the Stop hook will
+   * never fire even though the hook command is registered. This method
+   * reads the existing config, sets the flag if missing or false, and
+   * writes back preserving all other user settings.
+   *
+   * Idempotent: skips write if already true.
+   * Safe: preserves existing user config keys.
+   */
+  private async ensureZcodeHooksEnabled(settingsPath: string): Promise<void> {
+    const resolvedPath = resolveHome(settingsPath);
+    const existing = await readJsonFile<Record<string, unknown>>(resolvedPath);
+    if (!existing) return; // ensureSettingsFile should have created it
+
+    const hooks = (existing.hooks as Record<string, unknown> | undefined) ?? {};
+    if (hooks.enabled === true) return; // already enabled
+
+    hooks.enabled = true;
+    existing.hooks = hooks;
+    await writeJsonFile(resolvedPath, existing);
+    logger.info('zcode hooks.enabled set to true', { settingsPath: resolvedPath });
   }
 }
