@@ -122,7 +122,7 @@ describe('Pi Coding Agent extension', () => {
       agentId: 'acme-code',
       agentName: 'Acme Code Agent',
       agentSystem: 'pi',
-      framework: 'pi',
+      framework: 'pi-coding-agent',
     });
     await startTurn(runtime);
     await runtime.emit('context', {
@@ -137,7 +137,7 @@ describe('Pi Coding Agent extension', () => {
       'gen_ai.agent.id': 'acme-code',
       'gen_ai.agent.name': 'Acme Code Agent',
       'gen_ai.agent.system': 'pi',
-      'gen_ai.framework': 'pi',
+      'gen_ai.framework': 'pi-coding-agent',
       'agent.acme-code.cwd': '/workspace/example',
     });
     expect(records[0]['gen_ai.input.messages']).toBeUndefined();
@@ -211,6 +211,8 @@ describe('Pi Coding Agent extension', () => {
     expect(request['gen_ai.session.id']).toBe('pi-session-1');
     expect(request['gen_ai.agent.type']).toBe('pi-coding-agent');
     expect(request['gen_ai.agent.name']).toBe('Pi Coding Agent');
+    expect(request['gen_ai.agent.system']).toBe('pi');
+    expect(request['gen_ai.framework']).toBe('pi-coding-agent');
     expect(request.resourceAttributes).toBeUndefined();
     expect(request['agent.pi-coding-agent.cwd']).toBe('/workspace/example');
     expect(request['gen_ai.input.messages'][0].parts[0].content).toBe('Inspect the repository');

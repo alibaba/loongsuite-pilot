@@ -55,7 +55,8 @@ loongsuite-pilot agent unregister acme-code
 ```
 
 The custom identity is emitted as `gen_ai.agent.type/id/name`, with
-`gen_ai.agent.system=pi` and `gen_ai.framework=pi`. Direct `pi-agent-core`
+`gen_ai.agent.system=pi` and `gen_ai.framework=pi-coding-agent`, matching the
+built-in Agent because both use the same high-level SDK. Direct `pi-agent-core`
 usage, in-memory settings, and custom resource loaders that ignore PI
 extensions are outside this registration contract.
 

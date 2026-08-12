@@ -1452,6 +1452,46 @@ const targets = [{ configPath: defaultConfig, markers: ['loongsuite-pilot-pi-cod
 const resolveValue = value => typeof value === 'string'
   ? value.replace(/^~(?=[\\/])/, process.env.USERPROFILE || '').replaceAll('$PILOT_DATA', dataDir)
   : value;
+const stripJsoncComments = text => {
+  let result = '';
+  let index = 0;
+  let inString = false;
+  let escape = false;
+  while (index < text.length) {
+    const ch = text[index];
+    if (inString) {
+      result += ch;
+      if (escape) escape = false;
+      else if (ch.charCodeAt(0) === 92) escape = true;
+      else if (ch === '"') inString = false;
+      index++;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      result += ch;
+      index++;
+      continue;
+    }
+    if (ch === '/' && text[index + 1] === '/') {
+      index += 2;
+      while (index < text.length && text[index] !== '\n') index++;
+      continue;
+    }
+    if (ch === '/' && text[index + 1] === '*') {
+      index += 2;
+      while (index + 1 < text.length && !(text[index] === '*' && text[index + 1] === '/')) index++;
+      index += 2;
+      continue;
+    }
+    result += ch;
+    index++;
+  }
+  return result;
+};
+const comparable = value => typeof value === 'string'
+  ? value.split(String.fromCharCode(92)).join('/')
+  : '';
 const localDir = path.join(dataDir, 'agents.d.local');
 try {
   for (const name of fs.existsSync(localDir) ? fs.readdirSync(localDir) : []) {
@@ -1468,25 +1508,41 @@ try {
     }
   }
   let cleaned = 0;
+  let skipped = 0;
   for (const target of targets) {
     if (!target.configPath || !fs.existsSync(target.configPath)) continue;
-    const data = JSON.parse(fs.readFileSync(target.configPath, 'utf-8'));
-    if (!Array.isArray(data.extensions)) continue;
-    const before = data.extensions.length;
-    data.extensions = data.extensions.filter(entry => {
-      const value = typeof entry === 'string' ? entry : '';
-      return !target.markers.some(marker => value === marker || value.includes(marker));
-    });
-    if (data.extensions.length === before) continue;
-    fs.writeFileSync(target.configPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
-    cleaned++;
+    try {
+      const raw = fs.readFileSync(target.configPath, 'utf-8');
+      const data = JSON.parse(stripJsoncComments(raw));
+      if (!Array.isArray(data.extensions)) continue;
+      const before = data.extensions.length;
+      data.extensions = data.extensions.filter(entry => {
+        const value = comparable(entry);
+        return !target.markers.some(marker => value === comparable(marker) || value.includes(comparable(marker)));
+      });
+      if (data.extensions.length === before) continue;
+      if (raw !== JSON.stringify(data, null, 2) + '\n') {
+        try {
+          fs.copyFileSync(target.configPath, target.configPath + '.bak', fs.constants.COPYFILE_EXCL);
+        } catch (e) {
+          if (e?.code !== 'EEXIST') throw e;
+        }
+      }
+      fs.writeFileSync(target.configPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+      cleaned++;
+    } catch {
+      skipped++;
+    }
   }
-  process.stdout.write(cleaned > 0 ? 'cleaned' : 'nochange');
+  process.stdout.write(cleaned > 0 ? (skipped > 0 ? 'partial' : 'cleaned') : (skipped > 0 ? 'skipped' : 'nochange'));
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
 '@ $cfg $DATA_DIR 2>$null
 
     switch ($result) {
         "cleaned"  { Msg "    ✅ 已清理 Pi / PI SDK Agent 扩展配置" "    ✅ Cleaned Pi / PI SDK Agent extension configs" }
+        "partial"  { Msg "    ⚠️  已清理可读取的 Pi 配置，部分损坏配置需手动清理" `
+                         "    ⚠️  Cleaned readable Pi configs; some invalid configs need manual cleanup" }
+        "skipped"  { Msg "    ⚠️  Pi 配置损坏，需手动清理" "    ⚠️  Invalid Pi configs skipped (manual cleanup needed)" }
         "nochange" { }
         default    { Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" }
     }

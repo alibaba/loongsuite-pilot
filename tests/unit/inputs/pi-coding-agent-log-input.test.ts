@@ -144,7 +144,7 @@ describe('PiCodingAgentLogInput', () => {
       'gen_ai.agent.id': 'acme-code',
       'gen_ai.agent.name': 'Acme Code Agent',
       'gen_ai.agent.system': 'pi',
-      'gen_ai.framework': 'pi',
+      'gen_ai.framework': 'pi-coding-agent',
       'agent.acme-code.cwd': tmpDir,
       'gen_ai.response.finish_reasons': ['stop'],
     })}\n`);
@@ -161,7 +161,7 @@ describe('PiCodingAgentLogInput', () => {
       'gen_ai.agent.id': 'acme-code',
       'gen_ai.agent.name': 'Acme Code Agent',
       'gen_ai.agent.system': 'pi',
-      'gen_ai.framework': 'pi',
+      'gen_ai.framework': 'pi-coding-agent',
       'workspace.path': tmpDir,
     });
   });

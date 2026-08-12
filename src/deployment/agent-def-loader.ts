@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { AgentDefinition } from '../types/index.js';
+import { isReservedPiSdkAgentId, isValidPiSdkAgentId } from '../pi-sdk/pi-sdk-agent-identity.js';
 import { resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -108,8 +109,8 @@ export class AgentDefLoader {
       const normalizedDataDir = this.dataDir.replace(/\\/g, '/').replace(/\/$/, '');
       if (
         mode !== 'plugin-inject'
-        || typeof id !== 'string'
-        || !/^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(id)
+        || !isValidPiSdkAgentId(id)
+        || isReservedPiSdkAgentId(id)
         || !piSdk
         || piSdk.schemaVersion !== 1
         || typeof piSdk.agentDir !== 'string'

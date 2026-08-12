@@ -1,11 +1,91 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const sh = readFileSync(resolve('deploy', 'installer-opensource.sh'), 'utf-8');
 const ps1 = readFileSync(resolve('deploy', 'installer-opensource.ps1'), 'utf-8');
 const runtimeSh = readFileSync(resolve('scripts', 'loongsuite-pilot.sh'), 'utf-8');
 const runtimePs1 = readFileSync(resolve('scripts', 'loongsuite-pilot.ps1'), 'utf-8');
+
+function extractPiCleanupNodeScript(source, style) {
+  const functionMarker = style === 'sh'
+    ? 'remove_pi_coding_agent_extension()'
+    : 'function Remove-PiCodingAgentExtension';
+  const functionStart = source.indexOf(functionMarker);
+  const functionEnd = source.indexOf('# ====', functionStart);
+  const body = source.slice(functionStart, functionEnd);
+  const scriptStartMarker = style === 'sh' ? 'result=$(node -e "\n' : "-e @'\n";
+  const scriptEndMarker = style === 'sh' ? '\n" "$cfg" "$DATA_DIR"' : "\n'@ $cfg $DATA_DIR";
+  const scriptStart = body.indexOf(scriptStartMarker) + scriptStartMarker.length;
+  const scriptEnd = body.indexOf(scriptEndMarker, scriptStart);
+  if (scriptStart < scriptStartMarker.length || scriptEnd < scriptStart) {
+    throw new Error(`failed to extract ${style} Pi cleanup script`);
+  }
+  return body.slice(scriptStart, scriptEnd);
+}
+
+function verifyPiCleanupContinuesPastInvalidConfig(script, envKey) {
+  const root = mkdtempSync(join(tmpdir(), 'pilot-pi-uninstall-'));
+  try {
+    const dataDir = join(root, 'pilot-data');
+    const definitionsDir = join(dataDir, 'agents.d.local');
+    const defaultConfig = join(root, 'default-pi', 'settings.json');
+    const goodConfig = join(root, 'good-agent', 'settings.json');
+    const badConfig = join(root, 'bad-agent', 'settings.json');
+    for (const dir of [definitionsDir, join(root, 'default-pi'), join(root, 'good-agent'), join(root, 'bad-agent')]) {
+      mkdirSync(dir, { recursive: true });
+    }
+
+    writeFileSync(defaultConfig, '{ broken default config');
+    writeFileSync(badConfig, '{ broken custom config');
+    const managedSpec = join(dataDir, 'plugins', 'pi-coding-agent', 'agents', 'good-code.mjs');
+    writeFileSync(goodConfig, `{
+  // preserve a backup before normalizing JSONC
+  "url": "https://example.test/path//segment",
+  "extensions": [
+    ${JSON.stringify(managedSpec)},
+    "/third-party.mjs"
+  ]
+}\n`);
+
+    for (const [id, configPath] of [['good-code', goodConfig], ['bad-code', badConfig]]) {
+      writeFileSync(join(definitionsDir, `${id}.json`), JSON.stringify({
+        id,
+        piSdk: { schemaVersion: 1 },
+        pluginInject: {
+          pluginId: `loongsuite-pilot-pi-sdk-${id}`,
+          pluginSpec: `$PILOT_DATA/plugins/pi-coding-agent/agents/${id}.mjs`,
+          configPaths: [configPath],
+        },
+      }));
+    }
+
+    const run = spawnSync(process.execPath, ['-e', script, defaultConfig, dataDir], {
+      encoding: 'utf8',
+      env: { ...process.env, [envKey]: root },
+    });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toBe('partial');
+    expect(JSON.parse(readFileSync(goodConfig, 'utf8'))).toEqual({
+      url: 'https://example.test/path//segment',
+      extensions: ['/third-party.mjs'],
+    });
+    expect(readFileSync(badConfig, 'utf8')).toBe('{ broken custom config');
+    expect(existsSync(`${goodConfig}.bak`)).toBe(true);
+    expect(readFileSync(`${goodConfig}.bak`, 'utf8')).toContain('// preserve a backup');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
 // Hook-mode agents whose settings files must be cleaned on uninstall. Kept in
 // sync with agents.d/*.json (deployMode: hook). A missing entry means the
@@ -146,6 +226,13 @@ describe('uninstall cleans the Pi Coding Agent extension injection', () => {
       expect(source).toContain('loongsuite-pilot-pi-sdk-');
       expect(source).toContain('plugins/pi-coding-agent/agents/');
     }
+  });
+
+  it.each([
+    ['Unix', extractPiCleanupNodeScript(sh, 'sh'), 'HOME'],
+    ['Windows', extractPiCleanupNodeScript(ps1, 'ps1'), 'USERPROFILE'],
+  ])('%s cleanup accepts JSONC and continues past damaged targets', (_platform, script, envKey) => {
+    verifyPiCleanupContinuesPastInvalidConfig(script, envKey);
   });
 });
 

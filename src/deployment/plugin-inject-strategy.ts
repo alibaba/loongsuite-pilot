@@ -317,7 +317,7 @@ export class PluginInjectStrategy implements DeployStrategy {
   }
 
   private resolveSpec(spec: string): string {
-    return spec.replace(/\$PILOT_DATA/g, this.dataDir);
+    return this.normalizeSpecForComparison(spec.replace(/\$PILOT_DATA/g, this.dataDir));
   }
 
   private matchesSpec(entry: unknown, resolvedSpec: string, pluginId: string): boolean {
@@ -327,7 +327,12 @@ export class PluginInjectStrategy implements DeployStrategy {
         ? String(entry[0])
         : '';
 
-    return entryStr === resolvedSpec || entryStr.includes(pluginId);
+    return this.normalizeSpecForComparison(entryStr) === this.normalizeSpecForComparison(resolvedSpec)
+      || entryStr.includes(pluginId);
+  }
+
+  private normalizeSpecForComparison(spec: string): string {
+    return process.platform === 'win32' ? spec.replace(/\\/g, '/') : spec;
   }
 
   private flatArrayInject(

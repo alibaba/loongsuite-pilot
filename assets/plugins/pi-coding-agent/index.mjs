@@ -24,7 +24,7 @@ const DEFAULT_IDENTITY = Object.freeze({
   agentId: 'pi-coding-agent',
   agentName: 'Pi Coding Agent',
   agentSystem: 'pi',
-  framework: 'pi',
+  framework: 'pi-coding-agent',
 });
 const MAX_STRING_LENGTH = 64 * 1024;
 const MAX_MESSAGES = 40;

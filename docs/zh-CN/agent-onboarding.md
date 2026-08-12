@@ -59,7 +59,8 @@ loongsuite-pilot agent unregister acme-code
 ```
 
 注册身份会输出为自研 Agent 自己的 `gen_ai.agent.type/id/name`，同时输出
-`gen_ai.agent.system=pi` 和 `gen_ai.framework=pi`。直接使用 `pi-agent-core`、内存
+`gen_ai.agent.system=pi` 和 `gen_ai.framework=pi-coding-agent`；由于二者使用相同的
+高层 SDK，该值与内置 Pi Agent 保持一致。直接使用 `pi-agent-core`、内存
 settings 或不会加载 PI extensions 的自定义 ResourceLoader 不在该注册能力的覆盖范围内。
 
 ## 必要组成

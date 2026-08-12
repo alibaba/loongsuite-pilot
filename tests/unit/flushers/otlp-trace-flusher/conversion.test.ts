@@ -115,7 +115,7 @@ describe('OtlpTraceFlusher - conversion', () => {
   it('uses an explicit PI system and framework for a registered custom Agent resource', () => {
     const records = [{
       'gen_ai.agent.system': 'pi',
-      'gen_ai.framework': 'pi',
+      'gen_ai.framework': 'pi-coding-agent',
     }] as unknown as AgentActivityEntry[];
     const identity = (flusher as any).resolveAgentResourceIdentity('acme-code', records);
     const resource = (flusher as any).buildResource('acme-code', 'test-pilot', {}, identity);
@@ -123,7 +123,7 @@ describe('OtlpTraceFlusher - conversion', () => {
     expect(resource.attributes).toMatchObject({
       'gen_ai.agent.type': 'acme-code',
       'gen_ai.agent.system': 'pi',
-      'gen_ai.framework': 'pi',
+      'gen_ai.framework': 'pi-coding-agent',
     });
   });
 

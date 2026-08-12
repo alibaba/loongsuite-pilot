@@ -134,6 +134,39 @@ describe('AgentDefLoader', () => {
     expect(defs[0].piSdk).toEqual({ schemaVersion: 1, agentDir: '/tmp/acme/pi' });
   });
 
+  it('rejects a local PI SDK definition that shadows a built-in Agent id', async () => {
+    const builtin = {
+      id: 'pi-coding-agent',
+      displayName: 'Pi Coding Agent',
+      deployMode: 'plugin-inject',
+      detection: { paths: ['~/.pi/agent'], commands: ['pi'] },
+      pluginInject: {
+        configPaths: ['~/.pi/agent/settings.json'],
+        pluginSpec: '$PILOT_DATA/plugins/pi-coding-agent/index.mjs',
+        pluginId: 'loongsuite-pilot-pi-coding-agent',
+        configKey: 'extensions',
+      },
+    };
+    const shadow = {
+      ...builtin,
+      displayName: 'Shadowed Pi',
+      piSdk: { schemaVersion: 1, agentDir: '/tmp/shadow-pi' },
+      pluginInject: {
+        configPaths: ['/tmp/shadow-pi/settings.json'],
+        pluginSpec: '$PILOT_DATA/plugins/pi-coding-agent/agents/pi-coding-agent.mjs',
+        pluginId: 'loongsuite-pilot-pi-sdk-pi-coding-agent',
+        configKey: 'extensions',
+      },
+    };
+    await fs.writeFile(path.join(builtinDir, 'pi.json'), JSON.stringify(builtin));
+    await fs.writeFile(path.join(localDir, 'pi-shadow.json'), JSON.stringify(shadow));
+
+    const defs = await makeLoader().load();
+
+    expect(defs).toHaveLength(1);
+    expect(defs[0]).toMatchObject({ id: 'pi-coding-agent', displayName: 'Pi Coding Agent' });
+  });
+
   it('replaces $PILOT_DIR and $PILOT_DATA variables', async () => {
     const def = {
       id: 'var-test',

@@ -59,7 +59,7 @@ describe('PI SDK Agent registry', () => {
     expect(definition.detection.paths).toEqual([detectionPath]);
     expect(wrapper).toContain("createPiTelemetryExtension");
     expect(wrapper).toContain('"agentType": "acme-code"');
-    expect(wrapper).toContain('"framework": "pi"');
+    expect(wrapper).toContain('"framework": "pi-coding-agent"');
     if (process.platform !== 'win32') {
       expect((await fs.stat(result.wrapperPath)).mode & 0o777).toBe(0o600);
       expect((await fs.stat(result.definitionPath)).mode & 0o777).toBe(0o600);
@@ -238,6 +238,28 @@ describe('PI SDK Agent registry', () => {
       agentDir: path.join(os.homedir(), '.pi', 'agent'),
       detectionPaths: [detectionPath],
     })).rejects.toThrow('must be dedicated');
+  });
+
+  it('serializes concurrent registrations before checking the dedicated agentDir', async () => {
+    const requests = ['first-code', 'second-code'].map(id => registerPiSdkAgent({
+      dataDir,
+      id,
+      name: id,
+      agentDir,
+      detectionPaths: [detectionPath],
+    }));
+
+    const results = await Promise.allSettled(requests);
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    const rejected = results.find(result => result.status === 'rejected');
+    expect(rejected).toMatchObject({ status: 'rejected' });
+    expect(rejected.status === 'rejected' ? String(rejected.reason) : '').toContain('registry is busy');
+
+    const definitions = await listRegisteredPiSdkAgents(dataDir);
+    expect(definitions).toHaveLength(1);
+    const settings = JSON.parse(await fs.readFile(path.join(agentDir, 'settings.json'), 'utf8'));
+    expect(settings.extensions).toHaveLength(1);
+    await expect(fs.access(path.join(dataDir, 'pi-sdk-registry.lock'))).rejects.toThrow();
   });
 });
 

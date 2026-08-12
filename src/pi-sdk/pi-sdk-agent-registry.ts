@@ -1,6 +1,5 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { ClientType } from '../types/index.js';
 import type { AgentDefinition } from '../types/index.js';
 import { detectAgent } from '../deployment/detect-utils.js';
 import { PluginInjectStrategy } from '../deployment/plugin-inject-strategy.js';
@@ -12,15 +11,16 @@ import {
   writeJsonFile,
   writeTextFileAtomic,
 } from '../utils/fs-utils.js';
+import { acquireSingleInstanceLock } from '../utils/single-instance-lock.js';
+import {
+  isReservedPiSdkAgentId,
+  isValidPiSdkAgentId,
+  validatePiSdkAgentId,
+} from './pi-sdk-agent-identity.js';
 
-const AGENT_ID_RE = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
-const RESERVED_AGENT_IDS = new Set<string>([
-  ...Object.values(ClientType),
-  // Definition ids that intentionally differ from their emitted ClientType.
-  'hermes-agent',
-  'qoder-jetbrains',
-]);
+export { validatePiSdkAgentId } from './pi-sdk-agent-identity.js';
 const PI_SDK_INPUT_TYPE = 'pi-sdk-jsonl';
+const PI_SDK_REGISTRY_LOCK_FILE = 'pi-sdk-registry.lock';
 
 export interface PiSdkAgentRegistrationRequest {
   dataDir: string;
@@ -48,17 +48,6 @@ export interface PiSdkAgentDoctorResult {
   runtimePresent: boolean;
   injectionPresent: boolean;
   healthy: boolean;
-}
-
-export function validatePiSdkAgentId(raw: string): string {
-  const id = raw.trim().toLowerCase();
-  if (!AGENT_ID_RE.test(id)) {
-    throw new Error('agent id must be 1-64 lowercase letters, digits, dots, underscores, or hyphens');
-  }
-  if (RESERVED_AGENT_IDS.has(id)) {
-    throw new Error(`agent id is reserved by the built-in integration: ${id}`);
-  }
-  return id;
 }
 
 export function buildPiSdkAgentDefinition(
@@ -115,6 +104,13 @@ export async function registerPiSdkAgent(
   request: PiSdkAgentRegistrationRequest,
 ): Promise<PiSdkAgentRegistrationResult> {
   const dataDir = resolveAbsolutePath(request.dataDir, 'Pilot data directory');
+  return withPiSdkRegistryLock(dataDir, () => registerPiSdkAgentLocked(dataDir, request));
+}
+
+async function registerPiSdkAgentLocked(
+  dataDir: string,
+  request: PiSdkAgentRegistrationRequest,
+): Promise<PiSdkAgentRegistrationResult> {
   const definition = buildPiSdkAgentDefinition(request);
   const definitionPath = getDefinitionPath(dataDir, definition.id);
   const wrapperPath = getWrapperPath(dataDir, definition.id);
@@ -181,6 +177,13 @@ export async function unregisterPiSdkAgent(
   idValue: string,
 ): Promise<{ id: string; injectionRemoved: boolean; definitionRemoved: boolean }> {
   const dataDir = resolveAbsolutePath(dataDirValue, 'Pilot data directory');
+  return withPiSdkRegistryLock(dataDir, () => unregisterPiSdkAgentLocked(dataDir, idValue));
+}
+
+async function unregisterPiSdkAgentLocked(
+  dataDir: string,
+  idValue: string,
+): Promise<{ id: string; injectionRemoved: boolean; definitionRemoved: boolean }> {
   const id = validatePiSdkAgentId(idValue);
   const definitionPath = getDefinitionPath(dataDir, id);
   const definition = await readJsonFile<AgentDefinition>(definitionPath);
@@ -233,6 +236,10 @@ export async function listRegisteredPiSdkAgents(dataDirValue: string): Promise<A
  */
 export async function ensureRegisteredPiSdkWrappers(dataDirValue: string): Promise<number> {
   const dataDir = resolveAbsolutePath(dataDirValue, 'Pilot data directory');
+  return withPiSdkRegistryLock(dataDir, () => ensureRegisteredPiSdkWrappersLocked(dataDir));
+}
+
+async function ensureRegisteredPiSdkWrappersLocked(dataDir: string): Promise<number> {
   const definitions = await listRegisteredPiSdkAgents(dataDir);
   if (definitions.length === 0) return 0;
 
@@ -262,6 +269,20 @@ export async function ensureRegisteredPiSdkWrappers(dataDirValue: string): Promi
     restored += 1;
   }
   return restored;
+}
+
+async function withPiSdkRegistryLock<T>(dataDir: string, operation: () => Promise<T>): Promise<T> {
+  const lockPath = path.join(dataDir, PI_SDK_REGISTRY_LOCK_FILE);
+  const { lock, holderPid } = acquireSingleInstanceLock(lockPath);
+  if (!lock) {
+    const holder = holderPid ? ` (held by pid ${holderPid})` : '';
+    throw new Error(`PI SDK Agent registry is busy${holder}; retry the command`);
+  }
+  try {
+    return await operation();
+  } finally {
+    lock.release();
+  }
 }
 
 export async function doctorPiSdkAgent(
@@ -304,8 +325,8 @@ export function isPiSdkAgentDefinition(definition: AgentDefinition): definition 
   const pluginInject = definition.pluginInject;
   return definition.deployMode === 'plugin-inject'
     && typeof id === 'string'
-    && AGENT_ID_RE.test(id)
-    && !RESERVED_AGENT_IDS.has(id)
+    && isValidPiSdkAgentId(id)
+    && !isReservedPiSdkAgentId(id)
     && definition.piSdk?.schemaVersion === 1
     && typeof definition.piSdk.agentDir === 'string'
     && definition.piSdk.agentDir.length > 0
@@ -328,7 +349,7 @@ function renderPiSdkWrapper(definition: AgentDefinition): string {
     agentId: definition.id,
     agentName: definition.displayName,
     agentSystem: 'pi',
-    framework: 'pi',
+    framework: 'pi-coding-agent',
   };
   return [
     '// Generated by loongsuite-pilot. Re-register the Agent instead of editing this file.',
