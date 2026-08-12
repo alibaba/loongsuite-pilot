@@ -84,6 +84,8 @@ maybe_sudo ordinary-command
   it('propagates critical service-specific installer failures inside an if condition', () => {
     const result = runShell(String.raw`
 ${commonMocks}
+mkdir -p "$BOOTSTRAP_DIR"
+touch "$BOOTSTRAP_DIR/updater-daemon.js"
 detect_init_system() { echo systemd-system; }
 _write_systemd_system_updater_unit() { return 0; }
 maybe_sudo() {
@@ -105,6 +107,8 @@ fi
   it('propagates real init.d writer install failures after cleaning temporary files', () => {
     const result = runShell(String.raw`
 ${commonMocks}
+mkdir -p "$BOOTSTRAP_DIR"
+touch "$BOOTSTRAP_DIR/updater-daemon.js"
 detect_init_system() { echo initd; }
 resolve_user_home() { echo "$DATA_DIR/daemon-home"; }
 maybe_sudo() {
@@ -130,6 +134,53 @@ done < "$DATA_DIR/initd-temp-paths"
 `);
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+  });
+
+  it('does not register any updater service when the updater bootstrap is absent', () => {
+    const result = runShell(String.raw`
+${commonMocks}
+rm -f "$BOOTSTRAP_DIR/updater-daemon.js" "$INIT_TYPE_FILE" "$DATA_DIR/manager-called"
+selected_init=""
+detect_init_system() { echo "$selected_init"; }
+record_manager_call() { printf '%s\n' "$selected_init:$*" >> "$DATA_DIR/manager-called"; }
+_write_launchd_updater_plist() { record_manager_call writer-launchd; }
+_write_systemd_user_updater_unit() { record_manager_call writer-systemd-user; }
+_write_systemd_system_updater_unit() { record_manager_call writer-systemd-system; }
+_write_initd_updater_script() { record_manager_call writer-initd; }
+launchctl() { record_manager_call launchctl "$@"; }
+systemctl() { record_manager_call systemctl "$@"; }
+maybe_sudo() { record_manager_call sudo "$@"; }
+_register_initd_boot() { record_manager_call initd-register "$@"; }
+
+for selected_init in launchd systemd-user systemd-system initd; do
+  if autostart_install_updater_only false; then
+    exit 1
+  fi
+  [ ! -e "$DATA_DIR/manager-called" ]
+  [ ! -e "$INIT_TYPE_FILE" ]
+done
+`);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+  });
+
+  it('hard-fails a concrete updater restart without an unmanaged fallback when its bootstrap is absent', () => {
+    const result = runShell(String.raw`
+${commonMocks}
+updater_process_exists() { return 1; }
+systemctl() { return 1; }
+nohup() { touch "$DATA_DIR/nohup-called"; }
+
+echo systemd-user > "$INIT_TYPE_FILE"
+rm -f "$BOOTSTRAP_DIR/updater-daemon.js"
+if cmd_restart_updater; then
+  exit 1
+fi
+[ ! -e "$DATA_DIR/nohup-called" ]
+`);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stderr).toContain('Service manager failed to restart updater (init_type=systemd-user)');
   });
 
   it('normalizes legacy systemd state before updater self-healing', () => {
@@ -264,6 +315,39 @@ if cmd_restart_updater; then exit 1; fi
     expect(result.stderr).toContain('Service manager failed to restart updater (init_type=initd)');
   });
 
+  it.each([
+    ['collector', 'unknown'],
+    ['updater', 'nohup'],
+  ])('does not start an unmanaged %s after a concrete manager registers but liveness is delayed', (daemon, oldInitType) => {
+    const result = runShell(String.raw`
+${commonMocks}
+is_running() { return 1; }
+updater_process_exists() { return 1; }
+detect_init_system() { echo systemd-user; }
+autostart_install_collector_only() { touch "$DATA_DIR/collector-registered"; }
+autostart_install_updater_only() {
+  [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]
+  touch "$DATA_DIR/updater-registered"
+}
+nohup() { touch "$DATA_DIR/nohup-called"; }
+mkdir -p "$BOOTSTRAP_DIR"
+touch "$BOOTSTRAP_DIR/updater-daemon.js"
+
+echo "$2" > "$INIT_TYPE_FILE"
+if [ "$1" = collector ]; then
+  if (cmd_restart_collector); then exit 1; fi
+  [ -e "$DATA_DIR/collector-registered" ]
+else
+  if cmd_restart_updater; then exit 1; fi
+  [ -e "$DATA_DIR/updater-registered" ]
+fi
+[ ! -e "$DATA_DIR/nohup-called" ]
+`.replace('$1', daemon).replace('$2', oldInitType));
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stderr).toContain(`Service manager failed to restart ${daemon} (init_type=systemd-user)`);
+  });
+
   it('preserves the legacy updater fallback when no service manager can be detected', () => {
     const result = runShell(String.raw`
 ${commonMocks}
@@ -293,6 +377,19 @@ describe('Windows Task Scheduler restart self-healing', () => {
     expect(end).toBeGreaterThan(start);
     return script.slice(start, end);
   }
+
+  it('refuses to install an updater task when its bootstrap is absent', () => {
+    const start = script.indexOf('function Install-UpdaterTask {');
+    const end = script.indexOf('function Remove-AllTasks {', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const body = script.slice(start, end);
+    const bootstrapGuard = body.indexOf('if (-not (Test-Path $entry)) { return $false }');
+    const taskAction = body.indexOf('New-HiddenTaskAction');
+
+    expect(bootstrapGuard).toBeGreaterThanOrEqual(0);
+    expect(taskAction).toBeGreaterThan(bootstrapGuard);
+  });
 
   it.each([
     ['Cmd-RestartCollector', 'restart-updater', 'Install-CollectorTask'],

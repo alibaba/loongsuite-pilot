@@ -711,6 +711,12 @@ cmd_restart_collector() {
                 fi
             fi
         fi
+        # A concrete manager now owns this daemon. Even if its first liveness
+        # check is slow, starting a nohup copy could create duplicate collectors.
+        if [ "$_restarted" = false ] && [ "$_new_init" != "none" ]; then
+            echo "❌ Service manager failed to restart collector (init_type=$_new_init)" >&2
+            exit 1
+        fi
         if [ "$_restarted" = false ]; then
             case "$init_type" in
                 nohup|unknown|"")
@@ -852,6 +858,12 @@ cmd_restart_updater() {
                     echo "⚠️  updater self-heal registered ($_new_init) but process not found" >&2
                 fi
             fi
+        fi
+        # A concrete manager now owns this daemon. Never race it with an
+        # unmanaged updater just because the first liveness check is slow.
+        if [ "$_restarted" = false ] && [ "$_new_init" != "none" ]; then
+            echo "❌ Service manager failed to restart updater (init_type=$_new_init)" >&2
+            return 1
         fi
         if [ "$_restarted" = false ]; then
             case "$init_type" in
@@ -1639,6 +1651,12 @@ autostart_install_collector_only() {
 
 autostart_install_updater_only() {
     local interactive="${1:-true}"
+
+    # Open-source packages may intentionally omit the updater daemon. Do not
+    # create a service definition whose executable payload does not exist.
+    if [ ! -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
+        return 1
+    fi
 
     local init_system
     init_system=$(detect_init_system "$interactive") || return 1
