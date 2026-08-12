@@ -2739,4 +2739,88 @@ describe('CodexTranscriptInput', () => {
       'tool.result.status': 'cancelled',
     });
   });
+
+  // ── Copied fork/subagent history prefix must be dropped ──────────────────
+  describe('copied history prefix', () => {
+    // Build one emittable turn (produces an llm.response) at the given base time.
+    const turnBlock = (turnId: string, baseIso: string): string[] => {
+      const base = Date.parse(baseIso);
+      const at = (s: number) => new Date(base + s * 1000).toISOString();
+      return [
+        record(at(0), 'turn_context', { turn_id: turnId, model: 'gpt-5.5', cwd: '/tmp/p' }),
+        record(at(1), 'event_msg', { type: 'task_started', turn_id: turnId }),
+        record(at(2), 'response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }),
+        record(at(3), 'event_msg', { type: 'agent_message', message: `done-${turnId}`, phase: 'final' }),
+        record(at(4), 'event_msg', tokenUsage(100, 10)),
+        record(at(5), 'event_msg', { type: 'task_complete', turn_id: turnId, last_agent_message: `done-${turnId}` }),
+      ];
+    };
+
+    it('drops the copied ancestor prefix of a resume/fork rollout, keeps the child turn', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-fork-'));
+      tempDirs.push(root);
+      const { input, entries, sessionDir } = await createInput(root);
+      const child = 'cccccccc-1111-4111-8111-111111111111';
+      const ancestor = 'aaaaaaaa-9999-4999-8999-999999999999';
+      const text = [
+        record('2026-08-05T10:00:00.000Z', 'session_meta', {
+          id: child, forked_from_id: ancestor, thread_source: 'user', model_provider: 'openai',
+        }),
+        record('2026-06-01T00:00:00.000Z', 'session_meta', { id: ancestor, thread_source: 'user', model_provider: 'openai' }),
+        ...turnBlock('ancestor-turn', '2026-06-01T00:00:10.000Z'),
+        record('2026-08-05T10:00:05.000Z', 'event_msg', { type: 'thread_settings_applied', thread_settings: { model: 'gpt-5.5' } }),
+        ...turnBlock('child-turn', '2026-08-05T10:00:10.000Z'),
+      ].join('\n') + '\n';
+      await writeTranscriptNamed(sessionDir, `rollout-2026-08-05T10-00-00-${child}.jsonl`, text);
+
+      await waitFor(() => responsesForTurn(entries, 'child-turn').length === 1);
+      await input.stop();
+
+      expect(responsesForTurn(entries, 'child-turn')).toHaveLength(1);
+      expect(responsesForTurn(entries, 'ancestor-turn')).toHaveLength(0);
+      expect(entries.some(e => e['agent.codex.transcript_turn_id'] === 'ancestor-turn')).toBe(false);
+    });
+
+    it('drops the copied parent prefix of a subagent rollout, keeps the child turn', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-sub-'));
+      tempDirs.push(root);
+      const { input, entries, sessionDir } = await createInput(root);
+      const child = 'cccccccc-2222-4222-8222-222222222222';
+      const parent = 'aaaaaaaa-8888-4888-8888-888888888888';
+      const text = [
+        record('2026-08-05T10:00:00.000Z', 'session_meta', {
+          id: child, forked_from_id: parent, thread_source: 'subagent', model_provider: 'openai',
+          source: { subagent: { thread_spawn: { parent_thread_id: parent, depth: 1, agent_path: '/root/child' } } },
+        }),
+        record('2026-06-01T00:00:00.000Z', 'session_meta', { id: parent, thread_source: 'user', model_provider: 'openai' }),
+        ...turnBlock('parent-turn', '2026-06-01T00:00:10.000Z'),
+        record('2026-08-05T10:00:05.000Z', 'event_msg', { type: 'thread_settings_applied', thread_settings: { model: 'gpt-5.5' } }),
+        ...turnBlock('subchild-turn', '2026-08-05T10:00:10.000Z'),
+      ].join('\n') + '\n';
+      await writeTranscriptNamed(sessionDir, `rollout-2026-08-05T10-00-00-${child}.jsonl`, text);
+
+      await waitFor(() => responsesForTurn(entries, 'subchild-turn').length === 1);
+      await input.stop();
+
+      expect(responsesForTurn(entries, 'subchild-turn')).toHaveLength(1);
+      expect(responsesForTurn(entries, 'parent-turn')).toHaveLength(0);
+    });
+
+    it('does not skip a normal user session that has no copied prefix', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-normal-'));
+      tempDirs.push(root);
+      const { input, entries, sessionDir } = await createInput(root);
+      const own = 'dddddddd-3333-4333-8333-333333333333';
+      const text = [
+        record('2026-08-05T10:00:00.000Z', 'session_meta', { id: own, thread_source: 'user', model_provider: 'openai' }),
+        ...turnBlock('normal-turn', '2026-08-05T10:00:10.000Z'),
+      ].join('\n') + '\n';
+      await writeTranscriptNamed(sessionDir, `rollout-2026-08-05T10-00-00-${own}.jsonl`, text);
+
+      await waitFor(() => responsesForTurn(entries, 'normal-turn').length === 1);
+      await input.stop();
+
+      expect(responsesForTurn(entries, 'normal-turn')).toHaveLength(1);
+    });
+  });
 });

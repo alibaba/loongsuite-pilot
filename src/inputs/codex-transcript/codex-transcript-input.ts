@@ -315,6 +315,38 @@ export class CodexTranscriptInput extends BaseInput {
       : undefined;
     if (ownerMeta?.depth === 0) this.registerPersistedSubagentSpawns(checkpoint, ownerMeta.threadId);
 
+    // Fork/resume/subagent rollouts begin with a verbatim copy of ancestor
+    // history that must never be emitted (it re-reports the ancestor's events
+    // or, post owner-session fix, spawns ghost turns). On the file's first scan
+    // (fresh checkpoint, nothing consumed yet), advance the offset past that
+    // copied prefix using codex's own boundary marker. Gated on a first-party
+    // fork/child indicator so normal user sessions are never touched, and
+    // fail-open: no boundary found -> skip nothing.
+    const hasCopiedPrefix = ownerMeta != null && (
+      ownerMeta.forkedFromId != null
+      || ownerMeta.parentThreadId != null
+      || ownerMeta.threadSource === 'subagent'
+    );
+    if (
+      hasCopiedPrefix
+      && checkpoint.scanOffset === 0
+      && checkpoint.activeTurn === null
+      && checkpoint.pendingTerminal === null
+    ) {
+      const prefixEnd = await findCopiedPrefixEndOffset(filePath, ownerMeta!.threadId, stat.size);
+      if (prefixEnd !== null && prefixEnd > 0) {
+        this.logger.info('skipping copied fork/subagent history prefix', {
+          transcriptPath: filePath,
+          skippedBytes: prefixEnd,
+          threadSource: ownerMeta!.threadSource,
+          forkedFromId: ownerMeta!.forkedFromId,
+          parentThreadId: ownerMeta!.parentThreadId,
+        });
+        checkpoint.scanOffset = prefixEnd;
+        checkpointChanged = true;
+      }
+    }
+
     let emittedCount = 0;
     let processedTerminalCount = 0;
     if (
@@ -2026,6 +2058,52 @@ async function findOwnerSessionMetaOffset(
     return undefined;
   });
   return ownerOffset;
+}
+
+/**
+ * Locate the end of a fork/resume/subagent rollout's copied-history prefix.
+ *
+ * Codex spawns (subagent) and Desktop resume/fork produce a new rollout that
+ * begins with a verbatim copy of the ancestor's history, then appends the
+ * child's own `thread_settings_applied` marker before any real new turn (see
+ * codex-rs `record_initial_history`, ForkPersistence::Copied). The copied
+ * region therefore spans from file start up to the first
+ * `event_msg/thread_settings_applied`. Emitting it re-reports the ancestor's
+ * events (colliding event.id) or, after the owner-session fix, spawns ghost
+ * turns; either way it must be dropped.
+ *
+ * Returns the end offset of that first `thread_settings_applied` (i.e. the
+ * offset where the child's own content begins), but only when a foreign
+ * session_meta (id != owner) was observed before it — the positive signal that
+ * a copied prefix actually exists. Returns null when there is no copied prefix
+ * or no boundary marker is found within the byte budget, so callers fail open
+ * (skip nothing) rather than risk dropping real data.
+ */
+async function findCopiedPrefixEndOffset(
+  filePath: string,
+  ownerThreadId: string,
+  endOffset: number,
+): Promise<number | null> {
+  const scanEnd = Math.min(endOffset, MAX_SCAN_BYTES_PER_FILE_CYCLE);
+  let sawForeignMeta = false;
+  let boundaryEndOffset: number | null = null;
+  await scanJsonLines(filePath, 0, scanEnd, line => {
+    const payload = asRecord(line.record.payload);
+    if (line.record.type === 'session_meta') {
+      const metaId = payload ? stringValue(payload.id) : undefined;
+      if (metaId && ownerThreadId && metaId !== ownerThreadId) sawForeignMeta = true;
+      return undefined;
+    }
+    if (line.record.type === 'event_msg' && payload?.type === 'thread_settings_applied') {
+      // The first settings marker delimits the copied prefix. A mid-stream
+      // settings change (a later marker) is in real content and must not match,
+      // so stop the scan here.
+      if (sawForeignMeta) boundaryEndOffset = line.endOffset;
+      return false;
+    }
+    return undefined;
+  });
+  return boundaryEndOffset;
 }
 
 function selectOwnerSessionMetaOffset(

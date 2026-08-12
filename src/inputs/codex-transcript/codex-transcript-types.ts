@@ -117,6 +117,8 @@ export interface CodexTranscriptMeta {
   rootSessionId: string;
   threadSource: 'user' | 'subagent' | 'unknown';
   parentThreadId?: string;
+  /** Top-level session_meta.forked_from_id — fork/resume lineage marker. */
+  forkedFromId?: string;
   depth: number;
   createdAtMs?: number;
   agentPath?: string;

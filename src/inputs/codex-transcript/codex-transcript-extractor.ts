@@ -23,6 +23,12 @@ export function extractCodexTranscriptMeta(record: Record<string, unknown>): Cod
   const subagent = asRecord(source?.subagent);
   const threadSpawn = asRecord(subagent?.thread_spawn);
   const parentThreadId = stringValue(threadSpawn?.parent_thread_id);
+  // First-party fork/resume lineage marker written at the top-level of the
+  // session_meta payload. Present for both subagent spawns and Desktop
+  // resume/fork, and is the most reliable trigger for "this file begins with a
+  // copied ancestor-history prefix". Subagent copies also expose
+  // parent_thread_id via thread_spawn; user resume/fork exposes only this.
+  const forkedFromId = stringValue(payload.forked_from_id);
   const agentPath = stringValue(threadSpawn?.agent_path);
   const agentNickname = stringValue(threadSpawn?.agent_nickname);
   const agentRole = stringValue(threadSpawn?.agent_role);
@@ -46,6 +52,7 @@ export function extractCodexTranscriptMeta(record: Record<string, unknown>): Cod
     rootSessionId: stringValue(payload.session_id) ?? threadId,
     threadSource,
     ...(parentThreadId ? { parentThreadId } : {}),
+    ...(forkedFromId ? { forkedFromId } : {}),
     depth,
     ...(Number.isFinite(createdAtMs) ? { createdAtMs } : {}),
     ...(agentPath ? { agentPath } : {}),
