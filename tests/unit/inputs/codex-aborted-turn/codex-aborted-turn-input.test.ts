@@ -69,10 +69,16 @@ describe('CodexAbortedTurnInput', () => {
     ));
     await input.stop();
 
-    const response = entries.find(entry => entry['event.name'] === 'llm.response');
+    const response = entries.find(entry => (
+      entry['event.name'] === 'llm.response'
+      && entry['gen_ai.response.finish_reasons']?.includes('cancelled')
+    ));
     expect(response).toMatchObject({
       'gen_ai.response.model': 'gpt-5.4-mini',
       'agent.codex.cwd': '/tmp/project',
+      'agent.codex.turn_status': 'interrupted',
+      'gen_ai.response.finish_reasons': ['cancelled'],
+      'gen_ai.turn.end': true,
     });
   });
 

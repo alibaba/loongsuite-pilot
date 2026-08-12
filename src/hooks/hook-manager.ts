@@ -524,6 +524,23 @@ export class HookManager {
     ];
   }
 
+  /** Build the dedicated QwenWorkCN Stop hook definition. */
+  static buildQwenWorkCNHooks(loongsuitePilotDir?: string): HookDefinition[] {
+    const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
+    const command = wrapHookCommand(`${baseDir}/hooks/qwenworkcn-loongsuite-pilot-hook${hookExt}`);
+    return [
+      {
+        agentId: 'qwen-work-cn',
+        settingsPath: resolveHome('~/.qwenworkcn/settings.json'),
+        hookJsonPath: ['hooks', 'Stop'],
+        hookCommand: command,
+        matcher: '*',
+        useNestedFormat: true,
+        shell: isWin ? 'powershell' : undefined,
+      },
+    ];
+  }
+
   /**
    * @deprecated Use buildQoderCliHooks() instead.
    */

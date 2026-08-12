@@ -29,21 +29,35 @@ function Get-NodeVersionSortKey {
 }
 
 function Resolve-NodeBin {
-    $pinFile = Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
-    if (Test-Path $pinFile) {
-        $pinned = (Get-Content $pinFile -ErrorAction SilentlyContinue).Trim()
-        if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
+    $pinFiles = @()
+    if ($env:LOONGSUITE_PILOT_CACHE_DIR) {
+        $pinFiles += Join-Path $env:LOONGSUITE_PILOT_CACHE_DIR "node-bin"
+    }
+    if ($env:LOONGSUITE_PILOT_DATA_DIR) {
+        $pinFiles += Join-Path $env:LOONGSUITE_PILOT_DATA_DIR "node-bin"
+    }
+    if ($env:USERPROFILE) {
+        $pinFiles += Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
+    }
+    foreach ($pinFile in $pinFiles) {
+        if (Test-Path $pinFile) {
+            $pinned = (Get-Content $pinFile -ErrorAction SilentlyContinue).Trim()
+            if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
+        }
     }
     $candidates = @()
-    # Managed runtime node (never removed by user node-manager churn) comes first.
-    $runtimeDir = Join-Path (Split-Path $pinFile) "runtime"
-    if (Test-Path $runtimeDir) {
-        $runtimeDirs = Get-ChildItem $runtimeDir -Directory -Filter "node-v*" -ErrorAction SilentlyContinue |
-            Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
-        foreach ($d in $runtimeDirs) {
-            $candidates += Join-Path $d.FullName "bin\node.exe"
-            # Official Node.js win zip layout: node.exe at the root.
-            $candidates += Join-Path $d.FullName "node.exe"
+    # Managed runtime node (never removed by user node-manager churn) comes
+    # first, preserving the custom cache/data/default pin-file priority.
+    foreach ($pinFile in $pinFiles) {
+        $runtimeDir = Join-Path (Split-Path $pinFile) "runtime"
+        if (Test-Path $runtimeDir) {
+            $runtimeDirs = Get-ChildItem $runtimeDir -Directory -Filter "node-v*" -ErrorAction SilentlyContinue |
+                Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
+            foreach ($d in $runtimeDirs) {
+                $candidates += Join-Path $d.FullName "bin\node.exe"
+                # Official Node.js win zip layout: node.exe at the root.
+                $candidates += Join-Path $d.FullName "node.exe"
+            }
         }
     }
     $nvmHome = $env:NVM_HOME
@@ -52,13 +66,15 @@ function Resolve-NodeBin {
             Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
         foreach ($d in $nvmDirs) { $candidates += Join-Path $d.FullName "node.exe" }
     }
-    $fnmDir = Join-Path $env:USERPROFILE ".fnm\node-versions"
-    if (Test-Path $fnmDir) {
-        $fnmDirs = Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue |
-            Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
-        foreach ($d in $fnmDirs) { $candidates += Join-Path $d.FullName "installation\node.exe" }
+    if ($env:USERPROFILE) {
+        $fnmDir = Join-Path $env:USERPROFILE ".fnm\node-versions"
+        if (Test-Path $fnmDir) {
+            $fnmDirs = Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue |
+                Sort-Object @{Expression={ Get-NodeVersionSortKey $_.Name }} -Descending
+            foreach ($d in $fnmDirs) { $candidates += Join-Path $d.FullName "installation\node.exe" }
+        }
+        $candidates += Join-Path $env:USERPROFILE ".volta\bin\node.exe"
     }
-    $candidates += Join-Path $env:USERPROFILE ".volta\bin\node.exe"
     $candidates += "C:\Program Files\nodejs\node.exe"
     $candidates += "C:\Program Files (x86)\nodejs\node.exe"
     $pathNode = Get-Command node -ErrorAction SilentlyContinue

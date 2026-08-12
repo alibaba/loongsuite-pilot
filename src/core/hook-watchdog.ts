@@ -63,6 +63,14 @@ export interface InterceptCheckTarget {
   cleanup?: () => Promise<void>;
 }
 
+export interface MacRuntimeInterceptDefinition {
+  id: string;
+  envName: string;
+  plistLabel: string;
+  agentIds: string[];
+  appNames: string[];
+}
+
 /**
  * Remove a marker-delimited block (inclusive of the BEGIN/END marker lines)
  * from rc-file content. Any line containing `begin` starts the cut and any
@@ -553,79 +561,84 @@ export class HookWatchdog {
     const targets: InterceptCheckTarget[] = [];
     const home = os.homedir();
 
-    // ── qoderwork-env: launchctl env + LaunchAgent plist (macOS only) ──
+    // ── QoderWork-family launchctl env + LaunchAgent plists (macOS only) ──
     if (process.platform === 'darwin') {
       const wrapperPath = path.join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs');
-      const plistPath = path.join(home, 'Library', 'LaunchAgents', 'com.loongsuite-pilot.qoderwork-env.plist');
-      const plistLabel = 'com.loongsuite-pilot.qoderwork-env';
+      for (const def of HookWatchdog.macRuntimeInterceptDefs()) {
+        const plistPath = path.join(home, 'Library', 'LaunchAgents', `${def.plistLabel}.plist`);
+        const appPaths = def.appNames.flatMap(appName => [
+          path.join('/Applications', appName),
+          path.join(home, 'Applications', appName),
+        ]);
 
-      targets.push({
-        id: 'qoderwork-env',
-        enabled: () => isAgentEnabled('qoder-work'),
-        precondition: async () => {
-          if (!await fileExists(wrapperPath)) return false;
-          const sysApp = await directoryExists('/Applications/QoderWork.app');
-          const userApp = await directoryExists(path.join(home, 'Applications', 'QoderWork.app'));
-          return sysApp || userApp;
-        },
-        check: async () => {
-          try {
-            const { stdout } = await execFileAsync('launchctl', ['getenv', 'QODER_WORKER_RUNTIME_PATH']);
-            if (stdout.trim() !== wrapperPath) return false;
-            // Also verify plist exists — without it, env is lost on reboot.
-            return fileExists(plistPath);
-          } catch {
-            return false;
-          }
-        },
-        repair: async () => {
-          await execFileAsync('launchctl', ['setenv', 'QODER_WORKER_RUNTIME_PATH', wrapperPath]);
-          const plistContent = [
-            '<?xml version="1.0" encoding="UTF-8"?>',
-            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-            '<plist version="1.0">',
-            '<dict>',
-            '    <key>Label</key>',
-            `    <string>${plistLabel}</string>`,
-            '    <key>ProgramArguments</key>',
-            '    <array>',
-            '        <string>/bin/launchctl</string>',
-            '        <string>setenv</string>',
-            '        <string>QODER_WORKER_RUNTIME_PATH</string>',
-            `        <string>${wrapperPath}</string>`,
-            '    </array>',
-            '    <key>RunAtLoad</key>',
-            '    <true/>',
-            '</dict>',
-            '</plist>',
-            '',
-          ].join('\n');
-          await fs.mkdir(path.dirname(plistPath), { recursive: true });
-          await fs.writeFile(plistPath, plistContent);
-          // NOTE: launchctl load/unload is deprecated since macOS 10.11 in
-          // favour of `launchctl bootstrap/bootout gui/<uid>`. We keep
-          // load/unload for now because it still works reliably across all
-          // supported macOS versions and avoids the uid lookup complexity.
-          await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
-          await execFileAsync('launchctl', ['load', plistPath]).catch(() => {});
-        },
-        cleanup: async () => {
-          // Mirror installer remove_qoderwork_runtime_wrapper: drop the env only
-          // if it still points at our wrapper, and remove the LaunchAgent plist.
-          try {
-            const { stdout } = await execFileAsync('launchctl', ['getenv', 'QODER_WORKER_RUNTIME_PATH']);
-            if (stdout.trim() === wrapperPath) {
-              await execFileAsync('launchctl', ['unsetenv', 'QODER_WORKER_RUNTIME_PATH']).catch(() => {});
+        targets.push({
+          id: def.id,
+          enabled: () => def.agentIds.some(agentId => isAgentEnabled(agentId)),
+          precondition: async () => {
+            if (!await fileExists(wrapperPath)) return false;
+            for (const appPath of appPaths) {
+              if (await directoryExists(appPath)) return true;
             }
-          } catch {
-            // getenv fails when unset — nothing to drop.
-          }
-          if (await fileExists(plistPath)) {
+            return false;
+          },
+          check: async () => {
+            try {
+              const { stdout } = await execFileAsync('launchctl', ['getenv', def.envName]);
+              if (stdout.trim() !== wrapperPath) return false;
+              // Also verify plist exists — without it, env is lost on reboot.
+              return fileExists(plistPath);
+            } catch {
+              return false;
+            }
+          },
+          repair: async () => {
+            await execFileAsync('launchctl', ['setenv', def.envName, wrapperPath]);
+            const plistContent = [
+              '<?xml version="1.0" encoding="UTF-8"?>',
+              '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+              '<plist version="1.0">',
+              '<dict>',
+              '    <key>Label</key>',
+              `    <string>${def.plistLabel}</string>`,
+              '    <key>ProgramArguments</key>',
+              '    <array>',
+              '        <string>/bin/launchctl</string>',
+              '        <string>setenv</string>',
+              `        <string>${def.envName}</string>`,
+              `        <string>${wrapperPath}</string>`,
+              '    </array>',
+              '    <key>RunAtLoad</key>',
+              '    <true/>',
+              '</dict>',
+              '</plist>',
+              '',
+            ].join('\n');
+            await fs.mkdir(path.dirname(plistPath), { recursive: true });
+            await fs.writeFile(plistPath, plistContent);
+            // NOTE: launchctl load/unload is deprecated since macOS 10.11 in
+            // favour of `launchctl bootstrap/bootout gui/<uid>`. We keep
+            // load/unload for now because it still works reliably across all
+            // supported macOS versions and avoids the uid lookup complexity.
             await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
-            await fs.rm(plistPath, { force: true }).catch(() => {});
-          }
-        },
-      });
+            await execFileAsync('launchctl', ['load', plistPath]).catch(() => {});
+          },
+          cleanup: async () => {
+            // Each product-specific target only removes its own env/plist.
+            try {
+              const { stdout } = await execFileAsync('launchctl', ['getenv', def.envName]);
+              if (stdout.trim() === wrapperPath) {
+                await execFileAsync('launchctl', ['unsetenv', def.envName]).catch(() => {});
+              }
+            } catch {
+              // getenv fails when unset — nothing to drop.
+            }
+            if (await fileExists(plistPath)) {
+              await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
+              await fs.rm(plistPath, { force: true }).catch(() => {});
+            }
+          },
+        });
+      }
     }
 
     // ── Shell rc intercept targets (qodercli + claude-code) ──
@@ -701,5 +714,25 @@ export class HookWatchdog {
     }
 
     return targets;
+  }
+
+  /** Keep the watchdog's product/env/app mapping aligned with the installer. */
+  static macRuntimeInterceptDefs(): MacRuntimeInterceptDefinition[] {
+    return [
+      {
+        id: 'qoderwork-env',
+        envName: 'QODER_WORKER_RUNTIME_PATH',
+        plistLabel: 'com.loongsuite-pilot.qoderwork-env',
+        agentIds: ['qoder-work', 'qoder-work-cn'],
+        appNames: ['QoderWork.app', 'QoderWork CN.app', 'QoderWorkCN.app'],
+      },
+      {
+        id: 'qwenworkcn-env',
+        envName: 'QW_QODER_WORKER_RUNTIME_PATH',
+        plistLabel: 'com.loongsuite-pilot.qwenworkcn-env',
+        agentIds: ['qwen-work-cn'],
+        appNames: ['QwenWorkCN.app'],
+      },
+    ];
   }
 }

@@ -101,12 +101,23 @@ if [[ -z "$NODE_BIN" ]]; then
   # prefer node-v22.9.0 over node-v22.22.2.
   candidates=()
   runtime_dir="$(dirname "$NODE_PIN_FILE")/runtime"
-  while IFS= read -r d; do
-    [[ -n "$d" ]] && candidates+=("$d/bin/node")
-  done < <(for d in "$runtime_dir"/node-v*; do [[ -d "$d" ]] && printf '%s\n' "$d"; done | sort_version_dirs_desc)
-  while IFS= read -r d; do
-    [[ -n "$d" ]] && candidates+=("$d/bin/node")
-  done < <(for d in "$HOME/.nvm/versions/node"/*; do [[ -d "$d" ]] && printf '%s\n' "$d"; done | sort_version_dirs_desc)
+  # Appends "<dir>/bin/node" for each newline-separated dir in $1, newest first.
+  # Herestring rather than `done < <(...)`: agents inject this hook as a bare path,
+  # so the interpreter is up to each runtime, and `sh <script>` bypasses the shebang.
+  # macOS /bin/sh is bash in POSIX mode, which rejects process substitution but still
+  # accepts <<<. A pipe would run candidates+= in a subshell and lose it.
+  # The list arrives as an argument so a non-zero glob/pipeline status cannot leak
+  # into `set -e`, and the empty case returns early because <<<"" still yields one
+  # blank line.
+  add_node_bin_candidates() {
+    local list="$1" d
+    [[ -n "$list" ]] || return 0
+    while IFS= read -r d; do
+      if [[ -n "$d" ]]; then candidates+=("$d/bin/node"); fi
+    done <<<"$list"
+  }
+  add_node_bin_candidates "$(for d in "$runtime_dir"/node-v*; do [[ -d "$d" ]] && printf '%s\n' "$d"; done | sort_version_dirs_desc)"
+  add_node_bin_candidates "$(for d in "$HOME/.nvm/versions/node"/*; do [[ -d "$d" ]] && printf '%s\n' "$d"; done | sort_version_dirs_desc)"
   candidates+=(
     "$HOME/.volta/bin/node"
     "$HOME/.fnm/aliases/default/bin/node"

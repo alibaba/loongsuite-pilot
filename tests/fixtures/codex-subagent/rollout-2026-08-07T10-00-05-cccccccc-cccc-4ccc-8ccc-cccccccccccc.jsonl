@@ -1,0 +1,11 @@
+{"timestamp":"2026-08-07T02:00:05.100Z","type":"session_meta","payload":{"id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","session_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","timestamp":"2026-08-07T02:00:05.100Z","cwd":"/tmp/codex-subagent-fixture","originator":"Codex Desktop","source":{"subagent":{"thread_spawn":{"parent_thread_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","depth":1,"agent_path":"/root/fixture_child_2","agent_nickname":"FixtureChild2","agent_role":null}}},"thread_source":"subagent","model_provider":"openai","multi_agent_version":"v2"}}
+{"timestamp":"2026-08-07T02:00:00.000Z","type":"session_meta","payload":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","session_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","thread_source":"user","model_provider":"openai"}}
+{"timestamp":"2026-08-07T02:00:01.000Z","type":"turn_context","payload":{"turn_id":"parent-turn-1","model":"gpt-test"}}
+{"timestamp":"2026-08-07T02:00:02.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"parent-turn-1"}}
+{"timestamp":"2026-08-07T02:00:07.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"parent-turn-1","last_agent_message":"delegated"}}
+{"timestamp":"2026-08-07T02:00:13.000Z","type":"turn_context","payload":{"turn_id":"child-turn-2","model":"gpt-test"}}
+{"timestamp":"2026-08-07T02:00:14.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"child-turn-2"}}
+{"timestamp":"2026-08-07T02:00:15.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic child task 2"}]}}
+{"timestamp":"2026-08-07T02:00:16.000Z","type":"event_msg","payload":{"type":"agent_message","message":"synthetic child response 2","phase":"final"}}
+{"timestamp":"2026-08-07T02:00:16.100Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":81,"output_tokens":8,"cached_input_tokens":0,"total_tokens":89}}}}
+{"timestamp":"2026-08-07T02:00:17.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"child-turn-2","last_agent_message":"synthetic child response 2"}}

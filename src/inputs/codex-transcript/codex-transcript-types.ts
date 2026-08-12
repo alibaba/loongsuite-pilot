@@ -34,6 +34,42 @@ export interface CodexActiveTranscriptTurn {
   emittedToolCallIds?: string[];
   emittedToolResultIds?: string[];
   inputContext?: CodexTranscriptInputContext;
+  /** Direct spawn_agent calls already observed while this parent turn streamed. */
+  subagentSpawns?: CodexPendingFusionChild[];
+}
+
+export interface CodexPendingFusionChild {
+  parentToolCallId: string;
+  parentTraceId: string;
+  spawnedAtMs: number;
+  taskName?: string;
+  agentPath?: string;
+  childThreadId?: string;
+}
+
+/** Parent task_complete staged until the current cycle rebuilds or degrades its direct children. */
+export interface CodexPendingFusionTurn {
+  turnId: string;
+  parentThreadId: string;
+  parentTraceId: string;
+  terminalEndOffset: number;
+  children: CodexPendingFusionChild[];
+}
+
+/**
+ * Completed child turn consumed from its rollout but not emitted independently.
+ * The active-turn snapshot lets fusion reconstruct it after the child scan
+ * offset advances or the collector restarts.
+ */
+export interface CodexPendingSubagentTurn {
+  turnId: string;
+  parentThreadId: string;
+  parentTurnId: string;
+  parentTraceId: string;
+  parentToolCallId: string;
+  confidence: 'explicit_id' | 'agent_path';
+  terminalEndOffset: number;
+  activeTurn: CodexActiveTranscriptTurn;
 }
 
 /**
@@ -55,7 +91,16 @@ export interface CodexTranscriptCheckpoint {
   scanOffset: number;
   activeTurn: CodexActiveTranscriptTurn | null;
   pendingTerminal: CodexPendingTerminalTurn | null;
-  latestSessionMetaOffset: number | null;
+  pendingFusion: CodexPendingFusionTurn | null;
+  pendingSubagent: CodexPendingSubagentTurn | null;
+  /**
+   * Offset of the session_meta that describes this rollout file itself.
+   *
+   * Forked Codex rollouts can contain multiple session_meta records: the
+   * child's own meta followed by copied parent history. Keeping the latest
+   * meta therefore misattributes child turns to the parent session.
+   */
+  ownerSessionMetaOffset: number | null;
   /** Terminal turns already processed by this transcript, including empty control turns. */
   emittedTerminalTurnIds: string[];
 }
@@ -66,7 +111,17 @@ export interface CodexTranscriptGlobalState {
 }
 
 export interface CodexTranscriptMeta {
-  sessionId: string;
+  /** The Codex thread/rollout described by this session_meta record. */
+  threadId: string;
+  /** Root user session shared by a subagent tree when Codex supplies it. */
+  rootSessionId: string;
+  threadSource: 'user' | 'subagent' | 'unknown';
+  parentThreadId?: string;
+  depth: number;
+  createdAtMs?: number;
+  agentPath?: string;
+  agentNickname?: string;
+  agentRole?: string;
   provider: string;
   baseInstructions?: string;
   toolDefinitions?: JsonValue;

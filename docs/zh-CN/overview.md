@@ -25,8 +25,11 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Claude Code | Hook | Yes | Yes | Yes | Yes |
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
-| Kiro CLI | Hook / 本地 session 轮询 | Yes | Yes | No | Yes |
+| Cursor CLI | 复用 Cursor Hook | Yes | Yes | Yes | Yes |
 | Hermes Agent | 原生目录插件 | Yes | Yes | Yes | Yes |
+| Kiro CLI | Hook / 本地 session 轮询 | Yes | Yes | No | Yes |
+| MiMo Code | 插件注入 | Yes | Yes | Yes | Yes |
+| OpenClaw | 插件注入 | Yes | Yes | Yes | Yes |
 | OpenCode | 插件注入 | Yes | Yes | Yes | Yes |
 | Pi Coding Agent | Extension 注入 | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
@@ -38,6 +41,8 @@ LoongSuite Pilot 运行在开发者本机，用于采集支持的 AI Coding Agen
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
 | Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
+
+OpenClaw 集成要求 OpenClaw 2026.5.12 或更高版本。
 
 ### Windows Agent 明确支持情况
 

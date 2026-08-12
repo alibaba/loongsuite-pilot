@@ -19,7 +19,8 @@ export type AlarmType =
   | 'DEGRADED_STARTUP_ALARM'
   | 'UPDATER_NOT_RUNNING_ALARM'
   | 'BROKEN_VERSION_POINTER_ALARM'
-  | 'INVALID_NODE_BIN_ALARM';
+  | 'INVALID_NODE_BIN_ALARM'
+  | 'UPDATER_NODE_PIN_ALARM';
 
 export interface AlarmContext {
   input_name?: string;
