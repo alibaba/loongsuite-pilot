@@ -19,6 +19,9 @@ import {
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 import {
+  CODEX_HOOK_EVENT_KEYS,
+  type InstalledCodexCommandHandler,
+  type InstalledCodexHookLocation,
   writeTrustedHashes,
   removeTrustBlock,
   verifyTrustHashes,
@@ -156,23 +159,21 @@ export class HookStrategy implements DeployStrategy {
   private async needsTrustRepairForCodex(def: AgentDefinition): Promise<boolean> {
     const cfg = def.hook?.trustToml;
     if (!cfg || !def.hook) return false;
-
-    const hookCommand = resolveHome(def.hook.hookCommand);
-    const eventToCommand: Record<string, string> = {};
-    for (const event of def.hook.events) {
-      eventToCommand[event] = formatHookCommand(
-        hookCommand, event, def.hook.eventSubcommand, def.id,
-      );
+    try {
+      const locations = await this.resolveInstalledCodexHooks(def);
+      return !verifyTrustHashes({
+        configPath: resolveHome(cfg.configPath),
+        hooksJsonAbsPath: path.resolve(resolveHome(def.hook.settingsPath)),
+        locations,
+        marker: cfg.marker,
+      }).valid;
+    } catch (err) {
+      logger.warn('could not resolve installed Codex hooks for trust verification', {
+        agentId: def.id,
+        error: String(err),
+      });
+      return true;
     }
-    const eventToGroupIndex = await this.resolveGroupIndices(def);
-    return !verifyTrustHashes({
-      configPath: resolveHome(cfg.configPath),
-      hooksJsonAbsPath: path.resolve(resolveHome(def.hook.settingsPath)),
-      hookEvents: def.hook.events,
-      eventToCommand,
-      eventToGroupIndex,
-      marker: cfg.marker,
-    }).valid;
   }
 
   async deploy(def: AgentDefinition): Promise<DeployResult> {
@@ -288,25 +289,12 @@ export class HookStrategy implements DeployStrategy {
     const cfg = def.hook!.trustToml!;
     const configPath = resolveHome(cfg.configPath);
     const hooksJsonAbsPath = path.resolve(resolveHome(def.hook!.settingsPath));
-    const hookCommand = resolveHome(def.hook!.hookCommand);
+    const locations = await this.resolveInstalledCodexHooks(def);
 
-    // 构建 event → 实际写入 hooks.json 的完整 command(与 buildHookDefinitions 一致)
-    const eventToCmd: Record<string, string> = {};
-    for (const ev of def.hook!.events) {
-      eventToCmd[ev] = formatHookCommand(hookCommand, ev, def.hook!.eventSubcommand, def.id);
-    }
-
-    // 回读 hooks.json,算出每个 event 中 pilot hook 的实际 group index。
-    // 当其他第三方 hook(如 r2c)排在前面时,pilot 的 hook 会被 push 到后面的位置。
-    // trust hash 的 key 必须用实际 index,否则 codex 端校验失败(静默 Untrusted)。
-    const eventToGroupIndex = await this.resolveGroupIndices(def);
-
-    writeTrustedHashes({
+    const changed = writeTrustedHashes({
       configPath,
       hooksJsonAbsPath,
-      hookEvents: def.hook!.events,
-      eventToCommand: eventToCmd,
-      eventToGroupIndex,
+      locations,
       marker: cfg.marker,
       forceBypass: process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS === '1',
     });
@@ -318,9 +306,7 @@ export class HookStrategy implements DeployStrategy {
     const verify = verifyTrustHashes({
       configPath,
       hooksJsonAbsPath,
-      hookEvents: def.hook!.events,
-      eventToCommand: eventToCmd,
-      eventToGroupIndex,
+      locations,
       marker: cfg.marker,
     });
     if (!verify.valid) {
@@ -329,7 +315,7 @@ export class HookStrategy implements DeployStrategy {
         mismatches: verify.mismatches,
       });
     } else {
-      logger.info('codex trust hash verified', { agentId: def.id });
+      logger.info('codex trust block self-check passed', { agentId: def.id, changed });
     }
   }
 
@@ -364,45 +350,69 @@ export class HookStrategy implements DeployStrategy {
     return allOk;
   }
 
-  /**
-   * 回读 hooks.json,找到 pilot hook command 在每个 event 数组中的实际 group index。
-   * 支持 nested format({hooks:[{command}]}) 和 flat format({command})两种结构。
-   */
-  private async resolveGroupIndices(def: AgentDefinition): Promise<Record<string, number>> {
-    const result: Record<string, number> = {};
+  /** Resolve each exact installed Pilot handler. Ambiguity is unsafe for trust. */
+  private async resolveInstalledCodexHooks(
+    def: AgentDefinition,
+  ): Promise<Record<string, InstalledCodexHookLocation>> {
+    const result: Record<string, InstalledCodexHookLocation> = {};
     const hookCommand = resolveHome(def.hook!.hookCommand);
-
-    try {
-      const settings = await readJsonFile<Record<string, unknown>>(def.hook!.settingsPath);
-      const hooks = (settings as any)?.hooks;
-      if (!hooks || typeof hooks !== 'object') {
-        return result;
-      }
-
-      for (const event of def.hook!.events) {
-        const arr = hooks[event];
-        if (!Array.isArray(arr)) continue;
-        const cmd = formatHookCommand(hookCommand, event, def.hook!.eventSubcommand, def.id);
-        for (let i = 0; i < arr.length; i++) {
-          const entry = arr[i];
-          // nested: {hooks: [{command}]}
-          if (Array.isArray(entry?.hooks)) {
-            if (entry.hooks.some((h: any) => h.command === cmd)) {
-              result[event] = i;
-              break;
-            }
-          }
-          // flat: {command}
-          if (entry?.command === cmd) {
-            result[event] = i;
-            break;
-          }
-        }
-      }
-    } catch {
-      // 读取失败时 fallback 全 0(首次安装、无其他 hook 时是对的)
+    const settingsPath = resolveHome(def.hook!.settingsPath);
+    const settings = await readJsonFile<Record<string, unknown>>(settingsPath);
+    const hooks = (settings as { hooks?: Record<string, unknown> } | null)?.hooks;
+    if (!hooks || typeof hooks !== 'object') {
+      throw new Error(`installed hooks object missing: ${settingsPath}`);
     }
 
+    for (const eventName of def.hook!.events) {
+      const eventKey = CODEX_HOOK_EVENT_KEYS[eventName];
+      if (!eventKey) throw new Error(`Unknown hook event: ${eventName}`);
+      const groups = hooks[eventName];
+      if (!Array.isArray(groups)) throw new Error(`installed hook event missing: ${eventName}`);
+      const command = formatHookCommand(
+        hookCommand, eventName, def.hook!.eventSubcommand, def.id,
+      );
+      const matches: InstalledCodexHookLocation[] = [];
+      groups.forEach((rawGroup, groupIndex) => {
+        if (!rawGroup || typeof rawGroup !== 'object') return;
+        const group = rawGroup as Record<string, unknown>;
+        const handlers = Array.isArray(group.hooks) ? group.hooks : [group];
+        handlers.forEach((rawHandler, handlerIndex) => {
+          if (!rawHandler || typeof rawHandler !== 'object') return;
+          const handler = rawHandler as Record<string, unknown>;
+          if (handler.command !== command) return;
+          if (handler.type !== undefined && handler.type !== 'command') return;
+          const installed: InstalledCodexCommandHandler = {
+            type: 'command',
+            command,
+            ...(typeof handler.commandWindows === 'string'
+              ? { commandWindows: handler.commandWindows }
+              : typeof handler.command_windows === 'string'
+                ? { commandWindows: handler.command_windows }
+                : {}),
+            ...(typeof handler.timeout === 'number' ? { timeout: handler.timeout } : {}),
+            ...(typeof handler.async === 'boolean' ? { async: handler.async } : {}),
+            ...(typeof handler.statusMessage === 'string' ? { statusMessage: handler.statusMessage } : {}),
+            ...(typeof handler.additionalContextLimit === 'number'
+              ? { additionalContextLimit: handler.additionalContextLimit }
+              : {}),
+          };
+          matches.push({
+            eventName,
+            eventKey,
+            groupIndex,
+            handlerIndex: Array.isArray(group.hooks) ? handlerIndex : 0,
+            ...(typeof group.matcher === 'string' ? { matcher: group.matcher } : {}),
+            handler: installed,
+          });
+        });
+      });
+      if (matches.length !== 1) {
+        throw new Error(
+          `expected exactly one installed Pilot handler for ${eventName}; found ${matches.length}`,
+        );
+      }
+      result[eventName] = matches[0]!;
+    }
     return result;
   }
 

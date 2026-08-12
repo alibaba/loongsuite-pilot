@@ -4,7 +4,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   computeHookTrustHash,
+  computeInstalledHookTrustHash,
   hookStateKey,
+  installedHookStateKey,
+  type InstalledCodexHookLocation,
   writeTrustedHashes,
   removeTrustBlock,
   verifyTrustHashes,
@@ -56,6 +59,75 @@ describe('codex-trust-writer 算法', () => {
 
   test('未知 event 抛错', () => {
     expect(() => computeHookTrustHash('Unknown', 'cmd')).toThrow(/Unknown hook event/);
+  });
+
+  test('matches Codex hashes for installed matcher-sensitive Pilot hooks', () => {
+    const command = '/Users/yunshen/.loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.sh';
+    expect(computeHookTrustHash('SessionStart', `${command} session-start`, '*')).toBe(
+      'sha256:474a9671344eabd67eeda6fc6dc5c152e22ee474e067ff28885da1230e334512',
+    );
+    expect(computeHookTrustHash('SubagentStart', `${command} subagent-start`, '*')).toBe(
+      'sha256:b35e26cd3fd1c65960cbb8a5b62720743729d447b720a62f4a78bf2bf19edcde',
+    );
+    expect(computeHookTrustHash('SubagentStop', `${command} subagent-stop`, '*')).toBe(
+      'sha256:d7d2dee53aeaca1819c85d2781ef97e6056768187eef9186a1eef8dc3e0dbc91',
+    );
+  });
+
+  test('ignores matcher for UserPromptSubmit and Stop', () => {
+    expect(computeHookTrustHash('UserPromptSubmit', 'cmd', '*')).toBe(
+      computeHookTrustHash('UserPromptSubmit', 'cmd'),
+    );
+    expect(computeHookTrustHash('Stop', 'cmd', '*')).toBe(
+      computeHookTrustHash('Stop', 'cmd'),
+    );
+  });
+
+  test('distinguishes absent, empty, and wildcard matcher for matcher events', () => {
+    const hashes = [
+      computeHookTrustHash('SessionStart', 'cmd'),
+      computeHookTrustHash('SessionStart', 'cmd', ''),
+      computeHookTrustHash('SessionStart', 'cmd', '*'),
+    ];
+    expect(new Set(hashes).size).toBe(3);
+  });
+
+  test('normalizes installed handler fields and uses the real handler index', () => {
+    const base: InstalledCodexHookLocation = {
+      eventName: 'SessionStart',
+      eventKey: 'session_start',
+      groupIndex: 2,
+      handlerIndex: 3,
+      matcher: '*',
+      handler: {
+        type: 'command',
+        command: 'unix-command',
+        commandWindows: 'windows-command',
+        timeout: 0,
+        async: true,
+        statusMessage: 'running',
+        additionalContextLimit: 4_096,
+      },
+    };
+    expect(installedHookStateKey('/abs/hooks.json', base)).toBe(
+      '/abs/hooks.json:session_start:2:3',
+    );
+    expect(computeInstalledHookTrustHash(base, 'linux')).not.toBe(
+      computeInstalledHookTrustHash(base, 'win32'),
+    );
+    expect(computeInstalledHookTrustHash(base, 'linux')).not.toBe(
+      computeInstalledHookTrustHash({
+        ...base,
+        handler: { ...base.handler, statusMessage: undefined },
+      }, 'linux'),
+    );
+    expect(computeInstalledHookTrustHash({
+      ...base,
+      handler: { ...base.handler, additionalContextLimit: 2_500 },
+    }, 'linux')).toBe(computeInstalledHookTrustHash({
+      ...base,
+      handler: { ...base.handler, additionalContextLimit: undefined },
+    }, 'linux'));
   });
 });
 
@@ -304,5 +376,40 @@ describe('writeTrustedHashes / verifyTrustHashes 闭环', () => {
       marker: 'otel-codex-hook',
     });
     expect(result.valid).toBe(true);
+  });
+
+  test('precise installed-key repair preserves third-party state and enabled', () => {
+    const location: InstalledCodexHookLocation = {
+      eventName: 'SubagentStart',
+      eventKey: 'subagent_start',
+      groupIndex: 1,
+      handlerIndex: 1,
+      matcher: '*',
+      handler: { type: 'command', command: 'pilot subagent-start' },
+    };
+    fs.writeFileSync(configPath, [
+      '[hooks.state."/abs/hooks.json:subagent_start:0:0"]',
+      'trusted_hash = "sha256:THIRD_PARTY"',
+      '',
+      '# BEGIN otel-codex-hook trust',
+      '[hooks.state."/abs/hooks.json:subagent_start:1:1"]',
+      'enabled = false',
+      'trusted_hash = "sha256:STALE"',
+      '# END otel-codex-hook trust',
+      '',
+    ].join('\n'));
+    const opts = {
+      configPath,
+      hooksJsonAbsPath: '/abs/hooks.json',
+      locations: { SubagentStart: location },
+      marker: 'otel-codex-hook',
+    };
+
+    expect(writeTrustedHashes(opts)).toBe(true);
+    const repaired = fs.readFileSync(configPath, 'utf8');
+    expect(repaired).toContain('sha256:THIRD_PARTY');
+    expect(repaired).toContain('enabled = false');
+    expect(repaired).not.toContain('sha256:STALE');
+    expect(writeTrustedHashes(opts)).toBe(false);
   });
 });

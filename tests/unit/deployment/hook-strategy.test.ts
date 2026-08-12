@@ -33,6 +33,14 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
 }));
 
 vi.mock('../../../src/deployment/codex-trust-writer.js', () => ({
+  CODEX_HOOK_EVENT_KEYS: {
+    SessionStart: 'session_start',
+    UserPromptSubmit: 'user_prompt_submit',
+    SubagentStart: 'subagent_start',
+    SubagentStop: 'subagent_stop',
+    Stop: 'stop',
+    PostToolUse: 'post_tool_use',
+  },
   writeTrustedHashes: vi.fn(),
   removeTrustBlock: vi.fn(),
   verifyTrustHashes: vi.fn(() => ({ valid: true, mismatches: [] })),
@@ -134,7 +142,11 @@ describe('HookStrategy', () => {
     });
 
     it('returns true when Codex hook exists but its trust state is invalid', async () => {
-      vi.mocked(readJsonFile).mockResolvedValue({ hooks: {} });
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: {
+          Stop: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh stop' }] }],
+        },
+      });
       vi.mocked(verifyTrustHashes).mockReturnValue({
         valid: false,
         mismatches: ['missing trust state'],
@@ -159,6 +171,86 @@ describe('HookStrategy', () => {
 
       expect(result).toBe(true);
       expect(verifyTrustHashes).toHaveBeenCalledOnce();
+    });
+
+    it('verifies trust with the installed matcher and non-zero group/handler indices', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: {
+          SubagentStart: [
+            { matcher: '*', hooks: [{ type: 'command', command: 'third-party' }] },
+            {
+              matcher: '*',
+              hooks: [
+                { type: 'command', command: 'another-handler' },
+                {
+                  type: 'command',
+                  command: '/opt/pilot/hooks/codex-hook.sh subagent-start',
+                  timeout: 12,
+                  async: true,
+                  statusMessage: 'starting',
+                },
+              ],
+            },
+          ],
+        },
+      });
+      vi.mocked(verifyTrustHashes).mockReturnValue({ valid: true, mismatches: [] });
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+
+      const result = await strategy.needsDeploy(makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['SubagentStart'],
+          hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          trustToml: {
+            configPath: '/home/.codex/config.toml',
+            trustAlgo: 'v1',
+            marker: 'otel-codex-hook',
+          },
+        },
+      }));
+
+      expect(result).toBe(false);
+      expect(verifyTrustHashes).toHaveBeenCalledWith(expect.objectContaining({
+        locations: {
+          SubagentStart: expect.objectContaining({
+            matcher: '*',
+            groupIndex: 1,
+            handlerIndex: 1,
+            handler: expect.objectContaining({ timeout: 12, async: true, statusMessage: 'starting' }),
+          }),
+        },
+      }));
+    });
+
+    it('refuses ambiguous duplicate installed commands instead of trusting index zero', async () => {
+      const command = '/opt/pilot/hooks/codex-hook.sh stop';
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: { Stop: [{ hooks: [{ type: 'command', command }, { type: 'command', command }] }] },
+      });
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+
+      const result = await strategy.needsDeploy(makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          trustToml: {
+            configPath: '/home/.codex/config.toml',
+            trustAlgo: 'v1',
+            marker: 'otel-codex-hook',
+          },
+        },
+      }));
+
+      expect(result).toBe(true);
+      expect(verifyTrustHashes).not.toHaveBeenCalled();
     });
 
     it('builds correct hook definitions from agent config', async () => {
