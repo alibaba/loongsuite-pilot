@@ -33,7 +33,14 @@ function Log-Error {
         $time = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
         $escapedMsg = $Message -replace '\\', '\\\\' -replace '"', '\"'
         $line = "{`"time`":`"$time`",`"gen_ai.agent.type`":`"minimax-code`",`"stage`":`"$Stage`",`"error.type`":`"ps1_$Stage`",`"error.message`":`"$escapedMsg`"}"
-        Add-Content -Path $file -Value $line
+        # Round 15 fix (PR #233, after upstream rebase onto #247): Add-Content
+        # defaults to the system ANSI codepage on Windows PowerShell 5.1, which
+        # mangles non-ASCII (e.g. Chinese user names in $escapedMsg). Pin to
+        # UTF-8 + NoNewline so the JSONL file is byte-exact readable by the
+        # Node processor. Matches the claude-code wrapper's contract; the
+        # ps1-json-encoding.test.mjs (added in #247) now enforces this on
+        # every .ps1 hook asset.
+        Add-Content -Path $file -Value $line -Encoding UTF8 -NoNewline
     } catch {}
 }
 
