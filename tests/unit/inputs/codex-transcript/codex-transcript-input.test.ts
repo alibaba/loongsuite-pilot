@@ -2806,6 +2806,45 @@ describe('CodexTranscriptInput', () => {
       expect(responsesForTurn(entries, 'parent-turn')).toHaveLength(0);
     });
 
+    it('probes across cycles for a copied prefix larger than one scan window', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-copied-big-'));
+      tempDirs.push(root);
+      const { input, entries, sessionDir, stateStore } = await createInput(root);
+      const child = 'cccccccc-4444-4444-8444-444444444444';
+      const ancestor = 'aaaaaaaa-7777-4777-8777-777777777777';
+      // Pad the copied region past one scan window (16 MiB) so the boundary can
+      // only be reached by resuming the probe on a later cycle. Padding uses an
+      // unrecognised event type so it never yields entries by itself.
+      const filler = 'x'.repeat(64 * 1024);
+      const padding: string[] = [];
+      for (let i = 0; i < 280; i++) {
+        padding.push(record('2026-06-01T00:00:20.000Z', 'event_msg', { type: 'copied_padding', filler }));
+      }
+      const text = [
+        record('2026-08-05T10:00:00.000Z', 'session_meta', {
+          id: child, forked_from_id: ancestor, thread_source: 'user', model_provider: 'openai',
+        }),
+        record('2026-06-01T00:00:00.000Z', 'session_meta', { id: ancestor, thread_source: 'user', model_provider: 'openai' }),
+        ...turnBlock('big-ancestor-turn', '2026-06-01T00:00:10.000Z'),
+        ...padding,
+        record('2026-08-05T10:00:05.000Z', 'event_msg', { type: 'thread_settings_applied', thread_settings: { model: 'gpt-5.5' } }),
+        ...turnBlock('big-child-turn', '2026-08-05T10:00:10.000Z'),
+      ].join('\n') + '\n';
+      expect(Buffer.byteLength(text)).toBeGreaterThan(16 * 1024 * 1024);
+      const transcript = await writeTranscriptNamed(sessionDir, `rollout-2026-08-05T10-00-00-${child}.jsonl`, text);
+
+      await waitFor(() => responsesForTurn(entries, 'big-child-turn').length === 1, 15_000);
+      await input.stop();
+
+      expect(responsesForTurn(entries, 'big-child-turn')).toHaveLength(1);
+      expect(responsesForTurn(entries, 'big-ancestor-turn')).toHaveLength(0);
+      // The boundary sits beyond the first window, so collection can only have
+      // started there by carrying probe state across cycles.
+      const checkpoint = transcriptCheckpoint(stateStore, transcript);
+      expect(checkpoint.scanOffset as number).toBeGreaterThan(16 * 1024 * 1024);
+      expect(checkpoint.copiedPrefixProbe).toMatchObject({ settled: true, sawForeignMeta: true });
+    }, 30_000);
+
     it('does not skip a normal user session that has no copied prefix', async () => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-normal-'));
       tempDirs.push(root);
