@@ -199,7 +199,7 @@ export interface MultimodalRuntimeConfig {
  * config.json `agents.<id>` keys with multimodal extraction implemented.
  * Capability lives in code (not user config); expand as more agents land.
  */
-export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex'] as const;
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder'] as const;
 
 /** Per-agent multimodal policy. uploadMode=none (default) disables. */
 export interface AgentMultimodalConfig {

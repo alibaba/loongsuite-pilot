@@ -24,6 +24,81 @@ export interface SqliteTokenResult {
   matchedDbPath: string | null;
 }
 
+/**
+ * Batch-read user-attached image paths from chat_record.extra.
+ * Keys are request_id; values are local image paths for that request.
+ * DB paths are resolved the same way as token enrichment (not caller-supplied).
+ * Fail-open: query errors are logged and skipped.
+ */
+export async function readAttachedImagePathsForRequestIds(
+  requestIds: string[],
+): Promise<Map<string, string[]>> {
+  const result = new Map<string, string[]>();
+  const unique = [...new Set(requestIds.map(id => id.trim()).filter(Boolean))];
+  if (unique.length === 0) return result;
+
+  const dbPaths = resolveAllQoderDbPaths();
+  if (dbPaths.length === 0) return result;
+
+  const placeholders = unique.map(() => '?').join(', ');
+  const sql = `
+    SELECT request_id AS request_id, extra AS extra
+    FROM chat_record
+    WHERE request_id IN (${placeholders})
+  `;
+
+  for (const dbPath of dbPaths) {
+    let rows: Array<{ request_id: string; extra: string | null }>;
+    try {
+      rows = await queryReadonly(dbPath, sql, unique);
+    } catch (err) {
+      logger.debug('sqlite attachedImagePaths query failed', { dbPath, error: String(err) });
+      continue;
+    }
+    for (const row of rows) {
+      const requestId = row.request_id?.trim();
+      if (!requestId || result.has(requestId)) continue;
+      const paths = parseAttachedImagePaths(row.extra);
+      if (paths.length > 0) result.set(requestId, paths);
+    }
+    if (result.size >= unique.length) break;
+  }
+  return result;
+}
+
+function parseAttachedImagePaths(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const extra = JSON.parse(raw) as Record<string, unknown>;
+
+    const fromField: string[] = [];
+    if (Array.isArray(extra.attachedImagePaths)) {
+      for (const item of extra.attachedImagePaths) {
+        if (typeof item === 'string' && item.trim()) fromField.push(item.trim());
+      }
+    }
+    if (fromField.length > 0) return [...new Set(fromField)];
+
+    // Fallback: context entries marked as image.
+    const fromContext: string[] = [];
+    const context = Array.isArray(extra.context) ? extra.context : [];
+    for (const item of context) {
+      if (!item || typeof item !== 'object') continue;
+      const record = item as Record<string, unknown>;
+      const name = typeof record.name === 'string' ? record.name : '';
+      const fileType = typeof record.fileType === 'string' ? record.fileType : '';
+      if (name !== 'image' && fileType !== 'image') continue;
+      const imgUrl = typeof record.imgUrl === 'string' ? record.imgUrl.trim() : '';
+      const filePath = typeof record.filePath === 'string' ? record.filePath.trim() : '';
+      const candidate = imgUrl || filePath;
+      if (candidate) fromContext.push(candidate);
+    }
+    return [...new Set(fromContext)];
+  } catch {
+    return [];
+  }
+}
+
 export async function readSqliteTokensForSession(sessionId: string): Promise<SqliteTokenResult> {
   const dbPaths = resolveAllQoderDbPaths();
   if (dbPaths.length === 0) return { rows: [], matchedDbPath: null };

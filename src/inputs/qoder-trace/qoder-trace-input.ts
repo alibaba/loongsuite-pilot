@@ -1,7 +1,8 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ClientType, CollectionMethod } from '../../types/index.js';
-import type { AgentActivityEntry } from '../../types/index.js';
+import type { AgentActivityEntry, MultimodalUploadMode } from '../../types/index.js';
+import type { MultimodalProcessor } from '../../multimodal/processor.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
@@ -13,9 +14,16 @@ import { readSegmentTokensForSession } from './segment-token-reader.js';
 import { readSqliteTokensForSession, isIdeaDbPath } from './sqlite-token-reader.js';
 import { readInterceptData, type InterceptData } from './intercept-token-reader.js';
 import { enrichCliTurn, enrichIdeTurn, injectTraceId } from './token-enricher.js';
+import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
 
 export interface QoderTraceInputOptions extends InputOptions {
   logDir?: string;
+  /** Cached multimodal policy; IDE-only extraction when enabled. */
+  multimodal?: {
+    enabled: boolean;
+    uploadMode?: MultimodalUploadMode;
+    processor?: MultimodalProcessor;
+  };
 }
 
 /**
@@ -32,10 +40,16 @@ export class QoderTraceInput extends BaseInput {
 
   private readonly logDir: string;
   private readonly logPrefix = 'qoder';
+  private readonly multimodalEnabled: boolean;
+  private readonly multimodalUploadMode: MultimodalUploadMode;
+  private readonly multimodalProcessor: MultimodalProcessor | null;
 
   constructor(opts: QoderTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder/history');
+    this.multimodalEnabled = opts.multimodal?.enabled === true && !!opts.multimodal.processor;
+    this.multimodalUploadMode = opts.multimodal?.uploadMode ?? 'none';
+    this.multimodalProcessor = opts.multimodal?.processor ?? null;
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -65,6 +79,10 @@ export class QoderTraceInput extends BaseInput {
     } else {
       this.logger.info('history checkpoint initialized before first hook record');
     }
+  }
+
+  protected override async onStop(): Promise<void> {
+    clearAttachedImagePathsCache();
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
@@ -113,6 +131,15 @@ export class QoderTraceInput extends BaseInput {
         for (const entry of sessionEntries) {
           entry['gen_ai.agent.type'] = ClientType.QoderIdea;
         }
+      }
+
+      // IDE-only multimodal: path → base64 → uri. Fail-open; never affects CLI turns.
+      if (this.multimodalEnabled && this.multimodalProcessor) {
+        await enrichIdeMultimodal(sessionEntries, {
+          uploadMode: this.multimodalUploadMode,
+          pathToUri: (filePath, timeUnixMs) =>
+            this.multimodalProcessor!.pathToUri(filePath, timeUnixMs),
+        });
       }
     }
 

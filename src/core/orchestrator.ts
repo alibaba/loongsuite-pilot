@@ -953,9 +953,17 @@ export class Orchestrator extends EventEmitter {
 
     // --- Qoder Trace (multi-source merge, supersedes hook/session/sqlite) ---
     const qoderCliLogDir = path.join(this.dataDir, 'logs', 'qoder', 'history');
+    const qoderAgentCfg = this.config.agents.qoder ?? { captureMessageContent: true };
+    const qoderMultimodalEnabled = !!this.multimodalProcessor
+      && isAgentMultimodalEnabled('qoder', qoderAgentCfg);
     const qoderTraceInput = new QoderTraceInput({
       stateStore: this.stateStore,
       logDir: qoderCliLogDir,
+      multimodal: {
+        enabled: qoderMultimodalEnabled,
+        uploadMode: qoderAgentCfg.multimodal?.uploadMode ?? 'none',
+        ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
+      },
     });
     this.inputManager.registerInput(qoderTraceInput);
     entries.push(

@@ -1,5 +1,5 @@
 import * as path from 'node:path';
-import { MAX_MULTIMODAL_PARTS, type BlobToUriFn } from '../../multimodal/types.js';
+import { MAX_MULTIMODAL_PARTS, type BlobToUriFn, type UriPart } from '../../multimodal/types.js';
 import {
   multimodalUploadIncludesInput,
   multimodalUploadIncludesTool,
@@ -588,7 +588,7 @@ function normalizeToolInput(name: string, value: unknown): JsonValue | undefined
 
 type TranscriptMessagePart =
   | { type: 'text'; content: string }
-  | { type: 'uri'; mime_type: string; modality: 'image'; uri: string };
+  | UriPart;
 
 /**
  * Build GenAI message parts from Codex transcript content blocks.

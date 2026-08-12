@@ -42,12 +42,12 @@ export interface UriResult {
   sha256: string;
 }
 
-/** On-event GenAI uri part. */
+/** On-event GenAI uri part (Codex blob / Qoder path → uri). */
 export interface UriPart {
   type: 'uri';
+  uri: string;
   mime_type?: string;
   modality?: string;
-  uri: string;
 }
 
 /** Summary item for gen_ai.input.multimodal_metadata. */
