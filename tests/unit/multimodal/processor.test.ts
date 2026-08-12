@@ -336,6 +336,62 @@ describe('MultimodalProcessor.pathToUri', () => {
     expect(uploader.items).toHaveLength(1);
   });
 
+  it('rejects new path reads when path inflight queue is full', async () => {
+    vi.resetModules();
+    let releaseReads!: () => void;
+    const holdReads = new Promise<void>(resolve => {
+      releaseReads = resolve;
+    });
+    vi.doMock('../../../src/multimodal/types.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../../../src/multimodal/types.js')>();
+      return { ...actual, MAX_MULTIMODAL_PATH_INFLIGHT: 2 };
+    });
+    vi.doMock('../../../src/multimodal/resolve.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../../../src/multimodal/resolve.js')>();
+      return {
+        ...actual,
+        readImagePathBytes: async (stated: Parameters<typeof actual.readImagePathBytes>[0]) => {
+          await holdReads;
+          return actual.readImagePathBytes(stated);
+        },
+      };
+    });
+    try {
+      const { MultimodalProcessor: ProcessorWithTinyPathBudget } = await import(
+        '../../../src/multimodal/processor.js'
+      );
+      const f1 = writeTempPng('inflight-1.png', 'one');
+      const f2 = writeTempPng('inflight-2.png', 'two');
+      const f3 = writeTempPng('inflight-3.png', 'three');
+      const uploader = new FakeUploader();
+      const processor = new ProcessorWithTinyPathBudget(STORAGE_BASE, uploader);
+
+      const first = processor.pathToUri(f1, EVENT_TIME_MS);
+      const second = processor.pathToUri(f2, EVENT_TIME_MS);
+      // Fill the two slots before the third distinct path is admitted.
+      await Promise.resolve();
+      const overflow = await processor.pathToUri(f3, EVENT_TIME_MS);
+      expect(overflow).toBeNull();
+
+      // Same path as an in-flight read still coalesces (does not consume a new slot).
+      const coalesced = processor.pathToUri(f1, EVENT_TIME_MS);
+
+      releaseReads();
+      const [a, b, c] = await Promise.all([first, second, coalesced]);
+      expect(a?.uri).toBeTruthy();
+      expect(b?.uri).toBeTruthy();
+      expect(c?.uri).toBe(a?.uri);
+
+      await processor.shutdown(1000);
+      expect(uploader.items).toHaveLength(2);
+    } finally {
+      releaseReads();
+      vi.doUnmock('../../../src/multimodal/types.js');
+      vi.doUnmock('../../../src/multimodal/resolve.js');
+      vi.resetModules();
+    }
+  });
+
   it('caches null for missing / non-image paths until eviction', async () => {
     const uploader = new FakeUploader();
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);

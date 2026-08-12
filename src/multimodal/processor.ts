@@ -19,6 +19,7 @@ import type {
 import {
   MAX_MULTIMODAL_BASE64_CHARS,
   MAX_MULTIMODAL_DATA_SIZE,
+  MAX_MULTIMODAL_PATH_INFLIGHT,
   MAX_MULTIMODAL_PENDING_BYTES,
   MAX_MULTIMODAL_PENDING_UPLOADS,
   MULTIMODAL_SHUTDOWN_TIMEOUT_MS,
@@ -77,6 +78,15 @@ export class MultimodalProcessor {
 
     const inflight = this.pathUriInflight.get(key);
     if (inflight) return inflight;
+
+    if (this.pathUriInflight.size >= MAX_MULTIMODAL_PATH_INFLIGHT) {
+      logger.warn('multimodal pathToUri rejected', {
+        reason: 'path_inflight_full',
+        pending: this.pathUriInflight.size,
+        limit: MAX_MULTIMODAL_PATH_INFLIGHT,
+      });
+      return null;
+    }
 
     const pending = (async (): Promise<UriResult | null> => {
       try {
