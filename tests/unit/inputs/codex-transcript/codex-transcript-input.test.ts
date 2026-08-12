@@ -3086,5 +3086,37 @@ describe('Codex transcript multimodal extraction', () => {
     expect(userParts(turn!)).toEqual([{ type: 'text', content: 'look' }]);
     expect(JSON.stringify(turn!.inputMessages)).not.toContain(imagePath);
   });
+
+  it('passes stable reuseKey so callers can skip re-decode on partial replay', () => {
+    const png = Buffer.from('fake-png-reuse').toString('base64');
+    const fixture = multimodalRecords([
+      userContentItem([
+        { type: 'input_text', text: 'look' },
+        { type: 'input_image', image_url: `data:image/png;base64,${png}` },
+      ]),
+      userMessageItem('look'),
+    ]);
+
+    const cache = new Map<string, ReturnType<BlobToUriFn>>();
+    let decodeCount = 0;
+    const cachingBlobToUri: BlobToUriFn = (params) => {
+      if (params.reuseKey && cache.has(params.reuseKey)) {
+        return cache.get(params.reuseKey) ?? null;
+      }
+      decodeCount += 1;
+      const result = fakeBlobToUri(params);
+      if (result && params.reuseKey) cache.set(params.reuseKey, result);
+      return result;
+    };
+
+    const first = extractTurn(fixture, { blobToUri: cachingBlobToUri });
+    const second = extractTurn(fixture, { blobToUri: cachingBlobToUri });
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(userParts(first!)[1]).toMatchObject({ type: 'uri' });
+    expect(userParts(second!)[1]).toEqual(userParts(first!)[1]);
+    expect(decodeCount).toBe(1);
+    expect([...cache.keys()][0]).toMatch(/^\d+:\d+$/);
+  });
 });
 

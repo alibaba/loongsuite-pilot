@@ -63,6 +63,11 @@ export interface MultimodalMetadataItem {
 export interface BlobToUriParams extends UriConvertMeta {
   /** Raw base64 (not a data-URL). */
   content: string;
+  /**
+   * Optional stable source key for caller-side reuse across partial replays
+   * (e.g. transcript record offset + content part index). Not used as a content key.
+   */
+  reuseKey?: string;
 }
 
 /** Injected: base64 → uri (e.g. Codex). */

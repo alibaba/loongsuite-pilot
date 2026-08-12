@@ -364,7 +364,7 @@ function extractCodexTurn(
         const message = transcriptInputMessage('user', payload.content);
         if (message) {
           inputMessages.push(message);
-          appendPrompt(message.parts[0]?.content);
+          appendPrompt(extractMessageText(payload.content));
           sawSubmittedUserMessage = true;
           markActivity(timestamp);
         }
@@ -393,6 +393,7 @@ function extractCodexTurn(
           payload.content,
           multimodalUploadIncludesInput(uploadMode) ? blobToUri : undefined,
           timestamp,
+          source.startOffset,
         );
         if (message) {
           inputMessages.push(message);
@@ -453,6 +454,7 @@ function extractCodexTurn(
       payload,
       multimodalUploadIncludesTool(uploadMode) ? blobToUri : undefined,
       timestamp,
+      source.startOffset,
     );
     if (!toolOutput) continue;
     const envelope = toolSteps.get(toolOutput.callId);
@@ -598,6 +600,7 @@ function transcriptToolOutput(
   payload: Record<string, unknown>,
   blobToUri: BlobToUriFn | undefined,
   timestampMs: number,
+  recordOffset?: number,
 ): { callId: string; output?: JsonValue } | null {
   if (itemType !== 'function_call_output' && itemType !== 'custom_tool_call_output' && itemType !== 'tool_search_output') return null;
   const callId = stringValue(payload.call_id) ?? stringValue(payload.id);
@@ -614,7 +617,7 @@ function transcriptToolOutput(
   }
   // Codex may return read-image tool results as content-part arrays with input_image.
   if (Array.isArray(payload.output)) {
-    const parts = extractMessageParts(payload.output, blobToUri, timestampMs);
+    const parts = extractMessageParts(payload.output, blobToUri, timestampMs, recordOffset);
     return { callId, output: parts as unknown as JsonValue };
   }
   return { callId, output: toJsonValue(parseMaybeJson(payload.output)) };
@@ -648,10 +651,11 @@ type TranscriptMessagePart =
 function transcriptInputMessage(
   role: string,
   content: unknown,
-  blobToUri: BlobToUriFn | undefined,
-  timestampMs: number,
+  blobToUri?: BlobToUriFn,
+  timestampMs = 0,
+  recordOffset?: number,
 ): { role: string; parts: TranscriptMessagePart[] } | null {
-  const parts = extractMessageParts(content, blobToUri, timestampMs);
+  const parts = extractMessageParts(content, blobToUri, timestampMs, recordOffset);
   return parts.length > 0 ? { role, parts } : null;
 }
 
@@ -659,6 +663,7 @@ function extractMessageParts(
   content: unknown,
   blobToUri: BlobToUriFn | undefined,
   timestampMs: number,
+  recordOffset?: number,
 ): TranscriptMessagePart[] {
   if (typeof content === 'string' && content) {
     return [{ type: 'text', content }];
@@ -668,7 +673,8 @@ function extractMessageParts(
   const parts: TranscriptMessagePart[] = [];
   let multimodalCount = 0;
   let hasUriPart = false;
-  for (const item of content) {
+  for (let partIndex = 0; partIndex < content.length; partIndex++) {
+    const item = content[partIndex];
     if (typeof item === 'string' && item) {
       parts.push({ type: 'text', content: item });
       continue;
@@ -696,6 +702,8 @@ function extractMessageParts(
         mime_type: dataMatch[1] || 'image/unknown',
         modality: 'image',
         time_unix_ms: Math.max(0, timestampMs),
+        // Stable across partial-turn replays; callers may cache by this instead of re-decoding.
+        ...(typeof recordOffset === 'number' ? { reuseKey: `${recordOffset}:${partIndex}` } : {}),
       });
       if (!result) continue;
       multimodalCount++;

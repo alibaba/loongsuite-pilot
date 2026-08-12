@@ -26,7 +26,8 @@ import {
   sessionIdFromTranscriptPath,
 } from './codex-transcript-extractor.js';
 import type { MultimodalProcessor } from '../../multimodal/processor.js';
-import type { BlobToUriFn } from '../../multimodal/types.js';
+import type { BlobToUriFn, UriResult } from '../../multimodal/types.js';
+import { LruMap, MULTIMODAL_LRU_LIMIT } from '../../multimodal/uploader/lru-set.js';
 import { attachMultimodalMetadataForEntry } from '../../multimodal/rewrite.js';
 import {
   MAX_EMITTED_TERMINAL_TURNS,
@@ -162,6 +163,11 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly includeMultimodal: boolean;
   private readonly multimodalUploadMode: MultimodalUploadMode;
   private readonly multimodalProcessor: MultimodalProcessor | null;
+  /**
+   * Partial-turn replay cache: filePath + recordOffset:partIndex → uri result.
+   * Avoids re-decode/sha256 of the same input_image across wakeup cycles.
+   */
+  private readonly multimodalUriCache = new LruMap<UriResult>(MULTIMODAL_LRU_LIMIT);
   private wakeupWatcher: FSWatcher | null = null;
   private processedTerminalTurnIdsLoaded = false;
   private processedTerminalTurnIdsDirty = false;
@@ -237,6 +243,7 @@ export class CodexTranscriptInput extends BaseInput {
   protected override async onStop(): Promise<void> {
     this.wakeupWatcher?.close();
     this.wakeupWatcher = null;
+    this.multimodalUriCache.clear();
   }
 
   protected override async collect(): Promise<AgentActivityEntry[]> {
@@ -691,7 +698,7 @@ export class CodexTranscriptInput extends BaseInput {
       meta,
       sessionIdFromTranscriptPath(filePath),
       activeTurn.turnId,
-      this.partialTurnOptions(activeTurn),
+      this.partialTurnOptions(activeTurn, filePath),
     );
     const previouslyEmittedStepCount = activeTurn.emittedStepCount ?? 0;
     if (!extraction) {
@@ -842,7 +849,7 @@ export class CodexTranscriptInput extends BaseInput {
       meta,
       sessionIdFromTranscriptPath(filePath),
       activeTurn.turnId,
-      this.partialTurnOptions(activeTurn),
+      this.partialTurnOptions(activeTurn, filePath),
     );
     const lastStep = previous?.steps.at(-1);
     if (!lastStep) {
@@ -1882,7 +1889,7 @@ export class CodexTranscriptInput extends BaseInput {
     if (markDirty) this.processedTerminalTurnIdsDirty = true;
   }
 
-  private partialTurnOptions(activeTurn: CodexActiveTranscriptTurn): {
+  private partialTurnOptions(activeTurn: CodexActiveTranscriptTurn, filePath: string): {
     startedAtMs?: number;
     model?: string;
     cwd?: string;
@@ -1893,7 +1900,7 @@ export class CodexTranscriptInput extends BaseInput {
     return {
       startedAtMs: activeTurn.startedAtMs,
       ...(this.includeMultimodal && this.multimodalProcessor
-        ? { blobToUri: this.blobToUri, uploadMode: this.multimodalUploadMode }
+        ? { blobToUri: this.blobToUri(filePath), uploadMode: this.multimodalUploadMode }
         : {}),
       ...(activeTurn.model ? { model: activeTurn.model } : {}),
       ...(activeTurn.cwd ? { cwd: activeTurn.cwd } : {}),
@@ -1903,10 +1910,23 @@ export class CodexTranscriptInput extends BaseInput {
     };
   }
 
-  private readonly blobToUri: BlobToUriFn = (params) => {
-    if (!this.multimodalProcessor) return null;
-    return this.multimodalProcessor.blobToUri(params);
-  };
+  /**
+   * blob→uri with partial-replay cache.
+   * `transcriptPath` scopes reuseKey so the same byte offset in different rollouts does not collide.
+   */
+  private blobToUri(transcriptPath: string): BlobToUriFn {
+    return (params) => {
+      if (!this.multimodalProcessor) return null;
+      const cacheKey = params.reuseKey ? `${transcriptPath}\0${params.reuseKey}` : undefined;
+      if (cacheKey) {
+        const hit = this.multimodalUriCache.get(cacheKey);
+        if (hit) return hit;
+      }
+      const result = this.multimodalProcessor.blobToUri(params);
+      if (result && cacheKey) this.multimodalUriCache.set(cacheKey, result);
+      return result;
+    };
+  }
 }
 
 async function collectRolloutFiles(dir: string, files: string[]): Promise<void> {
