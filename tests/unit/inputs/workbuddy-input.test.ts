@@ -122,6 +122,13 @@ describe('WorkBuddy audit-event builder', () => {
     expect((requests[1]['gen_ai.input.messages_delta'] as any[])
       .map(message => message.parts[0].id))
       .toEqual(['call-synthetic-a', 'call-synthetic-b']);
+    const toolResponseParts = (requests[1]['gen_ai.input.messages_delta'] as any[])
+      .map(message => message.parts[0]);
+    expect(toolResponseParts.map(part => part.response)).toEqual([
+      { ok: true, value: 'SYNTHETIC_RESULT_A' },
+      { ok: true, value: 'SYNTHETIC_RESULT_B' },
+    ]);
+    expect(toolResponseParts.every(part => !('result' in part))).toBe(true);
 
     const toolCalls = entries.filter(entry => entry['event.name'] === 'tool.call');
     const toolResults = entries.filter(entry => entry['event.name'] === 'tool.result');
@@ -279,6 +286,27 @@ describe('WorkBuddy audit-event builder', () => {
       && entry['gen_ai.step.id'] === 'request-synthetic-1:s2');
     expect((nextRequest?.['gen_ai.input.messages_delta'] as any[]))
       .toHaveLength(1);
+  });
+
+  it('emits a standard null tool response when WorkBuddy has no usable output', async () => {
+    const records = fixtureRecords().map(record =>
+      record.type === 'function_call_result' && record.callId === 'call-synthetic-a'
+        ? { ...record, output: undefined }
+        : record);
+    const entries = await buildWorkBuddyEvents(records, { sessionId: 'session-1' });
+    const nextRequest = entries.find(entry =>
+      entry['event.name'] === 'llm.request'
+      && entry['gen_ai.step.id'] === 'request-synthetic-1:s2');
+    const responsePart = (nextRequest?.['gen_ai.input.messages_delta'] as any[])
+      .find(message => message.parts[0].id === 'call-synthetic-a')
+      ?.parts[0];
+
+    expect(responsePart).toEqual({
+      type: 'tool_call_response',
+      id: 'call-synthetic-a',
+      response: null,
+    });
+    expect(responsePart).not.toHaveProperty('result');
   });
 
   it('uses structural Hook data to repair missing transcript tool identity and timestamps', async () => {
@@ -456,17 +484,44 @@ describe('WorkBuddy audit-event builder', () => {
     const entries = await buildWorkBuddyEvents(records, {
       sessionId: 'workbuddy-duration-test',
     });
-    const conversion = await convertEventLogToReadableSpans(entries);
-    expect(conversion.warnings).toEqual([]);
+    const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
+    try {
+      const conversion = await convertEventLogToReadableSpans(entries);
+      expect(conversion.warnings).toEqual([]);
 
-    const llmDurations = conversion.spans
-      .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')
-      .map(span => spanDurationNanos(span));
-    const toolDurations = conversion.spans
-      .filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL')
-      .map(span => spanDurationNanos(span));
-    expect(llmDurations).toEqual([100_000_000n, 100_000_000n]);
-    expect(toolDurations).toEqual([100_000_000n, 0n]);
+      const llmSpans = conversion.spans
+        .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+      const llmDurations = llmSpans.map(span => spanDurationNanos(span));
+      const toolDurations = conversion.spans
+        .filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL')
+        .map(span => spanDurationNanos(span));
+      expect(llmDurations).toEqual([100_000_000n, 100_000_000n]);
+      expect(toolDurations).toEqual([100_000_000n, 0n]);
+
+      const secondInput = JSON.parse(String(llmSpans[1].attributes['gen_ai.input.messages']));
+      const responseParts = secondInput
+        .filter((message: any) => message.role === 'tool')
+        .flatMap((message: any) => message.parts);
+      expect(responseParts.map((part: any) => part.response)).toEqual([
+        { ok: true, value: 'SYNTHETIC_RESULT_A' },
+        { ok: true, value: 'SYNTHETIC_RESULT_B' },
+      ]);
+      expect(responseParts.every((part: any) => !('result' in part))).toBe(true);
+    } finally {
+      if (previousStability === undefined) {
+        delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      } else {
+        process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;
+      }
+      if (previousCapture === undefined) {
+        delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      } else {
+        process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = previousCapture;
+      }
+    }
   });
 
   it('does not infer model finish semantics from assistant status', async () => {

@@ -562,9 +562,10 @@ function validateSchema(trace, rules) {
   return checks;
 }
 
-function validateMessageField(attrs, key, ruleId, span, checks) {
+export function validateMessageField(attrs, key, ruleId, span, checks) {
   const raw = attrs[key];
   if (raw === undefined || raw === null) return;
+  const isInput = key === 'gen_ai.input.messages';
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (!Array.isArray(parsed)) {
@@ -573,44 +574,161 @@ function validateMessageField(attrs, key, ruleId, span, checks) {
     }
     for (let i = 0; i < parsed.length; i++) {
       const msg = parsed[i];
-      if (!msg.role) {
-        checks.push(error(ruleId, `${key}[${i}] missing role`, span.spanId, span.name));
+      const messagePath = `${key}[${i}]`;
+      if (isInput && !isObject(msg)) {
+        checks.push(error(ruleId, `${messagePath} is not an object`, span.spanId, span.name));
+        continue;
+      }
+      if (isInput && typeof msg.role !== 'string') {
+        checks.push(error(ruleId, `${messagePath} missing required string "role"`, span.spanId, span.name));
+      } else if (!isInput && !msg.role) {
+        checks.push(error(ruleId, `${messagePath} missing role`, span.spanId, span.name));
+      }
+      if (isInput &&
+          Object.hasOwn(msg, 'name') &&
+          msg.name !== null &&
+          typeof msg.name !== 'string') {
+        checks.push(error(ruleId, `${messagePath}.name must be a string or null`, span.spanId, span.name));
       }
       if (ruleId === 'schema.output_messages') {
         if (msg.finish_reason === undefined) {
-          checks.push(warn(ruleId, `${key}[${i}] missing finish_reason`, span.spanId, span.name));
+          checks.push(warn(ruleId, `${messagePath} missing finish_reason`, span.spanId, span.name));
         } else if (!VALID_FINISH_REASONS.has(msg.finish_reason)) {
           checks.push(error(ruleId,
-            `${key}[${i}] finish_reason="${msg.finish_reason}" is not a valid FinishReason (expected: ${[...VALID_FINISH_REASONS].join(', ')})`,
+            `${messagePath} finish_reason="${msg.finish_reason}" is not a valid FinishReason (expected: ${[...VALID_FINISH_REASONS].join(', ')})`,
             span.spanId, span.name));
         }
       }
-      if (msg.parts && Array.isArray(msg.parts)) {
-        for (let j = 0; j < msg.parts.length; j++) {
-          const part = msg.parts[j];
-          if (!part.type) {
-            checks.push(error(ruleId, `${key}[${i}].parts[${j}] missing type`, span.spanId, span.name));
-            continue;
+      if (isInput && !Array.isArray(msg.parts)) {
+        checks.push(error(ruleId, `${messagePath} missing required array "parts"`, span.spanId, span.name));
+        continue;
+      }
+      if (!Array.isArray(msg.parts)) continue;
+      for (let j = 0; j < msg.parts.length; j++) {
+        const part = msg.parts[j];
+        const partPath = `${messagePath}.parts[${j}]`;
+        if (isInput && !isObject(part)) {
+          checks.push(error(ruleId, `${partPath} is not an object`, span.spanId, span.name));
+          continue;
+        }
+        if (isInput && typeof part.type !== 'string') {
+          checks.push(error(ruleId, `${partPath} missing required string "type"`, span.spanId, span.name));
+          continue;
+        } else if (!isInput && !part.type) {
+          checks.push(error(ruleId, `${partPath} missing type`, span.spanId, span.name));
+          continue;
+        }
+        if (isInput) {
+          validateInputMessagePart(part, partPath, ruleId, span, checks);
+        } else if (VALID_PART_TYPES.has(part.type)) {
+          if (part.type === 'text' && part.content === undefined) {
+            checks.push(error(ruleId, `${partPath} TextPart missing required "content"`, span.spanId, span.name));
           }
-          if (VALID_PART_TYPES.has(part.type)) {
-            if (part.type === 'text' && part.content === undefined) {
-              checks.push(error(ruleId, `${key}[${i}].parts[${j}] TextPart missing required "content"`, span.spanId, span.name));
-            }
-            if (part.type === 'tool_call' && !part.id) {
-              checks.push(warn(ruleId, `${key}[${i}].parts[${j}] ToolCallPart missing "id"`, span.spanId, span.name));
-            }
-            if (part.type === 'tool_call_response' && !part.id) {
-              checks.push(warn(ruleId, `${key}[${i}].parts[${j}] ToolCallResponsePart missing "id"`, span.spanId, span.name));
-            }
-          } else {
-            checks.push(warn(ruleId, `${key}[${i}].parts[${j}] unknown part type="${part.type}"`, span.spanId, span.name));
+          if (part.type === 'tool_call' && !part.id) {
+            checks.push(warn(ruleId, `${partPath} ToolCallPart missing "id"`, span.spanId, span.name));
           }
+          if (part.type === 'tool_call_response' && !part.id) {
+            checks.push(warn(ruleId, `${partPath} ToolCallResponsePart missing "id"`, span.spanId, span.name));
+          }
+        } else {
+          checks.push(warn(ruleId, `${partPath} unknown part type="${part.type}"`, span.spanId, span.name));
         }
       }
     }
   } catch {
     checks.push(error(ruleId, `${key} is not valid JSON`, span.spanId, span.name));
   }
+}
+
+function validateInputMessagePart(part, partPath, ruleId, span, checks) {
+  const report = (detail) => checks.push(error(ruleId, `${partPath} ${detail}`, span.spanId, span.name));
+
+  switch (part.type) {
+    case 'text':
+      requireString(part, 'content', 'TextPart', report);
+      break;
+    case 'tool_call':
+      requireString(part, 'name', 'ToolCallRequestPart', report);
+      optionalNullableString(part, 'id', 'ToolCallRequestPart', report);
+      break;
+    case 'tool_call_response':
+      requireProperty(part, 'response', 'ToolCallResponsePart', report);
+      optionalNullableString(part, 'id', 'ToolCallResponsePart', report);
+      break;
+    case 'server_tool_call':
+      requireString(part, 'name', 'ServerToolCallPart', report);
+      requireGenericServerTool(part, 'server_tool_call', 'ServerToolCallPart', report);
+      optionalNullableString(part, 'id', 'ServerToolCallPart', report);
+      break;
+    case 'server_tool_call_response':
+      requireGenericServerTool(part, 'server_tool_call_response', 'ServerToolCallResponsePart', report);
+      optionalNullableString(part, 'id', 'ServerToolCallResponsePart', report);
+      break;
+    case 'blob':
+      requireString(part, 'modality', 'BlobPart', report);
+      requireString(part, 'content', 'BlobPart', report);
+      optionalNullableString(part, 'mime_type', 'BlobPart', report);
+      break;
+    case 'file':
+      requireString(part, 'modality', 'FilePart', report);
+      requireString(part, 'file_id', 'FilePart', report);
+      optionalNullableString(part, 'mime_type', 'FilePart', report);
+      break;
+    case 'uri':
+      requireString(part, 'modality', 'UriPart', report);
+      requireString(part, 'uri', 'UriPart', report);
+      optionalNullableString(part, 'mime_type', 'UriPart', report);
+      break;
+    case 'reasoning':
+      requireString(part, 'content', 'ReasoningPart', report);
+      break;
+    default:
+      checks.push(warn(
+        ruleId,
+        `${partPath} uses GenericPart extension type="${part.type}"`,
+        span.spanId,
+        span.name,
+      ));
+  }
+}
+
+function requireProperty(value, property, title, report) {
+  if (!Object.hasOwn(value, property)) {
+    report(`${title} missing required "${property}"`);
+  }
+}
+
+function requireString(value, property, title, report) {
+  if (!Object.hasOwn(value, property)) {
+    report(`${title} missing required "${property}"`);
+  } else if (typeof value[property] !== 'string') {
+    report(`${title}.${property} must be a string`);
+  }
+}
+
+function optionalNullableString(value, property, title, report) {
+  if (Object.hasOwn(value, property) &&
+      value[property] !== null &&
+      typeof value[property] !== 'string') {
+    report(`${title}.${property} must be a string or null`);
+  }
+}
+
+function requireGenericServerTool(value, property, title, report) {
+  if (!Object.hasOwn(value, property)) {
+    report(`${title} missing required "${property}"`);
+    return;
+  }
+  const nested = value[property];
+  if (!isObject(nested)) {
+    report(`${title}.${property} must be an object`);
+  } else if (typeof nested.type !== 'string') {
+    report(`${title}.${property} missing required string "type"`);
+  }
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 // ─── 5e. Semantic Validation ────────────────────────────────────────────────

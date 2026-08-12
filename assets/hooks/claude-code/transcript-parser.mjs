@@ -440,11 +440,14 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
         promptId: group.promptId,
       });
 
+      // Only advance past messages that were part of this request. The
+      // assistant response becomes new history for the next LLM request and
+      // must be emitted together with any following tool_result message.
+      history.emittedCount = history.messages.length;
       history.messages.push({
         role: 'assistant',
         content: group.mergedContent,
       });
-      history.emittedCount = history.messages.length;
 
       for (const toolId of declaredToolIds) {
         const ts = toolResultTimestamps.get(toolId);
