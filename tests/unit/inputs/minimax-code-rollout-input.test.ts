@@ -41,6 +41,70 @@ describe('MinimaxCodeRolloutInput', () => {
     expect(input.agentType).toBe('minimax-code');
   });
 
+  it('Round 12: on win32 + 无 sessionDirWindows / sessionDir → 用 Windows 默认 (不是 POSIX fallback)', () => {
+    // Round 12 fix (PR #233, copilot suppressed comment): the previous
+    // constructor only honored `opts.sessionDirWindows` on Windows; if
+    // the caller did not pass it, the constructor fell back to
+    // `opts.sessionDir ?? DEFAULT_SESSION_DIR` (the POSIX
+    // `~/.minimax-code/rollout`). The Orchestrator calls
+    // `new MinimaxCodeRolloutInput({ stateStore })` with no Windows
+    // override, so on Windows the input would have tried to read
+    // `~/.minimax-code/rollout` (which does not exist on the official
+    // MiniMax Code 3.0.60 Windows desktop client) and missed all
+    // rollout records. Now the Windows default is
+    // `DEFAULT_SESSION_DIR_WINDOWS` ('%APPDATA%/MiniMax/rollout').
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      const input = new MinimaxCodeRolloutInput({ stateStore });
+      const sessionDir = (input as any).sessionDir;
+      // resolveHome is identity for the test env (no %APPDATA% env
+      // var set), so the path should be the literal
+      // DEFAULT_SESSION_DIR_WINDOWS. Even if resolveHome expanded
+      // %APPDATA% on a real Windows host, the path should NOT be
+      // the POSIX DEFAULT_SESSION_DIR.
+      expect(sessionDir).toBe('%APPDATA%/MiniMax/rollout');
+      expect(sessionDir).not.toBe('~/.minimax-code/rollout');
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    }
+  });
+
+  it('Round 12: on win32 + 显式 sessionDirWindows → 用显式值 (优先级最高)', () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      const input = new MinimaxCodeRolloutInput({
+        stateStore,
+        sessionDirWindows: 'C:\\custom\\path',
+      });
+      const sessionDir = (input as any).sessionDir;
+      expect(sessionDir).toBe('C:\\custom\\path');
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    }
+  });
+
+  it('Round 12: on POSIX + 无 sessionDir → 用 POSIX 默认 (~/.minimax-code/rollout)', () => {
+    // resolveHome expands `~` to the user's home dir, so we check
+    // the resolved path ends with the expected suffix instead of
+    // exact equality. The fix being tested is "POSIX path used on
+    // POSIX, Windows path used on Windows" — not "no expansion".
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    try {
+      const input = new MinimaxCodeRolloutInput({ stateStore });
+      const sessionDir = (input as any).sessionDir;
+      // The resolved path should be a POSIX-style home-dir-relative
+      // path, NOT a Windows %APPDATA% path. `~` expands to the
+      // user's home on POSIX, so we check the suffix.
+      expect(sessionDir).toMatch(/\.minimax-code[/\\]rollout$/);
+      expect(sessionDir).not.toContain('%APPDATA%');
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    }
+  });
+
   it('discoverSessionFiles 按 model-io-sess_*.jsonl 模式匹配', async () => {
     fs.mkdirSync(path.join(TMPDIR, 'sub'), { recursive: true });
     fs.writeFileSync(path.join(TMPDIR, 'sub', 'model-io-sess_aaa.jsonl'), '');

@@ -139,12 +139,27 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
   readonly agentType = ClientType.MiniMaxCode;
 
   constructor(opts: MinimaxCodeRolloutInputOptions) {
+    // Round 12 fix (PR #233, copilot suppressed comment): the previous
+    // logic only honored `opts.sessionDirWindows` on Windows; if the
+    // caller did NOT pass it, the constructor fell back to
+    // `opts.sessionDir ?? DEFAULT_SESSION_DIR` (which is the POSIX
+    // path `~/.minimax-code/rollout`). The Orchestrator calls
+    // `new MinimaxCodeRolloutInput({ stateStore })` with no Windows
+    // override, so on Windows the input would have tried to read
+    // `~/.minimax-code/rollout` (which does not exist on the official
+    // MiniMax Code 3.0.60 Windows desktop client) and missed all
+    // rollout records. Now we fall back to the platform-appropriate
+    // default: `DEFAULT_SESSION_DIR_WINDOWS` on Windows, the POSIX
+    // `DEFAULT_SESSION_DIR` elsewhere. `opts.sessionDirWindows` and
+    // `opts.sessionDir` still take precedence over the defaults when
+    // explicitly provided.
     super({
       stateStore: opts.stateStore,
       sessionDir: resolveHome(
-        (process.platform === 'win32' && opts.sessionDirWindows)
-          ? opts.sessionDirWindows
-          : (opts.sessionDir ?? DEFAULT_SESSION_DIR),
+        opts.sessionDirWindows
+          ?? (process.platform === 'win32'
+            ? DEFAULT_SESSION_DIR_WINDOWS
+            : (opts.sessionDir ?? DEFAULT_SESSION_DIR)),
       ),
       filePattern: opts.filePattern ?? DEFAULT_FILE_PATTERN,
       pollIntervalMs: opts.pollIntervalMs
