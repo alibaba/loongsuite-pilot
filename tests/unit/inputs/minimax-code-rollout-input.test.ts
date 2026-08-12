@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { MinimaxCodeRolloutInput } from '../../../src/inputs/minimax-code-rollout/minimax-code-rollout-input.js';
 
@@ -662,5 +662,18 @@ describe('MinimaxCodeRolloutInput', () => {
     // response carries finish_reasons=['length'] but NO output.messages
     expect(responseEntry['gen_ai.response.finish_reasons']).toEqual(['length']);
     expect(responseEntry['gen_ai.output.messages']).toBeUndefined();
+  });
+
+  // Round 13 fix (PR #233, copilot suppressed comment): the module-scope
+  // TMPDIR is created with `fs.mkdtempSync` at import time but was
+  // never removed, so each test run leaked a temp dir under
+  // `os.tmpdir()/minimax-code-rollout-test-XXXXXX`. The per-test
+  // `beforeEach` already cleans up the per-test `state.json` but
+  // not the parent dir. Add an `afterAll` to clean the whole TMPDIR
+  // when the suite finishes. (`force: true` makes it tolerant of
+  // any pre-existing cleanup paths so this is safe to add
+  // unconditionally.)
+  afterAll(() => {
+    fs.rmSync(TMPDIR, { recursive: true, force: true });
   });
 });

@@ -510,7 +510,6 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
 
   private detectIncompleteResponse(
     response: Record<string, unknown>,
-    completedAt: string | number | undefined,
   ): { isIncomplete: boolean; missingFields: string[] } {
     // Round 8 fix (PR #233, addressing fangxiu-wf review finding #4):
     // we DO NOT classify incomplete responses as "interrupted" anymore.
@@ -522,13 +521,17 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     //
     // Threshold: a response is "incomplete" if BOTH the finishReason
     // AND the content-bearing fields (text + toolCalls) are missing.
-    // This matches the original Round 2/6 SIGTERM heuristic (completedAt
-    // + no finishReason + no text + no toolCalls) but is a strict
-    // subset — the Round 2 heuristic was brittle because a normal
-    // pure-chat response (no tool calls, no usage) also satisfied it
-    // and got mis-classified as "interrupted". A response missing
-    // finishReason + text + toolCalls is genuinely broken; a response
-    // missing only usage or only toolCalls is fine and we stay quiet.
+    // The original Round 2/6 SIGTERM heuristic also required
+    // completedAt to be present, but Round 8 dropped that requirement
+    // because the strict content-based threshold is enough on its own
+    // to avoid the false-positive "interrupted" classification (a
+    // normal pure-chat response with no tool calls and no usage would
+    // also have satisfied the old heuristic, since completedAt is
+    // usually present on a successful response). The content-based
+    // threshold generalizes: a response missing finishReason + text +
+    // toolCalls is genuinely broken regardless of whether completedAt
+    // is set; a response missing only usage or only toolCalls is fine
+    // and we stay quiet.
     const missing: string[] = [];
     const finishReason = (response['finishReason'] as string | undefined)
       ?? (response['finish_reason'] as string | undefined);
@@ -571,8 +574,15 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
     };
   }): AgentActivityEntry | null {
     const { response, completedAt, outputMessages, finishReasons, sharedFields } = opts;
+    // Round 13 fix (PR #233, copilot suppressed comment): the previous
+    // detectIncompleteResponse accepted a completedAt parameter but
+    // never used it (Round 8 dropped the completedAt-based heuristic in
+    // favor of a strict content-based threshold — see the comment in
+    // detectIncompleteResponse for the rationale). The unused parameter
+    // is now removed to reduce cognitive overhead and prevent future
+    // callers from assuming completedAt affects the classification.
     const { isIncomplete, missingFields } = this.detectIncompleteResponse(
-      response, completedAt,
+      response,
     );
     if (!isIncomplete) return null;
 

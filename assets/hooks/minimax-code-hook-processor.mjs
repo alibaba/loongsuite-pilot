@@ -39,7 +39,13 @@
  * finish_reasons 输出为 string[](规范要求 array)。
  */
 
-import fs from 'node:fs';
+// Round 13 fix (PR #233, copilot suppressed comment): `fs` was
+// imported but never used. Dropping the unused import avoids
+// accidental dependency drift and keeps the hook script lean. The
+// other imports remain: `path` is used for log-dir joins, `os`
+// for homedir() in the user-id fallback, and `crypto` for the
+// random session-id / trace-id generation in generateEventId and
+// generateTraceId.
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
