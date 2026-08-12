@@ -91,7 +91,14 @@ export class SlsUploader implements Uploader {
         return false;
       }
 
-      if (this.closed) return false;
+      if (this.closed) {
+        logger.debug('sls upload completed after close', {
+          targetPath: item.targetPath,
+          size: item.expectedSize,
+          requestId: result.value,
+        });
+        return true;
+      }
       this.successKeys.set(objectKey, true);
       logger.debug('sls upload ok', {
         targetPath: item.targetPath,

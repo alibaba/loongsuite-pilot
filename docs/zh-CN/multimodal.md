@@ -80,7 +80,7 @@ loongsuite-pilot restart
 
 ### Codex
 
-Codex 在写时把匹配的 `input_image` data-URL 转为 `uri` part，不再把 base64 写入 JSONL。上传异步进行；队列满或上传失败时仍可能返回乐观 `uri`（dangling），并打 warn 日志。
+Codex 在写时把匹配的 `input_image` data-URL 转为 `uri` part，不再把 base64 写入 JSONL。上传异步进行，可能产生乐观 `uri`（见下方 [悬空 URI](#悬空-uri与消费方约定)）。
 
 | `uploadMode` | Codex 采集表面 | 典型用户操作 |
 |--------------|----------------|--------------|
@@ -92,7 +92,7 @@ Codex 在写时把匹配的 `input_image` data-URL 转为 `uri` part，不再把
 
 注意：
 
-- Prompt 或回复文本中出现图像路径，不等于会采到多模态图片；必须以 transcript 里的 base64 `input_image` 为准。
+- Prompt 或回复文本中出现图像路径，不等于会采到多模态图片；必须以 transcript 里的 base64 `input_image` 为准。本地路径常出现在伴随的 `input_text`（`Files mentioned` / `<image path="...">`）中并会保留；Pilot 只从 companion data-URL 上传，避免按路径二次读文件。
 - `captureMessageContent: false` 时，多模态摘要字段会与其他消息内容一并剥离。
 
 ## 输出形态（简述）
@@ -101,6 +101,20 @@ Codex 在写时把匹配的 `input_image` data-URL 转为 `uri` part，不再把
 - 可选字段 `gen_ai.input.multimodal_metadata`：本条事件中 `uri` 媒体的摘要列表。
 
 完整字段说明见 [输出事件 Schema](output-event-schema.md#多模态消息-parts)。
+
+## 悬空 URI 与消费方约定
+
+Pilot 采用写时乐观 `uri`：事件可先带上 storage `uri`，上传在后台异步完成。下列情况对象可能永远不会出现在存储中（dangling），并打 warn 日志：
+
+| 场景 | 说明 |
+|------|------|
+| 上传队列满 | 仍返回 `uri`，但跳过入队。 |
+| 上传失败 | PUT / 重试失败后不再补传。 |
+| 进程关停超时 | `MultimodalProcessor.shutdown()` 对 in-flight 上传最多再等约 **1.5s**（`MULTIMODAL_SHUTDOWN_TIMEOUT_MS`）。 |
+
+关停超时**不等于**把上传判失败：底层仍是未 settle 的 Promise，PUT 可能还在进行。超时后关停路径不再继续等待，uploader 会标记 `closed`（完成时也不再写入进程内 `successKeys`）；随后进程很快 `exit`，尚未完成的请求可能被打断。因此对象是否最终落盘**不保证**——可能已上传成功，也可能永久缺失。事件字段本身无法区分这两种结果；运维侧可结合日志判断。
+
+这是有意取舍：图片是文本链路的补充信息，不阻塞进程退出；blob 只在内存中，没有像部分 SLS sender 那样「drain 不完落盘下次再发」的兜底。关停顺序上，带 `uri` 的事件通常已先 flush，随后 checkpoint / transcript offset 会推进，下次启动不会重读同一行，因此该窗口内未完成的上传**不会被重放补传**。
 
 ## 相关文档
 

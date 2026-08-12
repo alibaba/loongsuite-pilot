@@ -83,7 +83,13 @@ export class OssUploader implements Uploader {
         return false;
       }
 
-      if (this.closed) return false;
+      if (this.closed) {
+        logger.debug('oss upload completed after close', {
+          targetPath: item.targetPath,
+          size: item.expectedSize,
+        });
+        return true;
+      }
       this.successKeys.set(objectKey, true);
       logger.debug('oss upload ok', {
         targetPath: item.targetPath,
