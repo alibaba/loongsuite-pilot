@@ -159,6 +159,7 @@ export class HookStrategy implements DeployStrategy {
   private async needsTrustRepairForCodex(def: AgentDefinition): Promise<boolean> {
     const cfg = def.hook?.trustToml;
     if (!cfg || !def.hook) return false;
+    const forceBypass = process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS === '1';
     try {
       const locations = await this.resolveInstalledCodexHooks(def);
       return !verifyTrustHashes({
@@ -166,6 +167,7 @@ export class HookStrategy implements DeployStrategy {
         hooksJsonAbsPath: path.resolve(resolveHome(def.hook.settingsPath)),
         locations,
         marker: cfg.marker,
+        forceBypass,
       }).valid;
     } catch (err) {
       logger.warn('could not resolve installed Codex hooks for trust verification', {
@@ -242,14 +244,7 @@ export class HookStrategy implements DeployStrategy {
       // Codex 类 hook 需要写 trust hash 到 config.toml(forceBypass 应急通道由 pilot
       // config.json 的 agents.<id>.trust.forceBypass 控制 — 后续可由 hook-watchdog 读取)
       if (hookConfig.trustToml) {
-        try {
-          await this.writeCodexTrust(def);
-        } catch (err) {
-          logger.error('codex trust write failed (deploy continues)', {
-            agentId: def.id,
-            error: String(err),
-          });
-        }
+        await this.writeCodexTrust(def);
       }
 
       logger.info('hooks deployed', { agentId: def.id, events: hookConfig.events.length });
@@ -270,7 +265,8 @@ export class HookStrategy implements DeployStrategy {
 
   /**
    * 写 Codex trust hash + 立即自洽性校验(Q8)。
-   * 校验失败仅记 logger.error,不阻塞 deploy(让 hook-watchdog 活性检查兜底重试)。
+   * 定位、写入或本地校验失败时必须阻止 deploy 成功，避免产生“hook 存在但不可执行”
+   * 的静默部署状态。
    *
    * 注:command 字符串必须与 HookManager.installHook 写入 hooks.json 时一致,否则 hash 对不上。
    * HookManager nested format 写入的 command 就是原始 def.hook.hookCommand + 末尾空格 + subcommand
@@ -290,17 +286,18 @@ export class HookStrategy implements DeployStrategy {
     const configPath = resolveHome(cfg.configPath);
     const hooksJsonAbsPath = path.resolve(resolveHome(def.hook!.settingsPath));
     const locations = await this.resolveInstalledCodexHooks(def);
+    const forceBypass = process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS === '1';
 
     const changed = writeTrustedHashes({
       configPath,
       hooksJsonAbsPath,
       locations,
       marker: cfg.marker,
-      forceBypass: process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS === '1',
+      forceBypass,
     });
 
-    if (process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS === '1') {
-      logger.warn('Codex trust bypass enabled via LOONGSUITE_PILOT_CODEX_FORCE_BYPASS — hook trust verification is DISABLED', { agentId: def.id });
+    if (forceBypass) {
+      logger.warn('Codex trust enforcement bypass enabled via LOONGSUITE_PILOT_CODEX_FORCE_BYPASS', { agentId: def.id });
     }
 
     const verify = verifyTrustHashes({
@@ -308,15 +305,12 @@ export class HookStrategy implements DeployStrategy {
       hooksJsonAbsPath,
       locations,
       marker: cfg.marker,
+      forceBypass,
     });
     if (!verify.valid) {
-      logger.error('codex trust hash verification failed', {
-        agentId: def.id,
-        mismatches: verify.mismatches,
-      });
-    } else {
-      logger.info('codex trust block self-check passed', { agentId: def.id, changed });
+      throw new Error(`codex trust hash verification failed: ${verify.mismatches.join('; ')}`);
     }
+    logger.info('codex trust block self-check passed', { agentId: def.id, changed });
   }
 
   async undeploy(def: AgentDefinition): Promise<boolean> {

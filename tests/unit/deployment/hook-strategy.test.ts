@@ -54,7 +54,10 @@ import {
   writeJsonFile,
   writeTextFileAtomic,
 } from '../../../src/utils/fs-utils.js';
-import { verifyTrustHashes } from '../../../src/deployment/codex-trust-writer.js';
+import {
+  verifyTrustHashes,
+  writeTrustedHashes,
+} from '../../../src/deployment/codex-trust-writer.js';
 
 function makeDef(overrides?: Partial<AgentDefinition>): AgentDefinition {
   return {
@@ -251,6 +254,44 @@ describe('HookStrategy', () => {
 
       expect(result).toBe(true);
       expect(verifyTrustHashes).not.toHaveBeenCalled();
+    });
+
+    it('passes forceBypass to trust verification when deciding whether to redeploy', async () => {
+      const previous = process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS;
+      process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS = '1';
+      try {
+        vi.mocked(readJsonFile).mockResolvedValue({
+          hooks: {
+            Stop: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh stop' }] }],
+          },
+        });
+        vi.mocked(verifyTrustHashes).mockReturnValue({ valid: true, mismatches: [] });
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+
+        const result = await strategy.needsDeploy(makeDef({
+          id: 'codex',
+          hook: {
+            settingsPath: '/home/.codex/hooks.json',
+            events: ['Stop'],
+            hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+            format: 'nested',
+            eventSubcommand: 'kebab-case',
+            trustToml: {
+              configPath: '/home/.codex/config.toml',
+              trustAlgo: 'v1',
+              marker: 'otel-codex-hook',
+            },
+          },
+        }));
+
+        expect(result).toBe(false);
+        expect(verifyTrustHashes).toHaveBeenCalledWith(expect.objectContaining({
+          forceBypass: true,
+        }));
+      } finally {
+        if (previous === undefined) delete process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS;
+        else process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS = previous;
+      }
     });
 
     it('builds correct hook definitions from agent config', async () => {
@@ -719,6 +760,111 @@ describe('HookStrategy', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('disk error');
+    });
+
+    it('returns failure when Codex trust writing fails', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: {
+          Stop: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh stop' }] }],
+        },
+      });
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      vi.mocked(writeTrustedHashes).mockImplementationOnce(() => {
+        throw new Error('trust write failed');
+      });
+
+      const result = await strategy.deploy(makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          trustToml: {
+            configPath: '/home/.codex/config.toml',
+            trustAlgo: 'v1',
+            marker: 'otel-codex-hook',
+          },
+        },
+      }));
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('trust write failed');
+    });
+
+    it('returns failure when Codex trust self-check fails', async () => {
+      vi.mocked(readJsonFile).mockResolvedValue({
+        hooks: {
+          Stop: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh stop' }] }],
+        },
+      });
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      vi.mocked(verifyTrustHashes).mockReturnValueOnce({
+        valid: false,
+        mismatches: ['hash mismatch key=stop'],
+      });
+
+      const result = await strategy.deploy(makeDef({
+        id: 'codex',
+        hook: {
+          settingsPath: '/home/.codex/hooks.json',
+          events: ['Stop'],
+          hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+          format: 'nested',
+          eventSubcommand: 'kebab-case',
+          trustToml: {
+            configPath: '/home/.codex/config.toml',
+            trustAlgo: 'v1',
+            marker: 'otel-codex-hook',
+          },
+        },
+      }));
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('codex trust hash verification failed');
+      expect(result.error).toContain('hash mismatch key=stop');
+    });
+
+    it('passes forceBypass consistently when writing and verifying Codex trust', async () => {
+      const previous = process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS;
+      process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS = '1';
+      try {
+        vi.mocked(readJsonFile).mockResolvedValue({
+          hooks: {
+            Stop: [{ hooks: [{ type: 'command', command: '/opt/pilot/hooks/codex-hook.sh stop' }] }],
+          },
+        });
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        vi.mocked(verifyTrustHashes).mockReturnValue({ valid: true, mismatches: [] });
+
+        const result = await strategy.deploy(makeDef({
+          id: 'codex',
+          hook: {
+            settingsPath: '/home/.codex/hooks.json',
+            events: ['Stop'],
+            hookCommand: '/opt/pilot/hooks/codex-hook.sh',
+            format: 'nested',
+            eventSubcommand: 'kebab-case',
+            trustToml: {
+              configPath: '/home/.codex/config.toml',
+              trustAlgo: 'v1',
+              marker: 'otel-codex-hook',
+            },
+          },
+        }));
+
+        expect(result.success).toBe(true);
+        expect(writeTrustedHashes).toHaveBeenCalledWith(expect.objectContaining({
+          forceBypass: true,
+        }));
+        expect(verifyTrustHashes).toHaveBeenCalledWith(expect.objectContaining({
+          forceBypass: true,
+        }));
+      } finally {
+        if (previous === undefined) delete process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS;
+        else process.env.LOONGSUITE_PILOT_CODEX_FORCE_BYPASS = previous;
+      }
     });
   });
 
