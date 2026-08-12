@@ -15,7 +15,7 @@ export {
   readImagePathBytes,
   statImagePath,
   yyyymmddFromUnixMs,
-  yyyymmddUTC,
+  yyyymmddLocal,
 } from './resolve.js';
 export {
   attachMultimodalMetadata,

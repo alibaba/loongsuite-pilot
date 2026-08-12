@@ -107,25 +107,25 @@ export function modalityFromMime(mime: string): 'image' | 'audio' | 'video' | un
   return undefined;
 }
 
-export function yyyymmddUTC(date = new Date()): string {
-  const y = date.getUTCFullYear();
-  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const d = String(date.getUTCDate()).padStart(2, '0');
+export function yyyymmddLocal(date = new Date()): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
   return `${y}${m}${d}`;
 }
 
 /**
- * UTC YYYYMMDD from unix epoch milliseconds.
- * Falls back to current UTC day when missing/invalid.
+ * Local YYYYMMDD from unix epoch milliseconds (event time when provided).
+ * Falls back to the local calendar day of `fallback` (default: now) when missing/invalid.
  */
 export function yyyymmddFromUnixMs(
   timeUnixMs: number | undefined,
   fallback = new Date(),
 ): string {
   if (typeof timeUnixMs === 'number' && Number.isFinite(timeUnixMs) && timeUnixMs > 0) {
-    return yyyymmddUTC(new Date(timeUnixMs));
+    return yyyymmddLocal(new Date(timeUnixMs));
   }
-  return yyyymmddUTC(fallback);
+  return yyyymmddLocal(fallback);
 }
 
 /** Join storageBasePath (oss://bucket/prefix) with relative targetPath. */

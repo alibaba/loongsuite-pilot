@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MultimodalProcessor } from '../../../src/multimodal/processor.js';
+import { yyyymmddLocal } from '../../../src/multimodal/resolve.js';
 import {
   MAX_MULTIMODAL_BASE64_CHARS,
   MAX_MULTIMODAL_DATA_SIZE,
@@ -12,6 +13,8 @@ import {
 import { FakeUploader } from './fake-uploader.js';
 
 const STORAGE_BASE = 'oss://bucket/pilot-mm';
+const EVENT_TIME_MS = 1_700_000_000_000;
+const EVENT_DAY = yyyymmddLocal(new Date(EVENT_TIME_MS));
 const tmpDirs: string[] = [];
 
 afterEach(() => {
@@ -37,11 +40,11 @@ describe('MultimodalProcessor.blobToUri', () => {
       content: bytes.toString('base64'),
       mime_type: 'image/png',
       modality: 'image',
-      time_unix_ms: 1_700_000_000_000,
+      time_unix_ms: EVENT_TIME_MS,
     });
 
     expect(result).not.toBeNull();
-    expect(result!.uri).toMatch(/^oss:\/\/bucket\/pilot-mm\/20231114\/[a-f0-9]{64}\.png$/);
+    expect(result!.uri).toMatch(new RegExp(`^oss://bucket/pilot-mm/${EVENT_DAY}/[a-f0-9]{64}\\.png$`));
     expect(result!.mime_type).toBe('image/png');
     expect(result!.modality).toBe('image');
     expect(result!.size).toBe(bytes.length);
@@ -296,10 +299,10 @@ describe('MultimodalProcessor.pathToUri', () => {
     const uploader = new FakeUploader();
     const processor = new MultimodalProcessor(STORAGE_BASE, uploader);
 
-    const result = await processor.pathToUri(file, 1_700_000_000_000);
+    const result = await processor.pathToUri(file, EVENT_TIME_MS);
     expect(result).not.toBeNull();
     expect(result!.mime_type).toBe('image/png');
-    expect(result!.uri).toMatch(/^oss:\/\/bucket\/pilot-mm\/20231114\/[a-f0-9]{64}\.png$/);
+    expect(result!.uri).toMatch(new RegExp(`^oss://bucket/pilot-mm/${EVENT_DAY}/[a-f0-9]{64}\\.png$`));
 
     await processor.shutdown(1000);
     expect(uploader.items).toHaveLength(1);
