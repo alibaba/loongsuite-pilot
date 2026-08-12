@@ -1,4 +1,4 @@
-﻿# installer-inner.ps1 — Internal installer for loongsuite-pilot (Windows)
+﻿# installer-inner.ps1 -- Internal installer for loongsuite-pilot (Windows)
 #
 # Install (first time):
 #   irm <URL>/installer.ps1 | iex
@@ -19,6 +19,62 @@
 # Uninstall:
 #   .\installer-inner.ps1 uninstall
 #   .\installer-inner.ps1 uninstall -Purge
+#
+# ============================================================
+# MANDATORY: every line of this file must run under Constrained Language Mode (CLM)
+# ============================================================
+# On a machine with a WDAC / AppLocker application-control policy, any script the
+# policy does not allow runs in ConstrainedLanguage mode (see about_Language_Modes).
+# In that mode only types on the "allowed types" list may be cast to, have their
+# properties read, or have their methods invoked; static member access and method
+# calls on any other .NET type throw. This file sets $ErrorActionPreference =
+# "Stop", so an unguarded call becomes a terminating error -- the install aborts on
+# a locked-down machine instead of taking the designed fallback path. Any change
+# to this file must follow:
+#
+#   1) Do not use .NET types that are off the list. Common traps -> CLM-safe form:
+#        [System.IO.Path]::GetTempPath()        -> $env:TEMP (see Get-PilotTempRoot)
+#        [System.IO.Path]::GetFileName()        -> Split-Path -Leaf
+#        [System.IO.File]::ReadAllText/WriteAll -> Get-Content / Set-Content
+#        [Environment]::UserName                -> $env:USERNAME
+#        [Environment]::SetEnvironmentVariable  -> Set-ItemProperty HKCU:\Environment
+#        [Convert] / [Math] / [Console] / [Net.*] -> none are on the list; with no
+#                                                  substitute, follow rule 2
+#        New-Object / Add-Type / Invoke-Expression / class / enum / [ref] -> never
+#   2) Where there is genuinely no substitute and failure can degrade, wrap the
+#      whole thing in try { ... } catch { ... } and return a CLM-safe default from
+#      the catch. The two legal exceptions already in this file: the TLS1.2 bump (Download-AndExtract) and
+#      the PATH-change broadcast (Install-Command).
+#      Any new exception must state its fallback semantics.
+#   3) Safe to use: [string] [int] [bool] [double] [switch] [array] [hashtable]
+#      [regex] [datetime] [timespan] [version] [uri] [xml]. Model structured data
+#      as [hashtable], never as the "accelerator + @{} literal" shape --
+#      [pscustomobject] and [ordered] are both banned here (rule 4 explains why).
+#   4) WARNING: the allowed-types list in about_Language_Modes is NOT the real
+#      CoreTypes whitelist of Windows PowerShell 5.1, so never treat it as the only
+#      source of truth. Learned the hard way: the docs list [pscustomobject] as an
+#      allowed type, yet on 5.1 under WDAC/CLM, [pscustomobject]@{...} throws
+#      ConversionSupportedOnlyToCoreTypes -- the accelerator's real conversion
+#      target is the internal type LanguagePrimitives+InternalPSCustomObject, which
+#      is not in 5.1's CoreTypes. Lesson: an accelerator can point at an internal
+#      type that is off the list. Before introducing any new type from the list,
+#      run it for real in a 5.1 session with
+#      $ExecutionContext.SessionState.LanguageMode = "ConstrainedLanguage"; and
+#      whatever can be expressed with automatic variables / cmdlets / language
+#      operators should not introduce a type at all. For the same reason every
+#      [ordered]@{...} was downgraded to @{...}: the docs allow it under "Special
+#      cases" (while forbidding calls to its methods), but that is the same
+#      accelerator-converts-an-@{}-literal shape the docs already got wrong once
+#      for [pscustomobject]. $cfgArgs here is only ConvertTo-Json'd and read back
+#      by key name in node, so key order changes no behaviour -- keeping [ordered]
+#      buys nothing, and losing the bet means crashing in Write-Config, i.e. after
+#      deployment already happened. Any type dependency of that shape -- zero
+#      upside, non-zero risk -- gets deleted.
+#
+# Full list: https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_language_modes
+# Self-check: after editing, run
+#   grep -nE '\[[A-Za-z_][A-Za-z0-9_.]*\]::|New-Object|Add-Type'
+# and confirm every hit is inside a try block with a working fallback.
 
 [CmdletBinding()]
 param(
@@ -51,23 +107,23 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$script:SLS_REQUESTED = $PSBoundParameters.ContainsKey("SlsEndpoint") -or
-    $PSBoundParameters.ContainsKey("SlsProject") -or
-    $PSBoundParameters.ContainsKey("SlsLogstore") -or
-    $PSBoundParameters.ContainsKey("SlsAkId") -or
-    $PSBoundParameters.ContainsKey("SlsAkSecret")
-$script:CMS_REQUESTED = $PSBoundParameters.ContainsKey("CmsLicenseKey") -or
-    $PSBoundParameters.ContainsKey("CmsEndpoint") -or
-    $PSBoundParameters.ContainsKey("CmsWorkspace")
-$script:CMS_LICENSE_KEY_SET = $PSBoundParameters.ContainsKey("CmsLicenseKey")
-$script:CMS_ENDPOINT_SET = $PSBoundParameters.ContainsKey("CmsEndpoint")
-$script:CMS_WORKSPACE_SET = $PSBoundParameters.ContainsKey("CmsWorkspace")
-$script:COLLECT_LOG_SET = $PSBoundParameters.ContainsKey("CollectLog")
-$script:COLLECT_TRACE_SET = $PSBoundParameters.ContainsKey("CollectTrace")
-$script:SERVICE_NAME_PREFIX_SET = $PSBoundParameters.ContainsKey("ServiceNamePrefix")
-$script:PACKAGE_SELECTOR_EXPLICIT = $PSBoundParameters.ContainsKey("PackageUrl") -or
-    $PSBoundParameters.ContainsKey("Version") -or
-    $PSBoundParameters.ContainsKey("Channel")
+$script:SLS_REQUESTED = $PSBoundParameters.Keys -contains "SlsEndpoint" -or
+    $PSBoundParameters.Keys -contains "SlsProject" -or
+    $PSBoundParameters.Keys -contains "SlsLogstore" -or
+    $PSBoundParameters.Keys -contains "SlsAkId" -or
+    $PSBoundParameters.Keys -contains "SlsAkSecret"
+$script:CMS_REQUESTED = $PSBoundParameters.Keys -contains "CmsLicenseKey" -or
+    $PSBoundParameters.Keys -contains "CmsEndpoint" -or
+    $PSBoundParameters.Keys -contains "CmsWorkspace"
+$script:CMS_LICENSE_KEY_SET = $PSBoundParameters.Keys -contains "CmsLicenseKey"
+$script:CMS_ENDPOINT_SET = $PSBoundParameters.Keys -contains "CmsEndpoint"
+$script:CMS_WORKSPACE_SET = $PSBoundParameters.Keys -contains "CmsWorkspace"
+$script:COLLECT_LOG_SET = $PSBoundParameters.Keys -contains "CollectLog"
+$script:COLLECT_TRACE_SET = $PSBoundParameters.Keys -contains "CollectTrace"
+$script:SERVICE_NAME_PREFIX_SET = $PSBoundParameters.Keys -contains "ServiceNamePrefix"
+$script:PACKAGE_SELECTOR_EXPLICIT = $PSBoundParameters.Keys -contains "PackageUrl" -or
+    $PSBoundParameters.Keys -contains "Version" -or
+    $PSBoundParameters.Keys -contains "Channel"
 
 # ============================================================
 # Constants
@@ -133,8 +189,8 @@ if (-not $PackageUrl) {
 function Detect-Lang {
     if ($Lang) { return $Lang }
     if ($env:LOONGSUITE_PILOT_LANG) { return $env:LOONGSUITE_PILOT_LANG }
-    # $PSUICulture is an automatic variable (no .NET static call), so it works under
-    # Constrained Language Mode where [CultureInfo]::CurrentUICulture would throw.
+    # $PSUICulture is an automatic variable, so language detection needs no .NET member
+    # access at all -- trivially safe under Constrained Language Mode (WDAC/AppLocker).
     if ($PSUICulture -match "zh") { return "zh" }
     return "en"
 }
@@ -214,11 +270,19 @@ function Resolve-Node {
 
 # >>> managed-node-runtime >>>
 # Managed Node.js runtime + prebuilt node_modules, downloaded from OSS.
+# Returns a bare [hashtable]; do NOT use [pscustomobject]@{...}. about_Language_Modes
+# lists [pscustomobject] as an allowed type, but Windows PowerShell 5.1 under
+# WDAC/CLM was observed to throw "Cannot convert value to type
+# System.Management.Automation.LanguagePrimitives+InternalPSCustomObject. Only core
+# types are supported in this language mode." (ConversionSupportedOnlyToCoreTypes):
+# the accelerator's real conversion target is that internal type, which is not in
+# 5.1's CoreTypes whitelist. A hashtable is a genuine core type, and $platform.Os /
+# $platform.Arch read exactly the same way.
 function Get-ManagedNodePlatform {
     $archRaw = $env:PROCESSOR_ARCHITEW6432
     if (-not $archRaw) { $archRaw = $env:PROCESSOR_ARCHITECTURE }
     switch ($archRaw) {
-        "AMD64" { return [pscustomobject]@{ Os = "win"; Arch = "x64" } }
+        "AMD64" { return @{ Os = "win"; Arch = "x64" } }
         "ARM64" {
             Msg "    ⚠️ 托管 Node.js 无 win-arm64 产物，回退系统 node + npm install" `
                 "    ⚠️ No win-arm64 managed Node.js artifact, falling back to system node + npm install"
@@ -230,6 +294,19 @@ function Get-ManagedNodePlatform {
             return $null
         }
     }
+}
+
+# CLM-safe temp root. [System.IO.Path]::GetTempPath() is a static call on an
+# off-list type and throws under ConstrainedLanguage; both call sites used to sit
+# outside their try block, so with $ErrorActionPreference = "Stop" it terminated
+# Check-Deps / Install outright instead of falling back to system node + npm
+# install. Reading environment variables always works under CLM, and
+# Download-AndExtract already relied on $env:TEMP.
+function Get-PilotTempRoot {
+    if ($env:TEMP) { return $env:TEMP }
+    if ($env:TMP) { return $env:TMP }
+    if ($env:SystemRoot) { return (Join-Path $env:SystemRoot "Temp") }
+    return "C:\Windows\Temp"
 }
 
 function Invoke-ManagedNodeDownload {
@@ -249,11 +326,19 @@ function Test-ManagedNodeChecksum {
     param([string]$Archive, [string]$ShasumsFile, [string]$Name)
     try {
         $expected = $null
+        # -split / -eq / -match are language operators and depend on no type
+        # whitelist at all; the former [regex]::Escape() rested on exactly the doc
+        # list that rule 4 in the header calls unreliable. This is also stricter
+        # than the old regex: the filename is compared exactly, so metacharacters
+        # such as . cannot widen the match.
         foreach ($line in (Get-Content $ShasumsFile)) {
-            if ($line -match ("^([0-9a-fA-F]{64})\s+\*?" + [regex]::Escape($Name) + "\s*$")) {
-                $expected = $Matches[1].ToLower()
-                break
-            }
+            $fields = $line.Trim() -split '\s+'
+            if ($fields.Count -ne 2) { continue }
+            $hash = $fields[0]
+            if ($fields[1].TrimStart('*') -ne $Name) { continue }
+            if ($hash.Length -ne 64 -or $hash -notmatch '^[0-9a-fA-F]+$') { continue }
+            $expected = $hash.ToLower()
+            break
         }
         if (-not $expected) {
             Msg "    ❌ SHASUMS256.txt 中缺少 $Name 的校验和" "    ❌ SHASUMS256.txt has no entry for $Name"
@@ -296,9 +381,17 @@ function Ensure-ManagedNode {
     }
 
     $base = $script:NODE_DEPS_BASE.TrimEnd('/') + "/$($script:NODE_VERSION)"
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("pilot-managed-node-" + [guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    # $PID + Get-Random instead of [guid]::NewGuid(): an automatic variable plus a
+    # cmdlet, depending on no type whitelist (Download-AndExtract already does the
+    # same). Per rule 4 in the header, the docs permitting a type is not sufficient
+    # evidence for 5.1.
+    $tmp = Join-Path (Get-PilotTempRoot) "pilot-managed-node-$PID-$(Get-Random)"
     try {
+        # New-Item must stay inside the try: only then does an unwritable temp root
+        # reach the catch, return $null and fall back to system node. Outside the
+        # try, $ErrorActionPreference = "Stop" turns it into a terminating error
+        # that aborts the install.
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
         Msg "==> 下载托管 Node.js v$($script:NODE_VERSION) (win-x64)..." "==> Downloading managed Node.js v$($script:NODE_VERSION) (win-x64)..."
         $archivePath = Join-Path $tmp $archive
         $shasumsPath = Join-Path $tmp "SHASUMS256.txt"
@@ -339,9 +432,14 @@ function Ensure-NodeModules {
 
     $archive = "node-modules-$($platform.Os)-$($platform.Arch).tar.gz"
     $base = $script:NODE_MODULES_BASE.TrimEnd('/') + "/$AppVersion"
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("pilot-node-modules-" + [guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $tmp = Join-Path (Get-PilotTempRoot) "pilot-node-modules-$PID-$(Get-Random)"
     try {
+        # New-Item must stay inside the try: this runs after Deploy-Package, so an
+        # unwritable temp root amplified into a terminating error by
+        # $ErrorActionPreference = "Stop" would leave the package deployed with no
+        # dependencies. Inside the try, the catch returns $false and falls back to
+        # npm install.
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
         Msg "==> 下载预编译 node_modules (win-x64, app v$AppVersion)..." "==> Downloading prebuilt node_modules (win-x64, app v$AppVersion)..."
         $archivePath = Join-Path $tmp $archive
         $shasumsPath = Join-Path $tmp "SHASUMS256.txt"
@@ -568,7 +666,7 @@ function Write-ExistingReportingConfig {
         return $false
     }
 
-    $cfgArgs = [ordered]@{
+    $cfgArgs = @{
         configPath          = $configFile
         slsRequested        = [bool]$script:SLS_REQUESTED
         slsEndpoint         = "$SlsEndpoint"
@@ -778,7 +876,9 @@ function Reconfigure-ExistingReporting {
 $script:INSTALL_SRC = ""
 
 function Download-AndExtract {
-    $tmpDir = Join-Path $env:TEMP "loongsuite-pilot-install-$(Get-Random)"
+    # Go through Get-PilotTempRoot like everywhere else: an empty $env:TEMP makes
+    # Join-Path throw, and there is no fallback path here.
+    $tmpDir = Join-Path (Get-PilotTempRoot) "loongsuite-pilot-install-$(Get-Random)"
     New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
     $script:TMP_DIR = $tmpDir
 
@@ -995,7 +1095,7 @@ function Write-Config {
     if (-not (Test-Path $innerDataConfigDir)) { New-Item -ItemType Directory -Path $innerDataConfigDir -Force | Out-Null }
 
     # Bundle all params as JSON to avoid PowerShell dropping empty-string args to native commands
-    $cfgArgs = [ordered]@{
+    $cfgArgs = @{
         configPath          = $configFile
         innerDataConfigPath = $innerDataConfigFile
         dataDir             = $DataDir
@@ -1018,13 +1118,19 @@ function Write-Config {
 
     # Pipe the JSON through stdin instead of a temp file: writing UTF-8 *without BOM*
     # requires .NET calls that Constrained Language Mode (WDAC) forbids, and a BOM would
-    # break node's JSON.parse. node reads fd 0, so no file — and no CLM-blocked APIs.
+    # break node's JSON.parse. node reads fd 0, so no file -- and no CLM-blocked APIs.
+    # EAP is lowered to Continue for the duration of the call: under "Stop" a single line
+    # on node's stderr becomes a terminating error, so the exit-code check below would
+    # never be reached.
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $cfgJson | & $script:NODE_BIN -e @'
 const fs = require('fs');
-const opts = JSON.parse(fs.readFileSync(0, 'utf-8'));
+const opts = JSON.parse(fs.readFileSync(0, 'utf-8').replace(/^\uFEFF/,''));
 
 let existing = {};
-try { existing = JSON.parse(fs.readFileSync(opts.configPath, 'utf-8')); } catch {}
+// Strip the BOM before parsing, or `existing` stays {} on a BOM-prefixed config and
+// the spread below silently overwrites every key the user had set.
+try { existing = JSON.parse(fs.readFileSync(opts.configPath, 'utf-8').replace(/^\uFEFF/,'')); } catch {}
 
 const config = {
   ...existing,
@@ -1083,7 +1189,19 @@ fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
 const innerDataConfig = { sls: [INTERNAL_SLS] };
 fs.writeFileSync(opts.innerDataConfigPath, JSON.stringify(innerDataConfig, null, 2) + '\n');
 '@
+    $writeExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
 
+    # node prints its stack to stderr and exits non-zero on failure; without this check the
+    # installer would print a "Config written" success line over a config that was never
+    # updated -- and this runs after Deploy-Package, so the failure surfaces later as a
+    # collector that reports nowhere. Both paths are verified: data_config.json carries the
+    # internal SLS endpoint and is written by the same node process, so a partial write
+    # (first writeFileSync succeeds, second throws) must fail the install too.
+    if ($writeExit -ne 0 -or -not (Test-Path $configFile) -or -not (Test-Path $innerDataConfigFile)) {
+        Msg "    ❌ 配置写入失败 (node 退出码 $writeExit)" "    ❌ Config write failed (node exit $writeExit)"
+        exit 1
+    }
     Msg "    ✅ 配置已写入" "    ✅ Config written"
     Write-Host ""
 }
@@ -1129,7 +1247,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0loongsuite-pilot-s
         # Best-effort broadcast so already-open Explorer-spawned terminals refresh their PATH
         # without a re-login. [Environment]::SetEnvironmentVariable persists AND sends
         # WM_SETTINGCHANGE, but is a .NET static call that Constrained Language Mode (WDAC)
-        # forbids — the registry write above already persisted the value, so we just swallow
+        # forbids -- the registry write above already persisted the value, so we just swallow
         # the failure there (a new logon picks it up regardless). Get-ItemProperty returned the
         # value already expanded, so this never re-introduces %VAR% tokens as a plain REG_SZ.
         try { [Environment]::SetEnvironmentVariable('Path', $newPath, 'User') } catch {}
@@ -1333,7 +1451,7 @@ const fs = require('fs');
 const cfg = process.argv[1];
 const marker = process.argv[2];
 try {
-  const data = JSON.parse(fs.readFileSync(cfg, 'utf-8'));
+  const data = JSON.parse(fs.readFileSync(cfg, 'utf-8').replace(/^\uFEFF/,''));
   const hooks = data.hooks;
   if (!hooks || typeof hooks !== 'object') process.exit(0);
   let changed = false;
@@ -1376,14 +1494,14 @@ function Remove-OtelPlugin {
     # Clean Claude settings.json hooks
     $claudeSettings = Join-Path $env:USERPROFILE ".claude\settings.json"
     if ((Test-Path $claudeSettings) -and $script:NODE_BIN) {
-        $content = Get-Content $claudeSettings -Raw -ErrorAction SilentlyContinue
+        $content = Get-Content $claudeSettings -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
         if ($content -match "otel-claude-hook|hook-entry") {
             & $script:NODE_BIN -e @'
 const fs = require('fs');
 const f = process.argv[1];
 const isOurs = c => c.includes('otel-claude-hook') || c.includes('hook-entry.sh');
 try {
-  const d = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  const d = JSON.parse(fs.readFileSync(f, 'utf-8').replace(/^\uFEFF/,''));
   if (d && d.hooks) {
     for (const ev of Object.keys(d.hooks)) {
       if (!Array.isArray(d.hooks[ev])) continue;
@@ -1629,8 +1747,10 @@ function Remove-OnePilotScheduledTask {
 function Remove-PilotScheduledTasks {
     $taskFolder = "\LoongsuitePilot\"
     $currentIdentity = (whoami).Trim()
-    # $env:USERNAME 而非 [Environment]::UserName:后者是 CLM(WDAC/Device Guard)禁止的 .NET 静态成员访问,
-    # 受限环境下卸载一进本函数即抛错,恰好击穿本 CR 的 CLM 卸载目标。环境变量语义等价且 CLM 安全。
+    # $env:USERNAME instead of [Environment]::UserName: the latter is .NET static
+    # member access, which CLM (WDAC / Device Guard) forbids, so on a locked-down
+    # host uninstall would throw the moment it entered this function -- precisely the
+    # CLM-safe-uninstall goal. The environment variable is equivalent and CLM-safe.
     $currentUser = $env:USERNAME
     $userTag = ($currentIdentity -replace '[^A-Za-z0-9._-]', '_')
     $currentUserTasks = @("LoongsuitePilot-$userTag", "LoongsuitePilotUpdater-$userTag")

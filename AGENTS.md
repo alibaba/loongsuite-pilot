@@ -125,6 +125,71 @@ AgentDiscoveryService ──发现──→ InputManager ──注册──→ I
 | `~/.loongsuite-pilot/versions/` | 多版本安装目录 |
 | `~/.loongsuite-pilot/current` | 当前版本指针 |
 
+## PowerShell (.ps1) 硬约束
+
+仓库里所有 `.ps1`（安装器、CLI 包装、`assets/hooks/*.ps1`）都在用户机器上运行，其中一部分机器启用了
+WDAC / AppLocker 应用控制策略 —— 策略不放行的脚本会以 **ConstrainedLanguage 模式（CLM）** 执行。
+因此**新增或修改任何 `.ps1` 都必须满足下面两条硬约束**，不是建议：
+
+**1) CLM-safe**
+
+- 只有「允许类型」可以被强制转换、可以调用其方法；其他 .NET 类型的**方法调用**一律抛异常。
+  静态**属性读取**（如 `[Console]::IsInputRedirected`）不受限制，任何类型都允许。
+- 安装器与 hook 大量使用 `$ErrorActionPreference = "Stop"` + fail-open 的 `catch`，
+  所以一次 CLM 违规的表象不是报错，而是**静默失败**（安装中断在错误的分支 / 遥测悄悄丢失）。
+- 常见坑 → CLM-safe 写法：
+
+  | 禁止 | 替代 |
+  |------|------|
+  | `[System.IO.Path]::GetFileName()` | `Split-Path -Leaf` |
+  | `[System.IO.Path]::IsPathRooted()` | 对路径字符串 `-match` |
+  | `[System.IO.Path]::HasExtension()` | `$p -match '\.[^\\/.]+$'` |
+  | `[System.IO.Path]::GetTempPath()` | `$env:TEMP` |
+  | `[System.IO.File]::ReadAllText/WriteAllText` | `Get-Content` / `Set-Content` |
+  | `[System.IO.Directory]::Exists/Delete` | `Test-Path` / `Remove-Item` |
+  | `[Environment]::UserName` | `$env:USERNAME` |
+  | `$x.PSObject.Properties.Remove(k)` | `Select-Object -Property * -ExcludeProperty k` |
+  | `$PSBoundParameters.ContainsKey(k)` | `$PSBoundParameters.Keys -contains k` |
+  | `[Convert]` / `[Math]` / `[regex]::Matches` / `[Text.Encoding]` / `[Security.Cryptography]` | 用语言操作符或 cmdlet 表达 |
+  | `New-Object` / `Add-Type` / `Invoke-Expression` / `class` / `enum` / `[ref]` | 无替代，禁止 |
+
+- 结构化数据只用 `[hashtable]`。**`[pscustomobject]@{...}` 和 `[ordered]@{...}` 都禁止**：
+  `about_Language_Modes` 的允许类型清单**不等于** Windows PowerShell 5.1 真实的 CoreTypes 白名单，
+  文档把 `[pscustomobject]` 列为允许，但 5.1 在 WDAC 下实测抛 `ConversionSupportedOnlyToCoreTypes`
+  （加速器真实转换目标是内部类型 `LanguagePrimitives+InternalPSCustomObject`）。**清单不可信，只信实测。**
+- 确实无替代且失败可降级时，整段包进 `try { } catch { }` 并从 catch 返回 CLM-safe 默认值，
+  同时在注释里写明降级语义。
+- 完整论证（含每条规则的由来）在 `deploy/installer.ps1` 文件头的 CLM 区块，那是**唯一权威副本**；
+  其他 `.ps1` 不再重复这段说明，只在具体改写点写一行「为什么不用那个 API」。
+
+**2) 注释全 ASCII**
+
+`.ps1` 注释一律英文 ASCII，连 em dash / 箭头 / 中文引号 / emoji 都不要。`Msg` 之类**输出文案**里的中文保留。
+原因：BOM 一丢（复制粘贴、工具重写、CRLF 转换）5.1 就按系统 ANSI 代码页（中文 Windows 是 GBK/936）解析脚本；
+文档推荐的 `irm <URL>/installer.ps1 | iex` 更是按 HTTP charset 解码、完全不看 BOM。乱码字节可能带出引号/反引号
+把解析器一起拖崩。
+
+**3) 编码**
+
+`Set-Content` / `Add-Content` / `Get-Content` 在 5.1 默认走 ANSI 代码页。凡是与 node 侧交换的文件
+（`deployed-agents.json`、插件 marker 等）读写都要显式 `-Encoding UTF8`。注意 5.1 没有 `utf8NoBOM`，
+`-Encoding UTF8` 必定写出 BOM —— node 侧 `readJsonFile()` 已剥离前导 BOM，缺了这一步 `JSON.parse` 会抛、
+被 `catch` 吞掉返回 `null`，部署状态会**静默重置为空**。
+
+**兜底（不靠人自觉）**
+
+| 测试 | 约束 |
+|------|------|
+| `tests/unit/deploy/installer-ps1-clm-safe.test.mjs` | 内部专有 `.ps1`（`deploy/installer{,-inner}.ps1`、`ensure-pilot.ps1`）的 CLM + ASCII ratchet；禁止上表的写法；静态成员访问走审计过的白名单；权威 CLM 区块必须在 `deploy/installer{,-inner}.ps1` |
+| `tests/unit/scripts/ps1-clm-safe.test.mjs` | 全仓库 CLM ratchet，`KNOWN_CLM_UNSAFE` 白名单只能缩不能扩 |
+| `tests/unit/scripts/ps1-comments-ascii.test.mjs` | 全仓库 ASCII ratchet，`KNOWN_UNCONVERTED` 白名单只能缩不能扩 |
+| `tests/unit/scripts/ps1-json-encoding.test.mjs` | 所有 `Get-Content \| ConvertFrom-Json` / `ConvertTo-Json \| Set-Content` 必须带 `-Encoding UTF8` |
+| `tests/unit/utils/fs-utils.test.ts` | node 侧 `readJsonFile()` 必须剥离前导 BOM（与上一条成对，只修一半比不修更糟） |
+
+`tests/unit/scripts/*` 与 `tests/unit/utils/*` 这几条住在开源仓（`alibaba/loongsuite-pilot`），
+经开源同步落到本仓；它们都用 `git ls-files '*.ps1'` 扫描，所以同步之后连内部专有 `.ps1` 一起覆盖。
+第一条则常驻本仓：安装器只存在于内部，且要在同步到位之前就把内部文件钉住。
+
 ## 快速入口
 
 - **我要理解整体架构** → [docs/zh-CN/overview.md](docs/zh-CN/overview.md)
