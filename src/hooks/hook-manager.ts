@@ -385,7 +385,23 @@ export class HookManager {
   private buildHookEntry(def: HookDefinition): Record<string, unknown> {
     return def.useNestedFormat
       ? {
-          matcher: def.matcher ?? '*',
+          // Round 16 fix (PR #233, copilot suppressed comment):
+          // nested-format matcher omission when not set. The previous
+          // `def.matcher ?? '*'` always emitted an explicit `matcher`
+          // field, even when the caller didn't pass one. This
+          // diverged from installHook's nested-format branch (line
+          // 137) which uses the `...(def.matcher ? { matcher:
+          // def.matcher } : {})` pattern. Some hosts (e.g. MiniMax
+          // Code, the reason installHook was patched in Round 4) are
+          // sensitive to `matcher: '*'` and reject it, so emitting
+          // it via the JSONC path (currently only Qwen Code CLI,
+          // which uses settingsSyntax='jsonc' + format='nested')
+          // would reintroduce the same incompatibility if a
+          // future JSONC agent has the same constraint. The
+          // behavior is now consistent across both code paths:
+          // matcher is omitted when the caller didn't supply it,
+          // and emitted as the caller's value when they did.
+          ...(def.matcher ? { matcher: def.matcher } : {}),
           hooks: [{
             command: def.hookCommand,
             type: 'command',

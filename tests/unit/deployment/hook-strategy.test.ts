@@ -822,6 +822,68 @@ describe('HookStrategy', () => {
       expect(result.error).toContain('hash mismatch key=stop');
     });
 
+    it('Round 16: resolvePlatformSettingsPath expands env vars via resolveHome (Windows %APPDATA% + POSIX ~)', async () => {
+      // Round 16 fix (PR #233, copilot suppressed comment): the
+      // previous `resolvePlatformSettingsPath` returned the raw
+      // config value (`%APPDATA%/MiniMax/settings.json` on Windows
+      // or `~/.minimax-code/settings.json` on POSIX), and the
+      // downstream helpers (ensureSettingsFile /
+      // applyExtraSettings / applyEnvToSettings / readJsonFile /
+      // writeJsonFile / fileExists) do not call resolveHome
+      // themselves. The deployment would try to read a literal
+      // `%APPDATA%` path (which doesn't exist), creating the wrong
+      // relative directory and silently failing to inject hooks.
+      //
+      // This test uses an UNMOCKED resolveHome (calls the real
+      // function) and verifies that the path emitted to
+      // writeJsonFile has %APPDATA% and ~ expanded. We assert
+      // the negative — that the literal token is NOT present —
+      // because the resolved path depends on the host's APPDATA
+      // / HOME env var and is therefore not bit-exact
+      // reproducible across CI machines.
+      const fsUtils = await import('../../../src/utils/fs-utils.js');
+      vi.mocked(fsUtils.resolveHome).mockRestore();
+
+      const cases: Array<{ platform: NodeJS.Platform; path: string }> = [
+        { platform: 'win32', path: '%APPDATA%\\MiniMax\\settings.json' },
+        { platform: 'linux', path: '~/.minimax-code/settings.json' },
+        { platform: 'darwin', path: '~/.minimax-code/settings.json' },
+      ];
+      for (const { platform, path } of cases) {
+        const originalPlatform = process.platform;
+        Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+        vi.mocked(readJsonFile).mockResolvedValue({});
+        mockHookManager.isHookInstalled.mockResolvedValue(false);
+        mockHookManager.installHook.mockResolvedValue(true);
+        try {
+          const def = makeDef({
+            hook: {
+              settingsPath: '~/.minimax-code/settings.json',
+              settingsPathWindows: '%APPDATA%\\MiniMax\\settings.json',
+              events: ['Stop'],
+              hookCommand: '/opt/pilot/hooks/test.sh',
+              format: 'flat',
+            },
+          });
+          await strategy.deploy(def);
+          // Verify that NONE of the settings file writes use the
+          // literal %APPDATA% or ~ token — every write should
+          // have gone through resolveHome.
+          const writeJsonFileCalls = vi.mocked(writeJsonFile).mock.calls.map(args => args[0]);
+          for (const written of writeJsonFileCalls) {
+            expect(written).not.toContain('%APPDATA%');
+            expect(written).not.toMatch(/^~/);
+          }
+          const readJsonFileCalls = vi.mocked(readJsonFile).mock.calls.map(args => args[0]);
+          for (const read of readJsonFileCalls) {
+            expect(read).not.toContain('%APPDATA%');
+            expect(read).not.toMatch(/^~/);
+          }
+        } finally {
+          Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+        }
+      }
+    });
   });
 
   describe('env injection (settings.env merge)', () => {

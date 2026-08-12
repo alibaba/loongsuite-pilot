@@ -89,12 +89,28 @@ function appendEventSubcommand(
  * 3.0.60 Windows client writes to `%APPDATA%\MiniMax\settings.json`)
  * declare the Windows path in `settingsPathWindows`; everywhere else
  * we fall back to the POSIX `settingsPath`.
+ *
+ * Round 16 fix (PR #233, copilot suppressed comment): the function
+ * now also calls `resolveHome` on the selected path. The previous
+ * implementation returned the raw config value (`%APPDATA%/...` on
+ * Windows or `~/.minimax-code/...` on POSIX), and the downstream
+ * helpers (`ensureSettingsFile` / `applyExtraSettings` /
+ * `applyEnvToSettings` / `readJsonFile` / `writeJsonFile` /
+ * `fileExists`) do not call `resolveHome` themselves. On Windows
+ * the deployment would try to read a literal `%APPDATA%` path
+ * (which doesn't exist), creating the wrong relative directory
+ * and silently failing to inject hooks. Wrapping the platform
+ * result with `resolveHome` here is safe because settings paths
+ * are real filesystem paths consumed at deploy time, NOT runtime
+ * tokens that the host expands later (unlike `hookCommand`, which
+ * keeps `$PILOT_DATA` for the host to expand at invocation — see
+ * `resolvePlatformHookCommand` for the contrast).
  */
 function resolvePlatformSettingsPath(hookConfig: AgentHookConfig): string {
-  if (process.platform === 'win32' && hookConfig.settingsPathWindows) {
-    return hookConfig.settingsPathWindows;
-  }
-  return hookConfig.settingsPath;
+  const raw = (process.platform === 'win32' && hookConfig.settingsPathWindows)
+    ? hookConfig.settingsPathWindows
+    : hookConfig.settingsPath;
+  return resolveHome(raw);
 }
 
 /**
