@@ -242,6 +242,53 @@ describe('MinimaxCodeRolloutInput', () => {
     expect(entries[0]!.trace_id).toMatch(/^[0-9a-f]{32}$/);
   });
 
+  it('Round 17: object-shaped message content → JSON.stringify 成 string (TextPart schema 合规)', async () => {
+    // Round 17 fix (PR #233, copilot suppressed comment): the
+    // previous toParts emitted `{ type: 'text', content: <object> }`
+    // for non-string non-array object content. validate-trace's
+    // schema requires TextPart.content to be a string (the
+    // `requireString` check in scripts/validate-trace.mjs); an
+    // object content would produce `schema.input_messages` errors
+    // if MiniMax Code ever logs object-shaped message content
+    // (e.g. a future multi-modal / structured-prompt rollout
+    // record). The fix stringifies the object to a JSON string so
+    // the data is preserved in a string field. This test
+    // exercises a representative object content (image part
+    // with text+data fields) and asserts the emitted part is
+    // `{ type: 'text', content: '<json-string>' }`.
+    const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
+    const rec = {
+      type: 'model-io',
+      sessionId: 's1',
+      turnId: 't1',
+      request: {
+        requestId: 'req-object-content',
+        messages: [
+          { role: 'user', content: 'describe this image' },
+          { role: 'user', content: { type: 'image', data: 'base64xyz', text: 'fallback-label' } },
+        ],
+      },
+      startedAt: 1700000000000,
+      completedAt: 1700000001234,
+      response: { modelId: 'm1', text: 'ok', finishReason: 'stop' },
+    };
+    const entries = await (input as any).processSessionLine(rec, '/tmp/x.jsonl');
+    const requestEntry = entries[0];
+    const inputMessages = requestEntry['gen_ai.input.messages'] as Array<Record<string, unknown>>;
+    // 2 messages, second one had object content → now a JSON string
+    expect(inputMessages).toHaveLength(2);
+    const imagePartMessage = inputMessages[1]!;
+    expect(imagePartMessage.parts).toHaveLength(1);
+    const imagePart = imagePartMessage.parts![0]!;
+    expect(imagePart.type).toBe('text');
+    // The content MUST be a string (not an object) for validate-trace
+    // to accept it. We assert the value is a string AND that it
+    // round-trips back to the original object via JSON.parse.
+    expect(typeof imagePart.content).toBe('string');
+    const roundTripped = JSON.parse(imagePart.content as string);
+    expect(roundTripped).toEqual({ type: 'image', data: 'base64xyz', text: 'fallback-label' });
+  });
+
   it('processSessionLine: tool.role 消息 parts.type 为 tool_call_response (P1 fix)', async () => {
     const input = new MinimaxCodeRolloutInput({ stateStore, sessionDir: TMPDIR });
     const rec = {

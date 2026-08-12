@@ -774,7 +774,17 @@ export class MinimaxCodeRolloutInput extends BaseSessionInput {
         });
     }
     if (content && typeof content === 'object') {
-      return [{ type: 'text', content: toJsonValue(content) } as unknown as JsonValue];
+      // Round 17 fix (PR #233, copilot suppressed comment): the previous
+      // implementation emitted `{ type: 'text', content: toJsonValue(content) }`
+      // for non-string non-array object content. validate-trace's schema
+      // requires `TextPart.content` to be a string (scripts/validate-trace.mjs
+      // `requireString` check), so passing an object would produce
+      // `schema.input_messages` errors if MiniMax Code ever logs
+      // object-shaped message content. Stringify the object to a JSON
+      // string so the data is preserved in a string field that downstream
+      // consumers can re-parse if needed. The trace-validation rules
+      // explicitly allow this (a stringified JSON is still a string).
+      return [{ type: 'text', content: JSON.stringify(content) } as unknown as JsonValue];
     }
     return [];
   }
