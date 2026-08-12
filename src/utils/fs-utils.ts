@@ -29,11 +29,19 @@ export async function directoryExists(path: string): Promise<boolean> {
 
 /**
  * Reads and parses JSON from a file. Returns `null` on missing file or parse errors.
+ *
+ * A leading UTF-8 BOM is stripped before parsing. `JSON.parse` rejects it, and
+ * because this function swallows parse errors a BOM would silently degrade to
+ * "file absent" — i.e. deployment state or config reverting to defaults rather
+ * than failing loudly. Windows produces BOMs routinely: PowerShell 5.1's
+ * `Set-Content -Encoding UTF8` always writes one (there is no utf8NoBOM before
+ * PowerShell 6), and so does Notepad. Both touch files we read here
+ * (`deployed-agents.json`, `config.json`).
  */
 export async function readJsonFile<T>(path: string): Promise<T | null> {
   try {
     const text = await fsp.readFile(path, 'utf8');
-    return JSON.parse(text) as T;
+    return JSON.parse(text.replace(/^\uFEFF/, '')) as T;
   } catch {
     return null;
   }

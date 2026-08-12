@@ -20,7 +20,12 @@ function Log-Error {
         $time = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
         $escapedMsg = $Message -replace '\\', '\\\\' -replace '"', '\"'
         $line = "{`"time`":`"$time`",`"clientType`":`"CursorHook`",`"stage`":`"$Stage`",`"error.type`":`"ps1_$Stage`",`"error.message`":`"$escapedMsg`"}"
-        Add-Content -Path $file -Value $line
+        # Explicit UTF8 and -LiteralPath: Add-Content defaults to the ANSI codepage, so a
+        # Chinese username in a path or message lands as mojibake -- and node's
+        # shared/error-logger.mjs appends UTF-8 to this very file, making it mixed-encoding.
+        # A BOM on the first line is harmless here: nothing machine-parses this log (the
+        # retention service only deletes it by age). Matches codex-loongsuite-pilot-hook.ps1.
+        Add-Content -LiteralPath $file -Value $line -Encoding UTF8
     } catch {}
 }
 
