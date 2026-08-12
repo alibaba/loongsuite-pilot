@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 
 const __dirname_test = path.dirname(fileURLToPath(import.meta.url));
 
@@ -209,9 +210,46 @@ describe('MiMo Code plugin — end-to-end fixture replay', () => {
     // The fixture user prompt starts with "List py files..."
     const inputMsgs = firstReq['gen_ai.input.messages'];
     expect(inputMsgs).toBeTruthy();
+    expect(firstReq['gen_ai.input.messages_delta']).toEqual(inputMsgs);
     const userMsg = inputMsgs.find((m) => m.role === 'user');
     expect(userMsg).toBeTruthy();
     expect(userMsg.parts[0].content).toContain('List py files');
+  });
+
+  it('preserves the first user message in later converted LLM spans', async () => {
+    for (const e of events) {
+      await hooks.event({ event: e });
+    }
+    const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
+    try {
+      const records = capture.map((c) => parseRecord(c.data));
+      const conversion = await convertEventLogToReadableSpans(records);
+      expect(conversion.warnings).toEqual([]);
+      const llmSpans = conversion.spans
+        .filter((span) => span.attributes['gen_ai.span.kind'] === 'LLM')
+        .sort((a, b) => {
+          const seconds = a.startTime[0] - b.startTime[0];
+          return seconds || a.startTime[1] - b.startTime[1];
+        });
+      expect(llmSpans).toHaveLength(5);
+      const secondInput = JSON.parse(String(llmSpans[1].attributes['gen_ai.input.messages']));
+      const userMessage = secondInput.find((message) => message.role === 'user');
+      expect(userMessage.parts[0].content).toContain('List py files');
+    } finally {
+      if (previousStability === undefined) {
+        delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      } else {
+        process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;
+      }
+      if (previousCapture === undefined) {
+        delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      } else {
+        process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = previousCapture;
+      }
+    }
   });
 
   it('captures gen_ai.response.id from info.id', async () => {
