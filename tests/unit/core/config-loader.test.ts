@@ -674,13 +674,14 @@ describe('ConfigLoader', () => {
     });
   });
 
-  describe('collectLog, collectTrace, serviceNamePrefix, cms', () => {
+  describe('collectLog, collectTrace, serviceName, serviceNamePrefix, cms', () => {
     it('defaults when config file is missing', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
 
       const config = await loadConfig();
       expect(config.collectLog).toBe(true);
       expect(config.collectTrace).toBe(true);
+      expect(config.serviceName).toBeUndefined();
       expect(config.serviceNamePrefix).toBe('loongsuite-pilot');
       expect(config.cms).toEqual({ enabled: false, licenseKey: '', endpoint: '', workspace: '', debug: false });
     });
@@ -747,6 +748,27 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.serviceNamePrefix).toBe('from-env');
+    });
+
+    it('loads an exact serviceName from env over config and passes it to SLS', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceName: 'from-file',
+        serviceNamePrefix: 'legacy-prefix',
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_SERVICE_NAME', 'shared-service');
+
+      const config = await loadConfig();
+      expect(config.serviceName).toBe('shared-service');
+      expect(config.flushers.sls?.serviceName).toBe('shared-service');
+      expect(config.serviceNamePrefix).toBe('legacy-prefix');
+    });
+
+    it('treats an empty exact serviceName env as unset and falls back to config', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ serviceName: 'from-file' });
+      vi.stubEnv('LOONGSUITE_PILOT_SERVICE_NAME', '   ');
+
+      const config = await loadConfig();
+      expect(config.serviceName).toBe('from-file');
     });
   });
 
@@ -937,6 +959,25 @@ describe('ConfigLoader', () => {
       // both inner backends carry the managed serviceName
       expect(result!.endpoints.find(e => e.name === 'managed-otlp')!.serviceName).toBe('managed-svc');
       expect(result!.endpoints.find(e => e.name === 'managed-arms')!.serviceName).toBe('managed-svc');
+    });
+
+    it('buildOtlpTraceConfig uses one exact serviceName for user and managed backends', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        serviceName: 'shared-service',
+        serviceNamePrefix: 'user-svc',
+        otlpTrace: { endpoint: 'http://tempo:4318', serviceName: 'legacy-otlp-svc' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'managed-svc',
+        otlp: [{ name: 'managed-otlp', endpoint: 'http://collector.internal:4318' }],
+      });
+
+      const result = buildOtlpTraceConfig(await loadConfig());
+
+      expect(result!.serviceName).toBe('shared-service');
+      expect(result!.appendAgentTypeToServiceName).toBe(false);
+      expect(result!.endpoints.every(endpoint => endpoint.serviceName === undefined)).toBe(true);
     });
 
     it('buildOtlpTraceConfig leaves inner serviceName unset when it equals the user prefix', async () => {
